@@ -515,3 +515,79 @@ describe('a heavy file in a Step-3A-sized diff', () => {
     expect(k).toEqual(expect.arrayContaining(['1a', '2', '6a']));
   });
 });
+
+describe('the fix-audit roster (#10104)', () => {
+  const posture = {
+    since: 'a'.repeat(40),
+    effective: true,
+    posture: 'critical' as const,
+    scope: {
+      anchor: 'a'.repeat(40),
+      deltaFiles: ['src/a.ts'],
+      interaction: [],
+    },
+  };
+
+  it('drops Agent 0 and keeps the territory shape on a small delta', () => {
+    const plan = {
+      prNumber: '123',
+      ownerRepo: 'o/r',
+      worktreePath: '/wt',
+      srcDiffLines: 120,
+      diffLines: 300,
+      chunks: [{ id: 1 }, { id: 2 }],
+      files: [{ path: 'src/a.ts', removedLines: 1, fileLines: 10 }],
+      incremental: posture,
+    };
+    const keys = requiredAgents(plan).map((a) => a.key);
+    expect(keys).not.toContain('0');
+    // The chunk fan-out, not the 3A dimension set — the posture flips the
+    // shared predicate whatever the narrowed delta's size says.
+    expect(keys).toContain('chunk-1');
+    expect(keys).toContain('chunk-2');
+    expect(keys).toContain('test-matrix');
+    expect(keys).not.toContain('1a');
+    expect(keys).not.toContain('6a');
+    // The cross-chunk safety nets stay.
+    expect(keys).toContain('1b');
+    expect(keys).toContain('1c');
+    expect(keys).toContain('7');
+  });
+
+  it('keeps Agent 0 on the same plan without the posture', () => {
+    const plan = {
+      prNumber: '123',
+      ownerRepo: 'o/r',
+      worktreePath: '/wt',
+      srcDiffLines: 120,
+      diffLines: 300,
+      chunks: [{ id: 1 }],
+      files: [{ path: 'src/a.ts', removedLines: 1, fileLines: 10 }],
+      incremental: { ...posture, posture: undefined },
+    };
+    const keys = requiredAgents(plan).map((a) => a.key);
+    expect(keys).toContain('0');
+    // …and reads as 3A: the dimension set, no chunk agents.
+    expect(keys).toContain('1a');
+    expect(keys).not.toContain('chunk-1');
+  });
+
+  it('gives a heavy file its invariant agents under the posture', () => {
+    const plan = {
+      prNumber: '123',
+      ownerRepo: 'o/r',
+      worktreePath: '/wt',
+      srcDiffLines: 120,
+      diffLines: 300,
+      chunks: [{ id: 1 }],
+      files: [
+        { path: 'src/a.ts', removedLines: 0, fileLines: 10, heavy: true },
+      ],
+      incremental: posture,
+    };
+    const keys = requiredAgents(plan).map((a) => a.key);
+    expect(keys).toContain('invariant-a--src/a.ts');
+    expect(keys).toContain('invariant-b--src/a.ts');
+    expect(keys).toContain('invariant-c--src/a.ts');
+  });
+});

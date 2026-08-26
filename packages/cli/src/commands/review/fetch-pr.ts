@@ -29,7 +29,7 @@ import type { CommandModule } from 'yargs';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
   clearReviewWorktreeLeaseIfOwned,
@@ -39,7 +39,7 @@ import {
   reviewLeasePath,
 } from '../../services/review-worktree-lease.js';
 import { sanitizedGitEnv } from './lib/worktree.js';
-import { setGhHost } from './lib/gh.js';
+import { resolveGhHost, setGhHost } from './lib/gh.js';
 import { getPlatformReader } from './lib/platform/registry.js';
 import type { ReviewPlatformReader } from './lib/platform/types.js';
 import { EFFORT_OPTION, type ReviewEffort } from './parse-args.js';
@@ -101,6 +101,11 @@ import {
   clearRoundStamps,
 } from './lib/deadline.js';
 import { certifierMatchesRound, roundModelIdFrom } from './lib/round-model.js';
+import {
+  resolveCriticalPosture,
+  type CriticalPostureCause,
+} from './lib/posture.js';
+import { recordedSeverityFloor } from './lib/authorization.js';
 
 interface PrMetadata {
   headRefName: string;
@@ -329,6 +334,18 @@ export interface IncrementalDecision {
    * at the seam rather than order a from-scratch re-review.
    */
   scope?: IncrementalScope;
+  /**
+   * The round's posting posture, when the capture resolved it to
+   * critical-only (#10104) — present exactly beside an effective scope. It
+   * is what flips the round to the fix-audit shape: the territory fan-out
+   * regardless of the narrowed delta's size (`isFixAuditRound` in
+   * budget.ts), no Agent 0, seam-bounded interaction republication, and the
+   * posture-narrowed reverse-audit schedule.
+   */
+  posture?: 'critical';
+  /** Which arm resolved it: the operator's recorded floor, the round
+   *  schedule, or the latched flat-trend streak. */
+  postureCause?: CriticalPostureCause;
 }
 
 /** Thrown when a probe could not answer — the git surface, not a verdict. */
@@ -1254,6 +1271,43 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
           `agents will have to fall back to running \`git diff\` themselves.`,
       );
     }
+    // The round's posture, read at capture time (#10104). Only a round that
+    // is about to scope to an anchor asks: the fix-audit shape exists for
+    // the critical-only re-review of the commits since the last round, and
+    // without a usable anchor there is no "since". The floor is the CLI's
+    // own recorded invocation (never the orchestrator's account of it), and
+    // the side file is the same one compose's recovery reads next to this
+    // plan, so the prediction and the resolution share their facts.
+    let postureCause: CriticalPostureCause | null = null;
+    if (anchor?.diffBase) {
+      let sideLedger: unknown = null;
+      try {
+        sideLedger = JSON.parse(
+          readFileSync(
+            join(dirname(out), `qwen-review-pr-${prNumber}-prev-ledger.json`),
+            'utf8',
+          ),
+        );
+      } catch {
+        sideLedger = null;
+      }
+      postureCause = resolveCriticalPosture({
+        recordedFloor: recordedSeverityFloor({
+          callerPr: Number(prNumber),
+          callerRepo: ownerRepo,
+          // The same host formula the compose/submit boundary uses
+          // (`resolveGhHost`: flag, else GH_HOST): an asymmetric axis here
+          // let a URL-shaped record recover at one boundary and not the
+          // other — and the miss this side matters for is the operator's
+          // explicit `suggestion`, which must turn the posture OFF.
+          callerHost: resolveGhHost(
+            typeof args.host === 'string' ? args.host : undefined,
+          ),
+          defaultSeverityFloor: operatorReviewSettings().severityFloor,
+        })?.floor,
+        sideLedger,
+      });
+    }
     /** True when the FINAL published diff is the incremental delta. */
     let scopedDelta = false;
     /** The PR's own hunks, narrowed to what changed since the anchor. */
@@ -1350,8 +1404,13 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
           anchor: anchor.diffBase ?? anchor.incremental.since,
           selection,
           readWorktree: containedWorktreeReader(wt),
+          seamBound: postureCause !== null,
         })),
-        (narrowed = assembleSections(selection, widened.paths)) === null)
+        (narrowed = assembleSections(
+          selection,
+          widened.paths,
+          widened.hunkKeep,
+        )) === null)
       ) {
         // `assembleSections` selects nothing only when the widened set names
         // no section the full capture carries, which the guards above already
@@ -1362,6 +1421,25 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
         if (publish(narrowed)) {
           scopedDelta = true;
           anchor.incremental.scope = widened.scope;
+          if (postureCause !== null) {
+            anchor.incremental.posture = 'critical';
+            anchor.incremental.postureCause = postureCause;
+            const bounded = widened.scope.interaction.filter(
+              (e) => e.seam !== undefined,
+            );
+            const kept = bounded.reduce((n, e) => n + (e.seam?.kept ?? 0), 0);
+            const total = bounded.reduce(
+              (n, e) => n + (e.seam?.total ?? 0),
+              0,
+            );
+            writeStderrLine(
+              `Critical posture (${postureCause}): fix-audit round shape — ` +
+                `territory fan-out over the delta, Agent 0 skipped, ` +
+                (bounded.length > 0
+                  ? `interaction files seam-bounded to ${kept} of ${total} hunk(s).`
+                  : `no interaction file needed seam-bounding.`),
+            );
+          }
           // The published hunks are byte-identical hunks of
           // `mergeBaseSha..head`, so that range is what downstream consumers
           // recomputing their own diffs must probe (Agent 7's test-efficacy
@@ -1688,6 +1766,7 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
       ...buildPlanReport(plan, (path) => fileLineCount(fetchedSha, path), {
         operatorRoundCap: operatorReviewSettings().reverseAuditRounds,
         hasDeadline: hasReviewDeadline(process.env),
+        ...(anchor ? { incremental: anchor.incremental } : {}),
       }),
       ...planEffortField(args.effort),
     };

@@ -11,6 +11,7 @@
 import { describe, it, expect } from 'vitest';
 import { widenScope } from './incremental-scope.js';
 import { assembleSections, selectNarrowing } from './narrow-diff.js';
+import { buildDiffPlan, parseDiff } from './diff-plan.js';
 
 /** A one-hunk section for `path`, as `parseDiff` reads it. */
 function section(path: string): string {
@@ -104,5 +105,173 @@ describe('widenScope', () => {
 
     expect([...paths]).toEqual(['src/changed.ts']);
     expect(scope.interaction).toEqual([]);
+  });
+});
+
+/** The importer's two-hunk section: hunk 1 sits on the seam, hunk 2 does not. */
+const IMP_SECTION = [
+  'diff --git a/src/imp.ts b/src/imp.ts',
+  '--- a/src/imp.ts',
+  '+++ b/src/imp.ts',
+  '@@ -1,3 +1,3 @@',
+  " import { moved } from './changed.js';",
+  '-const a = old();',
+  '+const a = moved();',
+  ' //',
+  '@@ -10,3 +10,3 @@',
+  ' function unrelated() {',
+  '-  return 0;',
+  '+  return 1;',
+  ' }',
+  '',
+].join('\n');
+
+/** The importer's worktree content — its new side, seam on lines 1-2. */
+const IMP_SOURCE = [
+  "import { moved } from './changed.js';",
+  'const a = moved();',
+  '//',
+  '',
+  '',
+  '',
+  '',
+  '',
+  '',
+  'function unrelated() {',
+  '  return 1;',
+  '}',
+  '',
+].join('\n');
+
+function seamSelection() {
+  const sel = selectNarrowing(
+    Buffer.from(section('src/changed.ts') + IMP_SECTION, 'utf8'),
+    Buffer.from(section('src/changed.ts'), 'utf8'),
+  );
+  if (sel === null) throw new Error('the narrowing refused this fixture');
+  return sel;
+}
+
+describe('widenScope seam bound (#10104)', () => {
+  it('keeps only the hunks that display a seam line, and says so', () => {
+    const selection = seamSelection();
+    const widened = widenScope({
+      anchor: 'a'.repeat(40),
+      selection,
+      readWorktree: (rel) => (rel === 'src/imp.ts' ? IMP_SOURCE : null),
+      seamBound: true,
+    });
+
+    expect(widened.scope.interaction).toEqual([
+      {
+        path: 'src/imp.ts',
+        importsChanged: ['src/changed.ts'],
+        seam: { kept: 1, total: 2 },
+      },
+    ]);
+    expect([...(widened.hunkKeep?.get('src/imp.ts') ?? [])]).toEqual([0]);
+
+    const diff = assembleSections(
+      selection,
+      widened.paths,
+      widened.hunkKeep,
+    )?.toString('utf8');
+    expect(diff).toContain('+const a = moved();');
+    expect(diff).not.toContain('+  return 1;');
+    // The reassembled text is still a well-formed diff the planner tiles.
+    const parsed = parseDiff(diff ?? '');
+    const imp = parsed.files.find((f) => f.path === 'src/imp.ts');
+    expect(imp?.hunks).toHaveLength(1);
+    expect(() => buildDiffPlan(diff ?? '', 400)).not.toThrow();
+  });
+
+  it('keeps the file as a header-only section when no hunk sits near a seam', () => {
+    // The seam lives outside the file's own diff entirely: the import and
+    // its uses sit on lines no hunk displays. The file must still publish —
+    // header only — so a chunk owns it and its brief asks the seam question.
+    const source = [
+      '//', // 1
+      '//', // 2
+      '//', // 3
+      '',
+      '',
+      '',
+      '',
+      '',
+      '',
+      'function unrelated() {', // 10
+      '  return 1;', // 11
+      '}', // 12
+      '',
+      "import { moved } from './changed.js';", // 14
+      'const a = moved();', // 15
+      '',
+    ].join('\n');
+    const selection = seamSelection();
+    const widened = widenScope({
+      anchor: 'a'.repeat(40),
+      selection,
+      readWorktree: (rel) => (rel === 'src/imp.ts' ? source : null),
+      seamBound: true,
+    });
+
+    expect(widened.scope.interaction[0].seam).toEqual({ kept: 0, total: 2 });
+    expect(widened.hunkKeep?.get('src/imp.ts')?.size).toBe(0);
+    const diff = assembleSections(
+      selection,
+      widened.paths,
+      widened.hunkKeep,
+    )?.toString('utf8');
+    expect(diff).toContain('diff --git a/src/imp.ts b/src/imp.ts');
+    expect(diff).not.toContain('@@ -1,3 +1,3 @@');
+    const parsed = parseDiff(diff ?? '');
+    const imp = parsed.files.find((f) => f.path === 'src/imp.ts');
+    expect(imp).toBeDefined();
+    expect(imp?.hunks).toHaveLength(0);
+    // The planner still tiles the header-only section into a chunk.
+    const plan = buildDiffPlan(diff ?? '', 400);
+    expect(
+      plan.chunks.some((c) => c.files.some((f) => f.path === 'src/imp.ts')),
+    ).toBe(true);
+  });
+
+  it('republishes in full when the seam scan cannot read the source', () => {
+    // The edge was found on the first read; the seam read failing is a doubt
+    // state, and every doubt state republishes what the unbounded widening
+    // would have.
+    const reads = new Map<string, number>();
+    const selection = seamSelection();
+    const widened = widenScope({
+      anchor: 'a'.repeat(40),
+      selection,
+      readWorktree: (rel) => {
+        if (rel !== 'src/imp.ts') return null;
+        const n = (reads.get(rel) ?? 0) + 1;
+        reads.set(rel, n);
+        return n === 1 ? IMP_SOURCE : null;
+      },
+      seamBound: true,
+    });
+    expect(widened.scope.interaction[0].seam).toBeUndefined();
+    expect(widened.hunkKeep).toBeUndefined();
+    expect(
+      assembleSections(selection, widened.paths, widened.hunkKeep)?.toString(
+        'utf8',
+      ),
+    ).toBe(assembleSections(selection, widened.paths)?.toString('utf8'));
+  });
+
+  it('records nothing and drops nothing when the bound is off', () => {
+    const selection = seamSelection();
+    const widened = widenScope({
+      anchor: 'a'.repeat(40),
+      selection,
+      readWorktree: (rel) => (rel === 'src/imp.ts' ? IMP_SOURCE : null),
+    });
+    expect(widened.scope.interaction[0]).toEqual({
+      path: 'src/imp.ts',
+      importsChanged: ['src/changed.ts'],
+    });
+    expect(widened.hunkKeep).toBeUndefined();
   });
 });

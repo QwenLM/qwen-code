@@ -42,12 +42,21 @@ import type { NarrowSelection } from './narrow-diff.js';
 import {
   dependentsOfChanged,
   discoverWorkspacePackages,
+  seamLines,
 } from './import-graph.js';
 
 /** A still-clean file pulled in because it imports a changed one. */
 export interface InteractionFile {
   path: string;
   importsChanged: string[];
+  /**
+   * Present exactly when the fix-audit posture seam-bounded this file
+   * (#10104): of its section's `total` hunks, `kept` republish — the ones
+   * displaying a line that imports or uses what changed. The rest were
+   * cleared by the round that reviewed them and are not re-shown; the brief
+   * and the posted body both disclose the reduction through this record.
+   */
+  seam?: { kept: number; total: number };
 }
 
 export interface IncrementalScope {
@@ -66,6 +75,14 @@ export interface WidenedScope {
   paths: Set<string>;
   /** The record the plan carries and the chunk briefs read. */
   scope: IncrementalScope;
+  /**
+   * Per seam-bounded interaction file, the indices (into its section's
+   * `hunks`) to republish — `assembleSections` reads it. An entry exists only
+   * where the bound actually dropped something; an empty set is legal and
+   * means "header only": the file stays in the published diff (and so in a
+   * chunk, and so in a brief) with none of its already-cleared hunks.
+   */
+  hunkKeep?: Map<string, ReadonlySet<number>>;
 }
 
 export interface WidenInput {
@@ -75,6 +92,13 @@ export interface WidenInput {
   selection: NarrowSelection;
   /** Read a repo-relative file from the worktree; null when unreadable. */
   readWorktree: (repoRelPath: string) => string | null;
+  /**
+   * Bound each interaction file to the hunks near its import seams (#10104)
+   * — the fix-audit posture's widening. Off, the widening republishes
+   * full-range sections exactly as it always has; the flag is resolved by
+   * the capture command from the posture, never by a later reader.
+   */
+  seamBound?: boolean;
 }
 
 /**
@@ -85,7 +109,7 @@ export interface WidenInput {
  * floor rather than a separate path that could disagree with it.
  */
 export function widenScope(input: WidenInput): WidenedScope {
-  const { anchor, selection, readWorktree } = input;
+  const { anchor, selection, readWorktree, seamBound } = input;
   const touched = new Set(selection.touched);
 
   // Test and docs dependents stay out: re-running tests is `build-test`'s job,
@@ -104,6 +128,38 @@ export function widenScope(input: WidenInput): WidenedScope {
     packages,
   );
 
+  // The seam bound (#10104). Under the critical posture an interaction
+  // file's full-range republication is what re-entered 89% of a measured
+  // long-lived diff every round, and everything it re-found below Critical
+  // was deferred anyway. So each interaction file keeps only the hunks that
+  // DISPLAY a seam line — an import of a changed file, or a use of a binding
+  // such an import introduces — and the record says how many were shed. The
+  // file itself always stays in scope (header at minimum), so its chunk
+  // agent is still briefed to re-ask the seam question against the worktree.
+  // Every doubt state republishes in full: an unreadable source, a section
+  // with no hunks, a scan that keeps everything — each leaves the file
+  // exactly as the unbounded widening published it.
+  const hunkKeep = new Map<string, ReadonlySet<number>>();
+  const seams = new Map<string, { kept: number; total: number }>();
+  if (seamBound === true && interaction.size > 0) {
+    const byPath = new Map(selection.sections.map((f) => [f.path, f]));
+    for (const path of interaction.keys()) {
+      const section = byPath.get(path);
+      if (!section || section.hunks.length === 0) continue;
+      const source = readWorktree(path);
+      if (source === null) continue;
+      const lines = seamLines(path, source, touched, packages);
+      const kept = new Set<number>();
+      section.hunks.forEach((h, i) => {
+        if (lines.some((ln) => ln >= h.newStart && ln <= h.newEnd)) {
+          kept.add(i);
+        }
+      });
+      seams.set(path, { kept: kept.size, total: section.hunks.length });
+      if (kept.size < section.hunks.length) hunkKeep.set(path, kept);
+    }
+  }
+
   const paths = new Set([...touched, ...interaction.keys()]);
   return {
     paths,
@@ -112,8 +168,13 @@ export function widenScope(input: WidenInput): WidenedScope {
       deltaFiles: [...touched].sort(),
       interaction: [...interaction.entries()]
         .sort(([a], [b]) => a.localeCompare(b))
-        .map(([path, importsChanged]) => ({ path, importsChanged })),
+        .map(([path, importsChanged]) => ({
+          path,
+          importsChanged,
+          ...(seams.has(path) ? { seam: seams.get(path) } : {}),
+        })),
       contextFileCount: candidates.filter((p) => !interaction.has(p)).length,
     },
+    ...(hunkKeep.size > 0 ? { hunkKeep } : {}),
   };
 }

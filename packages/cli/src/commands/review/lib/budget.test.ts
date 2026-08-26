@@ -16,6 +16,8 @@ import {
   reverseAuditRoundTier,
   cappedRoundTier,
   reviewBudget,
+  isFixAuditRound,
+  isTerritoryFanOut,
 } from './budget.js';
 
 const budget = (srcDiffLines: number, diffLines = srcDiffLines) =>
@@ -1209,5 +1211,61 @@ describe('the huge reduction applies only where there is a wall to fit inside', 
     const withClock = { ...HUGE, budget: { reverseAuditRounds: 3 } };
     expect(reverseAuditRoundCap(withClock, true)).toBe(3);
     expect(reverseAuditRoundCap(withClock, false)).toBe(3); // in [3,5], honoured
+  });
+});
+
+describe('isFixAuditRound and the topology override (#10104)', () => {
+  const POSTURE = {
+    incremental: {
+      since: 'a'.repeat(40),
+      effective: true,
+      posture: 'critical',
+      scope: { anchor: 'a'.repeat(40), deltaFiles: ['x.ts'], interaction: [] },
+    },
+  };
+
+  it('reads the posture only from a well-formed effective block', () => {
+    expect(isFixAuditRound(POSTURE)).toBe(true);
+    expect(isFixAuditRound({})).toBe(false);
+    expect(isFixAuditRound({ incremental: null })).toBe(false);
+    expect(
+      isFixAuditRound({
+        incremental: { ...POSTURE.incremental, effective: false },
+      }),
+    ).toBe(false);
+    expect(
+      isFixAuditRound({
+        incremental: { ...POSTURE.incremental, scope: undefined },
+      }),
+    ).toBe(false);
+    expect(
+      isFixAuditRound({
+        incremental: { ...POSTURE.incremental, posture: 'CRITICAL' },
+      }),
+    ).toBe(false);
+  });
+
+  it('flips a small plan into the territory fan-out', () => {
+    const small = { srcDiffLines: 120, diffLines: 400 };
+    expect(isTerritoryFanOut(small)).toBe(false);
+    expect(isTerritoryFanOut({ ...small, ...POSTURE })).toBe(true);
+  });
+
+  it('prices the round cap at the territory tier it flips to', () => {
+    const small = { srcDiffLines: 120, diffLines: 400 };
+    expect(reverseAuditRoundTier(small, false)).toBe(10);
+    expect(reverseAuditRoundTier({ ...small, ...POSTURE }, false)).toBe(5);
+    // The huge finishability ruling still wins where there is a wall.
+    const huge = { srcDiffLines: 4000, diffLines: 5000, ...POSTURE };
+    expect(reverseAuditRoundTier(huge, true)).toBe(3);
+  });
+
+  it('stamps the flipped tier into the recorded budget', () => {
+    const small = { srcDiffLines: 120, diffLines: 400 };
+    expect(reviewBudget(small, {}).reverseAuditRounds).toBe(10);
+    expect(
+      reviewBudget(small, { incremental: POSTURE.incremental })
+        .reverseAuditRounds,
+    ).toBe(5);
   });
 });

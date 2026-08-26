@@ -1321,6 +1321,56 @@ describe('fetch-pr report assembly', () => {
     expect(writtenDiff()).toContain('b/b.ts');
   });
 
+  it('resolves the critical posture from the side file and seam-bounds the widening (#10104)', async () => {
+    anchorIsValid();
+    producerMocks.resolveMergeBase.mockReturnValue({
+      sha: BASE,
+      baseFetchFailed: false,
+    });
+    servesBothRanges();
+    producerMocks.lstatSync.mockImplementation((path?: unknown) => {
+      if (String(path).endsWith('b.ts')) return { isFile: () => true };
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+    // `b.ts` imports the changed file, but on lines its own single hunk
+    // (new-side 1-2) does not display — the seam-bounded widening keeps the
+    // file with none of its hunks.
+    const B_SOURCE =
+      '//x\n//y\nconst pad = 1;\n' +
+      "import { added } from './a.js';\nadded();\n";
+    producerMocks.readFileSync.mockImplementation((path?: unknown) => {
+      if (String(path).endsWith('b.ts')) return B_SOURCE;
+      if (String(path).endsWith('qwen-review-pr-42-prev-ledger.json')) {
+        // The previous posted round: round 7, so this round is 8 — past the
+        // auto floor's round schedule.
+        return JSON.stringify({
+          round: 7,
+          findings: [],
+          posted: 1,
+          floor: 'c',
+        });
+      }
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+
+    const report = await reportFor({ since: ANCHOR });
+
+    expect(report.incremental.posture).toBe('critical');
+    expect(report.incremental.postureCause).toBe('round');
+    expect(report.incremental.scope.interaction).toEqual([
+      { path: 'b.ts', importsChanged: ['a.ts'], seam: { kept: 0, total: 1 } },
+    ]);
+    // The file publishes header-only: still in scope (a chunk holds it, its
+    // brief asks the seam question), none of its cleared hunks re-shown.
+    const diff = writtenDiff() ?? '';
+    expect(diff).toContain('diff --git a/b.ts b/b.ts');
+    expect(diff).not.toContain('+y2');
+    expect(diff).toContain('+added');
+    // The recorded round cap prices the territory tier the posture flips to,
+    // not the small tier the narrowed sizes would read.
+    expect(report.budget.reverseAuditRounds).toBe(5);
+  });
+
   it('drops a widening candidate whose real path leaves the worktree', async () => {
     // Wiring, not the rule itself — `worktree-reader.test.ts` proves the rule
     // against a real filesystem, where the kernel does the resolving. What

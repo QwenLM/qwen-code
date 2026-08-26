@@ -5025,6 +5025,52 @@ describe('per-chunk retirement — cold territories stop costing a round', () =>
     expect(rounds).toContain(2);
   });
 
+  it('a fix-audit round narrows the wave and the note names it (#10104)', () => {
+    // Chunk 13 is the delta territory; 14 and 15 hold interaction files.
+    const fixAuditPlan = {
+      ...PLAN,
+      incremental: {
+        since: 'a'.repeat(40),
+        effective: true,
+        posture: 'critical',
+        postureCause: 'round',
+        scope: {
+          anchor: 'a'.repeat(40),
+          deltaFiles: ['packages/cli/src/commands/review/x.test.ts'],
+          interaction: [
+            {
+              path: 'a.ts',
+              importsChanged: ['packages/cli/src/commands/review/x.test.ts'],
+            },
+            {
+              path: 'bundle.min.js',
+              importsChanged: ['packages/cli/src/commands/review/x.test.ts'],
+            },
+          ],
+        },
+      },
+    };
+    writeFileSync(plan, JSON.stringify(fixAuditPlan));
+    const old = new Date(2020, 0, 1);
+    utimesSync(plan, old, old);
+
+    answerRound(1, { 13: YIELD, 14: DRY, 15: YIELD });
+    answerRound(2, { 13: DRY, 14: DRY, 15: YIELD });
+    const out = runRound(3);
+
+    expect(process.exitCode).toBeUndefined();
+    // 13 is delta (ordinary rules, yield+dry: hot); 15 yielded last wave;
+    // 14 is a non-delta territory whose latest audit is dry — narrowed out
+    // after ONE dry receipt, where plain retirement would need two.
+    expect(out).toContain('2 auditors required this round');
+    expect(out).toContain('— chunk 13 ─');
+    expect(out).toContain('— chunk 15 ─');
+    expect(out).not.toContain('— chunk 14 ─');
+    expect(out).toContain('posture-narrowed chunk(s) skipped');
+    expect(out).toContain('posture narrowing (#10104)');
+    expect(out).toContain('chunk 14 — not a delta territory, dry in round 2');
+  });
+
   it('round 3 skips a chunk dry in rounds 1 and 2, and the note names it', () => {
     answerRound(1, { 13: DRY, 14: YIELD, 15: YIELD });
     answerRound(2, { 13: DRY, 14: YIELD, 15: YIELD });
@@ -6890,6 +6936,65 @@ describe('incremental-scope briefs', () => {
     expect(seam).toContain('cleared by the previous round');
     expect(seam).toContain('INTERACTION only');
     expect(seam).toContain('src/changed.ts');
+  });
+
+  it('a fix-audit round frames the brief and discloses the seam bound (#10104)', () => {
+    const fixAudit = {
+      ...INCREMENTAL_PLAN,
+      incremental: {
+        since: 'abc1234def5678900000',
+        effective: true,
+        posture: 'critical',
+        postureCause: 'round',
+        scope: {
+          ...INCREMENTAL_PLAN.incremental.scope,
+          interaction: [
+            {
+              path: 'src/caller.ts',
+              importsChanged: ['src/changed.ts'],
+              seam: { kept: 1, total: 4 },
+            },
+          ],
+        },
+      },
+    };
+    const delta = buildChunkAgentPrompt(fixAudit, 1);
+    expect(delta).toContain('Fix-audit round (critical posting posture)');
+    expect(delta).toContain('the floor governs posting, never');
+
+    const seam = buildChunkAgentPrompt(fixAudit, 2);
+    expect(seam).toContain('SEAM-BOUNDED: 1 of 4 hunk(s)');
+    expect(seam).toContain('still yours in full, from the worktree');
+
+    // Without the posture, no fix-audit frame and no seam clause — the seam
+    // census is a fix-audit fact, and a plan without one renders none.
+    const plain = buildChunkAgentPrompt(INCREMENTAL_PLAN, 2);
+    expect(plain).not.toContain('Fix-audit round');
+    expect(plain).not.toContain('SEAM-BOUNDED');
+  });
+
+  it('a malformed seam census renders no seam clause', () => {
+    const bad = {
+      ...INCREMENTAL_PLAN,
+      incremental: {
+        since: 'abc1234def5678900000',
+        effective: true,
+        posture: 'critical',
+        scope: {
+          ...INCREMENTAL_PLAN.incremental.scope,
+          interaction: [
+            {
+              path: 'src/caller.ts',
+              importsChanged: ['src/changed.ts'],
+              seam: { kept: 5, total: 2 },
+            },
+          ],
+        },
+      },
+    };
+    const seam = buildChunkAgentPrompt(bad, 2);
+    expect(seam).toContain('INTERACTION only');
+    expect(seam).not.toContain('SEAM-BOUNDED');
   });
 
   it('whole-diff role briefs carry the frame once, up front', () => {

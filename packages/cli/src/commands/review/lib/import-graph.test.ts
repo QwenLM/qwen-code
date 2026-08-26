@@ -16,6 +16,7 @@ import {
   resolveSpecifier,
   dependentsOfChanged,
   discoverWorkspacePackages,
+  seamLines,
 } from './import-graph.js';
 
 describe('scanImportSpecifiers', () => {
@@ -353,5 +354,85 @@ describe('discoverWorkspacePackages', () => {
       );
       expect(pkgs).toEqual([]);
     }
+  });
+});
+
+describe('seamLines', () => {
+  const changed = new Set(['src/changed.ts']);
+
+  it('marks the import statement and every use of its bindings', () => {
+    const source = [
+      "import { moved, other as alias } from './changed.js';", // 1
+      "import { untouched } from './stable.js';", // 2
+      'const a = moved();', // 3
+      'const b = untouched();', // 4
+      'function f() {', // 5
+      '  return alias + a;', // 6
+      '}', // 7
+    ].join('\n');
+    expect(seamLines('src/imp.ts', source, changed)).toEqual([1, 3, 6]);
+  });
+
+  it('follows a namespace import through its alias', () => {
+    const source = [
+      "import * as ns from './changed.js';", // 1
+      'const x = 1;', // 2
+      'ns.moved(x);', // 3
+    ].join('\n');
+    expect(seamLines('src/imp.ts', source, changed)).toEqual([1, 3]);
+  });
+
+  it('reads a multiline clause back to its keyword', () => {
+    const source = [
+      'import {', // 1
+      '  moved,', // 2
+      "} from './changed.js';", // 3
+      'moved();', // 4
+    ].join('\n');
+    // The statement line is the `from` line; the clause scan recovers the
+    // binding across the wrap.
+    const lines = seamLines('src/imp.ts', source, changed);
+    expect(lines).toContain(3);
+    expect(lines).toContain(4);
+    expect(lines).toContain(2); // `moved,` itself mentions the binding
+  });
+
+  it('binds a require destructuring on the same line', () => {
+    const source = [
+      "const { moved: local } = require('./changed.js');", // 1
+      'local();', // 2
+      "const whole = require('./stable.js');", // 3
+      'whole();', // 4
+    ].join('\n');
+    expect(seamLines('src/imp.ts', source, changed)).toEqual([1, 2]);
+  });
+
+  it('bounds $-carrying identifiers correctly in both directions', () => {
+    // `$` is legal in IDENT_RE and is a regex anchor, and `\b` cannot bound
+    // a name that starts or ends with it — the unescaped join both missed
+    // real `store$.x` usage lines and false-marked lines whose LAST word was
+    // the `$`-less prefix.
+    const source = [
+      "import { store$ } from './changed.js';", // 1
+      'store$.subscribe(fn);', // 2
+      'const other = store', // 3 — a different identifier, must NOT mark
+      'let $ = 1;', // 4 — a bare `$` is a different identifier too
+    ].join('\n');
+    expect(seamLines('src/imp.ts', source, changed)).toEqual([1, 2]);
+
+    const leading = [
+      "import { $store } from './changed.js';", // 1
+      '$store.dispatch();', // 2
+      'const restore = 1;', // 3 — `store` inside another word, must NOT mark
+    ].join('\n');
+    expect(seamLines('src/imp.ts', leading, changed)).toEqual([1, 2]);
+  });
+
+  it('marks nothing for a file whose imports all resolve elsewhere', () => {
+    const source = [
+      "import { a } from './stable.js';",
+      'a();',
+    ].join('\n');
+    expect(seamLines('src/imp.ts', source, changed)).toEqual([]);
   });
 });

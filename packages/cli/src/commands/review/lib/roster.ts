@@ -30,8 +30,8 @@ import { pathTool } from '../script-lint.js';
 // The topology gate lives in `budget.ts` — it is a size ruling, and the round
 // cap needs the same one. Re-exported here because this file was its home and
 // the roster is where a reader looks for "which fan-out was owed".
-export { isTerritoryFanOut } from './budget.js';
-import { isTerritoryFanOut } from './budget.js';
+export { isTerritoryFanOut, isFixAuditRound } from './budget.js';
+import { isTerritoryFanOut, isFixAuditRound } from './budget.js';
 
 /**
  * How this review's diff was captured — which decides what can be asked of it.
@@ -85,6 +85,12 @@ export interface RosterPlan {
    */
   effort?: unknown;
   repositoryContext?: unknown;
+  /**
+   * The capture command's incremental ruling. The roster reads it through
+   * `isFixAuditRound` alone — a critical-posture round drops Agent 0 and
+   * keeps the territory shape whatever the narrowed delta's size says.
+   */
+  incremental?: unknown;
 }
 
 /** One agent this review must launch. */
@@ -210,7 +216,18 @@ export function requiredAgents(plan: RosterPlan): RequiredAgent[] {
   // issue-fidelity pass regardless of whether it has a worktree. Both halves of
   // the identity, because the brief builder needs both — requiring an agent
   // nobody could build would wedge the run.
-  if (isPositivePrNumber(plan.prNumber) && typeof plan.ownerRepo === 'string') {
+  // …and not on a fix-audit round (#10104). The critical posture exists for
+  // re-reviews whose signal is fix-induced breakage in the commits since the
+  // last round; issue fidelity was ruled by the full rounds before the
+  // posture engaged, everything an extra pass would file below Critical is
+  // deferred by the floor anyway, and the one fidelity regression that IS
+  // Critical — a fix commit removing behaviour the issue required — is the
+  // removed-behavior audit's territory (1b), which the round keeps.
+  if (
+    isPositivePrNumber(plan.prNumber) &&
+    typeof plan.ownerRepo === 'string' &&
+    !isFixAuditRound(plan)
+  ) {
     add('0');
   }
 

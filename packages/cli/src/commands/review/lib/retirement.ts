@@ -110,6 +110,16 @@ export interface RoundSchedule {
   coldChecks: number[];
   /** Retired chunks NOT due this round — the retirement note names these. */
   skipped: RetiredChunk[];
+  /**
+   * Chunks the fix-audit posture narrowed out of the wave (#10104): not a
+   * delta territory, and the most recent audit on record is a substantive
+   * dry receipt. Unlike a retired chunk they get no alternating cold check —
+   * on a critical-posture round the wave re-launches only the delta
+   * territories and whatever yielded in the previous wave, and the note
+   * disclosing that IS this list. Empty whenever the caller passed no
+   * narrowing context.
+   */
+  narrowed: Array<{ chunkId: number; dryRound: number }>;
   /** Every chunk is retired and none is due: the audit has converged. */
   converged: boolean;
   /**
@@ -693,6 +703,17 @@ function mergeOutcomes(outcomes: AuditOutcome[]): AuditOutcome {
  * the two-most-recent-dry rule and is due every round again; no state is
  * kept anywhere, the history IS the state.
  *
+ * Narrowing (#10104): on a fix-audit round the caller passes the delta
+ * territories, and from round 3 a NON-delta chunk leaves the wave after ONE
+ * substantive dry audit — no alternating cold check brings it back. That is
+ * the posture's deliberate recall trade ("re-launch only the chunks that
+ * produced findings in the previous wave, plus the delta chunks"), and it
+ * narrows the wave's WIDTH instead of lowering the round cap, because the
+ * late waves are where measured fix-induced Criticals kept surfacing. The
+ * failure directions are unchanged: an `unknown` outcome still reads as
+ * hot, a yield still re-launches, and with no narrowing context the
+ * schedule is exactly what it always was.
+ *
  * Throws whatever the transcript or record readers throw
  * (`TranscriptsUnavailableError` included): the CALLER owns the fail-open,
  * because the right degradation — build every chunk — is a build decision,
@@ -704,6 +725,7 @@ export function scheduleReverseAuditRound(
   round: number,
   env: NodeJS.ProcessEnv = process.env,
   diffPath?: string,
+  narrowing?: { deltaChunkIds: ReadonlySet<number> } | null,
 ): RoundSchedule {
   // Rounds 1 and 2 establish each chunk's record; retirement needs two
   // consecutive dry audits, so nothing can retire before round 3.
@@ -712,6 +734,7 @@ export function scheduleReverseAuditRound(
       due: [...chunkIds],
       coldChecks: [],
       skipped: [],
+      narrowed: [],
       converged: false,
       diagnostics: [],
     };
@@ -884,6 +907,7 @@ export function scheduleReverseAuditRound(
   const due: number[] = [];
   const coldChecks: number[] = [];
   const skipped: RetiredChunk[] = [];
+  const narrowed: Array<{ chunkId: number; dryRound: number }> = [];
   const diagnostics: string[] = [];
   for (const chunkId of chunkIds) {
     const audits = [...(history.get(chunkId)?.entries() ?? [])]
@@ -893,6 +917,19 @@ export function scheduleReverseAuditRound(
         failures: entry.failures,
       }))
       .sort((a, b) => a.round - b.round);
+    // The posture narrowing, ruled before retirement so a non-delta chunk
+    // never earns a cold-check slot the posture does not run: its most
+    // recent audit being provably dry is the whole bar. Everything less
+    // certain — no history, an unknown, a yield — falls through to the
+    // ordinary rules and stays hot, the same fail-toward-auditing floor as
+    // every other refusal in this file.
+    if (narrowing != null && !narrowing.deltaChunkIds.has(chunkId)) {
+      const latest = audits[audits.length - 1];
+      if (latest !== undefined && latest.outcome === 'dry') {
+        narrowed.push({ chunkId, dryRound: latest.round });
+        continue;
+      }
+    }
     const lastTwo = audits.slice(-2);
     const retired =
       lastTwo.length === 2 && lastTwo.every((a) => a.outcome === 'dry');
@@ -953,11 +990,14 @@ export function scheduleReverseAuditRound(
     due,
     coldChecks,
     skipped,
+    narrowed,
     // An empty `chunkIds` empties `due` vacuously — nothing was ever under
     // audit, so nothing has proven itself cold. `runAllChunks` refuses a
     // chunkless plan long before scheduling, but this function is exported,
     // and convergence is an exit-5 termination rule: it must not be
-    // reachable from nothing.
+    // reachable from nothing. A narrowed-out chunk does not block
+    // convergence: leaving the wave is what the posture ruled for it, and
+    // the note that discloses the narrowing is the record of the trade.
     converged: chunkIds.length > 0 && due.length === 0,
     diagnostics,
   };

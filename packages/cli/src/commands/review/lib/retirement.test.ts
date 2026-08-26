@@ -233,11 +233,84 @@ describe('scheduleReverseAuditRound — the scheduler on its own', () => {
       due: [13, 14, 15],
       coldChecks: [],
       skipped: [],
+      narrowed: [],
       converged: false,
       // No history yet — nothing is certifiable, so nothing is diagnosed.
       diagnostics: [],
     });
     expect(schedule(2).due).toEqual([13, 14, 15]);
+  });
+
+  it('posture narrowing drops a dry non-delta chunk, keeps yields and unknowns (#10104)', () => {
+    // Delta territory: 13. 14 and 15 are interaction-only chunks.
+    transcript(record(1, 13, 'chunk 13 round 1 territory walk'), YIELD);
+    transcript(record(2, 13, 'chunk 13 round 2 territory walk'), DRY);
+    transcript(record(1, 14, 'chunk 14 round 1 territory walk'), DRY);
+    transcript(record(2, 14, 'chunk 14 round 2 territory walk'), DRY);
+    transcript(record(1, 15, 'chunk 15 round 1 territory walk'), DRY);
+    transcript(record(2, 15, 'chunk 15 round 2 territory walk'), YIELD);
+    record(1, 16, 'chunk 16 round 1 territory walk'); // no transcript: unknown
+    record(2, 16, 'chunk 16 round 2 territory walk');
+
+    const r3 = scheduleReverseAuditRound(
+      plan,
+      [13, 14, 15, 16],
+      3,
+      process.env,
+      diff,
+      { deltaChunkIds: new Set([13]) },
+    );
+    // 13 is delta and keeps the ordinary rules (yield+dry: hot). 14 is
+    // non-delta with a dry latest audit: narrowed out, no cold check. 15
+    // yielded last wave: due. 16 never certified anything: fails toward
+    // auditing, due.
+    expect(r3.due).toEqual([13, 15, 16]);
+    expect(r3.narrowed).toEqual([{ chunkId: 14, dryRound: 2 }]);
+    expect(r3.coldChecks).toEqual([]);
+    expect(r3.converged).toBe(false);
+  });
+
+  it('a retired DELTA chunk still cold-checks; a narrowed one never does', () => {
+    dryTwice([13, 14]);
+    const narrowing = { deltaChunkIds: new Set([13]) };
+    const r3 = scheduleReverseAuditRound(
+      plan,
+      [13, 14],
+      3,
+      process.env,
+      diff,
+      narrowing,
+    );
+    expect(r3.due).toEqual([]);
+    expect(r3.skipped).toEqual([
+      { chunkId: 13, dryRounds: [1, 2], nextColdCheck: 4 },
+    ]);
+    expect(r3.narrowed).toEqual([{ chunkId: 14, dryRound: 2 }]);
+    // Every chunk left the wave — the audit has converged, and the narrowed
+    // chunk's exit is the posture's own ruling, disclosed, not a gap.
+    expect(r3.converged).toBe(true);
+
+    const r4 = scheduleReverseAuditRound(
+      plan,
+      [13, 14],
+      4,
+      process.env,
+      diff,
+      narrowing,
+    );
+    // The even round: the retired delta chunk takes its cold check; the
+    // narrowed chunk stays out.
+    expect(r4.due).toEqual([13]);
+    expect(r4.coldChecks).toEqual([13]);
+    expect(r4.narrowed).toEqual([{ chunkId: 14, dryRound: 2 }]);
+  });
+
+  it('without a narrowing context the schedule is what it always was', () => {
+    dryTwice([13, 14, 15]);
+    const r3 = schedule(3);
+    expect(r3.due).toEqual([]);
+    expect(r3.narrowed).toEqual([]);
+    expect(r3.skipped).toHaveLength(3);
   });
 
   it('a disclosure cannot BE the receipt — but cannot BLOCK a real one either', () => {

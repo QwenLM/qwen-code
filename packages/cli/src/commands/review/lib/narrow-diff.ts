@@ -205,12 +205,28 @@ export function selectNarrowing(
 export function assembleSections(
   selection: NarrowSelection,
   paths: ReadonlySet<string>,
+  hunkKeep?: ReadonlyMap<string, ReadonlySet<number>>,
 ): Buffer | null {
   // 1-based line numbers throughout, matching `parseDiff`'s own coordinates.
   const lines = selection.fullText.split('\n');
   const selected: Array<[number, number]> = [];
   for (const file of selection.sections) {
     if (!paths.has(file.path)) continue;
+    // A seam-bounded file (#10104) emits its header plus only the kept
+    // hunks. The header range ends where the first hunk begins, and each
+    // hunk's own `@@` carries its line numbers, so the reassembled section
+    // stays a well-formed unified diff whatever subset survives — an empty
+    // subset leaves a header-only section, which `parseDiff` reads as a
+    // hunk-less file and `planChunks` tiles as one unit, keeping the file in
+    // a chunk (and so in a brief) with none of its cleared hunks re-shown.
+    const kept = hunkKeep?.get(file.path);
+    if (kept !== undefined && file.hunks.length > 0) {
+      selected.push([file.diffStart, file.hunks[0].diffStart - 1]);
+      file.hunks.forEach((h, i) => {
+        if (kept.has(i)) selected.push([h.diffStart, h.diffEnd]);
+      });
+      continue;
+    }
     selected.push([file.diffStart, file.diffEnd]);
   }
 

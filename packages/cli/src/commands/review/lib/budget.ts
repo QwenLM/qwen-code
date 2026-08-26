@@ -63,6 +63,13 @@ export interface BudgetContext {
    * all; see `HUGE_REVERSE_AUDIT_ROUNDS`.
    */
   hasDeadline?: boolean;
+  /**
+   * The capture command's incremental ruling, when it made one — so the
+   * recorded round cap reads the SAME topology the fix-audit posture flips
+   * (`isFixAuditRound`), instead of stamping the small tier's ten rounds on
+   * a plan whose builder will enforce the territory tier's five.
+   */
+  incremental?: unknown;
 }
 
 export interface ReviewBudget {
@@ -229,6 +236,57 @@ const FAN_OUT_TOTAL_FLOOR = 3200;
 export interface DiffSize {
   srcDiffLines?: unknown;
   diffLines?: unknown;
+  /**
+   * The capture command's incremental ruling, carried so the fix-audit
+   * posture can reach the topology gate — see `isFixAuditRound`.
+   */
+  incremental?: unknown;
+}
+
+/**
+ * Is this plan a critical-posture **fix-audit round** — an incremental
+ * re-review whose capture resolved the round's posting posture to
+ * critical-only (issue #10104)?
+ *
+ * The fact is read from the plan, never from a caller argument, for the
+ * reason `effort` is: a shape the caller could assert is a shape that gets
+ * asserted. The capture command (`fetch-pr`) writes `incremental.posture`
+ * exactly when the posture resolved AND the round scoped to the anchor, and
+ * this reader additionally requires the scope to be present — a hand-edited
+ * plan claiming the posture over a full-range diff must not shrink the
+ * roster below what the full range is owed. Everything malformed reads as
+ * "not a fix-audit round", which is the ordinary full shape — the safe
+ * direction.
+ *
+ * It lives here beside `isTerritoryFanOut` because that predicate is its one
+ * structural consumer and this module must stay import-free.
+ */
+export function isFixAuditRound(plan: {
+  incremental?: unknown;
+}): boolean {
+  const inc = plan?.incremental;
+  if (typeof inc !== 'object' || inc === null) return false;
+  const rec = inc as {
+    posture?: unknown;
+    effective?: unknown;
+    scope?: unknown;
+  };
+  if (rec.posture !== 'critical' || rec.effective !== true) return false;
+  // The scope must be at least the shape the brief builder validates —
+  // anchor and delta list — or a posture beside a garbled scope would
+  // shrink the roster while `incrementalScopeOf` degrades the briefs to
+  // full-scope, two readers disagreeing about one plan.
+  const scope = rec.scope as
+    | { anchor?: unknown; deltaFiles?: unknown }
+    | null
+    | undefined;
+  return (
+    typeof scope === 'object' &&
+    scope !== null &&
+    typeof scope.anchor === 'string' &&
+    scope.anchor !== '' &&
+    Array.isArray(scope.deltaFiles)
+  );
 }
 
 /**
@@ -243,6 +301,14 @@ export interface DiffSize {
  * own, so the direction cannot cycle).
  */
 export function isTerritoryFanOut(plan: DiffSize): boolean {
+  // A fix-audit round keeps the territory shape whatever its size: the
+  // narrowed delta is usually 3A-sized, but the round's whole point is one
+  // accountable auditor per territory of the fix commits, not thirteen
+  // dimension lenses re-walking a delta the posture defers all but Critical
+  // findings on. Ruling it HERE keeps the one-predicate contract — the
+  // roster, the round-cap tier, and the topology-mismatch note all read this
+  // gate, so none of them can disagree about which fan-out the round owed.
+  if (isFixAuditRound(plan)) return true;
   const src = Number(plan?.srcDiffLines ?? 0);
   const total = Number(plan?.diffLines ?? 0);
   return !(src <= FAN_OUT_SRC_FLOOR && total <= FAN_OUT_TOTAL_FLOOR);
@@ -299,8 +365,13 @@ export function reverseAuditRoundTier(
   // give the huge gate and the topology gate two independent derivations of
   // the same two numbers inside one function — which is exactly the shape of
   // the defect this function was just repaired for, where one derivation
-  // laundered garbage the other rejected.
-  return isTerritoryFanOut({ srcDiffLines: src, diffLines: total })
+  // laundered garbage the other rejected. The incremental ruling rides along
+  // untouched: it is not a size, and the gate validates it itself.
+  return isTerritoryFanOut({
+    srcDiffLines: src,
+    diffLines: total,
+    incremental: size?.incremental,
+  })
     ? LARGE_REVERSE_AUDIT_ROUNDS
     : SMALL_REVERSE_AUDIT_ROUNDS;
 }
@@ -452,7 +523,7 @@ export function reviewBudget(
     // size failed to arrive, where the flat cap recorded five. The tier does
     // its own usability check precisely so this call can hand it the truth.
     reverseAuditRounds: cappedRoundTier(
-      input,
+      { ...input, incremental: context.incremental },
       context.operatorRoundCap,
       context.hasDeadline === true,
     ),

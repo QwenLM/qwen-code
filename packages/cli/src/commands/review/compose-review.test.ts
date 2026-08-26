@@ -165,7 +165,13 @@ function plan(
     host?: string;
     /** The head fetch-pr resolved — the ledger marker's incremental anchor. */
     fetchedSha?: string;
-    incremental?: { since: string; effective: boolean };
+    incremental?: {
+      since: string;
+      effective: boolean;
+      posture?: string;
+      postureCause?: string;
+      scope?: unknown;
+    };
     reviewModelId?: string;
   } = {},
 ): string {
@@ -468,7 +474,13 @@ function coveredPlan(
     prNumber?: string | number;
     host?: string;
     fetchedSha?: string;
-    incremental?: { since: string; effective: boolean };
+    incremental?: {
+      since: string;
+      effective: boolean;
+      posture?: string;
+      postureCause?: string;
+      scope?: unknown;
+    };
     reviewModelId?: string;
   } = {},
 ): string {
@@ -2129,6 +2141,122 @@ describe('composeReview — RC carries every applicable disclosure (no clause sq
   it('a clean RC still submits an empty body', () => {
     const r = composeReview(base({ criticalsInline: 2 }));
     expect(r.body).toBe('');
+  });
+});
+
+describe('composeReview — the fix-audit round-shape disclosure (#10104)', () => {
+  const POSTURE = {
+    since: 'a'.repeat(40),
+    effective: true,
+    posture: 'critical',
+    postureCause: 'round',
+    scope: {
+      anchor: 'a'.repeat(40),
+      deltaFiles: ['src/a.ts'],
+      interaction: [
+        {
+          path: 'src/b.ts',
+          importsChanged: ['src/a.ts'],
+          seam: { kept: 2, total: 7 },
+        },
+      ],
+    },
+  };
+
+  // `base()`'s own default `planPath: coveredPlan()` runs at call time and
+  // rewrites the shared plan.json AFTER an override argument was evaluated —
+  // so the posture'd plan must be written after `base()` returns, or the
+  // test silently measures the default plan.
+  function rcInput(
+    incremental: Record<string, unknown>,
+  ): ReturnType<typeof base> {
+    const input = base({ criticalsInline: 1 });
+    input.planPath = coveredPlan(['verify', 'reverse-audit'], {
+      incremental: incremental as never,
+    });
+    return input;
+  }
+
+  it('the plan posture is a floor-resolution arm: a context-unavailable round still defers (#10104)', () => {
+    // The adversarial shape: capture ran the narrow fix-audit round off the
+    // side file, then pr-context failed and compose runs context-unavailable
+    // — the two auto arms disengage, but the plan's own posture record must
+    // keep the posting bar aligned with the shape the round already ran.
+    const input = rcInput(POSTURE);
+    input.criticalsInline = 0;
+    input.suggestionsInline = 1;
+    input.contextUnavailable = true;
+    // The verdict's resolved default, as the state carries it in a real
+    // run; the enforcement reading is deliberately strict on an ABSENT
+    // floor and must stay so.
+    input.severityFloor = 'auto';
+    input.draftedComments = [
+      { path: 'src/a.ts', line: 3, body: '**[Suggestion]** untested guard' },
+    ];
+    const r = composeReview(input);
+    // The Suggestion was rerouted into the deferral list, not posted inline.
+    expect(r.floorEnforced).toEqual([0]);
+    expect(r.body).toContain(
+      'Findings below Critical were recorded and deferred, never posted.',
+    );
+  });
+
+  it("an explicit `suggestion` floor beats a stale plan posture, and the body says the floor was open", () => {
+    const input = rcInput(POSTURE);
+    input.criticalsInline = 0;
+    input.suggestionsInline = 1;
+    input.severityFloor = 'suggestion';
+    input.draftedComments = [
+      { path: 'src/a.ts', line: 3, body: '**[Suggestion]** untested guard' },
+    ];
+    const r = composeReview(input);
+    expect(r.floorEnforced).toEqual([]);
+    expect(r.body).toContain('resolved OPEN at compose time');
+    expect(r.body).not.toContain('recorded and deferred, never posted');
+  });
+
+  it('an RC body owns the reduced shape, cause and seam census', () => {
+    const r = composeReview(rcInput(POSTURE));
+    expect(r.event).toBe('REQUEST_CHANGES');
+    expect(r.body).toContain(
+      'fix-audit round under the critical posting posture',
+    );
+    expect(r.body).toContain('engaged by the round schedule');
+    expect(r.body).toContain('2 of 7 hunk(s) republished');
+  });
+
+  it('renders the flat-trend cause by name', () => {
+    const r = composeReview(
+      rcInput({ ...POSTURE, postureCause: 'flat-trend' }),
+    );
+    expect(r.body).toContain('engaged by the flat first-time-finding trend');
+  });
+
+  it('says nothing on a plan without the posture', () => {
+    const r = composeReview(
+      rcInput({ since: 'a'.repeat(40), effective: true }),
+    );
+    expect(r.body).not.toContain('fix-audit round');
+  });
+
+  it('a malformed posture block silences the disclosure, never crashes', () => {
+    const r = composeReview(rcInput({ ...POSTURE, scope: 'garbled' }));
+    expect(r.body).not.toContain('fix-audit round');
+    // …at the same bar the roster's reader applies (`isFixAuditRound`): a
+    // scope-shaped object missing its anchor or delta list is a plan the
+    // roster ran FULL, and neither the floor arm nor the disclosure may
+    // describe a fix-audit round nobody ran.
+    const r2 = composeReview(
+      rcInput({ ...POSTURE, scope: { anchor: '', deltaFiles: ['a.ts'] } }),
+    );
+    expect(r2.body).not.toContain('fix-audit round');
+    const r3 = composeReview(
+      rcInput({
+        ...POSTURE,
+        scope: { anchor: 'a'.repeat(40), deltaFiles: 'garbled' },
+      }),
+    );
+    expect(r3.body).not.toContain('fix-audit round');
   });
 });
 

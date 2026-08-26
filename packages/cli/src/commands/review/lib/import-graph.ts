@@ -267,6 +267,146 @@ export function discoverWorkspacePackages(
     .map(([dir, name]) => ({ name, dir }));
 }
 
+
+/** An identifier a seam binding can be — nothing flag- or operator-shaped. */
+const IDENT_RE = /^[A-Za-z_$][\w$]*$/;
+
+/** Words an import clause carries that are never local bindings. */
+const CLAUSE_NOISE = new Set(['type', 'typeof', 'default', 'as']);
+
+/**
+ * The local bindings an import clause introduces, from the text between the
+ * statement keyword and its `from`. A heuristic in the same spirit as
+ * `scanImportSpecifiers`, with the same chosen error directions: a name it
+ * misses drops a usage line from the seam (the hunk near it may still enter
+ * on another line), a name it over-collects marks one line too many — one
+ * hunk reviewed once more than needed, never less than the unwidened floor.
+ */
+function clauseBindings(clause: string): string[] {
+  const out: string[] = [];
+  const push = (raw: string) => {
+    const name = raw.trim();
+    if (IDENT_RE.test(name) && !CLAUSE_NOISE.has(name)) out.push(name);
+  };
+  const star = /\*\s*as\s+([A-Za-z_$][\w$]*)/.exec(clause);
+  if (star) push(star[1]);
+  const braces = /\{([^}]*)\}/.exec(clause);
+  if (braces) {
+    for (const entry of braces[1].split(',')) {
+      // `a as b` binds the LOCAL alias; `a` alone binds itself. `type x`
+      // never reaches runtime, but its usage lines are still seam reads for
+      // a reviewer, so type-only names are kept once the keyword is shed.
+      const words = entry
+        .trim()
+        .split(/\s+/)
+        .filter((w) => !CLAUSE_NOISE.has(w));
+      if (words.length > 0) push(words[words.length - 1]);
+    }
+  }
+  // The default import: the first identifier after the keyword, outside any
+  // braces (`import a, { b } from …` — `a`; `import { b } from …` — none).
+  const head = clause.split('{')[0];
+  const def = /^\s*(?:import|export)\s+(?:type\s+)?([A-Za-z_$][\w$]*)/.exec(
+    head,
+  );
+  if (def) push(def[1]);
+  return [...new Set(out)];
+}
+
+/**
+ * The 1-based lines of `source` that touch its seam with the changed files:
+ * every import/require statement whose specifier resolves into `changed`,
+ * plus every line mentioning a binding such a statement introduces.
+ *
+ * This is the seam-bounded widening's oracle (#10104): a fix-audit round
+ * republishes an interaction file's hunks only where they display one of
+ * these lines. It shares `scanImportSpecifiers`' regex spirit and its
+ * documented misses (template-literal specifiers, statements the patterns do
+ * not spell), and adds its own: a binding renamed into a local alias after
+ * import, or reached through a barrel, marks no line. Both directions were
+ * chosen — a missed line drops one hunk from a republication the previous
+ * round already cleared once, an extra line republishes one hunk more — and
+ * the file itself always stays in scope with its brief, so the seam question
+ * is asked even when no hunk survives.
+ */
+export function seamLines(
+  fromFile: string,
+  source: string,
+  changed: ReadonlySet<string>,
+  packages: readonly WorkspacePackage[] = [],
+): number[] {
+  const lineOf = (index: number): number => {
+    let line = 1;
+    for (let i = 0; i < index && i < source.length; i++) {
+      if (source.charCodeAt(i) === 10) line++;
+    }
+    return line;
+  };
+  const marked = new Set<number>();
+  const bindings = new Set<string>();
+  const fromRe = /\bfrom\s*(['"])([^'"\n]+)\1/g;
+  for (const m of source.matchAll(fromRe)) {
+    if (resolveSpecifier(fromFile, m[2], changed, packages) === null) continue;
+    marked.add(lineOf(m.index ?? 0));
+    // The clause sits between the statement keyword and this `from`. The
+    // nearest preceding keyword bounds it; a clause the scan cannot bound
+    // contributes the statement line alone — fail toward fewer lines, which
+    // the always-in-scope brief backstops.
+    const at = m.index ?? 0;
+    const start = Math.max(
+      source.lastIndexOf('import', at),
+      source.lastIndexOf('export', at),
+    );
+    if (start >= 0 && at - start <= 2000) {
+      for (const name of clauseBindings(source.slice(start, at))) {
+        bindings.add(name);
+      }
+    }
+  }
+  const callRe =
+    /\b(?:import|require)\s*\(\s*(['"])([^'"\n]+)\1\s*\)|\bimport\s*(['"])([^'"\n]+)\3/g;
+  for (const m of source.matchAll(callRe)) {
+    const spec = m[2] ?? m[4];
+    if (resolveSpecifier(fromFile, spec, changed, packages) === null) continue;
+    const at = m.index ?? 0;
+    const line = lineOf(at);
+    marked.add(line);
+    // `const { a, b: c } = require('x')` / `const x = require('x')`: the
+    // bindings sit BEFORE the call, on its own line.
+    const lineStart = source.lastIndexOf('\n', at - 1) + 1;
+    const before = source.slice(lineStart, at);
+    const decl = /(?:const|let|var)\s+(?:\{([^}]*)\}|([A-Za-z_$][\w$]*))\s*=\s*$/.exec(
+      before,
+    );
+    if (decl) {
+      if (decl[2]) bindings.add(decl[2]);
+      if (decl[1]) {
+        for (const entry of decl[1].split(',')) {
+          const words = entry.trim().split(/[:\s]+/).filter(Boolean);
+          const name = words[words.length - 1];
+          if (name && IDENT_RE.test(name)) bindings.add(name);
+        }
+      }
+    }
+  }
+  if (bindings.size > 0) {
+    // `$` is legal in the identifiers IDENT_RE admits and is a regex anchor,
+    // and `\b` cannot bound a name that starts or ends with it (`store$.x`
+    // never matched; a DIFFERENT identifier at end-of-line did). So the
+    // names are escaped and the boundary is spelled explicitly: not
+    // preceded/followed by an identifier character, `$` included.
+    const escaped = [...bindings].map((b) => b.replace(/\$/g, '\\$'));
+    const usage = new RegExp(
+      `(?<![\\w$])(?:${escaped.join('|')})(?![\\w$])`,
+    );
+    const lines = source.split('\n');
+    for (let i = 0; i < lines.length; i++) {
+      if (usage.test(lines[i])) marked.add(i + 1);
+    }
+  }
+  return [...marked].sort((a, b) => a - b);
+}
+
 /**
  * Which candidates import a changed file — the widening set.
  *
