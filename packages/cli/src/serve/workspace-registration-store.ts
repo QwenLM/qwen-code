@@ -12,7 +12,7 @@ import lockfile from 'proper-lockfile';
 import {
   isUnverifiableIdentityError,
   openNoFollow,
-} from '@qwen-code/qwen-code-core';
+} from '@qwen-code/qwen-code-core/noFollowOpen';
 import { MAX_WORKSPACE_PATH_LENGTH } from '@qwen-code/acp-bridge/workspacePaths';
 import { getGlobalQwenDirLite } from '../config/storage-paths-lite.js';
 import { MAX_REGISTERED_WORKSPACES } from './workspace-inputs.js';

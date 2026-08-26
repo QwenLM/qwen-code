@@ -472,8 +472,8 @@ describe('WorkspaceRegistrationStore', () => {
         }),
       },
     }));
-    // Keep the real barrel exports (the store now reads through
-    // `openNoFollow` from core) and only stub the write path under test.
+    // The read path uses the leaf noFollowOpen export, so this barrel mock
+    // remains limited to the deferred write helper under test.
     vi.doMock('@qwen-code/qwen-code-core', async (importOriginal) => {
       const actual =
         await importOriginal<typeof import('@qwen-code/qwen-code-core')>();
