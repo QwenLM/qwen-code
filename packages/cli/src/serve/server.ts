@@ -295,8 +295,12 @@ import { LiveSetupController } from './live/live-setup-controller.js';
 import { LiveTaskService } from './live/live-task-service.js';
 import type { ConversationWorkspace } from './conversations/conversation-workspace.js';
 import { ConversationRuntimeActivityGate } from './conversations/conversation-runtime-activity.js';
-import { conversationRootCompromisedError } from './conversations/conversation-runtime-errors.js';
+import {
+  conversationRootCompromisedError,
+  conversationRuntimeUnavailableError,
+} from './conversations/conversation-runtime-errors.js';
 import { ConversationRuntimeManager } from './conversations/conversation-runtime-manager.js';
+import { StandaloneSessionService } from './conversations/standalone-session-service.js';
 import {
   createConversationRuntimeOwnership,
   type ConversationRuntimeOwnership,
@@ -313,6 +317,7 @@ import {
   type LiveProviderCredential,
 } from './live/provider-credentials.js';
 import type { ChildHeapPolicySnapshot } from '@qwen-code/acp-bridge/childHeapPolicy';
+import { invalidateWorkspaceSessionListCache } from './server/session-list.js';
 
 export {
   createDefaultFsAuditEmit,
@@ -436,6 +441,9 @@ export interface ServeAppDeps {
    * a heartbeat timer.
    */
   manageScheduledTaskSessions?: boolean;
+  /** Advertise current-session task binding only when every managed daemon
+   * runtime installs the private cron-tool callback. */
+  currentSessionSchedulingAvailable?: boolean;
   /**
    * Directory of the built Web Shell SPA (`index.html` + `assets/`). When
    * set (and `opts.serveWebShell !== false`), `createServeApp` mounts the
@@ -927,6 +935,9 @@ export function createServeApp(
           )
         );
       },
+      currentSessionSchedulingAvailable:
+        deps.manageScheduledTaskSessions === true &&
+        deps.currentSessionSchedulingAvailable === true,
       workspaceGenerationAvailable: () => {
         const entry = workspaceRegistry.primaryEntry;
         const runtime =
@@ -1085,9 +1096,11 @@ export function createServeApp(
     defaultBridgeForAdmission = bridge;
   }
   const archiveCoordinator = new SessionArchiveCoordinator();
-  const conversationRuntimeActivity = deps.liveConversationWorkspace
-    ? new ConversationRuntimeActivityGate()
-    : undefined;
+  const conversationRuntimeActivity =
+    deps.liveConversationWorkspace ||
+    injectedWorkspaceRegistry?.listAll().some(isInternalWorkspaceRuntime)
+      ? new ConversationRuntimeActivityGate()
+      : undefined;
   (
     app.locals as {
       sessionArchiveCoordinator?: SessionArchiveCoordinator;
@@ -1375,6 +1388,7 @@ export function createServeApp(
           message: 'The Live Appshot channel is unavailable.',
         },
   );
+  let standaloneSessionService: StandaloneSessionService | undefined;
   const conversationRuntimeManager = deps.liveConversationWorkspace
     ? new ConversationRuntimeManager({
         ownership: conversationRuntimeOwnership!,
@@ -1395,6 +1409,30 @@ export function createServeApp(
           );
           invalidateServeFeaturesCache();
           return runtime;
+        },
+        quarantineRuntime: async (runtime) => {
+          liveCoordinatorSealed = true;
+          liveVoiceEnabled = false;
+          (app.locals as { liveVoiceEnabled?: boolean }).liveVoiceEnabled =
+            false;
+          liveCoordinator.setAppshotReadiness({
+            state: 'unavailable',
+            message: 'The Live Appshot channel is unavailable.',
+          });
+          invalidateServeFeaturesCache();
+          await Promise.all([
+            (
+              app.locals as {
+                sealAndWaitLiveCoordinator?: () => Promise<void>;
+              }
+            ).sealAndWaitLiveCoordinator?.() ?? Promise.resolve(),
+            conversationRuntimeActivity!.sealAndWait(),
+            publishLiveVoiceEnabled(false),
+          ]);
+          await workspaceManagementHandle.quarantineOwnedRuntime(runtime);
+        },
+        onTerminalQuarantine: (runtime) => {
+          standaloneSessionService?.freezeForTerminalQuarantine(runtime);
         },
       })
     : undefined;
@@ -1521,10 +1559,43 @@ export function createServeApp(
   const ensureConversationRuntimeWithLifecycle = async () => {
     await serveAppLifecycle.startBoot(startConversationRuntimeBoot);
     if (!liveRuntimeBootResult) {
-      throw new Error('Live conversation runtime is unavailable.');
+      throw conversationRuntimeUnavailableError();
     }
     return liveRuntimeBootResult;
   };
+  if (
+    conversationRuntimeManager &&
+    conversationRuntimeActivity &&
+    deps.liveConversationWorkspace
+  ) {
+    standaloneSessionService = new StandaloneSessionService({
+      ensureRuntime: ensureConversationRuntimeWithLifecycle,
+      assertRuntimeCurrent: (runtime) => {
+        conversationRuntimeManager.assertCurrent(runtime);
+      },
+      quarantineRuntime: (runtime) =>
+        conversationRuntimeManager.quarantine(
+          runtime,
+          'standalone_session_containment_failed',
+        ),
+      runRuntimeActivity: (_runtime, operation) =>
+        conversationRuntimeActivity.run(operation),
+      workspace: deps.liveConversationWorkspace,
+      lifecycle: archiveCoordinator,
+      requestedSessionIdAdmission,
+      invalidateSessionListCache: (runtime) =>
+        invalidateWorkspaceSessionListCache({
+          runtimeBaseDir: runtime.sessionRuntimeBaseDir,
+          workspaceCwd: runtime.workspaceCwd,
+          archiveStates: ['active'],
+        }),
+    });
+    (
+      app.locals as {
+        standaloneSessionService?: StandaloneSessionService;
+      }
+    ).standaloneSessionService = standaloneSessionService;
+  }
   const verifyLiveAppshotChannel = (): Promise<void> => {
     if (liveAppshotChannelPromise) return liveAppshotChannelPromise;
     const pending = ensureConversationRuntimeWithLifecycle()
@@ -1552,17 +1623,13 @@ export function createServeApp(
   const liveTaskService = new LiveTaskService({
     workspaceRegistry,
     ensureConversationRuntime: ensureConversationRuntimeWithLifecycle,
+    ...(standaloneSessionService ? { standaloneSessionService } : {}),
     materializeConversationDirectory: async (sessionId) => {
       const conversationWorkspace = deps.liveConversationWorkspace;
       if (!conversationWorkspace) {
         throw new Error('Live conversation workspace is unavailable.');
       }
       return conversationWorkspace.materializeConversationDirectory(sessionId);
-    },
-    discardEmptyConversationDirectory: async (sessionId) => {
-      const conversationWorkspace = deps.liveConversationWorkspace;
-      if (!conversationWorkspace) return false;
-      return conversationWorkspace.discardEmptyConversationDirectory(sessionId);
     },
   });
   const liveSessionCoordinator =
@@ -2498,13 +2565,14 @@ export function createServeApp(
     sessionShellCommandEnabled,
     languageCodes,
     virtualSubagentSessions,
+    conversationRuntimeActivity,
+    ...(standaloneSessionService ? { standaloneSessionService } : {}),
     isLiveSessionActive: (sessionId: string) =>
       liveCoordinator.isActiveSession(sessionId),
     ...(liveConversationWorkspaceForRoutes
       ? {
           ensureConversationRuntime: ensureConversationRuntimeWithLifecycle,
           liveConversationRootPath: liveConversationWorkspaceForRoutes.rootPath,
-          conversationRuntimeActivity: conversationRuntimeActivity!,
           materializeLiveConversationDirectory: (sessionId: string) =>
             liveConversationWorkspaceForRoutes.materializeConversationDirectory(
               sessionId,
@@ -2826,6 +2894,7 @@ export function createServeApp(
     daemonLog,
     mutate,
     sendPermissionVoteError,
+    conversationRuntimeActivity,
   });
 
   registerSseEventsRoutes(app, {
@@ -2835,6 +2904,7 @@ export function createServeApp(
     writerIdleTimeoutMs: opts.writerIdleTimeoutMs,
     sendBridgeError,
     virtualSubagentSessions,
+    conversationRuntimeActivity,
   });
 
   // Official ACP Streamable HTTP transport (RFD #721) mounted at `/acp`
@@ -2884,6 +2954,7 @@ export function createServeApp(
           },
         }
       : {}),
+    ...(standaloneSessionService ? { standaloneSessionService } : {}),
     checkRate: rateLimiter?.checkRate,
     clientMcpOverWs: opts.clientMcpOverWs === true,
     // Reverse tool channel (issue #5626, Phase 2). Per-connection provider:
