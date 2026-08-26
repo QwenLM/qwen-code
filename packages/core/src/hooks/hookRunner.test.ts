@@ -1116,6 +1116,71 @@ describe('HookRunner', () => {
       expect(killSpy).not.toHaveBeenCalled();
     });
 
+    it('force-kills an active POSIX hook group when the parent exits', async () => {
+      vi.spyOn(process, 'platform', 'get').mockReturnValue('linux');
+      const exitListenersBefore = process.listeners('exit');
+      const sighupListenersBefore = process.listeners('SIGHUP');
+      const sigintListenersBefore = process.listeners('SIGINT');
+      const sigtermListenersBefore = process.listeners('SIGTERM');
+      const mockProcess = createControllableMockProcess();
+      mockSpawn.mockReturnValue(mockProcess);
+      const killSpy = vi.spyOn(process, 'kill').mockReturnValue(true);
+
+      const resultPromise = hookRunner.executeHook(
+        hookConfig,
+        HookEventName.PreToolUse,
+        createMockInput(),
+      );
+      const exitListener = process
+        .listeners('exit')
+        .find((listener) => !exitListenersBefore.includes(listener));
+
+      expect(exitListener).toBeDefined();
+      exitListener?.(0);
+      expect(killSpy).toHaveBeenCalledWith(-mockProcess.pid, 'SIGKILL');
+
+      mockProcess.emit('close', null);
+      await resultPromise;
+      expect(process.listeners('exit')).toEqual(exitListenersBefore);
+      expect(process.listeners('SIGHUP')).toEqual(sighupListenersBefore);
+      expect(process.listeners('SIGINT')).toEqual(sigintListenersBefore);
+      expect(process.listeners('SIGTERM')).toEqual(sigtermListenersBefore);
+    });
+
+    it('leaves parent signals to an existing application handler', async () => {
+      vi.spyOn(process, 'platform', 'get').mockReturnValue('linux');
+      const listenersBefore = process.listeners('SIGTERM');
+      const mockProcess = createControllableMockProcess();
+      mockSpawn.mockReturnValue(mockProcess);
+      const killSpy = vi.spyOn(process, 'kill').mockReturnValue(true);
+      const applicationHandler = vi.fn();
+      process.on('SIGTERM', applicationHandler);
+
+      try {
+        const resultPromise = hookRunner.executeHook(
+          hookConfig,
+          HookEventName.PreToolUse,
+          createMockInput(),
+        );
+        const hookSignalHandler = process
+          .listeners('SIGTERM')
+          .find(
+            (listener) =>
+              listener !== applicationHandler &&
+              !listenersBefore.includes(listener),
+          );
+
+        expect(hookSignalHandler).toBeDefined();
+        hookSignalHandler?.('SIGTERM');
+        expect(killSpy).not.toHaveBeenCalled();
+
+        mockProcess.emit('close', 0);
+        await resultPromise;
+      } finally {
+        process.removeListener('SIGTERM', applicationHandler);
+      }
+    });
+
     it('escalates to SIGKILL for the process group even after the root closes', async () => {
       vi.useFakeTimers();
       const mockProcess = createControllableMockProcess();
@@ -1329,6 +1394,86 @@ describe('HookRunner', () => {
           callback(new Error('taskkill failed'));
         },
       );
+      const mockProcess = createControllableMockProcess();
+      mockSpawn.mockReturnValue(mockProcess);
+      const controller = new AbortController();
+
+      const resultPromise = hookRunner.executeHook(
+        hookConfig,
+        HookEventName.PreToolUse,
+        createMockInput(),
+        controller.signal,
+      );
+      controller.abort();
+      mockProcess.emit('close', null);
+      await resultPromise;
+
+      expect(mockProcess.kill).toHaveBeenCalledOnce();
+      expect(mockProcess.kill).toHaveBeenCalledWith('SIGKILL');
+    });
+
+    it('falls back to the direct child when POSIX group signals fail', async () => {
+      vi.useFakeTimers();
+      vi.spyOn(process, 'platform', 'get').mockReturnValue('linux');
+      const mockProcess = createControllableMockProcess();
+      mockSpawn.mockReturnValue(mockProcess);
+      const permissionError = Object.assign(new Error('not permitted'), {
+        code: 'EPERM',
+      });
+      vi.spyOn(process, 'kill').mockImplementation((target, signal) => {
+        if (target === -mockProcess.pid && signal === 0) {
+          return true;
+        }
+        if (target === -mockProcess.pid) {
+          throw permissionError;
+        }
+        return true;
+      });
+      const controller = new AbortController();
+
+      const resultPromise = hookRunner.executeHook(
+        hookConfig,
+        HookEventName.PreToolUse,
+        createMockInput(),
+        controller.signal,
+      );
+      controller.abort();
+      mockProcess.emit('close', null);
+      await vi.advanceTimersByTimeAsync(2000);
+      await resultPromise;
+
+      expect(mockProcess.kill).toHaveBeenCalledWith('SIGTERM');
+      expect(mockProcess.kill).toHaveBeenCalledWith('SIGKILL');
+    });
+
+    it('force-kills the direct child when cancellation has no pid', async () => {
+      vi.spyOn(process, 'platform', 'get').mockReturnValue('linux');
+      const mockProcess = {
+        ...createControllableMockProcess(),
+        pid: undefined,
+      };
+      mockSpawn.mockReturnValue(mockProcess);
+      const controller = new AbortController();
+
+      const resultPromise = hookRunner.executeHook(
+        hookConfig,
+        HookEventName.PreToolUse,
+        createMockInput(),
+        controller.signal,
+      );
+      controller.abort();
+      mockProcess.emit('close', null);
+      await resultPromise;
+
+      expect(mockProcess.kill).toHaveBeenCalledOnce();
+      expect(mockProcess.kill).toHaveBeenCalledWith('SIGKILL');
+    });
+
+    it('falls back to the direct child when taskkill throws synchronously', async () => {
+      vi.spyOn(process, 'platform', 'get').mockReturnValue('win32');
+      mockExecFile.mockImplementation(() => {
+        throw new Error('EMFILE');
+      });
       const mockProcess = createControllableMockProcess();
       mockSpawn.mockReturnValue(mockProcess);
       const controller = new AbortController();

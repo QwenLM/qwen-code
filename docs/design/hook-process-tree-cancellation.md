@@ -15,7 +15,9 @@ On POSIX, HookRunner starts each command hook as a detached child so the shell l
 
 The root child closing does not cancel escalation because descendants can remain in the group after the root exits. After SIGKILL is accepted, HookRunner does not wait for process IDs to disappear: terminated processes may remain briefly visible as zombies until their new parent reaps them.
 
-Windows does not expose POSIX process-group signals. HookRunner instead invokes the absolute System32 `taskkill.exe` path asynchronously with `/f /t /pid` and a bounded execution time. A failed taskkill falls back to force-killing the direct child and emits a diagnostic warning.
+While a POSIX command hook is running, HookRunner keeps its owned process group registered with a synchronous process-exit fallback. If the parent reaches Node's exit event before normal cancellation completes, the fallback sends SIGKILL to every active hook group instead of leaving the detached tree behind. Temporary SIGHUP, SIGINT, and SIGTERM handlers cover startup paths that still use Node's default signal behavior; when another application handler exists, HookRunner leaves graceful cancellation to it and retains the process-exit fallback.
+
+Windows does not expose POSIX process-group signals. HookRunner instead invokes the absolute System32 `taskkill.exe` path asynchronously with `/f /t /pid` and a bounded execution time. A failed taskkill falls back to force-killing the direct child and emits a diagnostic warning. If the root process has already exited, taskkill cannot reconstruct descendants from that former PID; reclaiming that case requires a Windows Job Object or descendant tracking and remains outside this change.
 
 Timeout and AbortSignal races share the same termination promise. Abort retains its existing result precedence, and normal hook success, output parsing, exit-code handling, and timeout defaults remain unchanged.
 
@@ -26,9 +28,11 @@ After tree termination, HookRunner waits up to one second for the root child to 
 - Propagating the ACP session initialization deadline into SessionStart.
 - Managing the ACP child process tree.
 - Reaping processes that deliberately leave the owned group through daemonization or a new session.
+- Preserving controlling-terminal access for POSIX command hooks. Creating the owned process group uses a detached session, so commands that open `/dev/tty` directly are unsupported.
+- Reclaiming a detached group after an untrappable parent SIGKILL or host failure, because those failures prevent all JavaScript exit handling from running.
 - Changing extension configuration, hook timeout defaults, or AsyncHookRegistry's unused process field.
 
 ## Test plan
 
-- Unit-test process-group ownership, TERM-to-KILL timing, root-close races, timeout/abort races, normal completion, spawn errors, and Windows taskkill fallback.
+- Unit-test process-group ownership, TERM-to-KILL timing, root-close races, timeout/abort races, parent-exit fallback, normal completion, spawn errors, and Windows taskkill fallback.
 - Run a POSIX process test whose descendant confirms receipt of SIGTERM, ignores it, and is then made non-running by group SIGKILL.

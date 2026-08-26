@@ -52,6 +52,9 @@ const HOOK_CHILD_CLOSE_WAIT_MS = 1000;
 const WINDOWS_TASKKILL_TIMEOUT_MS = 2000;
 const WINDOWS_TASKKILL = `${process.env['SystemRoot'] || 'C:\\Windows'}\\System32\\taskkill.exe`;
 
+const activePosixHookProcesses = new Set<ChildProcess>();
+let parentExitCleanupRegistered = false;
+
 /**
  * Exit code constants for hook execution
  */
@@ -114,9 +117,76 @@ function killDirectChild(child: ChildProcess, signal: NodeJS.Signals): void {
   }
 }
 
+function forceKillActivePosixHookProcesses(): void {
+  for (const child of activePosixHookProcesses) {
+    const pid = child.pid;
+    if (!pid) {
+      killDirectChild(child, 'SIGKILL');
+      continue;
+    }
+    if (signalProcessGroup(pid, 'SIGKILL') === 'failed') {
+      killDirectChild(child, 'SIGKILL');
+    }
+  }
+}
+
+function handleParentSignal(signal: 'SIGHUP' | 'SIGINT' | 'SIGTERM'): void {
+  const handler =
+    signal === 'SIGHUP'
+      ? handleParentSighup
+      : signal === 'SIGINT'
+        ? handleParentSigint
+        : handleParentSigterm;
+  if (process.listeners(signal).some((listener) => listener !== handler)) {
+    return;
+  }
+
+  forceKillActivePosixHookProcesses();
+  process.removeListener(signal, handler);
+  process.kill(process.pid, signal);
+}
+
+function handleParentSighup(): void {
+  handleParentSignal('SIGHUP');
+}
+
+function handleParentSigint(): void {
+  handleParentSignal('SIGINT');
+}
+
+function handleParentSigterm(): void {
+  handleParentSignal('SIGTERM');
+}
+
+function registerActivePosixHookProcess(child: ChildProcess): void {
+  if (process.platform === 'win32' || !child.pid) {
+    return;
+  }
+  activePosixHookProcesses.add(child);
+  if (!parentExitCleanupRegistered) {
+    process.on('exit', forceKillActivePosixHookProcesses);
+    process.prependListener('SIGHUP', handleParentSighup);
+    process.prependListener('SIGINT', handleParentSigint);
+    process.prependListener('SIGTERM', handleParentSigterm);
+    parentExitCleanupRegistered = true;
+  }
+}
+
+function unregisterActivePosixHookProcess(child: ChildProcess): void {
+  activePosixHookProcesses.delete(child);
+  if (activePosixHookProcesses.size === 0 && parentExitCleanupRegistered) {
+    process.removeListener('exit', forceKillActivePosixHookProcesses);
+    process.removeListener('SIGHUP', handleParentSighup);
+    process.removeListener('SIGINT', handleParentSigint);
+    process.removeListener('SIGTERM', handleParentSigterm);
+    parentExitCleanupRegistered = false;
+  }
+}
+
 async function terminatePosixHookProcessTree(
   child: ChildProcess,
 ): Promise<void> {
+  // executeCommandHook makes child.pid the process-group leader on POSIX.
   const pid = child.pid;
   if (!pid) {
     killDirectChild(child, 'SIGKILL');
@@ -135,6 +205,9 @@ async function terminatePosixHookProcessTree(
     return;
   }
 
+  debugLogger.debug(
+    `Hook process group ${pid} did not exit within ${HOOK_TERMINATE_GRACE_MS}ms after SIGTERM; escalating to SIGKILL`,
+  );
   const killResult = signalProcessGroup(pid, 'SIGKILL');
   if (killResult === 'failed') {
     killDirectChild(child, 'SIGKILL');
@@ -748,14 +821,17 @@ export class HookRunner {
           cwd: input.cwd,
           stdio: ['pipe', 'pipe', 'pipe'],
           shell: false,
+          // Own a process group so cancellation can signal the entire tree.
           detached: process.platform !== 'win32',
         },
       );
+      registerActivePosixHookProcess(child);
 
       let abortListenerAttached = false;
 
       const cleanup = () => {
         clearTimeout(timeoutHandle);
+        unregisterActivePosixHookProcess(child);
         if (signal && abortListenerAttached) {
           signal.removeEventListener('abort', abortHandler);
           abortListenerAttached = false;
@@ -794,6 +870,9 @@ export class HookRunner {
         }
 
         if (!childClosed) {
+          debugLogger.debug(
+            `Hook process ${child.pid ?? 'unknown'} did not close within ${HOOK_CHILD_CLOSE_WAIT_MS}ms after cancellation; destroying streams`,
+          );
           child.stdin?.destroy();
           child.stdout?.destroy();
           child.stderr?.destroy();

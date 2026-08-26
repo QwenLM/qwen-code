@@ -4,10 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { HookRunner } from './hookRunner.js';
 import { HookEventName, HooksConfigSource, HookType } from './types.js';
@@ -173,5 +174,168 @@ setInterval(() => {}, 1000);
         await rm(tempDir, { recursive: true, force: true });
       }
     }, 15_000);
+
+    it.each(['process-exit', 'signal-exit', 'handled-signal-exit'] as const)(
+      'reaps an active hook tree on parent %s',
+      async (exitMode) => {
+        const tempDir = await mkdtemp(join(tmpdir(), 'qwen-hook-exit-'));
+        const driverPath = join(tempDir, 'driver.mjs');
+        const fixturePath = join(tempDir, 'hook-tree.mjs');
+        const descendantFixturePath = join(tempDir, 'descendant.mjs');
+        const rootPidPath = join(tempDir, 'root.pid');
+        const descendantPidPath = join(tempDir, 'descendant.pid');
+        const descendantReadyPath = join(tempDir, 'descendant.ready');
+        const driverReadyPath = join(tempDir, 'driver.ready');
+        const upperCompletedPath = join(tempDir, 'upper.completed');
+        let driverPid: number | undefined;
+        let rootPid: number | undefined;
+        let descendantPid: number | undefined;
+
+        try {
+          await writeFile(
+            driverPath,
+            `import { readFileSync, writeFileSync } from 'node:fs';
+
+const { HookRunner } = await import(process.argv[2]);
+const [tempDir, fixturePath, rootPidPath, descendantPidPath, descendantFixturePath, descendantReadyPath, driverReadyPath, upperCompletedPath, exitMode] = process.argv.slice(3);
+const runner = new HookRunner();
+const controller = new AbortController();
+if (exitMode === 'handled-signal-exit') {
+  process.once('SIGTERM', async () => {
+    controller.abort();
+    await resultPromise;
+    writeFileSync(upperCompletedPath, 'completed');
+    process.exit(77);
+  });
+}
+const resultPromise = runner.executeHook(
+  { type: 'command', command: \`exec \${JSON.stringify(process.execPath)} \${JSON.stringify(fixturePath)} \${JSON.stringify(rootPidPath)} \${JSON.stringify(descendantPidPath)} \${JSON.stringify(descendantFixturePath)} \${JSON.stringify(descendantReadyPath)}\`, source: 'project', shell: 'bash', timeout: 60_000 },
+  'PreToolUse',
+  { session_id: 'parent-exit-test', transcript_path: \`\${tempDir}/transcript.jsonl\`, cwd: tempDir, hook_event_name: 'PreToolUse', timestamp: new Date().toISOString() },
+  controller.signal,
+);
+while (true) {
+  try {
+    if (readFileSync(descendantReadyPath, 'utf8') === 'ready') break;
+  } catch {}
+  await new Promise((resolve) => setTimeout(resolve, 25));
+}
+writeFileSync(driverReadyPath, 'ready');
+if (exitMode === 'process-exit') process.exit(0);
+setInterval(() => {}, 1000);
+`,
+          );
+          await writeFile(
+            fixturePath,
+            `import { spawn } from 'node:child_process';
+import { writeFileSync } from 'node:fs';
+
+writeFileSync(process.argv[2], String(process.pid));
+const descendant = spawn(process.execPath, [process.argv[4], process.argv[5]], { stdio: 'ignore' });
+writeFileSync(process.argv[3], String(descendant.pid));
+setInterval(() => {}, 1000);
+`,
+          );
+          await writeFile(
+            descendantFixturePath,
+            `import { writeFileSync } from 'node:fs';
+
+process.on('SIGTERM', () => {});
+process.on('SIGHUP', () => {});
+writeFileSync(process.argv[2], 'ready');
+setInterval(() => {}, 1000);
+`,
+          );
+
+          const driver = spawn(
+            process.execPath,
+            [
+              '--import=tsx/esm',
+              driverPath,
+              new URL('./hookRunner.ts', import.meta.url).href,
+              tempDir,
+              fixturePath,
+              rootPidPath,
+              descendantPidPath,
+              descendantFixturePath,
+              descendantReadyPath,
+              driverReadyPath,
+              upperCompletedPath,
+              exitMode,
+            ],
+            {
+              cwd: fileURLToPath(new URL('../../../../', import.meta.url)),
+              stdio: 'ignore',
+            },
+          );
+          driverPid = driver.pid;
+          const driverExit = new Promise<{
+            code: number | null;
+            signal: NodeJS.Signals | null;
+          }>((resolve, reject) => {
+            driver.on('error', reject);
+            driver.on('exit', (code, signal) => resolve({ code, signal }));
+          });
+
+          await waitFor(async () => {
+            rootPid = await readPid(rootPidPath);
+            descendantPid = await readPid(descendantPidPath);
+            return (
+              rootPid !== undefined &&
+              descendantPid !== undefined &&
+              (await readFile(driverReadyPath, 'utf8').catch(() => '')) ===
+                'ready'
+            );
+          }, 5000);
+          if (exitMode !== 'process-exit') {
+            process.kill(driverPid as number, 'SIGTERM');
+          }
+
+          const exit = await driverExit;
+          expect(exit).toEqual(
+            exitMode === 'process-exit'
+              ? { code: 0, signal: null }
+              : exitMode === 'signal-exit'
+                ? { code: null, signal: 'SIGTERM' }
+                : { code: 77, signal: null },
+          );
+          if (exitMode === 'handled-signal-exit') {
+            expect(await readFile(upperCompletedPath, 'utf8')).toBe(
+              'completed',
+            );
+          }
+          await waitFor(
+            () =>
+              !isRunning(rootPid as number) &&
+              !isRunning(descendantPid as number),
+            3000,
+          );
+        } finally {
+          if (driverPid && isRunning(driverPid)) {
+            try {
+              process.kill(driverPid, 'SIGKILL');
+            } catch {
+              // Already gone.
+            }
+          }
+          if (rootPid && isRunning(rootPid)) {
+            try {
+              process.kill(-rootPid, 'SIGKILL');
+            } catch {
+              // Already gone.
+            }
+          }
+          if (descendantPid && isRunning(descendantPid)) {
+            try {
+              process.kill(descendantPid, 'SIGKILL');
+            } catch {
+              // Already gone.
+            }
+          }
+          await rm(tempDir, { recursive: true, force: true });
+        }
+      },
+      15_000,
+    );
   },
 );
