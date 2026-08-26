@@ -2492,6 +2492,70 @@ describe.skipIf(!loaderOracleAvailable)('describeWorkerTlsTrustGaps', () => {
     }
   });
 
+  // One-clock witnesses: the walk's issuer preference and the per-member
+  // validity flags must judge the SAME instant the report samples. The
+  // straddle test feeds the anchor walk an instant inside the short-lived
+  // twin's window and everything else an instant past it — two clocks would
+  // anchor through the short root AND tell the operator to renew it, the
+  // false CERT_HAS_EXPIRED this PR removes. The boundary tests freeze the
+  // clock on each edge of that window, where the expired/not-yet-valid flags
+  // flip, so a one-sided edit to either predicate fails instead of passing
+  // silently years away from any boundary.
+  it('judges the walk and the report at one sampled instant', () => {
+    const insideWindow = new Date('2026-08-20T00:00:00Z').getTime();
+    const pastWindow = new Date('2026-08-25T00:00:00Z').getTime();
+    const clock = vi
+      .spyOn(Date, 'now')
+      .mockImplementation(() =>
+        new Error().stack?.includes('walkWorkerAnchorPath') === true
+          ? insideWindow
+          : pastWindow,
+      );
+    try {
+      expect(
+        describeWorkerTlsTrustGaps({
+          cert: Buffer.from(TEST_TLS_CERT_FULLCHAIN_RENEWED_ROOT),
+          certPath: '/certs/fullchain.pem',
+          daemonUrl,
+        }),
+      ).toEqual([]);
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
+  it('agrees on the exact instant the short-lived twin expires', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-08-22T12:12:20Z'));
+    try {
+      expect(
+        describeWorkerTlsTrustGaps({
+          cert: Buffer.from(TEST_TLS_CERT_FULLCHAIN_RENEWED_ROOT),
+          certPath: '/certs/fullchain.pem',
+          daemonUrl,
+        }),
+      ).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('agrees on the exact instant the short-lived twin becomes valid', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-08-19T12:12:20Z'));
+    try {
+      expect(
+        describeWorkerTlsTrustGaps({
+          cert: Buffer.from(TEST_TLS_CERT_FULLCHAIN_RENEWED_ROOT),
+          certPath: '/certs/fullchain.pem',
+          daemonUrl,
+        }),
+      ).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('names an expired chain member the signature-only walk accepts', () => {
     // R2-3(b): `x509.verify` checks signatures and never consults dates, so an
     // expired root anchors a fullchain "fine" here while every worker
