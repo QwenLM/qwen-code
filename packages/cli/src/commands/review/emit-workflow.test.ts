@@ -536,6 +536,15 @@ describe('emit-workflow — where it writes', () => {
     );
   });
 
+  // Every sibling review subcommand pins its cannot-read-the-plan guard at
+  // handler level; this one is the same guard for this command's entry point.
+  it('refuses an unreadable plan path before writing anything', () => {
+    const plan = join(dir, 'missing-plan.json');
+    expect(() => run(plan)).toThrow(/cannot read the plan/);
+    expect(readRecordedPrompts(plan).size).toBe(0);
+    expect(existsSync(reviewWorkflowScriptPath(plan))).toBe(false);
+  });
+
   it('refuses an unreadable rules path before writing anything', () => {
     const plan = join(dir, 'plan.json');
     writeFileSync(plan, JSON.stringify(localPlan()), 'utf8');
