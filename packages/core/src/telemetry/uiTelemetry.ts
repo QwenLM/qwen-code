@@ -152,6 +152,24 @@ const createInitialModelMetrics = (): ModelMetrics => ({
   bySource: Object.create(null) as Record<string, ModelMetricsCore>,
 });
 
+/**
+ * `structuredClone` copies own properties onto a FRESH object with
+ * `Object.prototype` — it does not preserve the null prototype above, so a
+ * plain clone silently re-arms the crash that comment describes, permanently,
+ * for every `bySource` map it touches. Every snapshot/restore clone goes
+ * through here so the guard survives a replay rollback.
+ */
+const cloneSessionMetrics = (metrics: SessionMetrics): SessionMetrics => {
+  const clone = structuredClone(metrics);
+  for (const model of Object.values(clone.models)) {
+    model.bySource = Object.assign(
+      Object.create(null) as Record<string, ModelMetricsCore>,
+      model.bySource,
+    );
+  }
+  return clone;
+};
+
 const createInitialSkillMetrics = (): SkillMetrics => ({
   totalCalls: 0,
   totalSuccess: 0,
@@ -187,6 +205,52 @@ const createInitialMetrics = (): SessionMetrics => ({
   },
   skills: createInitialSkillMetrics(),
 });
+
+/**
+ * The slice of telemetry state a session-swap replay overwrites.
+ *
+ * `LlmClient.initialize()` takes this snapshot immediately before it
+ * replays an incoming session's stored history — it is the only caller that
+ * knows whether a replay is about to happen (the decision is the client's
+ * private `initializedSessionId`, not the config session id). Everything
+ * after that replay can still fail: the rest of initialization,
+ * background-agent recovery, building the resumed history, the UI swap. The
+ * `/resume` and `/branch` catch blocks roll core back to the old session,
+ * but this service has no subtraction API — `resetSession` clears one bucket
+ * and `reset()` would take the surviving session's live data with it — so an
+ * abandoned swap would otherwise leak a full copy of the dead session's
+ * history into the process-wide totals for the life of the process, and
+ * `persistSessionUsage` would later write that inflated figure out (#9833).
+ *
+ * Callers never take or restore snapshots directly; they open a swap
+ * transaction on `LlmClient` (`beginTelemetrySwap`), which owns the
+ * snapshot for exactly one swap and settles or aborts it.
+ * Restore overwrites rather than subtracts, so it is safe to apply after a
+ * rollback has already replayed something else on top (the `/branch`
+ * rollback re-initializes the parent session).
+ */
+export interface UiTelemetryReplaySnapshot {
+  readonly metrics: SessionMetrics;
+  readonly sessionId: string;
+  /** Absent when the session had no bucket yet — restore removes it again. */
+  readonly sessionMetrics: SessionMetrics | undefined;
+  readonly sessionWasClosed: boolean;
+  /**
+   * The session the process was on when the replay began — the one a failed
+   * swap rolls back to. Absent when no session was initialized yet (the
+   * process's first replay). The `/branch` rollback's own re-initialize
+   * replays this session, and that replay's `resetSession` wipes its live
+   * bucket; only what the transcript persists comes back. Restore puts the
+   * captured bucket back so in-memory-only state (skill invocations are
+   * never persisted) survives the round trip.
+   */
+  readonly outgoingSessionId?: string;
+  /** Absent when the outgoing session had no bucket yet — restore removes it. */
+  readonly outgoingSessionMetrics?: SessionMetrics | undefined;
+  readonly outgoingSessionWasClosed?: boolean;
+  readonly lastPromptTokenCount: number;
+  readonly lastCachedContentTokenCount: number;
+}
 
 export class UiTelemetryService extends EventEmitter {
   static readonly #MAX_CLOSED_SESSIONS = 1000;
@@ -267,6 +331,103 @@ export class UiTelemetryService extends EventEmitter {
 
   setLastCachedContentTokenCount(count: number): void {
     this.#lastCachedContentTokenCount = count;
+  }
+
+  /**
+   * Captures everything a session replay is about to overwrite, so a session
+   * swap that fails after replaying can put the state back. See
+   * {@link UiTelemetryReplaySnapshot} for why a snapshot is the only
+   * compensation available (no subtraction API).
+   *
+   * `outgoingSessionId` is the session the process was on when the replay
+   * begins — the swap transaction's begin-time `outgoingHint`, falling back
+   * to `LlmClient.initializedSessionId`. An earlier failed swap's abort
+   * clears `initializedSessionId`, so keying on it alone would capture no
+   * outgoing session and lose the live bucket (#9844 review). Its bucket and
+   * closed flag are captured too: the `/branch` rollback re-initializes that
+   * session, and the re-initialize's `resetSession` wipes its live bucket —
+   * only what the transcript persists comes back (skill invocations never
+   * do), so restore must put the captured bucket back.
+   */
+  snapshotForReplay(
+    sessionId: string,
+    outgoingSessionId?: string,
+  ): UiTelemetryReplaySnapshot {
+    const outgoing =
+      outgoingSessionId && outgoingSessionId !== sessionId
+        ? outgoingSessionId
+        : undefined;
+    const sessionMetrics = this.#sessionMetrics.get(sessionId);
+    const outgoingSessionMetrics = outgoing
+      ? this.#sessionMetrics.get(outgoing)
+      : undefined;
+    return {
+      metrics: cloneSessionMetrics(this.#metrics),
+      sessionId,
+      sessionMetrics: sessionMetrics
+        ? cloneSessionMetrics(sessionMetrics)
+        : undefined,
+      sessionWasClosed: this.#closedSessions.has(sessionId),
+      outgoingSessionId: outgoing,
+      outgoingSessionMetrics: outgoingSessionMetrics
+        ? cloneSessionMetrics(outgoingSessionMetrics)
+        : undefined,
+      outgoingSessionWasClosed: outgoing
+        ? this.#closedSessions.has(outgoing)
+        : undefined,
+      lastPromptTokenCount: this.#lastPromptTokenCount,
+      lastCachedContentTokenCount: this.#lastCachedContentTokenCount,
+    };
+  }
+
+  /**
+   * Puts back the state {@link snapshotForReplay} captured, undoing the
+   * replay of an abandoned session swap. Overwrites rather than subtracts,
+   * so it stays correct when applied after the rollback's own re-initialize
+   * replayed something else on top. Only the snapshotted sessions' buckets
+   * are touched — every other session's live data survives, which is what
+   * makes this usable on a rollback path where the old session is still
+   * live. Emits `update` so keyed displays re-render the restored state.
+   */
+  restoreFromReplaySnapshot(snapshot: UiTelemetryReplaySnapshot): void {
+    this.#metrics = cloneSessionMetrics(snapshot.metrics);
+    this.#restoreSessionState(
+      snapshot.sessionId,
+      snapshot.sessionMetrics,
+      snapshot.sessionWasClosed,
+    );
+    if (snapshot.outgoingSessionId) {
+      this.#restoreSessionState(
+        snapshot.outgoingSessionId,
+        snapshot.outgoingSessionMetrics,
+        snapshot.outgoingSessionWasClosed,
+      );
+    }
+    this.#lastPromptTokenCount = snapshot.lastPromptTokenCount;
+    this.#lastCachedContentTokenCount = snapshot.lastCachedContentTokenCount;
+    this.emit('update', {
+      metrics: this.#metrics,
+      lastPromptTokenCount: this.#lastPromptTokenCount,
+    });
+  }
+
+  #restoreSessionState(
+    sessionId: string,
+    metrics: SessionMetrics | undefined,
+    wasClosed: boolean | undefined,
+  ): void {
+    if (metrics) {
+      this.#sessionMetrics.set(sessionId, cloneSessionMetrics(metrics));
+    } else {
+      // No bucket existed before the replay; the replay created one. Drop it
+      // rather than leave an empty bucket that reads as a live session.
+      this.#sessionMetrics.delete(sessionId);
+    }
+    if (wasClosed) {
+      this.#closedSessions.add(sessionId);
+    } else {
+      this.#closedSessions.delete(sessionId);
+    }
   }
 
   /**

@@ -5849,6 +5849,52 @@ describe('OpenAIContentConverter', () => {
   });
 
   describe('convertLlmToolsToOpenAI', () => {
+    it('removes uniqueItems from function-calling wire schemas', async () => {
+      const parametersJsonSchema = {
+        type: 'object',
+        properties: {
+          blockedBy: {
+            type: 'array',
+            uniqueItems: true,
+            items: { type: 'string' },
+          },
+        },
+      };
+      const tools = [
+        {
+          functionDeclarations: [
+            {
+              name: 'todo_write',
+              description: 'Update the todo list',
+              parametersJsonSchema,
+            },
+          ],
+        },
+      ] as Tool[];
+
+      const result = await converter.convertLlmToolsToOpenAI(tools);
+
+      expect(result).toEqual([
+        {
+          type: 'function',
+          function: {
+            name: 'todo_write',
+            description: 'Update the todo list',
+            parameters: {
+              type: 'object',
+              properties: {
+                blockedBy: {
+                  type: 'array',
+                  items: { type: 'string' },
+                },
+              },
+            },
+          },
+        },
+      ]);
+      expect(parametersJsonSchema.properties.blockedBy.uniqueItems).toBe(true);
+    });
+
     it('should convert Gemini tools with parameters field', async () => {
       const llmTools = [
         {

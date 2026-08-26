@@ -453,6 +453,14 @@ describe('Session', () => {
     refreshSystemInstruction: ReturnType<typeof vi.fn>;
     setTools: ReturnType<typeof vi.fn>;
     tryCompressChat: ReturnType<typeof vi.fn>;
+    beginManagedAutoMemoryRecall: ReturnType<typeof vi.fn>;
+    consumeManagedAutoMemoryRecall: ReturnType<typeof vi.fn>;
+    finishManagedAutoMemoryRecall: ReturnType<typeof vi.fn>;
+    recordCompletedToolCall: ReturnType<typeof vi.fn>;
+  };
+  let mockMemoryManager: {
+    scheduleExtract: ReturnType<typeof vi.fn>;
+    scheduleDream: ReturnType<typeof vi.fn>;
   };
   let mockBackgroundTaskRegistry: {
     abortAll: ReturnType<typeof vi.fn>;
@@ -660,6 +668,14 @@ describe('Session', () => {
         newTokenCount: 0,
         compressionStatus: core.CompressionStatus.NOOP,
       }),
+      beginManagedAutoMemoryRecall: vi.fn(),
+      consumeManagedAutoMemoryRecall: vi.fn().mockResolvedValue(null),
+      finishManagedAutoMemoryRecall: vi.fn(),
+      recordCompletedToolCall: vi.fn(),
+    };
+    mockMemoryManager = {
+      scheduleExtract: vi.fn().mockResolvedValue(undefined),
+      scheduleDream: vi.fn().mockResolvedValue(undefined),
     };
     mockBackgroundTaskRegistry = {
       abortAll: vi.fn(),
@@ -838,6 +854,8 @@ describe('Session', () => {
       // `skipLoopDetection ?? true`): heuristics off unless a test opts in.
       getSkipLoopDetection: vi.fn().mockReturnValue(true),
       getLlmClient: vi.fn().mockReturnValue(mockLlmClient),
+      getManagedAutoMemoryEnabled: vi.fn().mockReturnValue(true),
+      getMemoryManager: vi.fn().mockReturnValue(mockMemoryManager),
       getGoalRuntime: vi.fn().mockReturnValue(mockGoalRuntime),
       getGoalRuntimeReady: vi.fn().mockResolvedValue(mockGoalRuntime),
       getGoalRuntimePrepared: vi.fn().mockResolvedValue(mockGoalRuntime),
@@ -859,6 +877,8 @@ describe('Session', () => {
       getDisabledSkillNames: vi.fn().mockReturnValue(new Set<string>()),
       setSubSessionSpawner: vi.fn(),
       getSubSessionSpawner: vi.fn(),
+      setCurrentSessionScheduledTaskCreator: vi.fn(),
+      getCurrentSessionScheduledTaskCreator: vi.fn(),
       getExtensions: vi.fn().mockReturnValue([]),
     } as unknown as Config;
 
@@ -919,6 +939,7 @@ describe('Session', () => {
     mockClient = undefined as unknown as AgentSideConnection;
     mockSettings = undefined as unknown as LoadedSettings;
     mockLlmClient = undefined as unknown as typeof mockLlmClient;
+    mockMemoryManager = undefined as unknown as typeof mockMemoryManager;
     mockToolRegistry = undefined as unknown as typeof mockToolRegistry;
     vi.restoreAllMocks();
     vi.clearAllTimers();
@@ -2061,6 +2082,149 @@ describe('Session', () => {
         titleSource: 'auto',
       },
     );
+  });
+
+  describe('managed auto-memory', () => {
+    it('recalls before the initial send and schedules background work after a successful turn', async () => {
+      const memoryPrompt = '<system-reminder>remember this</system-reminder>';
+      const finalHistory: Content[] = [
+        { role: 'user', parts: [{ text: 'hello' }] },
+        { role: 'model', parts: [{ text: 'response' }] },
+      ];
+      mockLlmClient.consumeManagedAutoMemoryRecall.mockResolvedValueOnce({
+        prompt: memoryPrompt,
+        selectedDocs: [],
+        strategy: 'heuristic',
+      });
+      vi.mocked(mockChat.getHistoryShallow).mockReturnValue(finalHistory);
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'hello' }],
+      });
+
+      expect(mockLlmClient.beginManagedAutoMemoryRecall).toHaveBeenCalledWith(
+        'hello',
+        expect.any(AbortSignal),
+      );
+      expect(textParts(firstSentMessage())).toEqual([memoryPrompt, 'hello']);
+      expect(mockMemoryManager.scheduleExtract).toHaveBeenCalledWith({
+        projectRoot: '/repo',
+        sessionId: 'test-session-id',
+        history: finalHistory,
+        config: mockConfig,
+      });
+      expect(mockMemoryManager.scheduleExtract).toHaveBeenCalledOnce();
+      expect(mockMemoryManager.scheduleDream).toHaveBeenCalledWith({
+        projectRoot: '/repo',
+        sessionId: 'test-session-id',
+        config: mockConfig,
+      });
+      expect(mockMemoryManager.scheduleDream).toHaveBeenCalledOnce();
+      expect(
+        mockLlmClient.finishManagedAutoMemoryRecall,
+      ).toHaveBeenCalledOnce();
+    });
+
+    it('delivers refined recall after tool responses and records the completed tool', async () => {
+      const memoryPrompt = '<system-reminder>refined memory</system-reminder>';
+      mockLlmClient.consumeManagedAutoMemoryRecall
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce({
+          prompt: memoryPrompt,
+          selectedDocs: [],
+          strategy: 'model',
+        });
+      const execute = vi.fn().mockResolvedValue({
+        llmContent: 'file contents',
+        returnDisplay: 'file contents',
+      });
+      mockToolRegistry.getTool.mockReturnValue({
+        name: 'read_file',
+        kind: core.Kind.Read,
+        build: vi.fn().mockReturnValue({
+          params: { path: '/tmp/test.txt' },
+          getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+          getDescription: vi.fn().mockReturnValue('Read file'),
+          toolLocations: vi.fn().mockReturnValue([]),
+          execute,
+        }),
+      });
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValueOnce(
+          createStreamWithChunks([
+            {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                functionCalls: [
+                  {
+                    id: 'call-1',
+                    name: 'read_file',
+                    args: { path: '/tmp/test.txt' },
+                  },
+                ],
+              },
+            },
+          ]),
+        )
+        .mockResolvedValueOnce(createEmptyStream());
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'read file' }],
+      });
+
+      const followUpRequest = vi.mocked(mockChat.sendMessageStream).mock
+        .calls[1]?.[1] as { message: Part[] };
+      const followUp = followUpRequest.message;
+      expect(followUp[0]?.functionResponse).toBeDefined();
+      expect(textParts(followUp)).toEqual([memoryPrompt]);
+      expect(
+        mockLlmClient.consumeManagedAutoMemoryRecall,
+      ).toHaveBeenNthCalledWith(2, 'tool_result');
+      expect(mockLlmClient.recordCompletedToolCall).toHaveBeenCalledWith(
+        'read_file',
+        { path: '/tmp/test.txt' },
+      );
+    });
+
+    it('does not run managed memory for retries or failed turns', async () => {
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValueOnce(createEmptyStream());
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'retry' }],
+        retry: true,
+      } as PromptRequest);
+
+      expect(mockLlmClient.beginManagedAutoMemoryRecall).not.toHaveBeenCalled();
+      expect(mockMemoryManager.scheduleExtract).not.toHaveBeenCalled();
+      expect(mockMemoryManager.scheduleDream).not.toHaveBeenCalled();
+
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockRejectedValueOnce(new Error('provider failed'));
+      await expect(
+        session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'new request' }],
+        }),
+      ).rejects.toThrow('provider failed');
+
+      expect(mockLlmClient.beginManagedAutoMemoryRecall).toHaveBeenCalledOnce();
+      expect(mockMemoryManager.scheduleExtract).not.toHaveBeenCalled();
+      expect(mockMemoryManager.scheduleDream).not.toHaveBeenCalled();
+      expect(
+        mockLlmClient.finishManagedAutoMemoryRecall,
+      ).toHaveBeenCalledOnce();
+    });
   });
 
   it('rejects writer loss before mutating an existing ACP turn', async () => {
@@ -7665,6 +7829,7 @@ describe('Session', () => {
 
       delete process.env['QWEN_CODE_SERVE'];
       vi.mocked(mockConfig.setSubSessionSpawner).mockClear();
+      vi.mocked(mockConfig.setCurrentSessionScheduledTaskCreator).mockClear();
       const standalone = new Session(
         'standalone-acp-session',
         mockConfig,
@@ -7673,6 +7838,89 @@ describe('Session', () => {
       );
       expect(standalone).toBeDefined();
       expect(mockConfig.setSubSessionSpawner).not.toHaveBeenCalled();
+      expect(
+        mockConfig.setCurrentSessionScheduledTaskCreator,
+      ).not.toHaveBeenCalled();
+    });
+
+    it('uses the trusted daemon prompt id for a current-session task', async () => {
+      vi.mocked(mockClient.extMethod).mockResolvedValueOnce({
+        id: 'cron-1',
+        cron: '5 9 * * *',
+      });
+      const create = vi.mocked(mockConfig.setCurrentSessionScheduledTaskCreator)
+        .mock.calls[0]?.[0];
+      expect(create).toBeTypeOf('function');
+
+      await expect(
+        core.runWithInvocationContext(
+          {
+            version: 1,
+            sessionId: 'test-session-id',
+            promptId: 'daemon-prompt-id',
+          },
+          () =>
+            create?.({
+              cron: '5 9 * * *',
+              prompt: 'continue',
+              recurring: true,
+              promptId: 'test-session-id########1',
+            }),
+        ),
+      ).resolves.toEqual({ id: 'cron-1', cron: '5 9 * * *' });
+      expect(mockClient.extMethod).toHaveBeenCalledWith(
+        'qwen/control/scheduled-task/create-current',
+        {
+          callerSessionId: 'test-session-id',
+          promptId: 'daemon-prompt-id',
+          cron: '5 9 * * *',
+          prompt: 'continue',
+          recurring: true,
+        },
+      );
+    });
+
+    it('reports an explicit unavailable error for an older daemon bridge', async () => {
+      vi.mocked(mockClient.extMethod).mockRejectedValueOnce({
+        code: -32601,
+        message: 'Method not found',
+      });
+      const create = vi.mocked(mockConfig.setCurrentSessionScheduledTaskCreator)
+        .mock.calls[0]?.[0];
+
+      await expect(
+        create?.({
+          cron: '5 9 * * *',
+          prompt: 'continue',
+          recurring: true,
+          promptId: 'prompt-1',
+        }),
+      ).rejects.toThrow(/current_session_scheduling_unavailable/);
+    });
+
+    it('surfaces structured daemon rejections to the current-session tool', async () => {
+      vi.mocked(mockClient.extMethod).mockRejectedValueOnce({
+        code: -32602,
+        message: 'Invalid params',
+        data: {
+          errorKind: 'session_busy',
+          status: 409,
+          hint: 'The caller session has a pending interaction',
+        },
+      });
+      const create = vi.mocked(mockConfig.setCurrentSessionScheduledTaskCreator)
+        .mock.calls[0]?.[0];
+
+      await expect(
+        create?.({
+          cron: '5 9 * * *',
+          prompt: 'continue',
+          recurring: true,
+          promptId: 'prompt-1',
+        }),
+      ).rejects.toThrow(
+        'session_busy: The caller session has a pending interaction',
+      );
     });
 
     it('drops oldest background notifications when the queue reaches its cap', () => {
@@ -8772,7 +9020,8 @@ describe('Session', () => {
         status: 'skipped',
         convertedCount: 0,
         omittedCount: 0,
-        modelId: 'qwen3.7-plus',
+        modelId: 'idealab:qwen3.7-plus',
+        modelEndpoint: 'idealab.alibaba-inc.com',
         egressOccurred: true,
       });
       mockChat.sendMessageStream = vi
@@ -8796,6 +9045,28 @@ describe('Session', () => {
       expect(
         textParts(sent).some((t: string) => t.includes('look at this')),
       ).toBe(true);
+      expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+        sessionId: 'test-session-id',
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: {
+            type: 'text',
+            text: 'Vision bridge cancelled. Your image and prompt/context were sent to qwen3.7-plus (idealab.alibaba-inc.com).',
+          },
+          _meta: {
+            source: 'vision_bridge_notice',
+            qwenDiscreteMessage: true,
+            visionBridgeNotice: {
+              status: 'skipped',
+              convertedCount: 0,
+              omittedCount: 0,
+              modelName: 'qwen3.7-plus',
+              modelEndpoint: 'idealab.alibaba-inc.com',
+              egressOccurred: true,
+            },
+          },
+        },
+      });
     });
 
     it('preserves oversized inline images for the vision bridge', async () => {
@@ -11927,6 +12198,37 @@ describe('Session', () => {
         });
       });
 
+      it('marks estimated compression counts in the ACP notice (#9309)', async () => {
+        mockLlmClient.tryCompressChat.mockResolvedValueOnce({
+          originalTokenCount: 26600,
+          newTokenCount: 14500,
+          originalTokenCountIsEstimated: true,
+          newTokenCountIsEstimated: false,
+          compressionStatus: core.CompressionStatus.COMPRESSED,
+        });
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(createEmptyStream());
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'hello' }],
+        });
+
+        expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+          sessionId: 'test-session-id',
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: {
+              type: 'text',
+              text:
+                'IMPORTANT: This conversation approached the input token limit for qwen3-code-plus. ' +
+                'A compressed context will be sent for future messages (compressed from: ~26600 to 14500 tokens).',
+            },
+          },
+        });
+      });
+
       it('continues sending when automatic compression fails', async () => {
         mockLlmClient.tryCompressChat.mockRejectedValueOnce(
           new Error('compression rate limited'),
@@ -12832,6 +13134,170 @@ describe('Session', () => {
         );
       });
 
+      it.each(['inline image', 'image @ path'] as const)(
+        'lets the vision bridge own the timeout for a mid-turn %s',
+        async (source) => {
+          const tempDir =
+            source === 'image @ path'
+              ? await fs.realpath(
+                  await fs.mkdtemp(
+                    path.join(os.tmpdir(), 'qwen-acp-mid-turn-image-'),
+                  ),
+                )
+              : undefined;
+          const imagePath = tempDir
+            ? path.join(tempDir, 'image.png')
+            : undefined;
+          if (tempDir && imagePath) {
+            await fs.writeFile(imagePath, 'image');
+            mockConfig.getProjectRoot = vi.fn().mockReturnValue(tempDir);
+            mockConfig.getWorkspaceContext = vi.fn().mockReturnValue({
+              isPathWithinWorkspace: (pathSpec: string) =>
+                path
+                  .resolve(tempDir, pathSpec)
+                  .startsWith(`${tempDir}${path.sep}`),
+            });
+          }
+          const tool = {
+            name: 'read_file',
+            kind: core.Kind.Read,
+            build: vi.fn().mockReturnValue({
+              params: { path: '/tmp/test.txt' },
+              getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+              getDescription: vi.fn().mockReturnValue('Read file'),
+              toolLocations: vi.fn().mockReturnValue([]),
+              execute: vi.fn().mockResolvedValue({
+                llmContent: 'file contents',
+                returnDisplay: 'file contents',
+              }),
+            }),
+          };
+          const timeoutController = new AbortController();
+          const timeoutSpy = vi
+            .spyOn(AbortSignal, 'timeout')
+            .mockReturnValue(timeoutController.signal);
+          const bridgeResult = {
+            applied: true,
+            status: 'ok' as const,
+            parts: [{ text: '[transcribed image]' }],
+            transcript: '[transcribed image]',
+            convertedCount: 1,
+            omittedCount: 0,
+            modelId: 'vision-bridge',
+          };
+          let bridgeSignal: AbortSignal | undefined;
+          let resolutionSignal: AbortSignal | undefined;
+          let bridgeStarted!: () => void;
+          let resolveBridge!: (result: typeof bridgeResult) => void;
+          const bridgeStartedPromise = new Promise<void>((resolve) => {
+            bridgeStarted = resolve;
+          });
+          const readManyFilesSpy = imagePath
+            ? vi
+                .spyOn(core, 'readManyFiles')
+                .mockImplementation(async (_config, readOptions) => {
+                  resolutionSignal = readOptions.signal;
+                  return {
+                    contentParts: {
+                      inlineData: {
+                        mimeType: 'image/png',
+                        data: 'iVBORw0KGgo=',
+                      },
+                    },
+                  } as Awaited<ReturnType<typeof core.readManyFiles>>;
+                })
+            : undefined;
+
+          try {
+            mockToolRegistry.getTool.mockReturnValue(tool);
+            mockConfig.getApprovalMode = vi
+              .fn()
+              .mockReturnValue(ApprovalMode.YOLO);
+            mockConfig.getEffectiveInputModalities = vi
+              .fn()
+              .mockReturnValue({});
+            mockConfig.getDefaultVisionBridgeModel = vi.fn().mockReturnValue({
+              id: 'vision-bridge',
+              baseUrl: 'https://vision.example.com/v1',
+            });
+            mockClient.extMethod = vi.fn().mockResolvedValue({
+              items: [
+                {
+                  content: imagePath
+                    ? [
+                        {
+                          type: 'text',
+                          text: `please inspect @${imagePath}`,
+                        },
+                      ]
+                    : [
+                        { type: 'text', text: 'please inspect this image' },
+                        {
+                          type: 'image',
+                          mimeType: 'image/png',
+                          data: 'iVBORw0KGgo=',
+                        },
+                      ],
+                  displayText: 'please inspect this image',
+                },
+              ],
+            });
+            runVisionBridgeSpy.mockImplementation(
+              ({ signal }: { signal: AbortSignal }) =>
+                new Promise((resolve) => {
+                  bridgeSignal = signal;
+                  resolveBridge = resolve;
+                  bridgeStarted();
+                }),
+            );
+            mockChat.sendMessageStream = vi
+              .fn()
+              .mockResolvedValueOnce(
+                createStreamWithChunks([
+                  {
+                    type: core.StreamEventType.CHUNK,
+                    value: {
+                      functionCalls: [
+                        {
+                          id: 'call-1',
+                          name: 'read_file',
+                          args: { path: '/tmp/test.txt' },
+                        },
+                      ],
+                    },
+                  },
+                ]),
+              )
+              .mockResolvedValueOnce(createEmptyStream());
+
+            const prompt = session.prompt({
+              sessionId: 'test-session-id',
+              prompt: [{ type: 'text', text: 'read file' }],
+            });
+            await bridgeStartedPromise;
+            timeoutController.abort(new Error('mid-turn resolution timed out'));
+
+            const bridgeWasAborted = bridgeSignal?.aborted;
+            resolveBridge(bridgeResult);
+            await prompt;
+
+            expect(bridgeWasAborted).toBe(false);
+            if (resolutionSignal) expect(resolutionSignal.aborted).toBe(true);
+            const secondCall = vi.mocked(mockChat.sendMessageStream).mock
+              .calls[1];
+            expect(
+              textParts(secondCall?.[1].message as Part[]).some((text) =>
+                text.includes('[transcribed image]'),
+              ),
+            ).toBe(true);
+          } finally {
+            timeoutSpy.mockRestore();
+            readManyFilesSpy?.mockRestore();
+            if (tempDir) await fs.rm(tempDir, { recursive: true, force: true });
+          }
+        },
+      );
+
       it('records inline-media-only mid-turn messages with a placeholder display text', async () => {
         // An inline image with no text and no references must not record an
         // empty displayText: resume and replay would otherwise fall back to
@@ -13505,18 +13971,6 @@ describe('Session', () => {
 
       it('stops draining mid-turn messages when structured resolution is aborted', async () => {
         let promptSignalAborted = false;
-        const clampSpy = vi
-          .spyOn(core, 'clampInlineMediaPart')
-          .mockImplementation(() => {
-            const pendingPrompt = (
-              session as unknown as { pendingPrompt: AbortController | null }
-            ).pendingPrompt;
-            pendingPrompt?.abort();
-            promptSignalAborted = pendingPrompt?.signal.aborted ?? false;
-            const abortError = new Error('aborted');
-            abortError.name = 'AbortError';
-            throw abortError;
-          });
         const executeSpy = vi.fn().mockResolvedValue({
           llmContent: 'file contents',
           returnDisplay: 'file contents',
@@ -13535,6 +13989,24 @@ describe('Session', () => {
 
         mockToolRegistry.getTool.mockReturnValue(tool);
         mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+        mockConfig.getEffectiveInputModalities = vi.fn().mockReturnValue({});
+        mockConfig.getDefaultVisionBridgeModel = vi.fn().mockReturnValue({
+          id: 'vision-bridge',
+          baseUrl: 'https://vision.example.com/v1',
+        });
+        runVisionBridgeSpy.mockImplementation(async () => {
+          const pendingPrompt = (
+            session as unknown as { pendingPrompt: AbortController | null }
+          ).pendingPrompt;
+          pendingPrompt?.abort();
+          promptSignalAborted = pendingPrompt?.signal.aborted ?? false;
+          return {
+            applied: false,
+            status: 'skipped',
+            convertedCount: 0,
+            omittedCount: 0,
+          };
+        });
         mockClient.extMethod = vi.fn().mockResolvedValue({
           items: [
             {
@@ -13574,48 +14046,44 @@ describe('Session', () => {
           ]),
         );
 
-        try {
-          await session.prompt({
-            sessionId: 'test-session-id',
-            prompt: [{ type: 'text', text: 'read file' }],
-          });
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'read file' }],
+        });
 
-          const retainedMidTurnPart = {
-            text: '\n[User message received during tool execution]: already queued',
-          };
-          const abortedMidTurnPart = {
-            text: '\n[User message received during tool execution]: inspect this image',
-          };
-          const skippedMidTurnPart = {
-            text: '\n[User message received during tool execution]: should not be processed',
-          };
-          const preservedMessage = vi.mocked(mockChat.addHistory).mock
-            .calls[0]?.[0] as Content | undefined;
+        const retainedMidTurnPart = {
+          text: '\n[User message received during tool execution]: already queued',
+        };
+        const abortedMidTurnPart = {
+          text: '\n[User message received during tool execution]: inspect this image',
+        };
+        const skippedMidTurnPart = {
+          text: '\n[User message received during tool execution]: should not be processed',
+        };
+        const preservedMessage = vi.mocked(mockChat.addHistory).mock
+          .calls[0]?.[0] as Content | undefined;
 
-          expect(promptSignalAborted).toBe(true);
-          expect(clampSpy).toHaveBeenCalledTimes(1);
-          expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
-          expect(preservedMessage?.parts).toEqual(
-            expect.arrayContaining([retainedMidTurnPart]),
-          );
-          expect(preservedMessage?.parts).not.toEqual(
-            expect.arrayContaining([abortedMidTurnPart]),
-          );
-          expect(preservedMessage?.parts).not.toEqual(
-            expect.arrayContaining([skippedMidTurnPart]),
-          );
-          expect(
-            mockChatRecordingService.recordMidTurnUserMessage,
-          ).toHaveBeenCalledWith([retainedMidTurnPart], 'already queued');
-          expect(
-            mockChatRecordingService.recordMidTurnUserMessage,
-          ).not.toHaveBeenCalledWith(
-            [skippedMidTurnPart],
-            'should not be processed',
-          );
-        } finally {
-          clampSpy.mockRestore();
-        }
+        expect(promptSignalAborted).toBe(true);
+        expect(runVisionBridgeSpy).toHaveBeenCalledTimes(1);
+        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
+        expect(preservedMessage?.parts).toEqual(
+          expect.arrayContaining([retainedMidTurnPart]),
+        );
+        expect(preservedMessage?.parts).not.toEqual(
+          expect.arrayContaining([abortedMidTurnPart]),
+        );
+        expect(preservedMessage?.parts).not.toEqual(
+          expect.arrayContaining([skippedMidTurnPart]),
+        );
+        expect(
+          mockChatRecordingService.recordMidTurnUserMessage,
+        ).toHaveBeenCalledWith([retainedMidTurnPart], 'already queued');
+        expect(
+          mockChatRecordingService.recordMidTurnUserMessage,
+        ).not.toHaveBeenCalledWith(
+          [skippedMidTurnPart],
+          'should not be processed',
+        );
       });
 
       it('logs unrecognized mid-turn drain response fields', async () => {
@@ -15187,6 +15655,69 @@ describe('Session', () => {
           ['continued final'],
         ]);
         expect(capture.writeToSpan).toHaveBeenCalledWith(agentTelemetry.span);
+      });
+
+      it('does not extract a fresh channel turn stopped by loop protection in a Stop continuation', async () => {
+        const messageBus = {
+          request: vi.fn().mockResolvedValue({
+            success: true,
+            output: {
+              decision: 'block',
+              reason: 'Continue after Stop hook',
+            },
+          }),
+        };
+        mockConfig.getMessageBus = vi.fn().mockReturnValue(messageBus);
+        mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+        mockConfig.hasHooksForEvent = vi
+          .fn()
+          .mockImplementation((eventName: string) => eventName === 'Stop');
+        mockConfig.getMaxToolCallsPerTurn = vi.fn().mockReturnValue(1);
+        mockConfig.isMaxToolCallsPerTurnExplicit = vi
+          .fn()
+          .mockReturnValue(true);
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(createEmptyStream())
+          .mockResolvedValueOnce(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  functionCalls: [
+                    {
+                      id: 'stop-loop-1',
+                      name: 'read_file',
+                      args: { path: 'a' },
+                    },
+                    {
+                      id: 'stop-loop-2',
+                      name: 'read_file',
+                      args: { path: 'b' },
+                    },
+                  ],
+                },
+              },
+            ]),
+          );
+
+        await expect(
+          session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'channel task' }],
+            _meta: { [CHANNEL_PROMPT_META_KEY]: true },
+          }),
+        ).resolves.toEqual({ stopReason: 'end_turn' });
+
+        expect(logLoopDetectedSpy).toHaveBeenCalledWith(
+          mockConfig,
+          expect.objectContaining({
+            loop_type: core.LoopType.TURN_TOOL_CALL_CAP,
+          }),
+          {},
+        );
+        expect(mockMemoryManager.scheduleExtract).not.toHaveBeenCalled();
+        expect(mockMemoryManager.scheduleDream).not.toHaveBeenCalled();
       });
 
       it('keeps continuation retry text in the delivered prompt final', async () => {
@@ -18587,7 +19118,17 @@ describe('Session', () => {
               }),
               expect.objectContaining({
                 text: expect.stringContaining(
-                  'Runtime continuation context: check weather',
+                  '<goal_runtime_data>\n{"goalId":"goal-1","revision":1,"objective":"check weather"}\n</goal_runtime_data>',
+                ),
+              }),
+              expect.objectContaining({
+                text: expect.stringContaining(
+                  'contains no new real user input',
+                ),
+              }),
+              expect.objectContaining({
+                text: expect.stringContaining(
+                  'not evidence that the user supplied it',
                 ),
               }),
               expect.objectContaining({
@@ -21155,14 +21696,33 @@ describe('Session', () => {
       const onConfirmSpy = vi.fn().mockResolvedValue(undefined);
       const executeSpy = vi.fn();
       const internals = session as unknown as {
-        midTurnRecoveredMessages: Array<{
-          kind: 'text';
-          message: string;
-        }>;
+        midTurnRecoveredMessages: Array<
+          | { kind: 'text'; message: string }
+          | {
+              kind: 'structured';
+              content: Array<{
+                type: 'image';
+                mimeType: string;
+                data: string;
+              }>;
+              displayText: string;
+            }
+        >;
       };
       internals.midTurnRecoveredMessages.push({
         kind: 'text',
         message: 'recovered before cancellation',
+      });
+      internals.midTurnRecoveredMessages.push({
+        kind: 'structured',
+        content: [
+          {
+            type: 'image',
+            mimeType: 'image/png',
+            data: 'iVBORw0KGgo=',
+          },
+        ],
+        displayText: 'recovered image before cancellation',
       });
       const invocation = {
         params: { command: rawCommand },
@@ -21234,6 +21794,10 @@ describe('Session', () => {
           {
             text: '\n[User message received during tool execution]: recovered before cancellation',
           },
+          {
+            text: '\n[User message received during tool execution]: recovered image before cancellation',
+          },
+          { text: '[Attachment could not be processed]' },
         ],
       });
       expect(
@@ -21245,6 +21809,17 @@ describe('Session', () => {
           },
         ],
         'recovered before cancellation',
+      );
+      expect(
+        mockChatRecordingService.recordMidTurnUserMessage,
+      ).toHaveBeenCalledWith(
+        [
+          {
+            text: '\n[User message received during tool execution]: recovered image before cancellation',
+          },
+          { text: '[Attachment could not be processed]' },
+        ],
+        'recovered image before cancellation',
       );
     });
 
@@ -22971,6 +23546,10 @@ describe('Session', () => {
 
           expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
           expect(result.stopReason).toBe('end_turn');
+          expect(
+            mockLlmClient.beginManagedAutoMemoryRecall,
+          ).not.toHaveBeenCalled();
+          expect(mockMemoryManager.scheduleExtract).not.toHaveBeenCalled();
         });
 
         it('wraps additionalContext in the reserved tag before sending', async () => {
@@ -23011,6 +23590,9 @@ describe('Session', () => {
             core.isUserPromptSubmitContextPartText(textParts(sent).at(-1)!),
           ).toBe(true);
           expect(textParts(sent).at(-1)).toContain('extra hook context');
+          expect(
+            mockLlmClient.beginManagedAutoMemoryRecall,
+          ).toHaveBeenCalledWith('hello', expect.any(AbortSignal));
         });
       });
 

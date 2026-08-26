@@ -424,8 +424,12 @@ describe('RequestedSessionIdAdmission', () => {
     tempDirs.push(tempDir);
     const nonDirectory = path.join(tempDir, 'not-a-directory');
     await fsp.writeFile(nonDirectory, 'file');
+    // Traversing a regular file raises ENOTDIR only on POSIX; Windows reports
+    // ENOENT, which the admission legitimately reads as "no persisted
+    // session". A NUL byte makes fs.access reject with ERR_INVALID_ARG_VALUE
+    // on every platform, keeping the non-ENOENT contract under test.
     sessionServiceMock.sidecarPath.mockReturnValue(
-      path.join(nonDirectory, 'sidecar.json'),
+      path.join(nonDirectory, 'sidecar\0.json'),
     );
 
     await expect(

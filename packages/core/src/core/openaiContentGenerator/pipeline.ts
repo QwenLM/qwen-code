@@ -20,6 +20,7 @@ import {
   isOfficialOpenAIEndpoint,
 } from './prefix-caching.js';
 import { isDeepSeekHostname } from './provider/deepseek.js';
+import { isOpenRouterHostname } from './provider/openrouter.js';
 import { openaiRequestCaptureContext } from './requestCaptureContext.js';
 import { StreamingToolCallParser } from './streamingToolCallParser.js';
 import { TaggedThinkingParser } from './taggedThinkingParser.js';
@@ -1212,6 +1213,30 @@ export class ContentGenerationPipeline {
       // we don't push it there. See https://api-docs.deepseek.com/.
       if (isDeepSeekHostname(this.contentGeneratorConfig)) {
         typed['thinking'] = { type: 'disabled' };
+      }
+      // OpenRouter's thinking switch is the provider-level `reasoning`
+      // parameter (`reasoning: { enabled: false }`, see
+      // https://openrouter.ai/docs/features/reasoning-tokens). The shapes
+      // emitted above are ignored by the gateway, and the strip just above
+      // removes any `reasoning` object a provider hook injected — so
+      // thinking-capable models routed through OpenRouter keep thinking on.
+      // That breaks the AUTO-mode classifier's stage-1 side query (#9757):
+      // the 256-token budget is spent on reasoning, the forced
+      // respond_in_schema tool call never ships, and the classifier
+      // fail-closes. Must be emitted after the strip, which runs later
+      // than the provider buildRequest hook.
+      //
+      // Provider-level, not model-family-gated: unlike `enable_thinking`
+      // (a qwen-family wire field that leaks upstream on non-qwen
+      // routings), `reasoning` is an OpenRouter API parameter the gateway
+      // applies to whatever model supports it. `thinkingMandatory` models
+      // stay exempt: a disable shape they reject would be a guaranteed
+      // request failure.
+      if (
+        !thinkingMandatory &&
+        isOpenRouterHostname(this.contentGeneratorConfig)
+      ) {
+        typed['reasoning'] = { enabled: false };
       }
     }
 

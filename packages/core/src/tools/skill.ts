@@ -97,6 +97,7 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
     name: string;
     description: string;
   }> = [];
+  private hiddenSkillNames: Set<string> = new Set();
   private loadedSkillNames: Set<string> = new Set();
   // Cleanup function returned by `addChangeListener`. Stored so per-agent
   // SkillTool instances (subagents share the parent's SkillManager) can
@@ -184,11 +185,13 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
       this.pendingConditionalSkillNames =
         collected.pendingConditionalSkillNames;
       this.modelInvocableCommands = collected.modelInvocableCommands;
+      this.hiddenSkillNames = collected.hiddenSkillNames ?? new Set();
     } catch (error) {
       debugLogger.warn('Failed to load skills for Skills tool:', error);
       this.availableSkills = [];
       this.pendingConditionalSkillNames = new Set();
       this.modelInvocableCommands = [];
+      this.hiddenSkillNames = new Set();
     }
   }
 
@@ -211,8 +214,14 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
     );
     if (skillExists) return null;
 
-    // Check model-invocable commands (e.g. MCP prompts) listed in <available_skills>
-    const commandExists = this.modelInvocableCommands.some(
+    // Check model-invocable commands (e.g. MCP prompts) listed in
+    // <available_skills>. Consults the live provider — not just the cached
+    // snapshot — because in interactive mode the provider is only attached
+    // after CommandService initialisation resolves, which races SkillTool
+    // construction: the constructor's refreshSkills() then reads a still-null
+    // provider and caches an empty command set that is never refreshed unless
+    // an unrelated SkillManager change event happens to fire (issue #9821).
+    const commandExists = this.getModelInvocableCommands().some(
       (cmd) => cmd.name === params.skill,
     );
     if (commandExists) return null;
@@ -236,13 +245,55 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
     }
 
     const availableNames = [
-      ...this.availableSkills.map((s) => s.name),
-      ...this.modelInvocableCommands.map((c) => c.name),
+      ...new Set([
+        ...this.availableSkills.map((s) => s.name),
+        ...this.getModelInvocableCommands().map((c) => c.name),
+      ]),
     ];
     if (availableNames.length === 0) {
       return `Skill "${params.skill}" not found. No skills are currently available.`;
     }
     return `Skill "${params.skill}" not found. Available skills: ${availableNames.join(', ')}`;
+  }
+
+  /**
+   * Returns the model-invocable commands to validate against, preferring a
+   * live read of the config provider over the cached snapshot from the last
+   * `refreshSkills()` (see `validateToolParams` for the late-attach race).
+   * Falls back to the cache when no provider is registered (e.g. SDK mode)
+   * or when the provider throws. The provider is synchronous, so the live
+   * read is cheap enough to run on every validation.
+   *
+   * Commands whose names collide with a file-based skill (active or pending
+   * path-activation) are dropped, mirroring the `fileBasedSkillNames` dedup
+   * in `collectAvailableSkillEntries` — without this, a command named after
+   * a path-gated skill would pass validation here and bypass the
+   * "gated by paths:" branch above.
+   */
+  private getModelInvocableCommands(): ReadonlyArray<{
+    name: string;
+    description: string;
+  }> {
+    let commands: ReadonlyArray<{ name: string; description: string }>;
+    const provider = this.config.getModelInvocableCommandsProvider();
+    if (provider) {
+      try {
+        commands = provider();
+      } catch (error) {
+        debugLogger.warn(
+          'Model-invocable commands provider threw; falling back to cached set:',
+          error,
+        );
+        commands = this.modelInvocableCommands;
+      }
+    } else {
+      commands = this.modelInvocableCommands;
+    }
+    const shadowedNames = new Set<string>([
+      ...this.availableSkills.map((skill) => skill.name),
+      ...this.pendingConditionalSkillNames,
+    ]);
+    return commands.filter((cmd) => !shadowedNames.has(cmd.name));
   }
 
   protected createInvocation(params: SkillParams) {
@@ -253,6 +304,7 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
       (name: string) => this.loadedSkillNames.add(name),
       this.config.getModelInvocableCommandsExecutor(),
       (name: string) => this.loadedSkillNames.has(name),
+      (name: string) => this.hiddenSkillNames.has(name),
     );
   }
 
@@ -276,8 +328,10 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
   }
 
   /**
-   * Clears the loaded-skills tracking. Should be called when the session
-   * is reset (e.g. /clear) so that stale body-token data is not shown.
+   * Clears the loaded-skills tracking. Called when the session is reset
+   * (e.g. /clear) and conservatively at destructive history-rewrite
+   * boundaries (compaction, truncation, orphan stripping), so a skill
+   * whose body was evicted never stays stuck behind the dedup guard.
    */
   clearLoadedSkills(): void {
     this.loadedSkillNames.clear();
@@ -315,6 +369,7 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
         ) => Promise<ModelInvocableCommandExecutorResult | null>)
       | null = null,
     private readonly isSkillLoaded: (name: string) => boolean = () => false,
+    private readonly isSkillHidden: (name: string) => boolean = () => false,
   ) {
     super(params);
   }
@@ -357,6 +412,49 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
     _signal?: AbortSignal,
     _updateOutput?: (output: ToolResultDisplay) => void,
   ): Promise<ToolResult> {
+    if (this.isSkillHidden(this.params.skill)) {
+      let hiddenCommandFallbackAttempted = false;
+      if (this.commandExecutor) {
+        hiddenCommandFallbackAttempted = true;
+        try {
+          const content = await this.commandExecutor(
+            this.params.skill,
+            this.params.args ?? '',
+          );
+          if (content && typeof content === 'object' && 'error' in content) {
+            return {
+              llmContent: content.error,
+              returnDisplay: content.error,
+            };
+          }
+          if (typeof content === 'string') {
+            return {
+              llmContent: [{ text: content }],
+              returnDisplay: `Delegated to command: ${this.params.skill}`,
+            };
+          }
+        } catch (error) {
+          debugLogger.warn(
+            `Hidden-skill command fallback failed for "${this.params.skill}":`,
+            error,
+          );
+          // Fall through to the generic not-found message.
+        }
+      }
+      logSkillLaunch(
+        this.config,
+        new SkillLaunchEvent(this.params.skill, false, this.promptId),
+      );
+      if (!hiddenCommandFallbackAttempted) {
+        recordSkillInvocation(this.config, {
+          skillName: this.params.skill,
+          success: false,
+        });
+      }
+      const msg = `Skill "${this.params.skill}" not found.`;
+      return { llmContent: msg, returnDisplay: msg };
+    }
+
     // Disabled-skill guard. Mirrors validateToolParams's commandExists →
     // disabled ordering at the execution layer: when a skill is disabled
     // but a same-named non-skill command (MCP prompt, file command)
@@ -453,7 +551,11 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
               this.config,
               new SkillLaunchEvent(this.params.skill, true, this.promptId),
             );
-            this.onSkillLoaded(this.params.skill);
+            // Don't track via `onSkillLoaded` (mirrors the disabled
+            // branch above): the result is raw command text, not a
+            // skill body, so a tracked name here would block a later
+            // same-named file skill behind the dedup guard even though
+            // no body is resident.
             return {
               llmContent: [{ text: commandResult }],
               returnDisplay: `Executed command: ${this.params.skill}`,

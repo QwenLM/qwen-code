@@ -181,6 +181,67 @@ describe('compressFastCommand', () => {
     );
   });
 
+  // Issue #9309: the fast-compression banner mixes an API-reported baseline
+  // with a locally adjusted count, so the UI item must carry per-side
+  // provenance for the renderer to mark estimated numbers.
+  it('should pass token-count provenance to the compression item (interactive)', async () => {
+    mockTryCompressChatFast.mockResolvedValue({
+      originalTokenCount: 200,
+      newTokenCount: 100,
+      originalTokenCountIsEstimated: false,
+      newTokenCountIsEstimated: true,
+      compressionStatus: CompressionStatus.COMPRESSED,
+    } satisfies ChatCompressionInfo);
+
+    await compressFastCommand.action!(context, '');
+
+    expect(context.ui.addItem).toHaveBeenCalledWith(
+      {
+        type: MessageType.COMPRESSION,
+        compression: {
+          isPending: false,
+          originalTokenCount: 200,
+          newTokenCount: 100,
+          compressionStatus: CompressionStatus.COMPRESSED,
+          compressionKind: 'fast',
+          originalTokenCountIsEstimated: false,
+          newTokenCountIsEstimated: true,
+        },
+      },
+      expect.any(Number),
+    );
+  });
+
+  it('should mark estimated counts in the non-interactive message', async () => {
+    mockTryCompressChatFast.mockResolvedValue({
+      originalTokenCount: 200,
+      newTokenCount: 100,
+      originalTokenCountIsEstimated: false,
+      newTokenCountIsEstimated: true,
+      compressionStatus: CompressionStatus.COMPRESSED,
+    } satisfies ChatCompressionInfo);
+
+    const ctx = createMockCommandContext({
+      executionMode: 'non_interactive',
+      services: {
+        config: {
+          getLlmClient: () =>
+            ({
+              tryCompressChatFast: mockTryCompressChatFast,
+            }) as unknown as LlmClient,
+        },
+      },
+    });
+
+    const result = await compressFastCommand.action!(ctx, '');
+
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content: 'Context compressed (200 -> ~100).',
+    });
+  });
+
   it('should handle errors gracefully', async () => {
     const error = new Error('Compression failed');
     mockTryCompressChatFast.mockRejectedValue(error);

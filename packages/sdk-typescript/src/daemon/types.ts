@@ -37,9 +37,15 @@ export interface TranscriptCursor {
 /**
  * Why the runtime stopped a Goal at one of its enumerated bounds. Set alongside
  * `lastReason` — that stays the human-readable half, this is the half a client
- * may key behavior off (an evidence-limited Goal cannot be resumed).
+ * may key behavior off. Resuming an evidence-limited Goal restarts its evidence
+ * window: the objective and revision carry over, but evidence recorded before
+ * the resume is no longer citable. `token_budget` marks a spent autonomous-spend
+ * authorization that a resume re-arms.
  */
-export type GoalLimitKind = 'evidence_catalog' | 'checkpoint_request';
+export type GoalLimitKind =
+  | 'evidence_catalog'
+  | 'checkpoint_request'
+  | 'token_budget';
 
 export interface GoalRecord {
   goalId: string;
@@ -1455,6 +1461,7 @@ export interface DaemonWorkspaceSessionInfo {
 export interface DaemonArchiveSessionsResult {
   archived: string[];
   alreadyArchived: string[];
+  resolvedConflicts?: string[];
   notFound: string[];
   errors: Array<{ sessionId: string; error: string }>;
 }
@@ -1462,6 +1469,7 @@ export interface DaemonArchiveSessionsResult {
 export interface DaemonUnarchiveSessionsResult {
   unarchived: string[];
   alreadyActive: string[];
+  resolvedConflicts?: string[];
   notFound: string[];
   errors: Array<{ sessionId: string; error: string }>;
 }

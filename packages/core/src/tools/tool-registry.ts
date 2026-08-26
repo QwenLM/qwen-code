@@ -694,10 +694,32 @@ export class ToolRegistry {
         }
       }
       // register each function as a tool
+      //
+      // The same PermissionManager gate that createToolRegistry applies to
+      // built-ins (via registerLazy) applies here too. Without it, a
+      // discovered tool not covered by an active `permissions.allow`
+      // registry allowlist would stay registered and advertised to the
+      // model while the runtime scheduler gate rejects every invocation
+      // with EXECUTION_DENIED — advertised-then-rejected (#9827). Gating
+      // at registration keeps both sides of the gate consistent: an
+      // uncovered tool is hidden from the model instead of always
+      // failing. Whole-tool deny rules benefit from the same consistency
+      // ("a whole-tool deny rule also removes the tool from the registry",
+      // settings.md). Deny rules still apply at runtime regardless.
+      const permissionManager = this.config.getPermissionManager?.();
       for (const func of functions) {
         if (!func.name) {
           debugLogger.warn('Discovered a tool with no name. Skipping.');
           continue;
+        }
+        if (permissionManager) {
+          const toolEnabled = await permissionManager.isToolEnabled(func.name);
+          if (!toolEnabled) {
+            debugLogger.info(
+              `Discovered tool "${func.name}" skipped: not enabled by the permission manager (permissions.allow registry allowlist or whole-tool deny rule, #9827).`,
+            );
+            continue;
+          }
         }
         const parameters =
           func.parametersJsonSchema &&

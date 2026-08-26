@@ -433,6 +433,34 @@ describe('HistoryReplayer', () => {
       ]);
     });
 
+    it('keeps a dangling call in flight when finalizeDangling is false', async () => {
+      const record: ChatRecord = {
+        ...createAssistantRecord(''),
+        message: {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'call-inflight',
+                name: 'run_shell_command',
+                args: { command: 'sleep 10' },
+              },
+            },
+          ],
+        },
+      };
+
+      await replayer.replay([record], undefined, { finalizeDangling: false });
+
+      const updates = sentUpdates();
+      expect(updates.map((update) => update['sessionUpdate'])).toEqual([
+        'tool_call',
+      ]);
+      expect(replayer.getPendingToolCalls()).toEqual([
+        expect.objectContaining({ callId: 'call-inflight' }),
+      ]);
+    });
+
     it('should carry dangling function calls across replay pages', async () => {
       const record: ChatRecord = {
         ...createAssistantRecord(''),

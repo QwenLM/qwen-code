@@ -466,4 +466,79 @@ describe('sticky todo layout helpers', () => {
       expect(getStickyTodoMaxVisibleItemsForMode(8, true)).toBe(1);
     });
   });
+
+  describe('unchanged snapshot guard', () => {
+    it('falls back to previous snapshot when the latest committed snapshot is unchanged', () => {
+      const history = [
+        makeCustomTodoToolGroup(
+          [{ id: '1', content: 'Old Task', status: 'in_progress' }],
+          1,
+        ),
+        makeLlmHistoryItem('Response', 2),
+        makeLlmHistoryItem('Response 2', 3),
+        {
+          type: 'tool_group' as const,
+          tools: [
+            {
+              callId: 'todo-unchanged',
+              name: 'TodoWrite',
+              description: 'Update todos',
+              resultDisplay: {
+                type: 'todo_list' as const,
+                todos: [
+                  { id: '1', content: 'Old Task', status: 'in_progress' },
+                ],
+                unchanged: true,
+              },
+              status: ToolCallStatus.Success,
+              confirmationDetails: undefined,
+            },
+          ],
+          id: 4,
+        },
+      ] as HistoryItem[];
+
+      // It should skip the unchanged snapshot and return the previous valid one
+      expect(getStickyTodos(history, [])).toEqual([
+        { id: '1', content: 'Old Task', status: 'in_progress' },
+      ]);
+    });
+
+    it('allows history snapshot to be used when pending snapshot is unchanged', () => {
+      const history = [
+        makeCustomTodoToolGroup(
+          [{ id: '1', content: 'History Task', status: 'pending' }],
+          1,
+        ),
+        makeLlmHistoryItem('Response', 2),
+        makeLlmHistoryItem('Response 2', 3),
+      ] as HistoryItem[];
+
+      const pendingHistoryItems = [
+        {
+          type: 'tool_group' as const,
+          tools: [
+            {
+              callId: 'todo-pending-unchanged',
+              name: 'TodoWrite',
+              description: 'Update todos',
+              resultDisplay: {
+                type: 'todo_list' as const,
+                todos: [
+                  { id: '1', content: 'History Task', status: 'pending' },
+                ],
+                unchanged: true,
+              },
+              status: ToolCallStatus.Success,
+              confirmationDetails: undefined,
+            },
+          ],
+        },
+      ] as HistoryItemWithoutId[];
+
+      expect(getStickyTodos(history, pendingHistoryItems)).toEqual([
+        { id: '1', content: 'History Task', status: 'pending' },
+      ]);
+    });
+  });
 });

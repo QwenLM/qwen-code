@@ -5019,14 +5019,25 @@ export class DaemonClient {
 
   async archiveSessionsData(
     sessionIds: string[],
+    clientIdOrOptions?: string | { resolveConflicts?: boolean },
     clientId?: string,
   ): Promise<DaemonArchiveSessionsResult> {
+    const options =
+      typeof clientIdOrOptions === 'object' ? clientIdOrOptions : undefined;
     return await this.fetchWithTimeout(
       `${this.baseUrl}/sessions/archive`,
       {
         method: 'POST',
-        headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
-        body: JSON.stringify({ sessionIds }),
+        headers: this.headers(
+          { 'Content-Type': 'application/json' },
+          typeof clientIdOrOptions === 'string' ? clientIdOrOptions : clientId,
+        ),
+        body: JSON.stringify({
+          sessionIds,
+          ...(options?.resolveConflicts !== undefined
+            ? { resolveConflicts: options.resolveConflicts }
+            : {}),
+        }),
       },
       async (res) => {
         if (res.ok) {
@@ -5039,14 +5050,25 @@ export class DaemonClient {
 
   async unarchiveSessionsData(
     sessionIds: string[],
+    clientIdOrOptions?: string | { resolveConflicts?: boolean },
     clientId?: string,
   ): Promise<DaemonUnarchiveSessionsResult> {
+    const options =
+      typeof clientIdOrOptions === 'object' ? clientIdOrOptions : undefined;
     return await this.fetchWithTimeout(
       `${this.baseUrl}/sessions/unarchive`,
       {
         method: 'POST',
-        headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
-        body: JSON.stringify({ sessionIds }),
+        headers: this.headers(
+          { 'Content-Type': 'application/json' },
+          typeof clientIdOrOptions === 'string' ? clientIdOrOptions : clientId,
+        ),
+        body: JSON.stringify({
+          sessionIds,
+          ...(options?.resolveConflicts !== undefined
+            ? { resolveConflicts: options.resolveConflicts }
+            : {}),
+        }),
       },
       async (res) => {
         if (res.ok) {
@@ -6211,25 +6233,41 @@ export class WorkspaceDaemonClient {
 
   archiveSessionsData(
     sessionIds: string[],
+    clientIdOrOptions?: string | { resolveConflicts?: boolean },
     clientId?: string,
   ): Promise<DaemonArchiveSessionsResult> {
+    const options =
+      typeof clientIdOrOptions === 'object' ? clientIdOrOptions : undefined;
     return this.post(
       '/sessions/archive',
       'POST /workspaces/:workspace/sessions/archive',
-      { sessionIds },
-      clientId,
+      {
+        sessionIds,
+        ...(options?.resolveConflicts !== undefined
+          ? { resolveConflicts: options.resolveConflicts }
+          : {}),
+      },
+      typeof clientIdOrOptions === 'string' ? clientIdOrOptions : clientId,
     );
   }
 
   unarchiveSessionsData(
     sessionIds: string[],
+    clientIdOrOptions?: string | { resolveConflicts?: boolean },
     clientId?: string,
   ): Promise<DaemonUnarchiveSessionsResult> {
+    const options =
+      typeof clientIdOrOptions === 'object' ? clientIdOrOptions : undefined;
     return this.post(
       '/sessions/unarchive',
       'POST /workspaces/:workspace/sessions/unarchive',
-      { sessionIds },
-      clientId,
+      {
+        sessionIds,
+        ...(options?.resolveConflicts !== undefined
+          ? { resolveConflicts: options.resolveConflicts }
+          : {}),
+      },
+      typeof clientIdOrOptions === 'string' ? clientIdOrOptions : clientId,
     );
   }
 
