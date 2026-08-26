@@ -19,6 +19,7 @@ import {
   ACP_PRIVATE_PARENT_CAPABILITY_META_KEY,
   CHANNEL_PROMPT_DISPLAY_TEXT_META_KEY,
   CHANNEL_PROMPT_META_KEY,
+  resolvePromptImages,
   type AvailableCommand,
   type ChannelAgentBridge,
   type ChannelAgentBridgePromptOptions,
@@ -283,11 +284,11 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
     this.on('responseBoundary', clearChunks);
 
     const prompt: Array<Record<string, unknown>> = [];
-    if (options?.imageBase64 && options.imageMimeType) {
+    for (const image of resolvePromptImages(options)) {
       prompt.push({
         type: 'image',
-        data: options.imageBase64,
-        mimeType: options.imageMimeType,
+        data: image.data,
+        mimeType: image.mimeType,
       });
     }
     prompt.push({ type: 'text', text });
