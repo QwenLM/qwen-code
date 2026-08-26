@@ -172,6 +172,16 @@ export interface GoalRecord {
    * on Goals persisted before budgets existed: those stay unbounded.
    */
   tokenBudget?: number;
+  /**
+   * The turn that delivered this spend window's wind-down hand-off. A spent
+   * budget grants one more continuation before it stops the Goal, so the
+   * model can hand off instead of being cut mid-thought; this marks that
+   * turn as finished. Stamped by the turn's own `turn_finished` record, so a
+   * restart mid-hand-off (marker absent, hand-off never delivered) grants the
+   * hand-off again, while a restart after it (marker present) does not.
+   * Cleared whenever the budget is re-armed.
+   */
+  windDownTurnId?: string;
   createdAt: number;
   updatedAt: number;
   evidenceCheckpoint?: GoalEvidenceCheckpoint;
@@ -263,11 +273,27 @@ export interface GoalStateResponse {
   snapshot: GoalSnapshotV2;
 }
 
+/**
+ * Why a Goal is blocked.
+ *
+ * `authority` and `external` stop immediately on cited user or external
+ * evidence. `repeated` (the default) needs the same evidenced blocker on
+ * three consecutive turns. `infeasible` also stops immediately: the cited
+ * external fact shows the objective cannot be satisfied as written, so no
+ * amount of retrying would help -- waiting three turns to say so is the
+ * runaway this kind exists to end.
+ */
+export type GoalBlockerKind =
+  | 'authority'
+  | 'external'
+  | 'repeated'
+  | 'infeasible';
+
 export interface GoalTerminalProposal {
   status: 'complete' | 'blocked';
   reason: string;
   evidenceRefs: string[];
-  blockerKind?: 'authority' | 'external' | 'repeated';
+  blockerKind?: GoalBlockerKind;
 }
 
 export function isRepeatedBlockerProposal(
@@ -276,9 +302,19 @@ export function isRepeatedBlockerProposal(
   return (
     proposal.status === 'blocked' &&
     proposal.blockerKind !== 'authority' &&
-    proposal.blockerKind !== 'external'
+    proposal.blockerKind !== 'external' &&
+    proposal.blockerKind !== 'infeasible'
   );
 }
+
+/**
+ * Appended to `lastReason` when an `infeasible` blocker is accepted, so the
+ * stopped Goal tells the user what to do rather than only what went wrong.
+ * The verifier's reason says why the objective cannot hold; this says that
+ * resuming as-is will not change that.
+ */
+export const GOAL_INFEASIBLE_NEXT_STEP =
+  'The objective cannot be satisfied as written; edit or replace the Goal with an objective the evidence allows before resuming it.';
 
 export function validateGoalProposalReason(reason: string): string | null {
   if (!reason.trim()) return 'Goal proposal reason must not be empty';

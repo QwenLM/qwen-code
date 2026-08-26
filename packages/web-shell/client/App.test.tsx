@@ -22,7 +22,10 @@ import type {
   VoiceStatusRevision,
   VoiceWorkspaceTarget,
 } from './voice/voice-workspace-target';
-import type { WebShellComposerToolbarRenderInfo } from './customization';
+import type {
+  ChatHeaderRenderInfo,
+  WebShellComposerToolbarRenderInfo,
+} from './customization';
 import { serializeContextUsageMessage } from './components/messages/ContextUsageMessage';
 import { serializeStatsMessage } from './components/messages/StatsMessage';
 import { serializeStatusMessage } from './components/messages/StatusMessage';
@@ -1034,6 +1037,7 @@ vi.mock('./components/sidebar/WebShellSidebar', async () => {
       onMobileClose?: () => void;
       onNewSession?: () => Promise<boolean> | boolean;
       onLoadSession?: (sessionId: string) => Promise<void> | void;
+      onSessionsDeleted?: (sessionIds: string[]) => void;
       onOpenAddWorkspace?: () => void;
     }) => {
       // Expose the Daemon Status / Session Overview openers so tests can
@@ -1070,6 +1074,15 @@ vi.mock('./components/sidebar/WebShellSidebar', async () => {
             onClick: () => props.onLoadSession?.('session-2'),
           },
           'load session',
+        ),
+        React.createElement(
+          'button',
+          {
+            'data-testid': 'delete-session',
+            type: 'button',
+            onClick: () => props.onSessionsDeleted?.(['session-1']),
+          },
+          'delete session',
         ),
         React.createElement(
           'button',
@@ -1306,6 +1319,7 @@ vi.doMock('./components/SplitView', async () => {
       renderPaneHeaderActions?: (info: {
         sessionId: string;
         workspaceCwd?: string;
+        sessionActions?: typeof mockSessionActions;
       }) => unknown;
       voiceWorkspaces?: readonly unknown[];
     }) => {
@@ -1383,6 +1397,15 @@ vi.doMock('./components/SplitView', async () => {
             onClick: () => props.onPanesChange?.(['s1', 's2', 's3']),
           },
           'report',
+        ),
+        React.createElement(
+          'button',
+          {
+            'data-testid': 'split-remove-panes',
+            type: 'button',
+            onClick: () => props.onPanesChange?.([]),
+          },
+          'remove panes',
         ),
         React.createElement(
           'button',
@@ -1575,6 +1598,19 @@ vi.doMock('./components/SplitView', async () => {
           { 'data-testid': 'split-has-header-actions' },
           props.renderPaneHeaderActions ? 'yes' : 'no',
         ),
+        // Surface the pane header actions so tests can drive them like a real
+        // pane header would (the default action opens the token usage panel).
+        props.renderPaneHeaderActions
+          ? React.createElement(
+              'div',
+              { 'data-testid': 'split-header-actions' },
+              props.renderPaneHeaderActions({
+                sessionId: 's1',
+                workspaceCwd: '/tmp/project',
+                sessionActions: mockSessionActions,
+              }),
+            )
+          : null,
       );
     },
   };
@@ -6976,6 +7012,7 @@ describe('App read-only local commands mid-turn', () => {
         byName: {},
       },
       files: { totalLinesAdded: 3, totalLinesRemoved: 1 },
+      sources: [],
     };
     mockSessionActions.getStats.mockResolvedValue(statsFixture);
     const { rerender } = renderApp({});
@@ -8144,6 +8181,96 @@ describe('App session callbacks', () => {
     expect(testState.latestChatEditorProps?.visibleToolbarActions).toContain(
       'gitBranch',
     );
+  });
+
+  it('exposes token usage to a custom chat header', async () => {
+    mockSessionActions.getStats.mockReturnValue(new Promise(() => {}));
+    const renderChatHeader = vi.fn(
+      ({ onOpenTokenUsage }: ChatHeaderRenderInfo) => (
+        <button type="button" onClick={onOpenTokenUsage}>
+          Custom token usage
+        </button>
+      ),
+    );
+    const { container } = renderApp({
+      header: { items: ['tokenUsage'] },
+      renderChatHeader,
+    });
+    await flush();
+
+    expect(renderChatHeader).toHaveBeenCalledWith(
+      expect.objectContaining({
+        items: ['tokenUsage'],
+        onOpenTokenUsage: expect.any(Function),
+      }),
+    );
+    await act(async () => {
+      Array.from(container.querySelectorAll('button'))
+        .find((button) => button.textContent === 'Custom token usage')!
+        .click();
+      await Promise.resolve();
+    });
+    expect(mockSessionActions.getStats).toHaveBeenCalledOnce();
+    expect(container.textContent).toContain('Token Usage');
+  });
+
+  it('opens the token usage panel from the main chat header action', async () => {
+    const statsFixture: DaemonSessionStatsStatus = {
+      v: 1,
+      sessionId: 'session-1',
+      workspaceCwd: '/tmp/project',
+      sessionStartTimeMs: 1000,
+      durationMs: 60000,
+      promptCount: 2,
+      models: {
+        'qwen-plus::hybrid': {
+          api: { totalRequests: 2, totalErrors: 0, totalLatencyMs: 1000 },
+          tokens: {
+            prompt: 500000,
+            candidates: 100000,
+            total: 600000,
+            cached: 50000,
+            thoughts: 10000,
+          },
+        },
+      },
+      tools: {
+        totalCalls: 0,
+        totalSuccess: 0,
+        totalFail: 0,
+        totalDurationMs: 0,
+        byName: {},
+      },
+      files: { totalLinesAdded: 0, totalLinesRemoved: 0 },
+      sources: [],
+    };
+    mockSessionActions.getStats.mockResolvedValue(statsFixture);
+    const { container } = renderApp({
+      header: { items: ['title', 'environment', 'rightPanel', 'tokenUsage'] },
+    });
+    await flush();
+
+    const entry = container.querySelector<HTMLButtonElement>(
+      '[aria-label="Session token usage"]',
+    );
+    expect(entry).not.toBeNull();
+    await act(async () => {
+      entry!.click();
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(mockSessionActions.getStats).toHaveBeenCalled();
+    // Docked right panel on the main chat view renders in the container.
+    expect(container.textContent).toContain('Token Usage');
+    expect(container.textContent).toContain('qwen-plus::hybrid');
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="delete-session"]')!
+        .click();
+    });
+    expect(container.textContent).not.toContain('qwen-plus::hybrid');
   });
 
   it('wires the composer context ring from the connection and opens /context on click', async () => {
@@ -17839,6 +17966,82 @@ describe('App session callbacks', () => {
     expect(
       container.querySelector('[data-testid="split-initial"]')?.textContent,
     ).toBe('s1,s2,s3,s4,s5,s6');
+  });
+
+  it('opens the token usage panel from the default pane header action', async () => {
+    const statsFixture: DaemonSessionStatsStatus = {
+      v: 1,
+      sessionId: 's1',
+      workspaceCwd: '/tmp/project',
+      sessionStartTimeMs: 1000,
+      durationMs: 60000,
+      promptCount: 2,
+      models: {
+        'qwen-plus::hybrid': {
+          api: { totalRequests: 2, totalErrors: 0, totalLatencyMs: 1000 },
+          tokens: {
+            prompt: 500000,
+            candidates: 100000,
+            total: 600000,
+            cached: 50000,
+            thoughts: 10000,
+          },
+        },
+      },
+      tools: {
+        totalCalls: 3,
+        totalSuccess: 3,
+        totalFail: 0,
+        totalDurationMs: 900,
+        byName: {},
+      },
+      files: { totalLinesAdded: 12, totalLinesRemoved: 4 },
+      sources: [],
+    };
+    mockSessionActions.getStats.mockResolvedValue(statsFixture);
+    const { container } = renderApp({
+      sidebar: false,
+      splitSessionIds: ['s1'],
+      header: { items: ['tokenUsage'] },
+    });
+    await flush();
+
+    const entry = container.querySelector<HTMLButtonElement>(
+      '[aria-label="Session token usage"]',
+    );
+    expect(entry).not.toBeNull();
+    await act(async () => {
+      entry!.click();
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(mockSessionActions.getStats).toHaveBeenCalled();
+    // The right panel (floating drawer on split view) opened with the token
+    // usage tab and its live data, portaled into document.body.
+    expect(document.body.textContent).toContain('Token Usage');
+    expect(document.body.textContent).toContain('qwen-plus::hybrid');
+    expect(document.body.textContent).toContain('600K');
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="split-remove-panes"]')!
+        .click();
+    });
+    expect(document.body.textContent).not.toContain('qwen-plus::hybrid');
+  });
+
+  it('does not add a token usage pane action unless it is enabled', async () => {
+    const { container } = renderApp({
+      sidebar: false,
+      splitSessionIds: ['s1'],
+    });
+    await flush();
+
+    expect(
+      container.querySelector('[data-testid="split-has-header-actions"]')
+        ?.textContent,
+    ).toBe('no');
   });
 
   it('does not reopen controlled split view when the same ids get a new array reference', async () => {
