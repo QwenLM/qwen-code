@@ -130,40 +130,18 @@ function forceKillActivePosixHookProcesses(): void {
   }
 }
 
-function handleParentSignal(
-  signal: 'SIGHUP' | 'SIGINT' | 'SIGQUIT' | 'SIGTERM',
-): void {
-  const handler =
-    signal === 'SIGHUP'
-      ? handleParentSighup
-      : signal === 'SIGINT'
-        ? handleParentSigint
-        : signal === 'SIGQUIT'
-          ? handleParentSigquit
-          : handleParentSigterm;
+function handleParentSignal(signal: NodeJS.Signals): void {
   forceKillActivePosixHookProcesses();
-  if (process.listeners(signal).some((listener) => listener !== handler)) {
+  if (
+    process
+      .listeners(signal)
+      .some((listener) => listener !== handleParentSignal)
+  ) {
     return;
   }
 
-  process.removeListener(signal, handler);
+  process.removeListener(signal, handleParentSignal);
   process.kill(process.pid, signal);
-}
-
-function handleParentSighup(): void {
-  handleParentSignal('SIGHUP');
-}
-
-function handleParentSigint(): void {
-  handleParentSignal('SIGINT');
-}
-
-function handleParentSigquit(): void {
-  handleParentSignal('SIGQUIT');
-}
-
-function handleParentSigterm(): void {
-  handleParentSignal('SIGTERM');
 }
 
 function registerActivePosixHookProcess(child: ChildProcess): void {
@@ -173,10 +151,10 @@ function registerActivePosixHookProcess(child: ChildProcess): void {
   activePosixHookProcesses.add(child);
   if (!parentExitCleanupRegistered) {
     process.on('exit', forceKillActivePosixHookProcesses);
-    process.prependListener('SIGHUP', handleParentSighup);
-    process.prependListener('SIGINT', handleParentSigint);
-    process.prependListener('SIGQUIT', handleParentSigquit);
-    process.prependListener('SIGTERM', handleParentSigterm);
+    process.prependListener('SIGHUP', handleParentSignal);
+    process.prependListener('SIGINT', handleParentSignal);
+    process.prependListener('SIGQUIT', handleParentSignal);
+    process.prependListener('SIGTERM', handleParentSignal);
     parentExitCleanupRegistered = true;
   }
 }
@@ -185,10 +163,10 @@ function unregisterActivePosixHookProcess(child: ChildProcess): void {
   activePosixHookProcesses.delete(child);
   if (activePosixHookProcesses.size === 0 && parentExitCleanupRegistered) {
     process.removeListener('exit', forceKillActivePosixHookProcesses);
-    process.removeListener('SIGHUP', handleParentSighup);
-    process.removeListener('SIGINT', handleParentSigint);
-    process.removeListener('SIGQUIT', handleParentSigquit);
-    process.removeListener('SIGTERM', handleParentSigterm);
+    process.removeListener('SIGHUP', handleParentSignal);
+    process.removeListener('SIGINT', handleParentSignal);
+    process.removeListener('SIGQUIT', handleParentSignal);
+    process.removeListener('SIGTERM', handleParentSignal);
     parentExitCleanupRegistered = false;
   }
 }
