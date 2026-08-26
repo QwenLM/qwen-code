@@ -1121,6 +1121,7 @@ describe('HookRunner', () => {
       const exitListenersBefore = process.listeners('exit');
       const sighupListenersBefore = process.listeners('SIGHUP');
       const sigintListenersBefore = process.listeners('SIGINT');
+      const sigquitListenersBefore = process.listeners('SIGQUIT');
       const sigtermListenersBefore = process.listeners('SIGTERM');
       const mockProcess = createControllableMockProcess();
       mockSpawn.mockReturnValue(mockProcess);
@@ -1144,11 +1145,13 @@ describe('HookRunner', () => {
       expect(process.listeners('exit')).toEqual(exitListenersBefore);
       expect(process.listeners('SIGHUP')).toEqual(sighupListenersBefore);
       expect(process.listeners('SIGINT')).toEqual(sigintListenersBefore);
+      expect(process.listeners('SIGQUIT')).toEqual(sigquitListenersBefore);
       expect(process.listeners('SIGTERM')).toEqual(sigtermListenersBefore);
     });
 
-    it('leaves parent signals to an existing application handler', async () => {
+    it('kills active hooks while leaving parent signals to an application handler', async () => {
       vi.spyOn(process, 'platform', 'get').mockReturnValue('linux');
+      const exitListenersBefore = process.listeners('exit');
       const listenersBefore = process.listeners('SIGTERM');
       const mockProcess = createControllableMockProcess();
       mockSpawn.mockReturnValue(mockProcess);
@@ -1169,10 +1172,16 @@ describe('HookRunner', () => {
               listener !== applicationHandler &&
               !listenersBefore.includes(listener),
           );
+        const exitListener = process
+          .listeners('exit')
+          .find((listener) => !exitListenersBefore.includes(listener));
 
         expect(hookSignalHandler).toBeDefined();
+        expect(exitListener).toBeDefined();
         hookSignalHandler?.('SIGTERM');
-        expect(killSpy).not.toHaveBeenCalled();
+        expect(killSpy).toHaveBeenCalledWith(-mockProcess.pid, 'SIGKILL');
+        expect(killSpy).not.toHaveBeenCalledWith(process.pid, 'SIGTERM');
+        expect(process.listeners('exit')).toContain(exitListener);
 
         mockProcess.emit('close', 0);
         await resultPromise;
@@ -1181,7 +1190,70 @@ describe('HookRunner', () => {
       }
     });
 
+    it.each(['SIGHUP', 'SIGINT', 'SIGQUIT'] as const)(
+      'force-kills active hooks and re-raises %s when unhandled',
+      async (signal) => {
+        vi.spyOn(process, 'platform', 'get').mockReturnValue('linux');
+        const listenersBefore = process.listeners(signal);
+        const mockProcess = createControllableMockProcess();
+        mockSpawn.mockReturnValue(mockProcess);
+        const killSpy = vi.spyOn(process, 'kill').mockReturnValue(true);
+
+        const resultPromise = hookRunner.executeHook(
+          hookConfig,
+          HookEventName.PreToolUse,
+          createMockInput(),
+        );
+        const hookSignalHandler = process
+          .listeners(signal)
+          .find((listener) => !listenersBefore.includes(listener));
+
+        expect(hookSignalHandler).toBeDefined();
+        hookSignalHandler?.(signal);
+        expect(killSpy).toHaveBeenCalledWith(-mockProcess.pid, 'SIGKILL');
+        expect(killSpy).toHaveBeenCalledWith(process.pid, signal);
+
+        mockProcess.emit('close', null);
+        await resultPromise;
+      },
+    );
+
+    it('keeps parent cleanup registered while another hook is active', async () => {
+      vi.spyOn(process, 'platform', 'get').mockReturnValue('linux');
+      const exitListenersBefore = process.listeners('exit');
+      const firstProcess = createControllableMockProcess(4321);
+      const secondProcess = createControllableMockProcess(4322);
+      mockSpawn
+        .mockReturnValueOnce(firstProcess)
+        .mockReturnValueOnce(secondProcess);
+      const killSpy = vi.spyOn(process, 'kill').mockReturnValue(true);
+
+      const firstResult = hookRunner.executeHook(
+        hookConfig,
+        HookEventName.PreToolUse,
+        createMockInput(),
+      );
+      const secondResult = hookRunner.executeHook(
+        hookConfig,
+        HookEventName.PreToolUse,
+        createMockInput(),
+      );
+      firstProcess.emit('close', 0);
+      await firstResult;
+      const exitListener = process
+        .listeners('exit')
+        .find((listener) => !exitListenersBefore.includes(listener));
+
+      expect(exitListener).toBeDefined();
+      exitListener?.(0);
+      expect(killSpy).toHaveBeenCalledWith(-secondProcess.pid, 'SIGKILL');
+
+      secondProcess.emit('close', 0);
+      await secondResult;
+    });
+
     it('escalates to SIGKILL for the process group even after the root closes', async () => {
+      vi.spyOn(process, 'platform', 'get').mockReturnValue('linux');
       vi.useFakeTimers();
       const mockProcess = createControllableMockProcess();
       mockSpawn.mockReturnValue(mockProcess);
@@ -1229,6 +1301,7 @@ describe('HookRunner', () => {
     });
 
     it('does not send SIGKILL when the process group exits after SIGTERM', async () => {
+      vi.spyOn(process, 'platform', 'get').mockReturnValue('linux');
       const mockProcess = createControllableMockProcess();
       mockSpawn.mockReturnValue(mockProcess);
       const killSpy = vi
@@ -1260,6 +1333,7 @@ describe('HookRunner', () => {
     });
 
     it('returns the timeout result after process group cleanup', async () => {
+      vi.spyOn(process, 'platform', 'get').mockReturnValue('linux');
       vi.useFakeTimers();
       const mockProcess = createControllableMockProcess();
       mockSpawn.mockReturnValue(mockProcess);
@@ -1286,6 +1360,7 @@ describe('HookRunner', () => {
     });
 
     it('shares one termination when timeout and abort race, with abort taking precedence', async () => {
+      vi.spyOn(process, 'platform', 'get').mockReturnValue('linux');
       vi.useFakeTimers();
       const mockProcess = createControllableMockProcess();
       mockSpawn.mockReturnValue(mockProcess);
@@ -1493,6 +1568,7 @@ describe('HookRunner', () => {
     });
 
     it('waits for close after a cancellation-time child error', async () => {
+      vi.spyOn(process, 'platform', 'get').mockReturnValue('linux');
       vi.useFakeTimers();
       const mockProcess = createControllableMockProcess();
       mockSpawn.mockReturnValue(mockProcess);
@@ -1527,6 +1603,7 @@ describe('HookRunner', () => {
     });
 
     it('drains final output before resolving cancellation', async () => {
+      vi.spyOn(process, 'platform', 'get').mockReturnValue('linux');
       const mockProcess = createControllableMockProcess();
       mockSpawn.mockReturnValue(mockProcess);
       vi.spyOn(process, 'kill').mockImplementation((target, signal) => {
@@ -1564,6 +1641,7 @@ describe('HookRunner', () => {
     });
 
     it('bounds the output drain wait when close never arrives', async () => {
+      vi.spyOn(process, 'platform', 'get').mockReturnValue('linux');
       vi.useFakeTimers();
       const mockProcess = createControllableMockProcess();
       mockSpawn.mockReturnValue(mockProcess);

@@ -202,7 +202,6 @@ const runner = new HookRunner();
 const controller = new AbortController();
 if (exitMode === 'handled-signal-exit') {
   process.once('SIGTERM', async () => {
-    controller.abort();
     await resultPromise;
     writeFileSync(upperCompletedPath, 'completed');
     process.exit(77);

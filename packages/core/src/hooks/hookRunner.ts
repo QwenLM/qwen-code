@@ -130,18 +130,22 @@ function forceKillActivePosixHookProcesses(): void {
   }
 }
 
-function handleParentSignal(signal: 'SIGHUP' | 'SIGINT' | 'SIGTERM'): void {
+function handleParentSignal(
+  signal: 'SIGHUP' | 'SIGINT' | 'SIGQUIT' | 'SIGTERM',
+): void {
   const handler =
     signal === 'SIGHUP'
       ? handleParentSighup
       : signal === 'SIGINT'
         ? handleParentSigint
-        : handleParentSigterm;
+        : signal === 'SIGQUIT'
+          ? handleParentSigquit
+          : handleParentSigterm;
+  forceKillActivePosixHookProcesses();
   if (process.listeners(signal).some((listener) => listener !== handler)) {
     return;
   }
 
-  forceKillActivePosixHookProcesses();
   process.removeListener(signal, handler);
   process.kill(process.pid, signal);
 }
@@ -152,6 +156,10 @@ function handleParentSighup(): void {
 
 function handleParentSigint(): void {
   handleParentSignal('SIGINT');
+}
+
+function handleParentSigquit(): void {
+  handleParentSignal('SIGQUIT');
 }
 
 function handleParentSigterm(): void {
@@ -167,6 +175,7 @@ function registerActivePosixHookProcess(child: ChildProcess): void {
     process.on('exit', forceKillActivePosixHookProcesses);
     process.prependListener('SIGHUP', handleParentSighup);
     process.prependListener('SIGINT', handleParentSigint);
+    process.prependListener('SIGQUIT', handleParentSigquit);
     process.prependListener('SIGTERM', handleParentSigterm);
     parentExitCleanupRegistered = true;
   }
@@ -178,6 +187,7 @@ function unregisterActivePosixHookProcess(child: ChildProcess): void {
     process.removeListener('exit', forceKillActivePosixHookProcesses);
     process.removeListener('SIGHUP', handleParentSighup);
     process.removeListener('SIGINT', handleParentSigint);
+    process.removeListener('SIGQUIT', handleParentSigquit);
     process.removeListener('SIGTERM', handleParentSigterm);
     parentExitCleanupRegistered = false;
   }
