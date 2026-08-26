@@ -20,7 +20,8 @@
  * bodies must not reach model-visible content.
  */
 
-import { parseSseTranscript } from './transcribe-audio.js';
+import { parseSseCompletion } from './transcribe-audio.js';
+import { appendOmniUsageLog } from './usage-log.js';
 
 /** One media content part of the request. `url`/`data` are base64 data
  * URIs (or, for operators pointing at reachable hosts, plain URLs). */
@@ -41,6 +42,8 @@ export interface OmniChatRequestOptions {
   signal: AbortSignal;
   /** Optional response cap forwarded as `max_tokens`. */
   maxTokens?: number;
+  /** Tool name for OMNI_USAGE_LOG attribution (eval instrumentation). */
+  tool?: string;
 }
 
 /** Serialize one media part to the wire shape of its content type. */
@@ -91,6 +94,7 @@ export async function requestOmniChatCompletion(
         model: options.model,
         modalities: ['text'],
         stream: true,
+        stream_options: { include_usage: true },
         messages: [{ role: 'user', content }],
         ...(options.maxTokens !== undefined
           ? { max_tokens: options.maxTokens }
@@ -102,5 +106,7 @@ export async function requestOmniChatCompletion(
   if (!response.ok) {
     return { ok: false, error: `HTTP ${response.status}` };
   }
-  return { ok: true, text: parseSseTranscript(await response.text()).trim() };
+  const { text, usage } = parseSseCompletion(await response.text());
+  appendOmniUsageLog(options.model, usage, options.tool);
+  return { ok: true, text: text.trim() };
 }

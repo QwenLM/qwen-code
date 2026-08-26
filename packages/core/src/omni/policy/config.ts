@@ -67,7 +67,11 @@ const POLICY_ENTRY_KEYS = new Set([
   'maxRunsPerLineage',
   'onFailure',
   'output',
+  'description',
 ]);
+/** Upper bound on a policy `description` — it is injected verbatim into the
+ * system prompt, so a runaway string would silently bloat every request. */
+const MAX_POLICY_DESCRIPTION_CHARS = 600;
 const OUTPUT_KEYS = new Set(['reprocessMedia', 'source', 'artifacts']);
 /** Valid `kind:<…>` selector targets in `output.artifacts` — the media
  * modalities plus the non-media `file` artifact kind (transcripts). */
@@ -245,6 +249,25 @@ function normalizePolicy(
     if (!POLICY_ENTRY_KEYS.has(key)) {
       fail(`${where}.${id}: unknown key "${key}"`);
     }
+  }
+
+  // Optional model-facing description (like a tool description): free text
+  // explaining what this policy does / when it triggers. Collected into the
+  // media-guidance system-prompt section so the model learns the active
+  // preprocessing contract straight from configuration.
+  let description: string | undefined;
+  if (entry['description'] !== undefined) {
+    if (typeof entry['description'] !== 'string') {
+      fail(`${where}.${id}.description: must be a string`);
+    }
+    const trimmed = (entry['description'] as string).trim();
+    if (trimmed.length > MAX_POLICY_DESCRIPTION_CHARS) {
+      fail(
+        `${where}.${id}.description: must be ≤ ${MAX_POLICY_DESCRIPTION_CHARS} ` +
+          `characters (got ${trimmed.length})`,
+      );
+    }
+    if (trimmed.length > 0) description = trimmed;
   }
 
   // §13 #3/#4: legal values and enums.
@@ -561,6 +584,7 @@ function normalizePolicy(
     onFailure,
     output: { reprocessMedia, source, artifacts },
     stage,
+    ...(description !== undefined ? { description } : {}),
   };
 }
 

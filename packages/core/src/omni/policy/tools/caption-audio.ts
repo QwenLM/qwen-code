@@ -315,6 +315,7 @@ class CaptionAudioInvocation extends BaseMediaPolicyToolInvocation<CaptionAudioP
           media: [{ type: 'input_audio', data: dataUri, format }],
           timeoutMs: this.timeoutMs,
           signal,
+          tool: 'omni_caption_audio',
         });
         if (!response.ok) {
           return mediaPolicyToolError(
@@ -482,6 +483,7 @@ class CaptionAudioInvocation extends BaseMediaPolicyToolInvocation<CaptionAudioP
         media: [{ type: 'input_audio', data: dataUri, format: 'm4a' }],
         timeoutMs: remainingTimeoutMs(),
         signal,
+        tool: 'omni_caption_audio',
       });
       if (!response.ok) {
         return { failure: response.error, degenerated: false };

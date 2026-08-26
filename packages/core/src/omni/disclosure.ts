@@ -65,17 +65,40 @@ export function splitAnnotationBody(
   return undefined;
 }
 
+/**
+ * A bare keyframe timestamp label like `<00:11>` or `<1:02:03>` — the
+ * adjacent text for one sampled frame (mirrors read_video's per-frame
+ * `<timestamp>`). It deliberately carries NO 【媒体降质】<name>： prefix: the
+ * shared degradation notice is stated once on the first frame's header, and
+ * repeating the prefix on every one of N frames is pure noise. Anchored so
+ * only a lone marker matches — the first frame's header (which begins with
+ * 原视频…) does not.
+ */
+export function isKeyframeTimestampLabel(text: string): boolean {
+  return /^<\d{1,2}:\d{2}(?::\d{2})?>$/.test(text);
+}
+
 /** Model-facing disclosure text for one degraded resource. */
 export function formatDisclosureText(
   displayName: string,
   disclosure: string,
 ): string {
+  // Bare per-frame timestamp markers are delivered clean — the one-time
+  // degradation notice already rode on the first keyframe's header.
+  if (isKeyframeTimestampLabel(disclosure)) {
+    return disclosure;
+  }
   return `${OMNI_DISCLOSURE_TEXT_PREFIX}${escapeAnnotationName(displayName)}：${disclosure}`;
 }
 
 /** Whether a text is a disclosure emitted by {@link formatDisclosureText}. */
 export function isDisclosureText(text: string): boolean {
-  return text.startsWith(OMNI_DISCLOSURE_TEXT_PREFIX);
+  // Bare timestamp markers carry no prefix, but must still travel WITH their
+  // image when splitToolMedia relocates media out of a tool message.
+  return (
+    text.startsWith(OMNI_DISCLOSURE_TEXT_PREFIX) ||
+    isKeyframeTimestampLabel(text)
+  );
 }
 
 /** Marks a text Part as an explicit-omission notice: the transport guard

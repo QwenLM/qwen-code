@@ -495,6 +495,7 @@ class UnderstandVideoSegmentsInvocation extends BaseMediaPolicyToolInvocation<Un
         media: [{ type: 'video_url', url: dataUri }],
         timeoutMs: remainingTimeoutMs(),
         signal,
+        tool: 'omni_understand_video_segments',
       });
       if (!response.ok) {
         return { failure: response.error, degenerated: false };

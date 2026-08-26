@@ -193,6 +193,72 @@ describe('normalizeOmniProcessingConfig', () => {
       });
     });
 
+    it('accepts and trims an optional model-facing description', () => {
+      const config = normalize({
+        fixedPolicies: {
+          'image-downsample': {
+            mediaTypes: ['image'],
+            toolName: 'omni_downsample_image',
+            description: '  Downsamples large images.  ',
+          },
+        },
+      });
+      const image = config.fixedPolicies.find(
+        (p) => p.id === 'image-downsample',
+      );
+      expect(image?.description).toBe('Downsamples large images.');
+    });
+
+    it('omits description entirely when unset or blank (no empty-string key)', () => {
+      const config = normalize({
+        fixedPolicies: {
+          a: {
+            mediaTypes: ['image'],
+            toolName: 'omni_downsample_image',
+          },
+          b: {
+            mediaTypes: ['image'],
+            toolName: 'omni_downsample_image',
+            description: '   ',
+          },
+        },
+      });
+      for (const id of ['a', 'b']) {
+        const p = config.fixedPolicies.find((x) => x.id === id)!;
+        expect('description' in p).toBe(false);
+      }
+    });
+
+    it('rejects a non-string description', () => {
+      expect(() =>
+        normalize({
+          fixedPolicies: {
+            'image-downsample': {
+              mediaTypes: ['image'],
+              toolName: 'omni_downsample_image',
+              description: 123,
+            },
+          },
+        }),
+      ).toThrow(
+        'omni.processing.fixedPolicies.image-downsample.description: must be a string',
+      );
+    });
+
+    it('rejects an over-long description', () => {
+      expect(() =>
+        normalize({
+          fixedPolicies: {
+            'image-downsample': {
+              mediaTypes: ['image'],
+              toolName: 'omni_downsample_image',
+              description: 'x'.repeat(601),
+            },
+          },
+        }),
+      ).toThrow(/description: must be ≤ 600 characters \(got 601\)/);
+    });
+
     it('replaces a default guard entry wholesale (no field-level merge)', () => {
       // Whole-entry replacement: the override does NOT inherit the
       // default's toolName, so omitting it must be a validation error —

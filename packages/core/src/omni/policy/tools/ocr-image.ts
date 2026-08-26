@@ -222,6 +222,7 @@ class OcrImageInvocation extends BaseMediaPolicyToolInvocation<OcrImageParams> {
         media: [{ type: 'image_url', url: dataUri }],
         timeoutMs: this.timeoutMs,
         signal,
+        tool: 'omni_ocr_image',
       });
       if (!response.ok) {
         return mediaPolicyToolError(`OCR request failed: ${response.error}`);

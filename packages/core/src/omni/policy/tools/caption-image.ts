@@ -212,6 +212,7 @@ class CaptionImageInvocation extends BaseMediaPolicyToolInvocation<CaptionImageP
         media: [{ type: 'image_url', url: dataUri }],
         timeoutMs: this.timeoutMs,
         signal,
+        tool: 'omni_caption_image',
       });
       if (!response.ok) {
         return mediaPolicyToolError(

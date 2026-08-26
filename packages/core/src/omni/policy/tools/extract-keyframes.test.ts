@@ -192,6 +192,8 @@ describe('OmniExtractKeyframesTool', () => {
       expect(result.llmContent).toContain('Use read_file');
       // Absolute timestamp = bucket start + showinfo pts_time (input
       // seeking resets pts to ~0 within each window).
+      // Non-first frames carry ONLY their short timestamp marker; the
+      // shared header (source/resolution/sampling/hint) rides on frame 1.
       expect(result.artifacts?.[3]).toEqual({
         kind: 'image',
         storage: 'workspace',
@@ -200,14 +202,15 @@ describe('OmniExtractKeyframesTool', () => {
         mimeType: 'image/jpeg',
         sizeBytes: FRAME_SIZE,
         metadata: {
-          omniDisclosure:
-            '原视频 80s/1920×1080 → 关键帧 4/4 @ 63.5s，静态抽帧（全片分桶采样），时间连续性丢失',
+          omniDisclosure: '<01:04>',
           omniRole: 'keyframe',
         },
       });
-      for (const artifact of result.artifacts ?? []) {
-        expect(artifact.metadata?.['omniDisclosure']).toContain('全片分桶采样');
-      }
+      // The sampling-method note appears once, on the first frame's header.
+      const firstDisclosure =
+        result.artifacts?.[0]?.metadata?.['omniDisclosure'];
+      expect(firstDisclosure).toContain('全片分桶采样');
+      expect(firstDisclosure).toContain('原视频 80s/1920×1080');
     });
 
     it('caps the per-bucket scene search window at 30s on long videos', async () => {
@@ -256,10 +259,10 @@ describe('OmniExtractKeyframesTool', () => {
       expect(result.error).toBeUndefined();
       expect(result.artifacts).toHaveLength(2);
       expect(result.artifacts?.[0]?.metadata?.['omniDisclosure']).toContain(
-        '关键帧 1/2 @ 10s',
+        '<00:10>',
       );
       expect(result.artifacts?.[1]?.metadata?.['omniDisclosure']).toContain(
-        '关键帧 2/2 @ 22s',
+        '<00:22>',
       );
     });
 
@@ -275,7 +278,7 @@ describe('OmniExtractKeyframesTool', () => {
       expect(result.artifacts).toHaveLength(1);
       expect(result.artifacts?.[0]?.title).toBe('Keyframe 1/1');
       expect(result.artifacts?.[0]?.metadata?.['omniDisclosure']).toContain(
-        '@ 25s',
+        '<00:25>',
       );
     });
 
@@ -440,10 +443,13 @@ describe('OmniExtractKeyframesTool', () => {
 
       expect(result.error).toBeUndefined();
       expect(result.artifacts).toHaveLength(3);
-      const disclosure = result.artifacts?.[1]?.metadata?.['omniDisclosure'];
-      expect(disclosure).toContain('关键帧 2/3 @ 12.4s');
-      expect(disclosure).toContain('静态抽帧，时间连续性丢失');
-      expect(disclosure).not.toContain('全片分桶采样');
+      // Header (frame 1) carries the sampling method; later frames only the marker.
+      const header = result.artifacts?.[0]?.metadata?.['omniDisclosure'];
+      expect(header).toContain('静态抽帧，时间连续性丢失');
+      expect(header).not.toContain('全片分桶采样');
+      expect(result.artifacts?.[1]?.metadata?.['omniDisclosure']).toBe(
+        '<00:12>',
+      );
     });
 
     it('uses a single pass when a single frame is all that was asked for', async () => {
@@ -456,6 +462,38 @@ describe('OmniExtractKeyframesTool', () => {
         path.join(outputDir, 'clip-keyframe-%04d.jpg'),
       );
       expect(result.artifacts).toHaveLength(1);
+    });
+
+    it('does not emit stale frames left by a prior run in a persistent outputDir', async () => {
+      // A prior, LARGER extraction of the same source left higher-numbered
+      // frames behind. ffmpeg's %04d counter restarts at 1, so this
+      // shorter run writes 0001..0003; the stale 0004..0006 must not be
+      // reported as this run's output (they would carry no showinfo pts →
+      // timeSeconds: undefined). The single-pass path recovers its result
+      // by listing outputDir, so it must clear the source's stale frames
+      // first.
+      probe({ width: 1920, height: 1080 });
+      for (const n of ['0004', '0005', '0006']) {
+        await fs.writeFile(
+          path.join(outputDir, `clip-keyframe-${n}.jpg`),
+          Buffer.alloc(FRAME_SIZE),
+        );
+      }
+      mocks.runFfmpeg.mockImplementation(framesRun(3, [0, 12.4, 47]));
+      const { result } = await run();
+
+      expect(result.error).toBeUndefined();
+      // Exactly this run's three frames — not the six on disk.
+      expect(result.artifacts).toHaveLength(3);
+      expect(result.artifacts?.map((a) => a.workspacePath).sort()).toEqual([
+        'clip-keyframe-0001.jpg',
+        'clip-keyframe-0002.jpg',
+        'clip-keyframe-0003.jpg',
+      ]);
+      // The stale files were removed before the run rather than emitted.
+      await expect(
+        fs.access(path.join(outputDir, 'clip-keyframe-0004.jpg')),
+      ).rejects.toThrow();
     });
 
     it('errors when no frames could be extracted at all', async () => {
@@ -548,7 +586,11 @@ describe('OmniExtractKeyframesTool', () => {
     it('sizes frames onto the patch grid when frameTokenBudget is set', async () => {
       probe({ durationMs: 10_000, width: 1920, height: 1080 });
       mocks.runFfmpeg.mockImplementation(framesRun(1, [0]));
-      await run({ strategy: 'uniform', fps: 0.2, frameTokenBudget: 'small' });
+      const { result } = await run({
+        strategy: 'uniform',
+        fps: 0.2,
+        frameTokenBudget: 'small',
+      });
       const first = mocks.runFfmpeg.mock.calls[0] as [string[], unknown];
       const vfIndex = first[0].indexOf('-vf');
       // 1920×1080 under the 80-token small tier (80 × 28² px), grid-snapped.
@@ -560,6 +602,23 @@ describe('OmniExtractKeyframesTool', () => {
       expect(w % 28).toBe(0);
       expect(h % 28).toBe(0);
       expect(w * h).toBeLessThanOrEqual(80 * 784 + 8 * 784);
+      // The disclosure reports the SAME delivered dimensions the scale filter
+      // produced — file-derived from this input + budget, not a constant.
+      expect(result.artifacts?.[0]?.metadata?.['omniDisclosure']).toContain(
+        `缩放至 ${w}×${h}`,
+      );
+    });
+
+    it('discloses delivered dimensions derived from the source (not a constant)', async () => {
+      // A 640×360 source under the default 768 box is already within the
+      // ceiling, so it is delivered at its own size (never enlarged) — a
+      // different value than the 1920×1080 cases, proving file-derivation.
+      probe({ durationMs: 40_000, width: 640, height: 360 });
+      mocks.runFfmpeg.mockImplementation(framesRun(1, [5]));
+      const { result } = await run({ maxFrames: 1 });
+      expect(result.artifacts?.[0]?.metadata?.['omniDisclosure']).toContain(
+        '缩放至 640×360',
+      );
     });
 
     it('falls back to the scene path when the duration is unknown', async () => {

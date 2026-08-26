@@ -256,6 +256,17 @@ function formatSeconds(seconds: number): string {
   return seconds.toFixed(3);
 }
 
+/** `MM:SS` (or `H:MM:SS` when `withHours`) clock label for a keyframe's
+ * timestamp — the read_video reference's per-frame `<timestamp>` format. */
+function formatClock(totalSeconds: number, withHours: boolean): string {
+  const s = Math.max(0, Math.round(totalSeconds));
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const mm = String(m).padStart(2, '0');
+  const ss = String(s % 60).padStart(2, '0');
+  return withHours ? `${h}:${mm}:${ss}` : `${mm}:${ss}`;
+}
+
 async function fileExists(filePath: string): Promise<boolean> {
   try {
     await fs.access(filePath);
@@ -338,19 +349,35 @@ class ExtractKeyframesInvocation extends BaseMediaPolicyToolInvocation<ExtractKe
       // Grid sizing needs the source dimensions — without them the box
       // filter is the honest fallback.
       let scaleVf = scaleFilter(maxDimension);
-      if (
-        frameTokenBudget &&
+      // Delivered frame dimensions for the per-frame disclosure — derived from
+      // THIS file's source dimensions and the requested budget, using the same
+      // sizing the ffmpeg scale filter applies. Without it the model sees only
+      // the source resolution and cannot tell the frame it received was
+      // downscaled. Varies per input file / budget; empty when the source
+      // dimensions are unknown (the box filter's output is then indeterminate).
+      const sourceDimsKnown =
         probe.width !== undefined &&
         probe.height !== undefined &&
         probe.width > 0 &&
-        probe.height > 0
-      ) {
+        probe.height > 0;
+      let deliveredResolution = '';
+      if (frameTokenBudget && sourceDimsKnown) {
+        // Token-budget path: scale=W:H is applied verbatim, so W×H is exact.
         const target = videoFrameDimensionsForTokenBudget(
-          probe.width,
-          probe.height,
+          probe.width!,
+          probe.height!,
           frameTokenBudget,
         );
         scaleVf = `scale=${target.width}:${target.height}`;
+        deliveredResolution = `${target.width}×${target.height}`;
+      } else if (sourceDimsKnown) {
+        // Box path: mirror scaleFilter()'s fit-inside-maxDimension (longest
+        // edge capped, aspect preserved, never enlarged).
+        const factor = Math.min(
+          1,
+          maxDimension / Math.max(probe.width!, probe.height!),
+        );
+        deliveredResolution = `${Math.round(probe.width! * factor)}×${Math.round(probe.height! * factor)}`;
       }
 
       // ALL ffmpeg passes share ONE wall-clock budget, keeping the
@@ -414,16 +441,28 @@ class ExtractKeyframesInvocation extends BaseMediaPolicyToolInvocation<ExtractKe
               : '静态抽帧（全片分桶采样）'
             : '静态抽帧';
 
+      // The shared context (source, per-frame resolution, sampling method,
+      // temporal-loss caveat, look-closer hint) is IDENTICAL across all N
+      // frames, so it is emitted ONCE as a header on the first frame's
+      // disclosure; every later frame carries only its own short timestamp
+      // marker. Repeating the full paragraph on all 32 frames bloated the
+      // delivered prompt with ~30 duplicate copies of the same text.
+      const header = `原视频 ${originalDuration}${originalResolution} → 关键帧${deliveredResolution ? `，缩放至 ${deliveredResolution}` : ''}，${samplingNote}，时间连续性丢失。降质帧不足以辨识文字/小物体/精确计数：先用 omni_extract_keyframes（strategy=uniform、startSec、endSec）在疑似区间加密抽帧定位，再用 omni_clip_video 截取 ≤20s 后 read_file 看原生视频。看不清的细节不要凭猜测作答`;
+      // Per-frame markers use the read_video `<MM:SS>` (H:MM:SS past an hour)
+      // clock format; hours are shown for all frames when the source runs ≥1h
+      // so the format is uniform across the set.
+      const withHours = (durationSeconds ?? 0) >= 3600;
+
       const artifacts: ToolArtifact[] = [];
       for (const [index, frame] of frames.entries()) {
         const sizeBytes = (
           await fs.stat(path.join(this.params.outputDir, frame.fileName))
         ).size;
         const t = frame.timeSeconds;
-        const atTime =
+        const marker =
           t !== undefined && Number.isFinite(t)
-            ? ` @ ${Math.round(t * 10) / 10}s`
-            : '';
+            ? `<${formatClock(t, withHours)}>`
+            : `<关键帧 ${index + 1}/${frames.length}>`;
         artifacts.push({
           kind: 'image',
           storage: 'workspace',
@@ -432,7 +471,10 @@ class ExtractKeyframesInvocation extends BaseMediaPolicyToolInvocation<ExtractKe
           mimeType: 'image/jpeg',
           sizeBytes,
           metadata: {
-            omniDisclosure: `原视频 ${originalDuration}${originalResolution} → 关键帧 ${index + 1}/${frames.length}${atTime}，${samplingNote}，时间连续性丢失`,
+            // First frame: header + its marker; the rest: marker only. D8 is
+            // still satisfied — every lossy frame carries a non-empty
+            // disclosure.
+            omniDisclosure: index === 0 ? `${header}\n${marker}` : marker,
             // Marks the artifact as a sampled excerpt for downstream role
             // consumers (output routing selectors, memory coverage).
             omniRole: 'keyframe',
@@ -714,6 +756,29 @@ class ExtractKeyframesInvocation extends BaseMediaPolicyToolInvocation<ExtractKe
       extension: '.jpg',
     });
     const outputPattern = path.join(this.params.outputDir, frameNameTemplate);
+    // Clear any stale frames of THIS source left in outputDir by a prior
+    // run: ffmpeg's %04d counter restarts at 1 each run, so a previous
+    // extraction that produced MORE frames leaves higher-numbered files
+    // that share this source's name template. Unlike the bucketed/uniform
+    // paths — which return the exact files they tracked writing — this
+    // path recovers its result by listing the directory (below), and a
+    // directory listing cannot tell a fresh frame from a stale one. So a
+    // shorter run would otherwise emit the prior run's extra frames as its
+    // own, annotated with `timeSeconds: undefined` (no matching showinfo
+    // pts). Starting from a clean set makes the listing this-run-only.
+    // Re-running an operation supersedes its own output (see
+    // mediaPolicyTool `policyOutputFileName` docstring).
+    const staleFrames = await listFrameFiles(
+      this.params.outputDir,
+      frameNameTemplate,
+    );
+    await Promise.all(
+      staleFrames.map((name) =>
+        fs
+          .rm(path.join(this.params.outputDir, name), { force: true })
+          .catch(() => {}),
+      ),
+    );
     const scenePass = await runFfmpeg(
       [
         '-y',
