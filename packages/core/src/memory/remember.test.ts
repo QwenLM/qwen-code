@@ -580,6 +580,54 @@ describe('remember memory helper', () => {
     expect(rebuildManagedAutoMemoryIndex).toHaveBeenCalledWith(projectRoot);
   });
 
+  it('rebuilds writable stores when the forked agent rejects mid-run', async () => {
+    // A rejection after a write (timeout abort mid model stream, any
+    // mid-run throw) escapes the per-status rebuild below: MEMORY.md loads
+    // verbatim into every future session, so every store the agent could
+    // write to must be repaired before the error surfaces.
+    vi.mocked(runForkedAgent).mockRejectedValue(new Error('boom'));
+
+    await expect(
+      runManagedRememberByAgent({
+        config: createConfig(projectRoot),
+        projectRoot,
+        content: 'Remember this.',
+        contextMode: 'workspace',
+      }),
+    ).rejects.toThrow('boom');
+    expect(rebuildManagedAutoMemoryIndex).toHaveBeenCalledWith(projectRoot);
+    expect(rebuildUserAutoMemoryIndex).toHaveBeenCalledTimes(1);
+  });
+
+  it('rebuilds only the writable scope on rejection for scoped remembers', async () => {
+    vi.mocked(runForkedAgent).mockRejectedValue(new Error('boom'));
+
+    await expect(
+      runManagedRememberByAgent({
+        config: createConfig(projectRoot),
+        projectRoot,
+        content: 'Remember this.',
+        contextMode: 'workspace',
+        scope: 'project',
+      }),
+    ).rejects.toThrow('boom');
+    expect(rebuildManagedAutoMemoryIndex).toHaveBeenCalledWith(projectRoot);
+    expect(rebuildUserAutoMemoryIndex).not.toHaveBeenCalled();
+
+    vi.mocked(rebuildManagedAutoMemoryIndex).mockClear();
+    await expect(
+      runManagedRememberByAgent({
+        config: createConfig(projectRoot),
+        projectRoot,
+        content: 'Remember this.',
+        contextMode: 'workspace',
+        scope: 'user',
+      }),
+    ).rejects.toThrow('boom');
+    expect(rebuildManagedAutoMemoryIndex).not.toHaveBeenCalled();
+    expect(rebuildUserAutoMemoryIndex).toHaveBeenCalledTimes(1);
+  });
+
   it('rebuilds a store whose only write was a hand-written MEMORY.md', async () => {
     const projectEntry = path.join(
       getAutoMemoryRoot(projectRoot),

@@ -8,7 +8,10 @@ import path from 'node:path';
 import type { Config } from '../config/config.js';
 import { ToolNames } from '../tools/tool-names.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
-import { runForkedAgent } from '../agents/forkedAgent.js';
+import {
+  runForkedAgent,
+  type ForkedAgentResult,
+} from '../agents/forkedAgent.js';
 import { getAutoMemoryRoot, getUserAutoMemoryRoot } from './paths.js';
 import { buildManagedAutoMemoryPrompt } from './prompt.js';
 import {
@@ -223,29 +226,50 @@ export async function runManagedRememberByAgent(params: {
       restrictReadsToMemoryPaths: true,
     },
   );
-  const result = await runForkedAgent({
-    name: 'managed-auto-memory-remember',
-    config: scopedConfig,
-    taskPrompt: buildManagedRememberPrompt(params.content, params.projectRoot, {
-      wrapUserContent: true,
-      ...(params.scope ? { scope: params.scope } : {}),
-    }),
-    systemPrompt: buildRememberSystemPrompt(memoryPrompt),
-    maxTurns: params.config.getMemoryAgentMaxTurns() ?? 6,
-    maxTimeMinutes: params.config.getMemoryAgentTimeoutMinutes() ?? 5,
-    extraHistory: params.contextMode === 'clean' ? [] : undefined,
-    preserveEmptyExtraHistory: params.contextMode === 'clean',
-    tools: [
-      ToolNames.READ_FILE,
-      ToolNames.GREP,
-      ToolNames.WRITE_FILE,
-      ToolNames.EDIT,
-    ],
-    abortSignal: params.abortSignal,
-    suppressChatRecording: true,
-    completeAfterFirstSuccessfulWrite: (filePath) =>
-      path.basename(filePath) !== 'MEMORY.md',
-  });
+  let result: ForkedAgentResult;
+  try {
+    result = await runForkedAgent({
+      name: 'managed-auto-memory-remember',
+      config: scopedConfig,
+      taskPrompt: buildManagedRememberPrompt(
+        params.content,
+        params.projectRoot,
+        {
+          wrapUserContent: true,
+          ...(params.scope ? { scope: params.scope } : {}),
+        },
+      ),
+      systemPrompt: buildRememberSystemPrompt(memoryPrompt),
+      maxTurns: params.config.getMemoryAgentMaxTurns() ?? 6,
+      maxTimeMinutes: params.config.getMemoryAgentTimeoutMinutes() ?? 5,
+      extraHistory: params.contextMode === 'clean' ? [] : undefined,
+      preserveEmptyExtraHistory: params.contextMode === 'clean',
+      tools: [
+        ToolNames.READ_FILE,
+        ToolNames.GREP,
+        ToolNames.WRITE_FILE,
+        ToolNames.EDIT,
+      ],
+      abortSignal: params.abortSignal,
+      suppressChatRecording: true,
+      completeAfterFirstSuccessfulWrite: (filePath) =>
+        path.basename(filePath) !== 'MEMORY.md',
+    });
+  } catch (err) {
+    // A rejection after a write (timeout abort mid model stream, any
+    // mid-run throw) escapes the per-status repair below, and MEMORY.md
+    // loads verbatim into every future session — rebuild every store
+    // the agent could write to before surfacing the error.
+    await Promise.all([
+      ...(params.scope !== 'user'
+        ? [rebuildManagedAutoMemoryIndex(params.projectRoot)]
+        : []),
+      ...(params.scope !== 'project' ? [rebuildUserAutoMemoryIndex()] : []),
+    ]).catch((rebuildErr: unknown) => {
+      debugLogger.error('Memory index rebuild failed:', rebuildErr);
+    });
+    throw err;
+  }
 
   const filesWritten = result.filesWritten ?? [];
   const entryFilesWritten = filesWritten.filter(

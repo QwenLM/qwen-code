@@ -533,6 +533,155 @@ describe('runForkedAgent (AgentHeadless path) bound-tool isolation', () => {
     }
   });
 
+  it('resolves completed when the deferred self-abort lands inside the next model round', async () => {
+    // The deferred early-completion abort lands after the reasoning loop's
+    // post-batch abort check, inside the next model round, so the in-flight
+    // stream rejects with an AbortError. The goal write is already on disk
+    // at that point — the run must report the completion instead of
+    // surfacing the self-triggered abort as a failure.
+    const parent = new ConfigImpl(baseParams);
+    const parentRegistry = await parent.createToolRegistry(undefined, {
+      skipDiscovery: true,
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (parent as any).toolRegistry = parentRegistry;
+
+    let executeSignal: AbortSignal | undefined;
+    const spy = vi.spyOn(AgentHeadless, 'create').mockImplementation(
+      async (
+        _name,
+        _config,
+        _promptConfig,
+        _modelConfig,
+        _runConfig,
+        _toolConfig,
+        eventEmitter,
+      ) =>
+        ({
+          execute: vi.fn().mockImplementation(async (_context, signal) => {
+            executeSignal = signal;
+            const emitter = eventEmitter as AgentEventEmitter;
+            emitter.emit(AgentEventType.TOOL_CALL, {
+              subagentId: 'fork',
+              round: 1,
+              callId: 'write-1',
+              name: ToolNames.WRITE_FILE,
+              args: { file_path: '/repo/.qwen/memories/project.md' },
+              description: 'write',
+              timestamp: Date.now(),
+            });
+            emitter.emit(AgentEventType.TOOL_RESULT, {
+              subagentId: 'fork',
+              round: 1,
+              callId: 'write-1',
+              name: ToolNames.WRITE_FILE,
+              success: true,
+              timestamp: Date.now(),
+            });
+            // Yield a macrotask so the queued self-abort fires first,
+            // then fail the way a model stream aborted mid-flight does.
+            await new Promise((resolve) => setImmediate(resolve));
+            throw new DOMException('This operation was aborted', 'AbortError');
+          }),
+          getTerminateMode: vi
+            .fn()
+            .mockReturnValue(AgentTerminateMode.CANCELLED),
+          getFinalText: vi.fn().mockReturnValue(''),
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        }) as any,
+    );
+
+    try {
+      const result = await runForkedAgent({
+        name: 'test-fork',
+        systemPrompt: 'You are a test fork.',
+        taskPrompt: 'write one file',
+        config: parent,
+        completeAfterFirstSuccessfulWrite: true,
+      });
+
+      expect(executeSignal?.aborted).toBe(true);
+      expect(result.status).toBe('completed');
+      expect(result.terminateReason).toBe(AgentTerminateMode.GOAL);
+      expect(result.finalText).toBeUndefined();
+      expect(result.filesWritten).toEqual(['/repo/.qwen/memories/project.md']);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('still rejects when an external abort beats the deferred self-abort', async () => {
+    // An external cancel that fires while the self-abort is queued must
+    // keep rejecting the run: only the run's own early-completion abort
+    // is converted into a completion.
+    const parent = new ConfigImpl(baseParams);
+    const parentRegistry = await parent.createToolRegistry(undefined, {
+      skipDiscovery: true,
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (parent as any).toolRegistry = parentRegistry;
+
+    const external = new AbortController();
+    const spy = vi.spyOn(AgentHeadless, 'create').mockImplementation(
+      async (
+        _name,
+        _config,
+        _promptConfig,
+        _modelConfig,
+        _runConfig,
+        _toolConfig,
+        eventEmitter,
+      ) =>
+        ({
+          execute: vi.fn().mockImplementation(async (_context, _signal) => {
+            const emitter = eventEmitter as AgentEventEmitter;
+            emitter.emit(AgentEventType.TOOL_CALL, {
+              subagentId: 'fork',
+              round: 1,
+              callId: 'write-1',
+              name: ToolNames.WRITE_FILE,
+              args: { file_path: '/repo/.qwen/memories/project.md' },
+              description: 'write',
+              timestamp: Date.now(),
+            });
+            emitter.emit(AgentEventType.TOOL_RESULT, {
+              subagentId: 'fork',
+              round: 1,
+              callId: 'write-1',
+              name: ToolNames.WRITE_FILE,
+              success: true,
+              timestamp: Date.now(),
+            });
+            // The external cancel wins the race against the queued
+            // self-abort.
+            external.abort();
+            await new Promise((resolve) => setImmediate(resolve));
+            throw new DOMException('This operation was aborted', 'AbortError');
+          }),
+          getTerminateMode: vi
+            .fn()
+            .mockReturnValue(AgentTerminateMode.CANCELLED),
+          getFinalText: vi.fn().mockReturnValue(''),
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        }) as any,
+    );
+
+    try {
+      await expect(
+        runForkedAgent({
+          name: 'test-fork',
+          systemPrompt: 'You are a test fork.',
+          taskPrompt: 'write one file',
+          config: parent,
+          completeAfterFirstSuccessfulWrite: true,
+          abortSignal: external.signal,
+        }),
+      ).rejects.toMatchObject({ name: 'AbortError' });
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   it('keeps running past successful writes the early-completion predicate excludes', async () => {
     const parent = new ConfigImpl(baseParams);
     const parentRegistry = await parent.createToolRegistry(undefined, {

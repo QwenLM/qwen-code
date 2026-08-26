@@ -656,6 +656,13 @@ export async function runForkedAgent(
     params.tools !== undefined ? { tools: params.tools } : undefined;
   const executionController = createChildAbortController(params.abortSignal);
   let completedAfterWrite = false;
+  // Identity marker for the run's own early-completion abort, so the
+  // execute catch below can tell it apart from an external cancel
+  // that races it — an external cancel must still reject the run.
+  const selfAbortReason = new DOMException(
+    'Early completion after successful write',
+    'AbortError',
+  );
 
   const emitter = new AgentEventEmitter();
   emitter.on(AgentEventType.TOOL_CALL, (event) => {
@@ -691,7 +698,7 @@ export async function runForkedAgent(
       // the still-unemitted real successes of the same batch with
       // synthetic cancellation failures — truncating filesWritten below
       // the writes that actually landed on disk.
-      setImmediate(() => executionController.abort());
+      setImmediate(() => executionController.abort(selfAbortReason));
     }
   });
 
@@ -716,10 +723,25 @@ export async function runForkedAgent(
         await headless.execute(context, executionController.signal);
       });
 
-    if (params.suppressChatRecording) {
-      await runWithChatRecordingSuppressed(execute);
-    } else {
-      await execute();
+    try {
+      if (params.suppressChatRecording) {
+        await runWithChatRecordingSuppressed(execute);
+      } else {
+        await execute();
+      }
+    } catch (err) {
+      // The deferred self-abort lands after the reasoning loop's
+      // post-batch abort check, inside the next model round, so the
+      // run can reject with an AbortError even though the goal write
+      // is already on disk. Fall through to the completedAfterWrite
+      // return for that self-triggered abort; every other failure
+      // (external cancels included) propagates.
+      if (
+        !completedAfterWrite ||
+        executionController.signal.reason !== selfAbortReason
+      ) {
+        throw err;
+      }
     }
 
     const terminateReason = headless.getTerminateMode();
