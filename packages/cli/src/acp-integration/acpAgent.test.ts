@@ -16339,6 +16339,13 @@ describe('QwenAgent extMethod renameSession routing', () => {
     expect(vi.mocked(runWithAcpRuntimeOutputDir).mock.calls[0]![0]).toBe(
       perRequestSettings,
     );
+    // Pin the per-request cwd too: settings must be resolved FROM the
+    // request's directory and routing must target it — not the boot
+    // workspace's dir.
+    expect(loadSettings).toHaveBeenCalledWith('/tmp/workspace-a');
+    expect(vi.mocked(runWithAcpRuntimeOutputDir).mock.calls[0]![1]).toBe(
+      '/tmp/workspace-a',
+    );
 
     mockConnectionState.resolve();
     await agentPromise;
@@ -16372,6 +16379,10 @@ describe('QwenAgent extMethod renameSession routing', () => {
     expect(vi.mocked(runWithAcpRuntimeOutputDir).mock.calls[0]![0]).toBe(
       perRequestSettings,
     );
+    expect(loadSettings).toHaveBeenCalledWith('/tmp/workspace-a');
+    expect(vi.mocked(runWithAcpRuntimeOutputDir).mock.calls[0]![1]).toBe(
+      '/tmp/workspace-a',
+    );
 
     mockConnectionState.resolve();
     await agentPromise;
@@ -16401,6 +16412,10 @@ describe('QwenAgent extMethod renameSession routing', () => {
     expect(listSessions).toHaveBeenCalled();
     expect(vi.mocked(runWithAcpRuntimeOutputDir).mock.calls[0]![0]).toBe(
       perRequestSettings,
+    );
+    expect(loadSettings).toHaveBeenCalledWith('/tmp/workspace-a');
+    expect(vi.mocked(runWithAcpRuntimeOutputDir).mock.calls[0]![1]).toBe(
+      '/tmp/workspace-a',
     );
 
     mockConnectionState.resolve();
