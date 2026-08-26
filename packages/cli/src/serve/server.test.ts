@@ -22949,7 +22949,7 @@ describe('createServeApp', () => {
       expect(badBody.body.code).toBe('invalid_enabled_flag');
     });
 
-    it('returns the requested name and deferred activation without a child', async () => {
+    it('trims and returns the requested name with deferred activation without a child', async () => {
       const bridge = fakeBridge({
         workspaceSkillsImpl: async () => ({
           v: 1,
@@ -22969,7 +22969,7 @@ describe('createServeApp', () => {
         primaryWorkspaceTrusted: true,
       });
       const res = await auth(
-        request(app).post('/workspace/skills/ReViEw/enable'),
+        request(app).post('/workspace/skills/%20ReViEw%20/enable'),
       ).send({ enabled: false });
 
       expect(res.status).toBe(200);

@@ -1387,8 +1387,9 @@ Recommended poll cadence: aligned with whatever already polls `/workspace/mcp`; 
 
 `level` is one of `project`, `user`, `extension`, or `bundled`.
 `userInvocable` (boolean, optional) is omitted for normal skills (meaning
-`true`) and is present only as `false` when the skill cannot be invoked manually
-or toggled through the skill API. `modelInvocable` is independent: `false`
+`true`) and is present only as `false` when the skill cannot be invoked
+manually. It does not gate the settings-only Skill toggle routes described
+below. `modelInvocable` is independent: `false`
 means the skill remains manually available but is hidden from model invocation.
 `installedPath` is the existing absolute path to the skill's `SKILL.md`; the
 daemon returns it as stored without separately resolving symlinks or
@@ -2848,7 +2849,7 @@ Errors:
 - `400 {code: 'invalid_enabled_flag'}` — `enabled` missing or non-boolean.
 - `403 {code: 'untrusted_workspace'}` — the selected workspace is not trusted.
 
-The mutation reuses the workspace-scoped `settings_changed` event for each changed key (`skills.disabled` and/or `skills.enabled`); it does not add a new event type. Each of those events includes the same `mutation` object: `{ id, kind: 'skill_toggle', skills: [{ name, enabled }], activation, sessionsRefreshed, sessionsFailed }`. `id` correlates every settings event produced by one toggle request. `skills` lists the requested names and resulting enabled states of Skills that actually changed. Workspace skill status cells include optional `disabledReason: 'hard' | 'default' | 'inactive_extension'` and `lockedScope: 'system' | 'user' | 'systemDefaults'` fields.
+The mutation reuses the workspace-scoped `settings_changed` event for each changed key (`skills.disabled` and/or `skills.enabled`); it does not add a new event type. Each of those events includes the same `mutation` object: `{ id, kind: 'skill_toggle', skills: [{ name, enabled }], activation, sessionsRefreshed, sessionsFailed }`. `id` correlates every settings event produced by one toggle request. `skills` lists the requested names and requested enabled values whose workspace settings declarations actually changed; a higher-scope setting can leave effective availability unchanged. Workspace skill status cells include optional `disabledReason: 'hard' | 'default' | 'inactive_extension'` and `lockedScope: 'system' | 'user' | 'systemDefaults'` fields.
 
 #### `POST /workspace/skills/enable`
 

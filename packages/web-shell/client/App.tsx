@@ -4775,7 +4775,7 @@ export function App({
         if (request !== loadedSkillsRequestRef.current) return;
         setLoadedSkills(availableSkillInfos(status));
         setLoadedSkillsReady(true);
-        return true;
+        return status;
       } catch (error) {
         if (notifyOnError) {
           pushToast(
@@ -4846,17 +4846,36 @@ export function App({
     }
     pendingSkillTogglesByContextRef.current.set(contextKey, pendingToggles);
     let cancelled = false;
-    void reloadLoadedSkills(workspaceCwd, true).then((loaded) => {
-      if (cancelled || !loaded) return;
+    void reloadLoadedSkills(workspaceCwd, true).then((status) => {
+      if (cancelled || !status) return;
       markHandled();
       if (!sessionId) {
         pendingSkillTogglesByContextRef.current.delete(contextKey);
         return;
       }
+      const availableWorkspaceSkillNames = new Set(
+        status.skills
+          .filter((skill) => skill.status === 'ok')
+          .map((skill) => skill.name.toLowerCase()),
+      );
+      const pendingForSession = pendingToggles.filter(
+        (toggle) =>
+          !toggle.enabled ||
+          availableWorkspaceSkillNames.has(toggle.name.toLowerCase()),
+      );
+      if (pendingForSession.length === 0) {
+        pendingSkillTogglesByContextRef.current.delete(contextKey);
+        setLoadedSkillsFallback(undefined);
+        return;
+      }
+      pendingSkillTogglesByContextRef.current.set(
+        contextKey,
+        pendingForSession,
+      );
       const currentSnapshot = connectionSkillSnapshotRef.current;
       if (
         currentSnapshot.sessionId === sessionId &&
-        sessionSkillsReflectToggle(currentSnapshot.skills, pendingToggles)
+        sessionSkillsReflectToggle(currentSnapshot.skills, pendingForSession)
       ) {
         pendingSkillTogglesByContextRef.current.delete(contextKey);
         setLoadedSkillsFallback(undefined);
