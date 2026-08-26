@@ -45,6 +45,9 @@ jobs:
     # the runtime preflight below, per #9556).
     # Kill-switch: MAINTAINER_ECS_RUNNER_DISABLED.
     runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    # A wedged shard must free the pool runner well before GitHub's
+    # 360-minute default; 60 matches ci.yml's pool jobs.
+    timeout-minutes: 60
     # Skip on fork PRs: forks have no access to repository secrets
     # (OPENAI_*, DOCKERHUB_*), so the matrix would fail unconditionally
     # and show misleading red status. Same-repo PRs run normally.
@@ -126,6 +129,7 @@ jobs:
           mkdir -p "${cache_dir}"
           echo "NPM_CONFIG_CACHE=${cache_dir}" >> "${GITHUB_ENV}"
           echo "Using persistent npm cache at ${cache_dir}"
+          du -sh "${cache_dir}" 2>/dev/null || true
 
       - name: 'Configure npm for rate limiting'
         run: |-
@@ -212,7 +216,7 @@ jobs:
         if: |-
           ${{ always() && matrix.sandbox == 'sandbox:docker' && runner.environment == 'self-hosted' }}
         run: |-
-          docker image prune --force --filter 'until=24h' > /dev/null 2>&1 || true
+          docker image prune --force --filter 'until=24h' || echo "::warning::docker image prune failed on ${RUNNER_NAME:-this runner}; dangling images may accumulate"
 
   e2e-test-macos:
     name: 'E2E Test - macOS - shard ${{ matrix.shard }}'

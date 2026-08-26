@@ -1,4 +1,4 @@
-// Runner-routing regression guards for ci.yml and serve-ab.yml.
+// Runner-routing regression guards for ci.yml, serve-ab.yml and e2e.yml.
 //
 // classify_pr carries the routing logic TWICE — the `runs-on` expression
 // (which selects the classify job's own runner) and the `pick_runner` shell
@@ -434,6 +434,13 @@ describe('e2e.yml e2e-test-linux runner routing', () => {
   const job = e2eDoc.jobs['e2e-test-linux'];
   const runsOn = String(job['runs-on']);
 
+  it('pins the repository guard clause the matrix substitutes away', () => {
+    // evalRunsOn substitutes the repo clause with a constant; deleting it
+    // from the workflow would leave every evaluation green while fork runs
+    // queue on a label no fork registers. Pin the real text.
+    assert.match(runsOn, /github\.repository == 'QwenLM\/qwen-code'/);
+  });
+
   it('reaches the persistent pool on every trusted trigger', () => {
     for (const eventName of ['push', 'schedule', 'workflow_dispatch']) {
       assert.deepEqual(
@@ -466,7 +473,14 @@ describe('e2e.yml e2e-test-linux runner routing', () => {
     // The simple repo+kill-switch expression above is only safe because no
     // lane of this workflow ever runs PR-authored workflow code. Adding a
     // pull_request trigger must force a deliberate routing rework.
-    const triggers = Object.keys(e2eDoc.on ?? e2eDoc[true] ?? {});
+    // `on:` is equally valid as a map, a sequence, or a scalar; normalize
+    // before enumerating, or a non-map form enumerates indices, not names.
+    const onMap = e2eDoc.on ?? e2eDoc[true] ?? {};
+    const triggers = Array.isArray(onMap)
+      ? onMap.map(String)
+      : typeof onMap === 'string'
+        ? [onMap]
+        : Object.keys(onMap);
     assert.ok(triggers.length > 0, 'could not read the trigger map');
     for (const trigger of triggers) {
       assert.ok(
@@ -484,11 +498,24 @@ describe('e2e.yml e2e-test-linux runner routing', () => {
       String(s.uses || '').startsWith('actions/checkout'),
     );
     const prune = names.indexOf('Prune dangling docker images');
+    // GitHub's default is 360 minutes; a wedged shard would hold a pool
+    // runner for all of it. Pin the ci.yml pool precedent.
+    assert.equal(job['timeout-minutes'], 60);
     // Fail-fast daemon probe (#9556) before any expensive step, only on the
     // docker leg.
     assert.ok(preflight !== -1, 'the docker preflight must exist');
     assert.match(job.steps[preflight].if, /sandbox:docker/);
     assert.match(job.steps[preflight].run, /docker info/);
+    assert.match(job.steps[preflight].run, /exit 1/);
+    assert.ok(
+      preflight < names.indexOf('Install dependencies'),
+      'the docker preflight must fail fast, before any expensive step',
+    );
+    assert.ok(
+      !('continue-on-error' in job.steps[preflight]) &&
+        !('continue-on-error' in job),
+      'a failed docker probe must fail the job, not downgrade to a warning',
+    );
     // Ownership heal before checkout, self-hosted only.
     assert.ok(heal !== -1, 'the ownership heal must exist');
     assert.equal(
@@ -496,6 +523,7 @@ describe('e2e.yml e2e-test-linux runner routing', () => {
       "${{ runner.environment == 'self-hosted' }}",
     );
     assert.match(job.steps[heal].run, /chown -R .* "\$GITHUB_WORKSPACE"/);
+    assert.match(job.steps[heal].run, /chmod -R u\+rwX/);
     assert.ok(heal < checkout, 'the heal must precede the checkout');
     // Dangling-only prune at the end: always(), docker leg, pool only —
     // and never a form that could remove tagged images other jobs use.
@@ -504,10 +532,15 @@ describe('e2e.yml e2e-test-linux runner routing', () => {
     assert.match(job.steps[prune].if, /sandbox:docker/);
     assert.match(job.steps[prune].if, /runner\.environment == 'self-hosted'/);
     assert.match(job.steps[prune].run, /docker image prune --force/);
+    assert.match(job.steps[prune].run, /until=24h/);
     assert.doesNotMatch(job.steps[prune].run, /--all|-a\b/);
+    // A failing prune must stay diagnosable: surface a warning instead of a
+    // silent `|| true`, and keep the daemon's error out of /dev/null.
+    assert.match(job.steps[prune].run, /\|\| echo "::warning::/);
+    assert.doesNotMatch(job.steps[prune].run, /\/dev\/null/);
     assert.ok(
       prune === job.steps.length - 1,
-      'the prune must run after the test step',
+      'the prune must be the final step so nothing dirties the pool after it',
     );
   });
 
