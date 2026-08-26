@@ -577,10 +577,11 @@ describe('BackgroundShellRegistry', () => {
         vi.resetModules();
         vi.doMock('node:fs', async (importOriginal) => {
           const actual = await importOriginal<typeof import('node:fs')>();
-          return {
+          const modified = {
             ...actual,
             constants: { ...actual.constants, O_NOFOLLOW: undefined },
           };
+          return { ...modified, default: modified };
         });
 
         try {
