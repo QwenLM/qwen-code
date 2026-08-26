@@ -9,6 +9,7 @@ import { basename, dirname, join, resolve } from 'node:path';
 import {
   inertPath,
   tmpFile,
+  tmpPrefix,
   probeWorktreePath,
   scratchLabel,
   scratchWorktreePath,
@@ -31,10 +32,10 @@ describe('PARSE_ARGS_REPORT', () => {
 describe('tmpFile — target is a single safe component', () => {
   it('keeps ordinary labels intact', () => {
     expect(tmpFile('pr-6771', 'diff.txt')).toContain(
-      'qwen-review-pr-6771-diff.txt',
+      'qwen-review-pr-6771~diff.txt',
     );
     expect(tmpFile('local', 'plan.json')).toContain(
-      'qwen-review-local-plan.json',
+      'qwen-review-local~plan.json',
     );
   });
 
@@ -46,7 +47,7 @@ describe('tmpFile — target is a single safe component', () => {
     expect(dirname(p)).toBe(join('.qwen', 'tmp'));
     // The separator is flattened to an underscore, so the target survives as a
     // single component directly under the temp dir.
-    expect(basename(p)).toBe('qwen-review-src_foo.ts-diff.txt');
+    expect(basename(p)).toBe('qwen-review-src_foo.ts~diff.txt');
   });
 
   it('refuses to escape the temp dir with a crafted target', () => {
@@ -54,7 +55,22 @@ describe('tmpFile — target is a single safe component', () => {
     expect(dirname(p)).toBe(join('.qwen', 'tmp'));
     expect(p).not.toContain('..');
     // The dot-segment traversal is stripped to a plain component, not nested.
-    expect(basename(p)).toBe('qwen-review-evil-diff.txt');
+    expect(basename(p)).toBe('qwen-review-evil~diff.txt');
+  });
+});
+
+describe('tmpPrefix — prefix-free across dash-extended twins', () => {
+  it('does not match a concurrent src/foo-bar family when sweeping src/foo', () => {
+    // safeTarget keeps dashes, so `src/foo` → `src_foo` is a strict prefix of
+    // `src/foo-bar` → `src_foo-bar`. A family separator inside that alphabet
+    // makes cleanup's startsWith sweep delete the twin's live artifacts.
+    const prefix = tmpPrefix('src/foo');
+    expect(basename(tmpFile('src/foo', 'diff.txt')).startsWith(prefix)).toBe(
+      true,
+    );
+    expect(
+      basename(tmpFile('src/foo-bar', 'diff.txt')).startsWith(prefix),
+    ).toBe(false);
   });
 });
 

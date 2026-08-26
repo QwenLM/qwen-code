@@ -195,6 +195,13 @@ export function reviewBranch(prNumber: string | number): string {
 }
 
 /**
+ * Joiner between the target token and the per-family suffix. Outside
+ * {@link safeTarget}'s alphabet so cleanup's `startsWith(tmpPrefix(target))`
+ * sweep cannot match a dash-extended twin.
+ */
+const TMP_FAMILY_SEP = '~';
+
+/**
  * Per-target side-file path (review JSON, PR context, presubmit report).
  *
  * Files live under `.qwen/tmp/` rather than the OS temp dir so the path is
@@ -203,12 +210,21 @@ export function reviewBranch(prNumber: string | number): string {
  * and so they're scoped to the project rather than the user's whole machine.
  */
 export function tmpFile(target: string, suffix: string): string {
-  return join(REVIEW_TMP_DIR, `qwen-review-${safeTarget(target)}-${suffix}`);
+  return join(
+    REVIEW_TMP_DIR,
+    `qwen-review-${safeTarget(target)}${TMP_FAMILY_SEP}${suffix}`,
+  );
 }
 
-/** Filename prefix used by `tmpFile`; useful for cleanup globbing. */
+/**
+ * Filename prefix used by `tmpFile`; useful for cleanup globbing.
+ *
+ * The joiner is outside safeTarget's alphabet (`A-Za-z0-9._-`) so a token
+ * that is a dash-prefix of another (`src/foo` → `src_foo`, `src/foo-bar` →
+ * `src_foo-bar`) cannot make this prefix match the twin's family.
+ */
 export function tmpPrefix(target: string): string {
-  return `qwen-review-${safeTarget(target)}-`;
+  return `qwen-review-${safeTarget(target)}${TMP_FAMILY_SEP}`;
 }
 
 /**

@@ -3727,7 +3727,7 @@ describe('fetch-pr --resume', () => {
     // other read (resume marker, session ledger) is ENOENT.
     producerMocks.readFileSync.mockImplementation((path?: unknown) => {
       if (path === OUT) return prevReport();
-      if (String(path).endsWith('qwen-review-pr-42-diff.txt')) {
+      if (String(path).endsWith('qwen-review-pr-42~diff.txt')) {
         return Buffer.from(DIFF_BYTES) as unknown as string;
       }
       throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
@@ -3892,7 +3892,7 @@ describe('fetch-pr --resume', () => {
   it('falls through when the diff bytes changed — the content key', async () => {
     producerMocks.readFileSync.mockImplementation((path?: unknown) => {
       if (path === OUT) return prevReport();
-      if (String(path).endsWith('qwen-review-pr-42-diff.txt')) {
+      if (String(path).endsWith('qwen-review-pr-42~diff.txt')) {
         return Buffer.from('tampered') as unknown as string;
       }
       throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
@@ -4035,7 +4035,7 @@ describe('fetch-pr --resume', () => {
   it('refuses on an explicit effort different from the recorded run', async () => {
     producerMocks.readFileSync.mockImplementation((path?: unknown) => {
       if (path === OUT) return prevReport({ effort: 'medium' });
-      if (String(path).endsWith('qwen-review-pr-42-diff.txt')) {
+      if (String(path).endsWith('qwen-review-pr-42~diff.txt')) {
         return Buffer.from(DIFF_BYTES) as unknown as string;
       }
       throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
@@ -4051,7 +4051,7 @@ describe('fetch-pr --resume', () => {
   it('resumes at the recorded effort when none is passed, and says so', async () => {
     producerMocks.readFileSync.mockImplementation((path?: unknown) => {
       if (path === OUT) return prevReport({ effort: 'medium' });
-      if (String(path).endsWith('qwen-review-pr-42-diff.txt')) {
+      if (String(path).endsWith('qwen-review-pr-42~diff.txt')) {
         return Buffer.from(DIFF_BYTES) as unknown as string;
       }
       throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
@@ -4221,7 +4221,7 @@ describe('fetch-pr --resume bookkeeping is counted, not merely called', () => {
     vi.clearAllMocks();
     producerMocks.readFileSync.mockImplementation((path?: unknown) => {
       if (path === OUT) return prevReport();
-      if (String(path).endsWith('qwen-review-pr-42-diff.txt')) {
+      if (String(path).endsWith('qwen-review-pr-42~diff.txt')) {
         return Buffer.from(DIFF_BYTES) as unknown as string;
       }
       throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
@@ -4440,7 +4440,7 @@ describe('fetch-pr --resume bookkeeping is counted, not merely called', () => {
           return realFs.readFileSync(String(path), 'utf8');
         }
         if (path === OUT) return prevReport();
-        if (String(path).endsWith('qwen-review-pr-42-diff.txt')) {
+        if (String(path).endsWith('qwen-review-pr-42~diff.txt')) {
           return Buffer.from(DIFF_BYTES) as unknown as string;
         }
         throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });

@@ -24,7 +24,8 @@ import {
   recordedSeverityFloor,
   reviewWriteAuthorization,
 } from './lib/authorization.js';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { tmpFile } from './lib/paths.js';
 import { promptRecordDir, briefPath } from './lib/prompt-record.js';
 import { parseLedger } from './lib/ledger.js';
 
@@ -164,9 +165,8 @@ const CAPTURED_DIFF_FIXTURE = [
 ].join('\n');
 
 function writeCapturedDiff(pr: number): string {
-  const dirPath = join('.qwen', 'tmp');
-  mkdirSync(dirPath, { recursive: true });
-  const p = join(dirPath, `qwen-review-pr-${pr}-diff.txt`);
+  const p = tmpFile(`pr-${pr}`, 'diff.txt');
+  mkdirSync(dirname(p), { recursive: true });
   writeFileSync(p, CAPTURED_DIFF_FIXTURE, 'utf8');
   return p;
 }
@@ -3623,7 +3623,7 @@ describe('what the reviewer caught in this change', () => {
 // receipt lands there.
 describe('submit receipt (producer half of the audit contract)', () => {
   const receiptPath = () =>
-    join(dir, '.qwen', 'tmp', 'qwen-review-pr-6771-submit-receipt.json');
+    join(dir, tmpFile('pr-6771', 'submit-receipt.json'));
 
   const authorizedPost = (over: Record<string, unknown> = {}) =>
     args({ userAuthorized: true, ...over });

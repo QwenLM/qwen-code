@@ -78,6 +78,7 @@ import {
   writeRoundCapStop,
 } from './lib/deadline.js';
 import { runCleanup } from './cleanup.js';
+import { tmpFile } from './lib/paths.js';
 
 const PLAN = {
   diffPathAbsolute: '/abs/.qwen/tmp/qwen-review-pr-9206-diff.txt',
@@ -498,12 +499,7 @@ describe('issue #9206 — Step 9 cleanup must not destroy a non-converged run’
     // deletes run A's history with no Kept line: the evidence loss this
     // issue reports, recurring for the killed-run shape.
     mkdirSync(join(dir, '.qwen', 'tmp'), { recursive: true });
-    const planPath = join(
-      dir,
-      '.qwen',
-      'tmp',
-      'qwen-review-pr-9206-fetch.json',
-    );
+    const planPath = join(dir, tmpFile('pr-9206', 'fetch.json'));
     writeFileSync(planPath, JSON.stringify({ prNumber: '9206' }));
     const recordDir = promptRecordDir(planPath);
     mkdirSync(recordDir, { recursive: true });
@@ -529,12 +525,7 @@ describe('issue #9206 — Step 9 cleanup must not destroy a non-converged run’
     // history of the killed run; the sweep must keep them on that signal
     // alone.
     mkdirSync(join(dir, '.qwen', 'tmp'), { recursive: true });
-    const planPath = join(
-      dir,
-      '.qwen',
-      'tmp',
-      'qwen-review-pr-9206-fetch.json',
-    );
+    const planPath = join(dir, tmpFile('pr-9206', 'fetch.json'));
     writeFileSync(planPath, JSON.stringify({ prNumber: '9206' }));
     const recordDir = promptRecordDir(planPath);
     mkdirSync(recordDir, { recursive: true });
@@ -560,12 +551,7 @@ describe('issue #9206 — Step 9 cleanup must not destroy a non-converged run’
     // the first cleanup explicitly kept. A record directory whose plan is
     // gone is itself the retained shape: keep it.
     mkdirSync(join(dir, '.qwen', 'tmp'), { recursive: true });
-    const planPath = join(
-      dir,
-      '.qwen',
-      'tmp',
-      'qwen-review-pr-9206-fetch.json',
-    );
+    const planPath = join(dir, tmpFile('pr-9206', 'fetch.json'));
     const recordDir = promptRecordDir(planPath);
     mkdirSync(recordDir, { recursive: true });
     writeFileSync(
@@ -597,12 +583,7 @@ describe('issue #9206 — Step 9 cleanup must not destroy a non-converged run’
     // swept the older evidence beside it. `a-broken-symlink` sorts before
     // the record, so the old code hit the throw first.
     mkdirSync(join(dir, '.qwen', 'tmp'), { recursive: true });
-    const planPath = join(
-      dir,
-      '.qwen',
-      'tmp',
-      'qwen-review-pr-9206-fetch.json',
-    );
+    const planPath = join(dir, tmpFile('pr-9206', 'fetch.json'));
     const recordDir = promptRecordDir(planPath);
     mkdirSync(recordDir, { recursive: true });
     writeFileSync(
@@ -630,12 +611,7 @@ describe('issue #9206 — Step 9 cleanup must not destroy a non-converged run’
     // `<` \u2192 `!==` mutant (retain a converged run's own records forever,
     // under a false Kept claim) from shipping green.
     mkdirSync(join(dir, '.qwen', 'tmp'), { recursive: true });
-    const planPath = join(
-      dir,
-      '.qwen',
-      'tmp',
-      'qwen-review-pr-9206-fetch.json',
-    );
+    const planPath = join(dir, tmpFile('pr-9206', 'fetch.json'));
     writeFileSync(planPath, JSON.stringify({ prNumber: '9206' }));
     const recordDir = promptRecordDir(planPath);
     mkdirSync(recordDir, { recursive: true });
@@ -653,12 +629,7 @@ describe('issue #9206 — Step 9 cleanup must not destroy a non-converged run’
     // The real run's shape: the loop never converged and hit the 5-round cap,
     // so the builder wrote its round-cap stop marker INSIDE the record dir.
     mkdirSync(join(dir, '.qwen', 'tmp'), { recursive: true });
-    const planPath = join(
-      dir,
-      '.qwen',
-      'tmp',
-      'qwen-review-pr-9206-fetch.json',
-    );
+    const planPath = join(dir, tmpFile('pr-9206', 'fetch.json'));
     writeFileSync(planPath, JSON.stringify({ prNumber: '9206' }));
     const recordDir = promptRecordDir(planPath);
     mkdirSync(recordDir, { recursive: true });
