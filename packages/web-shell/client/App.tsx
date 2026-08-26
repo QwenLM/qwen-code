@@ -1240,6 +1240,7 @@ const emptyComposerApi: WebShellComposerApi = {
 };
 
 const EMPTY_BOTTOM_STATUS_ITEMS: readonly WebShellBottomStatusItem[] = [];
+const EMPTY_ADDITIONAL_SLASH_COMMANDS: readonly CommandInfo[] = [];
 const DEFAULT_CHAT_MAX_WIDTH = 1000;
 const DEFAULT_CHAT_HEADER_ITEMS: readonly WebShellChatHeaderItem[] = [
   'title',
@@ -2023,7 +2024,7 @@ export function App({
   composerToolbarActions,
   compactComposerOverlays = false,
   autoSubmitSlashCommands = false,
-  additionalSlashCommands = [],
+  additionalSlashCommands = EMPTY_ADDITIONAL_SLASH_COMMANDS,
   contextUsageAlwaysVisible = false,
   userMessageEditing = false,
   onUserMessageEditRequest,
@@ -5844,11 +5845,7 @@ export function App({
       sessionId: connection.sessionId,
       sessionName: sessionDisplayName,
     });
-  }, [
-    connection.sessionId,
-    onSessionInfoChange,
-    sessionDisplayName,
-  ]);
+  }, [connection.sessionId, onSessionInfoChange, sessionDisplayName]);
   const [currentMode, setCurrentMode] = useState('default');
   const currentModeRef = useRef(currentMode);
   currentModeRef.current = currentMode;
