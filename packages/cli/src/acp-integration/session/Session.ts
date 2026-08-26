@@ -48,6 +48,7 @@ import type {
   VisionBridgeResult,
   MemoryWriteCandidate,
   CronTaskDelivery,
+  CronRunSessionOutcome,
   InvocationContextV1,
   ChatRecordingService,
   TurnResultRecordPayload,
@@ -204,7 +205,6 @@ import {
   collectSessionTurnState,
   computeInitialTurnFromHistory as computeInitialTurnFromHistoryCore,
   buildGoalContinuationParts,
-  type CronRunSessionOutcome,
 } from '@qwen-code/qwen-code-core';
 import { NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE } from '@qwen-code/acp-bridge/bridgeErrors';
 import { CHANNEL_PROMPT_META_KEY } from '@qwen-code/channel-base';
@@ -212,6 +212,7 @@ import { QWEN_CODE_SERVE_ENV } from '../../config/acp-channel-fallback.js';
 import { ENV_ACP_REPEATED_TOOL_FAILURE_GUARD } from '../../config/shared-env-keys.js';
 import {
   buildScheduledTaskRunPrompt,
+  scheduledTaskRunSessionName,
   scheduledTaskRunSourceId,
   SCHEDULED_TASK_RUN_SOURCE_TYPE,
 } from '../../runtime/scheduled-task-run.js';
@@ -7567,6 +7568,7 @@ export class Session implements SessionContext {
   async #dispatchCronToFreshSession(job: CronFire): Promise<void> {
     const scheduler = this.config.getCronScheduler();
     const taskId = job.id ?? 'unknown';
+    const triggeredAt = job.lastFiredAt ?? Date.now();
     const record = async (outcome: CronRunSessionOutcome): Promise<void> => {
       if (!job.id || job.lastFiredAt === undefined) return;
       await scheduler
@@ -7587,13 +7589,17 @@ export class Session implements SessionContext {
             name: job.name,
             cron: job.cronExpr ?? '',
             prompt: job.prompt,
-            triggeredAt: job.lastFiredAt ?? Date.now(),
+            triggeredAt,
             trigger: 'scheduled',
           }),
           completion: 'sent',
-          // Title the child from the task, not from the built prompt whose
-          // first line is the execution-context header.
-          name: job.name ?? job.prompt,
+          // Title the child from the task and its trigger time — never from
+          // the built prompt, whose first line is the execution-context
+          // header. Same shape the manual-run route gives its children.
+          name: scheduledTaskRunSessionName(
+            job.name ?? job.prompt,
+            triggeredAt,
+          ),
           ...(job.id
             ? {
                 sourceType: SCHEDULED_TASK_RUN_SOURCE_TYPE,

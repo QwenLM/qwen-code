@@ -25,6 +25,41 @@ function cleanMetadataLine(value: string): string {
     .replace(/\s+/g, ' ');
 }
 
+/** Same ceiling the scheduled-task route and the sub-session launcher apply
+ * to a session title, so the label survives their re-cleaning untruncated. */
+const MAX_RUN_SESSION_NAME_LENGTH = 60;
+
+function pad2(n: number): string {
+  return String(n).padStart(2, '0');
+}
+
+/**
+ * Titles the fresh child session of one per-run fire: the task's label plus
+ * the local trigger time (`MM-DD HH:mm`), so consecutive runs of the same task
+ * are distinguishable in the session list. The label is cleaned like every
+ * other scheduled-task session name and cut on a code-point boundary so the
+ * time suffix always fits within the shared title ceiling.
+ */
+export function scheduledTaskRunSessionName(
+  label: string,
+  triggeredAt: number,
+): string {
+  const at = new Date(triggeredAt);
+  const suffix = ` · ${pad2(at.getMonth() + 1)}-${pad2(at.getDate())} ${pad2(
+    at.getHours(),
+  )}:${pad2(at.getMinutes())}`;
+  const cleaned = cleanMetadataLine(label);
+  const budget = MAX_RUN_SESSION_NAME_LENGTH - suffix.length;
+  let short = cleaned;
+  if (cleaned.length > budget) {
+    let cut = budget - 1;
+    const boundary = cleaned.charCodeAt(cut - 1);
+    if (boundary >= 0xd800 && boundary <= 0xdbff) cut -= 1;
+    short = `${cleaned.slice(0, cut)}…`;
+  }
+  return `${short}${suffix}`;
+}
+
 export function buildScheduledTaskRunPrompt(input: {
   id: string;
   name?: string;

@@ -2579,7 +2579,7 @@ describe('Session', () => {
             /^Scheduled task: Review PRs\nTask ID: task-1\nSchedule: 0 \* \* \* \*\nTriggered at: 1970-01-01T00:00:00\.123Z\nTrigger: scheduled\nSession: new chat for this run\n\nThis is a scheduled task run\. Execute the instructions below now\. Do not create or modify a schedule unless the instructions explicitly ask you to\.\n\nreview the next PR$/,
           ),
           completion: 'sent',
-          name: 'Review PRs',
+          name: expect.stringMatching(/^Review PRs · \d{2}-\d{2} \d{2}:\d{2}$/),
           sourceType: 'default',
           sourceId: 'scheduled_task_run:task-1',
           callerSessionId: 'test-session-id',
@@ -2635,7 +2635,11 @@ describe('Session', () => {
         SERVE_CONTROL_EXT_METHODS.createSubSession,
         // Untitled task: the child is named from the task prompt, never from
         // the execution-context header.
-        expect.objectContaining({ name: 'review the next PR' }),
+        expect.objectContaining({
+          name: expect.stringMatching(
+            /^review the next PR · \d{2}-\d{2} \d{2}:\d{2}$/,
+          ),
+        }),
       );
     });
     // The fire is not lost: it runs here, and the run record says so.

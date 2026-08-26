@@ -451,7 +451,10 @@ describe('scheduled-tasks routes', () => {
     });
     expect(h.bridge.named[1]).toEqual({
       sessionId: childSessionId,
-      displayName: 'Review PRs',
+      // Task label + local trigger time, so runs are told apart in the list.
+      displayName: expect.stringMatching(
+        /^Review PRs · \d{2}-\d{2} \d{2}:\d{2}$/,
+      ),
     });
     expect(h.bridge.prompts).toHaveLength(1);
     expect(h.bridge.prompts[0]).toMatchObject({ sessionId: childSessionId });

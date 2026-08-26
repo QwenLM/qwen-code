@@ -7,6 +7,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   buildScheduledTaskRunPrompt,
+  scheduledTaskRunSessionName,
   scheduledTaskRunSourceId,
 } from './scheduled-task-run.js';
 
@@ -45,6 +46,20 @@ describe('scheduled task run metadata', () => {
     expect(prompt).toContain('Scheduled task: Daily digest\n');
     expect(prompt).toContain('Trigger: manual\n');
     expect(prompt).toMatch(/\n\nline one\nline two$/);
+  });
+
+  it('titles a run session with the task label and local trigger time', () => {
+    const at = new Date(2026, 7, 26, 16, 0);
+    expect(
+      scheduledTaskRunSessionName('  Hourly\x1b[31m  review ', at.getTime()),
+    ).toBe('Hourly review · 08-26 16:00');
+  });
+
+  it('keeps the time suffix when a long label is cut to the title ceiling', () => {
+    const at = new Date(2026, 0, 5, 9, 7);
+    const name = scheduledTaskRunSessionName('x'.repeat(80), at.getTime());
+    expect(name).toHaveLength(60);
+    expect(name.endsWith('… · 01-05 09:07')).toBe(true);
   });
 
   it('builds a stable source id for the run session', () => {

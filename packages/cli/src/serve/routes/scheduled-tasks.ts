@@ -73,6 +73,7 @@ import {
 import type { ConversationRuntimeActivityGate } from '../conversations/conversation-runtime-activity.js';
 import {
   buildScheduledTaskRunPrompt,
+  scheduledTaskRunSessionName,
   scheduledTaskRunSourceId,
   SCHEDULED_TASK_RUN_SOURCE_TYPE,
 } from '../../runtime/scheduled-task-run.js';
@@ -358,8 +359,7 @@ export async function createScheduledTaskWithExistingSession(
     enabled: input.enabled !== false,
     sessionId: input.sessionId,
     sessionOwnedByTask: false,
-    sessionMode:
-      input.sessionMode === 'per_run' ? 'per_run' : 'persistent',
+    sessionMode: input.sessionMode === 'per_run' ? 'per_run' : 'persistent',
     ...(input.delivery !== undefined ? { delivery: input.delivery } : {}),
     ...(input.name !== undefined ? { name: input.name } : {}),
   };
@@ -464,6 +464,7 @@ async function dispatchTaskToFreshSession(
   if (!bridge || !sendPrompt || !task.sessionId) {
     throw new Error('Fresh-session dispatch is unavailable for this task');
   }
+  const triggeredAt = task.lastFiredAt ?? Date.now();
   const child = await runWithScheduledTaskTarget(target, () =>
     bridge.spawnOrAttach({
       workspaceCwd: target.workspaceCwd,
@@ -475,7 +476,10 @@ async function dispatchTaskToFreshSession(
   );
   try {
     bridge.updateSessionMetadata(child.sessionId, {
-      displayName: scheduledTaskSessionName(task.name ?? task.prompt),
+      displayName: scheduledTaskRunSessionName(
+        task.name ?? task.prompt,
+        triggeredAt,
+      ),
     });
   } catch {
     // The prompt can still run with the generated session id as its label.
@@ -491,7 +495,7 @@ async function dispatchTaskToFreshSession(
             name: task.name,
             cron: task.cron,
             prompt: task.prompt,
-            triggeredAt: task.lastFiredAt ?? Date.now(),
+            triggeredAt,
             trigger: 'manual',
           }),
         },
