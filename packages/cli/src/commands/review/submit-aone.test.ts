@@ -215,6 +215,22 @@ function postedJson(): PostedJson {
 }
 
 /**
+ * The refusal shape every gate in the command speaks (#9940 review): a
+ * stderr line naming the offence, the `{"posted": false}` JSON on
+ * stdout, exit 3.
+ */
+function expectRefusal(run: () => void, message: RegExp): void {
+  run();
+  expect(process.exitCode).toBe(3);
+  const stderr = stderrMock.mock.calls.map((c) => String(c[0])).join('\n');
+  expect(stderr).toMatch(message);
+  expect(postedJson()).toEqual({
+    posted: false,
+    reason: 'payload-contradicts-itself',
+  });
+}
+
+/**
  * The captured diff the Aone anchor gate validates against — submit reads
  * it at the fetch-pr convention path, cwd-relative, so the suite chdirs
  * into its temp dir. One hunk of `src/foo.ts` covering new-side lines
@@ -1967,11 +1983,13 @@ describe('the Aone anchor gate — the validation the platform does not perform'
       ],
       state: { modelId: 'test-model' },
     };
-    expect(() =>
-      runSubmit(base({ review: writeReview(unmarked) }), 'unknown', {
-        defaultComment: false,
-      }),
-    ).toThrow(/neither \*\*\[Critical\]\*\* nor \*\*\[Suggestion\]\*\*/);
+    expectRefusal(
+      () =>
+        runSubmit(base({ review: writeReview(unmarked) }), 'unknown', {
+          defaultComment: false,
+        }),
+      /neither \*\*\[Critical\]\*\* nor \*\*\[Suggestion\]\*\*/,
+    );
     expect(submitAoneMock).not.toHaveBeenCalled();
   });
 
@@ -1990,11 +2008,13 @@ describe('the Aone anchor gate — the validation the platform does not perform'
       ],
       state: { modelId: 'test-model' },
     };
-    expect(() =>
-      runSubmit(base({ review: writeReview(malformed) }), 'unknown', {
-        defaultComment: false,
-      }),
-    ).toThrow(/has no usable `line`/);
+    expectRefusal(
+      () =>
+        runSubmit(base({ review: writeReview(malformed) }), 'unknown', {
+          defaultComment: false,
+        }),
+      /has no usable `line`/,
+    );
     expect(submitAoneMock).not.toHaveBeenCalled();
   });
 
@@ -2020,11 +2040,13 @@ describe('the Aone anchor gate — the validation the platform does not perform'
       ],
       state: { modelId: 'test-model' },
     };
-    expect(() =>
-      runSubmit(base({ review: writeReview(renumbered) }), 'unknown', {
-        defaultComment: false,
-      }),
-    ).toThrow(/comments\[1\] has no usable `line`/);
+    expectRefusal(
+      () =>
+        runSubmit(base({ review: writeReview(renumbered) }), 'unknown', {
+          defaultComment: false,
+        }),
+      /comments\[1\] has no usable `line`/,
+    );
     expect(submitAoneMock).not.toHaveBeenCalled();
   });
 
@@ -2046,11 +2068,13 @@ describe('the Aone anchor gate — the validation the platform does not perform'
       ],
       state: { modelId: 'test-model' },
     };
-    expect(() =>
-      runSubmit(base({ review: writeReview(reversed) }), 'unknown', {
-        defaultComment: false,
-      }),
-    ).toThrow(/cannot end before it begins/);
+    expectRefusal(
+      () =>
+        runSubmit(base({ review: writeReview(reversed) }), 'unknown', {
+          defaultComment: false,
+        }),
+      /cannot end before it begins/,
+    );
     expect(submitAoneMock).not.toHaveBeenCalled();
   });
 
@@ -2228,11 +2252,13 @@ describe('the Aone anchor gate — the validation the platform does not perform'
       ],
       state: { modelId: 'test-model' },
     };
-    expect(() =>
-      runSubmit(base({ review: writeReview(markerOnly) }), 'unknown', {
-        defaultComment: false,
-      }),
-    ).toThrow(/renders as nothing/);
+    expectRefusal(
+      () =>
+        runSubmit(base({ review: writeReview(markerOnly) }), 'unknown', {
+          defaultComment: false,
+        }),
+      /renders as nothing/,
+    );
     expect(submitAoneMock).not.toHaveBeenCalled();
   });
 
@@ -2269,12 +2295,9 @@ describe('the Aone anchor gate — the validation the platform does not perform'
       ],
       state: { modelId: 'test-model' },
     });
-    let message = '';
-    try {
-      runSubmit(base({ review }), 'unknown', { defaultComment: false });
-    } catch (err) {
-      message = (err as Error).message;
-    }
+    runSubmit(base({ review }), 'unknown', { defaultComment: false });
+    expect(process.exitCode).toBe(3);
+    const message = stderrMock.mock.calls.map((c) => String(c[0])).join('\n');
     expect(message).toMatch(/comments\[2\] re-posts R1-2/);
     expect(message).not.toMatch(/comments\[1\]/);
     expect(submitAoneMock).not.toHaveBeenCalled();
@@ -2304,12 +2327,9 @@ describe('the Aone anchor gate — the validation the platform does not perform'
       ],
       state: { modelId: 'test-model' },
     });
-    let message = '';
-    try {
-      runSubmit(base({ review }), 'unknown', { defaultComment: false });
-    } catch (err) {
-      message = (err as Error).message;
-    }
+    runSubmit(base({ review }), 'unknown', { defaultComment: false });
+    expect(process.exitCode).toBe(3);
+    const message = stderrMock.mock.calls.map((c) => String(c[0])).join('\n');
     expect(message).toMatch(/comments\[0\] re-posts R1-2/);
     expect(message).not.toContain('bodyCriticals');
     expect(submitAoneMock).not.toHaveBeenCalled();
@@ -2338,12 +2358,9 @@ describe('the Aone anchor gate — the validation the platform does not perform'
       ],
       state: { modelId: 'test-model' },
     });
-    let message = '';
-    try {
-      runSubmit(base({ review }), 'unknown', { defaultComment: false });
-    } catch (err) {
-      message = (err as Error).message;
-    }
+    runSubmit(base({ review }), 'unknown', { defaultComment: false });
+    expect(process.exitCode).toBe(3);
+    const message = stderrMock.mock.calls.map((c) => String(c[0])).join('\n');
     expect(message).toMatch(/comments\[0\] re-posts R1-2/);
     expect(submitAoneMock).not.toHaveBeenCalled();
   });
@@ -2496,11 +2513,13 @@ describe('the Aone anchor gate — the validation the platform does not perform'
       comments: [{ path: 42, line: 12, body: '**[Critical]** Garbage path.' }],
       state: { modelId: 'test-model' },
     };
-    expect(() =>
-      runSubmit(base({ review: writeReview(garbagePath) }), 'unknown', {
-        defaultComment: false,
-      }),
-    ).toThrow(/has no `path`/);
+    expectRefusal(
+      () =>
+        runSubmit(base({ review: writeReview(garbagePath) }), 'unknown', {
+          defaultComment: false,
+        }),
+      /has no `path`/,
+    );
     expect(submitAoneMock).not.toHaveBeenCalled();
   });
 
@@ -2517,12 +2536,14 @@ describe('the Aone anchor gate — the validation the platform does not perform'
       ],
       state: { modelId: 'test-model' },
     };
-    expect(() =>
-      runSubmit(base({ review: writeReview(fence) }), 'unknown', {
-        defaultComment: false,
-        attribution: false,
-      }),
-    ).toThrow(/leaves a code fence open/);
+    expectRefusal(
+      () =>
+        runSubmit(base({ review: writeReview(fence) }), 'unknown', {
+          defaultComment: false,
+          attribution: false,
+        }),
+      /leaves a code fence open/,
+    );
     expect(submitAoneMock).not.toHaveBeenCalled();
   });
 
@@ -2543,11 +2564,13 @@ describe('the Aone anchor gate — the validation the platform does not perform'
       ],
       state: { modelId: 'test-model' },
     };
-    expect(() =>
-      runSubmit(base({ review: writeReview(noSide) }), 'unknown', {
-        defaultComment: false,
-      }),
-    ).toThrow(/sets `start_line` without/);
+    expectRefusal(
+      () =>
+        runSubmit(base({ review: writeReview(noSide) }), 'unknown', {
+          defaultComment: false,
+        }),
+      /sets `start_line` without/,
+    );
     expect(submitAoneMock).not.toHaveBeenCalled();
   });
 
@@ -2733,11 +2756,13 @@ describe('the Aone anchor gate — the validation the platform does not perform'
       ],
       state: { modelId: 'test-model' },
     };
-    expect(() =>
-      runSubmit(base({ review: writeReview(emptyPath) }), 'unknown', {
-        defaultComment: false,
-      }),
-    ).toThrow(/has no `path`/);
+    expectRefusal(
+      () =>
+        runSubmit(base({ review: writeReview(emptyPath) }), 'unknown', {
+          defaultComment: false,
+        }),
+      /has no `path`/,
+    );
     expect(submitAoneMock).not.toHaveBeenCalled();
   });
 

@@ -1109,9 +1109,10 @@ function submit(
   // compose" is a poor way to say "you gave me no state".
   const structural = structuralProblems(payload);
   if (structural.length > 0) {
-    throw new Error(
+    refuse(
       `The review payload contradicts itself; refusing to post it:\n` +
         structural.map((p) => `  - ${p}`).join('\n'),
+      'payload-contradicts-itself',
     );
   }
 
@@ -1457,9 +1458,10 @@ function submit(
     mintedIds ?? [],
   );
   if (problems.length > 0) {
-    throw new Error(
+    refuse(
       `The review payload contradicts itself; refusing to post it:\n` +
         problems.map((p) => `  - ${p}`).join('\n'),
+      'payload-contradicts-itself',
     );
   }
 

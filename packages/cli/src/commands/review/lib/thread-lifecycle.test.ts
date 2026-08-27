@@ -553,6 +553,15 @@ describe('fetchReviewThreads — the read the whole lifecycle plans from', () =>
     expect(() => fetchReviewThreads('o/r', 1)).toThrow();
   });
 
+  it('reads the thread list through CLICOLOR_FORCE colour wrappers (#9940 review)', () => {
+    // `gh` wraps its pretty-printed JSON in SGR escapes when the
+    // operator's environment forces colour; the read parses the JSON,
+    // not the terminal rendering.
+    ghMock.mockReturnValue(`\u001b[1;37m${page([node({})])}\u001b[0m`);
+    const threads = fetchReviewThreads('o/r', 1);
+    expect(threads.map((t) => t.threadId)).toEqual(['T1']);
+  });
+
   it('skips a thread with an unreadable root and keeps the well-formed ones', () => {
     ghMock.mockReturnValue(
       page([

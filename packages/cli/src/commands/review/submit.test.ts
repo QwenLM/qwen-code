@@ -208,6 +208,23 @@ function args(over: Record<string, unknown> = {}) {
   } as never;
 }
 
+/**
+ * The refusal shape the command's own contract speaks for every gate: a
+ * stderr line naming the offence, the `{"posted": false}` JSON on stdout,
+ * exit 3 — a refusal escaping as a thrown failure surfaces as a failed
+ * command an agent might retry or route around (#9940 review).
+ */
+function expectRefusal(run: () => void, message: RegExp): void {
+  run();
+  expect(process.exitCode).toBe(3);
+  const stderr = writeStderrSpy.mock.calls.map((c) => String(c[0])).join('\n');
+  expect(stderr).toMatch(message);
+  expect(JSON.parse(writeStdoutSpy.mock.calls.at(-1)![0] as string)).toEqual({
+    posted: false,
+    reason: 'payload-contradicts-itself',
+  });
+}
+
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), 'review-submit-'));
   // Run from the per-test fixture dir: the anchor gate's captured diff
@@ -1933,7 +1950,8 @@ describe('payload consistency — refuse before GitHub sees it', () => {
       body: 'LGTM',
     });
 
-    expect(() => runSubmit(authorized({ review }))).toThrow(
+    expectRefusal(
+      () => runSubmit(authorized({ review })),
       /carries `event`\/`body`.*computed here/s,
     );
     expect(ghMock).not.toHaveBeenCalled();
@@ -2205,9 +2223,10 @@ describe('payload consistency — refuse before GitHub sees it', () => {
       comments: [{ path: 'a.ts', line: 12, body: '**[Critical]**' }],
     });
 
-    expect(() =>
-      runSubmit(authorized({ review }), '0.21.3', { attribution: false }),
-    ).toThrow(/renders as nothing/);
+    expectRefusal(
+      () => runSubmit(authorized({ review }), '0.21.3', { attribution: false }),
+      /renders as nothing/,
+    );
     expect(ghMock).not.toHaveBeenCalled();
   });
 
@@ -2220,7 +2239,8 @@ describe('payload consistency — refuse before GitHub sees it', () => {
       comments: [{ path: 'a.ts', line: 12, body: '**[Critical]**' }],
     });
 
-    expect(() => runSubmit(authorized({ review }), '0.21.3')).toThrow(
+    expectRefusal(
+      () => runSubmit(authorized({ review }), '0.21.3'),
       /renders as nothing/,
     );
     expect(ghMock).not.toHaveBeenCalled();
@@ -2266,9 +2286,10 @@ describe('payload consistency — refuse before GitHub sees it', () => {
       ],
     });
 
-    expect(() =>
-      runSubmit(authorized({ review }), '0.21.3', { attribution: false }),
-    ).toThrow(/renders as nothing/);
+    expectRefusal(
+      () => runSubmit(authorized({ review }), '0.21.3', { attribution: false }),
+      /renders as nothing/,
+    );
     expect(ghMock).not.toHaveBeenCalled();
   });
 
@@ -2343,9 +2364,11 @@ describe('payload consistency — refuse before GitHub sees it', () => {
         ...REVIEW,
         comments: [{ path: 'a.ts', line: 12, body }],
       });
-      expect(() =>
-        runSubmit(authorized({ review }), '0.21.3', { attribution: false }),
-      ).toThrow(/renders as nothing/);
+      expectRefusal(
+        () =>
+          runSubmit(authorized({ review }), '0.21.3', { attribution: false }),
+        /renders as nothing/,
+      );
     }
     expect(ghMock).not.toHaveBeenCalled();
   });
@@ -2441,9 +2464,11 @@ describe('payload consistency — refuse before GitHub sees it', () => {
         ...REVIEW,
         comments: [{ path: 'a.ts', line: 12, body }],
       });
-      expect(() =>
-        runSubmit(authorized({ review }), '0.21.3', { attribution: false }),
-      ).toThrow(/leaves a code fence open/);
+      expectRefusal(
+        () =>
+          runSubmit(authorized({ review }), '0.21.3', { attribution: false }),
+        /leaves a code fence open/,
+      );
     }
     expect(ghMock).not.toHaveBeenCalled();
   });
@@ -2475,9 +2500,10 @@ describe('payload consistency — refuse before GitHub sees it', () => {
       ...REVIEW,
       comments: [{ path: 'a.ts', line: 12, body: '**[Critical]**\r~~~' }],
     });
-    expect(() =>
-      runSubmit(authorized({ review }), '0.21.3', { attribution: false }),
-    ).toThrow(/renders as nothing/);
+    expectRefusal(
+      () => runSubmit(authorized({ review }), '0.21.3', { attribution: false }),
+      /renders as nothing/,
+    );
     expect(ghMock).not.toHaveBeenCalled();
   });
 
@@ -2594,7 +2620,8 @@ describe('payload consistency — refuse before GitHub sees it', () => {
       comments: [{ path: 'a.ts', line: 12, body: '**[Critical]** boom' }],
     });
 
-    expect(() => runSubmit(authorized({ review }))).toThrow(
+    expectRefusal(
+      () => runSubmit(authorized({ review })),
       /counted from the `comments` you attached/,
     );
     expect(ghMock).not.toHaveBeenCalled();
@@ -2615,7 +2642,8 @@ describe('payload consistency — refuse before GitHub sees it', () => {
       ],
     });
 
-    expect(() => runSubmit(authorized({ review }))).toThrow(
+    expectRefusal(
+      () => runSubmit(authorized({ review })),
       /comments\[1\] opens with neither/,
     );
     expect(ghMock).not.toHaveBeenCalled();
@@ -2648,13 +2676,14 @@ describe('payload consistency — refuse before GitHub sees it', () => {
 
   it('rejects a payload with no commit_id', () => {
     const review = file('bad-6.json', { ...REVIEW, commit_id: undefined });
-    expect(() => runSubmit(authorized({ review }))).toThrow(/`commit_id`/);
+    expectRefusal(() => runSubmit(authorized({ review })), /`commit_id`/);
     expect(ghMock).not.toHaveBeenCalled();
   });
 
   it('rejects a payload with no state — there is nothing to compose from', () => {
     const review = file('bad-7.json', { ...REVIEW, state: undefined });
-    expect(() => runSubmit(authorized({ review }))).toThrow(
+    expectRefusal(
+      () => runSubmit(authorized({ review })),
       /`state` is missing/,
     );
     expect(ghMock).not.toHaveBeenCalled();
@@ -2669,7 +2698,8 @@ describe('payload consistency — refuse before GitHub sees it', () => {
       ],
     });
 
-    expect(() => runSubmit(authorized({ review }))).toThrow(
+    expectRefusal(
+      () => runSubmit(authorized({ review })),
       /start_line.*without.*side/s,
     );
     expect(ghMock).not.toHaveBeenCalled();
@@ -2700,7 +2730,7 @@ describe('payload consistency — refuse before GitHub sees it', () => {
       comments: [{ path: 'a.ts', body: '**[Critical]** x' }],
     });
 
-    expect(() => runSubmit(authorized({ review }))).toThrow(/usable `line`/);
+    expectRefusal(() => runSubmit(authorized({ review })), /usable `line`/);
     expect(ghMock).not.toHaveBeenCalled();
   });
 
@@ -3121,7 +3151,7 @@ describe('payload consistency — refuse before GitHub sees it', () => {
         ...REVIEW,
         comments: [{ path: 'a.ts', line, body: '**[Critical]** x' }],
       });
-      expect(() => runSubmit(authorized({ review }))).toThrow(/usable `line`/);
+      expectRefusal(() => runSubmit(authorized({ review })), /usable `line`/);
     }
     expect(ghMock).not.toHaveBeenCalled();
   });
@@ -3135,7 +3165,7 @@ describe('payload consistency — refuse before GitHub sees it', () => {
       comments: [{ path: 'a.ts', line: 12, body: '' }],
     });
 
-    expect(() => runSubmit(authorized({ review }))).toThrow(/empty comment/);
+    expectRefusal(() => runSubmit(authorized({ review })), /empty comment/);
     expect(ghMock).not.toHaveBeenCalled();
   });
 
@@ -3148,7 +3178,8 @@ describe('payload consistency — refuse before GitHub sees it', () => {
       comments: {},
     });
 
-    expect(() => runSubmit(authorized({ review }))).toThrow(
+    expectRefusal(
+      () => runSubmit(authorized({ review })),
       /`comments` is not an array/,
     );
     expect(ghMock).not.toHaveBeenCalled();
@@ -3163,7 +3194,8 @@ describe('payload consistency — refuse before GitHub sees it', () => {
       comments: [null],
     });
 
-    expect(() => runSubmit(authorized({ review }))).toThrow(
+    expectRefusal(
+      () => runSubmit(authorized({ review })),
       /entries must each be an object/,
     );
     expect(ghMock).not.toHaveBeenCalled();
@@ -3174,7 +3206,7 @@ describe('payload consistency — refuse before GitHub sees it', () => {
       ...REVIEW,
       comments: [{ path: 'a.ts', line: 12 }],
     });
-    expect(() => runSubmit(authorized({ review }))).toThrow(/empty comment/);
+    expectRefusal(() => runSubmit(authorized({ review })), /empty comment/);
     expect(ghMock).not.toHaveBeenCalled();
   });
 
@@ -3192,9 +3224,7 @@ describe('payload consistency — refuse before GitHub sees it', () => {
         },
       ],
     });
-    expect(() => runSubmit(authorized({ review }))).toThrow(
-      /cannot end before/,
-    );
+    expectRefusal(() => runSubmit(authorized({ review })), /cannot end before/);
     expect(ghMock).not.toHaveBeenCalled();
   });
 
@@ -3271,7 +3301,7 @@ describe('the verdict is computed, not carried', () => {
       state: { modelId: 'm', uncoverableChunks: ['chunk 5 (src/big.min.js)'] },
     });
 
-    expect(() => runSubmit(authorized({ review }))).toThrow(/not inputs/);
+    expectRefusal(() => runSubmit(authorized({ review })), /not inputs/);
     expect(ghMock).not.toHaveBeenCalled();
   });
 });
@@ -3637,7 +3667,8 @@ describe('what the reviewer caught in this change', () => {
       state: null,
     });
 
-    expect(() => runSubmit(authorized({ review }))).toThrow(
+    expectRefusal(
+      () => runSubmit(authorized({ review })),
       /`state` is missing/,
     );
     expect(ghMock).not.toHaveBeenCalled();
@@ -4220,7 +4251,8 @@ describe('the thread lifecycle', () => {
       ],
       { fixedFindings: [{ id: 'R1-2', by: 'the fix' }] },
     );
-    expect(() => runSubmit(authorizedPost({ review }))).toThrow(
+    expectRefusal(
+      () => runSubmit(authorizedPost({ review })),
       /contradicts itself/,
     );
     expect(ghMock).not.toHaveBeenCalled();
@@ -4239,7 +4271,8 @@ describe('the thread lifecycle', () => {
       ],
       fixedFindings: [{ id: 'R1-2', by: 'the fix' }],
     });
-    expect(() => runSubmit(authorizedPost({ review }))).toThrow(
+    expectRefusal(
+      () => runSubmit(authorizedPost({ review })),
       /state\.bodyCriticals\[0\] re-posts R1-2/,
     );
     expect(ghMock).not.toHaveBeenCalled();
@@ -4413,7 +4446,8 @@ describe('the thread lifecycle', () => {
         fixedFindings: [{ id: 'R1-2', by: 'the fix' }],
       },
     );
-    expect(() => runSubmit(authorizedPost({ review }))).toThrow(
+    expectRefusal(
+      () => runSubmit(authorizedPost({ review })),
       /contradicts itself/,
     );
     expect(ghMock).not.toHaveBeenCalled();
@@ -4468,12 +4502,11 @@ describe('the thread lifecycle', () => {
         fixedFindings: [{ id: 'R1-2', by: 'the fix' }],
       },
     );
-    let message = '';
-    try {
-      runSubmit(authorizedPost({ review }));
-    } catch (err) {
-      message = (err as Error).message;
-    }
+    runSubmit(authorizedPost({ review }));
+    expect(process.exitCode).toBe(3);
+    const message = writeStderrSpy.mock.calls
+      .map((c) => String(c[0]))
+      .join('\n');
     expect(message).toMatch(/comments\[1\] re-posts R1-2/);
     expect(message).not.toMatch(/comments\[0\]/);
     expect(message).not.toContain('rerouted');
@@ -4619,7 +4652,8 @@ describe('the thread lifecycle', () => {
       ],
       { fixedFindings: [{ id: 'R1-2', by: 'the fix' }] },
     );
-    expect(() => runSubmit(authorizedPost({ review }))).toThrow(
+    expectRefusal(
+      () => runSubmit(authorizedPost({ review })),
       /contradicts itself/,
     );
     expect(ghMock).not.toHaveBeenCalled();
@@ -4691,7 +4725,8 @@ describe('the thread lifecycle', () => {
       fixedFindings: [{ id: 'R1-2', by: 'the fix' }],
       bodyCriticals: ['R1-2 still stands — the guard drops a valid case'],
     });
-    expect(() => runSubmit(authorizedPost({ review }))).toThrow(
+    expectRefusal(
+      () => runSubmit(authorizedPost({ review })),
       /contradicts itself/,
     );
     expect(ghMock).not.toHaveBeenCalled();
@@ -4893,7 +4928,8 @@ describe('the thread lifecycle', () => {
       ],
       { fixedFindings: [{ id: 'R1-2', by: 'the fix' }] },
     );
-    expect(() => runSubmit(authorizedPost({ review }))).toThrow(
+    expectRefusal(
+      () => runSubmit(authorizedPost({ review })),
       /contradicts itself/,
     );
     expect(ghMock).not.toHaveBeenCalled();
@@ -4967,7 +5003,7 @@ describe('the thread lifecycle', () => {
       [{ path: 'src/a.ts', line: 12, body: '**[Critical]** double free' }],
       { planPath, fixedFindings: [{ id: 'R4-1', by: 'the fix' }] },
     );
-    expect(() => runSubmit(authorizedPost({ review }))).toThrow(/mints R4-1/);
+    expectRefusal(() => runSubmit(authorizedPost({ review })), /mints R4-1/);
     expect(ghMock).not.toHaveBeenCalled();
     expect(threadReadCalls()).toHaveLength(0);
   });
@@ -4986,7 +5022,7 @@ describe('the thread lifecycle', () => {
       bodyCriticals: ['the double free is still reachable from the parser'],
       fixedFindings: [{ id: 'R4-1', by: 'the fix' }],
     });
-    expect(() => runSubmit(authorizedPost({ review }))).toThrow(/mints R4-1/);
+    expectRefusal(() => runSubmit(authorizedPost({ review })), /mints R4-1/);
     expect(ghMock).not.toHaveBeenCalled();
   });
 

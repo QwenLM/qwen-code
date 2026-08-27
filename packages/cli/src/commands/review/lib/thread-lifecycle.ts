@@ -102,6 +102,15 @@ const THREADS_QUERY = `query($owner: String!, $name: String!, $pr: Int!, $after:
 const MAX_THREAD_PAGES = 30;
 
 /**
+ * `gh` wraps its pretty-printed JSON in SGR colour when the operator's
+ * environment forces colour (CLICOLOR_FORCE); the read parses the JSON,
+ * not the terminal rendering — strip the wrappers or the parse dies on
+ * the escape bytes (#9940 review).
+ */
+// eslint-disable-next-line no-control-regex -- ESC is the character under test
+const ANSI_SGR_RE = /\x1b\[[0-9;]*m/g;
+
+/**
  * The PR's review threads, oldest-visible-page order preserved. Throws on
  * a transport or shape failure — the read runs BEFORE the review's write,
  * so a failure costs a retryable aborted submit, never a half-planned
@@ -126,7 +135,7 @@ export function fetchReviewThreads(repo: string, pr: number): ReviewThread[] {
       `pr=${pr}`,
     ];
     if (after !== undefined) args.push('-f', `after=${after}`);
-    const response = JSON.parse(gh(...args)) as {
+    const response = JSON.parse(gh(...args).replace(ANSI_SGR_RE, '')) as {
       data?: {
         repository?: {
           pullRequest?: {
