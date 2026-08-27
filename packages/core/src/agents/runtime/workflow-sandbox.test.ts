@@ -2162,6 +2162,48 @@ describe('createWorkflowSandbox primitives', () => {
     expect(sandbox.getLogs()).toEqual([]);
   });
 
+  it('keeps run attribution observing across a chained teardown dispatch', async () => {
+    const controller = new AbortController();
+    const rejects = new Map<string, (error: Error) => void>();
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      abortOnTimeout: controller,
+      dispatch: (prompt: string) =>
+        new Promise((_resolve, reject) => {
+          rejects.set(prompt, reject);
+        }),
+    });
+    const baseline = process.listenerCount('unhandledRejection');
+    const runPromise = sandbox.run(`
+      (async () => {
+        try { await agent('a'); }
+        finally { await agent('b'); }
+      })();
+      await new Promise(() => {});
+    `);
+    await vi.waitFor(() => expect(rejects.has('a')).toBe(true));
+    controller.abort();
+    await expect(runPromise).rejects.toThrow(/aborted \(cancelled\)/);
+    rejects.get('a')?.(
+      new Error(
+        'Workflow subagent a did not complete (terminate mode: CANCELLED).',
+      ),
+    );
+    await vi.waitFor(() => expect(rejects.has('b')).toBe(true));
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(process.listenerCount('unhandledRejection')).toBe(baseline + 1);
+    rejects.get('b')?.(
+      new Error(
+        'Workflow subagent b did not complete (terminate mode: CANCELLED).',
+      ),
+    );
+    await vi.waitFor(() =>
+      expect(process.listenerCount('unhandledRejection')).toBe(baseline),
+    );
+    expect(sandbox.getLogs()).toEqual([]);
+  });
+
   it('mirrors a detached wrapper rejection that lands after the run settles', async () => {
     // Companion to the cancellation case, on the non-abort path: a
     // fire-and-forget async wrapper outliving the run used to lose its

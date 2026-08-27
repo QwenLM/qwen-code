@@ -251,7 +251,7 @@ export class WorkflowRunner {
       // TUI redraw per line while retaining the real replay timestamp.
       logAppended: (line) => {
         if (!isCurrentEntry()) return;
-        registry?.onLogAppended(runId, line);
+        registry?.onLogAppended(runId, line, Date.now(), entry);
       },
       budgetUpdated: (spent, total) => {
         if (!isCurrentEntry()) return;

@@ -1601,6 +1601,31 @@ describe('WorkflowRunRegistry', () => {
     ]);
   });
 
+  it("onLogAppended after a fail transition writes only for the run's own entry", () => {
+    const r = new WorkflowRunRegistry();
+    const entry = r.register(reg('wf_late_fail_log'));
+    const handle = {
+      runId: 'wf_late_fail_log',
+      abort: vi.fn(),
+    } as unknown as WorkflowRunHandle;
+    r.attachHandle(handle);
+    r.fail(handle.runId, 'approval contingency', 1_100);
+    r.releaseHandle(handle.runId, handle);
+
+    r.onLogAppended(handle.runId, 'late line', 1_200, entry);
+
+    expect(entry.recentLogs).toEqual(['late line']);
+    expect(entry.events.filter((event) => event.type === 'log')).toEqual([
+      expect.objectContaining({ message: 'late line' }),
+    ]);
+
+    const replacement = r.register(reg(handle.runId));
+    r.fail(handle.runId, 'replacement failed', 1_300);
+    r.onLogAppended(handle.runId, 'not mine', 1_400, entry);
+    expect(entry.recentLogs).toEqual(['late line']);
+    expect(replacement.recentLogs).toEqual([]);
+  });
+
   it('normalizes phase titles at the registry boundary', () => {
     const r = new WorkflowRunRegistry();
     const entry = r.register(reg('wf_phase_titles'));

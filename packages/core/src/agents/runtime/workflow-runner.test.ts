@@ -814,6 +814,59 @@ describe('WorkflowRunner', () => {
     ).toContain('cleanup ran');
   });
 
+  it("keeps an externally failed run's delayed cleanup logs", async () => {
+    const { config, registry } = configWithRegistry();
+    const onLogAppended = vi.spyOn(registry, 'onLogAppended');
+    let rejectDispatch: ((error: Error) => void) | undefined;
+    const handle = await WorkflowRunner.start({
+      config,
+      signal: new AbortController().signal,
+      script:
+        'try { return await agent("work"); } finally { log("cleanup ran"); }',
+      args: undefined,
+      runInBackground: true,
+      dispatch: () =>
+        new Promise<string>((_resolve, reject) => {
+          rejectDispatch = reject;
+        }),
+    });
+    await vi.waitFor(() => expect(rejectDispatch).toBeDefined());
+    registry.fail(
+      handle.runId,
+      'Failed to resolve workflow approval: wfap_1',
+      Date.now(),
+    );
+    handle.abort();
+
+    await expect(handle.completion).resolves.toMatchObject({
+      ok: false,
+      message: 'Failed to resolve workflow approval: wfap_1',
+    });
+    expect(registry.getHandle(handle.runId)).toBeUndefined();
+    const entry = registry.get(handle.runId)!;
+    await new Promise<void>((resolve) => {
+      setImmediate(() => {
+        rejectDispatch?.(new Error('aborted'));
+        resolve();
+      });
+    });
+    await vi.waitFor(() =>
+      expect(onLogAppended).toHaveBeenCalledWith(
+        handle.runId,
+        'cleanup ran',
+        expect.any(Number),
+        entry,
+      ),
+    );
+    expect(entry.status).toBe('failed');
+    expect(entry.recentLogs).toContain('cleanup ran');
+    expect(
+      entry.events
+        .filter((event) => event.type === 'log')
+        .map((event) => (event as { message: string }).message),
+    ).toContain('cleanup ran');
+  });
+
   it('rejects a concurrent resume while the original run is active', async () => {
     const { config, registry } = configWithRegistry();
     const runId = 'wf_1234abcd';

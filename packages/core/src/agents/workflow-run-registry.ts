@@ -979,14 +979,24 @@ export class WorkflowRunRegistry {
   }
 
   /** Record one sandbox log line without forcing a TUI redraw per line. */
-  onLogAppended(runId: string, line: string, at = Date.now()): void {
+  onLogAppended(
+    runId: string,
+    line: string,
+    at = Date.now(),
+    expectedEntry?: WorkflowTask,
+  ): void {
     const entry = this.entries.get(runId);
-    // Mirrors setRecentLogs's 'cancelled' allowance: a dialog cancel flips
-    // the status before the sandbox's run-end flush fires its last mirror
-    // lines, and the two persisted log projections must keep agreeing.
+    // Failed runs can emit cleanup logs after their handle is released.
+    // The entry identity admits only the owning run, not a later retry.
+    if (!entry) return;
+    const isOwnedFailedRun =
+      entry.status === 'failed' &&
+      expectedEntry !== undefined &&
+      entry === expectedEntry;
     if (
-      !entry ||
-      (!isActiveWorkflowStatus(entry.status) && entry.status !== 'cancelled')
+      !isActiveWorkflowStatus(entry.status) &&
+      entry.status !== 'cancelled' &&
+      !isOwnedFailedRun
     )
       return;
     const message = stripAnsiAndControl(line).slice(0, 4_096);

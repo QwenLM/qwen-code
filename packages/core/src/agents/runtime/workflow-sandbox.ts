@@ -1915,9 +1915,9 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
   //
   // Bounded three ways, because a listener that outlives its run leaks and
   // suppresses unrelated crashes: it waits only for THIS sandbox's
-  // in-flight dispatch count to reach zero, then only a fixed number of
-  // macrotask turns for the queued rejection events, and a hard cap
-  // retires it regardless if a dispatch never settles at all.
+  // in-flight dispatch count to reach zero, waits a fixed number of macrotask
+  // turns for queued rejection events, and rechecks in case teardown started
+  // another dispatch. A hard cap retires it if that chain never drains.
   const ESCAPE_DRAIN_TURNS = 2;
   const ESCAPE_DRAIN_CAP_MS = 5_000;
   let escapeHookInstalled = false;
@@ -1972,12 +1972,14 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
     cap.unref?.();
     void (async () => {
       try {
-        await whenDispatchesIdle();
-        for (let turn = 0; turn < ESCAPE_DRAIN_TURNS; turn++) {
-          await new Promise<void>((resolve) => {
-            setImmediate(resolve);
-          });
-        }
+        do {
+          await whenDispatchesIdle();
+          for (let turn = 0; turn < ESCAPE_DRAIN_TURNS; turn++) {
+            await new Promise<void>((resolve) => {
+              setImmediate(resolve);
+            });
+          }
+        } while (!cancelled && inFlightDispatches > 0);
       } finally {
         clearTimeout(cap);
         if (!cancelled) {
