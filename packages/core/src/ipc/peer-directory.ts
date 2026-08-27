@@ -177,6 +177,31 @@ export function formatPeerAddress(
 }
 
 /**
+ * The address to print for a peer: the shortest candidate in the grammar
+ * that the caller's own routing leaves alone and that resolves back to
+ * exactly this peer, or undefined when none does.
+ *
+ * `list_agents` advertises by this, and `sendToPeer` records and reports
+ * by it, so the string a receipt later names is one the model could have
+ * typed and one that would select the same session again. Ranked
+ * shortest-first so the common case stays a bare, typeable name; a ref
+ * collision plus adversarial literal names can leave no candidate, and
+ * then no address is better than one that routes elsewhere.
+ */
+export function advertisablePeerAddress(
+  peer: PeerSessionInfo,
+  peers: readonly PeerSessionInfo[],
+  isReserved?: (address: string) => boolean,
+): string | undefined {
+  const candidates = [peer.name, `${peer.name} [${peer.ref}]`, `[${peer.ref}]`];
+  return candidates.find((candidate) => {
+    if (isReserved?.(candidate) === true) return false;
+    const resolved = resolvePeerTarget(peers, candidate);
+    return resolved.kind === 'one' && resolved.peer === peer;
+  });
+}
+
+/**
  * Suggest the closest names when a target does not resolve.
  *
  * Prefix and substring only — no edit distance. A near-miss on this list

@@ -23,9 +23,6 @@ export interface InProcessRoutingTeam {
   members: ReadonlyArray<{ name: string }>;
 }
 
-/** Decides whether `send_message` would keep `address` in-process. */
-export type InProcessRecipientCheck = (address: string) => boolean;
-
 /**
  * True when `send_message` routes `address` somewhere inside this process.
  *

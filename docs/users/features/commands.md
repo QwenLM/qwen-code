@@ -808,8 +808,9 @@ in `settings.json` and restart:
 ```
 
 Once on, the model in one session can discover the others with
-`list_agents` — each appears under `sessions` with the same `name` that
-`qwen sessions ps` prints — and address one with `send_message` using
+`list_agents` — each appears under `sessions` with the `name` that
+`qwen sessions ps --json` records (the table view may truncate long
+names) — and address one with `send_message` using
 that name as `to`. When two sessions share a name, `list_agents` shows
 each with a short `[ref]` and the send must include it (`name [ref]`); a
 bare name that could mean either is refused rather than guessed.

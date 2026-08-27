@@ -6,8 +6,8 @@
 
 import type { Config } from '../config/config.js';
 import {
+  advertisablePeerAddress,
   listMessageablePeers,
-  resolvePeerTarget,
 } from '../ipc/peer-directory.js';
 import { isInProcessRecipient } from '../ipc/peer-routing.js';
 import { getOwnPeerIdentity } from '../ipc/peer-send.js';
@@ -72,22 +72,10 @@ class ListAgentsInvocation extends BaseToolInvocation<
     // lead agent id and member names. Validate every candidate against
     // that same rule and the peer-address grammar before advertising it.
     const teamFile = this.config.getTeamManager()?.getTeamFile();
-    const intercepted = (address: string): boolean =>
+    const isReserved = (address: string): boolean =>
       isInProcessRecipient(address, teamFile);
-    const addressFor = (peer: (typeof peers)[number]): string | undefined => {
-      const candidates = [
-        peer.name,
-        `${peer.name} [${peer.ref}]`,
-        `[${peer.ref}]`,
-      ];
-      return candidates.find((candidate) => {
-        if (intercepted(candidate)) return false;
-        const resolved = resolvePeerTarget(peers, candidate);
-        return resolved.kind === 'one' && resolved.peer === peer;
-      });
-    };
     const sessions = peers.flatMap((peer) => {
-      const to = addressFor(peer);
+      const to = advertisablePeerAddress(peer, peers, isReserved);
       // A ref collision plus adversarial literal names can leave no string
       // in the supported grammar that uniquely selects this peer. Do not
       // advertise a misleading address that would route elsewhere.

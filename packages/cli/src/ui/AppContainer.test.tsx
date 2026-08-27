@@ -7400,6 +7400,20 @@ describe('AppContainer State Management', () => {
       });
       expect(notices()).toHaveLength(6);
       expect(notices()[5]).toContain(describeDeliveryStatus('expired'));
+
+      // Expired with no delivery at all: the gate could not queue it
+      // (accept backlog full) — the peer may be alive, so no exit claim.
+      act(() => {
+        peer.emitReceipt({
+          status: 'expired',
+          address: 'docs-cd',
+          origMsgId: 'm7',
+          previous: 'pending',
+        });
+      });
+      expect(notices()).toHaveLength(7);
+      expect(notices()[6]).not.toContain('exited before');
+      expect(notices()[6]).toContain('too busy');
     });
 
     it('announces a newly held message once and stays quiet when one is released', () => {

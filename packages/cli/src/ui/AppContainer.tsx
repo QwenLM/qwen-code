@@ -2584,13 +2584,20 @@ export const AppContainer = (props: AppContainerProps) => {
     if (!peerMessaging) return;
     return peerMessaging.onReceipt(({ status, address, previous }) => {
       if (status === 'delivered' && previous !== 'held') return;
-      // The wire text for `expired` speaks of a held message; an accepted
-      // message that expired was never held — the session exited before
-      // reading it — and the notice must not claim otherwise.
+      // The wire text for `expired` speaks of a held message, which is
+      // only right when the message was held. A delivery corrected to
+      // expired means the session exited with it unread; an expiry with
+      // no delivery at all means the gate could not queue it (its accept
+      // backlog was full) or the session went away — the peer may well be
+      // alive, so the notice must not claim it exited.
       const detail =
-        status === 'expired' && previous !== 'held'
-          ? 'That session exited before it read your message; it was not delivered.'
-          : describeDeliveryStatus(status);
+        status !== 'expired'
+          ? describeDeliveryStatus(status)
+          : previous === 'delivered'
+            ? 'That session exited before it read your message; it was not delivered.'
+            : previous === 'held'
+              ? describeDeliveryStatus(status)
+              : 'Your message expired without being delivered; that session was too busy to queue it, or has exited. Retry once it is idle.';
       historyManager.addItem(
         {
           type: MessageType.INFO,

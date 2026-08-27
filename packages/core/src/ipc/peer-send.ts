@@ -20,7 +20,7 @@ import {
   type PeerDeliveryStatus,
 } from './peer-frames.js';
 import {
-  formatPeerAddress,
+  advertisablePeerAddress,
   listMessageablePeers,
   resolvePeerTarget,
   suggestPeerNames,
@@ -77,7 +77,6 @@ export interface SentPeerMessage {
   /** The address the model used, as list_agents printed it. */
   address: string;
   peerName: string;
-  sentAt: number;
   /** Last receipt applied, or 'pending' before any. */
   state: PeerDeliveryStatus | 'pending';
 }
@@ -240,7 +239,11 @@ export async function sendToPeer(
   }
 
   const peer = resolved.peer;
-  const address = formatPeerAddress(peer, peers, options.isReserved);
+  // The address the ledger remembers is the one list_agents would print:
+  // a receipt that names an address which re-resolves ambiguous — or that
+  // the listing never showed — sends the model in circles.
+  const address =
+    advertisablePeerAddress(peer, peers, options.isReserved) ?? `[${peer.ref}]`;
   // The wire contract drops frames with empty content silently, and no
   // receipt can ever follow; reporting such a write as sent would strand
   // the ledger entry pending and tell the model not to re-send.
@@ -276,7 +279,6 @@ export async function sendToPeer(
   trackSent(frame.msgId, {
     address,
     peerName: peer.name,
-    sentAt: Date.now(),
     state: 'pending',
   });
   try {

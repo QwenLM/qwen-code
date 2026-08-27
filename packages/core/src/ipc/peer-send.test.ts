@@ -44,7 +44,7 @@ const {
   sendToPeer,
   settleSentPeerMessage,
 } = await import('./peer-send.js');
-const { peerRef } = await import('./peer-directory.js');
+const { peerRef, resolvePeerTarget } = await import('./peer-directory.js');
 
 function peer(sessionId: string, name: string, cwd = '/w/app') {
   return {
@@ -409,6 +409,32 @@ describe('lookupSentPeerMessage', () => {
     });
   });
 
+  it('records an address that re-resolves to the same session', async () => {
+    // A teammate reserves the bare name and a second peer carries the
+    // literal registry name "docs-cd [aaa111]": only "[aaa111]" selects
+    // s1 uniquely, and that is what the ledger must remember.
+    const s1 = { ...peer('s1', 'docs-cd'), ref: 'aaa111' };
+    const s2 = { ...peer('s2', 'docs-cd [aaa111]', '/w/two'), ref: 'bbb222' };
+    listMessageablePeers.mockResolvedValue([s1, s2]);
+    const isReserved = (address: string) => address === 'docs-cd';
+
+    const outcome = await sendToPeer({
+      target: '[aaa111]',
+      message: 'hi',
+      approvalMode: ApprovalMode.DEFAULT,
+      isReserved,
+    });
+    expect(outcome).toMatchObject({
+      kind: 'sent',
+      peer: s1,
+      address: '[aaa111]',
+    });
+    expect(resolvePeerTarget([s1, s2], '[aaa111]')).toEqual({
+      kind: 'one',
+      peer: s1,
+    });
+  });
+
   it('keeps a send that timed out, since the peer may still read it', async () => {
     listMessageablePeers.mockResolvedValue([peer('s1', 'app-ab')]);
     sendPeerFrame.mockRejectedValue(new PeerSendError('slow', 'ETIMEDOUT'));
@@ -493,6 +519,17 @@ describe('settleSentPeerMessage', () => {
       previous: 'delivered',
     });
     expect(settleSentPeerMessage(id, 'misaddressed')).toBeUndefined();
+  });
+
+  it('lets a hold be corrected to expired or misaddressed', async () => {
+    for (const next of ['expired', 'misaddressed'] as const) {
+      const id = await sendOne();
+      expect(settleSentPeerMessage(id, 'held')).toBeDefined();
+      expect(settleSentPeerMessage(id, next)).toMatchObject({
+        previous: 'held',
+      });
+      expect(settleSentPeerMessage(id, 'delivered')).toBeUndefined();
+    }
   });
 
   it('treats a terminal state as final', async () => {

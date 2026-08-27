@@ -17,6 +17,7 @@ vi.mock('./uds-client.js', () => ({
 }));
 
 const {
+  advertisablePeerAddress,
   formatPeerAddress,
   listMessageablePeers,
   peerRef,
@@ -311,6 +312,47 @@ describe('formatPeerAddress', () => {
         peer: each,
       });
     }
+  });
+});
+
+describe('advertisablePeerAddress', () => {
+  const a = peer({ sessionId: 's1', name: 'app-ab', ref: 'aaa111' });
+  const b = peer({ sessionId: 's2', name: 'app-ab', ref: 'bbb222' });
+  const c = peer({ sessionId: 's3', name: 'docs-cd', ref: 'ccc333' });
+
+  it('prefers the bare name when it selects the peer uniquely', () => {
+    expect(advertisablePeerAddress(c, [a, c])).toBe('docs-cd');
+  });
+
+  it('appends the ref when the name is contested or reserved', () => {
+    expect(advertisablePeerAddress(a, [a, b, c])).toBe('app-ab [aaa111]');
+    expect(
+      advertisablePeerAddress(c, [a, c], (address) => address === 'docs-cd'),
+    ).toBe('docs-cd [ccc333]');
+  });
+
+  it('falls back to the bare ref when the bracketed form is taken literally', () => {
+    const literal = peer({
+      sessionId: 's4',
+      name: 'docs-cd [ccc333]',
+      ref: 'ddd444',
+    });
+    expect(
+      advertisablePeerAddress(
+        c,
+        [c, literal],
+        (address) => address === 'docs-cd',
+      ),
+    ).toBe('[ccc333]');
+  });
+
+  it('is undefined when no candidate selects the peer', () => {
+    const twin = peer({ sessionId: 's5', name: 'app-ab', ref: 'aaa111' });
+    expect(advertisablePeerAddress(a, [a, twin])).toBeUndefined();
+  });
+
+  it('never returns a string the caller reserves', () => {
+    expect(advertisablePeerAddress(c, [c], () => true)).toBeUndefined();
   });
 });
 
