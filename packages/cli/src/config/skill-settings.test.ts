@@ -80,6 +80,49 @@ describe('resolveSkillSettings', () => {
     });
   });
 
+  it('lets a qualified opt-in lift a legacy bare defaultDisabled entry', () => {
+    const result = resolveSkillSettings(
+      fakeSettings({
+        merged: {
+          defaultDisabled: ['pdf'],
+          enabled: ['demo:pdf'],
+        },
+      }),
+    );
+
+    expect(result.disablements.has('pdf')).toBe(false);
+    expect(result.disabledNames.has('pdf')).toBe(false);
+  });
+
+  it('lets a bare opt-in lift a qualified defaultDisabled entry', () => {
+    const result = resolveSkillSettings(
+      fakeSettings({
+        merged: {
+          defaultDisabled: ['demo:pdf'],
+          enabled: ['pdf'],
+        },
+      }),
+    );
+
+    expect(result.disablements.has('demo:pdf')).toBe(false);
+    expect(result.disabledNames.has('demo:pdf')).toBe(false);
+  });
+
+  it('does not let one extension opt in on behalf of another', () => {
+    const result = resolveSkillSettings(
+      fakeSettings({
+        merged: {
+          defaultDisabled: ['other:pdf'],
+          enabled: ['demo:pdf'],
+        },
+      }),
+    );
+
+    expect(result.disablements.get('other:pdf')).toEqual({
+      reason: 'default',
+    });
+  });
+
   it('ignores malformed and empty list entries', () => {
     const result = resolveSkillSettings(
       fakeSettings({

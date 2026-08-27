@@ -4994,12 +4994,20 @@ async function runQwenServeImpl(
         const {
           resolveSkillSettings,
           skillSettingStrings,
+          skillSettingEntriesMatchAny,
+          skillSettingEntriesMatch,
           updateWorkspaceSkillSettingLists,
         } = await import('../config/skill-settings.js');
         const fresh = loadSettingsForPersistence(workspace);
         const normalizedName = skillName.trim().toLowerCase();
         const resolved = resolveSkillSettings(fresh);
-        const disablement = resolved.disablements.get(normalizedName);
+        const disablement =
+          resolved.disablements.get(normalizedName) ??
+          [...resolved.disablements.entries()].find(
+            ([entry]) =>
+              skillSettingEntriesMatch(entry, normalizedName) &&
+              entry !== normalizedName,
+          )?.[1];
         if (disablement?.reason === 'hard' && disablement.lockedScope) {
           throw new runtime.WorkspaceSkillNotToggleableError(
             skillName,
@@ -5023,7 +5031,7 @@ async function runQwenServeImpl(
           skillName,
           enabled,
           resolved.defaultDisabledNames.has(normalizedName) &&
-            !resolved.enabledNames.has(normalizedName),
+            !skillSettingEntriesMatchAny(resolved.enabledNames, normalizedName),
         );
         const settingsChanges: Array<{
           key: 'skills.disabled' | 'skills.enabled';
@@ -5073,6 +5081,8 @@ async function runQwenServeImpl(
         const {
           resolveSkillSettings,
           skillSettingStrings,
+          skillSettingEntriesMatchAny,
+          skillSettingEntriesMatch,
           updateWorkspaceSkillSettingLists,
         } = await import('../config/skill-settings.js');
         const fresh = loadSettingsForPersistence(workspace);
@@ -5092,7 +5102,13 @@ async function runQwenServeImpl(
 
         for (const skillName of skillNames) {
           const normalizedName = skillName.trim().toLowerCase();
-          const disablement = resolved.disablements.get(normalizedName);
+          const disablement =
+            resolved.disablements.get(normalizedName) ??
+            [...resolved.disablements.entries()].find(
+              ([entry]) =>
+                skillSettingEntriesMatch(entry, normalizedName) &&
+                entry !== normalizedName,
+            )?.[1];
           if (disablement?.reason === 'hard' && disablement.lockedScope) {
             outcomes.push({
               skillName,
@@ -5109,7 +5125,10 @@ async function runQwenServeImpl(
             skillName,
             enabled,
             resolved.defaultDisabledNames.has(normalizedName) &&
-              !resolved.enabledNames.has(normalizedName),
+              !skillSettingEntriesMatchAny(
+                resolved.enabledNames,
+                normalizedName,
+              ),
           );
           const changed =
             JSON.stringify(updated.disabled) !==

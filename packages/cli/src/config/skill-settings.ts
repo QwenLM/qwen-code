@@ -93,7 +93,12 @@ export function resolveSkillSettings(
   const disablements = new Map<string, SkillDisablement>();
 
   for (const name of defaultDisabled) {
-    if (!enabled.has(name)) disablements.set(name, { reason: 'default' });
+    // An opt-in expressed in either spelling lifts the default
+    // disablement; an exact-string check would ignore a qualified opt-in
+    // for a legacy bare entry (and vice versa) (#9408).
+    if (!skillSettingEntriesMatchAny(enabled, name)) {
+      disablements.set(name, { reason: 'default' });
+    }
   }
 
   const lockedScopes = [
@@ -129,6 +134,33 @@ export function resolveSkillSettings(
   };
 }
 
+/**
+ * Whether two `skills.*` list entries refer to the same skill: identical
+ * spellings, or one entry spelled as the qualified `<extension>:<name>`
+ * form of the other's bare name. Mirrors the dual spelling that
+ * `skillSettingKeys` derives from an actual skill, so opt-ins and removals
+ * reach legacy entries written before a collision rename (#9408).
+ */
+export function skillSettingEntriesMatch(a: string, b: string): boolean {
+  const left = a.trim().toLowerCase();
+  const right = b.trim().toLowerCase();
+  if (left === right) return true;
+  const leftSuffix = left.slice(left.indexOf(':') + 1);
+  if (left.includes(':') && leftSuffix === right) return true;
+  const rightSuffix = right.slice(right.indexOf(':') + 1);
+  return right.includes(':') && rightSuffix === left;
+}
+
+export function skillSettingEntriesMatchAny(
+  entries: Iterable<string>,
+  skillName: string,
+): boolean {
+  for (const entry of entries) {
+    if (skillSettingEntriesMatch(entry, skillName)) return true;
+  }
+  return false;
+}
+
 function updateTarget(
   names: string[],
   skillName: string,
@@ -138,7 +170,7 @@ function updateTarget(
   const next: string[] = [];
   let found = false;
   for (const name of names) {
-    if (name.trim().toLowerCase() !== normalizedName) {
+    if (!skillSettingEntriesMatch(name, normalizedName)) {
       next.push(name);
     } else if (include && !found) {
       next.push(skillName);
@@ -155,9 +187,8 @@ export function updateWorkspaceSkillSettingLists(
   enabled: boolean,
   defaultDisabled: boolean,
 ): WorkspaceSkillSettingLists {
-  const normalizedName = skillName.trim().toLowerCase();
-  const hadExplicitEnable = lists.enabled.some(
-    (name) => name.trim().toLowerCase() === normalizedName,
+  const hadExplicitEnable = lists.enabled.some((name) =>
+    skillSettingEntriesMatch(name, skillName),
   );
 
   if (enabled) {
