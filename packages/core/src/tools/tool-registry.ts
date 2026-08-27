@@ -467,6 +467,9 @@ export class ToolRegistry {
         !this.tools.has(tool.name)
       ) {
         this.tools.set(tool.name, tool);
+        if (source.isPermissionDeferred(tool.name)) {
+          this.permissionDeferred.add(tool.name);
+        }
       }
     }
   }

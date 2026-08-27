@@ -2639,7 +2639,7 @@ const SETTINGS_SCHEMA = {
             requiresRestart: true,
             default: 10,
             description:
-              'Context-window percentage used as the session-start budget for preloading deferred tools (bundled built-ins and MCP alike). When every deferred tool schema fits within the budget, all are declared upfront instead of loaded on demand, keeping the prompt prefix stable for KV caching. Set 0 to always load deferred tools on demand.',
+              'Context-window percentage used as the session-start budget for preloading ordinary deferred tools (bundled built-ins and MCP alike). When every eligible deferred tool schema fits within the budget, all are declared upfront instead of loaded on demand, keeping the prompt prefix stable for KV caching. Tools demoted by tools.eager are excluded from this preload and stay on demand. Set 0 to always load deferred tools on demand.',
             showInDialog: true,
             // A percentage of the context window: values above 100 would set a
             // budget larger than the window and unconditionally preload every
@@ -2741,14 +2741,14 @@ const SETTINGS_SCHEMA = {
         },
       },
       // Legacy tool permission fields – kept for backward compatibility.
-      // Use permissions.{allow,ask,deny} instead.
       core: {
         type: 'array',
         label: 'Core Tools (deprecated)',
         category: 'Tools',
         requiresRestart: true,
         default: undefined as string[] | undefined,
-        description: 'Deprecated. Use permissions.allow instead.',
+        description:
+          'Deprecated. permissions.allow cannot reproduce this registration restriction because it only auto-approves calls. Use tools.eager to defer unlisted eager-by-default tools or permissions.deny to remove tools. An empty list is treated as unset and disables nothing.',
         showInDialog: false,
       },
       allowed: {
@@ -2799,7 +2799,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: true,
         default: undefined as string[] | undefined,
         description:
-          'Tool names whose schemas are sent in the initial model request. When set, every other built-in tool is deferred instead: still registered and listed in /tools, still callable, but discovered on demand via tool_search. An explicitly empty list ([]) is an active allowlist naming nothing, so every non-exempt tool is deferred; omit the setting for no restriction. Use this to shrink the tool schemas sent to constrained-decoding backends (llama.cpp, LM Studio, Docker Model Runner). Differs from tools.disabled, which removes tools entirely, and from permissions.allow, which only auto-approves and never hides a tool.',
+          'Allowlist of eager-by-default built-in tool names whose schemas remain eligible for the initial model request. Unlisted non-exempt tools are deferred but stay registered, listed in /tools, callable, and discoverable via tool_search. Tools already deferred by default stay on demand even when listed; use tools.visible to surface one at startup. tool_search, structured_output, plan-mode lifecycle tools, task_stop, MCP tools, and computer_use__* tools are unaffected. An explicitly empty list ([]) defers every non-exempt eager-by-default tool; omit the setting for no restriction. Differs from tools.disabled, which removes tools entirely, and from permissions.allow, which only auto-approves calls.',
         showInDialog: false,
         mergeStrategy: MergeStrategy.UNION,
       },

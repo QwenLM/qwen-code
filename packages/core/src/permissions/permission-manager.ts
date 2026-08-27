@@ -111,10 +111,10 @@ export interface PermissionManagerConfig {
    * Returns the tool names from `settings.tools.eager`, the dedicated
    * eager-schema allowlist.
    *
-   * When this list is non-empty, built-in tools NOT named in it are demoted
-   * to deferred — still registered, listed in `/tools`, and loadable via
-   * ToolSearch, but their schemas stay out of the eager model request so
-   * constrained-decoding backends do not have to compile them (#9827).
+   * When this list is present, even if explicitly empty, eager-by-default
+   * built-in tools NOT named in it are demoted to deferred. Tools already
+   * deferred by default stay deferred even when named; `tools.visible`
+   * promotes those tools at startup. `undefined` means no restriction.
    *
    * This is deliberately a separate key from `permissions.allow`, which is
    * pure auto-approval and never affects registration (#10075).
@@ -235,10 +235,8 @@ export class PermissionManager {
     // Snapshot the `settings.tools.eager` allowlist. Only an ARRAY
     // activates it: `undefined`, `null`, or any non-array value means no
     // restriction, while an explicitly empty array is an active allowlist
-    // that names nothing and therefore defers every non-exempt tool. That
-    // is the same empty-array convention `tools.core` follows
-    // (#10065/#10080), so the two `tools.*` knobs cannot be read
-    // backwards from one another.
+    // that names nothing and therefore defers every non-exempt tool.
+    // `tools.core` differs: its empty list is treated as unset.
     //
     // Entries are parsed with the same rule parser the permission rules
     // use so alias forms (`ListFiles`) and stray specifiers

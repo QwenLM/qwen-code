@@ -48,8 +48,9 @@ export interface SkillConfig {
    * model can see, and since #10075 `permissions.allow` no longer affects
    * registration at all. A tool the `settings.tools.eager` allowlist omits
    * stays deferred (registered and loadable via `tool_search`) regardless of
-   * this grant; promoting it into the eager request needs the name in
-   * `tools.eager` plus a restart (#9827).
+   * this grant. An eager-by-default tool omitted by `tools.eager` needs its
+   * name added plus a restart; a tool deferred by default needs
+   * `tools.visible` instead (#9827).
    * Malformed entries are ignored. See `applySkillAllowedTools`.
    */
   allowedTools?: string[];

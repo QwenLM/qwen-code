@@ -1842,8 +1842,8 @@ export async function loadCliConfig(
   //
   // An explicitly empty array must survive as an empty array, not collapse
   // into "unset": `[]` is an active allowlist naming nothing (defer
-  // everything), the same empty-list convention `tools.core` follows
-  // (#10065/#10080). `normalizeDisabledToolList` maps undefined to `[]`,
+  // everything). `tools.core` differs: its empty list is treated as unset.
+  // `normalizeDisabledToolList` maps undefined to `[]`,
   // so the Array.isArray guard has to come first — without it, absent and
   // explicitly-empty would reach core as the same value, which is exactly
   // the SDK divergence #10138 reports for coreTools.

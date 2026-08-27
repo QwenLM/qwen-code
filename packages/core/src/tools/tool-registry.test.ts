@@ -1182,6 +1182,17 @@ describe('ToolRegistry', () => {
       expect(
         toolRegistry.isPermissionDeferred('uncovered_discovered_tool'),
       ).toBe(true);
+
+      const copiedRegistry = new ToolRegistry(config);
+      copiedRegistry.copyDiscoveredToolsFrom(toolRegistry);
+      expect(
+        copiedRegistry.isPermissionDeferred('uncovered_discovered_tool'),
+      ).toBe(true);
+      expect(
+        copiedRegistry
+          .getFunctionDeclarations()
+          .map((declaration) => declaration.name),
+      ).not.toContain('uncovered_discovered_tool');
     });
 
     it('removes a command-discovered tool hit by a whole-tool deny rule even under an active tools.eager allowlist (#9827)', async () => {

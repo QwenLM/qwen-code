@@ -4115,8 +4115,8 @@ describe('loadCliConfig tools.eager wiring (#9827, #10075)', () => {
     };
     const config = await loadCliConfig(settings, argv, undefined, []);
 
-    // `[]` is an active allowlist naming nothing (defer everything), not
-    // "unset" — the same empty-list convention `tools.core` follows.
+    // `[]` is an active allowlist naming nothing (defer everything), unlike
+    // `tools.core`, where an empty list is treated as unset.
     expect(config.getEagerTools()).toEqual([]);
   });
 

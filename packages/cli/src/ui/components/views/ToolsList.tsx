@@ -61,7 +61,7 @@ export const ToolsList: React.FC<ToolsListProps> = ({
         <Text color={theme.text.secondary}>
           {'  '}
           {t(
-            'Tools marked "(on demand)" stay available but are not offered to the model upfront; it loads them via tool_search when needed. Set tools.eager in settings.json to choose which schemas are sent upfront.',
+            'Tools marked "(on demand)" stay available but are not offered to the model upfront; it loads them via tool_search when needed. Set tools.eager to choose which eager-by-default schemas stay upfront, or tools.visible to surface an on-demand tool at startup.',
           )}
         </Text>
       </>

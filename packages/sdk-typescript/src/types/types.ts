@@ -410,13 +410,14 @@ export interface QueryOptions {
    * runtime. MCP tools are exempt from deny-based removal — hide them with
    * the per-server `excludeTools` / `tools.disabled` filters instead.
    * Separately, `tools.eager` in settings.json (requires restart) selects
-   * which tool schemas ride in the eager model request: built-in tools not
-   * named there are demoted to deferred — they stay registered and loadable
-   * via `tool_search`, but their schemas are not sent eagerly and a call
-   * still goes through the normal approval flow (MCP tools, the
-   * `--json-schema` `structured_output` contract, the plan-mode lifecycle
-   * tools, `task_stop`, `tool_search`, and the `computer_use__*` family are
-   * exempt) (#9827, #10075). `permissions.allow` plays no part in this — it
+   * which eager-by-default tool schemas remain eligible for the initial
+   * model request. Unlisted non-exempt tools are demoted to deferred and stay
+   * loadable via `tool_search`. Tools already deferred by default remain on
+   * demand even when listed; `tools.visible` surfaces one at startup. The
+   * allowlist does not affect MCP tools, the `--json-schema`
+   * `structured_output` contract, plan-mode lifecycle tools, `task_stop`,
+   * `tool_search`, or the `computer_use__*` family (#9827, #10075).
+   * `permissions.allow` plays no part in this — it
    * is pure auto-approval and never removes or hides a tool. Aliases like
    * 'Read', 'Edit', and 'Bash' also work but resolve to single tools.
    * Specifiers like 'Bash(git *)' are stripped; `coreTools` restricts
@@ -457,7 +458,7 @@ export interface QueryOptions {
    * - Does NOT restrict tool registration: this parameter maps to the CLI
    *   `--allowed-tools` flag and is pure auto-approval, as is
    *   `permissions.allow` in settings.json (#10075). To keep unlisted
-   *   built-in tool schemas out of the eager model request, set
+   *   eager-by-default built-in schemas out of the initial model request, set
    *   `tools.eager` in settings.json (requires restart); tools omitted
    *   there are demoted to deferred — still registered and loadable via
    *   `tool_search` (#9827)

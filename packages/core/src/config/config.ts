@@ -1052,11 +1052,11 @@ export interface ConfigParameters {
    */
   visibleTools?: string[];
   /**
-   * Tool names whose schemas ride in the EAGER model request. When set,
-   * every other built-in is demoted to deferred — still registered, still
-   * listed in `/tools`, still loadable via `tool_search` — so
-   * constrained-decoding backends never have to compile the schemas they
-   * cannot handle (#9827). Sourced from `settings.tools.eager`.
+   * Eager-by-default built-in tool names whose schemas remain eligible for
+   * the initial model request. Unlisted non-exempt tools are demoted to
+   * deferred but stay registered and loadable via `tool_search`. Tools
+   * already deferred by default stay deferred even when listed; use
+   * `visibleTools` to surface one at startup (#9827).
    *
    * `undefined` means no restriction; an explicitly empty array is an
    * active allowlist naming nothing, which defers every non-exempt tool.
@@ -1068,11 +1068,10 @@ export interface ConfigParameters {
   /**
    * Percentage of the model's context window used as the session-start
    * budget for preloading deferred tools. When the combined estimated
-   * schema size of every deferred tool — bundled built-ins and MCP alike
-   * — fits within the budget, they are all revealed upfront instead of
-   * loaded on demand via `tool_search`, keeping the declaration list
-   * stable for the whole session (prefix-cache friendly). `0` disables
-   * preloading. Sourced from `settings.tools.toolSearch.threshold`.
+   * schema size of every eligible deferred tool — bundled built-ins and MCP
+   * alike — fits within the budget, they are revealed upfront instead of
+   * loaded on demand via `tool_search`. Tools demoted by `tools.eager` are
+   * excluded from this preload. `0` disables preloading.
    */
   toolSearchThreshold?: number;
   /** Merged permission rules from all sources (settings + CLI args). */
@@ -2359,8 +2358,7 @@ export class Config {
     );
     // An explicitly empty array is preserved as an ACTIVE-but-empty
     // allowlist (defer everything); only `undefined` means "no
-    // restriction". Same convention `tools.core` uses for its empty list
-    // (#10065/#10080), so the two `tools.*` knobs read the same way.
+    // restriction". `tools.core` differs: its empty list is treated as unset.
     this.eagerTools =
       params.eagerTools === undefined
         ? undefined
@@ -5816,8 +5814,8 @@ export class Config {
   }
 
   /**
-   * Returns the `settings.tools.eager` allowlist: the tool names whose
-   * schemas ride in the eager model request.
+   * Returns the `settings.tools.eager` allowlist: eager-by-default tool names
+   * whose schemas remain eligible for the initial model request.
    *
    * `undefined` means "not configured — no restriction". An empty array is
    * an active allowlist that names nothing, which defers every

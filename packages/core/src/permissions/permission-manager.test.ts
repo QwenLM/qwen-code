@@ -1678,9 +1678,10 @@ function makeConfig(
     cwd: string;
     approvalMode: string;
     /**
-     * `settings.tools.eager` — the tool names whose schemas ride in the
-     * eager model request. Absent/empty means "no restriction". Wholly
-     * independent of the permission rules (#10075).
+     * `settings.tools.eager` — eager-by-default tool names whose schemas may
+     * ride in the initial request. Absent means "no restriction"; an empty
+     * array is active and defers every non-exempt tool. Wholly independent
+     * of the permission rules (#10075).
      */
     eagerTools: string[];
   }> = {},
@@ -2830,9 +2831,8 @@ describe('PermissionManager', () => {
     });
 
     it('an explicitly empty list is active and defers everything', async () => {
-      // `[]` is an active allowlist that names nothing — the same
-      // empty-array convention `tools.core` follows (#10065/#10080), so
-      // the two `tools.*` knobs cannot be read backwards from one another.
+      // `[]` is an active allowlist that names nothing; `tools.core` differs
+      // because its empty list is treated as unset.
       // This is the gentler answer for constrained-decoding backends: the
       // eager request carries almost no tool schemas, but every tool is
       // still registered and reachable via ToolSearch.
