@@ -287,6 +287,24 @@ function runInstallStep(machine) {
   }
 }
 
+// Allowlists only the exact `secrets.GITHUB_TOKEN` reference by flagging
+// EVERY occurrence of the secrets context: dot, bracket/indexed, and
+// whole-context forms all reach ambient secrets, so enumerating
+// expression shapes one at a time leaves the class open. Fails closed —
+// any occurrence that is not literally the permitted reference throws.
+function assertSecretFree(where, value) {
+  const refs =
+    String(value ?? '').match(/\bsecrets\b\s*(?:\.[A-Za-z_]+|\[[^\]]*\])?/g) ??
+    [];
+  for (const ref of refs) {
+    assert.equal(
+      ref.replace(/\s+/g, ''),
+      'secrets.GITHUB_TOKEN',
+      `capture ${where} references ${ref}; the render side must stay secret-free`,
+    );
+  }
+}
+
 const ASSOCIATIONS = [
   ...TRUSTED,
   'CONTRIBUTOR',
@@ -702,6 +720,128 @@ describe('web-shell-visuals.yml capture runner routing', () => {
     assert.ok(heal < checkout, 'the heal must precede the checkout');
   });
 
+  it('wipes the reused workspace except the shared root .git before checking out PR code', () => {
+    // The pool's per-repo workspace outlives a run, so the shared .git a
+    // previous job left behind — including exec knobs planted in it (hooks,
+    // core.hooksPath) — reaches this job's checkout unless the wipe defangs
+    // it. This is the byte-identical port of serve-ab.yml's step; this pin
+    // mirrors serve-ab's test of the same name line for line, so the two
+    // copies drift only through a deliberate double edit.
+    const steps = visualsCaptureJob.steps;
+    const wipeIndex = steps.findIndex(
+      (s) =>
+        s.name ===
+        'Wipe stale workspace except the shared .git before checkout',
+    );
+    assert.ok(
+      wipeIndex !== -1,
+      'self-hosted reuse must not bleed one PR into the next',
+    );
+    const wipe = steps[wipeIndex];
+    assert.equal(wipe.if, "${{ runner.environment == 'self-hosted' }}");
+    // The script text alone does not decide whether the wipe runs: the
+    // shell wrapper, continue-on-error (step and job level), and env
+    // overrides (BASH_ENV, PATH, GITHUB_WORKSPACE) — at step, job, and
+    // workflow level — all control whether the pinned command executes
+    // and whether its failure fails the job.
+    const shell =
+      wipe.shell ??
+      visualsCaptureJob.defaults?.run?.shell ??
+      visualsDoc.defaults?.run?.shell;
+    assert.ok(
+      shell === undefined || shell === 'bash',
+      'the wipe must run under the default bash wrapper',
+    );
+    assert.ok(
+      !('continue-on-error' in wipe),
+      'a failed wipe must fail the job, not bleed into the next PR',
+    );
+    assert.ok(
+      !('continue-on-error' in visualsCaptureJob),
+      'a job-level continue-on-error would mask a failed wipe',
+    );
+    for (const envMap of [wipe.env, visualsCaptureJob.env, visualsDoc.env]) {
+      assert.ok(
+        !envMap ||
+          (envMap.BASH_ENV === undefined &&
+            envMap.PATH === undefined &&
+            envMap.GITHUB_WORKSPACE === undefined),
+        'BASH_ENV, PATH, or GITHUB_WORKSPACE can shadow the pinned wipe command',
+      );
+    }
+    // The sudo-less wipe only works because ownership-restore ran first,
+    // and it must precede the checkouts or it deletes the freshly
+    // checked-out code instead of stale leftovers.
+    const ownershipIndex = steps.findIndex(
+      (s) => s.name === 'Restore workspace ownership',
+    );
+    assert.ok(
+      ownershipIndex !== -1,
+      'the wipe depends on the ownership-restore step existing',
+    );
+    assert.match(
+      steps[ownershipIndex].run,
+      /chown -R .* "\$GITHUB_WORKSPACE"/,
+      'ownership-restore must actually chown the workspace',
+    );
+    assert.ok(
+      ownershipIndex < wipeIndex,
+      'the wipe depends on ownership-restore running first',
+    );
+    const checkouts = steps.filter((s) =>
+      String(s.uses || '').startsWith('actions/checkout'),
+    );
+    for (const checkout of checkouts) {
+      assert.ok(
+        steps.indexOf(checkout) > wipeIndex,
+        'the wipe must run before every checkout it protects',
+      );
+    }
+    assert.ok(
+      checkouts.length >= 2,
+      'expected both the head and the merge-base checkout',
+    );
+    // Pin that the checkout-heal path guard is present and hands off to the
+    // kept-.git tail, line by line, so any change forces a deliberate test
+    // update — removing or demoting the wipe step must turn this red.
+    assert.match(
+      wipe.run,
+      /refusing to wipe suspicious workspace path/,
+      'the wipe must keep the checkout-heal path guard',
+    );
+    const executed = wipe.run
+      .split('\n')
+      .map((l) => l.trim())
+      .filter((l) => l !== '' && !l.startsWith('#'));
+    assert.equal(executed[0], 'set -uo pipefail');
+    const tail = executed.slice(-5);
+    assert.equal(
+      tail[0],
+      'find "$WS" -mindepth 1 -maxdepth 1 ! \\( -name \'.git\' -type d \\) -exec rm -rf {} +',
+      'the wipe must keep only a REAL .git directory — a symlink or gitfile named .git can point outside the workspace — and only the guarded $WS may reach the rm',
+    );
+    assert.equal(
+      tail[1],
+      'rm -rf "$WS/.git/hooks" "$WS/.git/info/attributes"',
+      'the kept .git must lose its hooks and info/attributes exec vectors',
+    );
+    assert.equal(
+      tail[2],
+      'rm -f "$(git --git-dir="$WS/.git" rev-parse --git-path config.worktree 2>/dev/null || echo /nonexistent)" 2>/dev/null || true',
+      "extensions.worktreeConfig activates .git/config.worktree, a second local file that git config --local neither lists nor unsets — delete it like qwen-triage.yml's hardened config-sanitize",
+    );
+    assert.equal(
+      tail[3],
+      'git --git-dir="$WS/.git" config --local --unset-all extensions.worktreeConfig 2>/dev/null || true',
+      'drop the extension that re-activates the split config file',
+    );
+    assert.equal(
+      tail[4],
+      '{ git --git-dir="$WS/.git" config --local --name-only --list 2>/dev/null || true; } | { grep -ivE \'^(core\\.(repositoryformatversion|bare|filemode|symlinks|ignorecase|precomposeunicode|logallrefupdates|worktree|hidedotfiles|protecthfs|protectntfs)|remote\\.|branch\\.|extensions\\.|gc\\.|pack\\.|fetch\\.|index\\.|safe\\.|submodule\\.[^.]+\\.(url|active|branch))\' || true; } | while IFS= read -r key; do git --git-dir="$WS/.git" config --local --unset-all "$key" 2>/dev/null || true; done',
+      "the kept .git config must be scrubbed to the qwen-triage.yml config-sanitize allowlist, anchored to $WS/.git so a healed symlinked root never scrubs the link's target",
+    );
+  });
+
   it('keeps the capture job free of ambient secrets', () => {
     // The security-model header promises the render job holds no secrets of
     // its own; the merge-base resolve step's read-only GITHUB_TOKEN is the
@@ -727,15 +867,27 @@ describe('web-shell-visuals.yml capture runner routing', () => {
       ]),
     );
     for (const [where, value] of surfaces) {
-      const refs = String(value ?? '').match(/secrets\.[A-Za-z_]+/g) ?? [];
-      for (const ref of refs) {
-        assert.equal(
-          ref,
-          'secrets.GITHUB_TOKEN',
-          `capture ${where} references ${ref}; the render side must stay secret-free`,
-        );
-      }
+      assertSecretFree(where, value);
     }
+  });
+
+  it('fails every secrets shape except the permitted reference', () => {
+    // The scan above only bites if the match itself cannot be bypassed:
+    // bracket/indexed and whole-context forms reach ambient secrets without
+    // the literal dot shape, and shape enumeration grew a new bypass sibling
+    // in three consecutive rounds. Deleting the broadened matcher must turn
+    // every non-dot shape red here.
+    for (const shape of [
+      "${{ secrets['EVIL'] }}",
+      '${{ secrets[matrix.key] }}',
+      '${{ toJSON(secrets) }}',
+      '${{ secrets }}',
+    ]) {
+      assert.throws(() => assertSecretFree('fixture env', shape));
+    }
+    assert.doesNotThrow(() =>
+      assertSecretFree('fixture env', '${{ secrets.GITHUB_TOKEN }}'),
+    );
   });
 
   it('keeps setup-node off the pool', () => {
