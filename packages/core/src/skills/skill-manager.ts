@@ -1084,13 +1084,14 @@ export class SkillManager {
           // `.backup-*` sibling with a valid SKILL.md would be loaded as a
           // duplicate skill, and a "deleted" skill could reappear from its
           // backup sibling.
-          // Match only the actual artifact suffix (`.backup-<digit>` /
-          // `.installing-<digit>`) so that legitimate skill names containing
-          // `.backup-` as a substring (e.g. `db.backup-restore`) are not
-          // skipped.
+          // Match only the actual artifact shape
+          // (`.backup-<pid>-<timestamp>` / `.installing-<pid>-<timestamp>`,
+          // anchored at the end of the entry name) so that legitimate skill
+          // dirs whose names merely contain `.backup-` or `.installing-`
+          // (e.g. `db.backup-2024`) are not skipped.
           if (
-            /\.backup-\d/.test(entry.name) ||
-            /\.installing-\d/.test(entry.name)
+            /\.backup-\d+-\d+$/.test(entry.name) ||
+            /\.installing-\d+-\d+$/.test(entry.name)
           ) {
             debugLogger.debug(`Skipping install artifact entry: ${entry.name}`);
             return null;
