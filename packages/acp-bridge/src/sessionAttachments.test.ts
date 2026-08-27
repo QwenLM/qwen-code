@@ -833,6 +833,256 @@ describe('SessionAttachmentStore', () => {
     }
   });
 
+  it('retries durable deletion after the attachment parent sync fails', async () => {
+    const root = await fs.mkdtemp(
+      path.join(tmpdir(), 'qwen-attachment-durability-'),
+    );
+    const store = new SessionAttachmentStore(root, 'session-a');
+    await store.putAttachment(
+      Uint8Array.of(1),
+      'application/octet-stream',
+      'old.bin',
+    );
+    const originalOpen = fs.open.bind(fs);
+    let failSync = true;
+    const open = vi.spyOn(fs, 'open').mockImplementation(async (...args) => {
+      const handle = await originalOpen(...args);
+      if (String(args[0]) === root) {
+        const originalSync = handle.sync.bind(handle);
+        handle.sync = async () => {
+          if (failSync) {
+            failSync = false;
+            throw Object.assign(new Error('directory sync failure'), {
+              code: 'EIO',
+            });
+          }
+          await originalSync();
+        };
+      }
+      return handle;
+    });
+
+    try {
+      await expect(store.delete()).rejects.toMatchObject({ code: 'EIO' });
+      await expect(
+        fs.stat(path.join(root, 'session-session-a')),
+      ).rejects.toMatchObject({ code: 'ENOENT' });
+
+      await expect(store.delete()).resolves.toBeUndefined();
+    } finally {
+      open.mockRestore();
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects attachment parent disappearance after opening it', async () => {
+    const root = await fs.mkdtemp(
+      path.join(tmpdir(), 'qwen-attachment-parent-vanished-'),
+    );
+    const store = new SessionAttachmentStore(root, 'session-a');
+    const reference = await store.putAttachment(
+      Uint8Array.of(1),
+      'application/octet-stream',
+      'kept.bin',
+    );
+    const originalStat = fs.stat.bind(fs);
+    const vanished = Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    let rejectParentStat = true;
+    const stat = vi.spyOn(fs, 'stat').mockImplementation(async (...args) => {
+      if (String(args[0]) === root && rejectParentStat) {
+        rejectParentStat = false;
+        throw vanished;
+      }
+      return originalStat(...args);
+    });
+
+    try {
+      await expect(store.delete()).rejects.toBe(vanished);
+      await expect(
+        fs.stat(path.join(root, 'session-session-a', reference.attachmentId)),
+      ).resolves.toBeDefined();
+    } finally {
+      stat.mockRestore();
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('retries a claimed attachment tombstone without deleting a successor', async () => {
+    const root = await fs.mkdtemp(
+      path.join(tmpdir(), 'qwen-attachment-tombstone-retry-'),
+    );
+    const store = new SessionAttachmentStore(root, 'session-a');
+    await store.putAttachment(
+      Uint8Array.of(1),
+      'application/octet-stream',
+      'old.bin',
+    );
+    const directory = path.join(root, 'session-session-a');
+    const tombstone = path.join(root, '.session-session-a.deleting');
+    const removeError = Object.assign(new Error('remove failed'), {
+      code: 'EIO',
+    });
+    const remove = vi.spyOn(fs, 'rm').mockRejectedValueOnce(removeError);
+
+    try {
+      await expect(store.delete()).rejects.toBe(removeError);
+      await expect(fs.stat(tombstone)).resolves.toBeDefined();
+      await expect(fs.stat(directory)).rejects.toMatchObject({
+        code: 'ENOENT',
+      });
+      await fs.mkdir(directory, { recursive: true });
+      await fs.writeFile(
+        path.join(directory, 'successor.bin'),
+        Uint8Array.of(2),
+      );
+
+      const recovery = new SessionAttachmentStore(root, 'session-a');
+      await expect(recovery.delete()).resolves.toBeUndefined();
+
+      await expect(fs.stat(tombstone)).rejects.toMatchObject({
+        code: 'ENOENT',
+      });
+      await expect(
+        fs.stat(path.join(directory, 'successor.bin')),
+      ).resolves.toBeDefined();
+    } finally {
+      remove.mockRestore();
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('rechecks the runtime generation after opening the attachment parent', async () => {
+    const root = await fs.mkdtemp(
+      path.join(tmpdir(), 'qwen-attachment-parent-fence-'),
+    );
+    const store = new SessionAttachmentStore(root, 'session-a');
+    await store.putAttachment(
+      Uint8Array.of(1),
+      'application/octet-stream',
+      'kept.bin',
+    );
+    const originalOpen = fs.open.bind(fs);
+    let continueOpen: (() => void) | undefined;
+    const openPaused = new Promise<void>((resolve) => {
+      continueOpen = resolve;
+    });
+    let parentOpened: (() => void) | undefined;
+    const parentOpenStarted = new Promise<void>((resolve) => {
+      parentOpened = resolve;
+    });
+    const open = vi.spyOn(fs, 'open').mockImplementation(async (...args) => {
+      if (String(args[0]) === root) {
+        parentOpened?.();
+        await openPaused;
+      }
+      return originalOpen(...args);
+    });
+    const rename = vi.spyOn(fs, 'rename');
+    const generationClosed = new Error('runtime generation closed');
+    let generationCurrent = true;
+
+    try {
+      const deleting = store.delete({
+        assertCanCommit: () => {
+          if (!generationCurrent) throw generationClosed;
+        },
+      });
+      await parentOpenStarted;
+      generationCurrent = false;
+      continueOpen?.();
+
+      await expect(deleting).rejects.toBe(generationClosed);
+      expect(rename).not.toHaveBeenCalled();
+      await expect(
+        fs.stat(path.join(root, 'session-session-a', 'kept.bin')),
+      ).resolves.toBeDefined();
+    } finally {
+      continueOpen?.();
+      open.mockRestore();
+      rename.mockRestore();
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('deletes attachments when the filesystem does not expose inodes', async () => {
+    const root = await fs.mkdtemp(
+      path.join(tmpdir(), 'qwen-attachment-zero-inode-'),
+    );
+    const store = new SessionAttachmentStore(root, 'session-a');
+    await store.putAttachment(
+      Uint8Array.of(1),
+      'application/octet-stream',
+      'old.bin',
+    );
+    const originalOpen = fs.open.bind(fs);
+    const originalStat = fs.stat.bind(fs);
+    const open = vi.spyOn(fs, 'open').mockImplementation(async (...args) => {
+      const handle = await originalOpen(...args);
+      if (String(args[0]) === root) {
+        const handleStat = handle.stat.bind(handle);
+        handle.stat = (async (...statArgs) => {
+          const result = await handleStat(...statArgs);
+          Object.defineProperty(result, 'ino', { value: 0 });
+          return result;
+        }) as typeof handle.stat;
+      }
+      return handle;
+    });
+    const stat = vi.spyOn(fs, 'stat').mockImplementation(async (...args) => {
+      const result = await originalStat(...args);
+      if (String(args[0]) === root) {
+        Object.defineProperty(result, 'ino', { value: 0 });
+      }
+      return result;
+    });
+
+    try {
+      await expect(store.delete()).resolves.toBeUndefined();
+      await expect(
+        fs.stat(path.join(root, 'session-session-a')),
+      ).rejects.toMatchObject({ code: 'ENOENT' });
+    } finally {
+      open.mockRestore();
+      stat.mockRestore();
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects deletion when parent inode verifiability changes', async () => {
+    const root = await fs.mkdtemp(
+      path.join(tmpdir(), 'qwen-attachment-inode-transition-'),
+    );
+    const store = new SessionAttachmentStore(root, 'session-a');
+    await store.putAttachment(
+      Uint8Array.of(1),
+      'application/octet-stream',
+      'kept.bin',
+    );
+    const originalStat = fs.stat.bind(fs);
+    const stat = vi.spyOn(fs, 'stat').mockImplementation(async (...args) => {
+      const result = await originalStat(...args);
+      if (String(args[0]) === root) {
+        Object.defineProperty(result, 'ino', { value: 0 });
+      }
+      return result;
+    });
+    const rename = vi.spyOn(fs, 'rename');
+
+    try {
+      await expect(store.delete()).rejects.toThrow(
+        'Session attachment parent directory changed.',
+      );
+      expect(rename).not.toHaveBeenCalled();
+      await expect(
+        fs.stat(path.join(root, 'session-session-a', 'kept.bin')),
+      ).resolves.toBeDefined();
+    } finally {
+      stat.mockRestore();
+      rename.mockRestore();
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
   it('forgets attachments whose backing file disappeared', async () => {
     const root = await fs.mkdtemp(path.join(tmpdir(), 'qwen-attachment-gone-'));
     const store = new SessionAttachmentStore(root, 'session-a');

@@ -27752,6 +27752,42 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
+    it('replaces this-daemon-lifetime bindings on setSessionPrs', async () => {
+      // The backfill cap trim evicts persisted bindings; the hydrated live
+      // entry must follow the sidecar (unlike seed, which defers to
+      // existing bindings) or the summary merge resurrects the evicted
+      // numbers. Unknown session ids are no-ops, not throws.
+      const bridge = makeBridge({
+        channelFactory: async () => makeChannel().channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      bridge.updateSessionMetadata(session.sessionId, {
+        pr: { number: 1, url: 'https://github.com/o/r/pull/1' },
+      });
+      expect(() =>
+        bridge.setSessionPrs?.('no-such-session', [
+          { number: 9, url: 'https://github.com/o/r/pull/9' },
+        ]),
+      ).not.toThrow();
+      bridge.setSessionPrs?.(session.sessionId, [
+        {
+          number: 3,
+          url: 'https://github.com/o/r/pull/3',
+          state: 'merged',
+        },
+        { number: 4, url: 'https://github.com/o/r/pull/4' },
+      ]);
+
+      expect(bridge.getSessionSummary(session.sessionId).prs).toEqual([
+        { number: 3, url: 'https://github.com/o/r/pull/3', state: 'merged' },
+        { number: 4, url: 'https://github.com/o/r/pull/4' },
+      ]);
+
+      await bridge.closeSession(session.sessionId);
+      await bridge.shutdown();
+    });
+
     it('logs a stderr audit record when a pr binding is added', async () => {
       const stderrSpy = vi
         .spyOn(process.stderr, 'write')
@@ -27840,6 +27876,188 @@ describe('createAcpSessionBridge', () => {
 
       await bridge.closeSession(session.sessionId);
       await drain;
+      await bridge.shutdown();
+    });
+
+    it('republishes when the same binding returns with a new state', async () => {
+      // The same-binding early return must compare state too: the sidecar
+      // write the caller makes after this returns would otherwise disagree
+      // with the live entry, the event stream, and the response.
+      const bridge = makeBridge({
+        channelFactory: async () => makeChannel().channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const before = bridge.getSessionCatalogVersion().revision;
+
+      const events: BridgeEvent[] = [];
+      const sub = bridge.subscribeEvents(session.sessionId);
+      const drain = (async () => {
+        for await (const ev of sub) events.push(ev);
+      })();
+      await new Promise((r) => setImmediate(r));
+
+      bridge.updateSessionMetadata(session.sessionId, {
+        pr: {
+          number: 9517,
+          url: 'https://github.com/o/r/pull/9517',
+          state: 'open',
+        },
+      });
+      const effective = bridge.updateSessionMetadata(session.sessionId, {
+        pr: {
+          number: 9517,
+          url: 'https://github.com/o/r/pull/9517',
+          state: 'merged',
+        },
+      });
+
+      expect(effective.prs).toEqual([
+        {
+          number: 9517,
+          url: 'https://github.com/o/r/pull/9517',
+          state: 'merged',
+        },
+      ]);
+      expect(bridge.getSessionSummary(session.sessionId).prs).toEqual(
+        effective.prs,
+      );
+      expect(bridge.getSessionCatalogVersion().revision).toBe(before + 2);
+
+      await new Promise((r) => setImmediate(r));
+      const prEvents = events.filter(
+        (e) =>
+          e.type === 'session_metadata_updated' &&
+          (e.data as { prs?: unknown }).prs !== undefined,
+      );
+      // Both binds publish: subscribers must see the open->merged
+      // transition, not only the final live entry.
+      expect(prEvents).toHaveLength(2);
+      expect(
+        (prEvents[1]?.data as { prs: Array<{ state?: string }> }).prs?.[0]
+          ?.state,
+      ).toBe('merged');
+
+      await bridge.closeSession(session.sessionId);
+      await drain;
+      await bridge.shutdown();
+    });
+
+    it('preserves the known state on a stateless re-bind', async () => {
+      // Mirrors the sidecar's `bound.state ?? known?.state`: SDK/ACP
+      // clients omit state on re-bind, and the live entry must not reset.
+      const bridge = makeBridge({
+        channelFactory: async () => makeChannel().channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      bridge.updateSessionMetadata(session.sessionId, {
+        pr: {
+          number: 9517,
+          url: 'https://github.com/o/r/pull/9517',
+          state: 'merged',
+        },
+      });
+      const effective = bridge.updateSessionMetadata(session.sessionId, {
+        pr: {
+          number: 9517,
+          url: 'https://github.com/o/r/pull/9517?v=2',
+        },
+      });
+
+      expect(effective.prs).toEqual([
+        {
+          number: 9517,
+          url: 'https://github.com/o/r/pull/9517?v=2',
+          state: 'merged',
+        },
+      ]);
+      expect(bridge.getSessionSummary(session.sessionId).prs).toEqual(
+        effective.prs,
+      );
+
+      await bridge.closeSession(session.sessionId);
+      await bridge.shutdown();
+    });
+
+    it('does not carry state across a cross-repository re-bind', async () => {
+      // Twin of the sidecar's url-gated carry: a same-numbered PR of
+      // another repository is a different PR and must not inherit the
+      // previous binding's state.
+      const bridge = makeBridge({
+        channelFactory: async () => makeChannel().channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      bridge.updateSessionMetadata(session.sessionId, {
+        pr: {
+          number: 9517,
+          url: 'https://github.com/repo-a/o/pull/9517',
+          state: 'merged',
+        },
+      });
+      const effective = bridge.updateSessionMetadata(session.sessionId, {
+        pr: {
+          number: 9517,
+          url: 'https://github.com/repo-b/o/pull/9517',
+        },
+      });
+
+      expect(effective.prs).toEqual([
+        { number: 9517, url: 'https://github.com/repo-b/o/pull/9517' },
+      ]);
+      expect(bridge.getSessionSummary(session.sessionId).prs).toEqual(
+        effective.prs,
+      );
+
+      await bridge.closeSession(session.sessionId);
+      await bridge.shutdown();
+    });
+
+    it('rejects a pr state outside the enum and names the constraint', async () => {
+      const bridge = makeBridge({
+        channelFactory: async () => makeChannel().channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      // 'draft' is a likely mistake: gh reports it, but the sidecar and
+      // the badge only know open/merged/closed.
+      expect(() =>
+        bridge.updateSessionMetadata(session.sessionId, {
+          pr: {
+            number: 9517,
+            url: 'https://github.com/o/r/pull/9517',
+            state: 'draft',
+          } as { number: number; url: string },
+        }),
+      ).toThrow(/`state` of `open`, `merged`, or `closed`/);
+
+      await bridge.closeSession(session.sessionId);
+      await bridge.shutdown();
+    });
+
+    it('propagates state through seedSessionPrs', async () => {
+      const bridge = makeBridge({
+        channelFactory: async () => makeChannel().channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      bridge.seedSessionPrs?.(session.sessionId, [
+        {
+          number: 9500,
+          url: 'https://github.com/o/r/pull/9500',
+          state: 'merged',
+        },
+      ]);
+
+      expect(bridge.getSessionSummary(session.sessionId).prs).toEqual([
+        {
+          number: 9500,
+          url: 'https://github.com/o/r/pull/9500',
+          state: 'merged',
+        },
+      ]);
+
+      await bridge.closeSession(session.sessionId);
       await bridge.shutdown();
     });
 

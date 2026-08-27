@@ -5,7 +5,7 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import { promises as fs, statSync } from 'node:fs';
+import { constants as fsConstants, promises as fs, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 import type { ContentBlock } from '@agentclientprotocol/sdk';
@@ -20,6 +20,116 @@ const SUPPORTED_IMAGE_MIME_TYPES = new Set([
   'image/png',
   'image/webp',
 ]);
+
+interface DurableAttachmentDirectory {
+  path: string;
+  handle: Awaited<ReturnType<typeof fs.open>>;
+  dev: number;
+  ino: number;
+  inodeVerifiable: boolean;
+}
+
+function hasVerifiableInode(ino: number): boolean {
+  return Number.isSafeInteger(ino) && ino > 0;
+}
+
+async function openDurableAttachmentDirectory(
+  directory: string,
+  openedHandle?: Awaited<ReturnType<typeof fs.open>>,
+): Promise<DurableAttachmentDirectory> {
+  const handle =
+    openedHandle ??
+    (await fs.open(
+      directory,
+      fsConstants.O_RDONLY |
+        (process.platform === 'win32' ? 0 : (fsConstants.O_NOFOLLOW ?? 0)),
+    ));
+  try {
+    const opened = await handle.stat();
+    const current = await fs.stat(directory);
+    const openedInodeVerifiable = hasVerifiableInode(opened.ino);
+    const currentInodeVerifiable = hasVerifiableInode(current.ino);
+    if (
+      !opened.isDirectory() ||
+      !current.isDirectory() ||
+      opened.dev !== current.dev ||
+      openedInodeVerifiable !== currentInodeVerifiable ||
+      (openedInodeVerifiable && opened.ino !== current.ino)
+    ) {
+      throw new Error('Session attachment parent directory changed.');
+    }
+    return {
+      path: directory,
+      handle,
+      dev: opened.dev,
+      ino: opened.ino,
+      inodeVerifiable: openedInodeVerifiable,
+    };
+  } catch (error) {
+    await handle.close().catch(() => undefined);
+    throw error;
+  }
+}
+
+async function openDurableAttachmentDirectoryIfPresent(
+  directory: string,
+): Promise<DurableAttachmentDirectory | undefined> {
+  let handle: Awaited<ReturnType<typeof fs.open>>;
+  try {
+    handle = await fs.open(
+      directory,
+      fsConstants.O_RDONLY |
+        (process.platform === 'win32' ? 0 : (fsConstants.O_NOFOLLOW ?? 0)),
+    );
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+    throw error;
+  }
+  return openDurableAttachmentDirectory(directory, handle);
+}
+
+async function syncDurableAttachmentDirectory(
+  expected: DurableAttachmentDirectory,
+): Promise<void> {
+  const opened = await expected.handle.stat();
+  const openedInodeVerifiable = hasVerifiableInode(opened.ino);
+  const current = await fs.stat(expected.path);
+  const currentInodeVerifiable = hasVerifiableInode(current.ino);
+  if (
+    !opened.isDirectory() ||
+    !current.isDirectory() ||
+    opened.dev !== expected.dev ||
+    openedInodeVerifiable !== expected.inodeVerifiable ||
+    (expected.inodeVerifiable && opened.ino !== expected.ino) ||
+    current.dev !== expected.dev ||
+    currentInodeVerifiable !== expected.inodeVerifiable ||
+    (expected.inodeVerifiable && current.ino !== expected.ino)
+  ) {
+    throw new Error('Session attachment parent directory changed.');
+  }
+  try {
+    await expected.handle.sync();
+  } catch (error) {
+    if (
+      process.platform !== 'win32' ||
+      !['EACCES', 'EINVAL', 'EPERM'].includes(
+        (error as NodeJS.ErrnoException).code ?? '',
+      )
+    ) {
+      throw error;
+    }
+  }
+  const after = await fs.stat(expected.path);
+  const afterInodeVerifiable = hasVerifiableInode(after.ino);
+  if (
+    !after.isDirectory() ||
+    after.dev !== expected.dev ||
+    afterInodeVerifiable !== expected.inodeVerifiable ||
+    (expected.inodeVerifiable && after.ino !== expected.ino)
+  ) {
+    throw new Error('Session attachment parent directory changed.');
+  }
+}
 
 // Text the degrade paths substitute for an attachment the model will not receive. The
 // SDK's DaemonSessionClient.hydrateBlock and the web shell's degradation
@@ -669,12 +779,75 @@ export class SessionAttachmentStore {
       this.persistentDirectory ??
       (await this.directoryPromise?.catch(() => undefined));
     if (directory) {
-      await this.removeDirectoryWithTombstone(
-        directory,
-        options.assertCanCommit,
-      );
+      await this.removeDirectoryDurably(directory, options.assertCanCommit);
     }
     if (fallbackError !== undefined) throw fallbackError;
+  }
+
+  /**
+   * Delete `directory` through a fixed-name tombstone while holding an open
+   * handle to its parent, re-checking the parent's identity and syncing it
+   * after each mutation. The FIXED tombstone name lets a deletion interrupted
+   * between the rename and the removal resume on the next call instead of
+   * leaking the tombstone, and a successor directory recreated at the
+   * original path after the rename is never swept up by the removal.
+   */
+  private async removeDirectoryDurably(
+    directory: string,
+    assertCanCommit?: () => void,
+  ): Promise<void> {
+    assertCanCommit?.();
+    const parent = await openDurableAttachmentDirectoryIfPresent(
+      path.dirname(directory),
+    );
+    if (!parent) return;
+    const tombstone = path.join(
+      path.dirname(directory),
+      `.${path.basename(directory)}.deleting`,
+    );
+    try {
+      assertCanCommit?.();
+      let tombstoneExists = false;
+      try {
+        const stats = await fs.lstat(tombstone);
+        if (!stats.isDirectory() || stats.isSymbolicLink()) {
+          throw new Error('Session attachment tombstone is not a directory.');
+        }
+        tombstoneExists = true;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      }
+      if (tombstoneExists) {
+        assertCanCommit?.();
+        await fs.rm(tombstone, { recursive: true, force: true });
+        await syncDurableAttachmentDirectory(parent);
+        return;
+      }
+      assertCanCommit?.();
+      try {
+        await fs.rename(directory, tombstone);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+        try {
+          const stats = await fs.lstat(tombstone);
+          if (!stats.isDirectory() || stats.isSymbolicLink()) {
+            throw new Error('Session attachment tombstone is not a directory.');
+          }
+          assertCanCommit?.();
+          await fs.rm(tombstone, { recursive: true, force: true });
+        } catch (tombstoneError) {
+          if ((tombstoneError as NodeJS.ErrnoException).code !== 'ENOENT') {
+            throw tombstoneError;
+          }
+        }
+        await syncDurableAttachmentDirectory(parent);
+        return;
+      }
+      await fs.rm(tombstone, { recursive: true, force: true });
+      await syncDurableAttachmentDirectory(parent);
+    } finally {
+      await parent.handle.close().catch(() => undefined);
+    }
   }
 
   /**
