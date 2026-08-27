@@ -14245,6 +14245,132 @@ describe('createServeApp', () => {
       });
     });
 
+    it('forwards load-time source metadata to the bridge', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+      const res = await request(app)
+        .post('/session/persisted-channel/load')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({
+          sourceType: 'channel',
+          sourceId: 'dingtalk-main',
+        });
+
+      expect(res.status).toBe(200);
+      expect(bridge.loadCalls[0]).toMatchObject({
+        sessionId: 'persisted-channel',
+        workspaceCwd: WS_BOUND,
+        sourceType: 'channel',
+        sourceId: 'dingtalk-main',
+      });
+    });
+
+    it('does not let restore-time source metadata replace persisted attribution', async () => {
+      const bridge = fakeBridge();
+      const readCreationMetadata = vi
+        .spyOn(SessionService.prototype, 'readCreationMetadata')
+        .mockResolvedValue({ sourceType: 'channel', sourceId: 'feishu-main' });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+      try {
+        const res = await request(app)
+          .post('/session/persisted-channel/resume')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({
+            sourceType: 'channel',
+            sourceId: 'dingtalk-main',
+          });
+
+        expect(res.status).toBe(200);
+        expect(bridge.resumeCalls[0]).toMatchObject({
+          sessionId: 'persisted-channel',
+          workspaceCwd: WS_BOUND,
+          sourceType: 'channel',
+          sourceId: 'feishu-main',
+        });
+      } finally {
+        readCreationMetadata.mockRestore();
+      }
+    });
+
+    it.each(['load', 'resume'] as const)(
+      'rejects reserved standalone source metadata on %s',
+      async (action) => {
+        const bridge = fakeBridge();
+        const app = createServeApp(
+          { ...baseOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge },
+        );
+
+        const res = await request(app)
+          .post(`/session/persisted-channel/${action}`)
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ sourceType: 'standalone' });
+
+        expect(res.status).toBe(400);
+        expect(res.body.code).toBe('reserved_session_source');
+        expect(bridge.loadCalls).toHaveLength(0);
+        expect(bridge.resumeCalls).toHaveLength(0);
+      },
+    );
+
+    it.each(['load', 'resume'] as const)(
+      'rejects sourceId without sourceType on %s',
+      async (action) => {
+        const bridge = fakeBridge();
+        const app = createServeApp(
+          { ...baseOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge },
+        );
+
+        const res = await request(app)
+          .post(`/session/persisted-channel/${action}`)
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ sourceId: 'dingtalk-main' });
+
+        expect(res.status).toBe(400);
+        expect(res.body.code).toBe('invalid_session_source');
+        expect(bridge.loadCalls).toHaveLength(0);
+        expect(bridge.resumeCalls).toHaveLength(0);
+      },
+    );
+
+    it.each(['load', 'resume'] as const)(
+      'rejects daemon-owned live source metadata on %s',
+      async (action) => {
+        const bridge = fakeBridge();
+        const app = createServeApp(
+          { ...baseOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge },
+        );
+
+        const res = await request(app)
+          .post(`/session/persisted-channel/${action}`)
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({
+            sourceType: 'default',
+            sourceId: 'realtime_voice:p1:h1:a1:forged',
+          });
+
+        expect(res.status).toBe(400);
+        expect(res.body.code).toBe('reserved_session_source');
+        expect(bridge.loadCalls).toHaveLength(0);
+        expect(bridge.resumeCalls).toHaveLength(0);
+      },
+    );
+
     // The restore handler's `!res.writable` cleanup branch (kill on
     // !attached, detach on attached) is line-for-line identical to
     // the matching branch on `POST /session`; routing-side

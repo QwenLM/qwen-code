@@ -11,7 +11,10 @@ import {
 import { dirname, join } from 'node:path';
 import process from 'node:process';
 import type { SessionScope, SessionTarget } from './types.js';
-import type { ChannelAgentBridge } from './ChannelAgentBridge.js';
+import type {
+  ChannelAgentBridge,
+  ChannelAgentBridgeSessionOptions,
+} from './ChannelAgentBridge.js';
 import { sanitizeLogText } from './sanitize.js';
 
 interface PersistedEntry {
@@ -122,9 +125,12 @@ export class SessionRouter {
 
   private sessionOptions(
     channelName: string,
-  ): { approvalMode?: string } | undefined {
+  ): ChannelAgentBridgeSessionOptions {
     const approvalMode = this.channelApprovalModes.get(channelName);
-    return approvalMode ? { approvalMode } : undefined;
+    return {
+      ...(approvalMode ? { approvalMode } : {}),
+      sourceId: channelName,
+    };
   }
 
   async resolve(
@@ -802,7 +808,7 @@ export class SessionRouter {
     cwd: string,
     loadWindow: SessionLoadWindow,
     routingKey: string,
-    options: { approvalMode?: string } | undefined,
+    options: ChannelAgentBridgeSessionOptions,
     operation: SessionOperation,
     sourceId: string,
   ): Promise<string> {

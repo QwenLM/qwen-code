@@ -319,6 +319,39 @@ describe('DaemonSessionClient', () => {
     });
   });
 
+  it('omits source metadata before resuming against an old daemon', async () => {
+    const { fetch, calls } = recordingFetch((req) => {
+      if (req.url.endsWith('/capabilities')) {
+        return jsonResponse(200, { features: [] });
+      }
+      if (req.url.endsWith('/session/s-1/resume')) {
+        return jsonResponse(200, {
+          sessionId: 's-1',
+          workspaceCwd: '/work/a',
+          attached: true,
+          clientId: 'client-1',
+          state: {},
+        });
+      }
+      return jsonResponse(500, { error: `unexpected ${req.url}` });
+    });
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+    await DaemonSessionClient.resume(client, 's-1', {
+      workspaceCwd: '/work/a',
+      sourceType: 'channel',
+      sourceId: 'dingtalk-main',
+    });
+
+    expect(calls.map((c) => c.url)).toEqual([
+      'http://daemon/capabilities',
+      'http://daemon/session/s-1/resume',
+    ]);
+    expect(JSON.parse(calls[1]!.body!)).toEqual({
+      cwd: '/work/a',
+    });
+  });
+
   it('replays attach-time model switch events on first subscription', async () => {
     const { fetch, calls } = recordingFetch((req) => {
       if (req.url.endsWith('/session')) {

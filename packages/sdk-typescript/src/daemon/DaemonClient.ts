@@ -3088,8 +3088,18 @@ export class DaemonClient {
     req: RestoreSessionRequest,
     clientId?: string,
   ): Promise<DaemonRestoredSession> {
+    let sourceType = req.sourceType;
+    let sourceId = req.sourceId;
     if (req.sourceType !== undefined || req.sourceId !== undefined) {
-      await this.requireCapability('session_source_metadata');
+      try {
+        await this.requireCapability('session_source_metadata');
+      } catch (error) {
+        if (!(error instanceof DaemonCapabilityMissingError)) {
+          throw error;
+        }
+        sourceType = undefined;
+        sourceId = undefined;
+      }
     }
     const timeoutMs = this.resolveRestoreTimeoutMs(req.timeoutMs);
     return await this.fetchWithTimeout(
@@ -3108,10 +3118,8 @@ export class DaemonClient {
           ...(action === 'load' && req.liveReplayMode !== undefined
             ? { liveReplayMode: req.liveReplayMode }
             : {}),
-          ...(req.sourceType !== undefined
-            ? { sourceType: req.sourceType }
-            : {}),
-          ...(req.sourceId !== undefined ? { sourceId: req.sourceId } : {}),
+          ...(sourceType !== undefined ? { sourceType } : {}),
+          ...(sourceId !== undefined ? { sourceId } : {}),
         }),
       },
       async (res) => {

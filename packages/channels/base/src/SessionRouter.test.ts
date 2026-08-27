@@ -752,7 +752,27 @@ describe('SessionRouter', () => {
       expect(bridge.loadSession).toHaveBeenCalledWith(
         'old-session',
         '/tmp',
-        { approvalMode: 'yolo' },
+        { approvalMode: 'yolo', sourceId: 'ch' },
+        expect.any(Object),
+      );
+    });
+
+    it('stamps channel name as sourceId when restoring sessions', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'qwen-router-'));
+      tempDirs.push(dir);
+      const persistPath = join(dir, 'sessions.json');
+      writePersistedSession(persistPath);
+      const router = new SessionRouter(bridge, '/tmp', 'user', persistPath);
+
+      await expect(router.restoreSessions()).resolves.toEqual({
+        restored: 1,
+        failed: 0,
+      });
+
+      expect(bridge.loadSession).toHaveBeenCalledWith(
+        'old-session',
+        '/tmp',
+        { sourceId: 'ch' },
         expect.any(Object),
       );
     });
@@ -921,7 +941,7 @@ describe('SessionRouter', () => {
       expect(restartedBridge.loadSession).toHaveBeenCalledWith(
         aliceSession,
         '/tmp',
-        undefined,
+        { sourceId: 'ch' },
         expect.any(Object),
       );
       expect(router.getSession('ch', 'alice', 'chat1')).toBe(aliceSession);
