@@ -330,7 +330,15 @@ export async function tryReclaimStaleTeam(teamName: string): Promise<boolean> {
   }
   let existing: TeamFile;
   try {
-    existing = JSON.parse(inspectedRaw) as TeamFile;
+    const parsed: unknown = JSON.parse(inspectedRaw);
+    // A config containing the literal `null` (or any other non-object
+    // JSON value) parses successfully but proves nothing about the
+    // owner — treat it like a corrupt file and leave the dirs for
+    // manual recovery.
+    if (parsed === null || typeof parsed !== 'object') {
+      return false;
+    }
+    existing = parsed as TeamFile;
   } catch {
     return false;
   }
