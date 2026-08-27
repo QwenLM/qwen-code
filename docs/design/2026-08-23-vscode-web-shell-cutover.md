@@ -7,9 +7,10 @@ Depends on [#9719](https://github.com/QwenLM/qwen-code/pull/9719).
 ## Goal
 
 Make the VS Code companion use Web Shell for the complete chat experience, not
-only the transcript. After this change, the extension keeps its ACP process and
-VS Code host integrations, while Web Shell owns the visible chat UI and its
-interaction state.
+only the transcript. Web Shell owns the visible chat UI and its interaction
+state, and the extension host keeps the VS Code integrations: process
+lifecycle, authentication, workspace trust, diff editors, and the contributed
+commands.
 
 This is the first of two follow-up changes. The second change removes the
 remaining repository consumers and deletes `packages/webui`.
@@ -29,30 +30,55 @@ PR #9719 replaces the legacy VS Code message timeline with
 - `@qwen-code/web-shell` declares `@qwen-code/webui` as both a peer dependency
   and a development dependency.
 
-The full `WebShellWithProviders` entry point cannot replace the VS Code app
-directly. It expects the daemon HTTP/SSE runtime, while the extension owns an
-ACP connection and exchanges messages with the webview through
-`postMessage`. Switching the extension to the daemon protocol is not required
-to consolidate the UI and would turn a UI migration into a runtime migration.
+`WebShellWithProviders` expects the daemon HTTP/SSE runtime, while the
+extension owned an ACP connection and exchanged messages with the webview
+through `postMessage`.
 
 ## Decisions
 
-### Keep ACP as the VS Code runtime boundary
+### Run the chat on a workspace-scoped daemon
 
-The extension host continues to own process lifecycle, authentication,
-workspace trust, ACP session transport, diff editors, and VS Code APIs. The
-webview continues to receive typed host events and send typed actions.
+This work first built a controlled host entry point driven by the ACP bridge
+over `postMessage`. That entry point reimplemented, against a second protocol,
+state Web Shell already derives from the daemon — transcript, streaming,
+permissions, questions, session history — and the reimplementation is what kept
+regressing. The chat now runs on `WebShellWithProviders` instead.
 
-This change does not add a daemon HTTP server, a loopback port, or a second
-session owner to the extension.
+The extension spawns `qwen serve` on a loopback port bound to the workspace,
+with `--require-auth` and a per-process token passed through the environment,
+and hands the webview its base URL. The webview talks to that daemon directly;
+Web Shell's own session, transcript, and permission machinery is the single
+implementation.
 
-### Add a controlled Web Shell host entry point
+The ACP connection remains, but its role narrows to authentication state and
+the `/auth` flow. It no longer carries prompts.
 
-Web Shell will expose one controlled entry point for embedded hosts. It owns
-the transcript, composer, permission and question surfaces, session/history
-presentation, attachments, and model/approval controls. Its host contract is
-limited to state received from the runtime and actions that must cross the
-webview boundary.
+Consequences worth stating plainly:
+
+- The extension runs two Qwen processes per workspace: the ACP agent for auth
+  and the daemon for the conversation.
+- The daemon is shared with the CLI and the browser Web Shell for that
+  workspace, so sessions the companion creates carry the `vscode` source type
+  and its history is scoped to that source. Without it the panel would list
+  conversations the user started in a terminal.
+- A daemon is bound to one workspace at spawn, so a multi-root window respawns
+  it when the active root changes.
+- Turn-lifecycle features that were driven by ACP agent events — the editor tab
+  status dot and the long-task/attention notifications — no longer fire, and
+  `/insight` progress no longer reaches the host. Web Shell renders its own
+  insight cards. Restoring the tab dot and notifications needs the webview to
+  report turn and permission transitions to the host; that is not in this
+  change.
+
+### Use Web Shell's standard entry point
+
+The companion mounts `WebShellWithProviders` and customizes it through props
+rather than through a bespoke embedded component: composer toolbar actions,
+host-only slash entries, active-editor context injection, review-diff and
+insight-report open handlers, and the session source type. The VS Code chrome
+the daemon cannot supply — the view header, session history dropdown,
+onboarding, and account dialog — stays in the extension and is themed from VS
+Code tokens and localized from the same language signal Web Shell uses.
 
 The host contract covers these existing capabilities:
 
@@ -110,14 +136,14 @@ The PR completes and verifies these user flows:
 - copy actions, file links, report links, and VS Code diff actions;
 - error, cancellation, authentication, and reconnect states.
 
-The latest user message remains editable in the embedded shell. The controlled
-host maps the selected transcript turn to the ACP turn index, rewinds both ACP
-and persisted conversation history, and restores the original snapshot if the
-replacement prompt fails.
+The latest user message remains editable. The host maps the selected transcript
+turn to a daemon rewind snapshot and rewinds the session before resubmitting.
 
 ## Out of scope
 
-- Replacing ACP with daemon HTTP/SSE in the VS Code extension.
+- Removing the ACP connection entirely; it still owns authentication.
+- Restoring the tab status dot, completion notifications, and host-side
+  `/insight` progress on daemon turn events.
 - Migrating desktop-specific navigation or native window chrome.
 - Creating `@qwen-code/chat-panel`, another UI package, or a parallel message
   model.
@@ -129,10 +155,10 @@ replacement prompt fails.
 
 1. Relocate the daemon React layer into Web Shell and update its internal
    imports, build aliases, public entry points, tests, and README.
-2. Define the controlled embedded-host entry point around existing Web Shell
-   components and the canonical transcript block model.
-3. Connect the VS Code ACP webview bridge to that entry point without changing
-   the extension-host transport.
+2. Spawn a workspace-scoped daemon from the extension host and bootstrap the
+   webview with its base URL, token, and client id.
+3. Mount `WebShellWithProviders` against that daemon and add the props the
+   companion needs, including its session source type.
 4. Remove replaced companion components, hooks, compatibility utilities,
    WebUI styles, Tailwind preset usage, package dependency, and bundler
    exceptions.
@@ -172,11 +198,13 @@ Capture screenshots for:
 9. authentication, empty, error, and reconnect states.
 
 The PR test report must distinguish WebView-only assertions from actions whose
-VS Code host or ACP side effect was observed end to end.
+VS Code host or daemon side effect was observed end to end.
 
 ## Completion criteria
 
-- VS Code mounts the controlled Web Shell surface for the entire chat flow.
+- VS Code mounts Web Shell for the entire chat flow.
+- Companion-created sessions are attributable to the `vscode` source and the
+  panel's history lists only them.
 - Web Shell and VS Code contain no production import of `@qwen-code/webui`.
 - The Web Shell package has no peer, development, build, or Vite dependency on
   `@qwen-code/webui`.
