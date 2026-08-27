@@ -671,19 +671,35 @@ function readRequestBody(raw: string | null): unknown {
 function filterScenarioSessions(
   scenario: WebShellDaemonScenario,
   searchParams: URLSearchParams,
+  workspaceCwd?: string,
 ): DaemonSessionSummary[] {
   const group = searchParams.get('group');
   const sourceType = searchParams.get('sourceType');
-  const sourceSessions = sourceType
+  const workspaceSessions = workspaceCwd
     ? scenario.sessions.filter(
+        (session) => session.workspaceCwd === workspaceCwd,
+      )
+    : scenario.sessions;
+  const sourceSessions = sourceType
+    ? workspaceSessions.filter(
         (session) =>
           session.sourceType === sourceType ||
           (sourceType === 'default' && session.sourceType === undefined),
       )
-    : scenario.sessions;
+    : workspaceSessions;
   return group === 'pinned'
     ? sourceSessions.filter((session) => Boolean(session.isPinned))
     : sourceSessions;
+}
+
+function workspaceCwdFromSessionsPath(path: string): string | undefined {
+  const workspaceMatch = path.match(
+    /^\/workspaces\/([^/]+)\/sessions(?:\/live-state)?\/?$/,
+  );
+  if (workspaceMatch) return decodeURIComponent(workspaceMatch[1]);
+
+  const legacyMatch = path.match(/^\/workspace\/(.+)\/sessions\/?$/);
+  return legacyMatch ? decodeURIComponent(legacyMatch[1]) : undefined;
 }
 
 function isDaemonPath(path: string): boolean {
@@ -1109,10 +1125,14 @@ async function handleDaemonRoute(
     method === 'GET' &&
     /^\/workspaces\/[^/]+\/sessions\/live-state\/?$/.test(path)
   ) {
+    const workspaceCwd = workspaceCwdFromSessionsPath(path);
     await json(route, {
       v: 1,
       catalogVersion: scenario.sessionCatalogVersion,
       sessions: scenario.sessions
+        .filter(
+          (session) => !workspaceCwd || session.workspaceCwd === workspaceCwd,
+        )
         .filter(
           (session) =>
             (session.clientCount ?? 0) > 0 ||
@@ -1135,8 +1155,9 @@ async function handleDaemonRoute(
     (/^\/workspace\/.+\/sessions\/?$/.test(path) ||
       /^\/workspaces\/[^/]+\/sessions\/?$/.test(path))
   ) {
+    const workspaceCwd = workspaceCwdFromSessionsPath(path);
     await json(route, {
-      sessions: filterScenarioSessions(scenario, searchParams),
+      sessions: filterScenarioSessions(scenario, searchParams, workspaceCwd),
     });
     return;
   }
