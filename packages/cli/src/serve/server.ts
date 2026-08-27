@@ -2174,6 +2174,7 @@ export function createServeApp(
     workspaceRegistry,
     sendBridgeError,
     mutate,
+    archiveCoordinator,
   });
 
   // Workspace memory + agents CRUD routes.

@@ -130,6 +130,7 @@ import type {
   WorkspaceRegistry,
   WorkspaceRuntime,
 } from './workspace-registry.js';
+import type { SessionArchiveCoordinator } from './server/session-archive.js';
 import type {
   DaemonTrustPolicySnapshot,
   DaemonWorkspaceTrustDecision,
@@ -6171,6 +6172,15 @@ async function runQwenServeImpl(
         if (refreshGeneration !== sessionPrRefreshGeneration) return;
         sessionPrRefreshTimer = mod.startSessionPrRefreshTimer({
           workspaceRegistry,
+          // The coordinator lives on the serve app (createServeApp below),
+          // which is built after this timer starts; read it per tick like
+          // the metrics sampler reads `acpHandle`.
+          getArchiveCoordinator: () =>
+            (
+              app.locals as {
+                sessionArchiveCoordinator?: SessionArchiveCoordinator;
+              }
+            ).sessionArchiveCoordinator,
         });
       })
       .catch((error) => {

@@ -23,10 +23,33 @@ import type {
   WorkspaceRegistry,
   WorkspaceRuntime,
 } from '../workspace-registry.js';
+import {
+  DaemonDrainingError,
+  type SessionArchiveCoordinator,
+} from './session-archive.js';
 import { invalidateWorkspaceSessionListCache } from './session-list.js';
 
 export const DEFAULT_SESSION_PR_REFRESH_INTERVAL_MS = 5 * 60 * 1000;
 const FIRST_RUN_DELAY_MS = 60_000;
+
+/**
+ * The slice of {@link SessionArchiveCoordinator} the sweep needs: the
+ * per-session shared lane that archive/delete take exclusively, so a sidecar
+ * commit and an archive move of the same session never interleave.
+ */
+export type SessionPrArchiveLane = Pick<
+  SessionArchiveCoordinator,
+  'runSharedMany'
+>;
+
+export interface SessionPrRefreshOptions {
+  /**
+   * Serialises each sidecar commit with archive/delete of the same session.
+   * Omitted only by callers that own no coordinator (tests); the daemon
+   * always passes the app-wide one.
+   */
+  archiveCoordinator?: SessionPrArchiveLane;
+}
 
 /**
  * `QWEN_SESSION_PR_REFRESH_MINUTES`: refresh interval in minutes; `0`
@@ -72,9 +95,21 @@ export interface SessionPrRefreshResult {
 export async function refreshWorkspaceSessionPrStates(
   runtime: WorkspaceRuntime,
   fetchPullRequests: typeof fetchGitHubPullRequests = fetchGitHubPullRequests,
+  options: SessionPrRefreshOptions = {},
 ): Promise<SessionPrRefreshResult> {
+  // The runtime was snapshotted from the registry before this sweep awaited
+  // anything; a trust/env replacement or removal closes its generation
+  // guard while the sweep is in flight, and a retired generation must not
+  // run `gh` with its stale env, commit sidecars, or notify its obsolete
+  // bridge — the same guard every REST/ACP binding writer asserts.
+  const assertGenerationOpen = (): void =>
+    runtime.generationGuard?.assertOpen();
   const sessionService = createWorkspaceRuntimeSessionService(runtime);
-  const pendingNumbers: Array<{ prPath: string; numbers: number[] }> = [];
+  const pendingNumbers: Array<{
+    sessionId: string;
+    prPath: string;
+    numbers: number[];
+  }> = [];
   let scanned = 0;
   for (const archiveState of ['active', 'archived'] as const) {
     // Sidecar-driven, not transcript-driven: a binding persisted before the
@@ -112,12 +147,13 @@ export async function refreshWorkspaceSessionPrStates(
         .filter((p) => p.state !== 'merged')
         .map((p) => p.number);
       if (numbers.length > 0) {
-        pendingNumbers.push({ prPath, numbers });
+        pendingNumbers.push({ sessionId, prPath, numbers });
       }
     }
   }
   if (pendingNumbers.length === 0) return { scanned, updated: 0 };
 
+  assertGenerationOpen();
   const result = await fetchPullRequests(
     runtime.workspaceCwd,
     runtime.env.effectiveEnv,
@@ -150,12 +186,13 @@ export async function refreshWorkspaceSessionPrStates(
       if (fetched !== undefined) states.set(number, fetched);
     }
     if (states.size === 0) continue;
-    try {
-      updated += await updateSessionPrStates(target.prPath, states, {
+    const commit = (): Promise<number> =>
+      updateSessionPrStates(target.prPath, states, {
         assertCanCommit: () => {
-          // Deletion and archive moves unlink or rename the sidecar outside
-          // the mutation queue; if it vanished between the queued read and
-          // this commit step, the write would resurrect a stale sidecar.
+          assertGenerationOpen();
+          // Belt and braces under the archive lane: a sidecar that vanished
+          // between the queued read and this commit step (a delete that
+          // took no lane) must not be resurrected by the write.
           if (!existsSync(target.prPath)) {
             throw new Error(
               `session PR sidecar vanished during refresh: ${target.prPath}`,
@@ -163,15 +200,29 @@ export async function refreshWorkspaceSessionPrStates(
           }
         },
       });
-    } catch {
-      // One unwritable sidecar must not starve the rest of the sweep.
+    try {
+      // The archive lane is what makes the existence check above sufficient:
+      // archive/delete hold the session's exclusive lane across their
+      // renames, so while this commit holds the shared lane neither can
+      // move the transcript or sidecar out from under the atomic write.
+      updated += await (options.archiveCoordinator
+        ? options.archiveCoordinator.runSharedMany([target.sessionId], commit)
+        : commit());
+    } catch (error) {
+      // A draining daemon accepts no further session maintenance — stop the
+      // sweep instead of failing every remaining target one by one.
+      if (error instanceof DaemonDrainingError) throw error;
+      // One unwritable (or archiving) sidecar must not starve the rest of
+      // the sweep; the next tick picks it up.
     }
   }
   if (updated > 0) {
     // Same pairing as every other binding write in this feature: the
     // sidebar refetch is catalog-version-gated and the live-state payload
     // carries no `prs`, so a silent sidecar rewrite would leave stale
-    // badges until an unrelated catalog change or a reload.
+    // badges until an unrelated catalog change or a reload. Never notify a
+    // retired generation's bridge: its successor owns the catalog now.
+    assertGenerationOpen();
     invalidateWorkspaceSessionListCache({
       runtimeBaseDir: runtime.sessionRuntimeBaseDir,
       workspaceCwd: runtime.workspaceCwd,
@@ -191,6 +242,11 @@ export async function refreshWorkspaceSessionPrStates(
 export function startSessionPrRefreshTimer(deps: {
   workspaceRegistry: WorkspaceRegistry;
   env?: Readonly<Record<string, string | undefined>>;
+  /**
+   * Resolved per tick (not at start) because the daemon parks the
+   * coordinator on the serve app, which is built after this timer starts.
+   */
+  getArchiveCoordinator?: () => SessionPrArchiveLane | undefined;
 }): { dispose(): void } | undefined {
   const intervalMs = resolveSessionPrRefreshIntervalMs(deps.env ?? process.env);
   if (intervalMs === undefined) return undefined;
@@ -199,12 +255,18 @@ export function startSessionPrRefreshTimer(deps: {
     if (running) return;
     running = true;
     try {
+      const archiveCoordinator = deps.getArchiveCoordinator?.();
       for (const runtime of deps.workspaceRegistry.listAll()) {
         if (!runtime.trusted) continue;
         try {
-          await refreshWorkspaceSessionPrStates(runtime);
-        } catch {
-          // A single workspace's failure must not starve the rest.
+          await refreshWorkspaceSessionPrStates(runtime, undefined, {
+            archiveCoordinator,
+          });
+        } catch (error) {
+          // A draining daemon rejects every workspace the same way.
+          if (error instanceof DaemonDrainingError) return;
+          // A single workspace's failure (including a generation retired
+          // mid-sweep) must not starve the rest.
         }
       }
     } finally {

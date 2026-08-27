@@ -19,11 +19,19 @@ import {
   upsertSessionPr,
   type SessionService,
 } from '@qwen-code/qwen-code-core';
+import { SessionArchivingError } from '../acp-session-bridge.js';
 import { sendBridgeError } from '../server/error-response.js';
+import {
+  DaemonDrainingError,
+  SessionArchiveCoordinator,
+} from '../server/session-archive.js';
 import * as sessionListModule from '../server/session-list.js';
 import { createWorkspaceRuntimeSessionService } from '../workspace-runtime-storage.js';
 import {
+  WorkspaceGenerationClosedError,
+  createWorkspaceGenerationGuard,
   createWorkspaceRegistry,
+  type WorkspaceGenerationGuard,
   type WorkspaceRegistry,
   type WorkspaceRuntime,
 } from '../workspace-registry.js';
@@ -1784,6 +1792,158 @@ describe('backfillWorkspaceSessionPrs', () => {
     ).toBeNull();
   });
 
+  function attachGuard(target: WorkspaceRuntime): WorkspaceGenerationGuard {
+    const guard = createWorkspaceGenerationGuard();
+    (target as { generationGuard?: WorkspaceGenerationGuard }).generationGuard =
+      guard;
+    return guard;
+  }
+
+  it('never runs gh for a retired runtime generation', async () => {
+    await seedSession(SESSION_A);
+    await seedWorktreeSidecar(SESSION_A, 'pr-123', 'worktree-pr-123');
+    const prPath = sessionService.getPrSessionPathForArchiveState(
+      SESSION_A,
+      'active',
+    );
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(123, 'worktree-pr-123')],
+    });
+    // The route snapshots the runtime from the registry; a trust/env
+    // replacement that lands before the scan finishes closes its guard, and
+    // `gh` must not run with the retired generation's env.
+    attachGuard(runtime).close();
+
+    await expect(backfillWorkspaceSessionPrs(runtime)).rejects.toBeInstanceOf(
+      WorkspaceGenerationClosedError,
+    );
+
+    expect(fetchGitHubPullRequestsMock).not.toHaveBeenCalled();
+    expect(await readSessionPrs(prPath)).toBeNull();
+  });
+
+  it('commits nothing once the runtime generation closes mid-run', async () => {
+    await seedSession(SESSION_A);
+    await seedWorktreeSidecar(SESSION_A, 'pr-123', 'worktree-pr-123');
+    const prPath = sessionService.getPrSessionPathForArchiveState(
+      SESSION_A,
+      'active',
+    );
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(123, 'worktree-pr-123')],
+    });
+    const guard = attachGuard(runtime);
+    // The replacement lands between the out-of-queue snapshot read and the
+    // queued write — the window every await in this run opens.
+    sidecarReadHook.current = {
+      path: prPath,
+      run: async () => {
+        guard.close();
+      },
+    };
+
+    await expect(backfillWorkspaceSessionPrs(runtime)).rejects.toBeInstanceOf(
+      WorkspaceGenerationClosedError,
+    );
+
+    expect(fetchGitHubPullRequestsMock).toHaveBeenCalledTimes(1);
+    expect(await readSessionPrs(prPath)).toBeNull();
+  });
+
+  it('defers a session held by an archive lane to the next run', async () => {
+    await seedSession(SESSION_A);
+    await seedWorktreeSidecar(SESSION_A, 'pr-123', 'worktree-pr-123');
+    const prPath = sessionService.getPrSessionPathForArchiveState(
+      SESSION_A,
+      'active',
+    );
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(123, 'worktree-pr-123')],
+    });
+    const archiveCoordinator = new SessionArchiveCoordinator();
+    let release!: () => void;
+    // An archive/delete in flight holds the session's exclusive lane across
+    // its renames; the commit must not race it, so this run reports the
+    // session as unwritable and the next run re-plans it.
+    const archiving = archiveCoordinator.runExclusiveMany(
+      [SESSION_A],
+      () =>
+        new Promise<void>((resolve) => {
+          release = resolve;
+        }),
+    );
+
+    const held = await backfillWorkspaceSessionPrs(runtime, undefined, {
+      archiveCoordinator,
+    });
+    expect(held).toMatchObject({ bound: 0, written: 0, writeErrors: 1 });
+    expect(await readSessionPrs(prPath)).toBeNull();
+
+    release();
+    await archiving;
+    const retried = await backfillWorkspaceSessionPrs(runtime, undefined, {
+      archiveCoordinator,
+    });
+    expect(retried).toMatchObject({ bound: 1, written: 1 });
+    expect(retried.writeErrors).toBeUndefined();
+    expect((await readSessionPrs(prPath))?.map((e) => e.number)).toEqual([123]);
+  });
+
+  it('holds the session lane across the rewrite and the live-entry sync', async () => {
+    await seedSession(SESSION_A);
+    await seedWorktreeSidecar(SESSION_A, 'pr-123', 'worktree-pr-123');
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(123, 'worktree-pr-123')],
+    });
+    const archiveCoordinator = new SessionArchiveCoordinator();
+    let archiveRefused = false;
+    // Fires after the rewrite commits and before the live-entry sync: an
+    // archive attempt in that gap must be refused, not interleaved, or the
+    // sync would publish a list the archive move is about to split.
+    sidecarCommitHook.current = async () => {
+      await expect(
+        archiveCoordinator.runExclusiveMany([SESSION_A], async () => {}),
+      ).rejects.toBeInstanceOf(SessionArchivingError);
+      archiveRefused = true;
+    };
+
+    const result = await backfillWorkspaceSessionPrs(runtime, undefined, {
+      archiveCoordinator,
+    });
+
+    expect(archiveRefused).toBe(true);
+    expect(result).toMatchObject({ bound: 1, written: 1 });
+    // The lane is released once the sync is done.
+    await expect(
+      archiveCoordinator.runExclusiveMany([SESSION_A], async () => 'ok'),
+    ).resolves.toBe('ok');
+  });
+
+  it('stops the run once the daemon seals session maintenance', async () => {
+    await seedSession(SESSION_A);
+    await seedWorktreeSidecar(SESSION_A, 'pr-123', 'worktree-pr-123');
+    const prPath = sessionService.getPrSessionPathForArchiveState(
+      SESSION_A,
+      'active',
+    );
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(123, 'worktree-pr-123')],
+    });
+    const archiveCoordinator = new SessionArchiveCoordinator();
+    await archiveCoordinator.sealMaintenanceAndWait();
+
+    await expect(
+      backfillWorkspaceSessionPrs(runtime, undefined, { archiveCoordinator }),
+    ).rejects.toBeInstanceOf(DaemonDrainingError);
+
+    expect(await readSessionPrs(prPath)).toBeNull();
+  });
+
   it('keeps backfilling other sessions when one sidecar write fails', async () => {
     await seedTranscriptBranches(SESSION_A, 1, 1);
     await seedTranscriptBranches(SESSION_B, 2, 2);
@@ -2236,6 +2396,110 @@ describe('registerSessionPrBackfillRoutes', () => {
       expect(seeded.markSessionCatalogChanged).not.toHaveBeenCalled();
     } finally {
       invalidateSpy.mockRestore();
+      await seeded.cleanup();
+    }
+  });
+
+  it('reports a workspace whose generation retired mid-run without notifying its bridge', async () => {
+    const seeded = await seedTrustedBackfillWorkspace();
+    const guard = createWorkspaceGenerationGuard();
+    (
+      seeded.runtime as { generationGuard?: WorkspaceGenerationGuard }
+    ).generationGuard = guard;
+    const prPath = createWorkspaceRuntimeSessionService(
+      seeded.runtime,
+    ).getPrSessionPathForArchiveState(SESSION_A, 'active');
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(123, 'worktree-pr-123')],
+    });
+    // The replacement lands while the route awaits the queued write; the
+    // retired generation must neither commit nor notify its obsolete bridge.
+    sidecarReadHook.current = {
+      path: prPath,
+      run: async () => {
+        guard.close();
+      },
+    };
+    const invalidateSpy = vi.spyOn(
+      sessionListModule,
+      'invalidateWorkspaceSessionListCache',
+    );
+    const app = express();
+    registerSessionPrBackfillRoutes(app, {
+      workspaceRegistry: registry([seeded.runtime]),
+      sendBridgeError,
+      mutate: passthroughMutate,
+    });
+
+    try {
+      const response = await request(app).post('/sessions/backfill-prs');
+
+      expect(response.status).toBe(200);
+      expect(response.body).toMatchObject({ bound: 0 });
+      expect(response.body.workspaces[0]).toMatchObject({
+        workspaceCwd: seeded.runtime.workspaceCwd,
+        bound: 0,
+        error: new WorkspaceGenerationClosedError().message,
+      });
+      expect(await readSessionPrs(prPath)).toBeNull();
+      expect(invalidateSpy).not.toHaveBeenCalled();
+      expect(seeded.markSessionCatalogChanged).not.toHaveBeenCalled();
+    } finally {
+      invalidateSpy.mockRestore();
+      await seeded.cleanup();
+    }
+  });
+
+  it('serialises each commit with the archive lane it is handed', async () => {
+    const seeded = await seedTrustedBackfillWorkspace();
+    const prPath = createWorkspaceRuntimeSessionService(
+      seeded.runtime,
+    ).getPrSessionPathForArchiveState(SESSION_A, 'active');
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(123, 'worktree-pr-123')],
+    });
+    const archiveCoordinator = new SessionArchiveCoordinator();
+    const runSharedMany = vi.spyOn(archiveCoordinator, 'runSharedMany');
+    let release!: () => void;
+    const archiving = archiveCoordinator.runExclusiveMany(
+      [SESSION_A],
+      () =>
+        new Promise<void>((resolve) => {
+          release = resolve;
+        }),
+    );
+    const app = express();
+    registerSessionPrBackfillRoutes(app, {
+      workspaceRegistry: registry([seeded.runtime]),
+      sendBridgeError,
+      mutate: passthroughMutate,
+      archiveCoordinator,
+    });
+
+    try {
+      const held = await request(app).post('/sessions/backfill-prs');
+      expect(held.status).toBe(200);
+      expect(held.body.workspaces[0]).toMatchObject({
+        bound: 0,
+        written: 0,
+        writeErrors: 1,
+      });
+      expect(runSharedMany).toHaveBeenCalledWith(
+        [SESSION_A],
+        expect.any(Function),
+      );
+      expect(await readSessionPrs(prPath)).toBeNull();
+      expect(seeded.markSessionCatalogChanged).not.toHaveBeenCalled();
+
+      release();
+      await archiving;
+      const retried = await request(app).post('/sessions/backfill-prs');
+      expect(retried.status).toBe(200);
+      expect(retried.body).toMatchObject({ bound: 1 });
+      expect(seeded.markSessionCatalogChanged).toHaveBeenCalledTimes(1);
+    } finally {
       await seeded.cleanup();
     }
   });

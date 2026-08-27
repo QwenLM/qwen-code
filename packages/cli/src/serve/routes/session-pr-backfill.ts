@@ -22,12 +22,24 @@ import {
   type SessionPr,
 } from '@qwen-code/qwen-code-core';
 import type { SendBridgeError } from '../server/error-response.js';
+import { DaemonDrainingError } from '../server/session-archive.js';
 import { invalidateWorkspaceSessionListCache } from '../server/session-list.js';
+import type { SessionPrArchiveLane } from '../server/session-pr-refresh.js';
 import { createWorkspaceRuntimeSessionService } from '../workspace-runtime-storage.js';
-import type {
-  WorkspaceRegistry,
-  WorkspaceRuntime,
+import {
+  WorkspaceGenerationClosedError,
+  type WorkspaceRegistry,
+  type WorkspaceRuntime,
 } from '../workspace-registry.js';
+
+export interface SessionPrBackfillOptions {
+  /**
+   * Serialises each session's sidecar commit with archive/delete of that
+   * session (see {@link SessionPrArchiveLane}). The daemon always passes the
+   * app-wide coordinator; only tests omit it.
+   */
+  archiveCoordinator?: SessionPrArchiveLane;
+}
 
 // `--worktree=#<N>` launches persist slug `pr-<N>` with branch
 // `worktree-pr-<N>` (see worktreeStartup / worktreeBranchForSlug); the
@@ -193,7 +205,15 @@ async function collectTranscriptBranches(
 export async function backfillWorkspaceSessionPrs(
   runtime: WorkspaceRuntime,
   fetchPullRequests: typeof fetchGitHubPullRequests = fetchGitHubPullRequests,
+  options: SessionPrBackfillOptions = {},
 ): Promise<SessionPrBackfillWorkspaceResult> {
+  // The route snapshots this runtime from the registry and then awaits
+  // scans, `gh`, and queued writes; a trust/env replacement or removal
+  // closes the generation guard meanwhile, and a retired generation must
+  // not run `gh` with its stale env or commit sidecars — the same guard
+  // every REST/ACP binding writer asserts around `upsertSessionPr`.
+  const assertGenerationOpen = (): void =>
+    runtime.generationGuard?.assertOpen();
   const result: SessionPrBackfillWorkspaceResult = {
     workspaceCwd: runtime.workspaceCwd,
     scanned: 0,
@@ -249,6 +269,7 @@ export async function backfillWorkspaceSessionPrs(
   }
   if (candidates.length === 0) return result;
 
+  assertGenerationOpen();
   const numberToUrl = new Map<number, string>();
   const numberToState = new Map<number, 'open' | 'merged' | 'closed'>();
   const branchToNumber = new Map<string, number>();
@@ -374,12 +395,17 @@ export async function backfillWorkspaceSessionPrs(
     );
     const createdAt = new Date().toISOString();
     let added = 0;
-    try {
+    // A closed generation is a whole-run condition, not a per-session write
+    // failure: surface it to the route (which reports the workspace as
+    // failed) instead of miscounting it in writeErrors.
+    assertGenerationOpen();
+    const commit = async (): Promise<void> => {
       const persisted = await replaceSessionPrs(prPath, (fresh) => {
-        // Deletion and archive moves unlink or rename the transcript and
-        // this sidecar outside the mutation queue; if the scanned
-        // transcript is gone, a write here would resurrect a sidecar for a
-        // session that no longer exists in this archive state.
+        assertGenerationOpen();
+        // Under the archive lane no archive/delete rename can interleave
+        // with this write; the existence check still covers a transcript
+        // removed by a path that takes no lane, so the plan never
+        // resurrects a sidecar for a session gone from this archive state.
         if (!existsSync(candidate.transcriptPath)) return null;
         const freshNumbers = new Set(fresh.map((entry) => entry.number));
         // Only entries seen in the snapshot are subject to this plan; newer
@@ -477,6 +503,8 @@ export async function backfillWorkspaceSessionPrs(
         // and the sync keeps its slot instead of being clobbered by the
         // rewrite-time snapshot. No-op when the session is not live.
         await replaceSessionPrs(prPath, (fresh) => {
+          // Never publish into a retired generation's bridge.
+          assertGenerationOpen();
           runtime.bridge.setSessionPrs?.(
             candidate.sessionId,
             fresh.map(({ number, url, state }) => ({
@@ -488,8 +516,28 @@ export async function backfillWorkspaceSessionPrs(
           return null;
         });
       }
-    } catch {
-      // One unwritable sidecar must not abort the whole workspace.
+    };
+    try {
+      // The shared lane spans the rewrite AND the live-entry sync: archive
+      // and delete take the exclusive lane across their renames, so while
+      // this holds the session neither can move the transcript or sidecar
+      // out from under the atomic write, and the sync publishes a list the
+      // archive move cannot have split.
+      await (options.archiveCoordinator
+        ? options.archiveCoordinator.runSharedMany(
+            [candidate.sessionId],
+            commit,
+          )
+        : commit());
+    } catch (error) {
+      if (
+        error instanceof WorkspaceGenerationClosedError ||
+        error instanceof DaemonDrainingError
+      ) {
+        throw error;
+      }
+      // One unwritable (or concurrently archiving) sidecar must not abort
+      // the whole workspace; the next run re-plans it.
       result.writeErrors = (result.writeErrors ?? 0) + 1;
     }
   }
@@ -502,6 +550,7 @@ export function registerSessionPrBackfillRoutes(
     workspaceRegistry: WorkspaceRegistry;
     sendBridgeError: SendBridgeError;
     mutate: (opts?: { strict?: boolean }) => RequestHandler;
+    archiveCoordinator?: SessionPrArchiveLane;
   },
 ): void {
   app.post('/sessions/backfill-prs', deps.mutate(), async (_req, res) => {
@@ -523,8 +572,9 @@ export function registerSessionPrBackfillRoutes(
           continue;
         }
         try {
-          const result = await backfillWorkspaceSessionPrs(runtime);
-          workspaces.push(result);
+          const result = await backfillWorkspaceSessionPrs(runtime, undefined, {
+            archiveCoordinator: deps.archiveCoordinator,
+          });
           // Same pairing as every other catalog mutation in this feature:
           // the sidebar refetch is catalog-version-gated, so a persisted
           // rewrite — new bindings or an eviction-only plan — stays
@@ -532,6 +582,9 @@ export function registerSessionPrBackfillRoutes(
           // advances. Gate on writes, not additions: a capped plan can
           // evict an entry while adding none.
           if (result.written > 0) {
+            // A generation retired after its last commit must not notify
+            // its obsolete bridge; the successor owns the catalog now.
+            runtime.generationGuard?.assertOpen();
             invalidateWorkspaceSessionListCache({
               runtimeBaseDir: runtime.sessionRuntimeBaseDir,
               workspaceCwd: runtime.workspaceCwd,
@@ -539,6 +592,7 @@ export function registerSessionPrBackfillRoutes(
             });
             runtime.bridge.markSessionCatalogChanged();
           }
+          workspaces.push(result);
         } catch (error) {
           workspaces.push({
             workspaceCwd: runtime.workspaceCwd,

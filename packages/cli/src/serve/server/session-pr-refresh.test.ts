@@ -18,9 +18,16 @@ import {
 } from '@qwen-code/qwen-code-core';
 import { createWorkspaceRuntimeSessionService } from '../workspace-runtime-storage.js';
 import {
+  WorkspaceGenerationClosedError,
+  createWorkspaceGenerationGuard,
   createWorkspaceRegistry,
+  type WorkspaceGenerationGuard,
   type WorkspaceRuntime,
 } from '../workspace-registry.js';
+import {
+  DaemonDrainingError,
+  SessionArchiveCoordinator,
+} from './session-archive.js';
 import * as sessionListModule from './session-list.js';
 import {
   refreshWorkspaceSessionPrStates,
@@ -304,6 +311,127 @@ describe('refreshWorkspaceSessionPrStates', () => {
 
     expect(result).toEqual({ scanned: 1, updated: 0 });
     expect(existsSync(prPath)).toBe(false);
+    expect(markSessionCatalogChanged).not.toHaveBeenCalled();
+  });
+
+  function attachGuard(target: WorkspaceRuntime): WorkspaceGenerationGuard {
+    const guard = createWorkspaceGenerationGuard();
+    (target as { generationGuard?: WorkspaceGenerationGuard }).generationGuard =
+      guard;
+    return guard;
+  }
+
+  async function seedOpenBinding(sessionId: string): Promise<string> {
+    await seedSession(sessionId);
+    const prPath = sessionService.getPrSessionPathForArchiveState(
+      sessionId,
+      'active',
+    );
+    await upsertSessionPr(prPath, {
+      number: 42,
+      url: 'https://github.com/o/r/pull/42',
+      state: 'open',
+    });
+    return prPath;
+  }
+
+  it('never runs gh for a retired runtime generation', async () => {
+    const prPath = await seedOpenBinding(SESSION_A);
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(42, 'merged')],
+    });
+    // The timer snapshots the runtime from the registry; a trust/env
+    // replacement that lands while the sidecar scan awaits closes its guard,
+    // and `gh` must not run with the retired generation's env.
+    attachGuard(runtime).close();
+
+    await expect(
+      refreshWorkspaceSessionPrStates(runtime),
+    ).rejects.toBeInstanceOf(WorkspaceGenerationClosedError);
+
+    expect(fetchGitHubPullRequestsMock).not.toHaveBeenCalled();
+    expect((await readSessionPrs(prPath))?.[0]?.state).toBe('open');
+    expect(markSessionCatalogChanged).not.toHaveBeenCalled();
+  });
+
+  it('commits nothing and notifies nobody once the generation closes mid-sweep', async () => {
+    const prPath = await seedOpenBinding(SESSION_A);
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(42, 'merged')],
+    });
+    const guard = attachGuard(runtime);
+    let prPathReads = 0;
+    fsMocks.readFile.mockImplementation(async (...args) => {
+      const content = await fsMocks.realReadFile!(...args);
+      if (args[0] === prPath) {
+        prPathReads += 1;
+        // Second read is the queued write's own read: the replacement lands
+        // after the sweep already fetched from gh and planned the rewrite.
+        if (prPathReads === 2) guard.close();
+      }
+      return content;
+    });
+
+    const result = await refreshWorkspaceSessionPrStates(runtime);
+
+    expect(result).toEqual({ scanned: 1, updated: 0 });
+    expect((await readSessionPrs(prPath))?.[0]?.state).toBe('open');
+    expect(markSessionCatalogChanged).not.toHaveBeenCalled();
+  });
+
+  it('defers a sidecar held by an archive lane to the next sweep', async () => {
+    const prPath = await seedOpenBinding(SESSION_A);
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(42, 'merged')],
+    });
+    const archiveCoordinator = new SessionArchiveCoordinator();
+    let release!: () => void;
+    // An archive/delete in flight holds the session's exclusive lane across
+    // its renames; the commit must not race it.
+    const archiving = archiveCoordinator.runExclusiveMany(
+      [SESSION_A],
+      () =>
+        new Promise<void>((resolve) => {
+          release = resolve;
+        }),
+    );
+
+    const held = await refreshWorkspaceSessionPrStates(runtime, undefined, {
+      archiveCoordinator,
+    });
+    expect(held).toEqual({ scanned: 1, updated: 0 });
+    expect((await readSessionPrs(prPath))?.[0]?.state).toBe('open');
+    expect(markSessionCatalogChanged).not.toHaveBeenCalled();
+
+    release();
+    await archiving;
+    const retried = await refreshWorkspaceSessionPrStates(runtime, undefined, {
+      archiveCoordinator,
+    });
+    expect(retried).toEqual({ scanned: 1, updated: 1 });
+    expect((await readSessionPrs(prPath))?.[0]?.state).toBe('merged');
+    expect(markSessionCatalogChanged).toHaveBeenCalledTimes(1);
+  });
+
+  it('stops the sweep once the daemon seals session maintenance', async () => {
+    const prPath = await seedOpenBinding(SESSION_A);
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(42, 'merged')],
+    });
+    const archiveCoordinator = new SessionArchiveCoordinator();
+    await archiveCoordinator.sealMaintenanceAndWait();
+
+    await expect(
+      refreshWorkspaceSessionPrStates(runtime, undefined, {
+        archiveCoordinator,
+      }),
+    ).rejects.toBeInstanceOf(DaemonDrainingError);
+
+    expect((await readSessionPrs(prPath))?.[0]?.state).toBe('open');
     expect(markSessionCatalogChanged).not.toHaveBeenCalled();
   });
 
@@ -1048,5 +1176,40 @@ describe('startSessionPrRefreshTimer', () => {
     // still-armed timer would have swept long before this point.
     await vi.advanceTimersByTimeAsync(24 * 60 * 60 * 1000);
     expect(fetchGitHubPullRequestsMock).not.toHaveBeenCalled();
+  });
+
+  it('commits every sweep under the archive lane resolved at tick time', async () => {
+    const trustedRuntime = timerRuntime('trusted', trustedCwd, true);
+    const registry = createWorkspaceRegistry([trustedRuntime]);
+    const prPath = await seedPendingBinding(trustedRuntime, SESSION_A);
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(42, 'merged')],
+    });
+    // The daemon parks the coordinator on the serve app, which exists only
+    // after the timer starts — so it is looked up per tick, not captured.
+    const app: { archiveCoordinator?: SessionArchiveCoordinator } = {};
+    const getArchiveCoordinator = vi.fn(() => app.archiveCoordinator);
+    vi.useFakeTimers();
+
+    const handle = startSessionPrRefreshTimer({
+      workspaceRegistry: registry,
+      env: {},
+      getArchiveCoordinator,
+    });
+    app.archiveCoordinator = new SessionArchiveCoordinator();
+    const runSharedMany = vi.spyOn(app.archiveCoordinator, 'runSharedMany');
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    await vi.waitFor(async () => {
+      expect((await readSessionPrs(prPath))?.[0]?.state).toBe('merged');
+    });
+    expect(getArchiveCoordinator).toHaveBeenCalled();
+    expect(runSharedMany).toHaveBeenCalledWith(
+      [SESSION_A],
+      expect.any(Function),
+    );
+
+    handle?.dispose();
   });
 });
