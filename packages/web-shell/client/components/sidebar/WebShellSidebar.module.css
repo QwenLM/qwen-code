@@ -788,6 +788,19 @@
   stroke-width: 1.6;
 }
 
+/* GitHub-style PR state: open green, merged purple, closed red. */
+.sessionDetailsRow svg.sessionPrStateOpen {
+  color: var(--success-color, #22c55e);
+}
+
+.sessionDetailsRow svg.sessionPrStateMerged {
+  color: var(--color-accent-fg, #8b5cf6);
+}
+
+.sessionDetailsRow svg.sessionPrStateClosed {
+  color: var(--destructive, #ef4444);
+}
+
 .sessionDetailsRow span {
   min-width: 0;
   overflow: hidden;
