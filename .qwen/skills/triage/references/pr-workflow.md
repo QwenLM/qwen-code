@@ -176,11 +176,18 @@ DEFAULT_BRANCH=$(gh repo view "$REPO" --json defaultBranchRef --jq '.defaultBran
 **Linked issues.** Read them from GitHub's own closing-reference parser — it
 understands all nine closing-keyword forms (`close`/`closes`/`closed`,
 `fix`/`fixes`/`fixed`, `resolve`/`resolves`/`resolved`), URL references, and
-cross-repo references; a keyword grep misses most of them:
+cross-repo references; a keyword grep misses most of them. Keep only same-repo
+references: issue numbers restart at 1 in every repository, so a cross-repo
+`Fixes other-org/other-repo#42` resolved against this repo silently returns
+this repo's unrelated issue #42, and every lookup below is scoped to this
+repo — cross-repo closing references are skipped (this gate can only judge
+duplicates against this repo's issues):
 
 ```bash
-ISSUES=$(gh pr view "$PR_NUMBER" --repo "$REPO" \
-  --json closingIssuesReferences --jq '.closingIssuesReferences[].number' | sort -u)
+ISSUES=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json closingIssuesReferences |
+  jq -r --arg repo "$REPO" '.closingIssuesReferences[]
+    | select((.repository.owner.login + "/" + .repository.name) == $repo)
+    | .number' | sort -u)
 ```
 
 The parser is not intent-aware — prose like "resolves #123's closer" links

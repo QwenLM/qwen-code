@@ -6840,4 +6840,13 @@ describe('stage 1-pre duplicate gate', () => {
     expect(section).toContain('NO production changes');
     expect(section).toContain('never fully subsumed');
   });
+
+  it('scopes linkage extraction to same-repo closing references', () => {
+    // A bare `.number` extraction drops the repository qualifier, so a
+    // cross-repo closing reference resolves against this repo's
+    // same-numbered unrelated issue. The scoping filter and the skip rule
+    // must stay.
+    expect(section).toContain('.repository.owner.login');
+    expect(section).toContain('cross-repo closing references are skipped');
+  });
 });
