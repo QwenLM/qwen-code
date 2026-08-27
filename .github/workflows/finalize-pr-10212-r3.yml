@@ -21,8 +21,126 @@ jobs:
             | sed '1d;$d;s/^          //' > /tmp/pr10212_patch.py
           test -s /tmp/pr10212_patch.py
           python3 /tmp/pr10212_patch.py
-          echo 'ZnJvbSBwYXRobGliIGltcG9ydCBQYXRoCgpwID0gUGF0aCgicGFja2FnZXMvY29yZS9zcmMvdXRpbHMvc2hlbGxBc3RQYXJzZXIudHMiKQpzID0gcC5yZWFkX3RleHQoKQpvbGQgPSAiIiIgIGNvbnN0IG5hbWVOb2RlID0gY29tbWFuZE5vZGUuY2hpbGRGb3JGaWVsZE5hbWUoJ25hbWUnKTsKICBjb25zdCBlbnZQcmVmaXggPSBuYW1lTm9kZQogICAgPyBjb21tYW5kTm9kZS5uYW1lZENoaWxkcmVuCiAgICAgICAgLmZpbHRlcigKICAgICAgICAgIChjaGlsZCkgPT4KICAgICAgICAgICAgL152YXJpYWJsZV9hc3NpZ25tZW50cz8kLy50ZXN0KGNoaWxkLnR5cGUpICYmCiAgICAgICAgICAgIGNoaWxkLmVuZEluZGV4IDw9IG5hbWVOb2RlLnN0YXJ0SW5kZXgsCiAgICAgICAgKQogICAgICAgIC5tYXAoKGNoaWxkKSA9PiBjaGlsZC50ZXh0KQogICAgICAgIC5qb2luKCcgJykKICAgIDogJyc7IiIiCm5ldyA9ICIiIiAgY29uc3QgbmFtZU5vZGUgPSBjb21tYW5kTm9kZS5jaGlsZEZvckZpZWxkTmFtZSgnbmFtZScpOwogIGNvbnN0IGVudlByZWZpeCA9CiAgICBuYW1lTm9kZSAmJiBuYW1lTm9kZS5zdGFydEluZGV4ID4gY29tbWFuZE5vZGUuc3RhcnRJbmRleAogICAgICA/IGNvbW1hbmROb2RlLnRleHQKICAgICAgICAgIC5zbGljZSgwLCBuYW1lTm9kZS5zdGFydEluZGV4IC0gY29tbWFuZE5vZGUuc3RhcnRJbmRleCkKICAgICAgICAgIC50cmltKCkKICAgICAgOiAnJzsiIiIKaWYgb2xkIG5vdCBpbiBzOgogICAgcmFpc2UgU3lzdGVtRXhpdCgiZ2VuZXJhdGVkIGVudi1wcmVmaXggYmxvY2sgbm90IGZvdW5kIikKcC53cml0ZV90ZXh0KHMucmVwbGFjZShvbGQsIG5ldywgMSkpCg==' | base64 -d > /tmp/fix-rule-generation.py
-          python3 /tmp/fix-rule-generation.py
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path('packages/core/src/utils/shellAstParser.ts')
+          s = p.read_text()
+
+          old = '''function extractRulesFromStatement(node: SyntaxNode): string[] {
+            switch (node.type) {
+              case 'command':
+                return [extractRuleFromCommand(node)].filter(Boolean) as string[];
+
+              case 'pipeline':
+              case 'list':
+              case 'compound_statement':
+              case 'subshell': {
+                const rules: string[] = [];
+                for (const child of node.namedChildren) {
+                  rules.push(...extractRulesFromStatement(child));
+                }
+                return rules;
+              }
+
+              case 'redirected_statement': {
+                const body = node.namedChildren[0];
+                return body ? extractRulesFromStatement(body) : [];
+              }
+
+              case 'negated_command': {
+                const inner = node.namedChildren[0];
+                return inner ? extractRulesFromStatement(inner) : [];
+              }
+
+              case 'variable_assignment':
+              case 'variable_assignments':
+                // Pure assignments – no rule needed
+                return [];
+
+              default:
+                // For complex constructs (if/while/for/case), try to extract from
+                // named children conservatively
+                return [];
+            }
+          }
+          '''
+
+          new = '''function isVariableAssignmentNode(node: SyntaxNode): boolean {
+            return /^variable_assignments?$/.test(node.type);
+          }
+
+          /**
+           * Extract rules from sibling AST nodes while retaining leading shell
+           * variable assignments as part of the execution identity of the next
+           * command. tree-sitter-bash represents `FOO=bar npm install` as a
+           * variable_assignment sibling followed by a command node, so looking
+           * only inside the command node loses the security-relevant prefix.
+           */
+          function extractRulesFromNodes(nodes: SyntaxNode[]): string[] {
+            const rules: string[] = [];
+            const pendingAssignments: string[] = [];
+
+            for (const node of nodes) {
+              if (isVariableAssignmentNode(node)) {
+                pendingAssignments.push(node.text);
+                continue;
+              }
+
+              const nodeRules = extractRulesFromStatement(node);
+              if (pendingAssignments.length > 0 && nodeRules.length > 0) {
+                nodeRules[0] = `${pendingAssignments.join(' ')} ${nodeRules[0]}`;
+              }
+              rules.push(...nodeRules);
+              pendingAssignments.length = 0;
+            }
+
+            return rules;
+          }
+
+          function extractRulesFromStatement(node: SyntaxNode): string[] {
+            switch (node.type) {
+              case 'command':
+                return [extractRuleFromCommand(node)].filter(Boolean) as string[];
+
+              case 'pipeline':
+              case 'list':
+              case 'compound_statement':
+              case 'subshell':
+              case 'redirected_statement':
+                return extractRulesFromNodes(node.namedChildren);
+
+              case 'negated_command': {
+                const inner = node.namedChildren[0];
+                return inner ? extractRulesFromStatement(inner) : [];
+              }
+
+              case 'variable_assignment':
+              case 'variable_assignments':
+                // Pure assignments – no rule needed until followed by a command.
+                return [];
+
+              default:
+                return [];
+            }
+          }
+          '''
+
+          if old not in s:
+              raise SystemExit('extractRulesFromStatement marker not found')
+          s = s.replace(old, new, 1)
+
+          old_root = '''  for (const stmt of root.namedChildren) {
+            rules.push(...extractRulesFromStatement(stmt));
+          }
+          '''
+          new_root = '''  rules.push(...extractRulesFromNodes(root.namedChildren));
+          '''
+          if old_root not in s:
+              raise SystemExit('extractCommandRules root loop marker not found')
+          s = s.replace(old_root, new_root, 1)
+          p.write_text(s)
+          PY
       - name: Install and validate
         run: |
           npm ci
