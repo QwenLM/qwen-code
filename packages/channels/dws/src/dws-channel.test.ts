@@ -1136,6 +1136,27 @@ describe('DwsChannel', () => {
     }
   });
 
+  // R3-2: the stale-replay rescue is deliberately direct-only; every other
+  // source is still marked processed and dropped here. A mention replayed
+  // long after it was sent must not be parked and re-driven as a fresh turn.
+  it('still drops a stale replayed non-direct message', async () => {
+    const client = new FakeDwsClient();
+    const channel = await readyChannel(client);
+    const replay = message(
+      'user_im_message_receive_at',
+      'stale-at-replay',
+      '@Qwen stale mention',
+      { eventTime: Date.now() - 60_000 },
+    );
+    client.directMessages = [replay];
+
+    await client.emit(0, replay);
+    expect(channel.inbound).toEqual([]);
+
+    await channel.poll();
+    expect(channel.inbound).toEqual([]);
+  });
+
   // R4-4: the pullback above only rescues the replay if the poll that was in
   // flight when it happened does not finish by writing its own window's end
   // back over it. `checkpoint.endTime` is always past the replay's `eventTime`,
@@ -4064,6 +4085,113 @@ describe('DwsChannel', () => {
       expect.objectContaining({
         chatId: 'cid-1',
         messageId: 'direct-history-retry',
+      }),
+    ]);
+  });
+
+  // R3-1: history dispatch skips messages that are ALREADY parked, but a
+  // direct message whose live turn is still in flight passes the skip and
+  // blocks in `handleImMessage`'s in-flight wait. When the live turn then
+  // fails it parks the message and spends attempt 1 — parked ≠ processed, so
+  // the waiting history dispatch must not start a second turn in the same
+  // poll and spend attempt 2.
+  it('spends one retry per poll when the live turn fails while history waits on it', async () => {
+    const client = new FakeDwsClient();
+    const channel = await readyChannel(client);
+    const event = message(
+      'user_im_message_receive_o2o_all',
+      'direct-inflight-retry',
+      'please retry this direct request',
+    );
+    client.directMessages = [event];
+
+    let turnEntered!: () => void;
+    let failTurn!: () => void;
+    const entered = new Promise<void>((resolve) => {
+      turnEntered = resolve;
+    });
+    const failing = new Promise<void>((resolve) => {
+      failTurn = resolve;
+    });
+    channel.inboundHandler = async () => {
+      turnEntered();
+      await failing;
+      throw new Error('agent unavailable');
+    };
+
+    const liveTurn = client.emit(1, event).then(
+      () => undefined,
+      () => undefined,
+    );
+    await entered;
+    const poll = channel.poll();
+    // Let the poll's history dispatch reach the in-flight wait before the
+    // live turn is allowed to fail.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    failTurn();
+    await Promise.all([liveTurn, poll]);
+
+    expect(channel.inboundAttempts).toBe(1);
+
+    channel.inboundHandler = undefined;
+    await channel.poll();
+
+    expect(channel.inboundAttempts).toBe(2);
+    expect(channel.inbound).toEqual([
+      expect.objectContaining({
+        chatId: 'cid-1',
+        messageId: 'direct-inflight-retry',
+      }),
+    ]);
+  });
+
+  // The gated in-flight re-check rethrows instead of returning:
+  // `replayPendingMessages` deletes the parked entry after any normal
+  // return, so a redelivered duplicate whose turn fails while the replay
+  // waits on it must not make the replay drop the parking.
+  it('keeps a parked message parked when its replay waits on a failed duplicate turn', async () => {
+    const client = new FakeDwsClient();
+    const channel = await readyChannel(client);
+    const event = message(
+      'user_im_message_receive_o2o_all',
+      'direct-parked-duplicate',
+      'please retry this direct request',
+    );
+    channel.inboundError = new Error('agent unavailable');
+
+    await expect(client.emit(1, event)).rejects.toThrow('agent unavailable');
+
+    let releaseDuplicate!: () => void;
+    const held = new Promise<void>((resolve) => {
+      releaseDuplicate = resolve;
+    });
+    channel.inboundHandler = async () => {
+      await held;
+      throw new Error('agent unavailable');
+    };
+    channel.inboundError = undefined;
+    const duplicateTurn = client.emit(1, event).then(
+      () => undefined,
+      () => undefined,
+    );
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const poll = channel.poll();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    releaseDuplicate();
+    await Promise.all([duplicateTurn, poll]);
+
+    // The duplicate turn spent attempt 2; the replay spent nothing and must
+    // have kept the parked entry.
+    expect(channel.inboundAttempts).toBe(2);
+
+    channel.inboundHandler = undefined;
+    await channel.poll();
+
+    expect(channel.inboundAttempts).toBe(3);
+    expect(channel.inbound).toEqual([
+      expect.objectContaining({
+        chatId: 'cid-1',
+        messageId: 'direct-parked-duplicate',
       }),
     ]);
   });
