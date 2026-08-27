@@ -5,6 +5,7 @@
  */
 
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
 import {
@@ -22,6 +23,12 @@ import {
 const PNG = '89504e470d0a1a0a';
 const GIF89 = '474946383961';
 const GIF87 = '474946383761';
+
+const publishWorkflow = () =>
+  readFileSync(
+    new URL('../workflows/web-shell-visuals-publish.yml', import.meta.url),
+    'utf8',
+  );
 
 test('sanitizeName preserves the extension (regression: a trailing char broke the .png filter)', () => {
   assert.equal(
@@ -160,6 +167,18 @@ test('buildComment lists a lone composite as one wide image (no light/dark table
   assert.doesNotMatch(body, /<table>/); // composites are a flat list now
   // A lone light shot no longer needs a dark-pair placeholder cell.
   assert.doesNotMatch(body, /<td>/);
+});
+
+test('buildComment: hosting failure reports rendered assets without broken image links', () => {
+  const body = buildComment(['home-light.png', 'model-switch.gif'], {
+    hostingFailed: true,
+    runUrl: 'https://run.example/7',
+  });
+  assert.match(body, /failed to host/i);
+  assert.match(body, /home-light\.png/);
+  assert.match(body, /model-switch\.gif/);
+  assert.match(body, /https:\/\/run\.example\/7/);
+  assert.doesNotMatch(body, /<img /);
 });
 
 // --- Empty-preview triage (coverage gap vs. genuinely no visual effect) ---
@@ -338,4 +357,18 @@ test('buildComment: render-failure note omits the run link when runUrl is absent
   const body = buildComment([], { renderIncomplete: true });
   assert.match(body, /failed to render/i);
   assert.doesNotMatch(body, /\[workflow run\]/); // no dangling empty link
+});
+
+test('publish workflow passes hosting failures through to the comment builder', () => {
+  const workflow = publishWorkflow();
+  assert.match(
+    workflow,
+    /HOSTING_STATUS_FILE="\$\{RUNNER_TEMP\}\/visuals-hosting-status\.txt"/,
+  );
+  assert.match(workflow, /echo 'failure' > "\$\{HOSTING_STATUS_FILE\}"/);
+  assert.match(workflow, /"\$\{HOSTING_STATUS_FILE\}"/);
+  assert.doesNotMatch(
+    workflow,
+    /Failed to push web-shell visuals to \$\{BRANCH\} after retries\."\n\s+exit 1/,
+  );
 });

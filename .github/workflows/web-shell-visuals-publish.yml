@@ -192,6 +192,8 @@ jobs:
           # skips the asset commit entirely; RAW_BASE stays empty and the
           # comment below is image-less ("no screenshot changes").
           RAW_BASE=''
+          HOSTING_STATUS_FILE="${RUNNER_TEMP}/visuals-hosting-status.txt"
+          echo 'success' > "${HOSTING_STATUS_FILE}"
           if [ "${HAS_IMAGES}" = "1" ]; then
             BRANCH="pr-assets/web-shell-visuals-${PR}"
             AUTH_URL="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
@@ -219,13 +221,15 @@ jobs:
               sleep 2
             done
             if [ "${pushed}" -ne 1 ]; then
-              echo "::error::Failed to push web-shell visuals to ${BRANCH} after retries."
-              exit 1
+              echo "::warning::Failed to push web-shell visuals to ${BRANCH} after retries; updating the PR comment with a hosting-failure note."
+              echo 'failure' > "${HOSTING_STATUS_FILE}"
+              cd "${GITHUB_WORKSPACE}"
+            else
+              ASSET_SHA="$(git rev-parse HEAD)"
+              cd "${GITHUB_WORKSPACE}"
+              echo "web-shell visuals hosted on ${BRANCH} at ${ASSET_SHA}."
+              RAW_BASE="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${ASSET_SHA}/imgs"
             fi
-            ASSET_SHA="$(git rev-parse HEAD)"
-            cd "${GITHUB_WORKSPACE}"
-            echo "web-shell visuals hosted on ${BRANCH} at ${ASSET_SHA}."
-            RAW_BASE="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${ASSET_SHA}/imgs"
           fi
 
           # --- Changed paths, for triaging an EMPTY preview ------------------
@@ -259,7 +263,8 @@ jobs:
             "${RAW_BASE}" \
             "${SHORT_SHA}" "${RUN_URL}" "${BODY_FILE}" \
             "${CHANGED_PATHS_FILE}" \
-            "${RENDER_STATUS_FILE}"
+            "${RENDER_STATUS_FILE}" \
+            "${HOSTING_STATUS_FILE}"
 
           # --- Post or update the PR comment --------------------------------
           # Dedup only against OUR OWN prior comment (bot author + marker), and

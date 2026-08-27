@@ -190,18 +190,22 @@ const codePath = (p) => `\`${esc(String(p).replace(/[`\r\n]/g, ''))}\``;
 
 /**
  * Pure comment builder. `files` is the list of staged filenames (png + gif).
- * `ctx` is `{ rawBase, shortSha, runUrl, changedPaths, renderIncomplete }`:
+ * `ctx` is
+ * `{ rawBase, shortSha, runUrl, changedPaths, renderIncomplete, hostingFailed }`:
  * `changedPaths` is the PR's full changed-file list (used only to triage an
  * empty preview), and `renderIncomplete` is true when >=1 scenario failed to
  * render on the PR head — in which case a missing view may be a render failure,
  * not "no change", and the comment must say so instead of a clean bill of
- * health. Returns the markdown body.
+ * health. `hostingFailed` is true when assets rendered but could not be pushed
+ * to the PR assets branch; in that state the comment must refresh without
+ * broken inline image URLs. Returns the markdown body.
  */
 export function buildComment(files, ctx = {}) {
   const rawBase = ctx.rawBase ?? '';
   const shortSha = ctx.shortSha ?? '';
   const runUrl = ctx.runUrl ?? '';
   const renderIncomplete = ctx.renderIncomplete === true;
+  const hostingFailed = ctx.hostingFailed === true;
   const url = (name) => `${rawBase}/${encodeURIComponent(name)}`;
   // A "see the run" pointer for the render-failure notes (omitted if unknown).
   const runLink = runUrl ? ` — see the [workflow run](${esc(runUrl)})` : '';
@@ -223,7 +227,19 @@ export function buildComment(files, ctx = {}) {
 
   out.push('#### Screenshots · before / after');
   out.push('');
-  if (shots.length > 0) {
+  if (hostingFailed) {
+    out.push(
+      `⚠️ _Preview images rendered, but the publish workflow failed to host them on the PR assets branch${runLink}._ This comment was still refreshed so stale images from an older push do not remain attached to this SHA.`,
+    );
+    out.push('');
+    const rendered = [...shots, ...gifs].sort();
+    if (rendered.length > 0) {
+      out.push('Rendered asset filenames:');
+      out.push('');
+      for (const f of rendered) out.push(`- ${codePath(f)}`);
+      out.push('');
+    }
+  } else if (shots.length > 0) {
     // Some views rendered. If others FAILED, say so first: the set below is
     // partial, and a view a reviewer expects but doesn't see may have crashed
     // rather than stayed unchanged.
@@ -276,7 +292,7 @@ export function buildComment(files, ctx = {}) {
     }
   }
 
-  if (gifs.length > 0) {
+  if (!hostingFailed && gifs.length > 0) {
     out.push('#### Flows');
     out.push('');
     for (const g of gifs) {
@@ -365,6 +381,7 @@ function commentCli(
   bodyFile,
   pathsFile,
   renderStatusFile,
+  hostingStatusFile,
 ) {
   let files = [];
   try {
@@ -397,12 +414,22 @@ function commentCli(
       // Unreadable → leave complete (fail open toward the normal preview).
     }
   }
+  let hostingFailed = false;
+  if (hostingStatusFile) {
+    try {
+      hostingFailed =
+        readFileSync(hostingStatusFile, 'utf8').trim() === 'failure';
+    } catch {
+      // Missing/older workflow input → normal hosted/no-image behavior.
+    }
+  }
   const body = buildComment(files, {
     rawBase,
     shortSha,
     runUrl,
     changedPaths,
     renderIncomplete,
+    hostingFailed,
   });
   writeFileSync(bodyFile, body);
   process.stderr.write(`Comment body: ${body.split('\n').length} lines.\n`);
@@ -413,7 +440,16 @@ if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
   if (cmd === 'stage') {
     stageCli(rest[0], rest[1], rest[2]);
   } else if (cmd === 'comment') {
-    commentCli(rest[0], rest[1], rest[2], rest[3], rest[4], rest[5], rest[6]);
+    commentCli(
+      rest[0],
+      rest[1],
+      rest[2],
+      rest[3],
+      rest[4],
+      rest[5],
+      rest[6],
+      rest[7],
+    );
   } else {
     process.stderr.write(`unknown command: ${cmd ?? '(none)'}\n`);
     process.exit(2);
