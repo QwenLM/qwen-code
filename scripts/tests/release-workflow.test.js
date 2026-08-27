@@ -645,6 +645,21 @@ describe('release workflow', () => {
     );
   });
 
+  it('digest-pins every sandbox base image', () => {
+    // integration_docker builds on the shared pool, whose docker daemon
+    // store persists across jobs: a co-resident job can retag a mutable
+    // base tag with a poisoned image, but a digest cannot be moved by
+    // `docker tag`. Every FROM must carry an @sha256: digest.
+    const dockerfile = readFileSync('Dockerfile', 'utf8');
+    const fromLines = dockerfile
+      .split('\n')
+      .filter((line) => /^FROM\s/.test(line));
+    expect(fromLines.length).toBeGreaterThan(0);
+    for (const line of fromLines) {
+      expect(line, line).toMatch(/@sha256:[0-9a-f]{64}(\s|$)/);
+    }
+  });
+
   it('bounds shared-pool jobs and skips redundant remote npm caches', () => {
     expect(
       Object.fromEntries(
