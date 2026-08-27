@@ -671,15 +671,13 @@ function readRequestBody(raw: string | null): unknown {
 function filterScenarioSessions(
   scenario: WebShellDaemonScenario,
   searchParams: URLSearchParams,
-  workspaceCwd?: string,
+  workspaceCwd: string,
 ): DaemonSessionSummary[] {
   const group = searchParams.get('group');
   const sourceType = searchParams.get('sourceType');
-  const workspaceSessions = workspaceCwd
-    ? scenario.sessions.filter(
-        (session) => session.workspaceCwd === workspaceCwd,
-      )
-    : scenario.sessions;
+  const workspaceSessions = scenario.sessions.filter(
+    (session) => session.workspaceCwd === workspaceCwd,
+  );
   const sourceSessions = sourceType
     ? workspaceSessions.filter(
         (session) =>
@@ -692,14 +690,16 @@ function filterScenarioSessions(
     : sourceSessions;
 }
 
-function workspaceCwdFromSessionsPath(path: string): string | undefined {
+function workspaceCwdFromSessionsPath(path: string): string {
   const workspaceMatch = path.match(
     /^\/workspaces\/([^/]+)\/sessions(?:\/live-state)?\/?$/,
   );
   if (workspaceMatch) return decodeURIComponent(workspaceMatch[1]);
 
   const legacyMatch = path.match(/^\/workspace\/(.+)\/sessions\/?$/);
-  return legacyMatch ? decodeURIComponent(legacyMatch[1]) : undefined;
+  if (legacyMatch) return decodeURIComponent(legacyMatch[1]);
+
+  throw new Error(`Unrecognized sessions path: ${path}`);
 }
 
 function isDaemonPath(path: string): boolean {
@@ -1130,9 +1130,7 @@ async function handleDaemonRoute(
       v: 1,
       catalogVersion: scenario.sessionCatalogVersion,
       sessions: scenario.sessions
-        .filter(
-          (session) => !workspaceCwd || session.workspaceCwd === workspaceCwd,
-        )
+        .filter((session) => session.workspaceCwd === workspaceCwd)
         .filter(
           (session) =>
             (session.clientCount ?? 0) > 0 ||

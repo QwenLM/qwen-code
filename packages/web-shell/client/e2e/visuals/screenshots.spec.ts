@@ -903,6 +903,7 @@ for (const theme of THEMES) {
         workspaceCwd: primaryCwd,
         displayName: primarySessionName,
         sessions,
+        sessionId: 'workspace-primary-session',
         capabilities: {
           workspaces: [
             {
