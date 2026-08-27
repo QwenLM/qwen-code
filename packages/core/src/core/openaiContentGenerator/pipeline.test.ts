@@ -6154,8 +6154,14 @@ describe('ContentGenerationPipeline', () => {
       expect(err).toBeInstanceOf(StreamInactivityTimeoutError);
       expect((err as Error).message).toBe(
         'No stream activity for 1000ms after 0 chunks ' +
-          '(stream lifetime: 1000ms). Set QWEN_STREAM_IDLE_TIMEOUT_MS ' +
-          'to increase this window (or 0 to disable it).',
+          '(stream lifetime: 1000ms). For provider-backed models, ' +
+          'increase modelProviders[providerId][].generationConfig.streamIdleTimeoutMs; ' +
+          'provider configuration takes precedence, so model.generationConfig is ' +
+          'ignored for those models. For runtime models, increase ' +
+          'model.generationConfig.streamIdleTimeoutMs. Built-in Qwen OAuth models ' +
+          'cannot be overridden via settings. Use QWEN_STREAM_IDLE_TIMEOUT_MS ' +
+          'for them or whenever no explicit value is active. ' +
+          'Set the active value to 0 to disable it.',
       );
       expect(err).toMatchObject({ code: 'ETIMEDOUT' });
       expect((err as StreamInactivityTimeoutError).chunksReceived).toBe(0);
@@ -6164,7 +6170,7 @@ describe('ContentGenerationPipeline', () => {
       expect(mockErrorHandler.handle).not.toHaveBeenCalled();
     });
 
-    it('includes the idle detail and env override hint in timeout errors', async () => {
+    it('includes settings and environment override hints in timeout errors', async () => {
       const gated = gatedStream(); // never push/end → silent
       (mockClient.chat.completions.create as Mock).mockResolvedValue(
         gated.stream,
@@ -6184,6 +6190,10 @@ describe('ContentGenerationPipeline', () => {
       expect(err).toBeInstanceOf(StreamInactivityTimeoutError);
       const message = (err as Error).message;
       expect(message).toContain('No stream activity for 1000ms after 0 chunks');
+      expect(message).toContain('model.generationConfig.streamIdleTimeoutMs');
+      expect(message).toContain(
+        'modelProviders[providerId][].generationConfig.streamIdleTimeoutMs',
+      );
       expect(message).toContain('QWEN_STREAM_IDLE_TIMEOUT_MS');
     });
 

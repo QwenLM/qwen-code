@@ -117,7 +117,7 @@ export class SkillCommandLoader implements ICommandLoader {
             : true;
 
         const sourceLabel = isExtension
-          ? `${t('Extension:')} ${skill.extensionName ?? 'unknown'}`
+          ? `${t('Extension:')} ${skill.extensionDisplayName ?? skill.extensionName ?? 'unknown'}`
           : skill.level === 'project'
             ? t('Project')
             : t('User');

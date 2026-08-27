@@ -75,6 +75,25 @@ describe('effortCommand', () => {
     expect(res).toMatchObject({ messageType: 'info' });
   });
 
+  it('keeps a valid tier session-local when persistence is disabled', async () => {
+    const res = await effortCommand.action!(
+      {
+        ...context,
+        executionPolicy: {
+          allowSessionReset: false,
+          allowWorkspaceSettingsWrite: false,
+          persistModelSelection: false,
+          blockedBuiltinCommandNames: [],
+        },
+      },
+      'high',
+    );
+
+    expect(setReasoningEffort).toHaveBeenCalledWith('high');
+    expect(setValue).not.toHaveBeenCalled();
+    expect(res).toMatchObject({ messageType: 'info' });
+  });
+
   it('reports thinking is disabled when setReasoningEffort is a no-op', async () => {
     // Simulate `reasoning: false`: setReasoningEffort no-ops, so the tier never
     // lands. The command must still persist it but report it has not taken

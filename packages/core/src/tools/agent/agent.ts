@@ -65,8 +65,6 @@ import {
   writeWorktreeSessionMarker,
 } from '../../services/gitWorktreeService.js';
 import { resolveExternalWorktreeDir } from '../../agents/worktree-pin.js';
-import { FileDiscoveryService } from '../../services/fileDiscoveryService.js';
-import { WorkspaceContext } from '../../utils/workspaceContext.js';
 import { getStartupContextLength } from '../../core/environmentContext.js';
 import {
   childLaunchDepth,
@@ -109,11 +107,12 @@ import {
 import { toModelVisibleSubagentResult } from '../../agents/subagent-result.js';
 import {
   ApprovalMode,
-  Config,
+  deriveApprovalModeConfig,
+  deriveWorktreeConfig,
   normalizeMaxSubagentDepth,
   validateMaxSessionTurns,
+  type Config,
 } from '../../config/config.js';
-import { createDenialState } from '../../permissions/denialTracking.js';
 import { isTeammate } from '../../agents/team/identity.js';
 import { isSubagentLikeExecutionContext } from '../../agents/runtime/subagent-plan-tool-policy.js';
 import {
@@ -607,118 +606,23 @@ function capturePersistedCliFlags(
 }
 
 /**
- * Creates a Config override with a different approval mode.
- *
- * Uses prototype delegation (Object.create) to avoid mutating the parent
- * config, then delegates to {@link rebuildToolRegistryOnOverride} so the
- * override's tool registry has core tools bound to the override rather
- * than to the parent. Without that rebuild, the parent's cached tool
- * instances continue to resolve `this.config` to the parent, defeating
- * per-Config isolation of FileReadCache / approval mode for any code
- * path that goes through the bound tool.
- *
- * Returns `{ config, cleanup }`. Callers MUST invoke `cleanup` in a
- * `finally` block after the override is no longer in use, otherwise
- * the parent's PermissionManager may leak a strip across the sub-agent
- * boundary (see strip lifecycle below).
- *
- * Strip lifecycle for AUTO overrides:
- *   - parent not in AUTO, override starts in AUTO: this function strips
- *     the PARENT's PM (shared via prototype chain — the override cannot
- *     have its own PM without a much bigger refactor).
- *   - parent already in AUTO, override starts in AUTO: parent's
- *     `setApprovalMode` already stripped on its own entry, so this
- *     function does not strip again.
- *   - override enters/leaves AUTO later: `setApprovalMode` reuses Config's
- *     normal state transition, but suppresses AUTO strip/restore while the
- *     parent is already in AUTO because the parent owns that strip lifecycle.
- *     `cleanup` only restores if the child finishes still in AUTO while the
- *     parent is not in AUTO.
+ * Creates an agent approval profile, then rebuilds its tool registry so bound
+ * tools resolve the derived Config and its child-local state.
  */
 export async function createApprovalModeOverride(
   base: Config,
   mode: ApprovalMode,
   options: ApprovalModeOverrideOptions = {},
 ): Promise<ApprovalModeOverrideHandle> {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const override = Object.create(base) as any;
-  const baseApprovalMode = base.getApprovalMode();
-  // These own properties intentionally mirror Config's TS-private field names.
-  // Config prototype methods read/write them at runtime on this override object.
-  override.approvalMode = mode;
-  override.manualPlanExitNoticeEventState = {
-    ...(override.manualPlanExitNoticeEventState ?? {
-      version: 0,
-      kind: 'clear',
-    }),
-  };
-  override.getApprovalMode = Config.prototype.getApprovalMode;
-  override.prePlanMode =
-    mode === ApprovalMode.PLAN
-      ? baseApprovalMode === ApprovalMode.PLAN
-        ? base.getPrePlanMode()
-        : baseApprovalMode
-      : undefined;
-  override.approvalModeRevision = 0;
-  override.autoModeDenialState = createDenialState();
-  override.setApprovalMode = (
-    nextMode: ApprovalMode,
-    setOptions?: Parameters<Config['setApprovalMode']>[1],
-  ): void => {
-    if (base.getApprovalMode() !== ApprovalMode.AUTO) {
-      Config.prototype.setApprovalMode.call(
-        override as Config,
-        nextMode,
-        setOptions,
-      );
-      return;
-    }
-
-    const hadOwnPermissionManager = Object.prototype.hasOwnProperty.call(
-      override,
-      'permissionManager',
-    );
-    const ownPermissionManager = override.permissionManager;
-    override.permissionManager = null;
-    try {
-      Config.prototype.setApprovalMode.call(
-        override as Config,
-        nextMode,
-        setOptions,
-      );
-    } finally {
-      if (hadOwnPermissionManager) {
-        override.permissionManager = ownPermissionManager;
-      } else {
-        delete override.permissionManager;
-      }
-    }
-  };
-  applyPersistedCliFlagOverrides(override as Config, options.persistedCliFlags);
-  await rebuildToolRegistryOnOverride(override as Config, base);
-
-  const cleanup = () => {
-    if (
-      (override as Config).getApprovalMode() === ApprovalMode.AUTO &&
-      base.getApprovalMode() !== ApprovalMode.AUTO
-    ) {
-      base.getPermissionManager?.()?.restoreDangerousRules();
-    }
-  };
-
-  if (mode === ApprovalMode.AUTO) {
-    const baseWasAuto = base.getApprovalMode() === ApprovalMode.AUTO;
-    if (!baseWasAuto) {
-      // This override is bringing AUTO into a non-AUTO parent. Strip
-      // dangerous allow rules so the sub-agent's classifier actually
-      // gates them. Cleanup handles restore if the child finishes in AUTO.
-      base.getPermissionManager?.()?.stripDangerousRulesForAutoMode();
-    }
-    // baseWasAuto: parent's setApprovalMode already stripped; cleanup
-    // will not restore while the parent remains in AUTO.
+  const { config: override, cleanup } = deriveApprovalModeConfig(base, mode);
+  try {
+    applyPersistedCliFlagOverrides(override, options.persistedCliFlags);
+    await rebuildToolRegistryOnOverride(override, base);
+    return { config: override, cleanup };
+  } catch (error) {
+    cleanup();
+    throw error;
   }
-
-  return { config: override as Config, cleanup };
 }
 
 /**
@@ -1720,6 +1624,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
   private async createForkSubagent(
     agentConfig: Config,
     eventEmitter: AgentEventEmitter = this.eventEmitter,
+    subagentId?: string,
   ): Promise<{
     subagent: AgentHeadless;
     initialMessages?: Content[];
@@ -1899,6 +1804,10 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       { max_turns: FORK_DEFAULT_MAX_TURNS },
       toolConfig,
       eventEmitter,
+      undefined,
+      undefined,
+      this.params.description,
+      subagentId,
     );
 
     return { subagent, initialMessages, taskPrompt, toolConfig };
@@ -2977,7 +2886,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         this.config.isTrustedFolder(),
       );
       const resolvedApprovalMode = permissionModeToApprovalMode(resolvedMode);
-      // ALWAYS produce a child Config via Object.create, even when the
+      // ALWAYS produce a child Config via an overlay, even when the
       // approval mode is identical to the parent. Subagents must run
       // against an isolated FileReadCache so a parent's prior_read
       // entries cannot satisfy enforcement on a path the subagent's
@@ -2993,45 +2902,17 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       // resolve `this.config` to the parent, reaching the parent's
       // FileReadCache rather than the subagent's. See
       // `createApprovalModeOverride` above for details.
+      const worktreeConfig = worktreeIsolation
+        ? deriveWorktreeConfig(this.config, worktreeIsolation.path, {
+            customIgnoreFiles:
+              this.config.getFileFilteringOptions().customIgnoreFiles,
+          })
+        : this.config;
       const { config: agentConfig, cleanup } = await createApprovalModeOverride(
-        this.config,
+        worktreeConfig,
         resolvedApprovalMode,
       );
       restoreParentPM = cleanup;
-
-      // ── Optional worktree isolation (Phase 2: rebind cwd) ─────────
-      // Rebind every "where am I?" surface on the agent's Config
-      // override to the worktree path so the subagent's tools cannot
-      // leak into the parent project tree.
-      //
-      // We override at two layers because Config getters mix direct
-      // field reads and getter calls. Shadowing only the methods would
-      // leave call sites like `this.targetDir` (e.g. inside
-      // `getProjectRoot`, `getFileService`) resolving via the
-      // prototype chain to the parent's `targetDir` — JS does not
-      // promote a getter assignment to a field shadow. Setting both
-      // `ov.targetDir` (own-property field) AND `ov.getTargetDir`
-      // (own-property method) covers both lookup paths.
-      if (worktreeIsolation) {
-        const wtPath = worktreeIsolation.path;
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const ov = agentConfig as any;
-        ov.targetDir = wtPath;
-        ov.cwd = wtPath;
-        ov.getTargetDir = () => wtPath;
-        ov.getCwd = () => wtPath;
-        ov.getWorkingDir = () => wtPath;
-        ov.getProjectRoot = () => wtPath;
-        const wtFileService = new FileDiscoveryService(
-          wtPath,
-          this.config.getFileFilteringOptions().customIgnoreFiles,
-        );
-        ov.fileDiscoveryService = wtFileService;
-        ov.getFileService = () => wtFileService;
-        const wtWorkspace = new WorkspaceContext(wtPath);
-        ov.workspaceContext = wtWorkspace;
-        ov.getWorkspaceContext = () => wtWorkspace;
-      }
 
       // Date.now() alone collides when two parallel background agents of the
       // same type land in the same ms; the registry is keyed by agentId.
@@ -3084,6 +2965,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         const fork = await this.createForkSubagent(
           agentConfig,
           backgroundEventEmitter,
+          hookOpts.agentId,
         );
         subagent = fork.subagent;
         taskPrompt = fork.taskPrompt;
@@ -3095,6 +2977,8 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           agentConfig,
           {
             eventEmitter: backgroundEventEmitter ?? this.eventEmitter,
+            taskName: this.params.description,
+            subagentId: hookOpts.agentId,
             ...(shouldRunInBackground && subagentModelId
               ? { modelConfigOverrides: { model: subagentModelId } }
               : {}),

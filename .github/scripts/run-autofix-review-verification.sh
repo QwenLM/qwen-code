@@ -119,7 +119,7 @@ reject_fix() {
   if [[ "${preexisting}" == 'true' ]]; then
     # NOT retryable: the repair agent is only allowed to amend this round's
     # fix, and a failure that exists without the fix is outside that boundary
-    # by definition — the 45-minute repair budget cannot reach it. The remedy
+    # by definition — the 60-minute repair budget cannot reach it. The remedy
     # is a base update (merge main into the branch), not a repair.
     echo "preexisting=true" >> "${GITHUB_OUTPUT}"
   elif [[ "${retryable}" == 'true' ]]; then
@@ -1053,7 +1053,7 @@ fi
 # a DEFECT-CLAIM round only when resolved-comments.txt marks a finding
 # resolved-in-code whose thread is Critical-tagged or belongs to a
 # CHANGES_REQUESTED review (matched in rc.json/rv.json). Those rounds get a
-# non-retryable rejection on all-green — the 45-minute repair pass cannot
+# non-retryable rejection on all-green — the 60-minute repair pass cannot
 # make a nonexistent defect reproduce; the next full round re-reads the
 # feedback with the evidence in LAST_REJECTION and can decline or escalate
 # instead. Every OTHER src+test round (a refactor pinning existing

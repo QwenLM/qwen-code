@@ -68,8 +68,8 @@ const mockConfigInternal = {
   getUserAgent: () => 'test-agent',
   getUserMemory: () => '',
   setUserMemory: vi.fn(),
-  getGeminiMdFileCount: () => 0,
-  setGeminiMdFileCount: vi.fn(),
+  getMemoryFileCount: () => 0,
+  setMemoryFileCount: vi.fn(),
   getToolRegistry: () =>
     ({
       registerTool: vi.fn(),
@@ -566,6 +566,37 @@ describe('WriteFileTool', () => {
         kind: 'notebook',
         mimeType: 'application/x-ipynb+json',
       });
+    });
+
+    it('does not record intermediate files when record_as_artifact is false', async () => {
+      mockConfigInternal.isRecordArtifactEnabled.mockReturnValue(true);
+      const filePath = path.join(rootDir, 'alibaba.html');
+      const params = {
+        file_path: filePath,
+        content: '<!doctype html><html><body>Alibaba</body></html>',
+        record_as_artifact: false,
+      };
+
+      const result = await tool.build(params).execute(abortSignal);
+
+      expect(result.llmContent).toContain('Successfully created');
+      expect(result.llmContent).not.toContain('automatically recorded');
+      expect(result.artifacts).toBeUndefined();
+    });
+
+    it('does not record intermediate files written under .qwen/tmp', async () => {
+      mockConfigInternal.isRecordArtifactEnabled.mockReturnValue(true);
+      const filePath = path.join(rootDir, '.qwen', 'tmp', 'alibaba.html');
+      const params = {
+        file_path: filePath,
+        content: '<!doctype html><html><body>Alibaba</body></html>',
+      };
+
+      const result = await tool.build(params).execute(abortSignal);
+
+      expect(result.llmContent).toContain('Successfully created');
+      expect(result.llmContent).not.toContain('automatically recorded');
+      expect(result.artifacts).toBeUndefined();
     });
 
     it('does not record artifact-like files when artifact recording is disabled', async () => {

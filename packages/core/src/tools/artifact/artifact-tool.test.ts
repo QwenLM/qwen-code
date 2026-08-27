@@ -80,6 +80,9 @@ describe('ArtifactTool', () => {
     ]);
     expect(res.artifacts?.[0]?.url).toMatch(/^file:\/\//);
     expect(res.artifacts?.[0]?.managedId).toBeTruthy();
+    expect(res.artifacts?.[0]?.metadata?.['qwen.published.sha256']).toMatch(
+      /^[0-9a-f]{64}$/,
+    );
 
     const published = res.resultFilePaths?.[0];
     expect(published).toBeTruthy();
@@ -102,6 +105,9 @@ describe('ArtifactTool', () => {
     const html = await fs.readFile(second.resultFilePaths![0], 'utf8');
     expect(html).toContain('<p>v2</p>');
     expect(html).not.toContain('<p>v1</p>');
+    expect(second.artifacts?.[0]?.metadata?.['qwen.published.sha256']).not.toBe(
+      first.artifacts?.[0]?.metadata?.['qwen.published.sha256'],
+    );
   });
 
   it('rejects a fragment with external references and does not publish', async () => {
