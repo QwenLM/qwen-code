@@ -6,7 +6,7 @@
 
 import { execFile } from 'node:child_process';
 import { stripVTControlCharacters } from 'node:util';
-import { sanitizeLogText } from '@qwen-code/channel-base';
+import { sanitizeLogText, truncateCodePoints } from '@qwen-code/channel-base';
 import { dwsProcessEnvironment } from './dws-environment.js';
 import {
   startDwsEventProcess,
@@ -203,13 +203,22 @@ function dwsCommandFailureMessage(
 }
 
 function dwsCommandFailureDetails(output: unknown): string {
-  const window = String(output ?? '').slice(0, DWS_ERROR_OUTPUT_WINDOW_CHARS);
+  const window = String(output ?? '').slice(-DWS_ERROR_OUTPUT_WINDOW_CHARS);
   if (!window.trim()) return '';
-  const details = sanitizeLogText(
-    stripVTControlCharacters(window),
+  const details = truncateCodePointsFromEnd(
+    sanitizeLogText(
+      stripVTControlCharacters(window),
+      DWS_ERROR_OUTPUT_WINDOW_CHARS,
+    ),
     DWS_ERROR_OUTPUT_MAX_CHARS,
   ).trim();
   return details;
+}
+
+function truncateCodePointsFromEnd(str: string, max: number): string {
+  const truncated = truncateCodePoints(str, max);
+  if (truncated === str) return str;
+  return Array.from(str).slice(-max).join('');
 }
 
 function runDwsProcess(

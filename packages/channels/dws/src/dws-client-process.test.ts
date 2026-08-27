@@ -108,6 +108,23 @@ describe('DWS command process', () => {
     );
   });
 
+  it('prefers stderr details over stdout details', async () => {
+    mockFailedDwsCommand({
+      stdout: 'detail on stdout',
+      stderr: 'detail on stderr',
+    });
+
+    const error = await new DwsClient({ executable: '/opt/dws' })
+      .assertCompatible()
+      .catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(DwsCommandError);
+    expect((error as Error).message).toContain(
+      'DWS command failed (1): detail on stderr',
+    );
+    expect((error as Error).message).not.toContain('detail on stdout');
+  });
+
   it('falls back to stdout when stderr sanitizes to empty', async () => {
     mockFailedDwsCommand({
       stdout: 'error: quota exceeded',
@@ -158,7 +175,18 @@ describe('DWS command process', () => {
 
     const prefix = 'DWS command failed (1): ';
     expect(error).toBeInstanceOf(DwsCommandError);
-    expect((error as Error).message).toBe(`${prefix}${'x'.repeat(256)}`);
-    expect((error as Error).message).not.toContain('tail');
+    expect((error as Error).message).toBe(`${prefix}${'x'.repeat(252)}tail`);
+    expect((error as Error).message).not.toContain('x'.repeat(253));
+  });
+
+  it('keeps later diagnostics from long command output', async () => {
+    mockFailedDwsCommand({ stderr: `${'noise'.repeat(200)}fatal: denied` });
+
+    const error = await new DwsClient({ executable: '/opt/dws' })
+      .assertCompatible()
+      .catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(DwsCommandError);
+    expect((error as Error).message).toContain('fatal: denied');
   });
 });
