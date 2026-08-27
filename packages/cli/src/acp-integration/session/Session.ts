@@ -7889,7 +7889,14 @@ export class Session implements SessionContext {
     scheduler.start((job: CronFire) => {
       if (this.cronDisabledByTokenLimit) return;
       if (job.missed && detectAutonomousSentinel(job.prompt)) return;
+      // A missed one-shot arrives as a synthetic carrier whose prompt is the
+      // confirm-first notification ("ask the user before running it"). It
+      // inherits sessionMode from the task it stands for, so without this
+      // guard it would be wrapped in the execute-now header and run headless,
+      // with nobody attached to answer the confirmation. Carriers belong in
+      // the controller session; only real fires get a fresh child.
       if (
+        !job.missed &&
         job.sessionMode === 'per_run' &&
         job.cronExpr !== '@wakeup' &&
         !job.delivery &&
@@ -7923,11 +7930,15 @@ export class Session implements SessionContext {
   async #dispatchCronToFreshSession(job: CronFire): Promise<void> {
     const scheduler = this.config.getCronScheduler();
     const taskId = job.id ?? 'unknown';
-    const triggeredAt = job.lastFiredAt ?? Date.now();
+    // Captured before the awaited RPC below: processJob re-stamps this very
+    // jobs-map entry on the next matching minute, so a spawn that outlasts one
+    // interval would otherwise annotate the *next* fire's run record.
+    const firedAt = job.lastFiredAt;
+    const triggeredAt = firedAt ?? Date.now();
     const record = async (outcome: CronRunSessionOutcome): Promise<void> => {
-      if (!job.id || job.lastFiredAt === undefined) return;
+      if (!job.id || firedAt === undefined) return;
       await scheduler
-        .annotateRunSession(job.id, job.lastFiredAt, outcome)
+        .annotateRunSession(job.id, firedAt, outcome)
         .catch((error) => {
           debugLogger.warn(
             `Scheduled task ${taskId} could not record its run session: ${error instanceof Error ? error.message : String(error)}`,

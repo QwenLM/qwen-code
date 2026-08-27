@@ -124,13 +124,6 @@ export interface DurableCronTask {
   runs?: CronTaskRun[];
 }
 
-/**
- * Appends a run record to a task's bounded history ring (newest last), capping
- * at {@link MAX_TASK_RUNS} by dropping the oldest. Pure — returns a fresh
- * array and treats an absent/foreign `runs` as empty, so it is safe on a task
- * that predates the field. Shared by every scheduler persist site so the cap
- * is enforced in exactly one place.
- */
 /** How a per-run fire's fresh-session dispatch ended: the session the run
  * actually executes in, and whether creating a fresh one failed first. */
 export interface CronRunSessionOutcome {
@@ -160,6 +153,13 @@ export function annotateCronRunSession(
   return { ...task, runs };
 }
 
+/**
+ * Appends a run record to a task's bounded history ring (newest last), capping
+ * at {@link MAX_TASK_RUNS} by dropping the oldest. Pure — returns a fresh
+ * array and treats an absent/foreign `runs` as empty, so it is safe on a task
+ * that predates the field. Shared by every scheduler persist site so the cap
+ * is enforced in exactly one place.
+ */
 export function appendCronRun(
   runs: CronTaskRun[] | undefined,
   entry: CronTaskRun,

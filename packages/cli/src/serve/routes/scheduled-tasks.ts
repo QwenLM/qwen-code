@@ -438,6 +438,40 @@ async function rollbackCronMutation(
   });
 }
 
+/**
+ * Puts a one-shot task back after its manual run failed to dispatch.
+ *
+ * Unlike {@link rollbackCronMutation} this is keyed by task id, not by
+ * whole-file equality: the dispatch window is wide enough for an unrelated
+ * write to land on the same workspace file (a recurring task's tick persist, a
+ * keepalive binding a task, another client's PATCH), and an equality-gated
+ * undo would silently decline — permanently destroying a schedule that never
+ * executed. Restores at the task's original position and no-ops when the task
+ * is somehow still present.
+ */
+async function restoreConsumedOneShot(
+  target: ScheduledTaskTarget,
+  before: DurableCronTask[] | undefined,
+  id: string,
+  route: string,
+): Promise<void> {
+  const index = before?.findIndex((t) => t.id === id) ?? -1;
+  const original = index === -1 ? undefined : before![index];
+  if (!original) return;
+  await runWithScheduledTaskTarget(target, () =>
+    updateCronTasks(target.workspaceCwd, (tasks) => {
+      if (tasks.some((t) => t.id === id)) return tasks; // never consumed → no write
+      const restored = [...tasks];
+      restored.splice(Math.min(index, restored.length), 0, original);
+      return restored;
+    }),
+  ).catch((error) => {
+    writeStderrLine(
+      `qwen serve: ${route} failed to restore the consumed one-shot task: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  });
+}
+
 async function teardownBoundSession(
   target: ScheduledTaskTarget,
   sessionId: string,
@@ -1214,16 +1248,11 @@ function registerScheduledTaskCrudRoutes(
           });
           return;
         }
-        if (
-          body['sessionMode'] === 'per_run' &&
-          (!bridge || !bridge.sendPrompt)
-        ) {
-          res.status(409).json({
-            error: 'Fresh-session dispatch is not available for this workspace',
-            code: 'session_mode_unavailable',
-          });
-          return;
-        }
+        // The per-run admission checks live inside the mutation below, where the
+        // task's CURRENT mode is known: the edit dialog re-sends the task's own
+        // sessionMode on every PATCH, so gating on the raw value here would make
+        // a prompt-only edit of an existing per_run task unsavable wherever
+        // fresh-session dispatch is unavailable.
         patch.sessionMode = body['sessionMode'];
       }
       if ('delivery' in body) {
@@ -1252,6 +1281,8 @@ function registerScheduledTaskCrudRoutes(
       let blockedByArchive = false;
       let blockedLegacy = false;
       let blockedSessionModeDelivery = false;
+      let blockedSessionModeUnavailable = false;
+      let blockedSessionModeUnbound = false;
       let rollbackBefore: DurableCronTask[] | undefined;
       let rollbackAfter: DurableCronTask[] | undefined;
       try {
@@ -1263,6 +1294,25 @@ function registerScheduledTaskCrudRoutes(
               if (idx === -1) return tasks; // not found → no write
               found = true;
               const current = tasks[idx]!;
+              // Both per-run admission checks apply to an actual CONVERSION.
+              // Re-sending the mode the task already has changes nothing, so it
+              // must not be refused (see the note on `patch.sessionMode` above).
+              const convertingToPerRun =
+                patch.sessionMode === 'per_run' &&
+                current.sessionMode !== 'per_run';
+              if (convertingToPerRun && (!bridge || !bridge.sendPrompt)) {
+                blockedSessionModeUnavailable = true;
+                return tasks; // no write
+              }
+              // `dispatchTaskToFreshSession` needs a bound session to attribute
+              // the child to and throws without one. Tool-created durable tasks
+              // start unbound (`cron_create` omits sessionId), so accepting the
+              // conversion here would leave a task whose every manual run 500s
+              // with a phantom failed-run record until keepalive binds it.
+              if (convertingToPerRun && !current.sessionId) {
+                blockedSessionModeUnbound = true;
+                return tasks; // no write
+              }
               // A legacy guarded task (isolated + precondition, both removed) can't be
               // enabled: `toView` reports it disabled, so the only PATCH the Web Shell
               // sends for it is the Enable toggle — which would 200 here and then read
@@ -1388,6 +1438,21 @@ function registerScheduledTaskCrudRoutes(
           error:
             'This task was disabled by archiving its session; unarchive the session to re-enable it.',
           code: 'task_session_archived',
+        });
+        return;
+      }
+      if (blockedSessionModeUnavailable) {
+        res.status(409).json({
+          error: 'Fresh-session dispatch is not available for this workspace',
+          code: 'session_mode_unavailable',
+        });
+        return;
+      }
+      if (blockedSessionModeUnbound) {
+        res.status(409).json({
+          error:
+            'This task is not bound to a session yet, so it cannot run in a new session every run. Try again once it has run or been opened at least once.',
+          code: 'session_mode_requires_bound_session',
         });
         return;
       }
@@ -1699,16 +1764,26 @@ function registerScheduledTaskCrudRoutes(
             dispatchFailed: true,
           });
           if (updated.recurring) {
-            await persistOutcome({ dispatchFailed: true }).catch(() => {});
+            await persistOutcome({ dispatchFailed: true }).catch(
+              (persistError) => {
+                // Matches the success path and rollbackCronMutation: a lost
+                // marker leaves a run record indistinguishable from an
+                // un-attributed run, so say so rather than swallowing it.
+                writeStderrLine(
+                  `qwen serve: POST ${base}/${id}/run could not record the failed dispatch: ${persistError instanceof Error ? persistError.message : String(persistError)}`,
+                );
+              },
+            );
           } else {
             // The mutation above consumed this one-shot before dispatch so it
             // could not race its scheduled slot. A synchronous admission
-            // failure means nothing ran, so restore it when the file is still
-            // exactly in the post-consumption state.
-            await rollbackCronMutation(
+            // failure means nothing ran, so put it back unconditionally — the
+            // 500 below invites a retry, and a declined undo would answer that
+            // retry with 404 for a schedule that never executed.
+            await restoreConsumedOneShot(
               target,
               rollbackBefore,
-              rollbackAfter,
+              id,
               `POST ${base}/${id}/run fresh-session dispatch`,
             );
           }

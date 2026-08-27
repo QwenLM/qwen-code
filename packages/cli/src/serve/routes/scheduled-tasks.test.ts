@@ -500,6 +500,83 @@ describe('scheduled-tasks routes', () => {
     expect(stored[0]?.runs).toBeUndefined();
   });
 
+  it('restores a consumed one-shot even when an unrelated write lands during dispatch', async () => {
+    // The one-shot is removed from the store before dispatch so it cannot race
+    // its scheduled slot. The undo must not be gated on the file still being
+    // byte-identical: a recurring task's tick persist, a keepalive binding, or
+    // another client's PATCH can land inside the dispatch window, and an
+    // equality-gated undo would destroy a schedule that never executed.
+    const created = await create({
+      cron: '0 0 1 1 *',
+      prompt: 'run once',
+      recurring: false,
+      sessionMode: 'per_run',
+    });
+    const spawnOrAttach = h.bridge.spawnOrAttach.bind(h.bridge);
+    h.bridge.spawnOrAttach = async (req) => {
+      // An unrelated task appears on the same workspace file mid-dispatch.
+      await updateCronTasks(h.workspace, (tasks) => [
+        ...tasks,
+        {
+          id: 'concurrent-task',
+          cron: '0 9 * * *',
+          prompt: 'unrelated',
+          recurring: true,
+          createdAt: 1_700_000_000_000,
+          lastFiredAt: 1_700_000_000_000,
+          sessionId: CALLER_SESSION_ID,
+        },
+      ]);
+      await spawnOrAttach(req);
+      throw new Error('spawn failed');
+    };
+
+    const run = await request(h.app).post(
+      `/scheduled-tasks/${created.body.id}/run`,
+    );
+
+    expect(run.status).toBe(500);
+    expect(run.body.code).toBe('scheduled_task_session_dispatch_failed');
+    const stored = await readCronTasks(h.workspace);
+    // The retry the 500 invites must find the task, not a 404.
+    expect(stored.map((t) => t.id).sort()).toEqual(
+      ['concurrent-task', created.body.id].sort(),
+    );
+    expect(stored.find((t) => t.id === created.body.id)).toMatchObject({
+      recurring: false,
+      sessionMode: 'per_run',
+    });
+  });
+
+  it('rejects a per-run conversion on a task with no bound session', async () => {
+    // Tool-created durable tasks start unbound (`cron_create` omits sessionId)
+    // and the dialog offers Edit unconditionally. Accepting the conversion
+    // would leave a task whose every manual run 500s with a phantom failed-run
+    // record until the keepalive heartbeat binds it.
+    await updateCronTasks(h.workspace, (tasks) => [
+      ...tasks,
+      {
+        id: 'unbound-task',
+        cron: '0 9 * * *',
+        prompt: 'unbound',
+        recurring: true,
+        createdAt: 1_700_000_000_000,
+        lastFiredAt: 1_700_000_000_000,
+      },
+    ]);
+
+    const res = await request(h.app)
+      .patch('/scheduled-tasks/unbound-task')
+      .send({ sessionMode: 'per_run' });
+
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('session_mode_requires_bound_session');
+    const stored = await readCronTasks(h.workspace);
+    expect(stored.find((t) => t.id === 'unbound-task')?.sessionMode).toBe(
+      undefined,
+    );
+  });
+
   it('rejects invalid or channel-delivery per-run session modes', async () => {
     const invalid = await create({
       cron: '0 * * * *',
@@ -760,6 +837,64 @@ describe('scheduled-tasks routes', () => {
     expect(res.status).toBe(201);
     expect(runtimeBridge.spawned).toEqual([res.body.sessionId]);
     expect(liveBridge.spawned).toEqual([]);
+  });
+
+  it('allows a prompt-only edit of a per_run task where dispatch is unavailable', async () => {
+    // The edit dialog prefills and re-sends the task's own sessionMode on every
+    // PATCH. Gating on the raw value would make a per_run task already on disk
+    // unsavable wherever task-session management is off — the user could only
+    // save by switching to persistent, silently changing its run semantics.
+    await updateCronTasks(h.workspace, (tasks) => [
+      ...tasks,
+      {
+        id: 'seeded-per-run',
+        cron: '0 9 * * *',
+        prompt: 'before',
+        recurring: true,
+        createdAt: 1_700_000_000_000,
+        lastFiredAt: 1_700_000_000_000,
+        sessionId: CALLER_SESSION_ID,
+        sessionMode: 'per_run',
+      },
+    ]);
+    const app = express();
+    app.use(express.json());
+    registerScheduledTasksRoutes(app, {
+      boundWorkspace: h.workspace,
+      mutate: () => (_req, _res, next) => next(),
+      safeBody,
+      // no bridge — fresh-session dispatch is unavailable here
+    });
+
+    const res = await request(app)
+      .patch('/scheduled-tasks/seeded-per-run')
+      .send({ prompt: 'after', sessionMode: 'per_run' });
+
+    expect(res.status).toBe(200);
+    const stored = await readCronTasks(h.workspace);
+    expect(stored.find((t) => t.id === 'seeded-per-run')).toMatchObject({
+      prompt: 'after',
+      sessionMode: 'per_run',
+    });
+
+    // An actual conversion is still refused where dispatch is unavailable.
+    await updateCronTasks(h.workspace, (tasks) => [
+      ...tasks,
+      {
+        id: 'seeded-persistent',
+        cron: '0 9 * * *',
+        prompt: 'p',
+        recurring: true,
+        createdAt: 1_700_000_000_000,
+        lastFiredAt: 1_700_000_000_000,
+        sessionId: CALLER_SESSION_ID,
+      },
+    ]);
+    const converted = await request(app)
+      .patch('/scheduled-tasks/seeded-persistent')
+      .send({ sessionMode: 'per_run' });
+    expect(converted.status).toBe(409);
+    expect(converted.body.code).toBe('session_mode_unavailable');
   });
 
   it('creates an unbound task without a bridge but rejects requested binding', async () => {

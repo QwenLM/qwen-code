@@ -3099,6 +3099,110 @@ describe('Session', () => {
     ).not.toContain('Scheduled task:');
   });
 
+  it('enqueues a missed one-shot carrier instead of dispatching it headless', async () => {
+    // The scheduler synthesises a carrier for a missed one-shot whose prompt is
+    // the confirm-first notification ("ask the user before running it"). It
+    // inherits sessionMode from the task it stands for, so a per_run task's
+    // carrier must NOT be wrapped in the execute-now header and run in a fresh
+    // child with nobody attached to answer the confirmation.
+    const annotateRunSession = vi.fn().mockResolvedValue(undefined);
+    const scheduler = {
+      hasPendingWork: true,
+      enableDurable: vi.fn().mockResolvedValue(undefined),
+      start: vi.fn(
+        (
+          callback: (job: {
+            id: string;
+            prompt: string;
+            cronExpr: string;
+            lastFiredAt: number;
+            sessionMode: 'per_run';
+            missed: true;
+          }) => void,
+        ) => {
+          callback({
+            id: 'task-1',
+            prompt:
+              'Do NOT execute this prompt yet. First ask the user whether to run it now: review the next PR',
+            cronExpr: '0 * * * *',
+            lastFiredAt: 123,
+            sessionMode: 'per_run',
+            missed: true,
+          });
+        },
+      ),
+      stop: vi.fn(),
+      annotateRunSession,
+      getExitSummary: vi.fn().mockReturnValue(undefined),
+    };
+    mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+    mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+
+    session.startCronScheduler();
+
+    await vi.waitFor(() => {
+      expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
+    });
+    expect(mockClient.extMethod).not.toHaveBeenCalledWith(
+      SERVE_CONTROL_EXT_METHODS.createSubSession,
+      expect.anything(),
+    );
+    const enqueued = JSON.stringify(
+      vi.mocked(mockChat.sendMessageStream).mock.calls[0],
+    );
+    expect(enqueued).toContain('First ask the user whether to run it now');
+    expect(enqueued).not.toContain('Execute the instructions below now');
+  });
+
+  it('attributes a slow per-run dispatch to the fire that started it', async () => {
+    // processJob re-stamps the live jobs-map entry every matching minute. A
+    // spawn round-trip that outlasts one interval must still annotate the run
+    // record of the fire it was dispatched for, not the next one's.
+    const annotateRunSession = vi.fn().mockResolvedValue(undefined);
+    const job = {
+      id: 'task-1',
+      prompt: 'review the next PR',
+      cronExpr: '* * * * *',
+      lastFiredAt: 123,
+      sessionMode: 'per_run' as const,
+    };
+    const scheduler = {
+      hasPendingWork: true,
+      enableDurable: vi.fn().mockResolvedValue(undefined),
+      start: vi.fn((callback: (fire: typeof job) => void) => {
+        callback(job);
+      }),
+      stop: vi.fn(),
+      annotateRunSession,
+      getExitSummary: vi.fn().mockReturnValue(undefined),
+    };
+    mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+    mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+    let releaseSpawn!: () => void;
+    const spawned = new Promise<void>((resolve) => {
+      releaseSpawn = resolve;
+    });
+    vi.mocked(mockClient.extMethod).mockImplementationOnce(async () => {
+      // The next tick lands while the spawn RPC is still in flight.
+      job.lastFiredAt = 456;
+      await spawned;
+      return { sessionId: 'child-session' };
+    });
+
+    session.startCronScheduler();
+
+    await vi.waitFor(() => {
+      expect(mockClient.extMethod).toHaveBeenCalled();
+    });
+    releaseSpawn();
+
+    await vi.waitFor(() => {
+      expect(annotateRunSession).toHaveBeenCalledWith('task-1', 123, {
+        sessionId: 'child-session',
+      });
+    });
+  });
+
   it('does not resume automatic turns until an aborted prompt settles', async () => {
     let resolvePromptCompletion!: () => void;
     const promptCompletion = new Promise<void>((resolve) => {
