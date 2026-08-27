@@ -90,6 +90,7 @@ import * as runtimeStatus from '../utils/runtimeStatus.js';
 import * as sessionRegistry from '../services/session-registry.js';
 import { ExtensionManager } from '../extension/extensionManager.js';
 import { SkillManager } from '../skills/skill-manager.js';
+import { createSkillScopedAgentConfig } from '../memory/skillReviewAgentPlanner.js';
 import { maybeRunAutoSkillCurator } from '../skills/skill-curator.js';
 import { HookSystem } from '../hooks/index.js';
 import { GOAL_HOOK_ID_OUTPUT_KEY } from '../goals/goalHook.js';
@@ -215,6 +216,9 @@ vi.mock('../memory/team-memory-sync.js', () => ({
   syncTeamMemory: vi
     .fn()
     .mockResolvedValue({ committed: false, pulled: false, pushed: false }),
+}));
+vi.mock('../agents/forkedAgent.js', () => ({
+  runForkedAgent: vi.fn(),
 }));
 vi.mock('../skills/skill-curator.js', () => ({
   maybeRunAutoSkillCurator: vi.fn().mockResolvedValue({ status: 'not_due' }),
@@ -9061,6 +9065,65 @@ describe('Server Config (config.ts)', () => {
       // An unlisted (not denied) tool is deferred, not dropped (#10075).
       expect(registered).not.toContain(ToolNames.SEND_MESSAGE);
       expect(deferred).toContain(ToolNames.SEND_MESSAGE);
+    });
+
+    it('derived getPermissionManager overrides reach the registration gate (scoped agent shims, #10075)', async () => {
+      // The skill-review fork wraps the base Config with
+      // createSkillScopedAgentConfig, whose scoped PermissionManager promises
+      // 'registered' for its file tools. Under an active tools.eager
+      // allowlist that omits them, the BASE manager demotes the same tools
+      // to deferred. createToolRegistry must resolve the manager through
+      // getPermissionManager() — where the derived config's override lives —
+      // not the `permissionManager` field, which resolves through the
+      // Object.create prototype chain to the base manager. With the field,
+      // the rebuild below registers the file tools as permission-deferred
+      // and prepareTools' eager filter strips them from the forked agent's
+      // explicit tools list — the silent-disappearance class #10075 set out
+      // to eliminate.
+      const config = new Config({
+        ...baseParams,
+        useRipgrep: false,
+        coreTools: undefined,
+        eagerTools: [],
+      });
+      await config.initialize();
+
+      const { registerFactory, registerPermissionDeferredFactory } = (
+        (await vi.importMock('../tools/tool-registry')) as {
+          ToolRegistry: {
+            prototype: {
+              registerFactory: Mock;
+              registerPermissionDeferredFactory: Mock;
+            };
+          };
+        }
+      ).ToolRegistry.prototype;
+      registerFactory.mockClear();
+      (registerPermissionDeferredFactory as Mock).mockClear();
+
+      // Mirrors runSkillReviewByAgent → createApprovalModeOverride →
+      // rebuildToolRegistryOnOverride on the scoped wrapper.
+      const scoped = createSkillScopedAgentConfig(config, TARGET_DIR);
+      await scoped.createToolRegistry(undefined, {
+        skipDiscovery: true,
+        forSubAgent: true,
+      });
+
+      const registered = (registerFactory as Mock).mock.calls.map(
+        (call) => call[0],
+      ) as string[];
+      const deferred = (
+        registerPermissionDeferredFactory as Mock
+      ).mock.calls.map((call) => call[0]) as string[];
+
+      // The scoped PM's 'registered' promise for its file tools must win
+      // over the base eager gate's 'deferred'.
+      expect(registered).toContain(ToolNames.READ_FILE);
+      expect(registered).toContain(ToolNames.WRITE_FILE);
+      expect(registered).toContain(ToolNames.EDIT);
+      expect(deferred).not.toContain(ToolNames.READ_FILE);
+      expect(deferred).not.toContain(ToolNames.WRITE_FILE);
+      expect(deferred).not.toContain(ToolNames.EDIT);
     });
 
     describe('with minified tool class names', () => {

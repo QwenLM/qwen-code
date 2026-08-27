@@ -9046,10 +9046,14 @@ export class Config {
     }
     let status: ToolRegistrationStatus = 'registered';
     try {
-      status = this.permissionManager
-        ? await this.permissionManager.getToolRegistrationStatus(
-            ToolNames.IMAGE_GEN,
-          )
+      // Resolve through the getter, not the `permissionManager` field: on a
+      // Config derived via Object.create (scoped agent shims installed with
+      // deriveConfig), the field resolves through the prototype chain to the
+      // base manager and would silently bypass the scoped override's
+      // registration decisions (#10075).
+      const permissionManager = this.getPermissionManager();
+      status = permissionManager
+        ? await permissionManager.getToolRegistrationStatus(ToolNames.IMAGE_GEN)
         : 'registered';
     } catch (error) {
       this.debugLogger.warn(
@@ -9095,8 +9099,17 @@ export class Config {
       // the tool silently disappearing (#10075).
       let status: ToolRegistrationStatus = 'registered';
       try {
-        status = this.permissionManager
-          ? await this.permissionManager.getToolRegistrationStatus(toolName)
+        // Resolve through the getter, not the `permissionManager` field: on
+        // a Config derived via Object.create (e.g. the skill-review and
+        // managed-memory agent shims installed with deriveConfig), the field
+        // resolves through the prototype chain to the base manager and
+        // would silently bypass the scoped override — demoting the shim's
+        // promised tools under an active `tools.eager` allowlist and letting
+        // prepareTools strip them from the forked agent's explicit tool list
+        // (#10075).
+        const permissionManager = this.getPermissionManager();
+        status = permissionManager
+          ? await permissionManager.getToolRegistrationStatus(toolName)
           : 'registered'; // Should never reach here after initialize(), but safe default.
       } catch (error) {
         this.debugLogger.warn(
