@@ -26,12 +26,31 @@ import { Storage } from '@qwen-code/qwen-code-core';
 const mocks = vi.hoisted(() => ({
   writeStdoutLine: vi.fn(),
   writeStderrLine: vi.fn(),
+  buildLaunchOverride: null as
+    | null
+    | (() => {
+        key: string;
+        prompt: string;
+      }),
 }));
 
 vi.mock('../../utils/stdioHelpers.js', () => ({
   writeStdoutLine: mocks.writeStdoutLine,
   writeStderrLine: mocks.writeStderrLine,
 }));
+// Delegation mock: every case runs the REAL builder unless it stands in a
+// return of its own. The one shape no plan can produce — a key disagreeing
+// with the roster — is how the CLI-internal mismatch guard is pinned below.
+vi.mock('./agent-prompt.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./agent-prompt.js')>();
+  return {
+    ...actual,
+    buildLaunch: (...args: Parameters<typeof actual.buildLaunch>) =>
+      mocks.buildLaunchOverride
+        ? mocks.buildLaunchOverride()
+        : actual.buildLaunch(...args),
+  };
+});
 import {
   buildFanOutRoster,
   emitWorkflowCommand,
@@ -52,6 +71,7 @@ import type { PlanReport } from './lib/report.js';
 beforeEach(() => {
   mocks.writeStdoutLine.mockClear();
   mocks.writeStderrLine.mockClear();
+  mocks.buildLaunchOverride = null;
 });
 
 /**
@@ -201,17 +221,20 @@ describe('emit-workflow — what it refuses', () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
-  // A 3B roster grows one agent per chunk and a workflow returns every one of
-  // them through a single tool result, so the bigger the fan-out the more of
-  // it the scheduler truncates away. The refusal must name that bound — the
-  // builder below can express the roster perfectly well.
+  // A 3B roster grows one agent per chunk while a workflow run is wall-clock
+  // capped end to end and the generated script fails closed on any agent
+  // that does not deliver — the bigger the fan-out, the more certain the run
+  // is to exhaust its budget and discard every agent. (A large result is not
+  // truncated away: the scheduler persists it and hands the model a pointer —
+  // the caps are the bound.) The refusal must name that bound — the builder
+  // below can express the roster perfectly well.
   it('refuses a territory fan-out, naming the delivery bound', () => {
     const territory = localPlan({ srcDiffLines: 2000, diffLines: 6000 });
     expect(fanOutBlocker(territory as unknown as RosterPlan)).toMatch(
       /territory fan-out \(Step 3B\)/,
     );
     expect(() => buildFanOutRoster(territory, planPath)).toThrow(
-      /one tool result/,
+      /wall-clock capped/,
     );
     // Refused BEFORE anything is written: no brief, no record.
     expect(readRecordedPrompts(planPath).size).toBe(0);
@@ -233,6 +256,21 @@ describe('emit-workflow — what it refuses', () => {
         /no usable diff size/,
       );
     }
+    expect(readRecordedPrompts(planPath).size).toBe(0);
+  });
+
+  // The roster key is what `check-coverage` looks up and what the brief was
+  // written under. `requiredAgents` and `buildLaunch` derive it the same way,
+  // so a mismatch is a contradiction inside the CLI that no plan can produce
+  // — the guard is pinned directly, with the builder stood in for. Left
+  // uncaught, every delivery check downstream reads "brief never reached an
+  // agent" on a run that did everything right.
+  it('refuses a roster key the builder did not build under', () => {
+    mocks.buildLaunchOverride = () => ({ key: 'WRONG-KEY', prompt: 'PROMPT' });
+    expect(() => buildFanOutRoster(localPlan(), planPath)).toThrow(
+      /built "WRONG-KEY" where the roster requires/,
+    );
+    // The mismatched prompt was never recorded as handed out.
     expect(readRecordedPrompts(planPath).size).toBe(0);
   });
 
@@ -370,6 +408,20 @@ describe('emit-workflow — where it writes', () => {
     // gate as a launched fan-out that returned nothing.
     expect(readRecordedPrompts(plan).size).toBe(0);
     expect(existsSync(join(projectDir))).toBe(false);
+  });
+
+  // A blocked plan writes nothing at all — including the session directory:
+  // creating it before the blocker check left every refusal an empty tree a
+  // later sweep would find.
+  it('creates no directory for a plan it refuses', () => {
+    const plan = join(dir, 'plan.json');
+    writeFileSync(
+      plan,
+      JSON.stringify(localPlan({ srcDiffLines: 2000, diffLines: 6000 })),
+      'utf8',
+    );
+    expect(() => run(plan)).toThrow(/territory fan-out/);
+    expect(existsSync(projectDir)).toBe(false);
   });
 
   it('falls back to a fixed subdirectory when there is no session id', () => {

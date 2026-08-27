@@ -34,6 +34,7 @@ import {
   committedSymlinkProbes,
 } from './test-efficacy.js';
 import { isolateHostGitConfig } from './lib/test-utils.js';
+import { sanitizedGitEnv } from './lib/worktree.js';
 import {
   mkdtempSync,
   mkdirSync,
@@ -260,7 +261,12 @@ function asCheckout(dir: string): void {
         'core.hooksPath=/dev/null/no-hooks',
         ...args,
       ],
-      { cwd: dir, encoding: 'utf8' },
+      // Sanitized like the guards these fixtures exist to provoke: an
+      // ambient GIT_INDEX_FILE (observed on a persistent runner) makes
+      // add/commit stage into ANOTHER index, and the bit a later
+      // update-index sets locally can never reproduce the state under
+      // test — the fixture must build the same index the guard reads.
+      { cwd: dir, encoding: 'utf8', env: sanitizedGitEnv() },
     );
   git('init', '-q', '-b', 'main', '--template=', '.');
   git('add', '-A');
@@ -452,8 +458,14 @@ describe('committedSymlinkProbes', () => {
     const repo = mkdtempSync(join(tmpdir(), 'qwen-symlink-mode-'));
     const isolation = isolateHostGitConfig();
     try {
+      // Sanitized for the reason asCheckout is: the function under test
+      // reads with a sanitized env, so the fixture must build with one.
       const g = (...args: string[]) =>
-        execFileSync('git', args, { cwd: repo, encoding: 'utf8' }).trim();
+        execFileSync('git', args, {
+          cwd: repo,
+          encoding: 'utf8',
+          env: sanitizedGitEnv(),
+        }).trim();
       g('init', '-q', '-b', 'main');
       g('config', 'user.email', 't@t.t');
       g('config', 'user.name', 't');
@@ -552,8 +564,15 @@ describe('restoreProbeTreeTracked, through runOneMutant', () => {
       // about the oracle, not about that.
       writeFileSync(join(dir, 'b.ts'), 'export const b = 1;\n');
       asCheckout(dir);
+      // With the same sanitized env the guard's own git calls use: an
+      // ambient discovery redirect (a GIT_INDEX_FILE on a persistent runner)
+      // writes the bit into ANOTHER index than the guard reads, the refusal
+      // this test pins never fires, and the mutant run dies later on a
+      // missing vitest instead — the incident this file's isolation
+      // discipline exists for.
       execFileSync('git', ['update-index', '--skip-worktree', 'a.ts'], {
         cwd: dir,
+        env: sanitizedGitEnv(),
       });
       writeFileSync(join(dir, 'a.ts'), 'MUTANT\n');
 

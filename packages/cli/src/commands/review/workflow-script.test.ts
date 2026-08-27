@@ -290,13 +290,21 @@ describe('the generated Step 3A fan-out script', () => {
 
   // A fan-out where nothing came back is the all-missing case of the same
   // fail-closed rule: a failed step, never an empty result the caller could
-  // aggregate over a diff no agent read.
-  it('throws when every agent failed rather than returning an empty result', async () => {
-    await expect(
-      runScript(buildReviewWorkflowScript(AGENTS), async () => {
-        throw new Error('all dead');
-      }),
-    ).rejects.toThrow(/required agents failed to deliver \(1a, 2, 7\)/);
+  // aggregate over a diff no agent read. But the partial-failure remedy —
+  // re-emit and dispatch again — loops here: a rebuild writes the identical
+  // script with the identical baked-in pin, measured against a real bad-pin
+  // run where every dispatch was rejected before the first request. The
+  // message must name the dispatch, not prescribe the loop.
+  it('throws when every agent failed, naming the dispatch rather than a re-emit', async () => {
+    const run = runScript(buildReviewWorkflowScript(AGENTS), async () => {
+      throw new Error('all dead');
+    });
+    await expect(run).rejects.toThrow(
+      /every agent failed to deliver \(1a, 2, 7\)/,
+    );
+    const message = await run.catch((err: Error) => err.message);
+    expect(message).toContain('writes the identical script');
+    expect(message).not.toContain('and dispatch again');
   });
 
   it('throws on an empty roster rather than reporting a clean review', async () => {

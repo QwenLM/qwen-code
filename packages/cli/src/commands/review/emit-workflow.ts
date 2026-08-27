@@ -71,24 +71,42 @@ export function fanOutBlocker(plan: RosterPlan): string | null {
 
   // Both paths build the same chunk prompts through `buildLaunch`, and the
   // emitter is topology-agnostic — a 3B roster serializes exactly like a 3A
-  // one. What differs is DELIVERY: the hand-launched path returns one Agent
-  // tool result per agent, each with its own output budget, while a workflow
-  // returns every agent's text inside ONE Workflow tool result under the
-  // scheduler-wide threshold. A 3A roster is bounded; a 3B roster is one
-  // agent per chunk plus the whole-diff agents, so it grows with the diff and
-  // the loss grows with it, without bound. This blocks on the roster's
-  // growth, not on the topology name, so it lifts the moment the workflow
-  // result carries a fan-out-sized budget.
+  // one. What differs is DELIVERY against the workflow runtime's caps: a run
+  // is wall-clock capped end to end, each subagent attempt is capped on turns
+  // and minutes, and an attempt that hits either becomes a `null` the
+  // fail-closed guard in the generated script then reads as a missing agent —
+  // discarding every agent that DID deliver. A large result is not truncated
+  // away: the scheduler persists it and hands the model a pointer. The bound
+  // is the caps. A 3A roster is bounded; a 3B roster is one agent per chunk
+  // plus the whole-diff agents, so it grows with the diff toward them without
+  // bound. This blocks on the roster's growth, not on the topology name, so
+  // it lifts the moment the runtime's caps grow with the fan-out.
   if (isTerritoryFanOut(plan)) {
     return (
       'this plan is a territory fan-out (Step 3B), whose roster grows one ' +
-      'agent per chunk, and a workflow returns every agent through one tool ' +
-      'result under the scheduler-wide output budget — so the larger the ' +
-      'fan-out, the more of it is silently truncated away.'
+      'agent per chunk while a workflow run is wall-clock capped end to ' +
+      'end and the generated script fails closed on any agent that does ' +
+      'not deliver — the larger the fan-out, the more certain the run is ' +
+      'to exhaust its budget and discard every agent it dispatched.'
     );
   }
 
   return null;
+}
+
+/**
+ * Throw when the plan is one the generated fan-out cannot serve. Called by
+ * the handler BEFORE the session directory is created — a blocked plan must
+ * leave no empty tree a later sweep finds — and again by the builder, whose
+ * contract direct callers rely on.
+ */
+function refuseBlockedFanOut(plan: RosterPlan): void {
+  const blocker = fanOutBlocker(plan);
+  if (blocker) {
+    throw new Error(
+      `emit-workflow: ${blocker} Use \`agent-prompt --roster\` for this review.`,
+    );
+  }
 }
 
 /**
@@ -108,12 +126,7 @@ export function buildFanOutRoster(
 ): WorkflowAgentSpec[] {
   const plan = report as RosterPlan;
 
-  const blocker = fanOutBlocker(plan);
-  if (blocker) {
-    throw new Error(
-      `emit-workflow: ${blocker} Use \`agent-prompt --roster\` for this review.`,
-    );
-  }
+  refuseBlockedFanOut(plan);
 
   // The state of the shared review worktree AT BUILD TIME, probed the same
   // way the hand-launched path does (agent-prompt's handler) and threaded
@@ -208,6 +221,12 @@ function runEmitWorkflow(args: EmitWorkflowArgs): void {
       );
     }
   }
+
+  // Refused BEFORE the session directory exists: a blocked plan writes
+  // nothing at all, and the directory `ensureWritableReviewWorkflowsDir`
+  // creates would otherwise outlive the refusal as an empty tree a later
+  // sweep finds. The builder repeats the same check for direct callers.
+  refuseBlockedFanOut(report as RosterPlan);
 
   // Resolved BEFORE anything is written: the env contract can be missing, and
   // a roster whose briefs and records were written for a script that then had

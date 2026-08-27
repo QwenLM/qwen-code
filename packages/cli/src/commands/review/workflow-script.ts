@@ -128,6 +128,23 @@ for (let i = 0; i < AGENTS.length; i++) {
 // a shortened delivered list would let the caller aggregate a review that
 // silently lacks one of them.
 if (missingRoles.length > 0) {
+  if (missingRoles.length === AGENTS.length) {
+    // Nothing delivered is not one dead agent — it is the dispatch itself:
+    // a pin the runtime rejects fails every dispatch before the first
+    // request, an exhausted runtime nulls every one of them. The roster and
+    // the pin are baked into this file, so the re-emit the partial-failure
+    // message prescribes regenerates the identical script and loops whoever
+    // follows it; name the dispatch, not the emitter.
+    throw new Error(
+      'review fan-out: every agent failed to deliver (' +
+        missingRoles.join(', ') +
+        '). No agent delivered anything, so the failure is the dispatch ' +
+        'itself, not one agent — the roster and the worktree pin are ' +
+        'baked into this file, and re-running \\'qwen review emit-workflow\\' ' +
+        'writes the identical script. Fix what the dispatch reads (the ' +
+        'worktree pin, the runtime) and dispatch this same script again.',
+    );
+  }
   throw new Error(
     'review fan-out: required agents failed to deliver (' +
       missingRoles.join(', ') +
