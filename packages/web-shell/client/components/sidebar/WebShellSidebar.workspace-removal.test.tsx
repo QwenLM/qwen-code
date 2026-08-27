@@ -497,6 +497,11 @@ async function ensureWorkspaceExpanded(name: string): Promise<void> {
 
 const expandWorkspace = ensureWorkspaceExpanded;
 
+/** Opt back into the inline archive button; the default keeps it dropdown-only. */
+const INLINE_ARCHIVE_ACTIONS = {
+  inlineItems: ['pin', 'archive'],
+} as const;
+
 function archiveButtonFor(label: string): HTMLButtonElement | undefined {
   return Array.from(
     container.querySelectorAll<HTMLButtonElement>(
@@ -1037,7 +1042,10 @@ describe('WebShellSidebar workspace removal', () => {
     });
     vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
 
-    renderSidebar({ lockedWorkspaceCwd: '/tmp/other' });
+    renderSidebar({
+      lockedWorkspaceCwd: '/tmp/other',
+      sessionActions: INLINE_ARCHIVE_ACTIONS,
+    });
     await act(async () => {
       await Promise.resolve();
     });
@@ -2738,7 +2746,7 @@ describe('WebShellSidebar workspace removal', () => {
       exportArchivedSession,
     }));
 
-    renderSidebar();
+    renderSidebar({ sessionActions: INLINE_ARCHIVE_ACTIONS });
     await expandWorkspace('other');
     await expandArchived();
     await act(async () => {
@@ -3149,7 +3157,7 @@ describe('WebShellSidebar non-primary archive', () => {
       ],
     });
 
-    renderSidebar({ onError });
+    renderSidebar({ onError, sessionActions: INLINE_ARCHIVE_ACTIONS });
     await expandWorkspace('other');
     const archiveButton = archiveButtonFor('Secondary error');
     expect(archiveButton).toBeDefined();
@@ -3195,7 +3203,7 @@ describe('WebShellSidebar non-primary archive', () => {
         : [],
     );
 
-    renderSidebar();
+    renderSidebar({ sessionActions: INLINE_ARCHIVE_ACTIONS });
     await ensureWorkspaceExpanded('project');
     await expandWorkspace('other');
     expect(archiveButtonFor('Primary active')).toBeDefined();
@@ -3206,6 +3214,71 @@ describe('WebShellSidebar non-primary archive', () => {
         ([, options]) => options?.archiveState === 'archived',
       ),
     ).toBe(false);
+  });
+
+  it('disables the inline archive button while a session has a running turn', async () => {
+    active.sessions.push(
+      {
+        sessionId: 'primary-running',
+        workspaceCwd: '/tmp/project',
+        displayName: 'Primary running',
+        hasActivePrompt: true,
+      },
+      {
+        sessionId: 'primary-idle',
+        workspaceCwd: '/tmp/project',
+        displayName: 'Primary idle',
+      },
+    );
+
+    renderSidebar({ sessionActions: INLINE_ARCHIVE_ACTIONS });
+    await ensureWorkspaceExpanded('project');
+
+    const runningArchive = archiveButtonFor('Primary running');
+    expect(runningArchive?.disabled).toBe(true);
+    expect(runningArchive?.title).toBe(
+      'A running session cannot be archived; archiving would end its turn',
+    );
+    expect(archiveButtonFor('Primary idle')?.disabled).toBe(false);
+
+    await act(async () => {
+      click(runningArchive!);
+      await Promise.resolve();
+    });
+    expect(active.archiveSession).not.toHaveBeenCalled();
+  });
+
+  it('disables the archive menu item while a session has a running turn', async () => {
+    active.sessions.push({
+      sessionId: 'primary-running',
+      workspaceCwd: '/tmp/project',
+      displayName: 'Primary running',
+      hasActivePrompt: true,
+    });
+
+    renderSidebar();
+    await ensureWorkspaceExpanded('project');
+
+    const trigger = sessionAction('Primary running');
+    expect(trigger).toBeDefined();
+    await act(async () => {
+      click(trigger!);
+      await Promise.resolve();
+    });
+    const archiveItem = Array.from(
+      document.body.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+    ).find((item) => item.textContent === 'Archive');
+    expect(archiveItem).toBeDefined();
+    expect(archiveItem?.getAttribute('data-disabled')).not.toBeNull();
+    expect(archiveItem?.title).toBe(
+      'A running session cannot be archived; archiving would end its turn',
+    );
+
+    await act(async () => {
+      click(archiveItem!);
+      await Promise.resolve();
+    });
+    expect(active.archiveSession).not.toHaveBeenCalled();
   });
 
   it('hides archive UI when session_archive is absent', async () => {
@@ -3406,7 +3479,7 @@ describe('WebShellSidebar non-primary archive', () => {
       errors: [],
     });
 
-    renderSidebar({ onError });
+    renderSidebar({ onError, sessionActions: INLINE_ARCHIVE_ACTIONS });
     await ensureWorkspaceExpanded('project');
     await expandWorkspace('other');
     const primaryArchiveButton = archiveButtonFor('Legacy primary shared');
@@ -3456,7 +3529,7 @@ describe('WebShellSidebar non-primary archive', () => {
         : [],
     );
 
-    renderSidebar();
+    renderSidebar({ sessionActions: INLINE_ARCHIVE_ACTIONS });
     await ensureWorkspaceExpanded('project');
     await expandWorkspace('other');
     const secondaryArchive = archiveButtonFor('Secondary pending');
@@ -5010,7 +5083,7 @@ describe('WebShellSidebar session toolbar archive action dedupe', () => {
     enableOrganization();
     useWorkspaceSessionCatalog(pinnedSecondaryCatalog);
 
-    renderSidebar();
+    renderSidebar({ sessionActions: INLINE_ARCHIVE_ACTIONS });
     await settle();
     expect(inlineSessionAction('Pinned secondary', 'Unpin')).toBeDefined();
     expect(archiveButtonsInRow('Pinned secondary')).toHaveLength(1);
@@ -5043,6 +5116,18 @@ describe('WebShellSidebar session toolbar archive action dedupe', () => {
         '[class*="sessionActions"]',
       ),
     ).toHaveLength(1);
+  });
+
+  it('keeps archive out of the inline slot by default', async () => {
+    enableOrganization();
+    useWorkspaceSessionCatalog(pinnedSecondaryCatalog);
+
+    renderSidebar();
+    await settle();
+
+    expect(inlineSessionAction('Pinned secondary', 'Unpin')).toBeDefined();
+    expect(archiveButtonsInRow('Pinned secondary')).toHaveLength(0);
+    expect(await countArchiveMenuItemsInRow('Pinned secondary')).toBe(1);
   });
 
   it('keeps exactly one archive menu item when archive is dropdown-only', async () => {
