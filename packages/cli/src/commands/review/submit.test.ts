@@ -27,6 +27,7 @@ import {
 import { join } from 'node:path';
 import { promptRecordDir, briefPath } from './lib/prompt-record.js';
 import { parseLedger } from './lib/ledger.js';
+import { carriedFindingOf } from './lib/thread-lifecycle.js';
 
 const ghMock = vi.hoisted(() =>
   vi.fn((_payload: string, ..._rest: string[]) => ''),
@@ -4143,6 +4144,35 @@ describe('the thread lifecycle', () => {
       'R1-2: still stands at HEAD\n\n<!-- qwen-review suggestion -->',
     );
     expect(replyBody).not.toContain('forged');
+  });
+
+  it('an attribution-off carry posts a root the next round still reaches (#9940 review)', () => {
+    // The readback carries R1-2 off the stacked-marker draft, so the
+    // attribution-off post must LEAD with it too: the post-time strip's
+    // separator stopped its [ \t] colon at the newline the readback's
+    // \s colon consumed, so it posted `\n:\n…` — a root
+    // carriedFindingOf never matched again, and the thread stayed open
+    // forever: the gap this pass exists to close, reopened by its own
+    // readback change (#9940 review).
+    seedThreads([]);
+    const review = payload([
+      {
+        path: 'src/foo.ts',
+        line: 12,
+        body: '**[Critical]**\n:\n**[Suggestion]** R1-2: still stands at HEAD',
+      },
+    ]);
+    runSubmit(authorizedPost({ review }), '0.21.3', { attribution: false });
+
+    const comments = reviewPost().comments as Array<{ body: string }>;
+    expect(comments).toHaveLength(1);
+    expect(comments[0]!.body.startsWith('R1-2: still stands at HEAD')).toBe(
+      true,
+    );
+    expect(carriedFindingOf(comments[0]!.body)).toEqual({
+      id: 'R1-2',
+      fixInduced: false,
+    });
   });
 
   it('a fixed ruling with no live thread is named, not resolved', () => {

@@ -8,6 +8,7 @@ import { describe, expect, it } from 'vitest';
 import {
   carriedClaimLine,
   countInlineFindings,
+  markerStrippedBody,
   severityOf,
   stripSeverityPrefix,
   unmarkedComments,
@@ -54,6 +55,22 @@ describe('stripSeverityPrefix — the attribution-off posted shape', () => {
       stripSeverityPrefix('**[Critical]**\u200B**[Suggestion]** text'),
     ).toBe('text');
     expect(stripSeverityPrefix('<!-- x -->**[Critical]** text')).toBe('text');
+  });
+
+  it('consumes the residue-and-colon separator the readback consumes — the fixpoints agree (#9940 review)', () => {
+    // The readback projection (markerStrippedBody) strips residue before
+    // its \s-wide colon; the post-time strip's [ \t] colon stopped at the
+    // newline, so a newline-then-colon stacked draft read back as
+    // carrying the id — the ledger carried it, the stamp stayed off —
+    // while its attribution-off post led with `\n:\n…`: a root no later
+    // carry or fixed ruling could ever reach (#9940 review).
+    const stacked = '**[Critical]**\n:\n**[Suggestion]** R1-2: claim';
+    expect(stripSeverityPrefix(stacked)).toBe('R1-2: claim');
+    expect(stripSeverityPrefix(stacked)).toBe(markerStrippedBody(stacked));
+    // Residue around the separator colon is the same machine grammar.
+    const residue = '**[Critical]** <!-- x -->: R1-2: claim';
+    expect(stripSeverityPrefix(residue)).toBe('R1-2: claim');
+    expect(stripSeverityPrefix(residue)).toBe(markerStrippedBody(residue));
   });
 
   it('a marker-only body strips to the empty string — the submit gate refuses it first', () => {

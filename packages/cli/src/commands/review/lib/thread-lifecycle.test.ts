@@ -418,6 +418,12 @@ describe('stampCarriedId — the write side of the readback', () => {
     for (const draft of [
       '**[Suggestion]** ```diff\n-old\n+new\n```\n\nthe pin moved',
       '**[Critical]** ~~~\nthe log\n~~~',
+      // The fence can LEAD with render-nothing residue — the pipeline
+      // admits it between marker and content — and the ^-anchored fence
+      // test reads through it, or the residue-led shape slips past and
+      // the stamp flips the fence the guard exists to prevent (#9940
+      // review).
+      '**[Critical]** <!-- x -->```diff\n-old\n+new\n```',
     ]) {
       expect(stampCarriedId(draft, 'R3-1')).toBe(draft);
     }

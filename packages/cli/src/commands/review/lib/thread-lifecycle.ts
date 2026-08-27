@@ -281,11 +281,15 @@ export function stampCarriedId(body: string, id: string): string {
   // OPENS a code fence, text before the backticks stops the posted first
   // line leading the fence — flipping the fence structure the gate
   // validated on the pre-stamp shape (under attribution off the unclosed
-  // flip swallows the appended invisible marker as visible code). Left
+  // flip swallows the appended invisible marker as visible code). The
+  // test reads through leading render-nothing residue — the pipeline
+  // admits it between marker and content, and a residue-led fence slips
+  // the ^-anchored test on the raw shape (#9940 review). Left
   // un-stamped, the draft degrades to the pre-stamping behaviour: its
   // thread root carries no id, so no later carry or fixed ruling can
   // reach it — the documented safe degradation (#9940 review).
-  if (ENTRY_FENCE_DELIMITER_RE.test(rest)) return body;
+  if (ENTRY_FENCE_DELIMITER_RE.test(rest.replace(LEADING_INVISIBLE_RE, '')))
+    return body;
   return `${lead}${marker} ${id}: ${rest}`;
 }
 

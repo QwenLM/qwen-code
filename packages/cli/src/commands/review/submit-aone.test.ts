@@ -1922,11 +1922,16 @@ describe('the Aone anchor gate — the validation the platform does not perform'
     expect(input['bodyCriticals']).toEqual(['finding — src/foo.ts:9999']);
   });
 
-  it('relocates an empty-claim draft through the placeholder (attribution off)', () => {
-    // A body whose substance sits AFTER a separator the strip eats
-    // (marker, then newline+colon) reduces the claim line to '' — the
-    // placeholder keeps the entry from posting as a dangling `path:line — `.
-    const emptyClaim = {
+  it('a separator-only draft is marker-only — the renders-as-nothing refusal owns it, attribution off (#9940 review)', () => {
+    // A marker whose ONLY follower is separator grammar (newline+colon)
+    // carries no finding text: the post-time strip consumes the same
+    // separator the readback always consumed, so the renders-as-nothing
+    // projection sees nothing and the consistency gate refuses — the
+    // marker-only policy the bare-marker arm below pins. The old `[ \t]`
+    // colon stopped at the newline and let the separator survive as
+    // false substance, relocating a claimless placeholder blocker
+    // instead of the refusal the operator is owed (#9940 review).
+    const separatorOnly = {
       commit_id: 'abc123',
       comments: [
         {
@@ -1937,14 +1942,15 @@ describe('the Aone anchor gate — the validation the platform does not perform'
       ],
       state: { modelId: 'test-model' },
     };
-    expect(() =>
-      runSubmit(base({ review: writeReview(emptyClaim) }), 'unknown', {
-        defaultComment: false,
-        attribution: false,
-      }),
-    ).not.toThrow();
-    const input = composeMock.mock.calls[0][0] as Record<string, unknown>;
-    expect(input['bodyCriticals']).toEqual(['finding — src/foo.ts:9999']);
+    expectRefusal(
+      () =>
+        runSubmit(base({ review: writeReview(separatorOnly) }), 'unknown', {
+          defaultComment: false,
+          attribution: false,
+        }),
+      /renders as nothing/,
+    );
+    expect(submitAoneMock).not.toHaveBeenCalled();
   });
 
   it('merges gate discards into an existing suggestionsDiscarded count', () => {
@@ -2659,15 +2665,14 @@ describe('the Aone anchor gate — the validation the platform does not perform'
     ]);
   });
 
-  it('relocates through the PLACEHOLDER when the claim line is empty — never the footer', () => {
-    // The body has substance past the marker (the ':' survives the
-    // renders-as-nothing projection), but the marker-stripped FIRST line
-    // reduces to empty once the separator strip eats the newline+colon.
-    // The extraction must strip the appended footer FIRST and then fall
-    // back to the placeholder — without the footer strip, the extraction
-    // falls THROUGH into the footer's first line and posts it as the
-    // claim.
-    const emptyClaim = {
+  it('a separator-only draft is marker-only under attribution ON too — refused, never a footer-placeholder relocation (#9940 review)', () => {
+    // The attribution-on arm of the separator-only refusal: the draft's
+    // only follower past the marker is the newline+colon separator, and
+    // a body the renders-as-nothing projection reduces to nothing is
+    // the consistency gate's refusal — landing BEFORE the anchor gate's
+    // relocation could fall back to the placeholder and post the
+    // appended footer's first line as the claim (#9940 review).
+    const separatorOnly = {
       commit_id: 'abc123',
       comments: [
         {
@@ -2678,13 +2683,14 @@ describe('the Aone anchor gate — the validation the platform does not perform'
       ],
       state: { modelId: 'test-model' },
     };
-    expect(() =>
-      runSubmit(base({ review: writeReview(emptyClaim) }), 'unknown', {
-        defaultComment: false,
-      }),
-    ).not.toThrow();
-    const input = composeMock.mock.calls[0][0] as Record<string, unknown>;
-    expect(input['bodyCriticals']).toEqual(['finding — src/foo.ts:9999']);
+    expectRefusal(
+      () =>
+        runSubmit(base({ review: writeReview(separatorOnly) }), 'unknown', {
+          defaultComment: false,
+        }),
+      /renders as nothing/,
+    );
+    expect(submitAoneMock).not.toHaveBeenCalled();
   });
 
   it('relocates a range whose START sits outside every hunk and END inside', () => {

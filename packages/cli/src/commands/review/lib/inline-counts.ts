@@ -47,6 +47,23 @@ export const LEADING_INVISIBLE_RE = new RegExp(`^${INVISIBLE_RESIDUE}+`, 'u');
 const ALL_INVISIBLE_RE = new RegExp(INVISIBLE_RESIDUE, 'gu');
 
 /**
+ * The separator a marker can trail: residue, an optional colon, residue
+ * again — the acceptance the readback projection (`markerStrippedBody`)
+ * applies after each marker, so the two marker-strip fixpoints agree on
+ * what a stacked-marker run hides. Residue is consumed only when the
+ * colon is present: residue before PLAIN content is model text the post
+ * keeps (the stamp lands before it), while residue around a separator
+ * colon is machine grammar. A `[ \t]`-only colon stopped at the newline
+ * the readback's `\s` colon consumed — a newline-then-colon stacked
+ * draft read back as carrying its id while the attribution-off post led
+ * with `\n:\n…`, a root no later readback could match (#9940 review).
+ */
+const MARKER_SEPARATOR_RE = new RegExp(
+  String.raw`^(?:${INVISIBLE_RESIDUE}*[:：]${INVISIBLE_RESIDUE}*|[ \t]*)`,
+  'u',
+);
+
+/**
  * Which severity marker a drafted comment opens with — or null for neither.
  *
  * The ONE statement of the predicate. The counter and the unmarked-scan each
@@ -152,6 +169,10 @@ export function countInlineFindings(comments: readonly DraftedComment[]): {
  * statement. A body that is nothing but markers strips to the empty string;
  * `submit`'s consistency gate refuses exactly that shape before the post
  * transform runs, so an empty result never reaches GitHub.
+ *
+ * The separator each marker trails matches the readback's acceptance
+ * (`MARKER_SEPARATOR_RE`), so a draft the ledger reads as CARRIED posts
+ * leading with the same claim the readback read (#9940 review).
  */
 export function stripSeverityPrefix(body: string): string {
   let current = body;
@@ -164,7 +185,7 @@ export function stripSeverityPrefix(body: string): string {
     const rest = visible
       .trimStart()
       .slice(prefix.length)
-      .replace(/^[ \t]*[:：]?[ \t]*/, '');
+      .replace(MARKER_SEPARATOR_RE, '');
     if (rest.replace(ALL_INVISIBLE_RE, '') === '') return '';
     current = rest;
   }
