@@ -14,6 +14,9 @@ name: 'Web-shell Visuals'
 # classify_pr, serve-ab): same-repo PRs and write-access fork authors render on
 # the persistent ECS pool — the same lanes whose code ci.yml already builds and
 # tests there — while every other fork PR keeps the ephemeral hosted runner.
+# NOTE: this trigger reads its YAML from the fork, so the association clause
+# is routing convenience, not a security boundary — the boundary for fork code
+# is the repo's fork-PR workflow-approval setting.
 # The privileged step that needs a write token — pushing the images and
 # commenting on the PR — lives in the separate workflow_run workflow that never
 # checks out PR code and deliberately stays on hosted runners.

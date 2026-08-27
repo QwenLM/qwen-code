@@ -99,7 +99,6 @@ function evalRunsOn(expression, { ecsDisabled, eventName, sameRepo, assoc }) {
       /github\.event_name != 'pull_request'/,
       String(eventName !== 'pull_request'),
     ],
-    [/github\.repository == 'QwenLM\/qwen-code'/, 'true'],
     [
       /github\.event\.pull_request\.head\.repo\.full_name == github\.repository/,
       String(sameRepo),
@@ -699,6 +698,7 @@ describe('web-shell-visuals.yml capture runner routing', () => {
     assert.ok(heal !== -1, 'the ownership heal must exist');
     assert.equal(steps[heal].if, "${{ runner.environment == 'self-hosted' }}");
     assert.match(steps[heal].run, /chown -R .* "\$GITHUB_WORKSPACE"/);
+    assert.match(steps[heal].run, /chmod -R u\+rwX "\$GITHUB_WORKSPACE"/);
     assert.ok(heal < checkout, 'the heal must precede the checkout');
   });
 
@@ -754,6 +754,53 @@ describe('web-shell-visuals.yml capture runner routing', () => {
     );
     assert.ok(preflight, 'the pool lane must use the pre-installed Node');
     assert.equal(preflight.if, "${{ runner.environment == 'self-hosted' }}");
+  });
+
+  it('keeps the persistent npm cache pool-only and ahead of the install', () => {
+    // setup-node's cache stays hosted (its post step uploads to GitHub
+    // and times out on the pool's slow egress); the pool lane points npm at
+    // a machine-persistent dir instead, the same shape as ci.yml. The export
+    // must land in GITHUB_ENV or the later npm ci never sees it, and it must
+    // precede that step or the first install bypasses the cache.
+    const steps = visualsCaptureJob.steps;
+    const cache = steps.findIndex(
+      (s) => s.name === 'Configure persistent npm cache (self-hosted)',
+    );
+    const npmCi = steps.findIndex((s) => s.name === 'Install dependencies');
+    assert.ok(cache !== -1, 'the pool npm-cache step must exist');
+    assert.equal(steps[cache].if, "${{ runner.environment == 'self-hosted' }}");
+    assert.match(steps[cache].run, /NPM_CONFIG_CACHE=.* >> "\$\{GITHUB_ENV\}"/);
+    assert.match(steps[cache].run, /\.cache\/qwen-code\/npm/);
+    assert.ok(
+      npmCi !== -1 && cache < npmCi,
+      'the cache must be configured before the install that uses it',
+    );
+  });
+
+  it('keeps the ffmpeg install pool-only, non-interactive, and best-effort', () => {
+    // Hosted images ship ffmpeg; the pool may not. The compensating install
+    // must never sink the preview: sudo -n never prompts, and the chain ends
+    // in a warning, so an uninstallable member degrades to raw .webm uploads
+    // — the convert step detects the missing binary, warns, and skips.
+    const steps = visualsCaptureJob.steps;
+    const ffmpeg = steps.findIndex((s) => s.name === 'Install ffmpeg');
+    const convert = steps.findIndex(
+      (s) => s.name === 'Convert flow recordings to inline GIFs',
+    );
+    assert.ok(ffmpeg !== -1, 'the pool ffmpeg install must exist');
+    assert.equal(
+      steps[ffmpeg].if,
+      "${{ runner.environment == 'self-hosted' }}",
+    );
+    assert.match(
+      steps[ffmpeg].run,
+      /^command -v ffmpeg .* \|\| sudo -n apt-get install -y ffmpeg .* \|\| sudo -n dnf install -y ffmpeg .* \|\| sudo -n yum install -y ffmpeg .* \|\| echo "::warning::could not install ffmpeg/,
+      'the install must probe apt, dnf, and yum non-interactively and end in a warning, never a failing step',
+    );
+    assert.ok(
+      convert !== -1 && ffmpeg < convert,
+      'the install must precede the GIF conversion that consumes it',
+    );
   });
 
   it('keeps the install step wired into the job', () => {
