@@ -246,15 +246,23 @@ describe('WebTerminalRegistry', () => {
       workspaceCwd: '/workspace',
     });
     const listener = vi.fn();
-    registry.addOutputListener('terminal:io', listener);
+    const detachListener = registry.addOutputListener('terminal:io', listener);
 
+    expect(registry.write('terminal:io', 'x'.repeat(256 * 1024 + 1))).toBe(
+      'written',
+    );
+    expect(registry.write('terminal:io', '\x03')).toBe('backpressure');
+    expect(write).toHaveBeenCalledOnce();
+    expect(registry.resize('terminal:io', 120, 40)).toBe(true);
+    expect(resize).toHaveBeenCalledWith(120, 40);
+
+    detachListener?.();
+    registry.addOutputListener('terminal:io', listener);
+    expect(registry.write('terminal:io', '\x03')).toBe('written');
     expect(registry.write('terminal:io', 'x'.repeat(256 * 1024))).toBe(
       'written',
     );
     expect(registry.write('terminal:io', 'x')).toBe('backpressure');
-    expect(write).toHaveBeenCalledOnce();
-    expect(registry.resize('terminal:io', 120, 40)).toBe(true);
-    expect(resize).toHaveBeenCalledWith(120, 40);
 
     onData('ready');
     expect(listener).toHaveBeenCalledWith('ready');

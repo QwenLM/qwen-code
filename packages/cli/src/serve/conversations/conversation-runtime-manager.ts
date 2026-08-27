@@ -15,6 +15,10 @@ import type {
   WorkspaceRegistry,
   WorkspaceRuntime,
 } from '../workspace-registry.js';
+import { writeStderrLine } from '../../utils/stdioHelpers.js';
+
+export type ConversationRuntimeQuarantineReason =
+  'standalone_session_containment_failed';
 
 export interface ConversationRuntimeManagerOptions {
   ownership: ConversationRuntimeOwnership;
@@ -24,15 +28,28 @@ export interface ConversationRuntimeManagerOptions {
     canonicalRoot: string,
     validate: (runtime: WorkspaceRuntime) => void | Promise<void>,
   ) => Promise<WorkspaceRuntime>;
+  quarantineRuntime: (
+    runtime: WorkspaceRuntime,
+    reason: ConversationRuntimeQuarantineReason,
+  ) => Promise<void>;
+  onTerminalQuarantine?: (
+    runtime: WorkspaceRuntime,
+    reason: ConversationRuntimeQuarantineReason,
+  ) => void;
 }
 
 export class ConversationRuntimeManager {
   private runtime?: WorkspaceRuntime;
   private pending?: Promise<WorkspaceRuntime>;
+  private terminalRuntime?: WorkspaceRuntime;
+  private quarantinePromise?: Promise<void>;
 
   constructor(private readonly options: ConversationRuntimeManagerOptions) {}
 
   ensure(): Promise<WorkspaceRuntime> {
+    if (this.terminalRuntime) {
+      return Promise.reject(conversationRuntimeUnavailableError());
+    }
     if (this.pending) return this.pending;
     const pending = this.ensureOnce().finally(() => {
       if (this.pending === pending) this.pending = undefined;
@@ -41,12 +58,56 @@ export class ConversationRuntimeManager {
     return pending;
   }
 
+  assertCurrent(expectedRuntime: WorkspaceRuntime): WorkspaceRuntime {
+    this.assertNotTerminal();
+    if (this.runtime !== expectedRuntime) {
+      throw conversationRuntimeUnavailableError();
+    }
+    this.assertActiveRuntime(expectedRuntime.workspaceCwd, expectedRuntime);
+    return expectedRuntime;
+  }
+
+  quarantine(
+    expectedRuntime: WorkspaceRuntime,
+    reason: ConversationRuntimeQuarantineReason,
+  ): Promise<void> {
+    if (this.terminalRuntime === expectedRuntime && this.quarantinePromise) {
+      return this.quarantinePromise;
+    }
+    if (this.terminalRuntime) throw conversationRuntimeUnavailableError();
+    if (this.runtime !== expectedRuntime) {
+      throw conversationRuntimeUnavailableError();
+    }
+    this.assertActiveRuntime(expectedRuntime.workspaceCwd, expectedRuntime);
+    this.terminalRuntime = expectedRuntime;
+    try {
+      this.options.onTerminalQuarantine?.(expectedRuntime, reason);
+    } catch {
+      try {
+        writeStderrLine(
+          'qwen serve: Conversations quarantine observer failed; runtime disposal will continue.',
+        );
+      } catch {
+        // Terminal containment must not depend on diagnostics.
+      }
+    }
+    const promise = Promise.resolve().then(() =>
+      this.options.quarantineRuntime(expectedRuntime, reason),
+    );
+    this.quarantinePromise = promise;
+    return promise;
+  }
+
   private async ensureOnce(): Promise<WorkspaceRuntime> {
+    this.assertNotTerminal();
     await this.options.ownership.acquire();
+    this.assertNotTerminal();
     const root = await this.revalidateRoot();
+    this.assertNotTerminal();
     if (this.runtime) {
       await this.assertExactRoot(this.runtime.workspaceCwd);
       this.assertActiveRuntime(root.canonicalRoot, this.runtime);
+      this.assertNotTerminal();
       return this.runtime;
     }
 
@@ -62,6 +123,7 @@ export class ConversationRuntimeManager {
       await this.assertExactRoot(existing.workspaceCwd);
       this.assertActiveRuntime(root.canonicalRoot, existing);
       this.runtime = existing;
+      this.assertNotTerminal();
       return existing;
     }
 
@@ -80,7 +142,12 @@ export class ConversationRuntimeManager {
     }
     this.assertActiveRuntime(root.canonicalRoot, created);
     this.runtime = created;
+    this.assertNotTerminal();
     return created;
+  }
+
+  private assertNotTerminal(): void {
+    if (this.terminalRuntime) throw conversationRuntimeUnavailableError();
   }
 
   private async revalidateRoot(): Promise<

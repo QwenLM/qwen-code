@@ -14,6 +14,7 @@ const CONTROL_FRAME_PREFIX = '\x00';
 const MAX_PENDING_INPUT_BYTES = 64 * 1024;
 const MAX_TERMINAL_DIMENSION = 1000;
 const MAX_SOCKET_BUFFERED_BYTES = 8 * 1024 * 1024;
+const TERMINAL_HEARTBEAT_MS = 15_000;
 
 export interface WebTerminalWorkspaceContext {
   workspaceCwd: string;
@@ -94,10 +95,44 @@ export function createTerminalWsHandler(
     bypassPrimaryDrain: true,
     onConnection: async (ws: WebSocket, req: IncomingMessage) => {
       let closed = false;
+      let alive = true;
+      let heartbeat: ReturnType<typeof setInterval> | undefined;
+      const onPong = () => {
+        alive = true;
+      };
+      const stopHeartbeat = () => {
+        if (heartbeat) clearInterval(heartbeat);
+        heartbeat = undefined;
+        ws.off('pong', onPong);
+      };
+      const terminate = () => {
+        stopHeartbeat();
+        try {
+          ws.terminate();
+        } catch {
+          // Socket is already gone.
+        }
+      };
       const markClosed = () => {
         closed = true;
+        stopHeartbeat();
       };
       ws.on('error', markClosed);
+      ws.once('close', markClosed);
+      ws.on('pong', onPong);
+      heartbeat = setInterval(() => {
+        if (!alive) {
+          terminate();
+          return;
+        }
+        alive = false;
+        try {
+          ws.ping();
+        } catch {
+          terminate();
+        }
+      }, TERMINAL_HEARTBEAT_MS);
+      heartbeat.unref();
       const url = new URL(req.url ?? '', 'http://localhost');
       const terminalId = url.searchParams.get('terminalId');
       const selector = url.searchParams.get('cwd');
@@ -140,7 +175,6 @@ export function createTerminalWsHandler(
         }
         pending.push({ text, isBinary });
       };
-      ws.once('close', markClosed);
       ws.on('message', bufferMessage);
 
       let snapshot = registry.readSnapshot(terminalId);
@@ -198,6 +232,7 @@ export function createTerminalWsHandler(
       const cleanup = () => {
         if (cleaned) return;
         cleaned = true;
+        stopHeartbeat();
         detach.output?.();
         detach.exit?.();
         ws.off('message', onMessage);

@@ -28,6 +28,8 @@ class FakeWebSocket extends EventEmitter {
   readonly sent: unknown[] = [];
   readonly send = vi.fn((data: unknown) => this.sent.push(data));
   readonly close = vi.fn();
+  readonly ping = vi.fn();
+  readonly terminate = vi.fn(() => this.emit('close'));
 }
 
 function sentOutput(ws: FakeWebSocket): string[] {
@@ -142,6 +144,33 @@ describe('terminal WebSocket route', () => {
     await connected;
 
     expect(registry.addOutputListener).not.toHaveBeenCalled();
+  });
+
+  it('terminates a terminal socket that misses a heartbeat', async () => {
+    vi.useFakeTimers();
+    const registry = registryWithSnapshot({
+      output: '',
+      exited: false,
+      workspaceCwd: '/workspace',
+    });
+    const detachOutput = vi.fn();
+    vi.mocked(registry.addOutputListener).mockReturnValueOnce(detachOutput);
+    const ws = new FakeWebSocket();
+
+    await createTerminalWsHandler(registry, resolveWorkspace).onConnection(
+      ws as unknown as WebSocket,
+      request,
+    );
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(ws.ping).toHaveBeenCalledOnce();
+    ws.emit('pong');
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(ws.terminate).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(15_000);
+
+    expect(ws.terminate).toHaveBeenCalledOnce();
+    expect(detachOutput).toHaveBeenCalledOnce();
+    vi.useRealTimers();
   });
 
   it('releases an exited session from the connection handshake', async () => {

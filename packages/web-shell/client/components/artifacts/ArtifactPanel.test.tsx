@@ -1896,6 +1896,61 @@ describe('ArtifactPanel add menu', () => {
 });
 
 describe('ArtifactPanel review downloads', () => {
+  it('renders a saved unified patch without full file bodies', () => {
+    const fileDiff =
+      '--- a/src/app.ts\n+++ b/src/app.ts\n@@ -1 +1 @@\n-old\n+new';
+    const changes = [
+      {
+        path: 'src/app.ts',
+        status: 'modified' as const,
+        toolCallId: 'tool-app',
+        isArtifact: false,
+        diffs: [{ oldText: '', newText: '', fileDiff }],
+      },
+    ];
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <ArtifactPanel
+            artifacts={[]}
+            tabs={[
+              {
+                id: 'review',
+                kind: 'review',
+                title: 'Review',
+                changes,
+                workspaceCwd: '/primary',
+                workspaceId: 'primary-id',
+              },
+            ]}
+            activeTabId="review"
+            reviewChanges={changes}
+            selectedReviewPath={null}
+            onSelectTab={() => {}}
+            onCloseTab={() => {}}
+            onOpenFilePreview={() => {}}
+            onClose={() => {}}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>('button[aria-label="src/app.ts"]')
+        ?.click();
+    });
+
+    expect(container.textContent).toContain('old');
+    expect(container.textContent).toContain('new');
+    expect(container.textContent).not.toContain('No diff available.');
+  });
+
   it('shows the requested actions and reports download failures through toast', async () => {
     const changes = ['report.html', 'notes.md', 'image.png'].map((path) => ({
       path,

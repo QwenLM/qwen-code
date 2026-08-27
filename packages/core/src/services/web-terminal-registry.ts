@@ -261,6 +261,9 @@ export class WebTerminalRegistry {
   ): (() => void) | undefined {
     const session = this.sessions.get(terminalId);
     if (!session) return undefined;
+    if (session.outputListeners.size === 0) {
+      session.unacknowledgedInputBytes = 0;
+    }
     session.outputListeners.add(listener);
     this.clearReclaim(session);
     return () => {
@@ -296,16 +299,12 @@ export class WebTerminalRegistry {
   write(terminalId: string, data: string): WebTerminalWriteResult {
     const session = this.sessions.get(terminalId);
     if (!session || session.exited) return 'unavailable';
-    const bytes = Buffer.byteLength(data);
-    if (
-      session.unacknowledgedInputBytes + bytes >
-      MAX_UNACKNOWLEDGED_INPUT_BYTES
-    ) {
+    if (session.unacknowledgedInputBytes >= MAX_UNACKNOWLEDGED_INPUT_BYTES) {
       return 'backpressure';
     }
     try {
       session.pty.write(data);
-      session.unacknowledgedInputBytes += bytes;
+      session.unacknowledgedInputBytes += Buffer.byteLength(data);
       return 'written';
     } catch {
       return 'unavailable';
