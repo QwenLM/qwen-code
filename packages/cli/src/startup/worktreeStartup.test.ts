@@ -52,6 +52,18 @@ async function makeTempRepo(): Promise<string> {
   return resolved;
 }
 
+async function getWorktreeGitDir(worktreePath: string): Promise<string> {
+  const gitPath = path.join(worktreePath, '.git');
+  const stat = await fs.lstat(gitPath);
+  if (stat.isDirectory()) return gitPath;
+  const raw = await fs.readFile(gitPath, 'utf8');
+  const match = /^gitdir:\s*(.+)\s*$/i.exec(raw.trim());
+  if (!match) throw new Error('.git file does not contain a gitdir pointer');
+  return path.isAbsolute(match[1]!)
+    ? match[1]!
+    : path.resolve(worktreePath, match[1]!);
+}
+
 describe('setupStartupWorktree', () => {
   // Real git operations + fetch through a local bare remote can take
   // 10–15s on slower runners; bump the per-test ceiling so the PR-ref
@@ -330,6 +342,35 @@ describe('setupStartupWorktree', () => {
       { cwd: tempRepo },
     );
     expect(branches.trim()).toContain(creator.context.branch);
+  });
+
+  it('preserves cleanup and refuses re-attach while the startup lock is held', async () => {
+    tempRepo = await makeTempRepo();
+    process.chdir(tempRepo);
+
+    const creator = await setupStartupWorktree('reattach-locked');
+    expect(creator?.ok).toBe(true);
+    if (!creator?.ok) return;
+
+    const gitDir = await getWorktreeGitDir(creator.context.worktreePath);
+    const lockPath = path.join(gitDir, 'qwen-startup-worktree.lock');
+    await fs.writeFile(lockPath, JSON.stringify({ pid: process.pid }));
+
+    process.chdir(tempRepo);
+    await expect(
+      discardCreatedStartupWorktree(creator.context),
+    ).resolves.toEqual({
+      preserved: expect.stringContaining('being re-attached or cleaned up'),
+    });
+
+    const reattacher = await setupStartupWorktree('reattach-locked');
+    expect(reattacher?.ok).toBe(false);
+    if (reattacher && !reattacher.ok) {
+      expect(reattacher.error).toContain('being cleaned up');
+    }
+    expect((await fs.stat(creator.context.worktreePath)).isDirectory()).toBe(
+      true,
+    );
   });
 
   it('treats EPERM from pid liveness checks as a live reattach process', async () => {

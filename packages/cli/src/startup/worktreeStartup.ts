@@ -37,6 +37,7 @@ import type { Config, WorktreeSession } from '@qwen-code/qwen-code-core';
 
 const debugLogger = createDebugLogger('WORKTREE_STARTUP');
 const STARTUP_REATTACH_MARKER = 'qwen-startup-reattach.json';
+const STARTUP_WORKTREE_LOCK = 'qwen-startup-worktree.lock';
 
 /**
  * `git rev-parse --abbrev-ref HEAD` returns this literal when the
@@ -233,12 +234,26 @@ export async function setupStartupWorktree(
       };
     }
     const worktreePath = path.resolve(expectedWorktreePath);
-    const reattachMarker = await writeStartupReattachMarker(worktreePath);
-    if (!reattachMarker.ok) {
+    const lock = await tryAcquireStartupWorktreeLock(worktreePath);
+    if (!lock.ok) {
       return {
         ok: false,
-        error: `--worktree: failed to mark re-attach at ${worktreePath} (${reattachMarker.error}).`,
+        error:
+          lock.reason === 'busy'
+            ? `--worktree: ${worktreePath} is being cleaned up by another process. Try again.`
+            : `--worktree: failed to lock ${worktreePath} (${lock.error}).`,
       };
+    }
+    try {
+      const reattachMarker = await writeStartupReattachMarker(worktreePath);
+      if (!reattachMarker.ok) {
+        return {
+          ok: false,
+          error: `--worktree: failed to mark re-attach at ${worktreePath} (${reattachMarker.error}).`,
+        };
+      }
+    } finally {
+      await lock.release();
     }
     try {
       process.chdir(worktreePath);
@@ -358,65 +373,89 @@ export async function discardCreatedStartupWorktree(
   try {
     process.chdir(context.repoRoot);
     const service = new GitWorktreeService(context.repoRoot);
-    const owner = await readWorktreeSessionMarker(context.worktreePath);
-    if (owner !== null) {
-      return {
-        preserved: `worktree ${context.worktreePath} is owned by session ${owner}`,
-      };
+    const lock = await tryAcquireStartupWorktreeLock(context.worktreePath);
+    if (!lock.ok) {
+      return lock.reason === 'busy'
+        ? {
+            preserved: `worktree ${context.worktreePath} is being re-attached or cleaned up by another process`,
+          }
+        : { error: lock.error };
     }
-    const reattachOwner = await readLiveStartupReattachMarker(
-      context.worktreePath,
-    );
-    if (reattachOwner !== null) {
-      return {
-        preserved: `worktree ${context.worktreePath} is being re-attached by process ${reattachOwner}`,
-      };
-    }
-    const intactCreatedSymlinkPaths: string[] = [];
-    for (const entry of context.createdSymlinkPaths) {
-      try {
-        const sourcePath = path.join(context.repoRoot, entry);
-        const worktreePath = path.join(context.worktreePath, entry);
-        const [stat, sourceTarget, worktreeTarget] = await Promise.all([
-          fs.lstat(worktreePath),
-          fs.realpath(sourcePath),
-          fs.realpath(worktreePath),
-        ]);
-        if (stat.isSymbolicLink() && sourceTarget === worktreeTarget) {
-          intactCreatedSymlinkPaths.push(entry);
+    try {
+      const protection = await getStartupWorktreeProtection(context);
+      if (protection) return protection;
+      const intactCreatedSymlinkPaths: string[] = [];
+      for (const entry of context.createdSymlinkPaths) {
+        try {
+          const sourcePath = path.join(context.repoRoot, entry);
+          const worktreePath = path.join(context.worktreePath, entry);
+          const [stat, sourceTarget, worktreeTarget] = await Promise.all([
+            fs.lstat(worktreePath),
+            fs.realpath(sourcePath),
+            fs.realpath(worktreePath),
+          ]);
+          if (stat.isSymbolicLink() && sourceTarget === worktreeTarget) {
+            intactCreatedSymlinkPaths.push(entry);
+          }
+        } catch {
+          // A missing or changed link is user-visible work and must stay dirty.
         }
-      } catch {
-        // A missing or changed link is user-visible work and must stay dirty.
       }
-    }
-    if (
-      await service.hasWorktreeChanges(
-        context.worktreePath,
-        intactCreatedSymlinkPaths,
-      )
-    ) {
-      return {
-        preserved: `worktree ${context.worktreePath} has uncommitted changes`,
-      };
-    }
-    const branchHead = await service.resolveRef(`refs/heads/${context.branch}`);
-    if (branchHead !== context.originalHeadCommit) {
-      return {
-        preserved: `worktree branch ${context.branch} changed after startup`,
-      };
-    }
-    const result = await service.removeUserWorktree(context.slug, {
-      deleteBranch: true,
-      forceDeleteBranch: true,
-    });
-    return result.success
-      ? {}
-      : {
-          error: result.error ?? `failed to remove ${context.worktreePath}`,
+      if (
+        await service.hasWorktreeChanges(
+          context.worktreePath,
+          intactCreatedSymlinkPaths,
+        )
+      ) {
+        return {
+          preserved: `worktree ${context.worktreePath} has uncommitted changes`,
         };
+      }
+      const branchHead = await service.resolveRef(
+        `refs/heads/${context.branch}`,
+      );
+      if (branchHead !== context.originalHeadCommit) {
+        return {
+          preserved: `worktree branch ${context.branch} changed after startup`,
+        };
+      }
+      const lateProtection = await getStartupWorktreeProtection(context);
+      if (lateProtection) return lateProtection;
+      const result = await service.removeUserWorktree(context.slug, {
+        deleteBranch: true,
+        forceDeleteBranch: true,
+      });
+      return result.success
+        ? {}
+        : {
+            error: result.error ?? `failed to remove ${context.worktreePath}`,
+          };
+    } finally {
+      await lock.release();
+    }
   } catch (error) {
     return { error: error instanceof Error ? error.message : String(error) };
   }
+}
+
+async function getStartupWorktreeProtection(
+  context: StartupWorktreeContext,
+): Promise<DiscardStartupWorktreeResult | null> {
+  const owner = await readWorktreeSessionMarker(context.worktreePath);
+  if (owner !== null) {
+    return {
+      preserved: `worktree ${context.worktreePath} is owned by session ${owner}`,
+    };
+  }
+  const reattachOwner = await readLiveStartupReattachMarker(
+    context.worktreePath,
+  );
+  if (reattachOwner !== null) {
+    return {
+      preserved: `worktree ${context.worktreePath} is being re-attached by process ${reattachOwner}`,
+    };
+  }
+  return null;
 }
 
 /**
@@ -539,6 +578,75 @@ async function getStartupReattachMarkerPath(
     ? match[1]!
     : path.resolve(worktreePath, match[1]!);
   return path.join(gitDir, STARTUP_REATTACH_MARKER);
+}
+
+async function getStartupWorktreeLockPath(
+  worktreePath: string,
+): Promise<string> {
+  return path.join(
+    path.dirname(await getStartupReattachMarkerPath(worktreePath)),
+    STARTUP_WORKTREE_LOCK,
+  );
+}
+
+async function tryAcquireStartupWorktreeLock(
+  worktreePath: string,
+  retried = false,
+): Promise<
+  | { ok: true; release: () => Promise<void> }
+  | { ok: false; reason: 'busy' }
+  | { ok: false; reason: 'error'; error: string }
+> {
+  try {
+    const lockPath = await getStartupWorktreeLockPath(worktreePath);
+    const handle = await fs.open(lockPath, 'wx');
+    try {
+      await handle.writeFile(
+        JSON.stringify({ pid: process.pid, at: new Date().toISOString() }),
+        'utf8',
+      );
+    } catch (error) {
+      await handle.close().catch(() => {});
+      await fs.rm(lockPath, { force: true }).catch(() => {});
+      throw error;
+    }
+    return {
+      ok: true,
+      release: async () => {
+        await handle.close().catch(() => {});
+        await fs.rm(lockPath, { force: true }).catch(() => {});
+      },
+    };
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
+      if (!retried && (await removeStaleStartupWorktreeLock(worktreePath))) {
+        return tryAcquireStartupWorktreeLock(worktreePath, true);
+      }
+      return { ok: false, reason: 'busy' };
+    }
+    return {
+      ok: false,
+      reason: 'error',
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+async function removeStaleStartupWorktreeLock(
+  worktreePath: string,
+): Promise<boolean> {
+  try {
+    const lockPath = await getStartupWorktreeLockPath(worktreePath);
+    const parsed = JSON.parse(await fs.readFile(lockPath, 'utf8')) as {
+      pid?: unknown;
+    };
+    const pid = typeof parsed.pid === 'number' ? parsed.pid : undefined;
+    if (!pid || isPidRunning(pid)) return false;
+    await fs.rm(lockPath, { force: true });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 async function writeStartupReattachMarker(

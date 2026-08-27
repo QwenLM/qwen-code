@@ -487,6 +487,60 @@ describe('Agent View supervisor process helpers', () => {
     await fs.rm(globalDir, { recursive: true, force: true });
   });
 
+  it('does not replay the initial prompt after a late working event follows kill', async () => {
+    const globalDir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-agent-view-store-'),
+    );
+    const launches: AgentViewLaunchFile[] = [];
+    const handler = createAgentViewSupervisorHandler({
+      globalDir,
+      platform: 'linux',
+      launchPtyHost: async (launch) => {
+        launches.push(launch);
+        return fakePtyHost(999_999_002 + launches.length);
+      },
+    });
+    const result = (await handler.dispatch?.({
+      prompt: 'write tests',
+      cwd: globalDir,
+    })) as { sessionId: string };
+    const token = await readWorkerTokenForTest(result.sessionId, globalDir);
+    await handler.workerEvent?.({
+      type: 'ready',
+      sessionId: result.sessionId,
+      token,
+      cwd: globalDir,
+    });
+    await expect(
+      readAgentViewSessionState(result.sessionId, { globalDir }),
+    ).resolves.toMatchObject({ initialPromptPending: true });
+
+    await handler.kill?.({ sessionId: result.sessionId });
+    await expect(
+      readAgentViewWorker(result.sessionId, { globalDir }),
+    ).resolves.toMatchObject({ tokenDigest: undefined });
+
+    await expect(
+      handler.workerEvent?.({
+        type: 'state',
+        sessionId: result.sessionId,
+        token,
+        sessionState: 'working',
+      }),
+    ).resolves.toMatchObject({ accepted: true });
+    await expect(
+      readAgentViewSessionState(result.sessionId, { globalDir }),
+    ).resolves.not.toHaveProperty('initialPromptPending');
+
+    await handler.respawn?.({ sessionId: result.sessionId });
+    expect(launches[1]?.argv).toEqual(
+      expect.arrayContaining([`--resume=${result.sessionId}`]),
+    );
+    expect(launches[1]?.argv).not.toContain('--prompt-interactive=write tests');
+
+    await fs.rm(globalDir, { recursive: true, force: true });
+  });
+
   it('fails the ready wait as soon as the launched host exits', async () => {
     const globalDir = await fs.mkdtemp(
       path.join(os.tmpdir(), 'qwen-agent-view-store-'),

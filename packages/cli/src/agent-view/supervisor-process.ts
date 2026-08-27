@@ -803,10 +803,12 @@ class AgentViewSupervisorProcessHandler
       await requireValidWorkerToken(event.sessionId, params, this.store);
     } catch (error) {
       if (
-        await clearInitialPromptPendingForRetiredWorkingEvent(
-          event,
-          params,
-          this.store,
+        await this.workers.withHostSetupLock(event.sessionId, () =>
+          clearInitialPromptPendingForRetiredWorkingEvent(
+            event,
+            params,
+            this.store,
+          ),
         )
       ) {
         this.notifyChanged();
@@ -848,10 +850,12 @@ class AgentViewSupervisorProcessHandler
           : await apply();
     } catch (error) {
       if (
-        await clearInitialPromptPendingForRetiredWorkingEvent(
-          event,
-          params,
-          this.store,
+        await this.workers.withHostSetupLock(event.sessionId, () =>
+          clearInitialPromptPendingForRetiredWorkingEvent(
+            event,
+            params,
+            this.store,
+          ),
         )
       ) {
         this.notifyChanged();
@@ -2158,7 +2162,7 @@ class WorkerRegistry {
         `Agent View session ${sessionId} has a stored worker whose identity cannot be verified.`,
       );
     }
-    await clearAgentViewWorkerPids(sessionId, this.store);
+    await retireAgentViewWorkerPids(sessionId, this.store);
     await markStoppedSession(sessionId, this.store, 'exited');
   }
 
@@ -2217,7 +2221,7 @@ class WorkerRegistry {
     if (this.ptyHosts.get(sessionId) === host) {
       this.clearStopFallback(sessionId, host);
       this.ptyHosts.delete(sessionId);
-      await clearAgentViewWorkerPids(sessionId, this.store);
+      await retireAgentViewWorkerPids(sessionId, this.store);
       if (preserveInput) {
         this.preserveQueuedInputControls(sessionId);
       } else {
@@ -2714,12 +2718,12 @@ class WorkerRegistry {
         `Agent View session ${sessionId} host became unreachable before its exit was confirmed.`,
       );
     }
-    await clearAgentViewWorkerPids(sessionId, this.store);
+    await retireAgentViewWorkerPids(sessionId, this.store);
   }
 
   async ensureNoStoredWorkerProcess(sessionId: string): Promise<void> {
     await this.assertNoStoredWorkerProcess(sessionId);
-    await clearAgentViewWorkerPids(sessionId, this.store);
+    await retireAgentViewWorkerPids(sessionId, this.store);
   }
 
   private async assertNoStoredWorkerProcess(sessionId: string): Promise<void> {
@@ -3022,7 +3026,7 @@ class WorkerRegistry {
       if (isPidRunning(worker?.hostPid) || isPidRunning(worker?.workerPid)) {
         return state;
       }
-      await clearAgentViewWorkerPids(state.sessionId, this.store);
+      await retireAgentViewWorkerPids(state.sessionId, this.store);
       await markStoppedSession(state.sessionId, this.store, 'exited');
       return { ...state, processState: 'exited' };
     }
@@ -3071,7 +3075,7 @@ class WorkerRegistry {
         this.store,
       );
       if (applied && !connected) {
-        await clearAgentViewWorkerPids(state.sessionId, this.store);
+        await retireAgentViewWorkerPids(state.sessionId, this.store);
         await removeAgentViewRosterEntry(state.sessionId, this.store);
       }
       if (applied) {
@@ -3210,7 +3214,7 @@ class WorkerRegistry {
       this.store,
     );
     if (appliedPatch) {
-      await clearAgentViewWorkerPids(state.sessionId, this.store);
+      await retireAgentViewWorkerPids(state.sessionId, this.store);
     }
     return appliedPatch ? { ...state, ...appliedPatch } : state;
   }
@@ -3701,8 +3705,7 @@ async function updateExitedSession(
   if (applied) {
     // The exit verdict is authoritative: drop the persisted pids so later
     // liveness probes and signaling paths cannot target a reused pid.
-    const tokenDigest = await clearAgentViewWorkerPids(sessionId, options);
-    rememberRetiredInitialPromptTokenDigest(sessionId, tokenDigest, options);
+    await retireAgentViewWorkerPids(sessionId, options);
   }
 }
 
@@ -4064,12 +4067,17 @@ async function clearInitialPromptPendingForRetiredWorkingEvent(
   if (typeof token !== 'string' || token.length === 0) {
     return false;
   }
-  if (
-    !consumeRetiredInitialPromptTokenDigest(event.sessionId, token, options)
-  ) {
+  if (!hasRetiredInitialPromptTokenDigest(event.sessionId, token, options)) {
     return false;
   }
-  return clearInitialPromptPendingForTerminalState(event.sessionId, options);
+  const cleared = await clearInitialPromptPendingForTerminalState(
+    event.sessionId,
+    options,
+  );
+  if (cleared) {
+    forgetRetiredInitialPromptTokenDigest(event.sessionId, options);
+  }
+  return cleared;
 }
 
 async function applyWorkerHeartbeatEvent(
@@ -4624,7 +4632,15 @@ function rememberRetiredInitialPromptTokenDigest(
   );
 }
 
-function consumeRetiredInitialPromptTokenDigest(
+async function retireAgentViewWorkerPids(
+  sessionId: string,
+  options: { globalDir?: string },
+): Promise<void> {
+  const tokenDigest = await clearAgentViewWorkerPids(sessionId, options);
+  rememberRetiredInitialPromptTokenDigest(sessionId, tokenDigest, options);
+}
+
+function hasRetiredInitialPromptTokenDigest(
   sessionId: string,
   token: string,
   options: { globalDir?: string },
@@ -4634,8 +4650,16 @@ function consumeRetiredInitialPromptTokenDigest(
   if (!tokenDigest || !tokenDigestMatches(token, tokenDigest)) {
     return false;
   }
-  retiredInitialPromptTokenDigests.delete(key);
   return true;
+}
+
+function forgetRetiredInitialPromptTokenDigest(
+  sessionId: string,
+  options: { globalDir?: string },
+): void {
+  retiredInitialPromptTokenDigests.delete(
+    retiredInitialPromptTokenKey(sessionId, options),
+  );
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
