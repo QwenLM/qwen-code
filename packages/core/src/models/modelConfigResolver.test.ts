@@ -11,6 +11,11 @@ import {
 } from './modelConfigResolver.js';
 import { AuthType } from '../core/contentGenerator.js';
 import { DEFAULT_QWEN_MODEL, MAINLINE_CODER_MODEL } from '../config/models.js';
+import {
+  buildProbeKey,
+  withProbeResult,
+  type ProbeResultStore,
+} from '../services/modalityProbe/probe-store.js';
 
 describe('modelConfigResolver', () => {
   describe('resolveModelConfig', () => {
@@ -1079,6 +1084,175 @@ describe('modelConfigResolver', () => {
 
       expect(result.config.contextWindowSize).toBe(32_000);
       expect(result.sources['contextWindowSize'].kind).toBe('settings');
+    });
+  });
+
+  describe('modalities fallback chain (probe layer)', () => {
+    // Chain under test (QwenLM/qwen-code#10309 phase 1):
+    //   explicit modalities (settings/modelProviders generationConfig)
+    //   > persisted probe verdict (settings `probeResults` store)
+    //   > name-pattern table (defaultModalities).
+    const PROBED_AT = '2026-08-27T00:00:00.000Z';
+    const BASE_URL = 'http://localhost:8000/v1';
+
+    function probeStore(
+      modelId: string,
+      verdict: 'image' | 'text_only',
+      baseUrl?: string,
+    ): ProbeResultStore {
+      return withProbeResult(undefined, AuthType.USE_OPENAI, modelId, baseUrl, {
+        verdict,
+        probedAt: PROBED_AT,
+      });
+    }
+
+    it('explicit settings modalities win over a matching probe verdict', () => {
+      // 'qwen3-coder-plus' pattern-resolves to text-only ({}), so the explicit
+      // { image: true } below is distinguishable from BOTH lower tiers — and
+      // the text_only probe entry matches the exact resolution key.
+      const result = resolveModelConfig({
+        authType: AuthType.USE_OPENAI,
+        cli: {},
+        settings: {
+          generationConfig: {
+            modalities: { image: true },
+          },
+        },
+        env: {
+          OPENAI_API_KEY: 'test-key',
+          OPENAI_BASE_URL: BASE_URL,
+          OPENAI_MODEL: 'qwen3-coder-plus',
+        },
+        probeResultStore: probeStore('qwen3-coder-plus', 'text_only', BASE_URL),
+      });
+
+      expect(result.config.modalities).toEqual({ image: true });
+      expect(result.sources['modalities'].kind).toBe('settings');
+    });
+
+    it('probe verdict image wins over the name-pattern table', () => {
+      // 'qwen3-coder-plus' pattern-resolves to {} (text-only); a persisted
+      // 'image' verdict must flip it to { image: true }.
+      const result = resolveModelConfig({
+        authType: AuthType.USE_OPENAI,
+        cli: {},
+        settings: {},
+        env: {
+          OPENAI_API_KEY: 'test-key',
+          OPENAI_BASE_URL: BASE_URL,
+          OPENAI_MODEL: 'qwen3-coder-plus',
+        },
+        probeResultStore: probeStore('qwen3-coder-plus', 'image', BASE_URL),
+      });
+
+      expect(result.config.modalities).toEqual({ image: true });
+      expect(result.sources['modalities'].kind).toBe('computed');
+      expect(result.sources['modalities'].detail).toBe(
+        `probe-tested ${PROBED_AT}`,
+      );
+    });
+
+    it('probe verdict text_only wins over the name-pattern table', () => {
+      // 'glm-4.5v' pattern-resolves to { image: true }; a persisted
+      // 'text_only' verdict must flip it to {}. Keyed WITHOUT a baseUrl —
+      // covers the undefined-baseUrl key spelling (no OPENAI_BASE_URL set).
+      const result = resolveModelConfig({
+        authType: AuthType.USE_OPENAI,
+        cli: {},
+        settings: {},
+        env: {
+          OPENAI_API_KEY: 'test-key',
+          OPENAI_MODEL: 'glm-4.5v',
+        },
+        probeResultStore: probeStore('glm-4.5v', 'text_only'),
+      });
+
+      expect(result.config.modalities).toEqual({});
+      expect(result.sources['modalities'].kind).toBe('computed');
+      expect(result.sources['modalities'].detail).toBe(
+        `probe-tested ${PROBED_AT}`,
+      );
+    });
+
+    it('falls through to the pattern table when no probe entry matches', () => {
+      const result = resolveModelConfig({
+        authType: AuthType.USE_OPENAI,
+        cli: {},
+        settings: {},
+        env: {
+          OPENAI_API_KEY: 'test-key',
+          OPENAI_BASE_URL: BASE_URL,
+          OPENAI_MODEL: 'glm-4.5v',
+        },
+      });
+
+      expect(result.config.modalities).toEqual({ image: true });
+      expect(result.sources['modalities'].kind).toBe('computed');
+      expect(result.sources['modalities'].detail).toBe(
+        'auto-detected from model',
+      );
+    });
+
+    it('explicit modelProvider modalities win over a matching probe verdict', () => {
+      // Mirrors the settings-channel test above through the OTHER explicit
+      // channel (modelProviders): explicit { image: false } vs an 'image'
+      // probe verdict vs the { image: true } pattern for 'glm-4.5v'.
+      const result = resolveModelConfig({
+        authType: AuthType.USE_OPENAI,
+        cli: {},
+        settings: {},
+        env: {
+          MY_CUSTOM_KEY: 'provider-key',
+        },
+        modelProvider: {
+          id: 'glm-4.5v',
+          name: 'GLM 4.5V',
+          envKey: 'MY_CUSTOM_KEY',
+          baseUrl: 'https://provider.example.com',
+          generationConfig: {
+            modalities: { image: false },
+          },
+        },
+        probeResultStore: probeStore(
+          'glm-4.5v',
+          'image',
+          'https://provider.example.com',
+        ),
+      });
+
+      expect(result.config.modalities).toEqual({ image: false });
+      expect(result.sources['modalities'].kind).toBe('modelProviders');
+    });
+
+    it('ignores hand-corrupted probe records (invalid verdict falls through to pattern)', () => {
+      // Read-side hardening: a hand-edited settings.json can put garbage in
+      // the store; only verdicts exactly 'image'/'text_only' are honored, so
+      // a corrupt record abstains to the pattern tier — never a wrong answer.
+      const corrupted: ProbeResultStore = {
+        [buildProbeKey(AuthType.USE_OPENAI, 'glm-4.5v', BASE_URL)]: {
+          // Simulate a hand-edited record; the static type says this can't
+          // happen, settings.json is not type-checked.
+          verdict: 'garbage' as 'image',
+          probedAt: PROBED_AT,
+        },
+      };
+      const result = resolveModelConfig({
+        authType: AuthType.USE_OPENAI,
+        cli: {},
+        settings: {},
+        env: {
+          OPENAI_API_KEY: 'test-key',
+          OPENAI_BASE_URL: BASE_URL,
+          OPENAI_MODEL: 'glm-4.5v',
+        },
+        probeResultStore: corrupted,
+      });
+
+      expect(result.config.modalities).toEqual({ image: true });
+      expect(result.sources['modalities'].kind).toBe('computed');
+      expect(result.sources['modalities'].detail).toBe(
+        'auto-detected from model',
+      );
     });
   });
 });

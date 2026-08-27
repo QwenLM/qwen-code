@@ -18,7 +18,16 @@ export type ProbeResultStore = Record<string, ModalityProbeRecord>;
 /** `|` is an acceptable separator: realistic authType/modelId/baseUrl values
  * never contain it, so the worst case is one wrong advisory verdict that a
  * re-probe overwrites — and `\0` (used by modelRegistryKey) would be hostile
- * in a human-editable settings.json. */
+ * in a human-editable settings.json.
+ *
+ * Phase-1 key spelling: registry-listed /model entries are keyed by their
+ * RESOLVED baseUrl (default-filled, as displayed on the dialog entry);
+ * raw/session models are keyed by the session-resolved baseUrl (which may be
+ * undefined, yielding a `''` final segment). Known divergence: QWEN_OAUTH
+ * resolves to `''` in the resolver path but 'DYNAMIC_QWEN_OAUTH_BASE_URL' in
+ * the registry path — hard-coded oauth models are therefore poor probe
+ * candidates in phase 1.
+ */
 export function buildProbeKey(
   authType: string,
   modelId: string,

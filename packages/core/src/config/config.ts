@@ -297,6 +297,7 @@ import {
   type AvailableModel,
   type ResolvedModelConfig,
   type RuntimeModelSnapshot,
+  type ProbeResultStore,
 } from '../models/index.js';
 import { resolveModelId } from '../utils/modelId.js';
 import type { WebSearchSettings } from '../tools/web-search.js';
@@ -1328,6 +1329,13 @@ export interface ConfigParameters {
   modelProvidersConfig?: ModelProvidersConfig;
   /** Maps custom provider ids to their SDK protocol (AuthType) */
   providerProtocolConfig?: ProviderProtocolConfig;
+  /**
+   * Lazy provider for the persisted modality probe store (settings
+   * `probeResults`); feeds the modalities resolution chain (explicit >
+   * probe > pattern). A callback so persisted verdicts are read live rather
+   * than snapshotted at boot. `undefined` keeps probe-free behavior.
+   */
+  probeResultStoreProvider?: () => ProbeResultStore | undefined;
   /** Agent and multi-agent collaboration settings */
   agents?: AgentsCollabSettings;
   /** General-purpose worktree settings (Phase D-2). */
@@ -2208,6 +2216,9 @@ export class Config {
   private modelsConfig!: ModelsConfig;
   private readonly modelProvidersConfig?: ModelProvidersConfig;
   private readonly providerProtocolConfig?: ProviderProtocolConfig;
+  private readonly probeResultStoreProvider?: () =>
+    | ProbeResultStore
+    | undefined;
   private readonly sandbox: SandboxConfig | undefined;
   private targetDir: string;
   private workspaceContext: WorkspaceContext;
@@ -2718,6 +2729,7 @@ export class Config {
     this.ideMode = params.ideMode ?? false;
     this.modelProvidersConfig = params.modelProvidersConfig;
     this.providerProtocolConfig = params.providerProtocolConfig;
+    this.probeResultStoreProvider = params.probeResultStoreProvider;
     this.cliVersion = params.cliVersion;
 
     this.chatRecordingEnabled = params.chatRecording ?? true;
@@ -2854,6 +2866,7 @@ export class Config {
       initialAuthType: params.authType ?? params.generationConfig?.authType,
       modelProvidersConfig: this.modelProvidersConfig,
       providerProtocolConfig: this.providerProtocolConfig,
+      probeResultStoreProvider: this.probeResultStoreProvider,
       generationConfig: {
         model: params.model,
         ...(params.generationConfig || {}),

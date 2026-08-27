@@ -8,12 +8,15 @@ import { AuthType } from '../core/contentGenerator.js';
 import { defaultModalities } from '../core/modalityDefaults.js';
 import { tokenLimit } from '../core/tokenLimits.js';
 import { DEFAULT_OPENAI_BASE_URL } from '../core/openaiContentGenerator/constants.js';
+import { readProbeResult } from '../services/modalityProbe/probe-store.js';
+import type { ProbeResultStore } from '../services/modalityProbe/probe-store.js';
 import {
   type ModelConfig,
   type ModelProvidersConfig,
   type ProviderProtocolConfig,
   type ResolvedModelConfig,
   type AvailableModel,
+  type ModalitySource,
 } from './types.js';
 import { DEFAULT_QWEN_MODEL } from '../config/models.js';
 import { QWEN_OAUTH_MODELS } from './constants.js';
@@ -89,6 +92,19 @@ export class ModelRegistry {
   /** providerId -> SDK protocol mapping; persists across reloads. */
   private providerProtocolConfig: ProviderProtocolConfig;
 
+  /**
+   * Lazy provider for the persisted modality probe store (settings
+   * `probeResults`), so the CLI layer can supply live settings. Consulted at
+   * registration/reload time only: entries cache probe-informed modalities
+   * and `modalitiesSource`, so a later
+   * `settings.setValue('probeResults', …)` does NOT refresh already
+   * registered entries until a registry reload. `undefined` keeps probe-free
+   * behavior (pattern table only).
+   */
+  private readonly probeResultStoreProvider?: () =>
+    | ProbeResultStore
+    | undefined;
+
   private getDefaultBaseUrl(authType: AuthType): string {
     switch (authType) {
       case AuthType.QWEN_OAUTH:
@@ -103,9 +119,11 @@ export class ModelRegistry {
   constructor(
     modelProvidersConfig?: ModelProvidersConfig,
     providerProtocolConfig?: ProviderProtocolConfig,
+    probeResultStoreProvider?: () => ProbeResultStore | undefined,
   ) {
     this.modelsByAuthType = new Map();
     this.providerProtocolConfig = providerProtocolConfig ?? {};
+    this.probeResultStoreProvider = probeResultStoreProvider;
 
     // Always register qwen-oauth models (hard-coded, cannot be overridden)
     this.registerAuthTypeModels(AuthType.QWEN_OAUTH, QWEN_OAUTH_MODELS);
@@ -314,11 +332,35 @@ export class ModelRegistry {
     // them explicitly. Without this, downstream consumers that read straight
     // from the registry (e.g. sub-agents via getResolvedModel) would inherit
     // the parent session's modalities instead of the agent's own.
+    //
+    // modalities fallback chain: explicit (provider-declared) > persisted
+    // probe verdict > name-pattern table; provenance is stamped on
+    // `modalitiesSource` for the /model dialog badge (issue #10309). The
+    // probe lookup is keyed by the RESOLVED baseUrl — the /model dialog
+    // probes with the same resolved baseUrl shown on the entry, so keys
+    // match. Read-side hardening: only verdicts exactly 'image'/'text_only'
+    // are honored (hand-edited settings.json garbage abstains to pattern).
+    let modalitiesSource: ModalitySource;
     if (
-      generationConfig.modalities === undefined ||
-      shouldUseCanonicalModalities(config.id)
+      generationConfig.modalities !== undefined &&
+      !shouldUseCanonicalModalities(config.id)
     ) {
-      generationConfig.modalities = defaultModalities(config.id);
+      modalitiesSource = 'explicit';
+    } else {
+      const probe = readProbeResult(
+        this.probeResultStoreProvider?.(),
+        authType,
+        config.id,
+        config.baseUrl || this.getDefaultBaseUrl(authType),
+      );
+      if (probe?.verdict === 'image' || probe?.verdict === 'text_only') {
+        generationConfig.modalities =
+          probe.verdict === 'image' ? { image: true } : {};
+        modalitiesSource = 'probe';
+      } else {
+        generationConfig.modalities = defaultModalities(config.id);
+        modalitiesSource = 'pattern';
+      }
     }
 
     return {
@@ -329,6 +371,7 @@ export class ModelRegistry {
       ...(config.baseUrl ? { registryBaseUrl: config.baseUrl } : {}),
       generationConfig,
       capabilities: config.capabilities || {},
+      modalitiesSource,
     };
   }
 

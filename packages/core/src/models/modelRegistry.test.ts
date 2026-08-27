@@ -13,6 +13,7 @@ import {
 } from './modelRegistry.js';
 import { AuthType } from '../core/contentGenerator.js';
 import type { ModelProvidersConfig, ProviderProtocolConfig } from './types.js';
+import { withProbeResult } from '../services/modalityProbe/probe-store.js';
 
 const debugLoggerWarnSpy = vi.hoisted(() => vi.fn());
 
@@ -322,6 +323,76 @@ describe('ModelRegistry', () => {
         image: true,
         video: true,
       });
+    });
+
+    it('stamps modalitiesSource probe when a persisted verdict matches', () => {
+      // The probe store is keyed by (authType, modelId, RESOLVED baseUrl) —
+      // here the provider entry's own baseUrl, which is already resolved.
+      const store = withProbeResult(
+        undefined,
+        AuthType.USE_OPENAI,
+        'qwen3-coder-plus',
+        'https://example.invalid',
+        { verdict: 'image', probedAt: '2026-08-27T00:00:00.000Z' },
+      );
+      const registry = new ModelRegistry(
+        {
+          openai: [
+            {
+              id: 'qwen3-coder-plus',
+              name: 'Qwen3 Coder Plus',
+              baseUrl: 'https://example.invalid',
+              generationConfig: {},
+            },
+          ],
+        },
+        undefined,
+        () => store,
+      );
+
+      const model = registry.getModel(AuthType.USE_OPENAI, 'qwen3-coder-plus');
+      // Pattern table alone would say {} (text-only); the probe verdict wins.
+      expect(model?.generationConfig.modalities).toEqual({ image: true });
+      expect(model?.modalitiesSource).toBe('probe');
+    });
+
+    it('stamps modalitiesSource pattern when no probe verdict matches', () => {
+      const registry = new ModelRegistry({
+        openai: [
+          {
+            id: 'gpt-4-turbo',
+            name: 'GPT-4 Turbo',
+            baseUrl: 'https://api.openai.com/v1',
+            generationConfig: {},
+          },
+        ],
+      });
+
+      const model = registry.getModel(AuthType.USE_OPENAI, 'gpt-4-turbo');
+      expect(model?.generationConfig.modalities).toEqual({ image: true });
+      expect(model?.modalitiesSource).toBe('pattern');
+    });
+
+    it('stamps modalitiesSource explicit when the provider declares modalities', () => {
+      // Not a canonical-forced id (MiniMax-M3 et al.), so the provider's own
+      // declaration survives with an 'explicit' stamp.
+      const registry = new ModelRegistry({
+        openai: [
+          {
+            id: 'gpt-4-turbo',
+            name: 'GPT-4 Turbo',
+            baseUrl: 'https://api.openai.com/v1',
+            generationConfig: { modalities: { image: true, pdf: true } },
+          },
+        ],
+      });
+
+      const model = registry.getModel(AuthType.USE_OPENAI, 'gpt-4-turbo');
+      expect(model?.generationConfig.modalities).toEqual({
+        image: true,
+        pdf: true,
+      });
+      expect(model?.modalitiesSource).toBe('explicit');
     });
   });
 
