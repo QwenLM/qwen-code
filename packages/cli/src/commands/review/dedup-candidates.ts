@@ -455,7 +455,8 @@ export function runDedupCandidates(args: DedupArgs): LedgerDedupReport {
       existing?.v === 1 &&
       existing.diffHash !== undefined &&
       existing.diffHash === diffHash &&
-      Array.isArray(existing.dropped)
+      Array.isArray(existing.dropped) &&
+      existing.dropped.every((d) => d !== null && typeof d === 'object')
     ) {
       cumulative = [...existing.dropped, ...dropped];
     }

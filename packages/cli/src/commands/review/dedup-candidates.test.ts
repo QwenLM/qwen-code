@@ -144,6 +144,9 @@ describe('validateCandidates — the typed channel refuses shapeless entries', (
     expect(() => validateCandidates([candidate({ line: 1.5 })])).toThrow(
       /candidates\[0\]\.line/,
     );
+    expect(() => validateCandidates([null])).toThrow(
+      /candidates\[0\] must be an object/,
+    );
   });
 
   it('passes extra fields through untouched — the kept list must stay shard-sufficient', () => {
@@ -195,6 +198,11 @@ describe('runDedupCandidates — matching against the posted work list', () => {
     const B = 'alpha beta gamma delta epsilon zeta iota kappa';
     writeLedger([entry({ title: A, line: 40 })]);
     expect(run([candidate({ title: B, line: 42 })]).droppedCount).toBe(1);
+    // The symmetric cell: a lineless candidate against a lined entry takes
+    // the lineless bar too — the anchored window cannot compare one side.
+    expect(run([candidate({ title: B, line: undefined })]).droppedCount).toBe(
+      0,
+    );
     writeLedger([entry({ title: A, line: undefined })]);
     expect(run([candidate({ title: B, line: 42 })]).droppedCount).toBe(0);
   });
@@ -356,16 +364,64 @@ describe('runDedupCandidates — the report on disk', () => {
     expect(r2.dropped.map((d) => d.matchedId)).toEqual(['R1-2']);
   });
 
+  it('two differently-worded drops of one anchor stay two in the report', () => {
+    // The everyday shape: two finders re-derive the same carried defect at
+    // the same anchor with different wording above the bar — the identity
+    // filter keys on the title, so both drops survive.
+    writeLedger([entry()]);
+    const plan = writePlan();
+    const r = runDedupCandidates({
+      plan,
+      candidates: writeCandidates([
+        candidate(),
+        candidate({
+          title: 'precheck workflow does not pin action version sha',
+        }),
+      ]),
+    });
+    expect(r.droppedCount).toBe(2);
+    expect(r.dropped.map((d) => d.title)).toEqual([
+      TITLE,
+      'precheck workflow does not pin action version sha',
+    ]);
+  });
+
   it('a report bound to another diff is replaced whole, never merged', () => {
     writeLedger([entry()]);
     const plan = writePlan();
     runDedupCandidates({ plan, candidates: writeCandidates([candidate()]) });
     writeDiff('diff --git a/y b/y\n@@ -0,0 +1 @@\n+other\n');
+    // A DISTINCT identity (line 43, still within the anchor window): the
+    // identity filter must not be able to collapse a cross-diff merge back
+    // to this run's count.
     const r2 = runDedupCandidates({
+      plan,
+      candidates: writeCandidates([candidate({ line: 43 })]),
+    });
+    expect(r2.droppedCount).toBe(1);
+  });
+
+  it('a poisoned same-diff report fails open — replaced, never crash-propagated', () => {
+    // The report sits beside the plan, another account's writable surface:
+    // a same-hash file whose `dropped` holds a hole must not brick the dedup
+    // for every same-diff retry of the round — the module's own contract is
+    // optimization, not a gate.
+    writeLedger([entry()]);
+    const plan = writePlan();
+    const diffHash = createHash('sha256')
+      .update(readFileSync(join(planDir, 'pr.diff')))
+      .digest('hex');
+    writeFileSync(
+      join(planDir, ledgerDedupReportName(PR)),
+      JSON.stringify({ v: 1, diffHash, dropped: [null] }),
+    );
+    const r = runDedupCandidates({
       plan,
       candidates: writeCandidates([candidate()]),
     });
-    expect(r2.droppedCount).toBe(1);
+    expect(r.droppedCount).toBe(1);
+    expect(r.dropped).toHaveLength(1);
+    expect(r.dropped[0].matchedId).toBe('R1-2');
   });
 
   it('keeps every candidate when the diff cannot be hashed — the drop could not be disclosed', () => {
@@ -379,7 +435,7 @@ describe('runDedupCandidates — the report on disk', () => {
     });
     expect(absent.droppedCount).toBe(0);
     expect(absent.kept).toHaveLength(1);
-    expect(absent.note).toContain('dedup skipped');
+    expect(absent.note).toContain('could not be hashed');
     // fetch-pr's documented partition-failure fallback writes the field null.
     const nullDiff = run([candidate()], { diffPathAbsolute: null });
     expect(nullDiff.droppedCount).toBe(0);
@@ -413,9 +469,9 @@ describe('ledgerDedupFacts — the disclosure’s read side', () => {
     runDedupCandidates({
       plan,
       candidates: writeCandidates([
+        candidate({ file: 'src/b.ts' }),
         candidate(),
         candidate({ line: 41 }),
-        candidate({ file: 'src/b.ts' }),
       ]),
     });
     return plan;
@@ -426,8 +482,8 @@ describe('ledgerDedupFacts — the disclosure’s read side', () => {
     expect(ledgerDedupFacts(plan)).toEqual({
       droppedCount: 3,
       ids: [
-        { id: 'R1-2', n: 2 },
         { id: 'R1-3', n: 1 },
+        { id: 'R1-2', n: 2 },
       ],
     });
   });
@@ -440,7 +496,7 @@ describe('ledgerDedupFacts — the disclosure’s read side', () => {
     writeFileSync(path, JSON.stringify(report));
     const facts = ledgerDedupFacts(plan);
     expect(facts.droppedCount).toBe(4);
-    expect(facts.ids.map((e) => e.id)).toEqual(['R1-2', 'R1-3']);
+    expect(facts.ids.map((e) => e.id)).toEqual(['R1-3', 'R1-2']);
   });
 
   it('renders nothing off a stale report — the diff moved on', () => {
