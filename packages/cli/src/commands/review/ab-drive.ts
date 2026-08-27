@@ -848,22 +848,25 @@ export const abDriveCommand: CommandModule = {
     'Drive the SAME script against two trees (PR arm and base arm) and report the paired captures — same bytes both arms, shared upstream owned end to end, confounds named',
   builder: (yargs) =>
     yargs
+      // No `demandOption` on the three required strings: a yargs requirement
+      // fires the CLI-wide `.fail()` (exit 1) BEFORE the handler, landing a
+      // usage error in the run-failed/coupling-fact class instead of the exit-2
+      // repairable class the handler and the other five callers use. The
+      // handler validates them (=== undefined) so a present-but-empty value
+      // still reaches runAbDrive's fail-report path.
       .option('script', {
         type: 'string',
-        demandOption: true,
         describe:
-          'Shell script both arms run verbatim; AB_ARM (a|b) and AB_ARM_ROOT are exported, and the cwd is the arm root',
+          'Shell script both arms run verbatim (required); AB_ARM (a|b) and AB_ARM_ROOT are exported, and the cwd is the arm root',
       })
       .option('arm-a', {
         type: 'string',
-        demandOption: true,
-        describe: 'Tree for arm a — conventionally the PR worktree',
+        describe: 'Tree for arm a — conventionally the PR worktree (required)',
       })
       .option('arm-b', {
         type: 'string',
-        demandOption: true,
         describe:
-          "Tree for arm b — conventionally the base-tree report's `path`",
+          "Tree for arm b — conventionally the base-tree report's `path` (required)",
       })
       .option('ready', {
         type: 'string',
@@ -919,6 +922,20 @@ export const abDriveCommand: CommandModule = {
     // stdout is this command's evidence; a reader that left (`| head`) must
     // not crash the process on the async EPIPE path the safe writer misses.
     ignoreBrokenPipe();
+    // Required flags, validated HERE (exit 2, repairable) rather than at the
+    // yargs layer (exit 1, the coupling-fact class). `=== undefined` only, so a
+    // present-but-empty value keeps its deliberate fail-report path inside
+    // runAbDrive (the empty-substitution guards there).
+    const missing = (['script', 'arm-a', 'arm-b'] as const).filter(
+      (k) => (argv as Record<string, unknown>)[k] === undefined,
+    );
+    if (missing.length > 0) {
+      writeStderrLineSafe(
+        `ab-drive: missing required ${missing.map((m) => `--${m}`).join(', ')} — pass --script, --arm-a and --arm-b.`,
+      );
+      process.exitCode = 2;
+      return;
+    }
     try {
       const bundleNotice = bundleStalenessNotices(process.argv[1], true);
       if (bundleNotice) writeStderrLineSafe(bundleNotice);

@@ -50,6 +50,7 @@ import {
   fstatSync,
   readSync,
   closeSync,
+  constants,
 } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -459,12 +460,22 @@ export function readCapped(
 ): { overflow: boolean; text: string } {
   let fd: number;
   try {
-    fd = openSync(path, 'r');
+    // O_NONBLOCK, mirroring readIfThere: an untrusted arm can swap its log for
+    // a writer-less FIFO (`rm log; mkfifo log` — it learns the path from its
+    // wrapper's command line), and a blocking open would then hang the poll
+    // loop FOREVER, past --timeout, with the finally kill-server never reached.
+    fd = openSync(path, constants.O_RDONLY | constants.O_NONBLOCK);
   } catch {
-    return { overflow: false, text: '' };
+    return { overflow: false, text: '' }; // absent/unopenable → empty snapshot
   }
   try {
-    const size = fstatSync(fd).size;
+    const st = fstatSync(fd);
+    // Only a regular file is a log. A DIRECTORY (`rm log; mkdir log`) would let
+    // openSync succeed and then throw EISDIR out of readSync into the poll
+    // loop; a FIFO/device is not a capture. Treat any non-regular file as an
+    // empty snapshot — the same guard readIfThere applies.
+    if (!st.isFile()) return { overflow: false, text: '' };
+    const size = st.size;
     if (size > maxBytes) return { overflow: true, text: '' };
     const buf = Buffer.allocUnsafe(size);
     let off = 0;
@@ -476,6 +487,11 @@ export function readCapped(
       off += n;
     }
     return { overflow: false, text: buf.toString('utf8', 0, off) };
+  } catch {
+    // fstat/read on a hostile special file must not escape into the handler
+    // catch-all (exit 1, the whole run's report — including the other arm's
+    // completed capture — discarded). Treat as an empty snapshot.
+    return { overflow: false, text: '' };
   } finally {
     closeSync(fd);
   }

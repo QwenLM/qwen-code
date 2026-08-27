@@ -248,7 +248,7 @@ const HUNK_RE = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/;
  * — `git show`, the heaviness metrics, the filename an agent is told it is
  * reviewing — then refers to a file that does not exist.
  */
-function unquote(raw: string): string {
+export function unquote(raw: string): string {
   return unquoteCStylePath(raw.trim());
 }
 
@@ -258,7 +258,7 @@ function stripPrefix(p: string): string {
 }
 
 /** Unquote then de-prefix a `diff --git` / `---` / `+++` path token. */
-function cleanPath(raw: string): string {
+export function cleanPath(raw: string): string {
   return stripPrefix(unquote(raw));
 }
 

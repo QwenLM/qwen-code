@@ -45,6 +45,7 @@ import {
   accessSync,
   constants,
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -56,7 +57,7 @@ import {
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import type { DiffFile } from './lib/diff-plan.js';
-import { parseDiff } from './lib/diff-plan.js';
+import { parseDiff, cleanPath, unquote } from './lib/diff-plan.js';
 import { sanitizedGitEnv } from './lib/worktree.js';
 import { assertWritableOutPath } from './lib/paths.js';
 import {
@@ -320,6 +321,27 @@ export function sectionUnsafeToRevert(
     header.some(
       (l) => l.startsWith('copy from ') || l.startsWith('rename from '),
     );
+  // R12-1: a rename/copy names its NEW path in the UNPREFIXED `rename to`/
+  // `copy to` metadata — git never prefixes those lines. If the `+++` token,
+  // stripped of its assumed a/ b/, disagrees with that metadata, the tokens
+  // were not default prefixes (a --no-prefix capture whose literal paths merely
+  // begin a/ or b/, which the syntactic oldOk/newOk gate cannot tell apart),
+  // and extractHunkPatch's rewrite would target the WRONG file even when a
+  // decoy at the stripped path lets `git apply -R --check` pass. Ground the
+  // rewrite in git's own metadata: refuse when they disagree.
+  if (isMoveOrCopy) {
+    const metaLine = header.find(
+      (l) => l.startsWith('rename to ') || l.startsWith('copy to '),
+    );
+    if (metaLine !== undefined) {
+      const metaPath = unquote(
+        metaLine.slice(metaLine.startsWith('rename to ') ? 10 : 8),
+      );
+      if (metaPath !== '' && cleanPath(plus) !== metaPath) {
+        return `hunk sits in a rename/copy section whose +++ path stripped to ${JSON.stringify(cleanPath(plus))} disagrees with its unprefixed rename/copy metadata ${JSON.stringify(metaPath)} — git never prefixes those lines, so the capture uses non-default prefixes and the -p1 rewrite would target the wrong file. Recapture with git's default prefixes.`;
+      }
+    }
+  }
   // A creation (`--- /dev/null`) or deletion (`+++ /dev/null`) legitimately
   // has differing sides — only two REAL paths differing without metadata is
   // the move-inducing shape.
@@ -438,6 +460,24 @@ function gitTreeState(
   return real === top ? 'root' : 'subdir';
 }
 
+/**
+ * Whether `path` is a file git TRACKS in `tree` (present in the index). This is
+ * the ground truth for "is git's -p1 target a real file here", used to tell a
+ * non-default-prefix / wrong-tree refusal (target not tracked → harness fact)
+ * from a genuine coupling refusal (target tracked, content mismatch, or a hunk
+ * already reverted — a working-tree delete still leaves the file tracked in the
+ * index). `--error-unmatch` makes ls-files exit non-zero for an untracked path.
+ */
+function isTrackedFile(tree: string, path: string): boolean {
+  const r = spawnSync('git', ['ls-files', '--error-unmatch', '--', path], {
+    cwd: tree,
+    encoding: 'utf8',
+    env: sanitizedGitEnv(),
+    timeout: 60_000,
+  });
+  return r.status === 0;
+}
+
 export function runRevertHunk(args: RevertHunkArgs): RevertHunkReport {
   // 'latin1', not 'utf8', end to end: the pipeline's diff files are byte
   // streams (fetch-diff writes latin1 so "a Latin-1/Shift-JIS diff survives
@@ -548,30 +588,14 @@ export function runRevertHunk(args: RevertHunkArgs): RevertHunkReport {
     };
   }
   const patch = extractHunkPatch(diffText, file, sel.n);
-  // The file `git apply -R -p1` will actually TOUCH — its own path resolution,
-  // not a guess about the prefix. `-p1` strips exactly one leading path
-  // component from each side (assuming git's default `a/` `b/`); the reverse
-  // apply modifies the non-`/dev/null` side. Grounding the prefix assumption in
-  // this resolved path (does it exist in the tree?) is what the syntactic
-  // `sectionUnsafeToRevert` gate cannot do: a `--no-prefix` or `--src-prefix`
-  // capture whose tokens merely LOOK like `a/` `b/` resolves, after the strip,
-  // to a path that is simply not in the tree.
-  const p1strip = (raw: string): string => {
-    const t = raw.startsWith('"') ? raw.slice(1, -1) : raw;
-    if (t === '/dev/null') return t;
-    const slash = t.indexOf('/');
-    return slash >= 0 ? t.slice(slash + 1) : t;
-  };
-  const patchLines = patch.split('\n');
-  const p1Minus = p1strip(
-    patchLines.find((l) => l.startsWith('--- '))?.slice(4) ?? '',
-  );
-  const p1Plus = p1strip(
-    patchLines.find((l) => l.startsWith('+++ '))?.slice(4) ?? '',
-  );
-  // -R modifies the side that is NOT /dev/null: the `+++` (new) side for an
-  // edit or creation, the `---` (old) side for a deletion (un-delete).
-  const p1Target = p1Plus !== '/dev/null' ? p1Plus : p1Minus;
+  // The file `git apply -R -p1` will TOUCH, grounded in the tree rather than a
+  // guess about the prefix. `file.path` is parseDiff's DECODED new-side path
+  // (or the old-side path for a deletion) — C-quoted names and `diff -u`
+  // timestamp suffixes already handled — which, once sectionUnsafeToRevert has
+  // refused every non-default-prefix rename, equals git's -p1 target. Grounding
+  // the prefix assumption in whether THIS path is a tracked file in the tree is
+  // what the syntactic gate cannot do for tokens that merely LOOK like a/ b/.
+  const target = file.path;
 
   const tree = resolve(args.tree);
   // git apply needs no repository, so a --tree that is a plain (non-repo)
@@ -646,20 +670,21 @@ export function runRevertHunk(args: RevertHunkArgs): RevertHunkReport {
     }
     if (check.status !== 0) {
       // Structural prefix check, grounded in the tree rather than token shape:
-      // if git's own `-p1` target does not EXIST here, the refusal is not a
+      // if git's target is not a TRACKED file here, the refusal is not a
       // coupling fact about the hunk — git could not find the file to revert.
       // That is either a non-default-prefix capture (git strips one component
       // assuming a/ b/, so `--no-prefix`/`--src-prefix` tokens resolve to a path
-      // that is not there) or a wrong --tree. Classify it as a harness fact
-      // (exit 2), not the exit-1 coupling class a verifier records against the
-      // diff. Only the "target genuinely present but content no longer matches"
-      // case — a real overlap/coupling — stays exit 1.
-      if (p1Target !== '/dev/null' && !existsSync(join(tree, p1Target))) {
+      // that is not tracked) or a wrong --tree. `isTrackedFile` reads the INDEX,
+      // so a hunk already reverted (its file deleted from the WORKING tree by an
+      // earlier revert) stays tracked and correctly reads as the exit-1
+      // conflict class, not a prefix problem. Untracked → harness fact (exit 2);
+      // tracked → a real overlap / already-mutated tree stays exit 1.
+      if (!isTrackedFile(tree, target)) {
         return {
           applied: false,
           hunk: entry,
           harnessFailure: true,
-          note: `hunk ${args.hunk}: git apply -R -p1 resolves the target to ${JSON.stringify(p1Target)}, which does not exist in ${tree} — so this is a harness fact, not a coupling refusal about the hunk. The capture likely uses non-default diff prefixes (git strips one leading component, assuming a/ b/), or --tree points at the wrong tree. Recapture with git's default prefixes (drop --no-prefix/--src-prefix/--dst-prefix); nothing was changed.`,
+          note: `hunk ${args.hunk}: git apply -R -p1's target ${JSON.stringify(target)} is not a tracked file in ${tree} — a harness fact, not a coupling refusal about the hunk. The capture likely uses non-default diff prefixes (git strips one leading component, assuming a/ b/), or --tree points at the wrong tree. Recapture with git's default prefixes (drop --no-prefix/--src-prefix/--dst-prefix); nothing was changed.`,
         };
       }
       return {
@@ -667,6 +692,21 @@ export function runRevertHunk(args: RevertHunkArgs): RevertHunkReport {
         hunk: entry,
         conflict: check.stderr || 'git apply --check refused (no error text)',
         note: `hunk ${args.hunk} does not revert independently — its context no longer matches the tree. Usually that means it overlaps another hunk's edits (a coupling worth reporting as a fact) or the tree was already mutated at those lines (reset the scratch tree and retry). The tree is unchanged.`,
+      };
+    }
+    // --check passed. Ground the target's SHAPE before trusting it: a DIRECTORY
+    // (or other non-regular file) at the resolved path — a wrong --tree can put
+    // one there — makes `git apply -R` exit 0 without touching anything, so
+    // applied:true would be a false witness over a byte-identical tree, the
+    // shape the submodule gate above also guards. A missing target is fine (a
+    // deletion being un-deleted); only an existing NON-file is refused.
+    const targetStat = lstatSync(join(tree, target), { throwIfNoEntry: false });
+    if (targetStat && !targetStat.isFile() && !targetStat.isSymbolicLink()) {
+      return {
+        applied: false,
+        hunk: entry,
+        harnessFailure: true,
+        note: `hunk ${args.hunk}: the resolved target ${JSON.stringify(target)} is a directory or special file in ${tree}, not a regular file — git apply -R exits 0 without touching it, so applied:true would be a false witness. Point --tree at the scratch worktree; nothing was changed.`,
       };
     }
     const apply = exec(tree, ['apply', '-R', '--whitespace=nowarn', patchPath]);
@@ -721,8 +761,11 @@ export const revertHunkCommand: CommandModule = {
     yargs
       .option('diff', {
         type: 'string',
-        demandOption: true,
-        describe: 'The unified diff file the plan records',
+        // No `demandOption`: a yargs-layer requirement fires the CLI-wide
+        // `.fail()` (process.exit(1)) BEFORE the handler, landing a usage error
+        // in the exit-1 refusal/coupling-fact class this command reserves for a
+        // genuine revert refusal. The handler validates it and exits 2 instead.
+        describe: 'The unified diff file the plan records (required)',
       })
       .option('list', {
         type: 'boolean',
@@ -743,13 +786,32 @@ export const revertHunkCommand: CommandModule = {
       .option('out', {
         type: 'string',
         describe: 'Also write the report JSON here',
-      })
-      .conflicts('list', 'hunk'),
+      }),
+  // No `.conflicts('list', 'hunk')`: like demandOption, a yargs conflict fires
+  // the CLI-wide `.fail()` (exit 1) before the handler. The handler enforces it
+  // and exits 2.
   handler: (argv) => {
     // stdout is this command's result and the tree may already be mutated by
     // the time we write it, so a reader that left (`| head`) must not crash
     // the process on the async EPIPE path the safe writer cannot catch.
     ignoreBrokenPipe();
+    // Required/mutually-exclusive flags, validated HERE (exit 2, the repairable
+    // class) rather than at the yargs layer (exit 1, the coupling-fact class).
+    const diffArg = argv['diff'] as string | undefined;
+    if (diffArg === undefined || diffArg.trim() === '') {
+      writeStderrLineSafe(
+        'revert-hunk: --diff <file> is required (the unified diff the plan records).',
+      );
+      process.exitCode = 2;
+      return;
+    }
+    if (argv['list'] && argv['hunk'] !== undefined) {
+      writeStderrLineSafe(
+        'revert-hunk: --list and --hunk are mutually exclusive — pass --list to enumerate, or --hunk with --tree to revert one.',
+      );
+      process.exitCode = 2;
+      return;
+    }
     const out = argv['out'] as string | undefined;
     try {
       if (out !== undefined) assertWritableOutPath(out);

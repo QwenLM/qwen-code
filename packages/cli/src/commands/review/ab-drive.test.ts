@@ -33,7 +33,11 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { abDriveCommand, runAbDrive, type AbDriveArgs } from './ab-drive.js';
 import { DRIVE_SENTINEL, LOG_MAX_BYTES, type ExecResult } from './drive.js';
-import { ignoreBrokenPipe, writeStdoutLine } from '../../utils/stdioHelpers.js';
+import {
+  ignoreBrokenPipe,
+  writeStdoutLine,
+  writeStderrLineSafe,
+} from '../../utils/stdioHelpers.js';
 
 vi.mock('../../utils/stdioHelpers.js', () => ({
   ignoreBrokenPipe: vi.fn(),
@@ -1193,6 +1197,26 @@ describe.skipIf(!hasTmux || process.platform === 'win32')(
       );
       expect(process.exitCode).toBe(2);
       process.exitCode = 0;
+    });
+
+    it('exits 2, not the yargs exit-1 fail path, when a required flag is missing', () => {
+      // demandOption would fire the CLI-wide .fail() (exit 1, coupling-fact
+      // class) before the handler; the handler validates the three required
+      // flags itself and exits 2, matching --out and the sibling callers.
+      for (const drop of ['script', 'arm-a', 'arm-b'] as const) {
+        const args = handlerArgs({
+          'arm-a': tempDir('ab-req-a-'),
+          'arm-b': tempDir('ab-req-b-'),
+        }) as Record<string, unknown>;
+        delete args[drop];
+        process.exitCode = 0;
+        (abDriveCommand.handler as (a: unknown) => void)(args);
+        expect(process.exitCode).toBe(2);
+        expect(vi.mocked(writeStderrLineSafe)).toHaveBeenCalledWith(
+          expect.stringContaining(`--${drop}`),
+        );
+        process.exitCode = 0;
+      }
     });
   },
 );

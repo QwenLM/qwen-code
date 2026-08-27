@@ -654,6 +654,18 @@ describe('the log cap', () => {
     expect(readCapped(small, 3)).toEqual({ overflow: false, text: 'abc' });
     rmSync(dir, { recursive: true, force: true });
   });
+
+  it('readCapped returns an empty snapshot for a non-regular file (R14-5)', () => {
+    // An untrusted arm can swap its log for a DIRECTORY (`rm log; mkdir log`).
+    // openSync succeeds, fstat reports a dir, and readSync would throw EISDIR
+    // out of the poll loop into the handler catch-all — the run's report lost.
+    // The isFile guard treats it as an empty snapshot instead of throwing.
+    const dir = mkdtempSync(join(tmpdir(), 'drv-dircap-'));
+    const asDir = join(dir, 'log');
+    mkdirSync(asDir);
+    expect(readCapped(asDir, 1024)).toEqual({ overflow: false, text: '' });
+    rmSync(dir, { recursive: true, force: true });
+  });
 });
 
 describe('--capture', () => {

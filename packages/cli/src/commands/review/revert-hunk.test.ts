@@ -405,7 +405,102 @@ describe('runRevertHunk', () => {
     expect(existsSync(join(dir, 'y'))).toBe(false);
   });
 
+  it('refuses a --no-prefix rename EVEN with a content-matching decoy at the stripped path (R12-1)', () => {
+    // The round-14 tree check caught this only when the stripped path was
+    // absent; a committed decoy `y` matching the hunk content let --check pass
+    // and the wrong file was rewound. The metadata cross-check (git never
+    // prefixes `rename to`) refuses the rewrite BEFORE any apply, decoy or not.
+    const dir = tempDir('rh-decoy-');
+    git(dir, 'init', '-q', '-b', 'main');
+    git(dir, 'config', 'user.email', 't@t');
+    git(dir, 'config', 'user.name', 't');
+    git(dir, 'config', 'core.autocrlf', 'false');
+    mkdirSync(join(dir, 'a'), { recursive: true });
+    writeFileSync(join(dir, 'a', 'x'), 'top-old\nmid\n');
+    git(dir, 'add', '.');
+    git(dir, 'commit', '-qm', 'base');
+    mkdirSync(join(dir, 'b'), { recursive: true });
+    writeFileSync(join(dir, 'b', 'y'), 'top-new\nmid\n');
+    rmSync(join(dir, 'a', 'x'));
+    const diffText = git(dir, 'diff', '-M', '--no-prefix'); // working-tree rename
+    // Plant a committed decoy root `y` holding the hunk's NEW content, so a
+    // -p1 revert of `y` would "succeed".
+    writeFileSync(join(dir, 'y'), 'top-new\nmid\n');
+    git(dir, 'add', '-A');
+    git(dir, 'commit', '-qm', 'rename + decoy y');
+    const diffPath = join(dir, 'decoy.diff');
+    writeFileSync(diffPath, diffText);
+    const id = listHunks(diffText).find((h) => h.path === 'b/y')?.id ?? 'b/y:1';
+    const beforeDecoy = readFileSync(join(dir, 'y'), 'utf8');
+    const r = runRevertHunk({ diff: diffPath, tree: dir, hunk: id });
+    expect(r.applied).toBe(false);
+    expect(r.harnessFailure).toBe(true);
+    // The decoy at the stripped path was NOT rewound.
+    expect(readFileSync(join(dir, 'y'), 'utf8')).toBe(beforeDecoy);
+  });
+
+  it('refuses when the resolved target is a DIRECTORY, not a false applied:true (R14-2)', () => {
+    // On some git versions (2.43) `git apply -R --check` exits 0 on a directory
+    // at the target and the real apply no-ops — a false applied:true over an
+    // untouched tree. Driven through the seam with --check forced to pass (as
+    // that git does), the success-path lstat guard must refuse the directory
+    // BEFORE the apply. (git 2.55 fails --check "wrong type" instead, a
+    // different but also-safe path — this pins the guard for the exit-0 gits.)
+    const { dir, diffPath } = twoHunkFixture();
+    rmSync(join(dir, 'f.txt'));
+    mkdirSync(join(dir, 'f.txt')); // the target is now a directory
+    const calls: string[][] = [];
+    const r = runRevertHunk({
+      diff: diffPath,
+      tree: dir,
+      hunk: 'f.txt:1',
+      exec: (_cwd, a) => {
+        calls.push(a);
+        return { status: 0, stderr: '' }; // git 2.43: --check passes on a dir
+      },
+    });
+    expect(r.applied).toBe(false);
+    expect(r.harnessFailure).toBe(true);
+    expect(r.note).toContain('directory or special file');
+    // The guard fired BEFORE the real apply — only --check ran through the seam.
+    expect(calls.filter((a) => !a.includes('--check'))).toEqual([]);
+  });
+
+  it('a C-quoted (non-ASCII) filename reverted twice stays a coupling refusal, not a prefix fact (R14-1)', () => {
+    // The target existence check must use the DECODED path, or a C-quoted name
+    // resolves to a literal backslash-octal string that never exists and a
+    // genuine "already reverted" refusal is misrouted from conflict (exit 1) to
+    // harnessFailure (exit 2) advising a no-op prefix repair.
+    const dir = tempDir('rh-cq-');
+    git(dir, 'init', '-q', '-b', 'main');
+    git(dir, 'config', 'user.email', 't@t');
+    git(dir, 'config', 'user.name', 't');
+    git(dir, 'config', 'core.autocrlf', 'false');
+    const fname = 'café.txt';
+    writeFileSync(join(dir, fname), 'top-old\nmid\n');
+    git(dir, 'add', '.');
+    git(dir, 'commit', '-qm', 'base');
+    writeFileSync(join(dir, fname), 'top-new\nmid\n');
+    git(dir, 'add', '.');
+    git(dir, 'commit', '-qm', 'edit');
+    const diffText = git(dir, 'diff', 'HEAD~1', 'HEAD');
+    // Sanity: git C-quoted the non-ASCII name in the header.
+    expect(diffText).toContain('\\303\\251');
+    const diffPath = join(dir, 'cq.diff');
+    writeFileSync(diffPath, diffText);
+    const id = listHunks(diffText)[0].id;
+    expect(runRevertHunk({ diff: diffPath, tree: dir, hunk: id }).applied).toBe(
+      true,
+    );
+    // Second revert: content no longer matches — a genuine coupling refusal.
+    const second = runRevertHunk({ diff: diffPath, tree: dir, hunk: id });
+    expect(second.applied).toBe(false);
+    expect(second.harnessFailure).toBeUndefined();
+    expect(second.conflict).toBeTruthy();
+  });
+
   it('refuses a hand-crafted section whose paths differ without rename metadata', () => {
+    // git never emits `--- a/old` / `+++ b/new` without a rename/copy header;
     // git never emits `--- a/old` / `+++ b/new` without a rename/copy header;
     // a hand-assembled --diff can, and reverse-applying it would MOVE the
     // file. Build one by taking a real single-file diff and rewriting its
@@ -1431,54 +1526,48 @@ describe('the command wiring', () => {
     process.exitCode = 0;
   });
 
-  it('parses through the REAL yargs builder — the conflicts guard must not eat --hunk', () => {
-    // The documented trap this pins: giving the boolean `--list` option a
-    // `default: false` makes yargs `conflicts` treat it as "given", and
-    // `--hunk` is then rejected before the handler runs — the command's
-    // primary path dead while every handler-level test stays green.
+  it('parses through the REAL yargs builder — no yargs-layer requirement reaches the exit-1 fail path', () => {
+    // Required/exclusive flags are enforced in the HANDLER (exit 2), not by
+    // yargs demandOption/conflicts (which fire the CLI-wide .fail() → exit 1,
+    // the coupling-fact class). So parsing must NEVER hit a yargs .fail(): the
+    // handler always runs and decides the exit code.
     const { dir, diffPath } = twoHunkFixture();
-    const handler = vi.fn();
-    const failures: string[] = [];
-    yargs([
-      'revert-hunk',
-      '--diff',
-      diffPath,
-      '--hunk',
-      'f.txt:1',
-      '--tree',
-      dir,
-    ])
-      .command({ ...revertHunkCommand, handler })
-      .exitProcess(false)
-      .fail((msg) => {
-        failures.push(msg ?? '');
-      })
-      .parseSync();
-    expect(failures).toEqual([]);
-    expect(handler).toHaveBeenCalledOnce();
-    expect(handler.mock.calls[0][0]).toMatchObject({
-      diff: diffPath,
-      hunk: 'f.txt:1',
-      tree: dir,
-    });
-
-    // And the guard itself still guards: --list with --hunk is refused. The
-    // fail callback THROWS on purpose — a yargs fail handler that returns
-    // normally lets parsing continue into the command handler, which is a
-    // yargs quirk, not this command's contract.
-    const handler2 = vi.fn();
-    const failures2: string[] = [];
-    expect(() =>
-      yargs(['revert-hunk', '--diff', diffPath, '--list', '--hunk', 'f.txt:1'])
-        .command({ ...revertHunkCommand, handler: handler2 })
+    const runThroughYargs = (args: string[]): string[] => {
+      const failures: string[] = [];
+      yargs(['revert-hunk', ...args])
+        .command(revertHunkCommand)
         .exitProcess(false)
         .fail((msg) => {
-          failures2.push(msg ?? '');
-          throw new Error(msg ?? 'parse failure');
+          failures.push(msg ?? 'yargs fail');
         })
-        .parseSync(),
-    ).toThrow();
-    expect(handler2).not.toHaveBeenCalled();
-    expect(failures2.join('\n')).toContain('mutually exclusive');
+        .parseSync();
+      return failures;
+    };
+
+    // --hunk is not eaten (the documented default:false conflicts trap) and no
+    // yargs requirement fires: the handler runs and reverts.
+    process.exitCode = 0;
+    expect(
+      runThroughYargs(['--diff', diffPath, '--hunk', 'f.txt:1', '--tree', dir]),
+    ).toEqual([]);
+    expect(process.exitCode).toBe(0);
+
+    // Missing --diff: no yargs .fail (would be exit 1); the handler exits 2.
+    process.exitCode = 0;
+    expect(runThroughYargs(['--list'])).toEqual([]); // no --diff
+    expect(process.exitCode).toBe(2);
+    expect(vi.mocked(writeStderrLineSafe)).toHaveBeenCalledWith(
+      expect.stringContaining('--diff <file> is required'),
+    );
+
+    // --list with --hunk: refused in-handler at exit 2, not a yargs conflict.
+    process.exitCode = 0;
+    expect(
+      runThroughYargs(['--diff', diffPath, '--list', '--hunk', 'f.txt:1']),
+    ).toEqual([]);
+    expect(process.exitCode).toBe(2);
+    expect(vi.mocked(writeStderrLineSafe)).toHaveBeenCalledWith(
+      expect.stringContaining('mutually exclusive'),
+    );
   });
 });
