@@ -883,7 +883,7 @@ test('toggles reasoning without effort tiers for qwen3.7-plus @smoke', async ({
   await expect(modelButton).toContainText('Thinking');
 });
 
-test('selects mandatory Kimi K3 reasoning tiers without a toggle @smoke', async ({
+test('selects mandatory Kimi K3 reasoning tiers with a disabled toggle @smoke', async ({
   page,
 }, testInfo) => {
   const scenario = createWebShellDaemonScenario({
@@ -918,9 +918,9 @@ test('selects mandatory Kimi K3 reasoning tiers without a toggle @smoke', async 
   await modelButton.click();
   const controls = page.locator('[data-web-shell-model-reasoning]');
   await expect(controls).toBeVisible();
-  await expect(
-    controls.locator('[data-web-shell-thinking-toggle]'),
-  ).toHaveCount(0);
+  const thinking = controls.locator('[data-web-shell-thinking-toggle]');
+  await expect(thinking).toBeChecked();
+  await expect(thinking).toBeDisabled();
   await expect(controls.locator('[data-web-shell-effort]')).toHaveCount(3);
 
   await controls.locator('[data-web-shell-effort="low"]').click();

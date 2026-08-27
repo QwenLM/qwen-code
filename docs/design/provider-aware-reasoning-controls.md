@@ -45,7 +45,8 @@ options into WebShell controls.
 
 Tiered capabilities declare whether thinking can be disabled. Existing models
 remain disableable by default. Thinking-only models omit the `none` option, and
-WebShell renders the effort choices without a switch.
+WebShell keeps the Thinking switch checked and disabled while leaving the
+effort choices selectable.
 
 Provider adapters remain responsible for the final request shape:
 
