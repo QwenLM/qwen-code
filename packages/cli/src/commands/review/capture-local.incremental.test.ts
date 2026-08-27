@@ -872,8 +872,10 @@ describe('capture-local — the decided stops are machine-readable', () => {
     const second = capture({ cache: cachePath, model: 'model-a' });
     expect(second['incremental']).toBeUndefined();
     expect(stderrLines.join('\n')).toContain('still on disk');
-    expect(second['cacheCandidatePath']).toBeDefined();
-    expect(existsSync(second['cacheCandidatePath'] as string)).toBe(false);
+    // THIS branch's withhold contract: the field itself stays off the plan
+    // (Step 8 branches on presence), where the base publishes the path and
+    // removes the file.
+    expect(second['cacheCandidatePath']).toBeUndefined();
     expect(stderrLines.join('\n')).toContain(
       'candidate would record their absence as reviewed state',
     );
