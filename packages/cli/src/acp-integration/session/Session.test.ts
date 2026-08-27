@@ -512,6 +512,7 @@ describe('Session', () => {
     getHandle: ReturnType<typeof vi.fn>;
     removeTerminal: ReturnType<typeof vi.fn>;
     list: ReturnType<typeof vi.fn>;
+    abortAll: ReturnType<typeof vi.fn>;
   };
   let mockGoalRuntime: {
     getSnapshot: ReturnType<typeof vi.fn>;
@@ -748,6 +749,7 @@ describe('Session', () => {
       getHandle: vi.fn().mockReturnValue(undefined),
       removeTerminal: vi.fn().mockReturnValue(false),
       list: vi.fn().mockReturnValue([]),
+      abortAll: vi.fn(),
     };
 
     mockChatRecordingService = {
@@ -3050,6 +3052,240 @@ describe('Session', () => {
     await observingSession.refreshWorkflowHistory();
 
     expect(observingSession.getWorkflowHistory()).toEqual([]);
+  });
+
+  it('keeps a sibling-deleted run buried when a late status emission lands after persistence', async () => {
+    // R7-5: the existing non-resurrection test fires the status callback
+    // only BEFORE snapshotPersisted, so it cannot see the real ordering.
+    // The registry's dispatch-drain callbacks emit on TERMINAL entries
+    // with no status gate, and in-flight dispatches keep draining across
+    // the snapshot write — so a terminal emission routinely lands AFTER
+    // retirement, re-inserting the run as "never persisted". A sibling's
+    // deletion was then undone by the next refresh: absent on disk but
+    // present in the stale cache reads as a pending write. Retirement has
+    // to be a latch.
+    session.dispose();
+    const snapshot = {
+      runId: 'wf_abcd',
+      meta: null,
+      status: 'failed' as const,
+      script: 'return 1;',
+      phases: [],
+      agentsDispatched: 0,
+      agentsCompleted: 0,
+      tokensSpent: 0,
+      tokenBudgetTotal: null,
+      perPhaseTokens: [],
+      recentLogs: [],
+      startTime: 1_000,
+      endTime: 2_000,
+    };
+    const deletingSession = new Session(
+      'deleting-session',
+      mockConfig,
+      mockClient,
+      mockSettings,
+      undefined,
+      undefined,
+      [],
+    );
+    const observingSession = new Session(
+      'observing-session',
+      mockConfig,
+      mockClient,
+      mockSettings,
+      undefined,
+      undefined,
+      [],
+    );
+    const terminalEntry = {
+      id: 'wf_abcd',
+      kind: 'workflow' as const,
+      runId: 'wf_abcd',
+      description: 'Callback-cached run',
+      meta: null,
+      status: 'failed' as const,
+      startTime: 1_000,
+      endTime: 2_000,
+      outputFile: '',
+      outputOffset: 0,
+      notified: true,
+      abortController: new AbortController(),
+      isBackgrounded: true,
+      currentPhase: null,
+      phases: [],
+      phaseVisits: [],
+      currentPhaseVisitId: null,
+      dispatches: [],
+      agentsDispatched: 0,
+      agentsCompleted: 0,
+      recentLogs: [],
+      events: [],
+      tokensSpent: 0,
+      tokenBudgetTotal: null,
+      perPhaseTokens: new Map(),
+      pendingApprovals: [],
+      script: 'return 1;',
+    };
+    const callback =
+      mockWorkflowRunRegistry.setStatusChangeCallback.mock.calls.at(
+        -1,
+      )?.[0] as (entry: core.WorkflowTask) => void;
+    const snapshotPersisted =
+      mockWorkflowRunRegistry.setSnapshotPersistedCallback.mock.calls.at(
+        -1,
+      )?.[0] as ((runId: string) => void) | undefined;
+
+    callback(terminalEntry);
+    snapshotPersisted?.('wf_abcd');
+    // A draining dispatch emits once more on the already-terminal entry,
+    // after retirement. This is the ordering the bug lived in.
+    callback(terminalEntry);
+
+    listWorkflowSnapshotsSpy.mockResolvedValueOnce([snapshot]);
+    await expect(
+      deletingSession.deleteWorkflowHistory(snapshot.runId),
+    ).resolves.toBe(true);
+    listWorkflowSnapshotsSpy.mockResolvedValueOnce([]);
+
+    await observingSession.refreshWorkflowHistory();
+    expect(observingSession.getWorkflowHistory()).toEqual([]);
+  });
+
+  it('re-remembers a run whose id is registered again after persistence', async () => {
+    // The latch must not be permanent: a retry reuses the runId, so once
+    // the entry goes active again its next settlement has to be cached
+    // like any other, or a genuine re-run would vanish from the session's
+    // projection until its own snapshot write lands.
+    session.dispose();
+    const observingSession = new Session(
+      'observing-session',
+      mockConfig,
+      mockClient,
+      mockSettings,
+      undefined,
+      undefined,
+      [],
+    );
+    const base = {
+      id: 'wf_relive',
+      kind: 'workflow' as const,
+      runId: 'wf_relive',
+      description: 'Re-run',
+      meta: null,
+      startTime: 1_000,
+      outputFile: '',
+      outputOffset: 0,
+      notified: true,
+      abortController: new AbortController(),
+      isBackgrounded: true,
+      currentPhase: null,
+      phases: [],
+      phaseVisits: [],
+      currentPhaseVisitId: null,
+      dispatches: [],
+      agentsDispatched: 0,
+      agentsCompleted: 0,
+      recentLogs: [],
+      events: [],
+      tokensSpent: 0,
+      tokenBudgetTotal: null,
+      perPhaseTokens: new Map(),
+      pendingApprovals: [],
+      script: 'return 1;',
+    };
+    const callback =
+      mockWorkflowRunRegistry.setStatusChangeCallback.mock.calls.at(
+        -1,
+      )?.[0] as (entry: core.WorkflowTask) => void;
+    const snapshotPersisted =
+      mockWorkflowRunRegistry.setSnapshotPersistedCallback.mock.calls.at(
+        -1,
+      )?.[0] as ((runId: string) => void) | undefined;
+
+    callback({
+      ...base,
+      status: 'failed',
+      endTime: 2_000,
+    } as core.WorkflowTask);
+    snapshotPersisted?.('wf_relive');
+    // The retry re-registers the same runId and runs.
+    callback({
+      ...base,
+      status: 'running',
+      endTime: undefined,
+    } as core.WorkflowTask);
+    // Its own settlement must be cached again.
+    callback({
+      ...base,
+      status: 'completed',
+      endTime: 3_000,
+    } as core.WorkflowTask);
+
+    expect(observingSession.getWorkflowHistory()).toEqual([
+      expect.objectContaining({ runId: 'wf_relive', status: 'completed' }),
+    ]);
+  });
+
+  it('deletes a run that fell out of the capped history window', async () => {
+    // R7-4: `buildSessionTasksStatus` serializes every registry entry
+    // unconditionally, but deletion gated on membership in the
+    // MAX_RETAINED_SNAPSHOTS window, which `refreshWorkflowHistory`
+    // truncates by startTime. A long run that settles after ~30 newer
+    // ones started stayed listed via the registry yet fell out of the
+    // window — terminal, handle-free, live in no sibling, and permanently
+    // undeletable. Membership must be tested against the uncapped set.
+    session.dispose();
+    const target = {
+      runId: 'wf_oldest',
+      meta: null,
+      status: 'failed' as const,
+      script: 'return 1;',
+      phases: [],
+      agentsDispatched: 0,
+      agentsCompleted: 0,
+      tokensSpent: 0,
+      tokenBudgetTotal: null,
+      perPhaseTokens: [],
+      recentLogs: [],
+      startTime: 1_000,
+      endTime: 2_000,
+    };
+    // 30 strictly newer snapshots fill the window ahead of the target.
+    const newer = Array.from(
+      { length: core.MAX_RETAINED_SNAPSHOTS },
+      (_, i) => ({
+        ...target,
+        runId: `wf_newer${i}`,
+        startTime: 10_000 + i,
+        endTime: 20_000 + i,
+      }),
+    );
+    const deletingSession = new Session(
+      'deleting-session',
+      mockConfig,
+      mockClient,
+      mockSettings,
+      undefined,
+      undefined,
+      [],
+    );
+    mockWorkflowRunRegistry.get.mockReturnValue({
+      runId: target.runId,
+      status: 'failed',
+    });
+    listWorkflowSnapshotsSpy.mockResolvedValueOnce([...newer, target]);
+
+    await expect(
+      deletingSession.deleteWorkflowHistory(target.runId),
+    ).resolves.toBe(true);
+    expect(deleteWorkflowSnapshotSpy).toHaveBeenCalledWith(
+      mockConfig,
+      target.runId,
+    );
+    expect(mockWorkflowRunRegistry.removeTerminal).toHaveBeenCalledWith(
+      target.runId,
+    );
   });
 
   it('rejects history deletion while a sibling session still owns the run', async () => {
@@ -31606,6 +31842,20 @@ describe('Session', () => {
       expect(
         mockWorkflowRunRegistry.clearStatusChangeCallback,
       ).toHaveBeenCalledWith(expect.any(Function));
+      // R7-10: mirror the agent registry. A workflow run that outlives
+      // its session's removal is invisible to the delete-history liveness
+      // gate, and its settlement snapshot write recreates history a
+      // sibling session just deleted. Abort must precede the callback
+      // teardown so the cancellation still reaches this session's own
+      // bookkeeping.
+      expect(mockWorkflowRunRegistry.abortAll).toHaveBeenCalled();
+      expect(
+        mockWorkflowRunRegistry.abortAll.mock.invocationCallOrder.at(-1),
+      ).toBeLessThan(
+        mockWorkflowRunRegistry.setCompletionCallback.mock.invocationCallOrder.at(
+          -1,
+        )!,
+      );
     });
 
     it('aborts an active notificationAbortController and nulls the reference', () => {

@@ -11556,6 +11556,205 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
+  it('still sees a live workflow run whose owning session was closed', async () => {
+    // R7-10: the liveness gate iterated `this.sessions` only, but a run
+    // outlives its session's removal — close/kill/shutdown use force
+    // semantics and a background run owns a detached controller. Once
+    // `removeStoredSessionEntry` deleted the session, a still-settling run
+    // was invisible here and unreachable by the delete handler's sibling
+    // `removeTerminal` loop, so a sibling delete-history removed the LIVE
+    // run's journal and snapshot and answered `{changed: true}` — and the
+    // orphan's settlement write recreated the file it had just deleted.
+    const sessionIdA = 'aaaaaaaa-1111-1111-1111-111111111111';
+    const sessionIdB = 'bbbbbbbb-2222-2222-2222-222222222222';
+    const runId = 'wf_orphan1';
+    const innerConfigA = await setupSessionMocks(sessionIdA);
+    innerConfigA.isWorkflowsEnabled.mockReturnValue(true);
+    Object.assign(innerConfigA, {
+      getWorkflowRunRegistry: vi.fn().mockReturnValue({
+        get: vi.fn().mockReturnValue({ runId, status: 'failed' }),
+        getHandle: vi.fn().mockReturnValue(undefined),
+        removeTerminal: vi.fn().mockReturnValue(true),
+      }),
+    });
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    const sessionMockA = lastSessionMock!;
+
+    // Session B owns a run that is terminal but still settling: the
+    // handle lives until the snapshot write lands.
+    const entryB = { runId, status: 'failed' as const };
+    const registryB = {
+      get: vi.fn().mockReturnValue(entryB),
+      getHandle: vi.fn().mockReturnValue({ completion: Promise.resolve() }),
+      removeTerminal: vi.fn().mockReturnValue(false),
+      hasRunningEntries: vi.fn().mockReturnValue(false),
+      list: vi.fn().mockReturnValue([entryB]),
+      abortAll: vi.fn(),
+    };
+    const innerConfigB = {
+      ...makeInnerConfig(),
+      getSessionId: vi.fn().mockReturnValue(sessionIdB),
+      isWorkflowsEnabled: vi.fn().mockReturnValue(true),
+      getWorkflowRunRegistry: vi.fn().mockReturnValue(registryB),
+    };
+    vi.mocked(loadCliConfig).mockResolvedValue(
+      innerConfigB as unknown as Config,
+    );
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+    const sessionCalls = vi.mocked(Session).mock.calls;
+    const predicateA = sessionCalls[0][7] as (runId: string) => boolean;
+    // While B is in the session map the gate already answered correctly.
+    expect(predicateA(runId)).toBe(true);
+
+    // Force-close B. Before the fix the registry vanished with the map
+    // entry and the gate went blind for the rest of the settlement.
+    await agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionClose, {
+      sessionId: sessionIdB,
+    });
+    expect(predicateA(runId)).toBe(true);
+
+    // A delete-history from A must refuse for as long as the handle lives.
+    sessionMockA.deleteWorkflowHistory.mockResolvedValue(false);
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionWorkflowTaskAction, {
+        sessionId: sessionIdA,
+        taskId: runId,
+        action: 'delete-history',
+      }),
+    ).resolves.toEqual({ changed: false });
+
+    // Once the orphan settles and releases its handle the retained
+    // registry is pruned and the gate stops answering for it.
+    registryB.getHandle.mockReturnValue(undefined);
+    expect(predicateA(runId)).toBe(false);
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it("serializes a sibling session's retry against a history deletion", async () => {
+    // R5-9: the mutual-exclusion claim used to be keyed `sessionId\0taskId`,
+    // which serialized nothing that mattered — all sessions share one
+    // snapshot store. A sibling's retry passes canStart (`failed`, no
+    // handle), takes its own per-session claim, then awaits journal
+    // load/compile before `register()`; a delete-history landing in that
+    // structural window saw the run terminal and handle-less in every
+    // registry, deleted the journal directory and snapshot, and answered
+    // `{changed: true}` — after which the retry re-registered and its
+    // settlement re-persisted the history the user was told was deleted.
+    // With a task-global claim one of the two must refuse.
+    const sessionIdA = 'aaaaaaaa-1111-1111-1111-111111111111';
+    const sessionIdB = 'bbbbbbbb-2222-2222-2222-222222222222';
+    const runId = 'wf_shared1';
+    const innerConfigA = await setupSessionMocks(sessionIdA);
+    innerConfigA.isWorkflowsEnabled.mockReturnValue(true);
+    Object.assign(innerConfigA, {
+      getWorkflowRunRegistry: vi.fn().mockReturnValue({
+        get: vi.fn().mockReturnValue({ runId, status: 'failed' }),
+        getHandle: vi.fn().mockReturnValue(undefined),
+        removeTerminal: vi.fn().mockReturnValue(true),
+      }),
+    });
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    const sessionMockA = lastSessionMock!;
+
+    // Session B parks its retry exactly where the race lived: past
+    // canStart, inside the await that precedes `register()`.
+    let releaseRetry!: () => void;
+    const retryGate = new Promise<void>((resolve) => {
+      releaseRetry = resolve;
+    });
+    const execute = vi.fn(async () => {
+      await retryGate;
+      return { llmContent: 'started' };
+    });
+    const innerConfigB = {
+      ...makeInnerConfig(),
+      getSessionId: vi.fn().mockReturnValue(sessionIdB),
+      isWorkflowsEnabled: vi.fn().mockReturnValue(true),
+      getWorkflowRunRegistry: vi.fn().mockReturnValue({
+        get: vi.fn().mockReturnValue({
+          runId,
+          status: 'failed',
+          script: 'return await agent("x")',
+          args: undefined,
+        }),
+        getHandle: vi.fn().mockReturnValue(undefined),
+        removeTerminal: vi.fn().mockReturnValue(false),
+      }),
+      getToolRegistry: vi.fn().mockReturnValue({
+        getTool: vi.fn((name: string) =>
+          name === 'workflow'
+            ? { buildSessionOwnedBackground: vi.fn(() => ({ execute })) }
+            : undefined,
+        ),
+      }),
+    };
+    vi.mocked(loadCliConfig).mockResolvedValue(
+      innerConfigB as unknown as Config,
+    );
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+    const retry = agent.extMethod(
+      SERVE_CONTROL_EXT_METHODS.sessionWorkflowTaskAction,
+      { sessionId: sessionIdB, taskId: runId, action: 'retry' },
+    );
+    await vi.waitFor(() => expect(execute).toHaveBeenCalledOnce());
+
+    // Session A's deletion of the same run must refuse while B holds the
+    // claim — and must not reach the store at all.
+    sessionMockA.deleteWorkflowHistory.mockResolvedValue(true);
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionWorkflowTaskAction, {
+        sessionId: sessionIdA,
+        taskId: runId,
+        action: 'delete-history',
+      }),
+    ).resolves.toEqual({ changed: false });
+    expect(sessionMockA.deleteWorkflowHistory).not.toHaveBeenCalled();
+
+    releaseRetry();
+    await expect(retry).resolves.toMatchObject({ changed: true });
+
+    // Once the claim is released the deletion goes through normally.
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionWorkflowTaskAction, {
+        sessionId: sessionIdA,
+        taskId: runId,
+        action: 'delete-history',
+      }),
+    ).resolves.toEqual({ changed: true });
+    expect(sessionMockA.deleteWorkflowHistory).toHaveBeenCalledWith(runId);
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it('wires history-deletion liveness across every sibling session registry', async () => {
     const sessionIdA = 'aaaaaaaa-1111-1111-1111-111111111111';
     const sessionIdB = 'bbbbbbbb-2222-2222-2222-222222222222';

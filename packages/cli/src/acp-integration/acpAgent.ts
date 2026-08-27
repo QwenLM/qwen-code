@@ -136,6 +136,7 @@ import {
   type ToolInvocationGuard,
   type WorkflowParams,
   type WorkflowToolResult,
+  type WorkflowRunRegistry,
   isTerminalWorkflowStatus,
   listSavedWorkflows,
   listWorkflowSnapshots,
@@ -3376,6 +3377,35 @@ class QwenAgent implements Agent {
   private sessions: Map<string, Session> = new Map();
   private readonly historyMutationTails = new Map<string, Promise<void>>();
   private readonly startingSessionIds = new Set<string>();
+  /**
+   * R7-10: workflow registries of sessions already removed from
+   * `this.sessions` whose runs have not finished settling. Consulted by
+   * `isWorkflowRunLiveOutsideSession` so a delete-history cannot delete
+   * an orphaned live run out from under itself. Pruned as they drain.
+   */
+  private readonly detachedWorkflowRegistries = new Set<WorkflowRunRegistry>();
+  /**
+   * R5-9: mutual exclusion for workflow task mutations, keyed by the task
+   * ALONE — never by session. All sessions in this child share one
+   * snapshot store, so a claim scoped to `sessionId\0taskId` serialized
+   * nothing that matters: a sibling session's retry of the same runId ran
+   * concurrently with a delete-history and neither saw the other. The
+   * retry passes `canStart` (`failed`, no handle), then awaits journal
+   * load/compile before `register()`; a delete landing in that structural
+   * window finds the run terminal and handle-less in every registry,
+   * removes the journal directory and snapshot, and answers
+   * `{changed: true}` — after which the retry's `register()` and its
+   * settlement re-persist the history the user was told was deleted.
+   *
+   * Every mutating action takes this claim (delete-history, retry, rerun,
+   * run-saved) and answers `{changed: false}` when it is already held.
+   * Once a retry has registered, `isWorkflowRunLiveOutsideSession` takes
+   * over and keeps deletion blocked for the life of the run.
+   *
+   * `run-saved` keys off a saved workflow's NAME rather than a runId, so
+   * it claims in its own namespace — a saved workflow named like a runId
+   * must not serialize against that run's history deletion.
+   */
   private readonly mutatingWorkflowTaskIds = new Set<string>();
   private activePromptCalls = new Map<string, Set<ActivePromptCall>>();
   private workspaceMcpDiscoveryConfig: Config | undefined;
@@ -4016,6 +4046,21 @@ class QwenAgent implements Agent {
       cleanupErrors.push(error);
     }
     this.sessions.delete(sessionId);
+    // R7-10: the registry outlives the session map entry while its runs
+    // settle. Keep it reachable so the liveness gate still sees them.
+    // Retention is bookkeeping, not cleanup: a Config that cannot answer
+    // must not turn a successful close into a shutdown failure.
+    try {
+      const registry = session.getConfig().getWorkflowRunRegistry?.();
+      if (registry && QwenAgent.isWorkflowRegistryDraining(registry)) {
+        this.detachedWorkflowRegistries.add(registry);
+      }
+    } catch (error) {
+      debugLogger.warn(
+        `Session ${sessionId}: could not retain its workflow registry for liveness checks:`,
+        error,
+      );
+    }
     // A Session missing from the next snapshot is how the daemon learns the
     // child released it — including when it never saw our close response.
     this.activeWorkReporter?.notifyChanged();
@@ -10919,7 +10964,9 @@ class QwenAgent implements Agent {
         if (!this.canUseWorkflowControls(config)) {
           return { changed: false };
         }
-        const mutationClaim = `${sessionId}\0${taskId}`;
+        // Task-global, NOT session-scoped — see `mutatingWorkflowTaskIds`.
+        const mutationClaim =
+          action === 'run-saved' ? `saved\0${taskId}` : taskId;
         if (action === 'delete-history') {
           if (this.mutatingWorkflowTaskIds.has(mutationClaim)) {
             return { changed: false };
@@ -10946,34 +10993,42 @@ class QwenAgent implements Agent {
         }
         const registry = config.getWorkflowRunRegistry();
         if (action === 'run-saved') {
-          const savedWorkflow = (await listSavedWorkflows(config)).find(
-            (entry) => entry.name === taskId,
-          );
-          if (!savedWorkflow) return { changed: false };
-          const workflowTool = config
-            .getToolRegistry()
-            .getTool(ToolNames.WORKFLOW);
-          if (!isSessionOwnedWorkflowTool(workflowTool)) {
-            throw RequestError.invalidParams(
-              undefined,
-              'The workflow tool is unavailable; cannot run this saved workflow.',
-            );
+          if (this.mutatingWorkflowTaskIds.has(mutationClaim)) {
+            return { changed: false };
           }
-          const result = (await workflowTool
-            .buildSessionOwnedBackground({
-              scriptPath: savedWorkflow.scriptPath,
-            })
-            .execute(new AbortController().signal)) as WorkflowToolResult;
-          const startedTask = result.workflowRunId
-            ? registry.get(result.workflowRunId)
-            : undefined;
-          return startedTask
-            ? {
-                changed: true,
-                status: startedTask.status,
-                taskId: startedTask.runId,
-              }
-            : { changed: false };
+          this.mutatingWorkflowTaskIds.add(mutationClaim);
+          try {
+            const savedWorkflow = (await listSavedWorkflows(config)).find(
+              (entry) => entry.name === taskId,
+            );
+            if (!savedWorkflow) return { changed: false };
+            const workflowTool = config
+              .getToolRegistry()
+              .getTool(ToolNames.WORKFLOW);
+            if (!isSessionOwnedWorkflowTool(workflowTool)) {
+              throw RequestError.invalidParams(
+                undefined,
+                'The workflow tool is unavailable; cannot run this saved workflow.',
+              );
+            }
+            const result = (await workflowTool
+              .buildSessionOwnedBackground({
+                scriptPath: savedWorkflow.scriptPath,
+              })
+              .execute(new AbortController().signal)) as WorkflowToolResult;
+            const startedTask = result.workflowRunId
+              ? registry.get(result.workflowRunId)
+              : undefined;
+            return startedTask
+              ? {
+                  changed: true,
+                  status: startedTask.status,
+                  taskId: startedTask.runId,
+                }
+              : { changed: false };
+          } finally {
+            this.mutatingWorkflowTaskIds.delete(mutationClaim);
+          }
         }
         const task = registry.get(taskId);
         if (!task) return { changed: false };
@@ -12923,6 +12978,25 @@ class QwenAgent implements Agent {
    * see every sibling registry — or it can delete a run another session
    * is still executing or settling. A handle outlives the terminal
    * transition until the snapshot write lands, so it blocks too.
+   *
+   * R7-10: iterating `this.sessions` alone left a blind spot the width of
+   * a whole run. A workflow can outlive its owning session's removal —
+   * explicit close/kill/shutdown use force semantics, and a background
+   * run owns a detached controller — so once `removeStoredSessionEntry`
+   * deleted the session, a still-settling run became invisible here and
+   * unreachable by the delete handler's sibling `removeTerminal` loop. A
+   * sibling `delete-history` then passed every check, removed the LIVE
+   * run's journal directory and snapshot, and answered `{changed: true}`;
+   * the orphan kept going and its settlement `writeWorkflowSnapshot`
+   * recreated the file — resurrection, plus a run whose journal was rm'd
+   * under it.
+   *
+   * The repair has two halves. `Session.dispose()` now aborts its
+   * workflow registry the way it already aborts the agent registry, so an
+   * orphan settles instead of running on; and the registry of a removed
+   * session stays reachable here until its runs drain, so the gate keeps
+   * answering for the settlement window that abort cannot compress to
+   * zero (the handle is released only after the snapshot write lands).
    */
   private isWorkflowRunLiveOutsideSession(
     excludeSessionId: string,
@@ -12930,12 +13004,54 @@ class QwenAgent implements Agent {
   ): boolean {
     for (const [sessionId, session] of this.sessions) {
       if (sessionId === excludeSessionId) continue;
-      const registry = session.getConfig().getWorkflowRunRegistry();
-      const entry = registry.get(runId);
-      if (entry && !isTerminalWorkflowStatus(entry.status)) return true;
-      if (registry.getHandle(runId)) return true;
+      if (
+        QwenAgent.isWorkflowRunLiveInRegistry(
+          session.getConfig().getWorkflowRunRegistry(),
+          runId,
+        )
+      ) {
+        return true;
+      }
+    }
+    this.pruneDrainedWorkflowRegistries();
+    for (const registry of this.detachedWorkflowRegistries) {
+      if (QwenAgent.isWorkflowRunLiveInRegistry(registry, runId)) return true;
     }
     return false;
+  }
+
+  private static isWorkflowRunLiveInRegistry(
+    registry: WorkflowRunRegistry,
+    runId: string,
+  ): boolean {
+    const entry = registry.get(runId);
+    if (entry && !isTerminalWorkflowStatus(entry.status)) return true;
+    return registry.getHandle(runId) !== undefined;
+  }
+
+  /**
+   * Registries of removed sessions are retained only while they still
+   * hold work — an aborted run keeps its handle until settlement releases
+   * it. Dropping drained ones keeps this from becoming a leak that grows
+   * with every closed session.
+   */
+  private pruneDrainedWorkflowRegistries(): void {
+    for (const registry of this.detachedWorkflowRegistries) {
+      if (!QwenAgent.isWorkflowRegistryDraining(registry)) {
+        this.detachedWorkflowRegistries.delete(registry);
+      }
+    }
+  }
+
+  /** Still holding work: an active entry, or a handle awaiting settlement. */
+  private static isWorkflowRegistryDraining(
+    registry: WorkflowRunRegistry,
+  ): boolean {
+    if (registry.hasRunningEntries?.()) return true;
+    return (
+      registry.list?.().some((entry) => registry.getHandle(entry.runId)) ??
+      false
+    );
   }
 
   private async createAndStoreSession(

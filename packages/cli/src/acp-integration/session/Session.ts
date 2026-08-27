@@ -2010,6 +2010,18 @@ export class Session implements SessionContext {
   #statusChangeCallback: (() => void) | undefined;
   #workflowStatusChangeCallback: ((entry?: WorkflowTask) => void) | undefined;
   private workflowHistory: WorkflowSnapshot[];
+  /**
+   * R7-5: runIds whose snapshot write this session has observed. Latches
+   * `#rememberWorkflowHistory` off so a post-persistence status emission
+   * cannot resurrect a sibling-deleted run. See that method.
+   */
+  private readonly persistedWorkflowRunIds = new Set<string>();
+  /**
+   * R7-4: every runId the last `refreshWorkflowHistory` merged, BEFORE the
+   * MAX_RETAINED_SNAPSHOTS cap. `workflowHistory` is the display window;
+   * this is what deletion tests membership against.
+   */
+  private mergedWorkflowRunIds = new Set<string>();
   private readonly unpersistedWorkflowHistory = new Map<
     string,
     WorkflowSnapshot
@@ -3407,6 +3419,10 @@ export class Session implements SessionContext {
         this.unpersistedWorkflowHistory.delete(runId);
       }
     }
+    // R7-4: the returned/stored history is the capped display window, but
+    // deletion must reason about the whole merged set — keep it before the
+    // slice rather than making callers re-derive it.
+    this.mergedWorkflowRunIds = new Set(byRunId.keys());
     this.workflowHistory = [...byRunId.values()]
       .sort((a, b) => b.startTime - a.startTime)
       .slice(0, MAX_RETAINED_SNAPSHOTS);
@@ -3429,12 +3445,29 @@ export class Session implements SessionContext {
     }
     await this.refreshWorkflowHistory();
     if (!isDeletable()) return false;
-    if (!this.workflowHistory.some((item) => item.runId === runId)) {
+    // R7-4: membership must be tested against everything the client can
+    // SEE, not against the capped window. `buildSessionTasksStatus`
+    // serializes every registry entry unconditionally, while
+    // `refreshWorkflowHistory` truncates to MAX_RETAINED_SNAPSHOTS by
+    // startTime — so a long run that settles after ~30 newer ones started
+    // stays listed via the registry but falls out of the window, and the
+    // capped check answered `{changed: false}` forever. It was terminal,
+    // handle-free and live in no sibling: nothing but the window kept it
+    // undeletable. `deleteWorkflowSnapshot` already tolerates an absent
+    // target, so widening the gate cannot delete something that is not
+    // there.
+    if (
+      !this.mergedWorkflowRunIds.has(runId) &&
+      registry.get(runId) === undefined &&
+      !this.unpersistedWorkflowHistory.has(runId)
+    ) {
       return false;
     }
     if (!(await deleteWorkflowSnapshot(this.config, runId))) return false;
     registry.removeTerminal(runId);
     this.unpersistedWorkflowHistory.delete(runId);
+    this.mergedWorkflowRunIds.delete(runId);
+    this.persistedWorkflowRunIds.delete(runId);
     this.workflowHistory = this.workflowHistory.filter(
       (item) => item.runId !== runId,
     );
@@ -3443,7 +3476,28 @@ export class Session implements SessionContext {
   }
 
   #rememberWorkflowHistory(entry: WorkflowTask): void {
-    if (!isTerminalWorkflowStatus(entry.status)) return;
+    if (!isTerminalWorkflowStatus(entry.status)) {
+      // Back in an active state means this runId was registered afresh
+      // (a retry/resume reuses it), so its next settlement must be
+      // remembered again — release the R7-5 latch here rather than
+      // wiring a second registry callback for it.
+      this.persistedWorkflowRunIds.delete(entry.runId);
+      return;
+    }
+    // R7-5: retirement is a latch, not a one-shot. The registry's
+    // dispatch-drain callbacks (onAgentCompleted / onBudgetUpdated /
+    // onDispatchSettled) emit status changes on TERMINAL entries with no
+    // status gate, and in-flight dispatches keep draining across the
+    // snapshot write — so a terminal emission routinely lands AFTER
+    // `notifySnapshotPersisted` retired the cache entry. Without this
+    // guard each late emission re-inserted the run as "never persisted",
+    // and a sibling session's deletion was then undone by the next
+    // refresh: absent on disk but present in the stale cache reads as a
+    // pending write, so the deleted run was republished and stayed for
+    // the life of the session. Cleared on re-registration
+    // (`#forgetPersistedWorkflowRun`) so a genuine re-run of the same
+    // runId is remembered again.
+    if (this.persistedWorkflowRunIds.has(entry.runId)) return;
     const snapshot = toSnapshot(entry);
     this.unpersistedWorkflowHistory.set(snapshot.runId, snapshot);
     this.workflowHistory = [
@@ -3931,6 +3985,14 @@ export class Session implements SessionContext {
       shellRegistry.clearStatusChangeCallback(this.#shellStatusChangeCallback);
       this.#shellStatusChangeCallback = undefined;
     }
+    // R7-10: mirror the agent registry's treatment above. Without this a
+    // workflow outlives its session's removal — close/kill/shutdown use
+    // force semantics and a background run owns a detached controller —
+    // and an orphan that nothing can see keeps writing its snapshot,
+    // recreating history a sibling session just deleted. Abort BEFORE the
+    // callbacks are cleared so the cancellation still reaches this
+    // session's own bookkeeping.
+    this.config.getWorkflowRunRegistry().abortAll();
     this.config.getWorkflowRunRegistry().setCompletionCallback(undefined);
     this.config
       .getWorkflowRunRegistry()
@@ -8801,7 +8863,10 @@ export class Session implements SessionContext {
     );
     workflowRegistry.setSnapshotPersistedCallback((runId) => {
       // The run is safely on disk now; drop the unpersisted copy so a
-      // deletion by another session cannot resurrect it on refresh.
+      // deletion by another session cannot resurrect it on refresh. The
+      // latch makes that retirement stick against the late terminal
+      // emissions draining dispatches still produce (R7-5).
+      this.persistedWorkflowRunIds.add(runId);
       this.unpersistedWorkflowHistory.delete(runId);
     });
     workflowRegistry.setCompletionCallback((displayText, modelText, meta) => {
