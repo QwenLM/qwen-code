@@ -615,7 +615,9 @@ function getGoalState(
   const lastReason = getString(source, 'lastReason');
   const limitKindRaw = getString(source, 'limitKind');
   const limitKind =
-    limitKindRaw === 'evidence_catalog' || limitKindRaw === 'checkpoint_request'
+    limitKindRaw === 'evidence_catalog' ||
+    limitKindRaw === 'checkpoint_request' ||
+    limitKindRaw === 'token_budget'
       ? limitKindRaw
       : undefined;
   return {

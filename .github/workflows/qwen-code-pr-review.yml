@@ -2038,9 +2038,18 @@ jobs:
   # cannot land that late — its cancel fires at run creation, seconds in.
   # A manual run-cancel during the delay window goes
   # silent under this rule (the person who cancelled does not need retry
-  # guidance); a manual cancel of review-pr alone mid-review still posts,
-  # benign as before. The PR number comes from the event payload, not the
-  # dead job's outputs, which do not survive a crash.
+  # guidance); a cancel landing mid-review still posts, but with the
+  # cancellation body, not the failure one — the step branches on
+  # REVIEW_PR_RESULT. For a cancel nothing failed and nothing retries
+  # automatically, so the failure body's claims are false and read as a
+  # pipeline outage to the PR author (issue #10109: run 32875478404 was
+  # run-cancelled two minutes into the review, no successor run existed,
+  # and the full "pipeline failed" comment posted anyway). The cancelled
+  # case cannot simply go silent: the job-level-timeout flavor — the very
+  # reason 'cancelled' is admitted here — reaches this job as the same
+  # result, so one accurate body covers both flavors. The PR number comes
+  # from the event payload, not the dead job's outputs, which do not
+  # survive a crash.
   fallback-comment:
     needs:
       [
@@ -2075,6 +2084,7 @@ jobs:
         env:
           GH_TOKEN: '${{ secrets.CI_BOT_PAT }}'
           PR_NUMBER: '${{ github.event.pull_request.number || github.event.issue.number || github.event.inputs.pr_number }}'
+          REVIEW_PR_RESULT: '${{ needs.review-pr.result }}'
           RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
         run: |-
           set -uo pipefail
@@ -2198,7 +2208,20 @@ jobs:
             echo "Skipping fallback comment: a bot review of this PR was submitted after this run was created." >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
-          body="**Qwen Code review did not complete successfully.** The review pipeline failed before a review could be posted. A transient error is retried automatically; if you are seeing this, retry with \`@qwen-code /review\`. See [workflow logs](${RUN_URL})."
+          # A cancelled review-pr reaches this job through the gate's
+          # compound clause with two indistinguishable-in-`needs` flavors:
+          # its own job-level timeout (auto-CANCELLED by GitHub), and a
+          # run/job cancel landing after the upstream chain finished. For
+          # neither is the failure body true — nothing failed, nothing is
+          # retried automatically (issue #10109) — so the cancelled case
+          # gets one body accurate for both flavors. It keeps the
+          # `[workflow logs](RUN_URL)` markdown link the cross-job dedup
+          # anchors on, and the retry instruction the timeout flavor needs.
+          if [ "$REVIEW_PR_RESULT" = "cancelled" ]; then
+            body="**Qwen Code review was cancelled before a review could be posted.** Nothing failed and nothing is retried automatically: the run was cancelled — by an operator, an upstream event, or the job exceeding its execution time limit. If you still want a review of this PR, request one with \`@qwen-code /review\`. See [workflow logs](${RUN_URL})."
+          else
+            body="**Qwen Code review did not complete successfully.** The review pipeline failed before a review could be posted. A transient error is retried automatically; if you are seeing this, retry with \`@qwen-code /review\`. See [workflow logs](${RUN_URL})."
+          fi
           body="$(printf '%s\n\n%s' "$FALLBACK_MARKER" "$body")"
           gh pr comment "$PR_NUMBER" \
             --repo "$GITHUB_REPOSITORY" \

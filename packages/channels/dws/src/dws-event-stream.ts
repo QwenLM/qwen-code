@@ -216,7 +216,15 @@ export const startDwsEventProcess: DwsEventProcessStarter = (
         if (state === 'pending') {
           settleStartupError(lastError ?? processError(code));
         } else if (state === 'ready' && !stopping) {
-          reportError(lastError ?? processError(code));
+          // A clean exit certifies any recorded stderr error as stale: the
+          // consumer chose to finish after writing it. The live-line clear in
+          // the stdout handler cannot be relied on for the final line — on
+          // Windows the pipe routinely drains only after `exitCode` is set,
+          // so its liveness gate (which protects errors from being cleared
+          // by lines buffered across a crash) also swallows that clear.
+          reportError(
+            code === 0 ? processError(code) : (lastError ?? processError(code)),
+          );
         }
       });
     });
