@@ -104,4 +104,27 @@ describe('ChatContextHeader', () => {
       'Toggle right panel',
     ]);
   });
+
+  it('opens the token usage panel from the trailing header action', () => {
+    const onOpenTokenUsage = vi.fn();
+    const view = mount({ rightPanelAvailable: true, onOpenTokenUsage });
+    const actions = Array.from(
+      view.querySelectorAll<HTMLButtonElement>('button'),
+    );
+
+    expect(actions.map((button) => button.getAttribute('aria-label'))).toEqual([
+      'Toggle environment information',
+      'Session token usage',
+      'Toggle right panel',
+    ]);
+    act(() => actions[1]!.click());
+    expect(onOpenTokenUsage).toHaveBeenCalledOnce();
+  });
+
+  it('hides the token usage action when no session is available', () => {
+    const view = mount();
+    expect(
+      view.querySelector('button[aria-label="Session token usage"]'),
+    ).toBeNull();
+  });
 });

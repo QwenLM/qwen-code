@@ -140,6 +140,7 @@ export type InvalidGoalEvidenceReferenceCode =
   | 'wrong_turn_lineage'
   | 'catalog_truncated'
   | 'immediate_blocker_external_evidence_required'
+  | 'infeasible_blocker_external_fact_required'
   | 'immediate_blocker_newer_evidence_required'
   | 'repeated_blocker_turn_coverage';
 
@@ -890,9 +891,24 @@ function validateBlockerCoverage(
 ): void {
   if (proposal.status !== 'blocked') return;
 
+  // Infeasibility is a claim about the world, so it is held to external
+  // facts only: user input can authorise stopping, but it cannot make an
+  // objective impossible, and assistant prose saying so is exactly the
+  // "I think this can't be done" exit this kind must not become.
+  if (
+    proposal.blockerKind === 'infeasible' &&
+    !citedRecords.some(({ proofKind }) => proofKind === 'external_fact')
+  ) {
+    throw new InvalidGoalEvidenceReferenceError(
+      'infeasible_blocker_external_fact_required',
+      'An infeasible blocker requires cited external tool evidence of the fact that makes the objective unsatisfiable.',
+    );
+  }
+
   if (
     proposal.blockerKind === 'authority' ||
-    proposal.blockerKind === 'external'
+    proposal.blockerKind === 'external' ||
+    proposal.blockerKind === 'infeasible'
   ) {
     if (
       !citedRecords.some(
