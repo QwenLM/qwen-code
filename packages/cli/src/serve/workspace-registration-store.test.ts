@@ -7,7 +7,7 @@
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { tmpdir } from 'node:os';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import {
   WorkspaceRegistrationStore,
   WorkspaceRegistrationStoreError,
@@ -35,6 +35,13 @@ afterEach(async () => {
 });
 
 describe('WorkspaceRegistrationStore', () => {
+  // update() lazily imports the core runtime; pre-warm its ~5s cold load so
+  // it lands in the hook budget, not the first timed add() under CI
+  // contention.
+  beforeAll(async () => {
+    await import('../utils/deferred-core-runtime.js');
+  }, 30_000);
+
   it('uses a full stable scope hash and returns an empty missing store', async () => {
     const home = await tempHome();
     const hash = workspaceRegistrationScopeHash('/work/primary');
