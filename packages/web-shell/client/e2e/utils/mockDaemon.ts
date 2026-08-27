@@ -690,6 +690,37 @@ function filterScenarioSessions(
     : sourceSessions;
 }
 
+type WorkspaceSessionsRouteMatch = {
+  workspaceCwd: string;
+  liveState: boolean;
+};
+
+function matchWorkspaceSessionsRoute(
+  path: string,
+): WorkspaceSessionsRouteMatch | undefined {
+  const liveStateMatch = path.match(
+    /^\/workspaces\/([^/]+)\/sessions\/live-state\/?$/,
+  );
+  if (liveStateMatch) {
+    return {
+      workspaceCwd: decodeURIComponent(liveStateMatch[1]),
+      liveState: true,
+    };
+  }
+
+  const sessionsMatch =
+    path.match(/^\/workspaces\/([^/]+)\/sessions\/?$/) ??
+    path.match(/^\/workspace\/([^/]+)\/sessions\/?$/);
+  if (!sessionsMatch) {
+    return undefined;
+  }
+
+  return {
+    workspaceCwd: decodeURIComponent(sessionsMatch[1]),
+    liveState: false,
+  };
+}
+
 function isDaemonPath(path: string): boolean {
   return (
     path === '/health' ||
@@ -715,9 +746,7 @@ function isDaemonPath(path: string): boolean {
     ) ||
     /^\/workspaces\/[^/]+\/channels\/[^/]+\/pairing-approvals\/?$/.test(path) ||
     /^\/workspaces\/[^/]+\/channels\/[^/]+\/?$/.test(path) ||
-    /^\/workspace\/[^/]+\/sessions\/?$/.test(path) ||
-    /^\/workspaces\/[^/]+\/sessions\/?$/.test(path) ||
-    /^\/workspaces\/[^/]+\/sessions\/live-state\/?$/.test(path) ||
+    Boolean(matchWorkspaceSessionsRoute(path)) ||
     /^\/workspace\/.+\/session-groups\/?$/.test(path) ||
     /^\/workspaces\/[^/]+\/session-groups\/?$/.test(path) ||
     /^\/workspaces\/.+\/git\/?$/.test(path) ||
@@ -804,17 +833,8 @@ function isDaemonRoute(method: string, path: string): boolean {
   ) {
     return true;
   }
-  if (
-    method === 'GET' &&
-    /^\/workspaces\/[^/]+\/sessions\/live-state\/?$/.test(path)
-  ) {
-    return true;
-  }
-  if (
-    method === 'GET' &&
-    (/^\/workspace\/[^/]+\/sessions\/?$/.test(path) ||
-      /^\/workspaces\/[^/]+\/sessions\/?$/.test(path))
-  ) {
+  const workspaceSessionsRoute = matchWorkspaceSessionsRoute(path);
+  if (method === 'GET' && workspaceSessionsRoute) {
     return true;
   }
   if (
@@ -1109,11 +1129,9 @@ async function handleDaemonRoute(
     await json(route, workspaceMcpResources(scenario, serverName));
     return;
   }
-  const workspaceLiveStateMatch = path.match(
-    /^\/workspaces\/([^/]+)\/sessions\/live-state\/?$/,
-  );
-  if (method === 'GET' && workspaceLiveStateMatch) {
-    const workspaceCwd = decodeURIComponent(workspaceLiveStateMatch[1]);
+  const workspaceSessionsRoute = matchWorkspaceSessionsRoute(path);
+  if (method === 'GET' && workspaceSessionsRoute?.liveState) {
+    const { workspaceCwd } = workspaceSessionsRoute;
     await json(route, {
       v: 1,
       catalogVersion: scenario.sessionCatalogVersion,
@@ -1136,14 +1154,8 @@ async function handleDaemonRoute(
     });
     return;
   }
-  const workspaceSessionsMatch = path.match(
-    /^\/workspaces\/([^/]+)\/sessions\/?$/,
-  );
-  const legacySessionsMatch = path.match(/^\/workspace\/([^/]+)\/sessions\/?$/);
-  if (method === 'GET' && (workspaceSessionsMatch || legacySessionsMatch)) {
-    const workspaceCwd = decodeURIComponent(
-      (workspaceSessionsMatch ?? legacySessionsMatch)?.[1] ?? '',
-    );
+  if (method === 'GET' && workspaceSessionsRoute) {
+    const { workspaceCwd } = workspaceSessionsRoute;
     await json(route, {
       sessions: filterScenarioSessions(scenario, searchParams, workspaceCwd),
     });
