@@ -8425,6 +8425,28 @@ describe('Server Config (config.ts)', () => {
       },
     );
 
+    it('does not register list_directory just because a permission rule covers it (#10075)', async () => {
+      // Pins the reverted #9829 side effect: `permissions.allow` / `ask`
+      // used to opt this tool in at registration. They are pure
+      // auto-approval now, so the opt-in gate must stay closed and only
+      // `tools.listDirectory.enabled` or `coreTools` can open it.
+      const config = new Config({
+        ...baseParams,
+        coreTools: undefined,
+        permissions: { allow: ['ListFiles'], ask: ['ListFiles'] },
+      });
+      await config.initialize();
+
+      const registerToolMock = (
+        (await vi.importMock('../tools/tool-registry')) as {
+          ToolRegistry: { prototype: { registerFactory: Mock } };
+        }
+      ).ToolRegistry.prototype.registerFactory;
+      expect(
+        (registerToolMock as Mock).mock.calls.map((call) => call[0]),
+      ).not.toContain(ToolNames.LS);
+    });
+
     it('should ignore coreTools overrides in bare mode', async () => {
       const config = new Config({
         ...baseParams,

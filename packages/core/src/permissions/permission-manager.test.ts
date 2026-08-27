@@ -2823,6 +2823,25 @@ describe('PermissionManager', () => {
       );
     });
 
+    it('tolerates non-string entries instead of crashing initialize()', async () => {
+      // Settings load performs no element-type validation (the schema
+      // declares only `type: 'array'`), so a stray number/null must be
+      // skipped rather than crash registry construction.
+      pm = new PermissionManager(
+        makeConfig({
+          eagerTools: [null, 42, 'ReadFile'] as unknown as string[],
+        }),
+      );
+      expect(() => pm.initialize()).not.toThrow();
+      expect(pm.isEagerToolAllowListActive()).toBe(true);
+      expect(await pm.getToolRegistrationStatus('read_file')).toBe(
+        'registered',
+      );
+      expect(await pm.getToolRegistrationStatus('send_message')).toBe(
+        'deferred',
+      );
+    });
+
     it('malformed entries drop out but still leave the list active', async () => {
       // Deferring more than intended is recoverable (ToolSearch still
       // reaches every tool); silently ignoring a configured list would
