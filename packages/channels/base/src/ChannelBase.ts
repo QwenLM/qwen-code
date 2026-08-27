@@ -532,7 +532,21 @@ export abstract class ChannelBase {
       await this.pushProactive(target, text);
       return;
     }
-    await this.sendResponseMessage(target.chatId, text, sessionId);
+    await this.deliverBackgroundReply(target.chatId, text, sessionId);
+  }
+
+  /**
+   * Fallback delivery of a background response when proactive send is
+   * unavailable. Adapters whose turn replies bypass sendResponseMessage (to
+   * stay out of turn-scoped streaming state, for example) override only this
+   * step instead of re-implementing the whole dispatch flow.
+   */
+  protected async deliverBackgroundReply(
+    chatId: string,
+    text: string,
+    sessionId: string,
+  ): Promise<void> {
+    await this.sendResponseMessage(chatId, text, sessionId);
   }
 
   async dispatchPermissionRequest(
@@ -6255,7 +6269,13 @@ export abstract class ChannelBase {
       } finally {
         promptBridge.off('textChunk', onChunk);
         promptBridge.off('responseBoundary', onResponseBoundary);
-        streamer?.stop();
+        if (streamer) {
+          streamer.stop();
+          // Queued block sends belong to this turn: let them land before
+          // onPromptEnd settles turn-scoped adapter state, or a send racing
+          // the settle can recreate discarded state and leak unredacted text.
+          await streamer.drain();
+        }
         // Identity guard: a turn that wedged past /clear's bounded wait gets
         // EVICTED — /clear gives up on active.done, deletes activePrompts, and a
         // turn the user starts AFTER the clear can re-seed activePrompts (and own
