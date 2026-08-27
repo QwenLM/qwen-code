@@ -3884,6 +3884,74 @@ describe('DingtalkChannel quoted media', () => {
     ).onMessage(downstream);
   }
 
+  it('downloads every picture in one richText callback', async () => {
+    const downloadCodes: string[] = [];
+    vi.spyOn(globalThis, 'fetch').mockImplementation(
+      (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.startsWith('https://oapi.dingtalk.com/gettoken')) {
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({ errcode: 0, access_token: 'app-token' }),
+              { status: 200 },
+            ),
+          );
+        }
+        if (
+          url === 'https://api.dingtalk.com/v1.0/robot/messageFiles/download'
+        ) {
+          const request = JSON.parse(String(init?.body)) as {
+            downloadCode: string;
+          };
+          downloadCodes.push(request.downloadCode);
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                downloadUrl: `https://example.com/${request.downloadCode}`,
+              }),
+              { status: 200 },
+            ),
+          );
+        }
+        const bytes = url.endsWith('/picture-1')
+          ? new Uint8Array([1])
+          : new Uint8Array([2]);
+        return Promise.resolve(
+          new Response(bytes, {
+            status: 200,
+            headers: { 'content-type': 'image/png' },
+          }),
+        );
+      },
+    );
+    const channel = createChannel();
+
+    sendDirectMedia(channel, 'richText', {
+      richText: [
+        { type: 'picture', downloadCode: 'picture-1' },
+        { type: 'picture', downloadCode: 'picture-2' },
+      ],
+    });
+
+    await vi.waitFor(() => {
+      expect(channel.handleInbound).toHaveBeenCalledOnce();
+    });
+    const envelope = vi.mocked(channel.handleInbound).mock.calls[0]![0];
+    expect(downloadCodes).toEqual(['picture-1', 'picture-2']);
+    expect(envelope.attachments).toEqual([
+      {
+        type: 'image',
+        data: Buffer.from([1]).toString('base64'),
+        mimeType: 'image/png',
+      },
+      {
+        type: 'image',
+        data: Buffer.from([2]).toString('base64'),
+        mimeType: 'image/png',
+      },
+    ]);
+  });
+
   it('downloads a replied picture and attaches it to the prompt', async () => {
     const downloadCodes = mockMediaDownload(
       'image/png',
@@ -4094,11 +4162,7 @@ describe('DingtalkChannel quoted media', () => {
     if (filePath) tempDirs.add(dirname(filePath));
   });
 
-  // R4-1: ChannelBase resolves a single inline image per envelope (the first
-  // data-only image attachment fills imageBase64) and silently drops every
-  // later data-only attachment, so the quoted image must be file-backed when
-  // the message's own image already occupies the slot.
-  it('file-backs a quoted image when the message already carries its own image', async () => {
+  it('keeps a quoted image data-backed when the message carries its own image', async () => {
     const downloadCodes = mockMediaDownload(
       'image/png',
       new Uint8Array([1, 2, 3]),
@@ -4148,26 +4212,18 @@ describe('DingtalkChannel quoted media', () => {
       referencedText: '[image]',
     });
     expect(envelope.attachments).toHaveLength(2);
-    // The own image keeps the single inline slot ChannelBase resolves.
-    expect(envelope.attachments?.[0]).toEqual({
-      type: 'image',
-      data: Buffer.from([1, 2, 3]).toString('base64'),
-      mimeType: 'image/png',
-    });
-    // The quoted image must not be a second data-only attachment — that shape
-    // is silently dropped by ChannelBase's single-image resolution.
-    const quotedAttachment = envelope.attachments?.[1];
-    expect(quotedAttachment).toMatchObject({
-      type: 'image',
-      mimeType: 'image/png',
-    });
-    expect(quotedAttachment).not.toHaveProperty('data');
-    const filePath = quotedAttachment?.filePath;
-    if (filePath) tempDirs.add(dirname(filePath));
-    expect(filePath).toBeTruthy();
-    expect(existsSync(filePath!)).toBe(true);
-    expect(readFileSync(filePath!)).toEqual(Buffer.from([1, 2, 3]));
-    expect(quotedAttachment?.fileName).toMatch(/^dingtalk_image_\d+\.png$/);
+    expect(envelope.attachments).toEqual([
+      {
+        type: 'image',
+        data: Buffer.from([1, 2, 3]).toString('base64'),
+        mimeType: 'image/png',
+      },
+      {
+        type: 'image',
+        data: Buffer.from([1, 2, 3]).toString('base64'),
+        mimeType: 'image/png',
+      },
+    ]);
   });
 
   it('cleans the generated placeholder for a direct file message', async () => {

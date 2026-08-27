@@ -15,7 +15,7 @@
 2226 assign-issue-owner.yml
 3480 audio-capture-prebuilds.yml
 9023 auto-minimize-spam.yml
-4638 build-and-publish-image.yml
+9256 build-and-publish-image.yml
 49610 cd-cua-driver.yml
 2076 cd-mobile-mcp.yml
 81137 ci.yml
@@ -34,7 +34,7 @@
 6495 pr-self-report-label.yml
 9646 qwen-autofix-fork-bridge.yml
 5942 qwen-autofix-fork-signal.yml
-397656 qwen-autofix.yml
+404284 qwen-autofix.yml
 7061 qwen-ci-flaky-rerun.yml
 158010 qwen-code-pr-review.yml
 79041 qwen-fleet-shepherd.yml

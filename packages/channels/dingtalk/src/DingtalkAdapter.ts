@@ -2293,16 +2293,7 @@ export class DingtalkChannel extends ChannelBase {
     const media = await downloadMedia(downloadCode, robotCode, token);
     if (!media) return;
 
-    // ChannelBase fills a single imageBase64 slot from the FIRST data-only
-    // image attachment and silently drops every later one, so an image
-    // arriving after the slot is taken (e.g. a quoted picture alongside the
-    // message's own picture) falls through to the file-backed path — the
-    // `saved to:` prompt line is what keeps it reachable for the agent.
-    const inlineImageSlotFree = !(envelope.attachments || []).some(
-      (attachment) => attachment.type === 'image' && attachment.data,
-    );
-
-    if (mediaType === 'image' && inlineImageSlotFree) {
+    if (mediaType === 'image') {
       const mimeType = media.mimeType.startsWith('image/')
         ? media.mimeType
         : 'image/jpeg';
@@ -2518,15 +2509,17 @@ export class DingtalkChannel extends ChannelBase {
       }
 
       const processMessage = async () => {
-        // Download media if present (first downloadCode only for images)
+        // Download media in callback order.
         if (content.downloadCodes.length > 0 && content.mediaType) {
-          await this.attachMedia(
-            envelope,
-            content.downloadCodes[0]!,
-            content.mediaType,
-            content.fileName,
-            content.placeholder,
-          );
+          for (const downloadCode of content.downloadCodes) {
+            await this.attachMedia(
+              envelope,
+              downloadCode,
+              content.mediaType,
+              content.fileName,
+              content.placeholder,
+            );
+          }
         }
         if (quoted.media) {
           await this.attachMedia(

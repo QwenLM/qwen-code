@@ -54,6 +54,7 @@ import {
 import type {
   AvailableCommand,
   ChannelAgentBridge,
+  ChannelPromptImage,
   ChannelLoopToolCreateInput,
   ChannelLoopToolResult,
   PermissionRequestEvent,
@@ -5262,15 +5263,22 @@ export abstract class ChannelBase {
       promptText = `[Replying to: "${quoted}"]\n\n${promptText}`;
     }
 
-    // Resolve attachments: extract image for bridge, append file paths to text
+    // Resolve attachments: extract images for bridge, append file paths to text
     let imageBase64 = envelope.imageBase64;
     let imageMimeType = envelope.imageMimeType;
+    const images: ChannelPromptImage[] = [];
+    if (imageBase64 && imageMimeType) {
+      images.push({ data: imageBase64, mimeType: imageMimeType });
+    }
     if (envelope.attachments?.length) {
       const filePaths: string[] = [];
       for (const att of envelope.attachments) {
-        if (att.type === 'image' && att.data && !imageBase64) {
-          imageBase64 = att.data;
-          imageMimeType = att.mimeType;
+        if (att.type === 'image' && att.data) {
+          images.push({ data: att.data, mimeType: att.mimeType });
+          if (!imageBase64) {
+            imageBase64 = att.data;
+            imageMimeType = att.mimeType;
+          }
         } else if (att.filePath) {
           const label = att.type === 'file' ? 'file' : att.type;
           // The filename is attacker-supplied (e.g. DingTalk), so neutralize both
@@ -5669,6 +5677,7 @@ export abstract class ChannelBase {
 
       try {
         const response = await promptBridge.prompt(sessionId, promptToSend, {
+          ...(images.length > 0 ? { images } : {}),
           imageBase64,
           imageMimeType,
           displayText,

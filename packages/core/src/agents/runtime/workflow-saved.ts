@@ -16,6 +16,12 @@
  * Precedence: when the same `<name>.js` exists in both scopes, the
  * project-level file wins (matches `FileCommandLoader`'s project-over-user
  * precedence for custom commands).
+ *
+ * A third root, `<projectDir>/workflows/generated`
+ * (`Storage.getGeneratedWorkflowsDir`), is trusted for `{scriptPath}` loads
+ * only. Scripts a tool generates for a single run go there: they are neither
+ * listed as slash commands nor resolvable by name, so emitting one never
+ * hands the user a command for a run that is already over.
  */
 
 import { promises as fs } from 'node:fs';
@@ -88,7 +94,20 @@ export function getSavedWorkflowDirs(config: Config): Array<{
 }
 
 /**
- * True when a saved-workflow root dir is itself a symlink. `readWorkflowFileSecurely`
+ * Every directory a `{scriptPath}` may resolve into: both saved scopes plus
+ * the generated-scripts root. Name resolution and discovery deliberately use
+ * {@link getSavedWorkflowDirs} instead — a generated script is loadable by
+ * path, never addressable by name.
+ */
+export function getWorkflowScriptRoots(config: Config): string[] {
+  return [
+    ...getSavedWorkflowDirs(config).map(({ dir }) => dir),
+    config.storage.getGeneratedWorkflowsDir(),
+  ];
+}
+
+/**
+ * True when a workflow script root dir is itself a symlink. `readWorkflowFileSecurely`
  * realpaths the root so it can tolerate symlinked *ancestors* (e.g. a project under
  * macOS `/tmp -> /private/tmp`); but that same laundering turns a checked-in
  * `.qwen/workflows -> /outside` link into the allowed boundary — letting discovery
@@ -98,7 +117,7 @@ export function getSavedWorkflowDirs(config: Config): Array<{
  * all three operations. A missing dir (the common case) is not a symlink, so this
  * is transparent until someone actually links the dir.
  */
-async function isSymlinkedRoot(dir: string): Promise<boolean> {
+export async function isSymlinkedRoot(dir: string): Promise<boolean> {
   return fs
     .lstat(dir)
     .then((st) => st.isSymbolicLink())
@@ -139,35 +158,42 @@ async function listJsFiles(dir: string): Promise<string[]> {
 
 /**
  * Read a candidate workflow file, but only after proving its canonical real
- * path stays inside one of the saved-workflow directories. `fs.realpath`
- * resolves both `..` and symlinks, so this single check defeats path
- * traversal (a `name`/`scriptPath` containing `..`) AND symlink escape (a
- * file inside the dir that links out). Throws otherwise.
+ * path stays inside one of the workflow script roots (the saved-workflow
+ * directories or the generated-scripts root). `fs.realpath` resolves both
+ * `..` and symlinks, so this single check defeats path traversal (a
+ * `name`/`scriptPath` containing `..`) AND symlink escape (a file inside the
+ * dir that links out). Throws otherwise.
  */
 async function readWorkflowFileSecurely(
   filePath: string,
   config: Config,
 ): Promise<string> {
   const real = await fs.realpath(filePath); // throws ENOENT if absent
-  const dirs = (
-    await Promise.all(
-      getSavedWorkflowDirs(config).map(async ({ dir }) => {
-        // Exclude a symlinked root: realpath(dir) would launder a
-        // `.qwen/workflows -> /outside` link into the allowed boundary, so a
-        // file resolving under the link's target would pass the check below.
-        if (await isSymlinkedRoot(dir)) return null;
-        try {
-          return await fs.realpath(dir);
-        } catch {
-          return path.resolve(dir);
-        }
-      }),
-    )
-  ).filter((d): d is string => d !== null);
+  const roots = await Promise.all(
+    getWorkflowScriptRoots(config).map(async (dir) => {
+      // Exclude a symlinked root: realpath(dir) would launder a
+      // `.qwen/workflows -> /outside` link into the allowed boundary, so a
+      // file resolving under the link's target would pass the check below.
+      if (await isSymlinkedRoot(dir)) return { dir, real: null };
+      try {
+        return { dir, real: await fs.realpath(dir) };
+      } catch {
+        return { dir, real: path.resolve(dir) };
+      }
+    }),
+  );
+  const dirs = roots.flatMap((r) => (r.real === null ? [] : [r.real]));
   const inside = dirs.some((d) => real === d || real.startsWith(d + path.sep));
   if (!inside) {
+    // Keep refused-but-considered roots visible: dropping a symlinked root
+    // from the list reads as if the loader never considered it at all.
+    const refused = roots.flatMap((r) => (r.real === null ? [r.dir] : []));
+    const refusedNote =
+      refused.length > 0
+        ? `; refused symlinked ${refused.length === 1 ? 'root' : 'roots'}: ${refused.join(', ')}`
+        : '';
     throw new Error(
-      `refusing to load a workflow file outside the saved-workflow directories: '${filePath}'.`,
+      `refusing to load a workflow file outside the workflow script roots (checked: ${dirs.join(', ')}${refusedNote}): '${filePath}'.`,
     );
   }
   return fs.readFile(real, 'utf8');
@@ -200,7 +226,8 @@ export async function listSavedWorkflows(
 /**
  * Resolve `workflow('<name>')` or `workflow({scriptPath})` to a loaded
  * script. The string form looks up `<name>.js` in project then user scope;
- * the `{scriptPath}` form reads the file at the given path directly.
+ * the `{scriptPath}` form reads the file at the given path directly, which
+ * may sit in either saved scope or under the generated-scripts root.
  *
  * Throws with an actionable, available-names message on a miss — the
  * message text mirrors upstream so scripts written against either runtime
