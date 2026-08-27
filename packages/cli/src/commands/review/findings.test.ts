@@ -2105,4 +2105,62 @@ describe('validateFindings — the canonical artifact round-trips', () => {
     ).toBe('N/A');
     expect(validateFindings([{ ...base }])[0].fixWitness).toBeUndefined();
   });
+
+  it('keeps fixConstraint, and drops the N/A its sibling field allows', () => {
+    // The fact the fix must not violate — the premise half of #10153, beside
+    // the claim half `fixWitness` carries. It round-trips like every sibling
+    // so Step 7's comment body reads it from data rather than re-deriving a
+    // constant or a file:line the finder already quoted.
+    const constraint =
+      'any bound here must be <= MAX_SUBAGENT_DEPTH_LIMIT = 100 ' +
+      '(packages/core/src/config/config.ts:1533)';
+    const [f] = validateFindings([
+      {
+        ...base,
+        fixWitness: 'N/A',
+        fixConstraint: constraint,
+      },
+    ]);
+    expect(f.fixConstraint).toBe(constraint);
+    expect(f.fixWitness).toBe('N/A');
+    expect(
+      validateFindings([{ ...base, fix_constraint: constraint }])[0]
+        .fixConstraint,
+    ).toBe(constraint);
+    // Absence stays absence: the field has no `N/A` form, because an empty
+    // constraint carries no information and would lengthen every posted
+    // comment (#9177). A finder that copies the fixWitness habit and writes
+    // the placeholder anyway must not hand the poster a "constraint" — the
+    // literal is normalised to absence so presence alone is the signal.
+    expect(validateFindings([{ ...base }])[0].fixConstraint).toBeUndefined();
+    for (const placeholder of [
+      'N/A',
+      'n/a',
+      'NA',
+      'none',
+      'None.',
+      ' N/A ',
+      // The omission literals the finding format and the posting rule name
+      // — the finder told to omit the line is the one most likely to write
+      // one, and carried through it would hand Step 7 a "constraint" that
+      // names no constant and no file:line.
+      'none observed',
+      'None observed',
+      'None observed.',
+      'no constraints observed',
+    ]) {
+      expect(
+        validateFindings([{ ...base, fixConstraint: placeholder }])[0]
+          .fixConstraint,
+      ).toBeUndefined();
+    }
+    // And the drop is narrow: a real constraint that merely CONTAINS one of
+    // the words survives — the bar for the field is a quoted constant or a
+    // file:line, and neither collapses to a placeholder.
+    expect(
+      validateFindings([
+        { ...base, fixConstraint: 'none of the callers pass 0 (src/a.ts:12)' },
+      ])[0].fixConstraint,
+    ).toBe('none of the callers pass 0 (src/a.ts:12)');
+  });
 });
