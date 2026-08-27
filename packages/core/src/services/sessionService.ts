@@ -376,6 +376,7 @@ export const SESSION_TITLE_MAX_LENGTH = 200;
  * (32-36 hex characters, optionally with hyphens).
  */
 const SESSION_FILE_PATTERN = /^[0-9a-fA-F-]{32,36}\.jsonl$/;
+const PR_SIDECAR_FILE_PATTERN = /^[0-9a-fA-F-]{32,36}\.pr\.json$/;
 /** Maximum number of lines to scan when looking for the first prompt text. */
 const MAX_PROMPT_SCAN_LINES = 10;
 /**
@@ -777,6 +778,58 @@ export class SessionService {
     pr: { number: number; url: string },
   ): void {
     this.sessionPrBoundCallback?.(sessionId, pr);
+  }
+
+  /**
+   * Lists session ids that have a PR sidecar in the given archive state's
+   * chats dir. Unlike {@link listSessions} (transcript-driven), this also
+   * sees sessions whose binding sidecar was written before their first
+   * transcript flush.
+   */
+  listSessionIdsWithPrSidecar(archiveState: SessionArchiveState): string[] {
+    const chatsDir = this.getChatsDirForState(archiveState);
+    let fileNames: string[];
+    try {
+      fileNames = fs.readdirSync(chatsDir);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
+      throw error;
+    }
+    return fileNames
+      .filter((name) => PR_SIDECAR_FILE_PATTERN.test(name))
+      .map((name) => name.slice(0, -'.pr.json'.length));
+  }
+
+  /**
+   * Project-membership check for sidecar-driven callers (the PR refresh
+   * sweep) that enumerate chats-dir files directly. That enumeration —
+   * unlike {@link listSessions} — also sees sessions of other projects
+   * whose sanitized cwds collide onto the same chats dir, so the
+   * transcript head must pass the same rule listSessions applies when it
+   * exists. A missing transcript is inconclusive: the sidecar may predate
+   * the session's first flush, so the binding must stay refreshable.
+   */
+  async sessionPrSidecarBelongsToCurrentProject(
+    sessionId: string,
+    archiveState: SessionArchiveState,
+  ): Promise<boolean> {
+    let records: ChatRecord[];
+    try {
+      records = await jsonl.readLines<ChatRecord>(
+        this.getSessionFilePath(sessionId, archiveState),
+        1,
+      );
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        this.warn(
+          `sessionPrSidecarBelongsToCurrentProject: failed to read ${sessionId}: ${error}`,
+        );
+      }
+      return true;
+    }
+    const head = records[0];
+    if (!head || typeof head.cwd !== 'string') return true;
+    return this.sessionBelongsToCurrentProject(sessionId, head.cwd);
   }
 
   private async readProjectSessionHead(
@@ -1936,6 +1989,54 @@ export class SessionService {
     };
   }
 
+  async getSessionListItem(
+    sessionId: string,
+    archiveState: SessionArchiveState = 'active',
+  ): Promise<SessionListItem | undefined> {
+    if (!SESSION_FILE_PATTERN.test(`${sessionId}.jsonl`)) return undefined;
+    const filePath = this.getSessionFilePath(sessionId, archiveState);
+    let stats: fs.Stats;
+    try {
+      stats = fs.statSync(filePath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+      throw error;
+    }
+    const records = await jsonl.readLines<ChatRecord>(
+      filePath,
+      MAX_PROMPT_SCAN_LINES,
+    );
+    if (records.length === 0) return undefined;
+    const firstRecord = records[0];
+    if (
+      !(await this.sessionBelongsToCurrentProject(
+        firstRecord.sessionId,
+        firstRecord.cwd,
+      ))
+    ) {
+      return undefined;
+    }
+    const titleInfo = this.readSessionTitleInfoFromFile(filePath);
+    const source = this.extractCreationMetadataFromRecords(records);
+    return {
+      sessionId: firstRecord.sessionId,
+      cwd: firstRecord.cwd,
+      startTime: firstRecord.timestamp,
+      mtime: stats.mtimeMs,
+      prompt: this.extractFirstPromptFromRecords(records),
+      gitBranch: firstRecord.gitBranch,
+      filePath,
+      customTitle: titleInfo.title,
+      titleSource: titleInfo.source,
+      ...(source.parentSessionId
+        ? { parentSessionId: source.parentSessionId }
+        : {}),
+      ...(source.sourceType ? { sourceType: source.sourceType } : {}),
+      ...(source.sourceId !== undefined ? { sourceId: source.sourceId } : {}),
+      isArchived: archiveState === 'archived',
+    };
+  }
+
   /**
    * Counts persisted sessions for this project by scanning the active and
    * archived chats directories.
@@ -2017,14 +2118,15 @@ export class SessionService {
   }
 
   /**
-   * Enumerates persisted session ids for one archive state by scanning the
-   * chats directory directly, in deterministic filename order. Paging
-   * `listSessions` instead would permanently miss every session whose mtime
-   * ties a page's last entry (its mtime cursor boundary is a strict `<`),
-   * so bulk consumers that need the FULL set must use this instead of
-   * paging. Membership is checked the same way as `listSessions`.
+   * Enumerates every persisted session id of this project for one archive
+   * state by reading the chats dir directly, in deterministic filename
+   * order. Unlike {@link listSessions} there is no mtime cursor and no
+   * page size: an exhaustive sweep paged by the strict `mtime < cursor`
+   * filter would silently skip sessions that share an mtime with a page's
+   * last entry, on every run. Membership is checked the same way as
+   * {@link listSessions}.
    */
-  async enumerateSessionIdsForArchiveState(
+  async listAllProjectSessionIds(
     archiveState: SessionArchiveState,
   ): Promise<string[]> {
     const chatsDir = this.getChatsDirForState(archiveState);
@@ -3447,6 +3549,22 @@ function remapSystemPayloadForFork(
       sourceSessionId,
       newSessionId,
     );
+  }
+  if (record.subtype === 'ui_telemetry') {
+    const payload = record.systemPayload as
+      | { uiEvent?: Record<string, unknown> }
+      | undefined;
+    const promptId = payload?.uiEvent?.['prompt_id'];
+    const sourcePrefix = `${sourceSessionId}#`;
+    if (typeof promptId === 'string' && promptId.startsWith(sourcePrefix)) {
+      return {
+        ...(payload ?? {}),
+        uiEvent: {
+          ...payload?.uiEvent,
+          prompt_id: `${newSessionId}${promptId.slice(sourceSessionId.length)}`,
+        },
+      } as ChatRecord['systemPayload'];
+    }
   }
   if (
     record.subtype === 'session_artifact_event' ||

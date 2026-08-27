@@ -269,7 +269,7 @@ describe('fetchGitHubPullRequests', () => {
         '--limit',
         '500',
         '--json',
-        'number,url,headRefName,state,updatedAt',
+        'number,url,headRefName,state',
       ],
       expect.objectContaining({ cwd: dir }),
       expect.any(Function),

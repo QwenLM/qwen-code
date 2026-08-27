@@ -27,7 +27,7 @@ export const GITHUB_PR_LIST_LIMIT = 30;
 const GH_PR_LIST_FIELDS =
   'number,title,url,author,headRefName,isDraft,reviewDecision,statusCheckRollup,updatedAt,state';
 
-const GH_PR_LIST_FIELDS_SLIM = 'number,url,headRefName,state,updatedAt';
+const GH_PR_LIST_FIELDS_SLIM = 'number,url,headRefName,state';
 
 export type GitHubPullRequestState = 'open' | 'draft' | 'merged' | 'closed';
 
@@ -188,9 +188,9 @@ export interface FetchGitHubPullRequestsOptions {
   /** `open` (default, glanceable panel) or `all` (merged/closed heads too). */
   state?: 'open' | 'all';
   /**
-   * Request only number/url/headRefName/state/updatedAt. The panel's CI
-   * rollup field makes large `--state all` queries hit GitHub GraphQL server
-   * timeouts (504); branch-mapping consumers like PR backfill don't need it.
+   * Request only number/url/headRefName/state. The panel's CI rollup field
+   * makes large `--state all` queries hit GitHub GraphQL server timeouts
+   * (504); branch-mapping consumers like PR backfill don't need it.
    */
   slim?: boolean;
 }

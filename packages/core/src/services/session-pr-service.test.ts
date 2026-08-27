@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { existsSync } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
@@ -18,12 +18,24 @@ import {
   mergeSessionPrLists,
   moveSessionPrSidecar,
   readSessionPrs,
+  replaceSessionPrs,
   updateSessionPrStates,
   upsertSessionPr,
   upsertSessionPrs,
   writeSessionPrs,
   type SessionPr,
+  type SessionPrState,
 } from './session-pr-service.js';
+
+const fsMocks = vi.hoisted(() => ({
+  readFile: vi.fn<typeof import('node:fs/promises').readFile>(),
+}));
+
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>();
+  fsMocks.readFile.mockImplementation(actual.readFile);
+  return { ...actual, readFile: fsMocks.readFile };
+});
 
 const entry = (number: number): SessionPr => ({
   number,
@@ -35,6 +47,7 @@ let tmpDir: string;
 let filePath: string;
 
 beforeEach(async () => {
+  fsMocks.readFile.mockClear();
   tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'session-pr-test-'));
   filePath = path.join(tmpDir, 'test.pr.json');
 });
@@ -112,15 +125,29 @@ describe('upsertSessionPr', () => {
     expect(prs.map((p) => p.number)).toEqual([100, 101]);
   });
 
-  it('re-binding the same number refreshes it and moves it to latest', async () => {
-    await upsertSessionPr(filePath, { number: 100, url: entry(100).url });
-    await upsertSessionPr(filePath, { number: 101, url: entry(101).url });
+  it('re-binding the same PR refreshes it and moves it to latest', async () => {
+    await writeSessionPrs(filePath, [entry(100), entry(101)]);
     const prs = await upsertSessionPr(filePath, {
       number: 100,
       url: 'https://github.com/owner/repo/pull/100?updated=1',
     });
+    // A query-string variant names the same PR: state carries over, but
+    // the re-bind is a fresh binding event (latest slot, new createdAt) —
+    // the backfill cap planner relies on the fresh createdAt to tell a
+    // concurrent re-bind from an untouched snapshot entry.
     expect(prs.map((p) => p.number)).toEqual([101, 100]);
     expect(prs[1]?.url).toContain('updated=1');
+    expect(prs[1]?.createdAt).not.toBe(entry(100).createdAt);
+  });
+
+  it('re-binding the same number to another repo moves it to latest', async () => {
+    await upsertSessionPr(filePath, { number: 100, url: entry(100).url });
+    await upsertSessionPr(filePath, { number: 101, url: entry(101).url });
+    const prs = await upsertSessionPr(filePath, {
+      number: 100,
+      url: 'https://github.com/other/repo/pull/100',
+    });
+    expect(prs.map((p) => p.number)).toEqual([101, 100]);
   });
 
   it('caps the list at SESSION_PR_LIST_LIMIT, dropping the oldest', async () => {
@@ -230,10 +257,11 @@ describe('upsertSessionPr', () => {
     expect((await readSessionPrs(filePath))?.[0]?.source).toBe('worktree');
   });
 
-  it('rewrites a same-URL refresh in place, keeping position and createdAt', async () => {
-    // A state-only refresh of an existing binding is not a re-bind: moving
-    // it to the tail with a fresh createdAt falsifies the binding-time
-    // order the badge and archive merges render by.
+  it('re-bind of the same PR moves it to latest with a fresh createdAt', async () => {
+    // A re-bind is a fresh binding event (latest slot, new createdAt) —
+    // the backfill cap planner relies on the fresh createdAt to tell a
+    // concurrent re-bind from an untouched snapshot entry. State-only
+    // refreshes go through updateSessionPrStates, which preserves order.
     await writeSessionPrs(filePath, [
       { ...entry(100), state: 'open' },
       entry(101),
@@ -243,9 +271,9 @@ describe('upsertSessionPr', () => {
       url: entry(100).url,
       state: 'merged',
     });
-    expect(prs.map((p) => p.number)).toEqual([100, 101]);
-    expect(prs[0]?.state).toBe('merged');
-    expect(prs[0]?.createdAt).toBe(entry(100).createdAt);
+    expect(prs.map((p) => p.number)).toEqual([101, 100]);
+    expect(prs[1]?.state).toBe('merged');
+    expect(prs[1]?.createdAt).not.toBe(entry(100).createdAt);
     expect(await readSessionPrs(filePath)).toEqual(prs);
   });
 });
@@ -579,6 +607,34 @@ describe('upsertSessionPrs', () => {
     expect(result.prs.map((p) => p.number)).toEqual([100, 8]);
     expect(await readSessionPrs(filePath)).toEqual(result.prs);
   });
+
+  it('does not carry state onto a same-numbered PR of another repository', async () => {
+    await upsertSessionPr(filePath, {
+      number: 100,
+      url: 'https://github.com/repo-a/owner/pull/100',
+      state: 'merged',
+    });
+    const prs = await upsertSessionPr(filePath, {
+      number: 100,
+      url: 'https://github.com/repo-b/owner/pull/100',
+    });
+    expect(prs).toHaveLength(1);
+    expect(prs[0]?.url).toBe('https://github.com/repo-b/owner/pull/100');
+    expect(prs[0]?.state).toBeUndefined();
+  });
+
+  it('carries state when the re-bind spells the same PR differently', async () => {
+    await upsertSessionPr(filePath, {
+      number: 100,
+      url: 'https://github.com/Owner/Repo/pull/100/',
+      state: 'merged',
+    });
+    const prs = await upsertSessionPr(filePath, {
+      number: 100,
+      url: 'https://github.com/owner/repo/pull/100?v=2',
+    });
+    expect(prs[0]?.state).toBe('merged');
+  });
 });
 
 describe('updateSessionPrStates', () => {
@@ -586,6 +642,12 @@ describe('updateSessionPrStates', () => {
     url: entry(number).url,
     state,
   });
+  const fetched = (
+    number: number,
+    state: SessionPrState,
+    url: string = entry(number).url,
+  ): ReadonlyMap<number, { state: SessionPrState; url: string }> =>
+    new Map([[number, { state, url }]]);
 
   it('rewrites states in place without touching order or createdAt', async () => {
     await writeSessionPrs(filePath, [
@@ -664,6 +726,116 @@ describe('updateSessionPrStates', () => {
     const persisted = await readSessionPrs(filePath);
     expect(persisted?.find((p) => p.number === 100)?.state).toBe('merged');
     expect(persisted?.find((p) => p.number === 101)).toBeDefined();
+  });
+
+  it('applies a fetched state only when its url matches the entry', async () => {
+    // The map is keyed by number, but the metadata route accepts any
+    // http(s) url: a binding that points at another repository must never
+    // pick up this repo's same-numbered PR state (and a wrong terminal
+    // state would be permanent — merged entries leave the sweep).
+    await writeSessionPrs(filePath, [{ ...entry(100), state: 'open' }]);
+    const updated = await updateSessionPrStates(
+      filePath,
+      fetched(
+        100,
+        'merged',
+        'https://github.com/other-org/other-repo/pull/100',
+      ),
+    );
+    expect(updated).toBe(0);
+    const persisted = await readSessionPrs(filePath);
+    expect(persisted?.[0]?.state).toBe('open');
+  });
+
+  it('refreshes a binding whose url is canonical-equivalent to the fetched one', async () => {
+    // Binding urls preserve the user's remote casing (backfill's remote
+    // fallback) or carry dialog spelling variants, while gh returns the
+    // server-canonical spelling; GitHub repo paths are case-insensitive,
+    // so a byte-unequal comparison skips the entry on every sweep — it
+    // can never reach the terminal merged state.
+    await writeSessionPrs(filePath, [
+      {
+        ...entry(100),
+        url: 'https://github.com/OWNER/REPO/pull/100/?v=2',
+        state: 'open',
+      },
+    ]);
+    const updated = await updateSessionPrStates(
+      filePath,
+      fetched(100, 'merged'),
+    );
+    expect(updated).toBe(1);
+    const persisted = await readSessionPrs(filePath);
+    expect(persisted?.[0]?.state).toBe('merged');
+  });
+
+  it('does not resurrect a sidecar deleted between the queued read and the write commit', async () => {
+    // Deletion and archive moves unlink the sidecar outside the mutation
+    // queue. Force the race deterministically: the queued read captures the
+    // contents, the deletion lands the moment the read resolves, and only
+    // the commit-step guard can still stop the stale write.
+    await writeSessionPrs(filePath, [{ ...entry(100), state: 'open' }]);
+    const raw = await fs.readFile(filePath, 'utf-8');
+    fsMocks.readFile.mockImplementationOnce(async () => {
+      await fs.unlink(filePath);
+      return raw;
+    });
+    await expect(
+      updateSessionPrStates(filePath, fetched(100, 'merged'), {
+        assertCanCommit: () => {
+          if (!existsSync(filePath)) {
+            throw new Error('sidecar vanished during refresh');
+          }
+        },
+      }),
+    ).rejects.toThrow('sidecar vanished during refresh');
+    expect(existsSync(filePath)).toBe(false);
+    // The rejected write must not wedge the queue for later mutations.
+    const recovered = await upsertSessionPr(filePath, {
+      number: 101,
+      url: entry(101).url,
+    });
+    expect(recovered.map((p) => p.number)).toEqual([101]);
+  });
+});
+
+describe('replaceSessionPrs', () => {
+  it('runs the planner against the freshest list inside the queue', async () => {
+    // The planner must see the result of mutations queued ahead of it —
+    // planning from a stale outer read would clobber a binding that lands
+    // between the caller's read and write.
+    await writeSessionPrs(filePath, [entry(100)]);
+    const seen: number[][] = [];
+    const upsert = upsertSessionPr(filePath, {
+      number: 101,
+      url: entry(101).url,
+    });
+    const replace = replaceSessionPrs(filePath, (existing) => {
+      seen.push(existing.map((p) => p.number));
+      return [...existing, entry(102)];
+    });
+    await Promise.all([upsert, replace]);
+    expect(seen).toEqual([[100, 101]]);
+    expect((await readSessionPrs(filePath))?.map((p) => p.number)).toEqual([
+      100, 101, 102,
+    ]);
+  });
+
+  it('leaves the file untouched when the planner returns null', async () => {
+    await writeSessionPrs(filePath, [entry(100)]);
+    const before = await fs.readFile(filePath, 'utf-8');
+    expect(await replaceSessionPrs(filePath, () => null)).toBeNull();
+    expect(await fs.readFile(filePath, 'utf-8')).toBe(before);
+  });
+
+  it('persists the planner result and returns it', async () => {
+    await writeSessionPrs(filePath, [entry(100)]);
+    const persisted = await replaceSessionPrs(filePath, (existing) =>
+      existing.filter((p) => p.number !== 100),
+    );
+    expect(persisted).toEqual([]);
+    // An empty list reads back as null (isValidSessionPrList rejects it).
+    expect(await readSessionPrs(filePath)).toBeNull();
   });
 });
 

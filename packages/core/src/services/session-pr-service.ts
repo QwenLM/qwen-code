@@ -368,16 +368,34 @@ function enqueuePrMutation<T>(
 }
 
 /**
+ * Canonical form of a binding url for same-target comparison: host/path
+ * case, trailing slashes, query, and fragment never change which PR a url
+ * names (GitHub hosts and repo paths are case-insensitive; query variants
+ * are cache-busters), while the repository path does — a same-numbered PR
+ * of a different repository is a different PR.
+ */
+export function canonicalSessionPrUrl(url: string): string {
+  try {
+    const parsed = new URL(url);
+    return `${parsed.origin}${parsed.pathname}`
+      .toLowerCase()
+      .replace(/\/+$/, '');
+  } catch {
+    return url.toLowerCase().replace(/\/+$/, '');
+  }
+}
+
+/**
  * Insert or refresh a binding (matched by PR number) and persist the list,
- * keeping at most {@link SESSION_PR_LIST_LIMIT} entries. A number re-bound
- * to a DIFFERENT url moves to the end (latest) with a fresh createdAt; a
- * same-url refresh rewrites the entry in place, preserving its position and
- * createdAt. An explicitly supplied `state` wins; an explicit `source` wins
- * only against a weaker-or-equal persisted one (a re-bind never downgrades
- * provenance). State never
- * crosses a URL change — the same number in another repository is another
- * PR, and inheriting a terminal 'merged' would poison the new binding
- * permanently (the sweep never re-queries merged entries).
+ * keeping at most {@link SESSION_PR_LIST_LIMIT} latest entries. A re-bind
+ * moves the number to the end (latest) with a fresh createdAt — the badge
+ * renders binding recency, and the backfill cap planner relies on the
+ * fresh createdAt to tell a concurrent re-bind from an untouched snapshot
+ * entry. An omitted `state` preserves the known one only for the same PR
+ * (same canonical url) — a different repository's same-numbered PR is a
+ * different PR and must not inherit a terminal state. An explicit `source`
+ * wins only against a weaker-or-equal persisted one (a re-bind never
+ * downgrades provenance).
  *
  * Entries the read-side shape check would reject are declined here: the
  * reader fails the WHOLE list closed, so persisting one poisoned entry would
@@ -394,7 +412,11 @@ export function upsertSessionPr(
 ): Promise<SessionPr[]> {
   return enqueuePrMutation(filePath, async () => {
     const existing = (await readSessionPrs(filePath)) ?? [];
-    const known = existing.find((entry) => entry.number === pr.number);
+    const known = existing.find(
+      (entry) =>
+        entry.number === pr.number &&
+        canonicalSessionPrUrl(entry.url) === canonicalSessionPrUrl(pr.url),
+    );
     // An explicit source upgrades the entry (review → create) but never
     // DOWNGRADES it: the worktree convention binding names the PR the
     // session exists for, and a client-driven re-bind stamping 'create'
@@ -404,26 +426,19 @@ export function upsertSessionPr(
       sourceAuthority(pr.source) >= sourceAuthority(known?.source)
         ? pr.source
         : known?.source;
-    const state =
-      pr.state ?? (known && known.url === pr.url ? known.state : undefined);
+    const state = pr.state ?? known?.state;
     const entry: SessionPr = {
       number: pr.number,
       url: pr.url,
-      createdAt:
-        known && known.url === pr.url
-          ? known.createdAt
-          : new Date().toISOString(),
+      createdAt: new Date().toISOString(),
       ...(state ? { state } : {}),
       ...(source ? { source } : {}),
     };
     if (!isValidSessionPr(entry)) return existing;
-    const next =
-      known && known.url === pr.url
-        ? existing.map((e) => (e.number === pr.number ? entry : e))
-        : capSessionPrListByAuthority([
-            ...existing.filter((e) => e.number !== pr.number),
-            entry,
-          ]);
+    const next = [
+      ...existing.filter((e) => e.number !== pr.number),
+      entry,
+    ].slice(-SESSION_PR_LIST_LIMIT);
     await writeSessionPrs(filePath, next);
     return next;
   });
@@ -490,7 +505,11 @@ export function upsertSessionPrs(
         (known ? alreadyBound : unresolved).push(candidate.number);
         continue;
       }
-      if (known && known.url === candidate.url) {
+      if (
+        known &&
+        canonicalSessionPrUrl(known.url) ===
+          canonicalSessionPrUrl(candidate.url)
+      ) {
         if (
           candidate.source !== undefined &&
           sourceAuthority(candidate.source) > sourceAuthority(known.source)
@@ -542,16 +561,19 @@ export function upsertSessionPrs(
 /**
  * Rewrites bound PR states in place — order and createdAt are preserved, so
  * a refresh sweep never reshuffles the badge's "latest" entry. Each stamp
- * carries the URL the state was resolved under; an entry whose url no
- * longer matches was re-bound to another PR during the sweep's gh window
- * and is skipped — stamping by bare number across that window would write
- * the stale repo's state onto the new binding. Returns the number of
+ * carries the URL the state was resolved under; an entry whose canonical
+ * url no longer matches was re-bound to another PR during the sweep's gh
+ * window and is skipped — stamping by bare number across that window would
+ * write the stale repo's state onto the new binding. Returns the number of
  * entries actually rewritten; 0 when the sidecar is absent/invalid or
- * nothing changed (no write then).
+ * nothing changed (no write then). `assertCanCommit` runs inside the
+ * mutation queue right before the irreversible write commit; a throw
+ * aborts the write.
  */
 export function updateSessionPrStates(
   filePath: string,
-  states: ReadonlyMap<number, { url: string; state: SessionPrState }>,
+  states: ReadonlyMap<number, { state: SessionPrState; url: string }>,
+  options: { assertCanCommit?: () => void } = {},
 ): Promise<number> {
   return enqueuePrMutation(filePath, async () => {
     const existing = await readSessionPrs(filePath);
@@ -561,7 +583,8 @@ export function updateSessionPrStates(
       const stamped = states.get(entry.number);
       if (
         stamped === undefined ||
-        stamped.url !== entry.url ||
+        canonicalSessionPrUrl(stamped.url) !==
+          canonicalSessionPrUrl(entry.url) ||
         stamped.state === entry.state
       ) {
         return entry;
@@ -570,7 +593,7 @@ export function updateSessionPrStates(
       return { ...entry, state: stamped.state };
     });
     if (changed === 0) return 0;
-    await writeSessionPrs(filePath, next);
+    await writeSessionPrs(filePath, next, options);
     return changed;
   });
 }
@@ -635,4 +658,25 @@ export function moveSessionPrSidecar(
       await fs.unlink(sourcePath);
     }),
   );
+}
+
+/**
+ * Replace the sidecar with a precomputed list atomically with respect to
+ * concurrent mutations: the planner runs inside the mutation queue against
+ * the freshest list, so a plan-then-write cycle cannot clobber a binding
+ * that lands between the caller's read and write. The planner returns the
+ * replacement list, or null to leave the file untouched. Resolves with the
+ * persisted list, or null when nothing changed.
+ */
+export function replaceSessionPrs(
+  filePath: string,
+  plan: (existing: SessionPr[]) => SessionPr[] | null,
+): Promise<SessionPr[] | null> {
+  return enqueuePrMutation(filePath, async () => {
+    const existing = (await readSessionPrs(filePath)) ?? [];
+    const next = plan(existing);
+    if (next === null) return null;
+    await writeSessionPrs(filePath, next);
+    return next;
+  });
 }

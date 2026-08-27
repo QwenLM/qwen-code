@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { existsSync } from 'node:fs';
 import * as fsp from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -16,10 +17,18 @@ import {
   type SessionService,
 } from '@qwen-code/qwen-code-core';
 import { createWorkspaceRuntimeSessionService } from '../workspace-runtime-storage.js';
-import type {
-  WorkspaceRegistry,
-  WorkspaceRuntime,
+import {
+  WorkspaceGenerationClosedError,
+  createWorkspaceGenerationGuard,
+  createWorkspaceRegistry,
+  type WorkspaceGenerationGuard,
+  type WorkspaceRuntime,
 } from '../workspace-registry.js';
+import {
+  DaemonDrainingError,
+  SessionArchiveCoordinator,
+} from './session-archive.js';
+import * as sessionListModule from './session-list.js';
 import {
   refreshWorkspaceSessionPrStates,
   resolveSessionPrRefreshIntervalMs,
@@ -31,10 +40,25 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
   fetchGitHubPullRequests: vi.fn(),
 }));
 
+const fsMocks = vi.hoisted(() => ({
+  readFile: vi.fn<typeof import('node:fs/promises').readFile>(),
+  realReadFile: undefined as
+    | undefined
+    | typeof import('node:fs/promises').readFile,
+}));
+
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>();
+  fsMocks.realReadFile = actual.readFile;
+  fsMocks.readFile.mockImplementation(actual.readFile);
+  return { ...actual, readFile: fsMocks.readFile };
+});
+
 const fetchGitHubPullRequestsMock = vi.mocked(fetchGitHubPullRequests);
 
 const SESSION_A = '00000000-0000-4000-8000-000000000001';
 const SESSION_B = '00000000-0000-4000-8000-000000000002';
+const SESSION_C = '00000000-0000-4000-8000-000000000003';
 
 function pr(number: number, state: string) {
   return {
@@ -76,9 +100,7 @@ describe('resolveSessionPrRefreshIntervalMs', () => {
     ).toBe(300_000);
   });
 
-  it('treats a blank value as unset, not a disable', () => {
-    // `Number('')` is 0: without the blank check an env var that is set
-    // but empty would silently turn the sweep off.
+  it('treats a blank value as unset, not as a disable', () => {
     expect(
       resolveSessionPrRefreshIntervalMs({
         QWEN_SESSION_PR_REFRESH_MINUTES: '',
@@ -91,15 +113,37 @@ describe('resolveSessionPrRefreshIntervalMs', () => {
     ).toBe(300_000);
   });
 
-  it('clamps values beyond the setTimeout delay limit back to the default', () => {
-    // Node clamps delays above 2^31-1 ms to ~1ms — an unclamped minutes
-    // value would fire the sweep in a tight loop.
+  it('falls back to the default below one minute', () => {
+    expect(
+      resolveSessionPrRefreshIntervalMs({
+        QWEN_SESSION_PR_REFRESH_MINUTES: '0.0001',
+      }),
+    ).toBe(300_000);
+    expect(
+      resolveSessionPrRefreshIntervalMs({
+        QWEN_SESSION_PR_REFRESH_MINUTES: '1',
+      }),
+    ).toBe(60_000);
+  });
+
+  it('falls back to the default when the converted ms overflows the 32-bit timer max', () => {
+    // setInterval clamps out-of-range delays to 1 ms; without the fallback a
+    // "monthly" interval would become a continuous sweep hot loop.
     expect(
       resolveSessionPrRefreshIntervalMs({
         QWEN_SESSION_PR_REFRESH_MINUTES: '43200',
       }),
     ).toBe(300_000);
-    // The largest whole-minute value still under the limit stays honored.
+    expect(
+      resolveSessionPrRefreshIntervalMs({
+        QWEN_SESSION_PR_REFRESH_MINUTES: '1e308',
+      }),
+    ).toBe(300_000);
+    expect(
+      resolveSessionPrRefreshIntervalMs({
+        QWEN_SESSION_PR_REFRESH_MINUTES: '35792',
+      }),
+    ).toBe(300_000);
     expect(
       resolveSessionPrRefreshIntervalMs({
         QWEN_SESSION_PR_REFRESH_MINUTES: '35791',
@@ -113,6 +157,7 @@ describe('refreshWorkspaceSessionPrStates', () => {
   let workspaceCwd: string;
   let runtime: WorkspaceRuntime;
   let sessionService: SessionService;
+  let markSessionCatalogChanged: ReturnType<typeof vi.fn>;
 
   beforeEach(async () => {
     vi.clearAllMocks();
@@ -123,19 +168,26 @@ describe('refreshWorkspaceSessionPrStates', () => {
       path.join(os.tmpdir(), 'qwen-pr-refresh-work-'),
     );
     process.env['QWEN_RUNTIME_DIR'] = runtimeDir;
+    markSessionCatalogChanged = vi.fn();
     runtime = {
       workspaceId: 'primary',
       workspaceCwd,
       sessionRuntimeBaseDir: runtimeDir,
       primary: true,
       trusted: true,
-      env: { mode: 'parent-process', overlayKeys: [] },
+      env: {
+        mode: 'parent-process',
+        overlayKeys: [],
+        effectiveEnv: { GH_TOKEN: 'x' },
+      },
+      bridge: { markSessionCatalogChanged },
     } as unknown as WorkspaceRuntime;
     sessionService = createWorkspaceRuntimeSessionService(runtime);
   });
 
   afterEach(async () => {
     delete process.env['QWEN_RUNTIME_DIR'];
+    fsMocks.readFile.mockImplementation(fsMocks.realReadFile!);
     await fsp.rm(runtimeDir, { recursive: true, force: true });
     await fsp.rm(workspaceCwd, { recursive: true, force: true });
   });
@@ -185,9 +237,305 @@ describe('refreshWorkspaceSessionPrStates', () => {
     expect(persisted?.[0]?.createdAt).toBe(seeded[0]?.createdAt);
     expect(fetchGitHubPullRequestsMock).toHaveBeenCalledWith(
       workspaceCwd,
-      undefined,
+      { GH_TOKEN: 'x' },
       { state: 'all', limit: 500, slim: true },
     );
+  });
+
+  it("never applies this workspace's state to a binding pointing at another repository", async () => {
+    // The metadata route accepts any http(s) pr.url, so a client can bind a
+    // foreign-repo PR whose number collides with this workspace's own; the
+    // workspace's same-numbered PR state must not leak onto it (a wrong
+    // 'merged' would also be permanent — merged entries leave the sweep).
+    await seedSession(SESSION_A);
+    const prPath = sessionService.getPrSessionPathForArchiveState(
+      SESSION_A,
+      'active',
+    );
+    await upsertSessionPr(prPath, {
+      number: 42,
+      url: 'https://github.com/other-org/other-repo/pull/42',
+      state: 'open',
+    });
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(42, 'merged')],
+    });
+
+    const result = await refreshWorkspaceSessionPrStates(runtime);
+
+    expect(result).toEqual({ scanned: 1, updated: 0 });
+    expect((await readSessionPrs(prPath))?.[0]?.state).toBe('open');
+  });
+
+  it('does not resurrect a sidecar whose session is deleted mid-sweep', async () => {
+    // Session deletion unlinks the transcript and sidecar outside the
+    // mutation queue. Land the deletion the moment the queued refresh read
+    // resolves; without the commit-step guard the write recreates the
+    // sidecar at the stale path and it haunts every future sweep.
+    await seedSession(SESSION_A);
+    const prPath = sessionService.getPrSessionPathForArchiveState(
+      SESSION_A,
+      'active',
+    );
+    await upsertSessionPr(prPath, {
+      number: 42,
+      url: 'https://github.com/o/r/pull/42',
+      state: 'open',
+    });
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(42, 'merged')],
+    });
+    const chatsDir = path.join(
+      new Storage(workspaceCwd).getProjectDir(),
+      'chats',
+    );
+    const transcriptPath = path.join(chatsDir, `${SESSION_A}.jsonl`);
+    let prPathReads = 0;
+    fsMocks.readFile.mockImplementation(async (...args) => {
+      const content = await fsMocks.realReadFile!(...args);
+      if (args[0] === prPath) {
+        prPathReads += 1;
+        // Second read is the queued refresh write's own read — the
+        // deletion lands right after it captured the contents.
+        if (prPathReads === 2) {
+          await fsp.unlink(transcriptPath);
+          await fsp.unlink(prPath);
+        }
+      }
+      return content;
+    });
+
+    const result = await refreshWorkspaceSessionPrStates(runtime);
+
+    expect(result).toEqual({ scanned: 1, updated: 0 });
+    expect(existsSync(prPath)).toBe(false);
+    expect(markSessionCatalogChanged).not.toHaveBeenCalled();
+  });
+
+  function attachGuard(target: WorkspaceRuntime): WorkspaceGenerationGuard {
+    const guard = createWorkspaceGenerationGuard();
+    (target as { generationGuard?: WorkspaceGenerationGuard }).generationGuard =
+      guard;
+    return guard;
+  }
+
+  async function seedOpenBinding(sessionId: string): Promise<string> {
+    await seedSession(sessionId);
+    const prPath = sessionService.getPrSessionPathForArchiveState(
+      sessionId,
+      'active',
+    );
+    await upsertSessionPr(prPath, {
+      number: 42,
+      url: 'https://github.com/o/r/pull/42',
+      state: 'open',
+    });
+    return prPath;
+  }
+
+  it('never runs gh for a retired runtime generation', async () => {
+    const prPath = await seedOpenBinding(SESSION_A);
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(42, 'merged')],
+    });
+    // The timer snapshots the runtime from the registry; a trust/env
+    // replacement that lands while the sidecar scan awaits closes its guard,
+    // and `gh` must not run with the retired generation's env.
+    attachGuard(runtime).close();
+
+    await expect(
+      refreshWorkspaceSessionPrStates(runtime),
+    ).rejects.toBeInstanceOf(WorkspaceGenerationClosedError);
+
+    expect(fetchGitHubPullRequestsMock).not.toHaveBeenCalled();
+    expect((await readSessionPrs(prPath))?.[0]?.state).toBe('open');
+    expect(markSessionCatalogChanged).not.toHaveBeenCalled();
+  });
+
+  it('commits nothing and notifies nobody once the generation closes mid-sweep', async () => {
+    const prPath = await seedOpenBinding(SESSION_A);
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(42, 'merged')],
+    });
+    const guard = attachGuard(runtime);
+    let prPathReads = 0;
+    fsMocks.readFile.mockImplementation(async (...args) => {
+      const content = await fsMocks.realReadFile!(...args);
+      if (args[0] === prPath) {
+        prPathReads += 1;
+        // Second read is the queued write's own read: the replacement lands
+        // after the sweep already fetched from gh and planned the rewrite.
+        if (prPathReads === 2) guard.close();
+      }
+      return content;
+    });
+
+    const result = await refreshWorkspaceSessionPrStates(runtime);
+
+    expect(result).toEqual({ scanned: 1, updated: 0 });
+    expect((await readSessionPrs(prPath))?.[0]?.state).toBe('open');
+    expect(markSessionCatalogChanged).not.toHaveBeenCalled();
+  });
+
+  it('defers a sidecar held by an archive lane to the next sweep', async () => {
+    const prPath = await seedOpenBinding(SESSION_A);
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(42, 'merged')],
+    });
+    const archiveCoordinator = new SessionArchiveCoordinator();
+    let release!: () => void;
+    // An archive/delete in flight holds the session's exclusive lane across
+    // its renames; the commit must not race it.
+    const archiving = archiveCoordinator.runExclusiveMany(
+      [SESSION_A],
+      () =>
+        new Promise<void>((resolve) => {
+          release = resolve;
+        }),
+    );
+
+    const held = await refreshWorkspaceSessionPrStates(runtime, undefined, {
+      archiveCoordinator,
+    });
+    expect(held).toEqual({ scanned: 1, updated: 0 });
+    expect((await readSessionPrs(prPath))?.[0]?.state).toBe('open');
+    expect(markSessionCatalogChanged).not.toHaveBeenCalled();
+
+    release();
+    await archiving;
+    const retried = await refreshWorkspaceSessionPrStates(runtime, undefined, {
+      archiveCoordinator,
+    });
+    expect(retried).toEqual({ scanned: 1, updated: 1 });
+    expect((await readSessionPrs(prPath))?.[0]?.state).toBe('merged');
+    expect(markSessionCatalogChanged).toHaveBeenCalledTimes(1);
+  });
+
+  it('stops the sweep once the daemon seals session maintenance', async () => {
+    const prPath = await seedOpenBinding(SESSION_A);
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(42, 'merged')],
+    });
+    const archiveCoordinator = new SessionArchiveCoordinator();
+    await archiveCoordinator.sealMaintenanceAndWait();
+
+    await expect(
+      refreshWorkspaceSessionPrStates(runtime, undefined, {
+        archiveCoordinator,
+      }),
+    ).rejects.toBeInstanceOf(DaemonDrainingError);
+
+    expect((await readSessionPrs(prPath))?.[0]?.state).toBe('open');
+    expect(markSessionCatalogChanged).not.toHaveBeenCalled();
+  });
+
+  it('counts only the bindings whose state was rewritten', async () => {
+    await seedSession(SESSION_A);
+    const prPath = sessionService.getPrSessionPathForArchiveState(
+      SESSION_A,
+      'active',
+    );
+    // 42 changes, 43 stays open: counting every pending binding present in
+    // the gh page would report two rewrites for one actual change.
+    await upsertSessionPr(prPath, {
+      number: 42,
+      url: 'https://github.com/o/r/pull/42',
+      state: 'open',
+    });
+    await upsertSessionPr(prPath, {
+      number: 43,
+      url: 'https://github.com/o/r/pull/43',
+      state: 'open',
+    });
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(42, 'merged'), pr(43, 'open')],
+    });
+
+    const result = await refreshWorkspaceSessionPrStates(runtime);
+
+    expect(result).toEqual({ scanned: 1, updated: 1 });
+    expect(
+      (await readSessionPrs(prPath))?.map((p) => [p.number, p.state]),
+    ).toEqual([
+      [42, 'merged'],
+      [43, 'open'],
+    ]);
+  });
+
+  it('invalidates the session-list cache and marks the catalog when a binding changed', async () => {
+    // The sidebar refetch is catalog-version-gated and the live-state
+    // payload carries no `prs`; a rewrite without this pairing leaves the
+    // stale badge on an otherwise-idle workspace indefinitely.
+    await seedSession(SESSION_A);
+    const prPath = sessionService.getPrSessionPathForArchiveState(
+      SESSION_A,
+      'active',
+    );
+    await upsertSessionPr(prPath, {
+      number: 42,
+      url: 'https://github.com/o/r/pull/42',
+      state: 'open',
+    });
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(42, 'merged')],
+    });
+    const invalidateSpy = vi.spyOn(
+      sessionListModule,
+      'invalidateWorkspaceSessionListCache',
+    );
+
+    try {
+      const result = await refreshWorkspaceSessionPrStates(runtime);
+
+      expect(result).toEqual({ scanned: 1, updated: 1 });
+      expect(invalidateSpy).toHaveBeenCalledWith({
+        runtimeBaseDir: runtimeDir,
+        workspaceCwd,
+        archiveStates: ['active', 'archived'],
+      });
+      expect(markSessionCatalogChanged).toHaveBeenCalledTimes(1);
+    } finally {
+      invalidateSpy.mockRestore();
+    }
+  });
+
+  it('leaves the cache and catalog untouched when no binding changed', async () => {
+    await seedSession(SESSION_A);
+    const prPath = sessionService.getPrSessionPathForArchiveState(
+      SESSION_A,
+      'active',
+    );
+    await upsertSessionPr(prPath, {
+      number: 42,
+      url: 'https://github.com/o/r/pull/42',
+      state: 'open',
+    });
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(42, 'open')],
+    });
+    const invalidateSpy = vi.spyOn(
+      sessionListModule,
+      'invalidateWorkspaceSessionListCache',
+    );
+
+    try {
+      const result = await refreshWorkspaceSessionPrStates(runtime);
+
+      expect(result).toEqual({ scanned: 1, updated: 0 });
+      expect(invalidateSpy).not.toHaveBeenCalled();
+      expect(markSessionCatalogChanged).not.toHaveBeenCalled();
+    } finally {
+      invalidateSpy.mockRestore();
+    }
   });
 
   it('skips gh entirely when every binding is merged', async () => {
@@ -242,9 +590,7 @@ describe('refreshWorkspaceSessionPrStates', () => {
       state: 'open',
     });
     fetchGitHubPullRequestsMock.mockResolvedValue({
-      kind: 'failed',
-      message: 'boom',
-      gitRoot: workspaceCwd,
+      kind: 'cli_unavailable',
     });
 
     const result = await refreshWorkspaceSessionPrStates(runtime);
@@ -253,9 +599,152 @@ describe('refreshWorkspaceSessionPrStates', () => {
     expect((await readSessionPrs(prPath))?.[0]?.state).toBe('open');
   });
 
+  async function seedArchivedSession(sessionId: string): Promise<void> {
+    await seedSession(sessionId);
+    const chatsDir = path.join(
+      new Storage(workspaceCwd).getProjectDir(),
+      'chats',
+    );
+    await fsp.mkdir(path.join(chatsDir, 'archive'), { recursive: true });
+    await fsp.rename(
+      path.join(chatsDir, `${sessionId}.jsonl`),
+      path.join(chatsDir, 'archive', `${sessionId}.jsonl`),
+    );
+  }
+
+  it('refreshes a sidecar written before the session flushed a transcript', async () => {
+    // No transcript: the bind route persists the sidecar before the first
+    // flush, and the sweep must still discover it.
+    const prPath = sessionService.getPrSessionPathForArchiveState(
+      SESSION_A,
+      'active',
+    );
+    await upsertSessionPr(prPath, {
+      number: 42,
+      url: 'https://github.com/o/r/pull/42',
+      state: 'open',
+    });
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(42, 'merged')],
+    });
+
+    const result = await refreshWorkspaceSessionPrStates(runtime);
+
+    expect(result).toEqual({ scanned: 1, updated: 1 });
+    expect((await readSessionPrs(prPath))?.[0]?.state).toBe('merged');
+  });
+
+  it('updates every pending session with one gh call per workspace', async () => {
+    await seedSession(SESSION_A);
+    const prPathA = sessionService.getPrSessionPathForArchiveState(
+      SESSION_A,
+      'active',
+    );
+    await upsertSessionPr(prPathA, {
+      number: 42,
+      url: 'https://github.com/o/r/pull/42',
+      state: 'open',
+    });
+    await seedSession(SESSION_B);
+    const prPathB = sessionService.getPrSessionPathForArchiveState(
+      SESSION_B,
+      'active',
+    );
+    await upsertSessionPr(prPathB, {
+      number: 43,
+      url: 'https://github.com/o/r/pull/43',
+      state: 'closed',
+    });
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(42, 'merged'), pr(43, 'merged')],
+    });
+
+    const result = await refreshWorkspaceSessionPrStates(runtime);
+
+    expect(result).toEqual({ scanned: 2, updated: 2 });
+    expect(fetchGitHubPullRequestsMock).toHaveBeenCalledTimes(1);
+    expect(fetchGitHubPullRequestsMock).toHaveBeenCalledWith(
+      workspaceCwd,
+      { GH_TOKEN: 'x' },
+      { state: 'all', limit: 500, slim: true },
+    );
+    expect((await readSessionPrs(prPathA))?.[0]?.state).toBe('merged');
+    expect((await readSessionPrs(prPathB))?.[0]?.state).toBe('merged');
+  });
+
+  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+    'keeps sweeping archived sessions when a sidecar write fails',
+    async () => {
+      await seedSession(SESSION_A);
+      const prPathA = sessionService.getPrSessionPathForArchiveState(
+        SESSION_A,
+        'active',
+      );
+      await upsertSessionPr(prPathA, {
+        number: 42,
+        url: 'https://github.com/o/r/pull/42',
+        state: 'open',
+      });
+      await seedArchivedSession(SESSION_B);
+      const prPathB = sessionService.getPrSessionPathForArchiveState(
+        SESSION_B,
+        'archived',
+      );
+      await upsertSessionPr(prPathB, {
+        number: 43,
+        url: 'https://github.com/o/r/pull/43',
+        state: 'open',
+      });
+      fetchGitHubPullRequestsMock.mockResolvedValue({
+        kind: 'ok',
+        pullRequests: [pr(42, 'merged'), pr(43, 'merged')],
+      });
+
+      const chatsDir = path.join(
+        new Storage(workspaceCwd).getProjectDir(),
+        'chats',
+      );
+      await fsp.chmod(chatsDir, 0o555);
+      try {
+        const result = await refreshWorkspaceSessionPrStates(runtime);
+
+        expect(result).toEqual({ scanned: 2, updated: 1 });
+        expect((await readSessionPrs(prPathA))?.[0]?.state).toBe('open');
+        expect((await readSessionPrs(prPathB))?.[0]?.state).toBe('merged');
+      } finally {
+        await fsp.chmod(chatsDir, 0o755);
+      }
+    },
+  );
+
   it('does not write back open for bindings missing from the gh page', async () => {
-    // Seeded 'closed': resurrecting page-absent bindings to 'open' would
-    // rewrite this entry (an 'open' seed makes that regression vacuous).
+    await seedSession(SESSION_A);
+    const prPath = sessionService.getPrSessionPathForArchiveState(
+      SESSION_A,
+      'active',
+    );
+    await upsertSessionPr(prPath, {
+      number: 999,
+      url: 'https://github.com/o/r/pull/999',
+      state: 'open',
+    });
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(42, 'merged')],
+    });
+
+    const result = await refreshWorkspaceSessionPrStates(runtime);
+
+    expect(result).toEqual({ scanned: 1, updated: 0 });
+    expect((await readSessionPrs(prPath))?.[0]?.state).toBe('open');
+  });
+
+  it('keeps a closed binding closed when its number is missing from the gh page', async () => {
+    // The sibling case seeds 'open', so a regression defaulting gh-absent
+    // numbers to 'open' would rewrite nothing and survive it; a 'closed'
+    // seed turns red under the same mutation.
     await seedSession(SESSION_A);
     const prPath = sessionService.getPrSessionPathForArchiveState(
       SESSION_A,
@@ -277,101 +766,57 @@ describe('refreshWorkspaceSessionPrStates', () => {
     expect((await readSessionPrs(prPath))?.[0]?.state).toBe('closed');
   });
 
-  it('updates nothing when the gh page is unavailable', async () => {
+  it('treats a draft PR as open for the state snapshot', async () => {
+    // The sidecar snapshot has no 'draft' variant, and isValidSessionPr
+    // rejects it — a persisted 'draft' would hide the session's bindings.
+    // Seeded 'closed' so the normalization is an observable rewrite.
     await seedSession(SESSION_A);
     const prPath = sessionService.getPrSessionPathForArchiveState(
       SESSION_A,
       'active',
     );
     await upsertSessionPr(prPath, {
-      number: 42,
-      url: 'https://github.com/o/r/pull/42',
-      state: 'open',
-    });
-    fetchGitHubPullRequestsMock.mockResolvedValue({
-      kind: 'cli_unavailable',
-    });
-
-    const result = await refreshWorkspaceSessionPrStates(runtime);
-
-    // Stamping authority is the page gh lists; without any page nothing
-    // stamps, whatever the workspace's git remote looks like.
-    expect(result).toEqual({ scanned: 1, updated: 0 });
-    expect((await readSessionPrs(prPath))?.[0]?.state).toBe('open');
-  });
-
-  it('refreshes a parent-repo binding in the fork layout', async () => {
-    // Origin is the fork, but gh resolves the PARENT repo for queries and
-    // the writers bind parent URLs — the sweep must accept the repository
-    // gh actually queried instead of freezing the binding at 'open'.
-    await seedSession(SESSION_A);
-    const prPath = sessionService.getPrSessionPathForArchiveState(
-      SESSION_A,
-      'active',
-    );
-    await upsertSessionPr(prPath, {
-      number: 7,
-      url: 'https://github.com/parent/repo/pull/7',
-      state: 'open',
+      number: 44,
+      url: 'https://github.com/o/r/pull/44',
+      state: 'closed',
     });
     fetchGitHubPullRequestsMock.mockResolvedValue({
       kind: 'ok',
-      pullRequests: [
-        { ...pr(7, 'merged'), url: 'https://github.com/parent/repo/pull/7' },
-      ],
+      pullRequests: [pr(44, 'draft')],
     });
 
     const result = await refreshWorkspaceSessionPrStates(runtime);
 
     expect(result).toEqual({ scanned: 1, updated: 1 });
-    expect((await readSessionPrs(prPath))?.[0]?.state).toBe('merged');
+    expect((await readSessionPrs(prPath))?.[0]?.state).toBe('open');
   });
 
-  it('never reads or stamps a sidecar through a traversal sessionId', async () => {
-    // The sessionId comes verbatim from the transcript's first record; a
-    // planted record may carry a path-escape id. The sweep must skip it
-    // instead of reading and stamping the escaped sidecar path.
-    const fileName = '00000000-0000-4000-8000-00000000000f';
-    const traversalId = '../../pwn';
-    const chatsDir = path.join(
-      new Storage(workspaceCwd).getProjectDir(),
-      'chats',
-    );
-    await fsp.mkdir(chatsDir, { recursive: true });
-    await fsp.writeFile(
-      path.join(chatsDir, `${fileName}.jsonl`),
-      `${JSON.stringify({
-        uuid: `${fileName}-user-1`,
-        parentUuid: null,
-        sessionId: traversalId,
-        timestamp: '2026-08-01T00:00:00.000Z',
-        type: 'user',
-        message: { role: 'user', parts: [{ text: 'hello' }] },
-        cwd: workspaceCwd,
-      })}\n`,
-      'utf8',
-    );
-    // A valid sidecar at the escaped path is what the unguarded sweep
-    // would read and stamp.
-    const escapedSidecar = sessionService.getPrSessionPathForArchiveState(
-      traversalId,
+  it('keeps sweeping when a sidecar is corrupt or unreadable', async () => {
+    await seedSession(SESSION_A);
+    const prPathA = sessionService.getPrSessionPathForArchiveState(
+      SESSION_A,
       'active',
     );
-    await fsp.mkdir(path.dirname(escapedSidecar), { recursive: true });
-    await fsp.writeFile(
-      escapedSidecar,
-      JSON.stringify({
-        prs: [
-          {
-            number: 42,
-            url: 'https://github.com/o/r/pull/42',
-            createdAt: '2026-08-01T00:00:00.000Z',
-            state: 'open',
-          },
-        ],
-      }),
-      'utf8',
+    await upsertSessionPr(prPathA, {
+      number: 42,
+      url: 'https://github.com/o/r/pull/42',
+      state: 'open',
+    });
+    // Invalid JSON makes readSessionPrs return null...
+    await seedSession(SESSION_B);
+    const prPathB = sessionService.getPrSessionPathForArchiveState(
+      SESSION_B,
+      'active',
     );
+    await fsp.writeFile(prPathB, '{invalid', 'utf8');
+    // ...and a directory at the path makes it throw (EISDIR). Neither may
+    // abort the sweep for the healthy sessions that follow.
+    await seedSession(SESSION_C);
+    const prPathC = sessionService.getPrSessionPathForArchiveState(
+      SESSION_C,
+      'active',
+    );
+    await fsp.mkdir(prPathC, { recursive: true });
     fetchGitHubPullRequestsMock.mockResolvedValue({
       kind: 'ok',
       pullRequests: [pr(42, 'merged')],
@@ -379,276 +824,392 @@ describe('refreshWorkspaceSessionPrStates', () => {
 
     const result = await refreshWorkspaceSessionPrStates(runtime);
 
-    expect(result).toEqual({ scanned: 0, updated: 0 });
-    const raw = JSON.parse(await fsp.readFile(escapedSidecar, 'utf8'));
-    expect(raw.prs[0].state).toBe('open');
+    expect(result).toEqual({ scanned: 1, updated: 1 });
+    expect((await readSessionPrs(prPathA))?.[0]?.state).toBe('merged');
+    expect(await fsp.readFile(prPathB, 'utf8')).toBe('{invalid');
   });
 
-  it('reaches sessions whose mtime ties a pagination boundary', async () => {
-    // 1007 sidecars, four of them sharing the mtime of the 1000th file:
-    // listSessions' strict-`<` cursor boundary drops those boundary twins
-    // on every paging run, so no sweep that pages it can ever refresh them.
-    const total = 1007;
-    const chatsDir = path.join(
-      new Storage(workspaceCwd).getProjectDir(),
-      'chats',
-    );
-    await fsp.mkdir(chatsDir, { recursive: true });
-    const baseMtime = Date.UTC(2026, 7, 1);
-    for (let i = 0; i < total; i++) {
-      const sessionId = `00000000-0000-4000-8000-${String(i).padStart(12, '0')}`;
-      await fsp.writeFile(
-        path.join(chatsDir, `${sessionId}.jsonl`),
-        `${JSON.stringify({
-          uuid: `${sessionId}-user-1`,
-          parentUuid: null,
-          sessionId,
-          timestamp: '2026-08-01T00:00:00.000Z',
-          type: 'user',
-          message: { role: 'user', parts: [{ text: 'hello' }] },
-          cwd: workspaceCwd,
-        })}\n`,
-        'utf8',
-      );
-      await fsp.writeFile(
-        path.join(chatsDir, `${sessionId}.pr.json`),
-        JSON.stringify({
-          prs: [
-            {
-              number: 100_000 + i,
-              url: `https://github.com/o/r/pull/${100_000 + i}`,
-              createdAt: '2026-08-01T00:00:00.000Z',
-              state: 'open',
-            },
-          ],
-        }),
-        'utf8',
-      );
-      const mtimeMs =
-        i >= 999 && i <= 1002 ? baseMtime - 999_000 : baseMtime - i * 1000;
-      const mtime = new Date(mtimeMs);
-      await fsp.utimes(path.join(chatsDir, `${sessionId}.jsonl`), mtime, mtime);
-    }
-    fetchGitHubPullRequestsMock.mockResolvedValue({
-      kind: 'ok',
-      pullRequests: [],
-    });
-
-    const result = await refreshWorkspaceSessionPrStates(runtime);
-
-    expect(result.scanned).toBe(total);
-    expect(result.updated).toBe(0);
-  }, 60_000);
-
-  it('never stamps a number re-bound to another repo during the gh window', async () => {
-    // The sweep reads sidecars before its gh round-trip and stamps after
-    // it. A concurrent writer re-binding the same number to another
-    // repository inside that window must not receive the stale repo's
-    // state — a wrong 'merged' stamp is terminal: the sweep never queries
-    // merged entries again, so the badge stays wrong permanently.
+  it('keeps sweeping when a transcript head has no string cwd', async () => {
     await seedSession(SESSION_A);
-    const prPath = sessionService.getPrSessionPathForArchiveState(
+    const prPathA = sessionService.getPrSessionPathForArchiveState(
       SESSION_A,
       'active',
     );
-    await upsertSessionPr(prPath, {
-      number: 5,
-      url: 'https://github.com/o/r/pull/5',
-      state: 'open',
-    });
-    fetchGitHubPullRequestsMock.mockImplementation(async () => {
-      await upsertSessionPr(prPath, {
-        number: 5,
-        url: 'https://github.com/other/repo/pull/5',
-        state: 'open',
-        source: 'create',
-      });
-      return { kind: 'ok', pullRequests: [pr(5, 'merged')] };
-    });
-
-    const result = await refreshWorkspaceSessionPrStates(runtime);
-
-    expect(result).toEqual({ scanned: 1, updated: 0 });
-    const persisted = await readSessionPrs(prPath);
-    expect(persisted?.[0]?.url).toBe('https://github.com/other/repo/pull/5');
-    expect(persisted?.[0]?.state).toBe('open');
-  });
-
-  it('never stamps a same-number PR of another repository', async () => {
-    await seedSession(SESSION_A);
-    const prPath = sessionService.getPrSessionPathForArchiveState(
-      SESSION_A,
-      'active',
-    );
-    // A binding whose URL points at an upstream repository; the sweep only
-    // queries the workspace repo, so a number collision there must not
-    // rewrite this entry.
-    await upsertSessionPr(prPath, {
-      number: 500,
-      url: 'https://github.com/upstream/repo/pull/500',
-      state: 'open',
-    });
-    await upsertSessionPr(prPath, {
+    await upsertSessionPr(prPathA, {
       number: 42,
       url: 'https://github.com/o/r/pull/42',
       state: 'open',
     });
-    fetchGitHubPullRequestsMock.mockResolvedValue({
-      kind: 'ok',
-      pullRequests: [pr(500, 'merged'), pr(42, 'merged')],
-    });
-
-    const result = await refreshWorkspaceSessionPrStates(runtime);
-
-    expect(result).toEqual({ scanned: 1, updated: 1 });
-    const persisted = await readSessionPrs(prPath);
-    expect(persisted?.find((p) => p.number === 500)?.state).toBe('open');
-    expect(persisted?.find((p) => p.number === 42)?.state).toBe('merged');
-  });
-
-  it('counts only bindings whose state was actually rewritten', async () => {
-    await seedSession(SESSION_A);
-    const prPath = sessionService.getPrSessionPathForArchiveState(
-      SESSION_A,
+    // A head that parses as an object but carries no string cwd is
+    // inconclusive; it must not abort the whole workspace's sweep.
+    const chatsDir = path.join(
+      new Storage(workspaceCwd).getProjectDir(),
+      'chats',
+    );
+    await fsp.writeFile(
+      path.join(chatsDir, `${SESSION_B}.jsonl`),
+      `${JSON.stringify({})}\n`,
+      'utf8',
+    );
+    const prPathB = sessionService.getPrSessionPathForArchiveState(
+      SESSION_B,
       'active',
     );
-    await upsertSessionPr(prPath, {
-      number: 10,
-      url: 'https://github.com/o/r/pull/10',
-      state: 'open',
-    });
-    await upsertSessionPr(prPath, {
-      number: 11,
-      url: 'https://github.com/o/r/pull/11',
+    await upsertSessionPr(prPathB, {
+      number: 43,
+      url: 'https://github.com/o/r/pull/43',
       state: 'open',
     });
     fetchGitHubPullRequestsMock.mockResolvedValue({
       kind: 'ok',
-      // gh confirms both numbers, but only one changed state.
-      pullRequests: [pr(10, 'merged'), pr(11, 'open')],
+      pullRequests: [pr(42, 'merged'), pr(43, 'merged')],
     });
 
     const result = await refreshWorkspaceSessionPrStates(runtime);
 
-    expect(result).toEqual({ scanned: 1, updated: 1 });
+    expect(result).toEqual({ scanned: 2, updated: 2 });
+    expect((await readSessionPrs(prPathA))?.[0]?.state).toBe('merged');
+    expect((await readSessionPrs(prPathB))?.[0]?.state).toBe('merged');
   });
 
-  it('never stamps a fork-URL binding from the parent page it passes through', async () => {
-    // Fork layout, reverse corner: the binding's URL is the FORK's web URL
-    // while the page is the PARENT's. PR numbers collide between fork and
-    // parent routinely, so the parent page's same-number state must not
-    // reach the fork binding — its repo is not the one gh listed.
-    await seedSession(SESSION_A);
-    const prPath = sessionService.getPrSessionPathForArchiveState(
-      SESSION_A,
-      'active',
+  it('does not rewrite sidecars owned by a colliding project', async () => {
+    // sanitizeCwd maps every non-alphanumeric to '-', so `my-app` and
+    // `my.app` share one chats dir; the sweep must stay on its own side of
+    // the collision.
+    const parent = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-pr-collide-'),
     );
-    await upsertSessionPr(prPath, {
-      number: 12,
-      url: 'https://github.com/me/fork/pull/12',
-      state: 'open',
-    });
-    fetchGitHubPullRequestsMock.mockResolvedValue({
-      kind: 'ok',
-      pullRequests: [
-        { ...pr(12, 'merged'), url: 'https://github.com/parent/repo/pull/12' },
-      ],
-    });
+    try {
+      const cwdA = path.join(parent, 'my-app');
+      const cwdB = path.join(parent, 'my.app');
+      await fsp.mkdir(cwdA, { recursive: true });
+      await fsp.mkdir(cwdB, { recursive: true });
+      const runtimeA = {
+        workspaceId: 'collide-a',
+        workspaceCwd: cwdA,
+        sessionRuntimeBaseDir: runtimeDir,
+        primary: true,
+        trusted: true,
+        env: { mode: 'parent-process', overlayKeys: [] },
+      } as unknown as WorkspaceRuntime;
+      const runtimeB = {
+        ...runtimeA,
+        workspaceId: 'collide-b',
+        workspaceCwd: cwdB,
+      } as unknown as WorkspaceRuntime;
+      const serviceA = createWorkspaceRuntimeSessionService(runtimeA);
+      const chatsDir = path.join(new Storage(cwdA).getProjectDir(), 'chats');
+      await fsp.mkdir(chatsDir, { recursive: true });
+      await fsp.writeFile(
+        path.join(chatsDir, `${SESSION_A}.jsonl`),
+        `${JSON.stringify({
+          uuid: `${SESSION_A}-user-1`,
+          parentUuid: null,
+          sessionId: SESSION_A,
+          timestamp: '2026-08-01T00:00:00.000Z',
+          type: 'user',
+          message: { role: 'user', parts: [{ text: 'hello' }] },
+          cwd: cwdA,
+        })}\n`,
+        'utf8',
+      );
+      const prPathA = serviceA.getPrSessionPathForArchiveState(
+        SESSION_A,
+        'active',
+      );
+      await upsertSessionPr(prPathA, {
+        number: 42,
+        url: 'https://github.com/o/r/pull/42',
+        state: 'open',
+      });
+      fetchGitHubPullRequestsMock.mockResolvedValue({
+        kind: 'ok',
+        pullRequests: [pr(42, 'merged')],
+      });
 
-    const result = await refreshWorkspaceSessionPrStates(runtime);
+      const result = await refreshWorkspaceSessionPrStates(runtimeB);
 
-    expect(result).toEqual({ scanned: 1, updated: 0 });
-    expect((await readSessionPrs(prPath))?.[0]?.state).toBe('open');
+      expect(result).toEqual({ scanned: 0, updated: 0 });
+      expect(fetchGitHubPullRequestsMock).not.toHaveBeenCalled();
+      expect((await readSessionPrs(prPathA))?.[0]?.state).toBe('open');
+    } finally {
+      await fsp.rm(parent, { recursive: true, force: true });
+    }
+  });
+
+  it('refreshes a pre-flush sidecar despite a cwd collision (accepted fail-open)', async () => {
+    // Same collision as above, but the foreign session has no transcript
+    // yet: the belongs-check is inconclusive and deliberately fails open so
+    // pre-flush bindings stay refreshable. Harm is bounded — only `state`
+    // is rewritten, and the owner's flush reasserts its own project.
+    const parent = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-pr-collide-open-'),
+    );
+    try {
+      const cwdA = path.join(parent, 'my-app');
+      const cwdB = path.join(parent, 'my.app');
+      await fsp.mkdir(cwdA, { recursive: true });
+      await fsp.mkdir(cwdB, { recursive: true });
+      const runtimeB = {
+        workspaceId: 'collide-b',
+        workspaceCwd: cwdB,
+        sessionRuntimeBaseDir: runtimeDir,
+        primary: true,
+        trusted: true,
+        env: { mode: 'parent-process', overlayKeys: [] },
+        bridge: { markSessionCatalogChanged: vi.fn() },
+      } as unknown as WorkspaceRuntime;
+      const serviceA = createWorkspaceRuntimeSessionService({
+        ...runtimeB,
+        workspaceId: 'collide-a',
+        workspaceCwd: cwdA,
+      } as unknown as WorkspaceRuntime);
+      const prPathA = serviceA.getPrSessionPathForArchiveState(
+        SESSION_A,
+        'active',
+      );
+      await upsertSessionPr(prPathA, {
+        number: 42,
+        url: 'https://github.com/o/r/pull/42',
+        state: 'open',
+      });
+      fetchGitHubPullRequestsMock.mockResolvedValue({
+        kind: 'ok',
+        pullRequests: [pr(42, 'merged')],
+      });
+
+      const result = await refreshWorkspaceSessionPrStates(runtimeB);
+
+      expect(result).toEqual({ scanned: 1, updated: 1 });
+      expect((await readSessionPrs(prPathA))?.[0]?.state).toBe('merged');
+    } finally {
+      await fsp.rm(parent, { recursive: true, force: true });
+    }
   });
 });
 
 describe('startSessionPrRefreshTimer', () => {
-  let runtimeDir: string;
-  let workspaceCwd: string;
-  let runtime: WorkspaceRuntime;
-  let sessionService: SessionService;
+  let baseDir: string;
+  let trustedCwd: string;
+  let untrustedCwd: string;
 
   beforeEach(async () => {
     vi.clearAllMocks();
-    runtimeDir = await fsp.mkdtemp(
-      path.join(os.tmpdir(), 'qwen-pr-refresh-timer-runtime-'),
+    baseDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'qwen-pr-timer-base-'));
+    trustedCwd = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-pr-timer-trusted-'),
     );
-    workspaceCwd = await fsp.mkdtemp(
-      path.join(os.tmpdir(), 'qwen-pr-refresh-timer-work-'),
+    untrustedCwd = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-pr-timer-untrusted-'),
     );
-    process.env['QWEN_RUNTIME_DIR'] = runtimeDir;
-    runtime = {
-      workspaceId: 'primary',
-      workspaceCwd,
-      sessionRuntimeBaseDir: runtimeDir,
-      primary: true,
-      trusted: true,
-      env: { mode: 'parent-process', overlayKeys: [] },
-    } as unknown as WorkspaceRuntime;
-    sessionService = createWorkspaceRuntimeSessionService(runtime);
+    process.env['QWEN_RUNTIME_DIR'] = baseDir;
   });
 
   afterEach(async () => {
-    delete process.env['QWEN_RUNTIME_DIR'];
     vi.useRealTimers();
-    await fsp.rm(runtimeDir, { recursive: true, force: true });
-    await fsp.rm(workspaceCwd, { recursive: true, force: true });
+    delete process.env['QWEN_RUNTIME_DIR'];
+    for (const dir of [baseDir, trustedCwd, untrustedCwd]) {
+      await fsp.rm(dir, { recursive: true, force: true });
+    }
   });
 
-  it('marks the session catalog when a sweep rewrites states', async () => {
-    // State transitions rewrite sidecars the daemon never sees; the tick
-    // must bump the catalog revision or live-state clients keep rendering
-    // the stale badge until unrelated churn.
-    vi.useFakeTimers();
+  function timerRuntime(
+    workspaceId: string,
+    workspaceCwd: string,
+    trusted: boolean,
+  ): WorkspaceRuntime {
+    return {
+      workspaceId,
+      workspaceCwd,
+      sessionRuntimeBaseDir: baseDir,
+      primary: trusted,
+      trusted,
+      env: { mode: 'parent-process', overlayKeys: [] },
+      bridge: { markSessionCatalogChanged: vi.fn() },
+    } as unknown as WorkspaceRuntime;
+  }
+
+  async function seedPendingBinding(
+    runtime: WorkspaceRuntime,
+    sessionId: string,
+  ): Promise<string> {
+    const service = createWorkspaceRuntimeSessionService(runtime);
     const chatsDir = path.join(
-      new Storage(workspaceCwd).getProjectDir(),
+      new Storage(runtime.workspaceCwd).getProjectDir(),
       'chats',
     );
     await fsp.mkdir(chatsDir, { recursive: true });
     await fsp.writeFile(
-      path.join(chatsDir, `${SESSION_A}.jsonl`),
+      path.join(chatsDir, `${sessionId}.jsonl`),
       `${JSON.stringify({
-        uuid: `${SESSION_A}-user-1`,
+        uuid: `${sessionId}-user-1`,
         parentUuid: null,
-        sessionId: SESSION_A,
+        sessionId,
         timestamp: '2026-08-01T00:00:00.000Z',
         type: 'user',
         message: { role: 'user', parts: [{ text: 'hello' }] },
-        cwd: workspaceCwd,
+        cwd: runtime.workspaceCwd,
       })}\n`,
       'utf8',
     );
-    await upsertSessionPr(
-      sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
-      { number: 42, url: 'https://github.com/o/r/pull/42', state: 'open' },
+    const prPath = service.getPrSessionPathForArchiveState(sessionId, 'active');
+    await upsertSessionPr(prPath, {
+      number: 42,
+      url: 'https://github.com/o/r/pull/42',
+      state: 'open',
+    });
+    return prPath;
+  }
+
+  it('returns undefined when disabled via QWEN_SESSION_PR_REFRESH_MINUTES=0', () => {
+    const registry = createWorkspaceRegistry([
+      timerRuntime('trusted', trustedCwd, true),
+    ]);
+
+    expect(
+      startSessionPrRefreshTimer({
+        workspaceRegistry: registry,
+        env: { QWEN_SESSION_PR_REFRESH_MINUTES: '0' },
+      }),
+    ).toBeUndefined();
+  });
+
+  it('sweeps only trusted workspaces after the first-run delay', async () => {
+    const trustedRuntime = timerRuntime('trusted', trustedCwd, true);
+    const untrustedRuntime = timerRuntime('untrusted', untrustedCwd, false);
+    const registry = createWorkspaceRegistry([
+      trustedRuntime,
+      untrustedRuntime,
+    ]);
+    const trustedPrPath = await seedPendingBinding(trustedRuntime, SESSION_A);
+    const untrustedPrPath = await seedPendingBinding(
+      untrustedRuntime,
+      SESSION_B,
     );
     fetchGitHubPullRequestsMock.mockResolvedValue({
       kind: 'ok',
       pullRequests: [pr(42, 'merged')],
     });
-    const markSessionCatalogChanged = vi.fn();
-    const timer = startSessionPrRefreshTimer({
-      workspaceRegistry: {
-        listAll: () => [{ ...runtime, bridge: { markSessionCatalogChanged } }],
-      } as unknown as WorkspaceRegistry,
-      env: { QWEN_SESSION_PR_REFRESH_MINUTES: '5' },
-    });
-    expect(timer).toBeDefined();
+    vi.useFakeTimers();
 
-    // Past the first-run delay: the sweep rewrites open -> merged and bumps
-    // the catalog. waitFor keeps advancing the fake clock and yielding until
-    // the tick's async sweep settles.
-    await vi.advanceTimersByTimeAsync(61_000);
-    await vi.waitFor(() =>
-      expect(markSessionCatalogChanged).toHaveBeenCalledTimes(1),
+    const handle = startSessionPrRefreshTimer({
+      workspaceRegistry: registry,
+      env: {},
+    });
+    expect(handle).toBeDefined();
+    // The first sweep is delayed to stay out of boot's way.
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(fetchGitHubPullRequestsMock).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(30_000); // crosses the first-run delay
+    await vi.waitFor(() => {
+      expect(fetchGitHubPullRequestsMock).toHaveBeenCalledTimes(1);
+    });
+    expect(fetchGitHubPullRequestsMock).toHaveBeenCalledWith(
+      trustedCwd,
+      undefined,
+      { state: 'all', limit: 500, slim: true },
     );
-    expect(
-      (
-        await readSessionPrs(
-          sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
-        )
-      )?.[0]?.state,
-    ).toBe('merged');
-    timer?.dispose();
+    await vi.waitFor(async () => {
+      expect((await readSessionPrs(trustedPrPath))?.[0]?.state).toBe('merged');
+    });
+    // The untrusted workspace's sidecar must never be read or rewritten.
+    expect((await readSessionPrs(untrustedPrPath))?.[0]?.state).toBe('open');
+
+    handle?.dispose();
+  });
+
+  it('skips an overlapping tick while a sweep is still running', async () => {
+    const trustedRuntime = timerRuntime('trusted', trustedCwd, true);
+    const registry = createWorkspaceRegistry([trustedRuntime]);
+    const prPath = await seedPendingBinding(trustedRuntime, SESSION_A);
+    let releaseFetch!: () => void;
+    fetchGitHubPullRequestsMock.mockReturnValue(
+      new Promise((resolve) => {
+        releaseFetch = () =>
+          resolve({ kind: 'ok', pullRequests: [pr(42, 'merged')] });
+      }),
+    );
+    vi.useFakeTimers();
+
+    const handle = startSessionPrRefreshTimer({
+      workspaceRegistry: registry,
+      env: { QWEN_SESSION_PR_REFRESH_MINUTES: '1' },
+    });
+    expect(handle).toBeDefined();
+
+    // The first tick reaches the (hung) gh fetch and holds `running`; every
+    // tick that lands while it is in flight must be skipped, not start a
+    // second sweep.
+    await vi.advanceTimersByTimeAsync(60_000);
+    await vi.waitFor(() => {
+      expect(fetchGitHubPullRequestsMock).toHaveBeenCalledTimes(1);
+    });
+    await vi.advanceTimersByTimeAsync(3 * 60_000);
+    expect(fetchGitHubPullRequestsMock).toHaveBeenCalledTimes(1);
+
+    releaseFetch();
+    await vi.waitFor(async () => {
+      expect((await readSessionPrs(prPath))?.[0]?.state).toBe('merged');
+    });
+    handle?.dispose();
+  });
+
+  it('stops ticking after dispose', async () => {
+    const trustedRuntime = timerRuntime('trusted', trustedCwd, true);
+    const registry = createWorkspaceRegistry([trustedRuntime]);
+    await seedPendingBinding(trustedRuntime, SESSION_A);
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(42, 'merged')],
+    });
+    vi.useFakeTimers();
+
+    const handle = startSessionPrRefreshTimer({
+      workspaceRegistry: registry,
+      env: {},
+    });
+    expect(handle).toBeDefined();
+    handle?.dispose();
+
+    // Far past the first-run delay and several default intervals: a
+    // still-armed timer would have swept long before this point.
+    await vi.advanceTimersByTimeAsync(24 * 60 * 60 * 1000);
+    expect(fetchGitHubPullRequestsMock).not.toHaveBeenCalled();
+  });
+
+  it('commits every sweep under the archive lane resolved at tick time', async () => {
+    const trustedRuntime = timerRuntime('trusted', trustedCwd, true);
+    const registry = createWorkspaceRegistry([trustedRuntime]);
+    const prPath = await seedPendingBinding(trustedRuntime, SESSION_A);
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(42, 'merged')],
+    });
+    // The daemon parks the coordinator on the serve app, which exists only
+    // after the timer starts — so it is looked up per tick, not captured.
+    const app: { archiveCoordinator?: SessionArchiveCoordinator } = {};
+    const getArchiveCoordinator = vi.fn(() => app.archiveCoordinator);
+    vi.useFakeTimers();
+
+    const handle = startSessionPrRefreshTimer({
+      workspaceRegistry: registry,
+      env: {},
+      getArchiveCoordinator,
+    });
+    app.archiveCoordinator = new SessionArchiveCoordinator();
+    const runSharedMany = vi.spyOn(app.archiveCoordinator, 'runSharedMany');
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    await vi.waitFor(async () => {
+      expect((await readSessionPrs(prPath))?.[0]?.state).toBe('merged');
+    });
+    expect(getArchiveCoordinator).toHaveBeenCalled();
+    expect(runSharedMany).toHaveBeenCalledWith(
+      [SESSION_A],
+      expect.any(Function),
+    );
+
+    handle?.dispose();
   });
 });

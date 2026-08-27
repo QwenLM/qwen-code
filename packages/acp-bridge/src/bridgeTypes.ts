@@ -165,6 +165,19 @@ export interface BridgeSpawnRequest {
   sessionId?: string;
 }
 
+/** Internal daemon-only creation surface for a managed standalone session. */
+export interface BridgeStandaloneSpawnRequest {
+  /** Runtime ownership root inherited only during provisional bootstrap. */
+  workspaceCwd: string;
+  /** Daemon-reserved canonical session id for the managed child directory. */
+  sessionId: string;
+  /** Explicit standalone parent lineage for a depth-1 sub-session. */
+  parentSessionId?: string;
+  /** Optional explicit model service id; falls back to settings default. */
+  modelServiceId?: string;
+  approvalMode?: ApprovalMode;
+}
+
 export interface BridgeSession {
   sessionId: string;
   /**
@@ -236,6 +249,12 @@ export interface BridgeRestoreSessionRequest {
   /** Optional persisted identifier paired with `sourceType`. */
   sourceId?: string;
 }
+
+/** Internal daemon-only restore surface for a managed standalone session. */
+export type BridgeStandaloneRestoreSessionRequest = Omit<
+  BridgeRestoreSessionRequest,
+  'sourceType' | 'sourceId'
+>;
 
 export const LOAD_REPLAY_MODE_META_KEY = 'qwen.session.loadReplayMode';
 export const LOAD_REPLAY_META_KEY = 'qwen.session.loadReplay';
@@ -530,6 +549,21 @@ export interface BridgeForkAgentResult {
   launched: boolean;
 }
 
+export interface BridgeConversationDirectoryExpectation {
+  canonicalSessionId: string;
+  root: {
+    canonicalPath: string;
+    device: number;
+    inode: number;
+  };
+  child: {
+    name: string;
+    canonicalPath: string;
+    device: number;
+    inode: number;
+  };
+}
+
 export interface ChangeSessionCwdRequest {
   path: string;
   /**
@@ -546,6 +580,12 @@ export interface ChangeSessionCwdRequest {
    * before this may bypass the independent global folder-trust registry.
    */
   managedRelocation?: 'live-conversation';
+  /**
+   * Exact daemon-pinned identity for a standalone Conversations child.
+   * The bridge forwards this proof verbatim; the ACP child validates it
+   * before and after mutating the session Config.
+   */
+  conversationDirectoryExpectation?: BridgeConversationDirectoryExpectation;
 }
 
 export interface ChangeSessionCwdResult {
@@ -1319,6 +1359,17 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
    */
   spawnOrAttach(req: BridgeSpawnRequest): Promise<BridgeSession>;
 
+  /** Create a fresh daemon-owned standalone session in provisional mode. */
+  spawnStandaloneSession(
+    req: BridgeStandaloneSpawnRequest,
+  ): Promise<BridgeSession>;
+
+  /** Restore a daemon-owned standalone session in provisional mode. */
+  restoreStandaloneSession(
+    action: 'load' | 'resume',
+    req: BridgeStandaloneRestoreSessionRequest,
+  ): Promise<BridgeRestoredSession>;
+
   /**
    * Load an existing persisted session and replay its history through
    * session_update notifications. Returns `attached: true` when the requested
@@ -1363,6 +1414,16 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
     req: ChangeSessionCwdRequest,
     context?: BridgeClientRequestContext,
   ): Promise<ChangeSessionCwdResult>;
+
+  commitManagedConversationBinding(
+    sessionId: string,
+    expectation: BridgeConversationDirectoryExpectation,
+  ): Promise<void>;
+
+  releaseManagedConversationBinding(
+    sessionId: string,
+    expectation: BridgeConversationDirectoryExpectation,
+  ): Promise<void>;
 
   /**
    * Set worktree metadata on an existing session entry. Used when
@@ -1459,6 +1520,12 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
   getSessionEventEpoch(sessionId: string): string;
 
   /**
+   * Return the daemon's current effective cwd for a live session without
+   * exposing it through public session summaries.
+   */
+  getSessionCurrentCwd(sessionId: string): string;
+
+  /**
    * Return the current compacted replay snapshot for a loaded session, when
    * the bridge has a compaction engine configured.
    */
@@ -1475,6 +1542,9 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
     context?: BridgeClientRequestContext,
     opts?: CloseSessionOpts,
   ): Promise<void>;
+
+  /** Durably anchor an eligible live default session before task binding. */
+  ensureDefaultSessionPersisted?(sessionId: string): Promise<void>;
 
   /**
    * Update mutable session metadata. Supports `displayName` and `pr`.
@@ -1498,14 +1568,12 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
 
   /**
    * Replace the in-memory PR binding list of a live session with the
-   * authoritative persisted one. The metadata routes call this after the
-   * sidecar upsert succeeds: the sidecar cap evicts by provenance
-   * authority while the bridge merge caps positionally, so once the list
-   * overflows the cap the two stores evict different entries — the live
-   * entry must mirror the persisted list or later events and rename
-   * responses serve the diverged one. Optional like
-   * {@link seedSessionPrs}. Callers own sidecar I/O; the bridge stays
-   * storage-agnostic.
+   * authoritative persisted one after a rewrite that can evict bindings
+   * (the backfill cap trim). Unlike {@link seedSessionPrs}, overwrites an
+   * entry that already holds bindings, so the summary merge cannot
+   * resurrect evicted numbers from a stale entry. No-op when the entry is
+   * unknown (session not live). Callers own sidecar I/O; the bridge stays
+   * storage-agnostic. Optional so lightweight fakes may omit it.
    */
   setSessionPrs?(sessionId: string, prs: SessionPrInfo[]): void;
 
