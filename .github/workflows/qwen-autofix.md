@@ -3975,7 +3975,7 @@ planted FIFO cannot stall it.
 
 In `review-address` · `Post autofix status comment`.
 
-````text
+```text
 Deep-link "Watch live progress" to THIS matrix leg's live
 log, not just the run page: the run page lists every leg of
 the scan and the reader must find which one is theirs. The
@@ -3991,6 +3991,7 @@ ends the run page is the right destination (all steps, all
 attempts), and one less thing to re-resolve on the
 crashed-agent paths where this step's outputs may be all
 that survived.
+```
 
 <a id="af-151"></a>
 
@@ -4041,7 +4042,7 @@ on-demand review (a human push, /review) keeps working.
 deliberately NOT signal codes: both mean "this loop can end by merging",
 and pausing on them would park exactly the PR a human should merge. They
 stay visible in the review body; acting on them is a different feature.
-````
+```
 
 <a id="af-152"></a>
 
