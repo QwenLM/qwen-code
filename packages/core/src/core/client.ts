@@ -4169,12 +4169,15 @@ export class GeminiClient {
           // Runaway protection is preserved: the cap still bounds each
           // iteration, and the chain itself is bounded by
           // stopHookBlockingCap / MAX_GOAL_ITERATIONS. Those are the only
-          // bounds on this path: the legacy hook Goal recurses inside one
-          // sendMessageStream call, so the runtime's token budget (which
-          // meters continuations the Goal runtime schedules) never sees it,
-          // and the recursion budget is not decremented below because a
-          // 50-iteration chain with steer and next-speaker continues would
-          // otherwise exhaust MAX_TURNS before its own iteration cap.
+          // Goal-specific bounds on this path (a user-set maxSessionTurns
+          // still cuts the chain: each hook hop is a plain send with no
+          // Goal permit, so it counts as a session turn): the legacy hook
+          // Goal recurses inside one sendMessageStream call, so the
+          // runtime's token budget (which meters continuations the Goal
+          // runtime schedules) never sees it, and the recursion budget is
+          // not decremented below because a 50-iteration chain with steer
+          // and next-speaker continues would otherwise exhaust MAX_TURNS
+          // before its own iteration cap.
           this.loopDetector.reset(prompt_id);
 
           const activeGoal = getActiveGoal(this.config.getSessionId());
