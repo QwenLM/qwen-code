@@ -1270,13 +1270,58 @@ function asListLine(text: string, pr: PrIdentity | null): string {
  * Both modes end on the trailing strip, the shape `submit`'s post transform
  * already uses: ingest ran it before the grammar went inert, and only this
  * pass sees a footer that rode in wrapped.
+ *
+ * The pass repeats until nothing changes, because each half can re-form
+ * what the other just removed — a single ordered pass closes neither
+ * direction. The strips SPLICE: cutting two footer spans out of `x <!-‹span›-
+ * qwen-review-deferred --‹span›> y` joins `<!-` to `- … --` to `>` and
+ * posts a live `<!-- qwen-review-deferred -->` (or a forged ledger opener)
+ * the grammar strip never saw, because no delimiter existed when it ran.
+ * And neutralization JOINS: `via Qwen<!-‹span›-Code /review` strips to
+ * `Qwen<!--Code`, which neutralizes to the footer phrase `via Qwen Code
+ * /review` the chain has already finished looking for — so a trailing
+ * grammar strip alone (the obvious patch) trades the forged marker for a
+ * forged footer. Every strip in the chain deletes or leaves its input
+ * alone, none lengthens, so the loop ends within the entry's length; and
+ * at the fixpoint every step is the identity on its input (a changing
+ * step strictly shortens), so the result carries no comment grammar, no
+ * marker line, no footer span and no trailing footer at once — the
+ * closure a caller can rely on without knowing which strip ran last.
  */
 function quotedProse(text: string, attribution: boolean): string {
-  const inert = stripCommentGrammar(
-    attribution ? text : stripCommentMarkerLines(text),
-  );
-  return stripReviewFooter(
-    attribution ? inert : stripForUnattributedPost(inert),
+  let current = text;
+  for (;;) {
+    const inert = stripCommentGrammar(
+      attribution ? current : stripCommentMarkerLines(current),
+    );
+    const next = stripReviewFooter(
+      attribution ? inert : stripForUnattributedPost(inert),
+    );
+    if (next === current) return current;
+    current = next;
+  }
+}
+
+/**
+ * Whether an entry would post as nothing from a verbatim body exit — the
+ * gate `ingestBodyCriticals` and the cannot-tell ingest share, stated once
+ * so the two cannot drift from each other or from the render legs.
+ *
+ * Two projections, both refused: the entry as written through the
+ * attribution-off strip chain (a marker-only or comment-only draft is
+ * invisible scaffolding whatever the exit later makes of it — the shape
+ * `submit`'s gate refuses), and the entry through the exit's own closure,
+ * `quotedProse`. The second is not implied by the first: the closure
+ * neutralizes comment grammar and re-runs the chain on what that exposes,
+ * so an entry held up only by a footer that comment grammar had split —
+ * `_— m via Qwen<!-‹span›-Code /review_` — projects as visible prose
+ * as written yet strips to nothing at the exit, and would post as an
+ * empty body Critical that still counts toward REQUEST_CHANGES.
+ */
+function rendersAsNothingAtExit(entry: string): boolean {
+  return (
+    rendersAsNothing(stripReviewFooter(stripForUnattributedPost(entry))) ||
+    rendersAsNothing(quotedProse(entry, false))
   );
 }
 
@@ -2555,9 +2600,10 @@ function ingestBodyCriticals(value: unknown): string[] {
   // post: strip the trailing forged footer BEFORE the emptiness projection
   // (mirroring `submit`'s gate) — otherwise a footer past the strip's caps
   // passes as ballast, the render legs strip it entirely, and a bare-marker
-  // entry posts and counts.
+  // entry posts and counts. And it projects through the exit's closure as
+  // well (`rendersAsNothingAtExit` says why one projection is not enough).
   for (const entry of entries) {
-    if (rendersAsNothing(stripReviewFooter(stripForUnattributedPost(entry)))) {
+    if (rendersAsNothingAtExit(entry)) {
       throw new Error(
         'compose-review: a body Critical renders as nothing (marker-only, ' +
           'empty comment, or otherwise invisible) — redraft it with the ' +
@@ -2728,7 +2774,7 @@ function composeReviewBody(
   // to nothing must fail the draft, not vanish — silently dropping it lifts
   // the `cannot-tell-existing-critical` cap and flips the verdict.
   for (const entry of cannotTell) {
-    if (rendersAsNothing(stripReviewFooter(stripForUnattributedPost(entry)))) {
+    if (rendersAsNothingAtExit(entry)) {
       throw new Error(
         'compose-review: a cannot-tell entry renders as nothing ' +
           '(marker-only, empty comment, or otherwise invisible) — ' +
@@ -4488,7 +4534,8 @@ function composeReviewBody(
   // stops at comment grammar either way: a literal `<!-- qwen-review-… -->`
   // in blocker prose would forge a second marker in the channel the
   // pipeline's own readers scan raw — and it goes inert BEFORE the
-  // sanitation, not after (`quotedProse`).
+  // sanitation, then again after anything the sanitation spliced back
+  // together, until neither has work left (`quotedProse`).
   const bodyCriticalBlock: Bi[] = bodyCriticals
     .map((l) => {
       const quoted = quotedProse(l, attribution);

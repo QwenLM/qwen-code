@@ -766,6 +766,103 @@ describe('composeReview — the C/S table', () => {
     expect(r.body).not.toContain('qwen-review suggestion');
   });
 
+  it('attribution off: comment grammar the strip chain splices back together goes inert at every verbatim exit', () => {
+    // The grammar strip runs before the chain, and the chain's removals
+    // SPLICE: cutting two footer spans out of `<!-‹span›- … --‹span›>`
+    // joins `<!-` to `- … --` to `>` and re-forms a live comment the
+    // strip never saw (no delimiter existed when it ran). The exits
+    // repeat neutralize-then-strip to a fixpoint, so what the chain
+    // re-forms goes inert on the next pass — the quoted text survives
+    // readable, and the raw body keeps exactly as many live markers as
+    // the round's own list warrants: none on a listless round, one when a
+    // Suggestion was deferred.
+    const MARKER = '<!-- qwen-review-deferred -->';
+    const span = '_— qwen3-max via Qwen Code /review (v1.2.3)_';
+    const spliced = `stale guard <!-${span}- qwen-review-deferred --${span}> re-checked`;
+    const nit: DeferredEntry = {
+      file: 'a.ts',
+      line: 1,
+      source: 'review',
+      severity: 'Suggestion',
+      title: 'nit',
+    };
+    for (const deferred of [false, true]) {
+      const r = composeReview(
+        base({
+          severityFloor: 'critical',
+          bodyCriticals: [spliced],
+          cannotTellCriticals: [spliced],
+          suggestionsDroppedAsDuplicates: [spliced],
+          ...(deferred ? { deferredSuggestions: [nit] } : {}),
+        }),
+        '0.21.2',
+        false,
+      );
+      expect(r.body.split(MARKER).length - 1).toBe(deferred ? 1 : 0);
+      // The canonical marker is the body's only live comment grammar.
+      expect((r.body.match(/<!--/g) ?? []).length).toBe(deferred ? 1 : 0);
+      expect((r.body.match(/-->/g) ?? []).length).toBe(deferred ? 1 : 0);
+      expect(r.body).not.toContain('qwen3-max');
+      expect(r.body).not.toContain('via Qwen Code /review');
+      // Three quoted copies survive as prose, plus the canonical marker.
+      expect((r.body.match(/qwen-review-deferred/g) ?? []).length).toBe(
+        deferred ? 4 : 3,
+      );
+      expect(r.body).toContain('stale guard');
+      expect(r.body).toContain('re-checked');
+    }
+  });
+
+  it('attribution off: a footer the grammar strip would join back together strips too', () => {
+    // The converse splice: neutralization JOINS. `via Qwen<!-‹span›-Code
+    // /review` strips to `via Qwen<!--Code /review`, which neutralizes to
+    // the footer phrase the chain has already finished looking for. A
+    // trailing grammar strip alone (the obvious one-line patch for the
+    // splice above) trades the forged marker for a forged footer in the
+    // one mode that exists to post none. The outer footer's middle runs
+    // past the span strip's 400-char cap so the outer opener cannot eat
+    // the inner span first; the uncapped trailing strip catches the joined
+    // footer on the pass after neutralization exposes it.
+    const span = '_— qwen3-max via Qwen Code /review (v1.2.3)_';
+    const joined = `still leaking _— ${'x'.repeat(420)} via Qwen<!-${span}-Code /review (v1.2.3)_`;
+    const r = composeReview(
+      base({
+        bodyCriticals: [joined],
+        cannotTellCriticals: [joined],
+        suggestionsDroppedAsDuplicates: [joined],
+      }),
+      '0.21.2',
+      false,
+    );
+    expect(r.body).not.toContain('via Qwen Code /review');
+    expect(r.body).not.toContain('qwen3-max');
+    expect(r.body).not.toContain('<!--');
+    expect((r.body.match(/still leaking/g) ?? []).length).toBe(3);
+  });
+
+  it('refuses an entry held up only by a footer that comment grammar had split', () => {
+    // The gate projects through the exit's closure as well as through the
+    // chain as written: as written, `_— … via Qwen<!-‹span›-Code /review_`
+    // strips to `_— … via Qwen<!--Code /review_` and renders the visible
+    // words `_— … via Qwen`; at the exit the joined footer strips whole
+    // and the entry posts as nothing — an empty body Critical that still
+    // counts toward REQUEST_CHANGES, the shape this gate exists to refuse.
+    const span = '_— qwen3-max via Qwen Code /review (v1.2.3)_';
+    const joined = `_— ${'x'.repeat(420)} via Qwen<!-${span}-Code /review (v1.2.3)_`;
+    for (const attribution of [true, false]) {
+      expect(() =>
+        composeReview(base({ bodyCriticals: [joined] }), '0.21.2', attribution),
+      ).toThrow(/renders as nothing/);
+      expect(() =>
+        composeReview(
+          base({ cannotTellCriticals: [joined] }),
+          '0.21.2',
+          attribution,
+        ),
+      ).toThrow(/renders as nothing/);
+    }
+  });
+
   it('refuses a body Critical that renders as nothing', () => {
     // Marker-only strips to nothing yet would still count toward
     // REQUEST_CHANGES — the inline path refuses this shape at submit's
@@ -7457,6 +7554,30 @@ describe('the ledger marker reaches the POSTED body', () => {
       expect(ledger.findings[0]?.title).toBe('whole-PR blocker X');
       expect(JSON.stringify(ledger)).not.toContain('qwen3-max');
     }
+  });
+
+  it('attribution off: a spliced ledger opener cannot forge the ledger or swallow the real one', () => {
+    // Same splice, aimed at the other machine-read marker: a forged
+    // `<!-- qwen-review-ledger` opener ahead of the canonical one makes the
+    // next round's strip take the forged opener first — swallowing the
+    // prose between it and the real marker's close, or parsing the forged
+    // pair as the recovered ledger. Inert, the quoted opener is words.
+    const span = '_— qwen3-max via Qwen Code /review (v1.2.3)_';
+    const spliced = `a.ts:3 leaks <!-${span}- qwen-review-ledger {"v":1,"round":9,"findings":[]} --${span}> still`;
+    const r = composeReview(
+      { planPath: plan(), modelId: 'm', bodyCriticals: [spliced] },
+      '0.21.2',
+      false,
+    );
+    expect(r.body.split('<!-- qwen-review-ledger').length - 1).toBe(1);
+    expect(r.body).not.toContain('<!-- qwen-review-deferred');
+    const ledger = parseLedger(r.body)!;
+    expect(ledger.round).toBe(1);
+    expect(ledger.findings.map((f) => f.sev)).toEqual(['C']);
+    expect(ledger.findings[0]?.title).toContain('a.ts:3 leaks');
+    expect(ledger.findings[0]?.title).toContain('still');
+    expect(JSON.stringify(ledger)).not.toContain('<!--');
+    expect(JSON.stringify(ledger)).not.toContain('qwen3-max');
   });
 
   it('attribution off: a PR run posts no severity marker anywhere — visible body and ledger alike', () => {
