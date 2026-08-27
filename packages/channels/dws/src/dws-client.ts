@@ -18,7 +18,10 @@ const DWS_PROCESS_FORCE_KILL_DELAY_MS = 5_000;
 const MINIMUM_DWS_VERSION = [1, 0, 57] as const;
 const DWS_MAX_OUTPUT_BYTES = 16 * 1024 * 1024;
 const DWS_ERROR_OUTPUT_MAX_CHARS = 1000;
-const ANSI_ESCAPE_SEQUENCE = /\u001b\[[0-?]*[ -/]*[@-~]/g;
+const ANSI_ESCAPE_SEQUENCE = new RegExp(
+  `${String.fromCharCode(27)}\\[[0-?]*[ -/]*[@-~]`,
+  'g',
+);
 const MAX_MESSAGE_PAGES = 100;
 const MAX_TODO_PAGES = 50;
 const TODO_PAGE_SIZE = 20;
