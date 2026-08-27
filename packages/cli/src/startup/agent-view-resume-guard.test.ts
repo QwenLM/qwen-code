@@ -169,6 +169,25 @@ describe('managed Agent View resume guards', () => {
     expect(mockReadAgentViewSessionState).toHaveBeenCalledTimes(2);
   });
 
+  it('still releases an exited managed session when stale worker env is rejected', async () => {
+    mockRequireValidWorkerToken.mockRejectedValue(
+      new Error('No Agent View worker token found for session-1.'),
+    );
+    mockReadAgentViewSessionState.mockResolvedValue(state('managed', 'exited'));
+
+    await expect(
+      isManagedAgentViewResumeBlocked('session-1', workerEnv('session-1')),
+    ).resolves.toBe(true);
+    await expect(
+      releaseExitedManagedSessionForContinue(
+        'session-1',
+        workerEnv('session-1'),
+      ),
+    ).resolves.toBe(true);
+
+    expect(mockRelease).toHaveBeenCalledWith('session-1');
+  });
+
   it('blocks --resume and --continue during the adopting window', async () => {
     // /background adopt writes ownership 'adopting' and spawns the worker
     // before patching 'managed'; both guards must already block.

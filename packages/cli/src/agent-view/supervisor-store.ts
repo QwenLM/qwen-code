@@ -466,13 +466,16 @@ export async function patchAgentViewActivityIf(
 /**
  * Drops the persisted pids once a terminal exit verdict is authoritative:
  * stale pids may be reused by unrelated processes, and leaving them makes
- * later liveness probes and signaling paths target the wrong process.
+ * later liveness probes and signaling paths target the wrong process. The
+ * worker token is also retired so a stale sideband env cannot authenticate as
+ * a live worker after exit.
  */
 export async function clearAgentViewWorkerPids(
   sessionId: string,
   options: StoreOptions = {},
-): Promise<void> {
+): Promise<string | undefined> {
   const paths = getAgentViewSessionPaths(sessionId, options);
+  let retiredTokenDigest: string | undefined;
   await withMutationQueue(workerMutationQueues, paths.workerPath, async () => {
     const existing = await readJsonRecordForWrite(paths.workerPath);
     if (existing === undefined) {
@@ -481,8 +484,11 @@ export async function clearAgentViewWorkerPids(
     const next: JsonRecord = { ...existing };
     delete next['hostPid'];
     delete next['workerPid'];
+    retiredTokenDigest = stringValue(next['tokenDigest']);
+    delete next['tokenDigest'];
     await writeJsonFile(paths.workerPath, { ...next, schemaVersion: 1 });
   });
+  return retiredTokenDigest;
 }
 
 export function digestAgentViewWorkerToken(token: string): string {

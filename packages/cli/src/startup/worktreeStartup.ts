@@ -36,6 +36,7 @@ import {
 import type { Config, WorktreeSession } from '@qwen-code/qwen-code-core';
 
 const debugLogger = createDebugLogger('WORKTREE_STARTUP');
+const STARTUP_REATTACH_MARKER = 'qwen-startup-reattach.json';
 
 /**
  * `git rev-parse --abbrev-ref HEAD` returns this literal when the
@@ -232,6 +233,13 @@ export async function setupStartupWorktree(
       };
     }
     const worktreePath = path.resolve(expectedWorktreePath);
+    const reattachMarker = await writeStartupReattachMarker(worktreePath);
+    if (!reattachMarker.ok) {
+      return {
+        ok: false,
+        error: `--worktree: failed to mark re-attach at ${worktreePath} (${reattachMarker.error}).`,
+      };
+    }
     try {
       process.chdir(worktreePath);
     } catch (error) {
@@ -354,6 +362,14 @@ export async function discardCreatedStartupWorktree(
     if (owner !== null) {
       return {
         preserved: `worktree ${context.worktreePath} is owned by session ${owner}`,
+      };
+    }
+    const reattachOwner = await readLiveStartupReattachMarker(
+      context.worktreePath,
+    );
+    if (reattachOwner !== null) {
+      return {
+        preserved: `worktree ${context.worktreePath} is being re-attached by process ${reattachOwner}`,
       };
     }
     const intactCreatedSymlinkPaths: string[] = [];
@@ -488,6 +504,7 @@ export async function persistStartupWorktreeSidecar(
       () => {},
     );
   }
+  await removeStartupReattachMarker(context.worktreePath);
 
   await writeWorktreeSession(sidecarPath, {
     slug: context.slug,
@@ -503,6 +520,90 @@ export async function persistStartupWorktreeSidecar(
   // with `--worktree <previous-slug>`. We only swap the sidecar's slug.
 
   return { overrodeResumedWorktree, overriddenSlug, sidecarPath };
+}
+
+async function getStartupReattachMarkerPath(
+  worktreePath: string,
+): Promise<string> {
+  const gitPath = path.join(worktreePath, '.git');
+  const stat = await fs.lstat(gitPath);
+  if (stat.isDirectory()) {
+    return path.join(gitPath, STARTUP_REATTACH_MARKER);
+  }
+  const raw = await fs.readFile(gitPath, 'utf8');
+  const match = /^gitdir:\s*(.+)\s*$/i.exec(raw.trim());
+  if (!match) {
+    throw new Error('.git file does not contain a gitdir pointer');
+  }
+  const gitDir = path.isAbsolute(match[1]!)
+    ? match[1]!
+    : path.resolve(worktreePath, match[1]!);
+  return path.join(gitDir, STARTUP_REATTACH_MARKER);
+}
+
+async function writeStartupReattachMarker(
+  worktreePath: string,
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  try {
+    const markerPath = await getStartupReattachMarkerPath(worktreePath);
+    await fs.writeFile(
+      markerPath,
+      JSON.stringify({ pid: process.pid, at: new Date().toISOString() }),
+      'utf8',
+    );
+    return { ok: true };
+  } catch (error) {
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+async function readLiveStartupReattachMarker(
+  worktreePath: string,
+): Promise<number | null> {
+  let markerPath: string;
+  try {
+    markerPath = await getStartupReattachMarkerPath(worktreePath);
+  } catch {
+    return null;
+  }
+  let pid: number | undefined;
+  try {
+    const parsed = JSON.parse(await fs.readFile(markerPath, 'utf8')) as {
+      pid?: unknown;
+    };
+    pid = typeof parsed.pid === 'number' ? parsed.pid : undefined;
+  } catch {
+    return null;
+  }
+  if (!pid || !isPidRunning(pid)) {
+    await fs.rm(markerPath, { force: true }).catch(() => {});
+    return null;
+  }
+  return pid;
+}
+
+async function removeStartupReattachMarker(
+  worktreePath: string,
+): Promise<void> {
+  try {
+    await fs.rm(await getStartupReattachMarkerPath(worktreePath), {
+      force: true,
+    });
+  } catch {
+    // Best-effort cleanup only; the live-pid check ignores stale markers.
+  }
+}
+
+function isPidRunning(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /**

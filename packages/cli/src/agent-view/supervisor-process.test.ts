@@ -422,6 +422,69 @@ describe('Agent View supervisor process helpers', () => {
     await fs.rm(globalDir, { recursive: true, force: true });
   });
 
+  it('does not replay the initial prompt after a late working event follows exit', async () => {
+    const globalDir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-agent-view-store-'),
+    );
+    const hosts: FakePtyHost[] = [];
+    const launches: AgentViewLaunchFile[] = [];
+    const handler = createAgentViewSupervisorHandler({
+      globalDir,
+      platform: 'linux',
+      launchPtyHost: async (launch) => {
+        launches.push(launch);
+        const host = fakePtyHost(999_999_002 + hosts.length);
+        hosts.push(host);
+        return host;
+      },
+    });
+    const result = (await handler.dispatch?.({
+      prompt: 'write tests',
+      cwd: globalDir,
+    })) as { sessionId: string };
+    const token = await readWorkerTokenForTest(result.sessionId, globalDir);
+    await handler.workerEvent?.({
+      type: 'ready',
+      sessionId: result.sessionId,
+      token,
+      cwd: globalDir,
+    });
+    await expect(
+      readAgentViewSessionState(result.sessionId, { globalDir }),
+    ).resolves.toMatchObject({ initialPromptPending: true });
+
+    hosts[0]?.resolveExit(1);
+    await waitForSessionState(
+      result.sessionId,
+      globalDir,
+      (state) => state.processState === 'exited',
+    );
+    await expect(
+      readAgentViewWorker(result.sessionId, { globalDir }),
+    ).resolves.toMatchObject({ tokenDigest: undefined });
+
+    await handler.workerEvent?.({
+      type: 'state',
+      sessionId: result.sessionId,
+      token,
+      sessionState: 'working',
+    });
+    await expect(
+      readAgentViewSessionState(result.sessionId, { globalDir }),
+    ).resolves.not.toHaveProperty('initialPromptPending');
+    await expect(
+      readAgentViewWorker(result.sessionId, { globalDir }),
+    ).resolves.toMatchObject({ tokenDigest: undefined });
+
+    await handler.respawn?.({ sessionId: result.sessionId });
+    expect(launches[1]?.argv).toEqual(
+      expect.arrayContaining([`--resume=${result.sessionId}`]),
+    );
+    expect(launches[1]?.argv).not.toContain('--prompt-interactive=write tests');
+
+    await fs.rm(globalDir, { recursive: true, force: true });
+  });
+
   it('fails the ready wait as soon as the launched host exits', async () => {
     const globalDir = await fs.mkdtemp(
       path.join(os.tmpdir(), 'qwen-agent-view-store-'),
@@ -1524,10 +1587,9 @@ describe('Agent View supervisor process helpers', () => {
 
     await expect(
       handler.workerControl?.({ sessionId: result.sessionId, token }),
-    ).resolves.toMatchObject({
-      sessionId: result.sessionId,
-      events: [],
-    });
+    ).rejects.toThrow(
+      `No Agent View worker token found for ${result.sessionId}.`,
+    );
 
     await fs.rm(globalDir, { recursive: true, force: true });
   });
@@ -4291,6 +4353,43 @@ describe('Agent View supervisor process helpers', () => {
       ownership: 'unmanaged',
       processState: 'exited',
     });
+
+    await fs.rm(globalDir, { recursive: true, force: true });
+  });
+
+  it('garbage collects only expired unmanaged tombstones', async () => {
+    const globalDir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-agent-view-store-'),
+    );
+    await writeAgentViewSessionState(
+      managedSessionStateForTest('expired', globalDir, {
+        ownership: 'unmanaged',
+        processState: 'exited',
+        updatedAt: '2026-08-01T00:00:00.000Z',
+      }),
+      { globalDir },
+    );
+    await writeAgentViewSessionState(
+      managedSessionStateForTest('recent', globalDir, {
+        ownership: 'unmanaged',
+        processState: 'exited',
+        updatedAt: '2026-08-20T00:00:00.000Z',
+      }),
+      { globalDir },
+    );
+    const handler = createAgentViewSupervisorHandler({
+      globalDir,
+      platform: 'linux',
+      now: () => new Date('2026-08-21T00:00:00.000Z'),
+    });
+
+    await expect(handler.list()).resolves.toEqual([]);
+    await expect(
+      readAgentViewSessionState('expired', { globalDir }),
+    ).resolves.toBeUndefined();
+    await expect(
+      readAgentViewSessionState('recent', { globalDir }),
+    ).resolves.toMatchObject({ ownership: 'unmanaged' });
 
     await fs.rm(globalDir, { recursive: true, force: true });
   });

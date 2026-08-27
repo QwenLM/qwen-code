@@ -94,6 +94,7 @@ const DEFAULT_SUPERVISOR_AUTO_EXIT_GRACE_MS = 10 * 60 * 1000;
 const DEFAULT_WORKER_READY_TIMEOUT_MS = 15_000;
 const DEFAULT_GRACEFUL_STOP_TIMEOUT_MS = 10_000;
 const DEFAULT_HOST_EXIT_TIMEOUT_MS = 10_000;
+const UNMANAGED_TOMBSTONE_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 const DEFAULT_ATTACH_LEASE_HEARTBEAT_MS =
   DEFAULT_AGENT_VIEW_ATTACH_LEASE_TTL_MS / 3;
 
@@ -113,6 +114,8 @@ export interface AgentViewSupervisorMaintenanceResult
 }
 
 type AgentViewStoreOptions = { globalDir?: string };
+
+const retiredInitialPromptTokenDigests = new Map<string, string>();
 
 export interface AgentViewSupervisorMaintenance {
   hibernateIdleSessions(): Promise<AgentViewSupervisorHibernationResult>;
@@ -291,6 +294,9 @@ class AgentViewSupervisorProcessHandler
       (this.options.now?.() ?? new Date()).getTime(),
     )) {
       if (snapshot.state.ownership === 'unmanaged') {
+        if (await this.gcUnmanagedSession(snapshot.state)) {
+          changed = true;
+        }
         continue;
       }
       if (snapshot.state.ownership === 'removing') {
@@ -350,6 +356,42 @@ class AgentViewSupervisorProcessHandler
           ),
         ),
     );
+  }
+  private async gcUnmanagedSession(
+    snapshotState: AgentViewSessionStateFile,
+  ): Promise<boolean> {
+    const cutoff =
+      (this.options.now?.() ?? new Date()).getTime() -
+      UNMANAGED_TOMBSTONE_RETENTION_MS;
+    const updatedAt = Date.parse(snapshotState.updatedAt);
+    if (!Number.isFinite(updatedAt) || updatedAt >= cutoff) {
+      return false;
+    }
+    try {
+      return await this.workers.withHostSetupLock(
+        snapshotState.sessionId,
+        async () => {
+          const state = await readAgentViewSessionState(
+            snapshotState.sessionId,
+            this.store,
+          );
+          if (
+            state?.ownership !== 'unmanaged' ||
+            state.updatedAt !== snapshotState.updatedAt ||
+            Date.parse(state.updatedAt) >= cutoff
+          ) {
+            return false;
+          }
+          await fs.promises.rm(
+            getAgentViewSessionPaths(state.sessionId, this.store).sessionDir,
+            { recursive: true, force: true },
+          );
+          return true;
+        },
+      );
+    } catch {
+      return false;
+    }
   }
   subscribe(
     _params: Record<string, unknown> | undefined,
@@ -757,7 +799,21 @@ class AgentViewSupervisorProcessHandler
       event.type === 'ready'
         ? (this.workers.getBootGeneration(event.sessionId) ?? null)
         : undefined;
-    await requireValidWorkerToken(event.sessionId, params, this.store);
+    try {
+      await requireValidWorkerToken(event.sessionId, params, this.store);
+    } catch (error) {
+      if (
+        await clearInitialPromptPendingForRetiredWorkingEvent(
+          event,
+          params,
+          this.store,
+        )
+      ) {
+        this.notifyChanged();
+        return { sessionId: event.sessionId, accepted: true };
+      }
+      throw error;
+    }
     if (event.type === 'ready') {
       this.workers.validatePendingWorkerReady(event, readyGeneration);
     }
@@ -791,6 +847,16 @@ class AgentViewSupervisorProcessHandler
           ? await this.withPromptQueueLock(event.sessionId, apply)
           : await apply();
     } catch (error) {
+      if (
+        await clearInitialPromptPendingForRetiredWorkingEvent(
+          event,
+          params,
+          this.store,
+        )
+      ) {
+        this.notifyChanged();
+        return { sessionId: event.sessionId, accepted: true };
+      }
       if (event.type === 'ready') {
         this.workers.rejectPendingWorkerReady(
           event.sessionId,
@@ -3635,7 +3701,8 @@ async function updateExitedSession(
   if (applied) {
     // The exit verdict is authoritative: drop the persisted pids so later
     // liveness probes and signaling paths cannot target a reused pid.
-    await clearAgentViewWorkerPids(sessionId, options);
+    const tokenDigest = await clearAgentViewWorkerPids(sessionId, options);
+    rememberRetiredInitialPromptTokenDigest(sessionId, tokenDigest, options);
   }
 }
 
@@ -3790,6 +3857,12 @@ async function applyWorkerEvent(
       state.processState === 'hibernating') &&
     (event.type === 'ready' || event.type === 'state')
   ) {
+    if (isInitialPromptWorkingEvent(event)) {
+      return clearInitialPromptPendingForTerminalState(
+        event.sessionId,
+        options,
+      );
+    }
     // A buffered/in-flight event from a dead worker must not clobber the
     // exit verdict. A legitimate replacement worker's ready arrives only
     // after respawn writes processState 'starting'.
@@ -3809,20 +3882,30 @@ async function applyWorkerEvent(
         : state.sessionState;
 
   let statePatchApplied = false;
+  let clearedTerminalInitialPrompt = false;
   await patchAgentViewSessionStateIf(
     event.sessionId,
     (existing) => {
       // Re-validate inside the queued mutation: an exit verdict enqueued
       // after the guard read above must not be clobbered by this patch.
+      const terminalState =
+        existing.sessionState === 'stopped' ||
+        existing.processState === 'exited' ||
+        existing.processState === 'hibernated' ||
+        existing.processState === 'hibernating';
       if (
         (existing.ownership !== 'managed' &&
           existing.ownership !== 'adopting') ||
-        ((existing.sessionState === 'stopped' ||
-          existing.processState === 'exited' ||
-          existing.processState === 'hibernated' ||
-          existing.processState === 'hibernating') &&
-          (event.type === 'ready' || event.type === 'state'))
+        (terminalState && (event.type === 'ready' || event.type === 'state'))
       ) {
+        if (
+          terminalState &&
+          isInitialPromptWorkingEvent(event) &&
+          existing.initialPromptPending === true
+        ) {
+          clearedTerminalInitialPrompt = true;
+          return { initialPromptPending: undefined };
+        }
         return undefined;
       }
       statePatchApplied = true;
@@ -3845,6 +3928,9 @@ async function applyWorkerEvent(
     },
     options,
   );
+  if (clearedTerminalInitialPrompt) {
+    return true;
+  }
   if (!statePatchApplied) {
     return false;
   }
@@ -3934,6 +4020,56 @@ async function applyWorkerEvent(
     options,
   );
   return true;
+}
+
+function isInitialPromptWorkingEvent(
+  event: AgentViewWorkerEvent,
+): event is Extract<AgentViewWorkerEvent, { type: 'state' }> {
+  return event.type === 'state' && event.sessionState === 'working';
+}
+
+async function clearInitialPromptPendingForTerminalState(
+  sessionId: string,
+  options: { globalDir?: string },
+): Promise<boolean> {
+  return patchAgentViewSessionStateIf(
+    sessionId,
+    (existing) => {
+      if (
+        (existing.ownership !== 'managed' &&
+          existing.ownership !== 'adopting') ||
+        existing.initialPromptPending !== true ||
+        (existing.sessionState !== 'stopped' &&
+          existing.processState !== 'exited' &&
+          existing.processState !== 'hibernated' &&
+          existing.processState !== 'hibernating')
+      ) {
+        return undefined;
+      }
+      return { initialPromptPending: undefined };
+    },
+    options,
+  );
+}
+
+async function clearInitialPromptPendingForRetiredWorkingEvent(
+  event: AgentViewWorkerEvent,
+  params: Record<string, unknown> | undefined,
+  options: { globalDir?: string },
+): Promise<boolean> {
+  if (!isInitialPromptWorkingEvent(event)) {
+    return false;
+  }
+  const token = params?.['token'];
+  if (typeof token !== 'string' || token.length === 0) {
+    return false;
+  }
+  if (
+    !consumeRetiredInitialPromptTokenDigest(event.sessionId, token, options)
+  ) {
+    return false;
+  }
+  return clearInitialPromptPendingForTerminalState(event.sessionId, options);
 }
 
 async function applyWorkerHeartbeatEvent(
@@ -4465,6 +4601,41 @@ function tokenDigestMatches(token: string, expectedDigest: string): boolean {
   const actual = Buffer.from(digestAgentViewWorkerToken(token), 'hex');
   const expected = Buffer.from(expectedDigest, 'hex');
   return actual.length === expected.length && timingSafeEqual(actual, expected);
+}
+
+function retiredInitialPromptTokenKey(
+  sessionId: string,
+  options: { globalDir?: string },
+): string {
+  return `${getAgentViewStorePaths(options).globalDir}\0${sanitizeSessionId(
+    sessionId,
+  )}`;
+}
+
+function rememberRetiredInitialPromptTokenDigest(
+  sessionId: string,
+  tokenDigest: string | undefined,
+  options: { globalDir?: string },
+): void {
+  if (!tokenDigest) return;
+  retiredInitialPromptTokenDigests.set(
+    retiredInitialPromptTokenKey(sessionId, options),
+    tokenDigest,
+  );
+}
+
+function consumeRetiredInitialPromptTokenDigest(
+  sessionId: string,
+  token: string,
+  options: { globalDir?: string },
+): boolean {
+  const key = retiredInitialPromptTokenKey(sessionId, options);
+  const tokenDigest = retiredInitialPromptTokenDigests.get(key);
+  if (!tokenDigest || !tokenDigestMatches(token, tokenDigest)) {
+    return false;
+  }
+  retiredInitialPromptTokenDigests.delete(key);
+  return true;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

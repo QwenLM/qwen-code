@@ -301,6 +301,37 @@ describe('setupStartupWorktree', () => {
     );
   });
 
+  it('preserves a created worktree after another process re-attaches before marker write', async () => {
+    tempRepo = await makeTempRepo();
+    process.chdir(tempRepo);
+
+    const creator = await setupStartupWorktree('reattach-race');
+    expect(creator?.ok).toBe(true);
+    if (!creator?.ok) return;
+
+    process.chdir(tempRepo);
+    const reattacher = await setupStartupWorktree('reattach-race');
+    expect(reattacher?.ok).toBe(true);
+    if (!reattacher?.ok) return;
+    expect(reattacher.context.wasReattached).toBe(true);
+
+    await expect(
+      discardCreatedStartupWorktree(creator.context),
+    ).resolves.toEqual({
+      preserved: expect.stringContaining('being re-attached by process'),
+    });
+
+    expect((await fs.stat(creator.context.worktreePath)).isDirectory()).toBe(
+      true,
+    );
+    const { stdout: branches } = await exec(
+      'git',
+      ['branch', '--list', creator.context.branch],
+      { cwd: tempRepo },
+    );
+    expect(branches.trim()).toContain(creator.context.branch);
+  });
+
   it('rejects invalid slug characters before any git operation', async () => {
     tempRepo = await makeTempRepo();
     process.chdir(tempRepo);
