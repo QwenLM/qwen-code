@@ -635,6 +635,22 @@ describe('resolveBootstrapRoute', () => {
     expect(resolveBootstrapRoute(['mcp', '--version'])).toBe('version');
     expect(resolveBootstrapRoute([])).toBe('default');
   });
+
+  it('demotes unregistered flags via the KNOWN_FAST_PATH_FLAGS gate', () => {
+    // The membership check is the load-bearing rule of argvSafeForFastPath:
+    // KNOWN_FAST_PATH_FLAGS stores only bare registered spellings, so it
+    // also rejects `--no-` negations, `=`-form resets, short-option
+    // clusters, and `---` tokens. Dropping the check flips
+    // `--unknown-flag --help` onto the help fast path.
+    expect(resolveBootstrapRoute(['--unknown-flag', '--help'])).toBe('default');
+    expect(resolveBootstrapRoute(['--unknown-flag'])).toBe('default');
+    expect(resolveBootstrapRoute(['--help', '--no-help'])).toBe('default');
+    expect(resolveBootstrapRoute(['--version=false', '--help'])).toBe(
+      'default',
+    );
+    expect(resolveBootstrapRoute(['-dh', '--help'])).toBe('default');
+    expect(resolveBootstrapRoute(['---help'])).toBe('default');
+  });
 });
 
 describe('runCliEntry', () => {
@@ -757,6 +773,13 @@ describe('runCliEntry', () => {
     }
     expect(helpText).toContain(
       '"openai", "anthropic", "qwen-oauth", "gemini", "vertex-ai"',
+    );
+    // The fast path mirrors config.ts and wraps help at the terminal width;
+    // in a non-TTY (columns unset) that disables wrapping, so a description
+    // longer than yargs' 80-column fallback renders on one unbroken line.
+    expect(helpText).toContain(
+      'Maximum cumulative tool calls executed during the run (success or ' +
+        'failure; `structured_output` under --json-schema is exempt).',
     );
     expect(helpText).toContain('deprecated');
     expect(mocks.main).not.toHaveBeenCalled();

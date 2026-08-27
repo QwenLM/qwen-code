@@ -147,20 +147,19 @@ function isValueToken(arg: string | undefined): arg is string {
 // from approximating it token-by-token (`--help --no-help`, `--version=false`,
 // `---help`, ...). So instead of enumerating entrance classes, close the
 // grammar: the help/version fast paths fire ONLY when every argv token is
-// known-safe — an exact registered flag, a value consumed by a value-taking
-// flag, or `--` (everything after it is positional data). Any other token
-// demotes to the slow path (the full parser itself — direction-safe by
-// construction, it prints exactly what it would have printed anyway).
-// Demotion triggers: `=`-form tokens (boolean flags reset via
-// `--version=false` / `-h=true`), `--no-` negations (`--help --no-help`),
-// single-dash clusters longer than one letter (`-dh` — yargs-parser expands
-// them letter-by-letter), three-plus leading dashes (`---help` — yargs-parser
-// strips them into the bare flag), any flag outside KNOWN_FAST_PATH_FLAGS,
-// and any unconsumed positional. Residual conservatism is intentional:
-// value-taking options still consume at most ONE following token, so
-// multi-value array invocations such as `--extensions a b --help` also demote
-// to the slow path, which prints the same top-level options plus the full
-// parser's command/positional sections.
+// known-safe — an exact registered flag spelling from KNOWN_FAST_PATH_FLAGS,
+// a value consumed by a value-taking flag, or `--` (everything after it is
+// positional data). Any other token demotes to the slow path (the full
+// parser itself — direction-safe by construction, it prints exactly what it
+// would have printed anyway). The set stores only bare registered spellings,
+// so the membership check alone rejects `=`-form resets (`--version=false`),
+// `--no-` negations (`--help --no-help`), short-option clusters (`-dh`),
+// three-plus-dash tokens (`---help`), and unknown flags — every shape
+// yargs-parser treats specially and the scanner cannot model. Residual
+// conservatism is intentional: value-taking options still consume at most
+// ONE following token, so multi-value array invocations such as
+// `--extensions a b --help` also demote to the slow path, which prints the
+// same top-level options plus the full parser's command/positional sections.
 function argvSafeForFastPath(argv: readonly string[]): boolean {
   for (let i = 0; i < argv.length; i++) {
     const token = argv[i]!;
@@ -169,18 +168,6 @@ function argvSafeForFastPath(argv: readonly string[]): boolean {
     }
     if (!token.startsWith('-')) {
       return false; // a positional breaks the flag-only fast-path grammar
-    }
-    if (token.startsWith('---')) {
-      return false;
-    }
-    if (token.includes('=')) {
-      return false;
-    }
-    if (token.startsWith('--no-')) {
-      return false;
-    }
-    if (!token.startsWith('--') && token.length > 2) {
-      return false; // short-option cluster, expanded letter-by-letter
     }
     if (!KNOWN_FAST_PATH_FLAGS.has(token)) {
       return false;
@@ -289,6 +276,10 @@ async function buildTopLevelHelpParser() {
   for (const [command, description] of TOP_LEVEL_COMMANDS) {
     parser.command(command, description);
   }
+
+  // Mirror config.ts, which wraps the rendered help at the terminal width;
+  // without it yargs falls back to 80 columns.
+  parser.wrap(parser.terminalWidth());
 
   return parser;
 }
