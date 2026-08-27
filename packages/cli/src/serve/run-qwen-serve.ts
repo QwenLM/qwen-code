@@ -1598,9 +1598,10 @@ function certCoversHost(x509: X509Certificate, host: string): boolean {
  *   - array → first non-empty string element after trim, or undefined
  *   - anything else (object, number, boolean, undefined) → undefined
  *
- * Returning `undefined` is the bridge's signal to use its own
- * `getCurrentGeminiMdFilename()` default — so a malformed value
- * keeps the daemon alive rather than producing a garbage filename.
+ * Returning `undefined` leaves the workspace on the daemon's init-default
+ * chain — the primary workspace's configured `context.fileName` snapshot
+ * (`contextFilenameForInit`), then the hard-coded `QWEN.md` — so a malformed
+ * value keeps the daemon alive rather than producing a garbage filename.
  */
 export function extractContextFilename(value: unknown): string | undefined {
   if (typeof value === 'string') {
@@ -8670,7 +8671,7 @@ async function runQwenServeImpl(
             clearRuntimeStartAfterHealthTimer();
             clearRuntimeStartFallbackTimer();
             cancelDeferredRuntimeStartup();
-            // NOTE: the SIGINT/SIGTERM handlers stay attached during the
+            // NOTE: the shutdown signal handlers stay attached during the
             // drain so a second signal can take the explicit force-exit path
             // above. Detaching them up front would leave Node's default signal
             // behavior in charge and could orphan agent children. We detach
@@ -8703,6 +8704,7 @@ async function runQwenServeImpl(
               if (!preserveSignalHandlers) {
                 process.removeListener('SIGINT', onSignal);
                 process.removeListener('SIGTERM', onSignal);
+                process.removeListener('SIGHUP', onSignal);
               }
               process.removeListener(
                 'uncaughtExceptionMonitor',
@@ -9008,6 +9010,7 @@ async function runQwenServeImpl(
 
       process.on('SIGINT', onSignal);
       process.on('SIGTERM', onSignal);
+      process.on('SIGHUP', onSignal);
       process.on('uncaughtExceptionMonitor', onUncaughtExceptionMonitor);
 
       // The per-attempt boot-error listener was removed by handleListening.
