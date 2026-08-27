@@ -4332,6 +4332,7 @@ export interface DaemonWorkspaceExtensionsStatus {
 }
 
 export interface ExtensionInstallRequest {
+  /** Git, GitHub, npm, or an absolute path on the daemon host. */
   source: string;
   credentialPersistence?: 'stored' | 'one_time';
   ref?: string;
