@@ -5070,6 +5070,32 @@ describe('Session', () => {
       }
     });
 
+    it('rejects clearing an effort owned by a different active scope', () => {
+      (mockSettings as unknown as { isTrusted: boolean }).isTrusted = true;
+      mockSettings.workspace.settings = { modelProviders: {} };
+      mockSettings.user.settings = {
+        model: { reasoningEffort: 'high' },
+      };
+      (mockSettings as unknown as { merged: Record<string, unknown> }).merged =
+        { model: { reasoningEffort: 'high' } };
+
+      let thrown: unknown;
+      try {
+        session.persistReasoningEffort(undefined);
+      } catch (error) {
+        thrown = error;
+      }
+
+      expect(thrown).toMatchObject({
+        code: -32603,
+        data: { errorKind: REASONING_EFFORT_PERSISTENCE_ERROR_KIND },
+        message: expect.stringContaining(
+          'default could not be cleared: it is persisted in a different settings scope',
+        ),
+      });
+      expect(mockSettings.setValue).not.toHaveBeenCalled();
+    });
+
     it('writes through the LoadedSettings owned by each Session', () => {
       const otherSetValue = vi.fn();
       const otherSettings = {

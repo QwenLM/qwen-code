@@ -9553,6 +9553,35 @@ export class Session implements SessionContext {
       persistScope === SettingScope.Workspace
         ? this.settings.workspace
         : this.settings.user;
+    const targetOwnsPersistedValue = settingExistsInScope(
+      'model.reasoningEffort',
+      settingsFile.settings,
+    );
+    const otherActiveScopeOwnsPersistedValue =
+      settingExistsInScope(
+        'model.reasoningEffort',
+        this.settings.system.settings,
+      ) ||
+      (persistScope === SettingScope.Workspace
+        ? settingExistsInScope(
+            'model.reasoningEffort',
+            this.settings.user.settings,
+          )
+        : this.settings.isTrusted &&
+          settingExistsInScope(
+            'model.reasoningEffort',
+            this.settings.workspace.settings,
+          ));
+    if (
+      persistedValue === undefined &&
+      !targetOwnsPersistedValue &&
+      otherActiveScopeOwnsPersistedValue
+    ) {
+      throw RequestError.internalError(
+        { errorKind: REASONING_EFFORT_PERSISTENCE_ERROR_KIND },
+        'Reasoning effort is active for the current session, but the default could not be cleared: it is persisted in a different settings scope',
+      );
+    }
     if (
       persistedValue !== undefined &&
       this.settings.merged.model?.reasoningEffort !== persistedValue &&
@@ -9573,10 +9602,7 @@ export class Session implements SessionContext {
       );
     }
     try {
-      if (
-        persistedValue !== undefined ||
-        settingExistsInScope('model.reasoningEffort', settingsFile.settings)
-      ) {
+      if (persistedValue !== undefined || targetOwnsPersistedValue) {
         this.settings.setValue(
           persistScope,
           'model.reasoningEffort',

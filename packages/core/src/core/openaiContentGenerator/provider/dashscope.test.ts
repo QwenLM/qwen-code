@@ -709,7 +709,7 @@ describe('DashScopeOpenAICompatibleProvider', () => {
       expect(() =>
         generator.buildRequest({ ...baseRequest }, 'test-prompt-id'),
       ).toThrow(
-        'Unsupported reasoning effort "vendor.ultra" for toggle-only Qwen model "qwen-max"',
+        'Unsupported model.reasoningEffort "vendor.ultra" for toggle-only Qwen model "qwen-max". Change or clear model.reasoningEffort before using this model.',
       );
     });
 

@@ -428,10 +428,18 @@ export function resolveCliGenerationConfig(
   // Apply the global reasoning-effort preference onto the unified reasoning
   // config. Effort values are model-defined, so preserve non-blank strings.
   const rawReasoningEffort = settings.model?.reasoningEffort;
+  const disabledReasoningUnsupported =
+    rawReasoningEffort === 'none' &&
+    generationConfig.thinkingMandatory === true;
+  const ignoredReasoningEffortWarning = disabledReasoningUnsupported
+    ? 'Ignoring model.reasoningEffort "none" because the selected model requires thinking.'
+    : undefined;
   let reasoningPreference: false | string | undefined;
   if (rawReasoningEffort === 'none') {
-    reasoningPreference = false;
-    generationConfig.reasoning = false;
+    if (!disabledReasoningUnsupported) {
+      reasoningPreference = false;
+      generationConfig.reasoning = false;
+    }
   } else if (
     typeof rawReasoningEffort === 'string' &&
     rawReasoningEffort.trim()
@@ -456,6 +464,7 @@ export function resolveCliGenerationConfig(
     sources: resolved.sources,
     warnings: [
       ...resolved.warnings,
+      ...(ignoredReasoningEffortWarning ? [ignoredReasoningEffortWarning] : []),
       ...(disambiguationWarning ? [disambiguationWarning] : []),
       ...(ignoredGenerationConfigWarning
         ? [ignoredGenerationConfigWarning]

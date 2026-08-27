@@ -554,7 +554,7 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
     if (isQwenFamilyWireModel(wireModel)) {
       if (!isBuiltInReasoningEffort(reasoning.effort)) {
         throw new Error(
-          `Unsupported reasoning effort ${JSON.stringify(reasoning.effort)} for toggle-only Qwen model ${JSON.stringify(wireModel)}`,
+          `Unsupported model.reasoningEffort ${JSON.stringify(reasoning.effort)} for toggle-only Qwen model ${JSON.stringify(wireModel)}. Change or clear model.reasoningEffort before using this model.`,
         );
       }
       return { enable_thinking: true };

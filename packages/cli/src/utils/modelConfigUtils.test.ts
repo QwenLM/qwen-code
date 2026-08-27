@@ -231,6 +231,32 @@ describe('modelConfigUtils', () => {
       },
     );
 
+    it('ignores a persisted disabled preference when thinking is mandatory', () => {
+      vi.mocked(resolveModelConfig).mockReturnValue({
+        config: {
+          model: 'qwen3.8-max',
+          thinkingMandatory: true,
+          reasoning: { effort: 'xhigh' },
+        },
+        sources: {},
+        warnings: [],
+      });
+
+      const result = resolveCliGenerationConfig({
+        argv: {},
+        settings: makeMockSettings({
+          model: { name: 'qwen3.8-max', reasoningEffort: 'none' },
+        }),
+        selectedAuthType: AuthType.USE_OPENAI,
+      });
+
+      expect(result.generationConfig.reasoning).toEqual({ effort: 'xhigh' });
+      expect(result.reasoningPreference).toBeUndefined();
+      expect(result.warnings).toContain(
+        'Ignoring model.reasoningEffort "none" because the selected model requires thinking.',
+      );
+    });
+
     it('keeps a resolved disabled default separate from an unset preference', () => {
       vi.mocked(resolveModelConfig).mockReturnValue({
         config: { model: '', reasoning: false },
