@@ -21,9 +21,13 @@ COMMENT_ID=$(gh api "repos/$REPO/issues/$PR_NUMBER/comments" -F body=@/tmp/stage
 
 **Terminal gate exception:** if any terminal exit triggers (Stage 0 core
 module hard block, Stage 1a template failure, Stage 1b problem-does-not-exist,
-or Stage 1c direction escalation), submit exactly one `CHANGES_REQUESTED`
-review and stop. Do not also post or update a Stage 1 issue comment, and do not
-continue to Stage 2, Stage 3, or approval.
+Stage 1c direction escalation, or Stage 1-pre's two request-changes exits —
+linked issue closed as not planned, or a remaining delta against a merged
+fix), submit exactly one `CHANGES_REQUESTED` review and stop. Do not also post
+or update a Stage 1 issue comment, and do not continue to Stage 2, Stage 3, or
+approval. The Stage 1-pre duplicate-close exit is different: it posts the
+terminal `stage=1-pre` comment and closes the PR instead of submitting a
+review.
 
 **Re-runs:** if the triage runs again on the same PR, update each comment in place. **Resolve the comment id by its stage marker AT PATCH TIME — never from memory, list position, or an earlier stage's bookkeeping.** On a re-run the thread holds four or more bot comments whose list order is not the stage order, and a wrong id silently overwrites another stage's comment (observed on a real re-run: the stage=3 comment clobbered with stage=1 content mid-run). The author filter matters too — the marker is public text anyone can paste into a comment, and the bot PAT may be able to edit other users' comments:
 
@@ -75,7 +79,7 @@ Every staged comment (Stage 1 gate-pass, Stage 2, Stage 3) ends with the signatu
 <sub>Reviewed at `<HEAD_SHA>` · re-run with `@qwen-code /triage`</sub>
 ```
 
-**If `HEAD_SHA` comes back empty** (API failure or a null `headRefOid`): **fail closed.** Do not PATCH an existing staged comment — the update rewrites the whole body, so a dropped footer erases the previously valid `Reviewed at` line just as an empty-backtick footer would. Retry the capture, or leave the prior comment (with its footer) untouched until a full OID is available; only a brand-new post that never had a footer may go out without one. Terminal-gate reviews (Stage 1a/1b/1c, submitted via `gh pr review --request-changes`) use the signature only — no footer; they reject before a real review pass.
+**If `HEAD_SHA` comes back empty** (API failure or a null `headRefOid`): **fail closed.** Do not PATCH an existing staged comment — the update rewrites the whole body, so a dropped footer erases the previously valid `Reviewed at` line just as an empty-backtick footer would. Retry the capture, or leave the prior comment (with its footer) untouched until a full OID is available; only a brand-new post that never had a footer may go out without one. Terminal-gate reviews (Stage 1-pre request-changes exits and Stage 1a/1b/1c, submitted via `gh pr review --request-changes`) use the signature only — no footer; they reject before a real review pass.
 
 **Approval:** the approve step runs **after** the Stage 3 comment. Comment first, then approve **pinned to the reviewed commit** — `gh pr review --approve` does not bind to a SHA, so a force-push in the check-then-act gap would approve unseen code. Use the reviews API with `commit_id` instead, which records the approval against the exact commit you reviewed (branch protection that requires approval of the latest push then won't count it if the head moved):
 
@@ -183,11 +187,26 @@ The parser is not intent-aware — prose like "resolves #123's closer" links
 #123 too — so treat the linkage as input to verify against the issue's
 actual state, never as proof by itself.
 
+```bash
+# Branch on each linked issue's state; $N feeds the closer query below.
+for N in $ISSUES; do
+  SR=$(gh issue view "$N" --repo "$REPO" --json state,stateReason \
+    --jq '.state + " " + (.stateReason // "")')
+  # "OPEN" -> proceed to 1a; "CLOSED NOT_PLANNED" -> request changes, stop;
+  # "CLOSED COMPLETED" -> run the closer query below with this $N
+done
+```
+
 - No linked issues, or every linked issue **open** → proceed to 1a.
 - Any linked issue **closed as not planned** → the fix target was rejected:
-  request changes (bilingual, `<!-- qwen-triage stage=1-pre -->` marker,
-  @mention the author) asking them to reach agreement in the issue first,
-  and stop.
+  submit exactly one `CHANGES_REQUESTED` review asking them to reach
+  agreement in the issue first (bilingual body whose first line is the
+  `<!-- qwen-triage stage=1-pre -->` marker, @mention the author), and stop:
+
+```bash
+gh pr review "$PR_NUMBER" --repo "$REPO" --request-changes --body-file /tmp/stage-1pre-not-planned.md
+```
+
 - Any linked issue **closed as completed** → find what closed it (GraphQL —
   the REST timeline's `closed` event carries no reliable closer reference):
 
@@ -196,7 +215,7 @@ gh api graphql -f query='
   query($owner: String!, $name: String!, $n: Int!) {
     repository(owner: $owner, name: $name) {
       issue(number: $n) {
-        timelineItems(first: 20, itemTypes: [CLOSED_EVENT]) {
+        timelineItems(last: 20, itemTypes: [CLOSED_EVENT]) {
           nodes {
             ... on ClosedEvent {
               closer {
@@ -209,8 +228,13 @@ gh api graphql -f query='
       }
     }
   }' -f owner="${REPO%%/*}" -f name="${REPO##*/}" -F n="$N" \
-  --jq '.data.repository.issue.timelineItems.nodes[].closer | select(.number != null) | "\(.number) \(.merged)"'
+  --jq '.data.repository.issue.timelineItems.nodes // [] | last | .closer | select(. != null and .number != null) | "\(.number) \(.merged)"'
 ```
+
+Only the LAST (most recent) close event counts — earlier closes belong to
+reopen cycles and their closers are stale. If the query fails or emits
+nothing (the number is a PR, not an issue; the issue does not exist; the
+latest close was manual), treat the closer as unresolved.
 
 - Closed by a **merged PR** → compare this PR's production diff (exclude
   test/generated files per the Stage 0 size rules) against the default
@@ -226,9 +250,16 @@ gh api graphql -f query='
     the ONLY place triage closes a PR.
   - **Any remaining delta** — everything else: an added production line
     that is missing there, a deleted production line that still exists
-    there, or any non-production addition → request changes: name the
-    merged PR, name the remaining delta, ask the author to rebase onto the
-    default branch and reduce the PR to that delta. Stop.
+    there, or any non-production addition → submit exactly one
+    `CHANGES_REQUESTED` review: name the merged PR, name the remaining
+    delta, ask the author to rebase onto the default branch and reduce the
+    PR to that delta (bilingual body whose first line is the
+    `<!-- qwen-triage stage=1-pre -->` marker, @mention the author). Stop:
+
+```bash
+gh pr review "$PR_NUMBER" --repo "$REPO" --request-changes --body-file /tmp/stage-1pre-remaining-delta.md
+```
+
 - Closed manually (no close commit) or the closer cannot be resolved →
   never close on ambiguity: flag it in the Stage 1 comment and escalate to
   the maintainer.
