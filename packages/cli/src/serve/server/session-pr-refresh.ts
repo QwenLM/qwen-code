@@ -18,6 +18,12 @@ import {
   updateSessionPrStates,
   type SessionPrState,
 } from '@qwen-code/qwen-code-core';
+import {
+  AONE_MAX_MR_VIEW_CALLS_PER_RUN,
+  defaultAoneMrBackend,
+  resolveAoneWorkspaceRepo,
+  type AoneMrBackend,
+} from './aone-mrs.js';
 import { createWorkspaceRuntimeSessionService } from '../workspace-runtime-storage.js';
 import type {
   WorkspaceRegistry,
@@ -49,6 +55,11 @@ export interface SessionPrRefreshOptions {
    * always passes the app-wide one.
    */
   archiveCoordinator?: SessionPrArchiveLane;
+  /**
+   * The a1 read backend for Aone workspaces. Tests substitute fakes; the
+   * daemon uses {@link defaultAoneMrBackend}.
+   */
+  aoneBackend?: AoneMrBackend;
 }
 
 /**
@@ -88,9 +99,12 @@ export interface SessionPrRefreshResult {
 /**
  * Refreshes the persisted `state` snapshot of one workspace's PR bindings.
  * Only merged is terminal (closed PRs can reopen), so workspaces whose
- * bindings are all merged cost no `gh` call at all. One slim
- * `gh pr list --state all` per workspace per sweep; rewritten in place
- * (order and createdAt preserved).
+ * bindings are all merged cost no platform call at all. GitHub workspaces
+ * pay one slim `gh pr list --state all` per sweep; Aone workspaces pay one
+ * `a1 repo mr view` per unique pending number (list output carries no
+ * state+URL pair, and closed MRs are not listable — a reopen reappears as
+ * opened and self-heals). Rewritten in place (order and createdAt
+ * preserved).
  */
 export async function refreshWorkspaceSessionPrStates(
   runtime: WorkspaceRuntime,
@@ -154,12 +168,6 @@ export async function refreshWorkspaceSessionPrStates(
   if (pendingNumbers.length === 0) return { scanned, updated: 0 };
 
   assertGenerationOpen();
-  const result = await fetchPullRequests(
-    runtime.workspaceCwd,
-    runtime.env.effectiveEnv,
-    { state: 'all', limit: 500, slim: true },
-  );
-  if (result.kind !== 'ok') return { scanned, updated: 0 };
   // The url rides along with the state: the map is keyed by number, but a
   // binding may point at another repository whose same-numbered PR must
   // never supply this workspace's state.
@@ -167,12 +175,44 @@ export async function refreshWorkspaceSessionPrStates(
     number,
     { state: SessionPrState; url: string }
   >();
-  for (const pr of result.pullRequests) {
-    // The sidecar snapshot has no 'draft' variant — a draft is still open.
-    numberToFetch.set(pr.number, {
-      state: pr.state === 'draft' ? 'open' : pr.state,
-      url: pr.url,
-    });
+  const aoneRepo = await resolveAoneWorkspaceRepo(
+    runtime.workspaceCwd,
+    runtime.env.effectiveEnv,
+  );
+  if (aoneRepo) {
+    // Aone's global ids are platform-unique, so a number bound by several
+    // sessions costs one mr view. The cap bounds one sweep's fan-out; a
+    // deterministic tail beyond it waits until the pending set shrinks
+    // (documented as implausible — sidecars cap at 10 entries and merged
+    // bindings drop out). A per-number failure (403/404/timeout) leaves
+    // that entry at its last state; the next sweep retries IT.
+    const backend = options.aoneBackend ?? defaultAoneMrBackend;
+    const unique = [
+      ...new Set(pendingNumbers.flatMap((target) => target.numbers)),
+    ].slice(0, AONE_MAX_MR_VIEW_CALLS_PER_RUN);
+    for (const number of unique) {
+      try {
+        const view = await backend.view(aoneRepo.repoPath, number);
+        numberToFetch.set(view.number, { state: view.state, url: view.url });
+      } catch {
+        // Skip this entry; the next sweep retries it.
+      }
+    }
+    if (numberToFetch.size === 0) return { scanned, updated: 0 };
+  } else {
+    const result = await fetchPullRequests(
+      runtime.workspaceCwd,
+      runtime.env.effectiveEnv,
+      { state: 'all', limit: 500, slim: true },
+    );
+    if (result.kind !== 'ok') return { scanned, updated: 0 };
+    for (const pr of result.pullRequests) {
+      // The sidecar snapshot has no 'draft' variant — a draft is still open.
+      numberToFetch.set(pr.number, {
+        state: pr.state === 'draft' ? 'open' : pr.state,
+        url: pr.url,
+      });
+    }
   }
 
   let updated = 0;
@@ -180,9 +220,10 @@ export async function refreshWorkspaceSessionPrStates(
     const states = new Map<number, { state: SessionPrState; url: string }>();
     for (const number of target.numbers) {
       const fetched = numberToFetch.get(number);
-      // Only a number ABSENT from gh's page is skipped (out of the limit
-      // window); a present one is authoritative — including an 'open' that
-      // supersedes a stale 'closed' after a reopen.
+      // Only a number ABSENT from the fetched set is skipped (out of gh's
+      // limit window, or beyond this a1 sweep's view cap); a present one
+      // is authoritative — including an 'open' that supersedes a stale
+      // 'closed' after a reopen.
       if (fetched !== undefined) states.set(number, fetched);
     }
     if (states.size === 0) continue;

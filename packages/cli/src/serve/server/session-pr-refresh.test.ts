@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { execSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import * as fsp from 'node:fs/promises';
 import * as os from 'node:os';
@@ -16,6 +17,11 @@ import {
   upsertSessionPr,
   type SessionService,
 } from '@qwen-code/qwen-code-core';
+import {
+  AONE_MAX_MR_VIEW_CALLS_PER_RUN,
+  AoneCommandError,
+  type AoneMrBackend,
+} from './aone-mrs.js';
 import { createWorkspaceRuntimeSessionService } from '../workspace-runtime-storage.js';
 import {
   WorkspaceGenerationClosedError,
@@ -240,6 +246,173 @@ describe('refreshWorkspaceSessionPrStates', () => {
       { GH_TOKEN: 'x' },
       { state: 'all', limit: 500, slim: true },
     );
+  });
+
+  describe('on an Aone workspace', () => {
+    const AONE_URL =
+      'https://code.alibaba-inc.com/jspt/agentic_coding/codereview/26430560';
+
+    beforeEach(() => {
+      execSync('git init', { cwd: workspaceCwd, stdio: 'pipe' });
+      execSync(
+        'git remote add origin git@gitlab.alibaba-inc.com:jspt/agentic_coding.git',
+        { cwd: workspaceCwd, stdio: 'pipe' },
+      );
+    });
+
+    function fakeAoneBackend(
+      overrides: Partial<AoneMrBackend> = {},
+    ): AoneMrBackend {
+      return {
+        list: vi.fn(async () => []),
+        view: vi.fn(async (_repoPath: string, id: number) => ({
+          number: id,
+          url: AONE_URL,
+          state: 'merged' as const,
+        })),
+        ...overrides,
+      };
+    }
+
+    it('refreshes a binding state through mr view', async () => {
+      await seedSession(SESSION_A);
+      const prPath = sessionService.getPrSessionPathForArchiveState(
+        SESSION_A,
+        'active',
+      );
+      const seeded = await upsertSessionPr(prPath, {
+        number: 26430560,
+        url: AONE_URL,
+      });
+      const backend = fakeAoneBackend();
+
+      const result = await refreshWorkspaceSessionPrStates(runtime, undefined, {
+        aoneBackend: backend,
+      });
+
+      expect(result).toEqual({ scanned: 1, updated: 1 });
+      expect(fetchGitHubPullRequestsMock).not.toHaveBeenCalled();
+      expect(backend.view).toHaveBeenCalledWith(
+        'jspt/agentic_coding',
+        26430560,
+      );
+      const persisted = await readSessionPrs(prPath);
+      expect(persisted?.[0]?.state).toBe('merged');
+      expect(persisted?.[0]?.createdAt).toBe(seeded[0]?.createdAt);
+    });
+
+    it('dedupes one mr view across sessions binding the same MR', async () => {
+      await seedSession(SESSION_A);
+      await seedSession(SESSION_B);
+      const prPathA = sessionService.getPrSessionPathForArchiveState(
+        SESSION_A,
+        'active',
+      );
+      const prPathB = sessionService.getPrSessionPathForArchiveState(
+        SESSION_B,
+        'active',
+      );
+      await upsertSessionPr(prPathA, { number: 26430560, url: AONE_URL });
+      await upsertSessionPr(prPathB, { number: 26430560, url: AONE_URL });
+      const backend = fakeAoneBackend();
+
+      const result = await refreshWorkspaceSessionPrStates(runtime, undefined, {
+        aoneBackend: backend,
+      });
+
+      expect(result).toEqual({ scanned: 2, updated: 2 });
+      expect(backend.view).toHaveBeenCalledTimes(1);
+      expect((await readSessionPrs(prPathA))?.[0]?.state).toBe('merged');
+      expect((await readSessionPrs(prPathB))?.[0]?.state).toBe('merged');
+    });
+
+    it('applies a non-terminal view state (open beats stale closed)', async () => {
+      await seedSession(SESSION_A);
+      const prPath = sessionService.getPrSessionPathForArchiveState(
+        SESSION_A,
+        'active',
+      );
+      // 'closed' stays in the pending set (only merged is terminal), so a
+      // reopened MR's fresh 'open' must reach the sidecar — pinning the
+      // view.state passthrough against a hardcoded-state mutation.
+      await upsertSessionPr(prPath, {
+        number: 26430560,
+        url: AONE_URL,
+        state: 'closed',
+      });
+      const backend = fakeAoneBackend({
+        view: vi.fn(async (_repoPath: string, id: number) => ({
+          number: id,
+          url: AONE_URL,
+          state: 'open' as const,
+        })),
+      });
+
+      const result = await refreshWorkspaceSessionPrStates(runtime, undefined, {
+        aoneBackend: backend,
+      });
+
+      expect(result).toEqual({ scanned: 1, updated: 1 });
+      expect((await readSessionPrs(prPath))?.[0]?.state).toBe('open');
+    });
+
+    it('leaves the binding untouched when mr view fails', async () => {
+      await seedSession(SESSION_A);
+      const prPath = sessionService.getPrSessionPathForArchiveState(
+        SESSION_A,
+        'active',
+      );
+      await upsertSessionPr(prPath, { number: 26430560, url: AONE_URL });
+      const backend = fakeAoneBackend({
+        view: vi.fn(async () => {
+          throw new AoneCommandError('403 Forbidden');
+        }),
+      });
+
+      const result = await refreshWorkspaceSessionPrStates(runtime, undefined, {
+        aoneBackend: backend,
+      });
+
+      expect(result).toEqual({ scanned: 1, updated: 0 });
+      expect((await readSessionPrs(prPath))?.[0]?.state).toBeUndefined();
+    });
+
+    it('caps mr view calls per sweep', async () => {
+      // Spread AONE_MAX_MR_VIEW_CALLS_PER_RUN + 2 unique numbers over
+      // several sessions (one sidecar caps at 10 entries) so the sweep
+      // collects more pending numbers than the per-sweep view budget.
+      const sessionIds = [SESSION_A, SESSION_B, SESSION_C];
+      let number = 1;
+      for (const sessionId of sessionIds) {
+        await seedSession(sessionId);
+        const prPath = sessionService.getPrSessionPathForArchiveState(
+          sessionId,
+          'active',
+        );
+        for (let i = 0; i < 9; i++, number++) {
+          await upsertSessionPr(prPath, {
+            number,
+            url: `https://code.alibaba-inc.com/jspt/agentic_coding/codereview/${number}`,
+          });
+        }
+      }
+      const view = vi.fn(async (_repoPath: string, id: number) => ({
+        number: id,
+        url: `https://code.alibaba-inc.com/jspt/agentic_coding/codereview/${id}`,
+        state: 'merged' as const,
+      }));
+      const backend = fakeAoneBackend({ view });
+
+      const result = await refreshWorkspaceSessionPrStates(runtime, undefined, {
+        aoneBackend: backend,
+      });
+
+      expect(view).toHaveBeenCalledTimes(AONE_MAX_MR_VIEW_CALLS_PER_RUN);
+      expect(result).toEqual({
+        scanned: 3,
+        updated: AONE_MAX_MR_VIEW_CALLS_PER_RUN,
+      });
+    });
   });
 
   it("never applies this workspace's state to a binding pointing at another repository", async () => {
