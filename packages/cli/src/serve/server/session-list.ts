@@ -15,10 +15,10 @@ import {
   type SessionGroupPresetColor,
   type SessionPr,
 } from '@qwen-code/qwen-code-core';
-import type { SessionPrInfo } from '@qwen-code/acp-bridge/bridgeTypes';
 import type {
   AcpSessionBridge,
   BridgeSessionSummary,
+  SessionPrInfo,
 } from '@qwen-code/acp-bridge/bridgeTypes';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import { createSessionOrganizationService } from '../session-organization-helpers.js';
