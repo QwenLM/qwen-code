@@ -433,6 +433,16 @@ const SETTINGS_SCHEMA = {
         description: 'The preferred editor to open files in.',
         showInDialog: true,
       },
+      outputStyle: {
+        type: 'string',
+        label: 'Output Style',
+        category: 'General',
+        requiresRestart: false,
+        default: undefined as string | undefined,
+        description:
+          'Name of the output style that shapes how responses are written, for example "Concise" or "Explanatory". Leave unset for the default style.',
+        showInDialog: false,
+      },
       vimMode: {
         type: 'boolean',
         label: 'Vim Mode',

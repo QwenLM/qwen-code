@@ -119,6 +119,19 @@ qwen -p "Summarize this repository" \
   --append-system-prompt "Return exactly three bullets."
 ```
 
+### Choose an Output Style
+
+Use `--output-style` to pick one of the built-in output styles for this run. A style is a named block of instructions layered onto the built-in prompt that changes how the answer is written — `Concise` leads with the result and drops preamble and narration, `Proactive` starts working instead of proposing, `Explanatory` adds short notes about the codebase along the way. It overrides the `general.outputStyle` setting; `default` selects no style.
+
+```bash
+qwen -p "Why does the build fail on Windows?" --output-style Concise
+```
+
+> [!note]
+>
+> - `Learning` asks you to write part of the code and waits for a reply, so it is skipped in headless runs.
+> - An unknown style name prints a warning and the run continues with the default style.
+
 > [!note]
 >
 > - `--system-prompt` applies only to the current run's main session.

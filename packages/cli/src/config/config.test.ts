@@ -575,6 +575,12 @@ describe('parseArguments', () => {
     expect(argv.systemPrompt).toBeUndefined();
   });
 
+  it('should parse --output-style', async () => {
+    process.argv = ['node', 'script.js', '--output-style', 'Concise'];
+    const argv = await parseArguments();
+    expect(argv.outputStyle).toBe('Concise');
+  });
+
   it('should allow -r flag as alias for --resume', async () => {
     process.argv = [
       'node',
@@ -1450,6 +1456,75 @@ describe('loadCliConfig', () => {
       await loadCliConfig({}, argv);
       expect(process.env['NODE_TLS_REJECT_UNAUTHORIZED']).toBe('0');
       expect(errorSpy).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('output style', () => {
+    it('leaves the style unset by default', async () => {
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+      const config = await loadCliConfig({}, argv);
+      expect(config.getOutputStyle()).toBeUndefined();
+    });
+
+    it('selects a built-in style from general.outputStyle, case-insensitively', async () => {
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+      const config = await loadCliConfig(
+        { general: { outputStyle: 'concise' } },
+        argv,
+      );
+      expect(config.getOutputStyle()?.name).toBe('Concise');
+    });
+
+    it('lets --output-style override the setting', async () => {
+      process.argv = ['node', 'script.js', '--output-style', 'Explanatory'];
+      const argv = await parseArguments();
+      const config = await loadCliConfig(
+        { general: { outputStyle: 'Concise' } },
+        argv,
+      );
+      expect(config.getOutputStyle()?.name).toBe('Explanatory');
+    });
+
+    it('treats "default" as no style, even when the setting names one', async () => {
+      process.argv = ['node', 'script.js', '--output-style', 'default'];
+      const argv = await parseArguments();
+      const config = await loadCliConfig(
+        { general: { outputStyle: 'Concise' } },
+        argv,
+      );
+      expect(config.getOutputStyle()).toBeUndefined();
+    });
+
+    it('warns about an unknown style and falls back to the default', async () => {
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+      const config = await loadCliConfig(
+        { general: { outputStyle: 'Verbose' } },
+        argv,
+      );
+      expect(config.getOutputStyle()).toBeUndefined();
+      expect(errorSpy).toHaveBeenCalledWith(
+        expect.stringContaining(
+          'Unknown output style "Verbose" (from general.outputStyle)',
+        ),
+      );
+      expect(errorSpy).toHaveBeenCalledWith(
+        expect.stringContaining('Concise, Proactive, Explanatory, Learning'),
+      );
+    });
+
+    it('names the flag when the unknown style came from --output-style', async () => {
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      process.argv = ['node', 'script.js', '--output-style', 'Verbose'];
+      const argv = await parseArguments();
+      const config = await loadCliConfig({}, argv);
+      expect(config.getOutputStyle()).toBeUndefined();
+      expect(errorSpy).toHaveBeenCalledWith(
+        expect.stringContaining('(from --output-style)'),
+      );
     });
   });
 

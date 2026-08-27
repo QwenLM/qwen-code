@@ -46,6 +46,9 @@ import {
   type WebSearchSettings,
   MAX_SUBAGENT_DEPTH_LIMIT,
   addDaemonRequestAttribute,
+  BUILT_IN_OUTPUT_STYLES,
+  getBuiltInOutputStyle,
+  type OutputStyleDefinition,
 } from '@qwen-code/qwen-code-core';
 import { extensionsCommand } from '../commands/extensions.js';
 import { hooksCommand } from '../commands/hooks.js';
@@ -145,6 +148,7 @@ export interface CliArgs {
   promptInteractive: string | undefined;
   systemPrompt: string | undefined;
   appendSystemPrompt: string | undefined;
+  outputStyle: string | undefined;
   yolo: boolean | undefined;
   bare: boolean | undefined;
   safeMode?: boolean | undefined;
@@ -686,6 +690,11 @@ export async function parseArguments(): Promise<CliArgs> {
           type: 'string',
           description:
             'Append instructions to the main session system prompt for this run. Can be combined with --system-prompt.',
+        })
+        .option('output-style', {
+          type: 'string',
+          description:
+            'Output style for this run, for example "Concise" or "Explanatory". Overrides the general.outputStyle setting; "default" selects no style.',
         })
         .option('sandbox', {
           alias: 's',
@@ -1497,6 +1506,35 @@ export class SessionIdConflictError extends Error {
   }
 }
 
+/**
+ * Resolves the output style for this session. `--output-style` wins over
+ * `general.outputStyle`; an unset, empty, or `default` value means no style.
+ * An unknown name is reported and the session falls back to the default
+ * style rather than refusing to start, so a typo in settings.json never
+ * locks the user out.
+ */
+export function resolveOutputStyle(
+  argvStyle: string | undefined,
+  settingsStyle: string | undefined,
+): OutputStyleDefinition | undefined {
+  const name = (argvStyle ?? settingsStyle)?.trim();
+  if (!name || name.toLowerCase() === 'default') {
+    return undefined;
+  }
+  const style = getBuiltInOutputStyle(name);
+  if (style) {
+    return style;
+  }
+  const known = BUILT_IN_OUTPUT_STYLES.map((s) => s.name).join(', ');
+  const source =
+    argvStyle !== undefined ? '--output-style' : 'general.outputStyle';
+  const warning = `Unknown output style "${name}" (from ${source}); using the default style. Available styles: ${known}.`;
+  debugLogger.warn(warning);
+  // eslint-disable-next-line no-console
+  console.error(`WARNING: ${warning}`);
+  return undefined;
+}
+
 export async function loadCliConfig(
   settings: Settings,
   argv: CliArgs,
@@ -2160,6 +2198,10 @@ export async function loadCliConfig(
     question,
     systemPrompt: argv.systemPrompt,
     appendSystemPrompt: argv.appendSystemPrompt,
+    outputStyle: resolveOutputStyle(
+      argv.outputStyle,
+      settings.general?.outputStyle,
+    ),
     // Legacy fields – kept for backward compatibility with getCoreTools() etc.
     coreTools:
       bareMode || safeMode
