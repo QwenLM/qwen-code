@@ -1,0 +1,317 @@
+name: Finalize PR 10212 review fixes
+on:
+  push:
+    branches: [fix/10197-env-prefix-bash-rules]
+    paths: [.github/workflows/finalize-pr-10212-r2.yml]
+permissions:
+  contents: write
+jobs:
+  finalize:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/10197-env-prefix-bash-rules
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Apply review fixes
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          # rule-parser.ts: robust env-token normalization + exported restrictive fallback helper.
+          p = Path('packages/core/src/permissions/rule-parser.ts')
+          s = p.read_text()
+          start = s.index('const ENV_ASSIGNMENT_REGEX = /^[A-Za-z_][A-Za-z0-9_]*=/;')
+          end_marker = '// ─────────────────────────────────────────────────────────────────────────────\n// File path matching (gitignore-style)'
+          end = s.index(end_marker, start)
+          new_block = r'''const ENV_ASSIGNMENT_REGEX = /^[A-Za-z_][A-Za-z0-9_]*=/;
+
+function permissionMatchTokens(command: string): string[] {
+  const tokens: string[] = [];
+  for (const token of parse(command)) {
+    if (typeof token === 'string') {
+      tokens.push(token);
+    } else if (token && typeof token === 'object' && 'op' in token) {
+      if (
+        token.op === 'glob' &&
+        'pattern' in token &&
+        typeof token.pattern === 'string'
+      ) {
+        // shell-quote represents an unquoted * / ? word as a glob token.
+        // Keep the original word rather than the literal op name "glob" so
+        // env assignments such as NODE_OPTIONS=* remain recognizable.
+        tokens.push(token.pattern);
+      } else if (typeof token.op === 'string') {
+        tokens.push(token.op);
+      }
+    }
+  }
+  return tokens;
+}
+
+/**
+ * Return the command with leading NAME=value assignments removed.
+ * If no leading assignment exists, preserve the original trimmed spelling.
+ * Restrictive permission matching and AUTO dangerous-rule classification use
+ * this helper so env prefixes can never make deny/ask coverage narrower.
+ */
+export function stripLeadingVariableAssignments(command: string): string {
+  const trimmed = command.trim();
+  if (!trimmed) return trimmed;
+
+  try {
+    const tokens = permissionMatchTokens(trimmed);
+    let firstCommandToken = 0;
+    while (
+      firstCommandToken < tokens.length &&
+      ENV_ASSIGNMENT_REGEX.test(tokens[firstCommandToken]!)
+    ) {
+      firstCommandToken++;
+    }
+    if (firstCommandToken === 0) return trimmed;
+    return tokens.slice(firstCommandToken).join(' ');
+  } catch {
+    return trimmed;
+  }
+}
+
+/** Collapse shell-equivalent whitespace outside quotes while retaining quotes. */
+function collapseUnquotedWhitespace(command: string): string {
+  let result = '';
+  let quote: "'" | '"' | null = null;
+  let escaped = false;
+  let pendingSpace = false;
+
+  for (const ch of command) {
+    if (escaped) {
+      result += ch;
+      escaped = false;
+      continue;
+    }
+    if (ch === '\\' && quote !== "'") {
+      if (pendingSpace && result) result += ' ';
+      pendingSpace = false;
+      result += ch;
+      escaped = true;
+      continue;
+    }
+    if (quote) {
+      result += ch;
+      if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === "'" || ch === '"') {
+      if (pendingSpace && result) result += ' ';
+      pendingSpace = false;
+      quote = ch;
+      result += ch;
+      continue;
+    }
+    if (/\s/.test(ch)) {
+      if (result) pendingSpace = true;
+      continue;
+    }
+    if (pendingSpace && result) result += ' ';
+    pendingSpace = false;
+    result += ch;
+  }
+
+  return result;
+}
+
+function normalizeCommandForPermissionMatch(command: string): string {
+  const trimmed = command.trim();
+  if (!trimmed) return trimmed;
+
+  try {
+    const tokens = permissionMatchTokens(trimmed);
+    let firstCommandToken = 0;
+    while (
+      firstCommandToken < tokens.length &&
+      ENV_ASSIGNMENT_REGEX.test(tokens[firstCommandToken]!)
+    ) {
+      firstCommandToken++;
+    }
+
+    // Environment assignments are part of the execution identity for allow
+    // rules. Preserve them, but canonicalize shell-equivalent whitespace so
+    // tabs/double spaces cannot evade an explicitly prefixed restrictive rule.
+    if (firstCommandToken > 0) {
+      return collapseUnquotedWhitespace(trimmed);
+    }
+
+    return tokens.join(' ');
+  } catch {
+    return trimmed;
+  }
+}
+
+'''
+          s = s[:start] + new_block + s[end:]
+          p.write_text(s)
+
+          # permission-manager.ts: deny/ask match both strict and assignment-stripped shapes.
+          p = Path('packages/core/src/permissions/permission-manager.ts')
+          s = p.read_text()
+          s = s.replace(
+              "  splitCompoundCommand,\n  SHELL_TOOL_NAMES,",
+              "  splitCompoundCommand,\n  stripLeadingVariableAssignments,\n  SHELL_TOOL_NAMES,",
+              1,
+          )
+          marker = '''    const matchArgs = [\n      toolName,\n      command,\n      filePath,\n      domain,\n      pathCtx,\n      specifier,\n      toolParams,\n      toolAliases,\n    ] as const;\n'''
+          replacement = marker + '''\n    // Allow rules intentionally bind to the full env-prefixed command identity.\n    // Restrictive rules must never become narrower than before this policy\n    // change, so deny/ask also test the legacy assignment-stripped shape.\n    const restrictiveCommand =\n      command !== undefined && SHELL_TOOL_NAMES.has(toolName)\n        ? stripLeadingVariableAssignments(command)\n        : command;\n    const restrictiveMatchArgs = [\n      toolName,\n      restrictiveCommand,\n      filePath,\n      domain,\n      pathCtx,\n      specifier,\n      toolParams,\n      toolAliases,\n    ] as const;\n'''
+          if marker not in s:
+              raise SystemExit('permission-manager matchArgs marker not found')
+          s = s.replace(marker, replacement, 1)
+          old = '''        if (matchesRule(rule, ...matchArgs, 'canonical')) return 'deny';'''
+          new = '''        if (\n          matchesRule(rule, ...matchArgs, 'canonical') ||\n          (restrictiveCommand !== command &&\n            matchesRule(rule, ...restrictiveMatchArgs, 'canonical'))\n        )\n          return 'deny';'''
+          if old not in s:
+              raise SystemExit('deny match line not found')
+          s = s.replace(old, new, 1)
+          old = '''        if (matchesRule(rule, ...matchArgs, 'canonical')) return 'ask';'''
+          new = '''        if (\n          matchesRule(rule, ...matchArgs, 'canonical') ||\n          (restrictiveCommand !== command &&\n            matchesRule(rule, ...restrictiveMatchArgs, 'canonical'))\n        )\n          return 'ask';'''
+          if old not in s:
+              raise SystemExit('ask match line not found')
+          s = s.replace(old, new, 1)
+          p.write_text(s)
+
+          # dangerousRules.ts: classify the interpreter behind leading env assignments.
+          p = Path('packages/core/src/permissions/dangerousRules.ts')
+          s = p.read_text()
+          old = "import type { PermissionRule } from './types.js';"
+          new = old + "\nimport { stripLeadingVariableAssignments } from './rule-parser.js';"
+          if old not in s:
+              raise SystemExit('dangerousRules import marker not found')
+          s = s.replace(old, new, 1)
+          old = "  const content = rule.specifier.trim().toLowerCase();"
+          new = "  const content = stripLeadingVariableAssignments(rule.specifier).toLowerCase();"
+          if old not in s:
+              raise SystemExit('dangerousRules content line not found')
+          s = s.replace(old, new, 1)
+          p.write_text(s)
+
+          # shellAstParser.ts: generated Always-allow rules retain leading env assignments.
+          p = Path('packages/core/src/utils/shellAstParser.ts')
+          s = p.read_text()
+          old = '''function extractRuleFromCommand(commandNode: SyntaxNode): string | null {\n  const rootName = getCommandName(commandNode);\n  if (!rootName) return null;\n\n  const argNodes = getArgumentNodes(commandNode);'''
+          new = '''function extractRuleFromCommand(commandNode: SyntaxNode): string | null {\n  const rootName = getCommandName(commandNode);\n  if (!rootName) return null;\n\n  const nameNode = commandNode.childForFieldName('name');\n  const envPrefix = nameNode\n    ? commandNode.namedChildren\n        .filter(\n          (child) =>\n            /^variable_assignments?$/.test(child.type) &&\n            child.endIndex <= nameNode.startIndex,\n        )\n        .map((child) => child.text)\n        .join(' ')\n    : '';\n\n  const argNodes = getArgumentNodes(commandNode);'''
+          if old not in s:
+              raise SystemExit('extractRuleFromCommand header not found')
+          s = s.replace(old, new, 1)
+          old = '''  let rule = rootName;'''
+          new = '''  let rule = envPrefix ? `${envPrefix} ${rootName}` : rootName;'''
+          # only first occurrence after function is intended
+          idx = s.index('function extractRuleFromCommand')
+          pos = s.find(old, idx)
+          if pos < 0:
+              raise SystemExit('extract rule initialization not found')
+          s = s[:pos] + s[pos:].replace(old, new, 1)
+          p.write_text(s)
+
+          # Dedicated env-prefix tests: remove duplicate + add all review regressions.
+          p = Path('packages/core/src/permissions/rule-parser.env-prefix.test.ts')
+          s = p.read_text()
+          s = s.replace(
+              "import { matchesCommandPattern } from './rule-parser.js';",
+              "import { matchesCommandPattern } from './rule-parser.js';\nimport { extractCommandRules } from '../utils/shellAstParser.js';",
+              1,
+          )
+          old = '''function makeConfig(allow: string[]): PermissionManagerConfig {\n  return {\n    getPermissionsAllow: () => allow,\n    getPermissionsAsk: () => [],\n    getPermissionsDeny: () => [],'''
+          new = '''function makeConfig(\n  allow: string[] = [],\n  ask: string[] = [],\n  deny: string[] = [],\n): PermissionManagerConfig {\n  return {\n    getPermissionsAllow: () => allow,\n    getPermissionsAsk: () => ask,\n    getPermissionsDeny: () => deny,'''
+          if old not in s:
+              raise SystemExit('makeConfig block not found')
+          s = s.replace(old, new, 1)
+          duplicate = '''    expect(\n      matchesCommandPattern(\n        'python3 *',\n        'PYTHONPATH=/tmp/lib python3 -c "print(1)"',\n      ),\n    ).toBe(false);\n'''
+          if duplicate not in s:
+              raise SystemExit('duplicate PYTHONPATH assertion not found')
+          s = s.replace(duplicate, '', 1)
+          s = s.replace(
+              "it('does not let static env prefixes inherit exact, prefix, or glob rules', () => {",
+              "it('does not let static env prefixes inherit exact or prefix rules', () => {",
+              1,
+          )
+          insert = '''\n  it('keeps deny and ask coverage for env-prefixed commands', async () => {\n    const denyPm = new PermissionManager(\n      makeConfig(['Bash(*)'], [], ['Bash(rm -rf *)']),\n    );\n    denyPm.initialize();\n    await expect(\n      denyPm.evaluate({\n        toolName: 'run_shell_command',\n        command: 'FOO=1 rm -rf /',\n        cwd: '/repo',\n      }),\n    ).resolves.toBe('deny');\n\n    const askPm = new PermissionManager(\n      makeConfig(['Bash'], ['Bash(git push *)']),\n    );\n    askPm.initialize();\n    await expect(\n      askPm.evaluate({\n        toolName: 'run_shell_command',\n        command: 'FOO=bar git push --force',\n        cwd: '/repo',\n      }),\n    ).resolves.toBe('ask');\n  });\n\n  it('canonicalizes unquoted whitespace in explicit env-prefixed rules', async () => {\n    expect(\n      matchesCommandPattern('FOO=bar rm *', 'FOO=bar\\trm -rf /'),\n    ).toBe(true);\n    expect(\n      matchesCommandPattern('FOO=bar rm *', 'FOO=bar  rm -rf /'),\n    ).toBe(true);\n\n    const pm = new PermissionManager(\n      makeConfig([], [], ['Bash(FOO=bar rm -rf *)']),\n    );\n    pm.initialize();\n    await expect(\n      pm.evaluate({\n        toolName: 'run_shell_command',\n        command: 'FOO=bar\\trm -rf /',\n        cwd: '/repo',\n      }),\n    ).resolves.toBe('deny');\n  });\n\n  it('preserves quoted env values while matching explicit prefixed rules', () => {\n    expect(\n      matchesCommandPattern('FOO="a b" npm', 'FOO="a b" npm'),\n    ).toBe(true);\n  });\n\n  it('preserves glob tokens inside env-assignment values', () => {\n    expect(\n      matchesCommandPattern(\n        'NODE_OPTIONS=* npm *',\n        'NODE_OPTIONS=--require=*evil.cjs npm --version',\n      ),\n    ).toBe(true);\n    expect(\n      matchesCommandPattern(\n        'FOO=a?b npm --version',\n        'FOO=a?b npm --version',\n      ),\n    ).toBe(true);\n  });\n\n  it('round-trips an env-prefixed Always allow rule', async () => {\n    const command = 'FOO=bar npm install';\n    const generated = await extractCommandRules(command);\n    expect(generated).toEqual(['FOO=bar npm install']);\n\n    const pm = new PermissionManager(\n      makeConfig(generated.map((rule) => `Bash(${rule})`)),\n    );\n    pm.initialize();\n    await expect(\n      pm.evaluate({\n        toolName: 'run_shell_command',\n        command,\n        cwd: '/repo',\n      }),\n    ).resolves.toBe('allow');\n  });\n'''
+          end_marker = '\n});\n'
+          pos = s.rfind(end_marker)
+          if pos < 0:
+              raise SystemExit('env-prefix describe end not found')
+          s = s[:pos] + insert + s[pos:]
+          p.write_text(s)
+
+          # dangerousRules regression coverage.
+          p = Path('packages/core/src/permissions/dangerousRules.test.ts')
+          s = p.read_text()
+          marker = '''  it('flags python -c style command-line wildcards', () => {\n    expect(isDangerousBashRule(bashRule('python -c *'))).toBe(true);\n    expect(isDangerousBashRule(bashRule('node -e *'))).toBe(true);\n  });\n'''
+          addition = marker + '''\n  it('flags env-prefixed interpreter wildcards in AUTO mode', () => {\n    expect(isDangerousBashRule(bashRule('X=1 python *'))).toBe(true);\n    expect(isDangerousBashRule(bashRule('FOO=bar npx *'))).toBe(true);\n    expect(isDangerousBashRule(bashRule('FOO=bar npm test'))).toBe(false);\n  });\n'''
+          if marker not in s:
+              raise SystemExit('dangerousRules insertion marker not found')
+          s = s.replace(marker, addition, 1)
+          marker = '''  it('returns empty array when input contains no dangerous rules', () => {'''
+          addition = '''  it('includes env-prefixed interpreter allow rules', () => {\n    const rule = bashRule('X=1 python *');\n    expect(findDangerousAllowRules([rule])).toEqual([rule]);\n  });\n\n'''
+          if marker not in s:
+              raise SystemExit('findDangerousAllowRules marker not found')
+          s = s.replace(marker, addition + marker, 1)
+          p.write_text(s)
+
+          # Update the now-stale rule-generation expectation.
+          p = Path('packages/core/src/utils/shellAstParser.test.ts')
+          s = p.read_text()
+          old = '''    it('handles env var prefix', async () => {\n      expect(await extractCommandRules('FOO=bar npm install')).toEqual([\n        'npm install',\n      ]);\n    });'''
+          new = '''    it('preserves env var prefixes in generated permission rules', async () => {\n      expect(await extractCommandRules('FOO=bar npm install')).toEqual([\n        'FOO=bar npm install',\n      ]);\n      expect(await extractCommandRules('A=1 B=2 npm install pkg')).toEqual([\n        'A=1 B=2 npm install *',\n      ]);\n    });'''
+          if old not in s:
+              raise SystemExit('shellAstParser env-prefix test not found')
+          s = s.replace(old, new, 1)
+          p.write_text(s)
+          PY
+      - name: Install, format and validate
+        run: |
+          npm ci
+          npx prettier --write \
+            packages/core/src/permissions/rule-parser.ts \
+            packages/core/src/permissions/permission-manager.ts \
+            packages/core/src/permissions/dangerousRules.ts \
+            packages/core/src/permissions/rule-parser.env-prefix.test.ts \
+            packages/core/src/permissions/dangerousRules.test.ts \
+            packages/core/src/utils/shellAstParser.ts \
+            packages/core/src/utils/shellAstParser.test.ts
+          npx prettier --check \
+            packages/core/src/permissions/rule-parser.ts \
+            packages/core/src/permissions/permission-manager.ts \
+            packages/core/src/permissions/dangerousRules.ts \
+            packages/core/src/permissions/rule-parser.env-prefix.test.ts \
+            packages/core/src/permissions/dangerousRules.test.ts \
+            packages/core/src/utils/shellAstParser.ts \
+            packages/core/src/utils/shellAstParser.test.ts
+          npx eslint --max-warnings 0 \
+            packages/core/src/permissions/rule-parser.ts \
+            packages/core/src/permissions/permission-manager.ts \
+            packages/core/src/permissions/dangerousRules.ts \
+            packages/core/src/permissions/rule-parser.env-prefix.test.ts \
+            packages/core/src/permissions/dangerousRules.test.ts \
+            packages/core/src/utils/shellAstParser.ts \
+            packages/core/src/utils/shellAstParser.test.ts
+          npx vitest run \
+            packages/core/src/permissions/rule-parser.env-prefix.test.ts \
+            packages/core/src/permissions/permission-manager.test.ts \
+            packages/core/src/permissions/dangerousRules.test.ts \
+            packages/core/src/utils/shellAstParser.test.ts \
+            packages/core/src/permissions/shell-semantics.test.ts \
+            packages/core/src/utils/shell-utils.test.ts
+          npx tsc --noEmit -p packages/core/tsconfig.json
+      - name: Commit tested change
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add \
+            packages/core/src/permissions/rule-parser.ts \
+            packages/core/src/permissions/permission-manager.ts \
+            packages/core/src/permissions/dangerousRules.ts \
+            packages/core/src/permissions/rule-parser.env-prefix.test.ts \
+            packages/core/src/permissions/dangerousRules.test.ts \
+            packages/core/src/utils/shellAstParser.ts \
+            packages/core/src/utils/shellAstParser.test.ts
+          git diff --cached --quiet && exit 0
+          git commit -m "fix(permissions): harden env-prefixed rule semantics"
+          git push origin HEAD:fix/10197-env-prefix-bash-rules
