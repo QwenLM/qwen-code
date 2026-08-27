@@ -491,7 +491,9 @@ describe('Session', () => {
     getTool: ReturnType<typeof vi.fn>;
     ensureTool: ReturnType<typeof vi.fn>;
     registerTool: ReturnType<typeof vi.fn>;
+    registerSessionTool: ReturnType<typeof vi.fn>;
     registerPermissionDeferredFactory: ReturnType<typeof vi.fn>;
+    registerSessionPermissionDeferredFactory: ReturnType<typeof vi.fn>;
     revealDeferredTool: ReturnType<typeof vi.fn>;
     pinDeferredToolReveal: ReturnType<typeof vi.fn>;
     warmAll: ReturnType<typeof vi.fn>;
@@ -782,7 +784,9 @@ describe('Session', () => {
       getTool: vi.fn(),
       ensureTool: vi.fn().mockResolvedValue(true),
       registerTool: vi.fn(),
+      registerSessionTool: vi.fn(),
       registerPermissionDeferredFactory: vi.fn(),
+      registerSessionPermissionDeferredFactory: vi.fn(),
       revealDeferredTool: vi.fn(),
       pinDeferredToolReveal: vi.fn(),
       warmAll: vi.fn().mockResolvedValue(undefined),
@@ -790,6 +794,13 @@ describe('Session', () => {
         names.map((name) => ({ name })),
       ),
     };
+    mockToolRegistry.registerSessionTool = vi.fn((tool) =>
+      mockToolRegistry.registerTool(tool),
+    );
+    mockToolRegistry.registerSessionPermissionDeferredFactory = vi.fn(
+      (name, factory) =>
+        mockToolRegistry.registerPermissionDeferredFactory(name, factory),
+    );
     const fileService = {
       shouldGitIgnoreFile: vi.fn().mockReturnValue(false),
       shouldIgnoreFile: vi.fn().mockReturnValue(false),
@@ -823,6 +834,7 @@ describe('Session', () => {
       assertCanStartTurn: vi.fn().mockResolvedValue(undefined),
       getWorkingDir: vi.fn().mockReturnValue(process.cwd()),
       getProjectRoot: vi.fn().mockReturnValue('/repo'),
+      getContextFileNames: vi.fn().mockReturnValue(['QWEN.md', 'AGENTS.md']),
       // Folder trust gates the project `.qwen/loop.md`; default trusted (the
       // production default). Untrusted-folder tests override to false.
       isTrustedFolder: vi.fn().mockReturnValue(true),

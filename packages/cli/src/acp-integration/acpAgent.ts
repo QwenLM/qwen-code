@@ -10198,7 +10198,11 @@ class QwenAgent implements Agent {
           const relocation = await config.relocateWorkingDirectory(
             canonicalPath,
             canonicalPath,
-            { skipProcessChdir: true, skipArtifactMigration: true },
+            {
+              skipProcessChdir: true,
+              skipArtifactMigration: true,
+              trustedFolder: true,
+            },
           );
           if (conversationDirectoryExpectation !== undefined) {
             await assertManagedConversationDirectoryIdentity(
@@ -10230,6 +10234,27 @@ class QwenAgent implements Agent {
               }`,
             );
           }
+          for (const error of relocation.projectRuntimeRefreshErrors ?? []) {
+            warnings.push(
+              `Project runtime refresh failed: ${
+                error instanceof Error ? error.message : String(error)
+              }`,
+            );
+          }
+
+          try {
+            await session.refreshSkillsFromSettings({
+              reloadSettings: false,
+              notifyConfigChanged: false,
+            });
+          } catch (error) {
+            warnings.push(
+              `Available commands refresh failed: ${
+                error instanceof Error ? error.message : String(error)
+              }`,
+            );
+          }
+          session.startCronScheduler();
 
           try {
             await config
@@ -12498,13 +12523,19 @@ class QwenAgent implements Agent {
       // not process.exit(1) the shared ACP child and every session on its
       // channel. newSessionConfig maps the throw to a RequestError.
       true,
-      this.managedToolInvocationGuard || restoreOptions || provisionalWorkspace
+      this.managedToolInvocationGuard ||
+        restoreOptions ||
+        provisionalWorkspace ||
+        sessionSource?.sourceType === 'channel'
         ? {
             ...(provisionalWorkspace
               ? { provisionalWorkspace: true as const }
               : {}),
             ...(this.managedToolInvocationGuard
               ? { toolInvocationGuard: this.managedToolInvocationGuard }
+              : {}),
+            ...(sessionSource?.sourceType === 'channel'
+              ? { projectRuntimeCronEnabled: false }
               : {}),
             ...(restoreOptions && sessionId
               ? {
@@ -12521,6 +12552,7 @@ class QwenAgent implements Agent {
               : {}),
           }
         : undefined,
+      settings,
     );
     if (sessionSource) {
       config.setSessionSource(sessionSource.sourceType, sessionSource.sourceId);

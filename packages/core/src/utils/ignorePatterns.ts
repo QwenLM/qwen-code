@@ -160,7 +160,9 @@ export class FileExclusions {
 
     // Add dynamic patterns (like context filenames)
     if (includeDynamicPatterns) {
-      for (const filename of getAllGeminiMdFilenames()) {
+      const contextFileNames =
+        this.config?.getContextFileNames?.() ?? getAllGeminiMdFilenames();
+      for (const filename of contextFileNames) {
         patterns.push(`**/${filename}`);
       }
     }

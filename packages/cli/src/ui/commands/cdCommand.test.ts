@@ -519,6 +519,7 @@ describe('cdCommand', () => {
     expect(relocateWorkingDirectory).toHaveBeenCalledWith(
       realNextDir,
       realNextDir,
+      { trustedFolder: true },
     );
     expect(result).toEqual({
       type: 'message',
@@ -563,6 +564,7 @@ describe('cdCommand', () => {
     expect(relocateWorkingDirectory).toHaveBeenCalledWith(
       realNextDir,
       realNextDir,
+      { trustedFolder: true },
     );
     expect(result).toEqual({
       type: 'message',

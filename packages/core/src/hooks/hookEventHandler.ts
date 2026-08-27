@@ -21,6 +21,7 @@ import type {
   MessageDisplayInput,
   ContextUsageData,
   SessionStartInput,
+  CwdChangedInput,
   SessionEndInput,
   SessionDeleteInput,
   SessionStartSource,
@@ -311,6 +312,25 @@ export class HookEventHandler {
       {
         trigger: source,
       },
+      signal,
+    );
+  }
+
+  async fireCwdChangedEvent(
+    oldCwd: string,
+    newCwd: string,
+    signal?: AbortSignal,
+  ): Promise<AggregatedHookResult> {
+    const input: CwdChangedInput = {
+      ...this.createBaseInput(HookEventName.CwdChanged),
+      old_cwd: oldCwd,
+      new_cwd: newCwd,
+    };
+
+    return this.executeHooks(
+      HookEventName.CwdChanged,
+      input,
+      undefined,
       signal,
     );
   }

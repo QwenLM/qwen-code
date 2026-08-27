@@ -91,9 +91,10 @@ export function didWriteManagedMemory(
 export function didWriteProjectContextFile(
   candidates: readonly MemoryWriteCandidate[],
   projectRoot: string,
+  contextFileNames: readonly string[] = getAllGeminiMdFilenames(),
 ): boolean {
   const contextFilePaths = new Set(
-    getAllGeminiMdFilenames()
+    contextFileNames
       .map((name) => name.trim())
       .filter((name) => name.length > 0)
       .map((name) => path.resolve(projectRoot, name)),

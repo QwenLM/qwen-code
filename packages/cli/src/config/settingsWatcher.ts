@@ -113,6 +113,7 @@ export class SettingsWatcher {
   private refreshTimer: NodeJS.Timeout | null = null;
   private readonly pendingScopeChanges: Set<SettingScope> = new Set();
   private processing: boolean = false;
+  private processingPromise: Promise<void> | null = null;
   private started: boolean = false;
 
   static readonly DEBOUNCE_MS = 300;
@@ -306,6 +307,24 @@ export class SettingsWatcher {
     this.pendingScopeChanges.clear();
   }
 
+  async pauseWorkspaceWatching(): Promise<() => void> {
+    if (!this.started) return () => undefined;
+    await this.replaceWatcher(SettingScope.Workspace);
+    this.pendingScopeChanges.delete(SettingScope.Workspace);
+    await this.processingPromise;
+
+    return () => {
+      if (!this.started || !this.settings.workspaceSettingsActive) return;
+      const settingsPath = this.settings.workspace.path;
+      const dir = path.dirname(settingsPath);
+      if (fs.existsSync(dir)) {
+        this.watchTargetDir(SettingScope.Workspace, settingsPath);
+      } else {
+        this.watchParentForDir(SettingScope.Workspace, settingsPath);
+      }
+    };
+  }
+
   addChangeListener(listener: SettingsChangeListener): () => void {
     this.changeListeners.add(listener);
     return () => {
@@ -349,8 +368,15 @@ export class SettingsWatcher {
   }
 
   private async drainPendingChanges(): Promise<void> {
-    if (this.processing) return;
+    if (this.processing) {
+      await this.processingPromise;
+      return;
+    }
     this.processing = true;
+    let resolveProcessing!: () => void;
+    this.processingPromise = new Promise<void>((resolve) => {
+      resolveProcessing = resolve;
+    });
     try {
       while (this.pendingScopeChanges.size > 0) {
         const scopes = new Set(this.pendingScopeChanges);
@@ -359,6 +385,8 @@ export class SettingsWatcher {
       }
     } finally {
       this.processing = false;
+      resolveProcessing();
+      this.processingPromise = null;
     }
   }
 

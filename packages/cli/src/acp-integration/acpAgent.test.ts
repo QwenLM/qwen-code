@@ -2075,6 +2075,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         installPendingManagedConversationBinding: ReturnType<typeof vi.fn>;
         commitManagedConversationBinding: ReturnType<typeof vi.fn>;
         releaseManagedConversationBinding: ReturnType<typeof vi.fn>;
+        startCronScheduler: ReturnType<typeof vi.fn>;
         appendLiveConversationTranscript: ReturnType<typeof vi.fn>;
         collectActiveWorkHolds: ReturnType<typeof vi.fn>;
         hasStandaloneRelocationBlockers: ReturnType<typeof vi.fn>;
@@ -4360,6 +4361,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         getCreatedAt: vi.fn().mockReturnValue(1_700_000_000_000),
         getTurnCount: vi.fn().mockReturnValue(3),
         prompt: vi.fn().mockResolvedValue({ stopReason: 'end_turn' }),
+        refreshSkillsFromSettings: vi.fn().mockResolvedValue(undefined),
       };
       lastSessionMock = sessionMock;
       return sessionMock as unknown as InstanceType<typeof Session>;
@@ -5078,6 +5080,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       expect(
         lastSessionMock?.hardSuspendTodoStopGuard.mock.invocationCallOrder[0],
       ).toBeLessThan(relocateWorkingDirectory.mock.invocationCallOrder[0]!);
+      expect(lastSessionMock?.startCronScheduler).toHaveBeenCalledTimes(2);
     } finally {
       await fs.rm(targetDir, { recursive: true, force: true });
     }
@@ -5361,7 +5364,11 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         expect(innerConfig.relocateWorkingDirectory).toHaveBeenCalledWith(
           expectation.child.canonicalPath,
           expectation.child.canonicalPath,
-          { skipProcessChdir: true, skipArtifactMigration: true },
+          {
+            skipProcessChdir: true,
+            skipArtifactMigration: true,
+            trustedFolder: true,
+          },
         );
         expect(
           lastSessionMock?.installPendingManagedConversationBinding,
@@ -10899,6 +10906,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       expect.objectContaining({
         toolInvocationGuard: expect.any(Function),
       }),
+      expect.anything(),
     );
 
     mockConnectionState.resolve();
@@ -19662,8 +19670,10 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
       }
 
       const sessionSettings = vi.mocked(loadCliConfig).mock.calls[0]?.[0];
+      const hostPolicy = vi.mocked(loadCliConfig).mock.calls[0]?.[9];
       expect(sessionSettings?.experimental?.cron).toBe(false);
       expect(requestSettings.merged.experimental?.cron).toBe(true);
+      expect(hostPolicy?.projectRuntimeCronEnabled).toBe(false);
 
       mockConnectionState.resolve();
       await agentPromise;

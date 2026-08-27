@@ -44,6 +44,7 @@ describe('initCommand', () => {
       services: {
         config: {
           getTargetDir: () => targetDir,
+          getPrimaryContextFileName: () => DEFAULT_CONTEXT_FILENAME,
         },
       },
     });

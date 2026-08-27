@@ -70,6 +70,7 @@ class DiscoveredToolInvocation extends BaseToolInvocation<
     // Windows' case-insensitive PATH keys, so normalize as the shell and MCP
     // spawn sites do (a no-op off win32).
     const child = spawn(callCommand, [this.toolName], {
+      cwd: this.config.getProjectRoot(),
       env: normalizePathEnvForWindows(sanitizeChildEnv(process.env)),
     });
     child.stdin.write(JSON.stringify(this.params));
@@ -217,6 +218,7 @@ export class ToolRegistry {
   // re-adding their schemas at startup would defeat the allowlist's
   // schema-shrink purpose (#9827).
   private permissionDeferred: Set<string> = new Set();
+  private readonly sessionOwnedTools = new Set<string>();
   private config: Config;
   private mcpClientManager: McpClientManager;
 
@@ -343,6 +345,13 @@ export class ToolRegistry {
     this.tools.set(tool.name, tool);
   }
 
+  registerSessionTool(tool: AnyDeclarativeTool): void {
+    this.registerTool(tool);
+    if (this.tools.get(tool.name) === tool) {
+      this.sessionOwnedTools.add(tool.name);
+    }
+  }
+
   /**
    * Registers a lazy tool factory. The tool module is not imported and the tool
    * is not instantiated until {@link ensureTool} or {@link warmAll} is called.
@@ -375,6 +384,16 @@ export class ToolRegistry {
     }
     this.factories.set(name, factory);
     this.permissionDeferred.add(name);
+  }
+
+  registerSessionPermissionDeferredFactory(
+    name: string,
+    factory: ToolFactory,
+  ): void {
+    this.registerPermissionDeferredFactory(name, factory);
+    if (this.factories.get(name) === factory) {
+      this.sessionOwnedTools.add(name);
+    }
   }
 
   /**
@@ -469,6 +488,112 @@ export class ToolRegistry {
         this.tools.set(tool.name, tool);
       }
     }
+  }
+
+  async replaceCoreToolsFrom(source: ToolRegistry): Promise<void> {
+    if (this.inflight.size > 0) {
+      await Promise.allSettled(this.inflight.values());
+    }
+    await source.mcpClientManager.stop();
+
+    for (const [name, tool] of this.tools) {
+      if (
+        this.sessionOwnedTools.has(name) ||
+        tool instanceof DiscoveredTool ||
+        tool instanceof DiscoveredMCPTool
+      ) {
+        continue;
+      }
+      if ('dispose' in tool && typeof tool.dispose === 'function') {
+        try {
+          tool.dispose();
+        } catch (error) {
+          debugLogger.warn(`Failed to dispose tool ${name}:`, error);
+        }
+      }
+      this.tools.delete(name);
+      this.revealedDeferred.delete(name);
+      this.pinnedDeferredReveals.delete(name);
+    }
+    for (const name of this.factories.keys()) {
+      if (!this.sessionOwnedTools.has(name)) {
+        this.factories.delete(name);
+        this.revealedDeferred.delete(name);
+        this.pinnedDeferredReveals.delete(name);
+      }
+    }
+    this.inflight.clear();
+    for (const name of this.permissionDeferred) {
+      if (!this.sessionOwnedTools.has(name)) {
+        this.permissionDeferred.delete(name);
+      }
+    }
+
+    for (const [name, tool] of source.tools) {
+      if (
+        !this.sessionOwnedTools.has(name) &&
+        !(tool instanceof DiscoveredTool || tool instanceof DiscoveredMCPTool)
+      ) {
+        this.tools.set(name, tool);
+      }
+    }
+    for (const [name, factory] of source.factories) {
+      if (!this.sessionOwnedTools.has(name)) {
+        this.factories.set(name, factory);
+      }
+    }
+    for (const name of source.permissionDeferred) {
+      if (!this.sessionOwnedTools.has(name)) {
+        this.permissionDeferred.add(name);
+      }
+    }
+  }
+
+  async clearProjectRuntimeTools(): Promise<void> {
+    if (this.inflight.size > 0) {
+      await Promise.allSettled(this.inflight.values());
+    }
+    for (const [name, tool] of this.tools) {
+      if (
+        this.sessionOwnedTools.has(name) ||
+        tool instanceof DiscoveredMCPTool
+      ) {
+        continue;
+      }
+      if ('dispose' in tool && typeof tool.dispose === 'function') {
+        try {
+          tool.dispose();
+        } catch (error) {
+          debugLogger.warn(`Failed to dispose tool ${name}:`, error);
+        }
+      }
+      this.tools.delete(name);
+      this.revealedDeferred.delete(name);
+      this.pinnedDeferredReveals.delete(name);
+    }
+    for (const name of this.factories.keys()) {
+      if (!this.sessionOwnedTools.has(name)) {
+        this.factories.delete(name);
+        this.revealedDeferred.delete(name);
+        this.pinnedDeferredReveals.delete(name);
+      }
+    }
+    this.inflight.clear();
+    for (const name of this.permissionDeferred) {
+      if (!this.sessionOwnedTools.has(name)) {
+        this.permissionDeferred.delete(name);
+      }
+    }
+  }
+
+  async rediscoverCommandTools(): Promise<void> {
+    for (const [name, tool] of this.tools) {
+      if (tool instanceof DiscoveredTool) {
+        this.tools.delete(name);
+        this.revealedDeferred.delete(name);
+      }
+    }
+    await this.discoverAndRegisterToolsFromCommand();
   }
 
   private removeDiscoveredTools(): void {
@@ -656,6 +781,7 @@ export class ToolRegistry {
       // agent-launched, must not inherit Qwen-internal daemon secrets, and
       // needs the Windows PATH normalization that comes with an explicit env.
       const proc = spawn(cmdParts[0] as string, cmdParts.slice(1) as string[], {
+        cwd: this.config.getProjectRoot(),
         env: normalizePathEnvForWindows(sanitizeChildEnv(process.env)),
       });
       let stdout = '';

@@ -161,6 +161,103 @@ describe('ToolRegistry', () => {
       expect(toolRegistry.getTool('mock-tool')).toBe(tool);
     });
 
+    it('replaces core tools while preserving discovered project and MCP tools', async () => {
+      const projectTool = new DiscoveredTool(
+        config,
+        'project-tool',
+        'project tool',
+        {},
+      );
+      const mcpTool = new DiscoveredMCPTool(
+        {} as CallableTool,
+        'server',
+        'remote-tool',
+        'remote tool',
+        {},
+      );
+      toolRegistry.registerTool(new MockTool({ name: 'old-core' }));
+      toolRegistry.registerTool(projectTool);
+      toolRegistry.registerTool(mcpTool);
+
+      const source = new ToolRegistry(config);
+      source.registerTool(new MockTool({ name: 'new-core' }));
+      await toolRegistry.replaceCoreToolsFrom(source);
+
+      expect(toolRegistry.getTool('old-core')).toBeUndefined();
+      expect(toolRegistry.getTool('new-core')).toBeDefined();
+      expect(toolRegistry.getTool('project-tool')).toBe(projectTool);
+      expect(toolRegistry.getTool(mcpTool.name)).toBe(mcpTool);
+    });
+
+    it('clears project runtime tools while preserving MCP tools', async () => {
+      const mcpTool = new DiscoveredMCPTool(
+        {} as CallableTool,
+        'server',
+        'remote-tool',
+        'remote tool',
+        {},
+      );
+      toolRegistry.registerTool(new MockTool({ name: 'core-tool' }));
+      toolRegistry.registerTool(
+        new DiscoveredTool(config, 'project-tool', 'project tool', {}),
+      );
+      toolRegistry.registerTool(mcpTool);
+
+      await toolRegistry.clearProjectRuntimeTools();
+
+      expect(toolRegistry.getTool('core-tool')).toBeUndefined();
+      expect(toolRegistry.getTool('project-tool')).toBeUndefined();
+      expect(toolRegistry.getTool(mcpTool.name)).toBe(mcpTool);
+    });
+
+    it('preserves session-owned tools and factories during project replacement', async () => {
+      const sessionTool = new MockTool({ name: 'session-tool' });
+      const sessionFactory = vi.fn(
+        async () => new MockTool({ name: 'session-factory' }),
+      );
+      toolRegistry.registerSessionTool(sessionTool);
+      toolRegistry.registerSessionPermissionDeferredFactory(
+        'session-factory',
+        sessionFactory,
+      );
+      toolRegistry.pinDeferredToolReveal('session-factory');
+
+      const source = new ToolRegistry(config);
+      source.registerTool(new MockTool({ name: 'new-core' }));
+      await toolRegistry.replaceCoreToolsFrom(source);
+
+      expect(toolRegistry.getTool('session-tool')).toBe(sessionTool);
+      expect(await toolRegistry.ensureTool('session-factory')).toBeDefined();
+      expect(toolRegistry.isPermissionDeferred('session-factory')).toBe(true);
+      expect(toolRegistry.getTool('new-core')).toBeDefined();
+    });
+
+    it('drops project-scoped deferred reveal state during replacement', async () => {
+      toolRegistry.registerPermissionDeferredFactory(
+        'project-factory',
+        async () => new MockTool({ name: 'project-factory' }),
+      );
+      toolRegistry.revealDeferredTool('project-factory');
+      toolRegistry.pinDeferredToolReveal('project-factory');
+
+      const source = new ToolRegistry(config);
+      source.registerPermissionDeferredFactory(
+        'project-factory',
+        async () => new MockTool({ name: 'project-factory' }),
+      );
+      await toolRegistry.replaceCoreToolsFrom(source);
+
+      expect(toolRegistry.isDeferredToolRevealed('project-factory')).toBe(
+        false,
+      );
+      expect(await toolRegistry.ensureTool('project-factory')).toBeDefined();
+      toolRegistry.revealDeferredTool('project-factory');
+      toolRegistry.clearRevealedDeferredTools();
+      expect(toolRegistry.isDeferredToolRevealed('project-factory')).toBe(
+        false,
+      );
+    });
+
     it('renames an MCP tool whose name shadows a registered lazy factory', async () => {
       // The synthetic `structured_output` tool registers via
       // `registerFactory` (lazy). Without this guard, an MCP server
@@ -1389,7 +1486,12 @@ describe('ToolRegistry', () => {
         // processes launched on the agent's behalf, so neither may inherit
         // the internal daemon secrets.
         for (const call of mockSpawn.mock.calls) {
-          const env = (call[2] as { env: NodeJS.ProcessEnv }).env;
+          const options = call[2] as {
+            cwd: string;
+            env: NodeJS.ProcessEnv;
+          };
+          const env = options.env;
+          expect(options.cwd).toBe('/test/dir');
           expect(env['QWEN_SERVER_TOKEN']).toBeUndefined();
           expect(env['QWEN_DAEMON_TOKEN']).toBeUndefined();
           // Benign inherited env is preserved.

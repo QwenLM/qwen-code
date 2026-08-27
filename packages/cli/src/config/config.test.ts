@@ -5337,13 +5337,18 @@ describe('loadCliConfig skills.directories', () => {
           42 as unknown as string,
           null as unknown as string,
           '/abs/skills',
+          'relative-skills',
         ],
       },
     };
 
     const config = await loadCliConfig(settings, argv);
 
-    expect(config.getCustomSkillDirs()).toEqual(['~/my-skills', '/abs/skills']);
+    expect(config.getCustomSkillDirs()).toEqual([
+      '~/my-skills',
+      '/abs/skills',
+      path.resolve(process.cwd(), 'relative-skills'),
+    ]);
   });
 
   it('should return empty array when skills.directories is not set', async () => {

@@ -287,6 +287,21 @@ export class PermissionManager {
     this.startupAskRules = this.getEffectiveAskRules();
   }
 
+  reloadForProjectChange(): void {
+    if (this.strippedAllowRules?.session.length) {
+      this.sessionRules.allow = [
+        ...this.sessionRules.allow,
+        ...this.strippedAllowRules.session,
+      ];
+    }
+    this.strippedAllowRules = undefined;
+    this.coreToolsAllowList = null;
+    this.permissionsAllowListActive = false;
+    this.startupAllowRules = [];
+    this.startupAskRules = [];
+    this.initialize();
+  }
+
   // ---------------------------------------------------------------------------
   // Core evaluation
   // ---------------------------------------------------------------------------

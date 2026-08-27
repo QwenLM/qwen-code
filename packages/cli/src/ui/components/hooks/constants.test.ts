@@ -88,6 +88,11 @@ describe('hooks constants', () => {
       expect(exitCodes).toHaveLength(2);
     });
 
+    it('should return exit codes for CwdChanged event', () => {
+      const exitCodes = getHookExitCodes(HookEventName.CwdChanged);
+      expect(exitCodes).toHaveLength(2);
+    });
+
     it('should return exit codes for SessionEnd event', () => {
       const exitCodes = getHookExitCodes(HookEventName.SessionEnd);
       expect(exitCodes).toHaveLength(2);
@@ -159,6 +164,15 @@ describe('hooks constants', () => {
     it('should return description for SessionStart', () => {
       const desc = getHookShortDescription(HookEventName.SessionStart);
       expect(desc).toBe('When a new session is started');
+    });
+
+    it('should describe CwdChanged', () => {
+      expect(getHookShortDescription(HookEventName.CwdChanged)).toBe(
+        'After the session changes its working directory',
+      );
+      expect(getHookDescription(HookEventName.CwdChanged)).toContain(
+        'old_cwd and new_cwd',
+      );
     });
 
     it('should return description for SessionDelete', () => {

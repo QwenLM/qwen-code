@@ -126,8 +126,12 @@ describe('isInSafeToolAllowlist', () => {
  * Build a stub Config whose WorkspaceContext considers `workspaceRoots`
  * as inside-the-workspace.
  */
-function makeConfig(workspaceRoots: string[]): Config {
+function makeConfig(
+  workspaceRoots: string[],
+  contextFileNames: readonly string[] = ['QWEN.md', 'AGENTS.md'],
+): Config {
   return {
+    getContextFileNames: () => contextFileNames,
     getWorkspaceContext: () => ({
       // Test fixture: roots and paths in this file use POSIX-style separators
       // regardless of OS, so hard-code '/' (not path.sep) for the prefix check.
@@ -377,6 +381,20 @@ describe('passesAcceptEditsFastPath', () => {
     }
   });
 
+  it('rejects the current session custom context filename', () => {
+    const customConfig = makeConfig([cwd], ['PROJECT-B.md']);
+
+    expect(
+      passesAcceptEditsFastPath(
+        ctx({
+          toolName: ToolNames.WRITE_FILE,
+          filePath: `${cwd}/PROJECT-B.md`,
+        }),
+        customConfig,
+      ),
+    ).toBe(false);
+  });
+
   it('allows ordinary files under .qwen/worktrees but rejects nested config surfaces', () => {
     expect(
       passesAcceptEditsFastPath(
@@ -518,6 +536,20 @@ describe('passesAcceptEditsFastPath', () => {
 });
 
 describe('shouldForceAutoModeReviewForAllow', () => {
+  it('uses the current session context filenames for shell writes', () => {
+    expect(
+      shouldForceAutoModeReviewForAllow(
+        ctx({
+          toolName: ToolNames.SHELL,
+          command: 'printf update > PROJECT-B.md',
+          cwd: '/repo',
+        }),
+        '/repo',
+        ['PROJECT-B.md'],
+      ),
+    ).toBe(true);
+  });
+
   it('returns true for Edit/Write targeting protected self-modification paths', () => {
     expect(
       shouldForceAutoModeReviewForAllow(

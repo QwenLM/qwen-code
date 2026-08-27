@@ -219,6 +219,21 @@ describe('SettingsWatcher', () => {
       expect(mockWatchers[1].instance.close).toHaveBeenCalled();
     });
 
+    it('retargets only the workspace watcher after project settings change', async () => {
+      watcher.startWatching();
+
+      const resume = await watcher.pauseWorkspaceWatching();
+      settings.workspace.path = '/next/.qwen/settings.json';
+      resume();
+
+      expect(mockWatchers[0].instance.close).not.toHaveBeenCalled();
+      expect(mockWatchers[1].instance.close).toHaveBeenCalledOnce();
+      expect(mockWatch).toHaveBeenLastCalledWith(
+        '/next/.qwen',
+        expect.objectContaining({ ignoreInitial: true, depth: 0 }),
+      );
+    });
+
     it('should be idempotent on double stop', () => {
       watcher.startWatching();
       watcher.stopWatching();

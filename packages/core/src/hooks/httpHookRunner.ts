@@ -104,7 +104,7 @@ async function validateResolvedHost(
  */
 export class HttpHookRunner {
   private urlValidator: UrlValidator;
-  private readonly allowPrivateNetworkHosts: boolean;
+  private allowPrivateNetworkHosts: boolean;
   private readonly executedOnceHooks: Set<string> = new Set();
   private statusMessageCallback?: StatusMessageCallback;
 
@@ -448,10 +448,14 @@ export class HttpHookRunner {
    * Update allowed URLs
    */
   updateAllowedUrls(allowedUrls: string[]): void {
-    // Create new validator with updated patterns
-    this.urlValidator = new UrlValidator(
-      allowedUrls,
-      this.allowPrivateNetworkHosts,
-    );
+    this.updateSecurity(allowedUrls, this.allowPrivateNetworkHosts);
+  }
+
+  updateSecurity(
+    allowedUrls: string[],
+    allowPrivateNetworkHosts: boolean,
+  ): void {
+    this.allowPrivateNetworkHosts = allowPrivateNetworkHosts;
+    this.urlValidator = new UrlValidator(allowedUrls, allowPrivateNetworkHosts);
   }
 }

@@ -4697,6 +4697,7 @@ export const useGeminiStream = (
         const matchedContextFileWrite = didWriteProjectContextFile(
           memoryWriteCandidates,
           config.getProjectRoot(),
+          config.getContextFileNames(),
         );
         debugLogger.debug(
           `Checked marked context-file memory tool batch; matched=${matchedContextFileWrite}`,
@@ -5434,6 +5435,8 @@ export const useGeminiStream = (
   // run once on mount and clean up only on real unmount.
   const cronSessionIdRef = useRef(sessionStates.sessionId);
   cronSessionIdRef.current = sessionStates.sessionId;
+  const cronWorkingDir =
+    config.getWorkingDir?.() ?? config.getTargetDir?.() ?? '';
 
   // Start the cron scheduler once config is initialized, stop on unmount.
   // Cron fires enqueue onto the shared notification queue.
@@ -5521,7 +5524,12 @@ export const useGeminiStream = (
         process.stderr.write(summary + '\n');
       }
     };
-  }, [config, getAutonomousLoopTickResolver, isConfigInitialized]);
+  }, [
+    config,
+    cronWorkingDir,
+    getAutonomousLoopTickResolver,
+    isConfigInitialized,
+  ]);
 
   // Register background agent notification callback onto the shared queue.
   useEffect(() => {

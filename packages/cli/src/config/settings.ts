@@ -477,16 +477,16 @@ export class LoadedSettings {
     this._merged = this.computeMergedSettings();
   }
 
-  readonly system: SettingsFile;
-  readonly systemDefaults: SettingsFile;
-  readonly user: SettingsFile;
-  readonly workspace: SettingsFile;
-  readonly isTrusted: boolean;
-  readonly migratedInMemoryScopes: Set<SettingScope>;
-  readonly migrationWarnings: string[];
-  readonly corruptedPath: string | undefined;
-  readonly wasRecovered: boolean;
-  readonly workspaceSettingsActive: boolean;
+  system: SettingsFile;
+  systemDefaults: SettingsFile;
+  user: SettingsFile;
+  workspace: SettingsFile;
+  isTrusted: boolean;
+  migratedInMemoryScopes: Set<SettingScope>;
+  migrationWarnings: string[];
+  corruptedPath: string | undefined;
+  wasRecovered: boolean;
+  workspaceSettingsActive: boolean;
   corruptionDialogDismissed: boolean = false;
 
   private _merged: Settings;
@@ -593,6 +593,33 @@ export class LoadedSettings {
 
   recomputeMerged(): void {
     this._merged = this.computeMergedSettings();
+  }
+
+  replaceWith(next: LoadedSettings): LoadedSettings {
+    const previous = new LoadedSettings(
+      this.system,
+      this.systemDefaults,
+      this.user,
+      this.workspace,
+      this.isTrusted,
+      this.migratedInMemoryScopes,
+      this.migrationWarnings,
+      this.corruptedPath,
+      this.wasRecovered,
+      this.workspaceSettingsActive,
+    );
+    this.system = next.system;
+    this.systemDefaults = next.systemDefaults;
+    this.user = next.user;
+    this.workspace = next.workspace;
+    this.isTrusted = next.isTrusted;
+    this.migratedInMemoryScopes = next.migratedInMemoryScopes;
+    this.migrationWarnings = next.migrationWarnings;
+    this.corruptedPath = next.corruptedPath;
+    this.wasRecovered = next.wasRecovered;
+    this.workspaceSettingsActive = next.workspaceSettingsActive;
+    this._merged = next.merged;
+    return previous;
   }
 
   reloadScopeFromDisk(scope: SettingScope): void {
@@ -720,6 +747,7 @@ export const CORRUPTED_SUFFIX = '.corrupted';
  */
 export interface LoadSettingsOptions {
   consumeCorruptionEnvVars?: boolean;
+  readOnly?: boolean;
   skipLoadEnvironment?: boolean;
   skipWorkspaceSettings?: boolean;
   workspaceTrusted?: boolean;
@@ -793,6 +821,13 @@ export function loadSettings(
         try {
           rawSettings = JSON.parse(stripJsonComments(content));
         } catch (parseError: unknown) {
+          if (opts.readOnly) {
+            settingsErrors.push({
+              message: getErrorMessage(parseError),
+              path: filePath,
+            });
+            return { settings: {} };
+          }
           // ===== JSON parse failed — enter corruption recovery =====
           // Strategy: save corrupted file as .corrupted → reset to empty →
           // show dialog in UI. Never crash due to a corrupted settings file.
@@ -884,6 +919,10 @@ export function loadSettings(
         let migrationWarnings: string[] | undefined;
 
         const persistSettingsObject = (warningPrefix: string) => {
+          if (opts.readOnly) {
+            migratedInMemoryScopes.add(scope);
+            return;
+          }
           try {
             // Use sync mode to remove deprecated keys (zombie key prevention)
             // while preserving comments and formatting from the original file.

@@ -1733,6 +1733,23 @@ describe('PermissionManager', () => {
       expect(await pm.evaluate({ toolName: 'agent' })).toBe('default');
     });
 
+    it('replaces project rules while preserving session rules', async () => {
+      let projectAllow = ['read_file'];
+      const config = makeConfig({});
+      config.getPermissionsAllow = () => projectAllow;
+      config.getRegistryAllowList = () => projectAllow;
+      const manager = new PermissionManager(config);
+      manager.initialize();
+      manager.addSessionAllowRule('write_file');
+
+      projectAllow = ['glob'];
+      manager.reloadForProjectChange();
+
+      expect(await manager.evaluate({ toolName: 'read_file' })).toBe('default');
+      expect(await manager.evaluate({ toolName: 'glob' })).toBe('allow');
+      expect(await manager.evaluate({ toolName: 'write_file' })).toBe('allow');
+    });
+
     it('matches a legacy truncated MCP permission alias', async () => {
       const rawName = `mcp__server__${'x'.repeat(80)}`;
       const legacyName = rawName.slice(0, 28) + '___' + rawName.slice(-32);

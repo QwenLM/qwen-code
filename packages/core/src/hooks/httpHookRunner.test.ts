@@ -338,6 +338,27 @@ describe('HttpHookRunner', () => {
       expect(mockFetch).toHaveBeenCalled();
     });
 
+    it('should apply updated URL and private-network policy', async () => {
+      const runner = new HttpHookRunner([], false);
+      const config = createMockConfig({ url: 'http://172.16.254.215/hook' });
+      const input = createMockInput();
+
+      await expect(
+        runner.execute(config, HookEventName.PreToolUse, input),
+      ).resolves.toMatchObject({ success: false });
+
+      runner.updateSecurity([], true);
+      mockSuccessResponse();
+      await expect(
+        runner.execute(config, HookEventName.PreToolUse, input),
+      ).resolves.toMatchObject({ success: true });
+
+      runner.updateSecurity(['https://hooks.example.com/*'], true);
+      await expect(
+        runner.execute(config, HookEventName.PreToolUse, input),
+      ).resolves.toMatchObject({ success: false });
+    });
+
     it('should allow a hostname resolving to a private IP when the flag is on', async () => {
       mockDns.addresses = [{ address: '172.16.254.215', family: 4 }];
       mockSuccessResponse();

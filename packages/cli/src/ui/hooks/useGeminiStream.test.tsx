@@ -295,6 +295,7 @@ describe('useGeminiStream', () => {
         () => ({ getToolSchemaList: vi.fn(() => []) }) as any,
       ),
       getProjectRoot: vi.fn(() => '/test/dir'),
+      getContextFileNames: vi.fn(() => ['QWEN.md']),
       getFileCheckpointingEnabled: vi.fn(() => false),
       getGeminiClient: mockGetGeminiClient,
       getApprovalMode: () => ApprovalMode.DEFAULT,
@@ -15610,17 +15611,21 @@ describe('useGeminiStream', () => {
 
   describe('cron scheduler initialization', () => {
     // Renders useGeminiStream wired to a provided cron scheduler mock, with a
-    // controllable isConfigInitialized gate. `config` identity is stable across
-    // rerenders so the cron effect only re-runs when `initialized` flips.
+    // controllable isConfigInitialized gate and working directory. `config`
+    // identity is stable across rerenders.
     const renderCronHook = (scheduler: unknown, initialized: boolean) => {
+      let activeScheduler = scheduler;
+      let workingDir = '/tmp';
       const cronConfig = {
         ...mockConfig,
         isCronEnabled: vi.fn(() => true),
-        getCronScheduler: vi.fn(() => scheduler),
+        getCronScheduler: vi.fn(() => activeScheduler),
+        getWorkingDir: vi.fn(() => workingDir),
       } as unknown as Config;
-      return renderHook(
-        (props: { initialized: boolean }) =>
-          useGeminiStream(
+      const rendered = renderHook(
+        (props: { initialized: boolean; workingDir?: string }) => {
+          workingDir = props.workingDir ?? workingDir;
+          return useGeminiStream(
             new MockedGeminiClientClass(cronConfig),
             [],
             mockAddItem,
@@ -15642,9 +15647,15 @@ describe('useGeminiStream', () => {
             () => {},
             80,
             24,
-          ),
-        { initialProps: { initialized } },
+          );
+        },
+        { initialProps: { initialized, workingDir } },
       );
+      return Object.assign(rendered, {
+        setScheduler(nextScheduler: unknown) {
+          activeScheduler = nextScheduler;
+        },
+      });
     };
 
     it('defers enableDurable and start until isConfigInitialized is true', async () => {
@@ -15748,6 +15759,32 @@ describe('useGeminiStream', () => {
       // the catch falling through instead of returning (#5022 review).
       await waitFor(() => {
         expect(scheduler.start).toHaveBeenCalled();
+      });
+    });
+
+    it('starts the scheduler for the new project after the working directory changes', async () => {
+      const createScheduler = () => ({
+        enableDurable: vi.fn().mockResolvedValue(undefined),
+        start: vi.fn(),
+        stop: vi.fn(),
+        getExitSummary: vi.fn(() => null),
+        hasPendingWork: false,
+      });
+      const previousScheduler = createScheduler();
+      const nextScheduler = createScheduler();
+      const rendered = renderCronHook(previousScheduler, true);
+
+      await waitFor(() => {
+        expect(previousScheduler.start).toHaveBeenCalledOnce();
+      });
+
+      rendered.setScheduler(nextScheduler);
+      rendered.rerender({ initialized: true, workingDir: '/next-project' });
+
+      await waitFor(() => {
+        expect(previousScheduler.stop).toHaveBeenCalledOnce();
+        expect(nextScheduler.enableDurable).toHaveBeenCalledOnce();
+        expect(nextScheduler.start).toHaveBeenCalledOnce();
       });
     });
   });

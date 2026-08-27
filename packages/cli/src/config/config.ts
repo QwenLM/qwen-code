@@ -41,6 +41,7 @@ import {
   parseBooleanEnvFlag,
   SchemaValidator,
   type ConfigParameters,
+  type ProjectRuntimeReloader,
   type MCPServerConfig,
   type SkillLevel,
   type WebSearchSettings,
@@ -68,7 +69,7 @@ import stripJsonComments from 'strip-json-comments';
 import { resolvePath } from '../utils/resolvePath.js';
 import { getCliVersion } from '../utils/version.js';
 import { loadSandboxConfig } from './sandboxConfig.js';
-import { appEvents } from '../utils/events.js';
+import { AppEvent, appEvents } from '../utils/events.js';
 import { mcpCommand } from '../commands/mcp.js';
 import { channelCommand } from '../commands/channel.js';
 import { authCommand } from '../commands/auth.js';
@@ -91,6 +92,7 @@ import {
 } from '../utils/runBudget.js';
 import { detectSystemLanguage } from '../i18n/index.js';
 import { resolveSkillSettings } from './skill-settings.js';
+import { recomputeMcpGating } from './hot-reload.js';
 
 const debugLogger = createDebugLogger('CONFIG');
 
@@ -1481,6 +1483,360 @@ export function buildDisabledSkillNamesProvider(
   return () => resolveSkillSettings(loadedSettings).disabledNames;
 }
 
+function resolveDisabledSlashCommands(
+  settings: Settings,
+  argv: CliArgs,
+  bareMode: boolean,
+  safeMode: boolean,
+): string[] {
+  const disabled: string[] = [];
+  const seen = new Set<string>();
+  const add = (value: string | undefined) => {
+    if (!value) return;
+    const trimmed = value.trim();
+    if (!trimmed) return;
+    const key = trimmed.toLowerCase();
+    if (!seen.has(key)) {
+      seen.add(key);
+      disabled.push(trimmed);
+    }
+  };
+  if (!bareMode && !safeMode) {
+    for (const name of settings.slashCommands?.disabled ?? []) add(name);
+  }
+  for (const name of argv.disabledSlashCommands ?? []) add(name);
+  for (const name of (process.env['QWEN_DISABLED_SLASH_COMMANDS'] ?? '').split(
+    ',',
+  )) {
+    add(name);
+  }
+  return disabled;
+}
+
+function resolveProjectPath(value: string, baseDir: string): string {
+  const expanded = resolvePath(value);
+  return path.isAbsolute(expanded)
+    ? path.normalize(expanded)
+    : path.resolve(baseDir, expanded);
+}
+
+function resolveProjectSkillPath(value: string, baseDir: string): string {
+  if (value === '~' || value.startsWith('~/') || value.startsWith('~\\')) {
+    return value;
+  }
+  return path.isAbsolute(value)
+    ? path.normalize(value)
+    : path.resolve(baseDir, value);
+}
+
+function createProjectRuntimeReloader(
+  loadedSettings: LoadedSettings,
+  settingsWatcher:
+    | {
+        pauseWorkspaceWatching?: () => Promise<() => void>;
+      }
+    | undefined,
+  argv: CliArgs,
+  topTierMcpServers: Record<string, MCPServerConfig> | undefined,
+  bareMode: boolean,
+  safeMode: boolean,
+  cliIncludeDirectories: readonly string[],
+  cronEnabledOverride?: boolean,
+): ProjectRuntimeReloader {
+  return {
+    async prepare(targetDir, trustedFolder, approvalMode) {
+      const nextSettings = loadSettings(targetDir, {
+        consumeCorruptionEnvVars: false,
+        readOnly: true,
+        skipLoadEnvironment: true,
+        skipWorkspaceSettings: bareMode || safeMode,
+        workspaceTrusted: trustedFolder,
+      });
+      const effectiveTrust = trustedFolder ?? nextSettings.isTrusted;
+      const assembled =
+        bareMode || safeMode
+          ? { ...topTierMcpServers }
+          : assembleMcpServers(
+              nextSettings.merged.mcpServers,
+              targetDir,
+              topTierMcpServers,
+            );
+      const gating =
+        bareMode || safeMode
+          ? {
+              allowed: argv.allowedMcpServerNames?.filter(Boolean),
+              excluded: undefined,
+              pending: undefined,
+            }
+          : recomputeMcpGating(
+              nextSettings,
+              assembled,
+              targetDir,
+              argv.allowedMcpServerNames,
+              approvalMode === ApprovalMode.YOLO,
+            );
+      const runtimeSettings = nextSettings.merged;
+      const includeDirectories = [
+        ...(bareMode || safeMode
+          ? []
+          : (runtimeSettings.context?.includeDirectories ?? []).map(
+              (directory) => resolveProjectPath(directory, targetDir),
+            )),
+        ...cliIncludeDirectories,
+      ];
+      const plansDirectory = runtimeSettings.plansDirectory;
+      const coreTools =
+        bareMode || safeMode
+          ? undefined
+          : argv.coreTools || runtimeSettings.tools?.core || undefined;
+      const permissionsAllow =
+        bareMode || safeMode
+          ? []
+          : [
+              ...(runtimeSettings.permissions?.allow ?? []),
+              ...(runtimeSettings.tools?.allowed ?? []),
+            ];
+      for (const rule of argv.allowedTools ?? []) {
+        if (rule && !permissionsAllow.includes(rule)) {
+          permissionsAllow.push(rule);
+        }
+      }
+      const permissionsDeny =
+        bareMode || safeMode
+          ? []
+          : [
+              ...(runtimeSettings.permissions?.deny ?? []),
+              ...(runtimeSettings.tools?.exclude ?? []),
+            ];
+      for (const rule of argv.excludeTools ?? []) {
+        if (rule && !permissionsDeny.includes(rule)) {
+          permissionsDeny.push(rule);
+        }
+      }
+
+      let previousSettings: LoadedSettings | undefined;
+      let resumeWatching: (() => void) | undefined;
+      let committed = false;
+
+      return {
+        config: {
+          trustedFolder: effectiveTrust,
+          includeDirectories,
+          loadMemoryFromIncludeDirectories:
+            bareMode || safeMode
+              ? includeDirectories.length > 0
+              : (runtimeSettings.context?.loadFromIncludeDirectories ?? false),
+          plansDir: Storage.getPlansDir(targetDir, plansDirectory),
+          plansDirectoryConfigured: Boolean(plansDirectory?.trim()),
+          cronEnabled:
+            cronEnabledOverride ?? runtimeSettings.experimental?.cron ?? true,
+          cronRecurringMaxAgeDays:
+            runtimeSettings.experimental?.cronRecurringMaxAgeDays,
+          lsToolEnabled: runtimeSettings.tools?.listDirectory?.enabled === true,
+          agentTeamEnabled: runtimeSettings.experimental?.agentTeam ?? false,
+          artifactEnabled: runtimeSettings.experimental?.artifact ?? true,
+          artifactAutoOpen: runtimeSettings.artifact?.autoOpen ?? true,
+          artifactPublisher: runtimeSettings.artifact?.publisher ?? 'local',
+          artifactHost: runtimeSettings.artifact?.host
+            ? {
+                uploadCommand:
+                  runtimeSettings.artifact.host.uploadCommand ?? '',
+                urlTemplate: runtimeSettings.artifact.host.urlTemplate ?? '',
+                keyPrefix: runtimeSettings.artifact.host.keyPrefix,
+              }
+            : undefined,
+          artifactOss: runtimeSettings.artifact?.oss
+            ? {
+                bucket: runtimeSettings.artifact.oss.bucket ?? '',
+                endpoint: runtimeSettings.artifact.oss.endpoint ?? '',
+                keyPrefix: runtimeSettings.artifact.oss.keyPrefix,
+                acl: runtimeSettings.artifact.oss.acl,
+                publicBaseUrl: runtimeSettings.artifact.oss.publicBaseUrl,
+              }
+            : undefined,
+          workflowsEnabled: runtimeSettings.tools?.workflowsEnabled ?? false,
+          skipWorkflowUsageWarning:
+            runtimeSettings.model?.skipWorkflowUsageWarning ?? false,
+          useRipgrep: runtimeSettings.tools?.useRipgrep,
+          useBuiltinRipgrep: runtimeSettings.tools?.useBuiltinRipgrep,
+          webSearch:
+            bareMode || safeMode
+              ? undefined
+              : resolveWebSearchSettings(runtimeSettings),
+          imageModel: runtimeSettings.imageModel || undefined,
+          allowedHttpHookUrls:
+            bareMode || safeMode
+              ? []
+              : (runtimeSettings.security?.allowedHttpHookUrls ?? []),
+          allowPrivateNetworkHooks:
+            bareMode || safeMode
+              ? false
+              : (runtimeSettings.security?.allowPrivateNetworkHooks ?? false),
+          fileFiltering: runtimeSettings.context?.fileFiltering,
+          shouldUseNodePtyShell:
+            runtimeSettings.tools?.shell?.enableInteractiveShell,
+          shellDefaultTimeoutMs: runtimeSettings.tools?.shell?.defaultTimeoutMs,
+          shellHeartbeatIntervalMs:
+            runtimeSettings.tools?.shell?.heartbeatIntervalMs,
+          truncateToolOutputThreshold:
+            runtimeSettings.tools?.truncateToolOutputThreshold,
+          truncateToolOutputLines:
+            runtimeSettings.tools?.truncateToolOutputLines,
+          toolOutputBatchBudget: runtimeSettings.tools?.toolOutputBatchBudget,
+          defaultFileEncoding: runtimeSettings.general?.defaultFileEncoding,
+          bugCommand: runtimeSettings.advanced?.bugCommand,
+          coreTools,
+          allowedTools:
+            bareMode || safeMode
+              ? argv.allowedTools || undefined
+              : argv.allowedTools ||
+                runtimeSettings.tools?.allowed ||
+                undefined,
+          excludeTools:
+            permissionsDeny.length > 0 ? permissionsDeny : undefined,
+          disabledSlashCommands: resolveDisabledSlashCommands(
+            runtimeSettings,
+            argv,
+            bareMode,
+            safeMode,
+          ),
+          permissions: {
+            allow: permissionsAllow.length > 0 ? permissionsAllow : undefined,
+            ask:
+              bareMode || safeMode
+                ? undefined
+                : runtimeSettings.permissions?.ask,
+            deny: permissionsDeny.length > 0 ? permissionsDeny : undefined,
+            registryAllowList:
+              bareMode || safeMode
+                ? undefined
+                : runtimeSettings.permissions?.allow,
+            autoMode:
+              bareMode || safeMode
+                ? undefined
+                : runtimeSettings.permissions?.autoMode,
+          },
+          disabledTools:
+            bareMode || safeMode
+              ? undefined
+              : normalizeDisabledToolList(runtimeSettings.tools?.disabled),
+          visibleTools:
+            bareMode || safeMode
+              ? undefined
+              : normalizeDisabledToolList(runtimeSettings.tools?.visible),
+          toolSearchThreshold:
+            bareMode || safeMode
+              ? 0
+              : runtimeSettings.tools?.toolSearch?.threshold,
+          toolDiscoveryCommand:
+            bareMode || safeMode
+              ? undefined
+              : runtimeSettings.tools?.discoveryCommand,
+          toolCallCommand:
+            bareMode || safeMode
+              ? undefined
+              : runtimeSettings.tools?.callCommand,
+          mcpServerCommand:
+            bareMode || safeMode
+              ? undefined
+              : runtimeSettings.mcp?.serverCommand,
+          mcpToolIdleTimeoutMs: runtimeSettings.mcp?.toolIdleTimeoutMs,
+          disabledSkillLevels:
+            bareMode ||
+            safeMode ||
+            !Array.isArray(nextSettings.merged.skills?.disabledLevels)
+              ? undefined
+              : nextSettings.merged.skills.disabledLevels.filter(isSkillLevel),
+          customSkillDirs:
+            bareMode || safeMode
+              ? undefined
+              : (nextSettings.merged.skills?.directories ?? [])
+                  .filter(
+                    (directory): directory is string =>
+                      typeof directory === 'string' &&
+                      directory.trim().length > 0,
+                  )
+                  .map((directory) =>
+                    resolveProjectSkillPath(directory.trim(), targetDir),
+                  ),
+          importFormat: runtimeSettings.context?.importFormat ?? 'tree',
+          contextFileName:
+            bareMode || safeMode
+              ? undefined
+              : runtimeSettings.context?.fileName,
+          enableManagedAutoMemory:
+            bareMode || safeMode
+              ? false
+              : (runtimeSettings.memory?.enableManagedAutoMemory ?? true),
+          enableManagedAutoDream:
+            bareMode || safeMode
+              ? false
+              : (runtimeSettings.memory?.enableManagedAutoDream ?? true),
+          enableTeamMemory:
+            bareMode || safeMode
+              ? false
+              : (runtimeSettings.memory?.enableTeamMemory ?? false),
+          enableTeamMemorySync:
+            bareMode || safeMode
+              ? false
+              : (runtimeSettings.memory?.enableTeamMemorySync ?? false),
+          enableAutoSkill:
+            bareMode || safeMode
+              ? false
+              : (runtimeSettings.memory?.enableAutoSkill ?? false),
+          autoSkillConfirm:
+            bareMode || safeMode
+              ? false
+              : (runtimeSettings.memory?.autoSkillConfirm ?? true),
+          agents: bareMode || safeMode ? undefined : nextSettings.merged.agents,
+          disableAllHooks:
+            bareMode || safeMode
+              ? true
+              : (nextSettings.merged.disableAllHooks ?? false),
+          stopHookBlockingCap:
+            bareMode || safeMode
+              ? undefined
+              : nextSettings.merged.stopHookBlockingCap,
+          userHooks:
+            bareMode || safeMode ? undefined : nextSettings.getUserHooks(),
+          projectHooks:
+            bareMode || safeMode ? undefined : nextSettings.getProjectHooks(),
+          mcpServers: assembled,
+          allowedMcpServers: gating.allowed,
+          excludedMcpServers: gating.excluded,
+          pendingMcpServers: gating.pending,
+        },
+        async commit() {
+          if (committed) return;
+          resumeWatching = await settingsWatcher?.pauseWorkspaceWatching?.();
+          try {
+            previousSettings = loadedSettings.replaceWith(nextSettings);
+            committed = true;
+          } catch (error) {
+            resumeWatching?.();
+            resumeWatching = undefined;
+            throw error;
+          }
+        },
+        async rollback() {
+          if (!committed || !previousSettings) return;
+          loadedSettings.replaceWith(previousSettings);
+          committed = false;
+          resumeWatching?.();
+          resumeWatching = undefined;
+          appEvents.emit(AppEvent.McpPendingApprovalChanged);
+        },
+        async complete() {
+          if (!committed) return;
+          resumeWatching?.();
+          resumeWatching = undefined;
+          appEvents.emit(AppEvent.McpPendingApprovalChanged);
+        },
+      };
+    },
+  };
+}
+
 /**
  * Thrown (instead of `process.exit(1)`) when a caller-supplied session id
  * already exists and `throwOnSessionIdConflict` is set. The interactive CLI
@@ -1540,7 +1896,10 @@ export async function loadCliConfig(
    * stopped during shutdown — only `stopWatching()` is exposed here to keep
    * core decoupled from the CLI-owned `SettingsWatcher` implementation.
    */
-  settingsWatcher?: { stopWatching(): void },
+  settingsWatcher?: {
+    stopWatching(): void;
+    pauseWorkspaceWatching?: () => Promise<() => void>;
+  },
   /**
    * When true, a duplicate caller-supplied session id throws
    * `SessionIdConflictError` instead of calling `process.exit(1)`. Embedded
@@ -1557,12 +1916,15 @@ export async function loadCliConfig(
     toolInvocationGuard?: ToolInvocationGuard;
     /** Host-managed session whose exact private cwd is bound after bootstrap. */
     provisionalWorkspace?: true;
+    /** Session policy that remains authoritative across project changes. */
+    projectRuntimeCronEnabled?: boolean;
     sessionRestore?: {
       projectionSource: (
         sessionId: string,
       ) => Promise<SessionRestoreProjection | undefined>;
     };
   },
+  loadedSettings?: LoadedSettings,
 ): Promise<Config> {
   const provisionalWorkspace = hostPolicy?.provisionalWorkspace === true;
   const debugMode = isDebugMode(argv);
@@ -1652,11 +2014,19 @@ export async function loadCliConfig(
         settings.context?.fileFiltering?.customIgnoreFiles,
       );
 
+  const cliIncludeDirectories = (argv.includeDirectories ?? []).map(
+    (directory) => resolveProjectPath(directory, cwd),
+  );
   const includeDirectories = provisionalWorkspace
     ? []
-    : (bareMode || safeMode ? [] : (settings.context?.includeDirectories ?? []))
-        .map(resolvePath)
-        .concat((argv.includeDirectories || []).map(resolvePath));
+    : [
+        ...(bareMode || safeMode
+          ? []
+          : (settings.context?.includeDirectories ?? []).map((directory) =>
+              resolveProjectPath(directory, cwd),
+            )),
+        ...cliIncludeDirectories,
+      ];
 
   // LSP configuration: enabled only via --experimental-lsp flag
   const lspEnabled =
@@ -1802,28 +2172,12 @@ export async function loadCliConfig(
   // Merge the slash-command denylist from settings + CLI flag + env var.
   // Settings merge (UNION across scopes) is already handled upstream; we
   // only de-duplicate while preserving case for diagnostic purposes.
-  const disabledSlashCommands: string[] = [];
-  const seenDisabled = new Set<string>();
-  const addDisabled = (value: string | undefined) => {
-    if (!value) return;
-    const trimmed = value.trim();
-    if (!trimmed) return;
-    const key = trimmed.toLowerCase();
-    if (!seenDisabled.has(key)) {
-      seenDisabled.add(key);
-      disabledSlashCommands.push(trimmed);
-    }
-  };
-  if (!bareMode && !safeMode) {
-    for (const name of settings.slashCommands?.disabled ?? [])
-      addDisabled(name);
-  }
-  for (const name of argv.disabledSlashCommands ?? []) addDisabled(name);
-  for (const name of (process.env['QWEN_DISABLED_SLASH_COMMANDS'] ?? '').split(
-    ',',
-  )) {
-    addDisabled(name);
-  }
+  const disabledSlashCommands = resolveDisabledSlashCommands(
+    settings,
+    argv,
+    bareMode,
+    safeMode,
+  );
 
   // Resolve the per-workspace tool denylist. De-duplicate while preserving
   // original casing; shared helper since the MCP restart refresh path
@@ -2139,6 +2493,18 @@ export async function loadCliConfig(
     bareMode || safeMode || approvalMode === ApprovalMode.YOLO
       ? undefined
       : getPendingGatedMcpServers(mcpServers, cwd);
+  const projectRuntimeReloader = loadedSettings
+    ? createProjectRuntimeReloader(
+        loadedSettings,
+        settingsWatcher,
+        argv,
+        topTierMcpServers,
+        bareMode,
+        safeMode,
+        cliIncludeDirectories,
+        hostPolicy?.projectRuntimeCronEnabled,
+      )
+    : undefined;
 
   const configParams: ConfigParameters = {
     sessionId,
@@ -2196,7 +2562,7 @@ export async function loadCliConfig(
             .filter(
               (d): d is string => typeof d === 'string' && d.trim().length > 0,
             )
-            .map((d) => d.trim()),
+            .map((d) => resolveProjectSkillPath(d.trim(), cwd)),
     disabledTools: disabledTools.length > 0 ? disabledTools : undefined,
     visibleTools: visibleTools.length > 0 ? visibleTools : undefined,
     toolSearchThreshold:
@@ -2222,7 +2588,7 @@ export async function loadCliConfig(
     toolInvocationGuard: hostPolicy?.toolInvocationGuard,
     // Permission rule persistence callback (writes to settings files).
     onPersistPermissionRule: async (scope, ruleType, rule) => {
-      const currentSettings = loadSettings(cwd);
+      const currentSettings = loadedSettings ?? loadSettings(cwd);
       const settingScope =
         scope === 'project' ? SettingScope.Workspace : SettingScope.User;
       const key = `permissions.${ruleType}`;
@@ -2473,6 +2839,7 @@ export async function loadCliConfig(
         }
       : undefined,
     settingsWatcher,
+    projectRuntimeReloader,
   };
 
   const config = new Config(configParams);

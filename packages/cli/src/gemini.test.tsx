@@ -855,6 +855,9 @@ describe('gemini.tsx main function', () => {
       undefined,
       // settingsWatcher: not started in bare mode
       undefined,
+      false,
+      undefined,
+      expect.objectContaining({ merged: {} }),
     );
   });
 

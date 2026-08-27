@@ -1049,6 +1049,9 @@ export const IDLE_HOOK_EVENTS: Record<HookEventName, ServeHookEventMeta> = {
     description: 'When a new session is started',
     matcherKind: 'sessionTrigger',
   },
+  CwdChanged: {
+    description: 'After the session changes its working directory',
+  },
   MessageDisplay: {
     description: 'Repeatedly, as the assistant reply streams',
   },

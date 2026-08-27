@@ -662,6 +662,16 @@ export class SubagentManager {
     this.notifyChangeListeners();
   }
 
+  async refreshForProjectChange(): Promise<void> {
+    try {
+      await this.refreshCache();
+    } catch (error) {
+      this.subagentsCache?.delete('project');
+      this.notifyChangeListeners();
+      throw error;
+    }
+  }
+
   /**
    * Finds a subagent by name and returns its metadata.
    *

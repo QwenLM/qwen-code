@@ -874,6 +874,9 @@ export async function main() {
       buildDisabledSkillNamesProvider(settings),
       undefined,
       settingsWatcher,
+      false,
+      undefined,
+      settings,
     );
     markAcpStartup('configConstructionEnd');
     profileCheckpoint('after_load_cli_config');

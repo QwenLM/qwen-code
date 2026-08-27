@@ -43,7 +43,6 @@ import {
   createDebugLogger,
   describeHoldCause,
   getErrorMessage,
-  getAllGeminiMdFilenames,
   ShellExecutionService,
   Storage,
   createInstructionsLoadedCallback,
@@ -3323,14 +3322,11 @@ export const AppContainer = (props: AppContainerProps) => {
   });
 
   // Context file names computation
-  const contextFileNames = useMemo(() => {
-    const fromSettings = settings.merged.context?.fileName;
-    return fromSettings
-      ? Array.isArray(fromSettings)
-        ? fromSettings
-        : [fromSettings]
-      : getAllGeminiMdFilenames();
-  }, [settings.merged.context?.fileName]);
+  const contextFileNamesKey = config.getContextFileNames().join('\0');
+  const contextFileNames = useMemo(
+    () => contextFileNamesKey.split('\0'),
+    [contextFileNamesKey],
+  );
   // Initial prompt handling
   const initialPrompt = useMemo(() => config.getQuestion(), [config]);
   const initialPromptSubmitted = useRef(false);
