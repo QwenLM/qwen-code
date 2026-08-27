@@ -17,40 +17,12 @@ jobs:
           node-version: 22
       - name: Apply reviewed patch
         run: |
-          python3 - <<'PY'
-          from pathlib import Path
-
-          wf = Path('.github/workflows/finalize-pr-10212-r2.yml').read_text()
-          marker = "          python3 - <<'PY'\n"
-          start = wf.index(marker) + len(marker)
-          end = wf.index("\n          PY", start)
-          body = wf[start:end]
-          body = '\n'.join(line[10:] if line.startswith('          ') else line for line in body.splitlines())
-
-          old = r'''  const nameNode = commandNode.childForFieldName('name');
-  const envPrefix = nameNode
-    ? commandNode.namedChildren
-        .filter(
-          (child) =>
-            /^variable_assignments?$/.test(child.type) &&
-            child.endIndex <= nameNode.startIndex,
-        )
-        .map((child) => child.text)
-        .join(' ')
-    : '';'''
-          new = r'''  const nameNode = commandNode.childForFieldName('name');
-  const envPrefix =
-    nameNode && nameNode.startIndex > commandNode.startIndex
-      ? commandNode.text
-          .slice(0, nameNode.startIndex - commandNode.startIndex)
-          .trim()
-      : '';'''
-          if old not in body:
-              raise SystemExit('env-prefix generation patch marker not found')
-          body = body.replace(old, new, 1)
-          Path('/tmp/pr10212_patch.py').write_text(body)
-          PY
+          sed -n "/python3 - <<'PY'/,/^          PY$/p" .github/workflows/finalize-pr-10212-r2.yml \
+            | sed '1d;$d;s/^          //' > /tmp/pr10212_patch.py
+          test -s /tmp/pr10212_patch.py
           python3 /tmp/pr10212_patch.py
+          echo 'ZnJvbSBwYXRobGliIGltcG9ydCBQYXRoCnAgPSBQYXRoKCJwYWNrYWdlcy9jb3JlL3NyYy91dGlscy9zaGVsbEFzdFBhcnNlci50cyIpCnMgPSBwLnJlYWRfdGV4dCgpCm9sZCA9ICIiIiAgY29uc3QgbmFtZU5vZGUgPSBjb21tYW5kTm9kZS5jaGlsZEZvckZpZWxkTmFtZSgnbmFtZScpOwogIGNvbnN0IGVudlByZWZpeCA9IG5hbWVOb2RlCiAgICA/IGNvbW1hbmROb2RlLm5hbWVkQ2hpbGRyZW4KICAgICAgICAuZmlsdGVyKAogICAgICAgICAgKGNoaWxkKSA9PgogICAgICAgICAgICAvXnZhcmlhYmxlX2Fzc2lnbm1lbnRzPyQvLnRlc3QoY2hpbGQudHlwZSkgJiYKICAgICAgICAgICAgY2hpbGQuZW5kSW5kZXggPD0gbmFtZU5vZGUuc3RhcnRJbmRleCwKICAgICAgICApCiAgICAgICAgLm1hcCgoY2hpbGQpID0+IGNoaWxkLnRleHQpCiAgICAgICAgLmpvaW4oJyAnKQogICAgOiAnJzsiIiIKbmV3ID0gIiIiICBjb25zdCBuYW1lTm9kZSA9IGNvbW1hbmROb2RlLmNoaWxkRm9yRmllbGROYW1lKCduYW1lJyk7CiAgY29uc3QgZW52UHJlZml4ID0KICAgIG5hbWVOb2RlICYmIG5hbWVOb2RlLnN0YXJ0SW5kZXggPiBjb21tYW5kTm9kZS5zdGFydEluZGV4CiAgICAgID8gY29tbWFuZE5vZGUudGV4dAogICAgICAgICAgLnNsaWNlKDAsIG5hbWVOb2RlLnN0YXJ0SW5kZXggLSBjb21tYW5kTm9kZS5zdGFydEluZGV4KQogICAgICAgICAgLnRyaW0oKQogICAgICA6ICcnOyIiIgppZiBvbGQgbm90IGluIHM6CiAgICByYWlzZSBTeXN0ZW1FeGl0KCJnZW5lcmF0ZWQgZW52LXByZWZpeCBibG9jayBub3QgZm91bmQiKQpwLndyaXRlX3RleHQocy5yZXBsYWNlKG9sZCwgbmV3LCAxKSkK' | base64 -d > /tmp/fix-rule-generation.py
+          python3 /tmp/fix-rule-generation.py
       - name: Install and validate
         run: |
           npm ci
