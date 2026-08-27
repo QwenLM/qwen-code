@@ -387,15 +387,19 @@ function SessionOverviewPanelInner({
     (connection.capabilities?.features?.includes(SESSION_LIVE_STATE_FEATURE) ??
       false) &&
     liveStateWorkspaceCwds.length > 0;
+  // Live state only replaces catalog/status polling when this panel runs the
+  // channel itself. When the sidebar owns it, its trusted-only coverage can
+  // miss workspaces this panel shows — so this panel keeps polling then.
+  const liveStateActive = manageLiveState && liveStateEnabled;
   useWorkspaceSessionLiveState(workspace.client, {
-    enabled: manageLiveState && liveStateEnabled,
+    enabled: liveStateActive,
     workspaceCwds: liveStateWorkspaceCwds,
     groupWorkspaceCwds: [],
   });
 
   const { sessions, loading, error, reload } = useScopedSessions(workspaceCwd, {
     autoLoad: true,
-    pollIntervalMs: liveStateEnabled ? undefined : LIST_POLL_MS,
+    pollIntervalMs: liveStateActive ? undefined : LIST_POLL_MS,
     pageSize: SESSION_LIST_PAGE_SIZE,
     archiveState: 'active',
     ...(organizationEnabled
@@ -408,7 +412,7 @@ function SessionOverviewPanelInner({
   const { sessions: otherSessions, reload: reloadOther } =
     useOtherWorkspaceSessions(
       includeOtherWorkspaces && !workspaceCwd,
-      liveStateEnabled ? undefined : LIST_POLL_MS,
+      liveStateActive ? undefined : LIST_POLL_MS,
     );
   const mergedSessions = useMemo(
     () =>
@@ -427,7 +431,7 @@ function SessionOverviewPanelInner({
     includeOtherWorkspaces &&
     (registeredWorkspaces?.length ?? 0) > 1;
   const status = useStatusReport({
-    autoLoad: !liveStateEnabled,
+    autoLoad: !liveStateActive,
     detail: 'full',
   });
   const statusReload = status.reload;
@@ -435,7 +439,7 @@ function SessionOverviewPanelInner({
 
   const statusInFlight = useRef(false);
   useEffect(() => {
-    if (liveStateEnabled) return;
+    if (liveStateActive) return;
     const timer = window.setInterval(() => {
       if (document.hidden || statusInFlight.current) return;
       statusInFlight.current = true;
@@ -444,21 +448,21 @@ function SessionOverviewPanelInner({
       });
     }, STATUS_POLL_MS);
     return () => window.clearInterval(timer);
-  }, [liveStateEnabled, statusReload]);
+  }, [liveStateActive, statusReload]);
 
   const cards = useMemo(
     () =>
       deriveSessionCards(
         mergedSessions,
         currentSessionId,
-        liveStateEnabled ? [] : (statusReport?.full?.sessions ?? []),
+        liveStateActive ? [] : (statusReport?.full?.sessions ?? []),
         currentWorkspaceCwd,
       ),
     [
       mergedSessions,
       currentSessionId,
       currentWorkspaceCwd,
-      liveStateEnabled,
+      liveStateActive,
       statusReport,
     ],
   );
@@ -514,6 +518,14 @@ function SessionOverviewPanelInner({
   // no longer see or change, so a stale one can't hide every remaining row.
   useEffect(() => {
     if (excludedWorkspaceCwds.size === 0) return;
+    // The funnel popover only renders with two or more options; with one or
+    // none left, any exclusion is one the user can no longer see or change.
+    if (workspaceOptions.length <= 1) {
+      setExcludedWorkspaceCwds((prev) =>
+        prev.size === 0 ? prev : new Set<string>(),
+      );
+      return;
+    }
     const optionCwds = new Set(workspaceOptions.map((option) => option.cwd));
     setExcludedWorkspaceCwds((prev) => {
       const next = new Set([...prev].filter((cwd) => optionCwds.has(cwd)));
@@ -636,11 +648,11 @@ function SessionOverviewPanelInner({
       Promise.all([
         reload().catch(() => undefined),
         reloadOther().catch(() => undefined),
-        liveStateEnabled
+        liveStateActive
           ? Promise.resolve()
           : statusReload().catch(() => undefined),
       ]),
-    [liveStateEnabled, reload, reloadOther, statusReload],
+    [liveStateActive, reload, reloadOther, statusReload],
   );
   const refresh = useCallback(() => {
     if (refreshing) return;
@@ -1495,7 +1507,13 @@ function SessionOverviewPanelInner({
         panel.scrollHeight -
         tableViewport.clientHeight +
         tableViewport.scrollHeight;
-      setFooterSticky(naturalHeight > viewport.clientHeight + 1);
+      // Asymmetric hysteresis: sticky mode's own decorations change the
+      // measured natural height by -3px (pt-3 +12, border-t +1, -mb-4 -16),
+      // so engage above P+1 but release only below P-3 as measured while
+      // sticky — otherwise the decision flips on its own side effect.
+      setFooterSticky(
+        (prev) => naturalHeight > viewport.clientHeight + (prev ? -4 : 1),
+      );
     };
     update();
     const observer = new ResizeObserver(update);

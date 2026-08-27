@@ -1417,6 +1417,52 @@ describe('SessionOverviewPanel', () => {
     expect(rowTitles()).toEqual(['Beta']);
   });
 
+  it('drops exclusions when the option set shrinks below the funnel threshold', async () => {
+    connectionState.capabilities = {
+      features: [],
+      workspaceCwd: '/w',
+      workspaces: [
+        { id: 'w0', cwd: '/w', primary: true, trusted: true },
+        { id: 'w1', cwd: '/wsB', primary: false, trusted: true },
+      ],
+    };
+    sessionsState.sessions = [session('a', { displayName: 'Alpha' })];
+    otherWorkspaceSessions['/wsB'] = [
+      session('b1', { workspaceCwd: '/wsB', displayName: 'Beta' }),
+    ];
+    render();
+    await flushAsync();
+    // Exclude the primary workspace through the funnel filter.
+    const trigger = container!.querySelector(
+      'button[aria-label="Filter by workspace"]',
+    ) as HTMLElement;
+    act(() => click(trigger));
+    const main = document.querySelector(
+      '#session-overview-workspace-0',
+    ) as HTMLElement;
+    act(() => click(main));
+    expect(rowTitles()).toEqual(['Beta']);
+
+    // /wsB loses trust (capabilities hot-reload): the option set shrinks to
+    // the lone primary, and the funnel — the only control that manages
+    // exclusions — renders only for two or more options. The exclusion the
+    // user can no longer see or change must drop, not hide every row.
+    connectionState.capabilities = {
+      features: [],
+      workspaceCwd: '/w',
+      workspaces: [
+        { id: 'w0', cwd: '/w', primary: true, trusted: true },
+        { id: 'w1', cwd: '/wsB', primary: false, trusted: false },
+      ],
+    };
+    rerender();
+    await flushAsync();
+    expect(
+      container!.querySelector('button[aria-label="Filter by workspace"]'),
+    ).toBeNull();
+    expect(rowTitles()).toEqual(['Alpha']);
+  });
+
   it('shows all available row actions without a menu', () => {
     connectionState.capabilities = {
       features: ['workspace_session_metadata', 'session_export'],
@@ -1657,6 +1703,75 @@ describe('SessionOverviewPanel', () => {
       );
       expect(footer.className).not.toContain('sticky bottom-0');
       expect(footer.className).not.toContain('border-t');
+    } finally {
+      globalThis.ResizeObserver = originalResizeObserver;
+    }
+  });
+
+  it('holds the sticky footer through its own mode-switch height delta', () => {
+    const resizeCallbacks = new Set<ResizeObserverCallback>();
+    const originalResizeObserver = globalThis.ResizeObserver;
+    globalThis.ResizeObserver = class {
+      constructor(callback: ResizeObserverCallback) {
+        resizeCallbacks.add(callback);
+      }
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    } as typeof ResizeObserver;
+    try {
+      sessionsState.sessions = [session('s1', { displayName: 'One' })];
+      render();
+      const panel = container!.querySelector(
+        '[data-web-shell-session-panel]',
+      ) as HTMLElement;
+      const viewport = panel.parentElement!;
+      const footer = container!.querySelector(
+        '[data-web-shell-session-footer]',
+      ) as HTMLElement;
+      const tableViewport = container!.querySelector(
+        '[data-web-shell-session-table-viewport]',
+      ) as HTMLElement;
+      Object.defineProperties(tableViewport, {
+        clientHeight: { configurable: true, value: 200 },
+        scrollHeight: { configurable: true, value: 200 },
+      });
+      Object.defineProperties(viewport, {
+        clientHeight: { configurable: true, value: 400 },
+      });
+      // Content is viewport+2 tall in the non-sticky layout: engage.
+      Object.defineProperties(panel, {
+        scrollHeight: { configurable: true, value: 402 },
+      });
+      act(() =>
+        resizeCallbacks.forEach((callback) =>
+          callback([], {} as ResizeObserver),
+        ),
+      );
+      expect(footer.className).toContain('sticky bottom-0');
+      // Sticky mode's own decorations shrink the measured natural height by
+      // 3px (pt-3 +12, border-t +1, -mb-4 -16). The decision must hold sticky
+      // through that self-inflicted delta instead of flipping back — a flip
+      // would re-fire the observer and loop forever in that height band.
+      Object.defineProperties(panel, {
+        scrollHeight: { configurable: true, value: 399 },
+      });
+      act(() =>
+        resizeCallbacks.forEach((callback) =>
+          callback([], {} as ResizeObserver),
+        ),
+      );
+      expect(footer.className).toContain('sticky bottom-0');
+      // Once the content genuinely fits again, release.
+      Object.defineProperties(panel, {
+        scrollHeight: { configurable: true, value: 396 },
+      });
+      act(() =>
+        resizeCallbacks.forEach((callback) =>
+          callback([], {} as ResizeObserver),
+        ),
+      );
+      expect(footer.className).not.toContain('sticky bottom-0');
     } finally {
       globalThis.ResizeObserver = originalResizeObserver;
     }
@@ -2527,7 +2642,27 @@ describe('SessionOverviewPanel polling', () => {
     sessionsState.sessions = [session('s')];
     render({ manageLiveState: false });
     expect(workspaceLiveStateOptions.enabled).toBe(false);
-    expect(scopedSessionsOptions.pollIntervalMs).toBeUndefined();
+    // No duplicate live-state channel — but the panel keeps its own catalog
+    // poll, because the sidebar's channel only covers trusted workspaces and
+    // must not freeze the rest of the overview.
+    expect(scopedSessionsOptions.pollIntervalMs).toBe(3000);
+    expect(statusReportOptions).toEqual({ autoLoad: true, detail: 'full' });
+  });
+
+  it('keeps its own catalog poll when it does not own the live-state channel', () => {
+    // Sidebar enabled (manageLiveState=false) and the primary workspace is
+    // not trusted: the sidebar's trusted-only channel cannot cover it, so the
+    // panel must fall back to its own polling instead of freezing.
+    connectionState.capabilities = {
+      features: ['workspace_session_live_state'],
+      workspaceCwd: '/w',
+      workspaces: [{ id: 'w0', cwd: '/w', primary: true, trusted: false }],
+    };
+    sessionsState.sessions = [session('s')];
+    render({ manageLiveState: false });
+    expect(workspaceLiveStateOptions.enabled).toBe(false);
+    expect(scopedSessionsOptions.pollIntervalMs).toBe(3000);
+    expect(statusReportOptions).toEqual({ autoLoad: true, detail: 'full' });
   });
 
   it('subscribes live state for every visible workspace', async () => {
