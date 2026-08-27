@@ -42,11 +42,15 @@ jobs:
     timeout-minutes: 10
     steps:
       # Trusted base-repo scripts. workflow_run checks out the default branch,
-      # never PR code. Sparse — only the publisher and its helper dependency.
+      # never PR code. Sparse — the publisher, its helper dependency, and the
+      # root package.json that marks the uploader's `.js` as ESM (without it
+      # the uploader only parses on the Node versions that infer module syntax,
+      # and this job pins no Node).
       - name: 'Checkout the publish scripts'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
           sparse-checkout: |-
+            /package.json
             .github/scripts/web-shell-visuals-publish.mjs
             scripts/upload-aliyun-oss-assets.js
             scripts/release-script-utils.js
@@ -112,13 +116,17 @@ jobs:
           # shares the same head commit SHA.
           RUN_HEAD_REPO: '${{ github.event.workflow_run.head_repository.full_name }}'
           RUN_HEAD_BRANCH: '${{ github.event.workflow_run.head_branch }}'
-          # The default public URL is derived from the bucket so that
+          # PR evidence is untrusted, PR-derived content, so it gets its own
+          # bucket knob: set ALIYUN_OSS_PR_ASSETS_BUCKET to move it off the
+          # bucket that also serves release, desktop, and live-host downloads.
+          # Unset, it falls back to the shared bucket — today's behaviour.
+          # The default public URL is derived from the resolved bucket so that
           # overriding only one of the two vars cannot post comment links
           # that 404 against (or show stale objects from) the other bucket.
           # A cross-region ALIYUN_OSS_ENDPOINT override must also override
           # ALIYUN_OSS_PUBLIC_BASE_URL because the default host pins Hangzhou.
-          ALIYUN_OSS_BUCKET: "${{ vars.ALIYUN_OSS_BUCKET || 'qwen-code-assets' }}"
-          ALIYUN_OSS_PUBLIC_BASE_URL: "${{ vars.ALIYUN_OSS_PUBLIC_BASE_URL || format('https://{0}.oss-cn-hangzhou.aliyuncs.com', vars.ALIYUN_OSS_BUCKET || 'qwen-code-assets') }}"
+          ALIYUN_OSS_BUCKET: "${{ vars.ALIYUN_OSS_PR_ASSETS_BUCKET || vars.ALIYUN_OSS_BUCKET || 'qwen-code-assets' }}"
+          ALIYUN_OSS_PUBLIC_BASE_URL: "${{ vars.ALIYUN_OSS_PR_ASSETS_PUBLIC_BASE_URL || (vars.ALIYUN_OSS_PR_ASSETS_BUCKET == '' && vars.ALIYUN_OSS_PUBLIC_BASE_URL) || format('https://{0}.oss-cn-hangzhou.aliyuncs.com', vars.ALIYUN_OSS_PR_ASSETS_BUCKET || vars.ALIYUN_OSS_BUCKET || 'qwen-code-assets') }}"
         run: |-
           set -euo pipefail
 
@@ -223,14 +231,19 @@ jobs:
           gate
 
           # --- Host on Aliyun OSS -------------------------------------------
-          # The PR head SHA makes the prefix immutable. Re-running the same head
-          # overwrites the same objects; a new head cannot change old URLs.
+          # Head SHA *and* run id, so every publish writes a prefix nothing has
+          # ever served before. The run id is not decoration: GitHub renders
+          # comment images through its camo proxy, which caches by URL, so
+          # re-running a preview for the SAME head onto the same object keys
+          # would leave reviewers looking at the previous run's screenshots.
+          # The old design got this free from the per-run commit SHA in the raw
+          # URL; the verify lane keeps it via <run-id>-<attempt>.
           # Host the images ONLY when there are changed views. A no-change run
-          # skips the asset commit entirely; RAW_BASE stays empty and the
+          # skips the upload entirely; RAW_BASE stays empty and the
           # comment below is image-less ("no screenshot changes").
           RAW_BASE=''
           if [ "${HAS_IMAGES}" = "1" ]; then
-            ASSET_PREFIX="pr-assets/web-shell-visuals/${PR}/${RUN_HEAD_SHA}"
+            ASSET_PREFIX="pr-assets/web-shell-visuals/${PR}/${RUN_HEAD_SHA}/${RUN_ID}"
             # Same PATH discipline as qwen-triage.yml's publish-verify: never
             # resolve node or ossutil through the shared $RUNNER_TEMP. node
             # is resolved under the inherited PATH and ossutil runs from a

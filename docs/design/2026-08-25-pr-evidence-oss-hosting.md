@@ -27,11 +27,16 @@ three-attempt retry policy and publishes objects with `public-read` ACL.
 Web Shell previews use this immutable prefix:
 
 ```text
-pr-assets/web-shell-visuals/<pr>/<head-sha>/
+pr-assets/web-shell-visuals/<pr>/<head-sha>/<run-id>/
 ```
 
-Re-running the same PR head overwrites the same object names. A new head uses a
-new prefix, so an already-posted URL cannot change underneath a reviewer.
+An object key is never written twice. The head SHA binds a URL to the code it
+depicts; the run id keeps a re-run of that same head from writing back over the
+objects an already-posted comment references. That matters because GitHub
+serves comment images through a caching image proxy: reusing a key would leave
+reviewers looking at the previous run's screenshots at a URL whose bytes had
+changed. The Git-backed design got this property free from the per-run commit
+SHA in the raw URL.
 
 Sandboxed `/verify` reports use this immutable prefix:
 
@@ -53,6 +58,21 @@ explicitly designated assets repository, but the workflow now rejects a
 designation that points back to the repository under review. An unset or
 self-targeting destination degrades to prose and downloadable run artifacts;
 an external image-host repository remains supported.
+
+## Bucket selection
+
+Both publishers resolve the destination as
+`ALIYUN_OSS_PR_ASSETS_BUCKET` → `ALIYUN_OSS_BUCKET` → `qwen-code-assets`, with
+the public base URL derived from whichever bucket wins (or set explicitly via
+`ALIYUN_OSS_PR_ASSETS_PUBLIC_BASE_URL`). Unset, this is exactly today's shared
+bucket. The knob exists because PR evidence is untrusted, PR-derived content
+while the shared bucket also serves release, desktop, and live-host downloads;
+setting one variable separates them without a workflow change.
+
+It does not narrow the credential: these jobs hold the same OSS key the release
+sync uses. Scoping a dedicated RAM user to the `pr-assets/` prefix is ops work
+outside this PR, and is the reason the destination is a variable rather than a
+constant.
 
 ## Compatibility and cleanup
 

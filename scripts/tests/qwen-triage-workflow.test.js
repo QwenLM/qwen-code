@@ -3979,6 +3979,43 @@ describe('qwen-triage verify hardening round 2', () => {
       expect(comment4).toContain('Sandboxed verification');
       expect(comment4).not.toContain('Evidence images');
 
+      // Install green but NO credential file: the configure step is
+      // continue-on-error, so this is what a missing/rotated OSS secret
+      // looks like from here. The publisher must degrade to text rather
+      // than hand the uploader a config it cannot read and pay three
+      // retry backoffs per image to learn that.
+      const out4b = join(dir, 'comment4b.md');
+      const res4b = sh(script, {
+        cwd: work,
+        env: {
+          ...process.env,
+          PATH: `${dir}:${process.env.PATH}`,
+          GH_STUB_OUT: out4b,
+          GH_TOKEN: 'x',
+          GITHUB_REPOSITORY: 'QwenLM/qwen-code',
+          RUNNER_TEMP: dir,
+          GITHUB_STEP_SUMMARY: '/dev/null',
+          GITHUB_RUN_ID: '80',
+          GITHUB_RUN_ATTEMPT: '2',
+          PR_NUMBER: '7999',
+          RUN_URL: 'u',
+          VERIFY_RESULT: 'success',
+          VERDICT: 'pass',
+          AGENT_VERDICT: 'findings',
+          SKIP_REASON: '',
+          PREPARE_FAILURE_PHASE: '',
+          ALIYUN_OSS_BUCKET: 'assets-bucket',
+          ALIYUN_OSS_PUBLIC_BASE_URL: 'https://assets.example.test',
+          OSSUTIL_INSTALL_OUTCOME: 'success',
+          OSS_STUB_ROOT: join(dir, 'oss'),
+        },
+      });
+      expect(res4b.status).toBe(0);
+      expect(existsSync(join(dir, '.ossutilconfig'))).toBe(false);
+      const comment4b = readFileSync(out4b, 'utf8');
+      expect(comment4b).toContain('Sandboxed verification');
+      expect(comment4b).not.toContain('Evidence images');
+
       // Exercise the production success dispatch too: copy the verified
       // binary into a job-private PATH and run the real uploader through it.
       const realUploader = readFileSync(
@@ -3991,7 +4028,10 @@ describe('qwen-triage verify hardening round 2', () => {
         join(work, 'scripts', 'upload-aliyun-oss-assets.js'),
         realUploader,
       );
-      writeFileSync(join(work, 'scripts', 'release-script-utils.js'), realUtils);
+      writeFileSync(
+        join(work, 'scripts', 'release-script-utils.js'),
+        realUtils,
+      );
       writeFileSync(
         join(dir, 'ossutil'),
         [
@@ -4005,6 +4045,9 @@ describe('qwen-triage verify hardening round 2', () => {
         ].join('\n'),
         { mode: 0o755 },
       );
+      // The configure step's product. The stub ossutil ignores -c, but the
+      // publisher now refuses to dispatch without it — as production does.
+      writeFileSync(join(dir, '.ossutilconfig'), '[Credentials]\n');
       const out5 = join(dir, 'comment5.md');
       const res5 = sh(script, {
         cwd: work,
@@ -4032,7 +4075,9 @@ describe('qwen-triage verify hardening round 2', () => {
         },
       });
       if (res5.status !== 0) {
-        throw new Error(`production dispatch failed:\n${res5.stdout}\n${res5.stderr}`);
+        throw new Error(
+          `production dispatch failed:\n${res5.stdout}\n${res5.stderr}`,
+        );
       }
       expect(
         readdirSync(
@@ -4097,12 +4142,21 @@ describe('qwen-triage verify hardening round 2', () => {
     );
     expect(configure).toContain('continue-on-error: true');
     expect(configure).toContain('-c "$RUNNER_TEMP/.ossutilconfig"');
-    const publish = stepIn('publish-verify', 'Post verification report comment');
+    const publish = stepIn(
+      'publish-verify',
+      'Post verification report comment',
+    );
     expect(publish).toContain(
       "OSSUTIL_INSTALL_OUTCOME: '${{ steps.install-ossutil.outcome }}'",
     );
+    // Both preconditions: the Actions-computed install outcome (never a
+    // marker in the PR-writable temp dir) AND the credential file the
+    // continue-on-error configure step is supposed to have written.
     expect(publish).toContain(
-      'elif [ "${OSSUTIL_INSTALL_OUTCOME:-}" = \'success\' ]; then',
+      'elif [ "${OSSUTIL_INSTALL_OUTCOME:-}" = \'success\' ] &&',
+    );
+    expect(publish).toContain(
+      '[ -f "${RUNNER_TEMP:-/tmp}/.ossutilconfig" ]; then',
     );
     const cleanup = stepIn('publish-verify', 'Cleanup Aliyun OSS credentials');
     expect(cleanup).toContain("if: '${{ always() }}'");

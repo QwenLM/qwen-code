@@ -4969,10 +4969,15 @@ jobs:
       contents: 'read'
       pull-requests: 'write'
     steps:
+      # Sparse — the uploader, its helper dependency, and the root
+      # package.json that marks the uploader's `.js` as ESM (without it the
+      # uploader only parses on the Node versions that infer module syntax,
+      # and this job pins no Node).
       - name: 'Checkout the OSS publisher scripts'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
           sparse-checkout: |-
+            /package.json
             scripts/upload-aliyun-oss-assets.js
             scripts/release-script-utils.js
           sparse-checkout-cone-mode: false
@@ -5014,13 +5019,13 @@ jobs:
           fi
           "$RUNNER_TEMP/ossutil" config -e "$ALIYUN_OSS_ENDPOINT" -i "$ALIYUN_OSS_ACCESS_KEY_ID" -k "$ALIYUN_OSS_ACCESS_KEY_SECRET" -L EN -c "$RUNNER_TEMP/.ossutilconfig"
 
-      # The publish job runs on the persistent ECS pool and downloads into
-      # a WORKSPACE-relative directory, which the runner does not clean
-      # between jobs: without this, a previous run's (possibly a different
-      # PR's) flake-gate.log survives and the publisher — which treats the
-      # file's presence as proof THIS run staged it — embeds it as this
-      # run's evidence. The verify side already applies the same rm-first
-      # rule to its own $RUNNER_TEMP tree.
+      # Belt-and-braces against a stale download directory. The job moved to
+      # an ephemeral hosted runner (and checkout cleans the workspace first),
+      # so nothing should survive between runs — but the publisher treats the
+      # presence of a file like flake-gate.log as proof THIS run staged it,
+      # and that inference must not silently start embedding another PR's
+      # evidence if this job is ever moved back onto the persistent pool.
+      # The verify side applies the same rm-first rule to its $RUNNER_TEMP.
       - name: 'Clear stale downloaded results'
         run: 'rm -rf verify-results'
 
@@ -5052,13 +5057,17 @@ jobs:
           DOWNLOAD_OUTCOME: '${{ steps.download.outcome }}'
           RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
           OSSUTIL_INSTALL_OUTCOME: '${{ steps.install-ossutil.outcome }}'
-          # The default public URL is derived from the bucket so that
+          # PR evidence is untrusted, PR-derived content, so it gets its own
+          # bucket knob: set ALIYUN_OSS_PR_ASSETS_BUCKET to move it off the
+          # bucket that also serves release, desktop, and live-host downloads.
+          # Unset, it falls back to the shared bucket — today's behaviour.
+          # The default public URL is derived from the resolved bucket so that
           # overriding only one of the two vars cannot post comment links
           # that 404 against (or show stale objects from) the other bucket.
           # A cross-region ALIYUN_OSS_ENDPOINT override must also override
           # ALIYUN_OSS_PUBLIC_BASE_URL because the default host pins Hangzhou.
-          ALIYUN_OSS_BUCKET: "${{ vars.ALIYUN_OSS_BUCKET || 'qwen-code-assets' }}"
-          ALIYUN_OSS_PUBLIC_BASE_URL: "${{ vars.ALIYUN_OSS_PUBLIC_BASE_URL || format('https://{0}.oss-cn-hangzhou.aliyuncs.com', vars.ALIYUN_OSS_BUCKET || 'qwen-code-assets') }}"
+          ALIYUN_OSS_BUCKET: "${{ vars.ALIYUN_OSS_PR_ASSETS_BUCKET || vars.ALIYUN_OSS_BUCKET || 'qwen-code-assets' }}"
+          ALIYUN_OSS_PUBLIC_BASE_URL: "${{ vars.ALIYUN_OSS_PR_ASSETS_PUBLIC_BASE_URL || (vars.ALIYUN_OSS_PR_ASSETS_BUCKET == '' && vars.ALIYUN_OSS_PUBLIC_BASE_URL) || format('https://{0}.oss-cn-hangzhou.aliyuncs.com', vars.ALIYUN_OSS_PR_ASSETS_BUCKET || vars.ALIYUN_OSS_BUCKET || 'qwen-code-assets') }}"
         # shellcheck disable=SC2016
         run: |-
           set -euo pipefail
@@ -5423,7 +5432,8 @@ jobs:
             local trusted_bin=''
             if [ -n "${VERIFY_ASSETS_UPLOADER:-}" ]; then
               upload_cmd=("$uploader")
-            elif [ "${OSSUTIL_INSTALL_OUTCOME:-}" = 'success' ]; then
+            elif [ "${OSSUTIL_INSTALL_OUTCOME:-}" = 'success' ] &&
+                 [ -f "${RUNNER_TEMP:-/tmp}/.ossutilconfig" ]; then
               # Resolve node under the inherited PATH, never through the
               # shared temp dir, and run ossutil from a fresh job-private
               # copy of the sha256-verified binary installed above instead
@@ -5440,7 +5450,11 @@ jobs:
                 upload_path="$trusted_bin"
               fi
             else
-              echo "::warning::ossutil install did not succeed; posting a text-only report." >&2
+              # The install and configure steps are continue-on-error, so a
+              # failure there renders green; say which precondition is missing
+              # instead of burning three retry backoffs per image on an
+              # uploader that cannot possibly authenticate.
+              echo "::warning::OSS publishing unavailable (ossutil=$([ -x "${RUNNER_TEMP:-/tmp}/ossutil" ] && echo ok || echo MISSING), config=$([ -f "${RUNNER_TEMP:-/tmp}/.ossutilconfig" ] && echo ok || echo MISSING)); posting a text-only report." >&2
               EVIDENCE_SECTION=''
               return 0
             fi

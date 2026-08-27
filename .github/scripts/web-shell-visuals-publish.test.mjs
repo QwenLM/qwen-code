@@ -40,9 +40,12 @@ const workflow = readFileSync(
 
 test('workflow hosts visuals on OSS without writing Git refs', () => {
   assert.match(workflow, /scripts\/upload-aliyun-oss-assets\.js/);
+  // Head SHA AND run id: GitHub's camo proxy caches comment images by URL,
+  // so a re-run for the same head must not write back over the object the
+  // previous comment already published.
   assert.match(
     workflow,
-    /pr-assets\/web-shell-visuals\/\$\{PR\}\/\$\{RUN_HEAD_SHA\}/,
+    /pr-assets\/web-shell-visuals\/\$\{PR\}\/\$\{RUN_HEAD_SHA\}\/\$\{RUN_ID\}/,
   );
   assert.match(workflow, /ALIYUN_OSS_PUBLIC_BASE_URL/);
   assert.match(workflow, /PATH="\$trusted_bin" "\$node_bin"/);
@@ -96,7 +99,11 @@ function hostingBlockSource() {
 
 function runHostingBlock(
   hasImages,
-  { publicBaseUrl = 'https://assets.example.test', uploadFails = false } = {},
+  {
+    publicBaseUrl = 'https://assets.example.test',
+    uploadFails = false,
+    runId = '900001',
+  } = {},
 ) {
   const dir = mkdtempSync(join(tmpdir(), 'visuals-hosting-'));
   const runnerTemp = join(dir, 'runner-temp');
@@ -158,6 +165,7 @@ function runHostingBlock(
     `HAS_IMAGES=${hasImages ? 1 : 0}`,
     `PR=${pr}`,
     `RUN_HEAD_SHA=${headSha}`,
+    `RUN_ID=${runId}`,
     `STAGE=${JSON.stringify(stage)}`,
     'ALIYUN_OSS_BUCKET=assets-bucket',
     `ALIYUN_OSS_PUBLIC_BASE_URL=${JSON.stringify(publicBaseUrl)}`,
@@ -177,11 +185,11 @@ function runHostingBlock(
       OSS_STUB_FAIL: uploadFails ? '1' : '0',
     },
   });
-  return { res, recordPath, stubRoot, pr, headSha, runnerTemp };
+  return { res, recordPath, stubRoot, pr, headSha, runId, runnerTemp };
 }
 
 test('hosting block uploads staged images to the exact prefix RAW_BASE promises', () => {
-  const { res, recordPath, stubRoot, pr, headSha, runnerTemp } =
+  const { res, recordPath, stubRoot, pr, headSha, runId, runnerTemp } =
     runHostingBlock(true);
   assert.equal(res.status, 0, res.stderr);
   // Flag wiring: the uploader gets the bucket, the credential file the
@@ -190,7 +198,7 @@ test('hosting block uploads staged images to the exact prefix RAW_BASE promises'
   assert.deepEqual(record, {
     bucket: 'assets-bucket',
     config: `${runnerTemp}/.ossutilconfig`,
-    prefix: `pr-assets/web-shell-visuals/${pr}/${headSha}`,
+    prefix: `pr-assets/web-shell-visuals/${pr}/${headSha}/${runId}`,
   });
   // Upload-prefix ↔ URL agreement: the objects land exactly where RAW_BASE
   // (the comment's image base URL) points.
@@ -202,22 +210,40 @@ test('hosting block uploads staged images to the exact prefix RAW_BASE promises'
       'web-shell-visuals',
       pr,
       headSha,
+      runId,
     ),
   ).sort();
   assert.deepEqual(hosted, ['home-light.png', 'model-switch.gif']);
   assert.match(
     res.stdout,
     new RegExp(
-      `^RAW_BASE=https://assets\\.example\\.test/pr-assets/web-shell-visuals/${pr}/${headSha}$`,
+      `^RAW_BASE=https://assets\\.example\\.test/pr-assets/web-shell-visuals/${pr}/${headSha}/${runId}$`,
       'm',
     ),
   );
   assert.match(
     res.stdout,
     new RegExp(
-      `Web-shell visuals hosted at https://assets\\.example\\.test/pr-assets/web-shell-visuals/${pr}/${headSha}\\.`,
+      `Web-shell visuals hosted at https://assets\\.example\\.test/pr-assets/web-shell-visuals/${pr}/${headSha}/${runId}\\.`,
     ),
   );
+});
+
+// The regression this guards: publishing back onto the previous run's object
+// keys. GitHub serves comment images through a caching proxy, so a re-run for
+// the same head would keep showing the stale screenshots.
+test('hosting block gives a re-run of the same head a fresh, non-colliding prefix', () => {
+  const first = runHostingBlock(true, { runId: '900001' });
+  assert.equal(first.res.status, 0, first.res.stderr);
+  const second = runHostingBlock(true, { runId: '900002' });
+  assert.equal(second.res.status, 0, second.res.stderr);
+  const prefixOf = (r) => JSON.parse(readFileSync(r.recordPath, 'utf8')).prefix;
+  assert.notEqual(prefixOf(first), prefixOf(second));
+  // Both still hang off the same immutable per-head path, so the head SHA
+  // stays the thing that binds a URL to the code it depicts.
+  const head = `pr-assets/web-shell-visuals/${first.pr}/${first.headSha}/`;
+  assert.ok(prefixOf(first).startsWith(head));
+  assert.ok(prefixOf(second).startsWith(head));
 });
 
 test('hosting block skips the uploader entirely on the no-change arm', () => {
@@ -236,14 +262,14 @@ test('hosting block aborts without publishing a URL when upload fails', () => {
 });
 
 test('hosting block strips a trailing slash from the public base URL', () => {
-  const { res, pr, headSha } = runHostingBlock(true, {
+  const { res, pr, headSha, runId } = runHostingBlock(true, {
     publicBaseUrl: 'https://assets.example.test/',
   });
   assert.equal(res.status, 0, res.stderr);
   assert.match(
     res.stdout,
     new RegExp(
-      `^RAW_BASE=https://assets\\.example\\.test/pr-assets/web-shell-visuals/${pr}/${headSha}$`,
+      `^RAW_BASE=https://assets\\.example\\.test/pr-assets/web-shell-visuals/${pr}/${headSha}/${runId}$`,
       'm',
     ),
   );
