@@ -38,6 +38,7 @@ import { loadServeFastPathEnvironment } from './fast-path-settings.js';
 import { loadEnvironment } from '../config/environment.js';
 import { RUNTIME_STARTUP_CANCELLED_MESSAGE } from './runtime-startup-errors.js';
 import { isLoopbackBind } from './loopback-binds.js';
+import { isOwnInterfaceAddress } from './local-bind-addresses.js';
 import { ChannelDeliveryAuthorizationStore } from './channel-delivery-authorization.js';
 import * as acpBridge from '@qwen-code/acp-bridge/bridge';
 import {
@@ -97,6 +98,7 @@ afterEach(() => {
   // try/finally cleanup would otherwise leak the figure into later
   // memory-budget tests.
   mockTotalMemBytes.value = undefined;
+  mockNetworkInterfaces.value = undefined;
 });
 
 afterAll(() => {
@@ -646,16 +648,22 @@ const mockChannelWorkerEnabledState = vi.hoisted(() => ({
 const mockTotalMemBytes = vi.hoisted(() => ({
   value: undefined as number | undefined,
 }));
+const mockNetworkInterfaces = vi.hoisted(() => ({
+  value: undefined as NodeJS.Dict<os.NetworkInterfaceInfo[]> | undefined,
+}));
 
 vi.mock('node:os', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:os')>();
   // Mock both the named and the default export: consumers do
   // `import os from 'node:os'`, which a bare spread would leave unmocked.
   const totalmem = () => mockTotalMemBytes.value ?? actual.totalmem();
+  const networkInterfaces = () =>
+    mockNetworkInterfaces.value ?? actual.networkInterfaces();
   return {
     ...actual,
     totalmem,
-    default: { ...actual, totalmem },
+    networkInterfaces,
+    default: { ...actual, totalmem, networkInterfaces },
   };
 });
 
@@ -1510,6 +1518,50 @@ describe('assertChannelWorkerDaemonUrlIsLocal', () => {
         ),
       ).toThrow(/Channels cannot start: --hostname/);
     }
+  });
+
+  // The refusals above are host-state-dependent: on a host that ASSIGNS the
+  // wide spelling (`ip addr add 127.0.0.2/8 dev lo`, a standard
+  // container-mesh pattern), the own-interface escape used to accept it
+  // before the refusal ran, and every worker dial then got `403 Invalid Host
+  // header`. Pin the assigned state so the ordering — Host-gate refusal
+  // before the own-interface escape — is witnessed on every host.
+  it('refuses an assigned wide loopback the Host gate answers 403', () => {
+    mockNetworkInterfaces.value = {
+      lo: [
+        {
+          address: '127.0.0.1',
+          netmask: '255.0.0.0',
+          family: 'IPv4',
+          mac: '00:00:00:00:00:00',
+          internal: true,
+          cidr: '127.0.0.1/8',
+        },
+        {
+          address: '127.0.0.2',
+          netmask: '255.0.0.0',
+          family: 'IPv4',
+          mac: '00:00:00:00:00:00',
+          internal: true,
+          cidr: '127.0.0.2/8',
+        },
+        {
+          address: '::1',
+          netmask: 'ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff',
+          family: 'IPv6',
+          mac: '00:00:00:00:00:00',
+          internal: true,
+          cidr: '::1/128',
+          scopeid: 0,
+        },
+      ],
+    };
+    // Witness the assigned state: without this assert a broken mock would
+    // let the throw below pass for the wrong (unassigned) reason.
+    expect(isOwnInterfaceAddress('127.0.0.2')).toBe(true);
+    expect(() =>
+      assertChannelWorkerDaemonUrlIsLocal('http://127.0.0.2:8080', '127.0.0.2'),
+    ).toThrow(/is a loopback address the daemon's Host header gate refuses/);
   });
 
   it('still accepts the loopback spellings the Host gate answers', () => {

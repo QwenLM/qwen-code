@@ -784,11 +784,14 @@ export function assertChannelWorkerDaemonUrlIsLocal(
         `a zone-less literal address of one of this machine's interfaces.`,
     );
   }
-  if (isHostGateLoopback(host) || isOwnInterfaceAddress(host)) return;
+  if (isHostGateLoopback(host)) return;
   if (isLoopbackBind(host)) {
     // A wide 127/8 bind passes `isLoopbackBind` and the kernel routes it to
     // loopback, but the primary Host gate answers only the spellings in
     // `LOOPBACK_BINDS` — every other 127.x.y.z gets 403 before a route.
+    // Order matters: this refusal must run BEFORE the own-interface escape
+    // below — a wide loopback address can be assigned to a local interface
+    // (`ip addr add 127.0.0.2/8 dev lo`), and the gate 403s it either way.
     throw new Error(
       `Channels cannot start: --hostname "${hostname}" is a loopback ` +
         `address the daemon's Host header gate refuses (it answers only ` +
@@ -798,6 +801,7 @@ export function assertChannelWorkerDaemonUrlIsLocal(
         `interfaces.`,
     );
   }
+  if (isOwnInterfaceAddress(host)) return;
   throw new Error(
     `Channels cannot start: --hostname "${hostname}" is not a loopback bind ` +
       `and does not name an address on this host, so channel workers have no ` +

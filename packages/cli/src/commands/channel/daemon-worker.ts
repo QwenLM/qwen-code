@@ -64,7 +64,10 @@ import {
   MAX_CHANNEL_STARTUP_FAILURE_MESSAGE_LENGTH,
   type ChannelStartupReportMessage,
 } from '../../serve/channel-worker-startup-ipc.js';
-import { isHostGateLoopback } from '../../serve/loopback-binds.js';
+import {
+  isHostGateLoopback,
+  isLoopbackBind,
+} from '../../serve/loopback-binds.js';
 import { isOwnInterfaceAddress } from '../../serve/local-bind-addresses.js';
 import { ChannelLoopMcpWorkerHost } from '../../serve/channel-loop-mcp-ipc.js';
 import { writeStderrLine, writeStdoutLine } from '../../utils/stdioHelpers.js';
@@ -333,11 +336,24 @@ function validateDaemonWorkerUrl(daemonUrl: string): void {
   // keeps the daemon token on this host exactly as loopback does, which is
   // the property this rule protects; anything else (a routable third-party
   // host, a DNS name we would have to resolve to find out) stays refused.
-  if (
-    (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') ||
-    (!isHostGateLoopback(parsed.hostname) &&
-      !isOwnInterfaceAddress(parsed.hostname))
-  ) {
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    throw new Error(
+      `${QWEN_DAEMON_URL_ENV} must use an http(s) loopback URL or a ` +
+        `literal address of one of this machine's interfaces.`,
+    );
+  }
+  if (isHostGateLoopback(parsed.hostname)) return;
+  if (isLoopbackBind(parsed.hostname)) {
+    // Order matters: this refusal must run BEFORE the own-interface escape
+    // below — a wide 127/8 address can be assigned to a local interface
+    // (`ip addr add 127.0.0.2/8 dev lo`), and the gate 403s it either way.
+    throw new Error(
+      `${QWEN_DAEMON_URL_ENV} points at a loopback address the daemon's ` +
+        `Host header gate refuses (it answers only 127.0.0.1, localhost, ` +
+        `and [::1]); use one of those spellings instead.`,
+    );
+  }
+  if (!isOwnInterfaceAddress(parsed.hostname)) {
     throw new Error(
       `${QWEN_DAEMON_URL_ENV} must use an http(s) loopback URL or a ` +
         `literal address of one of this machine's interfaces.`,
