@@ -255,7 +255,10 @@ import { getTipHistory } from '../services/tips/index.js';
 import { restorePromptStash } from '../services/prompt-stash.js';
 import { useRemoteInput } from '../remoteInput/RemoteInputContext.js';
 import { usePeerMessaging } from '../peerMessaging/PeerMessagingContext.js';
-import { MAX_ACCEPTED_BACKLOG } from '../peerMessaging/peer-messaging.js';
+import {
+  MAX_ACCEPTED_BACKLOG,
+  type PeerMessaging,
+} from '../peerMessaging/peer-messaging.js';
 import { useDualOutput } from '../dualOutput/DualOutputContext.js';
 import {
   requestConsentInteractive,
@@ -370,6 +373,7 @@ export function useQueuedSubmissionDrain({
   submitQuery,
   submissionInFlightRef,
   submissionSettledRevision,
+  peerMessaging,
 }: {
   config: Config;
   isConfigInitialized: boolean;
@@ -386,6 +390,7 @@ export function useQueuedSubmissionDrain({
   submitQuery: ReturnType<typeof useGeminiStream>['submitQuery'];
   submissionInFlightRef: RefObject<boolean>;
   submissionSettledRevision: number;
+  peerMessaging?: PeerMessaging | null;
 }) {
   const goalRuntimeSessionId = config.getSessionId();
   const [goalQueueRevision, setGoalQueueRevision] = useState(0);
@@ -456,6 +461,13 @@ export function useQueuedSubmissionDrain({
     }
     const submission = popNextSubmission(goalControlMode);
     if (submission === null) return;
+    if (
+      submission.kind === 'peer' &&
+      peerMessaging?.drainQueuedFrame(submission.delivery) === false
+    ) {
+      setQueueDrainNonce((nonce) => nonce + 1);
+      return;
+    }
 
     queueDrainingRef.current = true;
     let admissionFailed = false;
@@ -511,6 +523,7 @@ export function useQueuedSubmissionDrain({
               submission.modelText,
               submission.displayText,
               true,
+              submission.delivery,
             );
             markAdmissionFailed();
           },
@@ -519,6 +532,7 @@ export function useQueuedSubmissionDrain({
               submission.modelText,
               submission.displayText,
               true,
+              submission.delivery,
             );
             markAdmissionFailed();
           },
@@ -569,6 +583,7 @@ export function useQueuedSubmissionDrain({
     isConfigInitialized,
     isProcessing,
     pendingSubmissionCount,
+    peerMessaging,
     popNextSubmission,
     queueDrainNonce,
     restoreMessages,
@@ -2498,14 +2513,16 @@ export const AppContainer = (props: AppContainerProps) => {
   const peerMessaging = usePeerMessaging();
   useEffect(() => {
     if (!peerMessaging) return;
-    peerMessaging.setSubmitFn((modelText: string, displayText: string) => {
-      // Refuse once the queue's pending backlog reaches the cap: peer
-      // frames arrive at socket speed but drain at one per turn, and the
-      // queue must not grow unboundedly for a busy session.
-      if (getPendingSubmissionCount() >= MAX_ACCEPTED_BACKLOG) return false;
-      addPeerMessage(modelText, displayText);
-      return true;
-    });
+    peerMessaging.setSubmitFn(
+      (modelText: string, displayText: string, delivery) => {
+        // Refuse once the queue's pending backlog reaches the cap: peer
+        // frames arrive at socket speed but drain at one per turn, and the
+        // queue must not grow unboundedly for a busy session.
+        if (getPendingSubmissionCount() >= MAX_ACCEPTED_BACKLOG) return false;
+        addPeerMessage(modelText, displayText, delivery);
+        return true;
+      },
+    );
     // close() settles whatever is still queued with a corrective receipt;
     // it needs the current depth to tell consumed entries from queued ones.
     peerMessaging.setQueuedPeerCount(getQueuedPeerCount);
@@ -4631,6 +4648,7 @@ export const AppContainer = (props: AppContainerProps) => {
     submitQuery,
     submissionInFlightRef,
     submissionSettledRevision,
+    peerMessaging,
   });
 
   const nightly = props.version.includes('nightly');

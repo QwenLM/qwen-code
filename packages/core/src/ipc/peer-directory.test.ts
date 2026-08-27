@@ -242,6 +242,35 @@ describe('resolvePeerTarget', () => {
   it('resolves nothing against an empty directory', () => {
     expect(resolvePeerTarget([], 'app-ab')).toEqual({ kind: 'none' });
   });
+
+  it('refuses to guess a bracketed ref shared by two sessions', () => {
+    const x = peer({ sessionId: 's1', name: 'app-ab', ref: 'abc123' });
+    const y = peer({ sessionId: 's2', name: 'docs-cd', ref: 'abc123' });
+    const result = resolvePeerTarget([x, y], '[abc123]');
+    expect(result.kind).toBe('ambiguous');
+    if (result.kind === 'ambiguous') expect(result.matches).toEqual([x, y]);
+  });
+
+  it('round-trips a peer whose literal name carries brackets', () => {
+    const bracketed = peer({
+      sessionId: 's2',
+      name: 'notes [deadbeef]',
+    });
+    expect(resolvePeerTarget([a, bracketed], 'notes [deadbeef]')).toEqual({
+      kind: 'one',
+      peer: bracketed,
+    });
+  });
+
+  it('treats literal and ref readings of the same address as ambiguous', () => {
+    const notes = peer({ sessionId: 's1', name: 'notes', ref: 'cafe12' });
+    const literal = peer({ sessionId: 's2', name: 'notes [cafe12]' });
+    const result = resolvePeerTarget([notes, literal], 'notes [cafe12]');
+    expect(result.kind).toBe('ambiguous');
+    if (result.kind === 'ambiguous') {
+      expect(result.matches).toEqual(expect.arrayContaining([notes, literal]));
+    }
+  });
 });
 
 describe('formatPeerAddress', () => {

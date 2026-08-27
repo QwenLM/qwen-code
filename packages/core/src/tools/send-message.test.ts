@@ -137,6 +137,11 @@ describe('SendMessageTool — team mode', () => {
     expect(JSON.stringify(schema)).not.toContain('shutdown_request');
   });
 
+  it('rejects an empty message at build time', () => {
+    const tool = new SendMessageTool(makeTeamConfig());
+    expect(() => tool.build({ to: 'alice', message: '' })).toThrow(/message/i);
+  });
+
   it("delivers a teammate's ordinary message to the leader", async () => {
     const sendMessage = vi.fn().mockResolvedValue(undefined);
     const tool = new SendMessageTool(

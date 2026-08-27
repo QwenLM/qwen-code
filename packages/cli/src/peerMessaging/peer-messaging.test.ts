@@ -25,7 +25,11 @@ import {
   type PeerFrame,
   type PeerInbox,
 } from '@qwen-code/qwen-code-core';
-import { MAX_ACCEPTED_BACKLOG, PeerMessaging } from './peer-messaging.js';
+import {
+  MAX_ACCEPTED_BACKLOG,
+  PeerMessaging,
+  type PeerQueuedDelivery,
+} from './peer-messaging.js';
 
 // Holds the inbox's post-listen socket chmod, keeping startPeerInbox
 // pending while the socket already accepts connections.
@@ -368,6 +372,101 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
     );
     await settle();
     expect(submitted).toHaveLength(1);
+  });
+
+  it('drops a held frame when the session id swaps before reevaluation', async () => {
+    const sender = await startSenderInbox();
+    let mode = ApprovalMode.YOLO;
+    let current = 'session-a';
+    const started = await PeerMessaging.start({
+      socketPath: path.join(tmpDir, 'socks', 'self.sock'),
+      getApprovalMode: () => mode,
+      getPolicySetting: () => undefined,
+      updateSessionRegistryIpcPath: async () => {},
+      getSessionId: () => current,
+    });
+    if (!started) throw new Error('peer messaging failed to start');
+    messaging = started;
+    const submitted: string[] = [];
+    started.setSubmitFn((modelText) => {
+      submitted.push(modelText);
+      return true;
+    });
+    const frame = buildUserFrame({
+      content: 'held before /clear',
+      from: sender.socketPath,
+      fromMode: 'prompting',
+      toSessionId: 'session-a',
+    });
+    await sendPeerFrame(started.socketPath!, frame);
+    await settle();
+    expect(started.getHeld()).toHaveLength(1);
+
+    current = 'session-b';
+    mode = ApprovalMode.DEFAULT;
+    expect(started.reevaluate('approval-mode-changed')).toBe(0);
+    expect(started.getHeld()).toHaveLength(0);
+    expect(submitted).toHaveLength(0);
+    await settle();
+    const statuses = receipts
+      .filter(
+        (receipt) =>
+          receipt.type === 'control' && receipt.origMsgId === frame.msgId,
+      )
+      .map((receipt) => receipt.status);
+    expect(statuses).toEqual(['held', 'misaddressed']);
+  });
+
+  it('drops a queued envelope whose pin the session outgrew at drain', async () => {
+    const sender = await startSenderInbox();
+    let current = 'session-a';
+    const started = await PeerMessaging.start({
+      socketPath: path.join(tmpDir, 'socks', 'self.sock'),
+      getApprovalMode: () => ApprovalMode.DEFAULT,
+      getPolicySetting: () => undefined,
+      updateSessionRegistryIpcPath: async () => {},
+      getSessionId: () => current,
+    });
+    if (!started) throw new Error('peer messaging failed to start');
+    messaging = started;
+    const queued: PeerQueuedDelivery[] = [];
+    started.setSubmitFn((_modelText, _displayText, delivery) => {
+      if (delivery) queued.push(delivery);
+      return true;
+    });
+    const frame = buildUserFrame({
+      content: 'queued before /clear',
+      from: sender.socketPath,
+      toSessionId: 'session-a',
+    });
+    await sendPeerFrame(started.socketPath!, frame);
+    await settle();
+    expect(queued).toEqual([
+      {
+        msgId: frame.msgId,
+        from: sender.socketPath,
+        toSessionId: 'session-a',
+      },
+    ]);
+
+    current = 'session-b';
+    expect(started.drainQueuedFrame(queued[0])).toBe(false);
+    await settle();
+    const statuses = receipts
+      .filter((receipt) => receipt.type === 'control')
+      .map((receipt) => receipt.status);
+    expect(statuses).toEqual(['delivered', 'misaddressed']);
+  });
+
+  it('drains a matching or unpinned queued envelope', async () => {
+    const { messaging: m } = await start(ApprovalMode.DEFAULT, {
+      getSessionId: () => 'session-a',
+    });
+    expect(m.drainQueuedFrame({ msgId: 'm1', toSessionId: 'session-a' })).toBe(
+      true,
+    );
+    expect(m.drainQueuedFrame({ msgId: 'm2' })).toBe(true);
+    expect(m.drainQueuedFrame(undefined)).toBe(true);
   });
 
   it('holds a message when the receiver bypasses prompts and the sender says nothing', async () => {

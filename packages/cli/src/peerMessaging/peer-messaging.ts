@@ -39,12 +39,23 @@ import {
 
 const debugLogger = createDebugLogger('PEER_MESSAGING');
 
+/** Identity needed to re-check a queued frame's recipient at drain time. */
+export interface PeerQueuedDelivery {
+  msgId: string;
+  from?: string;
+  toSessionId?: string;
+}
+
 /**
  * Submit an already-formatted message into the session's input queue.
  * Returns false when the queue is too full to take it — the frame is then
  * refused with an honest receipt instead of accumulating unboundedly.
  */
-export type PeerSubmitFn = (modelText: string, displayText: string) => boolean;
+export type PeerSubmitFn = (
+  modelText: string,
+  displayText: string,
+  delivery?: PeerQueuedDelivery,
+) => boolean;
 
 /**
  * Cap on accepted messages waiting to be consumed.
@@ -144,6 +155,7 @@ export class PeerMessaging {
     const gate = new InboundGate({
       getApprovalMode: options.getApprovalMode,
       getPolicySetting: options.getPolicySetting,
+      getSessionId: options.getSessionId,
       deliver: (frame) => messaging.deliver(frame),
       reportStatus: (frame, status) => {
         if (!frame.from) return;
@@ -453,8 +465,38 @@ export class PeerMessaging {
           ...(frame.fromName !== undefined ? { fromName: frame.fromName } : {}),
           content: frame.message.content,
         }),
+        {
+          msgId: frame.msgId,
+          ...(frame.from !== undefined ? { from: frame.from } : {}),
+          ...(frame.toSessionId !== undefined
+            ? { toSessionId: frame.toSessionId }
+            : {}),
+        },
       ) ?? false
     );
+  }
+
+  /** Drop a queued frame if an in-process session swap invalidated its pin. */
+  drainQueuedFrame(delivery: PeerQueuedDelivery | undefined): boolean {
+    const ownSessionId = this.getSessionId?.();
+    if (
+      delivery?.toSessionId === undefined ||
+      ownSessionId === undefined ||
+      delivery.toSessionId === ownSessionId
+    ) {
+      return true;
+    }
+    debugLogger.debug(
+      `dropping queued peer message ${delivery.msgId}: addressed to session ${delivery.toSessionId}, this is ${ownSessionId}`,
+    );
+    if (delivery.from) {
+      void sendDeliveryStatus(delivery.from, {
+        status: 'misaddressed',
+        origMsgId: delivery.msgId,
+        from: this.inbox?.socketPath,
+      });
+    }
+    return false;
   }
 
   private emitHeldChange(held: readonly HeldMessage[]): void {

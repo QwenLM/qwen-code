@@ -269,6 +269,20 @@ describe('sendToPeer', () => {
     });
   });
 
+  it('refuses an empty message before building a frame', async () => {
+    listMessageablePeers.mockResolvedValue([peer('s1', 'app-ab')]);
+    const outcome = await sendToPeer({
+      target: 'app-ab',
+      message: '',
+      approvalMode: ApprovalMode.DEFAULT,
+    });
+    expect(outcome).toMatchObject({ kind: 'failed', address: 'app-ab' });
+    if (outcome.kind === 'failed') {
+      expect(outcome.reason).toContain('empty');
+    }
+    expect(sendPeerFrame).not.toHaveBeenCalled();
+  });
+
   it('reports a send failure against the address it tried', async () => {
     listMessageablePeers.mockResolvedValue([peer('s1', 'app-ab')]);
     sendPeerFrame.mockRejectedValue(new PeerSendError('gone', 'ECONNREFUSED'));
@@ -426,6 +440,15 @@ describe('settleSentPeerMessage', () => {
     });
     expect(settleSentPeerMessage(id, 'expired')).toBeUndefined();
     expect(settleSentPeerMessage(id, 'delivered')).toBeUndefined();
+  });
+
+  it('lets a delivery be corrected to misaddressed exactly once', async () => {
+    const id = await sendOne();
+    expect(settleSentPeerMessage(id, 'delivered')).toBeDefined();
+    expect(settleSentPeerMessage(id, 'misaddressed')).toMatchObject({
+      previous: 'delivered',
+    });
+    expect(settleSentPeerMessage(id, 'misaddressed')).toBeUndefined();
   });
 
   it('treats a terminal state as final', async () => {

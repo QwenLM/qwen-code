@@ -24,6 +24,7 @@ vi.mock('../ipc/peer-directory.js', async () => {
 });
 
 import { ListAgentsTool } from './list-agents.js';
+import { resolvePeerTarget } from '../ipc/peer-directory.js';
 
 function peerRow(over: Record<string, unknown> = {}) {
   return {
@@ -237,6 +238,69 @@ describe('ListAgentsTool — peer sessions', () => {
       'docs-cd [aaa111]',
       'docs-cd [bbb222]',
     ]);
+  });
+
+  it('appends the ref when a bracketed name is shadowed by a teammate', async () => {
+    listMessageablePeers.mockResolvedValue([
+      peerRow({ sessionId: 's1', name: 'notes [draft]', ref: 'aaa111' }),
+    ]);
+    const parsed = JSON.parse(
+      String((await run(toolWith(undefined, ['notes-draft']))).llmContent),
+    );
+    expect(parsed.sessions[0].to).toBe('notes [draft] [aaa111]');
+  });
+
+  it('keeps printed addresses distinct when a literal name mimics one', async () => {
+    const peers = [
+      peerRow({ sessionId: 's1', name: 'docs-cd', ref: 'aaa111' }),
+      peerRow({
+        sessionId: 's2',
+        name: 'docs-cd [aaa111]',
+        ref: 'bbb222',
+        ipcPath: '/tmp/s2.sock',
+      }),
+    ];
+    listMessageablePeers.mockResolvedValue(peers);
+    const parsed = JSON.parse(
+      String((await run(toolWith(undefined, ['docs-cd']))).llmContent),
+    );
+    const addresses = parsed.sessions.map(
+      (session: { to: string }) => session.to,
+    );
+    expect(new Set(addresses).size).toBe(2);
+    expect(addresses).toEqual(['[aaa111]', 'docs-cd [aaa111] [bbb222]']);
+    for (const [index, address] of addresses.entries()) {
+      expect(resolvePeerTarget(peers, address)).toEqual({
+        kind: 'one',
+        peer: peers[index],
+      });
+    }
+  });
+
+  it('appends the ref for leader handles intercepted by team routing', async () => {
+    listMessageablePeers.mockResolvedValue([
+      peerRow({ sessionId: 's1', name: 'leader', ref: 'aaa111' }),
+      peerRow({
+        sessionId: 's2',
+        name: 'lead-1',
+        ref: 'bbb222',
+        ipcPath: '/tmp/s2.sock',
+      }),
+    ]);
+    const parsed = JSON.parse(
+      String((await run(toolWith(undefined, ['worker']))).llmContent),
+    );
+    expect(
+      parsed.sessions.map((session: { to: string }) => session.to),
+    ).toEqual(['leader [aaa111]', 'lead-1 [bbb222]']);
+  });
+
+  it('omits started_at when the registry timestamp is outside Date range', async () => {
+    listMessageablePeers.mockResolvedValue([
+      peerRow({ sessionId: 's1', startedAt: 9e15 }),
+    ]);
+    const parsed = JSON.parse(String((await run()).llmContent));
+    expect(parsed.sessions[0]).not.toHaveProperty('started_at');
   });
 
   it('excludes this session from its own listing', async () => {

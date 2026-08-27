@@ -76,6 +76,7 @@ import {
 } from '@qwen-code/qwen-code-core';
 import type {
   PeerMessaging,
+  PeerQueuedDelivery,
   PeerReceipt,
 } from '../peerMessaging/peer-messaging.js';
 import { MAX_ACCEPTED_BACKLOG } from '../peerMessaging/peer-messaging.js';
@@ -1880,16 +1881,63 @@ describe('AppContainer State Management', () => {
       view.unmount();
     });
 
+    it('drops a peer envelope whose session-id pin the drain outgrew', async () => {
+      const delivery = { msgId: 'frame-1', toSessionId: 'session-a' };
+      let popped = false;
+      const popNextSubmission = vi.fn(() => {
+        if (popped) return null;
+        popped = true;
+        return {
+          kind: 'peer' as const,
+          modelText: '<cross_session_message>stale</cross_session_message>',
+          displayText: 'Message from another session: stale',
+          delivery,
+        };
+      });
+      const drainQueuedFrame = vi.fn().mockReturnValue(false);
+      const submitQuery = vi.fn();
+      const addHistoryItem = vi.fn();
+
+      renderHook(() =>
+        useQueuedSubmissionDrain({
+          config: mockConfig,
+          isConfigInitialized: true,
+          streamingState: StreamingState.Idle,
+          isProcessing: false,
+          dialogsVisible: false,
+          pendingSubmissionCount: 1,
+          getPendingSubmissionCount: () => (popped ? 0 : 1),
+          popNextSubmission,
+          enqueueGoalTurn: vi.fn(),
+          restoreMessages: vi.fn(),
+          restorePeerMessage: vi.fn(),
+          addHistoryItem,
+          submitQuery,
+          submissionInFlightRef: { current: false },
+          submissionSettledRevision: 0,
+          peerMessaging: { drainQueuedFrame } as unknown as PeerMessaging,
+        }),
+      );
+
+      await vi.waitFor(() => {
+        expect(drainQueuedFrame).toHaveBeenCalledWith(delivery);
+      });
+      expect(submitQuery).not.toHaveBeenCalled();
+      expect(addHistoryItem).not.toHaveBeenCalled();
+    });
+
     it('restores a failed peer admission as a peer entry, not user text', async () => {
       // Restoring as plain user text would drain the envelope through the
       // UserQuery preprocessing on retry — the exact hazard the peer
       // send type exists to prevent.
       const modelText = '<cross_session_message from="/tmp/a.sock">x</>';
       const displayText = 'Message from another session (a): x';
+      const delivery = { msgId: 'frame-1', toSessionId: 'session-a' };
       const popNextSubmission = vi.fn(() => ({
         kind: 'peer' as const,
         modelText,
         displayText,
+        delivery,
       }));
       const restorePeerMessage = vi.fn(() => {});
       const submitQuery = vi.fn(async (...args: unknown[]) => {
@@ -1924,6 +1972,7 @@ describe('AppContainer State Management', () => {
           modelText,
           displayText,
           true,
+          delivery,
         );
       });
     });
@@ -1937,10 +1986,12 @@ describe('AppContainer State Management', () => {
       // while the sender keeps a live `delivered` receipt.
       const modelText = '<cross_session_message from="/tmp/a.sock">x</>';
       const displayText = 'Message from another session (a): x';
+      const delivery = { msgId: 'frame-1', toSessionId: 'session-a' };
       const popNextSubmission = vi.fn(() => ({
         kind: 'peer' as const,
         modelText,
         displayText,
+        delivery,
       }));
       const restorePeerMessage = vi.fn(() => {});
       const submitQuery = vi.fn(async (...args: unknown[]) => {
@@ -1982,6 +2033,7 @@ describe('AppContainer State Management', () => {
           modelText,
           displayText,
           true,
+          delivery,
         );
       });
       expect(submitQuery).toHaveBeenCalledTimes(1);
@@ -7093,7 +7145,11 @@ describe('AppContainer State Management', () => {
 
     interface FakePeerMessaging {
       value: PeerMessaging;
-      submit: (modelText: string, displayText: string) => void;
+      submit: (
+        modelText: string,
+        displayText: string,
+        delivery?: PeerQueuedDelivery,
+      ) => void;
       emitHeld: (held: readonly HeldMessage[]) => void;
       emitReceipt: (receipt: PeerReceipt) => void;
     }
@@ -7112,12 +7168,23 @@ describe('AppContainer State Management', () => {
       }) as unknown as HeldMessage;
 
     const makePeerMessaging = (): FakePeerMessaging => {
-      let submitFn: ((modelText: string, displayText: string) => void) | null =
-        null;
+      let submitFn:
+        | ((
+            modelText: string,
+            displayText: string,
+            delivery?: PeerQueuedDelivery,
+          ) => void)
+        | null = null;
       let heldListener: ((held: readonly HeldMessage[]) => void) | null = null;
       let receiptListener: ((receipt: PeerReceipt) => void) | null = null;
       const value = {
-        setSubmitFn: (fn: (modelText: string, displayText: string) => void) => {
+        setSubmitFn: (
+          fn: (
+            modelText: string,
+            displayText: string,
+            delivery?: PeerQueuedDelivery,
+          ) => void,
+        ) => {
           submitFn = fn;
         },
         setQueuedPeerCount: vi.fn(),
@@ -7135,7 +7202,8 @@ describe('AppContainer State Management', () => {
       } as unknown as PeerMessaging;
       return {
         value,
-        submit: (modelText, displayText) => submitFn?.(modelText, displayText),
+        submit: (modelText, displayText, delivery) =>
+          submitFn?.(modelText, displayText, delivery),
         emitHeld: (held) => {
           if (!heldListener) throw new Error('no held-change listener wired');
           heldListener(held);
@@ -7181,15 +7249,25 @@ describe('AppContainer State Management', () => {
         getQueuedPeerCount: vi.fn().mockReturnValue(0),
       });
       const peer = makePeerMessaging();
+      const delivery = {
+        msgId: 'frame-1',
+        from: '/tmp/peer.sock',
+        toSessionId: 'session-a',
+      };
 
       renderWithPeer(peer);
       act(() => {
-        peer.submit('<cross_session_message …>envelope</…>', 'one-liner');
+        peer.submit(
+          '<cross_session_message …>envelope</…>',
+          'one-liner',
+          delivery,
+        );
       });
 
       expect(addPeerMessage).toHaveBeenCalledWith(
         '<cross_session_message …>envelope</…>',
         'one-liner',
+        delivery,
       );
       expect(addMessage).not.toHaveBeenCalled();
       // close() settles still-queued entries; it needs the live depth.

@@ -95,6 +95,13 @@ class SendMessageInvocation extends BaseToolInvocation<
   }
 
   /**
+   * Set when the peer route was consulted and found cross-session
+   * messaging off here, so the final error can say so instead of
+   * claiming a lookup that never happened.
+   */
+  private peerMessagingOff = false;
+
+  /**
    * Try to deliver to another Qwen Code session on this machine.
    *
    * Returns null when this is not a peer send at all — cross-session
@@ -103,13 +110,6 @@ class SendMessageInvocation extends BaseToolInvocation<
    * Every other outcome, including failures, is a result: each one has a
    * different next step for the model.
    */
-  /**
-   * Set when the peer route was consulted and found cross-session
-   * messaging off here, so the final error can say so instead of
-   * claiming a lookup that never happened.
-   */
-  private peerMessagingOff = false;
-
   private async trySendToPeer(
     to: string,
     teamActive: boolean,
@@ -494,6 +494,9 @@ export class SendMessageTool extends BaseDeclarativeTool<
           message: {
             type: 'string',
             description: 'Message text to send.',
+            // An empty message is nothing to deliver; the peer wire
+            // contract drops it silently, so refuse it at the boundary.
+            minLength: 1,
             // Cap message size so a teammate can't grow the
             // recipient's inbox file unboundedly with a single send.
             maxLength: 65536,

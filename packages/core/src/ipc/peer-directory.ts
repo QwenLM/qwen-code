@@ -119,16 +119,25 @@ export function resolvePeerTarget(
   const trimmed = target.trim();
   if (trimmed.length === 0) return { kind: 'none' };
 
-  // "name [ref]" — the form list_agents prints.
+  // "name [ref]" — the form list_agents prints. It has two readings: the
+  // bracketed form names a session by ref, but the whole string is also a
+  // candidate literal name — registry names are other-process input and
+  // can themselves contain brackets. Resolve both and merge: picking one
+  // reading silently injects into the wrong session when both have a
+  // claim, and a literal bracketed name must round-trip to itself.
   const withRef = /^(.*?)\s*\[([0-9a-f]{4,12})\]$/i.exec(trimmed);
   if (withRef) {
     const [, namePart, ref] = withRef;
-    const match = peers.find(
+    const bracketed = peers.filter(
       (peer) =>
         peer.ref === ref!.toLowerCase() &&
         (namePart!.length === 0 || peer.name === namePart),
     );
-    return match ? { kind: 'one', peer: match } : { kind: 'none' };
+    const literal = peers.filter((peer) => peer.name === trimmed);
+    const matches = [...new Set([...literal, ...bracketed])];
+    if (matches.length === 1) return { kind: 'one', peer: matches[0]! };
+    if (matches.length > 1) return { kind: 'ambiguous', matches };
+    return { kind: 'none' };
   }
 
   const byName = peers.filter((peer) => peer.name === trimmed);

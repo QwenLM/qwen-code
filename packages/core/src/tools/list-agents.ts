@@ -6,11 +6,12 @@
 
 import type { Config } from '../config/config.js';
 import {
-  formatPeerAddress,
   listMessageablePeers,
+  resolvePeerTarget,
 } from '../ipc/peer-directory.js';
 import { getOwnPeerIdentity } from '../ipc/peer-send.js';
 import { sanitizeName } from '../agents/team/teamHelpers.js';
+import { LEADER_NAME } from '../agents/team/types.js';
 import { ToolDisplayNames, ToolNames } from './tool-names.js';
 import {
   BaseDeclarativeTool,
@@ -67,28 +68,51 @@ class ListAgentsInvocation extends BaseToolInvocation<
         )
       : [];
 
-    // send_message routes a name to an in-process teammate first, and
-    // that lookup sanitizes (lowercases, folds punctuation). A peer whose
-    // name sanitizes to a teammate's is unreachable by its bare name, so
-    // it is printed with its ref — which no teammate name sanitizes to.
-    const teammateNames = new Set(
-      (this.config.getTeamManager()?.getTeamFile().members ?? []).map(
-        (member) => member.name,
-      ),
+    // send_message routes a name to an in-process recipient first: a
+    // teammate by sanitized name, plus the leader handle and the lead
+    // agent id. Validate every candidate against both those routes and
+    // the peer-address grammar before advertising it.
+    const teamFile = this.config.getTeamManager()?.getTeamFile();
+    const memberNames = new Set(
+      (teamFile?.members ?? []).map((member) => member.name),
     );
-    const sessions = peers.map((peer) => ({
-      // The name IS the address. The ref is only appended when it has to
-      // be, so the common case stays a bare, typeable name.
-      to:
-        teammateNames.has(sanitizeName(peer.name)) &&
-        !formatPeerAddress(peer, peers).endsWith(']')
-          ? `${peer.name} [${peer.ref}]`
-          : formatPeerAddress(peer, peers),
-      name: peer.name,
-      ref: peer.ref,
-      cwd: peer.cwd,
-      started_at: new Date(peer.startedAt).toISOString(),
-    }));
+    const intercepted = (address: string): boolean =>
+      address.toLowerCase() === LEADER_NAME ||
+      address === teamFile?.leadAgentId ||
+      memberNames.has(sanitizeName(address));
+    const addressFor = (peer: (typeof peers)[number]): string | undefined => {
+      const candidates = [
+        peer.name,
+        `${peer.name} [${peer.ref}]`,
+        `[${peer.ref}]`,
+      ];
+      return candidates.find((candidate) => {
+        if (intercepted(candidate)) return false;
+        const resolved = resolvePeerTarget(peers, candidate);
+        return resolved.kind === 'one' && resolved.peer === peer;
+      });
+    };
+    const sessions = peers.flatMap((peer) => {
+      const to = addressFor(peer);
+      // A ref collision plus adversarial literal names can leave no string
+      // in the supported grammar that uniquely selects this peer. Do not
+      // advertise a misleading address that would route elsewhere.
+      if (to === undefined) return [];
+      // A registry writer can record a finite-but-Date-invalid startedAt;
+      // toISOString would throw and take the whole listing down with it.
+      const startedAt = new Date(peer.startedAt);
+      return [
+        {
+          to,
+          name: peer.name,
+          ref: peer.ref,
+          cwd: peer.cwd,
+          ...(Number.isNaN(startedAt.getTime())
+            ? {}
+            : { started_at: startedAt.toISOString() }),
+        },
+      ];
+    });
 
     if (agents.length === 0 && sessions.length === 0) {
       const message =

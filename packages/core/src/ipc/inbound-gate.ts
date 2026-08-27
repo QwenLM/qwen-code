@@ -133,8 +133,16 @@ export interface InboundGateOptions {
   /** Report a terminal outcome back to the sender. Best-effort. */
   reportStatus?: (
     frame: PeerUserFrame,
-    status: 'held' | 'denied' | 'expired' | 'delivered',
+    status: 'held' | 'denied' | 'expired' | 'delivered' | 'misaddressed',
   ) => void;
+  /**
+   * The session id this process holds now, when pinning is wired. A
+   * parked frame pinned to another id was addressed to whoever held the
+   * socket before an in-process session swap (/clear, /resume), and a
+   * release path must drop it as misaddressed rather than deliver it
+   * into the session that replaced its addressee.
+   */
+  getSessionId?: () => string | undefined;
   /** Called whenever the held set changes, for UI. */
   onHeldChange?: (held: readonly HeldMessage[]) => void;
 }
@@ -338,6 +346,11 @@ export class InboundGate {
     if (!entry) return 'gone';
 
     if (decision === 'approve') {
+      if (!this.pinStillValid(entry.frame)) {
+        void this.report(entry.frame, 'misaddressed');
+        this.notifyHeldChange();
+        return 'done';
+      }
       if (!this.tryDeliver(entry.frame)) {
         this.held.splice(index, 0, entry);
         void this.report(entry.frame, 'held');
@@ -387,7 +400,13 @@ export class InboundGate {
     }
 
     let released = 0;
+    let misaddressed = 0;
     for (const entry of release) {
+      if (!this.pinStillValid(entry.frame)) {
+        misaddressed += 1;
+        void this.report(entry.frame, 'misaddressed');
+        continue;
+      }
       if (this.tryDeliver(entry.frame)) {
         released += 1;
         this.recordSettled(entry.frame.msgId, 'delivered');
@@ -405,7 +424,7 @@ export class InboundGate {
 
     if (release.length > 0 || dropped > 0) {
       debugLogger.debug(
-        `reevaluate (${reason}): released ${released}, dropped ${dropped}, ${this.held.length} still held`,
+        `reevaluate (${reason}): released ${released}, dropped ${dropped}, misaddressed ${misaddressed}, ${this.held.length} still held`,
       );
       this.notifyHeldChange();
     }
@@ -453,6 +472,17 @@ export class InboundGate {
   }
 
   /**
+   * A frame's pin is judged at arrival, but a session swap can happen
+   * while it sits parked; the release paths re-judge against the id the
+   * session holds now, not the one the frame saw on arrival.
+   */
+  private pinStillValid(frame: PeerUserFrame): boolean {
+    if (frame.toSessionId === undefined) return true;
+    const ownSessionId = this.options.getSessionId?.();
+    return ownSessionId === undefined || frame.toSessionId === ownSessionId;
+  }
+
+  /**
    * Receipt a terminal outcome without letting the transport take the
    * gate down with it.
    *
@@ -463,7 +493,7 @@ export class InboundGate {
    */
   private report(
     frame: PeerUserFrame,
-    status: 'held' | 'denied' | 'expired' | 'delivered',
+    status: 'held' | 'denied' | 'expired' | 'delivered' | 'misaddressed',
   ): Promise<void> {
     try {
       return Promise.resolve(this.options.reportStatus?.(frame, status));

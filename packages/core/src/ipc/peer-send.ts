@@ -115,7 +115,8 @@ function trackSent(msgId: string, info: SentPeerMessage): void {
  * The receipt transitions a sent message can make. A receiver's gate
  * re-sends `held` on a retry and on a failed release, and corrects
  * `delivered` to `expired` when the session exits with the message still
- * queued; everything else is a repeat, and a repeat must not become
+ * queued, and to `misaddressed` when a session swap outruns a queued
+ * envelope; everything else is a repeat, and a repeat must not become
  * another line in the user's transcript.
  */
 const RECEIPT_TRANSITIONS: Record<
@@ -124,7 +125,7 @@ const RECEIPT_TRANSITIONS: Record<
 > = {
   pending: new Set(['held', 'delivered', 'denied', 'expired', 'misaddressed']),
   held: new Set(['delivered', 'denied', 'expired', 'misaddressed']),
-  delivered: new Set(['expired']),
+  delivered: new Set(['expired', 'misaddressed']),
   denied: new Set(),
   expired: new Set(),
   misaddressed: new Set(),
@@ -228,6 +229,18 @@ export async function sendToPeer(
 
   const peer = resolved.peer;
   const address = formatPeerAddress(peer, peers);
+  // The wire contract drops frames with empty content silently, and no
+  // receipt can ever follow; reporting such a write as sent would strand
+  // the ledger entry pending and tell the model not to re-send.
+  if (options.message.length === 0) {
+    return {
+      kind: 'failed',
+      peer,
+      address,
+      reason:
+        'the message is empty — there is nothing to deliver. Say what to send.',
+    };
+  }
   const frame = buildUserFrame({
     content: options.message,
     from: self.ipcPath,
