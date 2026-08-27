@@ -66,6 +66,7 @@ import {
   getCoreSystemPrompt,
   getCustomSystemPrompt,
   getPlanModeSystemReminder,
+  isSystemMdActive,
   resolveInteractionMode,
 } from './prompts.js';
 import {
@@ -129,6 +130,7 @@ import {
   getDirectoryContextString,
   getInitialChatHistory,
   getStartupContextLength,
+  wrapSystemReminder,
   type AgentAvailabilityEntry,
 } from './environmentContext.js';
 import {
@@ -3531,19 +3533,20 @@ export class GeminiClient {
         // Every non-default output style is reminded each turn. The style
         // section lives in the cached system prompt, and a session drifts back
         // to the default voice over a long conversation without a nudge that
-        // sits next to the newest user text.
+        // sits next to the newest user text. Prompt overrides (a custom
+        // systemPrompt or QWEN_SYSTEM_MD) carry no style section, so those
+        // sessions get no reminder either.
         const activeStyle = this.config.getOutputStyle();
-        const outputStyle = activeStyle
-          ? resolveEffectiveOutputStyle(
-              activeStyle,
-              resolveInteractionMode(this.config),
-            )
-          : undefined;
+        const outputStyle =
+          activeStyle && !this.config.getSystemPrompt() && !isSystemMdActive()
+            ? resolveEffectiveOutputStyle(
+                activeStyle,
+                resolveInteractionMode(this.config),
+              )
+            : undefined;
         if (outputStyle) {
           systemReminders.push(
-            `<system-reminder>\n${escapeSystemReminderTags(
-              getOutputStyleTurnReminder(outputStyle),
-            )}\n</system-reminder>`,
+            wrapSystemReminder(getOutputStyleTurnReminder(outputStyle)),
           );
         }
 

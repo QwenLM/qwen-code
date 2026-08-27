@@ -8666,6 +8666,10 @@ hello
     });
 
     describe('output style turn reminder', () => {
+      afterEach(() => {
+        vi.unstubAllEnvs();
+      });
+
       const CONCISE_REMINDER =
         '<system-reminder>\nConcise output style is active. Be concise: answer first, cut the narration, keep only what the user needs.\n</system-reminder>';
 
@@ -8790,6 +8794,51 @@ hello
         const [reminder] = reminderParts(request);
         expect(reminder).toBeDefined();
         expect(reminder.slice(1).match(/<\/system-reminder>/g)).toHaveLength(1);
+      });
+
+      it('stays silent when a custom system prompt carries no style section', async () => {
+        vi.mocked(mockConfig.getOutputStyle).mockReturnValue(
+          getBuiltInOutputStyle('Concise'),
+        );
+        vi.mocked(mockConfig.getSystemPrompt).mockReturnValue('You are terse.');
+
+        const request = await runTurn([{ text: 'Hi' }]);
+
+        expect(reminderParts(request)).toEqual([]);
+      });
+
+      it('stays silent while QWEN_SYSTEM_MD replaces the base prompt', async () => {
+        vi.mocked(mockConfig.getOutputStyle).mockReturnValue(
+          getBuiltInOutputStyle('Concise'),
+        );
+        vi.stubEnv('QWEN_SYSTEM_MD', 'true');
+
+        const request = await runTurn([{ text: 'Hi' }]);
+
+        expect(reminderParts(request)).toEqual([]);
+      });
+
+      it('still reminds when QWEN_SYSTEM_MD is explicitly disabled', async () => {
+        vi.mocked(mockConfig.getOutputStyle).mockReturnValue(
+          getBuiltInOutputStyle('Concise'),
+        );
+        vi.stubEnv('QWEN_SYSTEM_MD', 'false');
+
+        const request = await runTurn([{ text: 'Hi' }]);
+
+        expect(reminderParts(request)).toEqual([CONCISE_REMINDER]);
+      });
+
+      it('reminds on cron-fired turns', async () => {
+        vi.mocked(mockConfig.getOutputStyle).mockReturnValue(
+          getBuiltInOutputStyle('Concise'),
+        );
+
+        const request = await runTurn([{ text: 'Hi' }], {
+          type: SendMessageType.Cron,
+        });
+
+        expect(reminderParts(request)).toEqual([CONCISE_REMINDER]);
       });
     });
 

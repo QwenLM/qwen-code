@@ -203,6 +203,17 @@ export function resolvePathFromEnv(envVar?: string): {
 }
 
 /**
+ * Whether `QWEN_SYSTEM_MD` replaces the base system prompt. The override is a
+ * full, user-owned prompt that carries no output-style section, so the prompt
+ * builders and the per-turn style reminder consult this together — a session
+ * is never reminded about a style its prompt does not carry.
+ */
+export function isSystemMdActive(): boolean {
+  const resolution = resolvePathFromEnv(process.env['QWEN_SYSTEM_MD']);
+  return resolution.value !== null && !resolution.isDisabled;
+}
+
+/**
  * Processes a custom system instruction by appending user memory if available.
  * This function should only be used when there is actually a custom instruction.
  *
@@ -468,17 +479,17 @@ export function getCoreSystemPrompt(
   );
   // if QWEN_SYSTEM_MD is set (and not 0|false), override system prompt from file
   // default path is .qwen/system.md (project-level), can be overridden via QWEN_SYSTEM_MD
-  let systemMdEnabled = false;
+  const systemMdEnabled = isSystemMdActive();
   let systemMdPath = path.resolve(path.join(QWEN_DIR, 'system.md'));
-  // Resolve the environment variable to get either a path or a switch value.
-  const systemMdResolution = resolvePathFromEnv(process.env['QWEN_SYSTEM_MD']);
 
-  // Proceed only if the environment variable is set and is not disabled.
-  if (systemMdResolution.value && !systemMdResolution.isDisabled) {
-    systemMdEnabled = true;
+  if (systemMdEnabled) {
+    // Resolve the environment variable to get either a path or a switch value.
+    const systemMdResolution = resolvePathFromEnv(
+      process.env['QWEN_SYSTEM_MD'],
+    );
 
     // We update systemMdPath to this new custom path.
-    if (!systemMdResolution.isSwitch) {
+    if (!systemMdResolution.isSwitch && systemMdResolution.value) {
       systemMdPath = systemMdResolution.value;
     }
 
