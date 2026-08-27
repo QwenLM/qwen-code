@@ -630,8 +630,7 @@ export class TeamManager {
               `Team roster write after failed spawn of "${name}" failed`,
             );
           } catch (cbErr) {
-            const cbMsg =
-              cbErr instanceof Error ? cbErr.message : String(cbErr);
+            const cbMsg = getErrorMessage(cbErr);
             debug.warn(
               `Compensating-write failure notice: leader message ` +
                 `callback threw: ${cbMsg}`,
