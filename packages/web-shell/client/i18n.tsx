@@ -1402,6 +1402,8 @@ const EN: Messages = {
   'sidebar.sessionPr': (v) => `Pull Request #${v?.number ?? ''}`,
   'sidebar.sessionPrMultiple': (v) =>
     `Pull Request #${v?.number ?? ''} (${v?.count ?? 0} total)`,
+  'sidebar.sessionPrStateMerged': 'Merged',
+  'sidebar.sessionPrStateClosed': 'Closed',
   'sidebar.userInputNeeded': 'User input needed',
   'sidebar.userInputNeededShort': 'Input',
   'sidebar.completedUnread': 'Finished',
@@ -4454,6 +4456,8 @@ const ZH: Messages = {
   'sidebar.sessionPr': (v) => `合并请求 #${v?.number ?? ''}`,
   'sidebar.sessionPrMultiple': (v) =>
     `合并请求 #${v?.number ?? ''}（共 ${v?.count ?? 0} 个）`,
+  'sidebar.sessionPrStateMerged': '已合入',
+  'sidebar.sessionPrStateClosed': '已关闭',
   'sidebar.userInputNeeded': '需要用户输入',
   'sidebar.userInputNeededShort': '需输入',
   'sidebar.completedUnread': '刚完成',
