@@ -1,0 +1,16 @@
+name: Validate PR 10202 review fixes
+on:
+  push:
+    branches: [fix/10199-mcp-permission-collisions]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/10199-mcp-permission-collisions
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci
+      - run: npx vitest run packages/core/src/core/permissionFlow.test.ts packages/core/src/core/permissionFlow.mcp-restrictive-collision.test.ts packages/core/src/permissions/mcp-permission-collision.test.ts packages/core/src/permissions/permission-manager.test.ts
