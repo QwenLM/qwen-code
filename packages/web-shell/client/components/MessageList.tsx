@@ -338,6 +338,50 @@ function isForceExpandGroup(
   return false;
 }
 
+function splitMcpAppToolGroups(messages: Message[]): Message[] {
+  const result: Message[] = [];
+  let changed = false;
+
+  for (const message of messages) {
+    if (
+      message.role !== 'tool_group' ||
+      message.tools.length < 2 ||
+      !message.tools.some((tool) => getMcpAppDisplay(tool.rawOutput))
+    ) {
+      result.push(message);
+      continue;
+    }
+
+    changed = true;
+    let segment: ACPToolCall[] = [];
+    let segmentIndex = 0;
+    const pushSegment = (tools: ACPToolCall[]) => {
+      if (tools.length === 0) return;
+      result.push({
+        ...message,
+        id:
+          segmentIndex++ === 0
+            ? message.id
+            : `${message.id}-${tools[0]!.callId}`,
+        tools,
+      });
+    };
+
+    for (const tool of message.tools) {
+      if (getMcpAppDisplay(tool.rawOutput)) {
+        pushSegment(segment);
+        segment = [];
+        pushSegment([tool]);
+      } else {
+        segment.push(tool);
+      }
+    }
+    pushSegment(segment);
+  }
+
+  return changed ? result : messages;
+}
+
 function mergeCompactToolGroups(
   messages: Message[],
   pendingApproval: PermissionRequest | null,
@@ -346,7 +390,9 @@ function mergeCompactToolGroups(
   let i = 0;
 
   const isMergedToolGroup = (m: Message): boolean =>
-    m.role === 'tool_group' && !isForceExpandGroup(m, pendingApproval);
+    m.role === 'tool_group' &&
+    !isForceExpandGroup(m, pendingApproval) &&
+    !m.tools.some((tool) => getMcpAppDisplay(tool.rawOutput));
 
   while (i < messages.length) {
     const msg = messages[i];
@@ -2101,34 +2147,36 @@ export function applyTurnCollapse(
 }
 
 /**
- * Locate a display item by message id, falling back to the tool call id for
- * tool groups that were merged (compact mode) or grouped (parallel agents)
- * under another message's id.
+ * Locate a tool by call id when available because compacting or splitting can
+ * move it under a different message id. Otherwise locate the message itself.
  */
 export function findDisplayItemIndex(
   items: readonly DisplayItem[],
   messageId: string,
   callId?: string,
 ): number {
-  for (let i = 0; i < items.length; i++) {
-    const item = items[i];
-    if (item.type === 'message') {
-      if (item.message.id === messageId) return i;
+  if (callId) {
+    for (let i = 0; i < items.length; i++) {
+      const item = items[i];
       if (
-        callId &&
-        item.message.role === 'tool_group' &&
-        item.message.tools.some((tool) => toolContainsCallId(tool, callId))
+        (item.type === 'message' &&
+          item.message.role === 'tool_group' &&
+          item.message.tools.some((tool) =>
+            toolContainsCallId(tool, callId),
+          )) ||
+        (item.type === 'parallel_agents' &&
+          item.agents.some((agent) => toolContainsCallId(agent, callId)))
       ) {
         return i;
       }
-    } else if (
-      item.type === 'parallel_agents' &&
-      callId &&
-      item.agents.some((agent) => toolContainsCallId(agent, callId))
-    ) {
+    }
+    return -1;
+  }
+
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i];
+    if (item.type === 'message' && item.message.id === messageId) {
       return i;
-    } else if (item.type === 'turn_outputs') {
-      continue;
     }
   }
   return -1;
@@ -2141,12 +2189,10 @@ function displayItemMatchesLocateTarget(
   if (!target) return false;
   const callId = target.callId;
   if (item.type === 'message') {
-    if (item.message.id === target.messageId) return true;
-    return (
-      !!callId &&
-      item.message.role === 'tool_group' &&
-      item.message.tools.some((tool) => toolContainsCallId(tool, callId))
-    );
+    return callId
+      ? item.message.role === 'tool_group' &&
+          item.message.tools.some((tool) => toolContainsCallId(tool, callId))
+      : item.message.id === target.messageId;
   }
   if (item.type === 'parallel_agents') {
     return (
@@ -2878,12 +2924,15 @@ export const MessageList = memo(
         } else if (tail?.role === 'thinking') {
           value = compactMode
             ? updateCompactStreamingThinkingTail(cached.value, tail)
-            : messages;
+            : splitMcpAppToolGroups(messages);
         }
       }
-      value ??= compactMode
-        ? mergeCompactToolGroups(messages, pendingApproval)
-        : messages;
+      if (!value) {
+        const standaloneMcpApps = splitMcpAppToolGroups(messages);
+        value = compactMode
+          ? mergeCompactToolGroups(standaloneMcpApps, pendingApproval)
+          : standaloneMcpApps;
+      }
       mergedMessagesCache.current = {
         sourceMessages: messages,
         compactMode,

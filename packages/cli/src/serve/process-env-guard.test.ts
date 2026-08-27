@@ -268,6 +268,16 @@ const allowedProcessEnvAccesses = normalizeAllowances([
     },
   ],
   [
+    'packages/cli/src/serve/server/session-pr-refresh.ts',
+    {
+      reason:
+        'The PR-state refresh interval (QWEN_SESSION_PR_REFRESH_MINUTES) is a ' +
+        'process-scoped operator switch; embedded callers may omit the ' +
+        'environment argument.',
+      accesses: { whole: 1 },
+    },
+  ],
+  [
     'packages/cli/src/serve/live/live-host-coordinator.ts',
     {
       reason: 'Live Host diagnostics are enabled for the whole daemon process.',
