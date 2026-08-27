@@ -191,6 +191,7 @@ test('buildComment: hosting failure reports rendered assets without broken image
   assert.match(body, /home-light\.png/);
   assert.match(body, /model-switch\.gif/);
   assert.match(body, /\[workflow run\]\(https:\/\/run\.example\/7\)/);
+  assert.doesNotMatch(body, /failed to render/i);
   assert.doesNotMatch(body, /<img /);
 });
 
@@ -425,13 +426,25 @@ test('publish workflow passes hosting failures through to the comment builder', 
     workflow,
     /HOSTING_STATUS_FILE="\$\{RUNNER_TEMP\}\/visuals-hosting-status\.txt"/,
   );
-  assert.match(workflow, /echo 'failure' > "\$\{HOSTING_STATUS_FILE\}"/);
+
+  const failureWrite = `echo 'failure' > "\${HOSTING_STATUS_FILE}"`;
+  const commentInvocation =
+    'node .github/scripts/web-shell-visuals-publish.mjs comment';
+  const failureWriteIndex = workflow.indexOf(failureWrite);
+  assert.notEqual(failureWriteIndex, -1);
+  const fromFailureWrite = workflow.slice(failureWriteIndex);
+  const commentIndex = fromFailureWrite.indexOf(commentInvocation);
+  assert.ok(commentIndex > 0);
+  const beforeComment = fromFailureWrite.slice(0, commentIndex);
+  assert.doesNotMatch(beforeComment, /\bexit 1\b/);
+
   assert.match(
     workflow,
-    /"\$\{RENDER_STATUS_FILE\}" \\\n\s+"\$\{HOSTING_STATUS_FILE\}"/,
+    /"\$\{BODY_FILE\}" \\\n\s+"\$\{CHANGED_PATHS_FILE\}" \\\n\s+"\$\{RENDER_STATUS_FILE\}" \\\n\s+"\$\{HOSTING_STATUS_FILE\}"/,
   );
-  assert.doesNotMatch(
+  assert.match(workflow, /echo 'success' > "\$\{HOSTING_STATUS_FILE\}"/);
+  assert.match(
     workflow,
-    /echo 'failure' > "\$\{HOSTING_STATUS_FILE\}"\n\s+exit 1/,
+    /if \[ "\$\{pushed\}" -ne 1 \]; then\n\s+echo "::warning::[^\n]*"\n\s+echo 'failure' > "\$\{HOSTING_STATUS_FILE\}"/,
   );
 });
