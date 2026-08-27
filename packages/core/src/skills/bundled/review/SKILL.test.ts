@@ -856,6 +856,21 @@ describe('bundled review skill', () => {
     expect(body).toContain(
       'A finding with no `fixConstraint` adds nothing — no `N/A`, no "no constraints observed"',
     );
+    // R4-2: half 2's operative sentence — the heading is pinned above, but
+    // the mandate itself was not, so weakening "carries it" shipped green.
+    expect(body).toContain(
+      'When the finding has a `fixConstraint`, the posted body carries it in one sentence of ordinary prose',
+    );
+    // R4-1: the witness closes the body, so the constraint's only consistent
+    // place is immediately before it — and a finding whose `fixWitness` is
+    // `N/A` has no witness sentence to stand beside, so the constraint takes
+    // that place itself, after the suggestion block.
+    expect(body).toContain(
+      'immediately before the fix-witness sentence, which still closes the body',
+    );
+    expect(body).toContain(
+      'the constraint sentence takes its place after the suggestion block',
+    );
   });
 
   it('keeps the fix side — fixWitness and sourced fixConstraint — through the dedup merge', () => {
@@ -913,6 +928,11 @@ describe('bundled review skill', () => {
     expect(body).toContain(
       'appends the same sentence to that entry, copied from the artifact',
     );
+    // R4-1: an entry that carries both sentences appends them in the inline
+    // order — the constraint before the witness.
+    expect(body).toContain(
+      'the constraint before the witness when the finding carries both',
+    );
     expect(body).toContain(
       'an entry whose finding carries a `fixWitness` or a `fixConstraint` appends the corresponding sentence',
     );
@@ -923,6 +943,16 @@ describe('bundled review skill', () => {
       'relocates an unanchorable Critical into the body as a one-line entry rebuilt from the claim line alone',
     );
     expect(body).toContain('the loss is a named acceptance, not a silent one');
+    // R4: the named residue covers the two further exits that carry neither
+    // sentence — the typed deferral line (a `DeferredEntry` holds no
+    // fix-side field) and the duplicate-drop account (a name-and-location
+    // pointer, never the finding's own text).
+    expect(body).toContain(
+      'a finding carried into `deferredSuggestions` renders as the typed one-line entry',
+    );
+    expect(body).toContain(
+      'a Suggestion dropped as a duplicate posts a name-and-location account only',
+    );
   });
 
   it('pins the fix-induced disposition and both of its operands', () => {
