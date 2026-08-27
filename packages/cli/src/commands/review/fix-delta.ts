@@ -32,13 +32,13 @@
 
 import type { CommandModule } from 'yargs';
 import {
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
   writeFileSync,
 } from 'node:fs';
-import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import { git, gitOpt, gitRaw, gitWithEnv } from './lib/git.js';
@@ -75,7 +75,14 @@ export const FIX_DELTA_EXCLUDES = [
  * Runs through a throwaway index so the user's index is untouched.
  */
 export function snapshotWorkingTree(root: string): string {
-  const scratch = mkdtempSync(join(tmpdir(), 'qwen-fix-delta-'));
+  // The scratch index must live OUTSIDE anything the snapshot can capture:
+  // os.tmpdir() honours TMPDIR, and a hermetic sandbox pointing it inside the
+  // worktree made `add -A` record the scratch directory itself into the
+  // trees — the command's own temp files reported as fix edits. The git dir
+  // is never part of any worktree tree; a linked worktree lands in
+  // `.git/worktrees/<name>/`, still outside.
+  const gitDir = git('-C', root, 'rev-parse', '--absolute-git-dir');
+  const scratch = mkdtempSync(join(gitDir, 'qwen-fix-delta-'));
   const env = { GIT_INDEX_FILE: join(scratch, 'index') };
   try {
     // An unborn HEAD (a repo with no commit yet) has no tree to seed from —
@@ -90,7 +97,11 @@ export function snapshotWorkingTree(root: string): string {
     } else {
       gitWithEnv(env, ['-C', root, 'read-tree', '--empty']);
     }
-    gitWithEnv(env, ['-C', root, 'add', '-A', '--', '.']);
+    // `--sparse`: in a sparse-checkout repository `add` refuses to run once
+    // ANY untracked file — e.g. this command's own side file — sits outside
+    // the cone. Out-of-cone tracked entries drop identically from both trees,
+    // so the delta is unaffected, and the flag is a no-op elsewhere.
+    gitWithEnv(env, ['-C', root, 'add', '-A', '--sparse', '--', '.']);
     return gitWithEnv(env, ['-C', root, 'write-tree']);
   } finally {
     rmSync(scratch, { recursive: true, force: true });
@@ -154,17 +165,28 @@ function filesBetweenTrees(
 }
 
 /**
- * Submodules holding edits a superproject tree cannot record. A submodule
- * enters the tree as its gitlink alone: an edit inside it that is not
- * committed there moves no gitlink, so both snapshots stay byte-identical
- * while the fix is on disk. Porcelain-v2 names them — a changed submodule
- * entry carries a 4-char state token after the XY pair, `S` plus a
- * new-commits flag, a modified-content flag and an untracked-content flag,
- * `.` where none (probed shapes: `SC..`, `S.M.`, `SCMU`, `S..U`) — and the
- * last two flags are the invisible content. A new-commits flag alone is
- * visible (the gitlink moved) and not reported. The HEAD-side mode field is
- * `000000` for a submodule staged but never committed — the ordinary
- * `git submodule add` interim state — so it is not pinned to `160000`.
+ * Paths holding edits a superproject tree cannot record: submodule checkouts
+ * and nested git repositories. Either enters the tree as its gitlink alone —
+ * an edit inside that is not committed there moves no gitlink, so both
+ * snapshots stay byte-identical while the fix is on disk. Porcelain-v2 names
+ * them across several entry classes, and the triggers are checkout states a
+ * fix can land on top of without creating, so the probe parses them all:
+ *
+ * - `1` entries carry a 4-char sub token — `S` plus a new-commits flag, a
+ *   modified-content flag and an untracked-content flag, `.` where none
+ *   (probed shapes: `SC..`, `S.M.`, `SCMU`, `S..U`) — and the last two flags
+ *   are the invisible content. A new-commits flag alone is visible (the
+ *   gitlink moved) and is not reported. The mode fields are NOT pinned: the
+ *   interim `submodule add` state prints a 000000 HEAD slot, a staged
+ *   deletion prints `160000 000000 000000`.
+ * - `2` entries — a staged gitlink rename: the score is space-separated, the
+ *   new path precedes the TAB-separated original one.
+ * - `u` entries — an unmerged gitlink: four mode fields, three hashes, the
+ *   path last.
+ * - `?` entries collapsed to a directory — under `showUntrackedFiles=all`
+ *   only a nested git repository survives unexpanded, and `add -A` records
+ *   its gitlink all the same. The same line names a staged-deleted gitlink,
+ *   whose `1 D. S...` twin carries no dirt flags for git to compute.
  */
 function dirtySubmodulePaths(root: string): string[] {
   // `--no-optional-locks`: plain `status` opportunistically rewrites the
@@ -184,17 +206,31 @@ function dirtySubmodulePaths(root: string): string[] {
     '--porcelain=v2',
     '--ignore-submodules=none',
   );
-  const dirty: string[] = [];
+  const dirty = new Set<string>();
   for (const line of status.split('\n')) {
-    const m =
-      /^1 \S\S S[CMU?.]([CMU?.])([CMU?.]) (?:000000|160000) 160000 160000 [0-9a-f]+ [0-9a-f]+ (.+)$/.exec(
-        line,
-      );
-    if (m && (m[1] !== '.' || m[2] !== '.')) {
-      dirty.push(m[3]);
+    if (line.startsWith('? ')) {
+      const path = line.slice(2);
+      if (path.endsWith('/') && existsSync(join(root, path, '.git'))) {
+        dirty.add(path.slice(0, -1));
+      }
+      continue;
     }
+    const fields = line.split(' ');
+    const kind = fields[0];
+    if (kind !== '1' && kind !== '2' && kind !== 'u') continue;
+    const sub = fields[2];
+    if (sub.length !== 4 || !sub.startsWith('S')) continue;
+    // Modified-content or untracked-content flag: the invisible content.
+    if (sub[2] === '.' && sub[3] === '.') continue;
+    dirty.add(
+      kind === '1'
+        ? fields.slice(8).join(' ')
+        : kind === 'u'
+          ? fields.slice(10).join(' ')
+          : fields.slice(9).join(' ').split('\t')[0],
+    );
   }
-  return dirty;
+  return [...dirty];
 }
 
 /** The blind-spot warning, phrased for an empty or an under-reporting hunks file. */
@@ -221,6 +257,17 @@ function preExistingDirtNote(dirty: string[]): string {
     'already held uncommitted content at snapshot time — pre-existing dirt, ' +
     `not reported as a blind spot because nothing newly dirtied ${them}. ` +
     `Edits inside ${them} since remain invisible to this command.`
+  );
+}
+
+/** Snapshot-time dirt that vanished: content changed between the two states. */
+function cleanedSubmoduleNote(cleaned: string[]): string {
+  const one = cleaned.length === 1;
+  return (
+    `fix-delta: ${one ? 'submodule' : 'submodules'} ${cleaned.join(', ')} ` +
+    'held uncommitted content at snapshot time that is gone now — content ' +
+    `inside ${one ? 'it' : 'them'} changed between the two states, ` +
+    'invisible to this command.'
   );
 }
 
@@ -308,13 +355,22 @@ export function runFixDelta(args: FixDeltaArgs): void {
   const preExisting = dirtyNow.filter((p) =>
     snapshot.dirtySubmodules.includes(p),
   );
+  // The third transition the baseline can see: dirt at snapshot time that is
+  // GONE now necessarily changed on disk between the two states — a clean
+  // submodule emits no status entry and the gitlink never moved, so without
+  // this the "nothing was applied" claim would be provably false.
+  const cleaned = snapshot.dirtySubmodules.filter((p) => !dirtyNow.includes(p));
   if (diff.trim() === '') {
+    if (preExisting.length > 0) {
+      writeStderrLine(preExistingDirtNote(preExisting));
+    }
     if (freshDirt.length > 0) {
       writeStderrLine(submoduleBlindSpot(freshDirt, true));
-    } else {
-      if (preExisting.length > 0) {
-        writeStderrLine(preExistingDirtNote(preExisting));
-      }
+    }
+    if (cleaned.length > 0) {
+      writeStderrLine(cleanedSubmoduleNote(cleaned));
+    }
+    if (freshDirt.length === 0 && cleaned.length === 0) {
       writeStderrLine(
         'fix-delta: the tree is unchanged since the snapshot — nothing was applied ' +
           '(or the snapshot was taken after the edits).',
@@ -328,8 +384,14 @@ export function runFixDelta(args: FixDeltaArgs): void {
     `fix-delta: ${files.length} file(s) changed since the snapshot — ${shown}` +
       (files.length > 8 ? `, and ${files.length - 8} more` : ''),
   );
+  if (preExisting.length > 0) {
+    writeStderrLine(preExistingDirtNote(preExisting));
+  }
   if (freshDirt.length > 0) {
     writeStderrLine(submoduleBlindSpot(freshDirt, false));
+  }
+  if (cleaned.length > 0) {
+    writeStderrLine(cleanedSubmoduleNote(cleaned));
   }
 }
 

@@ -15,6 +15,20 @@ vi.mock('../../utils/stdioHelpers.js', () => ({
   writeStdoutLine: vi.fn(),
   writeStderrLine: vi.fn(),
 }));
+// The temp-dir pin below needs os.tmpdir() to answer inside the worktree.
+// Setting TMPDIR cannot do that in this suite: isolateHostGitConfig's
+// dispose replaces process.env with a plain object, after which assignments
+// no longer reach the environ os.tmpdir() reads.
+const tmpdirOverride = vi.hoisted(() => ({
+  value: undefined as string | undefined,
+}));
+vi.mock('node:os', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:os')>();
+  // `default` has to carry the stub too: Node builtins are CJS, so Vite's
+  // interop can resolve a named import through the default export.
+  const tmpdir = () => tmpdirOverride.value ?? actual.tmpdir();
+  return { ...actual, default: { ...actual, tmpdir }, tmpdir };
+});
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import { execFileSync } from 'node:child_process';
 import {
@@ -70,8 +84,8 @@ describe('fix-delta', () => {
     return subSrc;
   }
 
-  /** `makeSubmoduleSource`, plus added AND committed at `sub` in the fixture. */
-  function plantCommittedSubmodule(): string {
+  /** `makeSubmoduleSource`, plus added AND committed at `name` in the fixture. */
+  function plantCommittedSubmodule(name = 'sub'): string {
     const subSrc = makeSubmoduleSource();
     git(
       '-c',
@@ -80,10 +94,10 @@ describe('fix-delta', () => {
       'add',
       '-q',
       subSrc,
-      'sub',
+      name,
     );
-    gitAt(join(repo, 'sub'), 'config', 'user.email', 't@t.t');
-    gitAt(join(repo, 'sub'), 'config', 'user.name', 't');
+    gitAt(join(repo, name), 'config', 'user.email', 't@t.t');
+    gitAt(join(repo, name), 'config', 'user.name', 't');
     git('add', '-A');
     git('commit', '-qm', 'add submodule');
     return subSrc;
@@ -112,6 +126,7 @@ describe('fix-delta', () => {
     rmSync(repo, { recursive: true, force: true });
     rmSync(out, { recursive: true, force: true });
     gitIsolation.dispose();
+    tmpdirOverride.value = undefined;
   });
 
   it('diffs exactly the edits made between the snapshot and now — on top of the reviewed change', () => {
@@ -146,6 +161,24 @@ describe('fix-delta', () => {
     expect(hunks).toContain('deleted file mode');
     expect(stderr().at(-1)).toMatch(
       /^fix-delta: 4 file\(s\) changed since the snapshot — a\.test\.ts, a\.ts, gone\.ts, 文\.ts$/,
+    );
+  });
+
+  it('counts a rename once, under its new name', () => {
+    // `filesBetweenTrees`/`patchBetweenTrees` pass `-M` and promise a rename
+    // counted once, under its new name — without `-M` the summary would name
+    // two changed files and a phantom deletion.
+    writeFileSync(join(repo, 'old-name.ts'), 'export const r = 1;\n');
+    git('add', '-A');
+    git('commit', '-qm', 'add old-name');
+    runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
+    git('mv', 'old-name.ts', 'new-name.ts');
+    runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() });
+    expect(stderr().at(-1)).toBe(
+      'fix-delta: 1 file(s) changed since the snapshot — new-name.ts',
+    );
+    expect(readFileSync(hunksFile(), 'utf8')).toContain(
+      'rename to new-name.ts',
     );
   });
 
@@ -256,6 +289,82 @@ describe('fix-delta', () => {
     }
   });
 
+  it('discloses pre-existing dirt beside a non-empty diff too', () => {
+    // The note's closing sentence — "Edits inside them since remain
+    // invisible" — must not become unreachable whenever the hunks file is
+    // non-empty: the auditor trusts the hunks as the complete edit set.
+    const subSrc = plantCommittedSubmodule();
+    try {
+      writeFileSync(join(repo, 'sub', 'f.txt'), 'pre-existing dirt\n');
+      runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
+      writeFileSync(join(repo, 'a.ts'), 'export const x = 42;\n');
+      writeFileSync(join(repo, 'sub', 'f.txt'), 'edited inside after\n');
+      runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() });
+
+      expect(readFileSync(hunksFile(), 'utf8')).toContain(
+        '+export const x = 42;',
+      );
+      const lines = stderr();
+      expect(lines.at(-2)).toBe(
+        'fix-delta: 1 file(s) changed since the snapshot — a.ts',
+      );
+      expect(lines.at(-1)).toContain('pre-existing');
+      expect(lines.at(-1)).toMatch(/\bsub\b/);
+    } finally {
+      rmSync(subSrc, { recursive: true, force: true });
+    }
+  });
+
+  it('names pre-existing dirt beside a fresh blind spot', () => {
+    // The fresh-dirt warning must not swallow the pre-existing note: the
+    // orchestrator reads only this stderr, so a submodule dirty at snapshot
+    // time that the fix also edited must be named beside the new one.
+    const srcA = plantCommittedSubmodule('subA');
+    const srcB = plantCommittedSubmodule('subB');
+    try {
+      writeFileSync(join(repo, 'subA', 'f.txt'), 'pre-existing dirt\n');
+      runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
+      writeFileSync(join(repo, 'subB', 'new-file.txt'), 'untracked inside\n');
+      runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() });
+
+      expect(readFileSync(hunksFile(), 'utf8')).toBe('');
+      const lines = stderr();
+      expect(
+        lines.some((l) => l.includes('pre-existing') && /\bsubA\b/.test(l)),
+      ).toBe(true);
+      expect(
+        lines.some((l) => l.includes('cannot see') && /\bsubB\b/.test(l)),
+      ).toBe(true);
+      expect(lines.some((l) => l.includes('nothing was applied'))).toBe(false);
+    } finally {
+      rmSync(srcA, { recursive: true, force: true });
+      rmSync(srcB, { recursive: true, force: true });
+    }
+  });
+
+  it('names a submodule whose snapshot-time dirt is gone now', () => {
+    // Dirt at snapshot time that is CLEAN now necessarily changed on disk
+    // between the two states — yet the gitlink never moves, a clean
+    // submodule emits no status entry, and the trees stay byte-identical.
+    const subSrc = plantCommittedSubmodule();
+    try {
+      writeFileSync(join(repo, 'sub', 'f.txt'), 'dirt at snapshot time\n');
+      runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
+      // The fix restores the committed content.
+      writeFileSync(join(repo, 'sub', 'f.txt'), 'before\n');
+      runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() });
+
+      expect(readFileSync(hunksFile(), 'utf8')).toBe('');
+      const lines = stderr();
+      expect(
+        lines.some((l) => l.includes('gone now') && /\bsub\b/.test(l)),
+      ).toBe(true);
+      expect(lines.some((l) => l.includes('nothing was applied'))).toBe(false);
+    } finally {
+      rmSync(subSrc, { recursive: true, force: true });
+    }
+  });
+
   it('never reports a submodule whose only change is new commits', () => {
     // A new-commits flag means the gitlink moved — the edit IS visible in
     // the tree comparison, so reporting "invisible edits" would steer the
@@ -284,6 +393,108 @@ describe('fix-delta', () => {
         'the tree is unchanged since the snapshot',
       );
       expect(stderr().some((l) => l.includes('cannot see'))).toBe(false);
+    } finally {
+      rmSync(subSrc, { recursive: true, force: true });
+    }
+  });
+
+  it('names an untracked embedded repo the snapshot records as a gitlink', () => {
+    // `? emb/` is the only untracked shape that survives
+    // `showUntrackedFiles=all` unexpanded, and `add -A` records its gitlink
+    // all the same — an edit inside leaves both trees byte-identical.
+    runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
+    const emb = join(repo, 'emb');
+    mkdirSync(emb);
+    gitAt(emb, 'init', '-q', '-b', 'main');
+    gitAt(emb, 'config', 'user.email', 't@t.t');
+    gitAt(emb, 'config', 'user.name', 't');
+    writeFileSync(join(emb, 'f.txt'), 'committed inside\n');
+    gitAt(emb, 'add', '-A');
+    gitAt(emb, 'commit', '-qm', 'init');
+    writeFileSync(join(emb, 'f.txt'), 'the fix — uncommitted inside\n');
+    runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() });
+
+    const lines = stderr();
+    expect(
+      lines.some((l) => /\bemb\b/.test(l) && l.includes('cannot see')),
+    ).toBe(true);
+    expect(lines.some((l) => l.includes('nothing was applied'))).toBe(false);
+  });
+
+  it('names a staged-deleted gitlink whose checkout still holds the content', () => {
+    // `git rm --cached sub` prints `1 D. S...` — no dirt flags for git to
+    // compute — but the checkout reappears as `? sub/`, and edits inside are
+    // invisible: both snapshots record the same gitlink.
+    const subSrc = plantCommittedSubmodule();
+    try {
+      runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
+      git('rm', '--cached', '-q', 'sub');
+      writeFileSync(join(repo, 'sub', 'f.txt'), 'after — the fix\n');
+      runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() });
+
+      expect(readFileSync(hunksFile(), 'utf8')).toBe('');
+      const last = stderr().at(-1) ?? '';
+      expect(last).toMatch(/\bsub\b/);
+      expect(last).toContain('cannot see');
+      expect(last).not.toContain('nothing was applied');
+    } finally {
+      rmSync(subSrc, { recursive: true, force: true });
+    }
+  });
+
+  it('names a renamed gitlink that also holds an interior write', () => {
+    // A staged gitlink rename prints a type-`2` line — the M/U flag proves
+    // git sees invisible content, and `^1 ` can never match it.
+    const subSrc = plantCommittedSubmodule();
+    try {
+      runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
+      git('mv', 'sub', 'sub2');
+      writeFileSync(join(repo, 'sub2', 'f.txt'), 'after — the fix\n');
+      runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() });
+
+      const lines = stderr();
+      expect(
+        lines.some((l) => /\bsub2\b/.test(l) && l.includes('cannot see')),
+      ).toBe(true);
+      expect(lines.some((l) => l.includes('nothing was applied'))).toBe(false);
+    } finally {
+      rmSync(subSrc, { recursive: true, force: true });
+    }
+  });
+
+  it('names an unmerged gitlink that also holds an interior write', () => {
+    // A mid-merge submodule conflict prints a `u` entry — unmatchable by any
+    // `1 `-anchored parse — while the snapshot survives the unmerged index.
+    const subSrc = plantCommittedSubmodule();
+    const sub = join(repo, 'sub');
+    try {
+      runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
+      // Force a submodule conflict: two branches move the gitlink to
+      // divergent commits.
+      const orig = git('rev-parse', 'HEAD:sub');
+      git('checkout', '-qb', 'b1');
+      writeFileSync(join(sub, 'f.txt'), 'v1\n');
+      gitAt(sub, 'add', '-A');
+      gitAt(sub, 'commit', '-qm', 'v1');
+      git('add', 'sub');
+      git('commit', '-qm', 'sub v1');
+      git('checkout', '-q', 'main');
+      gitAt(sub, 'checkout', '-q', orig);
+      git('checkout', '-qb', 'b2');
+      writeFileSync(join(sub, 'f.txt'), 'v2\n');
+      gitAt(sub, 'add', '-A');
+      gitAt(sub, 'commit', '-qm', 'v2');
+      git('add', 'sub');
+      git('commit', '-qm', 'sub v2');
+      expect(() => git('merge', 'b1')).toThrow();
+      writeFileSync(join(sub, 'f.txt'), 'after — the fix\n');
+      runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() });
+
+      const lines = stderr();
+      expect(
+        lines.some((l) => /\bsub\b/.test(l) && l.includes('cannot see')),
+      ).toBe(true);
+      expect(lines.some((l) => l.includes('nothing was applied'))).toBe(false);
     } finally {
       rmSync(subSrc, { recursive: true, force: true });
     }
@@ -337,13 +548,22 @@ describe('fix-delta', () => {
     writeFileSync(join(repo, 'a.ts'), 'export const x = 2;\n');
     git('add', 'a.ts');
     writeFileSync(join(repo, 'a.ts'), 'export const x = 3;\n');
+    // A planted stash makes the stash-stack invariance assertion below
+    // non-vacuous: a snapshot that disturbed the stack can no longer pass.
+    writeFileSync(join(repo, 'stashee.ts'), 'planted\n');
+    git('stash', 'push', '-u', '-m', 'planted', '--', 'stashee.ts');
     writeFileSync(join(repo, 'untracked.ts'), 'x\n');
     const statusBefore = git('status', '--porcelain', '--untracked-files=all');
     const stashBefore = git('stash', 'list');
+    expect(stashBefore).not.toBe('');
     const indexBefore = git('write-tree');
 
     runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
     writeFileSync(join(repo, 'untracked.ts'), 'y\n');
+    // A git-ignored file created between the states must stay out of the
+    // hunks — the property `add -A` is relied on for.
+    mkdirSync(join(repo, 'node_modules', 'dep'), { recursive: true });
+    writeFileSync(join(repo, 'node_modules', 'dep', 'index.js'), 'x\n');
     runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() });
 
     expect(git('status', '--porcelain', '--untracked-files=all')).toBe(
@@ -355,6 +575,7 @@ describe('fix-delta', () => {
     const hunks = readFileSync(hunksFile(), 'utf8');
     expect(hunks).toContain('-x\n+y');
     expect(hunks).not.toContain('x = 2');
+    expect(hunks).not.toContain('node_modules');
   });
 
   it("excludes the review's own side files, which change between the two states", () => {
@@ -394,6 +615,40 @@ describe('fix-delta', () => {
     expect(hunks).toContain('a/.qwen/settings.json');
   });
 
+  it('snapshots a sparse-checkout repository whose cone excludes the side files', () => {
+    // Sparse checkout is git's standard large-repo configuration; the side
+    // files then sit OUTSIDE the cone, and without `--sparse` the snapshot
+    // dies on a raw `add -A` failure after the fix already landed.
+    mkdirSync(join(repo, 'cone'));
+    mkdirSync(join(repo, 'outcone'));
+    writeFileSync(join(repo, 'cone', 'in.ts'), 'in\n');
+    writeFileSync(join(repo, 'outcone', 'out.ts'), 'out\n');
+    git('add', '-A');
+    git('commit', '-qm', 'cone fixtures');
+    git('sparse-checkout', 'set', 'cone');
+    const snapshot = join(
+      repo,
+      '.qwen',
+      'tmp',
+      'qwen-review-local-fix-snapshot.json',
+    );
+    const hunksOut = join(
+      repo,
+      '.qwen',
+      'tmp',
+      'qwen-review-local-fix-hunks.diff',
+    );
+    runFixDelta({ snapshot: true, since: undefined, out: snapshot });
+    writeFileSync(join(repo, 'cone', 'in.ts'), 'in — the fix\n');
+    runFixDelta({ snapshot: false, since: snapshot, out: hunksOut });
+
+    const hunks = readFileSync(hunksOut, 'utf8');
+    expect(hunks).toContain('+in — the fix');
+    // Out-of-cone tracked entries drop identically from both trees: no
+    // phantom deletion.
+    expect(hunks).not.toContain('outcone/out.ts');
+  });
+
   it('writes an empty diff and says so when nothing changed', () => {
     runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
     runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() });
@@ -420,6 +675,25 @@ describe('fix-delta', () => {
     } finally {
       rmSync(fresh, { recursive: true, force: true });
     }
+  });
+
+  it('does not capture its own scratch index when the temp dir is inside the worktree', () => {
+    // os.tmpdir() honours TMPDIR; a hermetic sandbox pointing it into the
+    // worktree made `add -A` record the scratch directory itself — the
+    // command's own temp files reported as fix edits.
+    const hostile = join(repo, 'tmp');
+    mkdirSync(hostile);
+    tmpdirOverride.value = hostile;
+    runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
+    writeFileSync(join(repo, 'a.ts'), 'export const x = 5;\n');
+    runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() });
+
+    const hunks = readFileSync(hunksFile(), 'utf8');
+    expect(hunks).toContain('+export const x = 5;');
+    expect(hunks).not.toContain('qwen-fix-delta-');
+    expect(stderr().at(-1)).toBe(
+      'fix-delta: 1 file(s) changed since the snapshot — a.ts',
+    );
   });
 
   it('is wired through yargs: --snapshot / --since are the modes, --out is required', async () => {
