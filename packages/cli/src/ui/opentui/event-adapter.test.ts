@@ -599,4 +599,72 @@ describe('event-adapter (ServerGeminiStreamEvent -> neutral)', () => {
       }),
     ).toBe('hello world\nline2');
   });
+
+  describe('citation visibility gate (R1-20)', () => {
+    it('suppresses citations when showCitations() is false', () => {
+      const map = createEventMapper({ showCitations: () => false });
+      expect(
+        map({
+          type: 'citation',
+          value: 'Sources: [1] https://example.com',
+        } as unknown as AnyEv),
+      ).toEqual([]);
+    });
+
+    it('still shows citations when showCitations() is true', () => {
+      const map = createEventMapper({ showCitations: () => true });
+      expect(
+        map({
+          type: 'citation',
+          value: 'Sources: [1] https://example.com',
+        } as unknown as AnyEv),
+      ).toEqual([{ type: 'info', text: 'Sources: [1] https://example.com' }]);
+    });
+  });
+
+  describe('renderResultDisplay structured displays (R1-66/68)', () => {
+    it('renders plan_summary as message + plan', () => {
+      expect(
+        renderResultDisplay({
+          type: 'plan_summary',
+          message: 'User approved.',
+          plan: 'step 1',
+        }),
+      ).toBe('User approved.\nstep 1');
+    });
+
+    it('renders nothing for team_result and task_list', () => {
+      expect(renderResultDisplay({ type: 'team_result', summary: 'x' })).toBe(
+        '',
+      );
+      expect(renderResultDisplay({ type: 'task_list', message: 'y' })).toBe('');
+    });
+
+    it('renders mcp_tool_progress with the ink spinner line', () => {
+      expect(
+        renderResultDisplay({
+          type: 'mcp_tool_progress',
+          progress: 5,
+          total: 10,
+        }),
+      ).toBe('◌ [5/10] Progress: 5');
+      expect(
+        renderResultDisplay({
+          type: 'mcp_tool_progress',
+          progress: 2,
+          message: 'working',
+        }),
+      ).toBe('◌ [2] working');
+    });
+
+    it('renders mcp_app with its fallbackText only', () => {
+      expect(
+        renderResultDisplay({
+          type: 'mcp_app',
+          html: '<b>must not leak</b>',
+          fallbackText: 'app fallback',
+        }),
+      ).toBe('app fallback');
+    });
+  });
 });

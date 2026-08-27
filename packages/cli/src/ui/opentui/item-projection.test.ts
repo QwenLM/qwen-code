@@ -10,16 +10,24 @@
  */
 
 import { describe, it, expect, vi } from 'vitest';
-import type { Config, SessionMetrics } from '@qwen-code/qwen-code-core';
+import {
+  CompressionStatus,
+  type Config,
+  type SessionMetrics,
+} from '@qwen-code/qwen-code-core';
 import {
   extractPromptText,
+  projectAbout,
+  projectCompression,
   projectContextUsage,
   projectDoctor,
+  projectExtensionsList,
   projectMcpStatus,
   projectModelStats,
   projectQuit,
   projectSkillStats,
   projectSpecialItemText,
+  projectStats,
   projectSummary,
   projectToolStats,
   projectToolsList,
@@ -405,5 +413,161 @@ describe('projectMcpStatus cached-items upgrade (R1-93)', () => {
     expect(text).toMatch(/tools-only[^\n]*Ready/);
     expect(text).toMatch(/prompts-only[^\n]*Ready/);
     expect(text).toMatch(/ghost[^\n]*Disconnected/);
+  });
+});
+
+describe('projectMcpStatus line spellings (R1-86)', () => {
+  it('prints the disconnected line exactly like ink — no dots after the name', () => {
+    const text = projectMcpStatus({ servers: { off: {} } });
+    expect(text).toContain('● off - Disconnected');
+  });
+});
+
+describe('projectAbout proxy redaction (R1-6)', () => {
+  it('masks credentials in parseable proxy URLs', () => {
+    const text = projectAbout({
+      proxy: 'http://user:pass@example.com:3128',
+    });
+    expect(text).toContain('Proxy: http://***:***@example.com:3128/');
+    expect(text).not.toContain('user');
+    expect(text).not.toContain('pass');
+  });
+
+  it('falls back to regex redaction when URL parsing fails', () => {
+    // Realistic proxy-env typos (a space in the host) must not leak the
+    // raw credentials into the shareable transcript.
+    const text = projectAbout({ proxy: 'http://user:pass@inv alid' });
+    expect(text).toContain('Proxy: http://***@inv alid');
+    expect(text).not.toContain('user');
+  });
+});
+
+describe('projectExtensionsList resolved settings (R1-8)', () => {
+  it('lists resolved setting names and values from the array', () => {
+    const config = {
+      getExtensions: () => [
+        {
+          name: 'ext-a',
+          version: '1.0.0',
+          isActive: true,
+          resolvedSettings: [
+            {
+              name: 'API_KEY',
+              envVar: 'API_KEY',
+              value: 'v1',
+              sensitive: false,
+            },
+          ],
+        },
+      ],
+    } as unknown as Config;
+    const text = projectExtensionsList(config, new Map());
+    expect(text).toContain(' settings:');
+    expect(text).toContain(' - API_KEY: v1');
+  });
+});
+
+describe('projectCompression (CompressionMessage parity, R1-7/76)', () => {
+  it('covers pending/compressed/estimated/failed/error/noop states', () => {
+    expect(projectCompression({ isPending: true })).toBe(
+      'Compressing chat history',
+    );
+    expect(
+      projectCompression({
+        compressionStatus: CompressionStatus.COMPRESSED,
+        originalTokenCount: 100,
+        newTokenCount: 40,
+      }),
+    ).toBe('Chat history compressed from 100 to 40 tokens.');
+    expect(
+      projectCompression({
+        compressionStatus: CompressionStatus.COMPRESSED,
+        originalTokenCount: 100,
+        newTokenCount: 40,
+        originalTokenCountIsEstimated: true,
+        newTokenCountIsEstimated: true,
+      }),
+    ).toBe('Chat history compressed from ~100 to ~40 tokens.');
+    expect(
+      projectCompression({
+        compressionStatus:
+          CompressionStatus.COMPRESSION_FAILED_INFLATED_TOKEN_COUNT,
+        originalTokenCount: 1000,
+      }),
+    ).toBe('Compression was not beneficial for this history size.');
+    expect(
+      projectCompression({
+        compressionStatus:
+          CompressionStatus.COMPRESSION_FAILED_INFLATED_TOKEN_COUNT,
+        originalTokenCount: 60000,
+      }),
+    ).toContain('compression prompt');
+    expect(
+      projectCompression({
+        compressionStatus:
+          CompressionStatus.COMPRESSION_FAILED_TOKEN_COUNT_ERROR,
+      }),
+    ).toBe('Could not compress chat history due to a token counting error.');
+    expect(
+      projectCompression({ compressionStatus: CompressionStatus.NOOP }),
+    ).toBe('Nothing to compress.');
+  });
+});
+
+describe('projectStats and the savings-tip placement (R1-86)', () => {
+  const stats = {
+    sessionId: 's1',
+    sessionStartTime: new Date(),
+    metrics: makeMetrics(),
+    lastPromptTokenCount: 0,
+    promptCount: 1,
+  } as unknown as SessionStatsState;
+
+  it('titles the /stats projection and renders the shared sections', () => {
+    const text = projectStats('9m', stats);
+    expect(text.startsWith('Session Stats')).toBe(true);
+    expect(text).toContain('Interaction Summary');
+    expect(text).toContain('Performance');
+    expect(text).toContain('Model Usage');
+  });
+
+  it('shows the /stats-model tip only inside the savings block', () => {
+    // cached=100/prompt=1000 in makeMetrics → 10% cache efficiency.
+    expect(projectStats('9m', stats)).toContain(
+      '» Tip: For a full token breakdown, run `/stats model`.',
+    );
+    const metrics = makeMetrics();
+    for (const model of Object.values(metrics.models)) {
+      model.tokens.cached = 0;
+    }
+    const zeroCache = { ...stats, metrics } as unknown as SessionStatsState;
+    const text = projectStats('9m', zeroCache);
+    expect(text).toContain('Model Usage');
+    expect(text).not.toContain('Tip:');
+  });
+});
+
+describe('dispatcher coverage for compression/stats items (R1-7)', () => {
+  it('projects compression and stats history items', () => {
+    expect(
+      projectSpecialItemText(
+        {
+          type: 'compression',
+          compression: {
+            isPending: false,
+            originalTokenCount: 100,
+            newTokenCount: 40,
+            compressionStatus: CompressionStatus.COMPRESSED,
+          },
+        },
+        {},
+      ),
+    ).toBe('Chat history compressed from 100 to 40 tokens.');
+    const statsText = projectSpecialItemText(
+      { type: 'stats', duration: '9m' },
+      {},
+    );
+    expect(statsText).toContain('Session Stats');
+    expect(statsText).toContain('Session duration: 9m');
   });
 });

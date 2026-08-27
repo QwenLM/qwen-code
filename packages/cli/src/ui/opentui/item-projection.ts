@@ -19,6 +19,7 @@
  */
 
 import {
+  CompressionStatus,
   findProviderByCredentials,
   getExtensionDisplayName,
   getMCPServerStatus,
@@ -26,12 +27,17 @@ import {
   resolveMetadataKey,
   uiTelemetryService,
 } from '@qwen-code/qwen-code-core';
-import type { Config, SessionMetrics } from '@qwen-code/qwen-code-core';
+import type {
+  Config,
+  SessionMetrics,
+  SkillLevel,
+} from '@qwen-code/qwen-code-core';
 import type { HistoryItemWithoutId } from '../types.js';
 import { flattenModelsBySource } from '../utils/modelsBySource.js';
 import { calculateCost } from '../../utils/costCalculator.js';
 import { computeSessionStats } from '../utils/computeStats.js';
 import { formatDuration } from '../utils/formatters.js';
+import { levelLabel } from '../utils/skill-level-label.js';
 import type { SessionStatsState } from '../contexts/SessionContext.js';
 import type { LoadedSettings } from '../../config/settings.js';
 
@@ -119,23 +125,30 @@ export function projectAbout(systemInfo: Record<string, unknown>): string {
   addField('Sandbox', String(systemInfo['sandboxEnv'] ?? ''));
   const proxy = systemInfo['proxy'] as string | undefined;
   if (proxy) {
-    try {
-      const url = new URL(proxy);
-      if (url.username || url.password) {
-        url.username = '***';
-        url.password = '***';
-        addField('Proxy', url.toString());
-      } else {
-        addField('Proxy', proxy);
-      }
-    } catch {
-      addField('Proxy', proxy);
-    }
+    addField('Proxy', redactProxy(proxy));
   } else {
     addField('Proxy', 'no proxy');
   }
   addField('Memory Usage', String(systemInfo['memoryUsage'] ?? ''));
   return lines.join('\n');
+}
+
+/**
+ * Parity of systemInfoFields' redactProxy: mask credentials when URL parsing
+ * fails (realistic proxy-env typos like an empty or spaced host) instead of
+ * leaking the raw string into the shareable transcript.
+ */
+function redactProxy(proxy: string): string {
+  try {
+    const url = new URL(proxy);
+    if (url.username || url.password) {
+      url.username = url.username ? '***' : '';
+      url.password = url.password ? '***' : '';
+    }
+    return url.toString();
+  } catch {
+    return proxy.replace(/\/\/[^/]*@/, '//***@');
+  }
 }
 
 /** Parity of views/ToolsList. */
@@ -169,27 +182,17 @@ export function projectToolsList(
 
 /** Parity of views/SkillsList. */
 export function projectSkillsList(
-  skills: ReadonlyArray<{ name: string; description?: string; level?: string }>,
+  skills: ReadonlyArray<{
+    name: string;
+    description?: string;
+    level?: SkillLevel;
+  }>,
 ): string {
   const lines = ['Available skills:', ''];
   if (skills.length === 0) {
     lines.push(' No skills available');
     return lines.join('\n');
   }
-  const levelLabel = (level: string): string => {
-    switch (level) {
-      case 'project':
-        return 'Project';
-      case 'user':
-        return 'User';
-      case 'extension':
-        return 'Extension';
-      case 'bundled':
-        return 'Bundled';
-      default:
-        return level;
-    }
-  };
   const truncate = (s: string, n: number) =>
     s.length > n ? `${s.slice(0, n)}…` : s;
   for (const skill of skills) {
@@ -592,7 +595,7 @@ export function projectMcpStatus(item: Record<string, unknown>): string {
     }
     if (status === MCPServerStatus.CONNECTING) {
       lines.push(
-        `◐ ${name}${from}... - Starting... (first startup may take longer)${authSuffix(name)}`,
+        `◐ ${name}${from} - Starting... (first startup may take longer)${authSuffix(name)}`,
       );
       lines.push(' (tools and prompts will appear when ready)');
     } else if (status === MCPServerStatus.CONNECTED) {
@@ -611,7 +614,7 @@ export function projectMcpStatus(item: Record<string, unknown>): string {
         `● ${name}${from} - Ready${parts.length > 0 ? ` (${parts.join(', ')})` : ''}${authSuffix(name)}`,
       );
     } else {
-      lines.push(`● ${name}${from}... - Disconnected${authSuffix(name)}`);
+      lines.push(`● ${name}${from} - Disconnected${authSuffix(name)}`);
       if (serverTools.length > 0) {
         lines.push(`(${serverTools.length} tools cached)`);
       }
@@ -666,13 +669,10 @@ export function projectExtensionsList(
         extension.isActive ? 'active' : 'disabled'
       } (${stateText})`,
     );
-    const resolvedSettings = (
-      extension as { resolvedSettings?: Record<string, unknown> }
-    ).resolvedSettings;
-    if (resolvedSettings && Object.keys(resolvedSettings).length > 0) {
+    if (extension.resolvedSettings && extension.resolvedSettings.length > 0) {
       lines.push(' settings:');
-      for (const [name, value] of Object.entries(resolvedSettings)) {
-        lines.push(` - ${name}: ${String(value)}`);
+      for (const setting of extension.resolvedSettings) {
+        lines.push(` - ${setting.name}: ${setting.value}`);
       }
     }
   }
@@ -687,6 +687,109 @@ export function projectMemorySaved(
   return `${verb ?? 'Saved'} ${writtenCount} ${writtenCount === 1 ? 'memory' : 'memories'}`;
 }
 
+/** Parity of messages/CompressionMessage. */
+export function projectCompression(compression: {
+  isPending?: boolean;
+  originalTokenCount?: number | null;
+  newTokenCount?: number | null;
+  compressionStatus?: CompressionStatus | null;
+  originalTokenCountIsEstimated?: boolean;
+  newTokenCountIsEstimated?: boolean;
+}): string {
+  if (compression.isPending) {
+    return 'Compressing chat history';
+  }
+  // Estimated counts (#9309): a '~' prefix marks which banner numbers are
+  // local estimates rather than API-reported counts.
+  const formatTokens = (count: number, isEstimated?: boolean) =>
+    isEstimated ? `~${count}` : String(count);
+  const original = compression.originalTokenCount ?? 0;
+  const next = compression.newTokenCount ?? 0;
+  switch (compression.compressionStatus) {
+    case CompressionStatus.COMPRESSED:
+      return `Chat history compressed from ${formatTokens(
+        original,
+        compression.originalTokenCountIsEstimated,
+      )} to ${formatTokens(
+        next,
+        compression.newTokenCountIsEstimated,
+      )} tokens.`;
+    case CompressionStatus.COMPRESSION_FAILED_INFLATED_TOKEN_COUNT:
+      // For smaller histories (< 50k tokens), compression overhead likely
+      // exceeds benefits; larger ones suggest a compression-prompt issue.
+      return original < 50000
+        ? 'Compression was not beneficial for this history size.'
+        : 'Chat history compression did not reduce size. This may indicate issues with the compression prompt.';
+    case CompressionStatus.COMPRESSION_FAILED_TOKEN_COUNT_ERROR:
+      return 'Could not compress chat history due to a token counting error.';
+    case CompressionStatus.NOOP:
+      return 'Nothing to compress.';
+    default:
+      return '';
+  }
+}
+
+/** Shared body of the quit summary and the `/stats` StatsDisplay. */
+function renderStatsSections(
+  duration: string,
+  stats: SessionStatsState,
+): string[] {
+  const lines: string[] = [];
+  const metrics = stats.metrics;
+  const computed = computeSessionStats(metrics);
+  lines.push('Interaction Summary');
+  lines.push(`Session ID: ${stats.sessionId}`);
+  const tools = metrics.tools;
+  lines.push(
+    `Tool Calls: ${tools.totalCalls} ( ✓ ${tools.totalSuccess} ✗ ${tools.totalFail} )`,
+  );
+  lines.push(`Success Rate: ${computed.successRate.toFixed(1)}%`);
+  if (computed.totalDecisions > 0) {
+    lines.push(
+      `User Agreement: ${computed.agreementRate.toFixed(1)}% (${computed.totalDecisions} reviewed)`,
+    );
+  }
+  if (computed.totalLinesAdded > 0 || computed.totalLinesRemoved > 0) {
+    lines.push(
+      `Code Changes: +${computed.totalLinesAdded} -${computed.totalLinesRemoved}`,
+    );
+  }
+  lines.push('');
+  lines.push('Performance');
+  lines.push(`Wall Time: ${duration}`);
+  lines.push(`Agent Active: ${formatDuration(computed.agentActiveTime)}`);
+  lines.push(
+    `» API Time: ${formatDuration(computed.totalApiTime)} (${computed.apiTimePercent.toFixed(1)}%)`,
+  );
+  lines.push(
+    `» Tool Time: ${formatDuration(computed.totalToolTime)} (${computed.toolTimePercent.toFixed(1)}%)`,
+  );
+  const entries = flattenActiveModels(metrics);
+  if (entries.length > 0) {
+    lines.push('');
+    lines.push('Model Usage');
+    for (const entry of entries) {
+      lines.push(
+        `${entry.label}: ${entry.metrics.api.totalRequests} requests, ` +
+          `${entry.metrics.tokens.prompt.toLocaleString()} input tokens, ` +
+          `${entry.metrics.tokens.candidates.toLocaleString()} output tokens`,
+      );
+    }
+    if (computed.cacheEfficiency > 0) {
+      lines.push('');
+      lines.push(
+        `Savings Highlight: ${computed.totalCachedTokens.toLocaleString()} ` +
+          `(${computed.cacheEfficiency.toFixed(1)}%) of input tokens were served from the cache, reducing costs.`,
+      );
+      // ink renders the /stats-model tip only inside this savings block
+      // (StatsDisplay ModelUsageTable), so it disappears with the block.
+      lines.push('');
+      lines.push('» Tip: For a full token breakdown, run `/stats model`.');
+    }
+  }
+  return lines;
+}
+
 /** Parity of SessionSummaryDisplay (quit): session summary + resume hint. */
 export function projectQuit(
   duration: string,
@@ -695,56 +798,7 @@ export function projectQuit(
 ): string {
   const lines = ['Agent powering down. Goodbye!', ''];
   if (stats) {
-    const metrics = stats.metrics;
-    const computed = computeSessionStats(metrics);
-    lines.push('Interaction Summary');
-    lines.push(`Session ID: ${stats.sessionId}`);
-    const tools = metrics.tools;
-    lines.push(
-      `Tool Calls: ${tools.totalCalls} ( ✓ ${tools.totalSuccess} ✗ ${tools.totalFail} )`,
-    );
-    lines.push(`Success Rate: ${computed.successRate.toFixed(1)}%`);
-    if (computed.totalDecisions > 0) {
-      lines.push(
-        `User Agreement: ${computed.agreementRate.toFixed(1)}% (${computed.totalDecisions} reviewed)`,
-      );
-    }
-    if (computed.totalLinesAdded > 0 || computed.totalLinesRemoved > 0) {
-      lines.push(
-        `Code Changes: +${computed.totalLinesAdded} -${computed.totalLinesRemoved}`,
-      );
-    }
-    lines.push('');
-    lines.push('Performance');
-    lines.push(`Wall Time: ${duration}`);
-    lines.push(`Agent Active: ${formatDuration(computed.agentActiveTime)}`);
-    lines.push(
-      `» API Time: ${formatDuration(computed.totalApiTime)} (${computed.apiTimePercent.toFixed(1)}%)`,
-    );
-    lines.push(
-      `» Tool Time: ${formatDuration(computed.totalToolTime)} (${computed.toolTimePercent.toFixed(1)}%)`,
-    );
-    const entries = flattenActiveModels(metrics);
-    if (entries.length > 0) {
-      lines.push('');
-      lines.push('Model Usage');
-      for (const entry of entries) {
-        lines.push(
-          `${entry.label}: ${entry.metrics.api.totalRequests} requests, ` +
-            `${entry.metrics.tokens.prompt.toLocaleString()} input tokens, ` +
-            `${entry.metrics.tokens.candidates.toLocaleString()} output tokens`,
-        );
-      }
-      if (computed.cacheEfficiency > 0) {
-        lines.push('');
-        lines.push(
-          `Savings Highlight: ${computed.totalCachedTokens.toLocaleString()} ` +
-            `(${computed.cacheEfficiency.toFixed(1)}%) of input tokens were served from the cache, reducing costs.`,
-        );
-      }
-    }
-    lines.push('');
-    lines.push('» Tip: For a full token breakdown, run `/stats model`.');
+    lines.push(...renderStatsSections(duration, stats));
   } else {
     lines.push(`Session duration: ${duration}`);
   }
@@ -753,6 +807,20 @@ export function projectQuit(
     lines.push(
       `To continue this session, run qwen --resume ${stats.sessionId}`,
     );
+  }
+  return lines.join('\n');
+}
+
+/** Parity of StatsDisplay (the `/stats` history item). */
+export function projectStats(
+  duration: string,
+  stats: SessionStatsState | undefined,
+): string {
+  const lines = ['Session Stats', ''];
+  if (stats) {
+    lines.push(...renderStatsSections(duration, stats));
+  } else {
+    lines.push(`Session duration: ${duration}`);
   }
   return lines.join('\n');
 }
@@ -868,6 +936,14 @@ export function projectSpecialItemText(
         ctx.stats,
         ctx.config,
       );
+    case 'compression':
+      return projectCompression(
+        (record['compression'] ?? {}) as Parameters<
+          typeof projectCompression
+        >[0],
+      );
+    case 'stats':
+      return projectStats(String(record['duration'] ?? ''), ctx.stats);
     case 'btw': {
       const btw = record['btw'] as Parameters<typeof projectBtw>[0] | undefined;
       return btw ? projectBtw(btw) : null;

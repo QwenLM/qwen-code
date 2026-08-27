@@ -82,4 +82,23 @@ describe('markdownToPlainText', () => {
       'really important now',
     );
   });
+
+  it('keeps fence-like lines inside a block opened by the other character (R1-47/48)', () => {
+    // CommonMark: a fence only closes on the same character.
+    expect(markdownToPlainText('~~~\n```\nbody\n~~~\nafter')).toBe(
+      '```\nbody\nafter',
+    );
+    expect(markdownToPlainText('```\n~~~\nbody\n```\nafter')).toBe(
+      '~~~\nbody\nafter',
+    );
+  });
+
+  it('recognizes headings inside blockquotes (R1-1)', () => {
+    expect(markdownToPlainText('> # Title')).toBe('Title');
+  });
+
+  it('keeps code-span contents literal — no link/emphasis consumption (R1-1)', () => {
+    expect(markdownToPlainText('`[a](b)`')).toBe('[a](b)');
+    expect(markdownToPlainText('`**not bold**`')).toBe('**not bold**');
+  });
 });

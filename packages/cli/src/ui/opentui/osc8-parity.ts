@@ -28,6 +28,7 @@ import {
   MD_LINK_PATTERN,
   MD_LINK_CAPTURE,
 } from '../utils/osc8.js';
+import { unescapeMarkdownDollars } from '../utils/inline-math.js';
 
 export {
   osc8Open,
@@ -70,15 +71,18 @@ export function renderMarkdownLink(
   url: string,
   canHyperlink: boolean,
 ): Osc8LinkRender {
+  // Ink unescapes backslash-dollars in BOTH branches before use (the
+  // math-enabled markdown pipeline emits '\$' labels routinely).
+  const renderedLabel = unescapeMarkdownDollars(label);
   const wrap = shouldWrapMarkdownLink(url, canHyperlink);
   if (!wrap) {
     return {
-      text: `${label} (${url})`,
+      text: `${renderedLabel} (${url})`,
       wrapped: false,
       deceptionSuffix: false,
     };
   }
-  const safeLabel = sanitizeForOsc(label);
+  const safeLabel = sanitizeForOsc(renderedLabel);
   const safeUrl = sanitizeForOsc(url);
   const showSuffix = labelMayDeceive(safeLabel, safeUrl);
   const envelope = `${osc8Open(url)}${safeLabel || safeUrl}${osc8Close()}`;
@@ -98,8 +102,11 @@ export function renderMarkdownLink(
 export function renderBareUrl(
   url: string,
   canHyperlink: boolean,
+  nextCharacter = '',
 ): Osc8LinkRender {
-  const trimmed = canHyperlink ? trimTrailingUrlPunctuation(url) : url;
+  const trimmed = canHyperlink
+    ? trimTrailingUrlPunctuation(url, nextCharacter)
+    : url;
   const wrap = canHyperlink && isSafeOscScheme(trimmed);
   if (!wrap) {
     return { text: url, wrapped: false, deceptionSuffix: false };

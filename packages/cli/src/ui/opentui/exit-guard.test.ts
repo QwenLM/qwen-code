@@ -35,12 +35,20 @@ describe('createExitGuard', () => {
     expect(guard.press('ctrl-c')).toBe('armed');
   });
 
-  it('ctrl-d arms with its own hint key and any key confirms', () => {
+  it('ctrl-d arms with its own hint key and confirms on the same key', () => {
     const guard = createExitGuard();
     expect(guard.press('ctrl-d')).toBe('armed');
     expect(guard.armedKey()).toBe('ctrl-d');
-    // Ink keeps one shared exit window: the second press confirms no matter
-    // which exit key delivers it.
+    expect(guard.press('ctrl-d')).toBe('exit');
+  });
+
+  it('a different exit key re-arms instead of confirming (ink keeps per-key windows)', () => {
+    const guard = createExitGuard();
+    expect(guard.press('ctrl-d')).toBe('armed');
+    // Ink: ctrlCPressedOnce / ctrlDPressedOnce are separate flags, and
+    // handleExit fast-quits only on the pressed key's own flag.
+    expect(guard.press('ctrl-c')).toBe('armed');
+    expect(guard.armedKey()).toBe('ctrl-c');
     expect(guard.press('ctrl-c')).toBe('exit');
   });
 

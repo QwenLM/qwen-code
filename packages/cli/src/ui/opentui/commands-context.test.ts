@@ -21,7 +21,8 @@ import {
 
 // clear() must NOT call clearScreen(): the OpenTUI renderer owns the screen
 // (audit 01 G-20); the mock records any accidental raw-ANSI regression.
-const clearScreenMock = vi.fn();
+// The vi.mock factory runs at module load time, so the mock must be hoisted.
+const clearScreenMock = vi.hoisted(() => vi.fn());
 vi.mock('../../utils/stdioHelpers.js', async (importOriginal) => {
   const actual =
     await importOriginal<typeof import('../../utils/stdioHelpers.js')>();

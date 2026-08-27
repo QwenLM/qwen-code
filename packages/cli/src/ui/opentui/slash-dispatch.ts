@@ -32,8 +32,14 @@ import { McpPromptLoader } from '../../services/McpPromptLoader.js';
 import { SavedWorkflowLoader } from '../../services/saved-workflow-loader.js';
 import { SkillCommandLoader } from '../../services/SkillCommandLoader.js';
 import { CommandService } from '../../services/CommandService.js';
-import { parseSlashCommand } from '../commands/commands.js';
-import { hasSlashCommandPathSeparator } from '../utils/commandUtils.js';
+import {
+  parseSlashCommand,
+  parseStackedSlashCommands,
+} from '../commands/commands.js';
+import { isSlashCommand } from '../utils/commandUtils.js';
+import type { HistoryItemWithoutId } from '../types.js';
+import type { SessionStatsState } from '../contexts/SessionContext.js';
+import { projectSpecialItemText } from './item-projection.js';
 import {
   appendUserPromptExpansionAdditionalContext,
   formatUserPromptExpansionBlockedMessage,
@@ -152,17 +158,15 @@ export async function loadInteractiveCommands(
 
 /**
  * Whether the submitted text must be treated as a slash command. Mirrors the
- * ink processor guard: '/' or '?' prefix, but not file-path-like input.
+ * ink processor guard: '/' or '?' prefix, with the shared classifier
+ * excluding `//`/`/*` comments and file-path-like input.
  */
 export function isSlashCommandInput(raw: string): boolean {
   const trimmed = raw.trim();
-  if (!trimmed.startsWith('/') && !trimmed.startsWith('?')) {
-    return false;
+  if (trimmed.startsWith('/')) {
+    return isSlashCommand(trimmed);
   }
-  if (trimmed.startsWith('/') && hasSlashCommandPathSeparator(trimmed)) {
-    return false;
-  }
-  return true;
+  return trimmed.startsWith('?');
 }
 
 export type SlashResolution =
@@ -209,6 +213,11 @@ export interface SlashDispatchEnv {
   /** Optional loaded settings; commands reading settings receive them. */
   settings?: LoadedSettings | null;
   abortSignal?: AbortSignal;
+  /**
+   * Live session stats (start time, metrics, counters) that commands such as
+   * /quit and /clear read and persist; the backend owns the true values.
+   */
+  sessionStats?: SessionStatsState;
 }
 
 function stringifyPromptContent(content: unknown): string {
@@ -306,6 +315,22 @@ export async function executeSlashCommand(
   commands: readonly SlashCommand[],
   env: SlashDispatchEnv,
 ): Promise<SlashEffect> {
+  // ink merges stacked skill invocations (/feat-dev /e2e-testing text);
+  // the merge is not ported yet, so report an explicit deferral instead of
+  // leaking the second skill token into the first skill's prompt.
+  const stacked = parseStackedSlashCommands(raw, commands);
+  if (stacked.skills.length >= 2) {
+    return {
+      kind: 'message',
+      messageType: 'info',
+      content: `Stacked skill invocations (${stacked.skills
+        .map((skill) => `/${skill.name}`)
+        .join(
+          ' ',
+        )}) are not yet available in the OpenTUI renderer. Run each skill separately.`,
+    };
+  }
+
   const resolution = resolveSlashCommand(raw, commands);
   if (resolution.type === 'unknown') {
     return {
@@ -326,6 +351,8 @@ export async function executeSlashCommand(
     return { kind: 'handled' };
   }
 
+  let cleared = false;
+  const addedItems: HistoryItemWithoutId[] = [];
   const context = {
     executionMode: 'interactive',
     invocation: { raw: raw.trim(), name: command.name, args },
@@ -336,8 +363,13 @@ export async function executeSlashCommand(
     },
     ui: {
       history: [],
-      addItem: () => 0,
-      clear: () => {},
+      addItem: (item: HistoryItemWithoutId) => {
+        addedItems.push(item);
+        return 0;
+      },
+      clear: () => {
+        cleared = true;
+      },
       setDebugMessage: () => {},
       pendingItem: null,
       setPendingItem: () => {},
@@ -357,11 +389,13 @@ export async function executeSlashCommand(
       addConfirmUpdateExtensionRequest: () => {},
     },
     session: {
-      // Commands such as /quit read session timing stats; supply a minimal,
-      // well-formed shape so they behave instead of throwing.
-      stats: {
+      // Commands such as /quit read session timing stats and /clear persists
+      // them; supply the backend's real stats when available and refuse to
+      // guess a start time otherwise (a fabricated `new Date()` would stamp
+      // near-zero durations into the persisted usage history).
+      stats: env.sessionStats ?? {
         sessionId: '',
-        sessionStartTime: new Date(),
+        sessionStartTime: new Date(0),
         metrics: {},
         lastPromptTokenCount: 0,
         promptCount: 0,
@@ -373,7 +407,19 @@ export async function executeSlashCommand(
 
   try {
     const result = await command.action(context, args);
-    return mapActionResult(result, command);
+    // ink discards command results once the submission is aborted (commands
+    // like /compress ignore the signal inside their own operation).
+    if (env.abortSignal?.aborted) {
+      return { kind: 'handled' };
+    }
+    if (cleared) {
+      return { kind: 'clear' };
+    }
+    const effect = mapActionResult(result, command);
+    if (effect.kind === 'handled' && addedItems.length > 0) {
+      return projectAddedItems(addedItems, env);
+    }
+    return effect;
   } catch (error) {
     return {
       kind: 'message',
@@ -381,4 +427,32 @@ export async function executeSlashCommand(
       content: `Command '/${command.name}' failed: ${error instanceof Error ? error.message : String(error)}`,
     };
   }
+}
+
+/**
+ * Surfaces history items a command added via `ui.addItem` (e.g. `/stats
+ * model`) by projecting them to transcript text; falls back to an explicit
+ * parity deferral when no projection exists.
+ */
+function projectAddedItems(
+  items: HistoryItemWithoutId[],
+  env: SlashDispatchEnv,
+): SlashEffect {
+  const texts = items
+    .map((item) =>
+      projectSpecialItemText(item, {
+        config: env.config,
+        stats: env.sessionStats,
+      }),
+    )
+    .filter((text): text is string => Boolean(text));
+  if (texts.length > 0) {
+    return { kind: 'message', messageType: 'info', content: texts.join('\n') };
+  }
+  return {
+    kind: 'message',
+    messageType: 'info',
+    content:
+      'This command renders a history item, which is not yet available in the OpenTUI renderer.',
+  };
 }

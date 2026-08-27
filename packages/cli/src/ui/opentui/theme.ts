@@ -1,4 +1,10 @@
 /**
+ * @license
+ * Copyright 2026 Qwen
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/**
  * Theme support: detect the terminal's light/dark mode via OSC 10/11
  * (opentui `waitForThemeMode`), subscribe to live changes (`theme_mode`),
  * and swap the palette. POC previously hard-coded a dark palette, which is

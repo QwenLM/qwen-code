@@ -34,12 +34,18 @@ export function decodeCapturedInput(buffer: Buffer): string {
   /* eslint-disable no-control-regex -- stripping C0 control bytes is the point. */
   return (
     text
-      .replace(/\u001B\[[0-9;?]*[A-Za-z]/g, '') // CSI sequences (arrows, etc.)
+      // Full ECMA-48 CSI production (parameter bytes incl. ':' for kitty
+      // CSI-u, intermediate bytes, any final @-~): arrows, editing keys
+      // like Delete/Home/PgDn ('~' final), function keys, modifier forms.
+      .replace(/\u001B\[[0-9:;<=>?]*[ -/]*[@-~]/g, '')
       // SS3 function-key sequences (F1-F4 etc., ESC O + final) survive the
       // capture filter as user input (classifyEscapeSequence preserves them);
       // strip the whole sequence here or the C0 pass below removes the bare
       // ESC and leaks the O+letter payload into the composer.
       .replace(/\u001BO[A-Za-z]/g, '')
+      // A replayed partial tail (ESC [ parameters without a final byte)
+      // would leak '[…' into the composer once the C0 pass drops the ESC.
+      .replace(/\u001B\[[0-9:;<=>?]*[ -/]*$/, '')
       .replace(/[\u0000-\u0008\u000B-\u001F\u007F]/g, '')
   );
   /* eslint-enable no-control-regex */

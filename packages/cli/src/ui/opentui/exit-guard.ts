@@ -39,8 +39,9 @@ export interface ExitGuardOptions {
 export interface ExitGuard {
   /**
    * Register a press. Returns `'exit'` when this press confirms a pending
-   * armed exit (second press of ANY guard key inside the window), or
-   * `'armed'` when it starts a new confirmation window.
+   * armed exit (second press of the SAME guard key inside the window — ink
+   * keeps per-key windows, `ctrlCPressedOnce` vs `ctrlDPressedOnce`), or
+   * `'armed'` when it starts (or re-arms) a confirmation window.
    */
   press(key: ExitGuardKey): 'exit' | 'armed';
   /** Currently armed key, or null when no confirmation is pending. */
@@ -73,12 +74,14 @@ export function createExitGuard(options: ExitGuardOptions = {}): ExitGuard {
 
   return {
     press(key: ExitGuardKey): 'exit' | 'armed' {
-      if (armed !== null) {
-        // Second press inside the window — ink exits regardless of whether
-        // the confirming key matches the arming one.
+      if (armed === key) {
+        // Second press of the same key inside the window exits.
         disarm();
         return 'exit';
       }
+      // Different key: ink keeps per-key windows, so this does not confirm
+      // — re-arm under the new key instead.
+      if (armed !== null) disarm();
       armed = key;
       timer = setTimeoutFn(() => {
         timer = null;

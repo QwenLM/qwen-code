@@ -4,8 +4,14 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { osc52Sequence } from './clipboard.js';
+
+const copyToClipboardMock = vi.hoisted(() => vi.fn());
+
+vi.mock('../utils/commandUtils.js', () => ({
+  copyToClipboard: copyToClipboardMock,
+}));
 
 describe('osc52Sequence', () => {
   it('emits a bare OSC 52 outside multiplexers', () => {
@@ -26,5 +32,20 @@ describe('osc52Sequence', () => {
     expect(osc52Sequence('hi', { STY: '12345.pts-0.host' })).toBe(
       `\x1bP\x1b]52;c;${b64}\x07\x1b\\`,
     );
+  });
+});
+
+describe('copyText', () => {
+  it('delegates the platform fallback to ink copyToClipboard', async () => {
+    const { copyText } = await import('./clipboard.js');
+    copyToClipboardMock.mockResolvedValueOnce(undefined);
+    await expect(copyText('snippet')).resolves.toBe(true);
+    expect(copyToClipboardMock).toHaveBeenCalledWith('snippet');
+  });
+
+  it('returns false when the platform fallback fails', async () => {
+    const { copyText } = await import('./clipboard.js');
+    copyToClipboardMock.mockRejectedValueOnce(new Error('exit 1'));
+    await expect(copyText('snippet')).resolves.toBe(false);
   });
 });

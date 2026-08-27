@@ -23,6 +23,7 @@
 import type {
   AnsiToken,
   ChatCompressionInfo,
+  GoalStateCause,
   RetryInfo,
   ServerGeminiStreamEvent,
 } from '@qwen-code/qwen-code-core';
@@ -30,6 +31,7 @@ import type { StreamEvent } from '../model/streaming-model.js';
 import type { TodoItem } from '../components/TodoDisplay.js';
 import type { CompressionProps } from '../types.js';
 import { sanitizeSensitiveText } from '../utils/textUtils.js';
+import { shouldDisplayGoalStateCause } from '../utils/goal-runtime.js';
 
 /**
  * Neutral-model union extension: tool detail events the backend folds into
@@ -140,6 +142,11 @@ export interface EventMapperContext {
   getModelName?: () => string;
   /** Configured max session turns for the MaxSessionTurns notice. */
   getMaxSessionTurns?: () => number;
+  /**
+   * ink parity of the `showCitations(settings)` gate in
+   * handleCitationEvent; absent means citations are shown.
+   */
+  showCitations?: () => boolean;
 }
 
 /** One-line compact JSON for tool-call args (empty object → undefined). */
@@ -220,6 +227,30 @@ export function renderResultDisplay(display: unknown): string {
       return (o['ansiOutput'] as Array<Array<{ text?: string }>>)
         .map((line) => line.map((t) => t.text ?? '').join(''))
         .join('\n');
+    }
+    // Structured displays ink's classifyDisplay handles individually.
+    if (o['type'] === 'plan_summary') {
+      const message = typeof o['message'] === 'string' ? o['message'] : '';
+      const plan = typeof o['plan'] === 'string' ? o['plan'] : '';
+      return [message, plan].filter(Boolean).join('\n');
+    }
+    // team_result/task_list are covered by their tools' returnDisplay text;
+    // ink renders nothing for the structured object (classifyDisplay none).
+    if (o['type'] === 'team_result' || o['type'] === 'task_list') {
+      return '';
+    }
+    if (o['type'] === 'mcp_tool_progress') {
+      const msg =
+        typeof o['message'] === 'string'
+          ? o['message']
+          : `Progress: ${o['progress']}`;
+      const totalStr = o['total'] != null ? `/${o['total']}` : '';
+      return `◌ [${o['progress']}${totalStr}] ${msg}`;
+    }
+    // mcp_app renders only its fallbackText in ink — the embedded HTML must
+    // never reach output.
+    if (o['type'] === 'mcp_app' && typeof o['fallbackText'] === 'string') {
+      return o['fallbackText'];
     }
     if (typeof o['summary'] === 'string') return o['summary'];
     if (typeof o['message'] === 'string') return o['message'];
@@ -481,7 +512,9 @@ export function createEventMapper(
       case 'citation': {
         closeThought();
         // ink parity: handleCitationEvent adds `{type: 'info'}` (the core
-        // already builds the display string).
+        // already builds the display string) but early-returns when the
+        // user disabled `ui.showCitations`.
+        if (context?.showCitations && !context.showCitations()) break;
         const text = ev.value as string;
         if (text) out.push({ type: 'info', text });
         break;
@@ -565,10 +598,12 @@ export function createEventMapper(
           value: GoalSnapshotLike;
           cause?: string;
         };
-        // ink gates on `event.cause && shouldDisplayGoalStateCause(cause)`
-        // (turn_finished / checkpoint / verifier_accept stay silent).
+        // ink gates on `event.cause && shouldDisplayGoalStateCause(cause)`;
+        // the shared predicate keeps the exhaustive-switch guard.
         const cause = v.cause;
-        if (!cause || SILENT_GOAL_CAUSES.includes(cause)) break;
+        if (!cause || !shouldDisplayGoalStateCause(cause as GoalStateCause)) {
+          break;
+        }
         // ink parity: addItem({type: 'goal_state', snapshot, cause}) renders
         // via GoalStatusMessage (GoalStateCard).
         out.push({ type: 'goal', snapshot: v.value, cause });
@@ -606,9 +641,6 @@ export type GoalSnapshotLike = {
   } | null;
   activity?: string;
 };
-
-/** Causes ink's shouldDisplayGoalStateCause keeps silent. */
-const SILENT_GOAL_CAUSES = ['turn_finished', 'checkpoint', 'verifier_accept'];
 
 /** Drains a real agent stream into a neutral-event sink. */
 export async function pumpServerStream(

@@ -23,6 +23,7 @@ import {
 } from './theme-auto.js';
 import { QwenDark } from '../themes/qwen-dark.js';
 import { QwenLight } from '../themes/qwen-light.js';
+import { OSC11_TIMEOUT_MS } from '../themes/detect-terminal-theme.js';
 
 describe('resolveThemeMode', () => {
   it('keeps light, defaults everything else to dark', () => {
@@ -80,7 +81,8 @@ describe('detectInitialThemeMode', () => {
     });
     await expect(detectInitialThemeMode(host)).resolves.toBe('light');
     expect(host.waitForThemeMode).toHaveBeenCalledWith(THEME_MODE_WAIT_MS);
-    expect(THEME_MODE_WAIT_MS).toBe(200);
+    // The wait window must track ink's probe timeout by construction.
+    expect(THEME_MODE_WAIT_MS).toBe(OSC11_TIMEOUT_MS);
   });
 
   it('falls back to COLORFGBG when the probe has no answer', async () => {

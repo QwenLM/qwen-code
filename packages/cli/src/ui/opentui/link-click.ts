@@ -118,7 +118,9 @@ export function decodeRowCells(grid: CellGrid, y: number): string[] | null {
  * Extract a buffer row into text. Spacer cells (wide-character
  * continuation and untouched cells) are skipped; the mapping back to
  * cell columns is preserved so a click column can be matched exactly even
- * when CJK characters precede the URL.
+ * when CJK characters precede the URL. One entry is pushed per UTF-16
+ * unit: a non-BMP character (emoji) from a single cell occupies two units
+ * in `text`, and the hit-test indexes `cellColumns` with UTF-16 offsets.
  */
 export function readBufferRow(grid: CellGrid, y: number): BufferRow {
   const cells = decodeRowCells(grid, y);
@@ -128,7 +130,7 @@ export function readBufferRow(grid: CellGrid, y: number): BufferRow {
   for (let x = 0; x < cells.length; x++) {
     if (cells[x] === '') continue;
     text += cells[x];
-    cellColumns.push(x);
+    for (let i = 0; i < cells[x].length; i++) cellColumns.push(x);
   }
   return { text: text.replace(/\s+$/, ''), cellColumns };
 }

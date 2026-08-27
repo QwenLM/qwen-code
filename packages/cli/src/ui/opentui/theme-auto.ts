@@ -23,10 +23,11 @@ import { QwenLight } from '../themes/qwen-light.js';
 import {
   detectFromColorFgBg,
   detectMacOSTheme,
+  OSC11_TIMEOUT_MS,
 } from '../themes/detect-terminal-theme.js';
 
-/** Ink's OSC 11 probe timeout (`OSC11_TIMEOUT_MS`) — kept identical. */
-export const THEME_MODE_WAIT_MS = 200;
+/** Ink's OSC 11 probe timeout — the shared constant, not a hand copy. */
+export const THEME_MODE_WAIT_MS = OSC11_TIMEOUT_MS;
 
 /** Structural view of the OpenTUI renderer's theme-mode query API. */
 export interface OpenTuiThemeModeHost {

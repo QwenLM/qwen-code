@@ -1,5 +1,11 @@
+/**
+ * @license
+ * Copyright 2026 Qwen
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 /** Clipboard write: OSC 52 (terminal-native) + platform fallback spawn. */
-import { spawn } from 'node:child_process';
+import { copyToClipboard } from '../utils/commandUtils.js';
 
 /**
  * OSC 52 sequence for `text`, adapted to the surrounding multiplexer
@@ -28,32 +34,10 @@ export function osc52Sequence(
   return sequence;
 }
 
-function platformCopy(text: string): Promise<void> {
-  const cmd =
-    process.platform === 'darwin'
-      ? 'pbcopy'
-      : process.platform === 'win32'
-        ? 'clip'
-        : 'xclip';
-  const args = process.platform === 'linux' ? ['-selection', 'clipboard'] : [];
-  return new Promise((resolve, reject) => {
-    try {
-      const child = spawn(cmd, args, { stdio: ['pipe', 'ignore', 'ignore'] });
-      child.on('error', reject);
-      child.on('exit', (code) =>
-        code === 0 ? resolve() : reject(new Error(`exit ${code}`)),
-      );
-      // A fast-failing helper (e.g. xclip without a display) leaves queued
-      // writes behind; without a listener the resulting EPIPE crashes the
-      // CLI instead of failing this copy.
-      child.stdin.on('error', () => {});
-      child.stdin.write(text);
-      child.stdin.end();
-    } catch (e) {
-      reject(e as Error);
-    }
-  });
-}
+// Same cap as ink's writeOsc52: iTerm2 caps at ~100KB base64, xterm ~8KB;
+// 75KB utf-8 is ~100KB base64. Larger payloads skip OSC 52 and rely on the
+// platform command.
+const MAX_OSC52_BYTES = 75_000;
 
 /**
  * Write text to the system clipboard.
@@ -66,7 +50,7 @@ export async function copyText(text: string): Promise<boolean> {
   const isWarp =
     /warp/i.test(process.env['TERM_PROGRAM'] ?? '') ||
     /warp/i.test(process.env['TERMINAL_EMULATOR'] ?? '');
-  if (!isWarp) {
+  if (!isWarp && Buffer.byteLength(text, 'utf8') <= MAX_OSC52_BYTES) {
     try {
       process.stdout.write(osc52Sequence(text));
     } catch {
@@ -74,7 +58,7 @@ export async function copyText(text: string): Promise<boolean> {
     }
   }
   try {
-    await platformCopy(text);
+    await copyToClipboard(text);
     return true;
   } catch {
     return false;

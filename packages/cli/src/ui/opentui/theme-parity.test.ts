@@ -91,11 +91,11 @@ describe('palette parity (semantic tokens → opentui palette)', () => {
     // theme default color, so opentui must too.
     expect(definition!.palette.text).toBe('#bfbdb6');
     expect(definition!.palette.dim).toBe('#6C7086');
-    expect(definition!.palette.accent).toBe('#89B4FA');
+    expect(definition!.palette.accent).toBe('#CBA6F7');
     expect(definition!.palette.green).toBe('#A6E3A1');
     expect(definition!.palette.red).toBe('#F38BA8');
     expect(definition!.palette.yellow).toBe('#F9E2AF');
-    expect(definition!.palette.purple).toBe('#CBA6F7');
+    expect(definition!.palette.purple).toBe('#89B4FA');
     expect(definition!.palette.hover).toBe('#1E1E2E');
   });
 
@@ -104,11 +104,11 @@ describe('palette parity (semantic tokens → opentui palette)', () => {
     expect(definition!.palette).toEqual({
       text: '#a3afb7',
       dim: '#6272a4',
-      accent: '#8be9fd',
+      accent: '#ff79c6',
       green: '#50fa7b',
       red: '#ff5555',
       yellow: '#fff783',
-      purple: '#ff79c6',
+      purple: '#8be9fd',
       hover: '#282a36',
     });
   });

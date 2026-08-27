@@ -49,6 +49,21 @@ describe('decodeCapturedInput', () => {
   it('preserves multibyte (CJK) input', () => {
     expect(decodeCapturedInput(Buffer.from('你好，世界'))).toBe('你好，世界');
   });
+
+  it('strips CSI colon params, intermediates and private flags (R1-5)', () => {
+    // kitty CSI-u colon parameters, space intermediate + private `?` flag:
+    // the full ECMA-48 production must be consumed as one sequence.
+    expect(
+      decodeCapturedInput(
+        Buffer.from('\u001B[38:5:208mA\u001B[ qB\u001B[?25lC'),
+      ),
+    ).toBe('ABC');
+  });
+
+  it('drops a truncated trailing CSI sequence (R1-5)', () => {
+    // A replay cut mid-sequence must not leak '[12;3' into the composer.
+    expect(decodeCapturedInput(Buffer.from('AB\u001B[12;3'))).toBe('AB');
+  });
 });
 
 describe('drainCapturedInputAsText', () => {

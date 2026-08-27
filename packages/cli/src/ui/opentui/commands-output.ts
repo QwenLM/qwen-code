@@ -104,22 +104,12 @@ export function commandMessageItem(
 }
 
 /**
- * Parity of `SLASH_COMMANDS_SKIP_RECORDING` in
- * ui/hooks/slashCommandProcessor.ts: primary command names that are never
- * written to the chat recording service.
+ * Re-export of the canonical `SLASH_COMMANDS_SKIP_RECORDING` set
+ * (ui/utils/commandUtils.ts) — primary command names that are never written
+ * to the chat recording service. Importing the original keeps both
+ * renderers recording the same commands.
  */
-export const SLASH_COMMANDS_SKIP_RECORDING: ReadonlySet<string> = new Set([
-  'quit',
-  'exit',
-  'clear',
-  'reset',
-  'new',
-  'resume',
-  'delete',
-  'branch',
-  'btw',
-  'history',
-]);
+export { SLASH_COMMANDS_SKIP_RECORDING } from '../utils/commandUtils.js';
 
 /**
  * Parity of `serializeHistoryItemForRecording` in

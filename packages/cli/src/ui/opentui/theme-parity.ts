@@ -55,11 +55,11 @@ export function paletteFromInkTheme(theme: Theme): Palette {
   return {
     text: semantic.text.primary || theme.defaultColor,
     dim: semantic.text.secondary,
-    accent: semantic.text.link,
+    accent: semantic.text.accent,
     green: semantic.status.success,
     red: semantic.status.error,
     yellow: semantic.status.warning,
-    purple: semantic.text.accent,
+    purple: semantic.text.link,
     hover: semantic.background.primary,
   };
 }

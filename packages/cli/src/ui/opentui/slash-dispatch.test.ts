@@ -173,6 +173,73 @@ describe('executeSlashCommand (result mapping)', () => {
   });
 });
 
+describe('executeSlashCommand ink-processor guards (R1-96/100/101/102)', () => {
+  it('does not treat comment-style input as slash commands', () => {
+    expect(isSlashCommandInput('/* This is a block comment */')).toBe(false);
+    expect(isSlashCommandInput('// line note')).toBe(false);
+  });
+
+  it('maps ui.clear() to the clear effect', async () => {
+    const commands = [
+      stub({
+        name: 'wipe',
+        action: (ctx) => {
+          ctx.ui.clear();
+        },
+      }),
+    ];
+    const effect = await executeSlashCommand('/wipe', commands, {
+      config: null,
+    });
+    expect(effect).toEqual({ kind: 'clear' });
+  });
+
+  it('drops the action result once the submission is aborted', async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const effect = await executeSlashCommand('/ask', registry, {
+      config: null,
+      abortSignal: controller.signal,
+    });
+    expect(effect).toEqual({ kind: 'handled' });
+  });
+
+  it('defers stacked skill invocations instead of leaking the second skill', async () => {
+    const skills = [
+      stub({ name: 'feat-dev', kind: CommandKind.SKILL }),
+      stub({ name: 'e2e-testing', kind: CommandKind.SKILL }),
+    ];
+    const effect = await executeSlashCommand(
+      '/feat-dev /e2e-testing do it',
+      skills,
+      { config: null },
+    );
+    expect(effect.kind).toBe('message');
+    if (effect.kind !== 'message') return;
+    expect(effect.content).toContain('Stacked skill invocations');
+    expect(effect.content).toContain('/feat-dev /e2e-testing');
+  });
+
+  it('projects ui.addItem history items to transcript text', async () => {
+    const commands = [
+      stub({
+        name: 'showstats',
+        action: (ctx) => {
+          ctx.ui.addItem({ type: 'stats', duration: '9m' }, Date.now());
+        },
+      }),
+    ];
+    const effect = await executeSlashCommand('/showstats', commands, {
+      config: null,
+    });
+    expect(effect.kind).toBe('message');
+    if (effect.kind !== 'message') return;
+    expect(effect.messageType).toBe('info');
+    expect(effect.content).toContain('Session Stats');
+    expect(effect.content).toContain('Session duration: 9m');
+  });
+});
+
 describe('original built-in registry', () => {
   it('loads built-in commands without a config (BuiltinCommandLoader)', async () => {
     const commands = await loadInteractiveCommands(null);

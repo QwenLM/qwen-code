@@ -175,6 +175,9 @@ export function OpenTuiThemeDialog(props: OpenTuiThemeDialogProps) {
     initialIndex: safeInitialThemeIndex,
     focused: mode === 'theme',
     maxItemsToShow: THEME_DIALOG_MAX_ITEMS_TO_SHOW,
+    // The item list grows/shrinks with the scope's custom themes; re-sync
+    // the cursor on scope change like ink's useSelectionList re-clamps.
+    resyncKey: selectedScope,
     onSelect: (themeName) => onSelect(themeName, selectedScope),
     onHighlight: (themeName) => {
       setHighlightedThemeName(themeName);
@@ -269,9 +272,15 @@ export function OpenTuiThemeDialog(props: OpenTuiThemeDialogProps) {
                 filetype="python"
                 syntaxStyle={SYNTAX}
                 fg={C.text}
+                height={layout.codeBlockHeight}
               />
               <box marginTop={1}>
-                <diff diff={THEME_PREVIEW_DIFF} view="unified" fg={C.text} />
+                <diff
+                  diff={THEME_PREVIEW_DIFF}
+                  view="unified"
+                  fg={C.text}
+                  height={layout.diffHeight}
+                />
               </box>
             </box>
           </box>

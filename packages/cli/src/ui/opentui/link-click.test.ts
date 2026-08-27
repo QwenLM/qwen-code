@@ -119,6 +119,32 @@ describe('readBufferRow', () => {
     expect(decodeRowCells(grid, -1)).toBeNull();
     expect(decodeRowCells(grid, 1)).toBeNull();
   });
+
+  it('pushes one cellColumns entry per UTF-16 unit for non-BMP cells (R1-88)', () => {
+    // The emoji is a single cell but occupies two UTF-16 units in `text`;
+    // findUrlAtRow indexes cellColumns with UTF-16 offsets, so both units
+    // must map back to the emoji's cell column.
+    const grid: CellGrid = {
+      buffers: {
+        char: Uint32Array.from([
+          0x1f600,
+          0x20,
+          ...'https://a.dev'.split('').map((c) => c.codePointAt(0)!),
+        ]),
+      },
+      width: 15,
+      height: 1,
+    };
+    const row = readBufferRow(grid, 0);
+    expect(row.text).toBe('😀 https://a.dev');
+    expect(row.cellColumns).toEqual([
+      0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14,
+    ]);
+    expect(findUrlAtRow(row, 2)?.url).toBe('https://a.dev');
+    expect(findUrlAtRow(row, 14)?.url).toBe('https://a.dev');
+    expect(findUrlAtRow(row, 1)).toBeNull(); // on the space cell
+    expect(findUrlAtRow(row, 15)).toBeNull(); // past the row
+  });
 });
 
 describe('extractUrlHits', () => {

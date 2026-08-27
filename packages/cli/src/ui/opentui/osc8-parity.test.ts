@@ -90,6 +90,14 @@ describe('osc8-parity renderMarkdownLink', () => {
     const out = renderMarkdownLink('lbl\x1b[31m', 'https://example.com', true);
     expect(out.text).not.toContain('\x1b[31m');
   });
+
+  it('unescapes backslash-dollars in the label (R1-9)', () => {
+    // The math-enabled markdown pipeline emits '\$' labels; ink shows '$'.
+    const wrapped = renderMarkdownLink('cost \\$5', 'https://x.dev', true);
+    expect(wrapped.text).toContain('cost $5');
+    const legacy = renderMarkdownLink('cost \\$5', 'https://x.dev', false);
+    expect(legacy.text).toBe('cost $5 (https://x.dev)');
+  });
 });
 
 describe('osc8-parity renderBareUrl', () => {
@@ -114,6 +122,19 @@ describe('osc8-parity renderBareUrl', () => {
     const out = renderBareUrl('https://en.wikipedia.org/wiki/Foo_(bar)', true);
     expect(out.text).toBe(
       `${osc8Open('https://en.wikipedia.org/wiki/Foo_(bar)')}https://en.wikipedia.org/wiki/Foo_(bar)${osc8Close()}`,
+    );
+  });
+
+  it('drops a trailing underscore when the next char ends the URL run (R1-93)', () => {
+    // The break set is CJK/fullwidth punctuation; a fullwidth comma after
+    // the underscore ends the run, so the target trims it off.
+    const out = renderBareUrl('https://x.dev/a_', true, '，');
+    expect(out.text).toBe(
+      `${osc8Open('https://x.dev/a')}https://x.dev/a_${osc8Close()}`,
+    );
+    const kept = renderBareUrl('https://x.dev/a_', true, 'b');
+    expect(kept.text).toBe(
+      `${osc8Open('https://x.dev/a_')}https://x.dev/a_${osc8Close()}`,
     );
   });
 });
