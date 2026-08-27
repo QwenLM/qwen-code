@@ -12705,7 +12705,7 @@ describe('CoreToolScheduler telemetry spans', () => {
     expect(responseText).not.toContain('had already completed');
   });
 
-  it('tells the model a post-completion cancellation discarded finished work', async () => {
+  it('tells the model a post-completion cancellation was user-directed and should stop', async () => {
     const abortController = new AbortController();
     const { completedCalls } = await runSingleTool({
       abortController,
@@ -12719,8 +12719,9 @@ describe('CoreToolScheduler telemetry spans', () => {
     expect(completedCall.status).toBe('cancelled');
     expect(completedCall.response.executionStatus).toBe('cancelled');
     const responseText = JSON.stringify(completedCall.response.responseParts);
-    expect(responseText).toContain('The tool had already completed');
-    expect(responseText).not.toContain('User cancelled tool execution.');
+    expect(responseText).toContain('User intentionally cancelled');
+    expect(responseText).toContain('Stop and await further instructions');
+    expect(responseText).toContain('discarded');
   });
 
   // A post-execution cancellation drops the model-visible output, but the
