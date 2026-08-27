@@ -926,6 +926,7 @@ describe('archiveDaemonSessions', () => {
     });
     vi.spyOn(service, 'acquireSessionWriterLease').mockResolvedValue({
       assertOwnedAndUnchanged: vi.fn().mockResolvedValue(undefined),
+      assertCleanupOwned: vi.fn(),
       release,
     } as unknown as SessionWriterLease);
 

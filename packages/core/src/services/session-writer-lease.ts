@@ -7,6 +7,7 @@
 import { execFile } from 'node:child_process';
 import * as nodeConstants from 'node:constants';
 import { createHash, randomUUID, type Hash } from 'node:crypto';
+import * as nodeFs from 'node:fs';
 import type { Stats } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
@@ -1964,6 +1965,62 @@ export class SessionWriterLease {
       throw new SessionWriterLostError();
     }
     return record;
+  }
+
+  /** Verify ownership after the transcript snapshot intentionally changes. */
+  assertCleanupOwned(): void {
+    if (this.released) throw new SessionWriterLostError();
+    let descriptor: number;
+    try {
+      descriptor = nodeFs.openSync(
+        this.lockPath,
+        nodeConstants.O_RDONLY |
+          (nodeConstants.O_NOFOLLOW ?? 0) |
+          (nodeConstants.O_NONBLOCK ?? 0),
+      );
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === 'ENOENT' || code === 'ELOOP') {
+        throw new SessionWriterLostError();
+      }
+      throw new SessionWriterUnavailableError();
+    }
+    try {
+      const stat = nodeFs.fstatSync(descriptor);
+      if (!stat.isFile()) throw new SessionWriterLostError();
+      let pathStat: Stats;
+      try {
+        pathStat = nodeFs.lstatSync(this.lockPath);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+          throw new SessionWriterLostError();
+        }
+        throw new SessionWriterUnavailableError();
+      }
+      if (
+        !pathStat.isFile() ||
+        pathStat.isSymbolicLink() ||
+        pathStat.dev !== stat.dev ||
+        pathStat.ino !== stat.ino
+      ) {
+        throw new SessionWriterLostError();
+      }
+      const raw = nodeFs.readFileSync(descriptor, 'utf8');
+      const record = parseLockRecord(raw);
+      if (
+        !record ||
+        !isActiveLockRecord(record) ||
+        record.owner_id !== this.ownerId ||
+        raw !== this.lockRecordRaw
+      ) {
+        throw new SessionWriterLostError();
+      }
+    } catch (error) {
+      if (error instanceof SessionWriterLostError) throw error;
+      throw new SessionWriterUnavailableError();
+    } finally {
+      nodeFs.closeSync(descriptor);
+    }
   }
 
   assertOwnedAndUnchanged(): Promise<void> {

@@ -225,6 +225,7 @@ async function runWithDaemonWriterLease<T>(params: {
   service: SessionService;
   mutate: (
     assertOwnedAndUnchanged: () => Promise<void>,
+    assertCleanupOwned: () => void,
   ) => Promise<{ value: T; mutationApplied: boolean }>;
   mutationAppliedAfterError: () => Promise<boolean>;
   afterMutationApplied: () => Promise<void>;
@@ -266,7 +267,10 @@ async function runWithDaemonWriterLease<T>(params: {
   let mutationApplied = false;
   let mutationError: unknown;
   try {
-    const mutation = await mutate(() => lease.assertOwnedAndUnchanged());
+    const mutation = await mutate(
+      () => lease.assertOwnedAndUnchanged(),
+      () => lease.assertCleanupOwned(),
+    );
     value = mutation.value;
     mutationApplied = mutation.mutationApplied;
   } catch (error) {
@@ -438,7 +442,7 @@ async function deletePersistedSessionWithLease(
     action: 'delete',
     sessionId,
     service,
-    mutate: async (assertOwnedAndUnchanged) => {
+    mutate: async (assertOwnedAndUnchanged, assertCleanupOwned) => {
       const lockedLocation = await classifySessionLocation(service, sessionId);
       if (lockedLocation === undefined) {
         return {
@@ -449,6 +453,7 @@ async function deletePersistedSessionWithLease(
       const removed = await service.removeSession(sessionId, {
         assertStorageUnchanged: assertOwnedAndUnchanged,
         assertCanMutate,
+        assertCleanupOwned,
       });
       return {
         value: removed ? ('removed' as const) : ('notFound' as const),
@@ -895,7 +900,7 @@ export async function archiveDaemonSessions(params: {
             action: 'archive',
             sessionId,
             service,
-            mutate: async (assertOwnedAndUnchanged) => {
+            mutate: async (assertOwnedAndUnchanged, assertCleanupOwned) => {
               const lockedLocation = await classifySessionLocation(
                 service,
                 sessionId,
@@ -919,6 +924,7 @@ export async function archiveDaemonSessions(params: {
                 resolveConflicts,
                 assertStorageUnchanged: assertOwnedAndUnchanged,
                 assertCanMutate,
+                assertCleanupOwned,
               });
               if (result.errors[0]) throw result.errors[0].error;
               if (result.archived.length > 0) {
@@ -1092,7 +1098,7 @@ export async function unarchiveDaemonSessions(params: {
             action: 'unarchive',
             sessionId,
             service,
-            mutate: async (assertOwnedAndUnchanged) => {
+            mutate: async (assertOwnedAndUnchanged, assertCleanupOwned) => {
               const lockedLocation = await classifySessionLocation(
                 service,
                 sessionId,
@@ -1116,6 +1122,7 @@ export async function unarchiveDaemonSessions(params: {
                 resolveConflicts,
                 assertStorageUnchanged: assertOwnedAndUnchanged,
                 assertCanMutate,
+                assertCleanupOwned,
               });
               if (result.errors[0]) throw result.errors[0].error;
               if (result.unarchived.length > 0) {

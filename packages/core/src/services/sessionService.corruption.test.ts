@@ -997,7 +997,7 @@ describe('SessionService lifecycle maintenance', () => {
   });
 
   it.each(['archive', 'unarchive'] as const)(
-    'does not swallow a generation rejection at the %s ledger fence',
+    'finishes the %s ledger move after the generation closes',
     async (action) => {
       const state = action === 'archive' ? 'active' : 'archived';
       const { service, sessionId, paths } = createHarness('transcript', state);
@@ -1017,12 +1017,47 @@ describe('SessionService lifecycle maintenance', () => {
         .mockImplementation(() => {
           throw generationChanged;
         });
+      const assertCleanupOwned = vi.fn();
 
       const result = await service[`${action}Sessions`]([sessionId], {
         assertCanMutate,
+        assertCleanupOwned,
       });
 
-      expect(result.errors[0]?.error).toBe(generationChanged);
+      expect(result.errors).toEqual([]);
+      expect(assertCanMutate).toHaveBeenCalledOnce();
+      expect(assertCleanupOwned).toHaveBeenCalled();
+      expect(fs.existsSync(sourceLedger)).toBe(false);
+      expect(fs.existsSync(destinationLedger)).toBe(true);
+    },
+  );
+
+  it.each(['archive', 'unarchive'] as const)(
+    'stops the %s ledger move after cleanup ownership is lost',
+    async (action) => {
+      const state = action === 'archive' ? 'active' : 'archived';
+      const { service, sessionId, paths } = createHarness('transcript', state);
+      const sourcePath = paths[state];
+      const destinationPath =
+        action === 'archive' ? paths.archived : paths.active;
+      const sourceLedger = sourcePath.replace(/\.jsonl$/, '.ledger.jsonl');
+      const destinationLedger = destinationPath.replace(
+        /\.jsonl$/,
+        '.ledger.jsonl',
+      );
+      fs.writeFileSync(sourceLedger, '{"promptId":"p1"}\n');
+      const ownershipLost = new Error('writer ownership lost');
+
+      const result = await service[`${action}Sessions`]([sessionId], {
+        assertCanMutate: vi.fn(),
+        assertCleanupOwned: () => {
+          throw ownershipLost;
+        },
+      });
+
+      expect(result.errors[0]?.error).toBe(ownershipLost);
+      expect(fs.existsSync(sourcePath)).toBe(false);
+      expect(fs.existsSync(destinationPath)).toBe(true);
       expect(fs.existsSync(sourceLedger)).toBe(true);
       expect(fs.existsSync(destinationLedger)).toBe(false);
     },
