@@ -38,7 +38,12 @@ import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { isNodeError } from './errors.js';
-import { isPidAlive } from './process-liveness.js';
+import {
+  isPidAlive,
+  isSameProcess,
+  readPidNamespaceId,
+  readProcStartToken,
+} from './process-liveness.js';
 
 export const RUNTIME_STATUS_SCHEMA_VERSION = 1;
 
@@ -52,6 +57,8 @@ export interface RuntimeStatus {
   /** Epoch seconds (with sub-second precision). Matches kimi-cli's format. */
   startedAt: number;
   qwenVersion: string | null;
+  pidNamespaceId?: number | null;
+  procStartToken?: string | null;
 }
 
 /**
@@ -67,6 +74,8 @@ interface RuntimeStatusOnDisk {
   hostname: string;
   started_at: number;
   qwen_version: string | null;
+  pid_namespace_id?: number | null;
+  proc_start_token?: string | null;
 }
 
 export interface WriteRuntimeStatusFields {
@@ -81,14 +90,17 @@ export interface WriteRuntimeStatusFields {
 function createRuntimeStatusPayload(
   fields: WriteRuntimeStatusFields,
 ): RuntimeStatusOnDisk {
+  const pid = fields.pid ?? process.pid;
   return {
     schema_version: RUNTIME_STATUS_SCHEMA_VERSION,
-    pid: fields.pid ?? process.pid,
+    pid,
     session_id: fields.sessionId,
     work_dir: fields.workDir,
     hostname: os.hostname(),
     started_at: Date.now() / 1000,
     qwen_version: fields.qwenVersion ?? null,
+    pid_namespace_id: readPidNamespaceId(),
+    proc_start_token: readProcStartToken(pid),
   };
 }
 
@@ -226,10 +238,14 @@ export function hasActiveRuntimeStatusClaimSync(
 }
 
 export function isRuntimeStatusActive(status: RuntimeStatus): boolean {
-  return (
-    status.pid > 0 &&
-    (status.hostname !== os.hostname() || isPidAlive(status.pid))
-  );
+  if (status.pid <= 0) return false;
+  if (status.hostname !== os.hostname()) return true;
+  const currentNamespace = readPidNamespaceId();
+  if (status.pidNamespaceId != null && currentNamespace != null) {
+    if (status.pidNamespaceId !== currentNamespace) return true;
+    return isSameProcess(status.pid, status.procStartToken);
+  }
+  return isPidAlive(status.pid);
 }
 
 function parseRuntimeStatus(data: unknown): RuntimeStatus | null {
@@ -250,6 +266,8 @@ function parseRuntimeStatus(data: unknown): RuntimeStatus | null {
   const hostname = obj['hostname'];
   const startedAt = obj['started_at'];
   const qwenVersion = obj['qwen_version'];
+  const pidNamespaceId = obj['pid_namespace_id'];
+  const procStartToken = obj['proc_start_token'];
 
   if (!isFiniteInteger(schemaVersion)) return null;
   if (!isFiniteInteger(pid)) return null;
@@ -269,6 +287,8 @@ function parseRuntimeStatus(data: unknown): RuntimeStatus | null {
     hostname,
     startedAt,
     qwenVersion,
+    pidNamespaceId: isFiniteInteger(pidNamespaceId) ? pidNamespaceId : null,
+    procStartToken: typeof procStartToken === 'string' ? procStartToken : null,
   };
 }
 

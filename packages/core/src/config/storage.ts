@@ -779,21 +779,16 @@ export class Storage {
           Storage.removeOrphanMarker(entryPath);
           continue;
         }
-        const { cwds, incomplete } = Storage.collectRecordedCwds(entryPath);
+        const { cwds, incomplete, keepOnly } =
+          Storage.collectRecordedCwds(entryPath);
+        if (keepOnly || cwds.some((cwd) => Storage.isKeepCwd(cwd))) {
+          Storage.removeOrphanMarker(entryPath);
+          continue;
+        }
         if (incomplete) {
-          // Some artifact was unreadable or exceeded the scan budget:
-          // the evidence may omit a live cwd, so fail closed — no
-          // marker, no deletion.
           continue;
         }
         if (cwds.length > 0) {
-          // `/cd` relocation keeps the old cwd on line 1 and moves the
-          // file, so a single sampled cwd is not conclusive: a single
-          // existing non-temp cwd vetoes removal.
-          if (cwds.some((cwd) => fs.existsSync(cwd) && !isTempDirPath(cwd))) {
-            Storage.removeOrphanMarker(entryPath);
-            continue;
-          }
           // No live non-temp cwd — a crashed temp session, a deleted
           // worktree, or a real project transiently absent (ejected
           // media, mount down). One sweep must not decide any of these:
@@ -873,7 +868,7 @@ export class Storage {
       ) {
         return;
       }
-      if (cwds.some((cwd) => fs.existsSync(cwd) && !isTempDirPath(cwd))) {
+      if (cwds.some((cwd) => Storage.isKeepCwd(cwd))) {
         Storage.removeOrphanMarker(entryPath);
         return;
       }
@@ -980,27 +975,42 @@ export class Storage {
   static collectRecordedCwds(entryPath: string): {
     cwds: string[];
     incomplete: boolean;
+    keepOnly: boolean;
   } {
     const cwds = new Set<string>();
-    const state = { incomplete: false };
+    const state = { incomplete: false, keepOnly: false };
     Storage.scanDirForCwds(path.join(entryPath, 'chats'), cwds, 0, state);
     Storage.scanDirForCwds(path.join(entryPath, 'subagents'), cwds, 0, state);
-    return { cwds: [...cwds], incomplete: state.incomplete };
+    return {
+      cwds: [...cwds],
+      incomplete: state.incomplete,
+      keepOnly: state.keepOnly,
+    };
   }
 
   /**
-   * A cwd that still exists outside temp roots vetoes removal on every
-   * caller's predicate, so it can end the scan early.
+   * A cwd that still exists outside temp roots, or whose path belongs to a
+   * different OS namespace, vetoes removal.
    */
-  private static isVetoCwd(cwd: string): boolean {
-    return fs.existsSync(cwd) && !isTempDirPath(cwd);
+  private static isKeepCwd(cwd: string): boolean {
+    return (
+      Storage.isUnevaluableCwd(cwd) ||
+      (fs.existsSync(cwd) && !isTempDirPath(cwd))
+    );
+  }
+
+  private static isUnevaluableCwd(cwd: string): boolean {
+    if (/^[A-Za-z]:[\\/]/.test(cwd)) {
+      return process.platform !== 'win32';
+    }
+    return process.platform === 'win32' && /^\/[A-Za-z](?:\/|$)/.test(cwd);
   }
 
   private static scanDirForCwds(
     dir: string,
     cwds: Set<string>,
     depth: number,
-    state: { incomplete: boolean },
+    state: { incomplete: boolean; keepOnly: boolean },
   ): boolean {
     if (depth > 2) return false;
     let dirents: fs.Dirent[];
@@ -1020,10 +1030,19 @@ export class Storage {
       } else if (dirent.name.endsWith('.jsonl')) {
         vetoed = Storage.scanFileForCwds(entryPath, cwds, state);
       } else if (dirent.name.endsWith('.runtime.json')) {
+        const hostname = Storage.readJsonStringField(
+          entryPath,
+          'hostname',
+          state,
+        );
+        if (hostname && hostname !== os.hostname()) {
+          state.keepOnly = true;
+          vetoed = true;
+        }
         const cwd = Storage.readJsonStringField(entryPath, 'work_dir', state);
         if (cwd) {
           cwds.add(cwd);
-          vetoed = Storage.isVetoCwd(cwd);
+          vetoed ||= Storage.isKeepCwd(cwd);
         }
       } else if (dirent.name.endsWith('.worktree.json')) {
         // `worktreePath`, not `originalCwd`: the repo root stays alive
@@ -1035,7 +1054,7 @@ export class Storage {
         );
         if (cwd) {
           cwds.add(cwd);
-          vetoed = Storage.isVetoCwd(cwd);
+          vetoed = Storage.isKeepCwd(cwd);
         }
       }
       if (vetoed) return true;
@@ -1047,7 +1066,7 @@ export class Storage {
   private static scanFileForCwds(
     filePath: string,
     cwds: Set<string>,
-    state: { incomplete: boolean },
+    state: { incomplete: boolean; keepOnly: boolean },
   ): boolean {
     try {
       if (fs.statSync(filePath).size > Storage.CWD_SCAN_MAX_FILE_BYTES) {
@@ -1065,7 +1084,7 @@ export class Storage {
         const cwd = record['cwd'];
         if (typeof cwd === 'string' && cwd) {
           cwds.add(cwd);
-          if (Storage.isVetoCwd(cwd)) return true;
+          if (Storage.isKeepCwd(cwd)) return true;
         }
       }
       return false;
@@ -1078,7 +1097,7 @@ export class Storage {
   private static readJsonStringField(
     filePath: string,
     field: string,
-    state: { incomplete: boolean },
+    state: { incomplete: boolean; keepOnly: boolean },
   ): string | null {
     try {
       const parsed = JSON.parse(fs.readFileSync(filePath, 'utf8')) as Record<

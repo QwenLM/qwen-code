@@ -9,7 +9,16 @@ if (process.env['NO_COLOR'] !== undefined) {
   delete process.env['NO_COLOR'];
 }
 
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import { setSimulate429 } from './src/utils/testUtils.js';
+
+if (process.env['QWEN_RUNTIME_DIR'] === undefined) {
+  process.env['QWEN_RUNTIME_DIR'] = fs.mkdtempSync(
+    path.join(os.tmpdir(), 'qwen-code-core-test-runtime-'),
+  );
+}
 
 // Avoid writing per-session debug log files during tests.
 // Unit tests can opt-in by overriding this env var.

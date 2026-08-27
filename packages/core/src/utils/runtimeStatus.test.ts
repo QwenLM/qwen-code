@@ -8,6 +8,7 @@ import { mkdtemp, readFile, rm, writeFile, readdir } from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { readPidNamespaceId, readProcStartToken } from './process-liveness.js';
 import {
   RUNTIME_STATUS_SCHEMA_VERSION,
   clearRuntimeStatus,
@@ -81,6 +82,63 @@ describe('runtime status discovery', () => {
     expect(isRuntimeStatusActive({ ...statuses[0]!, pid: 0 })).toBe(false);
   });
 
+  it.skipIf(process.platform !== 'linux')(
+    'treats claims from a different pid namespace as active keep-only evidence',
+    () => {
+      const currentNamespace = readPidNamespaceId();
+      expect(currentNamespace).not.toBeNull();
+
+      expect(
+        isRuntimeStatusActive({
+          schemaVersion: RUNTIME_STATUS_SCHEMA_VERSION,
+          pid: 2_000_000_000,
+          sessionId: 'abc',
+          workDir: '/remote',
+          hostname: os.hostname(),
+          startedAt: Date.now() / 1000,
+          qwenVersion: null,
+          pidNamespaceId: currentNamespace! + 1,
+          procStartToken: null,
+        }),
+      ).toBe(true);
+    },
+  );
+
+  it.skipIf(process.platform !== 'linux')(
+    'uses the proc start token for claims in the current pid namespace',
+    () => {
+      const currentNamespace = readPidNamespaceId();
+      expect(currentNamespace).not.toBeNull();
+
+      expect(
+        isRuntimeStatusActive({
+          schemaVersion: RUNTIME_STATUS_SCHEMA_VERSION,
+          pid: process.pid,
+          sessionId: 'abc',
+          workDir: process.cwd(),
+          hostname: os.hostname(),
+          startedAt: Date.now() / 1000,
+          qwenVersion: null,
+          pidNamespaceId: currentNamespace,
+          procStartToken: readProcStartToken(process.pid),
+        }),
+      ).toBe(true);
+      expect(
+        isRuntimeStatusActive({
+          schemaVersion: RUNTIME_STATUS_SCHEMA_VERSION,
+          pid: process.pid,
+          sessionId: 'abc',
+          workDir: process.cwd(),
+          hostname: os.hostname(),
+          startedAt: Date.now() / 1000,
+          qwenVersion: null,
+          pidNamespaceId: currentNamespace,
+          procStartToken: 'not-this-process:1',
+        }),
+      ).toBe(false);
+    },
+  );
+
   it('treats an unreadable runtime sidecar as unknown keep-only evidence', async () => {
     await writeRuntimeStatus(path.join(tmpDir, 'abc.runtime.json'), {
       sessionId: 'abc',
@@ -113,6 +171,13 @@ describe('writeRuntimeStatus', () => {
     expect(data.hostname.length).toBeGreaterThan(0);
     expect(typeof data.started_at).toBe('number');
     expect(data.qwen_version).toBe('0.15.3');
+    expect(
+      data.pid_namespace_id === null || Number.isInteger(data.pid_namespace_id),
+    ).toBe(true);
+    expect(
+      data.proc_start_token === null ||
+        typeof data.proc_start_token === 'string',
+    ).toBe(true);
   });
 
   it('defaults pid to process.pid and qwen_version to null', async () => {

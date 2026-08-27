@@ -752,7 +752,13 @@ describe('Storage – cleanOrphanProjectDirs', () => {
 
   const writeRuntimeSidecar = (
     filePath: string,
-    fields: { pid: number; workDir: string; hostname?: string },
+    fields: {
+      pid: number;
+      workDir: string;
+      hostname?: string;
+      pidNamespaceId?: number | null;
+      procStartToken?: string | null;
+    },
   ) => {
     actualFs.writeFileSync(
       filePath,
@@ -764,6 +770,8 @@ describe('Storage – cleanOrphanProjectDirs', () => {
         hostname: fields.hostname ?? os.hostname(),
         started_at: Date.now() / 1000,
         qwen_version: null,
+        pid_namespace_id: fields.pidNamespaceId ?? null,
+        proc_start_token: fields.procStartToken ?? null,
       }),
     );
   };
@@ -1034,11 +1042,79 @@ describe('Storage – cleanOrphanProjectDirs', () => {
     );
     ageEntry('-foreign-live');
 
-    await sweepPastMarkerGrace('-foreign-live');
+    await Storage.cleanOrphanProjectDirs('current');
 
     expect(actualFs.existsSync(path.join(projectsDir, '-foreign-live'))).toBe(
       true,
     );
+    expect(
+      actualFs.existsSync(
+        path.join(projectsDir, '-foreign-live', '.qwen-orphan-since'),
+      ),
+    ).toBe(false);
+  });
+
+  it.skipIf(process.platform !== 'linux')(
+    'keeps stale entries claimed from another pid namespace (R23-1)',
+    async () => {
+      writeSession('-foreign-namespace-live', goneCwd);
+      writeRuntimeSidecar(
+        path.join(
+          projectsDir,
+          '-foreign-namespace-live',
+          'chats',
+          'session-1.runtime.json',
+        ),
+        {
+          pid: DEAD_PID,
+          workDir: goneCwd,
+          pidNamespaceId: actualFs.statSync('/proc/self/ns/pid').ino + 1,
+        },
+      );
+      ageEntry('-foreign-namespace-live');
+      actualFs.writeFileSync(
+        path.join(projectsDir, '-foreign-namespace-live', '.qwen-orphan-since'),
+        String(Date.now() - STALE_AGE_MS),
+      );
+      ageFile(
+        path.join(projectsDir, '-foreign-namespace-live', '.qwen-orphan-since'),
+      );
+
+      await Storage.cleanOrphanProjectDirs('current');
+
+      expect(
+        actualFs.existsSync(path.join(projectsDir, '-foreign-namespace-live')),
+      ).toBe(true);
+    },
+  );
+
+  it('keeps entries with foreign-host runtime sidecars even when demoted (R23-3)', async () => {
+    writeSession('-foreign-demoted', goneCwd);
+    writeRuntimeSidecar(
+      path.join(
+        projectsDir,
+        '-foreign-demoted',
+        'chats',
+        'session-1.runtime.json',
+      ),
+      {
+        pid: 0,
+        workDir: goneCwd,
+        hostname: 'another-machine.example',
+      },
+    );
+    ageEntry('-foreign-demoted');
+
+    await Storage.cleanOrphanProjectDirs('current');
+
+    expect(
+      actualFs.existsSync(path.join(projectsDir, '-foreign-demoted')),
+    ).toBe(true);
+    expect(
+      actualFs.existsSync(
+        path.join(projectsDir, '-foreign-demoted', '.qwen-orphan-since'),
+      ),
+    ).toBe(false);
   });
 
   it('reads cwds from sidecars and archived transcripts', async () => {
@@ -1242,6 +1318,74 @@ describe('Storage – cleanOrphanProjectDirs', () => {
       false,
     );
   });
+
+  it('clears an old marker when partial evidence includes a live cwd (R23-2)', async () => {
+    const entry = path.join(projectsDir, '-partial-live-cwd');
+    actualFs.mkdirSync(path.join(entry, 'chats'), { recursive: true });
+    actualFs.mkdirSync(path.join(entry, 'subagents', 'sess-1'), {
+      recursive: true,
+    });
+    actualFs.writeFileSync(
+      path.join(entry, 'chats', 'torn.runtime.json'),
+      '{"work_dir":"/missing',
+    );
+    actualFs.writeFileSync(
+      path.join(entry, 'subagents', 'sess-1', 'agent-1.jsonl'),
+      JSON.stringify({ cwd: process.cwd(), type: 'agent' }) + '\n',
+    );
+    actualFs.writeFileSync(
+      path.join(entry, '.qwen-orphan-since'),
+      String(Date.now() - STALE_AGE_MS),
+    );
+    ageEntry('-partial-live-cwd');
+
+    await Storage.cleanOrphanProjectDirs('current');
+
+    expect(actualFs.existsSync(entry)).toBe(true);
+    expect(actualFs.existsSync(path.join(entry, '.qwen-orphan-since'))).toBe(
+      false,
+    );
+  });
+
+  it('keeps POSIX-looking Windows drive mounts on mocked win32 hosts (R23-3)', async () => {
+    const originalPlatform = process.platform;
+    writeSession('-container-path', '/c/Users/example/project');
+    ageEntry('-container-path');
+    try {
+      Object.defineProperty(process, 'platform', { value: 'win32' });
+      await Storage.cleanOrphanProjectDirs('current');
+    } finally {
+      Object.defineProperty(process, 'platform', { value: originalPlatform });
+    }
+
+    expect(actualFs.existsSync(path.join(projectsDir, '-container-path'))).toBe(
+      true,
+    );
+    expect(
+      actualFs.existsSync(
+        path.join(projectsDir, '-container-path', '.qwen-orphan-since'),
+      ),
+    ).toBe(false);
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'keeps Windows absolute paths on POSIX hosts (R23-3)',
+    async () => {
+      writeSession('-windows-path', 'C:\\Users\\example\\project');
+      ageEntry('-windows-path');
+
+      await Storage.cleanOrphanProjectDirs('current');
+
+      expect(actualFs.existsSync(path.join(projectsDir, '-windows-path'))).toBe(
+        true,
+      );
+      expect(
+        actualFs.existsSync(
+          path.join(projectsDir, '-windows-path', '.qwen-orphan-since'),
+        ),
+      ).toBe(false);
+    },
+  );
 
   it('keeps an entry reduced to subagent transcripts of a live cwd (R7-2)', async () => {
     // Subagent records carry their launch cwd: a live project must veto
