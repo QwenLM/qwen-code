@@ -76,7 +76,7 @@ export interface DaemonChannelSessionFactoryRequest {
   sessionId?: string;
   sessionScope?: SessionScope;
   approvalMode?: string;
-  /** Channel instance name stamped as daemon `sourceId` (new sessions only). */
+  /** Channel instance name stamped as daemon `sourceId`. */
   sourceId?: string;
 }
 
@@ -413,6 +413,7 @@ export class DaemonChannelBridge
       sessionId,
       sessionScope: this.options.sessionScope ?? 'thread',
       ...(options?.approvalMode ? { approvalMode: options.approvalMode } : {}),
+      ...(options?.sourceId ? { sourceId: options.sourceId } : {}),
     });
     if (lifecycleGeneration !== this.lifecycleGeneration) {
       await this.rejectStaleSession(session);

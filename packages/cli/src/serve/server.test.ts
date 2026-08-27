@@ -14220,6 +14220,31 @@ describe('createServeApp', () => {
       });
     });
 
+    it('forwards resume-time source metadata to the bridge', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+      const res = await request(app)
+        .post('/session/persisted-channel/resume')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({
+          sourceType: 'channel',
+          sourceId: 'dingtalk-main',
+        });
+
+      expect(res.status).toBe(200);
+      expect(bridge.resumeCalls[0]).toMatchObject({
+        sessionId: 'persisted-channel',
+        workspaceCwd: WS_BOUND,
+        sourceType: 'channel',
+        sourceId: 'dingtalk-main',
+      });
+    });
+
     // The restore handler's `!res.writable` cleanup branch (kill on
     // !attached, detach on attached) is line-for-line identical to
     // the matching branch on `POST /session`; routing-side
@@ -19357,6 +19382,64 @@ describe('createServeApp', () => {
             sessionId: '550e8400-e29b-41d4-a716-446655440101',
             sourceType: 'scheduled_task',
             sourceId: 'task-123',
+          }),
+        ]);
+      });
+
+      it('filters a restored legacy session by live source metadata', async () => {
+        const sessionId = '550e8400-e29b-41d4-a716-446655440301';
+        await writeStoredSession({
+          sessionId,
+          cwd: WS_BOUND,
+          timestamp: '2026-05-17T12:00:00.000Z',
+          prompt: 'legacy channel session',
+          mtime: new Date('2026-05-17T12:00:00.000Z'),
+        });
+        const bridge = fakeBridge({
+          listImpl: () => [
+            {
+              sessionId,
+              workspaceCwd: WS_BOUND,
+              createdAt: '2026-05-17T12:00:00.000Z',
+              updatedAt: '2026-05-17T12:03:00.000Z',
+              clientCount: 1,
+              hasActivePrompt: false,
+              sourceType: 'channel',
+              sourceId: 'dingtalk-main',
+            },
+          ],
+        });
+        const app = createServeApp(
+          { ...baseOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge, boundWorkspace: WS_BOUND },
+        );
+
+        const filtered = await request(app)
+          .get(
+            `/workspace/${encodeURIComponent(WS_BOUND)}/sessions?sourceType=channel&sourceId=dingtalk-main`,
+          )
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
+        expect(filtered.status).toBe(200);
+        expect(filtered.body.sessions).toEqual([
+          expect.objectContaining({
+            sessionId,
+            sourceType: 'channel',
+            sourceId: 'dingtalk-main',
+          }),
+        ]);
+
+        const organized = await request(app)
+          .get(
+            `/workspace/${encodeURIComponent(WS_BOUND)}/sessions?view=organized&group=all&sourceType=channel&sourceId=dingtalk-main`,
+          )
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
+        expect(organized.status).toBe(200);
+        expect(organized.body.sessions).toEqual([
+          expect.objectContaining({
+            sessionId,
+            sourceType: 'channel',
+            sourceId: 'dingtalk-main',
           }),
         ]);
       });
