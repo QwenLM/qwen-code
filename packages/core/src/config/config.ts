@@ -1859,12 +1859,238 @@ export type DerivedConfigOverrides = Partial<
   >
 >;
 
+export interface DerivedApprovalModeConfigHooks {
+  acquireAutoApprovalOverride(): boolean;
+  releaseAutoApprovalOverride(): void;
+}
+
+export interface DerivedApprovalModeConfigOptions {
+  hooks?: DerivedApprovalModeConfigHooks;
+}
+
+export interface DerivedApprovalModeConfigHandle {
+  config: Config;
+  cleanup: () => void;
+}
+
+export interface DerivedAgentConfigOptions {
+  customIgnoreFiles?: string[];
+  getPlanFilePath?: Config['getPlanFilePath'];
+}
+
+export interface DerivedAgentConfigHandle {
+  config: Config;
+  fileService: FileDiscoveryService;
+  workspaceContext: WorkspaceContext;
+}
+
+export interface DerivedWorktreeConfigOptions {
+  customIgnoreFiles?: string[];
+}
+
+/**
+ * Derives a Config with child-local approval state while preserving the
+ * canonical PermissionManager's AUTO strip/restore lifecycle.
+ */
+export function deriveApprovalModeConfig(
+  base: Config,
+  mode: ApprovalMode,
+  options: DerivedApprovalModeConfigOptions = {},
+): DerivedApprovalModeConfigHandle {
+  const baseApprovalMode = base.getApprovalMode();
+  const initialMode = getTrustedDerivedApprovalMode(base, mode);
+  let autoOverrideAcquired = false;
+  const acquireAutoOverride = () => {
+    if (autoOverrideAcquired || base.getApprovalMode() === ApprovalMode.AUTO) {
+      return;
+    }
+    if (options.hooks) {
+      autoOverrideAcquired = options.hooks.acquireAutoApprovalOverride();
+      return;
+    }
+    base.getPermissionManager?.()?.stripDangerousRulesForAutoMode();
+    autoOverrideAcquired = true;
+  };
+  const releaseAutoOverride = () => {
+    if (!autoOverrideAcquired) return;
+    if (options.hooks) {
+      options.hooks.releaseAutoApprovalOverride();
+    } else if (base.getApprovalMode() !== ApprovalMode.AUTO) {
+      base.getPermissionManager?.()?.restoreDangerousRules();
+    }
+    autoOverrideAcquired = false;
+  };
+
+  const derived = deriveConfig(base, {
+    getApprovalMode: Config.prototype.getApprovalMode,
+  });
+  const state = derived as unknown as {
+    approvalMode: ApprovalMode;
+    prePlanMode?: ApprovalMode;
+    approvalModeRevision: number;
+    manualPlanExitNoticeEventState: ManualPlanExitNoticeEventState;
+    autoModeDenialState: AutoModeDenialState;
+    permissionManager: PermissionManager | null;
+  };
+  state.approvalMode = initialMode;
+  state.prePlanMode =
+    initialMode === ApprovalMode.PLAN
+      ? baseApprovalMode === ApprovalMode.PLAN
+        ? base.getPrePlanMode()
+        : baseApprovalMode
+      : undefined;
+  state.approvalModeRevision = 0;
+  state.manualPlanExitNoticeEventState = {
+    ...((
+      base as unknown as {
+        manualPlanExitNoticeEventState?: ManualPlanExitNoticeEventState;
+      }
+    ).manualPlanExitNoticeEventState ?? { version: 0, kind: 'clear' }),
+  };
+  state.autoModeDenialState = createDenialState();
+
+  Object.defineProperty(derived, 'setApprovalMode', {
+    value: (
+      nextMode: ApprovalMode,
+      setOptions?: Parameters<Config['setApprovalMode']>[1],
+    ): void => {
+      const beforeMode = derived.getApprovalMode();
+      const hadOwnPermissionManager = Object.hasOwn(
+        derived,
+        'permissionManager',
+      );
+      const ownPermissionManager = state.permissionManager;
+      state.permissionManager = null;
+      try {
+        Config.prototype.setApprovalMode.call(derived, nextMode, setOptions);
+      } finally {
+        if (hadOwnPermissionManager) {
+          state.permissionManager = ownPermissionManager;
+        } else {
+          delete (state as Partial<typeof state>).permissionManager;
+        }
+      }
+
+      const afterMode = derived.getApprovalMode();
+      if (beforeMode !== ApprovalMode.AUTO && afterMode === ApprovalMode.AUTO) {
+        acquireAutoOverride();
+      } else if (
+        beforeMode === ApprovalMode.AUTO &&
+        afterMode !== ApprovalMode.AUTO
+      ) {
+        releaseAutoOverride();
+      }
+    },
+    writable: true,
+    configurable: true,
+    enumerable: true,
+  });
+
+  if (
+    initialMode === ApprovalMode.AUTO &&
+    base.getApprovalMode() !== ApprovalMode.AUTO
+  ) {
+    acquireAutoOverride();
+  }
+
+  return { config: derived, cleanup: releaseAutoOverride };
+}
+
+/**
+ * Derives the workspace and optional approval-mode state for one agent.
+ */
+export function deriveAgentConfig(
+  base: Config,
+  workingDirectory: string,
+  options: DerivedAgentConfigOptions = {},
+): DerivedAgentConfigHandle {
+  const fileService = new FileDiscoveryService(
+    workingDirectory,
+    options.customIgnoreFiles,
+  );
+  const workspaceContext = new WorkspaceContext(workingDirectory);
+  const derived = deriveConfig(base, {
+    getTargetDir: () => workingDirectory,
+    getCwd: () => workingDirectory,
+    getWorkingDir: () => workingDirectory,
+    getProjectRoot: () => workingDirectory,
+    getPlanFilePath: options.getPlanFilePath,
+    getFileService: () => fileService,
+    getWorkspaceContext: () => workspaceContext,
+  });
+  const workspaceState = derived as unknown as {
+    targetDir: string;
+    cwd: string;
+    fileDiscoveryService: FileDiscoveryService;
+    workspaceContext: WorkspaceContext;
+  };
+  workspaceState.targetDir = workingDirectory;
+  workspaceState.cwd = workingDirectory;
+  workspaceState.fileDiscoveryService = fileService;
+  workspaceState.workspaceContext = workspaceContext;
+  return {
+    config: derived,
+    fileService,
+    workspaceContext,
+  };
+}
+
+function getTrustedDerivedApprovalMode(
+  base: Config,
+  requestedMode: ApprovalMode,
+): ApprovalMode {
+  if (
+    !base.isTrustedFolder() &&
+    requestedMode !== ApprovalMode.DEFAULT &&
+    requestedMode !== ApprovalMode.PLAN
+  ) {
+    return ApprovalMode.DEFAULT;
+  }
+  return requestedMode;
+}
+
+/**
+ * Derives a Config whose workspace-bound state resolves to one worktree.
+ * Public getter overrides and Config's private field reads are rebound as a
+ * single operation so callers cannot accidentally mix parent and child paths.
+ */
+export function deriveWorktreeConfig(
+  base: Config,
+  worktreePath: string,
+  options: DerivedWorktreeConfigOptions = {},
+): Config {
+  const fileService = new FileDiscoveryService(
+    worktreePath,
+    options.customIgnoreFiles,
+  );
+  const workspaceContext = new WorkspaceContext(worktreePath);
+  const derived = deriveConfig(base, {
+    getTargetDir: () => worktreePath,
+    getCwd: () => worktreePath,
+    getWorkingDir: () => worktreePath,
+    getProjectRoot: () => worktreePath,
+    getFileService: () => fileService,
+    getWorkspaceContext: () => workspaceContext,
+  });
+  const workspaceState = derived as unknown as {
+    targetDir: string;
+    cwd: string;
+    fileDiscoveryService: FileDiscoveryService;
+    workspaceContext: WorkspaceContext;
+  };
+  workspaceState.targetDir = worktreePath;
+  workspaceState.cwd = worktreePath;
+  workspaceState.fileDiscoveryService = fileService;
+  workspaceState.workspaceContext = workspaceContext;
+  return derived;
+}
+
 /**
  * Creates a Config overlay while keeping prototype delegation inside one
  * reviewable boundary. Callers supply only public getter overrides; Config's
  * child-local and prohibited runtime state remains enforced by its accessors.
- * Approval-mode override wrappers that call Config prototype mutators must keep
- * owning their strip/restore lifecycle before migrating to this factory.
+ * Named profiles layer any private-state rebinding and cleanup contract above
+ * this generic factory.
  */
 export function deriveConfig(
   base: Config,
@@ -1953,10 +2179,8 @@ export class Config {
   private backgroundAgentResumeService?: BackgroundAgentResumeService;
   private readonly backgroundShellRegistry = new BackgroundShellRegistry();
   private readonly workflowRunRegistry = new WorkflowRunRegistry();
-  // Field initializer runs once on the parent Config; child Configs
-  // built via Object.create(parent) intentionally do NOT pick this up
-  // — see getFileReadCache() for the per-instance lazy initialization
-  // that keeps subagent caches isolated from the parent's.
+  // Derived Configs do not run field initializers. getFileReadCache()
+  // lazily installs an own cache to keep child state isolated.
   private fileReadCache: FileReadCache = new FileReadCache();
   private extensionManager!: ExtensionManager;
   private skillManager: SkillManager | null = null;
@@ -2146,8 +2370,8 @@ export class Config {
   private readonly chatRecordingFailureListeners =
     new Set<ChatRecordingFailureListener>();
   private fileCheckpointingEnabled: boolean;
-  // Object (not primitive) so sub-agents via Object.create(parentConfig)
-  // share the same budget instance through prototype lookup.
+  // Object state is intentionally shared by derived Configs through prototype
+  // lookup so every agent contributes to the same session budget.
   private readonly toolResultBudget = { bytesWritten: 0 };
   private fileHistoryService: FileHistoryService | undefined;
   private readonly proxy: string | undefined;
@@ -4240,9 +4464,8 @@ export class Config {
     // /clear or session resume would let a follow-up Read return the
     // placeholder despite the new session never having received the
     // file contents. Use the getter so the lazy own-property
-    // initialization in getFileReadCache() applies even for Configs
-    // constructed via Object.create — those should clear their own
-    // cache, not the parent's.
+    // initialization in getFileReadCache() applies even for derived Configs;
+    // each derived Config should clear its own cache, not the parent's.
     this.getFileReadCache().clear();
     this.toolResultBudget.bytesWritten = 0;
     this.getMemoryPressureMonitor()?.resetForNewSession();
@@ -6752,7 +6975,12 @@ export class Config {
       fromApprovedPlanExit?: boolean;
     },
   ): void {
-    if (isDerivedConfig(this)) {
+    // Specialized execution overlays install an own method that owns
+    // child-local approval state; a bare derived Config must stay immutable.
+    if (
+      isDerivedConfig(this) &&
+      !Object.prototype.hasOwnProperty.call(this, 'setApprovalMode')
+    ) {
       throw new Error('Derived Configs cannot change approval mode');
     }
     if (
@@ -6860,6 +7088,41 @@ export class Config {
     return this.plansDir;
   }
 
+  /**
+   * The plans-directory state (`plansDirectoryConfigured` / `plansDir`) is
+   * installed by the canonical Config constructor and inherited by derived
+   * Configs through the prototype chain. Derived agent/worktree profiles
+   * rebind `targetDir` to their own workspace, but the plan file stays in
+   * the owning base's plans directory — so the containment check must
+   * compare against the plans owner's project root, not the derived
+   * workspace. A teammate whose cwd differs from the parent project root
+   * would otherwise fail the assertion, and `savePlanBestEffort` would
+   * swallow the throw into a debug warning, silently dropping the plan.
+   */
+  private getPlansAnchorTargetDir(): string {
+    // The canonical Config owns `plansDirectoryConfigured`; a derived
+    // Config that owns it is its own anchor. Otherwise walk the prototype
+    // chain to the plans-owning base.
+    if (
+      Object.prototype.hasOwnProperty.call(this, 'plansDirectoryConfigured')
+    ) {
+      return this.targetDir;
+    }
+    let current: object | null = Object.getPrototypeOf(this);
+    while (current !== null && current !== Config.prototype) {
+      if (
+        Object.prototype.hasOwnProperty.call(
+          current,
+          'plansDirectoryConfigured',
+        )
+      ) {
+        return (current as Config).targetDir;
+      }
+      current = Object.getPrototypeOf(current);
+    }
+    return this.targetDir;
+  }
+
   private assertPlansDirWithinTargetDir(): void {
     if (!this.plansDirectoryConfigured) {
       return;
@@ -6867,7 +7130,7 @@ export class Config {
 
     Storage.assertPathWithinDirectory(
       this.plansDir,
-      this.targetDir,
+      this.getPlansAnchorTargetDir(),
       `plansDirectory must resolve within the project root.`,
     );
   }
@@ -6879,7 +7142,7 @@ export class Config {
 
     Storage.assertPathWithinDirectory(
       filePath,
-      this.targetDir,
+      this.getPlansAnchorTargetDir(),
       `plansDirectory must resolve within the project root.`,
     );
   }
@@ -7219,11 +7482,9 @@ export class Config {
   }
 
   /**
-   * Session-scoped memory pressure monitor. Child Configs created with
-   * `Object.create(parent)` inherit the parent's monitor through the prototype
-   * chain until this getter installs an own monitor backed by the inherited
-   * pressure config snapshot. This mirrors getFileReadCache()'s isolation
-   * contract while keeping type-safe direct field assignment inside the class.
+   * Session-scoped memory pressure monitor. Derived Configs inherit the
+   * parent's monitor until this getter installs an own monitor backed by the
+   * inherited pressure config snapshot. This mirrors getFileReadCache().
    */
   getMemoryPressureMonitor(): MemoryPressureMonitor | undefined {
     if (!Object.prototype.hasOwnProperty.call(this, 'memoryPressureMonitor')) {
@@ -8653,22 +8914,13 @@ export class Config {
    * subagent (which gets its own Config) does not inherit the parent's
    * recorded reads via the prototype chain.
    *
-   * The wrinkle: every subagent / scoped-agent / fork path in this
-   * codebase constructs its Config via `Object.create(parent)`. That
-   * does **not** run instance field initializers, so the parent's
-   * `fileReadCache` field is reachable on the child only by prototype
-   * lookup — i.e. child and parent end up sharing the same cache. The
-   * own-property check below detects "this instance was made by
-   * Object.create" and lazily attaches a fresh cache, ensuring
-   * isolation without requiring every Object.create site to remember
-   * to override the field.
+   * Derived Configs do not run instance field initializers, so the parent's
+   * `fileReadCache` is initially reachable through the prototype chain. The
+   * own-property check below lazily installs a fresh cache for each child.
    */
   getFileReadCache(): FileReadCache {
     if (!Object.prototype.hasOwnProperty.call(this, 'fileReadCache')) {
-      // The own-property write needs to bypass `private`'s structural
-      // check — the field is conceptually still private to the class,
-      // we just need TS to let us install an own copy on a child
-      // instance produced by `Object.create(parent)`.
+      // Install child-local state while keeping the field private to Config.
       (this as unknown as { fileReadCache: FileReadCache }).fileReadCache =
         new FileReadCache();
     }
@@ -8890,10 +9142,8 @@ export class Config {
     // in sync between them.
     //
     // Skipped when building a subagent-context registry. `this.jsonSchema`
-    // propagates to subagent overrides via prototype delegation
-    // (`Object.create(base)` in `createApprovalModeOverride` /
-    // `buildSubagentContextOverride`), but only `runNonInteractive`'s main
-    // and drain loops detect a successful structured_output call as
+    // propagates through Config derivation, but only `runNonInteractive`'s
+    // main and drain loops detect a successful structured_output call as
     // terminal. A subagent that called the tool would receive the
     // "Session will end now" llmContent, then keep running because its
     // own loop has no termination handler — wasted tokens with no
@@ -9189,9 +9439,9 @@ export class Config {
     // The ACP session's own registry is built before its constructor wires the
     // spawner, so that one is registered by the Session itself. Every registry
     // built afterwards reaches the spawner from here: sub-agent and override
-    // configs are `Object.create(base)`, and `copyDiscoveredToolsFrom` carries
-    // discovered tools only, so without this a daemon sub-agent would silently
-    // lose the tool.
+    // configs derive from the base Config, and `copyDiscoveredToolsFrom`
+    // carries discovered tools only, so without this a daemon sub-agent would
+    // silently lose the tool.
     if (this.getSubSessionSpawner()) {
       await registerLazy(ToolNames.CREATE_SUB_SESSION, async () => {
         const { CreateSubSessionTool } = await import(
