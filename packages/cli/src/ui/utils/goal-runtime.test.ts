@@ -28,6 +28,31 @@ describe('waitForGoalRuntime', () => {
     expect(getGoalRuntimeReady).toHaveBeenCalledTimes(1);
   });
 
+  // Config.getGoalRuntimeReady() throws synchronously (not a rejected
+  // promise) when persistence is unavailable; the gate must swallow that
+  // shape too or it escapes the startup effect as an unhandled rejection
+  // and the TUI never leaves its init banner (#10272).
+  it('allows Goal-less sessions when readiness throws synchronously', async () => {
+    const getGoalRuntimeReady = vi.fn((): Promise<GoalRuntime> => {
+      throw new GoalPersistenceUnavailableError();
+    });
+
+    await expect(waitForGoalRuntime({ getGoalRuntimeReady })).resolves.toBe(
+      true,
+    );
+    expect(getGoalRuntimeReady).toHaveBeenCalledTimes(1);
+  });
+
+  it('swallows a synchronous readiness throw inside the bounded wait too', async () => {
+    const getGoalRuntimeReady = vi.fn((): Promise<GoalRuntime> => {
+      throw new GoalPersistenceUnavailableError();
+    });
+
+    await expect(
+      waitForGoalRuntime({ getGoalRuntimeReady }, { timeoutMs: 100 }),
+    ).resolves.toBe(true);
+  });
+
   it('does not hide malformed or unsupported persisted Goal state', async () => {
     const failure = new Error('unsupported Goal lifecycle record');
     const getGoalRuntimeReady = vi.fn().mockRejectedValue(failure);

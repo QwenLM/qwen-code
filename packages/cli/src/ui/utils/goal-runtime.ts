@@ -54,10 +54,13 @@ export async function waitForGoalRuntime(
   config: Pick<Config, 'getGoalRuntimeReady'>,
   options: { timeoutMs?: number } = {},
 ): Promise<boolean> {
-  const ready = config.getGoalRuntimeReady();
   const awaitReady = async (): Promise<void> => {
     try {
-      await ready;
+      // The call must stay inside the try: Config.getGoalRuntimeReady()
+      // THROWS synchronously (rather than returning a rejected promise)
+      // when persistence is unavailable, and escaping the catch turned it
+      // into an unhandled rejection that killed the startup effect.
+      await config.getGoalRuntimeReady();
     } catch (error) {
       if (!(error instanceof GoalPersistenceUnavailableError)) throw error;
     }
