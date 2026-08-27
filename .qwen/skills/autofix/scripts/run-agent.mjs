@@ -33,7 +33,7 @@ const QWEN_TIMEOUT_MS = Number(process.env.QWEN_TIMEOUT_MS) || 90 * 60 * 1000;
 // QWEN_TIMEOUT_MS so
 // the failure comment says which limit fired; a leg whose absolute budget is
 // shorter than this window would always reach the absolute timer first
-// (none today — the shortest leg is the review workflow's 60-minute repair
+// (none today — the shortest leg is the issue lane's 50-minute assess
 // pass).
 const parsedIdleTimeoutMs = Number(process.env.QWEN_IDLE_TIMEOUT_MS);
 // Reject negative/0/NaN: Number('-1') is truthy, so a bare `|| default`

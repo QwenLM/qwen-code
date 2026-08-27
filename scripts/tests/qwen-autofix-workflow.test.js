@@ -4253,6 +4253,15 @@ describe('qwen-autofix workflow', () => {
       runPendingGate([marker('PENDING', '2026-08-17T07:50:00Z', 'other-ci')]),
     ).toBe('true');
 
+    // The design record this gate cites (af-101) describes THIS horizon —
+    // derive the bound from the workflow so the pin tracks PENDING_STALE_MIN,
+    // then require the doc to agree. Naming the 345-minute job cap instead
+    // computes a 0-minute margin and invites squeezing the bound down to the
+    // cap, which ages a live review-address run out mid-flight.
+    const pendingStaleMin = reviewScanJob.match(/PENDING_STALE_MIN=(\d+)/)?.[1];
+    expect(pendingStaleMin).toBeTruthy();
+    expect(designDoc).toContain(`${pendingStaleMin}-minute horizon`);
+
     // Writer/reader identity: all three status writes and both readers bind
     // the SAME context variable — a mismatch on any site leaves the marker
     // permanently unread (the fork-bridge tests pin their cross-site signal
@@ -19597,6 +19606,16 @@ exit 0
     expect(runner).toContain('setTimeout(() =>');
     expect(runner).toContain("killQwen(child, 'SIGKILL')");
     expect(runner).toContain('}, QWEN_TIMEOUT_MS)');
+  });
+
+  it('keeps the assess-candidates budget pinned at 50 minutes', () => {
+    // The runner default moved to 90m for `Develop fix`, and the issue
+    // job has no step-level caps — this env pin is the ONLY guard keeping
+    // assess from inheriting 90m: build (~6m) + assess (90m) + develop
+    // (90m) would exceed the job's 180-minute cap and cancel the always()
+    // reporters (claim withdrawal) — the silent round the pin's own
+    // comment warns about.
+    expect(assessCandidatesStep).toContain("QWEN_TIMEOUT_MS: '3000000'");
   });
 
   it('kills qwen subprocess descendants on timeout', () => {

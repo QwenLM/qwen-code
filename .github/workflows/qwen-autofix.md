@@ -2806,7 +2806,7 @@ running) is not blocking (the next scan re-checks once it starts).
 The dispatch-pending marker is exempted by context: it is this
 loop's own StatusContext busy signal (no .workflowName/.name, so
 it passes the filters above) and its dedicated TTL check above is
-the authority on it — the 345-minute horizon here would keep a
+the authority on it — the 375-minute horizon here would keep a
 stranded marker blocking long past its TTL.
 ```
 
