@@ -300,7 +300,8 @@ export function createGoalRuntime(
   /**
    * The permit turn of the wind-down continuation now in flight, if any.
    * In memory only: a wind-down the host dropped undelivered must be minted
-   * again, and only the turn that actually finishes stamps the record.
+   * again, and only a wind-down turn that finishes delivered stamps the
+   * record; one finished under someone else's text leaves the hand-off owed.
    */
   let windDownTurnId: string | undefined;
   let restorePreparation: Promise<CheckpointAttempt | undefined> | undefined;
@@ -606,8 +607,9 @@ export function createGoalRuntime(
     }
     if (isGoalTokenBudgetSpent(snapshot.goal)) {
       // A spent window buys one hand-off before it stops. The record marks
-      // the hand-off that finished; until then -- never granted, or granted
-      // and dropped by the host before the model saw it -- grant it.
+      // the hand-off that was delivered and finished; until then -- never
+      // granted, dropped before the model saw it, or finished under someone
+      // else's text -- grant it.
       if (snapshot.goal.windDownTurnId !== undefined) {
         stopForSpentBudget();
         return;
