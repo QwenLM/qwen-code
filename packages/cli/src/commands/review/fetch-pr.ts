@@ -1020,8 +1020,28 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
     const depsCacheRoot = process.env[DEPS_CACHE_ENV];
     let dependencies: WorktreeDependencyProvision | undefined;
     if (depsCacheRoot) {
+      // The entry's `dist` was built from the source revision its population
+      // recorded; the provisioner vouches for it only when that IS the
+      // worktree's merge base, so resolve the base here (step 5 re-resolves
+      // on its own surface — the second fetch is a no-op round trip once the
+      // tracking ref exists).
+      let depsMergeBaseSha: string | null;
       try {
-        dependencies = provisionWorktreeDependencies(wt, depsCacheRoot);
+        depsMergeBaseSha = resolveMergeBase(
+          remote,
+          meta.baseRefName,
+          `refs/heads/${ref}`,
+          gitProbe,
+        ).sha;
+      } catch {
+        depsMergeBaseSha = null;
+      }
+      try {
+        dependencies = provisionWorktreeDependencies(
+          wt,
+          depsCacheRoot,
+          depsMergeBaseSha,
+        );
       } catch (err) {
         dependencies = {
           provisioned: false,

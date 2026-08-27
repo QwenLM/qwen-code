@@ -76,6 +76,23 @@ import { readWorkspacePackages } from './workspaces.js';
 export const DEPS_COMPLETE_MARKER = '.qwen-review-deps-complete';
 
 /**
+ * The path+sha256 manifest the population step writes into the stage BEFORE
+ * the atomic rename (every file it snapshotted, sha256sum format). Entries
+ * sit on a path writable by the unsandboxed PR code a review executes, so
+ * the completeness marker alone cannot be trusted: the manifest is what an
+ * entry must still verify against before this farm links it anywhere.
+ */
+export const DEPS_MANIFEST_FILE = '.qwen-review-deps-manifest';
+
+/**
+ * The revision the population step built the entry's `dist` trees from
+ * (`git rev-parse HEAD` of its checkout, written before the manifest). The
+ * entry is keyed on the lockfile alone, so without this nothing could see a
+ * source-only base change leaving stale sibling `dist` under a warm name.
+ */
+export const DEPS_SOURCE_REV_FILE = '.qwen-review-source-rev';
+
+/**
  * The provenance file this farm writes into the worktree's `node_modules`,
  * naming the cache entry it links into. Deliberately the same name
  * `exposeDependencies`' own farms use, because it answers the same question —
@@ -144,6 +161,7 @@ const fallback = (
 export function provisionWorktreeDependencies(
   worktree: string,
   cacheRoot: string,
+  mergeBaseSha?: string | null,
 ): WorktreeDependencyProvision {
   let lockBytes: Buffer;
   try {
@@ -190,6 +208,44 @@ export function provisionWorktreeDependencies(
       `cache entry ${entry} has no node_modules/.package-lock.json`,
     );
   }
+  if (!entryManifestValid(entry)) {
+    // The marker only says the entry ARRIVED whole; the manifest says it is
+    // still what the population step published. A mismatch means the shared
+    // tree was written through or pre-created by PR code this same host
+    // executed — fail closed and let build-test install on its own path.
+    return fallback(
+      `cache entry ${entry} fails its content manifest; refusing to farm it`,
+    );
+  }
+  if (mergeBaseSha !== undefined) {
+    // The entry's `dist` was built from the recorded revision; it serves
+    // this worktree only when that IS the worktree's merge base. Any other
+    // shape — newer main than the PR's branch point, or an entry recorded
+    // before this field existed — serves sibling `dist` the worktree's own
+    // sources disagree with, and the probe verdicts built on it decide the
+    // PR from the base's code.
+    if (mergeBaseSha === null) {
+      return fallback(
+        'the merge base is unknown, so the cached dist cannot be vouched',
+      );
+    }
+    let recorded: string | null = null;
+    try {
+      recorded = readFileSync(join(entry, DEPS_SOURCE_REV_FILE), 'utf8').trim();
+    } catch {
+      // No recorded revision: an entry published before the source-rev
+      // guard existed. Its dist cannot be vouched either.
+    }
+    if (!recorded) {
+      return fallback(`cache entry ${entry} records no source revision`);
+    }
+    if (recorded !== mergeBaseSha) {
+      return fallback(
+        `cache entry ${entry} was built from ${recorded.slice(0, 12)}, ` +
+          `not the worktree's merge base ${mergeBaseSha.slice(0, 12)}`,
+      );
+    }
+  }
   // `lstatSync`, not `existsSync`: a committed DANGLING symlink at
   // `node_modules` reads as absent to existsSync and the farm's mkdir then
   // dies EEXIST — the same shape `exposeDependencies` guards against.
@@ -225,6 +281,7 @@ export function provisionWorktreeDependencies(
       join(worktreeReal, 'node_modules'),
       entryReal,
       tally,
+      false,
     )
   ) {
     return fallback('could not create the worktree node_modules farm', {
@@ -314,18 +371,90 @@ export function provisionWorktreeDependencies(
     }
   }
 
+  // The member manifests are PR content the lockfile key cannot see: `npm ci`
+  // rejects a manifest/lockfile desync loudly, but this farm would link
+  // everything the entry has and claim a completeness the entry cannot
+  // satisfy — the missing module then surfaces as a defect in the diff.
+  // Demand what npm's sync check demands (minus the optionals npm may
+  // legitimately leave out, like platform binaries) and count the member
+  // failed when the entry cannot resolve it. The same pass collects each
+  // member's declared bins for the `.bin` rebuild below.
+  const memberBins: Array<{ linkName: string; target: string }> = [];
+  for (const { dir, name } of members) {
+    const target = containedIn(worktreeReal, dir);
+    if (target === null) continue;
+    let manifest: MemberManifest;
+    try {
+      manifest = JSON.parse(
+        readFileSync(join(target, 'package.json'), 'utf8'),
+      ) as MemberManifest;
+    } catch {
+      continue;
+    }
+    const demanded = new Set<string>([
+      ...Object.keys(manifest.dependencies ?? {}),
+      ...Object.keys(manifest.devDependencies ?? {}),
+      ...Object.keys(manifest.peerDependencies ?? {}),
+    ]);
+    for (const [dep, meta] of Object.entries(
+      manifest.peerDependenciesMeta ?? {},
+    )) {
+      if (meta?.optional === true) demanded.delete(dep);
+    }
+    const source = containedIn(entryReal, dir);
+    let unmet = false;
+    for (const dep of demanded) {
+      const inEntry = existsSync(
+        join(entryReal, 'node_modules', ...dep.split('/')),
+      );
+      const inNested =
+        source !== null &&
+        existsSync(join(source, 'node_modules', ...dep.split('/')));
+      if (!inEntry && !inNested) {
+        unmet = true;
+        break;
+      }
+    }
+    if (unmet) {
+      tally.failed++;
+      continue;
+    }
+    const bin = manifest.bin;
+    if (typeof bin === 'string') {
+      memberBins.push({
+        // npm names a string bin after the package itself.
+        linkName: name.split('/').pop() ?? name,
+        target: join(target, bin),
+      });
+    } else if (bin) {
+      for (const [linkName, binPath] of Object.entries(bin)) {
+        memberBins.push({ linkName, target: join(target, binPath) });
+      }
+    }
+  }
+
   // The self-links, re-derived from the worktree manifest (see the module
   // comment for why the cache's own are skipped). npm creates one per member
   // so an import BY NAME resolves to the sibling's working copy.
   for (const { dir, name } of members) {
+    // The NAME is PR content and becomes a path under node_modules, where
+    // this loop rmSync/mkdir/symlinks: validate the shape BEFORE any
+    // filesystem operation. `.` collapses onto the farm root (whose occupied
+    // branch would rmSync the farm itself), a second non-scope segment
+    // traverses entry links into the shared cache, and a farm-owned name
+    // (`.bin`, the provision marker) replaces it. Every shape npm itself
+    // rejects dies here; containment below stays as the backstop.
+    if (!isValidPackageName(name)) {
+      tally.failed++;
+      continue;
+    }
     const memberDir = containedIn(worktreeReal, dir);
     if (memberDir === null) {
       tally.failed++;
       continue;
     }
-    // The NAME is PR content too, and it becomes a path under node_modules:
-    // reject anything that would escape (`..`, absolute, empty segments)
-    // by resolving the joined path and requiring containment.
+    // Reject anything that would still escape (`..`, absolute, empty
+    // segments) by resolving the joined path and requiring containment.
     const linkPath = resolve(join(worktreeReal, 'node_modules'), name);
     if (!insideDir(join(worktreeReal, 'node_modules'), linkPath)) {
       tally.failed++;
@@ -351,6 +480,47 @@ export function provisionWorktreeDependencies(
     } catch {
       tally.failed++;
     }
+  }
+
+  // The root farm deliberately does NOT mirror the entry's `.bin`: member
+  // binaries would resolve into the base's member snapshot, bypassing the
+  // self-links this farm re-derived precisely so probes never execute the
+  // base's copy. Rebuild it instead — the entry's third-party bin links
+  // re-resolve through the farm (their relative targets are npm's own), and
+  // each worktree member's bins are re-pointed at the worktree member,
+  // npm's precedence, the same re-derivation the self-links get.
+  try {
+    const binDir = join(worktreeReal, 'node_modules', '.bin');
+    mkdirSync(binDir, { recursive: true });
+    let entryBins: Dirent[] = [];
+    try {
+      entryBins = readdirSync(join(entryReal, 'node_modules', '.bin'), {
+        withFileTypes: true,
+      });
+    } catch {
+      // An entry without `.bin` links no third-party binaries.
+    }
+    for (const b of entryBins) {
+      if (!b.isSymbolicLink()) continue;
+      try {
+        symlinkSync(
+          readlinkSync(join(entryReal, 'node_modules', '.bin', b.name)),
+          join(binDir, b.name),
+        );
+      } catch {
+        tally.failed++;
+      }
+    }
+    for (const { linkName, target } of memberBins) {
+      try {
+        rmSync(join(binDir, linkName), { force: true });
+        symlinkSync(relative(binDir, target), join(binDir, linkName));
+      } catch {
+        tally.failed++;
+      }
+    }
+  } catch {
+    tally.failed++;
   }
 
   if (tally.failed > 0 || tally.linked === 0) {
@@ -392,10 +562,25 @@ export function provisionWorktreeDependencies(
  * dependency root (a PR cannot create files outside its own checkout, and a
  * genuine cache entry never lives inside the worktree), and must carry both
  * the completeness marker and a real `node_modules` — the shape only the
- * population step produces. A marker that fails any of it is ignored, which
- * restores exactly the pre-provisioning containment.
+ * population step produces — and it must sit under the configured cache
+ * root (`DEPS_CACHE_ENV`), because a marker naming anywhere else on the
+ * host is PR content pointing at an attacker-shaped directory. A marker
+ * that fails any of it is ignored, which restores exactly the
+ * pre-provisioning containment.
  */
 export function provisionSourceOf(dependencyRoot: string): string | null {
+  // The recorded path is admitted as the containment's `provisionRoot`, so
+  // bound what it may name to the configured cache: with the environment
+  // unset no cache exists, and a committed marker naming some other host
+  // path is PR content pointing at an attacker-shaped directory.
+  const cacheRoot = process.env[DEPS_CACHE_ENV];
+  if (!cacheRoot) return null;
+  let cacheRootReal: string;
+  try {
+    cacheRootReal = realpathSync(cacheRoot);
+  } catch {
+    return null;
+  }
   let recorded: string;
   try {
     recorded = readFileSync(
@@ -415,6 +600,7 @@ export function provisionSourceOf(dependencyRoot: string): string | null {
     return null;
   }
   if (insideDir(rootReal, real)) return null;
+  if (!insideDir(cacheRootReal, real)) return null;
   if (!existsSync(join(real, DEPS_COMPLETE_MARKER))) return null;
   try {
     if (!lstatSync(join(real, 'node_modules')).isDirectory()) return null;
@@ -450,6 +636,7 @@ function farmFromEntry(
     selfLinked: number;
     distCopied: number;
   },
+  mirrorDotBin = true,
 ): boolean {
   let entries: Dirent[];
   try {
@@ -501,7 +688,11 @@ function farmFromEntry(
       entry.name === '.vite' ||
       entry.name === '.vite-temp' ||
       entry.name === '.package-lock.json' ||
-      entry.name === PROVISION_MARKER
+      entry.name === PROVISION_MARKER ||
+      // The ROOT farm rebuilds `.bin` from the worktree's own members
+      // instead (see the caller): mirrored whole, member binaries would
+      // resolve into the base's snapshot. Nested farms keep theirs.
+      (!mirrorDotBin && entry.name === '.bin')
     ) {
       continue;
     }
@@ -549,6 +740,106 @@ function farmFromEntry(
     place(sourceEntry, targetEntry);
   }
   return true;
+}
+
+/** The manifest fields the farm's demand check and bin rebuild read. */
+interface MemberManifest {
+  dependencies?: Record<string, string>;
+  devDependencies?: Record<string, string>;
+  peerDependencies?: Record<string, string>;
+  peerDependenciesMeta?: Record<string, { optional?: boolean } | undefined>;
+  bin?: string | Record<string, string>;
+}
+
+/**
+ * The package-name shapes npm admits, applied to a workspace member's name
+ * before it becomes a path under `node_modules`: exactly one segment, or a
+ * scoped `@scope/name` — never a leading `.` or `_`, never an empty, `.`,
+ * or `..` segment, never a bare scope. Anything else is a traversal
+ * (`foo/..`), a collapse onto the farm root (`.`), or a farm-owned path
+ * (`.bin`, the provision marker) — and this loop rmSync/mkdir/symlinks at
+ * whatever a name survives to.
+ */
+function isValidPackageName(name: string): boolean {
+  const segmentOk = (seg: string): boolean =>
+    seg !== '' && !seg.startsWith('.') && !seg.startsWith('_');
+  const segments = name.split('/');
+  if (segments.length === 1) {
+    return segmentOk(segments[0]) && !segments[0].startsWith('@');
+  }
+  return (
+    segments.length === 2 &&
+    segments[0].startsWith('@') &&
+    segments[0].length > 1 &&
+    segmentOk(segments[1])
+  );
+}
+
+/**
+ * Whether the entry's files still hash to the manifest the population step
+ * published with it. The file SET must agree as well — an unlisted file is
+ * a write the manifest never vouched. The completeness marker and the
+ * manifest itself are the population step's own last writes and are not
+ * listed.
+ */
+function entryManifestValid(entry: string): boolean {
+  let manifestText: string;
+  try {
+    manifestText = readFileSync(join(entry, DEPS_MANIFEST_FILE), 'utf8');
+  } catch {
+    return false;
+  }
+  const listed = new Map<string, string>();
+  for (const line of manifestText.split('\n')) {
+    if (line === '') continue;
+    const parsed = /^([0-9a-f]{64})\s+\*?(.+)$/.exec(line);
+    if (parsed === null) return false;
+    listed.set(parsed[2].replace(/^\.\//, ''), parsed[1]);
+  }
+  const files: string[] = [];
+  walkFiles(entry, files);
+  const unlisted = [
+    join(entry, DEPS_COMPLETE_MARKER),
+    join(entry, DEPS_MANIFEST_FILE),
+  ];
+  try {
+    for (const file of files) {
+      if (unlisted.includes(file)) continue;
+      const rel = relative(entry, file);
+      const expected = listed.get(rel);
+      if (expected === undefined) return false;
+      const actual = createHash('sha256')
+        .update(readFileSync(file))
+        .digest('hex');
+      if (actual !== expected) return false;
+      listed.delete(rel);
+    }
+  } catch {
+    return false;
+  }
+  // Every walked file hashed right; nothing listed is missing.
+  return listed.size === 0;
+}
+
+function walkFiles(dir: string, out: string[]): void {
+  let dirents: Dirent[];
+  try {
+    dirents = readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  for (const d of dirents) {
+    // `find -type f` does not follow links, and neither may this walk: a
+    // symlinked file hashes to its target, not to the link the manifest
+    // recorded.
+    if (d.isSymbolicLink()) continue;
+    const full = join(dir, d.name);
+    if (d.isDirectory()) {
+      walkFiles(full, out);
+    } else if (d.isFile()) {
+      out.push(full);
+    }
+  }
 }
 
 /**

@@ -21,7 +21,7 @@ import {
 } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
-import { basename, join, sep } from 'node:path';
+import { basename, join, relative, sep } from 'node:path';
 import { parse } from 'yaml';
 
 const workflow = readFileSync(
@@ -3933,6 +3933,55 @@ function depsCacheSource() {
   return readFileSync(DEPS_CACHE_SCRIPT, 'utf8');
 }
 
+// The scenario suite drives a GNU-only script (sha256sum, mv -T,
+// find -printf) with a GNU-only fixture (touch -d @epoch). The production
+// step runs on the Linux-only persistent pool, but the macOS nightly lane
+// still executes THIS file — probe the host toolchain and skip honestly
+// instead of reddening a lane that can never run the step (the file's
+// existing hasGnuMktemp/hasJq convention).
+const hasGnuDepsToolchain = [
+  () => spawnSync('sha256sum', ['--version'], { stdio: 'ignore' }).status === 0,
+  () => spawnSync('find', ['--version'], { stdio: 'ignore' }).status === 0,
+  () => spawnSync('mv', ['--version'], { stdio: 'ignore' }).status === 0,
+  () => spawnSync('touch', ['--version'], { stdio: 'ignore' }).status === 0,
+].every((probe) => {
+  try {
+    return probe();
+  } catch {
+    return false;
+  }
+});
+
+// The revision the stubbed `git rev-parse HEAD` reports: the warm check
+// compares the entry's recorded source revision against the checkout's HEAD.
+const DEPS_STUB_REV = '0123456789abcdef0123456789abcdef01234567';
+
+// Seed an entry exactly the way the population step publishes it: the source
+// revision recorded, every file hashed into the manifest, the completeness
+// marker LAST. The warm path verifies all three before it serves anything.
+function sealDepsEntry(entry, rev = DEPS_STUB_REV) {
+  writeFileSync(join(entry, '.qwen-review-source-rev'), `${rev}\n`);
+  const files = [];
+  const walk = (dir) => {
+    for (const d of readdirSync(dir, { withFileTypes: true })) {
+      if (d.isSymbolicLink()) continue;
+      const full = join(dir, d.name);
+      if (d.isDirectory()) walk(full);
+      else if (d.isFile()) files.push(full);
+    }
+  };
+  walk(entry);
+  const manifest =
+    files
+      .map(
+        (f) =>
+          `${createHash('sha256').update(readFileSync(f)).digest('hex')}  ./${relative(entry, f)}`,
+      )
+      .join('\n') + '\n';
+  writeFileSync(join(entry, '.qwen-review-deps-manifest'), manifest);
+  writeFileSync(join(entry, '.qwen-review-deps-complete'), '');
+}
+
 function runDepsCacheStep({ stubs = {}, prepare = null } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'deps-cache-'));
   try {
@@ -3954,6 +4003,9 @@ function runDepsCacheStep({ stubs = {}, prepare = null } = {}) {
     // fixture holds, so the stub does not need to build one — the fixture
     // below IS the "installed" workspace.
     write('npm', 'exit 0');
+    // Default stub: the checkout's HEAD, read when sealing and verifying an
+    // entry's recorded source revision.
+    write('git', `echo "${DEPS_STUB_REV}"`);
     // Deterministic disk headroom: the gate reads the REAL host filesystem
     // otherwise, and a developer machine (or this CI runner) under 10G free
     // would flip every population scenario into the skip branch.
@@ -4018,6 +4070,10 @@ function runDepsCacheStep({ stubs = {}, prepare = null } = {}) {
         ? readdirSync(cacheRoot).filter((e) => e.startsWith('.stage.'))
         : [],
       entryComplete: existsSync(join(entry, '.qwen-review-deps-complete')),
+      entryRev: existsSync(join(entry, '.qwen-review-source-rev'))
+        ? readFileSync(join(entry, '.qwen-review-source-rev'), 'utf8').trim()
+        : null,
+      entryManifest: existsSync(join(entry, '.qwen-review-deps-manifest')),
       entryLock: existsSync(join(entry, 'package-lock.json'))
         ? readFileSync(join(entry, 'package-lock.json'), 'utf8')
         : null,
@@ -4043,118 +4099,177 @@ function runDepsCacheStep({ stubs = {}, prepare = null } = {}) {
   }
 }
 
-describe('dependency-cache step (real bash, stubbed npm)', () => {
-  it('populates a cold cache: keyed by lockfile hash, marker present, root bundle excluded', () => {
-    const r = runDepsCacheStep();
-    expect(r.status).toBe(0);
-    expect(r.calls).toContain('npm ci');
-    expect(r.entryComplete).toBe(true);
-    // The entry is selected by `fetch-pr` hashing the WORKTREE's lockfile,
-    // so the name must be the sha256 of the exact bytes...
-    expect(r.entries).toEqual([depsLockHash]);
-    // ...and the byte-compare inside `fetch-pr` reads this copy.
-    expect(r.entryLock).toBe(DEPS_LOCK);
-    expect(r.entryRootPkg).toBe(true);
-    // npm's completeness marker is what the provisioner hands the worktree
-    // so build-test skips its install.
-    expect(r.entryNpmMarker).toBe(true);
-    expect(r.entryNestedNm).toBe(true);
-    expect(r.entryMemberDist).toBe(true);
-    expect(r.entryRootDist).toBe(false);
-    // No torn stage left behind.
-    expect(r.stages).toEqual([]);
-    // The built state moved to the cache; the workspace is left lean so the
-    // next job's checkout clean does not crawl it.
-    expect(r.workspaceNm).toBe(false);
-    expect(r.workspaceDist).toBe(false);
-    expect(r.workspaceMemberDist).toBe(false);
-  });
-
-  it('exports the cache root for fetch-pr — the literal the CLI reads', () => {
-    // KEEP IN SYNC with DEPS_CACHE_ENV in
-    // packages/cli/src/commands/review/lib/dep-provision.ts: the CLI reads
-    // exactly this variable, and a renamed export silently disables
-    // provisioning with every test still green but this one.
-    const r = runDepsCacheStep();
-    expect(r.envContent).toContain(`QWEN_REVIEW_DEPS_CACHE=${r.cacheRoot}`);
-  });
-
-  it('keeps the completeness-marker literal the CLI validates entries by', () => {
-    // KEEP IN SYNC with DEPS_COMPLETE_MARKER in dep-provision.ts — the
-    // provisioner refuses any entry without this exact file.
-    expect(depsCacheSource()).toContain('.qwen-review-deps-complete');
-  });
-
-  it('warm path: installs nothing and leaves the workspace alone', () => {
-    const r = runDepsCacheStep({
-      prepare: ({ homeDir }) => {
-        const entry = join(homeDir, '.qwen-review-deps', depsLockHash);
-        mkdirSync(entry, { recursive: true });
-        writeFileSync(join(entry, '.qwen-review-deps-complete'), '');
-      },
+describe.skipIf(!hasGnuDepsToolchain)(
+  'dependency-cache step (real bash, stubbed npm)',
+  () => {
+    it('populates a cold cache: keyed by lockfile hash, marker present, root bundle excluded', () => {
+      const r = runDepsCacheStep();
+      expect(r.status).toBe(0);
+      expect(r.calls).toContain('npm ci');
+      expect(r.entryComplete).toBe(true);
+      // The entry is selected by `fetch-pr` hashing the WORKTREE's lockfile,
+      // so the name must be the sha256 of the exact bytes...
+      expect(r.entries).toEqual([depsLockHash]);
+      // ...and the byte-compare inside `fetch-pr` reads this copy.
+      expect(r.entryLock).toBe(DEPS_LOCK);
+      expect(r.entryRootPkg).toBe(true);
+      // npm's completeness marker is what the provisioner hands the worktree
+      // so build-test skips its install.
+      expect(r.entryNpmMarker).toBe(true);
+      // The entry is sealed with the revision its dist was built from and the
+      // manifest the warm path (and the provisioner) verify it by.
+      expect(r.entryRev).toBe(DEPS_STUB_REV);
+      expect(r.entryManifest).toBe(true);
+      expect(r.entryNestedNm).toBe(true);
+      expect(r.entryMemberDist).toBe(true);
+      expect(r.entryRootDist).toBe(false);
+      // No torn stage left behind.
+      expect(r.stages).toEqual([]);
+      // The built state moved to the cache; the workspace is left lean so the
+      // next job's checkout clean does not crawl it.
+      expect(r.workspaceNm).toBe(false);
+      expect(r.workspaceDist).toBe(false);
+      expect(r.workspaceMemberDist).toBe(false);
     });
-    expect(r.status).toBe(0);
-    expect(r.stdout).toContain('dependency cache warm');
-    expect(r.calls).not.toContain('npm');
-    // The warm path never installed, so there is nothing to strip.
-    expect(r.workspaceNm).toBe(true);
-    expect(r.workspaceDist).toBe(true);
-  });
 
-  it('a failed npm ci degrades without an entry — and still exports the root', () => {
-    // An OLDER entry can still serve a PR based before a lockfile bump, so
-    // the export must not be gated on this run's own population succeeding.
-    const r = runDepsCacheStep({ stubs: { npm: 'exit 1' } });
-    expect(r.status).toBe(0);
-    expect(r.stdout).toContain('npm ci failed');
-    expect(r.entries).toEqual([]);
-    expect(r.envContent).toContain('QWEN_REVIEW_DEPS_CACHE=');
-  });
-
-  it('a workspace without a lockfile is a no-op, not a failure', () => {
-    const r = runDepsCacheStep({
-      prepare: ({ work }) => rmSync(join(work, 'package-lock.json')),
+    it('exports the cache root for fetch-pr — the literal the CLI reads', () => {
+      // KEEP IN SYNC with DEPS_CACHE_ENV in
+      // packages/cli/src/commands/review/lib/dep-provision.ts: the CLI reads
+      // exactly this variable, and a renamed export silently disables
+      // provisioning with every test still green but this one.
+      const r = runDepsCacheStep();
+      expect(r.envContent).toContain(`QWEN_REVIEW_DEPS_CACHE=${r.cacheRoot}`);
     });
-    expect(r.status).toBe(0);
-    expect(r.stdout).toContain('no package-lock.json');
-    expect(r.calls).not.toContain('npm');
-  });
 
-  it('the disk gate skips the install, never the job', () => {
-    const r = runDepsCacheStep({
-      stubs: {
-        df: 'echo "Filesystem 1024-blocks Used Available Capacity Mounted on"; echo "/dev/x 1 1 1024 1% /"',
-      },
+    it('keeps the completeness-marker literal the CLI validates entries by', () => {
+      // KEEP IN SYNC with DEPS_COMPLETE_MARKER in dep-provision.ts — the
+      // provisioner refuses any entry without this exact file.
+      expect(depsCacheSource()).toContain('.qwen-review-deps-complete');
     });
-    expect(r.status).toBe(0);
-    expect(r.stdout).toContain('free under');
-    expect(r.calls).not.toContain('npm');
-  });
 
-  it('prunes to the newest three entries, never touching stage dirs', () => {
-    const older = ['0'.repeat(64), '1'.repeat(64), '2'.repeat(64)];
-    const r = runDepsCacheStep({
-      prepare: ({ homeDir }) => {
-        const cacheRoot = join(homeDir, '.qwen-review-deps');
-        older.forEach((name, i) => {
-          const d = join(cacheRoot, name);
-          mkdirSync(d, { recursive: true });
-          // Staggered OLD mtimes, oldest first, all older than the entry the
-          // run is about to create.
-          execFileSync('touch', ['-d', `@${1600000000 + i}`, d]);
-        });
-        // A live stage dir (recent mtime) the age-gated sweep must spare.
-        mkdirSync(join(cacheRoot, '.stage.live'), { recursive: true });
-      },
+    it('warm path: installs nothing and leaves the workspace alone', () => {
+      const r = runDepsCacheStep({
+        prepare: ({ homeDir }) => {
+          const entry = join(homeDir, '.qwen-review-deps', depsLockHash);
+          mkdirSync(join(entry, 'node_modules'), { recursive: true });
+          writeFileSync(
+            join(entry, 'node_modules', '.package-lock.json'),
+            '{}',
+          );
+          sealDepsEntry(entry);
+        },
+      });
+      expect(r.status).toBe(0);
+      expect(r.stdout).toContain('dependency cache warm');
+      expect(r.calls).not.toContain('npm');
+      // The warm path never installed, so there is nothing to strip.
+      expect(r.workspaceNm).toBe(true);
+      expect(r.workspaceDist).toBe(true);
     });
-    expect(r.status).toBe(0);
-    // Newest three: the fresh entry plus the two youngest of the old ones.
-    expect([...r.entries].sort()).toEqual(
-      [depsLockHash, older[1], older[2]].sort(),
-    );
-    expect(r.stages).toContain('.stage.live');
-  });
-});
+
+    it('a failed npm ci degrades without an entry — and still exports the root', () => {
+      // An OLDER entry can still serve a PR based before a lockfile bump, so
+      // the export must not be gated on this run's own population succeeding.
+      const r = runDepsCacheStep({ stubs: { npm: 'exit 1' } });
+      expect(r.status).toBe(0);
+      expect(r.stdout).toContain('npm ci failed');
+      expect(r.entries).toEqual([]);
+      expect(r.envContent).toContain('QWEN_REVIEW_DEPS_CACHE=');
+    });
+
+    it('a workspace without a lockfile is a no-op, not a failure', () => {
+      const r = runDepsCacheStep({
+        prepare: ({ work }) => rmSync(join(work, 'package-lock.json')),
+      });
+      expect(r.status).toBe(0);
+      expect(r.stdout).toContain('no package-lock.json');
+      expect(r.calls).not.toContain('npm');
+    });
+
+    it('the disk gate skips the install, never the job', () => {
+      const r = runDepsCacheStep({
+        stubs: {
+          df: 'echo "Filesystem 1024-blocks Used Available Capacity Mounted on"; echo "/dev/x 1 1 1024 1% /"',
+        },
+      });
+      expect(r.status).toBe(0);
+      expect(r.stdout).toContain('free under');
+      expect(r.calls).not.toContain('npm');
+    });
+
+    it('a warm entry from an OLDER source revision is rebuilt, not served', () => {
+      // The entry is keyed on the lockfile ALONE; a source-only base change
+      // must not keep serving sibling dist built from an older commit. The
+      // mismatched rev fails verification, so the step drops the entry and
+      // repopulates from the current checkout.
+      const r = runDepsCacheStep({
+        prepare: ({ homeDir }) => {
+          const entry = join(homeDir, '.qwen-review-deps', depsLockHash);
+          mkdirSync(join(entry, 'node_modules'), { recursive: true });
+          writeFileSync(
+            join(entry, 'node_modules', '.package-lock.json'),
+            '{}',
+          );
+          sealDepsEntry(entry, `${'f'.repeat(40)}`);
+        },
+      });
+      expect(r.status).toBe(0);
+      expect(r.stdout).toContain('failed verification');
+      expect(r.calls).toContain('npm ci');
+      expect(r.entryComplete).toBe(true);
+      expect(r.entryRev).toBe(DEPS_STUB_REV);
+    });
+
+    it('a warm entry whose content no longer matches its manifest is rebuilt', () => {
+      // The entry lives on a path writable by the unsandboxed PR code; a
+      // modified file must fail verification and be rebuilt, never served.
+      const r = runDepsCacheStep({
+        prepare: ({ homeDir }) => {
+          const entry = join(homeDir, '.qwen-review-deps', depsLockHash);
+          mkdirSync(join(entry, 'node_modules'), { recursive: true });
+          writeFileSync(
+            join(entry, 'node_modules', '.package-lock.json'),
+            '{}',
+          );
+          sealDepsEntry(entry);
+          writeFileSync(
+            join(entry, 'node_modules', '.package-lock.json'),
+            'trojan',
+          );
+        },
+      });
+      expect(r.status).toBe(0);
+      expect(r.stdout).toContain('failed verification');
+      expect(r.calls).toContain('npm ci');
+      expect(r.entryComplete).toBe(true);
+      expect(r.entryRev).toBe(DEPS_STUB_REV);
+    });
+
+    it('prunes to the newest three entries, never touching stage dirs', () => {
+      const older = ['0'.repeat(64), '1'.repeat(64), '2'.repeat(64)];
+      const r = runDepsCacheStep({
+        prepare: ({ homeDir }) => {
+          const cacheRoot = join(homeDir, '.qwen-review-deps');
+          older.forEach((name, i) => {
+            const d = join(cacheRoot, name);
+            mkdirSync(d, { recursive: true });
+            // Staggered OLD mtimes, oldest first, all older than the entry the
+            // run is about to create.
+            execFileSync('touch', ['-d', `@${1600000000 + i}`, d]);
+          });
+          // A live stage dir (recent mtime) the age-gated sweep must spare.
+          mkdirSync(join(cacheRoot, '.stage.live'), { recursive: true });
+        },
+      });
+      expect(r.status).toBe(0);
+      // Newest three: the fresh entry plus the two youngest of the old ones.
+      expect([...r.entries].sort()).toEqual(
+        [depsLockHash, older[1], older[2]].sort(),
+      );
+      expect(r.stages).toContain('.stage.live');
+    });
+  },
+);
 
 describe('dependency-cache step wiring', () => {
   it('ships the script executable', () => {

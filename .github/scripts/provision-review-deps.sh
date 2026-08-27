@@ -39,12 +39,39 @@ if [ ! -f package-lock.json ]; then
 fi
 HASH="$(sha256sum package-lock.json | cut -d' ' -f1)"
 ENTRY="$CACHE_ROOT/$HASH"
+# An entry is served only while it is still what the population step
+# published: the recorded source revision must equal this checkout's HEAD
+# (the entry is keyed on the lockfile ALONE, so a source-only base change
+# would otherwise keep serving sibling dist built from an older commit), and
+# every file must hash back to the manifest staged before the atomic rename
+# — file count included, an added file is a write nobody vouched for. The
+# entry lives on a path writable by the unsandboxed PR code this same job
+# executes, so the completeness marker alone cannot be trusted.
+entry_verifies() {
+  local e="$1" recorded current listed actual
+  recorded="$(cat "$e/.qwen-review-source-rev" 2>/dev/null)"
+  current="$(git rev-parse HEAD 2>/dev/null)"
+  [ -n "$recorded" ] && [ "$recorded" = "$current" ] || return 1
+  [ -f "$e/.qwen-review-deps-manifest" ] || return 1
+  ( cd "$e" && sha256sum -c --quiet .qwen-review-deps-manifest >/dev/null 2>&1 ) || return 1
+  listed=$(wc -l < "$e/.qwen-review-deps-manifest")
+  actual=$(
+    cd "$e" && find . -type f       ! -name .qwen-review-deps-manifest       ! -name .qwen-review-deps-complete | wc -l
+  )
+  [ "$listed" -eq "$actual" ]
+}
 if [ -f "$ENTRY/.qwen-review-deps-complete" ]; then
-  # Freshen the mtime the prune below sorts by, so an entry that is still
-  # serving reviews is never the one evicted.
-  touch "$ENTRY" 2>/dev/null
-  echo "dependency cache warm: $ENTRY"
-  exit 0
+  if entry_verifies "$ENTRY"; then
+    # Freshen the mtime the prune below sorts by, so an entry that is still
+    # serving reviews is never the one evicted.
+    touch "$ENTRY" 2>/dev/null
+    echo "dependency cache warm: $ENTRY"
+    exit 0
+  fi
+  # Failed verification: stale revision or modified content. Drop it and
+  # repopulate below rather than serve it.
+  echo "dependency cache entry failed verification; rebuilding it"
+  rm -rf "$ENTRY"
 fi
 # Disk gate, same contract as build-test's: an `npm ci` that dies on ENOSPC
 # leaves a partial tree AND a full disk for every later step. The install
@@ -88,8 +115,33 @@ if [ "$ok" != true ]; then
   rm -rf "$STAGE"
   exit 0
 fi
+# Publish only an entry later runs can verify: record the revision the dist
+# trees were built from and hash every staged file into a manifest. Both
+# land BEFORE the marker, so the atomic rename seals them with it, and the
+# warm check above (and the provisioning library) refuses an entry that
+# does not carry them or does not match them.
+SOURCE_REV="$(git rev-parse HEAD 2>/dev/null)"
+printf '%s\n' "$SOURCE_REV" > "$STAGE/.qwen-review-source-rev" || ok=false
+if [ "$ok" = true ]; then
+  MANIFEST_TMP="$(mktemp "$CACHE_ROOT/.manifest.XXXXXX" 2>/dev/null)" || ok=false
+fi
+if [ "$ok" = true ]; then
+  ( cd "$STAGE" && find . -type f -exec sha256sum {} + ) > "$MANIFEST_TMP" || ok=false
+fi
+if [ "$ok" != true ]; then
+  echo '::warning::dependency-cache snapshot could not be sealed; discarding the stage'
+  rm -rf "$STAGE"
+  [ -n "${MANIFEST_TMP:-}" ] && rm -rf "$MANIFEST_TMP"
+  exit 0
+fi
+mv "$MANIFEST_TMP" "$STAGE/.qwen-review-deps-manifest" || { rm -rf "$STAGE"; exit 0; }
 : > "$STAGE/.qwen-review-deps-complete"
 if mv -T "$STAGE" "$ENTRY" 2>/dev/null; then
+  # Immutable files after publish: a write through a farm link by the PR
+  # code this job is about to execute dies EACCES instead of corrupting
+  # every later review served from this entry. Directories stay writable,
+  # so the prune and any teardown can still unlink.
+  find "$ENTRY" -type f -exec chmod a-w {} + 2>/dev/null
   echo "dependency cache populated: $ENTRY"
 else
   # Lost a same-host race, or the entry appeared some other way — either way
@@ -112,5 +164,5 @@ find . \( -name .git -o -name node_modules \) -prune -o -type d -name dist -prin
 find "$CACHE_ROOT" -maxdepth 1 -mindepth 1 -type d -printf '%T@ %f\n' 2>/dev/null |
   sort -rn | awk '{print $2}' | grep -Ex '[0-9a-f]{64}' | tail -n +4 |
   while IFS= read -r old; do rm -rf "${CACHE_ROOT:?}/$old"; done
-find "$CACHE_ROOT" -maxdepth 1 -name '.stage.*' -mmin +240 -exec rm -rf {} + 2>/dev/null
+find "$CACHE_ROOT" -maxdepth 1 \( -name '.stage.*' -o -name '.manifest.*' \) -mmin +240 -exec rm -rf {} + 2>/dev/null
 exit 0

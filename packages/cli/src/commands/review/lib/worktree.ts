@@ -33,7 +33,15 @@ import {
   type Stats,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path';
+import {
+  basename,
+  dirname,
+  isAbsolute,
+  join,
+  relative,
+  resolve,
+  sep,
+} from 'node:path';
 import { readWorkspacePackages } from './workspaces.js';
 import { provisionSourceOf } from './dep-provision.js';
 
@@ -1593,12 +1601,20 @@ function farmLinkVerdict(
   }
   // A provisioned dependency root borrows its packages from the host cache
   // entry its farm marker names (validated — see the containment build):
-  // links resolving there are the borrowed dependencies themselves.
+  // links resolving under the entry's `node_modules` trees are the borrowed
+  // dependencies themselves. Anything else inside the entry is member source
+  // a real farm never links — admitted, it would alias the base's builds
+  // into probe resolution and re-open the write channel into the shared
+  // entry on every rebuild.
   if (
     containment.provisionRoot !== null &&
     insideDir(containment.provisionRoot, real)
   ) {
-    return 'internal';
+    return relative(containment.provisionRoot, real)
+      .split(sep)
+      .includes('node_modules')
+      ? 'internal'
+      : null;
   }
   for (const member of containment.selfLinks) {
     if (insideDir(member, real)) return 'self';

@@ -10,6 +10,7 @@ import {
   lstatSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   realpathSync,
   rmSync,
@@ -18,9 +19,12 @@ import {
 } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, relative } from 'node:path';
 import {
+  DEPS_CACHE_ENV,
   DEPS_COMPLETE_MARKER,
+  DEPS_MANIFEST_FILE,
+  DEPS_SOURCE_REV_FILE,
   PROVISION_MARKER,
   provisionSourceOf,
   provisionWorktreeDependencies,
@@ -31,9 +35,24 @@ const LOCK = JSON.stringify({ name: 'fixture', lockfileVersion: 3 });
 describe('provisionWorktreeDependencies', () => {
   const made: string[] = [];
   const tmp = (prefix: string): string => {
-    const dir = mkdtempSync(join(tmpdir(), prefix));
+    // Canonicalise: `verdict()` compares against realpath'd entry paths, and
+    // hosts whose temp dir is symlinked (macOS: /var -> /private/var) would
+    // otherwise misclassify every fixture self-link as an escape.
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), prefix)));
     made.push(dir);
     return dir;
+  };
+
+  /** Runs `fn` with DEPS_CACHE_ENV set, restoring the previous value. */
+  const withDepsCacheEnv = <T>(value: string, fn: () => T): T => {
+    const prev = process.env[DEPS_CACHE_ENV];
+    process.env[DEPS_CACHE_ENV] = value;
+    try {
+      return fn();
+    } finally {
+      if (prev === undefined) delete process.env[DEPS_CACHE_ENV];
+      else process.env[DEPS_CACHE_ENV] = prev;
+    }
   };
   afterEach(() => {
     for (const dir of made.splice(0)) {
@@ -55,6 +74,10 @@ describe('provisionWorktreeDependencies', () => {
     mkdirSync(join(nm, 'plain-pkg'), { recursive: true });
     writeFileSync(join(nm, 'plain-pkg', 'index.js'), 'plain\n');
     mkdirSync(join(nm, '.bin'), { recursive: true });
+    // npm writes member bin links RELATIVE, so they re-resolve through the
+    // worktree's self-links once `.bin` is rebuilt there.
+    symlinkSync('../plain-pkg/index.js', join(nm, '.bin', 'plainbin'));
+    symlinkSync('../@fix/core/dist/cli.js', join(nm, '.bin', 'corebin'));
     mkdirSync(join(nm, '@scope', 'inner'), { recursive: true });
     writeFileSync(join(nm, '@scope', 'inner', 'index.js'), 'scoped\n');
     mkdirSync(join(nm, '@fix'), { recursive: true });
@@ -65,6 +88,10 @@ describe('provisionWorktreeDependencies', () => {
     writeFileSync(
       join(entry, 'packages', 'core', 'dist', 'index.js'),
       'built at base\n',
+    );
+    writeFileSync(
+      join(entry, 'packages', 'core', 'dist', 'cli.js'),
+      'base cli\n',
     );
     symlinkSync(
       join(entry, 'packages', 'core'),
@@ -80,8 +107,45 @@ describe('provisionWorktreeDependencies', () => {
     );
     writeFileSync(join(nm, '.package-lock.json'), '{"installed": true}');
     writeFileSync(join(entry, 'package-lock.json'), lock);
-    writeFileSync(join(entry, DEPS_COMPLETE_MARKER), '');
+    sealEntry(entry);
     return entry;
+  };
+
+  /**
+   * The population step's publish order: hash every staged file into the
+   * manifest FIRST, marker LAST — the provisioner refuses an entry whose
+   * contents no longer hash back to the manifest.
+   */
+  const sealEntry = (entry: string): void => {
+    const files: string[] = [];
+    const walk = (dir: string): void => {
+      for (const d of readdirSync(dir, { withFileTypes: true })) {
+        if (d.isSymbolicLink()) continue;
+        const full = join(dir, d.name);
+        if (d.isDirectory()) walk(full);
+        else if (d.isFile()) {
+          // A RESEAL walks over the previous seal's own files; the manifest
+          // cannot list itself or the marker.
+          if (
+            d.name === DEPS_MANIFEST_FILE ||
+            d.name === DEPS_COMPLETE_MARKER
+          ) {
+            continue;
+          }
+          files.push(full);
+        }
+      }
+    };
+    walk(entry);
+    const manifest =
+      files
+        .map(
+          (f) =>
+            `${createHash('sha256').update(readFileSync(f)).digest('hex')}  ./${relative(entry, f)}`,
+        )
+        .join('\n') + '\n';
+    writeFileSync(join(entry, DEPS_MANIFEST_FILE), manifest);
+    writeFileSync(join(entry, DEPS_COMPLETE_MARKER), '');
   };
 
   const makeWorktree = (lock: string = LOCK): string => {
@@ -94,7 +158,7 @@ describe('provisionWorktreeDependencies', () => {
     mkdirSync(join(wt, 'packages', 'core'), { recursive: true });
     writeFileSync(
       join(wt, 'packages', 'core', 'package.json'),
-      JSON.stringify({ name: '@fix/core' }),
+      JSON.stringify({ name: '@fix/core', bin: { corebin: 'dist/cli.js' } }),
     );
     mkdirSync(join(wt, 'packages', 'empty'), { recursive: true });
     writeFileSync(
@@ -114,9 +178,10 @@ describe('provisionWorktreeDependencies', () => {
     expect(got.provisioned).toBe(true);
     expect(got.source).toBe(realpathSync(entry));
     expect(got.failed).toBe(0);
-    // plain-pkg, .bin, @scope/inner and the member's nested-dep from the
-    // cache; @fix/core and @fix/empty as worktree self-links.
-    expect(got.linked).toBe(6);
+    // plain-pkg, @scope/inner and the member's nested-dep from the cache;
+    // @fix/core and @fix/empty as worktree self-links. `.bin` is NOT among
+    // them — it is rebuilt below from the worktree's own members.
+    expect(got.linked).toBe(5);
     expect(got.selfLinked).toBe(2);
     expect(got.distCopied).toBe(1);
     // Third-party packages resolve into the cache entry...
@@ -150,6 +215,18 @@ describe('provisionWorktreeDependencies', () => {
     expect(
       readFileSync(join(wt, 'packages', 'core', 'dist', 'index.js'), 'utf8'),
     ).toBe('built at base\n');
+    // `.bin` is a REAL dir in the worktree: member binaries resolve into the
+    // worktree member, never the entry's base copy...
+    expect(lstatSync(join(wt, 'node_modules', '.bin')).isSymbolicLink()).toBe(
+      false,
+    );
+    expect(realpathSync(join(wt, 'node_modules', '.bin', 'corebin'))).toBe(
+      realpathSync(join(wt, 'packages', 'core', 'dist', 'cli.js')),
+    );
+    // ...while third-party binaries still resolve through the farm.
+    expect(realpathSync(join(wt, 'node_modules', '.bin', 'plainbin'))).toBe(
+      realpathSync(join(entry, 'node_modules', 'plain-pkg', 'index.js')),
+    );
     // npm's completeness marker is what makes build-test skip its install.
     expect(existsSync(join(wt, 'node_modules', '.package-lock.json'))).toBe(
       true,
@@ -292,6 +369,236 @@ describe('provisionWorktreeDependencies', () => {
     expect(existsSync(join(wt, 'evil'))).toBe(false);
   });
 
+  it('refuses a member named "." that would collapse onto the farm root', () => {
+    // The occupied branch's rmSync would delete the whole farm — provenance
+    // marker included — and re-create node_modules as a link to the member.
+    const cache = tmp('depprov-cache-');
+    const entry = makeEntry(cache);
+    const wt = makeWorktree();
+    writeFileSync(
+      join(wt, 'packages', 'core', 'package.json'),
+      JSON.stringify({ name: '.' }),
+    );
+
+    const got = provisionWorktreeDependencies(wt, cache);
+
+    expect(got.provisioned).toBe(false);
+    expect(got.failed).toBeGreaterThan(0);
+    // The farm survives: a real directory, marker intact.
+    expect(lstatSync(join(wt, 'node_modules')).isSymbolicLink()).toBe(false);
+    expect(
+      readFileSync(join(wt, 'node_modules', PROVISION_MARKER), 'utf8').trim(),
+    ).toBe(realpathSync(entry));
+  });
+
+  it('refuses a multi-segment member name that would traverse an entry link', () => {
+    // `plain-pkg/x` resolves THROUGH the farm's plain-pkg link, landing the
+    // mkdir/rm/symlink inside the shared host cache entry.
+    const cache = tmp('depprov-cache-');
+    const entry = makeEntry(cache);
+    const wt = makeWorktree();
+    writeFileSync(
+      join(wt, 'packages', 'core', 'package.json'),
+      JSON.stringify({ name: 'plain-pkg/x' }),
+    );
+
+    const got = provisionWorktreeDependencies(wt, cache);
+
+    expect(got.provisioned).toBe(false);
+    expect(got.failed).toBeGreaterThan(0);
+    // The entry is unpoisoned.
+    expect(existsSync(join(entry, 'node_modules', 'plain-pkg', 'x'))).toBe(
+      false,
+    );
+  });
+
+  it('refuses a member named after the farm provenance marker', () => {
+    // `.qwen-review-farm` would replace the marker that names the farm's
+    // source, and every scratch tree built for this review would lose its
+    // dependencies.
+    const cache = tmp('depprov-cache-');
+    const entry = makeEntry(cache);
+    const wt = makeWorktree();
+    writeFileSync(
+      join(wt, 'packages', 'core', 'package.json'),
+      JSON.stringify({ name: '.qwen-review-farm' }),
+    );
+
+    const got = provisionWorktreeDependencies(wt, cache);
+
+    expect(got.provisioned).toBe(false);
+    expect(got.failed).toBeGreaterThan(0);
+    expect(
+      readFileSync(join(wt, 'node_modules', PROVISION_MARKER), 'utf8').trim(),
+    ).toBe(realpathSync(entry));
+  });
+
+  it('refuses a member named ".bin" or a bare scope', () => {
+    // Either would replace the farm's `.bin` / scope directory, making every
+    // binary unreachable.
+    const cache = tmp('depprov-cache-');
+    makeEntry(cache);
+    const wt = makeWorktree();
+    writeFileSync(
+      join(wt, 'packages', 'core', 'package.json'),
+      JSON.stringify({ name: '.bin' }),
+    );
+
+    const got = provisionWorktreeDependencies(wt, cache);
+
+    expect(got.provisioned).toBe(false);
+    expect(got.failed).toBeGreaterThan(0);
+    expect(lstatSync(join(wt, 'node_modules', '.bin')).isSymbolicLink()).toBe(
+      false,
+    );
+
+    const cache2 = tmp('depprov-cache-');
+    makeEntry(cache2);
+    const wt2 = makeWorktree();
+    writeFileSync(
+      join(wt2, 'packages', 'core', 'package.json'),
+      JSON.stringify({ name: '@fix' }),
+    );
+
+    const got2 = provisionWorktreeDependencies(wt2, cache2);
+
+    expect(got2.provisioned).toBe(false);
+    expect(got2.failed).toBeGreaterThan(0);
+    // The other member's self-link still landed.
+    expect(realpathSync(join(wt2, 'node_modules', '@fix', 'empty'))).toBe(
+      realpathSync(join(wt2, 'packages', 'empty')),
+    );
+  });
+
+  it('falls back when the entry content no longer hashes to its manifest', () => {
+    // The entry sits on a path writable by the unsandboxed PR code the same
+    // job executes; a written-through or pre-planted tree must fail closed,
+    // not farm.
+    const cache = tmp('depprov-cache-');
+    const entry = makeEntry(cache);
+    writeFileSync(
+      join(entry, 'node_modules', 'plain-pkg', 'index.js'),
+      'trojan\n',
+    );
+
+    const got = provisionWorktreeDependencies(makeWorktree(), cache);
+
+    expect(got.provisioned).toBe(false);
+    expect(got.reason).toContain('manifest');
+
+    // Restored contents but an UNLISTED file: the set must agree too.
+    writeFileSync(
+      join(entry, 'node_modules', 'plain-pkg', 'index.js'),
+      'plain\n',
+    );
+    writeFileSync(join(entry, 'node_modules', 'planted'), 'x\n');
+    expect(
+      provisionWorktreeDependencies(makeWorktree(), cache).provisioned,
+    ).toBe(false);
+  });
+
+  it('falls back when the entry was built from a different source revision', () => {
+    // The entry's dist was built from the recorded revision; serving it to a
+    // worktree whose merge base is some OTHER commit decides the PR from the
+    // base's code.
+    const cache = tmp('depprov-cache-');
+    const entry = makeEntry(cache);
+    const recorded = 'ab'.repeat(20);
+    writeFileSync(join(entry, DEPS_SOURCE_REV_FILE), `${recorded}\n`);
+    sealEntry(entry);
+
+    const got = provisionWorktreeDependencies(
+      makeWorktree(),
+      cache,
+      'cd'.repeat(20),
+    );
+
+    expect(got.provisioned).toBe(false);
+    expect(got.reason).toContain('not the worktree');
+  });
+
+  it('falls back when a merge base is given but the entry records no revision', () => {
+    // An entry published before the source-rev guard existed cannot be
+    // vouched for either.
+    const cache = tmp('depprov-cache-');
+    makeEntry(cache);
+
+    const got = provisionWorktreeDependencies(
+      makeWorktree(),
+      cache,
+      'cd'.repeat(20),
+    );
+
+    expect(got.provisioned).toBe(false);
+    expect(got.reason).toContain('no source revision');
+  });
+
+  it('falls back when the merge base is unknown', () => {
+    const cache = tmp('depprov-cache-');
+    const entry = makeEntry(cache);
+    writeFileSync(join(entry, DEPS_SOURCE_REV_FILE), `${'cd'.repeat(20)}\n`);
+    sealEntry(entry);
+
+    const got = provisionWorktreeDependencies(makeWorktree(), cache, null);
+
+    expect(got.provisioned).toBe(false);
+    expect(got.reason).toContain('merge base is unknown');
+  });
+
+  it('farms an entry whose recorded revision IS the merge base', () => {
+    const cache = tmp('depprov-cache-');
+    const entry = makeEntry(cache);
+    const sha = 'cd'.repeat(20);
+    writeFileSync(join(entry, DEPS_SOURCE_REV_FILE), `${sha}\n`);
+    sealEntry(entry);
+
+    const got = provisionWorktreeDependencies(makeWorktree(), cache, sha);
+
+    expect(got.provisioned).toBe(true);
+    expect(got.source).toBe(realpathSync(entry));
+  });
+
+  it('COUNTS a member whose manifest demands a package the entry lacks', () => {
+    // Lockfile identity alone does not capture what the member manifests
+    // declare; npm ci would reject the desync loudly, so the farm must not
+    // claim a completeness the entry cannot satisfy.
+    const cache = tmp('depprov-cache-');
+    makeEntry(cache);
+    const wt = makeWorktree();
+    writeFileSync(
+      join(wt, 'packages', 'core', 'package.json'),
+      JSON.stringify({
+        name: '@fix/core',
+        dependencies: { 'left-pad': '^1.3.0' },
+      }),
+    );
+
+    const got = provisionWorktreeDependencies(wt, cache);
+
+    expect(got.provisioned).toBe(false);
+    expect(got.failed).toBeGreaterThan(0);
+    expect(existsSync(join(wt, 'node_modules', '.package-lock.json'))).toBe(
+      false,
+    );
+  });
+
+  it('accepts a member whose manifest demand the entry satisfies', () => {
+    const cache = tmp('depprov-cache-');
+    makeEntry(cache);
+    const wt = makeWorktree();
+    writeFileSync(
+      join(wt, 'packages', 'core', 'package.json'),
+      JSON.stringify({
+        name: '@fix/core',
+        dependencies: { 'plain-pkg': '*' },
+      }),
+    );
+
+    const got = provisionWorktreeDependencies(wt, cache);
+
+    expect(got.provisioned).toBe(true);
+  });
+
   it('falls back without a worktree lockfile to key the cache', () => {
     const cache = tmp('depprov-cache-');
     makeEntry(cache);
@@ -308,7 +615,37 @@ describe('provisionWorktreeDependencies', () => {
       const entry = makeEntry(cache);
       const wt = makeWorktree();
       expect(provisionWorktreeDependencies(wt, cache).provisioned).toBe(true);
-      expect(provisionSourceOf(wt)).toBe(realpathSync(entry));
+      expect(withDepsCacheEnv(cache, () => provisionSourceOf(wt))).toBe(
+        realpathSync(entry),
+      );
+    });
+
+    it('is null when no cache is configured', () => {
+      // The marker may be valid, but with DEPS_CACHE_ENV unset no cache
+      // exists for it to name — a local run must widen nothing.
+      const cache = tmp('depprov-cache-');
+      makeEntry(cache);
+      const wt = makeWorktree();
+      expect(provisionWorktreeDependencies(wt, cache).provisioned).toBe(true);
+      const prev = process.env[DEPS_CACHE_ENV];
+      delete process.env[DEPS_CACHE_ENV];
+      try {
+        expect(provisionSourceOf(wt)).toBe(null);
+      } finally {
+        if (prev !== undefined) process.env[DEPS_CACHE_ENV] = prev;
+      }
+    });
+
+    it('rejects a marker naming a valid entry OUTSIDE the configured cache', () => {
+      // A committed marker can name any attacker-shaped host directory; only
+      // the configured cache root may answer.
+      const cache = tmp('depprov-cache-');
+      const otherRoot = tmp('depprov-otherroot-');
+      const foreign = makeEntry(otherRoot);
+      const wt = makeWorktree();
+      mkdirSync(join(wt, 'node_modules'), { recursive: true });
+      writeFileSync(join(wt, 'node_modules', PROVISION_MARKER), foreign);
+      expect(withDepsCacheEnv(cache, () => provisionSourceOf(wt))).toBe(null);
     });
 
     it('is null for an unprovisioned tree', () => {

@@ -31,7 +31,7 @@ import {
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { isolateHostGitConfig } from './test-utils.js';
-import { DEPS_COMPLETE_MARKER } from './dep-provision.js';
+import { DEPS_CACHE_ENV, DEPS_COMPLETE_MARKER } from './dep-provision.js';
 import {
   discardWorktree,
   exposeDependencies,
@@ -1152,6 +1152,17 @@ describe('exposeDependencies', () => {
     made.push(dir);
     return dir;
   };
+  /** Runs `fn` with DEPS_CACHE_ENV set, restoring the previous value. */
+  const withDepsCacheEnv = <T>(value: string, fn: () => T): T => {
+    const prev = process.env[DEPS_CACHE_ENV];
+    process.env[DEPS_CACHE_ENV] = value;
+    try {
+      return fn();
+    } finally {
+      if (prev === undefined) delete process.env[DEPS_CACHE_ENV];
+      else process.env[DEPS_CACHE_ENV] = prev;
+    }
+  };
   afterEach(() => {
     for (const dir of made.splice(0)) {
       rmSync(dir, { recursive: true, force: true });
@@ -1646,7 +1657,8 @@ describe('exposeDependencies', () => {
     // the containment otherwise admits. Before `provisionRoot`, a scratch
     // tree farmed from such a worktree counted every borrowed package as an
     // escape and started with no dependencies at all.
-    const cacheEntry = tmp('expose-cache-');
+    const cacheRoot = tmp('expose-cacheroot-');
+    const cacheEntry = join(cacheRoot, 'entry');
     const root = tmp('expose-prov-root-');
     const probe = tmp('expose-prov-probe-');
     mkdirSync(join(cacheEntry, 'node_modules', 'cached-pkg'), {
@@ -1661,7 +1673,9 @@ describe('exposeDependencies', () => {
       'dir',
     );
 
-    const got = exposeDependencies(probe, root, { rebuild: true });
+    const got = withDepsCacheEnv(cacheRoot, () =>
+      exposeDependencies(probe, root, { rebuild: true }),
+    );
 
     expect(got).toMatchObject({ linked: 1, failed: 0 });
     expect(
@@ -1674,7 +1688,8 @@ describe('exposeDependencies', () => {
     // it names is validated, not believed: a directory without the population
     // step's completeness marker widens nothing, and the link into it stays
     // the escape it always was.
-    const notAnEntry = tmp('expose-notentry-');
+    const cacheRoot = tmp('expose-cacheroot-');
+    const notAnEntry = join(cacheRoot, 'not-an-entry');
     const root = tmp('expose-badmark-root-');
     const probe = tmp('expose-badmark-probe-');
     mkdirSync(join(notAnEntry, 'node_modules', 'planted'), {
@@ -1688,7 +1703,40 @@ describe('exposeDependencies', () => {
       'dir',
     );
 
-    const got = exposeDependencies(probe, root, { rebuild: true });
+    const got = withDepsCacheEnv(cacheRoot, () =>
+      exposeDependencies(probe, root, { rebuild: true }),
+    );
+
+    expect(got).toMatchObject({ linked: 0, failed: 1 });
+    expect(existsSync(join(probe, 'node_modules', 'planted'))).toBe(false);
+  });
+
+  it('COUNTS a planted link into the entry that borrows no node_modules', () => {
+    // The marker names the GENUINE entry here, so what guards the containment
+    // is the node_modules predicate: a committed link resolving inside the
+    // entry but outside every node_modules is member source a real farm
+    // never links — admitted, it aliases the base's builds into probe
+    // resolution and re-opens the write channel into the shared entry.
+    const cacheRoot = tmp('expose-cacheroot-');
+    const cacheEntry = join(cacheRoot, 'entry');
+    const root = tmp('expose-plant-root-');
+    const probe = tmp('expose-plant-probe-');
+    mkdirSync(join(cacheEntry, 'node_modules', 'cached-pkg'), {
+      recursive: true,
+    });
+    mkdirSync(join(cacheEntry, 'packages', 'cli'), { recursive: true });
+    writeFileSync(join(cacheEntry, DEPS_COMPLETE_MARKER), '');
+    mkdirSync(join(root, 'node_modules'), { recursive: true });
+    writeFileSync(join(root, 'node_modules', '.qwen-review-farm'), cacheEntry);
+    symlinkSync(
+      join(cacheEntry, 'packages', 'cli'),
+      join(root, 'node_modules', 'planted'),
+      'dir',
+    );
+
+    const got = withDepsCacheEnv(cacheRoot, () =>
+      exposeDependencies(probe, root, { rebuild: true }),
+    );
 
     expect(got).toMatchObject({ linked: 0, failed: 1 });
     expect(existsSync(join(probe, 'node_modules', 'planted'))).toBe(false);
