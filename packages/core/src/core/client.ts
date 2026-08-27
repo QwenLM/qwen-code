@@ -815,13 +815,14 @@ export class GeminiClient {
   }
 
   /**
-   * Applies a `propose_goal` approval at the end of the turn that made it.
+   * Applies a `propose_goal` approval at the true end of the turn that made it.
    *
    * Only when the model has stopped calling tools: a proposal made
    * mid-turn stays parked through the tool-result continuations, because
    * creating the Goal earlier would leave those continuations without a
-   * permit. An aborted turn drops the approval instead of starting a loop
-   * the user just cancelled.
+   * permit. Tail continuations keep the proposal parked until their final
+   * boundary. An aborted turn drops the approval instead of starting a loop
+   * the user just cancelled; an abort during dispatch pauses the new Goal.
    */
   private async settlePendingGoalProposal(
     turnEnded: boolean,
@@ -844,7 +845,23 @@ export class GeminiClient {
       );
       return;
     }
+    if (signal.aborted) return;
     const result = await applyPendingGoalProposal(runtime, proposal);
+    if (signal.aborted && result.applied) {
+      try {
+        await runtime.dispatch({
+          action: 'pause',
+          expectedGoalId: result.goal.goalId,
+          expectedRevision: result.goal.revision,
+        });
+      } catch (error) {
+        debugLogger.warn(
+          'Failed to pause a Goal applied during cancellation',
+          error,
+        );
+      }
+      return;
+    }
     if (!result.applied) {
       debugLogger.debug(`Dropping an approved Goal proposal: ${result.reason}`);
     }
@@ -3899,15 +3916,6 @@ export class GeminiClient {
       agentOutput.commitResponse(
         hasToolCalls || turn.pendingToolCalls.length > 0,
       );
-      // A Goal the user approved through propose_goal is set here, once the
-      // model has stopped calling tools, so the proposing turn never runs
-      // without a permit. The runtime's broadcast lands in
-      // pendingGoalStateEvents and is yielded just below.
-      await this.settlePendingGoalProposal(
-        turn.pendingToolCalls.length === 0,
-        signal,
-        loadGoalRuntime,
-      );
       for (const goalEvent of signal.aborted
         ? await finalizeInterruptedGoalTurn()
         : takePendingGoalEvents()) {
@@ -4168,6 +4176,10 @@ export class GeminiClient {
               value: warning,
             };
             debugLogger.warn(warning);
+            await this.settlePendingGoalProposal(true, signal, loadGoalRuntime);
+            for (const goalEvent of takePendingGoalEvents()) {
+              yield goalEvent;
+            }
             endCurrentInteraction('ok');
             return turn;
           }
@@ -4230,6 +4242,10 @@ export class GeminiClient {
               ? response.nonGoalBlockingStopReason || 'No reason provided'
               : continueReason;
           if (!continuationReasonAfterSteer && !pendingSteer) {
+            await this.settlePendingGoalProposal(true, signal, loadGoalRuntime);
+            for (const goalEvent of takePendingGoalEvents()) {
+              yield goalEvent;
+            }
             endCurrentInteraction('ok');
             normalCompletion = true;
             return turn;
@@ -4349,6 +4365,10 @@ export class GeminiClient {
           if (arenaAgentClient) {
             await arenaAgentClient.reportCompleted();
           }
+          await this.settlePendingGoalProposal(true, signal, loadGoalRuntime);
+          for (const goalEvent of takePendingGoalEvents()) {
+            yield goalEvent;
+          }
           endCurrentInteraction('ok');
           return turn;
         }
@@ -4431,6 +4451,11 @@ export class GeminiClient {
       if (!hasToolCalls) {
         this.finishManagedAutoMemoryRecall();
       }
+      await this.settlePendingGoalProposal(
+        turn.pendingToolCalls.length === 0,
+        signal,
+        loadGoalRuntime,
+      );
       for (const goalEvent of takePendingGoalEvents()) {
         yield goalEvent;
       }
@@ -4480,6 +4505,7 @@ export class GeminiClient {
       // `return turn`. Catches uncaught exceptions and guards against
       // future early-return sites that forget to call cancel.
       if (!normalCompletion) {
+        this.config.takePendingGoalProposal?.();
         this.cancelPendingMemoryPrefetch(
           signal?.aborted ? 'abort' : 'no_safe_delivery_point',
         );

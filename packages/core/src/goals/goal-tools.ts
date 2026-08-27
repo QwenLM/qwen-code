@@ -662,7 +662,11 @@ export async function applyPendingGoalProposal(
       }
     : { action: 'create', objective };
   try {
-    const goal = (await runtime.dispatch(request)).snapshot.goal;
+    const response =
+      request.action === 'replace'
+        ? await runtime.dispatch(request, { refuseIfActive: true })
+        : await runtime.dispatch(request);
+    const goal = response.snapshot.goal;
     if (!goal) {
       return {
         applied: false,

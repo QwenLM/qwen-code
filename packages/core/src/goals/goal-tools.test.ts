@@ -1757,6 +1757,43 @@ describe('ProposeGoalTool', () => {
     expect(runtime.getSnapshot().goal?.objective).toBe('Typed by hand');
   });
 
+  it('does not replace a paused Goal resumed ahead of the proposal dispatch', async () => {
+    const { runtime } = idleRuntime();
+    await runtime.dispatch({ action: 'create', objective: 'Paused by user' });
+    const original = runtime.getSnapshot().goal!;
+    await runtime.dispatch({
+      action: 'pause',
+      expectedGoalId: original.goalId,
+      expectedRevision: original.revision,
+    });
+
+    const resumed = runtime.dispatch({
+      action: 'resume',
+      expectedGoalId: original.goalId,
+      expectedRevision: original.revision,
+    });
+    const applied = applyPendingGoalProposal(runtime, {
+      objective,
+      approvedAt: 1,
+    });
+
+    await expect(resumed).resolves.toMatchObject({
+      snapshot: {
+        goal: {
+          goalId: original.goalId,
+          revision: original.revision,
+          status: 'active',
+        },
+      },
+    });
+    await expect(applied).resolves.toMatchObject({ applied: false });
+    expect(runtime.getSnapshot().goal).toMatchObject({
+      goalId: original.goalId,
+      objective: 'Paused by user',
+      status: 'active',
+    });
+  });
+
   it('reports a conflict instead of throwing when the expected version moved', async () => {
     const { runtime } = idleRuntime();
     await runtime.dispatch({ action: 'create', objective: 'Ship Goal v3' });

@@ -259,6 +259,7 @@ describe('GeminiClient Goal admission', () => {
 
   it('sets an approved propose_goal proposal once the turn ends without tool calls', async () => {
     const { client, config, runtime } = setupGoalClient();
+    nextSpeakerMocks.check.mockResolvedValue({ next_speaker: 'user' });
     vi.mocked(runtime.getSnapshot).mockReturnValue({
       v: 2,
       activity: 'idle',
@@ -286,6 +287,205 @@ describe('GeminiClient Goal admission', () => {
     expect(runtime.dispatch).toHaveBeenCalledWith({
       action: 'create',
       objective: 'ship it',
+    });
+  });
+
+  it('keeps an approved proposal parked through a queued steer continuation', async () => {
+    const { client, config, runtime } = setupGoalClient();
+    vi.mocked(config.getMaxSessionTurns).mockReturnValue(0);
+    nextSpeakerMocks.check.mockResolvedValue({ next_speaker: 'user' });
+    let pending: { objective: string; approvedAt: number } | undefined;
+    const takePendingGoalProposal = vi.fn(() => {
+      const proposal = pending;
+      pending = undefined;
+      return proposal;
+    });
+    Object.assign(config, {
+      takePendingGoalProposal,
+      getUsageStatisticsEnabled: vi.fn(() => false),
+    });
+    let snapshot: GoalSnapshotV2 = { v: 2, activity: 'idle', goal: null };
+    vi.mocked(runtime.getSnapshot).mockImplementation(() =>
+      structuredClone(snapshot),
+    );
+    vi.mocked(runtime.dispatch).mockImplementation(async (request) => {
+      if (request.action === 'create') {
+        snapshot = {
+          v: 2,
+          activity: 'idle',
+          goal: {
+            goalId: 'proposal-goal',
+            revision: 1,
+            objective: request.objective,
+            status: 'active',
+            evidenceCursor: { recordId: 'proposal-create' },
+            turnCount: 0,
+            activeTimeMs: 0,
+            tokensUsed: 0,
+            createdAt: 1,
+            updatedAt: 1,
+          },
+        };
+      }
+      return { snapshot: structuredClone(snapshot) };
+    });
+    turnMocks.run
+      .mockImplementationOnce(() => {
+        pending = { objective: 'ship it', approvedAt: 1 };
+        return emptyStream();
+      })
+      .mockImplementation(emptyStream);
+    const getSteerInput = vi
+      .fn()
+      .mockResolvedValueOnce({
+        parts: [{ text: 'queued user steering' }],
+        accept: vi.fn(),
+        restore: vi.fn(),
+      })
+      .mockResolvedValue(undefined);
+
+    await drain(
+      client.sendMessageStream(
+        [{ text: 'set a goal for this' }],
+        new AbortController().signal,
+        'real-user-key',
+        { type: SendMessageType.UserQuery, getSteerInput },
+      ),
+    );
+
+    expect(turnMocks.run).toHaveBeenCalledTimes(2);
+    expect(runtime.dispatch).toHaveBeenCalledTimes(1);
+    expect(runtime.dispatch).toHaveBeenCalledWith({
+      action: 'create',
+      objective: 'ship it',
+    });
+  });
+
+  it('drops a proposal when its turn exits with a provider error', async () => {
+    const { client, config, runtime } = setupGoalClient();
+    vi.mocked(config.getMaxSessionTurns).mockReturnValue(0);
+    vi.mocked(runtime.getSnapshot).mockReturnValue({
+      v: 2,
+      activity: 'idle',
+      goal: null,
+    });
+    let pending: { objective: string; approvedAt: number } | undefined;
+    Object.assign(config, {
+      takePendingGoalProposal: vi.fn(() => {
+        const proposal = pending;
+        pending = undefined;
+        return proposal;
+      }),
+      getUsageStatisticsEnabled: vi.fn(() => false),
+      getSkipNextSpeakerCheck: vi.fn(() => true),
+    });
+    turnMocks.run
+      .mockImplementationOnce(async function* () {
+        pending = { objective: 'stale proposal', approvedAt: 1 };
+        yield {
+          type: GeminiEventType.Error,
+          value: { error: { status: 500 } },
+        };
+      })
+      .mockImplementation(emptyStream);
+
+    await drain(
+      client.sendMessageStream(
+        [{ text: 'set a goal for this' }],
+        new AbortController().signal,
+        'failed-user-key',
+        { type: SendMessageType.UserQuery },
+      ),
+    );
+    await drain(
+      client.sendMessageStream(
+        [{ text: 'background notification' }],
+        new AbortController().signal,
+        'notification-key',
+        { type: SendMessageType.Notification },
+      ),
+    );
+
+    expect(runtime.dispatch).not.toHaveBeenCalled();
+  });
+
+  it('drops a proposal when cancellation lands during runtime readiness', async () => {
+    const { client, config, runtime } = setupGoalClient();
+    const controller = new AbortController();
+    Object.assign(config, {
+      takePendingGoalProposal: vi.fn(() => ({
+        objective: 'ship it',
+        approvedAt: 1,
+      })),
+    });
+
+    await client['settlePendingGoalProposal'](
+      true,
+      controller.signal,
+      async () => {
+        controller.abort();
+        return runtime;
+      },
+    );
+
+    expect(runtime.dispatch).not.toHaveBeenCalled();
+  });
+
+  it('pauses a proposal applied while cancellation is landing', async () => {
+    const { client, config, runtime } = setupGoalClient();
+    const controller = new AbortController();
+    Object.assign(config, {
+      takePendingGoalProposal: vi.fn(() => ({
+        objective: 'ship it',
+        approvedAt: 1,
+      })),
+    });
+    const appliedGoal = {
+      goalId: 'proposal-goal',
+      revision: 1,
+      objective: 'ship it',
+      status: 'active' as const,
+      evidenceCursor: { recordId: 'proposal-create' },
+      turnCount: 0,
+      activeTimeMs: 0,
+      tokensUsed: 0,
+      createdAt: 1,
+      updatedAt: 1,
+    };
+    vi.mocked(runtime.getSnapshot).mockReturnValue({
+      v: 2,
+      activity: 'idle',
+      goal: null,
+    });
+    vi.mocked(runtime.dispatch)
+      .mockImplementationOnce(async () => {
+        controller.abort();
+        return {
+          snapshot: { v: 2, activity: 'idle', goal: appliedGoal },
+        };
+      })
+      .mockResolvedValueOnce({
+        snapshot: {
+          v: 2,
+          activity: 'idle',
+          goal: { ...appliedGoal, status: 'paused' },
+        },
+      });
+
+    await client['settlePendingGoalProposal'](
+      true,
+      controller.signal,
+      async () => runtime,
+    );
+
+    expect(runtime.dispatch).toHaveBeenNthCalledWith(1, {
+      action: 'create',
+      objective: 'ship it',
+    });
+    expect(runtime.dispatch).toHaveBeenNthCalledWith(2, {
+      action: 'pause',
+      expectedGoalId: appliedGoal.goalId,
+      expectedRevision: appliedGoal.revision,
     });
   });
 

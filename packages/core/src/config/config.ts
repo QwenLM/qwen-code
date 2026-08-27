@@ -8941,7 +8941,7 @@ export class Config {
       // keep the text hand-off (`/goal set …`) that /goal-draft prints.
       if (
         this.getModelProposedGoals() !== 'disabled' &&
-        resolveInteractionMode(this) !== 'headless'
+        resolveInteractionMode(this) === 'interactive'
       ) {
         await registerLazy(ToolNames.PROPOSE_GOAL, async () => {
           const { ProposeGoalTool } = await import('../goals/goal-tools.js');
