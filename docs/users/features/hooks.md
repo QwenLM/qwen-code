@@ -1354,7 +1354,7 @@ Async hooks are scoped to the Qwen process because their captured output is deli
 **Features:**
 
 - Cannot return decision control (operation has already occurred)
-- Results are injected in the next conversation turn via `systemMessage` or `additionalContext`
+- Results are injected in the next conversation turn via `systemMessage` or `additionalContext`, except for output-ignored fire-and-forget event types documented above
 - Suitable for auditing, logging, background testing, etc.
 
 **Example:**

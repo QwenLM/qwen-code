@@ -344,12 +344,13 @@ setInterval(() => {}, 1000);
     );
 
     it.each([
-      ['MessageDisplay', HookEventName.MessageDisplay],
-      ['StopFailure', HookEventName.StopFailure],
-      ['SessionDelete', HookEventName.SessionDelete],
+      ['a MessageDisplay', HookEventName.MessageDisplay, false],
+      ['a StopFailure', HookEventName.StopFailure, false],
+      ['a SessionDelete', HookEventName.SessionDelete, false],
+      ['an async MessageDisplay', HookEventName.MessageDisplay, true],
     ] as const)(
-      'lets a %s hook write output and finish after parent exit',
-      async (_, eventName) => {
+      'lets %s hook write output and finish after parent exit',
+      async (_, eventName, isAsync) => {
         const tempDir = await mkdtemp(join(tmpdir(), 'qwen-hook-survive-'));
         const driverPath = join(tempDir, 'driver.mjs');
         const fixturePath = join(tempDir, 'hook.mjs');
@@ -364,10 +365,10 @@ setInterval(() => {}, 1000);
             `import { readFileSync } from 'node:fs';
 
 const { HookRunner } = await import(process.argv[2]);
-const [tempDir, fixturePath, readyPath, completedPath, pidPath, eventName] = process.argv.slice(3);
+const [tempDir, fixturePath, readyPath, completedPath, pidPath, eventName, isAsync] = process.argv.slice(3);
 const runner = new HookRunner();
 void runner.executeHook(
-  { type: 'command', command: \`exec \${JSON.stringify(process.execPath)} \${JSON.stringify(fixturePath)} \${JSON.stringify(readyPath)} \${JSON.stringify(completedPath)} \${JSON.stringify(pidPath)}\`, source: 'project', shell: 'bash', timeout: 60_000 },
+  { type: 'command', command: \`exec \${JSON.stringify(process.execPath)} \${JSON.stringify(fixturePath)} \${JSON.stringify(readyPath)} \${JSON.stringify(completedPath)} \${JSON.stringify(pidPath)}\`, source: 'project', shell: 'bash', timeout: 60_000, async: isAsync === 'true' },
   eventName,
   { session_id: 'parent-exit-survival-test', transcript_path: \`\${tempDir}/transcript.jsonl\`, cwd: tempDir, hook_event_name: eventName, timestamp: new Date().toISOString() },
 );
@@ -409,6 +410,7 @@ writeFileSync(process.argv[3], 'completed');
               completedPath,
               pidPath,
               eventName,
+              String(isAsync),
             ],
             {
               cwd: fileURLToPath(new URL('../../../../', import.meta.url)),

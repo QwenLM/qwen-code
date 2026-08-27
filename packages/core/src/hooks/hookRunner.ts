@@ -805,8 +805,8 @@ export class HookRunner {
         eventName === HookEventName.MessageDisplay ||
         eventName === HookEventName.StopFailure ||
         eventName === HookEventName.SessionDelete;
-      // These events ignore output by contract, so their output streams must
-      // not depend on a parent process they are allowed to outlive.
+      // These are the documented output-ignored events that may finish after
+      // Qwen exits, so their output streams must not depend on the parent.
       const outputStdio = survivesParentExit ? 'ignore' : 'pipe';
       const child = spawn(
         shellConfig.executable,
