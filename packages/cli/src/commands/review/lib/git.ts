@@ -84,9 +84,39 @@ export function gitWithEnv(
  * every other subcommand would try to open the name as an ordinary file.
  */
 export function gitWithInput(input: Buffer, args: string[]): string {
-  return execFileSync('git', args, { ...gitOpts(), encoding: 'utf8', input })
-    .replace(/\r\n/g, '\n')
-    .trim();
+  return gitWithInputRaw(input, args).replace(/\r\n/g, '\n').trim();
+}
+
+/**
+ * `gitWithInput` with the output UNTOUCHED — no CRLF rewrite, no trim.
+ *
+ * For a NUL-delimited protocol the convenience form is a corruption. `git
+ * check-attr --stdin -z` echoes each path back as a record key, and a path
+ * may legally begin with whitespace or contain `\r\n`: the trim eats the
+ * leading byte of the first record so its key no longer matches the path that
+ * was asked about, and the CRLF rewrite can collide one record's key with a
+ * sibling's. The caller then reads a MALFORMED identity rather than an honest
+ * `UNHASHABLE` — and in one concrete direction it fails OPEN, because the
+ * eaten record is the `diff` attribute, so a `diff=<driver>` path never folds
+ * its driver's `binary` setting in and the config-side binary↔text flip the
+ * identity exists to track goes invisible.
+ */
+export function gitWithInputRaw(input: Buffer, args: string[]): string {
+  return execFileSync('git', args, {
+    ...gitOpts(),
+    encoding: 'utf8',
+    input,
+    // The same raised ceiling `gitRaw` takes, for the same reason. The one
+    // caller is `check-attr --stdin -z`, which emits roughly three records
+    // per path: this repository's ~6,270 hashable source files produce about
+    // 1.16 MB, over `execFileSync`'s 1 MB default. Past it the call throws
+    // ENOBUFS, `renderingAttributes`' blanket catch answers an empty map, and
+    // every identity becomes UNHASHABLE — which never equals itself, so every
+    // path reads as changed on every round while the stateId stays stable and
+    // no refusal ever prints. The whole target is silently re-reviewed for
+    // ever and the unchanged-since stop becomes unreachable.
+    maxBuffer: 512 * 1024 * 1024,
+  });
 }
 
 /**

@@ -5,7 +5,12 @@
  */
 
 import { createHash } from 'node:crypto';
-import { constants as fsConstants, promises as fs, type Stats } from 'node:fs';
+import {
+  constants as fsConstants,
+  promises as fs,
+  type BigIntStats,
+  type Stats,
+} from 'node:fs';
 import type { FileHandle } from 'node:fs/promises';
 import path from 'node:path';
 import {
@@ -13,15 +18,18 @@ import {
   isOfficeDocumentExtension,
   isPrototypeMetadataKey,
   isRecordableDerivedChild,
+  isAdoptableContentFingerprintKey,
   isReservedWorkspaceMetadataKey,
   MAX_DIRECTORY_ARTIFACT_DEPTH,
   MAX_DIRECTORY_ARTIFACT_FILES,
+  PUBLISHED_CONTENT_SHA256_METADATA_KEY,
   metadataBudgetBytes,
   SESSION_ARTIFACT_PERSISTENCE_VERSION,
   pathHasSkippedDirectoryComponent,
   stableSessionArtifactId,
   WORKSPACE_CONTENT_MTIME_MS_METADATA_KEY,
   WORKSPACE_CONTENT_SHA256_METADATA_KEY,
+  WORKSPACE_CONTENT_SIZE_BYTES_METADATA_KEY,
 } from '@qwen-code/qwen-code-core';
 import type {
   PersistedSessionArtifact,
@@ -241,6 +249,10 @@ interface StoredArtifact extends NormalizedArtifact {
   insertSeq: number;
   durableTombstoneRequired?: boolean;
   hideWorkspacePath?: boolean;
+  missingFromStatError?: boolean;
+  lastObservedSha256?: string;
+  lastObservedSizeBytes?: number;
+  lastObservedMtimeMs?: number;
 }
 
 interface WorkspaceStatusExpected {
@@ -290,6 +302,7 @@ export class SessionArtifactStore {
   async list(): Promise<SessionArtifactsEnvelope> {
     return this.enqueue(async () => {
       await this.refreshWorkspaceStatuses();
+      await this.forgetVanishedAutoRecordedArtifacts();
       return {
         v: 1,
         sessionId: this.sessionId,
@@ -314,9 +327,14 @@ export class SessionArtifactStore {
       if (!artifact) return undefined;
       if (
         artifact.workspacePath &&
-        shouldRefreshWorkspaceStatus(artifact, Date.now())
+        needsWorkspaceStatusRefresh(artifact, Date.now())
       ) {
         await this.refreshWorkspaceStatus(artifact, { onError: 'missing' });
+      }
+      if (isVanishedAutoRecordedWorkspaceArtifact(artifact)) {
+        await this.forgetVanishedAutoRecordedArtifacts([artifact]);
+        const kept = this.artifacts.get(artifactId);
+        return kept ? toPublicArtifact(kept) : undefined;
       }
       return toPublicArtifact(artifact);
     });
@@ -427,7 +445,7 @@ export class SessionArtifactStore {
               const removeChange: InternalSessionArtifactChange = {
                 action: 'removed',
                 artifactId: existing.id,
-                artifact: toPublicArtifact(existing),
+                artifact: toRemovedPublicArtifact(existing),
                 reason: 'explicit',
                 durableTombstoneRequired:
                   existing.durableTombstoneRequired ||
@@ -440,7 +458,7 @@ export class SessionArtifactStore {
               changes.push({
                 action: 'removed',
                 artifactId: existing.id,
-                artifact: toPublicArtifact(existing),
+                artifact: toRemovedPublicArtifact(existing),
                 reason: 'unpin_to_ephemeral',
                 durableTombstoneRequired: true,
               });
@@ -617,10 +635,11 @@ export class SessionArtifactStore {
       // Tool/hook artifacts are session-scoped outputs and may be removed by
       // any caller that already passed session mutation auth.
       this.denyCrossClientMutation('remove', artifactId, existing, options);
+      const removedAt = new Date().toISOString();
       const removeChange: InternalSessionArtifactChange = {
         action: 'removed',
         artifactId,
-        artifact: toPublicArtifact(existing),
+        artifact: toRemovedPublicArtifact(existing, removedAt),
         reason: 'explicit',
         durableTombstoneRequired:
           existing.durableTombstoneRequired ||
@@ -1579,6 +1598,7 @@ export class SessionArtifactStore {
     const metadata = withWorkspaceContentHashMetadata(
       normalizeMetadata(input.metadata, {
         budget: options.metadataBudget ?? 'user',
+        trustedPublisher,
       }),
       workspaceStatus,
     );
@@ -1668,7 +1688,7 @@ export class SessionArtifactStore {
     const now = Date.now();
     const staleWorkspaceArtifacts = Array.from(this.artifacts.values())
       .filter((artifact) => artifact.workspacePath)
-      .filter((artifact) => shouldRefreshWorkspaceStatus(artifact, now));
+      .filter((artifact) => needsWorkspaceStatusRefresh(artifact, now));
 
     await runInBatches(
       staleWorkspaceArtifacts,
@@ -1733,27 +1753,66 @@ export class SessionArtifactStore {
     if (!artifact.workspacePath) {
       return;
     }
+    const previousStatus = artifact.status;
+    const previousSizeBytes = artifact.sizeBytes;
     try {
       const status = await getWorkspaceStatus(
         artifact.workspacePath,
         this.getRealWorkspaceCwd(),
         {
-          sizeBytes: artifact.sizeBytes,
+          sizeBytes: recordedWorkspaceSizeBytes(artifact),
           mtimeMs: artifact.metadata?.[WORKSPACE_CONTENT_MTIME_MS_METADATA_KEY],
           sha256: artifact.metadata?.[WORKSPACE_CONTENT_SHA256_METADATA_KEY],
         },
       );
-      const changed = isWorkspaceContentChanged(artifact, status);
-      artifact.status = changed ? 'changed' : status.status;
-      if (!changed) {
-        artifact.sizeBytes = status.sizeBytes;
-      }
+      const contentChanged = isWorkspaceContentChanged(artifact, status);
+      artifact.status = contentChanged ? 'changed' : status.status;
+      artifact.missingFromStatError = undefined;
       if (status.escaped) {
         artifact.status = 'missing';
         artifact.sizeBytes = undefined;
         artifact.hideWorkspacePath = true;
+      } else if (status.status === 'missing') {
+        artifact.sizeBytes = undefined;
+      } else if (status.sizeBytes !== undefined) {
+        if (
+          artifact.status === 'changed' &&
+          artifact.metadata?.[WORKSPACE_CONTENT_SIZE_BYTES_METADATA_KEY] ===
+            undefined
+        ) {
+          const baseline = recordedWorkspaceSizeBytes(artifact);
+          if (baseline !== undefined) {
+            artifact.metadata = {
+              ...artifact.metadata,
+              [WORKSPACE_CONTENT_SIZE_BYTES_METADATA_KEY]: baseline,
+            };
+          }
+        }
+        artifact.sizeBytes = status.sizeBytes;
+      }
+      if (artifact.status === 'available' && !status.escaped) {
+        artifact.metadata = withWorkspaceContentHashMetadata(
+          artifact.metadata,
+          {
+            status: 'available',
+            sha256: status.sha256,
+            mtimeMs: status.mtimeMs,
+            sizeBytes: status.sizeBytes,
+          },
+        );
       }
       artifact.lastStatAt = options.now ?? Date.now();
+      const observationChanged =
+        !status.escaped &&
+        status.status !== 'missing' &&
+        recordWorkspaceObservation(artifact, status);
+      if (
+        artifact.status !== previousStatus ||
+        artifact.sizeBytes !== previousSizeBytes ||
+        observationChanged
+      ) {
+        artifact.updatedAt = new Date(artifact.lastStatAt).toISOString();
+      }
     } catch (error) {
       writeStderrLine(
         `[artifacts] session=${this.sessionId} action=status_refresh_failed artifactId=${artifact.id} reason=${JSON.stringify(
@@ -1763,9 +1822,58 @@ export class SessionArtifactStore {
       if (options.onError === 'missing') {
         artifact.status = 'missing';
         artifact.sizeBytes = undefined;
+        artifact.missingFromStatError = true;
         artifact.lastStatAt = options.now ?? Date.now();
+        if (previousStatus !== 'missing' || previousSizeBytes !== undefined) {
+          artifact.updatedAt = new Date(artifact.lastStatAt).toISOString();
+        }
       }
       return;
+    }
+  }
+
+  private async forgetVanishedAutoRecordedArtifacts(
+    candidates?: readonly StoredArtifact[],
+  ): Promise<void> {
+    const vanished = (candidates ?? Array.from(this.artifacts.values())).filter(
+      isVanishedAutoRecordedWorkspaceArtifact,
+    );
+    if (vanished.length === 0) {
+      return;
+    }
+    const removedAt = new Date().toISOString();
+    const changes: InternalSessionArtifactChange[] = vanished.map(
+      (existing) => ({
+        action: 'removed',
+        artifactId: existing.id,
+        artifact: toRemovedPublicArtifact(existing, removedAt),
+        reason: 'eviction',
+        durableTombstoneRequired:
+          existing.durableTombstoneRequired ||
+          existing.retention !== 'ephemeral'
+            ? true
+            : undefined,
+        removedClientId: existing.clientId,
+      }),
+    );
+    const needsDurableTombstone = changes.some(
+      (change) => change.durableTombstoneRequired === true,
+    );
+    const before = this.cloneState();
+    for (const artifact of vanished) {
+      this.artifacts.delete(artifact.id);
+    }
+    try {
+      await this.persistChanges(changes, needsDurableTombstone);
+    } catch (error) {
+      writeStderrLine(
+        `[artifacts] session=${this.sessionId} action=vanish_forget_failed artifactIds=${JSON.stringify(
+          vanished.map((artifact) => artifact.id),
+        )} reason=${JSON.stringify(
+          error instanceof Error ? error.message : String(error),
+        )}`,
+      );
+      this.restoreState(before);
     }
   }
 
@@ -1811,7 +1919,7 @@ export class SessionArtifactStore {
     const now = Date.now();
     const staleWorkspaceCandidates = candidates
       .filter((artifact) => artifact.workspacePath)
-      .filter((artifact) => shouldRefreshWorkspaceStatus(artifact, now));
+      .filter((artifact) => needsWorkspaceStatusRefresh(artifact, now));
     await runInBatches(
       staleWorkspaceCandidates,
       WORKSPACE_STATUS_REFRESH_BATCH_SIZE,
@@ -1830,7 +1938,7 @@ export class SessionArtifactStore {
       removed.push({
         action: 'removed',
         artifactId: artifact.id,
-        artifact: toPublicArtifact(artifact),
+        artifact: toRemovedPublicArtifact(artifact),
         durableTombstoneRequired: artifact.durableTombstoneRequired,
         reason: 'eviction',
       });
@@ -2020,6 +2128,9 @@ function mergeArtifact(
         ? undefined
         : (incoming.lastStatAt ?? existing.lastStatAt),
     updatedAt: existing.updatedAt,
+    lastObservedSha256: undefined,
+    lastObservedSizeBytes: undefined,
+    lastObservedMtimeMs: undefined,
   };
 
   if (publishedUpdate) {
@@ -2199,11 +2310,7 @@ function mergeMetadata(
   const merged = { ...(existing.metadata ?? {}) };
   let changed = false;
   for (const [key, value] of Object.entries(incoming.metadata)) {
-    if (
-      (key === WORKSPACE_CONTENT_SHA256_METADATA_KEY ||
-        key === WORKSPACE_CONTENT_MTIME_MS_METADATA_KEY) &&
-      merged[key] !== value
-    ) {
+    if (isAdoptableContentFingerprintKey(key) && merged[key] !== value) {
       merged[key] = value;
       changed = true;
     } else if (!Object.hasOwn(merged, key)) {
@@ -2243,6 +2350,18 @@ function countByRetentionSource(
   return counts;
 }
 
+function isVanishedAutoRecordedWorkspaceArtifact(
+  artifact: StoredArtifact,
+): boolean {
+  return (
+    artifact.toolName === 'write_file' &&
+    artifact.workspacePath !== undefined &&
+    artifact.status === 'missing' &&
+    artifact.missingFromStatError !== true &&
+    artifact.hideWorkspacePath !== true
+  );
+}
+
 function shouldRefreshWorkspaceStatus(
   artifact: StoredArtifact,
   now: number,
@@ -2253,6 +2372,26 @@ function shouldRefreshWorkspaceStatus(
   );
 }
 
+function needsWorkspaceStatusRefresh(
+  artifact: StoredArtifact,
+  now: number,
+): boolean {
+  return (
+    shouldRefreshWorkspaceStatus(artifact, now) ||
+    shouldRecheckWriteFilePresence(artifact)
+  );
+}
+
+function shouldRecheckWriteFilePresence(artifact: StoredArtifact): boolean {
+  return (
+    artifact.toolName === 'write_file' &&
+    (artifact.status === 'available' ||
+      (artifact.status === 'missing' &&
+        artifact.missingFromStatError !== true &&
+        artifact.hideWorkspacePath !== true))
+  );
+}
+
 function selectEvictionCandidate(
   candidates: StoredArtifact[],
   sourceCounts: Record<DaemonSessionArtifactSource, number>,
@@ -2260,7 +2399,10 @@ function selectEvictionCandidate(
   return (
     oldest(
       candidates,
-      (artifact) => artifact.status === 'missing' && !artifact.clientRetained,
+      (artifact) =>
+        artifact.status === 'missing' &&
+        artifact.missingFromStatError !== true &&
+        !artifact.clientRetained,
     ) ??
     oldest(
       candidates,
@@ -2363,6 +2505,13 @@ function toPublicArtifact(
   };
 }
 
+function toRemovedPublicArtifact(
+  artifact: StoredArtifact,
+  removedAt: string = new Date().toISOString(),
+): DaemonSessionArtifact {
+  return { ...toPublicArtifact(artifact), updatedAt: removedAt };
+}
+
 function persistedArtifactToInput(
   artifact: PersistedSessionArtifact,
 ): RestoreSessionArtifactInput {
@@ -2393,7 +2542,7 @@ function workspaceExpectedFromArtifact(
     return undefined;
   }
   return {
-    sizeBytes: artifact.sizeBytes,
+    sizeBytes: recordedWorkspaceSizeBytes(artifact),
     mtimeMs: artifact.metadata?.[WORKSPACE_CONTENT_MTIME_MS_METADATA_KEY],
     sha256: artifact.metadata?.[WORKSPACE_CONTENT_SHA256_METADATA_KEY],
   };
@@ -2968,7 +3117,7 @@ function isSecretLikeMetadataValue(value: string): boolean {
 
 function normalizeMetadata(
   metadata: unknown,
-  options: { budget?: 'user' | 'persisted' } = {},
+  options: { budget?: 'user' | 'persisted'; trustedPublisher?: boolean } = {},
 ): Record<string, string | number | boolean | null> | undefined {
   if (metadata === undefined) {
     return undefined;
@@ -2988,8 +3137,18 @@ function normalizeMetadata(
     if (isPrototypeMetadataKey(key)) {
       continue;
     }
-    if (options.budget !== 'persisted' && isReservedWorkspaceMetadataKey(key)) {
-      continue;
+    if (options.budget !== 'persisted') {
+      // Content fingerprints are stamped by the store or by the artifact tool,
+      // never by whoever supplied the input.
+      if (isReservedWorkspaceMetadataKey(key)) {
+        continue;
+      }
+      if (
+        key === PUBLISHED_CONTENT_SHA256_METADATA_KEY &&
+        options.trustedPublisher !== true
+      ) {
+        continue;
+      }
     }
     if (!key) {
       throw new SessionArtifactValidationError(
@@ -3139,16 +3298,21 @@ async function getWorkspaceStatus(
     if (!relative || isOutsidePath(relative)) {
       return { status: 'missing', escaped: true };
     }
-    const preOpenStat = await fs.lstat(realPath);
+    // Identity is compared on bigint stats: NTFS file ids are 64-bit and the
+    // Number spelling loses precision above 2^53, so two files created close
+    // together can round to the SAME numeric ino and defeat the swap check.
+    const preOpenStat = await fs.lstat(realPath, { bigint: true });
     const handle = await fs.open(
       realPath,
       fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW,
     );
     try {
-      const stat = await handle.stat();
-      if (!isSameFile(preOpenStat, stat)) {
+      if (!isSameFile(preOpenStat, await handle.stat({ bigint: true }))) {
         return { status: 'missing', escaped: true };
       }
+      // The identity fstat cannot be reused here: bigint stats return BigInt
+      // fields and truncate mtimeMs, breaking the Number comparisons below.
+      const stat = await handle.stat();
       if (!stat.isFile()) {
         throw new Error('path is not a regular file');
       }
@@ -3194,6 +3358,7 @@ async function getWorkspaceStatus(
           status: 'changed',
           sizeBytes: stat.size,
           mtimeMs: stat.mtimeMs,
+          sha256,
         };
       }
       return {
@@ -3219,7 +3384,7 @@ async function getWorkspaceStatus(
   }
 }
 
-function isSameFile(before: Stats, after: Stats): boolean {
+function isSameFile(before: BigIntStats, after: BigIntStats): boolean {
   return before.dev === after.dev && before.ino === after.ino;
 }
 
@@ -3238,20 +3403,77 @@ function withWorkspaceContentHashMetadata(
         status: DaemonSessionArtifactStatus;
         sha256?: string;
         mtimeMs?: number;
+        sizeBytes?: number;
       }
     | undefined,
 ): Record<string, string | number | boolean | null> | undefined {
-  if (workspaceStatus?.status !== 'available' || !workspaceStatus.sha256) {
+  if (
+    workspaceStatus?.status !== 'available' ||
+    (workspaceStatus.sha256 === undefined &&
+      workspaceStatus.sizeBytes === undefined)
+  ) {
     return metadata;
   }
+  // The recorded size is the only baseline left when the file was too large to
+  // hash, so it must be stored even without a sha256.
   const next = {
     ...(metadata ?? {}),
-    [WORKSPACE_CONTENT_SHA256_METADATA_KEY]: workspaceStatus.sha256,
+    ...(workspaceStatus.sha256
+      ? { [WORKSPACE_CONTENT_SHA256_METADATA_KEY]: workspaceStatus.sha256 }
+      : {}),
     ...(workspaceStatus.mtimeMs !== undefined
       ? { [WORKSPACE_CONTENT_MTIME_MS_METADATA_KEY]: workspaceStatus.mtimeMs }
       : {}),
+    ...(workspaceStatus.sizeBytes !== undefined
+      ? {
+          [WORKSPACE_CONTENT_SIZE_BYTES_METADATA_KEY]:
+            workspaceStatus.sizeBytes,
+        }
+      : {}),
   };
   return next;
+}
+
+function recordedWorkspaceSizeBytes(
+  artifact: Pick<DaemonSessionArtifact, 'sizeBytes' | 'metadata'>,
+): number | undefined {
+  const recorded =
+    artifact.metadata?.[WORKSPACE_CONTENT_SIZE_BYTES_METADATA_KEY];
+  if (typeof recorded === 'number' && Number.isFinite(recorded)) {
+    return recorded;
+  }
+  return artifact.sizeBytes;
+}
+
+function recordWorkspaceObservation(
+  artifact: StoredArtifact,
+  status: {
+    sha256?: string;
+    sizeBytes?: number;
+    mtimeMs?: number;
+  },
+): boolean {
+  const hadObservation =
+    artifact.lastObservedSha256 !== undefined ||
+    artifact.lastObservedSizeBytes !== undefined ||
+    artifact.lastObservedMtimeMs !== undefined;
+  let changed = false;
+  if (hadObservation) {
+    if (
+      status.sha256 !== undefined &&
+      artifact.lastObservedSha256 !== undefined
+    ) {
+      changed = status.sha256 !== artifact.lastObservedSha256;
+    } else {
+      changed =
+        status.sizeBytes !== artifact.lastObservedSizeBytes ||
+        status.mtimeMs !== artifact.lastObservedMtimeMs;
+    }
+  }
+  artifact.lastObservedSha256 = status.sha256;
+  artifact.lastObservedSizeBytes = status.sizeBytes;
+  artifact.lastObservedMtimeMs = status.mtimeMs;
+  return changed;
 }
 
 function isWorkspaceContentChanged(
@@ -3267,10 +3489,11 @@ function isWorkspaceContentChanged(
   }
   const expectedSha256 =
     artifact.metadata?.[WORKSPACE_CONTENT_SHA256_METADATA_KEY];
+  const expectedSize = recordedWorkspaceSizeBytes(artifact);
   if (
-    artifact.sizeBytes !== undefined &&
+    expectedSize !== undefined &&
     status.sizeBytes !== undefined &&
-    status.sizeBytes !== artifact.sizeBytes
+    status.sizeBytes !== expectedSize
   ) {
     return true;
   }

@@ -7,7 +7,7 @@
 import type React from 'react';
 import { useEffect, useState } from 'react';
 import { Text, useIsScreenReaderEnabled } from 'ink';
-import Spinner from 'ink-spinner';
+import InkSpinner from 'ink-spinner';
 import type { SpinnerName } from 'cli-spinners';
 import { useStreamingContext } from '../contexts/StreamingContext.js';
 import { StreamingState } from '../types.js';
@@ -20,7 +20,7 @@ import { theme } from '../semantic-colors.js';
 const TMUX_SPINNER_INTERVAL_MS = 750;
 const TMUX_SPINNER_FRAMES = ['. ', '..'];
 
-interface GeminiRespondingSpinnerProps {
+interface RespondingSpinnerProps {
   /**
    * Optional string to display when not in Responding state.
    * If not provided and not Responding, renders null.
@@ -29,17 +29,15 @@ interface GeminiRespondingSpinnerProps {
   spinnerType?: SpinnerName;
 }
 
-export const GeminiRespondingSpinner: React.FC<
-  GeminiRespondingSpinnerProps
-> = ({ nonRespondingDisplay, spinnerType = 'dots' }) => {
+export const RespondingSpinner: React.FC<RespondingSpinnerProps> = ({
+  nonRespondingDisplay,
+  spinnerType = 'dots',
+}) => {
   const streamingState = useStreamingContext();
   const isScreenReaderEnabled = useIsScreenReaderEnabled();
   if (streamingState === StreamingState.Responding) {
     return (
-      <GeminiSpinner
-        spinnerType={spinnerType}
-        altText={SCREEN_READER_RESPONDING}
-      />
+      <Spinner spinnerType={spinnerType} altText={SCREEN_READER_RESPONDING} />
     );
   } else if (nonRespondingDisplay) {
     return isScreenReaderEnabled ? (
@@ -51,12 +49,12 @@ export const GeminiRespondingSpinner: React.FC<
   return null;
 };
 
-interface GeminiSpinnerProps {
+interface SpinnerProps {
   spinnerType?: SpinnerName;
   altText?: string;
 }
 
-export const GeminiSpinner: React.FC<GeminiSpinnerProps> = ({
+export const Spinner: React.FC<SpinnerProps> = ({
   spinnerType = 'dots',
   altText,
 }) => {
@@ -81,8 +79,8 @@ export const GeminiSpinner: React.FC<GeminiSpinnerProps> = ({
   }
 
   if (isTmux) {
-    // Note: must NOT wrap in <Box> here — GeminiSpinner is rendered inside a
-    // <Text> in Footer.tsx (`<Text>...<GeminiSpinner /> {msg}</Text>`), and
+    // Note: must NOT wrap in <Box> here — Spinner is rendered inside a
+    // <Text> in Footer.tsx (`<Text>...<Spinner /> {msg}</Text>`), and
     // Ink forbids <Box> nested inside <Text>. The 2-char fixed-width frames
     // already give us stable layout without an explicit width container.
     return (
@@ -94,7 +92,7 @@ export const GeminiSpinner: React.FC<GeminiSpinnerProps> = ({
 
   return (
     <Text color={theme.text.primary}>
-      <Spinner type={spinnerType} />
+      <InkSpinner type={spinnerType} />
     </Text>
   );
 };

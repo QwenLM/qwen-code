@@ -42,6 +42,7 @@ import {
   TURN_RESULT_CODE_TEXT_TRUNCATED,
   TURN_RESULT_TEXT_MAX_CHARS,
   TrustGateError,
+  canonicalSessionPrUrl,
   normalizeTurnResultError,
   normalizeSnapshotPayload,
   ShellExecutionService,
@@ -10283,11 +10284,15 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           // The url is interpolated into the stderr audit line — control
           // characters would let a client forge log lines (the displayName
           // branch rejects them for the same reason).
-          hasControlCharacter((pr as SessionPrInfo).url)
+          hasControlCharacter((pr as SessionPrInfo).url) ||
+          ((pr as SessionPrInfo).state !== undefined &&
+            (pr as SessionPrInfo).state !== 'open' &&
+            (pr as SessionPrInfo).state !== 'merged' &&
+            (pr as SessionPrInfo).state !== 'closed')
         ) {
           throw new InvalidSessionMetadataError(
             'pr',
-            `must be an object with a positive integer \`number\` and an http(s) \`url\` of at most ${SESSION_PR_URL_MAX_LENGTH} characters, without control characters`,
+            `must be an object with a positive integer \`number\` and an http(s) \`url\` of at most ${SESSION_PR_URL_MAX_LENGTH} characters, without control characters, and an optional \`state\` of \`open\`, \`merged\`, or \`closed\``,
           );
         }
       }
@@ -10362,13 +10367,36 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         const bound = metadata.pr;
         const existing = entry.prs ?? [];
         const latest = existing[existing.length - 1];
-        if (latest?.number === bound.number && latest.url === bound.url) {
+        if (
+          latest?.number === bound.number &&
+          latest.url === bound.url &&
+          // A re-bind carrying a new state is a change: the live entry,
+          // the metadata event, and the catalog revision must all see it.
+          (bound.state === undefined || bound.state === latest.state)
+        ) {
           // Same binding repeated — no change, no event.
         } else {
-          // Re-binding a number refreshes it and moves it to latest.
+          // Re-binding a number refreshes it and moves it to latest; an
+          // omitted state preserves the known one (mirrors the sidecar) —
+          // only for the same PR: a different repository's same-numbered
+          // PR is a different PR and must not inherit its state.
+          const known = existing.find(
+            (p) =>
+              p.number === bound.number &&
+              canonicalSessionPrUrl(p.url) === canonicalSessionPrUrl(bound.url),
+          );
           entry.prs = [
             ...existing.filter((p) => p.number !== bound.number),
-            { number: bound.number, url: bound.url },
+            {
+              number: bound.number,
+              url: bound.url,
+              ...((bound.state ?? known?.state)
+                ? {
+                    state: (bound.state ??
+                      known?.state) as SessionPrInfo['state'],
+                  }
+                : {}),
+            },
           ].slice(-SESSION_PR_LIST_LIMIT);
           markSessionCatalogChanged();
           writeStderrLine(
@@ -10409,7 +10437,23 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       const entry = byId.get(sessionId);
       if (!entry || (entry.prs && entry.prs.length > 0)) return;
       entry.prs = prs
-        .map(({ number, url }) => ({ number, url }))
+        .map(({ number, url, state }) => ({
+          number,
+          url,
+          ...(state ? { state } : {}),
+        }))
+        .slice(-SESSION_PR_LIST_LIMIT);
+    },
+
+    setSessionPrs(sessionId, prs) {
+      const entry = byId.get(sessionId);
+      if (!entry) return;
+      entry.prs = prs
+        .map(({ number, url, state }) => ({
+          number,
+          url,
+          ...(state ? { state } : {}),
+        }))
         .slice(-SESSION_PR_LIST_LIMIT);
     },
 
