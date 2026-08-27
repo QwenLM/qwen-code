@@ -217,7 +217,7 @@ describe('autofix-status-heartbeat loop', () => {
     const workdir = join(dir, 'work');
     mkdirSync(workdir, { recursive: true });
     // The loop pins its tick PATH from the launcher-supplied TRUSTED_PATH
-    // (af-148): the fakes travel through that capture, never through an
+    // (af-149): the fakes travel through that capture, never through an
     // ambient PATH the tick no longer trusts.
     const trustedPath = `${gh.bin}:${process.env.PATH}`;
     return {

@@ -3165,7 +3165,7 @@ describe('qwen-autofix workflow', () => {
     // fetch in resolve_and_reply_threads is the same class again — a GraphQL
     // paginate whose `--jq '…nodes[]'` stream is slurped straight into
     // THREADS_JSON — so it bumps the total pin above without joining the
-    // normalizer count below. The heartbeat's deep-link job lookup (af-149)
+    // normalizer count below. The heartbeat's deep-link job lookup (af-150)
     // is the same class once more: the run-attempt jobs listing is slurped
     // by `jq -rs` into a shell variable to resolve ONE job id, never a
     // WORKDIR file, so it bumps the total pin without joining the count
@@ -9962,10 +9962,49 @@ exit 1
       expect(step).toContain('sudo -n apt-get install');
       expect(step).not.toContain('sudo apt-get');
     }
-    // "Short jobs stay hosted" is an explicit design decision — only the
-    // three heavy jobs may route onto the persistent pool.
-    expect(routeJob).toContain("runs-on: 'ubuntu-latest'");
-    expect(reviewScanJob).toContain("runs-on: 'ubuntu-latest'");
+    // "Short jobs stay hosted" is the design rule — the carve-out is the
+    // scan lane: route and review-scan gate the WHOLE fan-out, and a
+    // hosted-runner backlog queued route past the cron period so the cron
+    // supersede rule starved every scan round (2026-08-25). They share the
+    // heavy jobs' exact expression, fork-trust clause and kill-switch
+    // included. The command jobs stay hosted.
+    expect(routeJob).toContain(ecsRunsOn);
+    expect(reviewScanJob).toContain(ecsRunsOn);
+    // af-148 carve-out premise: neither job checks code out, so the shared
+    // workspace needs no restore/wipe step. Pin it, so adding a checkout
+    // forces a deliberate update of the hygiene requirement.
+    expect(routeJob).not.toContain('actions/checkout');
+    expect(reviewScanJob).not.toContain('actions/checkout');
+    // The scan's per-run WORKDIR must not outlive the run on the pool:
+    // 0700 at creation and an always() cleanup step mirroring the heavy
+    // jobs' teardown. The value pins the autofix* prefix — the contract
+    // with the heavy jobs' age sweep, the only reclaim channel left after
+    // a hard runner kill.
+    expect(reviewScanJob).toContain(
+      "WORKDIR: '/tmp/autofix-scan-${{ github.run_id }}'",
+    );
+    // Pre-clean immediately before create: run_id is public and mkdir -p
+    // alone would accept a dir or symlink pre-planted on the shared /tmp.
+    expect(reviewScanJob).toContain(
+      'rm -rf "${WORKDIR}"\n          (umask 077; mkdir -p "${WORKDIR}")',
+    );
+    // The fleet file lives inside WORKDIR so the always() step and the age
+    // sweep reclaim it when the EXIT trap cannot (cancelled/killed run).
+    expect(reviewScanJob).toContain('FLEET_FILE="${WORKDIR}/fleet.tsv"');
+    expect(reviewScanJob).not.toContain('FLEET_FILE="$(mktemp)"');
+    // The EXIT trap is the in-step cleanup twin of the always() step; it
+    // must remove both the fleet file and the per-run dir.
+    expect(reviewScanJob).toContain(
+      'trap \'rm -f "${FLEET_FILE}"; rm -rf "${WORKDIR}"\' EXIT',
+    );
+    // Pin the cleanup step's command inside its own slice, not job-wide: a
+    // no-op cleanup with the right name and if: shipped green before.
+    const scanCleanupStep =
+      reviewScanJob.match(
+        /- name: 'Clean up scan workdir'[\s\S]*?(?=\n[ ]{6}- name: '|\n[ ]{2}# ==========|$)/,
+      )?.[0] ?? '';
+    expect(scanCleanupStep).toContain("if: 'always()'");
+    expect(scanCleanupStep).toContain('rm -rf "${WORKDIR}"');
     for (const name of ['takeover-command', 'retry-command', 'takeover-ack']) {
       const job =
         workflow.match(
@@ -10236,6 +10275,13 @@ exit 1
       // world-readable window on the shared /tmp.
       expect(step).toContain('(umask 077; mkdir -p "${WORKDIR}")');
       expect(step).not.toContain('chmod 700');
+      // Consumer side of the scan lane's reclaim contract: after a hard
+      // runner kill neither its EXIT trap nor its always() step fires, so
+      // this sweep is the only channel left — the glob must keep matching
+      // the scan WORKDIR basename pinned in the carve-out test.
+      expect(step).toContain(
+        "find /tmp -maxdepth 1 -name 'autofix*' -mmin +1440 -exec rm -rf {} + 2>/dev/null || true",
+      );
     }
     // Per-run/per-target teardown after the artifact upload: nothing else
     // removes these dirs on the persistent pool (PR numbers only increase).
@@ -10719,7 +10765,7 @@ exit 1
     expect(patBlockOf(prepareStep)).toBe(patBlockOf(publishPrStep));
     // Each PAT step carries the trusted-PATH env wiring. post_status's
     // covers the step's own externals AND seeds the heartbeat loop's pin:
-    // the loop re-pins its tick PATH from this capture (af-148).
+    // the loop re-pins its tick PATH from this capture (af-149).
     for (const step of [
       publishPrStep,
       pushAndReportStep,
@@ -10735,26 +10781,48 @@ exit 1
     // gh's own env channels are pinned/stripped BEFORE the first gh call in
     // each PAT step, so a $GITHUB_ENV-planted GH_HOST cannot reroute the
     // identity check and a planted GH_TOKEN cannot outrank the inline one.
-    for (const [step, firstGh] of [
-      [publishPrStep, 'GH_TOKEN="${GITHUB_TOKEN}" gh api user'],
-      [pushAndReportStep, 'GH_TOKEN="${GITHUB_TOKEN}" gh api user'],
-      [prepareStep, 'PR_LIVE="$(gh pr view'],
+    // The scan lane shares the persistent pool with those PAT steps
+    // (af-148), so route and review-scan carry the same reroute hardening
+    // in the same loop — one preamble shape, one edit site: a planted
+    // ~/.config/gh there would send the scan's CI_DEV_BOT_PAT or route's
+    // collaborator-permission lookups into a local socket.
+    for (const [step, firstGh, configMint] of [
+      [publishPrStep, 'GH_TOKEN="${GITHUB_TOKEN}" gh api user', 'export'],
+      [pushAndReportStep, 'GH_TOKEN="${GITHUB_TOKEN}" gh api user', 'export'],
+      [prepareStep, 'PR_LIVE="$(gh pr view', 'export'],
       // The heartbeat's step: deep-link lookup, comment upsert, and the
       // loop launch all carry the PAT; the first gh call is the deep link.
-      [postStatusCommentStep, 'JOB_ID="$(hermetic_gh api'],
+      // Its config mint is the per-call hermetic_gh wrapper pinned below
+      // (R11-1), not a step-level export.
+      [postStatusCommentStep, 'JOB_ID="$(hermetic_gh api', 'wrapper'],
+      [routeStep, 'gh api "repos/${REPO}/collaborators', 'guarded'],
+      [reviewScanJob, 'gh pr view', 'guarded'],
     ]) {
       const ghPin = step.indexOf('export GH_HOST=github.com');
       expect(ghPin).toBeGreaterThan(-1);
       expect(step).toMatch(/unset GH_ENTERPRISE_TOKEN GH_TOKEN/);
+      // GH_CONFIG_DIR is PINNED to a fresh throwaway (unsetting it falls
+      // back to the attacker-writable ~/.config/gh with http_unix_socket).
+      // route and review-scan additionally guard the mint itself: `export
+      // VAR="$(mktemp ...)"` reports export's status, not the
+      // substitution's, so a failing mktemp would sail through bash -e with
+      // an empty value — gh's unset fallback — unless the assignment is
+      // checked before export. The behavioural witness below turns red when
+      // the guard goes; the heavy jobs' older preambles predate the guard
+      // and are pinned in their current shape.
+      if (configMint === 'guarded') {
+        const guard =
+          'if ! GH_CONFIG_DIR="$(mktemp -d "${RUNNER_TEMP}/autofix-gh-config.XXXXXX")"; then';
+        expect(step).toContain(guard);
+        expect(step).toMatch(/exit 1\n\s*fi\n\s*export GH_CONFIG_DIR\n/);
+        expect(step.indexOf(guard)).toBeLessThan(step.indexOf(firstGh));
+      } else if (configMint === 'export') {
+        expect(step).toContain(
+          'export GH_CONFIG_DIR="$(mktemp -d "${RUNNER_TEMP}/autofix-gh-config.XXXXXX")"',
+        );
+      }
       expect(step.indexOf(firstGh)).toBeGreaterThan(-1);
       expect(ghPin).toBeLessThan(step.indexOf(firstGh));
-    }
-    // GH_CONFIG_DIR is PINNED to a fresh throwaway (unsetting it falls
-    // back to the attacker-writable ~/.config/gh with http_unix_socket).
-    for (const step of [publishPrStep, pushAndReportStep, prepareStep]) {
-      expect(step).toContain(
-        'export GH_CONFIG_DIR="$(mktemp -d "${RUNNER_TEMP}/autofix-gh-config.XXXXXX")"',
-      );
     }
     // post_status mints hermetically PER CALL (R11-1): RUNNER_TEMP is
     // same-UID-writable, so a dir minted once and reused across the step's
@@ -10860,7 +10928,7 @@ exit 1
     // mktemp minting the gh config dir): every command word after it —
     // gh, jq, date, and the setsid/bash of the heartbeat launch —
     // resolves under the stage-time capture, never the ambient PATH the
-    // job's own $GITHUB_PATH append keeps plantable (af-148).
+    // job's own $GITHUB_PATH append keeps plantable (af-149).
     expect(postStatusCommentStep).toContain('export PATH="${TRUSTED_PATH}"');
     expect(
       postStatusCommentStep.indexOf('export PATH="${TRUSTED_PATH}"'),
@@ -11082,6 +11150,111 @@ exit 1
       }).stdout,
     ).not.toContain('xdg-evil');
     rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('aborts route and review-scan before any gh call when the gh config dir cannot be minted', () => {
+    // Behavioural witness for the guarded-mint pin above: without the guard,
+    // `export VAR="$(mktemp ...)"` reports export's status, not the
+    // substitution's, so a failing mktemp sails through bash -e with an
+    // empty GH_CONFIG_DIR and the step calls gh against the shared
+    // ~/.config/gh fallback — the reroute hole the preamble closes. Run each
+    // step under a mktemp that refuses ONLY the gh-config template (later
+    // plain mktemp calls must keep working so the unguarded mutant provably
+    // reaches gh) and a gh stub that records every call: the step must fail
+    // loud before the first record. Probed: restoring the unguarded export
+    // makes both cases record a gh call and drop the ::error abort.
+    const realMktemp = spawnSync('bash', ['-c', 'command -v mktemp'], {
+      encoding: 'utf8',
+    }).stdout.trim();
+    const cases = [
+      {
+        name: 'route',
+        // The managed-PR review lane reaches the collaborator-permission
+        // lookup (the first gh call) fastest.
+        block: routeStep.match(/run: \|-\n([\s\S]*)$/)?.[1],
+        env: {
+          EVENT_NAME: 'pull_request_review',
+          REPO: 'QwenLM/qwen-code',
+          PR_BASE_REF: 'main',
+          PR_HEAD_REPO: 'QwenLM/qwen-code',
+          PR_AUTHOR: 'qwen-code-dev-bot',
+          AUTOFIX_BOT: 'qwen-code-dev-bot',
+          REVIEW_BOT: 'qwen-code-ci-bot',
+          SENDER_LOGIN: 'qqqys',
+        },
+      },
+      {
+        name: 'review-scan',
+        // A forced PR reaches `gh pr view` through read_forced_pr_meta.
+        block: reviewScanJob.match(
+          /- name: 'Scan for PRs with new feedback'[\s\S]*?run: \|-\n([\s\S]*?)(?=\n {6}- name: ')/,
+        )?.[1],
+        env: {
+          EVENT_NAME: 'schedule',
+          FORCED_PR: '1234',
+          REPO: 'QwenLM/qwen-code',
+          GITHUB_TOKEN: 'pat',
+        },
+      },
+    ];
+    for (const { name, block, env } of cases) {
+      expect(block, name).toBeTruthy();
+      const dir = mkdtempSync(join(tmpdir(), 'autofix-ghcfg-'));
+      try {
+        const bin = join(dir, 'bin');
+        mkdirSync(bin);
+        writeFileSync(
+          join(bin, 'mktemp'),
+          [
+            '#!/bin/bash',
+            'for a in "$@"; do',
+            '  case "$a" in *autofix-gh-config*) echo "mktemp: simulated failure: $a" >&2; exit 1 ;; esac',
+            'done',
+            `exec '${realMktemp}' "$@"`,
+            '',
+          ].join('\n'),
+        );
+        const callsFile = join(dir, 'gh-calls');
+        writeFileSync(
+          join(bin, 'gh'),
+          `#!/bin/bash\nprintf '%s\\n' "$*" >> '${callsFile}'\nexit 0\n`,
+        );
+        chmodSync(join(bin, 'mktemp'), 0o755);
+        chmodSync(join(bin, 'gh'), 0o755);
+        const proc = spawnSync(
+          'bash',
+          [
+            '-e',
+            '-o',
+            'pipefail',
+            '-c',
+            // The scan's forced-PR retry loop sleeps between attempts on the
+            // mutant path; keep the probe fast without touching the block.
+            `sleep() { :; }\n${block.replace(/^ {10}/gm, '')}`,
+          ],
+          {
+            env: {
+              PATH: `${bin}:${process.env.PATH}`,
+              RUNNER_TEMP: dir,
+              WORKDIR: join(dir, 'workdir'),
+              GITHUB_OUTPUT: join(dir, 'github-output'),
+              ...env,
+            },
+            encoding: 'utf8',
+          },
+        );
+        expect(proc.stdout, name).toContain(
+          '::error::could not create gh config dir',
+        );
+        expect(proc.status, name).not.toBe(0);
+        expect(
+          existsSync(callsFile),
+          `${name} called gh after a failed gh-config mktemp`,
+        ).toBe(false);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }
   });
 
   it('runs both verification gates under a throwaway global git config', () => {
@@ -11680,7 +11853,7 @@ exit 1
     ];
     // The review gate additionally kills the round heartbeat FIRST — it is
     // the first step that runs branch code on the host, and the loop holds
-    // the bot PAT (af-148). Parent-shell statements under the same
+    // the bot PAT (af-149). Parent-shell statements under the same
     // doctrine: ABSOLUTE-PATH-ONLY command words (this block runs in the
     // gate's outer shell, where a BASH_FUNC_builtin%% plant shadows the
     // `builtin` keyword itself — R10-1; `builtin kill` is sound only
@@ -15859,7 +16032,7 @@ exit 1
     );
     // The working-comment text renders through the heartbeat script's 'body'
     // subcommand — the initial post and every later tick use the SAME body,
-    // so they cannot drift (af-148). The strings themselves are pinned on
+    // so they cannot drift (af-149). The strings themselves are pinned on
     // the script below.
     expect(postStatusCommentStep).toContain(
       'bash --norc "${RUNNER_TEMP}/autofix-status-heartbeat.sh" body',
@@ -15966,7 +16139,7 @@ exit 1
     // identical (#9739). The heartbeat re-PATCHes the same comment every
     // ~10 min with elapsed time and last agent activity; the deep link
     // lands the "Watch live progress" anchor on the leg's own log page.
-    // Full rationale → qwen-autofix.md#af-148, af-149.
+    // Full rationale → qwen-autofix.md#af-149, af-150.
 
     // The comment body is owned by the script: the initial post and every
     // tick render through the same 'body' subcommand, so pin the text
@@ -16043,7 +16216,7 @@ exit 1
     // name while the loop holds the PAT, and the ambient PATH carries
     // same-UID-writable dirs ahead of the system ones — so the loop
     // re-pins PATH from the launcher's step-level TRUSTED_PATH capture
-    // and fails fast on a launch without it (af-148).
+    // and fails fast on a launch without it (af-149).
     expect(heartbeatScript).toContain('export PATH="${TRUSTED_PATH}"');
     // The capture is validated with the other launch inputs, so a launch
     // without it fails fast before registering anything (pinned
@@ -16382,7 +16555,7 @@ exit 1
     expect(postStatusCommentStep).toContain(
       'echo "heartbeat_pid=${HEARTBEAT_PID}" >> "${GITHUB_OUTPUT}"',
     );
-    // The killers' lifecycle pin (af-148): a pid recorded at launch can
+    // The killers' lifecycle pin (af-149): a pid recorded at launch can
     // be REUSED before a kill lands, so the launch also records the
     // loop's /proc/<pid>/stat start time and every killer confirms it
     // before signaling. Field 22 is index 19 after stripping the
@@ -16418,7 +16591,7 @@ exit 1
       postStatusCommentStep.indexOf('/proc/${HEARTBEAT_PID}/stat'),
     );
 
-    // Kill discipline (af-148): kill targets come from expression context
+    // Kill discipline (af-149): kill targets come from expression context
     // — a pid read from a WORKDIR file would be an untrusted kill target,
     // the sandbox mounts the host /tmp on the same path and runs as this
     // same user. The verification gate kills FIRST — before the first step
@@ -16470,7 +16643,7 @@ exit 1
     // same absolute-path/builtin form: bare names are PATH-resolved (the
     // job's own $GITHUB_PATH append keeps ${RUNNER_TEMP}/qwen-bin ahead
     // of /usr/bin here) and bare kill is shadowable by a $GITHUB_ENV
-    // BASH_FUNC plant (af-148).
+    // BASH_FUNC plant (af-149).
     expect(finalizeStatusCommentStep).toContain(
       '/usr/bin/touch "${WORKDIR}/heartbeat-stop" 2> /dev/null || true',
     );
@@ -16515,7 +16688,7 @@ exit 1
     // startup-channel pins at step level — BASH_ENV is sourced at process
     // STARTUP before line 1 of the body (an in-body unset is one hop
     // late), SHELLOPTS is the sibling option-import channel, and the LD_*
-    // family is mapped by ld.so at startup the same way (af-148, R8-3).
+    // family is mapped by ld.so at startup the same way (af-149, R8-3).
     expect(finalizeStatusCommentStep).toContain("BASH_ENV: ''");
     expect(finalizeStatusCommentStep).toContain("SHELLOPTS: ''");
     expect(finalizeStatusCommentStep).toContain("LD_PRELOAD: ''");
@@ -17049,7 +17222,10 @@ exit 1
 
     // Replay the real helper + render block over fixtures.
     const lines = scan.split('\n');
-    const hi = lines.findIndex((l) => l.trim() === 'FLEET_FILE="$(mktemp)"');
+    const hi = lines.findIndex(
+      (l) => l.trim() === 'FLEET_FILE="${WORKDIR}/fleet.tsv"',
+    );
+    expect(hi).toBeGreaterThan(-1);
     const hj = lines.findIndex((l, i) => i > hi && l.trim() === '}');
     const helper = lines.slice(hi, hj + 1).join('\n');
     expect(helper).toContain('fleet_row()');
@@ -17071,6 +17247,9 @@ exit 1
         [
           'set -uo pipefail',
           'SUMMARY_FILE="$(mktemp)"',
+          // The helper references the job-level WORKDIR (fleet file home);
+          // its EXIT trap then reclaims this replay dir.
+          'WORKDIR="$(mktemp -d)"',
           helper,
           'COUNT=1',
           "fleet_row 7329 'SELECTED' '1 review + 5 inline new (round 0/5)'",
@@ -17106,6 +17285,9 @@ exit 1
         [
           'set -uo pipefail',
           'SUMMARY_FILE="$(mktemp)"',
+          // The helper references the job-level WORKDIR (fleet file home);
+          // its EXIT trap then reclaims this replay dir.
+          'WORKDIR="$(mktemp -d)"',
           helper,
           'COUNT=0',
           render,

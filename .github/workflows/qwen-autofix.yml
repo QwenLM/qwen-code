@@ -200,7 +200,10 @@ jobs:
     # Full rationale → qwen-autofix.md#af-004
     if: |-
       ${{ github.repository == 'QwenLM/qwen-code' && (github.event_name != 'issue_comment' || (github.event.issue.pull_request && (startsWith(github.event.comment.body, '@qwen-code /takeover') || startsWith(github.event.comment.body, '@qwen-code /retry')))) && (github.event_name != 'pull_request' || github.event.label.name == 'autofix/takeover') && (github.event_name != 'pull_request_review' || github.event.pull_request.state == 'open') }}
-    runs-on: 'ubuntu-latest'
+    # Persistent pool, not hosted: a hosted backlog queued route past the cron
+    # period, and af-005's supersede then starved every scan round.
+    # Full rationale → qwen-autofix.md#af-148
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name != ''pull_request'' && github.event_name != ''pull_request_review'' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     timeout-minutes: 5
     concurrency:
       # Concurrency is keyed by TARGET, not shared and not fully unique:
@@ -256,6 +259,23 @@ jobs:
           COMMENT_PR_AUTHOR: '${{ github.event.issue.user.login }}'
           HAS_PR_URL: '${{ github.event.issue.pull_request.url }}'
         run: |-
+          # gh has its own reroute channels: pin the host, drop planted tokens,
+          # and point gh at a fresh empty config dir — on the persistent pool
+          # the shared ~/.config/gh is attacker-writable (config.yml can carry
+          # http_unix_socket transport reroutes), and a forged collaborator-
+          # permission response here would open the /takeover and /retry gates.
+          # Mirrors the heavy jobs' preamble. Full rationale → qwen-autofix.md#af-148
+          export GH_HOST=github.com
+          unset GH_ENTERPRISE_TOKEN GH_TOKEN
+          # `export VAR="$(...)"` reports export's status, not the
+          # substitution's: a failing mktemp must abort the step, not continue
+          # with an empty GH_CONFIG_DIR that gh treats as unset — falling back
+          # to the shared ~/.config/gh this preamble closes.
+          if ! GH_CONFIG_DIR="$(mktemp -d "${RUNNER_TEMP}/autofix-gh-config.XXXXXX")"; then
+            echo "::error::could not create gh config dir; refusing to run gh without reroute hardening"
+            exit 1
+          fi
+          export GH_CONFIG_DIR
           DO_ISSUE=false
           DO_REVIEW=false
           TAKEOVER_ACK=''
@@ -2054,7 +2074,8 @@ jobs:
     needs: 'route'
     if: |-
       ${{ needs.route.outputs.do_review == 'true' }}
-    runs-on: 'ubuntu-latest'
+    # Same pool decision as route. Full rationale → qwen-autofix.md#af-148
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name != ''pull_request'' && github.event_name != ''pull_request_review'' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     timeout-minutes: 15
     # A forced scan can write the same status comment as review-address.
     # Share its per-PR lock so neither writer can erase the other's state.
@@ -2072,6 +2093,11 @@ jobs:
       enum_failed: '${{ steps.scan.outputs.enum_failed }}'
     env:
       REPO: '${{ github.repository }}'
+      # Per-run home for the scan's API dumps. A fixed autofix* name (not
+      # mktemp's tmp.*) so the age sweep in the heavy jobs can reclaim it
+      # after a hard runner kill; cleaned normally by the always() step.
+      # Full rationale → qwen-autofix.md#af-148
+      WORKDIR: '/tmp/autofix-scan-${{ github.run_id }}'
     steps:
       - name: 'Scan for PRs with new feedback'
         id: 'scan'
@@ -2083,6 +2109,24 @@ jobs:
           REVIEW_SENDER: '${{ needs.route.outputs.review_sender }}'
           DISPATCH_SOURCE: "${{ github.event_name == 'workflow_dispatch' && inputs.source || '' }}"
         run: |-
+          # gh reroute hardening, mirroring the heavy jobs: pin the host, drop
+          # planted tokens, and use a fresh empty config dir — the pool's
+          # shared ~/.config/gh is attacker-writable, and a config.yml with an
+          # http_unix_socket reroute would swallow this step's gh calls,
+          # CI_DEV_BOT_PAT in the Authorization header included.
+          # Full rationale → qwen-autofix.md#af-148
+          export GH_HOST=github.com
+          unset GH_ENTERPRISE_TOKEN GH_TOKEN
+          # `export VAR="$(...)"` reports export's status, not the
+          # substitution's: a failing mktemp must abort the step, not continue
+          # with an empty GH_CONFIG_DIR that gh treats as unset — falling back
+          # to the shared ~/.config/gh this preamble closes.
+          if ! GH_CONFIG_DIR="$(mktemp -d "${RUNNER_TEMP}/autofix-gh-config.XXXXXX")"; then
+            echo "::error::could not create gh config dir; refusing to run gh without reroute hardening"
+            exit 1
+          fi
+          export GH_CONFIG_DIR
+
           # Every lane that reaches this scan is supposed to hold the PAT:
           # route now declines the one event GitHub is known to run without
           # secrets (a fork PR's own review) before it can set do_review.
@@ -2092,17 +2136,28 @@ jobs:
             exit 1
           fi
 
+          # Pre-clean before create, mirroring the heavy jobs: run_id is
+          # public and sequential, and mkdir -p alone would succeed over a
+          # dir or symlink pre-planted on the shared pool /tmp — the scan's
+          # redirects would then land in an attacker-chosen place, and a
+          # planted bot-prs.json would feed the forced-PR guard below.
+          rm -rf "${WORKDIR}"
+          (umask 077; mkdir -p "${WORKDIR}")
+
           # Fleet visibility: every per-PR decision below also records a row so
           # the run summary shows the WHOLE managed fleet in one table.
           # Reconstructing this by hand (list bot PRs, regex each one's eval
           # markers, cross-check checks and fork state) was the only way to see
           # a stall, so stalls stayed invisible until someone went looking.
-          FLEET_FILE="$(mktemp)"
-          trap 'rm -f "${FLEET_FILE}"' EXIT
+          # Inside WORKDIR, not mktemp's /tmp/tmp.*: on a cancelled run the
+          # EXIT trap never fires, and only the always() step and the heavy
+          # jobs' autofix* age sweep reclaim what this step leaves — neither
+          # can reach a tmp.* name.
+          FLEET_FILE="${WORKDIR}/fleet.tsv"
+          trap 'rm -f "${FLEET_FILE}"; rm -rf "${WORKDIR}"' EXIT
           fleet_row() {
             printf '%s\t%s\t%s\n' "$1" "$2" "$3" >> "${FLEET_FILE}"
           }
-          WORKDIR="$(mktemp -d)"
 
           read_forced_pr_meta() {
             local attempt meta
@@ -3264,6 +3319,16 @@ jobs:
           echo "targets=${TARGETS}" >> "${GITHUB_OUTPUT}"
           echo "has_targets=$([[ "${COUNT}" -gt 0 ]] && echo true || echo false)" >> "${GITHUB_OUTPUT}"
 
+      # Nothing else removes the per-run WORKDIR; on the persistent pool
+      # every scan would leave its API dumps behind forever. always() covers
+      # cancellation (the in-step EXIT trap does not fire on a killed run);
+      # only a hard runner kill abandons the dir, and the autofix* age sweep
+      # in the heavy jobs reclaims it. Mirrors issue-autofix's cleanup step.
+      # Full rationale → qwen-autofix.md#af-148
+      - name: 'Clean up scan workdir'
+        if: 'always()'
+        run: 'rm -rf "${WORKDIR}"'
+
   # ===========================================================================
   # REVIEW PHASE (build) — compile the trusted-base CLI bundle ONCE per scan
   # and fan it out to the address legs as an artifact. Each leg otherwise
@@ -3621,7 +3686,7 @@ jobs:
           # its age cap (accepted residual risk). No cross-run kill here,
           # because a pid read from a WORKDIR file is an untrusted kill
           # target (WORKDIR is sandbox-writable).
-          # Full rationale → qwen-autofix.md#af-148
+          # Full rationale → qwen-autofix.md#af-149
           find /tmp -maxdepth 1 -name 'autofix*' -mmin +1440 -exec rm -rf {} + 2>/dev/null || true
           # The reused workspace's .git accumulates unreferenced objects
           # across fetch runs on this persistent pool; prune them.
@@ -3649,7 +3714,7 @@ jobs:
           # inline body.
           # Absent from base must imply absent on disk: this cp fails every
           # pre-merge round, so a planted leftover in RUNNER_TEMP would
-          # otherwise be digested below and executed as trusted (af-148).
+          # otherwise be digested below and executed as trusted (af-149).
           # -rf, not -f: the planted leftover can be a DIRECTORY, which rm -f
           # cannot remove — the non-zero exit aborts this step under its
           # ambient -eo pipefail before the tolerant cp, and nothing else
@@ -4764,7 +4829,7 @@ jobs:
           # ${RUNNER_TEMP}/qwen-bin ahead of /usr/bin here — pin PATH from
           # the stage-time capture BEFORE the first command word resolves
           # (the R6-3 doctrine the sibling PAT steps apply; the loop
-          # re-pins from the same capture). Full rationale → af-148
+          # re-pins from the same capture). Full rationale → af-149
           export PATH="${TRUSTED_PATH}"
           # The gh calls in this step (deep-link lookup, comment upsert) and
           # the heartbeat loop launched here all carry the bot PAT: take the
@@ -4809,7 +4874,7 @@ jobs:
           # Deep-link "Watch live progress" to THIS matrix leg's live log
           # instead of the run page. Best-effort: any lookup failure keeps
           # the run URL, so the link is never worse than before.
-          # Full rationale → qwen-autofix.md#af-149
+          # Full rationale → qwen-autofix.md#af-150
           JOB_URL="${RUN_URL}"
           JOB_ID="$(hermetic_gh api "repos/${REPO}/actions/runs/${GITHUB_RUN_ID}/attempts/${GITHUB_RUN_ATTEMPT}/jobs" --paginate |
             jq -rs --arg pr "${PR}" \
@@ -4827,7 +4892,7 @@ jobs:
           # base at staging (pre-merge rounds of a PR whose workflow
           # resolves from its own ref): degrade to the pre-PR inline body
           # and skip the heartbeat — never fail the round.
-          # Full rationale → qwen-autofix.md#af-148
+          # Full rationale → qwen-autofix.md#af-149
           START_EPOCH="$(date +%s)"
           if [[ -n "${HEARTBEAT_SHA256}" ]]; then
             /usr/bin/echo "${HEARTBEAT_SHA256}  ${RUNNER_TEMP}/autofix-status-heartbeat.sh" | /usr/bin/sha256sum -c - > /dev/null
@@ -4864,7 +4929,7 @@ jobs:
           # loop BEFORE the first step that runs branch code on the host.
           # The pid travels to the killers through EXPRESSION CONTEXT —
           # WORKDIR is sandbox-writable, so no WORKDIR file is ever read
-          # as a kill target. Full rationale → qwen-autofix.md#af-148
+          # as a kill target. Full rationale → qwen-autofix.md#af-149
           HEARTBEAT_PID=''
           HEARTBEAT_START_TICKS=''
           # Re-verify immediately before THIS launch (R8-1): the check above
@@ -4892,7 +4957,7 @@ jobs:
             # BASH_FUNC_cat%% function, imported at bash STARTUP
             # even under --norc, ahead of builtins and PATH, and
             # a forged start time travels to every killer (R15-3).
-            # Full rationale → qwen-autofix.md#af-148
+            # Full rationale → qwen-autofix.md#af-149
             HB_STAT="$(/usr/bin/cat "/proc/${HEARTBEAT_PID}/stat" 2>/dev/null)" || HB_STAT=''
             HB_REST="${HB_STAT##*) }"
             HB_FIELDS=(${HB_REST})
@@ -5091,7 +5156,7 @@ jobs:
           # below documents). `builtin kill` is sound only inside the
           # env -i clean child (finalize); here kill is /usr/bin/kill,
           # the same procps already relied on for pkill.
-          # Full rationale → qwen-autofix.md#af-148
+          # Full rationale → qwen-autofix.md#af-149
           /usr/bin/touch "${WORKDIR}/heartbeat-stop" 2> /dev/null || true
           # Lifecycle-confirmed shutdown: this kill can land the whole
           # agent phase after the launch recorded HB_PID, and a pid
@@ -5102,7 +5167,7 @@ jobs:
           # start time, a dead pid has no stat — a failed check means
           # the loop is gone and killing nothing is right. The parse
           # is syntax-only plus /usr/bin/cat, per this shell's
-          # shadowing doctrine. Full rationale → qwen-autofix.md#af-148
+          # shadowing doctrine. Full rationale → qwen-autofix.md#af-149
           HB_FIELDS=()
           if [[ "${HB_PID:-}" =~ ^[0-9]+$ ]]; then
             HB_STAT="$(/usr/bin/cat "/proc/${HB_PID}/stat" 2>/dev/null)" || HB_STAT=''
@@ -6241,7 +6306,7 @@ jobs:
           # functions at startup even under --norc, ahead of builtins and
           # PATH — is closed by the env -i clean child below (R9-1), the
           # gate's R6-4 pattern.
-          # Full rationale → qwen-autofix.md#af-148
+          # Full rationale → qwen-autofix.md#af-149
           BASH_ENV: ''
           SHELLOPTS: ''
           LD_PRELOAD: ''
@@ -6292,7 +6357,7 @@ jobs:
           # soundly again. The kill target travels through expression
           # context — a pid read from a WORKDIR file would be an
           # untrusted kill target (WORKDIR is sandbox-writable).
-          # Full rationale → qwen-autofix.md#af-148
+          # Full rationale → qwen-autofix.md#af-149
           LD_PRELOAD= LD_AUDIT= LD_LIBRARY_PATH= \
             /usr/bin/env -i \
             PATH="${TRUSTED_PATH}" \
@@ -6325,7 +6390,7 @@ jobs:
               # failed check means the loop is already gone, so
               # killing nothing is right; the stop marker ends it on
               # its next self-check even if the kills miss.
-              # Full rationale → qwen-autofix.md#af-148
+              # Full rationale → qwen-autofix.md#af-149
               /usr/bin/touch "${WORKDIR}/heartbeat-stop" 2> /dev/null || true
               HB_FIELDS=()
               if [[ "${HB_PID:-}" =~ ^[0-9]+$ ]]; then
@@ -6432,7 +6497,7 @@ jobs:
           # /proc/<pid>/stat start time still matches the launch
           # capture, kill nothing otherwise. The session kill covers
           # the mid-tick subtree, same as its twins.
-          # Full rationale → qwen-autofix.md#af-148
+          # Full rationale → qwen-autofix.md#af-149
           HB_FIELDS=()
           if [[ "${HB_PID:-}" =~ ^[0-9]+$ ]]; then
             HB_STAT="$(cat "/proc/${HB_PID}/stat" 2>/dev/null)" || HB_STAT=''

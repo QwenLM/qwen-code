@@ -7,7 +7,7 @@
 # 'Post autofix status comment' starts this script as a detached loop;
 # every interval it re-PATCHes the SAME status comment with elapsed time
 # and last agent activity, and 'Finalize autofix status comment' kills it
-# before writing the terminal text. Full rationale → qwen-autofix.md#af-148.
+# before writing the terminal text. Full rationale → qwen-autofix.md#af-149.
 #
 # Subcommands:
 #   body — print the full bilingual working-state comment body to stdout.
@@ -55,7 +55,7 @@
 # a GH_CONFIG_DIR minted fresh milliseconds before the call and removed right
 # after — a long-lived minted dir under the same-UID-writable RUNNER_TEMP is
 # plantable between calls, R11-1), so a transport reroute planted in the
-# shared HOME's gh config cannot intercept the token. See af-148 for the trade.
+# shared HOME's gh config cannot intercept the token. See af-149 for the trade.
 
 # -e is deliberately absent: the (( ... < 0 )) clamp guards exit non-zero
 # on a false test and are load-bearing here. pipefail matches the sibling
@@ -128,7 +128,7 @@ run_loop() {
   # derived, and step env outranks $GITHUB_ENV plants. post_status pins
   # its own PATH the same way before the launch; the loop re-pins so no
   # future launcher can hand it an ambient PATH.
-  # Full rationale → qwen-autofix.md#af-148
+  # Full rationale → qwen-autofix.md#af-149
   export PATH="${TRUSTED_PATH}"
   # Hermetic pins for every gh call this loop makes (the af-112 doctrine):
   # pinned host and planted tokens dropped here, at launch. The config dir
