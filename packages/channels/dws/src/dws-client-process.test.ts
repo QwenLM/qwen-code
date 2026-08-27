@@ -51,4 +51,35 @@ describe('DWS command process', () => {
     expect(child.kill).toHaveBeenCalledWith('SIGKILL');
     await expect(result).resolves.toBeInstanceOf(DwsCommandError);
   });
+
+  it('includes sanitized stderr details when a DWS command exits non-zero', async () => {
+    vi.mocked(execFile).mockImplementation(((
+      _file,
+      _args,
+      _options,
+      callback,
+    ) => {
+      queueMicrotask(() => {
+        callback(
+          Object.assign(new Error('exit 1'), { code: 1 }),
+          '',
+          '\u001b[31mHTTP 400\n{"errorCode":"InvalidArgs"}\u001b[0m',
+        );
+      });
+      return {
+        exitCode: 1,
+        kill: vi.fn(),
+      };
+    }) as typeof execFile);
+
+    const error = await new DwsClient({ executable: '/opt/dws' })
+      .assertCompatible()
+      .catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(DwsCommandError);
+    expect((error as Error).message).toContain(
+      'DWS command failed (1): HTTP 400\\n{"errorCode":"InvalidArgs"}',
+    );
+    expect((error as Error).message).not.toContain('[31m');
+  });
 });
