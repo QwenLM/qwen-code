@@ -202,16 +202,23 @@ export function TextSelectionController(
     (event: MouseEvent) => {
       const selection = selectionRef.current;
 
-      // Any scroll drops the selection (B1: visible-region only).
-      if (event.name.startsWith('scroll-')) {
-        clearSelection();
+      // While paused (context menu owns the pointer) ignore press/move/release
+      // so they can't start or extend a selection under the menu — but do NOT
+      // clear: the existing selection is what the menu's Copy Selection
+      // offers. Nothing can scroll the viewport while paused, so wheel ticks
+      // are dropped here too (before the scroll-clear branch). A left-release
+      // must still finish a drag that was in flight when the menu opened, or
+      // the stale dragging state misroutes the next press/release pair.
+      if (propsRef.current.eventsPaused) {
+        if (event.name === 'left-release') {
+          selection.finish();
+        }
         return;
       }
 
-      // While paused (context menu owns the pointer) ignore press/move/release
-      // so they can't start or extend a selection under the menu — but do NOT
-      // clear: the existing selection is what the menu's Copy Selection offers.
-      if (propsRef.current.eventsPaused) {
+      // Any scroll drops the selection (B1: visible-region only).
+      if (event.name.startsWith('scroll-')) {
+        clearSelection();
         return;
       }
 

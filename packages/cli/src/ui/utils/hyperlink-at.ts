@@ -23,8 +23,8 @@ import type { ReadonlyFrame } from 'ink';
  * up to any C0 control (BEL, ESC-start-of-ST, LF/CR/TAB, …) or C1 ST.
  * Terminating on every C0 control — not just the three legal terminators —
  * keeps a hostile or malformed envelope from smuggling control characters into
- * the extracted URL (legitimate URLs never contain C0; the in-house emitter
- * strips them via `sanitizeForOsc` before wrapping).
+ * the extracted URL (legitimate URLs never contain C0, DEL, or C1 controls;
+ * the in-house emitter strips them via `sanitizeForOsc` before wrapping).
  */
 export function extractUrlFromOsc8Code(code: string): string | undefined {
   const marker = code.indexOf(']8;');
@@ -35,7 +35,7 @@ export function extractUrlFromOsc8Code(code: string): string | undefined {
   let end = urlStart;
   while (end < code.length) {
     const c = code.charCodeAt(end);
-    if (c < 0x20 || c === 0x9c) break;
+    if (c < 0x20 || (c >= 0x7f && c <= 0x9f)) break;
     end++;
   }
   const url = code.slice(urlStart, end);

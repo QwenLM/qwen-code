@@ -892,7 +892,10 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
           return true;
         }
         closeContextMenu();
-        return false;
+        // Fall through: the dismissing key continues through the normal
+        // pipeline (vim, paste handling, shell-mode, shortcuts) after the
+        // menu closes — returning here would skip every remaining
+        // interceptor and drop the key into the bare readline layer.
       }
 
       // When the Background tasks dialog is open, swallow every key so

@@ -285,15 +285,34 @@ export function ContentMouseController(
   });
 
   // Close a stranded menu when the controller deactivates (a dialog opening
-  // mid-interaction). Without this the menu stays rendered while its owner no
-  // longer receives the events that would dismiss it.
+  // mid-interaction) or unmounts (a view switch removing MainContent while
+  // the menu is open). Without this the menu stays rendered — provider-level
+  // state that outlives its owner — while every mouse consumer stays quieted
+  // for an overlay nobody can dismiss except Esc.
   const { closeMenu } = menu;
   const isActive = props.isActive;
   useEffect(() => {
     if (!isActive) {
       closeMenu();
     }
+    return () => {
+      closeMenu();
+    };
   }, [isActive, closeMenu]);
+
+  // The position clamp runs once, at open time. A resize while open can push
+  // the menu outside the composited frame where it renders invisibly — yet
+  // menu !== null keeps every VP mouse consumer quiet, and the still-mounted
+  // overlay's keypress handler would execute the invisible item on Enter.
+  // Close on any dimension change instead.
+  const prevSizeRef = useRef({ columns, rows });
+  useEffect(() => {
+    const prev = prevSizeRef.current;
+    prevSizeRef.current = { columns, rows };
+    if (prev.columns !== columns || prev.rows !== rows) {
+      closeMenu();
+    }
+  }, [columns, rows, closeMenu]);
 
   return null;
 }

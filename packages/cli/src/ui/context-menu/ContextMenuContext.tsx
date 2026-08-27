@@ -9,6 +9,7 @@ import {
   createContext,
   useCallback,
   useContext,
+  useEffect,
   useMemo,
   useRef,
   useState,
@@ -53,9 +54,15 @@ const ContextMenuContext = createContext<ContextMenuContextValue>({
   executeIndex: () => {},
 });
 
-export const ContextMenuProvider: React.FC<{ children: React.ReactNode }> = ({
-  children,
-}) => {
+export const ContextMenuProvider: React.FC<{
+  children: React.ReactNode;
+  /**
+   * Notified whenever the menu opens or closes. AppContainer mirrors the
+   * state into a ref to gate its always-active global keypress handler
+   * (which lives outside this provider's subtree and cannot consume keys).
+   */
+  onMenuChange?: (open: boolean) => void;
+}> = ({ children, onMenuChange }) => {
   const [menu, setMenu] = useState<ContextMenuState | null>(null);
   const [selectedIndex, setSelectedIndexState] = useState(0);
 
@@ -75,8 +82,16 @@ export const ContextMenuProvider: React.FC<{ children: React.ReactNode }> = ({
   );
 
   const closeMenu = useCallback(() => {
+    // Clear the mirror synchronously: KeypressContext can dispatch a whole
+    // stdin chunk in one tick with no render between, so an executeIndex
+    // landing right after a dismissal must not read the stale menu.
+    menuRef.current = null;
     setMenu(null);
   }, []);
+
+  useEffect(() => {
+    onMenuChange?.(menu !== null);
+  }, [menu, onMenuChange]);
 
   const setSelectedIndex = useCallback((index: number) => {
     setSelectedIndexState(index);

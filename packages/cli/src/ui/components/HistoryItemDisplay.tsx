@@ -151,6 +151,14 @@ const ClickableThinkMessage: React.FC<{
           }
           return;
         }
+        // Ctrl+click is reserved for the OSC 8 link gesture
+        // (ContentMouseController); mouse events broadcast to every
+        // subscriber, so without this exclusion one gesture would both open
+        // the link and toggle the thought block.
+        if (event.ctrl) {
+          pressRef.current = null;
+          return;
+        }
         if (event.name !== 'left-press' && event.name !== 'left-release') {
           pressRef.current = null;
           return;

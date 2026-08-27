@@ -3192,6 +3192,14 @@ export const AppContainer = (props: AppContainerProps) => {
   const ctrlDTimerRef = useRef<NodeJS.Timeout | null>(null);
   const [escapePressedOnce, setEscapePressedOnce] = useState(false);
   const escapeTimerRef = useRef<NodeJS.Timeout | null>(null);
+
+  // Mirror of the context-menu open state: the provider wraps the app below
+  // this component's own always-active keypress handler, so the handler
+  // cannot call useContextMenu() — the provider reports changes here instead.
+  const contextMenuOpenRef = useRef(false);
+  const handleContextMenuChange = useCallback((open: boolean) => {
+    contextMenuOpenRef.current = open;
+  }, []);
   const dialogsVisibleRef = useRef(false);
   const [isRewindSelectorOpen, setIsRewindSelectorOpen] = useState(false);
   const [rewindEscPending, setRewindEscPending] = useState(false);
@@ -3973,6 +3981,12 @@ export const AppContainer = (props: AppContainerProps) => {
         handleExit(ctrlDPressedOnce, setCtrlDPressedOnce, ctrlDTimerRef);
         return;
       } else if (keyMatchers[Command.ESCAPE](key)) {
+        // While the context menu is open its overlay owns Esc (closing the
+        // menu); the global branches below must not also fire on the same
+        // key — cancelling the stream, arming double-Esc, or cancelling btw.
+        if (contextMenuOpenRef.current) {
+          return;
+        }
         // In vim INSERT mode, let vim's own handler (in InputPrompt) consume
         // the Esc to switch to NORMAL mode. Without this guard, both handlers
         // fire on the same keypress — vim switches mode AND AppContainer
@@ -4055,6 +4069,7 @@ export const AppContainer = (props: AppContainerProps) => {
         btwItem &&
         !btwItem.btw.isPending &&
         !dialogsVisibleRef.current &&
+        !contextMenuOpenRef.current &&
         buffer.text.length === 0
       ) {
         if (key.name === 'return' || key.sequence === ' ') {
@@ -4769,7 +4784,9 @@ export const AppContainer = (props: AppContainerProps) => {
                 <RenderModeProvider value={renderModeValue}>
                   <TerminalOutputProvider value={writeRaw}>
                     <ShellFocusContext.Provider value={isFocused}>
-                      <ContextMenuProvider>
+                      <ContextMenuProvider
+                        onMenuChange={handleContextMenuChange}
+                      >
                         <App />
                       </ContextMenuProvider>
                     </ShellFocusContext.Provider>

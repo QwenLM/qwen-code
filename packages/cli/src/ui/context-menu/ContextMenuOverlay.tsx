@@ -67,6 +67,14 @@ const ActiveContextMenu: React.FC = () => {
     return null;
   }
 
+  // Pad every row to the longest label: an Ink absolute box only overwrites
+  // the cells it paints, so short rows would let the transcript show through
+  // the box interior and leave the selection highlight ragged.
+  const longestLabel = menu.items.reduce(
+    (max, item) => Math.max(max, item.label.length),
+    0,
+  );
+
   return (
     <Box
       position="absolute"
@@ -86,7 +94,7 @@ const ActiveContextMenu: React.FC = () => {
               backgroundColor={selected ? theme.text.accent : undefined}
               color={selected ? theme.background.primary : theme.text.primary}
             >
-              {` ${item.label} `}
+              {` ${item.label.padEnd(longestLabel)} `}
             </Text>
           </Box>
         );

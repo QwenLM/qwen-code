@@ -21,6 +21,7 @@ import { ContextMenuProvider, useContextMenu } from './ContextMenuContext.js';
 const mocks = vi.hoisted(() => ({
   stdout: { rows: 24 },
   warn: vi.fn(),
+  size: { columns: 80, rows: 24 },
 }));
 
 vi.mock('ink', async (importOriginal) => {
@@ -43,7 +44,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
 
 vi.mock('../hooks/useMouseEvents.js', () => ({ useMouseEvents: vi.fn() }));
 vi.mock('../hooks/useTerminalSize.js', () => ({
-  useTerminalSize: () => ({ columns: 80, rows: 24 }),
+  useTerminalSize: () => mocks.size,
 }));
 vi.mock('../utils/commandUtils.js', () => ({ copyToClipboard: vi.fn() }));
 vi.mock('../selection/screen-buffer.js', () => ({
@@ -108,6 +109,7 @@ describe('ContentMouseController', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    mocks.size = { columns: 80, rows: 24 };
     frame = makeLinkFrame();
     viewportRect = { x: 0, y: 0, width: frame.width, height: 1 };
     vi.mocked(copyToClipboard).mockResolvedValue(undefined);
@@ -294,6 +296,61 @@ describe('ContentMouseController', () => {
       expect(getMenu()).not.toBeNull();
       fire(makeEvent('scroll-down', 2, 1));
       expect(getMenu()).toBeNull();
+    });
+  });
+
+  describe('menu lifetime', () => {
+    const mountWithProbe = () => {
+      let latestMenu: ReturnType<typeof useContextMenu>['menu'] = null;
+      const MenuProbe = () => {
+        latestMenu = useContextMenu().menu;
+        return null;
+      };
+      // Build fresh elements on every render: React bails out of re-rendering
+      // a subtree handed the same element reference, which would hide
+      // terminal-size changes from the controller.
+      const tree = (withController: boolean) => (
+        <ContextMenuProvider>
+          {withController ? (
+            <ContentMouseController
+              isActive
+              getViewportRect={() => viewportRect}
+              hitTestScrollbar={() => false}
+            />
+          ) : null}
+          <MenuProbe />
+        </ContextMenuProvider>
+      );
+      const result = render(tree(true));
+      const rerenderWith = (withController: boolean) =>
+        result.rerender(tree(withController));
+      const openMenu = () =>
+        act(() => {
+          const handler = vi.mocked(useMouseEvents).mock.calls.at(-1)![0];
+          handler(makeEvent('right-press', 2, 1));
+        });
+      return { latestMenu: () => latestMenu, rerenderWith, openMenu };
+    };
+
+    it('closes the menu when the controller unmounts while it is open', () => {
+      const { latestMenu, rerenderWith, openMenu } = mountWithProbe();
+      openMenu();
+      expect(latestMenu()).not.toBeNull();
+
+      // A view switch unmounts MainContent (and this controller) while the
+      // provider-level menu would otherwise survive.
+      rerenderWith(false);
+      expect(latestMenu()).toBeNull();
+    });
+
+    it('closes the menu when terminal dimensions change while it is open', () => {
+      const { latestMenu, rerenderWith, openMenu } = mountWithProbe();
+      openMenu();
+      expect(latestMenu()).not.toBeNull();
+
+      mocks.size = { columns: 80, rows: 12 };
+      rerenderWith(true);
+      expect(latestMenu()).toBeNull();
     });
   });
 });

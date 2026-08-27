@@ -335,4 +335,75 @@ describe('TextSelectionController', () => {
     expect(setSelection).not.toHaveBeenCalled();
     expect(copyToClipboard).toHaveBeenCalledTimes(1);
   });
+
+  it('clears the selection on a wheel tick while not paused', () => {
+    const handler = mount();
+    selectHello(handler);
+    setSelection.mockClear();
+
+    handler(makeEvent('scroll-down', 1));
+
+    expect(setSelection).toHaveBeenCalledWith(null);
+  });
+
+  it('drops a wheel tick while eventsPaused instead of clearing', () => {
+    const { rerender } = renderController(false);
+    const handler = vi.mocked(useMouseEvents).mock.calls.at(-1)![0];
+    selectHello(handler);
+    setSelection.mockClear();
+
+    rerender(
+      <TextSelectionController
+        isActive
+        eventsPaused
+        getViewportRect={() => viewportRect}
+        getScrollState={() => scrollState}
+        hitTestScrollbar={() => false}
+      />,
+    );
+    const pausedHandler = vi.mocked(useMouseEvents).mock.calls.at(-1)![0];
+    pausedHandler(makeEvent('scroll-down', 1));
+
+    // Nothing scrolled while the menu owns the pointer — the selection the
+    // menu's Copy Selection offers must survive the wheel tick.
+    expect(setSelection).not.toHaveBeenCalled();
+  });
+
+  it('finishes an in-flight drag when the release lands while eventsPaused', () => {
+    const { rerender } = renderController(false);
+    const handler = vi.mocked(useMouseEvents).mock.calls.at(-1)![0];
+    handler(makeEvent('left-press', 1));
+    handler(makeEvent('move', 3));
+
+    // The context menu opens mid-drag and pauses events before the release.
+    rerender(
+      <TextSelectionController
+        isActive
+        eventsPaused
+        getViewportRect={() => viewportRect}
+        getScrollState={() => scrollState}
+        hitTestScrollbar={() => false}
+      />,
+    );
+    const pausedHandler = vi.mocked(useMouseEvents).mock.calls.at(-1)![0];
+    pausedHandler(makeEvent('left-release', 4));
+    setSelection.mockClear();
+    vi.mocked(copyToClipboard).mockClear();
+
+    // After resume, a bare release (no press) must not resurrect the stale
+    // drag and copy a range the user never selected.
+    rerender(
+      <TextSelectionController
+        isActive
+        getViewportRect={() => viewportRect}
+        getScrollState={() => scrollState}
+        hitTestScrollbar={() => false}
+      />,
+    );
+    const resumedHandler = vi.mocked(useMouseEvents).mock.calls.at(-1)![0];
+    resumedHandler(makeEvent('left-release', 5));
+
+    expect(setSelection).not.toHaveBeenCalled();
+    expect(copyToClipboard).not.toHaveBeenCalled();
+  });
 });

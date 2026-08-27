@@ -737,6 +737,16 @@ describe('<HistoryItemDisplay />', () => {
       expect(toggle).not.toHaveBeenCalled();
     });
 
+    it('does not toggle on Ctrl+click (reserved for the link gesture)', () => {
+      const toggle = vi.fn();
+      const handler = renderThoughtWithToggle(toggle);
+
+      handler?.({ ...mouseEvent('left-press', 5), ctrl: true });
+      handler?.({ ...mouseEvent('left-release', 5), ctrl: true });
+
+      expect(toggle).not.toHaveBeenCalled();
+    });
+
     it('hides the click hint when ui.mouseTracking is false despite VP being on', () => {
       const settingsNoMouse = new LoadedSettings(
         { path: '', settings: {}, originalSettings: {} },

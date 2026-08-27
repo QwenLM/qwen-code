@@ -136,6 +136,49 @@ describe('ContextMenuProvider', () => {
     expect(menu.menu).toBeNull();
   });
 
+  it('executeIndex right after closeMenu in the same tick is a no-op', () => {
+    const menu = mountProbe();
+    const onSelect = vi.fn();
+    act(() =>
+      menu.openMenu([{ id: 'a', label: 'Open Link', onSelect }], {
+        x: 0,
+        y: 0,
+      }),
+    );
+    // KeypressContext dispatches a whole stdin chunk with no render between,
+    // so closeMenu must clear the ref mirror synchronously.
+    act(() => {
+      menu.closeMenu();
+      menu.executeIndex(0);
+    });
+    expect(onSelect).not.toHaveBeenCalled();
+    expect(menu.menu).toBeNull();
+  });
+
+  it('notifies onMenuChange when the menu opens and closes', () => {
+    const onMenuChange = vi.fn();
+    let latest: ContextMenuContextValue | undefined;
+    const Probe = () => {
+      latest = useContextMenu();
+      return null;
+    };
+    render(
+      <ContextMenuProvider onMenuChange={onMenuChange}>
+        <Probe />
+      </ContextMenuProvider>,
+    );
+    expect(onMenuChange).toHaveBeenLastCalledWith(false);
+    act(() =>
+      latest!.openMenu([{ id: 'a', label: 'Open Link', onSelect: vi.fn() }], {
+        x: 0,
+        y: 0,
+      }),
+    );
+    expect(onMenuChange).toHaveBeenLastCalledWith(true);
+    act(() => latest!.closeMenu());
+    expect(onMenuChange).toHaveBeenLastCalledWith(false);
+  });
+
   it('setSelectedIndex updates the highlighted row', () => {
     const menu = mountProbe();
     act(() =>
