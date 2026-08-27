@@ -27,7 +27,11 @@ import type {
   TeamAgentHandle,
 } from '../backends/types.js';
 import { PermissionMode } from '../../hooks/types.js';
-import { AgentStatus, isTerminalStatus } from '../runtime/agent-types.js';
+import {
+  AgentStatus,
+  isTerminalStatus,
+  lastVisibleAnswer,
+} from '../runtime/agent-types.js';
 import { AgentEventType } from '../runtime/agent-events.js';
 import type {
   AgentRoundTextEvent,
@@ -1748,6 +1752,19 @@ export class TeamManager {
     const preAttachReport = this.lastVisibleAnswer(agent);
     if (preAttachReport !== undefined) {
       this.pendingFinalReports.set(agentId, preAttachReport);
+      // Mirror onRoundText: visible round text supersedes any
+      // explicit send_message(to: leader) flag set earlier in this
+      // round. sendMessage sets that flag synchronously — no event
+      // bridge needed — so a pre-attach explicit progress note would
+      // otherwise survive until the replayed IDLE settlement below,
+      // which would then skip this recovered answer and leave the
+      // leader with zero automatic reports. Erring toward one extra
+      // delivery (when the last visible text preceded the explicit
+      // send) matches the "exactly once, not zero" intent.
+      this.explicitLeaderReports.delete(agentId);
+      debug.info(
+        `setupEventBridge: recovered pre-attach round text for "${agentName}" (${agentId}); seeding pending report (${preAttachReport.length} chars) from message history.`,
+      );
     }
 
     if (currentStatus === AgentStatus.IDLE && preAttachReport !== undefined) {
@@ -1756,6 +1773,9 @@ export class TeamManager {
       // path uses so its final report and message flush happen
       // exactly once. Without pre-attach round text there is no
       // completed round to report — keep the flush-only behavior.
+      debug.info(
+        `setupEventBridge: replaying missed IDLE settlement for "${agentName}" (${agentId}); the initial round settled before the event bridge attached.`,
+      );
       onStatusChange({
         agentId,
         previousStatus: AgentStatus.RUNNING,
@@ -1791,13 +1811,7 @@ export class TeamManager {
   private lastVisibleAnswer(agent: TeamAgentHandle): string | undefined {
     const messages = agent.getMessages?.();
     if (!messages) return undefined;
-    for (let i = messages.length - 1; i >= 0; i--) {
-      const message = messages[i];
-      if (message.role !== 'assistant' || message.thought) continue;
-      const text = message.content.trim();
-      if (text) return text;
-    }
-    return undefined;
+    return lastVisibleAnswer(messages);
   }
 
   // ─── Private: Permission fallback ───────────────────────

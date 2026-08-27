@@ -169,4 +169,121 @@ describe('initial teammate result before event bridge attachment (#10211)', () =
       ]);
     });
   });
+
+  it('still reports the recovered result when the teammate sent an explicit leader message pre-attach', async () => {
+    const h = await createHarness();
+
+    // The default initialTask prompt instructs teammates to report via
+    // send_message(to: "leader"). Such a send goes through
+    // TeamManager.sendMessage synchronously — no event bridge needed —
+    // and marks the sender as having reported explicitly. The seed must
+    // clear that flag exactly like the live onRoundText handler does,
+    // or the replayed IDLE settlement skips the recovered answer and
+    // the leader receives zero automatic reports of the initial result.
+    await h.spawnTeammate('worker', {
+      onStart: async (agent) => {
+        agent.setStatus(AgentStatus.RUNNING);
+        await h.teamManager.sendMessage('leader', 'progress note', 'worker');
+        agent.getEventEmitter().emit(AgentEventType.ROUND_TEXT, {
+          subagentId: agent.agentId,
+          round: 1,
+          text: 'initial result',
+          thoughtText: '',
+          timestamp: Date.now(),
+        });
+        agent.setStatus(AgentStatus.IDLE);
+      },
+    });
+
+    await vi.waitFor(async () => {
+      expect(await h.teamManager.getLeaderMessages()).toEqual([
+        expect.objectContaining({ from: 'worker', text: 'progress note' }),
+        expect.objectContaining({ from: 'worker', text: 'initial result' }),
+      ]);
+    });
+
+    // Exactly once: the explicit note plus one automatic forwarding.
+    await settleAsyncWork();
+    expect(await h.teamManager.getLeaderMessages()).toEqual([]);
+  });
+
+  it('reports the last pre-attach round text when the round had multiple turns', async () => {
+    const h = await createHarness();
+
+    // A multi-turn pre-attach round emits several ROUND_TEXT events;
+    // the recovery scan must walk the history backwards so the most
+    // recent non-empty visible answer wins, not the earliest one.
+    await h.spawnTeammate('worker', {
+      onStart: (agent) => {
+        agent.setStatus(AgentStatus.RUNNING);
+        agent.getEventEmitter().emit(AgentEventType.ROUND_TEXT, {
+          subagentId: agent.agentId,
+          round: 1,
+          text: 'early turn answer',
+          thoughtText: '',
+          timestamp: Date.now(),
+        });
+        agent.getEventEmitter().emit(AgentEventType.ROUND_TEXT, {
+          subagentId: agent.agentId,
+          round: 1,
+          text: 'final turn answer',
+          thoughtText: '',
+          timestamp: Date.now(),
+        });
+        agent.setStatus(AgentStatus.IDLE);
+      },
+    });
+
+    await vi.waitFor(async () => {
+      expect(await h.teamManager.getLeaderMessages()).toEqual([
+        expect.objectContaining({
+          from: 'worker',
+          text: 'final turn answer',
+        }),
+      ]);
+    });
+
+    // The earlier turn text must never be reported on its own.
+    await settleAsyncWork();
+    expect(await h.teamManager.getLeaderMessages()).toEqual([]);
+  });
+
+  it('never reports thought-only round text, falling back to the earlier visible answer', async () => {
+    const h = await createHarness();
+
+    // AgentCore emits ROUND_TEXT whenever roundThoughtText is
+    // non-empty, so a trailing thought-only event is a reachable
+    // pre-attach shape. The recovery must skip thought messages and
+    // never surface internal reasoning as the round's final answer.
+    await h.spawnTeammate('worker', {
+      onStart: (agent) => {
+        agent.setStatus(AgentStatus.RUNNING);
+        agent.getEventEmitter().emit(AgentEventType.ROUND_TEXT, {
+          subagentId: agent.agentId,
+          round: 1,
+          text: 'visible answer',
+          thoughtText: '',
+          timestamp: Date.now(),
+        });
+        agent.getEventEmitter().emit(AgentEventType.ROUND_TEXT, {
+          subagentId: agent.agentId,
+          round: 1,
+          text: '',
+          thoughtText: 'internal reasoning about the task',
+          timestamp: Date.now(),
+        });
+        agent.setStatus(AgentStatus.IDLE);
+      },
+    });
+
+    await vi.waitFor(async () => {
+      expect(await h.teamManager.getLeaderMessages()).toEqual([
+        expect.objectContaining({ from: 'worker', text: 'visible answer' }),
+      ]);
+    });
+
+    // Nothing else — in particular no thought content — may arrive.
+    await settleAsyncWork();
+    expect(await h.teamManager.getLeaderMessages()).toEqual([]);
+  });
 });
