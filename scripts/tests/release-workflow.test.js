@@ -245,6 +245,9 @@ describe('release workflow', () => {
       // cross-job-persistent state and every later state read in the job,
       // so a demotion must fail even while it remains ahead of checkout.
       expect(restoreIndex, id).toBe(0);
+      expect(job.steps[restoreIndex]?.if, id).toBe(
+        "${{ runner.environment == 'self-hosted' }}",
+      );
       const checkoutIndex = job.steps.findIndex((step) =>
         String(step.uses ?? '').includes('actions/checkout'),
       );

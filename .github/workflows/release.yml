@@ -64,6 +64,7 @@ jobs:
       # containerized job. Restore the reusable workspace before checkout.
       - &restore_release_workspace
         name: 'Restore workspace ownership'
+        if: "${{ runner.environment == 'self-hosted' }}"
         run: |-
           set -uo pipefail
           RUNNER_UID="$(id -u)"
