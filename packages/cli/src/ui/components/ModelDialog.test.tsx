@@ -261,6 +261,37 @@ describe('<ModelDialog />', () => {
     expect(select.initialIndex).toBe(1);
   });
 
+  it('shows the active runtime model in Advisor mode', () => {
+    renderComponent(
+      { isAdvisorModelMode: true },
+      {
+        getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+        getAdvisorModel: vi.fn(() => 'runtime-advisor'),
+        getModel: vi.fn(() => 'runtime-advisor'),
+        getContentGeneratorConfig: vi.fn(() => ({
+          authType: AuthType.USE_OPENAI,
+          model: 'runtime-advisor',
+        })),
+        getAllConfiguredModels: vi.fn(() => [
+          {
+            id: 'runtime-advisor',
+            label: 'Runtime Advisor',
+            authType: AuthType.USE_OPENAI,
+            isRuntimeModel: true,
+            runtimeSnapshotId: '$runtime|openai|runtime-advisor',
+          },
+        ]),
+      },
+    );
+    const select = mockedSelect.mock.calls[0][0];
+
+    expect(select.items.map((item) => item.value)).toEqual([
+      '$advisor-off',
+      '$runtime|openai|runtime-advisor',
+    ]);
+    expect(select.initialIndex).toBe(1);
+  });
+
   it('keeps the persisted fast-only Advisor model listed and highlighted', () => {
     renderComponent(
       { isAdvisorModelMode: true },

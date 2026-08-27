@@ -9,6 +9,28 @@ import { AuthType, type Config } from '@qwen-code/qwen-code-core';
 import { checkAdvisorModelAvailability } from './advisor-model.js';
 
 describe('checkAdvisorModelAvailability', () => {
+  it('allows the active runtime model', () => {
+    const config = {
+      getModel: vi.fn(() => 'runtime-advisor'),
+      getContentGeneratorConfig: vi.fn(() => ({
+        authType: AuthType.USE_OPENAI,
+        model: 'runtime-advisor',
+      })),
+      getAllConfiguredModels: vi.fn(() => [
+        {
+          id: 'runtime-advisor',
+          authType: AuthType.USE_OPENAI,
+          isRuntimeModel: true,
+        },
+      ]),
+    } as unknown as Config;
+
+    expect(checkAdvisorModelAvailability(config, 'runtime-advisor')).toEqual({
+      available: true,
+      availableModelIds: ['runtime-advisor'],
+    });
+  });
+
   it('allows the configured fast model after it is persisted as a concrete selector', () => {
     const configuredModels = [
       {

@@ -338,10 +338,14 @@ export function ModelDialog({
     );
 
     // Separate runtime models from registry models
-    const runtimeModels =
-      isImageModelMode || isAdvisorModelMode
-        ? []
-        : allModels.filter((m) => m.isRuntimeModel);
+    const runtimeModels = isImageModelMode
+      ? []
+      : allModels.filter(
+          (m) =>
+            m.isRuntimeModel &&
+            (!isAdvisorModelMode ||
+              isAdvisorModelEligible(m, allowAdvisorFastOnly)),
+        );
     const registryModels = allModels.filter((m) => {
       const imageModelSelector = encodeVisionModelSelector(
         buildModelSelectionKey(m.authType, m.id, m.baseUrl),
