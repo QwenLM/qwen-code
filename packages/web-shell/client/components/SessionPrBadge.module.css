@@ -31,3 +31,25 @@
     transparent
   );
 }
+
+/* Merged PRs are settled history — dim the badge so open work stands out. */
+.sessionPrBadgeMerged {
+  background: color-mix(
+    in srgb,
+    var(--muted-foreground, #6b7280) 10%,
+    transparent
+  );
+  color: color-mix(
+    in srgb,
+    var(--muted-foreground, #6b7280) 75%,
+    var(--foreground)
+  );
+}
+
+.sessionPrBadgeMerged:hover {
+  background: color-mix(
+    in srgb,
+    var(--muted-foreground, #6b7280) 16%,
+    transparent
+  );
+}

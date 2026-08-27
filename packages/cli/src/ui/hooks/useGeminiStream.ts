@@ -33,6 +33,7 @@ import {
   SendMessageType,
   createDebugLogger,
   ToolNames,
+  goalToolResultProvenance,
   getErrorMessage,
   isNodeError,
   MessageSenderType,
@@ -3929,7 +3930,6 @@ export const useGeminiStream = (
             );
             immediateDuplicateToolResponses.responses.forEach(
               ({ request, response }, index) => {
-                const goalContext = request.goalContext;
                 config.getChatRecordingService?.()?.recordToolResult?.(
                   finalized[index].responseParts,
                   {
@@ -3942,15 +3942,7 @@ export const useGeminiStream = (
                     errorType: response.errorType,
                     executionStatus: response.executionStatus,
                   },
-                  goalContext
-                    ? request.name === ToolNames.GET_GOAL ||
-                      request.name === ToolNames.UPDATE_GOAL
-                      ? {
-                          goalContext: { ...goalContext },
-                          provenance: 'goal_runtime' as const,
-                        }
-                      : { goalContext: { ...goalContext } }
-                    : undefined,
+                  goalToolResultProvenance(request),
                 );
               },
             );
@@ -4870,7 +4862,6 @@ export const useGeminiStream = (
         (entry) => entry.responseParts,
       );
       orderedResponses.forEach(({ request, response, status }, index) => {
-        const goalContext = request.goalContext;
         config.getChatRecordingService?.()?.recordToolResult?.(
           finalizedResponses[index].responseParts,
           {
@@ -4884,15 +4875,7 @@ export const useGeminiStream = (
             errorType: response.errorType,
             executionStatus: response.executionStatus,
           },
-          goalContext
-            ? request.name === ToolNames.GET_GOAL ||
-              request.name === ToolNames.UPDATE_GOAL
-              ? {
-                  goalContext: { ...goalContext },
-                  provenance: 'goal_runtime' as const,
-                }
-              : { goalContext: { ...goalContext } }
-            : undefined,
+          goalToolResultProvenance(request),
         );
       });
 
