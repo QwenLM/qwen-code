@@ -230,6 +230,11 @@ class Session {
         OPENAI_BASE_URL: `http://127.0.0.1:${PORT}/v1`,
         OPENAI_API_KEY: 'bench-fake-key',
         OPENAI_MODEL: MODEL,
+        // Keep the TUI in the PTY-root process: otherwise the CLI relaunches
+        // itself into a child (gemini.tsx boot relaunch) and measureCpu samples
+        // the idle launcher, whose CPU stops accumulating, instead of the TUI.
+        // Before ...env so QWEN_BENCH_EXTRA_ENV can still override it.
+        QWEN_CODE_NO_RELAUNCH: '1',
         ...env,
       },
     });
@@ -387,9 +392,14 @@ async function main() {
       await runPhase(session, 'paced input (213 chars)', async (s) => {
         for (const ch of PACED_FIRST) await s.key(ch, PACE_MS);
         await sleep(1_000);
-        // Clear the composer without committing it to the transcript.
-        for (let i = 0; i < PACED_FIRST.length; i += 32) {
-          await s.key('\x7f'.repeat(32), 10);
+        // Clear the composer without committing it to the transcript. Size it
+        // to everything typed so far: the burst paste is never submitted, so
+        // its characters are still in the composer and must be cleared too,
+        // or the streaming phase commits them as a stray first message and
+        // phases 3-6 render history containing that turn.
+        const clearChars = BURST.length + PACED_FIRST.length;
+        for (let i = 0; i < clearChars; i += 32) {
+          await s.key('\x7f'.repeat(Math.min(32, clearChars - i)), 10);
         }
       }),
     );

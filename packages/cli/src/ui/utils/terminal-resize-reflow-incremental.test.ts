@@ -478,6 +478,90 @@ describe('installTerminalResizeReflow (VP incremental rendering)', () => {
     }
   });
 
+  it('captures a late two-write burst whose append stored nothing', () => {
+    const stdout = new FakeStdout();
+    const { restore, repaint } = installTerminalResizeReflow(
+      stdout as unknown as NodeJS.WriteStream,
+      { virtualViewport: true },
+    );
+    const dateNow = vi.spyOn(Date, 'now');
+    try {
+      let now = 1_000_000;
+      dateNow.mockImplementation(() => now);
+      const prev = frameLines(20, 10);
+      stdout.write(ansiEscapes.eraseLines(10) + prev.join('\n'));
+      // Width shrink arms the bare-write handoff via the clear-only erase;
+      // the commit burst then lands as TWO bare writes after the window
+      // expires: a short static append followed by the live-frame redraw.
+      stdout.columns = 12;
+      stdout.emit('resize');
+      stdout.write(RETURN_PREFIX + ansiEscapes.eraseLines(10));
+      now += 100; // past the 50 ms handoff window
+      // The append is below MIN_FRAME_LINES: modelFrame rejects it and
+      // stores nothing. The late-burst exception must survive this
+      // rejected write so the redraw that follows is still capturable —
+      // keying it on the write count instead of on whether a frame was
+      // captured drops the redraw and freezes the stale model.
+      stdout.write('static append');
+      const redrawn = frameLines(8, 14).map((line) => `${line}-late2`);
+      stdout.write(redrawn.join('\n'));
+      const next = redrawn.slice();
+      next[4] = 'LATE-UPDATE-2';
+      stdout.write(
+        incrementalDiffFrame(redrawn, next, {
+          trailingNewline: false,
+          returnPrefix: RETURN_PREFIX,
+        }),
+      );
+      stdout.written.length = 0;
+      repaint!();
+      const replay = stdout.written[0]!;
+      expect(replay).not.toBe(ansiEscapes.clearViewport);
+      expect(replay).toContain('LATE-UPDATE-2');
+      expect(replay).toContain('line-0-');
+      expect(replay).toContain('line-13-');
+    } finally {
+      dateNow.mockRestore();
+      restore();
+    }
+  });
+
+  it('captures the first VP frame when it lands long after the entry clear', () => {
+    const stdout = new FakeStdout();
+    const { restore, repaint } = installTerminalResizeReflow(
+      stdout as unknown as NodeJS.WriteStream,
+      { virtualViewport: true },
+    );
+    const dateNow = vi.spyOn(Date, 'now');
+    try {
+      let now = 1_000_000;
+      dateNow.mockImplementation(() => now);
+      // Alternate-screen entry: the clear arms first-frame capture.
+      stdout.write(ansiEscapes.clearTerminal);
+      // Slow boot: the reconciliation + flush of the first frame lands far
+      // past any short handoff window. Ink owns the just-cleared screen, so
+      // the first bare printable write is the first frame regardless.
+      now += 500;
+      const first = frameLines(20, 12);
+      stdout.write(first.join('\n'));
+      const next = first.slice();
+      next[3] = 'AFTER-BOOT-UPDATE';
+      stdout.write(
+        incrementalDiffFrame(first, next, { trailingNewline: false }),
+      );
+      stdout.written.length = 0;
+      repaint!();
+      const replay = stdout.written[0]!;
+      expect(replay).not.toBe(ansiEscapes.clearViewport);
+      expect(replay).toContain('line-0-');
+      expect(replay).toContain('line-11-');
+      expect(replay).toContain('AFTER-BOOT-UPDATE');
+    } finally {
+      dateNow.mockRestore();
+      restore();
+    }
+  });
+
   it('a post-window stray bell cannot clobber a captured single-write VP burst', () => {
     const stdout = new FakeStdout();
     const { restore, repaint } = installTerminalResizeReflow(

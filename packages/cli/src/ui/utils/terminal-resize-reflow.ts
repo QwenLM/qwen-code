@@ -469,6 +469,10 @@ export function installTerminalResizeReflow(
   // Printable bare writes seen in the current armed burst; the second one is
   // the live frame following a static append and bypasses MIN_FRAME_LINES.
   let barePrintableCount = 0;
+  // Whether the armed burst actually stored a frame. A write can be seen yet
+  // store nothing (rejected by MIN_FRAME_LINES), so the write count is not a
+  // proxy for capture; the post-window rescue keys off this flag instead.
+  let burstCaptured = false;
   // The handoff closes shortly after arming: the commit's bare writes land in
   // one synchronous render; later stray bare writes are ignored.
   let handoffUntil = 0;
@@ -479,8 +483,10 @@ export function installTerminalResizeReflow(
   let clearUntil = 0;
   debugLogger.debug('installed', { width: lastWidth, isVP });
 
-  const modelFrame = (content: string, bypassMin = false) => {
-    if (!bypassMin && content.split('\n').length < MIN_FRAME_LINES) return;
+  const modelFrame = (content: string, bypassMin = false): boolean => {
+    if (!bypassMin && content.split('\n').length < MIN_FRAME_LINES) {
+      return false;
+    }
     pendingResetFrame = '';
     pendingResetFullscreen = undefined;
     model.content = content;
@@ -489,6 +495,7 @@ export function installTerminalResizeReflow(
     // detect the newline on the ANSI-stripped content (the suffix is either
     // pure control bytes or a one-cell cursor block, never a '\n').
     model.trailingNewline = stripAnsi(content).endsWith('\n');
+    return true;
   };
 
   const anchorPendingReset = (
@@ -617,6 +624,7 @@ export function installTerminalResizeReflow(
           expectFrame = false;
           expectFirstFrame = false;
           barePrintableCount = 0;
+          burstCaptured = false;
         } else {
           const printable = stripAnsi(content).trim() !== '';
           if (printable && head === null) {
@@ -631,10 +639,12 @@ export function installTerminalResizeReflow(
             expectFrame = false;
             expectFirstFrame = false;
             barePrintableCount = 0;
+            burstCaptured = false;
           } else {
             // Clear-only write (Ink's log.clear): the redraw follows bare.
             expectFrame = true;
             barePrintableCount = 0;
+            burstCaptured = false;
             handoffUntil = Date.now() + HANDOFF_WINDOW_MS;
           }
           debugLogger.debug('match', { printable });
@@ -677,6 +687,7 @@ export function installTerminalResizeReflow(
         expectFrame = false;
         expectFirstFrame = false;
         barePrintableCount = 0;
+        burstCaptured = false;
         if (isVP) {
           const after = chunk.slice(
             chunk.indexOf(CLEAR_TERMINAL) + CLEAR_TERMINAL.length,
@@ -737,7 +748,7 @@ export function installTerminalResizeReflow(
         const lateBurst =
           isVP &&
           printable &&
-          (barePrintableCount === 0 ? diffHead === null : diffHead !== null);
+          (!burstCaptured ? diffHead === null : diffHead !== null);
         if (Date.now() >= handoffUntil && !lateBurst) {
           expectFrame = false;
         }
@@ -756,16 +767,22 @@ export function installTerminalResizeReflow(
             debugLogger.debug('diff', { applied: true, armed: true });
             expectFrame = false;
             barePrintableCount = 0;
+            burstCaptured = false;
           } else if (diffHead === null) {
-            modelFrame(chunk, barePrintableCount > 1);
+            if (modelFrame(chunk, barePrintableCount > 1)) burstCaptured = true;
             if (barePrintableCount > 1) expectFrame = false;
           }
         }
       } else if (expectFirstFrame) {
-        if (Date.now() >= handoffUntil) {
-          expectFirstFrame = false;
-          debugLogger.debug('first-frame', { state: 'expired' });
-        } else if (stripAnsi(chunk).trim() !== '') {
+        // No clock expiry here: Ink owns the screen from the entry clear
+        // until its first render lands, and on a slow boot the
+        // reconciliation + log-update flush of that frame can arrive well
+        // past any short handoff window (observed > 50 ms between the
+        // entry clear and the frame). The first bare printable write is
+        // structurally the first frame — nothing else can render onto the
+        // just-cleared alternate screen before Ink's own first frame — so
+        // capture it whenever it lands.
+        if (stripAnsi(chunk).trim() !== '') {
           // The first VP frame arrives bare (no erase prefix); anchor the
           // model with it — every later frame is a diff against this one.
           expectFirstFrame = false;
