@@ -3786,6 +3786,14 @@ describe('qwen-triage verify hardening round 2', () => {
           '  echo "upload-assets stub: --bucket, --config and --prefix are all required" >&2',
           '  exit 1',
           'fi',
+          // The real uploader hands --config to ossutil, which dies on a
+          // missing file: checking it here means a workflow mutation that
+          // drifts the flag away from the credential file the configure
+          // step writes turns the harness red instead of staying green.
+          'if [ ! -f "$config" ]; then',
+          '  echo "upload-assets stub: --config file does not exist: $config" >&2',
+          '  exit 1',
+          'fi',
           'target="$OSS_STUB_ROOT/$bucket/$prefix"',
           'mkdir -p "$target"',
           'for file in "$@"; do cp "$file" "$target/$(basename "$file")"; done',
@@ -3826,6 +3834,12 @@ describe('qwen-triage verify hardening round 2', () => {
       png(join(art, 'evidence', '03-big.png'), 2 * 1024 * 1024);
       png(join(art, 'evidence', '04-edge.png'), 2 * 1024 * 1024 - 9);
       writeFileSync(join(art, 'report.md'), '## r\n');
+
+      // The stub arm receives --config "${RUNNER_TEMP}/.ossutilconfig" and
+      // (like the real uploader's ossutil) refuses to run without that
+      // file, so seed the configure step's product for the stub runs. The
+      // production arms below manage the file explicitly instead.
+      writeFileSync(join(dir, '.ossutilconfig'), '[Credentials]\n');
 
       const out = join(dir, 'comment.md');
       const res = sh(script, {
@@ -3944,6 +3958,11 @@ describe('qwen-triage verify hardening round 2', () => {
       expect(readFileSync(out3, 'utf8')).toContain(
         'https://assets.example.test/pr-assets/verify/pr7999-79-1/01-ab.png',
       );
+
+      // The production arms below run WITHOUT the seeded credential file
+      // until the success arm writes it back — the missing-file case is
+      // exactly what res4b asserts on.
+      rmSync(join(dir, '.ossutilconfig'));
 
       // An ossutil install failure is expected to degrade to a text-only
       // report. This executes the production dispatch arm without touching
@@ -4161,6 +4180,65 @@ describe('qwen-triage verify hardening round 2', () => {
     const cleanup = stepIn('publish-verify', 'Cleanup Aliyun OSS credentials');
     expect(cleanup).toContain("if: '${{ always() }}'");
     expect(cleanup).toContain('rm -f "$RUNNER_TEMP/.ossutilconfig"');
+  });
+
+  // The publisher's checkout is the trust boundary for this job's OSS
+  // credentials: it must take only the trusted base-repo scripts, from the
+  // default-branch head (publish-verify only runs under issue_comment
+  // events, where github.sha is exactly that — never a PR merge ref).
+  // Dropping /package.json stops the uploader's `.js` parsing as ESM on
+  // Node versions that don't infer module syntax, and this job pins no Node.
+  it('checks out only trusted base-repo scripts at a pinned ref', () => {
+    const checkout = stepIn(
+      'publish-verify',
+      'Checkout the OSS publisher scripts',
+    );
+    expect(checkout).toContain("ref: '${{ github.sha }}'");
+    expect(checkout).toContain('persist-credentials: false');
+    expect(checkout).toContain('sparse-checkout-cone-mode: false');
+    for (const entry of [
+      '/package.json',
+      'scripts/upload-aliyun-oss-assets.js',
+      'scripts/release-script-utils.js',
+    ]) {
+      expect(checkout).toContain(`\n            ${entry}\n`);
+    }
+  });
+
+  // A CDN retry loop whose worst case exceeds the 10-minute job cap turns
+  // the intended "degrade to a text-only report" into "job killed
+  // mid-install"; pin the retry flags and compute the bound.
+  it('keeps the ossutil download retry budget inside the job cap', () => {
+    const install = stepIn('publish-verify', 'Install ossutil');
+    expect(install).toContain('--retry-all-errors');
+    const m = install.match(
+      /curl -fsSL --retry (\d+) --retry-delay (\d+) --retry-all-errors \\\n\s+--connect-timeout (\d+) --max-time (\d+)/,
+    );
+    expect(m).not.toBeNull();
+    const worstSeconds =
+      (Number(m[1]) + 1) * Number(m[4]) + Number(m[1]) * Number(m[2]);
+    const cap = job('publish-verify').match(/timeout-minutes: (\d+)/);
+    expect(cap).not.toBeNull();
+    expect(worstSeconds).toBeLessThan(Number(cap[1]) * 60);
+  });
+
+  // Overriding only one of the bucket/base-URL vars must not post comment
+  // links that 404 against (or show stale objects from) the other bucket:
+  // the default base URL is derived from whichever bucket wins. A stalled
+  // upload is additionally bounded per attempt so one black-hole socket
+  // cannot burn the job cap and lose the whole report.
+  it('derives the public URL from the resolved bucket and bounds uploads', () => {
+    const publish = stepIn(
+      'publish-verify',
+      'Post verification report comment',
+    );
+    expect(publish).toContain(
+      'ALIYUN_OSS_BUCKET: "${{ vars.ALIYUN_OSS_PR_ASSETS_BUCKET || vars.ALIYUN_OSS_BUCKET || \'qwen-code-assets\' }}"',
+    );
+    expect(publish).toContain(
+      "ALIYUN_OSS_PUBLIC_BASE_URL: \"${{ vars.ALIYUN_OSS_PR_ASSETS_PUBLIC_BASE_URL || (vars.ALIYUN_OSS_PR_ASSETS_BUCKET == '' && vars.ALIYUN_OSS_PUBLIC_BASE_URL) || format('https://{0}.oss-cn-hangzhou.aliyuncs.com', vars.ALIYUN_OSS_PR_ASSETS_BUCKET || vars.ALIYUN_OSS_BUCKET || 'qwen-code-assets') }}\"",
+    );
+    expect(publish).toContain("OSS_UPLOAD_ATTEMPT_TIMEOUT_MS: '120000'");
   });
 
   // Every publish fixture returned [] for the comments listing, so the

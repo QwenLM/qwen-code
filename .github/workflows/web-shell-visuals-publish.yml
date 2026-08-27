@@ -42,13 +42,20 @@ jobs:
     timeout-minutes: 10
     steps:
       # Trusted base-repo scripts. workflow_run checks out the default branch,
-      # never PR code. Sparse — the publisher, its helper dependency, and the
-      # root package.json that marks the uploader's `.js` as ESM (without it
-      # the uploader only parses on the Node versions that infer module syntax,
-      # and this job pins no Node).
+      # never PR code (the PR head is github.event.workflow_run.head_sha,
+      # consumed below as RUN_HEAD_SHA — never as a checkout ref). Sparse —
+      # the publisher, its helper dependency, and the root package.json that
+      # marks the uploader's `.js` as ESM (without it the uploader only
+      # parses on the Node versions that infer module syntax, and this job
+      # pins no Node).
       - name: 'Checkout the publish scripts'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
+          # Pin the trusted ref explicitly: on workflow_run events
+          # github.sha is the default-branch head this workflow runs from,
+          # so the pin makes "never PR code" a property of this step
+          # instead of an inference from the event's default resolution.
+          ref: '${{ github.sha }}'
           sparse-checkout: |-
             /package.json
             .github/scripts/web-shell-visuals-publish.mjs
@@ -72,9 +79,12 @@ jobs:
           trap 'rm -rf "$tmp_dir"' EXIT
           # Retry, unlike the release syncs: a red run there is simply rerun,
           # but a CDN blip here costs this PR its preview comment (the
-          # upload aborts the step) or its evidence images.
-          curl -fsSL --retry 3 --retry-delay 2 --retry-all-errors \
-            --connect-timeout 15 --max-time 300 "$OSSUTIL_URL" -o "$tmp_dir/ossutil.zip"
+          # upload aborts the step) or its evidence images. The worst-case
+          # budget stays inside the 10-minute job cap: 3 attempts x 120s
+          # max-time + 2 x 2s delays ≈ 6.1 minutes (an unreachable mirror
+          # fails the connect-timeout long before that).
+          curl -fsSL --retry 2 --retry-delay 2 --retry-all-errors \
+            --connect-timeout 10 --max-time 120 "$OSSUTIL_URL" -o "$tmp_dir/ossutil.zip"
           echo "$OSSUTIL_SHA256  $tmp_dir/ossutil.zip" | sha256sum -c -
           unzip -q "$tmp_dir/ossutil.zip" -d "$tmp_dir"
           ossutil_path="$(find "$tmp_dir" -type f \( -name 'ossutil' -o -name 'ossutil64' \) -print -quit)"
@@ -135,6 +145,12 @@ jobs:
           # ALIYUN_OSS_PUBLIC_BASE_URL because the default host pins Hangzhou.
           ALIYUN_OSS_BUCKET: "${{ vars.ALIYUN_OSS_PR_ASSETS_BUCKET || vars.ALIYUN_OSS_BUCKET || 'qwen-code-assets' }}"
           ALIYUN_OSS_PUBLIC_BASE_URL: "${{ vars.ALIYUN_OSS_PR_ASSETS_PUBLIC_BASE_URL || (vars.ALIYUN_OSS_PR_ASSETS_BUCKET == '' && vars.ALIYUN_OSS_PUBLIC_BASE_URL) || format('https://{0}.oss-cn-hangzhou.aliyuncs.com', vars.ALIYUN_OSS_PR_ASSETS_BUCKET || vars.ALIYUN_OSS_BUCKET || 'qwen-code-assets') }}"
+          # A stalled upload must not burn this job's 10-minute cap: bound
+          # every ossutil attempt so the uploader exhausts its retries (and
+          # aborts this publish, which stays re-triggerable) instead of
+          # hanging one black-hole socket until the job dies mid-upload.
+          # Worst case is one image's 3 attempts x 120s + backoffs ≈ 6.1 min.
+          OSS_UPLOAD_ATTEMPT_TIMEOUT_MS: '120000'
         run: |-
           set -euo pipefail
 

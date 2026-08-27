@@ -12,6 +12,7 @@ import { fail, isMainModule, readOptionValue } from './release-script-utils.js';
 
 const MAX_UPLOAD_ATTEMPTS = 3;
 const INITIAL_BACKOFF_MS = 2000;
+const ATTEMPT_TIMEOUT_ENV = 'OSS_UPLOAD_ATTEMPT_TIMEOUT_MS';
 
 if (isMainModule(import.meta.url)) {
   try {
@@ -28,7 +29,26 @@ function main(argv) {
     printUsage();
     return;
   }
-  uploadAssets(args);
+  uploadAssets(args, { attemptTimeoutMs: resolveAttemptTimeoutMs() });
+}
+
+// A stalled ossutil (a black-hole socket that accepts but never progresses)
+// must not hang the caller forever: the PR publishers run inside a
+// 10-minute job cap, and one stuck upload would burn the cap and lose the
+// whole report/comment. The bound is opt-in via env so the release syncs —
+// which move much larger files — keep today's unbounded behaviour exactly.
+function resolveAttemptTimeoutMs() {
+  const raw = process.env[ATTEMPT_TIMEOUT_ENV];
+  if (!raw) {
+    return 0;
+  }
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value < 0) {
+    fail(
+      `${ATTEMPT_TIMEOUT_ENV} must be a non-negative integer of milliseconds, got ${JSON.stringify(raw)}.`,
+    );
+  }
+  return value;
 }
 
 function printUsage() {
@@ -101,13 +121,18 @@ function parseUploadArgs(argv) {
 
 function uploadAssets(
   { assets, bucket, config, prefix },
-  { ossutilCommand = 'ossutil', ossutilCommandArgs = [] } = {},
+  {
+    ossutilCommand = 'ossutil',
+    ossutilCommandArgs = [],
+    attemptTimeoutMs = 0,
+  } = {},
 ) {
   for (const asset of assets) {
     const key = `${prefix}/${path.basename(asset)}`;
     uploadWithRetry(asset, bucket, key, config, {
       ossutilCommand,
       ossutilCommandArgs,
+      attemptTimeoutMs,
     });
   }
 }
@@ -117,7 +142,7 @@ function uploadWithRetry(
   bucket,
   key,
   config,
-  { ossutilCommand, ossutilCommandArgs },
+  { ossutilCommand, ossutilCommandArgs, attemptTimeoutMs },
 ) {
   for (let attempt = 1; attempt <= MAX_UPLOAD_ATTEMPTS; attempt += 1) {
     const result = spawnSync(
@@ -133,10 +158,20 @@ function uploadWithRetry(
         '--acl',
         'public-read',
       ],
-      { stdio: 'inherit' },
+      {
+        stdio: 'inherit',
+        // 0 disables the bound (the release syncs' default); a positive
+        // value SIGKILLs an attempt that stalls past it instead of letting
+        // it hang the caller out to the job cap.
+        ...(attemptTimeoutMs > 0
+          ? { timeout: attemptTimeoutMs, killSignal: 'SIGKILL' }
+          : {}),
+      },
     );
 
-    if (result.error) {
+    // A timeout surfaces as error.code ETIMEDOUT and a killed child — that
+    // is a retryable attempt failure, not a spawn error to rethrow.
+    if (result.error && result.error.code !== 'ETIMEDOUT') {
       throw result.error;
     }
     if (result.status === 0) {
@@ -145,7 +180,9 @@ function uploadWithRetry(
     if (attempt < MAX_UPLOAD_ATTEMPTS) {
       const delayMs = INITIAL_BACKOFF_MS * 2 ** (attempt - 1);
       console.warn(
-        `Upload attempt ${attempt}/${MAX_UPLOAD_ATTEMPTS} failed for ${path.basename(asset)}, retrying in ${delayMs / 1000}s...`,
+        `Upload attempt ${attempt}/${MAX_UPLOAD_ATTEMPTS} failed for ${path.basename(asset)}${
+          result.error ? ' (timed out)' : ''
+        }, retrying in ${delayMs / 1000}s...`,
       );
       sleepSync(delayMs);
     }
@@ -161,4 +198,4 @@ function sleepSync(ms) {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
-export { parseUploadArgs, uploadAssets };
+export { parseUploadArgs, resolveAttemptTimeoutMs, uploadAssets };

@@ -934,6 +934,22 @@ jobs:
           }
 
           REPO="${GITHUB_REPOSITORY}"
+
+          # Normalize the assets-repo designation before the CLI reads it.
+          # The env-level guard compares the RAW variable, so whitespace
+          # variants (" QwenLM/qwen-code ") and case variants slip past it;
+          # trim both ends and re-check self-targeting case-insensitively
+          # (repository names are case-insensitive). A padded or case-shifted
+          # self-reference must degrade to prose exactly like an unset one.
+          QWEN_REVIEW_ASSETS_REPO="${QWEN_REVIEW_ASSETS_REPO#"${QWEN_REVIEW_ASSETS_REPO%%[![:space:]]*}"}"
+          QWEN_REVIEW_ASSETS_REPO="${QWEN_REVIEW_ASSETS_REPO%"${QWEN_REVIEW_ASSETS_REPO##*[![:space:]]}"}"
+          if [ -n "${QWEN_REVIEW_ASSETS_REPO}" ] &&
+             [ "$(printf '%s' "${QWEN_REVIEW_ASSETS_REPO}" | tr '[:upper:]' '[:lower:]')" = \
+               "$(printf '%s' "${REPO}" | tr '[:upper:]' '[:lower:]')" ]; then
+            QWEN_REVIEW_ASSETS_REPO=''
+          fi
+          export QWEN_REVIEW_ASSETS_REPO
+
           REVIEW_URL="${GITHUB_SERVER_URL}/${REPO}/pull/${PR_NUMBER}"
           LOG_PATH="${RUNNER_TEMP:-/tmp}/qwen-review-pr-${PR_NUMBER}.jsonl"
           # Set by configure_qwen_network once the wrapper dir exists.

@@ -12,6 +12,7 @@ import {
   mkdtempSync,
   readdirSync,
   readFileSync,
+  rmSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -49,10 +50,85 @@ test('workflow hosts visuals on OSS without writing Git refs', () => {
     /pr-assets\/web-shell-visuals\/\$\{PR\}\/\$\{RUN_HEAD_SHA\}\/\$\{RUN_ID\}\/\$\{RUN_ATTEMPT\}/,
   );
   assert.match(workflow, /ALIYUN_OSS_PUBLIC_BASE_URL/);
+  assert.match(
+    workflow,
+    /RUN_ATTEMPT: '\$\{\{ github\.event\.workflow_run\.run_attempt \}\}'/,
+  );
   assert.match(workflow, /PATH="\$trusted_bin" "\$node_bin"/);
+  // ossutil must run from a fresh job-private dir, never $RUNNER_TEMP: a
+  // trusted_bin=$RUNNER_TEMP mutant would re-resolve the binary through the
+  // shared dir on every call and survive the PATH assertion above.
+  assert.match(workflow, /trusted_bin="\$\(mktemp -d\)"/);
+  assert.match(
+    workflow,
+    /install -m 0755 "\$\{RUNNER_TEMP\}\/ossutil" "\$trusted_bin\/ossutil"/,
+  );
   assert.doesNotMatch(workflow, /PATH="\$RUNNER_TEMP:\$PATH"/);
   assert.doesNotMatch(workflow, /git push/);
   assert.doesNotMatch(workflow, /checkout -q --orphan/);
+});
+
+test('workflow checks out only trusted base-repo scripts', () => {
+  // The job carries OSS credentials. Its checkout must pin the trusted ref
+  // (on workflow_run events github.sha is the default-branch head, never
+  // the PR head) and take only the publisher files — dropping /package.json
+  // makes the uploader's `.js` stop parsing as ESM on Node versions that
+  // don't infer module syntax, and this job pins no Node.
+  const checkout =
+    workflow.split("'Checkout the publish scripts'")[1]?.split('- name:')[0] ??
+    '';
+  assert.ok(checkout, 'checkout step not found');
+  assert.match(checkout, /ref: '\$\{\{ github\.sha \}\}'/);
+  assert.match(checkout, /persist-credentials: false/);
+  assert.match(checkout, /sparse-checkout-cone-mode: false/);
+  for (const entry of [
+    '/package.json',
+    '.github/scripts/web-shell-visuals-publish.mjs',
+    'scripts/upload-aliyun-oss-assets.js',
+    'scripts/release-script-utils.js',
+  ]) {
+    assert.ok(
+      checkout.includes(`\n            ${entry}\n`),
+      `sparse-checkout entry missing: ${entry}`,
+    );
+  }
+});
+
+test('workflow derives the public URL from the resolved bucket', () => {
+  // Overriding only one of the bucket/base-URL vars must not post comment
+  // links that 404 against (or show stale objects from) the other bucket:
+  // the default base URL is derived from whichever bucket wins.
+  const publish =
+    workflow.split("'Publish visuals to the PR'")[1]?.split('run: |-')[0] ?? '';
+  assert.ok(publish, 'publish step env not found');
+  assert.match(
+    publish,
+    /ALIYUN_OSS_BUCKET: "\$\{\{ vars\.ALIYUN_OSS_PR_ASSETS_BUCKET \|\| vars\.ALIYUN_OSS_BUCKET \|\| 'qwen-code-assets' \}\}"/,
+  );
+  assert.match(
+    publish,
+    /ALIYUN_OSS_PUBLIC_BASE_URL: "\$\{\{ vars\.ALIYUN_OSS_PR_ASSETS_PUBLIC_BASE_URL \|\| \(vars\.ALIYUN_OSS_PR_ASSETS_BUCKET == '' && vars\.ALIYUN_OSS_PUBLIC_BASE_URL\) \|\| format\('https:\/\/\{0\}\.oss-cn-hangzhou\.aliyuncs\.com', vars\.ALIYUN_OSS_PR_ASSETS_BUCKET \|\| vars\.ALIYUN_OSS_BUCKET \|\| 'qwen-code-assets'\) \}\}"/,
+  );
+  // A stalled upload is bounded per attempt so one black-hole socket cannot
+  // burn the whole 10-minute job cap and strand the preview comment.
+  assert.match(publish, /OSS_UPLOAD_ATTEMPT_TIMEOUT_MS: '120000'/);
+});
+
+test('workflow keeps the ossutil download retry budget inside the job cap', () => {
+  // A CDN retry loop whose worst case exceeds the 10-minute job cap turns
+  // the intended "degrade to the no-image path" into "job killed mid-install".
+  const install =
+    workflow.split("'Install ossutil'")[1]?.split('- name:')[0] ?? '';
+  const m = install.match(
+    /curl -fsSL --retry (\d+) --retry-delay (\d+) --retry-all-errors \\\n\s+--connect-timeout (\d+) --max-time (\d+)/,
+  );
+  assert.ok(m, 'curl retry flags not found in the install step');
+  const worstSeconds =
+    (Number(m[1]) + 1) * Number(m[4]) + Number(m[1]) * Number(m[2]);
+  assert.ok(
+    worstSeconds < 10 * 60,
+    `worst-case download budget ${worstSeconds}s exceeds the 10-minute job cap`,
+  );
 });
 
 test('workflow pins the ossutil credential lifecycle (sha256 install, config, always() cleanup)', () => {
@@ -98,6 +174,25 @@ function hostingBlockSource() {
   return raw;
 }
 
+function listFiles(root) {
+  if (!existsSync(root)) {
+    return [];
+  }
+  const out = [];
+  const walk = (dir, prefix) => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const rel = prefix ? `${prefix}/${entry.name}` : entry.name;
+      if (entry.isDirectory()) {
+        walk(join(dir, entry.name), rel);
+      } else {
+        out.push(rel);
+      }
+    }
+  };
+  walk(root, '');
+  return out;
+}
+
 function runHostingBlock(
   hasImages,
   {
@@ -108,6 +203,25 @@ function runHostingBlock(
   } = {},
 ) {
   const dir = mkdtempSync(join(tmpdir(), 'visuals-hosting-'));
+  try {
+    return runHostingBlockIn(dir, hasImages, {
+      publicBaseUrl,
+      uploadFails,
+      runId,
+      runAttempt,
+    });
+  } finally {
+    // The fixture used to leak a mkdtemp dir per call; capture everything
+    // the assertions need inside, then tear it down.
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+function runHostingBlockIn(
+  dir,
+  hasImages,
+  { publicBaseUrl, uploadFails, runId, runAttempt },
+) {
   const runnerTemp = join(dir, 'runner-temp');
   const stage = join(dir, 'stage');
   const work = join(dir, 'work');
@@ -188,36 +302,51 @@ function runHostingBlock(
       OSS_STUB_FAIL: uploadFails ? '1' : '0',
     },
   });
-  return { res, recordPath, stubRoot, pr, headSha, runId, runAttempt, runnerTemp };
+  // Capture the outcomes the caller asserts on before the fixture dir is
+  // torn down: the parsed upload record (null when the uploader never ran
+  // or wrote nothing) and the flat listing of everything hosted.
+  const record = existsSync(recordPath)
+    ? JSON.parse(readFileSync(recordPath, 'utf8'))
+    : null;
+  const hostedFiles = listFiles(stubRoot).sort();
+  return {
+    res,
+    record,
+    hostedFiles,
+    pr,
+    headSha,
+    runId,
+    runAttempt,
+    runnerTemp,
+  };
 }
 
 test('hosting block uploads staged images to the exact prefix RAW_BASE promises', () => {
-  const { res, recordPath, stubRoot, pr, headSha, runId, runAttempt, runnerTemp } =
-    runHostingBlock(true);
+  const {
+    res,
+    record,
+    hostedFiles,
+    pr,
+    headSha,
+    runId,
+    runAttempt,
+    runnerTemp,
+  } = runHostingBlock(true);
   assert.equal(res.status, 0, res.stderr);
   // Flag wiring: the uploader gets the bucket, the credential file the
   // configure step writes, and the prefix the comment URLs are built from.
-  const record = JSON.parse(readFileSync(recordPath, 'utf8'));
+  const prefix = `pr-assets/web-shell-visuals/${pr}/${headSha}/${runId}/${runAttempt}`;
   assert.deepEqual(record, {
     bucket: 'assets-bucket',
     config: `${runnerTemp}/.ossutilconfig`,
-    prefix: `pr-assets/web-shell-visuals/${pr}/${headSha}/${runId}/${runAttempt}`,
+    prefix,
   });
   // Upload-prefix ↔ URL agreement: the objects land exactly where RAW_BASE
   // (the comment's image base URL) points.
-  const hosted = readdirSync(
-    join(
-      stubRoot,
-      'assets-bucket',
-      'pr-assets',
-      'web-shell-visuals',
-      pr,
-      headSha,
-      runId,
-      runAttempt,
-    ),
-  ).sort();
-  assert.deepEqual(hosted, ['home-light.png', 'model-switch.gif']);
+  assert.deepEqual(hostedFiles, [
+    `assets-bucket/${prefix}/home-light.png`,
+    `assets-bucket/${prefix}/model-switch.gif`,
+  ]);
   assert.match(
     res.stdout,
     new RegExp(
@@ -235,19 +364,29 @@ test('hosting block uploads staged images to the exact prefix RAW_BASE promises'
 
 // The regression this guards: publishing back onto the previous run's object
 // keys. GitHub serves comment images through a caching proxy, so a re-run for
-// the same head would keep showing the stale screenshots.
+// the same head would keep showing the stale screenshots. A re-run comes in
+// TWO shapes: a brand-new workflow run (fresh run id) and a re-run of the
+// SAME run — which keeps the run id and only increments the attempt, and
+// still re-fires workflow_run `completed`. Both must get fresh prefixes;
+// dropping the attempt component from ASSET_PREFIX turns this red.
 test('hosting block gives a re-run of the same head a fresh, non-colliding prefix', () => {
-  const first = runHostingBlock(true, { runId: '900001' });
+  const first = runHostingBlock(true, { runId: '900001', runAttempt: '1' });
   assert.equal(first.res.status, 0, first.res.stderr);
-  const second = runHostingBlock(true, { runId: '900002' });
-  assert.equal(second.res.status, 0, second.res.stderr);
-  const prefixOf = (r) => JSON.parse(readFileSync(r.recordPath, 'utf8')).prefix;
-  assert.notEqual(prefixOf(first), prefixOf(second));
-  // Both still hang off the same immutable per-head path, so the head SHA
+  const rerunSameRun = runHostingBlock(true, {
+    runId: '900001',
+    runAttempt: '2',
+  });
+  assert.equal(rerunSameRun.res.status, 0, rerunSameRun.res.stderr);
+  const freshRun = runHostingBlock(true, { runId: '900002', runAttempt: '1' });
+  assert.equal(freshRun.res.status, 0, freshRun.res.stderr);
+  const prefixes = [first, rerunSameRun, freshRun].map((r) => r.record.prefix);
+  assert.equal(new Set(prefixes).size, 3);
+  // All still hang off the same immutable per-head path, so the head SHA
   // stays the thing that binds a URL to the code it depicts.
   const head = `pr-assets/web-shell-visuals/${first.pr}/${first.headSha}/`;
-  assert.ok(prefixOf(first).startsWith(head));
-  assert.ok(prefixOf(second).startsWith(head));
+  for (const prefix of prefixes) {
+    assert.ok(prefix.startsWith(head), `unexpected prefix: ${prefix}`);
+  }
 });
 
 // A maintainer re-run of the SAME workflow run keeps its run id — only
@@ -259,7 +398,7 @@ test('hosting block gives re-run attempts of the SAME run distinct prefixes', ()
   assert.equal(first.res.status, 0, first.res.stderr);
   const second = runHostingBlock(true, { runId: '900001', runAttempt: '2' });
   assert.equal(second.res.status, 0, second.res.stderr);
-  const prefixOf = (r) => JSON.parse(readFileSync(r.recordPath, 'utf8')).prefix;
+  const prefixOf = (r) => r.record.prefix;
   assert.equal(
     prefixOf(first),
     `pr-assets/web-shell-visuals/${first.pr}/${first.headSha}/900001/1`,
@@ -272,18 +411,18 @@ test('hosting block gives re-run attempts of the SAME run distinct prefixes', ()
 });
 
 test('hosting block skips the uploader entirely on the no-change arm', () => {
-  const { res, recordPath } = runHostingBlock(false);
+  const { res, record } = runHostingBlock(false);
   assert.equal(res.status, 0, res.stderr);
   assert.match(res.stdout, /^RAW_BASE=$/m); // empty -> image-less comment
   assert.doesNotMatch(res.stdout, /hosted at/);
-  assert.equal(existsSync(recordPath), false); // the uploader never ran
+  assert.equal(record, null); // the uploader never ran
 });
 
 test('hosting block aborts without publishing a URL when upload fails', () => {
-  const { res, recordPath } = runHostingBlock(true, { uploadFails: true });
+  const { res, record } = runHostingBlock(true, { uploadFails: true });
   assert.notEqual(res.status, 0);
   assert.doesNotMatch(res.stdout, /^RAW_BASE=/m);
-  assert.equal(existsSync(recordPath), false);
+  assert.equal(record, null);
 });
 
 test('hosting block strips a trailing slash from the public base URL', () => {
