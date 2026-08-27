@@ -1010,31 +1010,54 @@ fi
 # claim is the whole point -- the reasons ride into the round report, where a
 # maintainer reads them against the diff.
 #
-# Signals, all measured against the PRE-ROUND tree with merge freight
-# filtered out (a base-merging round is judged on its own changes):
+# Signals, all measured per round COMMIT rather than over the net range:
+# each of the round's own commits is diffed against its first parent, so a
+# base-merging round is judged on its own changes. A merge commit counts
+# only the lines its resolution is responsible for -- an added line main's
+# side did not already carry, a removed line main's side still carries --
+# so freight crossing the merge neither charges the round nor shields it,
+# and a weakening introduced while resolving a merge conflict IS counted.
+# A file that did not exist at the pre-round ref is not pre-existing
+# coverage and is not measured, whichever commit touched it. Per-file
+# pathspecs are `:(literal)` -- a branch-controlled filename may carry glob
+# magic, and the measurement must see exactly the file's own hunks, not the
+# union of every path its name matches.
 #   - the file was DELETED;
 #   - assertion lines removed exceed assertion lines added, an assertion line
-#     being one that contains `expect(`, `assert(`, or `assert.` (the repo's
-#     three idioms). An assertion moved within a file nets zero; one moved
+#     being one that contains `expect(`, `expect.poll(`, `assert(`, or
+#     `assert.` (the repo's idioms; a poll assertion spells its call
+#     `expect.poll(`). An assertion moved within a file nets zero; one moved
 #     OUT of a file nets negative and is answered by naming its new home;
-#   - a skip/todo marker was ADDED: `it`/`test`/`describe` `.skip`/`.todo`/
-#     `.failing`, or `xit(`/`xdescribe(`. `.skipIf` is deliberately NOT a
-#     signal -- it is this repo's standard environment guard (237 uses) and
-#     flagging it would charge every platform-conditional test to this gate.
+#   - a skip/todo marker was added NET: `it`/`test`/`describe` followed by
+#     `.skip`, `.todo`, `.fails`, or `.failing` -- optionally chained with
+#     `.each`/`.for` -- or `xit(`/`xdescribe(`. Markers removed in the same
+#     file net against markers added, so touching an already-skipped test
+#     without adding a marker is not charged. `.skipIf` is deliberately NOT
+#     a signal -- it is this repo's standard environment guard (237 uses)
+#     and flagging it would charge every platform-conditional test to this
+#     gate.
 # Snapshots are out of scope on both signals: they carry no assertion token,
 # and an obsolete snapshot removed by `vitest -u` is routine bookkeeping.
 # Fails OPEN -- a diff the gate cannot read skips the check rather than
 # rejecting a round it could not measure.
 WEAKEN_PATHSPEC=(':(glob)**/*.test.*' ':(glob)**/*.spec.*' ':(exclude,glob)**/__snapshots__/**')
-WEAKEN_ASSERT_RE='expect\(|assert\(|assert\.'
-WEAKEN_SKIP_RE='(^|[^A-Za-z0-9_$.])(it|test|describe)[[:space:]]*\.[[:space:]]*(skip|todo|failing)[[:space:]]*[(<]|(^|[^A-Za-z0-9_$.])x(it|describe)[[:space:]]*\('
+WEAKEN_ASSERT_RE='expect\(|expect\.poll\(|assert\(|assert\.'
+WEAKEN_SKIP_RE='(^|[^A-Za-z0-9_$.])(it|test|describe)[[:space:]]*\.[[:space:]]*(skip|todo|fails|failing)([[:space:]]*\.[[:space:]]*(each|for))?[[:space:]]*[(<]|(^|[^A-Za-z0-9_$.])x(it|describe)([[:space:]]*\.[[:space:]]*each)?[[:space:]]*\('
 WEAKENED=''
 WEAKEN_MEASURED='true'
-while IFS= read -r -d '' f; do
-  [[ -n "${f}" ]] || continue
-  if ! WEAKEN_DIFF="$(git diff -U0 --no-renames "${ROUND_RANGE}" -- "${f}" 2> /dev/null)"; then
-    WEAKEN_MEASURED='false'
-    break
+declare -A WEAKEN_FILES=() WEAKEN_DEL_ACC=() WEAKEN_ADD_ACC=() WEAKEN_SKIP_ADD_ACC=() WEAKEN_SKIP_DEL_ACC=()
+WEAKEN_ROUND_COMMITS="$(git rev-list --first-parent "origin/${BRANCH}..${BRANCH}" 2> /dev/null)" || WEAKEN_MEASURED='false'
+# Fold one commit's diff of one test file into the per-file accumulators.
+# When ${3} is set the commit is a merge: the same file at the merge's
+# second parent decides line authorship, keeping only what the merge
+# resolution itself authored.
+weaken_count_commit_file() {
+  local c="${1}" f="${2}" is_merge="${3}" p2='' l diff_body add_lines del_lines
+  if [[ -n "${is_merge}" ]]; then
+    p2="$(git show "${c}^2:${f}" 2> /dev/null)" || p2=''
+  fi
+  if ! diff_body="$(git diff -U0 --no-renames "${c}^" "${c}" -- ":(literal)${f}" 2> /dev/null)"; then
+    return 1
   fi
   # Everything from the first `@@` on is hunk content, so the ---/+++ file
   # headers are dropped by construction rather than by a `^+[^+]` guard that
@@ -1042,19 +1065,71 @@ while IFS= read -r -d '' f; do
   # anchored at column 1, `it.skip(` among them). -U0 emits no context lines,
   # so each remaining +/- line is a real edit; stripping the marker lets the
   # patterns below anchor on the source line itself.
-  WEAKEN_BODY="$(sed -n '/^@@/,$p' <<< "${WEAKEN_DIFF}")"
-  W_ADD_LINES="$(sed -n 's/^+//p' <<< "${WEAKEN_BODY}")"
-  W_DEL_LINES="$(sed -n 's/^-//p' <<< "${WEAKEN_BODY}")"
-  W_DEL="$(grep -cE "${WEAKEN_ASSERT_RE}" <<< "${W_DEL_LINES}" || true)"
-  W_ADD="$(grep -cE "${WEAKEN_ASSERT_RE}" <<< "${W_ADD_LINES}" || true)"
-  W_SKIP="$(grep -cE "${WEAKEN_SKIP_RE}" <<< "${W_ADD_LINES}" || true)"
-  if (( W_DEL > W_ADD )); then
-    WEAKENED+="${f}"$'\t'"net $(( W_DEL - W_ADD )) assertion line(s) removed"$'\n'
-  elif (( W_SKIP > 0 )); then
-    WEAKENED+="${f}"$'\t'"${W_SKIP} skip/todo marker(s) added"$'\n'
+  diff_body="$(sed -n '/^@@/,$p' <<< "${diff_body}")"
+  add_lines="$(sed -n 's/^+//p' <<< "${diff_body}")"
+  del_lines="$(sed -n 's/^-//p' <<< "${diff_body}")"
+  if [[ -n "${is_merge}" ]]; then
+    add_lines="$(while IFS= read -r l; do
+      if [[ -n "${l}" ]] && ! grep -qxF -- "${l}" <<< "${p2}"; then
+        printf '%s\n' "${l}"
+      fi
+    done <<< "${add_lines}")"
+    del_lines="$(while IFS= read -r l; do
+      if [[ -n "${l}" ]] && grep -qxF -- "${l}" <<< "${p2}"; then
+        printf '%s\n' "${l}"
+      fi
+    done <<< "${del_lines}")"
   fi
-done < <(git diff --name-only -z --no-renames --diff-filter=M "${ROUND_RANGE}" \
-  -- "${WEAKEN_PATHSPEC[@]}" 2> /dev/null | not_merge_freight)
+  local d a sa sd
+  d="$(grep -cE "${WEAKEN_ASSERT_RE}" <<< "${del_lines}" || true)"
+  a="$(grep -cE "${WEAKEN_ASSERT_RE}" <<< "${add_lines}" || true)"
+  sa="$(grep -cE "${WEAKEN_SKIP_RE}" <<< "${add_lines}" || true)"
+  sd="$(grep -cE "${WEAKEN_SKIP_RE}" <<< "${del_lines}" || true)"
+  WEAKEN_DEL_ACC["${f}"]="$(( ${WEAKEN_DEL_ACC["${f}"]:-0} + d ))"
+  WEAKEN_ADD_ACC["${f}"]="$(( ${WEAKEN_ADD_ACC["${f}"]:-0} + a ))"
+  WEAKEN_SKIP_ADD_ACC["${f}"]="$(( ${WEAKEN_SKIP_ADD_ACC["${f}"]:-0} + sa ))"
+  WEAKEN_SKIP_DEL_ACC["${f}"]="$(( ${WEAKEN_SKIP_DEL_ACC["${f}"]:-0} + sd ))"
+  WEAKEN_FILES["${f}"]=1
+}
+while IFS= read -r c; do
+  [[ -n "${c}" ]] || continue
+  [[ "${WEAKEN_MEASURED}" == 'true' ]] || break
+  if ! git rev-parse -q --verify "${c}^" > /dev/null 2>&1; then
+    WEAKEN_MEASURED='false'
+    break
+  fi
+  is_merge=''
+  if git rev-parse -q --verify "${c}^2" > /dev/null 2>&1; then
+    is_merge=1
+  fi
+  while IFS= read -r -d '' f; do
+    [[ -n "${f}" ]] || continue
+    # Pre-existing means present at the PRE-ROUND ref: a file this round (or
+    # its merge) introduced first has no prior coverage to weaken.
+    if ! git cat-file -e "origin/${BRANCH}:${f}" 2> /dev/null; then
+      continue
+    fi
+    if ! weaken_count_commit_file "${c}" "${f}" "${is_merge}"; then
+      WEAKEN_MEASURED='false'
+      break
+    fi
+  done < <(git diff --name-only -z --no-renames --diff-filter=M "${c}^" "${c}" \
+    -- "${WEAKEN_PATHSPEC[@]}" 2> /dev/null)
+done <<< "${WEAKEN_ROUND_COMMITS}"
+if [[ "${WEAKEN_MEASURED}" == 'true' ]]; then
+  while IFS= read -r f; do
+    [[ -n "${f}" ]] || continue
+    w_del="${WEAKEN_DEL_ACC["${f}"]:-0}"
+    w_add="${WEAKEN_ADD_ACC["${f}"]:-0}"
+    w_skip_add="${WEAKEN_SKIP_ADD_ACC["${f}"]:-0}"
+    w_skip_del="${WEAKEN_SKIP_DEL_ACC["${f}"]:-0}"
+    if (( w_del > w_add )); then
+      WEAKENED+="${f}"$'\t'"net $(( w_del - w_add )) assertion line(s) removed"$'\n'
+    elif (( w_skip_add > w_skip_del )); then
+      WEAKENED+="${f}"$'\t'"$(( w_skip_add - w_skip_del )) skip/todo marker(s) added"$'\n'
+    fi
+  done < <(printf '%s\n' "${!WEAKEN_FILES[@]}" | LC_ALL=C sort)
+fi
 # Deletions cannot use not_merge_freight: its content-equality test reads
 # "absent on both sides" as identical, so a round deleting a test the PR
 # ITSELF added (the classic round-5-deletes-what-round-3-pinned shape) looks
@@ -1101,7 +1176,7 @@ elif [[ -n "${WEAKENED}" ]]; then
     # Filenames are branch-controlled bytes rendered inside gate-authored
     # (trusted-voice) documents, so they go through the same conservative
     # safe-character set the shrink advisory above uses.
-    if grep -qxF "${f}" <<< "${WEAKEN_ACKED}"; then
+    if grep -qxF -- "${f}" <<< "${WEAKEN_ACKED}"; then
       WEAKEN_OK+="- \`${f//[^A-Za-z0-9._\/ -]/?}\` — ${signal}"$'\n'
       WEAKEN_OK_PATHS+="${f}"$'\n'
     else
