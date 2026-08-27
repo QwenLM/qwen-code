@@ -548,6 +548,9 @@ function isManagedMemoryShellAccess(
   cwd: string,
   projectRoot: string,
 ): boolean {
+  if (safeIsManagedMemoryPath(cwd, projectRoot, projectRoot)) {
+    return true;
+  }
   for (const segment of splitCommands(stripShellWrapper(command))) {
     const tokens = tokeniseSegment(segment, false);
     if (!tokens || tokens.length === 0) {

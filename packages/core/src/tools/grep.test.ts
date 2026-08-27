@@ -679,6 +679,35 @@ describe('GrepTool', () => {
       expect(result.returnDisplay).toBe('No matches found');
     });
 
+    it('filters managed memory unless direct reads are allowed', async () => {
+      const memoryFile = path.join(
+        tempRootDir,
+        '.qwen',
+        'memory',
+        'user',
+        'preference.md',
+      );
+      await fs.mkdir(path.dirname(memoryFile), { recursive: true });
+      await fs.writeFile(memoryFile, 'unique managed memory phrase');
+
+      const structuredResult = await new GrepTool({
+        ...mockConfig,
+        getMemoryRecallMode: () => 'structured',
+      } as Config)
+        .build({ pattern: 'unique managed memory phrase' })
+        .execute(abortSignal);
+      expect(structuredResult.llmContent).not.toContain('preference.md');
+
+      const scopedResult = await new GrepTool({
+        ...mockConfig,
+        getMemoryRecallMode: () => 'structured',
+        allowsDirectAutoMemoryRead: () => true,
+      } as Config)
+        .build({ pattern: 'unique managed memory phrase' })
+        .execute(abortSignal);
+      expect(scopedResult.llmContent).toContain('preference.md');
+    });
+
     it('should handle regex special characters correctly', async () => {
       const params: GrepToolParams = { pattern: 'foo.*bar' }; // Matches 'const foo = "bar";'
       const invocation = grepTool.build(params);

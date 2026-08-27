@@ -204,6 +204,15 @@ describe('GlobTool', () => {
         .build({ pattern: '**/*.md' })
         .execute(abortSignal);
       expect(legacyResult.llmContent).toContain(memoryFile);
+
+      const scopedResult = await new GlobTool({
+        ...mockConfig,
+        getMemoryRecallMode: () => 'structured',
+        allowsDirectAutoMemoryRead: () => true,
+      } as Config)
+        .build({ pattern: '**/*.md' })
+        .execute(abortSignal);
+      expect(scopedResult.llmContent).toContain(memoryFile);
     });
 
     it('should return "No files found" message when pattern matches nothing', async () => {

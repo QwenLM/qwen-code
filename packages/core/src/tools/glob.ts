@@ -222,6 +222,7 @@ class GlobToolInvocation extends BaseToolInvocation<
     for await (const entry of stream) {
       if (
         this.config.getMemoryRecallMode?.() === 'structured' &&
+        this.config.allowsDirectAutoMemoryRead?.() !== true &&
         isManagedMemoryPath(entry.fullpath(), this.config.getTargetDir())
       ) {
         continue;

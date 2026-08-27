@@ -23,6 +23,7 @@ import {
 } from '../utils/fileUtils.js';
 import { hasVerifiableInode } from '../utils/file-identity.js';
 import { getFolderStructure } from '../utils/getFolderStructure.js';
+import { isManagedMemoryPath } from '../memory/paths.js';
 
 /**
  * Options for reading multiple files.
@@ -462,7 +463,11 @@ async function readDirectory(
   const structure = await getFolderStructure(directoryPath, {
     fileService: config.getFileService(),
     fileFilteringOptions: config.getFileFilteringOptions(),
-    hideManagedMemory: config.getMemoryRecallMode() === 'structured',
+    hideManagedMemory:
+      config.getMemoryRecallMode() === 'structured' &&
+      config.allowsDirectAutoMemoryRead?.() !== true,
+    hideFolder: (folderPath) =>
+      isManagedMemoryPath(folderPath, config.getTargetDir()),
   });
   signal?.throwIfAborted();
 

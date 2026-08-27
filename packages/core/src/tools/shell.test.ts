@@ -520,6 +520,19 @@ describe('ShellTool', () => {
       expect(mockShellExecutionService).not.toHaveBeenCalled();
     });
 
+    it('rejects bare filenames when cwd is a managed memory root', async () => {
+      const result = await shellTool
+        .build({
+          command: 'cat MEMORY.md',
+          directory: '/test/dir/.qwen/memory',
+          is_background: false,
+        })
+        .execute(mockAbortSignal);
+
+      expect(result.error?.type).toBe(ToolErrorType.EXECUTION_DENIED);
+      expect(mockShellExecutionService).not.toHaveBeenCalled();
+    });
+
     it('rejects tilde paths into user memory', async () => {
       vi.mocked(os.homedir).mockReturnValue('/test/dir');
       const invocation = shellTool.build({
@@ -528,6 +541,31 @@ describe('ShellTool', () => {
       });
 
       const result = await invocation.execute(mockAbortSignal);
+
+      expect(result.error?.type).toBe(ToolErrorType.EXECUTION_DENIED);
+      expect(mockShellExecutionService).not.toHaveBeenCalled();
+    });
+
+    it('rejects direct paths into global user memory', async () => {
+      vi.mocked(os.homedir).mockReturnValue('/test/dir');
+      const result = await shellTool
+        .build({
+          command: 'cat /test/dir/.qwen/memories/user/preference.md',
+          is_background: false,
+        })
+        .execute(mockAbortSignal);
+
+      expect(result.error?.type).toBe(ToolErrorType.EXECUTION_DENIED);
+      expect(mockShellExecutionService).not.toHaveBeenCalled();
+    });
+
+    it('rejects direct paths into team memory', async () => {
+      const result = await shellTool
+        .build({
+          command: 'cat /test/dir/.qwen/team-memory/policy.md',
+          is_background: false,
+        })
+        .execute(mockAbortSignal);
 
       expect(result.error?.type).toBe(ToolErrorType.EXECUTION_DENIED);
       expect(mockShellExecutionService).not.toHaveBeenCalled();
@@ -665,6 +703,28 @@ describe('ShellTool', () => {
 
       expect(result.error).toBeUndefined();
       expect(result.llmContent).toContain('Output: remembered preference');
+    });
+
+    it('allows a managed memory cwd for scoped memory agents', async () => {
+      const scopedTool = new ShellTool({
+        ...mockConfig,
+        allowsDirectAutoMemoryRead: vi.fn().mockReturnValue(true),
+        allowsDirectAutoMemoryWrite: vi.fn().mockReturnValue(true),
+      } as unknown as Config);
+      const resultPromise = scopedTool
+        .build({
+          command: 'cat MEMORY.md',
+          directory: '/test/dir/.qwen/memory',
+          is_background: false,
+        })
+        .execute(mockAbortSignal);
+
+      await vi.waitFor(() =>
+        expect(mockShellExecutionService).toHaveBeenCalled(),
+      );
+      resolveShellExecution({ output: 'memory index' });
+      const result = await resultPromise;
+      expect(result.error).toBeUndefined();
     });
 
     it('rejects shell writes to managed auto-memory files', async () => {

@@ -125,6 +125,35 @@ ${testRootDir}${path.sep}
     expect(structure).toContain('preference.md');
   });
 
+  it('hides managed memory when listing from .qwen or the memory root', async () => {
+    await createTestFile('.qwen', 'memory', 'user', 'preference.md');
+    await createTestFile('.qwen', 'commands', 'review.md');
+
+    const qwenStructure = await getFolderStructure(
+      path.join(testRootDir, '.qwen'),
+      {
+        maxItems: 20,
+        hideManagedMemory: true,
+        hideFolder: (folderPath) =>
+          folderPath.includes(path.join('.qwen', 'memory')),
+      },
+    );
+    expect(qwenStructure).toContain('review.md');
+    expect(qwenStructure).not.toContain('preference.md');
+
+    const memoryStructure = await getFolderStructure(
+      path.join(testRootDir, '.qwen', 'memory'),
+      {
+        maxItems: 20,
+        hideManagedMemory: true,
+        hideFolder: (folderPath) =>
+          folderPath.includes(path.join('.qwen', 'memory')),
+      },
+    );
+    expect(memoryStructure).toContain('└───...');
+    expect(memoryStructure).not.toContain('preference.md');
+  });
+
   it('should ignore folders specified in custom ignoredFolders', async () => {
     await createTestFile('.hiddenfile');
     await createTestFile('file1.txt');

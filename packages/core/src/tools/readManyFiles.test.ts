@@ -967,6 +967,30 @@ describe('readManyFiles', () => {
       expect(content).toContain('Content from');
       expect(content).toContain('emptydir');
     });
+
+    it('hides managed memory directories only without direct-read capability', async () => {
+      await createTestFile('.qwen', 'memory', 'user', 'preference.md');
+      const structuredConfig = {
+        ...createMockConfig(tempRootDir),
+        getMemoryRecallMode: () => 'structured',
+      } as Config;
+
+      const hidden = await readManyFiles(structuredConfig, {
+        paths: ['.qwen'],
+      });
+      expect(contentToString(hidden.contentParts)).not.toContain(
+        'preference.md',
+      );
+
+      const visible = await readManyFiles(
+        {
+          ...structuredConfig,
+          allowsDirectAutoMemoryRead: () => true,
+        } as Config,
+        { paths: ['.qwen'] },
+      );
+      expect(contentToString(visible.contentParts)).toContain('preference.md');
+    });
   });
 
   describe('mixed files and directories', () => {

@@ -101,6 +101,18 @@ describe('getDirectoryContextString', () => {
       'Here is the folder structure of the current working directories:\n\nStructure 1\nStructure 2',
     );
   });
+
+  it('hides managed memory from structured startup context', async () => {
+    vi.mocked(mockConfig.getMemoryRecallMode!).mockReturnValue('structured');
+
+    await getDirectoryContextString(mockConfig as Config);
+
+    expect(getFolderStructure).toHaveBeenCalledWith('/test/dir', {
+      fileService: undefined,
+      hideManagedMemory: true,
+      hideFolder: expect.any(Function),
+    });
+  });
 });
 
 describe('getEnvironmentContext', () => {
@@ -152,6 +164,7 @@ describe('getEnvironmentContext', () => {
     expect(getFolderStructure).toHaveBeenCalledWith('/test/dir', {
       fileService: undefined,
       hideManagedMemory: false,
+      hideFolder: expect.any(Function),
     });
   });
 
