@@ -1541,6 +1541,9 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
     opts?: CloseSessionOpts,
   ): Promise<void>;
 
+  /** Durably anchor an eligible live default session before task binding. */
+  ensureDefaultSessionPersisted?(sessionId: string): Promise<void>;
+
   /**
    * Update mutable session metadata. Supports `displayName` and `pr`.
    * Throws `SessionNotFoundError` for unknown ids.

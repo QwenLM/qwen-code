@@ -1332,3 +1332,91 @@ describe('token budget transitions', () => {
     );
   });
 });
+
+describe('budget wind-down marker', () => {
+  const control = (request: GoalControlRequest, tokenBudgetGrant?: number) => ({
+    request,
+    now: 200,
+    nextGoalId: 'g-next',
+    cursor: { recordId: 'r-200' },
+    ...(tokenBudgetGrant === undefined ? {} : { tokenBudgetGrant }),
+  });
+
+  it('is stamped by the turn that finished the hand-off, and by no other turn', () => {
+    const quiet = reduceGoalTurnFinished(goalRecord(), {
+      now: 200,
+      tokensUsed: 10,
+    });
+    expect(quiet).not.toHaveProperty('windDownTurnId');
+
+    const handedOff = reduceGoalTurnFinished(goalRecord(), {
+      now: 200,
+      tokensUsed: 10,
+      windDownTurnId: 'turn-9',
+    });
+    expect(handedOff).toMatchObject({ windDownTurnId: 'turn-9', turnCount: 1 });
+  });
+
+  it.each(['resume', 'edit'] as const)(
+    'is cleared when %s re-arms a spent budget',
+    (action) => {
+      const spent = goalRecord({
+        status: 'usage_limited',
+        limitKind: 'token_budget',
+        tokensUsed: 1_200,
+        tokenBudget: 1_000,
+        windDownTurnId: 'turn-9',
+      });
+      const request: GoalControlRequest =
+        action === 'resume'
+          ? { action, expectedGoalId: 'g-1', expectedRevision: 1 }
+          : {
+              action,
+              objective: 'ship the rest',
+              expectedGoalId: 'g-1',
+              expectedRevision: 1,
+            };
+      const next = reduceGoalControl(spent, control(request, 1_000));
+      expect(next).toMatchObject({ tokenBudget: 2_200 });
+      expect(next).not.toHaveProperty('windDownTurnId');
+    },
+  );
+
+  it('survives a resume that does not re-arm anything', () => {
+    // A paused Goal comes back to the same window; the hand-off it already
+    // delivered there is still the truth about that window.
+    const resumed = reduceGoalControl(
+      goalRecord({
+        status: 'paused',
+        tokensUsed: 300,
+        tokenBudget: 1_000,
+        windDownTurnId: 'turn-9',
+      }),
+      control(
+        { action: 'resume', expectedGoalId: 'g-1', expectedRevision: 1 },
+        1_000,
+      ),
+    );
+    expect(resumed).toMatchObject({
+      status: 'active',
+      windDownTurnId: 'turn-9',
+    });
+  });
+
+  it('round-trips through a persisted snapshot and rejects an empty marker', () => {
+    const stored = snapshot(
+      goalRecord({
+        tokensUsed: 1_500,
+        tokenBudget: 1_000,
+        windDownTurnId: 'turn-9',
+      }),
+    );
+    expect(parseGoalSnapshotV2(stored)).toEqual(stored);
+    expect(
+      parseGoalSnapshotV2(snapshot(goalRecord({ windDownTurnId: '' }))),
+    ).toBeUndefined();
+    expect(
+      parseGoalSnapshotV2(snapshot(goalRecord({ windDownTurnId: 7 as never }))),
+    ).toBeUndefined();
+  });
+});

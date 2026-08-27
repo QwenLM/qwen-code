@@ -10236,6 +10236,25 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       return closeSessionImpl(sessionId, context, closeOpts);
     },
 
+    async ensureDefaultSessionPersisted(sessionId) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      const result = (await withTimeout(
+        Promise.race([
+          entry.connection.extMethod(SERVE_CONTROL_EXT_METHODS.sessionSource, {
+            sessionId,
+            sourceType: 'default',
+          }),
+          getTransportClosedReject(entry),
+        ]),
+        initTimeoutMs,
+        'ensureDefaultSessionPersisted',
+      )) as { persisted?: unknown };
+      if (result?.persisted !== true) {
+        throw new Error(`Session '${sessionId}' could not be persisted`);
+      }
+    },
+
     updateSessionMetadata(sessionId, metadata, context) {
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);

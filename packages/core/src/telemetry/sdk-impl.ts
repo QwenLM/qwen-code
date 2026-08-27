@@ -22,7 +22,10 @@
 
 import { diag } from '@opentelemetry/api';
 import type { Context, TextMapPropagator } from '@opentelemetry/api';
-import { W3CTraceContextPropagator } from '@opentelemetry/core';
+import {
+  getNumberFromEnv,
+  W3CTraceContextPropagator,
+} from '@opentelemetry/core';
 import { NodeSDK } from '@opentelemetry/sdk-node';
 import { SemanticResourceAttributes } from '@opentelemetry/semantic-conventions';
 import { resourceFromAttributes } from '@opentelemetry/resources';
@@ -43,6 +46,7 @@ import { UndiciInstrumentation } from '@opentelemetry/instrumentation-undici';
 import type { TelemetryRuntimeConfig } from './runtime-config.js';
 import { SERVICE_NAME } from './constants.js';
 import { setDaemonFallbackPropagator } from './daemon-tracing.js';
+import { configureContextUsageAttributeLengthLimit } from './context-usage.js';
 import {
   FileLogExporter,
   FileMetricExporter,
@@ -413,6 +417,12 @@ export async function startTelemetrySdk(
       ? undefined // undefined → NodeSDK keeps its default W3C propagator
       : NOOP_PROPAGATOR;
 
+  const spanAttributeValueLengthLimit =
+    getNumberFromEnv('OTEL_SPAN_ATTRIBUTE_VALUE_LENGTH_LIMIT') ??
+    getNumberFromEnv('OTEL_ATTRIBUTE_VALUE_LENGTH_LIMIT') ??
+    Infinity;
+  configureContextUsageAttributeLengthLimit(spanAttributeValueLengthLimit);
+
   const sdk = new NodeSDK({
     resource,
     // Disable async host/process/env resource detectors: they leave attributes
@@ -420,6 +430,9 @@ export async function startTelemetrySdk(
     // before the detectors settle (e.g. during HttpInstrumentation span creation).
     autoDetectResources: false,
     ...(textMapPropagator && { textMapPropagator }),
+    spanLimits: {
+      attributeValueLengthLimit: spanAttributeValueLengthLimit,
+    },
     spanProcessors: spanExporter
       ? [new SessionIdSpanProcessor(), new BatchSpanProcessor(spanExporter)]
       : [],
