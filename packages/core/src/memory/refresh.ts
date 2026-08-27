@@ -8,7 +8,7 @@ import * as path from 'node:path';
 import type { Config } from '../config/config.js';
 import { ToolNames, canonicalToolName } from '../tools/tool-names.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
-import { getAllGeminiMdFilenames } from '../utils/memory-constants.js';
+import { getAllMemoryFilenames } from '../utils/memory-constants.js';
 import { isAllowedMemoryPath } from './memory-scoped-agent-config.js';
 import {
   rebuildManagedAutoMemoryIndex,
@@ -93,7 +93,7 @@ export function didWriteProjectContextFile(
   projectRoot: string,
 ): boolean {
   const contextFilePaths = new Set(
-    getAllGeminiMdFilenames()
+    getAllMemoryFilenames()
       .map((name) => name.trim())
       .filter((name) => name.length > 0)
       .map((name) => path.resolve(projectRoot, name)),

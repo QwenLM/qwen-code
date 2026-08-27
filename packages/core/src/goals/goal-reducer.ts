@@ -46,6 +46,8 @@ export interface GoalTurnFinishedTransition {
   lastReason?: string;
   /** Tokens billed to the turn that just finished. */
   tokensUsed?: number;
+  /** Set when the finishing turn was the spend window's wind-down hand-off. */
+  windDownTurnId?: string;
 }
 
 export class GoalConflictError extends Error {
@@ -213,6 +215,9 @@ export function reduceGoalTurnFinished(
     ...(transition.lastReason === undefined
       ? {}
       : { lastReason: transition.lastReason }),
+    ...(transition.windDownTurnId === undefined
+      ? {}
+      : { windDownTurnId: transition.windDownTurnId }),
   });
 }
 
@@ -454,9 +459,10 @@ function rearmedTokenBudget(
   if (grant === undefined || !isGoalTokenBudgetSpent(current)) {
     return {};
   }
+  // A new window gets its own wind-down: the marker belongs to the old one.
   return Number.isFinite(grant)
-    ? { tokenBudget: current.tokensUsed + grant }
-    : { tokenBudget: undefined };
+    ? { tokenBudget: current.tokensUsed + grant, windDownTurnId: undefined }
+    : { tokenBudget: undefined, windDownTurnId: undefined };
 }
 
 function transitionGoal(
@@ -472,6 +478,9 @@ function transitionGoal(
   };
   if ('tokenBudget' in changes && changes.tokenBudget === undefined) {
     delete transitioned.tokenBudget;
+  }
+  if ('windDownTurnId' in changes && changes.windDownTurnId === undefined) {
+    delete transitioned.windDownTurnId;
   }
   return transitioned;
 }
@@ -517,6 +526,7 @@ function parseGoalRecord(value: unknown): GoalRecord | undefined {
       'activeTimeMs',
       'tokensUsed',
       'tokenBudget',
+      'windDownTurnId',
       'createdAt',
       'updatedAt',
       'evidenceCheckpoint',
@@ -538,6 +548,9 @@ function parseGoalRecord(value: unknown): GoalRecord | undefined {
       !isNonNegativeNumber(value['tokensUsed'])) ||
     (value['tokenBudget'] !== undefined &&
       !isNonNegativeNumber(value['tokenBudget'])) ||
+    (value['windDownTurnId'] !== undefined &&
+      (typeof value['windDownTurnId'] !== 'string' ||
+        !value['windDownTurnId'])) ||
     !isFiniteNumber(value['createdAt']) ||
     !isFiniteNumber(value['updatedAt']) ||
     !isGoalEvidenceCheckpoint(value['evidenceCheckpoint']) ||
@@ -572,6 +585,9 @@ function parseGoalRecord(value: unknown): GoalRecord | undefined {
     ...(value['tokenBudget'] === undefined
       ? {}
       : { tokenBudget: value['tokenBudget'] }),
+    ...(value['windDownTurnId'] === undefined
+      ? {}
+      : { windDownTurnId: value['windDownTurnId'] }),
     createdAt: value['createdAt'],
     updatedAt: value['updatedAt'],
     ...(value['evidenceCheckpoint'] === undefined

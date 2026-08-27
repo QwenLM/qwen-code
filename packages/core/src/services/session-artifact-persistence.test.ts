@@ -1093,6 +1093,8 @@ describe('session artifact persistence records', () => {
             metadata: {
               'qwen.workspace.sha256': 'not-a-sha',
               'qwen.workspace.mtimeMs': '123',
+              'qwen.workspace.sizeBytes': -1,
+              'qwen.published.sha256': 'not-a-sha',
               keep: true,
             },
           },

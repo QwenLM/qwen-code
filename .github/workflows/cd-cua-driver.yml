@@ -80,6 +80,12 @@ jobs:
             exit 1
           fi
 
+          DRIVER_VERSION=$(tr -d '[:space:]' < packages/cua-driver/rust/VERSION)
+          if [[ "$DRIVER_VERSION" != "$VERSION" ]]; then
+            echo "::error::Release version $VERSION does not match driver version $DRIVER_VERSION"
+            exit 1
+          fi
+
           SDK_NAME=$(node -p "require('./packages/cua-driver/typescript/package.json').name")
           SDK_VERSION=$(node -p "require('./packages/cua-driver/typescript/package.json').version")
           if [[ "$SDK_NAME" != "@qwen-code/cua-sdk" ]]; then

@@ -454,9 +454,9 @@
   --streaming-label-color: #b794f4;
   --agent-logo-gradient: linear-gradient(
     90deg,
-    #4796e4 0%,
-    #847ace 52%,
-    #c3677f 100%
+    #5b8def 0%,
+    #6d44e8 55%,
+    #a78bfa 100%
   );
   --subtle-bg: rgba(255, 255, 255, 0.04);
   --subtle-bg-strong: rgba(255, 255, 255, 0.06);
@@ -528,9 +528,9 @@
   --streaming-label-color: #7b4ab8;
   --agent-logo-gradient: linear-gradient(
     90deg,
-    #0b66c3 0%,
-    #7357b8 52%,
-    #bd4f67 100%
+    #2563eb 0%,
+    #6d44e8 55%,
+    #7c3aed 100%
   );
   --subtle-bg: rgba(32, 31, 25, 0.05);
   --subtle-bg-strong: rgba(32, 31, 25, 0.08);
@@ -1195,4 +1195,24 @@
 
 .queuedHint {
   display: none;
+}
+
+.tokenUsageHeaderButton {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted-foreground);
+  cursor: pointer;
+}
+
+.tokenUsageHeaderButton:hover,
+.tokenUsageHeaderButton:focus-visible {
+  color: var(--foreground);
+  background: color-mix(in srgb, var(--foreground) 8%, transparent);
 }

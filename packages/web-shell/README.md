@@ -246,6 +246,15 @@ const projection = projectChatRecordsToDaemonTranscript(records);
 命令名后必须是空白或输入结束，因此 `/usr/local/bin/tool` 等绝对路径不会触发
 回调。如果回调抛出异常，Web Shell 会报告错误并继续执行默认命令流程。
 
+嵌入宿主只展示普通任务会话时，可以隐藏 Sidebar 的“任务 / 频道”来源切换：
+
+```tsx
+<WebShellWithProviders sidebar={{ showSessionSourceSwitch: false }} />
+```
+
+隐藏后，Sidebar 的会话目录固定查询 `sourceType: "default"`；独立 WebShell 和未配置
+该选项的宿主仍默认展示来源切换。
+
 锁定工作区时，可以自定义 Sidebar 文件夹行的内容：
 
 ```tsx
