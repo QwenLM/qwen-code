@@ -9,15 +9,11 @@
  * can persist a ghost member in config.json.
  */
 
-import * as fs from 'node:fs/promises';
-import * as path from 'node:path';
-import * as os from 'node:os';
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { TeamManager } from './TeamManager.js';
 import type { TeamFile } from './types.js';
 import { formatAgentId, readTeamFile } from './teamHelpers.js';
 import * as teamHelpers from './teamHelpers.js';
-import { FakeBackend } from './test-utils/fake-backend.js';
+import { TeamCoordinationHarness } from './test-utils/coordination-harness.js';
 import { Storage } from '../../config/storage.js';
 
 vi.mock('../../config/storage.js', async (importOriginal) => {
@@ -61,32 +57,25 @@ function createDeferred<T>(): Deferred<T> {
 }
 
 describe('TeamManager ghost member regression (#10208)', () => {
-  let tmpDir: string;
+  let harness: TeamCoordinationHarness | undefined;
 
   afterEach(async () => {
-    if (tmpDir) {
-      await fs.rm(tmpDir, { recursive: true, force: true });
-    }
+    await harness?.cleanup();
+    harness = undefined;
     vi.restoreAllMocks();
   });
 
+  async function createHarness(): Promise<TeamCoordinationHarness> {
+    const h = await TeamCoordinationHarness.create();
+    setMockDir(h.tmpDir);
+    harness = h;
+    return h;
+  }
+
   it('does not persist a failed concurrent spawn in config.json', async () => {
-    tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'ghost-member-'));
-    setMockDir(tmpDir);
-
-    const teamName = 'test-team';
-    const teamDir = path.join(tmpDir, 'teams', teamName);
-    await fs.mkdir(teamDir, { recursive: true });
-
-    const teamFile: TeamFile = {
-      name: teamName,
-      createdAt: Date.now(),
-      leadAgentId: 'leader@test-team',
-      members: [],
-    };
-
-    const backend = new FakeBackend();
-    await backend.init();
+    const h = await createHarness();
+    const teamName = h.teamName;
+    const backend = h.backend;
 
     // Controlled spawn: call original synchronously so the agent is
     // created in the backend map, but defer the promise so we control
@@ -110,11 +99,15 @@ describe('TeamManager ghost member regression (#10208)', () => {
       throw new Error(`Unexpected agent: ${agentId}`);
     };
 
-    const manager = new TeamManager(backend, teamFile);
-
     // Start two concurrent spawns.
-    const spawnA = manager.spawnTeammate({ name: 'alpha', cwd: tmpDir });
-    const spawnB = manager.spawnTeammate({ name: 'beta', cwd: tmpDir });
+    const spawnA = h.teamManager.spawnTeammate({
+      name: 'alpha',
+      cwd: h.tmpDir,
+    });
+    const spawnB = h.teamManager.spawnTeammate({
+      name: 'beta',
+      cwd: h.tmpDir,
+    });
 
     // Let both spawnAgent calls start (agents created in backend map).
     await new Promise((r) => setTimeout(r, 50));
@@ -136,63 +129,29 @@ describe('TeamManager ghost member regression (#10208)', () => {
     expect(persistedNames).toContain('alpha');
     // Bug: B should NOT be in the persisted file after failed spawn.
     expect(persistedNames).not.toContain('beta');
-
-    await manager.cleanup();
   });
 
   it('preserves both members when concurrent spawns both succeed', async () => {
-    tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'ghost-member-'));
-    setMockDir(tmpDir);
-
-    const teamName = 'test-team';
-    const teamDir = path.join(tmpDir, 'teams', teamName);
-    await fs.mkdir(teamDir, { recursive: true });
-
-    const teamFile: TeamFile = {
-      name: teamName,
-      createdAt: Date.now(),
-      leadAgentId: 'leader@test-team',
-      members: [],
-    };
-
-    const backend = new FakeBackend();
-    await backend.init();
-
-    const manager = new TeamManager(backend, teamFile);
+    const h = await createHarness();
 
     // Both spawns succeed concurrently.
     await Promise.all([
-      manager.spawnTeammate({ name: 'alpha', cwd: tmpDir }),
-      manager.spawnTeammate({ name: 'beta', cwd: tmpDir }),
+      h.teamManager.spawnTeammate({ name: 'alpha', cwd: h.tmpDir }),
+      h.teamManager.spawnTeammate({ name: 'beta', cwd: h.tmpDir }),
     ]);
 
-    const persisted = await readTeamFile(teamName);
+    const persisted = await readTeamFile(h.teamName);
     expect(persisted).toBeDefined();
     const persistedNames = persisted!.members.map((m) => m.name);
     expect(persistedNames).toContain('alpha');
     expect(persistedNames).toContain('beta');
     expect(persisted!.members).toHaveLength(2);
-
-    await manager.cleanup();
   });
 
   it('keeps the roster ghost-free when a slow success write lands last (write serialization)', async () => {
-    tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'ghost-member-'));
-    setMockDir(tmpDir);
-
-    const teamName = 'test-team';
-    const teamDir = path.join(tmpDir, 'teams', teamName);
-    await fs.mkdir(teamDir, { recursive: true });
-
-    const teamFile: TeamFile = {
-      name: teamName,
-      createdAt: Date.now(),
-      leadAgentId: 'leader@test-team',
-      members: [],
-    };
-
-    const backend = new FakeBackend();
-    await backend.init();
+    const h = await createHarness();
+    const teamName = h.teamName;
+    const backend = h.backend;
 
     const deferredA = createDeferred<void>();
     const deferredB = createDeferred<void>();
@@ -235,10 +194,14 @@ describe('TeamManager ghost member regression (#10208)', () => {
       },
     );
 
-    const manager = new TeamManager(backend, teamFile);
-
-    const spawnA = manager.spawnTeammate({ name: 'alpha', cwd: tmpDir });
-    const spawnB = manager.spawnTeammate({ name: 'beta', cwd: tmpDir });
+    const spawnA = h.teamManager.spawnTeammate({
+      name: 'alpha',
+      cwd: h.tmpDir,
+    });
+    const spawnB = h.teamManager.spawnTeammate({
+      name: 'beta',
+      cwd: h.tmpDir,
+    });
 
     // Let both spawnAgent calls start (agents created in backend map).
     await new Promise((r) => setTimeout(r, 50));
@@ -263,27 +226,12 @@ describe('TeamManager ghost member regression (#10208)', () => {
     const persistedNames = persisted!.members.map((m) => m.name);
     expect(persistedNames).toContain('alpha');
     expect(persistedNames).not.toContain('beta');
-
-    await manager.cleanup();
   });
 
   it('still rejects with the original spawn error when the compensating write fails', async () => {
-    tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'ghost-member-'));
-    setMockDir(tmpDir);
-
-    const teamName = 'test-team';
-    const teamDir = path.join(tmpDir, 'teams', teamName);
-    await fs.mkdir(teamDir, { recursive: true });
-
-    const teamFile: TeamFile = {
-      name: teamName,
-      createdAt: Date.now(),
-      leadAgentId: 'leader@test-team',
-      members: [],
-    };
-
-    const backend = new FakeBackend();
-    await backend.init();
+    const h = await createHarness();
+    const teamName = h.teamName;
+    const backend = h.backend;
 
     const deferredB = createDeferred<void>();
     const originalSpawnAgent = backend.spawnAgent.bind(backend);
@@ -299,17 +247,18 @@ describe('TeamManager ghost member regression (#10208)', () => {
       return originalSpawnAgent(config);
     };
 
-    const manager = new TeamManager(backend, teamFile);
-
     // A succeeds; its success write lands before we arm the spy.
-    await manager.spawnTeammate({ name: 'alpha', cwd: tmpDir });
+    await h.teamManager.spawnTeammate({ name: 'alpha', cwd: h.tmpDir });
 
     // Make the next roster write (B's compensating write) fail.
     const writeSpy = vi
       .spyOn(teamHelpers, 'writeTeamFile')
       .mockRejectedValueOnce(new Error('ENOSPC: no space left on device'));
 
-    const spawnB = manager.spawnTeammate({ name: 'beta', cwd: tmpDir });
+    const spawnB = h.teamManager.spawnTeammate({
+      name: 'beta',
+      cwd: h.tmpDir,
+    });
     await new Promise((r) => setTimeout(r, 50));
     deferredB.reject(new Error('spawn failed'));
 
@@ -318,12 +267,10 @@ describe('TeamManager ghost member regression (#10208)', () => {
     expect(writeSpy).toHaveBeenCalledTimes(1);
 
     // ...and beta must be rolled back from the in-memory roster.
-    const inMemory = (manager as unknown as { teamFile: TeamFile }).teamFile;
+    const inMemory = (h.teamManager as unknown as { teamFile: TeamFile })
+      .teamFile;
     const inMemoryNames = inMemory.members.map((m) => m.name);
     expect(inMemoryNames).toContain('alpha');
     expect(inMemoryNames).not.toContain('beta');
-
-    writeSpy.mockRestore();
-    await manager.cleanup();
   });
 });
