@@ -428,6 +428,7 @@ describe('release workflow', () => {
       const base = mkdtempSync(join(tmpdir(), 'release-wipe-dots-'));
       const workspace = join(base, 'workspace');
       mkdirSync(workspace);
+      mkdirSync(join(base, 'sub'));
       writeFileSync(join(workspace, 'leftover.txt'), 'stale');
       try {
         const env = {
