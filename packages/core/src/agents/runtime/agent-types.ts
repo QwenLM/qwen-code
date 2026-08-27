@@ -231,6 +231,25 @@ export interface AgentMessage {
 }
 
 /**
+ * The last model-visible answer in a message history, or undefined
+ * when there is none. Scans most-recent-first; the first non-empty,
+ * non-thought assistant message wins. Shared by the team pre-attach
+ * recovery (TeamManager) and the arena final-text fallback
+ * (ArenaManager) so both apply the same selection rule.
+ */
+export function lastVisibleAnswer(
+  messages: readonly AgentMessage[],
+): string | undefined {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const message = messages[i]!;
+    if (message.role !== 'assistant' || message.thought) continue;
+    const text = message.content.trim();
+    if (text) return text;
+  }
+  return undefined;
+}
+
+/**
  * Snapshot of in-progress streaming state for UI mid-switch handoff.
  * Returned by AgentInteractive.getInProgressStream().
  */

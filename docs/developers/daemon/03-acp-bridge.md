@@ -184,11 +184,11 @@ sequenceDiagram
 
 ## Dependencies
 
-| Upstream                                                                                     | Downstream                                     |
-| -------------------------------------------------------------------------------------------- | ---------------------------------------------- |
-| `@agentclientprotocol/sdk` — `ClientSideConnection`, `PROTOCOL_VERSION`, ACP types           | `packages/cli/src/serve/` (the daemon)         |
-| `@qwen-code/qwen-code-core` — `ApprovalMode`, `TrustGateError`, `getCurrentGeminiMdFilename` | `packages/channels/base/` (planned, F4)        |
-| `node:crypto`, `node:fs`, `node:path`                                                        | `packages/vscode-ide-companion/` (planned, F4) |
+| Upstream                                                                           | Downstream                                     |
+| ---------------------------------------------------------------------------------- | ---------------------------------------------- |
+| `@agentclientprotocol/sdk` — `ClientSideConnection`, `PROTOCOL_VERSION`, ACP types | `packages/cli/src/serve/` (the daemon)         |
+| `@qwen-code/qwen-code-core` — `ApprovalMode`, `TrustGateError`                     | `packages/channels/base/` (planned, F4)        |
+| `node:crypto`, `node:fs`, `node:path`                                              | `packages/vscode-ide-companion/` (planned, F4) |
 
 ## Configuration
 
@@ -208,7 +208,6 @@ sequenceDiagram
 | `childEnvOverrides`                           | `{}`                                               | Per-handle env additions / scrubs for the ACP child.                                                                                                         |
 | `externalToolGuard`                           | (none)                                             | Optional handler for the private child-to-parent pre-execution decision. The bridge accepts it only from the owning channel for the currently active Prompt. |
 | `persistApprovalMode`, `persistDisabledTools` | —                                                  | Settings-write hooks for the Wave 4 mutation routes.                                                                                                         |
-| `contextFilename`                             | from `settings.json`'s `context.fileName`          | Overrides `getCurrentGeminiMdFilename`.                                                                                                                      |
 | `statusProvider`                              | (none)                                             | Daemon-host preflight cells (`DaemonStatusProvider`).                                                                                                        |
 | `delegateReadTextFileToClient`                | `true`                                             | Set `false` only for same-host runtimes so every child `FileSystemService.readTextFile` consumer uses the regular CLI filesystem service.                    |
 | `fileSystem`                                  | (none)                                             | `BridgeFileSystem` adapter for ACP `readTextFile` / `writeTextFile`.                                                                                         |
