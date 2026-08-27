@@ -9,6 +9,7 @@ import {
   type WebShellCustomization,
 } from '../customization';
 import type { Message } from '../adapters/types';
+import { summaryRunId } from './summaryRunId';
 
 vi.mock('../WebShellContexts', async () => {
   const { createContext } = await import('react');
@@ -243,7 +244,7 @@ describe('MessageItem tool group spacing', () => {
     const synthetic = render(
       <I18nProvider language="en">
         <CompactModeContext.Provider value={true}>
-          {item(toolMsg('summary-agent-1'))}
+          {item(toolMsg(summaryRunId('agent-1')))}
         </CompactModeContext.Provider>
       </I18nProvider>,
     );
