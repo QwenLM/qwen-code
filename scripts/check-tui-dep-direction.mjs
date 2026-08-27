@@ -24,10 +24,11 @@
  *
  * Detection parses each file with the TypeScript compiler (already a repo
  * devDependency) and walks ImportDeclaration / ExportDeclaration / dynamic
- * import() / require() / vi.mock() / import-type (type X = import("..."))
- * nodes, accepting string literals and interpolation-free template
- * literals as specifiers, so comments, strings, regex literals and
- * interpolated templates cannot mask or fake an import.
+ * import() / require() / vi.mock() / import-type (type X = import("...")) /
+ * import-equals (import x = require("...")) / require.resolve() /
+ * import.meta.resolve() nodes, accepting string literals and
+ * interpolation-free template literals as specifiers, so comments, strings,
+ * regex literals and interpolated templates cannot mask or fake an import.
  */
 
 import { lstatSync, readdirSync, readFileSync, realpathSync } from 'node:fs';
@@ -130,8 +131,14 @@ function symlinkedPathComponents(root, anchor = repoRoot) {
  * interpolation-free template literals (which the runtime treats
  * identically as module names); computed or interpolated ones (e.g.
  * `import(variable)`) are skipped because no static specifier exists to
- * classify. Import-type queries (`type X = import("...").Y`) count too —
- * they still record a static framework dependency at the type level.
+ * classify. Classified forms: import / export-from declarations, dynamic
+ * `import()`, `require()`, `vi.mock()`, import-type queries
+ * (`type X = import("...").Y`), import-equals (`import x = require("...")`,
+ * still a static framework reference), and module-resolution probes
+ * (`require.resolve("...")` / `import.meta.resolve("...")`, which name a
+ * framework package even without loading it). Known limitation: aliasing
+ * the dynamic-import operator (`const i = import; i("...")`) defeats
+ * detection — that is data-flow obfuscation, visible in review.
  */
 function findImports(source, fileName = 'module.ts') {
   const sourceFile = ts.createSourceFile(
@@ -170,6 +177,16 @@ function findImports(source, fileName = 'module.ts') {
       ts.isStringLiteral(node.moduleSpecifier)
     ) {
       record('export-from', node, node.moduleSpecifier.text);
+    } else if (ts.isImportEqualsDeclaration(node)) {
+      // `import x = require("...")` (also with an export modifier) still
+      // names a module statically via its external module reference.
+      const reference = node.moduleReference;
+      const spec = ts.isExternalModuleReference(reference)
+        ? staticSpecifier(reference.expression)
+        : undefined;
+      if (spec !== undefined) {
+        record('import-equals', node, spec);
+      }
     } else if (ts.isImportTypeNode(node)) {
       const argument = node.argument;
       const spec = ts.isLiteralTypeNode(argument)
@@ -193,12 +210,28 @@ function findImports(source, fileName = 'module.ts') {
         record('require', node, spec);
       } else if (
         ts.isPropertyAccessExpression(node.expression) &&
-        ts.isIdentifier(node.expression.expression) &&
-        node.expression.expression.text === 'vi' &&
-        node.expression.name.text === 'mock' &&
         spec !== undefined
       ) {
-        record('vi.mock', node, spec);
+        const callee = node.expression.expression;
+        if (
+          ts.isIdentifier(callee) &&
+          callee.text === 'require' &&
+          node.expression.name.text === 'resolve'
+        ) {
+          record('require.resolve', node, spec);
+        } else if (
+          ts.isMetaProperty(callee) &&
+          callee.keywordToken === ts.SyntaxKind.ImportKeyword &&
+          node.expression.name.text === 'resolve'
+        ) {
+          record('import.meta.resolve', node, spec);
+        } else if (
+          ts.isIdentifier(callee) &&
+          callee.text === 'vi' &&
+          node.expression.name.text === 'mock'
+        ) {
+          record('vi.mock', node, spec);
+        }
       }
     }
     ts.forEachChild(node, visit);

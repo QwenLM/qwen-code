@@ -175,6 +175,37 @@ describe('findImports', () => {
     expect(specs(source)).toEqual([]);
   });
 
+  it('detects import-equals forms (import x = require("..."))', () => {
+    expect(
+      specs(
+        [
+          "import ink = require('ink');",
+          "export import reactDom = require('react-dom');",
+          'import wrapped = require(`solid-js`);',
+        ].join('\n'),
+      ),
+    ).toEqual([
+      'import-equals:ink',
+      'import-equals:react-dom',
+      'import-equals:solid-js',
+    ]);
+  });
+
+  it('ignores namespace import-equals (no module specifier)', () => {
+    expect(specs('import ns = Some.Namespace;\n')).toEqual([]);
+  });
+
+  it('detects module-resolution probes that name a framework', () => {
+    expect(
+      specs(
+        [
+          "const p = require.resolve('ink');",
+          "const m = import.meta.resolve('react');",
+        ].join('\n'),
+      ),
+    ).toEqual(['require.resolve:ink', 'import.meta.resolve:react']);
+  });
+
   it('reports line numbers matching the source', () => {
     const source = '\n\n' + "import { Box } from 'ink';";
     expect(findImports(source)[0].line).toBe(3);
