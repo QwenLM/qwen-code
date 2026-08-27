@@ -56,6 +56,9 @@ describe('waitForGoalRuntime', () => {
     await expect(waitForGoalRuntime({ getGoalRuntimeReady })).rejects.toBe(
       failure,
     );
+    await expect(
+      waitForGoalRuntime({ getGoalRuntimeReady }, { timeoutMs: 100 }),
+    ).rejects.toBe(failure);
   });
 
   it('does not hide malformed or unsupported persisted Goal state', async () => {
