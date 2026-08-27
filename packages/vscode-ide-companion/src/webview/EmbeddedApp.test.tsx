@@ -106,6 +106,14 @@ afterEach(() => {
 });
 
 describe('EmbeddedApp host wiring', () => {
+  it('attributes its sessions to the VS Code channel', async () => {
+    const props = await renderApp();
+    // The daemon is shared with the CLI and the browser Web Shell for this
+    // workspace; without a distinct source type the panel cannot tell its own
+    // conversations apart from theirs.
+    expect(props['sessionSourceType']).toBe('vscode');
+  });
+
   it('injects the active editor reference into prepared submissions', async () => {
     await renderApp();
 

@@ -4,11 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { Fragment, useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { DaemonSessionSummary } from '@qwen-code/sdk/daemon';
+import type { ChromeStrings } from '../strings.js';
 import { LoaderCircle, Pencil, Search, Trash2 } from 'lucide-react';
 
 interface SessionHistoryDropdownProps {
+  t: ChromeStrings;
   sessions: readonly DaemonSessionSummary[];
   currentSessionId?: string;
   searchQuery: string;
@@ -23,29 +25,33 @@ interface SessionHistoryDropdownProps {
   onClose: () => void;
 }
 
-function groupSessions(sessions: readonly DaemonSessionSummary[]) {
+function groupSessions(
+  sessions: readonly DaemonSessionSummary[],
+  t: ChromeStrings,
+) {
   const today = new Date();
   today.setHours(0, 0, 0, 0);
   const yesterday = new Date(today);
   yesterday.setDate(yesterday.getDate() - 1);
   const groups = new Map<string, DaemonSessionSummary[]>([
-    ['Today', []],
-    ['Yesterday', []],
-    ['This Week', []],
-    ['Older', []],
+    [t('group.today'), []],
+    [t('group.yesterday'), []],
+    [t('group.thisWeek'), []],
+    [t('group.older'), []],
   ]);
 
   for (const session of sessions) {
     const timestamp = session.updatedAt ?? session.createdAt;
     const date = timestamp ? new Date(timestamp) : undefined;
-    let label = 'Older';
+    let label = t('group.older');
     if (date && !Number.isNaN(date.getTime())) {
       const day = new Date(date);
       day.setHours(0, 0, 0, 0);
-      if (day.getTime() === today.getTime()) label = 'Today';
-      else if (day.getTime() === yesterday.getTime()) label = 'Yesterday';
-      else if (day.getTime() > today.getTime() - 7 * 86_400_000) {
-        label = 'This Week';
+      if (day.getTime() === today.getTime()) label = t('group.today');
+      else if (day.getTime() === yesterday.getTime()) {
+        label = t('group.yesterday');
+      } else if (day.getTime() > today.getTime() - 7 * 86_400_000) {
+        label = t('group.thisWeek');
       }
     }
     groups.get(label)?.push(session);
@@ -57,22 +63,45 @@ function groupSessions(sessions: readonly DaemonSessionSummary[]) {
   })).filter((group) => group.sessions.length > 0);
 }
 
-function timeAgo(timestamp?: string): string {
+function timeAgo(timestamp: string | undefined, t: ChromeStrings): string {
   if (!timestamp) return '';
   const elapsed = Date.now() - new Date(timestamp).getTime();
   if (!Number.isFinite(elapsed)) return '';
   const minutes = Math.floor(elapsed / 60_000);
-  if (minutes < 1) return 'now';
+  if (minutes < 1) return t('time.now');
   if (minutes < 60) return `${minutes}m`;
   const hours = Math.floor(elapsed / 3_600_000);
   if (hours < 24) return `${hours}h`;
   const days = Math.floor(elapsed / 86_400_000);
-  if (days === 1) return 'Yesterday';
+  if (days === 1) return t('group.yesterday');
   if (days < 7) return `${days}d`;
   return new Date(timestamp).toLocaleDateString();
 }
 
+/**
+ * Row actions are revealed by hover *or* keyboard focus. Gating them on a
+ * React `hovered` flag alone left rename and delete unreachable without a
+ * mouse, and unmounting the focused button on mouse-out drops focus to
+ * `<body>`; CSS keeps them mounted and reachable.
+ */
+const DROPDOWN_CSS = `
+  .qwen-session-row-actions { visibility: hidden; }
+  .qwen-session-row:hover .qwen-session-row-actions,
+  .qwen-session-row:focus-within .qwen-session-row-actions,
+  .qwen-session-row-actions[data-confirming] { visibility: visible; }
+  .qwen-session-row:focus-visible,
+  .qwen-session-search:focus-visible,
+  .qwen-session-icon-button:focus-visible {
+    outline: 1px solid var(--vscode-focusBorder);
+    outline-offset: -1px;
+  }
+  .qwen-session-icon-button:hover {
+    background: var(--vscode-toolbar-hoverBackground);
+  }
+`;
+
 export function SessionHistoryDropdown({
+  t,
   sessions,
   currentSessionId,
   searchQuery,
@@ -97,6 +126,11 @@ export function SessionHistoryDropdown({
   useEffect(() => {
     searchRef.current?.focus();
   }, []);
+
+  // A stale "Delete?" must not survive a change of what is on screen.
+  useEffect(() => {
+    setConfirmDeleteId(undefined);
+  }, [searchQuery]);
 
   useEffect(() => {
     if (renamingId) {
@@ -127,7 +161,7 @@ export function SessionHistoryDropdown({
     <>
       <button
         type="button"
-        aria-label="Close conversation history"
+        aria-label={t('session.closeHistory')}
         onClick={onClose}
         style={{
           position: 'absolute',
@@ -142,7 +176,7 @@ export function SessionHistoryDropdown({
         id="qwen-session-history"
         role="dialog"
         aria-modal="true"
-        aria-label="Past conversations"
+        aria-label={t('header.history')}
         style={{
           position: 'absolute',
           top: 30,
@@ -164,9 +198,32 @@ export function SessionHistoryDropdown({
         onClick={(event) => event.stopPropagation()}
         onKeyDown={(event) => {
           event.stopPropagation();
-          if (event.key === 'Escape') onClose();
+          if (event.key === 'Escape') {
+            onClose();
+            return;
+          }
+          // `aria-modal` promises the dialog contains focus; without a trap
+          // Tab walks into the transcript behind the overlay.
+          if (event.key !== 'Tab') return;
+          const focusable = Array.from(
+            event.currentTarget.querySelectorAll<HTMLElement>(
+              'input, button, [tabindex]:not([tabindex="-1"])',
+            ),
+          ).filter((element) => element.tabIndex !== -1);
+          if (focusable.length === 0) return;
+          const first = focusable[0];
+          const last = focusable[focusable.length - 1];
+          const active = document.activeElement;
+          if (event.shiftKey && active === first) {
+            event.preventDefault();
+            last.focus();
+          } else if (!event.shiftKey && active === last) {
+            event.preventDefault();
+            first.focus();
+          }
         }}
       >
+        <style>{DROPDOWN_CSS}</style>
         <div
           style={{
             display: 'flex',
@@ -181,8 +238,9 @@ export function SessionHistoryDropdown({
           <input
             ref={searchRef}
             type="text"
-            aria-label="Search conversations"
-            placeholder="Search sessions…"
+            className="qwen-session-search"
+            aria-label={t('session.searchLabel')}
+            placeholder={t('session.searchPlaceholder')}
             value={searchQuery}
             onChange={(event) => onSearchChange(event.target.value)}
             onKeyDown={(event) => {
@@ -236,8 +294,13 @@ export function SessionHistoryDropdown({
 
         <div
           role="listbox"
-          aria-label="Conversations"
-          style={{ minWidth: 0, overflowX: 'hidden', overflowY: 'auto', padding: 6 }}
+          aria-label={t('session.listLabel')}
+          style={{
+            minWidth: 0,
+            overflowX: 'hidden',
+            overflowY: 'auto',
+            padding: 6,
+          }}
           onScroll={(event) => {
             const element = event.currentTarget;
             if (
@@ -250,9 +313,10 @@ export function SessionHistoryDropdown({
             }
           }}
         >
-          {groupSessions(filtered).map((group) => (
-            <Fragment key={group.label}>
+          {groupSessions(filtered, t).map((group) => (
+            <div role="group" aria-label={group.label} key={group.label}>
               <div
+                aria-hidden="true"
                 style={{
                   padding: '7px 8px 4px',
                   color: 'var(--vscode-descriptionForeground)',
@@ -270,14 +334,22 @@ export function SessionHistoryDropdown({
                   <div
                     key={session.sessionId}
                     role="option"
+                    className="qwen-session-row"
                     aria-selected={active}
                     tabIndex={renaming ? -1 : 0}
                     data-session-id={session.sessionId}
                     onMouseEnter={() => setHoveredId(session.sessionId)}
-                    onMouseLeave={() => setHoveredId(undefined)}
+                    onMouseLeave={() => {
+                      setHoveredId(undefined);
+                      // Don't leave a primed "Delete?" behind on a row the
+                      // pointer has left.
+                      setConfirmDeleteId((current) =>
+                        current === session.sessionId ? undefined : current,
+                      );
+                    }}
                     style={{
                       display: 'flex',
-                      minHeight: 31,
+                      minHeight: 26,
                       alignItems: 'center',
                       gap: 6,
                       padding: '4px 8px',
@@ -315,10 +387,13 @@ export function SessionHistoryDropdown({
                         return;
                       }
                       event.preventDefault();
+                      // Groups wrap rows, so walk up to the listbox — the
+                      // immediate parent only holds one date group.
                       const rows = Array.from(
-                        event.currentTarget.parentElement?.querySelectorAll<HTMLElement>(
-                          '[role="option"]',
-                        ) ?? [],
+                        event.currentTarget
+                          .closest('[role="listbox"]')
+                          ?.querySelectorAll<HTMLElement>('[role="option"]') ??
+                          [],
                       );
                       const index = rows.indexOf(event.currentTarget);
                       const nextIndex =
@@ -379,67 +454,74 @@ export function SessionHistoryDropdown({
                           fontWeight: active ? 600 : 400,
                         }}
                       >
-                        {session.displayName || 'Untitled'}
+                        {session.displayName || t('session.untitled')}
                       </span>
                     )}
 
-                    {!renaming &&
-                      (hovered || confirmDeleteId === session.sessionId) && (
-                        <span
-                          style={{
-                            display: 'inline-flex',
-                            alignItems: 'center',
-                            gap: 2,
+                    {!renaming && (
+                      <span
+                        className="qwen-session-row-actions"
+                        {...(confirmDeleteId === session.sessionId
+                          ? { 'data-confirming': '' }
+                          : {})}
+                        style={{
+                          display: 'inline-flex',
+                          alignItems: 'center',
+                          gap: 2,
+                        }}
+                      >
+                        <button
+                          type="button"
+                          className="qwen-session-icon-button"
+                          title={t('session.rename')}
+                          aria-label={t('session.renameLabel')}
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            cancelRenameRef.current = false;
+                            setRenamingId(session.sessionId);
+                            setRenameValue(session.displayName ?? '');
                           }}
+                          style={iconButtonStyle}
                         >
-                          <button
-                            type="button"
-                            title="Rename"
-                            aria-label="Rename conversation"
-                            onClick={(event) => {
-                              event.stopPropagation();
-                              cancelRenameRef.current = false;
-                              setRenamingId(session.sessionId);
-                              setRenameValue(session.displayName ?? '');
-                            }}
-                            style={iconButtonStyle}
-                          >
-                            <Pencil size={13} aria-hidden="true" />
-                          </button>
-                          {!active &&
-                            (confirmDeleteId === session.sessionId ? (
-                              <button
-                                type="button"
-                                onClick={(event) => {
-                                  event.stopPropagation();
-                                  setConfirmDeleteId(undefined);
-                                  void onDelete(session);
-                                }}
-                                style={{
-                                  ...iconButtonStyle,
-                                  width: 'auto',
-                                  padding: '0 5px',
-                                  color: 'var(--vscode-errorForeground)',
-                                }}
-                              >
-                                Delete?
-                              </button>
-                            ) : (
-                              <button
-                                type="button"
-                                title="Delete"
-                                aria-label="Delete conversation"
-                                onClick={(event) => {
-                                  event.stopPropagation();
-                                  setConfirmDeleteId(session.sessionId);
-                                }}
-                                style={iconButtonStyle}
-                              >
-                                <Trash2 size={13} aria-hidden="true" />
-                              </button>
-                            ))}
-                        </span>
-                      )}
+                          <Pencil size={13} aria-hidden="true" />
+                        </button>
+                        {!active &&
+                          (confirmDeleteId === session.sessionId ? (
+                            <button
+                              type="button"
+                              className="qwen-session-icon-button"
+                              aria-label={t('session.deleteConfirmLabel')}
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                setConfirmDeleteId(undefined);
+                                void onDelete(session);
+                              }}
+                              style={{
+                                ...iconButtonStyle,
+                                width: 'auto',
+                                padding: '0 5px',
+                                color: 'var(--vscode-errorForeground)',
+                              }}
+                            >
+                              {t('session.deleteConfirm')}
+                            </button>
+                          ) : (
+                            <button
+                              type="button"
+                              className="qwen-session-icon-button"
+                              title={t('session.delete')}
+                              aria-label={t('session.deleteLabel')}
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                setConfirmDeleteId(session.sessionId);
+                              }}
+                              style={iconButtonStyle}
+                            >
+                              <Trash2 size={13} aria-hidden="true" />
+                            </button>
+                          ))}
+                      </span>
+                    )}
                     {!renaming ? (
                       <span
                         style={{
@@ -448,13 +530,13 @@ export function SessionHistoryDropdown({
                           fontSize: 11,
                         }}
                       >
-                        {timeAgo(session.updatedAt ?? session.createdAt)}
+                        {timeAgo(session.updatedAt ?? session.createdAt, t)}
                       </span>
                     ) : null}
                   </div>
                 );
               })}
-            </Fragment>
+            </div>
           ))}
 
           {!loading && filtered.length === 0 && (
@@ -465,7 +547,7 @@ export function SessionHistoryDropdown({
                 color: 'var(--vscode-descriptionForeground)',
               }}
             >
-              {searchQuery ? 'No matching sessions' : 'No sessions available'}
+              {searchQuery ? t('session.emptyFiltered') : t('session.empty')}
             </div>
           )}
           {loading && (
@@ -485,7 +567,7 @@ export function SessionHistoryDropdown({
                 aria-hidden="true"
                 style={{ animation: 'qwen-vscode-spin 0.8s linear infinite' }}
               />
-              Loading…
+              {t('session.loading')}
             </div>
           )}
         </div>

@@ -24,6 +24,12 @@ import { useVSCode } from './hooks/useVSCode.js';
 import { QwenOnboarding } from './components/QwenOnboarding.js';
 import { SessionHistoryDropdown } from './components/SessionHistoryDropdown.js';
 import {
+  createChromeStrings,
+  readLanguage,
+  type ChromeStrings,
+} from './strings.js';
+import { VSCODE_SESSION_SOURCE_TYPE } from './sessionSource.js';
+import {
   findBlockByRowKey,
   findLastAssistantText,
   formatBlocksForCopyAll,
@@ -38,38 +44,41 @@ const COMPOSER_TOOLBAR_ACTIONS = [
   'voice',
 ] as const satisfies readonly ComposerToolbarAction[];
 
-const VSCODE_SLASH_COMMANDS = [
-  {
-    name: 'model',
-    description: 'Switch the active model',
-    completionLabel: 'Switch model...',
-    completionSection: 'Model',
-    completionPriority: -110,
-    autoSubmit: true,
-  },
-  {
-    name: 'auth',
-    description: 'Configure Coding Plan or API Key',
-    completionSection: 'Account',
-    completionPriority: -100,
-    autoSubmit: true,
-  },
-  {
-    name: 'account',
-    description: 'Show current account and authentication info',
-    completionLabel: 'Account',
-    completionSection: 'Account',
-    completionPriority: -100,
-    autoSubmit: true,
-  },
-  {
-    name: 'export',
-    description: 'Export the current conversation',
-    completionSection: 'Session',
-    completionPriority: -90,
-    subcommands: ['html', 'md', 'json', 'jsonl'],
-  },
-];
+/** Host-only slash entries. Built per language so the menu is not half-English. */
+function buildVsCodeSlashCommands(t: ChromeStrings) {
+  return [
+    {
+      name: 'model',
+      description: t('cmd.model.description'),
+      completionLabel: t('cmd.model.label'),
+      completionSection: t('cmd.section.model'),
+      completionPriority: -110,
+      autoSubmit: true,
+    },
+    {
+      name: 'auth',
+      description: t('cmd.auth.description'),
+      completionSection: t('cmd.section.account'),
+      completionPriority: -100,
+      autoSubmit: true,
+    },
+    {
+      name: 'account',
+      description: t('cmd.account.description'),
+      completionLabel: t('cmd.account.label'),
+      completionSection: t('cmd.section.account'),
+      completionPriority: -100,
+      autoSubmit: true,
+    },
+    {
+      name: 'export',
+      description: t('cmd.export.description'),
+      completionSection: t('cmd.section.session'),
+      completionPriority: -90,
+      subcommands: ['html', 'md', 'json', 'jsonl'],
+    },
+  ];
+}
 
 const VSCODE_HIDDEN_SLASH_COMMANDS = [
   'theme',
@@ -184,11 +193,6 @@ const VSCODE_EMBEDDED_CSS = `
 function readTheme(): WebShellTheme {
   const kind = document.body.getAttribute('data-vscode-theme-kind') ?? '';
   return /light/i.test(kind) ? 'light' : 'dark';
-}
-
-function readLanguage(): 'en' | 'zh-CN' {
-  const language = document.documentElement.lang || navigator.language;
-  return language.toLowerCase().startsWith('zh') ? 'zh-CN' : 'en';
 }
 
 interface RuntimeConfig {
@@ -364,6 +368,9 @@ function permissionDiffPreview(
 
 export function EmbeddedApp() {
   const vscode = useVSCode();
+  const language = useMemo(readLanguage, []);
+  const t = useMemo(() => createChromeStrings(language), [language]);
+  const slashCommands = useMemo(() => buildVsCodeSlashCommands(t), [t]);
   const [theme, setTheme] = useState<WebShellTheme>(readTheme);
   const initialRuntime = useMemo(readRuntimeConfig, []);
   const [runtime, setRuntime] = useState(initialRuntime);
@@ -377,7 +384,7 @@ export function EmbeddedApp() {
   const [insightReportPath, setInsightReportPath] = useState<string>();
   const [activeFile, setActiveFile] = useState<ActiveFileContext>();
   const [includeActiveFile, setIncludeActiveFile] = useState(true);
-  const [sessionTitle, setSessionTitle] = useState('New Session');
+  const [sessionTitle, setSessionTitle] = useState(() => t('session.new'));
   const [sessionHistoryOpen, setSessionHistoryOpen] = useState(false);
   const [sessionSearchQuery, setSessionSearchQuery] = useState('');
   const [sessions, setSessions] = useState<DaemonSessionSummary[]>([]);
@@ -428,6 +435,10 @@ export function EmbeddedApp() {
             pageSize: 20,
             cursor,
             archiveState: 'active',
+            // Only conversations started from VS Code. The daemon is shared
+            // with the CLI and the browser Web Shell for this workspace, so an
+            // unfiltered page lists sessions the user never opened here.
+            sourceType: VSCODE_SESSION_SOURCE_TYPE,
           });
         const pageSessions = Array.isArray(page.sessions) ? page.sessions : [];
         setSessions((current) => {
@@ -453,7 +464,7 @@ export function EmbeddedApp() {
         setSessionCursor(page.nextCursor);
       } catch (error) {
         setSessionListError(
-          error instanceof Error ? error.message : 'Failed to load sessions.',
+          error instanceof Error ? error.message : t('session.loadFailed'),
         );
       } finally {
         setSessionListLoading(false);
@@ -465,6 +476,7 @@ export function EmbeddedApp() {
       runtime?.workspaceCwd,
       sessionListLoading,
       sessionTitle,
+      t,
     ],
   );
 
@@ -644,9 +656,7 @@ export function EmbeddedApp() {
         const errorMessage = (message.data as { message?: unknown } | null)
           ?.message;
         setRuntimeError(
-          typeof errorMessage === 'string'
-            ? errorMessage
-            : 'Qwen Code failed to start.',
+          typeof errorMessage === 'string' ? errorMessage : t('boot.failed'),
         );
       } else if (message.type === 'error') {
         const text = (message.data as { message?: unknown } | null)?.message;
@@ -672,7 +682,7 @@ export function EmbeddedApp() {
         setAuthConnecting(false);
         setAuthError(undefined);
         if (message.type === 'authSuccess') {
-          setHostNotice({ tone: 'info', text: 'Signed in successfully.' });
+          setHostNotice({ tone: 'info', text: t('auth.signedIn') });
         }
       } else if (message.type === 'authCancelled') {
         setAuthenticated(false);
@@ -692,7 +702,7 @@ export function EmbeddedApp() {
             ? data.message
             : typeof data?.error === 'string'
               ? data.error
-              : 'Failed to connect to Qwen Code.';
+              : t('auth.failed');
         setAuthenticated(false);
         setAuthConnecting(false);
         setAuthError(text);
@@ -805,7 +815,7 @@ export function EmbeddedApp() {
     window.addEventListener('message', receiveBootstrap);
     vscode.postMessage({ type: 'webShellReady', data: {} });
     return () => window.removeEventListener('message', receiveBootstrap);
-  }, [clearInsight, closeOpenPermissionDiffs, updateTranscript, vscode]);
+  }, [clearInsight, closeOpenPermissionDiffs, t, updateTranscript, vscode]);
 
   if (!runtime) {
     return (
@@ -834,7 +844,7 @@ export function EmbeddedApp() {
             />
           </>
         )}
-        <span>{runtimeError ?? 'Starting Qwen Code...'}</span>
+        <span>{runtimeError ?? t('boot.starting')}</span>
       </div>
     );
   }
@@ -847,6 +857,7 @@ export function EmbeddedApp() {
       <style>{VSCODE_EMBEDDED_CSS}</style>
       {sessionHistoryOpen && (
         <SessionHistoryDropdown
+          t={t}
           sessions={sessions}
           currentSessionId={runtime.sessionId}
           searchQuery={sessionSearchQuery}
@@ -864,7 +875,7 @@ export function EmbeddedApp() {
             setEditingMessage(undefined);
             composerRef.current?.clear({ text: true, tags: true });
             setSwitchingSessionId(session.sessionId);
-            setSessionTitle(session.displayName || 'Past Conversations');
+            setSessionTitle(session.displayName || t('session.past'));
             setRuntime((current) =>
               current && current.sessionId !== session.sessionId
                 ? { ...current, sessionId: session.sessionId }
@@ -901,7 +912,7 @@ export function EmbeddedApp() {
               setSessionListError(
                 error instanceof Error
                   ? error.message
-                  : 'Failed to rename session.',
+                  : t('session.renameFailed'),
               );
             }
           }}
@@ -928,7 +939,7 @@ export function EmbeddedApp() {
               setSessionListError(
                 error instanceof Error
                   ? error.message
-                  : 'Failed to delete session.',
+                  : t('session.deleteFailed'),
               );
             }
           }}
@@ -957,9 +968,7 @@ export function EmbeddedApp() {
             style={{ animation: 'qwen-vscode-spin 0.8s linear infinite' }}
           />
           <span>
-            {creatingSession
-              ? 'Starting new session…'
-              : 'Loading conversation…'}
+            {creatingSession ? t('session.creating') : t('session.switching')}
           </span>
         </div>
       )}
@@ -980,8 +989,8 @@ export function EmbeddedApp() {
           ref={historyButtonRef}
           type="button"
           className="qwen-vscode-header-button"
-          title="Past conversations"
-          aria-label="Past conversations"
+          title={t('header.history')}
+          aria-label={t('header.history')}
           aria-haspopup="dialog"
           aria-expanded={sessionHistoryOpen}
           aria-controls={
@@ -1026,8 +1035,8 @@ export function EmbeddedApp() {
         <button
           type="button"
           className="qwen-vscode-header-button"
-          title="New Session"
-          aria-label="New session"
+          title={t('header.newSession')}
+          aria-label={t('header.newSession')}
           disabled={Boolean(
             switchingSessionId || creatingSession || authenticated === false,
           )}
@@ -1052,12 +1061,12 @@ export function EmbeddedApp() {
             void createNewSession()
               .then((created) => {
                 if (created) {
-                  setSessionTitle('New Session');
+                  setSessionTitle(t('session.new'));
                   return;
                 }
                 setHostNotice({
                   tone: 'error',
-                  text: 'Failed to create a new session.',
+                  text: t('session.createFailed'),
                 });
               })
               .catch((error) => {
@@ -1066,7 +1075,7 @@ export function EmbeddedApp() {
                   text:
                     error instanceof Error
                       ? error.message
-                      : 'Failed to create a new session.',
+                      : t('session.createFailed'),
                 });
               })
               .finally(() => setCreatingSession(false));
@@ -1153,8 +1162,8 @@ export function EmbeddedApp() {
           )}
           <button
             type="button"
-            title="Dismiss"
-            aria-label="Dismiss"
+            title={t('notice.dismiss')}
+            aria-label={t('notice.dismiss')}
             onClick={() => setHostNotice(undefined)}
             style={{
               display: 'inline-flex',
@@ -1202,9 +1211,7 @@ export function EmbeddedApp() {
                   {insightProgress.stage}
                 </div>
                 <div
-                  title={
-                    insightProgress.detail ?? 'Processing your chat history…'
-                  }
+                  title={insightProgress.detail ?? t('insight.progressDetail')}
                   style={{
                     overflow: 'hidden',
                     color: 'var(--vscode-descriptionForeground)',
@@ -1212,7 +1219,7 @@ export function EmbeddedApp() {
                     whiteSpace: 'nowrap',
                   }}
                 >
-                  {insightProgress.detail ?? 'Processing your chat history…'}
+                  {insightProgress.detail ?? t('insight.progressDetail')}
                 </div>
               </div>
               <span
@@ -1237,7 +1244,7 @@ export function EmbeddedApp() {
                   whiteSpace: 'nowrap',
                 }}
               >
-                Insight report generated: {insightReportPath}
+                {t('insight.ready')} {insightReportPath}
               </span>
               <button
                 type="button"
@@ -1268,6 +1275,7 @@ export function EmbeddedApp() {
         <QwenOnboarding
           connecting={authConnecting}
           error={authError}
+          t={t}
           onGetStarted={() => {
             setAuthConnecting(true);
             setAuthError(undefined);
@@ -1284,7 +1292,8 @@ export function EmbeddedApp() {
           className="qwen-code-vscode-web-shell"
           style={SHELL_STYLE}
           theme={theme}
-          language={readLanguage()}
+          language={language}
+          sessionSourceType={VSCODE_SESSION_SOURCE_TYPE}
           shellRef={shellRef}
           header={{ items: [] }}
           onSessionIdChange={(sessionId) => {
@@ -1306,7 +1315,7 @@ export function EmbeddedApp() {
           }}
           onSessionInfoChange={({ sessionId, sessionName }) => {
             if (!switchingSessionId || sessionId === switchingSessionId) {
-              const title = sessionName || 'New Session';
+              const title = sessionName || t('session.new');
               setSessionTitle(title);
               if (runtime.hostKind === 'panel') {
                 vscode.postMessage({
@@ -1323,7 +1332,7 @@ export function EmbeddedApp() {
             setCreatingSession(false);
             setHostNotice({
               tone: 'error',
-              text: error.message || 'Failed to load the Qwen Code session.',
+              text: error.message || t('session.loadError'),
             });
           }}
           sidebar={false}
@@ -1332,7 +1341,7 @@ export function EmbeddedApp() {
           composerToolbarActions={COMPOSER_TOOLBAR_ACTIONS}
           compactComposerOverlays
           autoSubmitSlashCommands
-          additionalSlashCommands={VSCODE_SLASH_COMMANDS}
+          additionalSlashCommands={slashCommands}
           hiddenSlashCommands={[...VSCODE_HIDDEN_SLASH_COMMANDS]}
           onSlashCommand={({ command, input }) => {
             if (command === 'auth' || command === 'login') {
@@ -1372,16 +1381,14 @@ export function EmbeddedApp() {
           }
           onTranscriptChange={updateTranscript}
           composerPlaceholders={{
-            idle: 'Ask Qwen Code or @ a file',
+            idle: t('composer.placeholder'),
           }}
           composerRef={composerRef}
           prepareSubmit={async (submission) => {
             if (editingMessage) {
               const sessionId = submission.sessionId ?? runtime.sessionId;
               if (!daemonClient || !sessionId) {
-                throw new Error(
-                  'The message cannot be edited before the session is ready.',
-                );
+                throw new Error(t('composer.editUnavailable'));
               }
               const { snapshots } =
                 await daemonClient.getRewindSnapshots(sessionId);
@@ -1389,9 +1396,7 @@ export function EmbeddedApp() {
                 (entry) => entry.turnIndex === editingMessage.turnIndex,
               );
               if (!snapshot) {
-                throw new Error(
-                  'The original message can no longer be edited.',
-                );
+                throw new Error(t('composer.editExpired'));
               }
               await daemonClient.rewindSession(sessionId, snapshot.promptId, {
                 clientId: runtime.clientId,
@@ -1480,13 +1485,13 @@ export function EmbeddedApp() {
                     whiteSpace: 'nowrap',
                   }}
                 >
-                  Editing message
+                  {t('composer.editing')}
                 </span>
                 <button
                   type="button"
                   className="qwen-vscode-toolbar-button"
-                  title="Cancel editing"
-                  aria-label="Cancel editing"
+                  title={t('composer.cancelEditing')}
+                  aria-label={t('composer.cancelEditing')}
                   onClick={cancelMessageEditing}
                   style={{
                     display: 'inline-flex',
@@ -1515,8 +1520,8 @@ export function EmbeddedApp() {
                 <button
                   type="button"
                   className="qwen-vscode-toolbar-button"
-                  title="Add context"
-                  aria-label="Add context"
+                  title={t('composer.addContext')}
+                  aria-label={t('composer.addContext')}
                   disabled={disabled}
                   onClick={() =>
                     vscode.postMessage({ type: 'attachFile', data: {} })
@@ -1543,8 +1548,12 @@ export function EmbeddedApp() {
                   <button
                     type="button"
                     className="qwen-vscode-toolbar-button qwen-vscode-active-file"
-                    title={`${includeActiveFile ? 'Included' : 'Excluded'}: ${activeFile.filePath}`}
-                    aria-label={`${includeActiveFile ? 'Exclude' : 'Include'} active file context`}
+                    title={`${includeActiveFile ? t('context.included') : t('context.excluded')}: ${activeFile.filePath}`}
+                    aria-label={
+                      includeActiveFile
+                        ? t('context.exclude')
+                        : t('context.include')
+                    }
                     onClick={() => setIncludeActiveFile((current) => !current)}
                     style={{
                       display: 'inline-flex',
@@ -1624,12 +1633,12 @@ export function EmbeddedApp() {
               }}
             >
               <strong id="qwen-account-info-title" style={{ flex: 1 }}>
-                Account Information
+                {t('account.title')}
               </strong>
               <button
                 type="button"
-                title="Close"
-                aria-label="Close"
+                title={t('common.close')}
+                aria-label={t('common.close')}
                 onClick={() => setAccountInfo(undefined)}
                 style={{
                   display: 'inline-flex',
@@ -1663,7 +1672,7 @@ export function EmbeddedApp() {
                   <span
                     style={{ color: 'var(--vscode-descriptionForeground)' }}
                   >
-                    Error
+                    {t('account.error')}
                   </span>
                   <span style={{ color: 'var(--vscode-errorForeground)' }}>
                     {accountInfo.error}
@@ -1674,17 +1683,17 @@ export function EmbeddedApp() {
                   <span
                     style={{ color: 'var(--vscode-descriptionForeground)' }}
                   >
-                    Auth Method
+                    {t('account.authType')}
                   </span>
                   <span style={{ minWidth: 0, overflowWrap: 'anywhere' }}>
-                    {accountInfo.authType || 'Unknown'}
+                    {accountInfo.authType || t('account.unknown')}
                   </span>
                   {accountInfo.envKey && (
                     <>
                       <span
                         style={{ color: 'var(--vscode-descriptionForeground)' }}
                       >
-                        API Key Env
+                        {t('account.envKey')}
                       </span>
                       <span style={{ minWidth: 0, overflowWrap: 'anywhere' }}>
                         {accountInfo.envKey}
@@ -1696,7 +1705,7 @@ export function EmbeddedApp() {
                       <span
                         style={{ color: 'var(--vscode-descriptionForeground)' }}
                       >
-                        Base URL
+                        {t('account.baseUrl')}
                       </span>
                       <span style={{ minWidth: 0, overflowWrap: 'anywhere' }}>
                         {accountInfo.baseUrl}
@@ -1708,7 +1717,7 @@ export function EmbeddedApp() {
                       <span
                         style={{ color: 'var(--vscode-descriptionForeground)' }}
                       >
-                        Current Model
+                        {t('account.model')}
                       </span>
                       <span style={{ minWidth: 0, overflowWrap: 'anywhere' }}>
                         {accountInfo.modelId}

@@ -8,10 +8,7 @@ import { logger } from '../../utils/logger.js';
 import * as vscode from 'vscode';
 import { BaseMessageHandler } from './BaseMessageHandler.js';
 import { getFileName } from '../utils/webviewUtils.js';
-import {
-  closeDiffCommand,
-  showDiffCommand,
-} from '../../commands/index.js';
+import { closeDiffCommand, showDiffCommand } from '../../commands/index.js';
 import {
   findLeftGroupOfChatWebview,
   findRightGroupOfChatWebview,

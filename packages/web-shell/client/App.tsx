@@ -62,6 +62,7 @@ import {
   SESSION_MONITOR_TOOL_CORRELATION_FEATURE,
   SESSION_SIDE_TASK_FEATURE,
   SESSION_TRANSCRIPT_PAGINATION_FEATURE,
+  WEB_SHELL_SESSION_SOURCE_TYPE,
   WEB_SHELL_SIDE_TASK_SOURCE_TYPE,
 } from './constants/sessions';
 import { extractPendingPermission } from './adapters/transcriptAdapter';
@@ -1052,6 +1053,13 @@ export interface WebShellProps {
   /** Cycle the approval mode when an otherwise-unhandled Tab is pressed. */
   cycleModeOnTab?: boolean;
   /**
+   * Creator attribution recorded on sessions this shell creates, and the
+   * source filter embedded hosts use to list only their own sessions. Defaults
+   * to the browser Web Shell's `'default'`; the VS Code companion overrides it
+   * so its sessions stay distinguishable from CLI and browser ones.
+   */
+  sessionSourceType?: string;
+  /**
    * Main-composer copy by semantic state. Omitted or blank entries retain the
    * WebShell localized default; shell-mode and follow-up copy still wins.
    */
@@ -2031,6 +2039,7 @@ export function App({
   userMessageEditing = false,
   onUserMessageEditRequest,
   cycleModeOnTab = false,
+  sessionSourceType = WEB_SHELL_SESSION_SOURCE_TYPE,
   composerPlaceholders,
   compactThinking = false,
   collapseCompletedTurns = true,
@@ -5967,6 +5976,8 @@ export function App({
   const [currentMode, setCurrentMode] = useState('default');
   const currentModeRef = useRef(currentMode);
   currentModeRef.current = currentMode;
+  const sessionSourceTypeRef = useRef(sessionSourceType);
+  sessionSourceTypeRef.current = sessionSourceType;
   const setPendingMode = useCallback((modeId: string) => {
     currentModeRef.current = modeId;
     setCurrentMode(modeId);
@@ -6112,6 +6123,7 @@ export function App({
             gitModeIntentRef.current.mode === 'branch'
               ? { name: gitModeIntentRef.current.name }
               : undefined,
+          sessionSourceType: sessionSourceTypeRef.current,
           onSessionCreated: onSessionCreatedRef.current,
           onSessionAllocated: (sessionId) => {
             preparingSessionIdRef.current = sessionId;

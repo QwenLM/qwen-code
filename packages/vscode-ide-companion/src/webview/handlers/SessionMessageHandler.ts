@@ -732,9 +732,10 @@ export class SessionMessageHandler extends BaseMessageHandler {
           await this.agentManager.rewindSession(editTargetTurnIndex);
         editAcpHistorySnapshot = rewindResult?.historyBeforeRewind ?? null;
         editAcpMutationApplied = true;
-        const retainedConversation = await this.conversationStore.getConversation(
-          this.currentConversationId,
-        );
+        const retainedConversation =
+          await this.conversationStore.getConversation(
+            this.currentConversationId,
+          );
         this.sendToWebView({
           type: 'conversationRewound',
           data: {
@@ -776,10 +777,7 @@ export class SessionMessageHandler extends BaseMessageHandler {
     }
 
     // Generate title for first message, but only if it hasn't been set yet
-    if (
-      isFirstMessage &&
-      (!this.isTitleSet || editTargetTurnIndex === 0)
-    ) {
+    if (isFirstMessage && (!this.isTitleSet || editTargetTurnIndex === 0)) {
       this.sendToWebView({
         type: 'sessionTitleUpdated',
         data: {

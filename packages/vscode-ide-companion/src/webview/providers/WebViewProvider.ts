@@ -7,6 +7,7 @@
 import * as vscode from 'vscode';
 import { execFile } from 'child_process';
 import { existsSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import * as path from 'node:path';
 import { QwenAgentManager } from '../../services/qwenAgentManager.js';
 import { ConversationStore } from '../../services/conversationStore.js';
@@ -134,6 +135,12 @@ export class WebViewProvider {
   private agentManager: QwenAgentManager;
   private conversationStore: ConversationStore;
   private daemonProcess: QwenDaemonProcess;
+  /**
+   * Daemon client identity for this host. The daemon uses it to attribute
+   * session-scoped requests, so it has to stay stable across webview reloads
+   * (a reload re-runs the bootstrap) while staying distinct per chat host.
+   */
+  private readonly daemonClientId = `vscode-${randomUUID()}`;
   private disposables: vscode.Disposable[] = [];
   private agentInitialized = false; // Track if agent has been initialized
   private isSyncingToVSCode = false; // Guard to prevent config change loop
@@ -1961,6 +1968,7 @@ export class WebViewProvider {
           type: 'webShellBootstrap',
           data: {
             ...runtime,
+            clientId: this.daemonClientId,
             workspaceCwd,
             hostKind: this.isViewHost ? 'view' : 'panel',
             ...(restoredSessionId ? { sessionId: restoredSessionId } : {}),

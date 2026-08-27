@@ -7,10 +7,12 @@
 import type { CSSProperties } from 'react';
 // eslint-disable-next-line import/no-internal-modules -- bundle the extension icon into the webview
 import iconUrl from '../../../assets/icon.png';
+import type { ChromeStrings } from '../strings.js';
 
 interface QwenOnboardingProps {
   connecting: boolean;
   error?: string;
+  t: ChromeStrings;
   onGetStarted: () => void;
 }
 
@@ -31,6 +33,7 @@ const BUTTON_STYLE: CSSProperties = {
 export function QwenOnboarding({
   connecting,
   error,
+  t,
   onGetStarted,
 }: QwenOnboardingProps) {
   return (
@@ -64,7 +67,9 @@ export function QwenOnboarding({
           style={{ objectFit: 'contain' }}
         />
         <div>
-          <div style={{ fontSize: 17, fontWeight: 600 }}>Qwen Code</div>
+          <div style={{ fontSize: 17, fontWeight: 600 }}>
+            {t('onboarding.title')}
+          </div>
           <div
             style={{
               marginTop: 5,
@@ -73,7 +78,7 @@ export function QwenOnboarding({
               lineHeight: 1.5,
             }}
           >
-            Connect a model provider to start coding with Qwen.
+            {t('onboarding.subtitle')}
           </div>
         </div>
         <div
@@ -81,7 +86,8 @@ export function QwenOnboarding({
             boxSizing: 'border-box',
             width: '100%',
             padding: 14,
-            border: '1px solid var(--vscode-widget-border, var(--vscode-panel-border))',
+            border:
+              '1px solid var(--vscode-widget-border, var(--vscode-panel-border))',
             borderRadius: 6,
             background: 'var(--vscode-editorWidget-background)',
           }}
@@ -115,7 +121,7 @@ export function QwenOnboarding({
                 }}
               />
             )}
-            {connecting ? 'Connecting…' : 'Get Started'}
+            {connecting ? t('onboarding.connecting') : t('onboarding.cta')}
           </button>
           {error && (
             <div
@@ -139,8 +145,7 @@ export function QwenOnboarding({
             lineHeight: 1.45,
           }}
         >
-          Supports Coding Plan, ModelStudio API Key, and OpenAI-compatible
-          providers.
+          {t('onboarding.providers')}
         </div>
       </div>
     </div>
