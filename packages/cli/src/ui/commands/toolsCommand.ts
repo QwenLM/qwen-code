@@ -11,6 +11,7 @@ import {
 } from './types.js';
 import { MessageType, type HistoryItemToolsList } from '../types.js';
 import { t } from '../../i18n/index.js';
+import { ToolNames } from '@qwen-code/qwen-code-core';
 
 export const toolsCommand: SlashCommand = {
   name: 'tools',
@@ -56,6 +57,9 @@ export const toolsCommand: SlashCommand = {
         deferred: toolRegistry.isDeferredAndHidden(tool.name),
       })),
       showDescriptions: useShowDescriptions,
+      // Without `tool_search` an on-demand tool cannot be loaded at all, so
+      // the footnote below must not tell the user it will be.
+      toolSearchAvailable: !!toolRegistry.getTool(ToolNames.TOOL_SEARCH),
     };
 
     context.ui.addItem(toolsListItem, Date.now());

@@ -404,6 +404,12 @@ export type HistoryItemToolsList = HistoryItemBase & {
   type: 'tools_list';
   tools: ToolDefinition[];
   showDescriptions: boolean;
+  /**
+   * Whether `tool_search` is registered this session. When it is not, an
+   * on-demand tool has no loading path left, so the footnote must not promise
+   * one (#9827, #10075).
+   */
+  toolSearchAvailable?: boolean;
 };
 
 export type HistoryItemSkillsList = HistoryItemBase & {

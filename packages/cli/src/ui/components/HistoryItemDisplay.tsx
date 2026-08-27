@@ -435,6 +435,7 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
           contentWidth={contentWidth}
           tools={itemForDisplay.tools}
           showDescriptions={itemForDisplay.showDescriptions}
+          toolSearchAvailable={itemForDisplay.toolSearchAvailable}
         />
       )}
       {itemForDisplay.type === 'skills_list' && (
