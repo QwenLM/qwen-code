@@ -1002,28 +1002,6 @@ describe('Storage – cleanOrphanProjectDirs', () => {
     }
   });
 
-  it('holds the entry lock for the whole read of a fresh entry (R18-4)', async () => {
-    // Fresh entries have no orphan marker to renew, so the read claim
-    // takes the entry lock non-blockingly for the duration of the read:
-    // the shutdown deletion leg takes the same lock before rmSync and
-    // must be able to observe the reader.
-    const resumeStorage = new Storage(aliveCwd);
-    const entryName = path.basename(resumeStorage.getProjectDir());
-    writeSession(entryName, aliveCwd);
-    const lockDir = path.join(
-      baseDir,
-      'tmp',
-      'orphan-cleanup-locks',
-      `${entryName}.lock`,
-    );
-    let heldDuringRead = false;
-    await resumeStorage.runWithProjectDirReadClaim(async () => {
-      heldDuringRead = actualFs.existsSync(lockDir);
-    });
-    expect(heldDuringRead).toBe(true);
-    expect(actualFs.existsSync(lockDir)).toBe(false);
-  });
-
   it('treats an EPERM sidecar pid as live (R18-3)', async () => {
     const entry = 'eperm-sidecar-sess';
     writeSession(entry, aliveCwd);
@@ -1477,100 +1455,6 @@ describe('Storage – cleanOrphanProjectDirs', () => {
     expect(actualFs.existsSync(path.join(entry, '.qwen-orphan-since'))).toBe(
       false,
     );
-  });
-
-  describe('containsOnlySessionArtifacts', () => {
-    it('requires exact artifact names, not prefixes or suffixes (R9-2, R10-1)', () => {
-      const dir = actualFs.mkdtempSync(path.join(projectsDir, 'ownership-'));
-      actualFs.mkdirSync(path.join(dir, 'chats'));
-      actualFs.writeFileSync(path.join(dir, 'chats', 'sess-1.jsonl'), '');
-      expect(Storage.containsOnlySessionArtifacts(dir, 'sess-1')).toBe(true);
-      // A sibling session whose id extends ours (`sess-1.b`) shares the
-      // `sess-1.` prefix — a startsWith check would claim its files.
-      actualFs.writeFileSync(path.join(dir, 'chats', 'sess-1.b.jsonl'), '');
-      expect(Storage.containsOnlySessionArtifacts(dir, 'sess-1')).toBe(false);
-      actualFs.rmSync(path.join(dir, 'chats', 'sess-1.b.jsonl'));
-      actualFs.rmSync(path.join(dir, 'chats', 'sess-1.jsonl'));
-      // The reverse direction: our id is a strict suffix of a sibling's
-      // (`team-worker-1`) — an endsWith check would claim its files.
-      actualFs.writeFileSync(
-        path.join(dir, 'chats', 'team-worker-1.jsonl'),
-        '',
-      );
-      expect(Storage.containsOnlySessionArtifacts(dir, 'worker-1')).toBe(false);
-    });
-
-    it('treats the sweep orphan marker as bookkeeping, not foreign content (R13-3)', () => {
-      // Another session's sweep can mark a live session's entry; the
-      // shutdown leg must still pass this guard on exit. The marker is
-      // the sweep's own intermediate state — newestFileMtimeMs and
-      // countFiles skip it, so must this walker.
-      const dir = actualFs.mkdtempSync(path.join(projectsDir, 'marked-'));
-      actualFs.mkdirSync(path.join(dir, 'chats'));
-      actualFs.writeFileSync(path.join(dir, 'chats', 'sess-1.jsonl'), '');
-      actualFs.writeFileSync(
-        path.join(dir, '.qwen-orphan-since'),
-        String(Date.now()),
-      );
-      expect(Storage.containsOnlySessionArtifacts(dir, 'sess-1')).toBe(true);
-    });
-
-    it('accepts independent runtime claims only for the same session id', () => {
-      const dir = actualFs.mkdtempSync(path.join(projectsDir, 'claims-'));
-      const chatsDir = path.join(dir, 'chats');
-      actualFs.mkdirSync(chatsDir);
-      actualFs.writeFileSync(path.join(chatsDir, 'sess-1.jsonl'), '');
-      actualFs.writeFileSync(
-        path.join(chatsDir, 'sess-1.claim-token.runtime.json'),
-        JSON.stringify({ session_id: 'sess-1', pid: process.pid }),
-      );
-      expect(Storage.containsOnlySessionArtifacts(dir, 'sess-1')).toBe(true);
-
-      actualFs.writeFileSync(
-        path.join(chatsDir, 'foreign.claim-token.runtime.json'),
-        JSON.stringify({ session_id: 'foreign', pid: process.pid }),
-      );
-      expect(Storage.containsOnlySessionArtifacts(dir, 'sess-1')).toBe(false);
-    });
-
-    it('accepts the auto-memory scaffold left by extracted sessions (F1)', () => {
-      // Managed auto-memory is keyed by the same sanitized cwd as the
-      // snapshot entry, so every headless session that ran extraction
-      // leaves memory/ + meta.json + extract-cursor.json at the entry
-      // top level. Without accepting them the shutdown deletion leg
-      // never fires for exactly the scripted-usage sessions of issue
-      // #7906.
-      const dir = actualFs.mkdtempSync(path.join(projectsDir, 'memscaf-'));
-      actualFs.mkdirSync(path.join(dir, 'chats'));
-      actualFs.writeFileSync(path.join(dir, 'chats', 'sess-1.jsonl'), '');
-      actualFs.mkdirSync(path.join(dir, 'memory'));
-      actualFs.writeFileSync(path.join(dir, 'memory', 'preferences.md'), '');
-      actualFs.writeFileSync(path.join(dir, 'meta.json'), '{}');
-      actualFs.writeFileSync(path.join(dir, 'extract-cursor.json'), '{}');
-      expect(Storage.containsOnlySessionArtifacts(dir, 'sess-1')).toBe(true);
-
-      // The consolidation lock is NOT part of the accepted scaffold:
-      // it signals an in-flight or crashed dream, and the sweep
-      // fallback covers both.
-      actualFs.writeFileSync(path.join(dir, 'consolidation.lock'), '');
-      expect(Storage.containsOnlySessionArtifacts(dir, 'sess-1')).toBe(false);
-      actualFs.rmSync(path.join(dir, 'consolidation.lock'));
-
-      // Name-only matches are not enough: the scaffold names must
-      // carry the right file kind.
-      actualFs.rmSync(path.join(dir, 'meta.json'));
-      actualFs.mkdirSync(path.join(dir, 'meta.json'));
-      expect(Storage.containsOnlySessionArtifacts(dir, 'sess-1')).toBe(false);
-      actualFs.rmSync(path.join(dir, 'meta.json'), { recursive: true });
-      actualFs.rmSync(path.join(dir, 'memory'), { recursive: true });
-      actualFs.writeFileSync(path.join(dir, 'memory'), '');
-      expect(Storage.containsOnlySessionArtifacts(dir, 'sess-1')).toBe(false);
-      actualFs.rmSync(path.join(dir, 'memory'));
-
-      // Anything else foreign still fails the guard.
-      actualFs.writeFileSync(path.join(dir, 'other-session.txt'), '');
-      expect(Storage.containsOnlySessionArtifacts(dir, 'sess-1')).toBe(false);
-    });
   });
 
   it('keeps an entry reduced to subagent transcripts of a live cwd (R7-2)', async () => {

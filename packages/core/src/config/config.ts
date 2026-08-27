@@ -224,7 +224,7 @@ import {
   type ChatRecordingFailureListener,
 } from '../services/chatRecordingService.js';
 import { CHARS_PER_TOKEN } from '../services/tokenEstimation.js';
-import { isTempDirPath, sanitizeCwd } from '../utils/paths.js';
+import { sanitizeCwd } from '../utils/paths.js';
 import {
   claimRuntimeStatus,
   isRuntimeStatusActive,
@@ -2212,7 +2212,6 @@ export class Config {
   private readonly chatCompression: ChatCompressionSettings | undefined;
   private readonly autoCompactThreshold: number | undefined;
   private readonly interactive: boolean;
-  private readonly acpMode: boolean;
   private readonly trustedFolder: boolean | undefined;
   private readonly useRipgrep: boolean;
   private readonly useBuiltinRipgrep: boolean;
@@ -2514,7 +2513,6 @@ export class Config {
     this.chatCompression = params.chatCompression;
     this.autoCompactThreshold = params.autoCompactThreshold;
     this.interactive = params.interactive ?? false;
-    this.acpMode = params.acpMode ?? false;
     this.trustedFolder = params.trustedFolder;
     this.skipLoopDetection = params.skipLoopDetection ?? false;
     this.maxToolCallsPerTurn = validateMaxToolCallsPerTurn(
@@ -3432,11 +3430,12 @@ export class Config {
     // Fire-and-forget sweep of orphaned project snapshots under
     // `<runtime>/projects/` — sessions that ran from one-shot temp dirs
     // (or since-deleted worktrees) leave entries whose recorded cwd no
-    // longer exists (issue #7906). Exit-time cleanup misses crashes and
-    // SIGKILL, so startup is the backstop. Unconditional (not gated on
-    // bare mode) because temp-dir sessions are common in scripted/bare
-    // usage. Fresh entries skip after a stat-only walk; only stale
-    // deletion candidates pay a handful of bounded record reads.
+    // longer exists (issue #7906). Startup is the single cleanup path:
+    // delayed removal keeps shutdown simple and gives ambiguous entries
+    // the stale + marker grace windows before deletion. Unconditional
+    // (not gated on bare mode) because temp-dir sessions are common in
+    // scripted/bare usage. Fresh entries skip after a stat-only walk;
+    // only stale deletion candidates pay a handful of bounded record reads.
     // setImmediate defers actual I/O past the startup hot path. Removals
     // and per-entry failures are logged so a missing-history report has
     // something to grep for; transcripts are usage-salvaged first (#7384).
@@ -5849,105 +5848,6 @@ export class Config {
       if (!this.initialized) {
         // Nothing else to clean up if not initialized.
         return;
-      }
-
-      // Remove the on-disk project snapshot when the session ran from a
-      // throwaway temp directory (e.g. `%TEMP%\qwen-*-sess-*`): such a
-      // path can never be resumed, so the entry would linger under
-      // `<runtime>/projects/` forever (issue #7906). The startup sweep
-      // backstops crash paths that skip shutdown. ACP mode is the
-      // inverse exception: the host closes a session child and may load
-      // it back from disk right after, so this leg stays off there and
-      // leaves cleanup to the sweep's freshness + marker gates. The chat recording
-      // flush happens in shutdown() before this runs, so no records are
-      // removed mid-write. A handoff is the one exception: its writer
-      // was sealed so a successor can resume from this very entry, so
-      // the entry must survive. Two more guards keep this from
-      // destroying data
-      // that isn't ours: the entry must contain only this session's
-      // artifacts (sanitized-cwd collisions and concurrent sessions can
-      // share an entry), and every cwd recorded in those artifacts must
-      // itself be temp — records `/cd`-migrated from a real project stay
-      // resumable, and a single exit-time existsSync snapshot must not
-      // decide the fate of a transiently absent mount; that gone-cwd
-      // class is left to the grace-gated startup sweep.
-      try {
-        if (
-          !this.acpMode &&
-          !this.sessionWriterHandoffRequested &&
-          isTempDirPath(this.storage.getProjectRoot())
-        ) {
-          const projectDir = this.storage.getProjectDir();
-          if (
-            Storage.containsOnlySessionArtifacts(projectDir, this.sessionId)
-          ) {
-            const { cwds: recordedCwds, incomplete } =
-              Storage.collectRecordedCwds(projectDir);
-            // Incomplete evidence (an unreadable or oversized artifact)
-            // may omit a non-temp cwd — fail closed, like the sweep.
-            // The windowless liveness re-check mirrors the sweep-side
-            // removeEntry: a sibling may serve this very session id
-            // concurrently (concurrent --resume, writer lease off), and
-            // the release above unlinked only our own claim — a
-            // surviving sidecar records the sibling, so never delete
-            // out from under it. Salvaging first would double-count a
-            // session still accruing usage.
-            const disposable =
-              !incomplete &&
-              recordedCwds.length > 0 &&
-              recordedCwds.every((cwd) => isTempDirPath(cwd)) &&
-              !Storage.hasLiveSession(projectDir, false);
-            if (disposable && !Storage.hasFreshOrphanMarker(projectDir)) {
-              try {
-                await this.salvageSessionUsage(projectDir);
-              } catch {
-                // Salvage failures must never block removal.
-              }
-              // The salvage await (and the transcript streaming above)
-              // widens the check-then-delete window: a sibling session
-              // sharing this entry — concurrent temp sessions, a
-              // sanitized-cwd collision, or a concurrent --resume of
-              // this very session id — may have started writing since
-              // the guard ran. Re-check before the irreversible step,
-              // mirroring the sweep-side removeEntry: a sibling past
-              // its claim has its sidecar on disk before any record
-              // append, so the windowless liveness gate sees it, and
-              // the ownership gate catches differently-named artifacts.
-              // The resume-read fence applies here too: a fresh orphan
-              // marker means a reader renewed its grace, and the entry
-              // lock is held by a claimed transcript reader (readers
-              // hold it for the whole read) or a concurrent sweep.
-              const releaseLock =
-                await Storage.tryAcquireProjectDirLock(projectDir);
-              if (releaseLock) {
-                try {
-                  if (
-                    !Storage.hasFreshOrphanMarker(projectDir) &&
-                    !Storage.hasLiveSession(projectDir, false) &&
-                    Storage.containsOnlySessionArtifacts(
-                      projectDir,
-                      this.sessionId,
-                    )
-                  ) {
-                    fs.rmSync(projectDir, {
-                      recursive: true,
-                      force: true,
-                    });
-                    this.debugLogger.info(
-                      `Orphan project snapshot removed at shutdown: ${path.basename(
-                        projectDir,
-                      )}`,
-                    );
-                  }
-                } finally {
-                  await releaseLock().catch(() => {});
-                }
-              }
-            }
-          }
-        }
-      } catch {
-        // Best-effort — don't block shutdown
       }
 
       this.skillManager?.stopWatching();

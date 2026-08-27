@@ -30,19 +30,6 @@ const IDE_DIR_NAME = 'ide';
 const PLANS_DIR_NAME = 'plans';
 const DEBUG_DIR_NAME = 'debug';
 const ARENA_DIR_NAME = 'arena';
-// Managed auto-memory is keyed by the same sanitized cwd as the
-// snapshot entries (memory/paths.ts getAutoMemoryRoot), so every
-// session that ran extraction leaves its scaffold inside the entry.
-// Mirrors AUTO_MEMORY_DIRNAME / AUTO_MEMORY_METADATA_FILENAME /
-// AUTO_MEMORY_EXTRACT_CURSOR_FILENAME — kept literal here because
-// memory/paths.js imports Storage (circular). consolidation.lock is
-// deliberately NOT allowed: a present lock means an in-flight or
-// crashed consolidation, and the sweep fallback covers both.
-const AUTO_MEMORY_SCAFFOLD_DIR = 'memory';
-const AUTO_MEMORY_SCAFFOLD_FILES = new Set([
-  'meta.json',
-  'extract-cursor.json',
-]);
 
 // Win32 and darwin default volumes equate names differing only in case,
 // and realpath preserves the spelling it was given — so the same physical
@@ -696,9 +683,6 @@ export class Storage {
    * Claims a local transcript for reading by refreshing an existing cleanup
    * marker. Cleanup takes the same cross-process lock before its final checks,
    * so it either deletes first or observes the renewed grace window.
-   * Fresh (unmarked) entries still take the lock non-blockingly for the
-   * duration of the read, so the shutdown deletion leg — which takes the
-   * same lock before rmSync — observes the reader and bails.
    */
   async runWithProjectDirReadClaim<T>(operation: () => Promise<T>): Promise<T> {
     const entryPath = this.getProjectDir();
@@ -711,13 +695,7 @@ export class Storage {
       return operation();
     }
     if (!marked) {
-      const release = await Storage.acquireProjectDirLock(entryPath, false);
-      if (!release) return operation();
-      try {
-        return await operation();
-      } finally {
-        await release().catch(() => {});
-      }
+      return operation();
     }
     try {
       if (fs.statSync(entryPath).isDirectory() && fs.existsSync(markerPath)) {
@@ -816,9 +794,8 @@ export class Storage {
           Storage.removeOrphanMarker(entryPath);
           continue;
         }
-        // Sidecars only exist for interactive sessions: a running
-        // sidecar-less session (headless/ACP/SDK/serve) is protected by
-        // its ongoing appends instead.
+        // Sidecars are best-effort liveness evidence. A running
+        // sidecar-less session is protected by its ongoing appends instead.
         const newest = Storage.newestFileMtimeMs(entryPath);
         if (newest > 0 && now - newest <= Storage.ORPHAN_STALE_AGE_MS) {
           Storage.removeOrphanMarker(entryPath);
@@ -968,7 +945,7 @@ export class Storage {
     } catch (error) {
       // ELOCKED (retry budget out) and EEXIST (lock raced into existence)
       // mean contention, not failure: a read claim degrades to the
-      // unclaimed read, and a deletion caller keeps the entry.
+      // unclaimed read, and cleanup keeps the entry.
       if (
         waitForLock &&
         !(
@@ -983,34 +960,6 @@ export class Storage {
         throw error;
       }
       return undefined;
-    }
-  }
-
-  /**
-   * Non-blocking variant of the entry lock for deletion paths: returns
-   * undefined when another holder — a claimed transcript reader or a
-   * concurrent sweep — has it, in which case the caller keeps the entry.
-   */
-  static tryAcquireProjectDirLock(
-    entryPath: string,
-  ): Promise<(() => Promise<void>) | undefined> {
-    return Storage.acquireProjectDirLock(entryPath, false);
-  }
-
-  /**
-   * True when the entry carries an orphan marker still inside its grace
-   * window — a resume claim renewed it, so deletion paths must bail.
-   */
-  static hasFreshOrphanMarker(entryPath: string): boolean {
-    try {
-      return (
-        Date.now() -
-          fs.statSync(path.join(entryPath, Storage.ORPHAN_MARKER_FILE))
-            .mtimeMs <=
-        Storage.ORPHAN_STALE_AGE_MS
-      );
-    } catch {
-      return false;
     }
   }
 
@@ -1292,9 +1241,8 @@ export class Storage {
    * True when the entry holds a runtime sidecar whose pid is still alive
    * — i.e. a session is running from this entry right now. With
    * `distrustStaleSidecars` off, a sidecar's pid is trusted regardless
-   * of its age: the deletion-gate re-checks (the sweep's removeEntry
-   * and the shutdown deletion leg), where a false "live" can only leak
-   * the entry, never delete a live session's records.
+   * of its age: the sweep deletion gate uses that mode, where a false
+   * "live" can only leak the entry, never delete a live session's records.
    */
   static hasLiveSession(
     entryPath: string,
@@ -1304,73 +1252,6 @@ export class Storage {
       path.join(entryPath, 'chats'),
       distrustStaleSidecars ? Storage.ORPHAN_STALE_AGE_MS : undefined,
     );
-  }
-
-  /**
-   * True when the entry contains nothing but this session's own
-   * artifacts plus the project-scoped auto-memory scaffold. Entries
-   * are keyed by sanitized cwd, which collisions and concurrent
-   * sessions can share, so whole-entry deletion at shutdown must be
-   * gated on exclusive ownership. Any other subdirectory (including
-   * `chats/archive/`) is treated as foreign by design: the shutdown
-   * path is the fast path, and such entries simply fall back to the
-   * grace-gated startup sweep.
-   */
-  static containsOnlySessionArtifacts(
-    projectDir: string,
-    sessionId: string,
-  ): boolean {
-    let topEntries: fs.Dirent[];
-    try {
-      topEntries = fs.readdirSync(projectDir, { withFileTypes: true });
-    } catch {
-      // Nothing on disk — nothing foreign either.
-      return true;
-    }
-    for (const entry of topEntries) {
-      // The sweep's own orphan marker is bookkeeping, not foreign
-      // content — newestFileMtimeMs and countFiles skip it too. A
-      // marked entry must still pass this guard or the shutdown leg
-      // bails on exactly the entries another session's sweep touched.
-      if (entry.name === Storage.ORPHAN_MARKER_FILE) continue;
-      // The per-project auto-memory scaffold shares this directory by
-      // construction (same sanitized-cwd key); headless sessions that
-      // ran extraction would otherwise never reach the deletion leg —
-      // precisely the scripted-usage population of issue #7906. It is
-      // project-scoped and disposable with the entry, like the sweep
-      // already treats it.
-      if (
-        entry.name === AUTO_MEMORY_SCAFFOLD_DIR
-          ? entry.isDirectory()
-          : !entry.isDirectory() && AUTO_MEMORY_SCAFFOLD_FILES.has(entry.name)
-      ) {
-        continue;
-      }
-      if (entry.name !== 'chats' || !entry.isDirectory()) return false;
-    }
-    let files: string[];
-    try {
-      files = fs.readdirSync(path.join(projectDir, 'chats'));
-    } catch {
-      return true;
-    }
-    // Transcript/worktree names must match exactly: session ids are
-    // caller-supplied SDK input, so one id can prefix or suffix another.
-    // Runtime claims may use unique filenames during concurrent resume;
-    // their payload remains authoritative for session ownership.
-    return files.every((file) => {
-      if (file === `${sessionId}.jsonl`) return true;
-      if (file === `${sessionId}.worktree.json`) return true;
-      if (!file.endsWith('.runtime.json')) return false;
-      try {
-        const parsed = JSON.parse(
-          fs.readFileSync(path.join(projectDir, 'chats', file), 'utf8'),
-        ) as { session_id?: unknown };
-        return parsed.session_id === sessionId;
-      } catch {
-        return false;
-      }
-    });
   }
 
   /** Every `*.jsonl` transcript under `<projectDir>/chats` (depth ≤ 2). */
