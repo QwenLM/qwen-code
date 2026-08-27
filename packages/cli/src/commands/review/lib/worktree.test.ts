@@ -40,6 +40,15 @@ import {
   worktreeResidue,
 } from './worktree.js';
 
+// Replaces a gitfile that `git worktree add` created. On Windows git marks
+// the linked worktree's `.git` hidden, and opening a hidden file for truncate
+// (writeFileSync's CREATE_ALWAYS) fails with EPERM — so unlink first and let
+// the rewrite create a fresh, unhidden file.
+function overwriteGitfile(gitfilePath: string, content: string): void {
+  rmSync(gitfilePath, { force: true });
+  writeFileSync(gitfilePath, content);
+}
+
 describe('worktreeResidue', () => {
   let repo: string;
   // The tree under measurement is a LINKED worktree — the production shape:
@@ -284,7 +293,7 @@ describe('worktreeResidue', () => {
     ]);
 
     gitRepo('config', 'core.worktree', tree);
-    writeFileSync(join(tree, '.git'), `gitdir: ${join(repo, '.git')}\n`);
+    overwriteGitfile(join(tree, '.git'), `gitdir: ${join(repo, '.git')}\n`);
 
     const got = worktreeResidue(tree);
 
@@ -335,7 +344,7 @@ describe('worktreeResidue', () => {
     writeFileSync(join(admin, 'commondir'), '../..\n');
     writeFileSync(join(admin, 'HEAD'), `${forgedHead}\n`);
     copyFileSync(join(repo, '.git', 'index'), join(admin, 'index'));
-    writeFileSync(join(tree, '.git'), `gitdir: ${admin}\n`);
+    overwriteGitfile(join(tree, '.git'), `gitdir: ${admin}\n`);
 
     // Unpinned, the forge's index answers clean — and an unanchored clean
     // verdict is exactly the one the probe refuses (#9557).
@@ -372,7 +381,7 @@ describe('worktreeResidue', () => {
     const admin = readFileSync(join(sibling, '.git'), 'utf8')
       .trim()
       .replace(/^gitdir:\s*/, '');
-    writeFileSync(join(tree, '.git'), `gitdir: ${admin}\n`);
+    overwriteGitfile(join(tree, '.git'), `gitdir: ${admin}\n`);
 
     const got = worktreeResidue(tree);
 
@@ -507,7 +516,7 @@ describe('worktreeResidue', () => {
       // absolutely, because its old relative spelling no longer resolves from
       // outside the repo.
       renameSync(tree, join(outside, 'review-wt'));
-      writeFileSync(
+      overwriteGitfile(
         join(outside, 'review-wt', '.git'),
         `gitdir: ${join(repo, '.git', 'worktrees', 'review-wt')}\n`,
       );
