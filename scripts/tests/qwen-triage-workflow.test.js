@@ -6858,4 +6858,19 @@ describe('stage 1-pre duplicate gate', () => {
     expect(section).toContain('**Reopen guard.**');
     expect(section).toContain('do not post or close again');
   });
+
+  it('binds each linked-issue state to its gate action', () => {
+    // The per-issue dispatch is the gate's decision table; deleting it or
+    // swapping the NOT_PLANNED and COMPLETED actions must not leave the
+    // suite green.
+    expect(section).toContain('"OPEN" -> proceed to 1a');
+    expect(section).toContain('"CLOSED NOT_PLANNED" -> request changes');
+    expect(section).toContain('"CLOSED COMPLETED" -> run the closer query');
+  });
+
+  it('never closes on an unresolvable closer', () => {
+    // The ambiguity bullet is the only explicit prohibition against closing
+    // on a closer that cannot be resolved; deleting it must make this red.
+    expect(section).toContain('never close on ambiguity');
+  });
 });
