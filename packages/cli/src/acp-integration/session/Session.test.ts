@@ -50,6 +50,7 @@ import type {
   SessionNotification,
   SessionUpdate,
 } from '@agentclientprotocol/sdk';
+import { RequestError } from '@agentclientprotocol/sdk';
 import type { LoadedSettings } from '../../config/settings.js';
 import * as nonInteractiveCliCommands from '../../nonInteractiveCliCommands.js';
 import { CommandKind } from '../../ui/commands/types.js';
@@ -490,6 +491,7 @@ describe('Session', () => {
     getTool: ReturnType<typeof vi.fn>;
     ensureTool: ReturnType<typeof vi.fn>;
     registerTool: ReturnType<typeof vi.fn>;
+    registerPermissionDeferredFactory: ReturnType<typeof vi.fn>;
     revealDeferredTool: ReturnType<typeof vi.fn>;
     pinDeferredToolReveal: ReturnType<typeof vi.fn>;
     warmAll: ReturnType<typeof vi.fn>;
@@ -505,6 +507,7 @@ describe('Session', () => {
     subscribe: ReturnType<typeof vi.fn>;
     beginTurn: ReturnType<typeof vi.fn>;
     releaseTurn: ReturnType<typeof vi.fn>;
+    markTurnDelivered: ReturnType<typeof vi.fn>;
     permitForTurn: ReturnType<typeof vi.fn>;
     getVerifierFeedback: ReturnType<typeof vi.fn>;
     finishTurn: ReturnType<typeof vi.fn>;
@@ -757,6 +760,7 @@ describe('Session', () => {
       subscribe: vi.fn().mockReturnValue(() => {}),
       beginTurn: vi.fn(),
       releaseTurn: vi.fn().mockResolvedValue(false),
+      markTurnDelivered: vi.fn(),
       permitForTurn: vi.fn(),
       getVerifierFeedback: vi.fn(),
       finishTurn: vi.fn().mockResolvedValue(undefined),
@@ -778,6 +782,7 @@ describe('Session', () => {
       getTool: vi.fn(),
       ensureTool: vi.fn().mockResolvedValue(true),
       registerTool: vi.fn(),
+      registerPermissionDeferredFactory: vi.fn(),
       revealDeferredTool: vi.fn(),
       pinDeferredToolReveal: vi.fn(),
       warmAll: vi.fn().mockResolvedValue(undefined),
@@ -803,6 +808,8 @@ describe('Session', () => {
       switchModel: switchModelSpy,
       getModel: vi.fn().mockImplementation(() => currentModel),
       getSessionId: vi.fn().mockReturnValue('test-session-id'),
+      getSessionSourceType: vi.fn().mockReturnValue(undefined),
+      isProvisionalWorkspace: vi.fn().mockReturnValue(false),
       setLiveAppendSystemPrompt: vi.fn(),
       takeActiveTodoReminder: vi.fn().mockReturnValue(undefined),
       // The restore-ask_user_question prompt path is gated on this flag;
@@ -1066,6 +1073,30 @@ describe('Session', () => {
       );
       expect(session.collectActiveWorkHolds()).toEqual([]);
       expect(session.isIdle()).toBe(true);
+      session.dispose();
+    });
+
+    it('blocks standalone relocation for reported work and running monitors', () => {
+      createReportingSession();
+      expect(session.hasStandaloneRelocationBlockers()).toBe(false);
+
+      mockBackgroundTaskRegistry.listUnfinalizedBackgroundAgentIds.mockReturnValue(
+        ['agent-running'],
+      );
+      expect(session.hasStandaloneRelocationBlockers()).toBe(true);
+
+      mockBackgroundTaskRegistry.listUnfinalizedBackgroundAgentIds.mockReturnValue(
+        [],
+      );
+      mockMonitorRegistry.getAll.mockReturnValue([
+        { id: 'monitor-running', status: 'running' },
+      ]);
+      expect(session.hasStandaloneRelocationBlockers()).toBe(true);
+
+      mockMonitorRegistry.getAll.mockReturnValue([
+        { id: 'monitor-complete', status: 'completed' },
+      ]);
+      expect(session.hasStandaloneRelocationBlockers()).toBe(false);
       session.dispose();
     });
 
@@ -2063,6 +2094,253 @@ describe('Session', () => {
       /reserved for the trusted Live Appshot channel/u,
     );
     expect(mockToolRegistry.registerTool).not.toHaveBeenCalled();
+  });
+
+  it('holds standalone turns until exact directory binding is committed and released', async () => {
+    session.dispose();
+    vi.mocked(mockConfig.getSessionSourceType).mockReturnValue('standalone');
+    vi.mocked(mockConfig.getTargetDir).mockReturnValue('/managed/child');
+    vi.mocked(mockConfig.assertCanStartTurn).mockClear();
+    session = new Session(
+      'test-session-id',
+      mockConfig,
+      mockClient,
+      mockSettings,
+    );
+    const expectation = {
+      canonicalSessionId: 'test-session-id',
+      root: { canonicalPath: '/managed', device: 1, inode: 2 },
+      child: {
+        name: 'child',
+        canonicalPath: '/managed/child',
+        device: 1,
+        inode: 3,
+      },
+    };
+    const assertIdentity = vi.fn().mockResolvedValue(undefined);
+
+    await expect(session.assertCanStartTurn()).rejects.toMatchObject({
+      data: { errorKind: 'working_directory_missing' },
+    });
+    expect(mockConfig.assertCanStartTurn).not.toHaveBeenCalled();
+
+    session.installPendingManagedConversationBinding(
+      expectation,
+      assertIdentity,
+    );
+    await session.commitManagedConversationBinding(expectation);
+    await expect(session.assertCanStartTurn()).rejects.toMatchObject({
+      data: { errorKind: 'working_directory_missing' },
+    });
+    expect(mockConfig.assertCanStartTurn).not.toHaveBeenCalled();
+
+    await session.releaseManagedConversationBinding(expectation);
+    await expect(session.assertCanStartTurn()).resolves.toBeUndefined();
+    expect(mockConfig.assertCanStartTurn).toHaveBeenCalledOnce();
+    expect(assertIdentity).toHaveBeenCalledTimes(5);
+  });
+
+  it('rechecks standalone directory identity after writer admission', async () => {
+    session.dispose();
+    vi.mocked(mockConfig.getSessionSourceType).mockReturnValue('standalone');
+    vi.mocked(mockConfig.getTargetDir).mockReturnValue('/managed/child');
+    session = new Session(
+      'test-session-id',
+      mockConfig,
+      mockClient,
+      mockSettings,
+    );
+    const expectation = {
+      canonicalSessionId: 'test-session-id',
+      root: { canonicalPath: '/managed', device: 1, inode: 2 },
+      child: {
+        name: 'child',
+        canonicalPath: '/managed/child',
+        device: 1,
+        inode: 3,
+      },
+    };
+    const identityChanged = new RequestError(
+      -32004,
+      'The standalone working directory identity is compromised.',
+      { errorKind: 'working_directory_compromised' },
+    );
+    const assertIdentity = vi
+      .fn()
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(identityChanged);
+    session.installPendingManagedConversationBinding(
+      expectation,
+      assertIdentity,
+    );
+    await session.commitManagedConversationBinding(expectation);
+    await session.releaseManagedConversationBinding(expectation);
+
+    await expect(session.assertCanStartTurn()).rejects.toBe(identityChanged);
+    expect(mockConfig.assertCanStartTurn).toHaveBeenCalledOnce();
+    expect(assertIdentity).toHaveBeenCalledTimes(5);
+  });
+
+  it('activates a provisional standalone workspace once before commit', async () => {
+    session.dispose();
+    vi.mocked(mockConfig.getSessionSourceType).mockReturnValue('standalone');
+    vi.mocked(mockConfig.isProvisionalWorkspace).mockReturnValue(true);
+    vi.mocked(mockConfig.getTargetDir).mockReturnValue('/managed/child');
+    session = new Session(
+      'test-session-id',
+      mockConfig,
+      mockClient,
+      mockSettings,
+    );
+    const expectation = {
+      canonicalSessionId: 'test-session-id',
+      root: { canonicalPath: '/managed', device: 1, inode: 2 },
+      child: {
+        name: 'child',
+        canonicalPath: '/managed/child',
+        device: 1,
+        inode: 3,
+      },
+    };
+    const assertIdentity = vi.fn().mockResolvedValue(undefined);
+    const activate = vi.fn().mockResolvedValue(undefined);
+    const onRelease = vi.fn();
+    session.installManagedConversationActivation(activate, onRelease);
+    session.installPendingManagedConversationBinding(
+      expectation,
+      assertIdentity,
+    );
+
+    await Promise.all([
+      session.commitManagedConversationBinding(expectation),
+      session.commitManagedConversationBinding(expectation),
+    ]);
+    await session.releaseManagedConversationBinding(expectation);
+
+    expect(activate).toHaveBeenCalledOnce();
+    expect(onRelease).toHaveBeenCalledOnce();
+    expect(assertIdentity).toHaveBeenCalledTimes(5);
+    await expect(session.assertCanStartTurn()).resolves.toBeUndefined();
+    await session.releaseManagedConversationBinding(expectation);
+    expect(onRelease).toHaveBeenCalledOnce();
+  });
+
+  it('drains automatic work that was queued before standalone release', async () => {
+    session.dispose();
+    vi.mocked(mockConfig.getSessionSourceType).mockReturnValue('standalone');
+    vi.mocked(mockConfig.getTargetDir).mockReturnValue('/managed/child');
+    mockChat.sendMessageStream = vi.fn().mockResolvedValue(createEmptyStream());
+    session = new Session(
+      'test-session-id',
+      mockConfig,
+      mockClient,
+      mockSettings,
+    );
+    const expectation = {
+      canonicalSessionId: 'test-session-id',
+      root: { canonicalPath: '/managed', device: 1, inode: 2 },
+      child: {
+        name: 'child',
+        canonicalPath: '/managed/child',
+        device: 1,
+        inode: 3,
+      },
+    };
+    session.installPendingManagedConversationBinding(
+      expectation,
+      vi.fn().mockResolvedValue(undefined),
+    );
+    await session.commitManagedConversationBinding(expectation);
+
+    await expect(
+      session.enqueueBackgroundNotification({
+        displayText: 'Agent completed.',
+        modelText: '<task-notification />',
+        taskId: 'queued-before-release',
+        status: 'completed',
+        kind: 'agent',
+      }),
+    ).resolves.toEqual({ accepted: true });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+
+    await session.releaseManagedConversationBinding(expectation);
+
+    await vi.waitFor(() =>
+      expect(mockChat.sendMessageStream).toHaveBeenCalledOnce(),
+    );
+  });
+
+  it('preserves a queued Goal turn until standalone release', async () => {
+    session.dispose();
+    vi.mocked(mockConfig.getSessionSourceType).mockReturnValue('standalone');
+    vi.mocked(mockConfig.getTargetDir).mockReturnValue('/managed/child');
+    session = new Session(
+      'test-session-id',
+      mockConfig,
+      mockClient,
+      mockSettings,
+    );
+    const expectation = {
+      canonicalSessionId: 'test-session-id',
+      root: { canonicalPath: '/managed', device: 1, inode: 2 },
+      child: {
+        name: 'child',
+        canonicalPath: '/managed/child',
+        device: 1,
+        inode: 3,
+      },
+    };
+    session.installPendingManagedConversationBinding(
+      expectation,
+      vi.fn().mockResolvedValue(undefined),
+    );
+    await session.commitManagedConversationBinding(expectation);
+    const permit: core.GoalTurnPermit = {
+      goalId: 'goal-1',
+      revision: 1,
+      turnId: 'turn-before-release',
+    };
+    mockGoalRuntime.getSnapshot.mockReturnValue({
+      v: 2,
+      activity: 'running',
+      goal: {
+        goalId: 'goal-1',
+        revision: 1,
+        objective: 'finish after release',
+        status: 'active',
+        evidenceCursor: { recordId: 'cursor-1' },
+        turnCount: 0,
+        activeTimeMs: 0,
+        tokensUsed: 0,
+        createdAt: 1234,
+        updatedAt: 1234,
+      },
+    });
+    mockGoalRuntime.permitForTurn.mockImplementation((turnKey: string) =>
+      turnKey === 'goal-runtime:turn-before-release' ? permit : undefined,
+    );
+    mockChat.sendMessageStream = vi.fn().mockResolvedValue(createEmptyStream());
+
+    await boundGoalHost!.startGoalTurn({
+      permit,
+      continuationContext: 'finish after release',
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+    expect(mockGoalRuntime.finishTurn).not.toHaveBeenCalled();
+    expect(mockGoalRuntime.releaseTurn).not.toHaveBeenCalled();
+
+    await session.releaseManagedConversationBinding(expectation);
+
+    await vi.waitFor(() =>
+      expect(mockGoalRuntime.finishTurn).toHaveBeenCalledWith(permit),
+    );
+    expect(mockChat.sendMessageStream).toHaveBeenCalledOnce();
   });
 
   it('attributes a delayed title notification to the persisted record session', () => {
@@ -4508,6 +4786,36 @@ describe('Session', () => {
       });
     });
 
+    it('does not persist a shared model default for a standalone session', async () => {
+      session.dispose();
+      vi.mocked(mockConfig.getSessionSourceType).mockReturnValue('standalone');
+      session = new Session(
+        'test-session-id',
+        mockConfig,
+        mockClient,
+        mockSettings,
+      );
+
+      await session.setModel(
+        {
+          sessionId: 'test-session-id',
+          modelId: `qwen3-coder-flash(${AuthType.USE_OPENAI})`,
+        },
+        { persistDefault: true },
+      );
+
+      expect(mockConfig.switchModel).toHaveBeenCalledWith(
+        AuthType.USE_OPENAI,
+        'qwen3-coder-flash',
+        undefined,
+      );
+      expect(mockSettings.setValue).not.toHaveBeenCalled();
+      expect(mockChatRecordingService.recordSessionModel).toHaveBeenCalledWith({
+        modelId: 'qwen3-coder-flash',
+        authType: AuthType.USE_OPENAI,
+      });
+    });
+
     it('propagates errors from config.switchModel', async () => {
       const configError = new Error('Invalid model');
       switchModelSpy.mockRejectedValueOnce(configError);
@@ -4557,6 +4865,7 @@ describe('Session', () => {
         expect.any(AbortSignal),
         'acp',
         mockSettings,
+        undefined,
       );
       expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
         sessionId: 'test-session-id',
@@ -4581,6 +4890,60 @@ describe('Session', () => {
       });
     });
 
+    it('applies the immutable standalone command policy after binding release', async () => {
+      session.dispose();
+      vi.mocked(mockConfig.getSessionSourceType).mockReturnValue('standalone');
+      vi.mocked(mockConfig.getTargetDir).mockReturnValue('/managed/child');
+      getAvailableCommandsSpy.mockResolvedValue([]);
+      session = new Session(
+        'test-session-id',
+        mockConfig,
+        mockClient,
+        mockSettings,
+      );
+      const expectation = {
+        canonicalSessionId: 'test-session-id',
+        root: { canonicalPath: '/managed', device: 1, inode: 2 },
+        child: {
+          name: 'child',
+          canonicalPath: '/managed/child',
+          device: 1,
+          inode: 3,
+        },
+      };
+      session.installPendingManagedConversationBinding(
+        expectation,
+        vi.fn().mockResolvedValue(undefined),
+      );
+      await session.commitManagedConversationBinding(expectation);
+      await session.releaseManagedConversationBinding(expectation);
+
+      await vi.waitFor(() =>
+        expect(getAvailableCommandsSpy).toHaveBeenCalledWith(
+          mockConfig,
+          expect.any(AbortSignal),
+          'acp',
+          mockSettings,
+          {
+            allowSessionReset: false,
+            allowWorkspaceSettingsWrite: false,
+            persistModelSelection: false,
+            blockedBuiltinCommandNames: [
+              'cd',
+              'clear',
+              'directory',
+              'diff',
+              'dream',
+              'export',
+              'learn',
+              'curator',
+              'workflows',
+            ],
+          },
+        ),
+      );
+    });
+
     it('forwards command descriptions from getAvailableCommands()', async () => {
       getAvailableCommandsSpy.mockResolvedValueOnce([
         {
@@ -4601,6 +4964,7 @@ describe('Session', () => {
         expect.any(AbortSignal),
         'acp',
         mockSettings,
+        undefined,
       );
       expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
         sessionId: 'test-session-id',
@@ -5279,6 +5643,51 @@ describe('Session', () => {
         }),
       );
       expect(notifyConfigChanged).not.toHaveBeenCalled();
+    });
+
+    it('does not publish refreshed skills while standalone activation is held', async () => {
+      session.dispose();
+      vi.mocked(mockConfig.getSessionSourceType).mockReturnValue('standalone');
+      vi.mocked(mockConfig.getTargetDir).mockReturnValue('/managed/child');
+      mockConfig.getSkillManager = vi.fn().mockReturnValue(null);
+      session = new Session(
+        'test-session-id',
+        mockConfig,
+        mockClient,
+        mockSettings,
+      );
+      const expectation = {
+        canonicalSessionId: 'test-session-id',
+        root: { canonicalPath: '/managed', device: 1, inode: 2 },
+        child: {
+          name: 'child',
+          canonicalPath: '/managed/child',
+          device: 1,
+          inode: 3,
+        },
+      };
+      session.installPendingManagedConversationBinding(
+        expectation,
+        vi.fn().mockResolvedValue(undefined),
+      );
+      await session.commitManagedConversationBinding(expectation);
+      getAvailableCommandsSpy.mockClear();
+      vi.mocked(mockClient.sessionUpdate).mockClear();
+
+      await session.refreshSkillsFromSettings({
+        reloadSettings: false,
+        notifyConfigChanged: false,
+      });
+
+      expect(getAvailableCommandsSpy).not.toHaveBeenCalled();
+      expect(mockClient.sessionUpdate).not.toHaveBeenCalled();
+
+      await session.releaseManagedConversationBinding(expectation);
+
+      await vi.waitFor(() =>
+        expect(mockClient.sessionUpdate).toHaveBeenCalledTimes(1),
+      );
+      expect(getAvailableCommandsSpy).toHaveBeenCalledTimes(1);
     });
 
     it('notifies SkillManager when the command update fails', async () => {
@@ -7780,17 +8189,19 @@ describe('Session', () => {
       // rule, must keep it out of the declarations too — advertising a tool
       // whose every call ends in EXECUTION_DENIED is the pollution the
       // daemon-only gate exists to remove.
-      const isToolEnabled = vi.fn().mockResolvedValue(false);
+      const getToolRegistrationStatus = vi.fn().mockResolvedValue('disabled');
       mockConfig.getPermissionManager = vi
         .fn()
-        .mockReturnValue({ isToolEnabled });
+        .mockReturnValue({ getToolRegistrationStatus });
       mockConfig.getSubSessionSpawner = vi
         .fn()
         .mockReturnValue(async () => ({ sessionId: 'sub-1' }));
 
       await registerCreateSubSessionTool(mockConfig);
 
-      expect(isToolEnabled).toHaveBeenCalledWith('create_sub_session');
+      expect(getToolRegistrationStatus).toHaveBeenCalledWith(
+        'create_sub_session',
+      );
       expect(mockToolRegistry.registerTool).not.toHaveBeenCalledWith(
         expect.objectContaining({ name: 'create_sub_session' }),
       );
@@ -7800,23 +8211,45 @@ describe('Session', () => {
       // The PM-present path must consult the manager and then register: a
       // gate that skips whenever a manager exists would drop the tool from
       // every daemon session that runs with permission management on.
-      const isToolEnabled = vi.fn().mockResolvedValue(true);
+      const getToolRegistrationStatus = vi.fn().mockResolvedValue('registered');
       mockConfig.getPermissionManager = vi
         .fn()
-        .mockReturnValue({ isToolEnabled });
+        .mockReturnValue({ getToolRegistrationStatus });
       mockConfig.getSubSessionSpawner = vi
         .fn()
         .mockReturnValue(async () => ({ sessionId: 'sub-1' }));
 
       await registerCreateSubSessionTool(mockConfig);
 
-      expect(isToolEnabled).toHaveBeenCalledWith('create_sub_session');
+      expect(getToolRegistrationStatus).toHaveBeenCalledWith(
+        'create_sub_session',
+      );
       expect(mockToolRegistry.registerTool).toHaveBeenCalledWith(
         expect.objectContaining({ name: 'create_sub_session' }),
       );
       expect(mockToolRegistry.revealDeferredTool).toHaveBeenCalledWith(
         'create_sub_session',
       );
+    });
+
+    it('keeps permission-deferred create_sub_session behind ToolSearch', async () => {
+      const getToolRegistrationStatus = vi.fn().mockResolvedValue('deferred');
+      mockConfig.getPermissionManager = vi
+        .fn()
+        .mockReturnValue({ getToolRegistrationStatus });
+      mockConfig.getSubSessionSpawner = vi
+        .fn()
+        .mockReturnValue(async () => ({ sessionId: 'sub-1' }));
+
+      await registerCreateSubSessionTool(mockConfig);
+
+      expect(
+        mockToolRegistry.registerPermissionDeferredFactory,
+      ).toHaveBeenCalledWith('create_sub_session', expect.any(Function));
+      expect(mockToolRegistry.registerTool).not.toHaveBeenCalled();
+      expect(mockToolRegistry.revealDeferredTool).not.toHaveBeenCalled();
+      expect(mockToolRegistry.pinDeferredToolReveal).not.toHaveBeenCalled();
+      expect(mockLlmClient.setTools).toHaveBeenCalledTimes(1);
     });
 
     it('wires the sub-session spawner only on daemon-backed sessions', () => {
@@ -18277,6 +18710,70 @@ describe('Session', () => {
         );
       });
 
+      it('returns a structured standalone-policy error for a blocked slash command', async () => {
+        session.dispose();
+        vi.mocked(mockConfig.getSessionSourceType).mockReturnValue(
+          'standalone',
+        );
+        vi.mocked(mockConfig.getTargetDir).mockReturnValue('/managed/child');
+        session = new Session(
+          'test-session-id',
+          mockConfig,
+          mockClient,
+          mockSettings,
+        );
+        const expectation = {
+          canonicalSessionId: 'test-session-id',
+          root: { canonicalPath: '/managed', device: 1, inode: 2 },
+          child: {
+            name: 'child',
+            canonicalPath: '/managed/child',
+            device: 1,
+            inode: 3,
+          },
+        };
+        session.installPendingManagedConversationBinding(
+          expectation,
+          vi.fn().mockResolvedValue(undefined),
+        );
+        await session.commitManagedConversationBinding(expectation);
+        await session.releaseManagedConversationBinding(expectation);
+        vi.mocked(
+          nonInteractiveCliCommands.handleSlashCommand,
+        ).mockResolvedValueOnce({
+          type: 'unsupported',
+          reason: 'The command "/export" is not available here.',
+          originalType: 'unsupported_action',
+        });
+        mockChat.sendMessageStream = vi.fn();
+
+        await expect(
+          session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: '/export' }],
+          }),
+        ).rejects.toMatchObject({
+          data: { errorKind: 'unsupported_action' },
+        });
+
+        expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+        expect(
+          nonInteractiveCliCommands.handleSlashCommand,
+        ).toHaveBeenCalledWith(
+          '/export',
+          expect.anything(),
+          mockConfig,
+          mockSettings,
+          expect.anything(),
+          expect.objectContaining({
+            allowSessionReset: false,
+            allowWorkspaceSettingsWrite: false,
+            persistModelSelection: false,
+            blockedBuiltinCommandNames: expect.arrayContaining(['export']),
+          }),
+        );
+      });
+
       it('does not record /advisor in the ACP transcript', async () => {
         const finishedSpy = vi
           .spyOn(core, 'logConversationFinishedEvent')
@@ -19068,6 +19565,261 @@ describe('Session', () => {
         expect(publishedActivities).toEqual(['idle', 'running']);
       });
 
+      it('stamps a Goal turn’s tool results with the permit, and its own reads as bookkeeping', async () => {
+        // The evidence catalog derives provenance from this stamp: an
+        // unstamped tool result yields no catalog entry at all, so an ACP
+        // Goal could never cite an external_fact and could never prove a
+        // completion with anything but the model's own words.
+        const permit: core.GoalTurnPermit = {
+          goalId: 'goal-1',
+          revision: 1,
+          turnId: 'turn-stamp',
+        };
+        mockGoalRuntime.getSnapshot.mockReturnValue({
+          v: 2,
+          activity: 'running',
+          goal: {
+            goalId: 'goal-1',
+            revision: 1,
+            objective: 'check weather',
+            status: 'active',
+            evidenceCursor: { recordId: 'cursor-1' },
+            turnCount: 0,
+            activeTimeMs: 0,
+            tokensUsed: 0,
+            createdAt: 1234,
+            updatedAt: 1234,
+          },
+        });
+        mockGoalRuntime.permitForTurn.mockImplementation((turnKey: string) =>
+          turnKey === 'goal-runtime:turn-stamp' ? permit : undefined,
+        );
+        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+        mockToolRegistry.getTool.mockImplementation((name: string) => ({
+          name,
+          displayName: name,
+          kind: core.Kind.Read,
+          schema: { name, description: name, parameters: {} },
+          validateToolParams: vi.fn().mockReturnValue(null),
+          getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+          getDescription: vi.fn().mockReturnValue(name),
+          toolLocations: vi.fn().mockReturnValue([]),
+          execute: vi.fn().mockResolvedValue(
+            name === 'run_shell_command'
+              ? {
+                  llmContent: 'command failed',
+                  returnDisplay: 'command failed',
+                  error: {
+                    message: 'command failed',
+                    type: core.ToolErrorType.EXECUTION_FAILED,
+                  },
+                }
+              : { llmContent: 'ok', returnDisplay: 'ok' },
+          ),
+        }));
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  functionCalls: [
+                    { id: 'call-read', name: 'read_file', args: {} },
+                    { id: 'call-goal', name: 'get_goal', args: {} },
+                    { id: 'call-failed', name: 'run_shell_command', args: {} },
+                  ],
+                },
+              },
+            ]),
+          )
+          .mockResolvedValue(createEmptyStream());
+
+        expect(boundGoalHost).toBeDefined();
+        await boundGoalHost!.startGoalTurn({
+          permit,
+          continuationContext: 'check weather',
+        });
+
+        await vi.waitFor(() => {
+          expect(mockGoalRuntime.finishTurn).toHaveBeenCalledWith(permit);
+        });
+
+        const optionsFor = (callId: string) =>
+          mockChatRecordingService.recordToolResult.mock.calls.find(
+            (call: unknown[]) =>
+              (call[1] as { callId?: string } | undefined)?.callId === callId,
+          )?.[2];
+        expect(optionsFor('call-read')).toEqual({ goalContext: permit });
+        expect(optionsFor('call-goal')).toEqual({
+          goalContext: permit,
+          provenance: 'goal_runtime',
+        });
+        // A failed command is evidence too -- it is exactly what an
+        // `infeasible` completion cites -- so the stamp must not depend on
+        // the tool succeeding.
+        expect(
+          mockChatRecordingService.recordToolResult.mock.calls.find(
+            (call: unknown[]) =>
+              (call[1] as { callId?: string } | undefined)?.callId ===
+              'call-failed',
+          )?.[1],
+        ).toMatchObject({ status: 'error' });
+        expect(optionsFor('call-failed')).toEqual({ goalContext: permit });
+      });
+
+      it('does not stamp a background-notification turn with a permit inherited by lineage', async () => {
+        // A notification fires from async resources created inside the turn
+        // that spawned the task, so the Goal store is inherited into it long
+        // after that turn ended. The notification turn is not a Goal turn:
+        // its tool results must record unstamped, or they would become
+        // external_fact evidence for a turn that never made those calls.
+        const permit: core.GoalTurnPermit = {
+          goalId: 'goal-1',
+          revision: 1,
+          turnId: 'turn-stale',
+        };
+        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+        mockToolRegistry.getTool.mockImplementation((name: string) => ({
+          name,
+          displayName: name,
+          kind: core.Kind.Read,
+          schema: { name, description: name, parameters: {} },
+          validateToolParams: vi.fn().mockReturnValue(null),
+          getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+          getDescription: vi.fn().mockReturnValue(name),
+          toolLocations: vi.fn().mockReturnValue([]),
+          execute: vi
+            .fn()
+            .mockResolvedValue({ llmContent: 'ok', returnDisplay: 'ok' }),
+        }));
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  functionCalls: [
+                    { id: 'call-notified', name: 'read_file', args: {} },
+                  ],
+                },
+              },
+            ]),
+          )
+          .mockResolvedValue(createEmptyStream());
+
+        // Enqueue from inside a Goal turn's store, as a task completion
+        // handler created during that turn would.
+        const notification = core.goalTurnContext.run(permit, () =>
+          session.enqueueBackgroundNotification({
+            displayText: 'Background agent completed.',
+            modelText: '<task-notification />',
+            taskId: 'agent-stale',
+            status: 'completed',
+            kind: 'agent',
+          }),
+        );
+        await expect(notification).resolves.toEqual({ accepted: true });
+        await vi.waitFor(() => {
+          expect(
+            mockChatRecordingService.recordToolResult.mock.calls.some(
+              (call: unknown[]) =>
+                (call[1] as { callId?: string } | undefined)?.callId ===
+                'call-notified',
+            ),
+          ).toBe(true);
+        });
+
+        const call = mockChatRecordingService.recordToolResult.mock.calls.find(
+          (call: unknown[]) =>
+            (call[1] as { callId?: string } | undefined)?.callId ===
+            'call-notified',
+        )!;
+        expect(call[2]).toBeUndefined();
+      });
+
+      it('does not stamp a cron turn with a permit inherited by lineage', async () => {
+        // `#drainCronQueue()` is fired from inside Goal-turn code paths (the
+        // turn settle's `finally`, among others), so a cron item can drain
+        // while a Goal permit is live in the store. A cron turn is never a
+        // Goal turn: its tool results must record unstamped, exactly like
+        // the notification turn above.
+        const permit: core.GoalTurnPermit = {
+          goalId: 'goal-1',
+          revision: 1,
+          turnId: 'turn-stale-cron',
+        };
+        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+        mockToolRegistry.getTool.mockImplementation((name: string) => ({
+          name,
+          displayName: name,
+          kind: core.Kind.Read,
+          schema: { name, description: name, parameters: {} },
+          validateToolParams: vi.fn().mockReturnValue(null),
+          getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+          getDescription: vi.fn().mockReturnValue(name),
+          toolLocations: vi.fn().mockReturnValue([]),
+          execute: vi
+            .fn()
+            .mockResolvedValue({ llmContent: 'ok', returnDisplay: 'ok' }),
+        }));
+        let fireCron!: (job: { prompt: string; cronExpr: string }) => void;
+        const scheduler = {
+          hasPendingWork: true,
+          enableDurable: vi.fn().mockResolvedValue(undefined),
+          start: vi.fn(
+            (callback: (job: { prompt: string; cronExpr: string }) => void) => {
+              fireCron = callback;
+            },
+          ),
+          stop: vi.fn(),
+          list: vi.fn().mockReturnValue([]),
+          getExitSummary: vi.fn().mockReturnValue(undefined),
+        };
+        mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+        mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+        session.startCronScheduler();
+        await vi.waitFor(() => expect(scheduler.start).toHaveBeenCalled());
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  functionCalls: [
+                    { id: 'call-cron', name: 'read_file', args: {} },
+                  ],
+                },
+              },
+            ]),
+          )
+          .mockResolvedValue(createEmptyStream());
+
+        // Fire from inside a Goal turn's store, as a drain triggered from a
+        // Goal-turn code path would be.
+        core.goalTurnContext.run(permit, () =>
+          fireCron({ prompt: 'cron work', cronExpr: '* * * * *' }),
+        );
+        await vi.waitFor(() => {
+          expect(
+            mockChatRecordingService.recordToolResult.mock.calls.some(
+              (call: unknown[]) =>
+                (call[1] as { callId?: string } | undefined)?.callId ===
+                'call-cron',
+            ),
+          ).toBe(true);
+        });
+
+        const call = mockChatRecordingService.recordToolResult.mock.calls.find(
+          (call: unknown[]) =>
+            (call[1] as { callId?: string } | undefined)?.callId ===
+            'call-cron',
+        )!;
+        expect(call[2]).toBeUndefined();
+      });
+
       it('runs a host-scheduled Goal turn with the canonical permit', async () => {
         const permit: core.GoalTurnPermit = {
           goalId: 'goal-1',
@@ -19101,6 +19853,8 @@ describe('Session', () => {
         await boundGoalHost!.startGoalTurn({
           permit,
           continuationContext: 'check weather',
+          objectiveUpdated: true,
+          windDown: true,
           verifierFeedback: 'Need independent evidence',
         });
 
@@ -19133,6 +19887,16 @@ describe('Session', () => {
               }),
               expect.objectContaining({
                 text: expect.stringContaining(
+                  'The Goal objective changed since your last turn',
+                ),
+              }),
+              expect.objectContaining({
+                text: expect.stringContaining(
+                  'The autonomous token budget for this Goal window is spent.',
+                ),
+              }),
+              expect.objectContaining({
+                text: expect.stringContaining(
                   'Verifier feedback: Need independent evidence',
                 ),
               }),
@@ -19140,6 +19904,9 @@ describe('Session', () => {
           }),
           expect.any(String),
           permit,
+        );
+        expect(mockGoalRuntime.markTurnDelivered).toHaveBeenCalledWith(
+          'goal-runtime:turn-1',
         );
         expect(
           mockChatRecordingService.recordGoalRuntimeMessage,
@@ -25669,6 +26436,119 @@ describe('Session', () => {
         isOutputMarkdown: true,
       };
     }
+
+    function recreateStandaloneSession() {
+      session.dispose();
+      vi.mocked(mockConfig.getSessionSourceType).mockReturnValue('standalone');
+      session = new Session(
+        'test-session-id',
+        mockConfig,
+        mockClient,
+        mockSettings,
+      );
+    }
+
+    it('blocks standalone worktree actions before building the tool', async () => {
+      recreateStandaloneSession();
+      const builds: Array<ReturnType<typeof vi.fn>> = [];
+      mockToolRegistry.getTool.mockImplementation((name: string) => {
+        const build = vi.fn();
+        builds.push(build);
+        return {
+          name,
+          kind:
+            name === core.ToolNames.AGENT ? core.Kind.Think : core.Kind.Edit,
+          displayName: name,
+          description: name,
+          build,
+          canUpdateOutput: false,
+          isOutputMarkdown: true,
+        };
+      });
+
+      const calls: FunctionCall[] = [
+        {
+          id: 'agent_isolation',
+          name: core.ToolNames.AGENT,
+          args: { subagent_type: 'explore', isolation: 'worktree' },
+        },
+        {
+          id: 'agent_working_dir',
+          name: core.ToolNames.AGENT,
+          args: { subagent_type: 'explore', working_dir: '/tmp/other' },
+        },
+        {
+          id: 'enter_worktree',
+          name: core.ToolNames.ENTER_WORKTREE,
+          args: { name: 'other' },
+        },
+        {
+          id: 'exit_worktree',
+          name: core.ToolNames.EXIT_WORKTREE,
+          args: { name: 'other' },
+        },
+      ];
+
+      for (const call of calls) {
+        const result = await (
+          session as unknown as ToolCallInternals
+        ).runToolCalls(new AbortController().signal, `prompt-${call.id}`, [
+          call,
+        ]);
+
+        expect(result.parts[0].functionResponse?.response).toEqual({
+          error:
+            'Standalone sessions cannot change or override their working directory.',
+        });
+      }
+      expect(builds).toHaveLength(4);
+      for (const build of builds) {
+        expect(build).not.toHaveBeenCalled();
+      }
+    });
+
+    it('allows a standalone fork Agent without a cwd override', async () => {
+      recreateStandaloneSession();
+      mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(true);
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+      const execute = vi.fn().mockResolvedValue({
+        llmContent: 'fork completed',
+        returnDisplay: 'fork completed',
+      });
+      const build = vi.fn().mockReturnValue({
+        params: { subagent_type: 'fork' },
+        eventEmitter: new EventEmitter(),
+        execute,
+        getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+        getDescription: vi.fn().mockReturnValue('Agent'),
+        toolLocations: vi.fn().mockReturnValue([]),
+      });
+      mockToolRegistry.getTool.mockReturnValue({
+        name: core.ToolNames.AGENT,
+        kind: core.Kind.Think,
+        displayName: 'Agent',
+        description: 'Agent',
+        build,
+        canUpdateOutput: false,
+        isOutputMarkdown: true,
+      });
+
+      const result = await (
+        session as unknown as ToolCallInternals
+      ).runToolCalls(new AbortController().signal, 'prompt-fork-agent', [
+        {
+          id: 'fork_agent',
+          name: core.ToolNames.AGENT,
+          args: { subagent_type: 'fork', prompt: 'inspect' },
+        },
+      ]);
+
+      expect(build).toHaveBeenCalled();
+      expect(execute).toHaveBeenCalledOnce();
+      expect(result.parts[0].functionResponse?.response).toEqual({
+        output: 'fork completed',
+      });
+    });
 
     it('records a missing tool name as a pre-execution failure', async () => {
       const logToolCallSpy = vi

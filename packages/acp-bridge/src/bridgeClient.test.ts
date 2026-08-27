@@ -48,7 +48,10 @@ import {
   type ClientMcpFrame,
 } from '@qwen-code/qwen-code-core';
 import type { JSONRPCMessage } from '@modelcontextprotocol/sdk/types.js';
-import { BridgeClient } from './bridgeClient.js';
+import {
+  BridgeClient,
+  type BridgeClientDeferredArtifactBatch,
+} from './bridgeClient.js';
 import {
   type LiveSpeakToUserHandler,
   MAX_SUB_SESSION_NAME_CHARS,
@@ -2131,6 +2134,9 @@ describe('BridgeClient — artifact ingress', () => {
       const fakeEntry = {
         sessionId,
         events: { publish },
+        artifactWorkspaceReady: true,
+        deferredArtifactBatches: [],
+        deferredArtifactInputCount: 0,
         artifacts: new SessionArtifactStore({
           sessionId,
           workspaceCwd: workspace,
@@ -2216,6 +2222,9 @@ describe('BridgeClient — artifact ingress', () => {
     const fakeEntry = {
       sessionId,
       events: { publish },
+      artifactWorkspaceReady: true,
+      deferredArtifactBatches: [] as BridgeClientDeferredArtifactBatch[],
+      deferredArtifactInputCount: 0,
       artifacts: {
         inputBatchLimit: () => 1,
         upsertMany,
@@ -2289,6 +2298,9 @@ describe('BridgeClient — artifact ingress', () => {
     const fakeEntry = {
       sessionId,
       events: { publish },
+      artifactWorkspaceReady: true,
+      deferredArtifactBatches: [] as BridgeClientDeferredArtifactBatch[],
+      deferredArtifactInputCount: 0,
       artifacts: {
         inputBatchLimit: () => 400,
         upsertMany,
@@ -2353,6 +2365,9 @@ describe('BridgeClient — artifact ingress', () => {
     const fakeEntry = {
       sessionId,
       events: { publish },
+      artifactWorkspaceReady: true,
+      deferredArtifactBatches: [],
+      deferredArtifactInputCount: 0,
       artifacts: {
         inputBatchLimit: () => 1,
         upsertMany,
@@ -2403,6 +2418,9 @@ describe('BridgeClient — artifact ingress', () => {
       const fakeEntry = {
         sessionId,
         events: { publish },
+        artifactWorkspaceReady: true,
+        deferredArtifactBatches: [],
+        deferredArtifactInputCount: 0,
         artifacts: new SessionArtifactStore({
           sessionId,
           workspaceCwd: workspace,
@@ -2467,6 +2485,9 @@ describe('BridgeClient — artifact ingress', () => {
       const fakeEntry = {
         sessionId,
         events: { publish },
+        artifactWorkspaceReady: true,
+        deferredArtifactBatches: [],
+        deferredArtifactInputCount: 0,
         artifacts: new SessionArtifactStore({
           sessionId,
           workspaceCwd: workspace,
@@ -2758,6 +2779,9 @@ describe('BridgeClient — artifact ingress', () => {
     const fakeEntry = {
       sessionId,
       events: { publish },
+      artifactWorkspaceReady: true,
+      deferredArtifactBatches: [],
+      deferredArtifactInputCount: 0,
       artifacts: {
         inputBatchLimit: () => 400,
         upsertMany,
@@ -2813,6 +2837,9 @@ describe('BridgeClient — artifact ingress', () => {
     const fakeEntry = {
       sessionId,
       events: { publish },
+      artifactWorkspaceReady: true,
+      deferredArtifactBatches: [],
+      deferredArtifactInputCount: 0,
       artifacts: {
         inputBatchLimit: () => 400,
         upsertMany: vi
@@ -2859,6 +2886,9 @@ describe('BridgeClient — artifact ingress', () => {
     const fakeEntry = {
       sessionId,
       events: { publish },
+      artifactWorkspaceReady: true,
+      deferredArtifactBatches: [],
+      deferredArtifactInputCount: 0,
       artifacts: {
         inputBatchLimit: () => 2,
         upsertMany,
@@ -2910,6 +2940,149 @@ describe('BridgeClient — artifact ingress', () => {
     }
   });
 
+  it('retains deferred artifact batches until each write succeeds', async () => {
+    const sessionId = 'sess:deferred-artifact-retry';
+    const upsertMany = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('transient artifact failure'))
+      .mockResolvedValue({ changes: [] });
+    const fakeEntry = {
+      sessionId,
+      events: { publish: vi.fn().mockReturnValue(true) },
+      artifactWorkspaceReady: false,
+      deferredArtifactBatches: [] as BridgeClientDeferredArtifactBatch[],
+      deferredArtifactInputCount: 0,
+      artifacts: { inputBatchLimit: () => 2, upsertMany },
+      pendingPermissionIds: new Set<string>(),
+      pendingInteractions: new Map(),
+      midTurnMessageQueue: [] as MidTurnQueueEntry[],
+      settledMidTurnMessageIds: [] as string[],
+    };
+    const client = new BridgeClient(
+      ((sid: string) => (sid === sessionId ? fakeEntry : undefined)) as never,
+      noPermissionFlow as never,
+      { request: noPermissionFlow } as never,
+      0,
+      Infinity,
+    );
+    const emit = (title: string) =>
+      client.extNotification('qwen/notify/session/artifact-event', {
+        sessionId,
+        artifacts: [{ title, url: `https://example.com/${title}` }],
+      });
+
+    await emit('one');
+    await emit('two');
+    fakeEntry.artifactWorkspaceReady = true;
+
+    await expect(
+      client.drainDeferredSessionArtifacts(fakeEntry as never),
+    ).rejects.toThrow('Deferred artifact ingestion failed');
+    expect(fakeEntry.deferredArtifactBatches).toHaveLength(2);
+    expect(fakeEntry.deferredArtifactInputCount).toBe(2);
+
+    await client.drainDeferredSessionArtifacts(fakeEntry as never);
+    expect(
+      upsertMany.mock.calls.map(([artifacts]) => artifacts[0]?.title),
+    ).toEqual(['one', 'one', 'two']);
+    expect(fakeEntry.deferredArtifactBatches).toEqual([]);
+    expect(fakeEntry.deferredArtifactInputCount).toBe(0);
+  });
+
+  it('defers a ready artifact batch when workspace preparation fails', async () => {
+    const sessionId = 'sess:deferred-artifact-prepare';
+    const upsertMany = vi.fn().mockResolvedValue({ changes: [] });
+    const clientRef: { current?: BridgeClient } = {};
+    const fakeEntry = {
+      sessionId,
+      events: { publish: vi.fn().mockReturnValue(true) },
+      artifactWorkspaceReady: true,
+      deferredArtifactBatches: [] as BridgeClientDeferredArtifactBatch[],
+      deferredArtifactInputCount: 0,
+      artifacts: { inputBatchLimit: () => 2, upsertMany },
+      prepareArtifactWorkspace: vi
+        .fn()
+        .mockRejectedValueOnce(new Error('transient preparation failure'))
+        .mockImplementation(() =>
+          clientRef.current!.drainDeferredSessionArtifacts(fakeEntry as never),
+        ),
+      pendingPermissionIds: new Set<string>(),
+      pendingInteractions: new Map(),
+      midTurnMessageQueue: [] as MidTurnQueueEntry[],
+      settledMidTurnMessageIds: [] as string[],
+    };
+    const client = new BridgeClient(
+      ((sid: string) => (sid === sessionId ? fakeEntry : undefined)) as never,
+      noPermissionFlow as never,
+      { request: noPermissionFlow } as never,
+      0,
+      Infinity,
+    );
+    clientRef.current = client;
+    const emit = (title: string) =>
+      client.extNotification('qwen/notify/session/artifact-event', {
+        sessionId,
+        artifacts: [{ title, url: `https://example.com/${title}` }],
+      });
+
+    await expect(emit('one')).resolves.toBeUndefined();
+    expect(upsertMany).not.toHaveBeenCalled();
+    expect(fakeEntry.deferredArtifactBatches).toHaveLength(1);
+    expect(fakeEntry.deferredArtifactInputCount).toBe(1);
+
+    await emit('two');
+    expect(
+      upsertMany.mock.calls.map(([artifacts]) => artifacts[0]?.title),
+    ).toEqual(['one', 'two']);
+    expect(fakeEntry.deferredArtifactBatches).toEqual([]);
+    expect(fakeEntry.deferredArtifactInputCount).toBe(0);
+  });
+
+  it('caps deferred artifacts across batches before workspace activation', async () => {
+    const sessionId = 'sess:deferred-artifact-cap';
+    const upsertMany = vi.fn().mockResolvedValue({ changes: [] });
+    const fakeEntry = {
+      sessionId,
+      events: { publish: vi.fn().mockReturnValue(true) },
+      artifactWorkspaceReady: false,
+      deferredArtifactBatches: [] as BridgeClientDeferredArtifactBatch[],
+      deferredArtifactInputCount: 0,
+      artifacts: { inputBatchLimit: () => 2, upsertMany },
+      pendingPermissionIds: new Set<string>(),
+      pendingInteractions: new Map(),
+      midTurnMessageQueue: [] as MidTurnQueueEntry[],
+      settledMidTurnMessageIds: [] as string[],
+    };
+    const client = new BridgeClient(
+      ((sid: string) => (sid === sessionId ? fakeEntry : undefined)) as never,
+      noPermissionFlow as never,
+      { request: noPermissionFlow } as never,
+      0,
+      Infinity,
+    );
+    const emit = (title: string) =>
+      client.extNotification('qwen/notify/session/artifact-event', {
+        sessionId,
+        artifacts: [{ title, url: `https://example.com/${title}` }],
+      });
+
+    await emit('one');
+    await emit('two');
+    await emit('three');
+    expect(fakeEntry.deferredArtifactInputCount).toBe(2);
+    expect(
+      fakeEntry.deferredArtifactBatches.map(
+        (batch) => batch.artifacts[0]?.title,
+      ),
+    ).toEqual(['two', 'three']);
+
+    fakeEntry.artifactWorkspaceReady = true;
+    await client.drainDeferredSessionArtifacts(fakeEntry as never);
+    expect(
+      upsertMany.mock.calls.map(([artifacts]) => artifacts[0]?.title),
+    ).toEqual(['two', 'three']);
+  });
+
   it('stores hook artifact events for child-initiated turns', async () => {
     const sessionId = 'sess:child-artifacts';
     const publish = vi.fn().mockReturnValue(true);
@@ -2919,6 +3092,9 @@ describe('BridgeClient — artifact ingress', () => {
     const fakeEntry = {
       sessionId,
       events: { publish },
+      artifactWorkspaceReady: true,
+      deferredArtifactBatches: [],
+      deferredArtifactInputCount: 0,
       artifacts: new SessionArtifactStore({
         sessionId,
         workspaceCwd: workspace,

@@ -146,6 +146,15 @@ export function validateDnsResolutionOrder(
 }
 
 function getNodeMemoryArgs(isDebugMode: boolean): string[] {
+  // Bun accepts --max-old-space-size but it is a no-op (Bun's heap limit
+  // starts small and adapts dynamically instead of honouring the flag).
+  // The one-process relaunch below happens unconditionally, so under Bun
+  // this only stops forwarding a flag that does nothing into the
+  // relaunch/sandbox child.
+  if ('bun' in process.versions) {
+    return [];
+  }
+
   const totalMemoryMB = os.totalmem() / (1024 * 1024);
   const heapStats = v8.getHeapStatistics();
   const currentMaxOldSpaceSizeMb = Math.floor(

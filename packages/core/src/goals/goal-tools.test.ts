@@ -618,6 +618,16 @@ describe('UpdateGoalTool', () => {
     expect(schema.properties.blockerKind.description).toContain(
       'exact same reason text',
     );
+    expect(
+      (schema.properties.blockerKind as { enum?: string[] }).enum,
+    ).toContain('infeasible');
+    expect(schema.properties.blockerKind.description).toContain(
+      'cannot be satisfied as written',
+    );
+    expect(tool.description).toContain('a tool result, not your own text');
+    expect(tool.description).toContain(
+      'not for difficulty, uncertainty, information you could still obtain',
+    );
   });
 
   it('rejects lineage turn ids before recording a proposal', async () => {

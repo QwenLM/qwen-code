@@ -261,6 +261,7 @@ describe('qwen serve multi-workspace channel workers', () => {
           serverWsUrl: primaryServer.wsUrl,
           senderPolicy: 'open',
           sessionScope: 'user',
+          multiSession: true,
           cwd: workspace,
         },
       },
@@ -332,6 +333,34 @@ describe('qwen serve multi-workspace channel workers', () => {
       ],
     });
 
+    const aliceTarget = { senderId: 'alice', chatId: 'group-1' };
+    const bobTarget = { senderId: 'bob', chatId: 'group-1' };
+    await expect(
+      primaryServer.sendMessage('/session new review', aliceTarget),
+    ).resolves.toContain('Created and selected task "review"');
+    await expect(
+      primaryServer.sendMessage('/session new review', bobTarget),
+    ).resolves.toContain('Created and selected task "review"');
+    await expect(
+      primaryServer.sendMessage('/sessions all', aliceTarget),
+    ).resolves.toContain('* review (open, shared)');
+
+    await expect(
+      primaryServer.sendMessage('/session close review', aliceTarget),
+    ).resolves.toContain('No task is selected');
+    await expect(
+      primaryServer.sendMessage('/sessions', aliceTarget),
+    ).resolves.toBe('No open named tasks.');
+    await expect(
+      primaryServer.sendMessage('/sessions', bobTarget),
+    ).resolves.toContain('* review (open, shared)');
+    await expect(
+      primaryServer.sendMessage('/session use review', aliceTarget),
+    ).resolves.toContain('Selected task "review"');
+    await expect(
+      primaryServer.sendMessage('/session current', aliceTarget),
+    ).resolves.toContain('Current task: review');
+
     const same = await fetch(`${baseUrl}/workspace/channel`, {
       method: 'PUT',
       headers: authHeaders,
@@ -367,6 +396,23 @@ describe('qwen serve multi-workspace channel workers', () => {
       selection: null,
       workers: [],
     });
+
+    const enableAfterRestart = await fetch(`${baseUrl}/workspace/channel`, {
+      method: 'PUT',
+      headers: authHeaders,
+      body: JSON.stringify({
+        selection: { mode: 'names', names: ['runtime'] },
+      }),
+    });
+    expect(enableAfterRestart.status).toBe(201);
+    await primaryServer.waitForConnection(15_000);
+    await waitForRunningControl(baseUrl);
+    await expect(
+      primaryServer.sendMessage('/session use review', aliceTarget),
+    ).resolves.toContain('Selected task "review"');
+    await expect(
+      primaryServer.sendMessage('/session use review', bobTarget),
+    ).resolves.toContain('Selected task "review"');
   }, 60_000);
 
   it('returns partial startup failures from control and daemon status', async () => {

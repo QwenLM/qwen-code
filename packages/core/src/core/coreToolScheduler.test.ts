@@ -3770,6 +3770,62 @@ describe('CoreToolScheduler', () => {
     expect(execute).not.toHaveBeenCalled();
   });
 
+  it('attributes a rejection by the legacy coreTools allowlist to core tools, not permissions.allow (#10075)', async () => {
+    // Since #10075 an uncovered `permissions.allow` tool is deferred (still
+    // registered and callable), never rejected at call time — so a
+    // rejection with no matching deny rule under an active allowlist can
+    // only come from the legacy coreTools allowlist, and the message must
+    // point at that knob instead of advising a permissions.allow rule that
+    // would be a no-op.
+    const execute = vi.fn().mockResolvedValue({
+      llmContent: 'sent',
+      returnDisplay: 'sent',
+    });
+    const toolsByName = new Map<string, MockTool>([
+      [ToolNames.EDIT, new MockTool({ name: ToolNames.EDIT, execute })],
+    ]);
+    const permissionManager = {
+      isToolEnabled: vi.fn().mockResolvedValue(false),
+      findMatchingDenyRule: vi.fn().mockReturnValue(undefined),
+      isPermissionsAllowListActive: vi.fn().mockReturnValue(true),
+      isCoveredByAllowOrAskRule: vi.fn().mockReturnValue(false),
+      isToolDisabledByCoreToolsAllowList: vi.fn().mockReturnValue(true),
+    };
+    const { scheduler, onAllToolCallsComplete } =
+      createSchedulerForLegacyToolTests({
+        toolsByName,
+        permissionManager,
+      });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: 'core-tools-miss',
+          name: ToolNames.EDIT,
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-core-tools-miss',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    expect(onAllToolCallsComplete).toHaveBeenCalled();
+    const completedCalls = onAllToolCallsComplete.mock
+      .calls[0][0] as ToolCall[];
+    const completedCall = completedCalls[0];
+    expect(completedCall.status).toBe('error');
+    if (completedCall.status === 'error') {
+      expect(completedCall.response.errorType).toBe(
+        ToolErrorType.EXECUTION_DENIED,
+      );
+      expect(completedCall.response.error?.message).toBe(
+        '"edit" is not listed in the active core tools allowlist (--core-tools or settings tools.core), so the tool is not available. Add it to the core tools list to re-enable it.',
+      );
+    }
+    expect(execute).not.toHaveBeenCalled();
+  });
+
   it('keeps the legacy declined message when the tool is disabled without an active allowlist (#9827)', async () => {
     const execute = vi.fn().mockResolvedValue({
       llmContent: 'sent',
