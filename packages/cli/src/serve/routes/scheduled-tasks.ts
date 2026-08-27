@@ -91,6 +91,8 @@ export interface ScheduledTasksSessionBridge {
     sourceId?: string;
   }): Promise<{ sessionId: string }>;
   closeSession(sessionId: string): Promise<unknown>;
+  /** Persist a restorable transcript anchor for an eligible default session. */
+  ensureDefaultSessionPersisted?(sessionId: string): Promise<void>;
   /** Advance the in-memory session-catalog revision after a successful
    * persisted removal driven by task cleanup. Optional so existing
    * structural test fakes stay source-compatible; the production bridge
@@ -331,6 +333,38 @@ export async function createScheduledTaskWithExistingSession(
     assertCallerPromptActive,
   );
   target.assertGenerationOpen?.();
+
+  if (options.source === 'rest') {
+    const ensurePersisted = target.bridge?.ensureDefaultSessionPersisted;
+    if (!ensurePersisted) {
+      throw new ExistingSessionScheduledTaskCreateError(
+        409,
+        'session_binding_unavailable',
+        'Session persistence is not available for this workspace',
+      );
+    }
+    try {
+      await ensurePersisted.call(target.bridge, input.sessionId);
+    } catch (error) {
+      target.assertGenerationOpen?.();
+      if (error instanceof SessionNotFoundError) {
+        throw new ExistingSessionScheduledTaskCreateError(
+          404,
+          'session_not_found',
+          `Session '${input.sessionId}' was not found`,
+        );
+      }
+      writeStderrLine(
+        `qwen serve: failed to persist scheduled-task session '${input.sessionId}': ${error instanceof Error ? error.message : String(error)}`,
+      );
+      throw new ExistingSessionScheduledTaskCreateError(
+        500,
+        'session_persistence_failed',
+        'Failed to persist the requested session',
+      );
+    }
+    target.assertGenerationOpen?.();
+  }
 
   const now = Date.now();
   const task: DurableCronTask = {

@@ -286,6 +286,30 @@ class ResponseTrackingChannel extends TestChannel {
   }
 }
 
+class SlowBlockSendChannel extends TestChannel {
+  sendCompletions = 0;
+  completionsAtPromptEnd: number[] = [];
+
+  protected override async sendResponseMessage(
+    chatId: string,
+    text: string,
+    sessionId: string,
+  ): Promise<void> {
+    await new Promise((resolve) => setTimeout(resolve, 15));
+    this.sendCompletions++;
+    await super.sendResponseMessage(chatId, text, sessionId);
+  }
+
+  protected override onPromptEnd(
+    chatId: string,
+    sessionId: string,
+    messageId?: string,
+  ): void {
+    this.completionsAtPromptEnd.push(this.sendCompletions);
+    super.onPromptEnd(chatId, sessionId, messageId);
+  }
+}
+
 class UnsafeProcessChannel extends TestChannel {
   processWithoutPreflight(envelope: Envelope): Promise<void> {
     return this.processInbound(envelope);
@@ -10189,7 +10213,7 @@ describe('ChannelBase', () => {
       expect(pathLine).not.toContain(rlo);
     });
 
-    it('extracts image from attachments', async () => {
+    it('forwards every image attachment in order', async () => {
       const ch = createChannel();
       await ch.handleInbound(
         envelope({
@@ -10200,11 +10224,20 @@ describe('ChannelBase', () => {
               data: 'base64data',
               mimeType: 'image/png',
             },
+            {
+              type: 'image',
+              data: 'second-image',
+              mimeType: 'image/jpeg',
+            },
           ],
         }),
       );
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const options = (bridge.prompt as any).mock.calls[0][2];
+      expect(options.images).toEqual([
+        { data: 'base64data', mimeType: 'image/png' },
+        { data: 'second-image', mimeType: 'image/jpeg' },
+      ]);
       expect(options.imageBase64).toBe('base64data');
       expect(options.imageMimeType).toBe('image/png');
     });
@@ -10220,7 +10253,33 @@ describe('ChannelBase', () => {
       );
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const options = (bridge.prompt as any).mock.calls[0][2];
-      expect(options.imageBase64).toBe('legacydata');
+      expect(options.images).toEqual([
+        { data: 'legacydata', mimeType: 'image/jpeg' },
+      ]);
+    });
+
+    it('orders the legacy image before attachment images', async () => {
+      const ch = createChannel();
+      await ch.handleInbound(
+        envelope({
+          text: 'see image',
+          imageBase64: 'legacydata',
+          imageMimeType: 'image/jpeg',
+          attachments: [
+            {
+              type: 'image',
+              data: 'attachmentdata',
+              mimeType: 'image/png',
+            },
+          ],
+        }),
+      );
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const options = (bridge.prompt as any).mock.calls[0][2];
+      expect(options.images).toEqual([
+        { data: 'legacydata', mimeType: 'image/jpeg' },
+        { data: 'attachmentdata', mimeType: 'image/png' },
+      ]);
     });
 
     it('prepends instructions on first message only', async () => {
@@ -13490,6 +13549,34 @@ describe('ChannelBase', () => {
       expect(ch.responseDeliveries).toEqual([
         { chatId: 'chat1', text: 'reply', sessionId: 's-1' },
       ]);
+    });
+
+    it('settles turn cleanup only after queued block sends land', async () => {
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockImplementation(
+        (sid: string) => {
+          (bridge as unknown as EventEmitter).emit(
+            'textChunk',
+            sid,
+            'first paragraph body\n\n',
+          );
+          return Promise.reject(new Error('agent boom'));
+        },
+      );
+      const ch = new SlowBlockSendChannel(
+        'test-chan',
+        defaultConfig({
+          blockStreaming: 'on',
+          blockStreamingChunk: { minChars: 5, maxChars: 100 },
+          blockStreamingCoalesce: { idleMs: 0 },
+        }),
+        bridge,
+      );
+
+      await expect(ch.handleInbound(envelope())).rejects.toThrow('agent boom');
+
+      // The failed turn's queued block send must have completed before
+      // onPromptEnd settled turn-scoped adapter state.
+      expect(ch.completionsAtPromptEnd).toEqual([1]);
     });
 
     it('uses block streamer when blockStreaming=on', async () => {
