@@ -204,8 +204,8 @@ fi
 # runner workspace refused), so the recursive chmod cannot escape it.
 chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chmod -R u+rwX "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace write permissions; checkout may fail on leftover read-only files"
 find "$WS" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
-# Later steps must not read pool-persistent Git, npm, Docker, or
-# setup-node state. A fresh directory avoids an unbounded scrub
+# Later steps must not read pool-persistent Git, npm, Docker, gh,
+# or setup-node state. A fresh directory avoids an unbounded scrub
 # denylist and stale lock files before checkout runs; the reserved
 # RUNNER_TOOL_CACHE variable cannot be overridden, so purge Node.
 TOOL_CACHE="$(realpath -m -- "\${RUNNER_TOOL_CACHE:?}" 2>/dev/null)" || exit 1
@@ -224,6 +224,11 @@ release_state="$(mktemp -d "\${RUNNER_TEMP:?}/release-state.XXXXXX")" || exit 1
 : > "\${release_state}/gitconfig" || exit 1
 : > "\${release_state}/npmrc" || exit 1
 mkdir "\${release_state}/docker" || exit 1
+# gh reads $HOME/.config/gh across pool jobs: a prior job could
+# plant a config.yml with http_unix_socket there and capture the
+# token a later \`gh\` call sends — qwen-autofix.yml isolates
+# GH_CONFIG_DIR the same way.
+mkdir "\${release_state}/gh" || exit 1
 {
   echo 'GIT_CONFIG_COUNT=0'
   echo 'GIT_CONFIG_NOSYSTEM=1'
@@ -231,6 +236,7 @@ mkdir "\${release_state}/docker" || exit 1
   echo "GIT_CONFIG_GLOBAL=\${release_state}/gitconfig"
   echo "NPM_CONFIG_USERCONFIG=\${release_state}/npmrc"
   echo "DOCKER_CONFIG=\${release_state}/docker"
+  echo "GH_CONFIG_DIR=\${release_state}/gh"
 } >> "\${GITHUB_ENV:?}"`;
 
 describe('release workflow', () => {
@@ -355,6 +361,9 @@ describe('release workflow', () => {
           );
           expect(stateEnv).toMatch(
             /DOCKER_CONFIG=.*\/release-state\.[^/]+\/docker\n/,
+          );
+          expect(stateEnv).toMatch(
+            /GH_CONFIG_DIR=.*\/release-state\.[^/]+\/gh\n/,
           );
           const isolatedEnv = { ...env };
           for (const line of stateEnv.trimEnd().split('\n')) {
