@@ -958,6 +958,27 @@ jobs:
           RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
         run: |-
           set -euo pipefail
+          # A close at/after the trigger is a terminal action of THIS run:
+          # Stage 1-pre closes a duplicate PR without leaving a review, and
+          # the review-list check below cannot tell that apart from a re-run
+          # that did nothing — it would announce on the just-closed PR that
+          # the re-run "did not" review it, and the ::warning would dispatch
+          # a human to a correctly-handled run. Read the PR's own state and
+          # exit quietly; a close BEFORE the trigger keeps the old behaviour,
+          # because this run still owes its summary. A failed `gh pr view`
+          # is not fatal: the review-list check below then decides, as before.
+          if PR_STATE="$(
+               gh pr view "$NUMBER" --repo "$GITHUB_REPOSITORY" --json state,closedAt
+             )" &&
+             CLOSED_SINCE_TRIGGER="$(
+               printf '%s' "$PR_STATE" |
+                 jq -r --arg since "$TRIGGERED_AT" \
+                   '.closedAt != null and .closedAt >= $since'
+             )" &&
+             [ "$CLOSED_SINCE_TRIGGER" = true ]; then
+            echo "PR closed at/after the trigger comment; no re-run summary needed."
+            exit 0
+          fi
           HAS_REVIEW=false
           HEAD_SHA=''
           # unknown until both the review list and the head SHA are readable

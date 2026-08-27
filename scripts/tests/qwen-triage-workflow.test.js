@@ -1196,7 +1196,8 @@ describe('qwen-triage tmux workflow', () => {
           const bin = join(dir, 'bin');
           mkdirSync(bin, { recursive: true });
           writeFileSync(join(dir, 'reviews.json'), JSON.stringify(reviews));
-          // Stand-in for `gh`: serves the review list and head SHA, and
+          // Stand-in for `gh`: serves the PR state, the review list and
+          // the head SHA, and
           // captures the comment body the step would have posted.
           writeFileSync(
             join(bin, 'gh'),
@@ -1204,6 +1205,7 @@ describe('qwen-triage tmux workflow', () => {
               '#!/usr/bin/env bash',
               'case "$*" in',
               `  "api user --jq .login") echo bot ;;`,
+              `  "pr view 1 --repo QwenLM/qwen-code --json state,closedAt") echo '{"state":"OPEN","closedAt":null}' ;;`,
               `  *"/pulls/1/reviews"*) cat "${join(dir, 'reviews.json')}" ;;`,
               `  *"/pulls/1 --jq .head.sha") [ -n "$FAKE_HEAD" ] && echo "$FAKE_HEAD" || exit 1 ;;`,
               `  *"/issues/1/comments"*)`,
@@ -1281,6 +1283,104 @@ describe('qwen-triage tmux workflow', () => {
       expect(noHead.status).toBe(0);
       expect(noHead.log).not.toContain('Triage re-run left no bot review');
       expect(noHead.comment).toContain('could not be read');
+    },
+  );
+
+  // A Stage 1-pre duplicate-close exit leaves no review at all, and the
+  // review-list check above cannot tell it apart from a re-run that did
+  // nothing: it announced "completed without a new review ... it did not"
+  // on the PR the same run just closed, and the ::warning dispatched a
+  // human to a correctly-handled run. The close IS the terminal action:
+  // the step must read the PR's own state and exit quietly. A close BEFORE
+  // the trigger keeps the old behaviour — that run still owes its summary.
+  it.skipIf(spawnSync('jq', ['--version']).status !== 0)(
+    'exits quietly when the PR was closed at/after the trigger comment',
+    () => {
+      const notifyStep = step('Notify silent triage re-run');
+      // The exemption reads the PR itself, not only the review list.
+      expect(notifyStep).toContain(
+        'gh pr view "$NUMBER" --repo "$GITHUB_REPOSITORY" --json state,closedAt',
+      );
+      const body = notifyStep.match(/run: \|-\n([\s\S]*)$/)?.[1];
+      expect(body).toBeTruthy();
+      const script = body.replace(/^ {10}/gm, '');
+
+      const run = (prState, reviews = []) => {
+        const dir = mkdtempSync(join(tmpdir(), 'triage-close-exit-'));
+        try {
+          const bin = join(dir, 'bin');
+          mkdirSync(bin, { recursive: true });
+          writeFileSync(join(dir, 'pr-state.json'), JSON.stringify(prState));
+          writeFileSync(join(dir, 'reviews.json'), JSON.stringify(reviews));
+          // Stand-in for `gh`: serves the PR state, an (empty) review list
+          // and the head SHA, and captures the comment body the step would
+          // have posted.
+          writeFileSync(
+            join(bin, 'gh'),
+            [
+              '#!/usr/bin/env bash',
+              'case "$*" in',
+              `  "api user --jq .login") echo bot ;;`,
+              `  "pr view 1 --repo QwenLM/qwen-code --json state,closedAt") cat "${join(dir, 'pr-state.json')}" ;;`,
+              `  *"/pulls/1/reviews"*) cat "${join(dir, 'reviews.json')}" ;;`,
+              `  *"/pulls/1 --jq .head.sha") echo head ;;`,
+              `  *"/issues/1/comments"*)`,
+              `    for a in "$@"; do case "$a" in body=*) printf '%s' "\${a#body=}" > "${join(dir, 'comment.txt')}" ;; esac; done`,
+              `    echo '{}' ;;`,
+              '  *) echo "unexpected gh call: $*" >&2; exit 1 ;;',
+              'esac',
+            ].join('\n'),
+            { mode: 0o755 },
+          );
+          const proc = spawnSync('bash', ['-c', script], {
+            env: {
+              ...process.env,
+              PATH: `${bin}:${process.env.PATH}`,
+              GITHUB_REPOSITORY: 'QwenLM/qwen-code',
+              NUMBER: '1',
+              TRIGGERED_AT: '2026-01-02T00:00:00Z',
+              RUN_URL: 'https://example.invalid/run',
+            },
+            encoding: 'utf8',
+          });
+          let comment = '';
+          try {
+            comment = readFileSync(join(dir, 'comment.txt'), 'utf8');
+          } catch {
+            comment = '';
+          }
+          return {
+            status: proc.status,
+            log: `${proc.stdout}${proc.stderr}`,
+            comment,
+          };
+        } finally {
+          rmSync(dir, { recursive: true, force: true });
+        }
+      };
+
+      // The close-exit shape: closed after the trigger, no review left.
+      // Neither the summary comment nor the warning may fire.
+      const closeExit = run({
+        state: 'CLOSED',
+        closedAt: '2026-01-03T00:00:00Z',
+      });
+      expect(closeExit.status).toBe(0);
+      expect(closeExit.comment).toBe('');
+      expect(closeExit.log).not.toContain('Triage re-run left no bot review');
+      expect(closeExit.log).toContain('no re-run summary needed');
+
+      // The boundary: a close BEFORE the trigger comment is not this run's
+      // terminal action, so the old notify behaviour stays intact.
+      const closedBefore = run({
+        state: 'CLOSED',
+        closedAt: '2026-01-01T00:00:00Z',
+      });
+      expect(closedBefore.status).toBe(0);
+      expect(closedBefore.log).toContain('Triage re-run left no bot review');
+      expect(closedBefore.comment).toContain(
+        '<!-- qwen-triage stage=rerun-summary -->',
+      );
     },
   );
 
