@@ -1063,6 +1063,8 @@ export interface ProjectRuntimeReloader {
     targetDir: string,
     trustedFolder: boolean | undefined,
     approvalMode: ApprovalMode,
+    /** The directory being left; a rollback restores its environment. */
+    previousDir: string,
   ): Promise<PreparedProjectRuntime>;
 }
 
@@ -1839,7 +1841,11 @@ function resolveCronRecurringMaxAgeDays(setting: number | undefined): number {
 function resolveContextFileNames(
   value: string | string[] | undefined,
 ): readonly string[] {
+  // Settings JSON is not schema-validated on load, and a `/cd` target's
+  // `context.fileName` reaches here verbatim — a non-string entry must not
+  // throw out of the middle of a half-committed relocation.
   const names = (Array.isArray(value) ? value : value ? [value] : [])
+    .filter((name): name is string => typeof name === 'string')
     .map((name) => name.trim())
     .filter(Boolean);
   return names.length > 0
@@ -2618,7 +2624,7 @@ export class Config {
   /** Project-level hooks (only loaded in trusted folders) */
   private projectHooks?: Record<string, unknown>;
   /** @deprecated Legacy merged hooks field - use userHooks/projectHooks instead */
-  private readonly hooks?: Record<string, unknown>;
+  private hooks?: Record<string, unknown>;
   private hookSystem?: HookSystem;
   private messageBus?: MessageBus;
   private readonly memoryManager: MemoryManager;
@@ -5779,6 +5785,11 @@ export class Config {
     );
     this.userHooks = runtime.userHooks;
     this.projectHooks = runtime.projectHooks;
+    // The legacy merged `hooks` field is only the getters' fallback when
+    // the split fields are unset. A hook-less target project sets both to
+    // undefined, and leaving the startup value here would revive the
+    // previous project's hooks — under the User source, past the trust gate.
+    this.hooks = undefined;
     this.setAllowedMcpServers(runtime.allowedMcpServers);
     this.setExcludedMcpServers(runtime.excludedMcpServers ?? []);
     this.setPendingMcpServers(runtime.pendingMcpServers);
@@ -5906,6 +5917,13 @@ export class Config {
     memoryRefreshError?: unknown;
     mcpRefreshError?: unknown;
     projectRuntimeRefreshErrors?: unknown[];
+    /**
+     * Session-only cron jobs and loop wakeups the swap cancelled, in the
+     * scheduler's exit-summary wording. The old scheduler is destroyed
+     * before the UI's effect cleanup can read it, so this is the only
+     * place the cancellation can still be reported.
+     */
+    cronExitSummary?: string;
   }> {
     if (isDerivedConfig(this)) {
       throw new Error('Derived Configs cannot relocate working directories');
@@ -5928,6 +5946,7 @@ export class Config {
       expected,
       opts?.trustedFolder,
       this.getApprovalMode(),
+      oldDir,
     );
     const workspaceDirectories = WorkspaceContext.resolveRootDirectories(
       expected,
@@ -6017,18 +6036,30 @@ export class Config {
     }
 
     this.backgroundTaskRegistry.disposeResidentAgents();
+    const cronExitSummary = this.cronScheduler?.getExitSummary() ?? undefined;
     this.cronScheduler?.destroy();
     this.cronScheduler = null;
     this.targetDir = expected;
     this.cwd = expected;
     resetPreloadedContentGenerator(this.contentGenerator);
     await this.refreshCurrentRuntimeStatus(expected);
+    // Directories the user added at runtime (`/directory add`) are not the
+    // previous project's to replace. They must also not be absorbed into
+    // the managed set just because the next project happens to list them:
+    // that would let a later `/cd` — to a project that does not — drop them.
+    const runtimeAddedDirectories = new Set(
+      [...this.workspaceContext.getDirectories()].filter(
+        (directory) => !this.managedWorkspaceDirectories.has(directory),
+      ),
+    );
     this.workspaceContext.applyRootDirectories(
       workspaceDirectories,
       this.managedWorkspaceDirectories,
     );
     this.managedWorkspaceDirectories = new Set(
-      workspaceDirectories.directories,
+      [...workspaceDirectories.directories].filter(
+        (directory) => !runtimeAddedDirectories.has(directory),
+      ),
     );
     this.fileDiscoveryService = null;
     this.sessionService = undefined;
@@ -6036,7 +6067,14 @@ export class Config {
     this.getFileReadCache().clear();
 
     if (preparedProjectRuntime) {
-      this.applyProjectRuntimeConfig(preparedProjectRuntime.config);
+      try {
+        this.applyProjectRuntimeConfig(preparedProjectRuntime.config);
+      } catch (error) {
+        // A bad field must not strand the move: the settings swap and
+        // chdir are already committed, and `complete()` below is what
+        // resumes the settings watcher.
+        projectRuntimeRefreshErrors.push(error);
+      }
 
       try {
         this.permissionManager?.reloadForProjectChange();
@@ -6114,7 +6152,12 @@ export class Config {
         projectRuntimeRefreshErrors.push(error);
       }
       try {
-        await this.hookSystem?.fireCwdChangedEvent(oldDir, expected);
+        // Every other fire site checks the kill switch; this one runs
+        // right after `disableAllHooks` may have flipped to the target
+        // project's value, so it must too.
+        if (!this.getDisableAllHooks()) {
+          await this.hookSystem?.fireCwdChangedEvent(oldDir, expected);
+        }
       } catch (error) {
         projectRuntimeRefreshErrors.push(error);
       }
@@ -6131,6 +6174,7 @@ export class Config {
       ...(projectRuntimeRefreshErrors.length > 0 && {
         projectRuntimeRefreshErrors,
       }),
+      ...(cronExitSummary !== undefined && { cronExitSummary }),
     };
   }
 

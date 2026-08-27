@@ -634,8 +634,15 @@ export class LoadedSettings {
       }
 
       const content = fs.readFileSync(file.path, 'utf-8');
-      const parsed = JSON.parse(stripJsonComments(content));
+      let parsed = JSON.parse(stripJsonComments(content));
       if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        // A scope loaded read-only (the `/cd` reloader) was migrated in
+        // memory and never written back, so the file on disk is still in
+        // its legacy layout. Re-parsing it raw here would undo that
+        // migration on the first hot-reload after the move.
+        if (this.migratedInMemoryScopes.has(scope) && needsMigration(parsed)) {
+          parsed = runMigrations(parsed, scope).settings;
+        }
         const resolved = resolveEnvVarsInObject(
           parsed as Settings,
           getHomeEnvFallbackVars((message) => debugLogger.warn(message)),

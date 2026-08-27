@@ -549,6 +549,17 @@ export class ToolRegistry {
     }
   }
 
+  /**
+   * Drops the project-scoped state a failed `/cd` tool refresh may have
+   * left half-built: command-discovered tools and their reveal state.
+   *
+   * Deliberately nothing else. This runs from the refresh's catch block,
+   * against a registry that is either still intact or already swapped by
+   * `replaceCoreToolsFrom` — never mixed — so core tools and factories are
+   * always the right set to keep. Removing them here (as an earlier version
+   * did) left the session with no `read_file`/`edit`/shell until restart
+   * whenever the target project's discovery command merely exited non-zero.
+   */
   async clearProjectRuntimeTools(): Promise<void> {
     if (this.inflight.size > 0) {
       await Promise.allSettled(this.inflight.values());
@@ -556,7 +567,7 @@ export class ToolRegistry {
     for (const [name, tool] of this.tools) {
       if (
         this.sessionOwnedTools.has(name) ||
-        tool instanceof DiscoveredMCPTool
+        !(tool instanceof DiscoveredTool)
       ) {
         continue;
       }
@@ -570,19 +581,6 @@ export class ToolRegistry {
       this.tools.delete(name);
       this.revealedDeferred.delete(name);
       this.pinnedDeferredReveals.delete(name);
-    }
-    for (const name of this.factories.keys()) {
-      if (!this.sessionOwnedTools.has(name)) {
-        this.factories.delete(name);
-        this.revealedDeferred.delete(name);
-        this.pinnedDeferredReveals.delete(name);
-      }
-    }
-    this.inflight.clear();
-    for (const name of this.permissionDeferred) {
-      if (!this.sessionOwnedTools.has(name)) {
-        this.permissionDeferred.delete(name);
-      }
     }
   }
 
@@ -886,6 +884,17 @@ export class ToolRegistry {
       for (const func of functions) {
         if (!func.name) {
           debugLogger.warn('Discovered a tool with no name. Skipping.');
+          continue;
+        }
+        // Discovery re-runs mid-session on `/cd`, after Session has
+        // registered its own tools (live voice, sub-sessions). A project's
+        // discovery command must not be able to replace those: `registerTool`
+        // would overwrite with only a debug warning, routing the model's
+        // next call into the project's `toolCallCommand`.
+        if (this.sessionOwnedTools.has(func.name)) {
+          debugLogger.warn(
+            `Discovered tool "${func.name}" skipped: the name is owned by the session.`,
+          );
           continue;
         }
         if (permissionManager) {

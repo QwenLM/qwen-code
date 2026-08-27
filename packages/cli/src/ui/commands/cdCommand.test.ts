@@ -339,6 +339,47 @@ describe('cdCommand', () => {
     });
   });
 
+  it('reports a successful move when a project runtime refresh step fails', async () => {
+    relocateWorkingDirectory.mockResolvedValue({
+      projectRuntimeRefreshErrors: [new Error('hooks failed'), 'skills failed'],
+    });
+
+    const result = (await cdCommand.action?.(
+      context,
+      '../next',
+    )) as MessageActionReturn;
+    const realNextDir = await realpath(nextDir);
+
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'warning',
+      content:
+        `Moved to ${realNextDir}. Project runtime refresh failed: hooks failed ` +
+        'Project runtime refresh failed: skills failed',
+    });
+  });
+
+  it('reports the session-only cron work the move cancelled', async () => {
+    relocateWorkingDirectory.mockResolvedValue({
+      cronExitSummary:
+        'Session ending. 1 active loop cancelled:\n  - [job-1] every 5m: poll',
+    });
+
+    const result = (await cdCommand.action?.(
+      context,
+      '../next',
+    )) as MessageActionReturn;
+    const realNextDir = await realpath(nextDir);
+
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'warning',
+      content:
+        `Moved to ${realNextDir}. Working directory changed; 1 active loop cancelled:\n` +
+        '  - [job-1] every 5m: poll',
+    });
+  });
+
   it('reports a successful move when MCP refresh fails afterward', async () => {
     relocateWorkingDirectory.mockResolvedValue({
       mcpRefreshError: new Error('MCP failed'),

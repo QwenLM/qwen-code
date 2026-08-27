@@ -314,6 +314,7 @@ vi.mock('../utils/memory-constants.js', () => ({
   getCurrentMemoryFilename: vi.fn(() => 'QWEN.md'), // Mock the original filename
   getAllMemoryFilenames: vi.fn(() => ['QWEN.md', 'AGENTS.md']),
   DEFAULT_CONTEXT_FILENAME: 'QWEN.md',
+  AGENT_CONTEXT_FILENAME: 'AGENTS.md',
 }));
 vi.mock('../tools/memory-config', () => ({
   setMemoryFilename: vi.fn(),
@@ -7005,7 +7006,12 @@ describe('Server Config (config.ts)', () => {
     });
 
     expect(result).toEqual({});
-    expect(prepare).toHaveBeenCalledWith(newDir, true, ApprovalMode.AUTO);
+    expect(prepare).toHaveBeenCalledWith(
+      newDir,
+      true,
+      ApprovalMode.AUTO,
+      expect.any(String),
+    );
     expect(commit).toHaveBeenCalledOnce();
     expect(rollback).not.toHaveBeenCalled();
     expect(complete).toHaveBeenCalledOnce();
@@ -7024,7 +7030,7 @@ describe('Server Config (config.ts)', () => {
     expect(config.getCustomSkillDirs()).toEqual(['/target-skills']);
     expect(config.getImportFormat()).toBe('flat');
     expect(config.getContextFileNames()).toEqual(['PROJECT-B.md']);
-    expect(mockSetGeminiMdFilename).not.toHaveBeenCalled();
+    expect(mockSetMemoryFilename).not.toHaveBeenCalled();
     expect(config.getManagedAutoMemoryEnabled()).toBe(false);
     expect(config.getManagedAutoDreamEnabled()).toBe(false);
     expect(config.getTeamMemoryEnabled()).toBe(true);
@@ -7118,7 +7124,12 @@ describe('Server Config (config.ts)', () => {
     );
 
     expect(chdirSpy).not.toHaveBeenCalled();
-    expect(prepare).toHaveBeenCalledWith(newDir, undefined, ApprovalMode.YOLO);
+    expect(prepare).toHaveBeenCalledWith(
+      newDir,
+      undefined,
+      ApprovalMode.YOLO,
+      expect.any(String),
+    );
     expect(config.getTargetDir()).toBe(baseParams.targetDir);
     chdirSpy.mockRestore();
   });
@@ -7717,8 +7728,271 @@ describe('Server Config (config.ts)', () => {
     cwdSpy.mockRestore();
   });
 
+  // The smallest prepared runtime `applyProjectRuntimeConfig` accepts; the
+  // relocation tests below override the one or two fields they are about.
+  const preparedRuntime = (
+    overrides: Record<string, unknown> = {},
+  ): Record<string, unknown> => ({
+    trustedFolder: true,
+    includeDirectories: [],
+    loadMemoryFromIncludeDirectories: false,
+    plansDir: '/path/to/other/plans',
+    plansDirectoryConfigured: false,
+    cronEnabled: true,
+    lsToolEnabled: false,
+    agentTeamEnabled: false,
+    artifactEnabled: true,
+    artifactAutoOpen: true,
+    artifactPublisher: 'local',
+    workflowsEnabled: false,
+    skipWorkflowUsageWarning: false,
+    allowedHttpHookUrls: [],
+    allowPrivateNetworkHooks: false,
+    mcpServers: {},
+    ...overrides,
+  });
+
+  const relocateWithRuntime = async (
+    config: Config,
+    newDir: string,
+    extra: { trustedFolder?: boolean } = { trustedFolder: true },
+  ) => {
+    const chdirSpy = vi.spyOn(process, 'chdir').mockImplementation(() => {});
+    const cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue(newDir);
+    try {
+      return await config.relocateWorkingDirectory(newDir, newDir, extra);
+    } finally {
+      chdirSpy.mockRestore();
+      cwdSpy.mockRestore();
+    }
+  };
+
+  it('relocateWorkingDirectory drops non-string context file names instead of throwing mid-move', async () => {
+    // Settings JSON is not validated on load, so a target project's
+    // `context.fileName: ["PROJECT-B.md", 42]` reaches the apply verbatim.
+    // Throwing there stranded a half-committed relocation (settings
+    // swapped, chdir done, watcher paused, tools not refreshed).
+    const prepare = vi.fn().mockResolvedValue({
+      config: preparedRuntime({ contextFileName: ['PROJECT-B.md', 42] }),
+      commit: vi.fn().mockResolvedValue(undefined),
+      rollback: vi.fn().mockResolvedValue(undefined),
+      complete: vi.fn().mockResolvedValue(undefined),
+    });
+    const config = new Config({
+      ...baseParams,
+      projectRuntimeReloader: { prepare },
+    });
+    await config.initialize({ skipGeminiInitialization: true });
+    await config.waitForMcpReady();
+
+    const result = await relocateWithRuntime(
+      config,
+      path.resolve('/path/to/other'),
+    );
+
+    expect(result).toEqual({});
+    expect(config.getContextFileNames()).toEqual(['PROJECT-B.md']);
+  });
+
+  it('relocateWorkingDirectory falls back to the default context file names when the target sets none', async () => {
+    const prepare = vi.fn().mockResolvedValue({
+      config: preparedRuntime(),
+      commit: vi.fn().mockResolvedValue(undefined),
+      rollback: vi.fn().mockResolvedValue(undefined),
+      complete: vi.fn().mockResolvedValue(undefined),
+    });
+    const config = new Config({
+      ...baseParams,
+      contextFileName: 'PROJECT-A.md',
+      projectRuntimeReloader: { prepare },
+    });
+    await config.initialize({ skipGeminiInitialization: true });
+    await config.waitForMcpReady();
+    expect(config.getContextFileNames()).toEqual(['PROJECT-A.md']);
+
+    await relocateWithRuntime(config, path.resolve('/path/to/other'));
+
+    expect(config.getContextFileNames()).toEqual(['QWEN.md', 'AGENTS.md']);
+  });
+
+  it('relocateWorkingDirectory does not revive the previous project hooks through the legacy hooks field', async () => {
+    // `getUserHooks()`/`getProjectHooks()` fall back to the legacy merged
+    // `hooks` field, which was only ever set at construction. A hook-less
+    // target leaves both split fields undefined — and the fallback then
+    // re-registered project A's command hooks in project B, under the
+    // User source that bypasses the workspace trust gate.
+    const legacyHooks = {
+      PreToolUse: [{ matcher: 'run_shell_command', hooks: [] }],
+    };
+    const prepare = vi.fn().mockResolvedValue({
+      config: preparedRuntime({
+        userHooks: undefined,
+        projectHooks: undefined,
+      }),
+      commit: vi.fn().mockResolvedValue(undefined),
+      rollback: vi.fn().mockResolvedValue(undefined),
+      complete: vi.fn().mockResolvedValue(undefined),
+    });
+    const config = new Config({
+      ...baseParams,
+      hooks: legacyHooks,
+      projectRuntimeReloader: { prepare },
+    });
+    await config.initialize({ skipGeminiInitialization: true });
+    await config.waitForMcpReady();
+    expect(config.getUserHooks()).toEqual(legacyHooks);
+    expect(config.getProjectHooks()).toEqual(legacyHooks);
+
+    await relocateWithRuntime(config, path.resolve('/path/to/other'));
+
+    expect(config.getUserHooks()).toBeUndefined();
+    expect(config.getProjectHooks()).toBeUndefined();
+  });
+
+  it('relocateWorkingDirectory honours the hooks kill switch for the CwdChanged event', async () => {
+    // Every other fire site checks `getDisableAllHooks()`; this one runs
+    // right after the flag may have flipped to the target's value.
+    const fireCwdChangedEvent = vi.mocked(
+      HookSystem.prototype.fireCwdChangedEvent,
+    );
+    const relocate = async (disableAllHooks: boolean) => {
+      fireCwdChangedEvent.mockClear();
+      const prepare = vi.fn().mockResolvedValue({
+        config: preparedRuntime({ disableAllHooks }),
+        commit: vi.fn().mockResolvedValue(undefined),
+        rollback: vi.fn().mockResolvedValue(undefined),
+        complete: vi.fn().mockResolvedValue(undefined),
+      });
+      const config = new Config({
+        ...baseParams,
+        projectRuntimeReloader: { prepare },
+      });
+      await config.initialize({ skipGeminiInitialization: true });
+      await config.waitForMcpReady();
+      expect(config.getHookSystem()).toBeDefined();
+      await relocateWithRuntime(config, path.resolve('/path/to/other'));
+      expect(config.getDisableAllHooks()).toBe(disableAllHooks);
+    };
+
+    await relocate(false);
+    expect(fireCwdChangedEvent).toHaveBeenCalledOnce();
+
+    await relocate(true);
+    expect(fireCwdChangedEvent).not.toHaveBeenCalled();
+  });
+
+  it('relocateWorkingDirectory keeps a runtime-added directory across a project that also lists it', async () => {
+    // `/directory add D` in project 1; project 2 lists D in its own
+    // `context.includeDirectories`; project 3 does not. D is the user's,
+    // not project 2's, so the third hop must not drop it.
+    const runtimeDir = path.resolve('/shared/runtime-added');
+    const makePrepared = (includeDirectories: string[]) => ({
+      config: preparedRuntime({ includeDirectories }),
+      commit: vi.fn().mockResolvedValue(undefined),
+      rollback: vi.fn().mockResolvedValue(undefined),
+      complete: vi.fn().mockResolvedValue(undefined),
+    });
+    const prepare = vi
+      .fn()
+      .mockResolvedValueOnce(makePrepared([runtimeDir]))
+      .mockResolvedValueOnce(makePrepared([]));
+    const config = new Config({
+      ...baseParams,
+      projectRuntimeReloader: { prepare },
+    });
+    await config.initialize({ skipGeminiInitialization: true });
+    await config.waitForMcpReady();
+    config.getWorkspaceContext().addDirectory(runtimeDir);
+
+    await relocateWithRuntime(config, path.resolve('/path/to/project2'));
+    expect(config.getWorkspaceContext().getDirectories()).toContain(runtimeDir);
+
+    await relocateWithRuntime(config, path.resolve('/path/to/project3'));
+    expect(config.getWorkspaceContext().getDirectories()).toContain(runtimeDir);
+  });
+
+  it('relocateWorkingDirectory reports the session-only cron work the swap cancelled', async () => {
+    // The old scheduler is destroyed before the UI effect cleanup can read
+    // its exit summary, so the relocation result is the only carrier.
+    const prepare = vi.fn().mockResolvedValue({
+      config: preparedRuntime(),
+      commit: vi.fn().mockResolvedValue(undefined),
+      rollback: vi.fn().mockResolvedValue(undefined),
+      complete: vi.fn().mockResolvedValue(undefined),
+    });
+    const config = new Config({
+      ...baseParams,
+      projectRuntimeReloader: { prepare },
+    });
+    await config.initialize({ skipGeminiInitialization: true });
+    await config.waitForMcpReady();
+    const summary = 'Session ending. 1 active loop cancelled:\n  - [j1] loop';
+    vi.spyOn(config.getCronScheduler(), 'getExitSummary').mockReturnValue(
+      summary,
+    );
+
+    const result = await relocateWithRuntime(
+      config,
+      path.resolve('/path/to/other'),
+    );
+
+    expect(result.cronExitSummary).toBe(summary);
+  });
+
+  it('relocateWorkingDirectory rolls back the prepared runtime when the ACP realpath check fails', async () => {
+    // `commit()` has already swapped the target project's settings by the
+    // time the TOCTOU check runs; without the rollback the session would
+    // stay in the old directory under the new project's rules.
+    const commit = vi.fn().mockResolvedValue(undefined);
+    const rollback = vi.fn().mockResolvedValue(undefined);
+    const complete = vi.fn().mockResolvedValue(undefined);
+    const prepare = vi.fn().mockResolvedValue({
+      config: preparedRuntime(),
+      commit,
+      rollback,
+      complete,
+    });
+    const config = new Config({
+      ...baseParams,
+      projectRuntimeReloader: { prepare },
+    });
+    await config.initialize({ skipGeminiInitialization: true });
+    await config.waitForMcpReady();
+    const newDir = path.resolve('/path/to/other');
+    vi.mocked(fs.realpathSync).mockImplementation((pathToResolve) =>
+      pathToResolve.toString() === newDir
+        ? path.resolve('/path/to/swapped')
+        : pathToResolve.toString(),
+    );
+
+    await expect(
+      config.relocateWorkingDirectory(newDir, newDir, {
+        skipProcessChdir: true,
+        skipArtifactMigration: true,
+      }),
+    ).rejects.toThrow(/Realpath mismatch/);
+
+    expect(commit).toHaveBeenCalledOnce();
+    expect(rollback).toHaveBeenCalledOnce();
+    expect(complete).not.toHaveBeenCalled();
+  });
+
   it('relocateWorkingDirectory should reject and roll back when session artifact migration fails', async () => {
-    const config = new Config({ ...baseParams, chatRecording: true });
+    const commit = vi.fn().mockResolvedValue(undefined);
+    const rollback = vi.fn().mockResolvedValue(undefined);
+    const complete = vi.fn().mockResolvedValue(undefined);
+    const config = new Config({
+      ...baseParams,
+      chatRecording: true,
+      projectRuntimeReloader: {
+        prepare: vi.fn().mockResolvedValue({
+          config: preparedRuntime(),
+          commit,
+          rollback,
+          complete,
+        }),
+      },
+    });
     const disposeResidentAgents = vi.spyOn(
       config.getBackgroundTaskRegistry(),
       'disposeResidentAgents',
@@ -7762,6 +8036,11 @@ describe('Server Config (config.ts)', () => {
     await expect(config.relocateWorkingDirectory(newDir)).rejects.toThrow(
       moveError,
     );
+    // The settings swap was committed before the move failed; it must be
+    // undone, and the watcher-resuming `complete()` never reached.
+    expect(commit).toHaveBeenCalledOnce();
+    expect(rollback).toHaveBeenCalledOnce();
+    expect(complete).not.toHaveBeenCalled();
 
     expect(fs.renameSync).toHaveBeenCalledWith(
       oldTranscriptPath,

@@ -2028,6 +2028,11 @@ describe('Session', () => {
       await session.enableLiveScreenContext();
       const screenTool = registered.get(CAPTURE_SCREEN_CONTEXT_TOOL_NAME);
       expect(screenTool?.name).toBe('capture_screen_context');
+      // Session-owned, not merely registered: a plain `registerTool` here
+      // would let the next `/cd` dispose the live channel tool.
+      expect(mockToolRegistry.registerSessionTool).toHaveBeenCalledWith(
+        expect.objectContaining({ name: CAPTURE_SCREEN_CONTEXT_TOOL_NAME }),
+      );
       const invocation = screenTool?.build({});
       expect(invocation).toBeDefined();
       await expect(invocation?.getDefaultPermission()).resolves.toBe('allow');

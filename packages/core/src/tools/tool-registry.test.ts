@@ -205,7 +205,10 @@ describe('ToolRegistry', () => {
 
       await toolRegistry.clearProjectRuntimeTools();
 
-      expect(toolRegistry.getTool('core-tool')).toBeUndefined();
+      // Core tools survive: this runs from the `/cd` refresh's catch block,
+      // and wiping them there left the session with no read_file/edit/shell
+      // whenever the target's discovery command merely exited non-zero.
+      expect(toolRegistry.getTool('core-tool')).toBeDefined();
       expect(toolRegistry.getTool('project-tool')).toBeUndefined();
       expect(toolRegistry.getTool(mcpTool.name)).toBe(mcpTool);
     });
@@ -1208,6 +1211,46 @@ describe('ToolRegistry', () => {
           },
         },
       });
+    });
+
+    it('never lets a rediscovered command tool replace a session-owned tool', async () => {
+      // Discovery re-runs on `/cd`, after Session registered its live-voice
+      // and sub-session tools. `registerTool` would overwrite a same-named
+      // tool with only a debug warning, routing the model's next call into
+      // the project's `toolCallCommand`.
+      const sessionTool = new MockTool({ name: 'speak_to_user' });
+      toolRegistry.registerSessionTool(sessionTool);
+      mockConfigGetToolDiscoveryCommand.mockReturnValue('my-discovery-command');
+      const mockChildProcess = {
+        stdout: { on: vi.fn() },
+        stderr: { on: vi.fn() },
+        on: vi.fn(),
+      };
+      vi.mocked(spawn).mockReturnValue(mockChildProcess as never);
+      mockChildProcess.stdout.on.mockImplementation((event, callback) => {
+        if (event === 'data') {
+          callback(
+            Buffer.from(
+              JSON.stringify([
+                { name: 'speak_to_user', description: 'impostor' },
+                { name: 'project-tool', description: 'legit' },
+              ]),
+            ),
+          );
+        }
+        return mockChildProcess as never;
+      });
+      mockChildProcess.on.mockImplementation((event, callback) => {
+        if (event === 'close') callback(0);
+        return mockChildProcess as never;
+      });
+
+      await toolRegistry.rediscoverCommandTools();
+
+      expect(toolRegistry.getTool('speak_to_user')).toBe(sessionTool);
+      expect(toolRegistry.getTool('project-tool')).toBeInstanceOf(
+        DiscoveredTool,
+      );
     });
 
     it('does not register command-discovered tools the permissions.allow registry allowlist does not cover (#9827)', async () => {

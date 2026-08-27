@@ -197,6 +197,7 @@ import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { LoadedSettings } from '../config/settings.js';
+import { formatCronRelocationNotice } from '../config/cron-relocation-notice.js';
 import {
   loadSettings,
   reloadEnvironment,
@@ -2304,8 +2305,9 @@ function readScopeSettings(
 async function resolvePreferredMemoryFile(
   dir: string,
   fallbackFilename: string,
+  contextFileNames: readonly string[],
 ): Promise<string> {
-  for (const filename of getAllMemoryFilenames()) {
+  for (const filename of contextFileNames) {
     const filePath = path.join(dir, filename);
     try {
       await fs.access(filePath);
@@ -2321,15 +2323,25 @@ async function resolvePreferredMemoryFile(
 async function resolveQwenMemoryPaths(params: {
   cwd: string;
   projectRoot: string;
+  /**
+   * The session's context-file names. `/cd` makes these session-scoped
+   * and never updates the process-global list, so a host asking for the
+   * memory paths after a move must be answered from the session, or it
+   * is handed `QWEN.md` for a project whose file is `CONTEXT.md`.
+   */
+  contextFileNames?: readonly string[];
 }): Promise<QwenMemoryPaths> {
-  const fallbackFilename = getAllMemoryFilenames()[0] ?? 'QWEN.md';
+  const contextFileNames = params.contextFileNames ?? getAllMemoryFilenames();
+  const fallbackFilename = contextFileNames[0] ?? 'QWEN.md';
   const userMemoryFile = await resolvePreferredMemoryFile(
     Storage.getGlobalQwenDir(),
     fallbackFilename,
+    contextFileNames,
   );
   const projectMemoryFile = await resolvePreferredMemoryFile(
     params.cwd,
     fallbackFilename,
+    contextFileNames,
   );
   const autoMemoryDir = getAutoMemoryRoot(params.projectRoot);
 
@@ -8148,7 +8160,11 @@ class QwenAgent implements Agent {
             ? params['projectRoot']
             : cwd;
         return {
-          paths: await resolveQwenMemoryPaths({ cwd, projectRoot }),
+          paths: await resolveQwenMemoryPaths({
+            cwd,
+            projectRoot,
+            contextFileNames: this.contextFileNamesForCwd(cwd),
+          }),
         };
       }
       case SERVE_STATUS_EXT_METHODS.workspaceMcp:
@@ -10235,6 +10251,11 @@ class QwenAgent implements Agent {
               `Project runtime refresh failed: ${
                 error instanceof Error ? error.message : String(error)
               }`,
+            );
+          }
+          if (relocation.cronExitSummary) {
+            warnings.push(
+              formatCronRelocationNotice(relocation.cronExitSummary),
             );
           }
 
@@ -12727,6 +12748,22 @@ class QwenAgent implements Agent {
       },
     );
     config.setFileSystemService(acpFileSystemService);
+  }
+
+  /**
+   * Context-file names for a host request about `cwd`. `/cd` scopes the
+   * names to the session and leaves the process-global list untouched, so
+   * an agent-level request has to be answered from the session that owns
+   * the directory; the global list is only right when no session does.
+   */
+  private contextFileNamesForCwd(cwd: string): readonly string[] {
+    for (const session of this.sessions.values()) {
+      const config = session.getConfig();
+      if (config.getWorkingDir() === cwd) {
+        return config.getContextFileNames();
+      }
+    }
+    return getAllMemoryFilenames();
   }
 
   private async createAndStoreSession(

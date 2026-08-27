@@ -501,8 +501,13 @@ interface DiscoveredFile {
  */
 export async function collectWorkspaceMemoryStatus(
   boundWorkspace: string,
+  /**
+   * Context-file names to look for. Defaults to the process-global list;
+   * a caller that knows a session's `/cd`-scoped names should pass them.
+   */
+  contextFileNames: readonly string[] = getAllMemoryFilenames(),
 ): Promise<ServeWorkspaceMemoryStatus> {
-  const filenames = new Set(getAllMemoryFilenames());
+  const filenames = new Set(contextFileNames);
   const files: DiscoveredFile[] = [];
   const errors: ServeWorkspaceMemoryStatus['errors'] = [];
 

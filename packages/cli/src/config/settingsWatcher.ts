@@ -322,6 +322,11 @@ export class SettingsWatcher {
       } else {
         this.watchParentForDir(SettingScope.Workspace, settingsPath);
       }
+      // The new watcher starts with `ignoreInitial`, and the pause dropped
+      // pending workspace changes: an edit that landed while the swap was
+      // in flight would otherwise never be seen. Same reconciliation the
+      // promote/demote paths do; `handleChange` no-ops when nothing drifted.
+      this.scheduleRefresh(SettingScope.Workspace);
     };
   }
 

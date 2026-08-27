@@ -2198,6 +2198,9 @@ export const AppContainer = (props: AppContainerProps) => {
           onInstructionsLoaded: createInstructionsLoadedCallback(() =>
             config.getHookSystem(),
           ),
+          // Session-scoped after `/cd`: the process-global names would
+          // reload the wrong file set and overwrite the relocated memory.
+          contextFileNames: config.getContextFileNames(),
         },
       );
 

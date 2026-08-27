@@ -151,6 +151,29 @@ describe('managed memory refresh helper', () => {
     ).toBe(true);
   });
 
+  it('recognises writes to session-scoped context file names', () => {
+    // After `/cd` the names are the session's, not the process-global
+    // list; a write to the project's own file must still trigger the
+    // instruction refresh, and the global default must not.
+    const write = (name: string) => [
+      {
+        toolName: 'write_file',
+        args: { file_path: path.join(projectRoot, name) },
+        status: 'success' as const,
+      },
+    ];
+    expect(
+      didWriteProjectContextFile(write('PROJECT-B.md'), projectRoot, [
+        'PROJECT-B.md',
+      ]),
+    ).toBe(true);
+    expect(
+      didWriteProjectContextFile(write(DEFAULT_CONTEXT_FILENAME), projectRoot, [
+        'PROJECT-B.md',
+      ]),
+    ).toBe(false);
+  });
+
   it('detects successful project context file writes only', () => {
     expect(
       didWriteProjectContextFile(

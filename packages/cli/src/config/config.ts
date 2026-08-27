@@ -53,7 +53,12 @@ import { hooksCommand } from '../commands/hooks.js';
 import { resolveAcpChannelFallback } from './acp-channel-fallback.js';
 import { normalizeDisabledToolList } from './normalizeDisabledTools.js';
 import type { LoadedSettings, Settings } from './settings.js';
-import { loadSettings, SettingScope } from './settings.js';
+import {
+  createMinimalSettings,
+  loadSettings,
+  SettingScope,
+} from './settings.js';
+import { reloadEnvironment } from './environment.js';
 import {
   resolveCliGenerationConfig,
   getAuthTypeFromEnv,
@@ -1513,6 +1518,36 @@ function resolveDisabledSlashCommands(
   return disabled;
 }
 
+/**
+ * The runtime-facing projection of `settings.agents`, shared by startup and
+ * the `/cd` reloader so the two cannot drift: keys the schema carries but
+ * the runtime deliberately ignores (`team`, `crossSessionMessaging`,
+ * `crossSessionInbound`) are dropped in both places.
+ */
+function projectAgentsSettings(
+  agents: Settings['agents'],
+): ConfigParameters['agents'] {
+  if (!agents) return undefined;
+  return {
+    builtin: agents.builtin
+      ? {
+          exploreModel: agents.builtin.exploreModel,
+        }
+      : undefined,
+    modelGrades: agents.modelGrades,
+    allowedGrades: agents.allowedGrades,
+    maxParallelAgents: agents.maxParallelAgents,
+    maxParallelAgentsByModel: agents.maxParallelAgentsByModel,
+    displayMode: agents.displayMode,
+    arena: agents.arena
+      ? {
+          worktreeBaseDir: agents.arena.worktreeBaseDir,
+          preserveArtifacts: agents.arena.preserveArtifacts ?? false,
+        }
+      : undefined,
+  };
+}
+
 function resolveProjectPath(value: string, baseDir: string): string {
   const expanded = resolvePath(value);
   return path.isAbsolute(expanded)
@@ -1521,15 +1556,31 @@ function resolveProjectPath(value: string, baseDir: string): string {
 }
 
 function resolveProjectSkillPath(value: string, baseDir: string): string {
-  if (value === '~' || value.startsWith('~/') || value.startsWith('~\\')) {
-    return value;
-  }
-  return path.isAbsolute(value)
-    ? path.normalize(value)
-    : path.resolve(baseDir, value);
+  // Expand first, then resolve: `resolvePath` handles every home spelling
+  // (`~`, `%userprofile%`), and an expanded path is absolute, so it is left
+  // alone rather than nailed under the project. Hand-enumerating `~`
+  // prefixes here silently broke `%userprofile%` skill directories.
+  const expanded = resolvePath(value);
+  return path.isAbsolute(expanded)
+    ? path.normalize(expanded)
+    : path.resolve(baseDir, expanded);
 }
 
-function createProjectRuntimeReloader(
+/**
+ * The LoadedSettings a permission-rule persistence write may go through.
+ * Bare mode hands `loadCliConfig` a `createMinimalSettings()` instance whose
+ * scope paths are all `''`; persisting through it writes a stray `.tmp` into
+ * the cwd and throws on the rename, so "Always allow" silently lands
+ * nowhere. Only a LoadedSettings backed by real files may be used.
+ */
+export function resolvePersistenceSettings(
+  loadedSettings: LoadedSettings | undefined,
+  cwd: string,
+): LoadedSettings {
+  return loadedSettings?.user.path ? loadedSettings : loadSettings(cwd);
+}
+
+export function createProjectRuntimeReloader(
   loadedSettings: LoadedSettings,
   settingsWatcher:
     | {
@@ -1541,17 +1592,29 @@ function createProjectRuntimeReloader(
   bareMode: boolean,
   safeMode: boolean,
   cliIncludeDirectories: readonly string[],
+  /**
+   * Startup's model-derived half of the tool-search decision. The model is
+   * session-stable, so it is captured once rather than re-resolved per `/cd`.
+   */
+  modelDisablesToolSearch: boolean,
   cronEnabledOverride?: boolean,
 ): ProjectRuntimeReloader {
   return {
-    async prepare(targetDir, trustedFolder, approvalMode) {
-      const nextSettings = loadSettings(targetDir, {
-        consumeCorruptionEnvVars: false,
-        readOnly: true,
-        skipLoadEnvironment: true,
-        skipWorkspaceSettings: bareMode || safeMode,
-        workspaceTrusted: trustedFolder,
-      });
+    async prepare(targetDir, trustedFolder, approvalMode, previousDir) {
+      // Mirror startup: a bare session is assembled against
+      // `createMinimalSettings()` and never sees the user's real settings.
+      // Loading them here would let `/cd` bring ambient command-execution
+      // hooks (bugCommand, artifact upload) into a bare session — and swap
+      // in real file paths for later settings writes.
+      const nextSettings = bareMode
+        ? createMinimalSettings()
+        : loadSettings(targetDir, {
+            consumeCorruptionEnvVars: false,
+            readOnly: true,
+            skipLoadEnvironment: true,
+            skipWorkspaceSettings: safeMode,
+            workspaceTrusted: trustedFolder,
+          });
       const effectiveTrust = trustedFolder ?? nextSettings.isTrusted;
       const assembled =
         bareMode || safeMode
@@ -1612,6 +1675,19 @@ function createProjectRuntimeReloader(
         if (rule && !permissionsDeny.includes(rule)) {
           permissionsDeny.push(rule);
         }
+      }
+      // Same rule as startup (`shouldDisableToolSearch` in `loadCliConfig`):
+      // these lists were readonly before `/cd` existed, so the startup
+      // injection used to survive for the whole session.
+      const toolSearchExplicitlyEnabled =
+        runtimeSettings.tools?.toolSearch?.enabled;
+      if (
+        (toolSearchExplicitlyEnabled === false ||
+          (toolSearchExplicitlyEnabled === undefined &&
+            modelDisablesToolSearch)) &&
+        !permissionsDeny.includes('tool_search')
+      ) {
+        permissionsDeny.push('tool_search');
       }
 
       let previousSettings: LoadedSettings | undefined;
@@ -1788,7 +1864,10 @@ function createProjectRuntimeReloader(
             bareMode || safeMode
               ? false
               : (runtimeSettings.memory?.autoSkillConfirm ?? true),
-          agents: bareMode || safeMode ? undefined : nextSettings.merged.agents,
+          agents:
+            bareMode || safeMode
+              ? undefined
+              : projectAgentsSettings(nextSettings.merged.agents),
           disableAllHooks:
             bareMode || safeMode
               ? true
@@ -1817,11 +1896,25 @@ function createProjectRuntimeReloader(
             resumeWatching = undefined;
             throw error;
           }
+          // The target's `.env` files and `settings.env` must reach
+          // `process.env` too — the assembled MCP servers inherit it at spawn
+          // and expand their commands against it. Same step serve's
+          // `workspaceReload` performs; bare mode never loads env at all.
+          if (!bareMode) {
+            reloadEnvironment(nextSettings.merged, targetDir, effectiveTrust);
+          }
         },
         async rollback() {
           if (!committed || !previousSettings) return;
           loadedSettings.replaceWith(previousSettings);
           committed = false;
+          if (!bareMode) {
+            reloadEnvironment(
+              previousSettings.merged,
+              previousDir,
+              previousSettings.isTrusted,
+            );
+          }
           resumeWatching?.();
           resumeWatching = undefined;
           appEvents.emit(AppEvent.McpPendingApprovalChanged);
@@ -2316,11 +2409,11 @@ export async function loadCliConfig(
   // Note: no `^` anchor — model names may include a provider prefix
   // (e.g. "openrouter/deepseek/deepseek-v4-flash").
   const toolSearchExplicitlyEnabled = settings.tools?.toolSearch?.enabled;
+  const modelDisablesToolSearch =
+    resolvedModel !== undefined && /deepseek-(v3|v4|chat)/i.test(resolvedModel);
   const shouldDisableToolSearch =
     toolSearchExplicitlyEnabled === false ||
-    (toolSearchExplicitlyEnabled === undefined &&
-      resolvedModel !== undefined &&
-      /deepseek-(v3|v4|chat)/i.test(resolvedModel));
+    (toolSearchExplicitlyEnabled === undefined && modelDisablesToolSearch);
   if (shouldDisableToolSearch) {
     if (!mergedDeny.includes('tool_search')) {
       mergedDeny.push('tool_search');
@@ -2502,6 +2595,7 @@ export async function loadCliConfig(
         bareMode,
         safeMode,
         cliIncludeDirectories,
+        modelDisablesToolSearch,
         hostPolicy?.projectRuntimeCronEnabled,
       )
     : undefined;
@@ -2588,7 +2682,7 @@ export async function loadCliConfig(
     toolInvocationGuard: hostPolicy?.toolInvocationGuard,
     // Permission rule persistence callback (writes to settings files).
     onPersistPermissionRule: async (scope, ruleType, rule) => {
-      const currentSettings = loadedSettings ?? loadSettings(cwd);
+      const currentSettings = resolvePersistenceSettings(loadedSettings, cwd);
       const settingScope =
         scope === 'project' ? SettingScope.Workspace : SettingScope.User;
       const key = `permissions.${ruleType}`;
@@ -2812,27 +2906,7 @@ export async function loadCliConfig(
     lsp: {
       enabled: lspEnabled,
     },
-    agents: settings.agents
-      ? {
-          builtin: settings.agents.builtin
-            ? {
-                exploreModel: settings.agents.builtin.exploreModel,
-              }
-            : undefined,
-          modelGrades: settings.agents.modelGrades,
-          allowedGrades: settings.agents.allowedGrades,
-          maxParallelAgents: settings.agents.maxParallelAgents,
-          maxParallelAgentsByModel: settings.agents.maxParallelAgentsByModel,
-          displayMode: settings.agents.displayMode,
-          arena: settings.agents.arena
-            ? {
-                worktreeBaseDir: settings.agents.arena.worktreeBaseDir,
-                preserveArtifacts:
-                  settings.agents.arena.preserveArtifacts ?? false,
-              }
-            : undefined,
-        }
-      : undefined,
+    agents: projectAgentsSettings(settings.agents),
     worktree: settings.worktree
       ? {
           symlinkDirectories: settings.worktree.symlinkDirectories,

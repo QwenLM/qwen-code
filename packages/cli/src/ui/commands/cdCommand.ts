@@ -15,6 +15,7 @@ import {
   TrustLevel,
 } from '../../config/trustedFolders.js';
 import { t } from '../../i18n/index.js';
+import { formatCronRelocationNotice } from '../../config/cron-relocation-notice.js';
 
 const MAX_PENDING_TRUST_CONFIRMATIONS = 50;
 const pendingTrustedPathConfirmations = new Map<string, string>();
@@ -197,6 +198,9 @@ export const cdCommand: SlashCommand = {
             error instanceof Error ? error.message : String(error)
           }`,
         );
+      }
+      if (relocation.cronExitSummary) {
+        warnings.push(formatCronRelocationNotice(relocation.cronExitSummary));
       }
     } catch (error) {
       return {

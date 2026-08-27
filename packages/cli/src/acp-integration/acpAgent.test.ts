@@ -5081,6 +5081,18 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         lastSessionMock?.hardSuspendTodoStopGuard.mock.invocationCallOrder[0],
       ).toBeLessThan(relocateWorkingDirectory.mock.invocationCallOrder[0]!);
       expect(lastSessionMock?.startCronScheduler).toHaveBeenCalledTimes(2);
+      // The daemon owns the settings watcher for non-managed sessions, so
+      // this is the only push of `available_commands_update` after a move.
+      expect(
+        (
+          lastSessionMock as unknown as {
+            refreshSkillsFromSettings: ReturnType<typeof vi.fn>;
+          }
+        ).refreshSkillsFromSettings,
+      ).toHaveBeenCalledWith({
+        reloadSettings: false,
+        notifyConfigChanged: false,
+      });
     } finally {
       await fs.rm(targetDir, { recursive: true, force: true });
     }

@@ -234,6 +234,24 @@ describe('SettingsWatcher', () => {
       );
     });
 
+    it('reconciles the new workspace settings against disk when watching resumes', async () => {
+      // The re-armed watcher starts with `ignoreInitial`, and the pause
+      // dropped pending workspace changes — an edit that landed during the
+      // commit→complete window would otherwise never hot-reload.
+      watcher.startWatching();
+      const scheduleRefresh = vi.spyOn(
+        watcher as unknown as { scheduleRefresh(scope: SettingScope): void },
+        'scheduleRefresh',
+      );
+
+      const resume = await watcher.pauseWorkspaceWatching();
+      settings.workspace.path = '/next/.qwen/settings.json';
+      expect(scheduleRefresh).not.toHaveBeenCalled();
+      resume();
+
+      expect(scheduleRefresh).toHaveBeenCalledWith(SettingScope.Workspace);
+    });
+
     it('should be idempotent on double stop', () => {
       watcher.startWatching();
       watcher.stopWatching();

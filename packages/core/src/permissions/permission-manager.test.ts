@@ -1750,6 +1750,30 @@ describe('PermissionManager', () => {
       expect(await manager.evaluate({ toolName: 'write_file' })).toBe('allow');
     });
 
+    it('keeps AUTO-stashed session grants across a project change', async () => {
+      // In AUTO mode a dangerous session grant lives in the stash, not in
+      // `sessionRules.allow`. A reload that cleared the stash without first
+      // re-attaching it lost the grant for the rest of the session: the
+      // re-strip found nothing, and leaving AUTO later restored nothing.
+      const manager = new PermissionManager(
+        makeConfig({ permissionsAllow: [], approvalMode: 'auto' }),
+      );
+      manager.initialize();
+      manager.addSessionAllowRule('Bash(npx *)');
+      expect(manager.getStrippedDangerousRules()?.session).toHaveLength(1);
+
+      manager.reloadForProjectChange();
+
+      expect(manager.getStrippedDangerousRules()?.session).toHaveLength(1);
+      manager.restoreDangerousRules();
+      expect(
+        await manager.evaluate({
+          toolName: 'run_shell_command',
+          command: 'npx vitest',
+        }),
+      ).toBe('allow');
+    });
+
     it('matches a legacy truncated MCP permission alias', async () => {
       const rawName = `mcp__server__${'x'.repeat(80)}`;
       const legacyName = rawName.slice(0, 28) + '___' + rawName.slice(-32);
