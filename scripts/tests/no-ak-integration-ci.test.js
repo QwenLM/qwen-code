@@ -390,11 +390,23 @@ describe('no-AK integration CI wiring', () => {
     expect(redirectTemp).toContain(
       "if: \"${{ needs.classify_pr.outputs.skip_ci != 'true' && runner.environment != 'self-hosted' }}\"",
     );
-    for (const key of ['TEMP', 'TMP']) {
-      expect(redirectTemp).toContain(
-        `"${key}=$temp" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append`,
-      );
-    }
+    // Pin the run block as one contiguous chunk so ordering is part of the
+    // contract: under PowerShell 5.1 an undefined $temp expands to empty, so
+    // if the assignment moves below the Out-File lines the step still writes
+    // TEMP=/TMP= to GITHUB_ENV and exits green. The shell pin matters for the
+    // same reason: Out-File's default is UTF-16LE on PowerShell 5.1, so the
+    // -Encoding utf8 spelling only carries its meaning there.
+    expect(redirectTemp).toContain(
+      [
+        "$temp = Join-Path $env:RUNNER_WORKSPACE 'qwen-code-temp'",
+        'New-Item -ItemType Directory -Force -Path $temp | Out-Null',
+        '"TEMP=$temp" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append',
+        '"TMP=$temp" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append',
+      ]
+        .map((line) => `          ${line}`)
+        .join('\n'),
+    );
+    expect(redirectTemp).toContain("shell: 'powershell'");
     const verifyTemp = getWorkflowStep(
       windowsJob,
       'Verify temp paths carry no short alias',
@@ -451,6 +463,9 @@ describe('no-AK integration CI wiring', () => {
     expect(redirectTempIndex).toBeGreaterThan(configureUseIndex);
     expect(redirectTempIndex).toBeLessThan(hostedNodeIndex);
     expect(redirectTempIndex).toBeLessThan(selfHostedNodeIndex);
+    expect(redirectTempIndex).toBeLessThan(
+      windowsJob.indexOf("name: 'Run tests and generate reports'"),
+    );
     expect(verifyTempIndex).toBeGreaterThan(hostedNodeIndex);
     expect(verifyTempIndex).toBeGreaterThan(selfHostedNodeIndex);
     expect(verifyTempIndex).toBeLessThan(installIndex);

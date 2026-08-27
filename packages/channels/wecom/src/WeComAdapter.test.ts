@@ -284,6 +284,15 @@ function makeBridge(): ChannelAgentBridge {
 
 class TestWeComChannel extends WeComChannel {
   readonly envelopes: Envelope[] = [];
+  readonly preflightedInbound = vi.fn();
+
+  protected override async processPreflightedInbound(
+    envelope: Envelope,
+    process: () => Promise<void> = () => this.processInbound(envelope),
+  ): Promise<void> {
+    this.preflightedInbound(envelope);
+    await super.processPreflightedInbound(envelope, process);
+  }
 
   protected override async processInbound(envelope: Envelope): Promise<void> {
     this.envelopes.push(envelope);
@@ -1970,6 +1979,7 @@ describe('WeComChannel', () => {
 
     client.emit('message.image', payload);
     await vi.waitFor(() => expect(mocks.lookup).toHaveBeenCalledTimes(1));
+    expect(channel.preflightedInbound).toHaveBeenCalledTimes(1);
     inspectable.disconnectGeneration += 1;
     releaseLookup?.([{ address: '93.184.216.34', family: 4 }]);
     await vi.waitFor(() =>

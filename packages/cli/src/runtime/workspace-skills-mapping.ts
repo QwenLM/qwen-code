@@ -40,6 +40,11 @@ export function mapSkillConfigToStatus(
     installedPath: skill.filePath,
     ...(skill.argumentHint ? { argumentHint: skill.argumentHint } : {}),
     ...(skill.model ? { model: skill.model } : {}),
-    ...(skill.extensionName ? { extensionName: skill.extensionName } : {}),
+    ...(skill.level === 'extension' && skill.extensionName
+      ? { extensionName: skill.extensionName }
+      : {}),
+    ...(skill.level === 'extension' && skill.extensionDisplayName
+      ? { extensionDisplayName: skill.extensionDisplayName }
+      : {}),
   };
 }
