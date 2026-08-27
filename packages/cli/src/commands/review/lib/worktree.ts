@@ -1173,12 +1173,23 @@ export function localFilterRefusal(
     );
   }
   if (unreadable.length > 0) {
+    // Same burial shape MAX_NAMED_SCREEN_KEYS bounds for the key lists: the
+    // unreadable list's source — the `<common>/worktrees` readdir — is
+    // unbounded, and test-efficacy re-embeds this refusal verbatim in every
+    // probe result, so a planted entry per fake worktree would bury the
+    // actionable part under megabytes of refusal. Name the first few and
+    // count the rest.
+    const named = unreadable
+      .slice(0, MAX_NAMED_SCREEN_KEYS)
+      .map((u) => `${inertPath(u.file)}: ${inertPath(u.detail)}`)
+      .join('; ');
+    const rest = unreadable.length - MAX_NAMED_SCREEN_KEYS;
     parts.push(
-      `the repository's local config could not be read (${unreadable
-        .map((u) => `${inertPath(u.file)}: ${inertPath(u.detail)}`)
-        .join(
-          '; ',
-        )}), so the screen cannot certify that ${checkout} would not EXECUTE a content filter`,
+      `the repository's local config could not be read (${named}${
+        rest > 0
+          ? `, … and ${rest} more unreadable file${rest === 1 ? '' : 's'}`
+          : ''
+      }), so the screen cannot certify that ${checkout} would not EXECUTE a content filter`,
     );
   }
   return parts.join('; ');

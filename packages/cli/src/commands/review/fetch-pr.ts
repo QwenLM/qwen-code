@@ -622,12 +622,15 @@ function cleanStale(prNumber: string): void {
   const ref = reviewBranch(prNumber);
   if (refExists(ref)) {
     tryRemove(() =>
-      execFileSync('git', ['branch', '-D', ref], {
+      execFileSync('git', [...INERT_GIT_ARGS, 'branch', '-D', ref], {
         stdio: 'pipe',
         // Same reason as every other git spawn in this pipeline: a delete must
         // land in the repository the caller named, not the one the shell's
-        // `GIT_DIR` points at. Bounded because `git branch` opens the repo
-        // config and a FIFO planted there holds an unbounded delete in open().
+        // `GIT_DIR` points at. INERT_GIT_ARGS beside the timeout: `branch -D`
+        // fires the reference-transaction hook from the never-wiped common
+        // hooks dir — the plantable surface every other spawn in this diff
+        // neutralizes. Bounded because `git branch` opens the repo config and
+        // a FIFO planted there holds an unbounded delete in open().
         env: sanitizedGitEnv(),
         timeout: SCREEN_SPAWN_TIMEOUT_MS,
         killSignal: 'SIGKILL',
@@ -700,11 +703,11 @@ function tryResume(
   const status = gitOpt(
     '-C',
     wt,
-    // `status` runs a planted `core.fsmonitor` (measured live) and this
-    // probe runs AHEAD of the first screen — the empty-value pin the
-    // residue's status spawn carries.
-    '-c',
-    'core.fsmonitor=',
+    // INERT_GIT_ARGS, not the fsmonitor pin alone: `status` refreshes the
+    // index, which fires `post-index-change` from the never-wiped common
+    // hooks dir, beside running a planted `core.fsmonitor` (both measured
+    // live) — and this probe runs AHEAD of the first screen.
+    ...INERT_GIT_ARGS,
     'status',
     '--porcelain',
     '--untracked-files=normal',
@@ -991,12 +994,15 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
     } catch (err) {
       // Roll back the fetched ref so the next run starts clean.
       tryRemove(() =>
-        execFileSync('git', ['branch', '-D', ref], {
+        execFileSync('git', [...INERT_GIT_ARGS, 'branch', '-D', ref], {
           stdio: 'pipe',
           // Same reason as every other git spawn in this pipeline: a delete must
           // land in the repository the caller named, not the one the shell's
-          // `GIT_DIR` points at. Bounded because `git branch` opens the repo
-          // config and a FIFO planted there holds an unbounded delete in open().
+          // `GIT_DIR` points at. INERT_GIT_ARGS beside the timeout: `branch -D`
+          // fires the reference-transaction hook from the never-wiped common
+          // hooks dir — the plantable surface every other spawn in this diff
+          // neutralizes. Bounded because `git branch` opens the repo config and
+          // a FIFO planted there holds an unbounded delete in open().
           env: sanitizedGitEnv(),
           timeout: SCREEN_SPAWN_TIMEOUT_MS,
           killSignal: 'SIGKILL',
@@ -1016,9 +1022,23 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
     // comparison folds case because object IDs are case-insensitive. The
     // ref is rolled back the way a metadata failure rolls it back — plus
     // the inert overrides the new rollback needs (see its comment) — and
-    // the outer catch releases the lease.
+    // the outer catch releases the lease. The comparison runs only when
+    // the advertised head has the shape of an object ID: a platform can
+    // advertise a branch name there (Aone fills it from `sourceBranch` on
+    // non-AGit-Flow MRs), and comparing a name against the fetched SHA
+    // would refuse every such MR as a redirected fetch. A non-OID head
+    // leaves the redirect defense off — disclose that on stderr.
+    if (meta.headRefOid && !SHA_RE.test(meta.headRefOid.toLowerCase())) {
+      writeStderrLine(
+        `WARNING: the platform advertised ${JSON.stringify(meta.headRefOid)} ` +
+          `as the PR head, which is not an object ID — the fetched head ` +
+          `could not be cross-checked against it, so the redirected-fetch ` +
+          `defense is off for this run.`,
+      );
+    }
     if (
       meta.headRefOid &&
+      SHA_RE.test(meta.headRefOid.toLowerCase()) &&
       meta.headRefOid.toLowerCase() !== fetchedSha.toLowerCase()
     ) {
       tryRemove(() =>
@@ -1068,12 +1088,15 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
       git(...INERT_GIT_ARGS, 'worktree', 'add', wt, ref);
     } catch (err) {
       tryRemove(() =>
-        execFileSync('git', ['branch', '-D', ref], {
+        execFileSync('git', [...INERT_GIT_ARGS, 'branch', '-D', ref], {
           stdio: 'pipe',
           // Same reason as every other git spawn in this pipeline: a delete must
           // land in the repository the caller named, not the one the shell's
-          // `GIT_DIR` points at. Bounded because `git branch` opens the repo
-          // config and a FIFO planted there holds an unbounded delete in open().
+          // `GIT_DIR` points at. INERT_GIT_ARGS beside the timeout: `branch -D`
+          // fires the reference-transaction hook from the never-wiped common
+          // hooks dir — the plantable surface every other spawn in this diff
+          // neutralizes. Bounded because `git branch` opens the repo config and
+          // a FIFO planted there holds an unbounded delete in open().
           env: sanitizedGitEnv(),
           timeout: SCREEN_SPAWN_TIMEOUT_MS,
           killSignal: 'SIGKILL',

@@ -1150,10 +1150,11 @@ describe('fetch-pr report assembly', () => {
       );
       // The stale-clean's `branch -D` opens the repo config: a FIFO planted
       // there holds an unbounded delete in open(), so the spawn carries the
-      // screen's bound.
+      // screen's bound — and it fires the reference-transaction hook from
+      // the never-wiped common hooks dir, so it carries INERT_GIT_ARGS too.
       expect(producerMocks.execFileSync).toHaveBeenCalledWith(
         'git',
-        ['branch', '-D', 'qwen-review/pr-42'],
+        [...INERT_GIT_ARGS, 'branch', '-D', 'qwen-review/pr-42'],
         expect.objectContaining({
           timeout: SCREEN_SPAWN_TIMEOUT_MS,
           killSignal: 'SIGKILL',
@@ -1217,11 +1218,12 @@ describe('fetch-pr report assembly', () => {
       );
       expect(producerMocks.execFileSync).toHaveBeenCalledWith(
         'git',
-        ['branch', '-D', 'qwen-review/pr-42'],
+        [...INERT_GIT_ARGS, 'branch', '-D', 'qwen-review/pr-42'],
         // Sanitized env: a delete must land in the repository the caller
         // named, not the one an exported `GIT_DIR` points at. Bounded:
         // `git branch` opens the repo config, and a FIFO planted there
-        // holds an unbounded delete in open().
+        // holds an unbounded delete in open(). INERT_GIT_ARGS: the delete
+        // fires the reference-transaction hook from the common hooks dir.
         expect.objectContaining({
           stdio: 'pipe',
           env: expect.any(Object),
@@ -1302,6 +1304,34 @@ describe('fetch-pr report assembly', () => {
       expect(report.fetchedSha).toBe('F00DF00DF00D');
     });
 
+    it('proceeds (with a disclosed warning) when the advertised head is not an object ID', async () => {
+      // Aone fills headRefOid from `sourceBranch`, which is a branch NAME on
+      // non-AGit-Flow MRs. Comparing a name against the fetched SHA would
+      // refuse every such MR as a redirected fetch — the comparison runs
+      // only when the advertised head has an object ID's shape, and the
+      // redirect defense being off is disclosed on stderr.
+      producerMocks.gh.mockReturnValue(
+        JSON.stringify({
+          headRefName: 'feature/login',
+          headRefOid: 'feature/login',
+          baseRefName: 'main',
+          additions: 1,
+          deletions: 0,
+          changedFiles: 1,
+          isCrossRepository: false,
+          body: '',
+        }),
+      );
+
+      const report = await reportFor({});
+
+      expect(report.fetchedSha).toBe('f00df00df00d');
+      const warned = producerMocks.writeStderrLine.mock.calls
+        .map((c) => String(c[0]))
+        .some((l) => l.includes('defense is off'));
+      expect(warned).toBe(true);
+    });
+
     it('clears the lease when the worktree add fails', async () => {
       producerMocks.git.mockImplementation((...args: string[]) => {
         // The creation add carries the inert `-c` overrides ahead of the
@@ -1313,10 +1343,12 @@ describe('fetch-pr report assembly', () => {
       await expect(reportFor({})).rejects.toThrow(
         'Failed to create worktree at',
       );
-      // The rollback the failure triggers is bounded like its siblings.
+      // The rollback the failure triggers is bounded like its siblings and
+      // inert like the SHA-mismatch one: `branch -D` fires the
+      // reference-transaction hook from the common hooks dir.
       expect(producerMocks.execFileSync).toHaveBeenCalledWith(
         'git',
-        ['branch', '-D', 'qwen-review/pr-42'],
+        [...INERT_GIT_ARGS, 'branch', '-D', 'qwen-review/pr-42'],
         expect.objectContaining({
           timeout: SCREEN_SPAWN_TIMEOUT_MS,
           killSignal: 'SIGKILL',
@@ -4321,10 +4353,12 @@ describe('fetch-pr --resume', () => {
       .mocked(gitOpt)
       .mock.calls.find((c) => c.includes('status') && c.includes('-C'));
     expect(statusCall).toContain('--untracked-files=normal');
-    // `status` runs a planted `core.fsmonitor` (measured live), and this
-    // probe runs AHEAD of the first screen — the empty-value pin beside the
-    // explicit-untracked flag.
+    // INERT_GIT_ARGS, not the fsmonitor pin alone: `status` refreshes the
+    // index, which fires `post-index-change` from the never-wiped common
+    // hooks dir, beside running a planted `core.fsmonitor` (both measured
+    // live) — and this probe runs AHEAD of the first screen.
     expect(statusCall).toContain('core.fsmonitor=');
+    expect(statusCall).toContain('core.hooksPath=/dev/null/no-hooks');
   });
 
   it('refuses on an explicit effort different from the recorded run', async () => {

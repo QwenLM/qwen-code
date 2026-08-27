@@ -1838,112 +1838,118 @@ process.stdout.write(JSON.stringify({
     );
   });
 
-  it('marks every candidate inconclusive when the runner dies mid-mutation, and still runs the revert probe', async () => {
-    // The mutation-phase catch: a runner killed (or failing to spawn) during a
-    // mutant run is not evidence about any statement. Every candidate that
-    // never got a verdict — the one being run AND the ones never attempted —
-    // must come back `inconclusive` with the reason, the revert probe must
-    // still run, and the report must still be written. The fake runner passes
-    // the baseline (run 1), dies BY SIGNAL on run 2 (the first mutant)
-    // without writing a report — the deadline-kill shape, which runProbeSuite
-    // answers with a throw — and passes the revert probe (run 3). (This test
-    // used to flood stdout past spawnSync's maxBuffer for an ENOBUFS error;
-    // the verdict channel is a file now — a flood just writes a big file —
-    // so the faithful "runner dies mid-run" shape is the signal death.)
-    write('package.json', '{"private":true,"workspaces":["packages/*"]}\n');
-    write(
-      'packages/lib/src/f.ts',
-      'export const state = new Map<string, string>();\n' +
-        'export const cache = new Set<string>();\n',
-    );
-    const base = commitAll('base');
-    write(
-      'packages/lib/src/f.ts',
-      'export const state = new Map<string, string>();\n' +
-        'export const cache = new Set<string>();\n' +
-        'export function reset() {\n' +
-        '  state.clear();\n' +
-        '  cache.clear();\n' +
-        '}\n',
-    );
-    write(
-      'packages/lib/src/f.test.ts',
-      'import { reset } from "./f.js"; import { it, expect } from "vitest"; it("t", () => expect(typeof reset).toBe("function"));\n',
-    );
-    commitAll('pr');
-    const wt = join(repo, 'wt');
-    git(repo, 'worktree', 'add', '-q', '--detach', wt, 'HEAD');
-    writeFileSync(
-      join(repo, 'report.json'),
-      JSON.stringify({
-        files: [
-          { path: 'packages/lib/src/f.ts', kind: 'source' },
-          { path: 'packages/lib/src/f.test.ts', kind: 'test' },
-        ],
-      }),
-    );
-    const callsFile = join(repo, 'calls.txt');
-    writeFileSync(
-      vitestScript(),
-      `#!/usr/bin/env node
-import fs from 'node:fs';
-import path from 'node:path';
-let n = 0;
-try { n = parseInt(fs.readFileSync(${JSON.stringify(callsFile)}, 'utf8'), 10) || 0; } catch {}
-n += 1;
-fs.writeFileSync(${JSON.stringify(callsFile)}, String(n));
-if (n === 2) {
-  // Die by signal mid-run, no report written: spawnSync answers the
-  // signal, the report file stays empty, and runProbeSuite throws.
-  process.kill(process.pid, 'SIGKILL');
-}
-const files = process.argv.slice(2).filter((a) => a.includes('.test.'));
-process.stdout.write(JSON.stringify({
-  numPassedTests: files.length,
-  numFailedTests: 0,
-  testResults: files.map((f) => ({
-    name: path.resolve(f),
-    assertionResults: [{ status: 'passed' }],
-  })),
-}));
-`,
-    );
+  // A self-SIGKILL reaches the parent spawnSync as a plain exit with
+  // `signal: null` on Windows (libuv TerminateProcess), so runProbeSuite
+  // never throws and the signal-death assertions below do not hold there.
+  it.skipIf(process.platform === 'win32')(
+    'marks every candidate inconclusive when the runner dies mid-mutation, and still runs the revert probe',
+    async () => {
+      // The mutation-phase catch: a runner killed (or failing to spawn) during a
+      // mutant run is not evidence about any statement. Every candidate that
+      // never got a verdict — the one being run AND the ones never attempted —
+      // must come back `inconclusive` with the reason, the revert probe must
+      // still run, and the report must still be written. The fake runner passes
+      // the baseline (run 1), dies BY SIGNAL on run 2 (the first mutant)
+      // without writing a report — the deadline-kill shape, which runProbeSuite
+      // answers with a throw — and passes the revert probe (run 3). (This test
+      // used to flood stdout past spawnSync's maxBuffer for an ENOBUFS error;
+      // the verdict channel is a file now — a flood just writes a big file —
+      // so the faithful "runner dies mid-run" shape is the signal death.)
+      write('package.json', '{"private":true,"workspaces":["packages/*"]}\n');
+      write(
+        'packages/lib/src/f.ts',
+        'export const state = new Map<string, string>();\n' +
+          'export const cache = new Set<string>();\n',
+      );
+      const base = commitAll('base');
+      write(
+        'packages/lib/src/f.ts',
+        'export const state = new Map<string, string>();\n' +
+          'export const cache = new Set<string>();\n' +
+          'export function reset() {\n' +
+          '  state.clear();\n' +
+          '  cache.clear();\n' +
+          '}\n',
+      );
+      write(
+        'packages/lib/src/f.test.ts',
+        'import { reset } from "./f.js"; import { it, expect } from "vitest"; it("t", () => expect(typeof reset).toBe("function"));\n',
+      );
+      commitAll('pr');
+      const wt = join(repo, 'wt');
+      git(repo, 'worktree', 'add', '-q', '--detach', wt, 'HEAD');
+      writeFileSync(
+        join(repo, 'report.json'),
+        JSON.stringify({
+          files: [
+            { path: 'packages/lib/src/f.ts', kind: 'source' },
+            { path: 'packages/lib/src/f.test.ts', kind: 'test' },
+          ],
+        }),
+      );
+      const callsFile = join(repo, 'calls.txt');
+      writeFileSync(
+        vitestScript(),
+        `#!/usr/bin/env node
+  import fs from 'node:fs';
+  import path from 'node:path';
+  let n = 0;
+  try { n = parseInt(fs.readFileSync(${JSON.stringify(callsFile)}, 'utf8'), 10) || 0; } catch {}
+  n += 1;
+  fs.writeFileSync(${JSON.stringify(callsFile)}, String(n));
+  if (n === 2) {
+    // Die by signal mid-run, no report written: spawnSync answers the
+    // signal, the report file stays empty, and runProbeSuite throws.
+    process.kill(process.pid, 'SIGKILL');
+  }
+  const files = process.argv.slice(2).filter((a) => a.includes('.test.'));
+  process.stdout.write(JSON.stringify({
+    numPassedTests: files.length,
+    numFailedTests: 0,
+    testResults: files.map((f) => ({
+      name: path.resolve(f),
+      assertionResults: [{ status: 'passed' }],
+    })),
+  }));
+  `,
+      );
 
-    await runHandler({
-      report: join(repo, 'report.json'),
-      worktree: wt,
-      base,
-      out: join(repo, 'out.json'),
-    });
+      await runHandler({
+        report: join(repo, 'report.json'),
+        worktree: wt,
+        base,
+        out: join(repo, 'out.json'),
+      });
 
-    const out = JSON.parse(readFileSync(join(repo, 'out.json'), 'utf8'));
-    expect(out.mutants.probed).toHaveLength(2);
-    for (const m of out.mutants.probed as Array<{
-      verdict: string;
-      detail: string;
-    }>) {
-      expect(m.verdict).toBe('inconclusive');
-      expect(m.detail).toContain('mutation probe could not run');
-    }
-    expect(out.mutants.probed[0].detail).toContain('SIGKILL');
-    expect(out.mutants.inconclusive).toBe(2);
-    expect(out.mutants.killed).toBe(0);
-    expect(out.mutants.survived).toBe(0);
-    expect(
-      (out.findings as Array<{ kind: string }>).some(
-        (f) => f.kind === 'mutant-survived',
-      ),
-    ).toBe(false);
-    // The revert probe still ran: a real verdict from run 3, not a propagated
-    // mutation failure.
-    expect(out.probed).toEqual([
-      expect.objectContaining({
-        file: 'packages/lib/src/f.test.ts',
-        verdict: 'inert',
-      }),
-    ]);
-    expect(existsSync(join(repo, 'wt-probe'))).toBe(false);
-  });
+      const out = JSON.parse(readFileSync(join(repo, 'out.json'), 'utf8'));
+      expect(out.mutants.probed).toHaveLength(2);
+      for (const m of out.mutants.probed as Array<{
+        verdict: string;
+        detail: string;
+      }>) {
+        expect(m.verdict).toBe('inconclusive');
+        expect(m.detail).toContain('mutation probe could not run');
+      }
+      expect(out.mutants.probed[0].detail).toContain('SIGKILL');
+      expect(out.mutants.inconclusive).toBe(2);
+      expect(out.mutants.killed).toBe(0);
+      expect(out.mutants.survived).toBe(0);
+      expect(
+        (out.findings as Array<{ kind: string }>).some(
+          (f) => f.kind === 'mutant-survived',
+        ),
+      ).toBe(false);
+      // The revert probe still ran: a real verdict from run 3, not a propagated
+      // mutation failure.
+      expect(out.probed).toEqual([
+        expect.objectContaining({
+          file: 'packages/lib/src/f.test.ts',
+          verdict: 'inert',
+        }),
+      ]);
+      expect(existsSync(join(repo, 'wt-probe'))).toBe(false);
+    },
+  );
 
   it('still finds the survivor under hostile user git diff config', async () => {
     // A developer's diff.srcPrefix/dstPrefix reshapes the `+++ b/…` headers

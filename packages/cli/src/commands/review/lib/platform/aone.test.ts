@@ -1081,8 +1081,10 @@ describe('aoneReader.fetchDiff', () => {
       'origin',
       '+refs/heads/master:refs/remotes/origin/master',
     );
-    // The throwaway ref is cleaned up.
+    // The throwaway ref is cleaned up — inert, because `branch -D` fires
+    // the reference-transaction hook from the never-wiped common hooks dir.
     expect(gitMock).toHaveBeenCalledWith(
+      ...INERT_GIT_ARGS,
       'branch',
       '-D',
       expect.stringMatching(refRe),

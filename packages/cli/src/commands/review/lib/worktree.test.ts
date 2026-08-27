@@ -2012,6 +2012,31 @@ describe('localFilterRefusal', () => {
     },
   );
 
+  it.skipIf(process.platform === 'win32')(
+    'caps the unreadable list — a planted entry per fake worktree cannot bury the refusal',
+    () => {
+      // The unreadable list is assembled from the `<common>/worktrees`
+      // readdir, which is unbounded, and test-efficacy re-embeds the refusal
+      // verbatim in every probe result: an unreadable entry per planted fake
+      // worktree would bury the actionable part under megabytes of message.
+      // The join is capped like the key lists. Symlinks exercise the
+      // not-a-regular-file shape without hanging the test the way FIFOs
+      // would.
+      for (let i = 0; i < 10; i++) {
+        const admin = join(repo, '.git', 'worktrees', `planted-${i}`);
+        mkdirSync(admin, { recursive: true });
+        symlinkSync('/dev/null', join(admin, 'config.worktree'));
+      }
+
+      const r = localFilterRefusal(tree, 'the probe checkout');
+
+      expect(r).not.toBeNull();
+      expect(r).toContain('… and 2 more unreadable files');
+      // Only the first 8 entries are named, whatever the readdir order.
+      expect((r ?? '').match(/planted-/g) ?? []).toHaveLength(8);
+    },
+  );
+
   it('refuses an include directive — the screen cannot see what it expands', () => {
     // `--file` does not expand `include.path`/`includeIf.*.path` while the
     // checkout's merged read DOES: a filter planted behind the include

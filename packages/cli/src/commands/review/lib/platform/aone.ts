@@ -671,7 +671,11 @@ export const aoneReader: ReviewPlatformReader = {
       ).toString('latin1');
     } finally {
       try {
-        git('branch', '-D', ref);
+        // INERT_GIT_ARGS: `branch -D` fires the reference-transaction hook
+        // from the never-wiped common hooks dir — the same hazard the
+        // fetch-pr rollbacks neutralize — and this delete runs on every
+        // fetchDiff exit, the certified success path included.
+        git(...INERT_GIT_ARGS, 'branch', '-D', ref);
       } catch {
         // The ref may not exist if the fetch failed; nothing to clean.
       }
