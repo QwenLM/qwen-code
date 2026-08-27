@@ -1,0 +1,100 @@
+name: Finalize PR 10212 round-3 fixes
+on:
+  push:
+    branches: [fix/10197-env-prefix-bash-rules]
+    paths: [.github/workflows/finalize-pr-10212-r3.yml]
+permissions:
+  contents: write
+jobs:
+  finalize:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/10197-env-prefix-bash-rules
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Apply reviewed patch
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          wf = Path('.github/workflows/finalize-pr-10212-r2.yml').read_text()
+          marker = "          python3 - <<'PY'\n"
+          start = wf.index(marker) + len(marker)
+          end = wf.index("\n          PY", start)
+          body = wf[start:end]
+          body = '\n'.join(line[10:] if line.startswith('          ') else line for line in body.splitlines())
+
+          old = r'''  const nameNode = commandNode.childForFieldName('name');
+  const envPrefix = nameNode
+    ? commandNode.namedChildren
+        .filter(
+          (child) =>
+            /^variable_assignments?$/.test(child.type) &&
+            child.endIndex <= nameNode.startIndex,
+        )
+        .map((child) => child.text)
+        .join(' ')
+    : '';'''
+          new = r'''  const nameNode = commandNode.childForFieldName('name');
+  const envPrefix =
+    nameNode && nameNode.startIndex > commandNode.startIndex
+      ? commandNode.text
+          .slice(0, nameNode.startIndex - commandNode.startIndex)
+          .trim()
+      : '';'''
+          if old not in body:
+              raise SystemExit('env-prefix generation patch marker not found')
+          body = body.replace(old, new, 1)
+          Path('/tmp/pr10212_patch.py').write_text(body)
+          PY
+          python3 /tmp/pr10212_patch.py
+      - name: Install and validate
+        run: |
+          npm ci
+          npx prettier --write \
+            packages/core/src/permissions/rule-parser.ts \
+            packages/core/src/permissions/permission-manager.ts \
+            packages/core/src/permissions/dangerousRules.ts \
+            packages/core/src/permissions/rule-parser.env-prefix.test.ts \
+            packages/core/src/permissions/dangerousRules.test.ts \
+            packages/core/src/utils/shellAstParser.ts \
+            packages/core/src/utils/shellAstParser.test.ts
+          npx prettier --check \
+            packages/core/src/permissions/rule-parser.ts \
+            packages/core/src/permissions/permission-manager.ts \
+            packages/core/src/permissions/dangerousRules.ts \
+            packages/core/src/permissions/rule-parser.env-prefix.test.ts \
+            packages/core/src/permissions/dangerousRules.test.ts \
+            packages/core/src/utils/shellAstParser.ts \
+            packages/core/src/utils/shellAstParser.test.ts
+          npx eslint --max-warnings 0 \
+            packages/core/src/permissions/rule-parser.ts \
+            packages/core/src/permissions/permission-manager.ts \
+            packages/core/src/permissions/dangerousRules.ts \
+            packages/core/src/permissions/rule-parser.env-prefix.test.ts \
+            packages/core/src/permissions/dangerousRules.test.ts \
+            packages/core/src/utils/shellAstParser.ts \
+            packages/core/src/utils/shellAstParser.test.ts
+          npx vitest run \
+            packages/core/src/permissions/rule-parser.env-prefix.test.ts \
+            packages/core/src/permissions/permission-manager.test.ts \
+            packages/core/src/permissions/dangerousRules.test.ts \
+            packages/core/src/utils/shellAstParser.test.ts \
+            packages/core/src/permissions/shell-semantics.test.ts \
+            packages/core/src/utils/shell-utils.test.ts
+          npx tsc --noEmit -p packages/core/tsconfig.json
+      - name: Commit tested fixes and remove temporary workflows
+        run: |
+          rm -f \
+            .github/workflows/finalize-pr-10212-r2.yml \
+            .github/workflows/finalize-pr-10212-r2-runner.yml \
+            .github/workflows/finalize-pr-10212-r3.yml
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add -A
+          git diff --cached --quiet && exit 0
+          git commit -m "fix(permissions): harden env-prefixed rule semantics"
+          git push origin HEAD:fix/10197-env-prefix-bash-rules
