@@ -1106,10 +1106,11 @@ describe('Gemini Client (client.ts)', () => {
     it('passes cancellation to SessionStart hooks and does not swallow it', async () => {
       const controller = new AbortController();
       const timeoutError = new Error('session initialization timed out');
+      const hookError = new Error('hook exploded independently');
       const fireSessionStartEvent = vi.fn(async (...args: unknown[]) => {
         expect(args[4]).toBe(controller.signal);
         controller.abort(timeoutError);
-        throw timeoutError;
+        throw hookError;
       });
       vi.mocked(mockConfig.getDisableAllHooks).mockReturnValue(false);
       vi.mocked(mockConfig.hasHooksForEvent).mockReturnValue(true);

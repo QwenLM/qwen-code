@@ -13918,6 +13918,7 @@ describe('createServeApp', () => {
 
     it('503s fresh session work for every channel quarantine reason', async () => {
       for (const reason of [
+        'restore_cleanup_failed',
         'restore_settlement_overdue',
         'new_session_cleanup_failed',
         'new_session_settlement_overdue',
@@ -13934,8 +13935,8 @@ describe('createServeApp', () => {
           .send({});
 
         expect(res.status).toBe(503);
-        // Quarantine lasts until the channel drains — strictly longer than the
-        // fence — and a fresh-id caller never sees the 409 that would tell it so.
+        // Fresh-id callers never see the same-id 409, so the 503 must carry the
+        // operation-budget-scale retry hint itself.
         expect(res.headers['retry-after']).toBe('90');
         expect(res.body).toMatchObject({
           code: 'acp_channel_unavailable',

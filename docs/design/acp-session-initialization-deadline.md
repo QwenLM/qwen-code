@@ -50,7 +50,7 @@ The Bridge observes the raw ACP request after its public timer fires. This prote
 - A late success is never registered. The Bridge sends one bounded `qwen/control/session/close` for the returned Session ID, and only `closed: true` is accepted as proof that cleanup completed.
 - Resource-not-found means cleanup is already complete.
 - A close failure quarantines only fresh session admission on that channel. Existing sibling Sessions continue until they drain, after which the channel is reaped.
-- If the raw request remains unsettled for one additional initialization budget, the channel similarly refuses fresh Sessions until it drains.
+- If the raw request remains unsettled for one additional initialization budget, the channel similarly refuses fresh Sessions until the request settles or the channel drains.
 - An empty timed-out channel follows the existing immediate teardown path; a shared channel is not killed while siblings remain.
 
 The Bridge holds the fresh-session admission reservation and a caller-supplied ID reservation until the raw request and cleanup settle. Abandoned requests count toward `maxSessions`, and shutdown awaits their settlement after initiating channel teardown. This prevents retries from overcommitting resources or reclaiming an ID that a late child response can still create.

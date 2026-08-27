@@ -139,9 +139,9 @@ export class SessionArchivingError extends Error {
  *
  * `restore_in_progress` is the ordinary case: a restore is running and the
  * caller can retry shortly. `awaiting_abandoned_cleanup` means the public
- * caller already received a timeout, but the non-cancellable ACP request (and
- * its cleanup) has not settled yet — retrying at the ordinary cadence just
- * re-hits the fence, so clients must back off much further.
+ * caller already received a timeout, but the non-cancellable ACP registration
+ * request (and its cleanup) has not settled yet — retrying at the ordinary
+ * cadence just re-hits the fence, so clients must back off much further.
  */
 export type RestoreInProgressReason =
   | 'restore_in_progress'
@@ -182,7 +182,7 @@ export class RestoreInProgressError extends Error {
         : `session/${activeAction}`;
     super(
       reason === 'awaiting_abandoned_cleanup'
-        ? `Session "${sessionId}" timed out during ${activeTarget} and its abandoned restore has not settled yet; retry ${retryTarget} once cleanup completes`
+        ? `Session "${sessionId}" timed out during ${activeTarget} and its abandoned registration has not settled yet; retry ${retryTarget} once cleanup completes`
         : activeAction === 'spawn'
           ? `Session "${sessionId}" is already being registered by ${activeTarget}; retry ${retryTarget} after it completes`
           : `Session "${sessionId}" is already being restored via ${activeTarget}; retry ${retryTarget} after it completes`,
@@ -634,7 +634,8 @@ export class WorkspaceDrainingError extends Error {
  * Why a channel is closed to new session work. Cleanup failures mean the
  * child's state is unknown; settlement-overdue states mean the child still
  * holds work the bridge can neither cancel nor account for. Existing sessions
- * remain usable while the channel drains and is recycled.
+ * remain usable. Cleanup-failed states last until channel recycle;
+ * settlement-overdue states may clear when the abandoned request settles.
  */
 export type BridgeChannelUnavailableReason =
   | 'restore_cleanup_failed'
@@ -645,10 +646,9 @@ export type BridgeChannelUnavailableReason =
 export class BridgeChannelQuarantinedError extends Error {
   readonly reason: BridgeChannelUnavailableReason;
   /**
-   * How long the caller should wait before retrying fresh session work. This
-   * state persists until the workspace channel drains, which is at least a
-   * restore budget away — the ordinary 5-second cadence would poll identical
-   * 503s, and a fresh id never reaches the 409 that carries the real hint.
+   * How long the caller should wait before retrying fresh session work. The
+   * operation-budget-derived hint avoids polling these longer-lived states at
+   * the ordinary 5-second cadence.
    */
   readonly retryAfterSeconds: number;
 

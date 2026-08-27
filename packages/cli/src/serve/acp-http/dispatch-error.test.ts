@@ -111,10 +111,10 @@ describe('toRpcError', () => {
   });
 
   it('carries every quarantine reason and its backoff hint', () => {
-    // Quarantine outlives the fence, and a fresh-id request never reaches the
-    // 409 that carries the real hint — so this payload is the only backoff
-    // signal such a caller gets.
+    // A fresh-id request never reaches the same-id 409, so this payload is the
+    // only operation-budget-scale backoff signal such a caller gets.
     for (const reason of [
+      'restore_cleanup_failed',
       'restore_settlement_overdue',
       'new_session_cleanup_failed',
       'new_session_settlement_overdue',

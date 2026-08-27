@@ -2786,16 +2786,15 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     opts.childEnvOverrides
       ? Object.freeze({ ...opts.childEnvOverrides })
       : Object.freeze({});
-  const rawInitTimeoutMs = opts.initializeTimeoutMs ?? DEFAULT_INIT_TIMEOUT_MS;
-  if (!Number.isFinite(rawInitTimeoutMs) || rawInitTimeoutMs <= 0) {
+  const initTimeoutMs = opts.initializeTimeoutMs ?? DEFAULT_INIT_TIMEOUT_MS;
+  if (!Number.isInteger(initTimeoutMs) || initTimeoutMs <= 0) {
     throw new TypeError(
-      `Invalid initializeTimeoutMs: ${rawInitTimeoutMs}. Must be a finite number > 0.`,
+      `Invalid initializeTimeoutMs: ${initTimeoutMs}. Must be a positive integer.`,
     );
   }
-  const initTimeoutMs = Math.ceil(rawInitTimeoutMs);
   if (initTimeoutMs > 2_147_483_647) {
     throw new TypeError(
-      `Invalid initializeTimeoutMs: ${rawInitTimeoutMs}. Must not exceed the supported timer range.`,
+      `Invalid initializeTimeoutMs: ${initTimeoutMs}. Must not exceed the supported timer range.`,
     );
   }
   const newSessionSettlementGraceMs = initTimeoutMs;
@@ -3041,8 +3040,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     const capability = owner?.activeWork;
     if (
       capability &&
-      !owner.isQuarantined &&
-      !owner.restoreSettlementOverdue &&
+      !channelIsCondemned(owner) &&
       ACTIVE_WORK_HOLD_CATEGORIES.some(
         (category) => !capability.categories.includes(category),
       )
@@ -3150,8 +3148,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       // that teardown is exactly what the drain is waiting for.
       const condemnedOwner = channelInfoForEntry(entry);
       const agentCloseTimeoutMs =
-        condemnedOwner?.isQuarantined === true ||
-        condemnedOwner?.restoreSettlementOverdue === true
+        condemnedOwner !== undefined && channelIsCondemned(condemnedOwner)
           ? ACTIVE_WORK_CLOSE_TIMEOUT_MS
           : undefined;
       await closeSessionImpl(entry.sessionId, undefined, {
@@ -3194,20 +3191,15 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     const info = channelInfoForEntry(entry);
     if (!info?.activeWork) return true;
     if (info.isDying) return false;
-    // A channel the restore lifecycle has already condemned is waiting to be
+    // A channel the session lifecycle has already condemned is waiting to be
     // reaped as soon as its visible work drains — that teardown is the only
-    // thing that can release a non-cancellable restore we have given up on.
+    // thing that can release a non-cancellable request we have given up on.
     // Deferring to the child here would make the drain depend on the very
-    // process we have declared unreliable, and a child wedged mid-restore is
+    // process we have declared unreliable, and a child wedged mid-request is
     // precisely the one that cannot answer this round trip inside
     // `ACTIVE_WORK_CLOSE_TIMEOUT_MS`. Nothing is attached to this session
     // (`maybeCloseIdleSession` gates on that), so proceed to local teardown.
-    if (
-      info.isQuarantined ||
-      info.restoreSettlementOverdue ||
-      info.newSessionCleanupFailed ||
-      info.newSessionSettlementOverdue
-    ) {
+    if (channelIsCondemned(info)) {
       return true;
     }
     try {
@@ -3487,6 +3479,15 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     );
   }
 
+  function channelIsCondemned(ci: ChannelInfo): boolean {
+    return (
+      ci.isQuarantined ||
+      ci.restoreSettlementOverdue ||
+      ci.newSessionCleanupFailed ||
+      ci.newSessionSettlementOverdue
+    );
+  }
+
   /**
    * A restore that blew its public deadline is left running because the ACP
    * request cannot be cancelled — but "cannot cancel" must not mean "wait
@@ -3511,7 +3512,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       ci.restoreSettlementOverdue = true;
       writeStderrLine(
         `qwen serve: abandoned session/${action} for ${JSON.stringify(sessionId)} has not settled ` +
-          `${restoreSettlementGraceMs}ms after its deadline; refusing fresh sessions on channel ${ci.id} until it drains`,
+          `${restoreSettlementGraceMs}ms after its deadline; refusing fresh sessions on channel ${ci.id} until it settles or drains`,
       );
       telemetry.event('session.restore.settlement_overdue', {
         'qwen-code.daemon.session_restore.action': action,
@@ -3540,7 +3541,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       ci.newSessionSettlementOverdue = true;
       writeStderrLine(
         `qwen serve: abandoned newSession${requestedSessionId ? ` for ${JSON.stringify(requestedSessionId)}` : ''} has not settled ` +
-          `${newSessionSettlementGraceMs}ms after its deadline; refusing fresh sessions on channel ${ci.id} until it drains`,
+          `${newSessionSettlementGraceMs}ms after its deadline; refusing fresh sessions on channel ${ci.id} until it settles or drains`,
       );
       telemetry.event('session.new.settlement_overdue', {
         'qwen-code.daemon.session_new.timeout_ms': initTimeoutMs,
@@ -3877,6 +3878,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
   // `inFlightRestores`: whichever operation reserves the id first owns its
   // registration window.
   const inFlightRequestedSessionSpawns = new Map<string, symbol>();
+  const abandonedRequestedSessionSpawns = new Set<symbol>();
 
   interface InFlightRestore {
     action: 'load' | 'resume';
@@ -4612,6 +4614,26 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     }
   }
 
+  function recordNewSessionPublicTimeout(
+    ci: ChannelInfo,
+    requestedSessionId: string | undefined,
+  ): boolean {
+    const channelWasEmpty = hasNoChannelWork(ci, {
+      ignoreCurrentSessionSpawn: true,
+    });
+    telemetry.event('session.new.public_result', {
+      'qwen-code.daemon.session_new.result': 'timeout',
+      'qwen-code.daemon.session_new.timeout_ms': initTimeoutMs,
+      'qwen-code.daemon.acp_channel.id': ci.id,
+      'qwen-code.daemon.session_new.channel_was_empty': channelWasEmpty,
+      ...(requestedSessionId ? { 'session.id': requestedSessionId } : {}),
+    });
+    writeStderrLine(
+      `qwen serve: newSession timed out after ${initTimeoutMs}ms${requestedSessionId ? ` for ${JSON.stringify(requestedSessionId)}` : ''} on channel ${ci.id}; decision=${channelWasEmpty ? 'kill_empty' : 'fence_shared'}`,
+    );
+    return channelWasEmpty;
+  }
+
   async function settleAbandonedNewSession(
     ci: ChannelInfo,
     token: symbol,
@@ -4855,21 +4877,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                     abandonedNewSessionSettlements.delete(settlement);
                   });
                   onNewSessionAbandoned?.(settlement);
-                  const channelWasEmpty = hasNoChannelWork(ci, {
-                    ignoreCurrentSessionSpawn: true,
-                  });
-                  telemetry.event('session.new.public_result', {
-                    'qwen-code.daemon.session_new.result': 'timeout',
-                    'qwen-code.daemon.session_new.timeout_ms': initTimeoutMs,
-                    'qwen-code.daemon.acp_channel.id': ci.id,
-                    'qwen-code.daemon.session_new.channel_was_empty':
-                      channelWasEmpty,
-                    ...(requestedSessionId
-                      ? { 'session.id': requestedSessionId }
-                      : {}),
-                  });
-                  writeStderrLine(
-                    `qwen serve: newSession timed out after ${initTimeoutMs}ms${requestedSessionId ? ` for ${JSON.stringify(requestedSessionId)}` : ''} on channel ${ci.id}; decision=${channelWasEmpty ? 'kill_empty' : 'fence_shared'}`,
+                  const channelWasEmpty = recordNewSessionPublicTimeout(
+                    ci,
+                    requestedSessionId,
                   );
                   if (!channelWasEmpty) {
                     armNewSessionSettlementGrace(
@@ -4902,12 +4912,17 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                   (error: unknown) => {
                     if (lifecycle.phase === 'active') {
                       clearTimeout(timer);
-                      reject(
+                      if (
                         extractJsonRpcErrorField(error, 'errorKind') ===
-                          SESSION_INITIALIZATION_TIMEOUT_ERROR_KIND
-                          ? new BridgeTimeoutError('newSession', initTimeoutMs)
-                          : error,
-                      );
+                        SESSION_INITIALIZATION_TIMEOUT_ERROR_KIND
+                      ) {
+                        recordNewSessionPublicTimeout(ci, requestedSessionId);
+                        reject(
+                          new BridgeTimeoutError('newSession', initTimeoutMs),
+                        );
+                      } else {
+                        reject(error);
+                      }
                       return;
                     }
                     void settleAbandonedNewSession(
@@ -7179,7 +7194,18 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     }
 
     if (inFlightRequestedSessionSpawns.has(req.sessionId)) {
-      throw new RestoreInProgressError(req.sessionId, 'spawn', action);
+      const owner = inFlightRequestedSessionSpawns.get(req.sessionId);
+      throw new RestoreInProgressError(
+        req.sessionId,
+        'spawn',
+        action,
+        owner !== undefined && abandonedRequestedSessionSpawns.has(owner)
+          ? {
+              reason: 'awaiting_abandoned_cleanup',
+              retryAfterSeconds: abandonedNewSessionRetryAfterSeconds,
+            }
+          : undefined,
+      );
     }
 
     const inFlight = inFlightRestores.get(req.sessionId);
@@ -8823,7 +8849,18 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           );
         }
         if (inFlightRequestedSessionSpawns.has(req.sessionId)) {
-          throw new RestoreInProgressError(req.sessionId, 'spawn', 'spawn');
+          const owner = inFlightRequestedSessionSpawns.get(req.sessionId);
+          throw new RestoreInProgressError(
+            req.sessionId,
+            'spawn',
+            'spawn',
+            owner !== undefined && abandonedRequestedSessionSpawns.has(owner)
+              ? {
+                  reason: 'awaiting_abandoned_cleanup',
+                  retryAfterSeconds: abandonedNewSessionRetryAfterSeconds,
+                }
+              : undefined,
+          );
         }
       }
       // Cap check: count both registered sessions and in-flight spawns
@@ -8853,6 +8890,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         );
       }
       const releaseRequestedSessionRegistration = () => {
+        if (requestedSessionRegistrationOwner !== undefined) {
+          abandonedRequestedSessionSpawns.delete(
+            requestedSessionRegistrationOwner,
+          );
+        }
         if (
           req.sessionId !== undefined &&
           requestedSessionRegistrationOwner !== undefined &&
@@ -8900,6 +8942,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           : undefined,
         (settlement) => {
           abandonedSettlement = settlement;
+          if (requestedSessionRegistrationOwner !== undefined) {
+            abandonedRequestedSessionSpawns.add(
+              requestedSessionRegistrationOwner,
+            );
+          }
         },
       );
       // Track in-flight spawns regardless of scope. Under `single`
