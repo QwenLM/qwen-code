@@ -3532,10 +3532,13 @@ export class GeminiClient {
         // section lives in the cached system prompt, and a session drifts back
         // to the default voice over a long conversation without a nudge that
         // sits next to the newest user text.
-        const outputStyle = resolveEffectiveOutputStyle(
-          this.config.getOutputStyle(),
-          resolveInteractionMode(this.config),
-        );
+        const activeStyle = this.config.getOutputStyle();
+        const outputStyle = activeStyle
+          ? resolveEffectiveOutputStyle(
+              activeStyle,
+              resolveInteractionMode(this.config),
+            )
+          : undefined;
         if (outputStyle) {
           systemReminders.push(
             `<system-reminder>\n${escapeSystemReminderTags(

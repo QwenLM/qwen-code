@@ -229,6 +229,7 @@ function setupGoalClient() {
       toolResultsNumToKeep: 5,
     })),
     getApprovalMode: vi.fn(() => ApprovalMode.DEFAULT),
+    getOutputStyle: vi.fn(() => undefined),
     getSdkMode: vi.fn(() => false),
     getArenaManager: vi.fn(() => null),
     getFileHistoryService: vi.fn(() => ({
