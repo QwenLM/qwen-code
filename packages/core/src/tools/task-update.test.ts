@@ -211,7 +211,7 @@ describe('TaskUpdateTool', () => {
     expect(reloaded?.status).toBe('completed');
   });
 
-  it('rejects leader reassignment after dispatching an in-progress task', async () => {
+  it('lets the leader reassign an in-progress task after dispatch', async () => {
     const dispatchedOwners: string[] = [];
     const teamManager = {
       validateTaskOwner: () => undefined,
@@ -234,11 +234,10 @@ describe('TaskUpdateTool', () => {
       .execute(new AbortController().signal);
 
     expect(first.error).toBeUndefined();
-    expect(second.error).toBeDefined();
-    expect(String(second.llmContent)).toContain('already assigned');
-    expect(dispatchedOwners).toEqual(['alice']);
+    expect(second.error).toBeUndefined();
+    expect(dispatchedOwners).toEqual(['alice', 'bob']);
     const reloaded = await getTask(TEAM, task.id);
-    expect(reloaded?.owner).toBe('alice');
+    expect(reloaded?.owner).toBe('bob');
   });
 
   it('validates required taskId', () => {
