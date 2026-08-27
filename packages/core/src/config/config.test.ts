@@ -2780,6 +2780,28 @@ describe('Server Config (config.ts)', () => {
       );
     });
 
+    it('parks one approved proposal and hands it to the client once', () => {
+      const config = new Config({ ...baseParams, chatRecording: true });
+
+      expect(config.setPendingGoalProposal({ objective: 'first' })).toBe(true);
+      expect(config.setPendingGoalProposal({ objective: 'second' })).toBe(
+        false,
+      );
+      expect(config.hasPendingGoalProposal()).toBe(true);
+      expect(config.takePendingGoalProposal()).toEqual({ objective: 'first' });
+      expect(config.hasPendingGoalProposal()).toBe(false);
+      expect(config.takePendingGoalProposal()).toBeUndefined();
+    });
+
+    it('clears a parked proposal when the session Goal runtime is replaced', () => {
+      const config = new Config({ ...baseParams, chatRecording: true });
+      config.setPendingGoalProposal({ objective: 'stale approval' });
+
+      config.startNewSession('replacement-session');
+
+      expect(config.takePendingGoalProposal()).toBeUndefined();
+    });
+
     it('restores the complete resumed-session Goal before exposing readiness', async () => {
       const config = new Config({
         ...baseParams,
@@ -4393,8 +4415,11 @@ describe('Server Config (config.ts)', () => {
       expect(registeredNames).toContain(ToolNames.PROPOSE_GOAL);
     });
     it.each([
-      ['ACP', { experimentalZedIntegration: true }],
-      ['stream-json', { inputFormat: InputFormat.STREAM_JSON }],
+      ['ACP', { experimentalZedIntegration: true, interactive: true }],
+      [
+        'stream-json',
+        { inputFormat: InputFormat.STREAM_JSON, interactive: true },
+      ],
     ] as const)(
       'does not register propose_goal without a turn-boundary settlement path in %s sessions',
       async (_mode, params) => {

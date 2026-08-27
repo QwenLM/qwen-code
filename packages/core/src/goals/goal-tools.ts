@@ -617,19 +617,20 @@ export interface ProposeGoalToolParams {
  */
 export interface PendingGoalProposal {
   objective: string;
-  approvedAt: number;
 }
 
 export interface ProposeGoalToolConfig extends GoalToolConfig {
+  getGoalRuntimeReady(): Promise<GoalRuntime>;
   isTrustedFolder(): boolean;
   getApprovalMode(): ApprovalMode;
-  setPendingGoalProposal(proposal: PendingGoalProposal): void;
+  hasPendingGoalProposal(): boolean;
+  setPendingGoalProposal(proposal: PendingGoalProposal): boolean;
 }
 
 type ProposeGoalRuntime = Pick<GoalRuntime, 'getSnapshot' | 'dispatch'>;
 
 export type ApplyPendingGoalProposalResult =
-  | { applied: true; goal: GoalRecord; replacedGoalId?: string }
+  | { applied: true; goal: GoalRecord }
   | { applied: false; reason: string };
 
 /**
@@ -676,7 +677,6 @@ export async function applyPendingGoalProposal(
     return {
       applied: true,
       goal,
-      ...(current ? { replacedGoalId: current.goalId } : {}),
     };
   } catch (error) {
     if (
@@ -695,9 +695,11 @@ export const PROPOSE_GOAL_PLAN_MODE_MESSAGE =
 export const PROPOSE_GOAL_UNTRUSTED_MESSAGE =
   'Goals can only be set in trusted workspaces. Tell the user to trust the folder with /trust and then run /goal set themselves.';
 export const PROPOSE_GOAL_UNAVAILABLE_MESSAGE =
-  'This session cannot persist Goals (chat recording is disabled), so no Goal can be set.';
+  'This session cannot persist Goals, so no Goal can be set.';
 export const PROPOSE_GOAL_NOT_APPROVED_MESSAGE =
   'The Goal was not set: the user did not approve it. Do not ask why and do not propose the same or a reworded objective again.';
+export const PROPOSE_GOAL_PENDING_MESSAGE =
+  'Another approved Goal proposal is already waiting for this turn to end. Do not propose another one.';
 
 function activeGoalMessage(revision: number): string {
   return `A Goal is already active (revision ${revision}); this tool does not replace a running Goal. Hand the user a \`/goal edit <objective>\` line to tighten it or a \`/goal set <objective>\` line to replace it, and stop.`;
@@ -752,7 +754,9 @@ class ProposeGoalInvocation extends BaseToolInvocation<
    * that could not be set, and again in `execute()` because `/goal` can
    * change the session while the dialog is open.
    */
-  private blocker(): { message: string; type: ToolErrorType } | undefined {
+  private async blocker(): Promise<
+    { message: string; type: ToolErrorType } | undefined
+  > {
     if (this.config.getApprovalMode() === ApprovalMode.PLAN) {
       return {
         message: PROPOSE_GOAL_PLAN_MODE_MESSAGE,
@@ -765,9 +769,15 @@ class ProposeGoalInvocation extends BaseToolInvocation<
         type: ToolErrorType.EXECUTION_DENIED,
       };
     }
+    if (this.config.hasPendingGoalProposal()) {
+      return {
+        message: PROPOSE_GOAL_PENDING_MESSAGE,
+        type: ToolErrorType.EXECUTION_DENIED,
+      };
+    }
     let runtime: ProposeGoalRuntime;
     try {
-      runtime = this.config.getGoalRuntime();
+      runtime = await this.config.getGoalRuntimeReady();
     } catch {
       return {
         message: PROPOSE_GOAL_UNAVAILABLE_MESSAGE,
@@ -787,7 +797,7 @@ class ProposeGoalInvocation extends BaseToolInvocation<
   override async getConfirmationDetails(
     _abortSignal: AbortSignal,
   ): Promise<ToolCallConfirmationDetails> {
-    const blocker = this.blocker();
+    const blocker = await this.blocker();
     if (blocker) {
       throw new StructuredToolError(blocker.message, blocker.type);
     }
@@ -810,14 +820,19 @@ class ProposeGoalInvocation extends BaseToolInvocation<
         ToolErrorType.EXECUTION_DENIED,
       );
     }
-    const blocker = this.blocker();
+    const blocker = await this.blocker();
     if (blocker) return this.errorResult(blocker.message, blocker.type);
 
     const objective = this.params.objective.trim();
     const current = this.config.getGoalRuntime().getSnapshot().goal;
     // Parked, not dispatched: the client sets it when this turn ends. Doing
     // it here would strip the rest of the turn of its Goal permit.
-    this.config.setPendingGoalProposal({ objective, approvedAt: Date.now() });
+    if (!this.config.setPendingGoalProposal({ objective })) {
+      return this.errorResult(
+        PROPOSE_GOAL_PENDING_MESSAGE,
+        ToolErrorType.EXECUTION_DENIED,
+      );
+    }
     const payload = {
       approved: true,
       objective,

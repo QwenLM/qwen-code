@@ -4345,6 +4345,42 @@ describe('loadCliConfig workflowsEnabled', () => {
   });
 });
 
+describe('loadCliConfig model-proposed Goals', () => {
+  const originalArgv = process.argv;
+
+  beforeEach(() => {
+    vi.resetAllMocks();
+    vi.mocked(os.homedir).mockReturnValue('/mock/home/user');
+    vi.stubEnv('GEMINI_API_KEY', 'test-api-key');
+    process.argv = ['node', 'script.js'];
+  });
+
+  afterEach(() => {
+    process.argv = originalArgv;
+    vi.unstubAllEnvs();
+    vi.restoreAllMocks();
+  });
+
+  it('passes the disabled setting into the core Config', async () => {
+    const argv = await parseArguments();
+    const config = await loadCliConfig(
+      { goals: { modelProposed: 'disabled' } },
+      argv,
+      undefined,
+      [],
+    );
+
+    expect(config.getModelProposedGoals()).toBe('disabled');
+  });
+
+  it('uses alwaysAsk by default', async () => {
+    const argv = await parseArguments();
+    const config = await loadCliConfig({}, argv, undefined, []);
+
+    expect(config.getModelProposedGoals()).toBe('alwaysAsk');
+  });
+});
+
 describe('screenReader configuration', () => {
   const originalArgv = process.argv;
 

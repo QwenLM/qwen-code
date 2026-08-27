@@ -19,6 +19,7 @@ import {
   GetGoalTool,
   PROPOSE_GOAL_NOT_APPROVED_MESSAGE,
   PROPOSE_GOAL_OBJECTIVE_MAX_CHARACTERS,
+  PROPOSE_GOAL_PENDING_MESSAGE,
   PROPOSE_GOAL_PLAN_MODE_MESSAGE,
   PROPOSE_GOAL_UNAVAILABLE_MESSAGE,
   PROPOSE_GOAL_UNTRUSTED_MESSAGE,
@@ -1535,15 +1536,20 @@ describe('ProposeGoalTool', () => {
   } {
     let parked: PendingGoalProposal | undefined;
     const setPendingGoalProposal = vi.fn((proposal: PendingGoalProposal) => {
+      if (parked) return false;
       parked = proposal;
+      return true;
     });
+    const getGoalRuntime =
+      typeof runtime === 'function'
+        ? runtime
+        : vi.fn(() => runtime as GoalRuntime);
     return {
-      getGoalRuntime:
-        typeof runtime === 'function'
-          ? runtime
-          : vi.fn(() => runtime as GoalRuntime),
+      getGoalRuntime,
+      getGoalRuntimeReady: async () => getGoalRuntime(),
       isTrustedFolder: () => true,
       getApprovalMode: () => ApprovalMode.DEFAULT,
+      hasPendingGoalProposal: () => parked !== undefined,
       setPendingGoalProposal,
       pending: () => parked,
       ...overrides,
@@ -1629,13 +1635,42 @@ describe('ProposeGoalTool', () => {
     const applied = await applyPendingGoalProposal(runtime, config.pending()!);
     expect(applied.applied).toBe(true);
     if (!applied.applied) return;
-    expect(applied.replacedGoalId).toBeUndefined();
     const goal = runtime.getSnapshot().goal;
     expect(goal?.goalId).toBe(applied.goal.goalId);
     expect(goal?.status).toBe('active');
     expect(goal?.objective).toBe(objective);
     // The runtime, not the tool, drives the first Goal turn.
     expect(host.started).toHaveLength(1);
+  });
+
+  it('does not silently replace an already approved pending proposal', async () => {
+    const { runtime } = idleRuntime();
+    const config = proposeConfig(runtime);
+    const tool = new ProposeGoalTool(config);
+    const firstObjective = 'Outcome: ship the first approved Goal.';
+    const secondObjective = 'Outcome: ship a different Goal.';
+
+    const first = await confirm(tool, ToolConfirmationOutcome.ProceedOnce, {
+      objective: firstObjective,
+    });
+    const second = await confirm(tool, ToolConfirmationOutcome.ProceedOnce, {
+      objective: secondObjective,
+    });
+
+    expect(
+      await first.invocation.execute(new AbortController().signal),
+    ).not.toHaveProperty('error');
+    const secondResult = await second.invocation.execute(
+      new AbortController().signal,
+    );
+
+    expect(secondResult.error?.type).toBe(ToolErrorType.EXECUTION_DENIED);
+    expect(config.pending()?.objective).toBe(firstObjective);
+    await expect(
+      tool
+        .build({ objective: 'Outcome: ask a third time.' })
+        .getConfirmationDetails(new AbortController().signal),
+    ).rejects.toThrow(PROPOSE_GOAL_PENDING_MESSAGE);
   });
 
   it('sets nothing when the dialog was cancelled', async () => {
@@ -1687,6 +1722,22 @@ describe('ProposeGoalTool', () => {
     expect(runtime.getSnapshot().goal).toBeNull();
   });
 
+  it('refuses before the dialog when Goal persistence failed to become ready', async () => {
+    const { runtime } = idleRuntime();
+    const config = proposeConfig(runtime);
+    Object.assign(config, {
+      getGoalRuntimeReady: vi
+        .fn()
+        .mockRejectedValue(new Error('restore failed')),
+    });
+
+    await expect(
+      new ProposeGoalTool(config)
+        .build({ objective })
+        .getConfirmationDetails(new AbortController().signal),
+    ).rejects.toThrow(PROPOSE_GOAL_UNAVAILABLE_MESSAGE);
+  });
+
   it('refuses to replace an active Goal and points at /goal edit', async () => {
     const { runtime } = await activeRuntime();
     const tool = new ProposeGoalTool(proposeConfig(runtime));
@@ -1697,6 +1748,22 @@ describe('ProposeGoalTool', () => {
         .getConfirmationDetails(new AbortController().signal),
     ).rejects.toThrow('/goal edit');
     expect(runtime.getSnapshot().goal?.objective).toBe('Ship Goal v3');
+  });
+
+  it('rechecks the active Goal after the dialog before parking approval', async () => {
+    const { runtime } = idleRuntime();
+    const config = proposeConfig(runtime);
+    const { invocation } = await confirm(
+      new ProposeGoalTool(config),
+      ToolConfirmationOutcome.ProceedOnce,
+    );
+    await runtime.dispatch({ action: 'create', objective: 'Typed by hand' });
+
+    const result = await invocation.execute(new AbortController().signal);
+
+    expect(result.error?.type).toBe(ToolErrorType.EXECUTION_DENIED);
+    expect(config.pending()).toBeUndefined();
+    expect(runtime.getSnapshot().goal?.objective).toBe('Typed by hand');
   });
 
   it('replaces a stopped Goal when the parked approval is applied', async () => {
@@ -1726,10 +1793,7 @@ describe('ProposeGoalTool', () => {
     expect(runtime.getSnapshot().goal?.goalId).toBe(paused.goalId);
 
     const applied = await applyPendingGoalProposal(runtime, config.pending()!);
-    expect(applied).toMatchObject({
-      applied: true,
-      replacedGoalId: paused.goalId,
-    });
+    expect(applied).toMatchObject({ applied: true });
     const goal = runtime.getSnapshot().goal;
     expect(goal?.goalId).not.toBe(paused.goalId);
     expect(goal?.status).toBe('active');
@@ -1774,7 +1838,6 @@ describe('ProposeGoalTool', () => {
     });
     const applied = applyPendingGoalProposal(runtime, {
       objective,
-      approvedAt: 1,
     });
 
     await expect(resumed).resolves.toMatchObject({
@@ -1814,7 +1877,6 @@ describe('ProposeGoalTool', () => {
 
     const applied = await applyPendingGoalProposal(stale, {
       objective,
-      approvedAt: 1,
     });
     expect(applied.applied).toBe(false);
     expect(runtime.getSnapshot().goal?.goalId).toBe(paused.goalId);

@@ -7450,9 +7450,15 @@ export class Config {
     return this.modelProposedGoals;
   }
 
+  hasPendingGoalProposal(): boolean {
+    return this.pendingGoalProposal !== undefined;
+  }
+
   /** Parks a `propose_goal` approval until the proposing turn ends. */
-  setPendingGoalProposal(proposal: PendingGoalProposal): void {
+  setPendingGoalProposal(proposal: PendingGoalProposal): boolean {
+    if (this.pendingGoalProposal) return false;
     this.pendingGoalProposal = proposal;
+    return true;
   }
 
   /** Hands the parked approval to the client at the turn boundary, once. */

@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from '../config/config.js';
 import type { GeminiChat } from './geminiChat.js';
 import {
@@ -21,20 +21,28 @@ import type {
 } from '../goals/goal-protocol.js';
 import type { ChatRecord } from '../services/chatRecordingService.js';
 import { ApprovalMode } from '../config/config.js';
+import {
+  __resetActiveGoalStoreForTests,
+  clearActiveGoal,
+  setActiveGoal,
+} from '../goals/activeGoalStore.js';
+import { GOAL_HOOK_ID_OUTPUT_KEY } from '../goals/goalHook.js';
 
 const turnMocks = vi.hoisted(() => ({
   constructors: [] as unknown[][],
+  pendingToolCalls: [] as unknown[][],
   run: vi.fn(),
 }));
 
 vi.mock('./turn.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./turn.js')>();
   class MockTurn {
-    pendingToolCalls: unknown[] = [];
+    pendingToolCalls: unknown[];
     finishReason: undefined;
 
     constructor(...args: unknown[]) {
       turnMocks.constructors.push(args);
+      this.pendingToolCalls = turnMocks.pendingToolCalls.shift() ?? [];
     }
 
     run(...args: unknown[]) {
@@ -250,11 +258,17 @@ function setupGoalClient() {
 
 describe('GeminiClient Goal admission', () => {
   beforeEach(() => {
+    __resetActiveGoalStoreForTests();
     turnMocks.constructors.length = 0;
+    turnMocks.pendingToolCalls.length = 0;
     turnMocks.run.mockReset().mockImplementation(emptyStream);
     nextSpeakerMocks.check.mockReset().mockResolvedValue({
       next_speaker: 'model',
     });
+  });
+
+  afterEach(() => {
+    __resetActiveGoalStoreForTests();
   });
 
   it('sets an approved propose_goal proposal once the turn ends without tool calls', async () => {
@@ -268,7 +282,7 @@ describe('GeminiClient Goal admission', () => {
     const takePendingGoalProposal = vi
       .fn()
       .mockReturnValueOnce(undefined) // the new-query discard
-      .mockReturnValueOnce({ objective: 'ship it', approvedAt: 1 });
+      .mockReturnValueOnce({ objective: 'ship it' });
     Object.assign(config, {
       takePendingGoalProposal,
       getUsageStatisticsEnabled: vi.fn(() => false),
@@ -290,11 +304,254 @@ describe('GeminiClient Goal admission', () => {
     });
   });
 
+  it('settles an approved proposal on the default skip-next-speaker exit', async () => {
+    const { client, config, runtime } = setupGoalClient();
+    vi.mocked(runtime.getSnapshot).mockReturnValue({
+      v: 2,
+      activity: 'idle',
+      goal: null,
+    });
+    let pending: { objective: string } | undefined;
+    const takePendingGoalProposal = vi.fn(() => {
+      const proposal = pending;
+      pending = undefined;
+      return proposal;
+    });
+    Object.assign(config, {
+      takePendingGoalProposal,
+      getSkipNextSpeakerCheck: vi.fn(() => true),
+      getUsageStatisticsEnabled: vi.fn(() => false),
+    });
+    turnMocks.run.mockImplementationOnce(() => {
+      pending = { objective: 'ship it' };
+      return emptyStream();
+    });
+
+    await drain(
+      client.sendMessageStream(
+        [{ text: 'set a goal for this' }],
+        new AbortController().signal,
+        'default-exit-key',
+        { type: SendMessageType.UserQuery },
+      ),
+    );
+
+    expect(nextSpeakerMocks.check).not.toHaveBeenCalled();
+    expect(runtime.dispatch).toHaveBeenCalledWith({
+      action: 'create',
+      objective: 'ship it',
+    });
+  });
+
+  it('settles an approved proposal when a blocking Stop hook hits its cap', async () => {
+    const { client, config, runtime } = setupGoalClient();
+    vi.mocked(runtime.getSnapshot).mockReturnValue({
+      v: 2,
+      activity: 'idle',
+      goal: null,
+    });
+    let pending: { objective: string } | undefined;
+    const takePendingGoalProposal = vi.fn(() => {
+      const proposal = pending;
+      pending = undefined;
+      return proposal;
+    });
+    Object.assign(config, {
+      takePendingGoalProposal,
+      getDisableAllHooks: vi.fn(() => false),
+      hasHooksForEvent: vi.fn((event) => event === 'Stop'),
+      getMessageBus: vi.fn(() => ({
+        request: vi.fn(async () => ({
+          output: { decision: 'block', reason: 'Keep working' },
+          stopHookCount: 1,
+        })),
+      })),
+      getStopHookBlockingCap: vi.fn(() => 1),
+      getUsageStatisticsEnabled: vi.fn(() => false),
+    });
+    turnMocks.run.mockImplementationOnce(() => {
+      pending = { objective: 'ship it' };
+      return emptyStream();
+    });
+
+    await drain(
+      client.sendMessageStream(
+        [{ text: 'set a goal for this' }],
+        new AbortController().signal,
+        'stop-cap-key',
+        { type: SendMessageType.UserQuery },
+      ),
+    );
+
+    expect(runtime.dispatch).toHaveBeenCalledWith({
+      action: 'create',
+      objective: 'ship it',
+    });
+  });
+
+  it('settles an approved proposal when a cleared Goal removes the Stop continuation', async () => {
+    const { client, config, runtime } = setupGoalClient();
+    vi.mocked(runtime.getSnapshot).mockReturnValue({
+      v: 2,
+      activity: 'idle',
+      goal: null,
+    });
+    setActiveGoal('goal-test-session', {
+      condition: 'finish the old goal',
+      iterations: 1,
+      setAt: 1,
+      tokensAtStart: 1,
+      hookId: 'old-goal-hook',
+    });
+    let pending: { objective: string } | undefined;
+    const takePendingGoalProposal = vi.fn(() => {
+      const proposal = pending;
+      pending = undefined;
+      return proposal;
+    });
+    Object.assign(config, {
+      takePendingGoalProposal,
+      getDisableAllHooks: vi.fn(() => false),
+      hasHooksForEvent: vi.fn((event) => event === 'Stop'),
+      getMessageBus: vi.fn(() => ({
+        request: vi.fn(async () => ({
+          output: {
+            decision: 'block',
+            reason: 'Keep working',
+            hookSpecificOutput: {
+              [GOAL_HOOK_ID_OUTPUT_KEY]: 'old-goal-hook',
+            },
+          },
+          stopHookCount: 1,
+          hasNonGoalBlockingStopHook: false,
+        })),
+      })),
+      getMaxSessionTurns: vi.fn(() => 0),
+      getUsageStatisticsEnabled: vi.fn(() => false),
+    });
+    turnMocks.run.mockImplementationOnce(() => {
+      pending = { objective: 'ship it' };
+      return emptyStream();
+    });
+    const getSteerInput = vi
+      .fn()
+      .mockResolvedValueOnce(undefined)
+      .mockImplementationOnce(async () => {
+        clearActiveGoal('goal-test-session');
+        return undefined;
+      });
+
+    await drain(
+      client.sendMessageStream(
+        [{ text: 'set a goal for this' }],
+        new AbortController().signal,
+        'stop-clear-key',
+        { type: SendMessageType.UserQuery, getSteerInput },
+      ),
+    );
+
+    expect(turnMocks.run).toHaveBeenCalledOnce();
+    expect(getSteerInput).toHaveBeenCalledTimes(2);
+    expect(takePendingGoalProposal).toHaveBeenCalledTimes(2);
+    expect(runtime.dispatch).toHaveBeenCalledWith({
+      action: 'create',
+      objective: 'ship it',
+    });
+  });
+
+  it('discards an approved proposal when settlement starts already aborted', async () => {
+    const { client, config, runtime } = setupGoalClient();
+    const controller = new AbortController();
+    controller.abort();
+    let pending: { objective: string } | undefined = { objective: 'ship it' };
+    const loadGoalRuntime = vi.fn(async () => runtime);
+    Object.assign(config, {
+      takePendingGoalProposal: vi.fn(() => {
+        const proposal = pending;
+        pending = undefined;
+        return proposal;
+      }),
+    });
+
+    await client['settlePendingGoalProposal'](
+      true,
+      controller.signal,
+      loadGoalRuntime,
+    );
+
+    expect(pending).toBeUndefined();
+    expect(loadGoalRuntime).not.toHaveBeenCalled();
+    expect(runtime.dispatch).not.toHaveBeenCalled();
+  });
+
+  it('keeps an approved proposal parked until its ToolResult turn ends', async () => {
+    const { client, config, runtime } = setupGoalClient();
+    nextSpeakerMocks.check.mockResolvedValue({ next_speaker: 'user' });
+    vi.mocked(runtime.getSnapshot).mockReturnValue({
+      v: 2,
+      activity: 'idle',
+      goal: null,
+    });
+    let pending: { objective: string } | undefined;
+    const takePendingGoalProposal = vi.fn(() => {
+      const proposal = pending;
+      pending = undefined;
+      return proposal;
+    });
+    Object.assign(config, {
+      takePendingGoalProposal,
+      getMaxSessionTurns: vi.fn(() => 0),
+      getUsageStatisticsEnabled: vi.fn(() => false),
+    });
+    turnMocks.pendingToolCalls.push([{ name: 'read_file' }], []);
+    turnMocks.run
+      .mockImplementationOnce(() => {
+        pending = { objective: 'ship it' };
+        return emptyStream();
+      })
+      .mockImplementation(emptyStream);
+
+    await drain(
+      client.sendMessageStream(
+        [{ text: 'set a goal for this' }],
+        new AbortController().signal,
+        'pending-tool-key',
+        { type: SendMessageType.UserQuery },
+      ),
+    );
+
+    expect(takePendingGoalProposal).toHaveBeenCalledOnce();
+    expect(runtime.dispatch).not.toHaveBeenCalled();
+    expect(pending).toEqual({ objective: 'ship it' });
+
+    await drain(
+      client.sendMessageStream(
+        [
+          {
+            functionResponse: {
+              name: 'read_file',
+              response: { output: 'ok' },
+            },
+          },
+        ],
+        new AbortController().signal,
+        'pending-tool-key',
+        { type: SendMessageType.ToolResult },
+      ),
+    );
+
+    expect(takePendingGoalProposal).toHaveBeenCalledTimes(2);
+    expect(runtime.dispatch).toHaveBeenCalledWith({
+      action: 'create',
+      objective: 'ship it',
+    });
+  });
+
   it('keeps an approved proposal parked through a queued steer continuation', async () => {
     const { client, config, runtime } = setupGoalClient();
     vi.mocked(config.getMaxSessionTurns).mockReturnValue(0);
     nextSpeakerMocks.check.mockResolvedValue({ next_speaker: 'user' });
-    let pending: { objective: string; approvedAt: number } | undefined;
+    let pending: { objective: string } | undefined;
     const takePendingGoalProposal = vi.fn(() => {
       const proposal = pending;
       pending = undefined;
@@ -331,7 +588,7 @@ describe('GeminiClient Goal admission', () => {
     });
     turnMocks.run
       .mockImplementationOnce(() => {
-        pending = { objective: 'ship it', approvedAt: 1 };
+        pending = { objective: 'ship it' };
         return emptyStream();
       })
       .mockImplementation(emptyStream);
@@ -369,7 +626,7 @@ describe('GeminiClient Goal admission', () => {
       activity: 'idle',
       goal: null,
     });
-    let pending: { objective: string; approvedAt: number } | undefined;
+    let pending: { objective: string } | undefined;
     Object.assign(config, {
       takePendingGoalProposal: vi.fn(() => {
         const proposal = pending;
@@ -381,7 +638,7 @@ describe('GeminiClient Goal admission', () => {
     });
     turnMocks.run
       .mockImplementationOnce(async function* () {
-        pending = { objective: 'stale proposal', approvedAt: 1 };
+        pending = { objective: 'stale proposal' };
         yield {
           type: GeminiEventType.Error,
           value: { error: { status: 500 } },
@@ -413,10 +670,7 @@ describe('GeminiClient Goal admission', () => {
     const { client, config, runtime } = setupGoalClient();
     const controller = new AbortController();
     Object.assign(config, {
-      takePendingGoalProposal: vi.fn(() => ({
-        objective: 'ship it',
-        approvedAt: 1,
-      })),
+      takePendingGoalProposal: vi.fn(() => ({ objective: 'ship it' })),
     });
 
     await client['settlePendingGoalProposal'](
@@ -435,10 +689,7 @@ describe('GeminiClient Goal admission', () => {
     const { client, config, runtime } = setupGoalClient();
     const controller = new AbortController();
     Object.assign(config, {
-      takePendingGoalProposal: vi.fn(() => ({
-        objective: 'ship it',
-        approvedAt: 1,
-      })),
+      takePendingGoalProposal: vi.fn(() => ({ objective: 'ship it' })),
     });
     const appliedGoal = {
       goalId: 'proposal-goal',
@@ -500,7 +751,7 @@ describe('GeminiClient Goal admission', () => {
     });
     const takePendingGoalProposal = vi
       .fn()
-      .mockReturnValueOnce({ objective: 'stale', approvedAt: 1 })
+      .mockReturnValueOnce({ objective: 'stale' })
       .mockReturnValue(undefined);
     Object.assign(config, {
       takePendingGoalProposal,
