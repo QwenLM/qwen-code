@@ -204,8 +204,8 @@ export class TeamManager {
   /**
    * Per-TeamManager write queue serializing every roster write
    * (the success-path write and the failed-spawn compensating
-   * write in `spawnTeammate`). Each queued task serializes the
-   * live `teamFile` when it RUNS, not when it is enqueued, so
+   * write in `spawnTeammate`). Each queued task snapshots
+   * `teamFile` when it RUNS, not when it is enqueued, so
    * commits land in call order and a compensating write queued
    * after a stale snapshot always lands last. Without this, two
    * unsynchronized writers can reorder — a slow atomic rename
@@ -217,8 +217,8 @@ export class TeamManager {
   /**
    * Count of roster writes that have started (reached their snapshot
    * point) in `persistTeamFile`'s queue. Because each queued write
-   * serializes the live roster when it RUNS, a member pushed after the
-   * last started write cannot be on disk yet. The failed-spawn
+   * snapshots the roster synchronously when it RUNS, a member pushed
+   * after the last started write cannot be on disk yet. The failed-spawn
    * compensating write compares this counter against the value captured
    * at push time and skips when no write could have persisted the
    * failed member — writing anyway would serialize the live roster and
@@ -339,15 +339,22 @@ export class TeamManager {
    */
   private persistTeamFile(): Promise<void> {
     const write = this.teamFileWriteQueue.then(() => {
-      // Snapshot point for `teamFileWritesStarted`: from here on this
-      // task serializes the live roster, so any member already pushed
+      // Snapshot point for `teamFileWritesStarted`: the roster snapshot
+      // below is taken synchronously here, so any member already pushed
       // could land on disk through this write. Counted before the
       // write runs (not after it resolves) so an in-flight write that
       // started inside a failed member's window still counts — the
       // compensating write queues behind it and repairs whatever it
       // persisted.
       this.teamFileWritesStarted++;
-      return writeTeamFile(this.teamFile.name, this.teamFile);
+      // Snapshot synchronously at the counted point, before any await:
+      // `writeTeamFile` awaits `fs.mkdir` before stringifying its
+      // argument, so handing it the live roster would let a member
+      // pushed during that fs hop land on disk through a write this
+      // gate counts as pre-push — the failed member's compensating
+      // write would then be skipped and the ghost persisted (#10208).
+      const snapshot = structuredClone(this.teamFile);
+      return writeTeamFile(this.teamFile.name, snapshot);
     });
     this.teamFileWriteQueue = write.catch(() => {});
     return write;

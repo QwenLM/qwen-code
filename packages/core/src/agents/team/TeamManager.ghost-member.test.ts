@@ -383,4 +383,84 @@ describe('TeamManager ghost member regression (#10208)', () => {
     expect(afterBeta).toBeDefined();
     expect(afterBeta!.members.map((m) => m.name)).toEqual(['beta']);
   });
+
+  it('excludes members pushed during the fs-await window of a held write (snapshot at counted point)', async () => {
+    const h = await createHarness();
+    const teamName = h.teamName;
+    const backend = h.backend;
+
+    const deferredA = createDeferred<void>();
+    const deferredB = createDeferred<void>();
+    gateSpawns(
+      backend,
+      new Map([
+        [formatAgentId('alpha', teamName), deferredA.promise],
+        [formatAgentId('beta', teamName), deferredB.promise],
+      ]),
+    );
+
+    // Mirror the real `writeTeamFile` order — `await fs.mkdir` first,
+    // stringify afterwards — by holding the first write in an fs-like
+    // await and serializing its argument only after release. If the
+    // queued task handed the writer the live roster instead of a
+    // snapshot taken synchronously at the counted start, the member
+    // pushed during the held await would be persisted by a write the
+    // gate counts as pre-push, and its compensating write would be
+    // skipped — re-persisting the ghost #10208 removes.
+    const realWriteTeamFile = teamHelpers.writeTeamFile;
+    let writeCalls = 0;
+    let releaseFirstWrite!: () => void;
+    const firstWriteGate = new Promise<void>((r) => {
+      releaseFirstWrite = r;
+    });
+    vi.spyOn(teamHelpers, 'writeTeamFile').mockImplementation(
+      async (name, tf) => {
+        writeCalls++;
+        if (writeCalls === 1) {
+          await firstWriteGate; // like the real await fs.mkdir
+          return realWriteTeamFile(name, tf); // stringify AFTER the await
+        }
+        return realWriteTeamFile(name, tf);
+      },
+    );
+
+    const spawnA = h.teamManager.spawnTeammate({
+      name: 'alpha',
+      cwd: h.tmpDir,
+    });
+    await new Promise((r) => setTimeout(r, 50));
+
+    // Alpha succeeds; its roster write starts (counter 0->1) and hangs
+    // in the mocked fs await. Only now is beta pushed, capturing
+    // writesStartedAtPush = 1.
+    deferredA.resolve();
+    await vi.waitFor(() => expect(writeCalls).toBe(1));
+
+    const spawnB = h.teamManager.spawnTeammate({
+      name: 'beta',
+      cwd: h.tmpDir,
+    });
+    await new Promise((r) => setTimeout(r, 50));
+
+    // Release alpha's write: serialization happens now. Beta's spawn
+    // then fails; the gate sees no write started after beta's push and
+    // skips the compensating write — correct only if alpha's write did
+    // not serialize beta.
+    releaseFirstWrite();
+    await spawnA;
+
+    deferredB.reject(new Error('spawn failed'));
+    await expect(spawnB).rejects.toThrow('spawn failed');
+    expect(writeCalls).toBe(1);
+
+    const persisted = await readTeamFile(teamName);
+    expect(persisted).toBeDefined();
+    const persistedNames = persisted!.members.map((m) => m.name);
+    expect(persistedNames).toContain('alpha');
+    expect(persistedNames).not.toContain('beta');
+
+    const inMemory = (h.teamManager as unknown as { teamFile: TeamFile })
+      .teamFile;
+    expect(inMemory.members.map((m) => m.name)).toEqual(['alpha']);
+  });
 });
