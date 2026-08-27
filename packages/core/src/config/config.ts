@@ -979,6 +979,17 @@ export interface SessionWorkflowPlanRevision {
   planId: string;
   sourceCallId: string;
   todoIds: readonly string[];
+  /**
+   * Stamped when the bound plan exits PLAN mode through an approved
+   * exit_plan_mode (Config.approveSessionWorkflowPlanRevision). The
+   * approved/pending status lives on the session-global revision instead of
+   * being derived from `getApprovalMode()`: per-agent Config wrappers carry
+   * their OWN approvalMode (e.g. an `approvalMode: plan` subagent frontmatter)
+   * while the revision is session-global, so a mode-based read would
+   * misjudge an already-approved revision as a pending draft inside such a
+   * wrapper.
+   */
+  approved?: boolean;
 }
 
 export interface ConfigParameters {
@@ -6796,6 +6807,9 @@ export class Config {
       noticeEvent.kind = options?.fromApprovedPlanExit
         ? 'clear'
         : 'manual-exit';
+      if (options?.fromApprovedPlanExit) {
+        this.approveSessionWorkflowPlanRevision();
+      }
     }
     // Any deliberate mode change invalidates the AUTO denialTracking signal.
     if (fromMode !== mode) {
@@ -7506,12 +7520,26 @@ export class Config {
             planId: revision.planId,
             sourceCallId: revision.sourceCallId,
             todoIds,
+            ...(revision.approved ? { approved: true } : {}),
           }
         : undefined;
   }
 
   clearSessionWorkflowPlanRevision(): void {
     this.sessionWorkflowPlanRevision = undefined;
+  }
+
+  /**
+   * Stamp the bound revision as approved. Runs on the PLAN → non-PLAN
+   * transition of an approved exit_plan_mode. Routing the write through
+   * `setSessionWorkflowPlanRevision` keeps it on the session-global root
+   * Config when `this` is a prototype wrapper whose write-through shim
+   * forwards mutations to the base.
+   */
+  approveSessionWorkflowPlanRevision(): void {
+    const revision = this.getSessionWorkflowPlanRevision();
+    if (!revision || revision.approved) return;
+    this.setSessionWorkflowPlanRevision({ ...revision, approved: true });
   }
 
   isSessionWorkflowTodoContextActive(): boolean {

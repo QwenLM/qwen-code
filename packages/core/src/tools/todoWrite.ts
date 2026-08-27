@@ -14,7 +14,6 @@ import * as fsSync from 'fs';
 import * as path from 'path';
 
 import type { Config } from '../config/config.js';
-import { ApprovalMode } from '../config/approval-mode.js';
 import { Storage } from '../config/storage.js';
 import { ToolDisplayNames, ToolNames } from './tool-names.js';
 import { atomicWriteFile } from '../utils/atomicFileWrite.js';
@@ -357,18 +356,19 @@ class TodoWriteToolInvocation extends BaseToolInvocation<
       const finalTodos = candidateTodos as TodoItem[];
       const boundWorkflowRevision =
         this.config.getSessionWorkflowPlanRevision?.();
-      // A revision captured while the session is still in PLAN mode is a
-      // pending draft: refining the membership before approval is ordinary
-      // drafting, not divergence. Only a revision that survived an
-      // exit_plan_mode approval (the mode has since left PLAN) constrains
-      // membership here — entering PLAN clears the revision on every
-      // mode-change route, so a revision observed in PLAN mode is necessarily
-      // still pending approval.
-      const approvedWorkflowRevision =
-        boundWorkflowRevision !== undefined &&
-        this.config.getApprovalMode() !== ApprovalMode.PLAN
-          ? boundWorkflowRevision
-          : undefined;
+      // Approved/pending status is stamped on the session-global revision by
+      // the approved exit_plan_mode transition
+      // (Config.approveSessionWorkflowPlanRevision), not derived from this
+      // config's approval mode: per-agent Config wrappers carry their OWN
+      // approvalMode (e.g. an `approvalMode: plan` subagent frontmatter)
+      // while the revision is session-global, so a mode-based heuristic would
+      // misread an already-approved revision as a pending draft inside such
+      // a wrapper and unconstrain its membership here. An unstamped revision
+      // is still a pending draft: refining membership before approval is
+      // ordinary drafting, not divergence.
+      const approvedWorkflowRevision = boundWorkflowRevision?.approved
+        ? boundWorkflowRevision
+        : undefined;
       const matchesApprovedTodoIds =
         !approvedWorkflowRevision ||
         (finalTodos.length === approvedWorkflowRevision.todoIds.length &&

@@ -799,12 +799,14 @@ describe('TodoWriteTool', () => {
       mockConfig = {
         getSessionId: () => 'test-session-123',
         getHookSystem: () => undefined,
-        // An approved revision only exists after the mode has left PLAN.
+        // Approval is stamped on the revision by the approved exit_plan_mode
+        // transition, not derived from the approval mode.
         getApprovalMode: vi.fn().mockReturnValue(ApprovalMode.DEFAULT),
         getSessionWorkflowPlanRevision: vi.fn().mockReturnValue({
           planId: 'approved-plan',
           sourceCallId: 'todo-call-1',
           todoIds: ['finished'],
+          approved: true,
         }),
         clearSessionWorkflowPlanRevision: clearRevision,
         isSessionWorkflowTodoContextActive: vi.fn().mockReturnValue(true),
@@ -838,12 +840,14 @@ describe('TodoWriteTool', () => {
       mockConfig = {
         getSessionId: () => 'test-session-123',
         getHookSystem: () => undefined,
-        // An approved revision only exists after the mode has left PLAN.
+        // Approval is stamped on the revision by the approved exit_plan_mode
+        // transition, not derived from the approval mode.
         getApprovalMode: vi.fn().mockReturnValue(ApprovalMode.DEFAULT),
         getSessionWorkflowPlanRevision: vi.fn().mockReturnValue({
           planId: 'approved-plan',
           sourceCallId: 'todo-call-1',
           todoIds: ['first', 'second'],
+          approved: true,
         }),
         clearSessionWorkflowPlanRevision: clearRevision,
         isSessionWorkflowTodoContextActive: vi.fn().mockReturnValue(true),
@@ -867,6 +871,53 @@ describe('TodoWriteTool', () => {
           todos: [
             { id: 'replacement', content: 'Replacement', status: 'pending' },
           ],
+        })
+        .execute(mockAbortSignal);
+
+      expect(clearRevision).toHaveBeenCalledOnce();
+      expect(result.returnDisplay).not.toMatchObject({ sessionWorkflow: true });
+      expect((result.returnDisplay as { planId?: string }).planId).not.toBe(
+        'approved-plan',
+      );
+    });
+
+    it('keeps an approved revision constraining membership under a PLAN-mode wrapper (R5-2)', async () => {
+      // A subagent whose definition carries `approvalMode: plan` gets a Config
+      // wrapper whose OWN approvalMode is PLAN while the plan revision is
+      // session-global and already approved. Approval status must come from
+      // the revision's stamp — not the wrapper's mode — so a divergent write
+      // inside the wrapper still ends the stale workflow binding.
+      const clearRevision = vi.fn();
+      mockConfig = {
+        getSessionId: () => 'test-session-123',
+        getHookSystem: () => undefined,
+        getApprovalMode: vi.fn().mockReturnValue(ApprovalMode.PLAN),
+        getSessionWorkflowPlanRevision: vi.fn().mockReturnValue({
+          planId: 'approved-plan',
+          sourceCallId: 'todo-call-1',
+          todoIds: ['first', 'second'],
+          approved: true,
+        }),
+        clearSessionWorkflowPlanRevision: clearRevision,
+        isSessionWorkflowTodoContextActive: vi.fn().mockReturnValue(true),
+        setActiveTodoReminder: vi.fn(),
+      } as unknown as Config;
+      tool = new TodoWriteTool(mockConfig);
+      mockFs.readFile.mockResolvedValue(
+        JSON.stringify({
+          planId: 'approved-plan',
+          todos: [
+            { id: 'first', content: 'First', status: 'in_progress' },
+            { id: 'second', content: 'Second', status: 'pending' },
+          ],
+        }),
+      );
+      mockFs.mkdir.mockResolvedValue(undefined);
+      mockAtomicWrite.mockResolvedValue(undefined);
+
+      const result = await tool
+        .build({
+          todos: [{ id: 'intruder', content: 'Intruder', status: 'pending' }],
         })
         .execute(mockAbortSignal);
 
