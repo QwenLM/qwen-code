@@ -59,7 +59,10 @@ export function validateProviderBaseUrl(
 }
 export async function postJson(input: {
   url: URL;
-  authorization: string;
+  credentialHeader: {
+    name: 'authorization' | 'x-api-key';
+    value: string;
+  };
   body: unknown;
   signal: AbortSignal;
 }): Promise<unknown> {
@@ -69,7 +72,7 @@ export async function postJson(input: {
       method: 'POST',
       headers: {
         accept: 'application/json',
-        authorization: input.authorization,
+        [input.credentialHeader.name]: input.credentialHeader.value,
         'content-type': 'application/json',
       },
       body: JSON.stringify(input.body),

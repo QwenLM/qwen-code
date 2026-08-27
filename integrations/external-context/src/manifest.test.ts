@@ -244,11 +244,17 @@ describe('extension manifest', () => {
       version: 1,
       timeoutMs: 5000,
       provider: {
-        type: 'polardb-mem0',
-        baseUrl: 'https://<your-polardb-mem0-endpoint>',
-        apiKeyEnv: 'MEM0_API_KEY',
-        userId: '<your-user-id>',
-        agentId: 'qwen-code',
+        type: 'mem0',
+        preset: 'aliyun-polardb-mysql-2026-08',
+        endpoint: {
+          origin: 'https://<your-polardb-mem0-endpoint>',
+          basePath: '',
+        },
+        credentialEnv: 'MEM0_API_KEY',
+        scope: {
+          userId: '<your-user-id>',
+          agentId: 'qwen-code',
+        },
       },
     });
 
@@ -269,9 +275,37 @@ describe('extension manifest', () => {
         MEM0_API_KEY: 'example-key',
       });
       expect(loaded.provider).toMatchObject({
-        type: 'polardb-mem0',
-        userId: 'example-user',
-        agentId: 'qwen-code',
+        type: 'mem0',
+        preset: 'aliyun-polardb-mysql-2026-08',
+        scope: { userId: 'example-user', agentId: 'qwen-code' },
+      });
+      expect(() => createProvider(loaded.provider)).not.toThrow();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps the stock Mem0 REST example loadable', async () => {
+    const config = await readJson('../examples/mem0-oss.json');
+    const substituted = JSON.parse(
+      JSON.stringify(config)
+        .replaceAll('<your-mem0-endpoint>', 'mem0.example.internal')
+        .replaceAll('<your-user-id>', 'example-user'),
+    );
+    const directory = await mkdtemp(
+      join(tmpdir(), 'external-context-example-'),
+    );
+    try {
+      const configPath = join(directory, 'config.json');
+      await writeFile(configPath, JSON.stringify(substituted));
+
+      const loaded = await loadConfig({
+        QWEN_EXTERNAL_CONTEXT_CONFIG: configPath,
+        MEM0_API_KEY: 'example-key',
+      });
+      expect(loaded.provider).toMatchObject({
+        type: 'mem0',
+        preset: 'mem0-oss-rest-2026-08',
       });
       expect(() => createProvider(loaded.provider)).not.toThrow();
     } finally {

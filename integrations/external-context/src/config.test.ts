@@ -79,15 +79,19 @@ describe('loadConfig', () => {
     });
   });
 
-  describe('PolarDB Mem0 provider', () => {
+  describe('versioned Mem0 provider', () => {
     const provider = {
-      type: 'polardb-mem0',
-      baseUrl: 'https://mem0.example.com:8443',
-      apiKeyEnv: 'MEM0_API_KEY',
-      userId: 'fixed-user',
+      type: 'mem0',
+      preset: 'aliyun-polardb-mysql-2026-08',
+      endpoint: {
+        origin: 'https://mem0.example.com:8443',
+        basePath: '',
+      },
+      credentialEnv: 'MEM0_API_KEY',
+      scope: { userId: 'fixed-user' },
     };
 
-    it('resolves the credential and fixed user binding', async () => {
+    it('resolves the credential, preset, endpoint, and fixed scope', async () => {
       const fixture = await createFixture();
       await writeConfig(fixture, { version: 1, provider });
 
@@ -99,15 +103,19 @@ describe('loadConfig', () => {
       ).resolves.toMatchObject({
         version: 1,
         provider: {
-          type: 'polardb-mem0',
-          baseUrl: 'https://mem0.example.com:8443',
-          apiKey: 'secret-value',
-          userId: 'fixed-user',
+          type: 'mem0',
+          preset: 'aliyun-polardb-mysql-2026-08',
+          endpoint: {
+            origin: 'https://mem0.example.com:8443',
+            basePath: '',
+          },
+          credential: 'secret-value',
+          scope: { userId: 'fixed-user' },
         },
       });
     });
 
-    it('enables writes for a v1 PolarDB Mem0 provider', async () => {
+    it('enables writes for a version 1 Mem0 preset with direct import', async () => {
       const fixture = await createFixture();
       await writeConfig(fixture, {
         version: 1,
@@ -123,18 +131,21 @@ describe('loadConfig', () => {
       ).resolves.toMatchObject({
         version: 1,
         write: { enabled: true },
-        provider: { type: 'polardb-mem0' },
+        provider: { type: 'mem0' },
       });
     });
 
-    it('loads a plain-HTTP baseUrl with allowInsecureHttp', async () => {
+    it('loads a non-loopback HTTP origin only with allowInsecureHttp', async () => {
       const fixture = await createFixture();
       await writeConfig(fixture, {
         version: 1,
         provider: {
           ...provider,
-          baseUrl: 'http://192.0.2.1:8080',
-          allowInsecureHttp: true,
+          endpoint: {
+            origin: 'http://192.0.2.1:8080',
+            basePath: '/mem0',
+            allowInsecureHttp: true,
+          },
         },
       });
 
@@ -144,18 +155,20 @@ describe('loadConfig', () => {
           MEM0_API_KEY: 'secret-value',
         }),
       ).resolves.toMatchObject({
-        provider: { type: 'polardb-mem0', allowInsecureHttp: true },
+        provider: {
+          type: 'mem0',
+          endpoint: { basePath: '/mem0', allowInsecureHttp: true },
+        },
       });
     });
 
-    it('rejects a PolarDB Mem0 provider without userId', async () => {
+    it('rejects missing required and unused scope values for a preset', async () => {
       const fixture = await createFixture();
       await writeConfig(fixture, {
         version: 1,
         provider: {
-          type: 'polardb-mem0',
-          baseUrl: 'https://mem0.example.com:8443',
-          apiKeyEnv: 'MEM0_API_KEY',
+          ...provider,
+          scope: { appId: 'unused-app' },
         },
       });
 
@@ -164,7 +177,32 @@ describe('loadConfig', () => {
           QWEN_EXTERNAL_CONTEXT_CONFIG: fixture.config,
           MEM0_API_KEY: 'secret-value',
         }),
-      ).rejects.toThrow('External context config is invalid.');
+      ).rejects.toThrow('External context Mem0 scope is invalid.');
+    });
+
+    it('requires only appId for the Platform V3 preset', async () => {
+      const fixture = await createFixture();
+      await writeConfig(fixture, {
+        version: 1,
+        provider: {
+          ...provider,
+          preset: 'mem0-platform-v3',
+          scope: { appId: 'fixed-app' },
+        },
+      });
+
+      await expect(
+        loadConfig({
+          QWEN_EXTERNAL_CONTEXT_CONFIG: fixture.config,
+          MEM0_API_KEY: 'secret-value',
+        }),
+      ).resolves.toMatchObject({
+        provider: {
+          type: 'mem0',
+          preset: 'mem0-platform-v3',
+          scope: { appId: 'fixed-app' },
+        },
+      });
     });
   });
 
@@ -498,6 +536,25 @@ describe('loadConfig', () => {
     expect(message).toBe(
       'Configured external context credential is unavailable.',
     );
+  });
+
+  it('rejects an unresolved credential placeholder', async () => {
+    const fixture = await createFixture();
+    await writeConfig(fixture, {
+      version: 1,
+      provider: {
+        type: 'generic-http-search-v1',
+        baseUrl: 'https://context.example.com',
+        tokenEnv: 'CONTEXT_TOKEN',
+      },
+    });
+
+    await expect(
+      loadConfig({
+        QWEN_EXTERNAL_CONTEXT_CONFIG: fixture.config,
+        CONTEXT_TOKEN: '${CONTEXT_TOKEN}',
+      }),
+    ).rejects.toThrow('Configured external context credential is unavailable.');
   });
 
   it.each(['__proto__', 'constructor', 'toString'])(

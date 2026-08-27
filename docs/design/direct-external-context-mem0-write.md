@@ -18,9 +18,13 @@ configuration containing the strict `write: { enabled: true }` block. The
 default extension manifest, existing version 1 configurations, Generic HTTP,
 and version 2 auto-recall remain write-free.
 
-The tool sends the validated text unchanged through Mem0 V3 Direct Import with
-`infer: false`. It does not pre-search, summarize, normalize, retry, poll, cache,
-or deduplicate. A separately installed `PreToolUse` command Hook displays a
+The tool sends the validated text unchanged through the selected, verified
+Mem0 direct-import preset with `infer: false`. The legacy
+`mem0-platform-v3` configuration remains supported. New `mem0` configurations
+select an immutable built-in preset as defined in
+[Direct External Context Mem0 Presets](./direct-external-context-mem0-presets.md).
+The tool does not pre-search, summarize, normalize, retry, poll, cache, or
+deduplicate. A separately installed `PreToolUse` command Hook displays a
 reversible escaped representation of the complete text and asks the user to
 confirm it. This confirmation is a direct-profile user-experience safeguard,
 not a server-side authorization boundary.
@@ -30,8 +34,9 @@ not a server-side authorization boundary.
 ### Goals
 
 - Let trusted collaborators save exact repository-shared text to one
-  administrator-bound Mem0 Project.
-- Keep the Project credential and `app_id` outside model-controlled input.
+  administrator-bound Mem0 corpus.
+- Keep the credential, endpoint, preset, and fixed scope outside
+  model-controlled input.
 - Make the complete text visible before the MCP call executes.
 - Perform at most one Provider request per approved tool invocation.
 - Represent asynchronous and ambiguous Provider outcomes without claiming
@@ -56,7 +61,7 @@ sequenceDiagram
     participant Q as Qwen Code
     participant H as PreToolUse Hook
     participant E as External Context MCP
-    participant P as Bound Mem0 Project
+    participant P as Bound Mem0 corpus
     M->>Q: context_remember(content)
     Q->>Q: Ordinary MCP permission check
     Q->>H: Exact tool name, mode, and content
@@ -121,6 +126,12 @@ configuration validation. The default extension manifest still includes only
 linking. Administrators must use the dedicated pinned MCP configuration whose
 `includeTools` contains exactly search and remember.
 
+New Mem0-compatible deployments may replace the legacy provider block with a
+strict `type: "mem0"` block containing one built-in preset, endpoint,
+credential reference, and preset-valid fixed scope. Writes are accepted only
+when that preset defines a reviewed direct-import mapping. A custom endpoint
+does not imply a custom write protocol.
+
 The remember tool annotations are `readOnlyHint: false`,
 `destructiveHint: false`, `idempotentHint: false`, and `openWorldHint: false`.
 They describe behavior for clients; they are not permission or authorization.
@@ -174,7 +185,7 @@ content sent to Mem0.
 
 ## Mem0 request and result semantics
 
-The adapter sends exactly one request:
+The legacy Platform V3 adapter sends exactly one request:
 
 ```http
 POST /v3/memories/add/
@@ -196,19 +207,28 @@ detection, so approving the same text twice can create two memories. The
 integration intentionally does not add a hidden search or content hash because
 neither would provide idempotency for an async remote operation.
 
+The versioned `mem0` adapter also sends exactly one request, using only the
+selected preset's fixed path, authentication, and scope placement. Platform V3
+uses its asynchronous add response. The initial OSS REST and PolarDB presets
+claim `stored` only for a valid `results[].id`; a bare `event_id`, alternate
+root object, or root array is `unknown`. The client never treats request
+acceptance as proof of persistence.
+
 Result mapping is conservative:
 
 | Provider outcome                                                                                                                      | Tool result                    |
 | ------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------ |
 | Valid `SUCCEEDED`                                                                                                                     | `stored`                       |
-| Valid `PENDING` with UUID `event_id`                                                                                                  | `accepted` with operation ID   |
+| Valid asynchronous `PENDING` with a bounded opaque `event_id`                                                                         | `accepted` with operation ID   |
+| Valid synchronous direct-import `results[].id` for a preset that defines it                                                           | `stored` with memory ID        |
 | Explicit `FAILED`, or HTTP 400, 401, 403, or 404                                                                                      | `failed` with stable MCP error |
 | Timeout, cancellation, redirect, other HTTP status, broken or oversized response, invalid JSON, unknown status, or invalid identifier | `unknown` with MCP error       |
 
-Mem0 Add normally returns `PENDING`, so `accepted` is the expected successful
-result and means queued, not persisted. `stored` is retained only for a valid
-synchronous `SUCCEEDED` response. `failed` is a definitive rejection and tells
-the model not to retry without changing the content or configuration.
+Mem0 Platform Add normally returns `PENDING`, so `accepted` is the expected
+successful result and means queued, not persisted. `stored` is retained only
+for a valid synchronous `SUCCEEDED` response or a preset-defined synchronous
+direct-import result. `failed` is a definitive rejection and tells the model
+not to retry without changing the content or configuration.
 `unknown` states that the Provider may already have accepted the write and
 tells the model not to retry automatically. The integration never polls the
 event or retries. User cancellation likewise does not prove that no record was

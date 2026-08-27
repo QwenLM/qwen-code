@@ -48,7 +48,10 @@ function streamingResponse(
 function requestArgs() {
   return {
     url: new URL('https://provider.example/'),
-    authorization: 'Bearer test',
+    credentialHeader: {
+      name: 'authorization' as const,
+      value: 'Bearer test',
+    },
     body: { q: 'x' },
     signal: new AbortController().signal,
   };

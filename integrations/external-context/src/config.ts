@@ -7,12 +7,14 @@
 import { readFile, realpath, stat } from 'node:fs/promises';
 import { isAbsolute, parse } from 'node:path';
 import { z } from 'zod';
+import { getMem0Preset, isValidMem0Scope } from './mem0-presets.js';
 import type {
   ExternalContextConfig,
   GenericHttpProviderConfig,
+  Mem0CompatibleProviderConfig,
   Mem0ProviderConfig,
-  PolarDbMem0ProviderConfig,
 } from './types.js';
+import { MEM0_PRESET_IDS } from './types.js';
 
 const MAX_CONFIG_BYTES = 64 * 1024;
 const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
@@ -27,12 +29,23 @@ const providerSchema = z.discriminatedUnion('type', [
     .strict(),
   z
     .object({
-      type: z.literal('polardb-mem0'),
-      baseUrl: z.string().url(),
-      apiKeyEnv: z.string().regex(ENV_NAME),
-      userId: z.string().trim().min(1).max(256),
-      agentId: z.string().trim().min(1).max(256).optional(),
-      allowInsecureHttp: z.boolean().optional(),
+      type: z.literal('mem0'),
+      preset: z.enum(MEM0_PRESET_IDS),
+      endpoint: z
+        .object({
+          origin: z.string().url(),
+          basePath: z.string().default(''),
+          allowInsecureHttp: z.boolean().optional(),
+        })
+        .strict(),
+      credentialEnv: z.string().regex(ENV_NAME),
+      scope: z
+        .object({
+          userId: z.string().trim().min(1).max(256).optional(),
+          agentId: z.string().trim().min(1).max(256).optional(),
+          appId: z.string().trim().min(1).max(256).optional(),
+        })
+        .strict(),
     })
     .strict(),
   z
@@ -122,11 +135,19 @@ export async function loadConfig(
     throw new ConfigurationError('External context config is invalid.');
   }
 
+  if (
+    result.data.provider.type === 'mem0' &&
+    !isValidMem0Scope(result.data.provider)
+  ) {
+    throw new ConfigurationError('External context Mem0 scope is invalid.');
+  }
+
   if (result.data.version === 1) {
     if (
       result.data.write !== undefined &&
       result.data.provider.type !== 'mem0-platform-v3' &&
-      result.data.provider.type !== 'polardb-mem0'
+      (result.data.provider.type !== 'mem0' ||
+        getMem0Preset(result.data.provider.preset).write === undefined)
     ) {
       throw new ConfigurationError(
         'External context memory writes require a Mem0 provider.',
@@ -158,12 +179,18 @@ export async function loadConfig(
 function resolveProvider(
   provider: z.infer<typeof providerSchema>,
   env: NodeJS.ProcessEnv,
-): Mem0ProviderConfig | PolarDbMem0ProviderConfig | GenericHttpProviderConfig {
+):
+  | Mem0ProviderConfig
+  | Mem0CompatibleProviderConfig
+  | GenericHttpProviderConfig {
   switch (provider.type) {
-    case 'mem0-platform-v3':
-    case 'polardb-mem0': {
+    case 'mem0-platform-v3': {
       const apiKey = readCredential(env, provider.apiKeyEnv);
       return { ...provider, apiKey };
+    }
+    case 'mem0': {
+      const credential = readCredential(env, provider.credentialEnv);
+      return { ...provider, credential };
     }
     case 'generic-http-search-v1': {
       const token = readCredential(env, provider.tokenEnv);
@@ -205,7 +232,11 @@ function isFilesystemRoot(value: string): boolean {
 
 function readCredential(env: NodeJS.ProcessEnv, name: string): string {
   const value = Object.hasOwn(env, name) ? env[name] : undefined;
-  if (typeof value !== 'string' || value.length === 0) {
+  if (
+    typeof value !== 'string' ||
+    value.length === 0 ||
+    value === '${' + name + '}'
+  ) {
     throw new ConfigurationError(
       'Configured external context credential is unavailable.',
     );

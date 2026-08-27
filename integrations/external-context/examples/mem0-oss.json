@@ -3,9 +3,9 @@
   "timeoutMs": 5000,
   "provider": {
     "type": "mem0",
-    "preset": "aliyun-polardb-mysql-2026-08",
+    "preset": "mem0-oss-rest-2026-08",
     "endpoint": {
-      "origin": "https://<your-polardb-mem0-endpoint>",
+      "origin": "https://<your-mem0-endpoint>",
       "basePath": ""
     },
     "credentialEnv": "MEM0_API_KEY",

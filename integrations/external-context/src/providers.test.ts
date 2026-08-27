@@ -15,9 +15,10 @@ import { renderExternalContext } from './context.js';
 import {
   createMemoryWriter,
   GenericHttpSearchV1Adapter,
+  Mem0CompatibleAdapter,
   Mem0PlatformV3Adapter,
-  PolarDbMem0Adapter,
 } from './providers.js';
+import type { Mem0CompatibleProviderConfig, Mem0PresetId } from './types.js';
 
 const closeServers: Array<() => Promise<void>> = [];
 
@@ -438,8 +439,8 @@ describe('Mem0PlatformV3Adapter', () => {
       { status: 'stored', providerOperationId: eventId },
     ],
     [{ status: 'PENDING' }, { status: 'unknown' }],
-    [{ status: 'PENDING', event_id: 'not-a-uuid' }, { status: 'unknown' }],
-    [{ status: 'SUCCEEDED', event_id: 'not-a-uuid' }, { status: 'unknown' }],
+    [{ status: 'PENDING', event_id: ' ' }, { status: 'unknown' }],
+    [{ status: 'SUCCEEDED', event_id: '\u0000' }, { status: 'unknown' }],
     [{ status: 'UNKNOWN', event_id: eventId }, { status: 'unknown' }],
     [{}, { status: 'unknown' }],
     [[], { status: 'unknown' }],
@@ -594,220 +595,290 @@ describe('Mem0PlatformV3Adapter', () => {
   });
 });
 
-describe('PolarDbMem0Adapter', () => {
-  const memoryId = '123e4567-e89b-12d3-a456-426614174000';
-
-  it('creates a writer for the PolarDB Mem0 provider type', () => {
+describe('Mem0CompatibleAdapter', () => {
+  it('creates a writer for a versioned Mem0 preset', () => {
     expect(
-      createMemoryWriter({
-        type: 'polardb-mem0',
-        baseUrl: 'https://mem0.example.com',
-        apiKeyEnv: 'MEM0_API_KEY',
-        apiKey: 'project-key',
-        userId: 'fixed-user',
-      }),
-    ).toBeInstanceOf(PolarDbMem0Adapter);
+      createMemoryWriter(
+        mem0CompatibleConfig(
+          'https://mem0.example.com',
+          'aliyun-polardb-mysql-2026-08',
+          { userId: 'fixed-user' },
+        ),
+      ),
+    ).toBeInstanceOf(Mem0CompatibleAdapter);
   });
 
-  it('requires HTTPS or loopback HTTP unless explicitly allowed', () => {
-    const config = {
-      type: 'polardb-mem0' as const,
-      baseUrl: 'http://192.0.2.1:8080',
-      apiKeyEnv: 'MEM0_API_KEY',
-      apiKey: 'project-key',
-      userId: 'fixed-user',
-    };
-    expect(() => new PolarDbMem0Adapter(config)).toThrow(
+  it('validates endpoint authority, basePath, and preset scope', () => {
+    const config = mem0CompatibleConfig(
+      'http://192.0.2.1:8080',
+      'aliyun-polardb-mysql-2026-08',
+      { userId: 'fixed-user' },
+    );
+    expect(() => new Mem0CompatibleAdapter(config)).toThrow(
       'Provider URL must use HTTPS or loopback HTTP; set "allowInsecureHttp": true',
     );
     expect(
-      () => new PolarDbMem0Adapter({ ...config, allowInsecureHttp: true }),
+      () =>
+        new Mem0CompatibleAdapter({
+          ...config,
+          endpoint: { ...config.endpoint, allowInsecureHttp: true },
+        }),
     ).not.toThrow();
     expect(
       () =>
-        new PolarDbMem0Adapter({
+        new Mem0CompatibleAdapter({
           ...config,
-          baseUrl: 'http://key@192.0.2.1:8080',
-          allowInsecureHttp: true,
+          endpoint: {
+            origin: 'https://mem0.example.com',
+            basePath: '/../other',
+          },
+        }),
+    ).toThrow('External context Mem0 base path is invalid.');
+    expect(
+      () =>
+        new Mem0CompatibleAdapter({
+          ...config,
+          endpoint: {
+            origin: 'https://mem0.example.com',
+            basePath: '/memory service',
+          },
+        }),
+    ).toThrow('External context Mem0 base path is invalid.');
+    expect(
+      () =>
+        new Mem0CompatibleAdapter({
+          ...config,
+          endpoint: {
+            origin: 'https://key@mem0.example.com',
+            basePath: '',
+          },
         }),
     ).toThrow('Provider URL must not contain credentials');
-  });
-
-  it('binds user_id and agent_id into the PolarDB search request', async () => {
-    let requestBody: unknown;
-    let requestPath: string | undefined;
-    let authorization: string | undefined;
-    const baseUrl = await startServer(async (request, response) => {
-      requestPath = request.url;
-      requestBody = JSON.parse(await readBody(request));
-      authorization = request.headers.authorization;
-      json(response, {
-        results: [{ id: 'memory-1', memory: 'repository policy', score: 0.9 }],
-      });
-    });
-    const adapter = polarDbAdapter(baseUrl, 'fixed-repository');
-
-    const items = await adapter.search({
-      query: 'deployment',
-      limit: 3,
-      signal: AbortSignal.timeout(1000),
-    });
-
-    expect(requestPath).toBe('/v2/memories/search');
-    expect(authorization).toBe('Token project-key');
-    expect(requestBody).toEqual({
-      query: 'deployment',
-      limit: 3,
-      agent_id: 'fixed-repository',
-      filters: { user_id: 'fixed-user' },
-    });
-    expect(items).toEqual([
-      { id: 'memory-1', content: 'repository policy', score: 0.9 },
-    ]);
-  });
-
-  it('omits agent_id from the search request when not configured', async () => {
-    let requestBody: unknown;
-    const baseUrl = await startServer(async (request, response) => {
-      requestBody = JSON.parse(await readBody(request));
-      json(response, { results: [] });
-    });
-
-    await polarDbAdapter(baseUrl).search({
-      query: 'deployment',
-      limit: 3,
-      signal: AbortSignal.timeout(1000),
-    });
-
-    expect(requestBody).toEqual({
-      query: 'deployment',
-      limit: 3,
-      filters: { user_id: 'fixed-user' },
-    });
-  });
-
-  it('sends one exact direct-import write with user binding and infer false', async () => {
-    const content = '  Keep 🙂 this\nexactly.  ';
-    let requestCount = 0;
-    let requestBody: unknown;
-    let requestPath: string | undefined;
-    let authorization: string | undefined;
-    const baseUrl = await startServer(async (request, response) => {
-      requestCount += 1;
-      requestPath = request.url;
-      authorization = request.headers.authorization;
-      requestBody = JSON.parse(await readBody(request));
-      json(response, { results: [{ id: memoryId, event: 'ADD' }] });
-    });
-
-    await expect(
-      polarDbAdapter(baseUrl, 'fixed-repository').remember({
-        content,
-        signal: AbortSignal.timeout(1000),
-      }),
-    ).resolves.toEqual({ status: 'stored', providerOperationId: memoryId });
-    expect(requestCount).toBe(1);
-    expect(requestPath).toBe('/v1/memories');
-    expect(authorization).toBe('Token project-key');
-    expect(requestBody).toEqual({
-      messages: [{ role: 'user', content }],
-      user_id: 'fixed-user',
-      agent_id: 'fixed-repository',
-      infer: false,
-    });
+    expect(
+      () =>
+        new Mem0CompatibleAdapter({
+          ...config,
+          scope: { appId: 'unused' },
+        }),
+    ).toThrow('External context Mem0 scope is invalid.');
   });
 
   it.each([
-    [
-      { results: [{ id: memoryId, event: 'ADD' }] },
-      { status: 'stored', providerOperationId: memoryId },
-    ],
-    [{ id: memoryId }, { status: 'stored', providerOperationId: memoryId }],
-    [
-      { memory_id: memoryId },
-      { status: 'stored', providerOperationId: memoryId },
-    ],
-    [
-      { event_id: memoryId },
-      { status: 'stored', providerOperationId: memoryId },
-    ],
-    [[{ id: memoryId }], { status: 'stored', providerOperationId: memoryId }],
-    [{ results: [{ id: 'not-a-uuid' }] }, { status: 'unknown' }],
-    [{ results: [] }, { status: 'unknown' }],
-    [{}, { status: 'unknown' }],
-    [[], { status: 'unknown' }],
-  ])('maps PolarDB Mem0 write response %#', async (responseBody, expected) => {
-    const baseUrl = await startServer((_request, response) => {
-      json(response, responseBody);
+    {
+      preset: 'mem0-platform-v3' as const,
+      scope: { appId: 'fixed-app' },
+      path: '/proxy/v3/memories/search/',
+      authorization: 'Token project-key',
+      apiKey: undefined,
+      responseItem: { id: 'memory-1', memory: 'platform memory' },
+      expectedBody: {
+        query: 'deployment',
+        top_k: 5,
+        threshold: 0.1,
+        rerank: false,
+        filters: { app_id: 'fixed-app' },
+      },
+      expectedContent: 'platform memory',
+    },
+    {
+      preset: 'mem0-oss-rest-2026-08' as const,
+      scope: { userId: 'fixed-user', agentId: 'fixed-agent' },
+      path: '/proxy/search',
+      authorization: undefined,
+      apiKey: 'project-key',
+      responseItem: { id: 'memory-1', content: 'oss memory' },
+      expectedBody: {
+        query: 'deployment',
+        top_k: 5,
+        filters: { user_id: 'fixed-user', agent_id: 'fixed-agent' },
+      },
+      expectedContent: 'oss memory',
+    },
+    {
+      preset: 'aliyun-polardb-mysql-2026-08' as const,
+      scope: { userId: 'fixed-user', agentId: 'fixed-agent' },
+      path: '/proxy/v2/memories/search',
+      authorization: 'Token project-key',
+      apiKey: undefined,
+      responseItem: { id: 'memory-1', memory: 'polardb memory' },
+      expectedBody: {
+        query: 'deployment',
+        top_k: 5,
+        agent_id: 'fixed-agent',
+        filters: { user_id: 'fixed-user' },
+      },
+      expectedContent: 'polardb memory',
+    },
+  ])(
+    'maps the $preset search contract',
+    async ({
+      preset,
+      scope,
+      path,
+      authorization,
+      apiKey,
+      responseItem,
+      expectedBody,
+      expectedContent,
+    }) => {
+      let requestBody: unknown;
+      let requestPath: string | undefined;
+      let requestAuthorization: string | undefined;
+      let requestApiKey: string | string[] | undefined;
+      const origin = await startServer(async (request, response) => {
+        requestPath = request.url;
+        requestBody = JSON.parse(await readBody(request));
+        requestAuthorization = request.headers.authorization;
+        requestApiKey = request.headers['x-api-key'];
+        json(response, { results: [responseItem, {}, responseItem] });
+      });
+
+      const items = await new Mem0CompatibleAdapter(
+        mem0CompatibleConfig(origin, preset, scope, '/proxy'),
+      ).search({
+        query: 'deployment',
+        limit: 99,
+        signal: AbortSignal.timeout(1000),
+      });
+
+      expect(requestPath).toBe(path);
+      expect(requestAuthorization).toBe(authorization);
+      expect(requestApiKey).toBe(apiKey);
+      expect(requestBody).toEqual(expectedBody);
+      expect(items).toEqual([
+        { id: 'memory-1', content: expectedContent },
+        { id: 'memory-1', content: expectedContent },
+      ]);
+    },
+  );
+
+  it.each([
+    {
+      preset: 'mem0-oss-rest-2026-08' as const,
+      path: '/memories',
+      scope: { userId: 'fixed-user', agentId: 'fixed-agent' },
+      authorization: undefined,
+      apiKey: 'project-key',
+    },
+    {
+      preset: 'aliyun-polardb-mysql-2026-08' as const,
+      path: '/v1/memories',
+      scope: { userId: 'fixed-user', agentId: 'fixed-agent' },
+      authorization: 'Token project-key',
+      apiKey: undefined,
+    },
+  ])(
+    'maps the $preset direct-import contract conservatively',
+    async ({ preset, path, scope, authorization, apiKey }) => {
+      const content = '  Keep 🙂 this\nexactly.  ';
+      let requestCount = 0;
+      let requestBody: unknown;
+      let requestPath: string | undefined;
+      let requestAuthorization: string | undefined;
+      let requestApiKey: string | string[] | undefined;
+      const origin = await startServer(async (request, response) => {
+        requestCount += 1;
+        requestPath = request.url;
+        requestBody = JSON.parse(await readBody(request));
+        requestAuthorization = request.headers.authorization;
+        requestApiKey = request.headers['x-api-key'];
+        json(response, { results: [{ id: 'memory-1', event: 'ADD' }] });
+      });
+
+      await expect(
+        new Mem0CompatibleAdapter(
+          mem0CompatibleConfig(origin, preset, scope),
+        ).remember({ content, signal: AbortSignal.timeout(1000) }),
+      ).resolves.toEqual({
+        status: 'stored',
+        providerOperationId: 'memory-1',
+      });
+      expect(requestCount).toBe(1);
+      expect(requestPath).toBe(path);
+      expect(requestAuthorization).toBe(authorization);
+      expect(requestApiKey).toBe(apiKey);
+      expect(requestBody).toEqual({
+        messages: [{ role: 'user', content }],
+        user_id: 'fixed-user',
+        agent_id: 'fixed-agent',
+        infer: false,
+      });
+    },
+  );
+
+  it('keeps Platform V3 event responses asynchronous', async () => {
+    const origin = await startServer((_request, response) => {
+      json(response, { status: 'PENDING', event_id: 'event-1' });
     });
 
     await expect(
-      polarDbAdapter(baseUrl).remember({
+      new Mem0CompatibleAdapter(
+        mem0CompatibleConfig(origin, 'mem0-platform-v3', {
+          appId: 'fixed-app',
+        }),
+      ).remember({
         content: 'repository policy',
         signal: AbortSignal.timeout(1000),
       }),
-    ).resolves.toEqual(expected);
+    ).resolves.toEqual({
+      status: 'accepted',
+      providerOperationId: 'event-1',
+    });
   });
 
-  it.each([400, 401, 403, 404])(
-    'returns failed for definitive HTTP %s rejections',
-    async (status) => {
-      let requestCount = 0;
-      const baseUrl = await startServer((_request, response) => {
-        requestCount += 1;
-        response.writeHead(status);
-        response.end('private upstream detail');
-      });
+  it('does not treat a direct-import event_id as proof of storage', async () => {
+    const origin = await startServer((_request, response) => {
+      json(response, { results: [{ event_id: 'event-1' }] });
+    });
 
-      await expect(
-        polarDbAdapter(baseUrl).remember({
-          content: 'repository policy',
-          signal: AbortSignal.timeout(1000),
-        }),
-      ).resolves.toEqual({ status: 'failed' });
-      expect(requestCount).toBe(1);
-    },
-  );
-
-  it.each([429, 500])(
-    'returns unknown for HTTP %s without retrying',
-    async (status) => {
-      let requestCount = 0;
-      const baseUrl = await startServer((_request, response) => {
-        requestCount += 1;
-        response.writeHead(status);
-        response.end('private upstream detail');
-      });
-
-      await expect(
-        polarDbAdapter(baseUrl).remember({
-          content: 'repository policy',
-          signal: AbortSignal.timeout(1000),
-        }),
-      ).resolves.toEqual({ status: 'unknown' });
-      expect(requestCount).toBe(1);
-    },
-  );
-
-  it('returns unknown when the write fails before any HTTP response', async () => {
     await expect(
-      polarDbAdapter('http://127.0.0.1:1').remember({
+      new Mem0CompatibleAdapter(
+        mem0CompatibleConfig(origin, 'aliyun-polardb-mysql-2026-08', {
+          userId: 'fixed-user',
+        }),
+      ).remember({
         content: 'repository policy',
         signal: AbortSignal.timeout(1000),
       }),
     ).resolves.toEqual({ status: 'unknown' });
   });
+
+  it('does not retry an ambiguous direct-import failure', async () => {
+    let requestCount = 0;
+    const origin = await startServer((_request, response) => {
+      requestCount += 1;
+      response.writeHead(500);
+      response.end('private upstream detail');
+    });
+
+    await expect(
+      new Mem0CompatibleAdapter(
+        mem0CompatibleConfig(origin, 'mem0-oss-rest-2026-08', {
+          userId: 'fixed-user',
+        }),
+      ).remember({
+        content: 'repository policy',
+        signal: AbortSignal.timeout(1000),
+      }),
+    ).resolves.toEqual({ status: 'unknown' });
+    expect(requestCount).toBe(1);
+  });
 });
 
-function polarDbAdapter(baseUrl: string, agentId?: string) {
-  return new PolarDbMem0Adapter({
-    type: 'polardb-mem0',
-    baseUrl,
-    apiKeyEnv: 'MEM0_API_KEY',
-    apiKey: 'project-key',
-    userId: 'fixed-user',
-    ...(agentId === undefined ? {} : { agentId }),
-  });
+function mem0CompatibleConfig(
+  origin: string,
+  preset: Mem0PresetId,
+  scope: Mem0CompatibleProviderConfig['scope'],
+  basePath = '',
+): Mem0CompatibleProviderConfig {
+  return {
+    type: 'mem0',
+    preset,
+    endpoint: { origin, basePath },
+    credentialEnv: 'MEM0_API_KEY',
+    credential: 'project-key',
+    scope,
+  };
 }
 
 function mem0Adapter(baseUrl: string) {

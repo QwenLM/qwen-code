@@ -61,7 +61,7 @@ export interface AutoRecallConfig {
 
 export type ProviderConfig =
   | Mem0ProviderConfig
-  | PolarDbMem0ProviderConfig
+  | Mem0CompatibleProviderConfig
   | GenericHttpProviderConfig;
 
 export interface Mem0ProviderConfig {
@@ -71,14 +71,29 @@ export interface Mem0ProviderConfig {
   appId: string;
 }
 
-export interface PolarDbMem0ProviderConfig {
-  type: 'polardb-mem0';
-  baseUrl: string;
-  apiKeyEnv: string;
-  apiKey: string;
-  userId: string;
-  agentId?: string;
-  allowInsecureHttp?: boolean;
+export const MEM0_PRESET_IDS = [
+  'mem0-platform-v3',
+  'mem0-oss-rest-2026-08',
+  'aliyun-polardb-mysql-2026-08',
+] as const;
+
+export type Mem0PresetId = (typeof MEM0_PRESET_IDS)[number];
+
+export interface Mem0CompatibleProviderConfig {
+  type: 'mem0';
+  preset: Mem0PresetId;
+  endpoint: {
+    origin: string;
+    basePath: string;
+    allowInsecureHttp?: boolean;
+  };
+  credentialEnv: string;
+  credential: string;
+  scope: {
+    userId?: string;
+    agentId?: string;
+    appId?: string;
+  };
 }
 
 export interface GenericHttpProviderConfig {
