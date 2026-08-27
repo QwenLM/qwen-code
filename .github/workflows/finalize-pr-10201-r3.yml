@@ -20,6 +20,14 @@ jobs:
         run: |
           python3 -m py_compile .github/scripts/finalize_pr_10201_round2.py
           python3 .github/scripts/finalize_pr_10201_round2.py
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('packages/core/src/utils/git-config-safety.round2.test.ts')
+          s = p.read_text()
+          s = s.replace('process.env.GIT_CONFIG_GLOBAL', "process.env['GIT_CONFIG_GLOBAL']")
+          s = s.replace('process.env.GIT_CONFIG_NOSYSTEM', "process.env['GIT_CONFIG_NOSYSTEM']")
+          p.write_text(s)
+          PY
       - name: Install, format and validate
         run: |
           npm ci
