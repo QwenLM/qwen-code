@@ -1002,6 +1002,35 @@ export function runCleanup(target: string): void {
       continue;
     }
     if (!file.startsWith(prefix)) continue;
+    // THIS run's stop sidecar outlives its own cleanup: the PR stop path
+    // writes the sidecar and runs cleanup in the same breath, and the
+    // parent's first poll is up to 250 ms away — swept here, neither the
+    // in-run snapshot nor the post-close fallback could ever observe the
+    // decision, and an already-decided up-to-date/empty-diff round exited 1
+    // "Review did not complete" (human review on #9659). The sidecar is
+    // kept only when its runId matches the environment the parent stamped —
+    // a foreign or unstamped one is residue and sweeps as before; the NEXT
+    // run's cleanup (different nonce) collects this one.
+    if (file === `${prefix}stop.json`) {
+      const envRunId = process.env['QWEN_REVIEW_RUN_ID'];
+      if (envRunId) {
+        try {
+          const sidecar = JSON.parse(
+            readFileSync(join(REVIEW_TMP_DIR, file), 'utf8'),
+          ) as { runId?: unknown };
+          if (sidecar.runId === envRunId) {
+            writeStdoutLine(
+              `Kept ${join(REVIEW_TMP_DIR, file)}: this run's stop verdict — ` +
+                `the parent reads it after the child exits; the next run's ` +
+                `cleanup collects it.`,
+            );
+            continue;
+          }
+        } catch {
+          // Unreadable or malformed: residue, swept below.
+        }
+      }
+    }
     const full = join(REVIEW_TMP_DIR, file);
     if (preserved.has(file)) {
       writeStdoutLine(
