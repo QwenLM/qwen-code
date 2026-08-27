@@ -508,6 +508,19 @@ function SessionOverviewPanelInner({
     }));
   }, [multiWorkspace, registeredWorkspaces, workspaceCwd]);
 
+  // Exclusions are only manageable through the filter popover. When the
+  // option set shrinks — most sharply when the host locks the panel to one
+  // workspace and the popover disappears — drop any exclusion the user can
+  // no longer see or change, so a stale one can't hide every remaining row.
+  useEffect(() => {
+    if (excludedWorkspaceCwds.size === 0) return;
+    const optionCwds = new Set(workspaceOptions.map((option) => option.cwd));
+    setExcludedWorkspaceCwds((prev) => {
+      const next = new Set([...prev].filter((cwd) => optionCwds.has(cwd)));
+      return next.size === prev.size ? prev : next;
+    });
+  }, [excludedWorkspaceCwds, workspaceOptions]);
+
   const filteredCards = useMemo(() => {
     let list = cards;
     if (excludedWorkspaceCwds.size > 0) {

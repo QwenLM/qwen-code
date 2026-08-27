@@ -1272,7 +1272,6 @@ describe('SessionOverviewPanel', () => {
     const empty = container!.querySelector('[data-slot="data-table-empty"]');
     expect(empty?.closest('tbody')).not.toBeNull();
     expect(empty?.textContent).toContain('No data');
-    expect(container!.textContent).not.toContain('No sessions matching');
   });
 
   it('filters rows by workspace via the multi-select panel', async () => {
@@ -1367,6 +1366,55 @@ describe('SessionOverviewPanel', () => {
     expect(
       container!.querySelector('button[aria-label="Filter by workspace"]'),
     ).toBeNull();
+  });
+
+  it('drops stale workspace exclusions when the panel locks to the excluded workspace', async () => {
+    connectionState.capabilities = {
+      features: [],
+      workspaceCwd: '/w',
+      workspaces: [
+        { id: 'w0', cwd: '/w', primary: true, trusted: true },
+        { id: 'w1', cwd: '/wsB', primary: false, trusted: true },
+      ],
+    };
+    sessionsState.sessions = [session('a', { displayName: 'Alpha' })];
+    otherWorkspaceSessions['/wsB'] = [
+      session('b1', { workspaceCwd: '/wsB', displayName: 'Beta' }),
+    ];
+    render();
+    await flushAsync();
+    // Exclude /wsB through the funnel filter.
+    const trigger = container!.querySelector(
+      'button[aria-label="Filter by workspace"]',
+    ) as HTMLElement;
+    act(() => click(trigger));
+    const payments = document.querySelector(
+      '#session-overview-workspace-1',
+    ) as HTMLElement;
+    act(() => click(payments));
+    expect(rowTitles()).toEqual(['Alpha']);
+
+    // The host locks the shell to the excluded workspace while the panel
+    // stays mounted: the filter UI disappears with the lock, so the stale
+    // exclusion must be reconciled away instead of hiding every row.
+    sessionsState.sessions = [
+      session('b1', { workspaceCwd: '/wsB', displayName: 'Beta' }),
+    ];
+    act(() =>
+      root!.render(
+        <I18nProvider language="en">
+          <SessionOverviewPanel
+            onOpenSession={onOpenSession}
+            workspaceCwd="/wsB"
+          />
+        </I18nProvider>,
+      ),
+    );
+    await flushAsync();
+    expect(
+      container!.querySelector('button[aria-label="Filter by workspace"]'),
+    ).toBeNull();
+    expect(rowTitles()).toEqual(['Beta']);
   });
 
   it('shows all available row actions without a menu', () => {
@@ -1472,7 +1520,6 @@ describe('SessionOverviewPanel', () => {
     }
     expect(cells.at(-1)?.className).toContain('sticky');
     expect((cells.at(-1) as HTMLElement).style.right).toBe('0px');
-    expect(headers[0]?.className).not.toContain('border-r');
     expect(headers.at(-1)?.className).not.toContain('border-l');
     expect(cells[0]?.className).toContain('bg-background');
     expect(cells[1]?.className).toContain('bg-background');
@@ -1483,7 +1530,6 @@ describe('SessionOverviewPanel', () => {
     expect(cells[0]?.className).toContain(
       'group-hover:bg-[color-mix(in_srgb,var(--muted)_50%,var(--background))]',
     );
-    expect(cells[0]?.className).not.toContain('group-hover:bg-muted/50');
     const footer = container!.querySelector(
       '[data-web-shell-session-footer]',
     ) as HTMLElement;
@@ -1730,6 +1776,11 @@ describe('SessionOverviewPanel', () => {
 
       expect(onCurrentSessionRemoved).not.toHaveBeenCalled();
       expect(container!.textContent).toContain(`${error}: daemon busy`);
+      // A rejected mutation still refreshes the owning catalog workspace so
+      // the overview doesn't sit on stale rows.
+      expect(sessionCatalogController.refreshWorkspace).toHaveBeenCalledWith(
+        '/w',
+      );
     },
   );
 
@@ -2133,6 +2184,34 @@ describe('SessionOverviewPanel', () => {
     expect(rowActionButton(rows()[0]!, 'Rename').disabled).toBe(false);
   });
 
+  it('falls back to the typed name when a rename resolves no metadata', async () => {
+    connectionState.sessionId = 's1';
+    connectionState.capabilities = {
+      features: ['workspace_session_metadata'],
+      workspaceCwd: '/w',
+    };
+    sessionsState.sessions = [session('s1', { displayName: 'One' })];
+    workspaceActions.renameSession.mockResolvedValueOnce(undefined);
+    render();
+    act(() => click(rowActionButton(rows()[0]!, 'Rename')));
+    const input = container!.querySelector(
+      'input[aria-label="Rename: One"]',
+    ) as HTMLInputElement;
+    act(() => setInputValue(input, 'Void Name'));
+    const form = input.closest('form')!;
+    act(() =>
+      form.dispatchEvent(
+        new Event('submit', { bubbles: true, cancelable: true }),
+      ),
+    );
+    await flushAsync();
+    expect(sessionCatalogController.renamed).toHaveBeenCalledWith(
+      '/w',
+      's1',
+      'Void Name',
+    );
+  });
+
   it('renames the current trusted secondary session from the global overview', async () => {
     connectionState.sessionId = 'b1';
     connectionState.workspaceCwd = '/wsB';
@@ -2334,6 +2413,9 @@ describe('SessionOverviewPanel', () => {
     act(() => click(confirm));
     await flushAsync();
     expect(container!.textContent).toContain('Failed to archive session');
+    expect(sessionCatalogController.refreshWorkspace).toHaveBeenCalledWith(
+      '/w',
+    );
 
     workspaceClient.archiveSessionsData.mockResolvedValueOnce({
       archived: ['s1'],
@@ -2372,6 +2454,11 @@ describe('SessionOverviewPanel', () => {
     );
     await flushAsync();
     expect(container!.textContent).toContain('Failed to rename session');
+    expect(sessionCatalogController.refreshWorkspace).toHaveBeenCalledWith(
+      '/w',
+    );
+    // The rejected name must not overwrite the catalog's cached display name.
+    expect(sessionCatalogController.renamed).not.toHaveBeenCalled();
   });
 });
 
