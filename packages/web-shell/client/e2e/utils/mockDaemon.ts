@@ -695,6 +695,14 @@ type WorkspaceSessionsRouteMatch = {
   liveState: boolean;
 };
 
+function decodeRouteSegment(segment: string): string | undefined {
+  try {
+    return decodeURIComponent(segment);
+  } catch {
+    return undefined;
+  }
+}
+
 function matchWorkspaceSessionsRoute(
   path: string,
 ): WorkspaceSessionsRouteMatch | undefined {
@@ -702,8 +710,10 @@ function matchWorkspaceSessionsRoute(
     /^\/workspaces\/([^/]+)\/sessions\/live-state\/?$/,
   );
   if (liveStateMatch) {
+    const workspaceCwd = decodeRouteSegment(liveStateMatch[1]);
+    if (workspaceCwd === undefined) return undefined;
     return {
-      workspaceCwd: decodeURIComponent(liveStateMatch[1]),
+      workspaceCwd,
       liveState: true,
     };
   }
@@ -714,9 +724,11 @@ function matchWorkspaceSessionsRoute(
   if (!sessionsMatch) {
     return undefined;
   }
+  const workspaceCwd = decodeRouteSegment(sessionsMatch[1]);
+  if (workspaceCwd === undefined) return undefined;
 
   return {
-    workspaceCwd: decodeURIComponent(sessionsMatch[1]),
+    workspaceCwd,
     liveState: false,
   };
 }
