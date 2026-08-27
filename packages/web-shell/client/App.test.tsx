@@ -17892,6 +17892,18 @@ describe('App session callbacks', () => {
   });
 
   it('starts a new session when leaving the Session Overview with Back', async () => {
+    mockConnection.workspaceCwd = '/work/secondary';
+    mockWorkspace.capabilities = {
+      workspaces: [
+        { id: 'primary', cwd: '/tmp/project', primary: true, trusted: true },
+        {
+          id: 'secondary',
+          cwd: '/work/secondary',
+          primary: false,
+          trusted: true,
+        },
+      ],
+    } as typeof mockWorkspace.capabilities;
     const onSessionIdChange = vi.fn();
     const { container } = renderApp({ onSessionIdChange });
     await flush();
@@ -17913,6 +17925,9 @@ describe('App session callbacks', () => {
 
     expect(mockSessionActions.clearSession).toHaveBeenCalledOnce();
     expect(onSessionIdChange).toHaveBeenCalledWith(undefined);
+    expect(testState.latestChatEditorProps?.selectedWorkspaceCwd).toBe(
+      '/work/secondary',
+    );
     expect(container.querySelector('[data-testid="inline-panel"]')).toBeNull();
   });
 

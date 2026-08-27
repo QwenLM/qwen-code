@@ -2675,6 +2675,8 @@ const EN: Messages = {
   'sessionsOverview.openInSplit': 'Open in split',
   'sessionsOverview.openInSplitHint':
     'Show the selected sessions side by side in this window',
+  'sessionsOverview.splitLimit': (v) =>
+    `Select at most ${v?.max ?? 6} sessions to open them together`,
   'sessionsOverview.openInTab': 'Open in new tab',
   'sessionsOverview.openInTabHint':
     'Open the selected sessions as a split view in a new browser tab',
@@ -2710,7 +2712,6 @@ const EN: Messages = {
     `"${v?.name ?? ''}" and its conversation history will be permanently deleted. This cannot be undone.`,
   'sessionsOverview.deleteFailed': 'Failed to delete session',
   'sessionsOverview.archiveFailed': 'Failed to archive session',
-  'sessionsOverview.mutationIncomplete': 'Operation did not complete',
   'sessionsOverview.actionUnavailable':
     'This action is unavailable for the selected session or workspace',
   'sessionsOverview.bulkArchive': 'Archive',
@@ -5636,6 +5637,8 @@ const ZH: Messages = {
   'sessionsOverview.noData': '暂无数据',
   'sessionsOverview.openInSplit': '分屏打开',
   'sessionsOverview.openInSplitHint': '在本窗口内并排显示选中的会话',
+  'sessionsOverview.splitLimit': (v) =>
+    `最多选择 ${v?.max ?? 6} 个会话同时打开`,
   'sessionsOverview.openInTab': '新标签页打开',
   'sessionsOverview.openInTabHint': '在新标签页中以分屏并排打开选中的会话',
   'sessionsOverview.popupBlocked':
@@ -5670,7 +5673,6 @@ const ZH: Messages = {
     `"${v?.name ?? ''}" 及其对话记录将被永久删除，此操作无法撤销。`,
   'sessionsOverview.deleteFailed': '删除会话失败',
   'sessionsOverview.archiveFailed': '归档会话失败',
-  'sessionsOverview.mutationIncomplete': '操作未完成',
   'sessionsOverview.actionUnavailable': '所选会话或工作区不支持此操作',
   'sessionsOverview.bulkArchive': '归档',
   'sessionsOverview.bulkArchiveHint': (v) =>

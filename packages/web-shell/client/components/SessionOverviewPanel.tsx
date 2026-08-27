@@ -629,10 +629,7 @@ function SessionOverviewPanelInner({
     void reloadData().finally(() => setRefreshing(false));
   }, [refreshing, reloadData]);
 
-  // Route session mutations to their owning workspaces: primary-workspace (and
-  // cwd-less) sessions go through the primary actions one id at a time, while
-  // other workspaces batch through their workspace-qualified client — mirroring
-  // the sidebar's per-scope handling.
+  // Route each batch through its owning workspace client.
   const mutateCards = useCallback(
     async (cards: SessionCard[], mutation: 'archive' | 'delete') => {
       const canMutate = mutation === 'archive' ? canArchiveCard : canDeleteCard;
@@ -651,71 +648,44 @@ function SessionOverviewPanelInner({
       let firstError: Error | undefined;
       for (const [cwd, group] of byCwd) {
         const ids = group.map((card) => card.sessionId);
-        if (cwd) {
-          try {
-            const client = workspace.client.workspaceByCwd(cwd);
-            const cardsById = new Map(
-              group.map((card) => [card.sessionId, card]),
-            );
-            if (mutation === 'archive') {
-              const result = await client.archiveSessionsData(ids);
-              for (const id of [
-                ...result.archived,
-                ...result.alreadyArchived,
-                ...result.notFound,
-              ]) {
-                const card = cardsById.get(id);
-                if (card) succeededIdentities.add(getSessionIdentity(card));
-              }
-              firstError ??= result.errors[0]
-                ? new Error(result.errors[0].error)
-                : undefined;
-            } else {
-              const result = await client.deleteSessionsData(ids);
-              for (const id of [...result.removed, ...result.notFound]) {
-                const card = cardsById.get(id);
-                if (card) succeededIdentities.add(getSessionIdentity(card));
-              }
-              firstError ??= result.errors[0]
-                ? new Error(result.errors[0].error)
-                : undefined;
-            }
-          } catch (error) {
-            firstError ??=
-              error instanceof Error ? error : new Error(String(error));
-          }
-        } else {
-          const results = await Promise.allSettled(
-            ids.map((id) =>
-              mutation === 'archive'
-                ? workspace.actions.archiveSession(id)
-                : workspace.actions.deleteSession(id),
-            ),
+        try {
+          const client = cwd
+            ? workspace.client.workspaceByCwd(cwd)
+            : workspace.client;
+          const cardsById = new Map(
+            group.map((card) => [card.sessionId, card]),
           );
-          results.forEach((result, index) => {
-            if (result.status === 'fulfilled' && result.value) {
-              succeededIdentities.add(getSessionIdentity(group[index]));
-            } else {
-              const reason =
-                result.status === 'rejected'
-                  ? result.reason
-                  : t('sessionsOverview.mutationIncomplete');
-              firstError ??=
-                reason instanceof Error ? reason : new Error(String(reason));
+          if (mutation === 'archive') {
+            const result = await client.archiveSessionsData(ids);
+            for (const id of [
+              ...result.archived,
+              ...result.alreadyArchived,
+              ...result.notFound,
+            ]) {
+              const card = cardsById.get(id);
+              if (card) succeededIdentities.add(getSessionIdentity(card));
             }
-          });
+            firstError ??= result.errors[0]
+              ? new Error(result.errors[0].error)
+              : undefined;
+          } else {
+            const result = await client.deleteSessionsData(ids);
+            for (const id of [...result.removed, ...result.notFound]) {
+              const card = cardsById.get(id);
+              if (card) succeededIdentities.add(getSessionIdentity(card));
+            }
+            firstError ??= result.errors[0]
+              ? new Error(result.errors[0].error)
+              : undefined;
+          }
+        } catch (error) {
+          firstError ??=
+            error instanceof Error ? error : new Error(String(error));
         }
       }
       return { succeededIdentities, error: firstError };
     },
-    [
-      canArchiveCard,
-      canDeleteCard,
-      primaryCwd,
-      t,
-      workspace.actions,
-      workspace.client,
-    ],
+    [canArchiveCard, canDeleteCard, primaryCwd, t, workspace.client],
   );
 
   const runBusy = useCallback(
@@ -1439,11 +1409,13 @@ function SessionOverviewPanelInner({
     autoResetPageIndex: false,
   });
   const selectedCards = table
-    .getSelectedRowModel()
-    .rows.map((row) => row.original);
+    .getSortedRowModel()
+    .rows.filter((row) => row.getIsSelected())
+    .map((row) => row.original);
   const selectedCount = selectedCards.length;
   const canOpenSelection =
     selectedCount > 0 &&
+    selectedCount <= MAX_SPLIT_PANES &&
     selectedCards.every((selected) =>
       cards.every(
         (card) =>
@@ -1455,13 +1427,7 @@ function SessionOverviewPanelInner({
     selectedCount > 0 && selectedCards.every(canArchiveCard);
   const canDeleteSelection =
     selectedCount > 0 && selectedCards.every(canDeleteCard);
-  // The split shows at most MAX_SPLIT_PANES; cap what we hand off so the
-  // new-tab URL doesn't bloat with ids that get discarded and the in-window
-  // path doesn't silently open fewer than were checked. The top-ranked
-  // selections win.
-  const splitIds = selectedCards
-    .map((card) => card.sessionId)
-    .slice(0, MAX_SPLIT_PANES);
+  const splitIds = selectedCards.map((card) => card.sessionId);
   useEffect(() => {
     const panel = panelRef.current;
     const viewport = panel?.parentElement;
@@ -1615,7 +1581,13 @@ function SessionOverviewPanelInner({
               variant="outline"
               disabled={!canOpenSelection}
               onClick={() => openInNewTab(splitIds)}
-              title={t('sessionsOverview.openInTabHint')}
+              title={
+                selectedCount > MAX_SPLIT_PANES
+                  ? t('sessionsOverview.splitLimit', {
+                      max: MAX_SPLIT_PANES,
+                    })
+                  : t('sessionsOverview.openInTabHint')
+              }
             >
               {t('sessionsOverview.openInTab')}
             </Button>
@@ -1626,7 +1598,13 @@ function SessionOverviewPanelInner({
                 variant="outline"
                 disabled={!canOpenSelection}
                 onClick={() => onOpenSplit(splitIds)}
-                title={t('sessionsOverview.openInSplitHint')}
+                title={
+                  selectedCount > MAX_SPLIT_PANES
+                    ? t('sessionsOverview.splitLimit', {
+                        max: MAX_SPLIT_PANES,
+                      })
+                    : t('sessionsOverview.openInSplitHint')
+                }
               >
                 {t('sessionsOverview.openInSplit')}
               </Button>

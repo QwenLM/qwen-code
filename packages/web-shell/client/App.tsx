@@ -12441,25 +12441,27 @@ export function App({
                             (entry) => entry.primary,
                           )?.cwd;
                         const openInvocation = sessionOpenInvocationRef.current;
-                        void createNewSession().then((created) => {
-                          const latest = connectionRef.current;
-                          const latestWorkspaceCwd =
-                            latest.workspaceCwd ||
-                            lockedWorkspaceCwd ||
-                            workspacesRef.current.find(
-                              (entry) => entry.primary,
-                            )?.cwd;
-                          if (
-                            created &&
-                            sessionOpenInvocationRef.current ===
-                              openInvocation &&
-                            (latest.sessionId === undefined ||
-                              (latest.sessionId === current.sessionId &&
-                                latestWorkspaceCwd === currentWorkspaceCwd))
-                          ) {
-                            onSessionIdChange?.(undefined);
-                          }
-                        });
+                        void createNewSession(currentWorkspaceCwd).then(
+                          (created) => {
+                            const latest = connectionRef.current;
+                            const latestWorkspaceCwd =
+                              latest.workspaceCwd ||
+                              lockedWorkspaceCwd ||
+                              workspacesRef.current.find(
+                                (entry) => entry.primary,
+                              )?.cwd;
+                            if (
+                              created &&
+                              sessionOpenInvocationRef.current ===
+                                openInvocation &&
+                              (latest.sessionId === undefined ||
+                                (latest.sessionId === current.sessionId &&
+                                  latestWorkspaceCwd === currentWorkspaceCwd))
+                            ) {
+                              onSessionIdChange?.(undefined);
+                            }
+                          },
+                        );
                       }}
                       aria-label={t('common.back')}
                       title={t('common.back')}

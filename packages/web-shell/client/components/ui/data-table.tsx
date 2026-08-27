@@ -49,8 +49,9 @@ function fixedClassName<TData>(
   header: boolean,
   showLeftShadow: boolean,
   showRightShadow: boolean,
+  fixedEnabled: boolean,
 ): string | undefined {
-  if (!meta.fixed) return undefined;
+  if (!meta.fixed || !fixedEnabled) return undefined;
   const showShadow =
     meta.fixedEdge &&
     (meta.fixed === 'left' ? showLeftShadow : showRightShadow);
@@ -115,6 +116,7 @@ function columnStyle<TData>(
   minimumWidth: number,
   fluidWeight: number,
   fixedOffset?: number,
+  fixedEnabled = true,
 ): CSSProperties | undefined {
   const style =
     columnWidthStyle(
@@ -124,7 +126,9 @@ function columnStyle<TData>(
       minimumWidth,
       fluidWeight,
     ) ?? {};
-  if (meta.fixed) style[meta.fixed] = fixedOffset ?? meta.fixedOffset ?? 0;
+  if (meta.fixed && fixedEnabled) {
+    style[meta.fixed] = fixedOffset ?? meta.fixedOffset ?? 0;
+  }
   return Object.keys(style).length > 0 ? style : undefined;
 }
 
@@ -204,6 +208,22 @@ export function DataTable<TData>({
       offset + (resolvedWidths.get(column.id) ?? 0),
     );
   }
+  const leftFixedWidth = visibleColumns.reduce(
+    (width, column) =>
+      columnMeta<TData>(column).fixed === 'left'
+        ? width + (resolvedWidths.get(column.id) ?? 0)
+        : width,
+    0,
+  );
+  const rightFixedWidth = visibleColumns.reduce(
+    (width, column) =>
+      columnMeta<TData>(column).fixed === 'right'
+        ? width + (resolvedWidths.get(column.id) ?? 0)
+        : width,
+    0,
+  );
+  const pinRightColumns =
+    availableWidth === 0 || availableWidth > leftFixedWidth + rightFixedWidth;
 
   const updateLayout = useCallback(
     (scroller: HTMLElement) => {
@@ -296,6 +316,7 @@ export function DataTable<TData>({
                         true,
                         fixedShadows.left,
                         fixedShadows.right,
+                        meta.fixed !== 'right' || pinRightColumns,
                       ),
                     )}
                     style={columnStyle(
@@ -305,6 +326,7 @@ export function DataTable<TData>({
                       widthMetrics.minimum,
                       widthMetrics.fluidWeight,
                       fixedOffsets.get(header.column.id),
+                      meta.fixed !== 'right' || pinRightColumns,
                     )}
                   >
                     {header.isPlaceholder
@@ -367,6 +389,7 @@ export function DataTable<TData>({
                         false,
                         fixedShadows.left,
                         fixedShadows.right,
+                        meta.fixed !== 'right' || pinRightColumns,
                       ),
                     )}
                     style={columnStyle(
@@ -376,6 +399,7 @@ export function DataTable<TData>({
                       widthMetrics.minimum,
                       widthMetrics.fluidWeight,
                       fixedOffsets.get(cell.column.id),
+                      meta.fixed !== 'right' || pinRightColumns,
                     )}
                     onClick={
                       meta.stopRowClick

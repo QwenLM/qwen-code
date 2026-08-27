@@ -3246,7 +3246,9 @@ describe('WebShellSidebar non-primary archive', () => {
 
     renderSidebar();
     await expandWorkspace('other');
-    expect(archiveButtonFor('Secondary active')).toBeUndefined();
+    expect(await openSessionMenuItems('Secondary active')).not.toContain(
+      'Archive',
+    );
     expect(container.textContent).not.toContain('Archived');
   });
 

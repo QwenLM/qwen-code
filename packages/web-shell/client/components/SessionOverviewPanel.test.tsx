@@ -57,6 +57,8 @@ let statusReportOptions: { autoLoad?: boolean; detail?: string };
 let workspaceClient: {
   listWorkspaceSessionsPage: ReturnType<typeof vi.fn>;
   workspaceByCwd: ReturnType<typeof vi.fn>;
+  archiveSessionsData: ReturnType<typeof vi.fn>;
+  deleteSessionsData: ReturnType<typeof vi.fn>;
 };
 // Primary-workspace actions surfaced by useWorkspace / useActions.
 let workspaceActions: {
@@ -216,6 +218,17 @@ beforeEach(() => {
         mimeType: 'text/html',
         format: 'html',
       })),
+    })),
+    archiveSessionsData: vi.fn(async (ids: string[]) => ({
+      archived: ids,
+      alreadyArchived: [],
+      notFound: [],
+      errors: [],
+    })),
+    deleteSessionsData: vi.fn(async (ids: string[]) => ({
+      removed: ids,
+      notFound: [],
+      errors: [],
     })),
   };
   sessionsReload.mockClear();
@@ -879,23 +892,30 @@ describe('SessionOverviewPanel', () => {
     expect(opened.focus).toHaveBeenCalledTimes(1);
   });
 
-  it('opens the selected sessions in split, in ranked order', () => {
+  it('opens the selected sessions in the visible sort order', () => {
     sessionsState.sessions = [
-      session('s-idle', { displayName: 'Bravo' }),
+      session('s-idle', {
+        displayName: 'Bravo',
+        updatedAt: '2026-01-01T00:00:00.000Z',
+      }),
       session('s-appr', {
         displayName: 'Charlie',
         isWaitingForPermission: true,
+        updatedAt: '2026-01-02T00:00:00.000Z',
       }),
     ];
     const onOpenSplit = vi.fn();
     render({ onOpenSplit });
+    const timeHeader = Array.from(container!.querySelectorAll('th')).find(
+      (header) => header.textContent?.includes('Time'),
+    )!;
+    act(() => click(timeHeader.querySelector('button')!));
     act(() => click(selectAllCheckbox()));
     const splitButton = footerButton('Open in split') as HTMLButtonElement;
     act(() =>
       splitButton.dispatchEvent(new MouseEvent('click', { bubbles: true })),
     );
-    // needs-approval (Charlie) is ranked ahead of idle (Bravo).
-    expect(onOpenSplit).toHaveBeenCalledWith(['s-appr', 's-idle']);
+    expect(onOpenSplit).toHaveBeenCalledWith(['s-idle', 's-appr']);
   });
 
   it('surfaces the popup-blocked notice when window.open is blocked', () => {
@@ -978,28 +998,22 @@ describe('SessionOverviewPanel', () => {
     expect(container!.textContent).toContain('1 of 2 row(s) selected.');
   });
 
-  it('caps the split to 6 sessions', () => {
+  it('disables split actions when more than 6 sessions are selected', () => {
     sessionsState.sessions = Array.from({ length: 8 }, (_, i) =>
       session(`s${i}`, { displayName: `S${i}` }),
     );
     const onOpenSplit = vi.fn();
     render({ onOpenSplit });
     act(() => click(selectAllCheckbox())); // all rows selected
-    expect(container!.textContent).not.toContain('Only the first 6');
     const openInTab = footerButton('Open in new tab') as HTMLButtonElement;
-    act(() =>
-      openInTab.dispatchEvent(new MouseEvent('click', { bubbles: true })),
-    );
-    const split = new URL(String(openSpy.mock.calls[0][0])).searchParams.get(
-      'split',
-    );
-    expect(split!.split(',')).toHaveLength(6);
-    // In-window split is likewise capped.
     const splitButton = footerButton('Open in split') as HTMLButtonElement;
-    act(() =>
-      splitButton.dispatchEvent(new MouseEvent('click', { bubbles: true })),
+    expect(openInTab.disabled).toBe(true);
+    expect(splitButton.disabled).toBe(true);
+    expect(openInTab.title).toBe(
+      'Select at most 6 sessions to open them together',
     );
-    expect(onOpenSplit.mock.calls[0][0]).toHaveLength(6);
+    expect(openSpy).not.toHaveBeenCalled();
+    expect(onOpenSplit).not.toHaveBeenCalled();
   });
 
   it('defaults to 50 rows per page and supports 10, 50, and 100', () => {
@@ -1533,7 +1547,7 @@ describe('SessionOverviewPanel', () => {
     ) as HTMLElement;
     act(() => click(confirm));
     await flushAsync();
-    expect(workspaceActions.archiveSession).toHaveBeenCalledWith('s1');
+    expect(workspaceClient.archiveSessionsData).toHaveBeenCalledWith(['s1']);
     expect(onOpenSession).not.toHaveBeenCalled();
   });
 
@@ -1549,8 +1563,29 @@ describe('SessionOverviewPanel', () => {
     ) as HTMLElement;
     act(() => click(confirm));
     await flushAsync();
-    expect(workspaceActions.archiveSession).toHaveBeenCalledWith('s1');
+    expect(workspaceClient.archiveSessionsData).toHaveBeenCalledWith(['s1']);
     expect(onCurrentSessionRemoved).toHaveBeenCalledOnce();
+  });
+
+  it('treats an already-missing current session as archived', async () => {
+    connectionState.sessionId = 's1';
+    sessionsState.sessions = [session('s1', { displayName: 'One' })];
+    workspaceClient.archiveSessionsData.mockResolvedValueOnce({
+      archived: [],
+      alreadyArchived: [],
+      notFound: ['s1'],
+      errors: [],
+    });
+    render({ onCurrentSessionRemoved });
+    act(() => click(rowActionButton(rows()[0]!, 'Archive')));
+    const confirm = document.querySelector(
+      '[data-slot="alert-dialog-action"]',
+    ) as HTMLElement;
+    act(() => click(confirm));
+    await flushAsync();
+
+    expect(onCurrentSessionRemoved).toHaveBeenCalledOnce();
+    expect(container!.textContent).not.toContain('Failed to archive session');
   });
 
   it('deletes the current session and clears it after success', async () => {
@@ -1563,19 +1598,19 @@ describe('SessionOverviewPanel', () => {
     ) as HTMLElement;
     act(() => click(confirm));
     await flushAsync();
-    expect(workspaceActions.deleteSession).toHaveBeenCalledWith('s1');
+    expect(workspaceClient.deleteSessionsData).toHaveBeenCalledWith(['s1']);
     expect(onCurrentSessionRemoved).toHaveBeenCalledOnce();
   });
 
   it.each([
-    ['Archive', 'archiveSession', 'Failed to archive session'],
-    ['Delete', 'deleteSession', 'Failed to delete session'],
+    ['Archive', 'archiveSessionsData', 'Failed to archive session'],
+    ['Delete', 'deleteSessionsData', 'Failed to delete session'],
   ] as const)(
-    'does not clear the current session when %s returns false',
+    'does not clear the current session when %s fails',
     async (label, action, error) => {
       connectionState.sessionId = 's1';
       sessionsState.sessions = [session('s1', { displayName: 'One' })];
-      workspaceActions[action].mockResolvedValueOnce(false);
+      workspaceClient[action].mockRejectedValueOnce(new Error('daemon busy'));
       render({ onCurrentSessionRemoved });
 
       act(() => click(rowActionButton(rows()[0]!, label)));
@@ -1586,26 +1621,32 @@ describe('SessionOverviewPanel', () => {
       await flushAsync();
 
       expect(onCurrentSessionRemoved).not.toHaveBeenCalled();
-      expect(container!.textContent).toContain(
-        `${error}: Operation did not complete`,
-      );
+      expect(container!.textContent).toContain(`${error}: daemon busy`);
     },
   );
 
   it.each([
-    ['Archive', 'archiveSession'],
-    ['Delete', 'deleteSession'],
+    [
+      'Archive',
+      'archiveSessionsData',
+      { archived: ['s1'], alreadyArchived: [], notFound: [], errors: [] },
+    ],
+    [
+      'Delete',
+      'deleteSessionsData',
+      { removed: ['s1'], notFound: [], errors: [] },
+    ],
   ] as const)(
     'does not clear a newly selected session when %s finishes',
-    async (label, action) => {
+    async (label, action, result) => {
       connectionState.sessionId = 's1';
       sessionsState.sessions = [
         session('s1', { displayName: 'One' }),
         session('s2', { displayName: 'Two' }),
       ];
-      let resolveMutation!: (value: boolean) => void;
-      workspaceActions[action].mockReturnValueOnce(
-        new Promise<boolean>((resolve) => {
+      let resolveMutation!: (value: typeof result) => void;
+      workspaceClient[action].mockReturnValueOnce(
+        new Promise<typeof result>((resolve) => {
           resolveMutation = resolve;
         }),
       );
@@ -1617,11 +1658,11 @@ describe('SessionOverviewPanel', () => {
         '[data-slot="alert-dialog-action"]',
       ) as HTMLElement;
       act(() => click(confirm));
-      expect(workspaceActions[action]).toHaveBeenCalledWith('s1');
+      expect(workspaceClient[action]).toHaveBeenCalledWith(['s1']);
 
       connectionState.sessionId = 's2';
       rerender({ onCurrentSessionRemoved });
-      await act(async () => resolveMutation(true));
+      await act(async () => resolveMutation(result));
       await flushAsync();
 
       expect(onCurrentSessionRemoved).not.toHaveBeenCalled();
@@ -1737,10 +1778,16 @@ describe('SessionOverviewPanel', () => {
     ) as HTMLElement;
     act(() => click(confirm));
     await flushAsync();
-    expect(workspaceActions.deleteSession).toHaveBeenCalledWith('s1');
+    expect(workspaceClient.deleteSessionsData).toHaveBeenCalledWith(['s1']);
   });
 
   it('batch-archives the selected sessions', async () => {
+    workspaceClient.archiveSessionsData.mockResolvedValueOnce({
+      archived: ['a'],
+      alreadyArchived: [],
+      notFound: ['b'],
+      errors: [],
+    });
     sessionsState.sessions = [
       session('a', { displayName: 'A' }),
       session('b', { displayName: 'B' }),
@@ -1754,9 +1801,12 @@ describe('SessionOverviewPanel', () => {
     ) as HTMLElement;
     act(() => click(confirm));
     await flushAsync();
-    // Primary-workspace sessions route through the workspace actions.
-    expect(workspaceActions.archiveSession).toHaveBeenCalledWith('a');
-    expect(workspaceActions.archiveSession).toHaveBeenCalledWith('b');
+    expect(workspaceClient.archiveSessionsData).toHaveBeenCalledOnce();
+    expect(workspaceClient.archiveSessionsData).toHaveBeenCalledWith([
+      'a',
+      'b',
+    ]);
+    expect(container!.textContent).not.toContain('Failed to archive session');
   });
 
   it('disables row actions while a batch mutation is running', async () => {
@@ -1766,9 +1816,14 @@ describe('SessionOverviewPanel', () => {
       workspaceCwd: '/w',
     };
     sessionsState.sessions = [session('s1', { displayName: 'One' })];
-    let resolveArchive!: (value: boolean) => void;
-    workspaceActions.archiveSession.mockReturnValueOnce(
-      new Promise<boolean>((resolve) => {
+    let resolveArchive!: (value: {
+      archived: string[];
+      alreadyArchived: string[];
+      notFound: string[];
+      errors: [];
+    }) => void;
+    workspaceClient.archiveSessionsData.mockReturnValueOnce(
+      new Promise((resolve) => {
         resolveArchive = resolve;
       }),
     );
@@ -1791,7 +1846,14 @@ describe('SessionOverviewPanel', () => {
       rowActionButton(rows()[0]!, 'Export conversation record').disabled,
     ).toBe(true);
 
-    await act(async () => resolveArchive(true));
+    await act(async () =>
+      resolveArchive({
+        archived: ['s1'],
+        alreadyArchived: [],
+        notFound: [],
+        errors: [],
+      }),
+    );
     await flushAsync();
     expect(rowActionButton(rows()[0]!, 'Rename').disabled).toBe(true);
     await act(async () => resolveReload(sessionsState.sessions));
@@ -1803,6 +1865,11 @@ describe('SessionOverviewPanel', () => {
   });
 
   it('batch-deletes the selected sessions after confirmation', async () => {
+    workspaceClient.deleteSessionsData.mockResolvedValueOnce({
+      removed: ['a'],
+      notFound: ['b'],
+      errors: [],
+    });
     sessionsState.sessions = [
       session('a', { displayName: 'A' }),
       session('b', { displayName: 'B' }),
@@ -1817,8 +1884,9 @@ describe('SessionOverviewPanel', () => {
     ) as HTMLElement;
     act(() => click(confirm));
     await flushAsync();
-    expect(workspaceActions.deleteSession).toHaveBeenCalledWith('a');
-    expect(workspaceActions.deleteSession).toHaveBeenCalledWith('b');
+    expect(workspaceClient.deleteSessionsData).toHaveBeenCalledOnce();
+    expect(workspaceClient.deleteSessionsData).toHaveBeenCalledWith(['a', 'b']);
+    expect(container!.textContent).not.toContain('Failed to delete session');
   });
 
   it('clears a deleted current session after a partial batch failure', async () => {
@@ -1863,7 +1931,9 @@ describe('SessionOverviewPanel', () => {
     act(() => click(confirm));
     await flushAsync();
 
-    expect(workspaceActions.deleteSession).toHaveBeenCalledWith('current');
+    expect(workspaceClient.deleteSessionsData).toHaveBeenCalledWith([
+      'current',
+    ]);
     expect(onCurrentSessionRemoved).toHaveBeenCalledOnce();
     expect(sessionsReload).toHaveBeenCalled();
     expect(container!.textContent).toContain(
@@ -2105,7 +2175,7 @@ describe('SessionOverviewPanel', () => {
 
   it('surfaces an archive failure in the notice area', async () => {
     sessionsState.sessions = [session('s1', { displayName: 'One' })];
-    workspaceActions.archiveSession.mockRejectedValueOnce(
+    workspaceClient.archiveSessionsData.mockRejectedValueOnce(
       new Error('daemon busy'),
     );
     render();
@@ -2117,7 +2187,12 @@ describe('SessionOverviewPanel', () => {
     await flushAsync();
     expect(container!.textContent).toContain('Failed to archive session');
 
-    workspaceActions.archiveSession.mockResolvedValue(true);
+    workspaceClient.archiveSessionsData.mockResolvedValueOnce({
+      archived: ['s1'],
+      alreadyArchived: [],
+      notFound: [],
+      errors: [],
+    });
     act(() => click(rowActionButton(rows()[0]!, 'Archive')));
     const retryConfirm = document.querySelector(
       '[data-slot="alert-dialog-action"]',
