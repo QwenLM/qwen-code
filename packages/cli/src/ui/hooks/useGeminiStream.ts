@@ -3582,6 +3582,7 @@ export const useGeminiStream = (
                       goalId: queuedGoal.permit.goalId,
                       revision: queuedGoal.permit.revision,
                       objective: queuedGoal.continuationContext,
+                      objectiveUpdated: queuedGoal.objectiveUpdated,
                       windDown: queuedGoal.windDown,
                       verifierFeedback: queuedGoal.verifierFeedback,
                     }),
@@ -3817,6 +3818,13 @@ export const useGeminiStream = (
               ? { getSteerInput: drainSteerAtBoundary }
               : {}),
           };
+          if (submitType === SendMessageType.Goal && goalBinding) {
+            try {
+              config.getGoalRuntime().markTurnDelivered(goalBinding.turnKey);
+            } catch {
+              // Goal runtime is optional during early initialization.
+            }
+          }
           const providerSignal = inheritedToolContinuationOwner
             ? processingSignal
             : abortSignal;
