@@ -361,6 +361,18 @@ function requirePopulatedRoot(root, label) {
 }
 
 function main() {
+  // Validate the rule-root paths before enumerating: a symlinked root or
+  // ancestor redirects everything the walk reads, so reject the path before
+  // trusting the scan — otherwise files outside the rule root are parsed
+  // before the link is diagnosed, and an empty external target reports "no
+  // source files" instead of the redirected root.
+  for (const root of [CORE_SRC, UI_MODEL]) {
+    for (const link of symlinkedPathComponents(root)) {
+      stdout.write(`error: symlink in rule root path: ${link}\n`);
+      exit(1);
+    }
+  }
+
   // Enumerate once per rule root so diagnostics (unlistable directories,
   // symlinks) are attributed to the same rule block as the scan.
   const coreEnumeration = requirePopulatedRoot(CORE_SRC, 'packages/core/src');
@@ -374,13 +386,6 @@ function main() {
   );
 
   let failed = false;
-  for (const root of [CORE_SRC, UI_MODEL]) {
-    for (const link of symlinkedPathComponents(root)) {
-      stdout.write(`error: symlink in rule root path: ${link}\n`);
-      failed = true;
-    }
-  }
-
   const results = [
     checkRule({
       label: 'packages/core/src — framework-neutral business core',

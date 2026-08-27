@@ -506,13 +506,28 @@ describe('end-to-end gate run (main wiring)', () => {
     rmSync(model, { recursive: true, force: true });
     mkdirSync(join(base, 'substitute-model'));
     writeFileSync(
-      join(base, 'substitute-model', 'model.ts'),
-      "import { z } from 'zod';\n",
+      join(base, 'substitute-model', 'witness.ts'),
+      "import { render } from 'ink';\n",
     );
     symlinkSync(join(base, 'substitute-model'), model, 'dir');
     const { code, out } = runGate(base);
     expect(code).toBe(1);
     expect(out).toContain('error: symlink in rule root path');
+    // The redirected target must be rejected before enumeration: its
+    // witness file is never parsed, so no violation from it can appear.
+    expect(out).not.toContain("import 'ink'");
+  }, 40000);
+
+  it('fails a symlinked root even when the target is empty', () => {
+    const base = makeFixtureCheckout();
+    const model = join(base, 'packages', 'cli', 'src', 'ui', 'model');
+    rmSync(model, { recursive: true, force: true });
+    mkdirSync(join(base, 'empty-substitute'));
+    symlinkSync(join(base, 'empty-substitute'), model, 'dir');
+    const { code, out } = runGate(base);
+    expect(code).toBe(1);
+    expect(out).toContain('error: symlink in rule root path');
+    expect(out).not.toContain('not found or has no source files');
   }, 40000);
 
   it('fails when a rule-root ancestor is a symlink', () => {
