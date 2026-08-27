@@ -202,6 +202,24 @@ describe('defaultModalities', () => {
     it('returns text-only for deepseek-reasoner', () => {
       expect(defaultModalities('deepseek-reasoner')).toEqual({});
     });
+
+    it('returns image for deepseek-v4-flash-vision-exp', () => {
+      expect(defaultModalities('deepseek-v4-flash-vision-exp')).toEqual({
+        image: true,
+      });
+    });
+
+    it('returns image for deepseek-vl2', () => {
+      expect(defaultModalities('deepseek-vl2')).toEqual({ image: true });
+    });
+
+    it('returns image for deepseek-vl-chat', () => {
+      expect(defaultModalities('deepseek-vl-chat')).toEqual({ image: true });
+    });
+
+    it('returns text-only for deepseek-v3 (v-prefixed text model)', () => {
+      expect(defaultModalities('deepseek-v3')).toEqual({});
+    });
   });
 
   describe('Zhipu GLM', () => {
@@ -217,6 +235,26 @@ describe('defaultModalities', () => {
 
     it('returns text-only for glm-4.7', () => {
       expect(defaultModalities('glm-4.7')).toEqual({});
+    });
+
+    it('returns image for glm-4.6v', () => {
+      expect(defaultModalities('glm-4.6v')).toEqual({ image: true });
+    });
+
+    it('returns image for glm-5v-turbo', () => {
+      expect(defaultModalities('glm-5v-turbo').image).toBe(true);
+    });
+
+    it('returns image + video + pdf for glm-5.3-flash', () => {
+      const m = defaultModalities('glm-5.3-flash');
+      expect(m.image).toBe(true);
+      expect(m.video).toBe(true);
+      expect(m.pdf).toBe(true);
+      expect(m.audio).toBeUndefined();
+    });
+
+    it('returns text-only for glm-5.3 (non-flash)', () => {
+      expect(defaultModalities('glm-5.3')).toEqual({});
     });
   });
 
