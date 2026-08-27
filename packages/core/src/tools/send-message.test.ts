@@ -361,6 +361,8 @@ describe('SendMessageTool — background-task mode', () => {
     expect(result.error?.type).toBe(ToolErrorType.SEND_MESSAGE_NOT_FOUND);
     expect(result.llmContent).toContain('No background task found');
     expect(result.llmContent).not.toContain('use `to:');
+    expect(result.returnDisplay).toContain('Task not found.');
+    expect(result.returnDisplay).not.toContain('use "to"');
   });
 
   it('returns error for non-existent task without an active team', async () => {
@@ -375,6 +377,8 @@ describe('SendMessageTool — background-task mode', () => {
     expect(result.error?.type).toBe(ToolErrorType.SEND_MESSAGE_NOT_FOUND);
     expect(result.llmContent).toContain('No background task found');
     expect(result.llmContent).not.toContain('use `to:');
+    expect(result.returnDisplay).toContain('Task not found.');
+    expect(result.returnDisplay).not.toContain('use "to"');
   });
 
   it('suggests the teammate destination for a matching task ID', async () => {
