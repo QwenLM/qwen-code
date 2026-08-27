@@ -412,7 +412,11 @@ export interface QueryOptions {
    * Separately, `tools.eager` in settings.json (requires restart) selects
    * which eager-by-default tool schemas remain eligible for the initial
    * model request. Unlisted non-exempt tools are demoted to deferred and stay
-   * loadable via `tool_search`. Tools already deferred by default remain on
+   * loadable via `tool_search` while ToolSearch is registered; when ToolSearch
+   * is not registered (`tools.toolSearch.enabled: false`, a `tool_search` deny
+   * rule, or the automatic DeepSeek opt-out) the demoted tools are out of
+   * reach for that session and a warning is logged. Tools already deferred by
+   * default remain on
    * demand even when listed; `tools.visible` surfaces one at startup. The
    * allowlist does not affect MCP tools, the `--json-schema`
    * `structured_output` contract, plan-mode lifecycle tools, `task_stop`,
@@ -461,7 +465,10 @@ export interface QueryOptions {
    *   eager-by-default built-in schemas out of the initial model request, set
    *   `tools.eager` in settings.json (requires restart); tools omitted
    *   there are demoted to deferred — still registered and loadable via
-   *   `tool_search` (#9827)
+   *   `tool_search` while ToolSearch is registered; when ToolSearch is not
+   *   registered (`tools.toolSearch.enabled: false`, a `tool_search` deny
+   *   rule, or the automatic DeepSeek opt-out) the demoted tools are out of
+   *   reach for that session and a warning is logged (#9827)
    *
    * **Pattern matching:**
    * - Tool name: `'write_file'`
