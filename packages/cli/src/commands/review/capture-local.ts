@@ -728,6 +728,27 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
     return inv !== null && inv.length === 0;
   };
   const cacheCandidatePath = tmpFile(target, 'cache-candidate.json');
+  // Read the cache BEFORE the candidate write: the dropped-out-while-on-disk
+  // set gates that write (below), and computing it after let a refused
+  // anchor's round write a candidate that silently OMITTED the dropped path
+  // — Step 8 promoted the omission, and two rounds later a scope-emptied
+  // stop certified bytes no round read (R23). Empty when no `--cache`
+  // scoped this round; the scoping branch below reuses these values.
+  const cachePathEarly =
+    args.cache !== undefined
+      ? resolveCachePath(args.cache, target, sourcePath)
+      : null;
+  const cacheEarly =
+    cachePathEarly === null ? null : readLocalCache(cachePathEarly);
+  const vanishedPresent: readonly string[] =
+    cacheEarly === null
+      ? []
+      : vanishedStillOnDisk(
+          capture.repoRoot,
+          headSha,
+          cacheEarly.files,
+          hashes,
+        );
   // The same uncertainty that withholds a decided stop withholds the
   // candidate: `hash-object` reads the worktree bytes THROUGH a set
   // assume-unchanged/skip-worktree bit while `git diff` cannot see them, so
@@ -736,10 +757,15 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
   // bit is cleared between rounds keeping the bytes, every comparison finds
   // no change, every visibility gate reads clean, and the unchanged-since
   // stop certifies them: a loop deciding "nothing to re-review" over bytes
-  // no round ever read.
+  // no round ever read. A cached path dropped out while still on disk is
+  // the same uncertainty from the other side: this capture cannot SEE the
+  // path, so the candidate would record its absence as reviewed state.
   const invisible = invisibleTracked();
   const candidateWritten =
-    treeHeldStill && invisible !== null && invisible.length === 0;
+    treeHeldStill &&
+    invisible !== null &&
+    invisible.length === 0 &&
+    vanishedPresent.length === 0;
   if (candidateWritten) {
     writeFileSync(cacheCandidatePath, JSON.stringify(candidate, null, 2));
   } else {
@@ -752,14 +778,21 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
     } catch {
       // nothing to remove
     }
-    if (treeHeldStill) {
-      writeStderrLine(invisibleCandidateRefusal(invisible));
-    } else {
+    if (!treeHeldStill) {
       writeStderrLine(
         'The working tree changed while the capture was being hashed — the ' +
           'cache candidate is withheld, so the next round cannot anchor on ' +
           'bytes this round never reviewed. The review itself proceeds on ' +
           'the first capture.',
+      );
+    } else if (invisible === null || invisible.length > 0) {
+      writeStderrLine(invisibleCandidateRefusal(invisible));
+    } else {
+      writeStderrLine(
+        `The cache candidate is withheld: ${vanishedPresent.length} cached ` +
+          `path(s) dropped out of this capture while still on disk, so the ` +
+          `candidate would record their absence as reviewed state. The ` +
+          `review itself proceeds in full.`,
       );
     }
   }
@@ -783,7 +816,6 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
   // Cached paths this capture dropped while still on disk and diverging
   // from HEAD — see `vanishedStillOnDisk`. Empty when no `--cache` scoped
   // this round. Read by the anchor refusal AND the stop gates below.
-  let vanishedPresent: readonly string[] = [];
   if (args.cache !== undefined) {
     // A DIRECTORY resolves to this command's own target, because the caller
     // cannot name the file.
@@ -801,12 +833,7 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
     //
     // Passing the directory ends the guessing: one deriver, and a caller
     // that knows only where caches live. A file path still works unchanged.
-    const cachePath = resolveCachePath(args.cache, target, sourcePath);
-    const cache = cachePath === null ? null : readLocalCache(cachePath);
-    vanishedPresent =
-      cache === null
-        ? []
-        : vanishedStillOnDisk(capture.repoRoot, headSha, cache.files, hashes);
+    const cache = cacheEarly;
     const refusal = anchorRefusalReason(
       cache,
       roundModelIdFrom(process.env),
@@ -919,7 +946,19 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
       // The stop condition is the SYMMETRIC set: a deleted-since-cache
       // path with no diff section left is still a change, and "no
       // changes" must not be claimed over it.
-      if (stateMoved.length === 0 && stateChanged.length === 0) {
+      if (
+        stateMoved.length === 0 &&
+        stateChanged.length === 0 &&
+        // …and NOT a file review, the exclusion BOTH sibling stops carry: a
+        // cached round-2 file review of a tracked-unmodified subject passed
+        // every anchor clause and stopped decided here, while the identical
+        // tree without a cache routes to the whole-file review SKILL.md
+        // owes a file target — the cache-vs-no-cache disagreement the
+        // scope-emptied exclusion was added to kill, one stop over (R23).
+        // The file shape gets its own sentence below instead of falling
+        // into the unhashable-paths diagnosis beside it.
+        args.file === undefined
+      ) {
         const invisible = invisibleTracked();
         if (invisible !== null && invisible.length === 0) {
           if (args.untracked !== false) {
@@ -943,6 +982,19 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
           // stop — the round decides nothing and says why.
           writeStderrLine(invisibleStopRefusal(invisible));
         }
+      } else if (
+        stateMoved.length === 0 &&
+        stateChanged.length === 0 &&
+        args.file !== undefined
+      ) {
+        // The excluded file shape, said honestly: nothing changed since the
+        // cached round, and a file target takes the whole-file review
+        // instead of a decided stop — cache and no-cache agree.
+        writeStderrLine(
+          `No content changes since the last local review round for this ` +
+            `file target — a file review never stops decided here; the ` +
+            `whole-file review reads the current state.`,
+        );
       } else if (stateMoved.length === 0) {
         // Nothing MOVED, but the scope is not empty: a path unhashable
         // on both sides stays in it, because "could not capture it

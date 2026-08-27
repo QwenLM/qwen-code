@@ -784,6 +784,20 @@ describe('capture-local — the decided stops are machine-readable', () => {
     const dirtyRun = capture({ cache: cachePath, model: 'model-a' });
     expect(dirtyRun['nothingToReview']).toBeUndefined();
     writeFileSync(join(repo, 'mod/m.ts'), 'export const m = 1;\n');
+    // …and a visibility bit INSIDE the submodule must break cleanliness the
+    // same way: `status --porcelain` honours it, so without the interior
+    // oracle the identity held still over an edit no round can see (the
+    // fix-induced half of R22-1).
+    writeFileSync(join(repo, 'mod/m.ts'), 'export const m = 3;\n');
+    execFileSync('git', ['update-index', '--assume-unchanged', 'm.ts'], {
+      cwd: join(repo, 'mod'),
+    });
+    const hiddenRun = capture({ cache: cachePath, model: 'model-a' });
+    expect(hiddenRun['nothingToReview']).toBeUndefined();
+    execFileSync('git', ['update-index', '--no-assume-unchanged', 'm.ts'], {
+      cwd: join(repo, 'mod'),
+    });
+    writeFileSync(join(repo, 'mod/m.ts'), 'export const m = 1;\n');
     // The user restores the pointer: `git diff HEAD` goes quiet for it.
     git('submodule', 'update', '--recursive');
     git('checkout', '--', '.');
@@ -802,6 +816,34 @@ describe('capture-local — the decided stops are machine-readable', () => {
     capture({ cache: cachePath, model: 'model-a' });
     expect(stderrLines.join('\n')).toContain('still on disk');
     rmSync(sub, { recursive: true, force: true });
+  });
+
+  it('withholds the candidate when a cached path dropped out while on disk', () => {
+    // R23: the candidate write gated on treeHeldStill and the visibility
+    // bits, never on the dropped-out set — so a refused-anchor round wrote
+    // a candidate silently OMITTING the dropped path, Step 8 promoted the
+    // omission, and two rounds later a scope-emptied stop certified bytes
+    // no round read. The same uncertainty that refuses the anchor withholds
+    // the candidate.
+    seedDirtyTree();
+    write('deploy.sh', 'echo v1\n');
+    const cachePath = promoteCandidate(
+      capture({ model: 'model-a' }),
+      'model-a',
+    );
+    // Visibility narrows without any flag moving: ignore the file, edit it.
+    write('.git/info/exclude', 'deploy.sh\n');
+    write('deploy.sh', 'echo v2\n');
+
+    stderrLines.length = 0;
+    const second = capture({ cache: cachePath, model: 'model-a' });
+    expect(second['incremental']).toBeUndefined();
+    expect(stderrLines.join('\n')).toContain('still on disk');
+    expect(second['cacheCandidatePath']).toBeDefined();
+    expect(existsSync(second['cacheCandidatePath'] as string)).toBe(false);
+    expect(stderrLines.join('\n')).toContain(
+      'candidate would record their absence as reviewed state',
+    );
   });
 
   it('keeps a DIRECTORY subject out of the anchor — it has no bytes', () => {
@@ -827,14 +869,24 @@ describe('capture-local — the decided stops are machine-readable', () => {
       join(repo, cachePath),
       JSON.stringify({ ...cand, lastModelId: 'model-a' }),
     );
+    stderrLines.length = 0;
     const second = capture({
       file: 'src',
       cache: join(repo, cachePath),
       model: 'model-a',
     });
-    expect(second['nothingToReview']).toEqual({
-      reason: 'unchanged-since-last-round',
-    });
+    // A FILE target never stops decided at unchanged-since (R23 gave it the
+    // exclusion both sibling stops carry — SKILL owes the shape a
+    // whole-file review, cache or no cache), so convergence shows as the
+    // ABSENCE of the wedge instead: no phantom directory in the delta, no
+    // could-not-be-hashed misdiagnosis, an admitted anchor.
+    expect(second['nothingToReview']).toBeUndefined();
+    expect(second['incremental']).toBeDefined();
+    const scope2 = (
+      second['incremental'] as { scope: { deltaFiles: string[] } }
+    ).scope;
+    expect(scope2.deltaFiles).not.toContain('src');
+    expect(stderrLines.join('\n')).not.toContain('could not be hashed');
   });
 
   it('publishes the stop at a name the PARENT can predict', () => {
