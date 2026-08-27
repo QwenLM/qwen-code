@@ -1041,6 +1041,8 @@ export interface ProjectRuntimeConfig {
   enableAutoSkill?: boolean;
   autoSkillConfirm?: boolean;
   agents?: AgentsCollabSettings;
+  worktree?: WorktreeSettings;
+  onPersistPermissionRule?: ConfigParameters['onPersistPermissionRule'];
   disableAllHooks?: boolean;
   stopHookBlockingCap?: number;
   userHooks?: Record<string, unknown>;
@@ -2554,7 +2556,7 @@ export class Config {
   >();
   private teamContext: TeamContext | null = null;
   private agentsSettings: AgentsCollabSettings;
-  private readonly worktreeSettings: WorktreeSettings;
+  private worktreeSettings: WorktreeSettings;
   private readonly skipLoopDetection: boolean;
   private readonly maxToolCallsPerTurn: number;
   private readonly maxToolCallsPerTurnExplicit: boolean;
@@ -2564,7 +2566,7 @@ export class Config {
   private readonly warnings: string[];
   private allowedHttpHookUrls: string[];
   private allowPrivateNetworkHooks: boolean;
-  private readonly onPersistPermissionRuleCallback?: (
+  private onPersistPermissionRuleCallback?: (
     scope: 'project' | 'user',
     ruleType: 'allow' | 'ask' | 'deny',
     rule: string,
@@ -5698,7 +5700,9 @@ export class Config {
     this.webSearchSettings = runtime.webSearch;
     this.webSearchNoticeEmitted = false;
     this.imageModel = runtime.imageModel || undefined;
-    this.allowedHttpHookUrls = [...runtime.allowedHttpHookUrls];
+    this.allowedHttpHookUrls = Array.isArray(runtime.allowedHttpHookUrls)
+      ? [...runtime.allowedHttpHookUrls]
+      : [];
     this.allowPrivateNetworkHooks = runtime.allowPrivateNetworkHooks;
     this.hookSystem?.updateHttpSecurity(
       this.getAllowedHttpHookUrls(),
@@ -5779,6 +5783,13 @@ export class Config {
     this.enableAutoSkill = runtime.enableAutoSkill ?? false;
     this.autoSkillConfirm = runtime.autoSkillConfirm ?? true;
     this.agentsSettings = runtime.agents ?? {};
+    this.backgroundTaskRegistry.setConcurrencyLimits({
+      maxConcurrentBackgroundAgents: this.agentsSettings.maxParallelAgents,
+      maxConcurrentBackgroundAgentsByModel:
+        this.agentsSettings.maxParallelAgentsByModel,
+    });
+    this.worktreeSettings = runtime.worktree ?? {};
+    this.onPersistPermissionRuleCallback = runtime.onPersistPermissionRule;
     this.disableAllHooks = runtime.disableAllHooks ?? false;
     this.stopHookBlockingCap = resolveStopHookBlockingCap(
       runtime.stopHookBlockingCap,

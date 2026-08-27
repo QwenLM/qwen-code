@@ -826,6 +826,26 @@ describe('BackgroundTaskRegistry', () => {
       expect(registry.get('bg-3')).toBeUndefined();
     });
 
+    it('applies updated limits and drains newly available slots', async () => {
+      registry = new BackgroundTaskRegistry({
+        maxConcurrentBackgroundAgents: 1,
+      });
+      registry.register(makeRegistration('bg-1'));
+      const reservationPromise = registry.waitForBackgroundSlot(
+        new AbortController().signal,
+      );
+      expect(registry.getQueuedCount()).toBe(1);
+
+      registry.setConcurrencyLimits({
+        maxConcurrentBackgroundAgents: 2,
+        maxConcurrentBackgroundAgentsByModel: { 'weak-model': 1 },
+      });
+
+      expect(registry.getMaxConcurrentBackgroundAgents()).toBe(2);
+      expect(await reservationPromise).toBeDefined();
+      expect(registry.getQueuedCount()).toBe(0);
+    });
+
     it('allows replacing the same running background agent at the cap', () => {
       registry = new BackgroundTaskRegistry({
         maxConcurrentBackgroundAgents: 1,

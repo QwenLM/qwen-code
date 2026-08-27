@@ -526,11 +526,11 @@ export class BackgroundTaskRegistry {
     symbol,
     BackgroundSlotClaim
   >();
-  private readonly maxConcurrentBackgroundAgents: number;
+  private maxConcurrentBackgroundAgents: number;
   // Per-model concurrency caps keyed by concrete model ID. Empty when no
   // `agents.maxParallelAgentsByModel` is configured, in which case only the
   // global cap is enforced.
-  private readonly maxConcurrentBackgroundAgentsByModel: Map<string, number>;
+  private maxConcurrentBackgroundAgentsByModel: Map<string, number>;
   private notificationCallback?: BackgroundNotificationCallback;
   private registerCallback?: BackgroundRegisterCallback;
   private statusChangeCallback?: BackgroundStatusChangeCallback;
@@ -547,6 +547,19 @@ export class BackgroundTaskRegistry {
     this.maxConcurrentBackgroundAgentsByModel = normalizePerModelConcurrency(
       options.maxConcurrentBackgroundAgentsByModel,
     );
+  }
+
+  setConcurrencyLimits(options: BackgroundTaskRegistryOptions = {}): void {
+    const configured =
+      options.maxConcurrentBackgroundAgents ?? MAX_CONCURRENT_BACKGROUND_AGENTS;
+    this.maxConcurrentBackgroundAgents =
+      Number.isInteger(configured) && configured >= 1
+        ? configured
+        : MAX_CONCURRENT_BACKGROUND_AGENTS;
+    this.maxConcurrentBackgroundAgentsByModel = normalizePerModelConcurrency(
+      options.maxConcurrentBackgroundAgentsByModel,
+    );
+    this.drainWaitQueue();
   }
 
   /**

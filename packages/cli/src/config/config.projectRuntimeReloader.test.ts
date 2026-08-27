@@ -202,6 +202,7 @@ describe('createProjectRuntimeReloader', () => {
     writeProject(projectA, {});
     writeProject(projectB, {
       agents: { allowedGrades: ['fast'], team: { maxTeammates: 7 } },
+      worktree: { symlinkDirectories: ['node_modules'] },
     });
 
     const prepared = await makeReloader(startupSettings()).prepare(
@@ -213,6 +214,26 @@ describe('createProjectRuntimeReloader', () => {
 
     expect(prepared.config.agents?.allowedGrades).toEqual(['fast']);
     expect('team' in (prepared.config.agents ?? {})).toBe(false);
+    expect(prepared.config.worktree?.symlinkDirectories).toEqual([
+      'node_modules',
+    ]);
+  });
+
+  it('preserves user agent settings when reloading in safe mode', async () => {
+    writeUserSettings({
+      agents: { allowedGrades: ['fast'], maxParallelAgents: 2 },
+    });
+    writeProject(projectA, {});
+    writeProject(projectB, {});
+
+    const prepared = await makeReloader(startupSettings(), {
+      safeMode: true,
+    }).prepare(projectB, true, ApprovalMode.DEFAULT, projectA);
+
+    expect(prepared.config.agents).toMatchObject({
+      allowedGrades: ['fast'],
+      maxParallelAgents: 2,
+    });
   });
 
   it('swaps the loaded settings on commit, restores them on rollback, and resumes the watcher', async () => {
@@ -257,6 +278,34 @@ describe('createProjectRuntimeReloader', () => {
 
     const real = startupSettings();
     expect(resolvePersistenceSettings(real, projectA)).toBe(real);
+  });
+
+  it('persists bare-mode permission rules in the relocation target', async () => {
+    writeProject(projectA, {});
+    writeProject(projectB, {});
+    const prepared = await makeReloader(createMinimalSettings(), {
+      bareMode: true,
+    }).prepare(projectB, true, ApprovalMode.DEFAULT, projectA);
+
+    await prepared.commit();
+    await prepared.config.onPersistPermissionRule?.(
+      'project',
+      'allow',
+      'run_shell_command(ls *)',
+    );
+
+    const settingsA = loadSettings(projectA, {
+      consumeCorruptionEnvVars: false,
+      workspaceTrusted: true,
+    });
+    const settingsB = loadSettings(projectB, {
+      consumeCorruptionEnvVars: false,
+      workspaceTrusted: true,
+    });
+    expect(settingsA.workspace.settings.permissions?.allow).toBeUndefined();
+    expect(settingsB.workspace.settings.permissions?.allow).toEqual([
+      'run_shell_command(ls *)',
+    ]);
   });
 
   it('resumes the watcher when the settings swap itself throws', async () => {

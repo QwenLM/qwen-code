@@ -7794,6 +7794,72 @@ describe('Server Config (config.ts)', () => {
     expect(config.getContextFileNames()).toEqual(['PROJECT-B.md']);
   });
 
+  it('relocateWorkingDirectory continues applying runtime settings after a malformed hook URL list', async () => {
+    const prepare = vi.fn().mockResolvedValue({
+      config: preparedRuntime({
+        allowedHttpHookUrls: 42,
+        permissions: { deny: ['target-project-deny'] },
+        contextFileName: 'PROJECT-B.md',
+      }),
+      commit: vi.fn().mockResolvedValue(undefined),
+      rollback: vi.fn().mockResolvedValue(undefined),
+      complete: vi.fn().mockResolvedValue(undefined),
+    });
+    const config = new Config({
+      ...baseParams,
+      permissions: { deny: ['source-project-deny'] },
+      contextFileName: 'PROJECT-A.md',
+      projectRuntimeReloader: { prepare },
+    });
+    await config.initialize({ skipGeminiInitialization: true });
+    await config.waitForMcpReady();
+
+    const result = await relocateWithRuntime(
+      config,
+      path.resolve('/path/to/other'),
+    );
+
+    expect(result).toEqual({});
+    expect(config.getAllowedHttpHookUrls()).toEqual([]);
+    expect(config.getPermissionsDeny()).toEqual(['target-project-deny']);
+    expect(config.getContextFileNames()).toEqual(['PROJECT-B.md']);
+  });
+
+  it('relocateWorkingDirectory updates agent, worktree, and persistence runtime state', async () => {
+    const initialPersistence = vi.fn();
+    const targetPersistence = vi.fn();
+    const prepare = vi.fn().mockResolvedValue({
+      config: preparedRuntime({
+        agents: { maxParallelAgents: 3 },
+        worktree: { symlinkDirectories: ['target-node_modules'] },
+        onPersistPermissionRule: targetPersistence,
+      }),
+      commit: vi.fn().mockResolvedValue(undefined),
+      rollback: vi.fn().mockResolvedValue(undefined),
+      complete: vi.fn().mockResolvedValue(undefined),
+    });
+    const config = new Config({
+      ...baseParams,
+      agents: { maxParallelAgents: 1 },
+      worktree: { symlinkDirectories: ['old-node_modules'] },
+      onPersistPermissionRule: initialPersistence,
+      projectRuntimeReloader: { prepare },
+    });
+    await config.initialize({ skipGeminiInitialization: true });
+    await config.waitForMcpReady();
+
+    await relocateWithRuntime(config, path.resolve('/path/to/other'));
+
+    expect(config.getAgentsSettings().maxParallelAgents).toBe(3);
+    expect(
+      config.getBackgroundTaskRegistry().getMaxConcurrentBackgroundAgents(),
+    ).toBe(3);
+    expect(config.getWorktreeSymlinkDirectories()).toEqual([
+      'target-node_modules',
+    ]);
+    expect(config.getOnPersistPermissionRule()).toBe(targetPersistence);
+  });
+
   it('relocateWorkingDirectory falls back to the default context file names when the target sets none', async () => {
     const prepare = vi.fn().mockResolvedValue({
       config: preparedRuntime(),

@@ -1580,6 +1580,24 @@ export function resolvePersistenceSettings(
   return loadedSettings?.user.path ? loadedSettings : loadSettings(cwd);
 }
 
+function createPermissionRulePersistenceCallback(
+  loadedSettings: LoadedSettings | undefined,
+  cwd: string,
+): NonNullable<ConfigParameters['onPersistPermissionRule']> {
+  return async (scope, ruleType, rule) => {
+    const currentSettings = resolvePersistenceSettings(loadedSettings, cwd);
+    const settingScope =
+      scope === 'project' ? SettingScope.Workspace : SettingScope.User;
+    const key = `permissions.${ruleType}`;
+    const currentRules: string[] =
+      currentSettings.forScope(settingScope).settings.permissions?.[ruleType] ??
+      [];
+    if (!currentRules.includes(rule)) {
+      currentSettings.setValue(settingScope, key, [...currentRules, rule]);
+    }
+  };
+}
+
 export function createProjectRuntimeReloader(
   loadedSettings: LoadedSettings,
   settingsWatcher:
@@ -1864,10 +1882,20 @@ export function createProjectRuntimeReloader(
             bareMode || safeMode
               ? false
               : (runtimeSettings.memory?.autoSkillConfirm ?? true),
-          agents:
-            bareMode || safeMode
+          agents: bareMode
+            ? undefined
+            : projectAgentsSettings(nextSettings.merged.agents),
+          worktree:
+            bareMode || !runtimeSettings.worktree
               ? undefined
-              : projectAgentsSettings(nextSettings.merged.agents),
+              : {
+                  symlinkDirectories:
+                    runtimeSettings.worktree.symlinkDirectories,
+                },
+          onPersistPermissionRule: createPermissionRulePersistenceCallback(
+            nextSettings,
+            targetDir,
+          ),
           disableAllHooks:
             bareMode || safeMode
               ? true
@@ -2681,19 +2709,10 @@ export async function loadCliConfig(
     },
     toolInvocationGuard: hostPolicy?.toolInvocationGuard,
     // Permission rule persistence callback (writes to settings files).
-    onPersistPermissionRule: async (scope, ruleType, rule) => {
-      const currentSettings = resolvePersistenceSettings(loadedSettings, cwd);
-      const settingScope =
-        scope === 'project' ? SettingScope.Workspace : SettingScope.User;
-      const key = `permissions.${ruleType}`;
-      const currentRules: string[] =
-        currentSettings.forScope(settingScope).settings.permissions?.[
-          ruleType
-        ] ?? [];
-      if (!currentRules.includes(rule)) {
-        currentSettings.setValue(settingScope, key, [...currentRules, rule]);
-      }
-    },
+    onPersistPermissionRule: createPermissionRulePersistenceCallback(
+      loadedSettings,
+      cwd,
+    ),
     toolDiscoveryCommand:
       bareMode || safeMode ? undefined : settings.tools?.discoveryCommand,
     toolCallCommand:
