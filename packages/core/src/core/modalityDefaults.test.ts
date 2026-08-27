@@ -166,6 +166,21 @@ describe('defaultModalities', () => {
       expect(m.image).toBe(true);
     });
 
+    // [Regression] issue-10194 — qwen3.8-flash/plus were classified as text-only
+    it('returns image + video for qwen3.8-flash', () => {
+      expect(defaultModalities('qwen3.8-flash')).toEqual({
+        image: true,
+        video: true,
+      });
+    });
+
+    it('returns image + video for qwen3.8-plus', () => {
+      expect(defaultModalities('qwen3.8-plus')).toEqual({
+        image: true,
+        video: true,
+      });
+    });
+
     it('returns image + video for qwen3.6-35b variants', () => {
       const m = defaultModalities('qwen3.6-35b-a3b-nvfp4');
       expect(m.image).toBe(true);
