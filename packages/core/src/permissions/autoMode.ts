@@ -22,7 +22,7 @@ import path from 'node:path';
 import type { Content } from '@google/genai';
 import { ApprovalMode, type Config } from '../config/config.js';
 import {
-  getAllGeminiMdFilenames,
+  getAllMemoryFilenames,
   LOCAL_CONTEXT_FILENAME,
 } from '../utils/memory-constants.js';
 import type { PermissionDeniedReason } from '../hooks/types.js';
@@ -261,7 +261,7 @@ function getAutoModeWritePathCandidates(filePath: string): string[] {
 
 export function isAutoModeProtectedWritePath(
   filePath: string,
-  contextFileNames: readonly string[] = getAllGeminiMdFilenames(),
+  contextFileNames: readonly string[] = getAllMemoryFilenames(),
 ): boolean {
   return getAutoModeWritePathCandidates(filePath).some((candidate) => {
     const normalized = normalizePathForAutoModePattern(candidate);
@@ -296,7 +296,7 @@ export function shouldClassifyAllShellForAutoMode(
 export function shouldForceAutoModeReviewForAllow(
   ctx: PermissionCheckContext,
   cwdFallback = process.cwd(),
-  contextFileNames: readonly string[] = getAllGeminiMdFilenames(),
+  contextFileNames: readonly string[] = getAllMemoryFilenames(),
 ): boolean {
   if (
     PROTECTED_WRITE_TOOL_NAMES.has(ctx.toolName) &&
@@ -497,7 +497,7 @@ export function passesAcceptEditsFastPath(
   if (
     isAutoModeProtectedWritePath(
       ctx.filePath,
-      config.getContextFileNames?.() ?? getAllGeminiMdFilenames(),
+      config.getContextFileNames?.() ?? getAllMemoryFilenames(),
     )
   ) {
     return false;

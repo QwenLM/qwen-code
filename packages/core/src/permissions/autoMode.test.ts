@@ -29,7 +29,7 @@ import { ApprovalMode } from '../config/config.js';
 import { ToolNames } from '../tools/tool-names.js';
 import type { Config } from '../config/config.js';
 import type { PermissionCheckContext } from './types.js';
-import { setGeminiMdFilename } from '../utils/memory-constants.js';
+import { setMemoryFilename } from '../utils/memory-constants.js';
 
 // ─── SAFE_TOOL_ALLOWLIST contents (frozen) ───────────────────────────────
 
@@ -216,7 +216,7 @@ describe('isAutoModeProtectedWritePath', () => {
   });
 
   it('matches configured context filenames', () => {
-    setGeminiMdFilename(['CUSTOM_AGENTS.md', 'docs/TEAM_CONTEXT.md']);
+    setMemoryFilename(['CUSTOM_AGENTS.md', 'docs/TEAM_CONTEXT.md']);
     try {
       const protectedPaths = [
         '/repo/CUSTOM_AGENTS.md',
@@ -228,7 +228,7 @@ describe('isAutoModeProtectedWritePath', () => {
         expect(isAutoModeProtectedWritePath(filePath)).toBe(true);
       }
     } finally {
-      setGeminiMdFilename(['QWEN.md', 'AGENTS.md']);
+      setMemoryFilename(['QWEN.md', 'AGENTS.md']);
     }
   });
 
