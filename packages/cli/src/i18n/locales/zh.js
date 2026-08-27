@@ -180,6 +180,7 @@ export default {
   'toolDisplayName.TodoList': '任务清单',
   'toolDisplayName.Goal': '目标',
   'toolDisplayName.UpdateGoal': '更新目标',
+  'toolDisplayName.ProposeGoal': '提议目标',
   'toolDisplayName.SaveMemory': '保存记忆',
   'toolDisplayName.Agent': 'Agent',
   'toolDisplayName.Artifact': '制品',
