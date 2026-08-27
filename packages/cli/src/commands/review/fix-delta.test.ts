@@ -365,6 +365,33 @@ describe('fix-delta', () => {
     }
   });
 
+  it('discloses a cleaned submodule beside a non-empty diff too', () => {
+    // A fix that edits a regular file AND restores a submodule dirty at
+    // snapshot time: the invisible content change must be disclosed on the
+    // non-empty path as well — the auditor trusts the hunks as the complete
+    // edit set there.
+    const subSrc = plantCommittedSubmodule();
+    try {
+      writeFileSync(join(repo, 'sub', 'f.txt'), 'dirt at snapshot time\n');
+      runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
+      writeFileSync(join(repo, 'a.ts'), 'export const x = 42;\n');
+      // The fix restores the committed content inside the submodule.
+      writeFileSync(join(repo, 'sub', 'f.txt'), 'before\n');
+      runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() });
+
+      expect(readFileSync(hunksFile(), 'utf8')).toContain(
+        '+export const x = 42;',
+      );
+      const lines = stderr();
+      expect(
+        lines.some((l) => l.includes('gone now') && /\bsub\b/.test(l)),
+      ).toBe(true);
+      expect(lines.some((l) => l.includes('nothing was applied'))).toBe(false);
+    } finally {
+      rmSync(subSrc, { recursive: true, force: true });
+    }
+  });
+
   it('never reports a submodule whose only change is new commits', () => {
     // A new-commits flag means the gitlink moved — the edit IS visible in
     // the tree comparison, so reporting "invisible edits" would steer the
@@ -414,6 +441,62 @@ describe('fix-delta', () => {
     writeFileSync(join(emb, 'f.txt'), 'the fix — uncommitted inside\n');
     runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() });
 
+    const lines = stderr();
+    expect(
+      lines.some((l) => /\bemb\b/.test(l) && l.includes('cannot see')),
+    ).toBe(true);
+    expect(lines.some((l) => l.includes('nothing was applied'))).toBe(false);
+  });
+
+  it('names a nested repo whose name needs C-quoting under default core.quotePath', () => {
+    // Default `core.quotePath` renders the `? ` entry of a non-ASCII name
+    // C-quoted — no '/', no resolvable path — so parsing the rendered line
+    // skipped the repository silently and printed the false all-clear beside
+    // an edit that landed inside. `-z` reads the raw name.
+    const nd = join(repo, '文dir');
+    mkdirSync(nd);
+    gitAt(nd, 'init', '-q', '-b', 'main');
+    gitAt(nd, 'config', 'user.email', 't@t.t');
+    gitAt(nd, 'config', 'user.name', 't');
+    writeFileSync(join(nd, 'f.txt'), 'inside\n');
+    gitAt(nd, 'add', '-A');
+    gitAt(nd, 'commit', '-qm', 'init');
+    runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
+    writeFileSync(join(nd, 'f.txt'), 'the fix — uncommitted inside\n');
+    runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() });
+
+    expect(readFileSync(hunksFile(), 'utf8')).toBe('');
+    const lines = stderr();
+    expect(
+      lines.some((l) => l.includes('文dir') && l.includes('cannot see')),
+    ).toBe(true);
+    expect(lines.some((l) => l.includes('nothing was applied'))).toBe(false);
+  });
+
+  it('does not stamp a clean untracked nested repo as pre-existing dirt', () => {
+    // A `?` entry carries no dirt flag: a pre-existing nested repo with
+    // fully committed interior is CLEAN at snapshot time. Stamping it dirty
+    // prints a false pre-existing note on a no-op run, and filters a fix's
+    // real interior edit out of the baseline into a false all-clear.
+    const emb = join(repo, 'emb');
+    mkdirSync(emb);
+    gitAt(emb, 'init', '-q', '-b', 'main');
+    gitAt(emb, 'config', 'user.email', 't@t.t');
+    gitAt(emb, 'config', 'user.name', 't');
+    writeFileSync(join(emb, 'f.txt'), 'committed inside\n');
+    gitAt(emb, 'add', '-A');
+    gitAt(emb, 'commit', '-qm', 'init');
+    runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
+
+    // (a) No edits: no false pre-existing note beside the all-clear.
+    runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() });
+    expect(stderr().some((l) => l.includes('nothing was applied'))).toBe(true);
+    expect(stderr().some((l) => l.includes('pre-existing'))).toBe(false);
+
+    // (b) A fix editing inside the nested repo, uncommitted there.
+    (writeStderrLine as unknown as Mock).mockClear();
+    writeFileSync(join(emb, 'f.txt'), 'the fix — uncommitted inside\n');
+    runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() });
     const lines = stderr();
     expect(
       lines.some((l) => /\bemb\b/.test(l) && l.includes('cannot see')),
@@ -615,6 +698,35 @@ describe('fix-delta', () => {
     expect(hunks).toContain('a/.qwen/settings.json');
   });
 
+  it('runs from a subdirectory cwd without losing the rest of the tree', () => {
+    // A review runs from a subdirectory too: root resolution is
+    // cwd-dependent, and every inner call carries `-C root` — dropping it
+    // from any of them scopes the call to the subdirectory alone and the
+    // rest of the tree falls out of the snapshot.
+    const subdir = join(repo, 'subdir');
+    mkdirSync(subdir);
+    process.chdir(subdir);
+    runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
+    const snap = JSON.parse(
+      readFileSync(snapshotFile(), 'utf8'),
+    ) as FixSnapshot;
+    expect(snap.root).toBe(repo);
+    writeFileSync(join(repo, 'a.ts'), 'export const x = 9;\n');
+    writeFileSync(join(subdir, 'b.ts'), 'export const b = 1;\n');
+    // A review run from the subdirectory writes its side files there.
+    mkdirSync(join(subdir, '.qwen', 'tmp'), { recursive: true });
+    writeFileSync(join(subdir, '.qwen', 'tmp', 'side.json'), '{}\n');
+    runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() });
+
+    const hunks = readFileSync(hunksFile(), 'utf8');
+    expect(hunks).toContain('+export const x = 9;');
+    expect(hunks).toContain('diff --git a/subdir/b.ts b/subdir/b.ts');
+    expect(hunks).not.toContain('side.json');
+    expect(stderr().at(-1)).toBe(
+      'fix-delta: 2 file(s) changed since the snapshot — a.ts, subdir/b.ts',
+    );
+  });
+
   it('snapshots a sparse-checkout repository whose cone excludes the side files', () => {
     // Sparse checkout is git's standard large-repo configuration; the side
     // files then sit OUTSIDE the cone, and without `--sparse` the snapshot
@@ -694,6 +806,111 @@ describe('fix-delta', () => {
     expect(stderr().at(-1)).toBe(
       'fix-delta: 1 file(s) changed since the snapshot — a.ts',
     );
+  });
+
+  it('does not capture a git directory that sits inside the worktree', () => {
+    // `git init --separate-git-dir` (or a `.git` file redirecting into the
+    // tree) makes the git dir ordinary capturable content: between the two
+    // states `write-tree` creates new loose objects in it, so without an
+    // exclusion the hunks drown in `.realgit/**` churn while the command
+    // still exits 0 — no signal for the audit to distrust the edit set.
+    const wt = realpathSync(
+      mkdtempSync(join(tmpdir(), 'qwen-fix-delta-sepgd-')),
+    );
+    const cwdHere = process.cwd();
+    try {
+      gitAt(
+        wt,
+        'init',
+        '-q',
+        '-b',
+        'main',
+        '--separate-git-dir',
+        join(wt, '.realgit'),
+      );
+      gitAt(wt, 'config', 'user.email', 't@t.t');
+      gitAt(wt, 'config', 'user.name', 't');
+      writeFileSync(join(wt, 'a.ts'), 'export const x = 1;\n');
+      gitAt(wt, 'add', '-A');
+      gitAt(wt, 'commit', '-qm', 'head');
+      process.chdir(wt);
+      const snap = join(out, 'sepgd-snapshot.json');
+      const hunks = join(out, 'sepgd-hunks.diff');
+      runFixDelta({ snapshot: true, since: undefined, out: snap });
+      writeFileSync(join(wt, 'a.ts'), 'export const x = 2;\n');
+      runFixDelta({ snapshot: false, since: snap, out: hunks });
+
+      const h = readFileSync(hunks, 'utf8');
+      expect(h).toContain('+export const x = 2;');
+      expect(h).not.toContain('qwen-fix-delta-');
+      expect(h).not.toContain('.realgit/');
+      expect(stderr().at(-1)).toBe(
+        'fix-delta: 1 file(s) changed since the snapshot — a.ts',
+      );
+    } finally {
+      process.chdir(cwdHere);
+      rmSync(wt, { recursive: true, force: true });
+    }
+  });
+
+  it('snapshots the real worktree under a hostile host environment', () => {
+    // Ambient GIT_DIR/GIT_WORK_TREE/GIT_INDEX_FILE in the user's environment
+    // must not divert the throwaway-index snapshot to another tree or write
+    // through the index file they point at. The protection is
+    // `sanitizedGitEnv`'s stripping plus `gitWithEnv` re-adding the scratch
+    // index AFTER it — this pins the invariant end-to-end.
+    const other = realpathSync(
+      mkdtempSync(join(tmpdir(), 'qwen-fix-delta-other-')),
+    );
+    try {
+      gitAt(other, 'init', '-q', '-b', 'main');
+      gitAt(other, 'config', 'user.email', 't@t.t');
+      gitAt(other, 'config', 'user.name', 't');
+      writeFileSync(join(other, 'decoy.ts'), 'decoy\n');
+      gitAt(other, 'add', '-A');
+      gitAt(other, 'commit', '-qm', 'decoy');
+      const plantedIndex = join(other, 'planted-index');
+      writeFileSync(plantedIndex, 'the ambient index bytes\n');
+      const ambient = {
+        GIT_DIR: join(other, '.git'),
+        GIT_WORK_TREE: other,
+        GIT_INDEX_FILE: plantedIndex,
+      };
+      const saved = Object.fromEntries(
+        Object.keys(ambient).map((k) => [k, process.env[k]]),
+      );
+      Object.assign(process.env, ambient);
+      try {
+        const indexBefore = readFileSync(join(repo, '.git', 'index'));
+        runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
+        const snap = JSON.parse(
+          readFileSync(snapshotFile(), 'utf8'),
+        ) as FixSnapshot;
+        expect(snap.root).toBe(repo);
+        writeFileSync(join(repo, 'a.ts'), 'export const x = 8;\n');
+        runFixDelta({
+          snapshot: false,
+          since: snapshotFile(),
+          out: hunksFile(),
+        });
+        expect(readFileSync(hunksFile(), 'utf8')).toContain(
+          '+export const x = 8;',
+        );
+        expect(readFileSync(plantedIndex, 'utf8')).toBe(
+          'the ambient index bytes\n',
+        );
+        expect(
+          readFileSync(join(repo, '.git', 'index')).equals(indexBefore),
+        ).toBe(true);
+      } finally {
+        for (const [k, v] of Object.entries(saved)) {
+          if (v === undefined) delete process.env[k];
+          else process.env[k] = v;
+        }
+      }
+    } finally {
+      rmSync(other, { recursive: true, force: true });
+    }
   });
 
   it('is wired through yargs: --snapshot / --since are the modes, --out is required', async () => {

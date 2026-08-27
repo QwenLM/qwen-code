@@ -39,7 +39,7 @@ import {
   rmSync,
   writeFileSync,
 } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import { git, gitOpt, gitRaw, gitWithEnv } from './lib/git.js';
 
@@ -71,6 +71,29 @@ export const FIX_DELTA_EXCLUDES = [
 ] as const;
 
 /**
+ * The git directory's path relative to `root` when it sits INSIDE the
+ * worktree, otherwise null. A checkout normally cannot see its git dir — git
+ * never records the conventional `.git` — but `git init --separate-git-dir`
+ * and `.git` files that redirect into the tree make it ordinary capturable
+ * content there: without an exclusion the snapshot trees would carry the
+ * whole git dir, and the loose objects `write-tree` creates between the two
+ * states would flood the hunks with object churn.
+ */
+function inTreeGitDir(root: string): string | null {
+  const gitDir = git('-C', root, 'rev-parse', '--absolute-git-dir');
+  const rel = relative(root, gitDir);
+  if (
+    rel === '' ||
+    rel === '..' ||
+    rel.startsWith(`..${sep}`) ||
+    isAbsolute(rel)
+  ) {
+    return null;
+  }
+  return rel;
+}
+
+/**
  * Record the working tree under `root` as a tree object and return its sha.
  * Runs through a throwaway index so the user's index is untouched.
  */
@@ -79,8 +102,9 @@ export function snapshotWorkingTree(root: string): string {
   // os.tmpdir() honours TMPDIR, and a hermetic sandbox pointing it inside the
   // worktree made `add -A` record the scratch directory itself into the
   // trees — the command's own temp files reported as fix edits. The git dir
-  // is never part of any worktree tree; a linked worktree lands in
-  // `.git/worktrees/<name>/`, still outside.
+  // is the usual such place, and the rare repository whose git dir sits
+  // inside its worktree is covered by the git-dir exclusion in
+  // `excludePathspec`, which keeps the scratch dir out of the trees with it.
   const gitDir = git('-C', root, 'rev-parse', '--absolute-git-dir');
   const scratch = mkdtempSync(join(gitDir, 'qwen-fix-delta-'));
   const env = { GIT_INDEX_FILE: join(scratch, 'index') };
@@ -101,16 +125,36 @@ export function snapshotWorkingTree(root: string): string {
     // ANY untracked file — e.g. this command's own side file — sits outside
     // the cone. Out-of-cone tracked entries drop identically from both trees,
     // so the delta is unaffected, and the flag is a no-op elsewhere.
-    gitWithEnv(env, ['-C', root, 'add', '-A', '--sparse', '--', '.']);
+    gitWithEnv(env, [
+      '-C',
+      root,
+      'add',
+      '-A',
+      '--sparse',
+      '--',
+      ...excludePathspec(root),
+    ]);
     return gitWithEnv(env, ['-C', root, 'write-tree']);
   } finally {
     rmSync(scratch, { recursive: true, force: true });
   }
 }
 
-/** The pathspec half of every tree comparison: review side files excluded. */
-function excludePathspec(): string[] {
-  return ['.', ...FIX_DELTA_EXCLUDES.map((p) => `:(glob,exclude)**/${p}/**`)];
+/**
+ * The pathspec half of every capture and tree comparison: review side files
+ * excluded, and — in the rare repository whose git dir sits inside its
+ * worktree — the git dir with them.
+ */
+function excludePathspec(root: string): string[] {
+  const specs = [
+    '.',
+    ...FIX_DELTA_EXCLUDES.map((p) => `:(glob,exclude)**/${p}/**`),
+  ];
+  const gitDir = inTreeGitDir(root);
+  if (gitDir !== null) {
+    specs.push(`:(exclude)${gitDir}`);
+  }
+  return specs;
 }
 
 /** The patch between two trees of this repository, review side files excluded. */
@@ -131,7 +175,7 @@ function patchBetweenTrees(
     fromTree,
     toTree,
     '--',
-    ...excludePathspec(),
+    ...excludePathspec(root),
   ).toString('utf8');
 }
 
@@ -159,9 +203,28 @@ function filesBetweenTrees(
     fromTree,
     toTree,
     '--',
-    ...excludePathspec(),
+    ...excludePathspec(root),
   ).toString('utf8');
   return raw.split('\0').filter((name) => name !== '');
+}
+
+/**
+ * Whether a nested repository's own status shows uncommitted content. A probe
+ * that cannot run answers dirty: the failure direction over-warns, it never
+ * silences a blind spot.
+ */
+function nestedRepoIsDirty(absPath: string): boolean {
+  const inner = gitOpt(
+    '-C',
+    absPath,
+    '-c',
+    'status.showUntrackedFiles=all',
+    '--no-optional-locks',
+    'status',
+    '--porcelain',
+    '--ignore-submodules=none',
+  );
+  return inner === null || inner !== '';
 }
 
 /**
@@ -180,13 +243,25 @@ function filesBetweenTrees(
  *   interim `submodule add` state prints a 000000 HEAD slot, a staged
  *   deletion prints `160000 000000 000000`.
  * - `2` entries — a staged gitlink rename: the score is space-separated, the
- *   new path precedes the TAB-separated original one.
+ *   new path ends the record, and the original path follows as its own NUL
+ *   element — consumed, never reported.
  * - `u` entries — an unmerged gitlink: four mode fields, three hashes, the
  *   path last.
  * - `?` entries collapsed to a directory — under `showUntrackedFiles=all`
  *   only a nested git repository survives unexpanded, and `add -A` records
  *   its gitlink all the same. The same line names a staged-deleted gitlink,
- *   whose `1 D. S...` twin carries no dirt flags for git to compute.
+ *   whose `1 D. S...` twin carries no dirt flags for git to compute. A `?`
+ *   entry carries NO dirt flag of its own, so the branch probes inside and
+ *   counts only a repository with uncommitted content — stamping a clean one
+ *   dirty would print a false pre-existing note on a no-op run, and would
+ *   filter a fix's real interior edit out of the baseline into a false
+ *   all-clear.
+ *
+ * The status runs with `-z`: entries are NUL-terminated and paths RAW. The
+ * rendered form C-quotes any name that needs it (a non-ASCII name under
+ * default `core.quotePath`, a tab, a quote or a backslash), and a quoted
+ * `? ` path neither ends in '/' nor resolves — the repository would be
+ * skipped silently while invisible edits land inside it.
  */
 function dirtySubmodulePaths(root: string): string[] {
   // `--no-optional-locks`: plain `status` opportunistically rewrites the
@@ -196,7 +271,7 @@ function dirtySubmodulePaths(root: string): string[] {
   // config; with `showUntrackedFiles=no` there, a submodule whose only
   // invisible edit is untracked content emits no entry at all, and only a
   // `-c` override (not `--untracked-files`) propagates to that inner run.
-  const status = git(
+  const status = gitRaw(
     '-C',
     root,
     '-c',
@@ -205,29 +280,38 @@ function dirtySubmodulePaths(root: string): string[] {
     'status',
     '--porcelain=v2',
     '--ignore-submodules=none',
-  );
+    '-z',
+  ).toString('utf8');
   const dirty = new Set<string>();
-  for (const line of status.split('\n')) {
-    if (line.startsWith('? ')) {
-      const path = line.slice(2);
-      if (path.endsWith('/') && existsSync(join(root, path, '.git'))) {
+  const entries = status.split('\0');
+  for (let i = 0; i < entries.length; i++) {
+    const entry = entries[i];
+    if (entry.startsWith('? ')) {
+      const path = entry.slice(2);
+      if (
+        path.endsWith('/') &&
+        existsSync(join(root, path, '.git')) &&
+        nestedRepoIsDirty(join(root, path.slice(0, -1)))
+      ) {
         dirty.add(path.slice(0, -1));
       }
       continue;
     }
-    const fields = line.split(' ');
+    const fields = entry.split(' ');
     const kind = fields[0];
     if (kind !== '1' && kind !== '2' && kind !== 'u') continue;
     const sub = fields[2];
     if (sub.length !== 4 || !sub.startsWith('S')) continue;
     // Modified-content or untracked-content flag: the invisible content.
     if (sub[2] === '.' && sub[3] === '.') continue;
+    // A rename's original path rides the next NUL element.
+    if (kind === '2') i++;
     dirty.add(
       kind === '1'
         ? fields.slice(8).join(' ')
         : kind === 'u'
           ? fields.slice(10).join(' ')
-          : fields.slice(9).join(' ').split('\t')[0],
+          : fields.slice(9).join(' '),
     );
   }
   return [...dirty];
