@@ -575,6 +575,33 @@ describe('SkillCommandLoader', () => {
       expect(commands.map((c) => c.name)).toEqual([]);
     });
 
+    it('matches a qualified disablement entry against the qualified skill', async () => {
+      // The post-rename spelling itself must disable the renamed skill
+      // (#9408): a prefix-stripping or bare-only matcher would silently
+      // re-enable disabled extension skills.
+      mockSkillManager.listSkills.mockImplementation(
+        ({ level }: { level: string }) => {
+          if (level === 'extension')
+            return Promise.resolve([
+              makeSkill({
+                name: 'rust:pdf',
+                level: 'extension',
+                extensionName: 'rust',
+              }),
+            ]);
+          return Promise.resolve([]);
+        },
+      );
+      (
+        mockConfig.getDisabledSkillNames as ReturnType<typeof vi.fn>
+      ).mockReturnValue(new Set(['rust:pdf']));
+
+      const loader = new SkillCommandLoader(mockConfig);
+      const commands = await loader.loadCommands(signal);
+
+      expect(commands.map((c) => c.name)).toEqual([]);
+    });
+
     it('reflects provider mutations on each load (live read)', async () => {
       // Regression: the provider must be called per-load, not cached, so
       // CommandService rebuilds (triggered by `reloadCommands`) pick up
