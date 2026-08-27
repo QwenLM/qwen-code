@@ -15,6 +15,7 @@
 
 import { spawnSync } from 'node:child_process';
 import { copyFileSync, existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { extname, join, resolve } from 'node:path';
 
 const BRAND_ID_RE = /^[a-z][a-z0-9-]*$/;
@@ -142,16 +143,33 @@ function patchTauriConfig(shellRoot, brand) {
   return configPath;
 }
 
+function resolveTauriCli(shellRoot) {
+  // Resolve the Tauri CLI entry point directly so the logo path never
+  // passes through a command interpreter. This eliminates shell injection
+  // via crafted filenames (e.g. $(cmd) or `cmd` in the path).
+  try {
+    const require = createRequire(join(shellRoot, 'package.json'));
+    return require.resolve('@tauri-apps/cli/tauri.js');
+  } catch {
+    return null;
+  }
+}
+
 function generateIcons(shellRoot, brand) {
-  // shell:true is required on Windows so npx.cmd resolves (CVE-2024-27980
-  // blocks shell-less .cmd spawns). Quote the logo path to prevent spaces
-  // or other characters from being re-interpreted by the shell.
-  const safeLogo = `"${brand.logo.replace(/"/g, '\\"')}"`;
-  const result = spawnSync(
-    'npx',
-    ['--yes', '@tauri-apps/cli', 'icon', safeLogo],
-    { cwd: shellRoot, stdio: 'inherit', shell: true },
-  );
+  // Invoke the Tauri CLI directly via Node so the logo path is passed as
+  // a plain argv element — no shell interpretation, no quoting games.
+  const tauriCli = resolveTauriCli(shellRoot);
+  const result = tauriCli
+    ? spawnSync(
+        process.execPath,
+        [tauriCli, 'icon', brand.logo],
+        { cwd: shellRoot, stdio: 'inherit' },
+      )
+    : spawnSync(
+        'npx',
+        ['--yes', '@tauri-apps/cli', 'icon', brand.logo],
+        { cwd: shellRoot, stdio: 'inherit' },
+      );
   if (result.status === 0) {
     return 'regenerated via tauri icon';
   }
