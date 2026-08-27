@@ -31,12 +31,16 @@
 // hand the auditor its own bookkeeping as an edit to audit.
 
 import type { CommandModule } from 'yargs';
+import type { Dirent } from 'node:fs';
 import {
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
@@ -50,24 +54,28 @@ export interface FixSnapshot {
   /** The tree object recording the working tree at snapshot time. */
   tree: string;
   /**
-   * Submodules already holding invisible edits at snapshot time. Dirt that
-   * predates the fix is not the fix's doing: a no-op fix in such a repository
-   * must still hear "nothing was applied", not a claim that invisible edits
-   * exist.
+   * Paths already holding invisible edits at snapshot time: submodule
+   * checkouts and nested git repositories, including ones a symlink reaches
+   * or an ignored directory hides. Dirt that predates the fix is not the
+   * fix's doing: a no-op fix in such a repository must still hear "nothing
+   * was applied", not a claim that invisible edits exist.
    */
   dirtySubmodules: string[];
 }
 
 /**
- * Review-owned directories that change between the two states and are never
- * a fix. Matched at any depth: the review writes them under the directory it
- * was run from, which is the repository root in the common case and a
- * subdirectory otherwise.
+ * The review's own NAME families under `.qwen/tmp` — everything the flow
+ * creates between the two states: the side files (`qwen-review-{target}-*`)
+ * and the worktree family (`review-pr-*`). Keyed on the names the flow
+ * itself writes, never on whole directories: content a user's repository
+ * tracks under `.qwen/tmp` or `.qwen/reviews` is ordinary reviewable
+ * content — a finding can anchor on it and `--fix` can edit it, and a
+ * directory-wide exclusion dropped exactly that edit from both capture and
+ * comparison.
  */
 export const FIX_DELTA_EXCLUDES = [
-  '.qwen/tmp',
-  '.qwen/reviews',
-  '.qwen/review-cache',
+  '.qwen/tmp/qwen-review-*',
+  '.qwen/tmp/review-pr-*',
 ] as const;
 
 /**
@@ -91,6 +99,40 @@ function inTreeGitDir(root: string): string | null {
     return null;
   }
   return rel;
+}
+
+/**
+ * The exclusion is lexical — a symlink planted at an excluded directory
+ * redirects every side-file write through it into a physical path no
+ * pathspec matches, so the capture would report the review's own
+ * bookkeeping (or an attacker's content) as fix edits. Refuse, the way
+ * `releaseWorktree` refuses a redirected ancestor: the failure direction
+ * stops the run, it never contaminates it.
+ */
+function assertNoRedirectedExcludes(root: string): void {
+  const targets = new Set<string>();
+  for (const chain of [join('.qwen', 'tmp'), inTreeGitDir(root) ?? '']) {
+    let acc = '';
+    for (const part of chain.split(sep)) {
+      if (part === '') continue;
+      acc = acc === '' ? part : join(acc, part);
+      targets.add(acc);
+    }
+  }
+  for (const rel of targets) {
+    let link = false;
+    try {
+      link = lstatSync(join(root, rel)).isSymbolicLink();
+    } catch {
+      continue;
+    }
+    if (link) {
+      throw new Error(
+        `fix-delta: excluded directory ${rel} is a symlink; refusing to ` +
+          'write side files outside the exclusion.',
+      );
+    }
+  }
 }
 
 /**
@@ -125,15 +167,33 @@ export function snapshotWorkingTree(root: string): string {
     // ANY untracked file — e.g. this command's own side file — sits outside
     // the cone. Out-of-cone tracked entries drop identically from both trees,
     // so the delta is unaffected, and the flag is a no-op elsewhere.
-    gitWithEnv(env, [
-      '-C',
-      root,
-      'add',
-      '-A',
-      '--sparse',
-      '--',
-      ...excludePathspec(root),
-    ]);
+    try {
+      gitWithEnv(env, [
+        '-C',
+        root,
+        'add',
+        '-A',
+        '--sparse',
+        '--ignore-errors',
+        '--',
+        ...excludePathspec(root),
+      ]);
+    } catch (err) {
+      // A nested git repository with ZERO commits is the only tolerated
+      // failure: git refuses `add` on it ("does not have a commit checked
+      // out"), and `--ignore-errors` has recorded everything else. The repo
+      // stays invisible in both trees — the same model as submodule content —
+      // and the blind-spot probe names it. Any other failure re-throws: a
+      // blanket tolerance would mask skipped paths, under-capture the tree,
+      // and hand the audit a false all-clear.
+      if (
+        !String((err as Error)?.message ?? '').includes(
+          'does not have a commit checked out',
+        )
+      ) {
+        throw err;
+      }
+    }
     return gitWithEnv(env, ['-C', root, 'write-tree']);
   } finally {
     rmSync(scratch, { recursive: true, force: true });
@@ -141,18 +201,22 @@ export function snapshotWorkingTree(root: string): string {
 }
 
 /**
- * The pathspec half of every capture and tree comparison: review side files
- * excluded, and — in the rare repository whose git dir sits inside its
- * worktree — the git dir with them.
+ * The pathspec half of every capture, tree comparison, and blind-spot
+ * probe: the review's own name families excluded — once as a file match and
+ * once as a deep-content match, because a glob `*` does not cross `/` — and,
+ * in the rare repository whose git dir sits inside its worktree, the git dir
+ * with them. `literal` there: the dir name is raw path text, and the default
+ * wildcard matching reads `[]`/`*`/`?` in it as a glob that drops merely
+ * matching tracked files from capture and comparison.
  */
 function excludePathspec(root: string): string[] {
-  const specs = [
-    '.',
-    ...FIX_DELTA_EXCLUDES.map((p) => `:(glob,exclude)**/${p}/**`),
-  ];
+  const specs = ['.'];
+  for (const family of FIX_DELTA_EXCLUDES) {
+    specs.push(`:(glob,exclude)**/${family}`, `:(glob,exclude)**/${family}/**`);
+  }
   const gitDir = inTreeGitDir(root);
   if (gitDir !== null) {
-    specs.push(`:(exclude)${gitDir}`);
+    specs.push(`:(exclude,literal)${gitDir}`);
   }
   return specs;
 }
@@ -209,22 +273,157 @@ function filesBetweenTrees(
 }
 
 /**
- * Whether a nested repository's own status shows uncommitted content. A probe
- * that cannot run answers dirty: the failure direction over-warns, it never
- * silences a blind spot.
+ * The state of a nested repository's own uncommitted content.
+ * `--ignored=matching` on top of the untracked view: a repository whose
+ * only uncommitted content matches its OWN ignore rules emits nothing to a
+ * plain status, and an edit inside would classify clean in both states.
+ *
+ * `failed` is a state of its own, not dirt: the caller decides what an
+ * unanswerable probe means for the baseline and for the warning. A name
+ * that is not valid UTF-8 cannot reach the child intact — spawn coerces
+ * every channel through UTF-8 — so the probe fails for it, and the failure
+ * direction over-warns, it never silences a blind spot.
  */
-function nestedRepoIsDirty(absPath: string): boolean {
+function probeNestedRepoState(absPath: Buffer): 'clean' | 'dirty' | 'failed' {
   const inner = gitOpt(
     '-C',
-    absPath,
+    absPath.toString(),
     '-c',
     'status.showUntrackedFiles=all',
     '--no-optional-locks',
     'status',
     '--porcelain',
     '--ignore-submodules=none',
+    '--ignored=matching',
   );
-  return inner === null || inner !== '';
+  if (inner === null) return 'failed';
+  return inner === '' ? 'clean' : 'dirty';
+}
+
+/** Join a relative path given as raw bytes onto an absolute path. */
+function joinBytes(abs: Buffer, rel: Buffer): Buffer {
+  return Buffer.concat([abs, Buffer.from(sep), rel]);
+}
+
+const DOT_GIT = Buffer.from('.git');
+
+/**
+ * Decode a raw path for reporting: UTF-8 when the bytes ARE UTF-8 (the
+ * everyday case), latin1 otherwise — a byte-preserving reading, so a name
+ * the decode cannot represent still reaches the disclosure line instead of
+ * mangling to U+FFFD and failing every filesystem check under it.
+ */
+function decodePath(raw: Buffer): string {
+  const utf8 = raw.toString('utf8');
+  return Buffer.from(utf8, 'utf8').equals(raw) ? utf8 : raw.toString('latin1');
+}
+
+/** Split a `-z` buffer on NUL bytes without a lossy string roundtrip. */
+function splitNul(raw: Buffer): Buffer[] {
+  const parts: Buffer[] = [];
+  let start = 0;
+  for (;;) {
+    const idx = raw.indexOf(0, start);
+    if (idx === -1) {
+      parts.push(raw.subarray(start));
+      return parts;
+    }
+    parts.push(raw.subarray(start, idx));
+    start = idx + 1;
+  }
+}
+
+/**
+ * The path of a kind-1/2/u status entry: everything after the entry's fixed
+ * ASCII field count, taken from the raw entry bytes — modes, hashes, flags
+ * and scores are ASCII, so the Nth space byte is exact even when the path
+ * itself is not valid UTF-8.
+ */
+function pathAfterSpaces(entry: Buffer, spaces: number): Buffer {
+  let off = 0;
+  for (let n = 0; n < spaces; n++) {
+    const idx = entry.indexOf(0x20, off);
+    if (idx === -1) return entry.subarray(entry.length);
+    off = idx + 1;
+  }
+  return entry.subarray(off);
+}
+
+/**
+ * The number of directory entries the ignored-directory walk visits before
+ * declaring the directory unresolvable. A repository can ignore an
+ * arbitrarily deep tree (`node_modules` is the everyday case), and the walk
+ * is the only discovery for nested repos hiding inside one, so it has to
+ * start; equally, it must not enumerate a whole package store on every
+ * snapshot. Past the budget the caller names the directory itself — the
+ * failure direction over-warns, it never silences a blind spot.
+ */
+const IGNORED_WALK_BUDGET = 100_000;
+
+/**
+ * The nested repositories inside a collapsed ignored directory, found by
+ * walking it: status never enumerates under an ignored path and `add -A`
+ * records nothing there, so an edit inside such a repository is invisible
+ * to both the probe's entry list and the tree comparison. Symlinked
+ * children are tested as repo candidates but never descended through — a
+ * link loop inside an ignored directory must not wedge the walk.
+ */
+function reposUnder(
+  dirAbs: Buffer,
+  dirRel: Buffer,
+): { repos: Array<{ abs: Buffer; rel: Buffer }>; exhausted: boolean } {
+  const repos: Array<{ abs: Buffer; rel: Buffer }> = [];
+  let left = IGNORED_WALK_BUDGET;
+  const queue: Array<{ abs: Buffer; rel: Buffer }> = [
+    { abs: dirAbs, rel: dirRel },
+  ];
+  for (let qi = 0; qi < queue.length; qi++) {
+    const cur = queue[qi];
+    let entries: Array<Dirent<Buffer>>;
+    try {
+      entries = readdirSync(cur.abs, {
+        encoding: 'buffer',
+        withFileTypes: true,
+      });
+    } catch {
+      continue;
+    }
+    for (const e of entries) {
+      if (left-- === 0) {
+        return { repos, exhausted: true };
+      }
+      const name = e.name;
+      const childAbs = joinBytes(cur.abs, name);
+      let isDir = e.isDirectory();
+      if (e.isSymbolicLink()) {
+        try {
+          isDir = statSync(childAbs).isDirectory();
+        } catch {
+          continue;
+        }
+      }
+      if (!isDir) continue;
+      const childRel = joinBytes(cur.rel, name);
+      if (existsSync(joinBytes(childAbs, DOT_GIT))) {
+        repos.push({ abs: childAbs, rel: childRel });
+      } else {
+        queue.push({ abs: childAbs, rel: childRel });
+      }
+    }
+  }
+  return { repos, exhausted: false };
+}
+
+function probeNestedRepo(
+  abs: Buffer,
+  rel: Buffer,
+  dirty: Set<string>,
+  recordFailed: boolean,
+): void {
+  const state = probeNestedRepoState(abs);
+  if (state === 'dirty' || (recordFailed && state === 'failed')) {
+    dirty.add(decodePath(rel));
+  }
 }
 
 /**
@@ -244,26 +443,41 @@ function nestedRepoIsDirty(absPath: string): boolean {
  *   deletion prints `160000 000000 000000`.
  * - `2` entries — a staged gitlink rename: the score is space-separated, the
  *   new path ends the record, and the original path follows as its own NUL
- *   element — consumed, never reported.
+ *   element — consumed for EVERY kind-`2` entry, even a skipped one, so it
+ *   is never parsed as an entry itself.
  * - `u` entries — an unmerged gitlink: four mode fields, three hashes, the
  *   path last.
- * - `?` entries collapsed to a directory — under `showUntrackedFiles=all`
- *   only a nested git repository survives unexpanded, and `add -A` records
- *   its gitlink all the same. The same line names a staged-deleted gitlink,
- *   whose `1 D. S...` twin carries no dirt flags for git to compute. A `?`
- *   entry carries NO dirt flag of its own, so the branch probes inside and
- *   counts only a repository with uncommitted content — stamping a clean one
- *   dirty would print a false pre-existing note on a no-op run, and would
- *   filter a fix's real interior edit out of the baseline into a false
- *   all-clear.
+ * - `?` entries — under `showUntrackedFiles=all` only a nested git
+ *   repository survives unexpanded as `? <dir>/`, and `add -A` records its
+ *   gitlink all the same. The same collapsed line names a staged-deleted
+ *   gitlink, whose `1 D. S...` twin carries no dirt flags for git to
+ *   compute. A slashLESS `?` entry is probed too when it is a symlink: the
+ *   link itself is what `add -A` records, so an edit through it into the
+ *   repository it reaches is invisible the same way.
+ * - `!` entries — `--ignored=matching` collapses an ignored directory to
+ *   `! <dir>/`, and neither status nor `add -A` ever looks inside one, so
+ *   nested repositories hidden there are discovered by walking the
+ *   directory. A `?`/`!` entry carries NO dirt flag of its own, so every
+ *   candidate is probed inside and only a repository with uncommitted
+ *   content counts — stamping a clean one dirty would print a false
+ *   pre-existing note on a no-op run, and would filter a fix's real
+ *   interior edit out of the baseline into a false all-clear.
  *
- * The status runs with `-z`: entries are NUL-terminated and paths RAW. The
- * rendered form C-quotes any name that needs it (a non-ASCII name under
- * default `core.quotePath`, a tab, a quote or a backslash), and a quoted
- * `? ` path neither ends in '/' nor resolves — the repository would be
- * skipped silently while invisible edits land inside it.
+ * The status runs with `-z` and is parsed as raw bytes: entries are
+ * NUL-terminated and paths unquoted, and the rendered form C-quotes any name
+ * that needs it (a non-ASCII name under default `core.quotePath`, a tab, a
+ * quote or a backslash) — or cannot represent it at all when the bytes are
+ * not valid UTF-8. A quoted or mangled path neither ends in '/' nor
+ * resolves, so the repository would be skipped silently while invisible
+ * edits land inside it.
+ *
+ * `recordFailed`: whether a nested-repo probe that CANNOT RUN counts as
+ * dirty. `--since` passes true — an unanswerable probe beside the verdict
+ * must over-warn, never fall silent. `--snapshot` passes false — the
+ * baseline records only confirmed dirt, so an unprobed repository at
+ * snapshot time still reads as NEW dirt once the fix lands inside it.
  */
-function dirtySubmodulePaths(root: string): string[] {
+function dirtySubmodulePaths(root: string, recordFailed: boolean): string[] {
   // `--no-optional-locks`: plain `status` opportunistically rewrites the
   // user's index to refresh its stat cache — a write this command promises
   // never to make. `-c status.showUntrackedFiles=all`: the untracked-content
@@ -271,7 +485,10 @@ function dirtySubmodulePaths(root: string): string[] {
   // config; with `showUntrackedFiles=no` there, a submodule whose only
   // invisible edit is untracked content emits no entry at all, and only a
   // `-c` override (not `--untracked-files`) propagates to that inner run.
-  const status = gitRaw(
+  // The exclusion pathspec: capture and the tree comparisons apply it, so the
+  // probe must too — otherwise the review's own worktrees and side files
+  // under `.qwen/tmp` would be classified as blind-spot submodule dirt.
+  const raw = gitRaw(
     '-C',
     root,
     '-c',
@@ -280,38 +497,72 @@ function dirtySubmodulePaths(root: string): string[] {
     'status',
     '--porcelain=v2',
     '--ignore-submodules=none',
+    '--ignored=matching',
     '-z',
-  ).toString('utf8');
+    '--',
+    ...excludePathspec(root),
+  );
+  const rootBuf = Buffer.from(root);
   const dirty = new Set<string>();
-  const entries = status.split('\0');
+  const entries = splitNul(raw);
   for (let i = 0; i < entries.length; i++) {
     const entry = entries[i];
-    if (entry.startsWith('? ')) {
-      const path = entry.slice(2);
-      if (
-        path.endsWith('/') &&
-        existsSync(join(root, path, '.git')) &&
-        nestedRepoIsDirty(join(root, path.slice(0, -1)))
-      ) {
-        dirty.add(path.slice(0, -1));
+    if (entry.length < 2) continue;
+    const head = entry[0];
+    if (head === 0x3f /* ? */ || head === 0x21 /* ! */) {
+      const rel = entry.subarray(2);
+      if (rel[rel.length - 1] === 0x2f /* / */) {
+        const dirRel = rel.subarray(0, rel.length - 1);
+        const dirAbs = joinBytes(rootBuf, dirRel);
+        if (head === 0x21 && !existsSync(joinBytes(dirAbs, DOT_GIT))) {
+          // Collapsed ignored directory that is not itself a repository:
+          // the only way in is to walk it.
+          const found = reposUnder(dirAbs, dirRel);
+          for (const r of found.repos) {
+            probeNestedRepo(r.abs, r.rel, dirty, recordFailed);
+          }
+          if (found.exhausted) {
+            dirty.add(decodePath(dirRel));
+          }
+        } else {
+          probeNestedRepo(dirAbs, dirRel, dirty, recordFailed);
+        }
+        continue;
       }
+      // Slashless: a plain file, or a symlink that may reach a repository.
+      let isLink = false;
+      try {
+        isLink = lstatSync(joinBytes(rootBuf, rel)).isSymbolicLink();
+      } catch {
+        continue;
+      }
+      if (!isLink) continue;
+      const abs = joinBytes(rootBuf, rel);
+      try {
+        if (!statSync(abs).isDirectory()) continue;
+      } catch {
+        continue;
+      }
+      if (!existsSync(joinBytes(abs, DOT_GIT))) continue;
+      probeNestedRepo(abs, rel, dirty, recordFailed);
       continue;
     }
-    const fields = entry.split(' ');
+    const fields = entry.toString('utf8').split(' ');
     const kind = fields[0];
     if (kind !== '1' && kind !== '2' && kind !== 'u') continue;
+    // A rename's original path rides the next NUL element — consumed even
+    // when the entry is skipped below, so it is never parsed as an entry
+    // itself (a name like `u x` would re-enter the stream and die on a
+    // missing field).
+    if (kind === '2') i++;
     const sub = fields[2];
     if (sub.length !== 4 || !sub.startsWith('S')) continue;
     // Modified-content or untracked-content flag: the invisible content.
     if (sub[2] === '.' && sub[3] === '.') continue;
-    // A rename's original path rides the next NUL element.
-    if (kind === '2') i++;
     dirty.add(
-      kind === '1'
-        ? fields.slice(8).join(' ')
-        : kind === 'u'
-          ? fields.slice(10).join(' ')
-          : fields.slice(9).join(' '),
+      decodePath(
+        pathAfterSpaces(entry, kind === '1' ? 8 : kind === '2' ? 9 : 10),
+      ),
     );
   }
   return [...dirty];
@@ -369,6 +620,7 @@ export function runFixDelta(args: FixDeltaArgs): void {
     );
   }
   const root = git('rev-parse', '--show-toplevel');
+  assertNoRedirectedExcludes(root);
   mkdirSync(dirname(resolve(args.out)), { recursive: true });
 
   if (args.snapshot) {
@@ -376,7 +628,12 @@ export function runFixDelta(args: FixDeltaArgs): void {
     const snapshot: FixSnapshot = {
       root,
       tree,
-      dirtySubmodules: dirtySubmodulePaths(root),
+      // `recordFailed` false: the baseline holds only CONFIRMED dirt. A
+      // probe that cannot run is recorded at `--since` time (the failure
+      // direction over-warns), but never as pre-existing — unconfirmed dirt
+      // cannot be blamed on "already there", or a fix's real edit inside
+      // would filter into a false all-clear.
+      dirtySubmodules: dirtySubmodulePaths(root, false),
     };
     writeFileSync(resolve(args.out), `${JSON.stringify(snapshot, null, 2)}\n`);
     writeStderrLine(`fix-delta: snapshot ${tree.slice(0, 12)} of ${root}`);
@@ -432,7 +689,7 @@ export function runFixDelta(args: FixDeltaArgs): void {
   // is blind to them whether or not the superproject diff is empty — probe
   // in both cases. Dirt recorded at snapshot time is not the fix's doing;
   // only NEW dirt names a blind spot.
-  const dirtyNow = dirtySubmodulePaths(root);
+  const dirtyNow = dirtySubmodulePaths(root, true);
   const freshDirt = dirtyNow.filter(
     (p) => !snapshot.dirtySubmodules.includes(p),
   );

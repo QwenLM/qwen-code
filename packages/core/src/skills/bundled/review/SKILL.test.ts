@@ -885,6 +885,14 @@ describe('bundled review skill', () => {
     expect(
       at('--outcomes .qwen/tmp/qwen-review-{target}-outcomes.json'),
     ).toBeLessThan(at('review fix-delta \\\n  --since'));
+    // The hunks producer runs before the consumer that reads them: swapped,
+    // the audit dies on a missing hunks file on a target's first fix run —
+    // and on a second review of the same target it reads the PREVIOUS run's
+    // leftover hunks and appends those stale assumptions to this run's
+    // ledger as `outcomeNote`s.
+    expect(at('review fix-delta \\\n  --since')).toBeLessThan(
+      at('--role fix-audit'),
+    );
     expect(at('--role fix-audit')).toBeLessThan(
       at('**Then re-issue the `report_findings` call, outcomes on it.**'),
     );
@@ -904,6 +912,12 @@ describe('bundled review skill', () => {
     expect(step).toContain(`--hunks ${hunksPath}`);
     expect(step).toContain(`--out ${artifactPath}`);
     expect(step).toContain(`--findings ${artifactPath}`);
+    // `--plan` is `demandOption: true` on the builder: dropping the flag
+    // kills every later fix audit in a yargs refusal, disclosed as a
+    // routine `Fix audit: not run — <error>`.
+    expect(step).toContain(
+      'review agent-prompt --plan <the plan report from Step 1> --role fix-audit',
+    );
     expect(step).toContain('never the reviewed diff');
     // The four constraints that keep it from being the forbidden re-review,
     // and the disclosure-not-finding rule that closes the back door.
