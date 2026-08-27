@@ -91,7 +91,7 @@ const initializationResult = {
   authError: null,
   themeError: null,
   shouldOpenAuthDialog: false,
-  geminiMdFileCount: 0,
+  memoryFileCount: 0,
 } as InitializationResult;
 
 async function start(

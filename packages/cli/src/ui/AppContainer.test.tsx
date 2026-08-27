@@ -207,12 +207,12 @@ vi.mock('../utils/events.js');
 vi.mock('./handleAutoUpdate.js');
 vi.mock('../utils/cleanup.js');
 
-const mockLoadHierarchicalGeminiMemory = vi.hoisted(() => vi.fn());
+const mockLoadHierarchicalMemory = vi.hoisted(() => vi.fn());
 vi.mock('../config/config.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../config/config.js')>();
   return {
     ...actual,
-    loadHierarchicalGeminiMemory: mockLoadHierarchicalGeminiMemory,
+    loadHierarchicalMemory: mockLoadHierarchicalMemory,
   };
 });
 
@@ -507,7 +507,7 @@ describe('AppContainer State Management', () => {
       themeError: null,
       authError: null,
       shouldOpenAuthDialog: false,
-      geminiMdFileCount: 0,
+      memoryFileCount: 0,
     } as InitializationResult;
   });
 
@@ -7041,7 +7041,7 @@ describe('AppContainer State Management', () => {
     });
 
     it('performMemoryRefresh anchors on config.getWorkingDir() and updates contextFilePaths', async () => {
-      mockLoadHierarchicalGeminiMemory.mockResolvedValue({
+      mockLoadHierarchicalMemory.mockResolvedValue({
         memoryContent: 'content',
         fileCount: 1,
         contextFilePaths: ['/custom/QWEN.md'],
@@ -7086,7 +7086,7 @@ describe('AppContainer State Management', () => {
         await performMemoryRefresh();
       });
 
-      expect(mockLoadHierarchicalGeminiMemory).toHaveBeenCalledWith(
+      expect(mockLoadHierarchicalMemory).toHaveBeenCalledWith(
         '/custom/workspace',
         expect.anything(),
         expect.anything(),

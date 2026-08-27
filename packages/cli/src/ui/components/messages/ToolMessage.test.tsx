@@ -90,8 +90,8 @@ vi.mock('../TerminalImage.js', () => ({
 }));
 
 // Mock child components or utilities if they are complex or have side effects
-vi.mock('../GeminiRespondingSpinner.js', () => ({
-  GeminiRespondingSpinner: ({
+vi.mock('../RespondingSpinner.js', () => ({
+  RespondingSpinner: ({
     nonRespondingDisplay,
   }: {
     nonRespondingDisplay?: string;
