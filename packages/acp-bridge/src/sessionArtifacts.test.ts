@@ -79,6 +79,8 @@ describe('SessionArtifactStore', () => {
     });
 
     const createdAt = created.changes[0]?.artifact?.createdAt;
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(Date.now() + 6_000));
     const removed = await store.remove(artifactId!);
     expect(removed).toMatchObject({
       changes: [{ action: 'removed', artifactId, reason: 'explicit' }],
