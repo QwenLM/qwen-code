@@ -200,8 +200,14 @@ find "$WS" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
 # denylist and stale lock files before checkout runs; the reserved
 # RUNNER_TOOL_CACHE variable cannot be overridden, so purge Node.
 TOOL_CACHE="$(realpath -m -- "\${RUNNER_TOOL_CACHE:?}" 2>/dev/null)" || exit 1
+# On the standard self-hosted layout the tool cache is a SIBLING
+# of the workspace (<root>/_work/_tool vs <root>/_work/qwen-code),
+# not inside it: anchor the containment to the runner work root.
+# Canonicalization above resolves symlinks, so a planted link
+# cannot smuggle an outside path through either arm.
+RW_ROOT="$(dirname -- "$RWS")"
 case "$TOOL_CACHE" in
-  "$RWS"/*) ;;
+  "$RWS"/*|"$RW_ROOT"/_tool) ;;
   *) echo "::error::refusing to purge tool cache outside the runner workspace: \${TOOL_CACHE}"; exit 1 ;;
 esac
 rm -rf -- "\${TOOL_CACHE}/node" 2>/dev/null || sudo -n rm -rf -- "\${TOOL_CACHE}/node" || exit 1
@@ -259,221 +265,265 @@ describe('release workflow', () => {
   it.skipIf(!hasGnuRealpath || process.getuid?.() === 0)(
     'executes the workspace wipe against guard branches',
     () => {
-    const wipeScript = canonicalWipe;
+      const wipeScript = canonicalWipe;
 
-    const runWipe = (envOverrides, { preCreateWorkspace } = {}) => {
-      const base = mkdtempSync(join(tmpdir(), 'release-wipe-behavioral-'));
-      const workspace = join(base, 'workspace');
-      mkdirSync(workspace);
-      if (preCreateWorkspace) preCreateWorkspace(base, workspace);
-      const env = {
-        ...process.env,
-        GITHUB_WORKSPACE: workspace,
-        RUNNER_WORKSPACE: base,
-        RUNNER_TEMP: join(base, 'temp'),
-        RUNNER_TOOL_CACHE: join(base, 'tool-cache'),
-        GITHUB_ENV: join(base, 'github-env'),
-        HOME: join(base, 'home'),
-        XDG_CONFIG_HOME: join(base, 'home', '.config'),
-        ...envOverrides,
-      };
-      mkdirSync(env.HOME);
-      mkdirSync(env.RUNNER_TEMP);
-      mkdirSync(join(env.RUNNER_TOOL_CACHE, 'node'), { recursive: true });
-      mkdirSync(join(env.HOME, '.docker'));
-      writeFileSync(
-        join(env.HOME, '.gitconfig'),
-        '[credential]\n\thelper = !false\n',
-      );
-      writeFileSync(join(env.HOME, '.gitconfig.lock'), 'stale');
-      writeFileSync(
-        join(env.HOME, '.docker', 'config.json'),
-        '{"proxies":{"default":{"httpProxy":"http://attacker"}}}',
-      );
-      env.GIT_CONFIG_GLOBAL = join(env.HOME, '.gitconfig');
-      env.GIT_CONFIG_COUNT = '1';
-      env.GIT_CONFIG_KEY_0 = 'credential.helper';
-      env.GIT_CONFIG_VALUE_0 = '!false';
-      return {
-        result: spawnSync('bash', ['-e', '-o', 'pipefail', '-c', wipeScript], {
-          encoding: 'utf8',
+      const runWipe = (envOverrides, { preCreateWorkspace } = {}) => {
+        const base = mkdtempSync(join(tmpdir(), 'release-wipe-behavioral-'));
+        const workspace = join(base, 'workspace');
+        mkdirSync(workspace);
+        if (preCreateWorkspace) preCreateWorkspace(base, workspace);
+        const env = {
+          ...process.env,
+          GITHUB_WORKSPACE: workspace,
+          RUNNER_WORKSPACE: base,
+          RUNNER_TEMP: join(base, 'temp'),
+          RUNNER_TOOL_CACHE: join(base, 'tool-cache'),
+          GITHUB_ENV: join(base, 'github-env'),
+          HOME: join(base, 'home'),
+          XDG_CONFIG_HOME: join(base, 'home', '.config'),
+          ...envOverrides,
+        };
+        mkdirSync(env.HOME);
+        mkdirSync(env.RUNNER_TEMP);
+        mkdirSync(join(env.RUNNER_TOOL_CACHE, 'node'), { recursive: true });
+        mkdirSync(join(env.HOME, '.docker'));
+        writeFileSync(
+          join(env.HOME, '.gitconfig'),
+          '[credential]\n\thelper = !false\n',
+        );
+        writeFileSync(join(env.HOME, '.gitconfig.lock'), 'stale');
+        writeFileSync(
+          join(env.HOME, '.docker', 'config.json'),
+          '{"proxies":{"default":{"httpProxy":"http://attacker"}}}',
+        );
+        env.GIT_CONFIG_GLOBAL = join(env.HOME, '.gitconfig');
+        env.GIT_CONFIG_COUNT = '1';
+        env.GIT_CONFIG_KEY_0 = 'credential.helper';
+        env.GIT_CONFIG_VALUE_0 = '!false';
+        return {
+          result: spawnSync(
+            'bash',
+            ['-e', '-o', 'pipefail', '-c', wipeScript],
+            {
+              encoding: 'utf8',
+              env,
+            },
+          ),
+          base,
+          workspace,
+          githubEnv: env.GITHUB_ENV,
           env,
-        }),
-        base,
-        workspace,
-        githubEnv: env.GITHUB_ENV,
-        env,
+        };
       };
-    };
 
-    // Happy path: a normal workspace inside the runner workspace is wiped,
-    // including subdirectories (the wipe's core property: recursive removal
-    // of all persisted entries, not just files).
-    {
-      const { result, base, workspace, githubEnv, env } = runWipe(
-        {},
-        {
-          preCreateWorkspace: (_base, ws) => {
-            writeFileSync(join(ws, 'leftover.txt'), 'stale');
-            mkdirSync(join(ws, 'leftover-dir'));
-            writeFileSync(join(ws, 'leftover-dir', 'nested.txt'), 'stale');
+      // Happy path: a normal workspace inside the runner workspace is wiped,
+      // including subdirectories (the wipe's core property: recursive removal
+      // of all persisted entries, not just files).
+      {
+        const { result, base, workspace, githubEnv, env } = runWipe(
+          {},
+          {
+            preCreateWorkspace: (_base, ws) => {
+              writeFileSync(join(ws, 'leftover.txt'), 'stale');
+              mkdirSync(join(ws, 'leftover-dir'));
+              writeFileSync(join(ws, 'leftover-dir', 'nested.txt'), 'stale');
+            },
           },
-        },
-      );
-      try {
-        expect(result.status).toBe(0);
-        const entries = readdirSync(workspace);
-        expect(entries).toHaveLength(0);
-        const stateEnv = readFileSync(githubEnv, 'utf8');
-        expect(stateEnv).toContain('GIT_CONFIG_COUNT=0\n');
-        expect(stateEnv).toContain('GIT_CONFIG_NOSYSTEM=1\n');
-        expect(stateEnv).toContain('GIT_CONFIG_PARAMETERS=\n');
-        expect(stateEnv).toMatch(
-          /GIT_CONFIG_GLOBAL=.*\/release-state\.[^/]+\/gitconfig\n/,
         );
-        expect(stateEnv).toMatch(
-          /NPM_CONFIG_USERCONFIG=.*\/release-state\.[^/]+\/npmrc\n/,
-        );
-        expect(stateEnv).toMatch(
-          /DOCKER_CONFIG=.*\/release-state\.[^/]+\/docker\n/,
-        );
-        const isolatedEnv = { ...env };
-        for (const line of stateEnv.trimEnd().split('\n')) {
-          const separator = line.indexOf('=');
-          isolatedEnv[line.slice(0, separator)] = line.slice(separator + 1);
+        try {
+          expect(result.status).toBe(0);
+          const entries = readdirSync(workspace);
+          expect(entries).toHaveLength(0);
+          const stateEnv = readFileSync(githubEnv, 'utf8');
+          expect(stateEnv).toContain('GIT_CONFIG_COUNT=0\n');
+          expect(stateEnv).toContain('GIT_CONFIG_NOSYSTEM=1\n');
+          expect(stateEnv).toContain('GIT_CONFIG_PARAMETERS=\n');
+          expect(stateEnv).toMatch(
+            /GIT_CONFIG_GLOBAL=.*\/release-state\.[^/]+\/gitconfig\n/,
+          );
+          expect(stateEnv).toMatch(
+            /NPM_CONFIG_USERCONFIG=.*\/release-state\.[^/]+\/npmrc\n/,
+          );
+          expect(stateEnv).toMatch(
+            /DOCKER_CONFIG=.*\/release-state\.[^/]+\/docker\n/,
+          );
+          const isolatedEnv = { ...env };
+          for (const line of stateEnv.trimEnd().split('\n')) {
+            const separator = line.indexOf('=');
+            isolatedEnv[line.slice(0, separator)] = line.slice(separator + 1);
+          }
+          expect(
+            spawnSync(
+              'git',
+              ['config', '--global', '--get', 'credential.helper'],
+              { env: isolatedEnv },
+            ).status,
+          ).not.toBe(0);
+          expect(readdirSync(isolatedEnv.DOCKER_CONFIG)).toHaveLength(0);
+          expect(() => lstatSync(join(base, 'tool-cache', 'node'))).toThrow();
+        } finally {
+          rmSync(base, { recursive: true, force: true });
         }
-        expect(
-          spawnSync(
-            'git',
-            ['config', '--global', '--get', 'credential.helper'],
-            { env: isolatedEnv },
-          ).status,
-        ).not.toBe(0);
-        expect(readdirSync(isolatedEnv.DOCKER_CONFIG)).toHaveLength(0);
-        expect(() => lstatSync(join(base, 'tool-cache', 'node'))).toThrow();
-      } finally {
-        rmSync(base, { recursive: true, force: true });
       }
-    }
 
-    // Symlink heal: a workspace replaced with a symlink inside the runner
-    // workspace is removed and recreated, then wiped. The decoy target
-    // is a real file so the test can verify `rm -f` removed only the
-    // link itself and did not follow/delete the target.
-    {
-      const { result, base, workspace } = runWipe(
-        {},
-        {
-          preCreateWorkspace: (b, ws) => {
-            rmSync(ws, { recursive: true, force: true });
-            const decoyTarget = join(b, 'decoy-target');
-            writeFileSync(decoyTarget, 'must-survive');
-            symlinkSync(decoyTarget, ws);
+      // Symlink heal: a workspace replaced with a symlink inside the runner
+      // workspace is removed and recreated, then wiped. The decoy target
+      // is a real file so the test can verify `rm -f` removed only the
+      // link itself and did not follow/delete the target.
+      {
+        const { result, base, workspace } = runWipe(
+          {},
+          {
+            preCreateWorkspace: (b, ws) => {
+              rmSync(ws, { recursive: true, force: true });
+              const decoyTarget = join(b, 'decoy-target');
+              writeFileSync(decoyTarget, 'must-survive');
+              symlinkSync(decoyTarget, ws);
+            },
           },
-        },
-      );
-      try {
-        expect(result.status).toBe(0);
-        expect(`${result.stdout}${result.stderr}`).toContain(
-          'healing workspace',
         );
-        const stat = lstatSync(workspace);
-        expect(stat.isDirectory()).toBe(true);
-        // The decoy target must survive: rm -f on the raw path removes
-        // the link itself and never follows it.
-        expect(readFileSync(join(base, 'decoy-target'), 'utf8')).toBe(
-          'must-survive',
-        );
-      } finally {
-        rmSync(base, { recursive: true, force: true });
+        try {
+          expect(result.status).toBe(0);
+          expect(`${result.stdout}${result.stderr}`).toContain(
+            'healing workspace',
+          );
+          const stat = lstatSync(workspace);
+          expect(stat.isDirectory()).toBe(true);
+          // The decoy target must survive: rm -f on the raw path removes
+          // the link itself and never follows it.
+          expect(readFileSync(join(base, 'decoy-target'), 'utf8')).toBe(
+            'must-survive',
+          );
+        } finally {
+          rmSync(base, { recursive: true, force: true });
+        }
       }
-    }
 
-    // The runner-provided cache path is still validated before recursive
-    // deletion so a poisoned intermediate symlink cannot redirect the purge.
-    {
-      const outside = mkdtempSync(join(tmpdir(), 'release-tool-cache-'));
-      const { result, base } = runWipe({ RUNNER_TOOL_CACHE: outside });
-      try {
-        expect(result.status).not.toBe(0);
-        expect(`${result.stdout}${result.stderr}`).toContain(
-          'refusing to purge tool cache outside the runner workspace',
-        );
-        expect(lstatSync(join(outside, 'node')).isDirectory()).toBe(true);
-      } finally {
-        rmSync(outside, { recursive: true, force: true });
-        rmSync(base, { recursive: true, force: true });
+      // The runner-provided cache path is still validated before recursive
+      // deletion so a poisoned intermediate symlink cannot redirect the purge.
+      {
+        const outside = mkdtempSync(join(tmpdir(), 'release-tool-cache-'));
+        const { result, base } = runWipe({ RUNNER_TOOL_CACHE: outside });
+        try {
+          expect(result.status).not.toBe(0);
+          expect(`${result.stdout}${result.stderr}`).toContain(
+            'refusing to purge tool cache outside the runner workspace',
+          );
+          expect(lstatSync(join(outside, 'node')).isDirectory()).toBe(true);
+        } finally {
+          rmSync(outside, { recursive: true, force: true });
+          rmSync(base, { recursive: true, force: true });
+        }
       }
-    }
 
-    // Workspace outside runner workspace: refused.
-    {
-      const outside = mkdtempSync(join(tmpdir(), 'release-wipe-outside-'));
-      const base = mkdtempSync(join(tmpdir(), 'release-wipe-runner-'));
-      try {
-        const env = {
-          ...process.env,
-          GITHUB_WORKSPACE: outside,
-          RUNNER_WORKSPACE: base,
-          RUNNER_TEMP: join(base, 'temp'),
-          RUNNER_TOOL_CACHE: join(base, 'tool-cache'),
-          GITHUB_ENV: join(base, 'github-env'),
-          HOME: join(base, 'home'),
-          XDG_CONFIG_HOME: join(base, 'home', '.config'),
-        };
-        mkdirSync(env.HOME);
-        mkdirSync(env.RUNNER_TEMP);
-        const result = spawnSync(
-          'bash',
-          ['-e', '-o', 'pipefail', '-c', wipeScript],
-          { encoding: 'utf8', env },
-        );
-        expect(result.status).not.toBe(0);
-        expect(`${result.stdout}${result.stderr}`).toContain(
-          'refusing to wipe workspace outside the runner workspace',
-        );
-      } finally {
-        rmSync(outside, { recursive: true, force: true });
-        rmSync(base, { recursive: true, force: true });
+      // Pool geometry: the tool cache is a SIBLING of the runner workspace
+      // (<root>/_work/_tool vs <root>/_work/qwen-code) — the standard
+      // self-hosted layout — so the containment must accept it.
+      {
+        const runnerRoot = mkdtempSync(join(tmpdir(), 'release-wipe-pool-'));
+        const rws = join(runnerRoot, '_work', 'qwen-code');
+        const workspace = join(rws, 'qwen-code');
+        mkdirSync(workspace, { recursive: true });
+        writeFileSync(join(workspace, 'leftover.txt'), 'stale');
+        try {
+          const env = {
+            ...process.env,
+            GITHUB_WORKSPACE: workspace,
+            RUNNER_WORKSPACE: rws,
+            RUNNER_TEMP: join(runnerRoot, 'temp'),
+            RUNNER_TOOL_CACHE: join(runnerRoot, '_work', '_tool'),
+            GITHUB_ENV: join(runnerRoot, 'github-env'),
+            HOME: join(runnerRoot, 'home'),
+            XDG_CONFIG_HOME: join(runnerRoot, 'home', '.config'),
+          };
+          mkdirSync(env.HOME);
+          mkdirSync(env.RUNNER_TEMP);
+          mkdirSync(join(env.RUNNER_TOOL_CACHE, 'node'), { recursive: true });
+          const result = spawnSync(
+            'bash',
+            ['-e', '-o', 'pipefail', '-c', wipeScript],
+            { encoding: 'utf8', env },
+          );
+          expect(result.status).toBe(0);
+          expect(readdirSync(workspace)).toHaveLength(0);
+          // The sibling tool cache's node directory is purged.
+          expect(() =>
+            lstatSync(join(env.RUNNER_TOOL_CACHE, 'node')),
+          ).toThrow();
+        } finally {
+          rmSync(runnerRoot, { recursive: true, force: true });
+        }
       }
-    }
 
-    // Path with '..' that realpath resolves inside the runner workspace:
-    // canonicalization succeeds, containment passes, wipe proceeds.
-    {
-      const base = mkdtempSync(join(tmpdir(), 'release-wipe-dots-'));
-      const workspace = join(base, 'workspace');
-      mkdirSync(workspace);
-      mkdirSync(join(base, 'sub'));
-      writeFileSync(join(workspace, 'leftover.txt'), 'stale');
-      try {
-        const env = {
-          ...process.env,
-          // String concatenation preserves the literal '..' segment —
-          // path.join would normalize it away before the script sees it.
-          GITHUB_WORKSPACE: `${base}/sub/../workspace`,
-          RUNNER_WORKSPACE: base,
-          RUNNER_TEMP: join(base, 'temp'),
-          RUNNER_TOOL_CACHE: join(base, 'tool-cache'),
-          GITHUB_ENV: join(base, 'github-env'),
-          HOME: join(base, 'home'),
-          XDG_CONFIG_HOME: join(base, 'home', '.config'),
-        };
-        mkdirSync(env.HOME);
-        mkdirSync(env.RUNNER_TEMP);
-        const result = spawnSync(
-          'bash',
-          ['-e', '-o', 'pipefail', '-c', wipeScript],
-          { encoding: 'utf8', env },
-        );
-        expect(result.status).toBe(0);
-        const entries = readdirSync(workspace);
-        expect(entries).toHaveLength(0);
-      } finally {
-        rmSync(base, { recursive: true, force: true });
+      // Workspace outside runner workspace: refused.
+      {
+        const outside = mkdtempSync(join(tmpdir(), 'release-wipe-outside-'));
+        const base = mkdtempSync(join(tmpdir(), 'release-wipe-runner-'));
+        try {
+          const env = {
+            ...process.env,
+            GITHUB_WORKSPACE: outside,
+            RUNNER_WORKSPACE: base,
+            RUNNER_TEMP: join(base, 'temp'),
+            RUNNER_TOOL_CACHE: join(base, 'tool-cache'),
+            GITHUB_ENV: join(base, 'github-env'),
+            HOME: join(base, 'home'),
+            XDG_CONFIG_HOME: join(base, 'home', '.config'),
+          };
+          mkdirSync(env.HOME);
+          mkdirSync(env.RUNNER_TEMP);
+          const result = spawnSync(
+            'bash',
+            ['-e', '-o', 'pipefail', '-c', wipeScript],
+            { encoding: 'utf8', env },
+          );
+          expect(result.status).not.toBe(0);
+          expect(`${result.stdout}${result.stderr}`).toContain(
+            'refusing to wipe workspace outside the runner workspace',
+          );
+        } finally {
+          rmSync(outside, { recursive: true, force: true });
+          rmSync(base, { recursive: true, force: true });
+        }
       }
-    }
-  });
+
+      // Path with '..' that realpath resolves inside the runner workspace:
+      // canonicalization succeeds, containment passes, wipe proceeds.
+      {
+        const base = mkdtempSync(join(tmpdir(), 'release-wipe-dots-'));
+        const workspace = join(base, 'workspace');
+        mkdirSync(workspace);
+        mkdirSync(join(base, 'sub'));
+        writeFileSync(join(workspace, 'leftover.txt'), 'stale');
+        try {
+          const env = {
+            ...process.env,
+            // String concatenation preserves the literal '..' segment —
+            // path.join would normalize it away before the script sees it.
+            GITHUB_WORKSPACE: `${base}/sub/../workspace`,
+            RUNNER_WORKSPACE: base,
+            RUNNER_TEMP: join(base, 'temp'),
+            RUNNER_TOOL_CACHE: join(base, 'tool-cache'),
+            GITHUB_ENV: join(base, 'github-env'),
+            HOME: join(base, 'home'),
+            XDG_CONFIG_HOME: join(base, 'home', '.config'),
+          };
+          mkdirSync(env.HOME);
+          mkdirSync(env.RUNNER_TEMP);
+          const result = spawnSync(
+            'bash',
+            ['-e', '-o', 'pipefail', '-c', wipeScript],
+            { encoding: 'utf8', env },
+          );
+          expect(result.status).toBe(0);
+          const entries = readdirSync(workspace);
+          expect(entries).toHaveLength(0);
+        } finally {
+          rmSync(base, { recursive: true, force: true });
+        }
+      }
+    },
+  );
 
   it('checks docker availability before the docker checkout', () => {
     const steps = releaseYaml.jobs.integration_docker.steps;
@@ -521,16 +571,35 @@ describe('release workflow', () => {
       'quality',
       'integration_none',
       'integration_docker',
-      'publish',
     ]) {
-      const setupNode = releaseYaml.jobs[id].steps.find((step) =>
+      const steps = releaseYaml.jobs[id].steps;
+      // The wipe purges the pool's tool cache, and in-tree precedent says
+      // nodejs.org may be unreachable through the ECS egress proxy: pool
+      // runs must reuse the machine's Node, with setup-node reserved for
+      // the hosted fallback.
+      const setupNode = steps.find((step) =>
         String(step.uses ?? '').includes('actions/setup-node'),
       );
-      expect(setupNode?.with.cache, id).toBe(
-        "${{ runner.environment != 'self-hosted' && 'npm' || '' }}",
+      expect(setupNode?.if, id).toBe(
+        "${{ runner.environment != 'self-hosted' }}",
       );
+      expect(setupNode?.with.cache, id).toBe('npm');
       expect(setupNode?.with['package-manager-cache'], id).toBe(false);
+      const machineNode = steps.find((step) =>
+        String(step.uses ?? '').includes('.github/actions/self-hosted-node'),
+      );
+      expect(machineNode?.if, id).toBe(
+        "${{ runner.environment == 'self-hosted' }}",
+      );
     }
+    // publish stays hosted-only and keeps its unconditional setup-node.
+    const publishSetupNode = releaseYaml.jobs.publish.steps.find((step) =>
+      String(step.uses ?? '').includes('actions/setup-node'),
+    );
+    expect(publishSetupNode?.with.cache).toBe(
+      "${{ runner.environment != 'self-hosted' && 'npm' || '' }}",
+    );
+    expect(publishSetupNode?.with['package-manager-cache']).toBe(false);
   });
 
   it('fires the fleet-moving npm-published dispatch on stable releases only', () => {
