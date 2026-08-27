@@ -412,10 +412,42 @@ The built-in presets are:
   `/v1/memories`, `Authorization: Token`, fixed `userId`, and optional
   `agentId`.
 
+#### Connecting a PolarDB Mem0 instance
+
+The console hands out a plain-HTTP address and port, not a TLS name, so the
+`https://` origin in `examples/polardb-mem0.json` is the shape the endpoint
+should have rather than the shape it arrives in. Pasting the console address
+into that example fails the URL policy, because the credential, every query,
+and every stored memory would otherwise cross the network in cleartext.
+
+`examples/polardb-mem0-loopback.json` is the path that needs no policy opt-in.
+Relay the instance to loopback, and the relay carries the credential and the
+memories:
+
+```bash
+ssh -L 8080:<console-address>:8080 <your-jump-host>
+export MEM0_API_KEY=<the console's secret.access.apikey>
+```
+
+Then copy that example to an administrator-owned path, replace
+`<your-user-id>`, and point `QWEN_EXTERNAL_CONTEXT_CONFIG` at it. Loopback
+HTTP loads as shipped, so nothing else has to change.
+
+Two alternatives, in preference order: bind a domain to the instance and
+terminate TLS, then use `examples/polardb-mem0.json` unchanged; or, only where
+the network path is itself the access control, keep the console address and add
+`"allowInsecureHttp": true` to the endpoint.
+
+Put the API key in the environment variable named by `credentialEnv`, never in
+the configuration file. The loopback example also omits `agentId`, which the
+preset sends at the request root — leave it out until a deployment is known to
+accept it there.
+
 The preset records the whole protocol, not just one API version. Search always
 sends a maximum of five through the preset's `top_k` field. The engine does not
 probe versions or fall back to a different preset. See
-`examples/polardb-mem0.json`, `examples/mem0-oss.json`, and the
+`examples/polardb-mem0.json`, `examples/polardb-mem0-loopback.json`,
+`examples/mem0-oss.json`, and the
 [preset design](../../docs/design/direct-external-context-mem0-presets.md).
 
 Non-loopback plain HTTP remains an explicit `allowInsecureHttp` endpoint

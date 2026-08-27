@@ -285,6 +285,50 @@ describe('extension manifest', () => {
     }
   });
 
+  // The console hands out a plain-HTTP address and port, which the URL policy
+  // rejects. This example is the one path that needs no policy opt-in: the
+  // relay carries the credential and the memories, and loopback HTTP loads as
+  // shipped, so only the user id has to be substituted.
+  it('keeps the PolarDB loopback example loadable with no policy opt-in', async () => {
+    const config = await readJson('../examples/polardb-mem0-loopback.json');
+
+    expect(config).toEqual({
+      version: 1,
+      timeoutMs: 5000,
+      provider: {
+        type: 'mem0',
+        preset: 'aliyun-polardb-mysql-2026-08',
+        endpoint: { origin: 'http://127.0.0.1:8080', basePath: '' },
+        credentialEnv: 'MEM0_API_KEY',
+        scope: { userId: '<your-user-id>' },
+      },
+    });
+
+    const substituted = JSON.parse(
+      JSON.stringify(config).replaceAll('<your-user-id>', 'example-user'),
+    );
+    const directory = await mkdtemp(
+      join(tmpdir(), 'external-context-example-'),
+    );
+    try {
+      const configPath = join(directory, 'config.json');
+      await writeFile(configPath, JSON.stringify(substituted));
+
+      const loaded = await loadConfig({
+        QWEN_EXTERNAL_CONTEXT_CONFIG: configPath,
+        MEM0_API_KEY: 'example-key',
+      });
+      expect(loaded.provider).toMatchObject({
+        type: 'mem0',
+        endpoint: { origin: 'http://127.0.0.1:8080' },
+        scope: { userId: 'example-user' },
+      });
+      expect(() => createProvider(loaded.provider)).not.toThrow();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it('keeps the stock Mem0 REST example loadable', async () => {
     const config = await readJson('../examples/mem0-oss.json');
     const substituted = JSON.parse(

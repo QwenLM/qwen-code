@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "timeoutMs": 5000,
+  "provider": {
+    "type": "mem0",
+    "preset": "aliyun-polardb-mysql-2026-08",
+    "endpoint": {
+      "origin": "http://127.0.0.1:8080",
+      "basePath": ""
+    },
+    "credentialEnv": "MEM0_API_KEY",
+    "scope": {
+      "userId": "<your-user-id>"
+    }
+  }
+}
