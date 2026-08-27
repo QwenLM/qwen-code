@@ -23,6 +23,8 @@ const ALL_FEATURES = [
 ] as const;
 
 const CLIENT_ID = 'live-client-1';
+// The id the daemon issues on create/attach; per-session calls must echo it.
+const ISSUED_CLIENT_ID = 'daemon-issued-7';
 const BASE_URL = 'http://127.0.0.1:0';
 const SESSION_ID = 'sess-1';
 
@@ -59,7 +61,10 @@ function makeClient(
       features: [...ALL_FEATURES],
       workspaceCwd: '/daemon-ws',
     })),
-    createOrAttachSession: vi.fn(async () => ({ sessionId: SESSION_ID })),
+    createOrAttachSession: vi.fn(async () => ({
+      sessionId: SESSION_ID,
+      clientId: ISSUED_CLIENT_ID,
+    })),
     listWorkspaceSessions: vi.fn(async () => []),
     promptNonBlocking: vi.fn(async () => ({ promptId: 'p1' })),
     subscribeEvents: vi.fn(() => envelopeStream([])),
@@ -115,6 +120,7 @@ async function seedPermissionOptions(
   client: DaemonClientLike,
   requestId = 'req-1',
 ): Promise<void> {
+  await adaptor.createSession();
   vi.mocked(client.subscribeEvents).mockReturnValueOnce(
     envelopeStream([permissionRequestEnvelope(requestId)]),
   );
@@ -226,7 +232,7 @@ describe('QwenCodeAdaptor.prompt', () => {
       SESSION_ID,
       { prompt: [{ type: 'text', text: 'run the tests' }] },
       undefined,
-      CLIENT_ID,
+      ISSUED_CLIENT_ID,
     );
     expect(receipt).toEqual({ status: 'accepted', jobRef: 'p1' });
     expect(adaptor.isBusy(handle)).toBe(true);
@@ -256,6 +262,7 @@ describe('QwenCodeAdaptor.prompt steering', () => {
     vi.mocked(client.createOrAttachSession).mockResolvedValueOnce({
       sessionId: SESSION_ID,
       hasActivePrompt: true,
+      clientId: ISSUED_CLIENT_ID,
     });
     const adaptor = makeAdaptor(client);
     const handle = await adaptor.createSession();
@@ -278,6 +285,7 @@ describe('QwenCodeAdaptor.prompt steering', () => {
     expect(client.enqueueMidTurnMessage).toHaveBeenCalledWith(
       SESSION_ID,
       'also update the docs\n\nand keep it short',
+      { clientId: ISSUED_CLIENT_ID },
     );
     expect(client.promptNonBlocking).not.toHaveBeenCalled();
     expect(receipt.status).toBe('accepted');
@@ -435,7 +443,7 @@ describe('QwenCodeAdaptor.events', () => {
           envelope(
             'permission_resolved',
             { requestId: 'req-ours' },
-            { originatorClientId: CLIENT_ID },
+            { originatorClientId: ISSUED_CLIENT_ID },
           ),
           envelope(
             'permission_resolved',
@@ -446,6 +454,8 @@ describe('QwenCodeAdaptor.events', () => {
       ),
     });
     const adaptor = makeAdaptor(client);
+    // Register the session so the daemon-issued clientId is tracked.
+    await adaptor.createSession();
 
     const events = await collect(adaptor, handleFor());
 
@@ -513,7 +523,7 @@ describe('QwenCodeAdaptor.respondPermission', () => {
       SESSION_ID,
       'req-1',
       { outcome: { outcome: 'selected', optionId: 'allow' } },
-      CLIENT_ID,
+      ISSUED_CLIENT_ID,
     );
     expect(result).toBe('delivered');
   });
@@ -533,7 +543,7 @@ describe('QwenCodeAdaptor.respondPermission', () => {
       SESSION_ID,
       'req-1',
       { outcome: { outcome: 'selected', optionId: 'deny' } },
-      CLIENT_ID,
+      ISSUED_CLIENT_ID,
     );
     expect(result).toBe('delivered');
   });
@@ -549,7 +559,7 @@ describe('QwenCodeAdaptor.respondPermission', () => {
       SESSION_ID,
       'req-1',
       { outcome: { outcome: 'cancelled' } },
-      CLIENT_ID,
+      ISSUED_CLIENT_ID,
     );
   });
 
@@ -572,6 +582,7 @@ describe('QwenCodeAdaptor.respondPermission', () => {
   it('falls back to cancelled when no options are known for the request', async () => {
     const client = makeClient();
     const adaptor = makeAdaptor(client);
+    await adaptor.createSession();
 
     await adaptor.respondPermission(handleFor(), 'req-unknown', 'allow');
 
@@ -579,7 +590,7 @@ describe('QwenCodeAdaptor.respondPermission', () => {
       SESSION_ID,
       'req-unknown',
       { outcome: { outcome: 'cancelled' } },
-      CLIENT_ID,
+      ISSUED_CLIENT_ID,
     );
   });
 });

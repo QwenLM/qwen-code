@@ -18,8 +18,11 @@
  *   instruction joined the running turn, rejected means the session went
  *   idle and a normal prompt is the right fallback.
  * - `permission_resolved.originatorClientId` names the *voter*, so comparing
- *   it against our own clientId distinguishes "we answered" from "someone
- *   answered in WebShell".
+ *   it against the daemon-issued clientId for the session distinguishes "we
+ *   answered" from "someone answered in WebShell". The issued id comes back
+ *   on the create/attach response; self-made ids are rejected by the
+ *   daemon's client registration guard, so every per-session call echoes
+ *   the issued one.
  */
 
 import { DaemonClient } from '@qwen-code/sdk';
@@ -65,7 +68,11 @@ export interface DaemonClientLike {
   createOrAttachSession(
     req: Record<string, unknown>,
     clientId?: string,
-  ): Promise<{ sessionId: string; hasActivePrompt?: boolean }>;
+  ): Promise<{
+    sessionId: string;
+    hasActivePrompt?: boolean;
+    clientId?: string;
+  }>;
   listWorkspaceSessions(
     workspaceCwd: string,
     options?: Record<string, unknown>,
@@ -125,6 +132,8 @@ export interface QwenCodeAdaptorOptions {
 interface SessionState {
   busy: boolean;
   activeJobRef?: string;
+  /** Daemon-issued client id for this session; echoed on every call. */
+  clientId?: string;
   /** Accumulated assistant text for the current turn. */
   turnBuffer: string;
   /** Options captured per pending permission request, for decision mapping. */
@@ -230,6 +239,13 @@ export class QwenCodeAdaptor implements BackendAdaptor {
     );
     this.trackSession(session.sessionId, {
       busy: session.hasActivePrompt === true,
+      // The daemon issues the authoritative per-client id on create/attach;
+      // every later call for this session must echo it (a self-made id is
+      // rejected by the daemon's client registration guard). Older daemons
+      // omit it — those calls stay anonymous.
+      ...(typeof session.clientId === 'string'
+        ? { clientId: session.clientId }
+        : {}),
     });
     return { id: session.sessionId, adaptor: ADAPTOR_NAME };
   }
@@ -278,6 +294,7 @@ export class QwenCodeAdaptor implements BackendAdaptor {
       const steered = await this.client.enqueueMidTurnMessage(
         handle.id,
         message,
+        state.clientId !== undefined ? { clientId: state.clientId } : {},
       );
       if (steered.accepted) {
         return {
@@ -301,7 +318,7 @@ export class QwenCodeAdaptor implements BackendAdaptor {
         handle.id,
         { prompt },
         undefined,
-        this.options.clientId,
+        state.clientId,
       );
     } catch (error) {
       if (isRecord(error) && error['status'] === 503) {
@@ -332,7 +349,7 @@ export class QwenCodeAdaptor implements BackendAdaptor {
     const state = this.trackSession(handle.id);
     const stream = this.client.subscribeEvents(handle.id, {
       ...(opts?.signal ? { signal: opts.signal } : {}),
-      clientId: this.options.clientId,
+      ...(state.clientId !== undefined ? { clientId: state.clientId } : {}),
     });
     for await (const envelope of stream) {
       const events = this.normalize(state, envelope);
@@ -348,7 +365,7 @@ export class QwenCodeAdaptor implements BackendAdaptor {
   }
 
   async cancel(handle: BackendHandle): Promise<void> {
-    await this.client.cancel(handle.id, this.options.clientId);
+    await this.client.cancel(handle.id, this.sessions.get(handle.id)?.clientId);
   }
 
   async respondPermission(
@@ -373,7 +390,7 @@ export class QwenCodeAdaptor implements BackendAdaptor {
       handle.id,
       requestId,
       response,
-      this.options.clientId,
+      state.clientId,
     );
     if (delivered) state.permissionOptions.delete(requestId);
     return delivered ? 'delivered' : 'already_resolved';
@@ -387,7 +404,7 @@ export class QwenCodeAdaptor implements BackendAdaptor {
 
   private trackSession(
     sessionId: string,
-    seed?: Partial<Pick<SessionState, 'busy'>>,
+    seed?: Partial<Pick<SessionState, 'busy' | 'clientId'>>,
   ): SessionState {
     let state = this.sessions.get(sessionId);
     if (!state) {
@@ -401,6 +418,7 @@ export class QwenCodeAdaptor implements BackendAdaptor {
     } else if (seed?.busy !== undefined) {
       state.busy = seed.busy;
     }
+    if (seed?.clientId !== undefined) state.clientId = seed.clientId;
     return state;
   }
 
@@ -552,8 +570,8 @@ export class QwenCodeAdaptor implements BackendAdaptor {
             type: 'permission_resolved',
             requestId,
             byUs:
-              this.options.clientId !== undefined &&
-              envelope.originatorClientId === this.options.clientId,
+              state.clientId !== undefined &&
+              envelope.originatorClientId === state.clientId,
           },
         ];
       }
