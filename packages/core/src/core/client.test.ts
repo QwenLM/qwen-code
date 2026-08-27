@@ -2729,6 +2729,49 @@ describe('Gemini Client (client.ts)', () => {
       warnSpy.mockRestore();
     });
 
+    it('warns again when a later setTools() finds newly held-back tools', async () => {
+      // The first warning must not freeze the diagnostic: a tool can join
+      // the permission-deferred set mid-session (image_gen registers through
+      // the deferred path when `/model --image` runs), and every later
+      // setTools() re-run withholds it again. A one-shot latch would leave
+      // the newcomer unreachable for the rest of the session with zero
+      // signal, so warn on the delta instead.
+      const reg = getRegistryMock();
+      reg.getTool.mockReturnValue(null); // ToolSearch absent.
+      reg.getDeferredToolSummary.mockReturnValue([
+        { name: 'write_file', description: 'write' },
+      ]);
+      reg.isPermissionDeferred.mockImplementation(
+        (name: string) => name === 'write_file',
+      );
+      vi.spyOn(client.getChat(), 'setTools').mockImplementation(() => {});
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+      await client.setTools();
+
+      // Mid-session registration grows the deferred set.
+      reg.getDeferredToolSummary.mockReturnValue([
+        { name: 'write_file', description: 'write' },
+        { name: 'image_gen', description: 'generate an image' },
+      ]);
+      reg.isPermissionDeferred.mockImplementation((name: string) =>
+        ['write_file', 'image_gen'].includes(name),
+      );
+
+      await client.setTools();
+
+      const eagerWarns = warnSpy.mock.calls
+        .map((call) => String(call[0]))
+        .filter((message) => message.includes('tools.eager is holding back'));
+      expect(eagerWarns).toHaveLength(2);
+      expect(eagerWarns[0]).toContain('write_file');
+      // The second warning names only the newcomer, not the already-warned
+      // tool again.
+      expect(eagerWarns[1]).toContain('image_gen');
+      expect(eagerWarns[1]).not.toContain('write_file');
+      warnSpy.mockRestore();
+    });
+
     it('does not append the same added MCP reminder twice', async () => {
       const reg = getRegistryMock();
       reg.getTool.mockImplementation((n: string) =>

@@ -423,9 +423,12 @@ export class GeminiClient {
   private announcedMcpToolNames = new Set<string>();
   private pendingAddedMcpTools = new Map<string, DeferredToolSummary>();
   private pendingRemovedMcpToolNames = new Set<string>();
-  // One-shot latch for the `tools.eager`-without-ToolSearch warning, so the
-  // reveal path does not repeat it on every setTools() call.
-  private eagerToolsUnreachableWarned = false;
+  // Already-warned names for the `tools.eager`-without-ToolSearch warning.
+  // A set rather than a boolean latch: tools can join the permission-deferred
+  // set mid-session (e.g. image_gen registering through the deferred path when
+  // `/model --image` runs after the first setTools()), and each newcomer must
+  // be named once without re-warning about tools already reported.
+  private eagerToolsUnreachableWarned = new Set<string>();
   // Dedup state for the per-turn skill/command "now available" delta reminders
   // (drainSkillAndCommandReminders). Keys are "skill:<name>" / "cmd:<name>". The
   // set is seeded on the first drain from the current skills (the startup
@@ -1684,7 +1687,7 @@ export class GeminiClient {
    * Returns `undefined` when ToolSearch is unavailable: reminders must not
    * advertise tools the model has no way to load on demand. Tools held back
    * by `tools.eager` in that state are unreachable for the session, which is
-   * warned about once (see {@link warnEagerToolsUnreachable}).
+   * warned about once per tool (see {@link warnEagerToolsUnreachable}).
    */
   private resolveDeferredToolsForReminder(
     deferredSummary: readonly DeferredToolSummary[],
@@ -1717,8 +1720,9 @@ export class GeminiClient {
   }
 
   /**
-   * Warn once when `tools.eager` holds tools back in a session that has no
-   * ToolSearch — `tools.toolSearch.enabled: false`, a `tool_search` deny
+   * Warn once per held-back tool when `tools.eager` leaves it unreachable in
+   * a session that has no ToolSearch — `tools.toolSearch.enabled: false`, a
+   * `tool_search` deny
    * rule, or the automatic DeepSeek prefix-cache opt-out in `loadCliConfig`.
    *
    * Keeping them hidden is the right call: revealing them would send exactly
@@ -1730,14 +1734,19 @@ export class GeminiClient {
    * reported for, so name it rather than leaving it to be discovered.
    */
   private warnEagerToolsUnreachable(withheldToolNames: string[]): void {
-    if (this.eagerToolsUnreachableWarned || withheldToolNames.length === 0) {
+    const newlyWithheld = withheldToolNames.filter(
+      (name) => !this.eagerToolsUnreachableWarned.has(name),
+    );
+    if (newlyWithheld.length === 0) {
       return;
     }
-    this.eagerToolsUnreachableWarned = true;
+    for (const name of newlyWithheld) {
+      this.eagerToolsUnreachableWarned.add(name);
+    }
     // eslint-disable-next-line no-console -- operator-facing breadcrumb; the debug log file is off in default runs, where this reshaping would otherwise be invisible
     console.warn(
-      `tools.eager is holding back ${withheldToolNames.length} tool(s) in a session with no tool_search, ` +
-        `so nothing can load them on demand and they are unreachable until restart: ${withheldToolNames.join(', ')}. ` +
+      `tools.eager is holding back ${newlyWithheld.length} tool(s) in a session with no tool_search, ` +
+        `so nothing can load them on demand and they are unreachable until restart: ${newlyWithheld.join(', ')}. ` +
         `Enable tools.toolSearch.enabled (and drop any tool_search deny rule) to keep them loadable, ` +
         `list them in tools.eager to send their schemas upfront, or use permissions.deny if removal was the intent.`,
     );
