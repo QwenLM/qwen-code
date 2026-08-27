@@ -81,6 +81,8 @@ Use the same `qwen --continue -p "<control>"` pattern for the other operations:
 | `/goal resume`                       | Resume an eligible Goal and start headless Goal work.                                    |
 | `/goal clear`                        | Clear the Goal without confirmation or a model call.                                     |
 
+A Goal is only as good as its completion condition. See [Goals](./goals.md) for what the verifier can and cannot judge, and use `qwen -p "/goal-draft <intent>"` to have the objective drafted before you set it.
+
 Runtime-scheduled Goal continuation segments do not count against `--max-session-turns`, but real user prompts still do. Explicit `--max-wall-time` and `--max-tool-calls` budgets continue to apply; exceeding either pauses active Goal work before the run exits with the budget-specific error.
 
 With `--output-format stream-json`, each Goal status change emits a `stream_event` whose `event.type` is `goal_state`. This canonical state event is emitted even without `--include-partial-messages`. When partial messages are enabled, the older `active_goal` event follows as a compatibility projection; automation should treat `goal_state` as authoritative.
