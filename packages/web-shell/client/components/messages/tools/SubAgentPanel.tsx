@@ -99,13 +99,12 @@ function SubToolTime({
 }
 
 const SubToolLine = memo(function SubToolLine({ tool }: { tool: ACPToolCall }) {
-  // Same row as the main transcript: one-line summary, expandable to
-  // the full output / diff / file content where the tool has any.
+  // Same expandable row as the main transcript.
   const body =
     tool.subTools || tool.subContent ? (
       <SubAgentPanel tool={tool} />
     ) : (
-      <ToolLine tool={tool} forceExpandable hideCollapsedOutput />
+      <ToolLine tool={tool} hideCollapsedOutput />
     );
   return <SubToolTime timestamp={tool.startTime}>{body}</SubToolTime>;
 });
