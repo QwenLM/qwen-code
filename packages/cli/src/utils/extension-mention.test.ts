@@ -5,11 +5,19 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import type { Extension } from '@qwen-code/qwen-code-core';
+import type { Extension, SkillConfig } from '@qwen-code/qwen-code-core';
 import {
   buildExtensionContextText,
   resolveAdvertisedSkillNames,
 } from './extension-mention.js';
+
+const skill = (name: string, description = name): SkillConfig => ({
+  name,
+  description,
+  level: 'extension',
+  filePath: `/ext/${name}/SKILL.md`,
+  body: '',
+});
 
 function makeExtension(overrides?: Partial<Extension>): Extension {
   return {
@@ -28,7 +36,7 @@ function makeExtension(overrides?: Partial<Extension>): Extension {
 describe('resolveAdvertisedSkillNames', () => {
   it('advertises the collision-qualified registry name for renamed skills', () => {
     const extension = makeExtension({
-      skills: [{ name: 'chat', description: 'Chat' }],
+      skills: [skill('chat')],
     });
     const cachedSkills = [
       { name: 'demo:chat', extensionName: 'demo' },
@@ -42,7 +50,7 @@ describe('resolveAdvertisedSkillNames', () => {
 
   it('keeps bare registry names for skills that never collided', () => {
     const extension = makeExtension({
-      skills: [{ name: 'commit', description: 'Commit' }],
+      skills: [skill('commit')],
     });
     const cachedSkills = [{ name: 'commit', extensionName: 'demo' }];
 
@@ -53,7 +61,7 @@ describe('resolveAdvertisedSkillNames', () => {
 
   it('falls back to manifest names when the cache is cold', () => {
     const extension = makeExtension({
-      skills: [{ name: 'chat', description: 'Chat' }],
+      skills: [skill('chat')],
     });
 
     expect(resolveAdvertisedSkillNames(extension, null)).toEqual(['chat']);
@@ -63,7 +71,7 @@ describe('resolveAdvertisedSkillNames', () => {
 
   it('ignores cached skills owned by other extensions', () => {
     const extension = makeExtension({
-      skills: [{ name: 'chat', description: 'Chat' }],
+      skills: [skill('chat')],
     });
     const cachedSkills = [
       { name: 'chat', extensionName: 'unrelated' },
@@ -79,7 +87,7 @@ describe('resolveAdvertisedSkillNames', () => {
 describe('buildExtensionContextText capability line', () => {
   it('renders resolved registry names in the capability line', () => {
     const extension = makeExtension({
-      skills: [{ name: 'commit', description: 'Commit' }, { name: 'chat' }],
+      skills: [skill('commit'), skill('chat')],
     });
     const cachedSkills = [
       { name: 'commit', extensionName: 'demo' },
@@ -96,7 +104,7 @@ describe('buildExtensionContextText capability line', () => {
 
   it('renders manifest names when no cache is supplied', () => {
     const extension = makeExtension({
-      skills: [{ name: 'chat', description: 'Chat' }],
+      skills: [skill('chat')],
     });
 
     expect(buildExtensionContextText(extension)).toContain(

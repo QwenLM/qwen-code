@@ -353,7 +353,9 @@ export function skillSettingKeys(skill: {
 export function isDisabledSkillName(
   rawName: string,
   disabledNames: ReadonlySet<string>,
-  findSkill: (loweredName: string) => { extensionName?: string } | undefined,
+  findSkill: (
+    loweredName: string,
+  ) => { name: string; extensionName?: string } | undefined,
 ): boolean {
   const lowered = rawName.trim().toLowerCase();
   if (disabledNames.has(lowered)) return true;

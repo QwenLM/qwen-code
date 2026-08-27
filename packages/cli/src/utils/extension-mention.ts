@@ -10,7 +10,6 @@ import {
   isSubpath,
   stripTerminalControlSequences,
   type Extension,
-  type SkillConfig,
 } from '@qwen-code/qwen-code-core';
 
 export const EXTENSION_REF_PREFIX = 'ext:';
@@ -69,7 +68,10 @@ export function getSanitizedExtensionDisplayName(extension: Extension): string {
  */
 export function resolveAdvertisedSkillNames(
   extension: Extension,
-  cachedSkills: readonly SkillConfig[] | null | undefined,
+  cachedSkills:
+    | ReadonlyArray<{ name: string; extensionName?: string }>
+    | null
+    | undefined,
 ): string[] {
   if (!extension.skills) return [];
   const owner = extension.name.toLowerCase();
@@ -88,7 +90,7 @@ export function resolveAdvertisedSkillNames(
 
 export function buildExtensionContextText(
   extension: Extension,
-  cachedSkills?: readonly SkillConfig[] | null,
+  cachedSkills?: ReadonlyArray<{ name: string; extensionName?: string }> | null,
 ): string {
   const displayName = getSanitizedExtensionDisplayName(extension);
   const lines: string[] = [];
@@ -144,7 +146,10 @@ export async function buildExtensionMentionContext(
     remainingBudget: number;
     signal?: AbortSignal;
     onDebugMessage?: (message: string) => void;
-    cachedSkills?: readonly SkillConfig[] | null;
+    cachedSkills?: ReadonlyArray<{
+      name: string;
+      extensionName?: string;
+    }> | null;
   },
 ): Promise<{ text: string; remainingBudget: number }> {
   let contextText = buildExtensionContextText(extension, options.cachedSkills);
