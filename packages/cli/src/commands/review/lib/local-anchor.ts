@@ -555,10 +555,20 @@ function gitlinkIdentity(repoRoot: string, path: string): string {
   if (oid === null || oid === '') return UNHASHABLE;
   try {
     const status = gitRaw('-C', sub, 'status', '--porcelain');
-    return status.length === 0 ? `160000:${oid}` : UNHASHABLE;
+    if (status.length !== 0) return UNHASHABLE;
   } catch {
     return UNHASHABLE;
   }
+  // `status --porcelain` HONOURS visibility bits set inside the submodule —
+  // an assume-unchanged internal edit reads clean (probed, git 2.43) — and
+  // the top-level oracle enumerates only the superproject's index, so
+  // cleanliness must ask the submodule's own bits too or the identity holds
+  // still over bytes no round can see (the fix-induced half of R22-1). The
+  // same oracle, one level down; a nested submodule's own interior is that
+  // submodule's dirt in THIS status once its pointer moves, and its bits
+  // one level deeper repeat this check when its gitlink is measured.
+  const bits = invisibleTrackedPaths(sub);
+  return bits !== null && bits.length === 0 ? `160000:${oid}` : UNHASHABLE;
 }
 
 /**

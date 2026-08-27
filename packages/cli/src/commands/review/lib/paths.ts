@@ -262,7 +262,15 @@ function canonicalise(abs: string): string {
       // `resolve('/', '..')` is `/`: the root is its own parent, so this is
       // the termination condition, not a step.
       if (parent === cur) return abs;
-      walked.push(cur.slice(parent.length).replace(/^[\\/]+/, ''));
+      // Strip only THIS platform's separators: `\` is a legal POSIX
+      // filename byte (this PR's own `notes\` fixtures insist on it), and
+      // the two-class strip corrupted a leaf like `\link` into `link` on
+      // the walk-up — the capture then diffed a different name and the real
+      // file dropped mutely (R23: dangling `\link` at the repo root is the
+      // end-to-end shape, since only a realpath FAILURE reaches this walk).
+      walked.push(
+        cur.slice(parent.length).replace(sep === '/' ? /^\/+/ : /^[\\/]+/, ''),
+      );
       cur = parent;
     }
   }

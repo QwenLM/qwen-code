@@ -619,7 +619,18 @@ describe('bundled review skill', () => {
     // The tails carry the load: without them the paragraph reads as a
     // durability promise again, which is the drift this pin exists for.
     expect(body).toContain('so an overflowing body can carry none of it');
-    expect(body).toContain('has no cross-round record on the PR at all');
+    // The recoverable record lives OFF the PR page — the marker makes the
+    // block locatable across rounds, the CI upload keeps the full entries.
+    // Pin both halves of that qualification, or the paragraph drifts back
+    // to a page-side promise.
+    expect(body).toContain('<!-- qwen-review-deferred -->');
+    // And the retention half: the artifact expires while the body's
+    // overflow pointer persists, so an unqualified "keeps a recoverable
+    // record" overstates the mechanism — the sentence must name the window.
+    expect(body).toContain('90-day retention window');
+    expect(body).toContain(
+      'keeps a recoverable record even though the PR page never shows it',
+    );
     expect(body).toContain(
       "when the budget trims it, the terminal summary is where the author's copy comes from",
     );
@@ -1245,6 +1256,11 @@ describe('bundled review skill', () => {
     // recommendation has to name a NUMBER.
     const body = skillBody();
     expect(body).toContain('first 24 characters of the basename');
+    // R23: the Step 1 bullet restated the template with the FULL basename,
+    // contradicting the capture block ~30 lines below — a model executing
+    // the bullet as written died with ENAMETOOLONG for any basename over
+    // ~226 bytes. Every spelling of the template must carry the truncation.
+    expect(body).not.toContain('file-review-<basename>');
     expect(body).toContain('ENAMETOOLONG');
     expect(body).not.toContain(
       'the reviewed path with its separators replaced',
@@ -1369,6 +1385,21 @@ describe('bundled review skill', () => {
     expect(body).toContain('`cacheCandidateStateId`');
     expect(body).toContain(
       'A mismatch (or an absent `cacheCandidateStateId` field on a plan that published a path) is treated exactly like a withheld candidate',
+    );
+  });
+
+  it('has both PR stops write the sidecar the run reader expects', () => {
+    // R23: `stopNameFor` predicts `qwen-review-pr-<n>-stop.json` but nothing
+    // in the PR flow ever wrote one — capture-local runs only for
+    // local/file targets — so every decided PR stop (up-to-date, empty
+    // diff) exited 1 "Review did not complete" over a round that WAS
+    // decided: the exact failure shape the sidecar mechanism closed for
+    // local rounds, left open behind a reader that suggested coverage.
+    const body = skillBody();
+    expect(body).toContain('**Before the cleanup, write the stop sidecar**');
+    expect(body).toContain('.qwen/tmp/qwen-review-pr-<n>-stop.json');
+    expect(body).toContain(
+      'write the stop sidecar exactly as the up-to-date stop below does',
     );
   });
 

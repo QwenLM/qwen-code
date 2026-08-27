@@ -270,3 +270,26 @@ describe('assertUnredirectedParent', () => {
     }
   });
 });
+
+describe('canonicalise walk-up — backslash is a POSIX filename byte', () => {
+  it.skipIf(process.platform === 'win32')(
+    'keeps a leading backslash through the ancestor walk',
+    () => {
+      // R23: the walk-up strip treated `\` as a separator on POSIX, so a
+      // dangling symlink literally named `\link` (realpath THROWS on a
+      // dangling link, which is what reaches the walk at all) came back as
+      // `link` — the capture then diffed a different name and the real
+      // entry dropped mutely; this PR's own `notes\` fixtures insist the
+      // byte is ordinary. Only the platform's separators are stripped now.
+      const root = realpathSync(mkdtempSync(join(tmpdir(), 'repo-rel-')));
+      try {
+        symlinkSync('no-such-target', join(root, '\\link'));
+        const out = repoRelativeOf(root, '\\link', root);
+        expect(out.escapes).toBe(false);
+        expect(out.rel).toBe('\\link');
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    },
+  );
+});
