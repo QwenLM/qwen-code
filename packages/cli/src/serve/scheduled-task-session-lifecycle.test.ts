@@ -135,4 +135,18 @@ describe('scheduled-task session lifecycle', () => {
     await enableTasksForSessions(workspace, []);
     expect(Object.keys(await byId())).toEqual(['a']);
   });
+
+  it('checks the runtime generation at the task-store commit point', async () => {
+    await seed([task({ id: 'a', sessionId: 'sess-1' })]);
+    const generationClosed = new Error('generation closed');
+
+    await expect(
+      disableTasksForSessions(workspace, ['sess-1'], {
+        assertCanCommit: () => {
+          throw generationClosed;
+        },
+      }),
+    ).rejects.toBe(generationClosed);
+    expect((await byId())['a']!.enabled).toBeUndefined();
+  });
 });

@@ -112,12 +112,14 @@ export const SERVE_CAPABILITY_REGISTRY = {
   session_context_usage: { since: 'v1' },
   session_supported_commands: { since: 'v1' },
   session_tasks: { since: 'v1' },
+  scheduled_task_session_reuse: { since: 'v1' },
   session_monitor_tool_correlation: { since: 'v1' },
   session_stats: { since: 'v1' },
   session_lsp: { since: 'v1' },
   session_status: { since: 'v1' },
   session_close: { since: 'v1' },
   session_archive: { since: 'v1' },
+  session_storage_conflict_repair: { since: 'v1' },
   session_metadata: { since: 'v1' },
   session_organization: { since: 'v1' },
   session_export: { since: 'v1' },
@@ -379,6 +381,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // `workspace_extensions` contract.
   extension_management_v2: { since: 'v1' },
   extension_git_credentials: { since: 'v1' },
+  extension_local_path_install: { since: 'v1' },
   // Workspace-qualified, daemon-local persisted transcript paging. The tag is
   // unconditional because the route also serves a trusted single-workspace
   // primary; authorization is evaluated for the selected runtime per request.
@@ -466,6 +469,7 @@ export interface AdvertiseFeatureToggles {
   sessionShellCommandEnabled?: boolean;
   sessionArtifactsPersistenceAvailable?: boolean;
   sessionGenerationAvailable?: boolean;
+  currentSessionSchedulingAvailable?: boolean;
   workspaceGenerationAvailable?: boolean;
   rateLimit?: boolean;
   reloadAvailable?: boolean;
@@ -579,6 +583,10 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
   [
     'session_generation',
     (toggles) => toggles.sessionGenerationAvailable === true,
+  ],
+  [
+    'scheduled_task_session_reuse',
+    (toggles) => toggles.currentSessionSchedulingAvailable === true,
   ],
   [
     'workspace_generation',

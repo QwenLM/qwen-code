@@ -200,7 +200,10 @@ jobs:
     # Full rationale → qwen-autofix.md#af-004
     if: |-
       ${{ github.repository == 'QwenLM/qwen-code' && (github.event_name != 'issue_comment' || (github.event.issue.pull_request && (startsWith(github.event.comment.body, '@qwen-code /takeover') || startsWith(github.event.comment.body, '@qwen-code /retry')))) && (github.event_name != 'pull_request' || github.event.label.name == 'autofix/takeover') && (github.event_name != 'pull_request_review' || github.event.pull_request.state == 'open') }}
-    runs-on: 'ubuntu-latest'
+    # Persistent pool, not hosted: a hosted backlog queued route past the cron
+    # period, and af-005's supersede then starved every scan round.
+    # Full rationale → qwen-autofix.md#af-148
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name != ''pull_request'' && github.event_name != ''pull_request_review'' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     timeout-minutes: 5
     concurrency:
       # Concurrency is keyed by TARGET, not shared and not fully unique:
@@ -256,6 +259,23 @@ jobs:
           COMMENT_PR_AUTHOR: '${{ github.event.issue.user.login }}'
           HAS_PR_URL: '${{ github.event.issue.pull_request.url }}'
         run: |-
+          # gh has its own reroute channels: pin the host, drop planted tokens,
+          # and point gh at a fresh empty config dir — on the persistent pool
+          # the shared ~/.config/gh is attacker-writable (config.yml can carry
+          # http_unix_socket transport reroutes), and a forged collaborator-
+          # permission response here would open the /takeover and /retry gates.
+          # Mirrors the heavy jobs' preamble. Full rationale → qwen-autofix.md#af-148
+          export GH_HOST=github.com
+          unset GH_ENTERPRISE_TOKEN GH_TOKEN
+          # `export VAR="$(...)"` reports export's status, not the
+          # substitution's: a failing mktemp must abort the step, not continue
+          # with an empty GH_CONFIG_DIR that gh treats as unset — falling back
+          # to the shared ~/.config/gh this preamble closes.
+          if ! GH_CONFIG_DIR="$(mktemp -d "${RUNNER_TEMP}/autofix-gh-config.XXXXXX")"; then
+            echo "::error::could not create gh config dir; refusing to run gh without reroute hardening"
+            exit 1
+          fi
+          export GH_CONFIG_DIR
           DO_ISSUE=false
           DO_REVIEW=false
           TAKEOVER_ACK=''
@@ -1318,13 +1338,15 @@ jobs:
           if [[ -f "${WORKDIR}/failure.md" && -n "$(git status --porcelain)" ]]; then
             echo "❌ Agent wrote failure.md after leaving a dirty workspace:"
             git status --short
-            cat "${WORKDIR}/failure.md"
+            # Agent-written content on step stdout: neutralize both command
+            # syntaxes (`##[` parses mid-line too — #9761).
+            sed -e 's/::/;;/g' -e 's/##\[/##［/g' "${WORKDIR}/failure.md"
             exit 1
           fi
 
           if [[ -f "${WORKDIR}/failure.md" ]]; then
             echo "🛑 Agent aborted intentionally:"
-            cat "${WORKDIR}/failure.md"
+            sed -e 's/::/;;/g' -e 's/##\[/##［/g' "${WORKDIR}/failure.md"
             exit 1
           fi
 
@@ -1395,12 +1417,14 @@ jobs:
           for f in decision.json pr-title.txt pr-body.md e2e-report.md failure.md failure.zh.md fix.diff; do
             if [[ -f "${WORKDIR}/${f}" ]]; then
               echo "=============== ${f} ==============="
-              # Agent-written content on step STDOUT: a line-start `::` would
-              # be parsed as a workflow command (::error::, ::add-mask::), the
-              # same reason the PR-lane dump loop neutralizes it. (The two
-              # step-SUMMARY loops write to a file, where `::` is not
+              # Agent-written content on step STDOUT: both workflow-command
+              # syntaxes parse here — a line-start `::` (::error::,
+              # ::add-mask::) AND `##[` even mid-line (a quoted
+              # `##[add-matcher]` fails THIS step; measured on #9761). The
+              # same reason the PR-lane dump loop neutralizes both. (The two
+              # step-SUMMARY loops write to a file, where commands are not
               # parsed.)
-              sed 's/::/;;/g' "${WORKDIR}/${f}"
+              sed -e 's/::/;;/g' -e 's/##\[/##［/g' "${WORKDIR}/${f}"
               echo
             fi
           done
@@ -2050,7 +2074,8 @@ jobs:
     needs: 'route'
     if: |-
       ${{ needs.route.outputs.do_review == 'true' }}
-    runs-on: 'ubuntu-latest'
+    # Same pool decision as route. Full rationale → qwen-autofix.md#af-148
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name != ''pull_request'' && github.event_name != ''pull_request_review'' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     timeout-minutes: 15
     # A forced scan can write the same status comment as review-address.
     # Share its per-PR lock so neither writer can erase the other's state.
@@ -2068,6 +2093,11 @@ jobs:
       enum_failed: '${{ steps.scan.outputs.enum_failed }}'
     env:
       REPO: '${{ github.repository }}'
+      # Per-run home for the scan's API dumps. A fixed autofix* name (not
+      # mktemp's tmp.*) so the age sweep in the heavy jobs can reclaim it
+      # after a hard runner kill; cleaned normally by the always() step.
+      # Full rationale → qwen-autofix.md#af-148
+      WORKDIR: '/tmp/autofix-scan-${{ github.run_id }}'
     steps:
       - name: 'Scan for PRs with new feedback'
         id: 'scan'
@@ -2079,6 +2109,24 @@ jobs:
           REVIEW_SENDER: '${{ needs.route.outputs.review_sender }}'
           DISPATCH_SOURCE: "${{ github.event_name == 'workflow_dispatch' && inputs.source || '' }}"
         run: |-
+          # gh reroute hardening, mirroring the heavy jobs: pin the host, drop
+          # planted tokens, and use a fresh empty config dir — the pool's
+          # shared ~/.config/gh is attacker-writable, and a config.yml with an
+          # http_unix_socket reroute would swallow this step's gh calls,
+          # CI_DEV_BOT_PAT in the Authorization header included.
+          # Full rationale → qwen-autofix.md#af-148
+          export GH_HOST=github.com
+          unset GH_ENTERPRISE_TOKEN GH_TOKEN
+          # `export VAR="$(...)"` reports export's status, not the
+          # substitution's: a failing mktemp must abort the step, not continue
+          # with an empty GH_CONFIG_DIR that gh treats as unset — falling back
+          # to the shared ~/.config/gh this preamble closes.
+          if ! GH_CONFIG_DIR="$(mktemp -d "${RUNNER_TEMP}/autofix-gh-config.XXXXXX")"; then
+            echo "::error::could not create gh config dir; refusing to run gh without reroute hardening"
+            exit 1
+          fi
+          export GH_CONFIG_DIR
+
           # Every lane that reaches this scan is supposed to hold the PAT:
           # route now declines the one event GitHub is known to run without
           # secrets (a fork PR's own review) before it can set do_review.
@@ -2088,17 +2136,28 @@ jobs:
             exit 1
           fi
 
+          # Pre-clean before create, mirroring the heavy jobs: run_id is
+          # public and sequential, and mkdir -p alone would succeed over a
+          # dir or symlink pre-planted on the shared pool /tmp — the scan's
+          # redirects would then land in an attacker-chosen place, and a
+          # planted bot-prs.json would feed the forced-PR guard below.
+          rm -rf "${WORKDIR}"
+          (umask 077; mkdir -p "${WORKDIR}")
+
           # Fleet visibility: every per-PR decision below also records a row so
           # the run summary shows the WHOLE managed fleet in one table.
           # Reconstructing this by hand (list bot PRs, regex each one's eval
           # markers, cross-check checks and fork state) was the only way to see
           # a stall, so stalls stayed invisible until someone went looking.
-          FLEET_FILE="$(mktemp)"
-          trap 'rm -f "${FLEET_FILE}"' EXIT
+          # Inside WORKDIR, not mktemp's /tmp/tmp.*: on a cancelled run the
+          # EXIT trap never fires, and only the always() step and the heavy
+          # jobs' autofix* age sweep reclaim what this step leaves — neither
+          # can reach a tmp.* name.
+          FLEET_FILE="${WORKDIR}/fleet.tsv"
+          trap 'rm -f "${FLEET_FILE}"; rm -rf "${WORKDIR}"' EXIT
           fleet_row() {
             printf '%s\t%s\t%s\n' "$1" "$2" "$3" >> "${FLEET_FILE}"
           }
-          WORKDIR="$(mktemp -d)"
 
           read_forced_pr_meta() {
             local attempt meta
@@ -3259,6 +3318,16 @@ jobs:
           } >> "${GITHUB_STEP_SUMMARY}"
           echo "targets=${TARGETS}" >> "${GITHUB_OUTPUT}"
           echo "has_targets=$([[ "${COUNT}" -gt 0 ]] && echo true || echo false)" >> "${GITHUB_OUTPUT}"
+
+      # Nothing else removes the per-run WORKDIR; on the persistent pool
+      # every scan would leave its API dumps behind forever. always() covers
+      # cancellation (the in-step EXIT trap does not fire on a killed run);
+      # only a hard runner kill abandons the dir, and the autofix* age sweep
+      # in the heavy jobs reclaims it. Mirrors issue-autofix's cleanup step.
+      # Full rationale → qwen-autofix.md#af-148
+      - name: 'Clean up scan workdir'
+        if: 'always()'
+        run: 'rm -rf "${WORKDIR}"'
 
   # ===========================================================================
   # REVIEW PHASE (build) — compile the trusted-base CLI bundle ONCE per scan
@@ -4699,7 +4768,17 @@ jobs:
             fi
           } > "${WORKDIR}/feedback.md"
           echo '--- feedback.md ---'
-          cat "${WORKDIR}/feedback.md"
+          # Reviewer/bot comment bodies ride this file VERBATIM and this echo
+          # puts them on step stdout, which the runner scans for workflow
+          # commands in BOTH syntaxes: `::name::` AND the legacy `##[name]`,
+          # the latter parsed MID-line too — a quoted `##[add-matcher]` makes
+          # the runner load the rest of the line as a matcher file and fail
+          # THIS step before the agent runs. Measured on #9761: a review
+          # finding about that injection channel carried the payload strings
+          # as its example text, and five consecutive pre-agent crashes
+          # burned the takeover window in ~70 minutes. Neutralize both
+          # prefixes like every other untrusted echo.
+          cat "${WORKDIR}/feedback.md" | sed -e 's/::/;;/g' -e 's/##\[/##［/g'
 
       # The agent below runs for up to 130 minutes and the verification gate adds
       # more, but nothing reaches the PR thread until "Push and report" at the
@@ -5072,7 +5151,9 @@ jobs:
                 else
                   echo "::warning::could not merge carried deferrals across the repair (one of the two sets is unparseable); keeping the carried set and preserving this round's as deferred-findings.unmerged.json. Raw content follows:"
                 fi
-                head -c 4000 "${WORKDIR}/deferred-findings.json" | sed 's/::/;;/g'
+                # Both command syntaxes, like every other untrusted echo
+                # (`##[` parses mid-line too — #9761).
+                head -c 4000 "${WORKDIR}/deferred-findings.json" | sed -e 's/::/;;/g' -e 's/##\[/##［/g'
                 echo
                 rm -f "${WORKDIR}/deferred-findings.carry.next"
                 # Keep the discarded set ON DISK so the warning's pointer at
@@ -5300,10 +5381,12 @@ jobs:
           for f in feedback.md address-summary.md no-action.md failure.md failure.zh.md handoff.md gate-rejection.md gate-advisories.md growth-audit.json agent-api-error agent-api-error-kind agent-timeout resolved-comments.txt comment-replies.json deferred-findings.json deferred-findings.carry.json deferred-findings.unmerged.json pr.diff; do
             if [[ -f "${WORKDIR}/${f}" ]]; then
               echo "=============== ${f} ==============="
-              # Agent-written content: a line-start `::` would be parsed as a
-              # workflow command (::error::, ::add-mask::), the same reason
-              # every other echo of these files neutralizes it.
-              sed 's/::/;;/g' "${WORKDIR}/${f}"
+              # Agent/reviewer-written content: both workflow-command syntaxes
+              # parse here — a line-start `::` (::error::, ::add-mask::) AND
+              # `##[` even mid-line (a quoted `##[add-matcher]` fails THIS
+              # step; measured on #9761 via the prepare echo of this same
+              # file). Neutralize both, like every other echo of these files.
+              sed -e 's/::/;;/g' -e 's/##\[/##［/g' "${WORKDIR}/${f}"
               echo
             fi
           done
@@ -5995,7 +6078,11 @@ jobs:
                 elif [[ "${_upsert_line}" == __upsert_trusted__* ]]; then
                   printf '%s\n' "${_upsert_line#__upsert_trusted__}"
                 else
-                  printf '%s\n' "${_upsert_line//::/;;}"
+                  # The canonical two-expression neutralizer, identical to
+                  # every other echo site — one spelling for the whole
+                  # family, so a syntax change cannot drift across two
+                  # implementations (`##[` parses mid-line too — #9761).
+                  printf '%s\n' "${_upsert_line}" | sed -e 's/::/;;/g' -e 's/##\[/##［/g'
                 fi
               done <<< "${UPSERT_OUT}"
             fi

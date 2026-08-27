@@ -725,6 +725,13 @@ describe('Gemini Client (client.ts)', () => {
 
   describe('initialize', () => {
     it('initializes from the selective runtime projection without the full transcript', async () => {
+      const restoreLoadedSkillsFromHistory = vi.fn();
+      vi.mocked(mockConfig.getToolRegistry().getTool).mockImplementation(
+        (name: string) =>
+          name === ToolNames.SKILL
+            ? ({ restoreLoadedSkillsFromHistory } as never)
+            : undefined,
+      );
       const seedResumeTokenCountsSpy = vi.spyOn(
         GeminiChat.prototype,
         'seedResumeTokenCounts',
@@ -762,6 +769,7 @@ describe('Gemini Client (client.ts)', () => {
         'test-session-id',
       );
       expect(seedResumeTokenCountsSpy).toHaveBeenCalledWith(321, 45, false);
+      expect(restoreLoadedSkillsFromHistory).toHaveBeenCalledWith(apiHistory);
     });
 
     it('seeds resumed chat with replayed prompt token count', async () => {
