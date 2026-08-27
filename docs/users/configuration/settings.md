@@ -549,6 +549,8 @@ Controls which [Skills](../features/skills) are exposed to the model.
 
 The precedence is `skills.disabled` > `skills.enabled` > `skills.defaultDisabled`. For example, a user can put a skill in `defaultDisabled` and a project can add the same name to `enabled`; a hard `disabled` entry at any scope still wins.
 
+Extension skills are named `<extension>:<name>` (as shown by `/skills`); entries may use that form, and a pre-rename bare name also keeps matching the renamed skill, so entries written before an extension collision survive.
+
 #### mcp
 
 | Setting                 | Type             | Description                                                                                                                                                                                                                                                                                                                                                                                                                                 | Default     |
