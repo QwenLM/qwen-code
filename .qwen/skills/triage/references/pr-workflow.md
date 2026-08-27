@@ -191,8 +191,14 @@ ISSUES=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json closingIssuesReferences |
 ```
 
 The parser is not intent-aware — prose like "resolves #123's closer" links
-#123 too — so treat the linkage as input to verify against the issue's
-actual state, never as proof by itself.
+#123 too, so an accidental prose mention can pull an unrelated issue into
+`ISSUES`. There is no deterministic intent check: the linkage decides WHICH
+issues the branches below read, and they then act on those issues' states.
+The blast radius stays bounded — the only irreversible act (close)
+additionally requires this PR's diff to be fully subsumed by the default
+branch, which is true only when the change is already landed, so an
+accidental linkage can at worst reach a visible, reversible request-changes
+review or a maintainer escalation, never a substantively wrong close.
 
 ```bash
 # Record each linked issue's state; $N feeds the closer query below. The loop
