@@ -5,6 +5,7 @@
  */
 
 import { execFile } from 'node:child_process';
+import { sanitizeLogText } from '@qwen-code/channel-base';
 import { dwsProcessEnvironment } from './dws-environment.js';
 import {
   startDwsEventProcess,
@@ -16,6 +17,8 @@ const DWS_PROCESS_TIMEOUT_MS = 45_000;
 const DWS_PROCESS_FORCE_KILL_DELAY_MS = 5_000;
 const MINIMUM_DWS_VERSION = [1, 0, 57] as const;
 const DWS_MAX_OUTPUT_BYTES = 16 * 1024 * 1024;
+const DWS_ERROR_OUTPUT_MAX_CHARS = 1000;
+const ANSI_ESCAPE_SEQUENCE = /\u001b\[[0-?]*[ -/]*[@-~]/g;
 const MAX_MESSAGE_PAGES = 100;
 const MAX_TODO_PAGES = 50;
 const TODO_PAGE_SIZE = 20;
@@ -187,6 +190,21 @@ export function classifyDwsCommandFailure(code: unknown): DwsCommandOutcome {
     : 'unknown';
 }
 
+function dwsCommandFailureMessage(
+  code: unknown,
+  stdout: unknown,
+  stderr: unknown,
+): string {
+  const base = `DWS command failed${code === undefined ? '' : ` (${String(code)})`}`;
+  const output = String(stderr ?? '').trim() || String(stdout ?? '').trim();
+  if (!output) return `${base}.`;
+  const details = sanitizeLogText(
+    output.replace(ANSI_ESCAPE_SEQUENCE, ''),
+    DWS_ERROR_OUTPUT_MAX_CHARS,
+  ).trim();
+  return details ? `${base}: ${details}` : `${base}.`;
+}
+
 function runDwsProcess(
   executable: string,
   args: string[],
@@ -212,7 +230,7 @@ function runDwsProcess(
           const outcome = classifyDwsCommandFailure(code);
           reject(
             new DwsCommandError(
-              `DWS command failed${code === undefined ? '' : ` (${String(code)})`}.`,
+              dwsCommandFailureMessage(code, stdout, stderr),
               outcome,
             ),
           );
