@@ -3975,7 +3975,7 @@ planted FIFO cannot stall it.
 
 In `review-address` · `Post autofix status comment`.
 
-```text
+````text
 Deep-link "Watch live progress" to THIS matrix leg's live
 log, not just the run page: the run page lists every leg of
 the scan and the reader must find which one is theirs. The
@@ -4041,7 +4041,7 @@ on-demand review (a human push, /review) keeps working.
 deliberately NOT signal codes: both mean "this loop can end by merging",
 and pausing on them would park exactly the PR a human should merge. They
 stay visible in the review body; acting on them is a different feature.
-```
+````
 
 <a id="af-152"></a>
 
@@ -4092,10 +4092,19 @@ earlier one is older than the activity that resumed it, so the dedup
 (AUTOFIX_BOT comments carrying the marker, newer than the boundary) reads
 exactly that. It deliberately does NOT begin "🤖 AutoFix stopped" — the
 fleet shepherd's REASON regex reads that prefix as a terminal stop, and
-this is a self-lifting park. The gate sits after the idle fast-path (an
-idle PR dispatches nothing anyway, and the streak jq is not free) and
-before target emission, so a parked PR spends no dispatch, no runner, and
-no round.
+this is a self-lifting park. The verdict is derived ABOVE the stale-base
+update, and the update's gate refuses a parked PR beside the conflict
+park: a base merge into a parked PR re-fires every synchronize-triggered
+workflow on the new head, and the base-merge round reviews an unchanged
+diff — its clean marker resets the streak, silently lifting the park
+with zero human activity (af-108's exact hazard, the one the conflict
+park's guard was added for). Both gates reuse the one derivation, so the
+two reads cannot drift; the park ACTION still sits after the idle
+fast-path (an idle PR dispatches nothing anyway) and before target
+emission, so a parked PR spends no dispatch, no runner, and no round.
+The notice's release clause branches on the takeover label like the cap
+notices: `/takeover stop` is a logged no-op on a PR without the label,
+so there the notice offers takeover itself instead.
 ```
 
 <a id="af-153"></a>

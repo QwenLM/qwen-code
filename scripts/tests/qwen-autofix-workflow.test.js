@@ -21221,7 +21221,9 @@ describe('growth-audit hardening: park wake set and verdict pipeline (round 3)',
     // CONSEC_FAIL toward a terminal lockout on the exact PR a human is
     // settling (probe-verified entrance). The scan block mirrors prepare's
     // conflict-handoff idempotence wake set; execute the real block.
-    expect(reviewScanJob).toContain('&& "${CONFLICT_PARKED}" != \'true\' ]]');
+    expect(reviewScanJob).toContain(
+      '&& "${CONFLICT_PARKED}" != \'true\' && "${CONV_PARKED}" != \'true\' ]]',
+    );
     const scanParkGateBlock = reviewScanJob.match(
       /CONFLICT_PARKED='false'[\s\S]*?rm -f "\$\{WORKDIR\}\/rv\.scan\.json" "\$\{WORKDIR\}\/rc\.scan\.json" "\$\{WORKDIR\}\/checks\.scan\.json"\n {12}fi\n/,
     )?.[0];
@@ -21386,7 +21388,7 @@ describe('growth-audit hardening: park wake set and verdict pipeline (round 3)',
               `REVIEW_BOT=qwen-code-ci-bot\nAUTOFIX_BOT=qwen-code-dev-bot\n` +
               `TRUSTED_ASSOC='["OWNER", "MEMBER", "COLLABORATOR"]'\n` +
               `CONVERGENCE_BREAK_ROUNDS='not-a-number'\n` +
-              `CONVERGENCE_SIGNAL_CODES='["root-cause-triage","batch-fixes","stem-surface"]'\n` +
+              `CONVERGENCE_SIGNAL_CODES='["root-cause-triage","successor-chain","batch-fixes","stem-surface"]'\n` +
               `${streakBlock.replace(/\n {12}/g, '\n')}\n` +
               `printf '\\n%s %s' "$CONV_STREAK" "$CONVERGENCE_BREAK_ROUNDS"`,
           ],
@@ -21421,6 +21423,13 @@ describe('growth-audit hardening: park wake set and verdict pipeline (round 3)',
       expect(
         readState({ rv: [botReview(T(1), 3, ['land-and-defer'])] }).streak,
       ).toBe(0);
+      // 'successor-chain' is a divergence signal like the other wired
+      // codes — the gate's list is the CLI vocabulary minus the ONE
+      // documented exit code ('land-and-defer'); the lockstep test pins
+      // that contract on both ends.
+      expect(
+        readState({ rv: [botReview(T(1), 3, ['successor-chain'])] }).streak,
+      ).toBe(1);
       // A dismissed review and its same-round re-run count once — the
       // NEWEST marker speaks for the round (here: the healthy re-run).
       expect(
@@ -21580,12 +21589,21 @@ describe('growth-audit hardening: park wake set and verdict pipeline (round 3)',
       expect(reviewScanJob).toContain(
         'fleet_row "${PR}" \'convergence-parked\'',
       );
-      const notice = reviewScanJob.match(
-        /elif ! gh pr comment "\$\{PR\}" --repo "\$\{REPO\}" --body "\$\(printf '⏸️ AutoFix paused by a review convergence signal[^\n]*/,
-      )?.[0];
-      expect(notice).toBeTruthy();
-      expect(notice).toContain('<!-- autofix-convergence-break -->');
-      expect(notice).not.toContain('🤖 AutoFix stopped');
+      // The release lever only exists under the takeover label, so the
+      // notice branches on it like the cap notices — two CONV_BODY texts,
+      // both under the park marker, neither a terminal-stop headline.
+      const noticeBodies =
+        reviewScanJob.match(
+          /CONV_BODY="\$\(printf '⏸️ AutoFix paused by a review convergence signal[^\n]*/g,
+        ) ?? [];
+      expect(noticeBodies).toHaveLength(2);
+      for (const body of noticeBodies) {
+        expect(body).toContain('<!-- autofix-convergence-break -->');
+        expect(body).not.toContain('🤖 AutoFix stopped');
+      }
+      expect(noticeBodies[0]).toContain('stop` to release takeover');
+      expect(noticeBodies[1]).toContain('to take it over');
+      expect(reviewScanJob).toContain('--body "${CONV_BODY}"');
       expect(reviewScanJob).toContain(
         'select((.body // "") | contains("<!-- autofix-convergence-break -->"))',
       );
@@ -21596,11 +21614,25 @@ describe('growth-audit hardening: park wake set and verdict pipeline (round 3)',
       // or a dedup that reposts every scan. Run the real block through a
       // loop (a `continue` needs one); a sentinel after the block says
       // whether the candidate fell through to dispatch or parked.
+      // The verdict derives ABOVE the stale-base update (a base merge into
+      // a parked PR would self-lift the park); the trip branch is the park
+      // ACTION on that verdict. The harness runs the production order:
+      // boundary+streak read, verdict derivation, then the action.
+      const parkedDerivation = reviewScanJob.match(
+        /CONV_PARKED='false'\n {12}if \[\[ "\$\{CONV_STREAK\}" -ge "\$\{CONVERGENCE_BREAK_ROUNDS\}" \]\]; then\n {14}CONV_PARKED='true'\n {12}fi\n/,
+      )?.[0];
+      expect(parkedDerivation).toBeTruthy();
       const tripBlock = reviewScanJob.match(
-        /\[\[ "\$\{CONVERGENCE_BREAK_ROUNDS\}" =~ [\s\S]*?\n {14}continue\n/,
+        /if \[\[ "\$\{CONV_PARKED\}" == 'true' \]\]; then\n[\s\S]*?\n {14}continue\n/,
       )?.[0];
       expect(tripBlock).toBeTruthy();
-      const runTrip = ({ rv = [], ic = [], dryRun = 'true', noticedAt }) => {
+      const runTrip = ({
+        rv = [],
+        ic = [],
+        dryRun = 'true',
+        noticedAt,
+        takeover = 'false',
+      }) => {
         writeFileSync(join(dir, 'rv.json'), JSON.stringify(rv));
         writeFileSync(join(dir, 'rc.json'), JSON.stringify([]));
         writeFileSync(
@@ -21627,10 +21659,11 @@ describe('growth-audit hardening: park wake set and verdict pipeline (round 3)',
             `set -e\nWORKDIR='${dir}'\nREARM_KEY='none'\nPR=1\nREPO='owner/repo'\n` +
               `DRY_RUN='${dryRun}'\nSKIP_LABEL='autofix/skip'\n` +
               `RETRY_COMMAND='@qwen-code /retry'\nTAKEOVER_COMMAND='@qwen-code /takeover'\n` +
+              `HAS_TAKEOVER='${takeover}'\n` +
               `REVIEW_BOT=qwen-code-ci-bot\nAUTOFIX_BOT=qwen-code-dev-bot\n` +
               `TRUSTED_ASSOC='["OWNER", "MEMBER", "COLLABORATOR"]'\n` +
               `CONVERGENCE_BREAK_ROUNDS='3'\n` +
-              `CONVERGENCE_SIGNAL_CODES='["root-cause-triage","batch-fixes","stem-surface"]'\n` +
+              `CONVERGENCE_SIGNAL_CODES='["root-cause-triage","successor-chain","batch-fixes","stem-surface"]'\n` +
               `fleet_row() { printf 'fleet_row: %s\\n' "$*"; }\n` +
               `gh() {\n` +
               `  case "\${1:-}" in\n` +
@@ -21647,6 +21680,8 @@ describe('growth-audit hardening: park wake set and verdict pipeline (round 3)',
               `    *) printf '%s\\n' "$*" >> "\${WORKDIR}/gh-calls" ;;\n` +
               `  esac\n` +
               `}\n` +
+              `${streakBlock.replace(/\n {12}/g, '\n')}` +
+              `${parkedDerivation.replace(/\n {12}/g, '\n')}` +
               `SENTINEL=''\n` +
               `for PR in 1; do\n` +
               `${tripBlock.replace(/\n {12}/g, '\n')}\n` +
@@ -21695,6 +21730,20 @@ describe('growth-audit hardening: park wake set and verdict pipeline (round 3)',
       const fresh = runTrip({ rv: threeSignals, dryRun: 'false' });
       expect(fresh.parked).toBe(true);
       expect(fresh.commentCalls).toContain('comment');
+      // A non-takeover PR's notice offers takeover itself: `/takeover stop`
+      // is the remove branch's logged no-op without the label, and command
+      // comments do not even move the breaker's boundary.
+      expect(fresh.commentCalls).toContain('to take it over');
+      expect(fresh.commentCalls).not.toContain('stop` to release takeover');
+      // Under the label the release lever exists and is advertised.
+      const taken = runTrip({
+        rv: threeSignals,
+        dryRun: 'false',
+        takeover: 'true',
+      });
+      expect(taken.parked).toBe(true);
+      expect(taken.commentCalls).toContain('stop` to release takeover');
+      expect(taken.commentCalls).not.toContain('to take it over');
       const dedup = runTrip({
         rv: threeSignals,
         dryRun: 'false',
@@ -21702,6 +21751,139 @@ describe('growth-audit hardening: park wake set and verdict pipeline (round 3)',
       });
       expect(dedup.parked).toBe(true);
       expect(dedup.commentCalls).not.toContain('comment');
+      // The dedup's time filter is not vacuous: a notice OLDER than the
+      // boundary (a maintainer response resumed the loop after the first
+      // park) must not suppress the fresh notice a re-trip earns — the
+      // af-152 promise. Every case above ran the dedup against an EMPTY
+      // boundary, where `> $since` cannot be told from "any notice ever".
+      const resumed = runTrip({
+        rv: [
+          botReview(T(3), 5, ['root-cause-triage']),
+          botReview(T(4), 6, ['batch-fixes']),
+          botReview(T(5), 7, ['root-cause-triage']),
+        ],
+        ic: [
+          {
+            user: { login: 'alice' },
+            author_association: 'OWNER',
+            created_at: T(2),
+            body: 'resuming — batch the remaining fixes',
+          },
+        ],
+        dryRun: 'false',
+        noticedAt: T(1),
+      });
+      expect(resumed.parked).toBe(true);
+      expect(resumed.commentCalls).toContain('comment');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps a convergence-parked PR out of the scan stale-base update (#10107)', () => {
+    // The verdict derives ABOVE the stale-base section and the update's
+    // gate refuses a parked PR beside the conflict park: a base merge into
+    // a parked PR re-fires every synchronize-triggered workflow on the new
+    // head, and the base-merge round reviews an unchanged diff — its clean
+    // marker resets the streak, silently self-lifting the park with zero
+    // human activity (af-108's exact hazard). Execute the real read, the
+    // real verdict derivation, and the real gate: a tripped streak must
+    // suppress the update-branch call, and an untripped one must still
+    // update.
+    const streakBlock = reviewScanJob.match(
+      /\[\[ "\$\{CONVERGENCE_BREAK_ROUNDS\}" =~ [\s\S]*?\|\| CONV_STREAK=0\n/,
+    )?.[0];
+    expect(streakBlock).toBeTruthy();
+    const parkedDerivation = reviewScanJob.match(
+      /CONV_PARKED='false'\n {12}if \[\[ "\$\{CONV_STREAK\}" -ge "\$\{CONVERGENCE_BREAK_ROUNDS\}" \]\]; then\n {14}CONV_PARKED='true'\n {12}fi\n/,
+    )?.[0];
+    expect(parkedDerivation).toBeTruthy();
+    // The verdict precedes the gate that consumes it.
+    expect(reviewScanJob.indexOf("CONV_PARKED='false'")).toBeLessThan(
+      reviewScanJob.indexOf('Auto-update a PR that is red ONLY'),
+    );
+    const staleBaseBlock = reviewScanJob.match(
+      /( {12}# Auto-update a PR that is red ONLY because of a stale base[\s\S]*?\n {12}fi\n)\n {12}N_FAILED_CHECKS=/,
+    )?.[1];
+    expect(staleBaseBlock).toBeTruthy();
+    const dir = mkdtempSync(join(tmpdir(), 'autofix-conv-base-'));
+    try {
+      const botReview = (at, round) => ({
+        user: { login: 'qwen-code-ci-bot' },
+        submitted_at: at,
+        state: 'CHANGES_REQUESTED',
+        body: `<!-- qwen-review-ledger ${JSON.stringify({
+          v: 1,
+          round,
+          findings: [],
+          rec: ['root-cause-triage'],
+        })} -->`,
+      });
+      const T = (h) => `2026-01-01T0${h}:00:00Z`;
+      const runStaleBase = ({ rv }) => {
+        writeFileSync(join(dir, 'rv.json'), JSON.stringify(rv));
+        writeFileSync(join(dir, 'rc.json'), JSON.stringify([]));
+        writeFileSync(join(dir, 'ic.json'), JSON.stringify([]));
+        const ghCalls = join(dir, 'gh-calls');
+        if (existsSync(ghCalls)) rmSync(ghCalls);
+        const out = execFileSync(
+          'bash',
+          [
+            '-c',
+            `set -e\nWORKDIR='${dir}'\nREARM_KEY='none'\nPR=1\nREPO='owner/repo'\n` +
+              `DRY_RUN='false'\nREVIEW_BOT=qwen-code-ci-bot\nAUTOFIX_BOT=qwen-code-dev-bot\n` +
+              `TRUSTED_ASSOC='["OWNER", "MEMBER", "COLLABORATOR"]'\n` +
+              `CONVERGENCE_BREAK_ROUNDS='3'\n` +
+              `CONVERGENCE_SIGNAL_CODES='["root-cause-triage","successor-chain","batch-fixes","stem-surface"]'\n` +
+              `CONFLICT_PARKED='false'\nMAIN_HEAD='mainsha'\nPR_HEAD_OID='prheadsha'\n` +
+              `CHECKS_JSON='[{"name":"Qwen Code CI","workflowName":"Qwen Code CI","conclusion":"FAILURE"}]'\n` +
+              `MAIN_GREEN_CHECKS='["Qwen Code CI"]'\n` +
+              `BASE_UPDATE_CUTOFF='2025-12-31T00:00:00Z'\n` +
+              `fleet_row() { :; }\n` +
+              `gh() {\n` +
+              `  case "\${1:-}" in\n` +
+              `    pr) printf '%s\\n' "\${*:2}" >> "\${WORKDIR}/gh-calls" ;;\n` +
+              `    api) if [[ "\${2:-}" == 'user' ]]; then\n` +
+              `           printf 'qwen-code-dev-bot'\n` +
+              `         elif [[ "$*" == *'/compare/'* ]]; then\n` +
+              `           printf 'behind'\n` +
+              `         else\n` +
+              `           printf '%s\\n' "api \${*:2}" >> "\${WORKDIR}/gh-calls"\n` +
+              `         fi ;;\n` +
+              `  esac\n` +
+              `}\n` +
+              `${streakBlock.replace(/\n {12}/g, '\n')}` +
+              `${parkedDerivation.replace(/\n {12}/g, '\n')}` +
+              `SENTINEL=''\n` +
+              `for PR in 1; do\n` +
+              `${staleBaseBlock.replace(/^ {12}/gm, '')}\n` +
+              `SENTINEL='reached'\ndone\n` +
+              `printf '\\nCONV_PARKED=%s sentinel=%s' "$CONV_PARKED" "$SENTINEL"`,
+          ],
+          { encoding: 'utf8' },
+        );
+        const last = out.split('\n').at(-1);
+        return {
+          parked: /CONV_PARKED=true/.test(last),
+          fellThrough: /sentinel=reached/.test(last),
+          calls: existsSync(ghCalls) ? readFileSync(ghCalls, 'utf8') : '',
+        };
+      };
+      // Tripped: the verdict parks and the stale-base gate refuses the head
+      // move — no update-branch call, no base-updated marker.
+      const parked = runStaleBase({
+        rv: [botReview(T(1), 3), botReview(T(2), 4), botReview(T(3), 5)],
+      });
+      expect(parked.parked).toBe(true);
+      expect(parked.fellThrough).toBe(true);
+      expect(parked.calls).not.toContain('update-branch');
+      expect(parked.calls).not.toContain('autofix-base-updated');
+      // Untripped: the SAME red-on-PR/green-on-main/behind state updates
+      // the base as before — the guard suppresses only the parked case.
+      const unparked = runStaleBase({ rv: [] });
+      expect(unparked.parked).toBe(false);
+      expect(unparked.fellThrough).toBe(false);
+      expect(unparked.calls).toContain('update-branch');
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -21749,7 +21931,7 @@ describe('growth-audit hardening: park wake set and verdict pipeline (round 3)',
               `REVIEW_BOT=qwen-code-ci-bot\nAUTOFIX_BOT=qwen-code-dev-bot\n` +
               `TRUSTED_ASSOC='["OWNER", "MEMBER", "COLLABORATOR"]'\n` +
               `CONVERGENCE_BREAK_ROUNDS='${rounds}'\n` +
-              `CONVERGENCE_SIGNAL_CODES='["root-cause-triage","batch-fixes","stem-surface"]'\n` +
+              `CONVERGENCE_SIGNAL_CODES='["root-cause-triage","successor-chain","batch-fixes","stem-surface"]'\n` +
               `${mirrorBlock.replace(/\n {10}/g, '\n')}\nprintf '\\n%s' "$STALE"`,
           ],
           { encoding: 'utf8' },
@@ -21835,6 +22017,14 @@ describe('growth-audit hardening: park wake set and verdict pipeline (round 3)',
     for (const code of signalCodes) {
       expect(vocab).toContain(code);
     }
+    // …and the converse: every divergence code the CLI can emit is wired —
+    // the vocabulary minus the ONE documented exit code. A code the CLI
+    // emits that the gate never counts takes the streak reduce's else-0
+    // branch and RESETS an accumulated streak instead of extending it.
+    for (const code of vocab) {
+      if (code === 'land-and-defer') continue;
+      expect(signalCodes).toContain(code);
+    }
     // 'land-and-defer' means "this loop can end by merging" — pausing on it
     // would park exactly the PR a human should merge.
     expect(vocab).toContain('land-and-defer');
@@ -21852,9 +22042,18 @@ describe('growth-audit hardening: park wake set and verdict pipeline (round 3)',
     // indentation; only the shell variable names around them differ.
     // A program opens as `--arg… "${VAR}" '` + newline and contains no
     // single quote of its own, so the next `'` closes it.
+    // Per-line, not whole-string, normalization: it absorbs the scan/mirror
+    // indentation difference but preserves whitespace INSIDE jq string
+    // literals — the machine-marker exclusion regex ends in a load-bearing
+    // trailing space, and a one-sided literal edit there must fail the pin
+    // instead of normalizing into it.
     const jqProgramsOf = (block) =>
       [...block.matchAll(/" '\n([\s\S]+?)'/g)].map((m) =>
-        m[1].replace(/\s+/g, ' ').trim(),
+        m[1]
+          .split('\n')
+          .map((line) => line.trimStart())
+          .join(' ')
+          .trim(),
       );
     const scanBlock = reviewScanJob.match(
       /\[\[ "\$\{CONVERGENCE_BREAK_ROUNDS\}" =~ [\s\S]*?\|\| CONV_STREAK=0\n/,
@@ -21866,6 +22065,15 @@ describe('growth-audit hardening: park wake set and verdict pipeline (round 3)',
     // Two programs each: the human-activity boundary and the streak.
     expect(scanPrograms).toHaveLength(2);
     expect(jqProgramsOf(mirrorBlock)).toEqual(scanPrograms);
+    // Witness that the pin now sees a one-sided literal edit: a single extra
+    // space inside ONE side's exclusion regex (its trailing space is
+    // load-bearing) normalized away under the old whole-string collapse.
+    const mutatedScanBlock = scanBlock.replace(
+      'qwen-review-ack) ',
+      'qwen-review-ack)  ',
+    );
+    expect(mutatedScanBlock).not.toEqual(scanBlock);
+    expect(jqProgramsOf(mutatedScanBlock)).not.toEqual(scanPrograms);
     // The design pointers resolve.
     expect(designDoc).toContain('<a id="af-151"></a>');
     expect(designDoc).toContain('<a id="af-152"></a>');
