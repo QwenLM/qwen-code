@@ -4010,6 +4010,17 @@ describe('base-refresh-only synchronize gate (real git, stubbed gh)', () => {
         git checkout -q pr; git merge -q --no-edit main >/dev/null
         git checkout -q main; echo z > other.txt; git commit -qam adv2
         git checkout -q pr; git merge -q --no-edit main >/dev/null ;;
+      many_refreshes)
+        git checkout -q main
+        n=1
+        while [ "$n" -le "$REFRESHES" ]; do
+          echo "m$n" > other.txt
+          git commit -qam "adv$n"
+          git checkout -q pr
+          git merge -q --no-edit main >/dev/null
+          git checkout -q main
+          n=$((n+1))
+        done ;;
       real_push_after_refresh)
         git checkout -q main; echo y > other.txt; git commit -qam advance
         git checkout -q pr; git merge -q --no-edit main >/dev/null
@@ -4050,6 +4061,7 @@ describe('base-refresh-only synchronize gate (real git, stubbed gh)', () => {
       userFail = false,
       reviewsFail = false,
       existingNoteId = '',
+      shapeEnv = {},
     } = {},
   ) {
     const dir = mkdtempSync(join(tmpdir(), 'base-refresh-'));
@@ -4058,7 +4070,7 @@ describe('base-refresh-only synchronize gate (real git, stubbed gh)', () => {
       mkdirSync(bin);
       execFileSync('bash', ['-c', SETUP], {
         cwd: dir,
-        env: { ...process.env, SHAPE: shape },
+        env: { ...process.env, SHAPE: shape, ...shapeEnv },
       });
       const R = readFileSync(join(dir, 'R'), 'utf8').trim();
       const H = readFileSync(join(dir, 'H'), 'utf8').trim();
@@ -4169,6 +4181,25 @@ describe('base-refresh-only synchronize gate (real git, stubbed gh)', () => {
     expect(r.status).toBe(0);
     expect(r.out.skip).toBe('true');
   });
+
+  it.skipIf(skipExecuted)(
+    'skips at the ten-refresh walk cap and fails open past it',
+    () => {
+      const at = runGate('many_refreshes', {
+        shapeEnv: { REFRESHES: '10' },
+      });
+      expect(at.status).toBe(0);
+      expect(at.out.skip).toBe('true');
+      const past = runGate('many_refreshes', {
+        shapeEnv: { REFRESHES: '11' },
+      });
+      expect(past.status).toBe(0);
+      expect(past.out.skip).toBe('false');
+      expect(past.out.reason).toBe(
+        'too many commits since the reviewed head (11)',
+      );
+    },
+  );
 
   it.skipIf(skipExecuted)(
     'skips when upstream touched the same file far from the PR hunks — offsets are ignored',
@@ -4304,6 +4335,45 @@ describe('base-refresh-only synchronize gate (real git, stubbed gh)', () => {
       expect(r.status).toBe(0);
       expect(r.out.skip).toBe('true');
       expect(r.out.reviewed_sha).toBe(r.R);
+    },
+  );
+
+  it.skipIf(skipExecuted)(
+    'a bodyless bot review cannot abort the ledger lookup',
+    () => {
+      // GitHub serializes a review submitted without a body as
+      // `"body": null`; jq's `contains` errors on null, so the marker
+      // filter coerces it — otherwise one bare approve would fail every
+      // later lookup open with "reviewed-head lookup failed" and the gate
+      // could never skip this PR again.
+      const beside = runGate('update_branch_only', {
+        reviewsFor: (R) =>
+          reviewsFixture(
+            reviewEntry({ sha: R }),
+            reviewEntry({ sha: R, body: null }),
+          ),
+      });
+      expect(beside.status).toBe(0);
+      expect(beside.out.skip).toBe('true');
+      expect(beside.out.reviewed_sha).toBe(beside.R);
+      const alone = runGate('update_branch_only', {
+        reviewsFor: (R) => reviewsFixture(reviewEntry({ sha: R, body: null })),
+      });
+      expect(alone.status).toBe(0);
+      expect(alone.out.skip).toBe('false');
+      expect(alone.out.reason).toBe('no completed automatic round on this PR');
+    },
+  );
+
+  it.skipIf(skipExecuted)(
+    'fails open when no commits followed the reviewed head',
+    () => {
+      const r = runGate('update_branch_only', {
+        reviewsFor: (_R, H) => reviewsFixture(reviewEntry({ sha: H })),
+      });
+      expect(r.status).toBe(0);
+      expect(r.out.skip).toBe('false');
+      expect(r.out.reason).toBe('no new commits since the reviewed head');
     },
   );
 

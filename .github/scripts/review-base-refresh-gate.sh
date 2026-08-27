@@ -75,7 +75,7 @@ decide() {
        | select(.state == "APPROVED" or .state == "CHANGES_REQUESTED"
                 or .state == "COMMENTED")
        | select(.submitted_at != null)
-       | select(.body | contains("<!-- qwen-review-ledger"))]
+       | select((.body // "") | contains("<!-- qwen-review-ledger"))]
       | last | .commit_id // empty'
   )" || return
   REASON='no completed automatic round on this PR'
