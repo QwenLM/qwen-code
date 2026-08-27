@@ -62,6 +62,17 @@ describe('waitForGoalRuntime', () => {
     );
   });
 
+  it('does not hide synchronous readiness errors', async () => {
+    const failure = new Error('unsupported Goal lifecycle record');
+    const getGoalRuntimeReady = vi.fn((): Promise<GoalRuntime> => {
+      throw failure;
+    });
+
+    await expect(waitForGoalRuntime({ getGoalRuntimeReady })).rejects.toBe(
+      failure,
+    );
+  });
+
   it('resolves true once the runtime settles within the timeout', async () => {
     const getGoalRuntimeReady = vi.fn().mockResolvedValue({});
     await expect(
