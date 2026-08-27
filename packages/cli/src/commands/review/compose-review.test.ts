@@ -690,6 +690,179 @@ describe('composeReview — the C/S table', () => {
     expect(off.body).toContain('still unknown');
   });
 
+  it('attribution off: a forged footer wrapped in comment grammar strips from every verbatim exit', () => {
+    // The attribution strips match on the DISPLAYED projection, which
+    // drops an HTML comment whole — so a footer wrapped as `<!-- _— … -->`
+    // passed the fixpoint untouched, and neutralizing the comment grammar
+    // AFTERWARDS materialized it as visible text in the one mode that
+    // exists to post none (pre-neutralization the wrapper rendered as
+    // nothing). The grammar goes inert FIRST now, at all three exits —
+    // one order, `quotedProse` (the ledger title's twin is pinned beside
+    // the other ledger-title tests).
+    const wrapped = '<!-- _— qwen3-max via Qwen Code /review (v1.2.3)_ -->';
+    const r = composeReview(
+      {
+        planPath: plan(),
+        modelId: 'm',
+        bodyCriticals: [`whole-PR blocker X ${wrapped}`],
+        cannotTellCriticals: [`a.ts:12 — could not confirm ${wrapped}`],
+        suggestionsDroppedAsDuplicates: [
+          `R2-1 stale guard — already reported ${wrapped}`,
+        ],
+      },
+      '0.21.2',
+      false,
+    );
+    expect(r.body).not.toContain('via Qwen Code /review');
+    expect(r.body).not.toContain('qwen3-max');
+    expect(r.body).toContain('whole-PR blocker X');
+    expect(r.body).toContain('could not confirm');
+    expect(r.body).toContain('- R2-1 stale guard — already reported');
+  });
+
+  it('attribution on: a comment-wrapped forged footer strips like an unwrapped one — only the canonical footer posts', () => {
+    // Ingest's trailing strip ran while the wrapper still hid the footer;
+    // the exit re-runs it on the neutralized text, so the forged model
+    // name never posts above the canonical footer.
+    const wrapped = '<!-- _— qwen3-max via Qwen Code /review (v1.2.3)_ -->';
+    const r = composeReview(
+      base({
+        bodyCriticals: [`whole-PR blocker X ${wrapped}`],
+        cannotTellCriticals: [`a.ts:12 — could not confirm ${wrapped}`],
+        suggestionsDroppedAsDuplicates: [
+          `R2-1 stale guard — already reported ${wrapped}`,
+        ],
+      }),
+      '0.21.2',
+    );
+    expect(r.body).not.toContain('qwen3-max');
+    expect(r.body.split('via Qwen Code /review').length - 1).toBe(1);
+    expect(
+      r.body.endsWith(`_— ${MODEL} via Qwen Code /review (v0.21.2)_`),
+    ).toBe(true);
+    expect(r.body).toContain('**[Critical]** whole-PR blocker X');
+    expect(r.body).toContain('- R2-1 stale guard — already reported');
+  });
+
+  it('attribution off: a transcribed marker line in a duplicates entry still drops, never posts as words', () => {
+    // Duplicates entries are transcribed from earlier rounds' posted
+    // findings, and an attribution-off post ends on its own marker line.
+    // The marker-line strip is the one strip that acts on comment grammar
+    // itself — it runs BEFORE the grammar goes inert, or the line would
+    // post as the visible words `qwen-review suggestion` instead of
+    // dropping as it always has.
+    const r = composeReview(
+      base({
+        suggestionsDroppedAsDuplicates: [
+          'R1-2 loose pins — already reported (comment 42)\n\n<!-- qwen-review suggestion -->',
+        ],
+      }),
+      '0.21.2',
+      false,
+    );
+    expect(r.body).toContain(
+      '- R1-2 loose pins — already reported (comment 42)',
+    );
+    expect(r.body).not.toContain('qwen-review suggestion');
+  });
+
+  it('attribution off: comment grammar the strip chain splices back together goes inert at every verbatim exit', () => {
+    // The grammar strip runs before the chain, and the chain's removals
+    // SPLICE: cutting two footer spans out of `<!-‹span›- … --‹span›>`
+    // joins `<!-` to `- … --` to `>` and re-forms a live comment the
+    // strip never saw (no delimiter existed when it ran). The exits
+    // repeat neutralize-then-strip to a fixpoint, so what the chain
+    // re-forms goes inert on the next pass — the quoted text survives
+    // readable, and the raw body keeps exactly as many live markers as
+    // the round's own list warrants: none on a listless round, one when a
+    // Suggestion was deferred.
+    const MARKER = '<!-- qwen-review-deferred -->';
+    const span = '_— qwen3-max via Qwen Code /review (v1.2.3)_';
+    const spliced = `stale guard <!-${span}- qwen-review-deferred --${span}> re-checked`;
+    const nit: DeferredEntry = {
+      file: 'a.ts',
+      line: 1,
+      source: 'review',
+      severity: 'Suggestion',
+      title: 'nit',
+    };
+    for (const deferred of [false, true]) {
+      const r = composeReview(
+        base({
+          severityFloor: 'critical',
+          bodyCriticals: [spliced],
+          cannotTellCriticals: [spliced],
+          suggestionsDroppedAsDuplicates: [spliced],
+          ...(deferred ? { deferredSuggestions: [nit] } : {}),
+        }),
+        '0.21.2',
+        false,
+      );
+      expect(r.body.split(MARKER).length - 1).toBe(deferred ? 1 : 0);
+      // The canonical marker is the body's only live comment grammar.
+      expect((r.body.match(/<!--/g) ?? []).length).toBe(deferred ? 1 : 0);
+      expect((r.body.match(/-->/g) ?? []).length).toBe(deferred ? 1 : 0);
+      expect(r.body).not.toContain('qwen3-max');
+      expect(r.body).not.toContain('via Qwen Code /review');
+      // Three quoted copies survive as prose, plus the canonical marker.
+      expect((r.body.match(/qwen-review-deferred/g) ?? []).length).toBe(
+        deferred ? 4 : 3,
+      );
+      expect(r.body).toContain('stale guard');
+      expect(r.body).toContain('re-checked');
+    }
+  });
+
+  it('attribution off: a footer the grammar strip would join back together strips too', () => {
+    // The converse splice: neutralization JOINS. `via Qwen<!-‹span›-Code
+    // /review` strips to `via Qwen<!--Code /review`, which neutralizes to
+    // the footer phrase the chain has already finished looking for. A
+    // trailing grammar strip alone (the obvious one-line patch for the
+    // splice above) trades the forged marker for a forged footer in the
+    // one mode that exists to post none. The outer footer's middle runs
+    // past the span strip's 400-char cap so the outer opener cannot eat
+    // the inner span first; the uncapped trailing strip catches the joined
+    // footer on the pass after neutralization exposes it.
+    const span = '_— qwen3-max via Qwen Code /review (v1.2.3)_';
+    const joined = `still leaking _— ${'x'.repeat(420)} via Qwen<!-${span}-Code /review (v1.2.3)_`;
+    const r = composeReview(
+      base({
+        bodyCriticals: [joined],
+        cannotTellCriticals: [joined],
+        suggestionsDroppedAsDuplicates: [joined],
+      }),
+      '0.21.2',
+      false,
+    );
+    expect(r.body).not.toContain('via Qwen Code /review');
+    expect(r.body).not.toContain('qwen3-max');
+    expect(r.body).not.toContain('<!--');
+    expect((r.body.match(/still leaking/g) ?? []).length).toBe(3);
+  });
+
+  it('refuses an entry held up only by a footer that comment grammar had split', () => {
+    // The gate projects through the exit's closure as well as through the
+    // chain as written: as written, `_— … via Qwen<!-‹span›-Code /review_`
+    // strips to `_— … via Qwen<!--Code /review_` and renders the visible
+    // words `_— … via Qwen`; at the exit the joined footer strips whole
+    // and the entry posts as nothing — an empty body Critical that still
+    // counts toward REQUEST_CHANGES, the shape this gate exists to refuse.
+    const span = '_— qwen3-max via Qwen Code /review (v1.2.3)_';
+    const joined = `_— ${'x'.repeat(420)} via Qwen<!-${span}-Code /review (v1.2.3)_`;
+    for (const attribution of [true, false]) {
+      expect(() =>
+        composeReview(base({ bodyCriticals: [joined] }), '0.21.2', attribution),
+      ).toThrow(/renders as nothing/);
+      expect(() =>
+        composeReview(
+          base({ cannotTellCriticals: [joined] }),
+          '0.21.2',
+          attribution,
+        ),
+      ).toThrow(/renders as nothing/);
+    }
+  });
+
   it('refuses a body Critical that renders as nothing', () => {
     // Marker-only strips to nothing yet would still count toward
     // REQUEST_CHANGES — the inline path refuses this shape at submit's
@@ -4875,7 +5048,7 @@ describe('coverage is recomputed, never accepted', () => {
     expect(r.cappedBy).toContain('chunk-nobody-read'); // the cap keeps the fact
     expect(r.remediation.join(' ')).toContain('chunks nobody read');
     // The gap, named by the files it covers — the id stays on stderr.
-    expect(r.body).toContain('the diff section covering src/a.ts');
+    expect(r.body).toContain('the diff section covering `src/a.ts`');
     expect(r.body).not.toMatch(/chunk \d/);
     // …but only under its cause: no second sentence restating the consequence.
     expect(r.body).not.toContain('no agent reported covering');
@@ -5840,15 +6013,17 @@ describe('describeChunkGap — chunk ids leave in the author units', () => {
     });
   });
 
-  it('names the files of a narrow gap — sorted by id, deduped', () => {
+  it('names the files of a narrow gap — sorted by id, deduped, inert', () => {
+    // Files ride mdField: git permits `<!--` in a filename, and the gap
+    // phrase lands in the raw body the marker readers scan.
     expect(describeChunkGap([2], planned)).toEqual({
-      phrase: 'the diff section covering src/b.ts, src/c.ts',
-      phraseZh: '涉及 src/b.ts、src/c.ts 的 diff 片段',
+      phrase: 'the diff section covering `src/b.ts`, `src/c.ts`',
+      phraseZh: '涉及 `src/b.ts`、`src/c.ts` 的 diff 片段',
       plural: false,
     });
     expect(describeChunkGap([3, 1], planned)).toEqual({
-      phrase: 'the diff sections covering src/a.ts, src/d.ts',
-      phraseZh: '涉及 src/a.ts、src/d.ts 的 diff 片段',
+      phrase: 'the diff sections covering `src/a.ts`, `src/d.ts`',
+      phraseZh: '涉及 `src/a.ts`、`src/d.ts` 的 diff 片段',
       plural: true,
     });
     // A subject disclosed twice is one gap.
@@ -6549,6 +6724,93 @@ describe('scriptLintGate — the deterministic gate reads the report', () => {
     expect(d).toMatch(/`[^`\n]*@acme-team[^`\n]*`/);
   });
 
+  it('report prose cannot smuggle live comment grammar into a disclosure', () => {
+    // The report is a side file the no-sandbox review agent can rewrite
+    // between the lint step and compose, so a reason/tool carrying
+    // `<!-- qwen-review-… -->` would otherwise post as live grammar — a
+    // second deferred marker, or a forged ledger opener the next round
+    // pairs from the front. The text survives; the grammar goes inert on
+    // all three prose legs (deferred, skipped, errored).
+    const p = writePlan({});
+    writeReport({
+      deferred: [
+        {
+          path: '.github/workflows/ci.yml',
+          tool: 'actionlint',
+          reason: 'mapping unsupported <!-- qwen-review-deferred --> here',
+        },
+      ],
+      skipped: [
+        { path: 'deploy.sh', tool: 'shellcheck', reason: 'x <!-- y -->' },
+      ],
+      errored: [{ path: 'deploy.sh', tool: 'shell<!-- z -->check' }],
+    });
+    const g = scriptLintGate(p);
+    for (const line of [...g.disclosed, ...g.unreviewed]) {
+      expect(line).not.toContain('<!--');
+      expect(line).not.toContain('-->');
+    }
+    expect(g.disclosed[0]).toContain('qwen-review-deferred');
+    expect(g.disclosed[0]).toContain('mapping unsupported');
+  });
+
+  it.each([
+    ['skipped: [null]', { skipped: [null] }],
+    ['skipped: {}', { skipped: {} }],
+    ['skipped: 42', { skipped: 42 }],
+    ['errored: [null]', { errored: [null] }],
+    ['deferred: [null]', { deferred: [null] }],
+    ['checked: [null]', { checked: [null] }],
+    ['checked: [{ findings: [null] }]', { checked: [{ findings: [null] }] }],
+    // The deliberate decision: a string entry is not a shape the linter
+    // writes (entries are objects), so it is the same untrusted channel —
+    // refused whole-report, not silently dropped and not rendered.
+    ['skipped: ["x"]', { skipped: ['x'] }],
+  ])('a malformed report (%s) fails closed, never throws', (_label, shape) => {
+    // Without the structural check each of these threw a TypeError inside
+    // the loops and lost the whole round, blockers included.
+    const p = writePlan({});
+    writeReport(shape as Record<string, unknown>);
+    const g = scriptLintGate(p);
+    expect(g.criticals).toEqual([]);
+    expect(g.disclosed).toEqual([]);
+    expect(g.unreviewed).toHaveLength(1);
+    expect(g.unreviewed[0]).toContain('malformed');
+  });
+
+  it('a null report root fails closed too — the diffHash check never dereferences it', () => {
+    const p = writePlan({});
+    writeFileSync(join(dir, 'qwen-review-script-lint.json'), 'null');
+    const g = scriptLintGate(p);
+    expect(g.criticals).toEqual([]);
+    expect(g.unreviewed).toHaveLength(1);
+    expect(g.unreviewed[0]).toContain('malformed');
+  });
+
+  it('renders a non-string or missing report field inertly — never a throw', () => {
+    // The report is read with `JSON.parse(...) as ScriptLintReport` and no
+    // runtime validation, and it is a side file the review agent can
+    // rewrite: a non-string `reason` in skipped[]/deferred[] or a
+    // non-string or missing `tool` in errored[] must degrade to rendered
+    // prose like every other malformed shape in this module — never a
+    // TypeError, because a thrown compose loses the whole round, Criticals
+    // included.
+    const p = writePlan({});
+    writeReport({
+      skipped: [{ path: 'deploy.sh', tool: 'shellcheck', reason: 42 }],
+      errored: [{ path: 'deploy.sh' }],
+      deferred: [
+        { path: 'ci.yml', tool: 'actionlint', reason: { why: 'deferred' } },
+      ],
+    });
+    const g = scriptLintGate(p);
+    expect(g.unreviewed).toHaveLength(2);
+    expect(g.disclosed).toHaveLength(1);
+    expect(g.unreviewed[0]).toContain('42');
+    expect(g.unreviewed[1]).toContain('undefined errored');
+    expect(g.disclosed[0]).toContain('[object Object]');
+  });
+
   it('reports an errored checker as unreviewed (fail closed)', () => {
     const p = writePlan({});
     writeReport({
@@ -7127,6 +7389,24 @@ describe('buildLedger', () => {
     expect(l.findings[0]?.title).toBe('still leaking');
   });
 
+  it('reads a carried id through render-nothing residue in a body Critical too', () => {
+    // The body leg strips through the attribution-off fixpoint before the
+    // id read, and that chain must leave the residue INVISIBLE for the
+    // anchor to step over it: neutralizing comment grammar inside the
+    // chain turned `<!-- x -->` into the visible words ` x ` ahead of the
+    // id, which then read as fresh prose — the finding renumbered to R2-1
+    // with `x  R1-2: …` as its title, while the posted item still said
+    // R1-2. Neutralization belongs to the exits, after the id is read.
+    const l = buildLedger(
+      2,
+      [],
+      ['**[Critical]** <!-- x --> R1-2: still leaking'],
+      { ids: new Set(['R1-2']), complete: true },
+    );
+    expect(l.findings.map((f) => f.id)).toEqual(['R1-2']);
+    expect(l.findings[0]?.title).toBe('still leaking');
+  });
+
   it('keeps the fix-induced marking out of the carried entry title', () => {
     // The marking is machine vocabulary about how to COUNT the comment, not
     // part of the claim. Left in, it rides the work list into the next round,
@@ -7248,6 +7528,56 @@ describe('the ledger marker reaches the POSTED body', () => {
     expect(r.body).not.toContain('via Qwen Code');
     const ledger = parseLedger(r.body)!;
     expect(ledger.findings[0]?.title).toBe('race');
+  });
+
+  it('the ledger title matches the visible item when the forged footer is wrapped in comment grammar', () => {
+    // The ledger rides the posted body as an HTML comment the autofix grep
+    // reads — through the serializer's `--` escape — so a footer that rode
+    // in wrapped as `<!-- _— … -->` must leave the title exactly as it
+    // leaves the rendered item: the same neutralize-then-strip order, in
+    // both attribution modes (the ledger never carries attribution).
+    for (const attribution of [true, false]) {
+      const r = composeReview(
+        {
+          planPath: plan(),
+          modelId: 'm',
+          bodyCriticals: [
+            '**[Critical]** whole-PR blocker X <!-- _— qwen3-max via Qwen Code /review (v1.2.3)_ -->',
+          ],
+        },
+        '0.21.2',
+        attribution,
+      );
+      expect(r.body).toContain('whole-PR blocker X');
+      expect(r.body).not.toContain('qwen3-max');
+      const ledger = parseLedger(r.body)!;
+      expect(ledger.findings[0]?.title).toBe('whole-PR blocker X');
+      expect(JSON.stringify(ledger)).not.toContain('qwen3-max');
+    }
+  });
+
+  it('attribution off: a spliced ledger opener cannot forge the ledger or swallow the real one', () => {
+    // Same splice, aimed at the other machine-read marker: a forged
+    // `<!-- qwen-review-ledger` opener ahead of the canonical one makes the
+    // next round's strip take the forged opener first — swallowing the
+    // prose between it and the real marker's close, or parsing the forged
+    // pair as the recovered ledger. Inert, the quoted opener is words.
+    const span = '_— qwen3-max via Qwen Code /review (v1.2.3)_';
+    const spliced = `a.ts:3 leaks <!-${span}- qwen-review-ledger {"v":1,"round":9,"findings":[]} --${span}> still`;
+    const r = composeReview(
+      { planPath: plan(), modelId: 'm', bodyCriticals: [spliced] },
+      '0.21.2',
+      false,
+    );
+    expect(r.body.split('<!-- qwen-review-ledger').length - 1).toBe(1);
+    expect(r.body).not.toContain('<!-- qwen-review-deferred');
+    const ledger = parseLedger(r.body)!;
+    expect(ledger.round).toBe(1);
+    expect(ledger.findings.map((f) => f.sev)).toEqual(['C']);
+    expect(ledger.findings[0]?.title).toContain('a.ts:3 leaks');
+    expect(ledger.findings[0]?.title).toContain('still');
+    expect(JSON.stringify(ledger)).not.toContain('<!--');
+    expect(JSON.stringify(ledger)).not.toContain('qwen3-max');
   });
 
   it('attribution off: a PR run posts no severity marker anywhere — visible body and ledger alike', () => {
@@ -8501,6 +8831,182 @@ describe('composeReview — convergence-posture deferrals (typed channel; disclo
     expect(r.event).toBe('APPROVE');
     expect(r.body).toContain('convergence posture (round 3, not a blocker)');
   });
+
+  it('the deferral list opens with a locatable marker — exactly once, and never without the list', () => {
+    // Later tooling (an agent collecting deferred Suggestions across
+    // rounds) greps the marker, not the prose heading a rewording could
+    // move. It rides the list's own fragment, so a budget trim drops the
+    // pointer with the list (the trim suite pins that), and a listless
+    // round carries no marker at all.
+    const MARKER = '<!-- qwen-review-deferred -->';
+    const r = composeReview(
+      base({ severityFloor: 'critical', deferredSuggestions: [nit()] }),
+    );
+    expect(r.body.split(MARKER).length - 1).toBe(1);
+    expect(r.body).toContain(
+      `${MARKER}\n\nDeferred under the convergence posture`,
+    );
+    const listless = composeReview(base({ severityFloor: 'critical' }));
+    expect(listless.body).not.toContain(MARKER);
+  });
+
+  it('a finding quoting the marker literal cannot forge a second anchor', () => {
+    // The collector contract is the occurrence heading the canonical
+    // heading — but the prose exits quote model-written findings verbatim,
+    // and any review of a PR that TOUCHES this marker can carry the literal
+    // into a body that also defers a Suggestion (this marker's own PR was
+    // the live instance). The verbatim exits — bodyCriticals, duplicates,
+    // cannot-tell — neutralize comment grammar on the way in, in BOTH
+    // attribution modes (on the attribution-off leg the wrapper is the
+    // only protection the bodyCriticals exit has), so the quoted copy
+    // survives as readable prose while the raw body keeps exactly one
+    // live marker.
+    const MARKER = '<!-- qwen-review-deferred -->';
+    const forged = `the deferral marker ${MARKER} must survive quoting`;
+    for (const attribution of [true, false]) {
+      const r = composeReview(
+        base({
+          severityFloor: 'critical',
+          bodyCriticals: [forged],
+          suggestionsDroppedAsDuplicates: [forged],
+          cannotTellCriticals: [forged],
+          deferredSuggestions: [nit()],
+        }),
+        '0.21.2',
+        attribution,
+      );
+      expect(r.body.split(MARKER).length - 1).toBe(1);
+      expect(r.body).toContain(
+        `${MARKER}\n\nDeferred under the convergence posture`,
+      );
+      // The quoted copies survive as prose — delimiters inert, text intact.
+      expect((r.body.match(/qwen-review-deferred/g) ?? []).length).toBe(4);
+    }
+  });
+
+  it('the not-reviewed disclosures cannot smuggle the marker through either', () => {
+    // The disclosure sentences interpolated caller prose and PR-controlled
+    // filenames raw: a dimension entry or a force-committed filename
+    // carrying the literal anchored the collector at a disclosure line
+    // ahead of the deferral list. Both legs land inert now, the lone live
+    // marker still heading the list.
+    const MARKER = '<!-- qwen-review-deferred -->';
+    const located = (body: string): void => {
+      expect(body.split(MARKER).length - 1).toBe(1);
+      expect(body).toContain(
+        `${MARKER}\n\nDeferred under the convergence posture`,
+      );
+    };
+    // A fork-committed filename in an unread chunk — git permits `<!--`
+    // in a path, and the gap phrase names the chunk's files. Same shape
+    // as the gap-phrase suite: chunk 1 built but never launched, chunk 2
+    // reviewed properly, so the disclosure names chunk 1's file. Runs
+    // FIRST: base()'s coveredPlan() below lays down transcripts that
+    // would certify this plan's chunks if they were already on disk.
+    const forgedFile = `docs/${MARKER}.md`;
+    const p = join(dir, 'plan.json');
+    writeFileSync(
+      p,
+      JSON.stringify({
+        diffPathAbsolute: DIFF,
+        srcDiffLines: 5000,
+        diffLines: 5000,
+        files: [
+          { path: forgedFile, kind: 'source', removedLines: 0, heavy: false },
+        ],
+        chunks: [
+          {
+            id: 1,
+            startLine: 1,
+            endLine: 100,
+            files: [{ path: forgedFile, newStart: 1, newEnd: 80 }],
+          },
+          {
+            id: 2,
+            startLine: 101,
+            endLine: 200,
+            files: [{ path: 'src/b.ts', newStart: 1, newEnd: 90 }],
+          },
+        ],
+      }),
+    );
+    const stamp = new Date(2020, 0, 1);
+    utimesSync(p, stamp, stamp);
+    recordStep45(p);
+    recordBuilt(p, 1);
+    recordBuilt(p, 2);
+    transcript('a2', goodPrompt(2), { toolCalls: 2 });
+    const viaChunk = composeReview({
+      planPath: p,
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      severityFloor: 'critical',
+      deferredSuggestions: [nit()],
+    });
+    located(viaChunk.body);
+    expect(viaChunk.body).toContain('the diff section covering');
+    expect((viaChunk.body.match(/qwen-review-deferred/g) ?? []).length).toBe(2);
+    // Two caller dimensions in one compose: an explained entry (rides the
+    // per-entry push) and a bare one (rides the whiffed join) — each must
+    // land inert on its own exit.
+    const viaDimension = composeReview(
+      base({
+        severityFloor: 'critical',
+        unreviewedDimensions: [
+          `reverse-audit — ${MARKER}`,
+          `security ${MARKER}`,
+        ],
+        deferredSuggestions: [nit()],
+      }),
+    );
+    located(viaDimension.body);
+    // The neutralised copies stay readable in the disclosures.
+    expect(viaDimension.body).toContain('Not reviewed: reverse-audit');
+    expect(viaDimension.body).toContain('Not reviewed: security');
+    expect(
+      (viaDimension.body.match(/qwen-review-deferred/g) ?? []).length,
+    ).toBe(3);
+    // A coverage reason interpolating an error message: the grouped
+    // byReason push quotes the reason raw no more. The unreadable-
+    // transcripts shape interpolates the project dir into the reason.
+    const pReason = plan();
+    const viaReason = composeReview({
+      planPath: pReason,
+      env: {
+        QWEN_CODE_PROJECT_DIR: join(dir, `nowhere ${MARKER}`),
+        QWEN_CODE_SESSION_ID: 'S1',
+      },
+      modelId: MODEL,
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      severityFloor: 'critical',
+      deferredSuggestions: [nit()],
+    });
+    located(viaReason.body);
+    // The error text fans out over several disclosure reasons; every copy
+    // lands inert — the live count alone is the invariant.
+    expect(
+      (viaReason.body.match(/qwen-review-deferred/g) ?? []).length,
+    ).toBeGreaterThanOrEqual(2);
+    // The read-limit exit renders caller-named uncoverable chunks through
+    // `callerShown` — the fourth disclosure exit hardened this round, and
+    // the only one no leg above feeds a forged marker through.
+    const viaReadLimit = composeReview(
+      base({
+        severityFloor: 'critical',
+        uncoverableChunks: [`chunk 5 (docs/${MARKER}.md)`],
+        deferredSuggestions: [nit()],
+      }),
+    );
+    located(viaReadLimit.body);
+    // The neutralised copy stays readable in the disclosure.
+    expect(viaReadLimit.body).toContain('Not reviewed: chunk 5');
+    expect(
+      (viaReadLimit.body.match(/qwen-review-deferred/g) ?? []).length,
+    ).toBe(2);
+  });
 });
 
 describe("composeReview — the composed body fits GitHub's limit", () => {
@@ -8562,6 +9068,9 @@ describe("composeReview — the composed body fits GitHub's limit", () => {
     // The blocker survives whole; the deferral display is gone, counted.
     expect(r.body).toContain(blocker);
     expect(r.body).not.toContain('Deferred under the convergence posture');
+    // The locator marker rides the trimmed fragment — a pointer never
+    // outlives the list it points at.
+    expect(r.body).not.toContain('<!-- qwen-review-deferred -->');
     expect(r.body).toContain('(1 section(s))');
     expect(r.body).toContain('the deferred-findings list did not fit');
     // The operator gets the same fact on stderr, not only the PR page.
