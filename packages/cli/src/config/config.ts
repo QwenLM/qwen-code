@@ -67,7 +67,10 @@ import stripJsonComments from 'strip-json-comments';
 import { resolvePath } from '../utils/resolvePath.js';
 import {
   TOP_LEVEL_GLOBAL_OPTIONS,
+  DEFAULT_COMMAND,
+  DEFAULT_COMMAND_DESC,
   DEFAULT_COMMAND_OPTIONS,
+  QUERY_POSITIONAL,
   TOP_LEVEL_DEPRECATED_OPTIONS,
   TOP_LEVEL_USAGE,
 } from './top-level-options.js';
@@ -575,12 +578,9 @@ export async function parseArguments(): Promise<CliArgs> {
     .option('proxy', TOP_LEVEL_GLOBAL_OPTIONS.proxy)
     .option('insecure', TOP_LEVEL_GLOBAL_OPTIONS.insecure)
     .option('chat-recording', TOP_LEVEL_GLOBAL_OPTIONS['chat-recording'])
-    .command('$0 [query..]', 'Launch Qwen Code CLI', (yargsInstance: Argv) =>
+    .command(DEFAULT_COMMAND, DEFAULT_COMMAND_DESC, (yargsInstance: Argv) =>
       yargsInstance
-        .positional('query', {
-          description:
-            'Positional prompt. Defaults to one-shot; use -i/--prompt-interactive for interactive.',
-        })
+        .positional('query', QUERY_POSITIONAL)
         .option('model', DEFAULT_COMMAND_OPTIONS.model)
         .option('fallback-model', {
           ...DEFAULT_COMMAND_OPTIONS['fallback-model'],

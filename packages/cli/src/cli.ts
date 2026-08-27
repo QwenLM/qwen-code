@@ -15,6 +15,9 @@ import {
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import type { ArgumentsCamelCase, Argv, Options } from 'yargs';
 import {
+  DEFAULT_COMMAND,
+  DEFAULT_COMMAND_DESC,
+  QUERY_POSITIONAL,
   TOP_LEVEL_DEPRECATED_OPTIONS,
   TOP_LEVEL_HELP_OPTIONS,
   TOP_LEVEL_USAGE,
@@ -93,7 +96,7 @@ const VALUE_FLAGS = new Set(
 VALUE_FLAGS.add('--sandbox-session-id');
 
 // The exact value-taking-flag spellings the pre-PR hasFlag scan hardcoded.
-// versionTokenIndex must skip value slots for THIS set only: flags that only
+// hasVersionToken must skip value slots for THIS set only: flags that only
 // the derived VALUE_FLAGS knows (--worktree, --proxy, -e, --auth-type,
 // --session-id, --exclude-tools, ...) were absent from the base scan, so base
 // COUNTED a `-v`/`--version` sitting in their value slot and printed the
@@ -225,8 +228,8 @@ function hasFlag(
   return false;
 }
 
-// Index of the `-v`/`--version` token before any `--`; -1 when no such
-// token exists. Mirrors the pre-PR hasFlag scan exactly: the token
+// True when argv carries a `-v`/`--version` token before any `--`.
+// Mirrors the pre-PR hasFlag scan exactly: the token
 // following one of the base's hardcoded value-taking flags
 // (BASE_VALUE_FLAGS) is skipped unconditionally (even when it starts with
 // `-`), so a version token sitting in one of THOSE value slots is NOT
@@ -236,21 +239,21 @@ function hasFlag(
 // scan, which counted a version token in their value slot (`qwen --proxy
 // -v ...` printed the version), so this scan must count it too. Tokens
 // after `--` are positional data and never count.
-function versionTokenIndex(argv: readonly string[]): number {
+function hasVersionToken(argv: readonly string[]): boolean {
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]!;
     if (arg === '--') {
-      return -1;
+      return false;
     }
     if (BASE_VALUE_FLAGS.has(arg)) {
       i++; // skip the value slot; the loop increment consumes the token
       continue;
     }
     if (arg === '--version' || arg === '-v') {
-      return i;
+      return true;
     }
   }
-  return -1;
+  return false;
 }
 
 async function buildTopLevelHelpParser() {
@@ -274,6 +277,14 @@ async function buildTopLevelHelpParser() {
   )) {
     parser.deprecateOption(option, message);
   }
+
+  // Registered first, mirroring the real parser, so the rendered command list
+  // leads with the default command and its `query` positional. Without it the
+  // fast-path help silently dropped both the `[default]` row and the whole
+  // Positionals section that the full parser prints.
+  parser.command(DEFAULT_COMMAND, DEFAULT_COMMAND_DESC, (defaultCmd) =>
+    defaultCmd.positional('query', QUERY_POSITIONAL),
+  );
 
   for (const [command, description] of TOP_LEVEL_COMMANDS) {
     parser.command(command, description);
@@ -332,7 +343,7 @@ export function resolveBootstrapRoute(
   // name cmd -- -v`, which the mcp fast path persists verbatim),
   // `=`-form tokens (`--model=-v` is one token, not an exact match), and
   // version tokens sitting in a BASE_VALUE_FLAGS value slot.
-  if (versionTokenIndex(argv) !== -1) {
+  if (hasVersionToken(argv)) {
     return 'version';
   }
 

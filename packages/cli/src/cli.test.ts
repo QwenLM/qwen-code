@@ -735,6 +735,14 @@ describe('runCliEntry', () => {
     expect(helpText).toContain('Usage: qwen [options] [command]');
     expect(helpText).toContain('\nCommands:');
     expect(helpText).toContain('\nOptions:');
+    // The default command and its positional are part of the contract this
+    // help output is supposed to state: `--prompt`'s own deprecation notice
+    // points users at the positional prompt form, so it has to be listed.
+    expect(helpText).toContain('\nPositionals:');
+    expect(helpText).toContain('qwen [query..]');
+    expect(helpText).toContain('Launch Qwen Code CLI');
+    expect(helpText).toContain('[default]');
+    expect(helpText).toContain('Positional prompt.');
     expect(helpText).toContain('Manage Qwen Code hooks');
     expect(helpText).toContain('Manage MCP servers');
     expect(helpText).toContain('Run Qwen Code as a local HTTP daemon');

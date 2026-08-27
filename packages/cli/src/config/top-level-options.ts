@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { Options } from 'yargs';
+import type { Options, PositionalOptions } from 'yargs';
 import type {
   ApprovalMode,
   AuthType as CoreAuthType,
@@ -67,6 +67,23 @@ export const AUTH_TYPE_PARITY_WITNESS: Record<`${CoreAuthType}`, true> = {
 /** Usage banner shared by both help builders, kept here with the options. */
 export const TOP_LEVEL_USAGE =
   'Usage: qwen [options] [command]\n\nQwen Code - Launch an interactive CLI, use -p/--prompt for non-interactive mode';
+
+/**
+ * The default command's yargs signature, description, and positional.
+ *
+ * Both help builders register this so `qwen --help` documents the positional
+ * prompt form. It is the form `--prompt`'s own deprecation notice points at
+ * ("Use the positional prompt instead"), so omitting it from help output left
+ * the documented migration target undiscoverable.
+ */
+export const DEFAULT_COMMAND = '$0 [query..]';
+
+export const DEFAULT_COMMAND_DESC = 'Launch Qwen Code CLI';
+
+export const QUERY_POSITIONAL = {
+  description:
+    'Positional prompt. Defaults to one-shot; use -i/--prompt-interactive for interactive.',
+} as const satisfies PositionalOptions;
 
 export const TOP_LEVEL_GLOBAL_OPTIONS = {
   telemetry: {
