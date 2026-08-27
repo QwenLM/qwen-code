@@ -467,7 +467,8 @@ export function installTerminalResizeReflow(
   // (patched Ink); undefined falls back to the wrapped-height classifier.
   let pendingResetFullscreen: boolean | undefined;
   // Printable bare writes seen in the current armed burst; the second one is
-  // the live frame following a static append and bypasses MIN_FRAME_LINES.
+  // the live frame following a static append and bypasses MIN_FRAME_LINES
+  // inside the handoff window.
   let barePrintableCount = 0;
   // Whether the armed burst actually stored a frame. A write can be seen yet
   // store nothing (rejected by MIN_FRAME_LINES), so the write count is not a
@@ -739,29 +740,37 @@ export function installTerminalResizeReflow(
         // a late burst that must stay capturable: before anything was
         // captured, a printable write with no diff head is the post-shrink
         // redraw delayed past the window (throttle + reconciliation of the
-        // re-laid-out tree); once a frame was captured, a bare diff is its
-        // follow-up render. Every other post-window write must not reach
-        // the capture path: an arm held open past the window would
-        // force-store the next stray as the live frame. Static mode
-        // self-heals on the next erase-prefixed redraw and disarms strays
-        // unconditionally.
+        // re-laid-out tree); a stored first write leaves the burst
+        // incomplete — the live frame can still follow as a second headless
+        // write; once a frame was captured, a bare diff is its follow-up
+        // render. Every other post-window write must not reach the capture
+        // path: an arm held open past the window would force-store the next
+        // stray as the live frame. Static mode self-heals on the next
+        // erase-prefixed redraw and disarms strays unconditionally.
+        const late = Date.now() >= handoffUntil;
         const lateBurst =
           isVP &&
           printable &&
-          (!burstCaptured ? diffHead === null : diffHead !== null);
-        if (Date.now() >= handoffUntil && !lateBurst) {
+          (!burstCaptured
+            ? diffHead === null
+            : diffHead !== null || barePrintableCount < 2);
+        if (late && !lateBurst) {
           expectFrame = false;
         }
         if (expectFrame && printable) {
           // Bare redraw (or static append preceding it): model each printable
           // bare write, last one wins; the second printable bare write of a
           // commit is the live frame and replaces the model even below
-          // MIN_FRAME_LINES. Once the live frame is consumed, disarm so later
-          // strays cannot clobber the model during idle. In VP the burst can
-          // also settle into a bare incremental diff (a width shrink during
-          // streaming redraws bare once, then diffs): that transforms the
-          // frame just captured — storing a diff-shaped write as a frame
-          // corrupts the model whether the diff applies or not.
+          // MIN_FRAME_LINES inside the window. Past the window the bypass is
+          // lost: a stored append and a captured frame are indistinguishable
+          // states, so only the MIN_FRAME_LINES gate can tell a delayed live
+          // frame from a stray following a captured one. Once the live frame
+          // is consumed, disarm so later strays cannot clobber the model
+          // during idle. In VP the burst can also settle into a bare
+          // incremental diff (a width shrink during streaming redraws bare
+          // once, then diffs): that transforms the frame just captured —
+          // storing a diff-shaped write as a frame corrupts the model
+          // whether the diff applies or not.
           barePrintableCount++;
           if (isVP && applyIncrementalDiff(model, chunk, currentWidth)) {
             debugLogger.debug('diff', { applied: true, armed: true });
@@ -769,7 +778,8 @@ export function installTerminalResizeReflow(
             barePrintableCount = 0;
             burstCaptured = false;
           } else if (diffHead === null) {
-            if (modelFrame(chunk, barePrintableCount > 1)) burstCaptured = true;
+            if (modelFrame(chunk, barePrintableCount > 1 && !late))
+              burstCaptured = true;
             if (barePrintableCount > 1) expectFrame = false;
           }
         }

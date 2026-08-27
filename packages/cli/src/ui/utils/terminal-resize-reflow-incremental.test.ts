@@ -526,6 +526,53 @@ describe('installTerminalResizeReflow (VP incremental rendering)', () => {
     }
   });
 
+  it('captures a late two-write burst whose stored append precedes the live frame', () => {
+    const stdout = new FakeStdout();
+    const { restore, repaint } = installTerminalResizeReflow(
+      stdout as unknown as NodeJS.WriteStream,
+      { virtualViewport: true },
+    );
+    const dateNow = vi.spyOn(Date, 'now');
+    try {
+      let now = 1_000_000;
+      dateNow.mockImplementation(() => now);
+      const prev = frameLines(20, 10);
+      stdout.write(ansiEscapes.eraseLines(10) + prev.join('\n'));
+      // Width shrink arms the bare-write handoff via the clear-only erase;
+      // the commit burst then lands as TWO bare writes after the window
+      // expires, and the static append is tall enough to be stored. The
+      // stored append must not be mistaken for the captured live frame:
+      // the redraw that follows still has to be captured, or the model
+      // freezes on the append and every later diff fails the head equation.
+      stdout.columns = 12;
+      stdout.emit('resize');
+      stdout.write(RETURN_PREFIX + ansiEscapes.eraseLines(10));
+      now += 100; // past the 50 ms handoff window
+      const append = frameLines(20, 10).map((line) => `append-${line}`);
+      stdout.write(append.join('\n')); // >= MIN_FRAME_LINES: stored
+      const redrawn = frameLines(8, 14).map((line) => `${line}-late3`);
+      stdout.write(redrawn.join('\n'));
+      const next = redrawn.slice();
+      next[4] = 'LATE-UPDATE-3';
+      stdout.write(
+        incrementalDiffFrame(redrawn, next, {
+          trailingNewline: false,
+          returnPrefix: RETURN_PREFIX,
+        }),
+      );
+      stdout.written.length = 0;
+      repaint!();
+      const replay = stdout.written[0]!;
+      expect(replay).not.toBe(ansiEscapes.clearViewport);
+      expect(replay).toContain('LATE-UPDATE-3');
+      expect(replay).toContain('line-13-');
+      expect(replay).not.toContain('append-line-');
+    } finally {
+      dateNow.mockRestore();
+      restore();
+    }
+  });
+
   it('captures the first VP frame when it lands long after the entry clear', () => {
     const stdout = new FakeStdout();
     const { restore, repaint } = installTerminalResizeReflow(

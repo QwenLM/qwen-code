@@ -34,6 +34,13 @@
  *   QWEN_BENCH_PACE_MS=30                  Interval between paced keystrokes.
  *   QWEN_BENCH_EXTRA_ENV='K=V K2=V2'       Extra env for the CLI child.
  *
+ * The driver scrubs CI markers (CI, CONTINUOUS_INTEGRATION, CI_*) from the
+ * child env and sets QWEN_CODE_NO_RELAUNCH=1, so the CLI under test stays
+ * interactive (VP mode) in the PTY-root process on any host — an ambient CI
+ * marker would otherwise silently switch it to legacy non-VP rendering.
+ * QWEN_BENCH_EXTRA_ENV can override QWEN_CODE_NO_RELAUNCH but cannot
+ * reintroduce a CI marker.
+ *
  * The CLI must be configured for the OpenAI-compatible endpoint at
  * http://127.0.0.1:$QWEN_BENCH_PORT/v1 with any non-empty API key (the fake
  * provider accepts every request). How that configuration is supplied is
@@ -220,23 +227,38 @@ class Session {
     this.pendingKeyAt = null;
     this.latencies = [];
     this.onData = null;
+    const childEnv = {
+      ...process.env,
+      OPENAI_BASE_URL: `http://127.0.0.1:${PORT}/v1`,
+      OPENAI_API_KEY: 'bench-fake-key',
+      OPENAI_MODEL: MODEL,
+      // Keep the TUI in the PTY-root process: otherwise the CLI relaunches
+      // itself into a child (gemini.tsx boot relaunch) and measureCpu samples
+      // the idle launcher, whose CPU stops accumulating, instead of the TUI.
+      // Before ...env so QWEN_BENCH_EXTRA_ENV can still override it.
+      QWEN_CODE_NO_RELAUNCH: '1',
+      ...env,
+    };
+    // CI markers flip the child's isInteractiveTerminal() to false and would
+    // silently measure legacy non-VP rendering — the mode this VP-only
+    // benchmark must not measure. Scrub after the ...env spread so no
+    // passthrough can reintroduce one, mirroring the child's own predicate
+    // (isCiEnvKey, ui/utils/terminal-buffer.ts) like pty-host.ts's workers.
+    for (const key of Object.keys(childEnv)) {
+      if (
+        key === 'CI' ||
+        key === 'CONTINUOUS_INTEGRATION' ||
+        key.startsWith('CI_')
+      ) {
+        delete childEnv[key];
+      }
+    }
     this.term = pty.spawn(...splitCmd(CMD), {
       name: 'xterm-256color',
       cols: COLS,
       rows: ROWS,
       cwd: process.cwd(),
-      env: {
-        ...process.env,
-        OPENAI_BASE_URL: `http://127.0.0.1:${PORT}/v1`,
-        OPENAI_API_KEY: 'bench-fake-key',
-        OPENAI_MODEL: MODEL,
-        // Keep the TUI in the PTY-root process: otherwise the CLI relaunches
-        // itself into a child (gemini.tsx boot relaunch) and measureCpu samples
-        // the idle launcher, whose CPU stops accumulating, instead of the TUI.
-        // Before ...env so QWEN_BENCH_EXTRA_ENV can still override it.
-        QWEN_CODE_NO_RELAUNCH: '1',
-        ...env,
-      },
+      env: childEnv,
     });
     this.pid = this.term.pid;
     this.term.onData((data) => {
