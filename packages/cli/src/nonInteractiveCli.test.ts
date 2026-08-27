@@ -2881,6 +2881,33 @@ describe('runNonInteractive', () => {
         }),
       );
       const permit = { goalId: 'g-1', revision: 2, turnId: 't-1' };
+      mockCoreExecuteToolCall.mockImplementation(
+        async (
+          _config: unknown,
+          request: { callId: string; name: string },
+        ) => ({
+          responseParts: [
+            {
+              functionResponse: {
+                id: request.callId,
+                name: request.name,
+                response:
+                  request.callId === 'shell-failed'
+                    ? { error: 'command failed' }
+                    : { output: 'ok' },
+              },
+            },
+          ],
+          resultDisplay:
+            request.callId === 'shell-failed' ? 'command failed' : 'ok',
+          ...(request.callId === 'shell-failed'
+            ? {
+                error: new Error('command failed'),
+                errorType: ToolErrorType.EXECUTION_FAILED,
+              }
+            : {}),
+        }),
+      );
       const goalToolCall = (callId: string, name: string) => ({
         type: GeminiEventType.ToolCallRequest,
         value: {
@@ -2897,6 +2924,7 @@ describe('runNonInteractive', () => {
           createStreamFromEvents([
             goalToolCall('shell-1', ToolNames.READ_FILE),
             goalToolCall('goal-read', ToolNames.GET_GOAL),
+            goalToolCall('shell-failed', ToolNames.SHELL),
           ] as unknown as ServerGeminiStreamEvent[]),
         )
         .mockReturnValueOnce(createStreamFromEvents(finishTurn));
@@ -2912,6 +2940,17 @@ describe('runNonInteractive', () => {
       expect(optionsByCallId.get('goal-read')).toEqual({
         goalContext: permit,
         provenance: 'goal_runtime',
+      });
+      // A failed command is evidence too -- it is exactly what an
+      // `infeasible` completion cites -- so the stamp must not depend on the
+      // tool succeeding.
+      expect(
+        recordToolResult.mock.calls.find(
+          (call) => call[1]?.callId === 'shell-failed',
+        )?.[1],
+      ).toMatchObject({ status: 'error' });
+      expect(optionsByCallId.get('shell-failed')).toEqual({
+        goalContext: permit,
       });
     });
 

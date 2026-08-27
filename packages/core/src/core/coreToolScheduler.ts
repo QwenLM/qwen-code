@@ -6285,10 +6285,13 @@ export class CoreToolScheduler {
         error: call.response.error,
         errorType: call.response.errorType,
       };
+      const goalProvenance = goalToolResultProvenance(call.request);
       this.chatRecordingService.recordToolResult(
         call.response.responseParts,
         result,
-        goalToolResultProvenance(call.request),
+        // Passed only inside a Goal turn, so recording outside one keeps its
+        // two-argument shape.
+        ...(goalProvenance ? ([goalProvenance] as const) : ([] as const)),
       );
     }
   }

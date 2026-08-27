@@ -32,8 +32,9 @@ export interface GoalToolResultRequest {
  * the Goal's own bookkeeping, and a catalog that cited its own reads as proof
  * would be circular.
  *
- * Every host that records tool results during a Goal turn must route through
- * here, so the three of them cannot drift on the rule.
+ * Every site that records tool results during a Goal turn routes through
+ * here -- the interactive scheduler, both TUI recording paths, headless, and
+ * ACP -- so the rule cannot drift between them.
  */
 export function goalToolResultProvenance(
   request: GoalToolResultRequest,

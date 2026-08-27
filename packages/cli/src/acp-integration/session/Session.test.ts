@@ -19606,10 +19606,18 @@ describe('Session', () => {
           getDefaultPermission: vi.fn().mockResolvedValue('allow'),
           getDescription: vi.fn().mockReturnValue(name),
           toolLocations: vi.fn().mockReturnValue([]),
-          execute: vi.fn().mockResolvedValue({
-            llmContent: 'ok',
-            returnDisplay: 'ok',
-          }),
+          execute: vi.fn().mockResolvedValue(
+            name === 'run_shell_command'
+              ? {
+                  llmContent: 'command failed',
+                  returnDisplay: 'command failed',
+                  error: {
+                    message: 'command failed',
+                    type: core.ToolErrorType.EXECUTION_FAILED,
+                  },
+                }
+              : { llmContent: 'ok', returnDisplay: 'ok' },
+          ),
         }));
         mockChat.sendMessageStream = vi
           .fn()
@@ -19621,6 +19629,7 @@ describe('Session', () => {
                   functionCalls: [
                     { id: 'call-read', name: 'read_file', args: {} },
                     { id: 'call-goal', name: 'get_goal', args: {} },
+                    { id: 'call-failed', name: 'run_shell_command', args: {} },
                   ],
                 },
               },
@@ -19648,6 +19657,88 @@ describe('Session', () => {
           goalContext: permit,
           provenance: 'goal_runtime',
         });
+        // A failed command is evidence too -- it is exactly what an
+        // `infeasible` completion cites -- so the stamp must not depend on
+        // the tool succeeding.
+        expect(
+          mockChatRecordingService.recordToolResult.mock.calls.find(
+            (call: unknown[]) =>
+              (call[1] as { callId?: string } | undefined)?.callId ===
+              'call-failed',
+          )?.[1],
+        ).toMatchObject({ status: 'error' });
+        expect(optionsFor('call-failed')).toEqual({ goalContext: permit });
+      });
+
+      it('does not stamp a background-notification turn with a permit inherited by lineage', async () => {
+        // A notification fires from async resources created inside the turn
+        // that spawned the task, so the Goal store is inherited into it long
+        // after that turn ended. The notification turn is not a Goal turn:
+        // its tool results must record unstamped, or they would become
+        // external_fact evidence for a turn that never made those calls.
+        const permit: core.GoalTurnPermit = {
+          goalId: 'goal-1',
+          revision: 1,
+          turnId: 'turn-stale',
+        };
+        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+        mockToolRegistry.getTool.mockImplementation((name: string) => ({
+          name,
+          displayName: name,
+          kind: core.Kind.Read,
+          schema: { name, description: name, parameters: {} },
+          validateToolParams: vi.fn().mockReturnValue(null),
+          getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+          getDescription: vi.fn().mockReturnValue(name),
+          toolLocations: vi.fn().mockReturnValue([]),
+          execute: vi
+            .fn()
+            .mockResolvedValue({ llmContent: 'ok', returnDisplay: 'ok' }),
+        }));
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  functionCalls: [
+                    { id: 'call-notified', name: 'read_file', args: {} },
+                  ],
+                },
+              },
+            ]),
+          )
+          .mockResolvedValue(createEmptyStream());
+
+        // Enqueue from inside a Goal turn's store, as a task completion
+        // handler created during that turn would.
+        const notification = core.goalTurnContext.run(permit, () =>
+          session.enqueueBackgroundNotification({
+            displayText: 'Background agent completed.',
+            modelText: '<task-notification />',
+            taskId: 'agent-stale',
+            status: 'completed',
+            kind: 'agent',
+          }),
+        );
+        await expect(notification).resolves.toEqual({ accepted: true });
+        await vi.waitFor(() => {
+          expect(
+            mockChatRecordingService.recordToolResult.mock.calls.some(
+              (call: unknown[]) =>
+                (call[1] as { callId?: string } | undefined)?.callId ===
+                'call-notified',
+            ),
+          ).toBe(true);
+        });
+
+        const call = mockChatRecordingService.recordToolResult.mock.calls.find(
+          (call: unknown[]) =>
+            (call[1] as { callId?: string } | undefined)?.callId ===
+            'call-notified',
+        )!;
+        expect(call).toHaveLength(2);
       });
 
       it('runs a host-scheduled Goal turn with the canonical permit', async () => {
