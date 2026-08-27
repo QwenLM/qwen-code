@@ -147,6 +147,83 @@ Save the `worktreePath`. All `read_file`, `grep_search`, `glob` calls below must
 
 This is the most important stage — catch problems before anyone spends time reviewing code.
 
+**1-pre. Duplicate / already-fixed check (run before the template check):**
+
+A PR opened after its linked issue was already fixed stays open forever — no
+other gate looks at the linked issue's state. Check it deterministically
+before investing in a review:
+
+```bash
+ISSUES=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json body --jq '.body' \
+  | grep -oiE '(fixes|closes|resolves) #[0-9]+' | grep -oE '[0-9]+' | sort -u)
+```
+
+- No linked issues, or every linked issue **open** → proceed to 1a.
+- Any linked issue **closed as not planned** → the fix target was rejected:
+  request changes (bilingual, `<!-- qwen-triage stage=1-pre -->` marker,
+  @mention the author) asking them to reach agreement in the issue first,
+  and stop.
+- Any linked issue **closed as completed** → find what closed it (GraphQL —
+  the REST timeline's `closed` event carries no reliable closer reference):
+
+```bash
+gh api graphql -f query='
+  query($owner: String!, $name: String!, $n: Int!) {
+    repository(owner: $owner, name: $name) {
+      issue(number: $n) {
+        timelineItems(first: 20, itemTypes: [CLOSED_EVENT]) {
+          nodes {
+            ... on ClosedEvent {
+              closer {
+                ... on PullRequest { number state merged }
+                ... on Commit { oid }
+              }
+            }
+          }
+        }
+      }
+    }
+  }' -f owner="${REPO%%/*}" -f name="${REPO##*/}" -F n="$N" \
+  --jq '.data.repository.issue.timelineItems.nodes[].closer | select(.number != null) | "\(.number) \(.merged)"'
+```
+
+  - Closed by a **merged PR** → compare this PR's production diff (exclude
+    test/generated files per the Stage 0 size rules) against `main`:
+    - **Fully subsumed** — every production line this PR adds already exists
+      in `main` (check per file via
+      `gh api "repos/$REPO/contents/<path>?ref=main"`) → post the terminal
+      comment below, then close the PR. This is the ONLY place triage closes
+      a PR.
+    - **Any remaining delta** — at least one production change is NOT in
+      `main` → request changes: name the merged PR, name the remaining
+      delta, ask the author to rebase onto `main` and reduce the PR to that
+      delta. Stop.
+  - Closed manually (no close commit) or the closer cannot be resolved →
+    never close on ambiguity: flag it in the Stage 1 comment and escalate to
+    the maintainer.
+
+```bash
+cat > /tmp/stage-1pre-duplicate.md <<'EOF'
+<!-- qwen-triage stage=1-pre -->
+
+The linked issue #N was already fixed by #M, and every production change in
+this PR is already on `main` — closing as a duplicate of #M. If something
+here is NOT covered by #M, say so and this can be reopened.
+
+<details>
+<summary>中文说明</summary>
+
+关联 issue #N 已由 #M 修复，本 PR 的生产代码改动均已存在于 `main`，
+现作为 #M 的重复 PR 关闭。如本 PR 有 #M 未覆盖的内容，请说明，可以重新打开。
+
+</details>
+
+— _Qwen Code · qwen3.7-max_
+EOF
+gh pr comment "$PR_NUMBER" --repo "$REPO" --body-file /tmp/stage-1pre-duplicate.md
+gh pr close "$PR_NUMBER" --repo "$REPO"
+```
+
 **1a. Template check:**
 
 PR body missing required headings from `.github/pull_request_template.md` (read from worktree) → request changes, @mention author, link the template, stop. This is the only public output for this terminal gate.
@@ -301,6 +378,8 @@ Risk: <if Stage 1e matched, list the high-risk paths and recommended review dept
 
 Save this comment's ID. Terminal exits — stop here if any applies:
 
+- Duplicate of a merged fix, no remaining delta (Stage 1-pre) → closed.
+- Duplicate with remaining delta, or issue closed as not planned (Stage 1-pre) → request changes, stopped.
 - Core module hard block (Stage 0) → rejected, do not proceed.
 - Template failure (Stage 1a) → stopped.
 - Problem does not exist (Stage 1b) → request changes, do not proceed to Stage 2.
