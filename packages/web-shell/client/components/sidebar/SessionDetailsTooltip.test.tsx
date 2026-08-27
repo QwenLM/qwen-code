@@ -209,9 +209,9 @@ describe('SessionDetailsTooltip', () => {
     expect(rowIcon(9503)?.className).not.toContain('sessionPrState');
 
     // State lives in the icon; visible text stays the bare PR label, with an
-    // sr-only state name so screen readers keep the information.
-    expect(byNumber(9500)?.textContent).toBe('Pull Request #9500Merged');
-    expect(byNumber(9501)?.textContent).toBe('Pull Request #9501Closed');
+    // sr-only " · State" suffix so screen readers keep the information.
+    expect(byNumber(9500)?.textContent).toBe('Pull Request #9500 · Merged');
+    expect(byNumber(9501)?.textContent).toBe('Pull Request #9501 · Closed');
     expect(byNumber(9502)?.textContent).toBe('Pull Request #9502');
 
     act(() => root.unmount());
