@@ -39,6 +39,7 @@ import {
 } from 'react';
 import { useI18n } from '../../i18n';
 import { extractErrorDetail } from '../../utils/errorDetail';
+import { DiffView } from '../messages/tools/DiffView';
 import { useExternalLinkOpener } from '../../hooks/useExternalLinkOpener';
 import { formatRelativeTime } from '../../utils/formatRelativeTime';
 import { normalizeTextMediaType } from '../../utils/imageIngestion';
@@ -1971,13 +1972,17 @@ function DiffPreview({ change }: { change: TurnOutputFileChange }) {
   const diffs = getDisplayDiffs(change.diffs);
   return (
     <div className={styles.diffPreview}>
-      {diffs.map((diff, index) => (
-        <CodeMirrorDiff
-          key={index}
-          oldText={diff.oldText}
-          newText={diff.newText}
-        />
-      ))}
+      {diffs.map((diff, index) =>
+        diff.fileDiff && !diff.fullContent ? (
+          <DiffView key={index} diff={diff.fileDiff} />
+        ) : (
+          <CodeMirrorDiff
+            key={index}
+            oldText={diff.oldText}
+            newText={diff.newText}
+          />
+        ),
+      )}
     </div>
   );
 }

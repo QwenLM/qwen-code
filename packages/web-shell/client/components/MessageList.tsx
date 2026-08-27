@@ -42,6 +42,7 @@ import { formatContextTokens } from '../utils/formatTokenCount';
 import { useWebShellPortalRoot } from '../portalRoot';
 import { useTranscriptRenderMode } from '../transcriptRenderMode';
 import { MessageItem } from './MessageItem';
+import { summaryRunFirstMemberId, summaryRunId } from './summaryRunId';
 import type { SessionContentGenerator } from './messages/AssistantMessage';
 import { MessageTimestamp } from './MessageTimestamp';
 import {
@@ -90,6 +91,13 @@ interface MessageListProps {
   historyCapacityReached?: boolean;
   historyPaginationError?: boolean;
   onLoadOlderHistory?: (options?: { force?: boolean }) => Promise<void>;
+  /**
+   * Identity of the session whose transcript `messages` show. Block ids are
+   * per-session ordinals, so changing it resets every session-scoped UI state
+   * (collapse overrides, pagination keep-open, pending page snapshots, the
+   * scroll anchor) — a direct session switch never renders empty messages.
+   */
+  sessionKey?: string;
   transcriptBlockCount?: number;
   transcriptActivity?: {
     getSnapshot(): {
@@ -295,7 +303,7 @@ export interface SessionTimelineRange {
 function isAgentOnlyToolGroup(msg: Message): boolean {
   return (
     msg.role === 'tool_group' &&
-    !msg.id.startsWith('summary-') &&
+    summaryRunFirstMemberId(msg.id) === undefined &&
     msg.tools.length === 1 &&
     isSubAgentToolCall(msg.tools[0])
   );
@@ -304,7 +312,7 @@ function isAgentOnlyToolGroup(msg: Message): boolean {
 function isBackgroundAgentOnlyToolGroup(msg: Message): boolean {
   return (
     msg.role === 'tool_group' &&
-    !msg.id.startsWith('summary-') &&
+    summaryRunFirstMemberId(msg.id) === undefined &&
     msg.tools.length === 1 &&
     isBackgroundSubAgentToolCall(msg.tools[0])
   );
@@ -413,7 +421,7 @@ function mergeCompactToolGroups(
       // Synthetic id so the aggregated group never collides with an original
       // message key: React then remounts instead of carrying the expanded
       // summary state into non-compact mode.
-      id: `summary-${run[0]!.id}`,
+      id: summaryRunId(run[0]!.id),
       role: 'tool_group',
       tools,
       ...(thoughts.length > 0 ? { thoughts } : {}),
@@ -432,7 +440,7 @@ function updateCompactStreamingThinkingTail(
   const group = messages[messages.length - 1];
   if (
     group?.role !== 'tool_group' ||
-    !group.id.startsWith('summary-') ||
+    summaryRunFirstMemberId(group.id) === undefined ||
     !group.thoughts?.length
   ) {
     return undefined;
@@ -450,7 +458,9 @@ function updateCompactStreamingThinkingTail(
   result[result.length - 1] = {
     ...group,
     thoughts,
-    ...(group.id === `summary-${tail.id}` ? { timestamp: tail.timestamp } : {}),
+    ...(group.id === summaryRunId(tail.id)
+      ? { timestamp: tail.timestamp }
+      : {}),
   };
   return result;
 }
@@ -667,6 +677,14 @@ export interface ApplyTurnCollapseOptions {
    */
   pendingApprovalCallId?: string | null;
   includeSubagentToolUsageInMetrics?: boolean;
+  /**
+   * Turns kept expanded despite being complete. Two sources: pagination
+   * split-turn detection (the tail was on screen before pagination completed
+   * the user prompt), and the anchor fallback (a turn collapsed while a
+   * history anchor sat on it). Entries persist until the user toggles the
+   * turn or the screen is cleared; an explicit user toggle always wins.
+   */
+  paginatedExpanded?: ReadonlySet<string>;
   /** Master switch; when false the items pass through untouched. */
   enabled: boolean;
 }
@@ -982,6 +1000,44 @@ function isScheduledTaskMessage(message: {
 // auto-follow still uses getLastUserMessageId so shell prompts do not jump.
 function isTurnStartMessage(message: Message): boolean {
   return message.role === 'user' || message.role === 'user_shell';
+}
+
+// Find the turn head (user message id) owning the message referenced by a
+// `msg:` row key, when the message is still present.
+function turnIdOfMessageRow(
+  messages: Message[],
+  rowKey: string,
+): string | undefined {
+  if (!rowKey.startsWith('msg:')) return undefined;
+  let messageId = rowKey.slice('msg:'.length);
+  // Compact-aggregate row keys embed the run's first member id. Resolve
+  // through it so the key still maps to its turn when looked up in the raw
+  // message list, including after a page extending the run re-keyed the
+  // aggregate.
+  messageId = summaryRunFirstMemberId(messageId) ?? messageId;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const message = messages[i];
+    if (message?.id !== messageId) continue;
+    for (let j = i; j >= 0; j--) {
+      const candidate = messages[j];
+      if (candidate && isTurnStartMessage(candidate)) return candidate.id;
+    }
+    return undefined;
+  }
+  return undefined;
+}
+
+// True when the given turn currently renders as a collapsed turn_collapse row.
+function isTurnCollapsedInVisibleItems(
+  items: DisplayItem[],
+  turnId: string,
+): boolean {
+  for (const item of items) {
+    if (item.type === 'turn_collapse' && item.turnCollapse.turnId === turnId) {
+      return item.turnCollapse.collapsed;
+    }
+  }
+  return false;
 }
 
 function timelineDetailSnippetForMessage(
@@ -1800,6 +1856,7 @@ export function applyTurnCollapse(
     automaticallyExpandedAgentKeys,
     pendingApprovalCallId,
     includeSubagentToolUsageInMetrics = true,
+    paginatedExpanded,
     enabled,
   }: ApplyTurnCollapseOptions,
 ): DisplayItem[] {
@@ -1955,7 +2012,8 @@ export function applyTurnCollapse(
     // turn is incomplete; otherwise it collapses once a newer turn starts. A
     // step-less turn (e.g. a plain "hi" reply) has nothing to fold, so it stays
     // expanded and shows a chevron-less metrics line. An explicit user toggle
-    // always wins.
+    // always wins; a turn whose tail was shown before pagination finished its
+    // head stays open so that content never vanishes mid-read.
     const shouldStayOpen =
       isActiveTurn ||
       hasActiveAgent ||
@@ -1969,7 +2027,9 @@ export function applyTurnCollapse(
         ? true
         : overrides.has(turnId)
           ? (overrides.get(turnId) as boolean)
-          : shouldStayOpen;
+          : paginatedExpanded?.has(turnId)
+            ? true
+            : shouldStayOpen;
     const collapsed = !expanded;
     // Push the user message
     result.push({
@@ -2729,6 +2789,7 @@ export const MessageList = memo(
   forwardRef<MessageListHandle, MessageListProps>(function MessageList(
     {
       messages,
+      sessionKey,
       terminalBackgroundShellTaskIds,
       pendingApproval,
       onShowContextDetail,
@@ -3278,6 +3339,20 @@ export const MessageList = memo(
     const [collapseOverrides, setCollapseOverrides] = useState<
       ReadonlyMap<string, boolean>
     >(() => new Map());
+    // Turns kept expanded despite being complete. Two sources: pagination
+    // split-turn detection (tail was on screen before the user prompt
+    // arrived), and the anchor fallback (a turn collapsed while a history
+    // anchor sat on it). Entries persist until the user toggles the turn or
+    // the screen is cleared.
+    const [paginatedExpandedTurns, setPaginatedExpandedTurns] = useState<
+      ReadonlySet<string>
+    >(() => new Set());
+    // Pending split-turn detection snapshots keyed by load generation: a load
+    // can resolve SDK-side before its page commits to the transcript, letting
+    // a next load enqueue its own snapshot before the earlier page lands.
+    const pendingPaginationTurnCompares = useRef(
+      new Map<number, { ids: Set<string>; resolved: boolean }>(),
+    );
     const [turnLayoutPending, startTurnLayoutTransition] = useTransition();
     const turnLayoutTransitionStarted = useRef(false);
     const turnLayoutRowTops = useRef(new Map<string, number>());
@@ -3353,10 +3428,33 @@ export const MessageList = memo(
     useLayoutEffect(() => {
       mergedMessageCountRef.current = mergedMessages.length;
     }, [mergedMessages.length]);
+    const rawMessagesRef = useRef(messages);
+    useLayoutEffect(() => {
+      rawMessagesRef.current = messages;
+    }, [messages]);
     const [
       suppressOlderHistoryLoadingStatus,
       setSuppressOlderHistoryLoadingStatus,
     ] = useState(false);
+
+    // A direct session switch never renders empty messages (the provider
+    // batches the store reset and the replay into one notification), so the
+    // /clear reset never runs for it. Block ids are per-session ordinals, so
+    // every session-scoped state must drop when the displayed session
+    // changes: stale keep-open and snapshot entries would collide with the
+    // new session's reused ids, and an old anchor would restore the previous
+    // session's scroll metrics into the new transcript.
+    const [trackedSessionKey, setTrackedSessionKey] = useState(sessionKey);
+    if (trackedSessionKey !== sessionKey) {
+      setTrackedSessionKey(sessionKey);
+      pendingPaginationTurnCompares.current.clear();
+      olderHistoryLoadGeneration.current += 1;
+      olderHistoryLoadInFlight.current = false;
+      olderHistoryRetryBlocked.current = false;
+      setOlderHistoryAnchor(null);
+      setCollapseOverrides((prev) => (prev.size ? new Map() : prev));
+      setPaginatedExpandedTurns((prev) => (prev.size ? new Set() : prev));
+    }
 
     useEffect(() => {
       if (!hasOlderHistory) {
@@ -3424,6 +3522,7 @@ export const MessageList = memo(
         turnFileChanges,
         turnArtifacts,
         turnScheduledTasks,
+        paginatedExpandedTurns,
       ] as const;
       const cached = visibleItemsCache.current;
       const currentTail = displayItems[displayItems.length - 1];
@@ -3475,6 +3574,7 @@ export const MessageList = memo(
         automaticallyExpandedAgentKeys,
         pendingApprovalCallId: pendingApproval?.toolCallId ?? null,
         includeSubagentToolUsageInMetrics,
+        paginatedExpanded: paginatedExpandedTurns,
         enabled: collapseEnabled,
       });
       let metricsApplied = false;
@@ -3555,6 +3655,7 @@ export const MessageList = memo(
       turnFileChanges,
       turnArtifacts,
       turnScheduledTasks,
+      paginatedExpandedTurns,
     ]);
     const virtualizerItems =
       visibleItemsCache.current?.sourceMessages === messages
@@ -3864,6 +3965,15 @@ export const MessageList = memo(
           });
         turnLayoutTransitionStarted.current = true;
         startTurnLayoutTransition(() => {
+          // An explicit toggle is the user's own decision: it wins over the
+          // pagination keep-open and returns the turn to normal collapse
+          // semantics.
+          setPaginatedExpandedTurns((prev) => {
+            if (!prev.has(turnId)) return prev;
+            const next = new Set(prev);
+            next.delete(turnId);
+            return next;
+          });
           setCollapseOverrides((prev) => {
             const next = new Map(prev);
             next.set(turnId, nextExpanded);
@@ -4085,6 +4195,40 @@ export const MessageList = memo(
         olderHistoryAnchor.rowKey &&
         !hasVisibleRowKey(olderHistoryAnchor.rowKey)
       ) {
+        // The anchor row can vanish because its turn collapsed while the page
+        // was loading (a turn completed by pagination). Re-expand that turn so
+        // the anchor can be restored instead of dropping the reader's position.
+        const anchorTurnId = turnIdOfMessageRow(
+          rawMessagesRef.current,
+          olderHistoryAnchor.rowKey,
+        );
+        if (
+          anchorTurnId !== undefined &&
+          isTurnCollapsedInVisibleItems(visibleItems, anchorTurnId)
+        ) {
+          // Re-expanding only helps when it can actually take effect: an
+          // explicit user collapse override wins over the keep-open, and a
+          // turn already marked keep-open yet still hidden cannot be helped.
+          // Fall through and drop the anchor in those cases, or pagination
+          // state stays pinned in-flight forever (every later load bails at
+          // the in-flight guard).
+          if (
+            collapseOverrides.get(anchorTurnId) !== false &&
+            !paginatedExpandedTurns.has(anchorTurnId)
+          ) {
+            setPaginatedExpandedTurns((prev) =>
+              prev.has(anchorTurnId) ? prev : new Set(prev).add(anchorTurnId),
+            );
+            // A page extending the turn's aggregated run re-keys the captured
+            // row, so anchor on the turn's user row instead: the re-expanded
+            // turn always renders it, and the restore path then adjusts the
+            // scroll position rather than dropping the anchor.
+            setOlderHistoryAnchor((anchor) =>
+              anchor ? { ...anchor, rowKey: `msg:${anchorTurnId}` } : anchor,
+            );
+            return;
+          }
+        }
         if (
           olderHistoryAnchor.generation === olderHistoryLoadGeneration.current
         ) {
@@ -4179,6 +4323,8 @@ export const MessageList = memo(
       mergedMessages.length,
       olderHistoryAnchor,
       visibleItems,
+      collapseOverrides,
+      paginatedExpandedTurns,
     ]);
     const virtualItems = virtualizer.getVirtualItems();
     const totalVirtualSize = virtualizer.getTotalSize();
@@ -4533,7 +4679,20 @@ export const MessageList = memo(
               : {})),
         });
         try {
+          // Remember which messages were on screen before the page arrives so
+          // a turn the daemon split across pages (tail shown first, head
+          // completing later) can be detected and kept expanded.
+          pendingPaginationTurnCompares.current.set(generation, {
+            ids: new Set(rawMessagesRef.current.map((message) => message.id)),
+            resolved: false,
+          });
           await onLoadOlderHistory(force ? { force: true } : undefined);
+          // The snapshot belongs to this load regardless of anchor state: a
+          // superseding anchor drop bumps the generation mid-flight and would
+          // otherwise orphan the entry unresolved at the FIFO head, wedging
+          // every later split-turn detection.
+          const compare = pendingPaginationTurnCompares.current.get(generation);
+          if (compare) compare.resolved = true;
           if (generation === olderHistoryLoadGeneration.current) {
             setOlderHistoryAnchor((anchor) =>
               anchor?.generation === generation
@@ -4542,6 +4701,9 @@ export const MessageList = memo(
             );
           }
         } catch {
+          // A failed load commits no page, so its snapshot is always safe to
+          // drop, including when the load was superseded mid-flight.
+          pendingPaginationTurnCompares.current.delete(generation);
           if (generation === olderHistoryLoadGeneration.current) {
             olderHistoryRetryBlocked.current = true;
             olderHistoryLoadInFlight.current = false;
@@ -4568,6 +4730,86 @@ export const MessageList = memo(
     const retryOlderHistory = useCallback(() => {
       void loadOlderHistory(true, true);
     }, [loadOlderHistory]);
+
+    // After a pagination page commits, mark turns whose user prompt just
+    // arrived while their tail was already on screen (the daemon split the
+    // turn across pages). `applyTurnCollapse` keeps those expanded so the
+    // content the user is reading never silently collapses.
+    useLayoutEffect(() => {
+      const pending = pendingPaginationTurnCompares.current;
+      if (pending.size === 0) return;
+      // Skip locally-injected messages (recap ids `local-*`): /recap re-pins
+      // them at index 0 on every render and pagination cannot move them, so
+      // they never reflect a page landing and would pin the head-change check
+      // forever, wedging split-turn detection for the rest of the session.
+      const first = messages.find(
+        (message) => !message?.id.startsWith('local-'),
+      );
+      if (!first) return;
+      const oldest = pending.entries().next().value;
+      if (!oldest) return;
+      const [generation, compare] = oldest;
+      // A page prepends older messages at the head; live messages that land
+      // while the fetch is in flight append at the tail. Wait for the head to
+      // change so a mid-flight live update cannot consume the snapshot before
+      // the page commits (which would silently skip the split-turn detection).
+      // Compare raw message ids, not the compact-mode aggregate ids: a page
+      // that extends an aggregated run re-keys the synthetic summary id, but
+      // the run members keep their daemon ids.
+      if (compare.ids.has(first.id)) return;
+      const newTurnIds: string[] = [];
+      for (let i = 0; i < messages.length; i++) {
+        const message = messages[i];
+        if (
+          !message ||
+          !isTurnStartMessage(message) ||
+          compare.ids.has(message.id)
+        ) {
+          continue;
+        }
+        let tailShown = false;
+        for (let j = i + 1; j < messages.length; j++) {
+          const next = messages[j];
+          if (isTurnStartMessage(next)) break;
+          if (compare.ids.has(next.id)) {
+            tailShown = true;
+            break;
+          }
+        }
+        if (tailShown) newTurnIds.push(message.id);
+      }
+      if (newTurnIds.length === 0) {
+        // A changed head while the load is resolved is the page landing, so
+        // consume the snapshot even when it completed no split turn —
+        // otherwise every later transcript update rescans it for the rest of
+        // the session. While the load is still in flight a head change is
+        // not the page (a transcript reload or session/branch switch);
+        // discarding the snapshot there would let the page commit that
+        // follows silently skip detection — the split turn collapses again,
+        // the bug this code exists to fix.
+        if (!compare.resolved) return;
+      } else {
+        setPaginatedExpandedTurns((prev) => {
+          let next: Set<string> | null = null;
+          for (const id of newTurnIds) {
+            if (!prev.has(id)) {
+              next ??= new Set(prev);
+              next.add(id);
+            }
+          }
+          return next ?? prev;
+        });
+      }
+      pending.delete(generation);
+      // The page that just committed is visible now: fold its ids into any
+      // newer pending snapshot so that load's detection still recognizes the
+      // tail a mid-turn page boundary showed.
+      for (const remaining of pending.values()) {
+        for (const message of messages) {
+          if (message) remaining.ids.add(message.id);
+        }
+      }
+    }, [messages]);
 
     useEffect(() => {
       const pendingGeneration = pendingOlderHistoryTopLoad.current;
@@ -4837,7 +5079,12 @@ export const MessageList = memo(
         pendingBottomFollowAfterCooldown.current = false;
         setShouldFollow(true);
         pendingScrollRef.current = null;
+        // Drop the in-flight pagination snapshots too: without this a stale
+        // pre-clear snapshot survives into the next session and can mislabel
+        // a complete turn as keep-open (block ids are per-session ordinals).
+        pendingPaginationTurnCompares.current.clear();
         setCollapseOverrides((prev) => (prev.size ? new Map() : prev));
+        setPaginatedExpandedTurns((prev) => (prev.size ? new Set() : prev));
       }
     }, [messages.length, setShouldFollow]);
 
