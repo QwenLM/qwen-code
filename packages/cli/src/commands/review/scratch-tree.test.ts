@@ -159,6 +159,51 @@ describe('runScratchTree', () => {
     expect(r.note).toContain('filter.planted.smudge');
   });
 
+  it('refuses an include redirect in a scanned config file — the measurement resolves what the scan cannot see', () => {
+    // Each local file is queried with `--file`, which leaves include
+    // directives UNRESOLVED, while the residue measurement's `git status`
+    // reads MERGED config that resolves them — so a `filter.*.clean` hidden
+    // behind the redirect executes on a stat-stale tracked file while the
+    // screen answers no filter key and certifies the tree it just executed
+    // in. The redirect itself is the refusal; `--includes` on the scan
+    // would not close it alone, because an `includeIf.gitdir:` condition is
+    // context-dependent from here.
+    const included = join(repo, 'included-config');
+    const pwned = join(repo, 'PWNED-include');
+    writeFileSync(
+      included,
+      `[filter "evil"]\n\tclean = touch ${pwned} && cat\n`,
+    );
+    git(worktree, 'config', 'include.path', included);
+    // The conditional arm too, aimed at this repository's common dir so it
+    // resolves in merged config from the review worktree: pinning only
+    // `include.` would leave the `includeif.` half of the scan unwitnessed.
+    writeFileSync(
+      join(repo, '.git', 'config'),
+      `\n[includeIf "gitdir:${join(repo, '.git')}/"]\n\tpath = ${included}\n`,
+      { flag: 'a' },
+    );
+    const attributes = execFileSync(
+      'git',
+      ['rev-parse', '--path-format=absolute', '--git-path', 'info/attributes'],
+      { cwd: worktree, encoding: 'utf8' },
+    ).trim();
+    writeFileSync(attributes, 'a.ts filter=evil\n');
+    const stale = new Date(Date.now() + 60_000);
+    utimesSync(join(worktree, 'a.ts'), stale, stale);
+
+    const r = runScratchTree({
+      worktree,
+      label: 'verify--round-1--include',
+      fetchedSha: headSha,
+    });
+
+    expect(r.available).toBe(false);
+    expect(r.note).toContain('include.path');
+    expect(r.note).toContain('includeif.gitdir:');
+    expect(existsSync(pwned)).toBe(false);
+  });
+
   it('places it BESIDE the review worktree, never inside it', () => {
     // Nested, every probe file would land in the tree this command exists to
     // keep clean — and in the PR's own diff with it.
@@ -1241,6 +1286,35 @@ describe('runScratchTree --standalone', () => {
     expect(r.available).toBe(false);
     expect(r.note).toContain('filter.evil.clean');
     expect(existsSync(pwned)).toBe(false);
+  });
+
+  it('refuses an include redirect in BOTH shapes — merged config resolves what the per-file scan cannot', () => {
+    // The include directive sits in the common config; the filter it
+    // redirects to never appears in a scanned file, so a screen keyed on
+    // filter keys answers clean — while the shared-worktree `git status`
+    // reads merged config, resolves the redirect, and executes the clean
+    // filter on a stat-stale tracked file (the fixture's committed
+    // `.gitattributes` selects it). Both shapes run that measurement, so
+    // neither is safe to stand up.
+    const included = join(repo, 'included-config');
+    const pwned = join(repo, 'PWNED-include');
+    writeFileSync(
+      included,
+      `[filter "evil"]\n\tclean = touch ${pwned} && cat\n`,
+    );
+    git(repo, 'config', 'include.path', included);
+    const stale = new Date(Date.now() + 60_000);
+    utimesSync(join(worktree, 'a.ts'), stale, stale);
+
+    const linked = runScratchTree({ worktree, label: 'verify--round-1--inc' });
+    expect(linked.available).toBe(false);
+    expect(linked.note).toContain('include.path');
+
+    const r = run();
+    expect(r.available).toBe(false);
+    expect(r.note).toContain('include.path');
+    expect(existsSync(pwned)).toBe(false);
+    expect(r.path).toBeUndefined();
   });
 
   it('rebuilds on every call — what the last call wrote is gone', () => {

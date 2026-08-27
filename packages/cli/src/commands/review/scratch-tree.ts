@@ -185,7 +185,9 @@ export interface ScratchTreeArgs {
 const NO_HOOKS = ['-c', 'core.hooksPath=/dev/null/no-hooks'];
 
 /**
- * The repo-local `filter.<name>.smudge|clean` commands, when any are defined.
+ * The repo-local config surface the checkouts and the residue measurement
+ * would execute: `filter.<name>.smudge|clean` commands, and the include
+ * directives that can redirect them.
  *
  * The reset's and rebuild's checkouts EXECUTE these — hooks are disabled above,
  * filters are not — and the planting surface is two plain writes a probe can
@@ -194,22 +196,34 @@ const NO_HOOKS = ['-c', 'core.hooksPath=/dev/null/no-hooks'];
  * `$(git rev-parse --git-path info/attributes)`. discard and cleanup never
  * wipe the common dir, so a filter planted while reviewing one PR fires on
  * every later matching checkout of the user's OWN repository — persistence
- * planted by reviewing a malicious PR, measured live. The two local config
- * files are checked with `--file` rather than merged config because filters
- * in the user's global config (git-lfs is the common one) are the user's own
+ * planted by reviewing a malicious PR, measured live. The local config files
+ * are checked with `--file` rather than merged config because filters in the
+ * user's global config (git-lfs is the common one) are the user's own
  * contract, exactly like any git command they run — while a probe's planting
  * surface is the repo-local files. The state cannot be told apart from a
  * filter the user set deliberately, and cannot be safely wiped, so a hit is a
  * refusal upstream, not a cleanup here.
+ *
+ * An include directive in one of the scanned files is its own refusal arm:
+ * `--file` reads leave it unresolved, so a filter defined behind the redirect
+ * is invisible to the filter scan, while every checkout this command
+ * authorises and EVERY shape's shared-worktree residue measurement read
+ * MERGED config, which resolves it and executes the filter. Refusing the
+ * redirect itself closes that — `--includes` on the scan would not, because
+ * an `includeIf.gitdir:` condition is context-dependent from here. The
+ * user's global config is still never scanned, whatever it includes.
  */
-function localFilterCommands(worktree: string): string[] {
+function localFilterCommands(worktree: string): {
+  filters: string[];
+  includes: string[];
+} {
   const files = spawnSync(
     'git',
     ['rev-parse', '--git-common-dir', '--git-dir'],
     { cwd: worktree, encoding: 'utf8', env: sanitizedGitEnv() },
   );
   if (files.error || files.status !== 0 || typeof files.stdout !== 'string') {
-    return [];
+    return { filters: [], includes: [] };
   }
   const [commonDir, gitDir] = files.stdout.trim().split('\n');
   const common = resolve(worktree, commonDir);
@@ -231,7 +245,8 @@ function localFilterCommands(worktree: string): string[] {
   } catch {
     // No linked worktrees registered: the two candidates above are all of it.
   }
-  const found: string[] = [];
+  const filters: string[] = [];
+  const includes: string[] = [];
   for (const file of candidates) {
     if (!existsSync(file)) continue;
     const r = spawnSync(
@@ -241,17 +256,21 @@ function localFilterCommands(worktree: string): string[] {
         '--file',
         file,
         '--get-regexp',
-        '^filter\\..*\\.(smudge|clean)$',
+        '^(filter\\..*\\.(smudge|clean)|include\\.|includeif\\.)',
       ],
       { cwd: worktree, encoding: 'utf8', env: sanitizedGitEnv() },
     );
     if (r.error || r.status !== 0 || typeof r.stdout !== 'string') continue;
     for (const line of r.stdout.split('\n')) {
       const key = line.split(/\s+/)[0];
-      if (key && !found.includes(key)) found.push(key);
+      if (!key) continue;
+      // git renders section names lowercase — an `includeIf` section
+      // arrives as `includeif.` — so the prefix test catches both arms.
+      const list = key.startsWith('include') ? includes : filters;
+      if (!list.includes(key)) list.push(key);
     }
   }
-  return found;
+  return { filters, includes };
 }
 
 /**
@@ -607,10 +626,10 @@ export function runScratchTree(args: ScratchTreeArgs): ScratchTreeReport {
   // commands (see worktreeResidue). A standalone clone's checkout reads the
   // CLONE's config, which holds none of these — but the shared measurement
   // it still runs can execute them, so the screen covers both shapes.
-  const filters = localFilterCommands(worktree);
-  if (filters.length > 0) {
+  const screened = localFilterCommands(worktree);
+  if (screened.filters.length > 0) {
     return unavailable(
-      `the repository's local config defines content filter(s) ${filters
+      `the repository's local config defines content filter(s) ${screened.filters
         .map(inertPath)
         .join(', ')} — ` +
         'this command would EXECUTE them: the linked shape through its checkouts, ' +
@@ -621,6 +640,22 @@ export function runScratchTree(args: ScratchTreeArgs): ScratchTreeReport {
         'that select it. Remove the filter config — or the attributes file that ' +
         'uses it — if it is not yours; until then no scratch tree is safe to ' +
         'create or reset.',
+    );
+  }
+  if (screened.includes.length > 0) {
+    return unavailable(
+      `the repository's local config redirects the very surface that screen ` +
+        `reads — include directive(s) ${screened.includes
+          .map(inertPath)
+          .join(', ')} — ` +
+        'and a per-file read cannot see through the redirect: each local file ' +
+        'is queried on its own, while the checkouts this command authorises and ' +
+        "EVERY shape's shared-worktree residue measurement read MERGED config, " +
+        'which resolves it and executes any `filter.*.smudge|clean` the ' +
+        'redirected file defines. Remove the include directive — or move the ' +
+        'config it names into the local file, where the screen reads it, if it ' +
+        'defines no filter — until then no scratch tree is safe to create or ' +
+        'reset.',
     );
   }
 
