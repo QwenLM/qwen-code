@@ -16,10 +16,11 @@
  * Usage:  node scripts/check-tui-dep-direction.mjs
  * Exit 0 = all rules hold; exit 1 = violations found (or the scan itself
  * was incomplete — unlistable directories fail the gate instead of
- * silently shrinking it, and any symlink fails it too, because a file
- * reached through a link resolves relative imports from the link's
- * lexical location, not the target's physical one, so no link can be
- * trusted to keep resolution inside the rule root).
+ * silently shrinking it, and any symlink fails it too, whether it sits
+ * inside a scanned tree or in a rule root's own path, because a scan
+ * reached through a link can be substituted by a commit while the path
+ * reads unchanged, and no link can be trusted to keep resolution inside
+ * the rule root).
  *
  * Detection parses each file with the TypeScript compiler (already a repo
  * devDependency) and walks ImportDeclaration / ExportDeclaration / dynamic
@@ -29,7 +30,7 @@
  * interpolated templates cannot mask or fake an import.
  */
 
-import { readdirSync, readFileSync, realpathSync } from 'node:fs';
+import { lstatSync, readdirSync, readFileSync, realpathSync } from 'node:fs';
 import { dirname, extname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { exit, stdout } from 'node:process';
@@ -93,6 +94,34 @@ function listSourceFiles(root) {
   };
   walk(root);
   return { files: files.sort(), unreadableDirs, symlinks };
+}
+
+/**
+ * Reject a symlinked rule root before walking it. `readdirSync` follows a
+ * symlink transparently, so if the root — or any ancestor component between
+ * `anchor` and it — is a link, a commit could substitute the protected scan
+ * with a clean tree elsewhere while the configured path reads unchanged and
+ * no in-tree symlink diagnostic fires. Every path component below the anchor
+ * is lstat-checked and any symlink is returned as a gate failure. A missing
+ * component stops the walk; `requirePopulatedRoot` reports the absent root.
+ */
+function symlinkedPathComponents(root, anchor = repoRoot) {
+  const links = [];
+  let current = anchor;
+  for (const part of root.slice(anchor.length + 1).split(sep)) {
+    if (!part) continue;
+    current = join(current, part);
+    let stats;
+    try {
+      stats = lstatSync(current);
+    } catch {
+      break;
+    }
+    if (stats.isSymbolicLink()) {
+      links.push(current);
+    }
+  }
+  return links;
 }
 
 /**
@@ -311,6 +340,14 @@ function main() {
     'TUI dependency-direction check (OpenTUI migration Phase 0)\n\n',
   );
 
+  let failed = false;
+  for (const root of [CORE_SRC, UI_MODEL]) {
+    for (const link of symlinkedPathComponents(root)) {
+      stdout.write(`error: symlink in rule root path: ${link}\n`);
+      failed = true;
+    }
+  }
+
   const results = [
     checkRule({
       label: 'packages/core/src — framework-neutral business core',
@@ -325,8 +362,6 @@ function main() {
       enumeration: uiModelEnumeration,
     }),
   ];
-
-  let failed = false;
   for (const result of results) {
     printRule(result);
     failed ||= result.violations.length > 0;
@@ -347,7 +382,13 @@ function main() {
   stdout.write('PASS — dependency direction holds.\n');
 }
 
-export { bannedFamily, checkRule, findImports, listSourceFiles };
+export {
+  bannedFamily,
+  checkRule,
+  findImports,
+  listSourceFiles,
+  symlinkedPathComponents,
+};
 
 if (
   process.argv[1] &&

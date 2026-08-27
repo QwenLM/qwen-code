@@ -21,6 +21,7 @@ import {
   checkRule,
   findImports,
   listSourceFiles,
+  symlinkedPathComponents,
 } from '../check-tui-dep-direction.mjs';
 
 const temporaryDirectories = [];
@@ -365,5 +366,43 @@ describe('listSourceFiles', () => {
     expect(files).toHaveLength(1);
     expect(symlinks).toHaveLength(2);
     expect(unreadableDirs).toEqual([]);
+  });
+});
+
+describe('symlinkedPathComponents', () => {
+  it('returns [] for an ordinary path', () => {
+    const anchor = makeTemporaryDirectory();
+    const root = join(anchor, 'packages', 'cli', 'src', 'ui', 'model');
+    mkdirSync(root, { recursive: true });
+    expect(symlinkedPathComponents(root, anchor)).toEqual([]);
+  });
+
+  it('rejects a symlinked rule root (substituted scan)', () => {
+    const anchor = makeTemporaryDirectory();
+    mkdirSync(join(anchor, 'clean-elsewhere'));
+    symlinkSync(
+      join(anchor, 'clean-elsewhere'),
+      join(anchor, 'ui-model'),
+      'dir',
+    );
+    expect(symlinkedPathComponents(join(anchor, 'ui-model'), anchor)).toEqual([
+      join(anchor, 'ui-model'),
+    ]);
+  });
+
+  it('rejects a symlinked ancestor component (reviewer bypass)', () => {
+    const anchor = makeTemporaryDirectory();
+    mkdirSync(join(anchor, 'real-src', 'ui', 'model'), { recursive: true });
+    symlinkSync(join(anchor, 'real-src'), join(anchor, 'src'), 'dir');
+    expect(
+      symlinkedPathComponents(join(anchor, 'src', 'ui', 'model'), anchor),
+    ).toEqual([join(anchor, 'src')]);
+  });
+
+  it('stops at a missing component without throwing', () => {
+    const anchor = makeTemporaryDirectory();
+    expect(
+      symlinkedPathComponents(join(anchor, 'nope', 'model'), anchor),
+    ).toEqual([]);
   });
 });
