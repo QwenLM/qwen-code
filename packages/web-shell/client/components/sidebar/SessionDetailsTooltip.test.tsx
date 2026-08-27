@@ -6,7 +6,7 @@ import { createRoot } from 'react-dom/client';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { I18nProvider } from '../../i18n';
 import { SessionDetailsTooltip } from './SessionDetailsTooltip';
-import styles from './WebShellSidebar.module.css';
+import styles from '../SessionPrStateIcon.module.css';
 
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 

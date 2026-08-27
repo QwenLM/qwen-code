@@ -1,16 +1,10 @@
 import { useEffect, useRef, useState, type ReactElement } from 'react';
-import type {
-  DaemonSessionPrInfo,
-  DaemonSessionSummary,
-} from '@qwen-code/sdk/daemon';
+import type { DaemonSessionSummary } from '@qwen-code/sdk/daemon';
 import {
   CheckIcon,
   CopyIcon,
   FolderClosedIcon,
   GitBranchIcon,
-  GitMergeIcon,
-  GitPullRequestClosedIcon,
-  GitPullRequestIcon,
   RadioTowerIcon,
 } from 'lucide-react';
 import { useI18n } from '../../i18n';
@@ -19,6 +13,7 @@ import { writeClipboardText } from '../../utils/clipboard';
 import { isExternalOpenUrl } from '../../utils/externalOpen';
 import { workspaceBasename } from '../../utils/workspace';
 import { Popover, PopoverAnchor, PopoverContent } from '../ui/popover';
+import { SessionPrStateIcon } from '../SessionPrStateIcon';
 import styles from './WebShellSidebar.module.css';
 import { resolveSessionDetailsCollisionBoundary } from './sessionDetailsCollisionBoundary';
 
@@ -28,29 +23,6 @@ interface SessionDetailsTooltipProps {
   time: string;
   completedUnread: boolean;
   children: ReactElement;
-}
-
-/** GitHub-style state icon and color; a state-less binding stays neutral. */
-function sessionPrStateIcon(pr: DaemonSessionPrInfo): {
-  Icon: typeof GitPullRequestIcon;
-  className: string | undefined;
-} {
-  switch (pr.state) {
-    case 'merged':
-      return { Icon: GitMergeIcon, className: styles.sessionPrStateMerged };
-    case 'closed':
-      return {
-        Icon: GitPullRequestClosedIcon,
-        className: styles.sessionPrStateClosed,
-      };
-    case 'open':
-      return {
-        Icon: GitPullRequestIcon,
-        className: styles.sessionPrStateOpen,
-      };
-    default:
-      return { Icon: GitPullRequestIcon, className: undefined };
-  }
 }
 
 export function SessionDetailsTooltip({
@@ -175,44 +147,37 @@ export function SessionDetailsTooltip({
         {[...(session.prs ?? [])]
           .reverse()
           .filter((pr) => isExternalOpenUrl(pr.url))
-          .map((pr, index) => {
-            const { Icon: StateIcon, className: stateClass } =
-              sessionPrStateIcon(pr);
-            return (
-              // Index composite: a hand-edited sidecar can carry duplicate
-              // numbers (the reader validates shape, not uniqueness), and a
-              // duplicate key would reconcile rows against each other. The
-              // list is a stable per-snapshot order, so index keys are safe.
-              <div
-                className={styles.sessionDetailsRow}
-                key={`${index}-${pr.number}`}
+          .map((pr, index) => (
+            // Index composite: a hand-edited sidecar can carry duplicate
+            // numbers (the reader validates shape, not uniqueness), and a
+            // duplicate key would reconcile rows against each other. The
+            // list is a stable per-snapshot order, so index keys are safe.
+            <div
+              className={styles.sessionDetailsRow}
+              key={`${index}-${pr.number}`}
+            >
+              <SessionPrStateIcon state={pr.state} />
+              <a
+                href={pr.url}
+                target="_blank"
+                rel="noreferrer"
+                title={pr.url}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  openExternalLink(event, pr.url);
+                }}
               >
-                <StateIcon
-                  aria-hidden="true"
-                  {...(stateClass ? { className: stateClass } : {})}
-                />
-                <a
-                  href={pr.url}
-                  target="_blank"
-                  rel="noreferrer"
-                  title={pr.url}
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    openExternalLink(event, pr.url);
-                  }}
-                >
-                  {t('sidebar.sessionPr', { number: pr.number })}
-                  {pr.state === 'merged' || pr.state === 'closed' ? (
-                    <span className="sr-only">
-                      {pr.state === 'merged'
-                        ? t('sidebar.sessionPrStateMerged')
-                        : t('sidebar.sessionPrStateClosed')}
-                    </span>
-                  ) : null}
-                </a>
-              </div>
-            );
-          })}
+                {t('sidebar.sessionPr', { number: pr.number })}
+                {pr.state === 'merged' || pr.state === 'closed' ? (
+                  <span className="sr-only">
+                    {pr.state === 'merged'
+                      ? t('sidebar.sessionPrStateMerged')
+                      : t('sidebar.sessionPrStateClosed')}
+                  </span>
+                ) : null}
+              </a>
+            </div>
+          ))}
         <div className={styles.sessionDetailsRow}>
           <RadioTowerIcon aria-hidden="true" />
           <span>{status}</span>
