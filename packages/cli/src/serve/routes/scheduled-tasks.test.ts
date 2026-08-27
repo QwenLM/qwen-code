@@ -57,6 +57,8 @@ interface StubBridge {
   sendPrompt(
     sessionId: string,
     req: { sessionId: string; prompt: Array<{ type: 'text'; text: string }> },
+    signal?: AbortSignal,
+    context?: { onPromptAdmitted?: () => void },
   ): Promise<unknown>;
   closeSession(sessionId: string): Promise<unknown>;
   ensureDefaultSessionPersisted(sessionId: string): Promise<void>;
@@ -133,8 +135,9 @@ function makeStubBridge(): StubBridge {
       });
       return { sessionId };
     },
-    async sendPrompt(sessionId, req) {
+    async sendPrompt(sessionId, req, _signal, context) {
       bridge.prompts.push({ sessionId, text: req.prompt[0]?.text ?? '' });
+      context?.onPromptAdmitted?.();
       return { stopReason: 'end_turn' };
     },
     async closeSession(sessionId: string) {
@@ -501,6 +504,34 @@ describe('scheduled-tasks routes', () => {
 
     expect(run.status).toBe(500);
     expect(run.body.code).toBe('scheduled_task_session_dispatch_failed');
+    const stored = await readCronTasks(h.workspace);
+    expect(stored).toHaveLength(1);
+    expect(stored[0]).toMatchObject({
+      id: created.body.id,
+      recurring: false,
+      sessionMode: 'per_run',
+    });
+    expect(stored[0]?.runs).toBeUndefined();
+  });
+
+  it('restores a per-run one-shot when prompt admission rejects asynchronously', async () => {
+    const created = await create({
+      cron: '0 0 1 1 *',
+      prompt: 'run once',
+      recurring: false,
+      sessionMode: 'per_run',
+    });
+    h.bridge.sendPrompt = vi.fn(() =>
+      Promise.reject(new SessionNotFoundError('sess-2')),
+    );
+
+    const run = await request(h.app).post(
+      `/scheduled-tasks/${created.body.id}/run`,
+    );
+
+    expect(run.status).toBe(500);
+    expect(run.body.code).toBe('scheduled_task_session_dispatch_failed');
+    expect(h.bridge.closed).toContain('sess-2');
     const stored = await readCronTasks(h.workspace);
     expect(stored).toHaveLength(1);
     expect(stored[0]).toMatchObject({

@@ -1614,6 +1614,17 @@ describe('BridgeClient — create-sub-session extMethod dispatch', () => {
       }),
     ).rejects.toThrow(/sourceType/);
     expect(onCreate).not.toHaveBeenCalled();
+
+    await expect(
+      client.extMethod(METHOD, {
+        prompt: 'x',
+        completion: 'sent',
+        sourceType: 'scheduled_task',
+        sourceId: 'task-forge',
+        callerSessionId: 'caller-1',
+      }),
+    ).rejects.toThrow(/sourceType/);
+    expect(onCreate).not.toHaveBeenCalled();
   });
 
   it('rejects a callerSessionId this connection does not own', async () => {

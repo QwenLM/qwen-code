@@ -105,6 +105,8 @@ export interface ScheduledTasksSessionBridge {
       sessionId: string;
       prompt: Array<{ type: 'text'; text: string }>;
     },
+    signal?: AbortSignal,
+    context?: { onPromptAdmitted?: () => void },
   ): Promise<unknown>;
   closeSession(sessionId: string): Promise<unknown>;
   /** Persist a restorable transcript anchor for an eligible default session. */
@@ -553,22 +555,40 @@ async function dispatchTaskToFreshSession(
     // The prompt can still run with the generated session id as its label.
   }
   try {
-    const turn = sendPrompt(child.sessionId, {
-      sessionId: child.sessionId,
-      prompt: [
-        {
-          type: 'text',
-          text: buildScheduledTaskRunPrompt({
-            id: task.id,
-            name: task.name,
-            cron: task.cron,
-            prompt: task.prompt,
-            triggeredAt,
-            trigger: 'manual',
-          }),
-        },
-      ],
+    let markPromptAdmitted!: () => void;
+    const promptAdmitted = new Promise<void>((resolve) => {
+      markPromptAdmitted = resolve;
     });
+    const turn = sendPrompt(
+      child.sessionId,
+      {
+        sessionId: child.sessionId,
+        prompt: [
+          {
+            type: 'text',
+            text: buildScheduledTaskRunPrompt({
+              id: task.id,
+              name: task.name,
+              cron: task.cron,
+              prompt: task.prompt,
+              triggeredAt,
+              trigger: 'manual',
+            }),
+          },
+        ],
+      },
+      undefined,
+      {
+        onPromptAdmitted: markPromptAdmitted,
+      },
+    );
+    await Promise.race([
+      promptAdmitted,
+      turn.then(
+        () => undefined,
+        (error) => Promise.reject(error),
+      ),
+    ]);
     void turn.catch((error) => {
       writeStderrLine(
         `qwen serve: scheduled-task session ${child.sessionId} prompt failed: ${error instanceof Error ? error.message : String(error)}`,

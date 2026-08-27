@@ -75,6 +75,7 @@ import { CANCEL_VOTE_SENTINEL } from './permissionMediator.js';
 import {
   isScheduledTaskRunSource,
   parseSessionSource,
+  SCHEDULED_TASK_RUN_SOURCE_TYPE,
 } from './session-source.js';
 // Narrowed from the concrete `MultiClientPermissionMediator` to the
 // sub-interface this class actually uses (`request` only). Structural
@@ -1882,6 +1883,15 @@ export class BridgeClient implements Client {
     const source = parseSessionSource(params['sourceType'], params['sourceId']);
     if ('error' in source) {
       throw RequestError.invalidParams(undefined, source.error);
+    }
+    if (
+      source.sourceType !== undefined &&
+      source.sourceType !== SCHEDULED_TASK_RUN_SOURCE_TYPE
+    ) {
+      throw RequestError.invalidParams(
+        undefined,
+        '`sourceType` is not settable on a sub-session',
+      );
     }
     const promptLimit = isScheduledTaskRunSource(source)
       ? MAX_SUB_SESSION_PROMPT_CHARS + SCHEDULED_TASK_RUN_CONTEXT_HEADROOM_CHARS

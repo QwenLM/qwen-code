@@ -857,6 +857,7 @@ export function createSubSessionLauncher(
       const promptId = randomUUID();
       let lastEventId!: number;
       let turn!: ReturnType<AcpSessionBridge['sendPrompt']>;
+      let promptAdmission: Promise<void> | undefined;
       let sub: BridgeSession;
       if (standalone) {
         const created = await standaloneService!.createChildWithInitialPrompt(
@@ -917,6 +918,10 @@ export function createSubSessionLauncher(
 
       if (!standalone) {
         lastEventId = bridge.getSessionLastEventId(sessionId);
+        let markPromptAdmitted!: () => void;
+        promptAdmission = new Promise<void>((resolve) => {
+          markPromptAdmitted = resolve;
+        });
         turn = bridge.sendPrompt(
           sessionId,
           {
@@ -924,7 +929,7 @@ export function createSubSessionLauncher(
             prompt: [{ type: 'text', text: info.prompt }],
           } as Parameters<AcpSessionBridge['sendPrompt']>[1],
           undefined,
-          { promptId },
+          { promptId, onPromptAdmitted: markPromptAdmitted },
         );
         promptDispatched = true;
       }
@@ -937,6 +942,20 @@ export function createSubSessionLauncher(
       });
 
       if (info.completion === 'sent') {
+        if (isScheduledTaskRunSource(info) && promptAdmission) {
+          await Promise.race([
+            promptAdmission,
+            turn.then(
+              () => undefined,
+              (err) =>
+                Promise.reject(
+                  new Error(
+                    `sub-session dispatch failed: ${err instanceof Error ? err.message : String(err)}`,
+                  ),
+                ),
+            ),
+          ]);
+        }
         // Hold the concurrency slot until the sub-session's turn finishes
         // (or the daemon shuts down via stop(), or a wall-clock ceiling is
         // reached). Without this the cap is a no-op for sent mode — the
