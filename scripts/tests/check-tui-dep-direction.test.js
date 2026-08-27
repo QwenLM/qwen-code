@@ -133,6 +133,47 @@ describe('findImports', () => {
     expect(specs(source)).toEqual(['dynamic-import:@opentui/core']);
   });
 
+  it('detects import-type queries (type X = import("...").Y)', () => {
+    expect(
+      specs(
+        [
+          'type Node = import("react").ReactNode;',
+          "type Box = import('ink').Box['props'];",
+          'type Core = import(`@opentui/core`).TuiApp;',
+        ].join('\n'),
+      ),
+    ).toEqual([
+      'import-type:react',
+      'import-type:ink',
+      'import-type:@opentui/core',
+    ]);
+  });
+
+  it('accepts interpolation-free template literals as call specifiers', () => {
+    expect(
+      specs(
+        [
+          'const lazy = await import(`@solidjs/router`);',
+          'const legacy = require(`react-dom`);',
+          'vi.mock(`ink-spinner`);',
+        ].join('\n'),
+      ),
+    ).toEqual([
+      'dynamic-import:@solidjs/router',
+      'require:react-dom',
+      'vi.mock:ink-spinner',
+    ]);
+  });
+
+  it('still ignores interpolated specifiers (not statically knowable)', () => {
+    const source = [
+      'const mod = await import(`react${suffix}`);',
+      'const legacy = require(`${name}/ink`);',
+      'vi.mock(`ink-${variant}`);',
+    ].join('\n');
+    expect(specs(source)).toEqual([]);
+  });
+
   it('reports line numbers matching the source', () => {
     const source = '\n\n' + "import { Box } from 'ink';";
     expect(findImports(source)[0].line).toBe(3);
@@ -209,12 +250,12 @@ describe('checkRule', () => {
     expect(contained.violations).toEqual([]);
   });
 
-  it('follows symlinked files and directories instead of skipping them', () => {
+  it('follows symlinked files and directories inside the rule root', () => {
     const root = makeTemporaryDirectory();
-    const target = join(root, 'real');
-    writeSource(root, 'real/leak.ts', "import { Box } from 'ink';\n");
     const scanRoot = join(root, 'scanned');
     mkdirSync(scanRoot);
+    const target = join(scanRoot, 'real');
+    writeSource(root, 'scanned/real/leak.ts', "import { Box } from 'ink';\n");
     writeSource(root, 'scanned/clean.ts', "import { z } from 'zod';\n");
     symlinkSync(target, join(scanRoot, 'linked-dir'), 'dir');
     symlinkSync(
@@ -228,7 +269,43 @@ describe('checkRule', () => {
       root: scanRoot,
       rules: { noFramework: true },
     });
+    // leak.ts is reached once as a real file and once through the file
+    // symlink; the directory symlink dedups against the real directory.
     expect(result.violations).toHaveLength(2);
+    expect(result.escapedSymlinks).toEqual([]);
+  });
+
+  it('fails the gate when a symlink target escapes the physical root', () => {
+    const root = makeTemporaryDirectory();
+    writeSource(root, 'outside/config/settings.ts', 'export const x = 1;\n');
+    writeSource(root, 'outside/sneaky.ts', "import { render } from 'ink';\n");
+    const scanRoot = join(root, 'ui-model');
+    mkdirSync(scanRoot);
+    writeSource(root, 'ui-model/clean.ts', "import { z } from 'zod';\n");
+    // The review scenario: a file inside the rule root that is actually
+    // served from outside it, where its lexical relative imports would
+    // resolve inside the root and mask the escape.
+    symlinkSync(
+      join(root, 'outside', 'sneaky.ts'),
+      join(scanRoot, 'dialog-scope.ts'),
+      'file',
+    );
+    symlinkSync(
+      join(root, 'outside', 'config'),
+      join(scanRoot, 'config-dir'),
+      'dir',
+    );
+
+    const result = checkRule({
+      label: 'escaped',
+      root: scanRoot,
+      rules: { noFramework: true, selfContained: true },
+    });
+    expect(result.escapedSymlinks).toHaveLength(2);
+    expect(result.escapedSymlinks.join(' ')).toContain('dialog-scope.ts');
+    expect(result.escapedSymlinks.join(' ')).toContain('config-dir');
+    // Escaped entries are not scanned, so they cannot fake a clean result.
+    expect(result.scanned).toBe(1);
   });
 
   it.skipIf(process.platform === 'win32')(

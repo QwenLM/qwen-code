@@ -16,16 +16,20 @@
  * Usage:  node scripts/check-tui-dep-direction.mjs
  * Exit 0 = all rules hold; exit 1 = violations found (or the scan itself
  * was incomplete — unlistable directories fail the gate instead of
- * silently shrinking it; symlinks are followed, not skipped).
+ * silently shrinking it; symlinks are followed, not skipped, but a
+ * symlink whose target escapes the physical rule root fails the gate so
+ * traversal cannot leave it, and imports resolve from the real location).
  *
  * Detection parses each file with the TypeScript compiler (already a repo
  * devDependency) and walks ImportDeclaration / ExportDeclaration / dynamic
- * import() / require() / vi.mock() nodes, so comments, strings, regex
- * literals and template interpolations cannot mask or fake an import.
+ * import() / require() / vi.mock() / import-type (type X = import("..."))
+ * nodes, accepting string literals and interpolation-free template
+ * literals as specifiers, so comments, strings, regex literals and
+ * interpolated templates cannot mask or fake an import.
  */
 
 import { readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
-import { dirname, extname, join, resolve, sep } from 'node:path';
+import { dirname, extname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { exit, stdout } from 'node:process';
 import ts from 'typescript';
@@ -53,11 +57,26 @@ const SKIP_DIRS = new Set(['node_modules', 'dist', '.git']);
  * realpath visited-set guarding cycles, so a committed symlink cannot evade
  * the rules) and unlistable directories are collected as diagnostics for
  * the caller to fail on.
+ *
+ * Symlink containment: every symlink target is resolved physically and must
+ * stay inside the physical rule root. A target escaping it would let the
+ * walker recursively read outside the repository, and would desync relative
+ * imports from their real source location (a file reached via a symlink
+ * resolves `./sibling` lexically, not from where the bytes really live),
+ * so escaped symlinks are collected as diagnostics and fail the gate.
  */
 function listSourceFiles(root) {
   const files = [];
   const unreadableDirs = [];
+  const escapedSymlinks = [];
   const visitedDirs = new Set();
+  // The root itself may sit behind a symlink; anchor containment on its
+  // physical location so in-root links resolve consistently.
+  const realRoot = realpathSync(root);
+  const escapesRoot = (target) => {
+    const rel = relative(realRoot, target);
+    return rel === '..' || rel.startsWith(`..${sep}`);
+  };
   const walk = (dir) => {
     let realDir;
     try {
@@ -88,11 +107,19 @@ function listSourceFiles(root) {
           continue;
         }
         if (stats.isDirectory()) {
+          if (escapesRoot(realpathSync(full))) {
+            escapedSymlinks.push(`${full} -> ${realpathSync(full)}`);
+            continue;
+          }
           if (!SKIP_DIRS.has(entry.name)) walk(full);
         } else if (
           stats.isFile() &&
           SOURCE_EXTENSIONS.has(extname(entry.name))
         ) {
+          if (escapesRoot(realpathSync(full))) {
+            escapedSymlinks.push(`${full} -> ${realpathSync(full)}`);
+            continue;
+          }
           files.push(full);
         }
         continue;
@@ -105,13 +132,17 @@ function listSourceFiles(root) {
     }
   };
   walk(root);
-  return { files: files.sort(), unreadableDirs };
+  return { files: files.sort(), unreadableDirs, escapedSymlinks };
 }
 
 /**
- * Extract import specifiers via the TypeScript AST. Only string-literal
- * specifiers are reportable; computed ones (e.g. `import(variable)`) are
- * skipped because no static specifier exists to classify.
+ * Extract import specifiers via the TypeScript AST. Only statically
+ * knowable specifiers are reportable: string literals and
+ * interpolation-free template literals (which the runtime treats
+ * identically as module names); computed or interpolated ones (e.g.
+ * `import(variable)`) are skipped because no static specifier exists to
+ * classify. Import-type queries (`type X = import("...").Y`) count too —
+ * they still record a static framework dependency at the type level.
  */
 function findImports(source, fileName = 'module.ts') {
   const sourceFile = ts.createSourceFile(
@@ -129,6 +160,15 @@ function findImports(source, fileName = 'module.ts') {
     found.push({ kind, spec: specifier, line: lineOf(node) });
   };
 
+  // Specifiers a call/import can statically name: quoted literals plus
+  // template literals without `${}` interpolation (isStringLiteral rejects
+  // those, but they resolve to the same module name).
+  const staticSpecifier = (node) =>
+    node &&
+    (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node))
+      ? node.text
+      : undefined;
+
   const visit = (node) => {
     if (
       ts.isImportDeclaration(node) &&
@@ -141,30 +181,35 @@ function findImports(source, fileName = 'module.ts') {
       ts.isStringLiteral(node.moduleSpecifier)
     ) {
       record('export-from', node, node.moduleSpecifier.text);
+    } else if (ts.isImportTypeNode(node)) {
+      const argument = node.argument;
+      const spec = ts.isLiteralTypeNode(argument)
+        ? staticSpecifier(argument.literal)
+        : undefined;
+      if (spec !== undefined) {
+        record('import-type', node, spec);
+      }
     } else if (ts.isCallExpression(node)) {
-      const [firstArg] = node.arguments;
+      const spec = staticSpecifier(node.arguments[0]);
       if (
         node.expression.kind === ts.SyntaxKind.ImportKeyword &&
-        firstArg &&
-        ts.isStringLiteral(firstArg)
+        spec !== undefined
       ) {
-        record('dynamic-import', node, firstArg.text);
+        record('dynamic-import', node, spec);
       } else if (
         ts.isIdentifier(node.expression) &&
         node.expression.text === 'require' &&
-        firstArg &&
-        ts.isStringLiteral(firstArg)
+        spec !== undefined
       ) {
-        record('require', node, firstArg.text);
+        record('require', node, spec);
       } else if (
         ts.isPropertyAccessExpression(node.expression) &&
         ts.isIdentifier(node.expression.expression) &&
         node.expression.expression.text === 'vi' &&
         node.expression.name.text === 'mock' &&
-        firstArg &&
-        ts.isStringLiteral(firstArg)
+        spec !== undefined
       ) {
-        record('vi.mock', node, firstArg.text);
+        record('vi.mock', node, spec);
       }
     }
     ts.forEachChild(node, visit);
@@ -210,8 +255,9 @@ function bannedFamily(spec) {
   return null;
 }
 
-function checkRule({ label, root, rules }) {
-  const { files, unreadableDirs } = listSourceFiles(root);
+function checkRule({ label, root, rules, enumeration }) {
+  const { files, unreadableDirs, escapedSymlinks } =
+    enumeration ?? listSourceFiles(root);
   let specifiers = 0;
   const violations = [];
 
@@ -263,6 +309,7 @@ function checkRule({ label, root, rules }) {
     specifiers,
     violations,
     unreadableDirs,
+    escapedSymlinks,
   };
 }
 
@@ -282,16 +329,23 @@ function printRule(result) {
 }
 
 function requirePopulatedRoot(root, label) {
-  if (listSourceFiles(root).files.length === 0) {
+  const enumeration = listSourceFiles(root);
+  if (enumeration.files.length === 0) {
     stdout.write(`error: ${label} (${root}) not found or has no source files`);
     stdout.write('\n');
     exit(1);
   }
+  return enumeration;
 }
 
 function main() {
-  requirePopulatedRoot(CORE_SRC, 'packages/core/src');
-  requirePopulatedRoot(UI_MODEL, 'packages/cli/src/ui/model');
+  // Enumerate once per rule root so diagnostics (unlistable directories,
+  // escaped symlinks) are attributed to the same rule block as the scan.
+  const coreEnumeration = requirePopulatedRoot(CORE_SRC, 'packages/core/src');
+  const uiModelEnumeration = requirePopulatedRoot(
+    UI_MODEL,
+    'packages/cli/src/ui/model',
+  );
 
   stdout.write(
     'TUI dependency-direction check (OpenTUI migration Phase 0)\n\n',
@@ -302,11 +356,13 @@ function main() {
       label: 'packages/core/src — framework-neutral business core',
       root: CORE_SRC,
       rules: { noFramework: true, noRelativeIntoCli: true },
+      enumeration: coreEnumeration,
     }),
     checkRule({
       label: 'packages/cli/src/ui/model — framework-neutral streaming state',
       root: UI_MODEL,
       rules: { noFramework: true, selfContained: true },
+      enumeration: uiModelEnumeration,
     }),
   ];
 
@@ -316,6 +372,10 @@ function main() {
     failed ||= result.violations.length > 0;
     for (const dir of result.unreadableDirs) {
       stdout.write(`error: could not list directory: ${dir}\n`);
+      failed = true;
+    }
+    for (const link of result.escapedSymlinks) {
+      stdout.write(`error: symlink escapes the rule root: ${link}\n`);
       failed = true;
     }
   }
