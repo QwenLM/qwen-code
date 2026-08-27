@@ -120,6 +120,8 @@ Workspace read-only snapshots: `workspace_mcp`, `workspace_skills`, `workspace_p
 
 Extension management: `extension_management_v2` adds the global `/extensions/*` catalog/mutation/operation contract and the workspace activation projection. It is separate from the published `workspace_extensions` compatibility surface and from `workspace_qualified_rest_core`.
 
+Local Extension installation: `extension_local_path_install` allows an absolute path on the daemon host in the existing `source` field of both Extension install routes. It is separate from `extension_management_v2` because the primary-workspace compatibility route also supports it, and clients must not send local paths to older daemons.
+
 V2 Extension batch activation: `extension_batch_activation_v2` adds queued global default-activation and selected-workspace override batches to `extension_management_v2`. Clients must pre-flight it independently because older V2 daemons expose only singular activation routes.
 
 Workspace-qualified session reads: `workspace_persisted_transcript`, `workspace_session_export`, `workspace_archived_session_export`, `workspace_session_live_state`. The active and archived export tags are independent from each other and from `session_export` and `workspace_qualified_rest_core`, so clients must pre-flight the exact storage state they intend to export. Persisted transcript paging permits an untrusted secondary under its bounded read policy; both full export paths remain trusted-only. `workspace_session_live_state` is likewise independent from `workspace_qualified_rest_core` and is trusted-only: it serves the selected runtime's memory-only live-session snapshot and catalog version and does not extend the untrusted-secondary persisted read policy to live bridge state.

@@ -36,6 +36,7 @@ import { isBlockedAuthProviderHost } from '../server/auth-provider-helpers.js';
 import type { SendBridgeError } from '../server/error-response.js';
 import type { safeBody as safeBodyType } from '../server/request-helpers.js';
 import {
+  isPortableAbsolutePath,
   requireTrustedWorkspaceRuntime,
   resolveWorkspaceRuntimeFromParam,
   sendGenerationClosedError,
@@ -71,6 +72,37 @@ const extensionArchiveBodyParser = express.raw({
   type: 'application/octet-stream',
   limit: EXTENSION_ARCHIVE_UPLOAD_LIMIT,
 });
+
+const assertDaemonExtensionInstallSource = (
+  installMetadata: ExtensionInstallMetadata,
+  source: string,
+  ref: string | undefined,
+  autoUpdate: boolean | undefined,
+): void => {
+  if (installMetadata.type === 'local') {
+    if (!path.isAbsolute(source)) {
+      throw new Error(
+        'Local extension sources must be absolute daemon-host paths; relative paths are not supported over the daemon endpoint.',
+      );
+    }
+    if (ref || autoUpdate) {
+      throw new Error(
+        '`ref` and `autoUpdate` are not applicable for local extensions.',
+      );
+    }
+    return;
+  }
+  if (
+    installMetadata.type === 'git' ||
+    installMetadata.type === 'github-release' ||
+    installMetadata.type === 'npm'
+  ) {
+    return;
+  }
+  throw new Error(
+    'Only GitHub, Git, npm, and absolute local path extension installs are supported over the daemon endpoint.',
+  );
+};
 
 const parseExtensionArchiveFilename = (
   value: unknown,
@@ -1073,25 +1105,18 @@ export function registerWorkspaceExtensionRoutes(
           return;
         }
         const localSource =
-          /^[A-Za-z]:[\\/]/.test(sourceValue) ||
-          sourceValue.startsWith('/') ||
-          sourceValue.startsWith('.');
+          isPortableAbsolutePath(sourceValue) || sourceValue.startsWith('.');
         if (localSource) {
           try {
             const metadata = await parseInstallSource(sourceValue, {
               networkPolicy: 'public',
             });
-            if (
-              metadata.type !== 'git' &&
-              metadata.type !== 'github-release' &&
-              metadata.type !== 'npm'
-            ) {
-              res.status(400).json({
-                error:
-                  'Only GitHub, Git, and npm extension installs are supported over the daemon endpoint.',
-              });
-              return;
-            }
+            assertDaemonExtensionInstallSource(
+              metadata,
+              sourceValue,
+              refValue,
+              autoUpdateValue,
+            );
           } catch (error) {
             const message =
               error instanceof Error ? error.message : 'Invalid install source';
@@ -1142,15 +1167,12 @@ export function registerWorkspaceExtensionRoutes(
             const prepared = await context!.prepare(async (signal) => {
               const installMetadata = await parseInstallSource(sourceValue);
 
-              if (
-                installMetadata.type !== 'git' &&
-                installMetadata.type !== 'github-release' &&
-                installMetadata.type !== 'npm'
-              ) {
-                throw new Error(
-                  'Only GitHub, Git, and npm extension installs are supported over the daemon endpoint.',
-                );
-              }
+              assertDaemonExtensionInstallSource(
+                installMetadata,
+                sourceValue,
+                refValue,
+                autoUpdateValue,
+              );
               if (
                 gitCredential &&
                 installMetadata.type !== 'git' &&
@@ -1947,15 +1969,12 @@ export function registerWorkspaceExtensionRoutes(
       async (extensionManager, _signal, context) => {
         const prepared = await context!.prepare(async (signal) => {
           const metadata = await parseInstallSource(sourceValue);
-          if (
-            metadata.type !== 'git' &&
-            metadata.type !== 'github-release' &&
-            metadata.type !== 'npm'
-          ) {
-            throw new Error(
-              'Only GitHub, Git, and npm extension installs are supported over the daemon endpoint.',
-            );
-          }
+          assertDaemonExtensionInstallSource(
+            metadata,
+            sourceValue,
+            typeof ref === 'string' ? ref : undefined,
+            typeof autoUpdate === 'boolean' ? autoUpdate : undefined,
+          );
           if (
             gitCredential &&
             metadata.type !== 'git' &&
