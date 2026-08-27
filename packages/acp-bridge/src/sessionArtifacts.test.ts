@@ -338,6 +338,62 @@ describe('SessionArtifactStore', () => {
     await expect(store.list()).resolves.toMatchObject({ artifacts: [] });
   });
 
+  it('get() does not forget a sibling write_file artifact from a stale missing observation', async () => {
+    let failWrites = false;
+    const store = new SessionArtifactStore({
+      sessionId: 's1-get-scoped-forget',
+      workspaceCwd: workspace,
+      persistence: {
+        recordEvent: async () => {
+          if (failWrites) {
+            throw new Error('disk full');
+          }
+        },
+        recordSnapshot: async () => {},
+      },
+    });
+    await fs.writeFile(path.join(workspace, 'a.html'), '<html>a</html>');
+    await fs.writeFile(path.join(workspace, 'b.html'), '<html>b</html>');
+    const created = await store.upsertMany(
+      [
+        {
+          title: 'a.html',
+          workspacePath: 'a.html',
+          toolName: 'write_file',
+        },
+        {
+          title: 'b.html',
+          workspacePath: 'b.html',
+          toolName: 'write_file',
+        },
+      ],
+      { strict: true },
+    );
+    const artifactA = created.changes[0]!.artifactId;
+    const artifactB = created.changes[1]!.artifactId;
+
+    await fs.rm(path.join(workspace, 'a.html'));
+    await fs.rm(path.join(workspace, 'b.html'));
+    failWrites = true;
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(Date.now() + 6_000));
+
+    await expect(store.list()).resolves.toMatchObject({
+      artifacts: [
+        { id: artifactA, status: 'missing' },
+        { id: artifactB, status: 'missing' },
+      ],
+    });
+
+    failWrites = false;
+    await fs.writeFile(path.join(workspace, 'b.html'), '<html>b</html>');
+    await expect(store.get(artifactA)).resolves.toBeUndefined();
+    await expect(store.get(artifactB)).resolves.toMatchObject({
+      id: artifactB,
+      status: 'available',
+    });
+  });
+
   it('restamps an available write_file fingerprint after a same-content mtime drift', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-08-24T00:00:00.000Z'));

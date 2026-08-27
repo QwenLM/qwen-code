@@ -322,7 +322,7 @@ export class SessionArtifactStore {
         await this.refreshWorkspaceStatus(artifact, { onError: 'missing' });
       }
       if (isVanishedAutoRecordedWorkspaceArtifact(artifact)) {
-        await this.forgetVanishedAutoRecordedArtifacts();
+        await this.forgetVanishedAutoRecordedArtifacts([artifact]);
         const kept = this.artifacts.get(artifactId);
         return kept ? toPublicArtifact(kept) : undefined;
       }
@@ -1795,8 +1795,10 @@ export class SessionArtifactStore {
     }
   }
 
-  private async forgetVanishedAutoRecordedArtifacts(): Promise<void> {
-    const vanished = Array.from(this.artifacts.values()).filter(
+  private async forgetVanishedAutoRecordedArtifacts(
+    candidates?: readonly StoredArtifact[],
+  ): Promise<void> {
+    const vanished = (candidates ?? Array.from(this.artifacts.values())).filter(
       isVanishedAutoRecordedWorkspaceArtifact,
     );
     if (vanished.length === 0) {
