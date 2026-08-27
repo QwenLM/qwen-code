@@ -175,8 +175,9 @@ export class PermissionManager {
 
   /**
    * Canonical tool names from the `settings.tools.eager` allowlist, or
-   * `null` when the setting is absent/empty (the default — every tool
-   * keeps its normal registration).
+   * `null` when the setting is absent (the default — every tool keeps its
+   * normal registration). An empty array is NOT null: it is an active
+   * allowlist naming nothing, which defers every non-exempt tool.
    *
    * Matching goes through `toolMatchesRuleToolName`, the same helper the
    * permission rules use, so aliases (`ListFiles`) and meta-categories
@@ -231,20 +232,31 @@ export class PermissionManager {
       this.stripDangerousRulesForAutoMode();
     }
 
-    // Snapshot the `settings.tools.eager` allowlist. Entries are parsed
-    // with the same rule parser the permission rules use so alias forms
-    // (`ListFiles`) and stray specifiers (`Bash(npm test)`) normalise to a
-    // canonical tool name; the eager gate is tool-level, not
-    // invocation-level. Empty/whitespace-only and malformed entries are
-    // dropped rather than allowed to gate the entire toolset, and a list
-    // that reduces to nothing leaves the allowlist inactive.
-    const rawEagerTools = this.config.getEagerTools?.() ?? [];
-    const eagerNames = rawEagerTools
-      .filter((name) => typeof name === 'string' && name.trim() !== '')
-      .map((name) => parseRule(name))
-      .filter((rule) => !rule.invalid)
-      .map((rule) => rule.toolName);
-    this.eagerToolAllowList = eagerNames.length > 0 ? eagerNames : null;
+    // Snapshot the `settings.tools.eager` allowlist. Only an ARRAY
+    // activates it: `undefined`, `null`, or any non-array value means no
+    // restriction, while an explicitly empty array is an active allowlist
+    // that names nothing and therefore defers every non-exempt tool. That
+    // is the same empty-array convention `tools.core` follows
+    // (#10065/#10080), so the two `tools.*` knobs cannot be read
+    // backwards from one another.
+    //
+    // Entries are parsed with the same rule parser the permission rules
+    // use so alias forms (`ListFiles`) and stray specifiers
+    // (`Bash(npm test)`) normalise to a canonical tool name; the eager
+    // gate is tool-level, not invocation-level. Empty/whitespace-only and
+    // malformed entries are dropped, which can leave an active allowlist
+    // matching nothing — deferring more than intended is recoverable
+    // (ToolSearch still reaches every tool), whereas silently ignoring a
+    // configured list would resend exactly the schemas the user asked to
+    // keep out (#9827).
+    const rawEagerTools = this.config.getEagerTools?.();
+    this.eagerToolAllowList = Array.isArray(rawEagerTools)
+      ? rawEagerTools
+          .filter((name) => typeof name === 'string' && name.trim() !== '')
+          .map((name) => parseRule(name))
+          .filter((rule) => !rule.invalid)
+          .map((rule) => rule.toolName)
+      : null;
   }
 
   // ---------------------------------------------------------------------------

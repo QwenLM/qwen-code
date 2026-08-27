@@ -1839,10 +1839,18 @@ export async function loadCliConfig(
   // `tools.eager` restricts which schemas ride in the initial model request
   // (#9827). Unlisted tools stay registered and reachable via tool_search —
   // it is a schema-size knob, not an availability knob (#10075).
+  //
+  // An explicitly empty array must survive as an empty array, not collapse
+  // into "unset": `[]` is an active allowlist naming nothing (defer
+  // everything), the same empty-list convention `tools.core` follows
+  // (#10065/#10080). `normalizeDisabledToolList` maps undefined to `[]`,
+  // so the Array.isArray guard has to come first — without it, absent and
+  // explicitly-empty would reach core as the same value, which is exactly
+  // the SDK divergence #10138 reports for coreTools.
   const eagerTools =
-    bareMode || safeMode
-      ? []
-      : normalizeDisabledToolList(settings.tools?.eager);
+    bareMode || safeMode || !Array.isArray(settings.tools?.eager)
+      ? undefined
+      : normalizeDisabledToolList(settings.tools.eager);
 
   // Helper: check if a tool is explicitly covered by an allow rule OR by the
   // coreTools whitelist. Uses alias matching for coreTools (via isToolEnabled)
@@ -2206,7 +2214,7 @@ export async function loadCliConfig(
             .map((d) => d.trim()),
     disabledTools: disabledTools.length > 0 ? disabledTools : undefined,
     visibleTools: visibleTools.length > 0 ? visibleTools : undefined,
-    eagerTools: eagerTools.length > 0 ? eagerTools : undefined,
+    eagerTools,
     toolSearchThreshold:
       bareMode || safeMode ? 0 : settings.tools?.toolSearch?.threshold,
     // New unified permissions (PermissionManager source of truth).

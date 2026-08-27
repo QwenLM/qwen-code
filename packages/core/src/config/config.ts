@@ -1052,11 +1052,14 @@ export interface ConfigParameters {
    */
   visibleTools?: string[];
   /**
-   * Tool names whose schemas ride in the EAGER model request. When
-   * non-empty, every other built-in is demoted to deferred — still
-   * registered, still listed in `/tools`, still loadable via `tool_search`
-   * — so constrained-decoding backends never have to compile the schemas
-   * they cannot handle (#9827). Sourced from `settings.tools.eager`.
+   * Tool names whose schemas ride in the EAGER model request. When set,
+   * every other built-in is demoted to deferred — still registered, still
+   * listed in `/tools`, still loadable via `tool_search` — so
+   * constrained-decoding backends never have to compile the schemas they
+   * cannot handle (#9827). Sourced from `settings.tools.eager`.
+   *
+   * `undefined` means no restriction; an explicitly empty array is an
+   * active allowlist naming nothing, which defers every non-exempt tool.
    *
    * Deliberately separate from `permissions.allow`, which is pure
    * auto-approval and never affects registration (#10075).
@@ -2009,7 +2012,7 @@ export class Config {
   // self-consistent.
   private disabledTools: ReadonlySet<string>;
   private readonly visibleTools: ReadonlySet<string>;
-  private readonly eagerTools: readonly string[];
+  private readonly eagerTools: readonly string[] | undefined;
   private readonly toolSearchThreshold: number;
   private readonly permissionsAllow: string[];
   private readonly permissionsAsk: string[];
@@ -2352,11 +2355,18 @@ export class Config {
         (name): name is string => typeof name === 'string',
       ),
     );
-    this.eagerTools = Object.freeze(
-      (params.eagerTools ?? []).filter(
-        (name): name is string => typeof name === 'string',
-      ),
-    );
+    // An explicitly empty array is preserved as an ACTIVE-but-empty
+    // allowlist (defer everything); only `undefined` means "no
+    // restriction". Same convention `tools.core` uses for its empty list
+    // (#10065/#10080), so the two `tools.*` knobs read the same way.
+    this.eagerTools =
+      params.eagerTools === undefined
+        ? undefined
+        : Object.freeze(
+            params.eagerTools.filter(
+              (name): name is string => typeof name === 'string',
+            ),
+          );
     this.toolSearchThreshold =
       params.toolSearchThreshold ?? DEFAULT_TOOL_SEARCH_THRESHOLD;
     this.permissionsAllow = params.permissions?.allow || [];
@@ -5804,10 +5814,14 @@ export class Config {
 
   /**
    * Returns the `settings.tools.eager` allowlist: the tool names whose
-   * schemas ride in the eager model request. Empty means "no restriction".
-   * Consumed by `PermissionManager.getToolRegistrationStatus` (#9827).
+   * schemas ride in the eager model request.
+   *
+   * `undefined` means "not configured — no restriction". An empty array is
+   * an active allowlist that names nothing, which defers every
+   * non-exempt tool. Consumed by
+   * `PermissionManager.getToolRegistrationStatus` (#9827).
    */
-  getEagerTools(): readonly string[] {
+  getEagerTools(): readonly string[] | undefined {
     return this.eagerTools;
   }
 

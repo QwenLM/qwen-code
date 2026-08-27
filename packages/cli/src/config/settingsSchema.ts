@@ -2799,7 +2799,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: true,
         default: undefined as string[] | undefined,
         description:
-          'Tool names whose schemas are sent in the initial model request. When set, every other built-in tool is deferred instead: still registered and listed in /tools, still callable, but discovered on demand via tool_search. Use this to shrink the tool schemas sent to constrained-decoding backends (llama.cpp, Docker Model Runner). Differs from tools.disabled, which removes tools entirely, and from permissions.allow, which only auto-approves and never hides a tool.',
+          'Tool names whose schemas are sent in the initial model request. When set, every other built-in tool is deferred instead: still registered and listed in /tools, still callable, but discovered on demand via tool_search. An explicitly empty list ([]) is an active allowlist naming nothing, so every non-exempt tool is deferred; omit the setting for no restriction. Use this to shrink the tool schemas sent to constrained-decoding backends (llama.cpp, LM Studio, Docker Model Runner). Differs from tools.disabled, which removes tools entirely, and from permissions.allow, which only auto-approves and never hides a tool.',
         showInDialog: false,
         mergeStrategy: MergeStrategy.UNION,
       },

@@ -2755,7 +2755,9 @@ describe('PermissionManager', () => {
       expect(await pm.isToolEnabled('edit')).toBe(true);
     });
 
-    it('no eager list → allowlist inactive, everything registered', async () => {
+    it('an absent eager list leaves the allowlist inactive', async () => {
+      // Only `undefined` means "no restriction" — see the empty-array case
+      // below for the deliberate asymmetry.
       pm = new PermissionManager(makeConfig({ permissionsAllow: [] }));
       pm.initialize();
       expect(pm.isEagerToolAllowListActive()).toBe(false);
@@ -2801,17 +2803,39 @@ describe('PermissionManager', () => {
       );
     });
 
-    it('malformed and empty entries are ignored', async () => {
+    it('an explicitly empty list is active and defers everything', async () => {
+      // `[]` is an active allowlist that names nothing — the same
+      // empty-array convention `tools.core` follows (#10065/#10080), so
+      // the two `tools.*` knobs cannot be read backwards from one another.
+      // This is the gentler answer for constrained-decoding backends: the
+      // eager request carries almost no tool schemas, but every tool is
+      // still registered and reachable via ToolSearch.
+      pm = new PermissionManager(makeConfig({ eagerTools: [] }));
+      pm.initialize();
+      expect(pm.isEagerToolAllowListActive()).toBe(true);
+      for (const name of ['read_file', 'edit', 'send_message']) {
+        expect(await pm.getToolRegistrationStatus(name)).toBe('deferred');
+        expect(await pm.isToolEnabled(name)).toBe(true);
+      }
+      // Exempt families still ride eagerly, so the session stays usable.
+      expect(await pm.getToolRegistrationStatus('tool_search')).toBe(
+        'registered',
+      );
+    });
+
+    it('malformed entries drop out but still leave the list active', async () => {
+      // Deferring more than intended is recoverable (ToolSearch still
+      // reaches every tool); silently ignoring a configured list would
+      // resend exactly the schemas the user asked to keep out (#9827).
       pm = new PermissionManager(
         makeConfig({ eagerTools: ['', '   ', 'Bash(unbalanced'] }),
       );
       pm.initialize();
-      // Nothing valid survived, so the allowlist never activates and the
-      // whole toolset stays eagerly registered rather than vanishing.
-      expect(pm.isEagerToolAllowListActive()).toBe(false);
+      expect(pm.isEagerToolAllowListActive()).toBe(true);
       expect(await pm.getToolRegistrationStatus('send_message')).toBe(
-        'registered',
+        'deferred',
       );
+      expect(await pm.isToolEnabled('send_message')).toBe(true);
     });
 
     it('deny rules still win over eager membership', async () => {
