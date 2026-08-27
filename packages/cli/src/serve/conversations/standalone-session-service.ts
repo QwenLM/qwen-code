@@ -27,6 +27,7 @@ import {
   SessionStorageEntryError,
   SessionTranscriptDurabilityError,
   SessionTranscriptChangedError,
+  SessionWriterLostError,
   SessionWriterUnavailableError,
   type ApprovalMode,
   type SessionArchiveState,
@@ -1379,7 +1380,13 @@ export class StandaloneSessionService {
           this.pendingLifecycleLeaseReleases.delete(pendingKey);
         }
         return true;
-      } catch {
+      } catch (error) {
+        if (error instanceof SessionWriterLostError) {
+          if (this.pendingLifecycleLeaseReleases.get(pendingKey) === lease) {
+            this.pendingLifecycleLeaseReleases.delete(pendingKey);
+          }
+          return false;
+        }
         // The lease clears retryable terminal failures itself.
       }
     }

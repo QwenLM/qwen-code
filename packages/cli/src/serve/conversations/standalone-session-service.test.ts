@@ -18,6 +18,7 @@ import {
   SessionService,
   SessionStorageEntryError,
   SessionTranscriptDurabilityError,
+  SessionWriterLostError,
   writeSessionPrs,
 } from '@qwen-code/qwen-code-core';
 import { promises as fs } from 'node:fs';
@@ -872,6 +873,61 @@ describe('StandaloneSessionService', () => {
     });
 
     expect(lease.release).toHaveBeenCalledTimes(4);
+    expect(harness.deletionJournal.clear).toHaveBeenCalledOnce();
+  });
+
+  it('does not park a lost lease before exact deletion recovery', async () => {
+    mockActiveStandalone();
+    const harness = createHarness();
+    const lostLease = mockWriterLease();
+    lostLease.release.mockRejectedValue(new SessionWriterLostError());
+    const nextLease = {
+      assertOwnedAndUnchanged: vi.fn(async () => undefined),
+      assertCleanupOwned: vi.fn(),
+      release: vi.fn(async () => undefined),
+      isReleased: false,
+      isReleaseDurabilityPending: false,
+    };
+    vi.mocked(SessionService.prototype.acquireSessionWriterLease)
+      .mockResolvedValueOnce(lostLease as never)
+      .mockResolvedValueOnce(nextLease as never);
+    vi.spyOn(
+      SessionService.prototype,
+      'removeSessionTranscriptForLifecycle',
+    ).mockResolvedValue(true);
+    vi.spyOn(
+      SessionService.prototype,
+      'cleanupRemovedSessionStateForLifecycle',
+    ).mockResolvedValue();
+
+    await expect(harness.service.delete([sessionId])).resolves.toEqual({
+      removed: [sessionId],
+      notFound: [],
+      errors: [],
+      fileCleanupPending: [sessionId],
+    });
+
+    vi.mocked(
+      SessionService.prototype.findSessionIdIgnoringCase,
+    ).mockResolvedValue(undefined);
+    harness.deletionJournal.read.mockResolvedValueOnce(
+      deletionEntry() as never,
+    );
+    harness.inspectStandaloneDeletionPaths.mockResolvedValueOnce({
+      status: 'absent',
+    });
+
+    await expect(harness.service.delete([sessionId])).resolves.toEqual({
+      removed: [sessionId],
+      notFound: [],
+      errors: [],
+      fileCleanupPending: [],
+    });
+
+    expect(
+      SessionService.prototype.acquireSessionWriterLease,
+    ).toHaveBeenCalledTimes(2);
+    expect(nextLease.release).toHaveBeenCalledOnce();
     expect(harness.deletionJournal.clear).toHaveBeenCalledOnce();
   });
 
