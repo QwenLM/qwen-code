@@ -203,6 +203,7 @@ registry. Clients **must** gate UI off `features`, not off `mode` (per design
  'extension_batch_activation_v2',
  'workspace_settings', 'workspace_init', 'workspace_mcp_restart',
  'session_recap', 'session_generation', 'session_btw', 'session_shell_command',
+ 'standalone_sessions_v1',
  'mcp_workspace_pool', 'mcp_pool_restart',
  'require_auth', 'allow_origin', 'auth_device_flow',
  'permission_mediation', 'prompt_absolute_deadline', 'writer_idle_timeout',
@@ -491,6 +492,7 @@ operator diagnostic snapshot documented below.
 | `workspace_voice`                   | settings persistence is available, so the legacy primary workspace Voice settings routes are active.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | `workspace_voice_transcription`     | the primary workspace has a configured Voice transcription model.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 | `session_shell_command`             | session shell execution is explicitly enabled.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| `standalone_sessions_v1`            | the daemon has installed the complete standalone-session runtime, lifecycle coordinator, durable deletion journal, managed-directory implementation, and `/standalone/sessions` route family. Direct embeds without the complete dependency graph omit both the routes and this tag.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | `session_artifacts_persistence`     | session artifact persistence is wired for the runtime.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | `session_generation`                | session generation helpers are available.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
 | `scheduled_task_session_reuse`      | durable scheduled-task session management is active and every managed daemon runtime has installed the callback that lets a task explicitly bind to its current existing session.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
@@ -1384,6 +1386,17 @@ Recommended poll cadence: aligned with whatever already polls `/workspace/mcp`; 
       "userInvocable": false,
       "installedPath": "/home/alice/project/.qwen/skills/review/SKILL.md",
       "argumentHint": "[path]"
+    },
+    {
+      "kind": "skill",
+      "status": "ok",
+      "name": "database-review",
+      "description": "Review database changes",
+      "level": "extension",
+      "modelInvocable": true,
+      "installedPath": "/home/alice/.qwen/extensions/alibabacloud-database-suite/skills/database-review/SKILL.md",
+      "extensionName": "alibabacloud-database-suite",
+      "extensionDisplayName": "Alibaba Cloud Database Suite"
     }
   ]
 }
@@ -1400,6 +1413,11 @@ canonicalizing it. Current daemons emit it for every skill, while clients must
 tolerate its absence from older v1 daemons. Skill bodies, hooks, `skillRoot`,
 and other skill configuration remain excluded. `errors` is omitted when
 discovery succeeds.
+
+For extension-owned skills, `extensionName` is the canonical manifest name and
+is safe to use as the owner identity. `extensionDisplayName` is an optional,
+localized presentation value and may be non-unique. New clients should display
+`extensionDisplayName ?? extensionName`; older daemons omit the display field.
 
 Repeated reads are served from the last committed workspace snapshot,
 periodically revalidated against the child's in-memory cache. A read never
@@ -2012,6 +2030,30 @@ cannot provide a snapshot, the response includes `statusUnavailable: true`.
 This route exposes only stable client-facing fields. It intentionally omits
 debug internals such as process IDs, spawn args, stderr tails, root URIs, and
 workspace-folder paths.
+
+### Standalone session lifecycle (`standalone_sessions_v1`)
+
+When `/capabilities.features` contains `standalone_sessions_v1`, the daemon exposes a process-global route family for top-level standalone sessions owned by its dedicated Conversations runtime. These routes never accept a workspace selector and never fall back to the primary workspace. Direct embeds that cannot construct the complete Conversations ownership, runtime, directory, lifecycle, and deletion-journal dependency graph omit both the feature and all routes below.
+
+| Route                                            | Request                                                                                                                                                      | Success                                                                                                                                        |
+| ------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| `POST /standalone/sessions`                      | `{ "sessionId": "<UUID>", "modelServiceId"?: string, "approvalMode"?: ApprovalMode }`                                                                        | `200` with the standalone session, `context: { "kind": "standalone" }`, and its managed projectless output directory. Creation is prompt-less. |
+| `GET /standalone/sessions`                       | Query: `cursor?`, `size?` (1-100), `archiveState?` (`active` or `archived`)                                                                                  | `200 { sessions, nextCursor?, liveMergeFailed?, truncated? }`                                                                                  |
+| `GET /standalone/sessions/:id`                   | none                                                                                                                                                         | `202 { sessionId, state: "creating" }` while local creation is in flight, otherwise `200` with the exact summary.                              |
+| `POST /standalone/sessions/:id/load`             | Existing restore options only: `historyPageSize?`, `liveReplayMode?`, `hideInheritedHistory?`, `approvalMode?`; client identity stays in `X-Qwen-Client-Id`. | `200` restored standalone session.                                                                                                             |
+| `POST /standalone/sessions/:id/resume`           | Same restore options as `load`.                                                                                                                              | `200` restored standalone session without load-history replay.                                                                                 |
+| `POST /standalone/sessions/:id/repair-directory` | Empty body or `{}`                                                                                                                                           | `200` with the verified or recreated managed directory.                                                                                        |
+| `PATCH /standalone/sessions/:id/metadata`        | `{ "displayName": string }`                                                                                                                                  | `200 { sessionId, displayName }`                                                                                                               |
+| `GET /standalone/sessions/:id/export`            | Query: `format=html`, `format=md`, `format=json`, or `format=jsonl` (defaults to `html`).                                                                    | Existing export content type, filename, and body.                                                                                              |
+| `POST /standalone/sessions/archive`              | `{ "sessionIds": ["<UUID>", ...] }`                                                                                                                          | `200 { archived, alreadyArchived, notFound, errors }`                                                                                          |
+| `POST /standalone/sessions/unarchive`            | `{ "sessionIds": ["<UUID>", ...] }`                                                                                                                          | `200 { unarchived, alreadyActive, notFound, errors }`                                                                                          |
+| `POST /standalone/sessions/delete`               | `{ "sessionIds": ["<UUID>", ...] }`                                                                                                                          | `200 { removed, notFound, errors, fileCleanupPending }`                                                                                        |
+
+Bodies must be JSON objects with no unknown fields. IDs are RFC UUID v1-v5 values; the daemon canonicalizes them to lowercase. Batch requests contain 1-100 strings and are validated and de-duplicated before mutation. A batch failure is reported as `{ sessionId, code, message }` and does not roll back successful operations on other IDs. `fileCleanupPending` means transcript deletion committed but journal-authorized sidecar or managed-directory cleanup must be retried by reconciliation; the session is already logically removed.
+
+Only explicit standalone transcripts and the documented top-level legacy compatibility shape are visible. Child, Live, project, worktree, ambiguous, unreadable, or deletion-journaled records fail closed. Creation continues if its HTTP response disconnects; a committed session is not deleted, and the response client is detached. Recover by exact GET followed by load/resume instead of retrying create as an attach.
+
+Archive, unarchive, repair, rename, and delete share the same per-session lifecycle admission as load/resume and prompts. Delete uses transcript unlink as its durable commit point and a private journal plus atomic managed-directory staging for crash recovery. Recovery restores the directory when the transcript remains intact and completes cleanup when the transcript is gone; any mismatched identity, conflicting path, foreign owner, or ambiguous transcript returns a structured fail-closed error.
 
 ### `POST /session`
 
