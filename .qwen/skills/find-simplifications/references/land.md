@@ -121,7 +121,7 @@ Then the gate matching what you touched:
 | user-facing strings, `i18n/locales/*`              | `npm run check-i18n`                                                                                                                           |
 | `package.json` or dependencies                     | `npm run check:lockfile`                                                                                                                       |
 | `scripts/`                                         | `npm run test:scripts` — plain `npm test` does not cover it                                                                                    |
-| `packages/desktop*`                                | `npm run check:desktop-isolation`                                                                                                              |
+| `packages/desktop-shell`                           | `npm run check:desktop-isolation`                                                                                                              |
 | bundling, the serve fast path, `esbuild.config.js` | `npm run check:serve-fast-path-bundle`                                                                                                         |
 | CLI behavior                                       | the matching `npm run test:integration:*` script                                                                                               |
 
