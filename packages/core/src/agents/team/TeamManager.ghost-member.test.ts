@@ -14,6 +14,7 @@ import type { TeamFile } from './types.js';
 import { formatAgentId, readTeamFile } from './teamHelpers.js';
 import * as teamHelpers from './teamHelpers.js';
 import { TeamCoordinationHarness } from './test-utils/coordination-harness.js';
+import type { FakeBackend } from './test-utils/fake-backend.js';
 import { Storage } from '../../config/storage.js';
 
 vi.mock('../../config/storage.js', async (importOriginal) => {
@@ -56,6 +57,42 @@ function createDeferred<T>(): Deferred<T> {
   return { promise, resolve, reject };
 }
 
+/**
+ * Gate teammate spawns behind per-agent promises while each agent still
+ * registers synchronously in the backend map.
+ *
+ * Encodes the suite's most delicate contract: `FakeBackend.spawnAgent`
+ * creates the FakeAgent synchronously before its first await, which is
+ * exactly what keeps these race tests deterministic — calling the
+ * original fire-and-forget preserves that synchronous registration
+ * (`getAgentFromBackend` finds the handle while its spawn promise is
+ * still gated), and returning the gate promise lets each test control
+ * when the gated `spawnTeammate` continues past its await.
+ *
+ * Agents without a gate throw by default; with `passthroughUnknown`
+ * they spawn normally through the original backend instead.
+ */
+function gateSpawns(
+  backend: FakeBackend,
+  gates: Map<string, Promise<void>>,
+  options?: { passthroughUnknown?: boolean },
+): void {
+  const originalSpawnAgent = backend.spawnAgent.bind(backend);
+  backend.spawnAgent = (config) => {
+    const gate = gates.get(config.agentId);
+    if (gate) {
+      // Fire-and-forget: the synchronous portion creates the FakeAgent
+      // in the backend map so getAgentFromBackend finds it.
+      void originalSpawnAgent(config);
+      return gate;
+    }
+    if (options?.passthroughUnknown) {
+      return originalSpawnAgent(config);
+    }
+    throw new Error(`Unexpected agent: ${config.agentId}`);
+  };
+}
+
 describe('TeamManager ghost member regression (#10208)', () => {
   let harness: TeamCoordinationHarness | undefined;
 
@@ -77,27 +114,17 @@ describe('TeamManager ghost member regression (#10208)', () => {
     const teamName = h.teamName;
     const backend = h.backend;
 
-    // Controlled spawn: call original synchronously so the agent is
-    // created in the backend map, but defer the promise so we control
-    // when each spawnTeammate continues past its await.
+    // Controlled spawn: gate each agent's promise while the agent
+    // still registers synchronously in the backend map (gateSpawns).
     const deferredA = createDeferred<void>();
     const deferredB = createDeferred<void>();
-    const originalSpawnAgent = backend.spawnAgent.bind(backend);
-
-    backend.spawnAgent = (config) => {
-      const agentId = config.agentId;
-      // Fire-and-forget: the synchronous portion creates the FakeAgent
-      // in the backend map so getAgentFromBackend finds it.
-      void originalSpawnAgent(config);
-
-      if (agentId === formatAgentId('alpha', teamName)) {
-        return deferredA.promise;
-      }
-      if (agentId === formatAgentId('beta', teamName)) {
-        return deferredB.promise;
-      }
-      throw new Error(`Unexpected agent: ${agentId}`);
-    };
+    gateSpawns(
+      backend,
+      new Map([
+        [formatAgentId('alpha', teamName), deferredA.promise],
+        [formatAgentId('beta', teamName), deferredB.promise],
+      ]),
+    );
 
     // Start two concurrent spawns.
     const spawnA = h.teamManager.spawnTeammate({
@@ -155,20 +182,13 @@ describe('TeamManager ghost member regression (#10208)', () => {
 
     const deferredA = createDeferred<void>();
     const deferredB = createDeferred<void>();
-    const originalSpawnAgent = backend.spawnAgent.bind(backend);
-
-    backend.spawnAgent = (config) => {
-      const agentId = config.agentId;
-      void originalSpawnAgent(config);
-
-      if (agentId === formatAgentId('alpha', teamName)) {
-        return deferredA.promise;
-      }
-      if (agentId === formatAgentId('beta', teamName)) {
-        return deferredB.promise;
-      }
-      throw new Error(`Unexpected agent: ${agentId}`);
-    };
+    gateSpawns(
+      backend,
+      new Map([
+        [formatAgentId('alpha', teamName), deferredA.promise],
+        [formatAgentId('beta', teamName), deferredB.promise],
+      ]),
+    );
 
     // Hold A's roster write after it snapshots the roster. The real
     // write serializes synchronously when it starts, so the snapshot
@@ -233,22 +253,23 @@ describe('TeamManager ghost member regression (#10208)', () => {
     const teamName = h.teamName;
     const backend = h.backend;
 
+    // Gate only beta; other agents (alpha, gamma) pass through to
+    // the original backend spawn.
     const deferredB = createDeferred<void>();
-    const originalSpawnAgent = backend.spawnAgent.bind(backend);
-
-    backend.spawnAgent = (config) => {
-      const agentId = config.agentId;
-      if (agentId === formatAgentId('beta', teamName)) {
-        // Create the handle synchronously, but defer resolution so we
-        // control when B continues past its await.
-        void originalSpawnAgent(config);
-        return deferredB.promise;
-      }
-      return originalSpawnAgent(config);
-    };
+    gateSpawns(
+      backend,
+      new Map([[formatAgentId('beta', teamName), deferredB.promise]]),
+      { passthroughUnknown: true },
+    );
 
     // A succeeds; its success write lands before we arm the spy.
     await h.teamManager.spawnTeammate({ name: 'alpha', cwd: h.tmpDir });
+
+    // Witness for the leader notification: the compensating-write
+    // failure must be surfaced to the leader, since debug logging
+    // alone is invisible in production.
+    const leaderSpy = vi.fn();
+    h.teamManager.setLeaderMessageCallback(leaderSpy);
 
     // Make the next roster write (B's compensating write) fail.
     const writeSpy = vi
@@ -272,5 +293,25 @@ describe('TeamManager ghost member regression (#10208)', () => {
     const inMemoryNames = inMemory.members.map((m) => m.name);
     expect(inMemoryNames).toContain('alpha');
     expect(inMemoryNames).not.toContain('beta');
+
+    // The failure must also be surfaced to the leader — a debug-only
+    // trail is invisible in production.
+    const notice = leaderSpy.mock.calls.find((call: unknown[]) =>
+      String(call[0]).includes('Compensating team-file write'),
+    );
+    expect(notice).toBeDefined();
+    expect(notice![0]).toContain('<team_error>');
+    expect(notice![0]).toContain(formatAgentId('beta', teamName));
+
+    // A rejected write must not poison the write queue: a subsequent
+    // normal spawn has to land its roster write on disk.
+    await h.teamManager.spawnTeammate({ name: 'gamma', cwd: h.tmpDir });
+
+    const persisted = await readTeamFile(teamName);
+    expect(persisted).toBeDefined();
+    const persistedNames = persisted!.members.map((m) => m.name);
+    expect(persistedNames).toContain('alpha');
+    expect(persistedNames).toContain('gamma');
+    expect(persistedNames).not.toContain('beta');
   });
 });

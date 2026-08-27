@@ -577,6 +577,24 @@ export class TeamManager {
           `Compensating team-file write after failed spawn of ` +
             `${agentId} failed: ${getErrorMessage(writeErr)}`,
         );
+        // Beyond the debug log (which is off in production), surface
+        // the failure to the leader as well, mirroring `fireAndForget`:
+        // the persisted roster may now keep a ghost member (#10208),
+        // and the leader is the only production-visible observer.
+        try {
+          this.leaderMessageCallback?.(
+            `<team_error>Compensating team-file write after failed ` +
+              `spawn of ${agentId} failed: ` +
+              `${getErrorMessage(writeErr)}</team_error>`,
+            `Team roster write after failed spawn of "${name}" failed`,
+          );
+        } catch (cbErr) {
+          const cbMsg = cbErr instanceof Error ? cbErr.message : String(cbErr);
+          debug.warn(
+            `Compensating-write failure notice: leader message ` +
+              `callback threw: ${cbMsg}`,
+          );
+        }
       }
       throw err;
     }
