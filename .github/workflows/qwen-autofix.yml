@@ -3318,7 +3318,8 @@ jobs:
                 | {at: (.submitted_at // ""),
                    marker: ((.body // "") | [ scan("<!-- qwen-review-ledger (.*?) -->") ] | last | .[0] // "")}
                 | select(.marker != "")
-                | .led = (.marker | try fromjson catch null) | select(.led != null)
+                | .led = (.marker | try fromjson catch null)
+                | select(.led | type == "object")
                 | {at, round: (.led.round // 0),
                    rec: (.led.rec | if type == "array" then . else [] end)} ]
               | sort_by(.at) | group_by(.round) | map(last)
@@ -3328,15 +3329,16 @@ jobs:
             if [[ "${CONV_STREAK}" -ge "${CONVERGENCE_BREAK_ROUNDS}" ]]; then
               echo "🛑 #${PR}: review non-convergence signal for ${CONV_STREAK} consecutive round(s) (threshold ${CONVERGENCE_BREAK_ROUNDS}) — pausing until a human weighs in"
               fleet_row "${PR}" 'convergence-parked' "review non-convergence signal ${CONV_STREAK} round(s) running — paused; a maintainer response or ${RETRY_COMMAND} resumes"
-              # The signal codes observed since the boundary, for the notice
-              # — the review names WHAT it keeps diagnosing, so the human
-              # reads the same vocabulary the breaker acted on.
+              # The UNION of signal codes observed since the boundary, for
+              # the notice — wider than the trailing streak the breaker
+              # acted on (a round that reset the streak still contributes).
+              # The notice's wording claims exactly this union.
               CONV_CODES="$(jq -r --arg rb "${REVIEW_BOT}" --arg since "${CONV_SINCE}" \
                 --argjson codes "${CONVERGENCE_SIGNAL_CODES}" '
                 [ .[] | select((.user.login // "") == $rb)
                   | select((.submitted_at // "") > $since)
                   | ((.body // "") | [ scan("<!-- qwen-review-ledger (.*?) -->") ] | last | .[0] // "")
-                  | select(. != "") | (try fromjson catch null) | select(. != null)
+                  | select(. != "") | (try fromjson catch null) | select(type == "object")
                   | (.rec | if type == "array" then . else [] end) | .[] ]
                 | map(select(. as $c | $codes | index($c))) | unique | join(", ")' \
                 "${WORKDIR}/rv.json" 2> /dev/null || echo '')"
@@ -3367,7 +3369,7 @@ jobs:
                   fi
                   if [[ "${SCAN_BOT_ACTOR}" != "${AUTOFIX_BOT}" ]]; then
                     echo "::warning::convergence-break notice skipped: PAT authenticates as '${SCAN_BOT_ACTOR}', expected ${AUTOFIX_BOT}"
-                  elif ! gh pr comment "${PR}" --repo "${REPO}" --body "$(printf '⏸️ AutoFix paused by a review convergence signal: the last %s automated review round(s) each carried a machine-readable non-convergence recommendation (%s) — the reviewer keeps finding new defects at a rate that is not falling while the loop keeps widening the diff, so another automatic round is unlikely to converge this PR. The loop resumes once a maintainer responds on this PR (a review or comment counts, and steers the next rounds), and pauses again if the signal persists for %s more round(s). Alternatives: split the recurring cluster into its own PR, batch the remaining fixes into one push, comment `%s` to re-arm a fresh window, or `%s stop` to release takeover. While paused, new feedback and base conflicts stay unhandled.\n\n<details>\n<summary>中文说明</summary>\n\n⏸️ AutoFix 已因评审收敛信号暂停：最近 %s 轮自动评审均携带机器可读的不收敛建议码（%s）——评审仍在以不降的速率发现新缺陷，而循环在继续扩大 diff，再跑一轮自动修复难以收敛本 PR。维护者在本 PR 上作出回应后循环自动恢复（评论或评审均可，并将作为后续轮次的指引）；若信号再持续 %s 轮会再次暂停。可选做法：把反复出问题的簇拆成独立 PR、把剩余修复攒成一批一次推送、评论 `%s` 重开计数窗口、或评论 `%s stop` 释放接管。暂停期间，新反馈与 base 冲突不会被处理。\n\n</details>\n\n<!-- autofix-convergence-break -->' "${CONV_STREAK}" "${CONV_CODES}" "${CONVERGENCE_BREAK_ROUNDS}" "${RETRY_COMMAND}" "${TAKEOVER_COMMAND}" "${CONV_STREAK}" "${CONV_CODES}" "${CONVERGENCE_BREAK_ROUNDS}" "${RETRY_COMMAND}" "${TAKEOVER_COMMAND}")"; then
+                  elif ! gh pr comment "${PR}" --repo "${REPO}" --body "$(printf '⏸️ AutoFix paused by a review convergence signal: %s consecutive automated review round(s) signalled machine-readable non-convergence (codes observed since the window boundary: %s) — the reviewer keeps finding new defects at a rate that is not falling while the loop keeps widening the diff, so another automatic round is unlikely to converge this PR. The loop resumes once a maintainer responds on this PR (a review or comment counts, and steers the next rounds), and pauses again if the signal persists for %s more round(s). Alternatives: split the recurring cluster into its own PR, batch the remaining fixes into one push, comment `%s` to re-arm a fresh window, or `%s stop` to release takeover. While paused, new feedback and base conflicts stay unhandled.\n\n<details>\n<summary>中文说明</summary>\n\n⏸️ AutoFix 已因评审收敛信号暂停：%s 轮自动评审连续发出机器可读的不收敛信号（窗口边界以来观察到的信号码：%s）——评审仍在以不降的速率发现新缺陷，而循环在继续扩大 diff，再跑一轮自动修复难以收敛本 PR。维护者在本 PR 上作出回应后循环自动恢复（评论或评审均可，并将作为后续轮次的指引）；若信号再持续 %s 轮会再次暂停。可选做法：把反复出问题的簇拆成独立 PR、把剩余修复攒成一批一次推送、评论 `%s` 重开计数窗口、或评论 `%s stop` 释放接管。暂停期间，新反馈与 base 冲突不会被处理。\n\n</details>\n\n<!-- autofix-convergence-break -->' "${CONV_STREAK}" "${CONV_CODES}" "${CONVERGENCE_BREAK_ROUNDS}" "${RETRY_COMMAND}" "${TAKEOVER_COMMAND}" "${CONV_STREAK}" "${CONV_CODES}" "${CONVERGENCE_BREAK_ROUNDS}" "${RETRY_COMMAND}" "${TAKEOVER_COMMAND}")"; then
                     echo "::warning::convergence-break notice failed for #${PR}; will retry next scan"
                   fi
                 fi
@@ -4580,7 +4582,8 @@ jobs:
                 | {at: (.submitted_at // ""),
                    marker: ((.body // "") | [ scan("<!-- qwen-review-ledger (.*?) -->") ] | last | .[0] // "")}
                 | select(.marker != "")
-                | .led = (.marker | try fromjson catch null) | select(.led != null)
+                | .led = (.marker | try fromjson catch null)
+                | select(.led | type == "object")
                 | {at, round: (.led.round // 0),
                    rec: (.led.rec | if type == "array" then . else [] end)} ]
               | sort_by(.at) | group_by(.round) | map(last)

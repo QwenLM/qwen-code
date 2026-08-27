@@ -14664,7 +14664,7 @@ exit 1
     });
     expect(forgedErr.out).toContain(';;error;;forged');
     expect(forgedErr.out).not.toContain('::error::forged');
-  });
+  }, 30000);
 
   it.skipIf(!hasBashMapfile)(
     'bite check: rejects a round whose changed tests pass on the pre-round tree',
@@ -17225,7 +17225,7 @@ exit 1
     expect(ciWorkflow).toContain(
       '.github/scripts/autofix-status-heartbeat.test.mjs',
     );
-  });
+  }, 30000);
 
   it('renders the whole managed fleet into the run summary', () => {
     // Diagnosing a stall used to mean listing bot PRs, regexing each one's eval
@@ -21493,6 +21493,87 @@ describe('growth-audit hardening: park wake set and verdict pipeline (round 3)',
       // The window key is the other boundary: /retry or re-engaging resets
       // the breaker exactly like every other census.
       expect(readState({ rv: threeSignals, rearmKey: T(2) }).streak).toBe(1);
+      // A marker whose payload parses to a NON-object (number, string,
+      // array, boolean) is skipped like an unparseable one. Under jq >=
+      // 1.7 (the CI/production platform) the old `!= null` select let
+      // `.led.round` raise "Cannot index number" outside any try — the
+      // `|| echo 0` fallback turned one bad marker into CONV_STREAK=0 for
+      // the WHOLE window. jq 1.6 masks the crash (its assignment's
+      // try scope swallows the downstream error), so this witness bites
+      // only on 1.7+.
+      expect(
+        readState({
+          rv: [
+            botReview(T(1), 3, ['batch-fixes']),
+            {
+              user: { login: 'qwen-code-ci-bot' },
+              submitted_at: T(2),
+              state: 'CHANGES_REQUESTED',
+              body: '<!-- qwen-review-ledger 42 -->',
+            },
+            botReview(T(3), 5, ['batch-fixes']),
+          ],
+        }).streak,
+      ).toBe(2);
+      // A trusted-human REVIEW moves the boundary too — the notice
+      // promises "a review or comment counts", so the reviews arm's
+      // state filter and submitted_at field must decide here.
+      expect(
+        readState({
+          rv: [
+            ...threeSignals,
+            {
+              user: { login: 'alice' },
+              author_association: 'MEMBER',
+              submitted_at: T(2),
+              state: 'COMMENTED',
+              body: 'review feedback, not an issue comment',
+            },
+          ],
+        }).streak,
+      ).toBe(1);
+      // The boundary reads the NEWEST trusted-human activity, not the
+      // first: a `min` would anchor the boundary at the first response
+      // forever, and every later response — the act the notice says
+      // resumes the loop — would fail to advance it.
+      expect(
+        readState({
+          rv: threeSignals,
+          ic: [
+            {
+              user: { login: 'alice' },
+              author_association: 'OWNER',
+              created_at: T(2),
+              body: 'looking into it',
+            },
+            {
+              user: { login: 'alice' },
+              author_association: 'OWNER',
+              created_at: T(4),
+              body: 'keep going',
+            },
+          ],
+        }).streak,
+      ).toBe(0);
+      // The loop's own convergence-break notice must not count as
+      // trusted-human activity even though its author carries a trusted
+      // association on this repo — the marker is not in the
+      // machine-marker exclusion regex, so the bot-login filter is the
+      // only thing keeping the park from self-disarming on its own
+      // notice.
+      expect(
+        readState({
+          rv: threeSignals,
+          ic: [
+            {
+              user: { login: 'qwen-code-dev-bot' },
+              author_association: 'MEMBER',
+              created_at: T(2),
+              body: '<!-- autofix-convergence-break --> notice',
+            },
+          ],
+        }).streak,
+      ).toBe(3);
       // Wiring: the trip parks the candidate before target emission, posts
       // the once-per-boundary notice under its own marker, and is a PARK —
       // never the fleet shepherd's terminal-stop headline.
@@ -21508,6 +21589,119 @@ describe('growth-audit hardening: park wake set and verdict pipeline (round 3)',
       expect(reviewScanJob).toContain(
         'select((.body // "") | contains("<!-- autofix-convergence-break -->"))',
       );
+      // Trip branch, EXECUTED: the -ge threshold, the park's `continue`,
+      // the once-per-boundary notice dedup, and the CONV_CODES union are
+      // the breaker's core effect — a substring pin cannot see a threshold
+      // off by one, a missing `continue` (the parked PR still dispatched),
+      // or a dedup that reposts every scan. Run the real block through a
+      // loop (a `continue` needs one); a sentinel after the block says
+      // whether the candidate fell through to dispatch or parked.
+      const tripBlock = reviewScanJob.match(
+        /\[\[ "\$\{CONVERGENCE_BREAK_ROUNDS\}" =~ [\s\S]*?\n {14}continue\n/,
+      )?.[0];
+      expect(tripBlock).toBeTruthy();
+      const runTrip = ({ rv = [], ic = [], dryRun = 'true', noticedAt }) => {
+        writeFileSync(join(dir, 'rv.json'), JSON.stringify(rv));
+        writeFileSync(join(dir, 'rc.json'), JSON.stringify([]));
+        writeFileSync(
+          join(dir, 'ic.json'),
+          JSON.stringify(
+            noticedAt === undefined
+              ? ic
+              : [
+                  ...ic,
+                  {
+                    user: { login: 'qwen-code-dev-bot' },
+                    created_at: noticedAt,
+                    body: '<!-- autofix-convergence-break --> earlier notice',
+                  },
+                ],
+          ),
+        );
+        const ghCalls = join(dir, 'gh-calls');
+        if (existsSync(ghCalls)) rmSync(ghCalls);
+        const out = execFileSync(
+          'bash',
+          [
+            '-c',
+            `set -e\nWORKDIR='${dir}'\nREARM_KEY='none'\nPR=1\nREPO='owner/repo'\n` +
+              `DRY_RUN='${dryRun}'\nSKIP_LABEL='autofix/skip'\n` +
+              `RETRY_COMMAND='@qwen-code /retry'\nTAKEOVER_COMMAND='@qwen-code /takeover'\n` +
+              `REVIEW_BOT=qwen-code-ci-bot\nAUTOFIX_BOT=qwen-code-dev-bot\n` +
+              `TRUSTED_ASSOC='["OWNER", "MEMBER", "COLLABORATOR"]'\n` +
+              `CONVERGENCE_BREAK_ROUNDS='3'\n` +
+              `CONVERGENCE_SIGNAL_CODES='["root-cause-triage","batch-fixes","stem-surface"]'\n` +
+              `fleet_row() { printf 'fleet_row: %s\\n' "$*"; }\n` +
+              `gh() {\n` +
+              `  case "\${1:-}" in\n` +
+              `    pr) if [[ "\${2:-}" == 'view' ]]; then\n` +
+              `          printf '{"labels":[{"name":"triage"}]}'\n` +
+              `        else\n` +
+              `          printf '%s\\n' "\${*:2}" >> "\${WORKDIR}/gh-calls"\n` +
+              `        fi ;;\n` +
+              `    api) if [[ "\${2:-}" == 'user' ]]; then\n` +
+              `           printf 'qwen-code-dev-bot'\n` +
+              `         else\n` +
+              `           printf '%s\\n' "api \${*:2}" >> "\${WORKDIR}/gh-calls"\n` +
+              `         fi ;;\n` +
+              `    *) printf '%s\\n' "$*" >> "\${WORKDIR}/gh-calls" ;;\n` +
+              `  esac\n` +
+              `}\n` +
+              `SENTINEL=''\n` +
+              `for PR in 1; do\n` +
+              `${tripBlock.replace(/\n {12}/g, '\n')}\n` +
+              `fi\n` +
+              `SENTINEL='reached'\ndone\n` +
+              `printf '\\nsentinel=%s' "$SENTINEL"`,
+          ],
+          { encoding: 'utf8' },
+        );
+        return {
+          out,
+          parked: !out.includes('sentinel=reached'),
+          commentCalls: existsSync(ghCalls)
+            ? readFileSync(ghCalls, 'utf8')
+            : '',
+        };
+      };
+      // At the bar the candidate parks before dispatch; under it, it is
+      // selected normally.
+      const atBar = runTrip({ rv: threeSignals });
+      expect(atBar.parked).toBe(true);
+      expect(atBar.out).toContain('convergence-parked');
+      expect(atBar.out).toContain(
+        '🧪 DRY-RUN: would post convergence-break notice on #1',
+      );
+      expect(runTrip({ rv: threeSignals.slice(0, 2) }).parked).toBe(false);
+      // The notice carries the UNION of signal codes observed since the
+      // boundary — wider than the trailing streak: a round that reset the
+      // streak still contributes its code, and the reworded notice claims
+      // exactly that.
+      const union = runTrip({
+        rv: [
+          botReview(T(1), 3, ['stem-surface']),
+          botReview(T(2), 4, []),
+          botReview(T(3), 5, ['root-cause-triage']),
+          botReview(T(4), 6, ['root-cause-triage']),
+          botReview(T(5), 7, ['root-cause-triage']),
+        ],
+      });
+      expect(union.parked).toBe(true);
+      expect(union.out).toContain('(codes: root-cause-triage, stem-surface)');
+      // The notice posts once per boundary; a notice already present
+      // after the boundary suppresses the repost but not the park. The
+      // live-label gate runs outside DRY_RUN, against a stubbed gh whose
+      // calls are journaled.
+      const fresh = runTrip({ rv: threeSignals, dryRun: 'false' });
+      expect(fresh.parked).toBe(true);
+      expect(fresh.commentCalls).toContain('comment');
+      const dedup = runTrip({
+        rv: threeSignals,
+        dryRun: 'false',
+        noticedAt: T(9),
+      });
+      expect(dedup.parked).toBe(true);
+      expect(dedup.commentCalls).not.toContain('comment');
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -21536,7 +21730,14 @@ describe('growth-audit hardening: park wake set and verdict pipeline (round 3)',
           rec: ['batch-fixes'],
         })} -->`,
       });
-      const staleOf = ({ rv = [], rc = [], ic = [], stale = 'false' }) => {
+      const staleOf = ({
+        rv = [],
+        rc = [],
+        ic = [],
+        stale = 'false',
+        rearmKey = 'none',
+        rounds = '3',
+      }) => {
         writeFileSync(join(dir, 'rv.json'), JSON.stringify(rv));
         writeFileSync(join(dir, 'rc.json'), JSON.stringify(rc));
         writeFileSync(join(dir, 'ic.json'), JSON.stringify(ic));
@@ -21544,10 +21745,10 @@ describe('growth-audit hardening: park wake set and verdict pipeline (round 3)',
           'bash',
           [
             '-c',
-            `set -e\nWORKDIR='${dir}'\nLIVE_REARM_KEY='none'\nSTALE='${stale}'\n` +
+            `set -e\nWORKDIR='${dir}'\nLIVE_REARM_KEY='${rearmKey}'\nSTALE='${stale}'\n` +
               `REVIEW_BOT=qwen-code-ci-bot\nAUTOFIX_BOT=qwen-code-dev-bot\n` +
               `TRUSTED_ASSOC='["OWNER", "MEMBER", "COLLABORATOR"]'\n` +
-              `CONVERGENCE_BREAK_ROUNDS='3'\n` +
+              `CONVERGENCE_BREAK_ROUNDS='${rounds}'\n` +
               `CONVERGENCE_SIGNAL_CODES='["root-cause-triage","batch-fixes","stem-surface"]'\n` +
               `${mirrorBlock.replace(/\n {10}/g, '\n')}\nprintf '\\n%s' "$STALE"`,
           ],
@@ -21590,6 +21791,21 @@ describe('growth-audit hardening: park wake set and verdict pipeline (round 3)',
       ).toEqual({ stale: 'false', parked: false });
       // An already-stale leg is not re-derived (the block never unsets it).
       expect(staleOf({ rv: threeSignals, stale: 'true' }).stale).toBe('true');
+      // The mirror's window-key wiring is the scan harness's rearmKey case:
+      // a re-armed window counts only signals after the new key — a fresh
+      // runway, not a silent discard of the leg the scan still allows.
+      expect(staleOf({ rv: threeSignals, rearmKey: T(2) })).toEqual({
+        stale: 'false',
+        parked: false,
+      });
+      // The mirror's malformed-knob fallback matches the scan's (the scan
+      // side's is pinned by the 'not-a-number' case above): with a garbage
+      // repo var the mirror must park at the SAME threshold, or it burns an
+      // agent round the scan already refused.
+      expect(staleOf({ rv: threeSignals, rounds: 'garbage' })).toEqual({
+        stale: 'true',
+        parked: true,
+      });
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
