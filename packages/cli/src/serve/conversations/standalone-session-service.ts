@@ -487,10 +487,24 @@ export class StandaloneSessionService {
     }
   }
 
-  async get(rawSessionId: string): Promise<StandaloneSessionLookup> {
+  get(rawSessionId: string): Promise<StandaloneSessionLookup> {
+    return this.getWithRequiredScope(rawSessionId, 'top-level');
+  }
+
+  getForInternalTask(rawSessionId: string): Promise<StandaloneSessionLookup> {
+    return this.getWithRequiredScope(rawSessionId, 'any');
+  }
+
+  private async getWithRequiredScope(
+    rawSessionId: string,
+    requiredScope: 'top-level' | 'any',
+  ): Promise<StandaloneSessionLookup> {
     const { sessionId } = parseRequiredSessionId(rawSessionId);
     const creating = this.creating.get(sessionId);
-    if (creating?.scope === 'top-level') {
+    if (
+      creating !== undefined &&
+      (requiredScope === 'any' || creating.scope === 'top-level')
+    ) {
       return { sessionId, state: 'creating' };
     }
     if (creating) {
@@ -507,6 +521,7 @@ export class StandaloneSessionService {
           const persisted = await this.readStandaloneSummary(
             runtime,
             sessionId,
+            requiredScope,
           );
           if (await this.options.deletionJournal.hasRecord(sessionId)) {
             throw serviceError('standalone_session_conflict', sessionId, true);
@@ -2811,6 +2826,7 @@ export class StandaloneSessionService {
   private async readStandaloneSummary(
     runtime: WorkspaceRuntime,
     sessionId: string,
+    requiredScope: 'top-level' | 'any',
   ): Promise<StandaloneSessionSummary> {
     const durable = await runWithWorkspaceRuntimeStorage(runtime, async () => {
       const service = createWorkspaceRuntimeSessionService(runtime);
@@ -2829,7 +2845,12 @@ export class StandaloneSessionService {
       if (source?.kind !== 'standalone') {
         return undefined;
       }
-      if (source.metadata.parentSessionId !== undefined) return undefined;
+      if (
+        requiredScope === 'top-level' &&
+        source.metadata.parentSessionId !== undefined
+      ) {
+        return undefined;
+      }
       const item = await service.getSessionListItem(storageSessionId, location);
       if (!item) return undefined;
       let prs: Awaited<ReturnType<typeof readSessionPrs>>;

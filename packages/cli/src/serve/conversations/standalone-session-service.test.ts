@@ -1443,6 +1443,9 @@ describe('StandaloneSessionService', () => {
       code: 'standalone_session_not_found',
       sessionId: childSessionId,
     });
+    await expect(
+      harness.service.getForInternalTask(childSessionId),
+    ).resolves.toEqual({ sessionId: childSessionId, state: 'creating' });
 
     releaseSpawn();
     await creating;
@@ -1518,9 +1521,23 @@ describe('StandaloneSessionService', () => {
     vi.spyOn(
       SessionService.prototype,
       'readCreationMetadataIfReadable',
-    ).mockResolvedValue({
+    ).mockImplementation(async (targetSessionId) =>
+      targetSessionId === sessionId
+        ? {
+            sourceType: 'standalone',
+            parentSessionId: '22222222-2222-4222-8222-222222222222',
+          }
+        : { sourceType: 'standalone' },
+    );
+    vi.spyOn(SessionService.prototype, 'getSessionListItem').mockResolvedValue({
+      sessionId,
+      cwd: root.canonicalRoot,
+      startTime: '2026-08-24T00:00:00.000Z',
+      mtime: Date.parse('2026-08-24T01:00:00.000Z'),
+      prompt: 'child task',
+      filePath: '/transcripts/session.jsonl',
       sourceType: 'standalone',
-      parentSessionId: '22222222-2222-4222-8222-222222222222',
+      isArchived: false,
     });
     const harness = createHarness();
 
@@ -1529,6 +1546,15 @@ describe('StandaloneSessionService', () => {
       sessionId,
     });
     expect(harness.bridge.getSessionSummary).not.toHaveBeenCalled();
+
+    await expect(
+      harness.service.getForInternalTask(sessionId),
+    ).resolves.toMatchObject({
+      sessionId,
+      sourceType: 'standalone',
+      parentSessionId: '22222222-2222-4222-8222-222222222222',
+      context: { kind: 'standalone' },
+    });
   });
 
   it('merges only volatile live state onto authoritative persisted identity', async () => {

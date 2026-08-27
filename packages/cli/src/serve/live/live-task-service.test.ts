@@ -307,7 +307,7 @@ function makeHarness() {
     async (sessionId: string) => `/conversations/${sessionId}`,
   );
   const standaloneSessionService = {
-    get: vi.fn(async (targetSessionId: string) => {
+    getForInternalTask: vi.fn(async (targetSessionId: string) => {
       const canonicalSessionId = normalizeSessionIdForLookup(targetSessionId);
       const storageSessionId = [...persistedSessions.keys()].find(
         (candidate) =>
@@ -500,7 +500,9 @@ describe('LiveTaskService', () => {
     };
     persistedSessions.set(sessionId, persisted(sessionId));
     persistedSessionOwners.set(sessionId, '/project');
-    harness.standaloneSessionService.get.mockRejectedValueOnce(makeError());
+    harness.standaloneSessionService.getForInternalTask.mockRejectedValueOnce(
+      makeError(),
+    );
     listWorkspaceSessionsForResponse.mockResolvedValue({
       sessions: [summary],
     });
@@ -1152,6 +1154,35 @@ describe('LiveTaskService', () => {
     ).toHaveBeenCalledWith('task-1');
     expect(harness.bridge.resumeSession).not.toHaveBeenCalled();
     expect(harness.bridge.changeSessionCwd).not.toHaveBeenCalled();
+    expect(harness.sendPrompt).toHaveBeenCalledOnce();
+  });
+
+  it('locates and resumes a cold child standalone task', async () => {
+    const harness = makeHarness();
+    const childSessionId = '22222222-2222-4222-8222-222222222222';
+    persistedSessions.set(childSessionId, persisted(childSessionId));
+    persistedSessionOwners.set(childSessionId, '/conversations');
+    sessionSources.set(childSessionId, {
+      sourceType: 'standalone',
+      parentSessionId: '11111111-1111-4111-8111-111111111111',
+    });
+
+    const result = await harness.service.handle({
+      callerSessionId: 'live-root',
+      name: 'send_message_to_thread',
+      arguments: {
+        threadId: childSessionId,
+        prompt: 'continue this child task',
+      },
+    });
+
+    expect(result).toEqual({ threadId: childSessionId });
+    expect(
+      harness.standaloneSessionService.getForInternalTask,
+    ).toHaveBeenCalledWith(childSessionId);
+    expect(
+      harness.standaloneSessionService.resumeForInternalTask,
+    ).toHaveBeenCalledWith(childSessionId);
     expect(harness.sendPrompt).toHaveBeenCalledOnce();
   });
 
