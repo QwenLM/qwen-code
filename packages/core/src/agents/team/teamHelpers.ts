@@ -336,8 +336,10 @@ export async function tryReclaimStaleTeam(teamName: string): Promise<boolean> {
 
 /**
  * Delete an entire team directory and its associated task
- * directory. Silently ignores missing directories (ENOENT).
+ * directory. Missing directories are silently ignored because
+ * fs.rm is called with { force: true }.
  * Throws on real filesystem failures (EACCES, EIO, etc.).
+ * When both removals fail, throws an AggregateError covering both.
  */
 export async function deleteTeamDirs(teamName: string): Promise<void> {
   const teamDir = getTeamDir(teamName);
@@ -348,15 +350,15 @@ export async function deleteTeamDirs(teamName: string): Promise<void> {
     fs.rm(tasksDir, { recursive: true, force: true }),
   ]);
 
-  for (const result of results) {
-    if (result.status === 'rejected') {
-      const err = result.reason;
-      // ENOENT is expected when the directory doesn't exist (idempotent delete).
-      if (isNodeError(err) && err.code === 'ENOENT') {
-        continue;
-      }
-      throw err;
-    }
+  const errors = results
+    .filter((r): r is PromiseRejectedResult => r.status === 'rejected')
+    .map((r) => r.reason);
+
+  if (errors.length === 1) {
+    throw errors[0];
+  }
+  if (errors.length > 1) {
+    throw new AggregateError(errors, 'Failed to delete team directories');
   }
 }
 

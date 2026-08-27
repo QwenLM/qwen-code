@@ -83,9 +83,17 @@ class TeamDeleteInvocation extends BaseToolInvocation<
     // we delete it — leaving an orphan dir that wedges the team
     // name on the next `team_create`. Sweep once more after a
     // short delay to catch the race.
-    await deleteTeamDirs(teamName);
-    await new Promise((r) => setTimeout(r, 250));
-    await deleteTeamDirs(teamName);
+    //
+    // Filesystem errors (EACCES, EIO, etc.) must NOT prevent the
+    // state-reset tail below — otherwise the session is left
+    // permanently in a "team active" state with no recovery.
+    try {
+      await deleteTeamDirs(teamName);
+      await new Promise((r) => setTimeout(r, 250));
+      await deleteTeamDirs(teamName);
+    } catch (err) {
+      debug.warn('Filesystem cleanup failed; resetting team state anyway:', err);
+    }
 
     // Drop this team's in-process inbox locks now that its inboxes are
     // gone, so the lock map doesn't retain a dead Mutex per inbox for
