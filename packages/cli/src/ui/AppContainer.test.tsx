@@ -207,12 +207,12 @@ vi.mock('../utils/events.js');
 vi.mock('./handleAutoUpdate.js');
 vi.mock('../utils/cleanup.js');
 
-const mockLoadHierarchicalGeminiMemory = vi.hoisted(() => vi.fn());
+const mockLoadHierarchicalMemory = vi.hoisted(() => vi.fn());
 vi.mock('../config/config.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../config/config.js')>();
   return {
     ...actual,
-    loadHierarchicalGeminiMemory: mockLoadHierarchicalGeminiMemory,
+    loadHierarchicalMemory: mockLoadHierarchicalMemory,
   };
 });
 
@@ -482,6 +482,7 @@ describe('AppContainer State Management', () => {
       addChangeListener: vi.fn(),
       loadSubagent: vi.fn(),
       createSubagent: vi.fn(),
+      getAvailableModelGrades: vi.fn().mockReturnValue(new Map()),
     };
     vi.spyOn(mockConfig, 'getSubagentManager').mockReturnValue(
       mockSubagentManager as SubagentManager,
@@ -506,8 +507,25 @@ describe('AppContainer State Management', () => {
       themeError: null,
       authError: null,
       shouldOpenAuthDialog: false,
-      geminiMdFileCount: 0,
+      memoryFileCount: 0,
     } as InitializationResult;
+  });
+
+  // AgentTool's constructor fires refreshSubagents() as a floating promise;
+  // a SubagentManager mock missing any method it touches rejects unhandled
+  // and fails the whole vitest run, not just this file.
+  it('keeps the SubagentManager mock complete for AgentTool init', async () => {
+    const rejections: unknown[] = [];
+    const onRejection = (reason: unknown) => rejections.push(reason);
+    process.on('unhandledRejection', onRejection);
+    try {
+      await mockConfig.initialize();
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(rejections).toEqual([]);
+    } finally {
+      process.off('unhandledRejection', onRejection);
+      await mockConfig.shutdown();
+    }
   });
 
   describe('speculative tool results', () => {
@@ -7023,7 +7041,7 @@ describe('AppContainer State Management', () => {
     });
 
     it('performMemoryRefresh anchors on config.getWorkingDir() and updates contextFilePaths', async () => {
-      mockLoadHierarchicalGeminiMemory.mockResolvedValue({
+      mockLoadHierarchicalMemory.mockResolvedValue({
         memoryContent: 'content',
         fileCount: 1,
         contextFilePaths: ['/custom/QWEN.md'],
@@ -7068,7 +7086,7 @@ describe('AppContainer State Management', () => {
         await performMemoryRefresh();
       });
 
-      expect(mockLoadHierarchicalGeminiMemory).toHaveBeenCalledWith(
+      expect(mockLoadHierarchicalMemory).toHaveBeenCalledWith(
         '/custom/workspace',
         expect.anything(),
         expect.anything(),

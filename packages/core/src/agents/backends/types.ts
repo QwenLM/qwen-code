@@ -14,6 +14,7 @@
 import type { Content } from '@google/genai';
 import type { AnsiOutput } from '../../utils/terminalSerializer.js';
 import type {
+  AgentMessage,
   AgentStatus,
   PromptConfig,
   ModelConfig,
@@ -142,6 +143,13 @@ export interface TeamAgentHandle {
    * handles may not.
    */
   getError?(): string | undefined;
+  /**
+   * Conversation message history. Optional: in-process handles
+   * (AgentInteractive, FakeAgent) provide it; PTY handles don't.
+   * TeamManager reads it to recover round text emitted before its
+   * event bridge attached.
+   */
+  getMessages?(): readonly AgentMessage[];
 }
 
 /**
