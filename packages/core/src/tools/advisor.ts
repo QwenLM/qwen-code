@@ -233,8 +233,11 @@ class AdvisorToolInvocation extends BaseToolInvocation<
           disableModelFallbacks: true,
         }),
       );
+      const structuredResult = Array.isArray(result.jsonResult)
+        ? undefined
+        : result.jsonResult;
       const review = parseReview(
-        result.jsonResult ?? parseJsonObjectText(result.text),
+        structuredResult ?? parseJsonObjectText(result.text),
         result.model,
       );
       return {

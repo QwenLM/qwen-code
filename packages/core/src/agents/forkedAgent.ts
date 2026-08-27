@@ -357,6 +357,12 @@ function extractQueryUsage(
   };
 }
 
+function asJsonObject(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
 // ---------------------------------------------------------------------------
 // ForkedAgentParams / ForkedAgentResult — AgentHeadless path
 // ---------------------------------------------------------------------------
@@ -586,7 +592,7 @@ export async function runForkedAgent(
           (part) => part.functionCall?.name === 'respond_in_schema',
         )?.functionCall;
         if (schemaCall?.args) {
-          jsonResult = schemaCall.args as Record<string, unknown>;
+          jsonResult = asJsonObject(schemaCall.args);
         }
 
         // Defensive: when preserveTools is true the model could produce an
@@ -617,7 +623,7 @@ export async function runForkedAgent(
       const trimmed = fullText.trim() || null;
       if (jsonSchema && !jsonResult && trimmed) {
         try {
-          jsonResult = JSON.parse(trimmed) as Record<string, unknown>;
+          jsonResult = asJsonObject(JSON.parse(trimmed) as unknown);
         } catch {
           // non-JSON response despite schema constraint — treat as text
         }

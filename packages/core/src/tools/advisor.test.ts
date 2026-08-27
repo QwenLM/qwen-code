@@ -213,6 +213,26 @@ describe('AdvisorTool', () => {
     });
   });
 
+  it('recovers an array-wrapped review from the text fallback', async () => {
+    mockRunForkedAgent.mockResolvedValueOnce({
+      text: JSON.stringify([review]),
+      jsonResult: [review],
+      usage: { inputTokens: 10, outputTokens: 5, cacheHitTokens: 0 },
+      model: 'advisor-model',
+    });
+
+    const result = await new AdvisorTool(makeConfig())
+      .build({})
+      .execute(new AbortController().signal);
+
+    expect(result.error).toBeUndefined();
+    expect(result.returnDisplay).toEqual({
+      type: 'advisor_review',
+      model: 'advisor-model',
+      ...review,
+    });
+  });
+
   it('propagates cancellation', async () => {
     const controller = new AbortController();
     const abortError = new Error('cancelled');
