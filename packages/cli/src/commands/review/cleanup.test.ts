@@ -199,6 +199,23 @@ describe('runCleanup', () => {
     mocks.rmSync.mockReset();
   });
 
+  it('refuses the bare `pr` target — its prefix engulfs every PR family', () => {
+    // R20-4 follow-up: `tmpPrefix('pr')` is `qwen-review-pr-`, a strict
+    // prefix of EVERY PR round's family, and the lease guard lives inside
+    // the `pr-<n>` branch a bare `pr` never enters — one `cleanup pr` swept
+    // every PR's artifacts at once, unguarded. A repo-root file literally
+    // named `pr` derives exactly this token.
+    runCleanup('pr');
+    expect(process.exitCode).toBe(1);
+    process.exitCode = 0;
+    expect(mocks.writeStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining('Refusing to clean target "pr"'),
+    );
+    expect(mocks.rmSync).not.toHaveBeenCalled();
+    // The numbered form is untouched.
+    expect(() => runCleanup('pr-123')).not.toThrow();
+  });
+
   it('keeps the lease when branch deletion fails', () => {
     mocks.execFileSync.mockImplementation(() => {
       throw new Error('branch is locked');

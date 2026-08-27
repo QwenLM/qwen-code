@@ -313,7 +313,14 @@ export function repoRelativeOf(
   // at <root>". As a pathspec `.` scopes the diff to the whole tree, which is
   // what naming the root asks for.
   const escapes = rel === '..' || rel.startsWith('..' + sep) || isAbsolute(rel);
-  return { rel, abs, escapes };
+  // Git spells every path with forward slashes on every platform, and `rel`
+  // flows VERBATIM into git pathspecs, the candidate's recorded `source`,
+  // and `cachePathFor`'s digest — where node's win32 `relative()` answers
+  // backslashes, one file got two different cache filenames across
+  // platforms and the win32 lane failed every assertion spelling the posix
+  // form (R21-1). Normalized HERE, after the escape check computed against
+  // the platform separator, so both consumers of `rel` see one spelling.
+  return { rel: sep === '/' ? rel : rel.split(sep).join('/'), abs, escapes };
 }
 
 /**

@@ -1273,7 +1273,7 @@ describe('bundled review skill', () => {
     // lease-guarded — running cleanup there deletes a live concurrent
     // plan and its records.
     expect(body).toContain(
-      '**A FILE review whose derived token collides with a RESERVED one — `local`, or `pr-<n>` — must NOT run this command at all**',
+      '**A FILE review whose derived token collides with a RESERVED one — `local`, `pr`, or `pr-<n>` — must NOT run this command at all**',
     );
     // R18-5: the file family sits outside every cleanup sweep, so this
     // instruction is its ONLY remover — and cleanup's #9206 retention (keep
