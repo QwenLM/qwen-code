@@ -175,13 +175,18 @@ function writeStub(dir, name, lines) {
 }
 
 // Executes the REAL 'Install Playwright Chromium' step under GitHub's
-// default bash wrapper with apt-get absent from PATH, so the non-apt lane
-// runs. Its external world is stubbed: npx/sudo/dnf/yum/ldd are scripts in
-// a stub dir, the browser tree is a real tmp ${HOME}, and machine state is
-// a file the dnf/yum stubs write — the same side effect a real provision
-// has. machine: 'provisioned' — every library resolves before the first
-// scan; 'provisionable' — the first scan finds missing libraries and dnf
-// fixes them; 'unprovisionable' — nothing resolves and dnf/yum both fail.
+// default bash wrapper as a pool member (RUNNER_ENVIRONMENT=self-hosted),
+// so the download-only lane runs. Its external world is stubbed:
+// npx/sudo/dnf/yum/ldd are scripts in a stub dir (apt-get joins them on
+// the debian-* states), the browser tree is a real tmp ${HOME}, and
+// machine state is a file the package-manager stubs write — the same side
+// effect a real provision has. machine: 'provisioned' — every library
+// resolves before the first scan; 'provisionable' — the first scan finds
+// missing libraries and dnf fixes them; 'unprovisionable' — nothing
+// resolves and dnf/yum both fail; 'debian-provisioned' /
+// 'debian-provisionable' — a pool member that ships apt-get, fully
+// provisioned / fixed through the apt arm; 'no-browser' — the install
+// leaves no browser tree for the scan to find.
 function runInstallStep(machine) {
   const install = visualsCaptureJob.steps.find(
     (s) => s.name === 'Install Playwright Chromium',
@@ -212,7 +217,13 @@ function runInstallStep(machine) {
       'while [ $# -gt 0 ]; do case "$1" in -*) shift ;; *) break ;; esac; done',
       'exec "$@"',
     ]);
-    for (const tool of ['dnf', 'yum']) {
+    // apt-get joins the stub set only on the Debian-family states: real
+    // RHEL pool members do not ship it, and a stubbed one would win the
+    // apt arm before dnf.
+    const packageManagers = machine.startsWith('debian')
+      ? ['apt-get', 'dnf', 'yum']
+      : ['dnf', 'yum'];
+    for (const tool of packageManagers) {
       writeStub(stubDir, tool, [
         '#!/bin/sh',
         `printf '${tool} %s\\n' "$*" >> "$STUB_DIR/calls.log"`,
@@ -225,22 +236,26 @@ function runInstallStep(machine) {
       "state=''",
       '[ -f "$STUB_DIR/state" ] && read -r state < "$STUB_DIR/state"',
       '[ "$state" = provisioned ] && exit 0',
-      'case "$1" in *chrome*) printf \'\\tlibnss3.so => not found\\n\' ;; esac',
+      // A distinct missing lib per binary name keeps each arm of the
+      // workflow's find provably scanned: dropping an arm drops its line.
+      "case \"$1\" in *headless_shell*) printf '\\tlibatk-1.0.so.0 => not found\\n' ;; *chrome*) printf '\\tlibnss3.so => not found\\n' ;; esac",
     ]);
     const fakeHome = join(root, 'home');
-    const browserDir = join(
-      fakeHome,
-      '.cache',
-      'ms-playwright',
-      'chromium-1187',
-    );
-    mkdirSync(browserDir, { recursive: true });
-    for (const bin of ['headless_shell', 'chrome']) {
-      const file = join(browserDir, bin);
-      writeFileSync(file, '#!/bin/sh\n');
-      chmodSync(file, 0o755);
+    if (machine !== 'no-browser') {
+      const browserDir = join(
+        fakeHome,
+        '.cache',
+        'ms-playwright',
+        'chromium-1187',
+      );
+      mkdirSync(browserDir, { recursive: true });
+      for (const bin of ['headless_shell', 'chrome']) {
+        const file = join(browserDir, bin);
+        writeFileSync(file, '#!/bin/sh\n');
+        chmodSync(file, 0o755);
+      }
     }
-    if (machine === 'provisioned') {
+    if (machine === 'provisioned' || machine === 'debian-provisioned') {
       writeFileSync(join(stubState, 'state'), 'provisioned\n');
     }
     const result = spawnSync(
@@ -250,8 +265,12 @@ function runInstallStep(machine) {
         env: {
           PATH: `${stubDir}:${binDir}`,
           HOME: fakeHome,
+          RUNNER_ENVIRONMENT: 'self-hosted',
           STUB_DIR: stubState,
-          STUB_PROVISION: machine === 'provisionable' ? 'ok' : 'fail',
+          STUB_PROVISION:
+            machine === 'provisionable' || machine === 'debian-provisionable'
+              ? 'ok'
+              : 'fail',
         },
         encoding: 'utf8',
       },
@@ -747,6 +766,10 @@ describe('web-shell-visuals.yml capture runner routing', () => {
     const install = steps.findIndex(
       (s) => s.name === 'Install Playwright Chromium',
     );
+    const clear = steps.findIndex((s) => s.name === 'Clear stale capture dirs');
+    const heal = steps.findIndex(
+      (s) => s.name === 'Restore workspace ownership',
+    );
     const npmCi = steps.findIndex((s) => s.name === 'Install dependencies');
     const afterCapture = steps.findIndex((s) => s.id === 'after_capture');
     assert.ok(install !== -1, 'the Playwright install step must exist');
@@ -767,16 +790,16 @@ describe('web-shell-visuals.yml capture runner routing', () => {
       'a job-level continue-on-error would mask the gate too',
     );
     // The hosted apt lane is not exec-tested here (apt-get may not exist on
-    // the machine running the suite); pin its one line. The non-apt lane is
-    // exec-tested by the tests below.
+    // the machine running the suite); pin its gate and its one body line.
+    // The pool lane is exec-tested by the tests below.
     const lines = steps[install].run.split('\n');
     const ifIndex = lines.findIndex((l) =>
-      l.trim().startsWith('if command -v apt-get'),
+      l.trim().startsWith('if [ "${RUNNER_ENVIRONMENT:-}" = "github-hosted" ]'),
     );
     const elseIndex = lines.findIndex((l) => l.trim() === 'else');
     assert.ok(
       ifIndex !== -1 && elseIndex > ifIndex,
-      'the apt probe must branch into a non-apt lane',
+      "the lane split must gate on the runner environment — the pool's Ubuntu members ship apt-get but not passwordless sudo, so an apt probe sends them into --with-deps",
     );
     assert.equal(
       lines[ifIndex + 1].trim(),
@@ -786,9 +809,12 @@ describe('web-shell-visuals.yml capture runner routing', () => {
     // An env override at any of these levels moves the ground under the
     // pinned steps: HOME relocates the library scan, RUNNER_TEMP the stale
     // clear, GITHUB_WORKSPACE the heal, PATH/BASH_ENV re-resolve (or
-    // pre-load) every command.
+    // pre-load) every command. Check the env map of EACH pinned step — a
+    // step-level override beats the job and workflow levels.
     for (const envMap of [
       steps[install].env,
+      steps[clear].env,
+      steps[heal].env,
       visualsCaptureJob.env,
       visualsDoc.env,
     ]) {
@@ -866,10 +892,88 @@ describe('web-shell-visuals.yml capture runner routing', () => {
     );
     assert.match(
       stdout,
+      /libatk-1\.0\.so\.0 => not found/,
+      'the headless_shell arm of the find must be scanned too',
+    );
+    assert.match(
+      stdout,
       /::error::/,
       'the failure must carry the actionable annotation',
     );
     assert.match(calls, /^sudo -n yum /m, 'yum must be tried once dnf fails');
+  });
+
+  it('keeps an apt-get-shipping pool member out of the password-gated lane', () => {
+    // The pool's Ubuntu members ship apt-get but allowlist sudo to npm/rm;
+    // the apt probe sent them into --with-deps and its sudo died on the
+    // password prompt (run 33022864520). The lane split must key on the
+    // runner environment, not on apt-get's presence.
+    const { status, stdout, stderr, calls } =
+      runInstallStep('debian-provisioned');
+    assert.equal(
+      status,
+      0,
+      `a Debian-family pool member must pass the gate: ${stdout}${stderr}`,
+    );
+    assert.match(
+      stdout,
+      /Chromium shared libraries all resolve on this runner\./,
+    );
+    assert.match(
+      calls,
+      /^npx playwright install chromium$/m,
+      'the lane must download the browser',
+    );
+    assert.ok(
+      !calls.includes('--with-deps'),
+      'an apt-get-shipping pool member must not take the hosted-only flag',
+    );
+    assert.ok(
+      !/^(sudo|dnf|yum) /m.test(calls),
+      'nothing may be provisioned when the first scan resolves',
+    );
+  });
+
+  it('provisions a Debian-family machine through the apt arm', () => {
+    const { status, stdout, stderr, calls } = runInstallStep(
+      'debian-provisionable',
+    );
+    assert.equal(
+      status,
+      0,
+      `a machine apt-get can fix must pass the gate: ${stdout}${stderr}`,
+    );
+    assert.match(
+      stdout,
+      /Chromium shared libraries all resolve on this runner\./,
+    );
+    assert.match(
+      calls,
+      /^sudo -n apt-get install -y .*libnss3/m,
+      'the Debian arm must lead the provisioning chain',
+    );
+    assert.ok(
+      !/(dnf|yum)/m.test(calls),
+      'apt-get success must short-circuit the RHEL arms',
+    );
+  });
+
+  it('fails a scan that finds no browser binaries at all', () => {
+    // A machine-level PLAYWRIGHT_BROWSERS_PATH redirect or a Playwright
+    // revision renaming the binaries leaves the find empty; judging
+    // `missing` alone would pass that vacuously and postpone the crash to
+    // browser launch, behind after_capture's continue-on-error.
+    const { status, stdout, stderr } = runInstallStep('no-browser');
+    assert.equal(
+      status,
+      1,
+      `a zero-binary scan must fail the gate: ${stdout}${stderr}`,
+    );
+    assert.match(
+      stdout,
+      /::error::no Chromium binaries found under .*ms-playwright/,
+      'the failure must say the scan found nothing to judge',
+    );
   });
 });
 

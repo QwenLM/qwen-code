@@ -140,18 +140,21 @@ jobs:
       - name: 'Install dependencies'
         run: 'npm ci --prefer-offline --no-audit --progress=false'
 
-      # --with-deps drives apt-get; the pool machines are not Debian-family
-      # ("apt-get: command not found" on the first pool run, 2026-08-26), so
-      # there the browser download has to suffice, and the runtime libraries
-      # the RHEL-family pool images do not ship are provisioned with dnf/yum
-      # when the first ldd scan finds them missing (the same shape as the
-      # 'Install ffmpeg' step). The post-rescan gate is unchanged: fail with
-      # the concrete missing list — a clear provisioning signal — instead of
-      # a mid-render crash.
+      # --with-deps drives apt-get and needs passwordless sudo: hosted images
+      # grant it, the pool does not (its sudo is allowlisted to npm/rm) — and
+      # the pool is not uniformly RHEL-family: its Ubuntu members ship
+      # apt-get, took the branch on the bare apt probe, and died on the
+      # password prompt (run 33022864520). Gate the apt lane on the runner
+      # environment instead, run every pool member through the download-only
+      # lane, and provision the libraries an image does not ship best-effort
+      # (apt/dnf/yum, the same shape as the 'Install ffmpeg' step) when the
+      # first ldd scan finds them missing. The post-rescan gate is unchanged:
+      # fail with the concrete missing list — a clear provisioning signal —
+      # instead of a mid-render crash.
       - name: 'Install Playwright Chromium'
         run: |-
           set -uo pipefail
-          if command -v apt-get > /dev/null 2>&1; then
+          if [ "${RUNNER_ENVIRONMENT:-}" = "github-hosted" ] && command -v apt-get > /dev/null 2>&1; then
             npx playwright install --with-deps chromium
           else
             # One definition, two call sites: the gate judges the rescan, so
@@ -159,7 +162,9 @@ jobs:
             # copies could drift.
             scan_chromium_libs() {
               missing=''
+              scanned=0
               while IFS= read -r bin; do
+                scanned=$((scanned + 1))
                 unresolved="$(ldd "${bin}" 2>/dev/null | grep 'not found' || true)"
                 if [ -n "${unresolved}" ]; then
                   missing="${missing}${unresolved}"$'\n'
@@ -173,9 +178,13 @@ jobs:
               # Chromium runtime set, then rescan and let the gate below judge
               # what actually resolves. Best-effort like the ffmpeg step — a
               # machine that cannot be provisioned still fails the gate with
-              # the concrete list.
+              # the concrete list. apt leads for the pool's Debian-family
+              # members; sudo -n never prompts, so a gated machine falls
+              # through to the next arm.
+              chromium_deb_deps='libnss3 libnspr4 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdbus-1-3 libexpat1 libglib2.0-0 libx11-6 libxcomposite1 libxdamage1 libxext6 libxfixes3 libxrandr2 libdrm2 libxcb1 libxkbcommon0 libgbm1 libasound2 libpango-1.0-0 libcairo2'
               chromium_sys_deps='nss nspr atk at-spi2-atk at-spi2-core cups-libs dbus-libs expat glib2 libX11 libXcomposite libXdamage libXext libXfixes libXrandr libdrm libxcb libxkbcommon mesa-libgbm alsa-lib pango cairo'
-              sudo -n dnf install -y --skip-broken ${chromium_sys_deps} > /dev/null 2>&1 ||
+              sudo -n apt-get install -y ${chromium_deb_deps} > /dev/null 2>&1 ||
+                sudo -n dnf install -y --skip-broken ${chromium_sys_deps} > /dev/null 2>&1 ||
                 sudo -n yum install -y --skip-broken ${chromium_sys_deps} > /dev/null 2>&1 ||
                 echo "::warning::could not install Chromium system dependencies; the library gate lists what still fails to resolve."
               scan_chromium_libs
@@ -183,6 +192,10 @@ jobs:
             if [ -n "${missing}" ]; then
               printf '%s' "${missing}" | sort -u
               echo "::error::Chromium's shared libraries do not resolve on this runner (missing list above). Provision them in the pool image, or set MAINTAINER_ECS_RUNNER_DISABLED to route the render back to hosted."
+              exit 1
+            fi
+            if [ "${scanned}" -eq 0 ]; then
+              echo "::error::no Chromium binaries found under ${HOME}/.cache/ms-playwright — install location moved?"
               exit 1
             fi
             echo "Chromium shared libraries all resolve on this runner."
