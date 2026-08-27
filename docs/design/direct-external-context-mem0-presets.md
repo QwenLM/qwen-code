@@ -68,6 +68,13 @@ uncertainty three ways instead, none of which requires knowing the build:
 
 A preset that cannot be made safe this way documents the build it requires.
 
+Selection is evidence-based on the operator's side too. `preset` is the only
+field of a `mem0` block that is a judgement rather than a fact the
+administrator holds, so the workspace ships a read-only probe that runs a
+candidate preset against the endpoint and reports whether it works. Adding a
+preset requires authoritative protocol evidence; choosing one should not
+require less.
+
 ## Configuration
 
 ```json
@@ -215,3 +222,5 @@ The implementation must prove:
 - no retry on search or write failures
 - loadability of the shipped PolarDB and Mem0 server examples
 - compatibility of the existing `mem0-platform-v3` configuration
+- that the preset probe is read-only, never renders the credential, and
+  refuses to conclude anything from an empty corpus

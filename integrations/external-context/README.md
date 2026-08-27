@@ -430,6 +430,33 @@ stderr first when search fails right after a new endpoint is configured. See
 `examples/polardb-mem0.json`, `examples/mem0-server.json`, and the
 [preset design](../../docs/design/direct-external-context-mem0-presets.md).
 
+### Choosing a preset
+
+Every other field in a `mem0` block is a fact the administrator already holds.
+`preset` is not: it is a claim about which wire contract the deployment
+implements, and these services are self-hosted or vendor-packaged, so the
+answer is not visible from the configuration side. Do not guess it - probe it:
+
+```bash
+MEM0_API_KEY=<credential> node dist/preset-probe-main.js \
+  --preset aliyun-polardb-mysql-2026-08 \
+  --origin https://memory.example.com \
+  --user-id <a scope whose corpus holds at least one memory>
+```
+
+The probe is read-only. It only issues search requests and one
+`GET /openapi.json`, never writes, and never prints the credential. It reports
+the deployment's declared search schema when one is served, runs the selected
+preset through the real adapter, and exits non-zero when that preset does not
+work against the endpoint - which is the answer to "did I pick the right one".
+
+Pass `--base-path`, `--agent-id`, `--app-id`, `--credential-env`, or
+`--allow-insecure-http` to match the configuration you intend to ship.
+
+Give it a scope that actually has memories. Against an empty corpus every
+request agrees by returning nothing, which reads as a pass and is not one; the
+probe reports that case as inconclusive rather than letting it through.
+
 Non-loopback plain HTTP remains an explicit `allowInsecureHttp` endpoint
 opt-in. Because it sends credentials, queries, and memory content in cleartext,
 prefer HTTPS or a loopback relay such as `ssh -L`. Both shipped examples use
