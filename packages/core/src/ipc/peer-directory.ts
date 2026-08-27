@@ -140,27 +140,40 @@ export function resolvePeerTarget(
     return { kind: 'none' };
   }
 
+  // A bare string is read two ways as well — as a name, and as a ref (an
+  // error message quotes one, and making the user reconstruct "name
+  // [ref]" from it would be busywork). Merged, not ranked: a name that
+  // equals another session's ref is a claim from both, and resolving it
+  // by priority would inject into whichever one the ladder happened to
+  // try first.
   const byName = peers.filter((peer) => peer.name === trimmed);
-  if (byName.length === 1) return { kind: 'one', peer: byName[0]! };
-  if (byName.length > 1) return { kind: 'ambiguous', matches: byName };
-
-  // A bare ref is accepted too — an error message quotes one, and making
-  // the user reconstruct "name [ref]" from it would be busywork.
   const byRef = peers.filter((peer) => peer.ref === trimmed.toLowerCase());
-  if (byRef.length === 1) return { kind: 'one', peer: byRef[0]! };
-  if (byRef.length > 1) return { kind: 'ambiguous', matches: byRef };
+  const matches = [...new Set([...byName, ...byRef])];
+  if (matches.length === 1) return { kind: 'one', peer: matches[0]! };
+  if (matches.length > 1) return { kind: 'ambiguous', matches };
 
   return { kind: 'none' };
 }
 
-/** How a peer is addressed in output: bare name, or `name [ref]`. */
+/**
+ * How a peer is addressed in output: bare name, or `name [ref]`.
+ *
+ * The ref is appended when the bare name is contested by another peer,
+ * or when `isReserved` says the caller's own routing would keep the bare
+ * name in-process (a teammate of the same name, the broadcast keyword) —
+ * an address that reads as a peer but routes elsewhere is worse than a
+ * longer one.
+ */
 export function formatPeerAddress(
   peer: PeerSessionInfo,
   peers: readonly PeerSessionInfo[],
+  isReserved?: (address: string) => boolean,
 ): string {
   const contested =
     peers.filter((other) => other.name === peer.name).length > 1;
-  return contested ? `${peer.name} [${peer.ref}]` : peer.name;
+  return contested || isReserved?.(peer.name) === true
+    ? `${peer.name} [${peer.ref}]`
+    : peer.name;
 }
 
 /**
@@ -175,6 +188,7 @@ export function suggestPeerNames(
   peers: readonly PeerSessionInfo[],
   target: string,
   limit = 3,
+  isReserved?: (address: string) => boolean,
 ): string[] {
   const needle = target.trim().toLowerCase();
   if (needle.length === 0) return [];
@@ -184,5 +198,5 @@ export function suggestPeerNames(
       return name.startsWith(needle) || name.includes(needle);
     })
     .slice(0, limit)
-    .map((peer) => formatPeerAddress(peer, peers));
+    .map((peer) => formatPeerAddress(peer, peers, isReserved));
 }

@@ -346,6 +346,7 @@ export * from './ipc/inbound-gate.js';
 export * from './ipc/peer-directory.js';
 export * from './ipc/peer-envelope.js';
 export * from './ipc/peer-frames.js';
+export * from './ipc/peer-routing.js';
 export * from './ipc/peer-send.js';
 export * from './ipc/socket-path.js';
 export * from './ipc/uds-client.js';

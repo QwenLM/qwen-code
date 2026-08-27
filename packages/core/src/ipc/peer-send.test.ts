@@ -365,6 +365,50 @@ describe('lookupSentPeerMessage', () => {
     }
   });
 
+  it("forgets a send refused by a full backlog or this side's own cap", async () => {
+    listMessageablePeers.mockResolvedValue([peer('s1', 'app-ab')]);
+    for (const code of ['EAGAIN', 'EBUSY']) {
+      sendPeerFrame.mockClear();
+      sendPeerFrame.mockRejectedValue(new PeerSendError('busy', code));
+      await sendToPeer({
+        target: 'app-ab',
+        message: 'hi',
+        approvalMode: ApprovalMode.DEFAULT,
+      });
+      expect(
+        lookupSentPeerMessage(sendPeerFrame.mock.calls[0][1].msgId),
+      ).toBeUndefined();
+    }
+  });
+
+  it('reports a reserved bare name as name [ref], in suggestions and on send', async () => {
+    const shadowed = peer('s1', 'build');
+    listMessageablePeers.mockResolvedValue([shadowed]);
+    const isReserved = (address: string) => address === 'build';
+
+    const miss = await sendToPeer({
+      target: 'buil',
+      message: 'hi',
+      approvalMode: ApprovalMode.DEFAULT,
+      isReserved,
+    });
+    expect(miss).toEqual({
+      kind: 'not-found',
+      suggestions: [`build [${shadowed.ref}]`],
+    });
+
+    const sent = await sendToPeer({
+      target: `build [${shadowed.ref}]`,
+      message: 'hi',
+      approvalMode: ApprovalMode.DEFAULT,
+      isReserved,
+    });
+    expect(sent).toMatchObject({
+      kind: 'sent',
+      address: `build [${shadowed.ref}]`,
+    });
+  });
+
   it('keeps a send that timed out, since the peer may still read it', async () => {
     listMessageablePeers.mockResolvedValue([peer('s1', 'app-ab')]);
     sendPeerFrame.mockRejectedValue(new PeerSendError('slow', 'ETIMEDOUT'));

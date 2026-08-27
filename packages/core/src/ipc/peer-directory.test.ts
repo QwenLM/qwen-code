@@ -212,6 +212,17 @@ describe('resolvePeerTarget', () => {
     });
   });
 
+  it("refuses to guess when a bare string is one peer's name and another's ref", () => {
+    const victim = peer({ sessionId: 's1', name: 'app-ab', ref: 'abc123' });
+    const shadow = peer({ sessionId: 's2', name: 'abc123', ref: 'ffffff' });
+    const result = resolvePeerTarget([victim, shadow], 'abc123');
+    expect(result.kind).toBe('ambiguous');
+    if (result.kind === 'ambiguous') {
+      expect(result.matches).toEqual(expect.arrayContaining([victim, shadow]));
+      expect(result.matches).toHaveLength(2);
+    }
+  });
+
   it('refuses to guess between two sessions whose refs collide', () => {
     const x = peer({ sessionId: 's1', name: 'app-ab', ref: 'abc123' });
     const y = peer({ sessionId: 's2', name: 'docs-cd', ref: 'abc123' });
@@ -286,6 +297,12 @@ describe('formatPeerAddress', () => {
     expect(formatPeerAddress(a, [a, b, c])).toBe(`app-ab [${a.ref}]`);
   });
 
+  it('appends the ref when the caller reserves the bare name', () => {
+    const reserved = (address: string) => address === 'docs-cd';
+    expect(formatPeerAddress(c, [a, c], reserved)).toBe(`docs-cd [${c.ref}]`);
+    expect(formatPeerAddress(a, [a, c], reserved)).toBe('app-ab');
+  });
+
   it('round-trips through resolvePeerTarget', () => {
     const peers = [a, b, c];
     for (const each of peers) {
@@ -318,6 +335,13 @@ describe('suggestPeerNames', () => {
     expect(suggestPeerNames([a, d], 'qwen')).toEqual([
       `qwen-code-f7 [${a.ref}]`,
       `qwen-code-f7 [${d.ref}]`,
+    ]);
+  });
+
+  it('never suggests a bare name the caller would route in-process', () => {
+    const reserved = (address: string) => address === 'docs-cd';
+    expect(suggestPeerNames([a, b, c], 'docs', 3, reserved)).toEqual([
+      `docs-cd [${c.ref}]`,
     ]);
   });
 

@@ -9,9 +9,8 @@ import {
   listMessageablePeers,
   resolvePeerTarget,
 } from '../ipc/peer-directory.js';
+import { isInProcessRecipient } from '../ipc/peer-routing.js';
 import { getOwnPeerIdentity } from '../ipc/peer-send.js';
-import { sanitizeName } from '../agents/team/teamHelpers.js';
-import { LEADER_NAME } from '../agents/team/types.js';
 import { ToolDisplayNames, ToolNames } from './tool-names.js';
 import {
   BaseDeclarativeTool,
@@ -68,18 +67,13 @@ class ListAgentsInvocation extends BaseToolInvocation<
         )
       : [];
 
-    // send_message routes a name to an in-process recipient first: a
-    // teammate by sanitized name, plus the leader handle and the lead
-    // agent id. Validate every candidate against both those routes and
-    // the peer-address grammar before advertising it.
+    // send_message claims some addresses before it looks at peers — the
+    // broadcast keyword, and with a team active the leader handle, the
+    // lead agent id and member names. Validate every candidate against
+    // that same rule and the peer-address grammar before advertising it.
     const teamFile = this.config.getTeamManager()?.getTeamFile();
-    const memberNames = new Set(
-      (teamFile?.members ?? []).map((member) => member.name),
-    );
     const intercepted = (address: string): boolean =>
-      address.toLowerCase() === LEADER_NAME ||
-      address === teamFile?.leadAgentId ||
-      memberNames.has(sanitizeName(address));
+      isInProcessRecipient(address, teamFile);
     const addressFor = (peer: (typeof peers)[number]): string | undefined => {
       const candidates = [
         peer.name,

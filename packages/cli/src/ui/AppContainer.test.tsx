@@ -7375,6 +7375,31 @@ describe('AppContainer State Management', () => {
       expect(notices()).toHaveLength(4);
       expect(notices()[3]).toContain('different session');
       expect(notices()[3]).not.toContain('declined');
+
+      // An accepted message that expired was never held: the wire text
+      // for 'expired' speaks of a held message and must not be reused.
+      act(() => {
+        peer.emitReceipt({
+          status: 'expired',
+          address: 'docs-cd',
+          origMsgId: 'm5',
+          previous: 'delivered',
+        });
+      });
+      expect(notices()).toHaveLength(5);
+      expect(notices()[4]).toContain('exited before it read');
+      expect(notices()[4]).not.toContain('held');
+
+      act(() => {
+        peer.emitReceipt({
+          status: 'expired',
+          address: 'docs-cd',
+          origMsgId: 'm6',
+          previous: 'held',
+        });
+      });
+      expect(notices()).toHaveLength(6);
+      expect(notices()[5]).toContain(describeDeliveryStatus('expired'));
     });
 
     it('announces a newly held message once and stays quiet when one is released', () => {

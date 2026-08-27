@@ -334,6 +334,41 @@ describe('ListAgentsTool — peer sessions', () => {
     ]);
   });
 
+  it('never advertises the broadcast keyword as a peer address', async () => {
+    listMessageablePeers.mockResolvedValue([
+      peerRow({ sessionId: 's1', name: '*', ref: 'aaa111' }),
+    ]);
+    const parsed = JSON.parse(String((await run()).llmContent));
+    expect(parsed.sessions).toHaveLength(1);
+    expect(parsed.sessions[0].to).not.toBe('*');
+    expect(parsed.sessions[0].to).toContain('aaa111');
+  });
+
+  it('intercepts the leader handle only while a team is active', async () => {
+    listMessageablePeers.mockResolvedValue([
+      peerRow({ sessionId: 's1', name: 'leader', ref: 'aaa111' }),
+    ]);
+    const noTeam = JSON.parse(String((await run()).llmContent));
+    expect(noTeam.sessions[0].to).toBe('leader');
+    const withTeam = JSON.parse(
+      String((await run(toolWith(undefined, ['alice']))).llmContent),
+    );
+    expect(withTeam.sessions[0].to).toBe('leader [aaa111]');
+  });
+
+  it('omits a peer that no address in the grammar can single out', async () => {
+    // Same name and the same ref: every candidate is ambiguous for both.
+    listMessageablePeers.mockResolvedValue([
+      peerRow({ sessionId: 's1', name: 'docs-cd', ref: 'aaa111' }),
+      peerRow({ sessionId: 's2', name: 'docs-cd', ref: 'aaa111', cwd: '/w/2' }),
+      peerRow({ sessionId: 's3', name: 'other-ef', ref: 'bbb222' }),
+    ]);
+    const parsed = JSON.parse(String((await run()).llmContent));
+    expect(parsed.sessions.map((s: { to: string }) => s.to)).toEqual([
+      'other-ef',
+    ]);
+  });
+
   it('counts both kinds in the display line', async () => {
     const registry = new BackgroundTaskRegistry();
     registry.register({

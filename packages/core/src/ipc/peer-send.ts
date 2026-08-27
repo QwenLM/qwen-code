@@ -186,6 +186,13 @@ export interface SendToPeerOptions {
   message: string;
   /** Current approval mode, asserted to the receiver for mode parity. */
   approvalMode: ApprovalMode | null;
+  /**
+   * Addresses the caller's own routing keeps in-process (a teammate's
+   * name, the broadcast keyword). A peer whose bare name is reserved is
+   * reported — in suggestions and in the sent address — as `name [ref]`,
+   * the form that reaches it.
+   */
+  isReserved?: (address: string) => boolean;
 }
 
 /**
@@ -215,7 +222,12 @@ export async function sendToPeer(
     }
     return {
       kind: 'not-found',
-      suggestions: suggestPeerNames(peers, options.target),
+      suggestions: suggestPeerNames(
+        peers,
+        options.target,
+        undefined,
+        options.isReserved,
+      ),
     };
   }
   if (resolved.kind === 'ambiguous') {
@@ -228,7 +240,7 @@ export async function sendToPeer(
   }
 
   const peer = resolved.peer;
-  const address = formatPeerAddress(peer, peers);
+  const address = formatPeerAddress(peer, peers, options.isReserved);
   // The wire contract drops frames with empty content silently, and no
   // receipt can ever follow; reporting such a write as sent would strand
   // the ledger entry pending and tell the model not to re-send.
@@ -275,7 +287,11 @@ export async function sendToPeer(
       error instanceof PeerSendError &&
       (error.code === 'ENOENT' ||
         error.code === 'ECONNREFUSED' ||
-        error.code === 'EMSGSIZE')
+        error.code === 'EMSGSIZE' ||
+        // A refused connect (full backlog) and this side's own send cap
+        // both mean the frame was never written.
+        error.code === 'EAGAIN' ||
+        error.code === 'EBUSY')
     ) {
       sentMessages.delete(canonicalizeMsgId(frame.msgId));
     }

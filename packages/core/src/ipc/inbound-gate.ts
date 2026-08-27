@@ -162,7 +162,7 @@ export class InboundGate {
    */
   private readonly settled = new Map<
     string,
-    'delivered' | 'denied' | 'expired'
+    'delivered' | 'denied' | 'expired' | 'misaddressed'
   >();
   private shuttingDown = false;
 
@@ -347,9 +347,13 @@ export class InboundGate {
 
     if (decision === 'approve') {
       if (!this.pinStillValid(entry.frame)) {
+        // Dropped, not released: the id is tombstoned like every other
+        // terminal outcome, and the caller is told the message is gone
+        // rather than that it will appear on the next turn.
+        this.recordSettled(entry.frame.msgId, 'misaddressed');
         void this.report(entry.frame, 'misaddressed');
         this.notifyHeldChange();
-        return 'done';
+        return 'gone';
       }
       if (!this.tryDeliver(entry.frame)) {
         this.held.splice(index, 0, entry);
@@ -404,6 +408,7 @@ export class InboundGate {
     for (const entry of release) {
       if (!this.pinStillValid(entry.frame)) {
         misaddressed += 1;
+        this.recordSettled(entry.frame.msgId, 'misaddressed');
         void this.report(entry.frame, 'misaddressed');
         continue;
       }
@@ -457,7 +462,7 @@ export class InboundGate {
   /** Remember a settled id, pruning the oldest beyond the cap. */
   private recordSettled(
     msgId: string,
-    verdict: 'delivered' | 'denied' | 'expired',
+    verdict: 'delivered' | 'denied' | 'expired' | 'misaddressed',
   ): void {
     const key = canonicalizeMsgId(msgId);
     // Delete-then-set refreshes recency: Map iterates in insertion

@@ -544,11 +544,13 @@ describe('SendMessageTool — peer mode', () => {
     // that it carries no authority over there.
     expect(result.llmContent).toContain('held');
     expect(result.llmContent).toContain("none of your user's authority");
-    expect(sendToPeer).toHaveBeenCalledWith({
-      target: 'docs-cd',
-      message: 'check the tests',
-      approvalMode: DEFAULT_MODE,
-    });
+    expect(sendToPeer).toHaveBeenCalledWith(
+      expect.objectContaining({
+        target: 'docs-cd',
+        message: 'check the tests',
+        approvalMode: DEFAULT_MODE,
+      }),
+    );
   });
 
   it('asserts nothing about its mode when the mode is unreadable', async () => {
@@ -818,6 +820,45 @@ describe('SendMessageTool — peer mode', () => {
       .execute(new AbortController().signal);
     expect(result.llmContent).toContain('do not re-send');
     expect(result.llmContent).toContain('<cross_session_message>');
+  });
+
+  it('hands the peer route a reservation rule that mirrors its own routing', async () => {
+    sendToPeer.mockResolvedValue({ kind: 'not-found', suggestions: [] });
+    const tool = new SendMessageTool(
+      makeTeamConfig({
+        teamManager: {
+          sendMessage: vi
+            .fn()
+            .mockRejectedValue(new Error('Teammate "x" not found.')),
+          broadcast: vi.fn(),
+          getTeamFile: () => ({
+            leadAgentId: 'lead-1',
+            members: [{ name: 'alice' }],
+          }),
+        },
+      }),
+    );
+    await tool
+      .build({ to: 'zed', message: 'hi' })
+      .execute(new AbortController().signal);
+    const isReserved = sendToPeer.mock.calls[0][0].isReserved as (
+      address: string,
+    ) => boolean;
+    expect(isReserved('*')).toBe(true);
+    expect(isReserved('leader')).toBe(true);
+    expect(isReserved('lead-1')).toBe(true);
+    expect(isReserved('Alice')).toBe(true);
+    expect(isReserved('docs-cd')).toBe(false);
+
+    sendToPeer.mockClear();
+    await toolWithoutTeam()
+      .build({ to: 'zed', message: 'hi' })
+      .execute(new AbortController().signal);
+    const noTeam = sendToPeer.mock.calls[0][0].isReserved as (
+      address: string,
+    ) => boolean;
+    expect(noTeam('*')).toBe(true);
+    expect(noTeam('leader')).toBe(false);
   });
 
   it('warns the model off permission laundering in the tool description', () => {

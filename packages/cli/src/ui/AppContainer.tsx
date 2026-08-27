@@ -2584,10 +2584,17 @@ export const AppContainer = (props: AppContainerProps) => {
     if (!peerMessaging) return;
     return peerMessaging.onReceipt(({ status, address, previous }) => {
       if (status === 'delivered' && previous !== 'held') return;
+      // The wire text for `expired` speaks of a held message; an accepted
+      // message that expired was never held — the session exited before
+      // reading it — and the notice must not claim otherwise.
+      const detail =
+        status === 'expired' && previous !== 'held'
+          ? 'That session exited before it read your message; it was not delivered.'
+          : describeDeliveryStatus(status);
       historyManager.addItem(
         {
           type: MessageType.INFO,
-          text: `Message to ${address}: ${describeDeliveryStatus(status)}`,
+          text: `Message to ${address}: ${detail}`,
         },
         Date.now(),
       );

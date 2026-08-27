@@ -91,12 +91,12 @@ Commands for managing AI tools and models.
 | `/curator`            | Inspect, pin, archive, or restore inactive project auto-skills                        | `/curator`, `/curator run --dry-run`, `/curator pin <directory>`, `/curator restore <directory>`          |
 | `/plan`               | Switch to plan mode or exit plan mode                                                 | `/plan`, `/plan <task>`, `/plan exit`                                                                     |
 | `/approval-mode`      | Change the tool-approval mode (current session only)                                  | `/approval-mode`, `/approval-mode auto-edit`                                                              |
-| `/peers`              | Review messages held from other Qwen Code sessions on this machine                    | `/peers`, `/peers accept <id>`, `/peers deny all`                                                         |
 | → `plan`              | Analysis only, no execution (secure review)                                           | `/approval-mode plan`                                                                                     |
 | → `default`           | Require approval for edits (daily use)                                                | `/approval-mode default`                                                                                  |
 | → `auto-edit`         | Auto-approve edits (trusted environment)                                              | `/approval-mode auto-edit`                                                                                |
 | → `auto`              | Classifier-evaluated approval (autonomous)                                            | `/approval-mode auto`                                                                                     |
 | → `yolo`              | Auto-approve everything (quick prototyping)                                           | `/approval-mode yolo`                                                                                     |
+| `/peers`              | Review messages held from other Qwen Code sessions on this machine                    | `/peers`, `/peers accept <id>`, `/peers deny all`                                                         |
 | `/model`              | Switch model used in current session                                                  | `/model`, `/model <model-id>` (switch immediately)                                                        |
 | `/model --fast`       | Set a lighter model for prompt suggestions                                            | `/model --fast qwen3-coder-flash`                                                                         |
 | `/model --voice`      | Set the model used for voice transcription                                            | `/model --voice <model-id>`                                                                               |
@@ -830,7 +830,8 @@ receiving session.
 
 The `send_message` call only confirms the message was handed to the other
 session. What became of it arrives later as a receipt: if it was held,
-declined, or expired — or released after a hold — a notice appears in the
+declined, expired, or misaddressed (the address changed hands — list the
+agents again) — or released after a hold — a notice appears in the
 sending session's transcript (`Message to <name>: …`). The model that
 sent it is not told; if the other session replies, the reply arrives as a
 cross-session message.

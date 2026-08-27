@@ -32,9 +32,12 @@ import type { PermissionDecision } from '../permissions/types.js';
 import { ToolErrorType } from './tool-error.js';
 import { ToolNames, ToolDisplayNames } from './tool-names.js';
 import { getAgentName } from '../agents/team/identity.js';
-import { findMemberByName } from '../agents/team/teamHelpers.js';
 import { LEADER_NAME } from '../agents/team/types.js';
 import type { ApprovalMode } from '../config/approval-mode.js';
+import {
+  isInProcessRecipient,
+  type InProcessRoutingTeam,
+} from '../ipc/peer-routing.js';
 import { sendToPeer } from '../ipc/peer-send.js';
 import {
   getPlanRequiredTeammatePreApprovalMessage,
@@ -112,8 +115,9 @@ class SendMessageInvocation extends BaseToolInvocation<
    */
   private async trySendToPeer(
     to: string,
-    teamActive: boolean,
+    teamFile: InProcessRoutingTeam | undefined,
   ): Promise<ToolResult | null> {
+    const teamActive = teamFile !== undefined;
     let approvalMode: ApprovalMode | null;
     try {
       approvalMode = this.config.getApprovalMode();
@@ -127,6 +131,9 @@ class SendMessageInvocation extends BaseToolInvocation<
       target: to,
       message: this.params.message,
       approvalMode,
+      // Addresses this tool would keep in-process must never be handed
+      // back to the model as a peer address, bare.
+      isReserved: (address) => isInProcessRecipient(address, teamFile),
     });
 
     switch (outcome.kind) {
@@ -406,15 +413,12 @@ class SendMessageInvocation extends BaseToolInvocation<
     // a member: a teammate reports back with `to: "leader"` (or the lead
     // agent id), and TeamManager resolves both — so must this check, or a
     // teammate's report would go looking for a session named "leader".
-    const inProcessRecipient =
-      !!teamManager &&
-      (to.toLowerCase() === LEADER_NAME ||
-        to === teamManager.getTeamFile().leadAgentId ||
-        findMemberByName(teamManager.getTeamFile().members, to) !== undefined);
+    const teamFile = teamManager?.getTeamFile();
+    const inProcessRecipient = isInProcessRecipient(to, teamFile);
 
     if (!inProcessRecipient) {
       // Route 3: another Qwen Code session on this machine.
-      const peerResult = await this.trySendToPeer(to, !!teamManager);
+      const peerResult = await this.trySendToPeer(to, teamFile);
       if (peerResult) return peerResult;
     }
 

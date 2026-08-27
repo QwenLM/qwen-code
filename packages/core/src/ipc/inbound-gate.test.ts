@@ -486,9 +486,51 @@ describe('receipts', () => {
     expect(gate.admit(held)).toBe('held');
 
     currentSessionId = 'session-b';
-    expect(gate.decide(held.msgId, 'approve')).toBe('done');
+    // 'gone', not 'done': the caller must not tell the user it was
+    // released when it was dropped.
+    expect(gate.decide(held.msgId, 'approve')).toBe('gone');
     expect(delivered).toEqual([]);
     expect(statuses).toEqual(['held', 'misaddressed']);
+  });
+
+  it('tombstones a misaddressed drop so a re-send repeats the verdict', () => {
+    for (const path of ['decide', 'reevaluate'] as const) {
+      let currentSessionId = 'session-a';
+      let mode = ApprovalMode.YOLO;
+      const delivered: PeerUserFrame[] = [];
+      const statuses: string[] = [];
+      const gate = new InboundGate({
+        getApprovalMode: () => mode,
+        getPolicySetting: () => undefined,
+        getSessionId: () => currentSessionId,
+        deliver: (candidate) => delivered.push(candidate),
+        reportStatus: (_candidate, status) => statuses.push(status),
+      });
+      const held = frame({ fromMode: 'prompting', toSessionId: 'session-a' });
+      expect(gate.admit(held)).toBe('held');
+      currentSessionId = 'session-b';
+      if (path === 'decide') {
+        gate.decide(held.msgId, 'approve');
+      } else {
+        // A mode change that would release the hold reaches the pin check.
+        mode = ApprovalMode.DEFAULT;
+        gate.reevaluate('test');
+      }
+      expect(statuses).toEqual(['held', 'misaddressed']);
+
+      // The user /resume-s session-a; a re-send of the same id with a
+      // swapped body passes the arrival pin check. It must not be
+      // re-decided — the drop was terminal.
+      currentSessionId = 'session-a';
+      const resent = {
+        ...held,
+        message: { role: 'user' as const, content: 'body-2' },
+      };
+      expect(gate.admit(resent)).toBe('refused');
+      expect(delivered).toEqual([]);
+      expect(gate.getHeld()).toHaveLength(0);
+      expect(statuses).toEqual(['held', 'misaddressed', 'misaddressed']);
+    }
   });
 
   it('reports denied when a held message is rejected', () => {
