@@ -406,31 +406,36 @@ describe('file I/O', () => {
       await expect(deleteTeamDirs('nonexistent')).resolves.not.toThrow();
     });
 
-    it('throws on non-ENOENT filesystem errors (e.g. EACCES)', async () => {
+    it('throws AggregateError when both rm calls fail (e.g. EACCES)', async () => {
       const eaccesError = Object.assign(new Error('permission denied'), {
         code: 'EACCES',
       });
       setFsRmMock(() => Promise.reject(eaccesError));
 
-      await expect(deleteTeamDirs('any-team')).rejects.toThrow(
-        'permission denied',
-      );
+      await expect(deleteTeamDirs('any-team')).rejects.toThrow(AggregateError);
     });
 
-    it('throws on EIO errors', async () => {
+    it('throws AggregateError when both rm calls fail (EIO)', async () => {
       const eioError = Object.assign(new Error('I/O error'), { code: 'EIO' });
       setFsRmMock(() => Promise.reject(eioError));
 
-      await expect(deleteTeamDirs('any-team')).rejects.toThrow('I/O error');
+      await expect(deleteTeamDirs('any-team')).rejects.toThrow(AggregateError);
     });
 
-    it('still ignores ENOENT when fs.rm rejects with ENOENT', async () => {
-      const enoentError = Object.assign(new Error('no such file'), {
-        code: 'ENOENT',
+    it('throws the single error when only the second rm call fails', async () => {
+      const eaccesError = Object.assign(new Error('permission denied'), {
+        code: 'EACCES',
       });
-      setFsRmMock(() => Promise.reject(enoentError));
+      let callCount = 0;
+      setFsRmMock(() => {
+        callCount++;
+        if (callCount === 1) return Promise.resolve();
+        return Promise.reject(eaccesError);
+      });
 
-      await expect(deleteTeamDirs('any-team')).resolves.not.toThrow();
+      await expect(deleteTeamDirs('any-team')).rejects.toThrow(
+        'permission denied',
+      );
     });
   });
 
