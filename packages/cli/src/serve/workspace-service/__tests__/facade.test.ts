@@ -3585,6 +3585,24 @@ describe('createDaemonWorkspaceService', () => {
       expect(invokeWorkspaceCommand).toHaveBeenCalledOnce();
     });
 
+    it('still refreshes the child when the parent environment reload rejects', async () => {
+      const reloadDaemonEnv = vi
+        .fn()
+        .mockRejectedValue(new Error('environment reload failed'));
+      const invokeWorkspaceCommand = vi.fn().mockResolvedValue({
+        configsRefreshed: 2,
+        configsFailed: 0,
+      });
+      const svc = createDaemonWorkspaceService(
+        makeDeps({ reloadDaemonEnv, invokeWorkspaceCommand }),
+      );
+
+      await expect(svc.reloadModelProviders(makeCtx())).resolves.toEqual({
+        status: 'failed',
+      });
+      expect(invokeWorkspaceCommand).toHaveBeenCalledOnce();
+    });
+
     it('reports deferred only when no child is live and the parent refresh succeeded', async () => {
       const invokeWorkspaceCommand = vi
         .fn()

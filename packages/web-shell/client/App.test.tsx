@@ -21625,7 +21625,7 @@ describe('App session callbacks', () => {
     expect(mockStore.dispatch).toHaveBeenCalledWith([
       {
         type: 'status',
-        text: 'The change was saved, but running sessions could not be refreshed. Retry or restart qwen serve before using the updated model list.',
+        text: 'The change was saved, but running sessions could not be refreshed. Restart qwen serve before using the updated model list.',
       },
     ]);
   });

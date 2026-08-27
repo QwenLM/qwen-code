@@ -385,6 +385,8 @@ export interface DaemonClientOptions {
 const DEFAULT_SESSION_LIST_PAGE_SIZE = 20;
 
 const DEFAULT_FETCH_TIMEOUT_MS = 30_000;
+// The daemon may spend 30s waiting for the ACP child after persistence.
+const MODEL_PROVIDER_MUTATION_TIMEOUT_MS = 45_000;
 const DEFAULT_SESSION_RESTORE_TIMEOUT_MS = 70_000;
 const SESSION_RESTORE_TIMEOUT_HEADROOM_MS = 10_000;
 const VOICE_TRANSCRIPTION_DEFAULT_TIMEOUT_MS = 65_000;
@@ -4086,6 +4088,7 @@ export class DaemonClient {
         }
         return (await res.json()) as DaemonModelDeleteResult;
       },
+      MODEL_PROVIDER_MUTATION_TIMEOUT_MS,
     );
   }
 
@@ -5518,6 +5521,7 @@ export class DaemonClient {
         }
         return (await res.json()) as DaemonAuthProviderInstallResult;
       },
+      MODEL_PROVIDER_MUTATION_TIMEOUT_MS,
     );
   }
 

@@ -3874,6 +3874,9 @@ describe('Settings Loading and Merging', () => {
         [SETTINGS_VERSION_KEY]: SETTINGS_VERSION,
       });
       expect(settings.merged.ui?.theme).toBe('dark');
+      expect(mockDebugLogger.warn).toHaveBeenCalledWith(
+        expect.stringContaining('settings file is not a JSON object'),
+      );
     });
 
     it('keeps existing settings and logs when reload JSON parsing fails', () => {

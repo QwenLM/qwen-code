@@ -40,9 +40,7 @@ interface RegisterWorkspaceAuthRoutesDeps {
     req: ServeAuthProviderInstallRequest,
     assertGenerationOpen?: () => void,
   ) => Promise<ServeAuthProviderInstallResult>;
-  syncModelProvidersRuntime?: (
-    assertGenerationOpen?: () => void,
-  ) => Promise<ServeModelProviderRuntimeSyncResult>;
+  syncModelProvidersRuntime?: () => Promise<ServeModelProviderRuntimeSyncResult>;
   captureGenerationAssertion?: () => (() => void) | undefined;
 }
 
@@ -353,7 +351,7 @@ export function registerWorkspaceAuthRoutes(
         let runtimeSync: ServeModelProviderRuntimeSyncResult | undefined;
         if (syncModelProvidersRuntime) {
           try {
-            runtimeSync = await syncModelProvidersRuntime(assertGenerationOpen);
+            runtimeSync = await syncModelProvidersRuntime();
           } catch (syncError) {
             if (sendGenerationClosedError(res, syncError)) return;
             writeStderrLine(

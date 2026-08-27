@@ -636,6 +636,10 @@ export class LoadedSettings {
         file.originalSettings = structuredClone(parsed) as Settings;
         file.rawJson = content;
         reloaded = true;
+      } else {
+        debugLogger.warn(
+          `reloadScopeFromDisk(${scope}): settings file is not a JSON object, keeping previous settings`,
+        );
       }
     } catch (err) {
       debugLogger.warn(

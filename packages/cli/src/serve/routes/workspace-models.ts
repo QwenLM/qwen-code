@@ -58,9 +58,7 @@ export interface WorkspaceModelsRouteDeps {
     req: Request,
     res: Response,
   ) => string | undefined | null;
-  syncModelProvidersRuntime?: (
-    assertGenerationOpen?: () => void,
-  ) => Promise<ServeModelProviderRuntimeSyncResult>;
+  syncModelProvidersRuntime?: () => Promise<ServeModelProviderRuntimeSyncResult>;
 }
 
 function parseTarget(
@@ -299,11 +297,11 @@ export function registerWorkspaceModelsRoutes(
         if (sendGenerationClosedError(res, err)) return;
         throw err;
       }
+      for (const write of writes) broadcastWrite(write);
       let runtimeSync: ServeModelProviderRuntimeSyncResult | undefined;
       if (deps.syncModelProvidersRuntime) {
         try {
-          runtimeSync =
-            await deps.syncModelProvidersRuntime(assertGenerationOpen);
+          runtimeSync = await deps.syncModelProvidersRuntime();
         } catch (err) {
           if (sendGenerationClosedError(res, err)) return;
           writeStderrLine(
@@ -318,7 +316,6 @@ export function registerWorkspaceModelsRoutes(
           throw err;
         }
       }
-      for (const write of writes) broadcastWrite(write);
 
       const clearedActiveModel = writes.some((w) => w.key === 'model.name');
       // Surface restart-required so the UI can prompt (e.g. modelFallbacks).

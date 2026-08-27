@@ -179,11 +179,14 @@ describe('DELETE /workspace/models', () => {
 
   it('reports degraded runtime sync after the model removal is persisted', async () => {
     writeUserSettings({ modelProviders: { openai: [{ id: 'gpt-4o' }] } });
+    let modelProvidersAtSync: unknown;
     const syncModelProvidersRuntime = vi.fn(async () => {
-      expect(readUserSettings()['modelProviders']).toEqual({ openai: [] });
+      modelProvidersAtSync = readUserSettings()['modelProviders'];
       return { status: 'failed' as const };
     });
-    const { app } = makeApp({ syncModelProvidersRuntime });
+    const { app, broadcastSettingsChanged } = makeApp({
+      syncModelProvidersRuntime,
+    });
 
     const res = await request(app)
       .delete('/workspace/models')
@@ -195,6 +198,10 @@ describe('DELETE /workspace/models', () => {
       runtimeSync: { status: 'failed' },
     });
     expect(syncModelProvidersRuntime).toHaveBeenCalledOnce();
+    expect(modelProvidersAtSync).toEqual({ openai: [] });
+    expect(broadcastSettingsChanged.mock.invocationCallOrder[0]).toBeLessThan(
+      syncModelProvidersRuntime.mock.invocationCallOrder[0]!,
+    );
   });
 
   it('writes to the workspace scope when the workspace owns modelProviders', async () => {

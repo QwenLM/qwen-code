@@ -885,6 +885,72 @@ describe('DaemonClient', () => {
       expect((err as DaemonHttpError).status).toBe(404);
       expect((err as DaemonHttpError).body).toEqual(body);
     });
+
+    it('waits past the daemon child-sync deadline for a persisted result', async () => {
+      vi.useFakeTimers();
+      try {
+        const result = {
+          removed: true,
+          clearedActiveModel: false,
+          requiresRestart: false,
+          runtimeSync: { status: 'failed' as const },
+        };
+        const { fetch } = recordingFetch(
+          () =>
+            new Promise<Response>((resolve) => {
+              setTimeout(() => resolve(jsonResponse(200, result)), 31_000);
+            }),
+        );
+        const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+        let settled = false;
+        const deletion = client
+          .deleteModel({ authType: 'openai', modelId: 'gpt-4o' })
+          .finally(() => {
+            settled = true;
+          });
+
+        await vi.advanceTimersByTimeAsync(30_000);
+        expect(settled).toBe(false);
+        await vi.advanceTimersByTimeAsync(1_000);
+        await expect(deletion).resolves.toEqual(result);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('gives provider installation the same child-sync headroom', async () => {
+      vi.useFakeTimers();
+      try {
+        const result = {
+          v: 1 as const,
+          providerId: 'openai',
+          providerLabel: 'OpenAI',
+          authType: 'openai',
+          message: 'saved',
+          runtimeSync: { status: 'failed' as const },
+        };
+        const { fetch } = recordingFetch(
+          () =>
+            new Promise<Response>((resolve) => {
+              setTimeout(() => resolve(jsonResponse(200, result)), 31_000);
+            }),
+        );
+        const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+        let settled = false;
+        const installation = client
+          .installAuthProvider({ providerId: 'openai', apiKey: 'key' })
+          .finally(() => {
+            settled = true;
+          });
+
+        await vi.advanceTimersByTimeAsync(30_000);
+        expect(settled).toBe(false);
+        await vi.advanceTimersByTimeAsync(1_000);
+        await expect(installation).resolves.toEqual(result);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
   });
 
   describe('read-only status routes', () => {

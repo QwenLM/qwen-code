@@ -23,6 +23,8 @@ import type {
 } from './types.js';
 
 const AGENT_GENERATE_TIMEOUT_MS = 330_000;
+// The SDK uses 45s; keep this wrapper behind its transport timeout.
+const MODEL_PROVIDER_MUTATION_TIMEOUT_MS = 50_000;
 
 function hasGoalSnapshot(value: unknown): value is DaemonGoal {
   if (!value || typeof value !== 'object') return false;
@@ -1038,6 +1040,7 @@ export function createDaemonWorkspaceActions({
       return withActionTimeout(
         client.installAuthProvider(req),
         'Install auth provider timed out',
+        MODEL_PROVIDER_MUTATION_TIMEOUT_MS,
       );
     },
 
@@ -1046,6 +1049,7 @@ export function createDaemonWorkspaceActions({
       return withActionTimeout(
         client.deleteModel(target),
         'Delete model timed out',
+        MODEL_PROVIDER_MUTATION_TIMEOUT_MS,
       );
     },
 
