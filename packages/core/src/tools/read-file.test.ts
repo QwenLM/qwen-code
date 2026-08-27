@@ -24,6 +24,7 @@ import type { VisionBridgeNoticeDisplay } from '../services/visionBridge/vision-
 import {
   clearAutoMemoryRootCache,
   getAutoMemoryRoot,
+  getTeamAutoMemoryRoot,
 } from '../memory/paths.js';
 
 const visionBridgeMocks = vi.hoisted(() => ({
@@ -544,6 +545,35 @@ describe('ReadFileTool', () => {
       }
     });
 
+    it('should reject case-variant managed-memory paths on case-insensitive filesystems', async () => {
+      const filePath = path.join(
+        tempRootDir,
+        '.qwen',
+        'memory',
+        'feedback',
+        'preference.md',
+      );
+      await fsp.mkdir(path.dirname(filePath), { recursive: true });
+      await fsp.writeFile(filePath, 'remembered preference', 'utf-8');
+      const caseVariant = path.join(
+        tempRootDir,
+        '.QWEN',
+        'Memory',
+        'feedback',
+        'preference.md',
+      );
+      if (!fs.existsSync(caseVariant)) return;
+
+      const result = await (
+        tool.build({ file_path: caseVariant }) as ToolInvocation<
+          ReadFileToolParams,
+          ToolResult
+        >
+      ).execute(abortSignal);
+
+      expect(result.error?.type).toBe(ToolErrorType.EXECUTION_DENIED);
+    });
+
     it('should allow direct managed auto-memory reads for scoped memory agents', async () => {
       const previousLocal = process.env['QWEN_CODE_MEMORY_LOCAL'];
       process.env['QWEN_CODE_MEMORY_LOCAL'] = '1';
@@ -574,6 +604,26 @@ describe('ReadFileTool', () => {
         }
         clearAutoMemoryRootCache();
       }
+    });
+
+    it('should allow direct reads of team memory in structured mode', async () => {
+      const filePath = path.join(
+        getTeamAutoMemoryRoot(tempRootDir),
+        'reference',
+        'shared.md',
+      );
+      await fsp.mkdir(path.dirname(filePath), { recursive: true });
+      await fsp.writeFile(filePath, 'shared team memory', 'utf-8');
+
+      const result = await (
+        tool.build({ file_path: filePath }) as ToolInvocation<
+          ReadFileToolParams,
+          ToolResult
+        >
+      ).execute(abortSignal);
+
+      expect(result.error).toBeUndefined();
+      expect(result.llmContent).toContain('shared team memory');
     });
 
     it.skipIf(process.platform === 'win32')(

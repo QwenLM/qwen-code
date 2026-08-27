@@ -2187,7 +2187,7 @@ describe('microcompactHistory memory body eviction', () => {
     ]);
   });
 
-  it('counts a pending body result as still resident', () => {
+  it('does not count an uncommitted pending body result as resident', () => {
     const old = makeMemoryResult('project:same.md', 'x'.repeat(100), 1);
     const pending = makeMemoryResult('project:same.md', 'current body', 1);
 
@@ -2202,7 +2202,9 @@ describe('microcompactHistory memory body eviction', () => {
       { sizeOnly: true, pendingContent: pending },
     );
 
-    expect(result.meta?.evictedMemoryBodies).toEqual([]);
+    expect(result.meta?.evictedMemoryBodies).toEqual([
+      { memoryRef: 'project:same.md', mtimeMs: 1 },
+    ]);
   });
 
   it('does not treat a search window as a resident full body', () => {

@@ -5634,6 +5634,126 @@ hello
       expect(client['lastDeliveredMemoryTreeRevision']).toBeUndefined();
     });
 
+    it('does not commit a tree revision when the first model event is an error', async () => {
+      mockMemoryManager.recall.mockImplementation((_root, _query, options) => {
+        options.onFastResult?.({
+          treeSnapshot: fastTreeSnapshot('error-revision'),
+          focusedPrompt: '',
+          prompt: '',
+          selectedDocs: [],
+          strategy: 'none',
+        });
+        return new Promise(() => {});
+      });
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          yield {
+            type: GeminiEventType.Error,
+            value: new Error('request rejected'),
+          };
+        })(),
+      );
+      client['chat'] = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+      } as unknown as GeminiChat;
+
+      await fromAsync(
+        client.sendMessageStream(
+          [{ text: 'fail' }],
+          new AbortController().signal,
+          'prompt-tree-error',
+        ),
+      );
+
+      expect(client['lastDeliveredMemoryTreeRevision']).toBeUndefined();
+      expect(logMemoryRecallDelivery).toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({
+          delivery_point: 'discarded',
+          discard_reason: 'no_safe_delivery_point',
+        }),
+      );
+    });
+
+    it('does not commit a tree revision from an attempt superseded by retry', async () => {
+      mockMemoryManager.recall.mockImplementation((_root, _query, options) => {
+        options.onFastResult?.({
+          treeSnapshot: fastTreeSnapshot('retried-revision'),
+          focusedPrompt: '',
+          prompt: '',
+          selectedDocs: [],
+          strategy: 'none',
+        });
+        return new Promise(() => {});
+      });
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          yield { type: GeminiEventType.Content, value: 'discarded attempt' };
+          yield { type: GeminiEventType.Retry };
+          yield {
+            type: GeminiEventType.Error,
+            value: new Error('all retries failed'),
+          };
+        })(),
+      );
+      client['chat'] = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+      } as unknown as GeminiChat;
+
+      await fromAsync(
+        client.sendMessageStream(
+          [{ text: 'fail after retry' }],
+          new AbortController().signal,
+          'prompt-tree-retry-error',
+        ),
+      );
+
+      expect(client['lastDeliveredMemoryTreeRevision']).toBeUndefined();
+      expect(logMemoryRecallDelivery).toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({ delivery_point: 'discarded' }),
+      );
+    });
+
+    it('records fast-delivery dedup state only after delivery is committed', async () => {
+      const fast = {
+        treeSnapshot: fastTreeSnapshot('pending-revision'),
+        focusedPrompt: '## Memory focus for this turn\n\nPending focus',
+        prompt: '## Memory focus for this turn\n\nPending focus',
+        selectedDocs: [fastDoc('/m/pending.md', '- pending')],
+        strategy: 'heuristic' as const,
+      };
+      const handle = {
+        promise: new Promise<never>(() => {}),
+        settledAt: null,
+        result: null,
+        consumed: false,
+        terminalLogged: false,
+        fastResultRef: { current: fast },
+        fastDelivered: false,
+        fastDeliveredRefs: new Set<string>(),
+        firedAt: Date.now(),
+        controller: new AbortController(),
+      };
+      client['pendingMemoryPrefetch'] = handle;
+
+      const delivery = await client.consumeManagedAutoMemoryRecall('initial');
+
+      expect(handle.fastDelivered).toBe(false);
+      expect(handle.fastDeliveredRefs).toEqual(new Set());
+      client.discardManagedAutoMemoryRecallDelivery(delivery);
+      expect(handle.fastDelivered).toBe(false);
+      expect(handle.fastDeliveredRefs).toEqual(new Set());
+
+      const retryDelivery =
+        await client.consumeManagedAutoMemoryRecall('initial');
+      client.commitManagedAutoMemoryRecallDelivery(retryDelivery);
+      expect(handle.fastDelivered).toBe(true);
+      expect(handle.fastDeliveredRefs).toEqual(new Set(['user:pending.md']));
+    });
+
     it('delivers the deterministic fast result on a tool-free turn when the selector is still in flight', async () => {
       vi.useFakeTimers();
       mockMemoryManager.recall.mockImplementation((_root, _query, options) => {

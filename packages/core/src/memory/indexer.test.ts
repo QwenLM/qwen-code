@@ -10,14 +10,17 @@ import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   AUTO_MEMORY_PINNED_DIRNAME,
+  clearAutoMemoryRootCache,
   getAutoMemoryFilePath,
   getAutoMemoryIndexPath,
+  getUserAutoMemoryRoot,
 } from './paths.js';
 import {
   buildManagedAutoMemoryIndex,
   buildTeamAutoMemoryIndex,
   rebuildManagedAutoMemoryIndex,
   rebuildAutoMemoryIndexAtRoot,
+  rebuildUserAutoMemoryIndex,
 } from './indexer.js';
 import { ensureAutoMemoryScaffold } from './store.js';
 
@@ -69,6 +72,27 @@ describe('managed auto-memory indexer', () => {
     await expect(fs.stat(missingRoot)).rejects.toMatchObject({
       code: 'ENOENT',
     });
+  });
+
+  it('does not create a missing user root while rebuilding', async () => {
+    const previousBaseDir = process.env['QWEN_CODE_MEMORY_BASE_DIR'];
+    process.env['QWEN_CODE_MEMORY_BASE_DIR'] = path.join(tempDir, 'runtime');
+    clearAutoMemoryRootCache();
+    try {
+      const missingRoot = getUserAutoMemoryRoot();
+
+      await expect(rebuildUserAutoMemoryIndex()).resolves.toBe('');
+      await expect(fs.stat(missingRoot)).rejects.toMatchObject({
+        code: 'ENOENT',
+      });
+    } finally {
+      if (previousBaseDir === undefined) {
+        delete process.env['QWEN_CODE_MEMORY_BASE_DIR'];
+      } else {
+        process.env['QWEN_CODE_MEMORY_BASE_DIR'] = previousBaseDir;
+      }
+      clearAutoMemoryRootCache();
+    }
   });
 
   it('formats a compact file-based MEMORY.md index view', () => {

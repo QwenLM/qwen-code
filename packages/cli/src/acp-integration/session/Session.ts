@@ -7325,13 +7325,22 @@ export class Session implements SessionContext {
     }
     const responseStream = (async function* () {
       let committed = false;
+      let receivedChunk = false;
       try {
         for await (const event of sourceStream) {
-          if (!committed) {
-            geminiClient.commitManagedAutoMemoryRecallDelivery(memoryDelivery);
-            committed = true;
+          if (event.type === StreamEventType.CHUNK) {
+            receivedChunk = true;
+          } else if (
+            event.type === StreamEventType.RETRY ||
+            event.type === StreamEventType.MODEL_FALLBACK
+          ) {
+            receivedChunk = false;
           }
           yield event;
+        }
+        if (receivedChunk) {
+          geminiClient.commitManagedAutoMemoryRecallDelivery(memoryDelivery);
+          committed = true;
         }
       } finally {
         if (!committed) {

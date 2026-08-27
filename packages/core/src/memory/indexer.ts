@@ -15,6 +15,7 @@ import {
   getTeamAutoMemoryIndexPath,
   getTeamAutoMemoryRoot,
   getUserAutoMemoryIndexPath,
+  getUserAutoMemoryRoot,
   TEAM_AUTO_MEMORY_DIRNAME,
 } from './paths.js';
 import {
@@ -269,6 +270,7 @@ export async function rebuildAutoMemoryIndexAtRoot(
  * and skips metadata (user memory has no per-project state file).
  */
 export async function rebuildUserAutoMemoryIndex(): Promise<string> {
+  if (!existsSync(getUserAutoMemoryRoot())) return '';
   const docs = await scanUserAutoMemoryTopicDocuments();
   const content = buildManagedAutoMemoryIndex(docs);
   await atomicWriteFile(getUserAutoMemoryIndexPath(), content, {

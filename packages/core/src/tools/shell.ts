@@ -2232,6 +2232,14 @@ export class ShellToolInvocation extends BaseToolInvocation<
    * - All other commands → 'ask'
    */
   override async getDefaultPermission(): Promise<PermissionDecision> {
+    if (
+      this.config.getMemoryRecallMode?.() === 'structured' &&
+      (this.config.allowsDirectAutoMemoryRead?.() !== true ||
+        this.config.allowsDirectAutoMemoryWrite?.() !== true)
+    ) {
+      return 'ask';
+    }
+
     // Gate on the RAW command before `stripShellWrapper` runs.
     // `stripShellWrapper` drops leading env-assignment tokens AND
     // unwraps `bash -c '...'` to its inner script — so for

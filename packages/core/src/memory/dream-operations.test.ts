@@ -157,4 +157,22 @@ describe('Dream operations', () => {
       'Important',
     );
   });
+
+  it.each(['Pinned/important.md', 'memory.md'])(
+    'rejects case variants of protected path %s',
+    async (protectedPath) => {
+      await fs.writeFile(
+        path.join(memoryRoot, DREAM_OPERATIONS_FILENAME),
+        JSON.stringify({
+          version: 1,
+          delete: [protectedPath],
+          operations: [],
+        }),
+      );
+
+      await expect(applyDreamOperations(memoryRoot)).rejects.toThrow(
+        'unsafe path',
+      );
+    },
+  );
 });

@@ -97,12 +97,14 @@ function parseManifest(value: unknown): DreamOperationsManifest {
 function normalizeRelativeMarkdownPath(value: string): string {
   const normalized = value.replaceAll('\\', '/');
   const canonical = path.posix.normalize(normalized);
+  const protectedPath = canonical.toLowerCase();
   if (
     normalized.length === 0 ||
     path.posix.isAbsolute(normalized) ||
     normalized.split('/').includes('..') ||
-    canonical.split('/')[0] === AUTO_MEMORY_PINNED_DIRNAME ||
-    path.posix.basename(normalized) === AUTO_MEMORY_INDEX_FILENAME ||
+    protectedPath.split('/')[0] === AUTO_MEMORY_PINNED_DIRNAME.toLowerCase() ||
+    path.posix.basename(protectedPath) ===
+      AUTO_MEMORY_INDEX_FILENAME.toLowerCase() ||
     !normalized.endsWith('.md')
   ) {
     throw new Error(`Dream operation contains an unsafe path: ${value}`);

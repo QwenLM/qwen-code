@@ -2522,7 +2522,7 @@ describe('Session', () => {
       ).toHaveBeenCalledOnce();
     });
 
-    it('commits delivery on the first response event', async () => {
+    it('commits delivery after the final response attempt completes', async () => {
       const delivery = {
         prompt: '<system-reminder>tree</system-reminder>',
         selectedDocs: [],
@@ -2532,13 +2532,21 @@ describe('Session', () => {
       mockGeminiClient.consumeManagedAutoMemoryRecall.mockResolvedValueOnce(
         delivery,
       );
-      mockChat.sendMessageStream = vi
-        .fn()
-        .mockResolvedValue(
-          createStreamWithChunks([
-            { type: core.StreamEventType.CHUNK, value: { text: 'ok' } },
-          ]),
-        );
+      mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+        (async function* () {
+          yield { type: core.StreamEventType.RETRY } as const;
+          expect(
+            mockGeminiClient.commitManagedAutoMemoryRecallDelivery,
+          ).not.toHaveBeenCalled();
+          yield {
+            type: core.StreamEventType.CHUNK,
+            value: { text: 'ok' },
+          } as const;
+          expect(
+            mockGeminiClient.commitManagedAutoMemoryRecallDelivery,
+          ).not.toHaveBeenCalled();
+        })(),
+      );
 
       await session.prompt({
         sessionId: 'test-session-id',
@@ -2576,6 +2584,68 @@ describe('Session', () => {
           prompt: [{ type: 'text', text: 'hello' }],
         }),
       ).rejects.toThrow('provider failed');
+
+      expect(
+        mockGeminiClient.discardManagedAutoMemoryRecallDelivery,
+      ).toHaveBeenCalledWith(delivery);
+      expect(
+        mockGeminiClient.commitManagedAutoMemoryRecallDelivery,
+      ).not.toHaveBeenCalled();
+    });
+
+    it('discards delivery when the provider stream ends without a chunk', async () => {
+      const delivery = {
+        prompt: '<system-reminder>tree</system-reminder>',
+        selectedDocs: [],
+        strategy: 'heuristic',
+        deliveredTreeRevision: 'tree-v1',
+      };
+      mockGeminiClient.consumeManagedAutoMemoryRecall.mockResolvedValueOnce(
+        delivery,
+      );
+      mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+        (async function* () {
+          yield { type: core.StreamEventType.RETRY } as const;
+        })(),
+      );
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'hello' }],
+      });
+
+      expect(
+        mockGeminiClient.discardManagedAutoMemoryRecallDelivery,
+      ).toHaveBeenCalledWith(delivery);
+      expect(
+        mockGeminiClient.commitManagedAutoMemoryRecallDelivery,
+      ).not.toHaveBeenCalled();
+    });
+
+    it('discards chunks from an attempt superseded by a retry', async () => {
+      const delivery = {
+        prompt: '<system-reminder>tree</system-reminder>',
+        selectedDocs: [],
+        strategy: 'heuristic',
+        deliveredTreeRevision: 'tree-v1',
+      };
+      mockGeminiClient.consumeManagedAutoMemoryRecall.mockResolvedValueOnce(
+        delivery,
+      );
+      mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+        (async function* () {
+          yield {
+            type: core.StreamEventType.CHUNK,
+            value: { text: 'discarded attempt' },
+          } as const;
+          yield { type: core.StreamEventType.RETRY } as const;
+        })(),
+      );
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'hello' }],
+      });
 
       expect(
         mockGeminiClient.discardManagedAutoMemoryRecallDelivery,

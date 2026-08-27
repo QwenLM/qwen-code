@@ -255,6 +255,7 @@ const EMPTY_RELEVANT_AUTO_MEMORY_RESULT: RelevantAutoMemoryPromptResult = {
 export type MemoryDeliveryResult = RelevantAutoMemoryPromptResult & {
   deliveredTreeRevision?: string;
   deliveryEvent?: MemoryRecallDeliveryEvent;
+  commitDeliveryState?: () => void;
 };
 
 function wrapIdeContext(contextText: string): string {
@@ -1255,6 +1256,7 @@ export class GeminiClient {
   commitManagedAutoMemoryRecallDelivery(
     delivery: MemoryDeliveryResult | null,
   ): void {
+    delivery?.commitDeliveryState?.();
     if (delivery?.deliveredTreeRevision) {
       this.lastDeliveredMemoryTreeRevision = delivery.deliveredTreeRevision;
     }
@@ -1378,15 +1380,17 @@ export class GeminiClient {
       }
       const delivery = this.prepareMemoryDelivery(fast);
       if (!delivery.prompt) return null;
-      handle.fastDelivered = true;
-      for (const doc of fast.selectedDocs) {
-        if (this.config.getMemoryRecallMode?.() === 'legacy') {
-          this.surfacedRelevantAutoMemoryPaths.add(doc.filePath);
-        }
-        handle.fastDeliveredRefs.add(toAutoMemoryRef(doc));
-      }
       return {
         ...delivery,
+        commitDeliveryState: () => {
+          handle.fastDelivered = true;
+          for (const doc of fast.selectedDocs) {
+            if (this.config.getMemoryRecallMode?.() === 'legacy') {
+              this.surfacedRelevantAutoMemoryPaths.add(doc.filePath);
+            }
+            handle.fastDeliveredRefs.add(toAutoMemoryRef(doc));
+          }
+        },
         deliveryEvent: new MemoryRecallDeliveryEvent({
           phase: 'fast',
           delivery_point: 'initial',
@@ -1430,13 +1434,15 @@ export class GeminiClient {
     });
 
     if (deduped.prompt) {
-      if (this.config.getMemoryRecallMode?.() === 'legacy') {
-        for (const doc of deduped.selectedDocs) {
-          this.surfacedRelevantAutoMemoryPaths.add(doc.filePath);
-        }
-      }
       return {
         ...deduped,
+        commitDeliveryState: () => {
+          if (this.config.getMemoryRecallMode?.() === 'legacy') {
+            for (const doc of deduped.selectedDocs) {
+              this.surfacedRelevantAutoMemoryPaths.add(doc.filePath);
+            }
+          }
+        },
         deliveryEvent: this.logMemoryPrefetchDelivery(
           handle,
           deliveryPoint,
@@ -2871,6 +2877,14 @@ export class GeminiClient {
     }
   }
 
+  private restoreMemoryBodyStateFromHistory(): void {
+    this.config
+      .getMemoryManager()
+      .restoreMemoryBodiesPresentInHistory(
+        collectResidentMemoryBodies(this.getHistoryShallow()),
+      );
+  }
+
   async *sendMessageStream(
     request: PartListUnion,
     callerSignal: AbortSignal,
@@ -3440,8 +3454,8 @@ export class GeminiClient {
     // prefetch as a safety net.
     let normalCompletion = false;
     let hasToolCalls = false;
-    let memoryTreeRevisionToCommit: string | undefined;
-    let memoryRecallDeliveryToCommit: MemoryRecallDeliveryEvent | undefined;
+    let memoryDeliveryToCommit: MemoryDeliveryResult | null = null;
+    let modelRequestAccepted = false;
     // Declared outside the try so the finally block can close it out on
     // uncaught-exception exits too; created (when the hook is registered)
     // right before the turn's streaming loop below.
@@ -3800,8 +3814,7 @@ export class GeminiClient {
           // the user prompt. Contrast the ToolResult path below, which
           // must append to avoid splitting functionCall / functionResponse.
           systemReminders.unshift(userQueryMemory.prompt);
-          memoryTreeRevisionToCommit = userQueryMemory.deliveredTreeRevision;
-          memoryRecallDeliveryToCommit = userQueryMemory.deliveryEvent;
+          memoryDeliveryToCommit = userQueryMemory;
         }
 
         requestToSend = [...systemReminders, ...requestToSend];
@@ -3872,8 +3885,7 @@ export class GeminiClient {
           // intact under native Gemini; the OpenAI converter then emits the
           // text as a separate user message after the tool messages.
           requestToSend = [...requestToSend, toolResultMemory.prompt];
-          memoryTreeRevisionToCommit = toolResultMemory.deliveredTreeRevision;
-          memoryRecallDeliveryToCommit = toolResultMemory.deliveryEvent;
+          memoryDeliveryToCommit = toolResultMemory;
         }
       }
 
@@ -3936,13 +3948,17 @@ export class GeminiClient {
       let steerInputSettled = false;
       try {
         for await (const event of resultStream) {
-          if (memoryTreeRevisionToCommit) {
-            this.lastDeliveredMemoryTreeRevision = memoryTreeRevisionToCommit;
-            memoryTreeRevisionToCommit = undefined;
-          }
-          if (memoryRecallDeliveryToCommit) {
-            logMemoryRecallDelivery(this.config, memoryRecallDeliveryToCommit);
-            memoryRecallDeliveryToCommit = undefined;
+          const acceptsModelInput =
+            event.type === GeminiEventType.Content ||
+            event.type === GeminiEventType.Thought ||
+            event.type === GeminiEventType.ToolCallRequest ||
+            event.type === GeminiEventType.Finished ||
+            event.type === GeminiEventType.Citation;
+          if (acceptsModelInput && !modelRequestAccepted) {
+            modelRequestAccepted = true;
+            if (messageType === SendMessageType.ToolResult) {
+              this.restoreMemoryBodyStateFromHistory();
+            }
           }
           if (!steerInputSettled) {
             // Settle the attached steer input as soon as the first stream
@@ -3960,6 +3976,7 @@ export class GeminiClient {
             event.type === GeminiEventType.Retry ||
             event.type === GeminiEventType.ModelFallback
           ) {
+            modelRequestAccepted = false;
             hasToolCalls = false;
             agentOutput.restartAttempt(
               event.type === GeminiEventType.Retry &&
@@ -4136,11 +4153,12 @@ export class GeminiClient {
             return turn;
           }
         }
-        if (memoryRecallDeliveryToCommit) {
-          this.discardPreparedMemoryRecallDelivery(
-            memoryRecallDeliveryToCommit,
-          );
-          memoryRecallDeliveryToCommit = undefined;
+        if (memoryDeliveryToCommit && modelRequestAccepted) {
+          this.commitManagedAutoMemoryRecallDelivery(memoryDeliveryToCommit);
+          memoryDeliveryToCommit = null;
+        } else if (memoryDeliveryToCommit) {
+          this.discardManagedAutoMemoryRecallDelivery(memoryDeliveryToCommit);
+          memoryDeliveryToCommit = null;
         }
       } finally {
         // Fires on every exit from the loop above: normal completion, any of
@@ -4685,9 +4703,9 @@ export class GeminiClient {
       normalCompletion = true;
       return turn;
     } catch (error) {
-      if (memoryRecallDeliveryToCommit) {
-        this.discardPreparedMemoryRecallDelivery(memoryRecallDeliveryToCommit);
-        memoryRecallDeliveryToCommit = undefined;
+      if (memoryDeliveryToCommit) {
+        this.discardManagedAutoMemoryRecallDelivery(memoryDeliveryToCommit);
+        memoryDeliveryToCommit = null;
       }
       for (const goalEvent of await finalizeInterruptedGoalTurn()) {
         yield goalEvent;
@@ -4709,6 +4727,13 @@ export class GeminiClient {
       }
       throw error;
     } finally {
+      if (memoryDeliveryToCommit) {
+        this.discardManagedAutoMemoryRecallDelivery(memoryDeliveryToCommit);
+        memoryDeliveryToCommit = null;
+      }
+      if (messageType === SendMessageType.ToolResult && !modelRequestAccepted) {
+        this.restoreMemoryBodyStateFromHistory();
+      }
       if (
         this.activeAutomaticTodoWorkChainPromptIds.has(prompt_id) &&
         (!normalCompletion || !hasToolCalls)

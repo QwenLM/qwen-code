@@ -887,10 +887,7 @@ export function microcompactHistory(
       ? 0
       : Math.min(media.length + nestedMedia.length, keepRecent);
   const residentMemoryBodies = new Set(
-    collectResidentMemoryBodies([
-      ...result,
-      ...normalizePendingContent(opts?.pendingContent),
-    ]).map(memoryBodyVersionKey),
+    collectResidentMemoryBodies(result).map(memoryBodyVersionKey),
   );
 
   return {

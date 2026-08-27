@@ -33,7 +33,7 @@ import { FileOperation } from '../telemetry/metrics.js';
 import { getProgrammingLanguage } from '../telemetry/telemetry-utils.js';
 import { logFileOperation } from '../telemetry/loggers.js';
 import { FileOperationEvent } from '../telemetry/types.js';
-import { isManagedMemoryPath } from '../memory/paths.js';
+import { isManagedMemoryPath, isTeamAutoMemPath } from '../memory/paths.js';
 import { memoryFreshnessNote } from '../memory/memoryAge.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { getFileReadDefaultPermission } from './file-read-permission.js';
@@ -137,7 +137,11 @@ class ReadFileToolInvocation extends BaseToolInvocation<
     // dropping the staleness warning for the rest of the session.
     // These files are small; re-emit them on every read.
     const isAutoMem = isManagedMemoryPath(absPath, projectRoot);
-    if (isAutoMem && this.config.allowsDirectAutoMemoryRead?.() !== true) {
+    if (
+      isAutoMem &&
+      !isTeamAutoMemPath(absPath, projectRoot) &&
+      this.config.allowsDirectAutoMemoryRead?.() !== true
+    ) {
       return {
         llmContent:
           'Direct read_file access to managed auto-memory files is disabled. Use search_memory.fetch or search_memory.search to retrieve memory content.',

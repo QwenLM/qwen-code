@@ -547,16 +547,26 @@ describe('ShellTool', () => {
     });
 
     it('rejects direct paths into global user memory', async () => {
+      const previousBaseDir = process.env['QWEN_CODE_MEMORY_BASE_DIR'];
+      process.env['QWEN_CODE_MEMORY_BASE_DIR'] = '/test/dir/.qwen';
       vi.mocked(os.homedir).mockReturnValue('/test/dir');
-      const result = await shellTool
-        .build({
-          command: 'cat /test/dir/.qwen/memories/user/preference.md',
-          is_background: false,
-        })
-        .execute(mockAbortSignal);
+      try {
+        const result = await shellTool
+          .build({
+            command: 'cat /test/dir/.qwen/memories/user/preference.md',
+            is_background: false,
+          })
+          .execute(mockAbortSignal);
 
-      expect(result.error?.type).toBe(ToolErrorType.EXECUTION_DENIED);
-      expect(mockShellExecutionService).not.toHaveBeenCalled();
+        expect(result.error?.type).toBe(ToolErrorType.EXECUTION_DENIED);
+        expect(mockShellExecutionService).not.toHaveBeenCalled();
+      } finally {
+        if (previousBaseDir === undefined) {
+          delete process.env['QWEN_CODE_MEMORY_BASE_DIR'];
+        } else {
+          process.env['QWEN_CODE_MEMORY_BASE_DIR'] = previousBaseDir;
+        }
+      }
     });
 
     it('rejects direct paths into team memory', async () => {
@@ -7498,6 +7508,46 @@ describe('ShellTool', () => {
 
       expect(permission).toBe('allow');
     });
+
+    it('asks for every shell command when structured memory isolation is active', async () => {
+      const structuredTool = new ShellTool({
+        ...mockConfig,
+        getMemoryRecallMode: () => 'structured',
+        allowsDirectAutoMemoryRead: () => false,
+        allowsDirectAutoMemoryWrite: () => false,
+      } as unknown as Config);
+
+      const permission = await structuredTool
+        .build({ command: 'git status', is_background: false })
+        .getDefaultPermission();
+
+      expect(permission).toBe('ask');
+    });
+
+    it.each([
+      'cat $PWD/.qwen/team-memory/policy.md',
+      'M=team-memory; cat .qwen/$M/policy.md',
+      'eval "cat .qwen/memory/MEMORY.md"',
+      'grep -r secret ~',
+      'shopt -s dotglob && cp -r ~/* /tmp/exfil',
+      'cd $HOME/.qwen && cd memories && cat MEMORY.md',
+    ])(
+      'requires confirmation for dynamic memory access: %s',
+      async (command) => {
+        const structuredTool = new ShellTool({
+          ...mockConfig,
+          getMemoryRecallMode: () => 'structured',
+          allowsDirectAutoMemoryRead: () => false,
+          allowsDirectAutoMemoryWrite: () => false,
+        } as unknown as Config);
+
+        expect(
+          await structuredTool
+            .build({ command, is_background: false })
+            .getDefaultPermission(),
+        ).toBe('ask');
+      },
+    );
 
     // Regression coverage for PR #4386 round 6 (cid 3298521039): the
     // env-prefix wrapper substitution bypass. `getDefaultPermission`

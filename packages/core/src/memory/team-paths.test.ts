@@ -144,6 +144,28 @@ describe('team auto-memory paths', () => {
     }
   });
 
+  it('canonicalizes case variants on case-insensitive filesystems', () => {
+    const memoryFile = path.join(
+      projectRoot,
+      '.qwen',
+      'memory',
+      'user',
+      'preference.md',
+    );
+    fs.mkdirSync(path.dirname(memoryFile), { recursive: true });
+    fs.writeFileSync(memoryFile, 'preference');
+    const caseVariant = path.join(
+      projectRoot,
+      '.QWEN',
+      'Memory',
+      'user',
+      'preference.md',
+    );
+    if (!fs.existsSync(caseVariant)) return;
+
+    expect(isManagedMemoryPath(caseVariant, projectRoot)).toBe(true);
+  });
+
   it.skipIf(process.platform !== 'darwin')(
     'recognizes /private/tmp aliases for managed memory paths',
     () => {
