@@ -1591,3 +1591,34 @@ describe('bundled review skill', () => {
     );
   });
 });
+
+describe('bundled review skill — the decided-stop composed verdict (#9908)', () => {
+  it('routes every ledger-bearing stop through compose-review', () => {
+    // A decided stop used to complete with event: null, so `--fail-on
+    // request-changes` passed over standing blockers — the R8-1/R13-3
+    // residual. Each stop now composes a real verdict when open Criticals
+    // exist, and the dispositions channel is machine-checked by the CLI.
+    const body = skillBody();
+    // The two incremental stops DEDUCE dispositions (byte-identical state /
+    // the supersededPaths split); clean-tree JUDGES them (no anchor).
+    expect(body).toContain(
+      '**When open Criticals exist, compose the stop verdict before stopping**',
+    );
+    expect(body).toContain('stopReRule: { dispositions: [...] }');
+    expect(body).toContain(
+      'compose the stop verdict before stopping, exactly as that bullet prescribes',
+    );
+    expect(body).toContain(
+      '`superseded` for a Critical whose cited file is in `supersededPaths`',
+    );
+    expect(body).toContain(
+      'the dispositions are judged, not deduced: no anchor certifies what moved',
+    );
+    // Criticals only — Suggestions never enter dispositions, and a
+    // cleared stop comments rather than approves.
+    expect(body).toContain(
+      'Criticals only — Suggestions never enter dispositions',
+    );
+    expect(body).toContain('composes a Comment, never an Approve');
+  });
+});

@@ -15515,3 +15515,132 @@ describe('draftedFindingsOf — the drafts as the convergence diagnosis reads th
     expect(idOf('**[Critical]** R1-2: (fix-induced) x')).toBe('R1-2');
   });
 });
+
+describe('composeReview — the decided-stop re-rule', () => {
+  let cwd0: string;
+  beforeEach(() => {
+    cwd0 = process.cwd();
+    process.chdir(dir);
+  });
+  afterEach(() => {
+    process.chdir(cwd0);
+  });
+
+  function stopPlan(
+    opts: { stop?: boolean; ledger?: unknown[]; name?: string } = {},
+  ): string {
+    const cachePath = join(dir, `review-cache-${opts.name ?? 'default'}.json`);
+    writeFileSync(
+      cachePath,
+      JSON.stringify({
+        findings: opts.ledger ?? [
+          { id: 'R1-1', severity: 'Critical', status: 'open' },
+          { id: 'R1-2', severity: 'Critical', status: 'fixed' },
+          { id: 'R1-3', severity: 'Suggestion', status: 'open' },
+        ],
+      }),
+    );
+    const p = join(dir, `stop-plan-${opts.name ?? 'default'}.json`);
+    writeFileSync(
+      p,
+      JSON.stringify({
+        chunks: [],
+        files: [],
+        diffLines: 0,
+        srcDiffLines: 0,
+        skippedFiles: [],
+        cachePath,
+        ...(opts.stop === false
+          ? {}
+          : { nothingToReview: { reason: 'unchanged-since-last-round' } }),
+      }),
+    );
+    return p;
+  }
+
+  function reRule(over: Record<string, unknown> = {}) {
+    return composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      planPath: stopPlan(),
+      env: ENV,
+      modelId: MODEL,
+      stopReRule: {
+        dispositions: [{ id: 'R1-1', ruling: 'still-stands' }],
+      },
+      bodyCriticals: ['R1-1: the mechanism still fires — re-read at HEAD'],
+      ...over,
+    });
+  }
+
+  it('composes REQUEST_CHANGES from a standing re-rule, floors skipped', () => {
+    const r = reRule();
+    expect(r.event).toBe('REQUEEST_CHANGES'.replace('EE', 'E'));
+    expect(r.body).toContain('Decided-stop re-rule');
+    expect(r.cappedBy).not.toContain('chunk-nobody-read');
+  });
+
+  it('a re-rule that cleared every blocker COMMENTS, never approves', () => {
+    const r = reRule({
+      stopReRule: { dispositions: [{ id: 'R1-1', ruling: 'fixed' }] },
+      bodyCriticals: [],
+    });
+    expect(r.event).toBe('COMMENT');
+  });
+
+  it('refuses a full-round plan wearing the flag', () => {
+    expect(() =>
+      reRule({ planPath: stopPlan({ stop: false, name: 'full' }) }),
+    ).toThrow(/no nothingToReview decision/);
+  });
+
+  it('refuses when an open ledger Critical has no disposition', () => {
+    expect(() =>
+      reRule({
+        planPath: stopPlan({
+          name: 'two-open',
+          ledger: [
+            { id: 'R1-1', severity: 'Critical', status: 'open' },
+            { id: 'R2-9', severity: 'Critical', status: 'open' },
+          ],
+        }),
+      }),
+    ).toThrow(/R2-9 has no disposition/);
+  });
+
+  it('refuses a disposition that matches no open ledger Critical', () => {
+    expect(() =>
+      reRule({
+        stopReRule: {
+          dispositions: [
+            { id: 'R1-1', ruling: 'still-stands' },
+            { id: 'R9-9', ruling: 'fixed' },
+          ],
+        },
+      }),
+    ).toThrow(/R9-9 matches no open ledger Critical/);
+  });
+
+  it('refuses still-stands without its body Critical, and fixed with one', () => {
+    expect(() => reRule({ bodyCriticals: [] })).toThrow(
+      /still-stands but no body Critical/,
+    );
+    expect(() =>
+      reRule({
+        stopReRule: { dispositions: [{ id: 'R1-1', ruling: 'fixed' }] },
+      }),
+    ).toThrow(/ruled fixed yet a body Critical/);
+  });
+
+  it('honours the runId fence when a parent published one', () => {
+    const env = { ...ENV, QWEN_REVIEW_RUN_ID: 'run-X' };
+    expect(() => reRule({ env })).toThrow(/no stop sidecar/);
+    mkdirSync(join(dir, '.qwen/tmp'), { recursive: true });
+    writeFileSync(
+      join(dir, '.qwen/tmp/qwen-review-local-stop.json'),
+      JSON.stringify({ reason: 'unchanged-since-last-round', runId: 'run-X' }),
+    );
+    const r = reRule({ env });
+    expect(r.event).toBe('REQUEST_CHANGES');
+  });
+});

@@ -422,11 +422,16 @@ export function newestArtifactSince(
  * Exit code contract: 0 = the review completed (whatever it decided); 1 = it
  * never reached a verdict (child failed, timed out with no verdict captured,
  * or left no composed artifact); 3 = it completed AND the caller asked
- * --fail-on request-changes AND the event is REQUEST_CHANGES. A stop carries
- * no composed verdict and no synthesised one: the cache ledger a stop renders
- * is rewritten only by a round that writes the cache, so a blocker fixed and
- * committed stays `open` in it — an exit code keyed on that count is a
- * failure no action clears. 3, not 2 — yargs exits 1 on usage errors and
+ * --fail-on request-changes AND the event is REQUEST_CHANGES. A stop round
+ * whose cache ledger holds open Criticals composes a REAL verdict now — the
+ * orchestrator's re-rule of those findings (deduced on the incremental
+ * stops, judged on clean-tree; SKILL Step 1's stop branches, machine-checked
+ * by compose-review's stopReRule gate) — and gates here exactly like a full
+ * round; a stop whose ledger holds nothing open completes with no event and
+ * exits 0. No verdict is ever synthesised from a ledger COUNT: that count is
+ * rewritten only by a cache-writing round, so a blocker fixed and committed
+ * stays `open` in it, and an exit code keyed on it is a failure no action
+ * clears (#9659's deleted blocker-dating chain). 3, not 2 — yargs exits 1 on usage errors and
  * some shells reserve 2, so a CI gate can tell "review is blocking" from
  * "the tool broke" without parsing anything.
  */
@@ -749,8 +754,11 @@ async function runReview(args: RunReviewArgs): Promise<void> {
   // blocker list comes from the cache ledger, which only a cache-writing
   // round rewrites — a stop never does — so a blocker fixed and committed
   // stays `open` there, and an exit code keyed on it is a failure no action
-  // clears. A composed verdict on the stop path — the model re-ruling the
-  // ledger — is the answer that can gate; until then a stop exits 0.
+  // clears. The gate on the stop path is the composed verdict read above:
+  // Step 1's stop branches re-rule the ledger's open Criticals and call
+  // compose-review (its stopReRule gate machine-checks the dispositions),
+  // so a standing blocker arrives here as a real REQUEST_CHANGES and a
+  // ledger with nothing open completes with no event.
 
   const result: RunReviewResult = {
     completed,

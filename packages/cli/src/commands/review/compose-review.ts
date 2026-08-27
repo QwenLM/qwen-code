@@ -22,7 +22,8 @@
 
 import type { CommandModule } from 'yargs';
 import { certifierMatchesRound, roundModelIdFrom } from './lib/round-model.js';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { REVIEW_TMP_DIR } from './lib/paths.js';
 import { dirname, join } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { getCliVersion } from '../../utils/version.js';
@@ -189,6 +190,109 @@ const BODY_SAFETY_MARGIN = 512;
  * Does this plan name a pull request? The budget and the marker must not
  * disagree about whether a marker will ride, so both ask here.
  */
+/**
+ * Does the plan carry the capture's own decided-stop decision — the
+ * `nothingToReview` field `capture-local` writes when the round is one of
+ * the three decided stops? The FIELD is the capture's own: no full-round
+ * plan carries it, so a model-written `stopReRule` on a full round finds
+ * nothing here and is refused. (The path arrives through the model-written
+ * state — the same seam every other `planPath` reader here trusts.)
+ */
+function planCarriesDecidedStop(planPath: string | undefined): boolean {
+  if (!planPath) return false;
+  try {
+    const plan = JSON.parse(readFileSync(planPath, 'utf8')) as {
+      nothingToReview?: unknown;
+    };
+    const stop = plan.nothingToReview;
+    return (
+      typeof stop === 'object' &&
+      stop !== null &&
+      typeof (stop as { reason?: unknown }).reason === 'string' &&
+      (stop as { reason: string }).reason !== ''
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The fence `run.ts` applies to the same decided-stop decision: the capture
+ * stamps its stop sidecar with the run id the parent published, and the
+ * `stopReRule` grant is read against that stamp — a plan-shape match alone
+ * is what a stale stop plan left behind by an earlier round matches just as
+ * well. No published id (an interactive round no `review run` gate reads) →
+ * no fence to match, the plan-shape check stands alone. A published id with
+ * no sidecar stamped by it → refused.
+ */
+function stopSidecarFenced(env: NodeJS.ProcessEnv | undefined): boolean {
+  const runId = (env ?? process.env)['QWEN_REVIEW_RUN_ID'];
+  if (typeof runId !== 'string' || runId === '') return true;
+  let names: string[];
+  try {
+    names = readdirSync(REVIEW_TMP_DIR);
+  } catch (e) {
+    process.stderr.write(
+      `FENCE-PROBE cwd=${process.cwd()} err=${(e as Error).message}\n`,
+    );
+    return false;
+  }
+  process.stderr.write(
+    `FENCE-PROBE cwd=${process.cwd()} names=${JSON.stringify(names)} runId=${runId}\n`,
+  );
+  for (const name of names) {
+    // `stopNameFor`'s shape: `qwen-review-<stem>-stop.json`. The target
+    // class is not knowable here; match the family and let the stamp decide.
+    if (!/^qwen-review-.*-stop\.json$/.test(name)) continue;
+    try {
+      const stop = JSON.parse(
+        readFileSync(join(REVIEW_TMP_DIR, name), 'utf8'),
+      ) as { runId?: unknown };
+      if (stop.runId === runId) return true;
+    } catch {
+      continue;
+    }
+  }
+  return false;
+}
+
+/**
+ * The OPEN Critical ids in the cache ledger the plan names — the exact set
+ * a decided-stop re-rule owes a ruling for. Null when the plan names no
+ * cache or the ledger cannot be read: the completeness check then refuses,
+ * because a re-rule whose baseline cannot be read cannot be shown complete.
+ */
+function openLedgerCriticalIds(planPath: string | undefined): string[] | null {
+  if (!planPath) return null;
+  try {
+    const plan = JSON.parse(readFileSync(planPath, 'utf8')) as {
+      cachePath?: unknown;
+    };
+    if (typeof plan.cachePath !== 'string' || plan.cachePath === '') {
+      return null;
+    }
+    const cache = JSON.parse(readFileSync(plan.cachePath, 'utf8')) as {
+      findings?: unknown;
+    };
+    if (!Array.isArray(cache.findings)) return [];
+    const ids: string[] = [];
+    for (const f of cache.findings) {
+      const e = f as { id?: unknown; severity?: unknown; status?: unknown };
+      if (
+        e?.severity === 'Critical' &&
+        e?.status === 'open' &&
+        typeof e.id === 'string' &&
+        e.id !== ''
+      ) {
+        ids.push(e.id);
+      }
+    }
+    return ids;
+  } catch {
+    return null;
+  }
+}
+
 function planNamesPr(planPath: string | undefined): boolean {
   try {
     if (!planPath) return false;
@@ -803,6 +907,37 @@ export interface ComposeReviewInput {
    * check is off: every non-high review, which runs no Step 5.
    */
   findingsPath?: string;
+  /**
+   * The decided-stop re-rule (SKILL Step 1's stop branches): the capture
+   * decided there is nothing to review, and the orchestrator re-ruled the
+   * cache ledger's OPEN Criticals against the current tree. One entry per
+   * open ledger Critical, under its ledger id, with the Step 6 ruling.
+   *
+   * Machine-checked for completeness before anything is granted: the set of
+   * ids here must equal the set of open Critical ids in the ledger the
+   * plan's `cachePath` names — both directions — and every `still-stands`
+   * ruling must have a matching body Critical carrying its id while
+   * `fixed`/`superseded` ones must not. Any mismatch throws; a model cannot
+   * drop a blocker by omitting its row, and cannot resurrect one the ledger
+   * never held. The grant additionally requires the plan to carry the
+   * capture's own `nothingToReview` field (no full-round plan does) and —
+   * under a `review run` parent, which publishes a run id — the runId-fenced
+   * stop sidecar the same capture wrote.
+   *
+   * Granted, it exempts the round from the agent-transcript floors: no
+   * agents ran, so no transcripts, receipts, verifiers or script-lint
+   * evidence exist or CAN exist — demanding them is an unsatisfiable cap.
+   * The verify floor is covered by the completeness check itself: every
+   * posted blocker is a re-assertion, under its original id, of a finding a
+   * previous full round verified.
+   */
+  stopReRule?: {
+    dispositions: Array<{
+      id: string;
+      ruling: 'still-stands' | 'fixed' | 'superseded';
+      evidence?: string;
+    }>;
+  };
   /**
    * Where to look for the harness's records. Defaults to the environment the CLI
    * exported. A test seam only — production never passes it, and a model cannot:
@@ -3203,9 +3338,98 @@ function composeReviewBody(
   // the re-post out of the body while `modelBodyCriticals` still counted it
   // toward `criticalsNeedingVerify` — a blocker the linter proved would go on
   // pulling the unverified cap through a copy that no longer posts.
-  const gate = input.planPath
-    ? scriptLintGate(input.planPath)
-    : { criticals: [], unreviewed: [], disclosed: [] };
+  // The decided-stop re-rule grant — validated fail-closed BEFORE any floor
+  // is skipped. See ComposeReviewInput.stopReRule for the contract; every
+  // refusal here THROWS rather than degrading to the regular floors, because
+  // running transcript floors over a stop state composes garbage caps and
+  // the orchestrator needs the actual reason.
+  const stopReRuleGranted = (() => {
+    const srr = input.stopReRule;
+    if (srr === undefined) return false;
+    if (!Array.isArray(srr.dispositions)) {
+      throw new Error(
+        'stopReRule.dispositions must be an array — one entry per open ' +
+          'ledger Critical.',
+      );
+    }
+    if (!planCarriesDecidedStop(input.planPath)) {
+      throw new Error(
+        'stopReRule refused: the plan carries no nothingToReview decision — ' +
+          'a full round takes the regular floors, never the stop re-rule.',
+      );
+    }
+    if (!stopSidecarFenced(input.env)) {
+      throw new Error(
+        'stopReRule refused: a run id is published but no stop sidecar ' +
+          'carries its stamp — a stale or foreign stop plan matches the ' +
+          'shape but never the fence.',
+      );
+    }
+    const ledger = openLedgerCriticalIds(input.planPath);
+    if (ledger === null) {
+      throw new Error(
+        'stopReRule refused: the ledger the plan names cannot be read — a ' +
+          're-rule whose baseline is unreadable cannot be shown complete.',
+      );
+    }
+    const ruled = new Map<string, string>();
+    for (const d of srr.dispositions) {
+      if (
+        typeof d?.id !== 'string' ||
+        d.id === '' ||
+        !['still-stands', 'fixed', 'superseded'].includes(d?.ruling as string)
+      ) {
+        throw new Error(
+          'stopReRule refused: every disposition needs an id and a ruling ' +
+            'of still-stands, fixed, or superseded.',
+        );
+      }
+      if (ruled.has(d.id)) {
+        throw new Error(
+          `stopReRule refused: duplicate disposition for ${d.id}.`,
+        );
+      }
+      ruled.set(d.id, d.ruling);
+    }
+    const ledgerSet = new Set(ledger);
+    for (const id of ledgerSet) {
+      if (!ruled.has(id)) {
+        throw new Error(
+          `stopReRule refused: open ledger Critical ${id} has no ` +
+            'disposition — a blocker cannot be dropped by omitting its row.',
+        );
+      }
+    }
+    for (const id of ruled.keys()) {
+      if (!ledgerSet.has(id)) {
+        throw new Error(
+          `stopReRule refused: disposition ${id} matches no open ledger ` +
+            'Critical — a ruling cannot invent its subject.',
+        );
+      }
+    }
+    const bodyText = (input.bodyCriticals ?? []).join('\n');
+    for (const [id, ruling] of ruled) {
+      const inBody = bodyText.includes(id);
+      if (ruling === 'still-stands' && !inBody) {
+        throw new Error(
+          `stopReRule refused: ${id} is ruled still-stands but no body ` +
+            'Critical carries its id — a standing blocker must post.',
+        );
+      }
+      if (ruling !== 'still-stands' && inBody) {
+        throw new Error(
+          `stopReRule refused: ${id} is ruled ${ruling} yet a body ` +
+            'Critical still carries its id — one ruling per finding.',
+        );
+      }
+    }
+    return true;
+  })();
+  const gate =
+    input.planPath && !stopReRuleGranted
+      ? scriptLintGate(input.planPath)
+      : { criticals: [], unreviewed: [], disclosed: [] };
   const ownAfterGateDedup = withoutGateReposts(bodyCriticals, gate.criticals);
   bodyCriticals.length = 0;
   bodyCriticals.push(...ownAfterGateDedup);
@@ -3221,7 +3445,16 @@ function composeReviewBody(
   // resolve one after a specialist inspects it, so capping here would make every
   // affected review impossible to approve.
   const repositoryContextNotes: string[] = [];
-  if (input.planPath) {
+  if (stopReRuleGranted) {
+    // No agents ran: the round IS the capture's stop decision plus the
+    // orchestrator's re-rule of the open ledger. Disclosed on every verdict
+    // so the body says what kind of round this was.
+    gateDisclosed.push(
+      'Decided-stop re-rule: the verdict below is the re-rule of the ' +
+        "cache ledger's open Criticals against the current tree — no " +
+        'review agents ran this round.',
+    );
+  } else if (input.planPath) {
     // The gate ran above, where its claims were needed to dedup the model's
     // re-posts before provenance was taken. ONE invocation, reused here.
     bodyCriticals.push(...gate.criticals); // render + count toward `c`, deterministic
@@ -3268,8 +3501,13 @@ function composeReviewBody(
   const nonDeterministicBodyCriticals =
     ownBodyCriticals.filter((x) => !DETERMINISTIC_TAG_RE.test(x)).length +
     (relocatedCount - relocatedDeterministic);
-  const criticalsNeedingVerify =
-    criticalsInline + nonDeterministicBodyCriticals;
+  const criticalsNeedingVerify = stopReRuleGranted
+    ? // Every posted blocker on a granted stop re-rule is a re-assertion,
+      // under its original id, of a finding a previous full round verified —
+      // and the completeness gate above already proved the set exact. No
+      // verifier ran this round because no agents did.
+      0
+    : criticalsInline + nonDeterministicBodyCriticals;
   // Fail closed at every exit: this flag softens a Request changes below, and
   // it must end up true whenever the review posts non-deterministic Criticals
   // and CANNOT SHOW they were verified — verifier absent, transcripts
@@ -3289,7 +3527,11 @@ function composeReviewBody(
   //
   // What it supplies is `planPath` — a path, whose contents the CLI wrote. The
   // transcripts are found from the environment the CLI exported.
-  if (!input.planPath) {
+  if (stopReRuleGranted) {
+    // Nothing to recompute: no agents, no transcripts, no receipts. The
+    // grant's two-read gate (the plan's own nothingToReview plus the
+    // runId-fenced sidecar) is what stands where coverage proof would.
+  } else if (!input.planPath) {
     coverageEntries.push({
       subject: 'coverage',
       reason:
@@ -3984,6 +4226,11 @@ function composeReviewBody(
 
   let event: ReviewEvent = baseEvent;
   if (event === 'APPROVE' && cappedBy.length > 0) event = 'COMMENT';
+  // A stop re-rule that cleared every blocker still reviewed NOTHING new —
+  // it re-ruled old findings on a tree the capture certified unchanged. A
+  // Comment passes `--fail-on request-changes` exactly like an Approve
+  // would, without claiming a review that never ran.
+  if (stopReRuleGranted && event === 'APPROVE') event = 'COMMENT';
   // The caps that reach a Request changes — because they remove the premise
   // the never-soften rule stands on. "A REQUEST_CHANGES earned by a
   // confirmed Critical is never softened" presumes CONFIRMED, and these

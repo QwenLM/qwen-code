@@ -1301,6 +1301,51 @@ describe('review run (handler)', () => {
     expect(process.exitCode).toBe(0);
   });
 
+  it('gates a stop round through its COMPOSED verdict — the #9908 path', async () => {
+    // Step 1's stop branches now compose a real verdict when the ledger
+    // holds open Criticals (deduced dispositions on the incremental stops,
+    // judged on clean-tree). The parent needs no new plumbing: the composed
+    // artifact rides the same name a full round writes, so a standing
+    // blocker exits 3 under --fail-on and a cleared one comments to exit 0.
+    spawnMock.mockImplementation(
+      (
+        _cmd: unknown,
+        _argv: unknown,
+        opts: { env: Record<string, string> },
+      ) => {
+        const child = new FakeChild();
+        setImmediate(() => {
+          mkdirSync(REVIEW_TMP_DIR, { recursive: true });
+          writeFileSync(
+            join(REVIEW_TMP_DIR, 'qwen-review-local-stop.json'),
+            JSON.stringify({
+              reason: 'unchanged-since-last-round',
+              runId: opts.env['QWEN_REVIEW_RUN_ID'],
+            }),
+            'utf8',
+          );
+          writeFileSync(
+            join(REVIEW_TMP_DIR, 'qwen-review-local-composed.json'),
+            JSON.stringify({
+              event: 'REQUEST_CHANGES',
+              verdictLine: 'Verdict: Request changes — R1-1 still stands',
+            }),
+            'utf8',
+          );
+          child.emit('close', 0);
+        });
+        return child;
+      },
+    );
+
+    await runHandler({ 'fail-on': 'request-changes' });
+
+    const result = JSON.parse(outs.join(''));
+    expect(result.completed).toBe(true);
+    expect(result.event).toBe('REQUEST_CHANGES');
+    expect(process.exitCode).toBe(3);
+  });
+
   it('exits 0 under --fail-on for a decided stop round', async () => {
     // A stop composes no verdict and synthesises none: the ledger it renders
     // is rewritten only by a cache-writing round, so a blocker fixed and
