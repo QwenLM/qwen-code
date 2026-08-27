@@ -23,7 +23,7 @@ import { SettingScope } from '../../config/settings.js';
 import {
   getScopeMessageForSetting,
   getScopeItems,
-} from './dialog-scope-utils.js';
+} from '../../config/dialogScopeUtils.js';
 import { themeManager, AUTO_THEME_NAME } from '../themes/theme-manager.js';
 import {
   DialogFrame,

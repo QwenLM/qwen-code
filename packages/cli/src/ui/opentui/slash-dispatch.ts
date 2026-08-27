@@ -32,7 +32,7 @@ import { McpPromptLoader } from '../../services/McpPromptLoader.js';
 import { SavedWorkflowLoader } from '../../services/saved-workflow-loader.js';
 import { SkillCommandLoader } from '../../services/SkillCommandLoader.js';
 import { CommandService } from '../../services/CommandService.js';
-import { parseSlashCommand } from './slash-command-parse.js';
+import { parseSlashCommand } from '../commands/commands.js';
 import { hasSlashCommandPathSeparator } from '../utils/commandUtils.js';
 import {
   appendUserPromptExpansionAdditionalContext,
