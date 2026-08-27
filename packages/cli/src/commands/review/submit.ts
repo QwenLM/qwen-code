@@ -1474,11 +1474,11 @@ function submit(
   // resolves it (#9940 review). GitHub only — the Aone write path has no
   // review-thread graph to reach into. The insertion preserves every
   // property the gate above validated — the severity marker, visibility
-  // and fence state all sit behind it, untouched — because a body that
-  // OPENS a code fence takes no stamp at all (stampCarriedId leaves it
-  // un-stamped, disclosed below): text before the backticks would stop
-  // the posted first line leading the fence the gate validated (#9940
-  // review).
+  // and fence state all sit behind it, untouched — because a body whose
+  // fence OPENS on the marker's first line takes no stamp at all
+  // (stampCarriedId leaves it un-stamped, disclosed below): text before
+  // the backticks would stop the posted first line leading the fence
+  // the gate validated (#9940 review).
   const stampedFresh = new Set<number>();
   let stampSkippedFence = 0;
   if (!aoneWrite && draftedIds !== undefined) {

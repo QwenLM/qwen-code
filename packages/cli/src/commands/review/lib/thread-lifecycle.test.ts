@@ -436,6 +436,28 @@ describe('stampCarriedId — the write side of the readback', () => {
     ).toBe('**[Suggestion]** R3-2: the claim\n```diff\n-old\n+new\n```');
   });
 
+  it('stamps the bare-marker draft whose fence opens on line 2 (#9940 review)', () => {
+    // The fence skip protects a fence that OPENS on the marker's
+    // projected first line: the stamp inserts on line 1, and a fence
+    // opening on a later rendered line it cannot flip. The guard reads
+    // through leading residue — and residue swallows newlines — so a
+    // bare newline outside comments must still end the skip, or the
+    // bare-marker draft posts un-stamped: its root carries no id, the
+    // marked readback leg reads the fence opener and shadows the bare
+    // one, every later carried re-report matches nothing, posts inline,
+    // and opens a NEW thread — the multiplication this pass exists to
+    // kill (#9940 review).
+    const draft = '**[Critical]**\n```diff\n-old\n+new\n```\nthe claim';
+    const stamped = stampCarriedId(draft, 'R1-5');
+    expect(stamped).toBe(
+      '**[Critical]** R1-5: \n```diff\n-old\n+new\n```\nthe claim',
+    );
+    expect(carriedFindingOf(stamped)).toEqual({
+      id: 'R1-5',
+      fixInduced: false,
+    });
+  });
+
   it('stamps through leading residue, and before residue after the marker', () => {
     expect(stampCarriedId('\n**[Critical]** the claim', 'R1-1')).toBe(
       '\n**[Critical]** R1-1: the claim',

@@ -265,8 +265,8 @@ export function carriedFindingOf(body: unknown): {
  * the root and the marker disagree exactly as they did before stamps).
  * Returns the body unchanged when there is nothing to stamp into (no
  * marker), nothing to stamp (an id already leads), or the stamp would
- * break what the gate validated — a body that OPENS a code fence
- * (#9940 review).
+ * break what the gate validated — a body whose fence opens on the
+ * marker's projected first line (#9940 review).
  */
 export function stampCarriedId(body: string, id: string): string {
   if (carriedFindingOf(body) !== null) return body;
@@ -277,19 +277,32 @@ export function stampCarriedId(body: string, id: string): string {
   const visible = body.slice(lead.length);
   if (!visible.startsWith(marker)) return body;
   const rest = stripSeverityPrefix(visible);
-  // The insertion lands between the marker and the body; when the body
-  // OPENS a code fence, text before the backticks stops the posted first
-  // line leading the fence — flipping the fence structure the gate
-  // validated on the pre-stamp shape (under attribution off the unclosed
-  // flip swallows the appended invisible marker as visible code). The
-  // test reads through leading render-nothing residue — the pipeline
-  // admits it between marker and content, and a residue-led fence slips
-  // the ^-anchored test on the raw shape (#9940 review). Left
-  // un-stamped, the draft degrades to the pre-stamping behaviour: its
-  // thread root carries no id, so no later carry or fixed ruling can
-  // reach it — the documented safe degradation (#9940 review).
-  if (ENTRY_FENCE_DELIMITER_RE.test(rest.replace(LEADING_INVISIBLE_RE, '')))
+  // The insertion lands between the marker and the body; when a code
+  // fence OPENS on the marker's projected first line, text before the
+  // backticks stops the posted first line leading the fence — flipping
+  // the fence structure the gate validated on the pre-stamp shape
+  // (under attribution off the unclosed flip swallows the appended
+  // invisible marker as visible code). The test reads through leading
+  // render-nothing residue — the pipeline admits it between marker and
+  // content — but residue swallows newlines, and only residue on the
+  // SAME rendered line may keep the skip: a bare newline outside
+  // comments pushes the fence to a later line the line-1 insertion
+  // cannot flip, and skipping there loses the root's id with no fence
+  // to protect — every later carried re-report matches nothing, posts
+  // inline, and opens a NEW thread (#9940 review). Newlines inside
+  // comments stay render-invisible, so a comment-led same-line fence
+  // keeps the skip. Left un-stamped, the draft degrades to the
+  // pre-stamping behaviour: its thread root carries no id, so no later
+  // carry or fixed ruling can reach it — the documented safe
+  // degradation (#9940 review).
+  const residue = LEADING_INVISIBLE_RE.exec(rest)?.[0] ?? '';
+  const opensFence = ENTRY_FENCE_DELIMITER_RE.test(rest.slice(residue.length));
+  if (
+    opensFence &&
+    !residue.replace(/<!--[\s\S]*?(?:-->|$)/g, '').includes('\n')
+  ) {
     return body;
+  }
   return `${lead}${marker} ${id}: ${rest}`;
 }
 
