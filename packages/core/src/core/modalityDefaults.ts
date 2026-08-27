@@ -61,14 +61,19 @@ const MODALITY_PATTERNS: Array<[RegExp, InputModalities]> = [
   [/^qwen/, {}],
 
   // -------------------
-  // DeepSeek — text-only
+  // DeepSeek — text-only, except explicit vision variants
+  // (QwenLM/qwen-code#10270)
   // -------------------
+  [/^deepseek-.*vision/, { image: true }],
   [/^deepseek/, {}],
 
   // -------------------
-  // Zhipu GLM
+  // Zhipu GLM — v-suffix ids are vision models; others are text-only
+  // (QwenLM/qwen-code#10270)
   // -------------------
-  [/^glm-4\.5v/, { image: true }],
+  [/^glm-[0-9.]+v/, { image: true }],
+  // glm-5.3-flash natively integrates vision input (no v suffix)
+  [/^glm-5\.3-flash/, { image: true }],
   [/^glm-5(?:-|$)/, {}],
   [/^glm-/, {}],
 

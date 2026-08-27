@@ -832,6 +832,16 @@ export function stripParagraphMarkers(body: string): string {
  * nothing changes posts none of them. Every attribution-off leg — submit's
  * post transform and gate, compose's body lists, the ledger titles — goes
  * through here so the sites cannot drift.
+ *
+ * Comment grammar is deliberately NOT neutralized in this chain, even
+ * though a forged footer wrapped in an HTML comment slips past every strip
+ * above (they match the displayed projection, which drops the comment
+ * whole). The chain is shared with submit's inline-comment transform,
+ * whose contract keeps a quoted marker MENTION verbatim, and with the
+ * ledger's id read, which steps over a leading comment as render-nothing
+ * residue — a strip here turned both into visible words. The verbatim
+ * body exits neutralize the grammar BEFORE calling in (`quotedProse` in
+ * compose-review), where the wrapped footer then strips like any other.
  */
 export function stripForUnattributedPost(body: string): string {
   let current = body;

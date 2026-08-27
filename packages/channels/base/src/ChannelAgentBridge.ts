@@ -98,6 +98,8 @@ export interface BridgeSessionInfo {
 
 export interface ChannelAgentBridgeSessionOptions {
   approvalMode?: string;
+  /** Whether daemon-managed Channel loop tools may be attached to the session. */
+  enableChannelLoops?: boolean;
   /**
    * Channel instance name (e.g. `feishu-main`) stamped as the daemon `sourceId`
    * on **new** sessions — creation-time attribution paired with

@@ -146,6 +146,69 @@ describe('SessionService - rename and custom title', () => {
       );
     });
 
+    it('runs lifecycle mutation fences before appending the title', async () => {
+      vi.mocked(jsonl.readLines).mockResolvedValue([recordA1]);
+      const internals = sessionService as unknown as {
+        resolveMaintainableSessionSnapshot: () => Promise<{
+          location: 'active';
+          identities: Array<{
+            state: 'active';
+            filePath: string;
+            dev: number;
+            ino: number;
+            size: number;
+            mtimeMs: number;
+            ctimeMs: number;
+          }>;
+        }>;
+        assertMaintainableSessionUnchanged: () => void;
+      };
+      vi.spyOn(
+        internals,
+        'resolveMaintainableSessionSnapshot',
+      ).mockResolvedValue({
+        location: 'active',
+        identities: [
+          {
+            state: 'active',
+            filePath: `/chats/${sessionIdA}.jsonl`,
+            dev: 1,
+            ino: 1,
+            size: 1,
+            mtimeMs: 1,
+            ctimeMs: 1,
+          },
+        ],
+      });
+      vi.spyOn(
+        internals,
+        'assertMaintainableSessionUnchanged',
+      ).mockImplementation(() => undefined);
+      const order: string[] = [];
+      vi.mocked(jsonl.writeLineSync).mockImplementation(() => {
+        order.push('write');
+      });
+
+      await expect(
+        sessionService.renameSessionForLifecycle(
+          sessionIdA,
+          'lifecycle title',
+          'manual',
+          'active',
+          {
+            assertStorageUnchanged: () => {
+              order.push('storage');
+            },
+            assertCanMutate: () => {
+              order.push('runtime');
+            },
+          },
+        ),
+      ).resolves.toBe(true);
+
+      expect(order).toEqual(['storage', 'runtime', 'write']);
+    });
+
     it('should return false when session does not exist', async () => {
       vi.mocked(jsonl.readLines).mockResolvedValue([]);
 

@@ -5,7 +5,6 @@ import {
   CopyIcon,
   FolderClosedIcon,
   GitBranchIcon,
-  GitPullRequestIcon,
   RadioTowerIcon,
 } from 'lucide-react';
 import { useI18n } from '../../i18n';
@@ -14,6 +13,7 @@ import { writeClipboardText } from '../../utils/clipboard';
 import { isExternalOpenUrl } from '../../utils/externalOpen';
 import { workspaceBasename } from '../../utils/workspace';
 import { Popover, PopoverAnchor, PopoverContent } from '../ui/popover';
+import { SessionPrStateIcon, sessionPrStateLabel } from '../SessionPrStateIcon';
 import styles from './WebShellSidebar.module.css';
 import { resolveSessionDetailsCollisionBoundary } from './sessionDetailsCollisionBoundary';
 
@@ -147,37 +147,36 @@ export function SessionDetailsTooltip({
         {[...(session.prs ?? [])]
           .reverse()
           .filter((pr) => isExternalOpenUrl(pr.url))
-          .map((pr, index) => (
-            // Index composite: a hand-edited sidecar can carry duplicate
-            // numbers (the reader validates shape, not uniqueness), and a
-            // duplicate key would reconcile rows against each other. The
-            // list is a stable per-snapshot order, so index keys are safe.
-            <div
-              className={styles.sessionDetailsRow}
-              key={`${index}-${pr.number}`}
-            >
-              <GitPullRequestIcon aria-hidden="true" />
-              <a
-                href={pr.url}
-                target="_blank"
-                rel="noreferrer"
-                title={pr.url}
-                onClick={(event) => {
-                  event.stopPropagation();
-                  openExternalLink(event, pr.url);
-                }}
+          .map((pr, index) => {
+            const stateLabel = sessionPrStateLabel(t, pr.state);
+            return (
+              // Index composite: a hand-edited sidecar can carry duplicate
+              // numbers (the reader validates shape, not uniqueness), and a
+              // duplicate key would reconcile rows against each other. The
+              // list is a stable per-snapshot order, so index keys are safe.
+              <div
+                className={styles.sessionDetailsRow}
+                key={`${index}-${pr.number}`}
               >
-                {t('sidebar.sessionPr', { number: pr.number })}
-                {pr.state === 'merged' || pr.state === 'closed'
-                  ? ` · ${
-                      pr.state === 'merged'
-                        ? t('sidebar.sessionPrStateMerged')
-                        : t('sidebar.sessionPrStateClosed')
-                    }`
-                  : ''}
-              </a>
-            </div>
-          ))}
+                <SessionPrStateIcon state={pr.state} />
+                <a
+                  href={pr.url}
+                  target="_blank"
+                  rel="noreferrer"
+                  title={pr.url}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    openExternalLink(event, pr.url);
+                  }}
+                >
+                  {t('sidebar.sessionPr', { number: pr.number })}
+                  {stateLabel ? (
+                    <span className="sr-only">{` · ${stateLabel}`}</span>
+                  ) : null}
+                </a>
+              </div>
+            );
+          })}
         <div className={styles.sessionDetailsRow}>
           <RadioTowerIcon aria-hidden="true" />
           <span>{status}</span>

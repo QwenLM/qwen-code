@@ -193,6 +193,11 @@ function makeFakeEnv() {
     }),
     renameSession: vi.fn().mockResolvedValue(true),
     findSessionTitlesByPrefix: vi.fn().mockResolvedValue([]),
+    // Exactly ONE copy, deliberately: the duplicate-key cleanup (#10022 on
+    // main, its twin on this branch) each removed a DIFFERENT copy of this
+    // member, and the clean merge of the two resolved to zero — the /branch
+    // hook then TypeError'd on the absent method and three tests here went
+    // red (R17-1).
     getSessionDisplayName: vi.fn().mockResolvedValue(undefined),
   };
 
