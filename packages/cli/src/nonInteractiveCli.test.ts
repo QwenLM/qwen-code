@@ -2863,23 +2863,6 @@ describe('runNonInteractive', () => {
       vi.mocked(mockToolRegistry.getTool).mockReturnValue({
         kind: Kind.Read,
       } as unknown as ReturnType<typeof mockToolRegistry.getTool>);
-      mockCoreExecuteToolCall.mockImplementation(
-        async (
-          _config: unknown,
-          request: { callId: string; name: string },
-        ) => ({
-          responseParts: [
-            {
-              functionResponse: {
-                id: request.callId,
-                name: request.name,
-                response: { output: 'ok' },
-              },
-            },
-          ],
-          resultDisplay: 'ok',
-        }),
-      );
       const permit = { goalId: 'g-1', revision: 2, turnId: 't-1' };
       mockCoreExecuteToolCall.mockImplementation(
         async (
