@@ -358,7 +358,15 @@ export async function deleteTeamDirs(teamName: string): Promise<void> {
     throw errors[0];
   }
   if (errors.length > 1) {
-    throw new AggregateError(errors, 'Failed to delete team directories');
+    // Fold member messages into the wrapper message: serializers that
+    // only read `.stack`/`.message` (e.g. debugLogger) would otherwise
+    // drop the per-directory errno/path detail of `.errors`.
+    throw new AggregateError(
+      errors,
+      `Failed to delete team directories for "${teamName}": ${errors
+        .map((e) => (e instanceof Error ? e.message : String(e)))
+        .join('; ')}`,
+    );
   }
 }
 

@@ -9,6 +9,20 @@ import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { TeamDeleteTool } from './team-delete.js';
+import { deleteTeamDirs } from '../agents/team/teamHelpers.js';
+
+// Mock at the tool boundary so cleanup-failure paths can be injected
+// without relying on real-fs permissions (which root bypasses). Keep the
+// rest of the module real: disposeInboxLocks (mailbox.ts) resolves
+// getInboxesDir through it.
+vi.mock('../agents/team/teamHelpers.js', async (importOriginal) => {
+  const original =
+    await importOriginal<typeof import('../agents/team/teamHelpers.js')>();
+  return {
+    ...original,
+    deleteTeamDirs: vi.fn().mockResolvedValue(undefined),
+  };
+});
 
 vi.mock('../config/storage.js', () => {
   let mockDir = '/tmp/test';
@@ -49,6 +63,8 @@ beforeEach(async () => {
 
 afterEach(async () => {
   await fs.rm(tmpDir, { recursive: true, force: true });
+  vi.mocked(deleteTeamDirs).mockReset();
+  vi.mocked(deleteTeamDirs).mockResolvedValue(undefined);
 });
 
 describe('TeamDeleteTool', () => {
@@ -66,6 +82,51 @@ describe('TeamDeleteTool', () => {
     expect(result.llmContent).toContain('deleted');
     expect(config.setTeamManager).toHaveBeenCalledWith(null);
     expect(config.setTeamContext).toHaveBeenCalledWith(null);
+  });
+
+  it('resets team state and surfaces failure when directory deletion fails', async () => {
+    // Issue #10210's invariant at the tool boundary: a non-benign
+    // cleanup failure must NOT be converted into complete success,
+    // and it must NOT wedge the session ("team active" forever).
+    const eacces = Object.assign(new Error('EACCES: permission denied'), {
+      code: 'EACCES',
+    });
+    vi.mocked(deleteTeamDirs).mockRejectedValue(eacces);
+
+    const config = makeConfig({ hasManager: true });
+    const result = await new TeamDeleteTool(config)
+      .build({})
+      .execute(new AbortController().signal);
+
+    // The state-reset tail still ran...
+    expect(config.setTeamManager).toHaveBeenCalledWith(null);
+    expect(config.setTeamContext).toHaveBeenCalledWith(null);
+    // ...and the result reports failure instead of complete deletion.
+    expect(result.error).toBeDefined();
+    expect(String(result.llmContent)).toContain('cleanup failed');
+    expect(String(result.llmContent)).not.toContain('deleted.');
+  });
+
+  it('runs the delayed second sweep even when the first sweep fails', async () => {
+    // The second sweep exists to catch the straggler-writeMessage
+    // race; a first-sweep throw must not cancel it. A retry that
+    // succeeds means the directories are genuinely gone.
+    vi.mocked(deleteTeamDirs)
+      .mockRejectedValueOnce(
+        Object.assign(new Error('ENOTEMPTY: directory not empty'), {
+          code: 'ENOTEMPTY',
+        }),
+      )
+      .mockResolvedValueOnce(undefined);
+
+    const config = makeConfig({ hasManager: true });
+    const result = await new TeamDeleteTool(config)
+      .build({})
+      .execute(new AbortController().signal);
+
+    expect(deleteTeamDirs).toHaveBeenCalledTimes(2);
+    expect(result.error).toBeUndefined();
+    expect(result.llmContent).toContain('deleted');
   });
 
   it('returns error when no team is active', async () => {

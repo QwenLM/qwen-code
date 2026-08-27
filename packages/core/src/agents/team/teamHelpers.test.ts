@@ -54,8 +54,7 @@ let rmMockOverride:
   | ((...args: Parameters<typeof fs.rm>) => Promise<unknown>)
   | null = null;
 vi.mock('node:fs/promises', async (importOriginal) => {
-  const original =
-    await importOriginal<typeof import('node:fs/promises')>();
+  const original = await importOriginal<typeof import('node:fs/promises')>();
   return {
     ...original,
     default: original,
@@ -412,7 +411,15 @@ describe('file I/O', () => {
       });
       setFsRmMock(() => Promise.reject(eaccesError));
 
-      await expect(deleteTeamDirs('any-team')).rejects.toThrow(AggregateError);
+      const err: unknown = await deleteTeamDirs('any-team').then(
+        () => undefined,
+        (e: unknown) => e,
+      );
+      expect(err).toBeInstanceOf(AggregateError);
+      expect((err as AggregateError).errors).toHaveLength(2);
+      // Member errno/path detail must survive in the wrapper message —
+      // serializers reading only `.message`/`.stack` never see `.errors`.
+      expect((err as AggregateError).message).toContain('permission denied');
     });
 
     it('throws AggregateError when both rm calls fail (EIO)', async () => {
