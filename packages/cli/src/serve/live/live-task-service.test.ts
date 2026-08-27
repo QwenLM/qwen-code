@@ -307,7 +307,7 @@ function makeHarness() {
     async (sessionId: string) => `/conversations/${sessionId}`,
   );
   const standaloneSessionService = {
-    get: vi.fn(async (targetSessionId: string) => {
+    getForInternalTask: vi.fn(async (targetSessionId: string) => {
       const canonicalSessionId = normalizeSessionIdForLookup(targetSessionId);
       const storageSessionId = [...persistedSessions.keys()].find(
         (candidate) =>
@@ -379,7 +379,7 @@ function makeHarness() {
         workingDirectory: { state: 'ready' as const },
       }),
     ),
-    resume: vi.fn(async (sessionId: string) => {
+    resumeForInternalTask: vi.fn(async (sessionId: string) => {
       const canonicalSessionId = normalizeSessionIdForLookup(sessionId);
       resident.add(canonicalSessionId);
       return {
@@ -500,7 +500,9 @@ describe('LiveTaskService', () => {
     };
     persistedSessions.set(sessionId, persisted(sessionId));
     persistedSessionOwners.set(sessionId, '/project');
-    harness.standaloneSessionService.get.mockRejectedValueOnce(makeError());
+    harness.standaloneSessionService.getForInternalTask.mockRejectedValueOnce(
+      makeError(),
+    );
     listWorkspaceSessionsForResponse.mockResolvedValue({
       sessions: [summary],
     });
@@ -1147,11 +1149,40 @@ describe('LiveTaskService', () => {
     });
 
     expect(result).toEqual({ threadId: 'task-1' });
-    expect(harness.standaloneSessionService.resume).toHaveBeenCalledWith(
-      'task-1',
-    );
+    expect(
+      harness.standaloneSessionService.resumeForInternalTask,
+    ).toHaveBeenCalledWith('task-1');
     expect(harness.bridge.resumeSession).not.toHaveBeenCalled();
     expect(harness.bridge.changeSessionCwd).not.toHaveBeenCalled();
+    expect(harness.sendPrompt).toHaveBeenCalledOnce();
+  });
+
+  it('locates and resumes a cold child standalone task', async () => {
+    const harness = makeHarness();
+    const childSessionId = '22222222-2222-4222-8222-222222222222';
+    persistedSessions.set(childSessionId, persisted(childSessionId));
+    persistedSessionOwners.set(childSessionId, '/conversations');
+    sessionSources.set(childSessionId, {
+      sourceType: 'standalone',
+      parentSessionId: '11111111-1111-4111-8111-111111111111',
+    });
+
+    const result = await harness.service.handle({
+      callerSessionId: 'live-root',
+      name: 'send_message_to_thread',
+      arguments: {
+        threadId: childSessionId,
+        prompt: 'continue this child task',
+      },
+    });
+
+    expect(result).toEqual({ threadId: childSessionId });
+    expect(
+      harness.standaloneSessionService.getForInternalTask,
+    ).toHaveBeenCalledWith(childSessionId);
+    expect(
+      harness.standaloneSessionService.resumeForInternalTask,
+    ).toHaveBeenCalledWith(childSessionId);
     expect(harness.sendPrompt).toHaveBeenCalledOnce();
   });
 
@@ -1298,9 +1329,9 @@ describe('LiveTaskService', () => {
       },
     });
 
-    expect(harness.standaloneSessionService.resume).toHaveBeenCalledWith(
-      sessionId,
-    );
+    expect(
+      harness.standaloneSessionService.resumeForInternalTask,
+    ).toHaveBeenCalledWith(sessionId);
     expect(harness.bridge.resumeSession).not.toHaveBeenCalled();
     expect(harness.materializeConversationDirectory).not.toHaveBeenCalled();
     expect(harness.bridge.changeSessionCwd).not.toHaveBeenCalled();
@@ -1370,9 +1401,9 @@ describe('LiveTaskService', () => {
       arguments: { threadId: 'task-1', prompt: 'continue standalone' },
     });
 
-    expect(harness.standaloneSessionService.resume).toHaveBeenCalledWith(
-      'task-1',
-    );
+    expect(
+      harness.standaloneSessionService.resumeForInternalTask,
+    ).toHaveBeenCalledWith('task-1');
     expect(
       harness.standaloneSessionService.dispatchPrompt,
     ).toHaveBeenCalledWith('task-1', expect.any(Function));

@@ -6,6 +6,7 @@ import { createRoot } from 'react-dom/client';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { I18nProvider } from '../../i18n';
 import { SessionDetailsTooltip } from './SessionDetailsTooltip';
+import styles from '../SessionPrStateIcon.module.css';
 
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -134,7 +135,7 @@ describe('SessionDetailsTooltip', () => {
     act(() => root.unmount());
   });
 
-  it('marks merged and closed pull requests with a state suffix', async () => {
+  it('marks pull request state with GitHub-style icons', async () => {
     vi.useFakeTimers();
     const container = document.createElement('div');
     document.body.appendChild(container);
@@ -159,7 +160,12 @@ describe('SessionDetailsTooltip', () => {
                   url: 'https://github.com/o/r/pull/9501',
                   state: 'closed',
                 },
-                { number: 9502, url: 'https://github.com/o/r/pull/9502' },
+                {
+                  number: 9502,
+                  url: 'https://github.com/o/r/pull/9502',
+                  state: 'open',
+                },
+                { number: 9503, url: 'https://github.com/o/r/pull/9503' },
               ],
             }}
             label="Fix CI"
@@ -177,11 +183,36 @@ describe('SessionDetailsTooltip', () => {
     const details = document.querySelector('[role="dialog"]');
     const byNumber = (number: number) =>
       details?.querySelector(`a[href="https://github.com/o/r/pull/${number}"]`);
-    // An open (or state-less) binding renders without a suffix; swapped or
-    // deleted label branches are the exact regression this pins.
-    expect(byNumber(9502)?.textContent).toBe('Pull Request #9502');
-    expect(byNumber(9501)?.textContent).toBe('Pull Request #9501 · Closed');
+    const rowIcon = (number: number) =>
+      byNumber(number)?.parentElement?.querySelector('svg');
+    expect(rowIcon(9500)?.classList.contains('lucide-git-merge')).toBe(true);
+    expect(rowIcon(9500)?.classList.contains(styles.sessionPrStateMerged)).toBe(
+      true,
+    );
+    expect(
+      rowIcon(9501)?.classList.contains('lucide-git-pull-request-closed'),
+    ).toBe(true);
+    expect(rowIcon(9501)?.classList.contains(styles.sessionPrStateClosed)).toBe(
+      true,
+    );
+    expect(rowIcon(9502)?.classList.contains('lucide-git-pull-request')).toBe(
+      true,
+    );
+    expect(rowIcon(9502)?.classList.contains(styles.sessionPrStateOpen)).toBe(
+      true,
+    );
+    // A state-less binding keeps the neutral icon without a state color;
+    // swapped or dropped state branches are the exact regression this pins.
+    expect(rowIcon(9503)?.classList.contains('lucide-git-pull-request')).toBe(
+      true,
+    );
+    expect(rowIcon(9503)?.className).not.toContain('sessionPrState');
+
+    // State lives in the icon; visible text stays the bare PR label, with an
+    // sr-only " · State" suffix so screen readers keep the information.
     expect(byNumber(9500)?.textContent).toBe('Pull Request #9500 · Merged');
+    expect(byNumber(9501)?.textContent).toBe('Pull Request #9501 · Closed');
+    expect(byNumber(9502)?.textContent).toBe('Pull Request #9502');
 
     act(() => root.unmount());
   });

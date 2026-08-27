@@ -555,7 +555,18 @@ describe('bundled review skill', () => {
     // The tails carry the load: without them the paragraph reads as a
     // durability promise again, which is the drift this pin exists for.
     expect(body).toContain('so an overflowing body can carry none of it');
-    expect(body).toContain('has no cross-round record on the PR at all');
+    // The recoverable record lives OFF the PR page — the marker makes the
+    // block locatable across rounds, the CI upload keeps the full entries.
+    // Pin both halves of that qualification, or the paragraph drifts back
+    // to a page-side promise.
+    expect(body).toContain('<!-- qwen-review-deferred -->');
+    // And the retention half: the artifact expires while the body's
+    // overflow pointer persists, so an unqualified "keeps a recoverable
+    // record" overstates the mechanism — the sentence must name the window.
+    expect(body).toContain('90-day retention window');
+    expect(body).toContain(
+      'keeps a recoverable record even though the PR page never shows it',
+    );
     expect(body).toContain(
       "when the budget trims it, the terminal summary is where the author's copy comes from",
     );
@@ -584,6 +595,12 @@ describe('bundled review skill', () => {
     // refuses and runs fresh at high) rather than silently pinned — dropping
     // the `forced-by-comment` arm re-creates the "comment at medium" state.
     expect(body).toContain('`forced-by-comment`');
+    expect(body).toContain(
+      '`explicit`, `last_used`, `configured`, or `forced-by-comment`',
+    );
+    expect(body).not.toContain(
+      'pass --effort only when the user chose a level in THIS invocation',
+    );
     // R15-11: a resumed run must NOT re-take the incremental decision — the
     // previous attempt's `incremental` field is history, so the continuation
     // never enters the `upToDate` stop/cleanup branch that would destroy the
@@ -596,6 +613,13 @@ describe('bundled review skill', () => {
     expect(body).toContain('One slice of this fact survives a resume');
     expect(body).toContain(
       "Only a never-resumed run's re-entry records nothing",
+    );
+  });
+
+  it('relays a remembered effort notice before the review starts', () => {
+    const body = skillBody();
+    expect(body).toContain(
+      'When a warning says the last explicitly typed effort was reused, relay it as the opening line before starting the review.',
     );
   });
 

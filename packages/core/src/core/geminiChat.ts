@@ -450,10 +450,13 @@ export type StreamEvent =
   | { type: StreamEventType.COMPRESSED; info: ChatCompressionInfo }
   | { type: StreamEventType.MODEL_FALLBACK; info: ModelFallbackInfo };
 
-export interface GeminiChatSendOptions {
+export interface LlmChatSendOptions {
   /** Skip only the configured model fallback chain for this request. */
   disableModelFallbacks?: boolean;
 }
+
+/** @deprecated Use `LlmChatSendOptions`; retained until a future major release. */
+export type GeminiChatSendOptions = LlmChatSendOptions;
 
 interface TryCompressOptions {
   /**
@@ -2610,7 +2613,7 @@ export class GeminiChat {
     params: SendMessageParameters,
     prompt_id: string,
     goalContext?: GoalTurnPermit,
-    options?: GeminiChatSendOptions,
+    options?: LlmChatSendOptions,
   ): Promise<AsyncGenerator<StreamEvent>> {
     const turnGoalContext = goalContext ? { ...goalContext } : undefined;
     const fullTurnRoute = model.endsWith('\0');
