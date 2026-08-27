@@ -5399,7 +5399,7 @@ export function App({
       // Grew back above the breakpoint: restore a split that a shrink folded
       // away. Standalone/uncontrolled only — a controlled host owns its split
       // lifecycle and re-opens it itself.
-      if (splitFoldedByShrinkRef.current) {
+      if (splitFoldedByShrinkRef.current && !activePanel) {
         splitFoldedByShrinkRef.current = false;
         if (!externalSplitControlled && splitSessionIdsRef.current.length > 0) {
           setMainView((prev) => (prev === 'chat' ? 'split' : prev));
@@ -5432,6 +5432,7 @@ export function App({
       }
     }
   }, [
+    activePanel,
     isLargeScreen,
     mainView,
     notifyControlledSplitClose,

@@ -16,6 +16,7 @@ import type {
   DaemonSessionPrInfo,
   DaemonSessionSummary,
   DaemonStatusReportSession,
+  SessionMetadataResult,
 } from '@qwen-code/sdk/daemon';
 import {
   ArchiveIcon,
@@ -52,6 +53,7 @@ import { workspaceLabel, workspaceLabelForCwd } from '../utils/workspace';
 import { useOtherWorkspaceSessions } from '../hooks/useOtherWorkspaceSessions';
 import { useScopedSessions } from '../hooks/useScopedSessions';
 import { useWorkspaceSessionLiveState } from '../session-catalog/workspace-session-live-state';
+import { useSessionCatalogController } from '../session-catalog/session-catalog-hooks';
 import { getDaemonToken } from '../config/daemon';
 import {
   SESSION_LIST_PAGE_SIZE,
@@ -92,7 +94,9 @@ import styles from './SessionOverviewPanel.module.css';
 
 // The daemon's live-state channel (2s, coordinated through the shared session
 // catalog) is the primary refresh path when advertised; the full-list catalog
-// poll is only the fallback for daemons without the feature.
+// poll is only the fallback for daemons without the feature. Full status fans
+// out expensive diagnostics, so poll it less often, pause while hidden, and
+// never overlap requests.
 const LIST_POLL_MS = 3000;
 const STATUS_POLL_MS = 10000;
 const PAGE_SIZE = 50;
@@ -330,6 +334,9 @@ function SessionOverviewPanelInner({
   const connectionRef = useRef(connection);
   connectionRef.current = connection;
   const workspace = useWorkspace();
+  const sessionCatalogController = useSessionCatalogController(
+    workspace.client,
+  );
   const actions = useActions();
   const currentSessionId = connection.sessionId;
   const organizationEnabled =
@@ -648,6 +655,7 @@ function SessionOverviewPanelInner({
       let firstError: Error | undefined;
       for (const [cwd, group] of byCwd) {
         const ids = group.map((card) => card.sessionId);
+        const ownerCwd = cwd || primaryCwd;
         try {
           const client = cwd
             ? workspace.client.workspaceByCwd(cwd)
@@ -681,11 +689,22 @@ function SessionOverviewPanelInner({
         } catch (error) {
           firstError ??=
             error instanceof Error ? error : new Error(String(error));
+        } finally {
+          if (ownerCwd) {
+            sessionCatalogController.refreshWorkspace(ownerCwd);
+          }
         }
       }
       return { succeededIdentities, error: firstError };
     },
-    [canArchiveCard, canDeleteCard, primaryCwd, t, workspace.client],
+    [
+      canArchiveCard,
+      canDeleteCard,
+      primaryCwd,
+      sessionCatalogController,
+      t,
+      workspace.client,
+    ],
   );
 
   const runBusy = useCallback(
@@ -735,23 +754,39 @@ function SessionOverviewPanelInner({
     }
     cancelRename();
     void runBusy(card, async () => {
+      const ownerCwd = card.workspaceCwd || primaryCwd;
       try {
         // The current session renames through its own session actions (the
         // daemon only allows it there); other sessions update metadata on the
         // owning workspace client — mirroring the sidebar.
+        let result: SessionMetadataResult | void;
         if (isCurrentCard(card)) {
-          await actions.renameSession(nextName);
+          result = await actions.renameSession(nextName);
         } else if (card.workspaceCwd) {
-          await workspace.client
+          result = await workspace.client
             .workspaceByCwd(card.workspaceCwd)
             .updateSessionMetadata(card.sessionId, { displayName: nextName });
         } else {
-          await workspace.client.updateSessionMetadata(card.sessionId, {
-            displayName: nextName,
-          });
+          result = await workspace.client.updateSessionMetadata(
+            card.sessionId,
+            {
+              displayName: nextName,
+            },
+          );
+        }
+        if (ownerCwd) {
+          sessionCatalogController.renamed(
+            ownerCwd,
+            card.sessionId,
+            result?.displayName || nextName,
+          );
+          sessionCatalogController.refreshWorkspace(ownerCwd);
         }
         await reloadData();
       } catch (err) {
+        if (ownerCwd) {
+          sessionCatalogController.refreshWorkspace(ownerCwd);
+        }
         setActionError(
           err instanceof Error
             ? `${t('sidebar.renameFailed')}: ${err.message}`
@@ -767,8 +802,10 @@ function SessionOverviewPanelInner({
     editingCard,
     editingName,
     isCurrentCard,
+    primaryCwd,
     reloadData,
     runBusy,
+    sessionCatalogController,
     t,
     workspace.client,
   ]);
@@ -845,7 +882,8 @@ function SessionOverviewPanelInner({
           if (current) {
             const cleared = await onCurrentSessionRemoved?.(current);
             if (cleared === false) {
-              throw new Error(t('sidebar.newSessionFailed'));
+              setActionError(t('sidebar.newSessionFailed'));
+              return;
             }
           }
           if (result.error) throw result.error;
@@ -895,7 +933,8 @@ function SessionOverviewPanelInner({
         if (current) {
           const cleared = await onCurrentSessionRemoved?.(current);
           if (cleared === false) {
-            throw new Error(t('sidebar.newSessionFailed'));
+            setActionError(t('sidebar.newSessionFailed'));
+            return;
           }
         }
         if (result.error) throw result.error;
@@ -936,10 +975,6 @@ function SessionOverviewPanelInner({
     );
     setRowSelection({});
   }, [excludedWorkspaceCwds, searchQuery]);
-  const filteredCardIdsKey = useMemo(
-    () => filteredCards.map(getSessionIdentity).sort().join('\0'),
-    [filteredCards],
-  );
   useEffect(() => {
     const validIds = new Set(filteredCards.map(getSessionIdentity));
     setRowSelection((prev) => {
@@ -950,7 +985,7 @@ function SessionOverviewPanelInner({
         ? prev
         : next;
     });
-  }, [filteredCardIdsKey, filteredCards]);
+  }, [filteredCards]);
   useEffect(() => {
     setPagination((prev) => {
       const lastPageIndex = Math.max(

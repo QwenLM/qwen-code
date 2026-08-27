@@ -50,8 +50,15 @@ let otherWorkspaceSessions: Record<string, DaemonSessionSummary[]>;
 // Options captured from the (mocked) useScopedSessions call, so tests can
 // assert the live-state vs catalog-poll fallback.
 let scopedSessionsOptions: { pollIntervalMs?: number };
-let workspaceLiveStateOptions: { enabled: boolean };
+let workspaceLiveStateOptions: {
+  enabled: boolean;
+  workspaceCwds?: string[];
+};
 let statusReportOptions: { autoLoad?: boolean; detail?: string };
+const sessionCatalogController = vi.hoisted(() => ({
+  refreshWorkspace: vi.fn(),
+  renamed: vi.fn(),
+}));
 // Stable client object (per test) so the other-workspace hook's load callback
 // keeps a stable identity and its effect doesn't loop.
 let workspaceClient: {
@@ -113,11 +120,18 @@ vi.mock('../hooks/useScopedSessions', () => ({
 vi.mock('../session-catalog/workspace-session-live-state', () => ({
   useWorkspaceSessionLiveState: (
     _client: unknown,
-    options: { enabled: boolean },
+    options: { enabled: boolean; workspaceCwds?: string[] },
   ) => {
     workspaceLiveStateOptions = options;
     return new Map();
   },
+}));
+
+vi.mock('../session-catalog/session-catalog-hooks', async (importOriginal) => ({
+  ...(await importOriginal<
+    typeof import('../session-catalog/session-catalog-hooks')
+  >()),
+  useSessionCatalogController: () => sessionCatalogController,
 }));
 
 const { SessionOverviewPanel, deriveSessionCards } = await import(
@@ -181,6 +195,8 @@ beforeEach(() => {
   scopedSessionsOptions = {};
   workspaceLiveStateOptions = { enabled: false };
   statusReportOptions = {};
+  sessionCatalogController.refreshWorkspace.mockReset();
+  sessionCatalogController.renamed.mockReset();
   workspaceActions = {
     deleteSession: vi.fn(async () => true),
     archiveSession: vi.fn(async () => true),
@@ -200,14 +216,14 @@ beforeEach(() => {
       listWorkspaceSessionsPage: vi.fn(async () => ({
         sessions: otherWorkspaceSessions[cwd] ?? [],
       })),
-      archiveSessionsData: vi.fn(async () => ({
-        archived: [],
+      archiveSessionsData: vi.fn(async (ids: string[]) => ({
+        archived: ids,
         alreadyArchived: [],
         notFound: [],
         errors: [],
       })),
-      deleteSessionsData: vi.fn(async () => ({
-        removed: [],
+      deleteSessionsData: vi.fn(async (ids: string[]) => ({
+        removed: ids,
         notFound: [],
         errors: [],
       })),
@@ -388,6 +404,14 @@ describe('deriveSessionCards', () => {
     ]);
   });
 
+  it('ranks newer sessions first when status is equal', () => {
+    const cards = deriveSessionCards([
+      session('older', { updatedAt: '2026-01-01T00:00:00.000Z' }),
+      session('newer', { updatedAt: '2026-01-02T00:00:00.000Z' }),
+    ]);
+    expect(cards.map((card) => card.sessionId)).toEqual(['newer', 'older']);
+  });
+
   it('needs-approval wins even when the prompt is also active (blocked turn)', () => {
     const cards = deriveSessionCards(
       [session('s', { hasActivePrompt: true, isWaitingForPermission: true })],
@@ -451,6 +475,27 @@ describe('deriveSessionCards', () => {
     expect(cards[0].status).toBe('needsApproval');
   });
 
+  it('uses status-report running details as a compatibility fallback', () => {
+    const cards = deriveSessionCards([session('s')], undefined, [
+      statusSession('s', { hasActivePrompt: true }),
+    ]);
+    expect(cards[0].status).toBe('running');
+  });
+
+  it('does not merge status from another workspace with the same session id', () => {
+    const cards = deriveSessionCards(
+      [session('s', { workspaceCwd: '/a' })],
+      undefined,
+      [
+        statusSession('s', {
+          workspaceCwd: '/b',
+          pendingPermissionCount: 1,
+        }),
+      ],
+    );
+    expect(cards[0].status).toBe('idle');
+  });
+
   it('passes bound PRs through to the card', () => {
     const prs = [
       { number: 9500, url: 'https://github.com/o/r/pull/9500' },
@@ -484,11 +529,13 @@ describe('SessionOverviewPanel', () => {
     sessionsState.sessions = [
       session('s-idle', { displayName: 'Bravo' }),
       session('s-run', { displayName: 'Alpha', hasActivePrompt: true }),
-      session('s-appr', {
-        displayName: 'Charlie',
-        isWaitingForPermission: true,
-      }),
+      session('s-appr', { displayName: 'Charlie' }),
     ];
+    statusState.report = {
+      full: {
+        sessions: [statusSession('s-appr', { pendingPermissionCount: 1 })],
+      },
+    };
     render();
     expect(rowTitles()).toEqual(['Charlie', 'Alpha', 'Bravo']);
   });
@@ -752,7 +799,7 @@ describe('SessionOverviewPanel', () => {
       await act(async () => copy.click());
       expect(writeText).toHaveBeenCalledWith('session-to-copy');
       expect(copy.querySelector('.lucide-check')).not.toBeNull();
-      expect(copy.className).toContain('opacity-100');
+      expect(copy.className).not.toContain('opacity-0');
       expect(rowCheckbox(rows()[0]!).getAttribute('data-state')).toBe(
         'unchecked',
       );
@@ -829,6 +876,7 @@ describe('SessionOverviewPanel', () => {
     ) as HTMLElement;
     act(() => click(confirm));
     await flushAsync();
+    expect(workspaceClient.workspaceByCwd).toHaveBeenCalledWith('/wsB');
     const qualified = workspaceClient.workspaceByCwd.mock.results.at(-1)!.value;
     expect(qualified.archiveSessionsData).toHaveBeenCalledWith(['same']);
     expect(workspaceActions.archiveSession).not.toHaveBeenCalled();
@@ -981,6 +1029,15 @@ describe('SessionOverviewPanel', () => {
     rerender();
     expect(selectAllCheckbox().getAttribute('data-state')).toBe('checked');
     expect(container!.textContent).toContain('1 of 1 row(s) selected.');
+
+    sessionsState.sessions = [
+      session('a', { displayName: 'A' }),
+      session('b', { displayName: 'B' }),
+    ];
+    rerender();
+    expect(container!.textContent).toContain('1 of 2 row(s) selected.');
+    const a = rows().find((row) => row.textContent?.includes('A'))!;
+    expect(rowCheckbox(a).getAttribute('data-state')).toBe('unchecked');
   });
 
   it('preserves selection across live status updates', () => {
@@ -1014,6 +1071,28 @@ describe('SessionOverviewPanel', () => {
     );
     expect(openSpy).not.toHaveBeenCalled();
     expect(onOpenSplit).not.toHaveBeenCalled();
+  });
+
+  it('opens all 6 sessions at the split limit', () => {
+    const expectedIds = Array.from({ length: 6 }, (_, i) => `s${i}`);
+    sessionsState.sessions = expectedIds.map((id, i) =>
+      session(id, { displayName: `S${i}` }),
+    );
+    const onOpenSplit = vi.fn();
+    render({ onOpenSplit });
+    act(() => click(selectAllCheckbox()));
+    const openInTab = footerButton('Open in new tab') as HTMLButtonElement;
+    const splitButton = footerButton('Open in split') as HTMLButtonElement;
+    expect(openInTab.disabled).toBe(false);
+    expect(splitButton.disabled).toBe(false);
+
+    act(() => click(openInTab));
+    const split = new URL(String(openSpy.mock.calls[0][0])).searchParams.get(
+      'split',
+    );
+    expect(split?.split(',').sort()).toEqual(expectedIds);
+    act(() => click(splitButton));
+    expect([...onOpenSplit.mock.calls[0][0]].sort()).toEqual(expectedIds);
   });
 
   it('defaults to 50 rows per page and supports 10, 50, and 100', () => {
@@ -1100,6 +1179,25 @@ describe('SessionOverviewPanel', () => {
     expect(rows()).toHaveLength(5);
   });
 
+  it('clamps the current page when the session list shrinks', async () => {
+    window.localStorage.setItem(
+      'qwen-web-shell-session-overview-page-size',
+      '10',
+    );
+    sessionsState.sessions = Array.from({ length: 15 }, (_, i) =>
+      session(`s${i}`, { displayName: `S${i}` }),
+    );
+    render();
+    act(() => click(footerButton('Next')!));
+    expect(container!.textContent).toContain('Page 2 of 2');
+
+    sessionsState.sessions = sessionsState.sessions.slice(0, 10);
+    rerender();
+    await flushAsync();
+    expect(container!.textContent).toContain('Page 1 of 1');
+    expect(rows()).toHaveLength(10);
+  });
+
   it('selects every session across pages like the old overview', () => {
     sessionsState.sessions = Array.from({ length: 60 }, (_, i) =>
       session(`s${i}`, { displayName: `S${i}` }),
@@ -1139,6 +1237,10 @@ describe('SessionOverviewPanel', () => {
     expect(rowTitles()).toContain('Beta');
     // …with its workspace display name in the folder column.
     expect(container!.textContent).toContain('Payments API');
+    const primary = rows().find((row) => row.textContent?.includes('Alpha'))!;
+    expect(
+      primary.querySelector('[data-web-shell-session-workspace]')?.textContent,
+    ).toBe('w');
     expect(
       container!.querySelector('button[aria-label="Filter by workspace"]'),
     ).not.toBeNull();
@@ -1548,6 +1650,9 @@ describe('SessionOverviewPanel', () => {
     act(() => click(confirm));
     await flushAsync();
     expect(workspaceClient.archiveSessionsData).toHaveBeenCalledWith(['s1']);
+    expect(sessionCatalogController.refreshWorkspace).toHaveBeenCalledWith(
+      '/w',
+    );
     expect(onOpenSession).not.toHaveBeenCalled();
   });
 
@@ -1599,6 +1704,9 @@ describe('SessionOverviewPanel', () => {
     act(() => click(confirm));
     await flushAsync();
     expect(workspaceClient.deleteSessionsData).toHaveBeenCalledWith(['s1']);
+    expect(sessionCatalogController.refreshWorkspace).toHaveBeenCalledWith(
+      '/w',
+    );
     expect(onCurrentSessionRemoved).toHaveBeenCalledOnce();
   });
 
@@ -1765,6 +1873,9 @@ describe('SessionOverviewPanel', () => {
     // instance from the mock results (each call builds a fresh object).
     const qualified = workspaceClient.workspaceByCwd.mock.results.at(-1)!.value;
     expect(qualified.archiveSessionsData).toHaveBeenCalledWith(['b1']);
+    expect(sessionCatalogController.refreshWorkspace).toHaveBeenCalledWith(
+      '/wsB',
+    );
   });
 
   it('deletes a session through the confirm dialog', async () => {
@@ -1939,6 +2050,13 @@ describe('SessionOverviewPanel', () => {
     expect(container!.textContent).toContain(
       'Failed to delete session: locked',
     );
+    expect(sessionCatalogController.refreshWorkspace).toHaveBeenCalledTimes(2);
+    expect(sessionCatalogController.refreshWorkspace).toHaveBeenCalledWith(
+      '/w',
+    );
+    expect(sessionCatalogController.refreshWorkspace).toHaveBeenCalledWith(
+      '/wsB',
+    );
   });
 
   it('surfaces a failure to clear the deleted current session', async () => {
@@ -1952,9 +2070,23 @@ describe('SessionOverviewPanel', () => {
     ) as HTMLElement;
     act(() => click(confirm));
     await flushAsync();
-    expect(container!.textContent).toContain(
-      'Failed to delete session: Failed to create a new chat',
-    );
+    expect(container!.textContent).toContain('Failed to create a new chat');
+    expect(container!.textContent).not.toContain('Failed to delete session');
+  });
+
+  it('surfaces a failure to clear the archived current session', async () => {
+    connectionState.sessionId = 's1';
+    sessionsState.sessions = [session('s1', { displayName: 'One' })];
+    onCurrentSessionRemoved.mockResolvedValue(false);
+    render({ onCurrentSessionRemoved });
+    act(() => click(rowActionButton(rows()[0]!, 'Archive')));
+    const confirm = document.querySelector(
+      '[data-slot="alert-dialog-action"]',
+    ) as HTMLElement;
+    act(() => click(confirm));
+    await flushAsync();
+    expect(container!.textContent).toContain('Failed to create a new chat');
+    expect(container!.textContent).not.toContain('Failed to archive session');
   });
 
   it('renames the current session inline from its row action', async () => {
@@ -1987,6 +2119,14 @@ describe('SessionOverviewPanel', () => {
     await flushAsync();
     // The current session renames through its own session actions.
     expect(workspaceActions.renameSession).toHaveBeenCalledWith('Renamed');
+    expect(sessionCatalogController.renamed).toHaveBeenCalledWith(
+      '/w',
+      's1',
+      'Renamed',
+    );
+    expect(sessionCatalogController.refreshWorkspace).toHaveBeenCalledWith(
+      '/w',
+    );
     expect(rowActionButton(rows()[0]!, 'Rename').disabled).toBe(true);
     await act(async () => resolveReload(sessionsState.sessions));
     await flushAsync();
@@ -2127,6 +2267,14 @@ describe('SessionOverviewPanel', () => {
     expect(qualified.updateSessionMetadata).toHaveBeenCalledWith('b1', {
       displayName: 'Renamed Beta',
     });
+    expect(sessionCatalogController.renamed).toHaveBeenCalledWith(
+      '/wsB',
+      'b1',
+      'Renamed',
+    );
+    expect(sessionCatalogController.refreshWorkspace).toHaveBeenCalledWith(
+      '/wsB',
+    );
   });
 
   it('exports a session as an html download', async () => {
@@ -2234,7 +2382,9 @@ describe('SessionOverviewPanel polling', () => {
     try {
       render();
       statusReload.mockClear();
-      await vi.advanceTimersByTimeAsync(10000);
+      await vi.advanceTimersByTimeAsync(3100);
+      expect(statusReload).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(7000);
       expect(statusReload).toHaveBeenCalledOnce();
     } finally {
       vi.useRealTimers();
@@ -2291,6 +2441,33 @@ describe('SessionOverviewPanel polling', () => {
     render({ manageLiveState: false });
     expect(workspaceLiveStateOptions.enabled).toBe(false);
     expect(scopedSessionsOptions.pollIntervalMs).toBeUndefined();
+  });
+
+  it('subscribes live state for every visible workspace', async () => {
+    connectionState.capabilities = {
+      features: ['workspace_session_live_state'],
+      workspaceCwd: '/w',
+      workspaces: [
+        { id: 'w0', cwd: '/w', primary: true, trusted: true },
+        { id: 'w1', cwd: '/wsB', primary: false, trusted: true },
+      ],
+    };
+    render();
+    await flushAsync();
+    expect(workspaceLiveStateOptions.workspaceCwds).toEqual(['/w', '/wsB']);
+  });
+
+  it('subscribes live state only for a locked workspace', () => {
+    connectionState.capabilities = {
+      features: ['workspace_session_live_state'],
+      workspaceCwd: '/w',
+      workspaces: [
+        { id: 'w0', cwd: '/w', primary: true, trusted: true },
+        { id: 'w1', cwd: '/wsB', primary: false, trusted: true },
+      ],
+    };
+    render({ workspaceCwd: '/wsB' });
+    expect(workspaceLiveStateOptions.workspaceCwds).toEqual(['/wsB']);
   });
 
   it('falls back to the catalog poll without live-state', () => {

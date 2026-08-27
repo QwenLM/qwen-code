@@ -76,6 +76,30 @@ function FixedTableHarness() {
   return <DataTable table={table} />;
 }
 
+function FluidWeightTableHarness() {
+  const columns = useMemo<ColumnDef<Item>[]>(
+    () => [
+      {
+        accessorKey: 'sized',
+        header: 'One',
+        meta: { width: 100, fluidWeight: 1 } satisfies DataTableColumnMeta,
+      },
+      {
+        accessorKey: 'automatic',
+        header: 'Three',
+        meta: { width: 100, fluidWeight: 3 } satisfies DataTableColumnMeta,
+      },
+    ],
+    [],
+  );
+  const table = useReactTable({
+    data: [{ sized: 'One', automatic: 'Three' }],
+    columns,
+    getCoreRowModel: getCoreRowModel(),
+  });
+  return <DataTable table={table} />;
+}
+
 function NarrowFixedTableHarness() {
   const columns = useMemo<ColumnDef<Item>[]>(
     () => [
@@ -164,7 +188,22 @@ describe('DataTable', () => {
     try {
       const headers = container.querySelectorAll('th');
       expect(headers[0]!.style.width).toBe('250px');
+      expect(headers[1]!.style.width).toBe('100px');
       expect(headers[1]!.style.left).toBe('250px');
+    } finally {
+      cleanup();
+    }
+  });
+
+  it('distributes extra width by fluidWeight', () => {
+    const { container, cleanup } = renderAtWidth(
+      <FluidWeightTableHarness />,
+      600,
+    );
+    try {
+      const headers = container.querySelectorAll('th');
+      expect(headers[0]!.style.width).toBe('200px');
+      expect(headers[1]!.style.width).toBe('400px');
     } finally {
       cleanup();
     }

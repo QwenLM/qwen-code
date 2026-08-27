@@ -348,9 +348,8 @@ interface WebShellSidebarProps {
   onOpenGoals: () => void;
   onOpenSessions: () => void;
   /**
-   * Whether to offer the Session Overview entry point. Gated to large screens
-   * by the app: below that there is no room to make managing several sessions
-   * side by side worthwhile.
+   * Whether to offer the Session Overview entry point. The table handles
+   * narrow widths, so the entry point can be offered at every viewport size.
    */
   canOpenSessionsOverview?: boolean;
   onOpenSplitView: () => void;

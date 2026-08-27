@@ -2770,6 +2770,7 @@ describe('WebShellSidebar workspace removal', () => {
 
     expect(activeItems).toContain('Archive');
     expect(inlineSessionAction('Unlocked pinned', 'Unpin')).toBeDefined();
+    expect(await openSessionMenuItems('Unlocked pinned')).toContain('Archive');
 
     const archivedItems = await openSessionMenuItems('Unlocked archived');
     expect(archivedItems).toEqual([

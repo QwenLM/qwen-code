@@ -126,4 +126,26 @@ describe('React 18 ref compatibility', () => {
     act(() => root.unmount());
     container.remove();
   });
+
+  it('forwards a TooltipContent ref to its DOM element', () => {
+    const ref = React.createRef<HTMLDivElement>();
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    act(() =>
+      root.render(
+        <TooltipProvider>
+          <Tooltip open>
+            <TooltipTrigger>Trigger</TooltipTrigger>
+            <TooltipContent ref={ref}>Content</TooltipContent>
+          </Tooltip>
+        </TooltipProvider>,
+      ),
+    );
+    expect(ref.current).toBeInstanceOf(HTMLDivElement);
+
+    act(() => root.unmount());
+    container.remove();
+  });
 });
