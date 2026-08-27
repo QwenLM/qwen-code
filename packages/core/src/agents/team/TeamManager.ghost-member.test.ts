@@ -253,17 +253,36 @@ describe('TeamManager ghost member regression (#10208)', () => {
     const teamName = h.teamName;
     const backend = h.backend;
 
-    // Gate only beta; other agents (alpha, gamma) pass through to
-    // the original backend spawn.
+    // Gate alpha and beta; later agents (gamma) pass through to the
+    // original backend spawn.
+    const deferredA = createDeferred<void>();
     const deferredB = createDeferred<void>();
     gateSpawns(
       backend,
-      new Map([[formatAgentId('beta', teamName), deferredB.promise]]),
+      new Map([
+        [formatAgentId('alpha', teamName), deferredA.promise],
+        [formatAgentId('beta', teamName), deferredB.promise],
+      ]),
       { passthroughUnknown: true },
     );
 
+    // Start both spawns so beta is already in the live roster when
+    // alpha's success write runs — that write persists beta, which is
+    // what makes beta's compensating write necessary (the gate must
+    // let it through).
+    const spawnA = h.teamManager.spawnTeammate({
+      name: 'alpha',
+      cwd: h.tmpDir,
+    });
+    const spawnB = h.teamManager.spawnTeammate({
+      name: 'beta',
+      cwd: h.tmpDir,
+    });
+    await new Promise((r) => setTimeout(r, 50));
+
     // A succeeds; its success write lands before we arm the spy.
-    await h.teamManager.spawnTeammate({ name: 'alpha', cwd: h.tmpDir });
+    deferredA.resolve();
+    await spawnA;
 
     // Witness for the leader notification: the compensating-write
     // failure must be surfaced to the leader, since debug logging
@@ -276,11 +295,6 @@ describe('TeamManager ghost member regression (#10208)', () => {
       .spyOn(teamHelpers, 'writeTeamFile')
       .mockRejectedValueOnce(new Error('ENOSPC: no space left on device'));
 
-    const spawnB = h.teamManager.spawnTeammate({
-      name: 'beta',
-      cwd: h.tmpDir,
-    });
-    await new Promise((r) => setTimeout(r, 50));
     deferredB.reject(new Error('spawn failed'));
 
     // The compensating write failure must not mask the spawn error...
@@ -313,5 +327,60 @@ describe('TeamManager ghost member regression (#10208)', () => {
     expect(persistedNames).toContain('alpha');
     expect(persistedNames).toContain('gamma');
     expect(persistedNames).not.toContain('beta');
+  });
+
+  it('does not persist in-flight siblings when the failed spawn is the first write (compensating-write gate)', async () => {
+    const h = await createHarness();
+    const teamName = h.teamName;
+    const backend = h.backend;
+
+    const deferredA = createDeferred<void>();
+    const deferredB = createDeferred<void>();
+    gateSpawns(
+      backend,
+      new Map([
+        [formatAgentId('alpha', teamName), deferredA.promise],
+        [formatAgentId('beta', teamName), deferredB.promise],
+      ]),
+    );
+
+    // Watch roster writes: when no earlier write could have persisted
+    // the failed member, the compensating write must not run at all.
+    const writeSpy = vi.spyOn(teamHelpers, 'writeTeamFile');
+
+    // Start two concurrent spawns; both members are pushed to the live
+    // roster while both spawnAgent calls are still gated.
+    const spawnA = h.teamManager.spawnTeammate({
+      name: 'alpha',
+      cwd: h.tmpDir,
+    });
+    const spawnB = h.teamManager.spawnTeammate({
+      name: 'beta',
+      cwd: h.tmpDir,
+    });
+    await new Promise((r) => setTimeout(r, 50));
+
+    // Alpha fails BEFORE any roster write has started. The compensating
+    // write must be skipped: it would serialize the live roster and
+    // persist beta, whose spawn is still pending — a ghost member if
+    // the process exits before beta resolves (#10208 symptom).
+    deferredA.reject(new Error('spawn failed'));
+    await expect(spawnA).rejects.toThrow('spawn failed');
+    expect(writeSpy).not.toHaveBeenCalled();
+
+    const persisted = await readTeamFile(teamName);
+    expect(persisted).toBeDefined();
+    const persistedNames = persisted!.members.map((m) => m.name);
+    expect(persistedNames).not.toContain('alpha');
+    expect(persistedNames).not.toContain('beta');
+    expect(persisted!.members).toHaveLength(0);
+
+    // The gate must not break the normal path: beta then succeeds and
+    // its own success write persists the roster.
+    deferredB.resolve();
+    await spawnB;
+    const afterBeta = await readTeamFile(teamName);
+    expect(afterBeta).toBeDefined();
+    expect(afterBeta!.members.map((m) => m.name)).toEqual(['beta']);
   });
 });

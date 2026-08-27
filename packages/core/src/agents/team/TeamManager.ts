@@ -215,6 +215,20 @@ export class TeamManager {
   private teamFileWriteQueue: Promise<void> = Promise.resolve();
 
   /**
+   * Count of roster writes that have started (reached their snapshot
+   * point) in `persistTeamFile`'s queue. Because each queued write
+   * serializes the live roster when it RUNS, a member pushed after the
+   * last started write cannot be on disk yet. The failed-spawn
+   * compensating write compares this counter against the value captured
+   * at push time and skips when no write could have persisted the
+   * failed member — writing anyway would serialize the live roster and
+   * persist sibling members whose own spawn is still pending, widening
+   * the #10208 ghost window in the "no write has landed yet"
+   * interleaving.
+   */
+  private teamFileWritesStarted = 0;
+
+  /**
    * Cap on per-agent pending messages. Each message can be up to the
    * `send_message` schema's `maxLength`, and a queue only drains when its
    * recipient goes IDLE — so without a cap a single looping or
@@ -324,9 +338,17 @@ export class TeamManager {
    * poison the queue — the chain survives for subsequent writes.
    */
   private persistTeamFile(): Promise<void> {
-    const write = this.teamFileWriteQueue.then(() =>
-      writeTeamFile(this.teamFile.name, this.teamFile),
-    );
+    const write = this.teamFileWriteQueue.then(() => {
+      // Snapshot point for `teamFileWritesStarted`: from here on this
+      // task serializes the live roster, so any member already pushed
+      // could land on disk through this write. Counted before the
+      // write runs (not after it resolves) so an in-flight write that
+      // started inside a failed member's window still counts — the
+      // compensating write queues behind it and repairs whatever it
+      // persisted.
+      this.teamFileWritesStarted++;
+      return writeTeamFile(this.teamFile.name, this.teamFile);
+    });
     this.teamFileWriteQueue = write.catch(() => {});
     return write;
   }
@@ -382,6 +404,11 @@ export class TeamManager {
     this.pendingMessages.set(agentId, []);
     this.lastActivityAt.set(agentId, Date.now());
     this.agentIdentities.set(agentId, identity);
+
+    // Roster writes that started before this push cannot have persisted
+    // the member; the compensating write after a failed spawn compares
+    // against this to decide whether anything on disk needs repairing.
+    const writesStartedAtPush = this.teamFileWritesStarted;
 
     let agentSpawned = false;
     let eventBridgeAttached = false;
@@ -567,33 +594,42 @@ export class TeamManager {
       // persisted this member in config.json, rewrite the file so
       // persisted membership matches the post-rollback in-memory
       // state. Best-effort — the original error is more important.
-      try {
-        await this.persistTeamFile();
-      } catch (writeErr) {
-        // Best-effort — the original error takes precedence, but
-        // leave a trail so a resurfaced ghost member can be told
-        // apart from a compensating write that itself failed.
-        debug.warn(
-          `Compensating team-file write after failed spawn of ` +
-            `${agentId} failed: ${getErrorMessage(writeErr)}`,
-        );
-        // Beyond the debug log (which is off in production), surface
-        // the failure to the leader as well, mirroring `fireAndForget`:
-        // the persisted roster may now keep a ghost member (#10208),
-        // and the leader is the only production-visible observer.
+      // Gated on `teamFileWritesStarted`: if no roster write started
+      // while the member was in the roster, nothing on disk can
+      // contain it, and writing anyway would serialize the live roster
+      // — persisting sibling members whose own spawn is still pending
+      // and widening the ghost window #10208 removes in the "failed
+      // spawn is the first write" interleaving.
+      if (this.teamFileWritesStarted > writesStartedAtPush) {
         try {
-          this.leaderMessageCallback?.(
-            `<team_error>Compensating team-file write after failed ` +
-              `spawn of ${agentId} failed: ` +
-              `${getErrorMessage(writeErr)}</team_error>`,
-            `Team roster write after failed spawn of "${name}" failed`,
-          );
-        } catch (cbErr) {
-          const cbMsg = cbErr instanceof Error ? cbErr.message : String(cbErr);
+          await this.persistTeamFile();
+        } catch (writeErr) {
+          // Best-effort — the original error takes precedence, but
+          // leave a trail so a resurfaced ghost member can be told
+          // apart from a compensating write that itself failed.
           debug.warn(
-            `Compensating-write failure notice: leader message ` +
-              `callback threw: ${cbMsg}`,
+            `Compensating team-file write after failed spawn of ` +
+              `${agentId} failed: ${getErrorMessage(writeErr)}`,
           );
+          // Beyond the debug log (which is off in production), surface
+          // the failure to the leader as well, mirroring `fireAndForget`:
+          // the persisted roster may now keep a ghost member (#10208),
+          // and the leader is the only production-visible observer.
+          try {
+            this.leaderMessageCallback?.(
+              `<team_error>Compensating team-file write after failed ` +
+                `spawn of ${agentId} failed: ` +
+                `${getErrorMessage(writeErr)}</team_error>`,
+              `Team roster write after failed spawn of "${name}" failed`,
+            );
+          } catch (cbErr) {
+            const cbMsg =
+              cbErr instanceof Error ? cbErr.message : String(cbErr);
+            debug.warn(
+              `Compensating-write failure notice: leader message ` +
+                `callback threw: ${cbMsg}`,
+            );
+          }
         }
       }
       throw err;
