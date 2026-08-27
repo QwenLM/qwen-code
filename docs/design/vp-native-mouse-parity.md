@@ -41,7 +41,8 @@ WezTerm/Kitty = plain click. Two protocol facts shape this design:
   modifier bits are reported, so the app can never detect ⌘. Terminals that
   open links on ⌘+click (iTerm2) intercept it at the terminal layer even
   while an app tracks the mouse (the tmux experience), so that path is
-  expected to keep working natively — verified empirically on device.
+  expected to keep working natively (on-device confirmation still open — see
+  Open questions).
 - **Shift/Option are reserved.** This app documents Shift(Option)+drag as the
   "use the terminal's own selection" bypass gesture
   (`settingsSchema.ts` `useTerminalBuffer` description); occupying those
@@ -116,8 +117,9 @@ New headless component
 `MainContent`'s VP branch next to `TextSelectionController`, with the same
 wiring (`getViewportRect`, `hitTestScrollbar`) and the same `isActive` gate
 (`!uiState.dialogsVisible`). It subscribes via `useMouseEvents` (tracking
-`'button'`), which already enforces the VP gate, `ui.mouseTracking` setting
-gate, and TTY gate — no new gating logic.
+`'button'` normally, upgraded to `'any'` while the menu is open — hover
+needs bare-motion `?1003h`), which already enforces the VP gate,
+`ui.mouseTracking` setting gate, and TTY gate — no new gating logic.
 
 **Ctrl+click to open a link:**
 
@@ -142,7 +144,9 @@ gate, and TTY gate — no new gating logic.
   1. **Open Link** — when `hyperlinkAtCell` finds a URL.
   2. **Copy Link Address** — same condition; `copyToClipboard(url)`.
   3. **Copy Selection** — when a non-empty text selection is active (see §3);
-     re-runs `getSelectedText(frame, range)` + `copyToClipboard`.
+     snapshots the selected text at menu-open time and copies the snapshot
+     on select (re-deriving the range at execute time would copy the wrong
+     cells while the frame keeps streaming).
 - If no item applies, do nothing (no empty menu).
 - Open the menu at the click position via `ContextMenuContext` (§4).
 - Also closes the menu on: any press outside the menu rect, any `scroll-*`
@@ -244,7 +248,13 @@ Interaction while open:
 | `packages/cli/src/ui/layouts/DefaultAppLayout.tsx`                                                                            | render `<ContextMenuOverlay />` last inside root Box                                                                        |
 | `packages/cli/src/ui/AppContainer.tsx`                                                                                        | mount `ContextMenuProvider`                                                                                                 |
 | `packages/cli/src/ui/components/InputPrompt.tsx`                                                                              | quiet composer keys while menu open                                                                                         |
+| `packages/cli/src/ui/components/shared/RowMouseController.tsx`                                                                | quiet row hover/select while the menu is open (`isActive` gate)                                                             |
+| `packages/cli/src/ui/components/shared/TextInputMouseController.tsx`                                                          | quiet click-to-position while the menu is open                                                                              |
+| `packages/cli/src/ui/components/HistoryItemDisplay.tsx`                                                                       | yield Ctrl+presses to the link controller (cancel the thought-toggle press)                                                 |
+| `packages/cli/src/ui/selection/selection-coords.ts`                                                                           | extracted `snapWideChar` helper shared with the controller                                                                  |
+| `integration-tests/terminal-capture/scenarios/vp-context-menu.ts`                                                             | **new** — manual visual-evidence scenario (not collected by any test suite)                                                 |
 | `packages/cli/src/config/settingsSchema.ts`                                                                                   | `ui.mouseTracking` description refresh                                                                                      |
+| `packages/vscode-ide-companion/schemas/settings.schema.json`                                                                  | regenerated mirror of `settingsSchema.ts`                                                                                   |
 | `docs/users/configuration/settings.md`, `docs/users/support/troubleshooting.md`, `docs/users/reference/keyboard-shortcuts.md` | docs refresh                                                                                                                |
 
 ## Scope boundaries
@@ -257,8 +267,8 @@ settings + docs refresh.
 
 - Paste menu item and middle-click paste (need a clipboard-read primitive;
   follow-up issue).
-- Hover URL preview (needs upgrading tracking to `?1003h`; follow-up
-  enhancement).
+- Hover URL preview (follow-up enhancement; the `?1003h` upgrade itself is
+  built — gated to the open menu — but no preview UI exists yet).
 - Heuristic detection of bare URLs in content that was _not_ OSC 8-wrapped
   (tool output, non-markdown surfaces). Only links the renderers wrapped are
   clickable — exactly the set a terminal would render as OSC 8 links.
@@ -320,9 +330,12 @@ with no menu preserves it; a wheel-close clears too, consistent with the
 existing "scroll drops the selection" rule). The exact clear path is the
 selection stack's frame-invalidation reacting to the menu-close re-render;
 root-causing it needs instrumentation of the invalidation callback, which is
-out of scope here. Impact is cosmetic only — drag-select copies on release, so
-the text is already on the clipboard before the menu opens. Escaping without
-clearing is a candidate follow-up once the invalidation path is instrumented.
+out of scope here. Impact is cosmetic as long as the drag completed before
+the menu opened — drag-select copies on release, so the text is already on
+the clipboard then; a menu opened mid-drag is the exception (the copying
+release is paused, so the text is not on the clipboard yet). Escaping
+without clearing is a candidate follow-up once the invalidation path is
+instrumented.
 
 ## Future work
 

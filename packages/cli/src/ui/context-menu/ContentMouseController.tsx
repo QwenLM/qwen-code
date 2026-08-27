@@ -113,9 +113,10 @@ export function ContentMouseController(
           `Link copied to clipboard (not openable directly): ${url}`,
         );
       })
-      .catch(() => {
+      .catch((error: unknown) => {
         // eslint-disable-next-line no-console
-        console.warn(`Unable to open link: ${url}`);
+        console.warn(`Unable to copy link to clipboard: ${url}`);
+        debugLogger.warn('Clipboard copy failed:', error);
       });
   }, []);
 
@@ -177,12 +178,36 @@ export function ContentMouseController(
           menu.closeMenu();
           return;
         }
-        if (event.name !== 'right-press') {
+        if (event.name === 'right-press') {
+          // Close, then fall through and re-open at the new cell.
+          menu.closeMenu();
+        } else if (event.name.endsWith('-press')) {
+          // Any other press outside the menu (e.g. middle-press) dismisses
+          // it. Releases are ignored so the right-release that opened the
+          // menu cannot close it again.
+          menu.closeMenu();
+          return;
+        } else {
           return;
         }
-        // right-press while open: close, then fall through and re-open at
-        // the new cell.
-        menu.closeMenu();
+      }
+
+      // A pending Ctrl+press anchors to a grid cell, but scrolling swaps the
+      // content that cell carries (and streaming reflow moves it too), so any
+      // wheel tick invalidates the anchor. A move outside the viewport or over
+      // the scrollbar is still a drag, so both cancels run before those early
+      // returns.
+      if (event.name.startsWith('scroll-')) {
+        ctrlPressRef.current = null;
+        return;
+      }
+      if (event.name === 'move' && event.button !== 'none') {
+        // A pointer move with a button held cancels the pending Ctrl+click
+        // (it is a Ctrl+drag). Bare motion is ignored: while the menu is
+        // open this controller upgrades to 'any' tracking, so bare moves
+        // stream in without any button involved.
+        ctrlPressRef.current = null;
+        return;
       }
 
       const rect = propsRef.current.getViewportRect();
@@ -268,10 +293,6 @@ export function ContentMouseController(
           openLink(url);
         }
         return;
-      }
-      if (event.name === 'move') {
-        // A pointer move cancels the pending Ctrl+click (it is a Ctrl+drag).
-        ctrlPressRef.current = null;
       }
     },
     [menu, mapPoint, getBuffer, openLink, columns, rows],

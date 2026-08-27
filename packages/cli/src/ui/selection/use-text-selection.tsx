@@ -361,8 +361,9 @@ export function TextSelectionController(
   }, [props.isActive, clearSelection]);
 
   // Expose the live selection to an external query ref (context menu "Copy
-  // Selection"). Collapsed point-selections are reported as none — they carry
-  // no text.
+  // Selection"). A collapsed char-mode selection is a bare click (cleared on
+  // release anyway) and carries no text; a collapsed word/line span still
+  // holds its cell(s), so it stays offerable.
   const selectionQueryRef = props.selectionQueryRef;
   useEffect(() => {
     if (!selectionQueryRef) {
@@ -371,7 +372,10 @@ export function TextSelectionController(
     selectionQueryRef.current = {
       getRange: () => {
         const selection = selectionRef.current;
-        if (selection.isEmpty || selection.isCollapsed) {
+        if (
+          selection.isEmpty ||
+          (selection.isCollapsed && selection.mode === 'char')
+        ) {
           return null;
         }
         return selection.normalized();

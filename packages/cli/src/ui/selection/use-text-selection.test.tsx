@@ -11,7 +11,10 @@ import { useMouseEvents } from '../hooks/useMouseEvents.js';
 import type { MouseEvent } from '../utils/mouse.js';
 import { copyToClipboard } from '../utils/commandUtils.js';
 import { getScreenBuffer, type ScreenBuffer } from './screen-buffer.js';
-import { TextSelectionController } from './use-text-selection.js';
+import {
+  TextSelectionController,
+  type SelectionQuery,
+} from './use-text-selection.js';
 
 const mocks = vi.hoisted(() => ({
   stdout: { rows: 10 },
@@ -405,5 +408,64 @@ describe('TextSelectionController', () => {
 
     expect(setSelection).not.toHaveBeenCalled();
     expect(copyToClipboard).not.toHaveBeenCalled();
+  });
+
+  describe('selectionQueryRef', () => {
+    const mountWithQuery = () => {
+      const selectionQueryRef = { current: null as SelectionQuery | null };
+      render(
+        <TextSelectionController
+          isActive
+          getViewportRect={() => viewportRect}
+          getScrollState={() => scrollState}
+          hitTestScrollbar={() => false}
+          selectionQueryRef={selectionQueryRef}
+        />,
+      );
+      const handler = vi.mocked(useMouseEvents).mock.calls.at(-1)![0];
+      return { selectionQueryRef, handler };
+    };
+
+    it('reports the normalized range of a drag selection', () => {
+      const { selectionQueryRef, handler } = mountWithQuery();
+      expect(selectionQueryRef.current).not.toBeNull();
+      selectHello(handler);
+      expect(selectionQueryRef.current!.getRange()).toEqual({
+        sx: 0,
+        sy: 0,
+        ex: 4,
+        ey: 0,
+      });
+    });
+
+    it('reports null for a bare collapsed click', () => {
+      const { selectionQueryRef, handler } = mountWithQuery();
+      handler(makeEvent('left-press', 2));
+      handler(makeEvent('left-release', 2));
+      expect(selectionQueryRef.current!.getRange()).toBeNull();
+    });
+
+    it('still reports a collapsed word span from a single-cell double-click', () => {
+      frame = makeFrame('x = 5');
+      vi.spyOn(Date, 'now').mockReturnValueOnce(1000).mockReturnValueOnce(1100);
+      const { selectionQueryRef, handler } = mountWithQuery();
+      handler(makeEvent('left-press', 5));
+      handler(makeEvent('left-press', 5));
+      // The isolated '5' is a one-cell word span: collapsed but carrying
+      // text, so Copy Selection must still be offered.
+      expect(selectionQueryRef.current!.getRange()).toEqual({
+        sx: 4,
+        sy: 0,
+        ex: 4,
+        ey: 0,
+      });
+    });
+
+    it('clears the ref on unmount', () => {
+      const { selectionQueryRef } = mountWithQuery();
+      expect(selectionQueryRef.current).not.toBeNull();
+      cleanup();
+      expect(selectionQueryRef.current).toBeNull();
+    });
   });
 });

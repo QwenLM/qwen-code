@@ -102,23 +102,23 @@ Press `Ctrl+R` to search prompt history, or shell history while shell mode is ac
 
 Active when `ui.useTerminalBuffer` is enabled (Settings → UI → Virtualized History), screen reader mode is off, and Qwen Code is running in a compatible interactive terminal (`stdout` is a TTY, CI is inactive, and `TERM` is not `dumb`), which is the default for ordinary non-screen-reader sessions. In that mode conversation history is rendered inside an in-app viewport instead of the host terminal scrollback, so the keys below replace the terminal's native scroll.
 
-| Shortcut        | Description                                                                                                |
-| --------------- | ---------------------------------------------------------------------------------------------------------- |
-| `Shift+Up`      | Scroll history up one line.                                                                                |
-| `Shift+Down`    | Scroll history down one line.                                                                              |
-| `PgUp`          | Scroll history up one page (viewport height).                                                              |
-| `PgDn`          | Scroll history down one page (viewport height).                                                            |
-| `Ctrl+Home`     | Jump to the top of the conversation.                                                                       |
-| `Ctrl+End`      | Jump to the bottom (and re-engage live auto-follow).                                                       |
-| **Mouse wheel** | Scroll history (3 lines per tick). Requires `ui.mouseTracking` (on by default).                            |
-| **Ctrl+click**  | Open the hyperlink under the pointer in your browser. Requires `ui.mouseTracking`.                         |
-| **Right-click** | Open an in-app context menu (Open Link / Copy Link Address / Copy Selection). Requires `ui.mouseTracking`. |
+| Shortcut        | Description                                                                                                                                        |
+| --------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `Shift+Up`      | Scroll history up one line.                                                                                                                        |
+| `Shift+Down`    | Scroll history down one line.                                                                                                                      |
+| `PgUp`          | Scroll history up one page (viewport height).                                                                                                      |
+| `PgDn`          | Scroll history down one page (viewport height).                                                                                                    |
+| `Ctrl+Home`     | Jump to the top of the conversation.                                                                                                               |
+| `Ctrl+End`      | Jump to the bottom (and re-engage live auto-follow).                                                                                               |
+| **Mouse wheel** | Scroll history (3 lines per tick). Requires `ui.mouseTracking` (on by default).                                                                    |
+| **Ctrl+click**  | Open an http(s) hyperlink under the pointer in your browser (other link schemes are copied to the clipboard instead). Requires `ui.mouseTracking`. |
+| **Right-click** | Over a link or a text selection, open an in-app context menu (Open Link / Copy Link Address / Copy Selection). Requires `ui.mouseTracking`.        |
 
 When `ui.useTerminalBuffer` is on and `ui.mouseTracking` is enabled (the default), the terminal forwards mouse events to qwen-code so the wheel can drive the in-app viewport. As a side effect, native mouse behaviors are consumed by the program, so qwen-code provides its own equivalents:
 
 - **Text selection:** drag to select text in the history viewport, double-click to select a word, triple-click to select a line. The selection is highlighted and copied to the clipboard when you release the mouse (works locally, over SSH via OSC 52, and inside tmux). A single click clears the selection; scrolling or new output clears it too. Selection is limited to the visible viewport for now.
-- **Hyperlinks:** `Ctrl+click` a link to open it in your browser (on terminals such as iTerm2 that intercept `⌘+click` themselves, that native gesture also works). `Ctrl` is used because `Shift`/`Option` stay reserved for the terminal-selection bypass below, and plain clicks keep their existing behavior.
-- **Right-click menu:** right-click opens a small context menu. Over a hyperlink it offers **Open Link** and **Copy Link Address**; over an active text selection it offers **Copy Selection**. Navigate it with the mouse or `↑`/`↓` + `Enter`, and dismiss it with `Esc`, a click elsewhere, or scrolling.
+- **Hyperlinks:** `Ctrl+click` a link to open it in your browser (on terminals such as iTerm2 that intercept `⌘+click` themselves, that native gesture is expected to keep working). `Ctrl` is used because `Shift`/`Option` stay reserved for the terminal-selection bypass below, and plain clicks keep their existing behavior. Only http(s) links open in the browser; other link schemes (mailto:, ftp:, ssh:, …) are copied to the clipboard instead.
+- **Right-click menu:** right-click over a hyperlink or an active text selection opens a small context menu (right-click on plain text is a deliberate no-op). Over a hyperlink it offers **Open Link** and **Copy Link Address**; over an active text selection it offers **Copy Selection**. Navigate it with the mouse or `↑`/`↓` + `Enter`, and dismiss it with `Esc`, a click elsewhere, or scrolling.
 
 You can still fall back to the terminal's own selection by holding `Shift` (or `Option` on macOS Terminal / iTerm) while dragging. Set `ui.mouseTracking` to `false` to stop qwen-code from capturing the mouse entirely and hand every mouse gesture back to the terminal (native right-click menu, link clicks, and click-and-drag selection); the in-app viewport then no longer responds to the mouse, so use the keyboard shortcuts above to scroll.
 

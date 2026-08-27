@@ -4,13 +4,17 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { type MutableRefObject } from 'react';
+import { useEffect, type MutableRefObject } from 'react';
 import { type DOMElement } from 'ink';
-import { render } from '@testing-library/react';
+import { act, render } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { RowMouseController } from './RowMouseController.js';
 import { useMouseEvents } from '../../hooks/useMouseEvents.js';
 import { useTerminalSize } from '../../hooks/useTerminalSize.js';
+import {
+  ContextMenuProvider,
+  useContextMenu,
+} from '../../context-menu/ContextMenuContext.js';
 import {
   measureElementPosition,
   layoutRowForEvent,
@@ -163,5 +167,41 @@ describe('RowMouseController', () => {
     handler(makeEvent({ name: 'left-release', row: 1 }));
     expect(onHoverIndex).not.toHaveBeenCalled();
     expect(onSelectIndex).not.toHaveBeenCalled();
+  });
+
+  it('quiets while the context menu is open and resumes after it closes', () => {
+    let closeMenu: (() => void) | undefined;
+    const MenuProbe = () => {
+      const menuContext = useContextMenu();
+      closeMenu = menuContext.closeMenu;
+      const { openMenu } = menuContext;
+      useEffect(() => {
+        openMenu([{ id: 'x', label: 'X', onSelect: () => {} }], { x: 0, y: 0 });
+      }, [openMenu]);
+      return null;
+    };
+    render(
+      <ContextMenuProvider>
+        <RowMouseController
+          containerRef={ref(containerNode)}
+          itemRefs={ref(itemNodes)}
+          scrollOffset={0}
+          onHoverIndex={onHoverIndex}
+          onSelectIndex={onSelectIndex}
+        />
+        <MenuProbe />
+      </ContextMenuProvider>,
+    );
+    // Menu open: the isActive gate is the only defense against a click on
+    // the overlay also selecting the row underneath it.
+    expect(vi.mocked(useMouseEvents).mock.calls.at(-1)![1]).toMatchObject({
+      isActive: false,
+      tracking: 'any',
+    });
+
+    act(() => closeMenu!());
+    expect(vi.mocked(useMouseEvents).mock.calls.at(-1)![1]).toMatchObject({
+      isActive: true,
+    });
   });
 });

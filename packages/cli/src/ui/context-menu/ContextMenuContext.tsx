@@ -132,8 +132,9 @@ export function useContextMenu(): ContextMenuContextValue {
 
 /**
  * Outer size of the rendered menu box (border included) for a given item
- * list. Shared by the overlay (clamping/rendering) and the mouse controller
- * (hit-testing) so both compute identical geometry.
+ * list. Used by the mouse controller for hit-testing and the open-time clamp.
+ * The overlay re-encodes this geometry itself (border + one-space padding per
+ * row), so its row rendering must stay in sync with these constants by hand.
  */
 export function contextMenuSize(items: ContextMenuItem[]): {
   width: number;

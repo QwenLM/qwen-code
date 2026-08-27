@@ -88,6 +88,20 @@ function makeLinkFrame(): ReadonlyFrame {
   } as unknown as ReadonlyFrame;
 }
 
+/** Wide variant: the link sits at the left edge, plain cells beyond the
+ * menu box's reach (used to hit the outside-press dismissal path). */
+function makeWideLinkFrame(): ReadonlyFrame {
+  const text = 'link' + ' '.repeat(26);
+  return {
+    width: text.length,
+    height: 1,
+    cells: [
+      [...text].map((ch, i) => makeCell(ch, i < 4 ? LINK_URL : undefined)),
+    ],
+    boundaries: [Array.from({ length: text.length }, () => null)],
+  } as unknown as ReadonlyFrame;
+}
+
 const makeEvent = (
   name: MouseEvent['name'],
   col: number,
@@ -130,17 +144,24 @@ describe('ContentMouseController', () => {
   interface Mounted {
     fire: (event: MouseEvent) => void;
     getMenu: () => ReturnType<typeof useContextMenu>['menu'];
+    getSelectedIndex: () => number;
   }
 
-  function mount(selectionRange?: {
-    sx: number;
-    sy: number;
-    ex: number;
-    ey: number;
-  }): Mounted {
+  function mount(
+    selectionRange?: {
+      sx: number;
+      sy: number;
+      ex: number;
+      ey: number;
+    },
+    options: { hitTestScrollbar?: () => boolean } = {},
+  ): Mounted {
     let latestMenu: Mounted['getMenu'] extends () => infer R ? R : never = null;
+    let latestSelectedIndex = 0;
     const MenuProbe = () => {
-      latestMenu = useContextMenu().menu;
+      const menuContext = useContextMenu();
+      latestMenu = menuContext.menu;
+      latestSelectedIndex = menuContext.selectedIndex;
       return null;
     };
     const selectionQueryRef = {
@@ -151,7 +172,7 @@ describe('ContentMouseController', () => {
         <ContentMouseController
           isActive
           getViewportRect={() => viewportRect}
-          hitTestScrollbar={() => false}
+          hitTestScrollbar={options.hitTestScrollbar ?? (() => false)}
           selectionQueryRef={selectionQueryRef}
         />
         <MenuProbe />
@@ -167,6 +188,7 @@ describe('ContentMouseController', () => {
           handler(event);
         }),
       getMenu: () => latestMenu,
+      getSelectedIndex: () => latestSelectedIndex,
     };
   }
 
@@ -190,6 +212,23 @@ describe('ContentMouseController', () => {
       fire(makeEvent('left-press', 2, 1, true));
       fire(makeEvent('move', 3, 1));
       fire(makeEvent('left-release', 3, 1, true));
+      expect(openBrowserSecurely).not.toHaveBeenCalled();
+    });
+
+    it('does not open when a Ctrl+drag returns to the starting cell', () => {
+      const { fire } = mount();
+      fire(makeEvent('left-press', 2, 1, true));
+      fire(makeEvent('move', 3, 1));
+      fire(makeEvent('move', 2, 1));
+      fire(makeEvent('left-release', 2, 1, true));
+      expect(openBrowserSecurely).not.toHaveBeenCalled();
+    });
+
+    it('does not open when a scroll invalidates the press anchor', () => {
+      const { fire } = mount();
+      fire(makeEvent('left-press', 2, 1, true));
+      fire(makeEvent('scroll-down', 2, 1));
+      fire(makeEvent('left-release', 2, 1, true));
       expect(openBrowserSecurely).not.toHaveBeenCalled();
     });
 
@@ -217,10 +256,13 @@ describe('ContentMouseController', () => {
       await Promise.resolve();
       await Promise.resolve();
       expect(copyToClipboard).toHaveBeenCalledWith('https://');
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining('Link copied to clipboard'),
+      );
       warnSpy.mockRestore();
     });
 
-    it('copies non-http(s) links to the clipboard instead', () => {
+    it('copies non-http(s) links to the clipboard instead', async () => {
       frame = {
         ...frame,
         cells: [[...'mail'].map(() => makeCell('m', 'mailto:dev@example.com'))],
@@ -231,6 +273,35 @@ describe('ContentMouseController', () => {
       fire(makeEvent('left-release', 1, 1, true));
       expect(openBrowserSecurely).not.toHaveBeenCalled();
       expect(copyToClipboard).toHaveBeenCalledWith('mailto:dev@example.com');
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining('mailto:dev@example.com'),
+      );
+      warnSpy.mockRestore();
+    });
+
+    it('reports a clipboard failure as a copy failure, not an open failure', async () => {
+      frame = {
+        ...frame,
+        cells: [[...'mail'].map(() => makeCell('m', 'mailto:dev@example.com'))],
+      } as unknown as ReadonlyFrame;
+      vi.mocked(copyToClipboard).mockRejectedValueOnce(
+        new Error('no clipboard'),
+      );
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const { fire } = mount();
+      fire(makeEvent('left-press', 1, 1, true));
+      fire(makeEvent('left-release', 1, 1, true));
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining('Unable to copy link to clipboard'),
+      );
+      expect(mocks.warn).toHaveBeenCalledWith(
+        'Clipboard copy failed:',
+        expect.any(Error),
+      );
       warnSpy.mockRestore();
     });
   });
@@ -267,6 +338,27 @@ describe('ContentMouseController', () => {
       expect(getMenu()).toBeNull();
     });
 
+    it('does not open over the scrollbar', () => {
+      const { fire, getMenu } = mount(undefined, {
+        hitTestScrollbar: () => true,
+      });
+      fire(makeEvent('right-press', 2, 1));
+      expect(getMenu()).toBeNull();
+    });
+
+    it("requests 'button' tracking normally and 'any' while the menu is open", () => {
+      const { fire } = mount();
+      expect(vi.mocked(useMouseEvents).mock.calls.at(-1)![1]).toEqual({
+        isActive: true,
+        tracking: 'button',
+      });
+      fire(makeEvent('right-press', 2, 1));
+      expect(vi.mocked(useMouseEvents).mock.calls.at(-1)![1]).toEqual({
+        isActive: true,
+        tracking: 'any',
+      });
+    });
+
     it('clicking a menu item launches the browser and closes the menu', () => {
       const { fire, getMenu } = mount();
       fire(makeEvent('right-press', 2, 1)); // opens the menu at grid (1,0)
@@ -278,15 +370,68 @@ describe('ContentMouseController', () => {
     });
 
     it('hovering a menu row updates the selected index', () => {
-      const { fire, getMenu } = mount();
+      const { fire, getMenu, getSelectedIndex } = mount();
       fire(makeEvent('right-press', 2, 1)); // grid (1,0), 2 items
+      expect(getSelectedIndex()).toBe(0);
       // Item 1 at grid row 2 → terminal row 3.
       fire(makeEvent('move', 2, 3));
-      const menu = getMenu();
-      expect(menu).not.toBeNull();
-      // selectedIndex lives in the provider; assert via a click on item 1.
+      expect(getSelectedIndex()).toBe(1);
+      // Click then executes the hovered (second) item.
       fire(makeEvent('left-press', 2, 3));
       expect(copyToClipboard).toHaveBeenCalledWith(LINK_URL);
+      expect(getMenu()).toBeNull();
+    });
+
+    it('a press outside the menu rect closes it', () => {
+      // Wide frame so cells beyond the menu box are outside its rect.
+      frame = makeWideLinkFrame();
+      viewportRect = { x: 0, y: 0, width: frame.width, height: 1 };
+      const { fire, getMenu } = mount();
+      fire(makeEvent('right-press', 2, 1)); // menu at grid (1,0)
+      expect(getMenu()).not.toBeNull();
+      fire(makeEvent('left-press', 28, 1)); // grid x 27 > box width 21
+      expect(getMenu()).toBeNull();
+    });
+
+    it('a middle-press outside the menu closes it', () => {
+      frame = makeWideLinkFrame();
+      viewportRect = { x: 0, y: 0, width: frame.width, height: 1 };
+      const { fire, getMenu } = mount();
+      fire(makeEvent('right-press', 2, 1));
+      expect(getMenu()).not.toBeNull();
+      fire({ ...makeEvent('left-press', 28, 1), name: 'middle-press' });
+      expect(getMenu()).toBeNull();
+    });
+
+    it('a right-press over another cell re-opens the menu there', () => {
+      const { fire, getMenu } = mount({ sx: 5, sy: 0, ex: 8, ey: 0 });
+      fire(makeEvent('right-press', 2, 1)); // over the link
+      expect(getMenu()!.items.map((item) => item.id)).toEqual([
+        'open-link',
+        'copy-link',
+        'copy-selection',
+      ]);
+      fire(makeEvent('right-press', 7, 1)); // plain cell, selection active
+      expect(getMenu()!.items.map((item) => item.id)).toEqual([
+        'copy-selection',
+      ]);
+    });
+
+    it('Copy Selection copies the text snapshotted at menu-open time', () => {
+      const { fire, getMenu } = mount({ sx: 5, sy: 0, ex: 8, ey: 0 });
+      fire(makeEvent('right-press', 7, 1)); // menu at grid (6,0)
+      expect(getMenu()!.items.map((item) => item.id)).toEqual([
+        'copy-selection',
+      ]);
+      // The frame keeps streaming while the menu is open: the snapshot must
+      // win over a re-derivation against the new cells.
+      frame = {
+        ...frame,
+        cells: [[...'xxxx erin'].map((ch) => makeCell(ch))],
+      } as unknown as ReadonlyFrame;
+      // Item 0 at grid row 1 → terminal row 2, col inside the box.
+      fire(makeEvent('left-press', 8, 2));
+      expect(copyToClipboard).toHaveBeenCalledWith('here');
       expect(getMenu()).toBeNull();
     });
 
@@ -309,11 +454,11 @@ describe('ContentMouseController', () => {
       // Build fresh elements on every render: React bails out of re-rendering
       // a subtree handed the same element reference, which would hide
       // terminal-size changes from the controller.
-      const tree = (withController: boolean) => (
+      const tree = (withController: boolean, active = true) => (
         <ContextMenuProvider>
           {withController ? (
             <ContentMouseController
-              isActive
+              isActive={active}
               getViewportRect={() => viewportRect}
               hitTestScrollbar={() => false}
             />
@@ -322,8 +467,8 @@ describe('ContentMouseController', () => {
         </ContextMenuProvider>
       );
       const result = render(tree(true));
-      const rerenderWith = (withController: boolean) =>
-        result.rerender(tree(withController));
+      const rerenderWith = (withController: boolean, active = true) =>
+        result.rerender(tree(withController, active));
       const openMenu = () =>
         act(() => {
           const handler = vi.mocked(useMouseEvents).mock.calls.at(-1)![0];
@@ -340,6 +485,16 @@ describe('ContentMouseController', () => {
       // A view switch unmounts MainContent (and this controller) while the
       // provider-level menu would otherwise survive.
       rerenderWith(false);
+      expect(latestMenu()).toBeNull();
+    });
+
+    it('closes the menu when the controller deactivates while it is open', () => {
+      const { latestMenu, rerenderWith, openMenu } = mountWithProbe();
+      openMenu();
+      expect(latestMenu()).not.toBeNull();
+
+      // A dialog opening mid-interaction flips isActive to false.
+      rerenderWith(true, false);
       expect(latestMenu()).toBeNull();
     });
 

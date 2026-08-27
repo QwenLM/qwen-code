@@ -25,7 +25,8 @@ export default {
   spawn: [
     'bash',
     '-c',
-    `TMUX= FORCE_HYPERLINK=1 BROWSER=echo node dist/cli.js ` +
+    `TMUX= CI= CONTINUOUS_INTEGRATION= FORCE_HYPERLINK=1 BROWSER=echo ` +
+      `node dist/cli.js ` +
       `--auth-type openai ` +
       `--openai-base-url http://127.0.0.1:${MOCK_PORT}/v1 ` +
       `--openai-api-key sk-mock -m mock-model --approval-mode yolo`,

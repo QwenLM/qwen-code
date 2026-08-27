@@ -23,8 +23,9 @@ import { useContextMenu } from './ContextMenuContext.js';
  * `useKeypress`, which needs KeypressProvider) mounts only while open.
  *
  * Keyboard: ↑/↓ move the highlight, Enter executes, Esc closes. Mouse
- * hover / click are handled by {@link ContentMouseController}, which shares
- * the same geometry helpers so the two never disagree about the menu rect.
+ * hover / click are handled by {@link ContentMouseController}, which
+ * hit-tests with `contextMenuSize` — the border/padding encoded below must
+ * stay in sync with that helper.
  */
 export const ContextMenuOverlay: React.FC = () => {
   const { menu } = useContextMenu();
