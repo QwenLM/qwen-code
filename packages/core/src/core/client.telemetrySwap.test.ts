@@ -89,9 +89,6 @@ function makeEnv() {
   const config: any = {
     getSessionId: () => sessionId,
     getResumedSessionData: () => resumedData,
-    // initialize() on a resumed session asks the skill tool to restore its
-    // loaded skills via config.getToolRegistry().getTool(...).
-    getToolRegistry: () => ({ getTool: () => undefined }),
     swap(id: string, data?: ResumedSessionData) {
       sessionId = id;
       resumedData = data;
