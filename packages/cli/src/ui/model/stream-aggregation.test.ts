@@ -61,6 +61,21 @@ describe('createStreamAggregator', () => {
     expect(STREAM_UPDATE_WINDOW_MS).toBe(60);
   });
 
+  it('flushes at the default window when windowMs is omitted', () => {
+    vi.useFakeTimers();
+    try {
+      const h = createHarness();
+      h.push({ kind: 'text', value: 'a' });
+      expect(h.flushed).toEqual([]);
+      vi.advanceTimersByTime(STREAM_UPDATE_WINDOW_MS - 1);
+      expect(h.flushed).toEqual([]);
+      vi.advanceTimersByTime(1);
+      expect(h.flushed).toEqual([{ kind: 'text', value: 'a' }]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('coalesces consecutive same-group events inside one window', () => {
     vi.useFakeTimers();
     try {

@@ -6,7 +6,7 @@
 
 import { describe, expect, it } from 'vitest';
 import {
-  initialStreamingState,
+  initialStreamingModelState,
   reduceStreamEvent,
   reduceStreamEvents,
   selectIsDone,
@@ -14,10 +14,14 @@ import {
   selectItemById,
   selectItems,
 } from './streaming-model.js';
-import type { StreamingState, StreamEvent } from './streaming-model.js';
+import type {
+  HistoryItem,
+  StreamingModelState,
+  StreamEvent,
+} from './streaming-model.js';
 
-function reduceAll(events: StreamEvent[]): StreamingState {
-  return reduceStreamEvents(initialStreamingState, events);
+function reduceAll(events: StreamEvent[]): StreamingModelState {
+  return reduceStreamEvents(initialStreamingModelState, events);
 }
 
 describe('streamingModel', () => {
@@ -148,6 +152,40 @@ describe('streamingModel', () => {
     });
   });
 
+  describe('user events', () => {
+    it('produces a user item carrying text, promptId and sentToModel', () => {
+      const state = reduceAll([
+        {
+          type: 'user',
+          text: 'run the tests',
+          promptId: 'sess########7',
+          sentToModel: true,
+        },
+      ]);
+      const items = selectItems(state);
+      expect(items).toHaveLength(1);
+      expect(items[0]).toEqual({
+        kind: 'user',
+        id: 'user-0',
+        text: 'run the tests',
+        promptId: 'sess########7',
+        sentToModel: true,
+      });
+    });
+
+    it('closes a trailing streaming assistant item', () => {
+      const state = reduceAll([
+        { type: 'text', delta: 'intro' },
+        { type: 'user', text: 'next turn' },
+      ]);
+      expect(state.items[0]).toMatchObject({
+        kind: 'assistant',
+        streaming: false,
+      });
+      expect(state.items[1]).toMatchObject({ kind: 'user', text: 'next turn' });
+    });
+  });
+
   describe('task progress / end', () => {
     it('keeps only the tail of task progress lines', () => {
       const events: StreamEvent[] = [
@@ -167,6 +205,22 @@ describe('streamingModel', () => {
         done: false,
         progress: ['three', 'four', 'five'],
       });
+    });
+
+    it('ignores task-progress and task-end for unknown ids', () => {
+      const start = {
+        type: 'task-start',
+        id: 's1',
+        name: 'n',
+        description: 'd',
+      } as const;
+      const before = reduceAll([start]);
+      const after = reduceAll([
+        start,
+        { type: 'task-progress', id: 'ghost', line: 'nope' },
+        { type: 'task-end', id: 'ghost', tools: 1, seconds: 1, tokens: '1' },
+      ]);
+      expect(after.items).toEqual(before.items);
     });
 
     it('closes the task with formatted stats', () => {
@@ -263,6 +317,56 @@ describe('streamingModel', () => {
       expect(selectItemById(state, 's1')).toMatchObject({ done: true });
       expect(selectIsDone(state)).toBe(true);
     });
+  });
+
+  it('never mutates items held by earlier states on any updating branch', () => {
+    // Every branch that rewrites an existing item relies on
+    // replace-not-mutate discipline over objects shared by reference with
+    // every previously returned state, so fold one event per branch and
+    // deep-check each captured snapshot after the whole fold.
+    const scenarios: StreamEvent[][] = [
+      [
+        { type: 'text', delta: 'a' },
+        { type: 'text', delta: 'b' },
+      ],
+      [
+        { type: 'thinking', delta: 'a' },
+        { type: 'thinking', delta: 'b' },
+      ],
+      [
+        { type: 'tool-start', id: 't1', tool: 'Bash', title: 'ls' },
+        { type: 'tool-output', id: 't1', delta: 'x' },
+      ],
+      [
+        { type: 'tool-start', id: 't1', tool: 'Bash', title: 'ls' },
+        { type: 'tool-end', id: 't1', success: true, summary: 'ok' },
+      ],
+      [
+        { type: 'task-start', id: 's1', name: 'n', description: 'd' },
+        { type: 'task-progress', id: 's1', line: 'step' },
+      ],
+      [
+        { type: 'task-start', id: 's1', name: 'n', description: 'd' },
+        { type: 'task-end', id: 's1', tools: 1, seconds: 1, tokens: '1' },
+      ],
+    ];
+    for (const events of scenarios) {
+      let state = initialStreamingModelState;
+      const captured: Array<{
+        items: readonly HistoryItem[];
+        clone: HistoryItem[];
+      }> = [];
+      for (const event of events) {
+        state = reduceStreamEvent(state, event);
+        captured.push({
+          items: state.items,
+          clone: structuredClone([...state.items]),
+        });
+      }
+      for (const { items, clone } of captured) {
+        expect([...items]).toEqual(clone);
+      }
+    }
   });
 
   it('never mutates the previous state', () => {

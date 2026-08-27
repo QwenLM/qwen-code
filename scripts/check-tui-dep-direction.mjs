@@ -8,21 +8,27 @@
  *      react, solid, or @opentui/*, and no relative imports that reach
  *      into packages/cli.
  *   2. packages/cli/src/ui/model (framework-neutral streaming state) must
- *      not import react, solid, ink, or @opentui/* either, so any renderer
- *      binding can sit on top of it.
+ *      not import react, solid, ink, or @opentui/* either, and must be
+ *      self-contained — no relative import may resolve outside the
+ *      directory, so no framework-dependent sibling can leak in through a
+ *      relative path.
  *
  * Usage:  node scripts/check-tui-dep-direction.mjs
- * Exit 0 = all rules hold; exit 1 = violations found.
+ * Exit 0 = all rules hold; exit 1 = violations found (or the scan itself
+ * was incomplete — unlistable directories fail the gate instead of
+ * silently shrinking it; symlinks are followed, not skipped).
  *
- * Detection is a regex scan over comments/strings-masked source (static
- * imports, export-from, dynamic import(), require(), vi.mock()), not a full
- * parse — sufficient for dependency direction, deliberately dependency-free.
+ * Detection parses each file with the TypeScript compiler (already a repo
+ * devDependency) and walks ImportDeclaration / ExportDeclaration / dynamic
+ * import() / require() / vi.mock() nodes, so comments, strings, regex
+ * literals and template interpolations cannot mask or fake an import.
  */
 
-import { readdirSync, readFileSync } from 'node:fs';
+import { readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { dirname, extname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { exit, stdout } from 'node:process';
+import ts from 'typescript';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const CORE_SRC = join(repoRoot, 'packages', 'core', 'src');
@@ -36,38 +42,61 @@ const SOURCE_EXTENSIONS = new Set([
   '.jsx',
   '.mjs',
   '.cjs',
+  '.mts',
+  '.cts',
 ]);
 const SKIP_DIRS = new Set(['node_modules', 'dist', '.git']);
 
-const IMPORT_PATTERNS = [
-  {
-    kind: 'import',
-    re: /\bimport\s+(?:type\s+)?(?:[\s\S]*?\bfrom\s+)?(['"])([^'"\n]+)\1/g,
-  },
-  {
-    kind: 'dynamic-import',
-    re: /\bimport\s*\(\s*(['"])([^'"\n]+)\1\s*\)/g,
-  },
-  {
-    kind: 'export-from',
-    re: /\bexport\s+(?:\*|\{[\s\S]*?\})\s*from\s+(['"])([^'"\n]+)\1/g,
-  },
-  { kind: 'require', re: /\brequire\s*\(\s*(['"])([^'"\n]+)\1\s*\)/g },
-  { kind: 'vi.mock', re: /\bvi\.mock\s*\(\s*(['"])([^'"\n]+)\1/g },
-];
-
+/**
+ * Walk a directory tree collecting source files. A gate whose only product
+ * is trust must not shrink silently: symlinked entries are followed (with a
+ * realpath visited-set guarding cycles, so a committed symlink cannot evade
+ * the rules) and unlistable directories are collected as diagnostics for
+ * the caller to fail on.
+ */
 function listSourceFiles(root) {
   const files = [];
+  const unreadableDirs = [];
+  const visitedDirs = new Set();
   const walk = (dir) => {
+    let realDir;
+    try {
+      realDir = realpathSync(dir);
+    } catch (error) {
+      unreadableDirs.push(`${dir} (${error.message})`);
+      return;
+    }
+    if (visitedDirs.has(realDir)) return;
+    visitedDirs.add(realDir);
     let entries;
     try {
       entries = readdirSync(dir, { withFileTypes: true });
-    } catch {
+    } catch (error) {
+      unreadableDirs.push(`${dir} (${error.message})`);
       return;
     }
     for (const entry of entries) {
-      if (entry.isSymbolicLink()) continue;
       const full = join(dir, entry.name);
+      if (entry.isSymbolicLink()) {
+        // The target may be a file, a directory, or dangling; stat it so a
+        // committed symlink cannot evade either rule.
+        let stats;
+        try {
+          stats = statSync(full);
+        } catch (error) {
+          unreadableDirs.push(`${full} (${error.message})`);
+          continue;
+        }
+        if (stats.isDirectory()) {
+          if (!SKIP_DIRS.has(entry.name)) walk(full);
+        } else if (
+          stats.isFile() &&
+          SOURCE_EXTENSIONS.has(extname(entry.name))
+        ) {
+          files.push(full);
+        }
+        continue;
+      }
       if (entry.isDirectory()) {
         if (!SKIP_DIRS.has(entry.name)) walk(full);
       } else if (entry.isFile() && SOURCE_EXTENSIONS.has(extname(entry.name))) {
@@ -76,73 +105,86 @@ function listSourceFiles(root) {
     }
   };
   walk(root);
-  return files.sort();
+  return { files: files.sort(), unreadableDirs };
 }
 
 /**
- * Mask comment and string-literal regions so "import" text inside fixture
- * strings is not mistaken for a real import. Template literals are masked
- * whole, including any ${} interpolation (imports cannot appear there).
- * Returns an array of [start, end) spans.
+ * Extract import specifiers via the TypeScript AST. Only string-literal
+ * specifiers are reportable; computed ones (e.g. `import(variable)`) are
+ * skipped because no static specifier exists to classify.
  */
-function maskedSpans(source) {
-  const spans = [];
-  const n = source.length;
-  let i = 0;
-  while (i < n) {
-    const ch = source[i];
-    const next = source[i + 1];
-    if (ch === '/' && next === '/') {
-      const start = i;
-      while (i < n && source[i] !== '\n') i++;
-      spans.push([start, i]);
-      continue;
-    }
-    if (ch === '/' && next === '*') {
-      const start = i;
-      i += 2;
-      while (i < n && !(source[i] === '*' && source[i + 1] === '/')) i++;
-      i = Math.min(n, i + 2);
-      spans.push([start, i]);
-      continue;
-    }
-    if (ch === "'" || ch === '"' || ch === '`') {
-      const start = i;
-      i++;
-      while (i < n && source[i] !== ch) {
-        if (source[i] === '\\') i++;
-        i++;
-      }
-      i = Math.min(n, i + 1);
-      spans.push([start, i]);
-      continue;
-    }
-    i++;
-  }
-  return spans;
-}
-
-function isMasked(spans, index) {
-  return spans.some(([start, end]) => index >= start && index < end);
-}
-
-function findImports(source) {
-  const spans = maskedSpans(source);
+function findImports(source, fileName = 'module.ts') {
+  const sourceFile = ts.createSourceFile(
+    fileName,
+    source,
+    ts.ScriptTarget.Latest,
+    /* setParentNodes */ true,
+  );
   const found = [];
-  for (const { kind, re } of IMPORT_PATTERNS) {
-    re.lastIndex = 0;
-    let match;
-    while ((match = re.exec(source)) !== null) {
-      if (isMasked(spans, match.index)) continue;
-      const line = source.slice(0, match.index).split('\n').length;
-      found.push({ kind, spec: match[2], line });
+
+  const lineOf = (node) =>
+    sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile)).line +
+    1;
+  const record = (kind, node, specifier) => {
+    found.push({ kind, spec: specifier, line: lineOf(node) });
+  };
+
+  const visit = (node) => {
+    if (
+      ts.isImportDeclaration(node) &&
+      ts.isStringLiteral(node.moduleSpecifier)
+    ) {
+      record('import', node, node.moduleSpecifier.text);
+    } else if (
+      ts.isExportDeclaration(node) &&
+      node.moduleSpecifier &&
+      ts.isStringLiteral(node.moduleSpecifier)
+    ) {
+      record('export-from', node, node.moduleSpecifier.text);
+    } else if (ts.isCallExpression(node)) {
+      const [firstArg] = node.arguments;
+      if (
+        node.expression.kind === ts.SyntaxKind.ImportKeyword &&
+        firstArg &&
+        ts.isStringLiteral(firstArg)
+      ) {
+        record('dynamic-import', node, firstArg.text);
+      } else if (
+        ts.isIdentifier(node.expression) &&
+        node.expression.text === 'require' &&
+        firstArg &&
+        ts.isStringLiteral(firstArg)
+      ) {
+        record('require', node, firstArg.text);
+      } else if (
+        ts.isPropertyAccessExpression(node.expression) &&
+        ts.isIdentifier(node.expression.expression) &&
+        node.expression.expression.text === 'vi' &&
+        node.expression.name.text === 'mock' &&
+        firstArg &&
+        ts.isStringLiteral(firstArg)
+      ) {
+        record('vi.mock', node, firstArg.text);
+      }
     }
-  }
+    ts.forEachChild(node, visit);
+  };
+  visit(sourceFile);
   return found.sort((a, b) => a.line - b.line);
 }
 
+/**
+ * Classify a specifier into a banned framework family, treating each
+ * framework as its whole ecosystem (ink/react/solid prefixes and scoped
+ * ecosystem packages), matching how the migration isolates renderers.
+ */
 function bannedFamily(spec) {
-  if (spec === 'ink' || spec.startsWith('ink/') || spec.startsWith('ink-')) {
+  if (
+    spec === 'ink' ||
+    spec.startsWith('ink/') ||
+    spec.startsWith('ink-') ||
+    spec.startsWith('@inkjs/')
+  ) {
     return 'ink';
   }
   if (
@@ -155,7 +197,10 @@ function bannedFamily(spec) {
   if (
     spec === 'solid-js' ||
     spec.startsWith('solid-js/') ||
-    spec.startsWith('@solidjs/')
+    spec.startsWith('solid-') ||
+    spec.startsWith('@solidjs/') ||
+    spec.startsWith('@solid-') ||
+    spec.startsWith('@solid/')
   ) {
     return 'solid';
   }
@@ -166,14 +211,13 @@ function bannedFamily(spec) {
 }
 
 function checkRule({ label, root, rules }) {
-  stdout.write(`[rule] ${label}\n`);
-  const files = listSourceFiles(root);
+  const { files, unreadableDirs } = listSourceFiles(root);
   let specifiers = 0;
   const violations = [];
 
   for (const file of files) {
     const source = readFileSync(file, 'utf8');
-    for (const imp of findImports(source)) {
+    for (const imp of findImports(source, file)) {
       specifiers++;
       const rel = `${file.slice(repoRoot.length + 1)}:${imp.line}`;
       if (rules.noFramework) {
@@ -185,66 +229,93 @@ function checkRule({ label, root, rules }) {
           );
         }
       }
-      if (rules.noRelativeIntoCli && imp.spec.startsWith('.')) {
+      if (imp.spec.startsWith('.')) {
         const resolved = resolve(dirname(file), imp.spec);
         if (
-          resolved === CLI_PACKAGE ||
-          resolved.startsWith(CLI_PACKAGE + sep)
+          rules.noRelativeIntoCli &&
+          (resolved === CLI_PACKAGE || resolved.startsWith(CLI_PACKAGE + sep))
         ) {
           violations.push(
             `  ${rel}  ${imp.kind} '${imp.spec}'` +
               `  (relative import reaches into packages/cli)`,
           );
         }
+        if (
+          rules.selfContained &&
+          resolved !== root &&
+          !resolved.startsWith(root + sep)
+        ) {
+          violations.push(
+            `  ${rel}  ${imp.kind} '${imp.spec}'` +
+              `  (relative import escapes the framework-neutral directory)`,
+          );
+        }
       }
     }
   }
 
+  return {
+    label,
+    scanned: files.length,
+    specifiers,
+    violations,
+    unreadableDirs,
+  };
+}
+
+function printRule(result) {
+  stdout.write(`[rule] ${result.label}\n`);
   stdout.write(
-    `  scanned ${files.length} files, ${specifiers} import specifiers\n`,
+    `  scanned ${result.scanned} files, ${result.specifiers} import specifiers\n`,
   );
-  if (violations.length === 0) {
+  if (result.violations.length === 0) {
     stdout.write('  OK: no violations\n');
   } else {
-    for (const violation of violations) stdout.write(`${violation}\n`);
+    for (const violation of result.violations) {
+      stdout.write(`${violation}\n`);
+    }
   }
   stdout.write('\n');
-  return violations;
+}
+
+function requirePopulatedRoot(root, label) {
+  if (listSourceFiles(root).files.length === 0) {
+    stdout.write(`error: ${label} (${root}) not found or has no source files`);
+    stdout.write('\n');
+    exit(1);
+  }
 }
 
 function main() {
-  let failed = false;
-
-  if (listSourceFiles(CORE_SRC).length === 0) {
-    stdout.write(`error: ${CORE_SRC} not found or empty\n`);
-    exit(1);
-  }
+  requirePopulatedRoot(CORE_SRC, 'packages/core/src');
+  requirePopulatedRoot(UI_MODEL, 'packages/cli/src/ui/model');
 
   stdout.write(
     'TUI dependency-direction check (OpenTUI migration Phase 0)\n\n',
   );
 
-  const coreViolations = checkRule({
-    label: 'packages/core/src — framework-neutral business core',
-    root: CORE_SRC,
-    rules: { noFramework: true, noRelativeIntoCli: true },
-  });
-  failed ||= coreViolations.length > 0;
-
-  let modelViolations = [];
-  if (listSourceFiles(UI_MODEL).length > 0) {
-    modelViolations = checkRule({
+  const results = [
+    checkRule({
+      label: 'packages/core/src — framework-neutral business core',
+      root: CORE_SRC,
+      rules: { noFramework: true, noRelativeIntoCli: true },
+    }),
+    checkRule({
       label: 'packages/cli/src/ui/model — framework-neutral streaming state',
       root: UI_MODEL,
-      rules: { noFramework: true, noRelativeIntoCli: false },
-    });
-  } else {
-    stdout.write(
-      `[rule] packages/cli/src/ui/model — framework-neutral streaming state\n` +
-        `  directory absent or has no source files; nothing to check\n\n`,
-    );
+      rules: { noFramework: true, selfContained: true },
+    }),
+  ];
+
+  let failed = false;
+  for (const result of results) {
+    printRule(result);
+    failed ||= result.violations.length > 0;
+    for (const dir of result.unreadableDirs) {
+      stdout.write(`error: could not list directory: ${dir}\n`);
+      failed = true;
+    }
   }
-  failed ||= modelViolations.length > 0;
 
   if (failed) {
     stdout.write('FAIL — dependency-direction violations found.\n');
@@ -253,8 +324,11 @@ function main() {
   stdout.write('PASS — dependency direction holds.\n');
 }
 
-export { bannedFamily, checkRule, findImports };
+export { bannedFamily, checkRule, findImports, listSourceFiles };
 
-if (resolve(process.argv[1] ?? '') === fileURLToPath(import.meta.url)) {
+if (
+  process.argv[1] &&
+  realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)
+) {
   main();
 }

@@ -11,7 +11,8 @@
  * source of truth for history.
  *
  * This module must not import react / solid / ink / @opentui — the rule is
- * enforced by `scripts/check-tui-dep-direction.mjs`.
+ * enforced by `scripts/check-tui-dep-direction.mjs` (wired into CI via
+ * `npm run check:tui-dep-direction`).
  */
 
 export type StreamEvent =
@@ -71,7 +72,12 @@ export type HistoryItem =
       stats?: string;
     };
 
-export interface StreamingState {
+/**
+ * Fold state of the streamed history. Named distinctly from the UI
+ * lifecycle enum `StreamingState` (ui/types.ts) — this one tracks history
+ * items, that one tracks Idle/Responding/WaitingForConfirmation.
+ */
+export interface StreamingModelState {
   readonly items: readonly HistoryItem[];
   readonly streaming: boolean;
   readonly done: boolean;
@@ -79,7 +85,7 @@ export interface StreamingState {
   readonly nextSeq: number;
 }
 
-export const initialStreamingState: StreamingState = {
+export const initialStreamingModelState: StreamingModelState = {
   items: [],
   streaming: false,
   done: false,
@@ -101,9 +107,9 @@ function findItemIndex(
  * Never mutates the input state.
  */
 export function reduceStreamEvent(
-  state: StreamingState,
+  state: StreamingModelState,
   event: StreamEvent,
-): StreamingState {
+): StreamingModelState {
   const items = [...state.items];
   const last = items[items.length - 1];
   let nextSeq = state.nextSeq;
@@ -234,9 +240,12 @@ export function reduceStreamEvent(
       break;
     }
     default: {
-      // Informational/lifecycle events (info, warning, error, goal state,
-      // live tool/task progress…) do not alter the rendered history items.
-      break;
+      // Exhaustiveness guard: a new StreamEvent variant without a reducer
+      // case must fail compilation, not silently drop from history.
+      const unhandled: never = event;
+      throw new Error(
+        `unhandled stream event: ${(unhandled as { type: string }).type}`,
+      );
     }
   }
 
@@ -250,26 +259,28 @@ export function reduceStreamEvent(
 
 /** Fold a sequence of events over a starting state. */
 export function reduceStreamEvents(
-  state: StreamingState,
+  state: StreamingModelState,
   events: readonly StreamEvent[],
-): StreamingState {
+): StreamingModelState {
   return events.reduce(reduceStreamEvent, state);
 }
 
-export function selectItems(state: StreamingState): readonly HistoryItem[] {
+export function selectItems(
+  state: StreamingModelState,
+): readonly HistoryItem[] {
   return state.items;
 }
 
-export function selectIsStreaming(state: StreamingState): boolean {
+export function selectIsStreaming(state: StreamingModelState): boolean {
   return state.streaming;
 }
 
-export function selectIsDone(state: StreamingState): boolean {
+export function selectIsDone(state: StreamingModelState): boolean {
   return state.done;
 }
 
 export function selectItemById(
-  state: StreamingState,
+  state: StreamingModelState,
   id: string,
 ): HistoryItem | undefined {
   return state.items.find((item) => item.id === id);

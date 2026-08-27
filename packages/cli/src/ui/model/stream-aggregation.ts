@@ -7,16 +7,17 @@
 /**
  * Framework-neutral stream aggregation window.
  *
- * One place for the 60ms coalescing semantics shared by the renderers
- * (see docs/design/screen-mode-contracts.md, "streaming aggregation"):
+ * One place for the 60ms coalescing semantics shared by the renderers:
  * token-level events arrive far faster than a terminal frame, so
  * consecutive events merge into one group per window, while consumers
  * flush pending groups at turn boundaries (flushNow) or drop them on a
  * failed attempt (discard), preserving cross-kind ordering and
- * turn-boundary semantics.
+ * turn-boundary semantics. The constant below and its tests are the
+ * canonical record of the window value until a design document lands.
  *
  * This module must not import react / solid / ink / @opentui — the rule is
- * enforced by `scripts/check-tui-dep-direction.mjs`.
+ * enforced by `scripts/check-tui-dep-direction.mjs` (wired into CI via
+ * `npm run check:tui-dep-direction`).
  */
 
 /** The aggregation window both renderers coalesce stream events into. */
