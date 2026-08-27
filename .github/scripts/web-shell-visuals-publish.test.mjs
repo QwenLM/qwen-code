@@ -40,12 +40,13 @@ const workflow = readFileSync(
 
 test('workflow hosts visuals on OSS without writing Git refs', () => {
   assert.match(workflow, /scripts\/upload-aliyun-oss-assets\.js/);
-  // Head SHA AND run id: GitHub's camo proxy caches comment images by URL,
-  // so a re-run for the same head must not write back over the object the
-  // previous comment already published.
+  // Head SHA, run id AND run attempt: GitHub's camo proxy caches comment
+  // images by URL, so a re-run for the same head must not write back over
+  // the object the previous comment already published — and the run id is
+  // stable across re-run attempts, so the attempt must be in the key too.
   assert.match(
     workflow,
-    /pr-assets\/web-shell-visuals\/\$\{PR\}\/\$\{RUN_HEAD_SHA\}\/\$\{RUN_ID\}/,
+    /pr-assets\/web-shell-visuals\/\$\{PR\}\/\$\{RUN_HEAD_SHA\}\/\$\{RUN_ID\}\/\$\{RUN_ATTEMPT\}/,
   );
   assert.match(workflow, /ALIYUN_OSS_PUBLIC_BASE_URL/);
   assert.match(workflow, /PATH="\$trusted_bin" "\$node_bin"/);
@@ -103,6 +104,7 @@ function runHostingBlock(
     publicBaseUrl = 'https://assets.example.test',
     uploadFails = false,
     runId = '900001',
+    runAttempt = '1',
   } = {},
 ) {
   const dir = mkdtempSync(join(tmpdir(), 'visuals-hosting-'));
@@ -166,6 +168,7 @@ function runHostingBlock(
     `PR=${pr}`,
     `RUN_HEAD_SHA=${headSha}`,
     `RUN_ID=${runId}`,
+    `RUN_ATTEMPT=${runAttempt}`,
     `STAGE=${JSON.stringify(stage)}`,
     'ALIYUN_OSS_BUCKET=assets-bucket',
     `ALIYUN_OSS_PUBLIC_BASE_URL=${JSON.stringify(publicBaseUrl)}`,
@@ -185,11 +188,11 @@ function runHostingBlock(
       OSS_STUB_FAIL: uploadFails ? '1' : '0',
     },
   });
-  return { res, recordPath, stubRoot, pr, headSha, runId, runnerTemp };
+  return { res, recordPath, stubRoot, pr, headSha, runId, runAttempt, runnerTemp };
 }
 
 test('hosting block uploads staged images to the exact prefix RAW_BASE promises', () => {
-  const { res, recordPath, stubRoot, pr, headSha, runId, runnerTemp } =
+  const { res, recordPath, stubRoot, pr, headSha, runId, runAttempt, runnerTemp } =
     runHostingBlock(true);
   assert.equal(res.status, 0, res.stderr);
   // Flag wiring: the uploader gets the bucket, the credential file the
@@ -198,7 +201,7 @@ test('hosting block uploads staged images to the exact prefix RAW_BASE promises'
   assert.deepEqual(record, {
     bucket: 'assets-bucket',
     config: `${runnerTemp}/.ossutilconfig`,
-    prefix: `pr-assets/web-shell-visuals/${pr}/${headSha}/${runId}`,
+    prefix: `pr-assets/web-shell-visuals/${pr}/${headSha}/${runId}/${runAttempt}`,
   });
   // Upload-prefix ↔ URL agreement: the objects land exactly where RAW_BASE
   // (the comment's image base URL) points.
@@ -211,20 +214,21 @@ test('hosting block uploads staged images to the exact prefix RAW_BASE promises'
       pr,
       headSha,
       runId,
+      runAttempt,
     ),
   ).sort();
   assert.deepEqual(hosted, ['home-light.png', 'model-switch.gif']);
   assert.match(
     res.stdout,
     new RegExp(
-      `^RAW_BASE=https://assets\\.example\\.test/pr-assets/web-shell-visuals/${pr}/${headSha}/${runId}$`,
+      `^RAW_BASE=https://assets\\.example\\.test/pr-assets/web-shell-visuals/${pr}/${headSha}/${runId}/${runAttempt}$`,
       'm',
     ),
   );
   assert.match(
     res.stdout,
     new RegExp(
-      `Web-shell visuals hosted at https://assets\\.example\\.test/pr-assets/web-shell-visuals/${pr}/${headSha}/${runId}\\.`,
+      `Web-shell visuals hosted at https://assets\\.example\\.test/pr-assets/web-shell-visuals/${pr}/${headSha}/${runId}/${runAttempt}\\.`,
     ),
   );
 });
@@ -246,6 +250,27 @@ test('hosting block gives a re-run of the same head a fresh, non-colliding prefi
   assert.ok(prefixOf(second).startsWith(head));
 });
 
+// A maintainer re-run of the SAME workflow run keeps its run id — only
+// run_attempt increments. Without the attempt segment the re-run would
+// overwrite the exact object keys the attempt-1 comment already references
+// (and camo-cached), so attempts of one run must land on distinct prefixes.
+test('hosting block gives re-run attempts of the SAME run distinct prefixes', () => {
+  const first = runHostingBlock(true, { runId: '900001', runAttempt: '1' });
+  assert.equal(first.res.status, 0, first.res.stderr);
+  const second = runHostingBlock(true, { runId: '900001', runAttempt: '2' });
+  assert.equal(second.res.status, 0, second.res.stderr);
+  const prefixOf = (r) => JSON.parse(readFileSync(r.recordPath, 'utf8')).prefix;
+  assert.equal(
+    prefixOf(first),
+    `pr-assets/web-shell-visuals/${first.pr}/${first.headSha}/900001/1`,
+  );
+  assert.equal(
+    prefixOf(second),
+    `pr-assets/web-shell-visuals/${first.pr}/${first.headSha}/900001/2`,
+  );
+  assert.notEqual(prefixOf(first), prefixOf(second));
+});
+
 test('hosting block skips the uploader entirely on the no-change arm', () => {
   const { res, recordPath } = runHostingBlock(false);
   assert.equal(res.status, 0, res.stderr);
@@ -262,14 +287,14 @@ test('hosting block aborts without publishing a URL when upload fails', () => {
 });
 
 test('hosting block strips a trailing slash from the public base URL', () => {
-  const { res, pr, headSha, runId } = runHostingBlock(true, {
+  const { res, pr, headSha, runId, runAttempt } = runHostingBlock(true, {
     publicBaseUrl: 'https://assets.example.test/',
   });
   assert.equal(res.status, 0, res.stderr);
   assert.match(
     res.stdout,
     new RegExp(
-      `^RAW_BASE=https://assets\\.example\\.test/pr-assets/web-shell-visuals/${pr}/${headSha}/${runId}$`,
+      `^RAW_BASE=https://assets\\.example\\.test/pr-assets/web-shell-visuals/${pr}/${headSha}/${runId}/${runAttempt}$`,
       'm',
     ),
   );

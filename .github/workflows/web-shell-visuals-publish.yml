@@ -111,6 +111,10 @@ jobs:
         env:
           GH_TOKEN: '${{ secrets.CI_BOT_PAT }}'
           RUN_ID: '${{ github.event.workflow_run.id }}'
+          # The run id is stable across re-run attempts — only the attempt
+          # number increments — so it alone cannot keep a re-run off the
+          # previous attempt's object keys in the OSS prefix below.
+          RUN_ATTEMPT: '${{ github.event.workflow_run.run_attempt }}'
           RUN_URL: '${{ github.event.workflow_run.html_url }}'
           # Authenticated (NOT artifact-sourced) head SHA of the run that
           # triggered this publish — used to bind the artifact to its real PR.
@@ -235,19 +239,23 @@ jobs:
           gate
 
           # --- Host on Aliyun OSS -------------------------------------------
-          # Head SHA *and* run id, so every publish writes a prefix nothing has
-          # ever served before. The run id is not decoration: GitHub renders
-          # comment images through its camo proxy, which caches by URL, so
-          # re-running a preview for the SAME head onto the same object keys
-          # would leave reviewers looking at the previous run's screenshots.
-          # The old design got this free from the per-run commit SHA in the raw
-          # URL; the verify lane keeps it via <run-id>-<attempt>.
+          # Head SHA, run id *and* run attempt, so every publish writes a
+          # prefix nothing has ever served before. The run id is not
+          # decoration: GitHub renders comment images through its camo proxy,
+          # which caches by URL, so re-running a preview for the SAME head
+          # onto the same object keys would leave reviewers looking at the
+          # previous run's screenshots. The run id alone is not enough either:
+          # it is stable across re-run attempts (only run_attempt increments),
+          # so the attempt segment keeps a maintainer re-run off the exact
+          # keys the previous attempt's comment already references. The old
+          # design got this free from the per-run commit SHA in the raw URL;
+          # the verify lane keeps it via <run-id>-<attempt>.
           # Host the images ONLY when there are changed views. A no-change run
           # skips the upload entirely; RAW_BASE stays empty and the
           # comment below is image-less ("no screenshot changes").
           RAW_BASE=''
           if [ "${HAS_IMAGES}" = "1" ]; then
-            ASSET_PREFIX="pr-assets/web-shell-visuals/${PR}/${RUN_HEAD_SHA}/${RUN_ID}"
+            ASSET_PREFIX="pr-assets/web-shell-visuals/${PR}/${RUN_HEAD_SHA}/${RUN_ID}/${RUN_ATTEMPT}"
             # Same PATH discipline as qwen-triage.yml's publish-verify: never
             # resolve node or ossutil through the shared $RUNNER_TEMP. node
             # is resolved under the inherited PATH and ossutil runs from a

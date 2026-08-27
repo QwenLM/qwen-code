@@ -27,12 +27,15 @@ three-attempt retry policy and publishes objects with `public-read` ACL.
 Web Shell previews use this immutable prefix:
 
 ```text
-pr-assets/web-shell-visuals/<pr>/<head-sha>/<run-id>/
+pr-assets/web-shell-visuals/<pr>/<head-sha>/<run-id>/<run-attempt>/
 ```
 
 An object key is never written twice. The head SHA binds a URL to the code it
 depicts; the run id keeps a re-run of that same head from writing back over the
-objects an already-posted comment references. That matters because GitHub
+objects an already-posted comment references. The run id alone would not be
+enough: it is stable across re-run attempts (only the attempt number
+increments), so the run attempt segment keeps a maintainer re-run of the same
+workflow run off the previous attempt's keys too. That matters because GitHub
 serves comment images through a caching image proxy: reusing a key would leave
 reviewers looking at the previous run's screenshots at a URL whose bytes had
 changed. The Git-backed design got this property free from the per-run commit
