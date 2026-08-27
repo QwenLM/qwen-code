@@ -230,6 +230,59 @@ describe('installTerminalResizeReflow (VP incremental rendering)', () => {
     }
   });
 
+  it('does not clobber the frame model on a mid-content erase sequence', () => {
+    // R10-1: a benign write merely CONTAINING eraseLines(1) mid-content
+    // (echoed nested-TUI output, a library writing stdout directly) is not
+    // an erase-prefixed frame write. The erase match must anchor to the
+    // write head; otherwise the tail after the mid-content match clobbers
+    // the frame model and the wake repaint replays the fragment.
+    const stdout = new FakeStdout();
+    const { restore, repaint } = installTerminalResizeReflow(
+      stdout as unknown as NodeJS.WriteStream,
+      { virtualViewport: true },
+    );
+    try {
+      const frame = frameLines(20, 10);
+      stdout.write(ansiEscapes.eraseLines(10) + frame.join('\n'));
+      stdout.write(`log ${ESC}2K${ESC}G noise`);
+      stdout.written.length = 0;
+      repaint!();
+      expect(stdout.written.length).toBe(1);
+      const replay = stdout.written[0]!;
+      expect(replay.startsWith(ansiEscapes.clearViewport)).toBe(true);
+      // The anchored frame survives; the log fragment does not replace it.
+      expect(replay).toContain('line-0-');
+      expect(replay).toContain('line-9-');
+      expect(replay).not.toContain(' noise');
+    } finally {
+      restore();
+    }
+  });
+
+  it('passes a mid-content erase write through an armed clear window unspliced', () => {
+    // R10-1 clear-window variant: inside the post-shrink window, ordinary
+    // erase-prefixed writes get CLEAR_VIEWPORT spliced in — a write only
+    // CONTAINING the erase sequence mid-content must pass through as-is,
+    // not blank the screen mid-log-write.
+    const stdout = new FakeStdout();
+    const { restore } = installTerminalResizeReflow(
+      stdout as unknown as NodeJS.WriteStream,
+      { virtualViewport: true },
+    );
+    try {
+      const frame = frameLines(20, 10);
+      stdout.write(ansiEscapes.eraseLines(10) + frame.join('\n'));
+      stdout.columns = 12;
+      stdout.emit('resize');
+      const write = `log ${ESC}2K${ESC}G noise`;
+      stdout.written.length = 0;
+      stdout.write(write);
+      expect(stdout.written).toEqual([write]);
+    } finally {
+      restore();
+    }
+  });
+
   it('preserves trailing cursor suffixes across diff application', () => {
     const stdout = new FakeStdout();
     const { restore, repaint } = installTerminalResizeReflow(

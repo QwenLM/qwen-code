@@ -61,6 +61,20 @@ const ERASE_LINES_PATTERN = createEraseLinesPattern();
 // eslint-disable-next-line no-control-regex
 const VP_ERASE_LINES_RE = /(?:\u001B\[2K\u001B\[1A)*\u001B\[2K\u001B\[G/;
 
+/**
+ * A VP erase match is an erase-prefixed FRAME write only at the write head:
+ * real Ink frame writes start with the erase sequence (possibly after cursor
+ * positioning / other control bytes), never after printable content. A
+ * benign write merely CONTAINING the sequence mid-content (echoed
+ * nested-TUI output, a library writing stdout directly) must stay an
+ * ordinary content write — otherwise its tail clobbers the frame model and,
+ * inside the post-shrink clear window, gets CLEAR_VIEWPORT spliced into the
+ * middle of the write (R10-1).
+ */
+function vpEraseMatchAtWriteHead(chunk: string, matchIndex: number): boolean {
+  return stripAnsi(chunk.slice(0, matchIndex)).trim() === '';
+}
+
 // Live frames are >= 8 rows; shorter printable bursts (console output, small
 // redraws) must not be mistaken for a frame and clobber the model.
 const MIN_FRAME_LINES = 8;
@@ -593,7 +607,7 @@ export function installTerminalResizeReflow(
       const match = (isVP ? VP_ERASE_LINES_RE : ERASE_LINES_PATTERN).exec(
         chunk,
       );
-      if (match) {
+      if (match && (!isVP || vpEraseMatchAtWriteHead(chunk, match.index))) {
         const content = chunk.slice(match.index + match[0].length);
         const eraseCount = countOccurrences(match[0], ERASE_LINE);
         // VP incremental shrink-diff frames carry the erase prefix in front
