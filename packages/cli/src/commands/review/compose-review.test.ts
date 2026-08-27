@@ -1984,6 +1984,39 @@ describe('composeReview — pre-verify carried-ledger dedup disclosure (#10105)'
     // The shapeless id is counted but never quoted — the titles stay in the
     // report; only ids the two shape tests vouch for reach the posted body.
     expect(r.body).not.toContain('not-an-id');
+    // Not low signal: the reviewers DID report findings — this round set
+    // them aside as carried. The fixture's srcDiffLines already exceed the
+    // threshold, so the carve-out is the only thing keeping the false
+    // "none of the N review agents reported a finding" claim out of the
+    // verdict line, the composed JSON and the archived report.
+    expect(r.lowSignal).toBeNull();
+  });
+
+  it('a dedup-only APPROVE keeps its paragraph break before the disclosure', () => {
+    const r = composeReview(input(planWithReport()));
+    // The separator ternary's dedup arm is the only thing standing between
+    // the verdict sentence and a wall-of-text weld on this branch.
+    expect(r.body).toContain(
+      'No blocking issues. LGTM! ✅\n\n4 candidate finding(s)',
+    );
+  });
+
+  it('the set-aside disclosure trims on its own rank, never as the deferral list', () => {
+    // A round that set candidates aside, has zero posture deferrals (an
+    // all-Critical shape), and overflows the body budget: every trim
+    // surface keys on the rank that went, so the notice must name the
+    // disclosure itself — not a "deferred-findings list" that does not
+    // exist — and the archived `bodyTrim.deferralList` pointer must stay
+    // false. The blocker is far past the budget, so the body lands on the
+    // truncation path, exactly the shape the round-1 probe measured.
+    const r = composeReview(
+      input(planWithReport(), { bodyCriticals: ['B'.repeat(60_000)] }),
+    );
+    expect(r.body.length).toBeLessThanOrEqual(65536);
+    expect(r.body).toContain('the carried-ledger dedup disclosure did not fit');
+    expect(r.body).not.toContain('the deferred-findings list');
+    expect(r.bodyTrim.deferralList).toBe(false);
+    expect(r.bodyTrim.sections).toBeGreaterThan(0);
   });
 
   it('renders on a blocking event too — the drop happened either way', () => {

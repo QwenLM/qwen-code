@@ -277,6 +277,34 @@ describe('runDedupCandidates — the deferral half reads the findings artifact',
     writeFileSync(join(reviewsDir, `2026-08-25-101010-pr-${PR}.json`), '{oops');
     expect(run([candidate()]).sources.artifact).toBeNull();
   });
+
+  it('a low-confidence deferral never absorbs a candidate', () => {
+    // Terminal-only: it is on no ledger, on no standing deferral record,
+    // and Step 6 never rules on it — a match would simply vanish, the
+    // unrecoverable direction the module header names.
+    writeArtifact([deferred({ confidence: 'low' })]);
+    expect(run([candidate()]).droppedCount).toBe(0);
+    // The control: the identical entry at high confidence still drops.
+    writeArtifact([deferred({ confidence: 'high' })]);
+    expect(run([candidate()]).droppedCount).toBe(1);
+  });
+
+  it('a deferral the fix run closed never absorbs a re-derivation', () => {
+    // `fixed` and `no_change_needed` both take the claim off the plate
+    // (findings.ts: one applied, one retracted), so the entry is no longer
+    // standing — matching it would lose a regression or a revival.
+    writeArtifact([deferred({ outcome: 'fixed' })]);
+    expect(run([candidate()]).droppedCount).toBe(0);
+    writeArtifact([deferred({ outcome: 'no_change_needed' })]);
+    expect(run([candidate()]).droppedCount).toBe(0);
+  });
+
+  it('a skipped or outcome-less deferral stays standing and still absorbs', () => {
+    writeArtifact([deferred({ outcome: 'skipped' })]);
+    expect(run([candidate()]).droppedCount).toBe(1);
+    writeArtifact([deferred()]);
+    expect(run([candidate()]).droppedCount).toBe(1);
+  });
 });
 
 describe('runDedupCandidates — the report on disk', () => {
@@ -313,6 +341,21 @@ describe('runDedupCandidates — the report on disk', () => {
     expect(r2.kept[0].file).toBe('src/new.ts');
   });
 
+  it('a repeated invocation over overlapping candidates counts each drop once', () => {
+    // The orchestrator retries a lost tool result with the same candidates
+    // file, and a Step 5 reporting round re-runs before rewriting it: the
+    // merge must identity-dedupe, or the posted disclosure double-counts.
+    writeLedger([entry()]);
+    const plan = writePlan();
+    runDedupCandidates({ plan, candidates: writeCandidates([candidate()]) });
+    const r2 = runDedupCandidates({
+      plan,
+      candidates: writeCandidates([candidate()]),
+    });
+    expect(r2.droppedCount).toBe(1);
+    expect(r2.dropped.map((d) => d.matchedId)).toEqual(['R1-2']);
+  });
+
   it('a report bound to another diff is replaced whole, never merged', () => {
     writeLedger([entry()]);
     const plan = writePlan();
@@ -323,6 +366,24 @@ describe('runDedupCandidates — the report on disk', () => {
       candidates: writeCandidates([candidate()]),
     });
     expect(r2.droppedCount).toBe(1);
+  });
+
+  it('keeps every candidate when the diff cannot be hashed — the drop could not be disclosed', () => {
+    // `ledgerDedupFacts` reads only a report hash-bound to this round's
+    // diff, so an unhashable diff would set candidates aside with no
+    // disclosure ever rendering — the script-lint gate this module
+    // imitates fails closed on the same absent hash; the dedup fails open.
+    writeLedger([entry()]);
+    const absent = run([candidate()], {
+      diffPathAbsolute: join(planDir, 'absent.diff'),
+    });
+    expect(absent.droppedCount).toBe(0);
+    expect(absent.kept).toHaveLength(1);
+    expect(absent.note).toContain('dedup skipped');
+    // fetch-pr's documented partition-failure fallback writes the field null.
+    const nullDiff = run([candidate()], { diffPathAbsolute: null });
+    expect(nullDiff.droppedCount).toBe(0);
+    expect(nullDiff.kept).toHaveLength(1);
   });
 
   it('refuses an unreadable plan or candidates file with a clean message', () => {

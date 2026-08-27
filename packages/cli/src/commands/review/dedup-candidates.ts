@@ -138,7 +138,6 @@ export interface LedgerDedupReport {
 interface DedupArgs {
   plan: string;
   candidates: string;
-  out?: string;
 }
 
 /**
@@ -309,11 +308,15 @@ function postedEntries(
  * artifact for this PR (`.qwen/reviews/<date>-<time>-pr-<n>.json`). Only the
  * `D<round>-<n>` entries participate: a posted finding is matched through
  * the side file above (the authoritative cross-environment work list), and
- * an artifact `R` entry may predate rounds the ledger has since ruled — while
- * a low-confidence terminal-only finding must never absorb a candidate at
- * all, because nothing downstream would rule on it and the claim would
- * simply vanish. Local-only by nature, exactly like the incremental cache:
- * a CI or fresh-clone round has no artifact and loses only the deferral half.
+ * an artifact `R` entry may predate rounds the ledger has since ruled —
+ * while a low-confidence terminal-only finding must never absorb a
+ * candidate at all, because nothing downstream would rule on it and the
+ * claim would simply vanish, and a deferral the fix run closed (`fixed`,
+ * or `no_change_needed` — findings.ts takes both off the reader's plate)
+ * is no longer standing, so matching it would lose a regression or a
+ * revival of the very claim it closed. Local-only by nature, exactly like
+ * the incremental cache: a CI or fresh-clone round has no artifact and
+ * loses only the deferral half.
  */
 function deferredEntries(
   planDir: string,
@@ -345,11 +348,18 @@ function deferredEntries(
     const f = raw as {
       id?: unknown;
       severity?: unknown;
+      confidence?: unknown;
+      outcome?: unknown;
       summary?: unknown;
       shortSummary?: unknown;
       locations?: unknown;
     };
     if (typeof f?.id !== 'string' || !DEFERRED_ID_SHAPE.test(f.id)) continue;
+    // The id shape admits; the entry's own state decides. A low-confidence
+    // entry is terminal-only and never ruled on, and a closed outcome is no
+    // longer standing — either absorbing a candidate would vanish the claim.
+    if (f.confidence !== 'high') continue;
+    if (f.outcome === 'fixed' || f.outcome === 'no_change_needed') continue;
     const texts = [f.summary, f.shortSummary].filter(
       (t): t is string => typeof t === 'string' && t.trim() !== '',
     );
@@ -395,6 +405,7 @@ export function runDedupCandidates(args: DedupArgs): LedgerDedupReport {
 
   const planDir = dirname(resolve(args.plan));
   const pr = isPositivePrNumber(plan.prNumber) ? plan.prNumber : undefined;
+  const diffHash = diffHashOf(plan.diffPathAbsolute);
   const posted = pr !== undefined ? postedEntries(planDir, pr) : null;
   const deferred = pr !== undefined ? deferredEntries(planDir, pr) : null;
   // Posted first: when a claim exists in both carriers, the drop should cite
@@ -403,25 +414,34 @@ export function runDedupCandidates(args: DedupArgs): LedgerDedupReport {
 
   const kept: DedupCandidate[] = [];
   const dropped: DroppedCandidate[] = [];
-  for (const candidate of candidates) {
-    const match = carried.find((entry) => candidateMatches(candidate, entry));
-    if (!match) {
-      kept.push(candidate);
-      continue;
+  if (diffHash === undefined) {
+    // The drop is irreversible and the disclosure is keyed to a report
+    // hash-bound to THIS round's diff — an unhashable diff would set
+    // candidates aside with nothing `ledgerDedupFacts` can ever render.
+    // Dedup is an optimization, not a gate: keep everything. The
+    // script-lint gate this module imitates fails closed on the same
+    // absent hash; here failing open is the conservative direction.
+    kept.push(...candidates);
+  } else {
+    for (const candidate of candidates) {
+      const match = carried.find((entry) => candidateMatches(candidate, entry));
+      if (!match) {
+        kept.push(candidate);
+        continue;
+      }
+      dropped.push({
+        file: candidate.file,
+        ...(candidate.line !== undefined ? { line: candidate.line } : {}),
+        title: candidate.title,
+        severity: candidate.severity,
+        matchedId: match.id,
+        matchedTitle: match.texts[0],
+        via: match.via,
+      });
     }
-    dropped.push({
-      file: candidate.file,
-      ...(candidate.line !== undefined ? { line: candidate.line } : {}),
-      title: candidate.title,
-      severity: candidate.severity,
-      matchedId: match.id,
-      matchedTitle: match.texts[0],
-      via: match.via,
-    });
   }
 
-  const diffHash = diffHashOf(plan.diffPathAbsolute);
-  const outPath = resolve(args.out ?? join(planDir, ledgerDedupReportName(pr)));
+  const outPath = join(planDir, ledgerDedupReportName(pr));
   // A repeat invocation within the round (a Step 5 reporting round's fresh
   // findings) accumulates: the disclosure reads ONE report, and overwriting
   // would erase the earlier batches' drops from it. A report bound to a
@@ -442,6 +462,19 @@ export function runDedupCandidates(args: DedupArgs): LedgerDedupReport {
   } catch {
     // No usable prior report — this invocation's drops stand alone.
   }
+  // Identity-dedupe the merge: a within-round retry re-runs the SAME
+  // candidates file, and a cross-run leftover merges a same-diff report —
+  // either would otherwise count one set-aside candidate twice in the
+  // posted disclosure.
+  const dropIdentity = (d: DroppedCandidate): string =>
+    [d.file, d.line ?? '', d.title, d.matchedId].join('\u0000');
+  const seen = new Set<string>();
+  cumulative = cumulative.filter((d) => {
+    const key = dropIdentity(d);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 
   const parts = [
     `Carried-ledger dedup: ${candidates.length} candidate(s), ` +
@@ -461,6 +494,11 @@ export function runDedupCandidates(args: DedupArgs): LedgerDedupReport {
       ? `Deferral record: ${deferred.name}, ${deferred.entries.length} entries.`
       : `No findings artifact for this PR on this machine — deferral dedup skipped.`,
   );
+  if (diffHash === undefined) {
+    parts.push(
+      `The plan's diff could not be hashed — dedup skipped, every candidate kept.`,
+    );
+  }
   const report: LedgerDedupReport = {
     v: 1,
     ...(diffHash ? { diffHash } : {}),
@@ -549,11 +587,6 @@ export const dedupCandidatesCommand: CommandModule = {
         demandOption: true,
         describe:
           'JSON array of pooled candidates: {file, line?, title, severity}, extra fields ride through',
-      })
-      .option('out', {
-        type: 'string',
-        describe:
-          'Report path (default: qwen-review-pr-<n>-ledger-dedup.json beside the plan)',
       }),
   handler: (argv) => {
     const args = argv as unknown as DedupArgs;
