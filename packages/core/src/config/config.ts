@@ -6568,6 +6568,7 @@ export class Config {
     PreparedMemoryRecallTransition | undefined
   > {
     if (!this.isManagedMemoryAvailable()) return undefined;
+    if (this.memoryRecallMode === 'structured') return undefined;
     const status = await this.scanMemoryRecallCorpusStatus();
     const to: MemoryRecallMode = status.ready ? 'structured' : 'legacy';
     if (to === this.memoryRecallMode) {

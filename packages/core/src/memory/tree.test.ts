@@ -251,4 +251,35 @@ describe('auto memory tree rendering', () => {
       '└── [project:project/present.md] project/present.md',
     );
   });
+
+  it('omits trailing leaves to keep the focused subtree within budget', () => {
+    const memories = Array.from({ length: 5 }, (_, index) =>
+      doc(`project/${index}.md`, {
+        description: `${index}-${'detail '.repeat(120)}`,
+      }),
+    );
+
+    const focused = renderAutoMemoryFocusedSubtree(memories, {
+      charBudget: 2_000,
+    });
+
+    expect(focused.prompt.length).toBeLessThanOrEqual(2_000);
+    expect(focused.displayed).toBeGreaterThan(0);
+    expect(focused.displayed).toBeLessThan(memories.length);
+    expect(focused.omitted).toBe(memories.length - focused.displayed);
+    expect(focused.prompt).toContain(`另 ${focused.omitted} 条已选记忆未展示`);
+    expect(focused.prompt).not.toContain('project/4.md');
+  });
+
+  it('returns an omission-only fallback when no leaf fits the budget', () => {
+    const focused = renderAutoMemoryFocusedSubtree([doc('project/one.md')], {
+      charBudget: 1,
+    });
+
+    expect(focused).toEqual({
+      prompt: '## Memory focus for this turn\n\n另 1 条已选记忆未展示',
+      displayed: 0,
+      omitted: 1,
+    });
+  });
 });

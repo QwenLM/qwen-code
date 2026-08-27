@@ -755,6 +755,24 @@ describe('auto-memory relevant recall', () => {
     );
   });
 
+  it('does not treat a short keyword as a substring of a larger word', async () => {
+    const shortKeyword = {
+      ...docs[0]!,
+      keywords: ['ai'],
+    };
+    mockSnapshot([shortKeyword]);
+    vi.mocked(selectRelevantAutoMemoryDocumentsByModel).mockResolvedValue([]);
+    const onFastResult = vi.fn();
+
+    await resolveRelevantAutoMemoryPromptForQuery(
+      '/tmp/project',
+      'explain this behavior',
+      { config, onFastResult },
+    );
+
+    expect(onFastResult.mock.calls[0]?.[0].selectedDocs).toEqual([]);
+  });
+
   it('prioritizes a lexically matched memory whose body version is stale', async () => {
     const stale = {
       ...docs[0]!,
@@ -943,6 +961,23 @@ describe('auto-memory relevant recall', () => {
 
     expect(result.strategy).toBe('heuristic');
     expect(result.selectedDocs).toEqual([docs[0]]);
+  });
+
+  it('excludes already surfaced bodies before legacy heuristic fallback', async () => {
+    vi.mocked(config.getMemoryRecallMode).mockReturnValue('legacy');
+    mockSnapshot(docs);
+    vi.mocked(selectRelevantAutoMemoryDocumentsByModel).mockRejectedValue(
+      new Error('selector unavailable'),
+    );
+
+    const result = await resolveRelevantAutoMemoryPromptForQuery(
+      '/tmp/project',
+      'check the latency dashboard',
+      { config, excludedFilePaths: new Set([docs[0]!.filePath]) },
+    );
+
+    expect(result.strategy).toBe('none');
+    expect(result.selectedDocs).not.toContain(docs[0]);
   });
 
   it('keeps model selection enabled when no fast model is configured', async () => {

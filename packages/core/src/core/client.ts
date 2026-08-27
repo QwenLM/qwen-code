@@ -252,7 +252,7 @@ const EMPTY_RELEVANT_AUTO_MEMORY_RESULT: RelevantAutoMemoryPromptResult = {
   strategy: 'none',
 };
 
-type MemoryDeliveryResult = RelevantAutoMemoryPromptResult & {
+export type MemoryDeliveryResult = RelevantAutoMemoryPromptResult & {
   deliveredTreeRevision?: string;
   deliveryEvent?: MemoryRecallDeliveryEvent;
 };
@@ -1249,6 +1249,27 @@ export class GeminiClient {
       deliveryPoint,
       deliveryPoint === 'initial' ? INITIAL_MEMORY_RECALL_WAIT_MS : 0,
     );
+  }
+
+  /** @internal */
+  commitManagedAutoMemoryRecallDelivery(
+    delivery: MemoryDeliveryResult | null,
+  ): void {
+    if (delivery?.deliveredTreeRevision) {
+      this.lastDeliveredMemoryTreeRevision = delivery.deliveredTreeRevision;
+    }
+    if (delivery?.deliveryEvent) {
+      logMemoryRecallDelivery(this.config, delivery.deliveryEvent);
+    }
+  }
+
+  /** @internal */
+  discardManagedAutoMemoryRecallDelivery(
+    delivery: MemoryDeliveryResult | null,
+  ): void {
+    if (delivery?.deliveryEvent) {
+      this.discardPreparedMemoryRecallDelivery(delivery.deliveryEvent);
+    }
   }
 
   /** @internal */
@@ -3820,21 +3841,6 @@ export class GeminiClient {
       }
 
       if (messageType === SendMessageType.ToolResult) {
-        const toolResultMemory =
-          await this.consumeManagedAutoMemoryRecall('tool_result');
-        if (toolResultMemory?.prompt) {
-          // Append (not prepend): on a ToolResult turn, requestToSend leads
-          // with functionResponse parts that must immediately follow the
-          // model's functionCall (Qwen API constraint — same reason the
-          // IDE-context block above is skipped while a tool call is pending,
-          // see the `hasPendingToolCall` guard). Putting the memory text
-          // after the functionResponse parts keeps the call/response pairing
-          // intact under native Gemini; the OpenAI converter then emits the
-          // text as a separate user message after the tool messages.
-          requestToSend = [...requestToSend, toolResultMemory.prompt];
-          memoryTreeRevisionToCommit = toolResultMemory.deliveredTreeRevision;
-          memoryRecallDeliveryToCommit = toolResultMemory.deliveryEvent;
-        }
         const activeTodoReminder =
           this.config.takeActiveTodoReminder(prompt_id);
         if (activeTodoReminder) {
@@ -3854,6 +3860,21 @@ export class GeminiClient {
           sizeOnly: true,
           pendingContent: createUserContent(requestToSend),
         });
+        const toolResultMemory =
+          await this.consumeManagedAutoMemoryRecall('tool_result');
+        if (toolResultMemory?.prompt) {
+          // Append (not prepend): on a ToolResult turn, requestToSend leads
+          // with functionResponse parts that must immediately follow the
+          // model's functionCall (Qwen API constraint — same reason the
+          // IDE-context block above is skipped while a tool call is pending,
+          // see the `hasPendingToolCall` guard). Putting the memory text
+          // after the functionResponse parts keeps the call/response pairing
+          // intact under native Gemini; the OpenAI converter then emits the
+          // text as a separate user message after the tool messages.
+          requestToSend = [...requestToSend, toolResultMemory.prompt];
+          memoryTreeRevisionToCommit = toolResultMemory.deliveredTreeRevision;
+          memoryRecallDeliveryToCommit = toolResultMemory.deliveryEvent;
+        }
       }
 
       for (const goalEvent of takePendingGoalEvents()) {

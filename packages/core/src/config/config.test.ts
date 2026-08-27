@@ -6622,6 +6622,55 @@ describe('Server Config (config.ts)', () => {
     expect(config.getContextFilePaths()).toEqual([]);
   });
 
+  it('guards and rolls back the memory recall mode transition by revision', async () => {
+    const config = Object.create(Config.prototype) as Config;
+    Object.assign(config, {
+      memoryRecallMode: 'legacy',
+      memoryRecallModeInitialized: true,
+      memoryCorpusRevision: 'legacy-revision',
+      autoMemoryPrompt: 'legacy prompt',
+    });
+    vi.spyOn(config, 'isManagedMemoryAvailable').mockReturnValue(true);
+    vi.spyOn(config, 'getProjectRoot').mockReturnValue('/tmp/project');
+    vi.spyOn(config, 'getTeamMemoryEnabled').mockReturnValue(false);
+    vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
+    const scan = vi
+      .fn()
+      .mockResolvedValue({ ready: true, revision: 'structured-revision' });
+    Object.assign(config, {
+      scanMemoryRecallCorpusStatus: scan,
+      buildAutoMemoryPromptForMode: vi
+        .fn()
+        .mockResolvedValue('structured prompt'),
+    });
+
+    const transition = await config.prepareMemoryRecallTransition();
+    expect(transition).toMatchObject({
+      from: 'legacy',
+      to: 'structured',
+      revision: 'structured-revision',
+      autoMemoryPrompt: 'structured prompt',
+      previousRevision: 'legacy-revision',
+      previousAutoMemoryPrompt: 'legacy prompt',
+    });
+    await expect(
+      config.confirmMemoryRecallTransition(transition!),
+    ).resolves.toBe(true);
+
+    config.commitMemoryRecallTransition(transition!);
+    expect(config.getMemoryRecallMode()).toBe('structured');
+    expect(config.getAutoMemoryPrompt()).toBe('structured prompt');
+
+    config.rollbackMemoryRecallTransition(transition!);
+    expect(config.getMemoryRecallMode()).toBe('legacy');
+    expect(config.getAutoMemoryPrompt()).toBe('legacy prompt');
+
+    scan.mockResolvedValueOnce({ ready: true, revision: 'changed-revision' });
+    await expect(
+      config.confirmMemoryRecallTransition(transition!),
+    ).resolves.toBe(false);
+  });
+
   it('refreshHierarchicalMemory should include appended auto-memory in the context warning estimate', async () => {
     const config = new Config({
       ...baseParams,

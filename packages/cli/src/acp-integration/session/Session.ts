@@ -5191,6 +5191,9 @@ export class Session implements SessionContext {
             if (isFreshUserTurn) {
               managedMemoryRecallStarted = true;
               this.config
+                .getMemoryManager()
+                .resetExhaustedBodyRefsForCurrentTurn();
+              this.config
                 .getGeminiClient()
                 .beginManagedAutoMemoryRecall(promptText, pendingSend.signal);
             }
@@ -5239,14 +5242,6 @@ export class Session implements SessionContext {
             // plan mode in ACP has no effect because the model never learns it
             // should avoid edits.
             const systemReminders = await this.#buildInitialSystemReminders();
-            if (isFreshUserTurn) {
-              const memory = await this.config
-                .getGeminiClient()
-                .consumeManagedAutoMemoryRecall('initial');
-              if (memory?.prompt) {
-                systemReminders.unshift({ text: memory.prompt });
-              }
-            }
             if (systemReminders.length > 0 && !isRestoreAskUserQuestion) {
               // On an `interrupted_prompt` continuation the replayed orphaned
               // user run can already carry the reminders that were prepended on
@@ -5501,7 +5496,11 @@ export class Session implements SessionContext {
                       promptId,
                       nextMessage?.parts ?? [],
                       pendingSend.signal,
-                      { modelOverride: fullTurnModelOverride },
+                      {
+                        modelOverride: fullTurnModelOverride,
+                        consumeInitialMemory:
+                          isFreshUserTurn && turnCount === 1,
+                      },
                     );
                   if (!sendResult.responseStream) {
                     this.todoStopGuard.suspend();
@@ -7124,6 +7123,7 @@ export class Session implements SessionContext {
       beforeSend?: (
         context: BeforeModelSendContext,
       ) => Promise<BeforeModelSendDecision>;
+      consumeInitialMemory?: boolean;
     } = {},
   ): Promise<AutoCompressionSendResult> {
     const geminiClient = this.config.getGeminiClient()!;
@@ -7260,14 +7260,15 @@ export class Session implements SessionContext {
       return { responseStream: null, stopReason: 'cancelled' };
     }
 
-    if (message[0]?.functionResponse) {
-      const memory =
-        await geminiClient.consumeManagedAutoMemoryRecall('tool_result');
-      if (memory?.prompt) {
-        message = insertAfterFunctionResponses(message, [
-          { text: memory.prompt },
-        ]);
-      }
+    const memoryDelivery = options.consumeInitialMemory
+      ? await geminiClient.consumeManagedAutoMemoryRecall('initial')
+      : message[0]?.functionResponse
+        ? await geminiClient.consumeManagedAutoMemoryRecall('tool_result')
+        : null;
+    if (memoryDelivery?.prompt) {
+      message = insertAfterFunctionResponses(message, [
+        { text: memoryDelivery.prompt },
+      ]);
     }
 
     const chat = this.#getCurrentChat();
@@ -7282,9 +7283,31 @@ export class Session implements SessionContext {
       },
     };
     const goalPermit = goalTurnContext.getStore();
-    const responseStream = goalPermit
-      ? await chat.sendMessageStream(model, request, promptId, goalPermit)
-      : await chat.sendMessageStream(model, request, promptId);
+    let sourceStream: AsyncGenerator<StreamEvent>;
+    try {
+      sourceStream = goalPermit
+        ? await chat.sendMessageStream(model, request, promptId, goalPermit)
+        : await chat.sendMessageStream(model, request, promptId);
+    } catch (error) {
+      geminiClient.discardManagedAutoMemoryRecallDelivery(memoryDelivery);
+      throw error;
+    }
+    const responseStream = (async function* () {
+      let committed = false;
+      try {
+        for await (const event of sourceStream) {
+          if (!committed) {
+            geminiClient.commitManagedAutoMemoryRecallDelivery(memoryDelivery);
+            committed = true;
+          }
+          yield event;
+        }
+      } finally {
+        if (!committed) {
+          geminiClient.discardManagedAutoMemoryRecallDelivery(memoryDelivery);
+        }
+      }
+    })();
     return { responseStream };
   }
 

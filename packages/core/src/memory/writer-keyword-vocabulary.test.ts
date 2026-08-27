@@ -96,4 +96,43 @@ describe('writer keyword vocabulary snapshot', () => {
     expect(snapshot).toContain('user scope:');
     expect(snapshot).toContain('user topic');
   });
+
+  it('reserves vocabulary space for every non-empty requested scope', () => {
+    const projectDocs = Array.from({ length: 400 }, (_, index) =>
+      doc('project', `${index}.md`, [`project keyword ${index}`], index),
+    );
+    const snapshot = renderWriterKeywordVocabularySnapshot([
+      ...projectDocs,
+      doc('user', 'preference.md', ['user preference'], 1),
+      doc('team', 'policy.md', ['team policy'], 1),
+    ]);
+
+    expect(snapshot.length).toBeLessThanOrEqual(8_000);
+    expect(snapshot).toContain('user preference (1)');
+    expect(snapshot).toContain('team policy (1)');
+  });
+
+  it('keeps the truncation warning inside the total character budget', () => {
+    const docs = (['project', 'user', 'team'] as const).flatMap((scope) => {
+      const stable = Array.from(
+        { length: 100 },
+        (_, index) =>
+          `${scope} stable keyword ${index.toString().padStart(3, '0')}`,
+      );
+      const recent = Array.from(
+        { length: 100 },
+        (_, index) =>
+          `${scope} recent keyword ${index.toString().padStart(3, '0')}`,
+      );
+      return [
+        doc(scope, 'stable-a.md', stable, 1),
+        doc(scope, 'stable-b.md', stable, 2),
+        doc(scope, 'recent.md', recent, 3),
+      ];
+    });
+    const snapshot = renderWriterKeywordVocabularySnapshot(docs);
+
+    expect(snapshot.length).toBeLessThanOrEqual(8_000);
+    expect(snapshot).toContain('snapshot was truncated');
+  });
 });

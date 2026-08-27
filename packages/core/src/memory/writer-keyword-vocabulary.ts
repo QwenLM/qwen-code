@@ -12,6 +12,8 @@ import {
 
 const DEFAULT_MAX_CHARS = 8_000;
 const HIGH_FREQUENCY_BUDGET_RATIO = 0.7;
+const TRUNCATION_WARNING =
+  '> WARNING: Keyword vocabulary snapshot was truncated.';
 
 const SCOPE_ORDER: readonly AutoMemoryScope[] = ['project', 'user', 'team'];
 
@@ -24,7 +26,6 @@ interface KeywordStats {
 
 interface WriterKeywordVocabularyOptions {
   scopes?: readonly AutoMemoryScope[];
-  maxChars?: number;
 }
 
 function isReusableKeyword(keyword: string): boolean {
@@ -38,7 +39,6 @@ function isReusableKeyword(keyword: string): boolean {
   if (/^#\d+$/.test(normalized)) return false;
   if (/^[A-Z][A-Z0-9_]{2,}$/.test(normalized)) return false;
   if (/[().]|::/.test(normalized)) return false;
-  if (/\.[a-z0-9]{1,8}$/i.test(normalized)) return false;
   return true;
 }
 
@@ -115,7 +115,6 @@ export function renderWriterKeywordVocabularySnapshot(
   docs: readonly ScannedAutoMemoryDocument[],
   options: WriterKeywordVocabularyOptions = {},
 ): string {
-  const maxChars = options.maxChars ?? DEFAULT_MAX_CHARS;
   const requestedScopes = options.scopes ?? SCOPE_ORDER;
   const scopes = SCOPE_ORDER.filter((scope) => requestedScopes.includes(scope));
   const lines = [
@@ -124,14 +123,20 @@ export function renderWriterKeywordVocabularySnapshot(
     'Prefer reusing these canonical retrieval terms or short phrases when they match the memory meaning. Create a new discriminative term or phrase when none fits.',
   ];
 
-  for (const scope of scopes) {
-    const scopeDocs = docs.filter((doc) => doc.scope === scope);
-    if (scopeDocs.length === 0) continue;
-    const stats = collectKeywordStats(scopeDocs);
-    if (stats.length === 0) continue;
+  const scopedStats = scopes
+    .map((scope) => ({
+      scope,
+      stats: collectKeywordStats(docs.filter((doc) => doc.scope === scope)),
+    }))
+    .filter(({ stats }) => stats.length > 0);
+  const scopeBudget = Math.floor(
+    (DEFAULT_MAX_CHARS - lines.join('\n').length) /
+      Math.max(1, scopedStats.length),
+  );
 
-    const highBudget = Math.floor(maxChars * HIGH_FREQUENCY_BUDGET_RATIO);
-    const lowBudget = maxChars - highBudget;
+  for (const { scope, stats } of scopedStats) {
+    const highBudget = Math.floor(scopeBudget * HIGH_FREQUENCY_BUDGET_RATIO);
+    const lowBudget = scopeBudget - highBudget;
     const used = new Set<string>();
     const high = takeWithinBudget(
       stats
@@ -162,8 +167,9 @@ export function renderWriterKeywordVocabularySnapshot(
   }
 
   const rendered = lines.join('\n').trim();
-  if (rendered.length <= maxChars) {
+  if (rendered.length <= DEFAULT_MAX_CHARS) {
     return rendered;
   }
-  return `${rendered.slice(0, maxChars).trimEnd()}\n\n> WARNING: Keyword vocabulary snapshot was truncated.`;
+  const contentBudget = DEFAULT_MAX_CHARS - TRUNCATION_WARNING.length - 2;
+  return `${rendered.slice(0, contentBudget).trimEnd()}\n\n${TRUNCATION_WARNING}`;
 }

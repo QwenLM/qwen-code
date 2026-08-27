@@ -20,7 +20,11 @@ import {
   type MemorySourceStatus,
   type ScannedAutoMemoryDocument,
 } from './scan.js';
-import { buildAutoMemoryTree, type AutoMemoryTreeLeaf } from './tree.js';
+import {
+  buildAutoMemoryTree,
+  toAutoMemoryRef,
+  type AutoMemoryTreeLeaf,
+} from './tree.js';
 
 const SEARCH_BODY_WINDOW_CHARS = 1_200;
 const SEARCH_BODY_CONTEXT_BEFORE_CHARS = 300;
@@ -55,7 +59,6 @@ type MemoryCursor = {
   ref: string;
   mtimeMs: number;
   offset: number;
-  depth?: number;
 };
 
 type BranchCursor = {
@@ -202,7 +205,7 @@ function normalizedOffsetToSourceOffset(
 }
 
 function memoryRef(doc: ScannedAutoMemoryDocument): string {
-  return `${doc.scope}:${sanitizeAutoMemoryPromptField(doc.relativePath, 512)}`;
+  return toAutoMemoryRef(doc);
 }
 
 function encodeCursor(cursor: SearchMemoryCursor): string {
@@ -265,8 +268,8 @@ function parseMemoryCursor(
   cursor: string | undefined,
   ref: string,
   mtimeMs: number,
-): { offset: number; depth: number } {
-  if (!cursor) return { offset: 0, depth: 0 };
+): { offset: number } {
+  if (!cursor) return { offset: 0 };
   const parsed = decodeCursor(cursor);
   if (parsed.kind !== 'memory' || parsed.ref !== ref) {
     throw new Error('Invalid cursor.');
@@ -274,7 +277,7 @@ function parseMemoryCursor(
   if (parsed.mtimeMs !== mtimeMs) {
     throw new Error('Memory changed since cursor was issued.');
   }
-  return { offset: parsed.offset, depth: parsed.depth ?? 0 };
+  return { offset: parsed.offset };
 }
 
 function parseBranchCursor(
@@ -298,11 +301,10 @@ function makeMemoryCursor(
   ref: string,
   mtimeMs: number,
   offset: number | undefined,
-  depth: number,
 ): string | undefined {
   return offset === undefined
     ? undefined
-    : encodeCursor({ kind: 'memory', ref, mtimeMs, offset, depth });
+    : encodeCursor({ kind: 'memory', ref, mtimeMs, offset });
 }
 
 function makeBranchCursor(
@@ -328,24 +330,19 @@ function bodyWindow(
   const readableTotal = Math.min(total, maxTotalChars);
   const parsedCursor = cursor
     ? parseMemoryCursor(cursor, ref, mtimeMs)
-    : { offset: preferredOffset, depth: 0 };
+    : { offset: preferredOffset };
   const requestedOffset = parsedCursor.offset;
   const start = Math.max(0, Math.min(requestedOffset, readableTotal));
   const end = Math.min(readableTotal, start + maxChars);
-  const nextDepth = parsedCursor.depth + 1;
-  const readLimitExhausted =
-    maxChars > 0 && end >= readableTotal && readableTotal < total;
   const nextCursor =
-    end < readableTotal
-      ? makeMemoryCursor(ref, mtimeMs, end, nextDepth)
-      : undefined;
+    end < readableTotal ? makeMemoryCursor(ref, mtimeMs, end) : undefined;
   return {
     content: body.slice(start, end),
     truncated: end < total,
     range: { start, end, total },
     previousCursor:
       start > 0
-        ? makeMemoryCursor(ref, mtimeMs, Math.max(0, start - maxChars), 1)
+        ? makeMemoryCursor(ref, mtimeMs, Math.max(0, start - maxChars))
         : undefined,
     nextCursor,
     ...(nextCursor
@@ -355,13 +352,6 @@ function bodyWindow(
             refs: [ref] as [string],
             cursor: nextCursor,
           },
-        }
-      : {}),
-    ...(readLimitExhausted
-      ? {
-          readLimitExhausted: true,
-          readLimitMessage:
-            'The per-ref fetch budget is exhausted before the end of this memory. Use the returned content or report the bounded-read limit; do not fetch or search this same ref again to continue reading.',
         }
       : {}),
   };
@@ -384,10 +374,12 @@ function validateCategory(
 function normalizeValidSearchKeyword(keyword: string): string | null {
   const normalized = normalizeSearchText(keyword);
   const cjkCount = [...normalized].filter((char) =>
-    /\p{Script=Han}/u.test(char),
+    /\p{Script=Han}|\p{Script=Hiragana}|\p{Script=Katakana}|\p{Script=Hangul}/u.test(
+      char,
+    ),
   ).length;
-  const asciiCount = (normalized.match(/[a-z0-9]/g) ?? []).length;
-  if (cjkCount < 2 && asciiCount < 3) {
+  const letterOrNumberCount = (normalized.match(/[\p{L}\p{N}]/gu) ?? []).length;
+  if (cjkCount < 2 && letterOrNumberCount < 3) {
     return null;
   }
   return normalized;
@@ -774,9 +766,7 @@ async function readContentResult(
       continuation: window.continuation,
     };
   }
-  if (window.truncated && !window.nextCursor) {
-    exhaustedBodyRefs.add(ref);
-  }
+  let readLimitExhausted = false;
   if (window.content && window.range) {
     const previous = bodyCoverage.get(ref);
     const coverage =
@@ -794,6 +784,16 @@ async function readContentResult(
     });
     coverage.ranges.sort((a, b) => a.start - b.start);
     bodyCoverage.set(ref, coverage);
+    let coveredChars = 0;
+    let coveredEnd = 0;
+    for (const range of coverage.ranges) {
+      if (range.end <= coveredEnd) continue;
+      coveredChars += range.end - Math.max(range.start, coveredEnd);
+      coveredEnd = range.end;
+    }
+    readLimitExhausted =
+      freshDoc.body.length > maxTotalChars && coveredChars >= maxTotalChars;
+    if (readLimitExhausted) exhaustedBodyRefs.add(ref);
     let coveredUntil = 0;
     for (const range of coverage.ranges) {
       if (range.start > coveredUntil) break;
@@ -808,6 +808,13 @@ async function readContentResult(
     version: freshDoc.mtimeMs,
     title: sanitizeAutoMemoryPromptField(freshDoc.title, 256),
     ...window,
+    ...(readLimitExhausted
+      ? {
+          readLimitExhausted: true,
+          readLimitMessage:
+            'The per-ref fetch budget is exhausted before the end of this memory. Use the returned content or report the bounded-read limit; do not fetch or search this same ref again to continue reading.',
+        }
+      : {}),
   };
 }
 
@@ -941,6 +948,11 @@ export async function executeSearchMemory(
         const { title: _title, ...fetchResult } = result;
         remaining -= fetchResult.content?.length ?? 0;
         results.push(fetchResult);
+      } else {
+        missingRefs.push(ref);
+        warnings.push(
+          `Memory ref ${JSON.stringify(ref)} disappeared before it could be read. Search again to refresh the memory snapshot.`,
+        );
       }
     }
     return complete(
@@ -964,9 +976,10 @@ export async function executeSearchMemory(
       throw new Error('search requires keywords.');
     }
     for (const scope of params.scopes ?? []) validateScope(scope);
+    const scopes = params.scopes ? [...new Set(params.scopes)] : undefined;
     for (const category of params.categories ?? []) validateCategory(category);
     const { keywords, warnings } = normalizeSearchKeywords(params.keywords);
-    const snapshot = await getSnapshot(options, params.scopes);
+    const snapshot = await getSnapshot(options, scopes);
     const categories = params.categories
       ? new Set<AutoMemoryTreeCategoryKey>(params.categories)
       : undefined;
@@ -1030,6 +1043,7 @@ export async function executeSearchMemory(
   }
 
   for (const scope of params.scopes ?? []) validateScope(scope);
+  const scopes = params.scopes ? [...new Set(params.scopes)] : undefined;
   const limitPerBranch = params.limitPerBranch ?? MAX_EXPLORE_LEAVES;
   if (limitPerBranch < 1 || limitPerBranch > MAX_EXPLORE_LEAVES) {
     throw new Error('explore limitPerBranch must be between 1 and 20.');
@@ -1038,7 +1052,7 @@ export async function executeSearchMemory(
     throw new Error('explore accepts at most 3 branches.');
   }
   for (const branch of params.branches ?? []) validateCategory(branch.category);
-  const snapshot = await getSnapshot(options, params.scopes);
+  const snapshot = await getSnapshot(options, scopes);
   const cursorScopes = snapshot.sourceStatus.searchedScopes;
   if (!params.branches || params.branches.length === 0) {
     const tree = buildAutoMemoryTree(snapshot.docs);

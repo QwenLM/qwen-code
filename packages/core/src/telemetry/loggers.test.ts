@@ -45,6 +45,7 @@ import {
   EVENT_TOOL_OUTPUT_TRUNCATED,
   EVENT_PROTOCOL_TAG_SANITIZED,
   EVENT_MEMORY_RECALL_DELIVERY,
+  EVENT_MEMORY_SEARCH,
   EVENT_MEMORY_MIGRATION,
   EVENT_MEMORY_RECALL_MODE_TRANSITION,
 } from './constants.js';
@@ -74,6 +75,7 @@ import {
   logApiRetry,
   logProtocolTagSanitized,
   logMemoryRecallDelivery,
+  logMemorySearch,
   logMemoryMigration,
   logMemoryRecallModeTransition,
   normalizeToolCallEvent,
@@ -107,6 +109,7 @@ import {
   ApiRetryEvent,
   ProtocolTagSanitizedEvent,
   MemoryRecallDeliveryEvent,
+  MemorySearchEvent,
   MemoryMigrationEvent,
   MemoryRecallModeTransitionEvent,
   LoopDetectedEvent,
@@ -301,6 +304,35 @@ describe('loggers', () => {
   });
 
   describe('memory migration telemetry', () => {
+    it('records aggregate memory search telemetry without query content', () => {
+      const config = makeFakeConfig({ sessionId: 'test-session-id' });
+
+      logMemorySearch(
+        config,
+        new MemorySearchEvent({
+          mode: 'search',
+          docs_scanned: 12,
+          results_returned: 3,
+          duration_ms: 45,
+        }),
+      );
+
+      expect(mockLogger.emit).toHaveBeenCalledWith({
+        body: 'Memory search: mode=search. Returned 3/12 docs.',
+        attributes: expect.objectContaining({
+          'session.id': 'test-session-id',
+          'event.name': EVENT_MEMORY_SEARCH,
+          mode: 'search',
+          docs_scanned: 12,
+          results_returned: 3,
+          duration_ms: 45,
+        }),
+      });
+      expect(JSON.stringify(mockLogger.emit.mock.calls[0])).not.toMatch(
+        /query|keyword|content|filePath|relativePath|sourceHash|secret/i,
+      );
+    });
+
     it('records aggregate migration cost without memory content', () => {
       const config = makeFakeConfig({ sessionId: 'test-session-id' });
       logMemoryMigration(

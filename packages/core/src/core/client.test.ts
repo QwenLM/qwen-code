@@ -4163,6 +4163,9 @@ describe('Gemini Client (client.ts)', () => {
 
     it('runs size-only microcompaction on SendMessageType.ToolResult with pending content counted', async () => {
       const { clear, markReadEvictedFromHistory } = mockFileReadCacheStub();
+      const consumeRecall = vi
+        .spyOn(client, 'consumeManagedAutoMemoryRecall')
+        .mockResolvedValue(null);
       const { history } = await makeReadFileResponses(4, 120_000);
       const setHistory = vi.fn();
       client['chat'] = {
@@ -4203,6 +4206,9 @@ describe('Gemini Client (client.ts)', () => {
       expect(clear).not.toHaveBeenCalled();
       // Three reads are blanked while clearing down to the 250K watermark.
       expect(markReadEvictedFromHistory).toHaveBeenCalledTimes(3);
+      expect(
+        vi.mocked(markReadEvictedFromHistory).mock.invocationCallOrder.at(-1),
+      ).toBeLessThan(consumeRecall.mock.invocationCallOrder[0]!);
       expect(mockClientDebugLogger.info).toHaveBeenCalledWith(
         expect.stringContaining(
           '[TOOL-RESULT MC] tool result chars 620000 > 500000',
@@ -4480,6 +4486,7 @@ describe('Gemini Client (client.ts)', () => {
         microcompactMeta: {
           unresolvedEvictedReads: 2,
           evictedReadPaths: [],
+          evictedMemoryBodies: [{ memoryRef: 'project:topic.md', mtimeMs: 7 }],
           toolsCleared: 3,
           mediaCleared: 0,
           tokensSaved: 800,
@@ -4504,7 +4511,7 @@ describe('Gemini Client (client.ts)', () => {
       ).toHaveBeenCalledOnce();
       expect(
         mockMemoryManager.markMemoryBodiesEvictedFromHistory,
-      ).toHaveBeenCalledWith([]);
+      ).toHaveBeenCalledWith([{ memoryRef: 'project:topic.md', mtimeMs: 7 }]);
       expect(client['forceFullIdeContext']).toBe(true);
     });
 
@@ -6426,6 +6433,73 @@ hello
           excludedFilePaths: expect.anything(),
         }),
       );
+    });
+
+    it('excludes body-bearing memories after legacy delivery', async () => {
+      vi.mocked(mockConfig.getMemoryRecallMode).mockReturnValue('legacy');
+      const memoryPath = '/test/project/root/.qwen/memory/user.md';
+      const selectedDoc = {
+        scope: 'user' as const,
+        type: 'user' as const,
+        filePath: memoryPath,
+        relativePath: 'user.md',
+        filename: 'user.md',
+        title: 'User Memory',
+        description: 'User preferences',
+        category: 'communication_preference' as const,
+        keywords: [],
+        usageScenarios: ['User preferences'],
+        body: '- User prefers terse responses.',
+        mtimeMs: 1,
+      };
+      mockMemoryManager.recall
+        .mockResolvedValueOnce({
+          prompt: `## Relevant memory\n\n${selectedDoc.body}`,
+          selectedDocs: [selectedDoc],
+          strategy: 'semantic',
+        })
+        .mockResolvedValueOnce({
+          prompt: '',
+          selectedDocs: [],
+          strategy: 'none',
+        });
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          yield { type: 'content', value: 'Hello' };
+        })(),
+      );
+      client['chat'] = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+      } as unknown as GeminiChat;
+
+      for await (const _ of client.sendMessageStream(
+        [{ text: 'First question' }],
+        new AbortController().signal,
+        'prompt-id-legacy-memory-1',
+      )) {
+        // consume stream
+      }
+      for await (const _ of client.sendMessageStream(
+        [{ text: 'Second question' }],
+        new AbortController().signal,
+        'prompt-id-legacy-memory-2',
+      )) {
+        // consume stream
+      }
+
+      expect(mockMemoryManager.recall).toHaveBeenNthCalledWith(
+        2,
+        '/test/project/root',
+        'Second question',
+        expect.objectContaining({
+          excludedFilePaths: expect.objectContaining({
+            has: expect.any(Function),
+          }),
+        }),
+      );
+      const options = mockMemoryManager.recall.mock.calls[1]?.[2];
+      expect(options?.excludedFilePaths?.has(memoryPath)).toBe(true);
     });
 
     it('should hold the main request for exactly the initial recall budget when recall never settles', async () => {

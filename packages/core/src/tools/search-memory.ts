@@ -210,6 +210,10 @@ export class SearchMemoryTool extends BaseDeclarativeTool<
   SearchMemoryToolParams,
   ToolResult
 > {
+  override get maxOutputChars(): number {
+    return Number.POSITIVE_INFINITY;
+  }
+
   constructor(private readonly config: Config) {
     super(
       ToolNames.SEARCH_MEMORY,

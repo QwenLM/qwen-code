@@ -8,7 +8,11 @@ import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { getAutoMemoryFilePath } from './paths.js';
+import {
+  clearAutoMemoryRootCache,
+  getAutoMemoryFilePath,
+  getAutoMemoryRoot,
+} from './paths.js';
 import {
   parseAutoMemoryTopicDocument,
   scanAutoMemorySnapshot,
@@ -381,6 +385,104 @@ describe('auto-memory topic scanning', () => {
         process.env['QWEN_CODE_MEMORY_LOCAL'] = previousLocal;
       }
     }
+  });
+
+  it('applies one project file cap after merging runtime and local roots', async () => {
+    const previousLocal = process.env['QWEN_CODE_MEMORY_LOCAL'];
+    const previousBase = process.env['QWEN_CODE_MEMORY_BASE_DIR'];
+    delete process.env['QWEN_CODE_MEMORY_LOCAL'];
+    process.env['QWEN_CODE_MEMORY_BASE_DIR'] = path.join(tempDir, 'global');
+    clearAutoMemoryRootCache();
+    try {
+      const runtimeRoot = getAutoMemoryRoot(projectRoot);
+      const localRoot = path.join(projectRoot, '.qwen', 'memory');
+      const writeDocs = async (
+        root: string,
+        prefix: string,
+        count: number,
+        timestamp: Date,
+      ) => {
+        await Promise.all(
+          Array.from({ length: count }, async (_, index) => {
+            const filePath = path.join(
+              root,
+              prefix,
+              `${index.toString().padStart(3, '0')}.md`,
+            );
+            await fs.mkdir(path.dirname(filePath), { recursive: true });
+            await fs.writeFile(
+              filePath,
+              `---\ntype: project\nname: ${prefix}-${index}\ndescription: cap fixture\n---\nbody`,
+            );
+            await fs.utimes(filePath, timestamp, timestamp);
+          }),
+        );
+      };
+      await writeDocs(
+        runtimeRoot,
+        'runtime',
+        105,
+        new Date('2026-08-26T00:00:00.000Z'),
+      );
+      await writeDocs(
+        localRoot,
+        'local',
+        100,
+        new Date('2026-08-27T00:00:00.000Z'),
+      );
+
+      const snapshot = await scanAutoMemorySnapshot(projectRoot, {
+        scopes: ['project'],
+      });
+
+      expect(snapshot.docs).toHaveLength(200);
+      expect(snapshot.sourceStatus.incompleteScopes).toContainEqual({
+        scope: 'project',
+        reason: 'file_limit',
+        discovered: 205,
+        returned: 200,
+      });
+      expect(
+        snapshot.docs.some((doc) => doc.relativePath === 'local/099.md'),
+      ).toBe(true);
+      expect(
+        snapshot.docs.some((doc) => doc.relativePath === 'runtime/104.md'),
+      ).toBe(false);
+    } finally {
+      if (previousLocal === undefined) {
+        delete process.env['QWEN_CODE_MEMORY_LOCAL'];
+      } else {
+        process.env['QWEN_CODE_MEMORY_LOCAL'] = previousLocal;
+      }
+      if (previousBase === undefined) {
+        delete process.env['QWEN_CODE_MEMORY_BASE_DIR'];
+      } else {
+        process.env['QWEN_CODE_MEMORY_BASE_DIR'] = previousBase;
+      }
+      clearAutoMemoryRootCache();
+    }
+  });
+
+  it('uses relative paths to stabilize equal-mtime filename ties', async () => {
+    const first = getAutoMemoryFilePath(projectRoot, 'a/same.md');
+    const second = getAutoMemoryFilePath(projectRoot, 'z/same.md');
+    await fs.mkdir(path.dirname(first), { recursive: true });
+    await fs.mkdir(path.dirname(second), { recursive: true });
+    const content =
+      '---\ntype: project\nname: Same\ndescription: tie fixture\n---\nbody';
+    await fs.writeFile(first, content);
+    await fs.writeFile(second, content);
+    const timestamp = new Date('2026-08-27T00:00:00.000Z');
+    await fs.utimes(first, timestamp, timestamp);
+    await fs.utimes(second, timestamp, timestamp);
+
+    const docs = await scanAutoMemoryTopicDocuments(projectRoot);
+
+    expect(
+      docs
+        .filter((doc) => doc.filename === 'same.md')
+        .map((doc) => doc.relativePath),
+    ).toEqual(['a/same.md', 'z/same.md']);
   });
 
   it('reports requested but disabled team memory as unavailable', async () => {

@@ -54,6 +54,12 @@ describe('SearchMemoryTool', () => {
     expect(tool.shouldDefer).toBe(false);
   });
 
+  it('keeps its internally budgeted JSON intact', () => {
+    expect(new SearchMemoryTool(config()).maxOutputChars).toBe(
+      Number.POSITIVE_INFINITY,
+    );
+  });
+
   it('rejects stale historical calls while the legacy protocol is active', async () => {
     const mockConfig = config();
     vi.mocked(mockConfig.getMemoryRecallMode).mockReturnValue('legacy');

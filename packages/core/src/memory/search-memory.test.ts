@@ -10,6 +10,7 @@ import {
   type ExecuteSearchMemoryOptions,
   type SearchMemoryToolResult,
 } from './search-memory.js';
+import { rereadAutoMemoryDocument } from './scan.js';
 import type {
   AutoMemoryScanSnapshot,
   ScannedAutoMemoryDocument,
@@ -134,6 +135,19 @@ describe('executeSearchMemory', () => {
     expect(fetchResult.results[0]).not.toHaveProperty('keywords');
     expect(fetchResult.results[0]).not.toHaveProperty('usageScenarios');
     expect(fetchResult.results[0]).not.toHaveProperty('category');
+  });
+
+  it('uses a lossless encoded ref for paths with prompt punctuation', async () => {
+    const docs = [doc('project/a] b.md', { body: 'encoded body' })];
+    const ref = 'project:project/a%5D%20b.md';
+
+    const result = expectContentResult(
+      await executeSearchMemory({ mode: 'fetch', refs: [ref] }, options(docs)),
+      'fetch',
+    );
+
+    expect(result.results[0]?.ref).toBe(ref);
+    expect(result.results[0]?.content).toBe('encoded body');
   });
 
   it('caps all bodies in one fetch call', async () => {
@@ -516,6 +530,7 @@ describe('executeSearchMemory', () => {
     const testOptions = {
       ...options(docs),
       exhaustedBodyRefs,
+      bodyCoverage: new Map(),
     };
 
     const first = expectContentResult(
@@ -565,6 +580,35 @@ describe('executeSearchMemory', () => {
       'search',
     );
     expect(searchResult.results).toEqual([]);
+  });
+
+  it('does not exhaust a ref after a short window near the read cap', async () => {
+    const body = `early marker ${'A'.repeat(19_470)} late marker ${'B'.repeat(2000)}`;
+    const exhaustedBodyRefs = new Set<string>();
+    const testOptions = {
+      ...options([doc('project/long.md', { body })]),
+      exhaustedBodyRefs,
+      bodyCoverage: new Map(),
+    };
+
+    const late = expectContentResult(
+      await executeSearchMemory(
+        { mode: 'search', keywords: ['late marker'] },
+        testOptions,
+      ),
+      'search',
+    );
+    const early = expectContentResult(
+      await executeSearchMemory(
+        { mode: 'search', keywords: ['early marker'] },
+        testOptions,
+      ),
+      'search',
+    );
+
+    expect(late.results[0]?.content).toContain('late marker');
+    expect(exhaustedBodyRefs).toEqual(new Set());
+    expect(early.results[0]?.content).toContain('early marker');
   });
 
   it('does not return an empty result for a body match beyond the read budget', async () => {
@@ -682,6 +726,69 @@ describe('executeSearchMemory', () => {
     expect(fetchResult.warnings).toEqual([
       'Unknown ref "project:missing.md". Copy the complete ref exactly from the memory tree or a search result.',
     ]);
+  });
+
+  it('reports a ref that disappears after the snapshot', async () => {
+    vi.mocked(rereadAutoMemoryDocument).mockResolvedValueOnce(null);
+
+    const result = expectContentResult(
+      await executeSearchMemory(
+        { mode: 'fetch', refs: ['project:project/gone.md'] },
+        options([doc('project/gone.md')]),
+      ),
+      'fetch',
+    );
+
+    expect(result.missingRefs).toEqual(['project:project/gone.md']);
+    expect(result.warnings?.[0]).toContain('disappeared');
+  });
+
+  it('accepts Unicode letter keywords used by recall metadata', async () => {
+    for (const keyword of [
+      'かな',
+      'カナ',
+      '한글',
+      'память',
+      'μνήμη',
+      'ذاكرة',
+    ]) {
+      const result = expectContentResult(
+        await executeSearchMemory(
+          { mode: 'search', keywords: [keyword] },
+          options([
+            doc(`project/${keyword.length}.md`, {
+              keywords: [keyword],
+              body: keyword,
+            }),
+          ]),
+        ),
+        'search',
+      );
+      expect(result.results).toHaveLength(1);
+    }
+  });
+
+  it('deduplicates requested scopes before filtering a snapshot', async () => {
+    const result = expectContentResult(
+      await executeSearchMemory(
+        {
+          mode: 'search',
+          keywords: ['project marker'],
+          scopes: ['project', 'project'],
+        },
+        options([
+          doc('project/scope.md', {
+            keywords: ['project marker'],
+            body: 'project marker',
+          }),
+        ]),
+      ),
+      'search',
+    );
+
+    expect(result.sourceStatus.requestedScopes).toEqual(['project']);
+    expect(result.sourceStatus.searchedScopes).toEqual(['project']);
+    expect(result.results).toHaveLength(1);
   });
 
   it('suggests a unique full ref without silently reading it', async () => {

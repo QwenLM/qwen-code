@@ -110,6 +110,7 @@ const RECALL_TOKEN_RUN = new RegExp(
 
 /** Whether a matched run is CJK, and therefore bigram-tokenized. */
 const CJK_RUN_START = new RegExp(`^${CJK_CLASS}`, 'u');
+const CJK_BIGRAM = new RegExp(`^${CJK_CLASS}{2}$`, 'u');
 
 function normalizeRecallText(text: string): string {
   return text.normalize('NFKC').toLowerCase();
@@ -261,7 +262,7 @@ function scoreDocument(
     if (useStructuredMetadata && usageScenarios.includes(token)) {
       lexicalScore += 3;
     }
-    const cjkBigram = /^\p{Script=Han}{2}$/u.test(token);
+    const cjkBigram = CJK_BIGRAM.test(token);
     if ((!useStructuredMetadata || !cjkBigram) && body.includes(token)) {
       lexicalScore += 1;
     }
@@ -288,9 +289,19 @@ function isStrongFastMatch(
   const keywords = doc.keywords
     .map((keyword) => normalizeRecallText(keyword).trim())
     .filter(Boolean);
+  const includesKeyword = (keyword: string) => {
+    if (!/^[a-z0-9]{1,2}$/.test(keyword)) {
+      return normalizedQuery.includes(keyword);
+    }
+    const escaped = keyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    return new RegExp(
+      `(?:^|[^\\p{L}\\p{N}])${escaped}(?:$|[^\\p{L}\\p{N}])`,
+      'u',
+    ).test(normalizedQuery);
+  };
   if (
     (title.length > 0 && normalizedQuery.includes(title)) ||
-    keywords.some((keyword) => normalizedQuery.includes(keyword))
+    keywords.some(includesKeyword)
   ) {
     return true;
   }

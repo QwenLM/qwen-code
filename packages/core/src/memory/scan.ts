@@ -292,19 +292,30 @@ export function parseAutoMemoryTopicDocument(
 async function listMarkdownFiles(root: string): Promise<string[]> {
   try {
     const entries = await fs.readdir(root, { recursive: true });
-    return (
-      entries
-        .filter(
-          (entry): entry is string =>
-            typeof entry === 'string' &&
-            entry.endsWith('.md') &&
-            path.basename(entry) !== AUTO_MEMORY_INDEX_FILENAME,
-        )
-        // Normalize to forward slashes so relative paths are valid URL segments
-        // on all platforms (Windows readdir returns backslash-separated paths).
-        .map((entry) => entry.replaceAll('\\', '/'))
-        .sort()
+    const candidates = entries
+      .filter(
+        (entry): entry is string =>
+          typeof entry === 'string' &&
+          entry.endsWith('.md') &&
+          path.basename(entry) !== AUTO_MEMORY_INDEX_FILENAME,
+      )
+      // Normalize to forward slashes so relative paths are valid URL segments
+      // on all platforms (Windows readdir returns backslash-separated paths).
+      .map((entry) => entry.replaceAll('\\', '/'))
+      .sort();
+    const files = await Promise.all(
+      candidates.map(async (entry) => {
+        try {
+          return (await fs.lstat(path.join(root, entry))).isFile()
+            ? entry
+            : null;
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+          throw error;
+        }
+      }),
     );
+    return files.filter((entry): entry is string => entry !== null);
   } catch (error) {
     const nodeError = error as NodeJS.ErrnoException;
     if (nodeError.code === 'ENOENT') {
@@ -327,7 +338,10 @@ function sortScannedDocuments(
             : 0,
       )
     : docs.sort(
-        (a, b) => b.mtimeMs - a.mtimeMs || a.filename.localeCompare(b.filename),
+        (a, b) =>
+          b.mtimeMs - a.mtimeMs ||
+          a.filename.localeCompare(b.filename) ||
+          a.relativePath.localeCompare(b.relativePath),
       );
 }
 
@@ -466,13 +480,26 @@ async function scanProjectAutoMemoryWithStatus(
     roots.map((root) =>
       scanAutoMemoryDocumentsFromRootWithStatus(root, {
         scope: 'project',
-        uncapped,
+        uncapped: true,
       }),
     ),
   );
+  const allDocs = sortScannedDocuments(
+    dedupeScannedDocuments(results.flatMap((result) => result.docs)),
+  );
+  const docs = uncapped ? allDocs : allDocs.slice(0, MAX_SCANNED_MEMORY_FILES);
+  const incompleteScopes = results.flatMap((result) => result.incompleteScopes);
+  if (!uncapped && allDocs.length > MAX_SCANNED_MEMORY_FILES) {
+    incompleteScopes.push({
+      scope: 'project',
+      reason: 'file_limit',
+      discovered: allDocs.length,
+      returned: docs.length,
+    });
+  }
   return {
-    docs: dedupeScannedDocuments(results.flatMap((result) => result.docs)),
-    incompleteScopes: results.flatMap((result) => result.incompleteScopes),
+    docs,
+    incompleteScopes,
   };
 }
 

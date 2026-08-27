@@ -25,12 +25,6 @@ const CATEGORY_ORDER: readonly AutoMemoryTreeCategoryKey[] = [
   ...AUTO_MEMORY_TREE_CATEGORIES,
   AUTO_MEMORY_UNCATEGORIZED,
 ];
-const MEMORY_OVERVIEW_USAGE_LINES = [
-  'Use the metadata below to decide relevance. It can be enough by itself.',
-  'If the user asks about the visible overview or directory metadata, answer from these cards without calling search_memory or empty explore.',
-  'When you need a managed memory body, use search_memory.fetch/search/explore; do not read .qwen/memory, .qwen/team-memory, or ~/.qwen/memories with read_file, shell commands, glob, or directory browsing.',
-];
-
 export interface AutoMemoryTreeLeaf {
   memoryRef: string;
   scope: AutoMemoryScope;
@@ -69,7 +63,12 @@ interface RenderAutoMemoryFocusedSubtreeResult {
 }
 
 export function toAutoMemoryRef(doc: ScannedAutoMemoryDocument): string {
-  return `${doc.scope}:${sanitizeAutoMemoryPromptField(doc.relativePath, 512)}`;
+  const encodedPath = doc.relativePath
+    .replaceAll('\\', '/')
+    .split('/')
+    .map((segment) => encodeURIComponent(segment))
+    .join('/');
+  return `${doc.scope}:${encodedPath}`;
 }
 
 function sanitizeList(values: readonly string[], maxChars: number): string[] {
@@ -220,10 +219,7 @@ export function createAutoMemoryTreeSnapshot(
       .update(JSON.stringify(revisionValue))
       .digest('hex'),
     tree,
-    routerPrompt: renderAutoMemoryGlobalRouter(tree, {
-      sourceStatus,
-      compact: true,
-    }),
+    routerPrompt: renderAutoMemoryGlobalRouter(tree, sourceStatus),
     sourceStatus,
   };
 }
@@ -361,29 +357,15 @@ export function renderAutoMemoryFocusedSubtree(
 
 function renderAutoMemoryGlobalRouter(
   tree: AutoMemoryTree,
-  options: {
-    sourceStatus?: MemorySourceStatus;
-    charBudget?: number;
-    compact?: boolean;
-  } = {},
+  sourceStatus?: MemorySourceStatus,
 ): string {
-  const header = options.compact
-    ? [
-        '## Complete memory tree',
-        '',
-        'This is the latest complete memory metadata tree. It replaces any older complete memory tree in the conversation. Use it to route into the focused subtree or search_memory when metadata is insufficient.',
-        ...sourceWarning(options.sourceStatus),
-        '',
-      ]
-    : [
-        '## Complete memory tree',
-        '',
-        'This is the latest complete memory metadata tree. It replaces any older complete memory tree in the conversation.',
-        ...sourceWarning(options.sourceStatus),
-        '',
-        ...MEMORY_OVERVIEW_USAGE_LINES,
-        '',
-      ];
+  const header = [
+    '## Complete memory tree',
+    '',
+    'This is the latest complete memory metadata tree. It replaces any older complete memory tree in the conversation. Use it to route into the focused subtree or search_memory when metadata is insufficient.',
+    ...sourceWarning(sourceStatus),
+    '',
+  ];
   const lines = [...header];
   if (tree.categories.length === 0) {
     lines.push('No managed memory entries are currently visible.');
