@@ -63,16 +63,12 @@ import { getRecentGitStatus } from '../utils/gitUtils.js';
 import {
   assembleSystemPrompt,
   getArenaSystemReminder,
-  getCoreSystemPrompt,
   getCustomSystemPrompt,
+  getMainSessionBaseSystemPrompt,
   getPlanModeSystemReminder,
-  isSystemMdActive,
-  resolveInteractionMode,
+  resolveMainSessionOutputStyle,
 } from './prompts.js';
-import {
-  getOutputStyleTurnReminder,
-  resolveEffectiveOutputStyle,
-} from './output-styles.js';
+import { getOutputStyleTurnReminder } from './output-styles.js';
 import {
   CompressionStatus,
   GeminiEventType,
@@ -354,31 +350,6 @@ const SKILL_WRITE_TOOL_NAMES: ReadonlySet<string> = new Set([
   ToolNames.WRITE_FILE,
   ToolNames.EDIT,
 ]);
-
-type MainSessionPromptConfig = Pick<
-  Config,
-  | 'getSystemPrompt'
-  | 'getModel'
-  | 'getOutputStyle'
-  | 'getExperimentalZedIntegration'
-  | 'getInputFormat'
-  | 'isInteractive'
->;
-
-export function getMainSessionBaseSystemPrompt(
-  config: MainSessionPromptConfig,
-): string {
-  const overrideSystemPrompt = config.getSystemPrompt();
-  return overrideSystemPrompt
-    ? getCustomSystemPrompt(overrideSystemPrompt)
-    : getCoreSystemPrompt(
-        undefined,
-        config.getModel(),
-        undefined,
-        resolveInteractionMode(config),
-        config.getOutputStyle(),
-      );
-}
 
 export class GeminiClient {
   private chat?: GeminiChat;
@@ -3530,20 +3501,10 @@ export class GeminiClient {
           }
         }
 
-        // Every non-default output style is reminded each turn. The style
-        // section lives in the cached system prompt, and a session drifts back
-        // to the default voice over a long conversation without a nudge that
-        // sits next to the newest user text. Prompt overrides (a custom
-        // systemPrompt or QWEN_SYSTEM_MD) carry no style section, so those
-        // sessions get no reminder either.
-        const activeStyle = this.config.getOutputStyle();
-        const outputStyle =
-          activeStyle && !this.config.getSystemPrompt() && !isSystemMdActive()
-            ? resolveEffectiveOutputStyle(
-                activeStyle,
-                resolveInteractionMode(this.config),
-              )
-            : undefined;
+        // Remind the model of the style its system prompt carries: the
+        // section sits in the cached prompt and fades over a long
+        // conversation without a nudge next to the newest user text.
+        const outputStyle = resolveMainSessionOutputStyle(this.config);
         if (outputStyle) {
           systemReminders.push(
             wrapSystemReminder(getOutputStyleTurnReminder(outputStyle)),

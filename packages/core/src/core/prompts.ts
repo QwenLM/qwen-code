@@ -11,6 +11,7 @@ import { ToolNames } from '../tools/tool-names.js';
 import process from 'node:process';
 import { isGitRepository } from '../utils/gitUtils.js';
 import { QWEN_DIR } from '../config/storage.js';
+import type { Config } from '../config/config.js';
 import type { GenerateContentConfig } from '@google/genai';
 import { InputFormat } from '../output/types.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
@@ -449,6 +450,57 @@ Your core function is efficient and safe assistance. Balance conciseness with th
 
 Interaction mode reminder: ${interaction.questions}
 `.trim();
+}
+
+type MainSessionPromptConfig = Pick<
+  Config,
+  | 'getSystemPrompt'
+  | 'getModel'
+  | 'getOutputStyle'
+  | 'getExperimentalZedIntegration'
+  | 'getInputFormat'
+  | 'isInteractive'
+>;
+
+/**
+ * The output style a main session's prompt actually carries — the single
+ * decision the prompt builders and the per-turn style reminder consult
+ * together, so a session is never reminded about a style its prompt does not
+ * carry. Prompt overrides own their wording end to end: neither a custom
+ * `systemPrompt` nor a `QWEN_SYSTEM_MD` replacement gets a style section, so
+ * neither gets a reminder. Uses a structural type, like
+ * {@link resolveInteractionMode}, to avoid a hard dependency on the full
+ * Config class.
+ */
+export function resolveMainSessionOutputStyle(config: {
+  getSystemPrompt(): string | undefined;
+  getOutputStyle(): OutputStyleDefinition | null | undefined;
+  getExperimentalZedIntegration(): boolean;
+  getInputFormat?(): string;
+  isInteractive(): boolean;
+}): OutputStyleDefinition | undefined {
+  if (config.getSystemPrompt() || isSystemMdActive()) {
+    return undefined;
+  }
+  return resolveEffectiveOutputStyle(
+    config.getOutputStyle(),
+    resolveInteractionMode(config),
+  );
+}
+
+export function getMainSessionBaseSystemPrompt(
+  config: MainSessionPromptConfig,
+): string {
+  const overrideSystemPrompt = config.getSystemPrompt();
+  return overrideSystemPrompt
+    ? getCustomSystemPrompt(overrideSystemPrompt)
+    : getCoreSystemPrompt(
+        undefined,
+        config.getModel(),
+        undefined,
+        resolveInteractionMode(config),
+        resolveMainSessionOutputStyle(config),
+      );
 }
 
 /**
