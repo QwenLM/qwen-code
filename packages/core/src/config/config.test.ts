@@ -3723,6 +3723,14 @@ describe('Server Config (config.ts)', () => {
           }
           return result;
         });
+      const actualFs =
+        await vi.importActual<typeof import('node:fs')>('node:fs');
+      (fs.readFileSync as Mock).mockImplementation(
+        (pathOrDescriptor: unknown) =>
+          typeof pathOrDescriptor === 'number'
+            ? actualFs.readFileSync(pathOrDescriptor, 'utf8')
+            : undefined,
+      );
 
       try {
         const initialize = config.initialize();
