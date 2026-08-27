@@ -107,13 +107,19 @@ import { ResourceRegistry } from '../resources/resource-registry.js';
 import { SkillManager } from '../skills/skill-manager.js';
 import { maybeRunAutoSkillCurator } from '../skills/skill-curator.js';
 import type { SkillLevel } from '../skills/types.js';
-import { PermissionManager } from '../permissions/permission-manager.js';
+import {
+  PermissionManager,
+  type ToolRegistrationStatus,
+} from '../permissions/permission-manager.js';
 import {
   type AutoModeDenialState,
   createDenialState,
   resetDenialState,
 } from '../permissions/denialTracking.js';
-import { parseRule } from '../permissions/rule-parser.js';
+import {
+  parseRule,
+  toolMatchesRuleToolName,
+} from '../permissions/rule-parser.js';
 import { SubagentManager } from '../subagents/subagent-manager.js';
 import type { SubagentConfig } from '../subagents/types.js';
 import { BackgroundTaskRegistry } from '../agents/background-tasks.js';
@@ -227,6 +233,7 @@ import {
   patchSessionRecord,
   unregisterSession,
 } from '../services/session-registry.js';
+import { delay } from '../utils/retry.js';
 import {
   SessionService,
   type ResumedSessionData,
@@ -979,6 +986,11 @@ export interface ConfigParameters {
   embeddingModel?: string;
   sandbox?: SandboxConfig;
   targetDir: string;
+  /**
+   * Internal host-only bootstrap mode for a managed workspace whose exact
+   * directory is bound after session registration. It is not a user setting.
+   */
+  provisionalWorkspace?: boolean;
   debugMode: boolean;
   includePartialMessages?: boolean;
   question?: string;
@@ -1058,6 +1070,21 @@ export interface ConfigParameters {
     allow?: string[];
     ask?: string[];
     deny?: string[];
+    /**
+     * The subset of `allow` that comes from `settings.permissions.allow`
+     * (never `--allowed-tools`, the SDK `allowedTools` param, or the
+     * legacy `tools.allowed` key). When it contains at least one valid
+     * rule, the registry-level allowlist activates: built-in tools not
+     * covered by any allow or ask rule are excluded from registration, so
+     * their schemas are never sent to the model (MCP tools, the
+     * `--json-schema` `structured_output` contract, the plan-mode
+     * lifecycle tools, and the `computer_use__*` family are exempt)
+     * (#9827). Only this subset can ACTIVATE the allowlist; while it is
+     * active, `--allowed-tools` / SDK `allowedTools` rules are merged
+     * into the effective allow set and still count toward coverage,
+     * keeping covered built-ins registered.
+     */
+    registryAllowList?: string[];
     /** Settings consumed by the AUTO approval mode classifier. */
     autoMode?: AutoModeSettings;
   };
@@ -1752,6 +1779,24 @@ export type SubSessionSpawner = (
   req: SubSessionSpawnRequest,
 ) => Promise<SubSessionSpawnResult>;
 
+export interface CurrentSessionScheduledTaskCreateRequest {
+  cron: string;
+  prompt: string;
+  recurring: boolean;
+  promptId: string;
+}
+
+export interface CurrentSessionScheduledTaskCreateResult {
+  id: string;
+  cron: string;
+}
+
+/** Daemon-only capability used by `cron_create` to bind a durable task to the
+ * session whose active turn is executing the tool. */
+export type CurrentSessionScheduledTaskCreator = (
+  req: CurrentSessionScheduledTaskCreateRequest,
+) => Promise<CurrentSessionScheduledTaskCreateResult>;
+
 /**
  * A higher-priority static DashScope thinking knob that shadows the global
  * reasoning-effort tier on the wire (see getReasoningEffortOverride).
@@ -1855,6 +1900,9 @@ export class Config {
   private goalRestoreActivation?: () => Promise<void>;
   private rejectGoalRestoreActivation?: (reason?: unknown) => void;
   private readonly sessionRuntimeBaseDir: string;
+  private readonly provisionalWorkspace: boolean;
+  private provisionalWorkspaceActivated = false;
+  private provisionalWorkspaceActivation?: Promise<void>;
   private sessionProjectDirRegistered = false;
   private pendingSessionWriterLease?: SessionWriterLease;
   private pendingSessionWriterRelease:
@@ -1986,6 +2034,7 @@ export class Config {
   private readonly permissionsAllow: string[];
   private readonly permissionsAsk: string[];
   private readonly permissionsDeny: string[];
+  private readonly permissionsRegistryAllowList: string[];
   private readonly permissionsAutoMode: AutoModeSettings;
   private readonly toolDiscoveryCommand: string | undefined;
   private readonly toolCallCommand: string | undefined;
@@ -2266,6 +2315,7 @@ export class Config {
 
   constructor(params: ConfigParameters) {
     this.sessionRuntimeBaseDir = Storage.getRuntimeBaseDir();
+    this.provisionalWorkspace = params.provisionalWorkspace === true;
     this.sessionId = params.sessionId ?? randomUUID();
     // Only set the global env marker once per process lifetime, so
     // throwaway Config instances (e.g. telemetry-only) don't clobber
@@ -2328,6 +2378,8 @@ export class Config {
     this.permissionsAllow = params.permissions?.allow || [];
     this.permissionsAsk = params.permissions?.ask || [];
     this.permissionsDeny = params.permissions?.deny || [];
+    this.permissionsRegistryAllowList =
+      params.permissions?.registryAllowList || [];
     this.permissionsAutoMode = params.permissions?.autoMode ?? {};
     this.toolInvocationGuard = params.toolInvocationGuard;
     this.toolDiscoveryCommand = params.toolDiscoveryCommand;
@@ -2783,6 +2835,34 @@ export class Config {
     }
   }
 
+  /**
+   * Completes the cwd-sensitive half of a host-managed provisional bootstrap.
+   * Calls are one-flight and a failed activation stays failed; callers must
+   * discard the partially activated session instead of retrying individual
+   * initialization steps.
+   */
+  async activateProvisionalWorkspace(): Promise<void> {
+    if (!this.provisionalWorkspace || this.provisionalWorkspaceActivated) {
+      return;
+    }
+    if (this.provisionalWorkspaceActivation) {
+      return this.provisionalWorkspaceActivation;
+    }
+    const activation = (async () => {
+      this.getFileService();
+      await this.geminiClient.initialize();
+      await this.toolRegistry.warmAll({ strict: true });
+      logStartSession(this, new StartSessionEvent(this));
+      this.provisionalWorkspaceActivated = true;
+    })();
+    this.provisionalWorkspaceActivation = activation;
+    return activation;
+  }
+
+  isProvisionalWorkspace(): boolean {
+    return this.provisionalWorkspace;
+  }
+
   private async initializeOnce(
     options?: ConfigInitializeOptions,
   ): Promise<void> {
@@ -2832,8 +2912,12 @@ export class Config {
       this.fileHistoryService = undefined;
     }
 
-    // Initialize centralized FileDiscoveryService
-    this.getFileService();
+    // A managed provisional Config is still rooted at the shared ownership
+    // directory here. Its first cwd-sensitive service is created only after
+    // the daemon binds the exact private child.
+    if (!this.provisionalWorkspace) {
+      this.getFileService();
+    }
     this.promptRegistry = new PromptRegistry();
     this.resourceRegistry = new ResourceRegistry();
     this.extensionManager.setConfig(this);
@@ -3111,7 +3195,11 @@ export class Config {
     this.subagentManager = new SubagentManager(this);
     recordStartupEvent('config_initialize_skills_start');
     if (!options?.skipSkillManager) {
-      if (this.getAutoSkillEnabled() && this.isTrustedFolder()) {
+      if (
+        !this.provisionalWorkspace &&
+        this.getAutoSkillEnabled() &&
+        this.isTrustedFolder()
+      ) {
         try {
           const curatorResult = await maybeRunAutoSkillCurator(
             this.getProjectRoot(),
@@ -3161,10 +3249,12 @@ export class Config {
     }
     recordStartupEvent('config_initialize_extensions_final_end');
 
-    recordStartupEvent('config_initialize_hierarchical_memory_start');
-    await this.refreshHierarchicalMemory('session_start');
-    recordStartupEvent('config_initialize_hierarchical_memory_end');
-    this.debugLogger.debug('Hierarchical memory loaded');
+    if (!this.provisionalWorkspace) {
+      recordStartupEvent('config_initialize_hierarchical_memory_start');
+      await this.refreshHierarchicalMemory('session_start');
+      recordStartupEvent('config_initialize_hierarchical_memory_end');
+      this.debugLogger.debug('Hierarchical memory loaded');
+    }
 
     // Progressive MCP availability: skip MCP discovery in the synchronous
     // tool-registry construction path and kick it off in the background
@@ -3182,6 +3272,7 @@ export class Config {
     const skipInlineMcpDiscovery =
       this.getBareMode() ||
       this.isSafeMode() ||
+      this.provisionalWorkspace ||
       !legacyBlockingMcp ||
       options?.skipMcpDiscovery === true;
 
@@ -3199,7 +3290,7 @@ export class Config {
       `Tool registry initialized with ${this.toolRegistry.getAllToolNames().length} tools`,
     );
 
-    if (!options?.skipGeminiInitialization) {
+    if (!options?.skipGeminiInitialization && !this.provisionalWorkspace) {
       await this.geminiClient.initialize();
       this.debugLogger.info('Gemini client initialized');
     } else {
@@ -3214,11 +3305,13 @@ export class Config {
     // read-only replay Configs pass `lenientToolWarmup` so a tool that cannot be
     // constructed under their deliberately-skipped subsystems (e.g. SkillTool without
     // a SkillManager) is logged and skipped instead of aborting initialize().
-    recordStartupEvent('config_initialize_tool_warmup_start');
-    await this.toolRegistry.warmAll({
-      strict: options?.lenientToolWarmup !== true,
-    });
-    recordStartupEvent('config_initialize_tool_warmup_end');
+    if (!this.provisionalWorkspace) {
+      recordStartupEvent('config_initialize_tool_warmup_start');
+      await this.toolRegistry.warmAll({
+        strict: options?.lenientToolWarmup !== true,
+      });
+      recordStartupEvent('config_initialize_tool_warmup_end');
+    }
 
     // Fire-and-forget MCP discovery. Each server's tools land in the
     // registry as it becomes ready; the cli's AppContainer debounces
@@ -3247,12 +3340,15 @@ export class Config {
     if (
       skipInlineMcpDiscovery &&
       (!(this.getBareMode() || this.isSafeMode()) || hasMcpServers) &&
+      !this.provisionalWorkspace &&
       !options?.skipMcpDiscovery
     ) {
       this.startMcpDiscoveryInBackground();
     }
 
-    logStartSession(this, new StartSessionEvent(this));
+    if (!this.provisionalWorkspace) {
+      logStartSession(this, new StartSessionEvent(this));
+    }
     this.debugLogger.info('Config initialization completed');
 
     // Fire-and-forget sweep of stale ephemeral worktrees left behind by
@@ -3270,7 +3366,7 @@ export class Config {
     // directly would cause launches from a monorepo subdirectory to
     // scan `<subdir>/.qwen/worktrees/` — which never exists — and the
     // sweep would silently be a no-op forever.
-    if (!this.getBareMode()) {
+    if (!this.getBareMode() && !this.provisionalWorkspace) {
       void (async () => {
         try {
           // Resolve the repo top-level FIRST. The previous code bailed
@@ -4129,6 +4225,12 @@ export class Config {
     unregisterSessionModel(previousSessionId);
     this.publishModelEnv();
     this.sessionData = sessionData;
+    if (isSessionTransition) {
+      const skillTool = this.toolRegistry?.getTool?.(ToolNames.SKILL);
+      if (skillTool && 'clearLoadedSkills' in skillTool) {
+        (skillTool as { clearLoadedSkills(): void }).clearLoadedSkills();
+      }
+    }
     this.clearSessionRestoreProjection();
     this.pendingRecoveredAgentsNotice = null;
     this.getOwnActiveTodoReminders().clear();
@@ -4259,6 +4361,50 @@ export class Config {
         this.sessionRegistered = false;
         this.sessionRegistryActive = false;
       });
+  }
+
+  /**
+   * Resolves once initial registration has settled, reporting whether a
+   * record actually exists.
+   *
+   * Anything that publishes *into* the record — the peer-messaging socket
+   * path, today — has to wait for this: `patchSessionRecord` no-ops when
+   * the record is missing, so advertising an address before registration
+   * lands would silently never advertise it at all. Reuses the same write
+   * queue rather than adding a second signal to keep in sync.
+   */
+  async whenSessionRegistered(): Promise<boolean> {
+    await this.sessionRegistryWrite.catch(() => {
+      // A failed earlier write is reported by the flag, not by throwing.
+    });
+    return this.sessionRegistered;
+  }
+
+  /** Serialize the peer inbox address with every other registry patch. */
+  async updateSessionRegistryIpcPath(
+    ipcPath: string | undefined,
+  ): Promise<void> {
+    if (!this.sessionRegistryActive) return;
+    let applied = false;
+    this.queueSessionRegistryWrite(async () => {
+      applied = await patchSessionRecord({ ipcPath });
+      if (ipcPath === undefined || applied) return;
+      // The advertise is one-shot: no later patch re-asserts ipcPath, and
+      // every skip is transient (the fd-pressure window on this process's
+      // own start-token read, or a momentary read error) — the same window
+      // registration retries the same reads for. Without a retry here the
+      // session would keep a live inbox no peer can ever discover.
+      for (let attempt = 0; attempt < 2 && !applied; attempt += 1) {
+        await delay(250);
+        applied = await patchSessionRecord({ ipcPath });
+      }
+      if (!applied) {
+        this.debugLogger.warn(
+          'peer inbox address was not published to the session registry; peers cannot discover this session until it restarts',
+        );
+      }
+    });
+    await this.sessionRegistryWrite;
   }
 
   /** Drain queued patches, then remove this process's registered record. */
@@ -5764,6 +5910,17 @@ export class Config {
   }
 
   /**
+   * Returns the allow rules that come from `settings.permissions.allow`
+   * only — never `--allowed-tools` / the SDK `allowedTools` param (merged
+   * into `getPermissionsAllow()` above) nor the legacy `tools.allowed`
+   * key. Consumed by `PermissionManager` to decide whether the
+   * registry-level allowlist is active (#9827).
+   */
+  getRegistryAllowList(): string[] {
+    return this.permissionsRegistryAllowList;
+  }
+
+  /**
    * Returns the merged deny-rules for PermissionManager.
    *
    * Merges:
@@ -6322,7 +6479,7 @@ export class Config {
   }
 
   isLspEnabled(): boolean {
-    return this.lspEnabled && !this.getBareMode();
+    return this.lspEnabled && !this.getBareMode() && !this.provisionalWorkspace;
   }
 
   getLspClient(): LspClient | undefined {
@@ -7205,18 +7362,74 @@ export class Config {
 
   /**
    * Whether the built-in `list_directory` tool is enabled. Opt-in: the tool
-   * is disabled by default and turns on either through the
-   * `tools.listDirectory.enabled` setting or by being explicitly listed in
-   * the `coreTools` allowlist. Entries are normalised with `parseRule` — the
-   * same parser `PermissionManager` uses to build its allowlist — so alias
-   * forms (`ListFiles`) and specifier forms (`list_directory(/src)`) match.
+   * is disabled by default and turns on through the
+   * `tools.listDirectory.enabled` setting, by being explicitly listed in the
+   * `coreTools` allowlist, or by being covered by an allow OR ask rule while
+   * the `permissions.allow` registry allowlist is active (#9827). Coverage
+   * scans the merged allow set (`getPermissionsAllow()` — settings +
+   * `--allowed-tools` + SDK `allowedTools` + legacy `tools.allowed`) so it
+   * counts exactly what `PermissionManager.isToolEnabled()` counts, while
+   * activation still comes only from `settings.permissions.allow` rules
+   * (`getRegistryAllowList()`), ignoring empty/whitespace-only entries the
+   * same way `PermissionManager.initialize`'s `parseRules` does (and
+   * skipping non-string entries, which settings load never type-validates).
+   * Entries are
+   * normalised with `parseRule` — the same parser `PermissionManager` uses —
+   * so alias forms (`ListFiles`) and specifier forms (`list_directory(/src)`)
+   * match; the check honours meta-categories (`Read`) via
+   * `toolMatchesRuleToolName`, matching the coverage semantics of the
+   * registry gate itself (`isCoveredByAllowOrAskRule`, which counts ask
+   * rules too).
    */
   isLsToolEnabled(): boolean {
     if (this.lsToolEnabled) return true;
-    return (
+    if (
       this.getCoreTools()?.some(
         (name) => parseRule(name).toolName === ToolNames.LS,
-      ) ?? false
+      ) ??
+      false
+    ) {
+      return true;
+    }
+    // `permissions.allow` registry allowlist (#9827): without these branches
+    // an allowlisted tool passes `PermissionManager.isToolEnabled()` but the
+    // registry never registers it, so it silently vanishes from `/tools` and
+    // the model request while calls to it fail with TOOL_NOT_REGISTERED.
+    const coveredByPermissionRule = (raw: string): boolean => {
+      // Mirror the `parseRules` guard: settings load performs no
+      // element-type validation (the schema declares only `type: 'array'`),
+      // so a stray non-string/empty entry must be skipped here, never
+      // crash registry construction (#9827).
+      if (typeof raw !== 'string' || raw.trim() === '') return false;
+      const rule = parseRule(raw);
+      return (
+        !rule.invalid && toolMatchesRuleToolName(rule.toolName, ToolNames.LS)
+      );
+    };
+    // Activation comes only from settings `permissions.allow` rules and
+    // requires at least one non-empty valid entry — exactly how
+    // `PermissionManager.initialize` computes it (`parseRules` filters empty
+    // entries before parsing, and `parseRule('')` carries no `invalid` flag),
+    // so a degenerate `[""]` leaves the allowlist inactive in both places.
+    // The `typeof` guard mirrors that filter for non-string entries too:
+    // `PermissionManager.initialize` tolerates them in the same settings
+    // file, so this gate must not become a new startup crash (#9827).
+    const allowListActive = this.getRegistryAllowList().some(
+      (raw) =>
+        typeof raw === 'string' && raw.trim() !== '' && !parseRule(raw).invalid,
+    );
+    if (!allowListActive) return false;
+    // Coverage mirrors `PermissionManager.isToolEnabled`: the merged allow
+    // set and ask rules both count while the allowlist is active, so a tool
+    // the permission system reports as enabled is genuinely offered to
+    // `registerLazy` (#9827). Ask-only coverage counts for exactly the same
+    // reason it counts in `PermissionManager.isCoveredByAllowOrAskRule` —
+    // otherwise the ask rule could never fire and arriving calls would fail
+    // TOOL_NOT_REGISTERED. Gating both on the allowlist actually being
+    // active keeps the default opt-in behaviour when it is not.
+    return (
+      this.getPermissionsAllow().some(coveredByPermissionRule) ||
+      this.getPermissionsAsk().some(coveredByPermissionRule)
     );
   }
 
@@ -7314,6 +7527,7 @@ export class Config {
   }
 
   isWorkflowsEnabled(): boolean {
+    if (this.provisionalWorkspace) return false;
     // Workflows are experimental and opt-in: enabled via settings or env var
     // P1 also honors a kill switch: QWEN_CODE_DISABLE_WORKFLOWS=1 forces off
     if (process.env['QWEN_CODE_DISABLE_WORKFLOWS'] === '1') return false;
@@ -7535,7 +7749,7 @@ export class Config {
    * for tests / power users ('0' forces off, '1' forces on).
    */
   getTeamMemoryEnabled(): boolean {
-    if (this.getBareMode()) {
+    if (this.getBareMode() || this.provisionalWorkspace) {
       return false;
     }
     const override = process.env['QWEN_CODE_MEMORY_TEAM'];
@@ -7555,7 +7769,7 @@ export class Config {
    * Off by default since it mutates the repo and pushes. Inert in bare mode.
    */
   getTeamMemorySyncEnabled(): boolean {
-    if (this.getBareMode()) {
+    if (this.getBareMode() || this.provisionalWorkspace) {
       return false;
     }
     const override = process.env['QWEN_CODE_MEMORY_TEAM_SYNC'];
@@ -7579,7 +7793,12 @@ export class Config {
   }
 
   getAutoSkillEnabled(): boolean {
-    return this.enableAutoSkill && !this.getBareMode() && !this.isSafeMode();
+    return (
+      this.enableAutoSkill &&
+      !this.getBareMode() &&
+      !this.isSafeMode() &&
+      !this.provisionalWorkspace
+    );
   }
 
   /**
@@ -8682,11 +8901,13 @@ export class Config {
     ) {
       return;
     }
-    let enabled = true;
+    let status: ToolRegistrationStatus = 'registered';
     try {
-      enabled = this.permissionManager
-        ? await this.permissionManager.isToolEnabled(ToolNames.IMAGE_GEN)
-        : true;
+      status = this.permissionManager
+        ? await this.permissionManager.getToolRegistrationStatus(
+            ToolNames.IMAGE_GEN,
+          )
+        : 'registered';
     } catch (error) {
       this.debugLogger.warn(
         `Failed to check permissions for tool "${ToolNames.IMAGE_GEN}", skipping registration:`,
@@ -8694,12 +8915,17 @@ export class Config {
       );
       return;
     }
-    if (!enabled) return;
+    if (status === 'disabled') return;
 
-    registry.registerFactory(ToolNames.IMAGE_GEN, async () => {
+    const factory: ToolFactory = async () => {
       const { ImageGenTool } = await import('../tools/image-gen.js');
       return new ImageGenTool(this);
-    });
+    };
+    if (status === 'deferred') {
+      registry.registerPermissionDeferredFactory(ToolNames.IMAGE_GEN, factory);
+    } else {
+      registry.registerFactory(ToolNames.IMAGE_GEN, factory);
+    }
   }
 
   async createToolRegistry(
@@ -8718,13 +8944,17 @@ export class Config {
       toolName: ToolName,
       factory: ToolFactory,
     ): Promise<void> => {
-      // PermissionManager handles both the coreTools allowlist (registry-level)
-      // and deny rules (runtime-level) in a single check.
-      let pmEnabled = true;
+      // PermissionManager handles the coreTools allowlist, deny rules, and
+      // the `permissions.allow` registry allowlist in a single check. A tool
+      // the active allowlist does not cover comes back `deferred`, not
+      // `disabled`: it is still registered — listed in `/tools` and loadable
+      // via ToolSearch — but its schema stays out of the eager model request
+      // (#9827) without the tool silently disappearing (#10075).
+      let status: ToolRegistrationStatus = 'registered';
       try {
-        pmEnabled = this.permissionManager
-          ? await this.permissionManager.isToolEnabled(toolName)
-          : true; // Should never reach here after initialize(), but safe default.
+        status = this.permissionManager
+          ? await this.permissionManager.getToolRegistrationStatus(toolName)
+          : 'registered'; // Should never reach here after initialize(), but safe default.
       } catch (error) {
         this.debugLogger.warn(
           `Failed to check permissions for tool "${toolName}", skipping registration:`,
@@ -8733,7 +8963,9 @@ export class Config {
         return;
       }
 
-      if (pmEnabled) {
+      if (status === 'deferred') {
+        registry.registerPermissionDeferredFactory(toolName, factory);
+      } else if (status === 'registered') {
         registry.registerFactory(toolName, factory);
       }
     };
@@ -9199,6 +9431,8 @@ export class Config {
 
   private subSessionSpawner?: SubSessionSpawner;
 
+  private currentSessionScheduledTaskCreator?: CurrentSessionScheduledTaskCreator;
+
   /**
    * Wire the sub-session spawner used by the `create_sub_session` tool. Set by
    * the daemon/ACP session layer (which routes it to the bridge over
@@ -9212,5 +9446,17 @@ export class Config {
   /** The injected sub-session spawner, or undefined outside daemon mode. */
   getSubSessionSpawner(): SubSessionSpawner | undefined {
     return this.subSessionSpawner;
+  }
+
+  setCurrentSessionScheduledTaskCreator(
+    creator: CurrentSessionScheduledTaskCreator | undefined,
+  ): void {
+    this.currentSessionScheduledTaskCreator = creator;
+  }
+
+  getCurrentSessionScheduledTaskCreator():
+    | CurrentSessionScheduledTaskCreator
+    | undefined {
+    return this.currentSessionScheduledTaskCreator;
   }
 }

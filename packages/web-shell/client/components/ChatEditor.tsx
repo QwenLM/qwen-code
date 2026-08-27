@@ -1080,23 +1080,21 @@ function ModelReasoningControls({
       <div className={styles.reasoningSectionTitle}>
         {t('reasoning.options')}
       </div>
-      {canDisable ? (
-        <div className={styles.reasoningThinkingRow}>
-          <span>{t('reasoning.thinking')}</span>
-          <Switch
-            checked={reasoning.enabled}
-            disabled={busy || !onSelect}
-            aria-label={t('reasoning.thinking')}
-            data-web-shell-thinking-toggle
-            onCheckedChange={(enabled) =>
-              void select(enabled ? reasoning.effort : 'none')
-            }
-          />
-        </div>
-      ) : null}
+      <div className={styles.reasoningThinkingRow}>
+        <span>{t('reasoning.thinking')}</span>
+        <Switch
+          checked={reasoning.enabled}
+          disabled={busy || !onSelect || !canDisable}
+          aria-label={t('reasoning.thinking')}
+          data-web-shell-thinking-toggle
+          onCheckedChange={(enabled) =>
+            void select(enabled ? reasoning.effort : 'none')
+          }
+        />
+      </div>
       {hasEffortOptions ? (
         <>
-          {canDisable ? <div className={styles.reasoningDivider} /> : null}
+          <div className={styles.reasoningDivider} />
           <div className={styles.reasoningSectionTitle}>
             {t('reasoning.effort')}
           </div>

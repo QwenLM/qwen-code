@@ -149,12 +149,16 @@ export function mapReasoningControls(
     const value = getString(getRecord(item), 'value');
     return value ? [value] : [];
   });
-  const currentValue = getString(option, 'currentValue');
-  if (!currentValue || !values.includes(currentValue)) return undefined;
   const meta = getRecord(option['_meta']);
   const reasoningMeta = getRecord(meta?.['qwenCode/reasoning']);
-  const canDisable = values.includes('none');
-  if (!canDisable && reasoningMeta?.['canDisable'] !== false) return undefined;
+  const thinkingMandatory = reasoningMeta?.['thinkingMandatory'] === true;
+  const providerMandatory = reasoningMeta?.['canDisable'] === false;
+  const explicitlyMandatory = thinkingMandatory || providerMandatory;
+  const hasDisableOption = values.includes('none');
+  if (!hasDisableOption && !explicitlyMandatory) return undefined;
+  if (hasDisableOption && explicitlyMandatory) return undefined;
+  const currentValue = getString(option, 'currentValue');
+  if (!currentValue || !values.includes(currentValue)) return undefined;
   const selectableValues = values.filter((value) => value !== 'none');
   if (selectableValues.length === 0) return undefined;
   if (reasoningMeta?.['toggleOnly'] === true) {
@@ -162,6 +166,7 @@ export function mapReasoningControls(
       enabled: currentValue !== 'none',
       effort: selectableValues[0]!,
       efforts: [],
+      ...(explicitlyMandatory ? { canDisable: false } : {}),
     };
   }
   const efforts = selectableValues;
@@ -173,9 +178,9 @@ export function mapReasoningControls(
     ) ?? efforts[0]!;
   return {
     enabled: currentValue !== 'none',
-    ...(!canDisable ? { canDisable: false } : {}),
     effort,
     efforts,
+    ...(explicitlyMandatory ? { canDisable: false } : {}),
   };
 }
 
@@ -621,7 +626,9 @@ function getGoalState(
   const lastReason = getString(source, 'lastReason');
   const limitKindRaw = getString(source, 'limitKind');
   const limitKind =
-    limitKindRaw === 'evidence_catalog' || limitKindRaw === 'checkpoint_request'
+    limitKindRaw === 'evidence_catalog' ||
+    limitKindRaw === 'checkpoint_request' ||
+    limitKindRaw === 'token_budget'
       ? limitKindRaw
       : undefined;
   return {

@@ -15,10 +15,10 @@
 2226 assign-issue-owner.yml
 3480 audio-capture-prebuilds.yml
 9023 auto-minimize-spam.yml
-4638 build-and-publish-image.yml
+9256 build-and-publish-image.yml
 49610 cd-cua-driver.yml
 2076 cd-mobile-mcp.yml
-74315 ci.yml
+81137 ci.yml
 1482 codeql.yml
 9389 comment-attachment-guard.yml
 31677 desktop-release.yml
@@ -26,13 +26,15 @@
 10005 dsw-swe-verified-release.yml
 12340 e2e.yml
 11394 finalize-release.yml
+16647 live-host-release.yml
+5950 live-host.yml
 7642 main-ci-failure-issue.yml
 1686 npm-cache.yml
 7299 pr-force-push-reminder.yml
 6495 pr-self-report-label.yml
 9646 qwen-autofix-fork-bridge.yml
 5942 qwen-autofix-fork-signal.yml
-397656 qwen-autofix.yml
+404284 qwen-autofix.yml
 7061 qwen-ci-flaky-rerun.yml
 158010 qwen-code-pr-review.yml
 79041 qwen-fleet-shepherd.yml
@@ -54,6 +56,7 @@
 17013 serve-ab.yml
 2641 stale.yml
 10920 sync-desktop-to-oss.yml
+10018 sync-live-host-to-oss.yml
 10138 sync-release-to-oss.yml
 3303 update-ecs-runner-qwen.yml
 2307 web-shell-visuals-cleanup.yml

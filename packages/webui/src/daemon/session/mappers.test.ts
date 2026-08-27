@@ -131,6 +131,29 @@ describe('mapReasoningControls', () => {
       ]),
     ).toBeUndefined();
   });
+
+  it('maps runtime-mandatory reasoning without inventing Thinking off', () => {
+    expect(
+      mapReasoningControls([
+        {
+          id: 'reasoning_effort',
+          currentValue: 'xhigh',
+          options: [{ value: 'low' }, { value: 'medium' }, { value: 'xhigh' }],
+          _meta: {
+            'qwenCode/reasoning': {
+              defaultEffort: 'xhigh',
+              thinkingMandatory: true,
+            },
+          },
+        },
+      ]),
+    ).toEqual({
+      enabled: true,
+      effort: 'xhigh',
+      efforts: ['low', 'medium', 'xhigh'],
+      canDisable: false,
+    });
+  });
 });
 
 describe('mapProviderStatus reasoning preview', () => {
@@ -822,6 +845,46 @@ describe('updateConnectionFromDaemonEvent', () => {
     expect(next.goalState?.goal).toMatchObject({
       status: 'usage_limited',
       limitKind: 'evidence_catalog',
+    });
+  });
+
+  it('carries a token_budget limitKind through from the wire', () => {
+    const next = applyEvent(
+      { status: 'connected', workspaceCwd: '/workspace' },
+      {
+        id: 1,
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            _meta: {
+              goalState: {
+                v: 2,
+                activity: 'idle',
+                goal: {
+                  goalId: 'goal-1',
+                  revision: 3,
+                  objective: 'ship it',
+                  status: 'usage_limited',
+                  evidenceCursor: { recordId: 'record-1' },
+                  turnCount: 2,
+                  activeTimeMs: 10,
+                  createdAt: 1,
+                  updatedAt: 2,
+                  lastReason: 'The Goal spent its autonomous token budget.',
+                  limitKind: 'token_budget',
+                },
+              },
+            },
+          },
+        },
+      } as DaemonEvent,
+    );
+
+    expect(next.goalState?.goal).toMatchObject({
+      status: 'usage_limited',
+      limitKind: 'token_budget',
     });
   });
 

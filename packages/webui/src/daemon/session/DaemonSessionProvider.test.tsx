@@ -8645,6 +8645,70 @@ describe('DaemonSessionProvider', () => {
     });
   });
 
+  it('preserves hydrated Goal state when the event stream starts', async () => {
+    sdkMocks.sessions.push(createMockSession({ sessionId: 'session-a' }));
+    const goal = createDeferred<GoalStateResponse>();
+    const eventApplied = createDeferred<void>();
+    sdkMocks.sessions.push(
+      createMockSession({
+        sessionId: 'session-b',
+        goal: vi.fn(() => goal.promise),
+        events: async function* events(opts = {}) {
+          yield {
+            v: 1,
+            type: 'git_branch_changed',
+            data: { branch: 'feature' },
+          };
+          eventApplied.resolve();
+          await new Promise<void>((resolve) => {
+            if (opts.signal?.aborted) {
+              resolve();
+              return;
+            }
+            opts.signal?.addEventListener('abort', () => resolve(), {
+              once: true,
+            });
+          });
+        },
+      }),
+    );
+    let actions: DaemonSessionActions | undefined;
+    let connection: DaemonConnectionState | undefined;
+
+    function Harness() {
+      actions = useDaemonActions();
+      connection = useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, { autoConnect: true });
+    await act(async () => {
+      await flushPromises();
+    });
+
+    act(() => {
+      void requireActions(actions).loadSession('session-b');
+    });
+    await act(async () => {
+      await flushPromises();
+    });
+    expect(connection?.goalState).toBeUndefined();
+
+    await act(async () => {
+      goal.resolve({
+        snapshot: { v: 2, goal: null, activity: 'idle' },
+      });
+      await eventApplied.promise;
+      await flushPromises();
+    });
+
+    expect(connection).toMatchObject({
+      sessionId: 'session-b',
+      gitBranch: 'feature',
+      goalState: { v: 2, goal: null, activity: 'idle' },
+    });
+  });
+
   it('retries a session switch while the target session is closing', async () => {
     const firstSession = createMockSession({ sessionId: 'session-a' });
     const secondSession = createMockSession({ sessionId: 'session-b' });
@@ -12076,6 +12140,7 @@ describe('DaemonSessionProvider', () => {
   });
 
   it('preserves session and uses delta resume after a retriable SSE error', async () => {
+    const resumeDelivered = createDeferred<void>();
     let callCount = 0;
     const events = vi.fn(async function* retriableEvents(
       opts: { signal?: AbortSignal } = {},
@@ -12107,6 +12172,7 @@ describe('DaemonSessionProvider', () => {
           },
         },
       } satisfies DaemonEvent;
+      resumeDelivered.resolve();
       await new Promise<void>((resolve) => {
         if (opts.signal?.aborted) {
           resolve();
@@ -12132,8 +12198,9 @@ describe('DaemonSessionProvider', () => {
       maxReconnectDelayMs: 1,
     });
     await act(async () => {
-      await wait(20);
+      await resumeDelivered.promise;
       await flushPromises();
+      await flushTranscriptDispatch();
     });
 
     expect(sdkMocks.MockDaemonSessionClient.load).toHaveBeenCalledTimes(1);

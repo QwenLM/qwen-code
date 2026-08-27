@@ -65,7 +65,7 @@ import {
 } from './toolFormatting';
 import { useI18n } from '../../i18n';
 import { useTranscriptRenderMode } from '../../transcriptRenderMode';
-import { TodoTimelineContext } from '../../App';
+import { TodoTimelineContext } from '../../WebShellContexts';
 import {
   type ToolHeaderExtraRenderInfo,
   type ToolHeaderKind,
@@ -117,32 +117,6 @@ function openMonitorDetailsOnce(
     });
 }
 
-export function hasExpandableContent(tool: ACPToolCall): boolean {
-  if (getMcpAppDisplay(tool.rawOutput)) return true;
-  const name = tool.toolName.toLowerCase();
-  if (isAskUserQuestionToolName(tool.toolName)) return !!extractText(tool);
-  // write_file shows content from args even before completion
-  if (name === 'write_file' || name === 'writefile') {
-    return !!getWriteContent(tool) || hasEditContent(tool);
-  }
-  if (tool.status !== 'completed' && tool.status !== 'failed') return false;
-  if (isShellToolName(name)) {
-    const text = extractText(tool);
-    return !!text && text.trim().length > 0 && text.split('\n').length > 1;
-  }
-  if (isSkillToolName(name)) {
-    return !!getFirstToolContentText(tool);
-  }
-  if (name === 'edit' || name === 'write' || name === 'editfile') {
-    return hasEditContent(tool);
-  }
-  if (name === 'read' || name === 'read_file' || name === 'readfile') {
-    const text = extractText(tool);
-    return !!text && text.split('\n').length > 3;
-  }
-  return false;
-}
-
 // Tools whose expanded row renders a kind-specific detail view (shell output /
 // diff / file content / Q&A). Must stay in sync with the renderers in
 // ToolLine's lineDetail block below. Tools NOT in this set have nothing extra
@@ -163,15 +137,6 @@ function hasDetailView(tool: ACPToolCall): boolean {
     isSkillToolName(name) ||
     isAskUserQuestionToolName(tool.toolName)
   );
-}
-
-function hasDiffContent(tool: ACPToolCall): boolean {
-  if (tool.content?.some((b) => b.type === 'diff')) return true;
-  return !!getRawFileDiff(tool);
-}
-
-function hasEditContent(tool: ACPToolCall): boolean {
-  return hasDiffContent(tool) || !!extractText(tool);
 }
 
 export function extractDiff(tool: ACPToolCall): string {
@@ -390,19 +355,6 @@ function ToolExpandedCard({
   );
 }
 
-function getWriteContent(tool: ACPToolCall): string {
-  if (tool.args?.content) return tool.args.content as string;
-  if (tool.args?.new_string) return tool.args.new_string as string;
-  const text = extractText(tool);
-  if (text) return text;
-  if (tool.rawOutput && typeof tool.rawOutput === 'object') {
-    const raw = tool.rawOutput as Record<string, unknown>;
-    if (typeof raw.content === 'string') return raw.content;
-    if (typeof raw.newContent === 'string') return raw.newContent;
-  }
-  return '';
-}
-
 // Collapsed by default: the diff of this todo_write call (just-completed and
 // just-started items), expanding to the full list on click. The per-snapshot
 // diff comes from the timeline context, so this is isolated in its own
@@ -440,7 +392,6 @@ interface ToolLineProps {
   workspaceCwd?: string;
   summaryOnly?: boolean;
   forceExpanded?: boolean;
-  forceExpandable?: boolean;
   hideHeader?: boolean;
   hideCollapsedOutput?: boolean;
 }
@@ -1010,7 +961,6 @@ function areToolLinePropsEqual(
   if (prev.workspaceCwd !== next.workspaceCwd) return false;
   if (prev.summaryOnly !== next.summaryOnly) return false;
   if (prev.forceExpanded !== next.forceExpanded) return false;
-  if (prev.forceExpandable !== next.forceExpandable) return false;
   if (prev.hideHeader !== next.hideHeader) return false;
   if (prev.hideCollapsedOutput !== next.hideCollapsedOutput) return false;
   const a = prev.tool;
@@ -1110,7 +1060,6 @@ export const ToolLine = memo(function ToolLine({
   workspaceCwd,
   summaryOnly = false,
   forceExpanded = false,
-  forceExpandable = false,
   hideHeader = false,
   hideCollapsedOutput = false,
 }: ToolLineProps) {
@@ -1124,7 +1073,7 @@ export const ToolLine = memo(function ToolLine({
   const [monitorDetailsUnavailable, setMonitorDetailsUnavailable] =
     useState(false);
   const [expanded, setExpanded] = useState(
-    () => isForcedExpanded || shouldAutoExpand(tool),
+    () => isForcedExpanded || (!summaryOnly && shouldAutoExpand(tool)),
   );
   const monitorDetailsRequestRef = useRef<object | null>(null);
   // Set once the user explicitly toggles this row, so auto-collapse-on-
@@ -1133,14 +1082,20 @@ export const ToolLine = memo(function ToolLine({
 
   useEffect(
     () => {
-      setExpanded(isForcedExpanded || shouldAutoExpand(tool));
+      setExpanded(isForcedExpanded || (!summaryOnly && shouldAutoExpand(tool)));
       setMonitorDetailsUnavailable(false);
       monitorDetailsRequestRef.current = null;
       // A new tool identity resets the manual latch.
       userToggledRef.current = false;
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [isForcedExpanded, monitorDetailsAvailable, tool.callId, tool.toolName],
+    [
+      isForcedExpanded,
+      monitorDetailsAvailable,
+      summaryOnly,
+      tool.callId,
+      tool.toolName,
+    ],
   );
   const isAgent = isSubAgentToolCall(tool);
   const hasApproval = approval && approval.toolCallId === tool.callId;
@@ -1329,15 +1284,12 @@ export const ToolLine = memo(function ToolLine({
     name === 'search' ||
     name === 'glob';
   const isRead = name === 'read' || name === 'read_file' || name === 'readfile';
-  // A row expands when it has a todo list to reveal, detail output
-  // (bash/diff/read content), or a description long enough to be ellipsised.
+  // Every regular tool row expands on demand. Content controls only what the
+  // expanded card shows, never whether the user can open or close it.
   // When a long description is expanded we move it out of the header into a
   // wrapped block below, so the header drops its single-line copy.
   const descExpandable = !isTodo && isDescriptionExpandable(description);
-  const expandable =
-    !isForcedExpanded &&
-    (forceExpandable ||
-      (isTodo ? hasTodoList : hasExpandableContent(tool) || descExpandable));
+  const expandable = !isForcedExpanded;
   const interactive = opensMonitorDetails || expandable;
   const fallbackToMonitorInline = () => {
     setMonitorDetailsUnavailable(true);
@@ -1362,13 +1314,9 @@ export const ToolLine = memo(function ToolLine({
   const hideDescriptionInHeader =
     showDescriptionInDetail && !isShell && !isSearch && !isRead;
   const expandedCardDetail = fullDescription;
-  // A failed tool with no result text still gets the titled card so its
-  // title-row error icon remains visible when expanded.
+  // Contentless tools still get a titled card when the user opens them.
   const showExpandedSummaryPanel =
-    !isTodo &&
-    expanded &&
-    !detailView &&
-    (showDescriptionInDetail || result || tool.status === 'failed');
+    expanded && !detailView && (!isTodo || (!hasTodoList && !result));
 
   return (
     <div className={styles.line}>

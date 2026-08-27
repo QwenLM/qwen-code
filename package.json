@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/qwen-code",
-  "version": "0.22.0",
+  "version": "0.22.2",
   "engines": {
     "node": ">=22.0.0"
   },
@@ -19,14 +19,15 @@
     "packages/channels/gitlab",
     "packages/channels/plugin-example",
     "integrations/external-context",
-    "!packages/desktop-shell"
+    "!packages/desktop-shell",
+    "!packages/live-host"
   ],
   "repository": {
     "type": "git",
     "url": "git+https://github.com/QwenLM/qwen-code.git"
   },
   "config": {
-    "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.22.0"
+    "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.22.2"
   },
   "scripts": {
     "start": "node scripts/start.js",

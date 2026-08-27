@@ -1,6 +1,5 @@
 import './styles/globals.css';
 import {
-  createContext,
   forwardRef,
   memo,
   useCallback,
@@ -13,7 +12,6 @@ import {
   type ComponentPropsWithoutRef,
   type KeyboardEvent as ReactKeyboardEvent,
   type PointerEvent as ReactPointerEvent,
-  type ReactNode,
 } from 'react';
 import { createPortal } from 'react-dom';
 import {
@@ -51,6 +49,7 @@ import type {
   DaemonSessionShellTaskStatus,
   DaemonSessionTaskStatus,
   DaemonSessionArtifact,
+  DaemonSessionSummary,
   DaemonWorkspaceCapability,
   DaemonWorkspaceGitStatus,
   GoalSnapshotV2,
@@ -135,6 +134,7 @@ import { SkillsManagerPage } from './components/skills/SkillsManagerPage';
 import { DaemonStatusDialog } from './components/dialogs/DaemonStatusDialog';
 import { SessionOverviewPanel } from './components/SessionOverviewPanel';
 import { SplitView } from './components/SplitView';
+import { GaugeIcon } from 'lucide-react';
 import type { PaneHeaderActionsRenderer } from './components/ChatPane';
 import {
   ArtifactPanel,
@@ -348,51 +348,8 @@ import {
 } from './customization';
 import type { CommandDisplayCategoryOrder } from './utils/commandDisplay';
 import { WebShellPortalRootContext } from './portalRoot';
+import { CompactModeContext, TodoContextsProvider } from './WebShellContexts';
 import styles from './App.module.css';
-
-export const CompactModeContext = createContext(false);
-
-/**
- * Per-snapshot status diffs (keyed by tool callId or plan message id), so a
- * history row can render what changed in that snapshot without re-deriving it
- * from the whole transcript. Empty by default so a row rendered outside the
- * provider still falls back gracefully.
- */
-export const TodoTimelineContext = createContext<Map<string, TodoSnapshotDiff>>(
-  new Map(),
-);
-
-/**
- * Per-todo timing and resource detail keyed by todoStateKey, consumed by the
- * expanded todo list so a finished task can reveal when it ran and what it
- * spent. Empty by default so a row rendered outside the provider (or in tests)
- * simply shows no expander.
- */
-export const TodoDetailContext = createContext<Map<string, TodoDetail>>(
-  new Map(),
-);
-
-/**
- * Provides both todo contexts in one wrapper so the message list stays at a
- * single nesting level (one provider in the tree, not two).
- */
-function TodoContextsProvider({
-  timeline,
-  details,
-  children,
-}: {
-  timeline: Map<string, TodoSnapshotDiff>;
-  details: Map<string, TodoDetail>;
-  children: ReactNode;
-}) {
-  return (
-    <TodoTimelineContext.Provider value={timeline}>
-      <TodoDetailContext.Provider value={details}>
-        {children}
-      </TodoDetailContext.Provider>
-    </TodoTimelineContext.Provider>
-  );
-}
 
 const MODES_CYCLE = DAEMON_APPROVAL_MODES;
 const MAX_TOASTS = 4;
@@ -488,7 +445,6 @@ function availableSkillInfos(status: {
     }))
     .sort((a, b) => a.name.localeCompare(b.name));
 }
-
 function availableSessionSkillInfos(
   skills: readonly string[],
   commands: readonly {
@@ -552,7 +508,6 @@ function mergeSkillToggles(
   return [...byName.values()];
 }
 
-const COMPACT_MODE_SETTING_KEY = 'ui.compactMode';
 const HIDE_TIPS_SETTING_KEY = 'ui.hideTips';
 
 /** Maps each ModelDialogMode to its i18n title key — single source of truth. */
@@ -953,6 +908,8 @@ export interface WebShellSidebarOptions {
   defaultCollapsed?: boolean;
   /** Whether to show WebShell's built-in compact drawer toggle. Defaults to true. */
   showCompactToggle?: boolean;
+  /** Whether to show the Tasks/Channels session-source switch. Defaults to true. */
+  showSessionSourceSwitch?: boolean;
   /** Hide or replace the complete sidebar branding row. */
   branding?: false | WebShellSidebarBranding;
   /** Customize the primary navigation area (new task button, custom entries). */
@@ -1234,6 +1191,12 @@ type SessionActionsWithCreate = {
   releaseSession: (sessionId: string) => Promise<void>;
 };
 
+type PendingReasoningIntent = {
+  modelId: string;
+  value: string;
+  effort: string;
+};
+
 const emptyComposerApi: WebShellComposerApi = {
   insertText: () => {},
   setText: () => {},
@@ -1279,6 +1242,7 @@ function resolveSidebarOptions(sidebar: WebShellProps['sidebar']): {
   enabled: boolean;
   defaultCollapsed: boolean;
   showCompactToggle: boolean;
+  showSessionSourceSwitch: boolean;
   branding?: false | WebShellSidebarBranding;
   primaryNav?: WebShellSidebarPrimaryNavOptions;
   hideProjectHeader?: boolean;
@@ -1287,15 +1251,26 @@ function resolveSidebarOptions(sidebar: WebShellProps['sidebar']): {
   lockedWorkspace?: WebShellSidebarLockedWorkspace;
 } {
   if (sidebar === true) {
-    return { enabled: true, defaultCollapsed: false, showCompactToggle: true };
+    return {
+      enabled: true,
+      defaultCollapsed: false,
+      showCompactToggle: true,
+      showSessionSourceSwitch: true,
+    };
   }
   if (!sidebar) {
-    return { enabled: false, defaultCollapsed: false, showCompactToggle: true };
+    return {
+      enabled: false,
+      defaultCollapsed: false,
+      showCompactToggle: true,
+      showSessionSourceSwitch: true,
+    };
   }
   return {
     enabled: sidebar.enabled ?? true,
     defaultCollapsed: sidebar.defaultCollapsed ?? false,
     showCompactToggle: sidebar.showCompactToggle ?? true,
+    showSessionSourceSwitch: sidebar.showSessionSourceSwitch ?? true,
     branding: sidebar.branding,
     primaryNav: sidebar.primaryNav,
     hideProjectHeader: sidebar.hideProjectHeader,
@@ -2068,6 +2043,7 @@ export function App({
   const titleHeaderItemVisible = chatHeaderItems.includes('title');
   const environmentHeaderItemVisible = chatHeaderItems.includes('environment');
   const rightPanelHeaderItemVisible = chatHeaderItems.includes('rightPanel');
+  const tokenUsageHeaderItemVisible = chatHeaderItems.includes('tokenUsage');
   const rightPanelItems = rightPanel?.items ?? DEFAULT_RIGHT_PANEL_ITEMS;
   const environmentPanelItems =
     environmentPanel?.items ?? DEFAULT_ENVIRONMENT_PANEL_ITEMS;
@@ -2495,16 +2471,21 @@ export function App({
   const [sessionStatusDisplayName, setSessionStatusDisplayName] = useState<
     string | undefined
   >(undefined);
+  const [currentSessionSummary, setCurrentSessionSummary] = useState<
+    DaemonSessionSummary | undefined
+  >(undefined);
   // Tracks the logical session from the latest effect run. In-flight fetches
   // compare their captured key against this ref on resolve: a match means
   // the response is still relevant and may set OR clear the worktree state;
   // a mismatch means connection.sessionId moved on (reconnect cycling or a
   // user-initiated switch) and the stale response is dropped.
   const worktreeSessionKeyRef = useRef<string | undefined>(undefined);
+  const sessionStatusRequestRef = useRef(0);
   useLayoutEffect(() => {
     setSessionWorktree(undefined);
     setSessionBranch(undefined);
     setSessionStatusDisplayName(undefined);
+    setCurrentSessionSummary(undefined);
   }, [logicalSessionKey]);
   // Restore worktree info from the server when switching to an existing
   // session. The effect intentionally does NOT cancel in-flight fetches on
@@ -2515,11 +2496,13 @@ export function App({
     const sid = connection.sessionId;
     const sessionKey = logicalSessionKey;
     const owner = sessionOwnerGuard.capture();
+    const requestId = ++sessionStatusRequestRef.current;
     worktreeSessionKeyRef.current = sessionKey;
     if (!sid) {
       setSessionWorktree(undefined);
       setSessionBranch(undefined);
       setSessionStatusDisplayName(undefined);
+      setCurrentSessionSummary(undefined);
       return;
     }
     if (
@@ -2532,10 +2515,15 @@ export function App({
     workspace.client
       .sessionStatus(sid)
       .then((summary) => {
-        if (worktreeSessionKeyRef.current === sessionKey && owner.isCurrent()) {
+        if (
+          sessionStatusRequestRef.current === requestId &&
+          worktreeSessionKeyRef.current === sessionKey &&
+          owner.isCurrent()
+        ) {
           setSessionWorktree(summary.worktree);
           setSessionBranch(summary.branch);
           setSessionStatusDisplayName(summary.displayName);
+          setCurrentSessionSummary(summary);
         }
         return loadSessionCatalogOnce(
           workspace.client,
@@ -2549,6 +2537,7 @@ export function App({
           .then((page) => {
             if (
               worktreeSessionKeyRef.current !== sessionKey ||
+              sessionStatusRequestRef.current !== requestId ||
               !owner.isCurrent()
             ) {
               return;
@@ -2563,10 +2552,15 @@ export function App({
           .catch(() => undefined);
       })
       .catch(() => {
-        if (worktreeSessionKeyRef.current === sessionKey && owner.isCurrent()) {
+        if (
+          sessionStatusRequestRef.current === requestId &&
+          worktreeSessionKeyRef.current === sessionKey &&
+          owner.isCurrent()
+        ) {
           setSessionWorktree(undefined);
           setSessionBranch(undefined);
           setSessionStatusDisplayName(undefined);
+          setCurrentSessionSummary(undefined);
         }
       });
   }, [
@@ -2578,6 +2572,7 @@ export function App({
     connection.workspaceCwd,
     logicalSessionKey,
     sessionOwnerGuard,
+    sessionHasActivePrompt,
     workspace.client,
   ]);
   // Active workspace: the connected session's workspace, else the workspace
@@ -3583,6 +3578,35 @@ export function App({
     },
     [getDefaultReviewPanelWidth, t],
   );
+  const openTokenUsagePanel = useCallback(
+    (
+      sourceSessionId: string,
+      sourceSessionActions?: DaemonSessionActions,
+      closeWithPane = false,
+    ) => {
+      const tab: ArtifactPanelTab = {
+        id: `token-usage:${sourceSessionId}`,
+        kind: 'token_usage',
+        title: t('tokenUsage.title'),
+        sessionId: sourceSessionId,
+        ...(closeWithPane ? { closeWithPane: true } : {}),
+        ...(sourceSessionActions
+          ? { sessionActions: sourceSessionActions }
+          : {}),
+      };
+      setArtifactPanelTabs((tabs) =>
+        tabs.some((item) => item.id === tab.id)
+          ? tabs.map((item) => (item.id === tab.id ? tab : item))
+          : [...tabs, tab],
+      );
+      setActiveArtifactPanelTabId(tab.id);
+      setArtifactPanelWidth((width) =>
+        artifactPanelOpenRef.current ? width : getDefaultReviewPanelWidth(),
+      );
+      setArtifactPanelOpen(true);
+    },
+    [getDefaultReviewPanelWidth, t],
+  );
   const openAttachmentPanel = useCallback(
     (
       file: AttachmentPreviewRequest,
@@ -3967,9 +3991,11 @@ export function App({
       observer.disconnect();
     };
   }, [artifactPanelOpen, artifactPanelFullscreen]);
-  const closeArtifactPanelTab = useCallback((tabId: string) => {
+  const closeArtifactPanelTabs = useCallback((tabIds: ReadonlySet<string>) => {
+    if (tabIds.size === 0) return;
     setArtifactPanelTabs((tabs) => {
-      const nextTabs = tabs.filter((tab) => tab.id !== tabId);
+      const nextTabs = tabs.filter((tab) => !tabIds.has(tab.id));
+      if (nextTabs.length === tabs.length) return tabs;
       if (nextTabs.length === 0) {
         setArtifactPanelOpen(false);
         setArtifactPanelFullscreen(false);
@@ -3981,8 +4007,11 @@ export function App({
         setPaneArtifactSnapshots(new Map());
         return nextTabs;
       }
-      if (activeArtifactPanelTabIdRef.current === tabId) {
-        const closedIndex = tabs.findIndex((tab) => tab.id === tabId);
+      if (
+        activeArtifactPanelTabIdRef.current &&
+        tabIds.has(activeArtifactPanelTabIdRef.current)
+      ) {
+        const closedIndex = tabs.findIndex((tab) => tabIds.has(tab.id));
         const nextActive =
           nextTabs[Math.min(closedIndex, nextTabs.length - 1)] ?? nextTabs[0];
         setActiveArtifactPanelTabId(nextActive.id);
@@ -3990,6 +4019,29 @@ export function App({
       return nextTabs;
     });
   }, []);
+  const closeArtifactPanelTab = useCallback(
+    (tabId: string) => closeArtifactPanelTabs(new Set([tabId])),
+    [closeArtifactPanelTabs],
+  );
+  const closeTokenUsageTabs = useCallback(
+    (sessionIds?: readonly string[], paneOnly = false) => {
+      const sessions = sessionIds ? new Set(sessionIds) : undefined;
+      closeArtifactPanelTabs(
+        new Set(
+          artifactPanelTabsRef.current
+            .filter(
+              (tab) =>
+                tab.kind === 'token_usage' &&
+                (!paneOnly || tab.closeWithPane) &&
+                (!sessions ||
+                  (tab.sessionId !== undefined && sessions.has(tab.sessionId))),
+            )
+            .map((tab) => tab.id),
+        ),
+      );
+    },
+    [closeArtifactPanelTabs],
+  );
   const handleArtifactPanelResizeStart = useCallback(
     (event: ReactPointerEvent<HTMLDivElement>) => {
       event.preventDefault();
@@ -5207,6 +5259,18 @@ export function App({
   // dependency (it changes on every pane add/remove).
   const splitSessionIdsRef = useRef<string[]>(splitSessionIds);
   splitSessionIdsRef.current = splitSessionIds;
+  const previousSplitSessionIdsRef = useRef<string[]>(splitSessionIds);
+  useEffect(() => {
+    const nextIds = new Set(splitSessionIds);
+    closeTokenUsageTabs(
+      previousSplitSessionIdsRef.current.filter((id) => !nextIds.has(id)),
+      true,
+    );
+    previousSplitSessionIdsRef.current = splitSessionIds;
+  }, [closeTokenUsageTabs, splitSessionIds]);
+  useEffect(() => {
+    if (mainView !== 'split') closeTokenUsageTabs(undefined, true);
+  }, [closeTokenUsageTabs, mainView]);
   const [mcpDialogMessage, setMcpDialogMessage] =
     useState<SerializedMcpStatusMessage | null>(null);
   // Settings and Daemon Status are shown as an in-place panel that replaces the
@@ -5353,12 +5417,17 @@ export function App({
   }, [externalSplitControlled, externalSplitSignature]);
   const handleSplitPanesChange = useCallback(
     (sessionIds: string[]) => {
+      const nextIds = new Set(sessionIds);
+      closeTokenUsageTabs(
+        splitSessionIdsRef.current.filter((id) => !nextIds.has(id)),
+        true,
+      );
       if (!externalSplitControlled) {
         setSplitSessionIds(sessionIds);
       }
       onSplitSessionIdsChangeRef.current?.(sessionIds);
     },
-    [externalSplitControlled],
+    [closeTokenUsageTabs, externalSplitControlled],
   );
   const notifyControlledSplitClose = useCallback(() => {
     if (externalSplitControlled) {
@@ -5375,6 +5444,28 @@ export function App({
     clearSplitSessions();
     openPanel('sessions');
   }, [notifyControlledSplitClose, openPanel]);
+  // Built-in pane action follows the same tokenUsage opt-in as the chat header.
+  // Hosts can override via `renderPaneHeaderActions` to replace or extend it.
+  const defaultPaneHeaderActions = useCallback<PaneHeaderActionsRenderer>(
+    ({ sessionId, sessionActions }) => (
+      <button
+        type="button"
+        className={styles.tokenUsageHeaderButton}
+        aria-label={t('tokenUsage.open')}
+        title={t('tokenUsage.open')}
+        disabled={!sessionActions}
+        onClick={() =>
+          sessionActions && openTokenUsagePanel(sessionId, sessionActions, true)
+        }
+      >
+        <GaugeIcon size={16} aria-hidden="true" />
+      </button>
+    ),
+    [openTokenUsagePanel, t],
+  );
+  const resolvedPaneHeaderActions =
+    renderPaneHeaderActions ??
+    (tokenUsageHeaderItemVisible ? defaultPaneHeaderActions : undefined);
   // A `?split=a,b` URL (opened in a new tab from the overview) enters the split
   // view with those sessions on load. Consume the param once so a later reload
   // or exit doesn't force the split back on.
@@ -5712,6 +5803,17 @@ export function App({
     currentModelRef.current = modelId;
     setCurrentModel(modelId);
   }, []);
+  const [pendingReasoningIntent, setPendingReasoningIntentState] = useState<
+    PendingReasoningIntent | undefined
+  >(undefined);
+  const pendingReasoningIntentRef = useRef(pendingReasoningIntent);
+  const setPendingReasoningIntent = useCallback(
+    (intent: PendingReasoningIntent | undefined) => {
+      pendingReasoningIntentRef.current = intent;
+      setPendingReasoningIntentState(intent);
+    },
+    [],
+  );
   const connectionRef = useRef(connection);
   connectionRef.current = connection;
   /**
@@ -5847,6 +5949,14 @@ export function App({
     null,
   );
   const preparingSessionIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (
+      connection.sessionId &&
+      connection.sessionId !== preparingSessionIdRef.current
+    ) {
+      setPendingReasoningIntent(undefined);
+    }
+  }, [connection.sessionId, setPendingReasoningIntent]);
   const allocatedSessionCatalogOwnerRef = useRef<
     | {
         sessionId: string;
@@ -5908,6 +6018,19 @@ export function App({
       let allocatedSessionId: string | undefined;
       const modelId =
         currentModelRef.current || connectionRef.current.currentModel;
+      const reasoningIntent = pendingReasoningIntentRef.current;
+      const reasoningPreview = connectionRef.current.models?.find(
+        (model) => model.id === modelId,
+      )?.reasoningPreview;
+      const reasoningEffort =
+        reasoningIntent &&
+        reasoningIntent.modelId === modelId &&
+        reasoningPreview &&
+        (reasoningIntent.value === 'none'
+          ? reasoningPreview.canDisable !== false
+          : reasoningPreview.efforts.includes(reasoningIntent.value))
+          ? reasoningIntent.value
+          : undefined;
       const modeId =
         currentModeRef.current || connectionRef.current.currentMode;
       const primaryWorkspaceCwd = ordinaryWorkspaces.find(
@@ -5934,6 +6057,7 @@ export function App({
           sessionActions: sessionActions as typeof sessionActions &
             SessionActionsWithCreate,
           modelId,
+          reasoningEffort,
           modeId,
           workspaceCwd: targetWorkspaceCwd,
           worktree:
@@ -5971,6 +6095,9 @@ export function App({
           // composer chip stays in the selected mode so the user knows
           // the intent was not fulfilled and can retry.
           setGitModeIntent({ mode: 'current' });
+          if (pendingReasoningIntentRef.current === reasoningIntent) {
+            setPendingReasoningIntent(undefined);
+          }
         });
       } catch (error) {
         if (allocatedSessionId && catalogWorkspaceCwd) {
@@ -5997,6 +6124,7 @@ export function App({
     lockedWorkspaceCwd,
     sessionActions,
     sessionCatalogController,
+    setPendingReasoningIntent,
     workspace.workspaceCwd,
     ordinaryWorkspaces,
   ]);
@@ -6411,11 +6539,45 @@ export function App({
     connection.sessionId &&
       connection.context?.sessionId === connection.sessionId,
   );
-  const displayedReasoning = hasAuthoritativeReasoningContext
-    ? connection.reasoning
-    : !connection.sessionId && !connection.context
+  const welcomeReasoningPreview =
+    !connection.sessionId && !connection.context
       ? connection.models?.find((model) => model.id === currentModel)
           ?.reasoningPreview
+      : undefined;
+  useEffect(() => {
+    if (
+      pendingReasoningIntent?.modelId === currentModel &&
+      pendingReasoningIntent.value === 'none' &&
+      welcomeReasoningPreview?.canDisable === false
+    ) {
+      setPendingReasoningIntent(undefined);
+    }
+  }, [
+    currentModel,
+    pendingReasoningIntent,
+    setPendingReasoningIntent,
+    welcomeReasoningPreview,
+  ]);
+  const validPendingReasoningIntent =
+    pendingReasoningIntent?.modelId === currentModel &&
+    welcomeReasoningPreview &&
+    (pendingReasoningIntent.value === 'none'
+      ? welcomeReasoningPreview.canDisable !== false
+      : welcomeReasoningPreview.efforts.includes(pendingReasoningIntent.value))
+      ? pendingReasoningIntent
+      : undefined;
+  const displayedReasoning = hasAuthoritativeReasoningContext
+    ? connection.reasoning
+    : welcomeReasoningPreview
+      ? {
+          ...welcomeReasoningPreview,
+          enabled: validPendingReasoningIntent
+            ? validPendingReasoningIntent.value !== 'none'
+            : welcomeReasoningPreview.enabled,
+          effort:
+            validPendingReasoningIntent?.effort ??
+            welcomeReasoningPreview.effort,
+        }
       : undefined;
   // The workspace the Changes dialog reads — the same active workspace the
   // git-status effect targets (computed once above), so the chip and the
@@ -7228,9 +7390,6 @@ export function App({
   const languageSetting = workspaceSettings.find(
     (setting) => setting.key === LANGUAGE_SETTING_KEY,
   );
-  const compactModeSetting = workspaceSettings.find(
-    (setting) => setting.key === COMPACT_MODE_SETTING_KEY,
-  );
   const currentVoiceModel = (() => {
     const value = readScopedModelSetting(
       targetedWorkspaceSettings,
@@ -7490,14 +7649,6 @@ export function App({
     }
     return options;
   }, [connection.models]);
-  const [compactMode, setCompactMode] = useState(false);
-  const compactModeRef = useRef(compactMode);
-  compactModeRef.current = compactMode;
-
-  useEffect(() => {
-    const value = compactModeSetting?.values.effective;
-    if (typeof value === 'boolean') setCompactMode(value);
-  }, [compactModeSetting?.values.effective]);
 
   useEffect(() => {
     if (providedTheme) {
@@ -7585,18 +7736,6 @@ export function App({
     lastRecapBlockCountRef.current = 0;
     store.reset();
   }, [store, t]);
-
-  const handleToggleCompact = useCallback(() => {
-    const previous = compactModeRef.current;
-    const next = !compactModeRef.current;
-    setCompactMode(next);
-    setWorkspaceSetting('workspace', COMPACT_MODE_SETTING_KEY, next).catch(
-      (error: unknown) => {
-        setCompactMode(previous);
-        reportError(error, t('compact.saveFailed'));
-      },
-    );
-  }, [reportError, setWorkspaceSetting, t]);
 
   const handleSetMode = useCallback(
     (modeId: string) => {
@@ -9421,11 +9560,12 @@ export function App({
             (connectionRef.current.sessionId === admissionOwner.sessionId &&
               getComposerWorkspaceCwd() === admissionOwner.workspaceCwd));
         const { trackSendFailure = false, ...sendOptions } = opts ?? {};
+        const startedWithoutSession = !connectionRef.current.sessionId;
         const deferComposerCommit =
           Boolean(prepareSubmitRef.current || onSubmitBeforeRef.current) ||
           createSessionPromiseRef.current !== null;
         const clearComposerOnPromptStart =
-          !connectionRef.current.sessionId || deferComposerCommit;
+          startedWithoutSession || deferComposerCommit;
         let optimisticUserMessage: OptimisticUserMessage | undefined;
         let submittedPromptText = promptText;
         let submittedInputAnnotations = sendOptions.inputAnnotations;
@@ -9511,6 +9651,17 @@ export function App({
               files: promptFiles,
               inputAnnotations: submittedInputAnnotations,
             });
+          }
+          if (startedWithoutSession && !admissionStarted) {
+            const editor = editorRef.current;
+            if (editor && !editor.hasInput()) {
+              editor.setText(submittedPromptText);
+              if (promptImages?.length) editor.restoreImages(promptImages);
+              if (promptFiles?.length) editor.restoreFiles(promptFiles);
+              if (submittedInputAnnotations?.length) {
+                editor.restoreInputAnnotations?.(submittedInputAnnotations);
+              }
+            }
           }
           reportError(error, errorMessage);
         });
@@ -10840,8 +10991,9 @@ export function App({
           return;
         }
         if (e.key === 'o') {
+          // The compact toggle is gone; keep Ctrl+O suppressed everywhere so
+          // the key never falls through to the browser's Open File dialog.
           e.preventDefault();
-          handleToggleCompact();
           return;
         }
         if (e.key === 'y') {
@@ -10853,14 +11005,7 @@ export function App({
     };
     window.addEventListener('keydown', onGlobalShortcut, true);
     return () => window.removeEventListener('keydown', onGlobalShortcut, true);
-  }, [
-    interactionBlocked,
-    handleClearScreen,
-    handleToggleCompact,
-    handleRetry,
-    store,
-    t,
-  ]);
+  }, [interactionBlocked, handleClearScreen, handleRetry, store, t]);
 
   const resetEscapeState = useCallback(() => {
     escArmedActionRef.current = null;
@@ -11115,6 +11260,42 @@ export function App({
         );
     },
     [reportError, sessionActions, sessionWriteBlocked, t],
+  );
+
+  const handleWelcomeReasoningEffort = useCallback(
+    (value: string) => {
+      const activeConnection = connectionRef.current;
+      if (
+        sessionWriteBlockedRef.current ||
+        activeConnection.sessionId ||
+        activeConnection.context
+      ) {
+        return;
+      }
+      const modelId = currentModelRef.current;
+      const preview = activeConnection.models?.find(
+        (model) => model.id === modelId,
+      )?.reasoningPreview;
+      if (!preview) return;
+      const previous = pendingReasoningIntentRef.current;
+      if (value === 'none') {
+        if (preview.canDisable === false) return;
+        const previousEffort =
+          previous?.modelId === modelId &&
+          preview.efforts.includes(previous.effort)
+            ? previous.effort
+            : preview.effort;
+        setPendingReasoningIntent({
+          modelId,
+          value,
+          effort: previousEffort,
+        });
+        return;
+      }
+      if (!preview.efforts.includes(value)) return;
+      setPendingReasoningIntent({ modelId, value, effort: value });
+    },
+    [setPendingReasoningIntent],
   );
 
   const handleDeleteModel = useCallback(
@@ -11752,6 +11933,9 @@ export function App({
         <McpAppHostContext.Provider value={workspace.baseUrl}>
           {/* prettier-ignore */}
           <WebShellPortalRootContext.Provider value={portalRoot}>
+          {/* Compact view is fixed on for every message surface (main chat,
+              split panes, subagent detail, drawer) — no toggle remains. */}
+          <CompactModeContext.Provider value={true}>
         <div
           ref={appRootRef}
           className={appClassName}
@@ -11965,6 +12149,7 @@ export function App({
               <DeleteSessionDialog
                 workspaceCwd={lockedWorkspaceCwd}
                 onDeleted={(sessionIds) => {
+                  closeTokenUsageTabs(sessionIds);
                   store.dispatch([
                     {
                       type: 'status',
@@ -12163,8 +12348,10 @@ export function App({
                     closePanel();
                   }}
                   onSessionRenameConfirmed={reconcileCatalogRename}
+                  onSessionsDeleted={closeTokenUsageTabs}
                   onError={reportError}
                   mobileOpen={mobileDrawerOpen}
+                  onMobileClose={closeMobileDrawer}
                   selectedWorkspaceCwd={selectedWorkspaceCwd}
                   onSelectWorkspace={setSelectedWorkspaceCwd}
                   onOpenGitDiff={(workspaceCwd) =>
@@ -12201,6 +12388,9 @@ export function App({
                   lockedWorkspace={sidebarOptions.lockedWorkspace}
                   branding={sidebarOptions.branding}
                   primaryNav={sidebarOptions.primaryNav}
+                  showSessionSourceSwitch={
+                    sidebarOptions.showSessionSourceSwitch
+                  }
                   hideProjectHeader={sidebarOptions.hideProjectHeader}
                   sessionActions={sidebarOptions.sessionActions}
                   footer={sidebarOptions.footer}
@@ -12260,6 +12450,15 @@ export function App({
                         onEnvironmentPanelOpenChange:
                           handleEnvironmentPanelOpenChange,
                         onRightPanelOpenChange: handleRightPanelOpenChange,
+                        ...(tokenUsageHeaderItemVisible && connection.sessionId
+                          ? {
+                              onOpenTokenUsage: () =>
+                                openTokenUsagePanel(
+                                  connection.sessionId!,
+                                  sessionActions,
+                                ),
+                            }
+                          : {}),
                       })}
                     </div>
                   ) : (
@@ -12282,6 +12481,15 @@ export function App({
                       }
                       onToggleRightPanel={() =>
                         handleRightPanelOpenChange(!artifactPanelOpen)
+                      }
+                      onOpenTokenUsage={
+                        tokenUsageHeaderItemVisible && connection.sessionId
+                          ? () =>
+                              openTokenUsagePanel(
+                                connection.sessionId!,
+                                sessionActions,
+                              )
+                          : undefined
                       }
                     />
                   )}
@@ -12581,6 +12789,19 @@ export function App({
                           : ordinaryWorkspaces
                       }
                       lockedWorkspace={lockedWorkspaceCapability}
+                      currentSession={
+                        currentSessionSummary
+                          ? {
+                              ...currentSessionSummary,
+                              hasActivePrompt:
+                                currentSessionSummary.hasActivePrompt === true ||
+                                sessionHasActivePrompt,
+                            }
+                          : undefined
+                      }
+                      currentSessionSchedulingAvailable={workspace.capabilities?.features?.includes(
+                        'scheduled_task_session_reuse',
+                      )}
                       onCreateViaChat={() => {
                         // Start a FRESH session and jump to it so the task-
                         // creation chat doesn't pile onto the current
@@ -12746,12 +12967,11 @@ export function App({
                       </button>
                     </div>
                   )}
-                  {/* Share the app-level customization + compact-mode contexts so
-                      split panes render markdown/tool-headers/thinking the same
-                      way the single-session chat does (todo contexts stay chat-
-                      only — they belong to the outer session, not the panes). */}
+                  {/* Share the app-level customization so split panes render
+                      markdown/tool-headers/thinking the same way the single-
+                      session chat does (todo contexts stay chat-only — they
+                      belong to the outer session, not the panes). */}
                   <WebShellCustomizationProvider value={customization}>
-                    <CompactModeContext.Provider value={compactMode}>
                       <SplitView
                         sessionIds={splitSessionIds}
                         // Mirror live pane add/remove back up so switching away
@@ -12774,7 +12994,7 @@ export function App({
                         messageTurnOutputs={messageTurnOutputs}
                         restartSseOnPrompt={restartSseOnPrompt}
                         historyPageSize={historyPageSize}
-                        renderPaneHeaderActions={renderPaneHeaderActions}
+                        renderPaneHeaderActions={resolvedPaneHeaderActions}
                         voiceUserRevision={voiceUserRevision}
                         voiceWorkspaceRevisions={voiceWorkspaceRevisions}
                         voiceWorkspaces={
@@ -12785,7 +13005,6 @@ export function App({
                         }
                         sessionWorkflowEnabled={sessionWorkflowEnabled}
                       />
-                    </CompactModeContext.Provider>
                   </WebShellCustomizationProvider>
                 </div>
               )}
@@ -12847,7 +13066,6 @@ export function App({
                   }
                 >
                   <WebShellCustomizationProvider value={customization}>
-                    <CompactModeContext.Provider value={compactMode}>
                       <TodoContextsProvider
                         timeline={todoTimeline}
                         details={todoDetails}
@@ -12870,6 +13088,7 @@ export function App({
                             const messageListContent = (
                               <LiveMessageList
                                 ref={messageListRef}
+                                sessionKey={connection.sessionId}
                                 baselineBlocks={blocks}
                                 baselineSummary={blockChangeSummary}
                                 baselineMessages={messages}
@@ -13029,7 +13248,6 @@ export function App({
                           })()}
                         </InteractionBlockContext.Provider>
                       </TodoContextsProvider>
-                    </CompactModeContext.Provider>
 
                     <div
                       ref={footerRef}
@@ -13365,7 +13583,9 @@ export function App({
                           onSelectReasoningEffort={
                             hasAuthoritativeReasoningContext
                               ? handleReasoningEffort
-                              : undefined
+                              : welcomeReasoningPreview && !sessionWriteBlocked
+                                ? handleWelcomeReasoningEffort
+                                : undefined
                           }
                           workspaces={composerWorkspaces}
                           selectedWorkspaceCwd={
@@ -13597,12 +13817,10 @@ export function App({
                 >
                   <DrawerTitle className="sr-only">Right panel</DrawerTitle>
                   <WebShellCustomizationProvider value={customization}>
-                    <CompactModeContext.Provider value={compactMode}>
-                      <ArtifactPanel
-                        {...artifactPanelSharedProps}
-                        variant="drawer"
-                      />
-                    </CompactModeContext.Provider>
+                    <ArtifactPanel
+                      {...artifactPanelSharedProps}
+                      variant="drawer"
+                    />
                   </WebShellCustomizationProvider>
                 </DrawerContent>
               </Drawer>
@@ -13667,20 +13885,19 @@ export function App({
                     />
                   )}
                   <WebShellCustomizationProvider value={customization}>
-                    <CompactModeContext.Provider value={compactMode}>
-                      <div className={styles.artifactPanelClip}>
-                        <ArtifactPanel
-                          {...artifactPanelSharedProps}
-                          panelWidth={artifactPanelWidth}
-                        />
-                      </div>
-                    </CompactModeContext.Provider>
+                    <div className={styles.artifactPanelClip}>
+                      <ArtifactPanel
+                        {...artifactPanelSharedProps}
+                        panelWidth={artifactPanelWidth}
+                      />
+                    </div>
                   </WebShellCustomizationProvider>
                 </div>,
                 artifactPanelSlotEl,
               )}
           </div>
         </div>
+        </CompactModeContext.Provider>
         </WebShellPortalRootContext.Provider>
         </McpAppHostContext.Provider>
       </I18nProvider>

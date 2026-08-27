@@ -5,7 +5,12 @@
  */
 
 import { createHash } from 'node:crypto';
-import { constants as fsConstants, promises as fs, type Stats } from 'node:fs';
+import {
+  constants as fsConstants,
+  promises as fs,
+  type BigIntStats,
+  type Stats,
+} from 'node:fs';
 import type { FileHandle } from 'node:fs/promises';
 import path from 'node:path';
 import {
@@ -187,6 +192,7 @@ export interface SessionArtifactWarningDetail {
 
 export interface SessionArtifactRestoreOptions {
   preserveLiveEphemeral?: boolean;
+  workspaceAccess?: 'metadata-only';
 }
 
 export interface SessionArtifactPersistence {
@@ -280,6 +286,10 @@ export class SessionArtifactStore {
 
   inputBatchLimit(): number {
     return this.maxArtifacts * 2;
+  }
+
+  resetWorkspaceResolutionCache(): void {
+    this.realWorkspaceCwdPromise = undefined;
   }
 
   async list(): Promise<SessionArtifactsEnvelope> {
@@ -715,6 +725,7 @@ export class SessionArtifactStore {
           const markerArtifact = await this.normalizeRestoredMarkerArtifact(
             artifact,
             warnings,
+            options.workspaceAccess === 'metadata-only',
           );
           if (markerArtifact)
             this.markerArtifacts.set(artifact.id, markerArtifact);
@@ -738,6 +749,12 @@ export class SessionArtifactStore {
               metadataBudget: 'persisted',
               workspaceExpected: workspaceExpectedFromArtifact(artifact),
               hashWorkspaceContent: false,
+              ...(options.workspaceAccess === 'metadata-only'
+                ? {
+                    workspaceAccess: 'metadata-only' as const,
+                    workspaceStatus: artifact.status,
+                  }
+                : {}),
             },
           );
           if (
@@ -864,6 +881,7 @@ export class SessionArtifactStore {
   private async normalizeRestoredMarkerArtifact(
     artifact: PersistedSessionArtifact,
     warnings: string[],
+    metadataOnly = false,
   ): Promise<PersistedSessionArtifact | undefined> {
     try {
       const input = persistedArtifactToInput(artifact);
@@ -881,6 +899,12 @@ export class SessionArtifactStore {
           metadataBudget: 'persisted',
           workspaceExpected: workspaceExpectedFromArtifact(artifact),
           hashWorkspaceContent: false,
+          ...(metadataOnly
+            ? {
+                workspaceAccess: 'metadata-only' as const,
+                workspaceStatus: artifact.status,
+              }
+            : {}),
         },
       );
       if (normalized.id !== artifact.id) {
@@ -1484,6 +1508,8 @@ export class SessionArtifactStore {
       metadataBudget?: 'user' | 'persisted';
       workspaceExpected?: WorkspaceStatusExpected;
       hashWorkspaceContent?: boolean;
+      workspaceAccess?: 'metadata-only';
+      workspaceStatus?: DaemonSessionArtifactStatus;
     } = {},
   ): Promise<NormalizedArtifact> {
     if (!input || typeof input !== 'object') {
@@ -1508,7 +1534,9 @@ export class SessionArtifactStore {
     const workspacePath = input.workspacePath
       ? normalizeWorkspacePath(
           input.workspacePath,
-          await this.getRealWorkspaceCwdForValidation(),
+          options.workspaceAccess === 'metadata-only'
+            ? this.workspaceCwd
+            : await this.getRealWorkspaceCwdForValidation(),
         )
       : undefined;
     const managedId = normalizeManagedId(input.managedId);
@@ -1534,11 +1562,18 @@ export class SessionArtifactStore {
       persistenceAvailable: this.persistence !== undefined,
     });
     const workspaceStatus = workspacePath
-      ? await this.getInitialWorkspaceStatus(
-          workspacePath,
-          options.workspaceExpected,
-          { hashContent: options.hashWorkspaceContent !== false },
-        )
+      ? options.workspaceAccess === 'metadata-only'
+        ? {
+            status: options.workspaceStatus ?? 'missing',
+            ...(options.workspaceExpected?.sizeBytes !== undefined
+              ? { sizeBytes: options.workspaceExpected.sizeBytes }
+              : {}),
+          }
+        : await this.getInitialWorkspaceStatus(
+            workspacePath,
+            options.workspaceExpected,
+            { hashContent: options.hashWorkspaceContent !== false },
+          )
       : undefined;
     if (workspaceStatus?.escaped) {
       throw new SessionArtifactValidationError(
@@ -1575,7 +1610,9 @@ export class SessionArtifactStore {
       storage,
       source,
       status: workspaceStatus?.status ?? 'available',
-      ...(workspacePath ? { lastStatAt: Date.now() } : {}),
+      ...(workspacePath && options.workspaceAccess !== 'metadata-only'
+        ? { lastStatAt: Date.now() }
+        : {}),
       title,
       description,
       workspacePath,
@@ -3107,16 +3144,21 @@ async function getWorkspaceStatus(
     if (!relative || isOutsidePath(relative)) {
       return { status: 'missing', escaped: true };
     }
-    const preOpenStat = await fs.lstat(realPath);
+    // Identity is compared on bigint stats: NTFS file ids are 64-bit and the
+    // Number spelling loses precision above 2^53, so two files created close
+    // together can round to the SAME numeric ino and defeat the swap check.
+    const preOpenStat = await fs.lstat(realPath, { bigint: true });
     const handle = await fs.open(
       realPath,
       fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW,
     );
     try {
-      const stat = await handle.stat();
-      if (!isSameFile(preOpenStat, stat)) {
+      if (!isSameFile(preOpenStat, await handle.stat({ bigint: true }))) {
         return { status: 'missing', escaped: true };
       }
+      // The identity fstat cannot be reused here: bigint stats return BigInt
+      // fields and truncate mtimeMs, breaking the Number comparisons below.
+      const stat = await handle.stat();
       if (!stat.isFile()) {
         throw new Error('path is not a regular file');
       }
@@ -3187,7 +3229,7 @@ async function getWorkspaceStatus(
   }
 }
 
-function isSameFile(before: Stats, after: Stats): boolean {
+function isSameFile(before: BigIntStats, after: BigIntStats): boolean {
   return before.dev === after.dev && before.ino === after.ino;
 }
 

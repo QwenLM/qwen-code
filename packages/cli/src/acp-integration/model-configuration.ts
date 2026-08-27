@@ -27,6 +27,12 @@ export const REASONING_EFFORT_NAMES: Record<ReasoningEffort, string> = {
   max: 'Max',
 };
 
+type ModelReasoningConfigState = {
+  enabled?: boolean;
+  effort?: ReasoningEffort;
+  thinkingMandatory?: boolean;
+};
+
 export function getModelConfiguration(
   modelId: string | undefined,
   route?: { readonly authType?: AuthType; readonly baseUrl?: string },
@@ -45,12 +51,15 @@ export function getModelConfiguration(
 
 export function buildModelReasoningConfigOption(
   modelId: string | undefined,
-  state: { enabled?: boolean; effort?: ReasoningEffort } = {},
+  state: ModelReasoningConfigState = {},
   route?: { readonly authType?: AuthType; readonly baseUrl?: string },
 ): SessionConfigOption | undefined {
   const reasoning = getModelConfiguration(modelId, route)?.reasoning;
   if (!reasoning?.thinking) return undefined;
-  const canDisable = reasoning.toggleOnly || reasoning.canDisable !== false;
+  const providerCanDisable =
+    reasoning.toggleOnly || reasoning.canDisable !== false;
+  const thinkingMandatory = state.thinkingMandatory === true;
+  const canDisable = providerCanDisable && !thinkingMandatory;
 
   const currentValue =
     state.enabled === false && canDisable
@@ -96,7 +105,8 @@ export function buildModelReasoningConfigOption(
         ...(reasoning.toggleOnly
           ? { toggleOnly: true }
           : { defaultEffort: reasoning.defaultEffort }),
-        ...(!canDisable ? { canDisable: false } : {}),
+        ...(!providerCanDisable ? { canDisable: false } : {}),
+        ...(thinkingMandatory ? { thinkingMandatory: true } : {}),
       },
     },
   };
@@ -104,9 +114,10 @@ export function buildModelReasoningConfigOption(
 
 export function buildModelReasoningConfigPreview(
   modelId: string | undefined,
+  state: ModelReasoningConfigState = {},
 ): SessionConfigOption[] | undefined {
   const reasoning = getModelConfiguration(modelId)?.reasoning;
   if (!reasoning?.thinking || reasoning.toggleOnly) return undefined;
-  const option = buildModelReasoningConfigOption(modelId);
+  const option = buildModelReasoningConfigOption(modelId, state);
   return option ? [option] : undefined;
 }
