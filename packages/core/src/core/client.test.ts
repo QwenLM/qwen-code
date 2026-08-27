@@ -557,6 +557,7 @@ describe('Gemini Client (client.ts)', () => {
       revealDeferredTool: vi.fn(),
       preloadDeferredToolsWithinBudget: vi.fn().mockReturnValue(0),
       isDeferredToolRevealed: vi.fn().mockReturnValue(false),
+      isPermissionDeferred: vi.fn().mockReturnValue(false),
       getTool: vi.fn().mockReturnValue(null),
       getMcpServerInstructions: vi.fn().mockReturnValue(new Map()),
     };
@@ -1373,6 +1374,7 @@ describe('Gemini Client (client.ts)', () => {
         getDeferredToolSummary: ReturnType<typeof vi.fn>;
         getTool: ReturnType<typeof vi.fn>;
         isDeferredToolRevealed: ReturnType<typeof vi.fn>;
+        isPermissionDeferred: ReturnType<typeof vi.fn>;
         revealDeferredTool: ReturnType<typeof vi.fn>;
         preloadDeferredToolsWithinBudget: ReturnType<typeof vi.fn>;
       };
@@ -1441,25 +1443,30 @@ describe('Gemini Client (client.ts)', () => {
       expect(getHistorySpy).not.toHaveBeenCalled();
     });
 
-    it('eagerly reveals every deferred tool when ToolSearch is unavailable', async () => {
+    it('reveals ordinary deferred tools when ToolSearch is unavailable', async () => {
       // When ToolSearch is filtered out (deny rule / --exclude-tools
       // tool_search), the model has no way to reach deferred schemas.
       // Silent disappearance is the worst failure mode — instead, reveal
-      // every deferred tool eagerly so they all land in the declaration
+      // ordinary deferred tools eagerly so they land in the declaration
       // list. The token-saving rationale of deferral was predicated on
       // the discovery surface being available.
       const reg = getRegistryMock();
       reg.getDeferredToolSummary.mockReturnValue([
         { name: 'cron_create', description: 'schedule' },
         { name: 'cron_list', description: 'list' },
+        { name: 'write_file', description: 'write' },
       ]);
       reg.getTool.mockReturnValue(null); // ToolSearch absent
+      reg.isPermissionDeferred.mockImplementation(
+        (name: string) => name === 'write_file',
+      );
       reg.revealDeferredTool.mockClear();
 
       await client.startChat();
 
       expect(reg.revealDeferredTool).toHaveBeenCalledWith('cron_create');
       expect(reg.revealDeferredTool).toHaveBeenCalledWith('cron_list');
+      expect(reg.revealDeferredTool).not.toHaveBeenCalledWith('write_file');
     });
 
     it('does NOT eagerly reveal when ToolSearch is available', async () => {
@@ -2070,6 +2077,7 @@ describe('Gemini Client (client.ts)', () => {
         getDeferredToolSummary: ReturnType<typeof vi.fn>;
         getTool: ReturnType<typeof vi.fn>;
         isDeferredToolRevealed: ReturnType<typeof vi.fn>;
+        isPermissionDeferred: ReturnType<typeof vi.fn>;
         revealDeferredTool: ReturnType<typeof vi.fn>;
         warmAll: ReturnType<typeof vi.fn>;
       };
@@ -2584,7 +2592,7 @@ describe('Gemini Client (client.ts)', () => {
       );
     });
 
-    it('eagerly reveals every deferred tool when ToolSearch is unavailable', async () => {
+    it('reveals ordinary deferred tools when ToolSearch is unavailable', async () => {
       // Mirrors startChat's silent-disappearance guard: without ToolSearch
       // a deferred MCP tool can't be reached, so the only safe option is
       // to reveal it so it lands in the declaration list. If setTools()
@@ -2596,7 +2604,11 @@ describe('Gemini Client (client.ts)', () => {
       reg.getDeferredToolSummary.mockReturnValue([
         { name: 'mcp__server__alpha', description: 'a', serverName: 'server' },
         { name: 'mcp__server__beta', description: 'b', serverName: 'server' },
+        { name: 'write_file', description: 'write' },
       ]);
+      reg.isPermissionDeferred.mockImplementation(
+        (name: string) => name === 'write_file',
+      );
       reg.revealDeferredTool.mockClear();
 
       const addHistorySpy = vi.spyOn(client.getChat(), 'addHistory');
@@ -2611,6 +2623,7 @@ describe('Gemini Client (client.ts)', () => {
 
       expect(reg.revealDeferredTool).toHaveBeenCalledWith('mcp__server__alpha');
       expect(reg.revealDeferredTool).toHaveBeenCalledWith('mcp__server__beta');
+      expect(reg.revealDeferredTool).not.toHaveBeenCalledWith('write_file');
       expect(setSystemInstructionSpy).not.toHaveBeenCalled();
       expect(addHistorySpy).not.toHaveBeenCalled();
     });

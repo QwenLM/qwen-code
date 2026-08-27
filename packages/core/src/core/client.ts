@@ -1669,11 +1669,11 @@ export class GeminiClient {
    * backed deferred tools.
    *
    * Side effect: when ToolSearch is not registered (e.g. `--exclude-tools
-   * tool_search` or a deny rule), every deferred tool is eagerly revealed
-   * here so it lands in the declaration list. Skipping this would leave the
-   * tool both off the declarations AND off the deferred-summary list (since
-   * `undefined` is returned in that branch) — a silent disappearance that's
-   * harder to diagnose than seeing the tool name absent from `/mcp` output.
+   * tool_search` or a deny rule), deferred tools are eagerly revealed here so
+   * they land in the declaration list. Tools explicitly demoted by
+   * `tools.eager` stay hidden. Skipping this for ordinary deferred tools would
+   * leave them both off the declarations AND off the deferred-summary list
+   * (since `undefined` is returned in that branch) — a silent disappearance.
    *
    * Returns `undefined` when ToolSearch is unavailable: reminders must not
    * advertise tools the model has no way to load on demand.
@@ -1686,7 +1686,9 @@ export class GeminiClient {
     if (!toolSearchAvailable) {
       if (deferredSummary.length > 0) {
         for (const t of deferredSummary) {
-          toolRegistry.revealDeferredTool(t.name);
+          if (!toolRegistry.isPermissionDeferred(t.name)) {
+            toolRegistry.revealDeferredTool(t.name);
+          }
         }
       }
       return undefined;
