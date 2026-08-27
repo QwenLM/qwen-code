@@ -573,7 +573,13 @@ export function GitDialog({
       // workspace is rejected by the daemon route's workspace-conflict
       // check and surfaces here as a warning only.
       if (typeof result.number === 'number' && result.url) {
-        const pr = { number: result.number, url: result.url };
+        // Newly created → the snapshot starts open; the daemon's refresh
+        // timer advances it to merged/closed.
+        const pr = {
+          number: result.number,
+          url: result.url,
+          state: 'open' as const,
+        };
         const sid = sessionIdRef.current;
         if (sid) {
           ws.updateSessionMetadata(sid, { pr }).catch((err: unknown) => {

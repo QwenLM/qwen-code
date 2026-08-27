@@ -169,6 +169,7 @@ import {
   refreshMemoryAfterManagedWrite,
   refreshMemoryInstruction,
   GoalPersistenceUnavailableError,
+  ambientGoalToolResultProvenance,
   goalTurnContext,
   sessionIdContext,
   promptIdContext,
@@ -8092,10 +8093,14 @@ export class Session implements SessionContext {
    * `_meta.source='cron'`, streams the model response, and handles tool calls.
    */
   async #executeCronPrompt(item: CronQueueItem): Promise<void> {
-    // Same session-ID binding rationale as #executePrompt.
-    return runWithInvocationContext(undefined, () =>
-      sessionIdContext.run(this.config.getSessionId(), () =>
-        this.#executeCronPromptInner(item),
+    // Same session-ID binding rationale as #executePrompt, and the same
+    // reason to leave the Goal store as the notification drain: a cron turn
+    // is never a Goal turn, whatever lineage it was scheduled from.
+    return goalTurnContext.exit(() =>
+      runWithInvocationContext(undefined, () =>
+        sessionIdContext.run(this.config.getSessionId(), () =>
+          this.#executeCronPromptInner(item),
+        ),
       ),
     );
   }
@@ -8872,9 +8877,17 @@ export class Session implements SessionContext {
         this.currentShellNotificationActive = item.kind === 'shell';
         this.#activeWorkChanged();
         try {
-          await runWithInvocationContext(undefined, () =>
-            sessionIdContext.run(this.config.getSessionId(), () =>
-              this.#executeBackgroundNotificationPromptInner(item),
+          // A notification fires from async resources created inside the
+          // turn that spawned the task, so a Goal permit can reach here by
+          // lineage after that turn is long over. This is not a Goal turn:
+          // leave the store, as #executePrompt does for every non-Goal turn,
+          // or the notification's tool results would be stamped as evidence
+          // for a turn that never made those calls.
+          await goalTurnContext.exit(() =>
+            runWithInvocationContext(undefined, () =>
+              sessionIdContext.run(this.config.getSessionId(), () =>
+                this.#executeBackgroundNotificationPromptInner(item),
+              ),
             ),
           );
         } finally {
@@ -9731,13 +9744,19 @@ export class Session implements SessionContext {
         ) {
           return;
         }
-        this.config
-          .getChatRecordingService()
-          ?.recordToolResult(finalized[index].responseParts, {
+        const goalProvenance = ambientGoalToolResultProvenance(record.toolName);
+        this.config.getChatRecordingService()?.recordToolResult(
+          finalized[index].responseParts,
+          {
             ...record.metadata,
             persistedOutputFiles: finalized[index].persistedOutputFiles,
             artifacts: finalized[index].artifacts,
-          });
+          },
+          // Passed only inside a Goal turn: outside one this call keeps its
+          // former two-argument shape, so nothing about ordinary recording
+          // changes.
+          ...(goalProvenance ? ([goalProvenance] as const) : ([] as const)),
+        );
       });
       return {
         ...result,

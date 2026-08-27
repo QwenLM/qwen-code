@@ -2374,12 +2374,16 @@ export function registerSessionRoutes(
   const parseSessionPrBody = (
     req: Request,
     res: Response,
-  ): { number: number; url: string } | null | undefined => {
+  ):
+    | { number: number; url: string; state?: 'open' | 'merged' | 'closed' }
+    | null
+    | undefined => {
     const raw: unknown = safeBody(req)['pr'];
     if (raw === undefined) return undefined;
     const candidate = raw as Record<string, unknown> | null;
     const number = candidate?.['number'];
     const url = candidate?.['url'];
+    const state = candidate?.['state'];
     if (
       candidate === null ||
       typeof candidate !== 'object' ||
@@ -2391,16 +2395,20 @@ export function registerSessionRoutes(
       !/^https?:\/\//i.test(url) ||
       // The url lands in the bridge's stderr audit line — control
       // characters would let a caller forge log lines.
-      hasControlCharacter(url)
+      hasControlCharacter(url) ||
+      (state !== undefined &&
+        state !== 'open' &&
+        state !== 'merged' &&
+        state !== 'closed')
     ) {
       res.status(400).json({
-        error: `\`pr\` must be an object with a positive integer \`number\` and an http(s) \`url\` of at most ${SESSION_PR_URL_MAX_LENGTH} characters, without control characters`,
+        error: `\`pr\` must be an object with a positive integer \`number\` and an http(s) \`url\` of at most ${SESSION_PR_URL_MAX_LENGTH} characters, without control characters, and an optional \`state\` of \`open\`, \`merged\`, or \`closed\``,
         code: 'invalid_metadata',
         field: 'pr',
       });
       return null;
     }
-    return { number, url };
+    return { number, url, ...(state ? { state } : {}) };
   };
 
   const serializeSessionErrors = (
@@ -6216,7 +6224,11 @@ export function registerSessionRoutes(
                 service.getPrSessionPathForArchiveState(sessionId, 'active'),
                 pr,
               )
-            ).map(({ number, url }) => ({ number, url }));
+            ).map(({ number, url, state }) => ({
+              number,
+              url,
+              ...(state ? { state } : {}),
+            }));
             effective = { ...effective, prs: persistedPrs };
           }
         } finally {
@@ -6328,7 +6340,11 @@ export function registerSessionRoutes(
           await runWithWorkspaceRuntimeStorage(runtime, async () => {
             let effective: {
               displayName?: string;
-              prs?: Array<{ number: number; url: string }>;
+              prs?: Array<{
+                number: number;
+                url: string;
+                state?: 'open' | 'merged' | 'closed';
+              }>;
             };
             const service = createWorkspaceRuntimeSessionService(runtime);
             try {
@@ -6375,7 +6391,11 @@ export function registerSessionRoutes(
                     ),
                     pr,
                   )
-                ).map(({ number, url }) => ({ number, url }));
+                ).map(({ number, url, state }) => ({
+                  number,
+                  url,
+                  ...(state ? { state } : {}),
+                }));
                 assertRuntimeGenerationOpen?.();
                 effective = { ...effective, prs: persistedPrs };
               }
@@ -6401,9 +6421,10 @@ export function registerSessionRoutes(
                   pr,
                 );
                 assertRuntimeGenerationOpen?.();
-                effective.prs = persisted.map(({ number, url }) => ({
+                effective.prs = persisted.map(({ number, url, state }) => ({
                   number,
                   url,
+                  ...(state ? { state } : {}),
                 }));
               }
               if (displayName !== undefined) {
@@ -6949,12 +6970,14 @@ export function registerSessionRoutes(
                     },
                   ),
                 )
-              : Promise.resolve(
-                  listLiveWorkspaceSessionsForResponse(
-                    runtime.bridge,
-                    key,
-                    options,
-                  ),
+              : listLiveWorkspaceSessionsForResponse(
+                  runtime.bridge,
+                  key,
+                  options,
+                  {
+                    runtimeBaseDir: runtime.sessionRuntimeBaseDir,
+                    signal: controller.signal,
+                  },
                 );
           const result =
             liveRuntime && deps.conversationRuntimeActivity

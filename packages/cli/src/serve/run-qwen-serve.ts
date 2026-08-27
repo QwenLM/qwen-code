@@ -130,6 +130,7 @@ import type {
   WorkspaceRegistry,
   WorkspaceRuntime,
 } from './workspace-registry.js';
+import type { SessionArchiveCoordinator } from './server/session-archive.js';
 import type {
   DaemonTrustPolicySnapshot,
   DaemonWorkspaceTrustDecision,
@@ -4118,6 +4119,12 @@ async function runQwenServeImpl(
   // bucket plus the window-scoped event-loop histogram it resets each seal.
   // Torn down together with the event-loop monitor on runtime restart/stop.
   let daemonMetricsSampler: { dispose(): void } | undefined;
+  // Low-frequency sweep refreshing bound-PR state snapshots (open → merged).
+  // The refresh module loads via dynamic import (see start site) because it
+  // pulls the SessionService chain, which must stay out of the pre-listen
+  // static closure; the generation guards dispose-vs-async-start races.
+  let sessionPrRefreshTimer: { dispose(): void } | undefined;
+  let sessionPrRefreshGeneration = 0;
   let runtimeStartupError: string | undefined;
   let runtimeStarting: Promise<void> | undefined;
   let markRuntimeReady!: () => void;
@@ -4137,6 +4144,10 @@ async function runQwenServeImpl(
     daemonEventLoopMonitor = undefined;
     const metricsSampler = daemonMetricsSampler;
     daemonMetricsSampler = undefined;
+    const prRefreshTimer = sessionPrRefreshTimer;
+    sessionPrRefreshTimer = undefined;
+    sessionPrRefreshGeneration += 1;
+    prRefreshTimer?.dispose();
     try {
       eventLoopMonitor?.dispose();
     } catch (err) {
@@ -6165,6 +6176,43 @@ async function runQwenServeImpl(
         metricsLoopDelay.disable();
       },
     };
+
+    // Same lifecycle as the metrics sampler above: retire any prior timer
+    // before starting a new one (buildRuntime re-entry), unref'd inside.
+    // Dynamic import on purpose: session-pr-refresh statically pulls the
+    // SessionService chain (glob et al.), which the serve fast-path bundle
+    // closure check forbids in this pre-listen root's static closure.
+    sessionPrRefreshTimer?.dispose();
+    const refreshGeneration = ++sessionPrRefreshGeneration;
+    void import('./server/session-pr-refresh.js')
+      .then((mod) => {
+        if (refreshGeneration !== sessionPrRefreshGeneration) return;
+        sessionPrRefreshTimer = mod.startSessionPrRefreshTimer({
+          workspaceRegistry,
+          // The coordinator lives on the serve app (createServeApp below),
+          // which is built after this timer starts; read it per tick like
+          // the metrics sampler reads `acpHandle`.
+          getArchiveCoordinator: () =>
+            (
+              app.locals as {
+                sessionArchiveCoordinator?: SessionArchiveCoordinator;
+              }
+            ).sessionArchiveCoordinator,
+        });
+      })
+      .catch((error) => {
+        // Degrade to "no PR-state sweep" instead of leaking an unhandled
+        // rejection: the serve fast path installs no process-level
+        // unhandledRejection handler before this runs, and Node's default
+        // for one is to exit — a failed chunk load (e.g. an in-place
+        // upgrade replacing dist/ under the running daemon) would take
+        // down every runtime, session, and connection the daemon serves.
+        daemonLog.warn(
+          `session-pr-refresh load failed: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      });
 
     // Factory for dynamically creating workspace runtimes (POST /workspaces).
     interface WorkspaceRuntimeBuildOptions {
