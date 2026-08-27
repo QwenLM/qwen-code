@@ -89,9 +89,15 @@ export interface SkillConfig {
   body: string;
 
   /**
-   * For extension-level skills: the name of the providing extension
+   * For extension-level skills: the canonical name of the providing extension
    */
   extensionName?: string;
+
+  /**
+   * For extension-level skills: the localized display name of the providing
+   * extension. Presentation only; never use this field as an identity.
+   */
+  extensionDisplayName?: string;
 
   /**
    * Argument hint shown after the slash command name in completion menus.
