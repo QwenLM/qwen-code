@@ -28,24 +28,27 @@ describe('bounded Mem0 request engine', () => {
         return Response.json(fixture.providerResponse);
       });
       const search = createRequestEngine(runtime(fixture), fetcher);
+      const callerSignal = AbortSignal.timeout(5000);
 
       const items = await search({
         query: fixture.query,
-        signal: AbortSignal.timeout(5000),
+        signal: callerSignal,
       });
 
       expect(capturedUrl).toBe(fixture.expectedRequest.url);
       expect(capturedInit?.method).toBe(fixture.expectedRequest.method);
       expect(capturedInit?.redirect).toBe('manual');
-      expect(capturedInit?.signal).toBeInstanceOf(AbortSignal);
+      expect(capturedInit?.signal).toBe(callerSignal);
       const headers = new Headers(capturedInit?.headers);
       if (fixture.expectedRequest.authorization !== undefined) {
         expect(headers.get('authorization')).toBe(
           fixture.expectedRequest.authorization,
         );
+        expect(headers.get('x-api-key')).toBeNull();
       }
       if (fixture.expectedRequest.xApiKey !== undefined) {
         expect(headers.get('x-api-key')).toBe(fixture.expectedRequest.xApiKey);
+        expect(headers.get('authorization')).toBeNull();
       }
       if (fixture.expectedRequest.body === undefined) {
         expect(capturedInit?.body).toBeUndefined();
@@ -90,9 +93,9 @@ describe('bounded Mem0 request engine', () => {
       auth: 'authorization-bearer',
     };
     const fetcher: FetchLike = vi.fn(async (_input, init) => {
-      expect(new Headers(init?.headers).get('authorization')).toBe(
-        'Bearer fixture-token',
-      );
+      const headers = new Headers(init?.headers);
+      expect(headers.get('authorization')).toBe('Bearer fixture-token');
+      expect(headers.get('x-api-key')).toBeNull();
       return Response.json({ results: [] });
     });
 

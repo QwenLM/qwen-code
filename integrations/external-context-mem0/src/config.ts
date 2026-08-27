@@ -177,7 +177,8 @@ function requireScopeValue(
 
 function readRequiredEnvironment(env: NodeJS.ProcessEnv, name: string): string {
   const value = env[name];
-  if (!value || value === '${' + name + '}') {
+  const trimmed = value?.trim();
+  if (!value || !trimmed || trimmed === '${' + name + '}') {
     throw new ConfigurationError(
       'Mem0 extension configuration is unavailable.',
     );

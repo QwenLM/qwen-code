@@ -61,7 +61,7 @@ export function renderResult(sourceItems: readonly ExternalContextItem[]): {
   structuredContent: Record<string, unknown>;
 } {
   const items: ExternalContextItem[] = [];
-  for (const source of sourceItems.slice(0, MAX_ITEMS)) {
+  for (const source of sourceItems) {
     if (!source.id || !source.content) continue;
     const item = compactItem(source);
     items.push(item);
@@ -69,6 +69,7 @@ export function renderResult(sourceItems: readonly ExternalContextItem[]): {
       items.pop();
       break;
     }
+    if (items.length === MAX_ITEMS) break;
   }
 
   const structuredContent = envelope(items);

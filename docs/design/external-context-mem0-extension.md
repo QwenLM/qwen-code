@@ -1,6 +1,6 @@
 # Configurable Mem0 Provider Extension
 
-**Status:** Proposed
+**Status:** Partially implemented through PR1 (no live presets)
 
 **Date:** 2026-08-26
 
@@ -25,9 +25,10 @@ dynamic module loading, or new third-party cases in its private
 remains available for compatibility, but it does not become a registry for
 Mem0 product variants.
 
-This proposal defines architecture and compatibility policy only. Runtime
-code, configuration schemas, presets, packaging, and provider tests land in
-later pull requests.
+This document defines the architecture and compatibility policy. PR1 adds the
+self-contained runtime skeleton, configuration schemas, packaging, and
+synthetic contract tests. Live provider presets and provider-specific tests
+remain later rollout steps.
 
 ## Goals
 
@@ -316,3 +317,12 @@ link consistency, `git diff --check`, and two consecutive clean design audits
 covering architecture boundaries, failure paths, compatibility,
 maintainability, complexity, security, testing strategy, and simpler
 alternatives.
+
+## PR1 verification
+
+PR1 keeps the built-in preset registry empty, so the shipped Extension fails
+closed instead of enabling a live provider. Verification covers the canonical
+schemas, startup configuration boundary, bounded request engine, normalized
+result profile, MCP tool surface, package build and typecheck, release wiring,
+and synthetic GET and POST dialect fixtures. Live provider verification
+belongs to the pull request that adds each preset.

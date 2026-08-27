@@ -148,6 +148,39 @@ describe('Mem0 Extension schemas', () => {
     ).rejects.toThrow('configuration is unavailable');
   });
 
+  it('rejects blank and unresolved credentials', async () => {
+    const fixture = await readFixture('synthetic-filtered-post-v1.json');
+    const presets = new Map([[fixture.dialect.id, fixture.dialect]]);
+    const configPath = await writeConfig(fixture.instance);
+
+    for (const credential of [
+      '   ',
+      '${SYNTHETIC_MEMORY_TOKEN}',
+      '  ${SYNTHETIC_MEMORY_TOKEN}  ',
+    ]) {
+      await expect(
+        loadRuntimeConfiguration({
+          presets,
+          env: {
+            QWEN_EXTERNAL_CONTEXT_MEM0_CONFIG: configPath,
+            SYNTHETIC_MEMORY_TOKEN: credential,
+          },
+        }),
+      ).rejects.toThrow('configuration is unavailable');
+    }
+
+    const preservedCredential = '  actual-token  ';
+    await expect(
+      loadRuntimeConfiguration({
+        presets,
+        env: {
+          QWEN_EXTERNAL_CONTEXT_MEM0_CONFIG: configPath,
+          SYNTHETIC_MEMORY_TOKEN: preservedCredential,
+        },
+      }),
+    ).resolves.toMatchObject({ credential: preservedCredential });
+  });
+
   it('fails closed for unavailable, malformed, and oversized configuration files', async () => {
     const fixture = await readFixture('synthetic-filtered-post-v1.json');
     const presets = new Map([[fixture.dialect.id, fixture.dialect]]);
@@ -281,6 +314,18 @@ describe('Mem0 Extension schemas', () => {
       },
     },
     {
+      name: 'query in the origin',
+      mutate: (instance: InstanceConfigV1) => {
+        instance.endpoint.origin = 'https://memory.example.com?tenant=x';
+      },
+    },
+    {
+      name: 'fragment in the origin',
+      mutate: (instance: InstanceConfigV1) => {
+        instance.endpoint.origin = 'https://memory.example.com#tenant';
+      },
+    },
+    {
       name: 'encoded base-path traversal, including double encoding',
       mutate: (instance: InstanceConfigV1) => {
         instance.endpoint.basePath = '/safe/%252e%252e/private';
@@ -307,6 +352,29 @@ describe('Mem0 Extension schemas', () => {
         },
       }),
     ).rejects.toThrow(ConfigurationError);
+  });
+
+  it.each([
+    '/safe/../private',
+    '/safe/%2e%2e/private',
+    '/safe?tenant=x',
+    '/safe\\private',
+    '/safe//private',
+  ])('rejects unsafe preset search path %s', async (searchPath) => {
+    const fixture = await readFixture('synthetic-filtered-post-v1.json');
+    const dialect = structuredClone(fixture.dialect) as DialectV1;
+    dialect.search.path = searchPath;
+    const configPath = await writeConfig(fixture.instance);
+
+    await expect(
+      loadRuntimeConfiguration({
+        presets: new Map([[dialect.id, dialect]]),
+        env: {
+          QWEN_EXTERNAL_CONTEXT_MEM0_CONFIG: configPath,
+          SYNTHETIC_MEMORY_TOKEN: 'runtime-token',
+        },
+      }),
+    ).rejects.toThrow('path is invalid');
   });
 
   it('rejects scope fields not consumed exactly by the preset', async () => {

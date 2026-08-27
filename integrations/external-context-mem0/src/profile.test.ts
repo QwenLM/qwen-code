@@ -26,12 +26,22 @@ describe('external context result rendering', () => {
     expect(
       renderedItems(
         renderResult([
-          { id: '', content: 'missing id' },
-          { id: 'missing-content', content: '' },
-          { id: 'valid', content: 'kept' },
+          ...Array.from({ length: 5 }, (_, index) => ({
+            id: index % 2 === 0 ? '' : `invalid-${index}`,
+            content: index % 2 === 0 ? `invalid-${index}` : '',
+          })),
+          ...Array.from({ length: 6 }, (_, index) => ({
+            id: `valid-${index}`,
+            content: `content-${index}`,
+          })),
         ]),
       ),
-    ).toEqual([{ id: 'valid', content: 'kept' }]);
+    ).toEqual(
+      Array.from({ length: 5 }, (_, index) => ({
+        id: `valid-${index}`,
+        content: `content-${index}`,
+      })),
+    );
   });
 
   it('truncates fields and keeps the longest content prefix that fits', () => {
