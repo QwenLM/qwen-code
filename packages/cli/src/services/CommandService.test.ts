@@ -385,6 +385,44 @@ describe('CommandService', () => {
     ]);
   });
 
+  it('skips an occupied suffix and takes the next free number', async () => {
+    // demo/chat.toml claims demo:chat and demo/chat1.toml claims
+    // demo:chat1; the colliding skill probes upward past both entries.
+    const chatCommand = createMockCommand('demo:chat', CommandKind.FILE);
+    const chatOneCommand = createMockCommand('demo:chat1', CommandKind.FILE);
+    const collidingSkill = {
+      ...createMockCommand('demo:chat', CommandKind.SKILL),
+      extensionName: 'demo',
+      modelInvocable: true,
+    };
+
+    const service = await CommandService.create(
+      [
+        new MockCommandLoader([chatCommand, chatOneCommand]),
+        new MockCommandLoader([collidingSkill]),
+      ],
+      new AbortController().signal,
+    );
+
+    const commands = service.getCommands();
+    expect(commands).toHaveLength(3);
+
+    expect(commands.find((cmd) => cmd.name === 'demo:chat')?.kind).toBe(
+      CommandKind.FILE,
+    );
+    expect(commands.find((cmd) => cmd.name === 'demo:chat1')?.kind).toBe(
+      CommandKind.FILE,
+    );
+
+    // The while loop walks past the taken suffix; always-1 would land on
+    // demo:chat1 and overwrite the second file command.
+    const renamedSkill = commands.find((cmd) => cmd.extensionName === 'demo');
+    expect(renamedSkill?.name).toBe('demo:chat2');
+    expect(service.getModelInvocableCommands().map((c) => c.name)).toEqual([
+      'demo:chat2',
+    ]);
+  });
+
   it('should handle secondary conflicts when renaming extension commands', async () => {
     // User has both /deploy and /gcp.deploy commands
     const userCommand1 = createMockCommand('deploy', CommandKind.FILE);
