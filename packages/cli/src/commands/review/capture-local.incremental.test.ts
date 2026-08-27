@@ -801,6 +801,22 @@ describe('capture-local — the decided stops are machine-readable', () => {
     });
     const first = capture({ model: 'model-a' });
     const cachePath = promoteCandidate(first, 'model-a');
+    // R22-1 first: the DIRTY pointer, unchanged, CONVERGES — the gitlink
+    // records `160000:<oid>` instead of UNHASHABLE (which never equals
+    // itself and wedged the unchanged-since stop for the change set's
+    // lifetime).
+    const rerun = capture({ cache: cachePath, model: 'model-a' });
+    expect(rerun['nothingToReview']).toEqual({
+      reason: 'unchanged-since-last-round',
+    });
+    // …but the oid alone must never certify INTERNAL edits: dirty the
+    // submodule's content (pointer unmoved) and the identity flips to
+    // UNHASHABLE — no decided stop may fire over bytes `git diff` renders
+    // only as `-dirty`.
+    writeFileSync(join(repo, 'mod/m.ts'), 'export const m = 2;\n');
+    const dirtyRun = capture({ cache: cachePath, model: 'model-a' });
+    expect(dirtyRun['nothingToReview']).toBeUndefined();
+    writeFileSync(join(repo, 'mod/m.ts'), 'export const m = 1;\n');
     // The user restores the pointer: `git diff HEAD` goes quiet for it.
     git('submodule', 'update', '--recursive');
     git('checkout', '--', '.');
