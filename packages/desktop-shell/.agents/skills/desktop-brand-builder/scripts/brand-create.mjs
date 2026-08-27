@@ -235,10 +235,15 @@ function patchBootstrap(shellRoot, brand) {
   const brandLogoName = `brand-logo${logoExt}`;
   copyFileSync(brand.logo, join(bootstrapDir, brandLogoName));
 
-  // Escape single quotes for safe injection into JS single-quoted string
-  // literals. Without this, an appName like "Bob's App" would produce
-  // `'Starting Bob's App'` which is a SyntaxError.
-  const appNameJsSafe = brand.appName.replace(/'/g, "\\'");
+  // Build content safe to splice into the single-quoted JS string literals
+  // of bootstrap.js. JSON.stringify escapes backslashes, newlines and other
+  // control characters, not just quotes; then strip the surrounding double
+  // quotes and escape single quotes for the single-quoted context. Escaping
+  // single quotes alone is insufficient: an appName ending in a backslash
+  // (e.g. "Bob's App\") would otherwise escape the literal's closing quote.
+  const appNameJsSafe = JSON.stringify(brand.appName)
+    .slice(1, -1)
+    .replace(/'/g, "\\'");
 
   const patched = [];
   for (const file of ['index.html', 'bootstrap.js']) {
@@ -250,7 +255,8 @@ function patchBootstrap(shellRoot, brand) {
     // (e.g. `$&` in the replacement string would expand to the matched text).
     if (file === 'bootstrap.js') {
       // JS file: appName appears inside single-quoted string literals,
-      // so single quotes must be escaped to avoid SyntaxError.
+      // so it must be fully JS-literal-escaped (quotes, backslashes,
+      // newlines); see appNameJsSafe above.
       text = text.replaceAll('Qwen Code', () => appNameJsSafe);
     } else {
       text = text.replaceAll('Qwen Code', () => brand.appName);

@@ -5,7 +5,13 @@
  */
 
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync } from 'node:fs';
+import {
+  mkdtempSync,
+  mkdirSync,
+  writeFileSync,
+  rmSync,
+  readFileSync,
+} from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
@@ -52,6 +58,20 @@ function makeShellRoot() {
   return root;
 }
 
+/**
+ * Seed a minimal @tauri-apps/cli stub so generateIcons resolves and runs it
+ * locally instead of falling back to a slow, network-dependent `npx --yes`.
+ */
+function seedTauriCliStub(root) {
+  const cliDir = join(root, 'node_modules', '@tauri-apps', 'cli');
+  mkdirSync(cliDir, { recursive: true });
+  writeFileSync(
+    join(cliDir, 'package.json'),
+    JSON.stringify({ name: '@tauri-apps/cli', version: '0.0.0' }),
+  );
+  writeFileSync(join(cliDir, 'tauri.js'), 'process.exit(0);\n');
+}
+
 function makeLogo(dir) {
   const logoPath = join(dir, 'logo.png');
   const png = Buffer.from(
@@ -85,9 +105,17 @@ beforeEach(() => {
 
 afterEach(() => {
   for (const d of tmpDirs) {
-    try { rmSync(d, { recursive: true, force: true }); } catch { /* best-effort cleanup */ }
+    try {
+      rmSync(d, { recursive: true, force: true });
+    } catch {
+      /* best-effort cleanup */
+    }
   }
-  try { rmSync(shellRoot, { recursive: true, force: true }); } catch { /* best-effort cleanup */ }
+  try {
+    rmSync(shellRoot, { recursive: true, force: true });
+  } catch {
+    /* best-effort cleanup */
+  }
 });
 
 describe('brand-create.mjs safety checks', () => {
@@ -145,4 +173,38 @@ describe('brand-create.mjs safety checks', () => {
     expect(result.status).not.toBe(0);
     expect(result.stderr).toContain('Qwen Code Desktop');
   });
+
+  // Hostile appName escaping: appName is a free-form override, and the
+  // bootstrap.js patcher must not emit invalid JS for it. Previously only
+  // single quotes were escaped, so a trailing backslash escaped the
+  // literal's closing quote while brand-create still exited 0.
+  it('keeps generated bootstrap.js valid JS for hostile appName values', () => {
+    const hostileNames = [
+      "Bob's App\\", // trailing backslash (the reported trigger)
+      'Line1\nLine2', // raw newline is invalid in a single-quoted literal
+      'Say "hi"', // double quotes
+      'It\'s "quoted" \\ done', // quotes and backslashes combined
+    ];
+    for (const appName of hostileNames) {
+      const root = makeShellRoot();
+      tmpDirs.push(root);
+      seedTauriCliStub(root);
+      const logo = makeLogo(root);
+      const bootstrapPath = join(root, 'bootstrap', 'bootstrap.js');
+      writeFileSync(
+        bootstrapPath,
+        "const a = 'Starting Qwen Code';\nconst b = 'Restarting Qwen Code';\n",
+      );
+      const result = runBrand(root, {
+        brandId: 'acme-ai',
+        logo,
+        appName,
+      });
+      expect(result.status, result.stderr).toBe(0);
+      const check = spawnSync(process.execPath, ['--check', bootstrapPath], {
+        encoding: 'utf8',
+      });
+      expect(check.status, check.stderr).toBe(0);
+    }
+  }, 60_000);
 });
