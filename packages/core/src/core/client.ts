@@ -69,6 +69,10 @@ import {
   resolveInteractionMode,
 } from './prompts.js';
 import {
+  getOutputStyleTurnReminder,
+  resolveEffectiveOutputStyle,
+} from './output-styles.js';
+import {
   CompressionStatus,
   GeminiEventType,
   Turn,
@@ -3522,6 +3526,22 @@ export class GeminiClient {
           } catch {
             // Arena config not yet initialized — skip
           }
+        }
+
+        // Every non-default output style is reminded each turn. The style
+        // section lives in the cached system prompt, and a session drifts back
+        // to the default voice over a long conversation without a nudge that
+        // sits next to the newest user text.
+        const outputStyle = resolveEffectiveOutputStyle(
+          this.config.getOutputStyle(),
+          resolveInteractionMode(this.config),
+        );
+        if (outputStyle) {
+          systemReminders.push(
+            `<system-reminder>\n${escapeSystemReminderTags(
+              getOutputStyleTurnReminder(outputStyle),
+            )}\n</system-reminder>`,
+          );
         }
 
         const userQueryMemory =

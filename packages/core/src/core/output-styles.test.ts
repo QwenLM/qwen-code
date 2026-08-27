@@ -12,6 +12,7 @@ import {
   getBuiltInOutputStyle,
   getOutputStyleTurnReminder,
   renderOutputStyleSection,
+  resolveEffectiveOutputStyle,
   type OutputStyleDefinition,
 } from './output-styles.js';
 
@@ -136,5 +137,33 @@ describe('applyOutputStyle', () => {
     expect(applyOutputStyle('BASE', REPLACING)).toBe(
       'BASE\n\n# Output Style: Replacing\nStyle body.',
     );
+  });
+});
+
+describe('resolveEffectiveOutputStyle', () => {
+  const learning = getBuiltInOutputStyle('Learning')!;
+  const concise = getBuiltInOutputStyle('Concise')!;
+
+  it('returns undefined when no style is active', () => {
+    expect(
+      resolveEffectiveOutputStyle(undefined, 'interactive'),
+    ).toBeUndefined();
+    expect(resolveEffectiveOutputStyle(null, 'headless')).toBeUndefined();
+  });
+
+  it('drops Learning in headless mode, where its handoff can never be answered', () => {
+    expect(resolveEffectiveOutputStyle(learning, 'headless')).toBeUndefined();
+  });
+
+  it('keeps Learning where a reply can arrive', () => {
+    expect(resolveEffectiveOutputStyle(learning, 'interactive')).toBe(learning);
+    expect(resolveEffectiveOutputStyle(learning, 'acp')).toBe(learning);
+  });
+
+  it('keeps every other style in every mode', () => {
+    for (const mode of ['interactive', 'headless', 'acp'] as const) {
+      expect(resolveEffectiveOutputStyle(concise, mode)).toBe(concise);
+      expect(resolveEffectiveOutputStyle(LAYERED, mode)).toBe(LAYERED);
+    }
   });
 });

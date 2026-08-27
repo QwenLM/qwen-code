@@ -14,7 +14,10 @@ import { QWEN_DIR } from '../config/storage.js';
 import type { GenerateContentConfig } from '@google/genai';
 import { InputFormat } from '../output/types.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
-import { applyOutputStyle } from './output-styles.js';
+import {
+  applyOutputStyle,
+  resolveEffectiveOutputStyle,
+} from './output-styles.js';
 import type { OutputStyleDefinition } from './output-styles.js';
 
 const debugLogger = createDebugLogger('PROMPTS');
@@ -459,11 +462,10 @@ export function getCoreSystemPrompt(
   interactionMode: SystemPromptInteractionMode = 'interactive',
   outputStyle?: OutputStyleDefinition | null,
 ): string {
-  // Learning requires a reply to its handoff, which a headless run cannot receive.
-  const effectiveOutputStyle =
-    interactionMode === 'headless' && outputStyle?.name === 'Learning'
-      ? undefined
-      : outputStyle;
+  const effectiveOutputStyle = resolveEffectiveOutputStyle(
+    outputStyle,
+    interactionMode,
+  );
   // if QWEN_SYSTEM_MD is set (and not 0|false), override system prompt from file
   // default path is .qwen/system.md (project-level), can be overridden via QWEN_SYSTEM_MD
   let systemMdEnabled = false;
