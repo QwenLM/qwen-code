@@ -76,12 +76,28 @@ function launchChild(command, commandArgs, onLaunchError) {
     process.on(signal, handler);
     return [signal, handler];
   });
+  if (process.platform === 'win32') {
+    // Presence-only SIGINT watcher. Without one, libuv's console control
+    // handler returns FALSE for CTRL_C_EVENT and Windows terminates this
+    // launcher instantly while the CLI child keeps running, so the child's
+    // exit status is never mirrored. Do NOT forward: child.kill('SIGINT')
+    // maps to TerminateProcess on Windows.
+    const noop = () => {};
+    process.on('SIGINT', noop);
+    forwarders.push(['SIGINT', noop]);
+  }
 
   child.on('error', (error) => {
     // A spawn failure also emits 'close' (with a negative code); mark the
     // failure so the close-mirror path below stays silent while the error
     // handler decides what happens next.
     spawnFailed = true;
+    // Drop this child's forwarders before the fallback launches: a stale
+    // handler would intercept the fallback child's re-raised death signal
+    // and swallow it, making the launcher exit 0 for a signal-killed run.
+    for (const [name, handler] of forwarders) {
+      process.removeListener(name, handler);
+    }
     onLaunchError(error);
   });
   child.on('close', (code, signal) => {

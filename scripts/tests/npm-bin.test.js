@@ -83,6 +83,12 @@ describe('scripts/npm-bin.js platform launcher', () => {
   });
 
   it('runs the bundled CLI under the bundled runtime when the platform package resolves', async () => {
+    // Pin the platform: beforeEach restores the runner's real one, and on a
+    // Windows runner the launcher correctly takes the win32 branch, which
+    // would fail the POSIX-layout assertions below.
+    setPlatform('linux');
+    setArch('x64');
+
     await importLauncher();
 
     expect(spawnMock).toHaveBeenCalledTimes(1);
@@ -173,7 +179,11 @@ describe('scripts/npm-bin.js platform launcher', () => {
   });
 
   it('falls back to the node entry when the platform package lacks the runtime', async () => {
-    existsSyncMock.mockImplementation((p) => !String(p).includes('/bun/'));
+    // Separator-agnostic: on Windows the launcher probes backslash paths
+    // (\platform\pkg\bun\bun.exe), which a plain '/bun/' match never sees.
+    existsSyncMock.mockImplementation(
+      (p) => !String(p).replaceAll('\\', '/').includes('/bun/'),
+    );
 
     await importLauncher();
 
@@ -184,6 +194,7 @@ describe('scripts/npm-bin.js platform launcher', () => {
   });
 
   it('falls back to the node entry when the platform runtime fails to spawn', async () => {
+    setPlatform('linux');
     const children = [];
     spawnMock.mockImplementation(() => {
       const child = createFakeChild();
@@ -199,6 +210,20 @@ describe('scripts/npm-bin.js platform launcher', () => {
     children[0].handlers['error'](new Error('spawn ENOENT'));
     children[0].handlers['close'](-2, null);
 
+    // The failed child's forwarders must be dropped before the fallback
+    // spawns: a stale handler would intercept the fallback child's re-raised
+    // death signal and swallow it, so the launcher exits 0 for a
+    // signal-killed run.
+    const firstChildPairs = onSpy.mock.calls
+      .filter(([signal]) =>
+        ['SIGHUP', 'SIGINT', 'SIGQUIT', 'SIGTERM'].includes(signal),
+      )
+      .slice(0, 4);
+    expect(firstChildPairs.length).toBe(4);
+    for (const [signal, handler] of firstChildPairs) {
+      expect(removeListenerSpy).toHaveBeenCalledWith(signal, handler);
+    }
+
     expect(spawnMock).toHaveBeenCalledTimes(2);
     const [runtime, commandArgs] = spawnMock.mock.calls[1];
     expect(runtime).toBe(process.execPath);
@@ -208,6 +233,14 @@ describe('scripts/npm-bin.js platform launcher', () => {
     expect(notice).toContain('failed to start');
     expect(notice).toContain('Falling back to node');
     expect(exitSpy).not.toHaveBeenCalled();
+
+    // The fallback child owns the exit decision like the first child; drive
+    // it to its own close. A module-scoped spawnFailed would hit the
+    // suppression guard here and leave the launcher hanging.
+    children[1].handlers['close'](null, 'SIGTERM');
+    expect(killSpy).toHaveBeenCalledWith(process.pid, 'SIGTERM');
+    children[1].handlers['close'](0, null);
+    expect(exitSpy).toHaveBeenCalledWith(0);
   });
 
   it('exits 1 when the node fallback itself fails to spawn', async () => {
@@ -282,13 +315,22 @@ describe('scripts/npm-bin.js platform launcher', () => {
     }
   });
 
-  it('does not forward SIGINT on Windows, where the console already delivers it', async () => {
+  it('watches SIGINT on Windows without forwarding it', async () => {
     setPlatform('win32');
 
     await importLauncher();
 
     const signals = onSpy.mock.calls.map((call) => call[0]);
-    expect(signals).not.toContain('SIGINT');
     expect(signals).toContain('SIGTERM');
+    // Presence-only: without a SIGINT watcher, libuv's console control
+    // handler lets Windows terminate the launcher instantly on CTRL_C while
+    // the CLI child keeps running. Invoking the watcher must not kill the
+    // child — child.kill('SIGINT') maps to TerminateProcess on Windows.
+    expect(signals).toContain('SIGINT');
+    const sigintHandler = onSpy.mock.calls.find(
+      (call) => call[0] === 'SIGINT',
+    )?.[1];
+    sigintHandler();
+    expect(fakeChild.kill).not.toHaveBeenCalled();
   });
 });
