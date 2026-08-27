@@ -1264,6 +1264,43 @@ describe('review run (handler)', () => {
     expect(process.exitCode).toBe(0);
   });
 
+  it('reads a stop written and closed BEFORE the first poll tick', async () => {
+    // The cleanup-before-first-poll window (human review on #9659): the PR
+    // stop path writes the sidecar and runs cleanup in the same breath, and
+    // the parent's first in-run poll is up to 250 ms away. cleanup now
+    // SPARES the current run's sidecar (pinned in cleanup.test), so the
+    // post-close fallback must be able to read the decision with ZERO timer
+    // advance — the existing race arms all advance 1000 ms first, which is
+    // exactly how this window went unpinned.
+    spawnMock.mockImplementation(
+      (
+        _cmd: unknown,
+        _argv: unknown,
+        opts: { env: Record<string, string> },
+      ) => {
+        const child = new FakeChild();
+        mkdirSync(REVIEW_TMP_DIR, { recursive: true });
+        writeFileSync(
+          join(REVIEW_TMP_DIR, 'qwen-review-local-stop.json'),
+          JSON.stringify({
+            reason: 'clean-tree',
+            runId: opts.env['QWEN_REVIEW_RUN_ID'],
+          }),
+          'utf8',
+        );
+        // Close synchronously on the next microtask — before ANY timer.
+        queueMicrotask(() => child.emit('close', 0));
+        return child;
+      },
+    );
+
+    await runHandler();
+
+    const result = JSON.parse(outs.join(''));
+    expect(result.completed).toBe(true);
+    expect(process.exitCode).toBe(0);
+  });
+
   it('exits 0 under --fail-on for a decided stop round', async () => {
     // A stop composes no verdict and synthesises none: the ledger it renders
     // is rewritten only by a cache-writing round, so a blocker fixed and
