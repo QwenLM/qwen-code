@@ -25,12 +25,15 @@ import {
   useState,
 } from 'react';
 import {
+  isTerminalStatus,
   type AgentInteractive,
   type ApprovalMode,
   type Config,
 } from '@qwen-code/qwen-code-core';
 import { useArenaInProcess } from '../hooks/useArenaInProcess.js';
+import { useAgentStreamingState } from '../hooks/useAgentStreamingState.js';
 import { useTeamInProcess } from '../hooks/useTeamInProcess.js';
+import { StreamingState } from '../types.js';
 
 // ─── Types ──────────────────────────────────────────────────
 
@@ -60,7 +63,9 @@ export interface AgentViewState {
    * Queued follow-up messages per agent (keyed by agentId). Held here —
    * not in the composer — because the layout keys AgentComposer by the
    * active view, so switching teammate tabs unmounts the composer and any
-   * component-local queue would be silently discarded (#10069).
+   * component-local queue would be silently discarded (#10069). Delivery
+   * also lives here (AgentQueueFlusher) so queues flush even while the
+   * agent's tab is unfocused (#10148).
    */
   agentMessageQueues: ReadonlyMap<string, readonly string[]>;
 }
@@ -132,6 +137,66 @@ export function useAgentViewState(): AgentViewState {
 
 export function useAgentViewActions(): AgentViewActions {
   return useContext(AgentViewActionsContext) ?? DEFAULT_ACTIONS;
+}
+
+// ─── Queue delivery ─────────────────────────────────────────
+
+// Shared empty queue identity so agents without queued messages don't
+// allocate on every render.
+const EMPTY_MESSAGE_QUEUE: readonly string[] = [];
+
+/**
+ * Always-mounted delivery for one registered agent's queued follow-ups.
+ *
+ * AgentViewProvider mounts one flusher per registered agentId. Delivery
+ * cannot live in AgentComposer: the layout renders it keyed by the active
+ * view, so switching teammate tabs unmounts the composer while the queues
+ * persist — an agent that settles to idle (or a terminal status) while
+ * unfocused would otherwise keep accepted-but-undelivered messages forever
+ * (#10148).
+ */
+function AgentQueueFlusher({ agentId }: { agentId: string }) {
+  const { agents, agentMessageQueues } = useAgentViewState();
+  const { setAgentMessageQueue } = useAgentViewActions();
+  const interactiveAgent = agents.get(agentId)?.interactiveAgent;
+  const { status, streamingState } = useAgentStreamingState(interactiveAgent);
+  const messageQueue = agentMessageQueues.get(agentId) ?? EMPTY_MESSAGE_QUEUE;
+
+  // Dedupe by queue identity: effects run twice per commit under
+  // StrictMode, and the clear below only lands on the next render — without
+  // this the same queue would be delivered twice.
+  const flushedQueueRef = useRef<readonly string[] | null>(null);
+
+  useEffect(() => {
+    if (status !== undefined && isTerminalStatus(status)) {
+      // The agent can never accept these messages now; drop them so the
+      // display doesn't show undeliverable "queued" follow-ups forever.
+      if (messageQueue.length > 0) {
+        setAgentMessageQueue(agentId, []);
+      }
+      return;
+    }
+    if (
+      streamingState === StreamingState.Idle &&
+      messageQueue.length > 0 &&
+      status !== undefined
+    ) {
+      if (flushedQueueRef.current === messageQueue) return;
+      flushedQueueRef.current = messageQueue;
+      const combined = messageQueue.join('\n');
+      setAgentMessageQueue(agentId, []);
+      interactiveAgent?.enqueueMessage(combined);
+    }
+  }, [
+    streamingState,
+    messageQueue,
+    interactiveAgent,
+    status,
+    agentId,
+    setAgentMessageQueue,
+  ]);
+
+  return null;
 }
 
 // ─── Provider ───────────────────────────────────────────────
@@ -385,6 +450,12 @@ export function AgentViewProvider({
   return (
     <AgentViewStateContext.Provider value={state}>
       <AgentViewActionsContext.Provider value={actions}>
+        {/* Always-mounted queue delivery, one flusher per registered agent
+            — delivery must not depend on the keyed composer being mounted
+            (#10148). */}
+        {[...agents.keys()].map((agentId) => (
+          <AgentQueueFlusher key={agentId} agentId={agentId} />
+        ))}
         {children}
       </AgentViewActionsContext.Provider>
     </AgentViewStateContext.Provider>

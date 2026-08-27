@@ -10,6 +10,12 @@
  * renders AgentComposer with `key={activeView}`, so switching tabs unmounts
  * the composer; any queue held only in local component state is discarded
  * and the message is never delivered.
+ *
+ * Also covers #10148 -- delivery must not depend on the keyed composer
+ * being mounted: queued follow-ups are flushed when the agent settles to
+ * idle even while the user is on another teammate tab, and the queue is
+ * dropped when the agent reaches a terminal status (it can never be
+ * delivered then, and a permanent "queued" display would remain otherwise).
  */
 
 import { render } from 'ink-testing-library';
@@ -88,7 +94,7 @@ function makeFakeAgent(): AgentInteractive {
   } as unknown as AgentInteractive;
 }
 
-describe('AgentComposer queued follow-ups (#10069)', () => {
+describe('Agent View queued follow-ups (#10069, #10148)', () => {
   let agentA: AgentInteractive;
   let agentB: AgentInteractive;
   const streamingByAgent = new Map<AgentInteractive, typeof IDLE>();
@@ -191,17 +197,55 @@ describe('AgentComposer queued follow-ups (#10069)', () => {
     expect(agentA.enqueueMessage).toHaveBeenCalledTimes(1);
   });
 
-  it('flushes when returning to a tab after the agent becomes idle', async () => {
+  it('delivers queued follow-ups while the user is on another tab (#10148)', async () => {
     streamingByAgent.set(agentA, BUSY);
     const app = await renderWithView('agent-a');
 
     submitCapture.current!('follow-up while away');
+    await switchTo(app, 'agent-a');
+    expect(app.lastFrame()).toContain('follow-up while away');
+
+    // The user keeps working on teammate B while A finishes its round.
     await switchTo(app, 'agent-b');
     streamingByAgent.set(agentA, IDLE);
-    await switchTo(app, 'agent-a');
+    await switchTo(app, 'agent-b');
 
+    // Delivery must not wait for the user to revisit A's tab: A's composer
+    // is unmounted here, only the provider persists (#10148).
     expect(agentA.enqueueMessage).toHaveBeenCalledTimes(1);
     expect(agentA.enqueueMessage).toHaveBeenCalledWith('follow-up while away');
+
+    // Revisiting A later must not re-deliver.
+    await switchTo(app, 'agent-a');
+    expect(agentA.enqueueMessage).toHaveBeenCalledTimes(1);
+    expect(app.lastFrame()).not.toContain('follow-up while away');
+  });
+
+  it('drops the queue when the agent reaches a terminal status (#10148)', async () => {
+    streamingByAgent.set(agentA, BUSY);
+    const app = await renderWithView('agent-a');
+
+    submitCapture.current!('never delivered');
+    await switchTo(app, 'agent-a');
+    expect(app.lastFrame()).toContain('never delivered');
+
+    // A fails while the user is on B; queued follow-ups can never arrive.
+    await switchTo(app, 'agent-b');
+    streamingByAgent.set(agentA, {
+      status: AgentStatus.FAILED,
+      streamingState: StreamingState.Idle,
+      isInputActive: false,
+      elapsedTime: 0,
+      lastPromptTokenCount: 0,
+    });
+    await switchTo(app, 'agent-b');
+
+    expect(agentA.enqueueMessage).not.toHaveBeenCalled();
+
+    // The undeliverable queue must be dropped, not shown as "queued" forever.
+    await switchTo(app, 'agent-a');
+    expect(app.lastFrame()).not.toContain('never delivered');
+    expect(agentA.enqueueMessage).not.toHaveBeenCalled();
   });
 
   it('joins multiple queued follow-ups into one prompt after a tab switch', async () => {

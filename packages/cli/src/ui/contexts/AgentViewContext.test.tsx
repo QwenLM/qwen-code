@@ -34,6 +34,29 @@ function makeConfig(): Config {
   } as unknown as Config;
 }
 
+/**
+ * Minimal AgentInteractive stub. The provider mounts a per-agent queue
+ * flusher that derives streaming state via useAgentStreamingState, so the
+ * stub must cover that surface even in storage tests. Status stays
+ * undefined so the flusher never delivers here (delivery is covered by
+ * AgentComposer.queuedMessages.test.tsx).
+ */
+function makeInteractiveAgent(): AgentInteractive {
+  return {
+    getCore: () => ({
+      runtimeContext: {
+        getApprovalMode: () => ApprovalMode.DEFAULT,
+        setApprovalMode: vi.fn(),
+      },
+    }),
+    getStatus: () => undefined,
+    getPendingApprovals: () => new Map(),
+    getLastPromptTokenCount: () => 0,
+    getEventEmitter: () => undefined,
+    enqueueMessage: vi.fn(),
+  } as unknown as AgentInteractive;
+}
+
 describe('AgentViewProvider in-process bridges', () => {
   // Regression guard. The team bridge (useTeamInProcess) was authored but
   // never mounted in the provider, so teammate TEAMMATE_JOINED events never
@@ -59,11 +82,7 @@ describe('AgentViewProvider in-process bridges', () => {
 
   it('clears embedded shell focus when switching agent tabs', async () => {
     const config = makeConfig();
-    const interactiveAgent = {
-      getCore: () => ({
-        runtimeContext: { getApprovalMode: () => ApprovalMode.DEFAULT },
-      }),
-    } as AgentInteractive;
+    const interactiveAgent = makeInteractiveAgent();
 
     function Probe() {
       const state = useAgentViewState();
@@ -113,11 +132,7 @@ describe('AgentViewProvider in-process bridges', () => {
     // state change lands in its own commit (the production focus seed is
     // a keypress in a commit well after the tab switch).
     const config = makeConfig();
-    const interactiveAgent = {
-      getCore: () => ({
-        runtimeContext: { getApprovalMode: () => ApprovalMode.DEFAULT },
-      }),
-    } as AgentInteractive;
+    const interactiveAgent = makeInteractiveAgent();
 
     const probeActions: {
       registerAgent?: (
@@ -174,11 +189,7 @@ describe('AgentViewProvider in-process bridges', () => {
 describe('AgentViewProvider per-agent message queues', () => {
   it('stores queues per agent and clears them when emptied or unregistered', async () => {
     const config = makeConfig();
-    const interactiveAgent = {
-      getCore: () => ({
-        runtimeContext: { getApprovalMode: () => ApprovalMode.DEFAULT },
-      }),
-    } as AgentInteractive;
+    const interactiveAgent = makeInteractiveAgent();
 
     const probeActions: {
       registerAgent?: (
@@ -237,11 +248,7 @@ describe('AgentViewProvider per-agent message queues', () => {
 
   it('appends queued messages without losing same-batch updates', async () => {
     const config = makeConfig();
-    const interactiveAgent = {
-      getCore: () => ({
-        runtimeContext: { getApprovalMode: () => ApprovalMode.DEFAULT },
-      }),
-    } as AgentInteractive;
+    const interactiveAgent = makeInteractiveAgent();
 
     const probeActions: {
       registerAgent?: (
@@ -287,11 +294,7 @@ describe('AgentViewProvider per-agent message queues', () => {
     // manager detaching while the user submits), the append must not
     // resurrect the queue entry the delete just removed.
     const config = makeConfig();
-    const interactiveAgent = {
-      getCore: () => ({
-        runtimeContext: { getApprovalMode: () => ApprovalMode.DEFAULT },
-      }),
-    } as AgentInteractive;
+    const interactiveAgent = makeInteractiveAgent();
 
     const probeActions: {
       registerAgent?: (
@@ -334,11 +337,7 @@ describe('AgentViewProvider per-agent message queues', () => {
 
   it('clears all queued messages when all agents unregister', async () => {
     const config = makeConfig();
-    const interactiveAgent = {
-      getCore: () => ({
-        runtimeContext: { getApprovalMode: () => ApprovalMode.DEFAULT },
-      }),
-    } as AgentInteractive;
+    const interactiveAgent = makeInteractiveAgent();
 
     const probeActions: {
       registerAgent?: (
