@@ -560,6 +560,68 @@ describe('MessageList — failed prompt retry', () => {
 });
 
 describe('MessageList — compact mode', () => {
+  it('keeps MCP Apps standalone', async () => {
+    const scrollIntoView = vi
+      .spyOn(Element.prototype, 'scrollIntoView')
+      .mockImplementation(() => {});
+    try {
+      const mixed: ToolGroupMessage = {
+        id: 'mixed',
+        role: 'tool_group',
+        tools: [
+          { callId: 'read', toolName: 'Read', status: 'completed' },
+          { callId: 'edit', toolName: 'Edit', status: 'completed' },
+          {
+            callId: 'app',
+            toolName: 'mcp__demo__dashboard',
+            status: 'completed',
+            rawOutput: {
+              type: 'mcp_app',
+              serverName: 'demo',
+              resourceUri: 'ui://demo/dashboard',
+              html: '<main>Dashboard</main>',
+              toolResult: { content: [] },
+              toolArguments: {},
+              fallbackText: 'Dashboard ready',
+            },
+          },
+          { callId: 'shell', toolName: 'Shell', status: 'completed' },
+          { callId: 'glob', toolName: 'Glob', status: 'completed' },
+        ],
+      };
+      const ref = createRef<MessageListHandle>();
+      const container = mount([mixed], ref, {
+        compactMode: true,
+        customization: { collapseCompletedTurns: false },
+      });
+
+      expect(
+        Array.from(container.querySelectorAll('[data-tool-ids]')).map((row) =>
+          row.getAttribute('data-tool-ids'),
+        ),
+      ).toEqual(['read,edit', 'app', 'shell,glob']);
+
+      let found = false;
+      act(() => {
+        found = ref.current!.scrollToMessage('mixed', 'app');
+      });
+      await nextFrame();
+      expect(found).toBe(true);
+      const appRow = container.querySelector('[data-tool-ids="app"]');
+      expect(
+        container
+          .querySelector('[data-tool-ids="read,edit"]')
+          ?.getAttribute('data-locate-flashing'),
+      ).toBeNull();
+      expect(appRow?.getAttribute('data-locate-flashing')).toBe('true');
+      expect(scrollIntoView.mock.contexts.at(-1)).toBe(
+        appRow?.closest('[data-index]'),
+      );
+    } finally {
+      scrollIntoView.mockRestore();
+    }
+  });
+
   it('updates a lone streaming thinking tail in place without nesting', () => {
     const user = userMsg('u1');
     const thinking = {
