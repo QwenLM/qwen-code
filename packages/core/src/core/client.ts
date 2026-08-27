@@ -49,6 +49,7 @@ import {
   getStopHookContinuationReason,
   GOAL_HOOK_ID_OUTPUT_KEY,
 } from '../goals/goalHook.js';
+import { applyPendingGoalProposal } from '../goals/goal-tools.js';
 import { formatStopHookBlockingCapWarning } from '../hooks/stopHookCap.js';
 import { buildContextUsage } from '../hooks/context-usage.js';
 import { DEFAULT_TOKEN_LIMIT, tokenLimit } from './tokenLimits.js';
@@ -811,6 +812,42 @@ export class GeminiClient {
   private getHistoryLength(): number {
     const chat = this.getChat();
     return chat.getHistoryLength?.() ?? chat.getHistory().length;
+  }
+
+  /**
+   * Applies a `propose_goal` approval at the end of the turn that made it.
+   *
+   * Only when the model has stopped calling tools: a proposal made
+   * mid-turn stays parked through the tool-result continuations, because
+   * creating the Goal earlier would leave those continuations without a
+   * permit. An aborted turn drops the approval instead of starting a loop
+   * the user just cancelled.
+   */
+  private async settlePendingGoalProposal(
+    turnEnded: boolean,
+    signal: AbortSignal,
+    loadGoalRuntime: (required: boolean) => Promise<GoalRuntime | undefined>,
+  ): Promise<void> {
+    const take = this.config.takePendingGoalProposal;
+    if (typeof take !== 'function') return;
+    if (signal.aborted) {
+      take.call(this.config);
+      return;
+    }
+    if (!turnEnded) return;
+    const proposal = take.call(this.config);
+    if (!proposal) return;
+    const runtime = await loadGoalRuntime(false);
+    if (!runtime) {
+      debugLogger.debug(
+        'Dropping an approved Goal proposal: the Goal runtime is unavailable',
+      );
+      return;
+    }
+    const result = await applyPendingGoalProposal(runtime, proposal);
+    if (!result.applied) {
+      debugLogger.debug(`Dropping an approved Goal proposal: ${result.reason}`);
+    }
   }
 
   private getLastModelMessageText(): string | undefined {
@@ -3043,6 +3080,11 @@ export class GeminiClient {
         goalOrigin = 'runtime';
       } else if (messageType === SendMessageType.UserQuery) {
         goalOrigin = 'user';
+        // A propose_goal approval is applied when its own turn ends. One
+        // still parked when the next real user query starts belongs to a
+        // turn the user cancelled; starting a loop from it now would
+        // surprise them.
+        this.config.takePendingGoalProposal?.();
       }
 
       const goalRequiresPermit = goalRuntime
@@ -3856,6 +3898,15 @@ export class GeminiClient {
       }
       agentOutput.commitResponse(
         hasToolCalls || turn.pendingToolCalls.length > 0,
+      );
+      // A Goal the user approved through propose_goal is set here, once the
+      // model has stopped calling tools, so the proposing turn never runs
+      // without a permit. The runtime's broadcast lands in
+      // pendingGoalStateEvents and is yielded just below.
+      await this.settlePendingGoalProposal(
+        turn.pendingToolCalls.length === 0,
+        signal,
+        loadGoalRuntime,
       );
       for (const goalEvent of signal.aborted
         ? await finalizeInterruptedGoalTurn()

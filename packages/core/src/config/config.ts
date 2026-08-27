@@ -182,6 +182,7 @@ import {
   type GoalRuntime,
   type GoalTurnHost,
 } from '../goals/goal-runtime.js';
+import type { PendingGoalProposal } from '../goals/goal-tools.js';
 import type { GoalRecoveryRecord } from '../goals/goal-persistence.js';
 import { createGoalCheckpointVerifier } from '../goals/goal-checkpoint-verifier.js';
 import { createGoalVerifier } from '../goals/goal-verifier.js';
@@ -2130,6 +2131,8 @@ export class Config {
   private chatRecordingService: ChatRecordingService | undefined = undefined;
   private goalRuntime: GoalRuntime | undefined;
   private goalRuntimeReady: Promise<GoalRuntime> | undefined;
+  /** A `propose_goal` approval waiting for its turn to end; see PendingGoalProposal. */
+  private pendingGoalProposal: PendingGoalProposal | undefined;
   /**
    * A Goal restore held back because the session writer is not accepting
    * writes yet. Settled by {@link startPendingGoalRestore} once the
@@ -7447,6 +7450,18 @@ export class Config {
     return this.modelProposedGoals;
   }
 
+  /** Parks a `propose_goal` approval until the proposing turn ends. */
+  setPendingGoalProposal(proposal: PendingGoalProposal): void {
+    this.pendingGoalProposal = proposal;
+  }
+
+  /** Hands the parked approval to the client at the turn boundary, once. */
+  takePendingGoalProposal(): PendingGoalProposal | undefined {
+    const proposal = this.pendingGoalProposal;
+    this.pendingGoalProposal = undefined;
+    return proposal;
+  }
+
   /**
    * P5 T7: read the `skipWorkflowUsageWarning` setting. When `true`, the
    * `Workflow` tool suppresses the one-time banner that announces the
@@ -8268,6 +8283,8 @@ export class Config {
         'Goal runtime was replaced before the session writer became available',
       ),
     );
+    // An approval belongs to the session that produced it.
+    this.pendingGoalProposal = undefined;
     if (!this.chatRecordingService) {
       this.goalRuntime = undefined;
       this.goalRuntimeReady = undefined;

@@ -608,12 +608,83 @@ export interface ProposeGoalToolParams {
   objective: string;
 }
 
+/**
+ * A Goal the user approved in the `propose_goal` dialog, waiting for the
+ * turn that proposed it to end. Setting it mid-turn would leave the rest of
+ * that turn without a Goal permit (see `client.ts`, "An active Goal requires
+ * an exact turn permit"), so the tool only parks it here and the client
+ * applies it at the same boundary a typed `/goal set` takes effect.
+ */
+export interface PendingGoalProposal {
+  objective: string;
+  approvedAt: number;
+}
+
 export interface ProposeGoalToolConfig extends GoalToolConfig {
   isTrustedFolder(): boolean;
   getApprovalMode(): ApprovalMode;
+  setPendingGoalProposal(proposal: PendingGoalProposal): void;
 }
 
 type ProposeGoalRuntime = Pick<GoalRuntime, 'getSnapshot' | 'dispatch'>;
+
+export type ApplyPendingGoalProposalResult =
+  | { applied: true; goal: GoalRecord; replacedGoalId?: string }
+  | { applied: false; reason: string };
+
+/**
+ * Sets an approved proposal as the session Goal. Called by the client once
+ * the proposing turn has ended; never from inside a turn.
+ *
+ * Re-reads the snapshot because `/goal` may have changed the session since
+ * the dialog: an active Goal is never replaced (someone is already running
+ * it), a stopped one is replaced through its expected version, and no Goal
+ * creates.
+ */
+export async function applyPendingGoalProposal(
+  runtime: ProposeGoalRuntime,
+  proposal: PendingGoalProposal,
+): Promise<ApplyPendingGoalProposalResult> {
+  const objective = proposal.objective.trim();
+  const current = runtime.getSnapshot().goal;
+  if (current?.status === 'active') {
+    return {
+      applied: false,
+      reason: `A Goal became active (revision ${current.revision}) before the approved proposal could be set.`,
+    };
+  }
+  const request: GoalControlRequest = current
+    ? {
+        action: 'replace',
+        objective,
+        expectedGoalId: current.goalId,
+        expectedRevision: current.revision,
+      }
+    : { action: 'create', objective };
+  try {
+    const goal = (await runtime.dispatch(request)).snapshot.goal;
+    if (!goal) {
+      return {
+        applied: false,
+        reason: 'The Goal runtime accepted the request but reported no Goal.',
+      };
+    }
+    return {
+      applied: true,
+      goal,
+      ...(current ? { replacedGoalId: current.goalId } : {}),
+    };
+  } catch (error) {
+    if (
+      error instanceof GoalConflictError ||
+      error instanceof GoalInvalidTransitionError ||
+      error instanceof GoalPersistenceUnavailableError
+    ) {
+      return { applied: false, reason: error.message };
+    }
+    throw error;
+  }
+}
 
 export const PROPOSE_GOAL_PLAN_MODE_MESSAGE =
   'Keep planning; propose the Goal after the plan is approved.';
@@ -739,55 +810,19 @@ class ProposeGoalInvocation extends BaseToolInvocation<
     if (blocker) return this.errorResult(blocker.message, blocker.type);
 
     const objective = this.params.objective.trim();
-    const runtime = this.config.getGoalRuntime();
-    const current = runtime.getSnapshot().goal;
-    const request: GoalControlRequest = current
-      ? {
-          action: 'replace',
-          objective,
-          expectedGoalId: current.goalId,
-          expectedRevision: current.revision,
-        }
-      : { action: 'create', objective };
-
-    let goal: GoalRecord | null;
-    try {
-      goal = (await runtime.dispatch(request)).snapshot.goal;
-    } catch (error) {
-      if (
-        error instanceof GoalConflictError ||
-        error instanceof GoalInvalidTransitionError
-      ) {
-        return this.errorResult(
-          `The Goal changed while the proposal was pending, so it was not set: ${error.message}. Re-read it with get_goal before proposing again.`,
-          ToolErrorType.EXECUTION_DENIED,
-        );
-      }
-      if (error instanceof GoalPersistenceUnavailableError) {
-        return this.errorResult(
-          PROPOSE_GOAL_UNAVAILABLE_MESSAGE,
-          ToolErrorType.EXECUTION_DENIED,
-        );
-      }
-      throw error;
-    }
-    if (!goal) {
-      return this.errorResult(
-        'The Goal runtime accepted the request but reported no Goal.',
-        ToolErrorType.UNKNOWN,
-      );
-    }
+    const current = this.config.getGoalRuntime().getSnapshot().goal;
+    // Parked, not dispatched: the client sets it when this turn ends. Doing
+    // it here would strip the rest of the turn of its Goal permit.
+    this.config.setPendingGoalProposal({ objective, approvedAt: Date.now() });
     const payload = {
-      goalSet: true,
-      goalId: goal.goalId,
-      revision: goal.revision,
-      objective: goal.objective,
-      ...(current ? { replacedGoalId: current.goalId } : {}),
-      next: 'The user approved the Goal and it is now set. Acknowledge that in one sentence and end this turn; the Goal runtime starts the first Goal turn on its own. Do not begin the objective in this turn.',
+      approved: true,
+      objective,
+      ...(current ? { replacesGoalId: current.goalId } : {}),
+      next: 'The user approved the Goal. It is set the moment this turn ends: reply with one sentence acknowledging it and stop. Do not call more tools and do not begin the objective; the Goal runtime starts the first Goal turn on its own.',
     };
     return {
       llmContent: JSON.stringify(payload),
-      returnDisplay: `Goal set · ${capDisplay(objective)}`,
+      returnDisplay: `Goal approved · ${capDisplay(objective)}`,
     };
   }
 
@@ -815,7 +850,7 @@ export class ProposeGoalTool extends BaseDeclarativeTool<
     super(
       ProposeGoalTool.Name,
       ToolDisplayNames.PROPOSE_GOAL,
-      `Propose a session Goal for the user to approve. The user sees the objective in an approval dialog and decides; only their approval sets the Goal. This tool never sets one on its own, and no permission rule or approval mode skips the dialog. Propose only when the user asked for an outcome with a verifiable end state that spans multiple turns ("make the tests pass", "migrate every call site", or after /goal-draft produced an objective), and never to widen scope: the objective must follow from their request. Write the objective so an independent verifier can judge it from transcript evidence alone: one outcome; numbered binary "Done when" checks that name a command and ask to paste its output; what must not change; a budget; what to do when blocked. At most ${PROPOSE_GOAL_OBJECTIVE_MAX_CHARACTERS} characters, on one line. One Goal is active at a time: if a Goal is active this tool refuses and you must hand the user a \`/goal edit …\` or \`/goal set …\` line instead; a stopped Goal (paused, blocked, complete, usage-limited) is replaced on approval. If the user declines you will not be told why: do not ask about it and do not propose the same or a reworded objective again. After approval, acknowledge it in one sentence and end the turn; the Goal runtime starts the first Goal turn on its own. Unavailable in plan mode, in subagents, and in headless runs.`,
+      `Propose a session Goal for the user to approve. The user sees the objective in an approval dialog and decides; only their approval sets the Goal. This tool never sets one on its own, and no permission rule or approval mode skips the dialog. Propose only when the user asked for an outcome with a verifiable end state that spans multiple turns ("make the tests pass", "migrate every call site", or after /goal-draft produced an objective), and never to widen scope: the objective must follow from their request. Write the objective so an independent verifier can judge it from transcript evidence alone: one outcome; numbered binary "Done when" checks that name a command and ask to paste its output; what must not change; a budget; what to do when blocked. At most ${PROPOSE_GOAL_OBJECTIVE_MAX_CHARACTERS} characters, on one line. One Goal is active at a time: if a Goal is active this tool refuses and you must hand the user a \`/goal edit …\` or \`/goal set …\` line instead; a stopped Goal (paused, blocked, complete, usage-limited) is replaced on approval. If the user declines you will not be told why: do not ask about it and do not propose the same or a reworded objective again. After approval the Goal is set the moment the current turn ends: acknowledge it in one sentence and stop, without further tool calls; the Goal runtime starts the first Goal turn on its own. Unavailable in plan mode, in subagents, and in headless runs.`,
       Kind.Other,
       {
         type: 'object',

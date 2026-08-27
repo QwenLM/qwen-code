@@ -257,6 +257,69 @@ describe('GeminiClient Goal admission', () => {
     });
   });
 
+  it('sets an approved propose_goal proposal once the turn ends without tool calls', async () => {
+    const { client, config, runtime } = setupGoalClient();
+    vi.mocked(runtime.getSnapshot).mockReturnValue({
+      v: 2,
+      activity: 'idle',
+      goal: null,
+    });
+    const takePendingGoalProposal = vi
+      .fn()
+      .mockReturnValueOnce(undefined) // the new-query discard
+      .mockReturnValueOnce({ objective: 'ship it', approvedAt: 1 });
+    Object.assign(config, {
+      takePendingGoalProposal,
+      getUsageStatisticsEnabled: vi.fn(() => false),
+    });
+
+    await drain(
+      client.sendMessageStream(
+        [{ text: 'set a goal for this' }],
+        new AbortController().signal,
+        'real-user-key',
+        { type: SendMessageType.UserQuery },
+      ),
+    );
+
+    expect(takePendingGoalProposal).toHaveBeenCalledTimes(2);
+    expect(runtime.dispatch).toHaveBeenCalledWith({
+      action: 'create',
+      objective: 'ship it',
+    });
+  });
+
+  it('discards a proposal still parked when the next user query starts', async () => {
+    // The proposing turn was cancelled before its boundary; the approval must
+    // not start a loop from under the user's next message.
+    const { client, config, runtime } = setupGoalClient();
+    vi.mocked(runtime.getSnapshot).mockReturnValue({
+      v: 2,
+      activity: 'idle',
+      goal: null,
+    });
+    const takePendingGoalProposal = vi
+      .fn()
+      .mockReturnValueOnce({ objective: 'stale', approvedAt: 1 })
+      .mockReturnValue(undefined);
+    Object.assign(config, {
+      takePendingGoalProposal,
+      getUsageStatisticsEnabled: vi.fn(() => false),
+    });
+
+    await drain(
+      client.sendMessageStream(
+        [{ text: 'something else' }],
+        new AbortController().signal,
+        'real-user-key',
+        { type: SendMessageType.UserQuery },
+      ),
+    );
+
+    expect(takePendingGoalProposal).toHaveBeenCalled();
+    expect(runtime.dispatch).not.toHaveBeenCalled();
+  });
+
   it('exposes Goal as an explicit internal message type', () => {
     expect(SendMessageType.Goal).toBe('goal');
     expect(GeminiEventType.GoalState).toBe('goal_state');
