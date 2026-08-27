@@ -2883,6 +2883,33 @@ describe('PermissionManager', () => {
       expect(await pm.isToolEnabled('send_message')).toBe(true);
     });
 
+    it('logs the entries it dropped so a typo is not silent', async () => {
+      // A misspelt entry narrows the eager set to nothing and defers the
+      // whole toolset. That is recoverable, but it must not be invisible —
+      // silent reshaping of the toolset is what #10075 reported.
+      debugLoggerMock.warn.mockClear();
+      pm = new PermissionManager(
+        makeConfig({ eagerTools: ['ReadFile', '', 'Bash(unbalanced'] }),
+      );
+      pm.initialize();
+      expect(debugLoggerMock.warn).toHaveBeenCalledWith(
+        expect.stringContaining('tools.eager: ignoring 2 unusable entries'),
+      );
+      // The valid entry survives — dropping is per-entry, not all-or-nothing.
+      expect(await pm.getToolRegistrationStatus('read_file')).toBe(
+        'registered',
+      );
+    });
+
+    it('stays quiet when every entry parses', async () => {
+      debugLoggerMock.warn.mockClear();
+      pm = new PermissionManager(makeConfig({ eagerTools: ['ReadFile'] }));
+      pm.initialize();
+      expect(debugLoggerMock.warn).not.toHaveBeenCalledWith(
+        expect.stringContaining('tools.eager'),
+      );
+    });
+
     it('deny rules still win over eager membership', async () => {
       pm = new PermissionManager(
         makeConfig({

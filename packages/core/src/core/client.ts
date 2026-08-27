@@ -423,6 +423,9 @@ export class GeminiClient {
   private announcedMcpToolNames = new Set<string>();
   private pendingAddedMcpTools = new Map<string, DeferredToolSummary>();
   private pendingRemovedMcpToolNames = new Set<string>();
+  // One-shot latch for the `tools.eager`-without-ToolSearch warning, so the
+  // reveal path does not repeat it on every setTools() call.
+  private eagerToolsUnreachableWarned = false;
   // Dedup state for the per-turn skill/command "now available" delta reminders
   // (drainSkillAndCommandReminders). Keys are "skill:<name>" / "cmd:<name>". The
   // set is seeded on the first drain from the current skills (the startup
@@ -1676,7 +1679,9 @@ export class GeminiClient {
    * (since `undefined` is returned in that branch) — a silent disappearance.
    *
    * Returns `undefined` when ToolSearch is unavailable: reminders must not
-   * advertise tools the model has no way to load on demand.
+   * advertise tools the model has no way to load on demand. Tools held back
+   * by `tools.eager` in that state are unreachable for the session, which is
+   * warned about once (see {@link warnEagerToolsUnreachable}).
    */
   private resolveDeferredToolsForReminder(
     deferredSummary: readonly DeferredToolSummary[],
@@ -1685,16 +1690,46 @@ export class GeminiClient {
     const toolSearchAvailable = !!toolRegistry.getTool(ToolNames.TOOL_SEARCH);
     if (!toolSearchAvailable) {
       if (deferredSummary.length > 0) {
+        const withheld: string[] = [];
         for (const t of deferredSummary) {
-          if (!toolRegistry.isPermissionDeferred(t.name)) {
-            toolRegistry.revealDeferredTool(t.name);
+          if (toolRegistry.isPermissionDeferred(t.name)) {
+            withheld.push(t.name);
+            continue;
           }
+          toolRegistry.revealDeferredTool(t.name);
         }
+        this.warnEagerToolsUnreachable(withheld);
       }
       return undefined;
     }
     return deferredSummary.filter(
       (t) => !toolRegistry.isDeferredToolRevealed(t.name),
+    );
+  }
+
+  /**
+   * Warn once when `tools.eager` holds tools back in a session that has no
+   * ToolSearch — `tools.toolSearch.enabled: false`, a `tool_search` deny
+   * rule, or the automatic DeepSeek prefix-cache opt-out in `loadCliConfig`.
+   *
+   * Keeping them hidden is the right call: revealing them would send exactly
+   * the schemas the allowlist was configured to withhold. But `tools.eager`
+   * promises deferral rather than removal, and with nothing left to load them
+   * on demand these tools are out of reach for the whole session while still
+   * showing up in `/tools`. That gap between what the setting promises and
+   * what the session can do is the kind of silent reshaping #10075 was
+   * reported for, so name it rather than leaving it to be discovered.
+   */
+  private warnEagerToolsUnreachable(withheldToolNames: string[]): void {
+    if (this.eagerToolsUnreachableWarned || withheldToolNames.length === 0) {
+      return;
+    }
+    this.eagerToolsUnreachableWarned = true;
+    debugLogger.warn(
+      `tools.eager is holding back ${withheldToolNames.length} tool(s) in a session with no tool_search, ` +
+        `so nothing can load them on demand and they are unreachable until restart: ${withheldToolNames.join(', ')}. ` +
+        `Enable tools.toolSearch.enabled (and drop any tool_search deny rule) to keep them loadable, ` +
+        `list them in tools.eager to send their schemas upfront, or use permissions.deny if removal was the intent.`,
     );
   }
 

@@ -2628,6 +2628,54 @@ describe('Gemini Client (client.ts)', () => {
       expect(addHistorySpy).not.toHaveBeenCalled();
     });
 
+    it('warns that tools.eager holds tools back with no way to load them', async () => {
+      // Holding them back is correct — revealing would send exactly the
+      // schemas the allowlist withholds — but with no tool_search the tools
+      // are unreachable for the session while still listed in `/tools`.
+      // #10075 is about silent reshaping of the toolset, so say it.
+      const reg = getRegistryMock();
+      reg.getTool.mockReturnValue(null); // ToolSearch absent.
+      reg.getDeferredToolSummary.mockReturnValue([
+        { name: 'write_file', description: 'write' },
+        { name: 'mcp__server__alpha', description: 'a', serverName: 'server' },
+      ]);
+      reg.isPermissionDeferred.mockImplementation(
+        (name: string) => name === 'write_file',
+      );
+      vi.spyOn(client.getChat(), 'setTools').mockImplementation(() => {});
+      mockClientDebugLogger.warn.mockClear();
+
+      await client.setTools();
+
+      expect(mockClientDebugLogger.warn).toHaveBeenCalledWith(
+        expect.stringContaining('tools.eager is holding back 1 tool(s)'),
+      );
+      // Names the tool, so the report is actionable without a debug session.
+      expect(mockClientDebugLogger.warn).toHaveBeenCalledWith(
+        expect.stringContaining('write_file'),
+      );
+    });
+
+    it('does not warn when tools.eager held nothing back', async () => {
+      // Ordinary deferred tools are revealed here by design; that is not an
+      // allowlist losing its loading path, so the warning must stay quiet.
+      const reg = getRegistryMock();
+      reg.getTool.mockReturnValue(null); // ToolSearch absent.
+      reg.getDeferredToolSummary.mockReturnValue([
+        { name: 'mcp__server__alpha', description: 'a', serverName: 'server' },
+      ]);
+      reg.isPermissionDeferred.mockReturnValue(false);
+      vi.spyOn(client.getChat(), 'setTools').mockImplementation(() => {});
+      mockClientDebugLogger.warn.mockClear();
+
+      await client.setTools();
+
+      expect(mockClientDebugLogger.warn).not.toHaveBeenCalledWith(
+        expect.stringContaining('tools.eager'),
+      );
+      expect(reg.revealDeferredTool).toHaveBeenCalledWith('mcp__server__alpha');
+    });
+
     it('does not append the same added MCP reminder twice', async () => {
       const reg = getRegistryMock();
       reg.getTool.mockImplementation((n: string) =>

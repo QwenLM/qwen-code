@@ -960,10 +960,10 @@ export class ToolRegistry {
       if (!this.isEffectivelyDeferred(tool) || tool.alwaysLoad) continue;
       // Permission-deferred tools (#10075) are deliberately excluded: the
       // budget preload exists to stabilise the prompt cache for ordinary
-      // deferred tools, but auto-revealing an allowlist-demoted tool would
-      // re-add exactly the schema the `permissions.allow` registry
-      // allowlist keeps out of the eager request (#9827). Such tools stay
-      // loadable on demand via ToolSearch.
+      // deferred tools, but auto-revealing a demoted tool would re-add
+      // exactly the schema the `settings.tools.eager` allowlist keeps out
+      // of the eager request (#9827). Such tools stay loadable on demand
+      // via ToolSearch.
       if (this.permissionDeferred.has(tool.name)) continue;
       if (this.config.getVisibleTools().has(tool.name)) continue;
       candidates.push(tool.name);

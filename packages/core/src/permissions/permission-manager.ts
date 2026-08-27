@@ -246,15 +246,39 @@ export class PermissionManager {
     // matching nothing — deferring more than intended is recoverable
     // (ToolSearch still reaches every tool), whereas silently ignoring a
     // configured list would resend exactly the schemas the user asked to
-    // keep out (#9827).
+    // keep out (#9827). Dropped entries are logged: a typo silently
+    // deferring the whole toolset is the same class of surprise #10075
+    // reported, and nothing else on this path surfaces it.
     const rawEagerTools = this.config.getEagerTools?.();
-    this.eagerToolAllowList = Array.isArray(rawEagerTools)
-      ? rawEagerTools
-          .filter((name) => typeof name === 'string' && name.trim() !== '')
-          .map((name) => parseRule(name))
-          .filter((rule) => !rule.invalid)
-          .map((rule) => rule.toolName)
-      : null;
+    if (Array.isArray(rawEagerTools)) {
+      const canonicalNames: string[] = [];
+      const droppedEntries: string[] = [];
+      for (const entry of rawEagerTools) {
+        if (typeof entry !== 'string' || entry.trim() === '') {
+          droppedEntries.push(JSON.stringify(entry));
+          continue;
+        }
+        const rule = parseRule(entry);
+        if (rule.invalid) {
+          droppedEntries.push(JSON.stringify(entry));
+          continue;
+        }
+        canonicalNames.push(rule.toolName);
+      }
+      if (droppedEntries.length > 0) {
+        debugLogger.warn(
+          `tools.eager: ignoring ${droppedEntries.length} unusable entr${
+            droppedEntries.length === 1 ? 'y' : 'ies'
+          } (${droppedEntries.join(', ')}). ` +
+            `The allowlist stays active with ${canonicalNames.length} entr${
+              canonicalNames.length === 1 ? 'y' : 'ies'
+            }, so every other non-exempt tool is deferred to tool_search.`,
+        );
+      }
+      this.eagerToolAllowList = canonicalNames;
+    } else {
+      this.eagerToolAllowList = null;
+    }
   }
 
   // ---------------------------------------------------------------------------
