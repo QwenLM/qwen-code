@@ -77,6 +77,7 @@ vi.mock('../ide/ide-client.js', () => ({
 }));
 vi.mock('../utils/memory-constants.js', () => ({
   setGeminiMdFilename: vi.fn(),
+  getAllGeminiMdFilenames: vi.fn(() => ['QWEN.md', 'AGENTS.md']),
 }));
 
 import * as fs from 'node:fs';
