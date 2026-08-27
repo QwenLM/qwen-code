@@ -164,6 +164,11 @@ function runScenario(scenario, { timeoutMinutes = 180, logPath } = {}) {
           ATT: attemptFile,
           DUR: durationFile,
           PRM: promptFile,
+          // The step initializes PROXY_BIN before the retry loop and the
+          // agent invocation's decoy GITHUB_PATH/GITHUB_ENV wiring expands
+          // it; the extraction starts at OUTCOME='', past the init, so the
+          // harness must supply it (set -u would otherwise abort the loop).
+          PROXY_BIN: join(dir, 'proxy-bin'),
         },
       });
     } catch (e) {

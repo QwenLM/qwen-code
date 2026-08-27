@@ -795,6 +795,20 @@
   white-space: nowrap;
 }
 
+/* Match the session-row badge text: neutral muted tone, not the global link
+   blue — a blue/purple link would clash with the merged state icon's purple. */
+.sessionDetailsRow a {
+  color: color-mix(
+    in srgb,
+    var(--muted-foreground, #6b7280) 75%,
+    var(--foreground)
+  );
+}
+
+.sessionDetailsRow a:hover {
+  color: var(--foreground);
+}
+
 .sessionDetailsIdRow {
   min-width: 0;
   display: flex;
