@@ -24,6 +24,7 @@ import { BundledSkillLoader } from './services/BundledSkillLoader.js';
 import { FileCommandLoader } from './services/FileCommandLoader.js';
 import { SavedWorkflowLoader } from './services/saved-workflow-loader.js';
 import { McpPromptLoader } from './services/McpPromptLoader.js';
+import { skillMatchesSettingName } from './config/skill-settings.js';
 import {
   recordAutoSkillCommandUsage,
   SkillCommandLoader,
@@ -439,9 +440,16 @@ export const handleSlashCommand = async (
     const trimmed = name.trim();
     if (trimmed) disabledNameSet.add(trimmed.toLowerCase());
   }
-  const isDisabled = (cmd: { name: string; altNames?: readonly string[] }) =>
+  const isDisabled = (cmd: {
+    name: string;
+    kind?: CommandKind;
+    extensionName?: string;
+    altNames?: readonly string[];
+  }) =>
     disabledNameSet.has(cmd.name.toLowerCase()) ||
-    (cmd.altNames ?? []).some((a) => disabledNameSet.has(a.toLowerCase()));
+    (cmd.altNames ?? []).some((a) => disabledNameSet.has(a.toLowerCase())) ||
+    (cmd.kind === CommandKind.SKILL &&
+      skillMatchesSettingName(cmd, disabledNameSet));
 
   // Load the full command set (unfiltered by the denylist) so that the
   // fallback existence check below can distinguish a disabled command from a

@@ -1096,6 +1096,31 @@ describe('handleSlashCommand', () => {
       }
     });
 
+    it('filters a collision-qualified skill command for a legacy bare entry', async () => {
+      const mockQualifiedSkill = {
+        name: 'docs:pdf',
+        description: 'Docs pdf skill',
+        kind: CommandKind.SKILL,
+        extensionName: 'docs',
+        skillDetail: { name: 'docs:pdf', level: 'extension' },
+        supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
+      };
+      mockGetCommands.mockReturnValue([mockQualifiedSkill]);
+      vi.mocked(mockConfig.getDisabledSlashCommands).mockReturnValue(['pdf']);
+
+      const result = await handleSlashCommand(
+        '/docs:pdf',
+        abortController,
+        mockConfig,
+        mockSettings,
+      );
+
+      expect(result.type).toBe('unsupported');
+      if (result.type === 'unsupported') {
+        expect(result.reason).toContain('disabled');
+      }
+    });
+
     it('should still return no_command for genuinely unknown commands even with a denylist', async () => {
       mockGetCommands.mockReturnValue([mockDisabledCommand]);
       vi.mocked(mockConfig.getDisabledSlashCommands).mockReturnValue(['help']);

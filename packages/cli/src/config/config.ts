@@ -934,7 +934,9 @@ export async function parseArguments(): Promise<CliArgs> {
             'Slash command names to hide/disable (comma-separated or ' +
             'repeated). Merged with the `slashCommands.disabled` setting ' +
             'and QWEN_DISABLED_SLASH_COMMANDS. Matched case-insensitively ' +
-            'against the final command name.',
+            'against the final command name; for extension skills, a ' +
+            'pre-rename bare entry also matches its `<extension>:<name>` ' +
+            'form (#9408).',
           coerce: (names: string[]) =>
             names.flatMap((n) => n.split(',').map((t) => t.trim())),
         })

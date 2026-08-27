@@ -537,6 +537,25 @@ describe('CommandService', () => {
       expect(commands).toHaveLength(0);
     });
 
+    it('keeps a legacy bare disablement matching a collision-qualified skill', async () => {
+      const fileCommand = createMockCommand('demo:pdf', CommandKind.FILE);
+      const qualifiedSkill = {
+        ...createMockCommand('docs:pdf', CommandKind.SKILL),
+        extensionName: 'docs',
+        modelInvocable: true,
+      };
+      const service = await CommandService.create(
+        [new MockCommandLoader([fileCommand, qualifiedSkill])],
+        new AbortController().signal,
+        new Set(['pdf']),
+      );
+
+      const commands = service.getCommands();
+      expect(commands).toHaveLength(1);
+      expect(commands[0]?.name).toBe('demo:pdf');
+      expect(service.getModelInvocableCommands()).toHaveLength(0);
+    });
+
     it('should not filter any commands when disabledNames is empty', async () => {
       const mockLoader = new MockCommandLoader([mockCommandA, mockCommandB]);
       const service = await CommandService.create(
