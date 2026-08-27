@@ -42,8 +42,11 @@ const BASE_DIR = '/test/skills';
 // Entries seeded into the skills directory: one real skill, two crashed
 // reinstall artifacts shaped like the ones `installSkill` leaves behind
 // (`<slug>.backup-<pid>-<timestamp>` / `<slug>.installing-<pid>-<timestamp>`),
-// and a legitimate skill dir whose name merely contains `.backup-`
-// (`db.backup-2024`) which must still load.
+// and legitimate skill dirs that must still load: a name merely containing
+// `.backup-` (`db.backup-2024`), a name continuing after the two digit
+// groups (`db.backup-2024-1234-archive`, pins the `$` end anchor), and a
+// name with a hyphen instead of a dot before `backup-`
+// (`data-backup-2024-06`, pins the literal `\.` requirement).
 const dirEntry = (name: string) => ({
   name,
   isDirectory: () => true,
@@ -57,6 +60,8 @@ function seedSkillsDir(): void {
     dirEntry('my-skill.backup-12345-1753901234567'),
     dirEntry('my-skill.installing-12345-1753901234568'),
     dirEntry('db.backup-2024'),
+    dirEntry('db.backup-2024-1234-archive'),
+    dirEntry('data-backup-2024-06'),
   ] as unknown as Awaited<ReturnType<typeof fs.readdir>>);
 
   vi.mocked(fs.access).mockResolvedValue(undefined);
@@ -79,10 +84,24 @@ description: Stale staging artifact
 ---
 body`);
     }
+    if (pathStr.includes('db.backup-2024-1234-archive')) {
+      return Promise.resolve(`---
+name: db-2024-archive
+description: Legitimate dir continuing after the digit groups
+---
+body`);
+    }
     if (pathStr.includes('db.backup-2024')) {
       return Promise.resolve(`---
 name: db-2024
 description: Legitimate dir with backup in its name
+---
+body`);
+    }
+    if (pathStr.includes('data-backup-2024-06')) {
+      return Promise.resolve(`---
+name: data-backup-skill
+description: Legitimate dir with hyphen before backup-
 ---
 body`);
     }
@@ -104,7 +123,12 @@ body`);
   });
 }
 
-const EXPECTED_LOADED = ['db-2024', 'real-skill'];
+const EXPECTED_LOADED = [
+  'data-backup-skill',
+  'db-2024',
+  'db-2024-archive',
+  'real-skill',
+];
 
 describe('install artifact filtering', () => {
   beforeEach(() => {
