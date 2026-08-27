@@ -479,6 +479,13 @@ function coveredPlan(
   recordBuilt(p, 2);
   recordMatrix(p);
   recordStep45(p, step45Keys);
+  // The counter-frame audit (6d) is a whole-diff role in both topologies at
+  // high effort, gated on the PR identity: a plan naming the PR owes its
+  // record like Agent 0's. Where it is not required (no PR named, or medium
+  // effort) the extra record is inert.
+  if (planOpts.effort !== 'medium') {
+    recordStep45(p, ['6d']);
+  }
   // A plan naming the PR owes the roster's issue-fidelity agent (Agent 0)
   // too; without its records the plan caps with `unreviewed-dimension`, and
   // a verdict assertion over it is decided by the cap, not by the counts.
@@ -972,7 +979,8 @@ describe('composeReview — the low-signal Approve disclosure', () => {
     const r = composeReview(base({}));
     expect(r.event).toBe('APPROVE');
     expect(r.body).toBe(`No issues found. LGTM! ✅\n\n${FOOTER}`);
-    // The fixture's roster: two chunk agents plus the test matrix.
+    // The fixture's roster: two chunk agents plus the test matrix (no PR
+    // identity in this plan, so no counter-frame audit).
     expect(r.lowSignal).toEqual({ agents: 3, srcDiffLines: 5000 });
     expect(verdictLine(r)).toBe(
       'Verdict: Approve — low signal: none of the 3 review agents reported ' +
@@ -2175,7 +2183,7 @@ describe('composeReview — budget-gap disclosures (a channel, never a cap)', ()
     recordBuilt(p, 1);
     recordBuilt(p, 2);
     recordMatrix(p);
-    recordStep45(p, ['verify', 'reverse-audit']);
+    recordStep45(p, ['verify', 'reverse-audit', '6d']);
 
     // Not base(): its planPath DEFAULT (coveredPlan()) is evaluated on every
     // call and rewrites this run's a1/a2 transcripts with clean ones.
@@ -2214,7 +2222,7 @@ describe('composeReview — budget-gap disclosures (a channel, never a cap)', ()
     recordBuilt(p, 1);
     recordBuilt(p, 2);
     recordMatrix(p);
-    recordStep45(p, ['verify', 'reverse-audit']);
+    recordStep45(p, ['verify', 'reverse-audit', '6d']);
 
     const r = composeReview({
       criticalsInline: 0,
@@ -2248,7 +2256,7 @@ describe('composeReview — budget-gap disclosures (a channel, never a cap)', ()
     recordBuilt(p, 1);
     recordBuilt(p, 2);
     recordMatrix(p);
-    recordStep45(p, ['verify', 'reverse-audit']);
+    recordStep45(p, ['verify', 'reverse-audit', '6d']);
 
     const r = composeReview({
       criticalsInline: 0,
@@ -5938,11 +5946,13 @@ describe('bilingual body — the PR author writes Chinese (prDescriptionHasHan)'
 
   it('translates the disclosures — role phrase and Not-reviewed frame', () => {
     // test-matrix required and never built → one role gap, both languages.
+    // (6d is recorded so the matrix stays the ONLY gap the test is about.)
     const p = plan({ han: true });
     transcript('a1', goodPrompt(1), { toolCalls: 3 });
     transcript('a2', goodPrompt(2), { toolCalls: 2 });
     recordBuilt(p, 1);
     recordBuilt(p, 2);
+    recordStep45(p, ['6d']);
     const r = composeReview({ planPath: p, env: ENV, modelId: MODEL });
     expect(r.body).toContain(
       'Not reviewed: the whole-diff test-coverage check',
@@ -9756,7 +9766,7 @@ describe('composeReview — unresolved-Critical rendering (#8388 readability)', 
     recordBuilt(p, 1);
     recordBuilt(p, 2);
     recordMatrix(p);
-    recordStep45(p, ['verify', 'reverse-audit']);
+    recordStep45(p, ['verify', 'reverse-audit', '6d']);
     const r = composeReview({
       criticalsInline: 0,
       suggestionsInline: 0,

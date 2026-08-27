@@ -25,11 +25,14 @@ import { execFileSync } from 'node:child_process';
 import {
   chmodSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   realpathSync,
+  renameSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
@@ -1070,5 +1073,279 @@ describe('runScratchTree', () => {
         .mock.calls[0][0] as string;
       expect(JSON.parse(printed).available).toBe(true);
     });
+  });
+});
+
+describe('runScratchTree --standalone', () => {
+  // The prose-execution audit's tree. Its input is untrusted — a recipe the
+  // PR author wrote — so the tree is a clone with a `.git` of its own, sharing
+  // only the object store: what a recipe step writes into config, hooks or
+  // refs lands in the tree and dies with it. The invariant every test here is
+  // about is the one that made the shared-common-dir screen unnecessary: no
+  // git write inside the tree reaches the user's repository, so there is
+  // nothing to screen.
+  let repo: string;
+  let gitIsolation: ReturnType<typeof isolateHostGitConfig>;
+  let worktree: string;
+  let headSha: string;
+
+  const git = (cwd: string, ...args: string[]) =>
+    execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
+
+  const run = (
+    label = 'prose-exec--round-1--abc123',
+    extra: Partial<ScratchTreeArgs> = {},
+  ) => runScratchTree({ worktree, label, standalone: true, ...extra });
+
+  beforeEach(() => {
+    gitIsolation = isolateHostGitConfig();
+    repo = realpathSync(mkdtempSync(join(tmpdir(), 'qwen-scratch-tree-sa-')));
+    git(repo, 'init', '-q', '-b', 'main');
+    git(repo, 'config', 'user.email', 't@t.t');
+    git(repo, 'config', 'user.name', 't');
+    writeFileSync(join(repo, 'a.ts'), 'export const x = 1;\n');
+    writeFileSync(join(repo, '.gitignore'), 'node_modules\n');
+    // Selects a filter by name; whether one is DEFINED is per-repository
+    // config, which is exactly what a standalone clone does not inherit.
+    writeFileSync(join(repo, '.gitattributes'), 'a.ts filter=evil\n');
+    git(repo, 'add', '-A');
+    git(repo, 'commit', '-qm', 'head');
+    headSha = git(repo, 'rev-parse', 'HEAD');
+    worktree = join(repo, '.qwen', 'tmp', 'review-pr-1');
+    mkdirSync(join(repo, '.qwen', 'tmp'), { recursive: true });
+    git(repo, 'worktree', 'add', '--detach', '-q', worktree, headSha);
+  });
+
+  afterEach(() => {
+    rmSync(repo, { recursive: true, force: true });
+    gitIsolation.dispose();
+  });
+
+  it('stands up a clone with a .git of its own, sharing only the object store', () => {
+    const r = run();
+    expect(r.available).toBe(true);
+    expect(r.standalone).toBe(true);
+    expect(r.reused).toBe(false);
+    expect(r.headSha).toBe(headSha);
+    expect(r.path).toBe(
+      scratchWorktreePath(worktree, 'prose-exec--round-1--abc123'),
+    );
+    // A directory, not a gitfile: nothing points into the user's repository.
+    expect(statSync(join(r.path!, '.git')).isDirectory()).toBe(true);
+    expect(
+      realpathSync(
+        readFileSync(
+          join(r.path!, '.git', 'objects', 'info', 'alternates'),
+          'utf8',
+        ).trim(),
+      ),
+    ).toBe(realpathSync(join(repo, '.git', 'objects')));
+    expect(git(r.path!, 'rev-parse', 'HEAD')).toBe(headSha);
+    expect(readFileSync(join(r.path!, 'a.ts'), 'utf8')).toBe(
+      'export const x = 1;\n',
+    );
+    // No default push target, no template hooks, and no registration in the
+    // user's worktree list — it is not a worktree of that repository at all.
+    expect(git(r.path!, 'remote')).toBe('');
+    expect(existsSync(join(r.path!, '.git', 'hooks'))).toBe(false);
+    expect(git(repo, 'worktree', 'list', '--porcelain')).not.toContain(r.path!);
+    expect(r.note).toContain('STANDALONE clone');
+    expect(r.note).toContain("reaches the user's repository");
+  });
+
+  it('keeps a config, hook or ref write inside the tree from reaching the user’s repository', () => {
+    // The class the shared-common-dir screen tried to enumerate — a
+    // command-valued config key, an executable hook, a commit — planted from
+    // inside the tree by a recipe step. In a linked worktree every one of
+    // these lands in the user's `.git`; here they land in the clone's.
+    const r = run();
+    git(r.path!, 'config', 'core.editor', 'PLANTED');
+    mkdirSync(join(r.path!, '.git', 'hooks'), { recursive: true });
+    writeFileSync(join(r.path!, '.git', 'hooks', 'pre-commit'), '#!/bin/sh\n');
+    chmodSync(join(r.path!, '.git', 'hooks', 'pre-commit'), 0o755);
+    writeFileSync(join(r.path!, 'a.ts'), 'mutant\n');
+    git(
+      r.path!,
+      '-c',
+      'user.email=p@p.p',
+      '-c',
+      'user.name=p',
+      'commit',
+      '-qam',
+      'planted',
+    );
+
+    expect(git(r.path!, 'config', '--get', 'core.editor')).toBe('PLANTED');
+    expect(() => git(repo, 'config', '--get', 'core.editor')).toThrow();
+    expect(() => git(worktree, 'config', '--get', 'core.editor')).toThrow();
+    expect(existsSync(join(repo, '.git', 'hooks', 'pre-commit'))).toBe(false);
+    expect(git(repo, 'rev-list', '--all', '--count')).toBe('1');
+    expect(git(worktree, 'rev-parse', 'HEAD')).toBe(headSha);
+    expect(git(worktree, 'status', '--porcelain')).toBe('');
+  });
+
+  it('checks out under the clone’s config — a repo-local filter is neither run nor a refusal', () => {
+    // The linked shape must REFUSE this repository: its checkout would
+    // execute the filter the attributes select. The standalone clone's
+    // checkout reads the clone's config, which defines no such filter, so
+    // the same repository gets a tree and the command never runs.
+    const pwned = join(repo, 'PWNED-smudge');
+    git(repo, 'config', 'filter.evil.smudge', `touch ${pwned}`);
+
+    const linked = runScratchTree({ worktree, label: 'verify--round-1--x' });
+    expect(linked.available).toBe(false);
+    expect(linked.note).toContain('filter.evil.smudge');
+
+    const r = run();
+    expect(r.available).toBe(true);
+    expect(existsSync(pwned)).toBe(false);
+    expect(readFileSync(join(r.path!, 'a.ts'), 'utf8')).toBe(
+      'export const x = 1;\n',
+    );
+    expect(() =>
+      git(r.path!, 'config', '--get', 'filter.evil.smudge'),
+    ).toThrow();
+  });
+
+  it('rebuilds on every call — what the last call wrote is gone', () => {
+    const first = run();
+    writeFileSync(join(first.path!, '__probe__.test.ts'), 'it("x", () => {});');
+    writeFileSync(join(first.path!, 'a.ts'), 'mutant\n');
+    git(first.path!, 'config', 'probe.left', 'behind');
+    mkdirSync(join(first.path!, 'node_modules', 'left'), { recursive: true });
+
+    const second = run();
+    expect(second.available).toBe(true);
+    expect(second.reused).toBe(false);
+    expect(second.path).toBe(first.path);
+    expect(existsSync(join(second.path!, '__probe__.test.ts'))).toBe(false);
+    expect(existsSync(join(second.path!, 'node_modules', 'left'))).toBe(false);
+    expect(readFileSync(join(second.path!, 'a.ts'), 'utf8')).toBe(
+      'export const x = 1;\n',
+    );
+    expect(() => git(second.path!, 'config', '--get', 'probe.left')).toThrow();
+    expect(git(second.path!, 'rev-parse', 'HEAD')).toBe(headSha);
+  });
+
+  it('replaces a LINKED tree an earlier call left at the path, and unregisters it', () => {
+    // Same label, other shape: the path is shared between the two modes, and
+    // a linked worktree standing there is registered in the user's repository.
+    // Plain `rmSync` would leave that registration to wedge the next
+    // `worktree add`; the gitfile sends it through `discardWorktree` instead.
+    const label = 'prose-exec--round-1--abc123';
+    const linked = runScratchTree({ worktree, label });
+    expect(linked.available).toBe(true);
+    expect(statSync(join(linked.path!, '.git')).isFile()).toBe(true);
+    expect(git(repo, 'worktree', 'list', '--porcelain')).toContain(
+      linked.path!,
+    );
+
+    const r = run(label);
+    expect(r.available).toBe(true);
+    expect(r.path).toBe(linked.path);
+    expect(statSync(join(r.path!, '.git')).isDirectory()).toBe(true);
+    expect(git(repo, 'worktree', 'list', '--porcelain')).not.toContain(r.path!);
+    expect(existsSync(join(repo, '.git', 'worktrees', basename(r.path!)))).toBe(
+      false,
+    );
+  });
+
+  it('rebuilds over a symlink at the path without following it', () => {
+    const first = run();
+    const victim = join(repo, 'victim');
+    mkdirSync(join(victim, 'keep'), { recursive: true });
+    rmSync(first.path!, { recursive: true, force: true });
+    symlinkSync(victim, first.path!, 'dir');
+
+    const second = run();
+    expect(second.available).toBe(true);
+    expect(lstatSync(second.path!).isSymbolicLink()).toBe(false);
+    expect(existsSync(join(victim, 'keep'))).toBe(true);
+  });
+
+  it('refuses when an ancestor of the scratch path is a symlink', () => {
+    // A link at `.qwen/tmp` aims both the removal and the clone at whatever
+    // it points to. The linked shape's reset gate walks the ancestors for the
+    // same reason; the standalone path has no reset, so the walk is its own.
+    const elsewhere = join(repo, 'elsewhere');
+    renameSync(join(repo, '.qwen', 'tmp'), elsewhere);
+    symlinkSync(elsewhere, join(repo, '.qwen', 'tmp'), 'dir');
+
+    const r = run();
+    expect(r.available).toBe(false);
+    expect(r.standalone).toBe(true);
+    expect(r.note).toContain('symlink');
+    expect(
+      existsSync(join(elsewhere, basename(scratchWorktreePath(worktree, 'x')))),
+    ).toBe(false);
+  });
+
+  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+    'reports a clone that could not be made, with the residue still measured',
+    () => {
+      const parent = join(repo, '.qwen', 'tmp');
+      chmodSync(parent, 0o555);
+      try {
+        const r = run('prose-exec--round-1--abc123', { fetchedSha: headSha });
+        expect(r.available).toBe(false);
+        expect(r.standalone).toBe(true);
+        expect(r.note).toContain(
+          'could not stand up a standalone scratch tree',
+        );
+        expect(r.note).toContain('Do NOT fall back');
+        // Measured, not refused: the residue probe ran before the clone.
+        expect(r.sharedTreeUnmeasured).toBeUndefined();
+        expect(r.sharedTreeResidue).toEqual([]);
+      } finally {
+        chmodSync(parent, 0o755);
+      }
+    },
+  );
+
+  it('links the review worktree’s node_modules in, like the linked shape', () => {
+    mkdirSync(join(worktree, 'node_modules', 'vitest'), { recursive: true });
+    const r = run();
+    expect(r.dependencies).toEqual({
+      linked: 1,
+      failed: 0,
+      alreadyPresent: false,
+      selfLinked: 0,
+    });
+    expect(
+      lstatSync(join(r.path!, 'node_modules', 'vitest')).isSymbolicLink(),
+    ).toBe(true);
+  });
+
+  it('leaves the shared review worktree untouched, and still measures its residue', () => {
+    writeFileSync(join(worktree, '__probe__.test.ts'), 'it("x", () => {});');
+    const r = run('prose-exec--round-1--abc123', { fetchedSha: headSha });
+    expect(r.available).toBe(true);
+    expect(r.sharedTreeResidue).toEqual(['__probe__.test.ts']);
+    expect(r.note).toContain('NOT clean');
+    expect(git(worktree, 'status', '--porcelain')).toBe('?? __probe__.test.ts');
+  });
+
+  it('parses --standalone into the field runScratchTree reads', () => {
+    const parse = (argv: string[]) =>
+      (scratchTreeCommand.builder as (y: Argv) => Argv)(
+        yargs([]).strict(),
+      ).parseSync(argv) as unknown as ScratchTreeArgs;
+    const flagged = runScratchTree(
+      parse([
+        '--worktree',
+        worktree,
+        '--label',
+        'prose-exec--round-1--cli',
+        '--standalone',
+      ]),
+    );
+    expect(flagged.standalone).toBe(true);
+    expect(statSync(join(flagged.path!, '.git')).isDirectory()).toBe(true);
+    // The verifier's invocation — no flag — still gets the linked shape.
+    const plain = runScratchTree(
+      parse(['--worktree', worktree, '--label', 'verify--round-1--cli']),
+    );
+    expect(plain.standalone).toBe(false);
+    expect(statSync(join(plain.path!, '.git')).isFile()).toBe(true);
   });
 });

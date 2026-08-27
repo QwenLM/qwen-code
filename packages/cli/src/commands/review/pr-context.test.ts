@@ -3375,6 +3375,74 @@ describe('buildMarkdown host baking', () => {
   });
 });
 
+describe('runPrContext stale context-file removal (handler level)', () => {
+  // The same-repo context-unavailable flow (SKILL.md) launches Agent 0 and
+  // 6d against "a context file that is not on disk". An interrupted earlier
+  // round breaks that premise: it WROTE the file, and nothing else removes
+  // the path between rounds (fetch-pr's stale-clean sweeps the worktree and
+  // branch only). A failed re-run must therefore leave NO file behind — the
+  // documented missing-file returns are the only shape the launched agents
+  // can meet. The `-prev-ledger.json` side file is the deliberate exception:
+  // compose-review reads it for the round counter, and
+  // persistRecoveredLedger owns its deletion licensing — a run that failed
+  // before recovery never re-vouched it and must not reset it.
+  const sideFile = '/tmp/qwen-review-pr-6711-prev-ledger.json';
+
+  const run = () =>
+    (prContextCommand.handler as (a: unknown) => Promise<void>)({
+      _: [],
+      $0: 'qwen',
+      pr_number: '6711',
+      owner_repo: 'o/r',
+      out: '/tmp/ctx.md',
+    });
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    ensureAuthenticatedMock.mockReturnValue(undefined);
+    process.exitCode = undefined;
+  });
+
+  it('removes a prior context file when the fetch fails', async () => {
+    // The R4-1 shape on #9717: round 1 wrote the context file and was
+    // interrupted before cleanup; round 2's pr-context fails on a rate
+    // limit. Without the removal the stale file survives the failure and
+    // the launched agents read the context the run just lost, against the
+    // paragraph's own closing invariant.
+    ghMock.mockImplementation(() => {
+      throw new Error('HTTP 403: rate limited');
+    });
+    await expect(run()).rejects.toThrow(/rate limited/);
+    expect(rmSyncMock).toHaveBeenCalledWith('/tmp/ctx.md', { force: true });
+    expect(rmSyncMock.mock.calls.some((c) => String(c[0]) === sideFile)).toBe(
+      false,
+    );
+  });
+
+  it('removes the prior file BEFORE authenticating — an auth failure is still a failed run', async () => {
+    ensureAuthenticatedMock.mockImplementation(() => {
+      throw new Error('not logged in');
+    });
+    await expect(run()).rejects.toThrow(/not logged in/);
+    expect(rmSyncMock).toHaveBeenCalledWith('/tmp/ctx.md', { force: true });
+  });
+
+  it('removes nothing over an invalid invocation', async () => {
+    // Usage errors precede every side effect: a pr_number this predicate
+    // rejects must not delete a file the run was never committed to write.
+    await expect(
+      (prContextCommand.handler as (a: unknown) => Promise<void>)({
+        _: [],
+        $0: 'qwen',
+        pr_number: '0',
+        owner_repo: 'o/r',
+        out: '/tmp/ctx.md',
+      }),
+    ).rejects.toThrow(/positive integer/);
+    expect(rmSyncMock).not.toHaveBeenCalled();
+  });
+});
+
 describe('runPrContext identity failure (handler level)', () => {
   const metaJson = JSON.stringify({
     title: 't',
@@ -3427,7 +3495,14 @@ describe('runPrContext identity failure (handler level)', () => {
       owner_repo: 'o/r',
       out: '/tmp/ctx.md',
     });
-    expect(rmSyncMock).not.toHaveBeenCalled();
+    // Narrowed to the side file: the run's up-front removal of its own
+    // --out legitimately rm's the context path; the side file's deletion
+    // licensing is what this test pins.
+    expect(
+      rmSyncMock.mock.calls.some((c) =>
+        String(c[0]).endsWith('prev-ledger.json'),
+      ),
+    ).toBe(false);
   });
 
   it('never deletes the side file over an EMPTY login — exit 0 is not identity', async () => {
@@ -3445,7 +3520,14 @@ describe('runPrContext identity failure (handler level)', () => {
       owner_repo: 'o/r',
       out: '/tmp/ctx.md',
     });
-    expect(rmSyncMock).not.toHaveBeenCalled();
+    // Narrowed to the side file: the run's up-front removal of its own
+    // --out legitimately rm's the context path; the side file's deletion
+    // licensing is what this test pins.
+    expect(
+      rmSyncMock.mock.calls.some((c) =>
+        String(c[0]).endsWith('prev-ledger.json'),
+      ),
+    ).toBe(false);
   });
 
   const run = async () =>
@@ -3504,7 +3586,14 @@ describe('runPrContext identity failure (handler level)', () => {
     // licence — deletion fires:
     currentUserMock.mockReturnValue('bot');
     await run();
-    expect(rmSyncMock).toHaveBeenCalled();
+    // Narrowed to the side file: the up-front --out removal fires on
+    // every committed run, so "rmSync was called" no longer discriminates
+    // the licensed side-file deletion this test pins.
+    expect(
+      rmSyncMock.mock.calls.some((c) =>
+        String(c[0]).endsWith('prev-ledger.json'),
+      ),
+    ).toBe(true);
   });
 
   it('a marker-less OWN review is a persistent state, not proven absence', async () => {
@@ -3514,7 +3603,14 @@ describe('runPrContext identity failure (handler level)', () => {
     // exists to prevent.
     currentUserMock.mockReturnValue('someone');
     await run();
-    expect(rmSyncMock).not.toHaveBeenCalled();
+    // Narrowed to the side file: the run's up-front removal of its own
+    // --out legitimately rm's the context path; the side file's deletion
+    // licensing is what this test pins.
+    expect(
+      rmSyncMock.mock.calls.some((c) =>
+        String(c[0]).endsWith('prev-ledger.json'),
+      ),
+    ).toBe(false);
   });
 
   it('wires the foreign marker through to the rendered context and the side file', async () => {
