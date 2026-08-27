@@ -584,7 +584,7 @@ const EN: Messages = {
   'common.previous': 'previous',
   'common.expand': 'Expand',
   'common.collapse': 'Collapse',
-  'common.refresh': 'refresh',
+  'common.refresh': 'Refresh',
   'common.search': 'Search',
   'common.valid': 'valid',
   'common.clients': (v) => `${v?.count ?? 0} clients`,
@@ -1398,10 +1398,14 @@ const EN: Messages = {
   'sidebar.clients': (v) => `${v?.count ?? 0} client(s)`,
   'sidebar.running': 'Running',
   'sidebar.waitingForApproval': 'Waiting for approval',
+  'sidebar.waitingForApprovalShort': 'Approval',
   'sidebar.sessionPr': (v) => `Pull Request #${v?.number ?? ''}`,
   'sidebar.sessionPrMultiple': (v) =>
     `Pull Request #${v?.number ?? ''} (${v?.count ?? 0} total)`,
+  'sidebar.sessionPrStateMerged': 'Merged',
+  'sidebar.sessionPrStateClosed': 'Closed',
   'sidebar.userInputNeeded': 'User input needed',
+  'sidebar.userInputNeededShort': 'Input',
   'sidebar.completedUnread': 'Finished',
   'sidebar.pin': 'Pin',
   'sidebar.unpin': 'Unpin',
@@ -2656,11 +2660,11 @@ const EN: Messages = {
   'toolGroup.summary.ranAgents': (v) =>
     `Ran ${v?.count ?? 0} agent${v?.count === 1 ? '' : 's'}`,
   'toolGroup.summary.editedFiles': (v) =>
-    `Edited ${v?.count ?? 0} file${v?.count === 1 ? '' : 's'}`,
+    `Edited files ${v?.count ?? 0} time${v?.count === 1 ? '' : 's'}`,
   'toolGroup.summary.ranCommands': (v) =>
     `Ran ${v?.count ?? 0} command${v?.count === 1 ? '' : 's'}`,
   'toolGroup.summary.readFiles': (v) =>
-    `Read ${v?.count ?? 0} file${v?.count === 1 ? '' : 's'}`,
+    `Read files ${v?.count ?? 0} time${v?.count === 1 ? '' : 's'}`,
   'toolGroup.summary.searched': (v) =>
     `Searched ${v?.count ?? 0} time${v?.count === 1 ? '' : 's'}`,
   'toolGroup.summary.updatedTodos': (v) =>
@@ -4450,10 +4454,14 @@ const ZH: Messages = {
   'sidebar.clients': (v) => `${v?.count ?? 0} 个客户端`,
   'sidebar.running': '运行中',
   'sidebar.waitingForApproval': '等待批准',
+  'sidebar.waitingForApprovalShort': '待批准',
   'sidebar.sessionPr': (v) => `合并请求 #${v?.number ?? ''}`,
   'sidebar.sessionPrMultiple': (v) =>
     `合并请求 #${v?.number ?? ''}（共 ${v?.count ?? 0} 个）`,
+  'sidebar.sessionPrStateMerged': '已合入',
+  'sidebar.sessionPrStateClosed': '已关闭',
   'sidebar.userInputNeeded': '需要用户输入',
+  'sidebar.userInputNeededShort': '需输入',
   'sidebar.completedUnread': '刚完成',
   'sidebar.pin': '置顶',
   'sidebar.unpin': '取消置顶',
@@ -5606,9 +5614,9 @@ const ZH: Messages = {
   'toolGroup.moreKinds': (v) => ` +${v?.count ?? 0}`,
   'toolGroup.summary': (v) => `调用了 ${v?.count ?? 0} 个工具`,
   'toolGroup.summary.ranAgents': (v) => `已运行 ${v?.count ?? 0} 个智能体`,
-  'toolGroup.summary.editedFiles': (v) => `已编辑 ${v?.count ?? 0} 个文件`,
+  'toolGroup.summary.editedFiles': (v) => `已编辑文件 ${v?.count ?? 0} 次`,
   'toolGroup.summary.ranCommands': (v) => `已运行 ${v?.count ?? 0} 条命令`,
-  'toolGroup.summary.readFiles': (v) => `已读取 ${v?.count ?? 0} 个文件`,
+  'toolGroup.summary.readFiles': (v) => `已读取文件 ${v?.count ?? 0} 次`,
   'toolGroup.summary.searched': (v) => `已搜索 ${v?.count ?? 0} 次`,
   'toolGroup.summary.updatedTodos': (v) =>
     Number(v?.count ?? 0) > 1
