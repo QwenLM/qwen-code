@@ -25,14 +25,19 @@ import type {
   DaemonDeleteStandaloneSessionsResult,
   DaemonRestoredStandaloneSession,
   DaemonSessionRestoreStrategy,
+  DaemonStandaloneBatchError,
   DaemonStandaloneCreationRecovery,
   DaemonStandaloneDirectoryResult,
+  DaemonStandaloneFields,
   DaemonStandaloneMetadataResult,
   DaemonStandaloneSession,
+  DaemonStandaloneSessionCreating,
   DaemonStandaloneSessionListOptions,
   DaemonStandaloneSessionListPage,
   DaemonStandaloneSessionLookup,
   DaemonStandaloneSessionSummary,
+  DaemonStandaloneWorkingDirectory,
+  DaemonUnarchiveStandaloneSessionsResult,
   RestoreStandaloneSessionRequest,
   WorkspaceDaemonClient,
   DaemonClientEvictedData,
@@ -217,7 +222,12 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
     expectTypeOf<DaemonStandaloneDirectoryResult>().not.toBeNever();
     expectTypeOf<DaemonStandaloneMetadataResult>().not.toBeNever();
     expectTypeOf<DaemonArchiveStandaloneSessionsResult>().not.toBeNever();
+    expectTypeOf<DaemonUnarchiveStandaloneSessionsResult>().not.toBeNever();
     expectTypeOf<DaemonDeleteStandaloneSessionsResult>().not.toBeNever();
+    expectTypeOf<DaemonStandaloneBatchError>().not.toBeNever();
+    expectTypeOf<DaemonStandaloneFields>().not.toBeNever();
+    expectTypeOf<DaemonStandaloneSessionCreating>().not.toBeNever();
+    expectTypeOf<DaemonStandaloneWorkingDirectory>().not.toBeNever();
     expectTypeOf<DaemonStandaloneCreationRecovery>().not.toBeNever();
     expectTypeOf<DaemonSessionRestoreStrategy>().not.toBeNever();
   });

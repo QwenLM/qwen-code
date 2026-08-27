@@ -230,6 +230,9 @@ describe('DaemonSessionClient', () => {
           features: ['standalone_sessions_v1'],
         });
       }
+      if (requestPathEndsWith(req, `/session/${sessionId}/events`)) {
+        return sseResponse('');
+      }
       return jsonResponse(200, {
         sessionId,
         workspaceCwd: '/conversations',
@@ -239,6 +242,7 @@ describe('DaemonSessionClient', () => {
         context: { kind: 'standalone' },
         projectlessOutputDirectory: '/conversations/conversation-hash',
         workingDirectory: { state: 'ready' },
+        eventEpoch: 'epoch-created',
       });
     });
     const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
@@ -249,10 +253,16 @@ describe('DaemonSessionClient', () => {
 
     expect(session.sessionId).toBe(sessionId);
     expect(session.restoreStrategy).toEqual({ kind: 'standalone' });
+    expect(session.eventEpoch).toBe('epoch-created');
+    for await (const _event of session.events()) {
+      /* empty */
+    }
     expect(calls.map((call) => new URL(call.url).pathname)).toEqual([
       '/capabilities',
       '/standalone/sessions',
+      `/session/${sessionId}/events`,
     ]);
+    expect(calls[2]?.headers['last-event-id']).toBe('0');
   });
 
   it('loads and resumes standalone sessions without a workspace selector', async () => {
@@ -263,6 +273,16 @@ describe('DaemonSessionClient', () => {
           features: ['standalone_sessions_v1'],
         });
       }
+      if (req.url.endsWith(`/session/${sessionId}/attachments/media-1`)) {
+        return new Response(Uint8Array.from([1, 2, 3]), {
+          status: 200,
+          headers: { 'content-type': 'image/png' },
+        });
+      }
+      if (requestPathEndsWith(req, `/session/${sessionId}/events`)) {
+        return sseResponse('');
+      }
+      const loading = req.url.endsWith('/load');
       return jsonResponse(200, {
         sessionId,
         workspaceCwd: '/conversations',
@@ -272,9 +292,33 @@ describe('DaemonSessionClient', () => {
         context: { kind: 'standalone' },
         projectlessOutputDirectory: '/conversations/conversation-hash',
         workingDirectory: { state: 'ready' },
-        state: {},
-        compactedReplay: [],
-        liveJournal: [],
+        state: loading ? { mode: 'loaded' } : { mode: 'resumed' },
+        hasActivePrompt: true,
+        ...(loading
+          ? {
+              lastEventId: 42,
+              eventEpoch: 'epoch-loaded',
+              compactedReplay: [
+                {
+                  id: 1,
+                  v: 1,
+                  type: 'session_update',
+                  data: {
+                    sessionUpdate: 'user_message_chunk',
+                    content: {
+                      type: 'image',
+                      attachmentId: 'media-1',
+                      mimeType: 'image/png',
+                      size: 3,
+                    },
+                  },
+                },
+              ],
+              replayDegraded: true,
+              partial: true,
+              replayError: 'journal read failed',
+            }
+          : { eventEpoch: 'epoch-resumed' }),
       });
     });
     const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
@@ -293,8 +337,24 @@ describe('DaemonSessionClient', () => {
     );
 
     expect(loaded.restoreStrategy).toEqual({ kind: 'standalone' });
-    expect(loaded.replaySnapshotComplete).toBe(true);
+    expect(loaded.state).toEqual({ mode: 'loaded' });
+    expect(loaded.hasActivePrompt).toBe(true);
+    expect(loaded.lastEventId).toBe(42);
+    expect(loaded.eventEpoch).toBe('epoch-loaded');
+    expect(loaded.replaySnapshotComplete).toBe(false);
+    expect(loaded.replayPartial).toBe(true);
+    expect(loaded.replayError).toBe('journal read failed');
+    expect(loaded.replayDegraded).toBe(true);
+    expect(loaded.replaySnapshot.compactedReplay[0]?.data).toEqual({
+      sessionUpdate: 'user_message_chunk',
+      content: { type: 'image', data: 'AQID', mimeType: 'image/png' },
+    });
     expect(resumed.restoreStrategy).toEqual({ kind: 'standalone' });
+    expect(resumed.state).toEqual({ mode: 'resumed' });
+    expect(resumed.hasActivePrompt).toBe(true);
+    expect(resumed.lastEventId).toBe(0);
+    expect(resumed.eventEpoch).toBe('epoch-resumed');
+    expect(resumed.replaySnapshotComplete).toBe(false);
     const restores = calls.filter((call) =>
       /\/(load|resume)$/u.test(new URL(call.url).pathname),
     );
@@ -308,6 +368,42 @@ describe('DaemonSessionClient', () => {
     expect(JSON.parse(restores[1]?.body ?? '{}')).toEqual({});
     expect(restores[0]?.headers['x-qwen-client-id']).toBe('client-load');
     expect(restores[1]?.headers['x-qwen-client-id']).toBe('client-resume');
+    expect(
+      calls.filter((call) => call.url.endsWith('/attachments/media-1')),
+    ).toHaveLength(1);
+
+    for await (const _event of loaded.events()) {
+      /* empty */
+    }
+    for await (const _event of resumed.events()) {
+      /* empty */
+    }
+    const eventCalls = calls.filter((call) =>
+      requestPathEndsWith(call, `/session/${sessionId}/events`),
+    );
+    expect(eventCalls.map((call) => call.headers['last-event-id'])).toEqual([
+      '42',
+      '0',
+    ]);
+  });
+
+  it('uses workspace restore when standalone source metadata is incomplete', () => {
+    const { fetch } = recordingFetch(() => jsonResponse(500, {}));
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+    const session = new DaemonSessionClient({
+      client,
+      session: {
+        sessionId: 's-1',
+        workspaceCwd: '/work/a',
+        attached: true,
+        sourceType: 'standalone',
+      },
+    });
+
+    expect(session.restoreStrategy).toEqual({
+      kind: 'workspace',
+      workspaceCwd: '/work/a',
+    });
   });
 
   it('preserves active prompt state from createOrAttach responses', async () => {

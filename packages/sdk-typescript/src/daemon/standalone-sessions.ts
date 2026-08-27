@@ -401,8 +401,9 @@ export function isStandaloneSessionNotFoundError(error: unknown): boolean {
 
 export function isStandaloneCreationOutcomeUnknown(error: unknown): boolean {
   return (
-    error instanceof DaemonHttpError &&
-    recordCode(error.body) === 'standalone_creation_outcome_unknown'
+    error instanceof DaemonStandaloneCreationOutcomeUnknownError ||
+    (error instanceof DaemonHttpError &&
+      recordCode(error.body) === 'standalone_creation_outcome_unknown')
   );
 }
 

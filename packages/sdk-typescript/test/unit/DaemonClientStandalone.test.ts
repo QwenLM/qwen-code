@@ -10,6 +10,7 @@ import { DaemonHttpError } from '../../src/daemon/DaemonHttpError.js';
 import {
   DaemonStandaloneCreationOutcomeUnknownError,
   DaemonStandaloneProtocolError,
+  isStandaloneCreationOutcomeUnknown,
 } from '../../src/daemon/standalone-sessions.js';
 
 const SESSION_ID = '550e8400-e29b-41d4-a716-446655440000';
@@ -109,6 +110,41 @@ describe('DaemonClient standalone sessions', () => {
     expect(calls.map((call) => new URL(call.url).pathname)).toEqual([
       '/capabilities',
     ]);
+  });
+
+  it.each([
+    ['get', (client: DaemonClient) => client.getStandaloneSession(SESSION_ID)],
+    [
+      'export',
+      (client: DaemonClient) => client.exportStandaloneSession(SESSION_ID),
+    ],
+  ])(
+    'gates standalone %s before calling its route',
+    async (_name, operation) => {
+      const { fetch, calls } = recordingFetch(() => capabilityResponse(false));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(operation(client)).rejects.toMatchObject({
+        name: 'DaemonCapabilityMissingError',
+        capability: 'standalone_sessions_v1',
+      });
+      expect(calls.map((call) => new URL(call.url).pathname)).toEqual([
+        '/capabilities',
+      ]);
+    },
+  );
+
+  it('omits optional list query parameters when no options are provided', async () => {
+    const { fetch, calls } = recordingFetch((request) =>
+      request.url.endsWith('/capabilities')
+        ? capabilityResponse()
+        : jsonResponse(200, { sessions: [] }),
+    );
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+    await client.listStandaloneSessionsPage();
+
+    expect(calls[1]?.url).toBe('http://daemon/standalone/sessions');
   });
 
   it('generates the UUID before create and sends only standalone fields', async () => {
@@ -232,10 +268,10 @@ describe('DaemonClient standalone sessions', () => {
       }),
     ).resolves.toMatchObject({ nextCursor: 'next' });
     await expect(
-      client.getStandaloneSession(SESSION_ID),
+      client.getStandaloneSession(UPPER_SESSION_ID),
     ).resolves.toMatchObject({ context: { kind: 'standalone' } });
     await client.loadStandaloneSession(
-      SESSION_ID,
+      UPPER_SESSION_ID,
       {
         historyPageSize: 40,
         liveReplayMode: 'summary',
@@ -246,14 +282,18 @@ describe('DaemonClient standalone sessions', () => {
       'client-load',
     );
     await client.resumeStandaloneSession(
-      SESSION_ID,
+      UPPER_SESSION_ID,
       { approvalMode: 'default' },
       'client-resume',
     );
-    await client.repairStandaloneSessionDirectory(SESSION_ID);
-    await client.renameStandaloneSession(SESSION_ID, 'Renamed', 'client-meta');
+    await client.repairStandaloneSessionDirectory(UPPER_SESSION_ID);
+    await client.renameStandaloneSession(
+      UPPER_SESSION_ID,
+      'Renamed',
+      'client-meta',
+    );
     await expect(
-      client.exportStandaloneSession(SESSION_ID, { format: 'md' }),
+      client.exportStandaloneSession(UPPER_SESSION_ID, { format: 'md' }),
     ).resolves.toEqual({
       content: '# transcript',
       filename: 'session.md',
@@ -261,8 +301,8 @@ describe('DaemonClient standalone sessions', () => {
       format: 'md',
     });
     await client.archiveStandaloneSessions([UPPER_SESSION_ID]);
-    await client.unarchiveStandaloneSessions([SESSION_ID]);
-    await client.deleteStandaloneSessions([SESSION_ID]);
+    await client.unarchiveStandaloneSessions([UPPER_SESSION_ID]);
+    await client.deleteStandaloneSessions([UPPER_SESSION_ID]);
 
     const routeCalls = calls.filter(
       (call) => new URL(call.url).pathname !== '/capabilities',
@@ -348,6 +388,49 @@ describe('DaemonClient standalone sessions', () => {
     });
   });
 
+  it('rejects an exact lookup response for a different session id', async () => {
+    const { fetch } = recordingFetch((request) =>
+      request.url.endsWith('/capabilities')
+        ? capabilityResponse()
+        : jsonResponse(
+            200,
+            standaloneSummary('550e8400-e29b-41d4-a716-446655440001'),
+          ),
+    );
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+    await expect(
+      client.getStandaloneSession(SESSION_ID),
+    ).rejects.toBeInstanceOf(DaemonStandaloneProtocolError);
+  });
+
+  it('honors a standalone restore timeout override', async () => {
+    vi.useFakeTimers();
+    try {
+      let signal: AbortSignal | undefined;
+      const { fetch } = recordingFetch((request) => {
+        if (request.url.endsWith('/capabilities')) return capabilityResponse();
+        signal = request.signal ?? undefined;
+        return new Promise<Response>((_resolve, reject) => {
+          signal?.addEventListener('abort', () => reject(signal?.reason), {
+            once: true,
+          });
+        });
+      });
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const outcome = client
+        .loadStandaloneSession(SESSION_ID, { timeoutMs: 25 })
+        .catch((error: unknown) => error);
+
+      await vi.advanceTimersByTimeAsync(24);
+      expect(signal?.aborted).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(await outcome).toMatchObject({ name: 'TimeoutError' });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('performs one exact lookup after a transport-level unknown outcome', async () => {
     let createAttempts = 0;
     const { fetch, calls } = recordingFetch((request) => {
@@ -366,6 +449,7 @@ describe('DaemonClient standalone sessions', () => {
       .catch((reason: unknown) => reason);
 
     expect(error).toBeInstanceOf(DaemonStandaloneCreationOutcomeUnknownError);
+    expect(isStandaloneCreationOutcomeUnknown(error)).toBe(true);
     expect(error).toMatchObject({
       sessionId: SESSION_ID,
       recovery: {
@@ -382,20 +466,53 @@ describe('DaemonClient standalone sessions', () => {
     ).toHaveLength(1);
   });
 
+  it('reports unknown recovery when the exact lookup also fails', async () => {
+    const { fetch } = recordingFetch((request) => {
+      const url = new URL(request.url);
+      if (url.pathname === '/capabilities') return capabilityResponse();
+      if (url.pathname === '/standalone/sessions') {
+        throw new TypeError('connection reset');
+      }
+      return jsonResponse(500, {
+        code: 'lookup_failed',
+        error: 'Unavailable.',
+      });
+    });
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+    const error = await client
+      .createStandaloneSession({ sessionId: SESSION_ID })
+      .catch((reason: unknown) => reason);
+
+    expect(error).toMatchObject({
+      name: 'DaemonStandaloneCreationOutcomeUnknownError',
+      sessionId: SESSION_ID,
+      recovery: {
+        state: 'unknown',
+        sessionId: SESSION_ID,
+        error: { name: 'DaemonHttpError', status: 500 },
+      },
+    });
+  });
+
   it('recovers the generated UUID after a create transport timeout', async () => {
     let createAttempts = 0;
+    let generatedSessionId: string | undefined;
     const { fetch } = recordingFetch((request) => {
       const url = new URL(request.url);
       if (url.pathname === '/capabilities') return capabilityResponse();
       if (url.pathname === '/standalone/sessions') {
         createAttempts += 1;
+        generatedSessionId = (
+          JSON.parse(request.body ?? '{}') as { sessionId: string }
+        ).sessionId;
         return new Promise<Response>((_resolve, reject) => {
           request.signal?.addEventListener('abort', () => {
             reject(request.signal?.reason);
           });
         });
       }
-      return jsonResponse(200, standaloneSummary());
+      return jsonResponse(200, standaloneSummary(generatedSessionId));
     });
     const client = new DaemonClient({
       baseUrl: 'http://daemon',
@@ -403,16 +520,25 @@ describe('DaemonClient standalone sessions', () => {
       fetchTimeoutMs: 10,
     });
 
-    await expect(
-      client.createStandaloneSession({ sessionId: SESSION_ID }),
-    ).rejects.toMatchObject({
+    const error = await client
+      .createStandaloneSession()
+      .catch((reason: unknown) => reason);
+
+    expect(error).toMatchObject({
       name: 'DaemonStandaloneCreationOutcomeUnknownError',
-      sessionId: SESSION_ID,
+      sessionId: expect.stringMatching(
+        /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u,
+      ),
       recovery: {
         state: 'existing',
-        session: { sessionId: SESSION_ID },
+        session: { sessionId: expect.any(String) },
       },
     });
+    expect(error).toHaveProperty('sessionId', generatedSessionId);
+    expect(error).toHaveProperty(
+      'recovery.session.sessionId',
+      generatedSessionId,
+    );
     expect(createAttempts).toBe(1);
   });
 
@@ -561,6 +687,24 @@ describe('DaemonClient standalone sessions', () => {
     };
     await expect(
       client.archiveStandaloneSessions([SESSION_ID]),
+    ).rejects.toBeInstanceOf(DaemonStandaloneProtocolError);
+
+    response = {
+      unarchived: [SESSION_ID],
+      alreadyActive: [],
+      notFound: [],
+    };
+    await expect(
+      client.unarchiveStandaloneSessions([SESSION_ID]),
+    ).rejects.toBeInstanceOf(DaemonStandaloneProtocolError);
+
+    response = {
+      removed: [SESSION_ID],
+      notFound: [],
+      errors: [],
+    };
+    await expect(
+      client.deleteStandaloneSessions([SESSION_ID]),
     ).rejects.toBeInstanceOf(DaemonStandaloneProtocolError);
   });
 });
