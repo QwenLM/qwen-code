@@ -183,7 +183,6 @@ function makeFakeEnv() {
         return { filePath: `/tmp/${to}.jsonl`, copiedCount: 2 };
       }),
     loadSession: async (id: string) => sessionServiceMocks.sessions.get(id),
-    getSessionDisplayName: vi.fn().mockResolvedValue(undefined),
     // Realistic like SessionService.removeSession (deletes the fork JSONL):
     // the branch hook calls it in exactly the failure path these tests
     // drive (forkCreated && !uiSwapped), so the fork must not survive in
@@ -194,6 +193,12 @@ function makeFakeEnv() {
     }),
     renameSession: vi.fn().mockResolvedValue(true),
     findSessionTitlesByPrefix: vi.fn().mockResolvedValue([]),
+    // Exactly ONE copy, deliberately: the duplicate-key cleanup (#10022 on
+    // main, its twin on this branch) each removed a DIFFERENT copy of this
+    // member, and the clean merge of the two resolved to zero — the /branch
+    // hook then TypeError'd on the absent method and three tests here went
+    // red (R17-1).
+    getSessionDisplayName: vi.fn().mockResolvedValue(undefined),
   };
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
