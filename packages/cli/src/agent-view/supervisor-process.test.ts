@@ -459,9 +459,11 @@ describe('Agent View supervisor process helpers', () => {
       globalDir,
       (state) => state.processState === 'exited',
     );
-    await expect(
-      readAgentViewWorker(result.sessionId, { globalDir }),
-    ).resolves.toMatchObject({ tokenDigest: undefined });
+    await waitForWorkerState(
+      result.sessionId,
+      globalDir,
+      (worker) => worker?.tokenDigest === undefined,
+    );
 
     await handler.workerEvent?.({
       type: 'state',
@@ -5556,4 +5558,17 @@ async function waitForSessionState(
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
   throw new Error('Timed out waiting for session state.');
+}
+
+async function waitForWorkerState(
+  sessionId: string,
+  globalDir: string,
+  predicate: (worker: AgentViewWorkerFile | undefined) => boolean,
+): Promise<void> {
+  for (let attempt = 0; attempt < 50; attempt++) {
+    const worker = await readAgentViewWorker(sessionId, { globalDir });
+    if (predicate(worker)) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error('Timed out waiting for worker state.');
 }
