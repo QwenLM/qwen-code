@@ -34,10 +34,11 @@ const { __setMockGlobalDir } = (await import('../config/storage.js')) as any;
 let tmpDir: string;
 const TEAM = 'test-team';
 
-function makeConfig(approvalMode = DEFAULT_MODE) {
+function makeConfig(approvalMode = DEFAULT_MODE, teamManager: unknown = null) {
   return {
     getTeamContext: () => ({ teamName: TEAM }),
     getApprovalMode: () => approvalMode,
+    getTeamManager: () => teamManager,
   } as unknown as Config;
 }
 
@@ -208,6 +209,36 @@ describe('TaskUpdateTool', () => {
     expect(result.llmContent).toContain('unowned pending task');
     const reloaded = await getTask(TEAM, task.id);
     expect(reloaded?.status).toBe('completed');
+  });
+
+  it('rejects leader reassignment after dispatching an in-progress task', async () => {
+    const dispatchedOwners: string[] = [];
+    const teamManager = {
+      validateTaskOwner: () => undefined,
+      dispatchAssignedTask: vi.fn(async (task: { owner?: string }) => {
+        if (task.owner) dispatchedOwners.push(task.owner);
+        return true;
+      }),
+    };
+    tool = new TaskUpdateTool(makeConfig(DEFAULT_MODE, teamManager));
+    const task = await createTask(TEAM, {
+      subject: 'Race',
+      description: 'desc',
+    });
+
+    const first = await tool
+      .build({ taskId: task.id, status: 'in_progress', owner: 'alice' })
+      .execute(new AbortController().signal);
+    const second = await tool
+      .build({ taskId: task.id, owner: 'bob' })
+      .execute(new AbortController().signal);
+
+    expect(first.error).toBeUndefined();
+    expect(second.error).toBeDefined();
+    expect(String(second.llmContent)).toContain('already assigned');
+    expect(dispatchedOwners).toEqual(['alice']);
+    const reloaded = await getTask(TEAM, task.id);
+    expect(reloaded?.owner).toBe('alice');
   });
 
   it('validates required taskId', () => {

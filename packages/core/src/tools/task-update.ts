@@ -444,6 +444,23 @@ class TaskUpdateInvocation extends BaseToolInvocation<
       existing?.status !== 'in_progress';
     const ownerChanged =
       explicitOwner !== undefined && explicitOwner !== existingOwner;
+    if (
+      existing.status === 'in_progress' &&
+      existingOwner &&
+      existingOwner !== LEADER_NAME &&
+      explicitOwner &&
+      explicitOwner !== existingOwner
+    ) {
+      const msg =
+        `Cannot assign task #${taskId} to "${explicitOwner}": ` +
+        `it is already assigned to "${existingOwner}". ` +
+        `Complete or unassign the task before assigning it to another teammate.`;
+      return {
+        llmContent: msg,
+        returnDisplay: msg,
+        error: { message: msg },
+      };
+    }
     const nextBlockedBy = new Set(existing?.blockedBy ?? []);
     for (const blockedBy of this.params.addBlockedBy ?? []) {
       nextBlockedBy.add(blockedBy);
