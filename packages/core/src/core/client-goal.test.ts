@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from '../config/config.js';
 import type { GeminiChat } from './geminiChat.js';
 import {
@@ -19,6 +19,10 @@ import type {
   GoalStateRecordPayloadV2,
   GoalTurnPermit,
 } from '../goals/goal-protocol.js';
+import {
+  __resetActiveGoalStoreForTests,
+  setActiveGoal,
+} from '../goals/activeGoalStore.js';
 import type { ChatRecord } from '../services/chatRecordingService.js';
 import { ApprovalMode } from '../config/config.js';
 
@@ -1073,5 +1077,86 @@ describe('GeminiClient Goal admission', () => {
     expect(events).not.toContainEqual(
       expect.objectContaining({ type: GeminiEventType.MaxSessionTurns }),
     );
+  });
+
+  afterEach(() => __resetActiveGoalStoreForTests());
+
+  it('admits a runtime Goal turn to steer input at a hit session cap', async () => {
+    // Second half of the session-cap exclusion: runtime Goal turns skip the
+    // count increment (pinned by the 75-turn test above) and must also be
+    // admitted to steer input once the user's own turns hit the cap.
+    const { client } = setupGoalClient();
+    client['sessionTurnCount'] = 1;
+    const getSteerInput = vi.fn().mockResolvedValue(undefined);
+
+    await drain(
+      client.sendMessageStream(
+        [{ text: 'continue' }],
+        new AbortController().signal,
+        'goal-steer-cap',
+        {
+          type: SendMessageType.Goal,
+          goalPermit: permit,
+          goalTurnKey: `goal-runtime:${permit.turnId}`,
+          getSteerInput,
+        },
+      ),
+    );
+
+    expect(getSteerInput).toHaveBeenCalled();
+  });
+
+  it('does not decrement the caller recursion budget inside a legacy hook Goal chain', async () => {
+    // A legacy /goal chain recurses inside one sendMessageStream call. With
+    // the caller budget of 2 preserved at every hop, two blocked stops still
+    // run three model turns; a decremented budget would refuse the third.
+    // Unsupported Goal runtime: the legacy hook chain owns the send, so the
+    // branch under test is the one that keys the budget on the active goal.
+    const { client, config } = setupGoalClient();
+    vi.mocked(config.getGoalRuntimeReady).mockRejectedValue(
+      new GoalPersistenceUnavailableError('legacy-only session'),
+    );
+    vi.mocked(config.getSkipNextSpeakerCheck).mockReturnValue(true);
+    vi.mocked(config.getDisableAllHooks).mockReturnValue(false);
+    vi.mocked(config.getMaxSessionTurns).mockReturnValue(0);
+    vi.mocked(config.hasHooksForEvent).mockImplementation(
+      (event) => event === 'Stop',
+    );
+    let stopRequestCount = 0;
+    const messageBus = {
+      request: vi.fn(async () => {
+        stopRequestCount += 1;
+        if (stopRequestCount <= 2) {
+          return {
+            output: { decision: 'block', reason: 'keep going' },
+            stopHookCount: 1,
+          };
+        }
+        return { output: undefined, stopHookCount: 1 };
+      }),
+    };
+    vi.mocked(config.getMessageBus).mockReturnValue(
+      messageBus as unknown as ReturnType<Config['getMessageBus']>,
+    );
+    setActiveGoal('goal-test-session', {
+      condition: 'ship',
+      iterations: 0,
+      setAt: 1,
+      tokensAtStart: 0,
+      hookId: 'goal-hook:test',
+    });
+
+    await drain(
+      client.sendMessageStream(
+        [{ text: 'start the chain' }],
+        new AbortController().signal,
+        'legacy-goal-chain',
+        undefined,
+        2,
+      ),
+    );
+
+    expect(messageBus.request).toHaveBeenCalledTimes(3);
+    expect(turnMocks.run).toHaveBeenCalledTimes(3);
   });
 });
