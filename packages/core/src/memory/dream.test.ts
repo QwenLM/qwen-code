@@ -147,6 +147,52 @@ describe('managed auto-memory dream', () => {
     expect(result.createdEntries).toBe(1);
     expect(result.deletedEntries).toBe(1);
     expect(result.dedupedEntries).toBe(1);
+    await expect(
+      fs.stat(path.join(memoryRoot, DREAM_OPERATIONS_FILENAME)),
+    ).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('does not apply a manifest left by an earlier run', async () => {
+    const memoryRoot = getAutoMemoryRoot(projectRoot);
+    const memoryFile = path.join(memoryRoot, 'project', 'keep.md');
+    await fs.mkdir(path.dirname(memoryFile), { recursive: true });
+    await fs.writeFile(
+      memoryFile,
+      '---\ntype: project\nname: Keep\ndescription: Keep\nkeywords:\n  - keep memory\n---\n\nKeep this fact.\n',
+    );
+    await fs.writeFile(
+      path.join(memoryRoot, DREAM_OPERATIONS_FILENAME),
+      JSON.stringify({
+        version: 1,
+        delete: ['project/keep.md'],
+        operations: [],
+      }),
+    );
+    vi.mocked(planManagedAutoMemoryDreamByAgent).mockImplementation(
+      async () => {
+        await expect(
+          fs.stat(path.join(memoryRoot, DREAM_OPERATIONS_FILENAME)),
+        ).rejects.toMatchObject({ code: 'ENOENT' });
+        return {
+          status: 'completed',
+          finalText: 'No changes.',
+          filesTouched: [],
+        };
+      },
+    );
+
+    await runManagedAutoMemoryDream(
+      projectRoot,
+      new Date('2026-04-02T00:00:00.000Z'),
+      mockConfig,
+    );
+
+    await expect(fs.readFile(memoryFile, 'utf-8')).resolves.toContain(
+      'Keep this fact.',
+    );
+    await expect(
+      fs.stat(path.join(memoryRoot, DREAM_OPERATIONS_FILENAME)),
+    ).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
   it('does not delete sources when a replacement memory is invalid', async () => {

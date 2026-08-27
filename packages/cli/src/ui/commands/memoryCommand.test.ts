@@ -57,4 +57,30 @@ describe('memoryCommand', () => {
       messageType: 'info',
     });
   });
+
+  it.each([
+    ['disabled team memory', false, true],
+    ['an untrusted folder', true, false],
+  ])('rejects team migration with %s', async (_label, enabled, trusted) => {
+    const scheduleMetadataMigration = vi.fn();
+    const config = {
+      getTeamMemoryEnabled: vi.fn().mockReturnValue(enabled),
+      isTrustedFolder: vi.fn().mockReturnValue(trusted),
+      getMemoryManager: vi.fn().mockReturnValue({
+        scheduleMetadataMigration,
+      }),
+    } as unknown as Config;
+    const context = createMockCommandContext({
+      executionMode: 'interactive',
+      services: { config },
+    });
+
+    const result = await memoryCommand.action?.(context, 'migrate-team');
+
+    expect(scheduleMetadataMigration).not.toHaveBeenCalled();
+    expect(result).toMatchObject({
+      type: 'message',
+      messageType: 'error',
+    });
+  });
 });

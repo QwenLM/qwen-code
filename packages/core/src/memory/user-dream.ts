@@ -228,12 +228,14 @@ export async function failUserAutoMemoryDream(
 
 export async function runManagedUserAutoMemoryDream(
   projectRoot: string,
-  now: Date,
   config: Config,
   abortSignal?: AbortSignal,
 ): Promise<AutoMemoryDreamResult> {
   await ensureUserAutoMemoryScaffold();
   const memoryRoot = getUserAutoMemoryRoot();
+  await fs.rm(path.join(memoryRoot, DREAM_OPERATIONS_FILENAME), {
+    force: true,
+  });
   const before = await snapshotDreamFiles(memoryRoot, 'user');
   let agent;
   try {

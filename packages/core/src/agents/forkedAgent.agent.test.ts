@@ -583,6 +583,56 @@ describe('runForkedAgent (AgentHeadless path) bound-tool isolation', () => {
     expect(stopSpy).toHaveBeenCalledTimes(1);
   });
 
+  it('forwards FINISH token totals into the forked-agent result', async () => {
+    const parent = new ConfigImpl(baseParams);
+    const parentRegistry = await parent.createToolRegistry(undefined, {
+      skipDiscovery: true,
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (parent as any).toolRegistry = parentRegistry;
+    const createSpy = vi.spyOn(AgentHeadless, 'create').mockImplementation(
+      async (
+        _name,
+        _config,
+        _promptConfig,
+        _modelConfig,
+        _runConfig,
+        _toolConfig,
+        emitter?: AgentEventEmitter,
+      ): Promise<AgentHeadless> =>
+        ({
+          execute: vi.fn().mockImplementation(async () => {
+            emitter!.emit(AgentEventType.FINISH, {
+              subagentId: 'test-fork',
+              terminateReason: AgentTerminateMode.GOAL,
+              timestamp: Date.now(),
+              inputTokens: 100,
+              outputTokens: 20,
+              totalTokens: 120,
+            });
+          }),
+          getTerminateMode: vi.fn().mockReturnValue(AgentTerminateMode.GOAL),
+          getFinalText: vi.fn().mockReturnValue('done'),
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        }) as any,
+    );
+
+    try {
+      await expect(
+        runForkedAgent({
+          name: 'test-fork',
+          systemPrompt: 'You are a test fork.',
+          taskPrompt: 'do the task',
+          config: parent,
+        }),
+      ).resolves.toMatchObject({
+        usage: { inputTokens: 100, outputTokens: 20, totalTokens: 120 },
+      });
+    } finally {
+      createSpy.mockRestore();
+    }
+  });
+
   it('uses a runtime content-generator view for cross-auth fast models', async () => {
     const fastModel = 'deepseek-v4-flash';
     const runtimeView = makeRuntimeView(fastModel);

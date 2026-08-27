@@ -35,7 +35,6 @@ const debugLogger = createDebugLogger('AUTO_MEMORY_EXTRACT');
 
 export interface AutoMemoryExtractResult {
   touchedTopics: AutoMemoryType[];
-  touchedProjectScope?: boolean;
   touchedUserScope?: boolean;
   skippedReason?:
     | 'already_running'
@@ -256,7 +255,6 @@ export async function runAutoMemoryExtract(params: {
 
   return {
     touchedTopics: agentResult.touchedTopics,
-    touchedProjectScope: agentResult.touchedProjectScope,
     touchedUserScope: agentResult.touchedUserScope,
     cursor,
     systemMessage: agentResult.systemMessage,

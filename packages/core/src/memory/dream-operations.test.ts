@@ -135,4 +135,26 @@ describe('Dream operations', () => {
     await expect(fs.readFile(target, 'utf-8')).resolves.toContain('Target');
     await expect(fs.lstat(alias)).resolves.toBeDefined();
   });
+
+  it('rejects operations that delete pinned memory', async () => {
+    const pinnedDir = path.join(memoryRoot, 'pinned');
+    const pinnedFile = path.join(pinnedDir, 'important.md');
+    await fs.mkdir(pinnedDir, { recursive: true });
+    await fs.writeFile(pinnedFile, memory('project', 'Important'));
+    await fs.writeFile(
+      path.join(memoryRoot, DREAM_OPERATIONS_FILENAME),
+      JSON.stringify({
+        version: 1,
+        delete: ['pinned/important.md'],
+        operations: [],
+      }),
+    );
+
+    await expect(applyDreamOperations(memoryRoot)).rejects.toThrow(
+      'unsafe path',
+    );
+    await expect(fs.readFile(pinnedFile, 'utf-8')).resolves.toContain(
+      'Important',
+    );
+  });
 });

@@ -253,6 +253,7 @@ export async function rebuildAutoMemoryIndexAtRoot(
   root: string,
   scope: AutoMemoryScope,
 ): Promise<string> {
+  if (!existsSync(root)) return '';
   const docs = await scanAllAutoMemoryTopicDocumentsFromRoot(root, scope);
   const content = buildManagedAutoMemoryIndex(docs);
   await atomicWriteFile(path.join(root, 'MEMORY.md'), content, {

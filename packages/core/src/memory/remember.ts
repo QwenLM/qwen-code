@@ -6,7 +6,6 @@
 
 import type { Config } from '../config/config.js';
 import { ToolNames } from '../tools/tool-names.js';
-import { createDebugLogger } from '../utils/debugLogger.js';
 import { runForkedAgent } from '../agents/forkedAgent.js';
 import { getAutoMemoryRoot, getUserAutoMemoryRoot } from './paths.js';
 import { buildManagedAutoMemoryPrompt } from './prompt.js';
@@ -29,8 +28,6 @@ import {
   scanUserAutoMemoryTopicDocuments,
 } from './scan.js';
 import { renderWriterKeywordVocabularySnapshot } from './writer-keyword-vocabulary.js';
-
-const debugLogger = createDebugLogger('AUTO_MEMORY_REMEMBER');
 
 export type WorkspaceRememberContextMode = 'workspace' | 'clean';
 export type WorkspaceRememberScope = 'user' | 'project';
@@ -229,24 +226,19 @@ export async function runManagedRememberByAgent(params: {
   }
   const touchedScopes = classifyTouchedScopes(filesWritten, params.projectRoot);
 
-  await Promise.all([
-    touchedScopes.includes('project')
-      ? rebuildManagedAutoMemoryIndex(params.projectRoot)
-      : Promise.resolve(),
-    touchedScopes.includes('user')
-      ? rebuildUserAutoMemoryIndex().catch((err: unknown) => {
-          // Mirrors existing managed-memory behavior: user memory is useful
-          // when available, but project memory writes should not fail because
-          // ~/.qwen/memories cannot be indexed.
-          debugLogger.error('User memory index rebuild failed:', err);
-        })
-      : Promise.resolve(),
-  ]);
   if (touchedScopes.includes('user')) {
     await params.config
       .getMemoryManager()
       .recordUserMutation(params.projectRoot, params.config);
   }
+  await Promise.all([
+    touchedScopes.includes('project')
+      ? rebuildManagedAutoMemoryIndex(params.projectRoot)
+      : Promise.resolve(),
+    touchedScopes.includes('user')
+      ? rebuildUserAutoMemoryIndex()
+      : Promise.resolve(),
+  ]);
 
   return {
     summary:

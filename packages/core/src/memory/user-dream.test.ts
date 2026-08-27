@@ -28,6 +28,7 @@ vi.mock('./user-dream-agent-planner.js', () => ({
 
 import { planUserAutoMemoryDreamByAgent } from './user-dream-agent-planner.js';
 import { AUTO_MEMORY_SCHEMA_VERSION } from './types.js';
+import { DREAM_OPERATIONS_FILENAME } from './dream-operations.js';
 
 const EMPTY_DREAM_RESULT = {
   touchedTopics: [],
@@ -106,6 +107,49 @@ describe('User Memory dream', () => {
     expect(completed.status).toBe('noop');
   });
 
+  it('keeps user dream pending while the document limit is exceeded', async () => {
+    const userRoot = path.join(getUserAutoMemoryRoot(), 'user');
+    await fs.mkdir(userRoot, { recursive: true });
+    await Promise.all(
+      Array.from({ length: 120 }, (_, index) =>
+        fs.writeFile(
+          path.join(userRoot, `${index}.md`),
+          [
+            '---',
+            `name: Preference ${index}`,
+            'description: Durable user preference',
+            'type: user',
+            'category: communication_preference',
+            'keywords:',
+            `  - preference ${index}`,
+            'usage_scenarios:',
+            '  - Personalizing responses',
+            '---',
+            `Preference ${index}.`,
+          ].join('\n'),
+        ),
+      ),
+    );
+    const now = new Date('2026-08-01T00:00:00.000Z');
+
+    const mutation = await recordUserAutoMemoryMutation(now);
+    expect(mutation.metadata).toMatchObject({
+      dirtyMutations: 1,
+      status: 'pending',
+      pendingReason: 'document_limit',
+    });
+    const completed = await completeUserAutoMemoryDream(
+      1,
+      EMPTY_DREAM_RESULT,
+      new Date('2026-08-02T00:00:00.000Z'),
+    );
+    expect(completed).toMatchObject({
+      dirtyMutations: 0,
+      status: 'pending',
+      pendingReason: 'document_limit',
+    });
+  });
+
   it('rejects malformed persistent scheduler metadata', async () => {
     const now = new Date('2026-08-01T00:00:00.000Z');
     await readUserAutoMemoryMetadata(now);
@@ -156,14 +200,43 @@ describe('User Memory dream', () => {
       };
     });
 
-    const result = await runManagedUserAutoMemoryDream(
-      projectRoot,
-      new Date('2026-08-01T00:00:00.000Z'),
-      config,
-    );
+    const result = await runManagedUserAutoMemoryDream(projectRoot, config);
 
     expect(result.touchedTopics).toEqual(['user']);
     expect(result.createdEntries).toBe(1);
     expect(result.systemMessage).toContain('Managed User Memory dream');
+  });
+
+  it('does not apply a manifest left by an earlier run', async () => {
+    const memoryFile = path.join(getUserAutoMemoryRoot(), 'user', 'keep.md');
+    await fs.mkdir(path.dirname(memoryFile), { recursive: true });
+    await fs.writeFile(
+      memoryFile,
+      '---\ntype: user\nname: Keep\ndescription: Keep\nkeywords:\n  - keep preference\n---\n\nKeep this preference.\n',
+    );
+    await fs.writeFile(
+      path.join(getUserAutoMemoryRoot(), DREAM_OPERATIONS_FILENAME),
+      JSON.stringify({
+        version: 1,
+        delete: ['user/keep.md'],
+        operations: [],
+      }),
+    );
+    vi.mocked(planUserAutoMemoryDreamByAgent).mockImplementation(async () => {
+      await expect(
+        fs.stat(path.join(getUserAutoMemoryRoot(), DREAM_OPERATIONS_FILENAME)),
+      ).rejects.toMatchObject({ code: 'ENOENT' });
+      return {
+        status: 'completed',
+        finalText: 'No changes.',
+        filesTouched: [],
+      };
+    });
+
+    await runManagedUserAutoMemoryDream(projectRoot, config);
+
+    await expect(fs.readFile(memoryFile, 'utf-8')).resolves.toContain(
+      'Keep this preference.',
+    );
   });
 });

@@ -17,6 +17,7 @@ import {
   buildManagedAutoMemoryIndex,
   buildTeamAutoMemoryIndex,
   rebuildManagedAutoMemoryIndex,
+  rebuildAutoMemoryIndexAtRoot,
 } from './indexer.js';
 import { ensureAutoMemoryScaffold } from './store.js';
 
@@ -56,6 +57,17 @@ describe('managed auto-memory indexer', () => {
       force: true,
       maxRetries: 3,
       retryDelay: 10,
+    });
+  });
+
+  it('does not create a missing compatibility root while rebuilding', async () => {
+    const missingRoot = path.join(tempDir, 'missing-memory-root');
+
+    await expect(
+      rebuildAutoMemoryIndexAtRoot(missingRoot, 'project'),
+    ).resolves.toBe('');
+    await expect(fs.stat(missingRoot)).rejects.toMatchObject({
+      code: 'ENOENT',
     });
   });
 

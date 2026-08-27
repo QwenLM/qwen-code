@@ -155,6 +155,7 @@ describe('remember memory helper', () => {
       'edit',
     ]);
     expect(params.config.getUserMemory()).toBe('');
+    expect(recordUserMutation).not.toHaveBeenCalled();
     // The remember system prompt already embeds the full auto-memory section;
     // the forked-agent config must report an empty auto-memory prompt so
     // AgentCore does not append it a second time (duplication / blank-slate
@@ -385,7 +386,7 @@ describe('remember memory helper', () => {
     expect(params.suppressChatRecording).toBe(true);
   });
 
-  it('rebuilds touched project indexes and best-effort user indexes', async () => {
+  it('records a user mutation before reporting an index rebuild failure', async () => {
     const projectFile = path.join(getAutoMemoryRoot(projectRoot), 'project.md');
     const userFile = path.join(getUserAutoMemoryRoot(), 'user.md');
     vi.mocked(rebuildUserAutoMemoryIndex).mockRejectedValue(
@@ -397,19 +398,23 @@ describe('remember memory helper', () => {
       filesWritten: [userFile, projectFile],
     } satisfies ForkedAgentResult);
 
-    const result = await runManagedRememberByAgent({
-      config: createConfig(projectRoot),
-      projectRoot,
-      content: 'Remember both scopes.',
-      contextMode: 'workspace',
-    });
+    await expect(
+      runManagedRememberByAgent({
+        config: createConfig(projectRoot),
+        projectRoot,
+        content: 'Remember both scopes.',
+        contextMode: 'workspace',
+      }),
+    ).rejects.toThrow('user index unavailable');
 
-    expect(result.touchedScopes).toEqual(['project', 'user']);
     expect(rebuildManagedAutoMemoryIndex).toHaveBeenCalledWith(projectRoot);
     expect(rebuildUserAutoMemoryIndex).toHaveBeenCalledTimes(1);
     expect(recordUserMutation).toHaveBeenCalledWith(
       projectRoot,
       expect.any(Object),
+    );
+    expect(recordUserMutation.mock.invocationCallOrder[0]).toBeLessThan(
+      vi.mocked(rebuildUserAutoMemoryIndex).mock.invocationCallOrder[0]!,
     );
   });
 

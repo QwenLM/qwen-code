@@ -147,13 +147,21 @@ function splitFrontmatter(content: string): FrontmatterParts {
 }
 
 async function listMemoryFiles(root: string): Promise<string[]> {
+  const rootStats = await fs.lstat(root).catch((error: unknown) => {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+    throw error;
+  });
+  if (!rootStats) return [];
+  if (rootStats.isSymbolicLink()) {
+    throw new Error(`Refusing to migrate symlinked memory root: ${root}`);
+  }
   const entries = await fs
     .readdir(root, { recursive: true })
     .catch((error: unknown) => {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
       throw error;
     });
-  return entries
+  const candidates = entries
     .filter(
       (entry): entry is string =>
         typeof entry === 'string' &&
@@ -162,6 +170,17 @@ async function listMemoryFiles(root: string): Promise<string[]> {
     )
     .map((entry) => entry.replaceAll('\\', '/'))
     .sort();
+  const files = await Promise.all(
+    candidates.map(async (entry) => {
+      try {
+        return (await fs.lstat(path.join(root, entry))).isFile() ? entry : null;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+        throw error;
+      }
+    }),
+  );
+  return files.filter((entry): entry is string => entry !== null);
 }
 
 export async function scanMemoryMetadataMigrationCandidates(
@@ -171,7 +190,13 @@ export async function scanMemoryMetadataMigrationCandidates(
   const candidates: MemoryMetadataMigrationCandidate[] = [];
   for (const relativePath of await listMemoryFiles(root)) {
     const filePath = path.join(root, relativePath);
-    const content = await fs.readFile(filePath, 'utf-8');
+    let content: string;
+    try {
+      content = await fs.readFile(filePath, 'utf-8');
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
+      throw error;
+    }
     if (validateStructuredAutoMemoryDocument(content).valid) continue;
     const parts = splitFrontmatter(content);
     candidates.push({
@@ -220,10 +245,13 @@ export async function scanMemoryMetadataCorpusStatus(params: {
     roots.map(async ({ root, scope }) => {
       const files = [];
       for (const relativePath of await listMemoryFiles(root)) {
-        const content = await fs.readFile(
-          path.join(root, relativePath),
-          'utf-8',
-        );
+        let content: string;
+        try {
+          content = await fs.readFile(path.join(root, relativePath), 'utf-8');
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
+          throw error;
+        }
         files.push({
           scope,
           root,

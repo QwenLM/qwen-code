@@ -7,7 +7,10 @@
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { parseAutoMemoryTopicDocument } from './scan.js';
-import { AUTO_MEMORY_INDEX_FILENAME } from './paths.js';
+import {
+  AUTO_MEMORY_INDEX_FILENAME,
+  AUTO_MEMORY_PINNED_DIRNAME,
+} from './paths.js';
 
 export const DREAM_OPERATIONS_FILENAME = '.dream-operations.json';
 
@@ -93,16 +96,18 @@ function parseManifest(value: unknown): DreamOperationsManifest {
 
 function normalizeRelativeMarkdownPath(value: string): string {
   const normalized = value.replaceAll('\\', '/');
+  const canonical = path.posix.normalize(normalized);
   if (
     normalized.length === 0 ||
     path.posix.isAbsolute(normalized) ||
     normalized.split('/').includes('..') ||
+    canonical.split('/')[0] === AUTO_MEMORY_PINNED_DIRNAME ||
     path.posix.basename(normalized) === AUTO_MEMORY_INDEX_FILENAME ||
     !normalized.endsWith('.md')
   ) {
     throw new Error(`Dream operation contains an unsafe path: ${value}`);
   }
-  return path.posix.normalize(normalized);
+  return canonical;
 }
 
 function isWithinRoot(filePath: string, root: string): boolean {

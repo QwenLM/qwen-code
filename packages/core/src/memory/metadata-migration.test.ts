@@ -111,6 +111,16 @@ describe('memory metadata migration', () => {
     ]);
   });
 
+  it('ignores directories whose names end in .md', async () => {
+    await fs.mkdir(path.join(memoryRoot, 'project', 'fake.md'), {
+      recursive: true,
+    });
+
+    await expect(
+      scanMemoryMetadataMigrationCandidates(memoryRoot, 'project'),
+    ).resolves.toEqual([]);
+  });
+
   it.each([
     ['unclosed boundary', '---\ntype: project\nUnclosed body'],
     ['invalid YAML', '---\nname: [broken\n---\nBody'],
@@ -273,6 +283,38 @@ describe('memory metadata migration', () => {
       await commitMigratedMemoryMetadata(candidate!, metadata(candidate!)),
     ).toBe('conflict');
     expect((await fs.readFile(filePath, 'utf-8')).endsWith('NEWER')).toBe(true);
+  });
+
+  it('rejects a symlinked migration root before reading or writing files', async () => {
+    const outsideRoot = path.join(tempDir, 'outside');
+    const outsideFile = path.join(outsideRoot, 'legacy.md');
+    await fs.mkdir(outsideRoot, { recursive: true });
+    await fs.writeFile(outsideFile, legacyContent());
+    await fs.rm(memoryRoot, { recursive: true, force: true });
+    await fs.symlink(
+      outsideRoot,
+      memoryRoot,
+      process.platform === 'win32' ? 'junction' : 'dir',
+    );
+    const generateMetadata = vi.fn();
+
+    await expect(
+      runMemoryMetadataMigration({
+        config: {} as Config,
+        projectRoot,
+        root: memoryRoot,
+        scope: 'project',
+        generateMetadata,
+      }),
+    ).rejects.toThrow('symlinked memory root');
+
+    expect(generateMetadata).not.toHaveBeenCalled();
+    await expect(fs.readFile(outsideFile, 'utf-8')).resolves.toBe(
+      legacyContent(),
+    );
+    await expect(
+      fs.stat(path.join(outsideRoot, 'MEMORY.md')),
+    ).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
   it('treats deletion and rename after selection as CAS conflicts', async () => {
@@ -541,6 +583,37 @@ describe('memory metadata migration', () => {
     expect(receivedBodyChars).toBe(40_000);
   });
 
+  it('defers a second file when the current batch exhausts the body budget', async () => {
+    await write('project/one.md', legacyContent('a'.repeat(50_000)));
+    await write('project/two.md', legacyContent('b'.repeat(50_000)));
+    const receivedBodies: number[] = [];
+    const generateMetadata = vi.fn(
+      async (_config: Config, candidate: MemoryMetadataMigrationCandidate) => {
+        receivedBodies.push(candidate.bodyChars);
+        return metadata(candidate);
+      },
+    );
+    const params = {
+      config: {} as Config,
+      projectRoot,
+      root: memoryRoot,
+      scope: 'project' as const,
+      generateMetadata,
+    };
+
+    await expect(runMemoryMetadataMigration(params)).resolves.toMatchObject({
+      attempted: 1,
+      committed: 1,
+      remainingLegacyFiles: 1,
+    });
+    await expect(runMemoryMetadataMigration(params)).resolves.toMatchObject({
+      attempted: 1,
+      committed: 1,
+      remainingLegacyFiles: 0,
+    });
+    expect(receivedBodies).toEqual([40_000, 40_000]);
+  });
+
   it('continues after one invalid result and retries that file on the next run', async () => {
     await write('project/one.md', legacyContent('One'));
     await write('project/two.md', legacyContent('Two'));
@@ -608,5 +681,37 @@ describe('memory metadata migration', () => {
       'utf-8',
     );
     expect(index).toContain('Migrated memory');
+  });
+
+  it('rebuilds committed indexes when the active agent rejects on abort', async () => {
+    await write('project/one.md', legacyContent('One'));
+    await write('project/two.md', legacyContent('Two'));
+    const controller = new AbortController();
+    let callCount = 0;
+    const generateMetadata = vi.fn(
+      async (_config: Config, candidate: MemoryMetadataMigrationCandidate) => {
+        callCount += 1;
+        if (callCount === 2) {
+          controller.abort();
+          throw new DOMException('aborted', 'AbortError');
+        }
+        return metadata(candidate);
+      },
+    );
+
+    await expect(
+      runMemoryMetadataMigration({
+        config: {} as Config,
+        projectRoot,
+        root: memoryRoot,
+        scope: 'project',
+        generateMetadata,
+        abortSignal: controller.signal,
+      }),
+    ).rejects.toMatchObject({ name: 'AbortError' });
+
+    await expect(
+      fs.readFile(path.join(memoryRoot, 'MEMORY.md'), 'utf-8'),
+    ).resolves.toContain('Migrated memory');
   });
 });

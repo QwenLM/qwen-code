@@ -78,6 +78,11 @@ describe('User Dream agent planner', () => {
     const permissions =
       call.config.getPermissionManager?.() as PermissionManager;
     const userFile = path.join(getUserAutoMemoryRoot(), 'user', 'role.md');
+    const pinnedFile = path.join(
+      getUserAutoMemoryRoot(),
+      'pinned',
+      'preferences.md',
+    );
     const projectFile = path.join(
       getAutoMemoryRoot(projectRoot),
       'project',
@@ -98,6 +103,18 @@ describe('User Dream agent planner', () => {
         filePath: userFile,
       }),
     ).resolves.toBe('allow');
+    await expect(
+      permissions.evaluate({
+        toolName: ToolNames.WRITE_FILE,
+        filePath: pinnedFile,
+      }),
+    ).resolves.toBe('deny');
+    await expect(
+      permissions.evaluate({
+        toolName: ToolNames.EDIT,
+        filePath: pinnedFile,
+      }),
+    ).resolves.toBe('deny');
     await expect(
       permissions.evaluate({
         toolName: ToolNames.READ_FILE,

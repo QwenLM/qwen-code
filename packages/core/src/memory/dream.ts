@@ -161,6 +161,9 @@ async function runDreamByAgent(
   options: { suppressChatRecording?: boolean } = {},
 ): Promise<AutoMemoryDreamResult> {
   const memoryRoot = getAutoMemoryRoot(projectRoot);
+  await fs.rm(path.join(memoryRoot, DREAM_OPERATIONS_FILENAME), {
+    force: true,
+  });
   const before = await snapshotDreamFiles(memoryRoot);
   let result;
   try {

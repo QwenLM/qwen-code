@@ -10,7 +10,11 @@ import {
   type ForkedAgentResult,
 } from '../agents/forkedAgent.js';
 import { ToolNames } from '../tools/tool-names.js';
-import { AUTO_MEMORY_INDEX_FILENAME, getUserAutoMemoryRoot } from './paths.js';
+import {
+  AUTO_MEMORY_INDEX_FILENAME,
+  AUTO_MEMORY_PINNED_DIRNAME,
+  getUserAutoMemoryRoot,
+} from './paths.js';
 import { createMemoryScopedAgentConfig } from './memory-scoped-agent-config.js';
 import { DREAM_OPERATIONS_FILENAME } from './dream-operations.js';
 import { scanUserAutoMemoryTopicDocuments } from './scan.js';
@@ -25,6 +29,7 @@ You may use only the supplied User Memory directory. Do not infer project-specif
 
 Rules:
 - Preserve accurate user preferences, background, responsibilities, and personal references.
+- Treat files under the top-level \`${AUTO_MEMORY_PINNED_DIRNAME}/\` directory as protected read-only records. Never modify, overwrite, rename, merge into, or delete them.
 - Merge semantic duplicates into one complete canonical file.
 - Keep one independently retrievable fact, rule, preference, or reference per file.
 - Use description for what the memory says and usage_scenarios for future tasks where it would help.
@@ -67,6 +72,7 @@ export function buildUserConsolidationTaskPrompt(
     '- `dedupe` lists redundant sources merged into a surviving target.',
     '- `split` lists one old source replaced by at least two surviving targets.',
     '- Use an empty operations array for a plain stale-file deletion.',
+    '- Never schedule or modify files under the top-level `pinned/` directory.',
     `- Never schedule \`${AUTO_MEMORY_INDEX_FILENAME}\`, the operations file, an absolute path, or a path outside User Memory.`,
     `- Do not edit \`${memoryRoot}/${AUTO_MEMORY_INDEX_FILENAME}\`; the runtime validates operations and rebuilds it.`,
     '',
@@ -85,6 +91,7 @@ export async function planUserAutoMemoryDreamByAgent(
     includeUserMemory: true,
     userMemoryOnly: true,
     restrictReadsToMemoryPaths: true,
+    protectPinnedMemory: true,
   });
   const result = await runForkedAgent({
     name: 'managed-user-memory-dreamer',

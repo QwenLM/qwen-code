@@ -227,7 +227,6 @@ export interface ScheduleUserDreamParams {
   projectRoot: string;
   config?: Config;
   now?: Date;
-  minHoursBetweenDreams?: number;
 }
 
 export interface UserDreamScheduleResult {
@@ -739,6 +738,18 @@ export class MemoryManager {
       params.scope === 'project'
         ? getProjectMetadataMigrationRoots(params.projectRoot)
         : [root];
+    const domain = `${params.scope}:${root}`;
+    const existingId = this.migrationInFlightByDomain.get(domain);
+    if (existingId || activeMigrationDomains.has(domain)) {
+      return {
+        status: 'skipped',
+        skippedReason: 'running',
+        ...(existingId ? { taskId: existingId } : {}),
+      };
+    }
+    if (params.config.getMemoryRecallMode() === 'structured') {
+      return { status: 'skipped', skippedReason: 'complete' };
+    }
     if (
       (
         await Promise.all(
@@ -750,16 +761,6 @@ export class MemoryManager {
     ) {
       return { status: 'skipped', skippedReason: 'complete' };
     }
-    const domain = `${params.scope}:${root}`;
-    const existingId = this.migrationInFlightByDomain.get(domain);
-    if (existingId || activeMigrationDomains.has(domain)) {
-      return {
-        status: 'skipped',
-        skippedReason: 'running',
-        ...(existingId ? { taskId: existingId } : {}),
-      };
-    }
-
     const record = makeTaskRecord('migration', params.projectRoot);
     const abortController = new AbortController();
     this.migrationAbortControllers.set(record.id, abortController);
@@ -1312,6 +1313,7 @@ export class MemoryManager {
       return { status: 'skipped', skippedReason: 'memory_pressure' };
     }
     if (
+      params.config.getMemoryRecallMode() !== 'structured' &&
       (
         await Promise.all(
           getProjectMetadataMigrationRoots(params.projectRoot).map((root) =>
@@ -1437,6 +1439,7 @@ export class MemoryManager {
       return { status: 'skipped', skippedReason: 'memory_pressure' };
     }
     if (
+      params.config.getMemoryRecallMode() !== 'structured' &&
       (
         await scanMemoryMetadataMigrationCandidates(
           getUserAutoMemoryRoot(),
@@ -1453,10 +1456,7 @@ export class MemoryManager {
       return { status: 'skipped', skippedReason: 'not_pending' };
     }
     const elapsed = hoursSince(metadata.lastDreamAt, now);
-    if (
-      elapsed !== null &&
-      elapsed < (params.minHoursBetweenDreams ?? DEFAULT_USER_DREAM_MIN_HOURS)
-    ) {
+    if (elapsed !== null && elapsed < DEFAULT_USER_DREAM_MIN_HOURS) {
       return { status: 'skipped', skippedReason: 'min_hours' };
     }
 
@@ -1875,7 +1875,6 @@ export class MemoryManager {
       dirtyAtStart = runningMetadata.dirtyMutations;
       const result = await runManagedUserAutoMemoryDream(
         params.projectRoot,
-        now,
         params.config!,
         abortSignal,
       );
@@ -1934,7 +1933,6 @@ export class MemoryManager {
         const message = error instanceof Error ? error.message : String(error);
         debugLogger.warn('Failed to persist User Dream metadata:', error);
         this.update(record, { metadata: { metadataWriteError: message } });
-        throw new Error(`Failed to persist User Dream completion: ${message}`);
       }
     } catch (error) {
       const cancelled = abortSignal.aborted && record.status === 'cancelled';
