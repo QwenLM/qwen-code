@@ -5417,6 +5417,7 @@ describe('Session', () => {
             filePath: '/skills/collision/SKILL.md',
             level: 'extension',
             extensionName: 'disabled-ext',
+            extensionDisplayName: 'Disabled Extension',
           },
           {
             name: 'disabled-extension-skill',
@@ -5425,6 +5426,7 @@ describe('Session', () => {
             filePath: '/skills/disabled/SKILL.md',
             level: 'extension',
             extensionName: 'disabled-ext',
+            extensionDisplayName: 'Disabled Extension',
           },
           {
             name: 'disabled-ext:disabled-extension-skill',
@@ -5433,6 +5435,7 @@ describe('Session', () => {
             filePath: '/skills/disabled/SKILL.md',
             level: 'extension',
             extensionName: 'disabled-ext',
+            extensionDisplayName: 'Disabled Extension',
           },
         ]),
       });

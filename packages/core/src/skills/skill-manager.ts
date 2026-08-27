@@ -1045,6 +1045,7 @@ export class SkillManager {
             // validated extension name; displayName is free-form and can
             // carry characters command names cannot.
             extensionName: extension.name,
+            extensionDisplayName: extension.displayName,
             // Normalize so downstream consumers reading `skill.priority`
             // (e.g. the `/skills` display sort) observe the same value
             // reflected by the warning above.

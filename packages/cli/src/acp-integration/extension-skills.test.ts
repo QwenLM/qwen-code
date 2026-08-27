@@ -61,8 +61,14 @@ describe('extension skill activity helpers', () => {
       configWithExtensions([
         extension({
           name: 'canonical-ext',
-          displayName: 'Display Ext',
+          displayName: 'Shared Display',
           isActive: false,
+          skills: [extensionSkill('audit')],
+        }),
+        extension({
+          name: 'active-ext',
+          displayName: 'Shared Display',
+          isActive: true,
           skills: [extensionSkill('audit')],
         }),
       ]),
@@ -79,7 +85,10 @@ describe('extension skill activity helpers', () => {
     ).toBe(true);
     // SkillManager stopped using displayName as the owner (#9408), so a
     // display-prefixed name no longer appears in the registry.
-    expect(isInactiveExtensionSkill(skill('audit', 'Display Ext'), refs)).toBe(
+    expect(
+      isInactiveExtensionSkill(skill('audit', 'Shared Display'), refs),
+    ).toBe(false);
+    expect(isInactiveExtensionSkill(skill('audit', 'active-ext'), refs)).toBe(
       false,
     );
   });
