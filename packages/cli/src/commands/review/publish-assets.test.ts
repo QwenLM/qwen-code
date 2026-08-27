@@ -306,6 +306,32 @@ describe('publish-assets', () => {
     expect(ghWithInputPlainMock).not.toHaveBeenCalled();
   });
 
+  it('warns when the assets repo is the reviewed repo, case-insensitively', () => {
+    process.env['QWEN_REVIEW_ASSETS_REPO'] = 'qwenlm/qwen-code';
+    ghMock.mockImplementation((...args: string[]) => {
+      if (args[0] === 'repo' && args[1] === 'view') {
+        return JSON.stringify({
+          owner: { login: 'AaronZ345' },
+          name: 'qwen-code',
+          url: 'https://github.com/AaronZ345/qwen-code',
+          parent: { owner: { login: 'QwenLM' }, name: 'qwen-code' },
+        });
+      }
+      return args.includes('.object.sha') ? 'headsha1234567890' : '{}';
+    });
+    ghWithInputMock.mockImplementation(() => '{}');
+
+    run({ files: [pngFile('evidence.png')] });
+
+    expect(process.exitCode).toBeUndefined();
+    const stderr = (stderrSpy.mock.calls.map((c) => c[0]) as string[]).join(
+      '\n',
+    );
+    expect(stderr).toContain(
+      'QWEN_REVIEW_ASSETS_REPO points at the reviewed repository',
+    );
+  });
+
   it('creates the branch when missing, from the default branch head', () => {
     // First ref lookup throws (missing branch); the creation path then asks
     // for the default branch and its head; the post-upload head read follows.
