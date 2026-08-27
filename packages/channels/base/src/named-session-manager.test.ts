@@ -1,8 +1,10 @@
 import {
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -129,6 +131,34 @@ describe('NamedSessionManager', () => {
     expect(router.getSessionCwd(freshSessionId!)).toBe('/workspace');
   });
 
+  it('continues after stale-route discard fails', async () => {
+    const legacyId = await router.createManagedSession(
+      {
+        channelName: 'channel-a',
+        senderId: alice.senderId,
+        chatId: alice.chatId,
+      },
+      '/other-workspace',
+    );
+    router.activateManagedSession(
+      legacyId,
+      {
+        channelName: 'channel-a',
+        senderId: alice.senderId,
+        chatId: alice.chatId,
+      },
+      '/other-workspace',
+    );
+    vi.mocked(bridge.discardSession).mockRejectedValueOnce(
+      new Error('daemon IPC error'),
+    );
+
+    const named = manager();
+    const freshSessionId = await named.resolve(alice);
+    expect(freshSessionId).not.toBe(legacyId);
+    expect(router.getSessionCwd(freshSessionId!)).toBe('/workspace');
+  });
+
   it('does not adopt a legacy route owned by a colliding sender and chat', async () => {
     const first = { senderId: 'alice:x', chatId: 'group' };
     const colliding = { senderId: 'alice', chatId: 'x:group' };
@@ -152,6 +182,42 @@ describe('NamedSessionManager', () => {
     ]);
     await expect(named.list(colliding, false)).resolves.toEqual([
       expect.objectContaining({ name: 'review' }),
+    ]);
+  });
+
+  it('forgets a colliding route that conflicts with its true owner catalog', async () => {
+    const first = { senderId: 'alice:x', chatId: 'group' };
+    const colliding = { senderId: 'alice', chatId: 'x:group' };
+    const named = manager();
+    const firstTask = await named.create(first, 'review');
+    const staleSessionId = await router.createManagedSession(
+      { channelName: 'channel-a', ...first },
+      '/workspace',
+    );
+
+    const collidingSessionId = await named.resolve(colliding);
+
+    expect(collidingSessionId).not.toBe(staleSessionId);
+    await expect(named.list(colliding, false)).resolves.toEqual([
+      expect.objectContaining({ name: 'default', active: true }),
+    ]);
+    await expect(named.resolve(first)).resolves.toBe(firstTask.sessionId);
+  });
+
+  it('forgets a colliding route from another workspace', async () => {
+    const first = { senderId: 'alice:x', chatId: 'group' };
+    const colliding = { senderId: 'alice', chatId: 'x:group' };
+    const staleSessionId = await router.createManagedSession(
+      { channelName: 'channel-a', ...first },
+      '/other-workspace',
+    );
+    const named = manager();
+
+    const collidingSessionId = await named.resolve(colliding);
+
+    expect(collidingSessionId).not.toBe(staleSessionId);
+    await expect(named.list(colliding, false)).resolves.toEqual([
+      expect.objectContaining({ name: 'default', active: true }),
     ]);
   });
 
@@ -344,6 +410,55 @@ describe('NamedSessionManager', () => {
     } finally {
       stderr.mockRestore();
     }
+  });
+
+  it('preserves tasks and legacy routes across equivalent workspace paths', async () => {
+    const realWorkspace = join(dir, 'real-workspace');
+    const linkedWorkspace = join(dir, 'linked-workspace');
+    mkdirSync(realWorkspace);
+    symlinkSync(
+      realWorkspace,
+      linkedWorkspace,
+      process.platform === 'win32' ? 'junction' : 'dir',
+    );
+    const filePath = join(dir, 'named-sessions.json');
+    const firstManager = new NamedSessionManager({
+      channelName: 'channel-a',
+      cwd: linkedWorkspace,
+      filePath,
+      router,
+      isBusy: () => false,
+    });
+    await firstManager.create(alice, 'review');
+    const bob = { ...alice, senderId: 'bob' };
+    const bobSessionId = await router.resolve(
+      'channel-a',
+      bob.senderId,
+      bob.chatId,
+      bob.threadId,
+      linkedWorkspace,
+      true,
+    );
+    vi.mocked(bridge.discardSession).mockClear();
+
+    const restarted = new NamedSessionManager({
+      channelName: 'channel-a',
+      cwd: realWorkspace,
+      filePath,
+      router,
+      isBusy: () => false,
+    });
+
+    await expect(restarted.list(alice, false)).resolves.toEqual([
+      expect.objectContaining({ name: 'review', active: true }),
+    ]);
+    await expect(restarted.resolve(bob)).resolves.toBe(bobSessionId);
+    expect(readdirSync(dir)).not.toEqual(
+      expect.arrayContaining([
+        expect.stringMatching(/^named-sessions\.json\.stale-/u),
+      ]),
+    );
+    expect(bridge.discardSession).not.toHaveBeenCalled();
   });
 
   it('serializes concurrent changes for one owner and leaves no temp files', async () => {

@@ -10,6 +10,7 @@ import {
 } from 'node:fs';
 import { dirname } from 'node:path';
 import process from 'node:process';
+import { canonicalizeWorkspacePath } from './paths.js';
 import type { SessionTarget } from './types.js';
 import type { SessionRouter } from './SessionRouter.js';
 
@@ -72,6 +73,7 @@ interface StoredRegistry {
 export class NamedSessionManager {
   private readonly channelName: string;
   private readonly cwd: string;
+  private readonly canonicalCwd: string;
   private readonly filePath: string;
   private readonly router: SessionRouter;
   private readonly isBusy: (sessionId: string) => boolean;
@@ -82,6 +84,7 @@ export class NamedSessionManager {
   constructor(options: NamedSessionManagerOptions) {
     this.channelName = options.channelName;
     this.cwd = options.cwd;
+    this.canonicalCwd = canonicalizeWorkspacePath(options.cwd);
     this.filePath = options.filePath;
     this.router = options.router;
     this.isBusy = options.isBusy;
@@ -443,8 +446,10 @@ export class NamedSessionManager {
       routedTarget.senderId === input.senderId
     ) {
       const routedCwd = this.router.getSessionCwd(sessionId);
-      if (routedCwd !== undefined && routedCwd !== this.cwd) {
-        await this.router.detachManagedSession(sessionId);
+      if (routedCwd !== undefined && !this.isCurrentCwd(routedCwd)) {
+        await this.router
+          .detachManagedSession(sessionId)
+          .catch(() => undefined);
       } else {
         const timestamp = this.nextTimestamp();
         const task: StoredTask = {
@@ -532,13 +537,19 @@ export class NamedSessionManager {
     target: SessionTarget,
   ): void {
     const cwd = this.router.getSessionCwd(sessionId);
-    if (target.channelName !== this.channelName || cwd !== this.cwd) {
-      throw new Error('Cannot safely migrate a colliding legacy session.');
+    if (
+      target.channelName !== this.channelName ||
+      cwd === undefined ||
+      !this.isCurrentCwd(cwd)
+    ) {
+      this.router.forgetManagedSession(sessionId);
+      return;
     }
     const existing = this.getOwner(target);
     if (existing) {
       if (existing.tasks.some((task) => task.sessionId === sessionId)) return;
-      throw new Error('Colliding legacy session conflicts with named tasks.');
+      this.router.forgetManagedSession(sessionId);
+      return;
     }
     const timestamp = this.nextTimestamp();
     const task: StoredTask = {
@@ -925,7 +936,7 @@ export class NamedSessionManager {
       typeof value['sessionId'] === 'string' &&
       value['sessionId'].length > 0 &&
       typeof value['cwd'] === 'string' &&
-      (!requireCurrentCwd || value['cwd'] === this.cwd) &&
+      (!requireCurrentCwd || this.isCurrentCwd(value['cwd'])) &&
       value['isolation'] === 'shared' &&
       (value['status'] === 'open' || value['status'] === 'closed') &&
       this.isTimestamp(value['createdAt']) &&
@@ -939,6 +950,10 @@ export class NamedSessionManager {
       (target['isGroup'] === undefined ||
         typeof target['isGroup'] === 'boolean')
     );
+  }
+
+  private isCurrentCwd(cwd: string): boolean {
+    return canonicalizeWorkspacePath(cwd) === this.canonicalCwd;
   }
 
   private isTimestamp(value: unknown): value is number {
