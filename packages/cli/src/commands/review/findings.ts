@@ -47,6 +47,8 @@ import {
   FINDING_CONFIDENCES,
   FINDING_OUTCOMES,
   FINDING_SOURCES,
+  FINDING_DIRECTIONS,
+  FINDING_BASELINES,
   compressFindingSummary,
 } from '@qwen-code/qwen-code-core';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
@@ -84,6 +86,19 @@ export type Outcome = (typeof OUTCOMES)[number];
 /** Where a finding came from — the tag that decides whether it was verified. */
 export const SOURCES = FINDING_SOURCES;
 export type Source = (typeof SOURCES)[number];
+
+/**
+ * A Critical's two decision axes (#10291) — defined in core beside the
+ * other lists. The convergence posture reads them: at a resolved `critical`
+ * floor a Critical that is `fails-closed` AND `new-surface` is recorded
+ * rather than requested, exactly like a Suggestion; every other Critical
+ * posts. The renderer keeps no copy — it ignores the fields — so neither
+ * list is in the vocabulary snapshot the four above are.
+ */
+export const DIRECTIONS = FINDING_DIRECTIONS;
+export type Direction = (typeof DIRECTIONS)[number];
+export const BASELINES = FINDING_BASELINES;
+export type Baseline = (typeof BASELINES)[number];
 
 /** One location a finding applies to. A pattern aggregate carries several. */
 export interface FindingLocation {
@@ -149,6 +164,19 @@ export interface Finding {
   fixConstraint?: string;
   /** Free-form kebab-case tag (`correctness`, `security`, `test-coverage`, …). */
   category?: string;
+  /**
+   * Which way a Critical fails, stated by the verifier off its witness:
+   * `certifies-falsely` (a wrong result presented as correct) or
+   * `fails-closed` (refuses, wedges or degrades without one). Absent when
+   * the witness could not settle it — and absence never classifies.
+   */
+  direction?: Direction;
+  /**
+   * What a Critical is measured against, off the same evidence:
+   * `regression` (the merge base handled the trigger) or `new-surface` (the
+   * failing path does not exist at the merge base). Absent like `direction`.
+   */
+  baseline?: Baseline;
   /** Every location, in report order. A standalone finding has exactly one. */
   locations: FindingLocation[];
   /**
@@ -466,6 +494,29 @@ export function validateFindings(raw: unknown): Finding[] {
         ? fixConstraintRaw
         : undefined;
 
+    // The two axes are enums like `confidence`: a present value outside the
+    // list is a typo'd classification and fails with the index, because a
+    // value that silently dropped would turn a deferrable Critical into one
+    // that posts (fail-open) without anyone seeing the drop.
+    const direction =
+      o['direction'] === undefined
+        ? undefined
+        : oneOf(o['direction'], DIRECTIONS);
+    if (o['direction'] !== undefined && !direction) {
+      fail(
+        i,
+        `has direction ${JSON.stringify(o['direction'])}; expected one of ${DIRECTIONS.map((s) => JSON.stringify(s)).join(', ')}.`,
+      );
+    }
+    const baseline =
+      o['baseline'] === undefined ? undefined : oneOf(o['baseline'], BASELINES);
+    if (o['baseline'] !== undefined && !baseline) {
+      fail(
+        i,
+        `has baseline ${JSON.stringify(o['baseline'])}; expected one of ${BASELINES.map((s) => JSON.stringify(s)).join(', ')}.`,
+      );
+    }
+
     return {
       id,
       severity,
@@ -488,6 +539,8 @@ export function validateFindings(raw: unknown): Finding[] {
       ...(asString(o, 'category')
         ? { category: asString(o, 'category')! }
         : {}),
+      ...(direction ? { direction } : {}),
+      ...(baseline ? { baseline } : {}),
       locations: parseLocations(o, i),
       ...(assetFiles ? { assetFiles } : {}),
       ...(assets ? { assets } : {}),
@@ -1033,8 +1086,13 @@ export function renderFindings(report: FindingsReport): string[] {
     const more =
       f.locations.length > 1 ? ` (+${f.locations.length - 1} more)` : '';
     const confidence = f.confidence === 'low' ? ' [low confidence]' : '';
+    // The axes render as the same bracket tags the posted claim line carries.
+    const axes = [f.direction, f.baseline]
+      .filter((a) => a !== undefined)
+      .map((a) => ` [${a}]`)
+      .join('');
     const outcome = f.outcome ? ` [${f.outcome}]` : '';
-    return `${f.severity} — ${where}${more} — ${f.shortSummary}${confidence}${outcome}`;
+    return `${f.severity}${axes} — ${where}${more} — ${f.shortSummary}${confidence}${outcome}`;
   });
 }
 

@@ -30,6 +30,7 @@ import { getPlatformReader } from './lib/platform/registry.js';
 import type { PlatformKind } from './lib/platform/types.js';
 import {
   LEDGER_MAX_FINDINGS,
+  axesOf,
   parseLedger,
   streakOf,
   stripLedgerMarker,
@@ -2063,10 +2064,12 @@ export function renderLedgerSection(
       ? " — and has not: the anchor above came from this account's own earlier marker, not the foreign one"
       : '; this round is full-range unless a local cache supplies one'
   }`;
-  const rows = ledger.findings.map(
-    (f) =>
-      `| ${cell(f.id)} | ${f.sev === 'C' ? 'Critical' : 'Suggestion'} | \`${code(f.file)}${f.line ? `:${f.line}` : ''}\` | ${cell(f.title)} |`,
-  );
+  const rows = ledger.findings.map((f) => {
+    // A classified Critical (#10291) shows its axes beside the severity —
+    // the next round's Step 6 routes a still-standing entry by them.
+    const axes = axesOf(f);
+    return `| ${cell(f.id)} | ${f.sev === 'C' ? 'Critical' : 'Suggestion'}${axes ? ` (${axes})` : ''} | \`${code(f.file)}${f.line ? `:${f.line}` : ''}\` | ${cell(f.title)} |`;
+  });
   return [
     '## Previous /review round (machine ledger)',
     '',

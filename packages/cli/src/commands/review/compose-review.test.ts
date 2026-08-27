@@ -46,7 +46,7 @@ import {
   churnCensusOf,
   composeReview,
   nonConvergenceCritical,
-  deferrableSuggestionsInline,
+  deferrableFindingsInline,
   draftedFindingsOf,
   floorEnforcedReroute,
   isNonDiffDimensionGap,
@@ -8556,7 +8556,7 @@ describe('composeReview — convergence-posture deferrals (typed channel; disclo
     expect(r.lowSignal).toBeNull();
     expect(r.deferredCount).toBe(1);
     expect(verdictLine(r)).toBe(
-      'Verdict: Approve — 1 non-Critical finding(s) deferred under the convergence posture (listed in the body)',
+      'Verdict: Approve — 1 finding(s) deferred under the convergence posture (listed in the body)',
     );
   });
 
@@ -9123,7 +9123,7 @@ describe("composeReview — the composed body fits GitHub's limit", () => {
     // list survived, so it is pinned whole, like every sibling verdict
     // string in this file.
     expect(verdictLine(r)).toContain(
-      '3 non-Critical finding(s) deferred under the convergence posture ' +
+      '3 finding(s) deferred under the convergence posture ' +
         '(trimmed from the body to fit GitHub’s limit — whole in the ' +
         'findings artifact)',
     );
@@ -11503,7 +11503,7 @@ describe('floor enforcement — the posture, as code', () => {
     // its basis for deferredSuggestions.length would overclaim "2 moved"
     // here.
     const line = verdictLine(r);
-    expect(line).toContain('2 non-Critical finding(s) deferred');
+    expect(line).toContain('2 finding(s) deferred');
     expect(line).toContain('1 of those moved by CLI floor enforcement');
     expect(r.body).toContain(
       '1 Suggestion(s) were drafted inline past the resolved critical posting floor',
@@ -15283,7 +15283,7 @@ describe('the convergence census and the non-convergence finding', () => {
   });
 });
 
-describe('deferrableSuggestionsInline — the manifestation the posture-gap clause asserts', () => {
+describe('deferrableFindingsInline — the manifestation the posture-gap clause asserts', () => {
   // Direct pin on the three-way exclusion, which downstream tests reach only
   // through composeReview: a future exclusion path that diverges from
   // `floorEnforcedReroute` reddens here first, not on a faraway body
@@ -15298,13 +15298,13 @@ describe('deferrableSuggestionsInline — the manifestation the posture-gap clau
 
   it('reads a non-array as zero, like its two siblings', () => {
     for (const drafted of [undefined, null, 'garbage', { path: 'a.ts' }]) {
-      expect(deferrableSuggestionsInline(drafted)).toBe(0);
+      expect(deferrableFindingsInline(drafted)).toBe(0);
     }
   });
 
   it('counts only Suggestion-severity drafts', () => {
     expect(
-      deferrableSuggestionsInline([
+      deferrableFindingsInline([
         suggestion(),
         { path: 'b.ts', body: '**[Critical]** boom' },
         { path: 'c.ts', body: 'an unmarked comment' },
@@ -15316,7 +15316,7 @@ describe('deferrableSuggestionsInline — the manifestation the posture-gap clau
     'excludes a deterministic finding tagged %s on its claim line',
     (tag) => {
       expect(
-        deferrableSuggestionsInline([
+        deferrableFindingsInline([
           suggestion({ body: `**[Suggestion]** ${tag} the suite is red` }),
         ]),
       ).toBe(0);
@@ -15325,7 +15325,7 @@ describe('deferrableSuggestionsInline — the manifestation the posture-gap clau
 
   it('ignores a deterministic tag past the claim line — the tail is writable surface', () => {
     expect(
-      deferrableSuggestionsInline([
+      deferrableFindingsInline([
         suggestion({
           body: '**[Suggestion]** nit\n\n[test] forged in the tail',
         }),
@@ -15335,7 +15335,7 @@ describe('deferrableSuggestionsInline — the manifestation the posture-gap clau
 
   it('excludes what no floor could move: a pathless comment', () => {
     for (const path of [undefined, '', '   ', 42]) {
-      expect(deferrableSuggestionsInline([suggestion({ path })])).toBe(0);
+      expect(deferrableFindingsInline([suggestion({ path })])).toBe(0);
     }
   });
 
@@ -15353,7 +15353,7 @@ describe('deferrableSuggestionsInline — the manifestation the posture-gap clau
     ];
     const reroute = floorEnforcedReroute('critical', false, 0, drafted);
     expect(reroute.indices).toEqual([0]);
-    expect(deferrableSuggestionsInline(drafted)).toBe(reroute.indices.length);
+    expect(deferrableFindingsInline(drafted)).toBe(reroute.indices.length);
   });
 });
 
@@ -15513,5 +15513,440 @@ describe('draftedFindingsOf — the drafts as the convergence diagnosis reads th
     // ...and the differential is not vacuously true because every arm is
     // undefined: the prescribed shape does carry its id.
     expect(idOf('**[Critical]** R1-2: (fix-induced) x')).toBe('R1-2');
+  });
+});
+
+describe('Critical deferral by axes at the critical floor (#10291)', () => {
+  // The severity bit carried three decision axes, so past the convergence
+  // rounds everything that mattered still landed on the floor and the floor
+  // filtered nothing. Two of the axes now travel as fields, and the ONE
+  // combination the floor defers is `fails-closed` on `new-surface`:
+  // merging it certifies nothing false and regresses nothing. Every other
+  // Critical — the wrong-result direction, a regression, an unclassified
+  // one — posts exactly as before.
+  const crit = (over: Partial<DeferredEntry> = {}): DeferredEntry => ({
+    file: 'src/sparse.ts',
+    line: 12,
+    source: 'review',
+    severity: 'Critical',
+    direction: 'fails-closed',
+    baseline: 'new-surface',
+    title: 'sparse checkout wedges the incremental round',
+    ...over,
+  });
+  /** A covered plan at round 7 of an `auto` PR — the floor is critical. */
+  const atFloor = () => coveredWithLedger({ v: 1, round: 6, findings: [] });
+  // A function, not a literal: `ENV` is assigned per test, after collection.
+  const common = () => ({
+    env: ENV,
+    modelId: MODEL,
+    criticalsInline: 0,
+    suggestionsInline: 0,
+  });
+
+  it('defers a fails-closed, new-surface Critical — recorded, not requested, out of the work list', () => {
+    const r = composeReview({
+      ...common(),
+      planPath: atFloor(),
+      severityFloor: 'auto',
+      deferredSuggestions: [crit()],
+    });
+    // The posture's payoff on the shape #9659 oscillated on: a clean late
+    // round whose only Critical narrows a surface the base never had
+    // composes the APPROVE that ends the loop.
+    expect(r.event).toBe('APPROVE');
+    expect(r.cappedBy).toEqual([]);
+    expect(r.deferredCount).toBe(1);
+    expect(r.body).toContain('<!-- qwen-review-deferred -->');
+    // The line says what it is — a reader expects a deferral to be a
+    // Suggestion — and carries the axes that put it there.
+    expect(r.body).toContain(
+      'src/sparse.ts:12 — [review] Critical [fails-closed] [new-surface] sparse checkout wedges',
+    );
+    expect(r.body).toContain(
+      '1 Critical(s) among them are deferred by their axes',
+    );
+    expect(r.body).not.toContain('relocated from the deferral channel');
+    // Out of the work list like any deferral, and the anchor still rides.
+    const ledger = parseLedger(r.body)!;
+    expect(ledger.findings).toEqual([]);
+    expect(ledger.sha).toBe('deadbeef00112233');
+    expect(verdictLine(r)).toContain(
+      '1 finding(s) deferred under the convergence posture',
+    );
+  });
+
+  it.each([
+    ['the wrong-result direction', { direction: 'certifies-falsely' as const }],
+    ['a regression', { baseline: 'regression' as const }],
+    ['a missing baseline', { baseline: undefined }],
+    ['an unclassified one', { direction: undefined, baseline: undefined }],
+  ])('relocates every other Critical — %s', (_label, over) => {
+    const r = composeReview({
+      ...common(),
+      planPath: atFloor(),
+      severityFloor: 'auto',
+      deferredSuggestions: [crit(over)],
+    });
+    expect(r.event).toBe('REQUEST_CHANGES');
+    expect(r.deferredCount).toBe(0);
+    expect(r.body).toContain('relocated from the deferral channel');
+    expect(parseLedger(r.body)?.findings.map((f) => f.sev)).toEqual(['C']);
+  });
+
+  // Every arm where the floor is not in effect — the age rule never defers
+  // a blocker. One test per arm: the plans share a directory, and the side
+  // file one arm writes must not be read by the round-1 arm.
+  it.each<[string, () => Partial<ComposeReviewInput>]>([
+    [
+      'round 1 under auto',
+      () => ({
+        planPath: coveredPlan(['verify', 'reverse-audit'], {
+          prNumber: 8255,
+          fetchedSha: 'deadbeef00112233',
+        }),
+        severityFloor: 'auto',
+      }),
+    ],
+    [
+      'round 3 under auto — the code-age rounds',
+      () => ({
+        planPath: coveredWithLedger({ v: 1, round: 2, findings: [] }),
+        severityFloor: 'auto',
+      }),
+    ],
+    [
+      'the operator turned the posture off',
+      () => ({ planPath: atFloor(), severityFloor: 'suggestion' }),
+    ],
+    ['an absent floor', () => ({ planPath: atFloor() })],
+    [
+      'context-unavailable',
+      () => ({
+        planPath: atFloor(),
+        severityFloor: 'auto',
+        contextUnavailable: true,
+      }),
+    ],
+  ])(
+    'relocates a deferrable Critical when the floor is not in effect — %s',
+    (_label, over) => {
+      const r = composeReview({
+        ...common(),
+        deferredSuggestions: [crit()],
+        ...over(),
+      });
+      expect(r.deferredCount).toBe(0);
+      expect(r.body).toContain('relocated from the deferral channel');
+      // Relocation is salvage, never an unlicensed deferral.
+      expect(r.cappedBy).not.toContain('unlicensed-deferral');
+    },
+  );
+
+  it('an explicit critical floor licenses the deferral from round 1', () => {
+    const r = composeReview({
+      ...common(),
+      planPath: coveredPlan(['verify', 'reverse-audit'], {
+        prNumber: 8255,
+        fetchedSha: 'deadbeef00112233',
+      }),
+      severityFloor: 'critical',
+      deferredSuggestions: [crit()],
+    });
+    expect(r.event).toBe('APPROVE');
+    expect(r.deferredCount).toBe(1);
+  });
+
+  it('refuses a misspelled axis — the channel that un-posts a blocker is not guessed at', () => {
+    expect(() =>
+      composeReview(
+        base({
+          deferredSuggestions: [crit({ direction: 'fails-open' as never })],
+        }),
+      ),
+    ).toThrow(/direction must be one of certifies-falsely\|fails-closed/);
+    expect(() =>
+      composeReview(
+        base({
+          deferredSuggestions: [crit({ baseline: 'old-surface' as never })],
+        }),
+      ),
+    ).toThrow(/baseline must be one of regression\|new-surface/);
+  });
+
+  it('a deferred Critical that bears its id is a re-post, never a closure', () => {
+    // The successor-chain mint (#9905) reads absence from the work list as
+    // "ruled fixed" unless a re-post channel carries the id. A Critical the
+    // floor defers by its axes leaves the work list exactly like a
+    // Suggestion, so it must join the same way — or every deferred blocker
+    // would seed a fabricated lineage the sentinel fires on a round later.
+    const r = composeReview({
+      ...common(),
+      planPath: coveredWithLedger({
+        v: 1,
+        round: 6,
+        findings: [
+          {
+            id: 'R6-1',
+            sev: 'C',
+            file: 'src/sparse.ts',
+            title: 'sparse wedge',
+          },
+          { id: 'R6-2', sev: 'C', file: 'src/other.ts', title: 'fixed since' },
+        ],
+      }),
+      severityFloor: 'auto',
+      deferredSuggestions: [crit({ title: 'R6-1: sparse wedge' })],
+    });
+    expect(r.deferredCount).toBe(1);
+    expect(parseLedger(r.body)?.closed).toEqual([
+      { r: 7, id: 'R6-2', f: 'src/other.ts' },
+    ]);
+  });
+});
+
+describe('floor enforcement — the Critical arm (#10291)', () => {
+  // The backstop's Critical arm reads the claim line's axis tags the way it
+  // reads `[probe]`: the ONE combination the floor defers moves, and every
+  // untagged, half-tagged or self-contradicting Critical stays inline — the
+  // backstop never guesses a blocker out of the posting set.
+  let dir: string;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'floor-axes-'));
+  });
+  afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+  const plan = () => {
+    const p = join(dir, 'plan.json');
+    writeFileSync(p, JSON.stringify({ prNumber: 8255 }));
+    return p;
+  };
+  const sideFile = (round: number) =>
+    writeFileSync(
+      join(dir, 'qwen-review-pr-8255-prev-ledger.json'),
+      JSON.stringify({ v: 1, round, findings: [] }),
+    );
+  const drafts = () => [
+    {
+      path: 'a.ts',
+      line: 1,
+      body: '**[Critical]** R6-1: [fails-closed] [new-surface] sparse checkout wedges the round\n\nOnly a sparse clone reaches it.',
+    },
+    {
+      path: 'b.ts',
+      line: 2,
+      body: '**[Critical]** [certifies-falsely] [new-surface] a decided stop over unread bytes',
+    },
+    {
+      path: 'c.ts',
+      line: 3,
+      body: '**[Critical]** [fails-closed] half-classified',
+    },
+    {
+      path: 'd.ts',
+      line: 4,
+      body: '**[Critical]** [fails-closed] [certifies-falsely] [new-surface] self-contradicting',
+    },
+    { path: 'e.ts', line: 5, body: '**[Critical]** untagged blocker' },
+    { path: 'f.ts', line: 6, body: '**[Suggestion]** a nit' },
+  ];
+  const compose = (over: Partial<ComposeReviewInput> = {}) =>
+    composeReview({
+      planPath: plan(),
+      modelId: 'm',
+      criticalsInline: 5,
+      suggestionsInline: 1,
+      draftedComments: drafts(),
+      ...over,
+    });
+
+  it('moves the ONE combination the floor defers, and leaves every other Critical inline', () => {
+    const r = compose({ severityFloor: 'critical' });
+    expect(r.floorEnforced).toEqual([0, 5]);
+    expect(r.deferredCount).toBe(2);
+    expect(r.body).toContain(
+      '1 Suggestion(s) and 1 fails-closed, new-surface Critical(s) were drafted inline past the resolved critical posting floor',
+    );
+    // The moved record keeps the carried id at its head (the closure mint
+    // joins on it) and the WHOLE body, minus the tags the entry now
+    // carries as fields.
+    expect(r.body).toContain(
+      'a.ts:1 — [review] Critical [fails-closed] [new-surface] R6-1: sparse checkout wedges the round Only a sparse clone reaches it.',
+    );
+    expect(r.body).toContain(
+      '1 Critical(s) among them are deferred by their axes',
+    );
+    // The work list holds what posts, each Critical with the axes its claim
+    // line declared — and nothing else: a half-classified or contradictory
+    // claim records only what it settled.
+    expect(parseLedger(r.body)!.findings).toEqual([
+      {
+        id: 'R1-1',
+        sev: 'C',
+        d: 'c',
+        b: 'n',
+        file: 'b.ts',
+        line: 2,
+        title: 'a decided stop over unread bytes',
+      },
+      {
+        id: 'R1-2',
+        sev: 'C',
+        d: 'f',
+        file: 'c.ts',
+        line: 3,
+        title: 'half-classified',
+      },
+      {
+        id: 'R1-3',
+        sev: 'C',
+        b: 'n',
+        file: 'd.ts',
+        line: 4,
+        title: 'self-contradicting',
+      },
+      {
+        id: 'R1-4',
+        sev: 'C',
+        file: 'e.ts',
+        line: 5,
+        title: 'untagged blocker',
+      },
+    ]);
+    expect(r.baseEvent).toBe('REQUEST_CHANGES');
+    expect(verdictLine(r)).toContain(
+      '2 of those moved by CLI floor enforcement',
+    );
+  });
+
+  it('leaves a tagged Critical inline before the floor engages — the tags classify, the floor decides', () => {
+    sideFile(4); // this review is round 5: the age rounds, no floor
+    const r = compose({ severityFloor: 'auto' });
+    expect(r.floorEnforced).toEqual([]);
+    // The classification still rides the work list for the next round.
+    expect(parseLedger(r.body)!.findings[0]).toMatchObject({
+      sev: 'C',
+      d: 'f',
+      b: 'n',
+      title: 'sparse checkout wedges the round',
+    });
+  });
+
+  it('a probe-confirmed Critical keeps its source when moved — no second verifier is owed', () => {
+    // A plan whose Step 4 never ran: a review-sourced deferral owes the
+    // verifier floor and caps, a probe-sourced one is pre-confirmed by its
+    // source and does not — the source the claim line declared travels
+    // with the moved record.
+    const moved = (tag: string) =>
+      composeReview({
+        planPath: coveredPlan(['reverse-audit']),
+        env: ENV,
+        modelId: MODEL,
+        criticalsInline: 1,
+        suggestionsInline: 0,
+        severityFloor: 'critical',
+        draftedComments: [
+          {
+            path: 'a.ts',
+            line: 1,
+            body: `**[Critical]** ${tag}[fails-closed] [new-surface] wedge`,
+          },
+        ],
+      });
+    const probe = moved('[probe] ');
+    expect(probe.floorEnforced).toEqual([0]);
+    expect(probe.body).toContain(
+      'a.ts:1 — [probe] Critical [fails-closed] [new-surface] wedge',
+    );
+    expect(probe.cappedBy).toEqual([]);
+    const review = moved('');
+    expect(review.floorEnforced).toEqual([0]);
+    expect(review.body).toContain(
+      'a.ts:1 — [review] Critical [fails-closed] [new-surface] wedge',
+    );
+    expect(review.cappedBy).toContain('unreviewed-dimension');
+  });
+
+  it('floorEnforcedReroute constructs the Critical entry with its axes', () => {
+    const { indices, entries } = floorEnforcedReroute(
+      'critical',
+      false,
+      0,
+      drafts(),
+    );
+    expect(indices).toEqual([0, 5]);
+    expect(entries[0]).toEqual({
+      file: 'a.ts',
+      line: 1,
+      source: 'review',
+      severity: 'Critical',
+      direction: 'fails-closed',
+      baseline: 'new-surface',
+      title:
+        'R6-1: sparse checkout wedges the round Only a sparse clone reaches it.',
+    });
+    expect(entries[1].severity).toBe('Suggestion');
+  });
+
+  it('deferrableFindingsInline counts the tagged Critical the floor would move — and only that one', () => {
+    expect(deferrableFindingsInline(drafts())).toBe(2);
+    expect(deferrableFindingsInline(drafts().slice(1, 5))).toBe(0);
+  });
+
+  it('buildLedger stamps the axes as fields and keeps them out of the title — wherever the tags sit', () => {
+    const l = buildLedger(
+      3,
+      [
+        {
+          path: 'a.ts',
+          line: 1,
+          body: '**[Critical]** R2-1: (fix-induced) [fails-closed] [new-surface] wedge',
+        },
+        {
+          path: 'b.ts',
+          line: 2,
+          body: '**[Critical]** R2-2: [certifies-falsely] (fix-induced) lie',
+        },
+        {
+          path: 'c.ts',
+          line: 3,
+          body: '**[Suggestion]** [fails-closed] [new-surface] a tagged nit',
+        },
+      ],
+      ['body blocker [regression] [certifies-falsely]'],
+    );
+    expect(l.findings).toEqual([
+      {
+        id: 'R2-1',
+        sev: 'C',
+        d: 'f',
+        b: 'n',
+        file: 'a.ts',
+        line: 1,
+        title: 'wedge',
+      },
+      { id: 'R2-2', sev: 'C', d: 'c', file: 'b.ts', line: 2, title: 'lie' },
+      // Only a Critical is classified; a tagged Suggestion loses the tags
+      // and gains no field.
+      { id: 'R3-1', sev: 'S', file: 'c.ts', line: 3, title: 'a tagged nit' },
+      {
+        id: 'R3-2',
+        sev: 'C',
+        d: 'c',
+        b: 'r',
+        file: '(body)',
+        title: 'body blocker',
+      },
+    ]);
+    // The `(fix-induced)` marking is still read behind a tag placed before
+    // it — the tags come off before the marking is anchored on.
+    expect(
+      draftedFindingsOf([
+        {
+          path: 'b.ts',
+          body: '**[Critical]** R2-2: [certifies-falsely] (fix-induced) lie',
+        },
+      ]),
+    ).toEqual([{ file: 'b.ts', carriedId: 'R2-2', fixInduced: true }]);
   });
 });

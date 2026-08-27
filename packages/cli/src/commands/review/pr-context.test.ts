@@ -4092,3 +4092,35 @@ describe('prContextCommand handler — Aone routing', () => {
     expect(written).toContain('--pr 7');
   });
 });
+
+describe("the work-list table carries a Critical's axes (#10291)", () => {
+  it('spells the recorded axes beside the severity, and nothing beside an unclassified entry', () => {
+    const md = renderLedgerSection(
+      {
+        v: 1,
+        round: 7,
+        findings: [
+          {
+            id: 'R6-1',
+            sev: 'C',
+            d: 'f',
+            b: 'n',
+            file: 'src/sparse.ts',
+            line: 12,
+            title: 'sparse wedge',
+          },
+          { id: 'R6-2', sev: 'C', d: 'c', file: 'src/stop.ts', title: 'lie' },
+          { id: 'R6-3', sev: 'C', file: 'src/x.ts', title: 'unclassified' },
+        ],
+      },
+      'm',
+    );
+    expect(md).toContain(
+      '| R6-1 | Critical (fails-closed, new-surface) | `src/sparse.ts:12` | sparse wedge |',
+    );
+    expect(md).toContain(
+      '| R6-2 | Critical (certifies-falsely) | `src/stop.ts` | lie |',
+    );
+    expect(md).toContain('| R6-3 | Critical | `src/x.ts` | unclassified |');
+  });
+});

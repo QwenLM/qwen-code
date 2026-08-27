@@ -626,6 +626,26 @@ describe('agent-prompt (command boundary)', () => {
       expect(briefText).toContain('A confirmed Critical returns its witness.');
       expect(briefText).toContain('witness: not run —');
       expect(briefText).toContain('sweep the real population');
+      // The two decision axes (#10291) ride the same witness: the brief
+      // defines both values of each, ties the routing consequence to the
+      // ONE combination the floor defers, and tells the verifier to omit
+      // rather than guess — a guessed `fails-closed` takes a blocker off
+      // the pull request.
+      expect(briefText).toContain(
+        'A confirmed Critical also returns its two decision axes',
+      );
+      for (const value of [
+        'direction: certifies-falsely',
+        'direction: fails-closed',
+        'baseline: regression',
+        'baseline: new-surface',
+      ]) {
+        expect(briefText).toContain(value);
+      }
+      expect(briefText).toContain(
+        'only a Critical that is both fails-closed and new-surface is recorded as a deferral',
+      );
+      expect(briefText).toContain('OMIT that line rather than guess');
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

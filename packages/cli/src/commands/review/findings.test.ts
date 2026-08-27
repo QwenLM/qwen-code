@@ -2164,3 +2164,51 @@ describe('validateFindings — the canonical artifact round-trips', () => {
     ).toBe('none of the callers pass 0 (src/a.ts:12)');
   });
 });
+
+describe('the finding axes (#10291)', () => {
+  it('round-trips direction and baseline, and leaves an unclassified finding bare', () => {
+    const [classified, bare] = validateFindings([
+      { ...base, direction: 'fails-closed', baseline: 'new-surface' },
+      { ...base, id: 'f2' },
+    ]);
+    expect(classified.direction).toBe('fails-closed');
+    expect(classified.baseline).toBe('new-surface');
+    expect(bare.direction).toBeUndefined();
+    expect(bare.baseline).toBeUndefined();
+    // Fed back through `--input` (the artifact wrapper), both survive.
+    const again = validateFindings({
+      findings: [classified],
+    } as unknown as Finding[]);
+    expect(again[0]).toMatchObject({
+      direction: 'fails-closed',
+      baseline: 'new-surface',
+    });
+  });
+
+  it('refuses a misspelled axis with the index — a silent drop would post a deferrable blocker', () => {
+    expect(() =>
+      validateFindings([{ ...base, direction: 'fails-open' }]),
+    ).toThrow(
+      /Finding at index 0: has direction "fails-open"; expected one of "certifies-falsely", "fails-closed"/,
+    );
+    expect(() =>
+      validateFindings([{ ...base, baseline: 'old-surface' }]),
+    ).toThrow(
+      /Finding at index 0: has baseline "old-surface"; expected one of "regression", "new-surface"/,
+    );
+  });
+
+  it("renders the axes as the claim line's bracket tags", () => {
+    const report = buildReport(
+      validateFindings([
+        { ...base, direction: 'fails-closed', baseline: 'new-surface' },
+        { ...base, id: 'f2', direction: 'certifies-falsely' },
+        { ...base, id: 'f3' },
+      ]),
+    );
+    const lines = renderFindings(report);
+    expect(lines[0]).toMatch(/^Critical \[fails-closed\] \[new-surface\] — /);
+    expect(lines[1]).toMatch(/^Critical \[certifies-falsely\] — /);
+    expect(lines[2]).toMatch(/^Critical — /);
+  });
+});
