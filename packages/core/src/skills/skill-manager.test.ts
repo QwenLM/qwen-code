@@ -880,6 +880,43 @@ Body`);
       expect(badSkill?.priority).toBe(0);
     });
 
+    it('uses the canonical extension name for extension-owned skills', async () => {
+      vi.spyOn(mockConfig, 'getActiveExtensions').mockReturnValue([
+        {
+          id: 'database-suite',
+          name: 'alibabacloud-database-suite',
+          displayName: 'Alibaba Cloud Database Suite',
+          version: '1.0.0',
+          isActive: true,
+          path: '/extension',
+          config: {
+            name: 'alibabacloud-database-suite',
+            version: '1.0.0',
+          },
+          contextFiles: [],
+          skills: [
+            {
+              name: 'database-review',
+              description: 'Review database changes',
+              body: 'Body',
+              filePath: '/extension/skills/database-review/SKILL.md',
+              level: 'extension',
+            },
+          ],
+        },
+      ]);
+
+      const skills = await manager.listSkills({
+        level: 'extension',
+        force: true,
+      });
+
+      expect(skills[0]?.extensionName).toBe('alibabacloud-database-suite');
+      expect(skills[0]?.extensionDisplayName).toBe(
+        'Alibaba Cloud Database Suite',
+      );
+    });
+
     it('should deduplicate same-name skills across provider dirs within a level', async () => {
       // Override readdir to return the same skill name from both .qwen and .agents dirs
       vi.mocked(fs.readdir).mockReset();

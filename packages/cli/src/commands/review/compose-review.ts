@@ -73,7 +73,11 @@ import type { TestPlanReport } from './test-plan.js';
 import {
   LEDGER_BODY_FILE,
   LEDGER_ID_READBACK,
+  LEDGER_MAX_CLOSED,
   LEDGER_MAX_ID,
+  LEDGER_MAX_TITLE,
+  claimLocator,
+  isLedgerClosure,
   isLedgerFinding,
   isStandInName,
   normalizeLedgerFinding,
@@ -84,6 +88,7 @@ import {
   streakOf,
   volumeOf,
   type Ledger,
+  type LedgerClosure,
   type LedgerFinding,
 } from './lib/ledger.js';
 import { mdField, stripCommentGrammar } from './lib/md-field.js';
@@ -1605,12 +1610,14 @@ export function composeReview(
   const prevForConvergence = {
     ...(prevFacts.posted === undefined ? {} : { posted: prevFacts.posted }),
     findings: prevFacts.findings,
+    closed: prevFacts.closed,
     truncated: prevFacts.truncated,
     complete: prevRound > 0 && !prevFacts.truncated,
     round: prevRound,
     anchored: prevFacts.anchored,
     foreign: prevFacts.foreign,
     merged: prevFacts.merged,
+    anonymousAdoption: prevFacts.anonymousAdoption,
     ...(prevFacts.floor === undefined ? {} : { floor: prevFacts.floor }),
     ...(prevFacts.fresh === undefined ? {} : { fresh: prevFacts.fresh }),
   };
@@ -1742,6 +1749,118 @@ export function composeReview(
       })(),
     };
   }
+  // The posted work list, built ONCE here rather than inside the marker:
+  // three consumers share one id space — the marker that stamps it, the
+  // closure mint below, and the successor-chain check inside the diagnosis,
+  // which reads this round's findings as the build stamped them.
+  const carriedWorkList = {
+    ids: new Set(prevFacts.findings.map((f) => f.id)),
+    // A round that recovered NO predecessor knows nothing about which ids
+    // were real — the id space is shared across environments and a first
+    // round on a machine with no side file is the ordinary case — so it
+    // cannot call a claimed id a stray. Only a recovered, untruncated list
+    // is evidence of absence.
+    complete: prevRound > 0 && !prevFacts.truncated,
+  };
+  const postedLedger = buildPostedLedger(
+    effective,
+    Math.min(prevRound + 1, LEDGER_MAX_ROUND),
+    carriedWorkList,
+  );
+  // The closures this round mints (#9905): the previous work list's
+  // Criticals this round does not re-post — `fixed` and `superseded` both
+  // read as closure, and a positional diff needs no more. Minted ONLY where
+  // absence from the posting set MEANS "ruled fixed" — the same honesty
+  // rule the anchor applies, one consumer down, with the SAME legs the
+  // sibling `openCriticals` gate applies to the identical inference: a
+  // PARTIAL previous list (a vanished id may be the byte budget, not a
+  // ruling) and a PURE-FOREIGN list whose entries are a stranger's, not a
+  // shortened version of this account's (#9526), and an ANONYMOUSLY ADOPTED
+  // list — the persist seam's machine-readable record that the file's
+  // findings were adopted with no identity to vouch them, which walks
+  // through this inference exactly like a pure-foreign one. The anchor's
+  // fail-closed
+  // predicate — `anchorFailsClosed(cappedBy, scopeUnproven, …)` — binds the
+  // closures too, at the diagnosis and the marker where `cappedBy` and
+  // `scopeUnproven` are known (this function returns before the body
+  // computes them): a closure is the inference "ruled fixed", and a round
+  // that could not show it READ the diff — or that publicly answered
+  // "cannot tell" on a Critical — cannot support it. In all of them the
+  // mint stays silent rather than guesses — thin history stays silent.
+  const postedIds = new Set(postedLedger?.findings.map((f) => f.id) ?? []);
+  // Claim identity, not id identity: a claim this round RE-POSTS without a
+  // carried id — a gate Critical regenerated from the report, a model
+  // re-post the readback lost — gets a FRESH id in the build (or no build
+  // entry at all), so the original is absent from `postedIds` while the
+  // claim still stands. Read absent-by-id alone, a still-standing blocker
+  // mints a closure every round of its life, in the very body that
+  // re-posts it open. So the join ALSO runs on the locator projection the
+  // gate-repost dedup uses — over the SAME build the marker stamps, so the
+  // record and the mint cannot disagree about what closed, with the SAME
+  // write-capped window on both sides: the previous list's titles were
+  // sliced to LEDGER_MAX_TITLE at write time (and again at read), so a
+  // build-side projection over the uncapped title never meets a previous
+  // locator that outruns the cap.
+  const standingClaims = new Set(
+    (postedLedger?.findings ?? [])
+      .map((g) => claimLocator(g.title.slice(0, LEDGER_MAX_TITLE)))
+      .filter((k) => k !== ''),
+  );
+  // The re-post channels — the typed deferral channel and the reroute the
+  // floor enforcement feeds into it — carry claims OUTSIDE the build's id
+  // space, and their join is an ID join, never a text projection: four
+  // review rounds each patched a hand-rolled projection here, and each
+  // generation of fixes grew the next defect (R4-1: a moved-path re-file,
+  // a dash-less collapsed body, a Suggestion-severity re-voice — three
+  // entrances one probe round named, in a space of re-post shapes that
+  // cannot be enumerated and closed one entrance at a time). An entry
+  // whose title BEARS the original id proves which claim it re-posts —
+  // severity, path, and wording are all irrelevant to that readback; an
+  // entry that bears none proves nothing — it may carry ANY vanished
+  // claim — so the round fails closed and mints no closure at all: the
+  // same honesty leg the mint applies to a PARTIAL previous list, one
+  // element the round cannot account for suppressing the whole inference.
+  // The cost is a true closure withheld beside an id-less re-post; the
+  // opposite error is a fabricated lineage the sentinel fires one round
+  // later. Parse ONLY where the build above already parsed the same
+  // channel — a null build returned before any parse, so this adds no
+  // throw the round did not already have.
+  const repostEntries = [
+    ...(postedLedger === null
+      ? []
+      : toDeferredEntries(input.deferredSuggestions)),
+    ...reroute.entries,
+  ];
+  const repostedIds = new Set<string>();
+  let repostUnidentified = false;
+  for (const e of repostEntries) {
+    const carried = LEDGER_ID_READBACK.exec(e.title)?.[1];
+    // The same membership test `isCarry` applies in the build: an id the
+    // complete previous list never held is a stray — a renumbered or
+    // re-minted token, not a carry — and reading it as one would shield a
+    // claim the entry does not name while the claim it actually re-posts
+    // mints a closure. Over a partial list the mint is already silent, so
+    // the verdict this leg reaches there is inert.
+    if (carried === undefined || !carriedWorkList.ids.has(carried))
+      repostUnidentified = true;
+    else repostedIds.add(carried);
+  }
+  const closuresThisRound: LedgerClosure[] =
+    carriedWorkList.complete &&
+    postedLedger !== null &&
+    !(prevFacts.foreign === true && prevFacts.merged !== true) &&
+    prevFacts.anonymousAdoption !== true &&
+    !repostUnidentified
+      ? prevFacts.findings
+          .filter(
+            (f) =>
+              f.sev === 'C' &&
+              !postedIds.has(f.id) &&
+              !repostedIds.has(f.id) &&
+              !standingClaims.has(claimLocator(f.title)),
+          )
+          .map((f) => ({ r: postedLedger.round, id: f.id, f: f.file }))
+      : [];
   // Is the loop settling? Measured from facts this round already holds — the
   // previous work list and volume from the side file, this round's drafts —
   // and rendered as an observation. It changes nothing about what the round
@@ -1762,6 +1881,14 @@ export function composeReview(
     reroute,
     {
       prev: prevForConvergence,
+      // The chain's two closure generations and its new side, all from the
+      // one build above — the marker stamps exactly these closures, so the
+      // note and the record cannot disagree.
+      closuresThisRound,
+      repostUnidentified,
+      ...(postedLedger === null
+        ? {}
+        : { thisRoundFindings: postedLedger.findings }),
       // Read from the same input `floorEnforcedReroute` just acted on, through
       // the one predicate both share — so the advice cannot recommend a floor
       // the enforcement above already applied, nor name it a way the
@@ -1805,21 +1932,13 @@ export function composeReview(
     result.dimensionGapsAreDepthOnly ?? false,
     attribution,
     runtimeModelId,
-    prevRound,
     prevFacts.src0,
     postedInline,
     result.postedFresh,
     prevFacts.posted,
     floorKind,
-    {
-      ids: new Set(prevFacts.findings.map((f) => f.id)),
-      // A round that recovered NO predecessor knows nothing about which ids
-      // were real — the id space is shared across environments and a first
-      // round on a machine with no side file is the ordinary case — so it
-      // cannot call a claimed id a stray. Only a recovered, untruncated list
-      // is evidence of absence.
-      complete: prevRound > 0 && !prevFacts.truncated,
-    },
+    postedLedger,
+    closuresThisRound,
     churnRounds,
     flatRounds,
   );
@@ -1998,9 +2117,11 @@ const EMPTY_PREV_FACTS = {
   churnRounds: 0,
   flatRounds: 0,
   findings: [] as LedgerFinding[],
+  closed: [] as LedgerClosure[],
   truncated: false,
   foreign: false,
   merged: false,
+  anonymousAdoption: false,
   anchored: false,
 };
 
@@ -2053,12 +2174,25 @@ function prevLedgerFacts(
    * as "the previous round found nothing".
    */
   findings: LedgerFinding[];
+  /**
+   * The Criticals the previous round closed — its marker's minted closures,
+   * validated through the ledger's own admission test like the findings.
+   * Feeds the successor-chain signal (#9905). Empty when nothing was
+   * recovered or the marker predates the field — silence, never a guess.
+   */
+  closed: LedgerClosure[];
   /** Its marker shed findings to fit the byte budget: the list is partial. */
   truncated: boolean;
   /** It was recovered from a marker this account did not post. */
   foreign: boolean;
   /** That marker was merged over this account's own findings. */
   merged: boolean;
+  /**
+   * Its findings were adopted by an ANONYMOUS whole-write — recovery ran
+   * with no identity to vouch them, so the closure mint reads the list
+   * like a pure-foreign one. Absent on files a pre-telemetry writer made.
+   */
+  anonymousAdoption: boolean;
   /** The posting floor it ran under, when its marker recorded one. */
   floor?: 'c' | 'o';
   /** How many of its comments were findings reported for the first time. */
@@ -2106,6 +2240,7 @@ function prevLedgerFacts(
     ) as Ledger & {
       foreign?: unknown;
       merged?: unknown;
+      anonymousAdoption?: unknown;
       anchorFromRound?: unknown;
     };
     const round =
@@ -2192,6 +2327,24 @@ function prevLedgerFacts(
       graftRefusedThisRound = inc.effective === false || inc.upToDate === true;
     }
 
+    // The previous round's minted closures, through the ledger's own
+    // admission test on the same route as the findings — the side file is
+    // the same untrusted shape arriving by another route, and a closure
+    // claiming a round past the file's own is a squat the parser refuses.
+    // The count cap binds here as on the two sibling routes (`parseLedger`
+    // and the serializer): the caps exist for the hand-edited or planted
+    // file, which is bound by no mint, and this route is the one a planted
+    // `qwen-review-pr-<n>-prev-ledger.json` arrives by.
+    // Travels with the round like the work list does: a file with no
+    // usable round is one this read cannot place, and its closures would
+    // seed the successor-chain check for a round this read calls 0.
+    const closed =
+      round === 0 || !Array.isArray(prev.closed)
+        ? []
+        : prev.closed
+            .filter((c): c is LedgerClosure => isLedgerClosure(c, round))
+            .slice(-LEDGER_MAX_CLOSED);
+
     return {
       round,
       src0,
@@ -2205,6 +2358,7 @@ function prevLedgerFacts(
       // for a round this read calls 0 — the posted body would cite rounds 5
       // and up beside a marker stamping round 1.
       findings: round === 0 ? [] : findings,
+      closed,
       // The marker had to shed findings to fit its byte budget, so what came
       // back is known-incomplete (measured at up to 35 shed per round on the
       // worst PRs this diagnosis speaks to). Carried rather than dropped: the
@@ -2221,6 +2375,9 @@ function prevLedgerFacts(
       // rendering says so rather than publishing the citation bare.
       foreign: round !== 0 && prev.foreign === true,
       merged: round !== 0 && prev.merged === true,
+      // Travels with the findings it qualifies and the round, for the same
+      // reason both of those do.
+      anonymousAdoption: round !== 0 && prev.anonymousAdoption === true,
       // The previous round's anchor, as a yes/no THIS round can use. Two
       // consecutive withholds are the shape the self-check discloses; the
       // sha itself is Step 1's business, not this read's. A CERTIFIED
@@ -2289,6 +2446,73 @@ export function anchorFailsClosed(
 }
 
 /**
+ * This round's work list as the marker will stamp it. Extracted from the
+ * marker builder so the closure mint and the successor-chain check read the
+ * SAME build — a second `buildLedger` call composed beside the first is the
+ * drift class the marker's own id space cannot survive (the two reads would
+ * disagree the moment either leg's inputs are edited).
+ *
+ * Null when the review names no PR — exactly the marker's own condition: a
+ * local review has no previous round to mint closures against, no marker to
+ * carry them, and no script-lint gate to read (its planPath is absent, and
+ * the gate demands one).
+ */
+function buildPostedLedger(
+  input: ComposeReviewInput,
+  round: number,
+  carriedWorkList: { ids: ReadonlySet<string>; complete: boolean },
+): Ledger | null {
+  const planPath = input.planPath;
+  if (planPath === undefined || !planNamesPr(planPath)) return null;
+  return buildLedger(
+    // Capped by the caller, because the round is the id space and the parser
+    // refuses an id from past the cap: an uncapped stamp of prevRound + 1 met
+    // the serializer's round clamp at exactly LEDGER_MAX_ROUND and produced a
+    // marker whose own parser dropped every finding — invisibly, with the
+    // anchor still riding. The recovery path already refuses rounds above the
+    // cap, so prevRound can reach it only AT the cap, where staying there
+    // loses id uniqueness across those rounds and nothing else — against a
+    // counter no real PR approaches.
+    round,
+    (input.draftedComments ?? []) as Array<{
+      path?: unknown;
+      line?: unknown;
+      body?: unknown;
+    }>,
+    [
+      // The same rule the body applied, through the same statement of
+      // it: a re-post of a claim the gate regenerates below is dropped
+      // here too, or the work-list grows a second entry for one blocker
+      // every round.
+      ...withoutGateReposts(
+        ingestEntryList(input.bodyCriticals, 'bodyCriticals'),
+        scriptLintGate(planPath).criticals,
+      ),
+      // The same split the body performed: a relocated Critical is a
+      // posted, counted blocker and must enter the work list.
+      ...splitDeferralChannel(input.deferredSuggestions).relocated,
+      // The gate's Criticals, for the same reason: a gate Critical is a
+      // posted, counted blocker too — leaving it out let the next
+      // round's persistence half read "no prior Critical" over a round
+      // that posted one (#9526).
+      //
+      // A SECOND invocation, not the body composer's result — the two
+      // live in different functions and nothing passes the value across.
+      // What makes them agree is that `scriptLintGate` is pure in
+      // `planPath` and its inputs (the plan JSON, the report, the diff)
+      // are immutable for the length of one synchronous compose; it is
+      // NOT the single-origin discipline `postedInline` gets one line
+      // below. So the standing hazard is an edit, not a race: anything
+      // that filters, caps, or carves out what the BODY pushes must
+      // change this list too, or the posted body and the carried work
+      // list stop describing the same round (R4-1).
+      ...scriptLintGate(planPath).criticals,
+    ],
+    carriedWorkList,
+  );
+}
+
+/**
  * The next round's marker, or null when this review has no PR to carry one.
  * Round number comes from the side file `pr-context` wrote from the PREVIOUS
  * posted round (+1) — never from the model, never from this input.
@@ -2300,19 +2524,36 @@ function ledgerMarkerFor(
   dimensionGapsAreDepthOnly: boolean,
   attribution: boolean,
   runtimeModelId: string | undefined,
-  prevRound: number,
   prevSrc0: number,
   postedInline: number,
   freshInline: number,
   prevPostedInline: number | undefined,
   floorKind: CriticalFloorKind | undefined,
-  carriedWorkList: { ids: ReadonlySet<string>; complete: boolean },
+  /**
+   * This round's work list AS BUILT by the caller — one id space shared
+   * with the closure mint and the successor-chain check, never a second
+   * build that could disagree with either. Null exactly when this review
+   * has no PR to carry a marker — the same condition this function's own
+   * `null` return names.
+   */
+  postedLedger: Ledger | null,
+  /**
+   * The closures the caller minted over the recovered previous list. The
+   * marker carries them so the next round's sentinel reads one generation
+   * back (#9905). Advisory data, but NOT like the findings: a closure is
+   * the inference "ruled fixed", and a fail-closed round supports no such
+   * inference — a vanished id may sit in the territory nobody re-read — so
+   * the field rides only when the anchor's own predicate lets the anchor
+   * ride, and the serializer's cascade sheds it before the anchor.
+   */
+  closed: LedgerClosure[],
   churnRounds: number,
   flatRounds: number,
 ): string | null {
   try {
     if (!input.planPath) return null;
     if (!planNamesPr(input.planPath)) return null;
+    if (postedLedger === null) return null;
     const plan = JSON.parse(readFileSync(input.planPath, 'utf8')) as {
       fetchedSha?: unknown;
       srcDiffLines?: unknown;
@@ -2422,52 +2663,11 @@ function ledgerMarkerFor(
         ? certifying
         : undefined;
     return serializeLedger({
-      ...buildLedger(
-        // Capped, because the round is the id space and the parser refuses an
-        // id from past the cap: an uncapped stamp of prevRound + 1 met the
-        // serializer's round clamp at exactly LEDGER_MAX_ROUND and produced a
-        // marker whose own parser dropped every finding — invisibly, with the
-        // anchor still riding. The recovery path already refuses rounds above
-        // the cap, so prevRound can reach it only AT the cap, where staying
-        // there loses id uniqueness across those rounds and nothing else —
-        // against a counter no real PR approaches.
-        Math.min(prevRound + 1, LEDGER_MAX_ROUND),
-        (input.draftedComments ?? []) as Array<{
-          path?: unknown;
-          line?: unknown;
-          body?: unknown;
-        }>,
-        [
-          // The same rule the body applied, through the same statement of
-          // it: a re-post of a claim the gate regenerates below is dropped
-          // here too, or the work-list grows a second entry for one blocker
-          // every round.
-          ...withoutGateReposts(
-            ingestEntryList(input.bodyCriticals, 'bodyCriticals'),
-            scriptLintGate(input.planPath).criticals,
-          ),
-          // The same split the body performed: a relocated Critical is a
-          // posted, counted blocker and must enter the work list.
-          ...splitDeferralChannel(input.deferredSuggestions).relocated,
-          // The gate's Criticals, for the same reason: a gate Critical is a
-          // posted, counted blocker too — leaving it out let the next
-          // round's persistence half read "no prior Critical" over a round
-          // that posted one (#9526).
-          //
-          // A SECOND invocation, not the body composer's result — the two
-          // live in different functions and nothing passes the value across.
-          // What makes them agree is that `scriptLintGate` is pure in
-          // `planPath` and its inputs (the plan JSON, the report, the diff)
-          // are immutable for the length of one synchronous compose; it is
-          // NOT the single-origin discipline `postedInline` gets one line
-          // below. So the standing hazard is an edit, not a race: anything
-          // that filters, caps, or carves out what the BODY pushes must
-          // change this list too, or the posted body and the carried work
-          // list stop describing the same round (R4-1).
-          ...scriptLintGate(input.planPath).criticals,
-        ],
-        carriedWorkList,
-      ),
+      ...postedLedger,
+      // Gated by the SAME predicate the diagnosis applies (composeReviewBody):
+      // one shared decision, evaluated once per consumer, over the one set
+      // of cap inputs the caller passes both.
+      ...(!failClosed && closed.length > 0 ? { closed } : {}),
       // The pair falls together: a sha with no model reads to the next
       // round as a pre-field marker rather than as "nobody certified this".
       ...(shaCandidate && !identityDrifted ? { sha: shaCandidate } : {}),
@@ -2650,6 +2850,22 @@ function composeReviewBody(
     prev: PrevRound;
     floor?: 'c' | 'o';
     criticalFloorKind?: CriticalFloorKind;
+    /**
+     * The closures this round mints and this round's built work list — the
+     * successor-chain check's two inputs (#9905), both computed by the
+     * caller from the one `buildPostedLedger` build the marker stamps.
+     * Absent in direct-call tests: the signal reads `[]` and stays silent.
+     */
+    closuresThisRound?: readonly LedgerClosure[];
+    thisRoundFindings?: readonly LedgerFinding[];
+    /**
+     * Whether a re-post channel carried an element the recovered work list
+     * cannot place — an entry bearing no id that list held. The caller's
+     * closure mint fails closed over that state, and the `land-and-defer`
+     * gate below rests on the identical absence inference, so it withholds
+     * on it too — the same honesty leg, one consumer over.
+     */
+    repostUnidentified?: boolean;
     /**
      * Whether the CODE backstop enforces the floor this round reports. The
      * two readings differ by one thing — the reporting one folds an absent
@@ -3549,6 +3765,18 @@ function composeReviewBody(
         posted: postedInline,
         prev: convergence.prev,
         drafts: draftedFindingsOf(input.draftedComments),
+        // The fail-closed leg the mint's comment names: cappedBy and
+        // scopeUnproven are only known here, after the body's caps were
+        // computed, so this is where the gate applies for the note — the
+        // marker applies the same predicate for the record (ledgerMarkerFor),
+        // and the two cannot disagree about what closed.
+        ...(convergence.closuresThisRound === undefined ||
+        anchorFailsClosed(cappedBy, scopeUnproven, dimensionGapsAreDepthOnly)
+          ? {}
+          : { closuresThisRound: convergence.closuresThisRound }),
+        ...(convergence.thisRoundFindings === undefined
+          ? {}
+          : { thisRoundFindings: convergence.thisRoundFindings }),
         ...(convergence.floor === undefined
           ? {}
           : { floor: convergence.floor }),
@@ -3584,6 +3812,14 @@ function composeReviewBody(
         // - a PURE-FOREIGN list (foreign, not merged over this account's
         //   own): this account's entries are in no work list at all, so its
         //   own open Criticals cannot be re-posted.
+        // - an ANONYMOUSLY ADOPTED list: the persist seam's record that the
+        //   findings were adopted with no identity to vouch them. The same
+        //   leg the closure mint reads — the list walks like a pure-foreign
+        //   one through every absence inference.
+        // - an UNACCOUNTED re-post: a deferral or reroute entry this round
+        //   posted bears no id the recovered work list held, so a vanished
+        //   Critical may be the claim it re-voices. The caller's mint fails
+        //   closed over the same state.
         //
         // Passed anyway, the body carries "no Critical is open" beside its
         // own disclosure of what it could not read, and the artifact tells a
@@ -3594,7 +3830,11 @@ function composeReviewBody(
           dimensionGapsAreDepthOnly,
         ) &&
         convergence.prev.complete === true &&
-        !(convergence.prev.foreign === true && convergence.prev.merged !== true)
+        !(
+          convergence.prev.foreign === true && convergence.prev.merged !== true
+        ) &&
+        convergence.prev.anonymousAdoption !== true &&
+        convergence.repostUnidentified !== true
           ? { openCriticals }
           : {}),
       })
@@ -5585,18 +5825,9 @@ export function withoutGateReposts(
   ownBodyCriticals: readonly string[],
   gateCriticals: readonly string[],
 ): string[] {
-  const locator = (entry: string): string => {
-    const claim = entry.trim().replace(LEDGER_ID_READBACK, '').trim();
-    const dash = claim.indexOf(' — ');
-    // Backticks stripped: the gate renders the path through `mdField`, and a
-    // re-post that types the locator plainly names the same finding.
-    return (dash === -1 ? claim : claim.slice(0, dash))
-      .replace(/`/g, '')
-      .trim();
-  };
-  const regenerated = new Set(gateCriticals.map(locator).filter((k) => k));
+  const regenerated = new Set(gateCriticals.map(claimLocator).filter((k) => k));
   if (regenerated.size === 0) return [...ownBodyCriticals];
-  return ownBodyCriticals.filter((c) => !regenerated.has(locator(c)));
+  return ownBodyCriticals.filter((c) => !regenerated.has(claimLocator(c)));
 }
 
 /**
