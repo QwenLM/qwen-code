@@ -219,6 +219,149 @@ export function extractLastJsonStringFields(
 }
 
 /**
+ * The outcome of scanning for a field on the LAST line carrying a marker.
+ * Distinguishes "the newest record omits this field" from "no such record
+ * was in view" — a difference `extractLastJsonStringField` erases, because
+ * it keeps looking at older lines until some line does carry the field.
+ */
+export interface LastMatchingLineField {
+  /** A line containing the marker was found in the scanned text. */
+  matched: boolean;
+  /** The field's value on that line — `undefined` when the line omits it. */
+  value: string | undefined;
+}
+
+/**
+ * Outcome of {@link readLastMatchingLineFieldSync}. A miss is not one thing:
+ * only `absent` proves the record does not exist, and callers that would
+ * otherwise fall back to a weaker source need to tell the three apart.
+ */
+export type LastMatchingLineScan =
+  | { matched: true; value: string | undefined }
+  | {
+      matched: false;
+      /**
+       * - `absent` — the whole file was scanned and carries no such line.
+       * - `out-of-window` — the file is larger than the scan window and the
+       *   line is not in the tail; a newer record may exist out of reach.
+       * - `unreadable` — the file could not be stat'ed, opened, or read.
+       */
+      reason: 'absent' | 'out-of-window' | 'unreadable';
+    };
+
+/**
+ * Reads `key` from the LAST line containing `lineContains`, instead of the
+ * last occurrence of `key` across every matching line.
+ *
+ * For lifecycle records this is the only correct reading. A record set where
+ * a later entry legitimately drops the field — a `goal_state` record for a
+ * cleared Goal carries `goal: null` and no `objective` — must not be read as
+ * "the field is still whatever the previous record said". `matched: true`
+ * with `value: undefined` is that answer, and it is different from
+ * `matched: false`, which means no such record was in view at all.
+ *
+ * The first line is skipped unless `wholeLines` is set: a tail-window read
+ * starts mid-record, and a partial line can carry the marker while its
+ * fields sit before the window. Such a line only ever "wins" when no
+ * complete matching line follows it, and then it would answer with a
+ * spurious `undefined`.
+ */
+export function extractJsonStringFieldFromLastMatchingLine(
+  text: string,
+  lineContains: string,
+  key: string,
+  wholeLines = false,
+): LastMatchingLineField {
+  const firstLineEnd = text.indexOf('\n');
+  // Everything before `floor` belongs to the leading partial line.
+  const floor = wholeLines || firstLineEnd < 0 ? 0 : firstLineEnd + 1;
+  const hit = text.lastIndexOf(lineContains);
+  if (hit < floor) return { matched: false, value: undefined };
+  const lineStart = text.lastIndexOf('\n', hit) + 1;
+  const eol = text.indexOf('\n', hit);
+  const line = text.slice(lineStart, eol < 0 ? text.length : eol);
+  return { matched: true, value: extractJsonStringField(line, key) };
+}
+
+/**
+ * File-level counterpart of
+ * {@link extractJsonStringFieldFromLastMatchingLine}: reads the marker's
+ * last line from the tail window only.
+ *
+ * There is deliberately no head-window fallback. {@link
+ * readLastJsonStringFieldSync} can fall back because a title read only ever
+ * gets *staler*, never wrong: the head copy of a title is a title the
+ * session really had. A lifecycle field is different — a head-window hit on
+ * a file larger than the window means an unknown number of later records,
+ * including the one that cleared the state, are unreadable, so the value
+ * cannot be trusted. `complete` reports whether the scan saw the whole file,
+ * which is what lets a caller tell "no such record exists" from "no such
+ * record was reachable".
+ *
+ * Worst-case I/O: 1 × LITE_READ_BUF_SIZE per file (plus one re-read when a
+ * concurrent writer grows the file, matching the sibling reader's bound).
+ */
+export function readLastMatchingLineFieldSync(
+  filePath: string,
+  lineContains: string,
+  key: string,
+  scratchBuffer?: Buffer,
+): LastMatchingLineScan {
+  let fd: number | undefined;
+  try {
+    const stats = fs.statSync(filePath);
+    const fileSize = stats.size;
+    if (fileSize === 0) return { matched: false, reason: 'absent' };
+
+    fd = fs.openSync(filePath, getReadOpenFlags());
+    const buffer =
+      scratchBuffer && scratchBuffer.length >= LITE_READ_BUF_SIZE
+        ? scratchBuffer
+        : Buffer.alloc(LITE_READ_BUF_SIZE);
+
+    const scanTail = (size: number): LastMatchingLineScan | undefined => {
+      const tailLength = Math.min(size, LITE_READ_BUF_SIZE);
+      const tailOffset = size - tailLength;
+      const tailBytes = fs.readSync(fd!, buffer, 0, tailLength, tailOffset);
+      if (tailBytes <= 0) return undefined;
+      const hit = extractJsonStringFieldFromLastMatchingLine(
+        buffer.toString('utf-8', 0, tailBytes),
+        lineContains,
+        key,
+        tailOffset === 0,
+      );
+      if (hit.matched) return { matched: true, value: hit.value };
+      return tailOffset === 0
+        ? { matched: false, reason: 'absent' }
+        : { matched: false, reason: 'out-of-window' };
+    };
+
+    const fromTail = scanTail(fileSize);
+    if (fromTail?.matched) return fromTail;
+
+    // A concurrent writer may have appended a newer lifecycle record between
+    // the stat and the read; one bounded re-read catches it.
+    const grownSize = fs.fstatSync(fd).size;
+    if (grownSize > fileSize) {
+      const fromGrownTail = scanTail(grownSize);
+      if (fromGrownTail) return fromGrownTail;
+    }
+
+    return fromTail ?? { matched: false, reason: 'unreadable' };
+  } catch {
+    return { matched: false, reason: 'unreadable' };
+  } finally {
+    if (fd !== undefined) {
+      try {
+        fs.closeSync(fd);
+      } catch {
+        // best-effort: the result is already decided
+      }
+    }
+  }
+}
+
+/**
  * Like extractJsonStringField but finds the LAST occurrence.
  * Useful for fields that are appended (customTitle, aiTitle, etc.)
  * where the most recent entry should win.

@@ -13,6 +13,8 @@ import {
   extractLastJsonStringField,
   extractLastJsonStringFields,
   LITE_READ_BUF_SIZE,
+  extractJsonStringFieldFromLastMatchingLine,
+  readLastMatchingLineFieldSync,
   readLastJsonStringFieldSync,
   readLastJsonStringFieldsSync,
   unescapeJsonString,
@@ -176,6 +178,175 @@ describe('sessionStorageUtils', () => {
         (_, i) => `{"customTitle":"title-${i}"}`,
       ).join('\n');
       expect(extractLastJsonStringField(lines, 'customTitle')).toBe('title-9');
+    });
+  });
+
+  describe('extractJsonStringFieldFromLastMatchingLine', () => {
+    const GOAL = '"subtype":"goal_state"';
+    const create = (objective: string) =>
+      `{"type":"system","subtype":"goal_state","systemPayload":{"snapshot":{"goal":{"objective":"${objective}"}}}}`;
+    // `/goal clear` writes `goal: null` and a `clearedGoal` order — the line
+    // carries no `objective` at all.
+    const clear =
+      '{"type":"system","subtype":"goal_state","systemPayload":{"snapshot":{"goal":null,"clearedGoal":{"goalId":"g1"}}}}';
+
+    it('reads the field from the last matching line', () => {
+      const text = [create('first'), create('second')].join('\n');
+      expect(
+        extractJsonStringFieldFromLastMatchingLine(
+          text,
+          GOAL,
+          'objective',
+          true,
+        ),
+      ).toEqual({ matched: true, value: 'second' });
+    });
+
+    it('reports a matched line that omits the field, rather than an older value', () => {
+      const text = [create('first'), clear].join('\n');
+      expect(
+        extractJsonStringFieldFromLastMatchingLine(
+          text,
+          GOAL,
+          'objective',
+          true,
+        ),
+      ).toEqual({ matched: true, value: undefined });
+    });
+
+    it('reports no match when no line carries the marker', () => {
+      const text = '{"type":"user","message":"hi"}';
+      expect(
+        extractJsonStringFieldFromLastMatchingLine(
+          text,
+          GOAL,
+          'objective',
+          true,
+        ),
+      ).toEqual({ matched: false, value: undefined });
+    });
+
+    it('ignores a leading partial line unless told the text starts on a boundary', () => {
+      // A tail-window read starts mid-record: the marker is in view but the
+      // fields that precede it are not.
+      const partial = `"goal":{"objective":"cut off"}}}\n${create('whole')}`;
+      expect(
+        extractJsonStringFieldFromLastMatchingLine(
+          `{"subtype":"goal_state","x":${partial}`,
+          GOAL,
+          'objective',
+        ),
+      ).toEqual({ matched: true, value: 'whole' });
+
+      const onlyPartial = '{"snapshot":{}},"subtype":"goal_state"}\n';
+      expect(
+        extractJsonStringFieldFromLastMatchingLine(
+          onlyPartial,
+          GOAL,
+          'objective',
+        ),
+      ).toEqual({ matched: false, value: undefined });
+    });
+  });
+
+  describe('readLastMatchingLineFieldSync', () => {
+    const GOAL = '"subtype":"goal_state"';
+    let tmpDir: string;
+
+    beforeEach(() => {
+      tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sst-lastline-'));
+    });
+
+    afterEach(() => {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    });
+
+    const create = (objective: string) =>
+      `{"type":"system","subtype":"goal_state","systemPayload":{"snapshot":{"goal":{"objective":"${objective}"}}}}`;
+    const clear =
+      '{"type":"system","subtype":"goal_state","systemPayload":{"snapshot":{"goal":null}}}';
+    const filler = (bytes: number) =>
+      Array.from(
+        { length: Math.ceil(bytes / 100) },
+        (_, i) => `{"type":"user","message":"${'x'.repeat(80)}-${i}"}`,
+      ).join('\n');
+
+    function writeFile(name: string, lines: string[]): string {
+      const p = path.join(tmpDir, name);
+      fs.writeFileSync(p, lines.join('\n') + '\n');
+      return p;
+    }
+
+    it('returns the objective of the only goal record', () => {
+      const p = writeFile('small.jsonl', [create('Ship it')]);
+      expect(readLastMatchingLineFieldSync(p, GOAL, 'objective')).toEqual({
+        matched: true,
+        value: 'Ship it',
+      });
+    });
+
+    it('does not resurrect a cleared objective from an earlier record', () => {
+      const p = writeFile('cleared.jsonl', [
+        create('Write the release notes'),
+        clear,
+      ]);
+      expect(readLastMatchingLineFieldSync(p, GOAL, 'objective')).toEqual({
+        matched: true,
+        value: undefined,
+      });
+    });
+
+    it('reads the clear record when it sits at EOF of a long transcript', () => {
+      const p = writeFile('long-cleared.jsonl', [
+        create('Write the migration guide'),
+        filler(LITE_READ_BUF_SIZE * 3),
+        clear,
+      ]);
+      expect(readLastMatchingLineFieldSync(p, GOAL, 'objective')).toEqual({
+        matched: true,
+        value: undefined,
+      });
+    });
+
+    it('does not fall back to the head window when the goal record is out of reach', () => {
+      // The clear record fell out of the tail window along with the create
+      // record. A head-window hit would resurrect the long-cleared objective.
+      const p = writeFile('out-of-reach.jsonl', [
+        create('Write the migration guide'),
+        clear,
+        filler(LITE_READ_BUF_SIZE * 3),
+      ]);
+      expect(readLastMatchingLineFieldSync(p, GOAL, 'objective')).toEqual({
+        matched: false,
+        reason: 'out-of-window',
+      });
+    });
+
+    it('reports an absent record for a file with no goal line', () => {
+      const p = writeFile('none.jsonl', ['{"type":"user","message":"hi"}']);
+      expect(readLastMatchingLineFieldSync(p, GOAL, 'objective')).toEqual({
+        matched: false,
+        reason: 'absent',
+      });
+    });
+
+    it('reports an unreadable file rather than an absent record', () => {
+      expect(
+        readLastMatchingLineFieldSync(
+          path.join(tmpDir, 'nope.jsonl'),
+          GOAL,
+          'objective',
+        ),
+      ).toEqual({ matched: false, reason: 'unreadable' });
+    });
+
+    it('treats an empty file as an absent record', () => {
+      const p = path.join(tmpDir, 'empty.jsonl');
+      fs.writeFileSync(p, '');
+      expect(readLastMatchingLineFieldSync(p, GOAL, 'objective')).toEqual({
+        matched: false,
+        reason: 'absent',
+      });
     });
   });
 
