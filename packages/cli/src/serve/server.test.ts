@@ -160,6 +160,7 @@ import type {
   ServeWorkspaceSkillsStatus,
   ServeWorkspaceToolsStatus,
 } from '@qwen-code/acp-bridge/status';
+import { SERVE_CONTROL_EXT_METHODS } from '@qwen-code/acp-bridge/status';
 import { CAPABILITIES_SCHEMA_VERSION, type ServeOptions } from './types.js';
 import { isValidSessionId } from '../config/config.js';
 import type { DaemonLogger } from './daemon-logger.js';
@@ -4186,6 +4187,62 @@ describe('createServeApp', () => {
       expect(after.status).toBe(200);
       expect(after.body.features).toContain('multi_workspace_sessions');
       expect(after.body.workspaces).toHaveLength(2);
+    });
+
+    it('fans a user-scope Session Workflow write out to sibling workspace bridges (R6-4)', async () => {
+      // A user-scope write persists to the global user file and flips the
+      // gate for every workspace, but each runtime owns its own bridge. The
+      // legacy route's push must reach the sibling runtimes too, not just
+      // the primary.
+      const primaryInvoke = vi.fn().mockResolvedValue(undefined);
+      const secondaryInvoke = vi.fn().mockResolvedValue(undefined);
+      const primaryBridge = {
+        ...fakeBridge(),
+        invokeWorkspaceCommand: primaryInvoke,
+        publishWorkspaceEvent: vi.fn(),
+      } as unknown as AcpSessionBridge;
+      const secondaryBridge = {
+        invokeWorkspaceCommand: secondaryInvoke,
+      } as unknown as AcpSessionBridge;
+      const registry = createWorkspaceRegistry([
+        makeWorkspaceRuntimeForTest({
+          workspaceId: 'primary-id',
+          workspaceCwd: WS_BOUND,
+          primary: true,
+          bridge: primaryBridge,
+        }),
+        makeWorkspaceRuntimeForTest({
+          workspaceId: 'secondary-id',
+          workspaceCwd: '/workspace/secondary',
+          primary: false,
+          bridge: secondaryBridge,
+        }),
+      ]);
+      const app = createServeApp({ ...baseOpts, token: 'secret' }, undefined, {
+        bridge: primaryBridge,
+        workspaceRegistry: registry,
+        persistSetting: vi.fn(async () => undefined),
+      });
+
+      const res = await request(app)
+        .post('/workspace/settings')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .send({
+          scope: 'user',
+          key: 'experimental.sessionWorkflow',
+          value: true,
+        });
+
+      expect(res.status).toBe(200);
+      expect(primaryInvoke).toHaveBeenCalledWith(
+        SERVE_CONTROL_EXT_METHODS.workspaceSessionWorkflow,
+        { enabled: expect.any(Boolean) },
+      );
+      expect(secondaryInvoke).toHaveBeenCalledWith(
+        SERVE_CONTROL_EXT_METHODS.workspaceSessionWorkflow,
+        { enabled: expect.any(Boolean) },
+      );
     });
 
     it('classifies the daemon-owned Live runtime without exposing provenance', async () => {

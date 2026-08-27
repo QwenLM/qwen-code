@@ -75,6 +75,7 @@ function makeApp(
   });
   const updateSessionWorkflow = vi.fn().mockResolvedValue(undefined);
   const broadcastSettingsChanged = vi.fn();
+  const updateSiblingSessionWorkflows = vi.fn().mockResolvedValue(undefined);
 
   registerWorkspaceSettingsRoutes(app, {
     boundWorkspace: '/workspace',
@@ -83,6 +84,7 @@ function makeApp(
       req.body && typeof req.body === 'object' ? req.body : {},
     persistSetting,
     updateSessionWorkflow,
+    updateSiblingSessionWorkflows,
     broadcastSettingsChanged,
     parseAndValidateClientId: () => undefined,
     captureGenerationAssertion: overrides.captureGenerationAssertion,
@@ -93,6 +95,7 @@ function makeApp(
     app,
     persistSetting,
     updateSessionWorkflow,
+    updateSiblingSessionWorkflows,
     broadcastSettingsChanged,
   };
 }
@@ -222,6 +225,41 @@ describe('POST /workspace/settings', () => {
     expect(persistSetting).toHaveBeenCalled();
     expect(updateSessionWorkflow).toHaveBeenCalledWith(true);
     expect(updateSessionWorkflow).not.toHaveBeenCalledWith(false);
+  });
+
+  it('fans a user-scope Session Workflow write out to sibling workspaces', async () => {
+    // A user-scope write lands in the global user file and flips the gate
+    // for every workspace; the route must fan the re-derivation out to the
+    // non-primary runtimes after the primary push succeeds.
+    const { app, updateSiblingSessionWorkflows } = makeApp({
+      workspaceSettings: { experimental: { sessionWorkflow: true } },
+    });
+
+    const res = await request(app).post('/workspace/settings').send({
+      scope: 'user',
+      key: 'experimental.sessionWorkflow',
+      value: true,
+    });
+
+    expect(res.status).toBe(200);
+    expect(updateSiblingSessionWorkflows).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not fan out a workspace-scope Session Workflow write', async () => {
+    // A workspace-scope write only touches this workspace's file; siblings
+    // keep their own value, so no fan-out may fire.
+    const { app, updateSiblingSessionWorkflows } = makeApp({
+      workspaceSettings: { experimental: { sessionWorkflow: true } },
+    });
+
+    const res = await request(app).post('/workspace/settings').send({
+      scope: 'workspace',
+      key: 'experimental.sessionWorkflow',
+      value: true,
+    });
+
+    expect(res.status).toBe(200);
+    expect(updateSiblingSessionWorkflows).not.toHaveBeenCalled();
   });
 
   it('holds a second Session Workflow write until the first write finished its live push', async () => {

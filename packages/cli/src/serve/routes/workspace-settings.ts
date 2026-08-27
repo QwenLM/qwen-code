@@ -347,6 +347,15 @@ export interface WorkspaceSettingsRouteDeps {
     assertGenerationOpen?: () => void,
   ) => Promise<void>;
   updateSessionWorkflow: (enabled: boolean) => Promise<unknown>;
+  /**
+   * Fan a user-scope Session Workflow write out to the non-primary workspace
+   * runtimes. A user-scope write persists to the global user file and flips
+   * the effective gate for every workspace, but `updateSessionWorkflow` only
+   * reaches the primary bridge; each sibling runtime owns its own bridge and
+   * would otherwise keep deriving the stale gate. Best-effort by contract:
+   * implementations must not throw for an unreachable sibling.
+   */
+  updateSiblingSessionWorkflows?: () => Promise<void>;
   broadcastSettingsChanged: (
     key: string,
     value: unknown,
@@ -363,7 +372,7 @@ export interface WorkspaceSettingsRouteDeps {
 // A user-scoped write can be shadowed by a workspace-scoped value (workspace
 // wins the merge), so live sessions must follow the post-write effective value
 // rather than the raw value that was just written.
-function readEffectiveSessionWorkflow(
+export function readEffectiveSessionWorkflow(
   boundWorkspace: string,
   workspaceTrusted: boolean,
 ): boolean {
@@ -648,6 +657,15 @@ export function registerWorkspaceSettingsRoutes(
               if (sendGenerationClosedError(res, err))
                 return 'unchanged_failure';
               throw err;
+            }
+            // A user-scope write lands in the global user file, so the gate
+            // flips for every workspace on the host; the primary push above
+            // only reached the primary bridge. Fan the re-derivation out to
+            // the sibling runtimes (best-effort, non-throwing by contract).
+            // A workspace-scope write only touched this workspace's file, so
+            // siblings keep their own value and need no push.
+            if (settingScope === SettingScope.User) {
+              await deps.updateSiblingSessionWorkflows?.();
             }
           }
           return 'ok';
