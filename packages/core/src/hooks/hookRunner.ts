@@ -813,13 +813,20 @@ export class HookRunner {
           detached: process.platform !== 'win32',
         },
       );
-      registerActivePosixHookProcess(child);
+      const survivesParentExit =
+        eventName === HookEventName.MessageDisplay ||
+        this.isAsyncHook(hookConfig);
+      if (!survivesParentExit) {
+        registerActivePosixHookProcess(child);
+      }
 
       let abortListenerAttached = false;
 
       const cleanup = () => {
         clearTimeout(timeoutHandle);
-        unregisterActivePosixHookProcess(child);
+        if (!survivesParentExit) {
+          unregisterActivePosixHookProcess(child);
+        }
         if (signal && abortListenerAttached) {
           signal.removeEventListener('abort', abortHandler);
           abortListenerAttached = false;
