@@ -17,7 +17,7 @@
  * `buildComment`) are exported and tested. The file also runs as a CLI for the
  * workflow:
  *   node web-shell-visuals-publish.mjs stage   <screenshotsDir> <gifsDir> <stageDir>
- *   node web-shell-visuals-publish.mjs comment <stageDir> <rawBase> <shortSha> <runUrl> <bodyFile> [changedPathsFile] [renderStatusFile]
+ *   node web-shell-visuals-publish.mjs comment <stageDir> <rawBase> <shortSha> <runUrl> <bodyFile> [changedPathsFile] [renderStatusFile] [hostingStatusFile]
  */
 
 import {
@@ -228,6 +228,12 @@ export function buildComment(files, ctx = {}) {
   out.push('#### Screenshots · before / after');
   out.push('');
   if (hostingFailed) {
+    if (renderIncomplete) {
+      out.push(
+        `⚠️ _One or more scenarios failed to render_ on this head, so this preview may be missing views${runLink}.`,
+      );
+      out.push('');
+    }
     out.push(
       `⚠️ _Preview images rendered, but the publish workflow failed to host them on the PR assets branch${runLink}._ This comment was still refreshed so stale images from an older push do not remain attached to this SHA.`,
     );

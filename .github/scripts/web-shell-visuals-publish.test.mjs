@@ -5,8 +5,18 @@
  */
 
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import test from 'node:test';
+import { fileURLToPath } from 'node:url';
 
 import {
   buildComment,
@@ -29,6 +39,9 @@ const publishWorkflow = () =>
     new URL('../workflows/web-shell-visuals-publish.yml', import.meta.url),
     'utf8',
   );
+const publishScriptPath = fileURLToPath(
+  new URL('./web-shell-visuals-publish.mjs', import.meta.url),
+);
 
 test('sanitizeName preserves the extension (regression: a trailing char broke the .png filter)', () => {
   assert.equal(
@@ -177,8 +190,55 @@ test('buildComment: hosting failure reports rendered assets without broken image
   assert.match(body, /failed to host/i);
   assert.match(body, /home-light\.png/);
   assert.match(body, /model-switch\.gif/);
-  assert.match(body, /https:\/\/run\.example\/7/);
+  assert.match(body, /\[workflow run\]\(https:\/\/run\.example\/7\)/);
   assert.doesNotMatch(body, /<img /);
+});
+
+test('buildComment: hosting failure preserves render-failure caveat', () => {
+  const body = buildComment(['home-light.png', 'model-switch.gif'], {
+    hostingFailed: true,
+    renderIncomplete: true,
+    runUrl: 'https://run.example/7',
+  });
+  assert.match(body, /failed to render/i);
+  assert.match(body, /failed to host/i);
+  assert.match(body, /\[workflow run\]\(https:\/\/run\.example\/7\)/);
+  assert.doesNotMatch(body, /<img /);
+});
+
+test('comment CLI reads hosting failure status from the eighth argument', () => {
+  const root = mkdtempSync(join(tmpdir(), 'web-shell-visuals-'));
+  try {
+    const stageDir = join(root, 'stage');
+    const bodyFile = join(root, 'body.md');
+    const changedPathsFile = join(root, 'paths.txt');
+    const renderStatusFile = join(root, 'render-status.txt');
+    const hostingStatusFile = join(root, 'hosting-status.txt');
+    mkdirSync(stageDir);
+    writeFileSync(join(stageDir, 'home-light.png'), '');
+    writeFileSync(changedPathsFile, '');
+    writeFileSync(renderStatusFile, 'success\n');
+    writeFileSync(hostingStatusFile, 'failure\n');
+
+    execFileSync(process.execPath, [
+      publishScriptPath,
+      'comment',
+      stageDir,
+      'https://assets.example/pr',
+      'abc1234',
+      'https://run.example/7',
+      bodyFile,
+      changedPathsFile,
+      renderStatusFile,
+      hostingStatusFile,
+    ]);
+
+    const body = readFileSync(bodyFile, 'utf8');
+    assert.match(body, /failed to host/i);
+    assert.doesNotMatch(body, /<img /);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 // --- Empty-preview triage (coverage gap vs. genuinely no visual effect) ---
@@ -366,9 +426,12 @@ test('publish workflow passes hosting failures through to the comment builder', 
     /HOSTING_STATUS_FILE="\$\{RUNNER_TEMP\}\/visuals-hosting-status\.txt"/,
   );
   assert.match(workflow, /echo 'failure' > "\$\{HOSTING_STATUS_FILE\}"/);
-  assert.match(workflow, /"\$\{HOSTING_STATUS_FILE\}"/);
+  assert.match(
+    workflow,
+    /"\$\{RENDER_STATUS_FILE\}" \\\n\s+"\$\{HOSTING_STATUS_FILE\}"/,
+  );
   assert.doesNotMatch(
     workflow,
-    /Failed to push web-shell visuals to \$\{BRANCH\} after retries\."\n\s+exit 1/,
+    /echo 'failure' > "\$\{HOSTING_STATUS_FILE\}"\n\s+exit 1/,
   );
 });
