@@ -1488,6 +1488,7 @@ describe('loadCliConfig', () => {
     });
 
     it('treats "default" as no style, even when the setting names one', async () => {
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
       process.argv = ['node', 'script.js', '--output-style', 'default'];
       const argv = await parseArguments();
       const config = await loadCliConfig(
@@ -1495,6 +1496,33 @@ describe('loadCliConfig', () => {
         argv,
       );
       expect(config.getOutputStyle()).toBeUndefined();
+      // The sentinel must stay silent: falling through to the unknown-name
+      // path would warn on every startup for a documented value.
+      expect(errorSpy).not.toHaveBeenCalled();
+    });
+
+    it('treats a "default" setting as no style, without warning', async () => {
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+      const config = await loadCliConfig(
+        { general: { outputStyle: 'DEFAULT' } },
+        argv,
+      );
+      expect(config.getOutputStyle()).toBeUndefined();
+      expect(errorSpy).not.toHaveBeenCalled();
+    });
+
+    it('treats a whitespace-only value as no style, without warning', async () => {
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+      const config = await loadCliConfig(
+        { general: { outputStyle: '   ' } },
+        argv,
+      );
+      expect(config.getOutputStyle()).toBeUndefined();
+      expect(errorSpy).not.toHaveBeenCalled();
     });
 
     it('warns about an unknown style and falls back to the default', async () => {
@@ -1524,6 +1552,57 @@ describe('loadCliConfig', () => {
       expect(config.getOutputStyle()).toBeUndefined();
       expect(errorSpy).toHaveBeenCalledWith(
         expect.stringContaining('(from --output-style)'),
+      );
+    });
+
+    // `loadSettings` casts parsed settings.json to `Settings` without checking
+    // value types, so a hand-edited non-string value reaches this code as-is.
+    // Starting up beats a TypeError that locks everyone out of the project.
+    it.each([
+      ['a number', 1],
+      ['a boolean', true],
+      ['an object', {}],
+      ['an array', ['Concise']],
+    ])(
+      'warns and starts with the default style when the setting is %s',
+      async (_label, value) => {
+        const errorSpy = vi
+          .spyOn(console, 'error')
+          .mockImplementation(() => {});
+        process.argv = ['node', 'script.js'];
+        const argv = await parseArguments();
+        const config = await loadCliConfig(
+          { general: { outputStyle: value as unknown as string } },
+          argv,
+        );
+        expect(config.getOutputStyle()).toBeUndefined();
+        expect(errorSpy).toHaveBeenCalledWith(
+          expect.stringContaining(
+            'Invalid output style value (from general.outputStyle)',
+          ),
+        );
+      },
+    );
+
+    it('warns and starts with the default style when --output-style is repeated', async () => {
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      // yargs delivers an array for a repeated flag despite `type: 'string'`.
+      process.argv = [
+        'node',
+        'script.js',
+        '--output-style',
+        'Concise',
+        '--output-style',
+        'Proactive',
+      ];
+      const argv = await parseArguments();
+      expect(Array.isArray(argv.outputStyle)).toBe(true);
+      const config = await loadCliConfig({}, argv);
+      expect(config.getOutputStyle()).toBeUndefined();
+      expect(errorSpy).toHaveBeenCalledWith(
+        expect.stringContaining(
+          'Invalid output style value (from --output-style)',
+        ),
       );
     });
   });

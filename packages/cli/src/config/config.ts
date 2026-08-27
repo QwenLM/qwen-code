@@ -1512,12 +1512,30 @@ export class SessionIdConflictError extends Error {
  * An unknown name is reported and the session falls back to the default
  * style rather than refusing to start, so a typo in settings.json never
  * locks the user out.
+ *
+ * Both inputs are typed `unknown` on purpose: `loadSettings` casts parsed
+ * settings.json straight to `Settings` without validating value types, and a
+ * repeated `--output-style` flag makes yargs hand over an array despite
+ * `type: 'string'`. A non-string value warns and falls back to the default
+ * style, on the same no-lockout principle as an unknown name.
  */
 export function resolveOutputStyle(
-  argvStyle: string | undefined,
-  settingsStyle: string | undefined,
+  argvStyle: unknown,
+  settingsStyle: unknown,
 ): OutputStyleDefinition | undefined {
-  const name = (argvStyle ?? settingsStyle)?.trim();
+  const fromArgv = argvStyle !== undefined && argvStyle !== null;
+  const raw = fromArgv ? argvStyle : settingsStyle;
+  if (raw === undefined || raw === null) {
+    return undefined;
+  }
+  const source = fromArgv ? '--output-style' : 'general.outputStyle';
+  if (typeof raw !== 'string') {
+    warnAboutOutputStyle(
+      `Invalid output style value (from ${source}); using the default style.`,
+    );
+    return undefined;
+  }
+  const name = raw.trim();
   if (!name || name.toLowerCase() === 'default') {
     return undefined;
   }
@@ -1526,13 +1544,16 @@ export function resolveOutputStyle(
     return style;
   }
   const known = BUILT_IN_OUTPUT_STYLES.map((s) => s.name).join(', ');
-  const source =
-    argvStyle !== undefined ? '--output-style' : 'general.outputStyle';
-  const warning = `Unknown output style "${name}" (from ${source}); using the default style. Available styles: ${known}.`;
+  warnAboutOutputStyle(
+    `Unknown output style "${name}" (from ${source}); using the default style. Available styles: ${known}.`,
+  );
+  return undefined;
+}
+
+function warnAboutOutputStyle(warning: string): void {
   debugLogger.warn(warning);
   // eslint-disable-next-line no-console
   console.error(`WARNING: ${warning}`);
-  return undefined;
 }
 
 export async function loadCliConfig(

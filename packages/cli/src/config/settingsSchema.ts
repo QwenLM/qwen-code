@@ -437,7 +437,10 @@ const SETTINGS_SCHEMA = {
         type: 'string',
         label: 'Output Style',
         category: 'General',
-        requiresRestart: false,
+        // Read once in `loadCliConfig` and frozen into `Config`; nothing
+        // applies a mid-session change, so the restart hint is the honest
+        // answer. Same as `general.outputLanguage`.
+        requiresRestart: true,
         default: undefined as string | undefined,
         description:
           'Name of the output style that shapes how responses are written, for example "Concise" or "Explanatory". Leave unset for the default style.',
