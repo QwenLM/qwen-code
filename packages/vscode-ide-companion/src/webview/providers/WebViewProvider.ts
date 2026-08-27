@@ -1974,6 +1974,18 @@ export class WebViewProvider {
             ...(restoredSessionId ? { sessionId: restoredSessionId } : {}),
           },
         });
+        // A daemon that dies after a successful start leaves the webview
+        // making requests against a dead port with no way to know; surface it
+        // so the panel can show the failure instead of silently hanging.
+        this.daemonProcess.onExit = () => {
+          void webview.postMessage({
+            type: 'webShellBootstrapError',
+            data: {
+              message:
+                'Qwen Code stopped unexpectedly. Reload the panel to restart it.',
+            },
+          });
+        };
         await this.replayAuthState(webview);
         const editor = vscode.window.activeTextEditor;
         if (editor) {

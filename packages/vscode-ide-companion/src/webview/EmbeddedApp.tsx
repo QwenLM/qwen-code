@@ -374,6 +374,8 @@ export function EmbeddedApp() {
   const [theme, setTheme] = useState<WebShellTheme>(readTheme);
   const initialRuntime = useMemo(readRuntimeConfig, []);
   const [runtime, setRuntime] = useState(initialRuntime);
+  const runtimeRef = useRef(runtime);
+  runtimeRef.current = runtime;
   const [runtimeError, setRuntimeError] = useState<string>();
   const [authenticated, setAuthenticated] = useState<boolean | null>(null);
   const [authConnecting, setAuthConnecting] = useState(false);
@@ -655,9 +657,13 @@ export function EmbeddedApp() {
       } else if (message.type === 'webShellBootstrapError') {
         const errorMessage = (message.data as { message?: unknown } | null)
           ?.message;
-        setRuntimeError(
-          typeof errorMessage === 'string' ? errorMessage : t('boot.failed'),
-        );
+        const text =
+          typeof errorMessage === 'string' ? errorMessage : t('boot.failed');
+        setRuntimeError(text);
+        // Before bootstrap this renders as the full-panel startup state. After
+        // it, `runtime` is set and that branch is gone, so the same failure
+        // would be invisible — show it over the transcript instead.
+        if (runtimeRef.current) setHostNotice({ tone: 'error', text });
       } else if (message.type === 'error') {
         const text = (message.data as { message?: unknown } | null)?.message;
         if (typeof text === 'string') setHostNotice({ tone: 'error', text });

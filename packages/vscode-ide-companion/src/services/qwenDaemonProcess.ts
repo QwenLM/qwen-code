@@ -19,15 +19,35 @@ export class QwenDaemonProcess {
   private child: ChildProcess | null = null;
   private runtime: QwenDaemonRuntime | null = null;
   private startup: Promise<QwenDaemonRuntime> | null = null;
+  /** Workspace the live daemon was bound to via `serve --workspace`. */
+  private boundWorkspaceCwd: string | null = null;
+  /** Notified when a started daemon exits, so the host can tell the webview. */
+  onExit?: () => void;
 
   start(
     cliEntryPath: string,
     workspaceCwd: string,
   ): Promise<QwenDaemonRuntime> {
-    if (this.runtime && this.child && this.child.exitCode === null) {
+    // A daemon is bound to one workspace at spawn. Reusing it for a different
+    // root — which a multi-root window hits as soon as a second chat opens
+    // against another folder — would silently scope every session, history
+    // page, and prompt to the first root instead.
+    if (
+      this.boundWorkspaceCwd !== null &&
+      this.boundWorkspaceCwd !== workspaceCwd
+    ) {
+      this.dispose();
+    }
+    if (
+      this.runtime &&
+      this.child &&
+      this.child.exitCode === null &&
+      this.boundWorkspaceCwd === workspaceCwd
+    ) {
       return Promise.resolve(this.runtime);
     }
     if (this.startup) return this.startup;
+    this.boundWorkspaceCwd = workspaceCwd;
 
     const token = randomBytes(32).toString('hex');
     this.startup = new Promise<QwenDaemonRuntime>((resolve, reject) => {
@@ -66,6 +86,16 @@ export class QwenDaemonProcess {
         if (settled) return;
         settled = true;
         clearTimeout(timeout);
+        // `dispose()` clears the shared fields, so an attempt that was already
+        // replaced (a workspace switch kills the old child while it is still
+        // starting) must not run it — that would tear down its successor.
+        if (this.child !== child) {
+          child.kill();
+          reject(
+            error ?? new Error('Qwen daemon was superseded during startup'),
+          );
+          return;
+        }
         this.startup = null;
         if (error || !baseUrl) {
           this.dispose();
@@ -96,8 +126,18 @@ export class QwenDaemonProcess {
       });
       child.once('error', (error) => finish(error));
       child.once('exit', (code, signal) => {
-        this.child = null;
-        this.runtime = null;
+        if (settled) {
+          // Died after a successful start. Retract the runtime so the next
+          // start() respawns instead of handing out a dead base URL, but only
+          // while this child is still the live one.
+          if (this.child === child) {
+            this.child = null;
+            this.runtime = null;
+            this.boundWorkspaceCwd = null;
+          }
+          this.onExit?.();
+          return;
+        }
         finish(
           new Error(
             `Qwen daemon exited before startup (code=${String(code)}, signal=${String(signal)})${output ? `: ${output.slice(-500)}` : ''}`,
@@ -113,5 +153,6 @@ export class QwenDaemonProcess {
     this.child = null;
     this.runtime = null;
     this.startup = null;
+    this.boundWorkspaceCwd = null;
   }
 }
