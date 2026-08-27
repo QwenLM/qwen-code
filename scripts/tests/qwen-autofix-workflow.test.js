@@ -610,9 +610,9 @@ describe('qwen-autofix workflow', () => {
     expect(reviewScanJob).toContain('echo "targets=[]" >> "${GITHUB_OUTPUT}"');
     expect(reviewScanJob).toContain('active checks in flight; skipping until');
     // Staleness bound must sit above legitimate check runtimes (a review-address
-    // job runs up to its 330-minute cap) so an active run is never aged out
+    // job runs up to its 345-minute cap) so an active run is never aged out
     // mid-flight.
-    expect(reviewScanJob).toContain('PENDING_STALE_MIN=360');
+    expect(reviewScanJob).toContain('PENDING_STALE_MIN=375');
     // The staleness filter itself, including the comparison operator: a check only
     // blocks if its start is newer than the cutoff. Asserting `> $cut` too means a
     // flipped comparison (which would age out live checks → double-processing) is
@@ -4191,7 +4191,7 @@ describe('qwen-autofix workflow', () => {
     // No rollup entries → dispatchable.
     expect(runMarkerCheck([])).toBe('pass');
 
-    // A stranded marker must NOT keep blocking through the 360-minute
+    // A stranded marker must NOT keep blocking through the 375-minute
     // HAS_PENDING_CHECKS gate after its TTL expired: replay the gate's jq
     // over fixture rollups.
     const pendingGate = reviewScanJob.match(
@@ -4241,7 +4241,7 @@ describe('qwen-autofix workflow', () => {
         checkRun('build', 'IN_PROGRESS', '2026-08-17T07:50:00Z'),
       ]),
     ).toBe('true');
-    // ...a check stuck past the 360-minute horizon is aged out...
+    // ...a check stuck past the 375-minute horizon is aged out...
     expect(
       runPendingGate([
         checkRun('build', 'IN_PROGRESS', '2026-08-17T01:00:00Z'),
@@ -14774,9 +14774,9 @@ exit 1
     expect(repairDeterministicRejectionStep).toContain(
       "steps.verify.outputs.retryable == 'true'",
     );
-    expect(repairDeterministicRejectionStep).toContain('timeout-minutes: 55');
+    expect(repairDeterministicRejectionStep).toContain('timeout-minutes: 70');
     expect(repairDeterministicRejectionStep).toContain(
-      "QWEN_TIMEOUT_MS: '2700000'",
+      "QWEN_TIMEOUT_MS: '3600000'",
     );
     const settingsJson = (step) =>
       step.match(/SETTINGS_JSON: \|-\n([\s\S]*?)\n {8}run: \|-/)?.[1] ?? '';
@@ -19411,7 +19411,7 @@ exit 0
   it('bounds qwen subprocess runtime', () => {
     const runner = readFileSync(autofixRunnerScriptPath, 'utf8');
 
-    expect(runner).toContain('50 * 60 * 1000');
+    expect(runner).toContain('90 * 60 * 1000');
     expect(runner).toContain('setTimeout(() =>');
     expect(runner).toContain("killQwen(child, 'SIGKILL')");
     expect(runner).toContain('}, QWEN_TIMEOUT_MS)');
