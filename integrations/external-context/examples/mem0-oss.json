@@ -3,7 +3,7 @@
   "timeoutMs": 5000,
   "provider": {
     "type": "mem0",
-    "preset": "mem0-server-rest-2026-08",
+    "preset": "mem0-oss-rest-2026-08",
     "endpoint": {
       "origin": "https://<your-mem0-endpoint>",
       "basePath": ""

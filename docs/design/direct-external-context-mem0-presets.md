@@ -41,39 +41,8 @@ new identifier rather than silently changing an existing mapping.
 The first built-in presets are:
 
 - `mem0-platform-v3`
-- `mem0-server-rest-2026-08`
-- `polardb-mysql-2026-08`
-
-## Where preset immutability stops
-
-Preset immutability binds this repository, not the deployed service. The
-endpoint is operator-supplied and its build is not guaranteed: a Mem0-family
-service can be self-hosted, packaged by a cloud vendor, or pinned to an old
-release, and the stock Mem0 REST server carries no API version in its paths at
-all. An administrator selecting a preset is therefore asserting which contract
-they believe is deployed, and can be wrong.
-
-The integration does not probe, negotiate, or fall back. It manages that
-uncertainty three ways instead, none of which requires knowing the build:
-
-- **Prefer a request both known shapes accept.** Where one fixed request is
-  read identically by an older and a newer build, the preset sends that
-  request. `body-and-filters` scope placement is the only current instance.
-- **Never report an unverified write as `stored`.** A write outcome is claimed
-  only from evidence in the response itself, so a build that ignores a request
-  field degrades to `unknown` rather than to a false confirmation.
-- **Make a mismatch legible to the operator.** Provider failures are written
-  to the MCP server's stderr with the HTTP status, which separates a wire
-  contract mismatch from an outage. The model-facing error stays opaque.
-
-A preset that cannot be made safe this way documents the build it requires.
-
-Selection is evidence-based on the operator's side too. `preset` is the only
-field of a `mem0` block that is a judgement rather than a fact the
-administrator holds, so the workspace ships a read-only probe that runs a
-candidate preset against the endpoint and reports whether it works. Adding a
-preset requires authoritative protocol evidence; choosing one should not
-require less.
+- `mem0-oss-rest-2026-08`
+- `aliyun-polardb-mysql-2026-08`
 
 ## Configuration
 
@@ -83,7 +52,7 @@ require less.
   "timeoutMs": 5000,
   "provider": {
     "type": "mem0",
-    "preset": "polardb-mysql-2026-08",
+    "preset": "aliyun-polardb-mysql-2026-08",
     "endpoint": {
       "origin": "https://memory.example.com",
       "basePath": ""
@@ -152,38 +121,26 @@ design instead of expanding this configuration into a programming language.
 - Scope: required `appId` under `filters.app_id`
 - Limit: `top_k`
 - Direct import: `POST /v3/memories/add/`, `infer: false`
-- Write response: `PENDING` plus `event_id` is `accepted`; only
+- Write response: `PENDING` plus a UUID `event_id` is `accepted`; only
   `SUCCEEDED` is `stored`
 
 The legacy `mem0-platform-v3` configuration remains a fixed-endpoint shorthand
 for this mapping.
 
-### Mem0 Server REST 2026-08
+### Mem0 OSS REST 2026-08
 
 - Search: `POST /search`
 - Authentication: `X-API-Key`
-- Scope: required `userId` and optional `agentId`, sent both at the request
-  root and under `filters`
+- Scope: required `userId` and optional `agentId` under `filters`
 - Limit: `top_k`
 - Direct import: `POST /memories`, `infer: false`
-- Write response: a valid `results[].id` whose echoed `memory` matches the
-  submitted content is `stored`; otherwise `unknown`
+- Write response: a valid `results[].id` is `stored`; otherwise `unknown`
 
-This mapping follows the stock `mem0ai/mem0` REST server — the FastAPI service
-in that repository's `server/`, which is what "self-hosted Mem0" means here.
-The identifier avoids "OSS" because that abbreviation names an object storage
-service in some of the clouds these deployments run in.
+This mapping follows the stock `mem0ai/mem0` REST server. Bearer-authenticated
+deployments need a separately verified preset rather than a per-instance
+authentication override.
 
-The server moved session identity from the request root into `filters` and
-kept reading both, so the dual placement is one request that both shapes
-resolve to the same scope. Builds predating that change reject a
-`filters`-only search outright; builds predating `infer` silently run fact
-extraction instead, which the write-result content check catches.
-
-Bearer-authenticated deployments need a separately verified preset rather than
-a per-instance authentication override.
-
-### PolarDB MySQL 2026-08
+### Aliyun PolarDB MySQL 2026-08
 
 - Search: `POST /v2/memories/search`
 - Authentication: `Authorization: Token`
@@ -196,12 +153,23 @@ An `event_id` alone is never treated as proof of storage. If a later PolarDB
 contract documents asynchronous event polling, that behavior requires a new
 preset and write design rather than changing this preset in place.
 
-The identifier names the contract, not a cloud. PolarDB Mem0 is offered by
-more than one provider, and a preset scoped to one vendor would read as
-inapplicable to an operator running the same contract elsewhere. The mapping
-was verified against an Aliyun deployment; an operator on another provider
-should confirm it with the preset probe before relying on it, which is the
-same evidence this repository asks for when a preset is added.
+## Protocol evidence
+
+- Mem0 Platform V3 follows the official
+  [search API](https://docs.mem0.ai/api-reference/memory/search-memories) and
+  [V2-to-V3 migration contract](https://docs.mem0.ai/migration/platform-v2-to-v3).
+- Mem0 OSS REST is pinned to upstream commit
+  [`39bc023`](https://github.com/mem0ai/mem0/tree/39bc02330563764e7d4465f1ecff5f002d94da1a),
+  specifically [`server/main.py`](https://github.com/mem0ai/mem0/blob/39bc02330563764e7d4465f1ecff5f002d94da1a/server/main.py)
+  and [`server/auth.py`](https://github.com/mem0ai/mem0/blob/39bc02330563764e7d4465f1ecff5f002d94da1a/server/auth.py).
+- The PolarDB preset follows the official
+  [PolarDB for MySQL Mem0 contract](https://help.aliyun.com/en/polardb/polardb-for-mysql/use-polardb-mem0)
+  and the [live end-to-end evidence](https://github.com/QwenLM/qwen-code/pull/9952#issuecomment-5407141853)
+  recorded for this PR.
+
+Tests must continue to pin these exact request and response shapes. If an
+upstream contract changes incompatibly, add a new preset identifier instead of
+updating an existing mapping in place.
 
 ## Relationship to provider Extensions
 
@@ -224,10 +192,6 @@ The implementation must prove:
 - exact authentication, path, scope, and limit mapping for every preset
 - per-item response normalization and the five-result cap
 - conservative synchronous versus asynchronous write outcomes
-- refusal to report `stored` when the provider echoes rewritten content or a
-  delete event
 - no retry on search or write failures
-- loadability of the shipped PolarDB and Mem0 server examples
+- loadability of the shipped PolarDB and OSS examples
 - compatibility of the existing `mem0-platform-v3` configuration
-- that the preset probe is read-only, never renders the credential, and
-  refuses to conclude anything from an empty corpus

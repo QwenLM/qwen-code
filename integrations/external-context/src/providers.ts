@@ -11,9 +11,8 @@ import {
   validateProviderBaseUrl,
 } from './http-client.js';
 import {
-  findInvalidMem0Scope,
   getMem0Preset,
-  mem0ScopeViolationMessage,
+  isValidMem0Scope,
   type Mem0Preset,
   type Mem0ScopePlacement,
 } from './mem0-presets.js';
@@ -30,6 +29,8 @@ import type {
 
 const MEM0_BASE_URL = new URL('https://api.mem0.ai/');
 const MAX_PROVIDER_ITEMS = 5;
+const UUID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const DEFINITIVE_WRITE_REJECTION_STATUSES = new Set([400, 401, 403, 404]);
 
 export function createProvider(
@@ -91,13 +92,18 @@ export class GenericHttpSearchV1Adapter implements ExternalContextProvider {
 export class Mem0PlatformV3Adapter
   implements ExternalContextProvider, ExternalMemoryWriter
 {
-  private readonly baseUrl: URL;
+  private readonly delegate: Mem0CompatibleAdapter;
 
-  constructor(
-    private readonly config: Mem0ProviderConfig,
-    baseUrl: URL = MEM0_BASE_URL,
-  ) {
-    this.baseUrl = validateConfiguredBaseUrl(baseUrl.toString());
+  constructor(config: Mem0ProviderConfig, baseUrl: URL = MEM0_BASE_URL) {
+    const origin = validateConfiguredBaseUrl(baseUrl.toString());
+    this.delegate = new Mem0CompatibleAdapter({
+      type: 'mem0',
+      preset: 'mem0-platform-v3',
+      endpoint: { origin: origin.toString(), basePath: '' },
+      credentialEnv: config.apiKeyEnv,
+      credential: config.apiKey,
+      scope: { appId: config.appId },
+    });
   }
 
   async search(input: {
@@ -105,47 +111,14 @@ export class Mem0PlatformV3Adapter
     limit: number;
     signal: AbortSignal;
   }): Promise<readonly ExternalContextItem[]> {
-    const response = await postJson({
-      url: new URL('/v3/memories/search/', this.baseUrl),
-      credentialHeader: {
-        name: 'authorization',
-        value: `Token ${this.config.apiKey}`,
-      },
-      body: {
-        query: input.query,
-        filters: { app_id: this.config.appId },
-        top_k: Math.min(input.limit, MAX_PROVIDER_ITEMS),
-        threshold: 0.1,
-        rerank: false,
-      },
-      signal: input.signal,
-    });
-    return parseMem0Items(response);
+    return this.delegate.search(input);
   }
 
   async remember(input: {
     content: string;
     signal: AbortSignal;
   }): Promise<RememberResult> {
-    let response: unknown;
-    try {
-      response = await postJson({
-        url: new URL('/v3/memories/add/', this.baseUrl),
-        credentialHeader: {
-          name: 'authorization',
-          value: `Token ${this.config.apiKey}`,
-        },
-        body: {
-          messages: [{ role: 'user', content: input.content }],
-          app_id: this.config.appId,
-          infer: false,
-        },
-        signal: input.signal,
-      });
-    } catch (error) {
-      return classifyWriteRejection(error);
-    }
-    return parseMem0RememberResult(response);
+    return this.delegate.remember(input);
   }
 }
 
@@ -165,7 +138,7 @@ function parseMem0RememberResult(response: unknown): RememberResult {
   }
 
   const status = response['status'];
-  const operationId = parseOperationId(response['event_id']);
+  const operationId = parsePlatformEventId(response['event_id']);
   if (status === 'FAILED') {
     return { status: 'failed' };
   }
@@ -185,7 +158,13 @@ function parseMem0RememberResult(response: unknown): RememberResult {
   return { status: 'unknown' };
 }
 
-function parseOperationId(value: unknown): string | undefined {
+function parsePlatformEventId(value: unknown): string | undefined {
+  return typeof value === 'string' && UUID_PATTERN.test(value)
+    ? value
+    : undefined;
+}
+
+function parseProviderId(value: unknown): string | undefined {
   if (
     typeof value !== 'string' ||
     value.trim().length === 0 ||
@@ -207,11 +186,8 @@ export class Mem0CompatibleAdapter
   private readonly preset: Mem0Preset;
 
   constructor(private readonly config: Mem0CompatibleProviderConfig) {
-    const violation = findInvalidMem0Scope(config);
-    if (violation !== undefined) {
-      throw new ConfigurationError(
-        mem0ScopeViolationMessage(config.preset, violation),
-      );
+    if (!isValidMem0Scope(config)) {
+      throw new ConfigurationError('External context Mem0 scope is invalid.');
     }
     this.preset = getMem0Preset(config.preset);
     this.origin = validateConfiguredBaseUrl(config.endpoint.origin, {
@@ -280,7 +256,7 @@ export class Mem0CompatibleAdapter
     }
     return write.response === 'async-status'
       ? parseMem0RememberResult(response)
-      : parseDirectWriteResult(response, write.idField, input.content);
+      : parseDirectWriteResult(response, write.idField);
   }
 
   private buildUrl(path: string): URL {
@@ -293,8 +269,7 @@ export class Mem0CompatibleAdapter
 
 function parseDirectWriteResult(
   response: unknown,
-  idField: 'id',
-  content: string,
+  idField: 'id' | 'memory_id',
 ): RememberResult {
   if (!isRecord(response) || !Array.isArray(response['results'])) {
     return { status: 'unknown' };
@@ -303,47 +278,12 @@ function parseDirectWriteResult(
     if (!isRecord(item)) {
       continue;
     }
-    if (!isExactDirectImport(item, content)) {
-      return { status: 'unknown' };
-    }
-    const id = parseOperationId(item[idField]);
+    const id = parseProviderId(item[idField]);
     if (id !== undefined) {
       return { status: 'stored', providerOperationId: id };
     }
   }
   return { status: 'unknown' };
-}
-
-/**
- * Decides whether one returned result is evidence that the confirmed text was
- * stored verbatim.
- *
- * `infer: false` is what makes `context_remember` store the exact text the
- * user approved in the confirmation Hook, but it is an ordinary request field:
- * a deployment whose request model predates it drops it silently and runs LLM
- * fact extraction instead, then returns a rewritten memory plus a perfectly
- * valid identifier. Reporting `stored` there would tell the user that the text
- * they read is what landed, when it is not. The echoed `memory` is the only
- * client-side evidence available, and it does not depend on knowing which
- * build is deployed - which matters because the endpoint is operator-supplied
- * and its version is not guaranteed.
- *
- * Inference can also retire a contradicting memory, so a `DELETE` event is
- * never storage of this content.
- *
- * A result that echoes no `memory` at all is left to the identifier, so a
- * preset whose upstream simply does not return the field keeps its existing
- * behaviour rather than degrading to `unknown`.
- */
-function isExactDirectImport(
-  item: Record<string, unknown>,
-  content: string,
-): boolean {
-  const memory = item['memory'];
-  if (typeof memory === 'string' && memory !== content) {
-    return false;
-  }
-  return item['event'] !== 'DELETE';
 }
 
 function mem0CredentialHeader(
@@ -353,6 +293,8 @@ function mem0CredentialHeader(
   switch (preset.authentication) {
     case 'authorization-token':
       return { name: 'authorization', value: `Token ${credential}` };
+    case 'authorization-bearer':
+      return { name: 'authorization', value: `Bearer ${credential}` };
     case 'x-api-key':
       return { name: 'x-api-key', value: credential };
     // no default
@@ -386,75 +328,33 @@ function placeMem0Scope(
   if (placement === 'omit' || value === undefined) {
     return;
   }
-  if (placement === 'body' || placement === 'body-and-filters') {
+  if (placement === 'body') {
     body[field] = value;
+    return;
   }
-  if (placement === 'filters' || placement === 'body-and-filters') {
-    const filters = (body['filters'] ??= {}) as Record<string, unknown>;
-    filters[field] = value;
-  }
+  const filters = (body['filters'] ??= {}) as Record<string, unknown>;
+  filters[field] = value;
 }
-
-// Each rule names the shape it rejects so an administrator editing a local
-// file is told which character to remove, instead of retrying a single opaque
-// message against nine independent conditions.
-const MEM0_BASE_PATH_RULES: ReadonlyArray<{
-  reason: string;
-  rejects: (value: string) => boolean;
-}> = [
-  {
-    reason: 'it must start with "/"',
-    rejects: (value) => !value.startsWith('/'),
-  },
-  {
-    reason: 'it must not contain an empty segment ("//")',
-    rejects: (value) => value.includes('//'),
-  },
-  {
-    reason: 'it must not contain a query ("?")',
-    rejects: (value) => value.includes('?'),
-  },
-  {
-    reason: 'it must not contain a fragment ("#")',
-    rejects: (value) => value.includes('#'),
-  },
-  {
-    reason: 'it must not contain a backslash',
-    rejects: (value) => value.includes('\\'),
-  },
-  {
-    reason: 'it must not contain percent-encoded material ("%")',
-    rejects: (value) => value.includes('%'),
-  },
-  {
-    reason: 'it must not contain whitespace',
-    rejects: (value) => /\s/u.test(value),
-  },
-  {
-    reason: 'it must not contain control characters',
-    rejects: (value) =>
-      Array.from(value).some((character) => {
-        const code = character.codePointAt(0) ?? 0;
-        return code <= 0x1f || code === 0x7f;
-      }),
-  },
-  {
-    reason: 'it must not contain a "." or ".." segment',
-    rejects: (value) =>
-      value.split('/').some((segment) => segment === '.' || segment === '..'),
-  },
-];
 
 function validateMem0BasePath(value: string): void {
   if (value === '') {
     return;
   }
-  for (const rule of MEM0_BASE_PATH_RULES) {
-    if (rule.rejects(value)) {
-      throw new ConfigurationError(
-        `External context Mem0 endpoint basePath is invalid: ${rule.reason}.`,
-      );
-    }
+  if (
+    !value.startsWith('/') ||
+    value.includes('//') ||
+    value.includes('?') ||
+    value.includes('#') ||
+    value.includes('\\') ||
+    value.includes('%') ||
+    /\s/u.test(value) ||
+    Array.from(value).some((character) => {
+      const code = character.codePointAt(0) ?? 0;
+      return code <= 0x1f || code === 0x7f;
+    }) ||
+    value.split('/').some((segment) => segment === '.' || segment === '..')
+  ) {
+    throw new ConfigurationError('External context Mem0 base path is invalid.');
   }
 }
 

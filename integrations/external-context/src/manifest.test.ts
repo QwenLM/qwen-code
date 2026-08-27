@@ -245,7 +245,7 @@ describe('extension manifest', () => {
       timeoutMs: 5000,
       provider: {
         type: 'mem0',
-        preset: 'polardb-mysql-2026-08',
+        preset: 'aliyun-polardb-mysql-2026-08',
         endpoint: {
           origin: 'https://<your-polardb-mem0-endpoint>',
           basePath: '',
@@ -276,7 +276,7 @@ describe('extension manifest', () => {
       });
       expect(loaded.provider).toMatchObject({
         type: 'mem0',
-        preset: 'polardb-mysql-2026-08',
+        preset: 'aliyun-polardb-mysql-2026-08',
         scope: { userId: 'example-user', agentId: 'qwen-code' },
       });
       expect(() => createProvider(loaded.provider)).not.toThrow();
@@ -286,7 +286,7 @@ describe('extension manifest', () => {
   });
 
   it('keeps the stock Mem0 REST example loadable', async () => {
-    const config = await readJson('../examples/mem0-server.json');
+    const config = await readJson('../examples/mem0-oss.json');
     const substituted = JSON.parse(
       JSON.stringify(config)
         .replaceAll('<your-mem0-endpoint>', 'mem0.example.internal')
@@ -305,7 +305,7 @@ describe('extension manifest', () => {
       });
       expect(loaded.provider).toMatchObject({
         type: 'mem0',
-        preset: 'mem0-server-rest-2026-08',
+        preset: 'mem0-oss-rest-2026-08',
       });
       expect(() => createProvider(loaded.provider)).not.toThrow();
     } finally {

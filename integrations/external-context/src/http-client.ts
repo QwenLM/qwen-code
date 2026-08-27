@@ -122,7 +122,7 @@ function cancelResponseBody(response: Response): void {
   void response.body?.cancel().catch(() => undefined);
 }
 
-export async function readBoundedBody(response: Response): Promise<string> {
+async function readBoundedBody(response: Response): Promise<string> {
   if (!response.body) {
     throw new ProviderResponseError();
   }

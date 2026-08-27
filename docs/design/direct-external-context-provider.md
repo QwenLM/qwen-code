@@ -26,7 +26,7 @@ The extension supports three explicit read paths:
 
 - The legacy fixed-endpoint Mem0 Platform V3 adapter.
 - A bounded `mem0` adapter whose reviewed built-in preset selects Mem0
-  Platform V3, the stock Mem0 REST server, or PolarDB Mem0.
+  Platform V3, stock Mem0 OSS REST, or Aliyun PolarDB Mem0.
 - Generic HTTP Search V1 for an existing knowledge base, RAG service, or
   enterprise search endpoint.
 
@@ -338,8 +338,8 @@ Provider audit or access logs may still be retained. See
 ### Versioned Mem0-compatible Search
 
 The `mem0` adapter selects one immutable built-in preset at startup. The
-initial presets cover Mem0 Platform V3, the stock Mem0 REST server, and
-PolarDB Mem0. Each preset fixes authentication, search and direct-import
+initial presets cover Mem0 Platform V3, the stock Mem0 OSS REST server, and
+Aliyun PolarDB Mem0. Each preset fixes authentication, search and direct-import
 paths, scope placement, limit field, response fields, and write outcome
 semantics. Instance configuration cannot override those fields.
 
@@ -501,4 +501,4 @@ require separate review and implementation.
 
 - [Mem0 Organizations & Projects](https://docs.mem0.ai/api-reference/organizations-projects)
 - [Mem0 Search Memories](https://docs.mem0.ai/api-reference/memory/search-memories)
-- [Mem0 REST server](https://github.com/mem0ai/mem0/tree/main/server)
+- [Mem0 OSS server](https://github.com/mem0ai/mem0/tree/main/server)

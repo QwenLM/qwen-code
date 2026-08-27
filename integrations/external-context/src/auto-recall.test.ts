@@ -244,27 +244,35 @@ describe('runAutoRecall', () => {
     });
   });
 
-  // providerCredential's mem0 arm decides which field is scrubbed from the
-  // auto-forwarded query. Binding it to credentialEnv instead of credential
-  // typechecks and stays green everywhere else, while forwarding the real
-  // secret verbatim to the operator's endpoint as the search body.
-  it('scrubs the bound credential of a versioned Mem0 provider', async () => {
+  it('redacts a versioned Mem0 credential before search', async () => {
     const fixture = await createRepositoryFixture();
-    loadConfig.mockResolvedValue(mem0Config(fixture.root));
+    loadConfig.mockResolvedValue({
+      version: 2,
+      timeoutMs: 5000,
+      autoRecall: { repositoryRoot: fixture.root, timeoutMs: 1500 },
+      provider: {
+        type: 'mem0',
+        preset: 'mem0-oss-rest-2026-08',
+        endpoint: { origin: 'https://mem0.example.com', basePath: '' },
+        credentialEnv: 'MEM0_API_KEY',
+        credential: 'provider-secret-value',
+        scope: { userId: 'fixed-user' },
+      },
+    } satisfies ExternalContextConfigV2);
     search.mockResolvedValue([]);
     const { runAutoRecall } = await import('./auto-recall.js');
 
     await runAutoRecall({
       hook_event_name: 'UserPromptSubmit',
-      prompt: 'ignored',
-      submitted_prompt: 'why does mem0-secret-value fail here?',
+      submitted_prompt: 'compare provider-secret-value with deployment policy',
       cwd: fixture.root,
     });
 
-    expect(search).toHaveBeenCalledOnce();
-    const query = search.mock.calls[0]?.[0]?.query ?? '';
-    expect(query).not.toContain('mem0-secret-value');
-    expect(query).toContain('fail here?');
+    expect(search).toHaveBeenCalledWith({
+      query: 'compare with deployment policy',
+      limit: 5,
+      signal: expect.any(AbortSignal),
+    });
   });
 
   it('does not inspect the legacy prompt field', async () => {
@@ -745,22 +753,6 @@ function config(repositoryRoot: string): ExternalContextConfigV2 {
       baseUrl: 'https://context.example.com',
       tokenEnv: 'TOKEN',
       token: 'provider-secret-value',
-    },
-  };
-}
-
-function mem0Config(repositoryRoot: string): ExternalContextConfigV2 {
-  return {
-    version: 2,
-    timeoutMs: 5000,
-    autoRecall: { repositoryRoot, timeoutMs: 1500 },
-    provider: {
-      type: 'mem0',
-      preset: 'polardb-mysql-2026-08',
-      endpoint: { origin: 'https://mem0.example.com', basePath: '' },
-      credentialEnv: 'MEM0_API_KEY',
-      credential: 'mem0-secret-value',
-      scope: { userId: 'fixed-user' },
     },
   };
 }

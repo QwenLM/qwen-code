@@ -10,7 +10,6 @@ import { z } from 'zod';
 import { normalizeSearchQuery, renderExternalContext } from './context.js';
 import { ConfigurationError, loadConfig } from './config.js';
 import { createMemoryWriter, createProvider } from './providers.js';
-import { ProviderHttpStatusError } from './http-client.js';
 import {
   isValidMemoryContent,
   MAX_MEMORY_CONTENT_CHARACTERS,
@@ -72,8 +71,7 @@ export function createExternalContextMcpServer(
           ]),
         });
         return contextSearchResult(renderExternalContext(items));
-      } catch (error) {
-        reportProviderFailure('context_search', error);
+      } catch {
         return errorResult('External context search failed.');
       }
     },
@@ -117,8 +115,7 @@ export function createExternalContextMcpServer(
             ]),
           });
           return rememberResult(result);
-        } catch (error) {
-          reportProviderFailure('context_remember', error);
+        } catch {
           return errorResult('External context memory write failed.');
         }
       },
@@ -155,27 +152,6 @@ function contextSearchResult(text: string) {
     content: [{ type: 'text' as const, text }],
     structuredContent: JSON.parse(text) as Record<string, unknown>,
   };
-}
-
-/**
- * Reports a provider failure to the operator on stderr.
- *
- * The model keeps receiving the stable, detail-free error above; stdout is the
- * MCP transport, so stderr is the only operator-visible channel this process
- * has. Without it a wire-contract mismatch - the selected preset not matching
- * the build actually deployed at the configured endpoint - is indistinguishable
- * from an outage, and the endpoint's version is not something the integration
- * can assume. Only our own fixed messages and the HTTP status are written;
- * provider response bodies never are.
- */
-function reportProviderFailure(tool: string, error: unknown): void {
-  const detail =
-    error instanceof ProviderHttpStatusError
-      ? `HTTP ${error.status}`
-      : error instanceof Error
-        ? error.message
-        : 'unknown error';
-  process.stderr.write(`external-context: ${tool} failed: ${detail}\n`);
 }
 
 function errorResult(text: string) {

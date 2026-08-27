@@ -12,9 +12,10 @@ three managed deployment variants:
 - **Auto-recall:** version 2 configuration and an administrator-installed
   `UserPromptSubmit` Hook, with no external-context MCP server.
 
-The built-in adapters support Mem0 Platform V3 search, the PolarDB Mem0
-management API, and a small Generic HTTP Search V1 contract for existing
-knowledge or RAG services. Only the Mem0 providers have an optional write path.
+The built-in adapters support Mem0 Platform V3, the stock self-hosted Mem0
+REST server, the Aliyun PolarDB Mem0 management API, and a small Generic HTTP
+Search V1 contract for existing knowledge or RAG services. Only the Mem0
+providers have an optional write path.
 There is no generic ingestion protocol, personal memory,
 trusted user identity, per-document ACL, or tamper-resistant audit.
 
@@ -128,7 +129,7 @@ confirmation; use the governed profile when that is required.
    through an environment-aware dispatcher. If the provider requires an
    egress proxy, the launcher must include the administrator-approved proxy
    variables in that clean environment. Include `localhost`, `127.0.0.1`, and
-   `[::1]` in `NO_PROXY` when using the loopback Generic HTTP provider.
+   `[::1]` in `NO_PROXY` when using any loopback provider endpoint.
 
 6. Point `QWEN_CODE_SYSTEM_SETTINGS_PATH` at an administrator-controlled copy
    of `examples/managed-settings.json` only inside this managed launcher; do not
@@ -226,7 +227,7 @@ UTF-16. It never accepts a model-selected tenant, Project, `app_id`, filter, or
 metadata. Each approval performs exactly one request; the integration does not
 pre-search, retry, poll, cache, or deduplicate.
 
-Mem0 V3 Add is asynchronous in normal operation. `PENDING` with a valid
+Mem0 V3 Add is asynchronous in normal operation. `PENDING` with a UUID
 `event_id` is therefore the expected successful response and returns
 `accepted`, not `stored`. A valid synchronous `SUCCEEDED` response returns
 `stored` as a defensive compatibility path. Explicit `FAILED` and HTTP 400,
@@ -388,7 +389,7 @@ remain administrator-owned:
 ```json
 {
   "type": "mem0",
-  "preset": "polardb-mysql-2026-08",
+  "preset": "aliyun-polardb-mysql-2026-08",
   "endpoint": {
     "origin": "https://memory.example.com",
     "basePath": ""
@@ -405,57 +406,17 @@ The built-in presets are:
 
 - `mem0-platform-v3`: `/v3` Platform API, `Authorization: Token`, fixed
   `appId`.
-- `mem0-server-rest-2026-08`: the stock self-hosted Mem0 REST server
-  (`server/` in `mem0ai/mem0`) `/search` and `/memories`, `X-API-Key`, fixed
-  `userId`, and optional `agentId`. "Server", not "OSS", because that
-  abbreviation names an object storage service in some clouds.
-- `polardb-mysql-2026-08`: PolarDB `/v2/memories/search` and
+- `mem0-oss-rest-2026-08`: stock self-hosted Mem0 `/search` and `/memories`,
+  `X-API-Key`, fixed `userId`, and optional `agentId`.
+- `aliyun-polardb-mysql-2026-08`: PolarDB `/v2/memories/search` and
   `/v1/memories`, `Authorization: Token`, fixed `userId`, and optional
   `agentId`.
 
 The preset records the whole protocol, not just one API version. Search always
 sends a maximum of five through the preset's `top_k` field. The engine does not
-probe versions or fall back to a different preset.
-
-The preset is a claim about the build you deployed, and these services are
-self-hosted or vendor-packaged, so that claim can be wrong. Nothing detects it
-for you, but three things keep a mismatch from passing silently: identity is
-sent in every position a known build reads it from, so a search never quietly
-runs against an unscoped corpus; `context_remember` reports `stored` only when
-the response echoes back the exact approved text, so a server that ignored
-`infer: false` and rewrote the content reports `unknown` instead; and every
-provider failure is written to the MCP server's stderr with its HTTP status,
-which is what distinguishes a contract mismatch from an outage. Check that
-stderr first when search fails right after a new endpoint is configured. See
-`examples/polardb-mem0.json`, `examples/mem0-server.json`, and the
+probe versions or fall back to a different preset. See
+`examples/polardb-mem0.json`, `examples/mem0-oss.json`, and the
 [preset design](../../docs/design/direct-external-context-mem0-presets.md).
-
-### Choosing a preset
-
-Every other field in a `mem0` block is a fact the administrator already holds.
-`preset` is not: it is a claim about which wire contract the deployment
-implements, and these services are self-hosted or vendor-packaged, so the
-answer is not visible from the configuration side. Do not guess it - probe it:
-
-```bash
-MEM0_API_KEY=<credential> node dist/preset-probe-main.js \
-  --preset polardb-mysql-2026-08 \
-  --origin https://memory.example.com \
-  --user-id <a scope whose corpus holds at least one memory>
-```
-
-The probe is read-only. It only issues search requests and one
-`GET /openapi.json`, never writes, and never prints the credential. It reports
-the deployment's declared search schema when one is served, runs the selected
-preset through the real adapter, and exits non-zero when that preset does not
-work against the endpoint - which is the answer to "did I pick the right one".
-
-Pass `--base-path`, `--agent-id`, `--app-id`, `--credential-env`, or
-`--allow-insecure-http` to match the configuration you intend to ship.
-
-Give it a scope that actually has memories. Against an empty corpus every
-request agrees by returning nothing, which reads as a pass and is not one; the
-probe reports that case as inconclusive rather than letting it through.
 
 Non-loopback plain HTTP remains an explicit `allowInsecureHttp` endpoint
 opt-in. Because it sends credentials, queries, and memory content in cleartext,

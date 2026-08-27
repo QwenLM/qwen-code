@@ -209,31 +209,19 @@ neither would provide idempotency for an async remote operation.
 
 The versioned `mem0` adapter also sends exactly one request, using only the
 selected preset's fixed path, authentication, and scope placement. Platform V3
-uses its asynchronous add response. The direct-import presets claim `stored`
-only for a valid `results[].id`; a bare `event_id`, alternate root object, or
-root array is `unknown`. The client never treats request acceptance as proof
-of persistence.
-
-A direct-import result is additionally checked against the submitted text.
-`infer: false` is what makes the stored memory the exact text the user
-approved at the confirmation Hook, but it is an ordinary request field, and a
-deployment whose request model predates it drops it silently, extracts facts
-with an LLM, and returns a rewritten memory with a valid identifier. Because
-the endpoint is operator-supplied and its build is not guaranteed, the echoed
-`memory` is the only client-side evidence that the approved text is what
-landed: a result that echoes different content, or a delete event from a
-retired contradicting memory, is `unknown` rather than `stored`. A result that
-echoes no content at all is still judged by its identifier.
+uses its asynchronous add response. The initial OSS REST and PolarDB presets
+claim `stored` only for a valid `results[].id`; a bare `event_id`, alternate
+root object, or root array is `unknown`. The client never treats request
+acceptance as proof of persistence.
 
 Result mapping is conservative:
 
 | Provider outcome                                                                                                                      | Tool result                    |
 | ------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------ |
 | Valid `SUCCEEDED`                                                                                                                     | `stored`                       |
-| Valid asynchronous `PENDING` with a bounded opaque `event_id`                                                                         | `accepted` with operation ID   |
+| Valid asynchronous `PENDING` with a UUID `event_id`                                                                                   | `accepted` with operation ID   |
 | Valid synchronous direct-import `results[].id` for a preset that defines it                                                           | `stored` with memory ID        |
-| Explicit asynchronous `FAILED`, or HTTP 400, 401, 403, or 404                                                                         | `failed` with stable MCP error |
-| Direct-import result echoing rewritten content, or a delete event                                                                     | `unknown` with MCP error       |
+| Explicit `FAILED` in an asynchronous status response, or HTTP 400, 401, 403, or 404                                                   | `failed` with stable MCP error |
 | Timeout, cancellation, redirect, other HTTP status, broken or oversized response, invalid JSON, unknown status, or invalid identifier | `unknown` with MCP error       |
 
 Mem0 Platform Add normally returns `PENDING`, so `accepted` is the expected

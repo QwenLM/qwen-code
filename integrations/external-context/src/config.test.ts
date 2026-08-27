@@ -82,7 +82,7 @@ describe('loadConfig', () => {
   describe('versioned Mem0 provider', () => {
     const provider = {
       type: 'mem0',
-      preset: 'polardb-mysql-2026-08',
+      preset: 'aliyun-polardb-mysql-2026-08',
       endpoint: {
         origin: 'https://mem0.example.com:8443',
         basePath: '',
@@ -104,7 +104,7 @@ describe('loadConfig', () => {
         version: 1,
         provider: {
           type: 'mem0',
-          preset: 'polardb-mysql-2026-08',
+          preset: 'aliyun-polardb-mysql-2026-08',
           endpoint: {
             origin: 'https://mem0.example.com:8443',
             basePath: '',
@@ -162,31 +162,13 @@ describe('loadConfig', () => {
       });
     });
 
-    // Each rule is violated on its own. A fixture that breaks both at once
-    // passes even when one of the two branches is deleted, so the branches
-    // are pinned separately and by the key each one names.
-    it('rejects a scope missing a key the preset requires', async () => {
-      const fixture = await createFixture();
-      await writeConfig(fixture, {
-        version: 1,
-        provider: { ...provider, scope: { agentId: 'qwen-code' } },
-      });
-
-      await expect(
-        loadConfig({
-          QWEN_EXTERNAL_CONTEXT_CONFIG: fixture.config,
-          MEM0_API_KEY: 'secret-value',
-        }),
-      ).rejects.toThrow('preset "polardb-mysql-2026-08" requires "userId"');
-    });
-
-    it('rejects a scope carrying a key the preset does not use', async () => {
+    it('rejects missing required and unused scope values for a preset', async () => {
       const fixture = await createFixture();
       await writeConfig(fixture, {
         version: 1,
         provider: {
           ...provider,
-          scope: { userId: 'fixed-user', appId: 'unused-app' },
+          scope: { appId: 'unused-app' },
         },
       });
 
@@ -195,7 +177,7 @@ describe('loadConfig', () => {
           QWEN_EXTERNAL_CONTEXT_CONFIG: fixture.config,
           MEM0_API_KEY: 'secret-value',
         }),
-      ).rejects.toThrow('preset "polardb-mysql-2026-08" does not use "appId"');
+      ).rejects.toThrow('External context Mem0 scope is invalid.');
     });
 
     it('requires only appId for the Platform V3 preset', async () => {
