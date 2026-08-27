@@ -1074,8 +1074,15 @@ jobs:
               # correctness gate, not a security boundary: the agent can read
               # the marker path from its own environment, but forging it only
               # lets it post to an old head — nothing it could not already
-              # post to the live one. The OPEN check above still applies.
+              # post to the live one (the post-loop salvage-outputs consumer
+              # re-checks the live head too, so a forged marker cannot trade
+              # up to a false historical-head note on an unmoved PR). The
+              # OPEN check above still applies.
+              # The marker read gates on [ -f ] like every salvage-signal
+              # read: the path is agent-derivable, and a planted FIFO would
+              # block this cat — and with it the posting path — forever.
               if [ -n "${QWEN_CI_REVIEW_SALVAGE_OK_FILE:-}" ] \
+                && [ -f "${QWEN_CI_REVIEW_SALVAGE_OK_FILE}" ] \
                 && [ "$(cat "${QWEN_CI_REVIEW_SALVAGE_OK_FILE}" 2>/dev/null)" = "$expected_head" ]; then
                 echo "PR write allowed (salvage): PR #${pr_number} moved from ${expected_head} to ${current_head} past the salvage threshold; posting against the reviewed head." >&2
               else
@@ -1580,10 +1587,38 @@ jobs:
           RETRY_MIN_SECONDS=600
           MAX_ATTEMPTS=2
           START_TS="$(date +%s)"
-          # Salvage eligibility measures the CURRENT attempt (the retry loop
+          # Signal files sit at fixed, workflow-public names inside
+          # SALVAGE_DIR — a path the reviewed agent derives from its own
+          # exported environment — so a write-open of one can hit a planted
+          # FIFO and block, and a read-open can hang the same way. Every
+          # signal write therefore goes to a fresh temp and renames over
+          # the target (rename never opens the target); every read gates
+          # on [ -f ] before the cat.
+          write_signal() {
+            local tmp
+            tmp="$(mktemp "${SALVAGE_DIR}/.sig.XXXXXX")" || return 1
+            printf '%s' "$2" > "$tmp" && mv -f "$tmp" "$1" && return 0
+            rm -f "$tmp"
+            return 1
+          }
+          # Salvage state is per ATTEMPT — a retry re-runs the review from
+          # scratch, so the previous attempt's compose sighting (the watcher
+          # latches it) and elapsed fraction must not make the fresh attempt
+          # salvage-eligible from its first second. The composed artifact
+          # goes with the latch: a retryable death after compose skips the
+          # skill's Step 9 cleanup, and a surviving artifact would re-latch
+          # the watcher within one poll. The reset runs at the TOP of the
+          # loop AND before the retry backoff: the watcher polls through the
+          # backoff too, and a head move landing in those 60s must meet
+          # fresh state (#10110).
+          reset_attempt_salvage_state() {
+            rm -f "${SALVAGE_DIR}/compose-seen" "${COMPOSED_ARTIFACT:-}"
+            write_signal "${SALVAGE_DIR}/attempt-start" "$(date +%s)"
+          }
+          # Salvage eligibility measures the CURRENT attempt (the reset
           # rewrites this before each attempt): a retry restarts the review
           # from zero, so run-level elapsed would overstate a fresh attempt.
-          printf '%s' "$START_TS" > "${SALVAGE_DIR}/attempt-start"
+          write_signal "${SALVAGE_DIR}/attempt-start" "$START_TS"
 
           # Supersede watcher (#10110): only automatic lifecycle reviews — the
           # runs cancel-in-progress used to cancel on synchronize. It polls
@@ -1619,9 +1654,9 @@ jobs:
               # next poll instead. Residual risk, documented like the marker
               # escape: an agent can write valid JSON too, but it already
               # authors the review this signal describes.
-              if [ ! -f "${SALVAGE_DIR}/compose-seen" ] && [ -e "$COMPOSED_ARTIFACT" ] \
+              if [ ! -f "${SALVAGE_DIR}/compose-seen" ] && [ -f "$COMPOSED_ARTIFACT" ] \
                 && node -e 'const v=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));if(typeof v!=="object"||v===null||Array.isArray(v))process.exit(1);' "$COMPOSED_ARTIFACT" 2>/dev/null; then
-                : > "${SALVAGE_DIR}/compose-seen"
+                write_signal "${SALVAGE_DIR}/compose-seen" ''
               fi
               live_head="$(gh pr view "$PR_NUMBER" --repo "$REPO" --json headRefOid --jq '.headRefOid' 2>/dev/null)" || continue
               if [ -z "$live_head" ] || [ "$live_head" = "$EXPECTED_HEAD_SHA" ]; then
@@ -1635,7 +1670,10 @@ jobs:
               # 90-minute-in run restarts cheaply") measures the work being
               # discarded — the current attempt's, not the run's. The case
               # falls back to the run start on a mid-rewrite read.
-              attempt_start="$(cat "${SALVAGE_DIR}/attempt-start" 2>/dev/null || true)"
+              attempt_start=""
+              if [ -f "${SALVAGE_DIR}/attempt-start" ]; then
+                attempt_start="$(cat "${SALVAGE_DIR}/attempt-start" 2>/dev/null || true)"
+              fi
               case "$attempt_start" in
                 ''|*[!0-9]*) attempt_start="$START_TS" ;;
               esac
@@ -1646,12 +1684,12 @@ jobs:
               # budget and silently discard the result: cede regardless.
               if [ "$DOCS_ONLY_MEDIUM" != "true" ] \
                 && salvage_eligible "$elapsed" "$BUDGET_SECONDS" "$compose_seen" "$SALVAGE_ELAPSED_PERCENT"; then
-                printf '%s' "$live_head" > "${SALVAGE_DIR}/moved-to"
-                printf '%s' "$EXPECTED_HEAD_SHA" > "$QWEN_CI_REVIEW_SALVAGE_OK_FILE"
+                write_signal "${SALVAGE_DIR}/moved-to" "$live_head"
+                write_signal "$QWEN_CI_REVIEW_SALVAGE_OK_FILE" "$EXPECTED_HEAD_SHA"
                 echo "qwen-review-salvage: head moved to ${live_head} ${elapsed}s in (compose_seen=${compose_seen}) — finishing and posting against reviewed head ${EXPECTED_HEAD_SHA} (#10110)"
                 return 0
               fi
-              printf '%s' "$live_head" > "$SUPERSEDE_FILE"
+              write_signal "$SUPERSEDE_FILE" "$live_head"
               echo "qwen-review-salvage: head moved to ${live_head} ${elapsed}s in, before the salvage threshold — ending this review so the queued replacement covers the new head (#10110)"
               pkill -U "$(id -u)" -TERM -f "${REVIEW_URL}($|[^0-9])" 2>/dev/null || true
               sleep 15
@@ -1676,8 +1714,25 @@ jobs:
             live="$(gh pr view "${PR_NUMBER:-}" --repo "${REPO:-}" --json headRefOid --jq '.headRefOid' 2>/dev/null || true)"
             [ -n "$live" ] && [ "$live" != "${EXPECTED_HEAD_SHA:-}" ]
           }
+          # The supersede/moved-to files carry a head SHA this step
+          # interpolates into stdout, the step summary, and $GITHUB_OUTPUT;
+          # both are agent-writable. Gate the read on [ -f ] (a planted
+          # FIFO blocks the cat) and accept only the watcher's 40-hex
+          # shape — embedded newlines would survive command substitution
+          # and land as forged workflow commands or output lines.
+          read_head_signal() {
+            local content='unknown'
+            if [ -f "${1:-}" ]; then
+              content="$(cat "$1" 2>/dev/null || echo unknown)"
+            fi
+            case "$content" in
+              ''|*[!0-9a-f]*) content='unknown' ;;
+              *) [ "${#content}" -eq 40 ] || content='unknown' ;;
+            esac
+            echo "$content"
+          }
           cede_superseded() {
-            echo "Superseded early: PR #${PR_NUMBER:-} moved from ${EXPECTED_HEAD_SHA:-} to $(cat "${SUPERSEDE_FILE:-}" 2>/dev/null || echo unknown) before the salvage threshold; ceding to the replacement run (#10110)." | tee -a "$GITHUB_STEP_SUMMARY"
+            echo "Superseded early: PR #${PR_NUMBER:-} moved from ${EXPECTED_HEAD_SHA:-} to $(read_head_signal "${SUPERSEDE_FILE:-}") before the salvage threshold; ceding to the replacement run (#10110)." | tee -a "$GITHUB_STEP_SUMMARY"
             exit 0
           }
 
@@ -1691,15 +1746,7 @@ jobs:
             if [ -f "${SUPERSEDE_FILE:-}" ] && live_head_moved; then
               cede_superseded
             fi
-            # Salvage state is per ATTEMPT — a retry re-runs the review from
-            # scratch, so attempt 1's compose sighting (the watcher latches
-            # it) and elapsed fraction must not make the fresh attempt
-            # salvage-eligible from its first second. The composed artifact
-            # goes with the latch: a retryable death after compose skips the
-            # skill's Step 9 cleanup, and a surviving artifact would re-latch
-            # the watcher within one poll.
-            rm -f "${SALVAGE_DIR}/compose-seen" "${COMPOSED_ARTIFACT:-}"
-            date +%s > "${SALVAGE_DIR}/attempt-start"
+            reset_attempt_salvage_state
             attempt_timeout=$(( BUDGET_SECONDS - ($(date +%s) - START_TS) ))
             if [ "$attempt_timeout" -lt 30 ]; then
               fail "${REASON:-Qwen review ran out of time budget before it could complete.}" 1 "$KIND"
@@ -1710,11 +1757,15 @@ jobs:
             # a fatal (or retryable — and a retry would re-review the
             # superseded head from scratch) failure. Ending clean here keeps
             # the failure fallbacks silent; the queued replacement run owns
-            # the new head.
+            # the new head. The success guard matches the salvage-cede
+            # sibling: a watcher kill can never surface as exit-0 success,
+            # but the one-shot SUPERSEDE_FILE write can RACE a natural
+            # completion, and a posted review must not be recorded as
+            # superseded (its review_completed output with it).
             # ${VAR:-} defaults: the retry-loop replay in
             # scripts/tests/qwen-pr-review-workflow.test.js extracts this loop
             # verbatim and runs it under set -u without the salvage setup.
-            if [ -f "${SUPERSEDE_FILE:-}" ] && live_head_moved; then
+            if [ "$OUTCOME" != "success" ] && [ -f "${SUPERSEDE_FILE:-}" ] && live_head_moved; then
               cede_superseded
             fi
             if [ "$OUTCOME" != "success" ] && [ -f "${QWEN_CI_REVIEW_SALVAGE_OK_FILE:-}" ] && live_head_moved; then
@@ -1734,6 +1785,7 @@ jobs:
             if [ "$OUTCOME" = "retryable" ] && [ "$attempt" -lt "$MAX_ATTEMPTS" ] \
               && [ "$(( BUDGET_SECONDS - ($(date +%s) - START_TS) ))" -gt "$(( RETRY_BACKOFF_SECONDS + RETRY_MIN_SECONDS ))" ]; then
               echo "::warning::Transient review failure (${REASON}) — retrying once after ${RETRY_BACKOFF_SECONDS}s."
+              reset_attempt_salvage_state
               sleep "$RETRY_BACKOFF_SECONDS"
               attempt=$(( attempt + 1 ))
               continue
@@ -1749,17 +1801,16 @@ jobs:
             wait "$WATCHER_PID" 2>/dev/null || true
             WATCHER_PID=""
           fi
-          if [ -f "$QWEN_CI_REVIEW_SALVAGE_OK_FILE" ]; then
-            # moved-to is agent-writable content: embedded newlines would
-            # survive command substitution and land as forged name=value
-            # lines in $GITHUB_OUTPUT, flipping downstream gates like
-            # docs_only_medium. The watcher only ever writes a 40-hex head
-            # SHA here, so any other shape degrades to `unknown`.
-            salvage_moved_to="$(cat "${SALVAGE_DIR}/moved-to" 2>/dev/null || echo unknown)"
-            case "$salvage_moved_to" in
-              ''|*[!0-9a-f]*) salvage_moved_to='unknown' ;;
-              *) [ "${#salvage_moved_to}" -eq 40 ] || salvage_moved_to='unknown' ;;
-            esac
+          if [ -f "$QWEN_CI_REVIEW_SALVAGE_OK_FILE" ] && live_head_moved; then
+            # Same live-head re-check the cede sites apply: the marker path
+            # AND its expected content are exported into the agent's
+            # environment, so a forged marker on an UNMOVED head must not
+            # emit salvaged outputs — the historical-head note would post
+            # "head moved to unknown" on a PR whose head never moved.
+            # moved-to goes through read_head_signal: a planted FIFO must
+            # not hang a finished step, and any non-40-hex content degrades
+            # to `unknown` before it can reach $GITHUB_OUTPUT.
+            salvage_moved_to="$(read_head_signal "${SALVAGE_DIR}/moved-to")"
             {
               echo "salvaged=true"
               echo "salvage_moved_to=$salvage_moved_to"
