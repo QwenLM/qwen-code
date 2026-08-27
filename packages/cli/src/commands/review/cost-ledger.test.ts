@@ -6,11 +6,13 @@
 
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import {
+  chmodSync,
   existsSync,
   mkdtempSync,
   mkdirSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   utimesSync,
   writeFileSync,
 } from 'node:fs';
@@ -21,6 +23,7 @@ import {
   renderLedger,
   costLedgerCommand,
 } from './cost-ledger.js';
+import { appendRunSession, recordResume } from './lib/run-ledger.js';
 
 const SESSION = 'S-ledger';
 
@@ -1336,5 +1339,656 @@ describe('cost-ledger command boundary — informational, never a failure', () =
     expect(stderr).toContain('could not write');
     expect(stdout).toContain('Cost ledger:');
     expect(existsSync(join(blocked, 'ledger.json'))).toBe(false);
+  });
+});
+
+describe('cost-ledger — a resumed run bills the whole review', () => {
+  const dirs: string[] = [];
+  afterEach(() => {
+    for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
+  });
+
+  function fixture(): {
+    plan: string;
+    env: NodeJS.ProcessEnv;
+    project: string;
+  } {
+    const project = mkdtempSync(join(tmpdir(), 'ledger-resume-'));
+    dirs.push(project);
+    mkdirSync(join(project, 'chats'), { recursive: true });
+    mkdirSync(join(project, 'subagents', SESSION), { recursive: true });
+    writeFileSync(
+      join(project, 'chats', `${SESSION}.jsonl`),
+      event('2026-08-03T10:10:00Z', { input: 500, output: 50 }),
+    );
+    const plan = join(project, 'plan.json');
+    writeFileSync(
+      plan,
+      JSON.stringify({
+        diffPathAbsolute: join(project, 'diff.txt'),
+        diffLines: 10,
+        chunks: [{ id: 1, startLine: 1, endLine: 10 }],
+      }),
+    );
+    const start = new Date('2026-08-03T10:00:00Z');
+    utimesSync(plan, start, start);
+    return {
+      plan,
+      project,
+      env: {
+        QWEN_CODE_PROJECT_DIR: project,
+        QWEN_CODE_SESSION_ID: SESSION,
+      } as NodeJS.ProcessEnv,
+    };
+  }
+
+  /** The ledger `fetch-pr` writes, naming the interrupted attempt S0. */
+  function runLedger(plan: string): void {
+    appendRunSession(
+      plan,
+      { QWEN_CODE_SESSION_ID: 'S0' },
+      Date.parse('2026-08-03T10:00:30Z'),
+    );
+    appendRunSession(
+      plan,
+      { QWEN_CODE_SESSION_ID: SESSION },
+      Date.parse('2026-08-03T10:09:00Z'),
+    );
+    recordResume(
+      plan,
+      { QWEN_CODE_SESSION_ID: SESSION },
+      Date.parse('2026-08-03T10:09:00Z'),
+    );
+  }
+
+  it('bills the current session from its own entry, not from the plan', () => {
+    // The floor this pins: a `/review` launched inside a long-lived CLI
+    // session must not bill that session's earlier turns. The plan's mtime is
+    // 10:00 and this session's ledger entry is 10:09, so a conversation at
+    // 10:05 sits between the two candidate floors — the only place the
+    // difference is observable, and every other fixture here puts its events
+    // above both.
+    const { plan, project, env } = fixture();
+    writeFileSync(
+      join(project, 'chats', `${SESSION}.jsonl`),
+      [
+        // After the plan, before this attempt began: the operator's own
+        // conversation, which the review did not cause.
+        event('2026-08-03T10:05:00Z', { input: 900_000, output: 40_000 }),
+        // The review itself.
+        event('2026-08-03T10:10:00Z', { input: 500, output: 50 }),
+      ].join(''),
+    );
+    runLedger(plan);
+
+    const ledger = computeLedger(plan, env);
+    expect(ledger.main.calls).toBe(1);
+    expect(ledger.main.inputTokens).toBe(500);
+    expect(ledger.main.outputTokens).toBe(50);
+  });
+
+  it('still refuses an empty CURRENT chat when prior sessions have events', () => {
+    // The invariant the emptiness check exists for: prior events must not
+    // vouch for a broken current chat. The refusal tests predate the ledger
+    // and set up no prior session, so a refactor moving the check after the
+    // fold — or testing the folded set — would ship green while a resumed run
+    // whose new session's recorder degraded rendered a ledger that looks
+    // complete.
+    const { plan, project, env } = fixture();
+    writeFileSync(join(project, 'chats', `${SESSION}.jsonl`), '');
+    writeFileSync(
+      join(project, 'chats', 'S0.jsonl'),
+      event('2026-08-03T10:05:00Z', { input: 1000, output: 100 }),
+    );
+    runLedger(plan);
+
+    expect(() => computeLedger(plan, env)).toThrow(
+      // The message names the boundary that actually filtered — on a
+      // resumed run that is this attempt's ledger entry, not the plan.
+      /no main-loop usage records at or after this attempt's start/,
+    );
+  });
+
+  it('announces the span in the rendered summary, not only in the object', () => {
+    // The only user-visible statement that the totals cover more than this
+    // session. Asserted on the rendered text because that is where it can be
+    // deleted or crash at print time with every return-value test still green.
+    const { plan, project, env } = fixture();
+    writeFileSync(
+      join(project, 'chats', 'S0.jsonl'),
+      event('2026-08-03T10:05:00Z', { input: 1000, output: 100 }),
+    );
+    runLedger(plan);
+
+    const text = renderLedger(computeLedger(plan, env));
+    expect(text).toContain('1 earlier session');
+  });
+
+  it('does not announce a prior session that contributed nothing', () => {
+    // The `contributed > 0` guard: S0 is ledgered and authorized but has
+    // neither a chat nor an agent dir. An unconditional increment renders
+    // "totals include 1 earlier session" over a session whose contribution
+    // is zero — and no fixture asserted the 0.
+    const { plan, env } = fixture();
+    runLedger(plan);
+    const ledger = computeLedger(plan, env);
+    expect(ledger.priorSessions).toBe(0);
+  });
+
+  it('folds TWO prior sessions, each inside its own window', () => {
+    // RESUME_MAX leaves headroom for a twice-resumed run, and nothing below
+    // hand-built render fixtures exercised N >= 2: the spans accumulation,
+    // the counting past 1, and the per-prior ceiling pairing.
+    const { plan, project, env } = fixture();
+    writeFileSync(
+      join(project, 'chats', 'S0.jsonl'),
+      event('2026-08-03T10:01:00Z', { input: 1000, output: 100 }),
+    );
+    writeFileSync(
+      join(project, 'chats', 'S0b.jsonl'),
+      event('2026-08-03T10:06:00Z', { input: 200, output: 20 }),
+    );
+    appendRunSession(
+      plan,
+      { QWEN_CODE_SESSION_ID: 'S0' },
+      Date.parse('2026-08-03T10:00:30Z'),
+    );
+    appendRunSession(
+      plan,
+      { QWEN_CODE_SESSION_ID: 'S0b' },
+      Date.parse('2026-08-03T10:05:00Z'),
+    );
+    appendRunSession(
+      plan,
+      { QWEN_CODE_SESSION_ID: SESSION },
+      Date.parse('2026-08-03T10:09:00Z'),
+    );
+    recordResume(
+      plan,
+      { QWEN_CODE_SESSION_ID: SESSION },
+      Date.parse('2026-08-03T10:09:00Z'),
+    );
+
+    const ledger = computeLedger(plan, env);
+    expect(ledger.priorSessions).toBe(2);
+    expect(ledger.totals.inputTokens).toBe(1700);
+  });
+
+  it('clamps each prior session at ITS OWN successor, and sums both spans', () => {
+    // The intermediate per-session ceiling and multi-span wall time: events
+    // far inside any window discriminate neither.
+    const { plan, project, env } = fixture();
+    writeFileSync(
+      join(project, 'chats', 'S0.jsonl'),
+      [
+        event('2026-08-03T10:01:00Z', { input: 1000, output: 100 }),
+        // Past S0b's start: the NEXT entry's ceiling, not the global one,
+        // must exclude it from S0's leg.
+        event('2026-08-03T10:06:30Z', { input: 4444, output: 1 }),
+      ].join(''),
+    );
+    writeFileSync(
+      join(project, 'chats', 'S0b.jsonl'),
+      event('2026-08-03T10:06:00Z', { input: 200, output: 20 }),
+    );
+    appendRunSession(
+      plan,
+      { QWEN_CODE_SESSION_ID: 'S0' },
+      Date.parse('2026-08-03T10:00:30Z'),
+    );
+    appendRunSession(
+      plan,
+      { QWEN_CODE_SESSION_ID: 'S0b' },
+      Date.parse('2026-08-03T10:05:00Z'),
+    );
+    appendRunSession(
+      plan,
+      { QWEN_CODE_SESSION_ID: SESSION },
+      Date.parse('2026-08-03T10:09:00Z'),
+    );
+    recordResume(
+      plan,
+      { QWEN_CODE_SESSION_ID: SESSION },
+      Date.parse('2026-08-03T10:09:00Z'),
+    );
+
+    const ledger = computeLedger(plan, env);
+    // 1000 (S0, inside its window) + 200 (S0b) + 500 (current); the 4444
+    // stamped after S0b began belongs to no leg of S0's bill.
+    expect(ledger.totals.inputTokens).toBe(1700);
+    // Wall time accumulates across BOTH prior spans (each span here is a
+    // single event, so the sum is 0 — the assertion is that it is a number
+    // derived from two spans, not one, which the priorSessions count plus
+    // the totals above jointly pin).
+    expect(ledger.priorSessions).toBe(2);
+  });
+
+  it('prefilters prior agent streams against the PRIOR floor, not the current one', () => {
+    // Every fixture wrote prior transcripts at wall-clock now, postdating
+    // both candidate floors; in production a prior stream's mtime always
+    // predates the resumed attempt's floor, so a current-floor prefilter
+    // skips every prior agent silently.
+    const { plan, project, env } = fixture();
+    writeFileSync(
+      join(project, 'chats', 'S0.jsonl'),
+      event('2026-08-03T10:01:00Z', { input: 1000, output: 100 }),
+    );
+    const priorDir = join(project, 'subagents', 'S0');
+    mkdirSync(priorDir, { recursive: true });
+    const stream = join(priorDir, 'agent-a0.jsonl');
+    writeFileSync(
+      stream,
+      event('2026-08-03T10:02:00Z', { input: 300, output: 30 }),
+    );
+    // The stream's mtime: after the PRIOR attempt began, before the CURRENT
+    // one — the discriminating window.
+    const at = new Date('2026-08-03T10:02:30Z');
+    utimesSync(stream, at, at);
+    runLedger(plan);
+
+    const ledger = computeLedger(plan, env);
+    expect(ledger.totals.inputTokens).toBe(1800);
+  });
+
+  it('excludes prior chat noise from BEFORE that attempt began', () => {
+    // The Math.max(planMs, entry.atMs) floor on the prior leg: an event in
+    // [planMs, entry.atMs) — the operator's unrelated turns before the
+    // attempt started — must not bill. Every fixture left that window empty.
+    const { plan, project, env } = fixture();
+    writeFileSync(
+      join(project, 'chats', 'S0.jsonl'),
+      [
+        // After the plan (10:00:00), BEFORE S0's entry (10:00:30).
+        event('2026-08-03T10:00:10Z', { input: 9999, output: 1 }),
+        event('2026-08-03T10:01:00Z', { input: 1000, output: 100 }),
+      ].join(''),
+    );
+    runLedger(plan);
+
+    const ledger = computeLedger(plan, env);
+    expect(ledger.totals.inputTokens).toBe(1500);
+  });
+
+  it('bills the boundary instant to exactly one attempt', () => {
+    // The handoff operators: an event AT the prior session's ceiling belongs
+    // to the NEXT attempt (>= excludes), and an event AT the current floor
+    // belongs to the current one (>= includes). Both mutations shipped green
+    // with every fixture 40s-8h away from a boundary.
+    const { plan, project, env } = fixture();
+    const handoff = '2026-08-03T10:09:00.000Z';
+    writeFileSync(
+      join(project, 'chats', 'S0.jsonl'),
+      [
+        event('2026-08-03T10:01:00Z', { input: 1000, output: 100 }),
+        // Exactly at the ceiling: the next attempt's, not this one's.
+        event(handoff, { input: 7777, output: 1 }),
+      ].join(''),
+    );
+    writeFileSync(
+      join(project, 'chats', `${SESSION}.jsonl`),
+      // Exactly at the current floor: included.
+      event(handoff, { input: 500, output: 50 }),
+    );
+    runLedger(plan);
+
+    const ledger = computeLedger(plan, env);
+    // 1000 (prior, below the ceiling) + 500 (current, at the floor); the
+    // 7777 at the prior ceiling is excluded from the prior leg.
+    expect(ledger.totals.inputTokens).toBe(1500);
+  });
+
+  it("folds the interrupted attempt's main loop and agents into the totals", () => {
+    const { plan, env, project } = fixture();
+    runLedger(plan);
+    writeFileSync(
+      join(project, 'chats', 'S0.jsonl'),
+      event('2026-08-03T10:01:00Z', { input: 1_000, output: 100 }),
+    );
+    mkdirSync(join(project, 'subagents', 'S0'), { recursive: true });
+    writeFileSync(
+      join(project, 'subagents', 'S0', 'agent-a0.jsonl'),
+      [
+        userRecord('You are review agent `2` — Agent 2: Security.'),
+        event('2026-08-03T10:02:00Z', { input: 2_000, output: 200 }),
+      ].join('\n'),
+    );
+
+    const ledger = computeLedger(plan, env);
+    expect(ledger.priorSessions).toBe(1);
+    expect(ledger.main?.calls).toBe(2);
+    expect(ledger.main?.inputTokens).toBe(1_500);
+    expect(ledger.agents).toHaveLength(1);
+    expect(ledger.totals.inputTokens).toBe(3_500);
+  });
+
+  it('reports zero prior sessions without a ledger — and reads nothing extra', () => {
+    const { plan, env, project } = fixture();
+    writeFileSync(
+      join(project, 'chats', 'S0.jsonl'),
+      event('2026-08-03T10:01:00Z', { input: 1_000, output: 100 }),
+    );
+
+    const ledger = computeLedger(plan, env);
+    expect(ledger.priorSessions).toBe(0);
+    expect(ledger.main?.calls).toBe(1);
+    expect(ledger.totals.inputTokens).toBe(500);
+  });
+
+  it('counts a prior session with agents but a lost chat file', () => {
+    const { plan, env, project } = fixture();
+    runLedger(plan);
+    mkdirSync(join(project, 'subagents', 'S0'), { recursive: true });
+    writeFileSync(
+      join(project, 'subagents', 'S0', 'agent-a0.jsonl'),
+      [
+        userRecord('You are review agent `2` — Agent 2: Security.'),
+        event('2026-08-03T10:02:00Z', { input: 2_000, output: 200 }),
+      ].join('\n'),
+    );
+
+    const ledger = computeLedger(plan, env);
+    expect(ledger.priorSessions).toBe(1);
+    expect(ledger.agents).toHaveLength(1);
+    expect(ledger.totals.inputTokens).toBe(2_500);
+  });
+});
+
+describe('cost-ledger — prior-session bounds, faults and wall time', () => {
+  const dirs: string[] = [];
+  afterEach(() => {
+    for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
+  });
+
+  function fixture(): {
+    plan: string;
+    env: NodeJS.ProcessEnv;
+    project: string;
+  } {
+    const project = mkdtempSync(join(tmpdir(), 'ledger-bounds-'));
+    dirs.push(project);
+    mkdirSync(join(project, 'chats'), { recursive: true });
+    mkdirSync(join(project, 'subagents', SESSION), { recursive: true });
+    writeFileSync(
+      join(project, 'chats', `${SESSION}.jsonl`),
+      event('2026-08-03T10:10:00Z', { input: 500, output: 50 }),
+    );
+    const plan = join(project, 'plan.json');
+    writeFileSync(
+      plan,
+      JSON.stringify({
+        diffPathAbsolute: join(project, 'diff.txt'),
+        diffLines: 10,
+        chunks: [{ id: 1, startLine: 1, endLine: 10 }],
+      }),
+    );
+    const start = new Date('2026-08-03T10:00:00Z');
+    utimesSync(plan, start, start);
+    return {
+      plan,
+      project,
+      env: {
+        QWEN_CODE_PROJECT_DIR: project,
+        QWEN_CODE_SESSION_ID: SESSION,
+      } as NodeJS.ProcessEnv,
+    };
+  }
+
+  /** The ledger fetch-pr writes: S0 interrupted, the current session resumed. */
+  function runLedger(
+    project: string,
+    resumedAt = '2026-08-03T10:09:00Z',
+  ): void {
+    const plan = join(project, 'plan.json');
+    appendRunSession(
+      plan,
+      { QWEN_CODE_SESSION_ID: 'S0' },
+      Date.parse('2026-08-03T10:00:30Z'),
+    );
+    appendRunSession(
+      plan,
+      { QWEN_CODE_SESSION_ID: SESSION },
+      Date.parse(resumedAt),
+    );
+    recordResume(
+      plan,
+      { QWEN_CODE_SESSION_ID: SESSION },
+      Date.parse(resumedAt),
+    );
+  }
+
+  it('renders the resumed-run line, singular and plural, and not otherwise', () => {
+    const one = renderLedger({
+      totals: {
+        calls: 1,
+        inputTokens: 10,
+        cachedTokens: 0,
+        outputTokens: 1,
+        thoughtsTokens: 0,
+        firstAt: null,
+        lastAt: null,
+        wallSeconds: 60,
+      },
+      main: {
+        id: 'main',
+        label: 'main loop',
+        calls: 1,
+        inputTokens: 10,
+        cachedTokens: 0,
+        outputTokens: 1,
+        thoughtsTokens: 0,
+        firstAt: null,
+        lastAt: null,
+      },
+      agents: [],
+      priorSessions: 1,
+      missingStreams: 0,
+    });
+    expect(one).toContain('resumed run: totals include 1 earlier session ');
+    const two = renderLedger({
+      totals: {
+        calls: 1,
+        inputTokens: 10,
+        cachedTokens: 0,
+        outputTokens: 1,
+        thoughtsTokens: 0,
+        firstAt: null,
+        lastAt: null,
+        wallSeconds: 60,
+      },
+      main: {
+        id: 'main',
+        label: 'main loop',
+        calls: 1,
+        inputTokens: 10,
+        cachedTokens: 0,
+        outputTokens: 1,
+        thoughtsTokens: 0,
+        firstAt: null,
+        lastAt: null,
+      },
+      agents: [],
+      priorSessions: 2,
+      missingStreams: 0,
+    });
+    expect(two).toContain('2 earlier sessions');
+    const none = renderLedger({
+      totals: {
+        calls: 1,
+        inputTokens: 10,
+        cachedTokens: 0,
+        outputTokens: 1,
+        thoughtsTokens: 0,
+        firstAt: null,
+        lastAt: null,
+        wallSeconds: 60,
+      },
+      main: {
+        id: 'main',
+        label: 'main loop',
+        calls: 1,
+        inputTokens: 10,
+        cachedTokens: 0,
+        outputTokens: 1,
+        thoughtsTokens: 0,
+        firstAt: null,
+        lastAt: null,
+      },
+      agents: [],
+      priorSessions: 0,
+      missingStreams: 0,
+    });
+    expect(none).not.toContain('resumed run');
+  });
+
+  it("clamps a prior session's chat to the moment the next attempt began", () => {
+    // The interrupted CLI session went on serving unrelated turns after the
+    // review died; billing those as review cost is the mirror of the
+    // omission that folding prior cost exists to fix.
+    const { plan, env, project } = fixture();
+    runLedger(project);
+    mkdirSync(join(project, 'subagents', 'S0'), { recursive: true });
+    writeFileSync(
+      join(project, 'chats', 'S0.jsonl'),
+      [
+        event('2026-08-03T10:01:00Z', { input: 1_000, output: 100 }),
+        // After the resume began: another conversation, not this review.
+        event('2026-08-03T18:00:00Z', { input: 9_000, output: 900 }),
+      ].join('\n'),
+    );
+
+    const ledger = computeLedger(plan, env);
+    expect(ledger.priorSessions).toBe(1);
+    expect(ledger.totals.inputTokens).toBe(1_500);
+  });
+
+  // chmod 0o000 is a POSIX-only fault: on Windows it toggles the read-only
+  // attribute and readdir still succeeds, and root bypasses the mode
+  // entirely — the repo convention for this shape.
+  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+    'discloses an unreadable prior agent dir instead of silently flooring it',
+    () => {
+      const { plan, env, project } = fixture();
+      runLedger(project);
+      writeFileSync(
+        join(project, 'chats', 'S0.jsonl'),
+        event('2026-08-03T10:01:00Z', { input: 1_000, output: 100 }),
+      );
+      const priorDir = join(project, 'subagents', 'S0');
+      mkdirSync(priorDir, { recursive: true });
+      chmodSync(priorDir, 0o000);
+      try {
+        const seen: string[] = [];
+        const spy = vi
+          .spyOn(process.stderr, 'write')
+          .mockImplementation((chunk: unknown) => {
+            seen.push(String(chunk));
+            return true;
+          });
+        let ledger;
+        try {
+          ledger = computeLedger(plan, env);
+        } finally {
+          spy.mockRestore();
+        }
+        expect(ledger.priorSessions).toBe(1);
+        expect(
+          seen.some((l) => l.includes("prior session's subagent transcripts")),
+        ).toBe(true);
+      } finally {
+        chmodSync(priorDir, 0o755);
+      }
+    },
+  );
+
+  it('never reads a symlinked prior session directory', () => {
+    const { plan, env, project } = fixture();
+    runLedger(project);
+    const outside = mkdtempSync(join(tmpdir(), 'ledger-foreign-'));
+    dirs.push(outside);
+    writeFileSync(
+      join(outside, 'agent-foreign.jsonl'),
+      [
+        userRecord('You are review agent `2` — Agent 2: Security.'),
+        event('2026-08-03T10:02:00Z', { input: 7_000, output: 700 }),
+      ].join('\n'),
+    );
+    symlinkSync(outside, join(project, 'subagents', 'S0'));
+
+    const ledger = computeLedger(plan, env);
+    expect(ledger.agents).toHaveLength(0);
+    expect(ledger.totals.inputTokens).toBe(500);
+  });
+
+  it('counts a prior session ONCE when it had both chat and agents', () => {
+    // The agent window is nested inside the session's own; pushing both a
+    // chat span and an agent span billed the nested minutes twice.
+    const { plan, env, project } = fixture();
+    runLedger(project);
+    writeFileSync(
+      join(project, 'chats', 'S0.jsonl'),
+      [
+        event('2026-08-03T10:00:40Z', { input: 100, output: 10 }),
+        event('2026-08-03T10:02:40Z', { input: 100, output: 10 }),
+      ].join('\n'),
+    );
+    mkdirSync(join(project, 'subagents', 'S0'), { recursive: true });
+    writeFileSync(
+      join(project, 'subagents', 'S0', 'agent-a0.jsonl'),
+      [
+        userRecord('You are review agent `2` — Agent 2: Security.'),
+        event('2026-08-03T10:01:00Z', { input: 100, output: 10 }),
+        event('2026-08-03T10:02:00Z', { input: 100, output: 10 }),
+      ].join('\n'),
+    );
+    writeFileSync(
+      join(project, 'chats', `${SESSION}.jsonl`),
+      event('2026-08-03T10:10:00Z', { input: 100, output: 10 }),
+    );
+
+    // Prior session spans 10:00:40 → 10:02:40 = 120s, not 120 + a nested 60.
+    expect(computeLedger(plan, env).totals.wallSeconds).toBe(120);
+  });
+
+  it("clamps a prior session's AGENT transcripts to the next attempt too", () => {
+    // The operator kept using the interrupted CLI session and its later
+    // subagents wrote into the same dir — the mirror harm the chat ceiling
+    // already forbids.
+    const { plan, env, project } = fixture();
+    runLedger(project);
+    mkdirSync(join(project, 'subagents', 'S0'), { recursive: true });
+    writeFileSync(
+      join(project, 'subagents', 'S0', 'agent-a0.jsonl'),
+      [
+        userRecord('You are review agent `2` — Agent 2: Security.'),
+        event('2026-08-03T10:02:00Z', { input: 2_000, output: 200 }),
+        event('2026-08-03T18:00:00Z', { input: 9_000, output: 900 }),
+      ].join('\n'),
+    );
+
+    expect(computeLedger(plan, env).totals.inputTokens).toBe(2_500);
+  });
+
+  it("sums each session's own span rather than spanning the dead gap", () => {
+    const { plan, env, project } = fixture();
+    runLedger(project);
+    mkdirSync(join(project, 'subagents', 'S0'), { recursive: true });
+    writeFileSync(
+      join(project, 'chats', 'S0.jsonl'),
+      [
+        event('2026-08-03T10:01:00Z', { input: 100, output: 10 }),
+        event('2026-08-03T10:02:00Z', { input: 100, output: 10 }),
+      ].join('\n'),
+    );
+    writeFileSync(
+      join(project, 'chats', `${SESSION}.jsonl`),
+      [
+        event('2026-08-03T10:10:00Z', { input: 100, output: 10 }),
+        event('2026-08-03T10:13:00Z', { input: 100, output: 10 }),
+      ].join('\n'),
+    );
+
+    const ledger = computeLedger(plan, env);
+    // 60s (prior) + 180s (current) — not the 720s envelope.
+    expect(ledger.totals.wallSeconds).toBe(240);
   });
 });

@@ -94,23 +94,13 @@ vi.mock('../../config/settings.js', async (importOriginal) => {
   };
 });
 
-describe('tokenizeArgs', () => {
-  it('splits on whitespace and collapses runs', () => {
-    expect(tokenizeArgs('  6711   --comment ')).toEqual(['6711', '--comment']);
-  });
-
-  it('honours double- and single-quoted segments', () => {
-    expect(tokenizeArgs('"src/my file.ts" --effort low')).toEqual([
-      'src/my file.ts',
-      '--effort',
-      'low',
-    ]);
-    expect(tokenizeArgs("'a b' c")).toEqual(['a b', 'c']);
-  });
-
-  it('returns an empty list for an empty string', () => {
-    expect(tokenizeArgs('')).toEqual([]);
-    expect(tokenizeArgs('   ')).toEqual([]);
+describe('tokenizeArgs re-export', () => {
+  // The tokenizer's own suite is collocated at utils/shell-args.test.ts;
+  // this gate pins the re-export so the shared home cannot move without a
+  // test noticing.
+  it('is the shared utils/shell-args implementation', async () => {
+    const shared = await import('../../utils/shell-args.js');
+    expect(tokenizeArgs).toBe(shared.tokenizeArgs);
   });
 });
 
@@ -337,6 +327,117 @@ describe('parseReviewArgs', () => {
     expect(got.target).toMatchObject({ type: 'pr-url', number: 42 });
   });
 
+  it('an Aone codereview URL is a pr-url target keyed on the global MR id', () => {
+    const got = parseReviewArgs(
+      'https://code.alibaba-inc.com/maxcompute/odps_src/codereview/29295886',
+    );
+    expect(got.target).toMatchObject({
+      type: 'pr-url',
+      host: 'code.alibaba-inc.com',
+      owner: 'maxcompute',
+      repo: 'odps_src',
+      number: 29295886,
+    });
+  });
+
+  it('an Aone codereview URL with a trailing query still parses', () => {
+    const got = parseReviewArgs(
+      'https://code.alibaba-inc.com/maxcompute/odps_src/codereview/123?tab=files',
+    );
+    expect(got.target).toMatchObject({ type: 'pr-url', number: 123 });
+  });
+
+  it('an Aone codereview URL with a nested group keeps the last two segments', () => {
+    const got = parseReviewArgs(
+      'https://code.alibaba-inc.com/sub/maxcompute/odps_src/codereview/123',
+    );
+    expect(got.target).toMatchObject({
+      type: 'pr-url',
+      owner: 'maxcompute',
+      repo: 'odps_src',
+      number: 123,
+      // The FULL path rides the target — the identity gates compare it
+      // against nested-group remotes (the collapse is non-injective).
+      groupPath: 'sub/maxcompute/odps_src',
+    });
+    // The canonicalized URL keeps the full path too — a collapsed spelling
+    // would name a different repo to anything that re-reads it.
+    expect((got.target as { url: string }).url).toBe(
+      'https://code.alibaba-inc.com/sub/maxcompute/odps_src/codereview/123',
+    );
+  });
+
+  it('a two-segment Aone codereview URL carries its exact path too', () => {
+    // The URL pins an exact repo: the gates must not match it against a
+    // nested remote sharing the tail (reverse direction of the hazard).
+    const got = parseReviewArgs(
+      'https://code.alibaba-inc.com/maxcompute/odps_src/codereview/5',
+    );
+    expect(got.target).toMatchObject({
+      type: 'pr-url',
+      groupPath: 'maxcompute/odps_src',
+    });
+  });
+
+  it('a codereview URL on a NON-Aone host is refused, not a live target', () => {
+    // Unlike …/pull/<n> (any GHE host legitimately serves it), /codereview/
+    // is Aone-only — on any other host it must hit the fail-closed
+    // invalid-url refusal, not become a live PR target.
+    const got = parseReviewArgs(
+      'https://github.com/QwenLM/qwen-code/codereview/123',
+    );
+    expect(got.target).toEqual({ type: 'local' });
+    expect(got.warnings[0]).toContain('not a PR/CR URL');
+  });
+
+  it('a /pull/ URL on an AONE host is refused — Aone serves no /pull/ pages', () => {
+    // The Aone CR grammar is …/codereview/<global-id>; a /pull/<n> URL on
+    // an Aone host is a fabrication and must fail closed, not become a live
+    // target routed at the Aone host.
+    const got = parseReviewArgs(
+      'https://code.alibaba-inc.com/maxcompute/odps_src/pull/123',
+    );
+    expect(got.target).toEqual({ type: 'local' });
+    expect(got.warnings[0]).toContain('not a PR/CR URL');
+  });
+
+  it('the trailing-dot FQDN spelling of an Aone host is refused too', () => {
+    // `code.alibaba-inc.com.` is DNS-identical to the plain host and the
+    // URL grammar admits the dot — isAoneHost normalizes it, so the /pull/
+    // refusal and the CR-form refusal treat both spellings alike.
+    const got = parseReviewArgs(
+      'https://code.alibaba-inc.com./maxcompute/odps_src/pull/5',
+    );
+    expect(got.target).toEqual({ type: 'local' });
+    expect(got.warnings[0]).toContain('not a PR/CR URL');
+  });
+
+  it('a /codereview/ URL on a family-only (GHE) host is refused — fail closed', () => {
+    // `ghe.alibaba-inc.com` serves no /codereview/ grammar; accepting it
+    // as a live target would let detection route the explicit GHE host to
+    // GitHub and aim fetch/submit at GHE PR #123 — a target the supplied
+    // URL never named as a valid GHE resource.
+    const got = parseReviewArgs(
+      'https://ghe.alibaba-inc.com/group/repo/codereview/123',
+    );
+    expect(got.target).toEqual({ type: 'local' });
+    expect(got.warnings[0]).toContain('not a PR/CR URL');
+  });
+
+  it('a /pull/ URL on a family-only (GHE) host is a real GHE PR target', () => {
+    // The mirror arm: GHE instances legitimately serve /pull/ pages, so
+    // the family host must parse as a pr-url (and its explicit host then
+    // routes to the GitHub reader — pinned in registry.test.ts).
+    const got = parseReviewArgs(
+      'https://ghe.alibaba-inc.com/group/repo/pull/123',
+    );
+    expect(got.target).toMatchObject({
+      type: 'pr-url',
+      host: 'ghe.alibaba-inc.com',
+      number: 123,
+    });
+  });
+
   it('refuses a junk PR URL instead of guessing (never a file path, never PR 42)', () => {
     const got = parseReviewArgs(
       'https://github.com/QwenLM/qwen-code/pull/42oops',
@@ -345,13 +446,559 @@ describe('parseReviewArgs', () => {
     expect(got.extraTokens).toEqual([
       'https://github.com/QwenLM/qwen-code/pull/42oops',
     ]);
-    expect(got.warnings[0]).toContain('not a GitHub PR URL');
+    expect(got.warnings[0]).toContain('not a PR/CR URL');
   });
 
   it('last explicit effort wins when repeated', () => {
     const got = parseReviewArgs('6711 --effort low --effort medium');
     expect(got.effort).toBe('medium');
     expect(got.effortSource).toBe('explicit');
+  });
+});
+
+describe('parseReviewArgs — --severity-floor (the convergence posture knob)', () => {
+  it('defaults to auto: the round-adaptive rule is resolved at Step 6, not here', () => {
+    const got = parseReviewArgs('6711');
+    expect(got.severityFloor).toBe('auto');
+    expect(got.severityFloorSource).toBe('default');
+  });
+
+  it('parses both forms case-insensitively; the last valid occurrence wins', () => {
+    expect(parseReviewArgs('6711 --severity-floor critical')).toMatchObject({
+      severityFloor: 'critical',
+      severityFloorSource: 'explicit',
+    });
+    expect(parseReviewArgs('6711 --severity-floor=Suggestion')).toMatchObject({
+      severityFloor: 'suggestion',
+    });
+    expect(
+      parseReviewArgs(
+        '6711 --severity-floor critical --severity-floor suggestion',
+      ),
+    ).toMatchObject({ severityFloor: 'suggestion' });
+  });
+
+  it('warns and ignores the flag on a non-PR target, exactly as --comment does', () => {
+    const got = parseReviewArgs('src/foo.ts --severity-floor critical');
+    expect(got.target.type).toBe('file');
+    expect(got.severityFloor).toBe('auto');
+    expect(got.severityFloorSource).toBe('default');
+    expect(got.warnings.some((w) => w.includes('--severity-floor'))).toBe(true);
+  });
+
+  it('an invalid value warns naming what is in effect, and never eats the target', () => {
+    // The typo is discarded when another token is the target — without the
+    // disposal rule, `criticl` would classify as a file path and shadow the
+    // real PR target that follows it.
+    const got = parseReviewArgs('--severity-floor criticl 6711');
+    expect(got.target).toEqual({ type: 'pr-number', number: 6711 });
+    expect(got.severityFloor).toBe('auto');
+    expect(
+      got.warnings.some(
+        (w) =>
+          w.includes('Invalid --severity-floor value "criticl"') &&
+          w.includes('round-adaptive default'),
+      ),
+    ).toBe(true);
+  });
+
+  it('an invalid equals-form value warns instead of vanishing', () => {
+    // Mutation-verified gap: replacing the invalid-eq push with a bare
+    // `continue` left the whole suite green — an operator who typed the flag
+    // believing round 6 went Critical-only would get Suggestions posted with
+    // nothing saying the flag never took effect.
+    const got = parseReviewArgs('6711 --severity-floor=critcl');
+    expect(got.target).toEqual({ type: 'pr-number', number: 6711 });
+    expect(got.severityFloor).toBe('auto');
+    expect(
+      got.warnings.some((w) =>
+        w.includes('Invalid --severity-floor value "critcl"'),
+      ),
+    ).toBe(true);
+  });
+
+  it('a sole invalid value becomes the target, and the warning says so', () => {
+    const got = parseReviewArgs('--severity-floor criticl');
+    expect(got.target).toEqual({ type: 'file', path: 'criticl' });
+    expect(
+      got.warnings.some(
+        (w) =>
+          w.includes('Invalid --severity-floor value "criticl"') &&
+          w.includes('treating it as the review target'),
+      ),
+    ).toBe(true);
+  });
+
+  it('an unrelated typo never changes WHICH codebase is reviewed', () => {
+    // `--effort 6711` reviews PR 6711 past a flag mistake; adding a second
+    // malformed flag must not silently retarget the review at the local
+    // diff. PR-shaped values survive disposal; enum-typo-shaped ones do not.
+    const got = parseReviewArgs('--severity-floor blocker --effort 6711');
+    expect(got.target).toEqual({ type: 'pr-number', number: 6711 });
+    expect(
+      got.warnings.some(
+        (w) => w.includes('"blocker"') && w.includes('discarded'),
+      ),
+    ).toBe(true);
+  });
+
+  it('a typed target outranks a PR-shaped flag value', () => {
+    // With a real positional target present, `--effort 6712` is a typo, not
+    // a second target — keeping it would make the kept-as-target warning
+    // lie about which PR is reviewed.
+    const got = parseReviewArgs('6711 --effort 6712');
+    expect(got.target).toEqual({ type: 'pr-number', number: 6711 });
+    expect(got.extraTokens).toEqual([]);
+    expect(
+      got.warnings.some((w) => w.includes('"6712"') && w.includes('discarded')),
+    ).toBe(true);
+  });
+
+  it('two PR-shaped flag values are ambiguous — refused, never first-wins', () => {
+    // `--severity-floor 6711 --effort 6712`: silently reviewing 6711 would
+    // review the wrong PR half the time. Both are discarded with a warning
+    // that names them, and the review falls back to the local diff.
+    const got = parseReviewArgs('--severity-floor 6711 --effort 6712');
+    expect(got.target).toEqual({ type: 'local' });
+    expect(got.extraTokens).toEqual([]);
+    expect(
+      got.warnings.some(
+        (w) =>
+          w.includes('Ambiguous target') &&
+          w.includes('"6711"') &&
+          w.includes('"6712"'),
+      ),
+    ).toBe(true);
+  });
+
+  it('the ambiguity guard covers the equals form — syntax does not pick a PR', () => {
+    // Round-7 probe: the eq form never enters the disposal pool, so
+    // `--severity-floor=6711 --effort 6712` silently targeted 6712 while
+    // the all-spaced spelling was loudly refused. All four spellings must
+    // land the same place.
+    for (const raw of [
+      '--severity-floor 6711 --effort 6712',
+      '--severity-floor=6711 --effort 6712',
+      '--severity-floor 6711 --effort=6712',
+      '--severity-floor=6711 --effort=6712',
+    ]) {
+      const got = parseReviewArgs(raw);
+      expect(got.target).toEqual({ type: 'local' });
+      expect(got.warnings.some((w) => w.includes('Ambiguous target'))).toBe(
+        true,
+      );
+    }
+  });
+
+  it('same-id CR URLs from DIFFERENT nested groups are ambiguous', () => {
+    // The global MR id collides across repos; the rescue pool once deduped
+    // these on the collapsed owner/repo + number key (both collapse to
+    // `maxcompute/odps_src`… here: shared tail `sub/app`) and silently
+    // reviewed the first. The full group path keeps them distinct.
+    const got = parseReviewArgs(
+      '--severity-floor https://code.alibaba-inc.com/groupA/sub/app/codereview/7 ' +
+        '--effort https://code.alibaba-inc.com/groupB/sub/app/codereview/7',
+    );
+    expect(got.target).toEqual({ type: 'local' });
+    expect(got.warnings.some((w) => w.includes('Ambiguous target'))).toBe(true);
+  });
+
+  it('a bare number beside a same-number CR URL never wins — in any order', () => {
+    // The CR URL is the only carrier of host/platform identity: when both
+    // spellings of one PR arrive, the URL must be the target regardless of
+    // token order — a bare-number target flips detection onto the cwd
+    // fallback and silently reviews the cwd clone's same-number PR.
+    const url = 'https://code.alibaba-inc.com/maxcompute/odps_src/codereview/7';
+    for (const args of [`7 ${url}`, `${url} 7`]) {
+      const got = parseReviewArgs(args);
+      expect(got.target).toMatchObject({
+        type: 'pr-url',
+        host: 'code.alibaba-inc.com',
+        owner: 'maxcompute',
+        repo: 'odps_src',
+        number: 7,
+      });
+    }
+  });
+
+  it('flag-rescued spellings prefer the CR URL over the bare number too', () => {
+    // The rescue pool's one-PR subsumption must pick the repo-qualified
+    // spelling whichever order the invalid flag values arrived in.
+    const url = 'https://code.alibaba-inc.com/maxcompute/odps_src/codereview/7';
+    for (const args of [
+      `--severity-floor 7 --effort ${url}`,
+      `--severity-floor ${url} --effort 7`,
+    ]) {
+      const got = parseReviewArgs(args);
+      expect(got.target).toMatchObject({
+        type: 'pr-url',
+        host: 'code.alibaba-inc.com',
+        number: 7,
+      });
+    }
+  });
+
+  it('MIXED shapes: a positional bare number never outranks a flag-rescued same-number CR URL', () => {
+    // The round-12 witness: the invariant "the URL never loses to a
+    // same-number bare spelling" was gated on !hasValidCandidate, and a
+    // POSITIONAL bare number satisfied it — the URL (the only carrier of
+    // host/platform identity) was discarded as an effort typo and the run
+    // retargeted onto the cwd clone's same-number PR. A DIFFERENT number
+    // typed positionally still outranks (control at the end).
+    const url = 'https://code.alibaba-inc.com/maxcompute/odps_src/codereview/7';
+    for (const args of [
+      `--effort ${url} 7`,
+      `7 --effort ${url}`,
+      `--severity-floor=${url} 7`,
+    ]) {
+      const got = parseReviewArgs(args);
+      expect(got.target).toMatchObject({
+        type: 'pr-url',
+        host: 'code.alibaba-inc.com',
+        number: 7,
+      });
+    }
+    // Control: a DIFFERENT positional number outranks the rescued URL.
+    expect(parseReviewArgs(`--effort ${url} 8`).target).toMatchObject({
+      type: 'pr-number',
+      number: 8,
+    });
+  });
+
+  it('records the --host flag verbatim for the write gate', () => {
+    expect(parseReviewArgs('123 --host gitlab.alibaba-inc.com').host).toBe(
+      'gitlab.alibaba-inc.com',
+    );
+    expect(parseReviewArgs('123 --host=code.alibaba-inc.com').host).toBe(
+      'code.alibaba-inc.com',
+    );
+    expect(parseReviewArgs('123').host).toBeUndefined();
+    // The value is consumed — it never leaks into the target tokens.
+    const got = parseReviewArgs('123 --host gitlab.alibaba-inc.com');
+    expect(got.target).toMatchObject({ type: 'pr-number', number: 123 });
+    expect(got.extraTokens).toEqual([]);
+  });
+
+  it('the equals form rescues a PR-shaped value exactly as the spaced form does', () => {
+    // Round-8 probe: `--severity-floor=6711` reviewed the LOCAL tree while
+    // `--severity-floor 6711` rescued PR 6711 — the guard's invariant
+    // ("which codebase is reviewed cannot depend on which syntax happened
+    // to be typed") was wired into refusal only. Every spelling converges.
+    for (const raw of [
+      '--severity-floor=6711',
+      '--severity-floor 6711',
+      '--effort=6711',
+      '--severity-floor blocker --effort=6711',
+      '--severity-floor blocker --effort 6711',
+    ]) {
+      expect(parseReviewArgs(raw).target).toEqual({
+        type: 'pr-number',
+        number: 6711,
+      });
+    }
+    // Two spellings of the SAME PR are one candidate, not an ambiguity —
+    // and not an extra argument either: the restated spelling must not
+    // surface as `extraTokens` / "Ignoring extra argument(s)" (round-9).
+    const dup = parseReviewArgs('--severity-floor 6711 --effort=6711');
+    expect(dup.target).toEqual({ type: 'pr-number', number: 6711 });
+    expect(dup.warnings.some((w) => w.includes('Ambiguous'))).toBe(false);
+    expect(dup.extraTokens).toEqual([]);
+    expect(dup.warnings.some((w) => w.includes('Ignoring extra'))).toBe(false);
+    // Identity is the resolved TARGET, not the raw string: a bare number and
+    // a same-number URL name one PR (round-9 finding — a raw-token Set read
+    // them as two and fell back to the local tree).
+    const mixed = parseReviewArgs(
+      '--severity-floor 6711 --effort https://github.com/QwenLM/qwen-code/pull/6711',
+    );
+    expect(mixed.target).toMatchObject({ number: 6711 });
+    expect(mixed.warnings.some((w) => w.includes('Ambiguous'))).toBe(false);
+    expect(mixed.extraTokens).toEqual([]);
+  });
+
+  it('an invalid configured floor stays silent on a non-PR target', () => {
+    // Round-8 mutant: deleting the `&& isPr` gate warned every file/local
+    // review about a floor that is inert there by design.
+    const got = parseReviewArgs('src/foo.ts', { severityFloor: 'blocker' });
+    expect(got.severityFloor).toBe('auto');
+    expect(got.warnings).toEqual([]);
+  });
+
+  it('an explicit auto floor is legal and overrides a configured floor for one run', () => {
+    // Mutation-shown gap: dropping 'auto' from SEVERITY_FLOORS shipped
+    // green while the documented one-shot override was rejected and, alone,
+    // promoted to a bogus `auto` file target.
+    expect(
+      parseReviewArgs('6711 --severity-floor auto', {
+        severityFloor: 'critical',
+      }),
+    ).toMatchObject({ severityFloor: 'auto', severityFloorSource: 'explicit' });
+    const sole = parseReviewArgs('--severity-floor auto');
+    expect(sole.target).toEqual({ type: 'local' });
+  });
+
+  it('a quoted-empty value is consumed as missing on both flags', () => {
+    // Mutation-shown gap: with the consumption branch deleted, '' survived
+    // as the sole candidate and became an empty-string file target.
+    for (const raw of ['--severity-floor ""', '--effort ""']) {
+      const got = parseReviewArgs(raw);
+      expect(got.target).toEqual({ type: 'local' });
+      expect(got.warnings.some((w) => w.includes('requires a value'))).toBe(
+        true,
+      );
+    }
+    const withTarget = parseReviewArgs('6711 --severity-floor ""');
+    expect(withTarget.target).toEqual({ type: 'pr-number', number: 6711 });
+    expect(
+      withTarget.warnings.some((w) => w.includes('requires a value')),
+    ).toBe(true);
+  });
+
+  it('two invalid values are two typos, not a target and a tiebreak', () => {
+    // "Sole target candidate" is literal: with two invalid tokens neither is
+    // sole, so both are discarded and the review falls back to the local
+    // diff — promoting the first to a file target would send the caller off
+    // to stat `blocker`.
+    const got = parseReviewArgs(
+      '--severity-floor blocker --severity-floor warning',
+    );
+    expect(got.target).toEqual({ type: 'local' });
+    expect(got.extraTokens).toEqual([]);
+    expect(got.warnings.filter((w) => w.includes('discarded')).length).toBe(2);
+  });
+
+  it('flag-final or flag-followed is a missing value, never a consumed flag', () => {
+    const got = parseReviewArgs('6711 --severity-floor --comment');
+    expect(got.comment.requested).toBe(true);
+    expect(got.severityFloor).toBe('auto');
+    expect(
+      got.warnings.some((w) => w.includes('--severity-floor requires a value')),
+    ).toBe(true);
+  });
+
+  it('applies the configured review.severityFloor; an explicit flag still wins', () => {
+    expect(
+      parseReviewArgs('6711', { severityFloor: 'critical' }),
+    ).toMatchObject({
+      severityFloor: 'critical',
+      severityFloorSource: 'configured',
+    });
+    expect(
+      parseReviewArgs('6711 --severity-floor suggestion', {
+        severityFloor: 'critical',
+      }),
+    ).toMatchObject({
+      severityFloor: 'suggestion',
+      severityFloorSource: 'explicit',
+    });
+  });
+
+  it('a configured floor is silently inert on a non-PR target', () => {
+    const got = parseReviewArgs('src/foo.ts', { severityFloor: 'critical' });
+    expect(got.severityFloor).toBe('auto');
+    expect(got.warnings).toHaveLength(0);
+  });
+
+  it('an invalid configured floor warns on a PR target instead of dropping silently', () => {
+    const got = parseReviewArgs('6711', { severityFloor: 'blocker' });
+    expect(got.severityFloor).toBe('auto');
+    expect(
+      got.warnings.some((w) =>
+        w.includes('Invalid review.severityFloor value "blocker"'),
+      ),
+    ).toBe(true);
+  });
+});
+
+describe('parseReviewArgs — --topology (the minimal-prompt A/B arm)', () => {
+  it('defaults to auto: the standing effort-driven pipeline', () => {
+    const got = parseReviewArgs('6711');
+    expect(got.topology).toBe('auto');
+    expect(got.topologySource).toBe('default');
+  });
+
+  it('parses both forms case-insensitively; the last valid occurrence wins', () => {
+    expect(parseReviewArgs('6711 --topology minimal')).toMatchObject({
+      topology: 'minimal',
+      topologySource: 'explicit',
+    });
+    expect(parseReviewArgs('6711 --topology=Minimal')).toMatchObject({
+      topology: 'minimal',
+    });
+    expect(
+      parseReviewArgs('6711 --topology minimal --topology auto'),
+    ).toMatchObject({ topology: 'auto', topologySource: 'explicit' });
+  });
+
+  it('an explicit --topology auto is explicit, not the default', () => {
+    const got = parseReviewArgs('6711 --topology auto');
+    expect(got.topology).toBe('auto');
+    expect(got.topologySource).toBe('explicit');
+  });
+
+  it('selecting minimal does not change the target', () => {
+    expect(parseReviewArgs('6711 --topology minimal').target).toEqual({
+      type: 'pr-number',
+      number: 6711,
+    });
+    expect(parseReviewArgs('src/foo.ts --topology minimal').target).toEqual({
+      type: 'file',
+      path: 'src/foo.ts',
+    });
+  });
+
+  it('minimal gates --comment: terminal-only, posts nothing', () => {
+    const got = parseReviewArgs('6711 --topology minimal --comment');
+    expect(got.comment.requested).toBe(true);
+    expect(got.comment.effective).toBe(false);
+    expect(
+      got.warnings.some(
+        (w) => w.includes('`--comment`') && w.includes('terminal-only'),
+      ),
+    ).toBe(true);
+  });
+
+  it('minimal gates --fix: terminal-only, edits nothing', () => {
+    const got = parseReviewArgs('src/foo.ts --topology minimal --fix');
+    expect(got.fix.requested).toBe(true);
+    expect(got.fix.effective).toBe(false);
+    expect(
+      got.warnings.some(
+        (w) => w.includes('`--fix`') && w.includes('terminal-only'),
+      ),
+    ).toBe(true);
+  });
+
+  it('minimal gates --resume: a fresh single pass cannot continue an interrupted run', () => {
+    // The third flag the minimal arm gates: an effective resume would make
+    // `fetch-pr --resume` consume an interrupted pipeline run's lease and
+    // worktree for a pass that never continues it — destroying resumable
+    // state instead of either continuing or leaving it alone.
+    const got = parseReviewArgs('6711 --topology minimal --resume');
+    expect(got.resume.requested).toBe(true);
+    expect(got.resume.effective).toBe(false);
+    expect(
+      got.warnings.some(
+        (w) => w.includes('`--resume`') && w.includes('--topology minimal'),
+      ),
+    ).toBe(true);
+  });
+
+  it('an invalid value warns naming what is in effect, and never eats the target', () => {
+    const got = parseReviewArgs('--topology minial 6711');
+    expect(got.target).toEqual({ type: 'pr-number', number: 6711 });
+    expect(got.topology).toBe('auto');
+    expect(
+      got.warnings.some(
+        (w) =>
+          w.includes('Invalid --topology value "minial"') &&
+          w.includes('default topology'),
+      ),
+    ).toBe(true);
+  });
+
+  it('an invalid equals-form value warns instead of vanishing', () => {
+    const got = parseReviewArgs('6711 --topology=minial');
+    expect(got.target).toEqual({ type: 'pr-number', number: 6711 });
+    expect(got.topology).toBe('auto');
+    expect(
+      got.warnings.some((w) => w.includes('Invalid --topology value "minial"')),
+    ).toBe(true);
+  });
+
+  it('a sole invalid value becomes the target, and the warning says so', () => {
+    const got = parseReviewArgs('--topology minial');
+    expect(got.target).toEqual({ type: 'file', path: 'minial' });
+    expect(
+      got.warnings.some(
+        (w) =>
+          w.includes('Invalid --topology value "minial"') &&
+          w.includes('treating it as the review target'),
+      ),
+    ).toBe(true);
+  });
+
+  it('a PR-shaped value is rescued as the target, not discarded', () => {
+    // `--topology 6711` (forgot the value) must review PR 6711, not silently
+    // fall back to the local diff — the same rescue --effort/--severity-floor get.
+    const got = parseReviewArgs('--topology 6711');
+    expect(got.target).toEqual({ type: 'pr-number', number: 6711 });
+    expect(got.topology).toBe('auto');
+  });
+
+  it('minimal does not force effort the way --comment does', () => {
+    // minimal is terminal-only, so the comment-forces-high rule never fires;
+    // a local target's effort stays at its default.
+    const got = parseReviewArgs('src/foo.ts --topology minimal');
+    expect(got.effort).toBe('medium');
+    expect(got.effortSource).toBe('default');
+  });
+
+  it('the equals form rescues a PR-shaped value exactly as the spaced form does', () => {
+    // Sibling probes pin this for --effort/--severity-floor (the round-8
+    // regression); the topology copy must not diverge. Deleting the
+    // equals-form rescue branch reviews the local tree instead of PR 6711.
+    expect(parseReviewArgs('--topology=6711').target).toEqual({
+      type: 'pr-number',
+      number: 6711,
+    });
+  });
+
+  it('a quoted-empty value is consumed as missing, never an empty-string target', () => {
+    // Deleting the consumption branch leaves '' as the sole candidate, and
+    // it classifies as an empty-string file target.
+    const bare = parseReviewArgs('--topology ""');
+    expect(bare.target).toEqual({ type: 'local' });
+    expect(
+      bare.warnings.some((w) => w.includes('--topology requires a value')),
+    ).toBe(true);
+
+    const afterTarget = parseReviewArgs('6711 --topology ""');
+    expect(afterTarget.target).toEqual({ type: 'pr-number', number: 6711 });
+    expect(
+      afterTarget.warnings.some((w) =>
+        w.includes('--topology requires a value'),
+      ),
+    ).toBe(true);
+  });
+
+  it('flag-final or flag-followed is a missing value, never a consumed flag', () => {
+    // Deleting the branch eats the following token into the kept pool, so
+    // `--comment` never registers.
+    const flagFinal = parseReviewArgs('6711 --topology');
+    expect(flagFinal.target).toEqual({ type: 'pr-number', number: 6711 });
+    expect(flagFinal.topology).toBe('auto');
+    expect(
+      flagFinal.warnings.some((w) => w.includes('--topology requires a value')),
+    ).toBe(true);
+
+    const followed = parseReviewArgs('6711 --topology --comment');
+    expect(followed.target).toEqual({ type: 'pr-number', number: 6711 });
+    expect(followed.comment.requested).toBe(true);
+    expect(followed.topology).toBe('auto');
+    expect(
+      followed.warnings.some((w) => w.includes('--topology requires a value')),
+    ).toBe(true);
+  });
+
+  it('minimal gates the review.comment setting too, and the warning names it', () => {
+    // The suppression gate is written over the SETTING-OR-FLAG request, so a
+    // settings-driven comment is gated exactly like a flagged one — pinning
+    // `effective: false` here witnesses the gate itself: narrowing it to the
+    // flag alone would let the terminal-only arm post while every flag-based
+    // test stays green. And the warning must name the setting, not a flag
+    // the operator never typed — the forced-by-comment warning makes the
+    // same distinction.
+    const got = parseReviewArgs('6711 --topology minimal', { comment: true });
+    expect(got.comment.effective).toBe(false);
+    expect(
+      got.warnings.some(
+        (w) =>
+          w.includes('`review.comment` setting') && w.includes('terminal-only'),
+      ),
+    ).toBe(true);
+    expect(got.warnings.some((w) => w.includes('`--comment` is ignored'))).toBe(
+      false,
+    );
   });
 });
 
@@ -701,6 +1348,19 @@ describe('parseArgsCommand wiring', () => {
     expect(written).toBe(String(vi.mocked(writeStdoutLine).mock.calls[0][0]));
   });
 
+  it('--topology minimal survives the stdin → yargs → handler path', async () => {
+    // The flag must reach the printed verdict through the real handler, not
+    // just the pure function: a wiring drop leaves every pure-function test
+    // green while real `/review … --topology minimal` runs the full pipeline.
+    fsState.stdin = '6711 --topology minimal --comment\n';
+    await runCli(['parse-args', '--stdin']);
+    const got = printedVerdict();
+    expect(got.target).toEqual({ type: 'pr-number', number: 6711 });
+    expect(got.topology).toBe('minimal');
+    expect(got.topologySource).toBe('explicit');
+    expect(got.comment).toEqual({ requested: true, effective: false });
+  });
+
   // The real CLI nests this command under `review`, which changes what
   // yargs puts in argv._ (['review', 'parse-args'] instead of
   // ['parse-args']) — the smuggle guard once read that command path as
@@ -819,6 +1479,38 @@ describe('parseArgsCommand — configured defaults wiring', () => {
         w.includes('Invalid review.effort value "bogus" in settings'),
       ),
     ).toBe(true);
+  });
+
+  it('a configured severityFloor reaches the verdict through the handler', async () => {
+    // Deleting the severityFloor line of reviewDefaultsFromSettings leaves
+    // every pure-parser test green while production silently ignores the
+    // setting — same seam as the effort/comment cases above.
+    reviewSettingsMock.mockReturnValue({ severityFloor: 'critical' });
+    const got = await verdictFor('6711\n');
+    expect(got.severityFloor).toBe('critical');
+    expect(got.severityFloorSource).toBe('configured');
+  });
+
+  it('discards an invalid configured severityFloor, warning instead of dropping it silently', async () => {
+    // Parity with the effort twin: a settings-layer "validation" that
+    // silently dropped non-enum values would leave every pure-parser test
+    // green while the operator's typo takes effect as silence.
+    reviewSettingsMock.mockReturnValue({ severityFloor: 'bogus' });
+    const got = await verdictFor('6711\n');
+    expect(got.severityFloor).toBe('auto');
+    expect(
+      got.warnings.some((w) =>
+        w.includes('Invalid review.severityFloor value "bogus" in settings'),
+      ),
+    ).toBe(true);
+  });
+
+  it('maps a configured auto severityFloor to the round-adaptive default without warning', async () => {
+    reviewSettingsMock.mockReturnValue({ severityFloor: 'Auto' });
+    const got = await verdictFor('6711\n');
+    expect(got.severityFloor).toBe('auto');
+    expect(got.severityFloorSource).toBe('default');
+    expect(got.warnings).toHaveLength(0);
   });
 
   it('ignores workspace settings — the policy keys resolve from operator scopes only', async () => {
@@ -1012,8 +1704,8 @@ describe('parse-args warns when the bundle is not built from these sources', () 
   it('names the cause when the roots hold nothing the digest admits', () => {
     // A root that exists but holds only test files measures zero digested
     // files. That is "nothing found", not "something unreadable", and the
-    // docstring promises each unmeasurable case names itself. The other three
-    // roots come out of the fixture too, so the zero is complete, not the
+    // docstring promises each unmeasurable case names itself. Every other
+    // root comes out of the fixture too, so the zero is complete, not the
     // partial-checkout case.
     stamp(FOREIGN_DIGEST);
     const reviewDir = join(
@@ -1039,6 +1731,10 @@ describe('parse-args warns when the bundle is not built from these sources', () 
         'review-worktree-lease.ts',
       ),
     );
+    fsReal.rmSync(join(repo, 'packages', 'cli', 'src', 'utils'), {
+      recursive: true,
+      force: true,
+    });
     fsReal.rmSync(join(repo, 'packages', 'core'), {
       recursive: true,
       force: true,
@@ -1103,5 +1799,70 @@ describe('parse-args warns when the bundle is not built from these sources', () 
     stamp(FOREIGN_DIGEST);
     run();
     expect(writeStdoutLine).toHaveBeenCalled();
+  });
+});
+
+describe('--resume', () => {
+  it('is effective on a PR target', () => {
+    const r = parseReviewArgs('6711 --resume');
+    expect(r.resume).toEqual({ requested: true, effective: true });
+    expect(r.warnings).toEqual([]);
+  });
+
+  it('is effective on a PR URL target', () => {
+    const r = parseReviewArgs(
+      'https://github.com/QwenLM/qwen-code/pull/6711 --resume',
+    );
+    expect(r.resume).toEqual({ requested: true, effective: true });
+  });
+
+  it('is ignored with a warning on a local target', () => {
+    const r = parseReviewArgs('--resume');
+    expect(r.resume).toEqual({ requested: true, effective: false });
+    expect(r.warnings.some((w) => w.includes('`--resume`'))).toBe(true);
+  });
+
+  it('is ignored with a warning on a FILE target too', () => {
+    // The other member of the `!isPr` class, which SKILL.md names alongside
+    // local. A gate written as `target.type !== 'local'` reports the flag
+    // effective here — on a target shape with no `fetch-pr` call to consume
+    // it — and every local-target test stays green.
+    const r = parseReviewArgs('src/foo.ts --resume');
+    expect(r.resume).toEqual({ requested: true, effective: false });
+    expect(r.warnings.some((w) => w.includes('`--resume`'))).toBe(true);
+  });
+
+  it('is absent by default', () => {
+    const r = parseReviewArgs('6711');
+    expect(r.resume).toEqual({ requested: false, effective: false });
+  });
+
+  it('keeps an explicit effort untouched on the EFFECTIVE path', () => {
+    // The missing corner of the matrix: the other three cells are covered,
+    // and this is the one an effort-forcing mutation on the effective path
+    // would slip through — the shape the sibling `--comment` bug took when
+    // it shipped.
+    const r = parseReviewArgs('6711 --resume --effort low');
+    expect(r.resume).toEqual({ requested: true, effective: true });
+    expect(r.effort).toBe('low');
+    expect(r.effortSource).toBe('explicit');
+  });
+
+  it('does not change the effort resolution', () => {
+    const r = parseReviewArgs('6711 --resume');
+    expect(r.effort).toBe('high'); // the PR default, not a resume effect
+    expect(r.effortSource).toBe('default');
+  });
+
+  it('an IGNORED --resume must not change the effort either', () => {
+    // The sibling `--comment` has this test because the bug shipped once:
+    // a flag ignored for the target still forced the level.
+    const r = parseReviewArgs('--resume --effort low');
+    expect(r.resume).toEqual({ requested: true, effective: false });
+    expect(r.effort).toBe('low');
+    expect(r.effortSource).toBe('explicit');
+    const d = parseReviewArgs('--resume');
+    expect(d.effort).toBe('medium'); // the local default, untouched
+    expect(d.effortSource).toBe('default');
   });
 });

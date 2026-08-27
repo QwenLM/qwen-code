@@ -7,6 +7,7 @@ on:
       - 'release/**'
     paths:
       - 'packages/sdk-java/**'
+      - 'packages/core/src/config/approval-modes.json'
       - 'packages/cli/src/commands/serve.ts'
       - 'packages/cli/src/serve/**'
       - 'packages/cli/src/acp-integration/**'
@@ -25,6 +26,7 @@ on:
       - 'release/**'
     paths:
       - 'packages/sdk-java/**'
+      - 'packages/core/src/config/approval-modes.json'
       - 'packages/cli/src/commands/serve.ts'
       - 'packages/cli/src/serve/**'
       - 'packages/cli/src/acp-integration/**'

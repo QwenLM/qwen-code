@@ -19,6 +19,214 @@
   gap: 2px;
 }
 
+.chatSummaryParallelAgents {
+  padding: 2px 0;
+}
+
+/* Completed thinking folded into the merged tool summary: a clickable line
+   like a tool row, expanding to the thought content on click. */
+.chatSummaryThought {
+  padding: 2px 0;
+  min-width: 0;
+}
+
+.chatSummaryThoughtHeader {
+  display: flex;
+  align-items: center;
+  margin: 0;
+  padding: 0;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  color: var(--muted-foreground);
+  cursor: pointer;
+  text-align: left;
+  font: inherit;
+}
+
+.chatSummaryThoughtHeader:hover,
+.chatSummaryThoughtSummary:focus-visible {
+  color: var(--primary);
+}
+
+.chatSummaryThoughtSummary {
+  flex: 0 1 auto;
+  margin: 0;
+  padding: 0;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  color: inherit;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  cursor: pointer;
+  text-align: left;
+  font: inherit;
+}
+
+.chatSummaryThoughtSummary:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--primary) 45%, transparent);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+.chatSummaryThoughtIcon {
+  width: 14px;
+  height: 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  line-height: 1;
+}
+
+.chatSummaryThoughtIcon svg {
+  display: block;
+}
+
+/* The chevron is hover-only and hugs the content, like the thinking block. */
+.chatSummaryThoughtChevronRight,
+.chatSummaryThoughtChevronDown {
+  margin-left: 7px;
+  width: 14px;
+  height: 14px;
+  position: relative;
+  flex-shrink: 0;
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+
+.chatSummaryThoughtHeader:hover .chatSummaryThoughtChevronRight,
+.chatSummaryThoughtHeader:hover .chatSummaryThoughtChevronDown,
+.chatSummaryThoughtSummary:focus-visible ~ .chatSummaryThoughtChevronRight,
+.chatSummaryThoughtSummary:focus-visible ~ .chatSummaryThoughtChevronDown {
+  opacity: 1;
+}
+
+.chatSummaryThoughtLabelActive {
+  background-image: linear-gradient(
+    105deg,
+    var(--muted-foreground) 0%,
+    var(--muted-foreground) 46%,
+    rgba(255, 255, 255, 0.92) 50%,
+    var(--muted-foreground) 54%,
+    var(--muted-foreground) 100%
+  );
+  background-size: 300% 100%;
+  background-position: 150% 0;
+  background-clip: text;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  animation: chat-summary-thinking-shine 5s linear infinite;
+}
+
+@keyframes chat-summary-thinking-shine {
+  0% {
+    background-position: 150% 0;
+  }
+  100% {
+    background-position: -150% 0;
+  }
+}
+
+.chatSummaryThoughtLabel {
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.chatSummaryThoughtTranslate {
+  flex-shrink: 0;
+  margin-left: 7px;
+  padding: 0;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  color: var(--muted-foreground);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  line-height: inherit;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 120ms ease;
+}
+
+.chatSummaryThoughtTranslate:hover,
+.chatSummaryThoughtTranslate:focus-visible {
+  color: var(--primary);
+}
+
+.chatSummaryThoughtHeader:hover .chatSummaryThoughtTranslate,
+.chatSummaryThoughtHeaderExpanded .chatSummaryThoughtTranslate,
+.chatSummaryThoughtTranslate:focus-visible,
+.chatSummaryThoughtTranslate[data-state='open'] {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+/* The expanded-state chevron stays visible, like the thinking block. */
+.chatSummaryThoughtChevronDown {
+  opacity: 1;
+}
+
+.chatSummaryThoughtChevronRight::before,
+.chatSummaryThoughtChevronRight::after,
+.chatSummaryThoughtChevronDown::before,
+.chatSummaryThoughtChevronDown::after {
+  content: '';
+  position: absolute;
+  width: 6px;
+  height: 1px;
+  background: currentColor;
+  border-radius: 1px;
+}
+
+.chatSummaryThoughtChevronRight::before {
+  top: calc(50% - 2px);
+  left: calc(50% - 3px);
+  transform: rotate(45deg);
+}
+
+.chatSummaryThoughtChevronRight::after {
+  top: calc(50% + 2px);
+  left: calc(50% - 3px);
+  transform: rotate(-45deg);
+}
+
+.chatSummaryThoughtChevronDown::before {
+  top: 50%;
+  left: calc(50% - 5px);
+  transform: rotate(45deg);
+}
+
+.chatSummaryThoughtChevronDown::after {
+  top: 50%;
+  left: calc(50% - 1px);
+  transform: rotate(-45deg);
+}
+
+.chatSummaryThoughtContent {
+  margin-top: 4px;
+  padding-left: 21px;
+  color: var(--muted-foreground);
+  font-size: 13px;
+  line-height: 1.5;
+  opacity: 0.9;
+}
+
+.chatSummaryThoughtContent p,
+.chatSummaryThoughtContent ul,
+.chatSummaryThoughtContent ol {
+  margin-top: 0;
+  margin-bottom: 4px;
+}
+
+.chatSummaryThoughtContent :last-child {
+  margin-bottom: 0;
+}
+
 .line {
   padding: 2px 0;
   min-width: 0;
@@ -51,6 +259,7 @@
 .chatSummary:focus-visible .chatSummaryTextActive,
 .chatSummary[aria-expanded='true'] .chatSummaryTextActive {
   background-image: none;
+  color: inherit;
   -webkit-text-fill-color: currentColor;
 }
 
@@ -189,11 +398,6 @@
   grid-template-rows: 1fr;
   min-height: 0;
   overflow: hidden;
-  transition: grid-template-rows 180ms ease;
-}
-
-.chatSummaryContentCollapsed {
-  grid-template-rows: 0fr;
 }
 
 .chatSummaryContentInner {
@@ -223,9 +427,11 @@
 
 .lineName {
   flex-shrink: 0;
+  font-size: 13px;
 }
 
 .lineArg {
+  font-size: 13px;
   min-width: 0;
   flex: 1;
   overflow: hidden;

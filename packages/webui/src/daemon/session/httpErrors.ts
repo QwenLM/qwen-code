@@ -14,6 +14,15 @@ export function extractHttpStatus(error: unknown): number | undefined {
   return undefined;
 }
 
+export function isInvalidClientIdError(error: unknown): boolean {
+  return (
+    error instanceof DaemonHttpError &&
+    error.status === 400 &&
+    isRecord(error.body) &&
+    error.body['code'] === 'invalid_client_id'
+  );
+}
+
 export function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }

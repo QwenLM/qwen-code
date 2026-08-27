@@ -656,7 +656,7 @@ function testBootstrapBridgeConfiguration() {
       'utf8',
     ),
   );
-  assert.deepEqual(capability.windows, ['main', 'local-control']);
+  assert.deepEqual(capability.windows, ['main']);
   assert.equal(
     capability.remote,
     undefined,

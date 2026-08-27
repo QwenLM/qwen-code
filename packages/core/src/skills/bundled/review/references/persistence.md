@@ -1,0 +1,105 @@
+# Step 8: Save review report and cache
+
+_Reference file of the `review` skill, loaded on demand — the core body
+(Steps 1–7 and 9) is already in your context. Every run reads this file
+before Step 8 except cross-repo lightweight runs, which skip Step 8
+entirely (Step 1 names the skip)._
+
+**Steps 8 and 9 are four responses, not ten.** Every command in this tail is cheap; the model turns between them are not — and this stretch runs after the verdict is already computed (and, on a posting run, already posted), so every extra turn is pure latency to the reader. Measured across six CI reviews, the one-command-per-turn shape cost 4–6 minutes after submission, before the artifact-root fumbling below stretched it further (measured; DESIGN.md — The one-command-per-turn tail). The dependency chain is short, so batch to it, issuing each group as separate tool calls in one response exactly as the Step 1 setup batch does: (1) `cost-ledger` plus the `read_file` of the findings artifact — everything the report's content still needs; (2) write the Markdown report; (3) `save-artifact` and the incremental-cache write, when this run owes one — both read only files that already exist, and neither reads the other; (4) `record_artifact` (its `workspacePath` comes from save-artifact's stdout, which is why it is not in group 3) together with Step 9's `cleanup`. **Group (4) fires only after group (3) succeeded**: `cleanup` deletes the `.qwen/tmp` side files `save-artifact` reads, so a failed group (3) is resolved first — the JSON helper is fail-closed (below), and destroying its only inputs would convert a recoverable failure into a permanent one. When it **cannot** be resolved (a malformed input, a disk error — synthesizing a replacement is forbidden by the same fail-closed rule), the run still ends properly: disclose the failure, skip `record_artifact` (there is nothing valid to register), copy the findings/composed inputs beside the Markdown report so the artifact stays rebuildable, and **still run `cleanup`** — Step 9's bypass audit and the completion line are never gated behind a success that will not come. A group's remaining reads may join its response; nothing here needs a turn of its own. Lower tiers drop the commands they never owed (low saves no artifact and writes no cache; a `--topology minimal` run owes neither at ANY effort — no verdict, no composed input, no artifact, no cache), not the batching.
+
+### Report persistence
+
+Save the review results to a Markdown file for future reference:
+
+- Local changes review → `.qwen/reviews/<YYYY-MM-DD>-<HHMMSS>-local.md`
+- PR review → `.qwen/reviews/<YYYY-MM-DD>-<HHMMSS>-pr-<number>.md`
+- File review → `.qwen/reviews/<YYYY-MM-DD>-<HHMMSS>-<filename>.md`
+
+Include hours/minutes/seconds in the filename to avoid overwriting on same-day re-reviews.
+
+Create the `.qwen/reviews/` directory if it doesn't exist. **For PR worktree mode, use absolute paths to the main project directory** (not the worktree) — e.g., `mkdir -p /absolute/path/to/project/.qwen/reviews/`. Relative paths would land inside the worktree and be deleted in Step 9.
+
+**The saved report is a local artifact the user reads — its section headings and descriptive prose follow the output language preference** (critical rule 2), the same rule that governs the terminal narration. With a Chinese output language, section headings become, for example, "溯源", "Diff 统计", "构建与测试", "发现", "未审查", "裁决"; descriptions are written in Chinese. What stays verbatim in every language: the `Verdict:` line (computed by `compose-review`), SHAs, file paths, gate names (`build`, `test`, `script-lint`), and finding ids — these are technical identifiers, not prose. The report's _structure_ (section order, content requirements) is unchanged regardless of language.
+
+Report content should include:
+
+- Review timestamp and target description
+- **Provenance — the commits and the toolchain.** The head SHA reviewed (`fetchedSha` from the fetch report) and the base it was diffed against — **the range the round actually used**: `incremental.diffBase` on a delta-scoped round (`incremental.effective` and no `upToDate`), `mergeBaseSha` on every other, since recording the merge base for a round that reviewed `diffBase..head` hands the later reader a scope the run never had — plus the platform and the Node/npm versions the gates ran on, and one line per gate with its result (`build`, `test`, `script-lint`, `test-efficacy`, `test-plan` — ran / clean / failed / skipped, and why). A saved report is read by someone who cannot re-derive what it was about: without the SHA pair a "Verdict: Approve" names no commit, so it can be neither checked against the PR nor distinguished from an approval of a different head; and without the gate line a reader cannot tell a gate that passed from one that never ran. Both facts are already in reports this run has open — copy them, do not re-measure.
+- Effort level the review ran at (low / medium / high; **low** findings are marked unverified — medium and high verify them in Step 4; under `--topology minimal` mark the topology too — its findings are unverified whatever effort the run resolved)
+- Diff statistics (files changed, lines added/removed) — omit if reviewing a file with no diff
+- Build & test results (Agent 7 output summary) — high and medium effort (absent under `--topology minimal` — no agents ran)
+- All findings with verification status. Read them out of the findings artifact `qwen review findings` wrote (`.qwen/tmp/qwen-review-{target}-findings.json`) rather than re-typing them from the terminal — a third transcription of the same list is a third chance for a severity to drift, which has happened inside a single review.
+- **Per-finding outcomes, when Step 6B ran** — `fixed` / `skipped` / `no_change_needed`, with the reason for every `skipped`. The artifact already carries them; a `--fix` run whose archive does not say which findings were applied is a report that reads as if all of them were.
+- Verdict (high and medium effort — a low quick pass and a `--topology minimal` pass claim none; a medium verdict never exceeds Comment, since it runs no reverse audit — see Step 5)
+- **The cost ledger — run it, do not compute it.** `"${QWEN_CODE_CLI:-qwen}" review cost-ledger --plan <the plan report from Step 1> --out .qwen/reviews/<report>-cost-ledger.json` aggregates the model calls the harness recorded for this review — the main loop and each agent, with input / cached / output / thinking token counts and wall time — from the harness's own usage records, the same records the coverage gate trusts. The window is bounded: it starts at the plan's mtime, and the ledger runs at this step, so the pre-plan bootstrap turns and the composition after this snapshot are not captured, and side queries such as chat compression leave no usage records to capture at all. Paste its printed block into the report verbatim, and relay the first line in the terminal summary. The printed block lists only the eight biggest agents; the `--out` JSON keeps every one, so the diffable record survives in full (worktree mode: resolve `--out` against the main project directory, like the report itself). If it prints `cost-ledger unavailable`, note that instead — it is informational and never blocks a review. Why it is in the archive: a "this version got slower" report is unanswerable from memory, and the one time it was answered properly took hours of telemetry forensics to find a repair round that had silently doubled a run. The ledger makes the next such question a diff of two saved reports.
+
+**The report's verdict is not yours to type.** `compose-review` printed the exact `Verdict:` line in Step 6 and persisted the same line as `verdictLine` inside `.qwen/tmp/qwen-review-{target}-composed.json` — copy either, verbatim. Do not reconstruct it from `event` + `cappedBy`: a presubmit downgrade also depends on fields that pair does not carry, and a rebuilt line can differ from the computed one. (And not `$(jq …)`: a `jq` binary is not guaranteed on the host, and a substitution that fails leaves the archived verdict blank or literal — worse than absent, because it looks written.)
+
+A run has written an Approve into its saved report minutes after reading the capped verdict (measured; DESIGN.md — The narrated-away cap). The terminal is prose and the archive is forever; this line is the one place the archive can be made to tell the truth for free. If the composed event is not the one you expected, fix the run — not the report.
+
+After the Markdown report exists, create and register the structured review artifact for **medium and high** effort (low has no canonical composed verdict and must not invent one; a `--topology minimal` run owes none at ANY effort — it emits no verdict at all, so there is no composed JSON to persist — Step 3M) — the creation is group (3) of the batching rule above; the registration rides group (4) alongside cleanup, which never touches `.qwen/reviews/`. Use the same filename stem as the Markdown report with a `.json` extension:
+
+```bash
+"${QWEN_CODE_CLI:-qwen}" review save-artifact \
+  --findings .qwen/tmp/qwen-review-<target>-findings.json \
+  --composed .qwen/tmp/qwen-review-<target>-composed.json \
+  --report .qwen/reviews/<report>.md \
+  --target <target> \
+  --effort <effort> \
+  --workspace-root <absolute path to the main project directory> \
+  --out .qwen/reviews/<report>.json
+```
+
+`save-artifact` resolves relative paths and its containment root against `--workspace-root` — **pass the main project directory explicitly, as the block above does**; without the flag it falls back to its own working directory. The flag is not decoration: the root anchors the containment checks (`isWithin` and the symlink walk), and an ambient-cwd root is only as trustworthy as wherever the command happened to run — from inside the untrusted PR worktree it would be the PR's own tree, the exact threat `comment-status`'s run-from-the-main-checkout rule exists to prevent. It used to prefer `QWEN_CODE_PROJECT_DIR`, which does not name the main checkout in any environment — the harness exports it as the session-storage directory under the runtime base — and every measured CI run burned minutes rediscovering that before improvising a workaround (measured; DESIGN.md — The artifact root that pointed at qwen-home).
+
+For PR worktree mode, the findings and composed inputs were created inside `worktreePath`, while the durable report and output belong to the main project directory. Pass absolute paths for all four: resolve `--findings` and `--composed` against `worktreePath`, and resolve `--report` and `--out` against the main project directory. The worktree lives under the main project's `.qwen/tmp/`, so all four remain inside the session workspace accepted by the helper. `save-artifact` prints one JSON object on stdout — `{"path": "<absolute path>", "workspacePath": "<path relative to the main project directory>"}`. Then call `record_artifact` in the current session with exactly this registration shape, copying the absolute `path` into `workspacePath`. The tool verifies the file and stores the canonical workspace-root-relative form. Do not invent a different relative path, and do not use the old `path` tool parameter:
+
+```json
+{
+  "title": "Code review result",
+  "kind": "other",
+  "storage": "workspace",
+  "workspacePath": "<absolute path from save-artifact.path>",
+  "mimeType": "application/vnd.qwen.code-review+json",
+  "metadata": {
+    "artifactType": "code_review",
+    "schemaVersion": 1
+  }
+}
+```
+
+The JSON helper is fail-closed because it carries the authoritative review result: if it fails, do not synthesize a replacement or register a partial artifact. A `record_artifact` failure is a UI-delivery failure, not a review-verdict input: disclose the failure to the user, keep the Markdown report, and do **not** change, soften, or recompute the existing composed verdict.
+
+### Incremental review cache
+
+If reviewing a PR **at high effort**, update the review cache for incremental review support. Low and medium reviews must NOT write it, and neither must a `--topology minimal` run at any effort — a cache hit would make a later high-effort review of the same SHA report "No new changes since last review", silently converting a cheaper pass into a full-review verdict.
+
+**The cache advances exactly when the marker anchored — read the marker, do not re-derive the net.** `compose-review` already computed whether this round may certify a range: its posted body's ledger marker carries a `sha` on a clean round and withholds it otherwise (unproven coverage, an undecided blocker, any cap other than a depth-only `unreviewed-dimension` — where depth-only means every entry names the build-and-test dimension or is the machine's own relayed stop entry; a whiffed LENS in that field withholds). The cache and the marker must never disagree about what a clean round is, and a hand-copied condition list here is how they drifted once already — the list in this paragraph aged out of sync with the module and told a whiffed-lens round to cache the sha the marker had refused. So the rule is mechanical: **write `lastCommitSha` into the cache only if the composed body's marker carries a `sha`** (check the composed JSON's body for `"sha"` inside the `qwen-review-ledger` comment); when it does not, **skip the cache write entirely and say so in the terminal output**. Caching this SHA would scope the next high-effort run to `lastCommitSha..HEAD` — or, worse, let the same-SHA shortcut report "No new changes since last review" and skip the run outright, Step 6 re-check included: a whiffed Security lens at SHA A followed by an incremental review at SHA B means no run ever reviews A's diff for security, and an existing blocker this run could only mark `cannot tell` would never be re-checked at the same SHA, while the cached verdict reads as full coverage. Leave the previous cache entry in place (or none), so the next high-effort run re-covers the whole range — re-detecting any uncoverable chunk and re-ruling on any undecided blocker, keeping both disclosures alive:
+
+1. Create `.qwen/review-cache/` directory if it doesn't exist
+2. Write `.qwen/review-cache/pr-<number>.json` with:
+
+   ```json
+   {
+     "lastCommitSha": "<HEAD SHA captured in Step 1>",
+     "lastModelId": "<your model id — the YOUR_MODEL_ID value declared at the top of the skill prompt>",
+     "lastReviewDate": "<ISO timestamp>",
+     "round": <N — 1 on a first review, previous round + 1 after>,
+     "findingsCount": <number>,
+     "verdict": "<verdict>",
+     "findings": [
+       {
+         "id": "R<round>-<n>",
+         "severity": "Critical | Suggestion",
+         "file": "<path>",
+         "line": <number>,
+         "title": "<one line — enough for the next round to re-locate the claim>",
+         "status": "open"
+       }
+     ]
+   }
+   ```
+
+   The cache is the FALLBACK copy of the ledger — the authoritative one rides the posted review body itself: `compose-review` embeds a machine-readable marker (an HTML comment, invisible on the PR page) carrying this round's findings, round number, and — when the run ended clean — the reviewed head `sha`, and the next round's `pr-context` reads it back wherever it runs. The `sha` is what lets a fresh environment recover BOTH halves of incremental review, the work list and the anchor (Step 1's recovered-anchor check), where the cache could only ever serve the machine that wrote it. It is withheld under the fail-closed conditions that skip this cache write **and under every cap `compose-review` computes itself except `unreviewed-dimension`** — `cannotTellCriticals`, `uncoverableChunks`, the context-unavailable state, `scopeUnproven` (coverage the module could not prove — a chunk nobody read, an idle or blind agent), findings still `— [unverified]`, the deterministic gates — because an anchor written past unread scope would let the next round's incremental range skip it forever: a fail-closed round still posts its findings; it just never certifies a range. The wider net is measured, not cautionary: gated on the input fields alone, a round the module itself stamped "could not certify that any of this diff was reviewed" still carried the anchor. **`unreviewedDimensions` is the deliberate exception, and it is measured too**: it is prose about DEPTH — "the integration suite CI skipped did not run locally" is true of every round on a repo whose suites do not fit `build-test`'s whole-call budget — so gating on it closed a loop with no exit, where an untestable dimension capped the verdict, the cap withheld the anchor, and the missing anchor made the next round re-review the full diff of a PR that had not changed a line (measured: PR #9113 round 2, 119 minutes, 34M input tokens). A dimension nobody could run says nothing about WHICH LINES were read, and the anchor's only claim is about lines. A run that posts therefore persists its ledger even when this cache write is skipped; a run that does not post has only this cache, which is exactly why the cache remains. The `findings` ledger is what lets the **next** run open with "R1-2 is fixed" instead of a from-scratch list (see Step 6's previous-round section). Write every **newly confirmed high-confidence** finding under a fresh `R<round>-<n>` id, and carry a still-standing previous entry forward **under the id it already has** — the whole payoff is that `R1-2` names the same claim in every round, so a finding that survives is re-reported, never renumbered — while a finding ruled `fixed` this round leaves the ledger (the report said so; the cache is for what the next round must check, not history). Low-confidence and terminal-only findings stay out: the ledger holds claims this review stands behind, because next round re-asserts each one by id. Findings the convergence posture deferred stay out the same way — carrying them as ledger work would hand the next round the very re-ruling the posture exists to end. Their durable record on the PR is the POSTED deferral list (up to 20 entries; the body's overflow count names how many more) — and it is **not guaranteed**: the list is the first section the body budget trims, so an overflowing body can carry none of it. The findings artifact carries each deferred finding's full content under its `D<round>-<n>` id but no structured deferred marker yet, and the run report is machine-local — so an entry past the rendered cap, or in a list the budget trimmed, has no cross-round record on the PR at all. Keep the deferral list within its cap by collapsing families first (the bounded/unbounded rule) rather than deferring twenty-plus point findings; when the budget trims it, the terminal summary is where the author's copy comes from.
+
+3. Ensure `.qwen/reviews/` and `.qwen/review-cache/` are ignored by `.gitignore` — a broader rule like `.qwen/*` also satisfies this. Only warn the user if those paths are not ignored at all.

@@ -24,16 +24,37 @@ import type {
   DaemonSessionArtifactsEnvelope,
   DaemonTranscriptStore,
   DaemonCapabilities,
+  GoalControlRequest,
+  GoalSnapshotV2,
+  DaemonBranchSessionResult,
+  DaemonBranchedSession,
+  DaemonSessionAttachmentReference,
   PermissionResponse,
+  PromptContentBlock,
 } from '@qwen-code/sdk/daemon';
-import { isDaemonTurnError, type PromptResult } from '@qwen-code/sdk/daemon';
-import { extractHttpStatus } from './httpErrors.js';
 import {
+  DaemonHttpError,
+  DaemonPendingPromptLimitError,
+  DaemonTransportClosedError,
+  isDaemonTurnError,
+  isStaleBranchPointError,
+  type PromptResult,
+} from '@qwen-code/sdk/daemon';
+import { extractHttpStatus, isInvalidClientIdError } from './httpErrors.js';
+import {
+  mapProviderStatus,
   mapReasoningControls,
   mapSessionContextReasoning,
   mapSupportedCommands,
+  selectGoalState,
+  selectGoalStateFromRead,
 } from './mappers.js';
-import { toDaemonPromptContent } from './promptContent.js';
+import {
+  attachmentUriForName,
+  daemonPromptImageToBlob,
+  toDaemonPromptContent,
+  withAttachmentTokens,
+} from './promptContent.js';
 import {
   clearPassiveAssistantDoneTimer,
   withActionTimeout,
@@ -48,6 +69,7 @@ import type {
   AddDaemonSessionNotice,
   DaemonConnectionState,
   DaemonNoticeOperation,
+  DaemonPromptFile,
   DaemonPromptStatus,
   DaemonSessionActions,
   SettledPrompt,
@@ -56,6 +78,61 @@ import type {
 
 interface RefBox<T> {
   current: T;
+}
+
+function isDaemonSessionDisconnectedError(error: unknown): boolean {
+  return (
+    error instanceof DaemonTransportClosedError ||
+    (error instanceof TypeError &&
+      /(?:fetch failed|failed to fetch|networkerror|load failed)/i.test(
+        error.message,
+      ))
+  );
+}
+
+function normalizePromptFiles(
+  files: readonly DaemonPromptFile[] | undefined,
+): Array<{ name: string; data: Blob; text?: string; mimeType: string }> {
+  return (files ?? []).map((file) => ({
+    name: file.name,
+    data: file.data ?? new Blob([file.text ?? '']),
+    ...(file.text !== undefined ? { text: file.text } : {}),
+    mimeType:
+      file.mimeType || file.mediaType || file.media_type || 'text/plain',
+  }));
+}
+
+function imageAttachmentMimeType(mimeType: string): string {
+  return mimeType.split(';', 1)[0]?.trim().toLowerCase() || mimeType;
+}
+
+function imageAttachmentName(mimeType: string): string {
+  const extension = imageAttachmentMimeType(mimeType)
+    .slice('image/'.length)
+    .split('+', 1)[0];
+  return `image.${extension === 'jpg' ? 'jpeg' : extension || 'img'}`;
+}
+
+function promptFilesForTranscript(
+  files: ReturnType<typeof normalizePromptFiles>,
+  fileReferences: ReadonlyArray<DaemonSessionAttachmentReference | undefined>,
+  includeData = false,
+) {
+  return files.map((file, index) => ({
+    name: fileReferences[index]?.attachmentId ?? file.name,
+    mimeType: file.mimeType,
+    ...(file.text !== undefined ? { text: file.text } : {}),
+    ...(includeData ? { data: file.data } : {}),
+    ...(fileReferences[index]
+      ? { attachmentId: fileReferences[index].attachmentId }
+      : {}),
+  }));
+}
+
+class AttachmentUploadError extends Error {
+  constructor(readonly reason: unknown) {
+    super(reason instanceof Error ? reason.message : String(reason));
+  }
 }
 
 const DEFAULT_RESTORE_SERVER_TIMEOUT_MS = 60_000;
@@ -128,6 +205,14 @@ export interface CreateDaemonSessionActionsArgs {
   clearLiveJournalRepair?: () => void;
 }
 
+export function getWorkspaceModelsAfterSessionClear(
+  current: DaemonConnectionState,
+): DaemonConnectionState['models'] {
+  return current.providers
+    ? mapProviderStatus(current.providers).models
+    : current.models;
+}
+
 export function getConnectionAfterSessionClear(
   current: DaemonConnectionState,
   clearedSessionId: string | undefined,
@@ -139,12 +224,14 @@ export function getConnectionAfterSessionClear(
     delete next.displayName;
     delete next.tokenUsage;
     delete next.tokenCount;
+    delete next.goalState;
     // Drop the session-scoped raw snapshots (both carry the cleared
     // sessionId), which also makes the effect's canReuseSessionMetadata
     // check refetch fresh data for the next session.
     delete next.supportedCommands;
     delete next.context;
     delete next.reasoning;
+    next.models = getWorkspaceModelsAfterSessionClear(current);
     // Keep `commands`/`skills`: they are workspace-scoped (skills, custom,
     // MCP-prompt and workflow slash commands all live at the workspace/config
     // level, not the session), so they stay valid after the session is
@@ -199,6 +286,10 @@ export function createDaemonSessionActions({
   let reasoningActionToken = 0;
   let appliedReasoningActionToken = 0;
   let modelMutationGeneration = 0;
+  let branchInFlight = false;
+  let attachmentClient = sessionRef.current?.client;
+  let attachmentSessionId = sessionRef.current?.sessionId;
+  let attachmentClientId = sessionRef.current?.clientId;
 
   function trackSessionConfigMutation<T>(
     session: DaemonSessionClient,
@@ -219,6 +310,132 @@ export function createDaemonSessionActions({
     sessionConfigGeneration.set(
       session,
       (sessionConfigGeneration.get(session) ?? 0) + 1,
+    );
+  }
+
+  async function promptContentWithUploadedAttachments(
+    session: DaemonSessionClient,
+    text: string,
+    images: ReadonlyArray<{ data: string; mimeType: string }>,
+    files: ReadonlyArray<{
+      name: string;
+      data: Blob;
+      text?: string;
+      mimeType: string;
+    }>,
+    signal?: AbortSignal,
+  ): Promise<{
+    content: PromptContentBlock[];
+    references: DaemonSessionAttachmentReference[];
+    fileReferences: DaemonSessionAttachmentReference[];
+  }> {
+    if (text.trimStart().startsWith('/')) {
+      return {
+        content: toDaemonPromptContent(text),
+        references: [],
+        fileReferences: [],
+      };
+    }
+    const supportsAttachmentUpload =
+      getConnection().capabilities?.features.includes('session_attachments') ===
+      true;
+    const canUploadAttachments =
+      supportsAttachmentUpload &&
+      typeof session.uploadAttachment === 'function';
+    if (files.length > 0 && !canUploadAttachments) {
+      throw new Error('File attachment upload is not supported');
+    }
+    const uploadableImages = canUploadAttachments
+      ? images.filter((image) => image.mimeType !== 'image/*')
+      : [];
+    const inlineImages = images.filter(
+      (image) => !uploadableImages.includes(image),
+    );
+    const uploadableFiles = canUploadAttachments ? files : [];
+    const inlineFiles = files.filter((file) => !uploadableFiles.includes(file));
+    if (uploadableImages.length === 0 && uploadableFiles.length === 0) {
+      return {
+        content: toDaemonPromptContent(text, images, files),
+        references: [],
+        fileReferences: [],
+      };
+    }
+    const results = await Promise.allSettled([
+      ...uploadableImages.map(
+        async (image) =>
+          await session.uploadAttachment(
+            daemonPromptImageToBlob(image),
+            imageAttachmentName(image.mimeType),
+            imageAttachmentMimeType(image.mimeType),
+            signal,
+          ),
+      ),
+      ...uploadableFiles.map(
+        async (file) =>
+          await session.uploadAttachment(
+            file.data,
+            file.name,
+            file.mimeType,
+            signal,
+          ),
+      ),
+    ]);
+    const references = results.flatMap((result) =>
+      result.status === 'fulfilled' ? [result.value] : [],
+    );
+    const failure = results.find(
+      (result): result is PromiseRejectedResult => result.status === 'rejected',
+    );
+    if (!failure) {
+      const content = toDaemonPromptContent(text, inlineImages, inlineFiles);
+      const fileReferences = references.slice(uploadableImages.length);
+      content[0] = {
+        type: 'text',
+        text: withAttachmentTokens(
+          text,
+          files.map((file, index) =>
+            attachmentUriForName(
+              fileReferences[index]?.attachmentId ?? file.name,
+            ),
+          ),
+        ),
+      };
+      content.splice(1, 0, ...references);
+      return {
+        content,
+        references,
+        fileReferences,
+      };
+    }
+    await removeUploadedAttachments(session, references);
+    if (extractHttpStatus(failure.reason) === 404) {
+      if (uploadableFiles.length > 0) {
+        throw new AttachmentUploadError(failure.reason);
+      }
+      return {
+        content: toDaemonPromptContent(text, images, files),
+        references: [],
+        fileReferences: [],
+      };
+    }
+    throw new AttachmentUploadError(failure.reason);
+  }
+
+  async function removeUploadedAttachments(
+    session: DaemonSessionClient,
+    references: readonly DaemonSessionAttachmentReference[],
+  ): Promise<void> {
+    await Promise.allSettled(
+      references.map((reference) =>
+        session.removeAttachment(reference.attachmentId),
+      ),
+    );
+  }
+
+  function isDefinitePromptAdmissionRejection(error: unknown): boolean {
+    return (
+      error instanceof DaemonHttpError ||
+      error instanceof DaemonPendingPromptLimitError
     );
   }
 
@@ -414,6 +631,7 @@ export function createDaemonSessionActions({
         workspaceCwd: targetWorkspaceCwd,
         clientId: undefined,
         displayName: undefined,
+        goalState: undefined,
         error: undefined,
         errorStatus: undefined,
         missingSession: false,
@@ -483,31 +701,105 @@ export function createDaemonSessionActions({
           mimeType:
             img.mimeType || img.mediaType || img.media_type || 'image/*',
         }));
+        const normalizedFiles = normalizePromptFiles(options?.files);
+        const slashCommand = text.trimStart().startsWith('/');
+        const displayedImages = slashCommand ? [] : normalizedImages;
+        const displayedFiles = slashCommand ? [] : normalizedFiles;
         const inputAnnotations =
           options?.inputAnnotations && options.inputAnnotations.length > 0
             ? options.inputAnnotations
             : undefined;
-        if (options?.optimisticUserMessage !== false) {
+        const shouldAppendOptimisticMessage =
+          options?.optimisticUserMessage !== false;
+        const optimisticMessageAppended =
+          shouldAppendOptimisticMessage &&
+          displayedImages.length === 0 &&
+          displayedFiles.length === 0;
+        if (optimisticMessageAppended) {
           store.appendLocalUserMessage(
             text,
-            normalizedImages,
+            displayedImages,
             inputAnnotations ? { inputAnnotations } : undefined,
+            [],
           );
         }
+        let uploaded: Awaited<
+          ReturnType<typeof promptContentWithUploadedAttachments>
+        >;
+        try {
+          uploaded = await promptContentWithUploadedAttachments(
+            session,
+            text,
+            normalizedImages,
+            normalizedFiles,
+            ctrl.signal,
+          );
+        } catch (error) {
+          if (shouldAppendOptimisticMessage && !optimisticMessageAppended) {
+            store.appendLocalUserMessage(
+              text,
+              displayedImages,
+              inputAnnotations ? { inputAnnotations } : undefined,
+              promptFilesForTranscript(displayedFiles, [], true),
+            );
+          }
+          throw error instanceof AttachmentUploadError ? error.reason : error;
+        }
+        if (ctrl.signal.aborted) {
+          await removeUploadedAttachments(session, uploaded.references);
+          if (shouldAppendOptimisticMessage && !optimisticMessageAppended) {
+            store.appendLocalUserMessage(
+              text,
+              displayedImages,
+              inputAnnotations ? { inputAnnotations } : undefined,
+              promptFilesForTranscript(displayedFiles, [], true),
+            );
+          }
+          ctrl.signal.throwIfAborted();
+        }
         const promptRequest: Record<string, unknown> = {
-          prompt: toDaemonPromptContent(text, normalizedImages),
+          prompt: uploaded.content,
         };
+        options?.onAdmissionStarted?.();
         if (inputAnnotations) {
           promptRequest['_meta'] = { inputAnnotations };
         }
         if (options?.retry) {
           promptRequest['retry'] = true;
         }
-        options?.onAdmissionStarted?.();
-        const accepted = await session.submitPrompt(
-          promptRequest as Parameters<typeof session.submitPrompt>[0],
-          ctrl.signal,
-        );
+        let accepted: Awaited<ReturnType<typeof session.submitPrompt>>;
+        try {
+          accepted = await session.submitPrompt(
+            promptRequest as Parameters<typeof session.submitPrompt>[0],
+            ctrl.signal,
+          );
+        } catch (error) {
+          const definiteRejection = isDefinitePromptAdmissionRejection(error);
+          if (definiteRejection) {
+            await removeUploadedAttachments(session, uploaded.references);
+          }
+          if (shouldAppendOptimisticMessage && !optimisticMessageAppended) {
+            store.appendLocalUserMessage(
+              text,
+              displayedImages,
+              inputAnnotations ? { inputAnnotations } : undefined,
+              promptFilesForTranscript(
+                displayedFiles,
+                definiteRejection ? [] : uploaded.fileReferences,
+                definiteRejection,
+              ),
+            );
+          }
+          throw error;
+        }
+        if (shouldAppendOptimisticMessage && !optimisticMessageAppended) {
+          store.appendLocalUserMessage(
+            text,
+            displayedImages,
+            inputAnnotations ? { inputAnnotations } : undefined,
+            promptFilesForTranscript(displayedFiles, uploaded.fileReferences),
+          );
+        }
         if (activePromptsRef.current.get(sessionId)?.controller === ctrl) {
           restartEventStream(sessionId);
         }
@@ -570,19 +862,52 @@ export function createDaemonSessionActions({
         data: img.data,
         mimeType: img.mimeType || img.mediaType || img.media_type || 'image/*',
       }));
+      const normalizedFiles = normalizePromptFiles(options?.files);
+      const slashCommand = text.trimStart().startsWith('/');
+      const displayedImages = slashCommand ? [] : normalizedImages;
+      const displayedFiles = slashCommand ? [] : normalizedFiles;
       const inputAnnotations =
         options?.inputAnnotations && options.inputAnnotations.length > 0
           ? options.inputAnnotations
           : undefined;
-      if (options?.optimisticUserMessage !== false) {
+      const shouldAppendOptimisticMessage =
+        options?.optimisticUserMessage !== false;
+      const optimisticMessageAppended =
+        shouldAppendOptimisticMessage &&
+        displayedImages.length === 0 &&
+        displayedFiles.length === 0;
+      if (optimisticMessageAppended) {
         store.appendLocalUserMessage(
           text,
-          normalizedImages,
+          displayedImages,
           inputAnnotations ? { inputAnnotations } : undefined,
+          [],
         );
       }
+      let uploaded: Awaited<
+        ReturnType<typeof promptContentWithUploadedAttachments>
+      >;
+      try {
+        uploaded = await promptContentWithUploadedAttachments(
+          session,
+          text,
+          normalizedImages,
+          normalizedFiles,
+          options?.signal,
+        );
+      } catch (error) {
+        if (shouldAppendOptimisticMessage && !optimisticMessageAppended) {
+          store.appendLocalUserMessage(
+            text,
+            displayedImages,
+            inputAnnotations ? { inputAnnotations } : undefined,
+            promptFilesForTranscript(displayedFiles, [], true),
+          );
+        }
+        throw error instanceof AttachmentUploadError ? error.reason : error;
+      }
       const promptRequest: Record<string, unknown> = {
-        prompt: toDaemonPromptContent(text, normalizedImages),
+        prompt: uploaded.content,
       };
       if (inputAnnotations) {
         promptRequest['_meta'] = { inputAnnotations };
@@ -590,13 +915,44 @@ export function createDaemonSessionActions({
       if (options?.retry) {
         promptRequest['retry'] = true;
       }
-      const accepted = await session.submitPrompt(
-        promptRequest as Parameters<typeof session.submitPrompt>[0],
-      );
+      options?.onAdmissionStarted?.();
+      let accepted: Awaited<ReturnType<typeof session.submitPrompt>>;
+      try {
+        accepted = await session.submitPrompt(
+          promptRequest as Parameters<typeof session.submitPrompt>[0],
+        );
+      } catch (error) {
+        const definiteRejection = isDefinitePromptAdmissionRejection(error);
+        if (definiteRejection) {
+          await removeUploadedAttachments(session, uploaded.references);
+        }
+        if (shouldAppendOptimisticMessage && !optimisticMessageAppended) {
+          store.appendLocalUserMessage(
+            text,
+            displayedImages,
+            inputAnnotations ? { inputAnnotations } : undefined,
+            promptFilesForTranscript(
+              displayedFiles,
+              definiteRejection ? [] : uploaded.fileReferences,
+              definiteRejection,
+            ),
+          );
+        }
+        throw error;
+      }
+      if (shouldAppendOptimisticMessage && !optimisticMessageAppended) {
+        store.appendLocalUserMessage(
+          text,
+          displayedImages,
+          inputAnnotations ? { inputAnnotations } : undefined,
+          promptFilesForTranscript(displayedFiles, uploaded.fileReferences),
+        );
+      }
       if (options?.signal?.aborted) {
         try {
           const removal = await session.removePendingPrompt(accepted.promptId);
           if (removal.removed) {
+            await removeUploadedAttachments(session, uploaded.references);
             return { promptId: accepted.promptId, removedAfterAbort: true };
           }
         } catch (err) {
@@ -751,6 +1107,19 @@ export function createDaemonSessionActions({
           ),
           'Set reasoning effort timed out',
         );
+        const nextReasoning = mapReasoningControls(
+          result.configOptions,
+          getConnection().reasoning?.effort,
+        );
+        const confirmed =
+          value === 'none'
+            ? nextReasoning?.enabled === false
+            : nextReasoning?.enabled === true && nextReasoning.effort === value;
+        if (!confirmed) {
+          throw new Error(
+            `Daemon did not confirm reasoning effort ${JSON.stringify(value)}`,
+          );
+        }
         const current = getConnection();
         if (
           sessionRef.current === session &&
@@ -770,10 +1139,7 @@ export function createDaemonSessionActions({
             const configOptions = result.configOptions;
             return {
               ...current,
-              reasoning: mapReasoningControls(
-                configOptions,
-                current.reasoning?.effort,
-              ),
+              reasoning: nextReasoning,
               context: current.context
                 ? {
                     ...current.context,
@@ -1035,6 +1401,7 @@ export function createDaemonSessionActions({
           ...current,
           status: 'connected',
           sessionId: nextSession.sessionId,
+          goalState: undefined,
           ...(nextSession.clientId ? { clientId: nextSession.clientId } : {}),
           workspaceCwd: nextSession.workspaceCwd,
           error: undefined,
@@ -1089,6 +1456,7 @@ export function createDaemonSessionActions({
       clearActiveSessionState();
       setConnection((current) => ({
         ...current,
+        goalState: undefined,
         missingSession: false,
         error: undefined,
         errorStatus: undefined,
@@ -1369,9 +1737,89 @@ export function createDaemonSessionActions({
       }
     },
 
+    async uploadAttachment(attachment, opts) {
+      const session = requireSessionForAction(
+        addNotice,
+        sessionRef.current,
+        'Attachment upload failed',
+        'send_prompt',
+      );
+      if (opts?.sessionId && opts.sessionId !== session.sessionId) {
+        throw new Error('Attachment session changed');
+      }
+      const mimeType =
+        attachment.mimeType ??
+        attachment.mediaType ??
+        attachment.media_type ??
+        ('name' in attachment ? 'application/octet-stream' : 'image/*');
+      attachmentClient = session.client;
+      attachmentSessionId = session.sessionId;
+      attachmentClientId = session.clientId;
+      if ('name' in attachment) {
+        return await session.uploadAttachment(
+          attachment.data ??
+            new Blob([attachment.text ?? ''], { type: mimeType }),
+          attachment.name,
+          mimeType,
+          opts?.signal,
+        );
+      }
+      return await session.uploadAttachment(
+        daemonPromptImageToBlob(attachment),
+        imageAttachmentName(mimeType),
+        imageAttachmentMimeType(mimeType),
+        opts?.signal,
+      );
+    },
+
+    async readAttachment(attachmentId) {
+      const session = requireSessionForAction(
+        addNotice,
+        sessionRef.current,
+        'Attachment preview failed',
+        'read_attachment',
+      );
+      return await session.readAttachment(attachmentId);
+    },
+
+    async removeAttachment(attachmentId, opts) {
+      const session = sessionRef.current;
+      const sessionId = opts?.sessionId ?? session?.sessionId;
+      const client = session?.client ?? attachmentClient;
+      if (!sessionId || !client) {
+        throw dispatchActionError(
+          addNotice,
+          'Attachment removal failed',
+          new Error('Daemon session is not connected'),
+          'remove_attachment',
+        );
+      }
+      if (sessionId === session?.sessionId) {
+        return await session.removeAttachment(attachmentId);
+      }
+      const clientId =
+        getPersistedClientId(sessionId) ??
+        (attachmentSessionId === sessionId ? attachmentClientId : undefined);
+      try {
+        return clientId
+          ? await client.removeSessionAttachment(sessionId, attachmentId, {
+              clientId,
+            })
+          : await client.removeSessionAttachment(sessionId, attachmentId);
+      } catch (error) {
+        if (!clientId || !isInvalidClientIdError(error)) throw error;
+        return await client.removeSessionAttachment(sessionId, attachmentId);
+      }
+    },
+
     async enqueueMidTurnMessage(
       message: string,
-      opts?: { signal?: AbortSignal; messageId?: string },
+      opts?: {
+        signal?: AbortSignal;
+        messageId?: string;
+        content?: PromptContentBlock[];
+        onAdmissionStarted?: () => void;
+      },
     ): Promise<DaemonMidTurnMessageResult> {
       // Calls without an id are the old-daemon compatibility path and fall back
       // locally. With a stable id, transport failure is ambiguous (the POST may
@@ -1380,7 +1828,12 @@ export function createDaemonSessionActions({
       const session = sessionRef.current;
       if (!session) return { accepted: false };
       try {
-        return await session.enqueueMidTurnMessage(message, opts);
+        const { onAdmissionStarted, ...requestOptions } = opts ?? {};
+        onAdmissionStarted?.();
+        return await session.enqueueMidTurnMessage(
+          message,
+          opts ? requestOptions : undefined,
+        );
       } catch (err) {
         if (opts?.messageId) throw err;
         // An abort is the designed settle-time cancel (the message stays in the
@@ -1571,16 +2024,99 @@ export function createDaemonSessionActions({
       }
     },
 
-    async getStats() {
+    async getGoal() {
       const session = requireSessionForAction(
         addNotice,
         sessionRef.current,
-        'Load stats failed',
-        'load_stats',
+        'Load goal failed',
+        'load_goal',
       );
+      // A read the daemon answered while goal-less can resolve after a
+      // concurrent create; its bare-null snapshot carries no `clearedGoal`
+      // tombstone, so reconciling it would wipe the new goal. Stamp the read
+      // with the goal observed at issue time: a bare-null response may only
+      // clear the goal it actually observed.
+      const observedGoalId = getConnection().goalState?.goal?.goalId;
+      try {
+        const response = await withActionTimeout(
+          session.goal(),
+          'Load goal timed out',
+        );
+        setConnection((current) => {
+          if (current.sessionId !== session.sessionId) return current;
+          const goalState = selectGoalStateFromRead(
+            current.goalState,
+            response.snapshot,
+            observedGoalId,
+          );
+          if (goalState === current.goalState) return current;
+          return { ...current, goalState };
+        });
+        return response;
+      } catch (error) {
+        throw dispatchActionError(
+          addNotice,
+          'Load goal failed',
+          error,
+          'load_goal',
+        );
+      }
+    },
+
+    applyGoalSnapshot(sessionId: string, snapshot: GoalSnapshotV2) {
+      setConnection((current) =>
+        current.sessionId === sessionId
+          ? {
+              ...current,
+              goalState: selectGoalState(current.goalState, snapshot),
+            }
+          : current,
+      );
+    },
+
+    async controlGoal(request: GoalControlRequest) {
+      const session = requireSessionForAction(
+        addNotice,
+        sessionRef.current,
+        'Control goal failed',
+        'control_goal',
+      );
+      try {
+        const response = await withActionTimeout(
+          session.controlGoal(request),
+          'Control goal timed out',
+        );
+        setConnection((current) =>
+          current.sessionId === session.sessionId
+            ? {
+                ...current,
+                goalState: selectGoalState(
+                  current.goalState,
+                  response.snapshot,
+                ),
+              }
+            : current,
+        );
+        return response;
+      } catch (error) {
+        throw dispatchActionError(
+          addNotice,
+          'Control goal failed',
+          error,
+          'control_goal',
+        );
+      }
+    },
+
+    async getStats() {
+      const session = sessionRef.current;
+      if (!session) throw new Error('Daemon session is not connected');
       try {
         return await withActionTimeout(session.stats(), 'Load stats timed out');
       } catch (error) {
+        if (isDaemonSessionDisconnectedError(error)) {
+          throw error;
+        }
         throw dispatchActionError(
           addNotice,
           'Load stats failed',
@@ -1621,48 +2157,85 @@ export function createDaemonSessionActions({
       }
     },
 
-    async branchSession(name?: string) {
+    async branchSession(name?: string, atRecordId?: string) {
+      if (branchInFlight) {
+        throw new DOMException(
+          'A branch request is already in progress',
+          'InvalidStateError',
+        );
+      }
       const session = requireSessionForAction(
         addNotice,
         sessionRef.current,
         'Branch session failed',
         'branch_session',
       );
+      const sourceSessionId = session.sessionId;
+      const loadGeneration = pendingSessionLoadIdRef.current;
+      branchInFlight = true;
       try {
-        const result = await withActionTimeout(
-          session.client.branchSession(
-            session.sessionId,
-            { name },
-            session.clientId,
-          ),
-          'Branch session timed out',
-        );
-        persistStableClientId(result.clientId, result.sessionId);
-        void startSessionSwitch(result.sessionId, 'load').catch(
-          (switchError: unknown) => {
-            if (isAbortError(switchError)) return;
-            void session.client
-              .detachSession(result.sessionId, result.clientId)
-              .catch(() => undefined);
-            dispatchActionError(
-              addNotice,
-              'Branch session failed',
-              switchError,
-              'branch_session',
-            );
-          },
-        );
+        const branchRequest: Promise<DaemonBranchSessionResult> =
+          atRecordId === undefined
+            ? session.client.branchSession(
+                sourceSessionId,
+                { name },
+                session.clientId,
+              )
+            : session.client.branchSession(
+                sourceSessionId,
+                { name, atRecordId },
+                session.clientId,
+              );
+        const result = await branchRequest;
+        const switchStarted =
+          sessionRef.current === session &&
+          pendingSessionLoadIdRef.current === loadGeneration;
+        const restored =
+          atRecordId === undefined
+            ? (result as DaemonBranchedSession)
+            : undefined;
+        if (switchStarted) {
+          if (restored?.clientId) {
+            persistStableClientId(restored.clientId, restored.sessionId);
+          }
+          void startSessionSwitch(result.sessionId, 'load').catch(
+            (switchError: unknown) => {
+              if (restored?.clientId) {
+                void session.client
+                  .detachSession(restored.sessionId, restored.clientId)
+                  .catch(() => undefined);
+              }
+              if (isAbortError(switchError)) return;
+              dispatchActionError(
+                addNotice,
+                'Branch session failed',
+                switchError,
+                'branch_session',
+              );
+            },
+          );
+        } else if (restored?.clientId) {
+          void session.client
+            .detachSession(restored.sessionId, restored.clientId)
+            .catch(() => undefined);
+        }
         return {
           sessionId: result.sessionId,
           displayName: result.displayName,
+          switchStarted,
         };
       } catch (error) {
+        if (isStaleBranchPointError(error)) {
+          throw markNoticeDispatched(error);
+        }
         throw dispatchActionError(
           addNotice,
           'Branch session failed',
           error,
           'branch_session',
         );
+      } finally {
+        branchInFlight = false;
       }
     },
 

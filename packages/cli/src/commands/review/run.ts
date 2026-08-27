@@ -26,6 +26,10 @@
 // reached a verdict" from "blocking verdict" (opt-in via --fail-on).
 
 import type { CommandModule } from 'yargs';
+import {
+  APPROVAL_MODES,
+  isUnusableScriptEntry,
+} from '@qwen-code/qwen-code-core';
 import { spawn, execFileSync } from 'node:child_process';
 import { readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
@@ -40,6 +44,7 @@ export interface RunReviewArgs {
   target?: string;
   effort?: string;
   comment: boolean;
+  resume: boolean;
   json: boolean;
   failOn: 'none' | 'request-changes';
   timeoutMinutes: number;
@@ -215,6 +220,7 @@ export function buildReviewPrompt(args: {
   target?: string;
   effort?: string;
   comment?: boolean;
+  resume?: boolean;
 }): string {
   const parts = ['/review'];
   // Presence, not truthiness: an EMPTY target is a target the caller named
@@ -247,6 +253,7 @@ export function buildReviewPrompt(args: {
   }
   if (args.effort) parts.push(`--effort ${args.effort}`);
   if (args.comment) parts.push('--comment');
+  if (args.resume) parts.push('--resume');
   return parts.join(' ');
 }
 
@@ -345,6 +352,23 @@ export function killProcessGroup(pid: number, signal: NodeJS.Signals): void {
 /**
  * The child review's environment, with one correction: QWEN_CODE_CLI.
  *
+ * An UNSET slot is corrected too, and that case is not hypothetical: cli.ts
+ * stamps a *derived* `../index.js`, which does not exist beside the bundle, so
+ * a `node dist/cli.js review run <pr>` never stamps anything and the child
+ * review inherits nothing. Measured on PR #9113: the skill's second subcommand,
+ * `"${QWEN_CODE_CLI:-qwen}" review match-remote`, resolved `qwen` off PATH,
+ * landed in an older global install whose `review` has no `match-remote`, and
+ * came back `Unknown arguments: owner, repo, host, match-remote` — the review
+ * then spent minutes diagnosing its own harness instead of reading the diff.
+ * `review run` is the one place that can close this without guessing: it is
+ * about to re-enter `process.argv[1]` as the review CLI, so argv[1] IS this
+ * build's entry, no derivation involved.
+ *
+ * The stamp is only written when a shell could exec it — the same test the
+ * consumer applies at spawn time (isUnusableScriptEntry). A stamp that fails
+ * that test is worse than none: `${QWEN_CODE_CLI:-qwen}` falls back on empty,
+ * but a set-and-unusable path dies on exit 126.
+ *
  * cli.ts stamps QWEN_CODE_CLI first-writer-wins, so a `review run` launched
  * from INSIDE a parent Qwen session inherits the parent's entry — and the
  * skill's every `"${QWEN_CODE_CLI:-qwen}" review …` subcommand then runs the
@@ -358,25 +382,35 @@ export function killProcessGroup(pid: number, signal: NodeJS.Signals): void {
  * bundle). The child runs argv[1], so compare the resolved package roots
  * (dirname of realpathSync): cli-entry.js stamps itself but spawns cli.js,
  * so an exact-file comparison would blank a valid same-install stamp. On a
- * root mismatch — or an inherited path that does not resolve at all — write
- * '': empty counts as unset in stampCliEntryEnv, and the child re-stamps
- * from its own modules.
+ * root mismatch, an inherited path that does not resolve, or an UNSET slot,
+ * stamp this build's own `argv[1]` — the entry this command is about to
+ * re-enter — when a shell could exec it; write '' only when that entry fails
+ * `isUnusableScriptEntry`, preserving the bare-`qwen` fallback instead of a
+ * stamp that dies on exit 126.
  */
 function childEnv(): NodeJS.ProcessEnv {
   const env = { ...process.env };
   const inherited = env['QWEN_CODE_CLI'];
   const ownEntry = process.argv[1];
-  if (!inherited || !ownEntry) {
+  if (!ownEntry) {
     return env;
   }
-  try {
-    if (dirname(realpathSync(inherited)) === dirname(realpathSync(ownEntry))) {
-      return env;
+  if (inherited) {
+    try {
+      if (
+        dirname(realpathSync(inherited)) === dirname(realpathSync(ownEntry))
+      ) {
+        return env;
+      }
+    } catch {
+      // An inherited entry that does not resolve cannot be this build's.
     }
-  } catch {
-    // An inherited entry that does not resolve cannot be this build's.
   }
-  env['QWEN_CODE_CLI'] = '';
+  // Either nothing was stamped, or what was stamped belongs to another install.
+  // Both are answered by this build's own entry — when a shell can exec it.
+  env['QWEN_CODE_CLI'] = isUnusableScriptEntry(resolve(ownEntry))
+    ? ''
+    : resolve(ownEntry);
   return env;
 }
 
@@ -619,6 +653,12 @@ export const runCommand: CommandModule = {
         describe:
           'Authorise posting the review to GitHub (PR targets only) — same meaning as `/review <pr> --comment`',
       })
+      .option('resume', {
+        type: 'boolean',
+        default: false,
+        describe:
+          'Continue an interrupted review of this PR when its on-disk state still matches, instead of starting over (PR targets only) — same meaning as `/review <pr> --resume`. Falls back to a fresh review when nothing can be resumed.',
+      })
       .option('json', {
         type: 'boolean',
         default: false,
@@ -640,7 +680,7 @@ export const runCommand: CommandModule = {
       .option('approval-mode', {
         type: 'string',
         default: 'yolo',
-        choices: ['plan', 'default', 'auto-edit', 'auto', 'yolo'],
+        choices: APPROVAL_MODES,
         describe:
           'Approval mode for the child CLI. The default is yolo: headless runs cannot answer ' +
           'confirmation prompts, and anything still unapproved would be auto-denied mid-review.',
@@ -655,6 +695,7 @@ export const runCommand: CommandModule = {
       target: argv['target'] as string | undefined,
       effort: argv['effort'] as string | undefined,
       comment: Boolean(argv['comment']),
+      resume: Boolean(argv['resume']),
       json: Boolean(argv['json']),
       failOn: (argv['fail-on'] as 'none' | 'request-changes') ?? 'none',
       // `|| 120` would treat an explicit `--timeout-minutes 0` as falsy and

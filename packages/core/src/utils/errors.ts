@@ -365,9 +365,15 @@ export class FatalCancellationError extends FatalError {
   }
 }
 
-export class ForbiddenError extends Error {}
-export class UnauthorizedError extends Error {}
-export class BadRequestError extends Error {}
+export class ForbiddenError extends Error {
+  readonly status = 403;
+}
+export class UnauthorizedError extends Error {
+  readonly status = 401;
+}
+export class BadRequestError extends Error {
+  readonly status = 400;
+}
 
 interface ResponseData {
   error?: {

@@ -32,20 +32,41 @@
 //     coverage is the error.
 
 import type { CommandModule } from 'yargs';
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
+import {
+  existsSync,
+  readFileSync,
+  writeFileSync,
+  mkdirSync,
+  lstatSync,
+  realpathSync,
+} from 'node:fs';
+import type { Stats } from 'node:fs';
+import { dirname, resolve, sep } from 'node:path';
+import {
+  FINDING_SEVERITIES,
+  FINDING_CONFIDENCES,
+  FINDING_OUTCOMES,
+  FINDING_SOURCES,
+  compressFindingSummary,
+} from '@qwen-code/qwen-code-core';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
+import type { AnchorRequest } from './lib/anchors.js';
+import { isSameFile } from './lib/same-file.js';
 
-// These four lists have a second consumer: the Web Shell review renderer
+// These four lists are DEFINED in core (`core/src/tools/report-findings.ts`,
+// the `report_findings` tool's contract) and re-exported here under this
+// module's historical names. They still have one further deliberate consumer:
+// the Web Shell review renderer
 // (packages/web-shell/client/components/artifacts/CodeReviewArtifactDetail.tsx)
-// keeps its own copy and fails closed on any value it does not know, so a
-// value added here breaks rendering of every saved artifact that carries one.
-// Update the renderer copy in the same change.
+// is a browser bundle that cannot import Node-side packages, keeps its own
+// copy, and fails closed on any value it does not know — so a value added in
+// core breaks rendering of every saved artifact that carries one. Update the
+// renderer copy in the same change.
 /** The severity ladder, most severe first — this array IS the sort order. */
-export const SEVERITIES = ['Critical', 'Suggestion', 'Nice to have'] as const;
+export const SEVERITIES = FINDING_SEVERITIES;
 export type Severity = (typeof SEVERITIES)[number];
 
-export const CONFIDENCES = ['high', 'low'] as const;
+export const CONFIDENCES = FINDING_CONFIDENCES;
 export type Confidence = (typeof CONFIDENCES)[number];
 
 /**
@@ -57,11 +78,11 @@ export type Confidence = (typeof CONFIDENCES)[number];
  * already handled" and takes it off. They are different claims about the code,
  * so they are different words, and the fixer has to pick one.
  */
-export const OUTCOMES = ['fixed', 'skipped', 'no_change_needed'] as const;
+export const OUTCOMES = FINDING_OUTCOMES;
 export type Outcome = (typeof OUTCOMES)[number];
 
 /** Where a finding came from — the tag that decides whether it was verified. */
-export const SOURCES = ['review', 'build', 'test', 'probe', 'lint'] as const;
+export const SOURCES = FINDING_SOURCES;
 export type Source = (typeof SOURCES)[number];
 
 /** One location a finding applies to. A pattern aggregate carries several. */
@@ -91,6 +112,22 @@ export interface Finding {
    */
   witness?: string;
   suggestedFix?: string;
+  /**
+   * The test that must go red if the fix is removed — the file and the
+   * behaviour it pins, or `N/A` when the fix adds no guard, branch or
+   * behaviour a test can pin.
+   *
+   * `witness` is the reviewer's evidence that the defect is real; this is the
+   * ACCEPTANCE CRITERION handed to whoever fixes it, and the two are not
+   * interchangeable. It exists because the fix round is the review loop's
+   * largest source of its own next round: measured across six multi-round
+   * pull requests, roughly a third of every post-first-round finding was
+   * introduced by the fix immediately preceding it, and the dominant shape
+   * was a guard or branch added with no test of its own. Carried as data for
+   * the same reason `witness` is — the report and the comment body quote one
+   * recorded string instead of transcribing it twice more.
+   */
+  fixWitness?: string;
   /** Free-form kebab-case tag (`correctness`, `security`, `test-coverage`, …). */
   category?: string;
   /** Every location, in report order. A standalone finding has exactly one. */
@@ -134,20 +171,8 @@ export interface FindingsReport {
   outcomesRecorded: boolean;
 }
 
-/** `shortSummary`, when the caller did not supply one. */
-export function compressSummary(summary: string, max = 60): string {
-  // Collapse whitespace first: a summary that wrapped across lines in the source
-  // prose would otherwise carry its newlines into a single-line list cell.
-  const flat = summary.replace(/\s+/g, ' ').trim();
-  if (flat.length <= max) return flat;
-  // Cut on a word boundary when one is reasonably near the limit, so the label
-  // reads as a clause rather than a severed word. `max - 1` leaves room for the
-  // ellipsis, which is one character (U+2026), not three dots.
-  const head = flat.slice(0, max - 1);
-  const space = head.lastIndexOf(' ');
-  const cut = space >= max * 0.6 ? head.slice(0, space) : head;
-  return `${cut.trimEnd()}…`;
-}
+/** `shortSummary`, when the caller did not supply one. Defined in core. */
+export const compressSummary = compressFindingSummary;
 
 function fail(index: number, message: string): never {
   throw new Error(`Finding at index ${index}: ${message}`);
@@ -192,6 +217,20 @@ function oneOf<T extends string>(
     (allowed as readonly string[]).includes(value)
     ? (value as T)
     : undefined;
+}
+
+/**
+ * The finding format the agents write mandates the bracketed tag —
+ * `Source: [review]`, `Source: [probe]` — and a finding copied forward with
+ * the tag it was born with used to die at this gate, because the artifact
+ * schema names the bare enum. Strip the brackets and validate what is inside;
+ * anything else (including an unknown word, bracketed or not) still fails.
+ */
+function normalizeSource(value: unknown): unknown {
+  if (typeof value !== 'string') return value;
+  const trimmed = value.trim();
+  const bracketed = /^\[(.*)\]$/.exec(trimmed);
+  return (bracketed ? bracketed[1] : trimmed).trim();
 }
 
 function parseLocations(
@@ -265,8 +304,23 @@ function parseLocations(
  * are derived or dropped, never demanded.
  */
 export function validateFindings(raw: unknown): Finding[] {
+  // Step 9 cleanup deletes the side files `--input` normally receives, but
+  // not the saved artifact (Step 8, under .qwen/reviews/) nor a surviving
+  // `--out` report — and both wrap the findings array. Accept the wrapper,
+  // so a later outcome path can recover from the state that survives the
+  // cleanup instead of dying on a missing findings-in.json.
+  if (
+    !Array.isArray(raw) &&
+    raw !== null &&
+    typeof raw === 'object' &&
+    Array.isArray((raw as { findings?: unknown }).findings)
+  ) {
+    raw = (raw as { findings: unknown }).findings;
+  }
   if (!Array.isArray(raw)) {
-    throw new Error('Input must be a JSON array of findings.');
+    throw new Error(
+      'Input must be a JSON array of findings, or a saved review artifact/report object carrying one as "findings".',
+    );
   }
   const findings = raw.map((r, i) => {
     if (r === null || typeof r !== 'object' || Array.isArray(r)) {
@@ -303,7 +357,7 @@ export function validateFindings(raw: unknown): Finding[] {
     const source =
       o['source'] === undefined
         ? ('review' as Source)
-        : oneOf(o['source'], SOURCES);
+        : oneOf(normalizeSource(o['source']), SOURCES);
     if (!source) {
       fail(
         i,
@@ -363,6 +417,11 @@ export function validateFindings(raw: unknown): Finding[] {
     // it back out of the artifact instead of transcribing the evidence again.
     const witness = asString(o, 'witness');
 
+    // And `fixWitness` round-trips beside it: the acceptance criterion is
+    // written once, at the finding, and read back by the comment body and by
+    // a later round comparing what it asked for against what landed.
+    const fixWitness = asString(o, 'fixWitness') ?? asString(o, 'fix_witness');
+
     return {
       id,
       severity,
@@ -374,6 +433,7 @@ export function validateFindings(raw: unknown): Finding[] {
         : compressSummary(summary),
       failureScenario,
       ...(witness ? { witness } : {}),
+      ...(fixWitness ? { fixWitness } : {}),
       ...(asString(o, 'suggestedFix') || asString(o, 'suggested_fix')
         ? {
             suggestedFix: (asString(o, 'suggestedFix') ??
@@ -719,6 +779,13 @@ export function validateOutcomes(raw: unknown): OutcomeEntry[] {
           `expected one of ${OUTCOMES.map((s) => JSON.stringify(s)).join(', ')}.`,
       );
     }
+    // The report_findings contract refuses a skipped outcome the reader
+    // cannot inspect; the ledger feeding it must not accept one either.
+    if (outcome === 'skipped' && !asString(o, 'note')) {
+      throw new Error(
+        `Outcome for ${JSON.stringify(id)} is "skipped" with no note — the reader is owed the reason for work not done.`,
+      );
+    }
     return {
       id,
       outcome,
@@ -814,6 +881,103 @@ export function buildReport(findings: readonly Finding[]): FindingsReport {
   };
 }
 
+/**
+ * Headed for the `comments` array — the projection set. The projection and
+ * its skip disclosure must agree on exactly this set, so both read one
+ * predicate.
+ */
+function isPostable(f: Finding): boolean {
+  return (
+    f.confidence === 'high' &&
+    (f.severity === 'Critical' || f.severity === 'Suggestion')
+  );
+}
+
+/**
+ * The Step 7 resolver input, projected from the canonical findings.
+ *
+ * `resolve-anchors` wants flat `{id, path, anchor, line?}` entries — one per
+ * location — while the artifact stores `locations[]` arrays under a different
+ * key name (`file`, not `path`). Hand-writing that projection once produced
+ * all-null anchors and a redo; this is the mechanical version. Only the
+ * findings headed for the `comments` array are projected — high-confidence
+ * Criticals and Suggestions; a standalone finding keeps its own id, and an
+ * aggregate's locations carry `<id>-1`, `<id>-2`, …, the suffix scheme Step 7
+ * joins each resolution back to its finding on. Locations without an anchor
+ * are skipped: there is nothing to resolve, and the skip disclosure below
+ * names them. Their disposition follows Step 7's partial-resolution rule —
+ * while the finding still projects anchored locations, the anchorless ones
+ * add no comment and no body copy; a finding that projects nothing is the
+ * ordinary unanchorable one (body Critical, discarded Suggestion).
+ */
+export function anchorRequestsFor(
+  findings: readonly Finding[],
+): AnchorRequest[] {
+  const requests: AnchorRequest[] = [];
+  // Seed with EVERY finding's own id, not just the postable ones: Step 7
+  // joins each resolution back to the artifact by id, so a minted `<id>-N`
+  // equal to any finding's id attaches the comment to the wrong body,
+  // whether or not that finding projects a request of its own.
+  const seen = new Map<string, string>(findings.map((f) => [f.id, f.id]));
+  for (const f of findings) {
+    if (!isPostable(f)) continue;
+    const postable = f.locations.filter((l) => l.anchor !== undefined);
+    const multi = postable.length > 1;
+    for (const [i, l] of postable.entries()) {
+      const id = multi ? `${f.id}-${i + 1}` : f.id;
+      // Finding ids are unique, but an EXPANDED id can equal another finding's
+      // own id (`p1`'s first location mints `p1-1`; a standalone finding may
+      // be named `p1-1`). Resolutions join back on this id, so the collision
+      // must fail here: the emitted ids are unique, so no later gate sees it,
+      // and Step 7's join would attach the comment to the wrong finding's
+      // body. A finding matching its own id is the standalone shape, not a
+      // collision.
+      const other = seen.get(id);
+      if (other !== undefined && other !== f.id) {
+        throw new Error(
+          `findings: anchor request id "${id}" is produced twice — findings ` +
+            `"${other}" and "${f.id}" both claim it; rename one of the findings`,
+        );
+      }
+      seen.set(id, f.id);
+      requests.push({
+        id,
+        path: l.file,
+        anchor: l.anchor as string,
+        ...(l.line !== undefined ? { line: l.line } : {}),
+      });
+    }
+  }
+  return requests;
+}
+
+/**
+ * The locations the projection skips: a postable finding carrying a location
+ * with no anchor. Nothing downstream cross-checks the artifact's postable
+ * findings against the resolver input, so the command discloses them — and
+ * the disclosure splits on what the finding still projects: while anchored
+ * locations project, the anchorless ones add no comment and no body copy;
+ * only a finding that projects nothing is disposed of as unanchorable (a
+ * Critical moves to the body, a Suggestion is discarded).
+ */
+function anchorlessLocationsFor(
+  findings: readonly Finding[],
+): Array<{ id: string; count: number; anchored: number }> {
+  const skipped: Array<{ id: string; count: number; anchored: number }> = [];
+  for (const f of findings) {
+    if (!isPostable(f)) continue;
+    const count = f.locations.filter((l) => l.anchor === undefined).length;
+    if (count > 0) {
+      skipped.push({
+        id: f.id,
+        count,
+        anchored: f.locations.length - count,
+      });
+    }
+  }
+  return skipped;
+}
+
 /** One line per finding, for a terminal that will not render the JSON. */
 export function renderFindings(report: FindingsReport): string[] {
   return report.findings.map((f) => {
@@ -835,6 +999,7 @@ interface FindingsArgs {
   outcomes: string | undefined;
   print: boolean | undefined;
   testDelta: string | undefined;
+  toAnchors: string | undefined;
 }
 
 function readJson(path: string, what: string): unknown {
@@ -868,7 +1033,8 @@ export const findingsCommand: CommandModule = {
       .option('input', {
         type: 'string',
         demandOption: true,
-        describe: 'JSON array of findings written by the review',
+        describe:
+          'JSON array of findings written by the review (or a saved review artifact/report object carrying the array as "findings")',
       })
       .option('out', {
         type: 'string',
@@ -885,13 +1051,95 @@ export const findingsCommand: CommandModule = {
         describe:
           'The test-delta artifact. A Critical naming a test file that also failed on the merge base is held back to Suggestion, carrying the measurement that demoted it.',
       })
+      .option('to-anchors', {
+        type: 'string',
+        describe:
+          'Also write the Step 7 resolver input: one {id, path, anchor, line?} ' +
+          'per anchored location of every high-confidence Critical and ' +
+          'Suggestion, ready for resolve-anchors.',
+      })
       .option('print', {
         type: 'boolean',
         describe: 'Also print one line per finding to stdout',
       }),
   handler: (argv) => {
-    const { input, out, outcomes, print, testDelta } =
+    const { input, out, outcomes, print, testDelta, toAnchors } =
       argv as unknown as FindingsArgs;
+
+    // The resolver input must not share a file with anything this command
+    // reads or writes: a --to-anchors that lands on one of them destroys its
+    // counterpart while stderr reports every write as successful, and Step 7
+    // joins the pair by id — a silently destroyed member poisons the join.
+    // Identity is filesystem identity — dev/ino where a side exists, the
+    // canonicalised deepest ancestor where it does not: path strings miss
+    // hard links, case-variant spellings, and symlinked directory
+    // components. A link realpath cannot see through is refused where it can
+    // still alias — the anchor side outright, a sibling side when it dangles.
+    // Nesting is a collision too: the write sequence creates the prefix path
+    // as a directory, the paired write dies at EISDIR, and the stray
+    // directory survives every rerun.
+    if (toAnchors !== undefined) {
+      const anchorTarget = resolve(toAnchors);
+      let anchorStat: Stats | undefined;
+      try {
+        anchorStat = lstatSync(anchorTarget);
+      } catch {
+        // Not there yet — the run creates it; spelling is all it has.
+      }
+      if (anchorStat?.isSymbolicLink()) {
+        throw new Error(
+          `findings: --to-anchors must not be a symlink (${toAnchors}); ` +
+            'a link can alias a file this command also reads or writes, and no path compare would see the collision',
+        );
+      }
+      if (anchorStat?.isDirectory()) {
+        throw new Error(
+          `findings: --to-anchors must not be a directory (${toAnchors}); the anchor artifact is written as a file`,
+        );
+      }
+      const others: Array<[string, string | undefined]> = [
+        ['--input', input],
+        ['--out', out],
+        ['--outcomes', outcomes],
+        ['--test-delta', testDelta],
+      ];
+      for (const [flag, p] of others) {
+        if (p === undefined) continue;
+        const sibling = resolve(p);
+        try {
+          realpathSync(sibling);
+        } catch {
+          // realpath failed — distinguish a dangling link (which can still
+          // alias the resolver input) from a truly absent file.
+          let siblingStat: Stats | undefined;
+          try {
+            siblingStat = lstatSync(sibling);
+          } catch {
+            // Absent file — spelling is all it has.
+          }
+          if (siblingStat?.isSymbolicLink()) {
+            throw new Error(
+              `findings: ${flag} must not be a dangling symlink (${p}); ` +
+                'it could alias the resolver input, and no path compare would see the collision',
+            );
+          }
+        }
+        if (isSameFile(anchorTarget, sibling)) {
+          throw new Error(
+            `findings: --to-anchors points at the same file as ${flag} (${p}); the resolver input would overwrite it`,
+          );
+        }
+        if (
+          sibling.startsWith(anchorTarget + sep) ||
+          anchorTarget.startsWith(sibling + sep)
+        ) {
+          throw new Error(
+            `findings: --to-anchors must not nest inside ${flag} (${p}) or contain it; ` +
+              'one path would be created as a directory where the other needs a file',
+          );
+        }
+      }
+    }
 
     let findings = validateFindings(readJson(input, 'findings'));
     if (outcomes !== undefined) {
@@ -944,8 +1192,51 @@ export const findingsCommand: CommandModule = {
     findings = witnessHold.findings;
     const report = buildReport(findings);
 
+    // Project the resolver input from the SAME findings the artifact carries —
+    // after the holds above, so a Critical lowered to Suggestion (or a
+    // confidence lowered to terminal-only) projects as the holds intend — and
+    // BEFORE anything is written: a projection the collision guard refuses
+    // must leave the previous run's consistent pair on disk, not a rewritten
+    // findings.json beside a stale anchors.json.
+    const anchorRequests =
+      toAnchors !== undefined ? anchorRequestsFor(report.findings) : undefined;
+
     const target = resolve(out);
     mkdirSync(dirname(target), { recursive: true });
+
+    // The anchors file goes down BEFORE the artifact: Step 7 joins the pair
+    // by id, so a failure between the two writes can only leave this run's
+    // anchors.json beside the previous run's findings.json — never a
+    // rewritten findings.json beside a stale anchors.json. A failure of the
+    // FIRST write leaves the previous run's consistent pair untouched, and
+    // the anchors path is the realistic failure — a parent that cannot be
+    // created, a read-only directory — while the artifact's is the path the
+    // previous run already wrote.
+    if (toAnchors !== undefined && anchorRequests !== undefined) {
+      const anchorTarget = resolve(toAnchors);
+      mkdirSync(dirname(anchorTarget), { recursive: true });
+      writeFileSync(
+        anchorTarget,
+        `${JSON.stringify(anchorRequests, null, 2)}\n`,
+        'utf8',
+      );
+      writeStderrLine(
+        `findings: wrote ${anchorRequests.length} anchor request(s) for Step 7 to ${anchorTarget}`,
+      );
+      for (const { id, count, anchored } of anchorlessLocationsFor(
+        report.findings,
+      )) {
+        writeStderrLine(
+          `findings: ${id} carries ${count} location(s) without an anchor — ` +
+            'absent from the resolver input; ' +
+            (anchored > 0
+              ? `the finding still projects ${anchored} anchored location(s), ` +
+                'and the anchorless ones add no comment and no body copy'
+              : 'dispose as unanchorable'),
+        );
+      }
+    }
+
     writeFileSync(target, `${JSON.stringify(report, null, 2)}\n`, 'utf8');
 
     const { bySeverity, byConfidence } = report.counts;

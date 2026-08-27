@@ -1,0 +1,15 @@
+{
+  "roles": ["user", "thinking", "assistant", "tool_group"],
+  "expectedTextContent": [
+    "Inspect the contract",
+    "Checking identity",
+    "The contract is stable."
+  ],
+  "runtimeFields": ["rawInput", "rawOutput"],
+  "expectedToolArgs": { "path": "/workspace/project/src/index.ts" },
+  "expectedToolResult": {
+    "type": "vision_bridge_notice",
+    "summary": "Visible summary",
+    "notice": "Visible notice"
+  }
+}

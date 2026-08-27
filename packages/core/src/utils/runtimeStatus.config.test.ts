@@ -18,6 +18,11 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { Config } from '../config/config.js';
 import { Storage } from '../config/storage.js';
 import { readRuntimeStatus, writeRuntimeStatus } from './runtimeStatus.js';
+import {
+  listLiveSessions,
+  registerSession,
+  unregisterSession,
+} from '../services/session-registry.js';
 
 let tmpDir: string;
 let runtimeDir: string;
@@ -147,6 +152,91 @@ describe('Config.startNewSession runtime.json swap', () => {
     expect(entries.filter((e) => e.endsWith('.runtime.json'))).toEqual([
       `${sessionA}.runtime.json`,
     ]);
+  });
+});
+
+describe('Config.startNewSession session-registry patch', () => {
+  let prevQwenHome: string | undefined;
+
+  beforeEach(() => {
+    // Keep the registry inside this test's tmpdir — the patch seam must
+    // be exercised against the real registerSession/listLiveSessions
+    // round trip, and the default location is the runner's real home.
+    prevQwenHome = process.env['QWEN_HOME'];
+    process.env['QWEN_HOME'] = path.join(tmpDir, 'qwen-home');
+  });
+
+  afterEach(async () => {
+    await unregisterSession();
+    if (prevQwenHome === undefined) {
+      delete process.env['QWEN_HOME'];
+    } else {
+      process.env['QWEN_HOME'] = prevQwenHome;
+    }
+  });
+
+  it('keeps the registry record pointing at the swapped session id', async () => {
+    const sessionA = 'aaaaaaaa-1111-2222-3333-aaaaaaaaaaaa';
+    const sessionB = 'bbbbbbbb-1111-2222-3333-bbbbbbbbbbbb';
+    const config = makeConfig(sessionA);
+    config.markRuntimeStatusEnabled();
+    // registerSession never throws — it returns false on a failed write.
+    // Assert the seam itself before relying on anything downstream of
+    // it, or a write failure surfaces as a confusing patch-path error.
+    expect(
+      await registerSession({
+        sessionId: sessionA,
+        cwd: tmpDir,
+        qwenVersion: '0.0.0-test',
+      }),
+    ).toBe(true);
+    config.trackSessionRegistration(Promise.resolve(true));
+
+    const [before] = await listLiveSessions();
+
+    config.startNewSession(sessionB);
+
+    // Without the patch seam, `qwen sessions ps --json` would keep
+    // advertising sessionA's transcript for this live session — the exact
+    // stale-pointer bug the seam exists to prevent.
+    const after = await waitFor(async () => {
+      const [record] = await listLiveSessions();
+      return record?.sessionId === sessionB ? record : null;
+    });
+    expect(after).not.toBeNull();
+    expect(after!.pid).toBe(process.pid);
+    expect(after!.cwd).toBe(tmpDir);
+    // `name` is deliberately not patched on /clear: deriveSessionName
+    // hashes the session id into the suffix, so re-deriving it would
+    // rename the session a user just read out of `ps`.
+    expect(after!.name).toBe(before!.name);
+  });
+
+  it('patches the registry even when the sidecar write failed at startup', async () => {
+    // The two failure domains are independent: the sidecar lives in the
+    // project's chats/ dir, the registry in the global dir. When the
+    // sidecar write fails but registration succeeds, the patches must
+    // keep going — otherwise `ps` shows stale values until exit.
+    const sessionA = 'aaaaaaaa-1111-2222-3333-aaaaaaaaaaaa';
+    const sessionB = 'bbbbbbbb-1111-2222-3333-bbbbbbbbbbbb';
+    const config = makeConfig(sessionA);
+    // No markRuntimeStatusEnabled(): models the failed sidecar write.
+    expect(
+      await registerSession({
+        sessionId: sessionA,
+        cwd: tmpDir,
+        qwenVersion: '0.0.0-test',
+      }),
+    ).toBe(true);
+    config.trackSessionRegistration(Promise.resolve(true));
+
+    config.startNewSession(sessionB);
+
+    const after = await waitFor(async () => {
+      const [record] = await listLiveSessions();
+      return record?.sessionId === sessionB ? record : null;
+    });
+    expect(after).not.toBeNull();
   });
 });
 

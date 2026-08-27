@@ -13,6 +13,7 @@ import type {
   DaemonWorkspaceGitStatus,
   DaemonWorkspaceProvidersStatus,
   DaemonWorkspaceSkillsStatus,
+  GoalSnapshotV2,
 } from '@qwen-code/sdk/daemon';
 import type {
   DaemonCommandInfo,
@@ -55,6 +56,7 @@ export function mapProviderStatus(
       ].join('\0');
       if (seen.has(modelKey)) continue;
       seen.add(modelKey);
+      const reasoningPreview = mapReasoningControls(model.configOptions);
       models.push({
         id: model.modelId,
         baseModelId: model.baseModelId,
@@ -69,6 +71,7 @@ export function mapProviderStatus(
         ...(model.baseUrl !== undefined ? { baseUrl: model.baseUrl } : {}),
         ...(model.envKey !== undefined ? { envKey: model.envKey } : {}),
         ...(model.isRuntime ? { isRuntime: true } : {}),
+        ...(reasoningPreview ? { reasoningPreview } : {}),
       });
     }
   }
@@ -147,11 +150,20 @@ export function mapReasoningControls(
     return value ? [value] : [];
   });
   if (!values.includes('none')) return undefined;
-  const efforts = values.filter((value) => value !== 'none');
-  if (efforts.length === 0) return undefined;
   const currentValue = getString(option, 'currentValue');
+  if (!currentValue || !values.includes(currentValue)) return undefined;
   const meta = getRecord(option['_meta']);
   const reasoningMeta = getRecord(meta?.['qwenCode/reasoning']);
+  const selectableValues = values.filter((value) => value !== 'none');
+  if (selectableValues.length === 0) return undefined;
+  if (reasoningMeta?.['toggleOnly'] === true) {
+    return {
+      enabled: currentValue !== 'none',
+      effort: selectableValues[0]!,
+      efforts: [],
+    };
+  }
+  const efforts = selectableValues;
   const defaultEffort = getString(reasoningMeta, 'defaultEffort');
   const effort =
     [currentValue, fallbackEffort, defaultEffort].find(
@@ -278,6 +290,13 @@ export function updateConnectionFromDaemonEvent(
         tokenCount: getTokenCountFromUsage(tokenUsage),
       }));
     }
+    const goalState = getGoalState(update);
+    if (goalState) {
+      setConnection((current) => ({
+        ...current,
+        goalState: selectGoalState(current.goalState, goalState),
+      }));
+    }
     if (getString(update, 'sessionUpdate') === 'available_commands_update') {
       const { commands, skills } = mapAvailableCommandsUpdate(update);
       // An available_commands_update is the daemon's authoritative snapshot of
@@ -352,6 +371,272 @@ export function updateConnectionFromDaemonEvent(
     default:
       break;
   }
+}
+
+/**
+ * Reconcile a `goal()` READ against whatever landed while it was in flight.
+ *
+ * A read the daemon answered while goal-less carries no `clearedGoal`
+ * tombstone, so `selectGoalState` derives the clear target from the goal a
+ * concurrent create installed meanwhile — accepting the clear AND tombstoning
+ * that goal's identity, after which its own later frames at the same revision
+ * are rejected as superseded. Stamp the read with the goal observed when it was
+ * ISSUED: a bare-null response may only clear the goal it actually observed.
+ *
+ * Returns `current` unchanged when the read is stale, so callers can compare
+ * identity to skip the state write entirely.
+ */
+export function selectGoalStateFromRead(
+  current: GoalSnapshotV2 | undefined,
+  incoming: GoalSnapshotV2,
+  observedGoalId: string | undefined,
+): GoalSnapshotV2 {
+  if (
+    incoming.goal === null &&
+    !incoming.clearedGoal &&
+    current?.goal &&
+    current.goal.goalId !== observedGoalId
+  ) {
+    return current;
+  }
+  return selectGoalState(current, incoming);
+}
+
+export function selectGoalState(
+  current: GoalSnapshotV2 | undefined,
+  incoming: GoalSnapshotV2,
+): GoalSnapshotV2 {
+  const supersededByCurrent = current
+    ? supersededGoals.get(current)
+    : undefined;
+  let displacedGoal: GoalOrderIdentity | undefined;
+  if (incoming.goal === null) {
+    const clearedGoal =
+      incoming.clearedGoal ??
+      current?.goal ??
+      (current ? clearedGoalOrder.get(current) : undefined);
+    if (clearedGoal) {
+      if (
+        current?.goal &&
+        (current.goal.goalId !== clearedGoal.goalId ||
+          current.goal.revision > clearedGoal.revision ||
+          (current.goal.revision === clearedGoal.revision &&
+            current.goal.updatedAt > clearedGoal.updatedAt))
+      ) {
+        return current;
+      }
+      displacedGoal = {
+        goalId: clearedGoal.goalId,
+        revision: clearedGoal.revision,
+        updatedAt: clearedGoal.updatedAt,
+      };
+      clearedGoalOrder.set(incoming, displacedGoal);
+    }
+  }
+  if (current?.goal === null && incoming.goal) {
+    const clearedGoal = clearedGoalOrder.get(current);
+    if (
+      clearedGoal?.goalId === incoming.goal.goalId &&
+      isSupersededGoalFrame(clearedGoal, incoming.goal)
+    ) {
+      return current;
+    }
+  }
+  if (current && incoming.goal) {
+    // A goal this session already cleared or replaced must not come back over
+    // its successor. `goal-runtime` attaches `clearedGoal` only to a clear, so
+    // for a replacement this ledger is the sole ordering identity a
+    // different-goalId frame can be judged against.
+    const superseded = supersededByCurrent?.get(incoming.goal.goalId);
+    if (superseded && isSupersededGoalFrame(superseded, incoming.goal)) {
+      return current;
+    }
+  }
+  if (
+    current?.goal &&
+    incoming.goal &&
+    current.goal.goalId === incoming.goal.goalId &&
+    (incoming.goal.revision < current.goal.revision ||
+      (incoming.goal.revision === current.goal.revision &&
+        incoming.goal.updatedAt < current.goal.updatedAt))
+  ) {
+    return current;
+  }
+  if (
+    current?.goal &&
+    incoming.goal &&
+    current.goal.goalId !== incoming.goal.goalId
+  ) {
+    displacedGoal = {
+      goalId: current.goal.goalId,
+      revision: current.goal.revision,
+      updatedAt: current.goal.updatedAt,
+    };
+  }
+  rememberSupersededGoals(incoming, supersededByCurrent, displacedGoal);
+  // Null and different-goal snapshots have no shared revision domain, so keep
+  // their existing transport arrival-order semantics.
+  return incoming;
+}
+
+interface GoalOrderIdentity {
+  goalId: string;
+  revision: number;
+  updatedAt: number;
+}
+
+/** True when `goal` is at or behind an identity the session already superseded. */
+function isSupersededGoalFrame(
+  superseded: GoalOrderIdentity,
+  goal: { revision: number; updatedAt: number },
+): boolean {
+  return (
+    goal.revision < superseded.revision ||
+    (goal.revision === superseded.revision &&
+      goal.updatedAt <= superseded.updatedAt)
+  );
+}
+
+/**
+ * Carry the superseded-goal ledger forward onto the accepted snapshot, adding
+ * the goal this snapshot displaces. The ledger is bounded: a session replaces
+ * goals a handful of times, and only the most recent identities can still have
+ * frames in flight.
+ */
+function rememberSupersededGoals(
+  snapshot: GoalSnapshotV2,
+  inherited: ReadonlyMap<string, GoalOrderIdentity> | undefined,
+  displaced: GoalOrderIdentity | undefined,
+): void {
+  if (!inherited && !displaced) return;
+  const next = new Map(inherited ?? []);
+  // An accepted goal is live again (a newer revision cleared the guard above),
+  // so its stale identity no longer applies.
+  if (snapshot.goal) next.delete(snapshot.goal.goalId);
+  if (displaced) {
+    next.delete(displaced.goalId);
+    next.set(displaced.goalId, displaced);
+  }
+  while (next.size > MAX_SUPERSEDED_GOALS) {
+    const oldest = next.keys().next();
+    if (oldest.done) break;
+    next.delete(oldest.value);
+  }
+  if (next.size === 0) return;
+  supersededGoals.set(snapshot, next);
+}
+
+const MAX_SUPERSEDED_GOALS = 8;
+
+const clearedGoalOrder = new WeakMap<GoalSnapshotV2, GoalOrderIdentity>();
+
+/**
+ * Identities of goals a snapshot has superseded (cleared or replaced),
+ * inherited forward so a late frame from any of them cannot resurrect over the
+ * goal that displaced it.
+ */
+const supersededGoals = new WeakMap<
+  GoalSnapshotV2,
+  ReadonlyMap<string, GoalOrderIdentity>
+>();
+
+function getGoalState(
+  update: Record<string, unknown> | undefined,
+): GoalSnapshotV2 | undefined {
+  const raw = getRecord(getRecord(update?.['_meta'])?.['goalState']);
+  if (getNumber(raw, 'v') !== 2) return undefined;
+  const activity = getString(raw, 'activity');
+  if (
+    activity !== 'idle' &&
+    activity !== 'running' &&
+    activity !== 'verifying'
+  ) {
+    return undefined;
+  }
+  if (raw?.['goal'] === null) {
+    const clearedGoal = getRecord(raw['clearedGoal']);
+    const clearedGoalId = getString(clearedGoal, 'goalId');
+    const clearedRevision = getNumber(clearedGoal, 'revision');
+    const clearedUpdatedAt = getNumber(clearedGoal, 'updatedAt');
+    if (
+      raw['clearedGoal'] !== undefined &&
+      (!clearedGoalId ||
+        clearedRevision === undefined ||
+        clearedRevision <= 0 ||
+        clearedUpdatedAt === undefined)
+    ) {
+      return undefined;
+    }
+    return {
+      v: 2,
+      goal: null,
+      activity,
+      ...(clearedGoalId &&
+      clearedRevision !== undefined &&
+      clearedUpdatedAt !== undefined
+        ? {
+            clearedGoal: {
+              goalId: clearedGoalId,
+              revision: clearedRevision,
+              updatedAt: clearedUpdatedAt,
+            },
+          }
+        : {}),
+    };
+  }
+  const source = getRecord(raw?.['goal']);
+  const goalId = getString(source, 'goalId');
+  const revision = getNumber(source, 'revision');
+  const objective = getString(source, 'objective');
+  const status = getString(source, 'status');
+  const evidenceCursor = getRecord(source?.['evidenceCursor']);
+  const recordId = evidenceCursor?.['recordId'];
+  const turnCount = getNumber(source, 'turnCount');
+  const activeTimeMs = getNumber(source, 'activeTimeMs');
+  const createdAt = getNumber(source, 'createdAt');
+  const updatedAt = getNumber(source, 'updatedAt');
+  if (
+    !goalId ||
+    revision === undefined ||
+    !objective ||
+    (status !== 'active' &&
+      status !== 'paused' &&
+      status !== 'blocked' &&
+      status !== 'usage_limited' &&
+      status !== 'complete') ||
+    (recordId !== null && typeof recordId !== 'string') ||
+    turnCount === undefined ||
+    activeTimeMs === undefined ||
+    createdAt === undefined ||
+    updatedAt === undefined
+  ) {
+    return undefined;
+  }
+  const lastReason = getString(source, 'lastReason');
+  const limitKindRaw = getString(source, 'limitKind');
+  const limitKind =
+    limitKindRaw === 'evidence_catalog' ||
+    limitKindRaw === 'checkpoint_request' ||
+    limitKindRaw === 'token_budget'
+      ? limitKindRaw
+      : undefined;
+  return {
+    v: 2,
+    activity,
+    goal: {
+      goalId,
+      revision,
+      objective,
+      status,
+      evidenceCursor: { recordId },
+      turnCount,
+      activeTimeMs,
+      createdAt,
+      updatedAt,
+      ...(lastReason ? { lastReason } : {}),
+      ...(limitKind ? { limitKind } : {}),
+    },
+  };
 }
 
 export function getSessionDisplayName(
@@ -483,11 +768,15 @@ function mapAvailableCommandsUpdate(
       },
     ];
   });
-  const skills = Array.isArray(update['availableSkills'])
-    ? update['availableSkills'].filter(
-        (skill): skill is string => typeof skill === 'string',
-      )
-    : [];
+  const nestedSkills = getRecord(update['_meta'])?.['availableSkills'];
+  const rawSkills = Array.isArray(update['availableSkills'])
+    ? update['availableSkills']
+    : Array.isArray(nestedSkills)
+      ? nestedSkills
+      : [];
+  const skills = rawSkills.filter(
+    (skill): skill is string => typeof skill === 'string',
+  );
   const skillCommands = skills.map((skill) => ({
     name: skill,
     description: '',

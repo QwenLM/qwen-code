@@ -79,7 +79,7 @@ import { languageCommand } from './languageCommand.js';
 import {
   initializeLlmOutputLanguage,
   writeOutputLanguageFile,
-} from '../../utils/languageUtils.js';
+} from '../../i18n/languageUtils.js';
 
 describe('languageCommand', () => {
   let mockContext: CommandContext;
@@ -465,6 +465,30 @@ describe('languageCommand', () => {
       expect(result).toMatchObject({
         messageType: 'error',
         content: expect.stringContaining('untrusted'),
+      });
+    });
+
+    it('rejects --project when workspace settings writes are disabled', async () => {
+      if (!languageCommand.action) {
+        throw new Error('The language command must have an action.');
+      }
+      mockContext.executionPolicy = {
+        allowSessionReset: false,
+        allowWorkspaceSettingsWrite: false,
+        persistModelSelection: false,
+        blockedBuiltinCommandNames: [],
+      };
+
+      const result = await languageCommand.action(
+        mockContext,
+        'ui en --project',
+      );
+
+      expect(i18n.setLanguageAsync).not.toHaveBeenCalled();
+      expect(mockContext.services.settings.setValue).not.toHaveBeenCalled();
+      expect(result).toMatchObject({
+        messageType: 'error',
+        content: expect.stringContaining('not available'),
       });
     });
 

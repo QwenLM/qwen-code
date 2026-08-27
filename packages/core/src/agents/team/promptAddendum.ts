@@ -12,6 +12,12 @@
  * instructions — they infer from tool availability.
  */
 
+const FINAL_ANSWER_FORWARDING_NOTE = [
+  '   When your turn ends, the runtime forwards the last text you emitted to',
+  '   the leader automatically, so end your turn with your report. Calling',
+  '   send_message(to: "leader") earlier additionally delivers it sooner.',
+];
+
 /**
  * Build the system prompt addendum for a teammate.
  *
@@ -74,6 +80,7 @@ export function buildTeammatePromptAddendum(
       '',
       '5. AFTER APPROVAL: Only after the leader approves may you make changes.',
       '   When done, call send_message(to: "leader", message: "<your findings>").',
+      ...FINAL_ANSWER_FORWARDING_NOTE,
       '',
       '6. MARK COMPLETE: Call task_update(taskId, status: "completed").',
       '',
@@ -96,9 +103,9 @@ export function buildTeammatePromptAddendum(
     '2. DO THE WORK: Use read_file, grep_search, glob, etc.',
     '',
     '3. REPORT RESULTS: When done, call send_message(to: "leader",',
-    '   message: "<your findings>"). This is the ONLY way the',
-    '   leader can see your output — text output is NOT visible',
-    '   to other agents.',
+    '   message: "<your findings>").',
+    ...FINAL_ANSWER_FORWARDING_NOTE,
+    '   Your text output is NOT visible to peer teammates.',
     '',
     '4. MARK COMPLETE: Call task_update(taskId, status: "completed").',
     '',

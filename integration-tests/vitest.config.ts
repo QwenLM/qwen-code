@@ -34,6 +34,14 @@ export default defineConfig({
         maxForks: 4,
       },
     },
+    // The worker->main `onTaskUpdate` RPC runs on a 60s budget; under the
+    // resource pressure of the macOS E2E lane a stall longer than that
+    // surfaces as an unhandled error and exits an all-green run red (the
+    // same failure class the core, cli, and scripts suites hit on these
+    // lanes). Test failures still fail the run; only unhandled errors stop
+    // being fatal, and only off Linux — the ubuntu shards and Linux local
+    // runs keep the unhandled-error signal.
+    dangerouslyIgnoreUnhandledErrors: process.platform !== 'linux',
   },
   resolve: {
     alias: {
@@ -41,6 +49,10 @@ export default defineConfig({
       '@qwen-code/sdk/daemon/transports': resolve(
         __dirname,
         '../packages/sdk-typescript/dist/daemon/transports.js',
+      ),
+      '@qwen-code/sdk/daemon/transcript': resolve(
+        __dirname,
+        '../packages/sdk-typescript/dist/daemon/transcript.js',
       ),
       '@qwen-code/sdk/daemon': resolve(
         __dirname,

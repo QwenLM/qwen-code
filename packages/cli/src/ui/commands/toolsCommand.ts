@@ -18,6 +18,7 @@ export const toolsCommand: SlashCommand = {
     return t('List available Qwen Code tools. Usage: /tools [desc]');
   },
   kind: CommandKind.BUILT_IN,
+  canRunDuringStreaming: true,
   action: async (context: CommandContext, args?: string): Promise<void> => {
     const subCommand = args?.trim();
 

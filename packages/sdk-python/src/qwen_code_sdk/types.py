@@ -15,7 +15,7 @@ from typing import (
 
 from typing_extensions import NotRequired
 
-PermissionMode: TypeAlias = Literal["default", "plan", "auto-edit", "yolo"]
+PermissionMode: TypeAlias = Literal["default", "plan", "auto-edit", "auto", "yolo"]
 AuthType: TypeAlias = Literal[
     "openai",
     "anthropic",

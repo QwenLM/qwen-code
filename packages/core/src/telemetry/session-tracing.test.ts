@@ -240,6 +240,11 @@ import {
   setSessionContext,
   setSessionIdOnContext,
 } from './session-context.js';
+import {
+  configureContextUsageAttributeLengthLimit,
+  CONTEXT_USAGE_ATTRIBUTE,
+  type ContextUsageV1,
+} from './context-usage.js';
 import { sessionIdContext } from '../utils/sessionIdContext.js';
 
 function createMockConfig(
@@ -272,6 +277,7 @@ describe('session-tracing', () => {
   });
 
   afterEach(() => {
+    configureContextUsageAttributeLengthLimit(undefined);
     vi.restoreAllMocks();
   });
 
@@ -510,6 +516,25 @@ describe('session-tracing', () => {
       expect(mockSpans[1]!.attributes['gen_ai.output.type']).toBe('json');
     });
 
+    it.each(['cron', 'notification', 'teammate', 'goal'])(
+      'does not assign the session JSON contract to %s interactions',
+      (messageType) => {
+        startInteractionSpan(
+          createMockConfig({ jsonSchema: { type: 'object' } }),
+          {
+            promptId: `automatic-${messageType}`,
+            model: 'm',
+            messageType,
+          },
+        );
+
+        expect(
+          mockSpans.at(-1)!.attributes['gen_ai.output.type'],
+        ).toBeUndefined();
+        endInteractionSpan('ok', { promptId: `automatic-${messageType}` });
+      },
+    );
+
     it('isolates concurrent prompts and ends only the requested interaction', () => {
       const config = createMockConfig();
       startInteractionSpan(config, {
@@ -651,6 +676,21 @@ describe('session-tracing', () => {
   });
 
   describe('LLM request spans', () => {
+    const contextUsage: ContextUsageV1 = {
+      version: 1,
+      window_size_tokens: 100,
+      breakdown: {
+        system_prompt_tokens: 1,
+        builtin_tools_tokens: 1,
+        mcp_tools_tokens: 1,
+        memory_files_tokens: 1,
+        skills_tokens: 1,
+        messages_tokens: 10,
+      },
+      compaction_reserve_tokens: 20,
+      estimated: true,
+    };
+
     it('preserves the no-op span context when telemetry is disabled', () => {
       mockState.sdkInitialized = false;
 
@@ -659,6 +699,93 @@ describe('session-tracing', () => {
       });
 
       expect(trace.getSpan(context)).toBe(span);
+    });
+
+    it('writes the initial context snapshot and normalizes it at span end', () => {
+      const { span } = startLLMRequestSpanWithContext('m', 'p', {
+        contextUsage,
+      });
+      const record = mockSpans[0]!;
+
+      expect(
+        JSON.parse(String(record.attributes[CONTEXT_USAGE_ATTRIBUTE])),
+      ).toEqual(contextUsage);
+
+      endLLMRequestSpan(span, {
+        success: true,
+        inputTokens: 3,
+      });
+
+      const normalized = JSON.parse(
+        String(record.attributes[CONTEXT_USAGE_ATTRIBUTE]),
+      ) as ContextUsageV1;
+      expect(record.attributes['gen_ai.usage.input_tokens']).toBe(3);
+      expect(normalized.breakdown).toEqual({
+        system_prompt_tokens: 1,
+        builtin_tools_tokens: 1,
+        mcp_tools_tokens: 1,
+        memory_files_tokens: 0,
+        skills_tokens: 0,
+        messages_tokens: 0,
+      });
+      expect(normalized.available_before_compaction_tokens).toBe(77);
+    });
+
+    it('omits a request-start snapshot above the effective OTel limit', () => {
+      configureContextUsageAttributeLengthLimit(1);
+
+      const { span } = startLLMRequestSpanWithContext('m', 'p', {
+        contextUsage,
+      });
+      const record = mockSpans[0]!;
+      endLLMRequestSpan(span, { success: true, inputTokens: 3 });
+
+      expect(record.attributes).not.toHaveProperty(CONTEXT_USAGE_ATTRIBUTE);
+    });
+
+    it('omits the start value when a normalized value could exceed the limit', () => {
+      const initialValue = JSON.stringify(contextUsage);
+      configureContextUsageAttributeLengthLimit(initialValue.length);
+
+      const { span } = startLLMRequestSpanWithContext('m', 'p', {
+        contextUsage,
+      });
+      const record = mockSpans[0]!;
+      expect(record.attributes).not.toHaveProperty(CONTEXT_USAGE_ATTRIBUTE);
+
+      endLLMRequestSpan(span, { success: true, inputTokens: 3 });
+
+      expect(record.attributes).not.toHaveProperty(CONTEXT_USAGE_ATTRIBUTE);
+    });
+
+    it('owns the request-start snapshot across caller mutations', () => {
+      const mutableContextUsage = structuredClone(contextUsage);
+      const { span } = startLLMRequestSpanWithContext('m', 'p', {
+        contextUsage: mutableContextUsage,
+      });
+      const record = mockSpans[0]!;
+
+      mutableContextUsage.window_size_tokens = 1_000;
+      mutableContextUsage.breakdown.system_prompt_tokens = 50;
+      endLLMRequestSpan(span, { success: true, inputTokens: 10 });
+
+      const normalized = JSON.parse(
+        String(record.attributes[CONTEXT_USAGE_ATTRIBUTE]),
+      ) as ContextUsageV1;
+      expect(normalized.window_size_tokens).toBe(100);
+      expect(normalized.breakdown.system_prompt_tokens).toBe(1);
+      expect(normalized.available_before_compaction_tokens).toBe(70);
+    });
+
+    it('keeps the request-start context snapshot on TTL cleanup', () => {
+      startLLMRequestSpanWithContext('m', 'p', { contextUsage });
+      const record = mockSpans[0]!;
+      const initial = record.attributes[CONTEXT_USAGE_ATTRIBUTE];
+
+      runTTLSweepForTesting(Date.now() + 31 * 60 * 1000);
+
+      expect(record.ended).toBe(true);
+      expect(record.attributes[CONTEXT_USAGE_ATTRIBUTE]).toBe(initial);
     });
 
     it('creates and ends an LLM request span', () => {

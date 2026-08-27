@@ -1,7 +1,7 @@
 {
-  "name": "@trycua/cua-driver",
-  "version": "0.17.0",
-  "description": "Rust-backed Cua Driver SDK and embedded Node host",
+  "name": "@qwen-code/cua-sdk",
+  "version": "0.20.1",
+  "description": "Typed CUA Driver SDK and Computer Use API for Node.js",
   "type": "module",
   "license": "MIT",
   "repository": {
@@ -22,6 +22,10 @@
     "./electron": {
       "types": "./dist/electron.d.ts",
       "import": "./dist/electron.js"
+    },
+    "./computer-use": {
+      "types": "./computer-use/index.d.ts",
+      "import": "./computer-use/index.js"
     }
   },
   "files": [
@@ -31,17 +35,30 @@
     "dist/embedded.d.ts",
     "dist/electron.js",
     "dist/electron.d.ts",
+    "dist/native-assets.js",
+    "dist/native-assets.d.ts",
     "dist/native",
+    "computer-use/index.js",
+    "computer-use/index.d.ts",
+    "computer-use/README.md",
+    "scripts/install-native.mjs",
+    "LICENSE.md",
+    "NOTICE.md",
     "README.md"
   ],
+  "engines": {
+    "node": ">=22"
+  },
   "publishConfig": {
     "access": "public"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
+    "postinstall": "node scripts/install-native.mjs",
     "prepack": "npm run build",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "npm run build && node --test test/*.test.mjs",
+    "test": "npm run build && node --test test/*.test.mjs computer-use/test/computer-use.test.mjs",
+    "test:e2e": "node --test computer-use/test/daemon-integration.test.mjs",
     "generate:uniffi": "node ../scripts/generate-uniffi-bindings.mjs",
     "generate:uniffi:check": "node ../scripts/generate-uniffi-bindings.mjs --check",
     "stage:uniffi": "node ../scripts/stage-uniffi-library.mjs"
@@ -54,6 +71,6 @@
   },
   "dependencies": {
     "@ubjs/core": "0.31.0-3",
-    "@ubjs/node": "0.31.0-3"
+    "tar": "7.5.22"
   }
 }

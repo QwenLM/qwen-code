@@ -215,7 +215,7 @@ function modelCallScreenshot(app: string): Content {
     parts: [
       {
         functionCall: {
-          name: 'computer_use__get_app_state',
+          name: 'mcp__node-repl__node_repl',
           args: { app },
         },
       },
@@ -234,7 +234,7 @@ function userToolResultWithImage(mimeType: string, data: string): Content {
     parts: [
       {
         functionResponse: {
-          name: 'computer_use__get_app_state',
+          name: 'mcp__node-repl__node_repl',
           response: { output: 'screenshot returned' },
           parts: [{ inlineData: { mimeType, data } }],
         } as unknown as NonNullable<
@@ -284,7 +284,7 @@ describe('extractRecentImages', () => {
     ];
     const result = extractRecentImages(history, 3);
     expect(result).toHaveLength(1);
-    expect(result[0].sourceToolName).toBe('computer_use__get_app_state');
+    expect(result[0].sourceToolName).toBe('mcp__node-repl__node_repl');
     expect(result[0].sourceToolArgs).toEqual({ app: 'Safari' });
     expect(result[0].turnIndex).toBe(1); // user+fr is at index 1
   });
@@ -328,7 +328,7 @@ describe('extractRecentImages', () => {
     const result = extractRecentImages(history, 3);
     expect(result).toHaveLength(1);
     expect(result[0].part.inlineData?.data).toBe('nestedshot');
-    expect(result[0].sourceToolName).toBe('computer_use__get_app_state');
+    expect(result[0].sourceToolName).toBe('mcp__node-repl__node_repl');
   });
 
   it('collects both nested tool images and top-level user pastes', () => {
@@ -379,7 +379,7 @@ describe('countToolResponseImages', () => {
         parts: [
           {
             functionResponse: {
-              name: 'computer_use__get_app_state',
+              name: 'mcp__node-repl__node_repl',
               response: { output: '' },
               parts: [
                 { inlineData: { mimeType: 'image/png', data: 'x' } },
@@ -657,13 +657,13 @@ describe('buildImageRestorationBlock', () => {
       {
         part: { inlineData: { mimeType: 'image/png', data: 'aaaa' } },
         turnIndex: 5,
-        sourceToolName: 'computer_use__get_app_state',
+        sourceToolName: 'mcp__node-repl__node_repl',
         sourceToolArgs: { app: 'Safari' },
       },
       {
         part: { inlineData: { mimeType: 'image/png', data: 'bbbb' } },
         turnIndex: 11,
-        sourceToolName: 'computer_use__get_app_state',
+        sourceToolName: 'mcp__node-repl__node_repl',
         sourceToolArgs: { app: 'Mail' },
       },
     ];
@@ -675,7 +675,7 @@ describe('buildImageRestorationBlock', () => {
     const header = (block!.parts![0] as { text: string }).text;
     expect(header).toContain('Recent visual snapshots');
     expect(header).toContain('turn 5');
-    expect(header).toContain('computer_use__get_app_state');
+    expect(header).toContain('mcp__node-repl__node_repl');
     expect(header).toContain('"app":"Safari"');
     expect(header).toContain('turn 11');
     expect(header).toContain('"app":"Mail"');
@@ -750,7 +750,7 @@ describe('composePostCompactHistory', () => {
         parts: [
           {
             functionCall: {
-              name: 'computer_use__get_app_state',
+              name: 'mcp__node-repl__node_repl',
               args: { app: 'Safari' },
             },
           },
@@ -761,7 +761,7 @@ describe('composePostCompactHistory', () => {
         parts: [
           {
             functionResponse: {
-              name: 'computer_use__get_app_state',
+              name: 'mcp__node-repl__node_repl',
               response: { output: 'screenshot' },
             },
           },
@@ -1072,7 +1072,7 @@ describe('composePostCompactHistory', () => {
         parts: [
           {
             functionResponse: {
-              name: 'computer_use__get_app_state',
+              name: 'mcp__node-repl__node_repl',
               response: { output: '' },
               parts: [
                 { inlineData: { mimeType: 'image/png', data: 'img1' } },
@@ -1124,7 +1124,7 @@ describe('composePostCompactHistory', () => {
         parts: [
           {
             functionResponse: {
-              name: 'computer_use__get_app_state',
+              name: 'mcp__node-repl__node_repl',
               response: { output: '' },
               parts: [{ inlineData: { mimeType: 'image/png', data: 'i' } }],
             } as unknown as NonNullable<

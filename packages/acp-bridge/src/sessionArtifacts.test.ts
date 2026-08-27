@@ -6,7 +6,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createHash } from 'node:crypto';
-import { promises as fs } from 'node:fs';
+import { promises as fs, type BigIntStats, type Stats } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -44,6 +44,30 @@ describe('SessionArtifactStore', () => {
       .update(path.resolve(workspace, workspacePath))
       .digest('hex')
       .slice(0, 16);
+  }
+
+  // Forward the options through: the store lstats with { bigint: true }
+  // for the identity check, and a spy that dropped it would hand back
+  // numeric stats that never equal the bigint fstat — hiding a broken
+  // comparison behind a type mismatch.
+  function spyOnLstatForwarding(
+    hook: (
+      entry: Parameters<typeof fs.lstat>[0],
+      stat: Stats | BigIntStats,
+    ) => void | Promise<void>,
+  ) {
+    const originalLstat = fs.lstat.bind(fs);
+    return vi.spyOn(fs, 'lstat').mockImplementation((async (
+      entry: Parameters<typeof fs.lstat>[0],
+      options?: Parameters<typeof fs.lstat>[1],
+    ) => {
+      const stat = await originalLstat(
+        entry,
+        options as Parameters<typeof originalLstat>[1],
+      );
+      await hook(entry, stat);
+      return stat;
+    }) as typeof fs.lstat);
   }
 
   it('lists, removes, and idempotently ignores missing artifact deletes', async () => {
@@ -899,6 +923,339 @@ describe('SessionArtifactStore', () => {
     }
   });
 
+  it('updates workspace title and description when the same path is recorded again', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's2-workspace-rerecord-title',
+      workspaceCwd: workspace,
+    });
+    await fs.mkdir(path.join(workspace, 'reports'), { recursive: true });
+    await fs.writeFile(path.join(workspace, 'reports/dashboard.html'), 'hello');
+
+    const created = await store.upsertMany(
+      [
+        {
+          title: 'Draft',
+          description: 'First pass',
+          workspacePath: 'reports/dashboard.html',
+        },
+      ],
+      { strict: true },
+    );
+    const artifactId = created.changes[0]?.artifactId;
+
+    const updated = await store.upsertMany(
+      [
+        {
+          title: 'Final dashboard',
+          description: 'Ready for review',
+          workspacePath: 'reports/dashboard.html',
+        },
+      ],
+      { strict: true },
+    );
+
+    expect(updated.changes).toHaveLength(1);
+    expect(updated.changes[0]).toMatchObject({
+      action: 'updated',
+      artifactId,
+      artifact: {
+        id: artifactId,
+        storage: 'workspace',
+        title: 'Final dashboard',
+        description: 'Ready for review',
+        workspacePath: 'reports/dashboard.html',
+      },
+    });
+    expect((await store.list()).artifacts).toMatchObject([
+      {
+        id: artifactId,
+        title: 'Final dashboard',
+        description: 'Ready for review',
+        workspacePath: 'reports/dashboard.html',
+      },
+    ]);
+  });
+
+  it('keeps a curated title when write_file re-records the same workspace path', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's2-workspace-rerecord-preserve-title',
+      workspaceCwd: workspace,
+    });
+    await fs.mkdir(path.join(workspace, 'reports'), { recursive: true });
+    await fs.writeFile(path.join(workspace, 'reports/sales.csv'), 'a,b\n');
+
+    const created = await store.upsertMany(
+      [
+        {
+          title: 'Quarterly sales report',
+          description: 'Curated',
+          workspacePath: 'reports/sales.csv',
+          toolName: 'record_artifact',
+        },
+      ],
+      { strict: true },
+    );
+    const artifactId = created.changes[0]?.artifactId;
+
+    await store.upsertMany(
+      [
+        {
+          title: 'sales.csv',
+          workspacePath: 'reports/sales.csv',
+          toolName: 'write_file',
+        },
+      ],
+      { strict: true },
+    );
+
+    expect((await store.list()).artifacts).toMatchObject([
+      {
+        id: artifactId,
+        title: 'Quarterly sales report',
+        description: 'Curated',
+        toolName: 'record_artifact',
+      },
+    ]);
+  });
+
+  it('keeps a curated title after write_file then record_artifact then write_file', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's2-workspace-rerecord-write-then-curate',
+      workspaceCwd: workspace,
+    });
+    await fs.writeFile(path.join(workspace, 'report.html'), '<html>ok</html>');
+
+    await store.upsertMany(
+      [
+        {
+          title: 'report.html',
+          workspacePath: 'report.html',
+          toolName: 'write_file',
+          toolCallId: 'call-write',
+        },
+      ],
+      { strict: true },
+    );
+    await store.upsertMany(
+      [
+        {
+          title: 'Q3 Report',
+          workspacePath: 'report.html',
+          toolName: 'record_artifact',
+          toolCallId: 'call-record',
+        },
+      ],
+      { strict: true },
+    );
+    await store.upsertMany(
+      [
+        {
+          title: 'report.html',
+          workspacePath: 'report.html',
+          toolName: 'write_file',
+        },
+      ],
+      { strict: true },
+    );
+
+    expect((await store.list()).artifacts).toMatchObject([
+      {
+        title: 'Q3 Report',
+        toolName: 'record_artifact',
+        toolCallId: 'call-record',
+      },
+    ]);
+  });
+
+  it('keeps a curated title when a record_artifact hook re-records the same path', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's2-workspace-rerecord-record-hook',
+      workspaceCwd: workspace,
+    });
+    await fs.writeFile(path.join(workspace, 'report.html'), '<html>ok</html>');
+
+    await store.upsertMany(
+      [
+        {
+          title: 'Q3 Report',
+          workspacePath: 'report.html',
+          source: 'tool',
+          toolName: 'record_artifact',
+        },
+      ],
+      { strict: true },
+    );
+    await store.upsertMany(
+      [
+        {
+          title: 'report.html',
+          workspacePath: 'report.html',
+          source: 'hook',
+          toolName: 'record_artifact',
+          hookEventName: 'PostToolUse',
+        },
+      ],
+      { strict: true },
+    );
+
+    expect((await store.list()).artifacts).toMatchObject([
+      {
+        title: 'Q3 Report',
+        source: 'tool',
+        toolName: 'record_artifact',
+      },
+    ]);
+  });
+
+  it('keeps a title curated without toolName when write_file later auto-records', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's2-workspace-rerecord-unattributed-title',
+      workspaceCwd: workspace,
+    });
+    await fs.writeFile(path.join(workspace, 'notes.html'), '<html>ok</html>');
+
+    await store.upsertMany(
+      [
+        {
+          title: 'notes.html',
+          workspacePath: 'notes.html',
+          toolName: 'write_file',
+        },
+      ],
+      { strict: true },
+    );
+    await store.upsertMany(
+      [
+        {
+          title: 'Release notes',
+          workspacePath: 'notes.html',
+        },
+      ],
+      { strict: true },
+    );
+    await store.upsertMany(
+      [
+        {
+          title: 'notes.html',
+          workspacePath: 'notes.html',
+          toolName: 'write_file',
+        },
+      ],
+      { strict: true },
+    );
+
+    expect((await store.list()).artifacts).toMatchObject([
+      {
+        title: 'Release notes',
+      },
+    ]);
+    expect((await store.list()).artifacts[0]?.toolName).toBeUndefined();
+  });
+
+  it('keeps a hook-curated title when write_file later auto-records the same path', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's2-workspace-rerecord-hook-title',
+      workspaceCwd: workspace,
+    });
+    await fs.writeFile(path.join(workspace, 'sales.csv'), 'a,b\n');
+
+    await store.upsertMany(
+      [
+        {
+          title: 'Quarterly sales report',
+          workspacePath: 'sales.csv',
+          source: 'hook',
+          toolName: 'write_file',
+          hookEventName: 'PostToolUse',
+        },
+      ],
+      { strict: true },
+    );
+    await store.upsertMany(
+      [
+        {
+          title: 'sales.csv',
+          workspacePath: 'sales.csv',
+          source: 'tool',
+          toolName: 'write_file',
+        },
+      ],
+      { strict: true },
+    );
+
+    expect((await store.list()).artifacts).toMatchObject([
+      {
+        title: 'Quarterly sales report',
+        source: 'hook',
+        toolName: 'write_file',
+      },
+    ]);
+  });
+
+  it('keeps the existing description when a re-record omits it', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's2-workspace-rerecord-keep-description',
+      workspaceCwd: workspace,
+    });
+    await fs.writeFile(path.join(workspace, 'notes.html'), '<html>ok</html>');
+
+    await store.upsertMany(
+      [
+        {
+          title: 'Draft',
+          description: 'Keep me',
+          workspacePath: 'notes.html',
+        },
+      ],
+      { strict: true },
+    );
+
+    const updated = await store.upsertMany(
+      [
+        {
+          title: 'Final notes',
+          workspacePath: 'notes.html',
+        },
+      ],
+      { strict: true },
+    );
+
+    expect(updated.changes[0]?.artifact).toMatchObject({
+      title: 'Final notes',
+      description: 'Keep me',
+    });
+  });
+
+  it('uses the later title when the same workspace path appears twice in one batch', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's2-workspace-batch-duplicate',
+      workspaceCwd: workspace,
+    });
+    await fs.writeFile(path.join(workspace, 'dup.html'), '<html>ok</html>');
+
+    const created = await store.upsertMany(
+      [
+        {
+          title: 'First',
+          description: 'Old',
+          workspacePath: 'dup.html',
+        },
+        {
+          title: 'Second',
+          description: 'New',
+          workspacePath: 'dup.html',
+        },
+      ],
+      { strict: true },
+    );
+
+    expect(created.changes).toHaveLength(1);
+    expect(created.changes[0]?.artifact).toMatchObject({
+      title: 'Second',
+      description: 'New',
+    });
+  });
+
   it('accepts trusted published file urls outside the workspace', async () => {
     const store = new SessionArtifactStore({
       sessionId: 's2-published-file-url',
@@ -1087,6 +1444,9 @@ describe('SessionArtifactStore', () => {
       const logged = stderr.mock.calls.map((call) => String(call[0])).join('');
       expect(logged).toContain('action=dropped');
       expect(logged).toContain('max artifacts exceeded');
+      expect(overflow.warnings?.join(' ') ?? '').toMatch(
+        /dropped 1 newly created artifacts because the store is full/,
+      );
     } finally {
       stderr.mockRestore();
     }
@@ -1586,6 +1946,7 @@ describe('SessionArtifactStore', () => {
       { title: 'Page', workspacePath: 'reports/index.html' },
       { title: 'Image', workspacePath: 'screenshots/app.png' },
       { title: 'Notebook', workspacePath: 'analysis/run.ipynb' },
+      { title: 'Sheet', workspacePath: 'data/table.xlsx' },
       { title: 'Unknown file', workspacePath: 'artifacts/blob.unknown' },
       { title: 'Managed item', managedId: 'ext-123' },
     ]);
@@ -1594,9 +1955,436 @@ describe('SessionArtifactStore', () => {
       'html',
       'image',
       'notebook',
+      'document',
       'file',
       'other',
     ]);
+  });
+
+  it('expands a directory workspacePath into per-file artifacts', async () => {
+    const dir = path.join(workspace, 'scheduler_timeline_daily');
+    await fs.mkdir(path.join(dir, 'nested'), { recursive: true });
+    await fs.writeFile(path.join(dir, 'day1.xlsx'), 'xlsx-1');
+    await fs.writeFile(path.join(dir, 'day2.xlsx'), 'xlsx-2');
+    await fs.writeFile(path.join(dir, '.hidden.xlsx'), 'hidden');
+    await fs.writeFile(path.join(dir, '~$lock.xlsx'), 'lock');
+    await fs.writeFile(path.join(dir, 'nested', 'day3.xlsx'), 'xlsx-3');
+
+    const store = new SessionArtifactStore({
+      sessionId: 's-dir-expand',
+      workspaceCwd: workspace,
+    });
+    const result = await store.upsertMany(
+      [
+        {
+          title: '调度实例时间线数据 - 按天拆分 (17个Excel文件)',
+          kind: 'file',
+          workspacePath: 'scheduler_timeline_daily',
+          toolCallId: 'call-1',
+        },
+      ],
+      { strict: true },
+    );
+
+    expect(
+      result.changes.map((change) => change.artifact?.workspacePath),
+    ).toEqual([
+      'scheduler_timeline_daily/day1.xlsx',
+      'scheduler_timeline_daily/day2.xlsx',
+      'scheduler_timeline_daily/nested/day3.xlsx',
+    ]);
+    expect(result.changes.map((change) => change.artifact?.kind)).toEqual([
+      'document',
+      'document',
+      'document',
+    ]);
+    expect(result.changes.map((change) => change.artifact?.title)).toEqual([
+      'day1.xlsx',
+      'day2.xlsx',
+      'day3.xlsx',
+    ]);
+    expect(
+      result.changes.every(
+        (change) =>
+          change.artifact?.description ===
+          '调度实例时间线数据 - 按天拆分 (17个Excel文件)',
+      ),
+    ).toBe(true);
+    expect(
+      result.changes.every(
+        (change) => change.artifact?.toolCallId === 'call-1',
+      ),
+    ).toBe(true);
+
+    const listed = await store.list();
+    expect(
+      listed.artifacts.some(
+        (artifact) => artifact.workspacePath === 'scheduler_timeline_daily',
+      ),
+    ).toBe(false);
+  });
+
+  it('does not mark a leftover directory workspacePath as available', async () => {
+    await fs.writeFile(path.join(workspace, 'report.xlsx'), 'xlsx');
+    const store = new SessionArtifactStore({
+      sessionId: 's-dir-leftover',
+      workspaceCwd: workspace,
+    });
+    await store.upsertMany(
+      [{ title: 'Report', workspacePath: 'report.xlsx' }],
+      { strict: true },
+    );
+    await fs.rm(path.join(workspace, 'report.xlsx'));
+    await fs.mkdir(path.join(workspace, 'report.xlsx'));
+    await fs.writeFile(path.join(workspace, 'report.xlsx', 'inner.xlsx'), 'y');
+
+    vi.useFakeTimers();
+    vi.setSystemTime(Date.now() + 6_000);
+    const listed = await store.list();
+    expect(listed.artifacts).toHaveLength(1);
+    expect(listed.artifacts[0]?.status).not.toBe('available');
+    expect(listed.artifacts[0]?.workspacePath).toBe('report.xlsx');
+  });
+
+  it('rejects directory expansion when metadata is not a plain object', async () => {
+    await fs.mkdir(path.join(workspace, 'reports'));
+    await fs.writeFile(path.join(workspace, 'reports', 'a.xlsx'), 'xlsx');
+    const store = new SessionArtifactStore({
+      sessionId: 's-dir-meta',
+      workspaceCwd: workspace,
+    });
+
+    await expect(
+      store.upsertMany(
+        [
+          {
+            title: 'Reports',
+            workspacePath: 'reports',
+            metadata: ['a', 'b'] as never,
+          },
+        ],
+        { strict: true },
+      ),
+    ).rejects.toMatchObject({ field: 'metadata' });
+  });
+
+  it('rejects directory expansion when expanded metadata would exceed the budget', async () => {
+    await fs.mkdir(path.join(workspace, 'reports-meta'));
+    await fs.writeFile(path.join(workspace, 'reports-meta', 'a.xlsx'), 'xlsx');
+    const store = new SessionArtifactStore({
+      sessionId: 's-dir-meta-budget',
+      workspaceCwd: workspace,
+    });
+
+    await expect(
+      store.upsertMany(
+        [
+          {
+            title: 'Reports',
+            workspacePath: 'reports-meta',
+            metadata: { note: 'n'.repeat(4080) },
+          },
+        ],
+        { strict: true },
+      ),
+    ).rejects.toMatchObject({ field: 'metadata' });
+  });
+
+  it('rejects directory expansion when the parent title exceeds 200 characters', async () => {
+    await fs.mkdir(path.join(workspace, 'reports-long'));
+    await fs.writeFile(path.join(workspace, 'reports-long', 'a.xlsx'), 'xlsx');
+    const store = new SessionArtifactStore({
+      sessionId: 's-dir-long-title',
+      workspaceCwd: workspace,
+    });
+
+    await expect(
+      store.upsertMany(
+        [
+          {
+            title: 'x'.repeat(201),
+            workspacePath: 'reports-long',
+          },
+        ],
+        { strict: true },
+      ),
+    ).rejects.toMatchObject({ field: 'title' });
+  });
+
+  it('expands an in-workspace directory symlink and rejects an escaping one', async () => {
+    await fs.mkdir(path.join(workspace, 'real-reports'));
+    await fs.writeFile(path.join(workspace, 'real-reports', 'a.xlsx'), 'xlsx');
+    await fs.symlink(
+      path.join(workspace, 'real-reports'),
+      path.join(workspace, 'reports-link'),
+    );
+    const outside = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-out-dir-'));
+    try {
+      await fs.mkdir(path.join(outside, 'secret'));
+      await fs.writeFile(path.join(outside, 'secret', 'x.xlsx'), 'x');
+      await fs.symlink(
+        path.join(outside, 'secret'),
+        path.join(workspace, 'escape-dir'),
+      );
+      const store = new SessionArtifactStore({
+        sessionId: 's-dir-symlink',
+        workspaceCwd: workspace,
+      });
+      const expanded = await store.upsertMany(
+        [{ title: 'Linked', workspacePath: 'reports-link' }],
+        { strict: true },
+      );
+      expect(
+        expanded.changes.map((change) => change.artifact?.workspacePath),
+      ).toEqual(['reports-link/a.xlsx']);
+
+      await expect(
+        store.upsertMany([{ title: 'Escape', workspacePath: 'escape-dir' }], {
+          strict: true,
+        }),
+      ).rejects.toMatchObject({ field: 'workspacePath' });
+    } finally {
+      await fs.rm(outside, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects expanding a path nested under a junk directory', async () => {
+    await fs.mkdir(path.join(workspace, 'node_modules', 'react'), {
+      recursive: true,
+    });
+    await fs.writeFile(
+      path.join(workspace, 'node_modules', 'react', 'index.js'),
+      'js',
+    );
+    const store = new SessionArtifactStore({
+      sessionId: 's-dir-nested-junk',
+      workspaceCwd: workspace,
+    });
+    await expect(
+      store.upsertMany(
+        [{ title: 'React', workspacePath: 'node_modules/react' }],
+        { strict: true },
+      ),
+    ).rejects.toMatchObject({ field: 'workspacePath' });
+  });
+
+  it('rejects a symlink that aliases a skipped directory', async () => {
+    await fs.mkdir(path.join(workspace, 'node_modules', 'react'), {
+      recursive: true,
+    });
+    await fs.writeFile(
+      path.join(workspace, 'node_modules', 'react', 'index.js'),
+      'js',
+    );
+    await fs.symlink(
+      path.join(workspace, 'node_modules', 'react'),
+      path.join(workspace, 'deps'),
+    );
+    const store = new SessionArtifactStore({
+      sessionId: 's-dir-symlink-junk',
+      workspaceCwd: workspace,
+    });
+    await expect(
+      store.upsertMany([{ title: 'Deps', workspacePath: 'deps' }], {
+        strict: true,
+      }),
+    ).rejects.toMatchObject({ field: 'workspacePath' });
+  });
+
+  it('rejects a path whose intermediate symlink aliases a skipped directory', async () => {
+    await fs.mkdir(path.join(workspace, '.qwen', 'sub'), { recursive: true });
+    await fs.writeFile(
+      path.join(workspace, '.qwen', 'sub', 'secret.xlsx'),
+      'xlsx',
+    );
+    await fs.symlink(
+      path.join(workspace, '.qwen'),
+      path.join(workspace, 'link'),
+    );
+    const store = new SessionArtifactStore({
+      sessionId: 's-dir-intermediate-symlink-junk',
+      workspaceCwd: workspace,
+    });
+    await expect(
+      store.upsertMany([{ title: 'Secret', workspacePath: 'link/sub' }], {
+        strict: true,
+      }),
+    ).rejects.toMatchObject({ field: 'workspacePath' });
+  });
+
+  it('rejects directory expansion when the parent description is invalid', async () => {
+    await fs.mkdir(path.join(workspace, 'reports-desc'));
+    await fs.writeFile(path.join(workspace, 'reports-desc', 'a.xlsx'), 'xlsx');
+    const store = new SessionArtifactStore({
+      sessionId: 's-dir-bad-desc',
+      workspaceCwd: workspace,
+    });
+    await expect(
+      store.upsertMany(
+        [
+          {
+            title: 'Reports',
+            workspacePath: 'reports-desc',
+            description: 'x'.repeat(1001),
+          },
+        ],
+        { strict: true },
+      ),
+    ).rejects.toMatchObject({ field: 'description' });
+  });
+
+  it('keeps a curated title when a same-batch expansion precedes the explicit record', async () => {
+    await fs.mkdir(path.join(workspace, 'reports-batch'));
+    await fs.writeFile(
+      path.join(workspace, 'reports-batch', 'q3.xlsx'),
+      'xlsx',
+    );
+    const store = new SessionArtifactStore({
+      sessionId: 's-dir-same-batch-order',
+      workspaceCwd: workspace,
+    });
+    await store.upsertMany(
+      [
+        {
+          title: 'Reports',
+          workspacePath: 'reports-batch',
+          toolName: 'record_artifact',
+          toolCallId: 'call-dir',
+        },
+        {
+          title: 'Q3 Final',
+          workspacePath: 'reports-batch/q3.xlsx',
+          toolName: 'record_artifact',
+          toolCallId: 'call-file',
+        },
+      ],
+      { strict: true },
+    );
+    const listed = await store.list();
+    expect(listed.artifacts).toEqual([
+      expect.objectContaining({
+        title: 'Q3 Final',
+        toolCallId: 'call-file',
+        workspacePath: 'reports-batch/q3.xlsx',
+      }),
+    ]);
+    expect(
+      listed.artifacts[0]?.metadata?.['expandedFromDirectory'],
+    ).toBeUndefined();
+  });
+
+  it('keeps a curated title when a same-batch explicit record precedes expansion', async () => {
+    await fs.mkdir(path.join(workspace, 'reports-batch-b'));
+    await fs.writeFile(
+      path.join(workspace, 'reports-batch-b', 'q3.xlsx'),
+      'xlsx',
+    );
+    const store = new SessionArtifactStore({
+      sessionId: 's-dir-same-batch-order-b',
+      workspaceCwd: workspace,
+    });
+    await store.upsertMany(
+      [
+        {
+          title: 'Q3 Final',
+          workspacePath: 'reports-batch-b/q3.xlsx',
+          toolName: 'record_artifact',
+          toolCallId: 'call-file',
+        },
+        {
+          title: 'Reports',
+          workspacePath: 'reports-batch-b',
+          toolName: 'record_artifact',
+          toolCallId: 'call-dir',
+        },
+      ],
+      { strict: true },
+    );
+    const listed = await store.list();
+    expect(listed.artifacts).toEqual([
+      expect.objectContaining({
+        title: 'Q3 Final',
+        toolCallId: 'call-file',
+        workspacePath: 'reports-batch-b/q3.xlsx',
+      }),
+    ]);
+  });
+
+  it('keeps a curated title when a later directory expansion covers the same file', async () => {
+    await fs.mkdir(path.join(workspace, 'reports'));
+    await fs.writeFile(path.join(workspace, 'reports', 'q3.xlsx'), 'xlsx');
+    const store = new SessionArtifactStore({
+      sessionId: 's-dir-keep-title',
+      workspaceCwd: workspace,
+    });
+    await store.upsertMany(
+      [
+        {
+          title: 'Q3 Financial Report',
+          workspacePath: 'reports/q3.xlsx',
+          toolName: 'record_artifact',
+          toolCallId: 'call-1',
+        },
+      ],
+      { strict: true },
+    );
+    await store.upsertMany(
+      [
+        {
+          title: 'Reports',
+          workspacePath: 'reports',
+          toolName: 'record_artifact',
+          toolCallId: 'call-2',
+        },
+      ],
+      { strict: true },
+    );
+
+    const listed = await store.list();
+    expect(listed.artifacts).toEqual([
+      expect.objectContaining({
+        title: 'Q3 Financial Report',
+        toolCallId: 'call-1',
+      }),
+    ]);
+  });
+
+  it('rejects an empty directory workspacePath', async () => {
+    await fs.mkdir(path.join(workspace, 'empty-dir'));
+    const store = new SessionArtifactStore({
+      sessionId: 's-dir-empty',
+      workspaceCwd: workspace,
+    });
+
+    await expect(
+      store.upsertMany([{ title: 'Empty', workspacePath: 'empty-dir' }], {
+        strict: true,
+      }),
+    ).rejects.toMatchObject({ field: 'workspacePath' });
+  });
+
+  it('caps expanded directory files and warns', async () => {
+    const dir = path.join(workspace, 'many-files');
+    await fs.mkdir(dir);
+    await Promise.all(
+      Array.from({ length: 105 }, (_, index) =>
+        fs.writeFile(
+          path.join(dir, `f${String(index).padStart(3, '0')}.txt`),
+          'x',
+        ),
+      ),
+    );
+
+    const store = new SessionArtifactStore({
+      sessionId: 's-dir-cap',
+      workspaceCwd: workspace,
+    });
+    const result = await store.upsertMany([
+      { title: 'Many', workspacePath: 'many-files' },
+    ]);
+
+    expect(result.changes).toHaveLength(100);
+    expect(result.warnings?.[0]).toMatch(/more than 100/);
   });
 
   it('rejects unsafe display markup in title and description', async () => {
@@ -2480,22 +3268,102 @@ describe('SessionArtifactStore', () => {
 
     vi.useFakeTimers();
     vi.setSystemTime(new Date(Date.now() + 6_000));
-    const originalLstat = fs.lstat.bind(fs);
     let swapped = false;
-    const lstatSpy = vi.spyOn(fs, 'lstat').mockImplementation(async (entry) => {
-      const stat = await originalLstat(entry);
+    const lstatSpy = spyOnLstatForwarding(async (entry) => {
       if (!swapped && String(entry) === realTarget) {
         swapped = true;
         await fs.writeFile(replacement, 'after');
         await fs.rename(replacement, target);
       }
-      return stat;
     });
 
     try {
       const artifact = await store.get(artifactId);
       expect(artifact).toMatchObject({ id: artifactId, status: 'missing' });
       expect(artifact).not.toHaveProperty('workspacePath');
+    } finally {
+      lstatSpy.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it('detects a swap whose file ids differ only above 2^53', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's7-bigint-identity',
+      workspaceCwd: workspace,
+    });
+    await fs.writeFile(path.join(workspace, 'big.txt'), 'content');
+    const created = await store.upsertMany([
+      { title: 'Big', workspacePath: 'big.txt' },
+    ]);
+    const artifactId = created.changes[0]!.artifactId;
+    const realTarget = await fs.realpath(path.join(workspace, 'big.txt'));
+
+    // Injected ids on both sides of 2^53: the replacement rounds to the SAME
+    // Number as the original, so only the bigint comparison can see the swap.
+    const preOpenIno = 2n ** 53n;
+    const injectIno = (stat: Stats | BigIntStats, ino: bigint): void => {
+      stat.ino = typeof stat.ino === 'bigint' ? ino : Number(ino);
+    };
+    const lstatSpy = spyOnLstatForwarding((entry, stat) => {
+      if (String(entry) === realTarget) {
+        injectIno(stat, preOpenIno);
+      }
+    });
+    const originalOpen = fs.open.bind(fs);
+    const openSpy = vi.spyOn(fs, 'open').mockImplementation((async (
+      entry: Parameters<typeof fs.open>[0],
+      flags?: Parameters<typeof fs.open>[1],
+      mode?: Parameters<typeof fs.open>[2],
+    ) => {
+      const handle = await originalOpen(
+        entry,
+        flags as Parameters<typeof originalOpen>[1],
+        mode,
+      );
+      if (String(entry) !== realTarget) {
+        return handle;
+      }
+      const originalStat = handle.stat.bind(handle);
+      handle.stat = (async (options?: Parameters<typeof handle.stat>[0]) => {
+        const stat = await originalStat(options);
+        injectIno(stat, preOpenIno + 1n);
+        return stat;
+      }) as typeof handle.stat;
+      return handle;
+    }) as typeof fs.open);
+
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(Date.now() + 6_000));
+
+    try {
+      const artifact = await store.get(artifactId);
+      expect(artifact).toMatchObject({ id: artifactId, status: 'missing' });
+    } finally {
+      lstatSpy.mockRestore();
+      openSpy.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps an unswapped file available through an options-forwarding lstat spy', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's7-bigint-forwarding',
+      workspaceCwd: workspace,
+    });
+    await fs.writeFile(path.join(workspace, 'keep.txt'), 'content');
+    const created = await store.upsertMany([
+      { title: 'Keep', workspacePath: 'keep.txt' },
+    ]);
+    const artifactId = created.changes[0]!.artifactId;
+
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(Date.now() + 6_000));
+    const lstatSpy = spyOnLstatForwarding(() => {});
+
+    try {
+      const artifact = await store.get(artifactId);
+      expect(artifact).toMatchObject({ id: artifactId, status: 'available' });
     } finally {
       lstatSpy.mockRestore();
       vi.useRealTimers();
@@ -4067,6 +4935,80 @@ describe('SessionArtifactStore', () => {
         },
       ],
     });
+  });
+
+  it('restores workspace artifact metadata without filesystem access', async () => {
+    const sessionId = 's11-restore-workspace-metadata-only';
+    const workspacePath = 'missing/metadata-only.txt';
+    const id = stableSessionArtifactId(sessionId, `workspace:${workspacePath}`);
+    const realpath = vi.spyOn(fs, 'realpath');
+    const stat = vi.spyOn(fs, 'stat');
+    const lstat = vi.spyOn(fs, 'lstat');
+    const snapshots: SessionArtifactSnapshotRecordPayload[] = [];
+    const store = new SessionArtifactStore({
+      sessionId,
+      workspaceCwd: workspace,
+      persistence: {
+        recordEvent: async () => {},
+        recordSnapshot: async (snapshot) => {
+          snapshots.push(snapshot);
+        },
+      },
+    });
+
+    try {
+      await expect(
+        store.restore(
+          {
+            v: 2,
+            sessionId,
+            sequence: 1,
+            artifacts: [
+              {
+                id,
+                kind: 'file',
+                storage: 'workspace',
+                source: 'tool',
+                status: 'available',
+                title: 'Metadata-only workspace file',
+                workspacePath,
+                sizeBytes: 17,
+                retention: 'restorable',
+                clientRetained: false,
+                createdAt: '2026-07-04T00:00:00.000Z',
+                updatedAt: '2026-07-04T00:00:00.000Z',
+                persistedAt: '2026-07-04T00:00:00.000Z',
+              },
+            ],
+            tombstonedIds: [],
+            stickyEphemeralIds: [],
+            warnings: [],
+          },
+          { workspaceAccess: 'metadata-only' },
+        ),
+      ).resolves.toEqual([]);
+
+      expect(realpath).not.toHaveBeenCalled();
+      expect(stat).not.toHaveBeenCalled();
+      expect(lstat).not.toHaveBeenCalled();
+      await expect(store.recordSnapshot()).resolves.toEqual([]);
+      expect(snapshots).toMatchObject([
+        {
+          artifacts: [
+            {
+              id,
+              status: 'available',
+              sizeBytes: 17,
+              workspacePath,
+            },
+          ],
+        },
+      ]);
+    } finally {
+      realpath.mockRestore();
+      stat.mockRestore();
+      lstat.mockRestore();
+    }
   });
 
   it('keeps live artifacts when a non-empty restore snapshot fully fails', async () => {

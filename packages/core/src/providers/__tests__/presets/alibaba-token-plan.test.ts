@@ -34,10 +34,13 @@ describe('token plan provider', () => {
       modelIds: getDefaultModelIds(tokenPlanProvider),
     });
 
+    expect(tokenPlanProvider.supportsModelDiscovery).toBe(true);
+
     expect(template.map((model) => model.id)).toEqual([
       'qwen3.7-plus',
       'qwen3.6-plus',
       'qwen3.7-max',
+      'qwen3.8-max',
       'qwen3.8-max-preview',
       'qwen3.6-flash',
       'deepseek-v4-pro',
@@ -72,6 +75,14 @@ describe('token plan provider', () => {
       template.find((model) => model.id === 'qwen3.6-plus')?.generationConfig
         ?.modalities,
     ).toEqual({ image: true, video: true });
+    expect(
+      template.find((model) => model.id === 'qwen3.8-max')?.generationConfig,
+    ).toEqual({
+      extra_body: { enable_thinking: true },
+      thinkingMandatory: true,
+      contextWindowSize: 1000000,
+      modalities: { image: true, video: true },
+    });
     expect(
       template.find((model) => model.id === 'qwen3.8-max-preview')
         ?.generationConfig?.modalities,

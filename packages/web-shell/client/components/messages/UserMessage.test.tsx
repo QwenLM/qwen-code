@@ -349,6 +349,7 @@ describe('UserMessage', () => {
       />,
     );
     const img = container.querySelector('img')!;
+    expect(container.querySelector('[data-web-shell-user-bubble]')).toBeNull();
     act(() => img.click());
     expect(onImagePreview).toHaveBeenCalledWith(
       'data:image/png;base64,abc',
@@ -366,6 +367,221 @@ describe('UserMessage', () => {
     expect(container.querySelector('img')?.getAttribute('src')).toBe(
       'data:image/bmp;base64,Qk0=',
     );
+  });
+
+  it('renders file attachment chips when provided', () => {
+    const container = render(
+      <UserMessage
+        content="check this"
+        files={[{ name: 'app.log', mimeType: 'text/plain' }]}
+      />,
+    );
+    expect(container.textContent).toContain('check this');
+    expect(container.textContent).toContain('app.log');
+  });
+
+  it('does not render an empty bubble for a file-only message', () => {
+    const container = render(
+      <UserMessage
+        content=""
+        files={[{ name: 'app.log', mimeType: 'text/plain' }]}
+      />,
+    );
+
+    expect(
+      container.querySelector('[data-web-shell-user-files]'),
+    ).not.toBeNull();
+    expect(container.querySelector('[data-web-shell-user-bubble]')).toBeNull();
+  });
+
+  it('flashes the wrapper for a located file-only message', () => {
+    const container = render(
+      <UserMessage
+        content=""
+        files={[{ name: 'app.log', mimeType: 'text/plain' }]}
+        isLocateFlashing
+      />,
+    );
+
+    expect(
+      container.querySelector('[data-web-shell-user-files]')?.parentElement
+        ?.className,
+    ).toContain('flash');
+  });
+
+  it('previews a sent text attachment when its chip is clicked', () => {
+    const onAttachmentPreview = vi.fn();
+    const container = render(
+      <I18nProvider language="en">
+        <UserMessage
+          content="check this"
+          files={[
+            {
+              name: 'app.log',
+              mimeType: 'text/plain',
+              text: 'line one',
+            },
+          ]}
+          onAttachmentPreview={onAttachmentPreview}
+        />
+      </I18nProvider>,
+    );
+
+    act(() => {
+      (container.querySelector('[role="button"]') as HTMLElement).click();
+    });
+
+    expect(onAttachmentPreview).toHaveBeenCalledWith({
+      name: 'app.log',
+      mimeType: 'text/plain',
+      text: 'line one',
+    });
+    const chip = container.querySelector('[role="button"]') as HTMLElement;
+    expect(
+      container.querySelector('[data-web-shell-user-bubble]')?.contains(chip),
+    ).toBe(false);
+  });
+
+  it('previews a replayed daemon attachment by id', () => {
+    const onAttachmentPreview = vi.fn();
+    const container = render(
+      <UserMessage
+        content="check this"
+        files={[
+          {
+            name: 'data.json',
+            mimeType: 'text/plain',
+            attachmentId: 'attachment-1',
+          },
+        ]}
+        onAttachmentPreview={onAttachmentPreview}
+      />,
+    );
+
+    act(() => {
+      (container.querySelector('[role="button"]') as HTMLElement).click();
+    });
+
+    expect(onAttachmentPreview).toHaveBeenCalledWith({
+      name: 'data.json',
+      mimeType: 'text/plain',
+      attachmentId: 'attachment-1',
+    });
+  });
+
+  it.each(['Enter', ' '])(
+    'previews a file attachment with the %s key',
+    (key) => {
+      const onAttachmentPreview = vi.fn();
+      const container = render(
+        <UserMessage
+          content="check this"
+          files={[
+            {
+              name: 'data.json',
+              mimeType: 'application/json',
+              attachmentId: 'data.json',
+            },
+          ]}
+          onAttachmentPreview={onAttachmentPreview}
+        />,
+      );
+      const chip = container.querySelector('[role="button"]') as HTMLElement;
+
+      act(() => {
+        chip.dispatchEvent(
+          new KeyboardEvent('keydown', { key, bubbles: true }),
+        );
+      });
+
+      expect(onAttachmentPreview).toHaveBeenCalledWith({
+        name: 'data.json',
+        mimeType: 'application/json',
+        attachmentId: 'data.json',
+      });
+    },
+  );
+
+  it('previews a local attachment blob after a failed send', () => {
+    const onAttachmentPreview = vi.fn();
+    const data = new Blob(['draft']);
+    const container = render(
+      <UserMessage
+        content="check this"
+        files={[{ name: 'draft.txt', mimeType: 'text/plain', data }]}
+        onAttachmentPreview={onAttachmentPreview}
+      />,
+    );
+
+    act(() => {
+      (container.querySelector('[role="button"]') as HTMLElement).click();
+    });
+
+    expect(onAttachmentPreview).toHaveBeenCalledWith({
+      name: 'draft.txt',
+      mimeType: 'text/plain',
+      data,
+    });
+  });
+
+  it('previews a sent workspace file tag by path', () => {
+    const onAttachmentPreview = vi.fn();
+    const container = render(
+      <WebShellCustomizationProvider
+        value={{
+          parseUserMessageContent: () => [
+            {
+              type: 'tag',
+              tag: {
+                id: 'file:docs/notes.txt',
+                value: 'docs/notes.txt',
+                kind: 'file',
+                serialized: '@docs/notes.txt',
+              },
+            },
+          ],
+        }}
+      >
+        <UserMessage
+          content="@docs/notes.txt"
+          onAttachmentPreview={onAttachmentPreview}
+        />
+      </WebShellCustomizationProvider>,
+    );
+
+    act(() => {
+      (container.querySelector('[role="button"]') as HTMLElement).click();
+    });
+
+    expect(onAttachmentPreview).toHaveBeenCalledWith({
+      name: 'notes.txt',
+      workspacePath: 'docs/notes.txt',
+    });
+  });
+
+  it('does not make a sent directory tag previewable', () => {
+    const container = render(
+      <WebShellCustomizationProvider
+        value={{
+          parseUserMessageContent: () => [
+            {
+              type: 'tag',
+              tag: {
+                id: 'file:@docs/',
+                value: 'docs',
+                kind: 'file',
+                metadata: { fileKind: 'directory' },
+                serialized: '@docs/',
+              },
+            },
+          ],
+        }}
+      >
+        <UserMessage content="@docs/" onAttachmentPreview={vi.fn()} />
+      </WebShellCustomizationProvider>,
+    );
+
+    expect(container.querySelector('[role="button"]')).toBeNull();
   });
 
   it('uses a custom content renderer when provided', () => {

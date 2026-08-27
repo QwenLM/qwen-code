@@ -9,6 +9,7 @@ import type { Mocked } from 'vitest';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { ConfigParameters } from '../config/config.js';
 import { Config, ApprovalMode } from '../config/config.js';
+import { PermissionManager } from '../permissions/permission-manager.js';
 import { ToolRegistry, DiscoveredTool } from './tool-registry.js';
 import { DiscoveredMCPTool } from './mcp-tool.js';
 import { ExitPlanModeTool } from './exitPlanMode.js';
@@ -851,6 +852,128 @@ describe('ToolRegistry', () => {
         'web_fetch',
       );
     });
+
+    it('pinned reveal survives clearRevealedDeferredTools, discovered reveals do not', () => {
+      const registry = new ToolRegistry(new Config(baseConfigParams));
+      registry.registerTool(
+        new MockTool({ name: 'daemon-setup', shouldDefer: true }),
+      );
+      registry.registerTool(
+        new MockTool({ name: 'discovered', shouldDefer: true }),
+      );
+      registry.revealDeferredTool('daemon-setup');
+      registry.pinDeferredToolReveal('daemon-setup');
+      registry.revealDeferredTool('discovered');
+
+      registry.clearRevealedDeferredTools();
+
+      // The ToolSearch-discovered reveal is dropped by the reset...
+      expect(registry.isDeferredToolRevealed('discovered')).toBe(false);
+      expect(
+        registry.getFunctionDeclarations().map((d) => d.name),
+      ).not.toContain('discovered');
+      // ...but the pinned session-setup reveal survives it, so the fresh
+      // session's declaration list still offers the tool (a `/clear` whose
+      // budget-based preload withholds it would otherwise strand it).
+      expect(registry.isDeferredToolRevealed('daemon-setup')).toBe(true);
+      expect(registry.getFunctionDeclarations().map((d) => d.name)).toContain(
+        'daemon-setup',
+      );
+    });
+
+    it('pin for an unregistered tool reveals nothing on clear', () => {
+      const registry = new ToolRegistry(new Config(baseConfigParams));
+      registry.pinDeferredToolReveal('ghost');
+
+      registry.clearRevealedDeferredTools();
+
+      expect(registry.isDeferredToolRevealed('ghost')).toBe(false);
+    });
+  });
+
+  // #10075: built-in tools an active permissions.allow allowlist does not
+  // cover are demoted to deferred instead of being dropped from the
+  // registry, so they stay listed in /tools and loadable via ToolSearch
+  // while their schemas stay out of the eager model request (#9827).
+  describe('permission-deferred tools (#10075)', () => {
+    it('registers the tool but hides it from the eager declarations', async () => {
+      toolRegistry.registerTool(new MockTool({ name: 'visible' }));
+      toolRegistry.registerPermissionDeferredFactory(
+        'hidden_by_allowlist',
+        async () => new MockTool({ name: 'hidden_by_allowlist' }),
+      );
+      await toolRegistry.warmAll();
+
+      // Registered: listed for /tools and resolvable like any other tool.
+      expect(toolRegistry.getAllToolNames()).toContain('hidden_by_allowlist');
+      expect(toolRegistry.getTool('hidden_by_allowlist')).toBeDefined();
+      expect(toolRegistry.isPermissionDeferred('hidden_by_allowlist')).toBe(
+        true,
+      );
+
+      // Hidden from the eager model request...
+      expect(toolRegistry.getFunctionDeclarations().map((d) => d.name)).toEqual(
+        ['visible'],
+      );
+      // ...but present in diagnostics / includeDeferred views...
+      expect(
+        toolRegistry
+          .getFunctionDeclarations({ includeDeferred: true })
+          .map((d) => d.name),
+      ).toContain('hidden_by_allowlist');
+      // ...and discoverable through the deferred summary (ToolSearch).
+      expect(
+        toolRegistry.getDeferredToolSummary().map((t) => t.name),
+      ).toContain('hidden_by_allowlist');
+      expect(toolRegistry.isDeferredAndHidden('hidden_by_allowlist')).toBe(
+        true,
+      );
+    });
+
+    it('reveals the schema once ToolSearch loads the tool', async () => {
+      toolRegistry.registerPermissionDeferredFactory(
+        'hidden_by_allowlist',
+        async () => new MockTool({ name: 'hidden_by_allowlist' }),
+      );
+      await toolRegistry.warmAll();
+
+      toolRegistry.revealDeferredTool('hidden_by_allowlist');
+
+      expect(
+        toolRegistry.getFunctionDeclarations().map((d) => d.name),
+      ).toContain('hidden_by_allowlist');
+      expect(toolRegistry.isDeferredAndHidden('hidden_by_allowlist')).toBe(
+        false,
+      );
+    });
+
+    it('is never auto-revealed by the budget preload (#9827)', async () => {
+      // An ordinary deferred tool is preloaded when its schema fits the
+      // budget; a permission-deferred tool must stay hidden regardless —
+      // auto-revealing it would re-add exactly the schema the allowlist
+      // keeps out of the eager request.
+      toolRegistry.registerTool(
+        new MockTool({ name: 'ordinary-deferred', shouldDefer: true }),
+      );
+      toolRegistry.registerPermissionDeferredFactory(
+        'hidden_by_allowlist',
+        async () => new MockTool({ name: 'hidden_by_allowlist' }),
+      );
+      await toolRegistry.warmAll();
+
+      const revealed = toolRegistry.preloadDeferredToolsWithinBudget(1_000_000);
+
+      expect(revealed).toBe(1);
+      expect(toolRegistry.isDeferredToolRevealed('ordinary-deferred')).toBe(
+        true,
+      );
+      expect(toolRegistry.isDeferredToolRevealed('hidden_by_allowlist')).toBe(
+        false,
+      );
+      expect(toolRegistry.getFunctionDeclarations().map((d) => d.name)).toEqual(
+        ['ordinary-deferred'],
+      );
+    });
   });
 
   describe('getToolsByServer', () => {
@@ -988,6 +1111,213 @@ describe('ToolRegistry', () => {
           },
         },
       });
+    });
+
+    it('does not register command-discovered tools the permissions.allow registry allowlist does not cover (#9827)', async () => {
+      // Without the registration-side gate the uncovered tool stays
+      // registered and its schema is still sent to the model, yet every
+      // invocation is rejected EXECUTION_DENIED by the runtime scheduler
+      // gate — advertised-then-rejected. Not covered → not registered,
+      // matching the registerLazy path built-ins go through.
+      const pm = new PermissionManager({
+        getPermissionsAllow: () => ['covered_discovered_tool'],
+        getPermissionsAsk: () => [],
+        getPermissionsDeny: () => [],
+        getCoreTools: () => undefined,
+        getRegistryAllowList: () => ['covered_discovered_tool'],
+        getProjectRoot: () => '/test/dir',
+        getCwd: () => '/test/dir',
+        getApprovalMode: () => 'default',
+      });
+      pm.initialize();
+      expect(pm.isPermissionsAllowListActive()).toBe(true);
+      vi.spyOn(config, 'getPermissionManager').mockReturnValue(pm);
+      mockConfigGetToolDiscoveryCommand.mockReturnValue('my-discovery-command');
+
+      const declarations: FunctionDeclaration[] = [
+        {
+          name: 'covered_discovered_tool',
+          description: 'Covered by an allow rule',
+          parametersJsonSchema: { type: 'object', properties: {} },
+        },
+        {
+          name: 'uncovered_discovered_tool',
+          description: 'Not covered by any allow rule',
+          parametersJsonSchema: { type: 'object', properties: {} },
+        },
+      ];
+
+      const mockSpawn = vi.mocked(spawn);
+      const mockChildProcess = {
+        stdout: { on: vi.fn() },
+        stderr: { on: vi.fn() },
+        on: vi.fn(),
+      };
+      mockSpawn.mockReturnValue(mockChildProcess as any);
+      mockChildProcess.stdout.on.mockImplementation((event, callback) => {
+        if (event === 'data') {
+          callback(
+            Buffer.from(
+              JSON.stringify([{ function_declarations: declarations }]),
+            ),
+          );
+        }
+        return mockChildProcess as any;
+      });
+      mockChildProcess.on.mockImplementation((event, callback) => {
+        if (event === 'close') {
+          callback(0);
+        }
+        return mockChildProcess as any;
+      });
+
+      await toolRegistry.discoverAllTools();
+
+      expect(toolRegistry.getTool('covered_discovered_tool')).toBeDefined();
+      expect(toolRegistry.getTool('uncovered_discovered_tool')).toBeUndefined();
+    });
+
+    it('removes a command-discovered tool hit by a whole-tool deny rule even under an active permissions.allow allowlist (#9827)', async () => {
+      // settings.md pins the sibling semantic of the discovery gate: "A
+      // whole-tool deny rule (no specifier) also removes the tool from
+      // the registry — for built-in tools and tools found via
+      // tools.discoveryCommand". The denied tool below IS covered by an
+      // allow rule, so the allowlist gate alone would have kept it
+      // registered — only the deny branch of isToolEnabled can reject
+      // it, which is exactly what this test pins.
+      const pm = new PermissionManager({
+        getPermissionsAllow: () => [
+          'allowed_discovered_tool',
+          'denied_discovered_tool',
+        ],
+        getPermissionsAsk: () => [],
+        getPermissionsDeny: () => ['denied_discovered_tool'],
+        getCoreTools: () => undefined,
+        getRegistryAllowList: () => [
+          'allowed_discovered_tool',
+          'denied_discovered_tool',
+        ],
+        getProjectRoot: () => '/test/dir',
+        getCwd: () => '/test/dir',
+        getApprovalMode: () => 'default',
+      });
+      pm.initialize();
+      expect(pm.isPermissionsAllowListActive()).toBe(true);
+      vi.spyOn(config, 'getPermissionManager').mockReturnValue(pm);
+      mockConfigGetToolDiscoveryCommand.mockReturnValue('my-discovery-command');
+
+      const declarations: FunctionDeclaration[] = [
+        {
+          name: 'allowed_discovered_tool',
+          description: 'Covered by an allow rule',
+          parametersJsonSchema: { type: 'object', properties: {} },
+        },
+        {
+          name: 'denied_discovered_tool',
+          description: 'Covered by an allow rule AND a whole-tool deny rule',
+          parametersJsonSchema: { type: 'object', properties: {} },
+        },
+      ];
+
+      const mockSpawn = vi.mocked(spawn);
+      const mockChildProcess = {
+        stdout: { on: vi.fn() },
+        stderr: { on: vi.fn() },
+        on: vi.fn(),
+      };
+      mockSpawn.mockReturnValue(mockChildProcess as any);
+      mockChildProcess.stdout.on.mockImplementation((event, callback) => {
+        if (event === 'data') {
+          callback(
+            Buffer.from(
+              JSON.stringify([{ function_declarations: declarations }]),
+            ),
+          );
+        }
+        return mockChildProcess as any;
+      });
+      mockChildProcess.on.mockImplementation((event, callback) => {
+        if (event === 'close') {
+          callback(0);
+        }
+        return mockChildProcess as any;
+      });
+
+      await toolRegistry.discoverAllTools();
+
+      expect(toolRegistry.getTool('allowed_discovered_tool')).toBeDefined();
+      expect(toolRegistry.getTool('denied_discovered_tool')).toBeUndefined();
+    });
+
+    it('keeps a command-discovered tool covered by an ask rule registered under an active permissions.allow allowlist (#9827)', async () => {
+      // settings.md pins the other sibling semantic: a tool covered by
+      // an ask rule "stays registered even when an allowlist is active,
+      // so 'always require confirmation' never silently becomes 'tool
+      // unavailable'". The uncovered control tool in the same discovery
+      // run proves the gate is genuinely active, so the ask-covered
+      // registration cannot be a gate-bypass artefact.
+      const pm = new PermissionManager({
+        getPermissionsAllow: () => ['allowed_discovered_tool'],
+        getPermissionsAsk: () => ['asked_discovered_tool'],
+        getPermissionsDeny: () => [],
+        getCoreTools: () => undefined,
+        getRegistryAllowList: () => ['allowed_discovered_tool'],
+        getProjectRoot: () => '/test/dir',
+        getCwd: () => '/test/dir',
+        getApprovalMode: () => 'default',
+      });
+      pm.initialize();
+      expect(pm.isPermissionsAllowListActive()).toBe(true);
+      vi.spyOn(config, 'getPermissionManager').mockReturnValue(pm);
+      mockConfigGetToolDiscoveryCommand.mockReturnValue('my-discovery-command');
+
+      const declarations: FunctionDeclaration[] = [
+        {
+          name: 'allowed_discovered_tool',
+          description: 'Covered by an allow rule',
+          parametersJsonSchema: { type: 'object', properties: {} },
+        },
+        {
+          name: 'asked_discovered_tool',
+          description: 'Covered by an ask rule',
+          parametersJsonSchema: { type: 'object', properties: {} },
+        },
+        {
+          name: 'uncovered_discovered_tool',
+          description: 'Not covered by any allow or ask rule',
+          parametersJsonSchema: { type: 'object', properties: {} },
+        },
+      ];
+
+      const mockSpawn = vi.mocked(spawn);
+      const mockChildProcess = {
+        stdout: { on: vi.fn() },
+        stderr: { on: vi.fn() },
+        on: vi.fn(),
+      };
+      mockSpawn.mockReturnValue(mockChildProcess as any);
+      mockChildProcess.stdout.on.mockImplementation((event, callback) => {
+        if (event === 'data') {
+          callback(
+            Buffer.from(
+              JSON.stringify([{ function_declarations: declarations }]),
+            ),
+          );
+        }
+        return mockChildProcess as any;
+      });
+      mockChildProcess.on.mockImplementation((event, callback) => {
+        if (event === 'close') {
+          callback(0);
+        }
+        return mockChildProcess as any;
+      });
+
+      await toolRegistry.discoverAllTools();
+
+      expect(toolRegistry.getTool('allowed_discovered_tool')).toBeDefined();
+      expect(toolRegistry.getTool('asked_discovered_tool')).toBeDefined();
+      expect(toolRegistry.getTool('uncovered_discovered_tool')).toBeUndefined();
     });
 
     it('strips Qwen-internal daemon secrets from the discovery and tool-call child env (#6601)', async () => {

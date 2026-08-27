@@ -31,6 +31,7 @@ import type {
 import {
   buildPermissionRequestContent,
   interactionMetaFields,
+  type PermissionPersistencePolicy,
   requestPermissionWithAbort,
   resolvePermissionOutcome,
   toPermissionOptions,
@@ -76,6 +77,7 @@ export class SubAgentTracker {
       params,
       signal,
     ) => requestPermissionWithAbort(this.client, params, signal),
+    private readonly permissionPersistencePolicy?: PermissionPersistencePolicy,
   ) {
     this.toolCallEmitter = new ToolCallEmitter(ctx);
     this.messageEmitter = new MessageEmitter(ctx);
@@ -186,6 +188,7 @@ export class SubAgentTracker {
           success: event.success,
           message: event.responseParts ?? [],
           resultDisplay: event.resultDisplay,
+          boundaryArtifact: event.boundaryArtifact,
           args: state?.args,
           subagentMeta: this.subagentMeta,
         })
@@ -224,7 +227,11 @@ export class SubAgentTracker {
       const { title, locations, kind } =
         this.toolCallEmitter.resolveToolMetadata(event.name, state?.args);
 
-      const permissionOptions = toPermissionOptions(fullConfirmationDetails);
+      const permissionOptions = toPermissionOptions(
+        fullConfirmationDetails,
+        false,
+        this.permissionPersistencePolicy,
+      );
       const offeredPermissionOptions = permissionOptions.map((option) => ({
         ...option,
       }));

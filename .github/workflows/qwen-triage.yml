@@ -449,7 +449,10 @@ jobs:
     concurrency:
       # GitHub evaluates concurrency before the job `if`, but after `needs`.
       # Keep non-runnable PR/comment triggers out of the shared per-number
-      # group so they cannot cancel or replace an authorized run.
+      # group so they cannot cancel or replace an authorized run — including
+      # bot-created issues runs (#9264): the job `if` skips them, but a run
+      # left in the shared group would still cancel an in-progress triage of
+      # the same issue before its own skip is evaluated.
       group: >-
         ${{
           (
@@ -459,7 +462,10 @@ jobs:
             (github.event_name == 'issue_comment' &&
              (github.event.issue.state != 'open' ||
               needs.authorize.outputs.should_run != 'true' ||
-              !startsWith(github.event.comment.body, '@qwen-code /triage')))
+              !startsWith(github.event.comment.body, '@qwen-code /triage'))) ||
+            (github.event_name == 'issues' &&
+             github.event.issue.user.login ==
+               (vars.AUTOFIX_BOT_LOGIN || 'qwen-code-dev-bot'))
           ) &&
           format('{0}-run-{1}', github.workflow, github.run_id) ||
           format('{0}-{1}', github.workflow, github.event.issue.number || github.event.pull_request.number || github.event.inputs.number)
@@ -501,9 +507,17 @@ jobs:
     # mention the phrase in quoted text or mid-sentence descriptions.
     # always() so the job still evaluates when the upstream `authorize` job is
     # skipped (issues / workflow_dispatch paths, which need no permission gate).
+    # The issues clause is conditioned on the creator NOT being the autofix
+    # bot (#9264): every PR that defers findings for the first time opens a
+    # tracking issue upserted by that bot, and the open issues trigger triaged
+    # the bookkeeping issue with a full agent run per deferral. The identity
+    # is the same one qwen-autofix.yml upserts under (AUTOFIX_BOT), so the
+    # guard tracks a rename on either side via the shared variable.
     if: >-
       always() && (
-        github.event_name == 'issues' ||
+        (github.event_name == 'issues' &&
+         github.event.issue.user.login !=
+           (vars.AUTOFIX_BOT_LOGIN || 'qwen-code-dev-bot')) ||
         (github.event_name == 'workflow_dispatch' &&
          github.event.inputs.number != '' &&
          github.event.inputs.tmux_pr == '') ||
@@ -733,8 +747,12 @@ jobs:
           # coreToolScheduler L5 + permissionFlow.needsConfirmation). `tools.core`
           # additionally filters which tools register at all (fail-safe: an
           # unlisted tool like web_fetch/web_search/save_memory never loads, so
-          # those network/persistence tool channels are gone). No `sandbox` key:
-          # the ECS pool ships no container runtime.
+          # those network/persistence tool channels are gone). No `sandbox` key
+          # — a deliberate omission, not a capability gap: the ECS pool does run
+          # containers (this workflow's own container jobs, and autofix's
+          # `sandbox: "docker"` agent, both land on those labels). Adding one
+          # here is an open decision, NOT tracked in #9556 — that issue is
+          # scoped to the /review pipeline's execution steps.
           #
           # ⚠️ A command denylist is NOT a security boundary under --yolo, and
           # is not treated as one here. It is defense-in-depth against the
@@ -2137,14 +2155,22 @@ jobs:
     #   install + build              ~6m measured (run 30284341325: npm ci
     #                                3m00 + build 2m40), budget 15m for a
     #                                cold cache or a heavier dependency tree
+    #   flakiness gate               ~40m worst case: the 15m round budget
+    #                                is checked BEFORE each reset, so the
+    #                                last invocation drags its reset (≤~345s:
+    #                                sanitize -k 10 30, reset/clean -k 30 120
+    #                                each, bounded kill waits) plus its own
+    #                                -k 30 600 cap; add the OID pin (≤150s)
+    #                                and the unconditional post-gate reset
+    #                                (≤~345s)
     #   resolver/tools, checkout,
     #   pin, upload, cleanup         ~5m
     #   ------------------------------------
-    #   worst case                   ~140m  ⇒ 150 leaves 10m of headroom.
+    #   worst case                   ~180m  ⇒ 190 leaves 10m of headroom.
     #
     # Cost of the raise, stated so it is a decision and not a surprise: a
-    # verify run now occupies one ECS slot for up to 2.5h instead of 1h.
-    timeout-minutes: 150
+    # verify run now occupies one ECS slot for up to ~3h instead of 1h.
+    timeout-minutes: 190
     runs-on: ['self-hosted', 'linux', 'x64', 'ecs-qwen']
     # The job checks out and executes PR code. Run the steps in a container so
     # package scripts/builds cannot persist changes in the self-hosted runner's
@@ -2165,6 +2191,11 @@ jobs:
       verdict: '${{ steps.run.outputs.verdict || steps.prepare.outputs.verdict || steps.pr.outputs.verdict }}'
       failure_phase: '${{ steps.prepare.outputs.failure_phase }}'
       agent_verdict: '${{ steps.run.outputs.agent_verdict }}'
+      # Deterministic flakiness gate (#9125): `flaky` demotes the published
+      # headline; every other value is informational. The summary is
+      # gate-authored fixed text plus counters — never PR-controlled strings.
+      flake_verdict: '${{ steps.flake.outputs.flake_verdict }}'
+      flake_summary: '${{ steps.flake.outputs.flake_summary }}'
       skip_reason: '${{ steps.pr.outputs.skip_reason }}'
     steps:
       - name: 'Install PR resolver tools'
@@ -2572,11 +2603,81 @@ jobs:
         run: |-
           set -uo pipefail
           WS="${GITHUB_WORKSPACE:?}"
-          # Refuse to run anywhere unexpected: a wipe pointed at the wrong
-          # path by a mangled env is far worse than a skipped wipe, and
-          # this job cannot proceed safely without it either way.
+          # Strip trailing slashes on the RAW path, before anything reads it:
+          # `[ -L "$WS/" ]` and `[ ! -d "$WS/" ]` both resolve THROUGH a link
+          # and report its target, so one trailing slash hides the corruption
+          # the heal below exists to clear.
+          while [ "${WS%/}" != "$WS" ]; do WS="${WS%/}"; done
+          # The allowlist root is prepared BEFORE the heal, because it bounds
+          # what the heal may touch: canonical, slash-free and non-degenerate.
+          # An empty $RUNNER_WORKSPACE would turn every containment pattern
+          # below into the match-all "/*".
+          RWS="${RUNNER_WORKSPACE:?}"
+          RWS="$(realpath -m -- "$RWS" 2>/dev/null)" || { echo "::error::refusing to wipe: realpath unavailable, cannot canonicalize ${RUNNER_WORKSPACE}"; exit 1; }
+          while [ "${RWS%/}" != "$RWS" ]; do RWS="${RWS%/}"; done
+          if [ -z "$RWS" ]; then echo "::error::refusing to wipe: runner workspace resolved to /"; exit 1; fi
+          case "$RWS" in
+            ..|../*|*/..|*/../*) echo "::error::refusing runner workspace path containing '..': ${RWS}"; exit 1 ;;
+          esac
+          # Heal a workspace a previous job replaced with a symlink (or any
+          # non-directory) BEFORE canonicalizing it. Afterwards the path
+          # resolves to the link's target, the allowlist refuses that, and the
+          # refusal removes nothing — so every later job on this runner dies
+          # here, permanently, on corruption that is itself inside the runner
+          # workspace and safe to unlink.
+          if [ -L "$WS" ] || [ ! -d "$WS" ]; then
+            # Judge the PARENT, canonicalized. The heal necessarily acts on a
+            # raw path, and a raw containment match is not enough: the kernel
+            # resolves intermediate components too, so `$RWS/link/sub` matches
+            # "$RWS"/* as a string while naming a file outside it. Resolving
+            # the parent — never $WS itself, which would resolve through the
+            # very link being removed — is what makes the unlink containable.
+            HEAL_PARENT="$(realpath -m -- "$(dirname -- "$WS")" 2>/dev/null)" || { echo "::error::refusing to heal: realpath unavailable, cannot canonicalize the parent of ${WS}"; exit 1; }
+            case "$HEAL_PARENT" in
+              "$RWS"|"$RWS"/*) ;;
+              *) echo "::error::refusing to heal workspace outside the runner workspace: ${WS} (parent: ${HEAL_PARENT}, runner workspace: ${RWS})"; exit 1 ;;
+            esac
+            # The incident this heal exists for leaves no other trace: say what
+            # was found, and where it pointed, before it is gone.
+            if [ -L "$WS" ]; then
+              # The target is bytes a PREVIOUS job chose — on this pool that
+              # job may have run a contributor's code — and the runner parses
+              # `::` at the start of any stdout line as a workflow command. A
+              # target of $'x\n::error::forged' would therefore forge an
+              # annotation. Keep untrusted bytes off the command line itself,
+              # strip the line breaks that could start a new one, and cap the
+              # length.
+              heal_target="$(readlink -- "$WS" 2>/dev/null || printf '%s' '<unreadable>')"
+              heal_target="$(printf '%s' "$heal_target" | tr -d '\r\n' | cut -c1-200)"
+              echo "::warning::healing workspace ${WS}: it was a symlink"
+              printf 'heal: %s pointed at %s\n' "$WS" "$heal_target"
+            else
+              echo "::warning::healing workspace ${WS}: it was not a directory"
+            fi
+            # `rm -f` on the RAW path removes the link itself and never
+            # follows it. Both legs fail closed: under `-e` a failure that is
+            # not the last command of an && list is swallowed, and a swallowed
+            # one here would leave the wipe running against a corrupt path.
+            rm -f -- "$WS" || { echo "::error::refusing to continue: could not remove ${WS}"; exit 1; }
+            mkdir -- "$WS" || { echo "::error::refusing to continue: could not recreate ${WS}"; exit 1; }
+          fi
+          # Canonicalize before matching: the kernel resolves non-canonical
+          # spellings to the guarded roots (`/home/.` -> /home, `//usr` ->
+          # /usr), so a raw string match lets them slip past the case arms.
+          WS="$(realpath -m -- "$WS" 2>/dev/null)" || { echo "::error::refusing to wipe: realpath unavailable, cannot canonicalize ${GITHUB_WORKSPACE}"; exit 1; }
+          while [ "${WS%/}" != "$WS" ]; do WS="${WS%/}"; done
+          case "$WS" in
+            ..|../*|*/..|*/../*) echo "::error::refusing to wipe path containing '..': ${WS}"; exit 1 ;;
+          esac
           case "$WS" in
             /|/home|/root|/usr*|/etc*|/var|"") echo "::error::refusing to wipe suspicious workspace path: ${WS}"; exit 1 ;;
+          esac
+          # A denylist can only enumerate known roots — the allowlist closes
+          # every other one (/tmp, /opt, ...): only a directory inside the
+          # runner workspace may be wiped.
+          case "$WS" in
+            "$RWS"/*) ;;
+            *) echo "::error::refusing to wipe workspace outside the runner workspace: ${WS} (runner workspace: ${RWS})"; exit 1 ;;
           esac
           # Contents, not the directory itself: the runner owns the mount
           # point. Dotfiles included — a planted .npmrc or .git is exactly
@@ -2729,6 +2830,230 @@ jobs:
           fi
           echo "agent inputs pinned from base $(git rev-parse --short 'HEAD^1'); head ${ACTUAL_HEAD} matches the authorized head"
 
+      # The flakiness gate (#9125) re-runs the PR's changed test files and
+      # compares outcomes across identical rounds. The file list is recorded
+      # HERE — before the workspace is handed to the build user — because
+      # after `npm ci` a PR lifecycle script owns .git and could rewrite the
+      # diff to hide a test file from the gate. The list lives root-owned in
+      # RUNNER_TEMP, so the gate later runs exactly what was recorded. This
+      # pin is honesty, not a security boundary: the gate's verdict can only
+      # ever DEMOTE the published outcome (see the publish job), so hiding a
+      # file from it merely returns the PR to today's baseline of a single
+      # execution.
+      - name: 'Record changed test files for the flakiness gate'
+        if: "steps.pr.outputs.decision == 'run'"
+        # Startup-channel scrub (see the gate step): BASH_ENV and the
+        # LD_* loader channels are consumed at shell/loader startup,
+        # before any in-script defence — blank them where the step env
+        # is assembled. BASH_FUNC_* imports are handled by the re-exec
+        # below; POSIXLY_CORRECT refuses the special-builtin-named ones
+        # at bash startup (see the gate step's env block).
+        env:
+          BASH_ENV: ''
+          LD_PRELOAD: ''
+          LD_AUDIT: ''
+          LD_LIBRARY_PATH: ''
+          POSIXLY_CORRECT: '1'
+        run: |-
+          set -euo pipefail
+          # Startup-channel scrub, part zero: POSIX mode resolves special
+          # builtins BEFORE functions, so the `exec` below — and every
+          # later `exit` — cannot be shadowed by a BASH_FUNC_* import the
+          # way bare builtins can. A shadowed `exec` would skip the env -i
+          # re-exec and let the poisoned parent continue with every import
+          # alive; a shadowed `exit` would let it fall through after.
+          # `set` itself is a builtin and shadowable, so verify with a
+          # reserved word that the mode took, and refuse if not (the kill
+          # is the stop of last resort when `exit` is shadowed too).
+          set -o posix
+          if [[ ! -o posix ]]; then
+            /usr/bin/printf '::error::flake-gate record: startup-channel scrub unavailable — refusing to record in a poisoned environment\n'
+            exit 1
+            /usr/bin/kill -9 $$
+          fi
+          # Startup-channel scrub, part two: BASH_FUNC_<name>%% env
+          # entries are imported as shell functions BEFORE this body
+          # runs, are invisible to ${!BASH_FUNC_@}/`set`, and shadow
+          # every later resolution — including the PATH pin below,
+          # because function lookup precedes PATH. An import can even be
+          # NAMED `[` (bash accepts BASH_FUNC_[%%), and function lookup
+          # precedes builtins — so every decision up to and including
+          # the re-exec is a reserved word (`[[`, `case`), recognized
+          # at parse time: through a `[`-shaped guard the poison skips
+          # the re-exec that is the whole defense. No in-script purge
+          # is safe (an import can shadow the purge builtin itself).
+          # The child marker is a POSITIONAL argument, never an env
+          # entry — the poisoned file-command channel this block
+          # defends against can plant any env variable, so an env-borne
+          # "already re-executed" sentinel would be forgeable; argv is
+          # set by exec, and the runner wrapper passes no arguments
+          # after the script path. Mirrors the autofix lane's env -i
+          # bootstrap; only builtins and expansions resolve before this
+          # guard. The bash operand is absolute-pathed too: env applies
+          # the forwarded environment FIRST, then resolves the operand
+          # via execvp against its PATH — the inherited one, which may
+          # already be attacker-chosen. The child runs the body the
+          # PARENT snapshots into a variable — never the path again:
+          # the runner wrote this script node-owned and 644 inside the
+          # uid-1000-writable $RUNNER_TEMP, so a second open by the
+          # child is a deterministic window a kill-race survivor can
+          # rename-plant into.
+          # Identity comes from the kernel (/usr/bin/id -u), never $EUID:
+          # bash imports EUID from the process environment, overriding
+          # the native readonly variable, so one planted EUID line could
+          # silently skip every root-gated defence below in this step and
+          # in every later step (probe-verified; the runner's set-env
+          # blocklist does not cover EUID).
+          if [[ $(/usr/bin/id -u) -eq 0 ]] && [[ -n ${BASH_ENV:-} || -n ${LD_PRELOAD:-} || -n ${LD_AUDIT:-} || -n ${LD_LIBRARY_PATH:-} ]]; then
+            /usr/bin/printf '::error::flake-gate record: step-env scrub lost — refusing to run in a poisoned environment\n'
+            exit 1
+          fi
+          # Kill BEFORE the snapshot, liveness-verified (the gate
+          # step's shape): a live node writer is all the snapshot race
+          # needs, even at this pre-build point.
+          if [[ $(/usr/bin/id -u) -eq 0 ]]; then
+            /usr/bin/pkill -KILL -u node 2>/dev/null || true
+            for _ in 1 2 3; do
+              [[ -n $(/usr/bin/ps -o pid=,stat= -u node 2>/dev/null | /usr/bin/awk '$2 !~ /^Z/') ]] || break
+              /usr/bin/sleep 1
+              /usr/bin/pkill -KILL -u node 2>/dev/null || true
+            done
+            survivors="$(/usr/bin/ps -o pid=,stat= -u node 2>/dev/null | /usr/bin/awk '$2 !~ /^Z/')" || true
+            if [[ -n $survivors ]]; then
+              /usr/bin/printf '::error::flake-gate record: node-owned processes survived SIGKILL — refusing to record through a contested environment\n'
+              exit 1
+            fi
+          fi
+          case "${1:-}" in
+            --flake-clean-child) ;;
+            *)
+              [[ -x /usr/bin/env ]] || { /usr/bin/printf '::error::flake-gate record: clean re-exec unavailable\n'; exit 1; }
+              # Inode anchor: bash reads this script through fd 255, so
+              # the fd's identity IS the content bash is executing, while
+              # the snapshot below RE-OPENS the path — a swap that lands
+              # between bash's open and this point is filesystem state a
+              # kill cannot un-land. Require the path to still resolve to
+              # the opened inode; refuse otherwise.
+              _flake_self_id="$(/usr/bin/stat -L -c '%d:%i' "/proc/$$/fd/255" 2>/dev/null)" || _flake_self_id=''
+              _flake_body="$(<"${BASH_SOURCE[0]}")"
+              [[ -n $_flake_body ]] || { /usr/bin/printf '::error::flake-gate record: clean re-exec snapshot empty\n'; exit 1; }
+              if [[ -z $_flake_self_id ]] ||
+                 [[ "$(/usr/bin/stat -L -c '%d:%i' "${BASH_SOURCE[0]}" 2>/dev/null)" != "$_flake_self_id" ]]; then
+                /usr/bin/printf '::error::flake-gate record: step script changed between open and re-exec snapshot — refusing to run\n'
+                exit 1
+              fi
+              # Record the changed-test list in the PARENT's normal environment,
+              # before the env -i re-exec: the scrubbed child cannot read the
+              # shallow merge-ref objects — git's `safe.directory` global config
+              # lives under HOME, which `env -i` strips, so git refuses to read
+              # the base commit object and the diff fails with
+              # "Could not access <base-oid>". The diff reads git metadata only
+              # and executes no PR code, so running it here is safe, and the
+              # "Pin agent inputs" step already proved this environment reads
+              # the base. Write the NUL-delimited list under RUNNER_TEMP, which
+              # the re-exec forwards; the clean child copies it into the gate
+              # home below.
+              BASE_OID="$(/usr/bin/cat "${RUNNER_TEMP:?}/verify-base-oid")"
+              case "$BASE_OID" in
+                [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]*) ;;
+                *) /usr/bin/printf '::error::No trusted base OID recorded; refusing to record the flakiness-gate file list.\n'; exit 1 ;;
+              esac
+              rm -rf -- "${RUNNER_TEMP:?}/flake-record-files-all"
+              /usr/bin/git -c core.quotePath=false diff -z --name-only --diff-filter=ACMRT "$BASE_OID" HEAD \
+                > "${RUNNER_TEMP:?}/flake-record-files-all"
+              LD_PRELOAD= LD_AUDIT= LD_LIBRARY_PATH= exec /usr/bin/env -i \
+                PATH="$PATH" RUNNER_TEMP="${RUNNER_TEMP:-}" \
+                GITHUB_OUTPUT="${GITHUB_OUTPUT:-}" GITHUB_STEP_SUMMARY="${GITHUB_STEP_SUMMARY:-}" \
+                GITHUB_RUN_ID="${GITHUB_RUN_ID:-}" GITHUB_RUN_ATTEMPT="${GITHUB_RUN_ATTEMPT:-}" \
+                /usr/bin/bash --noprofile --norc -e -o pipefail -c "$_flake_body" flake-record --flake-clean-child
+              ;;
+          esac
+          # Runner file-command backing files under $RUNNER_TEMP are
+          # uid-1000-owned: a step's PR code can poison the job
+          # environment (PATH above all) that LATER steps inherit, and
+          # root-side blocks resolve bare binaries through it. Pin a
+          # root-only-writable PATH. Production runs this block as root;
+          # the test harness does not and keeps its stub PATH.
+          if [[ ${EUID:-1} -eq 0 ]]; then
+            export PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
+          fi
+          # Root-only home for every gate working file. $RUNNER_TEMP itself
+          # is uid 1000 mode 755 on this pool, and `node` in the job's
+          # container is uid 1000 — so PR-controlled code (lifecycle
+          # scripts during install/build, the agent era afterwards) has
+          # OWNER WRITE on the directory that used to hold the gate's
+          # root-owned files. It could unlink them and replant symlinks
+          # that every root-side consumer would follow: the recorded list
+          # swapped for /proc/<pid>/environ (NUL-framed KEY=VALUE is
+          # exactly the gate's intake framing, so ACTIONS_RUNTIME_TOKEN
+          # lands verbatim in the published log), the round output or the
+          # staged log swapped for any root-readable file.
+          #
+          # The home lives at the CONTAINER ROOT, not under $RUNNER_TEMP.
+          # That is the whole defence, and it is a property of the PARENT:
+          # rename(2) and unlink(2) need write permission on the directory
+          # holding the entry, never on the entry itself — so a 0700
+          # root:root home inside the uid-1000-writable $RUNNER_TEMP could
+          # always be renamed away wholesale and replaced with a
+          # node-owned lookalike, no matter how the gate validated it
+          # afterwards. Every re-validation we added there (ownership,
+          # mode, inode anchor, run-id marker) only narrowed the window;
+          # each one left the next TOCTOU gap, including the inter-step
+          # window before a `uses:` upload that cannot run shell at all.
+          # `/` is root:root 755 in this container: node can neither
+          # create, unlink, nor rename entries in it, so /flake-gate's
+          # entry — and therefore everything reached through it — is
+          # outside PR-controlled reach by construction, with no window to
+          # re-check. rm -rf first: the container is fresh per job, but a
+          # retried job on a warm image must not adopt an earlier tree.
+          GATE_HOME=/flake-gate
+          rm -rf -- "$GATE_HOME"
+          install -d -m 0700 -o root -g root "$GATE_HOME"
+          # Run-freshness marker: staging re-validates it before trusting
+          # the home. A stale-but-genuine home left by an earlier run on
+          # the persistent pool passes every ownership/mode/shape check —
+          # only this marker separates runs, so the always() staging step
+          # can never restage a previous run's evidence under this run's
+          # artifact name when the record step itself was skipped (a
+          # cancel between steps.pr and record still runs staging).
+          printf '%s-%s' "${GITHUB_RUN_ID:?}" "${GITHUB_RUN_ATTEMPT:?}" > "$GATE_HOME/run-id"
+          # Two statements, not a pipeline: `git diff | grep || true` would
+          # swallow a git failure as "no changed test files", silently
+          # narrowing the gate to n/a. A git failure here is pre-build
+          # infrastructure and must fail the step loudly; only a no-match
+          # grep may produce an empty list.
+          # NUL-delimited END TO END (-z / grep -z / gate `read -d ''`):
+          # line-based intake silently dropped every filename git C-quotes —
+          # quotePath=false only stops quoting of bytes >= 0x80, while ASCII
+          # specials (backslash, tab, quote, control chars, and the
+          # line-breaking newline itself) stay quoted and fail a `$`-anchored
+          # line grep with no skip-log entry. NUL is the one byte a path
+          # cannot contain. NOTE: the git output must never pass through a
+          # command substitution — `$( )` strips NUL bytes.
+          # T (typechange) included: a symlink->regular flip changes what
+          # the runner executes, so it is a changed test file exactly
+          # like M — excluding it silently drops the file from the gate.
+          # The diff was already computed in the parent (before the env -i
+          # re-exec, where git can read the shallow merge-ref objects) and
+          # staged under RUNNER_TEMP; this scrubbed child only copies it
+          # into the root-only gate home.
+          cp "${RUNNER_TEMP:?}/flake-record-files-all" "$GATE_HOME/files-all"
+          # .mts/.cts included: vitest's default include set collects them.
+          # Only a no-match (status 1) may yield an empty list: a grep
+          # error (status 2, e.g. ENOSPC opening the output) is
+          # infrastructure and must fail the step loudly — swallowing it
+          # would narrow the gate to zero files and starve it into n/a.
+          grep_status=0
+          grep -zE '\.(test|spec)\.(ts|tsx|js|jsx|mjs|cjs|mts|cts)$' \
+            "$GATE_HOME/files-all" \
+            > "$GATE_HOME/files" || grep_status=$?
+          if [ "$grep_status" -gt 1 ]; then
+            echo "flake-gate intake: grep failed with status ${grep_status}" >&2
+            exit 1
+          fi
+          rm -f "$GATE_HOME/files-all"
+          echo "Recorded $(tr -cd '\0' < "$GATE_HOME/files" | wc -c) changed test file(s) for the flakiness gate."
+
       - name: 'Clear stale npm cache'
         if: "steps.pr.outputs.decision == 'run'"
         run: 'rm -rf "$RUNNER_TEMP/npm-cache"'
@@ -2859,6 +3184,719 @@ jobs:
             exit 0
           fi
           echo "Install/build completed before verification." >> "$GITHUB_STEP_SUMMARY"
+
+      # Deterministic flakiness gate (#9125): re-run the PR's changed test
+      # files N times through the same entry points CI uses and compare the
+      # outcomes per FILE. A single execution has no power against
+      # non-deterministic failures — a ~50% flake passes half of all CI runs
+      # (PR #9086's mtime assertion was certified exactly that way) — while
+      # N=5 identical re-runs catch it with ~94% probability (all-pass and
+      # all-fail rounds both miss: 1 - 2*(1/2)^5). Only run-to-run DIVERGENCE
+      # is a gate signal: a test that fails identically every round is
+      # deterministic, CI already owns that, and an environment-sensitive
+      # suite must not false-positive here. Granularity is one runner
+      # invocation per changed file, so a consistently failing file cannot
+      # mask another file's divergence behind a shared exit bit.
+      #
+      # Authority is one-way by construction: `flaky` demotes the published
+      # headline, and no gate value can raise or soften one. The test code
+      # under execution is the PR's own, so a PR can always neuter its gate —
+      # but a gate that can only demote is not worth forging, which is what
+      # keeps its evidence meaningful.
+      - name: 'Flakiness gate: re-run changed test files'
+        id: 'flake'
+        if: "steps.pr.outputs.decision == 'run' && steps.prepare.outputs.verdict == ''"
+        env:
+          GITHUB_TOKEN: ''
+          GH_TOKEN: ''
+          FLAKE_ROUNDS: '${{ vars.QWEN_VERIFY_FLAKE_ROUNDS }}'
+          # Startup-channel scrub (see the re-exec below): BASH_ENV and
+          # the LD_* loader channels are consumed at shell/loader
+          # startup, before any in-script defence — blank them where the
+          # step env is assembled. Step env outranks the poisoned job
+          # env a PR step wrote to the uid-1000 file-command backing
+          # files; all four are defensive blanks, never secrets.
+          # POSIXLY_CORRECT enters POSIX mode at INVOCATION, so a
+          # BASH_FUNC_* import named after a special builtin (set, exit,
+          # exec ...) is refused at import — bash aborts red (exit 2)
+          # before the body's first command — instead of the import
+          # running attacker code as root on the first shadowable `set`,
+          # one command before the in-script POSIX switch can take
+          # effect. A poisoned startup therefore fails the step red
+          # rather than landing the fail-open error verdict: the abort
+          # IS the refusal.
+          BASH_ENV: ''
+          LD_PRELOAD: ''
+          LD_AUDIT: ''
+          LD_LIBRARY_PATH: ''
+          POSIXLY_CORRECT: '1'
+        run: |-
+          # Fail OPEN by contract: the gate is advisory-and-demoting only, so
+          # a bug in it must degrade to the fixed `error` verdict — never
+          # take down the verify lane.
+          #
+          # `set +e` is load-bearing, not style: the runner wraps every run:
+          # block in `bash -e -o pipefail`, and `set -uo pipefail` alone does
+          # NOT clear that inherited -e. Without the explicit +e the first
+          # failing test invocation kills the step, inverting fail-open into
+          # fail-closed for exactly the flaky/consistent-fail populations the
+          # gate exists to classify (round-1 sandboxed verify, cells C/D).
+          set -uo pipefail
+          set +e
+          # Startup-channel scrub, part zero: POSIX mode resolves special
+          # builtins BEFORE functions, so the `exec` below — and every
+          # later `exit` — cannot be shadowed by a BASH_FUNC_* import the
+          # way bare builtins can (a shadowed `exec` would skip the env -i
+          # re-exec and let the poisoned parent continue with every import
+          # alive; a shadowed `exit` would let it fall through after).
+          # `set` itself is a builtin and shadowable, so verify with a
+          # reserved word that the mode took; the refusal keeps the gate's
+          # fail-open verdict shape, and the kill only fires when `exit`
+          # is shadowed too.
+          set -o posix
+          if [[ ! -o posix ]]; then
+            /usr/bin/printf 'flake_verdict=%s\n' error >> "$GITHUB_OUTPUT"
+            /usr/bin/printf 'flake_summary=%s\n' 'the gate could not enter a scrub-safe shell mode — refusing to sample' >> "$GITHUB_OUTPUT"
+            exit 0
+            /usr/bin/kill -9 $$
+          fi
+          # Startup-channel scrub, part one: if the step-env blanks
+          # above lost to the poisoned job env, BASH_ENV's payload
+          # already ran at startup and the LD_* channels are live — a
+          # compromised root shell must not keep producing verdicts.
+          # Root-gated via /usr/bin/id -u — never $EUID, which the
+          # poisoned file-command channel can import (the record step
+          # carries the rationale); the test harness runs non-root, so
+          # it stays out.
+          if [[ $(/usr/bin/id -u) -eq 0 ]] && [[ -n ${BASH_ENV:-} || -n ${LD_PRELOAD:-} || -n ${LD_AUDIT:-} || -n ${LD_LIBRARY_PATH:-} ]]; then
+            /usr/bin/printf 'flake_verdict=%s\n' error >> "$GITHUB_OUTPUT"
+            /usr/bin/printf 'flake_summary=%s\n' 'the gate refused to sample in a poisoned environment — see the step log' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # Kill BEFORE the re-exec snapshot; absolute-pathed (no PATH
+          # pin applies this early, and a BASH_FUNC import shadows
+          # every bare word), root-gated via /usr/bin/id -u ($EUID is
+          # importable; the harness keeps its stubs). The liveness
+          # refusal mirrors the agent step's guard: the budget loop
+          # alone is out-forked by a plant repopulating between sweeps,
+          # and the snapshot must not read this node-owned script
+          # through a contested environment (install/build ran PR
+          # lifecycle code).
+          if [[ $(/usr/bin/id -u) -eq 0 ]]; then
+            /usr/bin/pkill -KILL -u node 2>/dev/null || true
+            for _ in 1 2 3; do
+              [[ -n $(/usr/bin/ps -o pid=,stat= -u node 2>/dev/null | /usr/bin/awk '$2 !~ /^Z/') ]] || break
+              /usr/bin/sleep 1
+              /usr/bin/pkill -KILL -u node 2>/dev/null || true
+            done
+            survivors="$(/usr/bin/ps -o pid=,stat= -u node 2>/dev/null | /usr/bin/awk '$2 !~ /^Z/')" || true
+            if [[ -n $survivors ]]; then
+              /usr/bin/printf 'flake_verdict=%s\n' error >> "$GITHUB_OUTPUT"
+              /usr/bin/printf 'flake_summary=%s\n' 'node-owned processes survived SIGKILL — the gate refused to sample' >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          fi
+          # Startup-channel scrub, part two — the record step carries
+          # the full rationale: reserved-word decisions (a BASH_FUNC
+          # import can be named `[`), one-shot env -i re-exec,
+          # positional child marker, and the snapshot body (the child
+          # never re-opens this node-owned script by path). The gate
+          # fails OPEN if the re-exec is unavailable, never into a
+          # compromised shell.
+          case "${1:-}" in
+            --flake-clean-child) ;;
+            *)
+              if [[ ! -x /usr/bin/env ]]; then
+                /usr/bin/printf 'flake_verdict=%s\n' error >> "$GITHUB_OUTPUT"
+                /usr/bin/printf 'flake_summary=%s\n' 'the gate could not start a clean shell — refusing to sample' >> "$GITHUB_OUTPUT"
+                exit 0
+              fi
+              # Inode anchor (the record step carries the rationale):
+              # the snapshot re-opens the path, so it must still resolve
+              # to the inode bash is executing through fd 255.
+              _flake_self_id="$(/usr/bin/stat -L -c '%d:%i' "/proc/$$/fd/255" 2>/dev/null)" || _flake_self_id=''
+              _flake_body="$(<"${BASH_SOURCE[0]}")"
+              if [[ -z $_flake_body ]]; then
+                /usr/bin/printf 'flake_verdict=%s\n' error >> "$GITHUB_OUTPUT"
+                /usr/bin/printf 'flake_summary=%s\n' 'the gate could not snapshot its own body — refusing to sample' >> "$GITHUB_OUTPUT"
+                exit 0
+              fi
+              if [[ -z $_flake_self_id ]] ||
+                 [[ "$(/usr/bin/stat -L -c '%d:%i' "${BASH_SOURCE[0]}" 2>/dev/null)" != "$_flake_self_id" ]]; then
+                /usr/bin/printf 'flake_verdict=%s\n' error >> "$GITHUB_OUTPUT"
+                /usr/bin/printf 'flake_summary=%s\n' 'the gate step script changed between open and re-exec snapshot — refusing to sample' >> "$GITHUB_OUTPUT"
+                exit 0
+              fi
+              LD_PRELOAD= LD_AUDIT= LD_LIBRARY_PATH= exec /usr/bin/env -i \
+                PATH="$PATH" RUNNER_TEMP="${RUNNER_TEMP:-}" \
+                GITHUB_OUTPUT="${GITHUB_OUTPUT:-}" GITHUB_STEP_SUMMARY="${GITHUB_STEP_SUMMARY:-}" \
+                GITHUB_RUN_ID="${GITHUB_RUN_ID:-}" GITHUB_RUN_ATTEMPT="${GITHUB_RUN_ATTEMPT:-}" \
+                FLAKE_ROUNDS="${FLAKE_ROUNDS:-}" FLAKE_SEQ_DIR="${FLAKE_SEQ_DIR:-}" \
+                /usr/bin/bash --noprofile --norc -e -o pipefail -c "$_flake_body" flake-gate --flake-clean-child
+              ;;
+          esac
+          # Same poisoned-env premise as the record step: the file
+          # commands a PR step wrote to the uid-1000-owned backing files
+          # are applied at step end, so this block's inherited PATH may
+          # be attacker-chosen. Pin a root-only-writable one before any
+          # bare binary is resolved (production runs as root; the test
+          # harness does not and keeps its stub PATH).
+          if [[ ${EUID:-1} -eq 0 ]]; then
+            export PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
+          fi
+          # Abnormal-exit net: `set -u` (or any unforeseen fatal) still
+          # aborts non-zero. Convert that ending to the fixed `error` verdict
+          # and a zero exit, so even a gate implementation bug is
+          # information, not an outage. finish() marks completion — the trap
+          # only rewrites endings that never reached a verdict.
+          GATE_DONE=''
+          on_gate_exit() {
+            if [ -z "$GATE_DONE" ] && [ -n "${GITHUB_OUTPUT:-}" ]; then
+              echo "flake_verdict=error" >> "$GITHUB_OUTPUT"
+              echo "flake_summary=the gate aborted before reaching a verdict — see the step log" >> "$GITHUB_OUTPUT"
+              # Keep the two channels agreeing (finish() writes both): an
+              # abnormal abort otherwise leaves the step summary empty
+              # while the step output carries the verdict.
+              if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+                echo "Flakiness gate: error — the gate aborted before reaching a verdict — see the step log" >> "$GITHUB_STEP_SUMMARY"
+              fi
+            fi
+            exit 0
+          }
+          trap on_gate_exit EXIT
+          unset ACTIONS_RUNTIME_TOKEN ACTIONS_RUNTIME_URL ACTIONS_CACHE_URL
+          # Every working file lives inside the root-only home the record
+          # step created. Verify it fail-closed BEFORE trusting anything in
+          # it: a plant (symlink, node-owned dir, loosened mode) means the
+          # integrity premise never held, and the gate must degrade to the
+          # fixed error verdict rather than read attacker-chosen bytes.
+          GATE_DIR=/flake-gate
+          # -O is the load-bearing test: "owned by the EFFECTIVE user" is
+          # root in production, so a directory a PR planted (owned by node)
+          # fails it, while the same code stays runnable under a harness.
+          # 0700 then means only that owner can traverse it.
+          gate_dir_ok() {
+            [ ! -L "$GATE_DIR" ] || return 1
+            [ -d "$GATE_DIR" ] || return 1
+            [ -O "$GATE_DIR" ] || return 1
+            [ "$(stat -c '%a' "$GATE_DIR" 2>/dev/null)" = '700' ] || return 1
+          }
+          if ! gate_dir_ok; then
+            echo "flake_verdict=error" >> "$GITHUB_OUTPUT"
+            echo "flake_summary=the gate working directory is missing or not root-owned 0700 — refusing to read files a PR could have planted" >> "$GITHUB_OUTPUT"
+            GATE_DONE=1
+            exit 0
+          fi
+          # The validated entry lives in the uid-1000-writable
+          # $RUNNER_TEMP top level, and rename(2) needs write on the
+          # PARENT, not the entry: the 0700 home cannot stop its own
+          # entry being swapped after this validation, and every later
+          # path-based access re-resolves the path. Record the home's
+          # identity now; every such access re-verifies it before use.
+          GATE_HOME_ID="$(stat -c '%d:%i' "$GATE_DIR")"
+          gate_home_intact() {
+            gate_dir_ok &&
+              [ "$(stat -c '%d:%i' "$GATE_DIR" 2>/dev/null)" = "$GATE_HOME_ID" ]
+          }
+          LOG="$GATE_DIR/log"
+          LIST="$GATE_DIR/files"
+          # Per-invocation detail (round lines, failure tails) goes to a
+          # SEPARATE file and is appended after the verdict: the publisher
+          # embeds the FIRST 10,000 chars of the log, so the per-file matrix
+          # and verdict must sit ahead of detail that can outgrow the cap.
+          DETAIL="$GATE_DIR/detail"
+          finish() {
+            # Outputs carry FIXED strings and counters only — file paths are
+            # PR-controlled text and belong in the log, which the publisher
+            # HTML-escapes before embedding.
+            echo "flake_verdict=$1" >> "$GITHUB_OUTPUT"
+            echo "flake_summary=$2" >> "$GITHUB_OUTPUT"
+            # Log appends re-resolve the home path, and finish() is
+            # callable from any point: write them only through a home
+            # re-verified at call time — a swapped home must not receive
+            # the verdict bytes through a planted `log` symlink.
+            if gate_home_intact; then
+              printf '\nverdict: %s\nsummary: %s\n' "$1" "$2" >> "$LOG"
+              # Detail LAST: the publisher embeds the first 10,000 chars, and
+              # the matrix/verdict must never be truncated away behind
+              # failure tails (full copy stays in the artifact).
+              if [ -s "$DETAIL" ]; then
+                printf -- '\n--- per-invocation detail (full copy in the artifact) ---\n' >> "$LOG"
+                cat "$DETAIL" >> "$LOG"
+              fi
+            fi
+            echo "Flakiness gate: $1 — $2" >> "$GITHUB_STEP_SUMMARY"
+            GATE_DONE=1
+            exit 0
+          }
+
+          ROUNDS="${FLAKE_ROUNDS:-}"
+          case "$ROUNDS" in ''|*[!0-9]*) ROUNDS=5 ;; esac
+          [ "$ROUNDS" -ge 2 ] || ROUNDS=2
+          [ "$ROUNDS" -le 10 ] || ROUNDS=10
+
+          # -f AND not -L: inside a 0700 root home a plant is impossible,
+          # but the check is the cheap half of a defence in depth — a
+          # future relocation out of the root-only home must not silently
+          # reintroduce "follow whatever symlink is there".
+          gate_home_intact ||
+            finish error 'the gate working directory changed since validation — refusing to read files a PR could have planted'
+          # Truncate ONLY through the verified home: `: >` opens with
+          # O_TRUNC through any symlink, so it must never run ahead of
+          # the first identity re-check.
+          : > "$LOG"
+          : > "$DETAIL"
+          { [ -f "$LIST" ] && [ ! -L "$LIST" ]; } ||
+            finish error 'the recorded changed-test list is missing or not a regular file'
+
+          # vitest's positional filters are lowercase SUBSTRING matches on
+          # root-relative paths: the operand for X.test.ts also collects a
+          # same-stem X.test.tsx sibling, and the one invocation's outcome
+          # would be attributed to the changed file alone — manufacturing
+          # divergence from a deterministic PR, or masking real divergence.
+          # Merge each colliding pair into ONE group and skip the sibling
+          # when the list reaches it. `${f}x` is the live shape: a
+          # collected superstring of a changed test path can only append
+          # the `x` of a .tsx/.jsx twin.
+          declare -A sibling_owner=()
+          while IFS= read -r -d '' f; do
+            [ -n "$f" ] || continue
+            [ -f "${f}x" ] && sibling_owner["${f}x"]="$f"
+          done < "$LIST"
+
+          # Partition into per-FILE groups. Every skipped file is logged
+          # with its reason — a silently narrowed gate would read as
+          # "covered" when it was not. Operands are `./`-prefixed BEFORE %q,
+          # so a checked-in filename beginning with `-` (e.g. `--config=x`)
+          # can never be parsed as a runner option.
+          group_labels=()
+          group_dirs=()
+          group_cmds=()
+          skipped=0
+          add_skip() {
+            printf '%s: %s\n' "$2" "$1" >> "$LOG"
+            skipped=$((skipped + 1))
+          }
+          owning_pkg_dir() {
+            # Nearest ancestor directory carrying package.json — nested
+            # workspaces (packages/channels/base) own their runner and must
+            # be entered themselves, never their parent. Result flows via
+            # OWNING_PKG_DIR, never stdout: a `$( )` capture strips
+            # trailing newlines, corrupting a directory name that ends in
+            # one (the NUL intake admits such paths).
+            local d="$1"
+            OWNING_PKG_DIR=''
+            d="${d%/*}"
+            while [ -n "$d" ] && [ "$d" != '.' ]; do
+              if [ -f "$d/package.json" ]; then
+                OWNING_PKG_DIR="$d"
+                return 0
+              fi
+              case "$d" in
+                */*) d="${d%/*}" ;;
+                *) d='' ;;
+              esac
+            done
+            return 1
+          }
+          has_vitest_config() {
+            # Mirror vitest's own resolution: it accepts vitest.config AND
+            # vite.config in six extensions. A narrower probe skips runnable
+            # packages (packages/webui's only config is vite.config.ts).
+            local n e
+            for n in vitest.config vite.config; do
+              for e in ts mts cts js mjs cjs; do
+                [ -f "$1/$n.$e" ] && return 0
+              done
+            done
+            [ -f "$1/vitest.workspace.ts" ] && return 0
+            return 1
+          }
+          # NUL-delimited to match the record step: `read -d ''` is the one
+          # framing a filename cannot break out of.
+          while IFS= read -r -d '' f; do
+            [ -n "$f" ] || continue
+            if [ ! -f "$f" ]; then
+              add_skip "$f" 'not present in the merge tree, skipped'
+              continue
+            fi
+            if [ -n "${sibling_owner["$f"]:-}" ]; then
+              add_skip "$f" "substring-colliding sibling — one vitest filter collects it together with ${sibling_owner["$f"]}, whose group it runs in"
+              continue
+            fi
+            case "$f" in
+              integration-tests/*)
+                # E2E suites need sandbox/model plumbing this gate does not have.
+                add_skip "$f" 'integration test, out of gate scope'
+                continue
+                ;;
+              */e2e/*|e2e/*)
+                # Browser/E2E specs (e.g. web-shell client/e2e) are excluded
+                # by their vitest configs — running them here would be
+                # permanent "No test files found" noise, not coverage.
+                add_skip "$f" 'e2e suite, out of gate scope'
+                continue
+                ;;
+            esac
+            case "$f" in
+              scripts/tests/*.test.js|scripts/tests/*.test.ts)
+                # Same substring-collision honesty as the generic arm: one
+                # positional filter collects every path containing it.
+                label="$f"
+                [ -f "${f}x" ] && label="$f + ${f}x"
+                group_labels+=("$label")
+                group_dirs+=('.')
+                group_cmds+=("npx --no-install vitest run --config ./scripts/tests/vitest.config.ts $(printf '%q' "./$f")")
+                ;;
+              scripts/tests/*)
+                # The pinned config's include set is narrower than the gate's
+                # intake regex; a file it rejects would fail collection every
+                # round and masquerade as a deterministic failure.
+                add_skip "$f" 'not in the scripts/tests vitest include set (*.test.{js,ts}), skipped'
+                ;;
+              .github/scripts/*.test.mjs)
+                group_labels+=("$f")
+                group_dirs+=('.')
+                group_cmds+=("node --test $(printf '%q' "./$f")")
+                ;;
+              packages/desktop/*|docs-site/*)
+                # Outside the npm-workspace install set (root workspaces
+                # exclude packages/desktop; docs-site is standalone), so the
+                # gate's vitest can never collect them — and desktop's
+                # nested apps each carry a package.json plus a BUILD
+                # vite.config.ts that would otherwise fool the generic
+                # resolver into treating bun-family tests as runnable.
+                add_skip "$f" 'outside the npm-workspace install set (unsupported runner family), skipped'
+                ;;
+              *)
+                # Generic vitest resolution keyed on the OWNING PACKAGE, not
+                # a path prefix: root npm workspaces outside packages/**
+                # (integrations/*) are CI-tested too and must be re-run
+                # through their own entry point like any nested workspace.
+                if ! owning_pkg_dir "$f"; then
+                  add_skip "$f" 'no owning package.json, skipped'
+                  continue
+                fi
+                pkg="$OWNING_PKG_DIR"
+                if ! has_vitest_config "$pkg"; then
+                  # e.g. packages/desktop runs `bun test` — an unsupported
+                  # runner family stays explicitly out of scope rather than
+                  # being mis-run through vitest.
+                  add_skip "$f" "owning package ${pkg} has no vitest config (unsupported runner family), skipped"
+                  continue
+                fi
+                # From the owning package CWD (vitest configs assume it);
+                # npx resolves the binary by walking up node_modules. The
+                # label names a substring-colliding sibling too: one
+                # filter collects both, so the group's outcome belongs to
+                # both (see sibling_owner).
+                label="$f"
+                [ -f "${f}x" ] && label="$f + ${f}x"
+                group_labels+=("$label")
+                group_dirs+=("$pkg")
+                group_cmds+=("npx --no-install vitest run $(printf '%q' "./${f#"$pkg"/}")")
+                ;;
+            esac
+          done < "$LIST"
+
+          total="${#group_labels[@]}"
+          if [ "$total" -eq 0 ]; then
+            finish n/a "no runnable changed test files (${skipped} out-of-scope file(s) noted in the log)"
+          fi
+          {
+            printf 'rounds=%s files=%s skipped=%s\n' "$ROUNDS" "$total" "$skipped"
+            for i in "${!group_labels[@]}"; do
+              printf 'file %s: (cd %s) %s\n' "${group_labels[$i]}" "${group_dirs[$i]}" "${group_cmds[$i]}"
+            done
+            printf '\n'
+          } >> "$LOG"
+
+          # 15-minute wall budget, checked before every invocation; each
+          # invocation drags its reset (≤~345s) and a -k 30 600 cap, and
+          # the OID pin plus the unconditional post-gate reset add ≤150s
+          # and ≤~345s — worst case ~40m, which the job timeout budget
+          # above accounts for. Divergence needs no uniform
+          # round count: a P and an F for the same group is non-determinism
+          # no matter how many rounds fit the budget.
+          kill_node_processes() {
+            # One-shot SIGTERM races slow-draining daemons, so SIGKILL
+            # with a bounded wait, zombies disregarded (same reasoning
+            # as the agent step's process guard).
+            pkill -KILL -u node 2>/dev/null || true
+            for _ in 1 2 3; do
+              [ -n "$(ps -o pid=,stat= -u node 2>/dev/null | awk '$2 !~ /^Z/')" ] || break
+              sleep 1
+              pkill -KILL -u node 2>/dev/null || true
+            done
+          }
+          # Round-state reset — the git calls run AS THE BUILD USER, not
+          # root: a root checkout restores node-mutated tracked files as
+          # new root-owned inodes that later node rounds cannot write
+          # (EACCES), manufacturing the very divergence the reset exists
+          # to prevent. `git clean -ffd` (no -x: gitignored
+          # node_modules/dist must survive) drops the untracked residue
+          # `checkout` never touches — lock files, output dirs a test
+          # creates — INCLUDING dirs holding a nested .git, which plain
+          # -fd by documented git behavior refuses to remove. The restore
+          # is `git reset --hard` to the OID pinned before the round
+          # loop: a test can `git commit` mid-invocation and move HEAD,
+          # after which restoring from HEAD would make the committed
+          # mutation the baseline, and a pathspec checkout would keep
+          # files the moved HEAD added. All calls carry the lane's
+          # runner-injection strip and a timeout wrapper (a planted
+          # filter can hang them, and the reset runs outside the
+          # invocation loop's deadline check). The calls also execute
+          # PR-planted git filters/hooks as node, so the kill runs AGAIN
+          # after them: nothing node-owned may be alive when root touches
+          # paths in the uid-1000-writable $RUNNER_TEMP afterwards. A
+          # failed reset fails open to the fixed error verdict while no
+          # sample exists; once samples are collected it stops the
+          # sampling instead — collected results are honest, and a later
+          # cleanup failure must not discard them.
+          reset_round_state() {
+            # Kill FIRST, then restore — a live daemon can re-dirty the
+            # tree after the checkout (the post-git kill covers the
+            # processes the restore itself re-spawns).
+            kill_node_processes
+            local reset_rc=0
+            # The restore below runs THROUGH the checkout's metadata: a
+            # smudge filter or fsmonitor hook planted in .git during a
+            # round survives checkout/clean (they never touch .git) and
+            # executes inside the next reset's own git calls, rewriting
+            # restored content per round — manufactured divergence. Drop
+            # .git's execution vectors as round state BEFORE restoring,
+            # as the build user (root's git trips the dubious-ownership
+            # guard); none of these calls runs filters or hooks itself.
+            timeout -k 10 30 runuser -u node -- env -u GITHUB_OUTPUT -u GITHUB_STATE -u GITHUB_ENV -u GITHUB_PATH -u GITHUB_STEP_SUMMARY \
+              -u GIT_DIR -u GIT_WORK_TREE -u GIT_COMMON_DIR -u GIT_INDEX_FILE -u GIT_OBJECT_DIRECTORY -u GIT_ALTERNATE_OBJECT_DIRECTORIES -u GIT_SHALLOW_FILE -u GIT_EXEC_PATH -u GIT_CONFIG_COUNT -u GIT_CONFIG_PARAMETERS -u GIT_ALLOW_PROTOCOL -u GIT_PROXY_COMMAND -u GIT_SSL_NO_VERIFY -u GIT_SSL_CAINFO -u GIT_ASKPASS -u GIT_SSH -u GIT_SSH_COMMAND \
+              bash -c 'rm -f .git/info/attributes; git config --local --list --name-only 2>/dev/null | grep -o "^filter\.[^.]*" | sort -u | while IFS= read -r s; do git config --local --remove-section "$s" 2>/dev/null || true; done; git config --local --unset core.fsmonitor 2>/dev/null || true; git config --local --unset core.hooksPath 2>/dev/null || true; git config --local --unset core.attributesFile 2>/dev/null || true' || reset_rc=$?
+            timeout -k 30 120 runuser -u node -- env -u GITHUB_OUTPUT -u GITHUB_STATE -u GITHUB_ENV -u GITHUB_PATH -u GITHUB_STEP_SUMMARY \
+              -u GIT_DIR -u GIT_WORK_TREE -u GIT_COMMON_DIR -u GIT_INDEX_FILE -u GIT_OBJECT_DIRECTORY -u GIT_ALTERNATE_OBJECT_DIRECTORIES -u GIT_SHALLOW_FILE -u GIT_EXEC_PATH -u GIT_CONFIG_COUNT -u GIT_CONFIG_PARAMETERS -u GIT_ALLOW_PROTOCOL -u GIT_PROXY_COMMAND -u GIT_SSL_NO_VERIFY -u GIT_SSL_CAINFO -u GIT_ASKPASS -u GIT_SSH -u GIT_SSH_COMMAND \
+              git reset --hard "$PINNED_OID" 2>/dev/null || reset_rc=$?
+            timeout -k 30 120 runuser -u node -- env -u GITHUB_OUTPUT -u GITHUB_STATE -u GITHUB_ENV -u GITHUB_PATH -u GITHUB_STEP_SUMMARY \
+              -u GIT_DIR -u GIT_WORK_TREE -u GIT_COMMON_DIR -u GIT_INDEX_FILE -u GIT_OBJECT_DIRECTORY -u GIT_ALTERNATE_OBJECT_DIRECTORIES -u GIT_SHALLOW_FILE -u GIT_EXEC_PATH -u GIT_CONFIG_COUNT -u GIT_CONFIG_PARAMETERS -u GIT_ALLOW_PROTOCOL -u GIT_PROXY_COMMAND -u GIT_SSL_NO_VERIFY -u GIT_SSL_CAINFO -u GIT_ASKPASS -u GIT_SSH -u GIT_SSH_COMMAND \
+              git clean -ffd 2>/dev/null || reset_rc=$?
+            kill_node_processes
+            return "$reset_rc"
+          }
+
+          # Pin the restore target ONCE, before any sample (see
+          # reset_round_state). Read as the build user, stripped —
+          # root's git would trip the dubious-ownership guard.
+          PINNED_OID="$(timeout -k 30 120 runuser -u node -- env -u GITHUB_OUTPUT -u GITHUB_STATE -u GITHUB_ENV -u GITHUB_PATH -u GITHUB_STEP_SUMMARY \
+            -u GIT_DIR -u GIT_WORK_TREE -u GIT_COMMON_DIR -u GIT_INDEX_FILE -u GIT_OBJECT_DIRECTORY -u GIT_ALTERNATE_OBJECT_DIRECTORIES -u GIT_SHALLOW_FILE -u GIT_EXEC_PATH -u GIT_CONFIG_COUNT -u GIT_CONFIG_PARAMETERS -u GIT_ALLOW_PROTOCOL -u GIT_PROXY_COMMAND -u GIT_SSL_NO_VERIFY -u GIT_SSL_CAINFO -u GIT_ASKPASS -u GIT_SSH -u GIT_SSH_COMMAND \
+            git rev-parse HEAD 2>/dev/null)"
+          case "$PINNED_OID" in
+            [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]*) ;;
+            *) finish error 'could not pin the baseline commit for workspace resets' ;;
+          esac
+
+          declare -a results=()
+          deadline=$(( $(date +%s) + 900 ))
+          rounds_done=0
+          timed_out=false
+          infra_exits=0
+          samples=0
+          round=1
+          while [ "$round" -le "$ROUNDS" ]; do
+            for i in "${!group_labels[@]}"; do
+              if [ "$(date +%s)" -ge "$deadline" ]; then
+                timed_out=true
+                break
+              fi
+              # Reset before EVERY invocation, not once per round: samples
+              # must start from equivalent state per file. A between-rounds
+              # reset leaves file i seeing what files 1..i-1 left THIS
+              # round — residue, staged mutations, HOME state — and round
+              # 1 must sample the same restored tree as rounds 2..N (PR
+              # lifecycle scripts, npm ci/build run as node, may have
+              # mutated the tree since the list was recorded).
+              reset_round_state
+              reset_rc=$?
+              if [ "$reset_rc" -ne 0 ]; then
+                if [ "$samples" -eq 0 ]; then
+                  finish error "workspace reset failed (exit ${reset_rc}) — samples would not start from equivalent state"
+                fi
+                # Samples already collected are honest — a reset failure
+                # must not discard them (including a computed flaky).
+                # Stop sampling; classification decides from what
+                # completed.
+                printf 'reset failed (exit %s) before round %s · %s: sampling stopped, classifying the collected results\n' "$reset_rc" "$round" "${group_labels[$i]}" >> "$LOG"
+                break 2
+              fi
+              # Re-verify the home identity before opening the output
+              # through it: a swapped home would redirect the sample's
+              # bytes and every read that follows (see GATE_HOME_ID).
+              # Samples already collected are honest (same rule as a
+              # reset failure): stop and classify them. Publishing
+              # `error` here instead would let a PR dodge a computed
+              # demotion by renaming the home after its first divergent
+              # sample.
+              if ! gate_home_intact; then
+                if [ "$samples" -eq 0 ]; then
+                  finish error 'the gate working directory changed mid-run — refusing to continue'
+                fi
+                printf 'gate home changed mid-run: sampling stopped, classifying the collected results\n' >> "$DETAIL"
+                break 2
+              fi
+              # Fresh per-invocation HOME and temp/cache dirs: samples must
+              # not share dotfile/XDG/cache state or caches any more than
+              # they share the tree or processes.
+              # Node-writable by necessity (the build user cannot enter
+              # the root-only home), so it stays under RUNNER_TEMP — and
+              # :? keeps a missing RUNNER_TEMP from silently relocating
+              # it to the container root.
+              inv_tmp="${RUNNER_TEMP:?}/flake-inv-tmp"
+              rm -rf "$inv_tmp"
+              mkdir -p "$inv_tmp"
+              # -h: never dereference — a planted symlink at this fixed
+              # path in the uid-1000-writable $RUNNER_TEMP must not turn
+              # the chown into an ownership takeover of its target.
+              chown -h node:node "$inv_tmp"
+              # Unique per invocation: if the redirect below fails to
+              # OPEN (ENOSPC), bash never runs the subshell and reports
+              # 1 — a reused path would leave the PREVIOUS invocation's
+              # bytes for the classifier to misread as this one's.
+              out="$GATE_DIR/round-out-$round-$i"
+              (
+                cd "${group_dirs[$i]}" &&
+                timeout -k 30 600 runuser -u node -- \
+                  env -u GITHUB_OUTPUT -u GITHUB_STATE -u GITHUB_ENV -u GITHUB_PATH -u GITHUB_STEP_SUMMARY \
+                  -u GIT_DIR -u GIT_WORK_TREE -u GIT_COMMON_DIR -u GIT_INDEX_FILE -u GIT_OBJECT_DIRECTORY -u GIT_ALTERNATE_OBJECT_DIRECTORIES -u GIT_SHALLOW_FILE -u GIT_EXEC_PATH -u GIT_CONFIG_COUNT -u GIT_CONFIG_PARAMETERS -u GIT_ALLOW_PROTOCOL -u GIT_PROXY_COMMAND -u GIT_SSL_NO_VERIFY -u GIT_SSL_CAINFO -u GIT_ASKPASS -u GIT_SSH -u GIT_SSH_COMMAND \
+                  NODE_OPTIONS='--max-old-space-size=3072' CI=true HOME="$inv_tmp" TMPDIR="$inv_tmp" \
+                  bash -c "${group_cmds[$i]}"
+              ) > "$out" 2>&1
+              status=$?
+              # Re-verify the home BEFORE the mark cascade re-resolves
+              # $out: the redirect fd was opened against the validated
+              # home, but every test below re-resolves the path — a home
+              # swapped during the invocation would turn the cascade into
+              # a reader of attacker bytes, and a root-side tail/grep
+              # through a planted symlink is a bounded arbitrary read.
+              # The exit status is the one honest signal left: record the
+              # mark from it alone — N needs output evidence that is no
+              # longer safely readable, so a non-zero status stays a
+              # failure — and stop sampling: a compromised home must not
+              # keep producing marks.
+              if ! gate_home_intact; then
+                mark='P'
+                if [ "$status" -ge 124 ]; then
+                  mark='I'
+                  infra_exits=$((infra_exits + 1))
+                elif [ "$status" -ne 0 ]; then
+                  mark='F'
+                fi
+                results[$i]="${results[$i]:-}${mark}"
+                samples=$((samples + 1))
+                printf 'gate home changed during round %s · %s (exit %s): mark recorded from the exit status alone, sampling stopped\n' "$round" "${group_labels[$i]}" "$status" >> "$DETAIL"
+                break 2
+              fi
+              # Timeout/signal exits (124-127, 128+N) are infrastructure
+              # events, not test outcomes: 124 is the cap itself, 125-127
+              # are timeout's own failure modes (it failed, or the runner
+              # binary was unrunnable/missing), 128+N is a signal kill —
+              # recorded as F they would publish a fake `flaky` next to any
+              # pass.
+              # Zero-collection is its own class (`N`): a file the runner's
+              # include set rejects fails every round without one test
+              # executing — reporting that as consistent-fail would publish
+              # "deterministic, CI owns it" with both clauses false. The
+              # marker is matched from PR-controlled output, but faking it
+              # can only SUPPRESS a demotion the PR could already dodge by
+              # deleting its tests — one-way authority holds.
+              mark='P'
+              if [ ! -e "$out" ]; then
+                # The redirect never opened: the invocation did not run.
+                # The unique path rules out stale bytes; a never-created
+                # output is infrastructure, never a test outcome.
+                mark='I'
+                infra_exits=$((infra_exits + 1))
+              elif [ "$status" -ge 124 ]; then
+                mark='I'
+                infra_exits=$((infra_exits + 1))
+              elif [ "$status" -ne 0 ] && grep -q 'No test files found' "$out"; then
+                mark='N'
+              elif [ "$status" -ne 0 ]; then
+                mark='F'
+              fi
+              results[$i]="${results[$i]:-}${mark}"
+              samples=$((samples + 1))
+              printf 'round %s · %s: %s (exit %s)\n' "$round" "${group_labels[$i]}" "$mark" "$status" >> "$DETAIL"
+              if [ "$status" -ne 0 ] && [ -e "$out" ]; then
+                {
+                  printf -- '--- output tail · round %s · %s ---\n' "$round" "${group_labels[$i]}"
+                  tail -c 8000 "$out"
+                  printf '\n'
+                } >> "$DETAIL"
+              fi
+              # Reclaim the sample's bytes: ENOSPC is the named hazard of
+              # this job, and the classifier already consumed the mark.
+              rm -f "$out"
+            done
+            [ "$timed_out" = true ] && break
+            rounds_done="$round"
+            round=$((round + 1))
+          done
+          # And leave the agent the same clean tree it would have seen
+          # before the gate ran: the last invocation's residue must not be
+          # handed to the verifier. Best-effort: the samples are complete,
+          # so a cleanup failure must not discard their verdict.
+          reset_round_state || echo "::warning::post-gate workspace reset failed (exit $?); continuing with the sampled verdict"
+
+          flaky=0
+          failing=0
+          ncoll=0
+          for i in "${!group_labels[@]}"; do
+            case "${results[$i]:-}" in
+              *P*F*|*F*P*) flaky=$((flaky + 1)) ;;
+              # A collection-state TRANSITION for one file (N next to P or
+              # F) is itself non-determinism: identical trees collected it
+              # in some rounds and rejected it in others. Reducing it to
+              # pass/consistent-fail would publish a verdict about samples
+              # that never all executed.
+              *N*P*|*P*N*|*N*F*|*F*N*) flaky=$((flaky + 1)) ;;
+              *P*) : ;;
+              *F*) failing=$((failing + 1)) ;;
+              *N*) ncoll=$((ncoll + 1)) ;;
+            esac
+          done
+          printf '\nper-file results (P=pass F=fail I=infra-exit, one letter per run):\n' >> "$LOG"
+          for i in "${!group_labels[@]}"; do
+            printf '  %s: %s\n' "${group_labels[$i]}" "${results[$i]:-}" >> "$LOG"
+          done
+
+          if [ "$flaky" -gt 0 ]; then
+            finish flaky "${flaky} of ${total} changed test file(s) returned different results across identical re-runs (${rounds_done} full round(s))"
+          fi
+          if [ "$rounds_done" -lt 2 ]; then
+            # Classification needs two completed rounds: one round (or
+            # zero) cannot separate a flake from a deterministic
+            # outcome. BOTH early stops land here — the deadline, and a
+            # reset failure with samples already collected (classified
+            # above first: an observed divergence still demotes).
+            if [ "$timed_out" = true ]; then
+              finish timeout "the 15-minute budget elapsed before two full rounds completed (${rounds_done} done) — no flakiness signal either way"
+            fi
+            finish timeout "sampling stopped after ${rounds_done} full round(s) — no flakiness signal either way"
+          fi
+          if [ "$infra_exits" -gt 0 ]; then
+            finish timeout "${infra_exits} invocation(s) ended in a timeout/signal exit — infrastructure, not test nondeterminism, so these rounds carry no flakiness signal"
+          fi
+          if [ "$failing" -gt 0 ]; then
+            finish consistent-fail "${failing} of ${total} changed test file(s) failed identically in every round — deterministic, so CI owns that signal"
+          fi
+          if [ "$ncoll" -gt 0 ] && [ "$ncoll" -eq "$total" ]; then
+            # Every file hit a runner include-set mismatch: claiming these
+            # rounds as sampling would publish evidence about tests that
+            # never executed.
+            finish n/a "none of the ${total} changed test file(s) were collected by their runner (include-set mismatch — reasons in the log)"
+          fi
+          if [ "$timed_out" = true ]; then
+            finish timeout "only ${rounds_done} of ${ROUNDS} rounds fit the 15-minute budget; the completed rounds agreed"
+          fi
+          pass_note=''
+          [ "$ncoll" -gt 0 ] && pass_note=" (${ncoll} not collected by the runner — see the log)"
+          finish pass "${total} changed test file(s) x ${rounds_done} identical rounds, no divergence${pass_note}"
 
       - name: 'Install evidence browser'
         if: "steps.pr.outputs.decision == 'run' && steps.prepare.outputs.verdict == ''"
@@ -3382,8 +4420,10 @@ jobs:
           find tmp -maxdepth 2 -type d -name '*-verify-*' -exec cp -r {} "$RUNNER_TEMP/verify-results/" \; 2>/dev/null || true
           # cp -r copies symlinks as symlinks (no deref), but
           # actions/upload-artifact FOLLOWS them — a node-planted link would
-          # exfiltrate whatever it points at into the artifact. Drop links.
-          find "$RUNNER_TEMP/verify-results" -type l -delete 2>/dev/null || true
+          # exfiltrate whatever it points at into the artifact; a planted
+          # FIFO would hang whoever opens it next. Drop every non-regular
+          # entry except directories (the collected artifact dirs).
+          find "$RUNNER_TEMP/verify-results" \( -type l -o -type p -o -type s -o -type b -o -type c \) -delete 2>/dev/null || true
 
           # 137 is ambiguous: the watchdog escalating past --kill-after looks
           # identical to an OOM kill. Use the elapsed budget to tell them
@@ -3435,15 +4475,321 @@ jobs:
           echo "agent_verdict=$AGENT_VERDICT" >> "$GITHUB_OUTPUT"
           echo "verify verdict: $VERDICT agent: ${AGENT_VERDICT:-none} (exit $EXIT_CODE)" >> "$GITHUB_STEP_SUMMARY"
 
-      - name: 'Upload verify results'
+      # The gate log's authoritative copy lives root-owned inside the 0700
+      # root-only home (/flake-gate/log), which no PR-controlled
+      # process can enter. This step runs AFTER the agent exits, from an
+      # always() root step, and assembles the upload tree there too: an
+      # early agent-step abort cannot lose the log, and agent-era PR code
+      # (which owns the chowned verify-results while it runs) can neither
+      # control what is uploaded under that name nor rename the tree the
+      # upload enumerates. The publisher pins the exact root-level path, so
+      # a same-named file nested in a collected artifact dir cannot shadow
+      # it either.
+      - name: 'Stage flakiness gate log for upload'
         if: "always() && steps.pr.outputs.decision == 'run'"
+        # Evidence-copying only, and the verdict outputs are already
+        # written: a failure here (ENOSPC from disk-filling PR tests, a
+        # hostile mount) must not flip the job red — the publisher's
+        # VERIFY_RESULT != success branch would then discard the recorded
+        # verdict and report "infrastructure failure" instead. Same rule
+        # the Upload step below documents.
+        continue-on-error: true
+        # Startup-channel scrub (see the gate step): BASH_ENV and the
+        # LD_* loader channels are consumed at shell/loader startup,
+        # before any in-script defence — blank them where the step env
+        # is assembled. BASH_FUNC_* imports are handled by the re-exec
+        # below; POSIXLY_CORRECT refuses the special-builtin-named ones
+        # at bash startup (see the gate step's env block).
+        env:
+          BASH_ENV: ''
+          LD_PRELOAD: ''
+          LD_AUDIT: ''
+          LD_LIBRARY_PATH: ''
+          POSIXLY_CORRECT: '1'
+        run: |-
+          set -euo pipefail
+          # Startup-channel scrub, part zero: POSIX mode resolves special
+          # builtins BEFORE functions, so the `exec` below — and every
+          # later `exit` — cannot be shadowed by a BASH_FUNC_* import the
+          # way bare builtins can. A shadowed `exec` would skip the env -i
+          # re-exec and let the poisoned parent continue with every import
+          # alive; a shadowed `exit` would let it fall through after.
+          # `set` itself is a builtin and shadowable, so verify with a
+          # reserved word that the mode took, and refuse if not (the kill
+          # is the stop of last resort when `exit` is shadowed too).
+          set -o posix
+          if [[ ! -o posix ]]; then
+            /usr/bin/printf '::error::flake-gate staging: startup-channel scrub unavailable — refusing to stage evidence in a poisoned environment\n'
+            exit 1
+            /usr/bin/kill -9 $$
+          fi
+          # Startup-channel scrub (same shape and rationale as the gate
+          # step's): fail closed if the step-env blanks lost, then
+          # re-exec once through an absolute-path env -i child to drop
+          # any BASH_FUNC_* imports before a bare binary resolves.
+          if [[ $(/usr/bin/id -u) -eq 0 ]] && [[ -n ${BASH_ENV:-} || -n ${LD_PRELOAD:-} || -n ${LD_AUDIT:-} || -n ${LD_LIBRARY_PATH:-} ]]; then
+            /usr/bin/printf '::error::flake-gate staging: step-env scrub lost — refusing to stage evidence in a poisoned environment\n'
+            exit 1
+          fi
+          # Kill BEFORE the re-exec snapshot — unconditional, not gated
+          # on the log existing: node can unlink the log, and that must
+          # not skip the kill/rebuild for the report the agent wrote.
+          # Absolute-pathed, root-gated via /usr/bin/id -u ($EUID is
+          # importable; the harness keeps its stubs). The liveness
+          # refusal mirrors the agent step's guard: the budget loop
+          # alone is out-forked by a plant repopulating between sweeps,
+          # and the snapshot must not read this node-owned script
+          # through a contested environment (the agent era just ran
+          # PR-controlled node code).
+          if [[ $(/usr/bin/id -u) -eq 0 ]]; then
+            /usr/bin/pkill -KILL -u node 2>/dev/null || true
+            for _ in 1 2 3; do
+              [[ -n $(/usr/bin/ps -o pid=,stat= -u node 2>/dev/null | /usr/bin/awk '$2 !~ /^Z/') ]] || break
+              /usr/bin/sleep 1
+              /usr/bin/pkill -KILL -u node 2>/dev/null || true
+            done
+            survivors="$(/usr/bin/ps -o pid=,stat= -u node 2>/dev/null | /usr/bin/awk '$2 !~ /^Z/')" || true
+            if [[ -n $survivors ]]; then
+              /usr/bin/printf '::error::flake-gate staging: node-owned processes survived SIGKILL — refusing to stage evidence through a contested environment\n'
+              exit 1
+            fi
+          fi
+          # The record step carries the full scrub/re-exec rationale:
+          # reserved-word decisions (a BASH_FUNC import can be named
+          # `[`), positional child marker (env markers forgeable),
+          # snapshot body (the child never re-opens this node-owned
+          # script by path), absolute-path bash operand.
+          case "${1:-}" in
+            --flake-clean-child) ;;
+            *)
+              [[ -x /usr/bin/env ]] || { /usr/bin/printf '::error::flake-gate staging: clean re-exec unavailable\n'; exit 1; }
+              # Inode anchor (the record step carries the rationale):
+              # the snapshot re-opens the path, so it must still resolve
+              # to the inode bash is executing through fd 255.
+              _flake_self_id="$(/usr/bin/stat -L -c '%d:%i' "/proc/$$/fd/255" 2>/dev/null)" || _flake_self_id=''
+              _flake_body="$(<"${BASH_SOURCE[0]}")"
+              [[ -n $_flake_body ]] || { /usr/bin/printf '::error::flake-gate staging: clean re-exec snapshot empty\n'; exit 1; }
+              if [[ -z $_flake_self_id ]] ||
+                 [[ "$(/usr/bin/stat -L -c '%d:%i' "${BASH_SOURCE[0]}" 2>/dev/null)" != "$_flake_self_id" ]]; then
+                /usr/bin/printf '::error::flake-gate staging: step script changed between open and re-exec snapshot — refusing to stage\n'
+                exit 1
+              fi
+              LD_PRELOAD= LD_AUDIT= LD_LIBRARY_PATH= exec /usr/bin/env -i \
+                PATH="$PATH" RUNNER_TEMP="${RUNNER_TEMP:-}" \
+                GITHUB_OUTPUT="${GITHUB_OUTPUT:-}" GITHUB_STEP_SUMMARY="${GITHUB_STEP_SUMMARY:-}" \
+                GITHUB_RUN_ID="${GITHUB_RUN_ID:-}" GITHUB_RUN_ATTEMPT="${GITHUB_RUN_ATTEMPT:-}" \
+                /usr/bin/bash --noprofile --norc -e -o pipefail -c "$_flake_body" flake-stage --flake-clean-child
+              ;;
+          esac
+          # Pin a root-only-writable PATH: the job env this step
+          # inherits may be poisoned through the uid-1000-owned
+          # file-command backing files (see the record step). Production
+          # runs as root; the test harness does not and keeps its stub
+          # PATH.
+          if [[ ${EUID:-1} -eq 0 ]]; then
+            export PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
+          fi
+          # BUILD a trusted upload tree; never harden an attacker's.
+          # $RUNNER_TEMP is uid-1000 mode-755 on this pool and `node` is
+          # uid 1000, so verify-results — chowned to the build user for the
+          # agent era — sits in a directory PR code can write: hardening it
+          # in place always left the ENTRY itself renameable, so a kill-race
+          # survivor could swap the whole hardened tree for a symlink farm
+          # that upload-artifact (which follows links) would publish. The
+          # upload now reads from /flake-gate/upload, inside the
+          # 0700 root-only home: a directory node cannot enter is one whose
+          # entries it can neither create, unlink, nor rename.
+          GATE_DIR=/flake-gate
+          UPLOAD_DIR="$GATE_DIR/upload"
+          # The run-id conjunct is the RUN-identity check: ownership,
+          # mode and shape all pass on a stale-but-genuine home an
+          # earlier run left on the persistent pool, and the always()
+          # staging step runs on exactly the paths where this run's
+          # record step (the only creator) was skipped — without it a
+          # previous run's evidence would ship under this run's name.
+          staged_ok=''
+          if [[ ! -L $GATE_DIR ]] && [[ -d $GATE_DIR ]] && [[ -O $GATE_DIR ]] &&
+             [[ $(stat -c '%a' "$GATE_DIR" 2>/dev/null) == '700' ]] &&
+             [[ $(cat "$GATE_DIR/run-id" 2>/dev/null) == "${GITHUB_RUN_ID:?}-${GITHUB_RUN_ATTEMPT:?}" ]]; then
+            # The validated ENTRY still lives in the uid-1000-writable
+            # $RUNNER_TEMP top level, and every absolute-path operation
+            # re-resolves it through the writable parent: cd in ONCE,
+            # re-stat the opened directory against the validated identity
+            # (the same discipline as vr_id below), and run every phase
+            # from relative paths — once cd'd, the phases stay anchored
+            # to the opened inode no matter how the entry above it is
+            # swapped. The one exception is the copy target, which must
+            # cross trees; a race there can only misdirect OUR bytes,
+            # never inject foreign ones into the anchored tree. The
+            # outer conjuncts above are six separate path resolutions a
+            # swap can thread, so the ATTRIBUTE half re-runs inside the
+            # opened directory: a plant the cd resolved into must still
+            # be owned by the effective user, 0700, and carry this
+            # run's marker — and node cannot create the root-owned
+            # directory -O demands.
+            home_id="$(stat -c '%d:%i' "$GATE_DIR" 2>/dev/null || true)"
+            # Explicit `|| exit 1` on every check and phase: this
+            # subshell is an `if` condition, and bash suppresses errexit
+            # there — an unguarded failure would fall through into the
+            # copy phases instead of refusing.
+            if (
+              cd "$GATE_DIR" || exit 1
+              [ "$(stat -c '%d:%i' . 2>/dev/null)" = "$home_id" ] || exit 1
+              [ -O . ] || exit 1
+              [ "$(stat -c '%a' . 2>/dev/null)" = '700' ] || exit 1
+              [ "$(cat ./run-id 2>/dev/null)" = "${GITHUB_RUN_ID:?}-${GITHUB_RUN_ATTEMPT:?}" ] || exit 1
+              rm -rf -- upload || exit 1
+              install -d -m 0700 -o root -g root upload || exit 1
+              # Copy only REGULAR files out of the untrusted tree,
+              # resolving nothing: -type f excludes symlinks/FIFOs/
+              # sockets/devices at selection time, and
+              # `cp -f --no-dereference` never opens a link target even
+              # if one wins the per-entry race between find and cp. The
+              # timeout bounds that race's worst arrival — a file
+              # swapped for a FIFO between lstat and open blocks cp
+              # forever and would hang this otherwise timeout-less step.
+              if [ -d "$RUNNER_TEMP/verify-results" ] && [ ! -L "$RUNNER_TEMP/verify-results" ]; then
+                # The guard above and the cd below re-resolve the path:
+                # a kill-loop survivor owning the uid-1000 parent can
+                # swap the entry between the two. The opened directory
+                # must still be the validated one, or the copy is
+                # skipped. || true: a survivor renaming verify-results
+                # between the guard above and this stat must degrade to
+                # a skipped copy (empty vr_id matches no opened
+                # directory), never a set -e abort that discards the
+                # authoritative gate-log copy below.
+                vr_id="$(stat -c '%d:%i' "$RUNNER_TEMP/verify-results" 2>/dev/null || true)"
+                (
+                  cd "$RUNNER_TEMP/verify-results" &&
+                  [ "$(stat -c '%d:%i' . 2>/dev/null)" = "$vr_id" ] &&
+                  timeout -k 10 60 find . -type f -exec cp -f --no-dereference --parents {} "$UPLOAD_DIR/" \;
+                ) 2>/dev/null || true
+              fi
+              # Scrub the rebuilt tree INSIDE the root-only home, where
+              # a survivor cannot re-enter: the per-entry find→cp race
+              # can still land a symlink (find lstat'd a regular file,
+              # cp saw the swapped link and --no-dereference copied the
+              # link itself) or a FIFO/socket/device — and
+              # upload-artifact follows links, so any non-regular
+              # arrival is a root-readable-content primitive into the
+              # public artifact and must not ship.
+              find upload \( -type l -o -type p -o -type s -o -type b -o -type c \) -delete || exit 1
+              # The gate's own log is authoritative and root-owned inside
+              # the home — it is copied LAST so nothing in the untrusted
+              # tree can shadow the name the publisher pins. Reserve the
+              # name first: when the log is absent (an ENOSPC'd gate) a
+              # planted file would otherwise survive the copy, and a
+              # planted DIRECTORY would swallow the authoritative file
+              # even when it exists.
+              rm -rf -- upload/flake-gate.log || exit 1
+              if [ -f log ] && [ ! -L log ]; then
+                cp -f --no-dereference log upload/flake-gate.log || exit 1
+              fi
+              chown -R root:root upload || exit 1
+              chmod -R go-rwx upload || exit 1
+            ); then
+              staged_ok=1
+            fi
+          fi
+          if [ -z "$staged_ok" ]; then
+            # ONE cleanup for BOTH refusals — a home that failed the
+            # outer validation, and one whose opened directory failed
+            # the identity/attribute re-checks mid-staging. Detection
+            # alone is not enough: a set -e abort used to leave the
+            # swapped-in tree for the always() upload to enumerate,
+            # shipping a plant — or a PREVIOUS run's evidence under
+            # this run's artifact name. rm -rf removes a symlink
+            # operand itself, never following it.
+            echo "::warning::flake-gate home missing, invalid, or swapped mid-staging; skipping the trusted upload rebuild."
+            rm -rf -- "$GATE_DIR"
+          fi
+
+      # The always() upload below re-resolves /flake-gate in a
+      # fresh step — staging's anchoring expires at its exit, so a swap
+      # between the two hands the upload a plant. Re-validate the entry's
+      # identity immediately before the upload and remove it on any
+      # mismatch; the upload runs only on an affirmative output. Every
+      # decision is a reserved word and every external absolute-pathed:
+      # this step inherits the same poisoned job environment the
+      # scrub/re-exec blocks defend against, and a hijacked check here
+      # fails CLOSED — never into a shipped plant.
+      - name: 'Re-check flake-gate home before upload'
+        id: 'flake-upload-check'
+        if: "always() && steps.pr.outputs.decision == 'run'"
+        # Same posture as the staging step: evidence-copying only.
+        continue-on-error: true
+        env:
+          BASH_ENV: ''
+          LD_PRELOAD: ''
+          LD_AUDIT: ''
+          LD_LIBRARY_PATH: ''
+          POSIXLY_CORRECT: '1'
+        run: |-
+          set -uo pipefail
+          # Startup-channel scrub (see the record step): this step has no
+          # env -i re-exec — it runs in the inherited job environment.
+          # POSIX mode resolves special builtins before functions, so
+          # set/export/exit cannot be shadowed by a BASH_FUNC_* import;
+          # every remaining decision below is a reserved word and every
+          # external absolute-pathed, so no shadowable command word stands
+          # between the poisoned environment this step may inherit and the
+          # verdict it writes. Verify with a reserved word that the mode
+          # took, and refuse if not (the kill is the stop of last resort
+          # when `exit` is shadowed too).
+          set -o posix
+          if [[ ! -o posix ]]; then
+            /usr/bin/printf '::error::flake-gate re-check: startup-channel scrub unavailable — refusing to validate in a poisoned environment\n'
+            exit 1
+            /usr/bin/kill -9 $$
+          fi
+          # /usr/bin/id -u, never $EUID (the record step carries the
+          # rationale): this step has no env -i re-exec, so this gate
+          # runs in the inherited job environment.
+          if [[ $(/usr/bin/id -u) -eq 0 ]]; then
+            export PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
+          fi
+          upload_ok=false
+          GATE_DIR=/flake-gate
+          # No cd-anchored subshell: the home sits directly under the
+          # root-only container root, where no PR-controlled process can
+          # rename the entry, so re-resolving $GATE_DIR cannot land
+          # anywhere else — and bare cd/[/stat would re-introduce exactly
+          # the shadowable command words this step must not run.
+          if [[ ! -L $GATE_DIR ]] && [[ -d $GATE_DIR ]] && [[ -O $GATE_DIR ]] &&
+             [[ $(/usr/bin/stat -c '%a' "$GATE_DIR" 2>/dev/null) == '700' ]] &&
+             [[ $(/usr/bin/cat "$GATE_DIR/run-id" 2>/dev/null) == "${GITHUB_RUN_ID:?}-${GITHUB_RUN_ATTEMPT:?}" ]] &&
+             [[ -d $GATE_DIR/upload ]]; then
+            upload_ok=true
+          fi
+          if [[ $upload_ok != true ]]; then
+            # Whatever occupies the entry now is not this run's
+            # validated home — remove it so the upload cannot
+            # enumerate a plant.
+            /usr/bin/rm -rf -- "$GATE_DIR"
+          fi
+          /usr/bin/printf 'upload_ok=%s\n' "$upload_ok" >> "$GITHUB_OUTPUT"
+
+      - name: 'Upload verify results'
+        if: "always() && steps.pr.outputs.decision == 'run' && steps.flake-upload-check.outputs.upload_ok == 'true'"
         # Don't let a missing/empty results dir (qwen crashed before writing
         # any) fail the job and mask the original error.
         continue-on-error: true
+        # Startup-channel scrub (see the gate step): the run: steps this PR
+        # adds blank the LD_* loader channels in their step env; this uses:
+        # step's node process inherits the same job env, and the loader
+        # channel reaches the final consumer of the chain — the enumeration
+        # of the staged tree — unless it is blanked here too.
+        env:
+          LD_PRELOAD: ''
+          LD_AUDIT: ''
+          LD_LIBRARY_PATH: ''
         uses: 'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02' # v4.6.2
         with:
           name: 'verify-results-${{ steps.pr.outputs.pr_number }}-${{ github.run_id }}-${{ github.run_attempt }}'
-          path: '${{ runner.temp }}/verify-results/'
+          # The rebuilt, root-only tree — not the agent-era directory the
+          # build user owned. Same inner layout, so the publisher's paths
+          # are unchanged.
+          path: '/flake-gate/upload/'
           retention-days: 7
 
       - name: 'Clean up runner workspace'
@@ -3504,9 +4850,90 @@ jobs:
         if: "always() && needs.authorize.outputs.verify_trust == 'external'"
         run: |-
           set -uo pipefail
+          # Same guard as the pre-run wipe above, layer for layer: raw
+          # trailing-slash strip, RUNNER_WORKSPACE allowlist root, symlink
+          # heal, canonicalize, strip, denylist, allowlist. Both copies now
+          # carry the checkout-heal hardening (#9277) and its heal (#9480);
+          # this header is the in-code inventory a future convergence of the
+          # wipe copies will read, so it must not understate what is here.
+          # See that step's comments for what each layer catches; the suite
+          # pins this copy's behavior on its own.
           WS="${GITHUB_WORKSPACE:?}"
+          # Strip trailing slashes on the RAW path, before anything reads it:
+          # `[ -L "$WS/" ]` and `[ ! -d "$WS/" ]` both resolve THROUGH a link
+          # and report its target, so one trailing slash hides the corruption
+          # the heal below exists to clear.
+          while [ "${WS%/}" != "$WS" ]; do WS="${WS%/}"; done
+          # The allowlist root is prepared BEFORE the heal, because it bounds
+          # what the heal may touch: canonical, slash-free and non-degenerate.
+          # An empty $RUNNER_WORKSPACE would turn every containment pattern
+          # below into the match-all "/*".
+          RWS="${RUNNER_WORKSPACE:?}"
+          RWS="$(realpath -m -- "$RWS" 2>/dev/null)" || { echo "::error::refusing to wipe: realpath unavailable, cannot canonicalize ${RUNNER_WORKSPACE}"; exit 1; }
+          while [ "${RWS%/}" != "$RWS" ]; do RWS="${RWS%/}"; done
+          if [ -z "$RWS" ]; then echo "::error::refusing to wipe: runner workspace resolved to /"; exit 1; fi
+          case "$RWS" in
+            ..|../*|*/..|*/../*) echo "::error::refusing runner workspace path containing '..': ${RWS}"; exit 1 ;;
+          esac
+          # Heal a workspace a previous job replaced with a symlink (or any
+          # non-directory) BEFORE canonicalizing it. Afterwards the path
+          # resolves to the link's target, the allowlist refuses that, and the
+          # refusal removes nothing — so every later job on this runner dies
+          # here, permanently, on corruption that is itself inside the runner
+          # workspace and safe to unlink.
+          if [ -L "$WS" ] || [ ! -d "$WS" ]; then
+            # Judge the PARENT, canonicalized. The heal necessarily acts on a
+            # raw path, and a raw containment match is not enough: the kernel
+            # resolves intermediate components too, so `$RWS/link/sub` matches
+            # "$RWS"/* as a string while naming a file outside it. Resolving
+            # the parent — never $WS itself, which would resolve through the
+            # very link being removed — is what makes the unlink containable.
+            HEAL_PARENT="$(realpath -m -- "$(dirname -- "$WS")" 2>/dev/null)" || { echo "::error::refusing to heal: realpath unavailable, cannot canonicalize the parent of ${WS}"; exit 1; }
+            case "$HEAL_PARENT" in
+              "$RWS"|"$RWS"/*) ;;
+              *) echo "::error::refusing to heal workspace outside the runner workspace: ${WS} (parent: ${HEAL_PARENT}, runner workspace: ${RWS})"; exit 1 ;;
+            esac
+            # The incident this heal exists for leaves no other trace: say what
+            # was found, and where it pointed, before it is gone.
+            if [ -L "$WS" ]; then
+              # The target is bytes a PREVIOUS job chose — on this pool that
+              # job may have run a contributor's code — and the runner parses
+              # `::` at the start of any stdout line as a workflow command. A
+              # target of $'x\n::error::forged' would therefore forge an
+              # annotation. Keep untrusted bytes off the command line itself,
+              # strip the line breaks that could start a new one, and cap the
+              # length.
+              heal_target="$(readlink -- "$WS" 2>/dev/null || printf '%s' '<unreadable>')"
+              heal_target="$(printf '%s' "$heal_target" | tr -d '\r\n' | cut -c1-200)"
+              echo "::warning::healing workspace ${WS}: it was a symlink"
+              printf 'heal: %s pointed at %s\n' "$WS" "$heal_target"
+            else
+              echo "::warning::healing workspace ${WS}: it was not a directory"
+            fi
+            # `rm -f` on the RAW path removes the link itself and never
+            # follows it. Both legs fail closed: under `-e` a failure that is
+            # not the last command of an && list is swallowed, and a swallowed
+            # one here would leave the wipe running against a corrupt path.
+            rm -f -- "$WS" || { echo "::error::refusing to continue: could not remove ${WS}"; exit 1; }
+            mkdir -- "$WS" || { echo "::error::refusing to continue: could not recreate ${WS}"; exit 1; }
+          fi
+          # Canonicalize before matching: the kernel resolves non-canonical
+          # spellings to the guarded roots (`/home/.` -> /home, `//usr` ->
+          # /usr), so a raw string match lets them slip past the case arms.
+          WS="$(realpath -m -- "$WS" 2>/dev/null)" || { echo "::error::refusing to wipe: realpath unavailable, cannot canonicalize ${GITHUB_WORKSPACE}"; exit 1; }
+          while [ "${WS%/}" != "$WS" ]; do WS="${WS%/}"; done
+          case "$WS" in
+            ..|../*|*/..|*/../*) echo "::error::refusing to wipe path containing '..': ${WS}"; exit 1 ;;
+          esac
           case "$WS" in
             /|/home|/root|/usr*|/etc*|/var|"") echo "::error::refusing to wipe suspicious workspace path: ${WS}"; exit 1 ;;
+          esac
+          # A denylist can only enumerate known roots — the allowlist closes
+          # every other one (/tmp, /opt, ...): only a directory inside the
+          # runner workspace may be wiped.
+          case "$WS" in
+            "$RWS"/*) ;;
+            *) echo "::error::refusing to wipe workspace outside the runner workspace: ${WS} (runner workspace: ${RWS})"; exit 1 ;;
           esac
           find "$WS" -mindepth 1 -maxdepth 1 -exec rm -rf {} + 2>/dev/null || true
           echo "Workspace wiped after external code (deny-by-default cleanup for the next pool job)." >> "$GITHUB_STEP_SUMMARY"
@@ -3553,6 +4980,16 @@ jobs:
           fi
           chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chmod -R u+rwX "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace write permissions; artifact download may fail on leftover read-only files"
 
+      # The publish job runs on the persistent ECS pool and downloads into
+      # a WORKSPACE-relative directory, which the runner does not clean
+      # between jobs: without this, a previous run's (possibly a different
+      # PR's) flake-gate.log survives and the publisher — which treats the
+      # file's presence as proof THIS run staged it — embeds it as this
+      # run's evidence. The verify side already applies the same rm-first
+      # rule to its own $RUNNER_TEMP tree.
+      - name: 'Clear stale downloaded results'
+        run: 'rm -rf verify-results'
+
       - name: 'Download verify results'
         id: 'download'
         uses: 'actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c' # v5.0.0
@@ -3573,6 +5010,8 @@ jobs:
           PR_NUMBER: '${{ needs.verify.outputs.pr_number || github.event.issue.number }}'
           VERDICT: '${{ needs.verify.outputs.verdict }}'
           AGENT_VERDICT: '${{ needs.verify.outputs.agent_verdict }}'
+          FLAKE_VERDICT: '${{ needs.verify.outputs.flake_verdict }}'
+          FLAKE_SUMMARY: '${{ needs.verify.outputs.flake_summary }}'
           SKIP_REASON: '${{ needs.verify.outputs.skip_reason }}'
           PREPARE_FAILURE_PHASE: '${{ needs.verify.outputs.failure_phase }}'
           VERIFY_RESULT: '${{ needs.verify.result }}'
@@ -3993,26 +5432,51 @@ jobs:
           # report — they only replace this run's own "running" status (see
           # the upsert below). Real outcomes (report, prepare-fail) upsert.
           WEAK_BODY=false
+          # The gate verdict travels via job outputs: it survives a later
+          # agent-step failure, a job timeout, and a cancellation. A
+          # recorded `flaky` must demote the headline in EVERY terminal
+          # branch — these two used to post the neutral notice and silently
+          # drop the demotion the download-failure branch already honors.
           if [ "${VERIFY_RESULT:-}" = "cancelled" ]; then
             WEAK_BODY=true
             {
               printf '%s\n\n' '<!-- qwen-triage:verify -->'
-              printf '**Sandboxed verification: ⚠️ incomplete — cancelled** - [workflow run](%s)\n\n' "$RUN_URL"
-              printf 'The verification job was cancelled before producing a report.\n\n'
-              printf '<details>\n<summary>中文 — 判定：⚠️ 未完成 · 已取消</summary>\n\n'
-              printf '验证作业在生成报告前被取消。\n\n'
-              printf '</details>\n\n'
+              if [ "${FLAKE_VERDICT:-}" = 'flaky' ]; then
+                printf '**Sandboxed verification: ❌ not passed — non-deterministic tests (flakiness gate); job cancelled before the report** - [workflow run](%s)\n\n' "$RUN_URL"
+                printf 'Flakiness gate: ❌ %s\n\n' "${FLAKE_SUMMARY:-changed test files returned different results across identical re-runs}"
+                printf 'The job was cancelled before producing a report, but the deterministic flakiness gate had already observed run-to-run divergence — the per-round matrix is in the gate step output of the workflow run log.\n\n'
+                printf '<details>\n<summary>中文 — 判定：❌ 不通过 · 测试结果不确定（抖动门）；作业在报告前被取消</summary>\n\n'
+                printf '抖动门：❌ %s\n\n' "${FLAKE_SUMMARY:-changed test files returned different results across identical re-runs}"
+                printf '作业在生成报告前被取消，但确定性抖动门已观测到轮间分歧——各轮矩阵见工作流运行日志中 gate step 的输出。\n\n'
+                printf '</details>\n\n'
+              else
+                printf '**Sandboxed verification: ⚠️ incomplete — cancelled** - [workflow run](%s)\n\n' "$RUN_URL"
+                printf 'The verification job was cancelled before producing a report.\n\n'
+                printf '<details>\n<summary>中文 — 判定：⚠️ 未完成 · 已取消</summary>\n\n'
+                printf '验证作业在生成报告前被取消。\n\n'
+                printf '</details>\n\n'
+              fi
               printf '%s\n' '— _Qwen Code · sandboxed verification_'
             } > "$BODY_FILE"
           elif [ "${VERIFY_RESULT:-}" != "success" ] || [ -z "${VERDICT:-}" ]; then
             WEAK_BODY=true
             {
               printf '%s\n\n' '<!-- qwen-triage:verify -->'
-              printf '**Sandboxed verification: ⚠️ incomplete — infrastructure failure** - [workflow run](%s)\n\n' "$RUN_URL"
-              printf 'The verification job did not complete (checkout, runner, or setup error) and produced no report. See the workflow run for details.\n\n'
-              printf '<details>\n<summary>中文 — 判定：⚠️ 未完成 · 基础设施故障</summary>\n\n'
-              printf '验证作业未完成（检出、runner 或初始化错误），未生成报告。详见工作流运行日志。\n\n'
-              printf '</details>\n\n'
+              if [ "${FLAKE_VERDICT:-}" = 'flaky' ]; then
+                printf '**Sandboxed verification: ❌ not passed — non-deterministic tests (flakiness gate); the job then failed before the report** - [workflow run](%s)\n\n' "$RUN_URL"
+                printf 'Flakiness gate: ❌ %s\n\n' "${FLAKE_SUMMARY:-changed test files returned different results across identical re-runs}"
+                printf 'The verification job did not complete, but the deterministic flakiness gate had already observed run-to-run divergence — the per-round matrix is in the gate step output of the workflow run log.\n\n'
+                printf '<details>\n<summary>中文 — 判定：❌ 不通过 · 测试结果不确定（抖动门）；作业随后在报告前失败</summary>\n\n'
+                printf '抖动门：❌ %s\n\n' "${FLAKE_SUMMARY:-changed test files returned different results across identical re-runs}"
+                printf '验证作业未完成，但确定性抖动门已观测到轮间分歧——各轮矩阵见工作流运行日志中 gate step 的输出。\n\n'
+                printf '</details>\n\n'
+              else
+                printf '**Sandboxed verification: ⚠️ incomplete — infrastructure failure** - [workflow run](%s)\n\n' "$RUN_URL"
+                printf 'The verification job did not complete (checkout, runner, or setup error) and produced no report. See the workflow run for details.\n\n'
+                printf '<details>\n<summary>中文 — 判定：⚠️ 未完成 · 基础设施故障</summary>\n\n'
+                printf '验证作业未完成（检出、runner 或初始化错误），未生成报告。详见工作流运行日志。\n\n'
+                printf '</details>\n\n'
+              fi
               printf '%s\n' '— _Qwen Code · sandboxed verification_'
             } > "$BODY_FILE"
           elif [ "${VERDICT:-}" = "skipped" ] || [ "${VERDICT:-}" = "n/a" ]; then
@@ -4044,13 +5508,28 @@ jobs:
             # claims the A/B, the harnesses and the gates were delivered —
             # when nothing was.
             WEAK_BODY=true
+            # The flake verdict travels via job outputs, independent of the
+            # artifact — the gate's demotion contract ("reported as not
+            # passed regardless of the agent verdict") must fire even when
+            # the download did not, or a flaky PR gets a neutral
+            # "results unavailable" notice instead of its ❌.
             {
               printf '%s\n\n' '<!-- qwen-triage:verify -->'
-              printf '**Sandboxed verification: ⚠️ incomplete — results unavailable** - [workflow run](%s)\n\n' "$RUN_URL"
-              printf 'The verification ran, but its result artifact could not be retrieved for publishing, so there is nothing to report here. The run log still has the agent output; re-run `@qwen-code /verify` for a fresh report.\n\n'
-              printf '<details>\n<summary>中文 — 判定：⚠️ 未完成 · 结果不可用</summary>\n\n'
-              printf '验证已执行，但结果产物未能取回用于发布，因此此处没有可报告的内容。运行日志中仍有 agent 输出；如需完整报告请重新运行 `@qwen-code /verify`。\n\n'
-              printf '</details>\n\n'
+              if [ "${FLAKE_VERDICT:-}" = 'flaky' ]; then
+                printf '**Sandboxed verification: ❌ not passed — non-deterministic tests (flakiness gate); result artifact unavailable** - [workflow run](%s)\n\n' "$RUN_URL"
+                printf 'Flakiness gate: ❌ %s\n\n' "${FLAKE_SUMMARY:-changed test files returned different results across identical re-runs}"
+                printf 'The verification ran and its deterministic flakiness gate observed run-to-run divergence, but the result artifact (report and per-round matrix) could not be retrieved for publishing. The run log still has the full output; re-run `@qwen-code /verify` for a fresh report.\n\n'
+                printf '<details>\n<summary>中文 — 判定：❌ 不通过 · 测试结果不确定（抖动门）；结果产物不可用</summary>\n\n'
+                printf '抖动门：❌ %s\n\n' "${FLAKE_SUMMARY:-changed test files returned different results across identical re-runs}"
+                printf '验证已执行，其确定性抖动门观测到轮间分歧，但结果产物（报告与各轮矩阵）未能取回用于发布。运行日志中仍有完整输出；如需完整报告请重新运行 `@qwen-code /verify`。\n\n'
+                printf '</details>\n\n'
+              else
+                printf '**Sandboxed verification: ⚠️ incomplete — results unavailable** - [workflow run](%s)\n\n' "$RUN_URL"
+                printf 'The verification ran, but its result artifact could not be retrieved for publishing, so there is nothing to report here. The run log still has the agent output; re-run `@qwen-code /verify` for a fresh report.\n\n'
+                printf '<details>\n<summary>中文 — 判定：⚠️ 未完成 · 结果不可用</summary>\n\n'
+                printf '验证已执行，但结果产物未能取回用于发布，因此此处没有可报告的内容。运行日志中仍有 agent 输出；如需完整报告请重新运行 `@qwen-code /verify`。\n\n'
+                printf '</details>\n\n'
+              fi
               printf '%s\n' '— _Qwen Code · sandboxed verification_'
             } > "$BODY_FILE"
           elif [ -n "${PREPARE_FAILURE_PHASE:-}" ]; then
@@ -4117,6 +5596,10 @@ jobs:
             # whatever directory find visits first, which is unordered.
             REPORT="$(find verify-results -mindepth 2 -type f -path '*-verify-*/report.md' 2>/dev/null | sort | head -1 || true)"
             ASSERTIONS_FILE="$(find verify-results -mindepth 2 -type f -path '*-verify-*/assertions.json' 2>/dev/null | sort | head -1 || true)"
+            # Exact root-level path, never a find: the staging step writes
+            # this name last as root, and a same-named file nested inside a
+            # collected agent artifact dir must not shadow it.
+            FLAKE_LOG='verify-results/flake-gate.log'
             ASSERT_LINE=''
             ASSERT_LINE_ZH=''
             if [ -n "$ASSERTIONS_FILE" ]; then
@@ -4198,6 +5681,50 @@ jobs:
                 fi
               fi
             fi
+            # The flakiness gate (#9125) is deterministic evidence with
+            # ONE-WAY authority: `flaky` demotes any headline — including a
+            # trusted agent `merge-ready` — because non-deterministic tests
+            # are a PR defect the agent's single execution cannot see. No
+            # other gate value may raise or soften an outcome: the gate ran
+            # the PR's own test code, and a gate that can only demote is not
+            # worth forging, which is what keeps its evidence trustworthy.
+            # FLAKE_SUMMARY is gate-authored fixed text plus counters (the
+            # gate keeps PR-controlled paths in its log, which is embedded
+            # through the escaping emit_block below).
+            FLAKE_LINE=''
+            FLAKE_LINE_ZH=''
+            case "${FLAKE_VERDICT:-}" in
+              flaky)
+                QUAL='❌ not passed'
+                QUAL_ZH='❌ 不通过'
+                HEADLINE='non-deterministic tests (flakiness gate)'
+                HEADLINE_ZH='测试结果不确定（抖动门）'
+                FLAKE_LINE="Flakiness gate: ❌ ${FLAKE_SUMMARY:-changed test files returned different results across identical re-runs}"
+                FLAKE_LINE_ZH="抖动门：❌ ${FLAKE_SUMMARY:-changed test files returned different results across identical re-runs}"
+                ;;
+              pass)
+                FLAKE_LINE="Flakiness gate: ✅ ${FLAKE_SUMMARY:-changed test files re-ran identically}"
+                FLAKE_LINE_ZH="抖动门：✅ ${FLAKE_SUMMARY:-changed test files re-ran identically}"
+                ;;
+              n/a)
+                FLAKE_LINE="Flakiness gate: not applicable — ${FLAKE_SUMMARY:-no changed unit-test files}"
+                FLAKE_LINE_ZH="抖动门：不适用 — ${FLAKE_SUMMARY:-no changed unit-test files}"
+                ;;
+              consistent-fail|timeout|error)
+                FLAKE_LINE="Flakiness gate: ⚠️ ${FLAKE_VERDICT} — ${FLAKE_SUMMARY:-see flake-gate.log in the run artifacts}"
+                FLAKE_LINE_ZH="抖动门：⚠️ ${FLAKE_VERDICT} — ${FLAKE_SUMMARY:-see flake-gate.log in the run artifacts}"
+                ;;
+              *)
+                # This branch only runs after a successful prepare, when
+                # the gate step ran and owes a verdict: an empty or
+                # unrecognized value means the uid-1000-writable
+                # $GITHUB_OUTPUT backing channel corrupted it in transit.
+                # Fail visible, never silent — and never embed the raw
+                # value, which is attacker-influenced on this path.
+                FLAKE_LINE='Flakiness gate: ⚠️ error — the gate verdict was missing or unrecognized at publish time; treating the gate as errored'
+                FLAKE_LINE_ZH='抖动门：⚠️ error — 发布时门判定缺失或无法识别，按 error 处理'
+                ;;
+            esac
             if [ -z "$REPORT" ]; then
               MISSING_REPORT_NOTE='No report.md was found in the run artifacts, so the report section is omitted — see the workflow run output.'
               echo "::warning::${MISSING_REPORT_NOTE}"
@@ -4232,8 +5759,21 @@ jobs:
               if [ -n "$ASSERT_LINE" ]; then
                 printf '%s\n\n' "$ASSERT_LINE"
               fi
+              if [ -n "$FLAKE_LINE" ]; then
+                printf '%s\n\n' "$FLAKE_LINE"
+              fi
               if [ "${AGENT_VERDICT:-}" = 'merge-ready' ] && [ "$TRUST_AGENT_VERDICT" != true ] && [ "${A_FAIL:-0}" != '0' ]; then
                 printf 'The agent reported `merge-ready`, but `assertions.json` recorded %s failures, so that claim was not trusted — see the report for whether these are expected A/B control cells.\n\n' "$A_FAIL"
+              fi
+              if [ "${FLAKE_VERDICT:-}" = 'flaky' ]; then
+                printf 'The deterministic flakiness gate re-ran the test files this PR changes and got different outcomes from identical runs%s. A test that can fail with no code changing lands as intermittent red on unrelated PRs, so this run is reported as not passed regardless of the agent verdict — the per-round matrix is in the flakiness gate log below.\n\n' "${AGENT_VERDICT:+ (agent verdict: \`${AGENT_VERDICT}\`)}"
+                if [ ! -f "$FLAKE_LOG" ]; then
+                  # emit_block no-ops on a missing file: without this note
+                  # the demotion's only evidence pointer dangles when the
+                  # staging step failed (its continue-on-error keeps the
+                  # job green precisely so the verdict survives).
+                  printf 'The flakiness gate log could not be staged into the result artifact — the per-round matrix is in the gate step output of the workflow run log.\n\n'
+                fi
               fi
               printf '<details>\n<summary>中文 — 判定：%s · %s</summary>\n\n' "$QUAL_ZH" "${HEADLINE_ZH:-$HEADLINE}"
               if [ "${VERDICT:-}" = 'pass' ]; then
@@ -4244,14 +5784,27 @@ jobs:
               if [ -n "$ASSERT_LINE_ZH" ]; then
                 printf '%s\n\n' "$ASSERT_LINE_ZH"
               fi
+              if [ -n "$FLAKE_LINE_ZH" ]; then
+                printf '%s\n\n' "$FLAKE_LINE_ZH"
+              fi
               if [ "${AGENT_VERDICT:-}" = 'merge-ready' ] && [ "$TRUST_AGENT_VERDICT" != true ] && [ "${A_FAIL:-0}" != '0' ]; then
                 printf 'agent 报告了 `merge-ready`，但 `assertions.json` 记录了 %s 个失败，因此该判定未被采信——请参阅报告确认这些是否为预期的 A/B 对照单元。\n\n' "$A_FAIL"
+              fi
+              if [ "${FLAKE_VERDICT:-}" = 'flaky' ]; then
+                printf '确定性抖动门将本 PR 改动的测试文件原样重跑了多轮，得到了不一致的结果%s。一个在代码不变时也会失败的测试会以间歇性红灯落在无关的 PR 上，因此无论 agent 判定如何，本次运行按不通过报告——各轮结果矩阵见下方抖动门日志。\n\n' "${AGENT_VERDICT:+（agent 判定：\`${AGENT_VERDICT}\`）}"
+                if [ ! -f "$FLAKE_LOG" ]; then
+                  printf '抖动门日志未能暂存进结果产物——各轮结果矩阵请查看工作流运行日志中 gate step 的输出。\n\n'
+                fi
               fi
               printf '</details>\n\n'
               if [ -n "${MISSING_REPORT_NOTE:-}" ]; then
                 printf '%s\n\n' "$MISSING_REPORT_NOTE"
               fi
               emit_report "$REPORT" 45000
+              # Cap 10000: the per-block caps must leave headroom under
+              # GitHub's 65,536-char comment limit once the 45000 report
+              # block and the mandatory prose are added (20000 crossed it).
+              emit_block 'Flakiness gate log' "$FLAKE_LOG" 10000
               if [ -n "$EVIDENCE_SECTION" ]; then
                 printf '%s' "$EVIDENCE_SECTION"
               fi

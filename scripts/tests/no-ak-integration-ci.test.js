@@ -10,7 +10,9 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   rmSync,
+  symlinkSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -20,6 +22,7 @@ import { getWorkflowJob, getWorkflowStep } from './workflow-helpers.js';
 
 const ROOT = path.resolve(import.meta.dirname, '../..');
 const NO_AK_SCRIPT = 'test:integration:no-ak:sandbox:none';
+const INTEGRATION_TYPECHECK_SCRIPT = 'typecheck:integration';
 const GUARD_ACTION_PATH = '.github/actions/verify-checkout-head/action.yml';
 const CONFIGURE_ACTION_PATH =
   '.github/actions/configure-windows-runner/action.yml';
@@ -130,11 +133,18 @@ describe('no-AK integration CI wiring', () => {
       readFileSync(path.join(ROOT, 'package.json'), 'utf8'),
     );
 
+    expect(packageJson.scripts[INTEGRATION_TYPECHECK_SCRIPT]).toBe(
+      'tsc -p integration-tests/tsconfig.json --pretty false',
+    );
+    expect(packageJson.scripts.typecheck).toContain(
+      `npm run ${INTEGRATION_TYPECHECK_SCRIPT}`,
+    );
     expect(packageJson.scripts[NO_AK_SCRIPT]).toBe(
       [
         'cross-env QWEN_SANDBOX=false vitest run --root ./integration-tests --poolOptions.forks.maxForks 2',
         './fake-openai-server.test.ts',
         './test-helper.test.ts',
+        './chat-transcript-contract.test.ts',
         './cli/daemon-invocation-context.test.ts',
         './cli/list_directory.test.ts',
         './cli/qwen-serve-routes.test.ts',
@@ -179,7 +189,12 @@ describe('no-AK integration CI wiring', () => {
     expect(gateStep).toContain(
       "(github.event_name == 'pull_request' || github.event_name == 'merge_group')",
     );
+    const integrationTypecheckCommand = `npm run ${INTEGRATION_TYPECHECK_SCRIPT}`;
+    expect(gateStep).toContain(integrationTypecheckCommand);
     expect(gateStep).toContain(`npm run ${NO_AK_SCRIPT}`);
+    expect(gateStep.indexOf(integrationTypecheckCommand)).toBeLessThan(
+      gateStep.indexOf(`npm run ${NO_AK_SCRIPT}`),
+    );
     expect(gateStep).toContain(
       "QWEN_HOME: '${{ runner.temp }}/qwen-no-ak-home/.qwen'",
     );
@@ -206,6 +221,7 @@ describe('no-AK integration CI wiring', () => {
       'IDEALAB_API_KEY',
       'MINIMAX_API_KEY',
       'MODELSCOPE_API_KEY',
+      'MOONSHOT_API_KEY',
       'OPENAI_API_KEY',
       'OPENAI_BASE_URL',
       'OPENAI_MODEL',
@@ -303,7 +319,7 @@ describe('no-AK integration CI wiring', () => {
       "expected_sha: '${{ github.event.pull_request.head.sha }}'",
     );
     expect(guardCalls.test_windows).toContain(
-      "expected_sha: '${{ github.event.merge_group.head_sha }}'",
+      'expected_sha: "${{ github.event_name == \'merge_group\' && github.event.merge_group.head_sha || github.event.pull_request.head.sha }}"',
     );
     expect(guardCalls.integration_cli).toContain(
       "expected_sha: '${{ github.event.merge_group.head_sha }}'",
@@ -320,7 +336,7 @@ describe('no-AK integration CI wiring', () => {
       'if: "${{ github.event_name == \'pull_request\' }}"',
     );
     expect(guardCalls.test_windows).toContain(
-      'if: "${{ needs.classify_pr.outputs.skip_ci != \'true\' }}"',
+      "if: \"${{ needs.classify_pr.outputs.skip_ci != 'true' && (github.event_name == 'pull_request' || github.event_name == 'merge_group') }}\"",
     );
     expect(guardCalls.integration_cli).not.toContain('if:');
   });
@@ -332,23 +348,27 @@ describe('no-AK integration CI wiring', () => {
     );
     const windowsJob = getWorkflowJob(workflow, 'test_windows');
 
-    // The runs-on expression is the Windows gate's escape hatch. Pin the
-    // whole line so a variable typo, a quoting regression in the nested
-    // ''true'' escapes, or an && / || regrouping fails here instead of
-    // surfacing only when the switch is flipped.
+    // The runs-on expression is the Windows gate's escape hatch and its fork
+    // trust policy: pull requests never reach the pool, because a
+    // pull_request run executes the PR's own YAML and could rewrite runs-on
+    // itself. Pin the whole line so a variable typo, a quoting regression in
+    // the nested ''true'' escapes, or an && / || regrouping fails here
+    // instead of surfacing only when the switch is flipped — or when a fork
+    // PR finds the persistent pool.
     const windowsRunsOn = windowsJob
       .split('\n')
       .find((line) => line.startsWith('    runs-on:'));
     expect(windowsRunsOn).toBe(
-      `    runs-on: '\${{ vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && fromJSON(''["self-hosted", "Windows", "X64", "ecs-win"]'') || fromJSON(''["windows-2022"]'') }}'`,
+      `    runs-on: '\${{ vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && github.event_name != ''pull_request'' && fromJSON(''["self-hosted", "Windows", "X64", "ecs-win"]'') || fromJSON(''["windows-2022"]'') }}'`,
     );
     expect(windowsJob.split('\n')).toContain('    timeout-minutes: 60');
 
-    // The guard must stay wired to the merge-queue head for this job.
+    // The guard must stay wired to the expected head for this job: the
+    // event-aware shape, since the revived triggers have no merge-queue head.
     const guard = getWorkflowStep(windowsJob, GUARD_STEP);
     expect(guard).toContain("uses: './.github/actions/verify-checkout-head'");
     expect(guard).toContain(
-      "expected_sha: '${{ github.event.merge_group.head_sha }}'",
+      'expected_sha: "${{ github.event_name == \'merge_group\' && github.event.merge_group.head_sha || github.event.pull_request.head.sha }}"',
     );
 
     // The self-hosted-only tuning comes from the composite action shared with
@@ -363,6 +383,28 @@ describe('no-AK integration CI wiring', () => {
     expect(configure).toContain(
       "uses: './.github/actions/configure-windows-runner'",
     );
+    const redirectTemp = getWorkflowStep(
+      windowsJob,
+      'Point temp at a short-alias-free directory',
+    );
+    expect(redirectTemp).toContain(
+      "if: \"${{ needs.classify_pr.outputs.skip_ci != 'true' && runner.environment != 'self-hosted' }}\"",
+    );
+    for (const key of ['TEMP', 'TMP']) {
+      expect(redirectTemp).toContain(
+        `"${key}=$temp" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append`,
+      );
+    }
+    const verifyTemp = getWorkflowStep(
+      windowsJob,
+      'Verify temp paths carry no short alias',
+    );
+    expect(verifyTemp).toContain(
+      'if: "${{ needs.classify_pr.outputs.skip_ci != \'true\' }}"',
+    );
+    expect(verifyTemp).toContain('fs.realpathSync(value)');
+    // The guard's decisions are asserted by executing it, below; pinning the
+    // JS text here only fixes its spelling in place.
     const configureAction = readFileSync(
       path.join(ROOT, CONFIGURE_ACTION_PATH),
       'utf8',
@@ -388,6 +430,17 @@ describe('no-AK integration CI wiring', () => {
     const configureUseIndex = windowsJob.indexOf(
       "uses: './.github/actions/configure-windows-runner'",
     );
+    const redirectTempIndex = windowsJob.indexOf(
+      "name: 'Point temp at a short-alias-free directory'",
+    );
+    const hostedNodeIndex = windowsJob.indexOf('actions/setup-node@');
+    const selfHostedNodeIndex = windowsJob.indexOf(
+      "uses: './.github/actions/self-hosted-node'",
+    );
+    const verifyTempIndex = windowsJob.indexOf(
+      "name: 'Verify temp paths carry no short alias'",
+    );
+    const installIndex = windowsJob.indexOf("name: 'Install dependencies'");
     const guardUseIndex = windowsJob.indexOf(
       "uses: './.github/actions/verify-checkout-head'",
     );
@@ -395,6 +448,12 @@ describe('no-AK integration CI wiring', () => {
     expect(autocrlfIndex).toBeGreaterThanOrEqual(0);
     expect(autocrlfIndex).toBeLessThan(windowsCheckoutIndex);
     expect(configureUseIndex).toBeGreaterThan(windowsCheckoutIndex);
+    expect(redirectTempIndex).toBeGreaterThan(configureUseIndex);
+    expect(redirectTempIndex).toBeLessThan(hostedNodeIndex);
+    expect(redirectTempIndex).toBeLessThan(selfHostedNodeIndex);
+    expect(verifyTempIndex).toBeGreaterThan(hostedNodeIndex);
+    expect(verifyTempIndex).toBeGreaterThan(selfHostedNodeIndex);
+    expect(verifyTempIndex).toBeLessThan(installIndex);
     expect(guardUseIndex).toBeGreaterThan(windowsCheckoutIndex);
     expect(configureUseIndex).toBeLessThan(guardUseIndex);
     for (const line of [
@@ -581,5 +640,89 @@ describe('no-AK integration CI wiring', () => {
     expect(webShellJob).toContain('ubuntu_runner');
     expect(webShellJob).toContain("run: 'npx playwright install chromium'");
     expect(webShellJob).toContain('--with-deps chromium');
+  });
+});
+
+// The 8.3 alias this guard exists for (`C:\Users\RUNNER~1` realpathing to
+// `C:\Users\runneradmin`) cannot be reproduced off Windows, but every
+// decision the guard makes is a comparison between an env value and its
+// realpath — and a symlink reproduces each of those on any platform. Run the
+// real script rather than pinning its text: the case-insensitive comparison
+// below is the whole point of the step, and a substring pin cannot tell a
+// working comparison from a reverted one.
+describe('Windows temp short-alias guard', () => {
+  const workflow = readFileSync(
+    path.join(ROOT, '.github/workflows/ci.yml'),
+    'utf8',
+  );
+  const step = getWorkflowStep(
+    getWorkflowJob(workflow, 'test_windows'),
+    'Verify temp paths carry no short alias',
+  );
+  // The script is single-quoted throughout precisely so this stays a
+  // delimiter-safe extraction.
+  const match = /node -e "([^"]+)"/.exec(step);
+  const script = match?.[1];
+
+  // Invoked exactly as the workflow does: `node -e <script>`, no extra argv.
+  const runGuard = (env) =>
+    execFileSync(
+      process.execPath,
+      ['-e', script],
+      // Only TEMP/TMP may reach the guard: inheriting the ambient
+      // environment would let the host's own temp decide the verdict.
+      // stdio 'pipe' captures stderr too, so a failure's message reaches
+      // the assertion instead of the test runner's console.
+      { env, encoding: 'utf8', stdio: 'pipe' },
+    );
+
+  it('extracts a runnable script from the workflow', () => {
+    expect(script).toBeTruthy();
+  });
+
+  it.runIf(process.platform === 'linux')(
+    'accepts, warns, or fails on the three ways an env path can meet its realpath',
+    () => {
+      const base = realpathSync(
+        mkdtempSync(path.join(tmpdir(), 'temp-guard-')),
+      );
+      try {
+        const canonical = path.join(base, 'runneradmin');
+        mkdirSync(canonical);
+
+        // 1. Alias-free: the env value already IS its realpath.
+        expect(() =>
+          runGuard({ TEMP: canonical, TMP: canonical }),
+        ).not.toThrow();
+
+        // 2. Casing-only difference — the regression this guard had to stop
+        // producing. On Windows realpath returns the on-disk casing, so this
+        // is one directory under one spelling: warn, do not fail the lane.
+        const casing = path.join(base, 'RUNNERADMIN');
+        symlinkSync(canonical, casing);
+        let stdout = '';
+        expect(() => {
+          stdout = runGuard({ TEMP: casing, TMP: casing });
+        }).not.toThrow();
+        expect(stdout).toContain('::warning::');
+        expect(stdout).toContain('only by casing');
+
+        // 3. A genuine second spelling, as the 8.3 alias produces: fail.
+        const alias = path.join(base, 'RUNNER~1');
+        symlinkSync(canonical, alias);
+        expect(() => runGuard({ TEMP: alias, TMP: alias })).toThrow(
+          /carries a short alias/,
+        );
+      } finally {
+        rmSync(base, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it('fails loudly when temp is unset instead of throwing on undefined', () => {
+    // configure-windows-runner and the hosted redirect both set TEMP and TMP,
+    // so an unset value means one of them stopped running — a clear message
+    // beats realpathSync(undefined)'s TypeError.
+    expect(() => runGuard({})).toThrow(/TEMP is not set/);
   });
 });

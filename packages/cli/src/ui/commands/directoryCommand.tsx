@@ -244,6 +244,7 @@ export const directoryCommand: SlashCommand = {
                 const {
                   memoryContent,
                   fileCount,
+                  contextFilePaths,
                   conditionalRules,
                   projectRoot,
                 } = await loadServerHierarchicalMemory(
@@ -258,6 +259,7 @@ export const directoryCommand: SlashCommand = {
                 );
                 config.setUserMemory(memoryContent);
                 config.setGeminiMdFileCount(fileCount);
+                config.setContextFilePaths(contextFilePaths);
                 config.setConditionalRulesRegistry(
                   new ConditionalRulesRegistry(conditionalRules, projectRoot),
                 );

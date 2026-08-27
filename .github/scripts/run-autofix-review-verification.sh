@@ -45,6 +45,42 @@ git config --file "${GIT_CONFIG_GLOBAL}" safe.directory "$(pwd)"
 if [ -s /etc/gitconfig ]; then
   echo "::notice::/etc/gitconfig exists but is bypassed by the gate's GIT_CONFIG_SYSTEM redirect — replicate any setting the checks need via per-job env."
 fi
+# Two more inherited knobs steer EXECUTION itself, and neither has a
+# legitimate setter: BASH_ENV names a file every non-interactive bash
+# sources at STARTUP — a body-side unset is one hop late (bash sources a
+# plant before line 1), so the verify steps pin it empty at step level AND
+# launch this gate through their env -i clean child; the unset here keeps
+# the gate's own bash children clean too. BITE_RUNNER selects the bite
+# check's runner command, which executes unwrapped with the gate's full
+# environment. Strip them with the GIT_* class.
+unset BASH_ENV BITE_RUNNER
+# The verdict variables are GATE state, not inherited state: a plant of
+# AUDIT_VERDICT_RECORDED=true plus a verdict from an earlier step would
+# otherwise ride the every-exit re-append back into this step's outputs on
+# paths where the gate validated nothing.
+unset AUDIT_VERDICT AUDIT_VERDICT_RECORDED
+# The runner backs $GITHUB_ENV/$GITHUB_PATH/$GITHUB_STEP_SUMMARY with files
+# under $RUNNER_TEMP/_runner_file_commands/ that it reads back at step end.
+# The channel strip below removes the VARIABLES from the checks, but the
+# files stay discoverable under the inherited (predictable) $RUNNER_TEMP
+# and stay WRITABLE — a check that appends there plants environment into
+# every later step of this job, the PAT-bearing one included (discovery
+# verified on a live runner). Lock the files for the lifetime of this
+# step. The $GITHUB_OUTPUT backing file is the ONE exception: the gate
+# must keep writing it, and forges against it lose to the every-exit
+# re-append below plus the conclusion gate Finalize verification applies
+# to outcome. The directory itself stays writable on purpose: the runner
+# creates the NEXT step's backing files there at step start, and a locked
+# directory would stall every later step of the job; the residual
+# rename-over (create + rename onto a locked file) is documented in the
+# design doc instead of bought at that price.
+if [[ -n "${GITHUB_OUTPUT:-}" && -d "${RUNNER_TEMP}/_runner_file_commands" ]]; then
+  for _rfc in "${RUNNER_TEMP}/_runner_file_commands"/*; do
+    if [[ -f "${_rfc}" && "${_rfc}" != "${GITHUB_OUTPUT}" ]]; then
+      chmod a-w "${_rfc}" 2> /dev/null || true
+    fi
+  done
+fi
 
 # Record whether the agent left a commit FIRST — this is a ref-only
 # diff, so it runs before the failure.md early-exits and covers an
@@ -60,30 +96,13 @@ if [[ "${committed_rc}" -eq 1 ]]; then
   echo "committed=true" >> "${GITHUB_OUTPUT}"
 fi
 
-if [[ -f "${WORKDIR}/failure.md" && -n "$(git status --porcelain)" ]]; then
-  echo "❌ Agent wrote failure.md after leaving a dirty workspace:"
-  git status --short
-  cat "${WORKDIR}/failure.md"
-  echo "outcome=failed" >> "${GITHUB_OUTPUT}"
-  exit 1
-fi
-
-if [[ -f "${WORKDIR}/failure.md" ]]; then
-  echo "🛑 Agent aborted intentionally:"
-  cat "${WORKDIR}/failure.md"
-  echo "outcome=failed" >> "${GITHUB_OUTPUT}"
-  exit 1
-fi
-
-# Convention: hooks are severed at EVERY host checkout of the PR
-# branch (no secret sits in this step's env, but a post-checkout
-# hook still runs branch code on the host).
-git config core.hooksPath /dev/null
-git checkout "${BRANCH}"
-
 GATE_LOG="${WORKDIR}/gate-output.log"
 : > "${GATE_LOG}"
 rm -f "${GATE_LOG}.bite"
+# Single reset point for the gate-authored advisory file: every writer
+# below APPENDS, so no later section can wipe an earlier section's
+# advisory (the footprint advisory used to die to the shrink section's rm).
+rm -f "${WORKDIR}/gate-advisories.md"
 reject_fix() {
   local label="${1}"
   local preexisting="${2:-false}"
@@ -93,10 +112,14 @@ reject_fix() {
   # step means the gate itself crashed, so losing the detail file must not turn
   # a deterministic rejection into an infrastructure retry.
   echo "outcome=failed" >> "${GITHUB_OUTPUT}"
+  echo "kiss_audit=${KISS_AUDIT:-false}" >> "${GITHUB_OUTPUT}"
+  if [[ "${AUDIT_VERDICT_RECORDED:-false}" == 'true' ]]; then
+    echo "audit_verdict=${AUDIT_VERDICT}" >> "${GITHUB_OUTPUT}"
+  fi
   if [[ "${preexisting}" == 'true' ]]; then
     # NOT retryable: the repair agent is only allowed to amend this round's
     # fix, and a failure that exists without the fix is outside that boundary
-    # by definition — the 18-minute repair budget cannot reach it. The remedy
+    # by definition — the 45-minute repair budget cannot reach it. The remedy
     # is a base update (merge main into the branch), not a repair.
     echo "preexisting=true" >> "${GITHUB_OUTPUT}"
   elif [[ "${retryable}" == 'true' ]]; then
@@ -125,6 +148,200 @@ reject_fix() {
     echo "::warning::could not write the gate rejection detail; the verdict stands."
   exit 1
 }
+# Last-writer binding for the audit verdict: the record below happens
+# BEFORE the branch's build/tests run, and a check can still discover the
+# step-output FILE through the inherited $RUNNER_TEMP (the strip removes
+# the variable, not the backing file) and append its own audit_verdict —
+# step outputs are last-write-wins. EVERY exit therefore re-appends the
+# validated verdict INLINE (no function call: gate snippets extracted by
+# the contract suite must stay executable standalone), including the exits
+# that run after branch checks (a forge appended mid-check loses to the
+# exit's rewrite) — so the gate's copy outwrites any forged append. The
+# flag gates it: a verdict rejected BEFORE its record (missing, malformed,
+# or a routing violation) never surfaces. kiss_audit rides the same
+# discipline (recorded above, re-appended unconditionally at every exit).
+# Defended control-bit surface: kiss_audit reaches every later step ONLY
+# through this output — recorded HERE, before any branch code runs in this
+# step, and re-appended at every exit below with the same last-writer
+# discipline as the verdict. A consumer that read steps.prepare's copy
+# directly would route the bit around the gate's defenses.
+echo "kiss_audit=${KISS_AUDIT:-false}" >> "${GITHUB_OUTPUT}"
+
+# Growth-audit verdict gate: a round tagged KISS_AUDIT (its counting window
+# is over the growth budget) must carry the audit's machine-readable verdict
+# — the audit IS the round's judgment of the over-budget approach, and a
+# round that skipped it must not push (the rubber-stamp hole by absence).
+# Sits BEFORE the failure.md early-exits below: a conflict round stops
+# BLOCKED via failure.md, and its verdict must be validated and surfaced to
+# GITHUB_OUTPUT before that exit writes outcome=failed — otherwise the
+# conflict trail marker never posts and the idempotent park never engages.
+# Also before the build/schema/footprint checks AND the no-commit/no-op
+# exits further down: the verdict is required even for a no-op audit round
+# whose verdict is sound with nothing left to fix. Malformed is agent
+# misbehavior, not a build problem — NON-retryable, so the repair pass is
+# never invoked and the next scan simply re-runs the audit.
+if [[ "${KISS_AUDIT:-false}" == 'true' ]]; then
+  AUDIT_VERDICT=''
+  if [[ -f "${WORKDIR}/growth-audit.json" ]]; then
+    # Slurp so the document COUNT is part of validation: the per-document
+    # parse accepted a valid first document followed by one jq errors on
+    # (or shape-filters out) on the FIRST document's verdict — the gate's
+    # contract is a single JSON document, so reject every multi-document
+    # stream.
+    AUDIT_VERDICT="$(jq -rs '
+        if length != 1 then empty else .[0]
+        | select((.verdict // "") | IN("sound", "drift", "conflict"))
+        | select((.kiss.result // "") | IN("pass", "fail"))
+        | select((.minimal_change.result // "") | IN("pass", "fail"))
+        | select((.verdict != "sound")
+            or ((.kiss.result == "pass") and (.minimal_change.result == "pass")))
+        | select((.verdict != "drift")
+            or ((.kiss.result == "fail") or (.minimal_change.result == "fail")))
+        | .verdict end' "${WORKDIR}/growth-audit.json" 2> /dev/null || true)"
+  fi
+  # Anchor the parsed value (defense in depth now that slurp rejects
+  # multi-document streams outright).
+  [[ "${AUDIT_VERDICT}" =~ ^(sound|drift|conflict)$ ]] || AUDIT_VERDICT=''
+  if [[ -z "${AUDIT_VERDICT}" ]]; then
+    {
+      echo "Growth-audit round (this counting window is over its growth budget) without a valid growth-audit.json verdict."
+      echo "The audit must run BEFORE any edit this round, and the verdict file must be a single JSON document carrying verdict sound|drift|conflict plus kiss.result and minimal_change.result each pass|fail, consistent with the taxonomy (sound requires both axes pass; drift requires at least one axis fail). Re-run the audit and produce the file; do not push without it."
+    } >> "${GATE_LOG}"
+    reject_fix 'growth-audit round missing a valid growth-audit.json verdict (audit skipped or malformed)' 'false' 'false'
+  fi
+  echo "🔎 growth-audit verdict: ${AUDIT_VERDICT}"
+  # Conflict routing is enforced HERE, not by convention: a conflict verdict
+  # must STOP BLOCKED with a handoff (the only growth path to a human). A
+  # round that kept fixing and committed would otherwise clear the gate like
+  # sound/drift, push the contested code, and park the next scan on a
+  # handoff question that was never asked. NON-retryable: re-audit, don't
+  # repair.
+  if [[ "${AUDIT_VERDICT}" == 'conflict' && ! -f "${WORKDIR}/failure.md" && ! -s "${WORKDIR}/handoff.md" ]]; then
+    reject_fix 'growth-audit verdict is conflict but the round did not stop with a handoff; conflict must STOP BLOCKED (no push)' 'false' 'false'
+  fi
+  # The no-push half of this routing is enforced at the success exit
+  # below: a repair pass re-auditing to conflict LEGITIMATELY runs behind
+  # the first pass's commit (committed_rc=1), so the push shape cannot be
+  # refused here without refusing it — the refusal sits at the push
+  # boundary itself.
+  # Record the verdict the GATE validated, for the report step to consume
+  # via the step output. The report must NOT re-read the file itself: the
+  # branch's own build/tests run as the runner user after this point and
+  # WORKDIR is a predictable path they can write — the validated verdict is
+  # the only verdict that may reach the trail marker and the re-arm.
+  echo "audit_verdict=${AUDIT_VERDICT}" >> "${GITHUB_OUTPUT}"
+  AUDIT_VERDICT_RECORDED='true'
+fi
+
+if [[ -f "${WORKDIR}/failure.md" && -n "$(git status --porcelain)" ]]; then
+  echo "❌ Agent wrote failure.md after leaving a dirty workspace:"
+  git status --short
+  # Agent-written content on step stdout: both workflow-command syntaxes
+  # parse here (`##[` mid-line too — measured on #9761). Same reason
+  # 'Show run artifacts' neutralizes these files.
+  sed -e 's/::/;;/g' -e 's/##\[/##［/g' "${WORKDIR}/failure.md"
+  echo "outcome=failed" >> "${GITHUB_OUTPUT}"
+  echo "kiss_audit=${KISS_AUDIT:-false}" >> "${GITHUB_OUTPUT}"
+  if [[ "${AUDIT_VERDICT_RECORDED:-false}" == 'true' ]]; then
+    echo "audit_verdict=${AUDIT_VERDICT}" >> "${GITHUB_OUTPUT}"
+  fi
+  exit 1
+fi
+
+if [[ -f "${WORKDIR}/failure.md" ]]; then
+  echo "🛑 Agent aborted intentionally:"
+  sed -e 's/::/;;/g' -e 's/##\[/##［/g' "${WORKDIR}/failure.md"
+  echo "outcome=failed" >> "${GITHUB_OUTPUT}"
+  echo "kiss_audit=${KISS_AUDIT:-false}" >> "${GITHUB_OUTPUT}"
+  if [[ "${AUDIT_VERDICT_RECORDED:-false}" == 'true' ]]; then
+    echo "audit_verdict=${AUDIT_VERDICT}" >> "${GITHUB_OUTPUT}"
+  fi
+  exit 1
+fi
+
+# These three handoff classifications skip a growth-audit CONFLICT verdict:
+# that round has its own routing — the verdict gate (stop enforced here) and
+# the push-boundary refusal at the success exit — and it must land
+# outcome=failed so the conflict trail marker posts and the park engages,
+# never the clean outcome=handoff. A plain (non-audit) handoff still takes
+# these.
+# A handoff claims the round changed NOTHING — dirt beside it is a
+# brake-violating partial patch (otherwise reported as a clean stop and
+# discarded silently with the runner), and untracked leftovers would trip
+# the NEXT round's dirty assert on the persistent pool. The ref-level
+# commit diff below is blind to both. Non-retryable like failure.md+dirty
+# above (a retryable rejection would engage the repair pass, which deletes
+# handoff.md and may commit against the brake), but under its OWN outcome:
+# outcome=failed would make the report step dress the rejection as a
+# failed FIX ("could not produce a passing fix", or a stale-base retry
+# promise) when no fix existed — the report step gives this shape its own
+# honest headline.
+if [[ -s "${WORKDIR}/handoff.md" && -n "$(git status --porcelain)" \
+  && "${AUDIT_VERDICT:-}" != 'conflict' ]]; then
+  echo "❌ Agent wrote handoff.md after leaving a dirty workspace:"
+  git status --short
+  sed -e 's/::/;;/g' -e 's/##\[/##［/g' "${WORKDIR}/handoff.md"
+  echo "outcome=dirty_handoff" >> "${GITHUB_OUTPUT}"
+  echo "kiss_audit=${KISS_AUDIT:-false}" >> "${GITHUB_OUTPUT}"
+  if [[ "${AUDIT_VERDICT_RECORDED:-false}" == 'true' ]]; then
+    echo "audit_verdict=${AUDIT_VERDICT}" >> "${GITHUB_OUTPUT}"
+  fi
+  exit 1
+fi
+
+# The committed sibling of the brake violation above: the round HAS a commit
+# beside handoff.md. Judged by dirt alone it slips both guards — the dirty
+# check sees a clean tree, and the no-commit handoff branch below requires
+# an unchanged ref — so it would reach the structural checks, where
+# reject_fix defaults to retryable and the repair pass deletes
+# handoff.md and may commit AGAIN against the brake's stop. Non-retryable
+# under its OWN outcome: a commit DID happen, so the dirty-handoff headline
+# claiming nothing was committed would misreport it. Same reasoning as the
+# dirty guard otherwise.
+if [[ -s "${WORKDIR}/handoff.md" && "${committed_rc:-0}" -eq 1 \
+  && "${AUDIT_VERDICT:-}" != 'conflict' ]]; then
+  echo "❌ Agent wrote handoff.md but the round HAS a commit — a brake violation:"
+  git log --oneline "origin/${BRANCH}..${BRANCH}"
+  sed -e 's/::/;;/g' -e 's/##\[/##［/g' "${WORKDIR}/handoff.md"
+  echo "outcome=committed_handoff" >> "${GITHUB_OUTPUT}"
+  echo "kiss_audit=${KISS_AUDIT:-false}" >> "${GITHUB_OUTPUT}"
+  if [[ "${AUDIT_VERDICT_RECORDED:-false}" == 'true' ]]; then
+    echo "audit_verdict=${AUDIT_VERDICT}" >> "${GITHUB_OUTPUT}"
+  fi
+  exit 1
+fi
+
+# No-commit brake handoff, classified BEFORE the structural checks below:
+# those judge the PR's OWN diff (core rebuild, schema freshness, contracts)
+# and reject_fix on failure, and the growth brake fires on exactly the red
+# PRs whose diff trips them. A compliant handoff commits nothing, so
+# running the checks first would reclassify it as a retryable failure —
+# the repair pass would delete handoff.md and commit against the brake's
+# stop. A handoff claims nothing (acted=false, deferred to a human), so
+# the checks' false-no-action rationale does not apply. failure.md
+# coexistence keeps the failed classification via the exits above.
+if git diff --quiet "origin/${BRANCH}...${BRANCH}" \
+  && [[ -s "${WORKDIR}/handoff.md" ]] \
+  && [[ "${AUDIT_VERDICT:-}" != 'conflict' ]]; then
+  echo "🤝 Branch unchanged with a handoff — the agent stopped under instruction and deferred this item to a human:"
+  # Agent-written content: both workflow-command syntaxes parse on step
+  # stdout — a line-start `::` (::error::, ::add-mask::) AND `##[` even
+  # mid-line (a quoted `##[add-matcher]` fails the step; measured on
+  #9761). The same reason 'Show run artifacts' neutralizes these files.
+  sed -e 's/::/;;/g' -e 's/##\[/##［/g' "${WORKDIR}/handoff.md"
+  echo "outcome=handoff" >> "${GITHUB_OUTPUT}"
+  echo "kiss_audit=${KISS_AUDIT:-false}" >> "${GITHUB_OUTPUT}"
+  if [[ "${AUDIT_VERDICT_RECORDED:-false}" == 'true' ]]; then
+    echo "audit_verdict=${AUDIT_VERDICT}" >> "${GITHUB_OUTPUT}"
+  fi
+  exit 0
+fi
+
+# Convention: hooks are severed at EVERY host checkout of the PR
+# branch (no secret sits in this step's env, but a post-checkout
+# hook still runs branch code on the host).
+git config core.hooksPath /dev/null
+git checkout "${BRANCH}"
 baseline_also_fails() {
   # A deterministic rejection is only chargeable to this round if the same
   # check passes WITHOUT the round's commits. Measured counterexample, run
@@ -172,7 +389,7 @@ baseline_also_fails() {
   local ab_log="${GATE_LOG}.baseline"
   : > "${ab_log}"
   rc=0
-  if ! "$@" >> "${ab_log}" 2>&1; then
+  if ! strip_runner_channels "$@" >> "${ab_log}" 2>&1; then
     rc=1
   fi
   git restore -- . 2>> "${GATE_LOG}" || true
@@ -193,6 +410,10 @@ baseline_also_fails() {
       tail -c 3000 "${GATE_LOG}" 2> /dev/null
       echo '````'
     } > "${WORKDIR}/gate-rejection.md" || true
+    echo "kiss_audit=${KISS_AUDIT:-false}" >> "${GITHUB_OUTPUT}"
+    if [[ "${AUDIT_VERDICT_RECORDED:-false}" == 'true' ]]; then
+      echo "audit_verdict=${AUDIT_VERDICT}" >> "${GITHUB_OUTPUT}"
+    fi
     exit 1
   fi
   # Every retryable exit below hands the tree to the repair agent with
@@ -267,6 +488,20 @@ fail_signature() {
 seed_dist_note() {
   echo "⚠️ the baseline leg rebuilt dist/ from baseline sources — run npm run build before typecheck/tests" >> "${GATE_LOG}"
 }
+# Every check below runs the BRANCH's own code (npm scripts, tests, and
+# their lifecycle children) with this step's inherited environment. Strip
+# the runner injection channels first: a check appending to GITHUB_OUTPUT
+# would overwrite the gate's own outputs last-write-wins (a forged
+# audit_verdict=sound after the gate's write), GITHUB_ENV/GITHUB_PATH
+# plant environment for the PAT-bearing steps that follow, and
+# GITHUB_STEP_SUMMARY lets branch code forge the job summary styled as
+# gate output (the display-channel sibling; qwen-triage strips it when
+# running external-author branch code for the same reason). Same class the
+# deferred-upsert child closes with env -i; targeted -u here because the
+# checks need the ordinary environment (PATH, HOME, …) to run at all.
+strip_runner_channels() {
+  env -u GITHUB_OUTPUT -u GITHUB_ENV -u GITHUB_PATH -u GITHUB_STEP_SUMMARY "$@"
+}
 run_check() {
   # pipefail makes the pipeline carry the command's status, not tee's. The
   # side copy holds THIS check's transcript alone — the identity comparison
@@ -274,7 +509,7 @@ run_check() {
   local label="${1}"
   shift
   : > "${GATE_LOG}.check"
-  if ! "$@" 2>&1 | tee -a "${GATE_LOG}" "${GATE_LOG}.check"; then
+  if ! strip_runner_channels "$@" 2>&1 | tee -a "${GATE_LOG}" "${GATE_LOG}.check"; then
     if baseline_also_fails "$@"; then
       reject_fix "${label} (pre-existing: also fails without this round's commit)" 'true'
     fi
@@ -294,7 +529,7 @@ run_check_no_ab() {
   # allowlist).
   local label="${1}"
   shift
-  if ! "$@" 2>&1 | tee -a "${GATE_LOG}"; then
+  if ! strip_runner_channels "$@" 2>&1 | tee -a "${GATE_LOG}"; then
     reject_fix "${label}"
   fi
 }
@@ -333,7 +568,8 @@ fi
 # no-op/unchanged return: on a stale-schema PR the agent can wrongly
 # write no-action.md, and without this the no-op path would report the
 # feedback as evaluated (acted=false) while CI stays red — the exact bug
-# this PR fixes. So it runs on EVERY path. The gate is shared with the
+# this PR fixes. So it runs on every path but the no-commit handoff,
+# which claims nothing and exits above. The gate is shared with the
 # issue-fix verify step (rationale + the generator crash guard live in
 # the script); the write is on a tracked file compared by `git status`,
 # not the commit-level no-op git-diff below, and it is restored on
@@ -350,22 +586,37 @@ run_check_no_ab 'cross-package contract verification failed' \
 assert_verification_tree
 
 if git diff --quiet "origin/${BRANCH}...${BRANCH}"; then
-  # No new commit. That is only legitimate as a deliberate no-action.
+  # No new commit. That is only legitimate as a deliberate no-action; the
+  # no-commit handoff was classified before the structural checks above.
   if [[ -s "${WORKDIR}/no-action.md" ]]; then
     echo "🟰 No action needed:"
-    cat "${WORKDIR}/no-action.md"
+    # Both command syntaxes, like every other echo of agent-written files
+    # (`##[` parses mid-line too — #9761).
+    sed -e 's/::/;;/g' -e 's/##\[/##［/g' "${WORKDIR}/no-action.md"
     echo "verified_head=$(git rev-parse HEAD)" >> "${GITHUB_OUTPUT}"
     echo "outcome=noop" >> "${GITHUB_OUTPUT}"
+    echo "kiss_audit=${KISS_AUDIT:-false}" >> "${GITHUB_OUTPUT}"
+    if [[ "${AUDIT_VERDICT_RECORDED:-false}" == 'true' ]]; then
+      echo "audit_verdict=${AUDIT_VERDICT}" >> "${GITHUB_OUTPUT}"
+    fi
     exit 0
   fi
   echo "❌ Branch unchanged and no no-action.md — agent produced nothing"
   echo "outcome=failed" >> "${GITHUB_OUTPUT}"
+  echo "kiss_audit=${KISS_AUDIT:-false}" >> "${GITHUB_OUTPUT}"
+  if [[ "${AUDIT_VERDICT_RECORDED:-false}" == 'true' ]]; then
+    echo "audit_verdict=${AUDIT_VERDICT}" >> "${GITHUB_OUTPUT}"
+  fi
   exit 1
 fi
 
 if [[ ! -s "${WORKDIR}/address-summary.md" ]]; then
   echo "❌ Branch changed but address-summary.md is missing"
   echo "outcome=failed" >> "${GITHUB_OUTPUT}"
+  echo "kiss_audit=${KISS_AUDIT:-false}" >> "${GITHUB_OUTPUT}"
+  if [[ "${AUDIT_VERDICT_RECORDED:-false}" == 'true' ]]; then
+    echo "audit_verdict=${AUDIT_VERDICT}" >> "${GITHUB_OUTPUT}"
+  fi
   exit 1
 fi
 
@@ -606,6 +857,96 @@ not_merge_freight() {
     git diff --quiet origin/main "${BRANCH}" -- "${f}" 2> /dev/null || printf '%s\0' "${f}"
   done
 }
+# --- Deny-by-default footprint areas ----------------------------------------
+# The class gate above protects an ENUMERATED surface, and enumeration is
+# never complete (a denylist is not a boundary). This check inverts the
+# default: every file a round touches is mapped to an AREA — its declared
+# workspace, else its top-level directory, else the root file itself — and
+# any area outside the PR's own footprint is surfaced. Consequence is
+# staged via QWEN_AUTOFIX_FOOTPRINT_ENFORCE: 'advisory' (default) writes a
+# gate-authored report section; 'reject' turns expansions into a retryable
+# rejection. Merge freight is excluded from the round side; deleted
+# workspaces degrade to their top-level segment (conservative: mismatch
+# surfaces rather than hides).
+list_areas() {
+  # $1: NUL-separated path file; $2: the REF whose recorded workspaces
+  # globs define membership. Ref-anchored on purpose: the round's on-disk
+  # manifest must not redefine its own footprint boundary. The ref's globs
+  # are read and translated ONCE per invocation (the per-file ancestor
+  # walk then matches in-bash — was_workspace_dir per (file×dir) re-ran
+  # git+jq+sed each time, ~21 ms a call). Longest ancestor wins (nested
+  # workspaces); non-workspace paths under packages/ keep TWO segments so
+  # sibling projects stay distinct areas. Emitted keys are printf %q —
+  # line-safe AND injective, so two distinct areas can never collapse
+  # into one comparison key (a lossy charset map hid expansions).
+  local ref="${2}" f d a g re
+  local -a ws_res=()
+  while IFS= read -r g; do
+    [[ -n "${g}" && "${g}" != '!'* ]] || continue
+    re="$(printf '%s' "${g}" | sed -e 's/[.^$+(){}|[]/\\&/g' -e 's/]/\\]/g' -e 's/\*\*/\x01/g' -e 's/\*/[^\/]*/g' -e 's/?/[^\/]/g' -e 's/\x01/.*/g')"
+    ws_res+=("${re}")
+  done < <(git show "${ref}:package.json" 2> /dev/null | jq -r '.workspaces[]?' 2> /dev/null)
+  while IFS= read -r -d '' f; do
+    [[ -n "${f}" ]] || continue
+    a=''
+    d="${f%/*}"
+    while [[ -n "${d}" && "${d}" != "${f}" ]]; do
+      for re in "${ws_res[@]}"; do
+        if [[ "${d}" =~ ^${re}$ ]]; then
+          a="${d}"
+          break 2
+        fi
+      done
+      [[ "${d}" == */* ]] || break
+      d="${d%/*}"
+    done
+    if [[ -z "${a}" ]]; then
+      if [[ "${f}" == packages/*/* ]]; then
+        a="${f#packages/}"
+        a="packages/${a%%/*}"
+      elif [[ "${f}" == */* ]]; then
+        a="${f%%/*}"
+      else
+        a="/${f}"
+      fi
+    fi
+    printf '%q\n' "${a}"
+  done < "${1}" | sort -u
+}
+FOOTPRINT_ENFORCE="${FOOTPRINT_ENFORCE:-advisory}"
+[[ "${FOOTPRINT_ENFORCE}" == 'reject' ]] || FOOTPRINT_ENFORCE='advisory'
+ROUND_FILES_Z="$(mktemp)"
+PR_FILES_Z="$(mktemp)"
+# Unmeasurable is a STATE here too: a failed producer (no merge base on an
+# orphan-history takeover, a transient git error) must skip the check
+# loudly, not shrink one side into a verdict — an empty PR side would
+# read as "every round area is an expansion".
+FOOTPRINT_MEASURED='true'
+git diff --name-only -z --no-renames "${ROUND_RANGE}" 2> /dev/null | not_merge_freight > "${ROUND_FILES_Z}" || FOOTPRINT_MEASURED='false'
+git diff --name-only -z --no-renames "${PR_RANGE}" 2> /dev/null > "${PR_FILES_Z}" || FOOTPRINT_MEASURED='false'
+if [[ "${FOOTPRINT_MEASURED}" != 'true' ]]; then
+  echo "🧭 footprint measurement UNAVAILABLE this round (diff producer failed) — check skipped" | tee -a "${GATE_LOG}"
+fi
+OUT_AREAS="$(comm -23 <(list_areas "${ROUND_FILES_Z}" "origin/${BRANCH}") <(list_areas "${PR_FILES_Z}" "origin/${BRANCH}"))" || OUT_AREAS=''
+rm -f "${ROUND_FILES_Z}" "${PR_FILES_Z}"
+if [[ "${FOOTPRINT_MEASURED}" == 'true' && -n "${OUT_AREAS}" ]]; then
+  if [[ "${FOOTPRINT_ENFORCE}" == 'reject' ]]; then
+    {
+      echo 'This round modified areas entirely outside the PR footprint:'
+      while IFS= read -r a; do [[ -n "${a}" ]] && echo "- ${a}"; done <<< "${OUT_AREAS}"
+      echo 'Footprint enforcement is set to reject: revert these files, or escalate the feedback that requires them to a maintainer as an open question.'
+    } >> "${GATE_LOG}"
+    reject_fix 'round expands into areas outside the PR footprint'
+  else
+    {
+      echo '🧭 **Gate advisory — this round modified areas outside the PR footprint** (machine-measured, not agent-authored):'
+      while IFS= read -r a; do [[ -n "${a}" ]] && echo "- ${a}"; done <<< "${OUT_AREAS}"
+      echo 'Review the expansion deliberately; the footprint gate is in advisory mode. · 本轮改动了 PR 足迹之外的区域（门自动测量，非 agent 文本），当前足迹门为 advisory 模式，请有意识地审阅该扩张。'
+    } >> "${WORKDIR}/gate-advisories.md"
+    echo "🧭 footprint expansion (advisory): $(tr '\n' ' ' <<< "${OUT_AREAS}")" | tee -a "${GATE_LOG}"
+  fi
+fi
+
 # Test-deletion advisory: deleting or shrinking tests is sometimes right
 # (the pinned behavior was wrong, or coverage is duplicated) and the agent
 # is required to justify it in its summary — but the SURFACING must not be
@@ -628,7 +969,6 @@ NET_TEST_LINES="$(git diff --numstat -z --no-renames "${ROUND_RANGE}" -- "${TEST
       [[ "${del}" != '-' ]] && total=$(( total - del ))
     done
     echo "${total}"; })"
-rm -f "${WORKDIR}/gate-advisories.md"
 if [[ -n "${DELETED_TESTS}" || "${NET_TEST_LINES}" -le -25 ]]; then
   {
     echo '⚖️ **Gate advisory — test coverage shrank this round** (machine-measured, not agent-authored): '"net ${NET_TEST_LINES} test lines."
@@ -646,7 +986,7 @@ if [[ -n "${DELETED_TESTS}" || "${NET_TEST_LINES}" -le -25 ]]; then
     fi
     echo
     echo 'The justification must be in the round summary above; a deletion is only sound when the pinned behavior itself was wrong (evidence shown) or the coverage demonstrably survives elsewhere. · 本轮测试覆盖净减少（门自动测量，非 agent 文本）；删除是否成立请对照上方轮次摘要中的理由——仅当被钉住的行为本身有误（需给出证据）或覆盖确有替代时才合理。'
-  } > "${WORKDIR}/gate-advisories.md"
+  } >> "${WORKDIR}/gate-advisories.md"
   echo '⚖️ test coverage shrank this round — advisory written for the report' | tee -a "${GATE_LOG}"
 fi
 
@@ -713,7 +1053,7 @@ fi
 # a DEFECT-CLAIM round only when resolved-comments.txt marks a finding
 # resolved-in-code whose thread is Critical-tagged or belongs to a
 # CHANGES_REQUESTED review (matched in rc.json/rv.json). Those rounds get a
-# non-retryable rejection on all-green — the 18-minute repair pass cannot
+# non-retryable rejection on all-green — the 45-minute repair pass cannot
 # make a nonexistent defect reproduce; the next full round re-reads the
 # feedback with the evidence in LAST_REJECTION and can decline or escalate
 # instead. Every OTHER src+test round (a refactor pinning existing
@@ -746,7 +1086,7 @@ bite_runner_default() {
   # $1 = workspace dir, rest = test paths relative to the workspace.
   local ws="${1}"
   shift
-  npm run test --workspace "${ws}" --if-present -- "$@"
+  strip_runner_channels npm run test --workspace "${ws}" --if-present -- "$@"
 }
 mapfile -d '' -t BITE_FILES < <(git diff --name-only -z --no-renames --diff-filter=AM "${ROUND_RANGE}" \
   -- ':(glob)**/*.test.*' ':(glob)**/*.spec.*' ':(exclude,glob)**/__snapshots__/**' \
@@ -781,15 +1121,18 @@ if [[ -s "${WORKDIR}/resolved-comments.txt" && -s "${WORKDIR}/rc.json" ]]; then
     | ($ids | split("\n")
         | map(sub("^rc:"; "") | sub("\r$"; "")
           | select(test("^[0-9]+$")) | tonumber)) as $resolved
-    | def critical($c):
+    | def cr_attached($x):
+        (($x.pull_request_review_id // null) as $review
+          | $review != null
+          and any($reviews[]; .id == $review and ((.state // "") == "CHANGES_REQUESTED")));
+      def critical($c):
         (($c.body // "") | contains("**[Critical]**"))
         or (($c.in_reply_to_id // null) as $root
           | $root != null
           and any($comments[];
-            .id == $root and ((.body // "") | contains("**[Critical]**"))))
-        or (($c.pull_request_review_id // null) as $review
-          | $review != null
-          and any($reviews[]; .id == $review and ((.state // "") == "CHANGES_REQUESTED")));
+            .id == $root
+            and (((.body // "") | contains("**[Critical]**")) or cr_attached(.))))
+        or cr_attached($c);
     any($comments[]; (.id as $id | $resolved | index($id) != null) and critical(.))' \
     "${WORKDIR}/rc.json" 2> /dev/null)" || BITE_ENFORCE='false'
   [[ "${BITE_ENFORCE}" == 'true' ]] || BITE_ENFORCE='false'
@@ -805,15 +1148,18 @@ if [[ -s "${WORKDIR}/resolved-comments.txt" && -s "${WORKDIR}/rc.json" ]]; then
       | ($ids | split("\n")
           | map(sub("^rc:"; "") | sub("\r$"; "")
             | select(test("^[0-9]+$")) | tonumber)) as $resolved
-      | def critical($c):
+      | def cr_attached($x):
+          (($x.pull_request_review_id // null) as $review
+            | $review != null
+            and any($reviews[]; .id == $review and ((.state // "") == "CHANGES_REQUESTED")));
+        def critical($c):
           (($c.body // "") | contains("**[Critical]**"))
           or (($c.in_reply_to_id // null) as $root
             | $root != null
             and any($comments[];
-              .id == $root and ((.body // "") | contains("**[Critical]**"))))
-          or (($c.pull_request_review_id // null) as $review
-            | $review != null
-            and any($reviews[]; .id == $review and ((.state // "") == "CHANGES_REQUESTED")));
+              .id == $root
+              and (((.body // "") | contains("**[Critical]**")) or cr_attached(.))))
+          or cr_attached($c);
       [ $comments[]
         | select(.id as $id | $resolved | index($id) != null)
         | select(critical(.)) | (.path // "") ]
@@ -909,6 +1255,10 @@ if [[ "${#BITE_FILES[@]}" -gt 0 && -n "${BITE_SRC}" ]]; then
           tail -c 3000 "${GATE_LOG}" 2> /dev/null
           echo '````'
         } > "${WORKDIR}/gate-rejection.md" || true
+        echo "kiss_audit=${KISS_AUDIT:-false}" >> "${GITHUB_OUTPUT}"
+        if [[ "${AUDIT_VERDICT_RECORDED:-false}" == 'true' ]]; then
+          echo "audit_verdict=${AUDIT_VERDICT}" >> "${GITHUB_OUTPUT}"
+        fi
         exit 1
       }
       git reset --quiet 2>> "${GATE_LOG}" || true
@@ -959,5 +1309,17 @@ if [[ "${#BITE_FILES[@]}" -gt 0 && -n "${BITE_SRC}" ]]; then
   fi
 fi
 assert_verification_tree
+# A conflict verdict must STOP BLOCKED: completing as fixed would push the
+# contested code under the PAT while the report posts the park marker —
+# the exact outcome the routing check above exists to prevent. The routing
+# check cannot see this shape (a planted handoff.md satisfies it), so
+# refuse at the push boundary. NON-retryable: re-audit, don't repair.
+if [[ "${AUDIT_VERDICT:-}" == 'conflict' ]]; then
+  reject_fix 'growth-audit verdict is conflict but the round completed as fixed; conflict must STOP BLOCKED (no push)' 'false' 'false'
+fi
 echo "verified_head=${VERIFICATION_HEAD}" >> "${GITHUB_OUTPUT}"
 echo "outcome=fixed" >> "${GITHUB_OUTPUT}"
+echo "kiss_audit=${KISS_AUDIT:-false}" >> "${GITHUB_OUTPUT}"
+if [[ "${AUDIT_VERDICT_RECORDED:-false}" == 'true' ]]; then
+  echo "audit_verdict=${AUDIT_VERDICT}" >> "${GITHUB_OUTPUT}"
+fi

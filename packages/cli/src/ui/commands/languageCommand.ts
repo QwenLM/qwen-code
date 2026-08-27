@@ -28,7 +28,7 @@ import {
   isAutoLanguage,
   resolveOutputLanguageOrPreserveAuto,
   writeOutputLanguageAndRegisterPath,
-} from '../../utils/languageUtils.js';
+} from '../../i18n/languageUtils.js';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
 
 const debugLogger = createDebugLogger('LANGUAGE_COMMAND');
@@ -116,6 +116,18 @@ function validateUiScopeFlags(
   }
   // Workspace settings are ignored on merge when untrusted, so a
   // --project save would silently not take effect — reject it up front.
+  if (
+    parsed.scope === SettingScope.Workspace &&
+    context.executionPolicy?.allowWorkspaceSettingsWrite === false
+  ) {
+    return {
+      type: 'message',
+      messageType: 'error',
+      content: t(
+        'Project language settings are not available in this session.',
+      ),
+    };
+  }
   if (
     parsed.scope === SettingScope.Workspace &&
     context.services.settings &&

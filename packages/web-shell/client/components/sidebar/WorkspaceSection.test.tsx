@@ -5,6 +5,7 @@ import { createRoot, type Root } from 'react-dom/client';
 import type { ReactNode } from 'react';
 import type {
   DaemonClient,
+  DaemonSessionGroupCatalog,
   DaemonSessionSummary,
   DaemonWorkspaceCapability,
   DaemonWorkspaceGitStatus,
@@ -82,6 +83,9 @@ function makeClient(): DaemonClient {
 
 const { I18nProvider } = await import('../../i18n');
 const { WorkspaceSection } = await import('./WorkspaceSection');
+const { readWorkspaceExpanded, writeWorkspaceExpanded } = await import(
+  './workspaceExpansion'
+);
 
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 if (!globalThis.PointerEvent) {
@@ -126,6 +130,9 @@ function renderSection(
     sourceType: string;
     channelGroupingEnabled: boolean;
     organizationEnabled: boolean;
+    sessionCatalogRequestsEnabled: boolean;
+    sessionGroupCatalog: DaemonSessionGroupCatalog;
+    sessionLiveStateEnabled: boolean;
   }> = {},
 ): void {
   act(() => {
@@ -142,10 +149,14 @@ function renderSection(
           noSessionsLabel="No sessions"
           loadErrorLabel="Load failed"
           organizationEnabled={overrides.organizationEnabled ?? false}
+          sessionCatalogRequestsEnabled={
+            overrides.sessionCatalogRequestsEnabled
+          }
+          sessionGroupCatalog={overrides.sessionGroupCatalog}
+          sessionLiveStateEnabled={overrides.sessionLiveStateEnabled}
           sourceType={overrides.sourceType}
           channelGroupingEnabled={overrides.channelGroupingEnabled}
           ungroupedLabel="Ungrouped"
-          formatTime={() => ''}
           renderSession={(session: DaemonSessionSummary): ReactNode => (
             <div key={session.sessionId}>{session.displayName}</div>
           )}
@@ -167,6 +178,7 @@ function gitChip(): HTMLElement | null {
 }
 
 beforeEach(() => {
+  window.localStorage.clear();
   container = document.createElement('div');
   document.body.appendChild(container);
   root = createRoot(container);
@@ -190,6 +202,7 @@ beforeEach(() => {
 afterEach(() => {
   act(() => root.unmount());
   container.remove();
+  vi.useRealTimers();
   vi.restoreAllMocks();
 });
 
@@ -206,7 +219,7 @@ describe('WorkspaceSection label', () => {
     expect(container.textContent).not.toContain('project');
   });
 
-  it('shows the complete read-only session name in a native tooltip', async () => {
+  it('shows read-only session details from row hover', async () => {
     const listWorkspaceSessionsPage = vi.fn().mockResolvedValue({
       sessions: [
         {
@@ -233,7 +246,33 @@ describe('WorkspaceSection label', () => {
 
     expect(
       container.querySelector('[title="A very long session name"]'),
-    ).not.toBeNull();
+    ).toBeNull();
+    const row = container.querySelector<HTMLElement>('[role="note"]');
+    if (!row) throw new Error('read-only row was not rendered');
+    expect(row.tabIndex).toBe(-1);
+    vi.useFakeTimers();
+    act(() => {
+      row.dispatchEvent(new Event('pointerover', { bubbles: true }));
+      vi.advanceTimersByTime(300);
+    });
+    const tooltip = document.querySelector('[role="dialog"]');
+    expect(tooltip?.textContent).toContain('A very long session name');
+    expect(tooltip?.textContent).toContain('danger');
+    expect(tooltip?.querySelector('[title="/tmp/danger"]')).not.toBeNull();
+    vi.useRealTimers();
+  });
+
+  it('restores and writes the workspace expansion preference', () => {
+    writeWorkspaceExpanded(trustedWorkspace.id, false);
+    renderSection();
+
+    const toggle = container.querySelector<HTMLButtonElement>(
+      'button[aria-expanded]',
+    );
+    expect(toggle?.getAttribute('aria-expanded')).toBe('false');
+    act(() => toggle?.click());
+    expect(toggle?.getAttribute('aria-expanded')).toBe('true');
+    expect(readWorkspaceExpanded(trustedWorkspace.id)).toBe(true);
   });
 
   it('does not render sessions loaded for the previous source', async () => {
@@ -451,6 +490,75 @@ describe('WorkspaceSection label', () => {
     // Channel mode discards the organization sections, so the catalog fetch
     // must be skipped too, mirroring the sidebar's own org prefetch gates.
     expect(listSessionGroups).not.toHaveBeenCalled();
+  });
+
+  it('never bypasses a fenced group catalog for a global reload token', async () => {
+    const listSessionGroups = vi
+      .fn()
+      .mockResolvedValue({ groups: [], colorOptions: [] });
+    const client = {
+      workspaceByCwd: vi.fn(() => ({
+        workspaceGit,
+        listWorkspaceSessionsPage: vi.fn().mockResolvedValue({ sessions: [] }),
+        listSessionGroups,
+      })),
+    } as unknown as DaemonClient;
+
+    renderSection({
+      client,
+      expanded: true,
+      organizationEnabled: true,
+      sessionLiveStateEnabled: true,
+      reloadToken: 0,
+    });
+    await flush();
+    expect(listSessionGroups).not.toHaveBeenCalled();
+
+    renderSection({
+      client,
+      expanded: true,
+      organizationEnabled: true,
+      sessionLiveStateEnabled: true,
+      reloadToken: 1,
+    });
+    await flush();
+    expect(listSessionGroups).not.toHaveBeenCalled();
+  });
+
+  it('defers legacy catalog requests until capability discovery completes', async () => {
+    const listWorkspaceSessionsPage = vi
+      .fn()
+      .mockResolvedValue({ sessions: [] });
+    const listSessionGroups = vi
+      .fn()
+      .mockResolvedValue({ groups: [], colorOptions: [] });
+    const client = {
+      workspaceByCwd: vi.fn(() => ({
+        workspaceGit,
+        listWorkspaceSessionsPage,
+        listSessionGroups,
+      })),
+    } as unknown as DaemonClient;
+
+    renderSection({
+      client,
+      expanded: true,
+      organizationEnabled: true,
+      sessionCatalogRequestsEnabled: false,
+    });
+    await flush();
+    expect(listWorkspaceSessionsPage).not.toHaveBeenCalled();
+    expect(listSessionGroups).not.toHaveBeenCalled();
+
+    renderSection({
+      client,
+      expanded: true,
+      organizationEnabled: true,
+      sessionCatalogRequestsEnabled: true,
+    });
+    await flush();
+    expect(listWorkspaceSessionsPage).toHaveBeenCalledTimes(1);
+    expect(listSessionGroups).toHaveBeenCalledTimes(1);
   });
 
   it('renders channel sessions flat while the channel catalog failed to load', async () => {
@@ -671,6 +779,39 @@ describe('WorkspaceSection label', () => {
 });
 
 describe('WorkspaceSection session loading', () => {
+  it('shows five sessions and resets Show all after the workspace closes', async () => {
+    const sessions = Array.from({ length: 6 }, (_, index) => ({
+      sessionId: `session-${index + 1}`,
+      displayName: `Session ${index + 1}`,
+      workspaceCwd: trustedWorkspace.cwd,
+    }));
+    const listWorkspaceSessionsPage = vi.fn().mockResolvedValue({ sessions });
+    const client = {
+      workspaceByCwd: vi.fn(() => ({
+        workspaceGit,
+        listWorkspaceSessionsPage,
+        listSessionGroups: vi.fn().mockResolvedValue({ groups: [] }),
+      })),
+    } as unknown as DaemonClient;
+
+    renderSection({ client, expanded: true });
+    await flush();
+    expect(container.textContent).toContain('Session 5');
+    expect(container.textContent).not.toContain('Session 6');
+
+    const showAll = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent === 'Show all',
+    );
+    act(() => showAll?.click());
+    expect(container.textContent).toContain('Session 6');
+
+    renderSection({ client, expanded: false });
+    await flush();
+    renderSection({ client, expanded: true });
+    await flush();
+    expect(container.textContent).not.toContain('Session 6');
+  });
+
   it('refreshes the catalog when an expanded workspace loses trust', async () => {
     const listWorkspaceSessionsPage = vi
       .fn()
@@ -770,6 +911,43 @@ describe('WorkspaceSection session loading', () => {
 
     expect(listWorkspaceSessionsPage).toHaveBeenCalledTimes(2);
     expect(container.textContent).toContain('Updated session');
+  });
+
+  it('does not refresh a retained catalog when live-state owns freshness', async () => {
+    const listWorkspaceSessionsPage = vi.fn().mockResolvedValue({
+      sessions: [
+        {
+          sessionId: 'session-1',
+          displayName: 'Initial session',
+        } as DaemonSessionSummary,
+      ],
+    });
+    const client = {
+      workspaceByCwd: vi.fn(() => ({
+        workspaceGit,
+        listWorkspaceSessionsPage,
+        listSessionGroups: vi.fn().mockResolvedValue({ groups: [] }),
+      })),
+    } as unknown as DaemonClient;
+
+    renderSection({ client, expanded: true });
+    await flush();
+    expect(listWorkspaceSessionsPage).toHaveBeenCalledTimes(1);
+
+    renderSection({
+      client,
+      expanded: false,
+      sessionLiveStateEnabled: true,
+    });
+    await flush();
+    renderSection({
+      client,
+      expanded: true,
+      sessionLiveStateEnabled: true,
+    });
+    await flush();
+
+    expect(listWorkspaceSessionsPage).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -960,5 +1138,16 @@ describe('WorkspaceSection git chip', () => {
     await flush();
 
     expect(gitChip()).toBeNull();
+  });
+});
+
+describe('isAbsolutePath', () => {
+  it('accepts unix, Windows and UNC absolute paths and rejects relative ones', async () => {
+    const { isAbsolutePath } = await import('./WorkspaceSection');
+    expect(isAbsolutePath('/x')).toBe(true);
+    expect(isAbsolutePath('C:\\x')).toBe(true);
+    expect(isAbsolutePath('\\\\server\\share')).toBe(true);
+    expect(isAbsolutePath('relative/path')).toBe(false);
+    expect(isAbsolutePath('name')).toBe(false);
   });
 });

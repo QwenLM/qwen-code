@@ -28,7 +28,7 @@ class ListAgentsInvocation extends BaseToolInvocation<
   }
 
   getDescription(): string {
-    return 'List background agents';
+    return 'List ordinary background subagents';
   }
 
   async execute(): Promise<ToolResult> {
@@ -52,7 +52,11 @@ class ListAgentsInvocation extends BaseToolInvocation<
       }));
 
     if (agents.length === 0) {
-      const message = 'No background agents are available in this session.';
+      const message =
+        'No ordinary background subagents are available in this session. ' +
+        'Named Agent Team teammates are not listed here; their results are ' +
+        'delivered automatically through team messaging, so do not use ' +
+        'list_agents to wait for a teammate.';
       return { llmContent: message, returnDisplay: message };
     }
 
@@ -75,9 +79,13 @@ export class ListAgentsTool extends BaseDeclarativeTool<
     super(
       ListAgentsTool.Name,
       ToolDisplayNames.LIST_AGENTS,
-      'List addressable background agents in the current session, including ' +
-        'agents restored from a prior session run. Use the returned task_id ' +
-        'with send_message to continue a running, paused, or completed agent.',
+      'List addressable ordinary background subagents in the current ' +
+        'session, including agents restored from a prior session run. Named ' +
+        'Agent Team teammates are NOT listed here: they have their own team ' +
+        'lifecycle and deliver their final reports automatically, so do not ' +
+        'use list_agents (or poll task_list) to wait for a teammate. Use the ' +
+        'returned task_id with send_message to continue a running, paused, ' +
+        'or completed agent.',
       Kind.Read,
       {
         type: 'object',

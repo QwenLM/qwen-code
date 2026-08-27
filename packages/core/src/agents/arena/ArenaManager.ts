@@ -1089,6 +1089,7 @@ export class ArenaManager {
                 model.modelId,
                 undefined,
                 'headless',
+                this.config.getOutputStyle(),
               ),
               contextFiles: this.config.getUserMemory(),
             }),

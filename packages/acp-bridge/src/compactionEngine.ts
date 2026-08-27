@@ -768,7 +768,7 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
         >;
         slot.chunks.push(text);
         if (event.id !== undefined) slot.lastEventId = event.id;
-        slot.lastMeta = meta ?? slot.lastMeta;
+        slot.lastMeta = mergeTranscriptUpdateMeta(slot.lastMeta, meta);
         slot.lastEnvelopeMeta = event._meta ?? slot.lastEnvelopeMeta;
         slot.lastTurn = captureTurnFields(event, slot.lastTurn);
         slot.lastSessionId = captureSessionId(event) ?? slot.lastSessionId;
@@ -800,7 +800,7 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
       ) {
         lastSlot.chunks.push(text);
         if (event.id !== undefined) lastSlot.lastEventId = event.id;
-        lastSlot.lastMeta = meta ?? lastSlot.lastMeta;
+        lastSlot.lastMeta = mergeTranscriptUpdateMeta(lastSlot.lastMeta, meta);
         lastSlot.lastEnvelopeMeta = event._meta ?? lastSlot.lastEnvelopeMeta;
         lastSlot.lastTurn = captureTurnFields(event, lastSlot.lastTurn);
         lastSlot.lastSessionId =
@@ -1375,11 +1375,28 @@ function mergeTranscriptUpdateMeta(
       ...(extractSourceRecordIdsFromMeta(incomingRecord) ?? []),
     ]),
   ];
+  const existingTranscript = extractTranscriptMeta(existingRecord);
+  const incomingTranscript = extractTranscriptMeta(incomingRecord);
   return {
     ...(existingRecord ?? {}),
     ...(incomingRecord ?? {}),
-    ...(sourceRecordIds.length > 0
-      ? { qwenTranscript: { sourceRecordIds } }
+    ...(existingTranscript || incomingTranscript || sourceRecordIds.length > 0
+      ? {
+          qwenTranscript: {
+            ...(existingTranscript ?? {}),
+            ...(incomingTranscript ?? {}),
+            ...(sourceRecordIds.length > 0 ? { sourceRecordIds } : {}),
+          },
+        }
       : {}),
   };
+}
+
+function extractTranscriptMeta(
+  meta: Record<string, unknown> | undefined,
+): Record<string, unknown> | undefined {
+  const transcript = meta?.['qwenTranscript'];
+  return typeof transcript === 'object' && transcript !== null
+    ? (transcript as Record<string, unknown>)
+    : undefined;
 }

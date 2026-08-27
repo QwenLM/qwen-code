@@ -6,6 +6,7 @@
 
 export {
   DaemonSessionProvider,
+  DEFAULT_MAX_BLOCKS,
   useDaemonActions,
   useOptionalDaemonActions,
   useDaemonSessionOwnerGuard,
@@ -31,6 +32,7 @@ export type {
   DaemonNoticeCategory,
   DaemonNoticeOperation,
   DaemonNoticeSeverity,
+  DaemonPromptFile,
   DaemonPromptImage,
   DaemonPromptStatus,
   DaemonReasoningControls,

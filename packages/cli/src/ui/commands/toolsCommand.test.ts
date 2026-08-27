@@ -27,6 +27,10 @@ const mockTools = [
 ] as Tool[];
 
 describe('toolsCommand', () => {
+  it('opts in to running during streaming', () => {
+    expect(toolsCommand.canRunDuringStreaming).toBe(true);
+  });
+
   it('should display an error if the tool registry is unavailable', async () => {
     const mockContext = createMockCommandContext({
       services: {

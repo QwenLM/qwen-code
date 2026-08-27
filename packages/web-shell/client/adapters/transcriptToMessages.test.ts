@@ -29,6 +29,69 @@ function textBlock(
   };
 }
 
+describe('Assistant branch anchors', () => {
+  it('preserves the checkpoint on the rendered Assistant message', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      textBlock('assistant-1', 'assistant', 'answer', 1, false, {
+        branchRecordId: 'checkpoint-1',
+      }),
+    ]);
+
+    expect(messages[0]).toMatchObject({
+      role: 'assistant',
+      branchRecordId: 'checkpoint-1',
+    });
+  });
+
+  it('does not anchor an insight-only block onto the previous reply', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      textBlock('assistant-1', 'assistant', 'first answer', 1),
+      textBlock(
+        'insight-1',
+        'assistant',
+        '{"insight_ready":{"path":"/tmp/report.md"}}',
+        2,
+        false,
+        { branchRecordId: 'checkpoint-2' },
+      ),
+    ]);
+
+    expect(messages[0]).toMatchObject({
+      role: 'assistant',
+      content: 'first answer',
+    });
+    expect(messages[0]).not.toHaveProperty('branchRecordId');
+    expect(messages.some((message) => message.role === 'insight_ready')).toBe(
+      true,
+    );
+    expect(messages.some((message) => 'branchRecordId' in message)).toBe(false);
+  });
+
+  it("anchors a checkpoint onto the insight block's own text segment", () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      textBlock('assistant-1', 'assistant', 'first answer', 1),
+      textBlock(
+        'insight-1',
+        'assistant',
+        '{"insight_ready":{"path":"/tmp/report.md"}} done',
+        2,
+        false,
+        { branchRecordId: 'checkpoint-2' },
+      ),
+    ]);
+
+    expect(messages[0]).not.toHaveProperty('branchRecordId');
+    const anchored = messages.find(
+      (message) => message.role === 'assistant' && message.content === 'done',
+    );
+    expect(anchored).toMatchObject({
+      role: 'assistant',
+      content: 'done',
+      branchRecordId: 'checkpoint-2',
+    });
+  });
+});
+
 function statusBlock(
   id: string,
   text: string,
@@ -140,6 +203,89 @@ describe('transcriptBlocksToDaemonMessages', () => {
     });
   });
 
+  it('normalizes an unchanged tool block content to a stable reference', () => {
+    const block = toolBlock('t1', 'call-1', 'running', 0, {
+      content: [{ type: 'content', content: { type: 'text', text: 'body' } }],
+    });
+    const first = transcriptBlocksToDaemonMessages([block]);
+    const second = transcriptBlocksToDaemonMessages([block]);
+
+    const firstContent = (first[0] as { tools: { content: unknown }[] })
+      .tools[0].content;
+    const secondContent = (second[0] as { tools: { content: unknown }[] })
+      .tools[0].content;
+    // The normalizer caches by the original block reference, so a block that
+    // did not change yields the same content array across frames,
+    // allowing MessageItem's JSON cache to avoid re-serializing the output.
+    expect(secondContent).toBe(firstContent);
+    expect(Object.isFrozen(firstContent)).toBe(true);
+  });
+
+  it('renormalizes content when a caller replaces the tool block', () => {
+    const block = toolBlock('t1', 'call-1', 'running', 0, {
+      content: [{ type: 'content', content: { type: 'text', text: 'before' } }],
+    });
+    const first = transcriptBlocksToDaemonMessages([block]);
+    const content = block.content as Array<{
+      type: 'content';
+      content: { type: 'text'; text: string };
+    }>;
+    content[0].content.text = 'after';
+    const second = transcriptBlocksToDaemonMessages([{ ...block }]);
+
+    expect(
+      (first[0] as { tools: { content: unknown }[] }).tools[0].content,
+    ).toMatchObject([{ content: { text: 'before' } }]);
+    expect(
+      (second[0] as { tools: { content: unknown }[] }).tools[0].content,
+    ).toMatchObject([{ content: { text: 'after' } }]);
+  });
+
+  it('preserves user file attachment metadata', () => {
+    const data = new Blob(['line one']);
+    const messages = transcriptBlocksToDaemonMessages([
+      textBlock('user-1', 'user', 'check this', 1, false, {
+        files: [
+          {
+            name: 'app.log',
+            mimeType: 'text/plain',
+            data,
+            text: 'line one',
+            attachmentId: 'app.log',
+          },
+        ],
+      }),
+    ]);
+
+    expect(messages[0]).toMatchObject({
+      id: 'user-1',
+      role: 'user',
+      content: 'check this',
+      files: [
+        {
+          name: 'app.log',
+          mimeType: 'text/plain',
+          data,
+          text: 'line one',
+          attachmentId: 'app.log',
+        },
+      ],
+    });
+  });
+
+  it('preserves literal attachment-looking user text', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      textBlock('user-1', 'user', 'check this\n\n@attachment:///data.json', 1),
+    ]);
+
+    expect(messages[0]).toMatchObject({
+      id: 'user-1',
+      role: 'user',
+      content: 'check this\n\n@attachment:///data.json',
+    });
+    expect(messages[0]).not.toHaveProperty('files');
+  });
+
   it('preserves user input annotations metadata', () => {
     const inputAnnotations = [
       {
@@ -204,6 +350,61 @@ describe('transcriptBlocksToDaemonMessages', () => {
         id: 'assistant-1',
         role: 'assistant',
         content: '正常回复',
+        isStreaming: false,
+        timestamp: 2,
+      },
+    ]);
+  });
+
+  it('keeps vision bridge notices separate from assistant output', () => {
+    const notice = {
+      status: 'skipped',
+      convertedCount: 0,
+      omittedCount: 0,
+      modelName: 'qwen3.6-plus',
+      modelEndpoint: 'idealab.alibaba-inc.com',
+      egressOccurred: true,
+    };
+    const messages = transcriptBlocksToDaemonMessages([
+      textBlock('assistant-0', 'assistant', 'Earlier reply', 0),
+      textBlock(
+        'vision-notice',
+        'assistant',
+        'Vision bridge cancelled.',
+        1,
+        false,
+        {
+          meta: {
+            source: 'vision_bridge_notice',
+            qwenDiscreteMessage: true,
+            visionBridgeNotice: notice,
+          },
+        },
+      ),
+      textBlock('assistant-1', 'assistant', 'Normal reply', 2),
+    ]);
+
+    expect(messages).toEqual([
+      {
+        id: 'assistant-0',
+        role: 'assistant',
+        content: 'Earlier reply',
+        isStreaming: false,
+        timestamp: 0,
+      },
+      {
+        id: 'vision-notice',
+        role: 'system',
+        content: 'Vision bridge cancelled.',
+        variant: 'info',
+        source: 'vision_bridge_notice',
+        data: notice,
+        timestamp: 1,
+      },
+      {
+        id: 'assistant-1',
+        role: 'assistant',
+        content: 'Normal reply',
         isStreaming: false,
         timestamp: 2,
       },
@@ -377,11 +578,15 @@ describe('transcriptBlocksToDaemonMessages', () => {
           content: '检查项目结构',
           priority: 'medium',
           status: 'pending',
+          _meta: { qwenTodo: { id: 'inspect' } },
         },
         {
           content: '运行类型检查',
           priority: 'high',
           status: 'in_progress',
+          _meta: {
+            qwenTodo: { id: 'typecheck', blockedBy: ['inspect'] },
+          },
         },
       ],
     };
@@ -397,16 +602,17 @@ describe('transcriptBlocksToDaemonMessages', () => {
         timestamp: 1,
         todos: [
           {
-            id: 'plan-0',
+            id: 'inspect',
             content: '检查项目结构',
             priority: 'medium',
             status: 'pending',
           },
           {
-            id: 'plan-1',
+            id: 'typecheck',
             content: '运行类型检查',
             priority: 'high',
             status: 'in_progress',
+            blockedBy: ['inspect'],
           },
         ],
       },
@@ -448,28 +654,208 @@ describe('transcriptBlocksToDaemonMessages', () => {
     ]);
   });
 
-  it('localizes structured mid-turn inserted status blocks', () => {
-    const messages = transcriptBlocksToDaemonMessages(
-      [
-        statusBlock('mid-1', 'Inserted message: hello', 1, {
-          source: 'mid_turn_message_injected',
-          data: { sessionId: 's1', messages: ['你好'] },
-        }),
-      ],
-      {
-        labels: {
-          midTurnInserted: (message) => `已插入消息：${message}`,
-        },
-      },
-    );
+  it('shows structured mid-turn inserted text without a status prefix', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      statusBlock('mid-1', '你好', 1, {
+        source: 'mid_turn_message_injected',
+        data: { sessionId: 's1', messages: ['你好'] },
+      }),
+    ]);
 
     expect(messages).toEqual([
       expect.objectContaining({
         role: 'system',
-        content: '已插入消息：你好',
+        content: '你好',
         source: 'mid_turn_message_injected',
         data: { sessionId: 's1', messages: ['你好'] },
       }),
+    ]);
+  });
+
+  it('extracts images from mid-turn injected message items', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      statusBlock('mid-1', 'look at this', 1, {
+        source: 'mid_turn_message_injected',
+        data: {
+          sessionId: 's1',
+          messages: ['look at this'],
+          items: [
+            {
+              content: [
+                { type: 'image', data: 'base64data', mimeType: 'image/png' },
+              ],
+            },
+          ],
+        },
+      }),
+    ]);
+
+    expect(messages).toEqual([
+      expect.objectContaining({
+        role: 'system',
+        content: 'look at this',
+        source: 'mid_turn_message_injected',
+        images: [{ data: 'base64data', mimeType: 'image/png' }],
+      }),
+    ]);
+  });
+
+  it('extracts file attachments from mid-turn injected message items', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      statusBlock('mid-1', 'explain this', 1, {
+        source: 'mid_turn_message_injected',
+        data: {
+          sessionId: 's1',
+          messages: ['explain this'],
+          items: [
+            {
+              content: [
+                {
+                  type: 'resource',
+                  attachmentId: 'notes.txt',
+                  mimeType: 'text/plain',
+                  size: 5,
+                },
+              ],
+            },
+          ],
+        },
+      }),
+    ]);
+
+    expect(messages).toEqual([
+      expect.objectContaining({
+        role: 'system',
+        content: 'explain this',
+        source: 'mid_turn_message_injected',
+        files: [
+          {
+            name: 'notes.txt',
+            attachmentId: 'notes.txt',
+            mimeType: 'text/plain',
+          },
+        ],
+      }),
+    ]);
+  });
+
+  it('shows the degraded-media notice when the echo text is empty', () => {
+    // When the stored media is gone at drain, the daemon echoes an empty
+    // messages array whose items carry only the placeholder text block; the
+    // notice must be surfaced instead of rendering an empty bubble.
+    const messages = transcriptBlocksToDaemonMessages([
+      statusBlock('mid-1', '', 1, {
+        source: 'mid_turn_message_injected',
+        data: {
+          sessionId: 's1',
+          messages: [''],
+          messageIds: ['mid-gone'],
+          items: [
+            {
+              content: [
+                {
+                  type: 'text',
+                  text: '[Attachment is no longer available]',
+                },
+              ],
+            },
+          ],
+        },
+      }),
+    ]);
+
+    expect(messages).toEqual([
+      expect.objectContaining({
+        role: 'system',
+        content: '[Attachment is no longer available]',
+        source: 'mid_turn_message_injected',
+      }),
+    ]);
+  });
+
+  it('keeps mid-turn injected echoes that look like status noise', () => {
+    // User content that merely starts like a filtered status line must not be
+    // dropped by the noise filter.
+    const messages = transcriptBlocksToDaemonMessages([
+      statusBlock('mid-1', 'Model switched: check this too', 1, {
+        source: 'mid_turn_message_injected',
+        data: {
+          sessionId: 's1',
+          messages: ['Model switched: check this too'],
+        },
+      }),
+    ]);
+
+    expect(messages).toEqual([
+      expect.objectContaining({
+        role: 'system',
+        content: 'Model switched: check this too',
+        source: 'mid_turn_message_injected',
+      }),
+    ]);
+  });
+
+  it('keeps mid-turn injected echoes that start like plan JSON', () => {
+    // User content starting with the plan projection shape must not be
+    // misrendered as a plan card (which also drops the attached images).
+    const planLikeText =
+      'plan: {"sessionUpdate":"plan","entries":[{"content":"step"}]}';
+    const messages = transcriptBlocksToDaemonMessages([
+      statusBlock('mid-1', planLikeText, 1, {
+        source: 'mid_turn_message_injected',
+        data: {
+          sessionId: 's1',
+          messages: [planLikeText],
+          items: [
+            {
+              content: [
+                { type: 'image', data: 'base64data', mimeType: 'image/png' },
+              ],
+            },
+          ],
+        },
+      }),
+    ]);
+
+    expect(messages).toEqual([
+      expect.objectContaining({
+        role: 'system',
+        content: planLikeText,
+        source: 'mid_turn_message_injected',
+        images: [{ data: 'base64data', mimeType: 'image/png' }],
+      }),
+    ]);
+  });
+
+  it('keeps replayed mid-turn user blocks as inserted messages', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      textBlock('mid-1', 'user', 'with image', 1, false, {
+        meta: {
+          source: 'mid_turn_message_injected',
+          qwenDiscreteMessage: true,
+        },
+        images: [{ data: 'AQID', mimeType: 'image/png' }],
+      }),
+      textBlock('mid-2', 'user', 'text only', 2, false, {
+        meta: {
+          source: 'mid_turn_message_injected',
+          qwenDiscreteMessage: true,
+        },
+      }),
+    ]);
+
+    expect(messages).toMatchObject([
+      {
+        role: 'system',
+        content: 'with image',
+        source: 'mid_turn_message_injected',
+        images: [{ data: 'AQID', mimeType: 'image/png' }],
+      },
+      {
+        role: 'system',
+        content: 'text only',
+        source: 'mid_turn_message_injected',
+      },
     ]);
   });
 
@@ -503,7 +889,7 @@ describe('transcriptBlocksToDaemonMessages', () => {
     ]);
   });
 
-  it('keeps each TodoWrite call as a distinct tool entry with its own todos', () => {
+  it('merges adjacent TodoWrite calls into one tool group like any tool', () => {
     const messages = transcriptBlocksToDaemonMessages([
       toolBlock('todo-1', 'todo-call-1', 'completed', 1, {
         title: 'Update Todos',
@@ -533,9 +919,7 @@ describe('transcriptBlocksToDaemonMessages', () => {
       }),
     ]);
 
-    // Each TodoWrite update stands alone in its own group (it renders as a
-    // self-contained collapsible checklist), rather than merging with adjacent
-    // tool calls.
+    // TodoWrite is an ordinary tool: adjacent calls share one group box.
     expect(messages).toEqual([
       {
         id: 'tg-todo-1',
@@ -546,13 +930,6 @@ describe('transcriptBlocksToDaemonMessages', () => {
             callId: 'todo-call-1',
             toolName: 'TodoWrite',
           }),
-        ],
-      },
-      {
-        id: 'tg-todo-2',
-        role: 'tool_group',
-        timestamp: 2,
-        tools: [
           expect.objectContaining({
             callId: 'todo-call-2',
             toolName: 'TodoWrite',
@@ -702,7 +1079,7 @@ describe('transcriptBlocksToDaemonMessages', () => {
     ]);
   });
 
-  it('never merges todo_write updates into or after a regular tool_group', () => {
+  it('merges todo_write updates with adjacent tool calls like any tool', () => {
     const messages = transcriptBlocksToDaemonMessages([
       toolBlock('t1', 'tc1', 'completed', 1, { toolName: 'Read' }),
       toolBlock('todo-1', 'todo-call-1', 'completed', 2, {
@@ -714,9 +1091,14 @@ describe('transcriptBlocksToDaemonMessages', () => {
     ]);
 
     expect(messages).toMatchObject([
-      { role: 'tool_group', tools: [{ callId: 'tc1' }] },
-      { role: 'tool_group', tools: [{ callId: 'todo-call-1' }] },
-      { role: 'tool_group', tools: [{ callId: 'tc2' }] },
+      {
+        role: 'tool_group',
+        tools: [
+          { callId: 'tc1' },
+          { callId: 'todo-call-1' },
+          { callId: 'tc2' },
+        ],
+      },
     ]);
   });
 

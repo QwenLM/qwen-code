@@ -18,6 +18,7 @@ import * as path from 'node:path';
 import { Storage } from '../../config/storage.js';
 import { isNodeError } from '../../utils/errors.js';
 import { atomicWriteJSON } from '../../utils/atomicFileWrite.js';
+import { isPidAlive } from '../../utils/process-liveness.js';
 import type { TeamFile, TeamMember } from './types.js';
 import {
   TEAMS_DIR,
@@ -292,20 +293,6 @@ export async function createTeamFile(
     encoding: 'utf-8',
     flag: 'wx',
   });
-}
-
-/**
- * Returns true when the given PID belongs to a live process.
- * EPERM means the process exists but is owned by another user —
- * treat as alive.
- */
-function isPidAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (err) {
-    return isNodeError(err) && err.code === 'EPERM';
-  }
 }
 
 /**
