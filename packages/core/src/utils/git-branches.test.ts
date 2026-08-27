@@ -1910,7 +1910,10 @@ describe('gitPull state guards', () => {
     ).not.toThrow();
     expect(fs.readFileSync(path.join(dir, 'a.txt'), 'utf8')).toBe('resolved\n');
     expect(git(dir, 'stash', 'list').trim()).toBe('');
-    git(dir, '-c', 'core.editor=true', 'cherry-pick', '--continue');
+    // `:` is git's special-cased no-op editor and spawns no process:
+    // coreutils `true` is not guaranteed on the Windows lanes' git-visible
+    // PATH, where cherry-pick --continue would fail starting it.
+    git(dir, '-c', 'core.editor=:', 'cherry-pick', '--continue');
     expect(fs.readFileSync(path.join(dir, 'a.txt'), 'utf8')).toBe('resolved\n');
   });
   it('refuses every pull shape while a resolved squash merge is staged', async () => {
@@ -1973,6 +1976,122 @@ describe('gitPull state guards', () => {
     ).not.toThrow();
     expect(fs.readFileSync(path.join(dir, 'a.txt'), 'utf8')).toBe('resolved\n');
     expect(git(dir, 'stash', 'list').trim()).toBe('');
+  });
+
+  it('refuses the force discard for unmerged entries no session head explains', async () => {
+    // A single-commit `cherry-pick -n` stopped on conflict writes no
+    // CHERRY_PICK_HEAD/MERGE_HEAD/SQUASH_MSG/sequencer state — only
+    // unmerged index entries — yet the discard's `reset --hard` destroys
+    // that resolution just as irrecoverably by reflog as the sessions the
+    // guard already covers.
+    const dir = makeRepo();
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'to pick\n');
+    git(dir, 'commit', '-q', '-am', 'to pick');
+    const pick = headSha(dir);
+    git(dir, 'reset', '-q', '--hard', 'HEAD~1');
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'other\n');
+    git(dir, 'commit', '-q', '-am', 'other');
+    expect(() => git(dir, 'cherry-pick', '-n', pick)).toThrow();
+
+    // No probe-able session state exists for the guard's head probes.
+    for (const head of ['MERGE_HEAD', 'CHERRY_PICK_HEAD', 'REVERT_HEAD']) {
+      expect(() => git(dir, 'rev-parse', '-q', '--verify', head)).toThrow();
+    }
+    expect(fs.existsSync(path.join(dir, '.git', 'sequencer'))).toBe(false);
+
+    const remote = makeBareRemote();
+    git(dir, 'remote', 'add', 'origin', remote);
+    git(dir, 'push', '-q', '-u', 'origin', 'HEAD');
+    const clone = makeClone(remote);
+    fs.writeFileSync(path.join(clone, 'remote-only.txt'), 'remote\n');
+    git(clone, 'add', '.');
+    git(clone, 'commit', '-q', '-m', 'remote commit');
+    git(clone, 'push', '-q', 'origin', 'HEAD');
+
+    await expect(gitPull(dir, { force: true })).rejects.toMatchObject({
+      code: 'merge_in_progress',
+    });
+
+    // The refusal precedes the discard: the conflict state is intact.
+    expect(git(dir, 'ls-files', '--unmerged').trim()).not.toBe('');
+  });
+
+  it('refuses every pull shape while a parked no-commit pick sequence holds the sequencer', async () => {
+    // Multiple picks with -n park their todo list in .git/sequencer while
+    // writing no CHERRY_PICK_HEAD/REVERT_HEAD the guard's head probes
+    // read; the staged resolution a stopped pick leaves is just as
+    // unrecoverable by reflog once the discard resets it.
+    const dir = makeRepo();
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'pick one\n');
+    git(dir, 'commit', '-q', '-am', 'pick one');
+    const pickOne = headSha(dir);
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'pick two\n');
+    git(dir, 'commit', '-q', '-am', 'pick two');
+    const pickTwo = headSha(dir);
+    git(dir, 'reset', '-q', '--hard', 'HEAD~2');
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'other\n');
+    git(dir, 'commit', '-q', '-am', 'other');
+    expect(() => git(dir, 'cherry-pick', '-n', pickOne, pickTwo)).toThrow();
+    expect(fs.existsSync(path.join(dir, '.git', 'sequencer'))).toBe(true);
+
+    const remote = makeBareRemote();
+    git(dir, 'remote', 'add', 'origin', remote);
+    git(dir, 'push', '-q', '-u', 'origin', 'HEAD');
+    const clone = makeClone(remote);
+    fs.writeFileSync(path.join(clone, 'remote-only.txt'), 'remote\n');
+    git(clone, 'add', '.');
+    git(clone, 'commit', '-q', '-m', 'remote commit');
+    git(clone, 'push', '-q', 'origin', 'HEAD');
+
+    for (const opts of [{}, { stash: true }, { force: true }] as const) {
+      await expect(gitPull(dir, opts)).rejects.toMatchObject({
+        code: 'merge_in_progress',
+      });
+    }
+
+    // The refusal precedes any action: the parked sequence survives.
+    expect(fs.existsSync(path.join(dir, '.git', 'sequencer'))).toBe(true);
+    expect(git(dir, 'ls-files', '--unmerged').trim()).not.toBe('');
+  });
+
+  it('classifies unmerged entries outside a subdirectory workspace', async () => {
+    // ls-files --unmerged lists only the cwd subtree, and the routes
+    // accept subdirectory workspaces: the probe must run from the
+    // toplevel, or a conflicted index outside the subtree reads as
+    // unmerged:false and the panel offers the stash button on a tree
+    // stashing cannot help. A stopped single-pick cherry-pick -n carries
+    // the unmerged entries without a MERGE_HEAD the plain pull would
+    // refuse on.
+    const dir = makeRepo();
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'to pick\n');
+    git(dir, 'commit', '-q', '-am', 'to pick');
+    const pick = headSha(dir);
+    git(dir, 'reset', '-q', '--hard', 'HEAD~1');
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'other\n');
+    git(dir, 'commit', '-q', '-am', 'other');
+    expect(() => git(dir, 'cherry-pick', '-n', pick)).toThrow();
+
+    const remote = makeBareRemote();
+    git(dir, 'remote', 'add', 'origin', remote);
+    git(dir, 'push', '-q', '-u', 'origin', 'HEAD');
+    const clone = makeClone(remote);
+    fs.writeFileSync(path.join(clone, 'remote-only.txt'), 'remote\n');
+    git(clone, 'add', '.');
+    git(clone, 'commit', '-q', '-m', 'remote commit');
+    git(clone, 'push', '-q', 'origin', 'HEAD');
+
+    fs.mkdirSync(path.join(dir, 'sub'));
+    fs.writeFileSync(path.join(dir, 'sub', 's.txt'), 'untracked\n');
+
+    let thrown: unknown;
+    await gitPull(path.join(dir, 'sub')).catch((err) => {
+      thrown = err;
+    });
+
+    expect(thrown).toMatchObject({
+      code: 'dirty_working_tree',
+      unmerged: true,
+    });
   });
 });
 
@@ -2113,56 +2232,66 @@ describe('gitPull incoming-tip guards', () => {
     expect(git(dir, 'stash', 'list').trim()).toBe('');
   });
 
-  it('pulls through a worktree whose ignored listing exceeds the 10MB buffer', async () => {
-    const dir = makeRepo();
-    fs.writeFileSync(path.join(dir, '.gitignore'), 'bulk\n');
-    git(dir, 'add', '.');
-    git(dir, 'commit', '-q', '-m', 'ignore bulk');
-    const remote = makeBareRemote();
-    git(dir, 'remote', 'add', 'origin', remote);
-    git(dir, 'push', '-q', '-u', 'origin', 'HEAD');
+  // The fixture's shortest created path is ~1.5KB — five 246-byte directory
+  // components under bulk/ plus a 250-byte file name — 48% over XNU's
+  // 1024-byte PATH_MAX, so fs.mkdirSync throws ENAMETOOLONG during fixture
+  // construction on the macOS lane. Shortening is not an option: short
+  // paths need ~120k files to reach the >10MB listing and blow the time
+  // budget.
+  it.runIf(process.platform !== 'darwin')(
+    'pulls through a worktree whose ignored listing exceeds the 10MB buffer',
+    async () => {
+      const dir = makeRepo();
+      fs.writeFileSync(path.join(dir, '.gitignore'), 'bulk\n');
+      git(dir, 'add', '.');
+      git(dir, 'commit', '-q', '-m', 'ignore bulk');
+      const remote = makeBareRemote();
+      git(dir, 'remote', 'add', 'origin', remote);
+      git(dir, 'push', '-q', '-u', 'origin', 'HEAD');
 
-    // A listing past runGitBuffer's fixed 10MB maxBuffer — the ordinary
-    // case for a large node_modules, which enumerates entry-by-entry.
-    // Long paths reach the listing size with fewer files: NTFS creates
-    // files far slower than ext4, and 41,500 one-by-one writes exceeded
-    // the test's 60s budget on the Windows lane.
-    let bulkDir = path.join(dir, 'bulk');
-    fs.mkdirSync(bulkDir);
-    for (let level = 0; level < 5; level++) {
-      bulkDir = path.join(bulkDir, `${'d'.repeat(245)}${level}`);
+      // A listing past runGitBuffer's fixed 10MB maxBuffer — the ordinary
+      // case for a large node_modules, which enumerates entry-by-entry.
+      // Long paths reach the listing size with fewer files: NTFS creates
+      // files far slower than ext4, and 41,500 one-by-one writes exceeded
+      // the test's 60s budget on the Windows lane.
+      let bulkDir = path.join(dir, 'bulk');
       fs.mkdirSync(bulkDir);
-    }
-    const nameFiller = 'x'.repeat(245);
-    for (let i = 0; i < 8_192; i++) {
-      fs.writeFileSync(path.join(bulkDir, `${nameFiller}-${i}.tmp`), '');
-    }
-    const listingBytes = execFileSync(
-      'git',
-      ['ls-files', '--others', '--ignored', '--exclude-standard', '-z'],
-      { cwd: dir, maxBuffer: 32 * 1024 * 1024 },
-    ).length;
-    expect(listingBytes).toBeGreaterThan(10 * 1024 * 1024);
+      for (let level = 0; level < 5; level++) {
+        bulkDir = path.join(bulkDir, `${'d'.repeat(245)}${level}`);
+        fs.mkdirSync(bulkDir);
+      }
+      const nameFiller = 'x'.repeat(245);
+      for (let i = 0; i < 8_192; i++) {
+        fs.writeFileSync(path.join(bulkDir, `${nameFiller}-${i}.tmp`), '');
+      }
+      const listingBytes = execFileSync(
+        'git',
+        ['ls-files', '--others', '--ignored', '--exclude-standard', '-z'],
+        { cwd: dir, maxBuffer: 32 * 1024 * 1024 },
+      ).length;
+      expect(listingBytes).toBeGreaterThan(10 * 1024 * 1024);
 
-    const clone = makeClone(remote);
-    fs.writeFileSync(path.join(clone, 'new.txt'), 'incoming\n');
-    git(clone, 'add', '.');
-    git(clone, 'commit', '-q', '-m', 'add new.txt');
-    git(clone, 'push', '-q', 'origin', 'HEAD');
+      const clone = makeClone(remote);
+      fs.writeFileSync(path.join(clone, 'new.txt'), 'incoming\n');
+      git(clone, 'add', '.');
+      git(clone, 'commit', '-q', '-m', 'add new.txt');
+      git(clone, 'push', '-q', 'origin', 'HEAD');
 
-    fs.writeFileSync(path.join(dir, 'a.txt'), 'local edit\n');
+      fs.writeFileSync(path.join(dir, 'a.txt'), 'local edit\n');
 
-    const result = await gitPull(dir, { stash: true });
+      const result = await gitPull(dir, { stash: true });
 
-    expect(result.success).toBe(true);
-    expect(fs.readFileSync(path.join(dir, 'new.txt'), 'utf8')).toBe(
-      'incoming\n',
-    );
-    expect(fs.readFileSync(path.join(dir, 'a.txt'), 'utf8')).toBe(
-      'local edit\n',
-    );
-    expect(git(dir, 'stash', 'list').trim()).toBe('');
-  }, 60_000);
+      expect(result.success).toBe(true);
+      expect(fs.readFileSync(path.join(dir, 'new.txt'), 'utf8')).toBe(
+        'incoming\n',
+      );
+      expect(fs.readFileSync(path.join(dir, 'a.txt'), 'utf8')).toBe(
+        'local edit\n',
+      );
+      expect(git(dir, 'stash', 'list').trim()).toBe('');
+    },
+    60_000,
+  );
 
   it('refuses a case-variant collision when the repository folds case', async () => {
     const dir = makeRepo();
@@ -2761,6 +2890,49 @@ describe('gitPull incoming-tip guards', () => {
     }
   });
 
+  it('pins the merge against ambient branch mergeoptions', async () => {
+    // branch.<name>.mergeoptions is read before command-line options and
+    // stays reachable through the HOME channel gitEnv() keeps: --no-commit
+    // there would let the pinned merge exit 0 with HEAD unmoved and
+    // MERGE_HEAD left behind, wedging every later pull into
+    // merge_in_progress. The pinned --commit --no-squash must outrank it.
+    const userGitconfig = path.join(hermeticHome, '.gitconfig');
+    fs.writeFileSync(
+      userGitconfig,
+      '[branch "master"]\n\tmergeoptions = --no-commit\n',
+    );
+    try {
+      const dir = makeRepo();
+      const remote = makeBareRemote();
+      git(dir, 'remote', 'add', 'origin', remote);
+      git(dir, 'push', '-q', '-u', 'origin', 'HEAD');
+
+      const clone = makeClone(remote);
+      fs.writeFileSync(path.join(clone, 'remote-only.txt'), 'remote\n');
+      git(clone, 'add', '.');
+      git(clone, 'commit', '-q', '-m', 'remote commit');
+      git(clone, 'push', '-q', 'origin', 'HEAD');
+
+      fs.writeFileSync(path.join(dir, 'local-only.txt'), 'local\n');
+      git(dir, 'add', '.');
+      git(dir, 'commit', '-q', '-m', 'local commit');
+      const headBefore = headSha(dir);
+
+      const result = await gitPull(dir);
+
+      expect(result.success).toBe(true);
+      expect(headSha(dir)).not.toBe(headBefore);
+      expect(() =>
+        git(dir, 'rev-parse', '-q', '--verify', 'MERGE_HEAD'),
+      ).toThrow();
+      expect(git(dir, 'log', '--merges', '--oneline').trim()).not.toBe('');
+      expect(fs.existsSync(path.join(dir, 'remote-only.txt'))).toBe(true);
+      expect(fs.existsSync(path.join(dir, 'local-only.txt'))).toBe(true);
+    } finally {
+      fs.rmSync(userGitconfig, { force: true });
+    }
+  });
+
   it('refuses a pull when incoming files land inside a tracked gitlink the probe cannot enumerate', async () => {
     const dir = makeRepo();
     // An embedded repository tracked as a gitlink (mode 160000): the
@@ -2811,6 +2983,147 @@ describe('gitPull incoming-tip guards', () => {
     );
     expect(fs.readFileSync(path.join(dir, 'a.txt'), 'utf8')).toBe(
       'local edit\n',
+    );
+  });
+
+  it('refuses a pull when incoming files land inside an UNTRACKED nested repository the probe cannot enumerate', async () => {
+    // A manual clone inside the workspace is not a gitlink, but ls-files
+    // is just as blind inside it: the ignored listing cannot see the
+    // shadowed file, so the nested repository must block like a gitlink.
+    // The shadowing file must be ignored for the overwrite to be silent.
+    const dir = makeRepo();
+    const vendorDir = path.join(dir, 'vendor');
+    fs.mkdirSync(vendorDir);
+    git(vendorDir, 'init', '-q', '-b', 'master');
+    git(vendorDir, 'config', 'user.email', 'vendor@example.com');
+    git(vendorDir, 'config', 'user.name', 'Vendor');
+    git(vendorDir, 'config', 'commit.gpgsign', 'false');
+    fs.writeFileSync(path.join(vendorDir, 'lib.txt'), 'vendored\n');
+    git(vendorDir, 'add', '.');
+    git(vendorDir, 'commit', '-q', '-m', 'vendor init');
+    fs.writeFileSync(path.join(dir, '.gitignore'), 'secret.env\n');
+    // Add only the ignore rule: `add .` would track the nested repository
+    // as a gitlink, and this fixture needs it UNTRACKED.
+    git(dir, 'add', '.gitignore');
+    git(dir, 'commit', '-q', '-m', 'ignore secret.env');
+    const remote = makeBareRemote();
+    git(dir, 'remote', 'add', 'origin', remote);
+    git(dir, 'push', '-q', '-u', 'origin', 'HEAD');
+
+    const clone = makeClone(remote);
+    fs.mkdirSync(path.join(clone, 'vendor'), { recursive: true });
+    fs.writeFileSync(path.join(clone, 'vendor', 'secret.env'), 'INCOMING\n');
+    git(clone, 'add', '-f', '.');
+    git(clone, 'commit', '-q', '-m', 'add vendor/secret.env');
+    git(clone, 'push', '-q', 'origin', 'HEAD');
+
+    fs.writeFileSync(path.join(vendorDir, 'secret.env'), 'TOPSECRET-LOCAL\n');
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'local edit\n');
+
+    await expect(gitPull(dir)).rejects.toMatchObject({
+      code: 'ignored_collision',
+    });
+
+    expect(fs.readFileSync(path.join(vendorDir, 'secret.env'), 'utf8')).toBe(
+      'TOPSECRET-LOCAL\n',
+    );
+    expect(fs.readFileSync(path.join(dir, 'a.txt'), 'utf8')).toBe(
+      'local edit\n',
+    );
+  });
+
+  it('refuses a rebase pull when an incoming gitlink lands on a local ignored file', async () => {
+    // The rebase arm enumerates the fetched tip's tree; mode-160000
+    // entries stay out of the additions (a gitlink landing on a tracked
+    // gitlink is a pointer update, not an overwrite), but they must still
+    // refuse when the gitlink lands on a local ignored FILE — the initial
+    // checkout replaces the file with an empty submodule directory, while
+    // the merge arm refuses the identical state.
+    const dir = makeRepo();
+    fs.writeFileSync(path.join(dir, '.gitignore'), 'sub\n');
+    git(dir, 'add', '.');
+    git(dir, 'commit', '-q', '-m', 'ignore sub');
+    const remote = makeBareRemote();
+    git(dir, 'remote', 'add', 'origin', remote);
+    git(dir, 'push', '-q', '-u', 'origin', 'HEAD');
+
+    const clone = makeClone(remote);
+    const subRepo = path.join(clone, 'sub');
+    fs.mkdirSync(subRepo);
+    git(subRepo, 'init', '-q', '-b', 'master');
+    git(subRepo, 'config', 'user.email', 'sub@example.com');
+    git(subRepo, 'config', 'user.name', 'Sub');
+    git(subRepo, 'config', 'commit.gpgsign', 'false');
+    fs.writeFileSync(path.join(subRepo, 'lib.txt'), 'vendored\n');
+    git(subRepo, 'add', '.');
+    git(subRepo, 'commit', '-q', '-m', 'sub init');
+    git(clone, 'add', '-f', 'sub');
+    git(clone, 'commit', '-q', '-m', 'add sub as a gitlink');
+    git(clone, 'push', '-q', 'origin', 'HEAD');
+
+    fs.writeFileSync(path.join(dir, 'sub'), 'SECRET-LOCAL\n');
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'local edit\n');
+
+    await expect(
+      gitPull(dir, { stash: true, rebase: true }),
+    ).rejects.toMatchObject({ code: 'ignored_collision' });
+
+    expect(fs.readFileSync(path.join(dir, 'sub'), 'utf8')).toBe(
+      'SECRET-LOCAL\n',
+    );
+    expect(fs.readFileSync(path.join(dir, 'a.txt'), 'utf8')).toBe(
+      'local edit\n',
+    );
+    expect(git(dir, 'stash', 'list').trim()).toBe('');
+  });
+
+  it('pulls a rebase through an incoming gitlink pointer update', async () => {
+    // The control for the refusal above: an incoming gitlink landing on a
+    // locally TRACKED gitlink is a submodule pointer update, not an
+    // overwrite, and must pull through.
+    const dir = makeRepo();
+    const subRepo = path.join(dir, 'sub');
+    fs.mkdirSync(subRepo);
+    git(subRepo, 'init', '-q', '-b', 'master');
+    git(subRepo, 'config', 'user.email', 'sub@example.com');
+    git(subRepo, 'config', 'user.name', 'Sub');
+    git(subRepo, 'config', 'commit.gpgsign', 'false');
+    fs.writeFileSync(path.join(subRepo, 'lib.txt'), 'vendored v1\n');
+    git(subRepo, 'add', '.');
+    git(subRepo, 'commit', '-q', '-m', 'sub v1');
+    git(dir, 'add', 'sub');
+    git(dir, 'commit', '-q', '-m', 'track sub');
+    const remote = makeBareRemote();
+    git(dir, 'remote', 'add', 'origin', remote);
+    git(dir, 'push', '-q', '-u', 'origin', 'HEAD');
+
+    // Upstream advances the submodule pointer.
+    const clone = makeClone(remote);
+    const cloneSub = path.join(clone, 'sub');
+    // The clone checks the gitlink out as an empty directory already.
+    fs.mkdirSync(cloneSub, { recursive: true });
+    git(cloneSub, 'init', '-q', '-b', 'master');
+    git(cloneSub, 'config', 'user.email', 'sub@example.com');
+    git(cloneSub, 'config', 'user.name', 'Sub');
+    git(cloneSub, 'config', 'commit.gpgsign', 'false');
+    fs.writeFileSync(path.join(cloneSub, 'lib.txt'), 'vendored v2\n');
+    git(cloneSub, 'add', '.');
+    git(cloneSub, 'commit', '-q', '-m', 'sub v2');
+    const newSubSha = headSha(cloneSub);
+    git(clone, 'add', '-f', 'sub');
+    git(clone, 'commit', '-q', '-m', 'advance the sub pointer');
+    git(clone, 'push', '-q', 'origin', 'HEAD');
+
+    fs.writeFileSync(path.join(dir, 'local-only.txt'), 'local\n');
+    git(dir, 'add', '.');
+    git(dir, 'commit', '-q', '-m', 'local commit');
+
+    const result = await gitPull(dir, { rebase: true });
+
+    expect(result.success).toBe(true);
+    expect(git(dir, 'ls-files', '-s', 'sub')).toContain(newSubSha);
+    expect(fs.readFileSync(path.join(dir, 'local-only.txt'), 'utf8')).toBe(
+      'local\n',
     );
   });
 
@@ -4891,6 +5204,41 @@ describe('gitPull incoming-tip guards', () => {
     });
 
     expect(fs.readFileSync(path.join(dir, 'caf\u00e9-notes.md'), 'utf8')).toBe(
+      'local secret\n',
+    );
+    expect(fs.readFileSync(path.join(dir, 'a.txt'), 'utf8')).toBe(
+      'local edit\n',
+    );
+    expect(git(dir, 'stash', 'list').trim()).toBe('');
+  });
+
+  it('refuses a case-fold collision that only up-then-low folding maps together', async () => {
+    // ς/σ (like µ/μ) are distinct under Unicode lowercase mapping but one
+    // file on the case-folding filesystems this probe exists for: the
+    // NTFS/APFS tables fold them together, so the probe's fold must.
+    const dir = makeRepo();
+    fs.writeFileSync(path.join(dir, '.gitignore'), 'final-\u03c3.md\n');
+    git(dir, 'add', '.');
+    git(dir, 'commit', '-q', '-m', 'ignore the final notes');
+    const remote = makeBareRemote();
+    git(dir, 'remote', 'add', 'origin', remote);
+    git(dir, 'push', '-q', '-u', 'origin', 'HEAD');
+
+    const clone = makeClone(remote);
+    fs.writeFileSync(path.join(clone, 'final-\u03c2.md'), 'incoming\n');
+    git(clone, 'add', '-f', 'final-\u03c2.md');
+    git(clone, 'commit', '-q', '-m', 'add the sigma-variant notes');
+    git(clone, 'push', '-q', 'origin', 'HEAD');
+
+    git(dir, 'config', 'core.ignorecase', 'true');
+    fs.writeFileSync(path.join(dir, 'final-\u03c3.md'), 'local secret\n');
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'local edit\n');
+
+    await expect(gitPull(dir, { stash: true })).rejects.toMatchObject({
+      code: 'ignored_collision',
+    });
+
+    expect(fs.readFileSync(path.join(dir, 'final-\u03c3.md'), 'utf8')).toBe(
       'local secret\n',
     );
     expect(fs.readFileSync(path.join(dir, 'a.txt'), 'utf8')).toBe(

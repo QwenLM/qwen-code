@@ -60,7 +60,8 @@ fetched upstream tip, never as a bare `git pull`: re-fetching between
 the probe and the merge would let a commit pushed into that window
 bypass the probe, and on the force path could fail a fetch after the
 local changes were already discarded. The merge passes `--ff --no-edit --no-autostash --no-verify-signatures
---no-gpg-sign` (the rebase passes `--no-autostash --no-gpg-sign`) so
+--no-gpg-sign --commit --no-squash` (the rebase passes `--no-autostash
+--no-gpg-sign`) so
 divergent branches merge instead of fataling on git builds without a
 `pull.rebase` / `pull.ff` policy, and ambient config the HOME/system
 channels keep reachable cannot change the outcome host-dependently:
@@ -68,12 +69,17 @@ channels keep reachable cannot change the outcome host-dependently:
 changes through a stash the caller never learns about; `merge.ff = only`
 would fatal the pinned merge on diverged branches, recreating the exact
 dead-end this feature exists to eliminate; `merge.verifySignatures =
-true` would fatal on every unsigned tip, even a fast-forward; and
+true` would fatal on every unsigned tip, even a fast-forward;
 `commit.gpgsign = true` would fatal the merge/rebase commit write
 whenever the daemon process cannot sign, leaving the MERGE_HEAD the
-update created behind. A configured `pull.rebase` or `pull.ff` policy —
-and the `merge.ff`, `merge.verifySignatures`, and `commit.gpgsign` keys
-above — is deliberately overridden by this pinned shape: the resolution
+update created behind; and `branch.<name>.mergeoptions` is read before
+command-line options, so a `--no-commit` or `--squash` injected there
+would stop the pinned merge before committing — exit 0, HEAD unmoved,
+MERGE_HEAD left behind — while the pinned `--commit --no-squash` parses
+after the mergeoptions defaults and wins. A configured `pull.rebase` or `pull.ff` policy —
+and the `merge.ff`, `merge.verifySignatures`, `commit.gpgsign`, and
+`branch.<name>.mergeoptions` keys above — is deliberately overridden by
+this pinned shape: the resolution
 flow must behave the same on every host, honoring `pull.ff = only`
 would recreate the exact dead-end this feature exists to eliminate (the
 update refuses instead of resolving), and ambient policy is what makes

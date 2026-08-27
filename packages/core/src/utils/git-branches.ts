@@ -741,6 +741,23 @@ async function hasStoppedSquash(
   return fs.existsSync(path.resolve(cwd, rel));
 }
 
+// A multi-commit `cherry-pick -n` or `revert -n` stopped on conflict
+// writes no sequence head — only the sequencer's parked todo list — yet
+// the staged resolution it holds is just as unrecoverable by reflog once
+// the discard resets it. git removes the directory on --abort/--quit and
+// after a completed sequence, so only a genuinely parked session trips
+// this probe.
+async function hasSequencerState(
+  cwd: string,
+  env?: Readonly<Record<string, string | undefined>>,
+): Promise<boolean> {
+  const rel = (
+    await runGit(cwd, ['rev-parse', '--git-path', 'sequencer'], env)
+  ).trim();
+  if (!rel) return false;
+  return fs.existsSync(path.resolve(cwd, rel));
+}
+
 async function hasInProgressRebase(
   cwd: string,
   env?: Readonly<Record<string, string | undefined>>,
@@ -759,9 +776,15 @@ async function hasUnmergedEntries(
   cwd: string,
   env?: Readonly<Record<string, string | undefined>>,
 ): Promise<boolean> {
+  // ls-files lists only the cwd subtree, and the routes accept subdirectory
+  // workspaces: probe from the toplevel so unmerged entries outside the
+  // subtree count too.
+  const toplevel = (
+    await runGit(cwd, ['rev-parse', '--show-toplevel'], env).catch(() => cwd)
+  ).trim();
   return (
     (
-      await runGit(cwd, ['ls-files', '--unmerged'], env).catch(() => '')
+      await runGit(toplevel, ['ls-files', '--unmerged'], env).catch(() => '')
     ).trim() !== ''
   );
 }
@@ -849,7 +872,10 @@ async function emptyTreeSha(
 // additions). A rebase's initial detach-checkout
 // writes the ENTIRE fetched tip's tree before the replay starts, so the
 // rebase shape enumerates that tree instead — paths unchanged upstream
-// but deleted locally are written by it too. On an unborn HEAD the merge
+// but deleted locally are written by it too, except paths the tip tracks
+// as gitlinks, which compare against the ignored listing separately: a
+// gitlink landing on a tracked gitlink is a pointer update, but a gitlink
+// landing on an ignored file destroys it. On an unborn HEAD the merge
 // base is the empty tree, since HEAD does not resolve yet and every
 // incoming path is new to the branch. The local side enumerates the
 // ignored files present in the worktree with `ls-files --others
@@ -934,17 +960,25 @@ async function incomingIgnoredPaths(
       additions.push(entry);
     }
   };
+  const incomingGitlinks: Buffer[] = [];
   if (includeReplayedAdditions && headExists) {
-    collect(
-      splitBuffer(
-        await runGitBuffer(toplevel, ['ls-tree', '-r', '-z', fetchedTip], env),
-        0,
-      )
-        // A path the tip still tracks as a gitlink is not an overwrite;
-        // drop mode-160000 entries and keep the paths of the rest.
-        .filter((entry) => !entry.toString('binary').startsWith('160000 '))
-        .map((entry) => entry.subarray(entry.indexOf(0x09) + 1)),
-    );
+    for (const entry of splitBuffer(
+      await runGitBuffer(toplevel, ['ls-tree', '-r', '-z', fetchedTip], env),
+      0,
+    )) {
+      const entryPath = entry.subarray(entry.indexOf(0x09) + 1);
+      if (entry.toString('binary').startsWith('160000 ')) {
+        // Kept out of the additions: the additions compare against the
+        // tracked-gitlink set, and an incoming gitlink landing on a
+        // locally tracked gitlink is a pointer update, not an overwrite.
+        // It still destroys a local ignored FILE at the same path (the
+        // checkout replaces it with an empty submodule directory), so it
+        // compares against the ignored listing separately below.
+        incomingGitlinks.push(entryPath);
+      } else {
+        collect([entryPath]);
+      }
+    }
   }
   for (const base of bases) {
     // An unborn branch has no local commits to replay.
@@ -977,7 +1011,7 @@ async function incomingIgnoredPaths(
       ),
     );
   }
-  if (additions.length === 0) return [];
+  if (additions.length === 0 && incomingGitlinks.length === 0) return [];
   // The local enumeration is structurally blind inside a tracked gitlink
   // (mode 160000): ls-files never descends into a nested repository's
   // directory, and the gitlink itself is not "others" — so an upstream
@@ -996,6 +1030,29 @@ async function incomingIgnoredPaths(
       const tab = entry.indexOf(0x09);
       if (tab === -1) return;
       for (const key of collisionKeys(entry.subarray(tab + 1), foldCase)) {
+        gitlinks.add(key);
+      }
+    },
+  );
+  // An UNTRACKED nested repository (a manual clone inside the workspace)
+  // is just as opaque to the local enumeration — ls-files never descends
+  // into it — and nothing else blocks an overwrite inside it, so confirmed
+  // nested repositories join the blocking set exactly like tracked
+  // gitlinks. Only collapsed `dir/` entries can hold one: a bounded stat
+  // per entry, no filesystem walk.
+  await streamGitListing(
+    toplevel,
+    ['ls-files', '--others', '--exclude-standard', '-z'],
+    env,
+    (entry) => {
+      if (!entry.toString('binary').endsWith('/')) return;
+      const dirName = entry.subarray(0, entry.length - 1);
+      if (
+        !fs.existsSync(path.join(toplevel, dirName.toString('utf8'), '.git'))
+      ) {
+        return;
+      }
+      for (const key of collisionKeys(dirName, foldCase)) {
         gitlinks.add(key);
       }
     },
@@ -1025,6 +1082,7 @@ async function incomingIgnoredPaths(
   );
   return findIgnoredCollisions(
     additions,
+    incomingGitlinks,
     ignoredFiles,
     ignoredDirs,
     gitlinks,
@@ -1047,7 +1105,10 @@ function collisionKeys(raw: Buffer, foldCase: boolean): string[] {
   if (foldCase) {
     const text = raw.toString('utf8');
     if (Buffer.byteLength(text, 'utf8') === raw.length) {
-      keys.push(text.normalize('NFC').toLowerCase());
+      // Up-then-low approximates case folding: lowercase mapping alone is
+      // not folding (ς/σ and µ/μ stay distinct), while the NTFS/APFS
+      // tables fold those pairs together.
+      keys.push(text.normalize('NFC').toUpperCase().toLowerCase());
     }
   }
   return keys;
@@ -1055,17 +1116,22 @@ function collisionKeys(raw: Buffer, foldCase: boolean): string[] {
 
 function findIgnoredCollisions(
   additions: Buffer[],
+  incomingGitlinks: Buffer[],
   ignoredFiles: ReadonlySet<string>,
   ignoredDirs: ReadonlySet<string>,
   gitlinks: ReadonlySet<string>,
   foldCase: boolean,
 ): Buffer[] {
-  return additions.filter((addition) =>
-    collisionKeys(addition, foldCase).some((key) => {
+  const collides = (keys: string[], withTrackedGitlinks: boolean): boolean =>
+    keys.some((key) => {
       // Exact match, or the incoming file sits where an ignored
       // directory's contents — or a tracked gitlink's nested repository —
       // live.
-      if (ignoredFiles.has(key) || ignoredDirs.has(key) || gitlinks.has(key)) {
+      if (
+        ignoredFiles.has(key) ||
+        ignoredDirs.has(key) ||
+        (withTrackedGitlinks && gitlinks.has(key))
+      ) {
         return true;
       }
       // An ignored file or a tracked gitlink sits at a directory prefix
@@ -1076,11 +1142,29 @@ function findIgnoredCollisions(
         slash = key.indexOf('/', slash + 1)
       ) {
         const prefix = key.slice(0, slash);
-        if (ignoredFiles.has(prefix) || gitlinks.has(prefix)) return true;
+        if (
+          ignoredFiles.has(prefix) ||
+          (withTrackedGitlinks && gitlinks.has(prefix))
+        ) {
+          return true;
+        }
       }
       return false;
-    }),
+    });
+  const collisions = additions.filter((addition) =>
+    collides(collisionKeys(addition, foldCase), true),
   );
+  // An incoming gitlink landing on a local ignored file destroys it like
+  // an incoming file would — the checkout replaces it with an empty
+  // submodule directory — but landing on a locally tracked gitlink is a
+  // pointer update, not an overwrite, so the tracked-gitlink set does not
+  // block this shape.
+  for (const gitlink of incomingGitlinks) {
+    if (collides(collisionKeys(gitlink, foldCase), false)) {
+      collisions.push(gitlink);
+    }
+  }
+  return collisions;
 }
 
 // Fail closed: an unreadable ignorecase setting assumes a folding
@@ -1298,8 +1382,13 @@ async function hasForeignHead(
 // cherry-pick or revert carries no MERGE_HEAD or rebase state dir, yet
 // `stash push` and `reset --hard` both abandon it and the staged
 // resolution blob is unrecoverable by reflog, so the guard covers those
-// heads — and a stopped am, which carries the same unrecoverable staged
-// resolution — too.
+// heads, a stopped am (the same unrecoverable staged resolution), and a
+// multi-commit `-n` cherry-pick/revert parked on its sequencer todo
+// list. A SINGLE-commit `cherry-pick -n`/`revert -n` stopped on conflict
+// writes no state any probe here reads — only unmerged index entries —
+// which the force path's unmerged check refuses fail-closed; once its
+// conflicts are resolved and staged, neither this guard nor git itself
+// can see it.
 async function refuseForeignMergeOrRebase(
   cwd: string,
   env?: Readonly<Record<string, string | undefined>>,
@@ -1335,6 +1424,12 @@ async function refuseForeignMergeOrRebase(
     throw new GitPullFailure(
       'rebase_in_progress',
       'cannot pull: an am session is in progress — finish, skip, or abort it before updating',
+    );
+  }
+  if (await hasSequencerState(cwd, env)) {
+    throw new GitPullFailure(
+      'merge_in_progress',
+      'cannot pull: a cherry-pick or revert sequence is in progress — finish or abort it before updating',
     );
   }
 }
@@ -1491,6 +1586,17 @@ async function gitPullInner(
     // would destroy that state and erase its sequence heads before any
     // later guard could see them.
     await reverifyPullIdentities(cwd, headRef, env);
+    // The guard re-run above found no session head the unmerged entries
+    // could belong to — the shape a single-commit `cherry-pick -n` or
+    // `revert -n` stopped on conflict leaves behind. The discard's
+    // `reset --hard` would destroy that staged resolution, unrecoverable
+    // by reflog, so fail closed.
+    if (await hasUnmergedEntries(cwd, env)) {
+      throw new GitPullFailure(
+        'merge_in_progress',
+        'cannot discard changes and update: the index carries unresolved conflicts that no merge, rebase, cherry-pick, or revert session explains — resolve or reset them from a terminal first',
+      );
+    }
     await runGit(cwd, ['reset', '--hard'], env);
     await runGit(cwd, ['clean', '-fd'], env);
   } else if (opts?.stash) {
@@ -1586,7 +1692,12 @@ async function gitPullInner(
   // fast-forward; --no-gpg-sign — commit.gpgsign = true fatals the commit
   // write whenever the daemon process cannot sign (no TTY/agent), leaving
   // the MERGE_HEAD this update created behind with no recovery on the
-  // plain shape. (git rebase has no verifySignatures knob to neutralize.)
+  // plain shape; --commit --no-squash — git reads
+  // branch.<name>.mergeoptions before command-line options, and the HOME
+  // channel stays reachable, so a --no-commit or --squash injected there
+  // would otherwise exit 0 with HEAD unmoved and the MERGE_HEAD this
+  // update created left behind.
+  // (git rebase has no verifySignatures knob to neutralize.)
   let output: string;
   let restoreFailed = false;
   let updateAttempted = false;
@@ -1643,6 +1754,8 @@ async function gitPullInner(
             '--no-autostash',
             '--no-verify-signatures',
             '--no-gpg-sign',
+            '--commit',
+            '--no-squash',
             fetchedTip,
           ],
       env,
