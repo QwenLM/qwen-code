@@ -203,23 +203,98 @@ fi
 # inside the runner workspace (a symlinked leaf was healed, a symlinked
 # runner workspace refused), so the recursive chmod cannot escape it.
 chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chmod -R u+rwX "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace write permissions; checkout may fail on leftover read-only files"
+# qwen-triage.yml documents this pool's behaviour: a detached
+# postinstall child of a previous job can outlive that job —
+# self-hosted runners do not reap job processes — and a survivor
+# with this job's uid waits out the one-shot sweep below, then
+# re-plants the fresh tree, appends to \`$GITHUB_ENV\`, or rewrites
+# the fresh release-state config files while the secret-bearing
+# steps run (0700 does not exclude the owner). Kill every live
+# process of this user outside the runner agent's own tree BEFORE
+# the file sweep, so the sweep is not racing a live process.
+#
+# The exclusion is the load-bearing part: a bare \`pkill -u\` would
+# kill the Runner.Worker executing this very step. Walk the PPID
+# chain from this shell to collect the agent's ancestor tree; a
+# process is kept only if its own parent chain reaches that tree.
+# Zombies do not count: one has already exited and can no longer
+# re-plant anything — and it cannot be killed either, so counting
+# one means this check can never clear. A root runner skips the
+# reap: as root every system process is killable, so no exclusion
+# can make the sweep safe.
+if [ "$RUNNER_UID" != "0" ]; then
+  REAP_USER="$(id -un)"
+  REAP_TREE=" $$ "
+  reap_pid=$$
+  while :; do
+    reap_pid="$(ps -o ppid= -p "$reap_pid" 2>/dev/null | tr -d '[:space:]')" || break
+    [ -n "$reap_pid" ] || break
+    [ "$reap_pid" -gt 1 ] 2>/dev/null || break
+    REAP_TREE="\${REAP_TREE}\${reap_pid} "
+  done
+  live_outside_tree() {
+    # One pid per line: live processes of this user whose parent
+    # chain never reaches the runner agent tree, zombies dropped.
+    ps -o pid= -o ppid= -o stat= -u "$REAP_USER" 2>/dev/null | awk -v tree="$REAP_TREE" '
+      BEGIN {
+        n = split(tree, t, " ")
+        for (i = 1; i <= n; i++) if (t[i] != "") keep[t[i]] = 1
+      }
+      { pids[NR] = $1; pp[$1] = $2; st[$1] = $3 }
+      END {
+        for (i = 1; i <= NR; i++) {
+          p = pids[i]
+          if (st[p] ~ /^Z/) continue
+          q = p
+          inside = (q in keep)
+          for (d = 0; d <= NR && !inside; d++) {
+            if (!(q in pp)) break
+            q = pp[q]
+            if (q in keep) { inside = 1; break }
+            if (q <= 1) break
+          }
+          if (!inside) print p
+        }
+      }'
+  }
+  reap_pids="$(live_outside_tree)" || true
+  if [ -n "$reap_pids" ]; then
+    printf '%s\\n' "$reap_pids" | xargs -r kill -KILL -- 2>/dev/null || true
+  fi
+  for _ in 1 2 3; do
+    reap_pids="$(live_outside_tree)" || true
+    [ -n "$reap_pids" ] || break
+    sleep 1
+    printf '%s\\n' "$reap_pids" | xargs -r kill -KILL -- 2>/dev/null || true
+  done
+  survivors="$(live_outside_tree)" || true
+  if [ -n "$survivors" ]; then
+    # Name them: a bare "processes survived" refusal leaves a real
+    # threat and a harmless leftover indistinguishable — including
+    # to the person reading the failure.
+    echo "::error::Processes of the runner user survived SIGKILL; refusing to run release steps with credentials."
+    printf '%s\\n' "$survivors" | while IFS= read -r survivor_pid; do
+      [ -n "$survivor_pid" ] || continue
+      ps -o pid= -o stat= -o args= -p "$survivor_pid" 2>/dev/null | sed 's/^/::error::  surviving process: /' || true
+    done
+    exit 1
+  fi
+fi
 find "$WS" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
-# Later steps must not read pool-persistent Git, npm, Docker, gh,
-# or setup-node state. A fresh directory avoids an unbounded scrub
-# denylist and stale lock files before checkout runs; the reserved
-# RUNNER_TOOL_CACHE variable cannot be overridden, so purge Node.
-TOOL_CACHE="$(realpath -m -- "\${RUNNER_TOOL_CACHE:?}" 2>/dev/null)" || exit 1
-# On the standard self-hosted layout the tool cache is a SIBLING
-# of the workspace (<root>/_work/_tool vs <root>/_work/qwen-code),
-# not inside it: anchor the containment to the runner work root.
-# Canonicalization above resolves symlinks, so a planted link
-# cannot smuggle an outside path through either arm.
-RW_ROOT="$(dirname -- "$RWS")"
-case "$TOOL_CACHE" in
-  "$RWS"/*|"$RW_ROOT"/_tool) ;;
-  *) echo "::error::refusing to purge tool cache outside the runner workspace: \${TOOL_CACHE}"; exit 1 ;;
-esac
-rm -rf -- "\${TOOL_CACHE}/node" 2>/dev/null || sudo -n rm -rf -- "\${TOOL_CACHE}/node" || exit 1
+# Later steps must not read pool-persistent Git, npm, Docker, or
+# gh state. A fresh directory avoids an unbounded scrub denylist
+# and stale lock files before checkout runs.
+#
+# The pool-wide RUNNER_TOOL_CACHE stays untouched ON PURPOSE:
+# lanes in three other pool workflows (qwen-autofix.yml's
+# issue-autofix/build-cli/review-address, serve-ab.yml's ab,
+# repo-hygiene.yml's dedup lane) resolve Node from it through
+# un-gated setup-node, while the pool-routed release jobs never
+# read the tool cache — their pool path is PATH Node via
+# .github/actions/self-hosted-node. Purging \`_tool/node\` here
+# would strip Node out from under the next such job on this
+# member, and nodejs.org may be unreachable through the pool's
+# egress proxy.
 release_state="$(mktemp -d "\${RUNNER_TEMP:?}/release-state.XXXXXX")" || exit 1
 : > "\${release_state}/gitconfig" || exit 1
 : > "\${release_state}/npmrc" || exit 1
@@ -417,26 +492,11 @@ describe('release workflow', () => {
         }
       }
 
-      // The runner-provided cache path is still validated before recursive
-      // deletion so a poisoned intermediate symlink cannot redirect the purge.
-      {
-        const outside = mkdtempSync(join(tmpdir(), 'release-tool-cache-'));
-        const { result, base } = runWipe({ RUNNER_TOOL_CACHE: outside });
-        try {
-          expect(result.status).not.toBe(0);
-          expect(`${result.stdout}${result.stderr}`).toContain(
-            'refusing to purge tool cache outside the runner workspace',
-          );
-          expect(lstatSync(join(outside, 'node')).isDirectory()).toBe(true);
-        } finally {
-          rmSync(outside, { recursive: true, force: true });
-          rmSync(base, { recursive: true, force: true });
-        }
-      }
-
       // Pool geometry: the tool cache is a SIBLING of the runner workspace
       // (<root>/_work/_tool vs <root>/_work/qwen-code) — the standard
-      // self-hosted layout — so the containment must accept it.
+      // self-hosted layout. The wipe must leave it untouched: other pool
+      // lanes resolve Node from it through un-gated setup-node, while the
+      // pool-routed release jobs never read it.
       {
         const runnerRoot = mkdtempSync(join(tmpdir(), 'release-wipe-pool-'));
         const rws = join(runnerRoot, '_work', 'qwen-code');
@@ -457,6 +517,10 @@ describe('release workflow', () => {
           mkdirSync(env.HOME);
           mkdirSync(env.RUNNER_TEMP);
           mkdirSync(join(env.RUNNER_TOOL_CACHE, 'node'), { recursive: true });
+          writeFileSync(
+            join(env.RUNNER_TOOL_CACHE, 'node', 'marker.txt'),
+            'pool-node',
+          );
           const result = spawnSync(
             'bash',
             ['-e', '-o', 'pipefail', '-c', wipeScript],
@@ -464,10 +528,16 @@ describe('release workflow', () => {
           );
           expect(result.status).toBe(0);
           expect(readdirSync(workspace)).toHaveLength(0);
-          // The sibling tool cache's node directory is purged.
-          expect(() =>
-            lstatSync(join(env.RUNNER_TOOL_CACHE, 'node')),
-          ).toThrow();
+          // The sibling tool cache's node directory SURVIVES the wipe.
+          expect(
+            lstatSync(join(env.RUNNER_TOOL_CACHE, 'node')).isDirectory(),
+          ).toBe(true);
+          expect(
+            readFileSync(
+              join(env.RUNNER_TOOL_CACHE, 'node', 'marker.txt'),
+              'utf8',
+            ),
+          ).toBe('pool-node');
         } finally {
           rmSync(runnerRoot, { recursive: true, force: true });
         }
@@ -537,6 +607,83 @@ describe('release workflow', () => {
           const entries = readdirSync(workspace);
           expect(entries).toHaveLength(0);
         } finally {
+          rmSync(base, { recursive: true, force: true });
+        }
+      }
+
+      // Process reap (R1-1): a detached survivor of a PREVIOUS pool job —
+      // orphaned to init exactly like a postinstall child that outlives its
+      // job — is killed before the file sweep runs. The orphan's parent
+      // chain never reaches this shell's ancestor tree, so the reap must
+      // reach it; the run still exits 0 and the workspace is wiped.
+      {
+        const pidFile = join(
+          tmpdir(),
+          `release-reap-pid-${process.pid}-${Date.now()}`,
+        );
+        // setsid + an exiting parent orphans the sleeper immediately
+        // (reparented to init, outside the wipe shell's ancestor tree).
+        // The outer loop waits for the pid file so the read cannot race.
+        spawnSync('bash', [
+          '-c',
+          'setsid bash -c \'echo $$ > "$1"; exec sleep 30\' x "$1" & ' +
+            'for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do ' +
+            '[ -s "$1" ] && exit 0; sleep 0.1; done; exit 1',
+          'x',
+          pidFile,
+          pidFile,
+        ]);
+        const survivorPid = Number(readFileSync(pidFile, 'utf8').trim());
+        rmSync(pidFile);
+        expect(survivorPid).toBeGreaterThan(1);
+        expect(() => process.kill(survivorPid, 0)).not.toThrow();
+        const { result, base } = runWipe({});
+        try {
+          expect(result.status).toBe(0);
+          // The orphan did not survive the reap.
+          expect(() => process.kill(survivorPid, 0)).toThrow();
+        } finally {
+          try {
+            process.kill(survivorPid, 'SIGKILL');
+          } catch {
+            // already reaped — expected
+          }
+          rmSync(base, { recursive: true, force: true });
+        }
+      }
+
+      // Reap fail-closed (R1-1): if a process outside the agent tree
+      // cannot be killed, the wipe must refuse before any checkout with
+      // credentials and name the survivor — never proceed. A stub `ps`
+      // reports one unkillable fake process for the whole run.
+      {
+        const stubDir = mkdtempSync(join(tmpdir(), 'release-reap-stub-'));
+        writeFileSync(
+          join(stubDir, 'ps'),
+          [
+            '#!/bin/bash',
+            '# Tree-walk probe: no parent — the kept tree is the wipe shell.',
+            'case "$*" in "-o ppid= -p "*) exit 0 ;; esac',
+            '# Live listing: always one fake survivor outside the tree.',
+            'case "$*" in *-u*) echo "424242 1 S fake-survivor-unkillable" ;;',
+            ' *) echo "424242 S fake-survivor-unkillable" ;; esac',
+            '',
+          ].join('\n'),
+        );
+        chmodSync(join(stubDir, 'ps'), 0o755);
+        const { result, base } = runWipe({
+          PATH: `${stubDir}:${process.env.PATH}`,
+        });
+        try {
+          expect(result.status).not.toBe(0);
+          expect(`${result.stdout}${result.stderr}`).toContain(
+            'survived SIGKILL; refusing to run release steps with credentials',
+          );
+          expect(`${result.stdout}${result.stderr}`).toContain(
+            'surviving process: 424242',
+          );
+        } finally {
+          rmSync(stubDir, { recursive: true, force: true });
           rmSync(base, { recursive: true, force: true });
         }
       }
@@ -686,10 +833,9 @@ describe('release workflow', () => {
       'integration_docker',
     ]) {
       const steps = releaseYaml.jobs[id].steps;
-      // The wipe purges the pool's tool cache, and in-tree precedent says
-      // nodejs.org may be unreachable through the ECS egress proxy: pool
-      // runs must reuse the machine's Node, with setup-node reserved for
-      // the hosted fallback.
+      // In-tree precedent says nodejs.org may be unreachable through the
+      // ECS egress proxy: pool runs must reuse the machine's Node, with
+      // setup-node reserved for the hosted fallback.
       const setupNode = steps.find((step) =>
         String(step.uses ?? '').includes('actions/setup-node'),
       );

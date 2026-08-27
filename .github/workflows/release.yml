@@ -163,23 +163,98 @@ jobs:
           # inside the runner workspace (a symlinked leaf was healed, a symlinked
           # runner workspace refused), so the recursive chmod cannot escape it.
           chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chmod -R u+rwX "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace write permissions; checkout may fail on leftover read-only files"
+          # qwen-triage.yml documents this pool's behaviour: a detached
+          # postinstall child of a previous job can outlive that job —
+          # self-hosted runners do not reap job processes — and a survivor
+          # with this job's uid waits out the one-shot sweep below, then
+          # re-plants the fresh tree, appends to `$GITHUB_ENV`, or rewrites
+          # the fresh release-state config files while the secret-bearing
+          # steps run (0700 does not exclude the owner). Kill every live
+          # process of this user outside the runner agent's own tree BEFORE
+          # the file sweep, so the sweep is not racing a live process.
+          #
+          # The exclusion is the load-bearing part: a bare `pkill -u` would
+          # kill the Runner.Worker executing this very step. Walk the PPID
+          # chain from this shell to collect the agent's ancestor tree; a
+          # process is kept only if its own parent chain reaches that tree.
+          # Zombies do not count: one has already exited and can no longer
+          # re-plant anything — and it cannot be killed either, so counting
+          # one means this check can never clear. A root runner skips the
+          # reap: as root every system process is killable, so no exclusion
+          # can make the sweep safe.
+          if [ "$RUNNER_UID" != "0" ]; then
+            REAP_USER="$(id -un)"
+            REAP_TREE=" $$ "
+            reap_pid=$$
+            while :; do
+              reap_pid="$(ps -o ppid= -p "$reap_pid" 2>/dev/null | tr -d '[:space:]')" || break
+              [ -n "$reap_pid" ] || break
+              [ "$reap_pid" -gt 1 ] 2>/dev/null || break
+              REAP_TREE="${REAP_TREE}${reap_pid} "
+            done
+            live_outside_tree() {
+              # One pid per line: live processes of this user whose parent
+              # chain never reaches the runner agent tree, zombies dropped.
+              ps -o pid= -o ppid= -o stat= -u "$REAP_USER" 2>/dev/null | awk -v tree="$REAP_TREE" '
+                BEGIN {
+                  n = split(tree, t, " ")
+                  for (i = 1; i <= n; i++) if (t[i] != "") keep[t[i]] = 1
+                }
+                { pids[NR] = $1; pp[$1] = $2; st[$1] = $3 }
+                END {
+                  for (i = 1; i <= NR; i++) {
+                    p = pids[i]
+                    if (st[p] ~ /^Z/) continue
+                    q = p
+                    inside = (q in keep)
+                    for (d = 0; d <= NR && !inside; d++) {
+                      if (!(q in pp)) break
+                      q = pp[q]
+                      if (q in keep) { inside = 1; break }
+                      if (q <= 1) break
+                    }
+                    if (!inside) print p
+                  }
+                }'
+            }
+            reap_pids="$(live_outside_tree)" || true
+            if [ -n "$reap_pids" ]; then
+              printf '%s\n' "$reap_pids" | xargs -r kill -KILL -- 2>/dev/null || true
+            fi
+            for _ in 1 2 3; do
+              reap_pids="$(live_outside_tree)" || true
+              [ -n "$reap_pids" ] || break
+              sleep 1
+              printf '%s\n' "$reap_pids" | xargs -r kill -KILL -- 2>/dev/null || true
+            done
+            survivors="$(live_outside_tree)" || true
+            if [ -n "$survivors" ]; then
+              # Name them: a bare "processes survived" refusal leaves a real
+              # threat and a harmless leftover indistinguishable — including
+              # to the person reading the failure.
+              echo "::error::Processes of the runner user survived SIGKILL; refusing to run release steps with credentials."
+              printf '%s\n' "$survivors" | while IFS= read -r survivor_pid; do
+                [ -n "$survivor_pid" ] || continue
+                ps -o pid= -o stat= -o args= -p "$survivor_pid" 2>/dev/null | sed 's/^/::error::  surviving process: /' || true
+              done
+              exit 1
+            fi
+          fi
           find "$WS" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
-          # Later steps must not read pool-persistent Git, npm, Docker, gh,
-          # or setup-node state. A fresh directory avoids an unbounded scrub
-          # denylist and stale lock files before checkout runs; the reserved
-          # RUNNER_TOOL_CACHE variable cannot be overridden, so purge Node.
-          TOOL_CACHE="$(realpath -m -- "${RUNNER_TOOL_CACHE:?}" 2>/dev/null)" || exit 1
-          # On the standard self-hosted layout the tool cache is a SIBLING
-          # of the workspace (<root>/_work/_tool vs <root>/_work/qwen-code),
-          # not inside it: anchor the containment to the runner work root.
-          # Canonicalization above resolves symlinks, so a planted link
-          # cannot smuggle an outside path through either arm.
-          RW_ROOT="$(dirname -- "$RWS")"
-          case "$TOOL_CACHE" in
-            "$RWS"/*|"$RW_ROOT"/_tool) ;;
-            *) echo "::error::refusing to purge tool cache outside the runner workspace: ${TOOL_CACHE}"; exit 1 ;;
-          esac
-          rm -rf -- "${TOOL_CACHE}/node" 2>/dev/null || sudo -n rm -rf -- "${TOOL_CACHE}/node" || exit 1
+          # Later steps must not read pool-persistent Git, npm, Docker, or
+          # gh state. A fresh directory avoids an unbounded scrub denylist
+          # and stale lock files before checkout runs.
+          #
+          # The pool-wide RUNNER_TOOL_CACHE stays untouched ON PURPOSE:
+          # lanes in three other pool workflows (qwen-autofix.yml's
+          # issue-autofix/build-cli/review-address, serve-ab.yml's ab,
+          # repo-hygiene.yml's dedup lane) resolve Node from it through
+          # un-gated setup-node, while the pool-routed release jobs never
+          # read the tool cache — their pool path is PATH Node via
+          # .github/actions/self-hosted-node. Purging `_tool/node` here
+          # would strip Node out from under the next such job on this
+          # member, and nodejs.org may be unreachable through the pool's
+          # egress proxy.
           release_state="$(mktemp -d "${RUNNER_TEMP:?}/release-state.XXXXXX")" || exit 1
           : > "${release_state}/gitconfig" || exit 1
           : > "${release_state}/npmrc" || exit 1
@@ -242,7 +317,7 @@ jobs:
 
       # Avoid setup-node downloads on ECS, where nodejs.org may be
       # unreachable through the egress proxy; reuse the machine's Node
-      # instead (the wipe above purges the pool's tool cache).
+      # instead.
       - name: 'Use pre-installed Node.js (self-hosted)'
         if: "${{ runner.environment == 'self-hosted' }}"
         uses: './.github/actions/self-hosted-node'
@@ -334,7 +409,7 @@ jobs:
 
       # Avoid setup-node downloads on ECS, where nodejs.org may be
       # unreachable through the egress proxy; reuse the machine's Node
-      # instead (the wipe above purges the pool's tool cache).
+      # instead.
       - name: 'Use pre-installed Node.js (self-hosted)'
         if: "${{ runner.environment == 'self-hosted' }}"
         uses: './.github/actions/self-hosted-node'
@@ -413,7 +488,7 @@ jobs:
 
       # Avoid setup-node downloads on ECS, where nodejs.org may be
       # unreachable through the egress proxy; reuse the machine's Node
-      # instead (the wipe above purges the pool's tool cache).
+      # instead.
       - name: 'Use pre-installed Node.js (self-hosted)'
         if: "${{ runner.environment == 'self-hosted' }}"
         uses: './.github/actions/self-hosted-node'
@@ -489,7 +564,7 @@ jobs:
 
       # Avoid setup-node downloads on ECS, where nodejs.org may be
       # unreachable through the egress proxy; reuse the machine's Node
-      # instead (the wipe above purges the pool's tool cache).
+      # instead.
       - name: 'Use pre-installed Node.js (self-hosted)'
         if: "${{ runner.environment == 'self-hosted' }}"
         uses: './.github/actions/self-hosted-node'
