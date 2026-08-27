@@ -523,13 +523,17 @@ describe('AppContainer State Management', () => {
     // unhandled rejection that fails the whole run, so pin the surface here,
     // where a missing method fails this test instead of leaking.
     await mockConfig.initialize();
-    const agentTool = mockConfig
-      .getToolRegistry()
-      ?.getTool(ToolNames.AGENT) as unknown as
-      | { refreshSubagents: () => Promise<void> }
-      | undefined;
-    expect(agentTool).toBeDefined();
-    await expect(agentTool!.refreshSubagents()).resolves.toBeUndefined();
+    try {
+      const agentTool = mockConfig
+        .getToolRegistry()
+        ?.getTool(ToolNames.AGENT) as unknown as
+        | { refreshSubagents: () => Promise<void> }
+        | undefined;
+      expect(agentTool).toBeDefined();
+      await expect(agentTool!.refreshSubagents()).resolves.toBeUndefined();
+    } finally {
+      await mockConfig.shutdown();
+    }
   });
 
   describe('speculative tool results', () => {

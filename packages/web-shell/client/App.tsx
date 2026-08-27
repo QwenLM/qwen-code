@@ -13432,6 +13432,7 @@ export function App({
                             const messageListContent = (
                               <LiveMessageList
                                 ref={messageListRef}
+                                sessionKey={connection.sessionId}
                                 baselineBlocks={blocks}
                                 baselineSummary={blockChangeSummary}
                                 baselineMessages={messages}

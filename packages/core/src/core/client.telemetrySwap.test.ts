@@ -89,6 +89,11 @@ function makeEnv() {
   const config: any = {
     getSessionId: () => sessionId,
     getResumedSessionData: () => resumedData,
+    // `initialize()` calls restoreLoadedSkillsFromHistory, which resolves the
+    // SKILL tool through the registry; this mock only exercises the telemetry
+    // swap, so return an empty registry (no SKILL tool → the restore is a
+    // no-op) rather than let the call throw `getToolRegistry is not a function`.
+    getToolRegistry: () => ({ getTool: () => undefined }),
     swap(id: string, data?: ResumedSessionData) {
       sessionId = id;
       resumedData = data;
