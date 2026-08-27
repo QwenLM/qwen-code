@@ -662,7 +662,7 @@ describe('DaemonChannelBridge', () => {
     bridge.stop();
   });
 
-  it('forwards sourceId to the session factory for new and loaded sessions', async () => {
+  it('forwards source metadata to the session factory for new and loaded sessions', async () => {
     const events = new EventQueue();
     const session = createFakeSession(events);
     const factory = vi.fn().mockResolvedValue(session);
@@ -672,13 +672,20 @@ describe('DaemonChannelBridge', () => {
     });
 
     await bridge.start();
-    await bridge.newSession('/repo', { sourceId: 'feishu-main' });
-    await bridge.loadSession('session-1', '/repo', { sourceId: 'feishu-main' });
+    await bridge.newSession('/repo', {
+      sourceType: 'channel',
+      sourceId: 'feishu-main',
+    });
+    await bridge.loadSession('session-1', '/repo', {
+      sourceType: 'channel',
+      sourceId: 'feishu-main',
+    });
 
     expect(factory).toHaveBeenNthCalledWith(1, {
       workspaceCwd: '/repo',
       modelServiceId: undefined,
       sessionScope: 'thread',
+      sourceType: 'channel',
       sourceId: 'feishu-main',
     });
     expect(factory).toHaveBeenNthCalledWith(2, {
@@ -686,6 +693,7 @@ describe('DaemonChannelBridge', () => {
       modelServiceId: undefined,
       sessionId: 'session-1',
       sessionScope: 'thread',
+      sourceType: 'channel',
       sourceId: 'feishu-main',
     });
 
