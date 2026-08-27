@@ -82,28 +82,25 @@ export class CommandService {
     for (const cmd of allCommands) {
       let finalName = cmd.name;
 
+      // Shared collision scheme: probe the base, then numeric suffixes, so
+      // skill commands and other extension commands resolve free names
+      // identically (#9408).
+      const claimFreeName = (base: string): string => {
+        if (!commandMap.has(base)) return base;
+        let suffix = 1;
+        while (commandMap.has(`${base}${suffix}`)) suffix++;
+        return `${base}${suffix}`;
+      };
+
       if (cmd.extensionName && commandMap.has(cmd.name)) {
         if (cmd.kind === CommandKind.SKILL) {
           // Skill commands already carry their extension prefix, so adding
           // another would be wrong. Suffix a number instead.
-          let suffix = 1;
-          while (commandMap.has(`${cmd.name}${suffix}`)) {
-            suffix++;
-          }
-          finalName = `${cmd.name}${suffix}`;
+          finalName = claimFreeName(cmd.name);
         } else {
           // Non-skill extension commands get renamed to
           // `extensionName.commandName`.
-          let renamedName = `${cmd.extensionName}.${cmd.name}`;
-          let suffix = 1;
-
-          // Keep trying until we find a name that doesn't conflict
-          while (commandMap.has(renamedName)) {
-            renamedName = `${cmd.extensionName}.${cmd.name}${suffix}`;
-            suffix++;
-          }
-
-          finalName = renamedName;
+          finalName = claimFreeName(`${cmd.extensionName}.${cmd.name}`);
         }
       }
 
