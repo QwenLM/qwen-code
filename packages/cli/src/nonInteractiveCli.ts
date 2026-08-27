@@ -34,6 +34,7 @@ import {
   InputFormat,
   LoopType,
   ToolNames,
+  goalToolResultProvenance,
   uiTelemetryService,
   parseAndFormatApiError,
   createDebugLogger,
@@ -226,6 +227,8 @@ interface HeadlessGoalTurn {
   controller: AbortController;
   origin: 'runtime' | 'user';
   continuationContext: string;
+  objectiveUpdated?: boolean;
+  windDown?: boolean;
   verifierFeedback?: string;
 }
 
@@ -647,6 +650,10 @@ export async function runNonInteractive(
           controller: new AbortController(),
           origin: 'runtime',
           continuationContext: input.continuationContext,
+          ...(input.objectiveUpdated
+            ? { objectiveUpdated: input.objectiveUpdated }
+            : {}),
+          ...(input.windDown ? { windDown: true } : {}),
           ...(input.verifierFeedback
             ? { verifierFeedback: input.verifierFeedback }
             : {}),
@@ -661,6 +668,13 @@ export async function runNonInteractive(
     };
     const bindGoalHost = () => {
       goalHostUnbind ??= config.bindGoalTurnHost(goalHost);
+    };
+    const markGoalTurnDelivered = (turn: HeadlessGoalTurn): void => {
+      try {
+        config.getGoalRuntime().markTurnDelivered(turn.turnKey);
+      } catch {
+        // Goal runtime is optional during early initialization.
+      }
     };
     let settlingGoalTurn: HeadlessGoalTurn | undefined;
     let goalTurnSettlement: Promise<void> | undefined;
@@ -1275,6 +1289,7 @@ export async function runNonInteractive(
                   'The Goal runtime did not schedule a continuation.',
                 );
               }
+              markGoalTurnDelivered(activeGoalTurn);
               initialPartList = buildGoalContinuationParts(activeGoalTurn);
               slashHandled = true;
               break;
@@ -2424,16 +2439,21 @@ export async function runNonInteractive(
             statusByResponse.get(response) ??
             (response.error ? 'error' : 'success');
           toolResponseParts.push(...finalizedParts);
-          chatRecordingService?.recordToolResult?.(finalizedParts, {
-            callId: request.callId,
-            status,
-            resultDisplay: response.resultDisplay,
-            persistedOutputFiles: finalized[index].persistedOutputFiles,
-            artifacts: finalized[index].artifacts,
-            error: response.error,
-            errorType: response.errorType,
-            executionStatus: response.executionStatus,
-          });
+          const goalProvenance = goalToolResultProvenance(request);
+          chatRecordingService?.recordToolResult?.(
+            finalizedParts,
+            {
+              callId: request.callId,
+              status,
+              resultDisplay: response.resultDisplay,
+              persistedOutputFiles: finalized[index].persistedOutputFiles,
+              artifacts: finalized[index].artifacts,
+              error: response.error,
+              errorType: response.errorType,
+              executionStatus: response.executionStatus,
+            },
+            ...(goalProvenance ? ([goalProvenance] as const) : ([] as const)),
+          );
         }
 
         return {
@@ -2694,6 +2714,7 @@ export async function runNonInteractive(
             const nextGoalTurn = queuedGoalTurns.shift();
             if (nextGoalTurn) {
               activeGoalTurn = nextGoalTurn;
+              markGoalTurnDelivered(nextGoalTurn);
               isFirstGoalSegment = true;
               currentMessages = [
                 {
@@ -2724,6 +2745,7 @@ export async function runNonInteractive(
             const nextGoalTurn = queuedGoalTurns.shift();
             if (nextGoalTurn) {
               activeGoalTurn = nextGoalTurn;
+              markGoalTurnDelivered(nextGoalTurn);
               isFirstGoalSegment = true;
               currentMessages = [
                 {

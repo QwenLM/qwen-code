@@ -548,6 +548,66 @@ describe('WebShellSidebar collapsed session group persistence', () => {
     ).not.toBeNull();
   });
 
+  it('shows the expanded attention pill short label with the full accessible name', async () => {
+    active.sessions = [
+      makeSession('attention-approval', {
+        displayName: 'Needs approval',
+        isWaitingForPermission: true,
+      }),
+    ];
+    active.data = active.sessions;
+    renderSidebar();
+    await flushSidebar();
+
+    let pill = container.querySelector<HTMLElement>(
+      `.${sidebarStyles.sessionAttention}`,
+    );
+    expect(pill?.textContent).toBe('Approval');
+    expect(pill?.getAttribute('aria-label')).toBe('Waiting for approval');
+    expect(
+      pill?.classList.contains(sidebarStyles.sessionAttentionUserInput),
+    ).toBe(false);
+
+    active.sessions = [
+      makeSession('attention-approval-and-input', {
+        displayName: 'Needs approval and input',
+        isWaitingForPermission: true,
+        isWaitingForUserQuestion: true,
+      }),
+    ];
+    active.data = active.sessions;
+    renderSidebar();
+    await flushSidebar();
+
+    pill = container.querySelector<HTMLElement>(
+      `.${sidebarStyles.sessionAttention}`,
+    );
+    expect(pill?.textContent).toBe('Approval');
+    expect(pill?.getAttribute('aria-label')).toBe('Waiting for approval');
+    expect(
+      pill?.classList.contains(sidebarStyles.sessionAttentionUserInput),
+    ).toBe(false);
+
+    active.sessions = [
+      makeSession('attention-input', {
+        displayName: 'Needs input',
+        isWaitingForUserQuestion: true,
+      }),
+    ];
+    active.data = active.sessions;
+    renderSidebar();
+    await flushSidebar();
+
+    pill = container.querySelector<HTMLElement>(
+      `.${sidebarStyles.sessionAttention}`,
+    );
+    expect(pill?.textContent).toBe('Input');
+    expect(pill?.getAttribute('aria-label')).toBe('User input needed');
+    expect(
+      pill?.classList.contains(sidebarStyles.sessionAttentionUserInput),
+    ).toBe(true);
+  });
+
   it('keeps project sessions available from the collapsed sidebar', async () => {
     connection.capabilities = {
       qwenCodeVersion: '1.2.3',

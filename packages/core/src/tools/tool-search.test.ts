@@ -37,7 +37,7 @@ const baseConfigParams: ConfigParameters = {
   targetDir: '/test/dir',
   debugMode: false,
   userMemory: '',
-  geminiMdFileCount: 0,
+  memoryFileCount: 0,
   approvalMode: ApprovalMode.DEFAULT,
 };
 

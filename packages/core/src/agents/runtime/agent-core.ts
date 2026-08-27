@@ -19,7 +19,10 @@
 import { randomUUID } from 'node:crypto';
 import { createChildAbortController } from '../../utils/abortController.js';
 import { reportError } from '../../utils/errorReporting.js';
-import { subagentNameContext } from '../../utils/subagentNameContext.js';
+import {
+  subagentIdentityContext,
+  subagentNameContext,
+} from '../../utils/subagentNameContext.js';
 import { runWithInvocationContext } from '../../utils/invocation-context.js';
 import type { Config } from '../../config/config.js';
 import {
@@ -403,6 +406,8 @@ export class AgentCore {
   private promptOrdinal = 0;
   readonly subagentId: string;
   readonly name: string;
+  /** Business/task name used for local per-invocation usage labels. */
+  readonly taskName?: string;
   readonly runtimeContext: Config;
   readonly promptConfig: PromptConfig;
   readonly modelConfig: ModelConfig;
@@ -501,10 +506,13 @@ export class AgentCore {
     eventEmitter?: AgentEventEmitter,
     hooks?: AgentHooks,
     runtimeView?: RuntimeContentGeneratorView,
+    taskName?: string,
+    subagentId?: string,
   ) {
-    const randomPart = randomUUID().replace(/-/g, '').slice(0, 8);
-    this.subagentId = `${name}-${randomPart}`;
+    this.subagentId =
+      subagentId ?? `${name}-${randomUUID().replace(/-/g, '').slice(0, 8)}`;
     this.name = name;
+    this.taskName = taskName;
     this.runtimeContext = runtimeContext;
     this.promptConfig = promptConfig;
     this.modelConfig = modelConfig;
@@ -684,6 +692,10 @@ export class AgentCore {
       if (name === ToolNames.AGENT) return !nestingAllowed;
       return excludedFromSubagents.has(name);
     };
+    const isHiddenByPermissionAllowList = (name: string | undefined): boolean =>
+      !!name &&
+      toolRegistry.isPermissionDeferred?.(name) === true &&
+      toolRegistry.isDeferredAndHidden?.(name) === true;
 
     if (this.toolConfig) {
       const asStrings = this.toolConfig.tools.filter(
@@ -698,14 +710,16 @@ export class AgentCore {
         hasWildcard ||
         (asStrings.length === 0 && onlyInlineDecls.length === 0)
       ) {
-        // Subagents inherit the full tool surface — including deferred tools
-        // (MCP, low-frequency built-ins). Subagents are one-shot and don't
-        // have the same "save tokens" lifecycle as the main chat, so hiding
-        // schemas would silently break existing `tools: ['*']` configs.
+        // Subagents inherit ordinary deferred tools (MCP, low-frequency
+        // built-ins). Permission-allowlist-deferred schemas remain hidden
+        // until ToolSearch reveals them, preserving the registry allowlist.
         toolsList.push(
           ...toolRegistry
             .getFunctionDeclarations({ includeDeferred: true })
-            .filter((t) => !isExcluded(t.name)),
+            .filter(
+              (t) =>
+                !isExcluded(t.name) && !isHiddenByPermissionAllowList(t.name),
+            ),
         );
       } else {
         // Explicit tool list: apply the full subagent exclusion set (not just
@@ -713,7 +727,7 @@ export class AgentCore {
         // (CRON_CREATE, TASK_STOP, SEND_MESSAGE, etc.) from leaking into
         // explicitly-configured subagents that happen to list them.
         const allowedNames = asStrings.filter((name) => {
-          if (isExcluded(name)) {
+          if (isExcluded(name) || isHiddenByPermissionAllowList(name)) {
             this.runtimeContext
               .getDebugLogger()
               ?.debug(
@@ -734,7 +748,7 @@ export class AgentCore {
       // workflow/cron/team tools into a subagent).
       toolsList.push(
         ...onlyInlineDecls.filter((d) => {
-          if (isExcluded(d.name)) {
+          if (isExcluded(d.name) || isHiddenByPermissionAllowList(d.name)) {
             this.runtimeContext
               .getDebugLogger()
               ?.debug(
@@ -747,11 +761,14 @@ export class AgentCore {
       );
     } else {
       // Inherit all available tools by default when not specified — see the
-      // wildcard branch above for why deferred tools are included.
+      // wildcard branch above for the two deferred-tool classes.
       toolsList.push(
         ...toolRegistry
           .getFunctionDeclarations({ includeDeferred: true })
-          .filter((t) => !isExcluded(t.name)),
+          .filter(
+            (t) =>
+              !isExcluded(t.name) && !isHiddenByPermissionAllowList(t.name),
+          ),
       );
     }
 
@@ -898,39 +915,48 @@ export class AgentCore {
     inheritedAgentDepth?: number,
   ): Promise<T> {
     const runInner = () =>
-      subagentNameContext.run(this.name, () => {
-        const runWithView = () =>
-          this.withRuntimeView(() => {
-            // Re-record this agent's prepared declarations on the live
-            // frame. The set prepareTools() recorded died with its frame;
-            // every round woken later (enqueueMessage, background/resume
-            // continuation turns) enters a fresh frame built from the
-            // delivery caller's ambient store — undefined from the
-            // top-level session, the SENDER agent's set when delivered
-            // inside another agent's tool body. Both leave tool_search's
-            // `select:` gate misreading this agent's surface. This runs
-            // inside the innermost frame (after the inheritedAgentId
-            // re-entry below) so the restored deferred-approval frame is
-            // patched too. No-op until this core's first prepareTools()
-            // completes: until then the frame keeps whatever set its
-            // shallow copy inherited.
-            if (this.declaredToolNames) {
-              recordCurrentAgentDeclaredToolNames(this.declaredToolNames);
-            }
-            return fn();
-          }, inheritedView);
-        // inheritedAgentDepth restores the agent's original nesting depth.
-        // Without it the frame recomputes from the UI's frame-less async
-        // chain to depth 0, and an approved `agent` tool call from a
-        // leaf-depth sub-agent would bypass maxSubagentDepth.
-        return inheritedAgentId
-          ? runWithAgentContext(
-              inheritedAgentId,
-              runWithView,
-              inheritedAgentDepth,
-            )
-          : runWithView();
-      });
+      subagentNameContext.run(this.name, () =>
+        subagentIdentityContext.run(
+          {
+            type: this.name,
+            id: this.subagentId,
+            ...(this.taskName ? { taskName: this.taskName } : {}),
+          },
+          () => {
+            const runWithView = () =>
+              this.withRuntimeView(() => {
+                // Re-record this agent's prepared declarations on the live
+                // frame. The set prepareTools() recorded died with its frame;
+                // every round woken later (enqueueMessage, background/resume
+                // continuation turns) enters a fresh frame built from the
+                // delivery caller's ambient store — undefined from the
+                // top-level session, the SENDER agent's set when delivered
+                // inside another agent's tool body. Both leave tool_search's
+                // `select:` gate misreading this agent's surface. This runs
+                // inside the innermost frame (after the inheritedAgentId
+                // re-entry below) so the restored deferred-approval frame is
+                // patched too. No-op until this core's first prepareTools()
+                // completes: until then the frame keeps whatever set its
+                // shallow copy inherited.
+                if (this.declaredToolNames) {
+                  recordCurrentAgentDeclaredToolNames(this.declaredToolNames);
+                }
+                return fn();
+              }, inheritedView);
+            // inheritedAgentDepth restores the agent's original nesting depth.
+            // Without it the frame recomputes from the UI's frame-less async
+            // chain to depth 0, and an approved `agent` tool call from a
+            // leaf-depth sub-agent would bypass maxSubagentDepth.
+            return inheritedAgentId
+              ? runWithAgentContext(
+                  inheritedAgentId,
+                  runWithView,
+                  inheritedAgentDepth,
+                )
+              : runWithView();
+          },
+        ),
+      );
     return inheritedTeammateIdentity
       ? runWithTeammateIdentity(inheritedTeammateIdentity, runInner)
       : runInner();

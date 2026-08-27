@@ -764,6 +764,38 @@ describe('loggers', () => {
       );
     });
 
+    it('keeps task identity local to UI telemetry', () => {
+      const event = new ApiResponseEvent(
+        'test-response-id',
+        'test-model',
+        100,
+        'prompt-id',
+        undefined,
+        undefined,
+        undefined,
+        'general-purpose',
+      );
+
+      logApiResponse(mockConfig, event, undefined, {
+        id: 'general-purpose-12345678',
+        type: 'general-purpose',
+        taskName: 'inspect customer records',
+      });
+
+      expect(mockUiEvent.addEvent).toHaveBeenCalledWith(
+        expect.objectContaining({
+          subagent_name: 'general-purpose',
+          subagent_id: 'general-purpose-12345678',
+          subagent_task_name: 'inspect customer records',
+        }),
+        'test-session-id',
+      );
+      const attributes = mockLogger.emit.mock.calls[0]![0].attributes;
+      expect(attributes.subagent_name).toBe('general-purpose');
+      expect(attributes).not.toHaveProperty('subagent_id');
+      expect(attributes).not.toHaveProperty('subagent_task_name');
+    });
+
     it.each([
       'prompt_suggestion',
       'forked_query',

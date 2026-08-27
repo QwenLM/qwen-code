@@ -957,6 +957,14 @@ describe('BackgroundAgentResumeService', () => {
     );
 
     expect(resumed).toBeDefined();
+    expect(subagentManager.createAgentHeadless).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.anything(),
+      expect.objectContaining({
+        taskName: 'Resume with hooks',
+        subagentId: agentId,
+      }),
+    );
     expect(hookSystem.fireSubagentStartEvent).toHaveBeenCalledWith(
       agentId,
       'researcher',
@@ -2449,6 +2457,8 @@ describe('BackgroundAgentResumeService', () => {
         ],
         executionAllowedTools: expectedExecutionAllowedTools,
       });
+      expect(createArgs?.[9]).toBe(launchPrompt);
+      expect(createArgs?.[10]).toBe(agentId);
       expect(executeContext).toBeDefined();
       const contextArg = executeContext as
         | { get(key: string): unknown }
