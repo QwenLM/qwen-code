@@ -67,6 +67,17 @@ describe('toolResultDisplayCompaction', () => {
     expect(compacted).toContain('truncated from');
   });
 
+  it('should preserve the unchanged flag through compaction', () => {
+    const display = {
+      type: 'todo_list' as const,
+      todos: [{ id: '1', content: 'Task', status: 'pending' as const }],
+      changes: { created: [], completed: [] },
+      unchanged: true,
+    };
+    const compacted = compactToolResultDisplayForHistory(display);
+    expect((compacted as TodoResultDisplay).unchanged).toBe(true);
+  });
+
   it('uses saved session wording when compacting recording strings', () => {
     const value = `start-${'x'.repeat(
       MAX_RETAINED_TOOL_RESULT_DISPLAY_CHARS,

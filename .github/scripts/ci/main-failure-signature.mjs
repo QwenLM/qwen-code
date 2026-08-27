@@ -156,6 +156,10 @@ const ALSO_FAILING_HEADING = '## Also failing';
 // under it.
 const ALSO_FAILING_BLOCK = /\n*##\s+Also failing\s*\n+(?:- [^\n]*\n?)+/;
 
+// The same split/merge contract — head / recorded occurrences / tail around
+// the marker, human text kept verbatim, occurrences newest-first and capped —
+// is re-implemented in bash/awk by .github/scripts/image-build-failure-issue.sh
+// for the build-and-publish-image workflow; a fix to one must reach the other.
 function splitOccurrenceBlock(body) {
   const index = body.indexOf(OCCURRENCE_MARKER);
   if (index === -1) return { head: body.trimEnd(), lines: [], tail: '' };

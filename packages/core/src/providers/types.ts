@@ -67,6 +67,9 @@ export interface ProviderConfig {
    */
   modelsEditable?: boolean;
 
+  /** Load the account's current model recommendations from `/models`. */
+  supportsModelDiscovery?: boolean;
+
   /** Display name prefix for model entries, or a function of baseUrl. */
   modelNamePrefix: string | ((baseUrl: string) => string);
 
