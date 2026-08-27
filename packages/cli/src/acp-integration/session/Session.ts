@@ -2029,6 +2029,18 @@ export class Session implements SessionContext {
     string,
     WorkflowSnapshot
   >();
+  /**
+   * Deletion order, so a refresh can tell which runs were deleted AFTER
+   * its disk read began. `refreshWorkflowHistory` reads the directory
+   * and then merges without holding a claim, while deletion holds one —
+   * a delete that lands between the read and the merge would otherwise
+   * be overwritten by the stale listing and the run would reappear
+   * until the next refresh. Keyed by runId so a later re-run of the same
+   * id (a retry reuses it) is not suppressed: its sequence predates that
+   * refresh's mark.
+   */
+  private workflowDeletionSeq = 0;
+  private readonly workflowDeletionSeqByRunId = new Map<string, number>();
   #shellStatusChangeCallback: (() => void) | undefined;
   private readonly workflowApprovalAbortController = new AbortController();
   private activeTodoPlanRevision?: {
@@ -3403,10 +3415,14 @@ export class Session implements SessionContext {
   }
 
   async refreshWorkflowHistory(): Promise<readonly WorkflowSnapshot[]> {
+    const deletionMark = this.workflowDeletionSeq;
     const persisted = await listWorkflowSnapshots(this.config);
     const byRunId = new Map(
       persisted.map((snapshot) => [snapshot.runId, snapshot]),
     );
+    for (const [runId, seq] of this.workflowDeletionSeqByRunId) {
+      if (seq > deletionMark) byRunId.delete(runId);
+    }
     for (const [runId, snapshot] of this.unpersistedWorkflowHistory) {
       const stored = byRunId.get(runId);
       if (stored === undefined) {
@@ -3476,6 +3492,7 @@ export class Session implements SessionContext {
       return false;
     }
     if (!(await deleteWorkflowSnapshot(this.config, runId))) return false;
+    this.workflowDeletionSeqByRunId.set(runId, ++this.workflowDeletionSeq);
     registry.removeTerminal(runId);
     this.unpersistedWorkflowHistory.delete(runId);
     this.mergedWorkflowRunIds.delete(runId);

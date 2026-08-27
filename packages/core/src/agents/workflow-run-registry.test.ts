@@ -1151,6 +1151,26 @@ describe('WorkflowRunRegistry', () => {
     expect(r.hasRunningEntries()).toBe(false);
   });
 
+  it('cancelStarting aborts a reserved start and leaves the release to the runner', () => {
+    const r = new WorkflowRunRegistry();
+    const controller = new AbortController();
+
+    expect(r.cancelStarting('wf_absent')).toBe(false);
+
+    r.reserveStart('wf_starting', () => controller);
+    expect(r.cancelStarting('wf_starting')).toBe(true);
+    expect(controller.signal.aborted).toBe(true);
+    // Same contract as abortAll: the reservation stays until the runner's
+    // start-failure path releases it, so a competing start cannot slip in
+    // between the abort and that release.
+    expect(r.isStarting('wf_starting')).toBe(true);
+    expect(() =>
+      r.reserveStart('wf_starting', () => new AbortController()),
+    ).toThrow(/already active/);
+    r.releaseStart('wf_starting', controller);
+    expect(r.hasRunningEntries()).toBe(false);
+  });
+
   it('register synthesizes description from meta.name when omitted', () => {
     const r = new WorkflowRunRegistry();
     const entry = r.register(

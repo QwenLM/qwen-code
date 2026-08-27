@@ -61,6 +61,7 @@ import {
 import {
   WorkflowRunner,
   WorkflowScriptNotLaunchedError,
+  WorkflowStartCancelledError,
   type WorkflowRunHandle,
 } from '../../agents/runtime/workflow-runner.js';
 import { isSymlinkedRoot } from '../../agents/runtime/workflow-saved.js';
@@ -381,7 +382,15 @@ class WorkflowToolInvocation extends BaseToolInvocation<
             : undefined,
       });
     } catch (error) {
-      if (runInBackground && signal.aborted) {
+      // Two cancel sources reach a background start: the caller's own
+      // signal, and a registry-side cancel (`cancelStarting`) that aborts
+      // the run's controller while the caller's signal stays live. The
+      // runner reports the latter with a typed error; both are the same
+      // outcome to the model.
+      if (
+        runInBackground &&
+        (signal.aborted || error instanceof WorkflowStartCancelledError)
+      ) {
         return backgroundStartCancelledResult();
       }
       // A script that never compiled has no run behind it, so reporting it as

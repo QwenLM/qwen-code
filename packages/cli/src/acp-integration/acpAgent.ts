@@ -4030,6 +4030,10 @@ class QwenAgent implements Agent {
     // Retention is bookkeeping, not cleanup: a Config that cannot answer
     // must not turn a successful close into a shutdown failure.
     try {
+      // Prune here as well as on the delete-history path: a daemon that
+      // closes sessions mid-run but never deletes history would otherwise
+      // retain every one of their registries for its whole lifetime.
+      this.pruneDrainedWorkflowRegistries();
       const registry = session.getConfig().getWorkflowRunRegistry?.();
       if (registry && QwenAgent.isWorkflowRegistryDraining(registry)) {
         this.detachedWorkflowRegistries.add(registry);
@@ -10883,6 +10887,18 @@ class QwenAgent implements Agent {
             }
             const registry = config.getWorkflowRunRegistry();
             const task = registry.get(taskId);
+            // A reserved-but-unregistered run has no entry yet: the runner
+            // is still loading its script or replaying its journal. The
+            // liveness gate already treats that window as live; cancel
+            // must too, or the client is told "not_found" about a run it
+            // can see starting, and cannot stop it until it registers.
+            if (!task && registry.isStarting?.(taskId)) {
+              registry.cancelStarting(taskId);
+              debugLogger.info(
+                `sessionTaskCancel completed sessionId=${sessionId} taskId=${taskId} taskKind=${taskKind} status=starting`,
+              );
+              return { cancelled: true, status: 'cancelled' };
+            }
             if (
               !task ||
               (task.status !== 'running' &&

@@ -592,10 +592,11 @@ export class WorkflowRunRegistry {
   }
 
   /**
-   * Register a new run. Mutates the registration in place to graduate
-   * it to a `WorkflowTask` (sets `id`, `kind`, derived counters), so
-   * callers can keep using their local reference post-register and
-   * observers see updates without an extra `get()`.
+   * Hold a run id for a workflow whose start is still in flight — the
+   * runner reserves before it loads the script and replays the journal,
+   * and only `register`s once both succeeded. The reservation is what
+   * makes the id visible to liveness and cancel checks during that
+   * window; the returned controller is the run's own.
    */
   reserveStart(
     runId: string,
@@ -622,6 +623,30 @@ export class WorkflowRunRegistry {
     return this.starting.has(runId);
   }
 
+  /**
+   * Cancel a run that has been reserved but not yet registered. Aborts
+   * the reserved controller only — the reservation itself is the
+   * runner's to release, in its start-failure path, exactly as after
+   * `abortAll`. Returns `false` when nothing is starting under `runId`,
+   * so a caller can fall through to the registered-entry route.
+   */
+  cancelStarting(runId: string): boolean {
+    const controller = this.starting.get(runId);
+    if (!controller) return false;
+    try {
+      controller.abort();
+    } catch (error) {
+      debugLogger.error('Failed to abort a starting workflow:', error);
+    }
+    return true;
+  }
+
+  /**
+   * Register a new run. Mutates the registration in place to graduate
+   * it to a `WorkflowTask` (sets `id`, `kind`, derived counters), so
+   * callers can keep using their local reference post-register and
+   * observers see updates without an extra `get()`.
+   */
   register(
     registration: WorkflowTaskRegistration,
     startController?: AbortController,

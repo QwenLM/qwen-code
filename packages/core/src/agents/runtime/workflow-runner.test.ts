@@ -19,6 +19,7 @@ import { WorkflowJournal, type JournalReplay } from './workflow-journal.js';
 import {
   WorkflowRunner,
   WorkflowScriptNotLaunchedError,
+  WorkflowStartCancelledError,
 } from './workflow-runner.js';
 import { compileWorkflowScript } from './workflow-sandbox.js';
 
@@ -346,6 +347,10 @@ describe('WorkflowRunner', () => {
       await expect(start).rejects.toThrow(
         'Background workflow start was cancelled.',
       );
+      // Typed, not a bare Error: the tool maps this to its "cancelled
+      // before it could start" result even when the caller's own signal
+      // is still live.
+      await expect(start).rejects.toBeInstanceOf(WorkflowStartCancelledError);
       expect(registry.hasRunningEntries()).toBe(false);
       expect(registry.list()).toEqual([]);
     } finally {

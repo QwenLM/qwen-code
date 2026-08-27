@@ -2851,6 +2851,69 @@ describe('Session', () => {
     ]);
   });
 
+  it('does not republish a run deleted while a refresh was still reading the disk', async () => {
+    // Refresh reads the directory and then merges without a claim, while
+    // deletion holds one: a delete that lands between the read and the
+    // merge was overwritten by the stale listing, and the run came back
+    // until the next refresh.
+    session.dispose();
+    const snapshot = {
+      runId: 'wf_stale',
+      meta: null,
+      status: 'failed' as const,
+      script: 'return 1;',
+      phases: [],
+      agentsDispatched: 0,
+      agentsCompleted: 0,
+      tokensSpent: 0,
+      tokenBudgetTotal: null,
+      perPhaseTokens: [],
+      recentLogs: [],
+      startTime: 1_000,
+      endTime: 2_000,
+    };
+    session = new Session(
+      'racing-session',
+      mockConfig,
+      mockClient,
+      mockSettings,
+      undefined,
+      undefined,
+      [snapshot],
+    );
+    let finishStaleRead!: (snapshots: Array<typeof snapshot>) => void;
+    listWorkflowSnapshotsSpy.mockImplementationOnce(
+      () =>
+        new Promise<Array<typeof snapshot>>((resolve) => {
+          finishStaleRead = resolve;
+        }),
+    );
+    const staleRefresh = session.refreshWorkflowHistory();
+    await vi.waitFor(() => expect(finishStaleRead).toBeDefined());
+
+    // The delete's own refresh sees the file, then removes it.
+    listWorkflowSnapshotsSpy.mockResolvedValueOnce([snapshot]);
+    await expect(session.deleteWorkflowHistory(snapshot.runId)).resolves.toBe(
+      true,
+    );
+    expect(session.getWorkflowHistory()).toEqual([]);
+
+    // The read that began before the delete now completes with the
+    // pre-delete listing.
+    finishStaleRead([snapshot]);
+    await staleRefresh;
+
+    expect(session.getWorkflowHistory()).toEqual([]);
+
+    // A later refresh that genuinely finds the run again (a retry reuses
+    // the runId) must not be suppressed by the old deletion.
+    listWorkflowSnapshotsSpy.mockResolvedValueOnce([snapshot]);
+    await session.refreshWorkflowHistory();
+    expect(session.getWorkflowHistory()).toEqual([
+      expect.objectContaining({ runId: 'wf_stale' }),
+    ]);
+  });
+
   it('drops persisted workflow history deleted by another session', async () => {
     session.dispose();
     const snapshot = {
