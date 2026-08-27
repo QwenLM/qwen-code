@@ -109,7 +109,7 @@ export interface StructuredError {
   status?: number;
 }
 
-export interface GeminiErrorEventValue {
+export interface LlmErrorEventValue {
   error: StructuredError;
 }
 
@@ -119,10 +119,16 @@ export interface SessionTokenLimitExceededValue {
   message: string;
 }
 
-export interface GeminiFinishedEventValue {
+export interface LlmFinishedEventValue {
   reason: FinishReason | undefined;
   usageMetadata: GenerateContentResponseUsageMetadata | undefined;
 }
+
+/** @deprecated Use `LlmErrorEventValue`; retained until a future major release. */
+export type GeminiErrorEventValue = LlmErrorEventValue;
+
+/** @deprecated Use `LlmFinishedEventValue`; retained until a future major release. */
+export type GeminiFinishedEventValue = LlmFinishedEventValue;
 
 export interface ToolCallRequestInfo {
   callId: string;
@@ -345,7 +351,7 @@ export type ServerGeminiUserCancelledEvent = {
 
 export type ServerGeminiErrorEvent = {
   type: GeminiEventType.Error;
-  value: GeminiErrorEventValue;
+  value: LlmErrorEventValue;
 };
 
 export enum CompressionStatus {
@@ -393,6 +399,15 @@ export type CompactionTriggerReason =
 export interface ChatCompressionInfo {
   originalTokenCount: number;
   newTokenCount: number;
+  /**
+   * Whether originalTokenCount came from a local estimate rather than an
+   * API-reported prompt count. The two compression paths measure on
+   * different scales (see #9309): /compress-fast anchors on the last
+   * API-reported prompt count (system prompt + tools + history) while a
+   * later /compress re-estimates history-only once the stored count is
+   * estimate-derived, so UIs must not present the numbers as one chain.
+   */
+  originalTokenCountIsEstimated?: boolean;
   /** Whether newTokenCount ultimately came from a local estimate. */
   newTokenCountIsEstimated?: boolean;
   compressionStatus: CompressionStatus;
@@ -417,7 +432,7 @@ export type ServerGeminiSessionTokenLimitExceededEvent = {
 
 export type ServerGeminiFinishedEvent = {
   type: GeminiEventType.Finished;
-  value: GeminiFinishedEventValue;
+  value: LlmFinishedEventValue;
 };
 
 export type ServerGeminiLoopDetectedEvent = {

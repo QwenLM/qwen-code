@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { InstructionsLoadedNotification } from '../utils/memoryDiscovery.js';
+import type { InstructionsLoadedNotification } from '../memory/memoryDiscovery.js';
 import type { HookSystem } from './hookSystem.js';
 import { HookEventName } from './types.js';
 

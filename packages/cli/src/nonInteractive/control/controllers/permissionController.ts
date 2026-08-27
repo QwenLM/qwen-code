@@ -18,12 +18,13 @@ import type {
   WaitingToolCall,
   ToolExecuteConfirmationDetails,
   ToolMcpConfirmationDetails,
-  ApprovalMode,
   TeammateApprovalRequestEvent,
   ToolConfirmationPayload,
   WorkflowApproval,
 } from '@qwen-code/qwen-code-core';
 import {
+  ApprovalMode,
+  APPROVAL_MODES,
   InputFormat,
   ToolConfirmationOutcome,
   ToolNames,
@@ -146,22 +147,23 @@ export class PermissionController extends BaseController {
   private checkPermissionMode(): { allowed: boolean; message?: string } {
     const mode = this.context.permissionMode;
 
-    // Map permission modes to approval logic (aligned with VALID_APPROVAL_MODE_VALUES)
-    switch (mode) {
-      case 'yolo': // Allow all tools
-      case 'auto-edit': // Auto-approve edit operations
-      case 'auto': // Auto-approve via LLM classifier — coreToolScheduler enforces the gate
-      case 'plan': // Auto-approve planning operations
-        return { allowed: true };
-
-      case 'default': // TODO: allow all tools for test
-      default:
-        return {
-          allowed: false,
-          message:
-            'Tool execution requires manual approval. Update permission mode or approve via host.',
-        };
+    if (mode === ApprovalMode.DEFAULT) {
+      return {
+        allowed: false,
+        message:
+          'Tool execution requires manual approval. Update permission mode or approve via host.',
+      };
     }
+
+    const validModes = APPROVAL_MODES as readonly PermissionMode[];
+    if (validModes.includes(mode)) {
+      return { allowed: true };
+    }
+
+    return {
+      allowed: false,
+      message: `Invalid permission mode: ${mode}. Valid values are: ${validModes.join(', ')}`,
+    };
   }
 
   /**
@@ -217,13 +219,7 @@ export class PermissionController extends BaseController {
     }
 
     const mode = payload.mode;
-    const validModes: PermissionMode[] = [
-      'default',
-      'plan',
-      'auto-edit',
-      'auto',
-      'yolo',
-    ];
+    const validModes = APPROVAL_MODES as readonly PermissionMode[];
 
     if (!validModes.includes(mode)) {
       throw new Error(

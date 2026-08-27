@@ -320,6 +320,7 @@ Most local inference servers (vLLM, Ollama, LM Studio, etc.) provide an OpenAI-c
         "baseUrl": "http://localhost:11434/v1",
         "generationConfig": {
           "timeout": 300000,
+          "streamIdleTimeoutMs": 600000,
           "maxRetries": 1,
           "contextWindowSize": 32768,
           "samplingParams": {
@@ -360,6 +361,13 @@ Most local inference servers (vLLM, Ollama, LM Studio, etc.) provide an OpenAI-c
   }
 }
 ```
+
+For queued or slow local OpenAI-compatible servers, `streamIdleTimeoutMs`
+controls how long this model may stay silent between streamed chunks. It
+overrides the global `QWEN_STREAM_IDLE_TIMEOUT_MS` value for the selected
+provider entry; set it to `0` to disable the idle guard. The separate 15-minute
+stream lifetime cap still applies unless `QWEN_STREAM_MAX_LIFETIME_MS` is raised
+or disabled.
 
 For local servers that don't require authentication, you can use any placeholder value for the API key:
 
@@ -648,6 +656,8 @@ The optional `reasoning` field under `generationConfig` controls how aggressivel
 Setting `reasoning: false` (the literal boolean) explicitly disables thinking on every provider — useful for cheap side queries that don't benefit from reasoning. This is honored at the request level too via `request.config.thinkingConfig.includeThoughts: false` for one-off calls (e.g. suggestion generation).
 
 On a `api.deepseek.com` baseURL, the OpenAI pipeline emits the explicit `thinking: { type: 'disabled' }` field that DeepSeek V4+ requires — the server-side default is `'enabled'`, so simply omitting `reasoning_effort` would still pay thinking latency/cost. Self-hosted DeepSeek backends (sglang/vllm) and other OpenAI-compatible servers do **not** receive this field; if you need to disable thinking on those, inject `thinking: { type: 'disabled' }` (or whatever knob your inference framework exposes) via `samplingParams`/`extra_body`.
+
+On an `openrouter.ai` baseURL, the OpenAI pipeline emits OpenRouter's provider-level `reasoning: { enabled: false }` field when reasoning is disabled. Other OpenAI-compatible servers do not receive this OpenRouter-specific field; use `samplingParams`/`extra_body` for their native disable knob.
 
 ### Interaction with `samplingParams` (OpenAI-compatible only)
 

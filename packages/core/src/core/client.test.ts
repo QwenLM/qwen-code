@@ -79,6 +79,7 @@ import {
   getCustomSystemPrompt,
   getPlanModeSystemReminder,
 } from './prompts.js';
+import { getBuiltInOutputStyle } from './output-styles.js';
 import { DEFAULT_QWEN_FLASH_MODEL } from '../config/models.js';
 import { FileDiscoveryService } from '../services/fileDiscoveryService.js';
 import { promptIdContext } from '../utils/promptIdContext.js';
@@ -90,7 +91,7 @@ import {
   buildChangedMcpToolsReminder,
   buildChangedSkillsReminder,
   getInitialChatHistory,
-} from '../utils/environmentContext.js';
+} from './environmentContext.js';
 import { collectAvailableSkillEntries } from '../tools/skill-utils.js';
 import type { AvailableSkillEntry } from '../tools/skill-utils.js';
 import { ToolNames } from '../tools/tool-names.js';
@@ -107,7 +108,7 @@ import { runWithAgentContext } from '../agents/runtime/agent-context.js';
 import {
   clearCacheSafeParams,
   getCacheSafeParams,
-} from '../utils/forkedAgent.js';
+} from '../agents/forkedAgent.js';
 
 // Mock fs module to prevent actual file system operations during tests
 const mockFileSystem = new Map<string, string>();
@@ -218,9 +219,9 @@ vi.mock('../tools/skill-utils.js', async (importOriginal) => {
     collectAvailableSkillEntries: vi.fn(),
   };
 });
-vi.mock('../utils/environmentContext', async (importOriginal) => {
+vi.mock('./environmentContext', async (importOriginal) => {
   const actual =
-    await importOriginal<typeof import('../utils/environmentContext.js')>();
+    await importOriginal<typeof import('./environmentContext.js')>();
   return {
     ...actual,
     getEnvironmentContext: vi
@@ -424,26 +425,6 @@ vi.mock(
 );
 import { microcompactHistory } from '../services/microcompaction/microcompact.js';
 
-// Mock RequestTokenizer to use simple character-based estimation
-vi.mock('../utils/request-tokenizer/requestTokenizer.js', () => ({
-  RequestTokenizer: class {
-    async calculateTokens(request: { contents: unknown }) {
-      // Simple estimation: count characters in JSON and divide by 4
-      const totalChars = JSON.stringify(request.contents).length;
-      return {
-        totalTokens: Math.floor(totalChars / 4),
-        breakdown: {
-          textTokens: Math.floor(totalChars / 4),
-          imageTokens: 0,
-          audioTokens: 0,
-          otherTokens: 0,
-        },
-        processingTime: 0,
-      };
-    }
-  },
-}));
-
 /**
  * Array.fromAsync ponyfill, which will be available in es 2024.
  *
@@ -562,7 +543,6 @@ describe('Gemini Client (client.ts)', () => {
       generateContent: mockGenerateContentFn,
       generateContentStream: vi.fn(),
       batchEmbedContents: vi.fn(),
-      countTokens: vi.fn().mockResolvedValue({ totalTokens: 100 }),
     } as unknown as ContentGenerator;
 
     // Because the GeminiClient constructor kicks off an async process (startChat)
@@ -602,6 +582,7 @@ describe('Gemini Client (client.ts)', () => {
       getAutoMemoryPrompt: vi.fn().mockReturnValue(''),
       getSystemPrompt: vi.fn().mockReturnValue(undefined),
       getAppendSystemPrompt: vi.fn().mockReturnValue(undefined),
+      getOutputStyle: vi.fn().mockReturnValue(undefined),
       getStaticSystemPrefix: vi.fn().mockReturnValue(undefined),
       setStaticSystemPrefix: vi.fn(),
       getFullContext: vi.fn().mockReturnValue(false),
@@ -619,7 +600,7 @@ describe('Gemini Client (client.ts)', () => {
         toolResultsThresholdMinutes: 60,
         toolResultsNumToKeep: 5,
       }),
-      getSessionTokenLimit: vi.fn().mockReturnValue(32000),
+      getSessionTokenLimit: vi.fn().mockReturnValue(0),
       getNoBrowser: vi.fn().mockReturnValue(false),
       getUsageStatisticsEnabled: vi.fn().mockReturnValue(true),
       getTelemetryIncludeSensitiveSpanAttributes: vi
@@ -654,6 +635,7 @@ describe('Gemini Client (client.ts)', () => {
           .mockReturnValue('/test/project/root/.gemini/projects/test-project'),
       },
       getContentGenerator: vi.fn().mockReturnValue(mockContentGenerator),
+      getModelRouteIdentity: vi.fn().mockReturnValue('test-route'),
       getEffectiveInputModalities: vi.fn().mockReturnValue({}),
       getBaseLlmClient: vi.fn(),
       getSkipLoopDetection: vi.fn().mockReturnValue(false),
@@ -743,6 +725,13 @@ describe('Gemini Client (client.ts)', () => {
 
   describe('initialize', () => {
     it('initializes from the selective runtime projection without the full transcript', async () => {
+      const restoreLoadedSkillsFromHistory = vi.fn();
+      vi.mocked(mockConfig.getToolRegistry().getTool).mockImplementation(
+        (name: string) =>
+          name === ToolNames.SKILL
+            ? ({ restoreLoadedSkillsFromHistory } as never)
+            : undefined,
+      );
       const seedResumeTokenCountsSpy = vi.spyOn(
         GeminiChat.prototype,
         'seedResumeTokenCounts',
@@ -780,6 +769,7 @@ describe('Gemini Client (client.ts)', () => {
         'test-session-id',
       );
       expect(seedResumeTokenCountsSpy).toHaveBeenCalledWith(321, 45, false);
+      expect(restoreLoadedSkillsFromHistory).toHaveBeenCalledWith(apiHistory);
     });
 
     it('seeds resumed chat with replayed prompt token count', async () => {
@@ -3147,6 +3137,7 @@ describe('Gemini Client (client.ts)', () => {
         addHistory,
         getHistory: vi.fn().mockReturnValue([]),
         getHistoryLength: vi.fn().mockReturnValue(1),
+        getLastPromptTokenCount: vi.fn().mockReturnValue(101),
         // Send is skipped, so the push counter never advances → restore.
         getUserContentPushCount: vi.fn().mockReturnValue(0),
         stripOrphanedUserEntriesFromHistory: vi
@@ -3171,6 +3162,170 @@ describe('Gemini Client (client.ts)', () => {
       expect(events[0]?.type).toBe(GeminiEventType.SessionTokenLimitExceeded);
       expect(mockTurnRunFn).not.toHaveBeenCalled();
       expect(addHistory).toHaveBeenCalledWith(retryEntry);
+    });
+
+    it('invalidates a foreign route count before the session limit gate', async () => {
+      let route = 'route-a';
+      let telemetryCount = 691_000;
+      vi.mocked(mockConfig.getModelRouteIdentity).mockImplementation(
+        () => route,
+      );
+      vi.mocked(mockConfig.getSessionTokenLimit).mockReturnValue(100_000);
+      vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockImplementation(
+        () => telemetryCount,
+      );
+      vi.mocked(uiTelemetryService.setLastPromptTokenCount).mockImplementation(
+        (count) => {
+          telemetryCount = count;
+        },
+      );
+      client.getChat().setLastPromptTokenCount(telemetryCount);
+      route = 'route-b';
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          yield { type: GeminiEventType.Content, value: 'response' };
+        })(),
+      );
+
+      const events = await fromAsync(
+        client.sendMessageStream(
+          [{ text: 'new route' }],
+          new AbortController().signal,
+          'prompt-route-switch',
+        ),
+      );
+
+      expect(events).not.toContainEqual(
+        expect.objectContaining({
+          type: GeminiEventType.SessionTokenLimitExceeded,
+        }),
+      );
+      expect(telemetryCount).toBe(0);
+    });
+
+    it('applies the session limit to the requested override route', async () => {
+      vi.mocked(mockConfig.getModelRouteIdentity).mockImplementation((model) =>
+        model ? `${model}@route` : 'override-model@route',
+      );
+      vi.mocked(mockConfig.getSessionTokenLimit).mockReturnValue(100);
+      client.getChat().setLastPromptTokenCount(101);
+      vi.mocked(mockConfig.getModelRouteIdentity).mockImplementation((model) =>
+        model ? `${model}@route` : 'active-model@route',
+      );
+
+      const events = await fromAsync(
+        client.sendMessageStream(
+          [{ text: 'override route' }],
+          new AbortController().signal,
+          'prompt-override-limit',
+          {
+            type: SendMessageType.UserQuery,
+            modelOverride: 'override-model',
+          },
+        ),
+      );
+
+      expect(events).toContainEqual({
+        type: GeminiEventType.SessionTokenLimitExceeded,
+        value: expect.objectContaining({ currentTokens: 101, limit: 100 }),
+      });
+      expect(mockTurnRunFn).not.toHaveBeenCalled();
+    });
+
+    it('applies the session limit to a resolved full-turn route selector', async () => {
+      // The vision-bridge full-turn selector `${id}\0${baseUrl}\0` arrives as
+      // modelOverride. GeminiChat.sendMessageStream resolves it and stamps
+      // counts under the RESOLVED route's identity, so the gate must resolve
+      // the selector before keying — the raw selector key (always containing
+      // a NUL) can never match a stamped count (#9454).
+      vi.mocked(mockConfig.getModelRouteIdentity).mockReturnValue(
+        'vision-agent@route',
+      );
+      vi.mocked(mockConfig.getSessionTokenLimit).mockReturnValue(100);
+      client.getChat().setLastPromptTokenCount(101);
+      const resolveForModel = vi.fn().mockResolvedValue({
+        model: 'vision-agent',
+        contentGeneratorConfig: undefined,
+      });
+      vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+        resolveForModel,
+      } as unknown as ReturnType<Config['getBaseLlmClient']>);
+      vi.mocked(mockConfig.getModelRouteIdentity).mockImplementation((model) =>
+        model ? `${model}@route` : 'active-model@route',
+      );
+
+      const events = await fromAsync(
+        client.sendMessageStream(
+          [{ text: 'vision route' }],
+          new AbortController().signal,
+          'prompt-selector-limit',
+          {
+            type: SendMessageType.UserQuery,
+            modelOverride: 'openai:vision-agent\0https://vision.example/v1\0',
+          },
+        ),
+      );
+
+      expect(resolveForModel).toHaveBeenCalledWith(
+        'openai:vision-agent\0https://vision.example/v1',
+        { failClosed: true },
+      );
+      expect(events).toContainEqual({
+        type: GeminiEventType.SessionTokenLimitExceeded,
+        value: expect.objectContaining({ currentTokens: 101, limit: 100 }),
+      });
+      expect(mockTurnRunFn).not.toHaveBeenCalled();
+    });
+
+    it('keeps the session limit enforced when turns alternate routes (#9506)', async () => {
+      // Counts are retained per route (#9506): an intervening turn on
+      // another route must not destroy the count the gate later reads for
+      // the original route. Pre-fix, the foreign-route gate read zeroed
+      // the only slot, so the returning turn read 0 and was admitted
+      // regardless of size — steady alternation disabled the limit.
+      vi.mocked(mockConfig.getModelRouteIdentity).mockImplementation((model) =>
+        model === 'route-x' ? 'route-x@route' : 'route-a',
+      );
+      vi.mocked(mockConfig.getSessionTokenLimit).mockReturnValue(100);
+      // Route A's last response stamped an over-limit count.
+      client.getChat().setLastPromptTokenCount(101);
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          yield { type: GeminiEventType.Content, value: 'response' };
+        })(),
+      );
+
+      // Intervening turn on route X: no counts recorded for X yet, so the
+      // gate admits it.
+      const foreignEvents = await fromAsync(
+        client.sendMessageStream(
+          [{ text: 'foreign route turn' }],
+          new AbortController().signal,
+          'prompt-alternate-foreign',
+          { type: SendMessageType.UserQuery, modelOverride: 'route-x' },
+        ),
+      );
+      expect(foreignEvents).not.toContainEqual(
+        expect.objectContaining({
+          type: GeminiEventType.SessionTokenLimitExceeded,
+        }),
+      );
+
+      // Returning to route A must still trip the gate with the retained
+      // over-limit count — the alternation must not have zeroed it.
+      const events = await fromAsync(
+        client.sendMessageStream(
+          [{ text: 'back on route a' }],
+          new AbortController().signal,
+          'prompt-alternate-return',
+          { type: SendMessageType.UserQuery },
+        ),
+      );
+      expect(events).toContainEqual({
+        type: GeminiEventType.SessionTokenLimitExceeded,
+        value: expect.objectContaining({ currentTokens: 101, limit: 100 }),
+      });
+      expect(mockTurnRunFn).toHaveBeenCalledTimes(1);
     });
   });
 
@@ -9266,6 +9421,7 @@ Other open files:
       const mockChat: Partial<GeminiChat> = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
+        getLastPromptTokenCount: vi.fn().mockReturnValue(9999),
       };
       client['chat'] = mockChat as GeminiChat;
 
@@ -13389,6 +13545,7 @@ Other open files:
         'test-model',
         undefined,
         'headless',
+        undefined,
       );
       expect(mockContentGenerator.generateContent).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -13397,6 +13554,30 @@ Other open files:
           }),
         }),
         'test-session-id',
+      );
+    });
+
+    it('passes the active output style to the core system prompt', async () => {
+      const contents = [{ role: 'user', parts: [{ text: 'hello' }] }];
+      const abortSignal = new AbortController().signal;
+      const concise = getBuiltInOutputStyle('Concise');
+
+      vi.mocked(getCoreSystemPrompt).mockClear();
+      vi.spyOn(client['config'], 'getOutputStyle').mockReturnValue(concise);
+
+      await client.generateContent(
+        contents,
+        {},
+        abortSignal,
+        DEFAULT_QWEN_FLASH_MODEL,
+      );
+
+      expect(getCoreSystemPrompt).toHaveBeenCalledWith(
+        undefined,
+        'test-model',
+        undefined,
+        'headless',
+        concise,
       );
     });
 
@@ -13428,6 +13609,7 @@ Other open files:
           'test-model',
           undefined,
           mode,
+          undefined,
         );
       },
     );

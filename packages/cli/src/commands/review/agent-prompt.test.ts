@@ -1678,12 +1678,16 @@ describe('--roster — every prompt the plan requires, in one call', () => {
 
       // PLAN has no srcDiffLines and no worktree: a diff-only 3A review, and its
       // `files[]` is absent, so the removed-behaviour audit is owed (an unknown
-      // deletion count is not "no deletions"). Pinned literally: this list IS the
-      // contract, and a drift here is a drift in who reviews.
+      // deletion count is not "no deletions") — and no `wrapperSignal`, so the
+      // wrapper/proxy check is owed too (an absent signal is not "no wrapping
+      // types"). Pinned literally: this list IS the contract, and a drift here
+      // is a drift in who reviews.
       const recorded = readRecordedPrompts(plan);
       expect([...recorded.keys()].sort()).toEqual([
         '1a',
         '1b',
+        '1d',
+        '1e',
         '2',
         '3a',
         '3b',
@@ -1697,7 +1701,7 @@ describe('--roster — every prompt the plan requires, in one call', () => {
 
       const printed = (writeStdoutLine as unknown as Mock).mock
         .calls[0][0] as string;
-      expect(printed).toContain('11 agents required');
+      expect(printed).toContain('13 agents required');
       // Every recorded prompt appears in the output byte-for-byte: what the
       // orchestrator copies is what the delivery check will look for.
       for (const [, prompt] of recorded) {
@@ -1705,7 +1709,7 @@ describe('--roster — every prompt the plan requires, in one call', () => {
       }
       // Labelled for the reader, so a Task launch can be named after its block.
       expect(printed).toMatch(
-        /───── agent \d+ of 11 — Agent 1a: Line-by-line correctness ─────/,
+        /───── agent \d+ of 13 — Agent 1a: Line-by-line correctness ─────/,
       );
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -2720,6 +2724,8 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
     '1a',
     '1b',
     '1c',
+    '1d',
+    '1e',
     '2',
     '3a',
     '3b',
@@ -2767,6 +2773,104 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
     expect(brief).toContain(
       'or "N/A" when the fix adds no guard, branch or behaviour a test can pin',
     );
+  });
+
+  it('welds the fix-constraint format into the launched finder briefs', () => {
+    // The premise half of #10153, pinned where it reaches the agents. Four
+    // clauses have to survive together: the format has to ASK for the fact,
+    // the omission has to stay an omission (a finder copying the Fix witness
+    // habit would write `N/A` and lengthen every comment), the evidence bar
+    // has to stay at witness grade (a wrong constraint is misdirection the
+    // fixer follows, so prose with no source is forbidden outright), and the
+    // field must not become a bar on reporting.
+    const brief = buildRoleBrief(PLAN, '1a');
+    expect(brief).toContain(
+      '**Fix constraint:** <an existing fact the fix must not violate, with its source',
+    );
+    expect(brief).toContain(
+      'OMIT THIS LINE when you observed none; never write "N/A"',
+    );
+    expect(brief).toContain(
+      'quote the constant or give the `file:line`, or omit the line',
+    );
+    expect(brief).toContain(
+      'is forbidden in this field exactly as "this looks risky" is forbidden in the failure scenario',
+    );
+    expect(brief).toContain(
+      'Like Fix witness, this field never gates reporting',
+    );
+    // And the two fields stay two: the constraint paragraph opens by parting
+    // claim from premise, so a rewrite that folds one into the other — "put
+    // the limit in the Fix witness" — reds here rather than shipping green.
+    expect(brief).toContain(
+      "Fix witness pins the fix's *claim*: does it do what it says. Nothing pins the fix's *premises*",
+    );
+  });
+
+  it('keeps the language-agnostic falsy-zero shape in the Agent 1a brief', () => {
+    // The #9788 split moved the language-pitfall CHECKLIST and wrapper/proxy
+    // routing out of 1a, but the falsy-zero shape is general correctness, not
+    // a checklist item — and its promoted replacement (Agent 1d) is high-only
+    // and files it under JS/TS alone. Deleting it here leaves medium reviews
+    // — the default for local and file targets — and non-JS highs with no
+    // agent prompted toward `if (x)` where 0 or '' is a valid value.
+    expect(buildRoleBrief(PLAN, '1a')).toContain(
+      "falsy-zero checks (`if (x)` where `0` or `''` is a valid value)",
+    );
+  });
+
+  it('keeps the moved checklists out of the Agent 1a brief', () => {
+    // The other half of the #9788 split: the test above pins what STAYED in
+    // 1a; this one pins what LEFT. A future edit that re-adds either bullet
+    // to 1a's brief — a merge resolution, or a restore aimed at the wrong
+    // role — keeps every suite green while high-effort 1a's walk and Agents
+    // 1d/1e double-flag the same ground, re-diluting the checklist inside
+    // the walk rhythm. SKILL.test.ts negatively pins the SKILL.md digest
+    // row; this pins the brief the agents actually read.
+    const brief = buildRoleBrief(PLAN, '1a');
+    expect(brief).not.toContain('language-pitfall checklist for this diff');
+    expect(brief).not.toContain('**Wrapper/proxy routing.**');
+  });
+
+  it('states the checklist entries with their real semantics', () => {
+    // The Go and Kotlin entries shipped inverted. Range-variable capture is
+    // the PRE-1.22 per-loop footgun — a module targeting Go 1.22+ allocates
+    // the loop variable per iteration, so the capture is safe — and Kotlin
+    // `==` already translates to `equals` (`===` is identity). As first
+    // written, the checklist prompted Agent 1d to report correct Go 1.22 and
+    // Kotlin code as bugs. Pin the corrected wording, per language, so a
+    // re-inversion ships red.
+    const brief = buildRoleBrief(PLAN, '1d');
+    // Go: the capture item is scoped to the vulnerable semantics alone, and
+    // the safe case is bound to the module's `go` directive — what actually
+    // gates per-iteration semantics — not the installed toolchain; an
+    // unbound cue reads as the toolchain version and declares an
+    // old-directive module safe.
+    expect(brief).toContain('only under the pre-1.22 per-loop semantics');
+    expect(brief).toContain("module's `go` directive in go.mod");
+    expect(brief).toContain('not the installed toolchain');
+    expect(brief).toContain('Go 1.22+');
+    expect(brief).toContain(
+      'allocates the loop variable per iteration, so the capture is safe',
+    );
+    expect(brief).not.toContain('per-iteration semantics or below');
+    // JS/TS: the capture item is scoped to `var` — `let`/`const` for-heads
+    // bind per iteration, so an unscoped cue repeats the Go false positive
+    // on the most common loop shape in a TypeScript diff.
+    expect(brief).toContain('a closure capturing a `var` loop variable');
+    expect(brief).toContain('for-heads bind per iteration');
+    // Java and Kotlin are separate entries with opposite equality traps:
+    // Java owes `.equals` where `==` stands; Kotlin's `==` already calls
+    // `equals`, so `===` is the operator owed. Each cue is pinned adjacent
+    // to its entry label — position-free pins shipped green through a
+    // Java/Kotlin phrase swap — and the Java cue keeps its scope limiter,
+    // or 1d pattern-matches any `==`, including comparisons where `==` is
+    // correct.
+    expect(brief).toContain('**Java:** `==` where `.equals` is owed');
+    expect(brief).toContain('(boxed types, `String`)');
+    expect(brief).toContain('**Kotlin:** `===` where `==` is owed');
+    expect(brief).toContain('`===` is identity');
+    expect(brief).not.toContain('**Java/Kotlin:**');
   });
 
   it('injects generic repository context into reviewers and a narrow verification boundary into Agent 7', () => {
@@ -2888,11 +2992,36 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
     expect(p).toContain('A vacuous test is a **Suggestion**');
     expect(p).toContain('report **that behaviour** as the Critical');
     expect(p).not.toContain('is a **Critical**: a green-no-matter-what');
+    // The brief's mutation analysis is reading-based — executed verdicts
+    // belong to Agent 7's efficacy probe — so its mutation claims must be
+    // phrased as hypotheses or carry an explicit not-run witness, never the
+    // execution-grade "verified N/N green" (issue #9901). The rule anchors on
+    // ownership, not on a capability claim: the review-agent tool table is
+    // role-neutral and includes the shell, so "you have no runner" would be
+    // false and must never come back.
+    expect(p).toContain('An unrun mutation is a hypothesis');
+    expect(p).toContain('ships N/N green');
+    expect(p).toContain('verified N/N green');
+    expect(p).toContain('witness: not run —');
+    expect(p).toContain('Executed mutation verdicts belong to Agent 7');
+    expect(p).not.toContain('you have no runner');
     // The test-matrix agent applies Agent 5's rules to the behaviour/test pairing
     // it owns, so its severity must move in lockstep — a revert of just this bullet
     // would let the two agents grade the same inert test differently on one PR.
     expect(buildRoleBrief(PLAN, 'test-matrix')).toContain(
       'a **Suggestion** on its own, Critical only when',
+    );
+    // And the witness discipline must move in lockstep too — test-matrix is the
+    // same reading-based mutation analysis, so it carries the same bar on
+    // execution-grade phrasing.
+    expect(buildRoleBrief(PLAN, 'test-matrix')).toContain('witness: not run —');
+    expect(buildRoleBrief(PLAN, 'test-matrix')).toContain('ships N/N green');
+    expect(buildRoleBrief(PLAN, 'test-matrix')).toContain('verified N/N green');
+    expect(buildRoleBrief(PLAN, 'test-matrix')).toContain(
+      'phrase an unrun mutation as a reasoned hypothesis',
+    );
+    expect(buildRoleBrief(PLAN, 'test-matrix')).not.toContain(
+      'you have no runner',
     );
   });
 
@@ -3889,6 +4018,8 @@ describe('path rules — they arrive where they belong, and nowhere else', () =>
   it.each([
     '1a',
     '1b',
+    '1d',
+    '1e',
     '2',
     '3a',
     '3b',
@@ -3956,11 +4087,12 @@ describe('lightweight mode — the diff, and nothing else', () => {
     );
   });
 
-  it('stops 1b and 1c asserting what they cannot check', () => {
+  it('stops 1b, 1c and 1e asserting what they cannot check', () => {
     // A precision rule, not a convenience. An agent that cannot grep for a
     // re-establishment and asserts one is missing files a false Critical, and a
-    // false Critical blocks a merge.
-    for (const role of ['1b', '1c'] as const) {
+    // false Critical blocks a merge. 1e's forwarding-completeness walk greps
+    // the wrapper's call sites — a caller outside the diff is the same shape.
+    for (const role of ['1b', '1c', '1e'] as const) {
       const b = buildRoleBrief(LIGHT, role);
       expect(b).toContain('`Confidence: low`');
       expect(b).toContain('must not assert it is missing');

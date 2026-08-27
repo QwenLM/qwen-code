@@ -18,7 +18,7 @@ import {
   LoopType,
 } from '../telemetry/types.js';
 import type { Config } from '../config/config.js';
-import { getToolCallRepeatKey } from '../utils/tool-call-repeat-key.js';
+import { getToolCallRepeatKey } from '../tools/tool-call-repeat-key.js';
 
 // Re-exported for existing importers (daemon turn-loop guard); the
 // implementation lives in a leaf module so replay detection in

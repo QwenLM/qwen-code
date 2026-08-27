@@ -9,8 +9,9 @@ import {
   type WebShellCustomization,
 } from '../customization';
 import type { Message } from '../adapters/types';
+import { summaryRunId } from './summaryRunId';
 
-vi.mock('../App', async () => {
+vi.mock('../WebShellContexts', async () => {
   const { createContext } = await import('react');
   return { CompactModeContext: createContext(false) };
 });
@@ -109,7 +110,7 @@ vi.mock('./InsightProgress', () => ({ InsightProgress: () => null }));
 vi.mock('./InsightReady', () => ({ InsightReady: () => null }));
 
 const { MessageItem } = await import('./MessageItem');
-const { CompactModeContext } = await import('../App');
+const { CompactModeContext } = await import('../WebShellContexts');
 
 (
   globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }
@@ -243,7 +244,7 @@ describe('MessageItem tool group spacing', () => {
     const synthetic = render(
       <I18nProvider language="en">
         <CompactModeContext.Provider value={true}>
-          {item(toolMsg('summary-agent-1'))}
+          {item(toolMsg(summaryRunId('agent-1')))}
         </CompactModeContext.Provider>
       </I18nProvider>,
     );

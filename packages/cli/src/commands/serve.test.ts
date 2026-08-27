@@ -15,6 +15,11 @@ import { maybeOpenWebShellBrowser, serveCommand } from './serve.js';
 const mockOpenBrowserSecurely = vi.hoisted(() => vi.fn());
 const mockShouldLaunchBrowser = vi.hoisted(() => vi.fn(() => true));
 const mockRunQwenServe = vi.hoisted(() => vi.fn());
+const mockApplyOpenWithAuth = vi.hoisted(() =>
+  vi.fn((options: { token?: string }) => {
+    options.token ??= 'generated-token';
+  }),
+);
 const mockQr = vi.hoisted(() => ({
   generate: vi.fn(
     (
@@ -38,6 +43,9 @@ vi.mock('qrcode-terminal', () => ({ default: mockQr }));
 vi.mock('../serve/run-qwen-serve.js', () => ({
   runQwenServe: mockRunQwenServe,
 }));
+vi.mock('../serve/open-with-auth.js', () => ({
+  applyOpenWithAuth: mockApplyOpenWithAuth,
+}));
 
 function buildParser(): Argv {
   return (serveCommand.builder as (argv: Argv) => Argv)(
@@ -46,6 +54,23 @@ function buildParser(): Argv {
 }
 
 describe('serve command args', () => {
+  it('defaults authenticated open to disabled', () => {
+    const parsed = buildParser().parseSync('');
+    expect(parsed['open-with-auth']).toBe(false);
+  });
+
+  it('parses standalone --open-with-auth', () => {
+    const parsed = buildParser().parseSync('--open-with-auth');
+    expect(parsed['open']).toBe(false);
+    expect(parsed['open-with-auth']).toBe(true);
+  });
+
+  it('allows redundant --open with --open-with-auth', () => {
+    const parsed = buildParser().parseSync('--open --open-with-auth');
+    expect(parsed['open']).toBe(true);
+    expect(parsed['open-with-auth']).toBe(true);
+  });
+
   it('parses --enable-session-shell', () => {
     const parsed = buildParser().parseSync('--enable-session-shell');
     expect(parsed['enable-session-shell']).toBe(true);
@@ -381,6 +406,49 @@ describe('serve rate limit env parsing', () => {
     );
   });
 
+  it('applies authenticated open before the yargs path starts the daemon', async () => {
+    let tokenAtBoot: string | undefined;
+    mockRunQwenServe.mockImplementationOnce(
+      async (options: { token?: string }) => {
+        tokenAtBoot = options.token;
+        return {
+          url: 'http://127.0.0.1:4170/',
+          webShellMounted: true,
+          runtimeReady: Promise.resolve(),
+          resolvedToken: 'generated-token',
+        };
+      },
+    );
+
+    await startServeHandlerWithArgs('--open-with-auth');
+
+    expect(mockApplyOpenWithAuth).toHaveBeenCalledWith(expect.any(Object));
+    expect(tokenAtBoot).toBe('generated-token');
+  });
+
+  it('prints the authenticated manual URL on the yargs headless path', async () => {
+    mockShouldLaunchBrowser.mockReturnValue(false);
+    const stderrWrites: string[] = [];
+    vi.spyOn(process.stderr, 'write').mockImplementation((chunk) => {
+      stderrWrites.push(String(chunk));
+      return true;
+    });
+    mockRunQwenServe.mockResolvedValueOnce({
+      url: 'http://127.0.0.1:4170/',
+      webShellMounted: true,
+      runtimeReady: Promise.resolve(),
+      resolvedToken: 'generated-token',
+    });
+
+    await startServeHandlerWithArgs('--open-with-auth');
+    await vi.waitFor(() =>
+      expect(stderrWrites.join('')).toContain(
+        'http://127.0.0.1:4170/#token=generated-token',
+      ),
+    );
+    expect(mockOpenBrowserSecurely).not.toHaveBeenCalled();
+  });
+
   it('omits the journal caps for an unpinned boot so adaptive growth stays enabled', async () => {
     mockRunQwenServe.mockResolvedValueOnce({
       url: 'http://127.0.0.1:4170/',
@@ -493,6 +561,41 @@ describe('serve rate limit env parsing', () => {
       expect(mockOpenBrowserSecurely).toHaveBeenCalledWith(
         'https://127.0.0.1/',
       ),
+    );
+  });
+
+  it('keeps Local Control pairing separate from the temporary primary token', async () => {
+    vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    const enable = vi.fn().mockResolvedValue({
+      active: true,
+      url: 'http://192.168.1.20:4170/#token=pairing-token',
+      interfaceName: 'en0',
+      sleepInhibited: false,
+      encrypted: false,
+    });
+    mockRunQwenServe.mockResolvedValueOnce({
+      url: 'http://127.0.0.1:4170/',
+      webShellMounted: true,
+      resolvedToken: 'generated-token',
+      runtimeReady: Promise.resolve(),
+      getLocalControl: () => ({ enable }),
+    });
+
+    await startServeHandlerWithArgs('--local-control --open-with-auth');
+    await vi.waitFor(() => expect(mockQr.generate).toHaveBeenCalled());
+
+    expect(mockRunQwenServe).toHaveBeenCalledWith(
+      expect.objectContaining({ token: 'generated-token' }),
+    );
+    expect(mockQr.generate).toHaveBeenCalledWith(
+      'http://192.168.1.20:4170/#token=pairing-token',
+      { small: true },
+      expect.any(Function),
+    );
+    expect(mockQr.generate).not.toHaveBeenCalledWith(
+      expect.stringContaining('generated-token'),
+      expect.anything(),
+      expect.anything(),
     );
   });
 
@@ -827,6 +930,30 @@ describe('maybeOpenWebShellBrowser', () => {
     expect(mockOpenBrowserSecurely).not.toHaveBeenCalled();
   });
 
+  it('prints a fragment URL for authenticated open in headless environments', async () => {
+    mockShouldLaunchBrowser.mockReturnValue(false);
+    const stderrWrites: string[] = [];
+    vi.spyOn(process.stderr, 'write').mockImplementation((chunk) => {
+      stderrWrites.push(String(chunk));
+      return true;
+    });
+
+    await maybeOpenWebShellBrowser(
+      {
+        url: 'http://127.0.0.1:4170/',
+        webShellMounted: true,
+        resolvedToken: 'temporary-secret',
+      },
+      true,
+      true,
+    );
+
+    expect(mockOpenBrowserSecurely).not.toHaveBeenCalled();
+    expect(stderrWrites.join('')).toContain(
+      'http://127.0.0.1:4170/#token=temporary-secret',
+    );
+  });
+
   it('rewrites a wildcard bind host to loopback', async () => {
     await maybeOpenWebShellBrowser(
       { url: 'http://0.0.0.0:4170/', webShellMounted: true },
@@ -879,6 +1006,30 @@ describe('maybeOpenWebShellBrowser', () => {
         true,
       ),
     ).resolves.toBeUndefined();
+  });
+
+  it('prints the authenticated URL when browser launch fails', async () => {
+    mockOpenBrowserSecurely.mockRejectedValueOnce(new Error('boom'));
+    const stderrWrites: string[] = [];
+    vi.spyOn(process.stderr, 'write').mockImplementation((chunk) => {
+      stderrWrites.push(String(chunk));
+      return true;
+    });
+
+    await maybeOpenWebShellBrowser(
+      {
+        url: 'http://127.0.0.1:4170/',
+        webShellMounted: true,
+        resolvedToken: 'temporary-secret',
+      },
+      true,
+      true,
+    );
+
+    expect(stderrWrites.join('')).toContain(
+      'Please open this URL manually: ' +
+        'http://127.0.0.1:4170/#token=temporary-secret',
+    );
   });
 });
 

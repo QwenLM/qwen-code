@@ -275,6 +275,10 @@ describe('runScratchTree', () => {
     // passes the registration gate and fails inside the reset — the catch must
     // take it to discard-and-rebuild rather than let the throw escape.
     const first = run();
+    // The git-created gitfile refuses an in-place overwrite on Windows
+    // (EPERM, even after clearing the read-only attribute); deleting and
+    // recreating works there and is an ordinary rewrite on POSIX.
+    rmSync(join(first.path!, '.git'), { force: true });
     writeFileSync(join(first.path!, '.git'), 'gitdir: /nowhere/at/all\n');
 
     const second = run();
@@ -378,6 +382,7 @@ describe('runScratchTree', () => {
     execFileSync('git', ['commit', '-qm', 'one'], { cwd: other });
 
     const first = run();
+    rmSync(join(first.path!, '.git'), { force: true }); // see the note above
     writeFileSync(
       join(first.path!, '.git'),
       `gitdir: ${join(other, '.git')}\n`,
@@ -463,6 +468,7 @@ describe('runScratchTree', () => {
       '--git-dir',
     );
 
+    rmSync(join(first.path!, '.git'), { force: true }); // see the note above
     writeFileSync(join(first.path!, '.git'), `gitdir: ${admin}\n`);
 
     const second = run();
