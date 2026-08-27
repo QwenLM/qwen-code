@@ -9955,10 +9955,49 @@ exit 1
       expect(step).toContain('sudo -n apt-get install');
       expect(step).not.toContain('sudo apt-get');
     }
-    // "Short jobs stay hosted" is an explicit design decision — only the
-    // three heavy jobs may route onto the persistent pool.
-    expect(routeJob).toContain("runs-on: 'ubuntu-latest'");
-    expect(reviewScanJob).toContain("runs-on: 'ubuntu-latest'");
+    // "Short jobs stay hosted" is the design rule — the carve-out is the
+    // scan lane: route and review-scan gate the WHOLE fan-out, and a
+    // hosted-runner backlog queued route past the cron period so the cron
+    // supersede rule starved every scan round (2026-08-25). They share the
+    // heavy jobs' exact expression, fork-trust clause and kill-switch
+    // included. The command jobs stay hosted.
+    expect(routeJob).toContain(ecsRunsOn);
+    expect(reviewScanJob).toContain(ecsRunsOn);
+    // af-148 carve-out premise: neither job checks code out, so the shared
+    // workspace needs no restore/wipe step. Pin it, so adding a checkout
+    // forces a deliberate update of the hygiene requirement.
+    expect(routeJob).not.toContain('actions/checkout');
+    expect(reviewScanJob).not.toContain('actions/checkout');
+    // The scan's per-run WORKDIR must not outlive the run on the pool:
+    // 0700 at creation and an always() cleanup step mirroring the heavy
+    // jobs' teardown. The value pins the autofix* prefix — the contract
+    // with the heavy jobs' age sweep, the only reclaim channel left after
+    // a hard runner kill.
+    expect(reviewScanJob).toContain(
+      "WORKDIR: '/tmp/autofix-scan-${{ github.run_id }}'",
+    );
+    // Pre-clean immediately before create: run_id is public and mkdir -p
+    // alone would accept a dir or symlink pre-planted on the shared /tmp.
+    expect(reviewScanJob).toContain(
+      'rm -rf "${WORKDIR}"\n          (umask 077; mkdir -p "${WORKDIR}")',
+    );
+    // The fleet file lives inside WORKDIR so the always() step and the age
+    // sweep reclaim it when the EXIT trap cannot (cancelled/killed run).
+    expect(reviewScanJob).toContain('FLEET_FILE="${WORKDIR}/fleet.tsv"');
+    expect(reviewScanJob).not.toContain('FLEET_FILE="$(mktemp)"');
+    // The EXIT trap is the in-step cleanup twin of the always() step; it
+    // must remove both the fleet file and the per-run dir.
+    expect(reviewScanJob).toContain(
+      'trap \'rm -f "${FLEET_FILE}"; rm -rf "${WORKDIR}"\' EXIT',
+    );
+    // Pin the cleanup step's command inside its own slice, not job-wide: a
+    // no-op cleanup with the right name and if: shipped green before.
+    const scanCleanupStep =
+      reviewScanJob.match(
+        /- name: 'Clean up scan workdir'[\s\S]*?(?=\n[ ]{6}- name: '|\n[ ]{2}# ==========|$)/,
+      )?.[0] ?? '';
+    expect(scanCleanupStep).toContain("if: 'always()'");
+    expect(scanCleanupStep).toContain('rm -rf "${WORKDIR}"');
     for (const name of ['takeover-command', 'retry-command', 'takeover-ack']) {
       const job =
         workflow.match(
@@ -10229,6 +10268,13 @@ exit 1
       // world-readable window on the shared /tmp.
       expect(step).toContain('(umask 077; mkdir -p "${WORKDIR}")');
       expect(step).not.toContain('chmod 700');
+      // Consumer side of the scan lane's reclaim contract: after a hard
+      // runner kill neither its EXIT trap nor its always() step fires, so
+      // this sweep is the only channel left — the glob must keep matching
+      // the scan WORKDIR basename pinned in the carve-out test.
+      expect(step).toContain(
+        "find /tmp -maxdepth 1 -name 'autofix*' -mmin +1440 -exec rm -rf {} + 2>/dev/null || true",
+      );
     }
     // Per-run/per-target teardown after the artifact upload: nothing else
     // removes these dirs on the persistent pool (PR numbers only increase).
@@ -10721,19 +10767,41 @@ exit 1
     // gh's own env channels are pinned/stripped BEFORE the first gh call in
     // each PAT step, so a $GITHUB_ENV-planted GH_HOST cannot reroute the
     // identity check and a planted GH_TOKEN cannot outrank the inline one.
-    for (const [step, firstGh] of [
-      [publishPrStep, 'GH_TOKEN="${GITHUB_TOKEN}" gh api user'],
-      [pushAndReportStep, 'GH_TOKEN="${GITHUB_TOKEN}" gh api user'],
-      [prepareStep, 'PR_LIVE="$(gh pr view'],
+    // The scan lane shares the persistent pool with those PAT steps
+    // (af-148), so route and review-scan carry the same reroute hardening
+    // in the same loop — one preamble shape, one edit site: a planted
+    // ~/.config/gh there would send the scan's CI_DEV_BOT_PAT or route's
+    // collaborator-permission lookups into a local socket.
+    for (const [step, firstGh, guardedMint] of [
+      [publishPrStep, 'GH_TOKEN="${GITHUB_TOKEN}" gh api user', false],
+      [pushAndReportStep, 'GH_TOKEN="${GITHUB_TOKEN}" gh api user', false],
+      [prepareStep, 'PR_LIVE="$(gh pr view', false],
+      [routeStep, 'gh api "repos/${REPO}/collaborators', true],
+      [reviewScanJob, 'gh pr view', true],
     ]) {
       const ghPin = step.indexOf('export GH_HOST=github.com');
       expect(ghPin).toBeGreaterThan(-1);
       expect(step).toMatch(/unset GH_ENTERPRISE_TOKEN GH_TOKEN/);
       // GH_CONFIG_DIR is PINNED to a fresh throwaway (unsetting it falls
       // back to the attacker-writable ~/.config/gh with http_unix_socket).
-      expect(step).toContain(
-        'export GH_CONFIG_DIR="$(mktemp -d "${RUNNER_TEMP}/autofix-gh-config.XXXXXX")"',
-      );
+      // route and review-scan additionally guard the mint itself: `export
+      // VAR="$(mktemp ...)"` reports export's status, not the
+      // substitution's, so a failing mktemp would sail through bash -e with
+      // an empty value — gh's unset fallback — unless the assignment is
+      // checked before export. The behavioural witness below turns red when
+      // the guard goes; the heavy jobs' older preambles predate the guard
+      // and are pinned in their current shape.
+      if (guardedMint) {
+        const guard =
+          'if ! GH_CONFIG_DIR="$(mktemp -d "${RUNNER_TEMP}/autofix-gh-config.XXXXXX")"; then';
+        expect(step).toContain(guard);
+        expect(step).toMatch(/exit 1\n\s*fi\n\s*export GH_CONFIG_DIR\n/);
+        expect(step.indexOf(guard)).toBeLessThan(step.indexOf(firstGh));
+      } else {
+        expect(step).toContain(
+          'export GH_CONFIG_DIR="$(mktemp -d "${RUNNER_TEMP}/autofix-gh-config.XXXXXX")"',
+        );
+      }
       expect(step.indexOf(firstGh)).toBeGreaterThan(-1);
       expect(ghPin).toBeLessThan(step.indexOf(firstGh));
     }
@@ -10954,6 +11022,111 @@ exit 1
       }).stdout,
     ).not.toContain('xdg-evil');
     rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('aborts route and review-scan before any gh call when the gh config dir cannot be minted', () => {
+    // Behavioural witness for the guarded-mint pin above: without the guard,
+    // `export VAR="$(mktemp ...)"` reports export's status, not the
+    // substitution's, so a failing mktemp sails through bash -e with an
+    // empty GH_CONFIG_DIR and the step calls gh against the shared
+    // ~/.config/gh fallback — the reroute hole the preamble closes. Run each
+    // step under a mktemp that refuses ONLY the gh-config template (later
+    // plain mktemp calls must keep working so the unguarded mutant provably
+    // reaches gh) and a gh stub that records every call: the step must fail
+    // loud before the first record. Probed: restoring the unguarded export
+    // makes both cases record a gh call and drop the ::error abort.
+    const realMktemp = spawnSync('bash', ['-c', 'command -v mktemp'], {
+      encoding: 'utf8',
+    }).stdout.trim();
+    const cases = [
+      {
+        name: 'route',
+        // The managed-PR review lane reaches the collaborator-permission
+        // lookup (the first gh call) fastest.
+        block: routeStep.match(/run: \|-\n([\s\S]*)$/)?.[1],
+        env: {
+          EVENT_NAME: 'pull_request_review',
+          REPO: 'QwenLM/qwen-code',
+          PR_BASE_REF: 'main',
+          PR_HEAD_REPO: 'QwenLM/qwen-code',
+          PR_AUTHOR: 'qwen-code-dev-bot',
+          AUTOFIX_BOT: 'qwen-code-dev-bot',
+          REVIEW_BOT: 'qwen-code-ci-bot',
+          SENDER_LOGIN: 'qqqys',
+        },
+      },
+      {
+        name: 'review-scan',
+        // A forced PR reaches `gh pr view` through read_forced_pr_meta.
+        block: reviewScanJob.match(
+          /- name: 'Scan for PRs with new feedback'[\s\S]*?run: \|-\n([\s\S]*?)(?=\n {6}- name: ')/,
+        )?.[1],
+        env: {
+          EVENT_NAME: 'schedule',
+          FORCED_PR: '1234',
+          REPO: 'QwenLM/qwen-code',
+          GITHUB_TOKEN: 'pat',
+        },
+      },
+    ];
+    for (const { name, block, env } of cases) {
+      expect(block, name).toBeTruthy();
+      const dir = mkdtempSync(join(tmpdir(), 'autofix-ghcfg-'));
+      try {
+        const bin = join(dir, 'bin');
+        mkdirSync(bin);
+        writeFileSync(
+          join(bin, 'mktemp'),
+          [
+            '#!/bin/bash',
+            'for a in "$@"; do',
+            '  case "$a" in *autofix-gh-config*) echo "mktemp: simulated failure: $a" >&2; exit 1 ;; esac',
+            'done',
+            `exec '${realMktemp}' "$@"`,
+            '',
+          ].join('\n'),
+        );
+        const callsFile = join(dir, 'gh-calls');
+        writeFileSync(
+          join(bin, 'gh'),
+          `#!/bin/bash\nprintf '%s\\n' "$*" >> '${callsFile}'\nexit 0\n`,
+        );
+        chmodSync(join(bin, 'mktemp'), 0o755);
+        chmodSync(join(bin, 'gh'), 0o755);
+        const proc = spawnSync(
+          'bash',
+          [
+            '-e',
+            '-o',
+            'pipefail',
+            '-c',
+            // The scan's forced-PR retry loop sleeps between attempts on the
+            // mutant path; keep the probe fast without touching the block.
+            `sleep() { :; }\n${block.replace(/^ {10}/gm, '')}`,
+          ],
+          {
+            env: {
+              PATH: `${bin}:${process.env.PATH}`,
+              RUNNER_TEMP: dir,
+              WORKDIR: join(dir, 'workdir'),
+              GITHUB_OUTPUT: join(dir, 'github-output'),
+              ...env,
+            },
+            encoding: 'utf8',
+          },
+        );
+        expect(proc.stdout, name).toContain(
+          '::error::could not create gh config dir',
+        );
+        expect(proc.status, name).not.toBe(0);
+        expect(
+          existsSync(callsFile),
+          `${name} called gh after a failed gh-config mktemp`,
+        ).toBe(false);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }
   });
 
   it('runs both verification gates under a throwaway global git config', () => {
@@ -15827,7 +16000,10 @@ exit 1
 
     // Replay the real helper + render block over fixtures.
     const lines = scan.split('\n');
-    const hi = lines.findIndex((l) => l.trim() === 'FLEET_FILE="$(mktemp)"');
+    const hi = lines.findIndex(
+      (l) => l.trim() === 'FLEET_FILE="${WORKDIR}/fleet.tsv"',
+    );
+    expect(hi).toBeGreaterThan(-1);
     const hj = lines.findIndex((l, i) => i > hi && l.trim() === '}');
     const helper = lines.slice(hi, hj + 1).join('\n');
     expect(helper).toContain('fleet_row()');
@@ -15849,6 +16025,9 @@ exit 1
         [
           'set -uo pipefail',
           'SUMMARY_FILE="$(mktemp)"',
+          // The helper references the job-level WORKDIR (fleet file home);
+          // its EXIT trap then reclaims this replay dir.
+          'WORKDIR="$(mktemp -d)"',
           helper,
           'COUNT=1',
           "fleet_row 7329 'SELECTED' '1 review + 5 inline new (round 0/5)'",
@@ -15884,6 +16063,9 @@ exit 1
         [
           'set -uo pipefail',
           'SUMMARY_FILE="$(mktemp)"',
+          // The helper references the job-level WORKDIR (fleet file home);
+          // its EXIT trap then reclaims this replay dir.
+          'WORKDIR="$(mktemp -d)"',
           helper,
           'COUNT=0',
           render,
@@ -21553,7 +21735,7 @@ describe('report-step stale-base hold while review-pr is in flight (#10110)', ()
   // The scan's dispatch gate (#8888) covers every push the SCAN can make,
   // but the report step's stale-base retry calls update-branch hours after
   // that gate last looked — the one loop-owned head move outside the hold.
-  // Full rationale → qwen-autofix.md#af-148.
+  // Full rationale → qwen-autofix.md#af-149.
 
   it('probes for a live review before the report-step update-branch', () => {
     const probeAt = reviewAddressReportStep.indexOf('REVIEW_LIVE_R=');
@@ -21661,7 +21843,7 @@ describe('report-step stale-base hold while review-pr is in flight (#10110)', ()
   });
 
   it('documents the hold in the design doc', () => {
-    expect(designDoc).toContain('<a id="af-148"></a>');
+    expect(designDoc).toContain('<a id="af-149"></a>');
     expect(designDoc).toContain('deferred a stale-base refresh');
   });
 });

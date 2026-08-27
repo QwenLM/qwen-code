@@ -26,6 +26,7 @@ import {
   type LiveTaskToolName,
   type LiveTaskToolRequestInfo,
 } from '@qwen-code/acp-bridge/bridgeOptions';
+import { isReservedStandaloneSessionSourceType } from '@qwen-code/acp-bridge/sessionSource';
 import type {
   WorkspaceRegistry,
   WorkspaceRuntime,
@@ -40,8 +41,16 @@ import {
   isCompatibleLiveSessionSource,
   readLoadableLiveConversationMetadata,
 } from '../../runtime/live-session-source.js';
-import { conversationRuntimeUnavailableError } from '../conversations/conversation-runtime-errors.js';
+import {
+  ConversationRuntimeOwnershipError,
+  conversationRuntimeUnavailableError,
+} from '../conversations/conversation-runtime-errors.js';
+import { DaemonDrainingError } from '../server/session-archive.js';
 import { normalizeSessionIdForLookup } from '../../config/session-id.js';
+import {
+  StandaloneSessionServiceError,
+  type StandaloneSessionService,
+} from '../conversations/standalone-session-service.js';
 
 const DEFAULT_LIST_LIMIT = 20;
 const DEFAULT_READ_TURN_LIMIT = 3;
@@ -97,8 +106,20 @@ interface TaskToolMarker {
 export interface LiveTaskServiceOptions {
   workspaceRegistry: WorkspaceRegistry;
   ensureConversationRuntime: () => Promise<WorkspaceRuntime>;
+  standaloneSessionService?: Pick<
+    StandaloneSessionService,
+    'createWithInitialPrompt' | 'get' | 'list' | 'resume'
+  > & {
+    dispatchPrompt(
+      sessionId: string,
+      dispatch: (
+        runtime: WorkspaceRuntime,
+        canonicalSessionId: string,
+        onPromptAdmitted: () => void,
+      ) => Promise<void>,
+    ): Promise<void>;
+  };
   materializeConversationDirectory: (sessionId: string) => Promise<string>;
-  discardEmptyConversationDirectory: (sessionId: string) => Promise<unknown>;
 }
 
 function boundedString(
@@ -457,6 +478,15 @@ export class LiveTaskService {
 
   constructor(private readonly options: LiveTaskServiceOptions) {}
 
+  private getStandaloneSessionService(): NonNullable<
+    LiveTaskServiceOptions['standaloneSessionService']
+  > {
+    if (!this.options.standaloneSessionService) {
+      throw conversationRuntimeUnavailableError();
+    }
+    return this.options.standaloneSessionService;
+  }
+
   interruptWait(callerSessionId: string): void {
     for (const controller of this.activeWaits.get(callerSessionId) ?? []) {
       controller.abort('user_input');
@@ -548,17 +578,23 @@ export class LiveTaskService {
     let cursor: string | undefined;
     let ordinaryCount = 0;
     do {
-      const result = await listWorkspaceSessionsForResponse(
-        runtime.bridge,
-        runtime.workspaceCwd,
-        {
-          size: Math.min(100, Math.max(ordinaryLimit, 1)),
-          view: 'organized',
-          group: 'all',
-          ...(cursor ? { cursor } : {}),
-        },
-        { runtimeBaseDir: runtime.sessionRuntimeBaseDir },
-      );
+      const result =
+        runtime.provenance === 'live-conversation'
+          ? await this.getStandaloneSessionService().list({
+              size: Math.min(100, Math.max(ordinaryLimit, 1)),
+              ...(cursor ? { cursor } : {}),
+            })
+          : await listWorkspaceSessionsForResponse(
+              runtime.bridge,
+              runtime.workspaceCwd,
+              {
+                size: Math.min(100, Math.max(ordinaryLimit, 1)),
+                view: 'organized',
+                group: 'all',
+                ...(cursor ? { cursor } : {}),
+              },
+              { runtimeBaseDir: runtime.sessionRuntimeBaseDir },
+            );
       for (const session of result.sessions) {
         const pinned = session.isPinned === true;
         if (!pinned) ordinaryCount += 1;
@@ -948,11 +984,24 @@ export class LiveTaskService {
     localHost(args['hostId']);
     const located = await this.locateTask(threadId);
     await this.ensureResident(located);
-    await this.dispatchPrompt(
-      located.runtime.bridge,
-      located.bridgeSessionId,
-      prompt,
-    );
+    if (isReservedStandaloneSessionSourceType(located.summary.sourceType)) {
+      await this.getStandaloneSessionService().dispatchPrompt(
+        threadId,
+        (runtime, canonicalSessionId, onPromptAdmitted) =>
+          this.dispatchPrompt(
+            runtime.bridge,
+            canonicalSessionId,
+            prompt,
+            onPromptAdmitted,
+          ),
+      );
+    } else {
+      await this.dispatchPrompt(
+        located.runtime.bridge,
+        located.bridgeSessionId,
+        prompt,
+      );
+    }
     return { threadId };
   }
 
@@ -966,8 +1015,16 @@ export class LiveTaskService {
     }
     const record = target as Record<string, unknown>;
     if (record['type'] === 'projectless') {
-      const runtime = await this.options.ensureConversationRuntime();
-      return this.createInRuntime(runtime, prompt, true);
+      const created =
+        await this.getStandaloneSessionService().createWithInitialPrompt(
+          { sessionId: randomUUID() },
+          prompt,
+        );
+      return {
+        threadId: created.session.sessionId,
+        projectlessOutputDirectory: created.projectlessOutputDirectory,
+        hostId: 'local',
+      };
     }
     if (record['type'] === 'project') {
       const projectId = boundedString(record['projectId'], 'projectId', 256);
@@ -976,7 +1033,7 @@ export class LiveTaskService {
       if (!runtime || runtime.provenance === 'live-conversation') {
         throw new Error(`Unknown project: ${projectId}`);
       }
-      return this.createInRuntime(runtime, prompt, false);
+      return this.createInRuntime(runtime, prompt);
     }
     throw new Error('Unsupported task target.');
   }
@@ -984,35 +1041,13 @@ export class LiveTaskService {
   private async createInRuntime(
     runtime: WorkspaceRuntime,
     prompt: string,
-    projectless: boolean,
   ): Promise<Record<string, unknown>> {
     const session = await runtime.bridge.spawnOrAttach({
       workspaceCwd: runtime.workspaceCwd,
       sessionScope: 'thread',
-      ...(projectless ? { sourceType: 'default' } : {}),
     });
-    let directory: string | undefined;
     let admitted = false;
     try {
-      if (projectless) {
-        if (session.sourcePersisted !== true) {
-          throw new Error('Projectless task metadata was not persisted.');
-        }
-        directory = await this.options.materializeConversationDirectory(
-          session.sessionId,
-        );
-        const changed = await runtime.bridge.changeSessionCwd(
-          session.sessionId,
-          {
-            path: directory,
-            allowedRoots: [runtime.workspaceCwd],
-            managedRelocation: 'live-conversation',
-          },
-        );
-        if (changed.newCwd !== directory) {
-          throw new Error('Projectless task relocation was rejected.');
-        }
-      }
       await this.dispatchPrompt(
         runtime.bridge,
         session.sessionId,
@@ -1023,14 +1058,11 @@ export class LiveTaskService {
       );
       return {
         threadId: session.sessionId,
-        ...(projectless && directory
-          ? { projectlessOutputDirectory: directory }
-          : {}),
         hostId: 'local',
       };
     } catch (error) {
       if (!admitted) {
-        await this.rollbackFreshSession(runtime, session, projectless);
+        await this.rollbackFreshSession(runtime, session);
       }
       throw error;
     }
@@ -1066,6 +1098,10 @@ export class LiveTaskService {
     } catch (error) {
       if (!(error instanceof SessionNotFoundError)) throw error;
     }
+    if (isReservedStandaloneSessionSourceType(task.summary.sourceType)) {
+      await this.getStandaloneSessionService().resume(task.summary.sessionId);
+      return;
+    }
     const service = createWorkspaceRuntimeSessionService(task.runtime);
     const metadata =
       task.runtime.provenance === 'live-conversation'
@@ -1100,7 +1136,6 @@ export class LiveTaskService {
   private async rollbackFreshSession(
     runtime: WorkspaceRuntime,
     session: BridgeSession,
-    projectless: boolean,
   ): Promise<void> {
     let removed = false;
     try {
@@ -1128,11 +1163,6 @@ export class LiveTaskService {
             .catch(() => false),
       );
       if (persistedRemoved) runtime.bridge.markSessionCatalogChanged();
-    }
-    if (projectless && removed) {
-      await this.options
-        .discardEmptyConversationDirectory(session.sessionId)
-        .catch(() => undefined);
     }
   }
 
@@ -1174,8 +1204,27 @@ export class LiveTaskService {
       throw new Error(`Task id is ambiguous: ${threadId}`);
     const runtime = runtimes[0]!;
     const service = createWorkspaceRuntimeSessionService(runtime);
-    const persisted = await service.loadSession(threadId);
     let summary: BridgeSessionSummary;
+    if (runtime.provenance === 'live-conversation') {
+      const standalone = await this.getStandaloneSessionService().get(threadId);
+      if ('state' in standalone) {
+        throw new Error(`Task is still being created: ${threadId}`);
+      }
+      const storageSessionId =
+        await service.findSessionIdIgnoringCase(threadId);
+      if (storageSessionId === undefined) {
+        throw new SessionNotFoundError(threadId);
+      }
+      const persisted = await service.loadSession(storageSessionId);
+      return {
+        runtime,
+        threadId,
+        bridgeSessionId,
+        persisted,
+        summary: standalone,
+      };
+    }
+    const persisted = await service.loadSession(threadId);
     try {
       summary = runtime.bridge.getSessionSummary(bridgeSessionId);
     } catch (error) {
@@ -1216,9 +1265,27 @@ export class LiveTaskService {
       ).map(async (runtime) => ({
         runtime,
         exists:
-          await createWorkspaceRuntimeSessionService(runtime).sessionExists(
-            threadId,
-          ),
+          runtime.provenance === 'live-conversation'
+            ? await this.getStandaloneSessionService()
+                .get(threadId)
+                .then((summary) => !('state' in summary))
+                .catch((error) => {
+                  if (
+                    error instanceof SessionNotFoundError ||
+                    (error instanceof StandaloneSessionServiceError &&
+                      (error.code === 'standalone_session_not_found' ||
+                        error.code === 'invalid_request')) ||
+                    error instanceof DaemonDrainingError ||
+                    (error instanceof ConversationRuntimeOwnershipError &&
+                      error.code === 'conversation_runtime_unavailable')
+                  ) {
+                    return false;
+                  }
+                  throw error;
+                })
+            : await createWorkspaceRuntimeSessionService(runtime).sessionExists(
+                threadId,
+              ),
       })),
     );
     return entries

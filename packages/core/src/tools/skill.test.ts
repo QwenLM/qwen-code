@@ -15,11 +15,13 @@ import type { SkillConfig } from '../skills/types.js';
 import type { ToolResult } from './tools.js';
 import { partToString } from '../utils/partUtils.js';
 import {
+  buildSkillLlmContent,
   collectAvailableSkillEntries,
   clearCollectedSkillEntriesCache,
   renderAvailableSkillsBlock,
 } from './skill-utils.js';
 import { recordAutoSkillUsage } from '../skills/skill-curator.js';
+import { ToolNames } from './tool-names.js';
 
 // Type for accessing protected methods in tests
 type SkillToolWithProtectedMethods = SkillTool & {
@@ -126,6 +128,7 @@ describe('SkillTool', () => {
         };
       }),
       getParseErrors: vi.fn().mockReturnValue(new Map()),
+      getCachedSkills: vi.fn().mockReturnValue(mockSkills),
       // Default to "all skills active" so existing tests that use
       // unconditional skills are unaffected by the conditional-skill gating
       // added alongside `paths:` frontmatter.
@@ -982,6 +985,7 @@ describe('SkillTool', () => {
       expect(result1.returnDisplay).toBe(
         'Specialized skill for reviewing code quality',
       );
+      expect(skillTool.getLoadedSkillContents()).toEqual(new Set([llmText1]));
 
       const invocation2 = (
         skillTool as SkillToolWithProtectedMethods
@@ -994,6 +998,7 @@ describe('SkillTool', () => {
       expect(result2.returnDisplay).toBe(
         'Skill "code-review" is already loaded in context.',
       );
+      expect(skillTool.getLoadedSkillContents()).toEqual(new Set([llmText1]));
     });
 
     it('still allows loading a different skill after one is already loaded', async () => {
@@ -1043,6 +1048,7 @@ describe('SkillTool', () => {
       await inv1.execute();
 
       skillTool.clearLoadedSkills();
+      expect(skillTool.getLoadedSkillContents()).toEqual(new Set());
 
       const inv2 = (
         skillTool as SkillToolWithProtectedMethods
@@ -1050,6 +1056,80 @@ describe('SkillTool', () => {
       const result2 = await inv2.execute();
       const llmText2 = partToString(result2.llmContent);
       expect(llmText2).toContain('Review code for quality and best practices.');
+    });
+
+    it('restores loaded Skill state from full bodies in resumed history', () => {
+      const output = buildSkillLlmContent(
+        '/project/.qwen/skills/code-review',
+        mockSkills[0].body,
+      );
+
+      skillTool.restoreLoadedSkillsFromHistory([
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'skill-call',
+                name: ToolNames.SKILL,
+                args: { skill: 'code-review' },
+              },
+            },
+          ],
+        },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'skill-call',
+                name: ToolNames.SKILL,
+                response: { output },
+              },
+            },
+          ],
+        },
+      ]);
+
+      expect(skillTool.getLoadedSkillNames()).toEqual(new Set(['code-review']));
+      expect(skillTool.getLoadedSkillContents()).toEqual(new Set([output]));
+    });
+
+    it('does not restore command output that matches an unrelated cached Skill', () => {
+      const output = buildSkillLlmContent(
+        '/project/.qwen/skills/code-review',
+        mockSkills[0].body,
+      );
+
+      skillTool.restoreLoadedSkillsFromHistory([
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'command-call',
+                name: ToolNames.SKILL,
+                args: { skill: 'model-command' },
+              },
+            },
+          ],
+        },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'command-call',
+                name: ToolNames.SKILL,
+                response: { output },
+              },
+            },
+          ],
+        },
+      ]);
+
+      expect(skillTool.getLoadedSkillNames()).toEqual(new Set());
+      expect(skillTool.getLoadedSkillContents()).toEqual(new Set());
     });
 
     it('re-invocation still logs telemetry and calls onSkillLoaded', async () => {
