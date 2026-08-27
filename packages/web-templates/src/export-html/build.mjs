@@ -214,6 +214,10 @@ const documentTemplateModule = `/**
 
 export const DOCUMENT_HTML_TEMPLATE = ${JSON.stringify(documentHtmlOutput)};
 export const EXPORT_TRANSCRIPT_RENDERER_VERSION = ${JSON.stringify(exportTranscriptRendererVersion)};
+export const EXPORT_TRANSCRIPT_RENDERER_LIMITS = Object.freeze({
+  maxBlocks: ${exportTranscriptMaxBlocks},
+  maxEnvelopeBytes: ${exportTranscriptMaxEnvelopeBytes},
+});
 `;
 
 const formattedTemplateModule = await prettier.format(templateModule, {

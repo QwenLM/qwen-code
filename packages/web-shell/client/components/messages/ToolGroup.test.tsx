@@ -740,8 +740,12 @@ describe('tool row rendering', () => {
     expect(container.textContent).toContain('document thought');
     expect(container.querySelector('[aria-expanded="false"]')).toBeNull();
     expect(
-      container.querySelector('[class*="chatSummaryContentClip"]')?.className,
-    ).not.toContain('chatSummaryContentCollapsed');
+      (
+        container.querySelector(
+          '[class*="chatSummaryContentClip"]',
+        ) as HTMLElement | null
+      )?.style.display,
+    ).not.toBe('none');
     expect(container.querySelector('button:not([disabled])')).toBeNull();
   });
 
@@ -2246,6 +2250,24 @@ describe('tool output logic', () => {
     ).toBe(fileDiff);
   });
 
+  it('keeps confirmed diff content on a subsequently cancelled tool', () => {
+    expect(
+      extractDiff(
+        makeTool({
+          toolName: 'edit',
+          wasCancelled: true,
+          content: [
+            {
+              type: 'diff',
+              oldText: 'old content',
+              newText: 'confirmed content',
+            },
+          ],
+        }),
+      ),
+    ).toContain('confirmed content');
+  });
+
   it('builds a unified diff for changed content blocks', () => {
     expect(buildUnifiedDiff('same\nold', 'same\nnew')).toBe(
       ' same\n-old\n+new',
@@ -2311,6 +2333,37 @@ describe('tool output logic', () => {
         messages[0]?.role === 'tool_group' ? messages[0].tools[0] : undefined;
 
       expect(tool).toBeDefined();
+      expect(extractDiff(tool!)).toBe('');
+    },
+  );
+
+  it.each(['cancelled', 'canceled'])(
+    'does not render an attempted raw-input diff for a %s default projection',
+    (status) => {
+      const block: DaemonToolTranscriptBlock = {
+        id: 'cancelled-default-edit',
+        kind: 'tool',
+        toolCallId: 'edit-default-call',
+        title: 'Edit',
+        status,
+        toolName: 'edit',
+        preview: { kind: 'generic' },
+        rawInput: {
+          oldText: 'old content',
+          newText: 'ATTEMPTED NEW CONTENT',
+        },
+        clientReceivedAt: 1,
+        createdAt: 1,
+        updatedAt: 1,
+      };
+      const messages = transcriptBlocksToDaemonMessages([block]);
+      const tool =
+        messages[0]?.role === 'tool_group' ? messages[0].tools[0] : undefined;
+
+      expect(tool).toMatchObject({
+        status: 'completed',
+        wasCancelled: true,
+      });
       expect(extractDiff(tool!)).toBe('');
     },
   );

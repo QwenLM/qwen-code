@@ -1580,10 +1580,35 @@ describe('transcriptBlocksToDaemonMessages', () => {
 
     expect(tool).toMatchObject({
       callId: 'agent-safe',
-      status: 'pending',
+      status: 'completed',
     });
-    expect(tool?.endTime).toBeUndefined();
+    expect(tool?.endTime).toBe(20);
   });
+
+  it.each(['failed', 'cancelled', 'canceled'] as const)(
+    'keeps terminal background agent status %s in safe projection',
+    (status) => {
+      const messages = transcriptBlocksToDaemonMessages(
+        [
+          toolBlock('agent-background-terminal', 'agent-terminal', status, 20, {
+            toolName: 'agent',
+            background: true,
+            preview: {
+              kind: 'subagent_delegation',
+              agentName: 'reviewer',
+              task: 'Review safely',
+            },
+            resultPreview: { kind: 'text', text: 'Terminal result' },
+          }),
+        ],
+        { safeToolProjection: true },
+      );
+      const tool = messages.find((message) => message.role === 'tool_group')
+        ?.tools[0];
+
+      expect(tool).toMatchObject({ status: 'failed', endTime: 20 });
+    },
+  );
 
   it('does not classify non-agent background tools as subagents', () => {
     const messages = transcriptBlocksToDaemonMessages(
@@ -2563,6 +2588,8 @@ describe('transcriptBlocksToDaemonMessages', () => {
 
     const tool =
       messages[0]?.role === 'tool_group' ? messages[0].tools[0] : undefined;
+    expect(messages).toHaveLength(1);
+    expect(tool).toBeDefined();
     expect(tool?.args).toBeUndefined();
     expect(tool?.rawOutput).toBeUndefined();
   });
@@ -2682,6 +2709,8 @@ describe('transcriptBlocksToDaemonMessages', () => {
 
     const tool =
       messages[0]?.role === 'tool_group' ? messages[0].tools[0] : undefined;
+    expect(messages).toHaveLength(1);
+    expect(tool).toMatchObject({ callId: 'raw-only-call' });
     expect(tool?.args).toBeUndefined();
     expect(tool?.rawOutput).toBeUndefined();
     expect(tool?.content).toBeUndefined();

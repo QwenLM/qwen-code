@@ -4,7 +4,10 @@ import { performance as nodePerformance } from 'node:perf_hooks';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import { chromium, type Browser, type Page } from 'playwright';
-import { EXPORT_TRANSCRIPT_RENDERER_VERSION } from '@qwen-code/web-templates';
+import {
+  EXPORT_TRANSCRIPT_RENDERER_LIMITS,
+  EXPORT_TRANSCRIPT_RENDERER_VERSION,
+} from '@qwen-code/web-templates';
 import {
   EXPORT_TRANSCRIPT_LIMITS_V1,
   createExportTranscriptDocumentV1,
@@ -40,6 +43,18 @@ const expectedNetwork = JSON.parse(
     'utf8',
   ),
 ) as ExpectedNetwork;
+
+function replaceDocumentEnvelope(html: string, value: unknown): string {
+  const idIndex = html.indexOf('id="transcript-document"');
+  const openTagEnd = html.indexOf('>', idIndex);
+  const closeTagStart = html.indexOf('</script>', openTagEnd);
+  if (idIndex === -1 || openTagEnd === -1 || closeTagStart === -1) {
+    throw new Error('Transcript document envelope is missing from test HTML.');
+  }
+  return `${html.slice(0, openTagEnd + 1)}${escapeJsonForHtmlScriptData(
+    JSON.stringify(value),
+  )}${html.slice(closeTagStart)}`;
+}
 
 function record(
   uuid: string,
@@ -341,6 +356,10 @@ describe('ExportTranscriptDocument browser gate', () => {
     )['thumbnailUrl'] as Record<string, unknown>;
 
     expect(blocks['maxItems']).toBe(EXPORT_TRANSCRIPT_LIMITS_V1.maxBlocks);
+    expect(EXPORT_TRANSCRIPT_RENDERER_LIMITS).toEqual({
+      maxBlocks: EXPORT_TRANSCRIPT_LIMITS_V1.maxBlocks,
+      maxEnvelopeBytes: EXPORT_TRANSCRIPT_LIMITS_V1.maxEnvelopeBytes,
+    });
     expect(rasterData['maxLength']).toBe(
       Math.ceil(EXPORT_TRANSCRIPT_LIMITS_V1.maxRasterBytes / 3) * 4,
     );
@@ -512,6 +531,46 @@ describe('ExportTranscriptDocument browser gate', () => {
     browser = undefined;
   }, 90_000);
 
+  it('renders a stable error page for incompatible document envelopes', async () => {
+    const document = createExportTranscriptDocumentV1(
+      [record('error-probe', null, 'user', 'Error probe')],
+      {
+        startTime: '2026-08-16T00:00:00.000Z',
+        metadata: {
+          sessionId: 'error-probe',
+          startTime: '2026-08-16T00:00:00.000Z',
+          exportTime: EXPORTED_AT,
+          cwd: '/workspace/project',
+          promptCount: 1,
+          uniqueFiles: [],
+        },
+      },
+      { rendererVersion: RENDERER_VERSION, exportedAt: EXPORTED_AT },
+    );
+    const html = renderExportTranscriptDocumentToHtml(document);
+    const invalidDocuments = [
+      { ...document, rendererVersion: 'incompatible-renderer' },
+      {
+        ...document,
+        metadata: { ...document.metadata, title: { invalid: true } },
+      },
+    ];
+
+    browser = await chromium.launch({ headless: true });
+    const page = await browser.newPage();
+    for (const invalidDocument of invalidDocuments) {
+      await page.setContent(replaceDocumentEnvelope(html, invalidDocument), {
+        waitUntil: 'load',
+      });
+      await expect
+        .poll(() => page.locator('body').getAttribute('data-render-complete'))
+        .toBe('error');
+      expect(await page.getByRole('alert').textContent()).toContain(
+        'Unable to open this chat export',
+      );
+    }
+  });
+
   it('runs the real HTML export entry point with zero network', async () => {
     const records = [
       {
@@ -523,6 +582,7 @@ describe('ExportTranscriptDocument browser gate', () => {
             '![tracking](https://example.invalid/track.png)',
             '[![nested-tracking](https://example.invalid/nested-track.png?u=victim)](https://example.com)',
             '![inline-safe](data:image/png;base64,iVBORw0KGgo=)',
+            'Literal closing tag: </script>',
           ].join('\n'),
         ),
         rawInput: CANARY,
@@ -570,6 +630,9 @@ describe('ExportTranscriptDocument browser gate', () => {
     );
     expect(await page.locator('body').innerText()).toContain(
       '[image omitted: nested-tracking]',
+    );
+    expect(await page.locator('body').innerText()).toContain(
+      'Literal closing tag: </script>',
     );
     expect(
       await page.locator('img[alt="inline-safe"]').getAttribute('src'),

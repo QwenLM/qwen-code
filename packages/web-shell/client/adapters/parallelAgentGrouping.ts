@@ -24,7 +24,7 @@ export type ParallelAgentDisplayItem =
 
 // Synthetic compact summaries carry a folded thought next to their single
 // tool, so this second-stage grouping must leave those rows intact.
-function isAgentOnlyToolGroup(message: Message): boolean {
+export function isAgentOnlyToolGroup(message: Message): boolean {
   return (
     message.role === 'tool_group' &&
     !message.id.startsWith('summary-') &&

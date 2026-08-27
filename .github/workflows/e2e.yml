@@ -292,6 +292,9 @@ jobs:
       - name: 'Install Playwright Chromium'
         run: 'npx playwright install --with-deps chromium'
 
+      - name: 'Run transcript document browser gate'
+        run: 'npx vitest run --root ./integration-tests ./chat-transcript-document.test.ts --retry=0'
+
       - name: 'Run web-shell browser regression'
         run: 'npm run test:e2e --workspace=packages/web-shell'
 

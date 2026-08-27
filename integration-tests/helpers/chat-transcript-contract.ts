@@ -68,7 +68,7 @@ export function adaptAcpTranscriptUpdates(
   );
 }
 
-function projectStableTranscriptBlockIds(
+export function projectStableTranscriptBlockIds(
   blocks: readonly DaemonTranscriptBlock[],
   scopeKey: string,
 ): TranscriptCandidate {

@@ -264,7 +264,7 @@ export function createExportTranscriptDocumentV1(
   for (const block of visibleBlocks) {
     const checkpoint = budget.checkpoint();
     const safe = sanitizeBlock(block, budget, ids, diagnostics);
-    if (budget.textBudgetExceeded) {
+    if (budget.cumulativeTextBudgetExceeded) {
       budget.restore(checkpoint);
       break;
     }
@@ -475,6 +475,16 @@ function sanitizeBlock(
       let resultPreview = block.resultPreview
         ? sanitizeResultPreview(block.resultPreview, budget, diagnostics, ids)
         : undefined;
+      if (
+        !resultPreview &&
+        block.preview.kind === 'file_diff' &&
+        status === 'completed'
+      ) {
+        resultPreview = {
+          kind: 'text',
+          text: budget.plainText('File change applied'),
+        };
+      }
       if (!resultPreview && (status === 'completed' || status === 'failed')) {
         diagnostics.add('tool_result_presentation_missing', 'error');
         budget.markContentLoss();
@@ -509,16 +519,18 @@ function sanitizeBlock(
       return {
         ...common,
         kind: 'shell',
-        text: budget.plainText(redactHomePaths(block.text)),
+        text: budget.plainText(block.text),
         ...(block.stream ? { stream: block.stream } : {}),
       };
     case 'user_shell':
       return {
         ...common,
         kind: 'user_shell',
-        text: budget.plainText(redactHomePaths(block.text)),
-        command: budget.plainText(redactHomePaths(block.command)),
-        ...(block.cwd ? { cwd: budget.label(safePath(block.cwd), 400) } : {}),
+        text: budget.plainText(block.text),
+        command: budget.plainText(block.command),
+        ...(block.cwd
+          ? { cwd: budget.label(safePath(block.cwd), 400, false) }
+          : {}),
         ...(block.stream ? { stream: block.stream } : {}),
       };
     case 'permission': {
@@ -610,15 +622,15 @@ function sanitizeToolPreview(
     case 'command':
       return {
         kind: preview.kind,
-        command: budget.plainText(redactHomePaths(preview.command)),
+        command: budget.plainText(preview.command),
         ...(preview.cwd
-          ? { cwd: budget.label(safePath(preview.cwd), 400) }
+          ? { cwd: budget.label(safePath(preview.cwd), 400, false) }
           : {}),
       };
     case 'file_diff':
       return {
         kind: preview.kind,
-        path: budget.label(safePath(preview.path), 400),
+        path: budget.label(safePath(preview.path), 400, false),
         ...(preview.oldText !== undefined
           ? { oldText: budget.plainText(preview.oldText) }
           : {}),
@@ -638,7 +650,7 @@ function sanitizeToolPreview(
         : undefined;
       return {
         kind: preview.kind,
-        path: budget.label(safePath(preview.path), 400),
+        path: budget.label(safePath(preview.path), 400, false),
         ...(range ? { range } : {}),
       };
     }
@@ -666,7 +678,7 @@ function sanitizeToolPreview(
     case 'code_block': {
       const language = budget.optionalLabel(preview.language, 64);
       const origin = preview.origin
-        ? budget.optionalLabel(safePath(preview.origin), 400)
+        ? budget.optionalLabel(safePath(preview.origin), 400, false)
         : undefined;
       return {
         kind: preview.kind,
@@ -686,7 +698,7 @@ function sanitizeToolPreview(
           ? {
               top: budget
                 .array(preview.top)
-                .map((item) => budget.plainText(redactHomePaths(item))),
+                .map((item) => budget.plainText(item)),
             }
           : {}),
       };
@@ -737,7 +749,7 @@ function sanitizeToolPreview(
         kind: preview.kind,
         rows: budget.array(preview.rows).map((row) => ({
           label: budget.plainText(row.label),
-          value: budget.plainText(redactHomePaths(row.value)),
+          value: budget.plainText(row.value),
         })),
       };
     case 'todo_list':
@@ -764,10 +776,10 @@ function sanitizeResultPreview(
     return sanitizeTodoPreview(preview, budget, ids);
   }
   if (preview.kind === 'text') {
-    return { kind: 'text', text: budget.text(redactHomePaths(preview.text)) };
+    return { kind: 'text', text: budget.text(preview.text) };
   }
   if (!preview.summary?.trim()) return undefined;
-  const summary = budget.text(redactHomePaths(preview.summary));
+  const summary = budget.text(preview.summary);
   return summary.trim()
     ? { kind: 'generic', summary }
     : { kind: 'text', text: summary };
@@ -862,6 +874,7 @@ function createMetadataPresentation(
         'project_name',
         diagnostics,
         budget,
+        false,
       )
     : undefined;
   const repository = metadata?.gitRepo
@@ -912,7 +925,7 @@ class ExportBudget {
   totalRasterBytes = 0;
   richRenderTasks = 0;
   truncated = false;
-  textBudgetExceeded = false;
+  cumulativeTextBudgetExceeded = false;
 
   constructor(private readonly diagnostics: DiagnosticCounter) {}
 
@@ -951,18 +964,22 @@ class ExportBudget {
     this.truncated = true;
   }
 
-  label(value: unknown, maxLength: number): string {
+  label(value: unknown, maxLength: number, redact = true): string {
     const safe = safeLabel(value, maxLength);
     if (safe !== value) this.markTruncated('label_sanitized');
     return this.applyTextBudgetWithFallback(
-      redactHomePaths(safe),
+      redact ? redactHomePaths(safe) : safe,
       safeLabel('[content omitted]', maxLength),
     );
   }
 
-  optionalLabel(value: unknown, maxLength: number): string | undefined {
+  optionalLabel(
+    value: unknown,
+    maxLength: number,
+    redact = true,
+  ): string | undefined {
     if (value === undefined || value === '') return undefined;
-    return this.label(value, maxLength);
+    return this.label(value, maxLength, redact);
   }
 
   plainText(value: string): string {
@@ -987,6 +1004,15 @@ class ExportBudget {
       onUrlChange: (code) => {
         this.truncated = true;
         this.diagnostics.add(code, 'warning', 1, true);
+      },
+      onComplexityLimit: () => {
+        this.truncated = true;
+        this.diagnostics.add(
+          'markdown_complexity_exceeded',
+          'warning',
+          1,
+          true,
+        );
       },
     });
     const richTaskSafeValue = transformRichMarkdownTasks(
@@ -1017,12 +1043,11 @@ class ExportBudget {
     const normalTextLimit =
       EXPORT_TRANSCRIPT_LIMITS_V1.maxVisibleTextBytes -
       REQUIRED_TEXT_FALLBACK_RESERVE_BYTES;
-    if (
-      bytes > EXPORT_TRANSCRIPT_LIMITS_V1.maxTextBytes ||
-      this.visibleTextBytes + bytes > normalTextLimit
-    ) {
+    const perItemExceeded = bytes > EXPORT_TRANSCRIPT_LIMITS_V1.maxTextBytes;
+    const cumulativeExceeded = this.visibleTextBytes + bytes > normalTextLimit;
+    if (perItemExceeded || cumulativeExceeded) {
       this.truncated = true;
-      this.textBudgetExceeded = true;
+      if (cumulativeExceeded) this.cumulativeTextBudgetExceeded = true;
       this.diagnostics.add('text_budget_exceeded', 'warning');
       const fallbackBytes = utf8Bytes(fallback);
       if (
@@ -1424,6 +1449,7 @@ const TRUNCATION_DIAGNOSTIC_CODES = new Set([
   'array_budget_exceeded',
   'todo_preview_truncated',
   'markdown_image_rejected',
+  'markdown_complexity_exceeded',
   'text_budget_exceeded',
   'image_type_rejected',
   'image_budget_or_animation_rejected',
@@ -1460,7 +1486,10 @@ function assertNoForbiddenFields(value: unknown): void {
   ]);
   const visit = (entry: unknown, key?: string): void => {
     if (typeof entry === 'string') {
-      if (key !== 'data' && redactHomePaths(entry) !== entry) {
+      const safePathField =
+        key !== undefined &&
+        ['path', 'cwd', 'origin', 'projectName'].includes(key);
+      if (key !== 'data' && containsUnredactedHomePath(entry, !safePathField)) {
         throw new ExportTranscriptDocumentError('home_path_forbidden');
       }
       return;
@@ -1571,6 +1600,11 @@ function assertResourceBudgets(value: unknown): void {
           normalizeUrl: normalizeNavigableUrl,
           onUrlChange: () => {
             throw new ExportTranscriptDocumentError('invalid_markdown_url');
+          },
+          onComplexityLimit: () => {
+            throw new ExportTranscriptDocumentError(
+              'markdown_complexity_exceeded',
+            );
           },
           replaceImage: (alt, source) => {
             const image = source
@@ -1759,7 +1793,7 @@ function safeRepository(
     return budget.plainText('[link omitted]');
   }
   const safe = safePath(raw).replace(/\.git$/i, '');
-  if (isSafeLabel(safe, 200)) return budget.plainText(safe);
+  if (isSafeLabel(safe, 200)) return budget.label(safe, 200, false);
   diagnostics.add('repository_rejected', 'warning', 1, true);
   budget.markContentLoss();
   return budget.plainText('[link omitted]');
@@ -1771,9 +1805,14 @@ function safeMetadataLabel(
   field: string,
   diagnostics: DiagnosticCounter,
   budget: ExportBudget,
+  redact = true,
 ): string | undefined {
   if (value === undefined || value === '') return undefined;
-  if (isSafeLabel(value, maxLength)) return budget.plainText(value);
+  if (isSafeLabel(value, maxLength)) {
+    return redact
+      ? budget.plainText(value)
+      : budget.label(value, maxLength, false);
+  }
   diagnostics.add(`${field}_rejected`, 'warning', 1, true);
   budget.markContentLoss();
   return undefined;
@@ -1809,8 +1848,25 @@ function isSafeRepository(value: unknown): value is string {
 }
 
 function safePath(value: string): string {
-  const normalized = value.replaceAll('\\', '/').replace(/\/+$/, '');
-  const basename = normalized.split('/').filter(Boolean).at(-1);
+  const normalized = value
+    .replaceAll('\\', '/')
+    .replace(/^file:\/\/[^/]+\//i, '/')
+    .replace(/^file:\/\/\//i, '/')
+    .replace(/^file:\//i, '/')
+    .replace(/\/+$/, '');
+  const components = normalized.split('/').filter(Boolean);
+  const rootIndex = /^[A-Za-z]:$/.test(components[0] ?? '') ? 1 : 0;
+  if (
+    /^(?:Users|home)$/i.test(components[rootIndex] ?? '') &&
+    components[rootIndex + 1] !== undefined
+  ) {
+    const homeBasename = components.at(-1);
+    if (components.length === rootIndex + 2) return '[home]';
+    return homeBasename && homeBasename !== '.' && homeBasename !== '..'
+      ? homeBasename
+      : '[path]';
+  }
+  const basename = components.at(-1);
   return basename && !/^[A-Za-z]:$/.test(basename) ? basename : '[path]';
 }
 
@@ -1823,98 +1879,140 @@ function isSafeExportPath(value: unknown): value is string {
 }
 
 function redactHomePaths(value: string): string {
+  return redactHomePathStructures(value);
+}
+function redactHomePathStructures(value: string): string {
   const urlPattern =
-    /\b(?:[A-Za-z][A-Za-z0-9+.-]*:\/\/|file:(?:\/\/)?)[^\s<>"'`]+/gi;
+    /\b(?:https?:\/\/|data:image\/[A-Za-z0-9.+-]+;base64,)[^\s<>"'\x60]+/gi;
   let result = '';
   let cursor = 0;
   for (const match of value.matchAll(urlPattern)) {
-    const index = match.index;
-    result += redactStandaloneHomePaths(value.slice(cursor, index));
-    result += /^file:/i.test(match[0])
-      ? redactFileUrlHomePath(match[0])
-      : match[0];
-    cursor = index + match[0].length;
+    result += redactNonHttpHomePathStructures(value.slice(cursor, match.index));
+    result += match[0];
+    cursor = match.index + match[0].length;
   }
-  return result + redactStandaloneHomePaths(value.slice(cursor));
+  return result + redactNonHttpHomePathStructures(value.slice(cursor));
 }
 
-function redactStandaloneHomePaths(value: string): string {
-  return value
-    .replace(
-      /(^|[^A-Za-z0-9+/,])(\/[^\s<>"'`]+)/g,
-      (_match, prefix: string, path: string) =>
-        `${prefix}${redactHomePathToken(path, '/') ?? path}`,
-    )
-    .replace(
-      /(^|[^A-Za-z0-9+/,])([A-Za-z]:\\[^\s<>"'`]+)/g,
-      (_match, prefix: string, path: string) =>
-        `${prefix}${redactHomePathToken(path, '\\') ?? path}`,
-    )
-    .replace(
-      /(^|[^A-Za-z0-9%])(%[0-9A-Fa-f]{2}[^\s<>"'`]*)/g,
-      (_match, prefix: string, path: string) =>
-        `${prefix}${redactHomePathToken(path, '/') ?? path}`,
-    );
-}
-
-function redactFileUrlHomePath(value: string): string {
-  try {
-    const url = new URL(value);
-    if (url.protocol !== 'file:') return value;
-    const components = normalizedUrlPathComponents(url.pathname);
-    const redacted = redactHomePathComponents(components, '/');
-    return redacted ? `file://${redacted}` : value;
-  } catch {
-    return redactStandaloneHomePaths(value);
-  }
-}
-
-function redactHomePathToken(
-  value: string,
-  separator: '/' | '\\',
-): string | undefined {
-  return redactHomePathComponents(
-    normalizedUrlPathComponents(value),
-    separator,
+function redactNonHttpHomePathStructures(value: string): string {
+  const rawRedacted = redactRawHomePathStructures(value);
+  const encodedRedacted = rawRedacted.replace(
+    /(^|[^A-Za-z0-9%])(%[0-9A-Fa-f]{2}[^\s<>"'\x60]*)/g,
+    (
+      match: string,
+      prefix: string,
+      token: string,
+      offset: number,
+      source: string,
+    ) => {
+      const tokenStart = offset + prefix.length;
+      if (source.slice(0, tokenStart).endsWith('[home]')) return match;
+      let decoded = token;
+      for (let pass = 0; pass < 3; pass += 1) {
+        try {
+          const next = decodeURIComponent(decoded);
+          if (next === decoded) break;
+          decoded = next;
+        } catch {
+          break;
+        }
+      }
+      const redacted = redactRawHomePathStructures(decoded);
+      return redacted === decoded ? match : prefix + redacted;
+    },
+  );
+  return encodedRedacted.replace(
+    /file:\/+(?:[^/\s]+\/)?(?:[A-Za-z]:\/)?\[home\]/gi,
+    'file://[home]',
   );
 }
 
-function redactHomePathComponents(
-  components: readonly string[],
-  separator: '/' | '\\',
-): string | undefined {
-  const rootIndex = /^[A-Za-z]:$/.test(components[0] ?? '') ? 1 : 0;
-  if (
-    !/^(?:Users|home)$/i.test(components[rootIndex] ?? '') ||
-    components[rootIndex + 1] === undefined
-  ) {
-    return undefined;
-  }
-  const suffix = components.slice(rootIndex + 2).join(separator);
-  return `[home]${suffix ? `${separator}${suffix}` : ''}`;
+function redactRawHomePathStructures(value: string): string {
+  return value
+    .replace(
+      /file:\/+(?:[^/\s]+\/)?(?:[A-Za-z]:\/)?(?:home|Users)\/(?:\.\/|\/)*[^/\\\s<>"'\x60,;:|()]+/gi,
+      'file://[home]',
+    )
+    .replace(
+      /(^|[^A-Za-z0-9_+\-./\\%])(\/(?:home|Users)\/(?:\.\/|\/)*[^/\\\s<>"'\x60,;:|()]+)/gi,
+      (
+        match: string,
+        prefix: string,
+        _path: string,
+        offset: number,
+        source: string,
+      ) =>
+        source.slice(0, offset + prefix.length).endsWith('[home]')
+          ? match
+          : prefix + '[home]',
+    )
+    .replace(
+      /(^|[^A-Za-z0-9_+\-./\\%])([A-Za-z]:\\(?:Users|home)\\[^/\\\s<>"'\x60,;:|()]+)/gi,
+      '$1[home]',
+    );
 }
 
-function normalizedUrlPathComponents(pathname: string): string[] {
-  let decoded = pathname;
-  for (let pass = 0; pass < 3; pass += 1) {
-    try {
-      const next = decodeURIComponent(decoded);
-      if (next === decoded) break;
-      decoded = next;
-    } catch {
-      break;
+function containsUnredactedHomePath(
+  value: string,
+  checkPercentEncoding: boolean,
+): boolean {
+  const urlPattern =
+    /\b(?:https?:\/\/|data:image\/[A-Za-z0-9.+-]+;base64,)[^\s<>"'\x60]+/gi;
+  let cursor = 0;
+  for (const match of value.matchAll(urlPattern)) {
+    if (
+      containsNonHttpHomePath(
+        value.slice(cursor, match.index),
+        checkPercentEncoding,
+      )
+    ) {
+      return true;
     }
+    cursor = match.index + match[0].length;
   }
-  const components: string[] = [];
-  for (const component of decoded.replaceAll('\\', '/').split('/')) {
-    if (!component || component === '.') continue;
-    if (component === '..') {
-      components.pop();
-    } else {
-      components.push(component);
+  return containsNonHttpHomePath(value.slice(cursor), checkPercentEncoding);
+}
+
+function containsNonHttpHomePath(
+  value: string,
+  checkPercentEncoding: boolean,
+): boolean {
+  if (containsRawHomePath(value)) return true;
+  if (!checkPercentEncoding) return false;
+  for (const match of value.matchAll(/%[0-9A-Fa-f]{2}[^\s<>"'\x60]*/g)) {
+    let decoded = match[0];
+    for (let pass = 0; pass < 3; pass += 1) {
+      try {
+        const next = decodeURIComponent(decoded);
+        if (next === decoded) break;
+        decoded = next;
+      } catch {
+        break;
+      }
     }
+    if (containsRawHomePath(decoded)) return true;
   }
-  return components;
+  return false;
+}
+
+function containsRawHomePath(value: string): boolean {
+  if (
+    /file:\/+(?:[^/\s]+\/)?(?:[A-Za-z]:\/)?(?:home|Users)\/(?:\.\/|\/)*[^/\\\s<>"'\x60,;:|()]+/i.test(
+      value,
+    ) ||
+    /(^|[^A-Za-z0-9_+\-./\\%])[A-Za-z]:\\(?:Users|home)\\[^/\\\s<>"'\x60,;:|()]+/i.test(
+      value,
+    )
+  ) {
+    return true;
+  }
+  for (const match of value.matchAll(
+    /(^|[^A-Za-z0-9_+\-./\\%])(\/(?:home|Users)\/(?:\.\/|\/)*[^/\\\s<>"'\x60,;:|()]+)/gi,
+  )) {
+    const pathStart = match.index + match[1].length;
+    if (!value.slice(0, pathStart).endsWith('[home]')) return true;
+  }
+  return false;
 }
 
 function safeLabel(value: unknown, maxLength: number): string {

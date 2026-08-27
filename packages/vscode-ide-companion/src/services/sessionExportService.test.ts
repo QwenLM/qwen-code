@@ -73,6 +73,13 @@ import {
   parseExportSlashCommand,
 } from './sessionExportService.js';
 
+const rawSessionRecord = {
+  uuid: 'raw-record-1',
+  parentUuid: null,
+  type: 'user',
+  message: { role: 'user', parts: [{ text: 'raw transcript record' }] },
+};
+
 describe('sessionExportService', () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -81,13 +88,13 @@ describe('sessionExportService', () => {
       conversation: {
         sessionId: 'session-1',
         startTime: '2025-01-01T00:00:00Z',
-        messages: [],
+        messages: [rawSessionRecord],
       },
     });
     mockCollectSessionData.mockResolvedValue({
       sessionId: 'session-1',
       startTime: '2025-01-01T00:00:00Z',
-      messages: [],
+      messages: [{ role: 'user', content: 'normalized export message' }],
     });
     mockNormalizeSessionData.mockImplementation((data) => data);
     mockToHtml.mockReturnValue('<html>export</html>');
@@ -157,7 +164,7 @@ describe('sessionExportService', () => {
       expect(mockNormalizeSessionData).toHaveBeenCalled();
       expect(mockToHtml).toHaveBeenCalledWith(
         expect.objectContaining({ sessionId: 'session-1' }),
-        [],
+        [rawSessionRecord],
       );
       expect(mockShowSaveDialog).toHaveBeenCalledWith(
         expect.objectContaining({

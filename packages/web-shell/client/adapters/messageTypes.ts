@@ -60,6 +60,7 @@ export interface DaemonMessageToolCall {
   kind?: DaemonMessageToolKind;
   startTime?: number;
   endTime?: number;
+  wasCancelled?: boolean;
   subContent?: string;
   subTools?: DaemonMessageToolCall[];
   /** Transcript blocks folded into this tool presentation. */

@@ -163,6 +163,10 @@ describe('ExportTranscriptDocumentV1', () => {
                   'Normalized /home//alice/private.txt /home/./alice/private.txt',
                   '--dir=/Users/alice/private.txt',
                   'encoded=%2Fhome%2Falice%2Fprivate.txt',
+                  'joined=/home/alice/a,/home/bob/b',
+                  'traversal=/home/alice/../../etc/passwd',
+                  'file traversal=file:///home/alice/..',
+                  'nested=/home/alice/home/notes.txt',
                   '![safe](data:image/png;base64,/home/AA)',
                 ].join('\n'),
               },
@@ -192,6 +196,136 @@ describe('ExportTranscriptDocumentV1', () => {
     expect(text).not.toContain('C:\\Users\\alice');
     expect(text).not.toContain('/home/alice');
     expect(text).not.toContain('%2Fhome%2Falice');
+    expect(text).not.toContain('/home/bob');
+    expect(text).toContain('joined=[home]/a,[home]/b');
+    expect(text).toContain('nested=[home]/home/notes.txt');
+    expect(text).not.toContain('[home][home]');
+  });
+
+  it('redacts home roots while preserving percent-encoded basenames', () => {
+    const document = createExportTranscriptDocumentV1(
+      [
+        record('read-home-root', null, {
+          type: 'assistant',
+          message: {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'read-home',
+                  name: 'read_file',
+                  args: { path: '/home/alice' },
+                },
+              },
+              {
+                functionCall: {
+                  id: 'read-literal',
+                  name: 'read_file',
+                  args: { path: '/tmp/%2Fhome%2Falice%2Fnotes' },
+                },
+              },
+              {
+                functionCall: {
+                  id: 'read-file-url-home',
+                  name: 'read_file',
+                  args: { path: 'file:///home/alice' },
+                },
+              },
+            ],
+          },
+        }),
+      ],
+      {
+        ...sessionData,
+        metadata: { ...sessionData.metadata, cwd: '/Users/bob' },
+      },
+      EXPORT_OPTIONS,
+    );
+
+    expect(document.metadata.projectName).toBe('[home]');
+    expect(
+      document.blocks
+        .filter((block) => block.kind === 'tool')
+        .map((block) => block.preview),
+    ).toEqual([
+      { kind: 'file_read', path: '[home]' },
+      { kind: 'file_read', path: '%2Fhome%2Falice%2Fnotes' },
+      { kind: 'file_read', path: '[home]' },
+    ]);
+  });
+
+  it('exports qwen-native edit args as a complete file diff', () => {
+    const document = createExportTranscriptDocumentV1(
+      [
+        record('edit-user', null),
+        record('edit-start', 'edit-user', {
+          type: 'assistant',
+          message: {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'edit-native',
+                  name: 'edit',
+                  args: {
+                    file_path: '/workspace/project/src/index.ts',
+                    old_string: 'const value = 1;',
+                    new_string: 'const value = 2;',
+                  },
+                },
+              },
+            ],
+          },
+        }),
+        record('edit-result', 'edit-start', {
+          type: 'tool_result',
+          message: {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'edit-native',
+                  name: 'edit',
+                  response: { output: 'Edit applied' },
+                },
+              },
+            ],
+          },
+          toolCallResult: {
+            callId: 'edit-native',
+            status: 'success',
+            resultDisplay: {
+              fileName: 'src/index.ts',
+              originalContent: 'const value = 1;',
+              newContent: 'const value = 2;',
+              fileDiff: '-const value = 1;\n+const value = 2;',
+            },
+          },
+        }),
+      ],
+      sessionData,
+      EXPORT_OPTIONS,
+    );
+    const edit = document.blocks.find(
+      (block) => block.kind === 'tool' && block.toolName === 'edit',
+    );
+
+    expect(edit).toMatchObject({
+      preview: {
+        kind: 'file_diff',
+        path: 'index.ts',
+        oldText: 'const value = 1;',
+        newText: 'const value = 2;',
+      },
+      resultPreview: { kind: 'text', text: 'File change applied' },
+    });
+    expect(document.metadata).toMatchObject({
+      complete: true,
+      truncated: false,
+    });
+    expect(document.diagnostics).not.toContainEqual(
+      expect.objectContaining({ code: 'tool_result_presentation_missing' }),
+    );
   });
 
   it('does not treat remote URL paths as local home paths', () => {
@@ -741,9 +875,30 @@ describe('ExportTranscriptDocumentV1', () => {
       `selected:missing-${CANARY}`,
       options,
     );
+    const terminalCases = [
+      ['deny', 'rejected'],
+      ['reject_always', 'rejected'],
+      ['cancel', 'cancelled'],
+      ['timeout', 'expired'],
+    ] as const;
 
     expect(approved).toEqual({ value: 'approved', lossy: false });
     expect(unknown).toEqual({ value: 'resolved', lossy: true });
+    for (const [input, value] of terminalCases) {
+      expect(classifyPermissionResolutionForExport(input, options)).toEqual({
+        value,
+        lossy: false,
+      });
+    }
+    expect(
+      classifyPermissionResolutionForExport('selected:reject', [
+        {
+          optionId: 'reject',
+          label: 'Reject',
+          raw: { kind: 'reject_always' },
+        },
+      ]),
+    ).toEqual({ value: 'rejected', lossy: false });
     expect(JSON.stringify({ approved, unknown })).not.toContain(CANARY);
   });
 
@@ -770,6 +925,12 @@ describe('ExportTranscriptDocumentV1', () => {
             ],
           },
         }),
+        record('after-large', 'large', {
+          message: {
+            role: 'user',
+            parts: [{ text: 'AFTER_BLOCK_PRESENT' }],
+          },
+        }),
       ],
       sessionData,
       EXPORT_OPTIONS,
@@ -784,6 +945,10 @@ describe('ExportTranscriptDocumentV1', () => {
         expect.objectContaining({ code: 'text_budget_exceeded' }),
       ]),
     );
+    expect(JSON.stringify(document.blocks)).toContain(
+      '[content omitted: export text budget exceeded]',
+    );
+    expect(JSON.stringify(document.blocks)).toContain('AFTER_BLOCK_PRESENT');
 
     const records = Array.from({ length: 100 }, (_, index) => {
       const assistant = index % 2 === 1;
@@ -812,6 +977,39 @@ describe('ExportTranscriptDocumentV1', () => {
           .join(''),
       ).byteLength,
     ).toBeLessThanOrEqual(EXPORT_TRANSCRIPT_LIMITS_V1.maxVisibleTextBytes);
+  });
+
+  it('degrades pathological markdown without throwing a raw range error', () => {
+    const document = createExportTranscriptDocumentV1(
+      [
+        record('deep-markdown', null, {
+          message: {
+            role: 'user',
+            parts: [
+              {
+                text: `${'> '.repeat(6_000)}[link](https://example.com)`,
+              },
+            ],
+          },
+        }),
+      ],
+      sessionData,
+      EXPORT_OPTIONS,
+    );
+
+    expect(document.blocks[0]).toMatchObject({
+      kind: 'user',
+      text: '[markdown omitted: complexity limit exceeded]',
+    });
+    expect(document.diagnostics).toContainEqual({
+      code: 'markdown_complexity_exceeded',
+      severity: 'warning',
+      count: 1,
+    });
+    expect(document.metadata).toMatchObject({
+      complete: false,
+      truncated: true,
+    });
   });
 
   it('marks sanitized metadata URLs as incomplete without leaking secrets', () => {
@@ -934,9 +1132,18 @@ describe('ExportTranscriptDocumentV1', () => {
 
     expect(text).toContain('[safe](https://example.com/path)');
     expect(text).toContain('[credential](https://example.com/private)');
-    expect(text).toContain('https://example.com/autolink');
+    expect(text).toContain('\nhttps://example.com/autolink\n');
     expect(text).toContain('https://example.com/bare');
     expect(text).toContain('http://www.example.com/path');
+    expect(text).not.toContain(
+      'https://example.com/autolink?CHAT_TRANSCRIPT_URL_CANARY',
+    );
+    expect(text).not.toContain(
+      'https://example.com/bare?CHAT_TRANSCRIPT_URL_CANARY',
+    );
+    expect(text).not.toContain(
+      'http://www.example.com/path?CHAT_TRANSCRIPT_URL_CANARY',
+    );
     expect(text).toContain(
       '`https://dave:password@example.com/inline?CHAT_TRANSCRIPT_URL_CANARY`',
     );
@@ -1589,5 +1796,31 @@ describe('ExportTranscriptDocumentV1', () => {
       maxArrayLength: 1_000,
       maxRichRenderTasks: 100,
     });
+  });
+
+  it('escapes HTML script terminators in serialized document data', () => {
+    const escaped = escapeJsonForHtmlScriptData(
+      JSON.stringify({ text: '</ScRiPt><!--\u2028\u2029' }),
+    );
+
+    expect(escaped.toLowerCase()).not.toContain('</script');
+    expect(escaped).not.toContain('<!--');
+    expect(escaped).toContain('\\u2028');
+    expect(escaped).toContain('\\u2029');
+  });
+
+  it('rejects invalid producer versions and export timestamps', () => {
+    expect(() =>
+      createExportTranscriptDocumentV1([], sessionData, {
+        ...EXPORT_OPTIONS,
+        rendererVersion: 'latest',
+      }),
+    ).toThrowError('invalid_renderer_version');
+    expect(() =>
+      createExportTranscriptDocumentV1([], sessionData, {
+        ...EXPORT_OPTIONS,
+        exportedAt: 'not-a-date',
+      }),
+    ).toThrowError('invalid_exported_at');
   });
 });

@@ -9,11 +9,7 @@ import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
 import readline from 'node:readline';
-import {
-  collectSessionData,
-  normalizeSessionData,
-  toHtml,
-} from '@qwen-code/qwen-code/export';
+import { collectSessionMetadata, toHtml } from '@qwen-code/qwen-code/export';
 
 const exportConfig = {};
 
@@ -110,8 +106,12 @@ async function buildProductSessionData(records) {
     startTime: startTimeFor(records),
     messages: records,
   };
-  const collected = await collectSessionData(conversation, exportConfig);
-  return normalizeSessionData(collected, records, exportConfig);
+  return {
+    sessionId: conversation.sessionId,
+    startTime: conversation.startTime,
+    messages: [],
+    metadata: await collectSessionMetadata(conversation, exportConfig),
+  };
 }
 
 function buildLegacySessionData(objects) {

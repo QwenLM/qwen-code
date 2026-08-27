@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest';
+import { EXPORT_TRANSCRIPT_RENDERER_VERSION } from '@qwen-code/web-templates';
 import type { ExportSessionData } from '../types.js';
-import { injectDocumentIntoHtmlTemplate, toHtml } from './html.js';
+import { createExportTranscriptDocumentV1 } from '../export-transcript-document.js';
+import {
+  injectDocumentIntoHtmlTemplate,
+  renderExportTranscriptDocumentToHtml,
+  toHtml,
+} from './html.js';
 
 const sessionData: ExportSessionData = {
   sessionId: 'session-secret',
@@ -62,5 +68,19 @@ describe('HTML export formatter', () => {
     expect(() => injectDocumentIntoHtmlTemplate('<html></html>', {})).toThrow(
       'Export HTML template is missing transcript-document.',
     );
+  });
+
+  it('fails closed when a document targets another renderer version', () => {
+    const document = createExportTranscriptDocumentV1(records, sessionData, {
+      rendererVersion: EXPORT_TRANSCRIPT_RENDERER_VERSION,
+      exportedAt: '2026-08-16T01:00:00.000Z',
+    });
+
+    expect(() =>
+      renderExportTranscriptDocumentToHtml({
+        ...document,
+        rendererVersion: '0.0.0-incompatible',
+      }),
+    ).toThrow('Export transcript renderer version mismatch.');
   });
 });

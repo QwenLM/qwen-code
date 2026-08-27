@@ -680,7 +680,7 @@ function extractTranscriptSegmentId(event: DaemonEvent): string | undefined {
     meta && isRecord(meta['qwenTranscript'])
       ? meta['qwenTranscript']
       : undefined;
-  const segmentId = transcript ? getString(transcript, 'segmentId') : undefined;
+  const segmentId = getString(transcript, 'segmentId');
   return segmentId && segmentId.length <= 512 ? segmentId : undefined;
 }
 
@@ -1078,10 +1078,9 @@ function normalizeToolUpdate(
     metadata && isRecord(metadata['qwenTranscript'])
       ? metadata['qwenTranscript']
       : undefined;
-  const resultPreviewText = getString(transcript, 'resultPreviewText');
-  const resultPreview = resultPreviewText
-    ? createDaemonToolResultTextPreview(resultPreviewText)
-    : undefined;
+  const resultPreview = createDaemonToolResultTextPreview(
+    getString(transcript, 'resultPreviewText') ?? '',
+  );
   const toolName =
     getString(update, 'toolName') ??
     getString(update, 'name') ??

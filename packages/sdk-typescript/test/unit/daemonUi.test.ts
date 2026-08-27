@@ -5163,6 +5163,24 @@ describe('daemon UI tool preview taxonomy (PR-C)', () => {
     });
   });
 
+  it('detects file_diff from qwen edit old_string/new_string args', () => {
+    expect(
+      createDaemonToolPreview(
+        {
+          file_path: '/work/foo.ts',
+          old_string: 'const x = 1',
+          new_string: 'const x = 2',
+        },
+        { toolName: 'edit' },
+      ),
+    ).toMatchObject({
+      kind: 'file_diff',
+      path: '/work/foo.ts',
+      oldText: 'const x = 1',
+      newText: 'const x = 2',
+    });
+  });
+
   it('detects file_diff from patch text', () => {
     const preview = createDaemonToolPreview({
       filePath: '/work/bar.ts',
@@ -5401,6 +5419,62 @@ describe('daemon UI tool preview taxonomy (PR-C)', () => {
         truncated: true,
       });
     }
+  });
+
+  it.each([123, ' '])('marks an invalid todo id %j as truncated', (id) => {
+    const preview = createDaemonToolPreview(
+      {
+        entries: [
+          { id, content: 'Implement', status: 'pending' },
+          {
+            id: 'todo-2',
+            content: 'Verify',
+            status: 'pending',
+            blockedBy: ['123'],
+          },
+        ],
+      },
+      { toolName: 'todo_write' },
+    );
+
+    expect(preview).toMatchObject({
+      kind: 'todo_list',
+      truncated: true,
+      entries: [{ id: 'plan-0' }, { id: 'todo-2', blockedBy: ['123'] }],
+    });
+  });
+
+  it.each([{ revision: 1 }, ' '])(
+    'marks an invalid todo plan id %j as truncated',
+    (planId) => {
+      const preview = createDaemonToolPreview(
+        {
+          entries: [{ id: 'todo-1', content: 'Implement', status: 'pending' }],
+          planId,
+        },
+        { toolName: 'todo_write' },
+      );
+
+      expect(preview).toMatchObject({ kind: 'todo_list', truncated: true });
+      expect(preview).not.toHaveProperty('planId');
+    },
+  );
+
+  it('marks an invalid higher-priority todo plan id as truncated', () => {
+    const preview = createDaemonToolPreview(
+      {
+        entries: [{ id: 'todo-1', content: 'Implement', status: 'pending' }],
+        _meta: { qwenTodoPlan: { id: { invalid: true } } },
+        plan: { id: 'fallback-plan' },
+      },
+      { toolName: 'todo_write' },
+    );
+
+    expect(preview).toMatchObject({
+      kind: 'todo_list',
+      planId: 'fallback-plan',
+      truncated: true,
+    });
   });
 
   it('bounds cumulative todo preview text', () => {

@@ -42,7 +42,7 @@ export const PlanMessage = memo(function PlanMessage({
       }`}
     >
       {documentMode ? (
-        <div className={styles.header}>
+        <div className={styles.headerStatic}>
           <span className={styles.title}>{t('plan.title')}</span>
           <span className={styles.progress}>
             {completed}/{total}

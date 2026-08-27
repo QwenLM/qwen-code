@@ -116,6 +116,9 @@ describe('PlanMessage', () => {
     expect(container.textContent).toContain('Second task');
     expect(container.textContent).toContain('Third task');
     expect(container.querySelector('button')).toBeNull();
+    expect(container.firstElementChild?.firstElementChild?.className).toContain(
+      'headerStatic',
+    );
     expect(container.textContent).toContain('Input');
     expect(container.textContent).toContain('12');
   });

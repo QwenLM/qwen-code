@@ -1251,13 +1251,15 @@ function daemonToolBlockToToolCall(
     block.status === 'failed' ||
     block.status === 'cancelled' ||
     block.status === 'canceled';
+  const forceBackgroundPending =
+    isBackgroundAgent && (!safeToolProjection || !isComplete);
 
   return {
     callId: block.toolCallId,
     toolName: block.toolName || 'unknown',
     title: block.title,
     status:
-      (isBackgroundAgent ? 'pending' : statusMap[block.status]) ||
+      (forceBackgroundPending ? 'pending' : statusMap[block.status]) ||
       (block.status as DaemonMessageToolCallStatus) ||
       'in_progress',
     kind: inferToolKind(block.toolName, block.toolKind),
@@ -1265,7 +1267,9 @@ function daemonToolBlockToToolCall(
     args: getToolArgs(block, safeToolProjection),
     parentToolCallId: block.parentToolCallId,
     startTime: block.createdAt,
-    endTime: isComplete && !isBackgroundAgent ? block.updatedAt : undefined,
+    endTime:
+      isComplete && !forceBackgroundPending ? block.updatedAt : undefined,
+    ...(isCancelledStatus(block.status) ? { wasCancelled: true } : {}),
     ...(content ? { content } : {}),
     sourceBlockIds: [block.id],
   };

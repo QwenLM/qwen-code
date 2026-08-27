@@ -11,6 +11,7 @@ import { transcriptBlocksToDaemonMessages } from '../packages/web-shell/client/a
 import {
   adaptAcpTranscriptUpdates,
   adaptDirectDaemonEvents,
+  projectStableTranscriptBlockIds,
   readJsonLines,
   stableTailIdentity,
 } from './helpers/chat-transcript-contract.js';
@@ -501,5 +502,32 @@ describe('chat transcript cross-host contract', () => {
     expect(stableTailIdentity(acp, acpTail)).toBe(true);
     expect(stableTailIdentity(completeTaggedAcp, tailTaggedAcp)).toBe(true);
     expect(stableTailIdentity(completeDelta, tailDelta, 0)).toBe(true);
+
+    const taggedBlock = completeTaggedAcp.blocks.find(
+      (block) => block.kind === 'assistant',
+    );
+    expect(taggedBlock).toBeDefined();
+    const duplicateIdentity = projectStableTranscriptBlockIds(
+      [taggedBlock!, { ...taggedBlock!, id: 'duplicate-runtime-id' }],
+      scopeKey,
+    );
+    const missingIdentity = projectStableTranscriptBlockIds(
+      [
+        {
+          ...taggedBlock!,
+          id: 'missing-runtime-id',
+          segmentId: undefined,
+          sourceRecordIds: undefined,
+        },
+      ],
+      scopeKey,
+    );
+
+    expect(duplicateIdentity.compatible).toBe(false);
+    expect(stableTailIdentity(duplicateIdentity, duplicateIdentity, 0)).toBe(
+      false,
+    );
+    expect(missingIdentity.compatible).toBe(false);
+    expect(stableTailIdentity(missingIdentity, missingIdentity, 0)).toBe(false);
   });
 });

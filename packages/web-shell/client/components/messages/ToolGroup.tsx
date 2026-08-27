@@ -153,7 +153,7 @@ export function extractDiff(tool: ACPToolCall): string {
     }
   }
 
-  if (tool.status === 'failed') return '';
+  if (tool.status === 'failed' || tool.wasCancelled) return '';
 
   const previewPatch = tool.args?.patch;
   if (typeof previewPatch === 'string' && previewPatch) return previewPatch;

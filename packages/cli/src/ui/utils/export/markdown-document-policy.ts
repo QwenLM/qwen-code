@@ -34,7 +34,14 @@ export interface MarkdownDocumentPolicy {
   normalizeUrl(source: string): string | undefined;
   replaceImage(alt: string, source: string | undefined): string;
   onUrlChange(code: 'url_rejected' | 'url_sanitized'): void;
+  onComplexityLimit?(): void;
 }
+
+const MARKDOWN_COMPLEXITY_FALLBACK =
+  '[markdown omitted: complexity limit exceeded]';
+const MAX_MARKDOWN_SOURCE_MARKERS = 2_048;
+const MAX_MARKDOWN_AST_NODES = 20_000;
+const MAX_MARKDOWN_AST_DEPTH = 512;
 
 const markdownParser = unified()
   .use(remarkParse)
@@ -54,16 +61,56 @@ function mayContainFencedCode(value: string): boolean {
   return value.includes('```') || value.includes('~~~');
 }
 
-function parseMarkdown(value: string): MarkdownNode {
-  return markdownParser.parse(value) as unknown as MarkdownNode;
+function parseMarkdown(value: string): MarkdownNode | undefined {
+  let markers = 0;
+  for (const character of value) {
+    if (character !== '[' && character !== ']' && character !== '>') continue;
+    markers += 1;
+    if (markers > MAX_MARKDOWN_SOURCE_MARKERS) return undefined;
+  }
+  try {
+    const root = markdownParser.parse(value) as unknown as MarkdownNode;
+    return isMarkdownTreeWithinBudget(root) ? root : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function walkMarkdown(
   node: MarkdownNode,
   visit: (node: MarkdownNode) => boolean | void,
 ): void {
-  if (visit(node) === false) return;
-  for (const child of node.children ?? []) walkMarkdown(child, visit);
+  const stack = [node];
+  while (stack.length > 0) {
+    const current = stack.pop();
+    if (!current || visit(current) === false) continue;
+    const children = current.children ?? [];
+    for (let index = children.length - 1; index >= 0; index -= 1) {
+      stack.push(children[index]);
+    }
+  }
+}
+
+function isMarkdownTreeWithinBudget(root: MarkdownNode): boolean {
+  const stack: Array<{ node: MarkdownNode; depth: number }> = [
+    { node: root, depth: 0 },
+  ];
+  let nodes = 0;
+  while (stack.length > 0) {
+    const current = stack.pop();
+    if (!current) continue;
+    nodes += 1;
+    if (
+      nodes > MAX_MARKDOWN_AST_NODES ||
+      current.depth > MAX_MARKDOWN_AST_DEPTH
+    ) {
+      return false;
+    }
+    for (const child of current.node.children ?? []) {
+      stack.push({ node: child, depth: current.depth + 1 });
+    }
+  }
+  return true;
 }
 
 function rangeOf(
@@ -128,8 +175,13 @@ export function sanitizeMarkdownDocument(
 ): string {
   if (!mayContainNavigableMarkdown(value)) return value;
   const root = parseMarkdown(value);
+  if (!root) {
+    policy.onComplexityLimit?.();
+    return MARKDOWN_COMPLEXITY_FALLBACK;
+  }
   const definitions = new Map<string, MarkdownNode>();
   const imageDefinitionIds = new Set<string>();
+  const linkDefinitionIds = new Set<string>();
   walkMarkdown(root, (node) => {
     if (node.type === 'definition') {
       const identifier = normalizedIdentifier(node);
@@ -139,6 +191,9 @@ export function sanitizeMarkdownDocument(
     } else if (node.type === 'imageReference') {
       const identifier = normalizedIdentifier(node);
       if (identifier) imageDefinitionIds.add(identifier);
+    } else if (node.type === 'linkReference') {
+      const identifier = normalizedIdentifier(node);
+      if (identifier) linkDefinitionIds.add(identifier);
     }
   });
 
@@ -171,7 +226,11 @@ export function sanitizeMarkdownDocument(
     }
     if (node.type === 'definition') {
       const identifier = normalizedIdentifier(node);
-      if (identifier && imageDefinitionIds.has(identifier)) {
+      if (
+        identifier &&
+        imageDefinitionIds.has(identifier) &&
+        !linkDefinitionIds.has(identifier)
+      ) {
         replacements.push({ ...range, value: '' });
         return false;
       }
@@ -224,7 +283,7 @@ function demoteFence(
   const lineEnd = value.indexOf('\n', range.start);
   const end = lineEnd === -1 || lineEnd > range.end ? range.end : lineEnd;
   const opening = value.slice(range.start, end);
-  const match = /^(`{3,}|~{3,})[ \t]*([^\s`~]+)(.*)$/.exec(opening);
+  const match = /^(`{3,}|~{3,})[ \t]*(\S+)(.*)$/.exec(opening);
   if (!match) return undefined;
   return {
     start: range.start,
@@ -239,7 +298,9 @@ export function transformRichMarkdownTasks(
 ): string {
   if (!mayContainFencedCode(value)) return value;
   const replacements: Replacement[] = [];
-  walkMarkdown(parseMarkdown(value), (node) => {
+  const root = parseMarkdown(value);
+  if (!root) return MARKDOWN_COMPLEXITY_FALLBACK;
+  walkMarkdown(root, (node) => {
     const language = richLanguage(node);
     if (!language || keepTask(language)) return;
     const replacement = demoteFence(value, node, language);
@@ -251,7 +312,9 @@ export function transformRichMarkdownTasks(
 export function countRichMarkdownTasks(value: string): number {
   if (!mayContainFencedCode(value)) return 0;
   let count = 0;
-  walkMarkdown(parseMarkdown(value), (node) => {
+  const root = parseMarkdown(value);
+  if (!root) return 0;
+  walkMarkdown(root, (node) => {
     if (richLanguage(node)) count += 1;
   });
   return count;

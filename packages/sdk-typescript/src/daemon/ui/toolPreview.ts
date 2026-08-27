@@ -124,8 +124,9 @@ export function createDaemonToolResultPreview(
   const todoList = detectTodoList(output, opts, false);
   if (todoList) return todoList;
 
-  const text = extractDisplayContentText(content);
-  return text ? createDaemonToolResultTextPreview(text) : undefined;
+  return createDaemonToolResultTextPreview(
+    extractDisplayContentText(content) ?? '',
+  );
 }
 
 export function createDaemonToolResultTextPreview(
@@ -176,10 +177,15 @@ function detectTodoList(
     const meta = isRecord(entry['_meta']) ? entry['_meta'] : undefined;
     const qwenTodo =
       meta && isRecord(meta['qwenTodo']) ? meta['qwenTodo'] : undefined;
-    const rawId =
-      getFirstString(qwenTodo, ['id']) ??
-      getFirstString(entry, ['id']) ??
-      `plan-${index}`;
+    const qwenTodoId = getFirstString(qwenTodo, ['id']);
+    const entryId = getFirstString(entry, ['id']);
+    const rawId = qwenTodoId ?? entryId ?? `plan-${index}`;
+    if (
+      (qwenTodo?.['id'] !== undefined) !== !!qwenTodoId ||
+      (entry['id'] !== undefined) !== !!entryId
+    ) {
+      truncated = true;
+    }
     const id = rawId.length <= MAX_TODO_ID_LENGTH ? rawId : `plan-${index}`;
     if (id !== rawId) truncated = true;
     const rawStatus = getFirstString(entry, ['status']);
@@ -205,7 +211,7 @@ function detectTodoList(
       rawPriority === 'low'
         ? rawPriority
         : undefined;
-    if (entry['priority'] !== undefined && priority === undefined) {
+    if ((entry['priority'] !== undefined) !== !!priority) {
       truncated = true;
     }
     const blockedBySource = qwenTodo?.['blockedBy'] ?? entry['blockedBy'];
@@ -242,10 +248,17 @@ function detectTodoList(
   const todoPlan =
     meta && isRecord(meta['qwenTodoPlan']) ? meta['qwenTodoPlan'] : undefined;
   const plan = isRecord(input['plan']) ? input['plan'] : undefined;
-  const rawPlanId =
-    getFirstString(todoPlan, ['id']) ??
-    getFirstString(plan, ['id']) ??
-    getFirstString(input, ['planId']);
+  const todoPlanId = getFirstString(todoPlan, ['id']);
+  const nestedPlanId = getFirstString(plan, ['id']);
+  const inputPlanId = getFirstString(input, ['planId']);
+  const rawPlanId = todoPlanId ?? nestedPlanId ?? inputPlanId;
+  if (
+    (todoPlan?.['id'] !== undefined) !== !!todoPlanId ||
+    (plan?.['id'] !== undefined) !== !!nestedPlanId ||
+    (input['planId'] !== undefined) !== !!inputPlanId
+  ) {
+    truncated = true;
+  }
   const planId =
     rawPlanId && rawPlanId.length <= MAX_TODO_ID_LENGTH ? rawPlanId : undefined;
   if (rawPlanId && !planId) truncated = true;
@@ -311,6 +324,7 @@ function detectFileDiff(
     'oldText',
     'old_text',
     'old_str',
+    'old_string',
     'oldString',
   ]);
   // wenshao R4 (qwen3.7-max): `content` is too ambiguous as a newText
@@ -326,6 +340,7 @@ function detectFileDiff(
     'newText',
     'new_text',
     'new_str',
+    'new_string',
     'newString',
   ]);
   const toolNameLower = (opts.toolName ?? '').toLowerCase();

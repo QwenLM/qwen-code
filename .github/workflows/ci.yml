@@ -818,14 +818,20 @@ jobs:
         if: "${{ runner.environment == 'github-hosted' }}"
         run: |-
           node node_modules/playwright/cli.js install --with-deps chromium
-          node node_modules/@playwright/test/node_modules/playwright/cli.js install chromium
+          nested_cli='node_modules/@playwright/test/node_modules/playwright/cli.js'
+          if [ -f "${nested_cli}" ]; then
+            node "${nested_cli}" install chromium
+          fi
 
       - name: 'Install Playwright Chromium (self-hosted)'
         if: "${{ runner.environment == 'self-hosted' }}"
         # Self-hosted ECS runners already include system deps; --with-deps can race apt locks.
         run: |-
           node node_modules/playwright/cli.js install chromium
-          node node_modules/@playwright/test/node_modules/playwright/cli.js install chromium
+          nested_cli='node_modules/@playwright/test/node_modules/playwright/cli.js'
+          if [ -f "${nested_cli}" ]; then
+            node "${nested_cli}" install chromium
+          fi
 
       - name: 'Choose web-shell Playwright port'
         run: |-

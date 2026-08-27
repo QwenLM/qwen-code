@@ -1,5 +1,5 @@
 import './document-styles.css';
-import { useEffect } from 'react';
+import { Component, useEffect, type ReactNode } from 'react';
 import { createRoot } from 'react-dom/client';
 import type { DaemonTranscriptBlock } from '@qwen-code/sdk/daemon';
 import { WebShellTranscript } from '@qwen-code/web-shell';
@@ -19,6 +19,10 @@ interface ExportTranscriptDocument {
     complete: boolean;
     truncated: boolean;
   };
+}
+
+function isOptionalString(value: unknown): value is string | undefined {
+  return value === undefined || typeof value === 'string';
 }
 
 function parseDocument(): ExportTranscriptDocument {
@@ -43,7 +47,13 @@ function parseDocument(): ExportTranscriptDocument {
     !Array.isArray(value.blocks) ||
     value.blocks.length > __EXPORT_TRANSCRIPT_MAX_BLOCKS__ ||
     !value.metadata ||
-    typeof value.metadata !== 'object'
+    typeof value.metadata !== 'object' ||
+    Array.isArray(value.metadata) ||
+    !isOptionalString(value.metadata.title) ||
+    !isOptionalString(value.metadata.startedAt) ||
+    typeof value.metadata.exportedAt !== 'string' ||
+    typeof value.metadata.complete !== 'boolean' ||
+    typeof value.metadata.truncated !== 'boolean'
   ) {
     throw new Error('Transcript document is incompatible with this renderer.');
   }
@@ -95,11 +105,30 @@ function DocumentError() {
   );
 }
 
+class DocumentErrorBoundary extends Component<
+  { children: ReactNode },
+  { failed: boolean }
+> {
+  state = { failed: false };
+
+  static getDerivedStateFromError() {
+    return { failed: true };
+  }
+
+  render() {
+    return this.state.failed ? <DocumentError /> : this.props.children;
+  }
+}
+
 const rootNode = document.getElementById('app');
 if (!rootNode) throw new Error('Transcript document root is missing.');
 const root = createRoot(rootNode);
 try {
-  root.render(<DocumentApp value={parseDocument()} />);
+  root.render(
+    <DocumentErrorBoundary>
+      <DocumentApp value={parseDocument()} />
+    </DocumentErrorBoundary>,
+  );
 } catch {
   root.render(<DocumentError />);
 }

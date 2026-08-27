@@ -29,7 +29,7 @@ import {
   createDaemonToolPreview,
   createDaemonToolResultPreview,
 } from './toolPreview.js';
-import { detachString, isRecord } from './utils.js';
+import { detachString, getFirstString, isRecord } from './utils.js';
 
 const DEFAULT_MAX_BLOCKS = 1_000;
 /**
@@ -169,9 +169,6 @@ export function appendLocalUserTranscriptMessage(
     undefined,
     undefined,
     opts.meta,
-    undefined,
-    undefined,
-    undefined,
   );
   if (opts.images && opts.images.length > 0) {
     (block as DaemonTextTranscriptBlock).images = [...opts.images];
@@ -2147,24 +2144,20 @@ function getPermissionToolIdentity(toolCall: unknown): {
 } {
   if (!isRecord(toolCall)) return {};
   const meta = isRecord(toolCall['_meta']) ? toolCall['_meta'] : undefined;
-  const read = (
-    record: Record<string, unknown> | undefined,
-    ...keys: string[]
-  ): string | undefined => {
-    for (const key of keys) {
-      const value = record?.[key];
-      if (typeof value === 'string' && value.length > 0) return value;
-    }
-    return undefined;
-  };
-  const toolCallId = read(toolCall, 'toolCallId', 'id');
-  const toolName = read(meta, 'toolName') ?? read(toolCall, 'toolName', 'name');
-  const toolKind = read(toolCall, 'kind');
-  return {
-    ...(toolCallId ? { toolCallId } : {}),
-    ...(toolName ? { toolName } : {}),
-    ...(toolKind ? { toolKind } : {}),
-  };
+  const toolCallId = getFirstString(toolCall, ['toolCallId', 'id']);
+  const toolName =
+    getFirstString(meta, ['toolName']) ??
+    getFirstString(toolCall, ['toolName', 'name']);
+  const toolKind = getFirstString(toolCall, ['kind']);
+  const identity: {
+    toolCallId?: string;
+    toolName?: string;
+    toolKind?: string;
+  } = {};
+  if (toolCallId) identity.toolCallId = toolCallId;
+  if (toolName) identity.toolName = toolName;
+  if (toolKind) identity.toolKind = toolKind;
+  return identity;
 }
 
 function clearActiveText(
