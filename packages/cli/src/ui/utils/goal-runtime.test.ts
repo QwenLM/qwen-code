@@ -37,12 +37,7 @@ describe('waitForGoalRuntime', () => {
     );
   });
 
-  it('treats a synchronous persistence-unavailable throw as settled', async () => {
-    // Config.getGoalRuntimeReady() THROWS synchronously (rather than
-    // rejecting) when chat recording is disabled, e.g. --no-chat-recording.
-    // The startup gate must swallow that throw exactly like the rejected
-    // promise above; an escaped rejection kills the AppContainer init effect
-    // and freezes the TUI on "Connecting to MCP servers..." forever (#10293).
+  it('allows Goal-less sessions when readiness throws synchronously', async () => {
     const getGoalRuntimeReady = vi.fn((): Promise<GoalRuntime> => {
       throw new GoalPersistenceUnavailableError();
     });
@@ -56,7 +51,7 @@ describe('waitForGoalRuntime', () => {
     expect(getGoalRuntimeReady).toHaveBeenCalledTimes(2);
   });
 
-  it('does not hide a synchronous throw of any other error', async () => {
+  it('does not hide synchronous readiness errors', async () => {
     const failure = new Error('unsupported Goal lifecycle record');
     const getGoalRuntimeReady = vi.fn((): Promise<GoalRuntime> => {
       throw failure;
@@ -65,6 +60,9 @@ describe('waitForGoalRuntime', () => {
     await expect(waitForGoalRuntime({ getGoalRuntimeReady })).rejects.toBe(
       failure,
     );
+    await expect(
+      waitForGoalRuntime({ getGoalRuntimeReady }, { timeoutMs: 100 }),
+    ).rejects.toBe(failure);
   });
 
   it('resolves true once the runtime settles within the timeout', async () => {
