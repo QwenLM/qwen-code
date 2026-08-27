@@ -22,7 +22,7 @@ import {
   DEFAULT_WORKFLOW_SUBAGENT_MAX_TURNS,
   DEFAULT_WORKFLOW_SUBAGENT_MAX_TIME_MINUTES,
 } from './workflow-orchestrator.js';
-import type { Config } from '../../config/config.js';
+import type { ApprovalMode, Config } from '../../config/config.js';
 import { AgentEventType, type AgentEventEmitter } from './agent-events.js';
 import { ToolConfirmationOutcome } from '../../tools/tools.js';
 import { WorkflowRunRegistry } from '../workflow-run-registry.js';
@@ -2919,6 +2919,7 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
     /** What the subagent's Config answers for "where am I?". */
     runtimeTargetDir?: string;
     runtimeIgnoreFiles?: string;
+    runtimeContext: Config;
     options?: {
       runConfigOverrides?: unknown;
       taskName?: string;
@@ -2976,6 +2977,11 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
     const cfg = {
       createToolRegistry: async () => fakeRegistry,
       getToolRegistry: () => fakeRegistry,
+      // Derived dispatch contexts layer an approval profile over the
+      // worktree profile; the derivation snapshots the base mode through
+      // these methods.
+      getApprovalMode: () => 'default' as ApprovalMode,
+      isTrustedFolder: () => true,
       // P3 R2 self-review: isolation:'worktree' provisioning reads
       // these methods. Provide deterministic returns so the tests can
       // drive GitWorktreeService stubs without re-deriving cwd.
@@ -3015,6 +3021,7 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
             runtimeIgnoreFiles: runtimeContext
               .getFileService?.()
               .getQwenIgnoreFileNamesDisplay(),
+            runtimeContext,
             options: {
               runConfigOverrides: options?.runConfigOverrides,
               taskName: options?.taskName,
@@ -4450,6 +4457,28 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
     expect(calls[0].config.model).toBe('qwen3-max');
     // Default-clean stub auto-removes; no suffix expected.
     expect(String(result)).not.toMatch(/worktree preserved/);
+    expect(calls[0].runtimeContextSame).toBe(false);
+    expect(calls[0].runtimeContext.getTargetDir()).toBe(
+      '/fake/repo/.qwen/worktrees/agent-deadbe1',
+    );
+    expect(calls[0].runtimeContext.getCwd()).toBe(
+      '/fake/repo/.qwen/worktrees/agent-deadbe1',
+    );
+    expect(calls[0].runtimeContext.getWorkingDir()).toBe(
+      '/fake/repo/.qwen/worktrees/agent-deadbe1',
+    );
+    expect(calls[0].runtimeContext.getProjectRoot()).toBe(
+      '/fake/repo/.qwen/worktrees/agent-deadbe1',
+    );
+    // The approval profile layered over the worktree context inherits the
+    // worktree rebinding through the prototype chain. The fake worktree
+    // path does not exist on disk, so assert the rebinding's presence
+    // rather than its resolved directories.
+    expect(calls[0].runtimeContext.getWorkspaceContext()).toBeDefined();
+    expect(
+      calls[0].runtimeContext.getFileService().getQwenIgnoreFileNamesDisplay(),
+    ).toBe('.qwenignore, .cursorignore');
+    expect(config.getTargetDir()).toBe('/fake/repo');
   });
 
   it("schema + isolation:'worktree': structured payload returned, worktree info logged", async () => {

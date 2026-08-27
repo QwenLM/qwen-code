@@ -610,9 +610,9 @@ describe('qwen-autofix workflow', () => {
     expect(reviewScanJob).toContain('echo "targets=[]" >> "${GITHUB_OUTPUT}"');
     expect(reviewScanJob).toContain('active checks in flight; skipping until');
     // Staleness bound must sit above legitimate check runtimes (a review-address
-    // job runs up to its 330-minute cap) so an active run is never aged out
+    // job runs up to its 345-minute cap) so an active run is never aged out
     // mid-flight.
-    expect(reviewScanJob).toContain('PENDING_STALE_MIN=360');
+    expect(reviewScanJob).toContain('PENDING_STALE_MIN=375');
     // The staleness filter itself, including the comparison operator: a check only
     // blocks if its start is newer than the cutoff. Asserting `> $cut` too means a
     // flipped comparison (which would age out live checks → double-processing) is
@@ -4191,7 +4191,7 @@ describe('qwen-autofix workflow', () => {
     // No rollup entries → dispatchable.
     expect(runMarkerCheck([])).toBe('pass');
 
-    // A stranded marker must NOT keep blocking through the 360-minute
+    // A stranded marker must NOT keep blocking through the 375-minute
     // HAS_PENDING_CHECKS gate after its TTL expired: replay the gate's jq
     // over fixture rollups.
     const pendingGate = reviewScanJob.match(
@@ -4241,7 +4241,7 @@ describe('qwen-autofix workflow', () => {
         checkRun('build', 'IN_PROGRESS', '2026-08-17T07:50:00Z'),
       ]),
     ).toBe('true');
-    // ...a check stuck past the 360-minute horizon is aged out...
+    // ...a check stuck past the 375-minute horizon is aged out...
     expect(
       runPendingGate([
         checkRun('build', 'IN_PROGRESS', '2026-08-17T01:00:00Z'),
@@ -4252,6 +4252,15 @@ describe('qwen-autofix workflow', () => {
     expect(
       runPendingGate([marker('PENDING', '2026-08-17T07:50:00Z', 'other-ci')]),
     ).toBe('true');
+
+    // The design record this gate cites (af-101) describes THIS horizon —
+    // derive the bound from the workflow so the pin tracks PENDING_STALE_MIN,
+    // then require the doc to agree. Naming the 345-minute job cap instead
+    // computes a 0-minute margin and invites squeezing the bound down to the
+    // cap, which ages a live review-address run out mid-flight.
+    const pendingStaleMin = reviewScanJob.match(/PENDING_STALE_MIN=(\d+)/)?.[1];
+    expect(pendingStaleMin).toBeTruthy();
+    expect(designDoc).toContain(`${pendingStaleMin}-minute horizon`);
 
     // Writer/reader identity: all three status writes and both readers bind
     // the SAME context variable — a mismatch on any site leaves the marker
@@ -14947,9 +14956,9 @@ exit 1
     expect(repairDeterministicRejectionStep).toContain(
       "steps.verify.outputs.retryable == 'true'",
     );
-    expect(repairDeterministicRejectionStep).toContain('timeout-minutes: 55');
+    expect(repairDeterministicRejectionStep).toContain('timeout-minutes: 70');
     expect(repairDeterministicRejectionStep).toContain(
-      "QWEN_TIMEOUT_MS: '2700000'",
+      "QWEN_TIMEOUT_MS: '3600000'",
     );
     const settingsJson = (step) =>
       step.match(/SETTINGS_JSON: \|-\n([\s\S]*?)\n {8}run: \|-/)?.[1] ?? '';
@@ -19593,10 +19602,26 @@ exit 0
   it('bounds qwen subprocess runtime', () => {
     const runner = readFileSync(autofixRunnerScriptPath, 'utf8');
 
-    expect(runner).toContain('50 * 60 * 1000');
+    expect(runner).toContain('90 * 60 * 1000');
     expect(runner).toContain('setTimeout(() =>');
     expect(runner).toContain("killQwen(child, 'SIGKILL')");
     expect(runner).toContain('}, QWEN_TIMEOUT_MS)');
+  });
+
+  it('keeps the assess-candidates budget pinned at 50 minutes', () => {
+    // The runner default moved to 90m for `Develop fix`, and the issue
+    // job has no step-level caps — this env pin is the ONLY guard keeping
+    // assess from inheriting 90m: build (~6m) + assess (90m) + develop
+    // (90m) would exceed the job's 180-minute cap and cancel the always()
+    // reporters (claim withdrawal) — the silent round the pin's own
+    // comment warns about.
+    expect(assessCandidatesStep).toContain("QWEN_TIMEOUT_MS: '3000000'");
+  });
+
+  it('keeps the develop-issue leg on the runner default budget', () => {
+    // `Develop fix` must inherit the runner's 90m default; an env pin here
+    // would silently restore the 50m budget the default raise removed.
+    expect(developFixStep).not.toContain('QWEN_TIMEOUT_MS');
   });
 
   it('kills qwen subprocess descendants on timeout', () => {
