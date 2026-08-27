@@ -2451,27 +2451,26 @@ describe('Tool Control Parameters (E2E)', () => {
   });
 
   // Regression guard for #10075: a pre-existing `permissions.allow`
-  // allowlist must not silently remove uncovered built-in tools (0.22.1
-  // unregistered them — absent from /tools, unfindable via tool_search,
-  // permission-errored at call time). Since the fix they are demoted to
-  // deferred: their schemas stay out of the eager model request (#9827
-  // schema-shrink preserved) but they remain registered, discoverable via
-  // tool_search, and callable through the normal approval flow.
+  // configuration must not remove, demote, or hide uncovered built-in
+  // tools (0.22.1 unregistered them — absent from /tools, unfindable via
+  // tool_search, permission-errored at call time). After the decoupling,
+  // `permissions.allow` is pure auto-approval and never gates the
+  // registry: without `tools.eager`, uncovered tools stay in the eager
+  // model request and run through the normal approval flow. Shrinking the
+  // eager surface is `tools.eager`'s job, which demotes (never removes)
+  // unlisted tools — still discoverable and loadable via tool_search.
   describe('permissions.allow from settings never removes built-in tools (#10075)', () => {
-    beforeEach(async () => {
-      testDir = await helper.setup('tool-control-allowlist-10075', {
-        settings: {
-          fastModel: 'openai:fake-model',
-          // Covers read_file + shell family only — write_file/edit stay
-          // uncovered, exactly the reporter's configuration shape.
-          permissions: { allow: ['ReadFile', 'Shell'] },
-        },
-      });
-    });
-
     it(
-      'keeps uncovered tools callable while excluding their schemas from the eager request',
+      'keeps uncovered tools registered, advertised, and callable',
       async () => {
+        testDir = await helper.setup('tool-control-allow-10075', {
+          settings: {
+            fastModel: 'openai:fake-model',
+            // Covers read_file + shell family only — write_file/edit stay
+            // uncovered, exactly the reporter's configuration shape.
+            permissions: { allow: ['ReadFile', 'Shell'] },
+          },
+        });
         await helper.createFile('test.txt', INITIAL_CONTENT);
 
         const fakeServer = await startFakeOpenAIServer(({ requestIndex }) => {
@@ -2483,7 +2482,7 @@ describe('Tool Control Parameters (E2E)', () => {
                   { file_path: helper.getPath('test.txt') },
                   'read-covered',
                 ),
-                // Uncovered by the allowlist — before the fix this was
+                // Uncovered by the allow rules — before the fix this was
                 // permission-errored ("not covered by any permissions.allow
                 // rule"), now it must run through the normal approval flow.
                 fakeToolCall(
@@ -2518,15 +2517,15 @@ describe('Tool Control Parameters (E2E)', () => {
             messages.push(message);
           }
 
-          // Schema-shrink side (#9827): the covered tool is in the eager
-          // request, the uncovered one is not.
+          // No tools.eager set — the allow rules demote NOTHING: covered
+          // and uncovered tools alike ride in the eager request (#10075).
           const advertisedTools = advertisedToolNames(fakeServer);
           expect(advertisedTools).toContain('read_file');
-          expect(advertisedTools).not.toContain('write_file');
-          expect(advertisedTools).not.toContain('edit');
+          expect(advertisedTools).toContain('write_file');
+          expect(advertisedTools).toContain('edit');
 
-          // Capability side (#10075): the uncovered tool is still
-          // registered and executes instead of being permission-errored.
+          // Capability side (#10075): the uncovered tool executes instead
+          // of being permission-errored.
           const toolNames = findToolCalls(messages).map(
             (tc) => tc.toolUse.name,
           );
@@ -2547,8 +2546,18 @@ describe('Tool Control Parameters (E2E)', () => {
     );
 
     it(
-      'discovers and loads an uncovered tool via tool_search',
+      'tools.eager defers uncovered tools; tool_search still discovers and loads them',
       async () => {
+        testDir = await helper.setup('tool-control-eager-10075', {
+          settings: {
+            fastModel: 'openai:fake-model',
+            // The eager/deferred boundary is driven solely by tools.eager;
+            // the allow rules play no part in it (#10075).
+            permissions: { allow: ['ReadFile', 'Shell'] },
+            tools: { eager: ['ReadFile', 'Shell'] },
+          },
+        });
+
         const fakeServer = await startFakeOpenAIServer(({ requestIndex }) => {
           if (requestIndex === 0) {
             // The model does not see write_file in the eager request; it
@@ -2597,6 +2606,13 @@ describe('Tool Control Parameters (E2E)', () => {
           for await (const message of q) {
             messages.push(message);
           }
+
+          // Schema-shrink side (#9827): unlisted built-ins stay out of the
+          // eager request while remaining registered.
+          const advertisedTools = advertisedToolNames(fakeServer);
+          expect(advertisedTools).toContain('read_file');
+          expect(advertisedTools).not.toContain('write_file');
+          expect(advertisedTools).not.toContain('edit');
 
           // tool_search loads the deferred tool (it must be registered, or
           // the lookup would report it missing).
