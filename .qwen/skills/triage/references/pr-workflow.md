@@ -33,7 +33,7 @@ review.
 
 ```bash
 BOT_LOGIN=$(gh api user --jq '.login')
-stage_comment_id() { # $1 = stage number (1, 2, 3) or "status"
+stage_comment_id() { # $1 = stage number (1, 2, 3), "1-pre", or "status"
   gh api "repos/$REPO/issues/$PR_NUMBER/comments" --method GET --paginate -F per_page=100 |
     jq -rs --arg bot "$BOT_LOGIN" --arg m "<!-- qwen-triage stage=$1 -->" \
       '[.[][] | select(.user.login == $bot) | select(.body | startswith($m))] | last | .id // empty'
@@ -270,6 +270,26 @@ gh pr review "$PR_NUMBER" --repo "$REPO" --request-changes --body-file /tmp/stag
 - Closed manually (no close commit) or the closer cannot be resolved →
   never close on ambiguity: flag it in the Stage 1 comment and escalate to
   the maintainer.
+
+**Reopen guard.** The close below is the gate's only irreversible act, and an
+explicit `@qwen-code /triage` re-run executes every stage again — including
+on a PR a maintainer reopened after this very close. On a reopened PR all
+inputs re-derive identically (the issue is still closed as completed, the
+closer is still merged, the diff is unchanged), so without a guard the gate
+would re-close against the maintainer's deliberate reopen, and keep
+re-closing on every later re-run. Check before posting and closing:
+
+```bash
+PRIOR_1PRE=$(stage_comment_id 1-pre)
+```
+
+The duplicate-close exit is the only Stage 1-pre path that posts a
+`stage=1-pre` issue comment (the two request-changes exits post reviews
+only). If the PR is OPEN and `PRIOR_1PRE` is non-empty, a duplicate close
+already happened and a human reopened the PR: do not post or close again —
+flag the reopen in the Stage 1 comment and escalate to the maintainer. The
+deliberate reopen means the duplicate judgment needs human eyes, and this
+guard is what keeps that judgment from being overridden on the next run.
 
 ```bash
 cat > /tmp/stage-1pre-duplicate.md <<'EOF'

@@ -6849,4 +6849,13 @@ describe('stage 1-pre duplicate gate', () => {
     expect(section).toContain('.repository.owner.login');
     expect(section).toContain('cross-repo closing references are skipped');
   });
+
+  it('guards the duplicate close against a human reopen', () => {
+    // A re-run on a reopened PR re-derives identical inputs; without the
+    // reopen guard the gate re-closes against a maintainer's deliberate
+    // reopen, and every later re-run closes again. Deleting the guard must
+    // make this red.
+    expect(section).toContain('**Reopen guard.**');
+    expect(section).toContain('do not post or close again');
+  });
 });
