@@ -1128,17 +1128,38 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
       );
       for (const message of page.messages) {
         if (signal.aborted || !this.connected) return;
+        const key = messageKey(message);
+        if (this.cursor.processedMessages.includes(key)) {
+          continue;
+        }
         // A parked message is already re-driven every poll by
         // `replayPendingMessages`; dispatching it here too would spend the
         // shared retry budget twice per poll.
         if (
           (this.cursor.pendingMessages ?? []).some(
-            (pending) => messageKey(pending.message) === messageKey(message),
+            (pending) => messageKey(pending.message) === key,
           )
         ) {
           continue;
         }
-        await this.handleImMessage({ kind: 'direct' }, message, true);
+        try {
+          await this.handleImMessage({ kind: 'direct' }, message, true);
+        } catch (error) {
+          // A failed plain direct message was just parked for replay, so the
+          // page can keep moving. An unparked failure — a document
+          // notification's turn — must still abort the window: the pinned
+          // watermark is what re-fetches it until its budget is spent.
+          if (
+            !(this.cursor.pendingMessages ?? []).some(
+              (pending) => messageKey(pending.message) === key,
+            )
+          ) {
+            throw error;
+          }
+          process.stderr.write(
+            `[Channel:${this.name}] direct-message dispatch failed mid-window; the message is parked for retry: ${sanitizeLogText(error instanceof Error ? error.message : String(error), 300)}\n`,
+          );
+        }
       }
       if (this.notificationWatermarkPulledBack) {
         // R4-4: a stale direct message replayed while this window's
