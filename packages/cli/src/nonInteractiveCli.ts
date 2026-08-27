@@ -33,6 +33,7 @@ import {
   InputFormat,
   LoopType,
   ToolNames,
+  goalToolResultProvenance,
   uiTelemetryService,
   parseAndFormatApiError,
   createDebugLogger,
@@ -2245,18 +2246,23 @@ export async function runNonInteractive(
           const { request, response } = orderedResponses[index];
           const finalizedParts = finalized[index].responseParts;
           toolResponseParts.push(...finalizedParts);
-          chatRecordingService?.recordToolResult?.(finalizedParts, {
-            callId: request.callId,
-            status:
-              statusByResponse.get(response) ??
-              (response.error ? 'error' : 'success'),
-            resultDisplay: response.resultDisplay,
-            persistedOutputFiles: finalized[index].persistedOutputFiles,
-            artifacts: finalized[index].artifacts,
-            error: response.error,
-            errorType: response.errorType,
-            executionStatus: response.executionStatus,
-          });
+          const goalProvenance = goalToolResultProvenance(request);
+          chatRecordingService?.recordToolResult?.(
+            finalizedParts,
+            {
+              callId: request.callId,
+              status:
+                statusByResponse.get(response) ??
+                (response.error ? 'error' : 'success'),
+              resultDisplay: response.resultDisplay,
+              persistedOutputFiles: finalized[index].persistedOutputFiles,
+              artifacts: finalized[index].artifacts,
+              error: response.error,
+              errorType: response.errorType,
+              executionStatus: response.executionStatus,
+            },
+            ...(goalProvenance ? ([goalProvenance] as const) : ([] as const)),
+          );
         }
 
         return {
