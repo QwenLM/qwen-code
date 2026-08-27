@@ -357,6 +357,9 @@ export const DialogManager = ({
       <Box flexDirection="column">
         <EffortDialog
           currentPreference={config.getReasoningPreference()}
+          thinkingMandatory={
+            config.getContentGeneratorConfig()?.thinkingMandatory === true
+          }
           onSelect={uiActions.handleEffortSelect}
         />
       </Box>

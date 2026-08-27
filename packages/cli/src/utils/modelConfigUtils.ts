@@ -436,8 +436,8 @@ export function resolveCliGenerationConfig(
     : undefined;
   let reasoningPreference: false | string | undefined;
   if (rawReasoningEffort === 'none') {
+    reasoningPreference = false;
     if (!disabledReasoningUnsupported) {
-      reasoningPreference = false;
       generationConfig.reasoning = false;
     }
   } else if (

@@ -20,8 +20,10 @@ interface EffortDialogProps {
   /** Callback when a tier is chosen; `undefined` means the dialog was cancelled. */
   onSelect: (effort: ReasoningEffort | undefined) => void;
 
-  /** The explicit preference; false means thinking is disabled. */
+  /** The explicit preference; false disables thinking when the model allows it. */
   currentPreference?: false | string;
+
+  thinkingMandatory?: boolean;
 }
 
 const EFFORT_DESCRIPTIONS: Record<ReasoningEffort, string> = {
@@ -35,9 +37,14 @@ const EFFORT_DESCRIPTIONS: Record<ReasoningEffort, string> = {
 export function EffortDialog({
   onSelect,
   currentPreference,
+  thinkingMandatory = false,
 }: EffortDialogProps): React.JSX.Element {
+  const activePreference =
+    thinkingMandatory && currentPreference === false
+      ? undefined
+      : currentPreference;
   const currentEffort =
-    currentPreference === false ? undefined : currentPreference;
+    activePreference === false ? undefined : activePreference;
   const items = REASONING_EFFORT_TIERS.map((tier) => ({
     label: `${tier} — ${t(EFFORT_DESCRIPTIONS[tier])}`,
     value: tier,
@@ -94,13 +101,13 @@ export function EffortDialog({
         isFocused
         showNumbers
       />
-      {currentPreference === false ? (
+      {activePreference === false ? (
         <Box marginTop={1}>
           <Text color={theme.text.secondary} wrap="truncate">
             {t('Thinking is disabled.')}
           </Text>
         </Box>
-      ) : currentPreference === undefined ? (
+      ) : activePreference === undefined ? (
         <Box marginTop={1}>
           <Text color={theme.text.secondary} wrap="truncate">
             {t('No effort configured — using the model/provider default.')}

@@ -62,6 +62,22 @@ describe('EffortDialog', () => {
     expect(frame).not.toContain('No effort configured');
   });
 
+  it('shows a dormant disabled preference as the model default when thinking is mandatory', () => {
+    const { lastFrame } = renderWithProviders(
+      <EffortDialog
+        onSelect={vi.fn()}
+        currentPreference={false}
+        thinkingMandatory
+      />,
+    );
+
+    const frame = lastFrame() ?? '';
+    expect(frame).toContain(
+      'No effort configured — using the model/provider default.',
+    );
+    expect(frame).not.toContain('Thinking is disabled.');
+  });
+
   it('registers an active Escape handler that cancels with undefined', () => {
     const onSelect = vi.fn();
     renderWithProviders(<EffortDialog onSelect={onSelect} />);

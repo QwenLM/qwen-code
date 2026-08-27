@@ -251,7 +251,7 @@ describe('modelConfigUtils', () => {
       });
 
       expect(result.generationConfig.reasoning).toEqual({ effort: 'xhigh' });
-      expect(result.reasoningPreference).toBeUndefined();
+      expect(result.reasoningPreference).toBe(false);
       expect(result.warnings).toContain(
         'Ignoring model.reasoningEffort "none" because the selected model requires thinking.',
       );

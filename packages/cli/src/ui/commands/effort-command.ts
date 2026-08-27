@@ -63,7 +63,10 @@ export const effortCommand: SlashCommand = {
         return { type: 'dialog', dialog: 'effort' };
       }
       const current = config.getReasoningEffort();
-      const preference = config.getReasoningPreference();
+      const preference =
+        config.getContentGeneratorConfig()?.thinkingMandatory === true
+          ? undefined
+          : config.getReasoningPreference();
       return {
         type: 'message',
         messageType: 'info',

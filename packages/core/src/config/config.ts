@@ -4899,8 +4899,8 @@ export class Config {
    * and interpret provider-specific strings locally. Pass undefined to clear
    * the override and fall back to the model/provider default.
    *
-   * No-op when the explicit preference disables thinking so `/effort` cannot
-   * silently re-enable it.
+   * No-op when thinking is actively disabled. A mandatory-thinking model may
+   * replace a dormant disabled preference because it cannot apply there.
    */
   setReasoningEffort(effort: string | undefined): void {
     if (!effort) {
@@ -4908,7 +4908,10 @@ export class Config {
       this.restoreReasoningDefault();
       return;
     }
-    if (this.reasoningPreference === false) {
+    if (
+      this.reasoningPreference === false &&
+      this.contentGeneratorConfig?.thinkingMandatory !== true
+    ) {
       return;
     }
     this.reasoningPreference = effort;
@@ -4967,6 +4970,9 @@ export class Config {
       return;
     }
     this.forEachReasoningConfig((cfg) => {
+      if (preference === false && cfg.thinkingMandatory === true) {
+        return;
+      }
       if (
         DashScopeOpenAICompatibleProvider.isDashScopeProvider(cfg) &&
         isTieredEffortWireModel(cfg.model)
@@ -5175,6 +5181,7 @@ export class Config {
       this.contentGeneratorConfig.model = config.model;
       this.contentGeneratorConfig.samplingParams = config.samplingParams;
       this.contentGeneratorConfig.reasoning = cloneReasoning(config.reasoning);
+      this.contentGeneratorConfig.thinkingMandatory = config.thinkingMandatory;
       this.contentGeneratorConfig.contextWindowSize = config.contextWindowSize;
       this.contentGeneratorConfig.enableCacheControl =
         config.enableCacheControl;

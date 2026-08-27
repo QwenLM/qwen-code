@@ -5371,6 +5371,84 @@ describe('Server Config (config.ts)', () => {
       expect(config.getContentGeneratorConfig().reasoning).toBe(false);
     });
 
+    it('keeps a disabled preference dormant for mandatory models and reapplies it after a hot switch', async () => {
+      const config = new Config({
+        ...baseParams,
+        generationConfig: {
+          reasoning: { effort: 'xhigh' },
+          thinkingMandatory: true,
+        },
+        reasoningPreference: false,
+        reasoningDefault: { effort: 'xhigh' },
+      });
+      const authType = AuthType.QWEN_OAUTH;
+      const handleHotModelChange = () =>
+        (
+          config as unknown as {
+            handleModelChange: (
+              authType: AuthType,
+              requiresRefresh: boolean,
+            ) => Promise<void>;
+          }
+        ).handleModelChange(authType, false);
+
+      vi.mocked(resolveContentGeneratorConfigWithSources)
+        .mockReturnValueOnce({
+          config: {
+            apiKey: 'test-key',
+            model: 'qwen3.8-max',
+            authType,
+            reasoning: { effort: 'xhigh' },
+            thinkingMandatory: true,
+          } as ContentGeneratorConfig,
+          sources: {},
+        })
+        .mockReturnValueOnce({
+          config: {
+            apiKey: 'test-key',
+            model: 'qwen3-coder-plus',
+            authType,
+            reasoning: { effort: 'high' },
+          } as ContentGeneratorConfig,
+          sources: {},
+        })
+        .mockReturnValueOnce({
+          config: {
+            apiKey: 'test-key',
+            model: 'qwen3.8-max',
+            authType,
+            reasoning: { effort: 'xhigh' },
+            thinkingMandatory: true,
+          } as ContentGeneratorConfig,
+          sources: {},
+        });
+
+      await config.refreshAuth(authType);
+
+      expect(config.getReasoningPreference()).toBe(false);
+      expect(config.getContentGeneratorConfig().reasoning).toEqual({
+        effort: 'xhigh',
+      });
+
+      await handleHotModelChange();
+
+      expect(config.getContentGeneratorConfig().thinkingMandatory).toBe(
+        undefined,
+      );
+      expect(config.getContentGeneratorConfig().reasoning).toBe(false);
+
+      await handleHotModelChange();
+
+      expect(config.getContentGeneratorConfig().reasoning).toEqual({
+        effort: 'xhigh',
+      });
+      config.setReasoningEffort('vendor.ultra');
+      expect(config.getReasoningPreference()).toBe('vendor.ultra');
+      expect(config.getContentGeneratorConfig().reasoning).toEqual({
+        effort: 'vendor.ultra',
+      });
+    });
+
     it.each([
       {
         label: 'an arbitrary effort',

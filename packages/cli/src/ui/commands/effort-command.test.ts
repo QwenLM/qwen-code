@@ -19,6 +19,7 @@ describe('effortCommand', () => {
   let setReasoningEffort: ReturnType<typeof vi.fn>;
   let getReasoningEffort: ReturnType<typeof vi.fn>;
   let getReasoningPreference: ReturnType<typeof vi.fn>;
+  let getContentGeneratorConfig: ReturnType<typeof vi.fn>;
   let setValue: ReturnType<typeof vi.fn>;
   let notifySettingsChanged: ReturnType<typeof vi.fn>;
   let context: CommandContext;
@@ -32,6 +33,7 @@ describe('effortCommand', () => {
     });
     getReasoningEffort = vi.fn(() => currentEffort);
     getReasoningPreference = vi.fn();
+    getContentGeneratorConfig = vi.fn().mockReturnValue({});
     setValue = vi.fn();
     notifySettingsChanged = vi.fn();
     context = createMockCommandContext({
@@ -39,6 +41,7 @@ describe('effortCommand', () => {
         config: {
           getReasoningEffort,
           getReasoningPreference,
+          getContentGeneratorConfig,
           setReasoningEffort,
           getReasoningEffortOverride: vi.fn().mockReturnValue(undefined),
         } as unknown as Config,
@@ -73,6 +76,24 @@ describe('effortCommand', () => {
     );
     expect((res as { content: string }).content).not.toContain(
       'using the model/provider default',
+    );
+  });
+
+  it('does not report a dormant disabled preference as active for a mandatory-thinking model', async () => {
+    getReasoningPreference.mockReturnValue(false);
+    getContentGeneratorConfig.mockReturnValue({ thinkingMandatory: true });
+    const nonInteractive = { ...context, executionMode: 'non_interactive' };
+
+    const res = await effortCommand.action!(
+      nonInteractive as typeof context,
+      '',
+    );
+
+    expect((res as { content: string }).content).toContain(
+      'using the model/provider default',
+    );
+    expect((res as { content: string }).content).not.toContain(
+      'Thinking is disabled.',
     );
   });
 
