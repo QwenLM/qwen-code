@@ -385,6 +385,9 @@ describe('SendMessageTool — background-task mode', () => {
 
     expect(result.error?.type).toBe(ToolErrorType.SEND_MESSAGE_NOT_FOUND);
     expect(result.llmContent).toContain('use `to: "qa-reviewer"`');
+    expect(result.returnDisplay).toContain(
+      'use "to" for teammate "qa-reviewer"',
+    );
   });
 
   it('returns error for a failed (non-running, non-revivable) task', async () => {
