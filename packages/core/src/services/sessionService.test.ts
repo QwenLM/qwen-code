@@ -235,6 +235,33 @@ describe('SessionService', () => {
     version: '1.0.0',
   };
 
+  const goalStateRecord = (objective: string): ChatRecord => ({
+    ...recordA1,
+    type: 'system',
+    subtype: 'goal_state',
+    message: undefined,
+    systemPayload: {
+      v: 2,
+      cause: 'create',
+      snapshot: {
+        v: 2,
+        activity: 'idle',
+        goal: {
+          goalId: 'goal-1',
+          revision: 1,
+          objective,
+          status: 'active',
+          evidenceCursor: { recordId: null },
+          turnCount: 0,
+          activeTimeMs: 0,
+          tokensUsed: 0,
+          createdAt: 1,
+          updatedAt: 1,
+        },
+      },
+    },
+  });
+
   describe('listSessions', () => {
     it('should return empty list when no sessions exist', async () => {
       readdirSyncSpy.mockReturnValue([]);
@@ -661,6 +688,51 @@ describe('SessionService', () => {
       const result = await sessionService.listSessions();
 
       expect(result.items[0].prompt).toBe('later prompt');
+    });
+
+    it('should expose the Goal objective for sessions without a prompt', async () => {
+      readdirSyncSpy.mockReturnValue([
+        `${sessionIdA}.jsonl`,
+      ] as unknown as Array<fs.Dirent<Buffer>>);
+      statSyncSpy.mockReturnValue({
+        mtimeMs: Date.now(),
+        isFile: () => true,
+      } as fs.Stats);
+      vi.mocked(jsonl.readLines).mockResolvedValue([
+        goalStateRecord('Ship the requested change'),
+      ]);
+
+      const result = await sessionService.listSessions();
+
+      expect(result.items[0].prompt).toBe('');
+      expect(result.items[0].goalObjective).toBe('Ship the requested change');
+    });
+
+    it('should prefer the latest persisted Goal objective', async () => {
+      readdirSyncSpy.mockReturnValue([
+        `${sessionIdA}.jsonl`,
+      ] as unknown as Array<fs.Dirent<Buffer>>);
+      statSyncSpy.mockReturnValue({
+        mtimeMs: Date.now(),
+        isFile: () => true,
+      } as fs.Stats);
+      vi.mocked(jsonl.readLines).mockResolvedValue([
+        goalStateRecord('Initial objective'),
+      ]);
+      type GoalObjectiveReader = {
+        readSessionGoalObjectiveFromFile: (
+          filePath: string,
+          tailBuffer?: Buffer,
+        ) => string | undefined;
+      };
+      vi.spyOn(
+        sessionService as unknown as GoalObjectiveReader,
+        'readSessionGoalObjectiveFromFile',
+      ).mockReturnValue('Revised objective');
+
+      const result = await sessionService.listSessions();
+
+      expect(result.items[0].goalObjective).toBe('Revised objective');
     });
 
     it('should NOT populate messageCount during listing', async () => {
