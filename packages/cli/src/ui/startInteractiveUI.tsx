@@ -8,6 +8,7 @@ import { stat } from 'node:fs/promises';
 import { basename } from 'node:path';
 import { render } from 'ink';
 import React from 'react';
+import * as signalExitModule from 'signal-exit';
 import {
   createDebugLogger,
   type InboundPolicy,
@@ -36,8 +37,10 @@ import { BackgroundTaskViewProvider } from './contexts/BackgroundTaskViewContext
 import { useKittyKeyboardProtocol } from './hooks/useKittyKeyboardProtocol.js';
 import {
   disableKittyProtocol,
+  popKittyProtocolFlags,
   pushKittyProtocolFlags,
 } from './utils/kittyProtocolDetector.js';
+import { setTerminalTeardown } from './utils/terminal-teardown.js';
 import { installTerminalRedrawOptimizer } from './utils/terminalRedrawOptimizer.js';
 import { installTerminalResizeReflow } from './utils/terminal-resize-reflow.js';
 import { installSynchronizedOutput } from './utils/synchronizedOutput.js';
@@ -60,6 +63,17 @@ import { computeWindowTitle, writeTerminalTitle } from './utils/windowTitle.js';
 import { getCliVersion } from '../utils/version.js';
 
 const debugLogger = createDebugLogger('STARTUP');
+
+type OnSignalExit = (
+  handler: () => void,
+  options: { alwaysLast: boolean },
+) => () => void;
+
+// Keep this dependency on Ink's v3 major. Separate v3 copies coordinate through
+// process.__signal_exit_emitter__; v4 uses a different global rendezvous.
+// signal-exit v3 is CommonJS, so the namespace's default is its callable export.
+const onSignalExit = (signalExitModule as unknown as { default: OnSignalExit })
+  .default;
 
 // The tool scheduler only runs a pressure check after a tool call, so a long
 // interactive conversation with no tool calls would never reclaim and could
@@ -111,6 +125,75 @@ export async function startInteractiveUI(
     process.stdout.isTTY && !config.getScreenReader()
       ? installSynchronizedOutput(process.stdout)
       : () => {};
+  const pressureMonitor = config.getMemoryPressureMonitor?.();
+  const useVP = shouldUseVirtualViewport(
+    settings.merged.ui?.useTerminalBuffer,
+    config.getScreenReader(),
+    isInteractiveTerminal(),
+  );
+  const stdoutMaxListeners = process.stdout.getMaxListeners();
+  if (useVP) {
+    // Visible VP rows each subscribe to resize through Ink's useBoxMetrics.
+    // Node's default warning writes into the alternate screen and shifts mouse
+    // coordinates even though these listeners are owned and cleaned up.
+    process.stdout.setMaxListeners(0);
+  }
+
+  let unmount: (() => void) | undefined;
+  let deferMainScreenRestore = false;
+  let terminalRestored = false;
+  const restoreTerminal = () => {
+    if (terminalRestored) return;
+    terminalRestored = true;
+    // Reclaim before unmounting so React teardown cannot exhaust a near-limit
+    // heap before the terminal has been restored.
+    const restoreOperations = [
+      () => {
+        if (unmount) pressureMonitor?.performCheck();
+      },
+      popKittyProtocolFlags,
+      () => unmount?.(),
+      () => {
+        if (!deferMainScreenRestore) {
+          disableKittyProtocol();
+        }
+      },
+      () => {
+        if (process.stdin.isTTY) {
+          process.stdin.setRawMode(false);
+        }
+      },
+      () => {
+        if (useVP) {
+          process.stdout.setMaxListeners(stdoutMaxListeners);
+        }
+      },
+      // Unwind the stdout.write wrapper stack in LIFO order (resizeReflow is
+      // installed last / outermost); the identity-guarded restores silently
+      // no-op and leak wrappers otherwise.
+      () => resizeReflow.restore(),
+      restoreSynchronizedOutput,
+      restoreTerminalRedrawOptimizer,
+    ];
+    for (const restore of restoreOperations) {
+      try {
+        restore();
+      } catch {
+        // Best-effort terminal restoration.
+      }
+    }
+  };
+  const clearTerminalTeardown = setTerminalTeardown(restoreTerminal);
+  onSignalExit(restoreTerminal, {
+    alwaysLast: false,
+  });
+  registerCleanup(
+    () => {
+      restoreTerminal();
+      clearTerminalTeardown();
+    },
+    { priority: true },
+  );
 
   // Create dual output bridge if --json-fd or --json-file is specified.
   // Errors are caught so a bad fd/path degrades gracefully instead of
@@ -159,12 +242,6 @@ export async function startInteractiveUI(
   // Must be outside any component/effect so StrictMode's mount/cleanup/remount
   // always reads from the same stable prop rather than the (now empty) module buffer.
   const initialCapturedInput = stopAndGetCapturedInput();
-
-  const useVP = shouldUseVirtualViewport(
-    settings.merged.ui?.useTerminalBuffer,
-    config.getScreenReader(),
-    isInteractiveTerminal(),
-  );
 
   // On width shrink the terminal reflows the printed frame into more physical
   // rows than Ink's stale erase count (issue #8557); amplify the clear to the
@@ -251,13 +328,6 @@ export async function startInteractiveUI(
     );
   };
 
-  const stdoutMaxListeners = process.stdout.getMaxListeners();
-  if (useVP) {
-    // Visible VP rows each subscribe to resize through Ink's useBoxMetrics.
-    // Node's default warning writes into the alternate screen and shifts mouse
-    // coordinates even though these listeners are owned and cleaned up.
-    process.stdout.setMaxListeners(0);
-  }
   const appTree = (
     <ErrorBoundary
       recordForExitEcho
@@ -277,28 +347,47 @@ export async function startInteractiveUI(
       <AppWrapper />
     </ErrorBoundary>
   );
-  const instance = render(
-    process.env['DEBUG'] ? (
-      <React.StrictMode>{appTree}</React.StrictMode>
-    ) : (
-      appTree
-    ),
-    {
-      exitOnCtrlC: false,
-      isScreenReaderEnabled: config.getScreenReader(),
-      alternateScreen: useVP,
-      ...(useVP ? { maxFps: 60 } : {}),
-    },
-  );
+  try {
+    const instance = render(
+      process.env['DEBUG'] ? (
+        <React.StrictMode>{appTree}</React.StrictMode>
+      ) : (
+        appTree
+      ),
+      {
+        exitOnCtrlC: false,
+        isScreenReaderEnabled: config.getScreenReader(),
+        alternateScreen: useVP,
+        ...(useVP ? { maxFps: 60 } : {}),
+      },
+    );
+    unmount = () => instance.unmount();
+  } catch (error) {
+    // Ink registers its own exit listener while constructing the renderer.
+    // Register the main-screen pop after it so any alternate screen Ink
+    // entered is left first, without guessing whether render reached that step.
+    deferMainScreenRestore = true;
+    onSignalExit(
+      () => {
+        try {
+          disableKittyProtocol();
+        } catch {
+          // Best-effort terminal restoration.
+        }
+      },
+      { alwaysLast: true },
+    );
+    restoreTerminal();
+    throw error;
+  }
   if (useVP) {
     // Ink entered the alternate screen synchronously inside render() above.
     // The Kitty keyboard flags were pushed at startup on the main screen, and
     // the spec tracks them per screen, so re-push them onto the alternate
     // screen now — otherwise Shift+Enter (and other modified keys) arrive
     // without their modifier and degrade to a bare Enter or an orphaned Escape.
-    // The push is ordered after Ink's enter-alternate-screen write, and Ink
-    // discards the alternate screen (and its flag stack) on unmount, so the
-    // startup main-screen push remains balanced by disableKittyProtocol() below.
+    // Teardown pops this screen before Ink returns to the main screen, then
+    // balances the startup push there.
     pushKittyProtocolFlags();
   }
   // Records the moment Ink's `render()` call has returned, which is
@@ -320,7 +409,6 @@ export async function startInteractiveUI(
 
   // Periodic memory-pressure check for the interactive session. The interval
   // is unref'd (can't keep the loop alive on its own) and cleared on cleanup.
-  const pressureMonitor = config.getMemoryPressureMonitor?.();
   let pressureCheckTimer: NodeJS.Timeout | undefined;
   if (pressureMonitor) {
     pressureCheckTimer = setInterval(() => {
@@ -335,37 +423,11 @@ export async function startInteractiveUI(
 
   registerCleanup(async () => {
     if (pressureCheckTimer) clearInterval(pressureCheckTimer);
-    // Best-effort reclaim before unmounting the React tree. Runs the
-    // synchronous cache-eviction step (and schedules compact_history) so a
-    // near-limit heap is not pushed over the edge by React reconciliation
-    // during unmount.
-    try {
-      pressureMonitor?.performCheck();
-    } catch {
-      // Best-effort: ignore.
-    }
     remoteInputWatcher?.shutdown();
     await dualOutputBridge?.shutdown();
-    instance.unmount();
-    // Pop the Kitty keyboard protocol only after Ink has unmounted. The
-    // protocol was enabled on the main screen before render, and the kitty
-    // spec tracks keyboard flags per screen: with alternateScreen enabled, a
-    // pop written before unmount lands on the alternate screen's (empty)
-    // stack, unmount then leaves the alternate screen, and the main screen's
-    // flags stay set — the user's shell keeps receiving kitty escape codes
-    // (e.g. "9;5u" on Ctrl-C) after exit.
-    disableKittyProtocol();
-    if (useVP) {
-      process.stdout.setMaxListeners(stdoutMaxListeners);
-    }
-    // Unwind the stdout.write wrapper stack in LIFO order (resizeReflow is
-    // installed last / outermost); the identity-guarded restores silently
-    // no-op and leak wrappers otherwise.
-    resizeReflow.restore();
-    restoreSynchronizedOutput();
-    restoreTerminalRedrawOptimizer();
     // If the ErrorBoundary caught a rendering error, echo it to stderr
-    // now that we are back on the main screen buffer. In VP mode the
+    // now that we are back on the main screen buffer (the priority
+    // restoreTerminal() cleanup runs before this one). In VP mode the
     // fallback UI was drawn on the alternate screen and is gone.
     const renderError = consumeLastRenderError();
     if (renderError) {

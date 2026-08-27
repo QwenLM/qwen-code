@@ -17,6 +17,8 @@ import type { InitializationResult } from '../core/initializer.js';
 
 const registerSession = vi.hoisted(() => vi.fn());
 const registerCleanup = vi.hoisted(() => vi.fn());
+const setTerminalTeardown = vi.hoisted(() => vi.fn(() => vi.fn()));
+const onSignalExit = vi.hoisted(() => vi.fn(() => vi.fn()));
 
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   const actual =
@@ -29,6 +31,14 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
 
 vi.mock('ink', () => ({
   render: vi.fn(() => ({ unmount: vi.fn() })),
+}));
+
+vi.mock('signal-exit', () => ({
+  default: onSignalExit,
+}));
+
+vi.mock('./utils/terminal-teardown.js', () => ({
+  setTerminalTeardown,
 }));
 
 vi.mock('../utils/cleanup.js', () => ({
@@ -128,10 +138,11 @@ describe('startInteractiveUI session registration', () => {
     const config = makeConfig();
     await start(config);
 
-    expect(registerCleanup).toHaveBeenCalledTimes(2);
-    const armUnregister = registerCleanup.mock
-      .calls[1]?.[0] as () => Promise<void> | void;
-    await armUnregister();
+    expect(registerCleanup).toHaveBeenCalledTimes(3);
+    const unregister = registerCleanup.mock.calls.at(
+      -1,
+    )?.[0] as () => Promise<void> | void;
+    await unregister();
     expect(config.unregisterSessionRegistry).toHaveBeenCalledTimes(1);
   });
 
@@ -147,7 +158,7 @@ describe('startInteractiveUI session registration', () => {
     ]);
 
     expect(result).toBe('started');
-    expect(registerCleanup).toHaveBeenCalledTimes(2);
+    expect(registerCleanup).toHaveBeenCalledTimes(3);
   });
 
   it('tracks a registration rejection without aborting startup', async () => {
@@ -185,8 +196,8 @@ describe('startInteractiveUI cross-session messaging', () => {
 
     expect(config.whenSessionRegistered).not.toHaveBeenCalled();
     expect(peerMessagingStart).not.toHaveBeenCalled();
-    // No inbox, no extra teardown: the registry pair is still all there is.
-    expect(registerCleanup).toHaveBeenCalledTimes(2);
+    // The disabled path adds no peer-specific cleanup.
+    expect(registerCleanup).toHaveBeenCalledTimes(3);
   });
 
   it('waits for registration to be queued before binding', async () => {
@@ -227,9 +238,10 @@ describe('startInteractiveUI cross-session messaging', () => {
     await start(config, enabledSettings);
     await vi.waitFor(() => expect(peerMessagingStart).toHaveBeenCalled());
 
-    expect(registerCleanup).toHaveBeenCalledTimes(3);
-    const closeInbox = registerCleanup.mock
-      .calls[1]?.[0] as () => Promise<void> | void;
+    expect(registerCleanup).toHaveBeenCalledTimes(4);
+    const closeInbox = registerCleanup.mock.calls.at(
+      -2,
+    )?.[0] as () => Promise<void> | void;
     await closeInbox();
     expect(close).toHaveBeenCalledTimes(1);
   });
@@ -249,8 +261,9 @@ describe('startInteractiveUI cross-session messaging', () => {
       expect(config.whenSessionRegistered).toHaveBeenCalled(),
     );
 
-    const closeInbox = registerCleanup.mock
-      .calls[1]?.[0] as () => Promise<void> | void;
+    const closeInbox = registerCleanup.mock.calls.at(
+      -2,
+    )?.[0] as () => Promise<void> | void;
     const cleanup = Promise.resolve(closeInbox());
     finishRegistration(true);
     await cleanup;

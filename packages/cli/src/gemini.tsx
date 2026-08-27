@@ -101,6 +101,10 @@ import {
   UPDATE_COMPLETE_EXIT_CODE,
 } from './utils/processUtils.js';
 import { getInstallationInfo } from './utils/installationInfo.js';
+import {
+  runTerminalTeardown,
+  setTerminalTeardown,
+} from './ui/utils/terminal-teardown.js';
 
 const debugLogger = createDebugLogger('STARTUP');
 
@@ -223,6 +227,7 @@ export function setupUncaughtExceptionHandler(config: Config) {
       // Best-effort: if the debug dir doesn't exist yet or the disk is
       // full, the stderr output below is the fallback record.
     }
+    runTerminalTeardown();
     // In VP / alternate-screen mode, stderr is written to the alternate
     // buffer which is discarded on teardown. Leave the alternate screen
     // *before* writing the error so the user actually sees it. Guard on
@@ -266,10 +271,23 @@ ${reason.stack}`
   });
 }
 
-function getSignalExitCode(signal: NodeJS.Signals): number {
-  if (signal === 'SIGINT') return 130;
-  if (signal === 'SIGHUP') return 129;
-  return 143;
+type InteractiveExitSignal = 'SIGHUP' | 'SIGINT' | 'SIGTERM';
+
+function getSignalExitCode(signal: InteractiveExitSignal): number {
+  return {
+    SIGHUP: 129,
+    SIGINT: 130,
+    SIGTERM: 143,
+  }[signal];
+}
+
+function restoreRawMode(wasRaw: boolean): void {
+  if (!process.stdin.isTTY) return;
+  try {
+    process.stdin.setRawMode(wasRaw);
+  } catch {
+    // Best-effort terminal restoration.
+  }
 }
 
 // A real SIGINT only reaches the process-level handler while raw mode is
@@ -288,24 +306,29 @@ const SIGINT_RERAISE_IGNORE_MS = 50;
 function installInteractiveSignalHandlers(wasRaw: boolean): () => void {
   let cleanupStarted = false;
   let lastSigintAt = 0;
+  let swallowSignalHandlersInstalled = false;
 
-  // The exit cleanup chain removes the named handlers below. Without a
-  // stand-in listener, a stray Ctrl+C during cleanup would fall back to
-  // Node's default SIGINT handling and kill the process before the
-  // terminal is restored (see #6776). Registered when cleanup begins;
-  // the process exits at the end of cleanup regardless.
+  // Named handlers are removed during non-signal cleanup. Install stand-ins
+  // first so a late signal cannot trigger Node's default exit mid-teardown.
   const swallowSignalDuringCleanup = () => {};
-
-  const beginExit = (signal: NodeJS.Signals) => {
-    if (process.stdin.isTTY) {
-      process.stdin.setRawMode(wasRaw);
+  const installSwallowSignalHandlers = () => {
+    if (swallowSignalHandlersInstalled) {
+      return;
     }
+    swallowSignalHandlersInstalled = true;
+    process.on('SIGHUP', swallowSignalDuringCleanup);
+    process.on('SIGINT', swallowSignalDuringCleanup);
+    process.on('SIGTERM', swallowSignalDuringCleanup);
+  };
 
+  const beginExit = (signal: InteractiveExitSignal) => {
     if (cleanupStarted) {
       return;
     }
     cleanupStarted = true;
-    process.on('SIGINT', swallowSignalDuringCleanup);
+    installSwallowSignalHandlers();
+    runTerminalTeardown();
+    restoreRawMode(wasRaw);
 
     void runExitCleanup()
       .catch((error) => {
@@ -339,14 +362,15 @@ function installInteractiveSignalHandlers(wasRaw: boolean): () => void {
     writeStderrLine('Press Ctrl+C again to exit.');
   };
 
+  process.on('SIGHUP', handleSighup);
   process.on('SIGTERM', handleSigterm);
   process.on('SIGINT', handleSigint);
-  process.on('SIGHUP', handleSighup);
 
   return () => {
+    installSwallowSignalHandlers();
+    process.removeListener('SIGHUP', handleSighup);
     process.removeListener('SIGTERM', handleSigterm);
     process.removeListener('SIGINT', handleSigint);
-    process.removeListener('SIGHUP', handleSighup);
   };
 }
 
@@ -1008,18 +1032,23 @@ export async function main() {
     let kittyProtocolDetectionComplete: Promise<boolean> | undefined;
     let themeAutoDetectionComplete: Promise<void> | undefined;
     if (config.isInteractive()) {
-      registerCleanup(installInteractiveSignalHandlers(wasRaw));
+      registerCleanup(installInteractiveSignalHandlers(wasRaw), {
+        priority: true,
+      });
     }
     if (config.isInteractive() && !wasRaw && process.stdin.isTTY) {
       const { startEarlyInputCapture, stopAndGetCapturedInput } = await import(
         './utils/earlyInputCapture.js'
       );
-      const { detectAndEnableKittyProtocol } = await import(
-        './ui/utils/kittyProtocolDetector.js'
-      );
+      const { detectAndEnableKittyProtocol, disableKittyProtocol } =
+        await import('./ui/utils/kittyProtocolDetector.js');
       // Set this as early as possible to avoid spurious characters from
       // input showing up in the output.
       process.stdin.setRawMode(true);
+      setTerminalTeardown(() => {
+        restoreRawMode(wasRaw);
+        disableKittyProtocol();
+      });
 
       // Startup optimization: start early input capture
       startEarlyInputCapture();

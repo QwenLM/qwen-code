@@ -7,15 +7,22 @@
 import { promises as fs } from 'node:fs';
 import { join } from 'node:path';
 
-const cleanupFunctions: Array<(() => void) | (() => Promise<void>)> = [];
+type CleanupFunction = (() => void) | (() => Promise<void>);
+
+const priorityCleanupFunctions: CleanupFunction[] = [];
+const cleanupFunctions: CleanupFunction[] = [];
 
 export function registerCleanup(
-  fn: (() => void) | (() => Promise<void>),
+  fn: CleanupFunction,
+  options: { priority?: boolean } = {},
 ): () => void {
-  cleanupFunctions.push(fn);
+  const functions = options.priority
+    ? priorityCleanupFunctions
+    : cleanupFunctions;
+  functions.push(fn);
   return () => {
-    const index = cleanupFunctions.indexOf(fn);
-    if (index !== -1) cleanupFunctions.splice(index, 1);
+    const index = functions.indexOf(fn);
+    if (index !== -1) functions.splice(index, 1);
   };
 }
 
@@ -72,11 +79,13 @@ export async function runExitCleanup(
   const overall = options._testOverallTimeoutMs ?? OVERALL_CLEANUP_TIMEOUT_MS;
 
   const drain = (async () => {
-    for (const fn of cleanupFunctions) {
-      try {
-        await withTimeout(Promise.resolve().then(fn), perFn);
-      } catch (_) {
-        // Ignore errors during cleanup.
+    for (const functions of [priorityCleanupFunctions, cleanupFunctions]) {
+      for (const fn of functions) {
+        try {
+          await withTimeout(Promise.resolve().then(fn), perFn);
+        } catch (_) {
+          // Ignore errors during cleanup.
+        }
       }
     }
   })();
@@ -92,7 +101,8 @@ export async function runExitCleanup(
     await Promise.race([drain, wallClock]);
   } finally {
     if (wallClockTimer) clearTimeout(wallClockTimer);
-    cleanupFunctions.length = 0; // Clear the array
+    priorityCleanupFunctions.length = 0;
+    cleanupFunctions.length = 0;
   }
 }
 
@@ -105,6 +115,7 @@ export async function runExitCleanup(
  * d6485964c (paths, jsonl-utils, ripGrep).
  */
 export function _resetCleanupFunctionsForTest(): void {
+  priorityCleanupFunctions.length = 0;
   cleanupFunctions.length = 0;
 }
 
