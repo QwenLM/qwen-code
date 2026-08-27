@@ -50,6 +50,7 @@ import {
   tmpFile,
   tmpPrefix,
 } from './lib/paths.js';
+import { safeTarget } from '../../utils/paths.js';
 
 interface CleanupArgs {
   target: string;
@@ -702,6 +703,22 @@ function pruneWorktrees(): void {
 }
 
 export function runCleanup(target: string): void {
+  // A bare `pr` target's sweep prefix (`qwen-review-pr-`) is a strict prefix
+  // of EVERY PR family, and the lease guard lives inside the `pr-<n>` branch
+  // below — which a bare `pr` never enters — so one `cleanup pr` deleted
+  // every PR round's artifacts at once, unguarded (R20-4 follow-up: a
+  // repo-root file literally named `pr` derives exactly this token). Refused
+  // outright: no target legitimately owns that family prefix.
+  if (safeTarget(target) === 'pr') {
+    writeStderrLine(
+      `Refusing to clean target "pr": its sweep prefix would match every ` +
+        `PR review's artifacts (qwen-review-pr-<n>-*), and PR leases are ` +
+        `checked per-number. For a file review of a path named "pr", remove ` +
+        `only the plan you wrote and its -prompts directory.`,
+    );
+    process.exitCode = 1;
+    return;
+  }
   // Before anything is deleted: the whole temp dir hangs off one path, and a
   // symlink anywhere above it redirects EVERY sweep below — the scratch family,
   // the base-tree lock, the side files. The scratch sweep alone used to answer

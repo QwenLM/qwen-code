@@ -775,8 +775,17 @@ describe('capture-local — the decided stops are machine-readable', () => {
     stderrLines.length = 0;
     const second = capture({ cache: cachePath, model: 'model-a' });
     expect(stderrLines.join('\n')).not.toContain('still on disk');
-    rmSync(sub, { recursive: true, force: true });
     expect(second['incremental']).toBeDefined();
+
+    // …and the certification is a MEASUREMENT, not the diff's silence: with
+    // the submodule's gitdir pointer gone its HEAD cannot be read, `git
+    // diff` shows nothing either way, and an unmeasurable pointer must
+    // refuse — the R20-3 follow-up's odb-removal shape.
+    rmSync(join(repo, 'mod/.git'), { recursive: true, force: true });
+    stderrLines.length = 0;
+    capture({ cache: cachePath, model: 'model-a' });
+    expect(stderrLines.join('\n')).toContain('still on disk');
+    rmSync(sub, { recursive: true, force: true });
   });
 
   it('keeps a DIRECTORY subject out of the anchor — it has no bytes', () => {

@@ -95,6 +95,40 @@ afterEach(() => {
   rmSync(dir, { recursive: true, force: true });
 });
 
+describe('capture-local — the re-captures\u2019 skipped lists ride the guard', () => {
+  it('withholds the stop when only a RE-capture skipped content', () => {
+    // R21-2: the sampling loop kept only `.diff` from re-captures 1 and 2 —
+    // an unreviewable file entering the window lands in `skipped`, never in
+    // the diff BYTES, so the byte comparison read "held still" and the
+    // decided stops fired over content two of the three captures skipped.
+    // Skip-set movement is tree movement.
+    let call = 0;
+    captureMock.mockImplementation(() => {
+      call += 1;
+      return {
+        diff: Buffer.from('', 'utf8'),
+        untracked: [],
+        skipped:
+          call === 1
+            ? []
+            : [{ path: 'huge.bin', bytes: 1, reason: 'over the cap' }],
+        unbornHead: false,
+        repoRoot: dir,
+      };
+    });
+    run('plan.json');
+
+    const plan = JSON.parse(readFileSync(join(dir, 'plan.json'), 'utf8'));
+    expect(plan.nothingToReview).toBeUndefined();
+    expect(existsSync(join(dir, '.qwen/tmp/qwen-review-local-stop.json'))).toBe(
+      false,
+    );
+    expect(errs.join('')).toContain(
+      'the working tree changed while the capture was being hashed',
+    );
+  });
+});
+
 describe('capture-local (command boundary)', () => {
   it('writes the diff and a plan the review can read', () => {
     capture();

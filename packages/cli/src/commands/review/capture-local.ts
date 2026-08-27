@@ -191,7 +191,7 @@ function gitlinkPathsAt(
   repoRoot: string,
   rev: string,
   paths: readonly string[],
-): string[] {
+): Array<{ path: string; oid: string }> {
   let raw: Buffer;
   try {
     raw = gitRaw(
@@ -207,16 +207,17 @@ function gitlinkPathsAt(
   } catch {
     return [];
   }
-  const out: string[] = [];
+  const out: Array<{ path: string; oid: string }> = [];
   for (const rec of raw.toString('utf8').split('\0')) {
     // `<mode> SP <type> SP <oid> TAB <path>` — 160000 is the gitlink mode.
     if (!rec.startsWith('160000 ')) continue;
     const tab = rec.indexOf('\t');
     if (tab === -1) continue;
     const path = rec.slice(tab + 1);
+    const oid = rec.slice(0, tab).split(' ')[2] ?? '';
     // A decode that mangled the name cannot be matched back to the caller's
     // spelling; leaving it out keeps it refused.
-    if (!path.includes('\ufffd')) out.push(path);
+    if (!path.includes('\ufffd')) out.push({ path, oid });
   }
   return out;
 }
@@ -304,10 +305,23 @@ function vanishedStillOnDisk(
   const bothUnhashable = onDisk.filter(
     (p) => worktree[p] === UNHASHABLE && head[p] === UNHASHABLE,
   );
+  // Certified by MEASUREMENT, not by the diff's silence: with the
+  // submodule's odb gone, `git diff HEAD` shows nothing for a MOVED pointer
+  // — that emptiness is git unable to answer, not answering "unmoved"
+  // (R20-3 follow-up). So the pointer is read directly from the submodule
+  // and compared to HEAD's recorded oid; a submodule whose HEAD cannot be
+  // read is unmeasurable, and unmeasurable is uncertifiable.
   const gitlinks = new Set(
-    bothUnhashable.length === 0 || headSha === null
+    (bothUnhashable.length === 0 || headSha === null
       ? []
-      : gitlinkPathsAt(repoRoot, headSha, bothUnhashable),
+      : gitlinkPathsAt(repoRoot, headSha, bothUnhashable)
+    )
+      .filter(
+        ({ path, oid }) =>
+          oid !== '' &&
+          gitOpt('-C', join(repoRoot, path), 'rev-parse', 'HEAD') === oid,
+      )
+      .map(({ path }) => path),
   );
   return onDisk.filter(
     (path) =>
@@ -689,18 +703,29 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
   // The extra pass is one more `git diff` and one more batched
   // `hash-object` over paths already read twice.
   const captures = [capture.diff];
+  const skippedPasses = [capture.skipped];
   const hashPasses = [hashes];
   for (let i = 0; i < 2; i++) {
-    captures.push(
-      captureLocalDiff({ file, includeUntracked: args.untracked }).diff,
-    );
+    const re = captureLocalDiff({ file, includeUntracked: args.untracked });
+    captures.push(re.diff);
+    // The re-captures' SKIPPED lists ride the comparison too: a file that
+    // enters the tree inside the window and lands in a skip class (over the
+    // cap, binary, an embedded repo, the budget) is in no capture's diff
+    // BYTES, so the byte comparison alone reads "held still" while two of
+    // the three captures explicitly skipped content — and every stop gate
+    // reads only capture 0's skipped list (R21-2). Skip-set movement is
+    // tree movement.
+    skippedPasses.push(re.skipped);
     hashPasses.push(hashWorktreeFiles(capture.repoRoot, planPaths));
     // Visibility-bit samples 1 and 2 — interleaved with the re-captures for
     // the same reason the hashes are: see sample 0 above.
     invisibleSamples.push(invisibleTrackedPaths(capture.repoRoot));
   }
+  const skipSet = (list: readonly SkippedFile[]): string =>
+    JSON.stringify(list.map((f) => f.path).sort());
   const treeHeldStill =
     captures.every((d) => d.equals(captures[0])) &&
+    skippedPasses.every((l) => skipSet(l) === skipSet(skippedPasses[0])) &&
     // `movedSince`, not `changedSince`: a path unhashable on both reads did
     // not move between them, and treating it as a move would withhold the
     // candidate on every round holding a pending deletion — the same
