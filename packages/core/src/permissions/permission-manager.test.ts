@@ -2886,28 +2886,32 @@ describe('PermissionManager', () => {
     it('logs the entries it dropped so a typo is not silent', async () => {
       // A misspelt entry narrows the eager set to nothing and defers the
       // whole toolset. That is recoverable, but it must not be invisible —
-      // silent reshaping of the toolset is what #10075 reported.
-      debugLoggerMock.warn.mockClear();
+      // silent reshaping of the toolset is what #10075 reported. Pin the
+      // console channel: the debug log file is off in default runs, where
+      // this warning matters most.
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
       pm = new PermissionManager(
         makeConfig({ eagerTools: ['ReadFile', '', 'Bash(unbalanced'] }),
       );
       pm.initialize();
-      expect(debugLoggerMock.warn).toHaveBeenCalledWith(
+      expect(warnSpy).toHaveBeenCalledWith(
         expect.stringContaining('tools.eager: ignoring 2 unusable entries'),
       );
       // The valid entry survives — dropping is per-entry, not all-or-nothing.
       expect(await pm.getToolRegistrationStatus('read_file')).toBe(
         'registered',
       );
+      warnSpy.mockRestore();
     });
 
     it('stays quiet when every entry parses', async () => {
-      debugLoggerMock.warn.mockClear();
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
       pm = new PermissionManager(makeConfig({ eagerTools: ['ReadFile'] }));
       pm.initialize();
-      expect(debugLoggerMock.warn).not.toHaveBeenCalledWith(
+      expect(warnSpy).not.toHaveBeenCalledWith(
         expect.stringContaining('tools.eager'),
       );
+      warnSpy.mockRestore();
     });
 
     it('deny rules still win over eager membership', async () => {

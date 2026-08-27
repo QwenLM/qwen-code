@@ -1725,7 +1725,8 @@ export class GeminiClient {
       return;
     }
     this.eagerToolsUnreachableWarned = true;
-    debugLogger.warn(
+    // eslint-disable-next-line no-console -- operator-facing breadcrumb; the debug log file is off in default runs, where this reshaping would otherwise be invisible
+    console.warn(
       `tools.eager is holding back ${withheldToolNames.length} tool(s) in a session with no tool_search, ` +
         `so nothing can load them on demand and they are unreachable until restart: ${withheldToolNames.join(', ')}. ` +
         `Enable tools.toolSearch.enabled (and drop any tool_search deny rule) to keep them loadable, ` +

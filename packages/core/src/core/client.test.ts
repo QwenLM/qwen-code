@@ -2643,17 +2643,20 @@ describe('Gemini Client (client.ts)', () => {
         (name: string) => name === 'write_file',
       );
       vi.spyOn(client.getChat(), 'setTools').mockImplementation(() => {});
-      mockClientDebugLogger.warn.mockClear();
+      // The contract promise is a warning visible in default runs, and the
+      // debug log file is off there — pin the console channel this uses.
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
 
       await client.setTools();
 
-      expect(mockClientDebugLogger.warn).toHaveBeenCalledWith(
+      expect(warnSpy).toHaveBeenCalledWith(
         expect.stringContaining('tools.eager is holding back 1 tool(s)'),
       );
       // Names the tool, so the report is actionable without a debug session.
-      expect(mockClientDebugLogger.warn).toHaveBeenCalledWith(
+      expect(warnSpy).toHaveBeenCalledWith(
         expect.stringContaining('write_file'),
       );
+      warnSpy.mockRestore();
     });
 
     it('does not warn when tools.eager held nothing back', async () => {
@@ -2666,14 +2669,15 @@ describe('Gemini Client (client.ts)', () => {
       ]);
       reg.isPermissionDeferred.mockReturnValue(false);
       vi.spyOn(client.getChat(), 'setTools').mockImplementation(() => {});
-      mockClientDebugLogger.warn.mockClear();
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
 
       await client.setTools();
 
-      expect(mockClientDebugLogger.warn).not.toHaveBeenCalledWith(
+      expect(warnSpy).not.toHaveBeenCalledWith(
         expect.stringContaining('tools.eager'),
       );
       expect(reg.revealDeferredTool).toHaveBeenCalledWith('mcp__server__alpha');
+      warnSpy.mockRestore();
     });
 
     it('does not append the same added MCP reminder twice', async () => {
