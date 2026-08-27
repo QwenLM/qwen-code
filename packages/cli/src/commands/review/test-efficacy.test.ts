@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { execFileSync, spawnSync } from 'node:child_process';
 import {
   replacementMutantsOf,
@@ -511,6 +511,22 @@ describe('probeCleanupFailureDetail', () => {
 });
 
 describe('restoreProbeTreeTracked, through runOneMutant', () => {
+  // Ambient host git state must not reach this fixture: the restore's own
+  // git spawns sanitize their env BY DESIGN — dropping the GIT_CONFIG_*
+  // redirects and reading whatever $HOME carries — so the refusal these
+  // tests pin can be decided by the host instead of the code (the incident
+  // class `isolateHostGitConfig` was written for; every sibling real-git
+  // suite isolates).
+  let gitIsolation: ReturnType<typeof isolateHostGitConfig>;
+
+  beforeEach(() => {
+    gitIsolation = isolateHostGitConfig();
+  });
+
+  afterEach(() => {
+    gitIsolation.dispose();
+  });
+
   it('refuses to run when the tree carries NO .git at all', () => {
     // The state the tree can never be put back from, and the cheapest one to
     // reach: `.git` is an untracked pointer file inside the directory the PR's
