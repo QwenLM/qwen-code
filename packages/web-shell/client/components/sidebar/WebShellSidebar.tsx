@@ -395,6 +395,8 @@ interface WebShellSidebarProps {
   lockedWorkspace?: WebShellSidebarLockedWorkspace;
   branding?: false | WebShellSidebarBranding;
   primaryNav?: WebShellSidebarPrimaryNavOptions;
+  /** Whether to show the Tasks/Channels session-source switch. Defaults to true. */
+  showSessionSourceSwitch?: boolean;
   /** Whether to hide the "Projects" header row (with search and add workspace). Defaults to false (shown). */
   hideProjectHeader?: boolean;
   /** Customize which action buttons appear on session rows. */
@@ -847,6 +849,7 @@ export function WebShellSidebar({
   lockedWorkspace: lockedWorkspaceOptions,
   branding,
   primaryNav: primaryNavOptions,
+  showSessionSourceSwitch = true,
   hideProjectHeader,
   sessionActions: sessionActionsOptions,
   footer,
@@ -895,8 +898,15 @@ export function WebShellSidebar({
   );
   const [sessionSource, setSessionSource] =
     useState<SidebarSessionSource>('default');
+  // Reset before commit so effects that key bookkeeping by the raw source
+  // cannot observe a hidden switch with channel state and default catalogs.
+  if (!showSessionSourceSwitch && sessionSource !== 'default') {
+    setSessionSource('default');
+  }
   const selectedSessionSource = sourceMetadataEnabled
-    ? sessionSource
+    ? showSessionSourceSwitch
+      ? sessionSource
+      : 'default'
     : undefined;
   const channelGroupingEnabled = Boolean(
     selectedSessionSource === 'channel' &&
@@ -3976,10 +3986,16 @@ export function WebShellSidebar({
       const isCurrent = isCurrentSession(session);
       const needsUserInput =
         !session.isWaitingForPermission && session.isWaitingForUserQuestion;
-      const attentionLabel = session.isWaitingForPermission
-        ? t('sidebar.waitingForApproval')
+      const attention = session.isWaitingForPermission
+        ? {
+            full: t('sidebar.waitingForApproval'),
+            short: t('sidebar.waitingForApprovalShort'),
+          }
         : needsUserInput
-          ? t('sidebar.userInputNeeded')
+          ? {
+              full: t('sidebar.userInputNeeded'),
+              short: t('sidebar.userInputNeededShort'),
+            }
           : null;
       const showPin = canOrganizeSession(session, 'pin');
       const showArchive =
@@ -4079,15 +4095,15 @@ export function WebShellSidebar({
                     : undefined
                 }
               >
-                {attentionLabel && (
+                {attention && (
                   <span
                     className={cx(
                       styles.sessionAttention,
                       needsUserInput && styles.sessionAttentionUserInput,
                     )}
-                    aria-label={attentionLabel}
+                    aria-label={attention.full}
                   >
-                    {attentionLabel}
+                    {attention.short}
                   </span>
                 )}
                 {session.hasActivePrompt ? (
@@ -4095,7 +4111,7 @@ export function WebShellSidebar({
                     className={styles.sessionLoading}
                     aria-label={t('sidebar.running')}
                   />
-                ) : !attentionLabel && gitIcon ? (
+                ) : !attention && gitIcon ? (
                   <span className={styles.sessionGitIcon}>{gitIcon}</span>
                 ) : null}
                 {(showPin ||
@@ -5098,7 +5114,7 @@ export function WebShellSidebar({
             onOpenChange={setCollapsedSessionsOpen}
             isCloseBlocked={isCollapsedCloseBlocked}
           >
-            {sourceMetadataEnabled && (
+            {showSessionSourceSwitch && sourceMetadataEnabled && (
               <Tabs
                 className="px-2 pb-2"
                 value={sessionSource}
