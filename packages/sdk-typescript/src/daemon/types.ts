@@ -1041,6 +1041,8 @@ export interface DaemonBranchInfo {
 export interface DaemonSessionPrInfo {
   number: number;
   url: string;
+  /** Snapshot of the PR's state at last bind/refresh; optional. */
+  state?: 'open' | 'merged' | 'closed';
 }
 
 /** Returned from `POST /session`. */
@@ -4459,6 +4461,7 @@ export interface DaemonWorkspaceExtensionsStatus {
 }
 
 export interface ExtensionInstallRequest {
+  /** Git, GitHub, npm, or an absolute path on the daemon host. */
   source: string;
   credentialPersistence?: 'stored' | 'one_time';
   ref?: string;

@@ -3061,6 +3061,7 @@ export class AcpDispatcher {
                 typeof boundPr['number'] === 'number' &&
                 typeof boundPr['url'] === 'string'
               ) {
+                const boundState = boundPr['state'];
                 const persistedPrs = (
                   await upsertSessionPr(
                     service.getPrSessionPathForArchiveState(
@@ -3070,9 +3071,18 @@ export class AcpDispatcher {
                     {
                       number: boundPr['number'],
                       url: boundPr['url'],
+                      ...(boundState === 'open' ||
+                      boundState === 'merged' ||
+                      boundState === 'closed'
+                        ? { state: boundState }
+                        : {}),
                     },
                   )
-                ).map(({ number, url }) => ({ number, url }));
+                ).map(({ number, url, state }) => ({
+                  number,
+                  url,
+                  ...(state ? { state } : {}),
+                }));
                 // Reply with the authoritative persisted list, mirroring the
                 // REST metadata routes.
                 result = { ...result, prs: persistedPrs };

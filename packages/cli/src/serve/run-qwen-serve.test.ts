@@ -10453,6 +10453,58 @@ describe('runQwenServe runtime startup failures', () => {
   });
 });
 
+// Simulate the refresh chunk vanishing under a running daemon (an in-place
+// upgrade replacing dist/): the module factory throws, so the first
+// health-triggered runtime build's dynamic import rejects.
+vi.mock('./server/session-pr-refresh.js', () => {
+  throw new Error(
+    'Cannot find module session-pr-refresh (simulated chunk replacement)',
+  );
+});
+
+describe('session-pr-refresh degraded load on the serve fast path', () => {
+  let tmpDir: string;
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    if (tmpDir) {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('degrades to no PR-state sweep instead of leaking an unhandled rejection', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-pr-refresh-degrade-')),
+    );
+    // The serve fast path installs no process-level unhandledRejection
+    // handler before the runtime builds, so record them here: without the
+    // import's .catch the rejection escapes and Node's default is to exit.
+    const rejections: unknown[] = [];
+    const recordRejection = (reason: unknown): void => {
+      rejections.push(reason);
+    };
+    process.on('unhandledRejection', recordRejection);
+    let handle: RunHandle | undefined;
+    try {
+      ({ handle } = await startDeferredDaemon(tmpDir));
+      const health = await fetch(`${handle.url}/health`);
+      expect(health.status).toBe(200);
+      // The first health schedules the runtime build; the refresh module
+      // import fires inside it and rejects on the next turns.
+      await expect(handle.runtimeReady).resolves.toBeUndefined();
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      expect(rejections).toEqual([]);
+      // The intended degradation is "no PR-state sweep" — the daemon keeps
+      // serving everything else.
+      const healthAfter = await fetch(`${handle.url}/health`);
+      expect(healthAfter.status).toBe(200);
+    } finally {
+      process.off('unhandledRejection', recordRejection);
+      await handle?.close();
+    }
+  });
+});
+
 describe('runQwenServe Web Shell signals on RunHandle', () => {
   let tmpDir: string;
 

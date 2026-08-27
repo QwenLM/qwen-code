@@ -5671,7 +5671,11 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
         params: {
           sessionId,
           metadata: {
-            pr: { number: 9101, url: 'https://github.com/o/r/pull/9101' },
+            pr: {
+              number: 9101,
+              url: 'https://github.com/o/r/pull/9101',
+              state: 'merged',
+            },
           },
         },
       });
@@ -5692,10 +5696,21 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
           'id' in frame &&
           (frame as { id: unknown }).id === 471,
       ) as
-        | { result?: { prs?: Array<{ number: number; url: string }> } }
+        | {
+            result?: {
+              prs?: Array<{ number: number; url: string; state?: string }>;
+            };
+          }
         | undefined;
-      expect(reply?.result?.prs?.map((entry) => entry.number)).toEqual([
-        9100, 9101,
+      // The reply echoes the persisted state: the dispatch persistence arm
+      // must carry `state` into the sidecar write, not drop it.
+      expect(reply?.result?.prs).toEqual([
+        { number: 9100, url: 'https://github.com/o/r/pull/9100' },
+        {
+          number: 9101,
+          url: 'https://github.com/o/r/pull/9101',
+          state: 'merged',
+        },
       ]);
       // The entry must be re-hydrated from the sidecar BEFORE the mutation
       // so the `session_metadata_updated` event payload is complete too.
@@ -5707,6 +5722,9 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       ).toEqual([9100]);
       const persisted = await readSessionPrs(sidecarPath);
       expect(persisted?.map((entry) => entry.number)).toEqual([9100, 9101]);
+      expect(persisted?.find((entry) => entry.number === 9101)?.state).toBe(
+        'merged',
+      );
     } finally {
       registry.dispose();
       rememberLane.dispose();
