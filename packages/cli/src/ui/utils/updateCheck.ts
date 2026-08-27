@@ -145,7 +145,10 @@ export async function runGlobalNpm(
   args: string[],
   run: typeof execFileAsync = execFileAsync,
   platform = process.platform,
-  nodePath = process.execPath,
+  // On the npm platform-runtime channel the CLI runs under the platform
+  // package's bundled Bun, so process.execPath has no npm beside it; the
+  // npm-bin.js launcher stamps the host Node's path for exactly this case.
+  nodePath = process.env['QWEN_CODE_HOST_NODE'] ?? process.execPath,
   resolveNpmCliPath = getNpmCliPath,
 ): Promise<string> {
   const { stdout } = await run(

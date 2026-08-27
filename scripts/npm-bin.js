@@ -53,8 +53,9 @@ function resolvePlatformPackageDir(name) {
   return dirname(require.resolve(`${name}/package.json`));
 }
 
-function launchChild(command, commandArgs, label) {
+function launchChild(command, commandArgs, onLaunchError) {
   const child = spawn(command, commandArgs, { stdio: 'inherit' });
+  let spawnFailed = false;
 
   // Ctrl+C and SIGTERM reach this launcher and the CLI child alike (both share
   // the foreground process group). The child owns the exit decision — the
@@ -77,9 +78,14 @@ function launchChild(command, commandArgs, label) {
   });
 
   child.on('error', (error) => {
-    fail(`failed to launch ${label}: ${error.message}`);
+    // A spawn failure also emits 'close' (with a negative code); mark the
+    // failure so the close-mirror path below stays silent while the error
+    // handler decides what happens next.
+    spawnFailed = true;
+    onLaunchError(error);
   });
   child.on('close', (code, signal) => {
+    if (spawnFailed) return;
     if (signal) {
       // Drop the forwarders first: registering a listener replaced the
       // default terminating action, so a re-raise that re-enters them would
@@ -98,6 +104,12 @@ function main() {
   const args = process.argv.slice(2);
   const isWindows = process.platform === 'win32';
 
+  // This launcher always runs under the host Node; publish its path so the
+  // update check can resolve npm even when the CLI itself runs under the
+  // platform package's bundled Bun (where process.execPath is the Bun binary
+  // and no npm lives next to it).
+  process.env['QWEN_CODE_HOST_NODE'] ??= process.execPath;
+
   // npm-bin.js and cli-entry.js both sit at the package root; argv[1] can be
   // a .bin symlink elsewhere, so locate the fallback via this module.
   const fallbackEntry = join(
@@ -106,7 +118,9 @@ function main() {
   );
   const runNodeFallback = (reason) => {
     process.stderr.write(`qwen: ${reason} Falling back to node.\n`);
-    launchChild(process.execPath, [fallbackEntry, ...args], fallbackEntry);
+    launchChild(process.execPath, [fallbackEntry, ...args], (error) =>
+      fail(`failed to launch ${fallbackEntry}: ${error.message}`),
+    );
   };
 
   const packageName = platformPackageName();
@@ -141,7 +155,14 @@ function main() {
     return;
   }
 
-  launchChild(runtime, [cliEntry, ...args], packageName);
+  launchChild(runtime, [cliEntry, ...args], (error) => {
+    // The runtime exists but cannot execute — e.g. a glibc-linked Bun on a
+    // musl host, or a noexec mount. The node entry ships in this same
+    // package, so degrade to it instead of dying here.
+    runNodeFallback(
+      `the ${packageName} runtime failed to start (${error.message}).`,
+    );
+  });
 }
 
 main();

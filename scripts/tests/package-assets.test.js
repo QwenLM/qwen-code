@@ -779,7 +779,11 @@ describe('package asset scripts', () => {
     // to the main package (npm picks one via their os/cpu fields).
     expect(distPackageJson.bin).toEqual({ qwen: 'npm-bin.js' });
     expect(distPackageJson.files).toContain('npm-bin.js');
-    expect(existsSync(path.join(rootDir, 'dist', 'npm-bin.js'))).toBe(true);
+    // Content equality, not just existence: a truncated or wrong-file copy
+    // (e.g. cli-entry.js) would ship a dead launcher as the published bin.
+    expect(readFileSync(path.join(rootDir, 'dist', 'npm-bin.js'), 'utf8')).toBe(
+      readFileSync(new URL('../npm-bin.js', import.meta.url), 'utf8'),
+    );
     for (const platformPackage of [
       '@qwen-code/qwen-code-darwin-arm64',
       '@qwen-code/qwen-code-darwin-x64',

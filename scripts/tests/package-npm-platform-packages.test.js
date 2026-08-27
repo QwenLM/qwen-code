@@ -5,7 +5,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import {
   existsSync,
   mkdtempSync,
@@ -76,112 +76,161 @@ function createStandaloneFixture(standaloneDir, archiveName) {
   }
 }
 
-describe('scripts/package-npm-platform-packages.js', () => {
-  let workDir;
-  let standaloneDir;
-  let outDir;
+// The fixture builder shells out to `zip` and the script under test to
+// `unzip` (win-x64 archive); the required test_windows lane has neither, and
+// the production repackager is legitimately Linux-release-runner-only, so
+// skip where the binaries are absent — same gate install-script.test.js uses.
+const zipAvailable =
+  spawnSync('zip', ['--version']).error === undefined &&
+  spawnSync('unzip', ['-v']).error === undefined;
+if (process.env.CI && process.platform !== 'win32' && !zipAvailable) {
+  console.warn(
+    '`zip`/`unzip` missing on a CI host; platform-package tests would skip.',
+  );
+}
 
-  beforeEach(() => {
-    workDir = mkdtempSync(path.join(tmpdir(), 'npm-platform-test-'));
-    standaloneDir = path.join(workDir, 'standalone');
-    outDir = path.join(workDir, 'out');
-    mkdirSync(standaloneDir, { recursive: true });
-    for (const archiveName of PLATFORM_ARCHIVES) {
-      createStandaloneFixture(standaloneDir, archiveName);
-    }
-  });
+const EXPECTED_PLATFORM_FIELDS = {
+  '@qwen-code/qwen-code-darwin-arm64': { os: ['darwin'], cpu: ['arm64'] },
+  '@qwen-code/qwen-code-darwin-x64': { os: ['darwin'], cpu: ['x64'] },
+  '@qwen-code/qwen-code-linux-arm64': {
+    os: ['linux'],
+    cpu: ['arm64'],
+    libc: ['glibc'],
+  },
+  '@qwen-code/qwen-code-linux-x64': {
+    os: ['linux'],
+    cpu: ['x64'],
+    libc: ['glibc'],
+  },
+  '@qwen-code/qwen-code-win-x64': { os: ['win32'], cpu: ['x64'] },
+};
 
-  afterEach(() => {
-    rmSync(workDir, { recursive: true, force: true });
-  });
+describe.skipIf(!zipAvailable)(
+  'scripts/package-npm-platform-packages.js',
+  () => {
+    let workDir;
+    let standaloneDir;
+    let outDir;
 
-  const runScript = (extraArgs = []) =>
-    execFileSync(
-      process.execPath,
-      [
-        SCRIPT_PATH,
-        '--version',
-        '9.9.9',
-        '--standalone-dir',
-        standaloneDir,
-        '--out-dir',
-        outDir,
-        ...extraArgs,
-      ],
-      { encoding: 'utf8' },
-    );
-
-  it('packages every release target and emits the optionalDependencies map', () => {
-    runScript();
-
-    const optionalDependencies = JSON.parse(
-      readFileSync(path.join(outDir, 'optional-dependencies.json'), 'utf8'),
-    );
-    expect(optionalDependencies).toEqual({
-      '@qwen-code/qwen-code-darwin-arm64': '9.9.9',
-      '@qwen-code/qwen-code-darwin-x64': '9.9.9',
-      '@qwen-code/qwen-code-linux-arm64': '9.9.9',
-      '@qwen-code/qwen-code-linux-x64': '9.9.9',
-      '@qwen-code/qwen-code-win-x64': '9.9.9',
+    beforeEach(() => {
+      workDir = mkdtempSync(path.join(tmpdir(), 'npm-platform-test-'));
+      standaloneDir = path.join(workDir, 'standalone');
+      outDir = path.join(workDir, 'out');
+      mkdirSync(standaloneDir, { recursive: true });
+      for (const archiveName of PLATFORM_ARCHIVES) {
+        createStandaloneFixture(standaloneDir, archiveName);
+      }
     });
 
-    for (const name of Object.keys(optionalDependencies)) {
-      const packageDir = path.join(outDir, name.replace('@qwen-code/', ''));
-      const manifest = JSON.parse(
-        readFileSync(path.join(packageDir, 'package.json'), 'utf8'),
-      );
-      expect(manifest.name).toBe(name);
-      expect(manifest.version).toBe('9.9.9');
-      expect(manifest.os).toHaveLength(1);
-      expect(manifest.cpu).toHaveLength(1);
-      expect(existsSync(path.join(packageDir, 'lib', 'cli-entry.js'))).toBe(
-        true,
-      );
-    }
-  });
+    afterEach(() => {
+      rmSync(workDir, { recursive: true, force: true });
+    });
 
-  it('strips every standalone fingerprint isStandaloneInstallDir probes', () => {
-    runScript();
-
-    for (const shortName of [
-      'qwen-code-darwin-arm64',
-      'qwen-code-darwin-x64',
-      'qwen-code-linux-arm64',
-      'qwen-code-linux-x64',
-      'qwen-code-win-x64',
-    ]) {
-      const packageDir = path.join(outDir, shortName);
-      expect(existsSync(path.join(packageDir, 'manifest.json'))).toBe(false);
-      expect(existsSync(path.join(packageDir, 'bin'))).toBe(false);
-      // The node/ compat mirror is standalone-installer-only dead weight — on
-      // win-x64 a byte-for-byte second copy of the Bun executable.
-      expect(existsSync(path.join(packageDir, 'node'))).toBe(false);
-    }
-  });
-
-  it('accepts the sibling scripts --key=value syntax', () => {
-    execFileSync(
-      process.execPath,
-      [
-        SCRIPT_PATH,
-        `--version=9.9.9`,
-        `--standalone-dir=${standaloneDir}`,
-        `--out-dir=${outDir}`,
-      ],
-      { encoding: 'utf8' },
-    );
-    expect(existsSync(path.join(outDir, 'optional-dependencies.json'))).toBe(
-      true,
-    );
-  });
-
-  it('refuses to run without --version', () => {
-    expect(() =>
+    const runScript = (extraArgs = []) =>
       execFileSync(
         process.execPath,
-        [SCRIPT_PATH, '--standalone-dir', standaloneDir, '--out-dir', outDir],
-        { encoding: 'utf8', stdio: 'pipe' },
-      ),
-    ).toThrowError(/--version is required/);
-  });
-});
+        [
+          SCRIPT_PATH,
+          '--version',
+          '9.9.9',
+          '--standalone-dir',
+          standaloneDir,
+          '--out-dir',
+          outDir,
+          ...extraArgs,
+        ],
+        { encoding: 'utf8' },
+      );
+
+    it('packages every release target and emits the optionalDependencies map', () => {
+      runScript();
+
+      const optionalDependencies = JSON.parse(
+        readFileSync(path.join(outDir, 'optional-dependencies.json'), 'utf8'),
+      );
+      expect(optionalDependencies).toEqual({
+        '@qwen-code/qwen-code-darwin-arm64': '9.9.9',
+        '@qwen-code/qwen-code-darwin-x64': '9.9.9',
+        '@qwen-code/qwen-code-linux-arm64': '9.9.9',
+        '@qwen-code/qwen-code-linux-x64': '9.9.9',
+        '@qwen-code/qwen-code-win-x64': '9.9.9',
+      });
+
+      for (const name of Object.keys(optionalDependencies)) {
+        const packageDir = path.join(outDir, name.replace('@qwen-code/', ''));
+        const manifest = JSON.parse(
+          readFileSync(path.join(packageDir, 'package.json'), 'utf8'),
+        );
+        expect(manifest.name).toBe(name);
+        expect(manifest.version).toBe('9.9.9');
+        // Exact platform fields: npm's selection depends on the values, not
+        // the cardinality, and the libc keeps glibc-linked Bun off musl hosts.
+        const { os, cpu, libc } = manifest;
+        expect({ os, cpu, ...(libc ? { libc } : {}) }).toEqual(
+          EXPECTED_PLATFORM_FIELDS[name],
+        );
+        expect(existsSync(path.join(packageDir, 'lib', 'cli-entry.js'))).toBe(
+          true,
+        );
+        // The pinned Bun runtime is the one artifact the platform package
+        // exists to deliver; it must survive repackaging in the launcher's
+        // layout.
+        const isWindows = name === '@qwen-code/qwen-code-win-x64';
+        expect(
+          existsSync(
+            path.join(
+              packageDir,
+              'bun',
+              ...(isWindows ? ['bun.exe'] : ['bin', 'bun']),
+            ),
+          ),
+        ).toBe(true);
+      }
+    });
+
+    it('strips every standalone fingerprint isStandaloneInstallDir probes', () => {
+      runScript();
+
+      for (const shortName of [
+        'qwen-code-darwin-arm64',
+        'qwen-code-darwin-x64',
+        'qwen-code-linux-arm64',
+        'qwen-code-linux-x64',
+        'qwen-code-win-x64',
+      ]) {
+        const packageDir = path.join(outDir, shortName);
+        expect(existsSync(path.join(packageDir, 'manifest.json'))).toBe(false);
+        expect(existsSync(path.join(packageDir, 'bin'))).toBe(false);
+        // The node/ compat mirror is standalone-installer-only dead weight — on
+        // win-x64 a byte-for-byte second copy of the Bun executable.
+        expect(existsSync(path.join(packageDir, 'node'))).toBe(false);
+      }
+    });
+
+    it('accepts the sibling scripts --key=value syntax', () => {
+      execFileSync(
+        process.execPath,
+        [
+          SCRIPT_PATH,
+          `--version=9.9.9`,
+          `--standalone-dir=${standaloneDir}`,
+          `--out-dir=${outDir}`,
+        ],
+        { encoding: 'utf8' },
+      );
+      expect(existsSync(path.join(outDir, 'optional-dependencies.json'))).toBe(
+        true,
+      );
+    });
+
+    it('refuses to run without --version', () => {
+      expect(() =>
+        execFileSync(
+          process.execPath,
+          [SCRIPT_PATH, '--standalone-dir', standaloneDir, '--out-dir', outDir],
+          { encoding: 'utf8', stdio: 'pipe' },
+        ),
+      ).toThrowError(/--version is required/);
+    });
+  },
+);

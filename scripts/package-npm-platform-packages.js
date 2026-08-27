@@ -43,6 +43,10 @@ const PLATFORMS = RELEASE_TARGETS.map((target) => {
     name: `@qwen-code/qwen-code-${target.qwenTarget}`,
     os: [OS_NAMES[osPart]],
     cpu: [cpu],
+    // The bundled Bun is glibc-linked. Declare the libc so npm skips musl
+    // hosts (Alpine) instead of installing a runtime that cannot execve;
+    // the launcher's resolution-failure then degrades those hosts to node.
+    libc: osPart === 'linux' ? ['glibc'] : undefined,
   };
 });
 
@@ -146,6 +150,7 @@ function packagePlatform(platform, options) {
     // skip the package on non-matching platforms without failing installs.
     os: platform.os,
     cpu: platform.cpu,
+    ...(platform.libc ? { libc: platform.libc } : {}),
   };
   fs.writeFileSync(
     path.join(packageDir, 'package.json'),

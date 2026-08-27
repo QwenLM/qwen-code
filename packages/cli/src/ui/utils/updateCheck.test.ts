@@ -305,6 +305,27 @@ describe('checkForUpdates', () => {
     );
   });
 
+  it('prefers the host Node stamped by the platform launcher over the Bun execPath', async () => {
+    const run = vi.fn().mockResolvedValue({ stdout: '"1.1.0"', stderr: '' });
+    vi.stubEnv('QWEN_CODE_HOST_NODE', '/usr/local/bin/node');
+    try {
+      await runGlobalNpm(
+        ['view', '@qwen-code/qwen-code'],
+        run as unknown as NonNullable<Parameters<typeof runGlobalNpm>[1]>,
+      );
+
+      // On the platform-runtime channel process.execPath is the bundled Bun,
+      // which has no npm beside it; the launcher-stamped host Node wins.
+      expect(run).toHaveBeenCalledWith(
+        '/usr/local/bin/node',
+        [expect.stringContaining('npm-cli.js'), 'view', '@qwen-code/qwen-code'],
+        expect.anything(),
+      );
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it('does not fall back when the global npm query fails', async () => {
     const run = vi.fn().mockRejectedValue(new Error('npm view failed'));
 

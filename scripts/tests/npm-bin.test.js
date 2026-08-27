@@ -35,6 +35,7 @@ function createFakeChild() {
 describe('scripts/npm-bin.js platform launcher', () => {
   const originalArgv = process.argv;
   const originalPlatform = process.platform;
+  const originalArch = process.arch;
   let exitSpy;
   let stderrSpy;
   let killSpy;
@@ -44,6 +45,9 @@ describe('scripts/npm-bin.js platform launcher', () => {
 
   const setPlatform = (platform) => {
     Object.defineProperty(process, 'platform', { value: platform });
+  };
+  const setArch = (arch) => {
+    Object.defineProperty(process, 'arch', { value: arch });
   };
 
   const importLauncher = async () => {
@@ -59,6 +63,7 @@ describe('scripts/npm-bin.js platform launcher', () => {
     existsSyncMock.mockReturnValue(true);
     process.argv = ['node', 'npm-bin.js', '--version'];
     setPlatform(originalPlatform);
+    setArch(originalArch);
     exitSpy = vi.spyOn(process, 'exit').mockImplementation(() => undefined);
     stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => {});
     killSpy = vi.spyOn(process, 'kill').mockImplementation(() => undefined);
@@ -69,6 +74,7 @@ describe('scripts/npm-bin.js platform launcher', () => {
   afterEach(() => {
     process.argv = originalArgv;
     setPlatform(originalPlatform);
+    setArch(originalArch);
     exitSpy.mockRestore();
     stderrSpy.mockRestore();
     killSpy.mockRestore();
@@ -81,8 +87,10 @@ describe('scripts/npm-bin.js platform launcher', () => {
 
     expect(spawnMock).toHaveBeenCalledTimes(1);
     const [runtime, commandArgs, options] = spawnMock.mock.calls[0];
-    expect(String(runtime).replaceAll('\\', '/')).toContain(
-      '/platform/pkg/bun',
+    // Exact layout, not a substring: swapping the isWindows branches must
+    // fail here instead of degrading every install of the other OS to node.
+    expect(String(runtime).replaceAll('\\', '/')).toBe(
+      '/platform/pkg/bun/bin/bun',
     );
     expect(commandArgs[0].replaceAll('\\', '/')).toBe(
       '/platform/pkg/lib/cli-entry.js',
@@ -91,6 +99,35 @@ describe('scripts/npm-bin.js platform launcher', () => {
     expect(options.stdio).toBe('inherit');
     expect(stderrSpy).not.toHaveBeenCalled();
   });
+
+  it.each([
+    ['darwin', 'arm64', '@qwen-code/qwen-code-darwin-arm64'],
+    ['darwin', 'x64', '@qwen-code/qwen-code-darwin-x64'],
+    ['linux', 'arm64', '@qwen-code/qwen-code-linux-arm64'],
+    ['linux', 'x64', '@qwen-code/qwen-code-linux-x64'],
+    ['win32', 'x64', '@qwen-code/qwen-code-win-x64'],
+  ])(
+    'resolves %s-%s through %s to the matching Bun layout',
+    async (platform, arch, packageName) => {
+      setPlatform(platform);
+      setArch(arch);
+
+      await importLauncher();
+
+      expect(resolveMock).toHaveBeenCalledWith(`${packageName}/package.json`);
+      expect(spawnMock).toHaveBeenCalledTimes(1);
+      const [runtime, commandArgs] = spawnMock.mock.calls[0];
+      const expectedRuntime =
+        platform === 'win32'
+          ? '/platform/pkg/bun/bun.exe'
+          : '/platform/pkg/bun/bin/bun';
+      expect(String(runtime).replaceAll('\\', '/')).toBe(expectedRuntime);
+      expect(commandArgs[0].replaceAll('\\', '/')).toBe(
+        '/platform/pkg/lib/cli-entry.js',
+      );
+      expect(exitSpy).not.toHaveBeenCalled();
+    },
+  );
 
   it('falls back to the node entry when the platform package is not installed', async () => {
     resolveMock.mockImplementation(() => {
@@ -104,6 +141,7 @@ describe('scripts/npm-bin.js platform launcher', () => {
     expect(runtime).toBe(process.execPath);
     expect(commandArgs[0].replaceAll('\\', '/')).toMatch(/cli-entry\.js$/);
     expect(commandArgs[0].replaceAll('\\', '/')).not.toContain('/platform/');
+    expect(commandArgs.slice(1)).toEqual(['--version']);
     const notice = String(stderrSpy.mock.calls[0][0]);
     expect(notice).toContain('was not installed');
     expect(notice).toContain('Falling back to node');
@@ -117,12 +155,25 @@ describe('scripts/npm-bin.js platform launcher', () => {
 
     expect(spawnMock).toHaveBeenCalledTimes(1);
     expect(spawnMock.mock.calls[0][0]).toBe(process.execPath);
+    expect(spawnMock.mock.calls[0][1].slice(1)).toEqual(['--version']);
     expect(String(stderrSpy.mock.calls[0][0])).toContain('no prebuilt runtime');
     expect(exitSpy).not.toHaveBeenCalled();
   });
 
-  it('falls back to the node entry when the platform package is damaged', async () => {
-    existsSyncMock.mockReturnValue(false);
+  it('falls back to the node entry when the platform package lacks the CLI entry', async () => {
+    existsSyncMock.mockImplementation((p) => !String(p).includes('cli-entry'));
+
+    await importLauncher();
+
+    expect(spawnMock).toHaveBeenCalledTimes(1);
+    expect(spawnMock.mock.calls[0][0]).toBe(process.execPath);
+    expect(spawnMock.mock.calls[0][1].slice(1)).toEqual(['--version']);
+    expect(String(stderrSpy.mock.calls[0][0])).toContain('damaged');
+    expect(exitSpy).not.toHaveBeenCalled();
+  });
+
+  it('falls back to the node entry when the platform package lacks the runtime', async () => {
+    existsSyncMock.mockImplementation((p) => !String(p).includes('/bun/'));
 
     await importLauncher();
 
@@ -132,11 +183,58 @@ describe('scripts/npm-bin.js platform launcher', () => {
     expect(exitSpy).not.toHaveBeenCalled();
   });
 
+  it('falls back to the node entry when the platform runtime fails to spawn', async () => {
+    const children = [];
+    spawnMock.mockImplementation(() => {
+      const child = createFakeChild();
+      children.push(child);
+      return child;
+    });
+
+    await importLauncher();
+
+    // musl/Alpine shape: the runtime file exists but cannot execve. Node also
+    // emits 'close' (with a negative code) after a spawn error, so the
+    // fallback must suppress the close-mirror path.
+    children[0].handlers['error'](new Error('spawn ENOENT'));
+    children[0].handlers['close'](-2, null);
+
+    expect(spawnMock).toHaveBeenCalledTimes(2);
+    const [runtime, commandArgs] = spawnMock.mock.calls[1];
+    expect(runtime).toBe(process.execPath);
+    expect(commandArgs[0].replaceAll('\\', '/')).toMatch(/cli-entry\.js$/);
+    expect(commandArgs.slice(1)).toEqual(['--version']);
+    const notice = String(stderrSpy.mock.calls[0][0]);
+    expect(notice).toContain('failed to start');
+    expect(notice).toContain('Falling back to node');
+    expect(exitSpy).not.toHaveBeenCalled();
+  });
+
+  it('exits 1 when the node fallback itself fails to spawn', async () => {
+    resolveMock.mockImplementation(() => {
+      throw new Error('Cannot find module');
+    });
+
+    await importLauncher();
+
+    fakeChild.handlers['error'](new Error('spawn node ENOENT'));
+    expect(spawnMock).toHaveBeenCalledTimes(1);
+    expect(exitSpy).toHaveBeenCalledWith(1);
+    expect(String(stderrSpy.mock.calls.at(-1)[0])).toContain(
+      'failed to launch',
+    );
+  });
+
   it('mirrors the child exit code', async () => {
     await importLauncher();
 
     fakeChild.handlers['close'](7, null);
     expect(exitSpy).toHaveBeenCalledWith(7);
+
+    // code 0 is where `?? 1` and `|| 1` differ: a successful CLI run must
+    // not surface as launcher failure to wrappers reading $?.
+    fakeChild.handlers['close'](0, null);
+    expect(exitSpy).toHaveBeenCalledWith(0);
   });
 
   it('re-raises the child death signal after dropping its own forwarders', async () => {
@@ -149,6 +247,21 @@ describe('scripts/npm-bin.js platform launcher', () => {
     expect(removedSignals).toContain('SIGTERM');
     expect(killSpy).toHaveBeenCalledWith(process.pid, 'SIGTERM');
     expect(exitSpy).not.toHaveBeenCalled();
+
+    // Removal must precede the re-raise (load-bearing: a queued re-raise is
+    // dropped when the watcher stops before the signal pipe drains), and it
+    // must use the exact handler references registered at launch — a
+    // wrong-reference removeListener is a silent no-op on real Node.
+    expect(
+      Math.max(...removeListenerSpy.mock.invocationCallOrder),
+    ).toBeLessThan(Math.min(...killSpy.mock.invocationCallOrder));
+    const forwarders = onSpy.mock.calls.filter(([signal]) =>
+      String(signal).startsWith('SIG'),
+    );
+    expect(forwarders.length).toBeGreaterThan(0);
+    for (const [signal, handler] of forwarders) {
+      expect(removeListenerSpy).toHaveBeenCalledWith(signal, handler);
+    }
   });
 
   it('forwards terminating signals to the child on unix', async () => {
@@ -160,6 +273,13 @@ describe('scripts/npm-bin.js platform launcher', () => {
     expect(signals).toEqual(
       expect.arrayContaining(['SIGHUP', 'SIGINT', 'SIGQUIT', 'SIGTERM']),
     );
+    // Registration alone is not forwarding: invoke each captured handler and
+    // check the kill actually reaches the child.
+    for (const signal of ['SIGHUP', 'SIGINT', 'SIGQUIT', 'SIGTERM']) {
+      const handler = onSpy.mock.calls.find((call) => call[0] === signal)?.[1];
+      handler();
+      expect(fakeChild.kill).toHaveBeenCalledWith(signal);
+    }
   });
 
   it('does not forward SIGINT on Windows, where the console already delivers it', async () => {

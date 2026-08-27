@@ -479,6 +479,19 @@ describe('package scripts', () => {
     );
     expect(platformStep).toContain('(\n');
     expect(platformStep).toContain(')');
+    // The skip branch must sit INSIDE the per-package subshell; hoisting it
+    // to loop level would stop the whole step at the first published package.
+    expect(platformStep).toMatch(/\(\n[\s\S]*?\bexit 0\b[\s\S]*?\n\s*\)/);
+    // The platform runtimes must publish before the main package whose
+    // optionalDependencies point at them, or installs race the registry and
+    // can silently fall back to node.
+    const mainStep = getWorkflowStep(
+      publishJob,
+      'Publish @qwen-code/qwen-code',
+    );
+    expect(publishJob.indexOf(platformStep)).toBeLessThan(
+      publishJob.indexOf(mainStep),
+    );
     // A fully-skipped publish must be visible, not silently green.
     expect(channelStep).toContain(
       'Every channel package was already published; nothing shipped',
