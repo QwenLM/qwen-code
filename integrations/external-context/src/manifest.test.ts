@@ -287,8 +287,8 @@ describe('extension manifest', () => {
 
   // The console hands out a plain-HTTP address and port, which the URL policy
   // rejects. This example is the one path that needs no policy opt-in: the
-  // relay carries the credential and the memories, and loopback HTTP loads as
-  // shipped, so only the user id has to be substituted.
+  // relay carries the credential and the memories, and loopback HTTP loads
+  // without enabling non-loopback insecure HTTP.
   it('keeps the PolarDB loopback example loadable with no policy opt-in', async () => {
     const config = await readJson('../examples/polardb-mem0-loopback.json');
 
@@ -300,7 +300,7 @@ describe('extension manifest', () => {
         preset: 'aliyun-polardb-mysql-2026-08',
         endpoint: { origin: 'http://127.0.0.1:8080', basePath: '' },
         credentialEnv: 'MEM0_API_KEY',
-        scope: { userId: '<your-user-id>' },
+        scope: { userId: '<your-user-id>', agentId: 'qwen-code' },
       },
     });
 
@@ -321,7 +321,7 @@ describe('extension manifest', () => {
       expect(loaded.provider).toMatchObject({
         type: 'mem0',
         endpoint: { origin: 'http://127.0.0.1:8080' },
-        scope: { userId: 'example-user' },
+        scope: { userId: 'example-user', agentId: 'qwen-code' },
       });
       expect(() => createProvider(loaded.provider)).not.toThrow();
     } finally {

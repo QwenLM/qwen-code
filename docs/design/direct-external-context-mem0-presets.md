@@ -165,7 +165,9 @@ preset and write design rather than changing this preset in place.
 - The PolarDB preset follows the official
   [PolarDB for MySQL Mem0 contract](https://help.aliyun.com/en/polardb/polardb-for-mysql/use-polardb-mem0)
   and the [live end-to-end evidence](https://github.com/QwenLM/qwen-code/pull/9952#issuecomment-5407141853)
-  recorded for this PR.
+  recorded for this PR. The public documentation covers the endpoint,
+  authentication, and scope placement; the live instance additionally proves
+  that `infer: false` is honored for direct import.
 
 Tests must continue to pin these exact request and response shapes. If an
 upstream contract changes incompatibly, add a new preset identifier instead of

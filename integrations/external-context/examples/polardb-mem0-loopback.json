@@ -10,7 +10,8 @@
     },
     "credentialEnv": "MEM0_API_KEY",
     "scope": {
-      "userId": "<your-user-id>"
+      "userId": "<your-user-id>",
+      "agentId": "qwen-code"
     }
   }
 }

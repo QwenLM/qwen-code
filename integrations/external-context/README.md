@@ -14,8 +14,8 @@ three managed deployment variants:
 
 The built-in adapters support Mem0 Platform V3, the stock self-hosted Mem0
 REST server, the Aliyun PolarDB Mem0 management API, and a small Generic HTTP
-Search V1 contract for existing knowledge or RAG services. Only the Mem0
-providers have an optional write path.
+Search V1 contract for existing knowledge or RAG services. Only Mem0 providers
+with a verified direct-import operation have an optional write path.
 There is no generic ingestion protocol, personal memory,
 trusted user identity, per-document ACL, or tamper-resistant audit.
 
@@ -414,34 +414,37 @@ The built-in presets are:
 
 #### Connecting a PolarDB Mem0 instance
 
-The console hands out a plain-HTTP address and port, not a TLS name, so the
-`https://` origin in `examples/polardb-mem0.json` is the shape the endpoint
-should have rather than the shape it arrives in. Pasting the console address
-into that example fails the URL policy, because the credential, every query,
-and every stored memory would otherwise cross the network in cleartext.
+After the instance finishes initializing, obtain its private or public address
+and `secret.access.apikey` from the console. Public access must be requested
+separately, and the application whitelist must allow the client independently
+of any PolarDB cluster whitelist. The console endpoint is plain HTTP with an IP
+address and port rather than a TLS name, so pasting it into the HTTPS example
+fails the URL policy: the credential, queries, and returned memories would
+otherwise cross the network in cleartext.
 
 `examples/polardb-mem0-loopback.json` is the path that needs no policy opt-in.
-Relay the instance to loopback, and the relay carries the credential and the
-memories:
+Use a jump host that can reach the endpoint and is allowed by the application
+whitelist, then relay the endpoint to loopback:
 
 ```bash
-ssh -L 8080:<console-address>:8080 <your-jump-host>
+ssh -N -L 127.0.0.1:8080:<endpoint-host>:<endpoint-port> <jump-host>
 export MEM0_API_KEY=<the console's secret.access.apikey>
 ```
 
 Then copy that example to an administrator-owned path, replace
 `<your-user-id>`, and point `QWEN_EXTERNAL_CONTEXT_CONFIG` at it. Loopback
-HTTP loads as shipped, so nothing else has to change.
+HTTP needs no `allowInsecureHttp` opt-in. A new instance has no searchable
+memories; seed it through the PolarDB API or the explicitly enabled managed
+write profile before validating search.
 
 Two alternatives, in preference order: bind a domain to the instance and
-terminate TLS, then use `examples/polardb-mem0.json` unchanged; or, only where
-the network path is itself the access control, keep the console address and add
-`"allowInsecureHttp": true` to the endpoint.
+terminate TLS, then use `examples/polardb-mem0.json`; or, only when the operator
+explicitly accepts cleartext traffic on an isolated trusted network, keep the
+console endpoint and add `"allowInsecureHttp": true`.
 
 Put the API key in the environment variable named by `credentialEnv`, never in
-the configuration file. The loopback example also omits `agentId`, which the
-preset sends at the request root — leave it out until a deployment is known to
-accept it there.
+the configuration file. PolarDB documents optional `agentId` at the request
+root; use a stable value when memories must be isolated by application.
 
 The preset records the whole protocol, not just one API version. Search always
 sends a maximum of five through the preset's `top_k` field. The engine does not
@@ -452,14 +455,15 @@ probe versions or fall back to a different preset. See
 
 Non-loopback plain HTTP remains an explicit `allowInsecureHttp` endpoint
 opt-in. Because it sends credentials, queries, and memory content in cleartext,
-prefer HTTPS or a loopback relay such as `ssh -L`. Both shipped examples use
-HTTPS and omit the flag.
+prefer HTTPS or a loopback relay such as `ssh -L`. The HTTPS example and the
+loopback HTTP example both omit the non-loopback insecure-HTTP opt-in.
 
 Preset scope is fixed in configuration and never supplied by the model. A
 missing required scope or an unused configured scope fails startup. The
 examples are read-only as shipped: `context_remember` is registered only when
-the version 1 configuration carries `"write": { "enabled": true }`. Enabling
-writes must reuse the managed write-confirmation Hook and permissions above.
+the version 1 configuration carries `"write": { "enabled": true }` and the
+selected preset defines verified direct import. Enabling writes must reuse the
+managed write-confirmation Hook and permissions above.
 
 ## Rollout and rollback
 
