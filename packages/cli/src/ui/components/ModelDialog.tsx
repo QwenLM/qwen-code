@@ -39,6 +39,7 @@ import {
 import type { HistoryItemWithoutId } from '../types.js';
 import {
   allowsFastOnlyAdvisorModel,
+  checkAdvisorModelAvailability,
   isAdvisorModelEligible,
 } from '../../config/advisor-model.js';
 
@@ -345,6 +346,14 @@ export function ModelDialog({
       const imageModelSelector = encodeVisionModelSelector(
         buildModelSelectionKey(m.authType, m.id, m.baseUrl),
       );
+      const advisorModelSelector = encodeAuxModelSelector(
+        buildModelSelectionKey(m.authType, m.id, m.baseUrl),
+      );
+      const isAvailableAdvisorModel =
+        !isAdvisorModelMode ||
+        (config !== undefined &&
+          checkAdvisorModelAvailability(config, advisorModelSelector)
+            .available);
       const isSelectableImageModel = isImageModelMode
         ? isImageGenerationCapable(m) &&
           config?.resolveImageGenerationModel(imageModelSelector) !== undefined
@@ -355,11 +364,13 @@ export function ModelDialog({
           authType === AuthType.QWEN_OAUTH) &&
         isSelectableImageModel &&
         (isFastModelMode ||
-          (isAdvisorModelMode && allowAdvisorFastOnly) ||
+          (isAdvisorModelMode && isAvailableAdvisorModel) ||
           !m.fastOnly) &&
         (isVoiceModelMode || !m.voiceOnly) &&
         (isVisionModelMode || isImageModelMode || !m.visionOnly) &&
-        (!isAdvisorModelMode || isAdvisorModelEligible(m, allowAdvisorFastOnly))
+        (!isAdvisorModelMode ||
+          (isAvailableAdvisorModel &&
+            isAdvisorModelEligible(m, allowAdvisorFastOnly)))
       );
     });
 
@@ -859,6 +870,10 @@ export function ModelDialog({
 
         hydrateApiKeyEnvFromSettings(settings, selectedEntry.model.envKey);
         const advisorModel = encodeAuxModelSelector(selected);
+        if (!checkAdvisorModelAvailability(config, advisorModel).available) {
+          setErrorMessage(t('Selected Advisor model is unavailable.'));
+          return;
+        }
         settings.setValue(SettingScope.User, 'advisorModel', advisorModel);
         selectionInFlightRef.current = true;
         try {

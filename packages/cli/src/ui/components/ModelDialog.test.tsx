@@ -241,7 +241,7 @@ describe('<ModelDialog />', () => {
       {
         getAuthType: vi.fn(() => AuthType.USE_OPENAI),
         getAdvisorModel: vi.fn(() => 'fast'),
-        getFastModel: vi.fn(() => 'fast-advisor-model'),
+        getFastModel: vi.fn(() => `${AuthType.USE_OPENAI}:fast-advisor-model`),
         getAllConfiguredModels: vi.fn(() => [
           {
             id: 'fast-advisor-model',
@@ -293,6 +293,50 @@ describe('<ModelDialog />', () => {
       `${AuthType.USE_OPENAI}::regular-advisor-model`,
     ]);
     expect(select.initialIndex).toBe(1);
+  });
+
+  it('does not list or persist other fast-only models in Advisor mode', async () => {
+    const setAdvisorModel = vi.fn().mockResolvedValue(undefined);
+    const { mockSettings } = renderComponent(
+      { isAdvisorModelMode: true },
+      {
+        getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+        getAdvisorModel: vi.fn(() => 'fast'),
+        getFastModel: vi.fn(() => `${AuthType.USE_OPENAI}:fast-flash`),
+        getAllConfiguredModels: vi.fn(() => [
+          {
+            id: 'fast-flash',
+            label: 'Fast Flash',
+            authType: AuthType.USE_OPENAI,
+            fastOnly: true,
+          },
+          {
+            id: 'fast-mini',
+            label: 'Fast Mini',
+            authType: AuthType.USE_OPENAI,
+            fastOnly: true,
+          },
+          {
+            id: 'regular-advisor-model',
+            label: 'Regular Advisor Model',
+            authType: AuthType.USE_OPENAI,
+          },
+        ]),
+        setAdvisorModel,
+      },
+    );
+    const select = mockedSelect.mock.calls[0][0];
+
+    expect(select.items.map((item) => item.value)).toEqual([
+      '$advisor-off',
+      `${AuthType.USE_OPENAI}::fast-flash`,
+      `${AuthType.USE_OPENAI}::regular-advisor-model`,
+    ]);
+
+    await select.onSelect(`${AuthType.USE_OPENAI}::fast-mini`);
+
+    expect(mockSettings.setValue).not.toHaveBeenCalled();
+    expect(setAdvisorModel).not.toHaveBeenCalled();
   });
 
   it('caps visible model options to the available dialog height', () => {
