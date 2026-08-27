@@ -250,8 +250,9 @@ task-oriented guides — what a maintainer types and what happens next — see:
 - [146. review-address · Report dry-run / failure — The agent committed (verify recorded committed=true before any gate could fail),…](#af-146)
 - [147. review-address · Report dry-run / failure — Same byte-budget hygiene as the English excerpt above. 3000 bytes ≈ 1000 CJK…](#af-147)
 - [148. run — Convergence-signal circuit breaker — the off-ramp the round and growth brakes cannot…](#af-148)
-- [149. review-scan · Scan for PRs with new feedback — Convergence-signal circuit breaker (#10107): the review side diagnoses a non-converging…](#af-149)
-- [150. review-address · Prepare branch and feedback — Convergence-break mirror (#10107): the scan refuses to select while the breaker holds,…](#af-150)
+- [149. route — Persistent pool, not hosted: a hosted backlog queued route past the cron period, and af-005's…](#af-149)
+- [150. review-scan · Scan for PRs with new feedback — Convergence-signal circuit breaker (#10107): the review side diagnoses a non-converging…](#af-150)
+- [151. review-address · Prepare branch and feedback — Convergence-break mirror (#10107): the scan refuses to select while the breaker holds,…](#af-151)
 
 ---
 
@@ -3784,7 +3785,47 @@ stay visible in the review body; acting on them is a different feature.
 
 <a id="af-149"></a>
 
-### 149. review-scan · Scan for PRs with new feedback — Convergence-signal circuit breaker (#10107): the review side diagnoses a non-converging…
+### 149. route — Persistent pool, not hosted: a hosted backlog queued route past the cron period, and af-005's supersede then starved every scan round.
+
+In `route` and `review-scan`.
+
+```text
+route and review-scan run on the persistent pool, not the
+hosted one. They are short trusted base-repo jobs, but they
+gate the WHOLE fan-out: while they sit queued, no
+review-address leg starts. On 2026-08-25 a hosted-runner
+backlog queued route for over 20 minutes — longer than the
+cron period — and af-005's newer-tick-supersedes-older rule
+then cancelled every still-queued round: nine consecutive
+schedule runs died without scanning while the ecs-qwen pool
+stood mostly idle. The supersede rule stays — it is right
+once route gets a runner in seconds; the fix is taking the
+hosted queue out of the critical path. review-scan moves
+with it because it shares the gate, and its own hosted waits
+delayed every fan-out by the same backlog. Both keep the
+fork-trust clause of the sibling lanes: pull_request and
+pull_request_review resolve this file from the PR's own
+merge commit, so only same-repo heads and write-access
+authors may reach the persistent pool; everything else stays
+hosted, and the kill-switch wins everywhere. Neither job
+checks code out — route only decides phases, and review-scan
+only calls the API — so the shared workspace needs no
+restore or wipe step here. The pool still leaves two marks
+on the lane, both closed in the same change. One: gh reads
+its config from the shared, attacker-writable $HOME, so both
+steps carry the heavy jobs' gh hardening preamble — a planted
+~/.config/gh/config.yml could reroute their gh calls into a
+local socket, taking CI_DEV_BOT_PAT with the scan and forged
+collaborator-permission answers with route. Two: review-scan
+fills a per-run WORKDIR with API dumps that no VM teardown
+removes on the pool, so it gets a fixed autofix* per-run path
+(the age sweep can reclaim it after a hard kill), an EXIT
+trap, and an always() cleanup step mirroring issue-autofix.
+```
+
+<a id="af-150"></a>
+
+### 150. review-scan · Scan for PRs with new feedback — Convergence-signal circuit breaker (#10107): the review side diagnoses a non-converging…
 
 In `review-scan` · `Scan for PRs with new feedback`.
 
@@ -3837,9 +3878,9 @@ before target emission, so a parked PR spends no dispatch, no runner, and
 no round.
 ```
 
-<a id="af-150"></a>
+<a id="af-151"></a>
 
-### 150. review-address · Prepare branch and feedback — Convergence-break mirror (#10107): the scan refuses to select while the breaker holds,…
+### 151. review-address · Prepare branch and feedback — Convergence-break mirror (#10107): the scan refuses to select while the breaker holds,…
 
 In `review-address` · `Prepare branch and feedback`.
 
