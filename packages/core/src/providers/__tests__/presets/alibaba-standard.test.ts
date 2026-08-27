@@ -71,7 +71,6 @@ describe('alibabaStandardProvider', () => {
       generationConfig: {
         extra_body: { enable_thinking: true },
         contextWindowSize: 1000000,
-        modalities: { image: true, video: true },
       },
     });
     expect(models?.[1]).toMatchObject({
