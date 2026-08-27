@@ -1098,23 +1098,6 @@ export class ContentGenerationPipeline {
       }
     }
 
-    // Let provider enhance the request (e.g., add metadata, cache control)
-    let providerRequest = this.config.provider.buildRequest(
-      baseRequest,
-      userPromptId,
-    );
-    if (
-      this.contentGeneratorConfig.enableCacheControl !== false &&
-      isOfficialOpenAIEndpoint(this.contentGeneratorConfig)
-    ) {
-      providerRequest = applyOfficialOpenAIPromptCaching(
-        providerRequest,
-        this.config.cliConfig.getSessionId?.(),
-        request.promptCacheSharing === true,
-        isInForkExecution() ? undefined : (getCurrentAgentId() ?? undefined),
-      );
-    }
-
     // Reasoning is disabled when either:
     //   - the per-request opt-out is set (forked queries for suggestions),
     //   - the config-level opt-out is set (`reasoning: false`).
@@ -1137,7 +1120,29 @@ export class ContentGenerationPipeline {
     const reasoningDisabled =
       request.config?.thinkingConfig?.includeThoughts === false ||
       this.contentGeneratorConfig.reasoning === false;
-    if (reasoningDisabled) {
+    const effectiveReasoningDisabled = reasoningDisabled && !thinkingMandatory;
+
+    // Let provider enhance the request (e.g., add metadata, cache control).
+    // Providers that translate configured effort need the effective opt-out
+    // before validating a knob that will not reach the wire.
+    let providerRequest = this.config.provider.buildRequest(
+      baseRequest,
+      userPromptId,
+      { reasoningDisabled: effectiveReasoningDisabled },
+    );
+    if (
+      this.contentGeneratorConfig.enableCacheControl !== false &&
+      isOfficialOpenAIEndpoint(this.contentGeneratorConfig)
+    ) {
+      providerRequest = applyOfficialOpenAIPromptCaching(
+        providerRequest,
+        this.config.cliConfig.getSessionId?.(),
+        request.promptCacheSharing === true,
+        isInForkExecution() ? undefined : (getCurrentAgentId() ?? undefined),
+      );
+    }
+
+    if (effectiveReasoningDisabled) {
       const typed = providerRequest as unknown as Record<string, unknown>;
       // Provider buildRequest doesn't auto-inject `enable_thinking`, so a
       // guarded `in typed` check would never fire for default qwen3 configs.
@@ -1454,7 +1459,11 @@ export class ContentGenerationPipeline {
     // configured reasoning object when explicitly enabled. This keeps provider- and
     // model-specific semantics intact while honoring request-level opt-out.
 
-    if (request.config?.thinkingConfig?.includeThoughts === false) {
+    const model = request.model || this.contentGeneratorConfig.model || '';
+    if (
+      request.config?.thinkingConfig?.includeThoughts === false &&
+      !this.requiresThinking(model)
+    ) {
       return {};
     }
 

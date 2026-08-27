@@ -1074,6 +1074,154 @@ describe('ContentGenerationPipeline', () => {
       expect(apiCall.tool_choice).toBe('required');
     });
 
+    it('honors a request reasoning opt-out before validating the configured qwen effort', async () => {
+      mockContentGeneratorConfig = {
+        ...mockContentGeneratorConfig,
+        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        model: 'qwen3.5-flash',
+        authType: AuthType.QWEN_OAUTH,
+        reasoning: { effort: 'vendor.ultra' },
+      } as ContentGeneratorConfig;
+      mockConfig = {
+        ...mockConfig,
+        contentGeneratorConfig: mockContentGeneratorConfig,
+      };
+      pipeline = new ContentGenerationPipeline(mockConfig);
+
+      const realProvider = new DashScopeOpenAICompatibleProvider(
+        mockContentGeneratorConfig,
+        {
+          getContentGeneratorConfig: () => ({ enableCacheControl: false }),
+        } as unknown as Config,
+      );
+      (mockProvider.buildRequest as Mock).mockImplementation(
+        (req, userPromptId, options) =>
+          realProvider.buildRequest(req, userPromptId, options),
+      );
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
+        { role: 'user', content: 'Classify action' },
+      ]);
+      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue({
+        id: 'r',
+        choices: [{ message: { content: 'ok' }, finish_reason: 'stop' }],
+      } as OpenAI.Chat.ChatCompletion);
+
+      await pipeline.execute(
+        {
+          model: 'qwen3.5-flash',
+          contents: [{ parts: [{ text: 'Classify action' }], role: 'user' }],
+          config: { thinkingConfig: { includeThoughts: false } },
+        },
+        'side-query:reasoning-opt-out',
+      );
+
+      expect(mockClient.chat.completions.create).toHaveBeenCalledOnce();
+      const apiCall = (mockClient.chat.completions.create as Mock).mock
+        .calls[0][0];
+      expect(apiCall.enable_thinking).toBe(false);
+      expect(apiCall.reasoning).toBeUndefined();
+      expect(apiCall.reasoning_effort).toBeUndefined();
+    });
+
+    it('preserves the configured effort when mandatory qwen thinking overrides a request opt-out', async () => {
+      mockContentGeneratorConfig = {
+        ...mockContentGeneratorConfig,
+        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        model: 'qwen3.8-max-preview',
+        authType: AuthType.QWEN_OAUTH,
+        reasoning: { effort: 'vendor.ultra' },
+        thinkingMandatory: true,
+      } as ContentGeneratorConfig;
+      mockConfig = {
+        ...mockConfig,
+        contentGeneratorConfig: mockContentGeneratorConfig,
+      };
+      pipeline = new ContentGenerationPipeline(mockConfig);
+
+      const realProvider = new DashScopeOpenAICompatibleProvider(
+        mockContentGeneratorConfig,
+        {
+          getContentGeneratorConfig: () => ({ enableCacheControl: false }),
+        } as unknown as Config,
+      );
+      (mockProvider.buildRequest as Mock).mockImplementation(
+        (req, userPromptId, options) =>
+          realProvider.buildRequest(req, userPromptId, options),
+      );
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
+        { role: 'user', content: 'Classify action' },
+      ]);
+      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue({
+        id: 'r',
+        choices: [{ message: { content: 'ok' }, finish_reason: 'stop' }],
+      } as OpenAI.Chat.ChatCompletion);
+
+      await pipeline.execute(
+        {
+          model: 'qwen3.8-max-preview',
+          contents: [{ parts: [{ text: 'Classify action' }], role: 'user' }],
+          config: { thinkingConfig: { includeThoughts: false } },
+        },
+        'side-query:mandatory-reasoning',
+      );
+
+      expect(mockClient.chat.completions.create).toHaveBeenCalledOnce();
+      const apiCall = (mockClient.chat.completions.create as Mock).mock
+        .calls[0][0];
+      expect(apiCall.enable_thinking).toBeUndefined();
+      expect(apiCall.reasoning_effort).toBe('vendor.ultra');
+      expect(apiCall.reasoning).toBeUndefined();
+    });
+
+    it('preserves the configured effort for a mandatory model on a generic endpoint', async () => {
+      mockContentGeneratorConfig = {
+        ...mockContentGeneratorConfig,
+        baseUrl: 'https://api.moonshot.ai/v1',
+        model: 'kimi-k3',
+        reasoning: { effort: 'vendor.ultra' },
+        thinkingMandatory: true,
+        samplingParams: undefined,
+      } as ContentGeneratorConfig;
+      mockConfig = {
+        ...mockConfig,
+        contentGeneratorConfig: mockContentGeneratorConfig,
+      };
+      pipeline = new ContentGenerationPipeline(mockConfig);
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
+        { role: 'user', content: 'Classify action' },
+      ]);
+      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue({
+        id: 'r',
+        choices: [{ message: { content: 'ok' }, finish_reason: 'stop' }],
+      } as OpenAI.Chat.ChatCompletion);
+
+      await pipeline.execute(
+        {
+          model: 'kimi-k3',
+          contents: [{ parts: [{ text: 'Classify action' }], role: 'user' }],
+          config: { thinkingConfig: { includeThoughts: false } },
+        },
+        'side-query:mandatory-generic-reasoning',
+      );
+
+      expect(mockClient.chat.completions.create).toHaveBeenCalledOnce();
+      const apiCall = (mockClient.chat.completions.create as Mock).mock
+        .calls[0][0];
+      expect(apiCall.reasoning).toEqual({ effort: 'vendor.ultra' });
+    });
+
     it('never ships the max tier to the tiered DashScope family end to end', async () => {
       // `/effort max` writes the tier into config, so a raw pass-through
       // 400s on this request and on every later one in the session. Drive
@@ -4958,6 +5106,7 @@ describe('ContentGenerationPipeline', () => {
           response_format: { type: 'json_object' },
         }),
         userPromptId,
+        { reasoningDisabled: false },
       );
       expect(mockClient.chat.completions.create).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -5014,6 +5163,7 @@ describe('ContentGenerationPipeline', () => {
           },
         }),
         userPromptId,
+        { reasoningDisabled: false },
       );
     });
 
@@ -5063,6 +5213,7 @@ describe('ContentGenerationPipeline', () => {
           },
         }),
         'test-prompt-id',
+        { reasoningDisabled: false },
       );
     });
 
@@ -5111,6 +5262,7 @@ describe('ContentGenerationPipeline', () => {
           },
         }),
         'test-prompt-id',
+        { reasoningDisabled: false },
       );
     });
 

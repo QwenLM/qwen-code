@@ -402,6 +402,121 @@ describe('GeminiContentGenerator', () => {
     expect(mockGoogleGenAI.models.generateContent).not.toHaveBeenCalled();
   });
 
+  it('honors a request reasoning opt-out before validating the configured effort', async () => {
+    const generatorWithUnknown = new GeminiContentGenerator(
+      { apiKey: 'test' },
+      {
+        model: 'gemini-2.5-pro',
+        reasoning: { effort: 'vendor.ultra' },
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      } as any,
+    );
+
+    await generatorWithUnknown.generateContent(
+      {
+        model: 'gemini-2.5-pro',
+        contents: [],
+        config: { thinkingConfig: { includeThoughts: false } },
+      },
+      'prompt-id',
+    );
+
+    expect(mockGoogleGenAI.models.generateContent).toHaveBeenCalledOnce();
+    expect(mockGoogleGenAI.models.generateContent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        config: expect.objectContaining({
+          thinkingConfig: { includeThoughts: false },
+        }),
+      }),
+    );
+  });
+
+  it('keeps validating configured effort when mandatory thinking overrides a request opt-out', async () => {
+    const generatorWithUnknown = new GeminiContentGenerator(
+      { apiKey: 'test' },
+      {
+        model: 'gemini-2.5-pro',
+        reasoning: { effort: 'vendor.ultra' },
+        thinkingMandatory: true,
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      } as any,
+    );
+
+    await expect(
+      generatorWithUnknown.generateContent(
+        {
+          model: 'gemini-2.5-pro',
+          contents: [],
+          config: { thinkingConfig: { includeThoughts: false } },
+        },
+        'prompt-id',
+      ),
+    ).rejects.toThrow('Unsupported Gemini reasoning effort: "vendor.ultra"');
+    expect(mockGoogleGenAI.models.generateContent).not.toHaveBeenCalled();
+  });
+
+  it('keeps mandatory thinking enabled across request and config opt-outs', async () => {
+    const generatorWithMandatoryThinking = new GeminiContentGenerator(
+      { apiKey: 'test' },
+      {
+        model: 'gemini-2.5-pro',
+        reasoning: false,
+        thinkingMandatory: true,
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      } as any,
+    );
+
+    await generatorWithMandatoryThinking.generateContent(
+      {
+        model: 'gemini-2.5-pro',
+        contents: [],
+        config: { thinkingConfig: { includeThoughts: false } },
+      },
+      'prompt-id',
+    );
+
+    expect(mockGoogleGenAI.models.generateContent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        config: expect.objectContaining({
+          thinkingConfig: {
+            includeThoughts: true,
+            thinkingLevel: 'THINKING_LEVEL_UNSPECIFIED',
+          },
+        }),
+      }),
+    );
+  });
+
+  it('does not inherit mandatory thinking through a request model override', async () => {
+    const generatorWithMandatoryThinking = new GeminiContentGenerator(
+      { apiKey: 'test' },
+      {
+        model: 'gemini-2.5-pro',
+        reasoning: { effort: 'vendor.ultra' },
+        thinkingMandatory: true,
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      } as any,
+    );
+
+    await generatorWithMandatoryThinking.generateContent(
+      {
+        model: 'gemini-2.0-flash',
+        contents: [],
+        config: { thinkingConfig: { includeThoughts: false } },
+      },
+      'prompt-id',
+    );
+
+    expect(mockGoogleGenAI.models.generateContent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        model: 'gemini-2.0-flash',
+        config: expect.objectContaining({
+          thinkingConfig: { includeThoughts: false },
+        }),
+      }),
+    );
+  });
+
   it('should strip displayName from inlineData and fileData before sending to API', async () => {
     const request = {
       model: 'gemini-1.5-flash',

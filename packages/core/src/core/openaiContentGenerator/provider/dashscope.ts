@@ -14,6 +14,7 @@ import type {
   ChatCompletionContentPartTextWithCache,
   ChatCompletionContentPartWithCache,
   ChatCompletionToolWithCache,
+  OpenAIProviderRequestOptions,
 } from './types.js';
 import { buildRuntimeFetchOptions } from '../../../utils/runtimeFetchOptions.js';
 import { createDebugLogger } from '../../../utils/debugLogger.js';
@@ -344,6 +345,7 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
   override buildRequest(
     request: OpenAI.Chat.ChatCompletionCreateParams,
     userPromptId: string,
+    options?: OpenAIProviderRequestOptions,
   ): OpenAI.Chat.ChatCompletionCreateParams {
     let messages = request.messages;
     let tools = request.tools;
@@ -387,9 +389,11 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
 
     // qwen3.8-max accepts the unified effort tiers directly. Older qwen hybrid
     // models still expose only the on/off `enable_thinking` switch. User
-    // extra_body wins (merged last); the disable path (reasoning: false) is
-    // handled upstream in the pipeline.
-    const qwenEffortConfig = this.buildQwenEffortConfig(request.model);
+    // extra_body wins (merged last); explicit reasoning opt-outs are handled
+    // upstream in the pipeline.
+    const qwenEffortConfig = options?.reasoningDisabled
+      ? {}
+      : this.buildQwenEffortConfig(request.model);
     const rawRequestParams = requestWithTokenLimits as unknown as Record<
       string,
       unknown

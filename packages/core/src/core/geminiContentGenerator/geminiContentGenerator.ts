@@ -101,6 +101,12 @@ export class GeminiContentGenerator implements ContentGenerator {
   ): GenerateContentConfig {
     const configSamplingParams = this.contentGeneratorConfig?.samplingParams;
     const requestConfig = request.config || {};
+    const requestModel =
+      request.model || this.contentGeneratorConfig?.model || '';
+    const thinkingMandatory =
+      this.contentGeneratorConfig?.thinkingMandatory === true &&
+      requestModel.toLowerCase() ===
+        (this.contentGeneratorConfig.model ?? '').toLowerCase();
 
     // Helper function to get parameter value with priority: config > request > default
     const getParameterValue = <T>(
@@ -140,23 +146,27 @@ export class GeminiContentGenerator implements ContentGenerator {
         configSamplingParams?.frequency_penalty,
         'frequencyPenalty',
       ),
-      thinkingConfig: getParameterValue(
-        this.buildThinkingConfig(),
-        'thinkingConfig',
-        {
-          includeThoughts: true,
-          thinkingLevel: 'THINKING_LEVEL_UNSPECIFIED' as ThinkingLevel,
-        },
-      ),
+      thinkingConfig:
+        requestConfig.thinkingConfig?.includeThoughts === false &&
+        !thinkingMandatory
+          ? requestConfig.thinkingConfig
+          : getParameterValue(
+              this.buildThinkingConfig(thinkingMandatory),
+              'thinkingConfig',
+              {
+                includeThoughts: true,
+                thinkingLevel: 'THINKING_LEVEL_UNSPECIFIED' as ThinkingLevel,
+              },
+            ),
     };
   }
 
-  private buildThinkingConfig():
-    | { includeThoughts: boolean; thinkingLevel?: ThinkingLevel }
-    | undefined {
+  private buildThinkingConfig(
+    thinkingMandatory: boolean,
+  ): { includeThoughts: boolean; thinkingLevel?: ThinkingLevel } | undefined {
     const reasoning = this.contentGeneratorConfig?.reasoning;
 
-    if (reasoning === false) {
+    if (reasoning === false && !thinkingMandatory) {
       return { includeThoughts: false };
     }
 
@@ -204,6 +214,13 @@ export class GeminiContentGenerator implements ContentGenerator {
       return {
         includeThoughts: true,
         thinkingLevel,
+      };
+    }
+
+    if (thinkingMandatory) {
+      return {
+        includeThoughts: true,
+        thinkingLevel: 'THINKING_LEVEL_UNSPECIFIED' as ThinkingLevel,
       };
     }
 

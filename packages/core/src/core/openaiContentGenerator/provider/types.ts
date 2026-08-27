@@ -8,6 +8,10 @@ export type OpenAIRequestContextOverrides = {
   toolResultContentFormat?: ContentGeneratorConfig['toolResultContentFormat'];
 };
 
+export type OpenAIProviderRequestOptions = {
+  reasoningDisabled: boolean;
+};
+
 // Extended types to support cache_control for DashScope
 export interface ChatCompletionContentPartTextWithCache
   extends OpenAI.Chat.ChatCompletionContentPartText {
@@ -29,6 +33,7 @@ export interface OpenAICompatibleProvider {
   buildRequest(
     request: OpenAI.Chat.ChatCompletionCreateParams,
     userPromptId: string,
+    options?: OpenAIProviderRequestOptions,
   ): OpenAI.Chat.ChatCompletionCreateParams;
   getDefaultGenerationConfig(): GenerateContentConfig;
   getResponseParsingOptions?(): OpenAIResponseParsingOptions;
