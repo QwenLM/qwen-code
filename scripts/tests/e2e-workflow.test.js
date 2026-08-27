@@ -32,4 +32,38 @@ describe('e2e workflow', () => {
     expect(group).toContain('github.event_name');
     expect(group).toContain('github.head_ref || github.ref_name');
   });
+
+  it('quarantines the nightly-isolated suites from every push lane', () => {
+    // cron-interactive is timing-flaky and external-context-mem0-write,
+    // external-context-auto-recall, context-compress-interactive and
+    // qwen-serve-channel-workers stall at CLI startup on macOS and the
+    // ecs-qwen pool runners (#10272, #10316), so they are quarantined to the
+    // nightly isolated matrix while the push lanes keep real signal. Every
+    // nightly canary must be excluded from every push lane, and every
+    // push-lane exclusion must keep its nightly canary — dropping either
+    // side silently loses coverage.
+    const nightlyFiles = yml.jobs['isolated-nightly'].strategy.matrix.include
+      .map((entry) => entry.test_file)
+      .sort();
+    const runStep = (job) =>
+      yml.jobs[job].steps.find((step) => step.name === 'Run E2E tests').run;
+    const countExcludes = (run) => {
+      const counts = new Map();
+      for (const match of run.matchAll(/--exclude ['"]([^'"]+)['"]/g)) {
+        const file = match[1].replace(/^\*\*\//, '');
+        counts.set(file, (counts.get(file) ?? 0) + 1);
+      }
+      return counts;
+    };
+    // The Linux job runs vitest twice (sandbox:docker and sandbox:none legs),
+    // so each quarantine exclude appears once per leg there.
+    const linux = countExcludes(runStep('e2e-test-linux'));
+    const macos = countExcludes(runStep('e2e-test-macos'));
+    expect([...linux.keys()].sort()).toEqual(nightlyFiles);
+    expect([...macos.keys()].sort()).toEqual(nightlyFiles);
+    for (const file of nightlyFiles) {
+      expect(linux.get(file)).toBe(2);
+      expect(macos.get(file)).toBe(1);
+    }
+  });
 });

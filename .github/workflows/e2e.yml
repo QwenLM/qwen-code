@@ -200,10 +200,16 @@ jobs:
           # The docker leg runs vitest directly instead of through
           # test:integration:sandbox:docker: that script would rebuild the image
           # the step above just built.
+          # external-context-mem0-write, external-context-auto-recall,
+          # context-compress-interactive and qwen-serve-channel-workers stall
+          # at CLI startup on macOS and the ecs-qwen pool runners (#10272);
+          # with cron-interactive and channel-plugin they are quarantined to
+          # the nightly isolated matrix below until the root fix lands
+          # (#10316).
           if [[ "${{ matrix.sandbox }}" == "sandbox:docker" ]]; then
-            npx cross-env QWEN_SANDBOX=docker vitest run --root ./integration-tests --exclude '**/interactive/cron-interactive.test.ts' --exclude '**/channel-plugin.test.ts' --shard='${{ matrix.shard }}'
+            npx cross-env QWEN_SANDBOX=docker vitest run --root ./integration-tests --exclude '**/interactive/cron-interactive.test.ts' --exclude '**/channel-plugin.test.ts' --exclude '**/interactive/external-context-mem0-write.test.ts' --exclude '**/interactive/external-context-auto-recall.test.ts' --exclude '**/interactive/context-compress-interactive.test.ts' --exclude '**/cli/qwen-serve-channel-workers.test.ts' --shard='${{ matrix.shard }}'
           else
-            npm run test:integration:sandbox:none -- --exclude '**/interactive/cron-interactive.test.ts' --exclude '**/channel-plugin.test.ts' --shard='${{ matrix.shard }}'
+            npm run test:integration:sandbox:none -- --exclude '**/interactive/cron-interactive.test.ts' --exclude '**/channel-plugin.test.ts' --exclude '**/interactive/external-context-mem0-write.test.ts' --exclude '**/interactive/external-context-auto-recall.test.ts' --exclude '**/interactive/context-compress-interactive.test.ts' --exclude '**/cli/qwen-serve-channel-workers.test.ts' --shard='${{ matrix.shard }}'
           fi
 
       # The sandbox build retags the same image name every run, so on a
@@ -272,7 +278,7 @@ jobs:
           OPENAI_API_KEY: '${{ secrets.OPENAI_API_KEY }}'
           OPENAI_BASE_URL: '${{ secrets.OPENAI_BASE_URL }}'
           OPENAI_MODEL: '${{ secrets.OPENAI_MODEL }}'
-        run: 'npx cross-env VERBOSE=true KEEP_OUTPUT=true QWEN_SANDBOX=false vitest run --root ./integration-tests --exclude "**/interactive/cron-interactive.test.ts" --exclude "**/channel-plugin.test.ts" --shard="${{ matrix.shard }}"'
+        run: 'npx cross-env VERBOSE=true KEEP_OUTPUT=true QWEN_SANDBOX=false vitest run --root ./integration-tests --exclude "**/interactive/cron-interactive.test.ts" --exclude "**/channel-plugin.test.ts" --exclude "**/interactive/external-context-mem0-write.test.ts" --exclude "**/interactive/external-context-auto-recall.test.ts" --exclude "**/interactive/context-compress-interactive.test.ts" --exclude "**/cli/qwen-serve-channel-workers.test.ts" --shard="${{ matrix.shard }}"'
 
   isolated-nightly:
     name: '${{ matrix.label }} (nightly)'
@@ -288,6 +294,16 @@ jobs:
             test_file: 'interactive/cron-interactive.test.ts'
           - label: 'channel-plugin E2E'
             test_file: 'channel-plugin.test.ts'
+          # Quarantined from the push lanes (#10272, #10316); see the
+          # excludes in the push jobs above.
+          - label: 'external-context-mem0-write E2E'
+            test_file: 'interactive/external-context-mem0-write.test.ts'
+          - label: 'external-context-auto-recall E2E'
+            test_file: 'interactive/external-context-auto-recall.test.ts'
+          - label: 'context-compress-interactive E2E'
+            test_file: 'interactive/context-compress-interactive.test.ts'
+          - label: 'qwen-serve-channel-workers E2E'
+            test_file: 'cli/qwen-serve-channel-workers.test.ts'
     steps:
       - name: 'Checkout'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
