@@ -434,7 +434,7 @@ function useCommandSuggestions(
               ];
             })
             .sort((left, right) => {
-              if (groupSkillsLast && commandPathParts.length === 0) {
+              if (groupSkillsLast && leafCommand === null) {
                 const skillDifference =
                   Number(left.command.kind === CommandKind.SKILL) -
                   Number(right.command.kind === CommandKind.SKILL);
