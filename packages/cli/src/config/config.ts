@@ -2268,7 +2268,6 @@ export async function loadCliConfig(
     // before deferred init are an accepted startup-latency tradeoff. `qwen -i
     // "prompt"` still initializes eagerly because it auto-submits after render.
     deferTelemetryInitialization: isAcpMode || (interactive && !question),
-    acpMode: isAcpMode,
     outboundCorrelation: settings.outboundCorrelation,
     usageStatisticsEnabled:
       parseBooleanEnvFlag(process.env['QWEN_USAGE_STATISTICS_ENABLED']) ??

@@ -10,31 +10,26 @@ import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   RUNTIME_STATUS_SCHEMA_VERSION,
-  claimRuntimeStatus,
   clearRuntimeStatus,
   isRuntimeStatusActive,
   readRuntimeStatusClaims,
   readRuntimeStatus,
-  releaseRuntimeStatus,
   writeRuntimeStatus,
 } from './runtimeStatus.js';
 
 const fsMocks = vi.hoisted(() => ({
-  link: vi.fn<typeof import('node:fs/promises').link>(),
   readFile: vi.fn<typeof import('node:fs/promises').readFile>(),
 }));
 
 vi.mock('node:fs/promises', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs/promises')>();
-  fsMocks.link.mockImplementation(actual.link);
   fsMocks.readFile.mockImplementation(actual.readFile);
-  return { ...actual, link: fsMocks.link, readFile: fsMocks.readFile };
+  return { ...actual, readFile: fsMocks.readFile };
 });
 
 let tmpDir: string;
 
 beforeEach(async () => {
-  fsMocks.link.mockClear();
   fsMocks.readFile.mockClear();
   tmpDir = await mkdtemp(path.join(os.tmpdir(), 'qwen-runtime-status-'));
 });
@@ -45,97 +40,19 @@ afterEach(async () => {
 
 const targetPath = () => path.join(tmpDir, 'runtime.json');
 
-describe('claimRuntimeStatus', () => {
-  it('uses an independent claim when a sibling wins the canonical path race', async () => {
-    const actualFs =
-      await vi.importActual<typeof import('node:fs/promises')>(
-        'node:fs/promises',
-      );
-    fsMocks.link.mockImplementationOnce(async (source, target) => {
-      await writeRuntimeStatus(target.toString(), {
-        sessionId: 'abc',
-        workDir: '/sibling',
-      });
-      return actualFs.link(source, target);
-    });
-
-    const claimedPath = await claimRuntimeStatus(targetPath(), {
-      sessionId: 'abc',
-      workDir: '/ours',
-    });
-
-    expect(claimedPath).not.toBe(targetPath());
-    expect(claimedPath).toMatch(/\.claim-[a-f0-9]+\.runtime\.json$/);
-    expect((await readRuntimeStatus(targetPath()))?.workDir).toBe('/sibling');
-    expect((await readRuntimeStatus(claimedPath))?.workDir).toBe('/ours');
-  });
-
-  it('replaces a non-live canonical claim', async () => {
-    await writeRuntimeStatus(targetPath(), {
-      sessionId: 'abc',
-      workDir: '/stale',
-      pid: 0,
-    });
-
-    const claimedPath = await claimRuntimeStatus(targetPath(), {
-      sessionId: 'abc',
-      workDir: '/ours',
-    });
-
-    expect(claimedPath).toBe(targetPath());
-    expect((await readRuntimeStatus(targetPath()))?.pid).toBe(process.pid);
-    expect((await readRuntimeStatus(targetPath()))?.workDir).toBe('/ours');
-    expect(
-      (await readdir(tmpDir)).filter((file) => file.includes('displaced')),
-    ).toEqual([]);
-  });
-
-  it('keeps a foreign-host canonical claim and creates a sibling', async () => {
-    await writeRuntimeStatus(targetPath(), {
-      sessionId: 'abc',
-      workDir: '/foreign',
-      pid: 2_000_000_000,
-    });
-    const foreign = JSON.parse(await readFile(targetPath(), 'utf8'));
-    foreign.hostname = 'another-machine.example';
-    await writeFile(targetPath(), JSON.stringify(foreign));
-
-    const claimedPath = await claimRuntimeStatus(targetPath(), {
-      sessionId: 'abc',
-      workDir: '/ours',
-    });
-
-    expect(claimedPath).not.toBe(targetPath());
-    expect((await readRuntimeStatus(targetPath()))?.workDir).toBe('/foreign');
-    expect((await readRuntimeStatus(claimedPath))?.workDir).toBe('/ours');
-  });
-
-  it('does not destroy an unreadable canonical claim', async () => {
-    await writeFile(targetPath(), '{not json');
-
-    const claimedPath = await claimRuntimeStatus(targetPath(), {
-      sessionId: 'abc',
-      workDir: '/ours',
-    });
-
-    expect(claimedPath).not.toBe(targetPath());
-    expect(await readFile(targetPath(), 'utf8')).toBe('{not json');
-    expect((await readRuntimeStatus(claimedPath))?.workDir).toBe('/ours');
-  });
-});
-
-describe('runtime status claim discovery', () => {
-  it('discovers sibling claims by payload session id', async () => {
-    const claimPath = path.join(tmpDir, 'abc.claim-token.runtime.json');
-    await writeRuntimeStatus(claimPath, {
+describe('runtime status discovery', () => {
+  it('discovers matching sidecars by payload session id', async () => {
+    const statusPath = path.join(tmpDir, 'abc.extra.runtime.json');
+    await writeRuntimeStatus(statusPath, {
       sessionId: 'abc',
       workDir: '/relocated',
       pid: process.pid,
     });
-    await writeRuntimeStatus(
-      path.join(tmpDir, 'other.claim-token.runtime.json'),
-      { sessionId: 'other', workDir: '/other', pid: process.pid },
-    );
+    await writeRuntimeStatus(path.join(tmpDir, 'other.extra.runtime.json'), {
+      sessionId: 'other',
+      workDir: '/other',
+      pid: process.pid,
+    });
 
     const { statuses, incomplete } = await readRuntimeStatusClaims(
       tmpDir,
@@ -164,16 +81,13 @@ describe('runtime status claim discovery', () => {
     expect(isRuntimeStatusActive({ ...statuses[0]!, pid: 0 })).toBe(false);
   });
 
-  it('treats an unreadable sibling as unknown keep-only evidence', async () => {
+  it('treats an unreadable runtime sidecar as unknown keep-only evidence', async () => {
     await writeRuntimeStatus(path.join(tmpDir, 'abc.runtime.json'), {
       sessionId: 'abc',
       workDir: '/old',
       pid: 0,
     });
-    await writeFile(
-      path.join(tmpDir, 'abc.claim-token.runtime.json'),
-      '{not json',
-    );
+    await writeFile(path.join(tmpDir, 'other.runtime.json'), '{not json');
 
     const { incomplete } = await readRuntimeStatusClaims(tmpDir, 'abc');
     expect(incomplete).toBe(true);
@@ -416,167 +330,5 @@ describe('clearRuntimeStatus', () => {
 
   it('does not throw on a non-existent directory', async () => {
     await clearRuntimeStatus(path.join(tmpDir, 'does-not-exist', 'r.json'));
-  });
-});
-
-describe('same-PID session swap', () => {
-  // Models the /clear, /reset, /new and /resume flow: same PID transitions
-  // from session A to session B. The old sidecar must stop claiming a live
-  // pid before the new one is written so external observers can't
-  // double-claim the PID — demoted to the non-live sentinel, keeping its
-  // membership evidence (R15-4).
-  it('demotes the old sidecar before writing the new one', async () => {
-    const oldPath = path.join(tmpDir, 'session-a.runtime.json');
-    const newPath = path.join(tmpDir, 'session-b.runtime.json');
-    await writeRuntimeStatus(oldPath, {
-      sessionId: 'session-a',
-      workDir: '/w',
-      pid: process.pid,
-      qwenVersion: '0.0.0-test',
-    });
-    expect(await readRuntimeStatus(oldPath)).not.toBeNull();
-
-    await releaseRuntimeStatus(oldPath);
-    await writeRuntimeStatus(newPath, {
-      sessionId: 'session-b',
-      workDir: '/w',
-      pid: 4242,
-      qwenVersion: '0.0.0-test',
-    });
-
-    const old = await readRuntimeStatus(oldPath);
-    expect(old?.pid).toBe(0);
-    expect(old?.sessionId).toBe('session-a');
-    const after = await readRuntimeStatus(newPath);
-    expect(after?.sessionId).toBe('session-b');
-    expect(after?.pid).toBe(4242);
-  });
-});
-
-describe('releaseRuntimeStatus', () => {
-  it('demotes our own claim to the non-live sentinel, keeping membership evidence (R15-4)', async () => {
-    await writeRuntimeStatus(targetPath(), {
-      sessionId: 'abc',
-      workDir: '/relocated',
-      pid: process.pid,
-      qwenVersion: '9.9.9',
-    });
-
-    await releaseRuntimeStatus(targetPath());
-
-    const after = await readRuntimeStatus(targetPath());
-    // pid 0 fails every isPidAlive gate (session seen as closed) while
-    // sessionBelongsToCurrentProject keeps reading sessionId/workDir.
-    expect(after?.pid).toBe(0);
-    expect(after?.sessionId).toBe('abc');
-    expect(after?.workDir).toBe('/relocated');
-    expect(after?.qwenVersion).toBe('9.9.9');
-    expect(await readdir(tmpDir)).not.toContain('r.json.releasing');
-  });
-
-  it('puts a foreign claim back untouched (R15-1)', async () => {
-    await writeRuntimeStatus(targetPath(), {
-      sessionId: 'abc',
-      workDir: '/w',
-      pid: 4242,
-    });
-
-    await releaseRuntimeStatus(targetPath());
-
-    const after = await readRuntimeStatus(targetPath());
-    expect(after?.pid).toBe(4242);
-    expect(await readdir(tmpDir)).not.toContain('r.json.releasing');
-  });
-
-  it('does not release another hostname with the same pid', async () => {
-    await writeRuntimeStatus(targetPath(), {
-      sessionId: 'abc',
-      workDir: '/foreign',
-      pid: process.pid,
-    });
-    const foreign = JSON.parse(await readFile(targetPath(), 'utf8'));
-    foreign.hostname = 'another-machine.example';
-    await writeFile(targetPath(), JSON.stringify(foreign));
-
-    await releaseRuntimeStatus(targetPath());
-
-    const after = await readRuntimeStatus(targetPath());
-    expect(after?.pid).toBe(process.pid);
-    expect(after?.hostname).toBe('another-machine.example');
-  });
-
-  it('does not overwrite a sibling claim that lands at the demotion commit', async () => {
-    await writeRuntimeStatus(targetPath(), {
-      sessionId: 'abc',
-      workDir: '/ours',
-      pid: process.pid,
-    });
-    const actualFs =
-      await vi.importActual<typeof import('node:fs/promises')>(
-        'node:fs/promises',
-      );
-    fsMocks.link.mockImplementationOnce(async (source, target) => {
-      await writeRuntimeStatus(target.toString(), {
-        sessionId: 'abc',
-        workDir: '/sibling',
-        pid: process.pid,
-      });
-      return actualFs.link(source, target);
-    });
-
-    await releaseRuntimeStatus(targetPath());
-
-    const after = await readRuntimeStatus(targetPath());
-    expect(after?.pid).toBe(process.pid);
-    expect(after?.workDir).toBe('/sibling');
-    expect(
-      (await readdir(tmpDir)).some((file) => file.includes('releasing')),
-    ).toBe(false);
-  });
-
-  it('preserves a displaced foreign claim when a sibling wins put-back', async () => {
-    await writeRuntimeStatus(targetPath(), {
-      sessionId: 'abc',
-      workDir: '/foreign',
-      pid: 4242,
-    });
-    const actualFs =
-      await vi.importActual<typeof import('node:fs/promises')>(
-        'node:fs/promises',
-      );
-    fsMocks.link.mockImplementationOnce(async (source, target) => {
-      await writeRuntimeStatus(target.toString(), {
-        sessionId: 'abc',
-        workDir: '/sibling',
-        pid: process.pid,
-      });
-      return actualFs.link(source, target);
-    });
-
-    await releaseRuntimeStatus(targetPath());
-
-    expect((await readRuntimeStatus(targetPath()))?.workDir).toBe('/sibling');
-    const displacedPath = (await readdir(tmpDir))
-      .map((file) => path.join(tmpDir, file))
-      .find((file) => file.includes('claim-'));
-    expect(displacedPath).toBeDefined();
-    expect((await readRuntimeStatus(displacedPath!))?.workDir).toBe('/foreign');
-    expect(
-      (await readdir(tmpDir)).some((file) => file.includes('releasing')),
-    ).toBe(false);
-  });
-
-  it('restores an unreadable record instead of destroying it', async () => {
-    await writeFile(targetPath(), '{not json');
-
-    await releaseRuntimeStatus(targetPath());
-
-    expect(await readFile(targetPath(), 'utf8')).toBe('{not json');
-    expect(await readdir(tmpDir)).not.toContain('r.json.releasing');
-  });
-
-  it('is a no-op on a missing file', async () => {
-    await releaseRuntimeStatus(targetPath());
-    expect(await readdir(tmpDir)).toEqual([]);
   });
 });

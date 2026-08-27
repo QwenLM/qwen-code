@@ -226,10 +226,7 @@ import {
 import { CHARS_PER_TOKEN } from '../services/tokenEstimation.js';
 import { sanitizeCwd } from '../utils/paths.js';
 import {
-  claimRuntimeStatus,
-  isRuntimeStatusActive,
-  readRuntimeStatus,
-  releaseRuntimeStatus,
+  clearRuntimeStatus,
   writeRuntimeStatus,
 } from '../utils/runtimeStatus.js';
 import {
@@ -1262,12 +1259,6 @@ export interface ConfigParameters {
   chatCompression?: ChatCompressionSettings;
   autoCompactThreshold?: number;
   interactive?: boolean;
-  /**
-   * True when this process serves an ACP host (daemon or IDE): the host
-   * closes session children and may reload them from disk afterwards, so
-   * session snapshots must outlive this Config's shutdown.
-   */
-  acpMode?: boolean;
   trustedFolder?: boolean;
   defaultFileEncoding?: FileEncodingType;
   useRipgrep?: boolean;
@@ -2180,7 +2171,6 @@ export class Config {
 
   private readonly cliVersion?: string;
   private runtimeStatusEnabled = false;
-  private runtimeStatusClaimPath?: string;
   private sessionRegistryActive = false;
   private sessionRegistered = false;
   private readonly experimentalZedIntegration: boolean = false;
@@ -2871,7 +2861,7 @@ export class Config {
       // block session startup.
       if (this.chatRecordingEnabled) {
         try {
-          const claimPath = await claimRuntimeStatus(
+          await writeRuntimeStatus(
             this.storage.getRuntimeStatusPath(this.sessionId),
             {
               sessionId: this.sessionId,
@@ -2882,7 +2872,7 @@ export class Config {
           // Arm the session-swap refresh for every kind, not just the
           // interactive UI: /clear, /resume and ACP session switches
           // must keep the sidecar on the session this pid now serves.
-          this.markRuntimeStatusEnabled(claimPath);
+          this.markRuntimeStatusEnabled();
         } catch {
           // ignored: best-effort, never block session startup.
         }
@@ -4353,13 +4343,10 @@ export class Config {
         const workDir = this.targetDir;
         const newSessionId = this.sessionId;
         this.queueRuntimeStatusWrite(async () => {
-          // Demote (never unlink) so a /cd-relocated outgoing session
-          // keeps its membership evidence; the pid gate inside
-          // releaseRuntimeStatus protects a foreign claim.
-          const oldClaimPath = this.runtimeStatusClaimPath;
-          this.runtimeStatusClaimPath = undefined;
-          if (oldClaimPath) await releaseRuntimeStatus(oldClaimPath);
-          this.runtimeStatusClaimPath = await claimRuntimeStatus(newPath, {
+          await clearRuntimeStatus(
+            this.storage.getRuntimeStatusPath(previousSessionId),
+          );
+          await writeRuntimeStatus(newPath, {
             sessionId: newSessionId,
             workDir,
             qwenVersion: cliVersion,
@@ -4402,10 +4389,8 @@ export class Config {
    * alone so this process can't trample a sidecar that happens to
    * share the outgoing session id.
    */
-  markRuntimeStatusEnabled(claimPath?: string): void {
+  markRuntimeStatusEnabled(): void {
     this.runtimeStatusEnabled = true;
-    this.runtimeStatusClaimPath =
-      claimPath ?? this.storage.getRuntimeStatusPath(this.sessionId);
   }
 
   /**
@@ -4556,19 +4541,8 @@ export class Config {
     // project filesystem must neither skip the patch nor hang `/cd` on
     // the HOME write. The failure domains are independent.
     if (this.runtimeStatusEnabled) {
+      const sidecarPath = this.storage.getRuntimeStatusPath(sessionId);
       this.queueRuntimeStatusWrite(async () => {
-        if (!this.runtimeStatusClaimPath) {
-          this.runtimeStatusClaimPath = await claimRuntimeStatus(
-            this.storage.getRuntimeStatusPath(sessionId),
-            {
-              sessionId,
-              workDir,
-              qwenVersion: this.cliVersion ?? null,
-            },
-          );
-          return;
-        }
-        const sidecarPath = this.runtimeStatusClaimPath;
         await writeRuntimeStatus(sidecarPath, {
           sessionId,
           workDir,
@@ -5416,32 +5390,18 @@ export class Config {
     return this.targetDir;
   }
 
-  private async getCurrentSessionArtifactMoves(
+  private getCurrentSessionArtifactMoves(
     oldStorage: Storage,
     newStorage: Storage,
-  ): Promise<Array<{ from: string; to: string }>> {
+  ): Array<{ from: string; to: string }> {
     const oldChatsDir = path.join(oldStorage.getProjectDir(), 'chats');
     const newChatsDir = path.join(newStorage.getProjectDir(), 'chats');
-    const fileNames = [
+    return [
       `${this.sessionId}.jsonl`,
+      `${this.sessionId}.runtime.json`,
       `${this.sessionId}.worktree.json`,
       `${this.sessionId}.pr.json`,
-    ];
-    if (this.runtimeStatusClaimPath) {
-      fileNames.push(path.basename(this.runtimeStatusClaimPath));
-    } else {
-      const canonicalPath = oldStorage.getRuntimeStatusPath(this.sessionId);
-      if (fs.existsSync(canonicalPath)) {
-        const status = await readRuntimeStatus(canonicalPath);
-        if (
-          status?.sessionId === this.sessionId &&
-          !isRuntimeStatusActive(status)
-        ) {
-          fileNames.push(path.basename(canonicalPath));
-        }
-      }
-    }
-    return fileNames.map((fileName) => ({
+    ].map((fileName) => ({
       from: path.join(oldChatsDir, fileName),
       to: path.join(newChatsDir, fileName),
     }));
@@ -5472,12 +5432,12 @@ export class Config {
     }
   }
 
-  private async moveCurrentSessionArtifacts(
+  private moveCurrentSessionArtifacts(
     oldStorage: Storage,
     newStorage: Storage,
-  ): Promise<void> {
+  ): void {
     const moved: Array<{ from: string; to: string }> = [];
-    for (const { from, to } of await this.getCurrentSessionArtifactMoves(
+    for (const { from, to } of this.getCurrentSessionArtifactMoves(
       oldStorage,
       newStorage,
     )) {
@@ -5524,14 +5484,7 @@ export class Config {
     }
     await this.flushRuntimeStatusWrites();
     try {
-      await this.moveCurrentSessionArtifacts(oldStorage, newStorage);
-      if (this.runtimeStatusEnabled && this.runtimeStatusClaimPath) {
-        this.runtimeStatusClaimPath = path.join(
-          newStorage.getProjectDir(),
-          'chats',
-          path.basename(this.runtimeStatusClaimPath),
-        );
-      }
+      this.moveCurrentSessionArtifacts(oldStorage, newStorage);
     } catch (error) {
       if (!opts?.skipProcessChdir) {
         try {
@@ -5805,25 +5758,15 @@ export class Config {
       // same daemon-mode leak rationale as the project dir above.
       unregisterSessionModel(this.sessionId);
 
-      // Release the runtime sidecar claimed at session establishment:
-      // this Config stopped serving the session even though the process
-      // may keep living. In multi-session processes (the `qwen serve`
-      // ACP child) the pid stays alive for the next sessions, and the
-      // sweep's windowless pid re-check would otherwise protect this
-      // closed session's entry forever. A handoff keeps the sidecar:
-      // the successor resumes from this very entry. The release demotes
-      // our own claim to the non-live sentinel pid (keeping the
-      // membership evidence for /cd-relocated sessions) and leaves a
-      // sibling's claim untouched — a sibling serving the same session
-      // id (concurrent --resume, writer lease off) must keep its only
-      // liveness evidence.
+      // Clear the runtime sidecar when this Config stops serving the
+      // session but the process may keep living for other sessions.
       if (this.runtimeStatusEnabled) {
         this.runtimeStatusEnabled = false;
         await this.flushRuntimeStatusWrites();
         if (!this.sessionWriterHandoffRequested) {
-          const claimPath = this.runtimeStatusClaimPath;
-          this.runtimeStatusClaimPath = undefined;
-          if (claimPath) await releaseRuntimeStatus(claimPath);
+          await clearRuntimeStatus(
+            this.storage.getRuntimeStatusPath(this.sessionId),
+          );
         }
       }
 

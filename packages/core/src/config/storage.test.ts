@@ -20,7 +20,6 @@ const mockRealpathSync = vi.hoisted(() =>
 );
 const mockReaddirSync = vi.hoisted(() => vi.fn());
 const mockMkdirSync = vi.hoisted(() => vi.fn());
-const mockUtimesSync = vi.hoisted(() => vi.fn());
 
 vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs')>();
@@ -36,16 +35,11 @@ vi.mock('node:fs', async (importOriginal) => {
   mockMkdirSync.mockImplementation(
     (...args: Parameters<typeof actual.mkdirSync>) => actual.mkdirSync(...args),
   );
-  mockUtimesSync.mockImplementation(
-    (...args: Parameters<typeof actual.utimesSync>) =>
-      actual.utimesSync(...args),
-  );
   const mocked = {
     ...actual,
     realpathSync: mockRealpathSync,
     readdirSync: mockReaddirSync,
     mkdirSync: mockMkdirSync,
-    utimesSync: mockUtimesSync,
   };
   return {
     ...mocked,
@@ -931,100 +925,6 @@ describe('Storage – cleanOrphanProjectDirs', () => {
     expect(result.removed).not.toContain(entryName);
   });
 
-  it('renews the marker and degrades when the entry lock is contended (R18-1/R21-1)', async () => {
-    // A crashed sweep or a slow multi-GiB rmSync can hold the entry
-    // lock; the read claim must renew the marker, wait out its retry
-    // budget, and then degrade instead of failing the resume.
-    const resumeStorage = new Storage(goneCwd);
-    const entryName = path.basename(resumeStorage.getProjectDir());
-    writeSession(entryName, goneCwd);
-    const markerPath = path.join(projectsDir, entryName, '.qwen-orphan-since');
-    actualFs.writeFileSync(markerPath, '');
-    ageFile(markerPath);
-    const before = actualFs.statSync(markerPath).mtimeMs;
-    const lockRoot = path.join(baseDir, 'tmp', 'orphan-cleanup-locks');
-    const lockDir = path.join(lockRoot, `${entryName}.lock`);
-    actualFs.mkdirSync(lockDir, { recursive: true });
-    try {
-      const result = await resumeStorage.runWithProjectDirReadClaim(
-        async () => 'READ_OK',
-      );
-      expect(result).toBe('READ_OK');
-    } finally {
-      actualFs.rmSync(lockDir, { recursive: true, force: true });
-    }
-    expect(actualFs.statSync(markerPath).mtimeMs).toBeGreaterThan(before);
-  }, 10_000);
-
-  it('reads on when the cleanup lock infrastructure is unavailable', async () => {
-    const resumeStorage = new Storage(goneCwd);
-    const entryName = path.basename(resumeStorage.getProjectDir());
-    writeSession(entryName, goneCwd);
-    actualFs.writeFileSync(
-      path.join(projectsDir, entryName, '.qwen-orphan-since'),
-      '',
-    );
-    actualFs.writeFileSync(path.join(baseDir, 'tmp'), 'not a directory');
-
-    await expect(
-      resumeStorage.runWithProjectDirReadClaim(async () => 'READ_OK'),
-    ).resolves.toBe('READ_OK');
-  });
-
-  it('reads on when the marker renewal fails with a permission error (R18-2)', async () => {
-    // Renewal is best-effort: a marker left root-owned by a sudo run
-    // (or an entry on a read-only remount) makes utimes fail while the
-    // transcript stays readable — the read must not be aborted.
-    const resumeStorage = new Storage(goneCwd);
-    const entryName = path.basename(resumeStorage.getProjectDir());
-    writeSession(entryName, goneCwd);
-    actualFs.writeFileSync(
-      path.join(projectsDir, entryName, '.qwen-orphan-since'),
-      '',
-    );
-    const utimesSpy = mockUtimesSync.mockImplementation(() => {
-      const error = new Error(
-        'EPERM: operation not permitted, utimes',
-      ) as NodeJS.ErrnoException;
-      error.code = 'EACCES';
-      throw error;
-    });
-    try {
-      const result = await resumeStorage.runWithProjectDirReadClaim(
-        async () => 'READ_OK',
-      );
-      expect(result).toBe('READ_OK');
-    } finally {
-      utimesSpy.mockImplementation(
-        (...args: Parameters<typeof actualFs.utimesSync>) =>
-          actualFs.utimesSync(...args),
-      );
-    }
-  });
-
-  it('treats an EPERM sidecar pid as live (R18-3)', async () => {
-    const entry = 'eperm-sidecar-sess';
-    writeSession(entry, aliveCwd);
-    writeRuntimeSidecar(
-      path.join(projectsDir, entry, 'chats', 'session-1.runtime.json'),
-      { pid: 12345, workDir: aliveCwd },
-    );
-    const killSpy = vi.spyOn(process, 'kill').mockImplementation(() => {
-      const error = new Error(
-        'operation not permitted',
-      ) as NodeJS.ErrnoException;
-      error.code = 'EPERM';
-      throw error;
-    });
-    try {
-      expect(Storage.hasLiveSession(path.join(projectsDir, entry), false)).toBe(
-        true,
-      );
-    } finally {
-      killSpy.mockRestore();
-    }
-  });
-
   it('keeps fresh entries even when their cwd is gone (grace window)', async () => {
     writeSession('-fresh-gone-sess', goneCwd);
     await Storage.cleanOrphanProjectDirs('current');
@@ -1218,72 +1118,6 @@ describe('Storage – cleanOrphanProjectDirs', () => {
     );
   });
 
-  it('recovers cwds from `}{`-glued records (crash mid-append)', async () => {
-    const chats = path.join(projectsDir, '-glued', 'chats');
-    actualFs.mkdirSync(chats, { recursive: true });
-    actualFs.writeFileSync(
-      path.join(chats, 'session-1.jsonl'),
-      JSON.stringify({ cwd: `${goneCwd}-a` }) +
-        JSON.stringify({ cwd: `${goneCwd}-b` }) +
-        '\n',
-    );
-    ageEntry('-glued');
-    await sweepPastMarkerGrace('-glued');
-    expect(actualFs.existsSync(path.join(projectsDir, '-glued'))).toBe(false);
-  });
-
-  it('treats an unterminated final record as torn residue (R4-5, R10-11)', async () => {
-    // Crash-mid-append residue: every writer terminates records with
-    // '\n', so a missing terminator means the append was killed — even
-    // if the tail happens to parse, the writer may have been cut off
-    // mid-record. Fail closed: the entry survives without a marker.
-    const chats = path.join(projectsDir, '-no-newline', 'chats');
-    actualFs.mkdirSync(chats, { recursive: true });
-    actualFs.writeFileSync(
-      path.join(chats, 'session-1.jsonl'),
-      JSON.stringify({ cwd: goneCwd }),
-    );
-    ageEntry('-no-newline');
-    await Storage.cleanOrphanProjectDirs('current');
-    expect(actualFs.existsSync(path.join(projectsDir, '-no-newline'))).toBe(
-      true,
-    );
-    expect(
-      actualFs.existsSync(
-        path.join(projectsDir, '-no-newline', '.qwen-orphan-since'),
-      ),
-    ).toBe(false);
-  });
-
-  it('recovers a live cwd from a record straddling a chunk boundary (R4-5)', async () => {
-    // The second record starts before the 64 KB read boundary and ends
-    // past it; broken chunk stitching would drop the live cwd and the
-    // entry would be marked for removal.
-    const chats = path.join(projectsDir, '-boundary', 'chats');
-    actualFs.mkdirSync(chats, { recursive: true });
-    const rec2 = JSON.stringify({ cwd: process.cwd() });
-    // Size rec1's pad from the real string lengths so rec2 genuinely
-    // straddles byte 65536 — the previous fixed pad left it entirely
-    // inside the second chunk.
-    const skeleton = JSON.stringify({ cwd: goneCwd, pad: '' });
-    const padLen = 65536 - (skeleton.length + 1) - Math.floor(rec2.length / 2);
-    const rec1 = JSON.stringify({ cwd: goneCwd, pad: 'x'.repeat(padLen) });
-    expect(rec1.length + 1).toBeLessThan(65536);
-    expect(rec1.length + 1 + rec2.length).toBeGreaterThan(65536);
-    actualFs.writeFileSync(
-      path.join(chats, 'session-1.jsonl'),
-      rec1 + '\n' + rec2 + '\n',
-    );
-    ageEntry('-boundary');
-    await Storage.cleanOrphanProjectDirs('current');
-    expect(actualFs.existsSync(path.join(projectsDir, '-boundary'))).toBe(true);
-    expect(
-      actualFs.existsSync(
-        path.join(projectsDir, '-boundary', '.qwen-orphan-since'),
-      ),
-    ).toBe(false);
-  });
-
   it('cleans entries whose only artifact is a sidecar pointing at a gone worktree (R5-1)', async () => {
     // A worktree session killed before its first record leaves only
     // the .worktree.json sidecar — the exact orphan shape from #7906.
@@ -1340,36 +1174,6 @@ describe('Storage – cleanOrphanProjectDirs', () => {
     expect(actualFs.existsSync(entry)).toBe(true);
   });
 
-  // chmod 0o000 only blocks reads on non-root POSIX: on Windows libuv
-  // maps it to the read-only attribute (still readable) and root
-  // bypasses it outright — the merge-queue Windows leg would fail.
-  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
-    'keeps an entry when a record is unreadable (R9-5)',
-    async () => {
-      // Mixed evidence: one transcript records a gone cwd, another cannot
-      // be opened. The unreadable one might hold a live cwd, so the scan
-      // is incomplete and must veto deletion — no marker either.
-      const entry = path.join(projectsDir, '-incomplete-scan');
-      actualFs.mkdirSync(path.join(entry, 'chats'), { recursive: true });
-      actualFs.writeFileSync(
-        path.join(entry, 'chats', 'a.jsonl'),
-        JSON.stringify({ cwd: goneCwd, type: 'qwen' }) + '\n',
-      );
-      const unreadable = path.join(entry, 'chats', 'b.jsonl');
-      actualFs.writeFileSync(
-        unreadable,
-        JSON.stringify({ cwd: '/real/project', type: 'qwen' }) + '\n',
-      );
-      actualFs.chmodSync(unreadable, 0o000);
-      ageEntry('-incomplete-scan');
-      await Storage.cleanOrphanProjectDirs('current');
-      expect(actualFs.existsSync(entry)).toBe(true);
-      expect(actualFs.existsSync(path.join(entry, '.qwen-orphan-since'))).toBe(
-        false,
-      );
-    },
-  );
-
   it('treats a torn final record as incomplete evidence (R10-11)', async () => {
     // All writers terminate records with '\n', so a non-terminated tail
     // at EOF is a torn write (kill -9 mid-append). Its cwd — possibly
@@ -1413,24 +1217,6 @@ describe('Storage – cleanOrphanProjectDirs', () => {
     expect(actualFs.existsSync(entry)).toBe(true);
     expect(actualFs.existsSync(path.join(entry, '.qwen-orphan-since'))).toBe(
       false,
-    );
-  });
-
-  it('keeps an entry whose marker vanished during salvage (R9-4)', async () => {
-    // Sweep A passes the expired-marker check and awaits salvage; in
-    // that window the entry becomes current for a new session, whose
-    // own sweep clears the marker. Sweep A must see the absence and
-    // bail out before rmSync — the marker's absence is the newest
-    // ownership signal.
-    writeSession('-marker-cleared', goneCwd);
-    ageEntry('-marker-cleared');
-    await Storage.cleanOrphanProjectDirs('current');
-    ageFile(path.join(projectsDir, '-marker-cleared', '.qwen-orphan-since'));
-    await Storage.cleanOrphanProjectDirs('current', async (entryPath) => {
-      actualFs.rmSync(path.join(entryPath, '.qwen-orphan-since'));
-    });
-    expect(actualFs.existsSync(path.join(projectsDir, '-marker-cleared'))).toBe(
-      true,
     );
   });
 
@@ -1549,30 +1335,6 @@ describe('Storage – cleanOrphanProjectDirs', () => {
     };
     await sweepPastMarkerGrace('-raced', hook);
     expect(actualFs.existsSync(path.join(projectsDir, '-raced'))).toBe(true);
-  });
-
-  it('aborts removal when a gone cwd reappears during salvage (R4-1)', async () => {
-    // The salvage await also widens the window for a vanished cwd to
-    // come back (ejected media plugged in again); the cwd re-check
-    // before rmSync must abort and clear the marker.
-    writeSession('-cwd-back', goneCwd);
-    ageEntry('-cwd-back');
-    const hook = async () => {
-      actualFs.mkdirSync(goneCwd, { recursive: true });
-    };
-    try {
-      await sweepPastMarkerGrace('-cwd-back', hook);
-      expect(actualFs.existsSync(path.join(projectsDir, '-cwd-back'))).toBe(
-        true,
-      );
-      expect(
-        actualFs.existsSync(
-          path.join(projectsDir, '-cwd-back', '.qwen-orphan-since'),
-        ),
-      ).toBe(false);
-    } finally {
-      actualFs.rmSync(goneCwd, { recursive: true, force: true });
-    }
   });
 
   it('keeps stale entries with files but no readable cwd records', async () => {

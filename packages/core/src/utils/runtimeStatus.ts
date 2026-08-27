@@ -19,31 +19,25 @@
  * cross-platform signal.
  *
  * Lifecycle:
- * - Written on session start (clean launch or resume). When another process
- *   already holds the canonical sidecar for the same session id (concurrent
- *   --resume), each process keeps an independent claim.
- * - On clean exit of the claiming process the record is demoted, not
- *   deleted: `releaseRuntimeStatus` rewrites it with the non-live
- *   sentinel pid 0, keeping the `session_id`/`work_dir` membership
- *   evidence that session lookup consults for `/cd`-relocated sessions
- *   (the sweep's liveness gates reject pid <= 0, so the session is
- *   seen as closed). Crashed processes skip the demotion; a liveness
- *   check suffices there.
- * - `clearRuntimeStatus` remains for the narrow case where the same
- *   PID keeps running while no longer serving the recorded session
- *   and no membership evidence needs to survive.
+ * - Written on session start (clean launch or resume); the resume case
+ *   atomically overwrites whatever the previous PID wrote.
+ * - Deleted only when the same PID keeps running while no longer
+ *   serving the recorded session, such as `/clear`, `/resume`, or a
+ *   daemon process closing one session while staying alive for others.
+ *   Crashed processes skip deletion; a liveness check is sufficient
+ *   there.
  *
- * Ordinary owner refreshes use `atomicWriteJSON`; ownership transitions use
- * create-only hard-link commits so racing claims cannot overwrite each other.
+ * The file is written via `atomicWriteJSON` (write-to-temp + rename,
+ * with in-place fallback when ownership differs).
  * The schema is small and stable; external consumers should treat
  * unknown fields as forward-compatible additions.
  */
 
-import { randomBytes } from 'node:crypto';
 import * as syncFs from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { atomicWriteJSON } from './atomicFileWrite.js';
 import { isNodeError } from './errors.js';
 import { isPidAlive } from './process-liveness.js';
 
@@ -111,74 +105,8 @@ export async function writeRuntimeStatus(
   fields: WriteRuntimeStatusFields,
 ): Promise<string> {
   await fs.mkdir(path.dirname(filePath), { recursive: true });
-  const { atomicWriteJSON } = await import('./atomicFileWrite.js');
   await atomicWriteJSON(filePath, createRuntimeStatusPayload(fields));
   return filePath;
-}
-
-/**
- * Atomically claim a runtime status path without replacing a live sibling.
- *
- * The canonical path is preferred. If another process already owns it, this
- * process writes a uniquely named sidecar in the same chats directory; sweep
- * liveness discovery scans every `*.runtime.json` file, so both processes keep
- * independent on-disk evidence. The returned path is the claim the caller owns
- * and must later pass to `releaseRuntimeStatus`.
- */
-export async function claimRuntimeStatus(
-  filePath: string,
-  fields: WriteRuntimeStatusFields,
-): Promise<string> {
-  await fs.mkdir(path.dirname(filePath), { recursive: true });
-  const payload = createRuntimeStatusPayload(fields);
-  if (await createOnlyRuntimeStatus(filePath, payload)) {
-    return filePath;
-  }
-
-  const existing = await readRuntimeStatus(filePath);
-  if (existing === null) {
-    if (await runtimeStatusPathExists(filePath)) {
-      return createSiblingClaim(filePath, payload);
-    }
-    if (await createOnlyRuntimeStatus(filePath, payload)) return filePath;
-    return createSiblingClaim(filePath, payload);
-  }
-  if (isRuntimeStatusActive(existing)) {
-    return createSiblingClaim(filePath, payload);
-  }
-
-  const displacedPath = siblingPath(filePath, 'displaced');
-  try {
-    await fs.rename(filePath, displacedPath);
-  } catch (error) {
-    if (!isNodeError(error) || error.code !== 'ENOENT') throw error;
-    if (await createOnlyRuntimeStatus(filePath, payload)) return filePath;
-    return createSiblingClaim(filePath, payload);
-  }
-
-  const displaced = await readRuntimeStatus(displacedPath);
-  if (
-    (displaced === null && (await runtimeStatusPathExists(displacedPath))) ||
-    (displaced !== null && isRuntimeStatusActive(displaced))
-  ) {
-    await restoreRuntimeStatus(displacedPath, filePath);
-    return createSiblingClaim(filePath, payload);
-  }
-
-  let claimed: boolean;
-  try {
-    claimed = await createOnlyRuntimeStatus(filePath, payload);
-  } catch (error) {
-    await restoreRuntimeStatus(displacedPath, filePath).catch(() => {});
-    throw error;
-  }
-  if (claimed) {
-    await fs.unlink(displacedPath).catch(() => {});
-    return filePath;
-  }
-
-  await fs.unlink(displacedPath).catch(() => {});
-  return createSiblingClaim(filePath, payload);
 }
 
 /**
@@ -225,7 +153,7 @@ export async function readRuntimeStatus(
   return parseRuntimeStatus(data);
 }
 
-/** Read every runtime claim for `sessionId` in one chats directory. */
+/** Read every runtime sidecar for `sessionId` in one chats directory. */
 export async function readRuntimeStatusClaims(
   chatsDir: string,
   sessionId: string,
@@ -251,7 +179,7 @@ export async function readRuntimeStatusClaims(
     const claimPath = path.join(chatsDir, entry.name);
     const status = await readRuntimeStatus(claimPath, options);
     if (status === null) {
-      incomplete ||= isRuntimeStatusCandidateName(entry.name, sessionId);
+      incomplete = true;
       continue;
     }
     if (status.sessionId === sessionId) {
@@ -262,7 +190,7 @@ export async function readRuntimeStatusClaims(
 }
 
 /**
- * Synchronous cleanup predicate. Any active local claim or foreign-host claim
+ * Synchronous cleanup predicate. Any active local or foreign-host sidecar
  * keeps the entry. `maxAgeMs` is used only by the sweep's early heuristic;
  * its final destructive gate calls without an age limit.
  */
@@ -302,26 +230,6 @@ export function isRuntimeStatusActive(status: RuntimeStatus): boolean {
     status.pid > 0 &&
     (status.hostname !== os.hostname() || isPidAlive(status.pid))
   );
-}
-
-function isRuntimeStatusCandidateName(
-  fileName: string,
-  sessionId: string,
-): boolean {
-  if (fileName === `${sessionId}.runtime.json`) return true;
-  return ['claim', 'displaced', 'releasing'].some((kind) =>
-    fileName.startsWith(`${sessionId}.${kind}-`),
-  );
-}
-
-async function runtimeStatusPathExists(filePath: string): Promise<boolean> {
-  try {
-    await fs.access(filePath);
-    return true;
-  } catch (error) {
-    if (isNodeError(error) && error.code === 'ENOENT') return false;
-    return true;
-  }
 }
 
 function parseRuntimeStatus(data: unknown): RuntimeStatus | null {
@@ -367,11 +275,8 @@ function parseRuntimeStatus(data: unknown): RuntimeStatus | null {
 /**
  * Remove the runtime status file at `filePath`, if present.
  *
- * Intentionally **not** called on `/quit` — when the qwen-code process
- * exits, an external observer's PID-liveness check already detects the
- * missing process, so a stale record is harmless. This helper exists
- * for the narrow case where the **same PID continues running** but
- * stops serving the recorded session.
+ * Called only when the **same PID continues running** but stops serving
+ * the recorded session.
  *
  * Safe to call multiple times and on paths that no longer exist;
  * `ENOENT` and other `OSError`-class failures are swallowed so cleanup
@@ -382,125 +287,6 @@ export async function clearRuntimeStatus(filePath: string): Promise<void> {
     await fs.unlink(filePath);
   } catch {
     // ignored: best-effort cleanup
-  }
-}
-
-/**
- * Release the runtime claim at `filePath` on clean session shutdown.
- *
- * Demotes rather than deletes: the record is rewritten with the
- * non-live sentinel pid 0, so liveness gates see the session as closed
- * while the `session_id`/`work_dir` membership evidence survives for
- * `/cd`-relocated session lookup. Only the claim THIS process
- * established is released — a record holding a foreign pid is put back
- * untouched.
- *
- * The release is fenced by a rename: a claim landing on the original
- * path after the fence belongs to a sibling and wins, so a racing
- * claim cannot be destroyed between the ownership check and the
- * rewrite. Best-effort throughout; never throws.
- */
-export async function releaseRuntimeStatus(filePath: string): Promise<void> {
-  const stagingPath = siblingPath(filePath, 'releasing');
-  try {
-    try {
-      await fs.rename(filePath, stagingPath);
-    } catch {
-      return; // already gone — nothing to release
-    }
-    const claim = await readRuntimeStatus(stagingPath);
-    if (
-      claim === null ||
-      claim.hostname !== os.hostname() ||
-      claim.pid !== process.pid
-    ) {
-      // Not our claim (or unreadable) — put it back exactly as found.
-      await restoreRuntimeStatus(stagingPath, filePath);
-      return;
-    }
-    try {
-      await createOnlyRuntimeStatus(
-        filePath,
-        createRuntimeStatusPayload({
-          sessionId: claim.sessionId,
-          workDir: claim.workDir,
-          pid: 0,
-          qwenVersion: claim.qwenVersion,
-        }),
-      );
-    } catch {
-      await restoreRuntimeStatus(stagingPath, filePath).catch(() => {});
-      return;
-    }
-    // EEXIST means a sibling claimed the original path after the rename fence.
-    // Its claim wins; either way the staged copy is ours and can be discarded.
-    await fs.unlink(stagingPath).catch(() => {});
-  } catch {
-    // ignored: best-effort release
-  }
-}
-
-async function createSiblingClaim(
-  filePath: string,
-  payload: RuntimeStatusOnDisk,
-): Promise<string> {
-  for (;;) {
-    const claimPath = siblingPath(filePath, 'claim');
-    if (await createOnlyRuntimeStatus(claimPath, payload)) return claimPath;
-  }
-}
-
-async function restoreRuntimeStatus(
-  stagedPath: string,
-  preferredPath: string,
-): Promise<void> {
-  if (await linkCreateOnly(stagedPath, preferredPath)) {
-    await fs.unlink(stagedPath).catch(() => {});
-    return;
-  }
-  for (;;) {
-    const claimPath = siblingPath(preferredPath, 'claim');
-    if (await linkCreateOnly(stagedPath, claimPath)) {
-      await fs.unlink(stagedPath).catch(() => {});
-      return;
-    }
-  }
-}
-
-function siblingPath(filePath: string, kind: string): string {
-  const suffix = '.runtime.json';
-  const stem = filePath.endsWith(suffix)
-    ? filePath.slice(0, -suffix.length)
-    : filePath;
-  return `${stem}.${kind}-${randomBytes(8).toString('hex')}${suffix}`;
-}
-
-async function createOnlyRuntimeStatus(
-  filePath: string,
-  payload: RuntimeStatusOnDisk,
-): Promise<boolean> {
-  const tempPath = `${filePath}.${randomBytes(8).toString('hex')}.tmp`;
-  try {
-    await fs.writeFile(tempPath, JSON.stringify(payload, null, 2), {
-      encoding: 'utf8',
-      flush: true,
-    });
-    return await linkCreateOnly(tempPath, filePath);
-  } finally {
-    await fs.unlink(tempPath).catch(() => {});
-  }
-}
-
-async function linkCreateOnly(
-  sourcePath: string,
-  targetPath: string,
-): Promise<boolean> {
-  try {
-    await fs.link(sourcePath, targetPath);
-    return true;
-  } catch (error) {
-    if (isNodeError(error) && error.code === 'EEXIST') return false;
-    throw error;
   }
 }
 

@@ -1924,110 +1924,84 @@ describe('Server Config (config.ts)', () => {
     });
   });
 
-  describe('initialize() runtime sidecar claim', () => {
+  describe('initialize() runtime sidecar', () => {
     it('writes the runtime sidecar at session establishment for every process kind', async () => {
       const config = new Config({ ...baseParams, chatRecording: true });
       const sessionId = config.getSessionId();
-      const claimPath = config.storage.getRuntimeStatusPath(sessionId);
-      const claimSpy = vi
-        .spyOn(runtimeStatus, 'claimRuntimeStatus')
-        .mockResolvedValue(claimPath);
+      const statusPath = config.storage.getRuntimeStatusPath(sessionId);
+      const writeSpy = vi
+        .spyOn(runtimeStatus, 'writeRuntimeStatus')
+        .mockResolvedValue(statusPath);
 
       await config.initialize();
 
       // The orphan sweep's pid-liveness gate reads only these sidecars;
-      // without this claim a headless/ACP/SDK/serve session has no
+      // without this sidecar a headless/ACP/SDK/serve session has no
       // liveness proof and is judged dead from file age alone.
-      expect(claimSpy).toHaveBeenCalledWith(
-        claimPath,
+      expect(writeSpy).toHaveBeenCalledWith(
+        statusPath,
         expect.objectContaining({
           sessionId,
           workDir: config.getTargetDir(),
         }),
       );
 
-      claimSpy.mockRestore();
+      writeSpy.mockRestore();
     });
 
-    it('skips the sidecar claim when chat recording is disabled', async () => {
+    it('skips the sidecar write when chat recording is disabled', async () => {
       // No transcript entry is created, so no sidecar should exist for
       // it either — e.g. ACP bootstrap and workspace-discovery configs.
       const config = new Config({ ...baseParams, chatRecording: false });
-      const claimSpy = vi
-        .spyOn(runtimeStatus, 'claimRuntimeStatus')
+      const writeSpy = vi
+        .spyOn(runtimeStatus, 'writeRuntimeStatus')
         .mockResolvedValue('');
 
       await config.initialize();
 
-      expect(claimSpy).not.toHaveBeenCalled();
+      expect(writeSpy).not.toHaveBeenCalled();
 
-      claimSpy.mockRestore();
-    });
-
-    it('tracks the independent sidecar returned for a concurrent resume', async () => {
-      const config = new Config({ ...baseParams, chatRecording: true });
-      const siblingPath = path.join(
-        path.dirname(
-          config.storage.getRuntimeStatusPath(config.getSessionId()),
-        ),
-        `${config.getSessionId()}.claim-test.runtime.json`,
-      );
-      const claimSpy = vi
-        .spyOn(runtimeStatus, 'claimRuntimeStatus')
-        .mockResolvedValue(siblingPath);
-      const releaseSpy = vi
-        .spyOn(runtimeStatus, 'releaseRuntimeStatus')
-        .mockResolvedValue(undefined);
-
-      await config.initialize();
-      await config.shutdown();
-
-      expect(releaseSpy).toHaveBeenCalledWith(siblingPath);
-
-      claimSpy.mockRestore();
-      releaseSpy.mockRestore();
+      writeSpy.mockRestore();
     });
   });
 
-  describe('shutdown() runtime sidecar release', () => {
-    it('releases the sidecar claim so a closed session stops claiming a live pid', async () => {
+  describe('shutdown() runtime sidecar cleanup', () => {
+    it('clears the sidecar so a closed session stops claiming a live pid', async () => {
       // In multi-session processes (the `qwen serve` ACP child) the pid
       // outlives the session; a leftover live claim would shield the
-      // closed session's entry from the sweep forever. The release
-      // demotes the claim (sentinel pid) rather than unlinking it, and
-      // protects a sibling's claim — both pinned in runtimeStatus.test.ts.
+      // closed session's entry from the sweep forever.
       const config = new Config(baseParams);
-      config.markRuntimeStatusEnabled(); // models the successful claim
-      const releaseSpy = vi
-        .spyOn(runtimeStatus, 'releaseRuntimeStatus')
+      config.markRuntimeStatusEnabled(); // models the successful write
+      const clearSpy = vi
+        .spyOn(runtimeStatus, 'clearRuntimeStatus')
         .mockResolvedValue(undefined);
 
       await config.shutdown();
 
-      expect(releaseSpy).toHaveBeenCalledWith(
+      expect(clearSpy).toHaveBeenCalledWith(
         config.storage.getRuntimeStatusPath(config.getSessionId()),
       );
 
-      releaseSpy.mockRestore();
+      clearSpy.mockRestore();
     });
 
     it('keeps the sidecar when a session-writer handoff was requested', async () => {
-      // The successor resumes from this very entry; its own claim lands
-      // at its initializeOnce.
+      // The successor resumes from this very entry; its own sidecar write
+      // lands at initializeOnce.
       const config = new Config(baseParams);
       config.markRuntimeStatusEnabled();
       (
         config as unknown as { sessionWriterHandoffRequested: boolean }
       ).sessionWriterHandoffRequested = true;
-      const releaseSpy = vi
-        .spyOn(runtimeStatus, 'releaseRuntimeStatus')
+      const clearSpy = vi
+        .spyOn(runtimeStatus, 'clearRuntimeStatus')
         .mockResolvedValue(undefined);
 
       await config.shutdown();
 
-      expect(releaseSpy).not.toHaveBeenCalled();
+      expect(clearSpy).not.toHaveBeenCalled();
 
-      releaseSpy.mockRestore();
+      clearSpy.mockRestore();
     });
   });
 
@@ -7021,7 +6995,7 @@ describe('Server Config (config.ts)', () => {
       oldChatsDir,
       `${sessionId}.runtime.json`,
     );
-    config.markRuntimeStatusEnabled(oldRuntimeStatusPath);
+    config.markRuntimeStatusEnabled();
     const oldWorktreeSessionPath = path.join(
       oldChatsDir,
       `${sessionId}.worktree.json`,
@@ -7079,7 +7053,7 @@ describe('Server Config (config.ts)', () => {
     cwdSpy.mockRestore();
   });
 
-  it('relocateWorkingDirectory moves inactive membership evidence without a runtime claim', async () => {
+  it('relocateWorkingDirectory moves the canonical runtime sidecar', async () => {
     const config = new Config(baseParams);
     const sessionId = config.getSessionId();
     const newDir = path.resolve('/path/to/other');
@@ -7087,17 +7061,6 @@ describe('Server Config (config.ts)', () => {
     const newStorage = new Storage(newDir);
     const oldRuntimeStatusPath = oldStorage.getRuntimeStatusPath(sessionId);
     const newRuntimeStatusPath = newStorage.getRuntimeStatusPath(sessionId);
-    const readRuntimeStatusSpy = vi
-      .spyOn(runtimeStatus, 'readRuntimeStatus')
-      .mockResolvedValue({
-        schemaVersion: runtimeStatus.RUNTIME_STATUS_SCHEMA_VERSION,
-        pid: 0,
-        sessionId,
-        workDir: config.getTargetDir(),
-        hostname: os.hostname(),
-        startedAt: Date.now() / 1000,
-        qwenVersion: null,
-      });
     const chdirSpy = vi.spyOn(process, 'chdir').mockImplementation(() => {});
     const cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue(newDir);
     vi.mocked(fs.existsSync).mockImplementation((pathToCheck) => {
@@ -7112,7 +7075,6 @@ describe('Server Config (config.ts)', () => {
       newRuntimeStatusPath,
     );
 
-    readRuntimeStatusSpy.mockRestore();
     chdirSpy.mockRestore();
     cwdSpy.mockRestore();
   });
@@ -7126,7 +7088,6 @@ describe('Server Config (config.ts)', () => {
     const oldStorage = new Storage(config.getTargetDir());
     const newStorage = new Storage(newDir);
     const oldRuntimeStatusPath = oldStorage.getRuntimeStatusPath(sessionId);
-    config.markRuntimeStatusEnabled(oldRuntimeStatusPath);
     const newRuntimeStatusPath = newStorage.getRuntimeStatusPath(sessionId);
     const chdirSpy = vi.spyOn(process, 'chdir').mockImplementation(() => {
       // Keep the test process in its original directory.
@@ -7279,8 +7240,8 @@ describe('Server Config (config.ts)', () => {
     const config = new Config(baseParams);
     config.markRuntimeStatusEnabled();
     config.trackSessionRegistration(Promise.resolve(true));
-    const claimRuntimeStatusSpy = vi
-      .spyOn(runtimeStatus, 'claimRuntimeStatus')
+    const writeRuntimeStatusSpy = vi
+      .spyOn(runtimeStatus, 'writeRuntimeStatus')
       .mockRejectedValue(new Error('read-only project fs'));
     const patchSessionRecordSpy = vi
       .spyOn(sessionRegistry, 'patchSessionRecord')
@@ -7295,114 +7256,36 @@ describe('Server Config (config.ts)', () => {
       }),
     );
 
-    claimRuntimeStatusSpy.mockRestore();
+    writeRuntimeStatusSpy.mockRestore();
     patchSessionRecordSpy.mockRestore();
   });
 
-  it('does not migrate a foreign canonical claim after a session claim fails', async () => {
-    const config = new Config(baseParams);
-    const oldClaimPath = config.storage.getRuntimeStatusPath(
-      config.getSessionId(),
-    );
-    config.markRuntimeStatusEnabled(oldClaimPath);
-    const releaseSpy = vi
-      .spyOn(runtimeStatus, 'releaseRuntimeStatus')
-      .mockResolvedValue(undefined);
-    const claimSpy = vi
-      .spyOn(runtimeStatus, 'claimRuntimeStatus')
-      .mockRejectedValueOnce(new Error('runtime status unavailable'));
-    const newSessionId = config.startNewSession('replacement-session');
-    await vi.waitFor(() => expect(claimSpy).toHaveBeenCalled());
-
-    const oldStorage = new Storage(config.getTargetDir());
-    const newDir = path.resolve('/path/to/other');
-    const newStorage = new Storage(newDir);
-    const foreignCanonicalPath = oldStorage.getRuntimeStatusPath(newSessionId);
-    const destinationPath = newStorage.getRuntimeStatusPath(newSessionId);
-    const readRuntimeStatusSpy = vi
-      .spyOn(runtimeStatus, 'readRuntimeStatus')
-      .mockResolvedValue({
-        schemaVersion: runtimeStatus.RUNTIME_STATUS_SCHEMA_VERSION,
-        pid: 123,
-        sessionId: newSessionId,
-        workDir: config.getTargetDir(),
-        hostname: 'foreign-host.example',
-        startedAt: Date.now() / 1000,
-        qwenVersion: null,
-      });
-    claimSpy.mockResolvedValueOnce(destinationPath);
-    const chdirSpy = vi.spyOn(process, 'chdir').mockImplementation(() => {});
-    const cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue(newDir);
-    vi.mocked(fs.existsSync).mockImplementation((pathToCheck) => {
-      const checked = pathToCheck.toString();
-      return checked === newDir || checked === foreignCanonicalPath;
-    });
-
-    await config.relocateWorkingDirectory(newDir);
-
-    expect(fs.renameSync).not.toHaveBeenCalledWith(
-      foreignCanonicalPath,
-      destinationPath,
-    );
-    expect(claimSpy).toHaveBeenLastCalledWith(destinationPath, {
-      sessionId: newSessionId,
-      workDir: newDir,
-      qwenVersion: null,
-    });
-    readRuntimeStatusSpy.mockRestore();
-    releaseSpy.mockRestore();
-    claimSpy.mockRestore();
-    chdirSpy.mockRestore();
-    cwdSpy.mockRestore();
-  });
-
-  it('retries a runtime claim on the next session switch after a failure', async () => {
+  it('drains a pending session sidecar write before clearing it at shutdown', async () => {
     const config = new Config(baseParams);
     config.markRuntimeStatusEnabled();
-    const recoveredPath = config.storage.getRuntimeStatusPath('second-session');
-    const claimSpy = vi
-      .spyOn(runtimeStatus, 'claimRuntimeStatus')
-      .mockRejectedValueOnce(new Error('runtime status unavailable'))
-      .mockResolvedValueOnce(recoveredPath);
-
-    config.startNewSession('first-session');
-    await vi.waitFor(() => expect(claimSpy).toHaveBeenCalledTimes(1));
-    config.startNewSession('second-session');
-    await vi.waitFor(() => expect(claimSpy).toHaveBeenCalledTimes(2));
-
-    expect(claimSpy.mock.calls[1]?.[0]).toBe(recoveredPath);
-    claimSpy.mockRestore();
-  });
-
-  it('drains a pending session claim before releasing it at shutdown', async () => {
-    const config = new Config(baseParams);
-    const oldPath = config.storage.getRuntimeStatusPath(config.getSessionId());
-    config.markRuntimeStatusEnabled(oldPath);
-    let finishClaim!: (claimPath: string) => void;
-    const pendingClaim = new Promise<string>((resolve) => {
-      finishClaim = resolve;
+    let finishWrite!: () => void;
+    const pendingWrite = new Promise<string>((resolve) => {
+      finishWrite = () => resolve('');
     });
-    const claimSpy = vi
-      .spyOn(runtimeStatus, 'claimRuntimeStatus')
-      .mockReturnValue(pendingClaim);
-    const releaseSpy = vi
-      .spyOn(runtimeStatus, 'releaseRuntimeStatus')
+    const writeSpy = vi
+      .spyOn(runtimeStatus, 'writeRuntimeStatus')
+      .mockReturnValue(pendingWrite);
+    const clearSpy = vi
+      .spyOn(runtimeStatus, 'clearRuntimeStatus')
       .mockResolvedValue(undefined);
 
     const newSessionId = config.startNewSession('replacement-session');
     const newPath = config.storage.getRuntimeStatusPath(newSessionId);
     const shutdown = config.shutdown();
-    await vi.waitFor(() => expect(claimSpy).toHaveBeenCalled());
-    expect(releaseSpy).toHaveBeenCalledWith(oldPath);
-    expect(releaseSpy).not.toHaveBeenCalledWith(newPath);
+    await vi.waitFor(() => expect(writeSpy).toHaveBeenCalled());
+    expect(clearSpy).not.toHaveBeenCalledWith(newPath);
 
-    finishClaim(newPath);
+    finishWrite();
     await shutdown;
 
-    expect(releaseSpy).toHaveBeenCalledWith(newPath);
-    expect(releaseSpy).toHaveBeenCalledTimes(2);
-    claimSpy.mockRestore();
-    releaseSpy.mockRestore();
+    expect(clearSpy).toHaveBeenCalledWith(newPath);
+    writeSpy.mockRestore();
+    clearSpy.mockRestore();
   });
 
   it('serializes pending registration, transitions, and unregister', async () => {
@@ -7591,7 +7474,7 @@ describe('Server Config (config.ts)', () => {
       oldChatsDir,
       `${sessionId}.runtime.json`,
     );
-    config.markRuntimeStatusEnabled(oldRuntimeStatusPath);
+    config.markRuntimeStatusEnabled();
     const newTranscriptPath = path.join(newChatsDir, `${sessionId}.jsonl`);
     const newRuntimeStatusPath = path.join(
       newChatsDir,
@@ -7647,7 +7530,7 @@ describe('Server Config (config.ts)', () => {
     const oldStorage = new Storage(oldDir);
     const newStorage = new Storage(newDir);
     const oldRuntimeStatusPath = oldStorage.getRuntimeStatusPath(sessionId);
-    config.markRuntimeStatusEnabled(oldRuntimeStatusPath);
+    config.markRuntimeStatusEnabled();
     const newRuntimeStatusPath = newStorage.getRuntimeStatusPath(sessionId);
     const cleanupError = new Error('cleanup failed');
     const exdevError = Object.assign(new Error('cross device'), {

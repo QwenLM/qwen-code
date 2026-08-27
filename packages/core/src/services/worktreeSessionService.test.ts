@@ -17,11 +17,7 @@ import {
   type WorktreeSession,
 } from './worktreeSessionService.js';
 import { Storage } from '../config/storage.js';
-import {
-  claimRuntimeStatus,
-  releaseRuntimeStatus,
-  writeRuntimeStatus,
-} from '../utils/runtimeStatus.js';
+import { writeRuntimeStatus } from '../utils/runtimeStatus.js';
 
 const fsMocks = vi.hoisted(() => ({
   readFile: vi.fn<typeof import('node:fs/promises').readFile>(),
@@ -186,7 +182,7 @@ describe('isSessionRuntimeActive', () => {
     ).resolves.toBe(true);
   });
 
-  it('treats a cleanly released pid-0 runtime status as dead', async () => {
+  it('treats a pid-0 runtime status as dead', async () => {
     const repoRoot = path.join(tmpDir, 'repo');
     Storage.setRuntimeBaseDir(path.join(tmpDir, 'runtime'));
     const statusPath = new Storage(repoRoot).getRuntimeStatusPath(
@@ -195,17 +191,15 @@ describe('isSessionRuntimeActive', () => {
     await writeRuntimeStatus(statusPath, {
       sessionId: 'owner-session',
       workDir: repoRoot,
-      pid: process.pid,
+      pid: 0,
     });
-
-    await releaseRuntimeStatus(statusPath);
 
     await expect(
       isSessionRuntimeActive('owner-session', repoRoot),
     ).resolves.toBe(false);
   });
 
-  it('keeps a session active while only a sibling claim is live', async () => {
+  it('keeps a session active while a matching runtime sidecar is live', async () => {
     const repoRoot = path.join(tmpDir, 'repo');
     Storage.setRuntimeBaseDir(path.join(tmpDir, 'runtime'));
     const statusPath = new Storage(repoRoot).getRuntimeStatusPath(
@@ -214,15 +208,16 @@ describe('isSessionRuntimeActive', () => {
     await writeRuntimeStatus(statusPath, {
       sessionId: 'owner-session',
       workDir: repoRoot,
-      pid: process.pid,
+      pid: 0,
     });
-    const siblingPath = await claimRuntimeStatus(statusPath, {
-      sessionId: 'owner-session',
-      workDir: repoRoot,
-      pid: process.pid,
-    });
-    expect(siblingPath).not.toBe(statusPath);
-    await releaseRuntimeStatus(statusPath);
+    await writeRuntimeStatus(
+      path.join(path.dirname(statusPath), 'owner-session.extra.runtime.json'),
+      {
+        sessionId: 'owner-session',
+        workDir: repoRoot,
+        pid: process.pid,
+      },
+    );
 
     await expect(
       isSessionRuntimeActive('owner-session', repoRoot),

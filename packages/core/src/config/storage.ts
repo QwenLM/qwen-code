@@ -7,16 +7,14 @@
 import * as path from 'node:path';
 import * as os from 'node:os';
 import * as fs from 'node:fs';
-import { StringDecoder } from 'node:string_decoder';
 import { AsyncLocalStorage } from 'node:async_hooks';
-import lockfile from 'proper-lockfile';
 import {
   getProjectHash,
   QWEN_DIR,
   sanitizeCwd,
   isTempDirPath,
 } from '../utils/paths.js';
-import { FatalConfigError, isNodeError } from '../utils/errors.js';
+import { FatalConfigError } from '../utils/errors.js';
 import { hasActiveRuntimeStatusClaimSync } from '../utils/runtimeStatus.js';
 
 export { QWEN_DIR } from '../utils/paths.js';
@@ -664,26 +662,13 @@ export class Storage {
   private static readonly ORPHAN_STALE_AGE_MS = 24 * 60 * 60 * 1000;
 
   /**
-   * Staleness for the cross-process entry lock — deliberately NOT
-   * ORPHAN_STALE_AGE_MS. The longest legitimate hold is one rmSync of a
-   * large entry (minutes); a holder SIGKILLed mid-deletion — the crash
-   * class this feature exists for — must self-heal quickly, not block
-   * every resume of the entry for a day.
-   */
-  private static readonly LOCK_STALE_AGE_MS = 30 * 60 * 1000;
-
-  /**
    * Marker file recording when an entry's non-temp cwds were first seen
    * gone. Its mtime is the grace anchor; a resume claim renews the grace
    * episode before reading the transcript.
    */
   private static readonly ORPHAN_MARKER_FILE = '.qwen-orphan-since';
 
-  /**
-   * Claims a local transcript for reading by refreshing an existing cleanup
-   * marker. Cleanup takes the same cross-process lock before its final checks,
-   * so it either deletes first or observes the renewed grace window.
-   */
+  /** Refreshes an orphan marker before reading a marked project entry. */
   async runWithProjectDirReadClaim<T>(operation: () => Promise<T>): Promise<T> {
     const entryPath = this.getProjectDir();
     const markerPath = path.join(entryPath, Storage.ORPHAN_MARKER_FILE);
@@ -708,19 +693,12 @@ export class Storage {
       // abort the read — the same filesystem error would block the
       // sweep's rmSync equally, so the claim-less read is safe.
     }
-    const release = await Storage.acquireProjectDirLock(entryPath, true).catch(
-      () => undefined,
-    );
-    await release?.().catch(() => {});
     return operation();
   }
 
   /**
-   * Per-transcript scan budget. Sweeps stream every record-bearing file
-   * on the startup thread; a pathological transcript (multi-GiB, or one
-   * giant newline-free line) must not stall startup or blow the heap —
-   * hitting the budget marks the evidence incomplete, which vetoes
-   * deletion (keep-only).
+   * Per-transcript scan budget. Oversized files mark the evidence
+   * incomplete, which vetoes deletion (keep-only).
    */
   private static readonly CWD_SCAN_MAX_FILE_BYTES = 8 * 1024 * 1024;
 
@@ -882,85 +860,34 @@ export class Storage {
         // Salvage failures must never block removal.
       }
     }
-    const releaseLock = await Storage.acquireProjectDirLock(entryPath, false);
-    if (!releaseLock) return;
-
-    try {
-      // The salvage await widens the check-then-delete window. Re-run every
-      // cheap gate while holding the same lock as transcript readers.
-      if (cwds) {
-        const markerPath = path.join(entryPath, Storage.ORPHAN_MARKER_FILE);
-        if (!fs.existsSync(markerPath)) {
-          return;
-        }
-        if (
-          Date.now() - fs.statSync(markerPath).mtimeMs <=
-          Storage.ORPHAN_STALE_AGE_MS
-        ) {
-          return;
-        }
-        if (cwds.some((cwd) => fs.existsSync(cwd) && !isTempDirPath(cwd))) {
-          Storage.removeOrphanMarker(entryPath);
-          return;
-        }
-      }
-      if (Storage.hasLiveSession(entryPath, false)) {
+    // The salvage await widens the check-then-delete window. Re-run every
+    // cheap gate before rmSync.
+    if (cwds) {
+      const markerPath = path.join(entryPath, Storage.ORPHAN_MARKER_FILE);
+      if (!fs.existsSync(markerPath)) {
         return;
       }
-      const newest = Storage.newestFileMtimeMs(entryPath);
-      if (newest > 0 && Date.now() - newest <= Storage.ORPHAN_STALE_AGE_MS) {
+      if (
+        Date.now() - fs.statSync(markerPath).mtimeMs <=
+        Storage.ORPHAN_STALE_AGE_MS
+      ) {
+        return;
+      }
+      if (cwds.some((cwd) => fs.existsSync(cwd) && !isTempDirPath(cwd))) {
         Storage.removeOrphanMarker(entryPath);
         return;
       }
-      fs.rmSync(entryPath, { recursive: true, force: true });
-      result.removed.push(entry);
-    } finally {
-      await releaseLock().catch(() => {});
     }
-  }
-
-  private static async acquireProjectDirLock(
-    entryPath: string,
-    waitForLock: boolean,
-  ): Promise<(() => Promise<void>) | undefined> {
-    const runtimeBaseDir = path.dirname(path.dirname(entryPath));
-    const lockRoot = path.join(
-      runtimeBaseDir,
-      TMP_DIR_NAME,
-      'orphan-cleanup-locks',
-    );
-    try {
-      fs.mkdirSync(lockRoot, { recursive: true });
-      return await lockfile.lock(
-        path.join(lockRoot, path.basename(entryPath)),
-        {
-          realpath: false,
-          stale: Storage.LOCK_STALE_AGE_MS,
-          update: 60_000,
-          retries: waitForLock
-            ? { retries: 20, minTimeout: 10, maxTimeout: 100 }
-            : 0,
-        },
-      );
-    } catch (error) {
-      // ELOCKED (retry budget out) and EEXIST (lock raced into existence)
-      // mean contention, not failure: a read claim degrades to the
-      // unclaimed read, and cleanup keeps the entry.
-      if (
-        waitForLock &&
-        !(
-          isNodeError(error) &&
-          (error.code === 'EACCES' ||
-            error.code === 'EPERM' ||
-            error.code === 'EROFS' ||
-            error.code === 'ELOCKED' ||
-            error.code === 'EEXIST')
-        )
-      ) {
-        throw error;
-      }
-      return undefined;
+    if (Storage.hasLiveSession(entryPath, false)) {
+      return;
     }
+    const newest = Storage.newestFileMtimeMs(entryPath);
+    if (newest > 0 && Date.now() - newest <= Storage.ORPHAN_STALE_AGE_MS) {
+      Storage.removeOrphanMarker(entryPath);
+      return;
+    }
+    fs.rmSync(entryPath, { recursive: true, force: true });
+    result.removed.push(entry);
   }
 
   /** Newest mtime among the entry's files (depth ≤ 2); 0 when none. */
@@ -1046,8 +973,9 @@ export class Storage {
    * removal for every caller, and transcripts can be large.
    *
    * `incomplete` reports a scan whose evidence may be partial — an
-   * artifact that failed to read or exceeded the per-file byte budget.
-   * Callers must treat incomplete evidence as vetoing deletion.
+   * artifact that failed to parse, failed to read, or exceeded the
+   * per-file byte budget. Callers must treat incomplete evidence as
+   * vetoing deletion.
    */
   static collectRecordedCwds(entryPath: string): {
     cwds: string[];
@@ -1115,104 +1043,35 @@ export class Storage {
     return false;
   }
 
-  /** Streams a transcript and records every line's cwd. */
+  /** Reads a bounded transcript and records every line's cwd. */
   private static scanFileForCwds(
     filePath: string,
     cwds: Set<string>,
     state: { incomplete: boolean },
   ): boolean {
-    let fd: number | undefined;
-    let bytesReadTotal = 0;
     try {
-      fd = fs.openSync(filePath, 'r');
-      const decoder = new StringDecoder('utf8');
-      const buf = Buffer.alloc(64 * 1024);
-      let leftover = '';
-      for (;;) {
-        const bytesRead = fs.readSync(fd, buf, 0, buf.length, null);
-        bytesReadTotal += bytesRead;
-        if (bytesReadTotal > Storage.CWD_SCAN_MAX_FILE_BYTES) {
-          state.incomplete = true;
-          return false;
-        }
-        const text = leftover + decoder.write(buf.subarray(0, bytesRead));
-        if (bytesRead === 0) {
-          if (leftover) {
-            if (Storage.extractLineCwds(leftover, cwds)) {
-              return true;
-            }
-            // Every writer terminates records with '\n', so a
-            // non-terminated tail at EOF is a torn write — its cwd may
-            // be lost; fail closed.
-            state.incomplete = true;
-          }
-          return false;
-        }
-        const lines = text.split('\n');
-        leftover = lines.pop() ?? '';
-        if (leftover.length > Storage.CWD_SCAN_MAX_FILE_BYTES) {
-          // One record longer than the whole budget: keep accumulating it
-          // would copy a growing prefix on every chunk. Give up —
-          // incomplete evidence vetoes deletion.
-          state.incomplete = true;
-          return false;
-        }
-        for (const line of lines) {
-          if (line && Storage.extractLineCwds(line, cwds)) return true;
+      if (fs.statSync(filePath).size > Storage.CWD_SCAN_MAX_FILE_BYTES) {
+        state.incomplete = true;
+        return false;
+      }
+      const text = fs.readFileSync(filePath, 'utf8');
+      if (text !== '' && !text.endsWith('\n')) {
+        state.incomplete = true;
+        return false;
+      }
+      for (const line of text.split('\n')) {
+        if (!line) continue;
+        const record = JSON.parse(line) as Record<string, unknown>;
+        const cwd = record['cwd'];
+        if (typeof cwd === 'string' && cwd) {
+          cwds.add(cwd);
+          if (Storage.isVetoCwd(cwd)) return true;
         }
       }
+      return false;
     } catch {
       state.incomplete = true;
       return false;
-    } finally {
-      if (fd !== undefined) {
-        try {
-          fs.closeSync(fd);
-        } catch {
-          // Ignore.
-        }
-      }
-    }
-  }
-
-  /**
-   * Records every `cwd` value on the line without parsing the record's
-   * (potentially huge) message payload. Records serialize `cwd` near
-   * the start, and a pattern scan also recovers cwds from oversized,
-   * `}{`-glued, or torn records. A false match inside message content
-   * only adds an extra cwd, which errs on the keep side.
-   */
-  private static extractLineCwds(line: string, cwds: Set<string>): boolean {
-    let pos = 0;
-    for (;;) {
-      const at = line.indexOf('"cwd"', pos);
-      if (at === -1) return false;
-      pos = at + '"cwd"'.length;
-      let i = pos;
-      while (i < line.length && line[i] === ' ') i++;
-      if (line[i] !== ':') continue;
-      i++;
-      while (i < line.length && line[i] === ' ') i++;
-      if (line[i] !== '"') continue;
-      let end = i + 1;
-      while (end < line.length) {
-        if (line[end] === '\\') {
-          end += 2;
-          continue;
-        }
-        if (line[end] === '"') break;
-        end++;
-      }
-      if (end >= line.length) return false;
-      try {
-        const value = JSON.parse(line.slice(i, end + 1)) as string;
-        if (value) {
-          cwds.add(value);
-          if (Storage.isVetoCwd(value)) return true;
-        }
-      } catch {
-        // Malformed escape sequence — not a real cwd value.
-      }
     }
   }
 
