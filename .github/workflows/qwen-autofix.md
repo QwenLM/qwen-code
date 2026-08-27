@@ -250,7 +250,9 @@ task-oriented guides — what a maintainer types and what happens next — see:
 - [146. review-address · Report dry-run / failure — The agent committed (verify recorded committed=true before any gate could fail),…](#af-146)
 - [147. review-address · Report dry-run / failure — Same byte-budget hygiene as the English excerpt above. 3000 bytes ≈ 1000 CJK…](#af-147)
 - [148. route — Persistent pool, not hosted: a hosted backlog queued route past the cron period, and af-005's…](#af-148)
-- [149. review-address · Prepare branch and feedback — Classify the live head: a round that pushes onto a fully GREEN head and leaves…](#af-149)
+- [149. review-address · Post autofix status comment — Round heartbeat: the announcement freezes at "working" for the whole round…](#af-149)
+- [150. review-address · Post autofix status comment — Deep-link "Watch live progress" to THIS matrix leg's live log, not just the run…](#af-150)
+- [151. review-address · Prepare branch and feedback — Classify the live head: a round that pushes onto a fully GREEN head and leaves…](#af-151)
 
 ---
 
@@ -2807,7 +2809,7 @@ running) is not blocking (the next scan re-checks once it starts).
 The dispatch-pending marker is exempted by context: it is this
 loop's own StatusContext busy signal (no .workflowName/.name, so
 it passes the filters above) and its dedicated TTL check above is
-the authority on it — the 330-minute horizon here would keep a
+the authority on it — the 375-minute horizon here would keep a
 stranded marker blocking long past its TTL.
 ```
 
@@ -3772,7 +3774,225 @@ trap, and an always() cleanup step mirroring issue-autofix.
 
 <a id="af-149"></a>
 
-### 149. review-address · Prepare branch and feedback — Classify the live head: a round that pushes onto a fully GREEN head and leaves…
+### 149. review-address · Post autofix status comment — Round heartbeat: the announcement freezes at "working" for the whole round…
+
+In `review-address` · `Post autofix status comment`.
+
+```text
+Round heartbeat: the announcement freezes at "working" for
+the whole round — up to the 130-minute agent step plus gate
+and repair — so on the PR page a healthy long round and a
+dead one look identical (observed on #9739: ~1.5h of
+silence). A detached loop started here re-PATCHes the SAME
+comment every 10 min with elapsed time and last agent
+activity (agent.log mtime — run-agent.mjs writes every
+stream event there; no parsing, and the thinking phase's
+10-minute stream-idle window shows as an honest "active N
+min ago"). EDITING one comment, not posting: a managed PR
+can run 100 rounds, and edits raise no issue_comment events
+(no workflow fan-out) and no notifications. The body renders
+through the heartbeat script's 'body' subcommand for the
+initial post AND every tick, so the two texts cannot drift.
+
+LIFETIME is bounded to the sandboxed agent phase: the
+verification gate kills the loop BEFORE it runs the
+branch's own build/tests ON THE HOST. The first design
+claimed "no fork code runs on the host beside this loop"
+for the whole round and review proved that false — the gate
+script says plainly that the branch's code runs there as
+the runner user. A PAT-holding host process concurrent with
+host-side branch code is a /proc/<pid>/environ read away
+from leaking the token (same UID; the pool's ptrace scope
+does NOT stand between — it gates ptrace attach, not this
+direct same-UID read; witnessed on the pool's host class:
+a non-descendant sibling extracted an environ canary with
+ptrace_scope=1), so the pulse covers the agent step — the
+longest, sandboxed phase — and dies before the gate. The
+comment holds its last tick through gate/repair; finalize
+flips the terminal text.
+
+KILL TARGETS travel through EXPRESSION CONTEXT: post_status
+records $! as heartbeat_pid, and the gate / finalize / the
+always() cleanup kill that value — delivered through each
+killer's step-level env: block (the STATUS_ID shape), so the
+runner sets it as data; an interpolation inside a run body
+would substitute a forged output BEFORE the shell parses, so
+it would execute as shell syntax in the consuming shell
+(R16-1). Never a pid read from a
+WORKDIR file: the agent's docker sandbox mounts the host
+/tmp on the same path and runs as this same user, so branch
+code the agent executes can plant any value in
+heartbeat.pid — an arbitrary same-UID kill in the hand of
+the next killer (this file class is known-hostile: the gate
+refuses to re-read its verdict from WORKDIR for the same
+reason). The on-disk pid file survives for diagnostics and
+the loop's OWN existence self-check only — tampering there
+can at worst end the pulse early or forge its "active"
+figure, never reach a kill or the token. The killers are
+INLINE bash in the yml: no PR-branch-controlled file is
+ever executed in a PAT-bearing or post-agent context, and
+the gate's own kill uses absolute-path/builtin command
+words per that step's shadowing doctrine.
+
+LIFECYCLE CONFIRMATION on every kill: the pid recorded at
+launch can be REUSED between the launch and a kill — the
+gate lands up to a whole agent phase after post_status
+recorded the id, and finalize and the always() cleanup run
+hours later still; by then the runner may have recycled
+the number. The blind form was probe-verified fatal:
+mapped to an unrelated detached session, the stale pid's
+kill block terminated it (pid, group AND session TERM).
+Every killer therefore confirms the pid's start time
+before signaling: post_status also records the loop's
+start time (heartbeat_start_ticks — field 22 of
+/proc/<pid>/stat, clock ticks since boot; index 19 after
+stripping through the LAST ')' of the parenthesized
+comm), and a killer signals only a pid whose stat still
+carries exactly that value. A reused pid necessarily
+carries a different start time and a dead pid carries no
+stat at all, so a failed check proves the loop is gone
+and killing nothing is right — the confirmation can only
+ever SUPPRESS a kill, never admit a wrong one (its
+residual is the narrow stat-read→signal window, the same
+residual the decimal check it replaces carried for its
+whole lifetime).
+
+PAT TRADE, chosen deliberately within that lifetime: the
+loop holds the bot PAT in env — a temporal overlap the
+"THIS step holds no PAT" rule (af-126) otherwise avoids.
+Accepted because within the agent phase the token never
+touches disk and the only host processes concurrent with
+the loop are trusted (run-agent.mjs, the bundled CLI) —
+plus two hardenings that keep the overlap honest. KILL:
+the overlap ends at the gate only if the kill covers the
+loop's whole SESSION — each tick's `timeout 60 gh` subtree
+runs in its OWN process group (coreutils timeout default)
+under the loop's setsid session, so a group/pid kill
+landing mid-tick leaves it alive holding the PAT for up to
+60s (witnessed on the pool's host class); all three
+killers therefore kill pid, group, AND session. PINS: the
+step's gh calls and every tick run under the af-112
+hermetic pins — pinned GH_HOST, dropped
+GH_TOKEN/GH_ENTERPRISE_TOKEN, and a fresh empty
+GH_CONFIG_DIR minted around EVERY call (the loop mints
+per tick, post_status mints per call inside its
+hermetic_gh wrapper, finalize mints adjacent to its
+single call) and removed right after. Without them the
+default ~/.config/gh on the shared attacker-writable
+HOME can carry http_unix_socket, and a planted same-UID
+listener then receives the tick's Authorization header
+WITH the PAT (witnessed with the pool's gh): exfil with
+no orphan, no /proc read and no kill miss, inside the
+legitimate overlap, where none of the trade arguments
+above reaches. The mint sits under the same-UID-writable
+RUNNER_TEMP, and a LONG-LIVED minted dir is itself
+plantable between calls — a config.yml with
+http_unix_socket written into it is read by the next
+call, witnessed with the pool's gh on the loop's 600s
+launch→first-call window (R11-1) — so the dir is minted
+milliseconds before each call and removed right after:
+the residual is a per-call mint→use race, not a
+persistent channel. RESOLUTION: the af-112
+pins close gh's CONFIG channel; the binary-resolution
+channel is closed separately. The PAT-bearing step and
+the loop both pin PATH from the stage-time TRUSTED_PATH
+capture BEFORE the first command word resolves (the R6-3
+doctrine): the job's own $GITHUB_PATH append keeps
+${RUNNER_TEMP}/qwen-bin ahead of /usr/bin, and a same-UID
+plant of gh/timeout/setsid/touch in any writable dir on
+the ambient PATH would otherwise be resolved with the PAT
+in env — witnessed: a planted setsid at launch and a
+planted gh mid-tick both received the token; the pinned
+forms never reached the plant. The loop validates the
+capture like any other launch input and fails fast
+without it; the killers in PAT-bearing steps take the
+same absolute-path/builtin command words as the gate's
+kill block. The alternative — heartbeat from the schedule
+scan or a watcher job — lands every ~40-70 min in this
+repo (af-027) and would re-derive comment id, run
+identity and liveness remotely: too slow and too much
+machinery for a pulse.
+
+ORPHAN DISCIPLINE on the persistent pool: the loop
+self-exits when the pid file no longer holds ITS OWN pid.
+This is an identity check, not an existence check — WORKDIR
+is PR-scoped, so after a crashed round's reset the next
+round recreates heartbeat.pid at the SAME path; existence
+alone would let the orphaned old loop pass and keep PATCHing
+its stale body onto the comment. Reclamation by rewrite is
+HOST-LOCAL: it fires only when the next same-PR round reuses
+the orphan's host. Cross-host — the fleet's general case,
+no per-PR runner affinity — nothing rewrites the file, the
+orphan keeps passing its own identity check, and it pulses
+its stale body onto the shared comment until the age cap
+(accepted residual risk, with its REAL profile: the orphan
+holds the bot PAT in /proc/<pid>/environ until the cap,
+and any same-UID process on that host — including another
+PR's round running its gate's host-side build/tests —
+reads it directly; the pool's ptrace scope does not gate
+this read, as witnessed above. The cap therefore sits just
+past the 330-minute job envelope — only a crash orphan
+ever reaches it, so the cap IS the bound on its token
+window. A cross-run kill keyed on a WORKDIR pid would
+reopen the untrusted-kill-target hole, so reclamation
+stays host-local). Reading the file to self-identify is
+safe (the loop never kills anything); the
+killers never read it, which is what keeps the
+untrusted-target hole closed — no cross-run kill. The other
+bounds: a heartbeat-stop marker, or the age cap just past
+the 330-minute job envelope; each tick's gh call is
+additionally wrapped in a 60s timeout so a black-holed
+connection cannot stall the loop past the cap. Killers that
+run in-round touch the stop marker BEFORE killing so a
+missed kill still ends the loop at its next self-check — a
+tick landing after the terminal text would overwrite it
+with a live-looking "working" line. The terminal text is
+additionally DRAINED, not slept past: the fixed 2s sleep
+proved wrong on probe — killing the client cannot cancel a
+PATCH the server already ACCEPTED (reproduced: WORKING
+accepted 1.67s in, TERMINAL submitted 3.80s in, the stale
+WORKING committed 6.67s in and flipped the comment back to
+live-looking). Each tick therefore stamps its start epoch
+into heartbeat-tick-inflight around its gh call and
+removes it after; finalize waits until the stamp is ABSENT
+or older than the 65s completion bound (the tick's 60s
+gh timeout plus margin) BEFORE its terminal PATCH — every
+request started before that bound has committed or died
+by the time the terminal text goes up. The stamp is a
+wait input, never a kill target: a planted fresh stamp
+costs at most the bound in finalize delay, a planted
+deletion reopens only the cosmetic overwrite (nothing
+rides the stamp but the comment text), and finalize's
+read is bounded like the loop's pid-file read so a
+planted FIFO cannot stall it.
+```
+
+<a id="af-150"></a>
+
+### 150. review-address · Post autofix status comment — Deep-link "Watch live progress" to THIS matrix leg's live log, not just the run…
+
+In `review-address` · `Post autofix status comment`.
+
+````text
+Deep-link "Watch live progress" to THIS matrix leg's live
+log, not just the run page: the run page lists every leg of
+the scan and the reader must find which one is theirs. The
+job id comes from the current run ATTEMPT's jobs listing
+matched on the name prefix "review-address (<pr>," — the
+matrix name format this job has always used — read through
+jq with --arg so the PR number enters as data, never string
+interpolation. BEST-EFFORT by construction: any lookup
+failure (API error, unexpected shape) leaves the run URL, so
+the link is never worse than before this existed. The
+finalize text keeps the run URL on purpose: once the round
+ends the run page is the right destination (all steps, all
+attempts), and one less thing to re-resolve on the
+crashed-agent paths where this step's outputs may be all
+that survived.
+
+<a id="af-151"></a>
+
+### 151. review-address · Prepare branch and feedback — Classify the live head: a round that pushes onto a fully GREEN head and leaves…
 
 In `review-address` · `Prepare branch and feedback`.
 
@@ -3830,12 +4050,18 @@ could charge the loop for someone else's red. A head that
 moved (a human push, a base update) breaks the head equality
 and drops the charge. A re-arm changes the window key and
 drops the whole set with it. Cancelled checks are not red
-here, matching the scan's own N_RED_NOW filter, and the
-autofix workflow's own checks are excluded the same way the
-feedback renderer excludes them. What remains uncovered is a
+here, matching the scan's own N_RED_NOW filter. The loop's
+own lanes are excluded wholesale by the canonical five-name
+filter this file's other own-lane filters use — deliberately
+NOT the feedback renderer's review-address carve-out, which
+keeps failed and in-flight address runs visible as feedback:
+a charge verdict must never see them (a failed own round is
+feedback, not a regression the pushed code authored, and an
+in-flight own check would hold the verdict at pending across
+the trigger family whose suite attaches to the PR head). What remains uncovered is a
 flake: a genuinely flaky check failing on the bot's push
 reads as a regression. The consequence is bounded on purpose
 — one regression only declines to RESET a counter that needs
 five consecutive non-progress rounds to trip, and the
-recovery is automatic, since a clean push resets it.
-```
+recovery is automatic, since a clean push resets it.```
+````

@@ -500,7 +500,7 @@ if [[ "${OUTCOME}" == "fixed" ]]; then
     echo
     echo "<!-- autofix-eval ts=${NEWEST} acted=true round=${NEXT_ROUND} win=${WINDOW:-none} -->"
     echo "<!-- autofix-redcheck head=${REPORT_HEAD} -->"
-    # Regression accounting (af-149). Two distinct facts, both keyed to the
+    # Regression accounting (af-151). Two distinct facts, both keyed to the
     # eval marker's window so the consecutive-failure walk reads them with
     # the same filter it already applies to the eval markers:
     #   autofix-push       — what THIS round pushed, and whether the head it
