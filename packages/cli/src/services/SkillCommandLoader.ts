@@ -12,6 +12,7 @@ import {
   applySkillAllowedTools,
   recordAutoSkillUsage,
 } from '@qwen-code/qwen-code-core';
+import { skillMatchesSettingName } from '../config/skill-settings.js';
 import { dirname } from 'node:path';
 import type { ICommandLoader } from './types.js';
 import {
@@ -94,7 +95,7 @@ export class SkillCommandLoader implements ICommandLoader {
       const disabled =
         this.config?.getDisabledSkillNames() ?? new Set<string>();
       const visibleSkills = allSkills.filter(
-        (skill) => !disabled.has(skill.name.toLowerCase()),
+        (skill) => !skillMatchesSettingName(skill, disabled),
       );
       const nonUserInvocableCount = visibleSkills.filter(
         (skill) => skill.userInvocable === false,

@@ -206,6 +206,7 @@ import {
   computeInitialTurnFromHistory as computeInitialTurnFromHistoryCore,
   buildGoalContinuationParts,
 } from '@qwen-code/qwen-code-core';
+import { skillMatchesSettingName } from '../../config/skill-settings.js';
 import { NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE } from '@qwen-code/acp-bridge/bridgeErrors';
 import { CHANNEL_PROMPT_META_KEY } from '@qwen-code/channel-base';
 import { QWEN_CODE_SERVE_ENV } from '../../config/acp-channel-fallback.js';
@@ -1772,22 +1773,27 @@ export async function buildAvailableCommandsSnapshot(
 
   const visibleSlashCommands = slashCommands.filter((cmd) => {
     if (cmd.kind !== CommandKind.SKILL || !cmd.skillDetail) return true;
-    const skillName = cmd.skillDetail.name.toLowerCase();
+    const detailExtensionName =
+      'extensionName' in cmd.skillDetail &&
+      typeof cmd.skillDetail.extensionName === 'string'
+        ? cmd.skillDetail.extensionName
+        : undefined;
     const isInactiveExtensionCommand =
       cmd.skillDetail.level === 'extension' &&
       isInactiveExtensionSkill(
         {
           name: cmd.skillDetail.name,
           level: 'extension',
-          extensionName:
-            'extensionName' in cmd.skillDetail &&
-            typeof cmd.skillDetail.extensionName === 'string'
-              ? cmd.skillDetail.extensionName
-              : undefined,
+          extensionName: detailExtensionName,
         },
         inactiveSkillRefs,
       );
-    return !disabledSkillNames.has(skillName) && !isInactiveExtensionCommand;
+    return (
+      !skillMatchesSettingName(
+        { name: cmd.skillDetail.name, extensionName: detailExtensionName },
+        disabledSkillNames,
+      ) && !isInactiveExtensionCommand
+    );
   });
 
   const availableCommands: AvailableCommand[] = visibleSlashCommands.map(

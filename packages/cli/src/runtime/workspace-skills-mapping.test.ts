@@ -69,6 +69,21 @@ describe('mapSkillConfigToStatus', () => {
     expect(status.lockedScope).toBe('user');
   });
 
+  it('matches a legacy bare disablement for a collision-qualified skill', () => {
+    const status = mapSkillConfigToStatus(
+      makeSkill({
+        name: 'rust:pdf',
+        level: 'extension',
+        extensionName: 'rust',
+        extensionDisplayName: 'Rust',
+      }),
+      new Map([['pdf', { reason: 'hard' }]]),
+    );
+
+    expect(status.status).toBe('disabled');
+    expect(status.disabledReason).toBe('hard');
+  });
+
   it('marks a forced-disabled skill as disabled', () => {
     const status = mapSkillConfigToStatus(
       makeSkill(),

@@ -39,6 +39,7 @@ import {
   applySkillAllowedTools,
   collectAvailableSkillEntries,
   clearCollectedSkillEntriesCache,
+  isDisabledSkillName,
 } from './skill-utils.js';
 
 /**
@@ -233,7 +234,16 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
     // `fileBasedSkillNames` exclusion in `refreshSkills`, a disabled skill
     // no longer shadows a same-named non-skill command, and we don't want
     // this branch to block the legitimate command path.
-    if (this.config.getDisabledSkillNames().has(params.skill.toLowerCase())) {
+    if (
+      isDisabledSkillName(
+        params.skill,
+        this.config.getDisabledSkillNames(),
+        (lowered) =>
+          this.availableSkills.find(
+            (skill) => skill.name.toLowerCase() === lowered,
+          ),
+      )
+    ) {
       return `Skill "${params.skill}" is disabled. Re-enable it via /skills or remove it from skills.disabled.`;
     }
 
@@ -526,9 +536,15 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
     // the `skills.disabled` setting, so without this guard a disabled
     // skill would still execute its body whenever it shadows a real
     // command.
-    const disabled = this.config
-      .getDisabledSkillNames()
-      .has(this.params.skill.toLowerCase());
+    const disabled = isDisabledSkillName(
+      this.params.skill,
+      this.config.getDisabledSkillNames(),
+      (lowered) =>
+        this.config
+          .getSkillManager()
+          ?.getCachedSkills()
+          ?.find((skill) => skill.name.toLowerCase() === lowered),
+    );
     if (disabled) {
       let disabledCommandFallbackAttempted = false;
       if (this.commandExecutor) {

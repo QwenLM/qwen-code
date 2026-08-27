@@ -30,6 +30,7 @@ import {
   formatContextFileDisplayPath,
   type CompactionThresholds,
 } from '@qwen-code/qwen-code-core';
+import { skillMatchesSettingName } from '../../config/skill-settings.js';
 import { t } from '../../i18n/index.js';
 import * as path from 'node:path';
 
@@ -374,7 +375,7 @@ export async function collectContextData(
     memoryFiles: showDetails ? detailMemoryFiles : [],
     skills: showDetails
       ? detailSkills.filter(
-          (skill) => !disabledSkillNames.has(skill.name.toLowerCase()),
+          (skill) => !skillMatchesSettingName(skill, disabledSkillNames),
         )
       : [],
     isEstimated,

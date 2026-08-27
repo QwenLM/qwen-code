@@ -8,7 +8,10 @@ import { describe, expect, it } from 'vitest';
 import { SettingScope } from './settings.js';
 import {
   computeWorkspaceSkillListUpdates,
+  lookupSkillDisablement,
   resolveSkillSettings,
+  skillMatchesSettingName,
+  skillSettingKeys,
   updateWorkspaceSkillSettingLists,
 } from './skill-settings.js';
 
@@ -224,5 +227,42 @@ describe('computeWorkspaceSkillListUpdates', () => {
 
     expect(result.enabled).toEqual(['Review']);
     expect(result.enabledChanged).toBe(true);
+  });
+});
+
+describe('skill setting name matching (#9408 collision renames)', () => {
+  it('matches a legacy bare entry against a collision-qualified skill', () => {
+    const skill = { name: 'rust:pdf', extensionName: 'rust' };
+    expect(skillSettingKeys(skill)).toEqual(['rust:pdf', 'pdf']);
+    expect(skillMatchesSettingName(skill, new Set(['pdf']))).toBe(true);
+    expect(
+      lookupSkillDisablement(skill, new Map([['pdf', { reason: 'hard' }]])),
+    ).toEqual({ reason: 'hard' });
+  });
+
+  it('keeps unqualified skills single-keyed', () => {
+    expect(skillSettingKeys({ name: 'pdf' })).toEqual(['pdf']);
+    expect(
+      skillMatchesSettingName({ name: 'pdf' }, new Set(['rust:pdf'])),
+    ).toBe(false);
+  });
+
+  it('prefers the precise qualified entry over the legacy bare one', () => {
+    const skill = { name: 'rust:pdf', extensionName: 'rust' };
+    expect(
+      lookupSkillDisablement(
+        skill,
+        new Map([
+          ['rust:pdf', { reason: 'hard', lockedScope: 'user' }],
+          ['pdf', { reason: 'default' }],
+        ]),
+      ),
+    ).toEqual({ reason: 'hard', lockedScope: 'user' });
+  });
+
+  it('does not let another extension own the prefix', () => {
+    expect(
+      skillSettingKeys({ name: 'other:pdf', extensionName: 'rust' }),
+    ).toEqual(['other:pdf']);
   });
 });

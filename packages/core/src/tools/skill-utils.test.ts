@@ -10,6 +10,8 @@ import {
   collectAvailableSkillEntries,
   clearCollectedSkillEntriesCache,
   clearLoadedSkillTracking,
+  isDisabledSkillName,
+  skillSettingKeys,
 } from './skill-utils.js';
 import { ToolNames } from './tool-names.js';
 import type { ToolRegistry } from './tool-registry.js';
@@ -175,5 +177,50 @@ describe('clearLoadedSkillTracking', () => {
     expect(() =>
       clearLoadedSkillTracking(registry, 'test-boundary'),
     ).not.toThrow();
+  });
+});
+
+describe('skill setting name matching', () => {
+  it('derives the bare spelling from a collision-qualified name', () => {
+    expect(
+      skillSettingKeys({ name: 'rust:pdf', extensionName: 'rust' }),
+    ).toEqual(['rust:pdf', 'pdf']);
+  });
+
+  it('passes unqualified names through as a single key, normalized', () => {
+    expect(skillSettingKeys({ name: 'pdf' })).toEqual(['pdf']);
+    expect(skillSettingKeys({ name: '  PDF ', extensionName: 'rust' })).toEqual(
+      ['pdf'],
+    );
+  });
+
+  it('keeps the full name when a different extension owns the prefix', () => {
+    expect(
+      skillSettingKeys({ name: 'other:pdf', extensionName: 'rust' }),
+    ).toEqual(['other:pdf']);
+  });
+
+  it('isDisabledSkillName matches the literal and legacy bare spellings', () => {
+    const disabled = new Set(['pdf']);
+    expect(isDisabledSkillName('pdf', disabled, () => undefined)).toBe(true);
+    expect(
+      isDisabledSkillName('rust:pdf', disabled, (lowered) =>
+        lowered === 'rust:pdf'
+          ? { name: 'rust:pdf', extensionName: 'rust' }
+          : undefined,
+      ),
+    ).toBe(true);
+    expect(
+      isDisabledSkillName('rust:pdf', new Set(['rust:pdf']), () => undefined),
+    ).toBe(true);
+    // Another extension's qualified spelling must not match a legacy
+    // entry for a different owner.
+    expect(
+      isDisabledSkillName('other:pdf', new Set(['rust:pdf']), (lowered) =>
+        lowered === 'other:pdf'
+          ? { name: 'other:pdf', extensionName: 'other' }
+          : undefined,
+      ),
+    ).toBe(false);
   });
 });

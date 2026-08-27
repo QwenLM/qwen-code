@@ -549,6 +549,32 @@ describe('SkillCommandLoader', () => {
       expect(commands.map((c) => c.name)).toEqual(['KeepMe']);
     });
 
+    it('keeps a legacy bare disablement matching a collision-qualified skill', async () => {
+      // Entry written before #9408's collision rename, when the skill
+      // registered under its bare manifest name.
+      mockSkillManager.listSkills.mockImplementation(
+        ({ level }: { level: string }) => {
+          if (level === 'extension')
+            return Promise.resolve([
+              makeSkill({
+                name: 'rust:pdf',
+                level: 'extension',
+                extensionName: 'rust',
+              }),
+            ]);
+          return Promise.resolve([]);
+        },
+      );
+      (
+        mockConfig.getDisabledSkillNames as ReturnType<typeof vi.fn>
+      ).mockReturnValue(new Set(['pdf']));
+
+      const loader = new SkillCommandLoader(mockConfig);
+      const commands = await loader.loadCommands(signal);
+
+      expect(commands.map((c) => c.name)).toEqual([]);
+    });
+
     it('reflects provider mutations on each load (live read)', async () => {
       // Regression: the provider must be called per-load, not cached, so
       // CommandService rebuilds (triggered by `reloadCommands`) pick up

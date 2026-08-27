@@ -13,6 +13,7 @@ import {
 import { MessageType } from '../types.js';
 import { t } from '../../i18n/index.js';
 import { normalizeSkillPriority } from '@qwen-code/qwen-code-core';
+import { skillMatchesSettingName } from '../../config/skill-settings.js';
 import { levelLabel } from '../utils/skill-level-label.js';
 
 export const skillsCommand: SlashCommand = {
@@ -68,7 +69,7 @@ export const skillsCommand: SlashCommand = {
       (skill) => skill.userInvocable !== false,
     );
     const visibleSkills = userInvocableSkills.filter(
-      (s) => !disabled.has(s.name.toLowerCase()),
+      (s) => !skillMatchesSettingName(s, disabled),
     );
     if (visibleSkills.length === 0) {
       const content =

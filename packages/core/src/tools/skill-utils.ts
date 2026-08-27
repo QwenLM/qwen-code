@@ -322,3 +322,42 @@ export function clearLoadedSkillTracking(
     );
   }
 }
+
+/**
+ * Every settings-list spelling a skill can match: its registry name and,
+ * when collision qualification renamed it to `<extensionName>:<name>`
+ * (#9408), the pre-rename bare manifest name. The qualified spelling comes
+ * first so a precise entry wins over the legacy one. (Core-local mirror of
+ * the canonical helpers in the CLI's `skill-settings.ts`, which owns the
+ * `skills.*` setting files.)
+ */
+export function skillSettingKeys(skill: {
+  name: string;
+  extensionName?: string;
+}): string[] {
+  const lowered = skill.name.trim().toLowerCase();
+  const owner = skill.extensionName?.trim().toLowerCase();
+  if (owner && lowered.startsWith(`${owner}:`)) {
+    return [lowered, lowered.slice(owner.length + 1)];
+  }
+  return [lowered];
+}
+
+/**
+ * Whether a user/model-supplied skill name is disabled. Beyond the literal
+ * spelling, a typed qualified name (`rust:pdf`) also matches a legacy bare
+ * settings entry (`pdf`) when the cached skill carries that extension —
+ * the upgrade path from #9408's collision renames. `findSkill` supplies
+ * the cached skill matching the typed name so the extension is known.
+ */
+export function isDisabledSkillName(
+  rawName: string,
+  disabledNames: ReadonlySet<string>,
+  findSkill: (loweredName: string) => { extensionName?: string } | undefined,
+): boolean {
+  const lowered = rawName.trim().toLowerCase();
+  if (disabledNames.has(lowered)) return true;
+  const match = findSkill(lowered);
+  if (!match) return false;
+  return skillSettingKeys(match).some((key) => disabledNames.has(key));
+}

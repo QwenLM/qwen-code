@@ -6,7 +6,10 @@
 
 import type { SkillConfig } from '@qwen-code/qwen-code-core';
 import type { ServeWorkspaceSkillStatus } from '@qwen-code/acp-bridge/status';
-import type { SkillDisablement } from '../config/skill-settings.js';
+import {
+  lookupSkillDisablement,
+  type SkillDisablement,
+} from '../config/skill-settings.js';
 
 /**
  * Maps a `SkillConfig` (as `SkillManager.listSkills()` returns) to the
@@ -20,7 +23,7 @@ export function mapSkillConfigToStatus(
   disablements: ReadonlyMap<string, SkillDisablement> = new Map(),
   opts: { disabled?: boolean } = {},
 ): ServeWorkspaceSkillStatus {
-  const disablement = disablements.get(skill.name.toLowerCase());
+  const disablement = lookupSkillDisablement(skill, disablements);
   const disabledReason = opts.disabled
     ? 'inactive_extension'
     : disablement?.reason;

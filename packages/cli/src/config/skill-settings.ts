@@ -46,6 +46,42 @@ export function skillSettingStrings(
     : [];
 }
 
+/**
+ * Every settings-list spelling a skill can match: its registry name and,
+ * when collision qualification renamed it to `<extensionName>:<name>`
+ * (#9408), the pre-rename bare manifest name. The qualified spelling comes
+ * first so a precise entry wins over the legacy one.
+ */
+export function skillSettingKeys(skill: {
+  name: string;
+  extensionName?: string;
+}): string[] {
+  const lowered = skill.name.trim().toLowerCase();
+  const owner = skill.extensionName?.trim().toLowerCase();
+  if (owner && lowered.startsWith(`${owner}:`)) {
+    return [lowered, lowered.slice(owner.length + 1)];
+  }
+  return [lowered];
+}
+
+export function skillMatchesSettingName(
+  skill: { name: string; extensionName?: string },
+  names: ReadonlySet<string>,
+): boolean {
+  return skillSettingKeys(skill).some((key) => names.has(key));
+}
+
+export function lookupSkillDisablement(
+  skill: { name: string; extensionName?: string },
+  disablements: ReadonlyMap<string, SkillDisablement>,
+): SkillDisablement | undefined {
+  for (const key of skillSettingKeys(skill)) {
+    const hit = disablements.get(key);
+    if (hit !== undefined) return hit;
+  }
+  return undefined;
+}
+
 export function resolveSkillSettings(
   settings: LoadedSettings,
 ): ResolvedSkillSettings {
