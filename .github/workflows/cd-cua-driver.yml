@@ -80,6 +80,12 @@ jobs:
             exit 1
           fi
 
+          DRIVER_VERSION=$(tr -d '[:space:]' < packages/cua-driver/rust/VERSION)
+          if [[ "$DRIVER_VERSION" != "$VERSION" ]]; then
+            echo "::error::Release version $VERSION does not match driver version $DRIVER_VERSION"
+            exit 1
+          fi
+
           SDK_NAME=$(node -p "require('./packages/cua-driver/typescript/package.json').name")
           SDK_VERSION=$(node -p "require('./packages/cua-driver/typescript/package.json').version")
           if [[ "$SDK_NAME" != "@qwen-code/cua-sdk" ]]; then
@@ -803,14 +809,6 @@ jobs:
         with:
           name: 'cua-sdk-npm-${{ needs.validate-version.outputs.version }}'
           path: '${{ runner.temp }}/cua-sdk-package'
-      - name: 'Require npm publishing token'
-        env:
-          NODE_AUTH_TOKEN: '${{ secrets.NPM_TOKEN }}'
-        run: |
-          if [[ -z "$NODE_AUTH_TOKEN" ]]; then
-            echo '::error::production-release NPM_TOKEN is required for the first @qwen-code/cua-sdk publication'
-            exit 1
-          fi
       - name: 'Clean-install against the published GitHub Release'
         env:
           QWEN_CUA_SDK_CACHE_DIR: '${{ runner.temp }}/public-release-cache'
@@ -864,7 +862,6 @@ jobs:
           '
       - name: 'Publish immutable SDK tarball'
         env:
-          NODE_AUTH_TOKEN: '${{ secrets.NPM_TOKEN }}'
           VERSION: '${{ needs.validate-version.outputs.version }}'
         run: |
           set -euo pipefail
@@ -934,17 +931,8 @@ jobs:
           name: 'node-repl-mcp-npm-${{
             needs.validate-version.outputs.node_repl_version }}'
           path: '${{ runner.temp }}/node-repl-package'
-      - name: 'Require npm publishing token'
-        env:
-          NODE_AUTH_TOKEN: '${{ secrets.NPM_TOKEN }}'
-        run: |
-          if [[ -z "$NODE_AUTH_TOKEN" ]]; then
-            echo '::error::production-release NPM_TOKEN is required for the first @qwen-code/node-repl-mcp publication'
-            exit 1
-          fi
       - name: 'Publish immutable Node REPL tarball'
         env:
-          NODE_AUTH_TOKEN: '${{ secrets.NPM_TOKEN }}'
           VERSION: '${{ needs.validate-version.outputs.node_repl_version }}'
         run: |
           set -euo pipefail

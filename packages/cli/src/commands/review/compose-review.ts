@@ -86,7 +86,7 @@ import {
   type Ledger,
   type LedgerFinding,
 } from './lib/ledger.js';
-import { mdField } from './lib/md-field.js';
+import { mdField, stripCommentGrammar } from './lib/md-field.js';
 import {
   convergenceAdvisory,
   convergenceAssessment,
@@ -1234,10 +1234,95 @@ function linkifyCommentRefs(text: string, pr: PrIdentity | null): string {
  * A model-written entry flattened to one renderable list line, its `comment
  * <id>` refs linked to the PR's anchors. Entries render as one-line list
  * items: an unindented newline ends a list item (CommonMark), so an entry
- * spanning lines would leak its continuation out of the list.
+ * spanning lines would leak its continuation out of the list. Comment
+ * grammar goes inert too — a quoted `<!-- qwen-review-… -->` literal would
+ * otherwise forge a second marker occurrence in the raw body the pipeline's
+ * own readers scan (md-field.ts documents the shipped ledger-marker case).
+ * Both callers already neutralized upstream through `quotedProse` (the
+ * strip is idempotent); this copy is the list line's OWN guarantee, so a
+ * caller that skips the upstream order cannot re-open the forgery.
  */
 function asListLine(text: string, pr: PrIdentity | null): string {
-  return linkifyCommentRefs(collapseToLine(text), pr);
+  return linkifyCommentRefs(collapseToLine(stripCommentGrammar(text)), pr);
+}
+
+/**
+ * A model-written entry on its way to a verbatim body exit — the ONE order
+ * its two sanitations compose in, stated once for the three exits
+ * (bodyCriticals, cannot-tell, duplicates) and the ledger title.
+ *
+ * Comment grammar goes inert BEFORE the attribution strips run. Those
+ * strips match on the DISPLAYED projection, which drops an HTML comment
+ * whole, so a forged footer wrapped as `<!-- _— … via Qwen Code /review
+ * … -->` is invisible to every one of them — and neutralizing the grammar
+ * AFTER the chain materialized exactly that footer as visible text in the
+ * attribution-off post that exists to carry none (pre-neutralization the
+ * wrapper rendered as nothing). Neutralized first, the footer is ordinary
+ * text the chain strips like any other.
+ *
+ * The one exception runs ahead of the neutralization: the marker-LINE strip
+ * is the single strip in the chain that acts on comment grammar itself (a
+ * transcribed posted comment carries its trailing `<!-- qwen-review … -->`
+ * on its own line), and once the grammar is inert it can never fire —
+ * the line would post as visible words instead of dropping as it always
+ * has. Attribution on keeps entries as written, that mode's contract.
+ *
+ * Both modes end on the trailing strip, the shape `submit`'s post transform
+ * already uses: ingest ran it before the grammar went inert, and only this
+ * pass sees a footer that rode in wrapped.
+ *
+ * The pass repeats until nothing changes, because each half can re-form
+ * what the other just removed — a single ordered pass closes neither
+ * direction. The strips SPLICE: cutting two footer spans out of `x <!-‹span›-
+ * qwen-review-deferred --‹span›> y` joins `<!-` to `- … --` to `>` and
+ * posts a live `<!-- qwen-review-deferred -->` (or a forged ledger opener)
+ * the grammar strip never saw, because no delimiter existed when it ran.
+ * And neutralization JOINS: `via Qwen<!-‹span›-Code /review` strips to
+ * `Qwen<!--Code`, which neutralizes to the footer phrase `via Qwen Code
+ * /review` the chain has already finished looking for — so a trailing
+ * grammar strip alone (the obvious patch) trades the forged marker for a
+ * forged footer. Every strip in the chain deletes or leaves its input
+ * alone, none lengthens, so the loop ends within the entry's length; and
+ * at the fixpoint every step is the identity on its input (a changing
+ * step strictly shortens), so the result carries no comment grammar, no
+ * marker line, no footer span and no trailing footer at once — the
+ * closure a caller can rely on without knowing which strip ran last.
+ */
+function quotedProse(text: string, attribution: boolean): string {
+  let current = text;
+  for (;;) {
+    const inert = stripCommentGrammar(
+      attribution ? current : stripCommentMarkerLines(current),
+    );
+    const next = stripReviewFooter(
+      attribution ? inert : stripForUnattributedPost(inert),
+    );
+    if (next === current) return current;
+    current = next;
+  }
+}
+
+/**
+ * Whether an entry would post as nothing from a verbatim body exit — the
+ * gate `ingestBodyCriticals` and the cannot-tell ingest share, stated once
+ * so the two cannot drift from each other or from the render legs.
+ *
+ * Two projections, both refused: the entry as written through the
+ * attribution-off strip chain (a marker-only or comment-only draft is
+ * invisible scaffolding whatever the exit later makes of it — the shape
+ * `submit`'s gate refuses), and the entry through the exit's own closure,
+ * `quotedProse`. The second is not implied by the first: the closure
+ * neutralizes comment grammar and re-runs the chain on what that exposes,
+ * so an entry held up only by a footer that comment grammar had split —
+ * `_— m via Qwen<!-‹span›-Code /review_` — projects as visible prose
+ * as written yet strips to nothing at the exit, and would post as an
+ * empty body Critical that still counts toward REQUEST_CHANGES.
+ */
+function rendersAsNothingAtExit(entry: string): boolean {
+  return (
+    rendersAsNothing(stripReviewFooter(stripForUnattributedPost(entry))) ||
+    rendersAsNothing(quotedProse(entry, false))
+  );
 }
 
 /**
@@ -1261,12 +1346,13 @@ function formatCannotTell(
     // Entries arrive collapsed (one list item each); an unattributed entry
     // goes through the full fixpoint sanitation — the entry is quoted into
     // a body that carries no canonical footer, so a surviving footer or
-    // marker in any position would be the post's only attribution. The
-    // marker check goes through `severityOf` (trims first — a leading space
-    // used to leak the marker past this strip into the posted body), and
-    // the strip is iterative — a looping model drafts stacked markers and a
-    // single slice posts the second one.
-    const source = attribution ? raw : stripForUnattributedPost(raw);
+    // marker in any position would be the post's only attribution — with
+    // its comment grammar inert FIRST (`quotedProse` says why the order is
+    // load-bearing). The marker check goes through `severityOf` (trims
+    // first — a leading space used to leak the marker past this strip into
+    // the posted body), and the strip is iterative — a looping model drafts
+    // stacked markers and a single slice posts the second one.
+    const source = quotedProse(raw, attribution);
     const unmarked =
       severityOf({ body: source }) === null
         ? source
@@ -1393,9 +1479,7 @@ function strippedList(
   attribution: boolean,
 ): string[] {
   return toStringList(input[key], key)
-    .map((entry) =>
-      stripReviewFooter(attribution ? entry : stripForUnattributedPost(entry)),
-    )
+    .map((entry) => quotedProse(entry, attribution))
     .filter((entry) => entry.trim() !== '');
 }
 
@@ -2516,9 +2600,10 @@ function ingestBodyCriticals(value: unknown): string[] {
   // post: strip the trailing forged footer BEFORE the emptiness projection
   // (mirroring `submit`'s gate) — otherwise a footer past the strip's caps
   // passes as ballast, the render legs strip it entirely, and a bare-marker
-  // entry posts and counts.
+  // entry posts and counts. And it projects through the exit's closure as
+  // well (`rendersAsNothingAtExit` says why one projection is not enough).
   for (const entry of entries) {
-    if (rendersAsNothing(stripReviewFooter(stripForUnattributedPost(entry)))) {
+    if (rendersAsNothingAtExit(entry)) {
       throw new Error(
         'compose-review: a body Critical renders as nothing (marker-only, ' +
           'empty comment, or otherwise invisible) — redraft it with the ' +
@@ -2689,7 +2774,7 @@ function composeReviewBody(
   // to nothing must fail the draft, not vanish — silently dropping it lifts
   // the `cannot-tell-existing-critical` cap and flips the verdict.
   for (const entry of cannotTell) {
-    if (rendersAsNothing(stripReviewFooter(stripForUnattributedPost(entry)))) {
+    if (rendersAsNothingAtExit(entry)) {
       throw new Error(
         'compose-review: a cannot-tell entry renders as nothing ' +
           '(marker-only, empty comment, or otherwise invisible) — ' +
@@ -4218,8 +4303,11 @@ function composeReviewBody(
     }
     const bareGap =
       bareIds.length > 0 ? describeChunkGap(bareIds, plannedChunks) : null;
-    const shown = [...(bareGap ? [bareGap.phrase] : []), ...callerNamed];
-    const shownZh = [...(bareGap ? [bareGap.phraseZh] : []), ...callerNamed];
+    // Caller-named entries are prose the CLI does not control; comment
+    // grammar goes inert like at every other verbatim exit.
+    const callerShown = callerNamed.map((entry) => stripCommentGrammar(entry));
+    const shown = [...(bareGap ? [bareGap.phrase] : []), ...callerShown];
+    const shownZh = [...(bareGap ? [bareGap.phraseZh] : []), ...callerShown];
     notReviewedParts.push({
       en: `Not reviewed: ${shown.join(', ')} — a line there exceeds the read limit.`,
       zh: `未审查：${shownZh.join('、')}——其中有一行超出单次读取上限。`,
@@ -4262,16 +4350,19 @@ function composeReviewBody(
   const whiffedDimensions = callerLeft.filter((d) => !d.includes(' — '));
   const explainedCaller = callerLeft.filter((d) => d.includes(' — '));
   if (whiffedDimensions.length > 0) {
+    const whiffedShown = whiffedDimensions.map((d) => stripCommentGrammar(d));
     notReviewedParts.push({
-      en: `Not reviewed: ${whiffedDimensions.join(', ')} — the agent returned no evidence of its walk twice.`,
-      zh: `未审查：${whiffedDimensions.join('、')}——该 agent 连续两次未返回任何检查过程的证据。`,
+      en: `Not reviewed: ${whiffedShown.join(', ')} — the agent returned no evidence of its walk twice.`,
+      zh: `未审查：${whiffedShown.join('、')}——该 agent 连续两次未返回任何检查过程的证据。`,
     });
   }
   for (const d of explainedCaller) {
-    // Caller prose, untranslatable by construction — quoted as-is in both.
+    // Caller prose, untranslatable by construction — quoted as-is in both,
+    // its comment grammar inert.
+    const disclosed = stripCommentGrammar(d);
     notReviewedParts.push({
-      en: `Not reviewed: ${d}.`,
-      zh: `未审查：${d}。`,
+      en: `Not reviewed: ${disclosed}.`,
+      zh: `未审查：${disclosed}。`,
     });
   }
   // Budget-gap disclosures, one BOUNDED sentence for all of them. Four
@@ -4389,20 +4480,20 @@ function composeReviewBody(
       ...[...named].map(([subject, { count }]) =>
         count > 1 ? `${subject} (×${count})` : subject,
       ),
-    ];
+    ].map((part) => stripCommentGrammar(part));
     const shownZh = [
       ...(gap ? [gap.phraseZh] : []),
       ...[...named.values()].map(({ zh, count }) =>
         count > 1 ? `${zh}（×${count}）` : zh,
       ),
-    ];
+    ].map((part) => stripCommentGrammar(part));
     const reasonZh = reasonZhOf.get(reason) ?? reason;
     notReviewedParts.push({
       en: reason
-        ? `Not reviewed: ${shown.join(', ')} — ${reason}.`
+        ? `Not reviewed: ${shown.join(', ')} — ${stripCommentGrammar(reason)}.`
         : `Not reviewed: ${shown.join(', ')}.`,
       zh: reason
-        ? `未审查：${shownZh.join('、')}——${reasonZh}。`
+        ? `未审查：${shownZh.join('、')}——${stripCommentGrammar(reasonZh)}。`
         : `未审查：${shownZh.join('、')}。`,
     });
   }
@@ -4439,9 +4530,17 @@ function composeReviewBody(
   // attributed template's severity signal; an unattributed post quotes the
   // blocker through the full fixpoint sanitation — no prefix, no forged
   // footer in any position (the body carries no canonical footer here, so
-  // a surviving forged one would be the post's only attribution).
+  // a surviving forged one would be the post's only attribution). "As-is"
+  // stops at comment grammar either way: a literal `<!-- qwen-review-… -->`
+  // in blocker prose would forge a second marker in the channel the
+  // pipeline's own readers scan raw — and it goes inert BEFORE the
+  // sanitation, then again after anything the sanitation spliced back
+  // together, until neither has work left (`quotedProse`).
   const bodyCriticalBlock: Bi[] = bodyCriticals
-    .map((l) => (attribution ? withMarker(l) : stripForUnattributedPost(l)))
+    .map((l) => {
+      const quoted = quotedProse(l, attribution);
+      return attribution ? withMarker(quoted) : quoted;
+    })
     .map((l) => ({ keep: 2, en: l, zh: l }));
 
   // Confirmed-but-duplicate Suggestions — dropped from the payload by the
@@ -4668,7 +4767,14 @@ function composeReviewBody(
           // (rank -1) goes before it — and the artifact and the terminal
           // report keep every entry whole.
           trim: 1,
-          en: `Deferred under the convergence posture (round ${deferredRound}, not a blocker)${signalFloorNote.en} — recorded, not requested in this round:\n\n${deferredShown
+          // The marker is how later tooling (an agent collecting deferred
+          // Suggestions across rounds) locates the block — the prose heading
+          // alone is the only other anchor, and rewording it must not break
+          // that lookup. It rides the SAME fragment so a budget trim drops
+          // the pointer with the list it would point at. The blank line is
+          // load-bearing: an HTML block swallowing the next line is the
+          // CommonMark quirk the ack/fallback markers already document.
+          en: `<!-- qwen-review-deferred -->\n\nDeferred under the convergence posture (round ${deferredRound}, not a blocker)${signalFloorNote.en} — recorded, not requested in this round:\n\n${deferredShown
             .map((entry) => `- ${mdField(entry)}`)
             .join(
               '\n',
@@ -5321,9 +5427,12 @@ export function describeChunkGap(
     }
   }
   if (allKnown && files.length <= 4) {
+    // Filenames are PR-controlled — git permits `<!--` in a path — so they
+    // ride mdField like every other body surface rendering one.
+    const named = files.map((f) => mdField(f));
     return {
-      phrase: `the diff ${uniq.length === 1 ? 'section' : 'sections'} covering ${files.join(', ')}`,
-      phraseZh: `涉及 ${files.join('、')} 的 diff 片段`,
+      phrase: `the diff ${uniq.length === 1 ? 'section' : 'sections'} covering ${named.join(', ')}`,
+      phraseZh: `涉及 ${named.join('、')} 的 diff 片段`,
       plural: uniq.length > 1,
     };
   }
@@ -5490,6 +5599,31 @@ export function withoutGateReposts(
   return ownBodyCriticals.filter((c) => !regenerated.has(locator(c)));
 }
 
+/**
+ * A structurally valid script-lint report: a plain-object root, and every
+ * list field (`checked` / `skipped` / `errored` / `deferred`, plus the
+ * nested `checked[].findings`) either absent/nullish or an array of plain
+ * objects. The gate's loops dereference entries and iterate fields without
+ * per-shape guards, so anything outside this contract is a TypeError, not
+ * a report.
+ */
+function structurallyValidReport(report: unknown): boolean {
+  const isPlainObject = (v: unknown): v is Record<string, unknown> =>
+    typeof v === 'object' && v !== null && !Array.isArray(v);
+  if (!isPlainObject(report)) return false;
+  for (const key of ['checked', 'skipped', 'errored', 'deferred'] as const) {
+    const v = report[key];
+    if (v === undefined || v === null) continue;
+    if (!Array.isArray(v) || v.some((e) => !isPlainObject(e))) return false;
+  }
+  for (const c of (report['checked'] ?? []) as Array<Record<string, unknown>>) {
+    const f = c['findings'];
+    if (f === undefined || f === null) continue;
+    if (!Array.isArray(f) || f.some((e) => !isPlainObject(e))) return false;
+  }
+  return true;
+}
+
 export function scriptLintGate(planPath: string): {
   criticals: string[];
   unreviewed: string[];
@@ -5551,6 +5685,22 @@ export function scriptLintGate(planPath: string): {
     }
     return { criticals, unreviewed, disclosed };
   }
+  // A parsed-but-MALFORMED report fails closed too — before the diffHash
+  // check dereferences it. The JSON is a side file the review agent can
+  // rewrite, and the hash is readable out of that same file, so a "fresh"
+  // report proves nothing about provenance; a null entry, a non-array
+  // field, or a null root would throw a TypeError in the loops below and
+  // lose the whole round, blockers included. The decision is whole-report
+  // refusal rather than per-entry salvage — and string entries like
+  // `skipped: ["x"]` are deliberately IN that refusal: the linter writes
+  // object entries, so a non-object entry is the same untrusted channel,
+  // not a shape to render.
+  if (!structurallyValidReport(report)) {
+    unreviewed.push(
+      'the executable-script lint — the report is malformed; re-run `qwen review script-lint`',
+    );
+    return { criticals, unreviewed, disclosed };
+  }
   // Fail closed on a STALE report — bound to the diff's CONTENT, not a commit. The
   // report carries a hash of the diff it ran against; we re-hash the plan's current
   // diff. A mismatch means it is not this review's report: a later PR commit
@@ -5582,14 +5732,18 @@ export function scriptLintGate(planPath: string): {
   // Each skipped entry carries its OWN reason (not installed, or an irregular file
   // like a symlink) — surface it, rather than hard-coding "not installed". A
   // deferred checker is NOT here: it is its own state, disclosed below without capping.
+  // The reason/tool fields are report prose headed for a machine-read body, so
+  // their comment grammar goes inert exactly as at every other prose exit — the
+  // report is a side file the review agent can rewrite, and a literal
+  // `<!-- qwen-review-… -->` there would otherwise post as a live marker.
   for (const s of report.skipped ?? []) {
     unreviewed.push(
-      `the executable-script lint — ${mdField(s.path)}: ${s.reason ?? `${s.tool} unavailable`}`,
+      `the executable-script lint — ${mdField(s.path)}: ${stripCommentGrammar(s.reason ?? `${s.tool} unavailable`)}`,
     );
   }
   for (const e of report.errored ?? []) {
     unreviewed.push(
-      `the executable-script lint — ${e.tool} errored on ${mdField(e.path)}`,
+      `the executable-script lint — ${stripCommentGrammar(e.tool)} errored on ${mdField(e.path)}`,
     );
   }
   // A deferred checker (actionlint) is disclosed but does not cap — the reader is
@@ -5597,7 +5751,7 @@ export function scriptLintGate(planPath: string): {
   // workflow PR un-Approvable on a checker we deliberately decline to run.
   for (const d of report.deferred ?? []) {
     disclosed.push(
-      `the executable-script lint — ${mdField(d.path)}: ${d.reason ?? `${d.tool} deferred`}`,
+      `the executable-script lint — ${mdField(d.path)}: ${stripCommentGrammar(d.reason ?? `${d.tool} deferred`)}`,
     );
   }
   return { criticals, unreviewed, disclosed };
@@ -6351,7 +6505,14 @@ export function buildLedger(
       id: idFor(carried),
       sev: 'C',
       file: LEDGER_BODY_FILE,
-      title: locatable(title, 'the review body'),
+      // The title is the visible item's text: the same neutralize-then-
+      // strip order, so a forged footer that rode in wrapped in comment
+      // grammar leaves the ledger exactly as it leaves the rendered list —
+      // the serializer only escapes `--`, and the autofix grep reads
+      // through the escape. The id was read BEFORE the grammar went inert,
+      // above: a leading comment is render-nothing residue the id anchor
+      // steps over, not prose to surface ahead of the carried id.
+      title: locatable(quotedProse(title, false), 'the review body'),
     });
   }
   return { v: 1, round, findings };
