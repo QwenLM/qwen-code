@@ -3121,6 +3121,169 @@ describe('Approval mode tool exclusion logic', () => {
     );
   });
 
+  it('should treat empty-string --core-tools values as absent, not as a [""] allowlist', async () => {
+    // A script expanding an unset variable (`qwen --core-tools "$TOOLS"`)
+    // hands yargs `[""]`; `--core-tools ,` yields `["", ""]`. Neither
+    // carries a tool name, so both must collapse to the absent-flag path
+    // instead of a one-entry allowlist that matches nothing and silently
+    // disables every tool with neither diagnostic firing (#10065).
+    for (const emptyValue of ['', ',']) {
+      process.argv = [
+        'node',
+        'script.js',
+        '--core-tools',
+        emptyValue,
+        '-p',
+        'test',
+      ];
+      const argv = await parseArguments();
+      const emptySettings: Settings = {};
+
+      mockWriteStderrLine.mockClear();
+      const config = await loadCliConfig(emptySettings, argv, undefined, []);
+      expect(config.getCoreTools()).toBeUndefined();
+      expect(mockWriteStderrLine).not.toHaveBeenCalledWith(
+        expect.stringContaining('tools.core is an empty allowlist'),
+      );
+    }
+
+    // Valued entries survive the empty-entry filter.
+    process.argv = [
+      'node',
+      'script.js',
+      '--core-tools',
+      'read_file,',
+      '-p',
+      'test',
+    ];
+    const argv = await parseArguments();
+    const settings: Settings = {};
+
+    const config = await loadCliConfig(settings, argv, undefined, []);
+    expect(config.getCoreTools()).toEqual(['read_file']);
+  });
+
+  it('should warn for an all-empty-string tools.core exactly like for []', async () => {
+    // `"core": [""]` (an unset-variable expansion or hand-edit written
+    // into settings) carries no tool name: PermissionManager.initialize()
+    // collapses it to the explicit empty allowlist, so the startup notice
+    // must fire for it too (#10065). A list still naming a tool must not.
+    process.argv = ['node', 'script.js', '-p', 'test'];
+    const argv = await parseArguments();
+    const emptyEntrySettings: Settings = {
+      tools: {
+        core: [''],
+      },
+    };
+
+    mockWriteStderrLine.mockClear();
+    await loadCliConfig(emptyEntrySettings, argv, undefined, []);
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining('tools.core is an empty allowlist'),
+    );
+
+    const valuedSettings: Settings = {
+      tools: {
+        core: ['', 'read_file'],
+      },
+    };
+
+    mockWriteStderrLine.mockClear();
+    await loadCliConfig(valuedSettings, argv, undefined, []);
+    expect(mockWriteStderrLine).not.toHaveBeenCalledWith(
+      expect.stringContaining('tools.core is an empty allowlist'),
+    );
+  });
+
+  it('should treat a non-array tools.core value as absent', async () => {
+    // Settings loading performs no type validation, so a hand-edited
+    // `"core": ""` reaches the coreTools ternary raw; it must normalize
+    // to ABSENT (undefined) instead of flowing into Config.coreTools,
+    // where `getCoreTools()?.some(...)` would throw during tool-registry
+    // construction (#10065).
+    process.argv = ['node', 'script.js', '-p', 'test'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      tools: {
+        core: '' as unknown as string[],
+      },
+    };
+
+    const config = await loadCliConfig(settings, argv, undefined, []);
+    expect(config.getCoreTools()).toBeUndefined();
+  });
+
+  it('should suppress the empty-allowlist notice when a valued --core-tools overrides the empty settings list', async () => {
+    // A valued argv flag wins over settings (its tools ARE registered),
+    // so the "all tools are disabled" notice would be factually wrong
+    // here (#10065).
+    process.argv = [
+      'node',
+      'script.js',
+      '--core-tools',
+      'web_fetch',
+      '-p',
+      'test',
+    ];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      tools: {
+        core: [],
+      },
+    };
+
+    mockWriteStderrLine.mockClear();
+    const config = await loadCliConfig(settings, argv, undefined, []);
+    expect(config.getCoreTools()).toEqual(['web_fetch']);
+    expect(mockWriteStderrLine).not.toHaveBeenCalledWith(
+      expect.stringContaining('tools.core is an empty allowlist'),
+    );
+  });
+
+  it('should suppress the empty-allowlist notice in safe mode and bare mode', async () => {
+    // Neither mode honours settings.tools.core — safe mode forces the
+    // CLI-level coreTools to undefined and bare mode replaces it with
+    // the built-in bare toolset — so the notice advice could never
+    // re-enable tools there.
+    const settings: Settings = {
+      tools: {
+        core: [],
+      },
+    };
+
+    for (const flag of ['--safe-mode', '--bare']) {
+      process.argv = ['node', 'script.js', flag, '-p', 'test'];
+      const argv = await parseArguments();
+
+      mockWriteStderrLine.mockClear();
+      await loadCliConfig(settings, argv, undefined, []);
+      // Note: safe mode resolves coreTools to the built-in safe-tools
+      // list (not undefined), so only the notice suppression is
+      // asserted here.
+      expect(mockWriteStderrLine).not.toHaveBeenCalledWith(
+        expect.stringContaining('tools.core is an empty allowlist'),
+      );
+    }
+  });
+
+  it('should still warn for a bare --core-tools flag over an empty settings allowlist', async () => {
+    // A bare flag is treated as ABSENT, so the empty settings list
+    // carries the session semantic and the notice must fire (#10065).
+    process.argv = ['node', 'script.js', '--core-tools', '-p', 'test'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      tools: {
+        core: [],
+      },
+    };
+
+    mockWriteStderrLine.mockClear();
+    await loadCliConfig(settings, argv, undefined, []);
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining('tools.core is an empty allowlist'),
+    );
+  });
+
   it('should exclude only shell tools in non-interactive mode with auto-edit approval mode', async () => {
     process.argv = [
       'node',

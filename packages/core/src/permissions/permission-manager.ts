@@ -256,10 +256,19 @@ export class PermissionManager {
     // Only an array activates the allowlist: `undefined`, `null`, or any
     // non-array value (e.g. `"tools": { "core": null }`, the common JSON
     // idiom for clearing this deprecated key) means no restriction.
+    // Entries that carry no tool name — the empty string, whitespace-only
+    // strings, non-string garbage — are dropped: an all-empty-string list
+    // (`[""]`, e.g. an unset-variable expansion written into settings)
+    // collapses to the explicit EMPTY allowlist with both #10065
+    // diagnostics instead of a size-1 allowlist that matches nothing and
+    // silently disables every tool while `isCoreToolsAllowListEmpty()`
+    // stays false (#10065).
     const rawCoreTools = this.config.getCoreTools?.();
     if (Array.isArray(rawCoreTools)) {
       this.coreToolsAllowList = new Set(
-        rawCoreTools.map((t) => parseRule(t).toolName),
+        rawCoreTools
+          .filter((t) => typeof t === 'string' && t.trim() !== '')
+          .map((t) => parseRule(t).toolName),
       );
     }
 
@@ -924,7 +933,9 @@ export class PermissionManager {
    * in settings). A bare/valueless `--core-tools` never produces this
    * state — `loadCliConfig` treats an argv-sourced empty list as absent —
    * and neither do `null`/non-array values, which `initialize()` treats
-   * as no restriction. When true, `isToolEnabled()` rejects EVERY tool —
+   * as no restriction; an all-empty-string list (`[""]`) does, because
+   * name-less entries are dropped when the allowlist is built (#10065).
+   * When true, `isToolEnabled()` rejects EVERY tool —
    * core and non-core alike — so user-facing remediation advice must name
    * this knob instead of promising re-enablement through other gates
    * (e.g. adding a `permissions.allow` rule can never satisfy an empty

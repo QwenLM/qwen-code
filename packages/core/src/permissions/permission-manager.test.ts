@@ -2581,6 +2581,31 @@ describe('PermissionManager', () => {
       expect(await pm.isToolEnabled('mcp__server__tool')).toBe(false);
     });
 
+    it('all-empty-string coreTools collapses to the empty allowlist, not a [""] allowlist', async () => {
+      // `"core": [""]` (e.g. an unset-variable expansion written into
+      // settings) carries no tool name; it must behave exactly like the
+      // explicit `[]` — `isCoreToolsAllowListEmpty()` true and every tool
+      // rejected — instead of a size-1 allowlist matching nothing that
+      // silently disables tools while neither diagnostic fires (#10065).
+      pm = new PermissionManager(makeConfig({ coreTools: [''] }));
+      pm.initialize();
+      expect(pm.isCoreToolsAllowListEmpty()).toBe(true);
+      expect(await pm.isToolEnabled('read_file')).toBe(false);
+      expect(await pm.isToolEnabled('agent')).toBe(false);
+      expect(await pm.isToolEnabled('structured_output')).toBe(false);
+
+      // Whitespace-only entries carry no name either.
+      pm = new PermissionManager(makeConfig({ coreTools: [' '] }));
+      pm.initialize();
+      expect(pm.isCoreToolsAllowListEmpty()).toBe(true);
+
+      // A list still naming a tool keeps its non-empty semantic.
+      pm = new PermissionManager(makeConfig({ coreTools: ['', 'read_file'] }));
+      pm.initialize();
+      expect(pm.isCoreToolsAllowListEmpty()).toBe(false);
+      expect(await pm.isToolEnabled('read_file')).toBe(true);
+    });
+
     it('undefined coreTools keeps tools enabled', async () => {
       pm = new PermissionManager(makeConfig());
       pm.initialize();

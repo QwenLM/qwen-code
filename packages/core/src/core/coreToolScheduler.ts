@@ -2490,7 +2490,7 @@ export class CoreToolScheduler {
               typeof pm.isCoreToolsAllowListEmpty === 'function' &&
               pm.isCoreToolsAllowListEmpty()
             ) {
-              permissionErrorMessage = `"${reqInfo.name}" is disabled because the core tools allowlist (settings tools.core) is explicitly empty. Remove the setting or list the tool there to re-enable it.`;
+              permissionErrorMessage = `"${reqInfo.name}" is disabled because the core tools allowlist (settings tools.core) is explicitly empty. Remove the setting or list the tool there, and restart, to re-enable it.`;
             } else if (
               // The legacy `coreTools` allowlist (`--core-tools` / settings
               // `tools.core`) keeps its hard-disable semantic: an unlisted

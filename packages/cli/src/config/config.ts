@@ -917,8 +917,18 @@ export async function parseArguments(): Promise<CliArgs> {
           type: 'array',
           string: true,
           description: 'Core tool paths',
+          // Empty entries carry no tool name (e.g. a script expanding an
+          // unset variable — `qwen --core-tools "$TOOLS"` — hands yargs
+          // `[""]`); drop them so the flag collapses to the absent-flag
+          // path instead of a one-entry allowlist that matches nothing
+          // and silently disables every tool (#10065).
           coerce: (tools: string[]) =>
-            tools.flatMap((tool) => tool.split(',').map((t) => t.trim())),
+            tools.flatMap((tool) =>
+              tool
+                .split(',')
+                .map((t) => t.trim())
+                .filter((t) => t !== ''),
+            ),
         })
         .option('exclude-tools', {
           type: 'array',
@@ -1777,13 +1787,17 @@ export async function loadCliConfig(
   // session (the empty-allowlist semantic of #10065). Give the user one
   // visible startup notice instead of failing every tool call silently;
   // the argv flag wins over settings when valued, so only the settings
-  // path can resolve to the empty allowlist here.
+  // path can resolve to the empty allowlist here. An all-empty-string
+  // list (`"core": [""]`, e.g. an unset-variable expansion written into
+  // settings) carries no tool name either and collapses to the same
+  // empty allowlist in `PermissionManager.initialize()`, so the notice
+  // covers it too (#10065).
   if (
     !bareMode &&
     !safeMode &&
     !(argv.coreTools && argv.coreTools.length > 0) &&
     Array.isArray(settings.tools?.core) &&
-    settings.tools.core.length === 0
+    settings.tools.core.every((t) => typeof t !== 'string' || t.trim() === '')
   ) {
     writeStderrLine(
       '⚠ tools.core is an empty allowlist: all tools are disabled for this session. Add tool names to tools.core or remove the key to re-enable tools (#10065).\n',
@@ -2182,13 +2196,22 @@ export async function loadCliConfig(
     // tool": only an explicit `tools.core: []` in settings (or a valued
     // flag) should carry the empty-allowlist semantic, so a forgotten
     // flag value — or a script expanding an unset variable into the flag
-    // — cannot silently flip a session to tool-free (#10065).
+    // — cannot silently flip a session to tool-free (#10065). The
+    // settings leg is type-guarded because settings loading performs no
+    // validation: a hand-edited non-array `"core": ""` must normalize to
+    // ABSENT (as the pre-#10065 `||` chain did) instead of flowing raw
+    // into Config.coreTools, where `getCoreTools()?.some(...)` would
+    // throw during tool-registry construction; empty-string entries are
+    // dropped where the allowlist is built (PermissionManager.initialize,
+    // #10065).
     coreTools:
       bareMode || safeMode
         ? undefined
         : argv.coreTools?.length
           ? argv.coreTools
-          : settings.tools?.core,
+          : Array.isArray(settings.tools?.core)
+            ? settings.tools.core
+            : undefined,
     allowedTools:
       bareMode || safeMode
         ? argv.allowedTools || undefined

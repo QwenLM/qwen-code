@@ -3821,6 +3821,11 @@ describe('CoreToolScheduler', () => {
       const message = completedCall.response.error?.message ?? '';
       expect(message).toContain('tools.core');
       expect(message).toContain('"edit"');
+      // The gate is restart-scoped (coreToolsAllowList is snapshotted in
+      // initialize(), `tools.core` is requiresRestart), so the advice
+      // must carry the restart caveat like its sibling messages
+      // (#10065).
+      expect(message).toContain('restart');
       expect(message).not.toContain('permissions.allow');
       expect(message).not.toContain('permission was declined');
     }
