@@ -884,11 +884,23 @@ describe('main-session style: reminder decision matches prompt section', () => {
       if (customPrompt) {
         // The override replaces the base verbatim.
         expect(prompt).toContain(customPrompt);
+        expect(prompt).not.toContain('You are Qwen Code');
       } else if (!systemMd) {
         expect(prompt).toContain('You are Qwen Code');
       }
     },
   );
+
+  it('forwards the config model to the base prompt', () => {
+    const config = {
+      ...makeConfig({ interactive: true, acp: false }),
+      getModel: () => 'qwen3-coder-7b',
+    };
+
+    expect(getMainSessionBaseSystemPrompt(config)).toContain(
+      '<function=run_shell_command>',
+    );
+  });
 });
 
 describe('Model-specific tool call formats', () => {
