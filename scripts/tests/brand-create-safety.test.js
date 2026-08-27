@@ -85,9 +85,9 @@ beforeEach(() => {
 
 afterEach(() => {
   for (const d of tmpDirs) {
-    try { rmSync(d, { recursive: true, force: true }); } catch {}
+    try { rmSync(d, { recursive: true, force: true }); } catch { /* best-effort cleanup */ }
   }
-  try { rmSync(shellRoot, { recursive: true, force: true }); } catch {}
+  try { rmSync(shellRoot, { recursive: true, force: true }); } catch { /* best-effort cleanup */ }
 });
 
 describe('brand-create.mjs safety checks', () => {
