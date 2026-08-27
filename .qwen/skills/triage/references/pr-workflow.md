@@ -195,14 +195,23 @@ The parser is not intent-aware — prose like "resolves #123's closer" links
 actual state, never as proof by itself.
 
 ```bash
-# Branch on each linked issue's state; $N feeds the closer query below.
+# Record each linked issue's state; $N feeds the closer query below. The loop
+# only collects states — it never acts per issue, so a mix of OPEN and CLOSED
+# issues gets exactly one outcome from the precedence rule below.
 for N in $ISSUES; do
   SR=$(gh issue view "$N" --repo "$REPO" --json state,stateReason \
     --jq '.state + " " + (.stateReason // "")')
-  # "OPEN" -> proceed to 1a; "CLOSED NOT_PLANNED" -> request changes, stop;
-  # "CLOSED COMPLETED" -> run the closer query below with this $N
+  # "OPEN" -> contributes nothing; "CLOSED NOT_PLANNED" -> request changes,
+  # stop; "CLOSED COMPLETED" -> run the closer query below with this $N
 done
 ```
+
+These branches are checked with a fixed precedence — any closed-as-not-planned
+first, then any closed-as-completed, and only when no issue is closed does the
+run proceed to 1a — so mixed states have exactly one outcome. An OPEN issue
+never short-circuits a CLOSED one: `fixes #101 and fixes #102` with #101 open
+and #102 closed-as-completed runs the closer query for #102, it does not
+proceed to 1a.
 
 - No linked issues, or every linked issue **open** → proceed to 1a.
 - Any linked issue **closed as not planned** → the fix target was rejected:

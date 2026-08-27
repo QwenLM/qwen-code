@@ -6863,10 +6863,20 @@ describe('stage 1-pre duplicate gate', () => {
   it('binds each linked-issue state to its gate action', () => {
     // The per-issue dispatch is the gate's decision table; deleting it or
     // swapping the NOT_PLANNED and COMPLETED actions must not leave the
-    // suite green.
-    expect(section).toContain('"OPEN" -> proceed to 1a');
+    // suite green. The loop only collects states, so an OPEN issue must not
+    // short-circuit to 1a over a CLOSED one.
+    expect(section).toContain('"OPEN" -> contributes nothing');
     expect(section).toContain('"CLOSED NOT_PLANNED" -> request changes');
     expect(section).toContain('"CLOSED COMPLETED" -> run the closer query');
+    expect(section).not.toContain('"OPEN" -> proceed to 1a');
+  });
+
+  it('defines one fixed precedence for mixed linked-issue states', () => {
+    // xe6u: `fixes #101 and fixes #102` with #101 OPEN, #102 CLOSED-COMPLETED
+    // must have one deterministic outcome. Without an explicit precedence the
+    // per-issue loop legend and the aggregate bullets contradict each other.
+    expect(section).toContain('fixed precedence');
+    expect(section).toContain('never short-circuits');
   });
 
   it('never closes on an unresolvable closer', () => {
