@@ -5,6 +5,7 @@
  */
 
 import { execFile } from 'node:child_process';
+import { stripVTControlCharacters } from 'node:util';
 import { sanitizeLogText } from '@qwen-code/channel-base';
 import { dwsProcessEnvironment } from './dws-environment.js';
 import {
@@ -17,11 +18,8 @@ const DWS_PROCESS_TIMEOUT_MS = 45_000;
 const DWS_PROCESS_FORCE_KILL_DELAY_MS = 5_000;
 const MINIMUM_DWS_VERSION = [1, 0, 57] as const;
 const DWS_MAX_OUTPUT_BYTES = 16 * 1024 * 1024;
-const DWS_ERROR_OUTPUT_MAX_CHARS = 1000;
-const ANSI_ESCAPE_SEQUENCE = new RegExp(
-  `${String.fromCharCode(27)}\\[[0-?]*[ -/]*[@-~]`,
-  'g',
-);
+const DWS_ERROR_OUTPUT_MAX_CHARS = 256;
+const DWS_ERROR_OUTPUT_WINDOW_CHARS = DWS_ERROR_OUTPUT_MAX_CHARS * 2;
 const MAX_MESSAGE_PAGES = 100;
 const MAX_TODO_PAGES = 50;
 const TODO_PAGE_SIZE = 20;
@@ -198,14 +196,20 @@ function dwsCommandFailureMessage(
   stdout: unknown,
   stderr: unknown,
 ): string {
-  const base = `DWS command failed${code === undefined ? '' : ` (${String(code)})`}`;
-  const output = String(stderr ?? '').trim() || String(stdout ?? '').trim();
-  if (!output) return `${base}.`;
+  const base = `DWS command failed${code === undefined || code === null ? '' : ` (${String(code)})`}`;
+  const details =
+    dwsCommandFailureDetails(stderr) || dwsCommandFailureDetails(stdout);
+  return details ? `${base}: ${details}` : `${base}.`;
+}
+
+function dwsCommandFailureDetails(output: unknown): string {
+  const window = String(output ?? '').slice(0, DWS_ERROR_OUTPUT_WINDOW_CHARS);
+  if (!window.trim()) return '';
   const details = sanitizeLogText(
-    output.replace(ANSI_ESCAPE_SEQUENCE, ''),
+    stripVTControlCharacters(window),
     DWS_ERROR_OUTPUT_MAX_CHARS,
   ).trim();
-  return details ? `${base}: ${details}` : `${base}.`;
+  return details;
 }
 
 function runDwsProcess(
