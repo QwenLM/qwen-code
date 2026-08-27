@@ -26,6 +26,7 @@ jobs:
           s = p.read_text()
           s = s.replace('process.env.GIT_CONFIG_GLOBAL', "process.env['GIT_CONFIG_GLOBAL']")
           s = s.replace('process.env.GIT_CONFIG_NOSYSTEM', "process.env['GIT_CONFIG_NOSYSTEM']")
+          s = s.replace('expect(result.status, result.stderr).toBe(0);', 'expect(result.status).toBe(0);')
           p.write_text(s)
           PY
       - name: Install, format and validate
