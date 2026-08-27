@@ -801,21 +801,25 @@ export class HookRunner {
         ...hookConfig.env,
       };
 
+      const survivesParentExit =
+        eventName === HookEventName.MessageDisplay ||
+        eventName === HookEventName.StopFailure ||
+        eventName === HookEventName.SessionDelete;
+      // These events ignore output by contract, so their output streams must
+      // not depend on a parent process they are allowed to outlive.
+      const outputStdio = survivesParentExit ? 'ignore' : 'pipe';
       const child = spawn(
         shellConfig.executable,
         [...shellConfig.argsPrefix, command],
         {
           env,
           cwd: input.cwd,
-          stdio: ['pipe', 'pipe', 'pipe'],
+          stdio: ['pipe', outputStdio, outputStdio],
           shell: false,
           // Own a process group so cancellation can signal the entire tree.
           detached: process.platform !== 'win32',
         },
       );
-      const survivesParentExit =
-        eventName === HookEventName.MessageDisplay ||
-        this.isAsyncHook(hookConfig);
       if (!survivesParentExit) {
         registerActivePosixHookProcess(child);
       }

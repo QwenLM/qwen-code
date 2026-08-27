@@ -175,9 +175,14 @@ setInterval(() => {}, 1000);
       }
     }, 15_000);
 
-    it.each(['process-exit', 'signal-exit', 'handled-signal-exit'] as const)(
-      'reaps an active hook tree on parent %s',
-      async (exitMode) => {
+    it.each([
+      ['synchronous', 'process-exit', false],
+      ['synchronous', 'signal-exit', false],
+      ['synchronous', 'handled-signal-exit', false],
+      ['async', 'process-exit', true],
+    ] as const)(
+      'reaps an active %s hook tree on parent %s',
+      async (_, exitMode, isAsync) => {
         const tempDir = await mkdtemp(join(tmpdir(), 'qwen-hook-exit-'));
         const driverPath = join(tempDir, 'driver.mjs');
         const fixturePath = join(tempDir, 'hook-tree.mjs');
@@ -197,7 +202,7 @@ setInterval(() => {}, 1000);
             `import { readFileSync, writeFileSync } from 'node:fs';
 
 const { HookRunner } = await import(process.argv[2]);
-const [tempDir, fixturePath, rootPidPath, descendantPidPath, descendantFixturePath, descendantReadyPath, driverReadyPath, upperCompletedPath, exitMode] = process.argv.slice(3);
+const [tempDir, fixturePath, rootPidPath, descendantPidPath, descendantFixturePath, descendantReadyPath, driverReadyPath, upperCompletedPath, exitMode, isAsync] = process.argv.slice(3);
 const runner = new HookRunner();
 const controller = new AbortController();
 if (exitMode === 'handled-signal-exit') {
@@ -208,7 +213,7 @@ if (exitMode === 'handled-signal-exit') {
   });
 }
 const resultPromise = runner.executeHook(
-  { type: 'command', command: \`exec \${JSON.stringify(process.execPath)} \${JSON.stringify(fixturePath)} \${JSON.stringify(rootPidPath)} \${JSON.stringify(descendantPidPath)} \${JSON.stringify(descendantFixturePath)} \${JSON.stringify(descendantReadyPath)}\`, source: 'project', shell: 'bash', timeout: 60_000 },
+  { type: 'command', command: \`exec \${JSON.stringify(process.execPath)} \${JSON.stringify(fixturePath)} \${JSON.stringify(rootPidPath)} \${JSON.stringify(descendantPidPath)} \${JSON.stringify(descendantFixturePath)} \${JSON.stringify(descendantReadyPath)}\`, source: 'project', shell: 'bash', timeout: 60_000, async: isAsync === 'true' },
   'PreToolUse',
   { session_id: 'parent-exit-test', transcript_path: \`\${tempDir}/transcript.jsonl\`, cwd: tempDir, hook_event_name: 'PreToolUse', timestamp: new Date().toISOString() },
   controller.signal,
@@ -261,6 +266,7 @@ setInterval(() => {}, 1000);
               driverReadyPath,
               upperCompletedPath,
               exitMode,
+              String(isAsync),
             ],
             {
               cwd: fileURLToPath(new URL('../../../../', import.meta.url)),
@@ -338,29 +344,32 @@ setInterval(() => {}, 1000);
     );
 
     it.each([
-      ['a MessageDisplay hook', false],
-      ['an async command hook', true],
-    ] as const)('lets %s finish after parent exit', async (_, isAsync) => {
-      const tempDir = await mkdtemp(join(tmpdir(), 'qwen-hook-survive-'));
-      const driverPath = join(tempDir, 'driver.mjs');
-      const fixturePath = join(tempDir, 'hook.mjs');
-      const readyPath = join(tempDir, 'hook.ready');
-      const completedPath = join(tempDir, 'hook.completed');
-      const pidPath = join(tempDir, 'hook.pid');
-      let hookPid: number | undefined;
+      ['MessageDisplay', HookEventName.MessageDisplay],
+      ['StopFailure', HookEventName.StopFailure],
+      ['SessionDelete', HookEventName.SessionDelete],
+    ] as const)(
+      'lets a %s hook write output and finish after parent exit',
+      async (_, eventName) => {
+        const tempDir = await mkdtemp(join(tmpdir(), 'qwen-hook-survive-'));
+        const driverPath = join(tempDir, 'driver.mjs');
+        const fixturePath = join(tempDir, 'hook.mjs');
+        const readyPath = join(tempDir, 'hook.ready');
+        const completedPath = join(tempDir, 'hook.completed');
+        const pidPath = join(tempDir, 'hook.pid');
+        let hookPid: number | undefined;
 
-      try {
-        await writeFile(
-          driverPath,
-          `import { readFileSync } from 'node:fs';
+        try {
+          await writeFile(
+            driverPath,
+            `import { readFileSync } from 'node:fs';
 
 const { HookRunner } = await import(process.argv[2]);
-const [tempDir, fixturePath, readyPath, completedPath, pidPath, isAsync] = process.argv.slice(3);
+const [tempDir, fixturePath, readyPath, completedPath, pidPath, eventName] = process.argv.slice(3);
 const runner = new HookRunner();
 void runner.executeHook(
-  { type: 'command', command: \`exec \${JSON.stringify(process.execPath)} \${JSON.stringify(fixturePath)} \${JSON.stringify(readyPath)} \${JSON.stringify(completedPath)} \${JSON.stringify(pidPath)}\`, source: 'project', shell: 'bash', timeout: 60_000, async: isAsync === 'true' },
-  isAsync === 'true' ? 'PreToolUse' : 'MessageDisplay',
-  { session_id: 'parent-exit-survival-test', transcript_path: \`\${tempDir}/transcript.jsonl\`, cwd: tempDir, hook_event_name: isAsync === 'true' ? 'PreToolUse' : 'MessageDisplay', timestamp: new Date().toISOString() },
+  { type: 'command', command: \`exec \${JSON.stringify(process.execPath)} \${JSON.stringify(fixturePath)} \${JSON.stringify(readyPath)} \${JSON.stringify(completedPath)} \${JSON.stringify(pidPath)}\`, source: 'project', shell: 'bash', timeout: 60_000 },
+  eventName,
+  { session_id: 'parent-exit-survival-test', transcript_path: \`\${tempDir}/transcript.jsonl\`, cwd: tempDir, hook_event_name: eventName, timestamp: new Date().toISOString() },
 );
 while (true) {
   try {
@@ -370,63 +379,70 @@ while (true) {
 }
 process.exit(0);
 `,
-        );
-        await writeFile(
-          fixturePath,
-          `import { writeFileSync } from 'node:fs';
+          );
+          await writeFile(
+            fixturePath,
+            `import { writeFileSync } from 'node:fs';
 
+const write = (stream, text) =>
+  new Promise((resolve, reject) =>
+    stream.write(text, (error) => (error ? reject(error) : resolve())),
+  );
 writeFileSync(process.argv[4], String(process.pid));
 writeFileSync(process.argv[2], 'ready');
 await new Promise((resolve) => setTimeout(resolve, 250));
+await write(process.stdout, 'late stdout\\n');
+await write(process.stderr, 'late stderr\\n');
 writeFileSync(process.argv[3], 'completed');
 `,
-        );
+          );
 
-        const driver = spawn(
-          process.execPath,
-          [
-            '--import=tsx/esm',
-            driverPath,
-            new URL('./hookRunner.ts', import.meta.url).href,
-            tempDir,
-            fixturePath,
-            readyPath,
-            completedPath,
-            pidPath,
-            String(isAsync),
-          ],
-          {
-            cwd: fileURLToPath(new URL('../../../../', import.meta.url)),
-            stdio: 'ignore',
-          },
-        );
-        const exit = await new Promise<{
-          code: number | null;
-          signal: NodeJS.Signals | null;
-        }>((resolve, reject) => {
-          driver.on('error', reject);
-          driver.on('exit', (code, signal) => resolve({ code, signal }));
-        });
+          const driver = spawn(
+            process.execPath,
+            [
+              '--import=tsx/esm',
+              driverPath,
+              new URL('./hookRunner.ts', import.meta.url).href,
+              tempDir,
+              fixturePath,
+              readyPath,
+              completedPath,
+              pidPath,
+              eventName,
+            ],
+            {
+              cwd: fileURLToPath(new URL('../../../../', import.meta.url)),
+              stdio: 'ignore',
+            },
+          );
+          const exit = await new Promise<{
+            code: number | null;
+            signal: NodeJS.Signals | null;
+          }>((resolve, reject) => {
+            driver.on('error', reject);
+            driver.on('exit', (code, signal) => resolve({ code, signal }));
+          });
 
-        expect(exit).toEqual({ code: 0, signal: null });
-        hookPid = await readPid(pidPath);
-        expect(hookPid).toBeDefined();
-        await waitFor(
-          async () =>
-            (await readFile(completedPath, 'utf8').catch(() => '')) ===
-            'completed',
-          3000,
-        );
-      } finally {
-        if (hookPid && isRunning(hookPid)) {
-          try {
-            process.kill(-hookPid, 'SIGKILL');
-          } catch {
-            // Already gone.
+          expect(exit).toEqual({ code: 0, signal: null });
+          hookPid = await readPid(pidPath);
+          expect(hookPid).toBeDefined();
+          await waitFor(
+            async () =>
+              (await readFile(completedPath, 'utf8').catch(() => '')) ===
+              'completed',
+            3000,
+          );
+        } finally {
+          if (hookPid && isRunning(hookPid)) {
+            try {
+              process.kill(-hookPid, 'SIGKILL');
+            } catch {
+              // Already gone.
+            }
           }
+          await rm(tempDir, { recursive: true, force: true });
         }
-        await rm(tempDir, { recursive: true, force: true });
-      }
-    });
+      },
+    );
   },
 );

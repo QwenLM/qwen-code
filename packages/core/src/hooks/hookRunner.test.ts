@@ -1098,6 +1098,74 @@ describe('HookRunner', () => {
     const createNoSuchProcessError = () =>
       Object.assign(new Error('no such process'), { code: 'ESRCH' });
 
+    it.each([
+      HookEventName.MessageDisplay,
+      HookEventName.StopFailure,
+      HookEventName.SessionDelete,
+    ])('uses parent-independent output streams for %s', async (eventName) => {
+      mockSpawn.mockReturnValue(createMockProcess());
+
+      await hookRunner.executeHook(
+        hookConfig,
+        eventName,
+        createMockInput({ hook_event_name: eventName }),
+      );
+
+      expect(mockSpawn.mock.calls[0][2].stdio).toEqual([
+        'pipe',
+        'ignore',
+        'ignore',
+      ]);
+    });
+
+    it('keeps output capture for process-scoped async hooks', async () => {
+      mockSpawn.mockReturnValue(createMockProcess());
+
+      await hookRunner.executeHook(
+        { ...hookConfig, async: true },
+        HookEventName.PreToolUse,
+        createMockInput(),
+      );
+
+      expect(mockSpawn.mock.calls[0][2].stdio).toEqual([
+        'pipe',
+        'pipe',
+        'pipe',
+      ]);
+    });
+
+    it.each([
+      HookEventName.MessageDisplay,
+      HookEventName.StopFailure,
+      HookEventName.SessionDelete,
+    ])('still cancels a parent-exit-surviving %s hook', async (eventName) => {
+      vi.spyOn(process, 'platform', 'get').mockReturnValue('linux');
+      const mockProcess = createControllableMockProcess();
+      mockSpawn.mockReturnValue(mockProcess);
+      const killSpy = vi
+        .spyOn(process, 'kill')
+        .mockImplementation((target, signal) => {
+          if (target === -mockProcess.pid && signal === 0) {
+            throw createNoSuchProcessError();
+          }
+          return true;
+        });
+      const controller = new AbortController();
+
+      const resultPromise = hookRunner.executeHook(
+        hookConfig,
+        eventName,
+        createMockInput({ hook_event_name: eventName }),
+        controller.signal,
+      );
+      controller.abort();
+      mockProcess.emit('close', null);
+      const result = await resultPromise;
+
+      expect(result.error?.message).toBe('Hook execution cancelled (aborted)');
+      expect(killSpy).toHaveBeenCalledWith(-mockProcess.pid, 'SIGTERM');
+    });
+
     it('owns a POSIX process group without signalling it on normal completion', async () => {
       const mockProcess = createMockProcess(0, 'done');
       mockSpawn.mockReturnValue(mockProcess);
