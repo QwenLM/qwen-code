@@ -162,7 +162,6 @@ const FINDING_ITEM_SCHEMA = {
     },
     summary: {
       type: 'string',
-      maxLength: 2000,
       description: 'One sentence stating the defect.',
     },
     shortSummary: {
