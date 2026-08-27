@@ -365,8 +365,29 @@ class SendMessageInvocation extends BaseToolInvocation<
       }
       try {
         const sender = getAgentName() ?? LEADER_NAME;
-        await teamManager.broadcast(this.params.message, sender);
-        const msg = 'Message broadcast to all teammates.';
+        const { total, failedRecipients } = await teamManager.broadcast(
+          this.params.message,
+          sender,
+        );
+        if (failedRecipients.length === 0) {
+          const msg = 'Message broadcast to all teammates.';
+          return { llmContent: msg, returnDisplay: msg };
+        }
+        const reached = total - failedRecipients.length;
+        if (reached === 0) {
+          const msg =
+            `Broadcast failed: delivery was rejected for all ${total} ` +
+            `recipient(s): ${failedRecipients.join(', ')}.`;
+          return {
+            llmContent: msg,
+            returnDisplay: msg,
+            error: { message: msg },
+          };
+        }
+        const msg =
+          `Message broadcast delivered to ${reached} of ${total} ` +
+          `recipient(s); delivery failed for: ${failedRecipients.join(', ')}. ` +
+          `The listed recipients did not receive the message.`;
         return { llmContent: msg, returnDisplay: msg };
       } catch (error) {
         const errMsg = error instanceof Error ? error.message : String(error);
