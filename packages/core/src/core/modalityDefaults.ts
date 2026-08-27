@@ -61,14 +61,19 @@ const MODALITY_PATTERNS: Array<[RegExp, InputModalities]> = [
   [/^qwen/, {}],
 
   // -------------------
-  // DeepSeek — text-only
+  // DeepSeek — vision variants accept image input (deepseek-v4-flash-vision-exp,
+  // 2026-08); everything else remains text-only (QwenLM/qwen-code#10270)
   // -------------------
+  [/^deepseek-.*(vision|vl)/, { image: true }],
   [/^deepseek/, {}],
 
   // -------------------
-  // Zhipu GLM
+  // Zhipu GLM — v-suffix family (glm-4.5v/4.6v/5v-turbo) accepts image input;
+  // glm-5.3-flash natively integrates vision incl. video/pdf (BigModel docs, 2026-08);
+  // other GLM models remain text-only (QwenLM/qwen-code#10270)
   // -------------------
-  [/^glm-4\.5v/, { image: true }],
+  [/^glm-\d+(?:\.\d+)?v/, { image: true }],
+  [/^glm-5\.3-flash/, { image: true, video: true, pdf: true }],
   [/^glm-5(?:-|$)/, {}],
   [/^glm-/, {}],
 
