@@ -124,10 +124,10 @@ Fired when a `session/load` is issued for an id that already has a `session/resu
 
 `reason` distinguishes two fences that share this code, and the `Retry-After` header tracks it:
 
-| `reason`                     | Meaning                                                                                                          | `Retry-After`                                                 |
-| ---------------------------- | ---------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------- |
-| `restore_in_progress`        | An ordinary restore is running.                                                                                  | `5` (matching `session_limit_exceeded`)                       |
-| `awaiting_abandoned_cleanup` | The public caller already got a `504` and the non-cancellable ACP request plus its cleanup have not settled yet. | the effective restore budget in seconds, clamped to `5`–`120` |
+| `reason`                     | Meaning                                                                                                          | `Retry-After`                                                                                                                  |
+| ---------------------------- | ---------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| `restore_in_progress`        | An ordinary restore is running.                                                                                  | `5` (matching `session_limit_exceeded`)                                                                                        |
+| `awaiting_abandoned_cleanup` | The public caller already got a `504` and the non-cancellable ACP request plus its cleanup have not settled yet. | the timed-out operation's budget in seconds — restore, or initialization for a caller-supplied-id spawn — clamped to `5`–`120` |
 
 The public restore request is governed by `limits.sessionRestoreTimeoutMs` (default 60s). After a `504` the id stays fenced until the late ACP request and cleanup settle, so a client that keeps retrying at the ordinary 5-second cadence would spin against a 409 it cannot clear — honor the budget-derived hint that comes with `awaiting_abandoned_cleanup`.
 
