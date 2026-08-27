@@ -34,6 +34,7 @@ import {
   rmSync,
   statSync,
   symlinkSync,
+  utimesSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -906,6 +907,9 @@ describe('runScratchTree', () => {
     });
     expect(existsSync(join(r.path!, 'node_modules', 'vitest'))).toBe(true);
     expect(r.note).toContain('2 dependencies linked in');
+    // The one exception to the note's read-only claim, stated in the note
+    // itself: the farm's links point back at the review worktree.
+    expect(r.note).toContain('a write THROUGH one of');
   });
 
   it('says a harness will not start when there is nothing to link', () => {
@@ -1153,6 +1157,20 @@ describe('runScratchTree --standalone', () => {
     expect(r.note).toContain("reaches the user's repository");
   });
 
+  it('pins the remote name at clone time, so a global clone.defaultRemoteName cannot wedge the build', () => {
+    // The user's GLOBAL config still applies to the clone (sanitizedGitEnv
+    // strips GIT_CONFIG_GLOBAL but keeps HOME), and stock git ≥ 2.37 honors
+    // `clone.defaultRemoteName`. Naming another remote there let the clone
+    // and the checkout succeed, then killed `git remote remove origin` with
+    // "No such remote" — refusing a tree that already stood, on every call.
+    git(repo, 'config', '--global', 'clone.defaultRemoteName', 'upstream');
+
+    const r = run();
+
+    expect(r.available).toBe(true);
+    expect(git(r.path!, 'remote')).toBe('');
+  });
+
   it('keeps a config, hook or ref write inside the tree from reaching the user’s repository', () => {
     // The class the shared-common-dir screen tried to enumerate — a
     // command-valued config key, an executable hook, a commit — planted from
@@ -1184,11 +1202,13 @@ describe('runScratchTree --standalone', () => {
     expect(git(worktree, 'status', '--porcelain')).toBe('');
   });
 
-  it('checks out under the clone’s config — a repo-local filter is neither run nor a refusal', () => {
-    // The linked shape must REFUSE this repository: its checkout would
-    // execute the filter the attributes select. The standalone clone's
-    // checkout reads the clone's config, which defines no such filter, so
-    // the same repository gets a tree and the command never runs.
+  it('refuses a planted filter in BOTH shapes — the shared-worktree measurement executes it', () => {
+    // The linked shape's checkout would execute the filter the attributes
+    // select. The standalone clone's checkout reads the clone's config, which
+    // defines no such filter — but both shapes measure the SHARED worktree
+    // with a `git status` that re-reads stat-stale files through configured
+    // clean filters, so neither shape is safe to stand up while one is
+    // defined.
     const pwned = join(repo, 'PWNED-smudge');
     git(repo, 'config', 'filter.evil.smudge', `touch ${pwned}`);
 
@@ -1197,14 +1217,30 @@ describe('runScratchTree --standalone', () => {
     expect(linked.note).toContain('filter.evil.smudge');
 
     const r = run();
-    expect(r.available).toBe(true);
+    expect(r.available).toBe(false);
+    expect(r.note).toContain('filter.evil.smudge');
     expect(existsSync(pwned)).toBe(false);
-    expect(readFileSync(join(r.path!, 'a.ts'), 'utf8')).toBe(
-      'export const x = 1;\n',
-    );
-    expect(() =>
-      git(r.path!, 'config', '--get', 'filter.evil.smudge'),
-    ).toThrow();
+    expect(r.path).toBeUndefined();
+  });
+
+  it('refuses the filter shape `git status` itself executes — a clean filter on a stat-stale file', () => {
+    // The smudge arm above pins the checkout side. This one pins the
+    // measurement side, which is the shape the standalone skip missed: every
+    // call measures the SHARED worktree with a `git status`, and status runs
+    // CLEAN filters whenever it re-reads a tracked file whose stat cache is
+    // stale. The documented two-write plant plus one touch, and the call must
+    // refuse before that measurement — not answer residue-clean with the
+    // payload already executed.
+    const pwned = join(repo, 'PWNED-clean');
+    git(repo, 'config', 'filter.evil.clean', `touch ${pwned} && cat`);
+    const stale = new Date(Date.now() + 60_000);
+    utimesSync(join(worktree, 'a.ts'), stale, stale);
+
+    const r = run();
+
+    expect(r.available).toBe(false);
+    expect(r.note).toContain('filter.evil.clean');
+    expect(existsSync(pwned)).toBe(false);
   });
 
   it('rebuilds on every call — what the last call wrote is gone', () => {
@@ -1332,6 +1368,7 @@ describe('runScratchTree --standalone', () => {
     expect(
       lstatSync(join(r.path!, 'node_modules', 'vitest')).isSymbolicLink(),
     ).toBe(true);
+    expect(r.note).toContain('a write THROUGH one of');
   });
 
   it('leaves the shared review worktree untouched, and still measures its residue', () => {

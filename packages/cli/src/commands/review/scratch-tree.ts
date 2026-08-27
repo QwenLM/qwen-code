@@ -266,8 +266,10 @@ function localFilterCommands(worktree: string): string[] {
  * way it applies to every git command they run. `--no-checkout`, so the one
  * checkout is the detached one at the reviewed head, under NO_HOOKS like every
  * other checkout here — and it reads the CLONE's config, which holds no
- * repo-local filter of the user's, so the filter screen the linked-tree path
- * needs has nothing to screen here. `origin` — the review worktree — is
+ * repo-local filter of the user's, so this checkout cannot run one. The
+ * caller's filter screen still covers this shape: the shared-worktree
+ * residue measurement every shape runs re-reads stat-stale files through
+ * configured clean filters. `origin` — the review worktree — is
  * removed afterwards: a standalone tree has nowhere to push by default. A
  * throw is the caller's rebuild-failure path.
  */
@@ -283,6 +285,14 @@ function buildStandaloneTree(
     '--shared',
     '--no-checkout',
     '--template=',
+    // Pin the remote name: without this the clone honours the user's global
+    // `clone.defaultRemoteName` (the GLOBAL config still applies here —
+    // sanitizedGitEnv strips GIT_CONFIG_GLOBAL but keeps HOME), and the
+    // `remote remove origin` below then dies "No such remote" AFTER the
+    // isolation already succeeded — refusing, on every call, a tree that
+    // stands.
+    '--origin',
+    'origin',
     worktree,
     tree,
   );
@@ -590,21 +600,27 @@ export function runScratchTree(args: ScratchTreeArgs): ScratchTreeReport {
     }
   }
 
-  // BEFORE any checkout runs — the reuse path's reset and the rebuild path's
-  // `worktree add` both execute configured content filters. A standalone
-  // clone's checkout reads the CLONE's config, which holds none of these, so
-  // the screen has nothing to say there (see `buildStandaloneTree`).
-  const filters = args.standalone ? [] : localFilterCommands(worktree);
+  // BEFORE any checkout or measurement runs — the reuse path's reset and the
+  // rebuild path's `worktree add` both execute configured content filters,
+  // and EVERY shape then measures the SHARED worktree with a `git status`
+  // that re-reads stat-stale files through configured `filter.*.clean`
+  // commands (see worktreeResidue). A standalone clone's checkout reads the
+  // CLONE's config, which holds none of these — but the shared measurement
+  // it still runs can execute them, so the screen covers both shapes.
+  const filters = localFilterCommands(worktree);
   if (filters.length > 0) {
     return unavailable(
       `the repository's local config defines content filter(s) ${filters
         .map(inertPath)
         .join(', ')} — ` +
-        'the checkouts this command runs would EXECUTE them (hooks are disabled, ' +
-        'filters are config-driven), and two plain writes into the common dir are ' +
-        'enough to plant both the filter and the attributes that select it. Remove ' +
-        'the filter config — or the attributes file that uses it — if it is not ' +
-        'yours; until then no scratch tree is safe to create or reset.',
+        'this command would EXECUTE them: the linked shape through its checkouts, ' +
+        'and EVERY shape through the shared-worktree residue measurement, whose ' +
+        '`git status` re-reads stat-stale files through configured clean filters ' +
+        '(hooks are disabled, filters are config-driven). Two plain writes into ' +
+        'the common dir are enough to plant both the filter and the attributes ' +
+        'that select it. Remove the filter config — or the attributes file that ' +
+        'uses it — if it is not yours; until then no scratch tree is safe to ' +
+        'create or reset.',
     );
   }
 
@@ -868,7 +884,16 @@ function dependencyNote(farm: DependencyFarm | null): string {
     ` ${farm.linked} dependencies linked in` +
     (farm.failed > 0
       ? `, ${farm.failed} could not be${farm.linked === 0 ? ' — so a JS unit harness may not start here' : ''}: a harness that cannot resolve a package is an environment gap, not a finding, and never a reason to probe in the review worktree instead.`
-      : '.')
+      : '.') +
+    // The note's "the review worktree stays read-only" has exactly one
+    // exception — the links themselves — and the `standalone` field's doc
+    // says the dependency note discloses it.
+    (farm.linked > 0
+      ? ' The links point back at the review worktree — a write THROUGH one of ' +
+        'them (a rebuild, an install script, a patch) lands in the tree every ' +
+        'other agent is reading; replace the link with a copy before modifying ' +
+        'a dependency.'
+      : '')
   );
 }
 
