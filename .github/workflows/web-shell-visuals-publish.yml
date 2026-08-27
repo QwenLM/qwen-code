@@ -70,7 +70,11 @@ jobs:
           set -euo pipefail
           tmp_dir="$(mktemp -d)"
           trap 'rm -rf "$tmp_dir"' EXIT
-          curl -fsSL --connect-timeout 15 --max-time 300 "$OSSUTIL_URL" -o "$tmp_dir/ossutil.zip"
+          # Retry, unlike the release syncs: a red run there is simply rerun,
+          # but a CDN blip here costs this PR its preview comment (the
+          # upload aborts the step) or its evidence images.
+          curl -fsSL --retry 3 --retry-delay 2 --retry-all-errors \
+            --connect-timeout 15 --max-time 300 "$OSSUTIL_URL" -o "$tmp_dir/ossutil.zip"
           echo "$OSSUTIL_SHA256  $tmp_dir/ossutil.zip" | sha256sum -c -
           unzip -q "$tmp_dir/ossutil.zip" -d "$tmp_dir"
           ossutil_path="$(find "$tmp_dir" -type f \( -name 'ossutil' -o -name 'ossutil64' \) -print -quit)"
