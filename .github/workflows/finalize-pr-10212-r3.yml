@@ -23,6 +23,7 @@ jobs:
           python3 /tmp/pr10212_patch.py
           python3 - <<'PY'
           from pathlib import Path
+          import re
 
           p = Path('packages/core/src/utils/shellAstParser.ts')
           s = p.read_text()
@@ -130,15 +131,18 @@ jobs:
               raise SystemExit('extractRulesFromStatement marker not found')
           s = s.replace(old, new, 1)
 
-          old_root = '''  for (const stmt of root.namedChildren) {
-            rules.push(...extractRulesFromStatement(stmt));
-          }
-          '''
-          new_root = '''  rules.push(...extractRulesFromNodes(root.namedChildren));
-          '''
-          if old_root not in s:
+          pattern = re.compile(
+              r"\n\s*for \(const stmt of root\.namedChildren\) \{\s*"
+              r"rules\.push\(\.\.\.extractRulesFromStatement\(stmt\)\);\s*\}\s*",
+              re.MULTILINE,
+          )
+          s, count = pattern.subn(
+              '\n  rules.push(...extractRulesFromNodes(root.namedChildren));\n\n',
+              s,
+              count=1,
+          )
+          if count != 1:
               raise SystemExit('extractCommandRules root loop marker not found')
-          s = s.replace(old_root, new_root, 1)
           p.write_text(s)
           PY
       - name: Install and validate
