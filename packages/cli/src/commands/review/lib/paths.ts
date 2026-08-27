@@ -5,12 +5,14 @@
  */
 
 // Centralised path constants and helpers for the `qwen review` subcommands.
-// All paths are relative to the project root (the current working directory
-// when the command is invoked). Use `path.join` rather than string
-// concatenation so Windows backslashes are produced when needed.
+// Review artifacts are relative to the project root; user-private runtime
+// preferences resolve under Storage's project directory. Use `path.join`
+// rather than string concatenation so Windows backslashes are produced.
 
 import { existsSync, realpathSync, statSync } from 'node:fs';
+
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { Storage } from '@qwen-code/qwen-code-core';
 import { safeTarget } from '../../../utils/paths.js';
 import { inertText } from './inert-text.js';
 
@@ -61,6 +63,17 @@ export const PARSE_ARGS_REPORT = join(
   'qwen-review-parse-args.json',
 );
 
+/** User-private path for the last effort explicitly typed in this project. */
+export function lastReviewEffortPath(
+  projectRoot: string,
+  sessionProjectDir?: string,
+): string {
+  const owner = sessionProjectDir?.trim()
+    ? resolve(sessionProjectDir)
+    : new Storage(projectRoot).getProjectDir();
+  return join(owner, 'review-last-effort');
+}
+
 /** Worktree path for a given PR review session. */
 export function worktreePath(prNumber: string | number): string {
   return join(REVIEW_TMP_DIR, `review-pr-${prNumber}`);
@@ -70,8 +83,7 @@ export function worktreePath(prNumber: string | number): string {
  * The disposable worktree the test-efficacy probe runs in — a sibling of the
  * shared review worktree, discarded wholesale when the probe finishes (#6832).
  *
- * The one exception to this file's "paths are relative to the project root"
- * rule: this returns an ABSOLUTE path. The probe drives `git worktree add`/
+ * This returns an ABSOLUTE path. The probe drives `git worktree add`/
  * `remove` with the shared worktree as cwd, so a relative path would resolve
  * against that worktree, not the repo root, and land the probe tree nested
  * inside the tree it is meant to sit beside. Both call sites — the probe and

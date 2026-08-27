@@ -18,6 +18,7 @@ import {
   assertUnredirectedParent,
   repoRelativeOf,
   inertPath,
+  lastReviewEffortPath,
   tmpFile,
   probeWorktreePath,
   scratchLabel,
@@ -26,6 +27,22 @@ import {
   worktreePath,
   PARSE_ARGS_REPORT,
 } from './paths.js';
+
+describe('lastReviewEffortPath', () => {
+  it('uses the project storage owner exported by the parent session', () => {
+    expect(
+      lastReviewEffortPath('/workspace/repo', '/runtime/projects/repo'),
+    ).toBe(resolve('/runtime/projects/repo/review-last-effort'));
+  });
+
+  it('keeps fallback storage private and project-scoped', () => {
+    const first = lastReviewEffortPath('/workspace/one');
+    const second = lastReviewEffortPath('/workspace/two');
+    expect(first).not.toBe(second);
+    expect(first).not.toContain('/workspace/one/.qwen');
+    expect(second).not.toContain('/workspace/two/.qwen');
+  });
+});
 
 describe('PARSE_ARGS_REPORT', () => {
   it('is the literal path the skill tees to in Step 0', () => {
