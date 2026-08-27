@@ -3297,7 +3297,7 @@ describe('startInteractiveUI', () => {
         authError: null,
         themeError: null,
         shouldOpenAuthDialog: false,
-        geminiMdFileCount: 0,
+        memoryFileCount: 0,
       },
     );
 
@@ -3368,7 +3368,7 @@ describe('startInteractiveUI', () => {
             authError: null,
             themeError: null,
             shouldOpenAuthDialog: false,
-            geminiMdFileCount: 0,
+            memoryFileCount: 0,
           },
         ),
       ).rejects.toThrow('render failed');
