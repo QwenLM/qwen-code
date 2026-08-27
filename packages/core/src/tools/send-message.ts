@@ -21,7 +21,7 @@
 import type { Config } from '../config/config.js';
 import type { PermissionDecision } from '../permissions/types.js';
 import { ToolErrorType } from './tool-error.js';
-import { findMemberByName } from '../agents/team/teamHelpers.js';
+import { findMemberByName, sanitizeName } from '../agents/team/teamHelpers.js';
 import { ToolNames, ToolDisplayNames } from './tool-names.js';
 import { getAgentName } from '../agents/team/identity.js';
 import { LEADER_NAME } from '../agents/team/types.js';
@@ -99,11 +99,12 @@ class SendMessageInvocation extends BaseToolInvocation<
 
       if (!entry) {
         const members = this.config.getTeamManager()?.getTeamFile().members;
-        const teammate = members
-          ? findMemberByName(members, this.params.task_id)
-          : undefined;
-        const hint = teammate
-          ? ` "${this.params.task_id}" is a teammate name — teammate ` +
+        const isTeamDestination =
+          members !== undefined &&
+          (findMemberByName(members, this.params.task_id) !== undefined ||
+            sanitizeName(this.params.task_id) === LEADER_NAME);
+        const hint = isTeamDestination
+          ? ` "${this.params.task_id}" is a team member name — team ` +
             `destinations use the "to" field, not "task_id".`
           : '';
         return {

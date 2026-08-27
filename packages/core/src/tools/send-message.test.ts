@@ -503,6 +503,11 @@ describe('SendMessageTool — destination validation (#10073)', () => {
     ).toThrow('exactly one destination');
   });
 
+  it('declares the two destination fields mutually exclusive', () => {
+    const tool = new SendMessageTool(makeTeamConfig());
+    expect(tool.description).toContain('Specify exactly one of the two fields');
+  });
+
   it('suggests "to" when a failed task_id matches a teammate name', async () => {
     const config = {
       getBackgroundTaskRegistry: () => new BackgroundTaskRegistry(),
@@ -522,7 +527,7 @@ describe('SendMessageTool — destination validation (#10073)', () => {
 
     expect(result.error?.type).toBe(ToolErrorType.SEND_MESSAGE_NOT_FOUND);
     expect(result.llmContent).toContain('No background task found');
-    expect(result.llmContent).toContain('teammate');
+    expect(result.llmContent).toContain('is a team member name');
     expect(result.llmContent).toContain('"to"');
   });
 
@@ -544,6 +549,25 @@ describe('SendMessageTool — destination validation (#10073)', () => {
     );
 
     expect(result.error?.type).toBe(ToolErrorType.SEND_MESSAGE_NOT_FOUND);
-    expect(result.llmContent).not.toContain('is a teammate name');
+    expect(result.llmContent).not.toContain('is a team member name');
+  });
+
+  it('suggests "to" when the task_id is the reserved leader name', async () => {
+    const config = {
+      getBackgroundTaskRegistry: () => new BackgroundTaskRegistry(),
+      getApprovalMode: () => DEFAULT_MODE,
+      getTeamManager: () => ({
+        getTeamFile: () => ({ members: [] }),
+      }),
+    } as unknown as Config;
+    const tool = new SendMessageTool(config);
+
+    const result = await tool.validateBuildAndExecute(
+      { task_id: 'Leader', message: 'hello' },
+      new AbortController().signal,
+    );
+
+    expect(result.error?.type).toBe(ToolErrorType.SEND_MESSAGE_NOT_FOUND);
+    expect(result.llmContent).toContain('is a team member name');
   });
 });
