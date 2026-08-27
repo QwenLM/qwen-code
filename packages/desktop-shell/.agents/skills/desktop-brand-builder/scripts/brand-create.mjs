@@ -14,7 +14,13 @@
  */
 
 import { spawnSync } from 'node:child_process';
-import { copyFileSync, existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import {
+  copyFileSync,
+  existsSync,
+  readFileSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { createRequire } from 'node:module';
 import { extname, join, resolve } from 'node:path';
 
@@ -50,7 +56,9 @@ function titleWords(brandId) {
     .split('-')
     .filter(Boolean)
     .map((part) =>
-      ACRONYMS.has(part) ? part.toUpperCase() : part[0].toUpperCase() + part.slice(1),
+      ACRONYMS.has(part)
+        ? part.toUpperCase()
+        : part[0].toUpperCase() + part.slice(1),
     );
 }
 
@@ -89,10 +97,19 @@ function loadConfig(path) {
   if (!logo || !existsSync(logo) || !statSync(logo).isFile()) {
     fail(`logo must be an existing file path, got: ${input.logo}`);
   }
-  const IMAGE_EXTS = new Set(['.png', '.jpg', '.jpeg', '.svg', '.ico', '.webp']);
+  const IMAGE_EXTS = new Set([
+    '.png',
+    '.jpg',
+    '.jpeg',
+    '.svg',
+    '.ico',
+    '.webp',
+  ]);
   const logoExt = extname(logo).toLowerCase();
   if (!IMAGE_EXTS.has(logoExt)) {
-    fail(`logo must be an image file (.png/.jpg/.jpeg/.svg/.ico/.webp), got: ${input.logo}`);
+    fail(
+      `logo must be an image file (.png/.jpg/.jpeg/.svg/.ico/.webp), got: ${input.logo}`,
+    );
   }
 
   const updaterEndpoints = Array.isArray(input.updaterEndpoints)
@@ -150,6 +167,21 @@ function patchTauriConfig(shellRoot, brand) {
   if (config.bundle) {
     config.bundle.shortDescription = `${brand.appName} desktop shell for the Qwen Code Web Shell`;
   }
+  // A brand that supplies its own updater feed (or pubkey) needs a
+  // plugins.updater section to apply it to. The pristine in-repo shell
+  // always ships one, but a fork or hand-edited shell-root may not;
+  // silently discarding the validated updater config while the success
+  // JSON reports it as applied would ship a branded build that can
+  // never update. Fail closed before any file is written.
+  if (
+    (brand.updaterEndpoints.length > 0 || brand.updaterPubkey) &&
+    !config.plugins?.updater
+  ) {
+    fail(
+      'brand supplies updater config but the target tauri.conf.json has ' +
+        'no plugins.updater section to apply it to',
+    );
+  }
   // A branded build must never poll the official updater feed, and the
   // official feed must never update a branded build. Empty endpoints
   // disable in-app updates unless the brand supplies its own feed.
@@ -196,16 +228,14 @@ function generateIcons(shellRoot, brand) {
   // a plain argv element — no shell interpretation, no quoting games.
   const tauriCli = resolveTauriCli(shellRoot);
   const result = tauriCli
-    ? spawnSync(
-        process.execPath,
-        [tauriCli, 'icon', brand.logo],
-        { cwd: shellRoot, stdio: 'inherit' },
-      )
-    : spawnSync(
-        'npx',
-        ['--yes', '@tauri-apps/cli', 'icon', brand.logo],
-        { cwd: shellRoot, stdio: 'inherit' },
-      );
+    ? spawnSync(process.execPath, [tauriCli, 'icon', brand.logo], {
+        cwd: shellRoot,
+        stdio: 'inherit',
+      })
+    : spawnSync('npx', ['--yes', '@tauri-apps/cli', 'icon', brand.logo], {
+        cwd: shellRoot,
+        stdio: 'inherit',
+      });
   if (result.status === 0) {
     return 'regenerated via tauri icon';
   }
@@ -245,6 +275,18 @@ function patchBootstrap(shellRoot, brand) {
     .slice(1, -1)
     .replace(/'/g, "\\'");
 
+  // index.html splices appName into text content (<title>, <h1>, <h2>)
+  // and double-quoted attributes (alt="..."), so it must be HTML-escaped:
+  // a raw `<` would start an unknown element and a raw `"` would
+  // terminate an attribute mid-value. Escape `&` first so the entities
+  // introduced by the later replacements are not double-escaped.
+  const appNameHtmlSafe = brand.appName
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+
   const patched = [];
   for (const file of ['index.html', 'bootstrap.js']) {
     const filePath = join(bootstrapDir, file);
@@ -259,7 +301,8 @@ function patchBootstrap(shellRoot, brand) {
       // newlines); see appNameJsSafe above.
       text = text.replaceAll('Qwen Code', () => appNameJsSafe);
     } else {
-      text = text.replaceAll('Qwen Code', () => brand.appName);
+      // HTML file: splice the HTML-escaped form; see appNameHtmlSafe.
+      text = text.replaceAll('Qwen Code', () => appNameHtmlSafe);
     }
     if (file === 'index.html') {
       text = text.replaceAll('qwen-code-logo.svg', () => brandLogoName);

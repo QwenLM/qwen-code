@@ -32,24 +32,29 @@ const SCRIPT = join(
 
 /**
  * Create a minimal fake shell-root with the files brand-create.mjs expects.
+ * Pass { withUpdater: false } to model a fork or hand-edited shell-root
+ * whose tauri.conf.json has no plugins.updater section.
  */
-function makeShellRoot() {
+function makeShellRoot({ withUpdater = true } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'brand-test-shell-'));
   mkdirSync(join(root, 'src-tauri', 'icons'), { recursive: true });
   mkdirSync(join(root, 'bootstrap'), { recursive: true });
+  const tauriConfig = {
+    productName: 'Qwen Code Desktop',
+    identifier: 'com.qwen.code.desktop',
+    bundle: { createUpdaterArtifacts: true, shortDescription: '' },
+  };
+  if (withUpdater) {
+    tauriConfig.plugins = {
+      updater: {
+        endpoints: ['https://updater.qwen-code.org'],
+        pubkey: 'dGVzdA==',
+      },
+    };
+  }
   writeFileSync(
     join(root, 'src-tauri', 'tauri.conf.json'),
-    JSON.stringify({
-      productName: 'Qwen Code Desktop',
-      identifier: 'com.qwen.code.desktop',
-      bundle: { createUpdaterArtifacts: true, shortDescription: '' },
-      plugins: {
-        updater: {
-          endpoints: ['https://updater.qwen-code.org'],
-          pubkey: 'dGVzdA==',
-        },
-      },
-    }),
+    JSON.stringify(tauriConfig),
   );
   writeFileSync(
     join(root, 'package.json'),
@@ -206,5 +211,78 @@ describe('brand-create.mjs safety checks', () => {
       });
       expect(check.status, check.stderr).toBe(0);
     }
+  }, 60_000);
+
+  // R5-1: appName is also spliced into bootstrap/index.html (<title>,
+  // alt attribute, <h1>, <h2>), where it must be HTML-escaped so the
+  // branded startup screen stays well-formed for free-form brand names.
+  it('HTML-escapes hostile appName values in bootstrap/index.html', () => {
+    const cases = [
+      {
+        appName: 'Acme <Corp>',
+        expected: [
+          '<title>Acme &lt;Corp&gt;</title>',
+          'alt="Acme &lt;Corp&gt;"',
+          '<h1>Acme &lt;Corp&gt;</h1>',
+          '<h2 id="title">Starting Acme &lt;Corp&gt;</h2>',
+        ],
+        hostileFragment: '<Corp>',
+      },
+      {
+        appName: 'Acme "Beta" <Desktop>',
+        expected: [
+          '<title>Acme &quot;Beta&quot; &lt;Desktop&gt;</title>',
+          'alt="Acme &quot;Beta&quot; &lt;Desktop&gt;"',
+          '<h1>Acme &quot;Beta&quot; &lt;Desktop&gt;</h1>',
+          '<h2 id="title">Starting Acme &quot;Beta&quot; &lt;Desktop&gt;</h2>',
+        ],
+        hostileFragment: 'alt="Acme "Beta"',
+      },
+    ];
+    for (const { appName, expected, hostileFragment } of cases) {
+      const root = makeShellRoot();
+      tmpDirs.push(root);
+      seedTauriCliStub(root);
+      const logo = makeLogo(root);
+      const indexPath = join(root, 'bootstrap', 'index.html');
+      writeFileSync(
+        indexPath,
+        '<!doctype html>\n<html>\n<head>\n<title>Qwen Code</title>\n' +
+          '</head>\n<body>\n<img src="qwen-code-logo.svg" alt="Qwen Code">\n' +
+          '<h1>Qwen Code</h1>\n<h2 id="title">Starting Qwen Code</h2>\n' +
+          '</body>\n</html>\n',
+      );
+      const result = runBrand(root, {
+        brandId: 'acme-ai',
+        logo,
+        appName,
+      });
+      expect(result.status, result.stderr).toBe(0);
+      const html = readFileSync(indexPath, 'utf8');
+      for (const snippet of expected) {
+        expect(html, `appName=${appName}`).toContain(snippet);
+      }
+      expect(html, `appName=${appName}`).not.toContain(hostileFragment);
+    }
+  }, 60_000);
+
+  // R5-8: the brand's validated updater config must not be silently
+  // discarded when the target tauri.conf.json has no plugins.updater
+  // section; fail closed with the config file left unmutated.
+  it('fails closed when the shell-root has no plugins.updater section', () => {
+    const root = makeShellRoot({ withUpdater: false });
+    tmpDirs.push(root);
+    const logo = makeLogo(root);
+    const confPath = join(root, 'src-tauri', 'tauri.conf.json');
+    const before = readFileSync(confPath, 'utf8');
+    const result = runBrand(root, {
+      brandId: 'acme-ai',
+      logo,
+      updaterEndpoints: ['https://updates.acme.ai'],
+      updaterPubkey: 'dGVzdHB1YmtleQ==',
+    });
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain('plugins.updater');
+    expect(readFileSync(confPath, 'utf8')).toBe(before);
   }, 60_000);
 });
