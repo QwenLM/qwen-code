@@ -704,6 +704,43 @@ describe('createDaemonSessionActions', () => {
     expect(store.reset).not.toHaveBeenCalled();
   });
 
+  it('keeps the successor exempted when a same-session reload supersedes', async () => {
+    const existingSession = createMockSession('session-a');
+    const { actions, attachmentLifecycle, pendingSessionLoadRef } =
+      createActionsHarness({
+        connection: { status: 'connected', sessionId: 'session-a' },
+        session: existingSession,
+      });
+
+    const first = actions.reloadSession();
+    const firstSettled = first.catch((error: unknown) => error);
+    expect(attachmentLifecycle.isCleanupDetachPreserved(existingSession)).toBe(
+      true,
+    );
+
+    // A second reload of the same session supersedes the first while it is
+    // still pending. Both switches capture the same session object, so the
+    // superseded switch's deferred release must not clear the exemption the
+    // successor re-preserved — otherwise the runner-effect cleanup detaches
+    // the session mid-reload.
+    const second = actions.reloadSession();
+    const secondSettled = second.catch((error: unknown) => error);
+
+    await expect(firstSettled).resolves.toMatchObject({ name: 'AbortError' });
+    expect(attachmentLifecycle.isCleanupDetachPreserved(existingSession)).toBe(
+      true,
+    );
+    // A superseded load cannot detach: only the surviving reload may.
+    expect(existingSession.detach).not.toHaveBeenCalled();
+
+    attachmentLifecycle.resolvePendingLoad(pendingSessionLoadRef.current!);
+    await expect(secondSettled).resolves.toBeUndefined();
+    expect(attachmentLifecycle.isCleanupDetachPreserved(existingSession)).toBe(
+      false,
+    );
+    expect(existingSession.detach).toHaveBeenCalledOnce();
+  });
+
   it('keeps the reload abort signal with the pending load', () => {
     const controller = new AbortController();
     const clearLiveJournalRepair = vi.fn();

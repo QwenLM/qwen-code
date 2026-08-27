@@ -21,7 +21,9 @@ export class SessionAttachmentLifecycle {
   private loadGeneration = 0;
   private currentLoad: PendingSessionLoad | undefined;
   private manuallyCleared = false;
-  private cleanupDetachExemption: DaemonSessionClient | undefined;
+  private cleanupDetachExemption:
+    | { session: DaemonSessionClient; load: PendingSessionLoad | undefined }
+    | undefined;
 
   get pendingLoad(): PendingSessionLoad | undefined {
     return this.currentLoad;
@@ -116,24 +118,42 @@ export class SessionAttachmentLifecycle {
     this.manuallyCleared = false;
   }
 
-  preserveCleanupDetach(session: DaemonSessionClient): void {
-    this.cleanupDetachExemption = session;
+  preserveCleanupDetach(
+    session: DaemonSessionClient,
+    load?: PendingSessionLoad,
+  ): void {
+    this.cleanupDetachExemption = { session, load };
   }
 
   isCleanupDetachPreserved(session: DaemonSessionClient | undefined): boolean {
-    return session !== undefined && this.cleanupDetachExemption === session;
+    return (
+      session !== undefined && this.cleanupDetachExemption?.session === session
+    );
   }
 
   releaseCleanupDetachExemption(
     session?: DaemonSessionClient | undefined,
+    load?: PendingSessionLoad,
   ): void {
-    if (session === undefined || this.cleanupDetachExemption === session) {
-      this.cleanupDetachExemption = undefined;
+    const exemption = this.cleanupDetachExemption;
+    if (exemption === undefined) return;
+    if (session !== undefined && exemption.session !== session) return;
+    // Two overlapping reloads of the same session share the session object,
+    // so identity alone cannot tell a switch's own exemption from the one a
+    // superseding switch re-preserved. A release tied to a superseded load
+    // must not clear the successor's exemption.
+    if (
+      load !== undefined &&
+      exemption.load !== undefined &&
+      exemption.load !== load
+    ) {
+      return;
     }
+    this.cleanupDetachExemption = undefined;
   }
 
   releaseCleanupDetachExemptionForSession(sessionId: string): void {
-    if (this.cleanupDetachExemption?.sessionId === sessionId) {
+    if (this.cleanupDetachExemption?.session.sessionId === sessionId) {
       this.cleanupDetachExemption = undefined;
     }
   }

@@ -285,4 +285,45 @@ describe('SessionAttachmentLifecycle', () => {
     lifecycle.resolvePendingLoad(lifecycle.pendingLoad!);
     await expect(second).resolves.toBeUndefined();
   });
+
+  it("keeps the successor's exemption when a superseded same-session release runs late", async () => {
+    const lifecycle = new SessionAttachmentLifecycle();
+    const session = {
+      sessionId: 'session-a',
+    } as DaemonSessionClient;
+
+    const first = lifecycle.startPendingLoad({
+      sessionId: 'session-a',
+      mode: 'load',
+      onTimeout: () => new Error('timed out'),
+    });
+    const firstLoad = lifecycle.pendingLoad!;
+    lifecycle.preserveCleanupDetach(session, firstLoad);
+
+    // A same-session reload supersedes the first load: the supersede clears
+    // the exemption synchronously, then the second switch re-preserves it for
+    // its own load.
+    const second = lifecycle.startPendingLoad({
+      sessionId: 'session-a',
+      mode: 'load',
+      onTimeout: () => new Error('timed out'),
+    });
+    const secondLoad = lifecycle.pendingLoad!;
+    await expect(first).rejects.toMatchObject({ name: 'AbortError' });
+    lifecycle.preserveCleanupDetach(session, secondLoad);
+    expect(lifecycle.isCleanupDetachPreserved(session)).toBe(true);
+
+    // The superseded switch's deferred release arrives after the successor
+    // re-preserved. Both preserved the same session object, so only the
+    // recorded load distinguishes the two exemptions.
+    lifecycle.releaseCleanupDetachExemption(session, firstLoad);
+    expect(lifecycle.isCleanupDetachPreserved(session)).toBe(true);
+
+    // The successor's own release clears the exemption once it settles.
+    lifecycle.releaseCleanupDetachExemption(session, secondLoad);
+    expect(lifecycle.isCleanupDetachPreserved(session)).toBe(false);
+
+    lifecycle.resolvePendingLoad(secondLoad);
+    await expect(second).resolves.toBeUndefined();
+  });
 });

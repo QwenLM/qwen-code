@@ -565,11 +565,14 @@ export function createDaemonSessionActions({
           );
         });
       if (reloadingCurrentSession) {
-        attachmentLifecycle.preserveCleanupDetach(currentSession);
+        attachmentLifecycle.preserveCleanupDetach(currentSession, pendingLoad);
         void loadPromise
           .then(detachCurrentSession, () => undefined)
           .finally(() => {
-            attachmentLifecycle.releaseCleanupDetachExemption(currentSession);
+            attachmentLifecycle.releaseCleanupDetachExemption(
+              currentSession,
+              pendingLoad,
+            );
           });
       } else {
         void detachCurrentSession();
