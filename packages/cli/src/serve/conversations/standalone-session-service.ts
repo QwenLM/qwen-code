@@ -1253,6 +1253,10 @@ export class StandaloneSessionService {
           record.storageSessionId,
           {
             assertCanMutate: () => this.options.assertRuntimeCurrent(runtime),
+            assertCleanupOwned: () => {
+              this.options.assertRuntimeCurrent(runtime);
+              lease.assertCleanupOwned();
+            },
           },
         );
       } catch {
@@ -1555,6 +1559,10 @@ export class StandaloneSessionService {
                           lease.assertOwnedAndUnchanged(),
                         assertCanMutate: () =>
                           this.options.assertRuntimeCurrent(runtime),
+                        assertCleanupOwned: () => {
+                          this.options.assertRuntimeCurrent(runtime);
+                          lease.assertCleanupOwned();
+                        },
                       },
                     );
                     if (archived.errors[0]) throw archived.errors[0].error;
@@ -1655,6 +1663,10 @@ export class StandaloneSessionService {
                           lease.assertOwnedAndUnchanged(),
                         assertCanMutate: () =>
                           this.options.assertRuntimeCurrent(runtime),
+                        assertCleanupOwned: () => {
+                          this.options.assertRuntimeCurrent(runtime);
+                          lease.assertCleanupOwned();
+                        },
                       },
                     );
                     if (unarchived.errors[0]) throw unarchived.errors[0].error;
@@ -1959,6 +1971,10 @@ export class StandaloneSessionService {
             locked.storageSessionId,
             {
               assertCanMutate: () => this.options.assertRuntimeCurrent(runtime),
+              assertCleanupOwned: () => {
+                this.options.assertRuntimeCurrent(runtime);
+                lease.assertCleanupOwned();
+              },
             },
           );
         } catch {

@@ -7,6 +7,7 @@
 import { execFile } from 'node:child_process';
 import * as nodeConstants from 'node:constants';
 import { createHash, randomUUID, type Hash } from 'node:crypto';
+import * as nodeFs from 'node:fs';
 import type { Stats } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
@@ -1582,6 +1583,7 @@ export class SessionWriterLease {
   private terminalPromise: Promise<void> | undefined;
   private operationTail: Promise<void> = Promise.resolve();
   private readonly lockRecordRaw: string;
+  private lockFileIdentity: { dev: number; ino: number } | undefined;
   private readonly retiredPath: string;
   private readonly claimPath: string;
 
@@ -1935,6 +1937,7 @@ export class SessionWriterLease {
   ): Promise<SessionWriterLease> {
     const lease = new SessionWriterLease(lockPath, lockRecord, options);
     try {
+      lease.lockFileIdentity = lease.readVerifiedLockIdentity();
       options.onOwnershipAcquired?.(lease);
       const snapshot = await captureTranscriptSnapshot(
         options.transcriptPath,
@@ -2048,7 +2051,13 @@ export class SessionWriterLease {
       }
       throw new SessionWriterUnavailableError();
     }
-    if (!stat.isFile() || stat.isSymbolicLink()) {
+    if (
+      !stat.isFile() ||
+      stat.isSymbolicLink() ||
+      (this.lockFileIdentity !== undefined &&
+        (stat.dev !== this.lockFileIdentity.dev ||
+          stat.ino !== this.lockFileIdentity.ino))
+    ) {
       throw new SessionWriterLostError();
     }
     let raw: string;
@@ -2070,6 +2079,75 @@ export class SessionWriterLease {
       throw new SessionWriterLostError();
     }
     return record;
+  }
+
+  private readVerifiedLockIdentity(): { dev: number; ino: number } {
+    let descriptor: number;
+    try {
+      descriptor = nodeFs.openSync(
+        this.lockPath,
+        nodeConstants.O_RDONLY |
+          (nodeConstants.O_NOFOLLOW ?? 0) |
+          (nodeConstants.O_NONBLOCK ?? 0),
+      );
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === 'ENOENT' || code === 'ELOOP') {
+        throw new SessionWriterLostError();
+      }
+      throw new SessionWriterUnavailableError();
+    }
+    try {
+      const stat = nodeFs.fstatSync(descriptor);
+      if (!stat.isFile()) throw new SessionWriterLostError();
+      if (!hasVerifiableInode(stat.ino)) {
+        throw new SessionWriterUnavailableError();
+      }
+      let pathStat: Stats;
+      try {
+        pathStat = nodeFs.lstatSync(this.lockPath);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+          throw new SessionWriterLostError();
+        }
+        throw new SessionWriterUnavailableError();
+      }
+      if (
+        !pathStat.isFile() ||
+        pathStat.isSymbolicLink() ||
+        pathStat.dev !== stat.dev ||
+        pathStat.ino !== stat.ino
+      ) {
+        throw new SessionWriterLostError();
+      }
+      const raw = nodeFs.readFileSync(descriptor, 'utf8');
+      const record = parseLockRecord(raw);
+      if (
+        !record ||
+        !isActiveLockRecord(record) ||
+        record.owner_id !== this.ownerId ||
+        raw !== this.lockRecordRaw
+      ) {
+        throw new SessionWriterLostError();
+      }
+      return { dev: stat.dev, ino: stat.ino };
+    } catch (error) {
+      if (error instanceof SessionWriterError) throw error;
+      throw new SessionWriterUnavailableError();
+    } finally {
+      nodeFs.closeSync(descriptor);
+    }
+  }
+
+  /** Verify ownership after the transcript snapshot intentionally changes. */
+  assertCleanupOwned(): void {
+    if (this.released) throw new SessionWriterLostError();
+    const expected = this.lockFileIdentity;
+    if (expected === undefined) throw new SessionWriterUnavailableError();
+    const current = this.readVerifiedLockIdentity();
+    if (current.dev !== expected.dev || current.ino !== expected.ino) {
+      throw new SessionWriterLostError();
+    }
   }
 
   assertOwnedAndUnchanged(): Promise<void> {

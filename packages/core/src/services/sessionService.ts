@@ -63,6 +63,7 @@ import {
   type SessionRestoreProjection,
 } from './session-transcript-reader.js';
 import {
+  SessionWriterError,
   SessionWriterLease,
   SessionTranscriptChangedError,
   SessionTranscriptIdentityUnavailableError,
@@ -306,6 +307,7 @@ export interface RemoveSessionsResult {
 export interface RemoveSessionOptions {
   assertStorageUnchanged?: () => Promise<void>;
   assertCanMutate?: () => void;
+  assertCleanupOwned?: () => void;
 }
 
 export interface ArchiveSessionsResult {
@@ -321,6 +323,7 @@ export interface ArchiveSessionsOptions {
   resolveConflicts?: boolean;
   assertStorageUnchanged?: () => Promise<void>;
   assertCanMutate?: () => void;
+  assertCleanupOwned?: () => void;
 }
 
 export interface UnarchiveSessionsResult {
@@ -336,6 +339,7 @@ export interface UnarchiveSessionsOptions {
   resolveConflicts?: boolean;
   assertStorageUnchanged?: () => Promise<void>;
   assertCanMutate?: () => void;
+  assertCleanupOwned?: () => void;
 }
 
 export interface SessionServiceOptions {
@@ -1529,7 +1533,7 @@ export class SessionService {
 
   private async removeSessionOrganization(
     sessionId: string,
-    assertCanMutate?: () => void,
+    assertCleanupOwned?: () => void,
     propagateFailure = false,
   ): Promise<void> {
     try {
@@ -1539,15 +1543,16 @@ export class SessionService {
           this.warn(message);
         },
       );
-      if (assertCanMutate) {
+      if (assertCleanupOwned) {
         await service.removeSession(sessionId, {
-          assertCanCommit: assertCanMutate,
+          assertCanCommit: assertCleanupOwned,
         });
       } else {
         await service.removeSession(sessionId);
       }
     } catch (error) {
-      assertCanMutate?.();
+      if (error instanceof SessionWriterError) throw error;
+      assertCleanupOwned?.();
       if (propagateFailure) throw error;
       this.warn(
         `removeSession: failed to clear session organization for ${sessionId}: ${error}`,
@@ -2600,7 +2605,7 @@ export class SessionService {
         await assertDurableDirectoryHandle(parent);
       }
       await this.cleanupRemovedSessionStateInternal(sessionId, options, true);
-      options.assertCanMutate?.();
+      (options.assertCleanupOwned ?? options.assertCanMutate)?.();
       for (const parent of parents) {
         await syncDurableDirectory(parent);
       }
@@ -2742,10 +2747,12 @@ export class SessionService {
     propagateOrganizationFailure: boolean,
   ): Promise<void> {
     this.cleanupRemovedSessionFiles(sessionId, options);
-    options.assertCanMutate?.();
+    const assertCleanupOwned =
+      options.assertCleanupOwned ?? options.assertCanMutate;
+    assertCleanupOwned?.();
     await this.removeSessionOrganization(
       sessionId,
-      options.assertCanMutate,
+      assertCleanupOwned,
       propagateOrganizationFailure,
     );
   }
@@ -2754,13 +2761,15 @@ export class SessionService {
     sessionId: string,
     options: RemoveSessionOptions,
   ): void {
-    options.assertCanMutate?.();
+    const assertCleanupOwned =
+      options.assertCleanupOwned ?? options.assertCanMutate;
+    assertCleanupOwned?.();
     this.removeWorktreeSidecars(sessionId);
-    options.assertCanMutate?.();
+    assertCleanupOwned?.();
     this.removePrSidecars(sessionId);
-    options.assertCanMutate?.();
+    assertCleanupOwned?.();
     this.removePromptLedgers(sessionId);
-    options.assertCanMutate?.();
+    assertCleanupOwned?.();
     this.removeFileHistoryBackups(sessionId);
   }
 
@@ -2809,23 +2818,26 @@ export class SessionService {
           this.assertMaintainableSessionUnchanged(sessionId, snapshot);
           this.removeFileIfExists(active.filePath);
           try {
-            options.assertCanMutate?.();
+            options.assertCleanupOwned?.();
             await this.movePrSidecar(
               this.getPrSessionPathForState(sessionId, 'active'),
               this.getPrSessionPathForState(sessionId, 'archived'),
-              options.assertCanMutate,
+              options.assertCleanupOwned,
             );
           } catch (sidecarError) {
-            options.assertCanMutate?.();
+            if (sidecarError instanceof SessionWriterError) {
+              throw sidecarError;
+            }
+            options.assertCleanupOwned?.();
             this.warn(
               `archiveSessions: failed to merge active pr sidecar for ${sessionId}: ${sidecarError}`,
             );
           }
-          options.assertCanMutate?.();
+          options.assertCleanupOwned?.();
           this.removeFileIfExists(
             this.getWorktreeSessionPathForState(sessionId, 'active'),
           );
-          options.assertCanMutate?.();
+          options.assertCleanupOwned?.();
           this.removeFileIfExists(
             this.getPromptLedgerPathForState(sessionId, 'active'),
           );
@@ -2861,7 +2873,7 @@ export class SessionService {
         } catch (error) {
           throw this.sessionFileMoveError('archive', error);
         }
-        options.assertCanMutate?.();
+        options.assertCleanupOwned?.();
         try {
           this.moveOptionalFile(activeSidecar, archivedSidecar);
         } catch (sidecarError) {
@@ -2873,19 +2885,25 @@ export class SessionService {
           await this.movePrSidecar(
             this.getPrSessionPathForState(sessionId, 'active'),
             this.getPrSessionPathForState(sessionId, 'archived'),
-            options.assertCanMutate,
+            options.assertCleanupOwned,
           );
         } catch (sidecarError) {
-          options.assertCanMutate?.();
+          if (sidecarError instanceof SessionWriterError) {
+            throw sidecarError;
+          }
+          options.assertCleanupOwned?.();
           this.warn(
             `archiveSessions: failed to move pr sidecar for ${sessionId}: ${sidecarError}`,
           );
         }
         try {
-          options.assertCanMutate?.();
+          options.assertCleanupOwned?.();
           this.moveLedgerSidecar(activeLedger, archivedLedger);
         } catch (ledgerError) {
-          options.assertCanMutate?.();
+          if (ledgerError instanceof SessionWriterError) {
+            throw ledgerError;
+          }
+          options.assertCleanupOwned?.();
           this.warn(
             `archiveSessions: failed to move prompt ledger for ${sessionId} from ${activeLedger} to ${archivedLedger}: ${ledgerError}`,
           );
@@ -2950,23 +2968,26 @@ export class SessionService {
           this.assertMaintainableSessionUnchanged(sessionId, snapshot);
           this.removeFileIfExists(archived.filePath);
           try {
-            options.assertCanMutate?.();
+            options.assertCleanupOwned?.();
             await this.movePrSidecar(
               this.getPrSessionPathForState(sessionId, 'archived'),
               this.getPrSessionPathForState(sessionId, 'active'),
-              options.assertCanMutate,
+              options.assertCleanupOwned,
             );
           } catch (sidecarError) {
-            options.assertCanMutate?.();
+            if (sidecarError instanceof SessionWriterError) {
+              throw sidecarError;
+            }
+            options.assertCleanupOwned?.();
             this.warn(
               `unarchiveSessions: failed to merge archived pr sidecar for ${sessionId}: ${sidecarError}`,
             );
           }
-          options.assertCanMutate?.();
+          options.assertCleanupOwned?.();
           this.removeFileIfExists(
             this.getWorktreeSessionPathForState(sessionId, 'archived'),
           );
-          options.assertCanMutate?.();
+          options.assertCleanupOwned?.();
           this.removeFileIfExists(
             this.getPromptLedgerPathForState(sessionId, 'archived'),
           );
@@ -2994,7 +3015,7 @@ export class SessionService {
         } catch (error) {
           throw this.sessionFileMoveError('unarchive', error);
         }
-        options.assertCanMutate?.();
+        options.assertCleanupOwned?.();
         try {
           this.moveOptionalFile(archivedSidecar, activeSidecar);
         } catch (sidecarError) {
@@ -3006,10 +3027,13 @@ export class SessionService {
           await this.movePrSidecar(
             this.getPrSessionPathForState(sessionId, 'archived'),
             this.getPrSessionPathForState(sessionId, 'active'),
-            options.assertCanMutate,
+            options.assertCleanupOwned,
           );
         } catch (sidecarError) {
-          options.assertCanMutate?.();
+          if (sidecarError instanceof SessionWriterError) {
+            throw sidecarError;
+          }
+          options.assertCleanupOwned?.();
           this.warn(
             `unarchiveSessions: failed to move pr sidecar for ${sessionId}: ${sidecarError}`,
           );
@@ -3023,10 +3047,13 @@ export class SessionService {
           'active',
         );
         try {
-          options.assertCanMutate?.();
+          options.assertCleanupOwned?.();
           this.moveLedgerSidecar(archivedLedger, activeLedger);
         } catch (ledgerError) {
-          options.assertCanMutate?.();
+          if (ledgerError instanceof SessionWriterError) {
+            throw ledgerError;
+          }
+          options.assertCleanupOwned?.();
           this.warn(
             `unarchiveSessions: failed to move prompt ledger for ${sessionId} from ${archivedLedger} to ${activeLedger}: ${ledgerError}`,
           );

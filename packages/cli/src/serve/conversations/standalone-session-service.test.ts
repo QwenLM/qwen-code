@@ -330,12 +330,14 @@ function mockArchivedStandalone(storageSessionId = sessionId): void {
 
 function mockWriterLease(): {
   assertOwnedAndUnchanged: ReturnType<typeof vi.fn>;
+  assertCleanupOwned: ReturnType<typeof vi.fn>;
   release: ReturnType<typeof vi.fn>;
   isReleased: boolean;
   isReleaseDurabilityPending: boolean;
 } {
   const lease = {
     assertOwnedAndUnchanged: vi.fn(async () => undefined),
+    assertCleanupOwned: vi.fn(),
     release: vi.fn(async () => undefined),
     isReleased: false,
     isReleaseDurabilityPending: false,
@@ -628,13 +630,15 @@ describe('StandaloneSessionService', () => {
     const archiveHarness = createHarness();
     mockActiveStandalone();
     const archiveLease = mockWriterLease();
-    vi.spyOn(SessionService.prototype, 'archiveSessions').mockResolvedValue({
-      archived: [sessionId],
-      alreadyArchived: [],
-      resolvedConflicts: [],
-      notFound: [],
-      errors: [],
-    });
+    const archive = vi
+      .spyOn(SessionService.prototype, 'archiveSessions')
+      .mockResolvedValue({
+        archived: [sessionId],
+        alreadyArchived: [],
+        resolvedConflicts: [],
+        notFound: [],
+        errors: [],
+      });
 
     await expect(archiveHarness.service.archive([sessionId])).resolves.toEqual({
       archived: [sessionId],
@@ -642,19 +646,30 @@ describe('StandaloneSessionService', () => {
       notFound: [],
       errors: [],
     });
+    const archiveOptions = archive.mock.calls[0]?.[1];
+    expect(archiveOptions).toEqual(
+      expect.objectContaining({
+        assertCanMutate: expect.any(Function),
+        assertCleanupOwned: expect.any(Function),
+      }),
+    );
+    archiveOptions?.assertCleanupOwned?.();
+    expect(archiveLease.assertCleanupOwned).toHaveBeenCalledOnce();
     expect(archiveLease.release).toHaveBeenCalledOnce();
 
     vi.restoreAllMocks();
     const unarchiveHarness = createHarness();
     mockArchivedStandalone();
     const unarchiveLease = mockWriterLease();
-    vi.spyOn(SessionService.prototype, 'unarchiveSessions').mockResolvedValue({
-      unarchived: [sessionId],
-      alreadyActive: [],
-      resolvedConflicts: [],
-      notFound: [],
-      errors: [],
-    });
+    const unarchive = vi
+      .spyOn(SessionService.prototype, 'unarchiveSessions')
+      .mockResolvedValue({
+        unarchived: [sessionId],
+        alreadyActive: [],
+        resolvedConflicts: [],
+        notFound: [],
+        errors: [],
+      });
 
     await expect(
       unarchiveHarness.service.unarchive([sessionId]),
@@ -664,6 +679,15 @@ describe('StandaloneSessionService', () => {
       notFound: [],
       errors: [],
     });
+    const unarchiveOptions = unarchive.mock.calls[0]?.[1];
+    expect(unarchiveOptions).toEqual(
+      expect.objectContaining({
+        assertCanMutate: expect.any(Function),
+        assertCleanupOwned: expect.any(Function),
+      }),
+    );
+    unarchiveOptions?.assertCleanupOwned?.();
+    expect(unarchiveLease.assertCleanupOwned).toHaveBeenCalledOnce();
     expect(unarchiveLease.release).toHaveBeenCalledOnce();
   });
 
@@ -694,10 +718,9 @@ describe('StandaloneSessionService', () => {
       SessionService.prototype,
       'removeSessionTranscriptForLifecycle',
     ).mockResolvedValue(true);
-    vi.spyOn(
-      SessionService.prototype,
-      'cleanupRemovedSessionStateForLifecycle',
-    ).mockResolvedValue();
+    const cleanupRemovedState = vi
+      .spyOn(SessionService.prototype, 'cleanupRemovedSessionStateForLifecycle')
+      .mockResolvedValue();
 
     await expect(harness.service.delete([sessionId])).resolves.toEqual({
       removed: [sessionId],
@@ -721,6 +744,13 @@ describe('StandaloneSessionService', () => {
       { assertCanCommit: expect.any(Function) },
     );
     expect(harness.deletionJournal.clear).toHaveBeenCalledOnce();
+    const cleanupOptions = cleanupRemovedState.mock.calls[0]?.[1];
+    expect(cleanupOptions).toEqual({
+      assertCanMutate: expect.any(Function),
+      assertCleanupOwned: expect.any(Function),
+    });
+    cleanupOptions?.assertCleanupOwned?.();
+    expect(lease.assertCleanupOwned).toHaveBeenCalledOnce();
     expect(lease.release).toHaveBeenCalledOnce();
   });
 
@@ -1138,12 +1168,11 @@ describe('StandaloneSessionService', () => {
       SessionService.prototype,
       'findSessionIdIgnoringCase',
     ).mockResolvedValue(undefined);
-    vi.spyOn(
-      SessionService.prototype,
-      'cleanupRemovedSessionStateForLifecycle',
-    ).mockResolvedValue();
+    const cleanupRemovedState = vi
+      .spyOn(SessionService.prototype, 'cleanupRemovedSessionStateForLifecycle')
+      .mockResolvedValue();
     const harness = createHarness();
-    mockWriterLease();
+    const lease = mockWriterLease();
     harness.deletionJournal.read
       .mockResolvedValueOnce(deletionEntry() as never)
       .mockResolvedValueOnce(deletionEntry() as never);
@@ -1169,6 +1198,14 @@ describe('StandaloneSessionService', () => {
       fileCleanupPending: [],
     });
     expect(harness.deletionJournal.clear).toHaveBeenCalledWith(sessionId, root);
+    const cleanupCalls = cleanupRemovedState.mock.calls;
+    const cleanupOptions = cleanupCalls[cleanupCalls.length - 1]?.[1];
+    expect(cleanupOptions).toEqual({
+      assertCanMutate: expect.any(Function),
+      assertCleanupOwned: expect.any(Function),
+    });
+    cleanupOptions?.assertCleanupOwned?.();
+    expect(lease.assertCleanupOwned).toHaveBeenCalledOnce();
   });
 
   it('keeps deletion outcome unknown when transcript directory sync fails after unlink', async () => {

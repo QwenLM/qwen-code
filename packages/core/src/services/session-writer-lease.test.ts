@@ -11,6 +11,7 @@ import {
   constants as fsConstants,
   mkdirSync,
   readFileSync,
+  renameSync,
   statSync,
   unlinkSync,
   utimesSync,
@@ -969,6 +970,7 @@ describe('SessionWriterLease', () => {
     const lease = await SessionWriterLease.acquire(fixture.options);
 
     await fs.appendFile(fixture.transcriptPath, '{"external":true}\n');
+    expect(() => lease.assertCleanupOwned()).not.toThrow();
     await expect(lease.assertOwnedAndUnchanged()).rejects.toBeInstanceOf(
       SessionTranscriptChangedError,
     );
@@ -979,6 +981,7 @@ describe('SessionWriterLease', () => {
     );
     await fs.unlink(lockPath);
     await fs.writeFile(lockPath, '{"replacement":true}');
+    expect(() => lease.assertCleanupOwned()).toThrow(SessionWriterLostError);
     await expect(lease.assertOwnedAndUnchanged()).rejects.toBeInstanceOf(
       SessionWriterLostError,
     );
@@ -989,6 +992,74 @@ describe('SessionWriterLease', () => {
       '{"replacement":true}',
     );
   });
+
+  it.runIf(process.platform !== 'win32')(
+    'rejects a byte-identical atomic replacement during cleanup',
+    async () => {
+      const fixture = await createFixture();
+      const lease = await SessionWriterLease.acquire(fixture.options);
+      const lockPath = getSessionWriterLockPath(
+        fixture.runtimeBaseDir,
+        fixture.options.sessionId,
+      );
+      const replacementPath = `${lockPath}.replacement`;
+      const lockRecord = await fs.readFile(lockPath, 'utf8');
+      await fs.writeFile(replacementPath, lockRecord);
+      await fs.rename(replacementPath, lockPath);
+
+      expect(() => lease.assertCleanupOwned()).toThrow(SessionWriterLostError);
+      await expect(lease.release()).rejects.toBeInstanceOf(
+        SessionWriterLostError,
+      );
+    },
+  );
+
+  it.runIf(process.platform !== 'win32')(
+    'rejects a byte-identical atomic replacement during acquisition',
+    async () => {
+      const fixture = await createFixture();
+      const lockPath = getSessionWriterLockPath(
+        fixture.runtimeBaseDir,
+        fixture.options.sessionId,
+      );
+      const replacementPath = `${lockPath}.replacement`;
+
+      await expect(
+        SessionWriterLease.acquire({
+          ...fixture.options,
+          onOwnershipAcquired: () => {
+            writeFileSync(replacementPath, readFileSync(lockPath));
+            renameSync(replacementPath, lockPath);
+          },
+        }),
+      ).rejects.toBeInstanceOf(SessionWriterUnavailableError);
+      await fs.unlink(lockPath);
+    },
+  );
+
+  it.runIf(process.platform !== 'win32')(
+    'rejects a symlinked cleanup lock',
+    async () => {
+      const fixture = await createFixture();
+      const lease = await SessionWriterLease.acquire(fixture.options);
+      const lockPath = getSessionWriterLockPath(
+        fixture.runtimeBaseDir,
+        fixture.options.sessionId,
+      );
+      const targetPath = `${lockPath}.replacement`;
+      const lockRecord = await fs.readFile(lockPath, 'utf8');
+      await fs.writeFile(targetPath, lockRecord);
+      await fs.unlink(lockPath);
+      await fs.symlink(targetPath, lockPath);
+
+      expect(() => lease.assertCleanupOwned()).toThrow(SessionWriterLostError);
+      await expect(lease.release()).rejects.toBeInstanceOf(
+        SessionWriterLostError,
+      );
+      await fs.unlink(lockPath);
+      await fs.unlink(targetPath);
+    },
+  );
 
   it.runIf(process.platform !== 'win32')(
     'classifies an unreadable owned lock as unavailable',
