@@ -114,11 +114,26 @@ function loadConfig(path) {
   }
 
   const words = titleWords(brandId);
+  const appName = input.appName?.trim() || words.join(' ');
+
+  // The single-use guard (detectAlreadyBranded) keys on productName
+  // changing away from the pristine default. If the brand's appName
+  // equals that default, the guard never fires on run 1, so run 2
+  // proceeds and doubles brand strings in bootstrap files. Reject this
+  // at load time so the error is clear and no files are mutated.
+  if (appName === 'Qwen Code Desktop') {
+    fail(
+      'appName must not be "Qwen Code Desktop" — that is the pristine ' +
+        'shell default and would defeat the re-run guard. Choose a ' +
+        'distinct name or use a different brandId.',
+    );
+  }
+
   return {
     brandId,
     logo,
     website: input.website?.trim() || undefined,
-    appName: input.appName?.trim() || words.join(' '),
+    appName,
     appId: input.appId?.trim() || deriveAppId(input.website, brandId),
     artifactPrefix: input.artifactPrefix?.trim() || words.join('-'),
     updaterEndpoints,

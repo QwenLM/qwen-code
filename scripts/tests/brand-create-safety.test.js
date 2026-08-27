@@ -123,4 +123,26 @@ describe('brand-create.mjs safety checks', () => {
     // on the updaterPubkey validation.
     expect(result.stderr).not.toContain('updaterPubkey is missing');
   });
+
+  // R3-4: Single-use guard bypass when appName === productName
+  it('rejects appName equal to the pristine default "Qwen Code Desktop"', () => {
+    const result = runBrand(shellRoot, {
+      brandId: 'acme-ai',
+      logo: logoPath,
+      appName: 'Qwen Code Desktop',
+    });
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain('Qwen Code Desktop');
+    expect(result.stderr).toContain('re-run guard');
+  });
+
+  it('rejects brandId that derives appName "Qwen Code Desktop"', () => {
+    // brandId "qwen-code-desktop" → titleWords → "Qwen Code Desktop"
+    const result = runBrand(shellRoot, {
+      brandId: 'qwen-code-desktop',
+      logo: logoPath,
+    });
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain('Qwen Code Desktop');
+  });
 });
