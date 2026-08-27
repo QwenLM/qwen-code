@@ -202,6 +202,19 @@ export class TeamManager {
   private readonly teamEventEmitter = new TeamEventEmitter();
 
   /**
+   * Per-TeamManager write queue serializing every roster write
+   * (the success-path write and the failed-spawn compensating
+   * write in `spawnTeammate`). Each queued task serializes the
+   * live `teamFile` when it RUNS, not when it is enqueued, so
+   * commits land in call order and a compensating write queued
+   * after a stale snapshot always lands last. Without this, two
+   * unsynchronized writers can reorder — a slow atomic rename
+   * for the stale snapshot landing after the compensating write
+   * — and re-persist exactly the ghost member #10208 removes.
+   */
+  private teamFileWriteQueue: Promise<void> = Promise.resolve();
+
+  /**
    * Cap on per-agent pending messages. Each message can be up to the
    * `send_message` schema's `maxLength`, and a queue only drains when its
    * recipient goes IDLE — so without a cap a single looping or
@@ -307,6 +320,21 @@ export class TeamManager {
    * Spawn a new teammate. Adds the member to the team file,
    * spawns via backend, and sets up the event bridge.
    */
+  /**
+   * Queue a team-file write behind any in-flight roster write and
+   * return its promise. The snapshot is taken when the queued task
+   * runs (see `teamFileWriteQueue`), so the last queued write always
+   * commits the newest in-memory state. A rejected write does not
+   * poison the queue — the chain survives for subsequent writes.
+   */
+  private persistTeamFile(): Promise<void> {
+    const write = this.teamFileWriteQueue.then(() =>
+      writeTeamFile(this.teamFile.name, this.teamFile),
+    );
+    this.teamFileWriteQueue = write.catch(() => {});
+    return write;
+  }
+
   async spawnTeammate(config: TeammateSpawnConfig): Promise<void> {
     if (this.teamFile.members.length >= this.maxTeammates) {
       throw new Error(
@@ -532,7 +560,7 @@ export class TeamManager {
       // EACCES, ...), `rollback` tears down the just-spawned agent
       // and event bridge so we don't leave a running teammate that
       // no team file knows about.
-      await writeTeamFile(this.teamFile.name, this.teamFile);
+      await this.persistTeamFile();
     } catch (err) {
       rollback();
       // Compensating write: if another concurrent spawn already
@@ -540,9 +568,15 @@ export class TeamManager {
       // persisted membership matches the post-rollback in-memory
       // state. Best-effort — the original error is more important.
       try {
-        await writeTeamFile(this.teamFile.name, this.teamFile);
-      } catch {
-        // Swallow — original error takes precedence.
+        await this.persistTeamFile();
+      } catch (writeErr) {
+        // Best-effort — the original error takes precedence, but
+        // leave a trail so a resurfaced ghost member can be told
+        // apart from a compensating write that itself failed.
+        debug.warn(
+          `Compensating team-file write after failed spawn of ` +
+            `${agentId} failed: ${getErrorMessage(writeErr)}`,
+        );
       }
       throw err;
     }
