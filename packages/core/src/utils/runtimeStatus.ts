@@ -37,7 +37,6 @@ import * as syncFs from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { atomicWriteJSON } from './atomicFileWrite.js';
 import { isNodeError } from './errors.js';
 import { isPidAlive } from './process-liveness.js';
 
@@ -105,6 +104,7 @@ export async function writeRuntimeStatus(
   fields: WriteRuntimeStatusFields,
 ): Promise<string> {
   await fs.mkdir(path.dirname(filePath), { recursive: true });
+  const { atomicWriteJSON } = await import('./atomicFileWrite.js');
   await atomicWriteJSON(filePath, createRuntimeStatusPayload(fields));
   return filePath;
 }
