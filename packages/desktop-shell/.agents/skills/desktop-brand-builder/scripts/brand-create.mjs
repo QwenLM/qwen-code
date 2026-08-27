@@ -95,6 +95,24 @@ function loadConfig(path) {
     fail(`logo must be an image file (.png/.jpg/.jpeg/.svg/.ico/.webp), got: ${input.logo}`);
   }
 
+  const updaterEndpoints = Array.isArray(input.updaterEndpoints)
+    ? input.updaterEndpoints
+    : [];
+  const updaterPubkey = input.updaterPubkey?.trim() || undefined;
+
+  // When a brand supplies its own updater feed it MUST also supply the
+  // matching signing pubkey. Using the official pubkey with a custom feed
+  // (or no pubkey at all) would silently break in-app updates: the
+  // updater verifies signatures against this key, so a mismatch means
+  // every update check fails verification and the app can never update.
+  if (updaterEndpoints.length > 0 && !updaterPubkey) {
+    fail(
+      'updaterEndpoints is non-empty but updaterPubkey is missing. ' +
+        'Provide the base64 public key that matches your ' +
+        'TAURI_SIGNING_PRIVATE_KEY so the updater can verify your feed.',
+    );
+  }
+
   const words = titleWords(brandId);
   return {
     brandId,
@@ -103,9 +121,8 @@ function loadConfig(path) {
     appName: input.appName?.trim() || words.join(' '),
     appId: input.appId?.trim() || deriveAppId(input.website, brandId),
     artifactPrefix: input.artifactPrefix?.trim() || words.join('-'),
-    updaterEndpoints: Array.isArray(input.updaterEndpoints)
-      ? input.updaterEndpoints
-      : [],
+    updaterEndpoints,
+    updaterPubkey,
   };
 }
 
@@ -133,6 +150,10 @@ function patchTauriConfig(shellRoot, brand) {
       // fail at startup. An empty string is harmless when endpoints is
       // also empty (no update check will run).
       config.plugins.updater.pubkey = '';
+    } else if (brand.updaterPubkey) {
+      // A brand supplying its own feed must pair it with the matching
+      // signing pubkey. loadConfig enforces this invariant.
+      config.plugins.updater.pubkey = brand.updaterPubkey;
     }
   }
   if (brand.updaterEndpoints.length === 0 && config.bundle) {

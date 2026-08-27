@@ -39,6 +39,9 @@ Optional overrides:
 - `appId` (Tauri bundle identifier)
 - `artifactPrefix`
 - `updaterEndpoints` (JSON array; empty array disables in-app updates)
+- `updaterPubkey` (base64 public key; **required** when `updaterEndpoints`
+  is non-empty — must match the `TAURI_SIGNING_PRIVATE_KEY` used to sign
+  your updater artifacts)
 - `target`: `mac`, `win`, `linux`, or `all`
 
 If required input is missing, ask once:
@@ -94,7 +97,8 @@ Create a temporary `brand.json` in the build directory:
   "appName": "Acme AI",
   "appId": "ai.acme.desktop",
   "artifactPrefix": "Acme-AI",
-  "updaterEndpoints": []
+  "updaterEndpoints": [],
+  "updaterPubkey": ""
 }
 ```
 
@@ -176,6 +180,15 @@ signing secrets (Apple, Windows) and updater private key belong to the
 official Qwen Code releases only. For a brand that needs signed releases or
 in-app updates, set up separate credentials and a separate updater feed; do
 not reuse the upstream ones.
+
+To generate a signing key pair for your updater feed:
+
+```bash
+npx @tauri-apps/cli signer generate -w ~/.tauri/my-brand.key
+# The .key file is the private key (set as TAURI_SIGNING_PRIVATE_KEY in
+# your build CI). The corresponding .pub file contains the base64 public
+# key — paste it into brand.json as updaterPubkey.
+```
 
 ## Validation
 

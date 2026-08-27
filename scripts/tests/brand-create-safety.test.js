@@ -100,4 +100,27 @@ describe('brand-create.mjs safety checks', () => {
     expect(fnMatch[0]).not.toContain('shell:true');
     expect(fnMatch[0]).not.toContain('safeLogo');
   });
+
+  // R1-1: Missing updaterPubkey for bring-your-own-feed
+  it('rejects updaterEndpoints without updaterPubkey', () => {
+    const result = runBrand(shellRoot, {
+      brandId: 'acme-ai',
+      logo: logoPath,
+      updaterEndpoints: ['https://updates.acme.ai'],
+    });
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain('updaterPubkey');
+  });
+
+  it('accepts updaterEndpoints when updaterPubkey is provided', () => {
+    const result = runBrand(shellRoot, {
+      brandId: 'acme-ai',
+      logo: logoPath,
+      updaterEndpoints: ['https://updates.acme.ai'],
+      updaterPubkey: 'dGVzdHB1YmtleQ==',
+    });
+    // May fail later (e.g., tauri icon not installed) but must NOT fail
+    // on the updaterPubkey validation.
+    expect(result.stderr).not.toContain('updaterPubkey is missing');
+  });
 });
