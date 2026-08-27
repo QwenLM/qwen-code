@@ -9,7 +9,7 @@ import * as fsSync from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { parseDocument } from 'yaml';
-import type { Config } from '../config/config.js';
+import { deriveConfig, type Config } from '../config/config.js';
 import { atomicWriteFile } from '../utils/atomicFileWrite.js';
 import { runForkedAgent } from '../agents/forkedAgent.js';
 import {
@@ -368,9 +368,10 @@ async function generateMemoryMetadataWithAgent(
   abortSignal?: AbortSignal,
 ): Promise<GeneratedMemoryMetadataWithUsage> {
   const startedAt = Date.now();
-  const agentConfig = Object.create(config) as Config;
-  agentConfig.getAutoMemoryPrompt = () => '';
-  agentConfig.getUserMemory = () => '';
+  const agentConfig = deriveConfig(config, {
+    getAutoMemoryPrompt: () => '',
+    getUserMemory: () => '',
+  });
   const result = await runForkedAgent({
     name: 'managed-memory-metadata-migrator',
     config: agentConfig,
