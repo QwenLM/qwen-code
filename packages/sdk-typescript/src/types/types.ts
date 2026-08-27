@@ -402,7 +402,13 @@ export interface QueryOptions {
   /**
    * Uses the legacy `coreTools` / CLI `--core-tools` allowlist semantics.
    * If specified, only matching core tools are registered for the session
-   * (non-core built-ins such as `send_message` are unaffected).
+   * (non-core built-ins such as `send_message` are unaffected). It is the
+   * only allowlist-style knob that restricts built-in tool registration;
+   * a whole-tool `permissions.deny` rule (and `tools.disabled`) also
+   * removes a tool from the registry, while a deny rule carrying a
+   * specifier (such as `Bash(rm *)`) only denies matching invocations at
+   * runtime. MCP tools are exempt from deny-based removal — hide them with
+   * the per-server `excludeTools` / `tools.disabled` filters instead.
    * Separately, `tools.eager` in settings.json (requires restart) selects
    * which tool schemas ride in the eager model request: built-in tools not
    * named there are demoted to deferred — they stay registered and loadable
