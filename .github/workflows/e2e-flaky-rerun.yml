@@ -1,0 +1,46 @@
+# Re-runs the failed lanes of a post-merge E2E run once before leaving main
+# red. The recurring 'Main CI failed: E2E Tests' issues are overwhelmingly
+# transient model-endpoint connectivity flakes, not regressions: run 32966197395
+# (2026-08-26) failed a Linux shard with `connect ETIMEDOUT` to the endpoint
+# and passed the identical tree on attempt 2. One automatic re-run turns those
+# green again; a failure that survives both attempts stays red and still
+# raises the Main CI Failure issue.
+
+name: 'E2E Flaky Rerun'
+
+on:
+  workflow_run:
+    workflows: ['E2E Tests']
+    types: ['completed']
+    branches: ['main']
+
+permissions:
+  contents: 'read'
+
+jobs:
+  rerun-failed-lanes:
+    name: 'Re-run failed E2E lanes (once)'
+    # First-attempt push runs only: the attempt-2 completion event carries
+    # run_attempt == 2, so the re-run cannot re-trigger itself, and a failure
+    # that survives both attempts reaches the issue bot untouched. Scheduled
+    # and dispatched runs stay manual: they exist to surface flakiness, not to
+    # gate main.
+    if: |-
+      ${{ github.repository == 'QwenLM/qwen-code' && github.event.workflow_run.conclusion == 'failure' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'main' && github.event.workflow_run.run_attempt == 1 }}
+    # Deliberately hosted, NOT the ECS pool — same reasoning as
+    # main-ci-failure-issue.yml#file_issue: a recovery job must not queue
+    # behind the infrastructure it is recovering from.
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 5
+    steps:
+      # Checks out nothing and runs no repository code: the job holding the
+      # bot PAT only calls the Actions API.
+      - name: 'Re-run the failed jobs'
+        env:
+          # GitHub writes use CI_BOT_PAT; keep the generated GITHUB_TOKEN
+          # read-only.
+          GH_TOKEN: '${{ secrets.CI_BOT_PAT }}'
+          REPO: '${{ github.repository }}'
+          RUN_ID: '${{ github.event.workflow_run.id }}'
+        run: |-
+          gh run rerun --failed "${RUN_ID}" --repo "${REPO}"

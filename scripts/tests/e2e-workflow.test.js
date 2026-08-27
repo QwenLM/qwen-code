@@ -32,4 +32,20 @@ describe('e2e workflow', () => {
     expect(group).toContain('github.event_name');
     expect(group).toContain('github.head_ref || github.ref_name');
   });
+
+  it('caps every lane so a hung model endpoint cannot stall the run', () => {
+    // A lane that loses connectivity to the model endpoint burns every test's
+    // full 300s timeout before reporting — the 2026-08-26 run took over
+    // 4 hours to fail while healthy lanes finish in ~17 minutes. Dropping a
+    // cap would silently reintroduce that, so every lane's timeout is pinned.
+    const lanes = [
+      'e2e-test-linux',
+      'e2e-test-macos',
+      'isolated-nightly',
+      'web-shell-browser-regression',
+    ];
+    for (const lane of lanes) {
+      expect(yml.jobs[lane]['timeout-minutes'], lane).toBeGreaterThan(0);
+    }
+  });
 });

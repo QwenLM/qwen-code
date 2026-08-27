@@ -38,6 +38,11 @@ jobs:
   e2e-test-linux:
     name: 'E2E Test (Linux) - ${{ matrix.sandbox }} - shard ${{ matrix.shard }}'
     runs-on: 'ubuntu-latest'
+    # Healthy lanes finish in ~17min. Without a cap, a lane that loses
+    # connectivity to the model endpoint burns every test's full 300s timeout
+    # (plus retries) before reporting — the 2026-08-26 run took over 4 hours
+    # to fail. Cap the lane so a hung endpoint surfaces within the hour.
+    timeout-minutes: 60
     # Skip on fork PRs: forks have no access to repository secrets
     # (OPENAI_*, DOCKERHUB_*), so the matrix would fail unconditionally
     # and show misleading red status. Same-repo PRs run normally.
@@ -150,6 +155,8 @@ jobs:
   e2e-test-macos:
     name: 'E2E Test - macOS - shard ${{ matrix.shard }}'
     runs-on: 'macos-latest'
+    # Same cap rationale as e2e-test-linux.
+    timeout-minutes: 60
     # Skip on fork PRs (no secrets) — see e2e-test-linux above.
     if: |-
       ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
@@ -206,6 +213,8 @@ jobs:
   isolated-nightly:
     name: '${{ matrix.label }} (nightly)'
     runs-on: 'ubuntu-latest'
+    # Same cap rationale as e2e-test-linux.
+    timeout-minutes: 60
     if: |-
       ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
     continue-on-error: true
@@ -264,6 +273,8 @@ jobs:
   web-shell-browser-regression:
     name: 'web-shell Browser Regression'
     runs-on: 'ubuntu-latest'
+    # Same cap rationale as e2e-test-linux.
+    timeout-minutes: 60
     if: |-
       ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
     steps:
