@@ -1596,9 +1596,10 @@ function certCoversHost(x509: X509Certificate, host: string): boolean {
  *   - array → first non-empty string element after trim, or undefined
  *   - anything else (object, number, boolean, undefined) → undefined
  *
- * Returning `undefined` is the bridge's signal to use its own
- * `getCurrentGeminiMdFilename()` default — so a malformed value
- * keeps the daemon alive rather than producing a garbage filename.
+ * Returning `undefined` leaves the workspace on the daemon's init-default
+ * chain — the primary workspace's configured `context.fileName` snapshot
+ * (`contextFilenameForInit`), then the hard-coded `QWEN.md` — so a malformed
+ * value keeps the daemon alive rather than producing a garbage filename.
  */
 export function extractContextFilename(value: unknown): string | undefined {
   if (typeof value === 'string') {
