@@ -6830,7 +6830,6 @@ export function App({
     modelDialogMode !== null ||
     showApprovalModeDialog ||
     tasksDialogMessage !== null ||
-    mcpDialogMessage !== null ||
     showMemoryDialog ||
     showAuthDialog ||
     showAddWorkspaceDialog ||
