@@ -87,7 +87,7 @@ describe('directoryCommand', () => {
       getExtensionContextFilePaths: () => [],
       getFileFilteringOptions: () => ({ ignore: [], include: [] }),
       setUserMemory: vi.fn(),
-      setGeminiMdFileCount: vi.fn(),
+      setMemoryFileCount: vi.fn(),
     } as unknown as Config;
 
     mockContext = {
@@ -263,7 +263,7 @@ describe('directoryCommand', () => {
       mockConfig.getContextRuleExcludes = vi.fn().mockReturnValue([]);
       mockConfig.setContextFilePaths = vi.fn();
       mockConfig.setConditionalRulesRegistry = vi.fn();
-      mockContext.ui.setGeminiMdFileCount = vi.fn();
+      mockContext.ui.setMemoryFileCount = vi.fn();
 
       if (!addCommand?.action) throw new Error('No action');
       await addCommand.action(

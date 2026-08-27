@@ -280,7 +280,11 @@ describe('createWorkspaceProvidersStatusProvider', () => {
       model: { name: 'qwen3.8-max' },
       modelProviders: {
         openai: [
-          { id: 'qwen3.8-max', name: 'Qwen 3.8 Max' },
+          {
+            id: 'qwen3.8-max',
+            name: 'Qwen 3.8 Max',
+            generationConfig: { thinkingMandatory: true },
+          },
           { id: 'qwen3.8-max-preview', name: 'Qwen 3.8 Max Preview' },
           { id: 'qwen3.8-max-latest', name: 'Qwen 3.8 Max Alias' },
           { id: 'qwen-plus', name: 'Qwen Plus' },
@@ -296,12 +300,13 @@ describe('createWorkspaceProvidersStatusProvider', () => {
       {
         id: 'reasoning_effort',
         currentValue: 'xhigh',
-        options: [
-          { value: 'none' },
-          { value: 'low' },
-          { value: 'medium' },
-          { value: 'xhigh' },
-        ],
+        options: [{ value: 'low' }, { value: 'medium' }, { value: 'xhigh' }],
+        _meta: {
+          'qwenCode/reasoning': {
+            defaultEffort: 'xhigh',
+            thinkingMandatory: true,
+          },
+        },
       },
     ]);
     expect(
