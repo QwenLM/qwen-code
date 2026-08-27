@@ -139,6 +139,8 @@ export class InProcessBackend implements Backend {
       eventEmitter,
       undefined,
       perAgent.runtimeView,
+      inProcessConfig.initialTask,
+      config.agentId,
     );
 
     const interactive = new AgentInteractive(
