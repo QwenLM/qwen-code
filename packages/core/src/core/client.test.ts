@@ -1102,6 +1102,35 @@ describe('Gemini Client (client.ts)', () => {
         'SessionStart hook failed: Error: hook failed',
       );
     });
+
+    it('passes cancellation to SessionStart hooks and does not swallow it', async () => {
+      const controller = new AbortController();
+      const timeoutError = new Error('session initialization timed out');
+      const fireSessionStartEvent = vi.fn(async (...args: unknown[]) => {
+        expect(args[4]).toBe(controller.signal);
+        controller.abort(timeoutError);
+        throw timeoutError;
+      });
+      vi.mocked(mockConfig.getDisableAllHooks).mockReturnValue(false);
+      vi.mocked(mockConfig.hasHooksForEvent).mockReturnValue(true);
+      vi.mocked(mockConfig.getHookSystem).mockReturnValue({
+        fireSessionStartEvent,
+      } as unknown as ReturnType<Config['getHookSystem']>);
+
+      await expect(
+        client['fireSessionStartHook'](
+          SessionStartSource.Startup,
+          controller.signal,
+        ),
+      ).rejects.toBe(timeoutError);
+      expect(fireSessionStartEvent).toHaveBeenCalledWith(
+        SessionStartSource.Startup,
+        'test-model',
+        PermissionMode.Default,
+        undefined,
+        controller.signal,
+      );
+    });
   });
 
   describe('startChat — session start profiling', () => {

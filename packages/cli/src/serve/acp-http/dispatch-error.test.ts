@@ -110,21 +110,24 @@ describe('toRpcError', () => {
     });
   });
 
-  it('carries the quarantine backoff hint for a settlement-overdue channel', () => {
+  it('carries every quarantine reason and its backoff hint', () => {
     // Quarantine outlives the fence, and a fresh-id request never reaches the
     // 409 that carries the real hint — so this payload is the only backoff
     // signal such a caller gets.
-    const error = new BridgeChannelQuarantinedError(
+    for (const reason of [
       'restore_settlement_overdue',
-      90,
-    );
-    expect(toRpcError(error)).toMatchObject({
-      data: {
-        reason: 'restore_settlement_overdue',
-        retryAfterSeconds: 90,
-        httpStatus: 503,
-      },
-    });
+      'new_session_cleanup_failed',
+      'new_session_settlement_overdue',
+    ] as const) {
+      const error = new BridgeChannelQuarantinedError(reason, 90);
+      expect(toRpcError(error)).toMatchObject({
+        data: {
+          reason,
+          retryAfterSeconds: 90,
+          httpStatus: 503,
+        },
+      });
+    }
   });
 
   it('maps invalid session metadata to the REST-equivalent invalid_metadata contract', () => {

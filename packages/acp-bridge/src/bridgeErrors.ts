@@ -631,16 +631,16 @@ export class WorkspaceDrainingError extends Error {
 }
 
 /**
- * Why a channel is closed to new session work. `restore_cleanup_failed`: the
- * cleanup of a timed-out restore failed, so the child's state is unknown.
- * `restore_settlement_overdue`: an abandoned restore blew past its settlement
- * grace period, so the child still holds work the bridge can neither cancel
- * nor account for. Both keep existing sessions usable and clear once the
- * channel drains and is recycled.
+ * Why a channel is closed to new session work. Cleanup failures mean the
+ * child's state is unknown; settlement-overdue states mean the child still
+ * holds work the bridge can neither cancel nor account for. Existing sessions
+ * remain usable while the channel drains and is recycled.
  */
 export type BridgeChannelUnavailableReason =
   | 'restore_cleanup_failed'
-  | 'restore_settlement_overdue';
+  | 'restore_settlement_overdue'
+  | 'new_session_cleanup_failed'
+  | 'new_session_settlement_overdue';
 
 export class BridgeChannelQuarantinedError extends Error {
   readonly reason: BridgeChannelUnavailableReason;
@@ -659,7 +659,11 @@ export class BridgeChannelQuarantinedError extends Error {
     super(
       reason === 'restore_settlement_overdue'
         ? 'The ACP channel is unavailable for new sessions while an abandoned session restore has not settled'
-        : 'The ACP channel is unavailable for new sessions while timed-out restore cleanup is pending',
+        : reason === 'new_session_settlement_overdue'
+          ? 'The ACP channel is unavailable for new sessions while an abandoned session initialization has not settled'
+          : reason === 'new_session_cleanup_failed'
+            ? 'The ACP channel is unavailable for new sessions while timed-out session initialization cleanup is pending'
+            : 'The ACP channel is unavailable for new sessions while timed-out restore cleanup is pending',
     );
     this.name = 'BridgeChannelQuarantinedError';
     this.reason = reason;

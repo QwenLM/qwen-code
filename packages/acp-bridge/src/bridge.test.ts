@@ -37,6 +37,7 @@ import {
   PromptDeadlineExceededError,
   PromptQueueFullError,
   RestoreInProgressError,
+  SessionLimitExceededError,
   SessionShellClientRequiredError,
   SessionShellDisabledError,
   SessionBusyError,
@@ -131,6 +132,7 @@ import { SessionAttachmentStore } from './sessionAttachments.js';
 import { MultiClientPermissionMediator } from './permissionMediator.js';
 import {
   REQUESTED_SESSION_ID_META_KEY,
+  SESSION_INITIALIZATION_DEADLINE_META_KEY,
   MID_TURN_QUEUE_DRAIN_METHOD,
   MID_TURN_RECONCILIATION_RING_SIZE,
   PROMPT_CANCEL_METHOD,
@@ -12720,6 +12722,214 @@ describe('createAcpSessionBridge', () => {
     expect(retry.sessionId).toContain('c1');
   });
 
+  it('closes a session created after the public newSession deadline', async () => {
+    const late = deferred<NewSessionResponse>();
+    const closeCalls: Array<Record<string, unknown>> = [];
+    const handle = makeChannel({
+      newSessionImpl: (params, agent) =>
+        agent.newSessionCalls.length === 2
+          ? late.promise
+          : { sessionId: `visible-${agent.newSessionCalls.length}` },
+      extMethodImpl: (method, params) => {
+        if (method === SERVE_CONTROL_EXT_METHODS.sessionClose) {
+          closeCalls.push(params);
+          return { closed: true };
+        }
+        return {};
+      },
+    });
+    const bridge = makeBridge({
+      channelFactory: async () => handle.channel,
+      initializeTimeoutMs: 20,
+      maxSessions: 2,
+      sessionScope: 'thread',
+    });
+    const sibling = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+    await expect(
+      bridge.spawnOrAttach({ workspaceCwd: WS_A }),
+    ).rejects.toBeInstanceOf(BridgeTimeoutError);
+    expect(handle.killed).toBe(false);
+    expect(bridge.sessionCount).toBe(1);
+    expect(
+      handle.agent.newSessionCalls[1]?._meta?.[
+        SESSION_INITIALIZATION_DEADLINE_META_KEY
+      ],
+    ).toEqual(expect.any(Number));
+    await expect(
+      bridge.spawnOrAttach({ workspaceCwd: WS_A }),
+    ).rejects.toBeInstanceOf(SessionLimitExceededError);
+
+    late.resolve({ sessionId: 'hidden-late' });
+    await vi.waitFor(() =>
+      expect(closeCalls).toContainEqual(
+        expect.objectContaining({ sessionId: 'hidden-late' }),
+      ),
+    );
+    expect(bridge.sessionCount).toBe(1);
+
+    const next = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    expect(next.sessionId).toBe('visible-3');
+    expect(bridge.sessionCount).toBe(2);
+    expect(sibling.sessionId).toBe('visible-1');
+    await bridge.shutdown();
+  });
+
+  it('holds a requested id until an abandoned newSession settles', async () => {
+    const late = deferred<NewSessionResponse>();
+    const handle = makeChannel({
+      newSessionImpl: (_params, agent) =>
+        agent.newSessionCalls.length === 2
+          ? late.promise
+          : { sessionId: `visible-${agent.newSessionCalls.length}` },
+      extMethodImpl: () => ({ closed: true }),
+    });
+    const bridge = makeBridge({
+      channelFactory: async () => handle.channel,
+      initializeTimeoutMs: 20,
+      sessionScope: 'thread',
+    });
+    await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+    await expect(
+      bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sessionId: 'requested-late',
+      }),
+    ).rejects.toBeInstanceOf(BridgeTimeoutError);
+    await expect(
+      bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sessionId: 'requested-late',
+      }),
+    ).rejects.toMatchObject({
+      activeAction: 'spawn',
+      requestedAction: 'spawn',
+    });
+
+    late.resolve({ sessionId: 'requested-late' });
+    await vi.waitFor(() =>
+      expect(handle.agent.extMethodCalls).toContainEqual(
+        expect.objectContaining({
+          method: SERVE_CONTROL_EXT_METHODS.sessionClose,
+          params: expect.objectContaining({ sessionId: 'requested-late' }),
+        }),
+      ),
+    );
+    await expect(
+      bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sessionId: 'requested-late',
+      }),
+    ).resolves.toMatchObject({ sessionId: 'visible-3' });
+    await bridge.shutdown();
+  });
+
+  it('keeps the public timeout contract when the agent enforces the deadline', async () => {
+    const handle = makeChannel({
+      newSessionImpl: (_params, agent) => {
+        if (agent.newSessionCalls.length === 1) {
+          return { sessionId: 'visible-sibling' };
+        }
+        throw new RequestError(
+          -32603,
+          'Session initialization deadline exceeded',
+          { errorKind: 'session_initialization_timeout' },
+        );
+      },
+    });
+    const bridge = makeBridge({
+      channelFactory: async () => handle.channel,
+      initializeTimeoutMs: 1_000,
+      sessionScope: 'thread',
+    });
+    await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+    await expect(
+      bridge.spawnOrAttach({ workspaceCwd: WS_A }),
+    ).rejects.toMatchObject({
+      name: 'BridgeTimeoutError',
+      label: 'newSession',
+      timeoutMs: 1_000,
+    });
+    expect(handle.killed).toBe(false);
+    expect(bridge.sessionCount).toBe(1);
+    await bridge.shutdown();
+  });
+
+  it('refuses fresh sessions when late newSession close is refused', async () => {
+    const late = deferred<NewSessionResponse>();
+    const handle = makeChannel({
+      newSessionImpl: (_params, agent) =>
+        agent.newSessionCalls.length === 2
+          ? late.promise
+          : { sessionId: `visible-${agent.newSessionCalls.length}` },
+      extMethodImpl: (method) => {
+        if (method === SERVE_CONTROL_EXT_METHODS.sessionClose) {
+          return { closed: false, holds: [agentHold('late-agent')] };
+        }
+        return {};
+      },
+    });
+    const bridge = makeBridge({
+      channelFactory: async () => handle.channel,
+      initializeTimeoutMs: 20,
+      sessionScope: 'thread',
+    });
+    const sibling = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    await expect(
+      bridge.spawnOrAttach({ workspaceCwd: WS_A }),
+    ).rejects.toBeInstanceOf(BridgeTimeoutError);
+
+    late.resolve({ sessionId: 'hidden-late' });
+    await vi.waitFor(() =>
+      expect(handle.agent.extMethodCalls).toContainEqual(
+        expect.objectContaining({
+          method: SERVE_CONTROL_EXT_METHODS.sessionClose,
+        }),
+      ),
+    );
+    await new Promise((resolve) => setImmediate(resolve));
+    await expect(
+      bridge.spawnOrAttach({ workspaceCwd: WS_A }),
+    ).rejects.toMatchObject({ reason: 'new_session_cleanup_failed' });
+    await expect(
+      bridge.sendPrompt(sibling.sessionId, {
+        sessionId: sibling.sessionId,
+        prompt: [{ type: 'text', text: 'still alive' }],
+      }),
+    ).resolves.toMatchObject({ stopReason: 'end_turn' });
+    expect(handle.killed).toBe(false);
+    expect(bridge.sessionCount).toBe(1);
+    await bridge.shutdown();
+  });
+
+  it('refuses fresh sessions when an abandoned newSession does not settle', async () => {
+    const handle = makeChannel({
+      newSessionImpl: (_params, agent) =>
+        agent.newSessionCalls.length === 2
+          ? new Promise<NewSessionResponse>(() => {})
+          : { sessionId: `visible-${agent.newSessionCalls.length}` },
+    });
+    const bridge = makeBridge({
+      channelFactory: async () => handle.channel,
+      initializeTimeoutMs: 20,
+      sessionScope: 'thread',
+    });
+    await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    await expect(
+      bridge.spawnOrAttach({ workspaceCwd: WS_A }),
+    ).rejects.toBeInstanceOf(BridgeTimeoutError);
+
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    await expect(
+      bridge.spawnOrAttach({ workspaceCwd: WS_A }),
+    ).rejects.toMatchObject({ reason: 'new_session_settlement_overdue' });
+    expect(handle.killed).toBe(false);
+    expect(bridge.sessionCount).toBe(1);
+    await bridge.shutdown();
+  });
+
   it('killAllSync force-kills BOTH the dying channel AND the fresh attach-target (BkUyD overwrite race)', async () => {
     // The killSession → spawnOrAttach race opens a window where two
     // channels are simultaneously "alive" from the daemon's
@@ -20918,6 +21128,15 @@ describe('createAcpSessionBridge', () => {
         /initializeTimeoutMs/,
       );
       expect(() => makeBridge({ initializeTimeoutMs: -1 })).toThrow(
+        /initializeTimeoutMs/,
+      );
+      expect(() => makeBridge({ initializeTimeoutMs: Number.NaN })).toThrow(
+        /initializeTimeoutMs/,
+      );
+      expect(() => makeBridge({ initializeTimeoutMs: Infinity })).toThrow(
+        /initializeTimeoutMs/,
+      );
+      expect(() => makeBridge({ initializeTimeoutMs: 2_147_483_648 })).toThrow(
         /initializeTimeoutMs/,
       );
     });
