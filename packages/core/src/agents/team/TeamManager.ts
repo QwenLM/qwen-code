@@ -317,10 +317,6 @@ export class TeamManager {
   // ─── Teammate lifecycle ─────────────────────────────────
 
   /**
-   * Spawn a new teammate. Adds the member to the team file,
-   * spawns via backend, and sets up the event bridge.
-   */
-  /**
    * Queue a team-file write behind any in-flight roster write and
    * return its promise. The snapshot is taken when the queued task
    * runs (see `teamFileWriteQueue`), so the last queued write always
@@ -335,6 +331,10 @@ export class TeamManager {
     return write;
   }
 
+  /**
+   * Spawn a new teammate. Adds the member to the team file,
+   * spawns via backend, and sets up the event bridge.
+   */
   async spawnTeammate(config: TeammateSpawnConfig): Promise<void> {
     if (this.teamFile.members.length >= this.maxTeammates) {
       throw new Error(
