@@ -520,6 +520,23 @@ describe('StandaloneSessionService', () => {
     expect(harness.bridge.updateSessionMetadata).toHaveBeenCalledOnce();
   });
 
+  it('repeats deletion reconciliation after a successful sweep', async () => {
+    mockActiveStandalone();
+    const harness = createHarness();
+    harness.bridge.getSessionSummary.mockReturnValue({
+      sessionId,
+      workspaceCwd: root.canonicalRoot,
+      sourceType: 'standalone',
+      clientCount: 1,
+      hasActivePrompt: false,
+    });
+
+    await harness.service.rename(sessionId, 'First name');
+    await harness.service.rename(sessionId, 'Second name');
+
+    expect(harness.deletionJournal.listSessionIds).toHaveBeenCalledTimes(2);
+  });
+
   it('fails read-only exact lookup closed while deletion is journaled', async () => {
     mockActiveStandalone();
     vi.spyOn(SessionService.prototype, 'getSessionListItem').mockResolvedValue({

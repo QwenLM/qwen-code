@@ -990,11 +990,12 @@ export class StandaloneSessionService {
       }
     })();
     this.reconciliations.set(runtime, pending);
-    void pending.catch(() => {
+    const clearPending = () => {
       if (this.reconciliations.get(runtime) === pending) {
         this.reconciliations.delete(runtime);
       }
-    });
+    };
+    void pending.then(clearPending, clearPending);
     return pending;
   }
 
