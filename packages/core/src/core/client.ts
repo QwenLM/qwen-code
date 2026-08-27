@@ -1674,8 +1674,11 @@ export class GeminiClient {
    * Side effect: when ToolSearch is not registered (e.g. `--exclude-tools
    * tool_search` or a deny rule), deferred tools are eagerly revealed here so
    * they land in the declaration list. Tools explicitly demoted by
-   * `tools.eager` stay hidden. Skipping this for ordinary deferred tools would
-   * leave them both off the declarations AND off the deferred-summary list
+   * `tools.eager` stay hidden unless the history-reveal pass above already
+   * re-exposed one for a resumed session — that schema stays in the
+   * declarations, so it is not counted unreachable below. Skipping this for
+   * ordinary deferred tools would leave them both off the declarations AND
+   * off the deferred-summary list
    * (since `undefined` is returned in that branch) — a silent disappearance.
    *
    * Returns `undefined` when ToolSearch is unavailable: reminders must not
@@ -1693,7 +1696,13 @@ export class GeminiClient {
         const withheld: string[] = [];
         for (const t of deferredSummary) {
           if (toolRegistry.isPermissionDeferred(t.name)) {
-            withheld.push(t.name);
+            // The history-reveal pass runs first at both call sites and
+            // re-exposes resume-referenced tools regardless of why they
+            // are deferred. Such a tool's schema IS in the declarations,
+            // so calling it unreachable would be false for this session.
+            if (!toolRegistry.isDeferredToolRevealed(t.name)) {
+              withheld.push(t.name);
+            }
             continue;
           }
           toolRegistry.revealDeferredTool(t.name);

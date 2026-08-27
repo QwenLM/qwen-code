@@ -2659,6 +2659,55 @@ describe('Gemini Client (client.ts)', () => {
       warnSpy.mockRestore();
     });
 
+    it('does not call a history-revealed eager tool unreachable', async () => {
+      // The history-reveal pass runs before the unreachable warning at both
+      // call sites and re-exposes resume-referenced tools even when
+      // tools.eager demoted them: the model must be able to repeat a call it
+      // already made in the transcript. That tool's schema IS sent in the
+      // declarations, so the "unreachable until restart" warning must not
+      // name it — warning anyway would be false for this session.
+      const reg = getRegistryMock();
+      reg.getTool.mockReturnValue(null); // ToolSearch absent.
+      reg.getDeferredToolSummary.mockReturnValue([
+        { name: 'write_file', description: 'write' },
+      ]);
+      reg.isPermissionDeferred.mockImplementation(
+        (name: string) => name === 'write_file',
+      );
+      reg.isDeferredToolRevealed.mockReturnValue(false);
+      reg.revealDeferredTool.mockImplementation((name: string) => {
+        if (name === 'write_file') {
+          reg.isDeferredToolRevealed.mockImplementation(
+            (n: string) => n === 'write_file',
+          );
+        }
+      });
+      client.setHistory([
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'call-resumed-write',
+                name: 'write_file',
+                args: { path: 'a.txt' },
+              },
+            },
+          ],
+        },
+      ]);
+      vi.spyOn(client.getChat(), 'setTools').mockImplementation(() => {});
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+      await client.setTools();
+
+      expect(reg.revealDeferredTool).toHaveBeenCalledWith('write_file');
+      expect(warnSpy).not.toHaveBeenCalledWith(
+        expect.stringContaining('tools.eager is holding back'),
+      );
+      warnSpy.mockRestore();
+    });
+
     it('does not warn when tools.eager held nothing back', async () => {
       // Ordinary deferred tools are revealed here by design; that is not an
       // allowlist losing its loading path, so the warning must stay quiet.
