@@ -38,7 +38,7 @@
 
 .metrics {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(86px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(96px, 1fr));
   gap: 8px;
 }
 
@@ -57,6 +57,7 @@
 .metric span {
   color: var(--muted-foreground);
   font-size: 11px;
+  white-space: nowrap;
 }
 
 .caps {
