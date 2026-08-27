@@ -1693,6 +1693,76 @@ describe('createDaemonWorkspaceService', () => {
       );
     });
 
+    it('resolves a pre-rename bare name to the collision-qualified skill', async () => {
+      const persistDisabledSkills = vi.fn().mockResolvedValue({
+        changed: true,
+        disabled: ['gsd-core:audit'],
+      });
+      const svc = createDaemonWorkspaceService(
+        makeDeps({
+          queryWorkspaceStatus: statusQuery(
+            skillStatus({
+              name: 'gsd-core:audit',
+              description: 'Audit',
+              level: 'extension',
+              extensionName: 'gsd-core',
+            }),
+          ),
+          persistDisabledSkills,
+          isChannelLive: () => false,
+        }),
+      );
+
+      await svc.setWorkspaceSkillEnabled(makeCtx(), 'audit', false);
+
+      expect(persistDisabledSkills).toHaveBeenCalledWith(
+        '/workspace',
+        'gsd-core:audit',
+        false,
+        undefined,
+      );
+    });
+
+    it('lets an exact canonical name win over a bare-name fallback', async () => {
+      const persistDisabledSkills = vi.fn().mockResolvedValue({
+        changed: true,
+        disabled: ['audit'],
+      });
+      const svc = createDaemonWorkspaceService(
+        makeDeps({
+          queryWorkspaceStatus: vi.fn().mockResolvedValue({
+            v: 1,
+            workspaceCwd: '/workspace',
+            initialized: true,
+            skills: [
+              skillStatus({
+                name: 'gsd-core:audit',
+                description: 'Audit',
+                level: 'extension',
+                extensionName: 'gsd-core',
+              }),
+              skillStatus({
+                name: 'audit',
+                description: 'User audit',
+                level: 'user',
+              }),
+            ],
+          }),
+          persistDisabledSkills,
+          isChannelLive: () => false,
+        }),
+      );
+
+      await svc.setWorkspaceSkillEnabled(makeCtx(), 'audit', false);
+
+      expect(persistDisabledSkills).toHaveBeenCalledWith(
+        '/workspace',
+        'audit',
+        false,
+        undefined,
+      );
+    });
+
     it('shares mutation ids within a request and renews them across requests', async () => {
       const publishWorkspaceEvent = vi.fn();
       const svc = createDaemonWorkspaceService(
@@ -2204,6 +2274,53 @@ describe('createDaemonWorkspaceService', () => {
         '/workspace',
         ['future-skill'],
         true,
+        undefined,
+      );
+    });
+
+    it('resolves a pre-rename bare batch entry to the qualified skill', async () => {
+      const statusQuery = vi.fn().mockResolvedValue({
+        v: 1,
+        workspaceCwd: '/workspace',
+        initialized: true,
+        skills: [
+          {
+            kind: 'skill',
+            status: 'ok',
+            name: 'gsd-core:audit',
+            description: 'Audit',
+            level: 'extension',
+            extensionName: 'gsd-core',
+            modelInvocable: true,
+          },
+        ],
+      });
+      const persistDisabledSkillsBatch = vi.fn().mockResolvedValue({
+        outcomes: [{ skillName: 'gsd-core:audit', changed: true }],
+        settingsChanges: [
+          { key: 'skills.disabled', value: ['gsd-core:audit'] },
+        ],
+      });
+      const svc = createDaemonWorkspaceService(
+        makeDeps({
+          queryWorkspaceStatus: statusQuery,
+          persistDisabledSkillsBatch,
+          isChannelLive: () => false,
+        }),
+      );
+
+      await expect(
+        svc.setWorkspaceSkillsEnabled(makeCtx(), ['audit'], false),
+      ).resolves.toMatchObject({
+        results: [
+          { skillName: 'gsd-core:audit', enabled: false, changed: true },
+        ],
+        errors: [],
+      });
+      expect(persistDisabledSkillsBatch).toHaveBeenCalledWith(
+        '/workspace',
+        ['gsd-core:audit'],
+        false,
         undefined,
       );
     });

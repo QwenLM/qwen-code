@@ -33,6 +33,7 @@ import {
   type ServeWorkspacePreflightStatus,
   type ServeWorkspaceSkillsRefreshResult,
   type ServeWorkspaceSkillsStatus,
+  type ServeWorkspaceSkillStatus,
 } from '@qwen-code/acp-bridge/status';
 
 import {
@@ -48,7 +49,10 @@ import {
 import { MCP_RESTART_SERVER_DEADLINE_MS } from '@qwen-code/acp-bridge/mcpTimeouts';
 
 import { loadSettings } from '../../config/settings.js';
-import { resolveSkillSettings } from '../../config/skill-settings.js';
+import {
+  resolveSkillSettings,
+  skillMatchesSettingName,
+} from '../../config/skill-settings.js';
 import { getWorkspaceTrustStatus } from '../../config/trustedFolders.js';
 import { buildPermissionSettings } from '../../config/permission-settings.js';
 import {
@@ -231,6 +235,31 @@ async function withTimeout<T>(
       },
     );
   });
+}
+
+/**
+ * Resolve a requested skill name against the loaded status rows. Exact
+ * canonical names win; extension skills also answer to their pre-rename
+ * bare spelling (#9408), so documented bare-name automation keeps working
+ * after collision qualification renames a skill. Two-phase on purpose:
+ * the fallback must never steal a request from a skill whose canonical
+ * name matches exactly.
+ */
+function resolveSkillStatusRow(
+  skills: readonly ServeWorkspaceSkillStatus[],
+  requestedSkillName: string,
+): ServeWorkspaceSkillStatus | undefined {
+  const normalizedName = requestedSkillName.trim().toLowerCase();
+  return (
+    skills.find(
+      (candidate) => candidate.name.trim().toLowerCase() === normalizedName,
+    ) ??
+    skills.find(
+      (candidate) =>
+        candidate.kind === 'skill' &&
+        skillMatchesSettingName(candidate, new Set([normalizedName])),
+    )
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -840,10 +869,9 @@ export function createDaemonWorkspaceService(
       enabled: boolean,
     ): Promise<WorkspaceSkillToggleResult> {
       assertActiveGeneration();
-      const normalizedName = requestedSkillName.trim().toLowerCase();
-      const status = await getWorkspaceSkillsStatus();
-      const skill = status.skills.find(
-        (candidate) => candidate.name.trim().toLowerCase() === normalizedName,
+      const skill = resolveSkillStatusRow(
+        (await getWorkspaceSkillsStatus()).skills,
+        requestedSkillName,
       );
       if (!skill) throw new WorkspaceSkillNotFoundError(requestedSkillName);
       if (skill.userInvocable === false) {
@@ -859,8 +887,9 @@ export function createDaemonWorkspaceService(
         skill.disabledReason === undefined;
       const disabledBySettings =
         needsLegacyInactiveCheck &&
-        resolveSkillSettings(loadBoundSettings(true)).disabledNames.has(
-          normalizedName,
+        skillMatchesSettingName(
+          skill,
+          resolveSkillSettings(loadBoundSettings(true)).disabledNames,
         );
       if (
         skill.level === 'extension' &&
@@ -986,8 +1015,13 @@ export function createDaemonWorkspaceService(
 
       for (const requestedName of requestedSkillNames) {
         const normalizedName = requestedName.trim().toLowerCase();
-        const skill = skillsByName.get(normalizedName);
+        const skill =
+          skillsByName.get(normalizedName) ??
+          resolveSkillStatusRow(status.skills, requestedName);
         if (!skill) {
+          // Unknown names persist as-is: targets may be declared before a
+          // skill is installed, and a persisted bare entry still matches a
+          // later-qualified skill through the dual-spelling settings probe.
           targets.push({ requestedName, skillName: requestedName });
           continue;
         }
@@ -1002,7 +1036,7 @@ export function createDaemonWorkspaceService(
             skill.level === 'extension' &&
             skill.status === 'disabled' &&
             skill.disabledReason === undefined &&
-            !disabledNames.has(normalizedName);
+            !skillMatchesSettingName(skill, disabledNames);
           if (
             skill.level === 'extension' &&
             skill.status === 'disabled' &&
@@ -1163,10 +1197,9 @@ export function createDaemonWorkspaceService(
       scope: WorkspaceSkillScope,
     ): Promise<WorkspaceSkillMutationResult> {
       assertActiveGeneration();
-      const normalizedName = requestedSkillName.trim().toLowerCase();
-      const status = await getWorkspaceSkillsStatus();
-      const skill = status.skills.find(
-        (candidate) => candidate.name.trim().toLowerCase() === normalizedName,
+      const skill = resolveSkillStatusRow(
+        (await getWorkspaceSkillsStatus()).skills,
+        requestedSkillName,
       );
       if (!skill) throw new WorkspaceSkillNotFoundError(requestedSkillName);
       const expectedLevel = scope === 'workspace' ? 'project' : 'user';
