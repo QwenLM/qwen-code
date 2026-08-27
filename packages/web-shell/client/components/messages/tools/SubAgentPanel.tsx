@@ -107,12 +107,7 @@ const SubToolLine = memo(function SubToolLine({ tool }: { tool: ACPToolCall }) {
     tool.subTools || tool.subContent ? (
       <SubAgentPanel tool={tool} defaultExpanded={documentMode} />
     ) : (
-      <ToolLine
-        tool={tool}
-        forceExpandable={!documentMode}
-        forceExpanded={documentMode}
-        hideCollapsedOutput
-      />
+      <ToolLine tool={tool} forceExpanded={documentMode} hideCollapsedOutput />
     );
   return <SubToolTime timestamp={tool.startTime}>{body}</SubToolTime>;
 });
