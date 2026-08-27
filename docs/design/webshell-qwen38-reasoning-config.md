@@ -16,9 +16,11 @@ does not apply to preview, dated, aliased, or runtime models.
 
 The agent projects that entry through ACP's existing `reasoning_effort`
 configuration option. For this model only, the option contains `none`,
-`default`, and the three manifest values. WebShell renders `none` as Thinking
-off, `default` as the model or provider default, and the remaining values as
-effort choices. No second effort configuration id is introduced.
+`default`, and the three manifest values. `default` remains an ACP instruction
+for clearing an override, not a model effort. WebShell therefore renders
+`none` as Thinking off and the manifest values as effort choices; when ACP
+reports `default`, it displays the manifest's default effort. No second effort
+configuration id is introduced.
 
 Both workspace-provider producers expose that same manifest-built option as
 an optional, per-model `configOptions` preview. The field is an additive v1
@@ -53,9 +55,13 @@ session is attached. Before it is applied, this local intent is not a workspace
 default and is neither persisted nor broadcast. Once WebShell applies it
 through the daemon-owned config-option mutation, the live session changes.
 `none`, native efforts, and custom efforts are persisted as the shared default
-for later sessions; `default` instead clears the selected settings scope and
-adopts the resulting merged preference. If the user changes models before
-submission, the model-bound intent is not applied to the other model.
+for later sessions. WebShell does not offer ACP's `default` instruction as an
+effort choice, and settings can still clear the selected scope. Ordinary ACP
+clients may send `default` to restore the live session's model or provider
+baseline without persistence; a private persistent request also clears its
+settings scope and applies the resulting merged preference. If the user changes
+models before submission, the model-bound intent is not applied to the other
+model.
 
 WebShell retains PR #8675's interaction design: the current reasoning state is
 shown as a suffix on the model chip, reasoning options occupy the first model
@@ -83,10 +89,10 @@ and unrelated request parameters, and applies the selected value. This keeps
 the control truthful instead of acknowledging a choice that a higher-priority
 field would silently shadow.
 
-Selecting `default` restores those static thinking fields from the current
-model baseline in the live session. This makes clearing an explicit preference
-consistent with a new session or daemon restart while preserving unrelated
-request parameters and the stored model configuration.
+When an ACP client selects `default`, those static thinking fields are restored
+from the current model baseline in the live session. This makes clearing an
+explicit preference consistent with a new session or daemon restart while
+preserving unrelated request parameters and the stored model configuration.
 
 When the active model requires thinking, ACP omits `none` from the option and
 marks that constraint in metadata. WebShell keeps the Thinking switch checked

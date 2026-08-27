@@ -97,6 +97,58 @@ describe('mapReasoningControls', () => {
     });
   });
 
+  it('keeps the ACP default instruction out of the effort list', () => {
+    const configOptions = [
+      {
+        id: 'reasoning_effort',
+        currentValue: 'default',
+        options: [
+          { value: 'none', name: 'Thinking Off' },
+          { value: 'default', name: 'Default' },
+          { value: 'low', name: 'Low' },
+          { value: 'medium', name: 'Medium' },
+          { value: 'xhigh', name: 'Extra High' },
+        ],
+        _meta: {
+          'qwenCode/reasoning': { defaultEffort: 'xhigh' },
+        },
+      },
+    ];
+
+    expect(mapReasoningControls(configOptions)).toEqual({
+      enabled: true,
+      effort: 'xhigh',
+      efforts: [
+        { value: 'low', name: 'Low' },
+        { value: 'medium', name: 'Medium' },
+        { value: 'xhigh', name: 'Extra High' },
+      ],
+    });
+  });
+
+  it('keeps default selectable without an authoritative model default', () => {
+    expect(
+      mapReasoningControls([
+        {
+          id: 'reasoning_effort',
+          currentValue: 'default',
+          options: [
+            { value: 'none', name: 'Thinking Off' },
+            { value: 'default', name: 'Default' },
+            { value: 'low', name: 'Low' },
+          ],
+        },
+      ]),
+    ).toEqual({
+      enabled: true,
+      effort: 'default',
+      efforts: [
+        { value: 'default', name: 'Default' },
+        { value: 'low', name: 'Low' },
+      ],
+    });
+  });
+
   it('maps toggle-only reasoning without exposing an effort list', () => {
     expect(
       mapReasoningControls([

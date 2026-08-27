@@ -158,22 +158,38 @@ export function mapReasoningControls(
   const currentValue = getString(option, 'currentValue');
   if (!currentValue || !values.includes(currentValue)) return undefined;
   if (thinkingMandatory && currentValue === 'none') return undefined;
-  const efforts = options.filter((item) => item.value !== 'none');
-  const selectableValues = efforts.map((item) => item.value);
-  if (efforts.length === 0) return undefined;
   if (reasoningMeta?.['toggleOnly'] === true) {
+    const enabledValue = options.find((item) => item.value !== 'none')?.value;
+    if (!enabledValue) return undefined;
     return {
       enabled: currentValue !== 'none',
-      effort: selectableValues[0]!,
+      effort: enabledValue,
       efforts: [],
       ...(thinkingMandatory ? { canDisable: false } : {}),
     };
   }
   const defaultEffort = getString(reasoningMeta, 'defaultEffort');
+  const hasVisibleDefaultEffort =
+    defaultEffort !== undefined &&
+    defaultEffort !== 'default' &&
+    options.some((item) => item.value === defaultEffort);
+  const efforts = options.filter(
+    (item) =>
+      item.value !== 'none' &&
+      (!hasVisibleDefaultEffort || item.value !== 'default'),
+  );
+  const selectableValues = efforts.map((item) => item.value);
+  if (efforts.length === 0) return undefined;
+  const visibleCurrentValue =
+    currentValue === 'default' && hasVisibleDefaultEffort
+      ? defaultEffort
+      : currentValue;
   const effort =
-    [currentValue, fallbackEffort, defaultEffort].find(
+    [visibleCurrentValue, fallbackEffort, defaultEffort].find(
       (value): value is string =>
-        typeof value === 'string' && selectableValues.includes(value),
+        typeof value === 'string' &&
+        (!hasVisibleDefaultEffort || value !== 'default') &&
+        selectableValues.includes(value),
     ) ?? efforts[0]!.value;
   return {
     enabled: currentValue !== 'none',
