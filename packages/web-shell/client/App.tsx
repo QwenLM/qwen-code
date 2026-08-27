@@ -11530,6 +11530,14 @@ export function App({
       workspaceActions
         .deleteModel(target)
         .then((result) => {
+          if (result?.runtimeSync?.status === 'failed') {
+            store.dispatch([
+              {
+                type: 'status',
+                text: t('settings.models.runtimeSyncFailed'),
+              },
+            ]);
+          }
           // A scrubbed fallback requires a restart — surface it like the
           // settings panel does.
           if (result?.requiresRestart) {

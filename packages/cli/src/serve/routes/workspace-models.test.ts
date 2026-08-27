@@ -53,6 +53,9 @@ function makeApp(
     ) => string | undefined | null;
     captureGenerationAssertion?: () => (() => void) | undefined;
     afterPersist?: () => void;
+    syncModelProvidersRuntime?: () => Promise<{
+      status: 'applied' | 'deferred' | 'failed';
+    }>;
   } = {},
 ) {
   const app = express();
@@ -82,6 +85,9 @@ function makeApp(
     parseAndValidateClientId:
       overrides.parseAndValidateClientId ?? (() => undefined),
     captureGenerationAssertion: overrides.captureGenerationAssertion,
+    ...(overrides.syncModelProvidersRuntime
+      ? { syncModelProvidersRuntime: overrides.syncModelProvidersRuntime }
+      : {}),
   });
   return { app, mutate, persistSettings, broadcastSettingsChanged };
 }
@@ -169,6 +175,26 @@ describe('DELETE /workspace/models', () => {
     expect(saved['modelProviders']).toEqual({
       openai: [{ id: 'deepseek-v4' }],
     });
+  });
+
+  it('reports degraded runtime sync after the model removal is persisted', async () => {
+    writeUserSettings({ modelProviders: { openai: [{ id: 'gpt-4o' }] } });
+    const syncModelProvidersRuntime = vi.fn(async () => {
+      expect(readUserSettings()['modelProviders']).toEqual({ openai: [] });
+      return { status: 'failed' as const };
+    });
+    const { app } = makeApp({ syncModelProvidersRuntime });
+
+    const res = await request(app)
+      .delete('/workspace/models')
+      .send({ authType: 'openai', modelId: 'gpt-4o' });
+
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({
+      removed: true,
+      runtimeSync: { status: 'failed' },
+    });
+    expect(syncModelProvidersRuntime).toHaveBeenCalledOnce();
   });
 
   it('writes to the workspace scope when the workspace owns modelProviders', async () => {

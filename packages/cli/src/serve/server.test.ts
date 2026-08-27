@@ -2702,6 +2702,7 @@ function makeWorkspaceRuntimeForTest(input: {
   sessionRuntimeBaseDir?: string;
   trusted?: boolean;
   generationGuard?: WorkspaceGenerationGuard;
+  workspaceService?: DaemonWorkspaceService;
 }): WorkspaceRuntime {
   return {
     workspaceId: input.workspaceId,
@@ -2712,7 +2713,7 @@ function makeWorkspaceRuntimeForTest(input: {
     trusted: input.trusted ?? true,
     env: { mode: 'parent-process', overlayKeys: [] },
     bridge: input.bridge,
-    workspaceService: {} as DaemonWorkspaceService,
+    workspaceService: input.workspaceService ?? ({} as DaemonWorkspaceService),
     routeFileSystemFactory: {} as WorkspaceFileSystemFactory,
     clientMcpSenderRegistry: new ClientMcpSenderRegistry(),
     ...(input.generationGuard
@@ -33239,6 +33240,7 @@ describe('auth device-flow routes', () => {
       message: 'ok',
     });
     const bridge = fakeBridge();
+    const invokeWorkspaceCommand = vi.spyOn(bridge, 'invokeWorkspaceCommand');
     const app = createServeApp(
       {
         ...baseOpts,
@@ -33271,6 +33273,231 @@ describe('auth device-flow routes', () => {
       },
       expect.any(Function),
     );
+    expect(invokeWorkspaceCommand).toHaveBeenCalledWith(
+      'qwen/control/workspace/model-providers/reload',
+      { cwd: process.cwd() },
+      { timeoutMs: 30_000 },
+    );
+    expect(res.body.runtimeSync).toEqual({ status: 'applied' });
+  });
+
+  it('POST /workspace/auth/provider syncs the active primary runtime after replacement', async () => {
+    const initialReloadModelProviders = vi
+      .fn()
+      .mockResolvedValue({ status: 'applied' });
+    const initialBridge = fakeBridge();
+    const initialRuntime = makeWorkspaceRuntimeForTest({
+      workspaceId: 'primary-id',
+      workspaceCwd: WS_BOUND,
+      primary: true,
+      bridge: initialBridge,
+      workspaceService: {
+        reloadModelProviders: initialReloadModelProviders,
+      } as unknown as DaemonWorkspaceService,
+    });
+    const registry = createWorkspaceRegistry([initialRuntime]);
+    const installAuthProvider = vi.fn().mockResolvedValue({
+      v: 1,
+      providerId: 'custom-openai-compatible',
+      providerLabel: 'Custom OpenAI',
+      authType: 'openai',
+      message: 'ok',
+    });
+    const app = createServeApp({ ...baseOpts, token: 'tkn' }, undefined, {
+      bridge: initialBridge,
+      workspaceRegistry: registry,
+      installAuthProvider,
+    });
+    const replacementReloadModelProviders = vi
+      .fn()
+      .mockResolvedValue({ status: 'deferred' });
+    const replacementRuntime = makeWorkspaceRuntimeForTest({
+      workspaceId: 'primary-id',
+      workspaceCwd: WS_BOUND,
+      primary: true,
+      bridge: fakeBridge(),
+      workspaceService: {
+        reloadModelProviders: replacementReloadModelProviders,
+      } as unknown as DaemonWorkspaceService,
+    });
+    expect(registry.beginReplacement(registry.primaryEntry, 'policy-2')).toBe(
+      true,
+    );
+    registry.activateReplacement(
+      registry.primaryEntry,
+      replacementRuntime,
+      'policy-2',
+    );
+
+    const res = await request(app)
+      .post('/workspace/auth/provider')
+      .set('Authorization', 'Bearer tkn')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .send({
+        providerId: 'custom-openai-compatible',
+        apiKey: 'sk-test',
+        baseUrl: 'https://api.example.com/v1',
+      });
+
+    expect(res.status).toBe(200);
+    expect(res.body.runtimeSync).toEqual({ status: 'deferred' });
+    expect(replacementReloadModelProviders).toHaveBeenCalledOnce();
+    expect(initialReloadModelProviders).not.toHaveBeenCalled();
+  });
+
+  it('DELETE /workspace/models syncs the active primary runtime after replacement', async () => {
+    const qwenHome = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-model-runtime-sync-'),
+    );
+    const previousQwenHome = process.env['QWEN_HOME'];
+    process.env['QWEN_HOME'] = qwenHome;
+    await fsp.writeFile(
+      path.join(qwenHome, 'settings.json'),
+      JSON.stringify({
+        modelProviders: { openai: [{ id: 'gpt-4o' }] },
+      }),
+    );
+    try {
+      const initialReloadModelProviders = vi
+        .fn()
+        .mockResolvedValue({ status: 'applied' });
+      const initialBridge = fakeBridge();
+      const initialRuntime = makeWorkspaceRuntimeForTest({
+        workspaceId: 'primary-id',
+        workspaceCwd: WS_BOUND,
+        primary: true,
+        bridge: initialBridge,
+        workspaceService: {
+          reloadModelProviders: initialReloadModelProviders,
+        } as unknown as DaemonWorkspaceService,
+      });
+      const registry = createWorkspaceRegistry([initialRuntime]);
+      const app = createServeApp(
+        { ...baseOpts, token: 'tkn', workspace: WS_BOUND },
+        undefined,
+        {
+          bridge: initialBridge,
+          workspaceRegistry: registry,
+          persistSettings: vi.fn().mockResolvedValue(undefined),
+        },
+      );
+      const replacementReloadModelProviders = vi
+        .fn()
+        .mockResolvedValue({ status: 'deferred' });
+      const replacementRuntime = makeWorkspaceRuntimeForTest({
+        workspaceId: 'primary-id',
+        workspaceCwd: WS_BOUND,
+        primary: true,
+        bridge: fakeBridge(),
+        workspaceService: {
+          reloadModelProviders: replacementReloadModelProviders,
+        } as unknown as DaemonWorkspaceService,
+      });
+      expect(registry.beginReplacement(registry.primaryEntry, 'policy-2')).toBe(
+        true,
+      );
+      registry.activateReplacement(
+        registry.primaryEntry,
+        replacementRuntime,
+        'policy-2',
+      );
+
+      const res = await request(app)
+        .delete('/workspace/models')
+        .set('Authorization', 'Bearer tkn')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ authType: 'openai', modelId: 'gpt-4o' });
+
+      expect(res.status).toBe(200);
+      expect(res.body.runtimeSync).toEqual({ status: 'deferred' });
+      expect(replacementReloadModelProviders).toHaveBeenCalledOnce();
+      expect(initialReloadModelProviders).not.toHaveBeenCalled();
+    } finally {
+      if (previousQwenHome === undefined) delete process.env['QWEN_HOME'];
+      else process.env['QWEN_HOME'] = previousQwenHome;
+      await fsp.rm(qwenHome, { recursive: true, force: true });
+    }
+  });
+
+  it('POST /workspace/auth/provider returns a warning state when runtime sync fails after persistence', async () => {
+    const installAuthProvider = vi.fn().mockResolvedValue({
+      v: 1,
+      providerId: 'custom-openai-compatible',
+      providerLabel: 'Custom OpenAI',
+      authType: 'openai',
+      baseUrl: 'https://api.example.com/v1',
+      message: 'ok',
+    });
+    const bridge = fakeBridge();
+    vi.spyOn(bridge, 'invokeWorkspaceCommand').mockRejectedValueOnce(
+      new Error('child rejected reload'),
+    );
+    const app = createServeApp({ ...baseOpts, token: 'tkn' }, undefined, {
+      bridge,
+      installAuthProvider,
+    });
+
+    const res = await request(app)
+      .post('/workspace/auth/provider')
+      .set('Authorization', 'Bearer tkn')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .send({
+        providerId: 'custom-openai-compatible',
+        apiKey: 'sk-test',
+        baseUrl: 'https://api.example.com/v1',
+      });
+
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({
+      v: 1,
+      providerId: 'custom-openai-compatible',
+      runtimeSync: { status: 'failed' },
+    });
+    expect(installAuthProvider).toHaveBeenCalledOnce();
+  });
+
+  it('POST /workspace/auth/provider preserves generation-close semantics during runtime sync', async () => {
+    const generationGuard = createWorkspaceGenerationGuard();
+    const bridge = fakeBridge();
+    const workspaceService = {
+      reloadModelProviders: vi.fn(async () => {
+        generationGuard.close();
+        generationGuard.assertOpen();
+        return { status: 'applied' as const };
+      }),
+    } as unknown as DaemonWorkspaceService;
+    const runtime = makeWorkspaceRuntimeForTest({
+      workspaceId: 'primary-id',
+      workspaceCwd: WS_BOUND,
+      primary: true,
+      bridge,
+      generationGuard,
+      workspaceService,
+    });
+    const app = createServeApp({ ...baseOpts, token: 'tkn' }, undefined, {
+      bridge,
+      workspaceRegistry: createWorkspaceRegistry([runtime]),
+      installAuthProvider: vi.fn().mockResolvedValue({
+        v: 1,
+        providerId: 'custom-openai-compatible',
+        providerLabel: 'Custom OpenAI',
+        authType: 'openai',
+        message: 'ok',
+      }),
+    });
+
+    const res = await request(app)
+      .post('/workspace/auth/provider')
+      .set('Authorization', 'Bearer tkn')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .send({
+        providerId: 'custom-openai-compatible',
+        apiKey: 'sk-test',
+        baseUrl: 'https://api.example.com/v1',
+      });
+
+    expect(res.status).toBe(503);
+    expect(res.body.code).toBe('workspace_runtime_unavailable');
   });
 
   it('POST /workspace/auth/provider filters invalid advanced numeric fields', async () => {

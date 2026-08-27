@@ -1428,6 +1428,46 @@ export function createDaemonWorkspaceService(
       };
     },
 
+    async reloadModelProviders(_ctx: WorkspaceRequestContext) {
+      assertActiveGeneration();
+      let failed = false;
+      if (deps.reloadDaemonEnv) {
+        try {
+          const result = await deps.reloadDaemonEnv(
+            boundWorkspace,
+            assertGenerationOpen,
+          );
+          failed = result.runtimeEnvironmentApplied === false;
+        } catch {
+          assertActiveGeneration();
+          failed = true;
+          writeStderrLine(
+            'qwen serve: model-provider parent environment sync failed',
+          );
+        }
+      }
+      assertActiveGeneration();
+
+      try {
+        const child = await invokeWorkspaceCommand<{
+          configsFailed?: number;
+        }>(
+          SERVE_CONTROL_EXT_METHODS.workspaceModelProvidersReload,
+          { cwd: boundWorkspace },
+          { timeoutMs: 30_000 },
+        );
+        if ((child.configsFailed ?? 0) > 0) failed = true;
+        return { status: failed ? 'failed' : 'applied' };
+      } catch (err) {
+        assertActiveGeneration();
+        if (err instanceof SessionNotFoundError) {
+          return { status: failed ? 'failed' : 'deferred' };
+        }
+        writeStderrLine('qwen serve: model-provider ACP child sync failed');
+        return { status: 'failed' };
+      }
+    },
+
     invalidateWorkspaceSkillsStatus() {
       invalidateWorkspaceSkillsSnapshot();
     },

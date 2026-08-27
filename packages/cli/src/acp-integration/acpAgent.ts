@@ -5222,7 +5222,7 @@ class QwenAgent implements Agent {
                 );
               }
             },
-            beforeSessionCreate: () => {
+            beforeSessionPublish: () => {
               response = buildResponse();
             },
             primeSession: (createdSession) => {
@@ -5483,7 +5483,7 @@ class QwenAgent implements Agent {
               sessionSource ?? {},
             ),
             replayHistory: false,
-            beforeSessionCreate: () => {
+            beforeSessionPublish: () => {
               response = profiler.timeSync('response_build', () => ({
                 modes: this.buildModesData(config),
                 models: this.buildAvailableModels(config),
@@ -12078,6 +12078,57 @@ class QwenAgent implements Agent {
           unknown
         >;
       }
+      case SERVE_CONTROL_EXT_METHODS.workspaceModelProvidersReload: {
+        const userReloaded = this.settings.reloadScopeFromDisk(
+          SettingScope.User,
+        );
+        const workspaceReloaded = this.settings.reloadScopeFromDisk(
+          SettingScope.Workspace,
+        );
+        if (userReloaded === false || workspaceReloaded === false) {
+          debugLogger.warn('Model-provider settings reload failed');
+          return { configsRefreshed: 0, configsFailed: 1 };
+        }
+        const merged = this.settings.merged;
+        reloadEnvironment(merged, cwd);
+        const providerProtocol = merged.providerProtocol ?? {};
+        let configsRefreshed = 0;
+        let configsFailed = 0;
+
+        const reloadConfig = (config: Config, id: string) => {
+          try {
+            config.reloadModelProvidersConfig(
+              merged.modelProviders,
+              providerProtocol,
+            );
+            configsRefreshed += 1;
+          } catch {
+            configsFailed += 1;
+            debugLogger.warn(`Model-provider reload failed for ${id}`);
+          }
+        };
+
+        reloadConfig(this.config, 'bootstrap');
+        for (const config of this.initializingConfigs) {
+          if (config !== this.config) {
+            reloadConfig(config, `initializing:${config.getSessionId()}`);
+          }
+        }
+        for (const [id, session] of this.sessions) {
+          try {
+            session.reloadModelProvidersFromDisk();
+            configsRefreshed += 1;
+          } catch {
+            configsFailed += 1;
+            debugLogger.warn(`Model-provider reload failed for session ${id}`);
+          }
+        }
+
+        return {
+          configsRefreshed,
+          configsFailed,
+        };
+      }
       case SERVE_CONTROL_EXT_METHODS.workspaceReload: {
         const oldMerged = structuredClone(this.settings.merged);
 
@@ -12821,7 +12872,7 @@ class QwenAgent implements Agent {
       deferWorkspaceActivation?: boolean;
       beforeDeferredWorkspaceActivation?: () => Promise<void>;
       prepareBeforeSessionCreate?: () => Promise<void>;
-      beforeSessionCreate?: () => void;
+      beforeSessionPublish?: () => void;
       primeSession?: (session: Session) => void;
       beforeStartPostReplayServices?: (session: Session) => Promise<void>;
       signal?: AbortSignal;
@@ -12857,8 +12908,6 @@ class QwenAgent implements Agent {
         { errorKind: 'session_id_conflict', sessionId },
       );
     }
-    options.beforeSessionCreate?.();
-
     const session = new Session(
       sessionId,
       config,
@@ -12927,6 +12976,18 @@ class QwenAgent implements Agent {
       // must be declared before the first prompt can be served.
       await registerCreateSubSessionTool(config);
       options.signal?.throwIfAborted();
+      const userReloaded =
+        settings.reloadScopeFromDisk?.(SettingScope.User) !== false;
+      const workspaceReloaded =
+        settings.reloadScopeFromDisk?.(SettingScope.Workspace) !== false;
+      if (!userReloaded || !workspaceReloaded) {
+        throw new Error('Unable to reload model-provider settings from disk.');
+      }
+      config.reloadModelProvidersConfig?.(
+        settings.merged.modelProviders,
+        settings.merged.providerProtocol ?? {},
+      );
+      options.beforeSessionPublish?.();
       options.primeSession?.(session);
       if (options.deferWorkspaceActivation !== true) {
         config.hydrateSessionRestoreFileHistory?.();

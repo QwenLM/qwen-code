@@ -837,35 +837,41 @@ describe('DaemonClient', () => {
   });
 
   describe('deleteModel', () => {
-    it('DELETEs /workspace/models with the target body and client id', async () => {
-      const result = {
-        removed: true,
-        clearedActiveModel: true,
-        requiresRestart: false,
-      };
-      const { fetch, calls } = recordingFetch(() => jsonResponse(200, result));
-      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+    it.each([undefined, 'applied', 'deferred', 'failed'] as const)(
+      'DELETEs /workspace/models and accepts runtime sync status %s',
+      async (runtimeSync) => {
+        const result = {
+          removed: true,
+          clearedActiveModel: true,
+          requiresRestart: false,
+          ...(runtimeSync ? { runtimeSync: { status: runtimeSync } } : {}),
+        };
+        const { fetch, calls } = recordingFetch(() =>
+          jsonResponse(200, result),
+        );
+        const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
 
-      await expect(
-        client.deleteModel(
-          {
-            authType: 'openai',
-            modelId: 'gpt-4o',
-            baseUrl: 'https://api.openai.com',
-          },
-          { clientId: 'client-42' },
-        ),
-      ).resolves.toEqual(result);
+        await expect(
+          client.deleteModel(
+            {
+              authType: 'openai',
+              modelId: 'gpt-4o',
+              baseUrl: 'https://api.openai.com',
+            },
+            { clientId: 'client-42' },
+          ),
+        ).resolves.toEqual(result);
 
-      expect(calls[0]?.method).toBe('DELETE');
-      expect(calls[0]?.url).toBe('http://daemon/workspace/models');
-      expect(JSON.parse(calls[0]!.body!)).toEqual({
-        authType: 'openai',
-        modelId: 'gpt-4o',
-        baseUrl: 'https://api.openai.com',
-      });
-      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-42');
-    });
+        expect(calls[0]?.method).toBe('DELETE');
+        expect(calls[0]?.url).toBe('http://daemon/workspace/models');
+        expect(JSON.parse(calls[0]!.body!)).toEqual({
+          authType: 'openai',
+          modelId: 'gpt-4o',
+          baseUrl: 'https://api.openai.com',
+        });
+        expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-42');
+      },
+    );
 
     it('propagates a non-2xx response as a DaemonHttpError', async () => {
       const body = { error: 'model not found', code: 'model_not_found' };

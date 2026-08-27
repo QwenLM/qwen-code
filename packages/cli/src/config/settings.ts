@@ -606,15 +606,23 @@ export class LoadedSettings {
     this._merged = this.computeMergedSettings();
   }
 
-  reloadScopeFromDisk(scope: SettingScope): void {
+  reloadScopeFromDisk(scope: SettingScope): boolean {
     const file = this.forScope(scope);
+    if (scope === SettingScope.Workspace && !this.workspaceSettingsActive) {
+      file.settings = {};
+      file.originalSettings = {};
+      file.rawJson = undefined;
+      this._merged = this.computeMergedSettings();
+      return true;
+    }
+    let reloaded = false;
     try {
       if (!fs.existsSync(file.path)) {
         file.settings = {};
         file.originalSettings = {};
         file.rawJson = undefined;
         this._merged = this.computeMergedSettings();
-        return;
+        return true;
       }
 
       const content = fs.readFileSync(file.path, 'utf-8');
@@ -627,6 +635,7 @@ export class LoadedSettings {
         file.settings = resolved;
         file.originalSettings = structuredClone(parsed) as Settings;
         file.rawJson = content;
+        reloaded = true;
       }
     } catch (err) {
       debugLogger.warn(
@@ -634,6 +643,7 @@ export class LoadedSettings {
       );
     }
     this._merged = this.computeMergedSettings();
+    return reloaded;
   }
 
   /**

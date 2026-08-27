@@ -22,6 +22,7 @@ import {
   WorkspaceSettingsPartialPersistError,
   type WorkspaceSettingsWrite,
 } from '../workspace-service/types.js';
+import type { ServeModelProviderRuntimeSyncResult } from '../types.js';
 import { sendGenerationClosedError } from '../workspace-route-runtime.js';
 
 type PersistSettings = (
@@ -57,6 +58,9 @@ export interface WorkspaceModelsRouteDeps {
     req: Request,
     res: Response,
   ) => string | undefined | null;
+  syncModelProvidersRuntime?: (
+    assertGenerationOpen?: () => void,
+  ) => Promise<ServeModelProviderRuntimeSyncResult>;
 }
 
 function parseTarget(
@@ -295,6 +299,25 @@ export function registerWorkspaceModelsRoutes(
         if (sendGenerationClosedError(res, err)) return;
         throw err;
       }
+      let runtimeSync: ServeModelProviderRuntimeSyncResult | undefined;
+      if (deps.syncModelProvidersRuntime) {
+        try {
+          runtimeSync =
+            await deps.syncModelProvidersRuntime(assertGenerationOpen);
+        } catch (err) {
+          if (sendGenerationClosedError(res, err)) return;
+          writeStderrLine(
+            'qwen serve: DELETE /workspace/models runtime sync failed after persistence',
+          );
+          runtimeSync = { status: 'failed' };
+        }
+        try {
+          assertGenerationOpen();
+        } catch (err) {
+          if (sendGenerationClosedError(res, err)) return;
+          throw err;
+        }
+      }
       for (const write of writes) broadcastWrite(write);
 
       const clearedActiveModel = writes.some((w) => w.key === 'model.name');
@@ -302,9 +325,12 @@ export function registerWorkspaceModelsRoutes(
       const requiresRestart = writes.some(
         (w) => getSettingDefinition(w.key)?.requiresRestart === true,
       );
-      res
-        .status(200)
-        .json({ removed: true, clearedActiveModel, requiresRestart });
+      res.status(200).json({
+        removed: true,
+        clearedActiveModel,
+        requiresRestart,
+        ...(runtimeSync ? { runtimeSync } : {}),
+      });
     },
   );
 }

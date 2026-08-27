@@ -282,7 +282,11 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
             : undefined,
       })
       .then((result) => {
-        onMessage(result.message);
+        onMessage(
+          result.runtimeSync?.status === 'failed'
+            ? `${result.message}\n\n${t('settings.models.runtimeSyncFailed')}`
+            : result.message,
+        );
         onClose();
       })
       .catch((err: unknown) => {
@@ -306,6 +310,7 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
     protocol,
     provider,
     saving,
+    t,
     thinking,
     workspaceActions,
   ]);

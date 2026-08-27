@@ -22,9 +22,11 @@ import {
 } from '../server/auth-provider-helpers.js';
 import type { SendBridgeError } from '../server/error-response.js';
 import { parseClientIdHeader, safeBody } from '../server/request-helpers.js';
+import { sendGenerationClosedError } from '../workspace-route-runtime.js';
 import type {
   ServeAuthProviderInstallRequest,
   ServeAuthProviderInstallResult,
+  ServeModelProviderRuntimeSyncResult,
 } from '../types.js';
 
 interface RegisterWorkspaceAuthRoutesDeps {
@@ -38,6 +40,9 @@ interface RegisterWorkspaceAuthRoutesDeps {
     req: ServeAuthProviderInstallRequest,
     assertGenerationOpen?: () => void,
   ) => Promise<ServeAuthProviderInstallResult>;
+  syncModelProvidersRuntime?: (
+    assertGenerationOpen?: () => void,
+  ) => Promise<ServeModelProviderRuntimeSyncResult>;
   captureGenerationAssertion?: () => (() => void) | undefined;
 }
 
@@ -141,6 +146,7 @@ export function registerWorkspaceAuthRoutes(
     boundWorkspace,
     allowPrivateAuthBaseUrl,
     installAuthProvider,
+    syncModelProvidersRuntime,
     captureGenerationAssertion,
   } = deps;
 
@@ -344,7 +350,23 @@ export function registerWorkspaceAuthRoutes(
           ? await installAuthProvider(installRequest, assertGenerationOpen)
           : await installAuthProvider(installRequest);
         assertGenerationOpen?.();
-        res.status(200).json(result);
+        let runtimeSync: ServeModelProviderRuntimeSyncResult | undefined;
+        if (syncModelProvidersRuntime) {
+          try {
+            runtimeSync = await syncModelProvidersRuntime(assertGenerationOpen);
+          } catch (syncError) {
+            if (sendGenerationClosedError(res, syncError)) return;
+            writeStderrLine(
+              'qwen serve: POST /workspace/auth/provider runtime sync failed after persistence',
+            );
+            runtimeSync = { status: 'failed' };
+          }
+        }
+        assertGenerationOpen?.();
+        res.status(200).json({
+          ...result,
+          ...(runtimeSync ? { runtimeSync } : {}),
+        });
       } catch (err) {
         sendBridgeError(res, err, {
           route: 'POST /workspace/auth/provider',

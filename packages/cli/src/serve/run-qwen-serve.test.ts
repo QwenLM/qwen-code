@@ -42,6 +42,7 @@ import { isLoopbackBind } from './loopback-binds.js';
 import { isOwnInterfaceAddress } from './local-bind-addresses.js';
 import { ChannelDeliveryAuthorizationStore } from './channel-delivery-authorization.js';
 import * as acpBridge from '@qwen-code/acp-bridge/bridge';
+import { SessionNotFoundError } from '@qwen-code/acp-bridge/bridgeErrors';
 import {
   journalGrowthPoolMb,
   resolveDaemonMemoryBudget,
@@ -486,6 +487,7 @@ function makeRuntimeBridge(): HttpAcpBridge {
     getEventRing: vi.fn().mockReturnValue({ getAll: () => [] }),
     resume: vi.fn(),
     preheat: vi.fn().mockResolvedValue(undefined),
+    invokeWorkspaceCommand: vi.fn().mockResolvedValue({ configsFailed: 0 }),
     sessionCount: 0,
     pendingPermissionCount: 0,
     activePromptCount: 0,
@@ -7144,6 +7146,7 @@ describe('runQwenServe runtime startup failures', () => {
       sensitiveSpanAttributeMaxLength: 1024 * 1024,
     });
     let runtimeMounted = false;
+    let reloadedRuntimeValue = 'reloaded';
     vi.spyOn(settingsRuntime, 'loadSettings').mockImplementation(
       () =>
         ({
@@ -7154,7 +7157,9 @@ describe('runQwenServe runtime startup failures', () => {
                 : '.runtime-boot',
             },
             env: {
-              QWEN_TEST_RUNTIME_VALUE: runtimeMounted ? 'reloaded' : 'boot',
+              QWEN_TEST_RUNTIME_VALUE: runtimeMounted
+                ? reloadedRuntimeValue
+                : 'boot',
             },
           },
         }) as unknown as ReturnType<typeof settingsRuntime.loadSettings>,
@@ -7180,6 +7185,10 @@ describe('runQwenServe runtime startup failures', () => {
             route: string;
             workspaceCwd: string;
           }): Promise<unknown>;
+          reloadModelProviders(ctx: {
+            route: string;
+            workspaceCwd: string;
+          }): Promise<unknown>;
         }
       | undefined;
     let primaryRuntimeEnv:
@@ -7200,6 +7209,8 @@ describe('runQwenServe runtime startup failures', () => {
       },
     );
 
+    const bridge = makeRuntimeBridge();
+
     const handle = await runQwenServe(
       {
         port: 0,
@@ -7210,7 +7221,7 @@ describe('runQwenServe runtime startup failures', () => {
         serveWebShell: false,
       },
       {
-        bridge: makeRuntimeBridge(),
+        bridge,
         bootSettings: {},
         daemonLogBaseDir: path.join(tmpDir, 'debug'),
         resolveOnListen: true,
@@ -7242,6 +7253,50 @@ describe('runQwenServe runtime startup failures', () => {
       expect(capturedRuntimeEnv['QWEN_TEST_RELOAD_LEAK']).toBeUndefined();
       expect(primaryRuntime?.sessionRuntimeBaseDir).toBe(pinnedRuntimeBaseDir);
       expect(capturedRuntimeEnv['QWEN_RUNTIME_DIR']).toBe(pinnedRuntimeBaseDir);
+
+      reloadedRuntimeValue = 'hot-synced';
+      await expect(
+        workspace!.reloadModelProviders({
+          route: 'POST /workspace/auth/provider',
+          workspaceCwd: tmpDir,
+        }),
+      ).resolves.toEqual({ status: 'applied' });
+      expect(capturedRuntimeEnv['QWEN_TEST_RUNTIME_VALUE']).toBe('hot-synced');
+      expect(bridge.invokeWorkspaceCommand).toHaveBeenCalledWith(
+        'qwen/control/workspace/model-providers/reload',
+        { cwd: tmpDir },
+        { timeoutMs: 30_000 },
+      );
+      expect(primaryRuntime?.sessionRuntimeBaseDir).toBe(pinnedRuntimeBaseDir);
+      expect(capturedRuntimeEnv['QWEN_RUNTIME_DIR']).toBe(pinnedRuntimeBaseDir);
+
+      vi.mocked(bridge.invokeWorkspaceCommand).mockRejectedValueOnce(
+        new SessionNotFoundError(tmpDir),
+      );
+      await expect(
+        workspace!.reloadModelProviders({
+          route: 'POST /workspace/auth/provider',
+          workspaceCwd: tmpDir,
+        }),
+      ).resolves.toEqual({ status: 'deferred' });
+      vi.mocked(bridge.invokeWorkspaceCommand).mockResolvedValueOnce({
+        configsFailed: 1,
+      });
+      await expect(
+        workspace!.reloadModelProviders({
+          route: 'POST /workspace/auth/provider',
+          workspaceCwd: tmpDir,
+        }),
+      ).resolves.toEqual({ status: 'failed' });
+      vi.mocked(bridge.invokeWorkspaceCommand).mockRejectedValueOnce(
+        new Error('child reload failed'),
+      );
+      await expect(
+        workspace!.reloadModelProviders({
+          route: 'POST /workspace/auth/provider',
+          workspaceCwd: tmpDir,
+        }),
+      ).resolves.toEqual({ status: 'failed' });
     } finally {
       if (originalBase === undefined) {
         delete process.env['QWEN_TEST_BOOT_BASE'];
@@ -7296,6 +7351,7 @@ describe('runQwenServe runtime startup failures', () => {
     const buildRuntimeEnvironmentActual =
       environmentRuntime.buildRuntimeEnvironment;
     let failReloadBuild = false;
+    let failEnvFileRead = false;
     vi.spyOn(environmentRuntime, 'buildRuntimeEnvironment').mockImplementation(
       (
         ...args: Parameters<typeof environmentRuntime.buildRuntimeEnvironment>
@@ -7303,12 +7359,25 @@ describe('runQwenServe runtime startup failures', () => {
         if (failReloadBuild) {
           throw new Error('runtime env rebuild failed');
         }
-        return buildRuntimeEnvironmentActual(...args);
+        const result = buildRuntimeEnvironmentActual(...args);
+        return failEnvFileRead
+          ? {
+              ...result,
+              envFileReadFailed: true,
+              envFileReadFailures: [
+                { path: path.join(tmpDir, '.env'), error: 'read failed' },
+              ],
+            }
+          : result;
       },
     );
     let workspace:
       | {
           reload(ctx: {
+            route: string;
+            workspaceCwd: string;
+          }): Promise<unknown>;
+          reloadModelProviders(ctx: {
             route: string;
             workspaceCwd: string;
           }): Promise<unknown>;
@@ -7330,6 +7399,7 @@ describe('runQwenServe runtime startup failures', () => {
     );
 
     const logBaseDir = path.join(tmpDir, 'debug');
+    const bridge = makeRuntimeBridge();
     const handle = await runQwenServe(
       {
         port: 0,
@@ -7340,7 +7410,7 @@ describe('runQwenServe runtime startup failures', () => {
         serveWebShell: false,
       },
       {
-        bridge: makeRuntimeBridge(),
+        bridge,
         bootSettings: {},
         daemonLogBaseDir: logBaseDir,
         resolveOnListen: true,
@@ -7356,6 +7426,12 @@ describe('runQwenServe runtime startup failures', () => {
       expect(capturedRuntimeEnv['QWEN_TEST_RUNTIME_VALUE']).toBe('boot');
 
       failReloadBuild = true;
+      await expect(
+        workspace!.reloadModelProviders({
+          route: 'POST /workspace/auth/provider',
+          workspaceCwd: tmpDir,
+        }),
+      ).resolves.toEqual({ status: 'failed' });
       await workspace!.reload({
         route: 'POST /workspace/reload',
         workspaceCwd: tmpDir,
@@ -7375,6 +7451,14 @@ describe('runQwenServe runtime startup failures', () => {
       expect(primaryRuntimeEnv!.effectiveEnv).toBe(capturedRuntimeEnv);
       expect(capturedRuntimeEnv['QWEN_TEST_RUNTIME_VALUE']).toBe('reloaded');
       expect(primaryRuntimeEnv!.fallbackReason).toBeUndefined();
+
+      failEnvFileRead = true;
+      await expect(
+        workspace!.reloadModelProviders({
+          route: 'POST /workspace/auth/provider',
+          workspaceCwd: tmpDir,
+        }),
+      ).resolves.toEqual({ status: 'failed' });
 
       await handle.close();
       closed = true;

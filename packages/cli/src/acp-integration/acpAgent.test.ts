@@ -4312,6 +4312,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
   ) {
     return {
       merged,
+      reloadScopeFromDisk: vi.fn(),
       forScope: vi.fn().mockReturnValue({ settings: { mcpServers: {} } }),
       getUserHooks: vi.fn().mockReturnValue({}),
       getProjectHooks: vi.fn().mockReturnValue({}),
@@ -4666,6 +4667,44 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     resolveRegistration();
     await sessionPromise;
     expect(settled).toBe(true);
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('reloads an initializing session and refreshes it again before publication', async () => {
+    const innerConfig = await setupSessionMocks(
+      'session-provider-reload-initializing',
+    );
+    const { agent, agentPromise } = await bootAcpAgent();
+    let resolveRegistration!: () => void;
+    const registration = new Promise<void>((resolve) => {
+      resolveRegistration = resolve;
+    });
+    vi.mocked(registerCreateSubSessionTool).mockReturnValueOnce(registration);
+
+    const sessionPromise = agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    await vi.waitFor(() =>
+      expect(registerCreateSubSessionTool).toHaveBeenCalledWith(
+        innerConfig as unknown as Config,
+      ),
+    );
+    innerConfig.reloadModelProvidersConfig.mockClear();
+
+    const result = await agent.extMethod(
+      SERVE_CONTROL_EXT_METHODS.workspaceModelProvidersReload,
+      { cwd: '/tmp' },
+    );
+
+    expect(result).toMatchObject({
+      configsRefreshed: 2,
+      configsFailed: 0,
+    });
+    expect(innerConfig.reloadModelProvidersConfig).toHaveBeenCalledOnce();
+
+    resolveRegistration();
+    await sessionPromise;
+    expect(innerConfig.reloadModelProvidersConfig).toHaveBeenCalledTimes(2);
 
     mockConnectionState.resolve();
     await agentPromise;
@@ -20065,6 +20104,82 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
   });
 
   it.each(['load', 'resume'] as const)(
+    '%s returns models from the final provider registry refresh',
+    async (action) => {
+      const innerConfig = bindRestoreMocks({ sessionExists: true });
+      const requestSettings = makeRestoreSettings();
+      Object.assign(requestSettings, {
+        reloadScopeFromDisk: vi.fn().mockReturnValue(true),
+      });
+      vi.mocked(loadSettings).mockReturnValue(requestSettings);
+
+      let configuredModels = [
+        {
+          id: 'old-model',
+          label: 'Old Model',
+          authType: 'api-key',
+        },
+      ];
+      const reloadModelProvidersConfig = vi.fn(() => {
+        configuredModels = [
+          {
+            id: 'new-model',
+            label: 'New Model',
+            authType: 'api-key',
+          },
+        ];
+      });
+      Object.assign(innerConfig, {
+        getAllConfiguredModels: vi.fn(() => configuredModels),
+        reloadModelProvidersConfig,
+      });
+
+      let resolveRegistration!: () => void;
+      vi.mocked(registerCreateSubSessionTool).mockReturnValueOnce(
+        new Promise<void>((resolve) => {
+          resolveRegistration = resolve;
+        }),
+      );
+      const { agent, agentPromise } = await spawnAgent();
+      const request = {
+        cwd: '/tmp',
+        sessionId: 'persisted-1',
+        mcpServers: [],
+      };
+
+      const pending =
+        action === 'load'
+          ? agent.loadSession(request)
+          : agent.unstable_resumeSession(request);
+      await vi.waitFor(() =>
+        expect(registerCreateSubSessionTool).toHaveBeenCalledOnce(),
+      );
+      resolveRegistration();
+      const response = (await pending) as {
+        models: { availableModels: Array<{ modelId: string }> };
+        configOptions: Array<{
+          id: string;
+          options: Array<{ value: string }>;
+        }>;
+      };
+      const modelOption = response.configOptions.find(
+        (option) => option.id === 'model',
+      );
+
+      expect(reloadModelProvidersConfig).toHaveBeenCalledOnce();
+      expect(
+        response.models.availableModels.map((model) => model.modelId),
+      ).toEqual(['new-model(api-key)']);
+      expect(modelOption?.options.map((option) => option.value)).toEqual([
+        'new-model(api-key)',
+      ]);
+
+      mockConnectionState.resolve();
+      await agentPromise;
+    },
+  );
+
+  it.each(['load', 'resume'] as const)(
     'disables native Cron when %s restores a channel session',
     async (action) => {
       bindRestoreMocks({ sessionExists: true });
@@ -23137,6 +23252,7 @@ describe('sessionLanguage multi-session propagation', () => {
       }),
       reloadModelProvidersConfig: vi.fn(),
       refreshAuth: vi.fn().mockResolvedValue(undefined),
+      switchModel: vi.fn().mockResolvedValue(undefined),
       getTargetDir: vi.fn().mockReturnValue('/tmp'),
       getContentGeneratorConfig: vi.fn().mockReturnValue({}),
       getAvailableModels: vi.fn().mockReturnValue([]),
@@ -23452,6 +23568,128 @@ describe('sessionLanguage multi-session propagation', () => {
     await agentPromise;
   });
 
+  it('reloads model providers for busy sessions without running full reload work', async () => {
+    const providerConfig = {
+      idealab: [
+        {
+          id: 'qwen3',
+          name: 'Qwen 3',
+          baseUrl: 'https://idealab.example/v1',
+        },
+      ],
+    };
+    const settings = {
+      merged: {
+        modelProviders: providerConfig,
+        providerProtocol: { idealab: 'openai' },
+      },
+      reloadScopeFromDisk: vi.fn(),
+      getUserHooks: vi.fn().mockReturnValue({}),
+      getProjectHooks: vi.fn().mockReturnValue({}),
+    } as unknown as LoadedSettings;
+    const cfg1 = makeConfig({
+      getSessionId: vi.fn().mockReturnValue('provider-1'),
+    });
+    const cfg2 = makeConfig({
+      getSessionId: vi.fn().mockReturnValue('provider-2'),
+    });
+    const reload1 = vi.fn(() =>
+      cfg1.reloadModelProvidersConfig(providerConfig, { idealab: 'openai' }),
+    );
+    const reload2 = vi.fn(() => {
+      throw new Error('broken registry');
+    });
+    const isIdle1 = vi.fn().mockReturnValue(false);
+    const isIdle2 = vi.fn().mockReturnValue(false);
+    const configs = [cfg1, cfg2];
+    let sessionIndex = 0;
+
+    vi.mocked(loadSettings).mockReturnValue(settings);
+    vi.mocked(loadCliConfig)
+      .mockResolvedValueOnce(cfg1 as unknown as Config)
+      .mockResolvedValueOnce(cfg2 as unknown as Config);
+    vi.mocked(Session).mockImplementation(() => {
+      const index = sessionIndex++;
+      const cfg = configs[index]!;
+      const id = cfg.getSessionId();
+      return {
+        getId: vi.fn().mockReturnValue(id),
+        shouldHintAskUserQuestionRestore: vi.fn().mockReturnValue(false),
+        getConfig: vi.fn().mockReturnValue(cfg),
+        isIdle: index === 0 ? isIdle1 : isIdle2,
+        reloadModelProvidersFromDisk: index === 0 ? reload1 : reload2,
+        sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
+        installRewriter: vi.fn(),
+        installGoalTerminalObserver: vi.fn(),
+        startCronScheduler: vi.fn(),
+        dispose: vi.fn(),
+      } as unknown as InstanceType<typeof Session>;
+    });
+    vi.mocked(buildAvailableCommandsSnapshot).mockResolvedValue({
+      availableCommands: [],
+      availableSkills: [],
+    });
+
+    const bootConfig = makeConfig();
+    const agentPromise = runAcpAgent(
+      bootConfig as unknown as Config,
+      settings,
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    });
+
+    await agent.newSession({ cwd: '/provider-1', mcpServers: [] });
+    await agent.newSession({ cwd: '/provider-2', mcpServers: [] });
+    vi.mocked(bootConfig.reloadModelProvidersConfig).mockClear();
+    vi.mocked(cfg1.reloadModelProvidersConfig).mockClear();
+    vi.mocked(cfg2.reloadModelProvidersConfig).mockClear();
+    vi.mocked(cfg1.refreshAuth).mockClear();
+    vi.mocked(cfg2.refreshAuth).mockClear();
+
+    const result = await agent.extMethod(
+      SERVE_CONTROL_EXT_METHODS.workspaceModelProvidersReload,
+      { cwd: '/provider-1' },
+    );
+
+    expect(result).toMatchObject({
+      configsRefreshed: 2,
+      configsFailed: 1,
+    });
+    expect(bootConfig.reloadModelProvidersConfig).toHaveBeenCalledWith(
+      providerConfig,
+      { idealab: 'openai' },
+    );
+    expect(reload1).toHaveBeenCalledOnce();
+    expect(reload2).toHaveBeenCalledOnce();
+    expect(isIdle1).not.toHaveBeenCalled();
+    expect(isIdle2).not.toHaveBeenCalled();
+    expect(cfg1.refreshAuth).not.toHaveBeenCalled();
+    expect(cfg2.refreshAuth).not.toHaveBeenCalled();
+    expect(cfg1.switchModel).not.toHaveBeenCalled();
+    expect(cfg2.switchModel).not.toHaveBeenCalled();
+
+    vi.mocked(settings.reloadScopeFromDisk).mockReturnValueOnce(false);
+    vi.mocked(bootConfig.reloadModelProvidersConfig).mockClear();
+    reload1.mockClear();
+    reload2.mockClear();
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceModelProvidersReload, {
+        cwd: '/provider-1',
+      }),
+    ).resolves.toEqual({ configsRefreshed: 0, configsFailed: 1 });
+    expect(bootConfig.reloadModelProvidersConfig).not.toHaveBeenCalled();
+    expect(reload1).not.toHaveBeenCalled();
+    expect(reload2).not.toHaveBeenCalled();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it('clears removed providerProtocol mappings and refreshes auth on workspace reload', async () => {
     const providerConfig = {
       idealab: [
@@ -23515,6 +23753,11 @@ describe('sessionLanguage multi-session propagation', () => {
     });
 
     await agent.newSession({ cwd: '/reload', mcpServers: [] });
+    mergedSettings = {
+      modelProviders: providerConfig,
+      providerProtocol: { idealab: 'openai' },
+    };
+    vi.mocked(cfg.refreshAuth).mockClear();
     await agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceReload, {});
 
     expect(cfg.reloadModelProvidersConfig).toHaveBeenCalledWith(
@@ -23589,6 +23832,11 @@ describe('sessionLanguage multi-session propagation', () => {
     });
 
     await agent.newSession({ cwd: '/reload', mcpServers: [] });
+    mergedSettings = { tools: { approvalMode: 'default' } };
+    vi.mocked(
+      (cfg as typeof cfg & { setApprovalMode: ReturnType<typeof vi.fn> })
+        .setApprovalMode,
+    ).mockClear();
     const approvalModes = APPROVAL_MODES as unknown as string[];
     const originalApprovalModes = [...approvalModes];
     approvalModes.splice(0, approvalModes.length, 'plan');
@@ -23748,6 +23996,7 @@ describe('sessionLanguage multi-session propagation', () => {
     });
 
     await agent.newSession({ cwd: '/skills', mcpServers: [] });
+    vi.mocked(bootstrapSettings.reloadScopeFromDisk).mockClear();
     await expect(
       agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceSkillsRefresh, {
         reason: 'content',

@@ -39,6 +39,7 @@ import type { WorkspaceVoiceStatus } from '../../services/voice-service.js';
 import type { VoiceMode } from '../../services/voice-settings.js';
 import type { WorkspaceProvidersStatusProvider } from '../workspace-providers-status.js';
 import type { WorkspaceSkillsStatusProvider } from '../workspace-skills-status.js';
+import type { ServeModelProviderRuntimeSyncResult } from '../types.js';
 import type {
   WorkspaceSkillInstallRequest,
   WorkspaceSkillMutationResult,
@@ -245,6 +246,11 @@ export interface DaemonWorkspaceService {
 
   /** Reload all settings (env + model + permissions + tools + memory). */
   reload(ctx: WorkspaceRequestContext): Promise<ReloadResponse>;
+
+  /** Reload only the runtime model-provider registry and spawn environment. */
+  reloadModelProviders(
+    ctx: WorkspaceRequestContext,
+  ): Promise<ServeModelProviderRuntimeSyncResult>;
 
   /** Drop cached skill status so extension skill changes are re-enumerated. */
   invalidateWorkspaceSkillsStatus(): void;
@@ -542,7 +548,11 @@ export interface DaemonWorkspaceServiceDeps {
   reloadDaemonEnv?: (
     workspace: string,
     assertGenerationOpen?: () => void,
-  ) => Promise<EnvReloadResult>;
+  ) => Promise<
+    EnvReloadResult & {
+      runtimeEnvironmentApplied?: boolean;
+    }
+  >;
 
   /** Eagerly start the ACP child/channel without creating a session. */
   preheatAcpChild?: () => Promise<void>;

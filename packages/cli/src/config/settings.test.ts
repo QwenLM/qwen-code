@@ -75,6 +75,7 @@ import {
   WORKSPACE_RESTRICTED_SETTINGS,
   WORKSPACE_RESTRICTED_SETTING_KEYS,
 } from './settingsUtils.js';
+import { getModelProvidersOwnerScope } from './modelProvidersScope.js';
 import { needsMigration } from './migration/index.js';
 import { QWEN_DIR } from '@qwen-code/qwen-code-core';
 
@@ -275,6 +276,36 @@ describe('Settings Loading and Merging', () => {
         const settings = loadSettings(MOCK_WORKSPACE_DIR);
 
         expect(settings.workspaceSettingsActive).toBe(true);
+      });
+
+      it('should keep workspace settings empty when reloading the home directory', () => {
+        const homeDir = '/mock/home/user';
+        vi.mocked(osActual.homedir).mockReturnValue(homeDir);
+        const homeSettingsPath = pathActual.join(
+          homeDir,
+          SETTINGS_DIRECTORY_NAME,
+          'settings.json',
+        );
+        (mockFsExistsSync as Mock).mockImplementation(
+          (p: fs.PathLike) => p.toString() === homeSettingsPath,
+        );
+        (fs.readFileSync as Mock).mockImplementation(() =>
+          JSON.stringify({
+            context: { includeDirectories: ['/user-context'] },
+            modelProviders: { openai: [{ id: 'user-model' }] },
+          }),
+        );
+        (fs.realpathSync as Mock).mockImplementation(() => homeDir);
+
+        const settings = loadSettings(homeDir);
+
+        expect(settings.reloadScopeFromDisk(SettingScope.User)).toBe(true);
+        expect(settings.reloadScopeFromDisk(SettingScope.Workspace)).toBe(true);
+        expect(settings.workspace.settings).toEqual({});
+        expect(getModelProvidersOwnerScope(settings)).toBe(SettingScope.User);
+        expect(settings.merged.context?.includeDirectories).toEqual([
+          '/user-context',
+        ]);
       });
     });
 
@@ -3765,7 +3796,7 @@ describe('Settings Loading and Merging', () => {
       const settings = loadSettings(MOCK_WORKSPACE_DIR);
       currentUserSettingsContent = JSON.stringify(reloadedUserSettingsContent);
 
-      settings.reloadScopeFromDisk(SettingScope.User);
+      expect(settings.reloadScopeFromDisk(SettingScope.User)).toBe(true);
 
       expect(settings.user.settings.ui?.theme).toBe('light');
       expect(settings.user.originalSettings.ui?.theme).toBe(
@@ -3803,7 +3834,7 @@ describe('Settings Loading and Merging', () => {
       const settings = loadSettings(MOCK_WORKSPACE_DIR);
       userSettingsExists = false;
 
-      settings.reloadScopeFromDisk(SettingScope.User);
+      expect(settings.reloadScopeFromDisk(SettingScope.User)).toBe(true);
 
       expect(settings.user.settings).toEqual({});
       expect(settings.user.originalSettings).toEqual({});
@@ -3836,7 +3867,7 @@ describe('Settings Loading and Merging', () => {
       const settings = loadSettings(MOCK_WORKSPACE_DIR);
       currentUserSettingsContent = '[]';
 
-      settings.reloadScopeFromDisk(SettingScope.User);
+      expect(settings.reloadScopeFromDisk(SettingScope.User)).toBe(false);
 
       expect(settings.user.settings).toEqual({
         ...initialUserSettingsContent,
@@ -3870,7 +3901,7 @@ describe('Settings Loading and Merging', () => {
       const settings = loadSettings(MOCK_WORKSPACE_DIR);
       currentUserSettingsContent = '{bad json';
 
-      settings.reloadScopeFromDisk(SettingScope.User);
+      expect(settings.reloadScopeFromDisk(SettingScope.User)).toBe(false);
 
       expect(settings.merged.ui?.theme).toBe('dark');
       expect(mockDebugLogger.warn).toHaveBeenCalledWith(
