@@ -1044,12 +1044,19 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
       await this.sendMessage(chatId, text);
       return;
     }
+    const idempotencyKey = stableUuid(
+      `${this.name}\0${chatId}\0${messageId}\0${text}`,
+    );
+    if (this.findImTarget(chatId)?.kind === 'direct') {
+      await this.sendImText(chatId, text, idempotencyKey);
+      return;
+    }
     await this.client.replyToImMessage(
       chatId,
       messageId,
       senderId,
       text,
-      stableUuid(`${this.name}\0${chatId}\0${messageId}\0${text}`),
+      idempotencyKey,
     );
   }
 
@@ -1130,11 +1137,14 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
           continue;
         }
         const notification = parseDocumentMentionNotification(message.content);
-        if (!notification) continue;
-        await this.processDocumentNotification(message, key, notification);
+        if (notification) {
+          await this.processDocumentNotification(message, key, notification);
+        } else {
+          await this.handleImMessage({ kind: 'direct' }, message, true);
+        }
       }
       if (this.notificationWatermarkPulledBack) {
-        // R4-4: a stale document notification replayed while this window's
+        // R4-4: a stale direct message replayed while this window's
         // fetch was in flight, and `handleImMessage` pulled the watermark back
         // to cover it. That replay was left UNMARKED on purpose for history
         // polling, so finishing this window normally would undo the rescue:
@@ -1458,13 +1468,13 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
       message.eventTime !== undefined &&
       message.eventTime < this.connectionStartedAt - 5_000
     ) {
-      if (!parseDocumentMentionNotification(message.content)) {
+      if (source.kind !== 'direct') {
         this.markProcessedMessage(messageKey(message));
         this.saveCursor();
         return;
       }
-      // A replayed document notification is left UNMARKED on purpose, for
-      // history polling to pick up. That only works if polling will ever look
+      // A replayed direct message is left UNMARKED on purpose, for history
+      // polling to pick up. That only works if polling will ever look
       // that far back: on a fresh cursor `notificationWatermark` starts at
       // `connectionStartedAt` and the query window opens at `watermark − 5s`
       // — exactly this branch's drop boundary — so every message this branch
@@ -1582,10 +1592,9 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     } catch (error) {
       if (source.kind !== 'at') {
         // R12-1: park failed direct messages next to ambient group ones.
-        // The DM history loop dispatches document-mention notifications
-        // only, so nothing else ever re-drove a plain DM whose turn threw
-        // once. `at` messages need no parking: the pinned mention
-        // checkpoint re-fetches them.
+        // Direct-message history may be unavailable, and ambient group
+        // messages have no history fallback. `at` messages need no parking:
+        // the pinned mention checkpoint re-fetches them.
         this.rememberPendingMessage(source, message);
       }
       // Under budget the throw propagates exactly as before, so redelivery

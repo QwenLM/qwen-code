@@ -1101,6 +1101,32 @@ describe('DwsChannel', () => {
     ]);
   });
 
+  it('lets polling recover a stale replayed direct message', async () => {
+    const client = new FakeDwsClient();
+    const channel = await readyChannel(client);
+    const replay = message(
+      'user_im_message_receive_o2o_all',
+      'replayed-direct',
+      'stale direct request',
+      { eventTime: Date.now() - 60_000 },
+    );
+    client.directMessages = [replay];
+
+    await client.emit(1, replay);
+    await channel.poll();
+
+    expect(channel.inbound).toEqual([
+      expect.objectContaining({
+        chatId: 'cid-1',
+        messageId: 'replayed-direct',
+        text: 'stale direct request',
+      }),
+    ]);
+
+    await channel.poll();
+    expect(channel.inbound).toHaveLength(1);
+  });
+
   // R4-4: the pullback above only rescues the replay if the poll that was in
   // flight when it happened does not finish by writing its own window's end
   // back over it. `checkpoint.endTime` is always past the replay's `eventTime`,
@@ -1709,6 +1735,53 @@ describe('DwsChannel', () => {
         text: expect.stringContaining('reply with the document code'),
       }),
     ]);
+  });
+
+  it('dispatches an ordinary direct message when the event stream misses it', async () => {
+    const client = new FakeDwsClient();
+    const channel = await readyChannel(client);
+    client.directMessages = [
+      message(
+        'user_im_message_receive_o2o_all',
+        'history-direct',
+        'recover this request',
+      ),
+    ];
+
+    await channel.poll();
+
+    expect(channel.inbound).toEqual([
+      expect.objectContaining({
+        chatId: 'cid-1',
+        messageId: 'history-direct',
+        text: 'recover this request',
+        isGroup: false,
+      }),
+    ]);
+  });
+
+  it('applies sender pairing to a direct message recovered from history', async () => {
+    const client = new FakeDwsClient();
+    const { channel, bridge } = await readyPolicyChannel(
+      client,
+      makeConfig({ senderPolicy: 'pairing' }),
+    );
+    client.directMessages = [
+      message(
+        'user_im_message_receive_o2o_all',
+        'history-pairing',
+        'please help',
+      ),
+    ];
+
+    await channel.poll();
+
+    expect(bridge.prompt).not.toHaveBeenCalled();
+    expect(client.sendImMessage).toHaveBeenCalledWith(
+      { kind: 'direct', openDingTalkId: 'open-alice' },
+      expect.stringContaining('pairing code'),
+      expect.any(String),
+    );
   });
 
   it('dispatches a group mention when the event stream misses it', async () => {
@@ -2826,7 +2899,7 @@ describe('DwsChannel', () => {
     );
 
     expect(bridge.prompt).toHaveBeenCalledOnce();
-    expect(client.replyToImMessage).toHaveBeenCalledOnce();
+    expect(client.sendImMessage).toHaveBeenCalledOnce();
   });
 
   it('removes a working reaction that finishes attaching after the task', async () => {
@@ -3739,10 +3812,9 @@ describe('DwsChannel', () => {
     expect(channel.inboundAttempts).toBe(5);
   });
 
-  // R12-1: a plain direct message whose turn throws had no redelivery path —
-  // the at-most-once event stream already consumed it, the DM history loop
-  // dispatches only document-mention notifications, and the pending queue
-  // parked only group sources. One transient failure lost it forever.
+  // R12-1: keep a local redelivery path when a direct-message turn throws.
+  // The event stream is at most once and remote history can be unavailable,
+  // so one transient failure must not lose the message forever.
   it('replays a failed direct message on the next poll', async () => {
     const client = new FakeDwsClient();
     const channel = await readyChannel(client);
@@ -4055,23 +4127,54 @@ describe('DwsChannel', () => {
     ]);
   });
 
-  it('uses the originating message for an idempotent final reply', async () => {
+  it('sends an idempotent ordinary message for a final direct response', async () => {
     const client = new FakeDwsClient();
     const channel = await readyChannel(client);
+    await client.emit(
+      1,
+      message('user_im_message_receive_o2o_all', 'message-1', 'hello'),
+    );
     channel.responseMessageId = 'message-1';
     channel.responseSenderId = 'open-alice';
 
     await channel.respond('cid-1', 'final answer');
+    const firstKey = client.sendImMessage.mock.calls[0]?.[2];
+    await channel.respond('cid-1', 'final answer');
 
-    expect(client.replyToImMessage).toHaveBeenCalledWith(
-      'cid-1',
-      'message-1',
-      'open-alice',
+    expect(client.sendImMessage).toHaveBeenNthCalledWith(
+      1,
+      { kind: 'direct', openDingTalkId: 'open-alice' },
       'final answer',
       expect.stringMatching(
         /^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-8[0-9a-f]{3}-[0-9a-f]{12}$/,
       ),
     );
+    expect(client.sendImMessage.mock.calls[1]?.[2]).toBe(firstKey);
+    expect(client.replyToImMessage).not.toHaveBeenCalled();
+  });
+
+  it('uses the originating message for a final group reply', async () => {
+    const client = new FakeDwsClient();
+    const channel = await readyChannel(client);
+    await client.emit(
+      0,
+      message('user_im_message_receive_at', 'message-1', '@Qwen hello', {
+        conversationId: 'group-1',
+      }),
+    );
+    channel.responseMessageId = 'message-1';
+    channel.responseSenderId = 'open-alice';
+
+    await channel.respond('group-1', 'final answer');
+
+    expect(client.replyToImMessage).toHaveBeenCalledWith(
+      'group-1',
+      'message-1',
+      'open-alice',
+      'final answer',
+      expect.any(String),
+    );
+    expect(client.sendImMessage).not.toHaveBeenCalled();
   });
 
   // R1-7: the unknown-outcome swallow decides whether a finished task is
