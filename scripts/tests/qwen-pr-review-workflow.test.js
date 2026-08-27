@@ -68,7 +68,7 @@ function retryLoopSource() {
 // scripted per attempt, plus stub timeout/sleep so the test is instant.
 function runScenario(
   scenario,
-  { timeoutMinutes = 180, logPath, extraEnv = {} } = {},
+  { timeoutMinutes = 180, logPath, extraEnv = {}, armWatcher = false } = {},
 ) {
   const dir = mkdtempSync(join(tmpdir(), 'review-retry-'));
   try {
@@ -105,10 +105,10 @@ function runScenario(
       ].join('\n') + '\n',
     );
     // The retry backoff and the watcher's poll loop are the sleeps in the
-    // extraction window (the harness never arms the watcher — see the
-    // AUTO_REVIEW pin below). The opt-in envs turn the backoff into "the
-    // watcher cedes while qwen is down" and observe the salvage state the
-    // watcher would poll through it.
+    // extraction window (a replay arms the watcher only by armWatcher
+    // opt-in — see the AUTO_REVIEW pin below). The opt-in envs turn the
+    // backoff into "the watcher cedes while qwen is down" and observe the
+    // salvage state the watcher would poll through it.
     write(
       'sleep',
       [
@@ -128,8 +128,36 @@ function runScenario(
     );
     // The cede exits re-read the live head before trusting their marker
     // files; scripted per test (empty output = failed read / unmoved head,
-    // which must NOT cede).
-    write('gh', '#!/bin/bash\necho "${STUB_LIVE_HEAD:-}"\n');
+    // which must NOT cede). `api` answers the timeline verification
+    // (STUB_TIMELINE lines, STUB_TIMELINE_STATUS for an unavailable API).
+    // STUB_LIVE_HEAD_A1 answers the FIRST pr-view call and
+    // STUB_LIVE_HEAD_A2 every call from attempt 2 on, so one replay can
+    // script the watcher's poll and the loop's later re-checks
+    // differently.
+    write(
+      'gh',
+      [
+        '#!/bin/bash',
+        'if [ "${1:-}" = "api" ]; then',
+        '  printf \'%s\\n\' "${STUB_TIMELINE:-}"',
+        '  exit "${STUB_TIMELINE_STATUS:-0}"',
+        'fi',
+        'att="$(cat "$ATT" 2>/dev/null || echo 0)"',
+        'if [ "$att" -ge 2 ] && [ -n "${STUB_LIVE_HEAD_A2:-}" ]; then',
+        '  echo "$STUB_LIVE_HEAD_A2"',
+        '  exit 0',
+        'fi',
+        'if [ -n "${STUB_GH_COUNT:-}" ]; then',
+        '  n=$(( $(cat "$STUB_GH_COUNT" 2>/dev/null || echo 0) + 1 ))',
+        '  echo "$n" > "$STUB_GH_COUNT"',
+        '  if [ "$n" -eq 1 ] && [ -n "${STUB_LIVE_HEAD_A1:-}" ]; then',
+        '    echo "$STUB_LIVE_HEAD_A1"',
+        '    exit 0',
+        '  fi',
+        'fi',
+        'echo "${STUB_LIVE_HEAD:-}"',
+      ].join('\n') + '\n',
+    );
     write(
       'qwen',
       [
@@ -169,6 +197,9 @@ function runScenario(
         '  supersede_during_backoff) if [ "$n" -eq 1 ]; then r success false "[API Error: 503 upstream overloaded]"; else r success false "attempt 2 must not run"; fi ;;',
         '  compose_then_backoff_supersede) if [ "$n" -eq 1 ]; then : > "$SALVAGE_DIR/compose-seen"; printf "{}" > "$COMPOSED_ARTIFACT"; r success false "[API Error: 503 upstream overloaded]"; else r success false "attempt 2 must not run"; fi ;;',
         '  supersede_after_success) printf "head-b" > "$SUPERSEDE_FILE"; r success false "Reviewed." ;;',
+        '  cede_revert_kill) exit 143 ;;',
+        '  retry_watcher_relaunch) if [ "$n" -eq 1 ]; then r success false "[API Error: 503 upstream overloaded]"; else i=0; until [ -f "$SUPERSEDE_FILE" ] || [ "$i" -ge 200 ]; do /bin/sleep 0.05; i=$((i+1)); done; r success false "[API Error: 503 upstream overloaded]"; fi ;;',
+        '  retry_clears_stale_signals) if [ "$n" -eq 1 ]; then r success false "[API Error: 503 upstream overloaded]"; else { [ -f "$SUPERSEDE_FILE" ] && echo present || echo absent; } >> "$OBS"; r success false "ok"; fi ;;',
         '  compose_latch_reset) if [ "$n" -eq 1 ]; then r success false "[API Error: 503 upstream overloaded]"; : > "$SALVAGE_DIR/compose-seen"; else { [ -f "$SALVAGE_DIR/compose-seen" ] && echo present || echo absent; } >> "$OBS"; r success false "[API Error: 503 upstream overloaded]"; fi ;;',
         '  compose_artifact_reset) if [ "$n" -eq 1 ]; then printf \'{"downgraded":false}\' > "$COMPOSED_ARTIFACT"; r success false "[API Error: 503 upstream overloaded]"; else { [ -e "$COMPOSED_ARTIFACT" ] && echo present || echo absent; } >> "$OBS"; r success false "ok"; fi ;;',
         '  errresult) r error true "connection dropped mid-review" ;;',
@@ -193,6 +224,7 @@ function runScenario(
     ].join('\n');
     let stdout = '';
     let timedOut = false;
+    let status = 0;
     try {
       stdout = execFileSync('bash', ['-c', harness], {
         encoding: 'utf8',
@@ -206,14 +238,26 @@ function runScenario(
           ATT: attemptFile,
           DUR: durationFile,
           PRM: promptFile,
+          ...(armWatcher
+            ? {
+                // The watcher polls and pkills with these; the stubs make
+                // every call inert except the decision itself.
+                PR_NUMBER: '1',
+                REPO: 'o/r',
+                REVIEW_URL: 'zz-no-such-review-url',
+                DOCS_ONLY_MEDIUM: 'false',
+                SALVAGE_ELAPSED_PERCENT: '50',
+              }
+            : {}),
           ...extraEnv,
           // The extraction window contains the watcher's AUTO_REVIEW-gated
           // arming and the spread above inherits the parent environment, so
           // pin AFTER it: an exported AUTO_REVIEW=true (this workflow's own
           // review lane exports one) would arm a watcher with no REPO to
           // poll and hang every replay. The production arming stays pinned
-          // by the shape tests; replays never arm it.
-          AUTO_REVIEW: 'false',
+          // by the shape tests; a replay arms it only by armWatcher opt-in,
+          // with the stub environment above.
+          AUTO_REVIEW: armWatcher ? 'true' : 'false',
         },
       });
     } catch (e) {
@@ -221,6 +265,10 @@ function runScenario(
         timedOut = true;
       } else {
         stdout = `${e.stdout ?? ''}`;
+        // The cede exits are load-bearing clean — a non-zero cede opens
+        // the failure-fallback gate — so a swallowed exit code would
+        // hide the regression this harness exists to catch.
+        status = e.status ?? 1;
       }
     }
     const line =
@@ -242,6 +290,7 @@ function runScenario(
       durations,
       prompts: readFileSync(promptFile, 'utf8').split('\n').filter(Boolean),
       timedOut,
+      status,
     };
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -4019,7 +4068,7 @@ describe('review supersede salvage (#10110)', () => {
     // a one-sided edit. Pin the pair structurally — one definition, two
     // call sites — so a one-sided signal edit cannot survive the replays.
     expect((run.match(/cede_superseded\(\) \{/g) ?? []).length).toBe(1);
-    expect((run.match(/cede_superseded/g) ?? []).length).toBe(3);
+    expect((run.match(/cede_superseded/g) ?? []).length).toBe(5);
   });
 
   it('decides KEEP vs CEDE with the extracted salvage_eligible', () => {
@@ -4078,6 +4127,8 @@ describe('review supersede salvage (#10110)', () => {
     docsOnly = false,
     pct = 50,
     plant = {},
+    failFirstPoll = false,
+    emptyFirstPoll = false,
   } = {}) {
     const dir = mkdtempSync(join(tmpdir(), 'review-watcher-'));
     try {
@@ -4105,7 +4156,21 @@ describe('review supersede salvage (#10110)', () => {
         chmodSync(p, 0o755);
       };
       write('sleep', '#!/bin/bash\nexit 0\n');
-      write('gh', `#!/bin/bash\necho "${liveHead}"\n`);
+      write(
+        'gh',
+        failFirstPoll || emptyFirstPoll
+          ? [
+              '#!/bin/bash',
+              `count_file="${dir}/gh-count"`,
+              'n=$(( $(cat "$count_file" 2>/dev/null || echo 0) + 1 ))',
+              'echo "$n" > "$count_file"',
+              'if [ "$n" -eq 1 ]; then',
+              failFirstPoll ? '  exit 1' : '  exit 0',
+              'fi',
+              `echo "${liveHead}"`,
+            ].join('\n') + '\n'
+          : `#!/bin/bash\necho "${liveHead}"\n`,
+      );
       write('pkill', `#!/bin/bash\necho "$*" >> "${pkillLog}"\n`);
       const eligible =
         run.match(/salvage_eligible\(\) \{[\s\S]*?\n\}/)?.[0] ?? '';
@@ -4121,11 +4186,17 @@ describe('review supersede salvage (#10110)', () => {
         `QWEN_CI_REVIEW_SALVAGE_OK_FILE="${dir}/salvage-ok"; COMPOSED_ARTIFACT="${dir}/composed.json"`,
         'supersede_watcher',
       ].join('\n');
-      execFileSync('bash', ['-c', harness], {
-        encoding: 'utf8',
-        timeout: 30_000,
-        env: { ...process.env, PATH: `${bin}:${process.env.PATH}` },
-      });
+      try {
+        execFileSync('bash', ['-c', harness], {
+          encoding: 'utf8',
+          timeout: 30_000,
+          env: { ...process.env, PATH: `${bin}:${process.env.PATH}` },
+        });
+      } catch {
+        // A watcher that dies before its one-shot decision (errexit on a
+        // failed poll, a wedged read) leaves absent signals — read what
+        // is there and let the assertions name the gap.
+      }
       const readOr = (name) =>
         existsSync(join(dir, name))
           ? readFileSync(join(dir, name), 'utf8')
@@ -4246,6 +4317,51 @@ describe('review supersede salvage (#10110)', () => {
     expect(fifo.superseded).toBe('head-b');
   });
 
+  it('keeps a late retry attempt salvage-eligible against its own budget (replayed watcher)', () => {
+    // Attempt 1 spent 12000s of the 21600s budget and died retryable;
+    // attempt 2 owns the 9600s that were left. When its head moves after
+    // 8000s — 83% of the only budget it ever had — the run must KEEP and
+    // post: the run-level denominator made the elapsed KEEP branch
+    // structurally unreachable (8000/21600 < 50%) and CEDE-killed the
+    // attempt minutes from posting.
+    const late = runWatcher({ runElapsed: 20000, attemptElapsed: 8000 });
+    expect(late.marker).toBe('head-a');
+    expect(late.movedTo).toBe('head-b');
+    expect(late.superseded).toBeNull();
+    // Control: a fresh attempt at the same run depth still cedes early.
+    const fresh = runWatcher({ runElapsed: 20000, attemptElapsed: 30 });
+    expect(fresh.marker).toBeNull();
+    expect(fresh.superseded).toBe('head-b');
+  });
+
+  it('keeps polling past failed or empty gh reads (replayed watcher)', () => {
+    // One transient gh failure among hundreds of polls is routine; under
+    // the step's errexit only `|| continue` keeps it from silently
+    // killing the watcher subshell. The failed poll must be skipped and
+    // the next one still reach the one-shot decision.
+    const failed = runWatcher({ failFirstPoll: true });
+    expect(failed.superseded).toBe('head-b');
+    expect(failed.pkilled).toBe(true);
+    expect(failed.marker).toBeNull();
+    // An empty read (exit 0, no head) must not decide either — the
+    // [ -z ] conjunct skips it like an unmoved head.
+    const empty = runWatcher({ emptyFirstPoll: true });
+    expect(empty.superseded).toBe('head-b');
+    expect(empty.pkilled).toBe(true);
+    expect(empty.marker).toBeNull();
+  });
+
+  it('stops acting past the budget plus grace (replayed watcher)', () => {
+    // The self-bound is the only protection against a watcher leaked
+    // through a hard step kill acting on a LATER job of the same PR on
+    // the reused runner: past budget + 30 minutes it returns without
+    // polling the head at all.
+    const expired = runWatcher({ runElapsed: 23401, attemptElapsed: 23401 });
+    expect(expired.marker).toBeNull();
+    expect(expired.superseded).toBeNull();
+    expect(expired.pkilled).toBe(false);
+  });
+
   it('ends a superseded attempt clean without retrying (replayed loop)', () => {
     const dir = mkdtempSync(join(tmpdir(), 'review-salvage-'));
     try {
@@ -4260,6 +4376,7 @@ describe('review supersede salvage (#10110)', () => {
         },
       });
       expect(r.attempts).toBe(1);
+      expect(r.status).toBe(0);
       expect(r.raw).toContain('Superseded early:');
       expect(r.raw).toContain('ceding to the replacement run (#10110)');
       expect(r.raw).not.toContain('FAIL ');
@@ -4292,6 +4409,7 @@ describe('review supersede salvage (#10110)', () => {
         },
       });
       expect(r.attempts).toBe(1);
+      expect(r.status).toBe(0);
       expect(r.raw).toContain('Salvage-armed review attempt did not complete');
       expect(r.raw).not.toContain('FAIL ');
     } finally {
@@ -4308,6 +4426,7 @@ describe('review supersede salvage (#10110)', () => {
         extraEnv: { QWEN_CI_REVIEW_SALVAGE_OK_FILE: salvageFile },
       });
       expect(r.line).toBe('OK outcome=success');
+      expect(r.status).toBe(0);
       expect(r.attempts).toBe(1);
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -4331,6 +4450,7 @@ describe('review supersede salvage (#10110)', () => {
         },
       });
       expect(r.attempts).toBe(1);
+      expect(r.status).toBe(0);
       expect(r.raw).toContain('Superseded early:');
       expect(r.raw).not.toContain('FAIL ');
     } finally {
@@ -4361,6 +4481,7 @@ describe('review supersede salvage (#10110)', () => {
       });
       expect(readFileSync(obs, 'utf8').trim()).toBe('absent');
       expect(r.attempts).toBe(1);
+      expect(r.status).toBe(0);
       expect(r.raw).toContain('Superseded early:');
       expect(r.raw).not.toContain('FAIL ');
     } finally {
@@ -4385,6 +4506,7 @@ describe('review supersede salvage (#10110)', () => {
         },
       });
       expect(r.line).toBe('OK outcome=success');
+      expect(r.status).toBe(0);
       expect(r.raw).not.toContain('Superseded early:');
       expect(r.attempts).toBe(1);
     } finally {
@@ -4487,6 +4609,141 @@ describe('review supersede salvage (#10110)', () => {
         extraEnv: { OBS: obs },
       });
       expect(r.attempts).toBe(2);
+      expect(readFileSync(obs, 'utf8').trim()).toBe('absent');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('cedes when the head moved inside the watcher poll gap (replayed loop)', () => {
+    // The head moves and the agent's gh write lands before the watcher's
+    // next poll: guard_pr_write exits 90, no signal file exists, and the
+    // attempt surfaces a fatal. The terminal fail must re-read the live
+    // head — the queued replacement already covers it, so the run cedes
+    // clean instead of going red on a genuine supersede.
+    const moved = runScenario('hardexit', {
+      extraEnv: { EXPECTED_HEAD_SHA: 'head-a', STUB_LIVE_HEAD: 'head-b' },
+    });
+    expect(moved.attempts).toBe(1);
+    expect(moved.status).toBe(0);
+    expect(moved.raw).toContain('Superseded early:');
+    expect(moved.raw).not.toContain('FAIL ');
+    // Control: an unmoved head keeps the red failure — the cede exists
+    // for the superseded run, not as a universal failure escape.
+    const unmoved = runScenario('hardexit', {
+      extraEnv: { EXPECTED_HEAD_SHA: 'head-a', STUB_LIVE_HEAD: 'head-a' },
+    });
+    expect(unmoved.status).toBe(1);
+    expect(unmoved.raw).toContain('FAIL ');
+    expect(unmoved.raw).not.toContain('Superseded early:');
+  });
+
+  it('cedes a killed attempt whose superseding push reverted before the re-check (replayed loop)', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'review-salvage-'));
+    try {
+      const supersedeFile = join(dir, 'superseded');
+      // The watcher ceded mid-attempt (file written, tree killed — the
+      // attempt surfaces the kill as a fatal), then the push was
+      // force-reverted before the post-attempt live-head re-check: the
+      // re-check sees the restored head, but the timeline still carries
+      // the force-push that landed back on it during this run — the
+      // unforgeable witness that the run really was superseded.
+      writeFileSync(supersedeFile, 'head-b');
+      const base = {
+        SUPERSEDE_FILE: supersedeFile,
+        EXPECTED_HEAD_SHA: 'head-a',
+        STUB_LIVE_HEAD: 'head-a',
+        REPO: 'o/r',
+      };
+      const now = new Date().toISOString();
+      const ceded = runScenario('cede_revert_kill', {
+        extraEnv: { ...base, STUB_TIMELINE: `head-a ${now}` },
+      });
+      expect(ceded.attempts).toBe(1);
+      expect(ceded.status).toBe(0);
+      expect(ceded.raw).toContain('Superseded early:');
+      expect(ceded.raw).not.toContain('FAIL ');
+      // A silent timeline (the verification unavailable) keeps the red
+      // failure — the cede needs the unforgeable witness.
+      const silent = runScenario('cede_revert_kill', { extraEnv: base });
+      expect(silent.status).toBe(1);
+      expect(silent.raw).toContain('FAIL ');
+      expect(silent.raw).not.toContain('Superseded early:');
+      // A force-push that predates this run proves nothing about a move
+      // during it.
+      const stale = runScenario('cede_revert_kill', {
+        extraEnv: { ...base, STUB_TIMELINE: 'head-a 2020-01-01T00:00:00Z' },
+      });
+      expect(stale.status).toBe(1);
+      expect(stale.raw).toContain('FAIL ');
+      // And a timeline event for ANOTHER head is not the move's signature.
+      const other = runScenario('cede_revert_kill', {
+        extraEnv: { ...base, STUB_TIMELINE: `deadbeef ${now}` },
+      });
+      expect(other.status).toBe(1);
+      expect(other.raw).toContain('FAIL ');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('relaunches a spent watcher and clears stale signals for a retry (replayed loop)', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'review-salvage-'));
+    try {
+      const supersedeFile = join(dir, 'superseded');
+      const B40 = 'b'.repeat(40);
+      // Attempt 1: the armed watcher sees a below-threshold head move
+      // (first gh call) recording the SHORT head, writes the supersede
+      // file and kills — but the head REVERTS before the re-check, so
+      // the run retries instead of ceding. The retry must clear attempt
+      // 1's file and relaunch the spent one-shot watcher: a head move
+      // early in attempt 2 (gh serves the full live head from attempt 2
+      // on) then lands a fresh CEDE within one poll. The two recorded
+      // shapes make the difference observable — a surviving stale file
+      // (no clear) or a missing relaunch degrades the cede's head to
+      // `unknown` instead of the watcher's 40-hex recording.
+      const r = runScenario('retry_watcher_relaunch', {
+        armWatcher: true,
+        extraEnv: {
+          SUPERSEDE_FILE: supersedeFile,
+          EXPECTED_HEAD_SHA: 'head-a',
+          STUB_GH_COUNT: join(dir, 'gh-count'),
+          STUB_LIVE_HEAD_A1: 'head-b',
+          STUB_LIVE_HEAD: 'head-a',
+          STUB_LIVE_HEAD_A2: B40,
+        },
+      });
+      expect(r.attempts).toBe(2);
+      expect(r.status).toBe(0);
+      expect(r.raw).toContain('Superseded early:');
+      expect(r.raw).toContain(`to ${B40} before the salvage threshold`);
+      expect(r.raw).not.toContain('FAIL ');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("clears the previous attempt's supersede signal before a retry (replayed loop)", () => {
+    const dir = mkdtempSync(join(tmpdir(), 'review-salvage-'));
+    try {
+      const supersedeFile = join(dir, 'superseded');
+      const obs = join(dir, 'signal-observed');
+      // A cede whose head reverted leaves the previous attempt's file
+      // behind; the re-check sees the restored head and retries, so
+      // attempt 2 must meet cleared state (the relaunch witness above
+      // covers the watcher half; this pins the rm).
+      writeFileSync(supersedeFile, 'head-b');
+      const r = runScenario('retry_clears_stale_signals', {
+        extraEnv: {
+          SUPERSEDE_FILE: supersedeFile,
+          OBS: obs,
+          EXPECTED_HEAD_SHA: 'head-a',
+          STUB_LIVE_HEAD: 'head-a',
+        },
+      });
+      expect(r.attempts).toBe(2);
+      expect(r.status).toBe(0);
+      expect(r.line).toBe('OK outcome=success');
       expect(readFileSync(obs, 'utf8').trim()).toBe('absent');
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -4739,5 +4996,12 @@ describe('review supersede salvage (#10110)', () => {
     );
     expect(delay.run).toContain('while this run queued');
     expect(delay.run).toContain('should_review=false');
+    // The comparison direction is load-bearing — a one-keystroke
+    // `!=` → `=` flip makes every run whose head did NOT move skip
+    // itself, silently ending all delayed automatic reviews — so pin
+    // the condition verbatim, not just its echo strings.
+    expect(delay.run).toContain(
+      'if [ -n "$EVENT_HEAD_SHA" ] && [ -n "$current_head" ] && [ "$current_head" != "$EVENT_HEAD_SHA" ]; then',
+    );
   });
 });

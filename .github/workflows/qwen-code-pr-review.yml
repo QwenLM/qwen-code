@@ -1638,7 +1638,7 @@ jobs:
           # leaked through a hard step kill cannot act on a later job.
           SALVAGE_POLL_SECONDS=60
           supersede_watcher() {
-            local live_head compose_seen elapsed attempt_start run_elapsed
+            local live_head compose_seen elapsed attempt_start run_elapsed attempt_budget
             while sleep "$SALVAGE_POLL_SECONDS"; do
               # Self-bound stays per RUN: the watcher must stop acting past
               # the whole budget even though eligibility is per attempt.
@@ -1678,12 +1678,18 @@ jobs:
                 ''|*[!0-9]*) attempt_start="$START_TS" ;;
               esac
               elapsed=$(( $(date +%s) - attempt_start ))
+              # Denominator is the attempt's OWN budget — the share of the
+              # run budget still left when it started — not the whole run's:
+              # a retry that starts with less than the threshold remaining
+              # could otherwise never reach the elapsed KEEP branch and
+              # would be CEDE-killed minutes from posting (#10110).
+              attempt_budget=$(( BUDGET_SECONDS - (attempt_start - START_TS) ))
               # A docs-only run can never post a salvaged outcome — the
               # medium relay skips any moved head and the salvage-note step
               # excludes docs-only — so KEEP would burn the rest of the
               # budget and silently discard the result: cede regardless.
               if [ "$DOCS_ONLY_MEDIUM" != "true" ] \
-                && salvage_eligible "$elapsed" "$BUDGET_SECONDS" "$compose_seen" "$SALVAGE_ELAPSED_PERCENT"; then
+                && salvage_eligible "$elapsed" "$attempt_budget" "$compose_seen" "$SALVAGE_ELAPSED_PERCENT"; then
                 write_signal "${SALVAGE_DIR}/moved-to" "$live_head"
                 write_signal "$QWEN_CI_REVIEW_SALVAGE_OK_FILE" "$EXPECTED_HEAD_SHA"
                 echo "qwen-review-salvage: head moved to ${live_head} ${elapsed}s in (compose_seen=${compose_seen}) — finishing and posting against reviewed head ${EXPECTED_HEAD_SHA} (#10110)"
@@ -1734,6 +1740,33 @@ jobs:
           cede_superseded() {
             echo "Superseded early: PR #${PR_NUMBER:-} moved from ${EXPECTED_HEAD_SHA:-} to $(read_head_signal "${SUPERSEDE_FILE:-}") before the salvage threshold; ceding to the replacement run (#10110)." | tee -a "$GITHUB_STEP_SUMMARY"
             exit 0
+          }
+          # SUPERSEDE_FILE's premise against an unforgeable witness. The
+          # watcher writes it on a REAL head move and kills the tree, but a
+          # fast force-push REVERT (or a gh blip in the live-head re-check)
+          # can land before we get here — the re-check then sees the
+          # restored head and the killed attempt would fall through to
+          # fail() on a run that really was superseded. A branch only
+          # returns to a head it left by force-push, so a force-push that
+          # landed BACK on the expected head during this run is the
+          # move-then-revert signature; timeline events are server-side —
+          # the reviewed agent cannot forge them. A match cedes clean; an
+          # unavailable or silent timeline keeps the red failure.
+          supersede_reverted_during_run() {
+            local owner repo events oid at
+            owner="${REPO:-}"
+            repo="${owner##*/}"
+            owner="${owner%%/*}"
+            events="$(gh api graphql -f query='query($owner:String!, $repo:String!, $number:Int!) { repository(owner: $owner, name: $repo) { pullRequest(number: $number) { timelineItems(last: 25, itemTypes: [HEAD_REF_FORCE_PUSHED_EVENT]) { nodes { ... on HeadRefForcePushedEvent { createdAt afterCommit { oid } } } } } } }' -F owner="$owner" -F repo="$repo" -F number="${PR_NUMBER:-}" --jq '.data.repository.pullRequest.timelineItems.nodes[]? | (.afterCommit.oid // "") + " " + (.createdAt // "")' 2>/dev/null)" || return 1
+            [ -n "$events" ] || return 1
+            while read -r oid at; do
+              [ "$oid" = "${EXPECTED_HEAD_SHA:-}" ] || continue
+              at="$(date -d "$at" +%s 2>/dev/null || echo 0)"
+              if [ "$at" -ge "$(( START_TS - 300 ))" ]; then
+                return 0
+              fi
+            done <<< "$events"
+            return 1
           }
 
           attempt=1
@@ -1786,9 +1819,32 @@ jobs:
               && [ "$(( BUDGET_SECONDS - ($(date +%s) - START_TS) ))" -gt "$(( RETRY_BACKOFF_SECONDS + RETRY_MIN_SECONDS ))" ]; then
               echo "::warning::Transient review failure (${REASON}) — retrying once after ${RETRY_BACKOFF_SECONDS}s."
               reset_attempt_salvage_state
+              # The one-shot watcher exits the moment it arms or cedes, and
+              # a retryable death can outlive it (a cede whose head
+              # reverted, an arming whose attempt still died): the fresh
+              # attempt must not run unwatched, and it must not meet the
+              # dead attempt's signals — every cede consumer re-checks the
+              # live head, so the cleared state is safe.
+              rm -f "${SALVAGE_DIR}/moved-to" "${QWEN_CI_REVIEW_SALVAGE_OK_FILE:-}" "${SUPERSEDE_FILE:-}"
+              if [ -n "${WATCHER_PID:-}" ] && ! kill -0 "$WATCHER_PID" 2>/dev/null; then
+                supersede_watcher &
+                WATCHER_PID=$!
+              fi
               sleep "$RETRY_BACKOFF_SECONDS"
               attempt=$(( attempt + 1 ))
               continue
+            fi
+            # Last look before a red failure: a genuinely superseded run
+            # cedes, not fails. A head that moved inside the watcher's
+            # poll gap left no signal file — only the live re-read sees
+            # it; a head that moved and reverted mid-attempt is verified
+            # against the timeline. Either way the queued replacement
+            # already covers the live head.
+            if live_head_moved; then
+              cede_superseded
+            fi
+            if [ -f "${SUPERSEDE_FILE:-}" ] && supersede_reverted_during_run; then
+              cede_superseded
             fi
             fail "$REASON" 1 "$KIND"
           done
