@@ -1,5 +1,6 @@
 import type { DaemonSessionArtifact } from '@qwen-code/sdk/daemon';
 import type { ACPToolCall, Message } from '../../adapters/types';
+import { parseUnifiedDiff } from '../../utils/unifiedDiff';
 import type {
   TurnOutputFileChange,
   TurnOutputScheduledTask,
@@ -342,9 +343,20 @@ function getFileChangeLineStats(diffs: TurnOutputFileChange['diffs']):
     }
   | undefined {
   const fullDiff = getFinalFullContentDiff(diffs);
-  return fullDiff
-    ? countChangedLines(fullDiff.oldText, fullDiff.newText)
-    : undefined;
+  if (fullDiff) return countChangedLines(fullDiff.oldText, fullDiff.newText);
+  if (diffs.length === 0) return undefined;
+  const total = { additions: 0, deletions: 0 };
+  for (const diff of diffs) {
+    const stats = diff.fullContent
+      ? countChangedLines(diff.oldText, diff.newText)
+      : diff.fileDiff
+        ? parseUnifiedDiff(diff.fileDiff)
+        : undefined;
+    if (!stats) return undefined;
+    total.additions += stats.additions;
+    total.deletions += stats.deletions;
+  }
+  return total;
 }
 
 function getFileChangeDiffs(tool: ACPToolCall): TurnOutputFileChange['diffs'] {
@@ -361,6 +373,8 @@ function getFileChangeDiffs(tool: ACPToolCall): TurnOutputFileChange['diffs'] {
       },
     ];
   }
+  const fileDiff = getStringField(raw, 'fileDiff');
+  if (fileDiff) return [{ oldText: '', newText: '', fileDiff }];
 
   const diffs = [];
   for (const content of tool.content ?? []) {
@@ -434,10 +448,7 @@ function upsertFileChange(
     ...existingWithoutLineStats
   } = existing;
   const diffs = mergeFileDiffs(existing.diffs, change.diffs);
-  const finalFullDiff = getFinalFullContentDiff(diffs);
-  const lineStats = finalFullDiff
-    ? countChangedLines(finalFullDiff.oldText, finalFullDiff.newText)
-    : undefined;
+  const lineStats = getFileChangeLineStats(diffs);
   list[index] = {
     ...existingWithoutLineStats,
     status:

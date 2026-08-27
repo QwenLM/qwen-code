@@ -102,8 +102,7 @@ function SubToolTime({
 
 const SubToolLine = memo(function SubToolLine({ tool }: { tool: ACPToolCall }) {
   const documentMode = useTranscriptRenderMode() === 'document';
-  // Same row as the main transcript: one-line summary, expandable to
-  // the full output / diff / file content where the tool has any.
+  // Same expandable row as the main transcript.
   const body =
     tool.subTools || tool.subContent ? (
       <SubAgentPanel tool={tool} defaultExpanded={documentMode} />

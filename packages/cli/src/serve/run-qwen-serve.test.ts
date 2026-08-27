@@ -3507,6 +3507,7 @@ describe('runQwenServe telemetry validation', () => {
       expect(body.workspaceCwd).toBe(canonicalizeWorkspace(primary));
       expect(body.features).toContain('multi_workspace_sessions');
       expect(body.features).toContain('workspace_runtime_removal');
+      expect(body.features).toContain('scheduled_task_session_reuse');
       expect(body.limits.maxTotalSessions).toBe(2);
       expect(body.limits.sessionRestoreTimeoutMs).toBe(90_000);
       expect(body.workspaces).toEqual([
@@ -3526,6 +3527,9 @@ describe('runQwenServe telemetry validation', () => {
         index,
         [bridgeOptions],
       ] of createBridge.mock.calls.entries()) {
+        expect(bridgeOptions.onCreateCurrentSessionScheduledTask).toBeTypeOf(
+          'function',
+        );
         const target = path.join(
           tmpDir,
           `static-runtime-external-${index}.txt`,
@@ -3809,6 +3813,12 @@ describe('runQwenServe telemetry validation', () => {
       expect(createBridge.mock.calls[1]?.[0].onChannelDelivery).toBeTypeOf(
         'function',
       );
+      expect(
+        createBridge.mock.calls[0]?.[0].onCreateCurrentSessionScheduledTask,
+      ).toBeTypeOf('function');
+      expect(
+        createBridge.mock.calls[1]?.[0].onCreateCurrentSessionScheduledTask,
+      ).toBeTypeOf('function');
       expect(createBridge.mock.calls[1]?.[0]).toMatchObject({
         permissionPolicy: 'local-only',
         sessionRestoreTimeoutMs: 90_000,
@@ -7989,6 +7999,13 @@ describe('runQwenServe runtime startup failures', () => {
       await new Promise((resolve) => setTimeout(resolve, 250));
       expect(resolveTelemetrySettings).not.toHaveBeenCalled();
       expect(createBridge).not.toHaveBeenCalled();
+      const bootstrapCapabilities = (await (
+        await fetch(`${handle.url}/capabilities`)
+      ).json()) as { features: string[] };
+      expect(bootstrapCapabilities.features).not.toContain(
+        'scheduled_task_session_reuse',
+      );
+      expect(createBridge).not.toHaveBeenCalled();
       const healthRes = await fetch(`${handle.url}/health`);
       expect(healthRes.status).toBe(200);
       expect(await healthRes.json()).toEqual({ status: 'ok' });
@@ -7998,6 +8015,12 @@ describe('runQwenServe runtime startup failures', () => {
       });
       expect(resolveTelemetrySettings).toHaveBeenCalledTimes(1);
       await expect(handle.runtimeReady).resolves.toBeUndefined();
+      const runtimeCapabilities = (await (
+        await fetch(`${handle.url}/capabilities`)
+      ).json()) as { features: string[] };
+      expect(runtimeCapabilities.features).toContain(
+        'scheduled_task_session_reuse',
+      );
       await handle.close();
       closed = true;
 
@@ -9975,6 +9998,9 @@ describe('runQwenServe runtime startup failures', () => {
       });
       expect(capabilitiesBody.features).not.toContain('client_mcp_over_ws');
       expect(capabilitiesBody.features).not.toContain('cdp_tunnel_over_ws');
+      expect(capabilitiesBody.features).not.toContain(
+        'scheduled_task_session_reuse',
+      );
 
       const port = new URL(handle.url).port;
       for (const origin of [
@@ -10393,6 +10419,58 @@ describe('runQwenServe runtime startup failures', () => {
     await handle.close();
 
     expect(dispose).toHaveBeenCalledTimes(1);
+  });
+});
+
+// Simulate the refresh chunk vanishing under a running daemon (an in-place
+// upgrade replacing dist/): the module factory throws, so the first
+// health-triggered runtime build's dynamic import rejects.
+vi.mock('./server/session-pr-refresh.js', () => {
+  throw new Error(
+    'Cannot find module session-pr-refresh (simulated chunk replacement)',
+  );
+});
+
+describe('session-pr-refresh degraded load on the serve fast path', () => {
+  let tmpDir: string;
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    if (tmpDir) {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('degrades to no PR-state sweep instead of leaking an unhandled rejection', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-pr-refresh-degrade-')),
+    );
+    // The serve fast path installs no process-level unhandledRejection
+    // handler before the runtime builds, so record them here: without the
+    // import's .catch the rejection escapes and Node's default is to exit.
+    const rejections: unknown[] = [];
+    const recordRejection = (reason: unknown): void => {
+      rejections.push(reason);
+    };
+    process.on('unhandledRejection', recordRejection);
+    let handle: RunHandle | undefined;
+    try {
+      ({ handle } = await startDeferredDaemon(tmpDir));
+      const health = await fetch(`${handle.url}/health`);
+      expect(health.status).toBe(200);
+      // The first health schedules the runtime build; the refresh module
+      // import fires inside it and rejects on the next turns.
+      await expect(handle.runtimeReady).resolves.toBeUndefined();
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      expect(rejections).toEqual([]);
+      // The intended degradation is "no PR-state sweep" — the daemon keeps
+      // serving everything else.
+      const healthAfter = await fetch(`${handle.url}/health`);
+      expect(healthAfter.status).toBe(200);
+    } finally {
+      process.off('unhandledRejection', recordRejection);
+      await handle?.close();
+    }
   });
 });
 

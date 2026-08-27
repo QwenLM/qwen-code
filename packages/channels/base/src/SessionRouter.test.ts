@@ -77,6 +77,8 @@ function daemonSession(
     sessionId,
     workspaceCwd: '/tmp',
     prompt: vi.fn().mockResolvedValue({}),
+    uploadAttachment: vi.fn(),
+    removeAttachment: vi.fn().mockResolvedValue(true),
     events: vi.fn(async function* (options?: { signal?: AbortSignal }) {
       await new Promise<void>((resolve) => {
         if (options?.signal?.aborted) {

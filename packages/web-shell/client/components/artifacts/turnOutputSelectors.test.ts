@@ -311,6 +311,86 @@ describe('turnOutputSelectors', () => {
     ]);
   });
 
+  it('keeps an intact unified patch when saved file bodies were truncated', () => {
+    const fileDiff =
+      '--- a/src/app.ts\n+++ b/src/app.ts\n@@ -1 +1 @@\n-old\n+new';
+    const messages = [
+      userMessage('u1', 'edit large file'),
+      toolGroup('tg1', [
+        {
+          callId: 'edit-1',
+          toolName: 'edit',
+          status: 'completed',
+          args: { file_path: 'src/app.ts' },
+          rawOutput: { fileName: 'src/app.ts', fileDiff },
+        },
+      ]),
+    ];
+
+    const change = getFileChangesByTurn(messages, new Map()).get('u1')?.[0];
+    expect(change).toMatchObject({ additions: 1, deletions: 1 });
+    expect(change?.diffs).toEqual([{ oldText: '', newText: '', fileDiff }]);
+  });
+
+  it('counts a saved patch after a full-content write', () => {
+    const fileDiff =
+      '--- a/src/app.ts\n+++ b/src/app.ts\n@@ -1 +1 @@\n-one\n+two';
+    const messages = [
+      userMessage('u1', 'write then edit a large file'),
+      toolGroup('tg1', [
+        {
+          callId: 'write-1',
+          toolName: 'write_file',
+          status: 'completed',
+          args: { file_path: 'src/app.ts', content: 'one\n' },
+        },
+        {
+          callId: 'edit-1',
+          toolName: 'edit',
+          status: 'completed',
+          args: { file_path: 'src/app.ts' },
+          rawOutput: { fileName: 'src/app.ts', fileDiff },
+        },
+      ]),
+    ];
+
+    const change = getFileChangesByTurn(messages, new Map()).get('u1')?.[0];
+    expect(change).toMatchObject({ additions: 2, deletions: 1 });
+  });
+
+  it('sums line stats from multiple saved patches', () => {
+    const patch = (oldText: string, newText: string) =>
+      `--- a/src/app.ts\n+++ b/src/app.ts\n@@ -1 +1 @@\n-${oldText}\n+${newText}`;
+    const messages = [
+      userMessage('u1', 'edit a large file twice'),
+      toolGroup('tg1', [
+        {
+          callId: 'edit-1',
+          toolName: 'edit',
+          status: 'completed',
+          args: { file_path: 'src/app.ts' },
+          rawOutput: {
+            fileName: 'src/app.ts',
+            fileDiff: patch('one', 'two'),
+          },
+        },
+        {
+          callId: 'edit-2',
+          toolName: 'edit',
+          status: 'completed',
+          args: { file_path: 'src/app.ts' },
+          rawOutput: {
+            fileName: 'src/app.ts',
+            fileDiff: patch('two', 'three'),
+          },
+        },
+      ]),
+    ];
+
+    const change = getFileChangesByTurn(messages, new Map()).get('u1')?.[0];
+    expect(change).toMatchObject({ additions: 2, deletions: 2 });
+  });
+
   it('keeps partial diffs after a full-content diff', () => {
     const messages = [
       userMessage('u1', 'write then edit file'),
