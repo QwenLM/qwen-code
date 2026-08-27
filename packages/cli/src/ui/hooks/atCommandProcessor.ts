@@ -645,6 +645,7 @@ export async function resolveAtCommandQuery({
       remainingBudget: extensionContextBudgetRemaining,
       signal,
       onDebugMessage,
+      cachedSkills: config.getSkillManager()?.getCachedSkills(),
     });
     extensionContextBudgetRemaining = context.remainingBudget;
 

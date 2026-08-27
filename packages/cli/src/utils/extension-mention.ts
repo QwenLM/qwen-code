@@ -5,11 +5,12 @@
  */
 
 import * as fs from 'node:fs/promises';
-import type { Extension } from '@qwen-code/qwen-code-core';
 import {
   getErrorMessage,
   isSubpath,
   stripTerminalControlSequences,
+  type Extension,
+  type SkillConfig,
 } from '@qwen-code/qwen-code-core';
 
 export const EXTENSION_REF_PREFIX = 'ext:';
@@ -60,7 +61,35 @@ export function getSanitizedExtensionDisplayName(extension: Extension): string {
   );
 }
 
-export function buildExtensionContextText(extension: Extension): string {
+/**
+ * Slash-invocable names for an extension's skills as they exist in the
+ * registry: bare when the name is unique, `<extension.name>:<name>` after
+ * collision qualification (#9408). Falls back to manifest names when no
+ * cache is available, since no qualification can have happened yet.
+ */
+export function resolveAdvertisedSkillNames(
+  extension: Extension,
+  cachedSkills: readonly SkillConfig[] | null | undefined,
+): string[] {
+  if (!extension.skills) return [];
+  const owner = extension.name.toLowerCase();
+  return extension.skills.map((s) => {
+    const manifest = sanitizeDisplayText(s.name) || s.name;
+    if (!cachedSkills?.length) return manifest;
+    const lowered = manifest.toLowerCase();
+    const hit = cachedSkills.find(
+      (c) =>
+        c.extensionName?.toLowerCase() === owner &&
+        (c.name === manifest || c.name.toLowerCase() === `${owner}:${lowered}`),
+    );
+    return hit ? hit.name : manifest;
+  });
+}
+
+export function buildExtensionContextText(
+  extension: Extension,
+  cachedSkills?: readonly SkillConfig[] | null,
+): string {
   const displayName = getSanitizedExtensionDisplayName(extension);
   const lines: string[] = [];
 
@@ -78,8 +107,8 @@ export function buildExtensionContextText(extension: Extension): string {
   const capabilities: string[] = [];
 
   if (extension.skills && extension.skills.length > 0) {
-    const skillNames = extension.skills
-      .map((s) => sanitizeDisplayText(s.name) || s.name)
+    const skillNames = resolveAdvertisedSkillNames(extension, cachedSkills)
+      .map((name) => sanitizeDisplayText(name) || name)
       .join(', ');
     capabilities.push(`- Skills: ${skillNames} (invoke via /<skill-name>)`);
   }
@@ -115,9 +144,10 @@ export async function buildExtensionMentionContext(
     remainingBudget: number;
     signal?: AbortSignal;
     onDebugMessage?: (message: string) => void;
+    cachedSkills?: readonly SkillConfig[] | null;
   },
 ): Promise<{ text: string; remainingBudget: number }> {
-  let contextText = buildExtensionContextText(extension);
+  let contextText = buildExtensionContextText(extension, options.cachedSkills);
   let remainingBudget = options.remainingBudget;
 
   if (extension.contextFiles.length === 0) {

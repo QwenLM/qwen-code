@@ -13123,6 +13123,8 @@ export class Session implements SessionContext {
         remainingBudget,
         signal: abortSignal,
         onDebugMessage: (message) => this.debug(message),
+        cachedSkills:
+          this.config.getSkillManager?.()?.getCachedSkills() ?? null,
       });
       remainingBudget = context.remainingBudget;
       extensionParts.push({ text: context.text });
