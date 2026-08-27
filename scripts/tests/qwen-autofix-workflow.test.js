@@ -19618,6 +19618,12 @@ exit 0
     expect(assessCandidatesStep).toContain("QWEN_TIMEOUT_MS: '3000000'");
   });
 
+  it('keeps the develop-issue leg on the runner default budget', () => {
+    // `Develop fix` must inherit the runner's 90m default; an env pin here
+    // would silently restore the 50m budget the default raise removed.
+    expect(developFixStep).not.toContain('QWEN_TIMEOUT_MS');
+  });
+
   it('kills qwen subprocess descendants on timeout', () => {
     withRunnerDir((dir) => {
       writeFileSync(join(dir, 'feedback.md'), 'feedback\n');
