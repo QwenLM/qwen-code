@@ -294,6 +294,7 @@ describe('SendMessageTool — background-task mode', () => {
 
     expect(result.error?.type).toBe(ToolErrorType.SEND_MESSAGE_NOT_FOUND);
     expect(result.llmContent).toContain('No background task found');
+    expect(result.llmContent).not.toContain('is a team destination');
   });
 
   it('returns error for a failed (non-running, non-revivable) task', async () => {
@@ -527,8 +528,8 @@ describe('SendMessageTool — destination validation (#10073)', () => {
 
     expect(result.error?.type).toBe(ToolErrorType.SEND_MESSAGE_NOT_FOUND);
     expect(result.llmContent).toContain('No background task found');
-    expect(result.llmContent).toContain('is a team member name');
-    expect(result.llmContent).toContain('"to"');
+    expect(result.llmContent).toContain('is a team destination');
+    expect(result.llmContent).toContain('use the "to" field');
   });
 
   it('adds no teammate hint when the task_id matches no teammate', async () => {
@@ -549,7 +550,7 @@ describe('SendMessageTool — destination validation (#10073)', () => {
     );
 
     expect(result.error?.type).toBe(ToolErrorType.SEND_MESSAGE_NOT_FOUND);
-    expect(result.llmContent).not.toContain('is a team member name');
+    expect(result.llmContent).not.toContain('is a team destination');
   });
 
   it('suggests "to" when the task_id is the reserved leader name', async () => {
@@ -568,6 +569,47 @@ describe('SendMessageTool — destination validation (#10073)', () => {
     );
 
     expect(result.error?.type).toBe(ToolErrorType.SEND_MESSAGE_NOT_FOUND);
-    expect(result.llmContent).toContain('is a team member name');
+    expect(result.llmContent).toContain('is a team destination');
+  });
+
+  it('adds no hint for leader spellings the "to" route would reject', async () => {
+    const config = {
+      getBackgroundTaskRegistry: () => new BackgroundTaskRegistry(),
+      getApprovalMode: () => DEFAULT_MODE,
+      getTeamManager: () => ({
+        getTeamFile: () => ({ members: [] }),
+      }),
+    } as unknown as Config;
+    const tool = new SendMessageTool(config);
+
+    const result = await tool.validateBuildAndExecute(
+      { task_id: 'Leader!', message: 'hello' },
+      new AbortController().signal,
+    );
+
+    expect(result.error?.type).toBe(ToolErrorType.SEND_MESSAGE_NOT_FOUND);
+    expect(result.llmContent).not.toContain('is a team destination');
+  });
+
+  it('suggests "to" when the task_id is the leader agent ID', async () => {
+    const config = {
+      getBackgroundTaskRegistry: () => new BackgroundTaskRegistry(),
+      getApprovalMode: () => DEFAULT_MODE,
+      getTeamManager: () => ({
+        getTeamFile: () => ({
+          members: [],
+          leadAgentId: 'leader@test-team',
+        }),
+      }),
+    } as unknown as Config;
+    const tool = new SendMessageTool(config);
+
+    const result = await tool.validateBuildAndExecute(
+      { task_id: 'leader@test-team', message: 'hello' },
+      new AbortController().signal,
+    );
+
+    expect(result.error?.type).toBe(ToolErrorType.SEND_MESSAGE_NOT_FOUND);
+    expect(result.llmContent).toContain('is a team destination');
   });
 });
