@@ -446,6 +446,27 @@ function providerEnv(runtime: WorkspaceRuntime): NodeJS.ProcessEnv {
   delete env['CLOUDFLARE_ACCOUNT_ID'];
   delete env['VERCEL_ORG_ID'];
   delete env['VERCEL_PROJECT_ID'];
+  delete env['CLOUDFLARE_API_TOKEN'];
+  delete env['CLOUDFLARE_API_BASE_URL'];
+  delete env['CF_API_BASE_URL'];
+  delete env['VERCEL_TOKEN'];
+  delete env['NETLIFY_AUTH_TOKEN'];
+  delete env['NETLIFY_API_URL'];
+  delete env['NETLIFY_SITE_ID'];
+  // Restore the daemon's credential-store locations instead of deleting
+  // them: logins performed by this daemon live under those paths.
+  for (const key of [
+    'XDG_DATA_HOME',
+    'XDG_STATE_HOME',
+    'XDG_CACHE_HOME',
+    'XDG_CONFIG_HOME',
+    'APPDATA',
+    'LOCALAPPDATA',
+  ]) {
+    const daemonValue = process.env[key];
+    if (daemonValue === undefined) delete env[key];
+    else env[key] = daemonValue;
+  }
   return env;
 }
 
@@ -1579,8 +1600,9 @@ async function assertLinkBoundary(runtime: WorkspaceRuntime): Promise<void> {
       await fsp.stat(path.join(current, '.git'));
       repositoryRoot = current;
       break;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    } catch {
+      // Only a discovered .git proves nesting; an unreadable entry proves
+      // nothing, and rethrowing turns transient fs errors into setup 500s.
     }
     const parent = path.dirname(current);
     if (parent === current) break;
@@ -2948,7 +2970,9 @@ async function handlePublish(
             `Could not publish the artifact through ${selectedProvider}. Try again.`,
           );
         });
-      if (selectedProvider === 'netlify') {
+      if (selectedProvider === 'netlify' && settings.netlify.siteId) {
+        // Only the dedicated site this flow created may have protection
+        // stripped; a host-configured site keeps its password/SSO settings.
         await makeSitePublic(
           resolvedPublisher.command,
           resolvedPublisher.targetId,

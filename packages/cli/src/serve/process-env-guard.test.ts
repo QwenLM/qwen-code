@@ -154,8 +154,8 @@ const allowedProcessEnvAccesses = normalizeAllowances([
     'packages/cli/src/serve/routes/workspace-artifact-publish.ts',
     {
       reason:
-        'Artifact provider CLIs are process-scoped: they install under the daemon-wide Qwen directory rather than any workspace, and provider child processes inherit the daemon environment with PATH pinned to the daemon PATH.',
-      accesses: { 'key:PATH': 1, whole: 3 },
+        'Artifact provider CLIs are process-scoped: they install under the daemon-wide Qwen directory rather than any workspace, and provider child processes inherit the daemon environment with PATH pinned to the daemon PATH. The credential-store location variables (XDG_* / APPDATA / LOCALAPPDATA) are read back from the daemon environment in a loop so a workspace overlay cannot redirect where the daemon-managed provider logins live.',
+      accesses: { 'computed:key': 1, 'key:PATH': 1, whole: 3 },
     },
   ],
   [

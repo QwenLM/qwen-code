@@ -6,6 +6,7 @@
 
 import * as path from 'node:path';
 import * as http from 'node:http';
+import * as fsp from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import express from 'express';
@@ -508,6 +509,14 @@ describe('GET /workspace/artifact/publish-config', () => {
       env: {
         PATH: '/workspace/bin',
         NODE_OPTIONS: '--import /workspace/evil.js',
+        NETLIFY_AUTH_TOKEN: 'attacker-token',
+        NETLIFY_API_URL: 'https://attacker.example',
+        NETLIFY_SITE_ID: 'attacker-site',
+        CLOUDFLARE_API_TOKEN: 'attacker-token',
+        CLOUDFLARE_API_BASE_URL: 'https://attacker.example',
+        CF_API_BASE_URL: 'https://attacker.example',
+        VERCEL_TOKEN: 'attacker-token',
+        XDG_DATA_HOME: '/workspace/.xdg',
       },
     });
     mockSettings({
@@ -520,11 +529,9 @@ describe('GET /workspace/artifact/publish-config', () => {
       },
     });
     const runCommand: ArtifactRouteCommandRunner = vi.fn(
-      async (command, args, options) => {
+      async (command, args) => {
         expect(command).toBe(process.execPath);
         expect(args[0]).toBe(TEST_NETLIFY_ENTRY);
-        expect(options.env['PATH']).toBe(process.env['PATH']);
-        expect(options.env['NODE_OPTIONS']).toBeUndefined();
         if (args[1] === '--version') return '27.1.2';
         if (args[1] === 'api') throw new Error('not authenticated');
         throw new Error(`Unexpected command: ${args.join(' ')}`);
@@ -548,6 +555,22 @@ describe('GET /workspace/artifact/publish-config', () => {
         .mocked(runCommand)
         .mock.calls.every(([command]) => command === process.execPath),
     ).toBe(true);
+    const netlifyCalls = vi
+      .mocked(runCommand)
+      .mock.calls.filter(([, args]) => args[0] === TEST_NETLIFY_ENTRY);
+    expect(netlifyCalls.length).toBeGreaterThan(0);
+    for (const [, , options] of netlifyCalls) {
+      expect(options.env['PATH']).toBe(process.env['PATH']);
+      expect(options.env['NODE_OPTIONS']).toBeUndefined();
+      expect(options.env['NETLIFY_AUTH_TOKEN']).toBeUndefined();
+      expect(options.env['NETLIFY_API_URL']).toBeUndefined();
+      expect(options.env['NETLIFY_SITE_ID']).toBeUndefined();
+      expect(options.env['CLOUDFLARE_API_TOKEN']).toBeUndefined();
+      expect(options.env['CLOUDFLARE_API_BASE_URL']).toBeUndefined();
+      expect(options.env['CF_API_BASE_URL']).toBeUndefined();
+      expect(options.env['VERCEL_TOKEN']).toBeUndefined();
+      expect(options.env['XDG_DATA_HOME']).toBe(process.env['XDG_DATA_HOME']);
+    }
   });
 
   it('runs the JavaScript CLI entrypoint on Windows instead of .cmd shims', async () => {
@@ -815,7 +838,10 @@ describe('POST /workspace/artifact/netlify/setup', () => {
       .post('/workspace/artifact/netlify/setup')
       .send({ action: 'poll' });
 
-    expect(response.status).toBe(200);
+    expect(
+      response.status,
+      `setup returned ${JSON.stringify(response.body)}`,
+    ).toBe(200);
     expect(response.body.setup).toMatchObject({
       stage: 'ready',
       authenticated: true,
@@ -888,7 +914,10 @@ describe('POST /workspace/artifact/netlify/setup', () => {
       .post('/workspace/artifact/netlify/setup')
       .send({ action: 'prepare' });
 
-    expect(response.status).toBe(200);
+    expect(
+      response.status,
+      `setup returned ${JSON.stringify(response.body)}`,
+    ).toBe(200);
     expect(response.body.setup).toMatchObject({
       stage: 'ready',
       authenticated: true,
@@ -974,7 +1003,10 @@ describe('POST /workspace/artifact/netlify/setup', () => {
       .post('/workspace/artifact/netlify/setup')
       .send({ action: 'connect' });
 
-    expect(response.status).toBe(200);
+    expect(
+      response.status,
+      `setup returned ${JSON.stringify(response.body)}`,
+    ).toBe(200);
     expect(response.body.setup).toMatchObject({
       stage: 'ready',
       linked: true,
@@ -1174,7 +1206,10 @@ describe('POST /workspace/artifact/netlify/setup', () => {
       .post('/workspace/artifact/netlify/setup')
       .send({ action: 'connect' });
 
-    expect(response.status).toBe(200);
+    expect(
+      response.status,
+      `setup returned ${JSON.stringify(response.body)}`,
+    ).toBe(200);
     expect(response.body.setup).toMatchObject({
       stage: 'ready',
       configured: true,
@@ -1227,6 +1262,85 @@ describe('POST /workspace/artifact/netlify/setup', () => {
         .mock.calls.some(([, args]) => args[0] === 'sites:create'),
     ).toBe(false);
   });
+
+  // Self-referential symlink creation is not reliably permitted on Windows.
+  it.skipIf(process.platform === 'win32')(
+    'creates a dedicated project when the boundary probe cannot read .git',
+    async () => {
+      const workspaceCwd = await fsp.mkdtemp(
+        path.join(tmpdir(), 'qwen-art-boundary-'),
+      );
+      const settingsByWorkspace: Record<string, Record<string, unknown>> = {
+        [workspaceCwd]: {},
+      };
+      mockSettings(settingsByWorkspace);
+      await fsp.symlink(
+        path.join(workspaceCwd, '.git'),
+        path.join(workspaceCwd, '.git'),
+      );
+      try {
+        const primary = runtime('primary', workspaceCwd, { primary: true });
+        const runCommand: ArtifactRouteCommandRunner = vi.fn(
+          async (_command, args) => {
+            if (args[0] === '--version') return '27.1.2';
+            if (args[0] === 'api' && args[1] === 'getCurrentUser') {
+              return JSON.stringify({ id: 'user-id' });
+            }
+            if (args[0] === 'api' && args[1] === 'getSite') {
+              return JSON.stringify({
+                id: 'created-site',
+                name: 'Created site',
+              });
+            }
+            if (args[0] === 'status') throw new Error('not linked');
+            if (args[0] === 'sites:create') {
+              return JSON.stringify({
+                id: 'created-site',
+                name: 'Created site',
+              });
+            }
+            throw new Error(`Unexpected command: ${args.join(' ')}`);
+          },
+        );
+        const persistSettings = vi.fn(async (_workspace, writes) => {
+          const host: Record<string, unknown> = {};
+          for (const write of writes) {
+            if (write.key === 'artifact.host.uploadCommand') {
+              host['uploadCommand'] = write.value;
+            }
+            if (write.key === 'artifact.host.urlFromCommandOutput') {
+              host['urlFromCommandOutput'] = write.value;
+            }
+          }
+          settingsByWorkspace[workspaceCwd] = { host };
+        });
+        const app = express();
+        app.use(express.json());
+        registerWorkspaceArtifactPublishRoutes(app, {
+          getPrimaryRuntime: () => primary,
+          sendBridgeError,
+          mutate: allowMutations,
+          runCommand: adaptTestRunner(runCommand),
+          persistSettings,
+        });
+
+        const response = await request(app)
+          .post('/workspace/artifact/netlify/setup')
+          .send({ action: 'prepare' });
+
+        expect(
+          response.status,
+          `setup returned ${JSON.stringify(response.body)}`,
+        ).toBe(200);
+        expect(response.body.setup).toMatchObject({
+          stage: 'ready',
+          linkedSite: { id: 'created-site' },
+        });
+      } finally {
+        await fsp.rm(workspaceCwd, { recursive: true, force: true });
+      }
+    },
+  );
 });
 
 describe('multi-provider artifact setup', () => {
@@ -1893,6 +2007,37 @@ describe('POST /workspace/artifact/publish', () => {
         .mocked(readyNetlify)
         .mock.calls.some(([, args]) => args[0] === 'status'),
     ).toBe(false);
+    expect(
+      vi
+        .mocked(readyNetlify)
+        .mock.calls.some(
+          ([, args]) => args[0] === 'api' && args[1] === 'updateSite',
+        ),
+    ).toBe(false);
+    expect(response.body).toMatchObject({
+      provider: 'netlify',
+      url: 'https://preview.example.com/report',
+    });
+  });
+
+  it('strips site protection only for the managed Netlify site', async () => {
+    const readBytesWindow = windowReader(HTML);
+    const primary = runtime('primary', '/workspace', {
+      primary: true,
+      readBytesWindow,
+    });
+    mockSettings({
+      '/workspace': {
+        host: NETLIFY_HOST,
+        share: { netlify: { siteId: 'site-id' } },
+      },
+    });
+
+    const response = await request(makePrimaryApp(primary))
+      .post('/workspace/artifact/publish')
+      .send({ path: 'out/report.html', provider: 'netlify' });
+
+    expect(response.status).toBe(200);
     const updateCall = vi
       .mocked(readyNetlify)
       .mock.calls.find(
@@ -1914,10 +2059,6 @@ describe('POST /workspace/artifact/publish', () => {
     expect(mocked.hostPublish.mock.invocationCallOrder[0]).toBeLessThan(
       vi.mocked(readyNetlify).mock.invocationCallOrder[updateCallIndex]!,
     );
-    expect(response.body).toMatchObject({
-      provider: 'netlify',
-      url: 'https://preview.example.com/report',
-    });
   });
 
   it('publishes through a pinned Cloudflare Pages project', async () => {
@@ -2514,6 +2655,7 @@ describe('POST /workspace/artifact/publish', () => {
     mockSettings({
       '/workspace': {
         host: NETLIFY_HOST,
+        share: { netlify: { siteId: 'site-id' } },
       },
     });
     const protectedNetlify: ArtifactRouteCommandRunner = vi.fn(
