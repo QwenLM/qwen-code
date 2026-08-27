@@ -4,7 +4,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import * as os from 'node:os';
 import type { SimpleGit, SimpleGitFactory, SimpleGitOptions } from 'simple-git';
 import type { ExtensionInstallMetadata } from '../config/config.js';
 import type { GitCredential } from './extension-git-credentials.js';
@@ -126,7 +125,11 @@ export function createExtensionGitClient(
 
   const environment: Record<string, string> = {
     GIT_CONFIG_NOSYSTEM: '1',
-    GIT_CONFIG_GLOBAL: os.devNull,
+    // The literal '/dev/null' on every platform, NOT os.devNull: Git for
+    // Windows special-cases the POSIX spelling in its compat layer, while
+    // os.devNull's win32 value ('\\\\.\\nul') is rejected as
+    // "fatal: unable to access '\\.\nul': Invalid argument".
+    GIT_CONFIG_GLOBAL: '/dev/null',
   };
   for (const key of [
     'PATH',

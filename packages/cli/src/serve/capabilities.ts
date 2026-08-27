@@ -208,13 +208,12 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // Workspace trust policy changes rebuild the affected runtime generation
   // without restarting the daemon. V2 trust status exposes convergence.
   workspace_trust_hot_reload: { since: 'v1' },
-  // `POST /workspace/init` scaffolds an empty
-  // `QWEN.md` (or whatever `getCurrentGeminiMdFilename()` returns) at
-  // the bound workspace root. Body: `{force?: boolean}`. Default
+  // `POST /workspace/init` scaffolds an empty `QWEN.md` (or the
+  // workspace `context.fileName` value injected as `contextFilename`)
+  // at the bound workspace root. Body: `{force?: boolean}`. Default
   // refuses with 409 when the file already exists; `force: true`
-  // overwrites. Mechanical only — does NOT call the LLM. To AI-fill
-  // the file, the caller should follow up with
-  // `POST /session/:id/prompt`.
+  // overwrites. Mechanical only — does NOT call the LLM. To AI-fill the
+  // file, the caller should follow up with `POST /session/:id/prompt`.
   workspace_init: { since: 'v1' },
   // `POST /workspace/setup-github` installs the fixed
   // qwen-code-action workflow set into the bound workspace after
@@ -381,6 +380,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // `workspace_extensions` contract.
   extension_management_v2: { since: 'v1' },
   extension_git_credentials: { since: 'v1' },
+  extension_local_path_install: { since: 'v1' },
   // Workspace-qualified, daemon-local persisted transcript paging. The tag is
   // unconditional because the route also serves a trusted single-workspace
   // primary; authorization is evaluated for the selected runtime per request.

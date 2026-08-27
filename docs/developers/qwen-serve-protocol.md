@@ -214,6 +214,7 @@ registry. Clients **must** gate UI off `features`, not off `mode` (per design
  'workspace_display_name',
  'workspace_qualified_rest_core', 'workspace_qualified_voice',
  'workspace_qualified_memory', 'extension_management_v2', 'extension_git_credentials',
+ 'extension_local_path_install',
  'workspace_persisted_transcript',
  'workspace_session_export', 'workspace_archived_session_export',
  'workspace_session_live_state',
@@ -298,6 +299,8 @@ The same tag also exposes workspace-qualified project-agent CRUD at `/workspaces
 
 `extension_git_credentials` advertises authenticated HTTPS Git installs on both `POST /workspace/extensions/install` and `POST /extensions/install`. Clients must preflight this tag before sending URL userinfo or `credentialPersistence`; older daemons reject URL credentials. The tag describes backend protocol support, not the availability of a keychain: stored mode reports the selected backend in the terminal operation result.
 
+`extension_local_path_install` advertises daemon-local Extension sources on both `POST /workspace/extensions/install` and `POST /extensions/install`. The `source` must be an absolute path that exists on the daemon host. Relative paths remain unsupported so daemon process cwd cannot change source identity or shadow a GitHub `owner/repo` shorthand. The existing install operation copies the Extension into managed storage; it does not link the source. Clients must preflight this tag because older daemons reject local sources.
+
 `extension_batch_activation_v2` adds `PUT /extensions/activation` and `PUT /workspaces/:workspace/extensions/activation`. Both accept 1–100 names in `extensionNames`, deduplicate them case-insensitively while preserving first-seen order, persist changed targets in one generation, and return one `202` operation handle. A target does not need to be installed when setting `enabled` or `disabled`: its name creates a desired-state declaration that is preserved when an Extension with that name is installed. The global route accepts `state: "enabled" | "disabled"`, writes V2 `defaultActivation`, and reconciles every registered runtime. The workspace route also accepts `"inherit"`, applies or clears exact overrides for the selected trusted runtime, and reconciles only that runtime. `inherit` does not declare an unknown name; an all-unknown clear reports `updated: false` and skips reconciliation. Singular activation routes remain installed-only and id-addressed.
 
 ### Extension Management V2 wire contract
@@ -381,7 +384,7 @@ Install requires explicit consent and an initial activation:
 }
 ```
 
-For workspace-only initial activation use `{ "scope": "workspace", "workspaceId": "target-workspace-id" }`; the target must exist and be trusted. Daemon installs accept GitHub, Git, and npm sources. `ref` does not apply to npm, and `registry` applies only to npm. `ref`, `autoUpdate`, `allowPreRelease`, and `registry` are optional.
+For workspace-only initial activation use `{ "scope": "workspace", "workspaceId": "target-workspace-id" }`; the target must exist and be trusted. Daemon installs accept GitHub, Git, and npm sources. When `extension_local_path_install` is advertised, they also accept an absolute path that exists on the daemon host. `ref` does not apply to npm, `ref` and `autoUpdate` do not apply to local sources, and `registry` applies only to npm. `ref`, `autoUpdate`, `allowPreRelease`, and `registry` are optional.
 
 When `extension_git_credentials` is advertised, an HTTPS Git source may include userinfo, for example `https://username:token@git.example.com/org/repository.git`. `credentialPersistence` is valid only with such a source. It is `stored` or `one_time` and defaults to `one_time` when omitted. Stored mode saves the credential through the daemon's hybrid secret storage and keeps only the clean repository URL in install metadata, so the extension remains updatable. One-time mode saves neither the repository URL nor the credential and creates a non-updatable `snapshot`; `autoUpdate: true` is rejected for this mode. Supplying the field without URL credentials, supplying invalid credentials, or using credentials with npm, archive, local, SSH, or non-Git sources returns `400`.
 
@@ -2904,7 +2907,7 @@ Target errors use `skill_not_found`, `skill_not_toggleable`, or `skill_inactive_
 
 Capability tag: `workspace_init`. Pure file IO — no ACP roundtrip, **no LLM invocation**.
 
-Scaffold an empty `QWEN.md` (or whatever `getCurrentGeminiMdFilename()` returns under `--memory-file-name` overrides) at the daemon's primary workspace root. Mechanical only — for AI-driven content fill, follow up with `POST /session/:id/prompt`.
+Scaffold an empty `QWEN.md` (or the workspace `context.fileName` settings override) at the daemon's primary workspace root. Mechanical only — for AI-driven content fill, follow up with `POST /session/:id/prompt`.
 
 Default refuses to overwrite when the target file exists with non-whitespace content. Whitespace-only files are treated as absent (matches the local `/init` slash command).
 

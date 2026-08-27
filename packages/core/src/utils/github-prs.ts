@@ -26,7 +26,9 @@ export const GITHUB_PR_LIST_LIMIT = 30;
 const GH_PR_LIST_FIELDS =
   'number,title,url,author,headRefName,isDraft,reviewDecision,statusCheckRollup,updatedAt';
 
-export type GitHubPullRequestState = 'open' | 'draft';
+const GH_PR_LIST_FIELDS_SLIM = 'number,url,headRefName,state';
+
+export type GitHubPullRequestState = 'open' | 'draft' | 'merged' | 'closed';
 
 export type GitHubPullRequestReviewDecision =
   | 'approved'
@@ -131,6 +133,7 @@ interface GhPrListEntry {
   author?: { login?: string } | null;
   headRefName?: string;
   isDraft?: boolean;
+  state?: string;
   reviewDecision?: string | null;
   statusCheckRollup?: Array<GhCheckRun | GhStatusContext>;
   updatedAt?: string;
@@ -139,13 +142,27 @@ interface GhPrListEntry {
 function mapEntry(entry: GhPrListEntry): GitHubPullRequest | null {
   if (typeof entry.number !== 'number') return null;
   const parsed = Date.parse(entry.updatedAt ?? '');
+  // `state` is only requested by slim consumers; the panel derives open/draft
+  // from isDraft because its field set predates it.
+  let state: GitHubPullRequestState;
+  switch (entry.state?.toUpperCase()) {
+    case 'MERGED':
+      state = 'merged';
+      break;
+    case 'CLOSED':
+      state = 'closed';
+      break;
+    default:
+      state = entry.isDraft ? 'draft' : 'open';
+      break;
+  }
   return {
     number: entry.number,
     title: entry.title ?? '',
     url: entry.url ?? '',
     author: entry.author?.login ?? '',
     headRefName: entry.headRefName ?? '',
-    state: entry.isDraft ? 'draft' : 'open',
+    state,
     reviewDecision: mapReviewDecision(entry.reviewDecision),
     checks: aggregateChecks(entry.statusCheckRollup),
     updatedAt: Number.isNaN(parsed) ? 0 : Math.floor(parsed / 1000),
@@ -164,10 +181,28 @@ export function parseGhPrList(stdout: string): GitHubPullRequest[] {
     .sort((a, b) => b.updatedAt - a.updatedAt);
 }
 
+export interface FetchGitHubPullRequestsOptions {
+  /** Bound on the returned list; defaults to {@link GITHUB_PR_LIST_LIMIT}. */
+  limit?: number;
+  /** `open` (default, glanceable panel) or `all` (merged/closed heads too). */
+  state?: 'open' | 'all';
+  /**
+   * Request only number/url/headRefName. The panel's CI rollup field makes
+   * large `--state all` queries hit GitHub GraphQL server timeouts (504);
+   * branch-mapping consumers like PR backfill don't need it.
+   */
+  slim?: boolean;
+}
+
 function runGhPrList(
   gitRoot: string,
   env?: Readonly<Record<string, string | undefined>>,
+  options: FetchGitHubPullRequestsOptions = {},
 ): Promise<string> {
+  const limit = Math.min(
+    Math.max(options.limit ?? GITHUB_PR_LIST_LIMIT, 1),
+    1000,
+  );
   return new Promise((resolve, reject) => {
     execFile(
       'gh',
@@ -175,11 +210,11 @@ function runGhPrList(
         'pr',
         'list',
         '--state',
-        'open',
+        options.state ?? 'open',
         '--limit',
-        String(GITHUB_PR_LIST_LIMIT),
+        String(limit),
         '--json',
-        GH_PR_LIST_FIELDS,
+        options.slim ? GH_PR_LIST_FIELDS_SLIM : GH_PR_LIST_FIELDS,
       ],
       {
         cwd: gitRoot,
@@ -228,13 +263,14 @@ function ghErrorMessage(
 export async function fetchGitHubPullRequests(
   cwd: string,
   env?: Readonly<Record<string, string | undefined>>,
+  options?: FetchGitHubPullRequestsOptions,
 ): Promise<FetchGitHubPullRequestsResult> {
   const gitRoot = findGitRoot(cwd);
   if (!gitRoot) return { kind: 'not_a_repo' };
 
   let stdout: string;
   try {
-    stdout = await runGhPrList(gitRoot, env);
+    stdout = await runGhPrList(gitRoot, env, options);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
       return { kind: 'cli_unavailable' };

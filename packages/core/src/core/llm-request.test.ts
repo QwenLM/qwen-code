@@ -5,10 +5,15 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { partListUnionToString } from './geminiRequest.js';
+import { partListUnionToString } from './llm-request.js';
+import { partListUnionToString as legacyPartListUnionToString } from './geminiRequest.js';
 import { type Part } from '@google/genai';
 
 describe('partListUnionToString', () => {
+  it('keeps the legacy module path working during the rename window', () => {
+    expect(legacyPartListUnionToString('hello')).toBe('hello');
+  });
+
   it('should return the string value if the input is a string', () => {
     const result = partListUnionToString('hello');
     expect(result).toBe('hello');

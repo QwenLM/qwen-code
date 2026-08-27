@@ -16,4 +16,12 @@ describe('integration Vitest config', () => {
     });
     expect(integrationConfig.test?.poolOptions?.threads).toBeUndefined();
   });
+
+  it('keeps unhandled errors fatal only on Linux', () => {
+    // toBe, not toBeFalsy: a deleted flag is `undefined` and must fail
+    // this pin on every platform, including Linux where the value is false.
+    expect(integrationConfig.test?.dangerouslyIgnoreUnhandledErrors).toBe(
+      process.platform !== 'linux',
+    );
+  });
 });

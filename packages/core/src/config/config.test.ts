@@ -25,7 +25,7 @@ import { DEFAULT_MAX_TOOL_CALLS_PER_TURN } from '../services/loopDetectionServic
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { setGeminiMdFilename as mockSetGeminiMdFilename } from '../utils/memory-constants.js';
+import { setMemoryFilename as mockSetMemoryFilename } from '../utils/memory-constants.js';
 import {
   DEFAULT_TELEMETRY_TARGET,
   DEFAULT_OTLP_ENDPOINT,
@@ -290,15 +290,15 @@ vi.mock('../tools/read-many-files', () => ({
   ReadManyFilesTool: createToolMock('read_many_files'),
 }));
 vi.mock('../utils/memory-constants.js', () => ({
-  setGeminiMdFilename: vi.fn(),
-  getCurrentGeminiMdFilename: vi.fn(() => 'QWEN.md'), // Mock the original filename
-  getAllGeminiMdFilenames: vi.fn(() => ['QWEN.md', 'AGENTS.md']),
+  setMemoryFilename: vi.fn(),
+  getCurrentMemoryFilename: vi.fn(() => 'QWEN.md'), // Mock the original filename
+  getAllMemoryFilenames: vi.fn(() => ['QWEN.md', 'AGENTS.md']),
   DEFAULT_CONTEXT_FILENAME: 'QWEN.md',
 }));
 vi.mock('../tools/memory-config', () => ({
-  setGeminiMdFilename: vi.fn(),
-  getCurrentGeminiMdFilename: vi.fn(() => 'QWEN.md'),
-  getAllGeminiMdFilenames: vi.fn(() => ['QWEN.md', 'AGENTS.md']),
+  setMemoryFilename: vi.fn(),
+  getCurrentMemoryFilename: vi.fn(() => 'QWEN.md'),
+  getAllMemoryFilenames: vi.fn(() => ['QWEN.md', 'AGENTS.md']),
   DEFAULT_CONTEXT_FILENAME: 'QWEN.md',
   AGENT_CONTEXT_FILENAME: 'AGENTS.md',
   MEMORY_SECTION_HEADER: '## Qwen Added Memories',
@@ -605,6 +605,28 @@ describe('Server Config (config.ts)', () => {
 
       config.setShellExecutionConfig({ terminalWidth: 120 });
       expect(config.getShellExecutionConfig().pager).toBe('less');
+    });
+  });
+
+  describe('memory file count compatibility', () => {
+    it('keeps the legacy parameter and accessors until a future major release', () => {
+      const config = new Config({ ...baseParams, geminiMdFileCount: 2 });
+
+      expect(config.getMemoryFileCount()).toBe(2);
+      expect(config.getGeminiMdFileCount()).toBe(2);
+
+      config.setGeminiMdFileCount(3);
+      expect(config.getMemoryFileCount()).toBe(3);
+    });
+
+    it('prefers the renamed parameter when both names are present', () => {
+      const config = new Config({
+        ...baseParams,
+        geminiMdFileCount: 2,
+        memoryFileCount: 4,
+      });
+
+      expect(config.getMemoryFileCount()).toBe(4);
     });
   });
 
@@ -1655,7 +1677,9 @@ describe('Server Config (config.ts)', () => {
       });
 
       expect(child.getCwd()).toBe('/tmp/derived');
-      expect(parent.getCwd()).toBe(baseParams.targetDir);
+      // The constructor resolves targetDir, so on win32 the POSIX fixture
+      // spelling comes back drive-qualified — compare the resolved form.
+      expect(parent.getCwd()).toBe(path.resolve(baseParams.targetDir));
       expect(Object.getPrototypeOf(child)).toBe(parent);
     });
 
@@ -2495,6 +2519,28 @@ describe('Server Config (config.ts)', () => {
   });
 
   describe('startNewSession', () => {
+    it('clears loaded Skill state at the session boundary', async () => {
+      const config = new Config({ ...baseParams });
+      await config.initialize({
+        skipGeminiInitialization: true,
+        skipHooks: true,
+        skipMcpDiscovery: true,
+        skipSkillManager: true,
+        skipFileCheckpointing: true,
+      });
+      const clearLoadedSkills = vi.fn();
+      vi.spyOn(config.getToolRegistry(), 'getTool').mockImplementation(
+        (name: string) =>
+          name === ToolNames.SKILL
+            ? ({ clearLoadedSkills } as never)
+            : undefined,
+      );
+
+      config.startNewSession('replacement-session');
+
+      expect(clearLoadedSkills).toHaveBeenCalledOnce();
+    });
+
     it('records no lifecycle transition when resuming the current session id', async () => {
       const sessionId = 'same-session-id';
       const config = new Config({ ...baseParams, sessionId });
@@ -2507,12 +2553,20 @@ describe('Server Config (config.ts)', () => {
       });
       vi.mocked(logSessionEnd).mockClear();
       vi.mocked(logStartSession).mockClear();
+      const clearLoadedSkills = vi.fn();
+      vi.spyOn(config.getToolRegistry(), 'getTool').mockImplementation(
+        (name: string) =>
+          name === ToolNames.SKILL
+            ? ({ clearLoadedSkills } as never)
+            : undefined,
+      );
 
       config.startNewSession(sessionId, {
         conversation: { messages: [] },
       } as unknown as ResumedSessionData);
 
       expect(logSessionEnd).not.toHaveBeenCalled();
+      expect(clearLoadedSkills).not.toHaveBeenCalled();
       expect(logStartSession).toHaveBeenCalledWith(
         config,
         expect.anything(),
@@ -7670,19 +7724,19 @@ describe('Server Config (config.ts)', () => {
     );
   });
 
-  it('Config constructor should call setGeminiMdFilename with contextFileName if provided', () => {
+  it('Config constructor should call setMemoryFilename with contextFileName if provided', () => {
     const contextFileName = 'CUSTOM_AGENTS.md';
     const paramsWithContextFile: ConfigParameters = {
       ...baseParams,
       contextFileName,
     };
     new Config(paramsWithContextFile);
-    expect(mockSetGeminiMdFilename).toHaveBeenCalledWith(contextFileName);
+    expect(mockSetMemoryFilename).toHaveBeenCalledWith(contextFileName);
   });
 
-  it('Config constructor should not call setGeminiMdFilename if contextFileName is not provided', () => {
+  it('Config constructor should not call setMemoryFilename if contextFileName is not provided', () => {
     new Config(baseParams); // baseParams does not have contextFileName
-    expect(mockSetGeminiMdFilename).not.toHaveBeenCalled();
+    expect(mockSetMemoryFilename).not.toHaveBeenCalled();
   });
 
   it('should set default file filtering settings when not provided', () => {
