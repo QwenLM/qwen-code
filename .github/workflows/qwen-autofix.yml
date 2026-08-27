@@ -1098,6 +1098,14 @@ jobs:
           OPENAI_MODEL: '${{ vars.QWEN_AUTOFIX_MODEL || vars.QWEN_PR_REVIEW_MODEL }}'
           NO_PROXY: '127.0.0.1,localhost,::1'
           QWEN_HOME: '${{ runner.temp }}/qwen-autofix-home'
+          # 50m, the runner's former default, pinned here on purpose: the
+          # default moved to 90m for `Develop fix`, but assessment is triage
+          # (observed max 41m, p50 7m) and this job has no step-level caps,
+          # so its 180-minute cap must cover build (~6m) + assess + develop
+          # (90m) + gate + publish. Letting assess grow to 90m too would let
+          # a hung assessment push the round into the JOB cap, which cancels
+          # the always() reporters (claim withdrawal) — a silent round.
+          QWEN_TIMEOUT_MS: '3000000'
           SETTINGS_JSON: |-
             {
               "maxSessionTurns": 60,
@@ -2082,7 +2090,7 @@ jobs:
     # Keep the predicate as narrow as the job's own `if:` — concurrency is
     # evaluated BEFORE it, so without the do_review conjunct a dispatch with
     # `phase: issue` + `pr_number: N` (route emits pr_number unconditionally)
-    # would park this skipped job in that PR's shared slot behind a 330-minute
+    # would park this skipped job in that PR's shared slot behind a 345-minute
     # address round, stalling the issue phase that `needs` it.
     concurrency:
       group: "qwen-pr-head-write-${{ needs.route.outputs.do_review == 'true' && needs.route.outputs.pr_number || github.run_id }}"
@@ -2421,11 +2429,11 @@ jobs:
           # Pending-check staleness bound (invariant across candidate PRs, computed
           # once): ignore a check stuck far past any legitimate runtime. The bound
           # must sit ABOVE real check durations here — review-pr can take ~50m and
-          # a review-address JOB runs up to its 330-minute cap — so an active run
+          # a review-address JOB runs up to its 345-minute cap — so an active run
           # keeps blocking and is never aged out mid-flight (which would enqueue
-          # the PR against a live check and double-process the feedback). 360 holds
+          # the PR against a live check and double-process the feedback). 375 holds
           # a 30-minute margin over that cap.
-          PENDING_STALE_MIN=360
+          PENDING_STALE_MIN=375
           PENDING_CUTOFF="$(date -u -d "${PENDING_STALE_MIN} minutes ago" +%Y-%m-%dT%H:%M:%SZ)"
 
           # Repetition-guard cutoff for the stale-base update marker (invariant
@@ -3515,7 +3523,7 @@ jobs:
     # write+ (internal) authors at scan AND address time. That is an
     # Full rationale → qwen-autofix.md#af-038
     runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name != ''pull_request'' && github.event_name != ''pull_request_review'' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
-    timeout-minutes: 330
+    timeout-minutes: 345
     permissions:
       contents: 'read'
     strategy:
@@ -3680,7 +3688,14 @@ jobs:
           (umask 077; mkdir -p "${WORKDIR}")
           # Age-sweep abandoned run-scoped dirs on this shared /tmp: a hard
           # runner kill skips the always() teardown and run_id never repeats,
-          # so nothing else ever reclaims them.
+          # so nothing else ever reclaims them. WHEN a crashed prior round
+          # ran on THIS host, the rm above also removes its heartbeat.pid
+          # and that loop ends itself at the next identity self-check;
+          # cross-host the orphan keeps its own pid file and pulses until
+          # its age cap (accepted residual risk). No cross-run kill here,
+          # because a pid read from a WORKDIR file is an untrusted kill
+          # target (WORKDIR is sandbox-writable).
+          # Full rationale → qwen-autofix.md#af-149
           find /tmp -maxdepth 1 -name 'autofix*' -mmin +1440 -exec rm -rf {} + 2>/dev/null || true
           # The reused workspace's .git accumulates unreferenced objects
           # across fetch runs on this persistent pool; prune them.
@@ -3700,6 +3715,22 @@ jobs:
           cp .github/scripts/resolve-owning-packages.sh "${RUNNER_TEMP}/resolve-owning-packages.sh"
           cp .github/scripts/run-autofix-review-verification.sh "${RUNNER_TEMP}/run-autofix-review-verification.sh"
           cp .github/scripts/resanitize-git-config.sh "${RUNNER_TEMP}/resanitize-git-config.sh"
+          # Absent from the trusted base until this PR merges, and this step
+          # runs under -e: a hard failure here would kill every pre-merge
+          # round — same rule as the upsert capture below. `|| true`, and the
+          # digest records only when the copy exists; an empty output reaches
+          # the consumer's own empty guard, which degrades to the pre-PR
+          # inline body.
+          # Absent from base must imply absent on disk: this cp fails every
+          # pre-merge round, so a planted leftover in RUNNER_TEMP would
+          # otherwise be digested below and executed as trusted (af-149).
+          # -rf, not -f: the planted leftover can be a DIRECTORY, which rm -f
+          # cannot remove — the non-zero exit aborts this step under its
+          # ambient -eo pipefail before the tolerant cp, and nothing else
+          # reclaims RUNNER_TEMP on this persistent pool, so every later
+          # round on the host dies at staging until a human clears it.
+          rm -rf "${RUNNER_TEMP}/autofix-status-heartbeat.sh"
+          cp .github/scripts/autofix-status-heartbeat.sh "${RUNNER_TEMP}/autofix-status-heartbeat.sh" 2> /dev/null || true
           # The staged copies' trusted-base provenance holds at cp time only:
           # RUNNER_TEMP is writable by the branch/agent code later steps run
           # on this host, so record each digest in GITHUB_OUTPUT — expression
@@ -3708,6 +3739,9 @@ jobs:
           # Full rationale → qwen-autofix.md#af-111
           echo "resanitize_sha256=$(sha256sum "${RUNNER_TEMP}/resanitize-git-config.sh" | cut -d' ' -f1)" >> "${GITHUB_OUTPUT}"
           echo "verify_runner_sha256=$(sha256sum "${RUNNER_TEMP}/run-autofix-review-verification.sh" | cut -d' ' -f1)" >> "${GITHUB_OUTPUT}"
+          if [[ -f "${RUNNER_TEMP}/autofix-status-heartbeat.sh" ]]; then
+            echo "heartbeat_sha256=$(sha256sum "${RUNNER_TEMP}/autofix-status-heartbeat.sh" | cut -d' ' -f1)" >> "${GITHUB_OUTPUT}"
+          fi
           # The upsert script travels as CONTENT, not as a staged copy: it
           # runs in a clean child that reads it from this expression-context
           # output, so there is no agent-writable copy to protect and no
@@ -3772,7 +3806,7 @@ jobs:
               ;;
           esac
           # The label routing pins ecs-qwen, but a mis-labelled registration
-          # must not silently claim a PAT-bearing 330-minute job — assert the
+          # must not silently claim a PAT-bearing 345-minute job — assert the
           # pool by name on the self-hosted branch too.
           if [[ "${RUNNER_ENVIRONMENT}" == 'self-hosted' ]]; then
             case "${RUNNER_NAME}" in
@@ -4794,8 +4828,50 @@ jobs:
           GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
           EFFECTIVE_ROUND: '${{ steps.prepare.outputs.effective_round }}'
           RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
+          SERVER_URL: '${{ github.server_url }}'
+          HEARTBEAT_SHA256: '${{ steps.stage.outputs.heartbeat_sha256 }}'
+          TRUSTED_PATH: '${{ steps.stage.outputs.trusted_path }}'
         run: |-
           set -uo pipefail
+          # Binary resolution: this step and the heartbeat loop it launches
+          # carry the bot PAT, and the job's own $GITHUB_PATH append keeps
+          # ${RUNNER_TEMP}/qwen-bin ahead of /usr/bin here — pin PATH from
+          # the stage-time capture BEFORE the first command word resolves
+          # (the R6-3 doctrine the sibling PAT steps apply; the loop
+          # re-pins from the same capture). Full rationale → af-149
+          export PATH="${TRUSTED_PATH}"
+          # The gh calls in this step (deep-link lookup, comment upsert) and
+          # the heartbeat loop launched here all carry the bot PAT: take the
+          # af-112 hermetic pins BEFORE the first call — pinned host, planted
+          # tokens dropped, and a fresh empty GH_CONFIG_DIR per call instead
+          # of the default ~/.config/gh on the shared attacker-writable HOME
+          # (its config.yml http_unix_socket would deliver the Authorization
+          # header — the PAT — to a planted same-UID listener).
+          # Full rationale → qwen-autofix.md#af-112
+          export GH_HOST=github.com
+          unset GH_ENTERPRISE_TOKEN GH_TOKEN
+          # The config dir is minted PER CALL (the R11-1 shape): every gh
+          # call below rides this wrapper, minting a fresh empty dir
+          # milliseconds before the call and removing it right after. A dir
+          # minted once and reused across the step's calls is plantable —
+          # RUNNER_TEMP is same-UID-writable, and a config.yml carrying
+          # http_unix_socket written into it between calls would capture
+          # the next call's Authorization header (the PAT). Fail CLOSED:
+          # a failed mint refuses the call — gh never runs with the PAT
+          # against the shared ~/.config/gh this pin exists to close off.
+          # (The loop mints per tick the same way; finalize mints adjacent
+          # to its single call.)
+          hermetic_gh() {
+            local cfg rc
+            if ! cfg="$(mktemp -d "${RUNNER_TEMP}/autofix-gh-config.XXXXXX")"; then
+              echo "::error::autofix heartbeat: could not create hermetic gh config dir; refusing gh calls with the PAT" >&2
+              return 1
+            fi
+            GH_CONFIG_DIR="${cfg}" gh "$@"
+            rc=$?
+            rm -rf "${cfg}"
+            return "${rc}"
+          }
           MARKER='<!-- autofix-status -->'
           ROUND_DISPLAY="${EFFECTIVE_ROUND:-${ROUND}}"
           # ROUND counts rounds already DONE; every other message numbers the
@@ -4804,28 +4880,108 @@ jobs:
           if [[ "${ROUND_DISPLAY}" =~ ^[0-9]+$ ]]; then
             ROUND_DISPLAY="$((ROUND_DISPLAY + 1))"
           fi
-          BODY="$(printf '%s\n\n🔄 **AutoFix is working on this PR** — round %s/%s. [Watch live progress](%s); this round posts its report here when it finishes.\n\n<details>\n<summary>中文说明</summary>\n\n🔄 **AutoFix 正在处理此 PR** —— 第 %s/%s 轮。[查看实时进度](%s)；本轮结束后会在此发布报告。\n\n</details>' \
-            "${MARKER}" "${ROUND_DISPLAY}" "${MAX_ROUNDS}" "${RUN_URL}" \
-            "${ROUND_DISPLAY}" "${MAX_ROUNDS}" "${RUN_URL}")"
-          STATUS_ID="$(gh api "repos/${REPO}/issues/${PR}/comments" --paginate |
+          # Deep-link "Watch live progress" to THIS matrix leg's live log
+          # instead of the run page. Best-effort: any lookup failure keeps
+          # the run URL, so the link is never worse than before.
+          # Full rationale → qwen-autofix.md#af-150
+          JOB_URL="${RUN_URL}"
+          JOB_ID="$(hermetic_gh api "repos/${REPO}/actions/runs/${GITHUB_RUN_ID}/attempts/${GITHUB_RUN_ATTEMPT}/jobs" --paginate |
+            jq -rs --arg pr "${PR}" \
+              '[ .[] | .jobs[]? | select((.name // "") | startswith("review-address (\($pr),")) | .id ] | last // empty')" ||
+            JOB_ID=''
+          if [[ "${JOB_ID}" =~ ^[0-9]+$ ]]; then
+            JOB_URL="${SERVER_URL}/${REPO}/actions/runs/${GITHUB_RUN_ID}/job/${JOB_ID}"
+          fi
+          # The working-comment text lives in the heartbeat script: the
+          # initial post and every later tick render through the SAME 'body'
+          # subcommand, so they cannot drift. The working tree is PR-branch
+          # code by this point — run the staged copy, digest-verified from
+          # expression context (same doctrine as resanitize-git-config.sh).
+          # An EMPTY digest means the script was absent from the trusted
+          # base at staging (pre-merge rounds of a PR whose workflow
+          # resolves from its own ref): degrade to the pre-PR inline body
+          # and skip the heartbeat — never fail the round.
+          # Full rationale → qwen-autofix.md#af-149
+          START_EPOCH="$(date +%s)"
+          if [[ -n "${HEARTBEAT_SHA256}" ]]; then
+            /usr/bin/echo "${HEARTBEAT_SHA256}  ${RUNNER_TEMP}/autofix-status-heartbeat.sh" | /usr/bin/sha256sum -c - > /dev/null
+            BODY="$(HB_ROUND="${ROUND_DISPLAY}" HB_CAP="${MAX_ROUNDS}" HB_URL="${JOB_URL}" \
+              HB_WORKDIR="${WORKDIR}" HB_START_EPOCH="${START_EPOCH}" \
+              bash --norc "${RUNNER_TEMP}/autofix-status-heartbeat.sh" body)"
+          else
+            BODY="$(printf '%s\n\n🔄 **AutoFix is working on this PR** — round %s/%s. [Watch live progress](%s); this round posts its report here when it finishes.\n\n<details>\n<summary>中文说明</summary>\n\n🔄 **AutoFix 正在处理此 PR** —— 第 %s/%s 轮。[查看实时进度](%s)；本轮结束后会在此发布报告。\n\n</details>' \
+              "${MARKER}" "${ROUND_DISPLAY}" "${MAX_ROUNDS}" "${RUN_URL}" \
+              "${ROUND_DISPLAY}" "${MAX_ROUNDS}" "${RUN_URL}")"
+          fi
+          STATUS_ID="$(hermetic_gh api "repos/${REPO}/issues/${PR}/comments" --paginate |
             jq -rs --arg m "${MARKER}" --arg ab "${AUTOFIX_BOT}" \
               '[ .[][] | select((.user.login // "") == $ab)
                  | select((.body // "") | contains($m)) ] | last | .id // empty')" ||
             STATUS_ID=''
           if [[ -n "${STATUS_ID}" ]]; then
-            gh api --method PATCH "repos/${REPO}/issues/comments/${STATUS_ID}" \
+            hermetic_gh api --method PATCH "repos/${REPO}/issues/comments/${STATUS_ID}" \
               -f body="${BODY}" > /dev/null ||
               echo "::warning::Failed to update the autofix status comment on PR #${PR}; continuing."
           else
-            STATUS_ID="$(gh api "repos/${REPO}/issues/${PR}/comments" \
+            STATUS_ID="$(hermetic_gh api "repos/${REPO}/issues/${PR}/comments" \
               -f body="${BODY}" --jq '.id')" ||
               {
                 STATUS_ID=''
                 echo "::warning::Failed to post the autofix status comment on PR #${PR}; continuing."
               }
           fi
+          # Round heartbeat: while the agent works, a detached loop
+          # re-PATCHes this comment every ~10 min with elapsed time and
+          # last agent activity, so the PR can tell a long round from a
+          # dead one. It holds the PAT in env — a deliberate trade bounded
+          # to the sandboxed agent phase: the verification gate kills the
+          # loop BEFORE the first step that runs branch code on the host.
+          # The pid travels to the killers through EXPRESSION CONTEXT —
+          # WORKDIR is sandbox-writable, so no WORKDIR file is ever read
+          # as a kill target. Full rationale → qwen-autofix.md#af-149
+          HEARTBEAT_PID=''
+          HEARTBEAT_START_TICKS=''
+          # Re-verify immediately before THIS launch (R8-1): the check above
+          # is separated from this second, PAT-holding execution by the two
+          # gh round-trips of the comment upsert — a live swap window in the
+          # attacker-writable RUNNER_TEMP. A mismatch fails the round closed;
+          # the explicit `|| exit 1` does not rely on the step's ambient
+          # shell options (af-023).
+          if [[ -n "${STATUS_ID}" && -n "${HEARTBEAT_SHA256}" ]]; then
+            /usr/bin/echo "${HEARTBEAT_SHA256}  ${RUNNER_TEMP}/autofix-status-heartbeat.sh" | /usr/bin/sha256sum -c - > /dev/null || exit 1
+            HB_REPO="${REPO}" HB_COMMENT_ID="${STATUS_ID}" \
+            HB_ROUND="${ROUND_DISPLAY}" HB_CAP="${MAX_ROUNDS}" HB_URL="${JOB_URL}" \
+            HB_WORKDIR="${WORKDIR}" HB_START_EPOCH="${START_EPOCH}" \
+              setsid bash --norc "${RUNNER_TEMP}/autofix-status-heartbeat.sh" loop &
+            HEARTBEAT_PID=$!
+            disown 2> /dev/null || true
+            # Lifecycle pin for the killers: between this launch and
+            # the later kills the pid above can be REUSED by the
+            # runner, so every killer confirms the pid's start time
+            # (field 22 of /proc/<pid>/stat — index 19 after stripping
+            # through the LAST ')', since comm can carry spaces)
+            # against this capture before signaling. The read is
+            # /usr/bin/cat, the gate twin's shadowing doctrine:
+            # a bare cat is shadowed by a $GITHUB_ENV-planted
+            # BASH_FUNC_cat%% function, imported at bash STARTUP
+            # even under --norc, ahead of builtins and PATH, and
+            # a forged start time travels to every killer (R15-3).
+            # Full rationale → qwen-autofix.md#af-149
+            HB_STAT="$(/usr/bin/cat "/proc/${HEARTBEAT_PID}/stat" 2>/dev/null)" || HB_STAT=''
+            HB_REST="${HB_STAT##*) }"
+            HB_FIELDS=(${HB_REST})
+            HEARTBEAT_START_TICKS="${HB_FIELDS[19]:-}"
+          fi
+          # Defense in depth on the producer: the ticks come from
+          # the /proc parse above in this PAT-holding shell, and a
+          # non-numeric value must never reach $GITHUB_OUTPUT —
+          # the consumers route them through step env (the
+          # STATUS_ID shape), where the runner sets them as data.
+          [[ "${HEARTBEAT_START_TICKS}" =~ ^[0-9]+$ ]] || HEARTBEAT_START_TICKS=''
           # Hand the id to the finalize step so it does not repeat this scan.
           echo "comment_id=${STATUS_ID}" >> "${GITHUB_OUTPUT}"
+          echo "heartbeat_pid=${HEARTBEAT_PID}" >> "${GITHUB_OUTPUT}"
+          echo "heartbeat_start_ticks=${HEARTBEAT_START_TICKS}" >> "${GITHUB_OUTPUT}"
 
       - name: 'Triage and address'
         id: 'address'
@@ -4981,7 +5137,57 @@ jobs:
           # Growth-audit rounds must carry a valid growth-audit.json verdict;
           # the gate enforces presence + shape before any push decision.
           KISS_AUDIT: '${{ steps.prepare.outputs.kiss_audit }}'
+          # The heartbeat kill targets travel through step env,
+          # the STATUS_ID shape: an expression interpolation
+          # inside the run body substitutes the value BEFORE the
+          # shell parses it, so a forged step output (post_status'
+          # shell is pollutable) would arrive as shell syntax and
+          # execute in this shell; step env is set by the runner
+          # as data (R16-1).
+          HB_PID: '${{ steps.post_status.outputs.heartbeat_pid }}'
+          HB_START_TICKS: '${{ steps.post_status.outputs.heartbeat_start_ticks }}'
         run: |-
+          # The round heartbeat ends HERE: this is the first step that runs
+          # branch code ON THE HOST (the agent phase sandboxes it in
+          # docker), and the loop holds the bot PAT in its env — the
+          # overlap is bounded to the sandboxed agent phase, never the
+          # host-side gate. Kill from the pid the launch recorded in
+          # expression context; WORKDIR files are sandbox-writable and are
+          # never read as kill targets. The session kill covers a kill
+          # landing MID-TICK: each tick's `timeout 60 gh` subtree sits in
+          # its OWN process group (coreutils timeout default), which the
+          # group+pid kills miss — but the loop owns its session via
+          # setsid, so -s <pid> targets exactly this round's tree.
+          # ABSOLUTE-PATH-ONLY command words here, NOT builtin: this block
+          # runs in the gate's OUTER shell, which inherits every
+          # $GITHUB_ENV plant — a BASH_FUNC_builtin%% import shadows the
+          # `builtin` keyword itself (the R6-4 doctrine the gate body
+          # below documents). `builtin kill` is sound only inside the
+          # env -i clean child (finalize); here kill is /usr/bin/kill,
+          # the same procps already relied on for pkill.
+          # Full rationale → qwen-autofix.md#af-149
+          /usr/bin/touch "${WORKDIR}/heartbeat-stop" 2> /dev/null || true
+          # Lifecycle-confirmed shutdown: this kill can land the whole
+          # agent phase after the launch recorded HB_PID, and a pid
+          # that old can already be REUSED — TERMing it would kill an
+          # unrelated process, its group and session. Signal only
+          # after /proc/<pid>/stat still shows the start time this
+          # round's launch captured: a reused pid carries a different
+          # start time, a dead pid has no stat — a failed check means
+          # the loop is gone and killing nothing is right. The parse
+          # is syntax-only plus /usr/bin/cat, per this shell's
+          # shadowing doctrine. Full rationale → qwen-autofix.md#af-149
+          HB_FIELDS=()
+          if [[ "${HB_PID:-}" =~ ^[0-9]+$ ]]; then
+            HB_STAT="$(/usr/bin/cat "/proc/${HB_PID}/stat" 2>/dev/null)" || HB_STAT=''
+            HB_REST="${HB_STAT##*) }"
+            HB_FIELDS=(${HB_REST})
+          fi
+          if [[ "${#HB_FIELDS[@]}" -gt 19 && -n "${HB_START_TICKS}" && "${HB_FIELDS[19]}" == "${HB_START_TICKS}" ]]; then
+            /usr/bin/kill -- -"${HB_PID}" 2> /dev/null || true
+            /usr/bin/kill "${HB_PID}" 2> /dev/null || true
+            /usr/bin/pkill -TERM -s "${HB_PID}" 2> /dev/null || true
+          fi
           # The gate decides whether the PAT push runs, and the first pass
           # executes the branch's own build/test on the host before the
           # second — so verify the staged runner's digest (recorded in
@@ -5026,10 +5232,10 @@ jobs:
         # the CLI without any sandbox (#9527 review).
         if: |-
           ${{ always() && steps.verify.outputs.retryable == 'true' && steps.sandbox_image.outcome == 'success' }}
-        # 55m: the 45-minute budget below plus the same 10-minute margin the
+        # 70m: the 60-minute budget below plus the same 10-minute margin the
         # primary attempt keeps under its own backstop, so the internal kill
         # path still writes `agent-timeout` before the step cap fires.
-        timeout-minutes: 55
+        timeout-minutes: 70
         env:
           QWEN_SANDBOX_IMAGE: '${{ steps.sandbox_image.outputs.image }}'
           DOCKER_HOST: ''
@@ -5041,15 +5247,18 @@ jobs:
           OPENAI_MODEL: '${{ vars.QWEN_AUTOFIX_MODEL || vars.QWEN_PR_REVIEW_MODEL }}'
           NO_PROXY: '127.0.0.1,localhost,::1'
           QWEN_HOME: '${{ runner.temp }}/qwen-autofix-review-home'
-          # 45m. The repair attempt starts from a deterministic rejection —
+          # 60m. The repair attempt starts from a deterministic rejection —
           # an opaque check failure, not the structured review feedback the
           # primary attempt is handed — so it must re-derive which change
-          # caused it before it can amend anything. At the previous 18m it
+          # caused it before it can amend anything. At the original 18m it
           # ran out mid-diagnosis on every observed rejection while the
           # primary attempt (120m) had already succeeded, and the round's
-          # work was discarded. Still a fraction of the primary budget: a
-          # repair that cannot land in 45m is a handoff, not a longer retry.
-          QWEN_TIMEOUT_MS: '2700000'
+          # work was discarded. At 45m (2026-08-23..26) it still timed out
+          # on 48 of 87 repair passes while the 28 that landed took p50 31m
+          # / p90 41m — the successes were brushing the cap, not the
+          # failures alone. Still a fraction of the primary budget: a
+          # repair that cannot land in 60m is a handoff, not a longer retry.
+          QWEN_TIMEOUT_MS: '3600000'
           CONFLICT: '${{ steps.prepare.outputs.conflict }}'
           BASE: 'main'
           SETTINGS_JSON: |-
@@ -5379,7 +5588,7 @@ jobs:
           if git rev-parse --verify "${BRANCH}" > /dev/null 2>&1; then
             git diff "origin/main...${BRANCH}" > "${WORKDIR}/pr.diff" || true
           fi
-          for f in feedback.md address-summary.md no-action.md failure.md failure.zh.md handoff.md gate-rejection.md gate-advisories.md growth-audit.json agent-api-error agent-api-error-kind agent-timeout resolved-comments.txt comment-replies.json deferred-findings.json deferred-findings.carry.json deferred-findings.unmerged.json pr.diff; do
+          for f in feedback.md address-summary.md no-action.md failure.md failure.zh.md handoff.md gate-rejection.md gate-advisories.md growth-audit.json agent-api-error agent-api-error-kind agent-timeout resolved-comments.txt comment-replies.json deferred-findings.json deferred-findings.carry.json deferred-findings.unmerged.json pr.diff heartbeat.log; do
             if [[ -f "${WORKDIR}/${f}" ]]; then
               echo "=============== ${f} ==============="
               # Agent/reviewer-written content: both workflow-command syntaxes
@@ -5759,7 +5968,7 @@ jobs:
                       # Review-in-flight hold for the loop's OWN report-time
                       # head move (#10110): same probe pair as the scan's
                       # dispatch gate (#8888), fail-open on probe errors.
-                      # Full rationale → qwen-autofix.md#af-149
+                      # Full rationale → qwen-autofix.md#af-151
                       ROLLUP_R="$(gh pr view "${PR}" --repo "${REPO}" --json statusCheckRollup --jq '.statusCheckRollup // []' 2> /dev/null || echo '[]')"
                       REVIEW_LIVE_R="$(jq -r '
                         [ .[]
@@ -6131,6 +6340,30 @@ jobs:
         if: |-
           ${{ always() && steps.prepare.outputs.stale != 'true' && needs.route.outputs.dry_run != 'true' }}
         env:
+          # Startup-channel pins, the gate steps' doctrine: BASH_ENV is
+          # sourced by bash at process STARTUP, before the launch below,
+          # and SHELLOPTS is the sibling option-import channel — a
+          # body-side unset is one hop late, so both are pinned empty at
+          # step level, which outranks any $GITHUB_ENV plant. The LD_*
+          # family is mapped by ld.so at startup the same way. These pins
+          # protect the parent shell that executes the launch; the
+          # BASH_FUNC_<name>%% channel no env: block can enumerate — the
+          # attacker chooses the name, and bash imports the entries as
+          # functions at startup even under --norc, ahead of builtins and
+          # PATH — is closed by the env -i clean child below (R9-1), the
+          # gate's R6-4 pattern.
+          # Full rationale → qwen-autofix.md#af-149
+          BASH_ENV: ''
+          SHELLOPTS: ''
+          LD_PRELOAD: ''
+          LD_AUDIT: ''
+          LD_LIBRARY_PATH: ''
+          TRUSTED_PATH: '${{ steps.stage.outputs.trusted_path }}'
+          # HOME re-enters the clean child below: a $GITHUB_ENV-planted
+          # HOME repoints gh's config search at an attacker-writable dir
+          # (af-112's http_unix_socket exfil). Pin it from the stage-time
+          # capture, the TRUSTED_PATH doctrine above (R8-3).
+          HOME: '${{ steps.stage.outputs.trusted_home }}'
           GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
           EFFECTIVE_ROUND: '${{ steps.prepare.outputs.effective_round }}'
           OUTCOME: '${{ steps.final_verify.outputs.outcome }}'
@@ -6146,44 +6379,151 @@ jobs:
           # can kill its shell at execve, silent exit 0) — the success text
           # must not assert a report that never posted.
           PUSH_REPORTED: '${{ steps.push_report.outputs.round_reported }}'
+          # The heartbeat kill targets ride step env, the STATUS_ID
+          # shape and the gate step's doctrine (R16-1): the clean
+          # child below re-declares them from these pins exactly
+          # like STATUS_ID, so a forged output arrives as data,
+          # never as run-body shell syntax.
+          HB_PID: '${{ steps.post_status.outputs.heartbeat_pid }}'
+          HB_START_TICKS: '${{ steps.post_status.outputs.heartbeat_start_ticks }}'
         run: |-
-          set -uo pipefail
-          MARKER='<!-- autofix-status -->'
-          if [[ -z "${STATUS_ID}" ]]; then
-            echo "This round posted no status comment on PR #${PR}; nothing to finalize."
-            exit 0
-          fi
-          ROUND_DISPLAY="${EFFECTIVE_ROUND:-${ROUND}}"
-          # ROUND counts rounds already DONE; every other message numbers the
-          # round being performed (the report posts ROUND + 1). Match it, or
-          # the same round carries two different numbers in one thread.
-          if [[ "${ROUND_DISPLAY}" =~ ^[0-9]+$ ]]; then
-            ROUND_DISPLAY="$((ROUND_DISPLAY + 1))"
-          fi
-          # 'fixed'/'noop'/'handoff'/'dirty_handoff'/'committed_handoff' are
-          # the outcomes that published a round report — handoff and the two
-          # brake-violation rejections post their note + eval marker from the
-          # report step; anything else means the round stopped before
-          # publishing one. fixed/noop additionally condition on the push
-          # step's own success output: an env plant can kill that step's
-          # shell at execve (silent exit 0, gate body never ran), and the
-          # success text would otherwise assert a report that never posted.
-          PUBLISHED=true
-          if [[ "${OUTCOME:-}" == 'fixed' || "${OUTCOME:-}" == 'noop' ]] && [[ "${PUSH_REPORTED:-}" != 'true' ]]; then
-            PUBLISHED=false
-          fi
-          if [[ "${PUBLISHED}" == 'true' && ( "${OUTCOME:-}" == 'fixed' || "${OUTCOME:-}" == 'noop' || "${OUTCOME:-}" == 'handoff' || "${OUTCOME:-}" == 'dirty_handoff' || "${OUTCOME:-}" == 'committed_handoff' ) ]]; then
-            EN="$(printf '✅ **AutoFix round %s finished** — [view run](%s). See this round'"'"'s report below.' "${ROUND_DISPLAY}" "${RUN_URL}")"
-            ZH="$(printf '✅ **AutoFix 第 %s 轮已完成** —— [查看运行](%s)。本轮报告见下方。' "${ROUND_DISPLAY}" "${RUN_URL}")"
-          else
-            EN="$(printf '⚠️ **AutoFix round %s ended without publishing a report** — [view run](%s).' "${ROUND_DISPLAY}" "${RUN_URL}")"
-            ZH="$(printf '⚠️ **AutoFix 第 %s 轮结束但未发布报告** —— [查看运行](%s)。' "${ROUND_DISPLAY}" "${RUN_URL}")"
-          fi
-          BODY="$(printf '%s\n\n%s\n\n<details>\n<summary>中文说明</summary>\n\n%s\n\n</details>' \
-            "${MARKER}" "${EN}" "${ZH}")"
-          gh api --method PATCH "repos/${REPO}/issues/comments/${STATUS_ID}" \
-            -f body="${BODY}" > /dev/null ||
-            echo "::warning::Failed to finalize the autofix status comment on PR #${PR}; continuing."
+          # This step holds the PAT, and its shell inherits every
+          # $GITHUB_ENV plant earlier steps left — including
+          # BASH_FUNC_<name>%% imports, which bash loads as functions at
+          # STARTUP even under --norc, ahead of builtins and PATH, under
+          # attacker-chosen names no step-level pin can enumerate
+          # (probe-verified: plants shadowing set/export/builtin/gh each
+          # hijacked this step's former inline body). Close the class,
+          # not the enumeration: the whole PAT-touching body runs in the
+          # gate's env -i clean-child form, re-declaring only what it
+          # needs from the step-level pins above and expression context.
+          # PATH reaches the child through the allowlist, so the body
+          # carries no in-shell pin of its own; inside the clean child
+          # no import survives, so bare and builtin words resolve
+          # soundly again. The kill target travels through expression
+          # context — a pid read from a WORKDIR file would be an
+          # untrusted kill target (WORKDIR is sandbox-writable).
+          # Full rationale → qwen-autofix.md#af-149
+          LD_PRELOAD= LD_AUDIT= LD_LIBRARY_PATH= \
+            /usr/bin/env -i \
+            PATH="${TRUSTED_PATH}" \
+            HOME="${HOME}" \
+            GITHUB_TOKEN="${GITHUB_TOKEN}" \
+            GH_HOST=github.com \
+            RUNNER_TEMP="${RUNNER_TEMP}" \
+            WORKDIR="${WORKDIR}" \
+            HB_PID="${HB_PID}" \
+            HB_START_TICKS="${HB_START_TICKS}" \
+            STATUS_ID="${STATUS_ID}" \
+            PUSH_REPORTED="${PUSH_REPORTED}" \
+            OUTCOME="${OUTCOME}" \
+            EFFECTIVE_ROUND="${EFFECTIVE_ROUND}" \
+            ROUND="${ROUND}" \
+            RUN_URL="${RUN_URL}" \
+            REPO="${REPO}" \
+            PR="${PR}" \
+            bash --norc -c '
+              set -uo pipefail
+              # Stop the round heartbeat BEFORE flipping this comment
+              # to its terminal text, and DRAIN it first: killing the
+              # client cannot cancel a PATCH the server already
+              # ACCEPTED, so the terminal PATCH must wait the last
+              # in-flight tick request out (the stamp drain below).
+              # The kill is lifecycle-confirmed: the gate killed this
+              # loop long before this step, and by now the pid
+              # recorded at launch can be REUSED — TERMing it would
+              # kill an unrelated process, its group and session. A
+              # failed check means the loop is already gone, so
+              # killing nothing is right; the stop marker ends it on
+              # its next self-check even if the kills miss.
+              # Full rationale → qwen-autofix.md#af-149
+              /usr/bin/touch "${WORKDIR}/heartbeat-stop" 2> /dev/null || true
+              HB_FIELDS=()
+              if [[ "${HB_PID:-}" =~ ^[0-9]+$ ]]; then
+                HB_STAT="$(cat "/proc/${HB_PID}/stat" 2>/dev/null)" || HB_STAT=''
+                HB_REST="${HB_STAT##*) }"
+                HB_FIELDS=(${HB_REST})
+              fi
+              if [[ "${#HB_FIELDS[@]}" -gt 19 && -n "${HB_START_TICKS:-}" && "${HB_FIELDS[19]}" == "${HB_START_TICKS}" ]]; then
+                builtin kill -- -"${HB_PID}" 2>/dev/null || true
+                builtin kill "${HB_PID}" 2>/dev/null || true
+                /usr/bin/pkill -TERM -s "${HB_PID}" 2>/dev/null || true
+              fi
+              # Drain the last in-flight tick before the terminal
+              # PATCH: each tick stamps its start epoch around its gh
+              # call (bounded to 60s), so a stamp older than 65s
+              # proves its request committed or died, and no stamp
+              # means nothing is in flight. The loop is dead by here,
+              # so no new stamp can appear. The read is bounded in
+              # time AND bytes (a planted FIFO must not stall this
+              # step, and a symlink to an endless non-NUL target —
+              # /dev/urandom or a fed FIFO — would otherwise stream
+              # into the substitution buffer GB-scale and kill this
+              # clean child before the terminal PATCH, R17-3); a
+              # valid stamp is ≤ ~20 bytes, so 64 covers it. A
+              # planted fresh stamp costs at most the 65s bound, a
+              # planted deletion reopens only the cosmetic overwrite.
+              DRAIN_END=$(( $(date +%s) + 65 ))
+              while :; do
+                NOW_S="$(date +%s)"
+                (( NOW_S >= DRAIN_END )) && break
+                STAMP="$(timeout 5 head -c 64 -- "${WORKDIR}/heartbeat-tick-inflight" 2> /dev/null)" || STAMP=''
+                [[ "${STAMP}" =~ ^[0-9]+$ ]] || break
+                (( STAMP + 65 <= NOW_S )) && break
+                sleep 1
+              done
+              # Hermetic gh config, the upsert twin'"'"'s shape: pinning
+              # HOME'"'"'s PATH does not sanitize its CONTENTS, which the
+              # gate-phase host-side branch code (same UID) can write
+              # before finalize — a planted http_unix_socket would capture
+              # the PATCH'"'"'s Authorization header. Fail closed (the
+              # post_status R8-1 shape): refuse the finalize PATCH rather
+              # than run gh with the PAT against an untrusted config.
+              if ! GH_CONFIG_DIR="$(mktemp -d "${RUNNER_TEMP}/autofix-gh-config.XXXXXX")"; then
+                echo "::error::autofix finalize: could not create hermetic gh config dir; refusing the finalize PATCH with the PAT"
+                exit 1
+              fi
+              export GH_CONFIG_DIR
+              MARKER="<!-- autofix-status -->"
+              if [[ -z "${STATUS_ID}" ]]; then
+                echo "This round posted no status comment on PR #${PR}; nothing to finalize."
+                exit 0
+              fi
+              ROUND_DISPLAY="${EFFECTIVE_ROUND:-${ROUND}}"
+              # ROUND counts rounds already DONE; every other message
+              # numbers the round being performed (the report posts
+              # ROUND + 1). Match it, or the same round carries two
+              # different numbers in one thread.
+              if [[ "${ROUND_DISPLAY}" =~ ^[0-9]+$ ]]; then
+                ROUND_DISPLAY="$((ROUND_DISPLAY + 1))"
+              fi
+              # "fixed"/"noop"/"handoff"/"dirty_handoff"/
+              # "committed_handoff" are the outcomes that published a
+              # round report — handoff and the two brake-violation
+              # rejections post their note + eval marker from the report
+              # step; anything else means the round stopped before
+              # publishing one. fixed/noop additionally condition on the
+              # success output of the push step: an env plant can kill
+              # that shell at execve (silent exit 0, gate body never
+              # ran), and the success text would otherwise assert a
+              # report that never posted.
+              PUBLISHED=true
+              if [[ "${OUTCOME:-}" == "fixed" || "${OUTCOME:-}" == "noop" ]] && [[ "${PUSH_REPORTED:-}" != "true" ]]; then
+                PUBLISHED=false
+              fi
+              if [[ "${PUBLISHED}" == "true" && ( "${OUTCOME:-}" == "fixed" || "${OUTCOME:-}" == "noop" || "${OUTCOME:-}" == "handoff" || "${OUTCOME:-}" == "dirty_handoff" || "${OUTCOME:-}" == "committed_handoff" ) ]]; then
+                EN="$(printf "✅ **AutoFix round %s finished** — [view run](%s). See this round'"'"'s report below." "${ROUND_DISPLAY}" "${RUN_URL}")"
+                ZH="$(printf "✅ **AutoFix 第 %s 轮已完成** —— [查看运行](%s)。本轮报告见下方。" "${ROUND_DISPLAY}" "${RUN_URL}")"
+              else
+                EN="$(printf "⚠️ **AutoFix round %s ended without publishing a report** — [view run](%s)." "${ROUND_DISPLAY}" "${RUN_URL}")"
+                ZH="$(printf "⚠️ **AutoFix 第 %s 轮结束但未发布报告** —— [查看运行](%s)。" "${ROUND_DISPLAY}" "${RUN_URL}")"
+              fi
+              BODY="$(printf "%s\n\n%s\n\n<details>\n<summary>中文说明</summary>\n\n%s\n\n</details>" \
+                "${MARKER}" "${EN}" "${ZH}")"
+              gh api --method PATCH "repos/${REPO}/issues/comments/${STATUS_ID}" \
+                -f body="${BODY}" > /dev/null ||
+                echo "::warning::Failed to finalize the autofix status comment on PR #${PR}; continuing."
+            '
 
       # Nothing else removes the per-target WORKDIR; PR numbers only
       # increase, so on the persistent pool every addressed PR would leave
@@ -6194,4 +6534,40 @@ jobs:
       # autofix workspace if that PR is never addressed again.
       - name: 'Clean up autofix workdir'
         if: 'always()'
-        run: 'rm -rf "${WORKDIR}"'
+        env:
+          # The heartbeat kill targets ride step env, the STATUS_ID
+          # shape and the gate step's doctrine (R16-1): the runner
+          # sets them as data, never as run-body shell syntax.
+          HB_PID: '${{ steps.post_status.outputs.heartbeat_pid }}'
+          HB_START_TICKS: '${{ steps.post_status.outputs.heartbeat_start_ticks }}'
+        run: |-
+          # Last heartbeat kill (the gate and finalize already did this on
+          # their paths) from the expression-context pid — never from a
+          # WORKDIR file, which is sandbox-writable. Lifecycle-confirmed
+          # like its twins and stalest of all: signal only a pid whose
+          # /proc/<pid>/stat start time still matches the launch
+          # capture, kill nothing otherwise. The session kill covers
+          # the mid-tick subtree, same as its twins.
+          # ABSOLUTE-PATH-ONLY command words, the gate twin's form:
+          # this block runs in the step's OUTER shell, which inherits
+          # every $GITHUB_ENV plant earlier steps left — a
+          # BASH_FUNC_cat%% import shadows cat at bash startup and
+          # forges the stat line (the matching start time sits in
+          # this step's own env), passing the lifecycle check on a
+          # REUSED pid so the real kill TERMs an unrelated process,
+          # its group and session; a planted kill or PATH-planted
+          # pkill no-ops the delivery instead, leaving the loop
+          # holding the PAT alive to its age cap (R17-4).
+          # Full rationale → qwen-autofix.md#af-149
+          HB_FIELDS=()
+          if [[ "${HB_PID:-}" =~ ^[0-9]+$ ]]; then
+            HB_STAT="$(/usr/bin/cat "/proc/${HB_PID}/stat" 2>/dev/null)" || HB_STAT=''
+            HB_REST="${HB_STAT##*) }"
+            HB_FIELDS=(${HB_REST})
+          fi
+          if [[ "${#HB_FIELDS[@]}" -gt 19 && -n "${HB_START_TICKS}" && "${HB_FIELDS[19]}" == "${HB_START_TICKS}" ]]; then
+            /usr/bin/kill -- -"${HB_PID}" 2> /dev/null || true
+            /usr/bin/kill "${HB_PID}" 2> /dev/null || true
+            /usr/bin/pkill -TERM -s "${HB_PID}" 2> /dev/null || true
+          fi
+          rm -rf "${WORKDIR}"

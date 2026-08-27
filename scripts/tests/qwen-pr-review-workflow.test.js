@@ -258,6 +258,11 @@ function runScenario(
           // by the shape tests; a replay arms it only by armWatcher opt-in,
           // with the stub environment above.
           AUTO_REVIEW: armWatcher ? 'true' : 'false',
+          // The step initializes PROXY_BIN before the retry loop and the
+          // agent invocation's decoy GITHUB_PATH/GITHUB_ENV wiring expands
+          // it; the extraction starts at OUTCOME='', past the init, so the
+          // harness must supply it (set -u would otherwise abort the loop).
+          PROXY_BIN: join(dir, 'proxy-bin'),
         },
       });
     } catch (e) {

@@ -231,10 +231,9 @@ beat the doc.
   `--no-ignore`: it surfaces `.qwen/tmp/` scratch copies of this repo, the
   same phantom-consumer class as `.claude/worktrees/` — **never name that
   one**, every hit there is a phantom consumer.
-- `packages/desktop` and `packages/desktop-shell` are negated out of the root
-  `workspaces` list but are still shipped code; `packages/mobile-mcp` and
-  `packages/cua-driver` are vendored. None is a target; all four are
-  consumers.
+- `packages/desktop-shell` is negated out of the root `workspaces` list but
+  is still shipped code; `packages/mobile-mcp` and `packages/cua-driver` are
+  vendored. None is a target; all three are consumers.
 - Then classify every hit: production / test / snapshot / docs / lint
   scaffolding. "No consumer" means no production consumer **and** a named,
   deliberate answer for each of the others.
