@@ -162,13 +162,33 @@ describe('loadConfig', () => {
       });
     });
 
-    it('rejects missing required and unused scope values for a preset', async () => {
+    // Each rule is violated on its own. A fixture that breaks both at once
+    // passes even when one of the two branches is deleted, so the branches
+    // are pinned separately and by the key each one names.
+    it('rejects a scope missing a key the preset requires', async () => {
+      const fixture = await createFixture();
+      await writeConfig(fixture, {
+        version: 1,
+        provider: { ...provider, scope: { agentId: 'qwen-code' } },
+      });
+
+      await expect(
+        loadConfig({
+          QWEN_EXTERNAL_CONTEXT_CONFIG: fixture.config,
+          MEM0_API_KEY: 'secret-value',
+        }),
+      ).rejects.toThrow(
+        'preset "aliyun-polardb-mysql-2026-08" requires "userId"',
+      );
+    });
+
+    it('rejects a scope carrying a key the preset does not use', async () => {
       const fixture = await createFixture();
       await writeConfig(fixture, {
         version: 1,
         provider: {
           ...provider,
-          scope: { appId: 'unused-app' },
+          scope: { userId: 'fixed-user', appId: 'unused-app' },
         },
       });
 
@@ -177,7 +197,9 @@ describe('loadConfig', () => {
           QWEN_EXTERNAL_CONTEXT_CONFIG: fixture.config,
           MEM0_API_KEY: 'secret-value',
         }),
-      ).rejects.toThrow('External context Mem0 scope is invalid.');
+      ).rejects.toThrow(
+        'preset "aliyun-polardb-mysql-2026-08" does not use "appId"',
+      );
     });
 
     it('requires only appId for the Platform V3 preset', async () => {

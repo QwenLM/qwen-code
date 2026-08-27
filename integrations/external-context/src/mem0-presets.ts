@@ -6,12 +6,28 @@
 
 import type { Mem0CompatibleProviderConfig, Mem0PresetId } from './types.js';
 
-export type Mem0Authentication =
-  | 'authorization-token'
-  | 'authorization-bearer'
-  | 'x-api-key';
+// Every member of these unions is exercised by a shipped preset and pinned by
+// a contract test. Widen one only together with the preset that needs it, so
+// no reviewed wire contract is described by an untested branch.
+export type Mem0Authentication = 'authorization-token' | 'x-api-key';
 
-export type Mem0ScopePlacement = 'body' | 'filters' | 'omit';
+/**
+ * Where a fixed scope selector is placed in a request body.
+ *
+ * `body-and-filters` writes the same key and value in both positions. It is
+ * not a fallback or a probe: it is one fixed request that older and newer
+ * builds of the same upstream both read as the identical scope. The Mem0
+ * server moved session identity from the request root into `filters`, and
+ * both shapes resolve through `_build_filters_and_metadata`, which seeds the
+ * effective filters from `filters` and then overwrites each identity key with
+ * the root value. Same key, same value, so the resolved scope is byte-equal
+ * either way, and neither build silently searches an unscoped corpus.
+ */
+export type Mem0ScopePlacement =
+  | 'body'
+  | 'filters'
+  | 'body-and-filters'
+  | 'omit';
 
 interface Mem0ScopeRule {
   required: boolean;
@@ -28,10 +44,10 @@ export interface Mem0Preset {
   };
   search: {
     path: string;
-    limitField: 'top_k' | 'limit';
+    limitField: 'top_k';
     fixedBody?: Readonly<Record<string, number | boolean>>;
-    idField: 'id' | 'memory_id';
-    contentFields: ReadonlyArray<'memory' | 'content' | 'text'>;
+    idField: 'id';
+    contentFields: ReadonlyArray<'memory' | 'content'>;
   };
   write?:
     | {
@@ -41,7 +57,7 @@ export interface Mem0Preset {
     | {
         path: string;
         response: 'results-id';
-        idField: 'id' | 'memory_id';
+        idField: 'id';
       };
 }
 
@@ -71,11 +87,11 @@ export const MEM0_PRESETS: Readonly<Record<Mem0PresetId, Mem0Preset>> = {
       response: 'async-status',
     },
   },
-  'mem0-oss-rest-2026-08': {
+  'mem0-server-rest-2026-08': {
     authentication: 'x-api-key',
     scope: {
-      userId: { required: true, search: 'filters', write: 'body' },
-      agentId: { required: false, search: 'filters', write: 'body' },
+      userId: { required: true, search: 'body-and-filters', write: 'body' },
+      agentId: { required: false, search: 'body-and-filters', write: 'body' },
       appId: omittedScope,
     },
     search: {
@@ -115,19 +131,55 @@ export function getMem0Preset(id: Mem0PresetId): Mem0Preset {
   return MEM0_PRESETS[id];
 }
 
-export function isValidMem0Scope(
+export type Mem0ScopeKey = 'userId' | 'agentId' | 'appId';
+
+export const MEM0_SCOPE_KEYS: readonly Mem0ScopeKey[] = [
+  'userId',
+  'agentId',
+  'appId',
+];
+
+export interface Mem0ScopeViolation {
+  key: Mem0ScopeKey;
+  reason: 'missing' | 'unused';
+}
+
+/**
+ * Returns the first scope key that breaks the selected preset's rules, or
+ * `undefined` when the fixed scope is valid. The offending key and reason are
+ * reported rather than a bare boolean because the rules are preset-dependent
+ * and an administrator editing a local file cannot otherwise tell which of
+ * three keys the preset rejected.
+ */
+export function findInvalidMem0Scope(
   config: Pick<Mem0CompatibleProviderConfig, 'preset' | 'scope'>,
-): boolean {
+): Mem0ScopeViolation | undefined {
   const rules = getMem0Preset(config.preset).scope;
-  return (['userId', 'agentId', 'appId'] as const).every((key) => {
+  for (const key of MEM0_SCOPE_KEYS) {
     const rule = rules[key];
     const value = config.scope[key];
     if (rule.required) {
-      return value !== undefined;
+      if (value === undefined) {
+        return { key, reason: 'missing' };
+      }
+      continue;
     }
-    if (rule.search === 'omit' && rule.write === 'omit') {
-      return value === undefined;
+    if (
+      rule.search === 'omit' &&
+      rule.write === 'omit' &&
+      value !== undefined
+    ) {
+      return { key, reason: 'unused' };
     }
-    return true;
-  });
+  }
+  return undefined;
+}
+
+export function mem0ScopeViolationMessage(
+  preset: Mem0PresetId,
+  violation: Mem0ScopeViolation,
+): string {
+  return violation.reason === 'missing'
+    ? `External context Mem0 scope is invalid: preset "${preset}" requires "${violation.key}".`
+    : `External context Mem0 scope is invalid: preset "${preset}" does not use "${violation.key}", so it must be omitted.`;
 }

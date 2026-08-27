@@ -11,8 +11,9 @@ import {
   validateProviderBaseUrl,
 } from './http-client.js';
 import {
+  findInvalidMem0Scope,
   getMem0Preset,
-  isValidMem0Scope,
+  mem0ScopeViolationMessage,
   type Mem0Preset,
   type Mem0ScopePlacement,
 } from './mem0-presets.js';
@@ -206,8 +207,11 @@ export class Mem0CompatibleAdapter
   private readonly preset: Mem0Preset;
 
   constructor(private readonly config: Mem0CompatibleProviderConfig) {
-    if (!isValidMem0Scope(config)) {
-      throw new ConfigurationError('External context Mem0 scope is invalid.');
+    const violation = findInvalidMem0Scope(config);
+    if (violation !== undefined) {
+      throw new ConfigurationError(
+        mem0ScopeViolationMessage(config.preset, violation),
+      );
     }
     this.preset = getMem0Preset(config.preset);
     this.origin = validateConfiguredBaseUrl(config.endpoint.origin, {
@@ -276,7 +280,7 @@ export class Mem0CompatibleAdapter
     }
     return write.response === 'async-status'
       ? parseMem0RememberResult(response)
-      : parseDirectWriteResult(response, write.idField);
+      : parseDirectWriteResult(response, write.idField, input.content);
   }
 
   private buildUrl(path: string): URL {
@@ -289,7 +293,8 @@ export class Mem0CompatibleAdapter
 
 function parseDirectWriteResult(
   response: unknown,
-  idField: 'id' | 'memory_id',
+  idField: 'id',
+  content: string,
 ): RememberResult {
   if (!isRecord(response) || !Array.isArray(response['results'])) {
     return { status: 'unknown' };
@@ -297,6 +302,9 @@ function parseDirectWriteResult(
   for (const item of response['results']) {
     if (!isRecord(item)) {
       continue;
+    }
+    if (!isExactDirectImport(item, content)) {
+      return { status: 'unknown' };
     }
     const id = parseOperationId(item[idField]);
     if (id !== undefined) {
@@ -306,6 +314,38 @@ function parseDirectWriteResult(
   return { status: 'unknown' };
 }
 
+/**
+ * Decides whether one returned result is evidence that the confirmed text was
+ * stored verbatim.
+ *
+ * `infer: false` is what makes `context_remember` store the exact text the
+ * user approved in the confirmation Hook, but it is an ordinary request field:
+ * a deployment whose request model predates it drops it silently and runs LLM
+ * fact extraction instead, then returns a rewritten memory plus a perfectly
+ * valid identifier. Reporting `stored` there would tell the user that the text
+ * they read is what landed, when it is not. The echoed `memory` is the only
+ * client-side evidence available, and it does not depend on knowing which
+ * build is deployed - which matters because the endpoint is operator-supplied
+ * and its version is not guaranteed.
+ *
+ * Inference can also retire a contradicting memory, so a `DELETE` event is
+ * never storage of this content.
+ *
+ * A result that echoes no `memory` at all is left to the identifier, so a
+ * preset whose upstream simply does not return the field keeps its existing
+ * behaviour rather than degrading to `unknown`.
+ */
+function isExactDirectImport(
+  item: Record<string, unknown>,
+  content: string,
+): boolean {
+  const memory = item['memory'];
+  if (typeof memory === 'string' && memory !== content) {
+    return false;
+  }
+  return item['event'] !== 'DELETE';
+}
+
 function mem0CredentialHeader(
   preset: Mem0Preset,
   credential: string,
@@ -313,8 +353,6 @@ function mem0CredentialHeader(
   switch (preset.authentication) {
     case 'authorization-token':
       return { name: 'authorization', value: `Token ${credential}` };
-    case 'authorization-bearer':
-      return { name: 'authorization', value: `Bearer ${credential}` };
     case 'x-api-key':
       return { name: 'x-api-key', value: credential };
     // no default
@@ -348,33 +386,75 @@ function placeMem0Scope(
   if (placement === 'omit' || value === undefined) {
     return;
   }
-  if (placement === 'body') {
+  if (placement === 'body' || placement === 'body-and-filters') {
     body[field] = value;
-    return;
   }
-  const filters = (body['filters'] ??= {}) as Record<string, unknown>;
-  filters[field] = value;
+  if (placement === 'filters' || placement === 'body-and-filters') {
+    const filters = (body['filters'] ??= {}) as Record<string, unknown>;
+    filters[field] = value;
+  }
 }
+
+// Each rule names the shape it rejects so an administrator editing a local
+// file is told which character to remove, instead of retrying a single opaque
+// message against nine independent conditions.
+const MEM0_BASE_PATH_RULES: ReadonlyArray<{
+  reason: string;
+  rejects: (value: string) => boolean;
+}> = [
+  {
+    reason: 'it must start with "/"',
+    rejects: (value) => !value.startsWith('/'),
+  },
+  {
+    reason: 'it must not contain an empty segment ("//")',
+    rejects: (value) => value.includes('//'),
+  },
+  {
+    reason: 'it must not contain a query ("?")',
+    rejects: (value) => value.includes('?'),
+  },
+  {
+    reason: 'it must not contain a fragment ("#")',
+    rejects: (value) => value.includes('#'),
+  },
+  {
+    reason: 'it must not contain a backslash',
+    rejects: (value) => value.includes('\\'),
+  },
+  {
+    reason: 'it must not contain percent-encoded material ("%")',
+    rejects: (value) => value.includes('%'),
+  },
+  {
+    reason: 'it must not contain whitespace',
+    rejects: (value) => /\s/u.test(value),
+  },
+  {
+    reason: 'it must not contain control characters',
+    rejects: (value) =>
+      Array.from(value).some((character) => {
+        const code = character.codePointAt(0) ?? 0;
+        return code <= 0x1f || code === 0x7f;
+      }),
+  },
+  {
+    reason: 'it must not contain a "." or ".." segment',
+    rejects: (value) =>
+      value.split('/').some((segment) => segment === '.' || segment === '..'),
+  },
+];
 
 function validateMem0BasePath(value: string): void {
   if (value === '') {
     return;
   }
-  if (
-    !value.startsWith('/') ||
-    value.includes('//') ||
-    value.includes('?') ||
-    value.includes('#') ||
-    value.includes('\\') ||
-    value.includes('%') ||
-    /\s/u.test(value) ||
-    Array.from(value).some((character) => {
-      const code = character.codePointAt(0) ?? 0;
-      return code <= 0x1f || code === 0x7f;
-    }) ||
-    value.split('/').some((segment) => segment === '.' || segment === '..')
-  ) {
-    throw new ConfigurationError('External context Mem0 base path is invalid.');
+  for (const rule of MEM0_BASE_PATH_RULES) {
+    if (rule.rejects(value)) {
+      throw new ConfigurationError(
+        `External context Mem0 endpoint basePath is invalid: ${rule.reason}.`,
+      );
+    }
   }
 }
 

@@ -405,16 +405,29 @@ The built-in presets are:
 
 - `mem0-platform-v3`: `/v3` Platform API, `Authorization: Token`, fixed
   `appId`.
-- `mem0-oss-rest-2026-08`: stock self-hosted Mem0 `/search` and `/memories`,
-  `X-API-Key`, fixed `userId`, and optional `agentId`.
+- `mem0-server-rest-2026-08`: the stock self-hosted Mem0 REST server
+  (`server/` in `mem0ai/mem0`) `/search` and `/memories`, `X-API-Key`, fixed
+  `userId`, and optional `agentId`. "Server", not "OSS", because that
+  abbreviation names an object storage service in some clouds.
 - `aliyun-polardb-mysql-2026-08`: PolarDB `/v2/memories/search` and
   `/v1/memories`, `Authorization: Token`, fixed `userId`, and optional
   `agentId`.
 
 The preset records the whole protocol, not just one API version. Search always
 sends a maximum of five through the preset's `top_k` field. The engine does not
-probe versions or fall back to a different preset. See
-`examples/polardb-mem0.json`, `examples/mem0-oss.json`, and the
+probe versions or fall back to a different preset.
+
+The preset is a claim about the build you deployed, and these services are
+self-hosted or vendor-packaged, so that claim can be wrong. Nothing detects it
+for you, but three things keep a mismatch from passing silently: identity is
+sent in every position a known build reads it from, so a search never quietly
+runs against an unscoped corpus; `context_remember` reports `stored` only when
+the response echoes back the exact approved text, so a server that ignored
+`infer: false` and rewrote the content reports `unknown` instead; and every
+provider failure is written to the MCP server's stderr with its HTTP status,
+which is what distinguishes a contract mismatch from an outage. Check that
+stderr first when search fails right after a new endpoint is configured. See
+`examples/polardb-mem0.json`, `examples/mem0-server.json`, and the
 [preset design](../../docs/design/direct-external-context-mem0-presets.md).
 
 Non-loopback plain HTTP remains an explicit `allowInsecureHttp` endpoint

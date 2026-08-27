@@ -633,7 +633,9 @@ describe('Mem0CompatibleAdapter', () => {
             basePath: '/../other',
           },
         }),
-    ).toThrow('External context Mem0 base path is invalid.');
+    ).toThrow(
+      'External context Mem0 endpoint basePath is invalid: it must not contain a "." or ".." segment.',
+    );
     expect(
       () =>
         new Mem0CompatibleAdapter({
@@ -643,7 +645,9 @@ describe('Mem0CompatibleAdapter', () => {
             basePath: '/memory service',
           },
         }),
-    ).toThrow('External context Mem0 base path is invalid.');
+    ).toThrow(
+      'External context Mem0 endpoint basePath is invalid: it must not contain whitespace.',
+    );
     expect(
       () =>
         new Mem0CompatibleAdapter({
@@ -660,7 +664,99 @@ describe('Mem0CompatibleAdapter', () => {
           ...config,
           scope: { appId: 'unused' },
         }),
-    ).toThrow('External context Mem0 scope is invalid.');
+    ).toThrow('preset "aliyun-polardb-mysql-2026-08" requires "userId"');
+  });
+
+  // Every rejection rule, one violation each. The suite previously exercised
+  // two of the nine, so deleting any of the other seven - including the "%"
+  // rule, without which "/%2e%2e/secret" survives the "." segment check and is
+  // forwarded percent-encoded for a decoding reverse proxy to traverse - left
+  // the whole suite green.
+  it.each([
+    { basePath: 'proxy', reason: 'it must start with "/"' },
+    {
+      basePath: '/proxy//inner',
+      reason: 'it must not contain an empty segment ("//")',
+    },
+    { basePath: '/proxy?a=1', reason: 'it must not contain a query ("?")' },
+    { basePath: '/proxy#a', reason: 'it must not contain a fragment ("#")' },
+    { basePath: '/proxy\\inner', reason: 'it must not contain a backslash' },
+    {
+      basePath: '/%2e%2e/secret',
+      reason: 'it must not contain percent-encoded material ("%")',
+    },
+    { basePath: '/proxy inner', reason: 'it must not contain whitespace' },
+    {
+      basePath: '/proxy\u0007inner',
+      reason: 'it must not contain control characters',
+    },
+    {
+      basePath: '/proxy/../secret',
+      reason: 'it must not contain a "." or ".." segment',
+    },
+  ])('rejects the basePath $basePath', ({ basePath, reason }) => {
+    expect(
+      () =>
+        new Mem0CompatibleAdapter(
+          mem0CompatibleConfig(
+            'https://mem0.example.com',
+            'aliyun-polardb-mysql-2026-08',
+            { userId: 'fixed-user' },
+            basePath,
+          ),
+        ),
+    ).toThrow(`External context Mem0 endpoint basePath is invalid: ${reason}.`);
+  });
+
+  it('joins a trailing-slash basePath without doubling the separator', async () => {
+    let requestPath: string | undefined;
+    const origin = await startServer((request, response) => {
+      requestPath = request.url;
+      json(response, { results: [] });
+    });
+
+    await new Mem0CompatibleAdapter(
+      mem0CompatibleConfig(
+        origin,
+        'aliyun-polardb-mysql-2026-08',
+        { userId: 'fixed-user' },
+        '/proxy/',
+      ),
+    ).search({
+      query: 'deployment',
+      limit: 5,
+      signal: AbortSignal.timeout(1000),
+    });
+
+    expect(requestPath).toBe('/proxy/v2/memories/search');
+  });
+
+  // The search contract tests pin basePath joining; the write contract tests
+  // did not, so a direct-import URL built without the reverse-proxy prefix
+  // stayed green while `context_remember` posted outside the prefix that
+  // search was correctly using.
+  it('applies basePath to the direct-import request too', async () => {
+    let requestPath: string | undefined;
+    const origin = await startServer(async (request, response) => {
+      requestPath = request.url;
+      await readBody(request);
+      json(response, { results: [{ id: 'memory-1', event: 'ADD' }] });
+    });
+
+    await expect(
+      new Mem0CompatibleAdapter(
+        mem0CompatibleConfig(
+          origin,
+          'aliyun-polardb-mysql-2026-08',
+          { userId: 'fixed-user' },
+          '/proxy',
+        ),
+      ).remember({
+        content: 'repository policy',
+        signal: AbortSignal.timeout(1000),
+      }),
+    ).resolves.toMatchObject({ status: 'stored' });
+    expect(requestPath).toBe('/proxy/v1/memories');
   });
 
   it.each([
@@ -681,18 +777,24 @@ describe('Mem0CompatibleAdapter', () => {
       expectedContent: 'platform memory',
     },
     {
-      preset: 'mem0-oss-rest-2026-08' as const,
+      preset: 'mem0-server-rest-2026-08' as const,
       scope: { userId: 'fixed-user', agentId: 'fixed-agent' },
       path: '/proxy/search',
       authorization: undefined,
       apiKey: 'project-key',
-      responseItem: { id: 'memory-1', content: 'oss memory' },
+      responseItem: { id: 'memory-1', content: 'server memory' },
       expectedBody: {
         query: 'deployment',
         top_k: 5,
+        // Sent in both positions on purpose: builds that read session identity
+        // from the request root and builds that read it from `filters` resolve
+        // this one request to the same scope, so neither silently searches an
+        // unscoped corpus. See Mem0ScopePlacement.
+        user_id: 'fixed-user',
+        agent_id: 'fixed-agent',
         filters: { user_id: 'fixed-user', agent_id: 'fixed-agent' },
       },
-      expectedContent: 'oss memory',
+      expectedContent: 'server memory',
     },
     {
       preset: 'aliyun-polardb-mysql-2026-08' as const,
@@ -754,7 +856,7 @@ describe('Mem0CompatibleAdapter', () => {
 
   it.each([
     {
-      preset: 'mem0-oss-rest-2026-08' as const,
+      preset: 'mem0-server-rest-2026-08' as const,
       path: '/memories',
       scope: { userId: 'fixed-user', agentId: 'fixed-agent' },
       authorization: undefined,
@@ -853,7 +955,7 @@ describe('Mem0CompatibleAdapter', () => {
 
     await expect(
       new Mem0CompatibleAdapter(
-        mem0CompatibleConfig(origin, 'mem0-oss-rest-2026-08', {
+        mem0CompatibleConfig(origin, 'mem0-server-rest-2026-08', {
           userId: 'fixed-user',
         }),
       ).remember({
@@ -862,6 +964,147 @@ describe('Mem0CompatibleAdapter', () => {
       }),
     ).resolves.toEqual({ status: 'unknown' });
     expect(requestCount).toBe(1);
+  });
+
+  // `infer: false` is what makes the stored text the exact text the user
+  // approved in the confirmation Hook, but a deployment whose request model
+  // predates the field drops it silently, extracts facts with an LLM, and
+  // still returns a valid identifier. The endpoint and its version are
+  // operator-supplied, so the echoed memory is the only evidence available.
+  it('does not claim storage when the provider rewrote the content', async () => {
+    const content = 'Deploy with --no-verify only after a green CI run.';
+    const origin = await startServer(async (request, response) => {
+      await readBody(request);
+      json(response, {
+        results: [
+          { id: 'memory-1', memory: 'Use --no-verify after CI.', event: 'ADD' },
+        ],
+      });
+    });
+
+    await expect(
+      new Mem0CompatibleAdapter(
+        mem0CompatibleConfig(origin, 'mem0-server-rest-2026-08', {
+          userId: 'fixed-user',
+        }),
+      ).remember({ content, signal: AbortSignal.timeout(1000) }),
+    ).resolves.toEqual({ status: 'unknown' });
+  });
+
+  it('claims storage when the provider echoes the content unchanged', async () => {
+    const content = 'Deploy with --no-verify only after a green CI run.';
+    const origin = await startServer(async (request, response) => {
+      await readBody(request);
+      json(response, {
+        results: [{ id: 'memory-1', memory: content, event: 'ADD' }],
+      });
+    });
+
+    await expect(
+      new Mem0CompatibleAdapter(
+        mem0CompatibleConfig(origin, 'mem0-server-rest-2026-08', {
+          userId: 'fixed-user',
+        }),
+      ).remember({ content, signal: AbortSignal.timeout(1000) }),
+    ).resolves.toEqual({ status: 'stored', providerOperationId: 'memory-1' });
+  });
+
+  // Fact extraction retires contradicting memories. A DELETE carries a valid
+  // identifier, so without this the tool reports a deletion as storage.
+  it('does not report a delete event as storage', async () => {
+    const content = 'repository policy';
+    const origin = await startServer(async (request, response) => {
+      await readBody(request);
+      json(response, {
+        results: [{ id: 'memory-1', memory: content, event: 'DELETE' }],
+      });
+    });
+
+    await expect(
+      new Mem0CompatibleAdapter(
+        mem0CompatibleConfig(origin, 'aliyun-polardb-mysql-2026-08', {
+          userId: 'fixed-user',
+        }),
+      ).remember({ content, signal: AbortSignal.timeout(1000) }),
+    ).resolves.toEqual({ status: 'unknown' });
+  });
+
+  it.each([
+    { label: 'an alternate root object', body: { data: [{ id: 'memory-1' }] } },
+    { label: 'a root array', body: [{ id: 'memory-1' }] },
+    { label: 'a non-array results field', body: { results: { id: 'm' } } },
+  ])('treats $label as unknown rather than throwing', async ({ body }) => {
+    const origin = await startServer(async (request, response) => {
+      await readBody(request);
+      json(response, body);
+    });
+
+    await expect(
+      new Mem0CompatibleAdapter(
+        mem0CompatibleConfig(origin, 'aliyun-polardb-mysql-2026-08', {
+          userId: 'fixed-user',
+        }),
+      ).remember({
+        content: 'repository policy',
+        signal: AbortSignal.timeout(1000),
+      }),
+    ).resolves.toEqual({ status: 'unknown' });
+  });
+
+  // The bound is what keeps a provider-controlled string out of the operation
+  // id that mcp.ts serializes verbatim into the tool result.
+  it.each([
+    { label: 'at the 256 code point bound', length: 256, stored: true },
+    { label: 'past the 256 code point bound', length: 257, stored: false },
+  ])('handles an identifier $label', async ({ length, stored }) => {
+    const id = 'a'.repeat(length);
+    const origin = await startServer(async (request, response) => {
+      await readBody(request);
+      json(response, { results: [{ id, event: 'ADD' }] });
+    });
+
+    await expect(
+      new Mem0CompatibleAdapter(
+        mem0CompatibleConfig(origin, 'aliyun-polardb-mysql-2026-08', {
+          userId: 'fixed-user',
+        }),
+      ).remember({
+        content: 'repository policy',
+        signal: AbortSignal.timeout(1000),
+      }),
+    ).resolves.toEqual(
+      stored
+        ? { status: 'stored', providerOperationId: id }
+        : { status: 'unknown' },
+    );
+  });
+
+  // The async preset's write request was only pinned through its PENDING
+  // response, so dropping the preset's `app_id` write rule stayed green while
+  // the write silently landed outside the administrator-bound app scope.
+  it('sends the Platform V3 preset direct-import contract', async () => {
+    const content = 'repository policy';
+    let requestPath: string | undefined;
+    let requestBody: unknown;
+    let requestAuthorization: string | undefined;
+    const origin = await startServer(async (request, response) => {
+      requestPath = request.url;
+      requestBody = JSON.parse(await readBody(request));
+      requestAuthorization = request.headers.authorization;
+      json(response, { status: 'PENDING', event_id: 'event-1' });
+    });
+
+    await new Mem0CompatibleAdapter(
+      mem0CompatibleConfig(origin, 'mem0-platform-v3', { appId: 'fixed-app' }),
+    ).remember({ content, signal: AbortSignal.timeout(1000) });
+
+    expect(requestPath).toBe('/v3/memories/add/');
+    expect(requestAuthorization).toBe('Token project-key');
+    expect(requestBody).toEqual({
+      messages: [{ role: 'user', content }],
+      app_id: 'fixed-app',
+      infer: false,
+    });
   });
 });
 

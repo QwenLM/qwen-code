@@ -41,8 +41,32 @@ new identifier rather than silently changing an existing mapping.
 The first built-in presets are:
 
 - `mem0-platform-v3`
-- `mem0-oss-rest-2026-08`
+- `mem0-server-rest-2026-08`
 - `aliyun-polardb-mysql-2026-08`
+
+## Where preset immutability stops
+
+Preset immutability binds this repository, not the deployed service. The
+endpoint is operator-supplied and its build is not guaranteed: a Mem0-family
+service can be self-hosted, packaged by a cloud vendor, or pinned to an old
+release, and the stock Mem0 REST server carries no API version in its paths at
+all. An administrator selecting a preset is therefore asserting which contract
+they believe is deployed, and can be wrong.
+
+The integration does not probe, negotiate, or fall back. It manages that
+uncertainty three ways instead, none of which requires knowing the build:
+
+- **Prefer a request both known shapes accept.** Where one fixed request is
+  read identically by an older and a newer build, the preset sends that
+  request. `body-and-filters` scope placement is the only current instance.
+- **Never report an unverified write as `stored`.** A write outcome is claimed
+  only from evidence in the response itself, so a build that ignores a request
+  field degrades to `unknown` rather than to a false confirmation.
+- **Make a mismatch legible to the operator.** Provider failures are written
+  to the MCP server's stderr with the HTTP status, which separates a wire
+  contract mismatch from an outage. The model-facing error stays opaque.
+
+A preset that cannot be made safe this way documents the build it requires.
 
 ## Configuration
 
@@ -127,18 +151,30 @@ design instead of expanding this configuration into a programming language.
 The legacy `mem0-platform-v3` configuration remains a fixed-endpoint shorthand
 for this mapping.
 
-### Mem0 OSS REST 2026-08
+### Mem0 Server REST 2026-08
 
 - Search: `POST /search`
 - Authentication: `X-API-Key`
-- Scope: required `userId` and optional `agentId` under `filters`
+- Scope: required `userId` and optional `agentId`, sent both at the request
+  root and under `filters`
 - Limit: `top_k`
 - Direct import: `POST /memories`, `infer: false`
-- Write response: a valid `results[].id` is `stored`; otherwise `unknown`
+- Write response: a valid `results[].id` whose echoed `memory` matches the
+  submitted content is `stored`; otherwise `unknown`
 
-This mapping follows the stock `mem0ai/mem0` REST server. Bearer-authenticated
-deployments need a separately verified preset rather than a per-instance
-authentication override.
+This mapping follows the stock `mem0ai/mem0` REST server — the FastAPI service
+in that repository's `server/`, which is what "self-hosted Mem0" means here.
+The identifier avoids "OSS" because that abbreviation names an object storage
+service in some of the clouds these deployments run in.
+
+The server moved session identity from the request root into `filters` and
+kept reading both, so the dual placement is one request that both shapes
+resolve to the same scope. Builds predating that change reject a
+`filters`-only search outright; builds predating `infer` silently run fact
+extraction instead, which the write-result content check catches.
+
+Bearer-authenticated deployments need a separately verified preset rather than
+a per-instance authentication override.
 
 ### Aliyun PolarDB MySQL 2026-08
 
@@ -174,6 +210,8 @@ The implementation must prove:
 - exact authentication, path, scope, and limit mapping for every preset
 - per-item response normalization and the five-result cap
 - conservative synchronous versus asynchronous write outcomes
+- refusal to report `stored` when the provider echoes rewritten content or a
+  delete event
 - no retry on search or write failures
-- loadability of the shipped PolarDB and OSS examples
+- loadability of the shipped PolarDB and Mem0 server examples
 - compatibility of the existing `mem0-platform-v3` configuration

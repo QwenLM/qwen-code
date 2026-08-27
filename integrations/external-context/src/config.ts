@@ -7,7 +7,11 @@
 import { readFile, realpath, stat } from 'node:fs/promises';
 import { isAbsolute, parse } from 'node:path';
 import { z } from 'zod';
-import { getMem0Preset, isValidMem0Scope } from './mem0-presets.js';
+import {
+  findInvalidMem0Scope,
+  getMem0Preset,
+  mem0ScopeViolationMessage,
+} from './mem0-presets.js';
 import type {
   ExternalContextConfig,
   GenericHttpProviderConfig,
@@ -135,11 +139,13 @@ export async function loadConfig(
     throw new ConfigurationError('External context config is invalid.');
   }
 
-  if (
-    result.data.provider.type === 'mem0' &&
-    !isValidMem0Scope(result.data.provider)
-  ) {
-    throw new ConfigurationError('External context Mem0 scope is invalid.');
+  if (result.data.provider.type === 'mem0') {
+    const violation = findInvalidMem0Scope(result.data.provider);
+    if (violation !== undefined) {
+      throw new ConfigurationError(
+        mem0ScopeViolationMessage(result.data.provider.preset, violation),
+      );
+    }
   }
 
   if (result.data.version === 1) {
