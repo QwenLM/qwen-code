@@ -42,9 +42,31 @@ const debugLogger = createDebugLogger('SKILL_ARGS_FILE');
 /** Where a skill finds the arguments it was invoked with. */
 export const SKILL_ARGS_DIR = join('.qwen', 'tmp');
 
-/** A component safe to put in a filename. */
+/**
+ * Encode a name component so it is safe to put in a filename on every
+ * platform, and injectively: two different skill names can never encode to
+ * the same component.
+ *
+ * The injectivity is the point (#9408): collision qualification makes
+ * `<extension>:<name>` a reachable skill name, and the naive underscore
+ * mapping made it alias with the equally reachable `<extension>_<name>`,
+ * so two different skills shared one args file, and with it each other's
+ * posting authority. Percent-encoding every byte outside the safe alphabet
+ * (with `%` escaped first) removes the whole class, including the
+ * pre-existing `a:b`/`a_b` and Unicode aliases. The encoded form only ever
+ * appears in on-disk filenames and the model-facing args note; users keep
+ * typing the skill name itself.
+ */
 function safe(s: string): string {
-  return s.replace(/[^A-Za-z0-9._-]/g, '_');
+  return Array.from(s)
+    .map((ch) => {
+      if (/[A-Za-z0-9._-]/.test(ch)) return ch;
+      const hex = Array.from(new TextEncoder().encode(ch))
+        .map((b) => b.toString(16).toUpperCase().padStart(2, '0'))
+        .join('');
+      return '%' + hex;
+    })
+    .join('');
 }
 
 /**

@@ -204,6 +204,44 @@ describe('writeSkillArgs', () => {
     expect(readFileSync(skillArgsPath('verify'), 'utf8')).toBe('other');
   });
 
+  it('never lets two different skill names share one file (#9408)', () => {
+    // Collision qualification makes `ext:name` a reachable skill name; the
+    // naive underscore mapping aliased it with the reachable `ext_name`,
+    // sharing one args file, and with it each other's posting authority.
+    const pairs: Array<[string, string]> = [
+      ['rust:pdf', 'rust_pdf'],
+      ['a:b', 'a_b'],
+      ['中', '_'],
+      ['my-ext:deploy', 'my-ext_deploy'],
+    ];
+    for (const [qualified, legacy] of pairs) {
+      expect(skillArgsPath(qualified)).not.toBe(skillArgsPath(legacy));
+    }
+  });
+
+  it('leaves plain names and the review authorization path untouched', () => {
+    expect(skillArgsPath('review').endsWith('qwen-skill-args-review.txt')).toBe(
+      true,
+    );
+    expect(skillArgsPath('pdf').endsWith('qwen-skill-args-pdf.txt')).toBe(true);
+    expect(
+      skillArgsPath('my-ext_deploy').endsWith(
+        'qwen-skill-args-my-ext_deploy.txt',
+      ),
+    ).toBe(true);
+  });
+
+  it('keeps qualified and legacy names round-trip separate', () => {
+    writeSkillArgs('rust:pdf', 'from extension');
+    writeSkillArgs('rust_pdf', 'from user skill');
+    expect(readFileSync(skillArgsPath('rust:pdf'), 'utf8')).toBe(
+      'from extension',
+    );
+    expect(readFileSync(skillArgsPath('rust_pdf'), 'utf8')).toBe(
+      'from user skill',
+    );
+  });
+
   it('returns null instead of throwing when the write fails', () => {
     // A read-only checkout must not stop a skill from running: it degrades to
     // the model reading the arguments out of the conversation, which is worse
