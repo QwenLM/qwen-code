@@ -9,16 +9,7 @@ if (process.env['NO_COLOR'] !== undefined) {
   delete process.env['NO_COLOR'];
 }
 
-import * as fs from 'node:fs';
-import * as os from 'node:os';
-import * as path from 'node:path';
 import { setSimulate429 } from './src/utils/testUtils.js';
-
-if (process.env['QWEN_RUNTIME_DIR'] === undefined) {
-  process.env['QWEN_RUNTIME_DIR'] = fs.mkdtempSync(
-    path.join(os.tmpdir(), 'qwen-code-core-test-runtime-'),
-  );
-}
 
 // Avoid writing per-session debug log files during tests.
 // Unit tests can opt-in by overriding this env var.
@@ -28,11 +19,6 @@ if (process.env['QWEN_DEBUG_LOG_FILE'] === undefined) {
 
 // Disable 429 simulation globally for all tests
 setSimulate429(false);
-
-// Keep managed auto-memory test fixtures under per-test temp project roots.
-if (process.env['QWEN_CODE_MEMORY_LOCAL'] === undefined) {
-  process.env['QWEN_CODE_MEMORY_LOCAL'] = '1';
-}
 
 // Some dependencies (e.g., undici) expect a global File constructor in Node.
 // Provide a minimal shim for test environment if missing.

@@ -100,6 +100,9 @@ describe('auto-memory storage scaffold', () => {
   });
 
   it('builds stable auto-memory paths under project .qwen directory', () => {
+    process.env['QWEN_CODE_MEMORY_LOCAL'] = '1';
+    clearAutoMemoryRootCache();
+
     expect(getAutoMemoryRoot(projectRoot)).toBe(
       path.join(projectRoot, '.qwen', 'memory'),
     );
