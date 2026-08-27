@@ -204,23 +204,20 @@ describe('evaluatePermissionFlow', () => {
     });
     Object.assign(invocation, { serverName: 'srv', serverToolName: 'foo/bar' });
 
-    await expect(
-      evaluatePermissionFlow(
-        mockConfig({
-          getPermissionManager: vi.fn().mockReturnValue(mockPm),
-          getToolRegistry: vi
-            .fn()
-            .mockReturnValue({}) as unknown as Config['getToolRegistry'],
-        }),
-        invocation,
-        'mcp__srv__foo_bar_0cnn7di',
-        {},
-      ),
-    ).resolves.toBeDefined();
-
-    expect(mockPm.hasRelevantRules).toHaveBeenCalledWith(
-      expect.objectContaining({ toolAliases: [legacyName, rawName] }),
+    const result = await evaluatePermissionFlow(
+      mockConfig({
+        getPermissionManager: vi.fn().mockReturnValue(mockPm),
+        getToolRegistry: vi
+          .fn()
+          .mockReturnValue({}) as unknown as Config['getToolRegistry'],
+      }),
+      invocation,
+      'mcp__srv__foo_bar_0cnn7di',
+      {},
     );
+
+    expect(result.pmCtx.toolAliases).toEqual([rawName]);
+    expect(result.pmCtx.toolAliases).not.toContain(legacyName);
   });
 
   it('forces interaction even when PM allows the tool', async () => {
