@@ -417,6 +417,8 @@ export default tseslint.config(
       'docs/**/*.mjs',
       // Plan C CDP-tunnel acceptance harness (issue #5626) runs with `node`.
       'packages/cli/src/serve/cdp-tunnel/acceptance/**/*.mjs',
+      // Desktop-shell skill helper scripts also run with `node`.
+      'packages/desktop-shell/.agents/skills/**/scripts/**/*.mjs',
     ],
     languageOptions: {
       globals: {
