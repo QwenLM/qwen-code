@@ -15844,11 +15844,14 @@ describe('createServeApp', () => {
       );
     });
 
-    it('dedupes by number on merge, preferring the live url', async () => {
+    it('dedupes by number on merge, preferring the persisted url', async () => {
       // Overlap is the common production case (a route binding is persisted
       // AND enters the live entry). Without the number-keyed filter the
       // merged list duplicates the number and the badge renders `#9517 +1`
-      // for a one-PR session.
+      // for a one-PR session. The sidecar is the append-only binding-time
+      // record — sidecar-only writers (the shell hook, backfill) re-bind a
+      // number without touching the live entry, so the persisted url wins
+      // over the stale live one.
       const id = '550e8400-e29b-41d4-a716-446655440004';
       await writeStoredSession({
         sessionId: id,
@@ -15883,7 +15886,7 @@ describe('createServeApp', () => {
 
       const merged = result.sessions.find((s) => s.sessionId === id);
       expect(merged?.prs).toEqual([
-        { number: 9517, url: 'https://github.com/o/r/pull/9517?v=2' },
+        { number: 9517, url: 'https://github.com/o/r/pull/9517' },
       ]);
     });
 
@@ -15945,13 +15948,15 @@ describe('createServeApp', () => {
       ]);
     });
 
-    it('does not stamp persisted state onto a number re-bound to another repo', async () => {
-      // The same number in another repository is another PR: the sidecar
-      // may hold a terminal state resolved for repo A's #5 while the live
-      // entry already re-bound #5 to repo B. Overlaying the state by bare
-      // number would render repo B's OPEN PR as merged (the sweep treats
-      // 'merged' as terminal and never re-queries, so the poisoning
-      // persists).
+    it('serves the persisted entry while a cross-repo re-bind is in flight', async () => {
+      // The same number in another repository is another PR. The sidecar is
+      // the append-only binding-time record, so a conflicted number is
+      // served from it: persisted url and the state resolved for that url.
+      // A live entry can only be NEWER inside the metadata bind route's
+      // live-write/sidecar-write window, and that race is bounded to one
+      // listing because the route invalidates the session-list cache after
+      // its sidecar write; serving the live url instead would keep a stale
+      // live entry's repo visible after a sidecar-only re-bind landed.
       const id = '550e8400-e29b-41d4-a716-446655440008';
       await writeStoredSession({
         sessionId: id,
@@ -15990,10 +15995,123 @@ describe('createServeApp', () => {
 
       const merged = result.sessions.find((s) => s.sessionId === id);
       expect(merged?.prs).toEqual([
-        { number: 5, url: 'https://github.com/repo-b/r/pull/5' },
+        {
+          number: 5,
+          url: 'https://github.com/repo-a/r/pull/5',
+          state: 'merged',
+        },
       ]);
     });
 
+    it('keeps every newest live-only binding below the persisted cap', async () => {
+      // The live-only append gate must key on the PERSISTED size: below the
+      // cap a live-only entry is genuinely the newest binding (eviction
+      // only happens at the cap). Gating on the running merged length drops
+      // the newest bindings once the total fills up, and the badge's
+      // last-is-latest render shows the wrong PR until the next fresh
+      // listing. The final slice evicts the oldest persisted entry instead.
+      const id = '550e8400-e29b-41d4-a716-446655440009';
+      await writeStoredSession({
+        sessionId: id,
+        cwd: WS_BOUND,
+        timestamp: '2026-05-17T12:00:00.000Z',
+        prompt: 'stored prompt',
+        mtime: new Date('2026-05-17T12:00:05.000Z'),
+      });
+      const service = new SessionService(WS_BOUND);
+      const sidecarPath = service.getPrSessionPathForArchiveState(id, 'active');
+      await fsp.rm(sidecarPath, { force: true });
+      for (let prNumber = 1; prNumber <= 8; prNumber++) {
+        await upsertSessionPr(sidecarPath, {
+          number: prNumber,
+          url: `https://github.com/o/r/pull/${prNumber}`,
+        });
+      }
+      const bridge = fakeBridge({
+        listImpl: () => [
+          {
+            sessionId: id,
+            workspaceCwd: WS_BOUND,
+            createdAt: '2026-05-17T12:00:00.000Z',
+            clientCount: 1,
+            hasActivePrompt: false,
+            prs: [
+              { number: 101, url: 'https://github.com/o/r/pull/101' },
+              { number: 102, url: 'https://github.com/o/r/pull/102' },
+              { number: 103, url: 'https://github.com/o/r/pull/103' },
+            ],
+          },
+        ],
+      });
+
+      const result = await listWorkspaceSessionsForResponse(bridge, WS_BOUND);
+
+      const merged = result.sessions.find((s) => s.sessionId === id);
+      expect(merged?.prs).toHaveLength(SESSION_PR_LIST_LIMIT);
+      expect(merged?.prs?.map((p) => p.number)).toEqual([
+        2, 3, 4, 5, 6, 7, 8, 101, 102, 103,
+      ]);
+    });
+
+    it('serves the persisted url when a sidecar-only writer re-bound a number', async () => {
+      // The shell hook / backfill re-bind a number by rewriting the sidecar
+      // alone; the live entry keeps the stale url until daemon restart. The
+      // merge must serve the persisted (re-bound) url, not the live one.
+      const id = '550e8400-e29b-41d4-a716-44665544a010';
+      await writeStoredSession({
+        sessionId: id,
+        cwd: WS_BOUND,
+        timestamp: '2026-05-17T12:00:00.000Z',
+        prompt: 'stored prompt',
+        mtime: new Date('2026-05-17T12:00:05.000Z'),
+      });
+      const service = new SessionService(WS_BOUND);
+      const sidecarPath = service.getPrSessionPathForArchiveState(id, 'active');
+      await fsp.rm(sidecarPath, { force: true });
+      await upsertSessionPr(sidecarPath, {
+        number: 1,
+        url: 'https://github.com/o/r/pull/1',
+      });
+      await upsertSessionPr(sidecarPath, {
+        number: 5,
+        url: 'https://github.com/repo-b/r/pull/5',
+      });
+      invalidateWorkspaceSessionListCache({
+        runtimeBaseDir: new Storage(WS_BOUND).getRuntimeBaseDir(),
+        workspaceCwd: WS_BOUND,
+        archiveStates: ['active'],
+      });
+      const bridge = fakeBridge({
+        listImpl: () => [
+          {
+            sessionId: id,
+            workspaceCwd: WS_BOUND,
+            createdAt: '2026-05-17T12:00:00.000Z',
+            clientCount: 1,
+            hasActivePrompt: false,
+            prs: [
+              { number: 1, url: 'https://github.com/o/r/pull/1' },
+              {
+                number: 5,
+                url: 'https://github.com/repo-a/r/pull/5',
+                state: 'open' as const,
+              },
+            ],
+          },
+        ],
+      });
+
+      const result = await listWorkspaceSessionsForResponse(bridge, WS_BOUND);
+
+      const merged = result.sessions.find((s) => s.sessionId === id);
+      // The re-bind's url wins; the live state belonged to the OLD url and
+      // must not carry over to another repo's PR.
+      expect(merged?.prs?.map((p) => p.url)).toEqual([
+        'https://github.com/o/r/pull/1',
+        'https://github.com/repo-b/r/pull/5',
+      ]);
+      expect(merged?.prs?.[1]?.state).toBeUndefined();
+    });
     it('reads the PR sidecar for live-only sessions so refreshed state wins', async () => {
       // The bind route persists the sidecar before the session's first
       // flush. Until then the row is live-only, and its bind-time state

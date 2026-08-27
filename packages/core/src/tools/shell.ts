@@ -2353,16 +2353,21 @@ export class ShellToolInvocation extends BaseToolInvocation<
     let preRunPrSnapshot: BranchPullRequestSnapshot | undefined;
     let preRunBranch: string | undefined;
     let preRunRepoKeys: AttributionRepoKeys | undefined;
-    let preRunGhEnv: Readonly<Record<string, string>> | undefined;
+    let preRunGhEnv: Readonly<Record<string, string | undefined>> | undefined;
     if (commandRunsGhPrCreate(commandToExecute)) {
       // The verification legs must authenticate the way the create itself
       // does (inline GH_TOKEN with no ambient gh auth), or the gate's
-      // advertised token shape binds nothing.
-      preRunGhEnv = ghPrCreateInlineEnv(commandToExecute);
+      // advertised token shape binds nothing. The inline record is an
+      // OVERLAY onto the full process env — the gh legs receive it as the
+      // child's ENTIRE environment, so passed alone it would drop PATH and
+      // HOME and fail every leg — and EVERY leg needs it, not just the
+      // snapshot fetch.
+      const inlineEnv = ghPrCreateInlineEnv(commandToExecute);
+      preRunGhEnv = inlineEnv ? { ...process.env, ...inlineEnv } : undefined;
       [preRunPrSnapshot, preRunBranch, preRunRepoKeys] = await Promise.all([
         fetchCurrentBranchPullRequest(cwd, preRunGhEnv),
         fetchCurrentBranchName(cwd),
-        fetchAttributionRepoKeys(cwd),
+        fetchAttributionRepoKeys(cwd, preRunGhEnv),
       ]);
     }
 
@@ -3129,7 +3134,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
     preRunPrSnapshot: BranchPullRequestSnapshot | undefined,
     preRunBranch: string | undefined,
     preRunRepoKeys: AttributionRepoKeys | undefined,
-    ghCreateEnv?: Readonly<Record<string, string>>,
+    ghCreateEnv?: Readonly<Record<string, string | undefined>>,
   ): void {
     void (async () => {
       try {

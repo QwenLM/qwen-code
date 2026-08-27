@@ -2566,6 +2566,162 @@ describe('backfillWorkspaceSessionPrs', () => {
       )?.[0],
     ).toMatchObject({ number: 42 });
   });
+
+  it('does not pair a fork-url binding with the parent page same-number state', async () => {
+    // Fork layout: the gh page lists the PARENT repo's PRs, and a
+    // `/review <fork-url>` form binds the FORK url. PR numbers are
+    // per-repo — the page's same-numbered entry is a DIFFERENT PR, so its
+    // (possibly terminal) state must never be stamped onto this binding;
+    // the refresh sweep keys stamps by repo and never re-queries a
+    // terminal state, so a wrong 'merged' would persist.
+    fetchRemoteWebUrlMock.mockResolvedValue('https://github.com/me/fork');
+    fetchAttributionRepoKeysMock.mockResolvedValue({
+      resolved: 'github.com/me/fork',
+      parent: 'github.com/parent/repo',
+    });
+    await seedSession(SESSION_A);
+    await appendUserText(
+      SESSION_A,
+      '/review https://github.com/me/fork/pull/7',
+    );
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [
+        {
+          ...pr(7, 'fix/7'),
+          url: 'https://github.com/parent/repo/pull/7',
+          state: 'merged' as const,
+        },
+      ],
+    });
+
+    const result = await backfillWorkspaceSessionPrs(runtime);
+
+    expect(result).toMatchObject({ scanned: 1, bound: 1 });
+    expect(
+      (
+        await readSessionPrs(
+          sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
+        )
+      )?.[0],
+    ).toEqual({
+      number: 7,
+      url: 'https://github.com/me/fork/pull/7',
+      createdAt: expect.any(String),
+      source: 'review',
+    });
+  });
+
+  it('keeps a bound number untouched when only the remote fallback can feed the url', async () => {
+    // Fork layout, run 1 (gh healthy) binds the parent URL. Run 2 while gh
+    // is down can only synthesize the FORK remote URL (a guaranteed 404);
+    // replacing the persisted parent URL with it on every gh-availability
+    // flip oscillates the entry's createdAt and drops its state. A
+    // remote-fallback URL for an already-bound number must re-offer the
+    // number WITHOUT a url so the mutation counts it already bound.
+    fetchRemoteWebUrlMock.mockResolvedValue('https://github.com/me/fork');
+    fetchAttributionRepoKeysMock.mockResolvedValue({
+      resolved: 'github.com/me/fork',
+      parent: 'github.com/parent/repo',
+    });
+    await seedSession(SESSION_A);
+    await appendUserText(SESSION_A, '/review 42');
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [
+        {
+          ...pr(42, 'fix/42'),
+          url: 'https://github.com/parent/repo/pull/42',
+        },
+      ],
+    });
+
+    const first = await backfillWorkspaceSessionPrs(runtime);
+    expect(first).toMatchObject({ bound: 1 });
+    const sidecarPath = sessionService.getPrSessionPathForArchiveState(
+      SESSION_A,
+      'active',
+    );
+    const afterFirst = await readSessionPrs(sidecarPath);
+    expect(afterFirst?.[0]?.url).toBe('https://github.com/parent/repo/pull/42');
+
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'cli_unavailable',
+    });
+    const second = await backfillWorkspaceSessionPrs(runtime);
+
+    expect(second).toMatchObject({ bound: 0, alreadyBound: 1 });
+    const afterSecond = await readSessionPrs(sidecarPath);
+    expect(afterSecond).toEqual(afterFirst);
+  });
+
+  it('writes the binding to the archive state the session holds at write time', async () => {
+    // An archive transition landing during the scan+gh window must not
+    // strand the new binding in the enumerated (stale) state's chats dir:
+    // the write re-resolves the session's CURRENT location, the way the
+    // sibling shell binder does.
+    await seedSession(SESSION_A);
+    await appendUserText(SESSION_A, '/review 42');
+    fetchGitHubPullRequestsMock.mockImplementation(async () => {
+      await archiveSession(SESSION_A);
+      return { kind: 'ok', pullRequests: [pr(42, 'fix/42')] };
+    });
+
+    const result = await backfillWorkspaceSessionPrs(runtime);
+
+    expect(result).toMatchObject({ scanned: 1, bound: 1 });
+    expect(
+      await readSessionPrs(
+        sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
+      ),
+    ).toBeNull();
+    expect(
+      (
+        await readSessionPrs(
+          sessionService.getPrSessionPathForArchiveState(SESSION_A, 'archived'),
+        )
+      )?.[0],
+    ).toMatchObject({ number: 42, url: 'https://github.com/o/r/pull/42' });
+  });
+
+  it('scans sessions whose mtime ties a pagination boundary', async () => {
+    // 1007 sessions, four of them sharing the mtime of the 1000th file:
+    // listSessions' strict-`<` cursor boundary drops those boundary twins
+    // on every paging run, so a pager can never reach them. Backfill must.
+    const total = 1007;
+    const chatsDir = path.join(
+      new Storage(workspaceCwd).getProjectDir(),
+      'chats',
+    );
+    await fsp.mkdir(chatsDir, { recursive: true });
+    const baseMtime = Date.UTC(2026, 7, 1);
+    for (let i = 0; i < total; i++) {
+      const sessionId = `00000000-0000-4000-8000-${String(i).padStart(12, '0')}`;
+      const filePath = path.join(chatsDir, `${sessionId}.jsonl`);
+      await fsp.writeFile(
+        filePath,
+        `${JSON.stringify({
+          uuid: `${sessionId}-user-1`,
+          parentUuid: null,
+          sessionId,
+          timestamp: '2026-08-01T00:00:00.000Z',
+          type: 'user',
+          message: { role: 'user', parts: [{ text: 'hello' }] },
+          cwd: workspaceCwd,
+        })}\n`,
+        'utf8',
+      );
+      const mtimeMs =
+        i >= 999 && i <= 1002 ? baseMtime - 999_000 : baseMtime - i * 1000;
+      const mtime = new Date(mtimeMs);
+      await fsp.utimes(filePath, mtime, mtime);
+    }
+    fetchGitHubPullRequestsMock.mockResolvedValue({ kind: 'not_a_repo' });
+
+    const result = await backfillWorkspaceSessionPrs(runtime);
+
+    expect(result.scanned).toBe(total);
+  }, 60_000);
 });
 
 describe('registerSessionPrBackfillRoutes', () => {

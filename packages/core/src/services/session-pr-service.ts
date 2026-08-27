@@ -176,26 +176,79 @@ const GH_CREATE_WRAPPER_NAMES = new Set(['sudo', 'env', 'nohup', 'command']);
 const GH_BINARY_PATTERN = /(?:^|[/\\])gh(?:\.exe|\.cmd|\.bat)?$/;
 
 /**
- * The inline `GH_*`/`GITHUB_*` assignments prefixing the first segment that
- * runs `gh pr create` (e.g. `GH_TOKEN=… gh pr create --fill`). The gh legs
- * that verify a create must authenticate the same way the create itself
- * did: with an inline token and no ambient gh auth, a bare verification
- * run errors and the binding silently misses. The token scan mirrors the
- * gate's approximate prefix grammar (assignments, wrapper names, flags and
- * their values) and stops at the gh binary — assignments after it are gh
- * arguments, not environment.
+ * Approximates the shell's own expansion so the verification legs
+ * authenticate the way the create itself did: surrounding quotes are
+ * syntax, and `$VAR`/`${VAR}` names the process environment the child
+ * shell expands from (an absent variable expands to the empty string,
+ * matching the shell). Single quotes suppress expansion in the shell too.
+ * Command substitutions (`$(…)`) stay literal — they cannot be evaluated
+ * here, and a wrong guess must not authenticate the legs.
+ */
+function expandInlineEnvValue(raw: string): string {
+  if (raw.length >= 2 && raw.startsWith("'") && raw.endsWith("'")) {
+    return raw.slice(1, -1);
+  }
+  const unquoted =
+    raw.length >= 2 && raw.startsWith('"') && raw.endsWith('"')
+      ? raw.slice(1, -1)
+      : raw;
+  return unquoted.replace(
+    /\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?/g,
+    (_match, name: string) => process.env[name] ?? '',
+  );
+}
+
+/**
+ * The inline `GH_*`/`GITHUB_*` credentials a `gh pr create` run carries
+ * (e.g. `GH_TOKEN=… gh pr create --fill`). The gh legs that verify a
+ * create must authenticate the same way the create itself did: with an
+ * inline token and no ambient gh auth, a bare verification run errors and
+ * the binding silently misses. Collection covers the shapes the execution
+ * gate admits: the prefix assignments of EVERY gate-matching segment (later
+ * segments win, so a non-creating gate-matching segment cannot shadow a
+ * later segment's token; non-GH assignments are skipped, not terminators),
+ * plus `export`-ed assignments anywhere in the command (`export GH_TOKEN=…;
+ * gh pr create`). The prefix scan mirrors the gate's approximate grammar
+ * (assignments, wrapper names, flags and their values) and stops at the gh
+ * binary — assignments after it are gh arguments, not environment.
  */
 export function ghPrCreateInlineEnv(
   command: string,
 ): Readonly<Record<string, string>> | undefined {
+  let env: Record<string, string> | undefined;
+  let sawGateSegment = false;
+  const record = (name: string, rawValue: string): void => {
+    (env ??= {})[name] = expandInlineEnvValue(rawValue);
+  };
   for (const segment of command.split(/&&|\|\||[;|\n]/)) {
+    const tokens = segment.trim().split(/\s+/);
+    // `export GH_TOKEN=…` in ANY segment binds the variable for every
+    // later segment of the command.
+    if (tokens[0] === 'export') {
+      for (let i = 1; i < tokens.length; i++) {
+        const exported = GH_INLINE_ENV_ASSIGNMENT_PATTERN.exec(tokens[i]);
+        if (exported !== null) {
+          record(exported[1], exported[2]);
+          continue;
+        }
+        // A non-GH assignment (`export FOO=bar GH_TOKEN=x`) exports both —
+        // skip it; only a bare name (`export PATH`) cannot be evaluated.
+        if (!tokens[i].includes('=')) break;
+      }
+    }
     if (!GH_PR_CREATE_SEGMENT_PATTERN.test(segment)) continue;
-    const env: Record<string, string> = {};
+    sawGateSegment = true;
     let previousWasFlag = false;
-    for (const token of segment.trim().split(/\s+/)) {
+    for (const token of tokens) {
       const assignment = GH_INLINE_ENV_ASSIGNMENT_PATTERN.exec(token);
       if (assignment !== null) {
-        env[assignment[1]] = assignment[2];
+        record(assignment[1], assignment[2]);
+        previousWasFlag = false;
+        continue;
+      }
+      if (/^[A-Za-z_][A-Za-z0-9_]*=\S+$/.test(token)) {
+        // A non-GH assignment (`FOO=bar GH_TOKEN=x gh pr create`) — the
+        // gate grammar admits it, so it must not end the scan.
         previousWasFlag = false;
         continue;
       }
@@ -211,9 +264,8 @@ export function ghPrCreateInlineEnv(
       }
       break;
     }
-    return Object.keys(env).length > 0 ? env : undefined;
   }
-  return undefined;
+  return sawGateSegment ? env : undefined;
 }
 
 /**

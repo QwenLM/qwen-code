@@ -429,9 +429,32 @@ export async function backfillWorkspaceSessionPrs(
       numbers.push(...rest, conventionNumber);
     }
     if (numbers.length === 0) continue;
+    // Re-resolve the session's CURRENT archive state immediately before the
+    // snapshot read and locked write: an archive/restore transition landing
+    // during the scan and gh window above must not strand the new bindings
+    // in the wrong state's chats dir. A location that cannot be determined
+    // keeps the enumerated state.
+    let archiveState = candidate.archiveState;
+    try {
+      const location = await sessionService.getSessionLocation(
+        candidate.sessionId,
+      );
+      if (location === 'active' || location === 'archived') {
+        archiveState = location;
+      }
+    } catch {
+      // Best-effort backfill: keep the enumerated state.
+    }
     const prPath = sessionService.getPrSessionPathForArchiveState(
       candidate.sessionId,
-      candidate.archiveState,
+      archiveState,
+    );
+    // The transcript moves with an archive transition; the write-time
+    // existence guard must check the re-resolved location, not the
+    // enumerated one.
+    const transcriptPath = path.join(
+      path.dirname(prPath),
+      `${candidate.sessionId}.jsonl`,
     );
     // Captured before the snapshot read: an entry committed while this run
     // is in flight is newer than the plan and must not be trimmed by it.
@@ -465,7 +488,14 @@ export async function backfillWorkspaceSessionPrs(
         continue;
       }
       urls.set(number, url);
-      const state = pageMapTrusted ? pageStateByNumber.get(number) : undefined;
+      // The page's state belongs to the page's OWN url for the number: a
+      // `/review <url>` form that resolved another repo's URL (the fork
+      // layout) must not pair with the page repo's same-numbered PR — a
+      // DIFFERENT PR whose terminal state would poison this binding.
+      const state =
+        pageMapTrusted && pageUrlByNumber.get(number) === url
+          ? pageStateByNumber.get(number)
+          : undefined;
       if (state !== undefined) states.set(number, state);
     }
     // The cap is shared with entries this run did not resolve and cannot
@@ -494,7 +524,7 @@ export async function backfillWorkspaceSessionPrs(
         // with this write; the existence check still covers a transcript
         // removed by a path that takes no lane, so the plan never
         // resurrects a sidecar for a session gone from this archive state.
-        if (!existsSync(candidate.transcriptPath)) return null;
+        if (!existsSync(transcriptPath)) return null;
         const freshNumbers = new Set(fresh.map((entry) => entry.number));
         // Only entries seen in the snapshot are subject to this plan; newer
         // ones are bindings this run never planned for and must keep.
