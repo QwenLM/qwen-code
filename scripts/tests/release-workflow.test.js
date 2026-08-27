@@ -19,7 +19,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, onTestFinished } from 'vitest';
 import { parse } from 'yaml';
 
 // `realpath -m` (the script's canonicalization line) is a GNU coreutils
@@ -357,6 +357,22 @@ describe('release workflow', () => {
     () => {
       const wipeScript = canonicalWipe;
 
+      // The guard-branch cases below assert geometry and env isolation, not
+      // the reap — but the wipe's reap is genuine: it kills every live
+      // process of the runner user outside the step's ancestor tree. On the
+      // shared ECS pool that would reach into whatever job is co-resident
+      // on the same member under this uid every time the suite runs. Give
+      // the guard-branch cases a `ps` that lists nothing so the reap branch
+      // executes end to end yet kills nothing; the R1-1 case keeps the one
+      // genuine reap probe, and the fail-closed case stubs its own `ps`.
+      const noKillStubDir = mkdtempSync(join(tmpdir(), 'release-reap-nokill-'));
+      writeFileSync(join(noKillStubDir, 'ps'), '#!/bin/bash\nexit 0\n');
+      chmodSync(join(noKillStubDir, 'ps'), 0o755);
+      const noKillPath = `${noKillStubDir}:${process.env.PATH}`;
+      onTestFinished(() =>
+        rmSync(noKillStubDir, { recursive: true, force: true }),
+      );
+
       const runWipe = (envOverrides, { preCreateWorkspace } = {}) => {
         const base = mkdtempSync(join(tmpdir(), 'release-wipe-behavioral-'));
         const workspace = join(base, 'workspace');
@@ -411,7 +427,7 @@ describe('release workflow', () => {
       // of all persisted entries, not just files).
       {
         const { result, base, workspace, githubEnv, env } = runWipe(
-          {},
+          { PATH: noKillPath },
           {
             preCreateWorkspace: (_base, ws) => {
               writeFileSync(join(ws, 'leftover.txt'), 'stale');
@@ -453,7 +469,14 @@ describe('release workflow', () => {
             ).status,
           ).not.toBe(0);
           expect(readdirSync(isolatedEnv.DOCKER_CONFIG)).toHaveLength(0);
-          expect(() => lstatSync(join(base, 'tool-cache', 'node'))).toThrow();
+          // The sibling tool cache SURVIVES the wipe: the sweep is scoped
+          // to the workspace, and the pool-wide cache stays untouched on
+          // purpose — the pool-routed release lane never reads it, while
+          // other pool lanes resolve Node from it through un-gated
+          // setup-node.
+          expect(
+            lstatSync(join(base, 'tool-cache', 'node')).isDirectory(),
+          ).toBe(true);
         } finally {
           rmSync(base, { recursive: true, force: true });
         }
@@ -465,7 +488,7 @@ describe('release workflow', () => {
       // link itself and did not follow/delete the target.
       {
         const { result, base, workspace } = runWipe(
-          {},
+          { PATH: noKillPath },
           {
             preCreateWorkspace: (b, ws) => {
               rmSync(ws, { recursive: true, force: true });
@@ -506,6 +529,7 @@ describe('release workflow', () => {
         try {
           const env = {
             ...process.env,
+            PATH: noKillPath,
             GITHUB_WORKSPACE: workspace,
             RUNNER_WORKSPACE: rws,
             RUNNER_TEMP: join(runnerRoot, 'temp'),
@@ -586,6 +610,7 @@ describe('release workflow', () => {
         try {
           const env = {
             ...process.env,
+            PATH: noKillPath,
             // String concatenation preserves the literal '..' segment —
             // path.join would normalize it away before the script sees it.
             GITHUB_WORKSPACE: `${base}/sub/../workspace`,
@@ -615,7 +640,9 @@ describe('release workflow', () => {
       // orphaned to init exactly like a postinstall child that outlives its
       // job — is killed before the file sweep runs. The orphan's parent
       // chain never reaches this shell's ancestor tree, so the reap must
-      // reach it; the run still exits 0 and the workspace is wiped.
+      // reach it; the run still exits 0 and the workspace is wiped. This is
+      // the suite's one genuine reap probe: unlike the guard-branch cases
+      // it deliberately runs without the no-kill `ps` stub.
       {
         const pidFile = join(
           tmpdir(),
@@ -624,9 +651,11 @@ describe('release workflow', () => {
         // setsid + an exiting parent orphans the sleeper immediately
         // (reparented to init, outside the wipe shell's ancestor tree).
         // The outer loop waits for the pid file so the read cannot race.
+        // The sleeper's stdio goes to /dev/null: a pipe inherited through
+        // the spawn would hold this spawnSync open until the sleeper ends.
         spawnSync('bash', [
           '-c',
-          'setsid bash -c \'echo $$ > "$1"; exec sleep 30\' x "$1" & ' +
+          'setsid bash -c \'echo $$ > "$1"; exec sleep 30\' x "$1" </dev/null >/dev/null 2>&1 & ' +
             'for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do ' +
             '[ -s "$1" ] && exit 0; sleep 0.1; done; exit 1',
           'x',
