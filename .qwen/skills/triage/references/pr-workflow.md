@@ -151,12 +151,37 @@ This is the most important stage — catch problems before anyone spends time re
 
 A PR opened after its linked issue was already fixed stays open forever — no
 other gate looks at the linked issue's state. Check it deterministically
-before investing in a review:
+before investing in a review. Scope note: the gate executes inside the
+triage agent session, so it covers healthy runs only — a run whose agent
+cannot reach the model produces no triage at all; that failure shape belongs
+to the workflow's response check, not here.
+
+**Default-branch scope.** Run 1-pre only when the PR targets the default
+branch:
 
 ```bash
-ISSUES=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json body --jq '.body' \
-  | grep -oiE '(fixes|closes|resolves) #[0-9]+' | grep -oE '[0-9]+' | sort -u)
+BASE_REF=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json baseRefName --jq '.baseRefName')
+DEFAULT_BRANCH=$(gh repo view "$REPO" --json defaultBranchRef --jq '.defaultBranchRef.name')
 ```
+
+- `BASE_REF` != `DEFAULT_BRANCH` (e.g. a backport to a `release/*` branch) →
+  skip 1-pre and proceed to 1a: such PRs legitimately carry changes that
+  already exist on the default branch, so the subsumption check below cannot
+  judge them.
+
+**Linked issues.** Read them from GitHub's own closing-reference parser — it
+understands all nine closing-keyword forms (`close`/`closes`/`closed`,
+`fix`/`fixes`/`fixed`, `resolve`/`resolves`/`resolved`), URL references, and
+cross-repo references; a keyword grep misses most of them:
+
+```bash
+ISSUES=$(gh pr view "$PR_NUMBER" --repo "$REPO" \
+  --json closingIssuesReferences --jq '.closingIssuesReferences[].number' | sort -u)
+```
+
+The parser is not intent-aware — prose like "resolves #123's closer" links
+#123 too — so treat the linkage as input to verify against the issue's
+actual state, never as proof by itself.
 
 - No linked issues, or every linked issue **open** → proceed to 1a.
 - Any linked issue **closed as not planned** → the fix target was rejected:
@@ -187,33 +212,39 @@ gh api graphql -f query='
   --jq '.data.repository.issue.timelineItems.nodes[].closer | select(.number != null) | "\(.number) \(.merged)"'
 ```
 
-  - Closed by a **merged PR** → compare this PR's production diff (exclude
-    test/generated files per the Stage 0 size rules) against `main`:
-    - **Fully subsumed** — every production line this PR adds already exists
-      in `main` (check per file via
-      `gh api "repos/$REPO/contents/<path>?ref=main"`) → post the terminal
-      comment below, then close the PR. This is the ONLY place triage closes
-      a PR.
-    - **Any remaining delta** — at least one production change is NOT in
-      `main` → request changes: name the merged PR, name the remaining
-      delta, ask the author to rebase onto `main` and reduce the PR to that
-      delta. Stop.
-  - Closed manually (no close commit) or the closer cannot be resolved →
-    never close on ambiguity: flag it in the Stage 1 comment and escalate to
-    the maintainer.
+- Closed by a **merged PR** → compare this PR's production diff (exclude
+  test/generated files per the Stage 0 size rules) against the default
+  branch (`$DEFAULT_BRANCH` — this PR's base, per the scope check above):
+  - **Fully subsumed** — applying this PR's ENTIRE diff to the default
+    branch would change nothing: every production line this PR adds already
+    exists there, AND every production line this PR deletes is already
+    absent there (check per file via
+    `gh api "repos/$REPO/contents/<path>?ref=$DEFAULT_BRANCH"`). A diff
+    with NO production changes (e.g. tests-only) is never fully subsumed —
+    any file it adds outside the production set is itself a remaining
+    delta. → post the terminal comment below, then close the PR. This is
+    the ONLY place triage closes a PR.
+  - **Any remaining delta** — everything else: an added production line
+    that is missing there, a deleted production line that still exists
+    there, or any non-production addition → request changes: name the
+    merged PR, name the remaining delta, ask the author to rebase onto the
+    default branch and reduce the PR to that delta. Stop.
+- Closed manually (no close commit) or the closer cannot be resolved →
+  never close on ambiguity: flag it in the Stage 1 comment and escalate to
+  the maintainer.
 
 ```bash
 cat > /tmp/stage-1pre-duplicate.md <<'EOF'
 <!-- qwen-triage stage=1-pre -->
 
 The linked issue #N was already fixed by #M, and every production change in
-this PR is already on `main` — closing as a duplicate of #M. If something
-here is NOT covered by #M, say so and this can be reopened.
+this PR is already on the default branch — closing as a duplicate of #M. If
+something here is NOT covered by #M, say so and this can be reopened.
 
 <details>
 <summary>中文说明</summary>
 
-关联 issue #N 已由 #M 修复，本 PR 的生产代码改动均已存在于 `main`，
+关联 issue #N 已由 #M 修复，本 PR 的生产代码改动均已存在于默认分支，
 现作为 #M 的重复 PR 关闭。如本 PR 有 #M 未覆盖的内容，请说明，可以重新打开。
 
 </details>

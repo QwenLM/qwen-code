@@ -6805,3 +6805,39 @@ describe('triage skips the autofix bot’s own bookkeeping issues (#9264)', () =
     expect(autofixDoc.env.AUTOFIX_BOT).toBe(`\${{ ${botIdentityCore} }}`);
   });
 });
+
+describe('stage 1-pre duplicate gate', () => {
+  const section = prSkill.slice(
+    prSkill.indexOf('**1-pre. Duplicate / already-fixed check'),
+    prSkill.indexOf('**1a. Template check:**'),
+  );
+
+  it('reads linked issues from GitHub closing references, not a keyword grep', () => {
+    // A keyword grep misses 6 of the 9 closing-keyword forms and matches
+    // substrings like "prefixes"; GitHub's own parser is the linkage source.
+    expect(section).toContain('--json closingIssuesReferences');
+    expect(section).not.toContain("grep -oiE '(fixes|closes|resolves)");
+  });
+
+  it('runs only for PRs targeting the default branch', () => {
+    // Backports to release/* branches legitimately carry changes that already
+    // exist on the default branch; without this scope the gate closes them.
+    expect(section).toContain('Run 1-pre only when the PR targets the default');
+    expect(section).toContain('defaultBranchRef');
+    expect(section).not.toContain('?ref=main');
+  });
+
+  it('defines subsumption over the full diff, never over added lines alone', () => {
+    // Added-lines-only quantification closes deletions-only diffs vacuously;
+    // the deleted-lines clause must stay.
+    expect(section).toContain('every production line this PR adds');
+    expect(section).toContain('every production line this PR deletes');
+  });
+
+  it('never closes a diff with no production changes', () => {
+    // Stage 0 exclusions empty the comparison set for tests-only PRs; such a
+    // diff must be a remaining delta, never "Fully subsumed".
+    expect(section).toContain('NO production changes');
+    expect(section).toContain('never fully subsumed');
+  });
+});
