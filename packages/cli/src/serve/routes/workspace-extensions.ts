@@ -341,9 +341,7 @@ const validateExtensionSourceMetadata = (
   const parsed = parsePotentialSourceUrl(installMetadata.source);
   return (
     !!parsed &&
-    (installMetadata.networkPolicy === 'public'
-      ? parsed.protocol === 'https:'
-      : parsed.protocol === 'https:' || parsed.protocol === 'ssh:') &&
+    parsed.protocol === 'https:' &&
     !isBlockedAuthProviderHost(parsed.hostname)
   );
 };
@@ -1108,9 +1106,7 @@ export function registerWorkspaceExtensionRoutes(
           isPortableAbsolutePath(sourceValue) || sourceValue.startsWith('.');
         if (localSource) {
           try {
-            const metadata = await parseInstallSource(sourceValue, {
-              networkPolicy: 'public',
-            });
+            const metadata = await parseInstallSource(sourceValue);
             assertDaemonExtensionInstallSource(
               metadata,
               sourceValue,
