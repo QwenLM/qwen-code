@@ -1738,6 +1738,19 @@ export class SessionArtifactStore {
       } else if (status.status === 'missing') {
         artifact.sizeBytes = undefined;
       } else if (status.sizeBytes !== undefined) {
+        if (
+          artifact.status === 'changed' &&
+          artifact.metadata?.[WORKSPACE_CONTENT_SIZE_BYTES_METADATA_KEY] ===
+            undefined
+        ) {
+          const baseline = recordedWorkspaceSizeBytes(artifact);
+          if (baseline !== undefined) {
+            artifact.metadata = {
+              ...artifact.metadata,
+              [WORKSPACE_CONTENT_SIZE_BYTES_METADATA_KEY]: baseline,
+            };
+          }
+        }
         artifact.sizeBytes = status.sizeBytes;
       }
       if (artifact.status === 'available' && !status.escaped) {
@@ -2076,6 +2089,9 @@ function mergeArtifact(
         ? undefined
         : (incoming.lastStatAt ?? existing.lastStatAt),
     updatedAt: existing.updatedAt,
+    lastObservedSha256: undefined,
+    lastObservedSizeBytes: undefined,
+    lastObservedMtimeMs: undefined,
   };
 
   if (publishedUpdate) {
@@ -2344,7 +2360,10 @@ function selectEvictionCandidate(
   return (
     oldest(
       candidates,
-      (artifact) => artifact.status === 'missing' && !artifact.clientRetained,
+      (artifact) =>
+        artifact.status === 'missing' &&
+        artifact.missingFromStatError !== true &&
+        !artifact.clientRetained,
     ) ??
     oldest(
       candidates,

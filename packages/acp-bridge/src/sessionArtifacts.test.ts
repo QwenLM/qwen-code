@@ -539,7 +539,11 @@ describe('SessionArtifactStore', () => {
 
     vi.setSystemTime(new Date(Date.now() + 6_000));
     const stillChanged = await store.get(artifactId);
-    expect(stillChanged).toMatchObject({ status: 'changed', sizeBytes: 11 });
+    expect(stillChanged).toMatchObject({
+      status: 'changed',
+      sizeBytes: 11,
+      metadata: { 'qwen.workspace.sizeBytes': 5 },
+    });
     expect(stillChanged?.updatedAt).toBe(changed?.updatedAt);
   });
 
@@ -582,6 +586,45 @@ describe('SessionArtifactStore', () => {
     vi.setSystemTime(new Date(Date.now() + 6_000));
     const restat = await store.get(artifactId);
     expect(restat?.updatedAt).toBe(secondEdit?.updatedAt);
+  });
+
+  it('does not bump updatedAt again after re-registering a changed workspace file', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's1-reregister-clears-observation',
+      workspaceCwd: workspace,
+    });
+    const filePath = path.join(workspace, 'report.txt');
+    await fs.writeFile(filePath, 'aaaa');
+    await store.upsertMany([{ title: 'Report', workspacePath: 'report.txt' }]);
+
+    await fs.writeFile(filePath, 'bbbb');
+    await fs.utimes(
+      filePath,
+      new Date('2026-07-06T00:00:00.000Z'),
+      new Date('2026-07-06T00:00:00.000Z'),
+    );
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(Date.now() + 6_000));
+    const artifactId = stableSessionArtifactId(
+      's1-reregister-clears-observation',
+      'workspace:report.txt',
+    );
+    await expect(store.get(artifactId)).resolves.toMatchObject({
+      status: 'changed',
+    });
+
+    const reregistered = await store.upsertMany([
+      { title: 'Report', workspacePath: 'report.txt' },
+    ]);
+    const afterRegister = reregistered.changes[0]?.artifact?.updatedAt;
+    expect(reregistered.changes[0]?.artifact).toMatchObject({
+      status: 'available',
+    });
+
+    vi.setSystemTime(new Date(Date.now() + 6_000));
+    const refreshed = (await store.list()).artifacts[0];
+    expect(refreshed).toMatchObject({ status: 'available', sizeBytes: 4 });
+    expect(refreshed?.updatedAt).toBe(afterRegister);
   });
 
   it('lets a client record a workspace path after write_file vanish-forget', async () => {
@@ -3996,6 +4039,82 @@ describe('SessionArtifactStore', () => {
         expect.objectContaining({ id: keep.changes[0]?.artifactId }),
         expect.objectContaining({ id: createdId }),
       ],
+    });
+  });
+
+  it('does not evict a write_file artifact whose missing status is a transient stat error', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-08-24T00:00:00.000Z'));
+    const store = new SessionArtifactStore({
+      sessionId: 's8-write-file-overflow-stat-error',
+      workspaceCwd: workspace,
+      maxArtifacts: 2,
+    });
+    await fs.writeFile(path.join(workspace, 'keep.html'), '<html>a</html>');
+    await fs.writeFile(path.join(workspace, 'error.html'), '<html>b</html>');
+    const keep = await store.upsertMany([
+      {
+        title: 'keep.html',
+        workspacePath: 'keep.html',
+        toolName: 'write_file',
+      },
+    ]);
+    const errored = await store.upsertMany([
+      {
+        title: 'error.html',
+        workspacePath: 'error.html',
+        toolName: 'write_file',
+      },
+    ]);
+
+    const originalRealpath = fs.realpath.bind(fs);
+    const realpathSpy = vi
+      .spyOn(fs, 'realpath')
+      .mockImplementation(async (entry) => {
+        if (String(entry).endsWith('error.html')) {
+          throw Object.assign(new Error('too many open files'), {
+            code: 'EMFILE',
+          });
+        }
+        return originalRealpath(entry);
+      });
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockReturnValue(true as never);
+    try {
+      await expect(store.list()).resolves.toMatchObject({
+        artifacts: expect.arrayContaining([
+          expect.objectContaining({
+            id: errored.changes[0]?.artifactId,
+            status: 'missing',
+          }),
+        ]),
+      });
+    } finally {
+      realpathSpy.mockRestore();
+      stderr.mockRestore();
+    }
+
+    vi.setSystemTime(new Date('2026-08-24T00:00:02.000Z'));
+    const overflow = await store.upsertMany([
+      { title: 'New link', url: 'https://example.com/new' },
+    ]);
+    expect(overflow.changes).toContainEqual(
+      expect.objectContaining({
+        action: 'removed',
+        artifactId: keep.changes[0]?.artifactId,
+        reason: 'eviction',
+      }),
+    );
+    expect(overflow.changes).not.toContainEqual(
+      expect.objectContaining({
+        artifactId: errored.changes[0]?.artifactId,
+      }),
+    );
+    await expect(store.list()).resolves.toMatchObject({
+      artifacts: expect.arrayContaining([
+        expect.objectContaining({ id: errored.changes[0]?.artifactId }),
+      ]),
     });
   });
 
