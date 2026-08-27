@@ -417,17 +417,11 @@ export function SkillsManagerPage({
               >
                 <DropdownMenuGroup>
                   <DropdownMenuItem
-                    disabled={
-                      busySkill !== null ||
-                      !canToggleSkills ||
-                      selectedSkill.userInvocable === false
-                    }
+                    disabled={busySkill !== null || !canToggleSkills}
                     title={
                       !canToggleSkills
                         ? t('skills.toggleUnsupported')
-                        : selectedSkill.userInvocable === false
-                          ? t('skills.notToggleable')
-                          : undefined
+                        : undefined
                     }
                     onSelect={() => void toggleSkill(selectedSkill)}
                   >

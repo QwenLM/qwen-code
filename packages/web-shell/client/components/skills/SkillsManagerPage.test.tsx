@@ -164,6 +164,41 @@ describe('SkillsManagerPage', () => {
     expect(enable?.hasAttribute('data-disabled')).toBe(true);
   });
 
+  it('allows settings writes for non-user-invocable Skills', async () => {
+    const disabledSkill: DaemonWorkspaceSkillStatus = {
+      kind: 'skill',
+      status: 'disabled',
+      name: 'model-only-helper',
+      description: 'Model-only helper',
+      level: 'user',
+      modelInvocable: true,
+      userInvocable: false,
+      disabledReason: 'default',
+    };
+    const enabledSkill: DaemonWorkspaceSkillStatus = {
+      ...disabledSkill,
+      status: 'ok',
+      disabledReason: undefined,
+    };
+    skillsState.current.skills = [disabledSkill];
+    skillsState.current.reload.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/workspace/demo',
+      initialized: true,
+      skills: [enabledSkill],
+      errors: [],
+    });
+
+    await renderPage();
+    await openDisabledSkill(disabledSkill.name);
+    await enableSelectedSkill();
+
+    expect(skillsState.current.setEnabled).toHaveBeenCalledWith(
+      disabledSkill.name,
+      true,
+    );
+  });
+
   it('shows the authoritative enabled state after a normal toggle', async () => {
     const disabledSkill: DaemonWorkspaceSkillStatus = {
       kind: 'skill',
