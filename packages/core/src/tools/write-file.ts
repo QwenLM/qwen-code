@@ -63,7 +63,10 @@ import {
   hasControlCharacter,
   hasUnsafeDisplayPayload,
 } from './record-artifact.js';
-import { OFFICE_DOCUMENT_EXTENSIONS } from '../utils/workspace-artifact-directory.js';
+import {
+  OFFICE_DOCUMENT_EXTENSIONS,
+  pathHasSkippedDirectoryComponent,
+} from '../utils/workspace-artifact-directory.js';
 import { toCanonicalWorkspaceArtifactPath } from '../utils/workspace-artifact-path.js';
 
 const debugLogger = createDebugLogger('WRITE_FILE');
@@ -111,6 +114,14 @@ export interface WriteFileToolParams {
    * Initially proposed content.
    */
   ai_proposed_content?: string;
+
+  /**
+   * When false, skip the automatic session-artifact registration that
+   * write_file otherwise does for artifact-like files (html, pdf, images).
+   * Use this for intermediate files that will be deleted, such as HTML
+   * written only to print a PDF.
+   */
+  record_as_artifact?: boolean;
 }
 
 class WriteFileToolInvocation extends BaseToolInvocation<
@@ -610,11 +621,14 @@ class WriteFileToolInvocation extends BaseToolInvocation<
           `User modified the \`content\` to be: ${content}`,
         );
       }
-      const artifact = buildWorkspaceArtifactMetadata(
-        this.config,
-        file_path,
-        postWriteSizeBytes,
-      );
+      const artifact =
+        this.params.record_as_artifact === false
+          ? null
+          : buildWorkspaceArtifactMetadata(
+              this.config,
+              file_path,
+              postWriteSizeBytes,
+            );
       if (artifact) {
         llmSuccessMessageParts.push(
           formatRecordArtifactReminder(artifact.workspacePath),
@@ -784,6 +798,9 @@ function resolveRecordedWorkspaceFile(
   if (!workspacePath) {
     return null;
   }
+  if (pathHasSkippedDirectoryComponent(workspacePath)) {
+    return null;
+  }
   return { filePath: resolvedFile, workspacePath };
 }
 
@@ -809,6 +826,8 @@ export class WriteFileTool
       ToolDisplayNames.WRITE_FILE,
       `Writes content to a specified file in the local filesystem. A request to create or generate a file does not establish that the target path is new. Unless the target's absence or current text contents have already been established in this session, you MUST use the ${ToolNames.READ_FILE} tool first; if the file does not exist, then create it. With prior-read enforcement enabled, blind overwrites are rejected. The file_path argument MUST be an absolute path. Always construct it by combining the project root with the file's relative path (e.g. project root '/path/to/project/' + relative 'foo/bar.txt' = '/path/to/project/foo/bar.txt'). If the user provides a relative path, resolve it against the project root first.
 
+Artifact-like files such as HTML, PDF, images, notebooks, and office documents are automatically registered as session artifacts. Intermediate files that exist only to produce another artifact — for example HTML written solely to print a PDF — must set record_as_artifact=false, or be written under .qwen/tmp/ so they are not registered. Delete those intermediates when done.
+
 The user has the ability to modify \`content\`. If modified, this will be stated in the response.`,
       Kind.Edit,
       {
@@ -821,6 +840,11 @@ The user has the ability to modify \`content\`. If modified, this will be stated
           content: {
             description: 'The content to write to the file.',
             type: 'string',
+          },
+          record_as_artifact: {
+            description:
+              'Set false for intermediate files that should not appear as session artifacts, such as HTML used only to print a PDF. Defaults to true for artifact-like extensions.',
+            type: 'boolean',
           },
         },
         required: ['file_path', 'content'],

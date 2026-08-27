@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { Config } from '../config/config.js';
+import { deriveConfig, type Config } from '../config/config.js';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type {
@@ -456,10 +456,9 @@ export function createMemoryScopedAgentConfig(
     },
   };
 
-  const scopedConfig = Object.create(config) as Config;
-  scopedConfig.getPermissionManager = () =>
-    scopedPm as unknown as PermissionManager;
-  scopedConfig.allowsDirectAutoMemoryRead = () => true;
-  scopedConfig.allowsDirectAutoMemoryWrite = () => true;
-  return scopedConfig;
+  return deriveConfig(config, {
+    getPermissionManager: () => scopedPm as unknown as PermissionManager,
+    allowsDirectAutoMemoryRead: () => true,
+    allowsDirectAutoMemoryWrite: () => true,
+  });
 }
