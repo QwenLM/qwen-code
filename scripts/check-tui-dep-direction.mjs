@@ -16,9 +16,10 @@
  * Usage:  node scripts/check-tui-dep-direction.mjs
  * Exit 0 = all rules hold; exit 1 = violations found (or the scan itself
  * was incomplete — unlistable directories fail the gate instead of
- * silently shrinking it; symlinks are followed, not skipped, but a
- * symlink whose target escapes the physical rule root fails the gate so
- * traversal cannot leave it, and imports resolve from the real location).
+ * silently shrinking it, and any symlink fails it too, because a file
+ * reached through a link resolves relative imports from the link's
+ * lexical location, not the target's physical one, so no link can be
+ * trusted to keep resolution inside the rule root).
  *
  * Detection parses each file with the TypeScript compiler (already a repo
  * devDependency) and walks ImportDeclaration / ExportDeclaration / dynamic
@@ -28,8 +29,8 @@
  * interpolated templates cannot mask or fake an import.
  */
 
-import { readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
-import { dirname, extname, join, relative, resolve, sep } from 'node:path';
+import { readdirSync, readFileSync, realpathSync } from 'node:fs';
+import { dirname, extname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { exit, stdout } from 'node:process';
 import ts from 'typescript';
@@ -53,40 +54,23 @@ const SKIP_DIRS = new Set(['node_modules', 'dist', '.git']);
 
 /**
  * Walk a directory tree collecting source files. A gate whose only product
- * is trust must not shrink silently: symlinked entries are followed (with a
- * realpath visited-set guarding cycles, so a committed symlink cannot evade
- * the rules) and unlistable directories are collected as diagnostics for
- * the caller to fail on.
+ * is trust must not shrink silently: unlistable directories are collected as
+ * diagnostics for the caller to fail on.
  *
- * Symlink containment: every symlink target is resolved physically and must
- * stay inside the physical rule root. A target escaping it would let the
- * walker recursively read outside the repository, and would desync relative
- * imports from their real source location (a file reached via a symlink
- * resolves `./sibling` lexically, not from where the bytes really live),
- * so escaped symlinks are collected as diagnostics and fail the gate.
+ * Symlinks fail closed. `checkRule` resolves a file's relative imports from
+ * the path the file was reached at, but a symlink's bytes live wherever the
+ * link points — so resolution from the link's lexical path can report an
+ * escape that physically stays in the root, or (worse) pass an import that
+ * physically escapes. Neither direction is auditable link-by-link, and the
+ * tree commits no symlinks, so any symlink is reported and fails the gate.
+ * Because symlinks are never followed, traversal cannot cycle or leave the
+ * root.
  */
 function listSourceFiles(root) {
   const files = [];
   const unreadableDirs = [];
-  const escapedSymlinks = [];
-  const visitedDirs = new Set();
-  // The root itself may sit behind a symlink; anchor containment on its
-  // physical location so in-root links resolve consistently.
-  const realRoot = realpathSync(root);
-  const escapesRoot = (target) => {
-    const rel = relative(realRoot, target);
-    return rel === '..' || rel.startsWith(`..${sep}`);
-  };
+  const symlinks = [];
   const walk = (dir) => {
-    let realDir;
-    try {
-      realDir = realpathSync(dir);
-    } catch (error) {
-      unreadableDirs.push(`${dir} (${error.message})`);
-      return;
-    }
-    if (visitedDirs.has(realDir)) return;
-    visitedDirs.add(realDir);
     let entries;
     try {
       entries = readdirSync(dir, { withFileTypes: true });
@@ -97,31 +81,7 @@ function listSourceFiles(root) {
     for (const entry of entries) {
       const full = join(dir, entry.name);
       if (entry.isSymbolicLink()) {
-        // The target may be a file, a directory, or dangling; stat it so a
-        // committed symlink cannot evade either rule.
-        let stats;
-        try {
-          stats = statSync(full);
-        } catch (error) {
-          unreadableDirs.push(`${full} (${error.message})`);
-          continue;
-        }
-        if (stats.isDirectory()) {
-          if (escapesRoot(realpathSync(full))) {
-            escapedSymlinks.push(`${full} -> ${realpathSync(full)}`);
-            continue;
-          }
-          if (!SKIP_DIRS.has(entry.name)) walk(full);
-        } else if (
-          stats.isFile() &&
-          SOURCE_EXTENSIONS.has(extname(entry.name))
-        ) {
-          if (escapesRoot(realpathSync(full))) {
-            escapedSymlinks.push(`${full} -> ${realpathSync(full)}`);
-            continue;
-          }
-          files.push(full);
-        }
+        symlinks.push(full);
         continue;
       }
       if (entry.isDirectory()) {
@@ -132,7 +92,7 @@ function listSourceFiles(root) {
     }
   };
   walk(root);
-  return { files: files.sort(), unreadableDirs, escapedSymlinks };
+  return { files: files.sort(), unreadableDirs, symlinks };
 }
 
 /**
@@ -256,7 +216,7 @@ function bannedFamily(spec) {
 }
 
 function checkRule({ label, root, rules, enumeration }) {
-  const { files, unreadableDirs, escapedSymlinks } =
+  const { files, unreadableDirs, symlinks } =
     enumeration ?? listSourceFiles(root);
   let specifiers = 0;
   const violations = [];
@@ -309,7 +269,7 @@ function checkRule({ label, root, rules, enumeration }) {
     specifiers,
     violations,
     unreadableDirs,
-    escapedSymlinks,
+    symlinks,
   };
 }
 
@@ -340,7 +300,7 @@ function requirePopulatedRoot(root, label) {
 
 function main() {
   // Enumerate once per rule root so diagnostics (unlistable directories,
-  // escaped symlinks) are attributed to the same rule block as the scan.
+  // symlinks) are attributed to the same rule block as the scan.
   const coreEnumeration = requirePopulatedRoot(CORE_SRC, 'packages/core/src');
   const uiModelEnumeration = requirePopulatedRoot(
     UI_MODEL,
@@ -374,8 +334,8 @@ function main() {
       stdout.write(`error: could not list directory: ${dir}\n`);
       failed = true;
     }
-    for (const link of result.escapedSymlinks) {
-      stdout.write(`error: symlink escapes the rule root: ${link}\n`);
+    for (const link of result.symlinks) {
+      stdout.write(`error: symlink in scanned tree (not followed): ${link}\n`);
       failed = true;
     }
   }

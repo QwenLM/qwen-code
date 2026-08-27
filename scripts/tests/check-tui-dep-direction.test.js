@@ -250,7 +250,7 @@ describe('checkRule', () => {
     expect(contained.violations).toEqual([]);
   });
 
-  it('follows symlinked files and directories inside the rule root', () => {
+  it('fails closed on symlinks inside the rule root instead of following them', () => {
     const root = makeTemporaryDirectory();
     const scanRoot = join(root, 'scanned');
     mkdirSync(scanRoot);
@@ -269,22 +269,22 @@ describe('checkRule', () => {
       root: scanRoot,
       rules: { noFramework: true },
     });
-    // leak.ts is reached once as a real file and once through the file
-    // symlink; the directory symlink dedups against the real directory.
-    expect(result.violations).toHaveLength(2);
-    expect(result.escapedSymlinks).toEqual([]);
+    // leak.ts is scanned once as a real file; both symlinks fail the gate
+    // and are never followed, so no link can mask or fake an import.
+    expect(result.violations).toHaveLength(1);
+    expect(result.symlinks).toHaveLength(2);
   });
 
-  it('fails the gate when a symlink target escapes the physical root', () => {
+  it('fails closed when a symlink target escapes the rule root', () => {
     const root = makeTemporaryDirectory();
     writeSource(root, 'outside/config/settings.ts', 'export const x = 1;\n');
     writeSource(root, 'outside/sneaky.ts', "import { render } from 'ink';\n");
     const scanRoot = join(root, 'ui-model');
     mkdirSync(scanRoot);
     writeSource(root, 'ui-model/clean.ts', "import { z } from 'zod';\n");
-    // The review scenario: a file inside the rule root that is actually
-    // served from outside it, where its lexical relative imports would
-    // resolve inside the root and mask the escape.
+    // A file served from outside the rule root whose lexical relative
+    // imports would resolve inside it; the link must fail the gate, not be
+    // scanned.
     symlinkSync(
       join(root, 'outside', 'sneaky.ts'),
       join(scanRoot, 'dialog-scope.ts'),
@@ -301,11 +301,36 @@ describe('checkRule', () => {
       root: scanRoot,
       rules: { noFramework: true, selfContained: true },
     });
-    expect(result.escapedSymlinks).toHaveLength(2);
-    expect(result.escapedSymlinks.join(' ')).toContain('dialog-scope.ts');
-    expect(result.escapedSymlinks.join(' ')).toContain('config-dir');
-    // Escaped entries are not scanned, so they cannot fake a clean result.
+    expect(result.symlinks).toHaveLength(2);
+    expect(result.symlinks.join(' ')).toContain('dialog-scope.ts');
+    expect(result.symlinks.join(' ')).toContain('config-dir');
+    // Symlinked entries are not scanned, so they cannot fake a clean result.
     expect(result.scanned).toBe(1);
+    expect(result.violations).toEqual([]);
+  });
+
+  it('fails closed on a link whose lexical path masks a physical escape', () => {
+    // Reviewer's end-to-end witness: deep/deeper/link.ts -> dist/target.ts,
+    // where the physical target imports ../../../cli/secret.js. Lexical
+    // resolution from the link stays inside the root (and dist/ is skipped),
+    // so only the fail-closed link diagnostic prevents a false PASS.
+    const root = makeTemporaryDirectory();
+    writeSource(root, 'dist/target.ts', "import '../../../cli/secret.js';\n");
+    writeSource(root, 'deep/deeper/keep.ts', "import { z } from 'zod';\n");
+    symlinkSync(
+      join(root, 'dist', 'target.ts'),
+      join(root, 'deep', 'deeper', 'link.ts'),
+      'file',
+    );
+
+    const result = checkRule({
+      label: 'masked-escape',
+      root,
+      rules: { noFramework: true, selfContained: true },
+    });
+    expect(result.violations).toEqual([]);
+    expect(result.symlinks).toHaveLength(1);
+    expect(result.symlinks[0]).toContain('link.ts');
   });
 
   it.skipIf(process.platform === 'win32')(
@@ -329,15 +354,16 @@ describe('checkRule', () => {
 });
 
 describe('listSourceFiles', () => {
-  it('does not revisit a directory reached through two symlinked paths', () => {
+  it('reports symlinked aliases instead of following them', () => {
     const root = makeTemporaryDirectory();
     mkdirSync(join(root, 'real'));
     writeFileSync(join(root, 'real', 'a.ts'), "import { z } from 'zod';\n");
     symlinkSync(join(root, 'real'), join(root, 'alias-one'), 'dir');
     symlinkSync(join(root, 'real'), join(root, 'alias-two'), 'dir');
 
-    const { files, unreadableDirs } = listSourceFiles(root);
+    const { files, symlinks, unreadableDirs } = listSourceFiles(root);
     expect(files).toHaveLength(1);
+    expect(symlinks).toHaveLength(2);
     expect(unreadableDirs).toEqual([]);
   });
 });
