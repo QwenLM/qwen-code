@@ -342,6 +342,7 @@ describe('extension management v2 REST', () => {
       expect(response.status).toBe(200);
       expect(response.body.features).toContain('extension_management_v2');
       expect(response.body.features).toContain('extension_git_credentials');
+      expect(response.body.features).toContain('extension_local_path_install');
       expect(response.body.features).toContain('extension_batch_activation_v2');
       expect(response.body.features).not.toContain(
         'workspace_qualified_extensions',
@@ -1683,6 +1684,138 @@ describe('extension management v2 REST', () => {
       await fsp.rm(h.scratch, { recursive: true, force: true });
     }
   });
+
+  it('installs a daemon-local path through the global V2 route', async () => {
+    const h = await makeHarness();
+    mockExtensionManager();
+    const source = path.join(h.scratch, 'local-extension');
+    await fsp.mkdir(source);
+    const prepareInstall = vi
+      .spyOn(ExtensionManager.prototype, 'prepareExtensionInstall')
+      .mockResolvedValue({} as never);
+    vi.spyOn(
+      ExtensionManager.prototype,
+      'commitPreparedExtension',
+    ).mockResolvedValue({
+      identity: { id: extensionId, name: 'local-extension' },
+      version: '1.0.0',
+      generation: 7,
+    } as never);
+    vi.spyOn(
+      ExtensionManager.prototype,
+      'disposePreparedExtension',
+    ).mockResolvedValue();
+    try {
+      const started = await auth(
+        request(h.app)
+          .post('/extensions/install')
+          .send({
+            source,
+            consent: true,
+            activation: {
+              scope: 'workspace',
+              workspaceId: h.secondary.workspaceId,
+            },
+          }),
+      );
+
+      expect(started.status).toBe(202);
+      await expect(
+        pollOperation(h.app, started.body.operationId),
+      ).resolves.toMatchObject({
+        status: 'succeeded',
+        result: {
+          status: 'installed',
+          source,
+          name: 'local-extension',
+        },
+      });
+      expect(prepareInstall).toHaveBeenCalledWith(
+        expect.objectContaining({
+          installMetadata: expect.objectContaining({ source, type: 'local' }),
+          initialActivation: {
+            scope: 'workspace',
+            workspacePath: h.secondary.workspaceCwd,
+          },
+        }),
+      );
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('does not install a relative local path through the global V2 route', async () => {
+    const h = await makeHarness();
+    mockExtensionManager();
+    const prepareInstall = vi.spyOn(
+      ExtensionManager.prototype,
+      'prepareExtensionInstall',
+    );
+    try {
+      const started = await auth(
+        request(h.app)
+          .post('/extensions/install')
+          .send({
+            source: '.',
+            consent: true,
+            activation: { scope: 'user' },
+          }),
+      );
+
+      expect(started.status).toBe(202);
+      await expect(
+        pollOperation(h.app, started.body.operationId),
+      ).resolves.toMatchObject({
+        status: 'failed',
+        error:
+          'Local extension sources must be absolute daemon-host paths; relative paths are not supported over the daemon endpoint.',
+      });
+      expect(prepareInstall).not.toHaveBeenCalled();
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    { option: 'ref', installOptions: { ref: 'v1' } },
+    { option: 'autoUpdate', installOptions: { autoUpdate: true } },
+  ])(
+    'does not install a daemon-local path with $option through the global V2 route',
+    async ({ installOptions }) => {
+      const h = await makeHarness();
+      mockExtensionManager();
+      const source = path.join(h.scratch, 'local-extension');
+      await fsp.mkdir(source);
+      const prepareInstall = vi.spyOn(
+        ExtensionManager.prototype,
+        'prepareExtensionInstall',
+      );
+      try {
+        const started = await auth(
+          request(h.app)
+            .post('/extensions/install')
+            .send({
+              source,
+              ...installOptions,
+              consent: true,
+              activation: { scope: 'user' },
+            }),
+        );
+
+        expect(started.status).toBe(202);
+        await expect(
+          pollOperation(h.app, started.body.operationId),
+        ).resolves.toMatchObject({
+          status: 'failed',
+          error:
+            '`ref` and `autoUpdate` are not applicable for local extensions.',
+        });
+        expect(prepareInstall).not.toHaveBeenCalled();
+      } finally {
+        await fsp.rm(h.scratch, { recursive: true, force: true });
+      }
+    },
+  );
 
   it.each([
     { persistence: undefined, expected: 'one_time' as const },

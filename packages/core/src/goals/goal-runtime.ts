@@ -28,6 +28,7 @@ import {
   GOAL_CHECKPOINT_STALLED_REASON,
   GOAL_DEFAULT_TOKEN_BUDGET,
   GOAL_EVIDENCE_CATALOG_EXHAUSTED_REASON,
+  GOAL_INFEASIBLE_NEXT_STEP,
   GOAL_STATE_VERSION,
   goalTokenBudgetReason,
   isGoalTokenBudgetSpent,
@@ -119,6 +120,18 @@ export interface GoalTurnHost {
   startGoalTurn(input: {
     permit: GoalTurnPermit;
     continuationContext: string;
+    /**
+     * Set on the first continuation carrying an objective the model has not
+     * been handed before, when it had been handed an earlier one. Hosts pass
+     * it straight to `renderGoalContinuationPrompt`.
+     */
+    objectiveUpdated?: boolean;
+    /**
+     * Set on the one continuation a spent budget still grants: the model is
+     * to hand off, not to keep working. Hosts pass it straight to
+     * `renderGoalContinuationPrompt`.
+     */
+    windDown?: boolean;
     verifierFeedback?: string;
   }): Promise<void>;
   preemptGoalTurn(reason: string): void;
@@ -167,6 +180,15 @@ export interface GoalRuntime {
   bindHost(host: GoalTurnHost): () => void;
   beginTurn(turnKey: string): GoalTurnPermit | undefined;
   releaseTurn(turnKey: string): Promise<boolean>;
+  /**
+   * Confirms the turn's prompt reached the model.
+   *
+   * Every host resolves `startGoalTurn` at enqueue time, before the model
+   * sees the prompt, so acceptance is not delivery. A continuation dropped
+   * after this call keeps its announcement; one dropped before it leaves
+   * its notice owed to the replacement continuation.
+   */
+  markTurnDelivered(turnKey: string): void;
   permitForTurn(turnKey: string): GoalTurnPermit | undefined;
   getVerifierFeedback(permit: GoalTurnPermit): string | undefined;
   finishTurn(permit: GoalTurnPermit): Promise<void>;
@@ -219,6 +241,29 @@ export function createGoalRuntime(
   let currentTurnKey: string | undefined;
   let queuedTurnKey: string | undefined;
   let continuationQueued = false;
+  /**
+   * The objective text the model last received in a continuation prompt.
+   *
+   * Committed when a continuation is delivered (`markTurnDelivered`) or finishes,
+   * not when it is merely accepted: every host resolves `startGoalTurn` at
+   * enqueue time, and a turn dropped before the model sees it must leave
+   * its notice owed to the replacement. Keyed on content rather than the
+   * (goalId, revision) pair because an edit that bumps the revision without
+   * changing the text hands the model nothing new. Only continuations
+   * count: a user turn carries the user's own text, not the objective, so
+   * it neither announces nor stales one. Held in memory rather than on the
+   * record because the consequence of losing it across a restart is one
+   * missing prompt line -- the objective itself still travels in the data
+   * block on every turn, and `get_goal` stays authoritative.
+   */
+  let announcedObjective: string | undefined;
+  /**
+   * The announcement the in-flight continuation carries, committed or
+   * discarded as a whole when the turn settles: delivered turns commit it,
+   * released or invalidated undelivered turns discard it.
+   */
+  let currentTurnAnnouncement: string | undefined;
+  let currentTurnDelivered = false;
   let currentProposal:
     | {
         proposal: GoalTerminalProposal;
@@ -252,6 +297,12 @@ export function createGoalRuntime(
   let currentTurnFeedback: string | undefined;
   let restored = false;
   let restoreActivationPending = false;
+  /**
+   * The permit turn of the wind-down continuation now in flight, if any.
+   * In memory only: a wind-down the host dropped undelivered must be minted
+   * again, and only the turn that actually finishes stamps the record.
+   */
+  let windDownTurnId: string | undefined;
   let restorePreparation: Promise<CheckpointAttempt | undefined> | undefined;
   let restoreActivation: Promise<void> | undefined;
   let preparedRestoreCause: GoalStateCause | undefined;
@@ -435,7 +486,20 @@ export function createGoalRuntime(
     }
   };
 
-  const flushContinuation = (cause?: GoalStateCause) => {
+  /**
+   * Settles the in-flight continuation's announcement: delivered turns
+   * commit it (the model holds that objective now), anything else discards
+   * it so a later continuation re-derives the notice it carried.
+   */
+  const settleCurrentTurnAnnouncement = (delivered: boolean) => {
+    if (delivered && currentTurnAnnouncement !== undefined) {
+      announcedObjective = currentTurnAnnouncement;
+    }
+    currentTurnAnnouncement = undefined;
+    currentTurnDelivered = false;
+  };
+
+  const flushContinuation = (cause?: GoalStateCause, windDown = false) => {
     if (
       !continuationQueued ||
       !host ||
@@ -462,11 +526,26 @@ export function createGoalRuntime(
     currentPermitHost = scheduledHost;
     currentTurnKey = `goal-runtime:${currentPermit.turnId}`;
     const startedPermit = structuredClone(currentPermit);
+    // The model is about to be handed objective text different from the one
+    // it last received. Content is the key, not the (goalId, revision) pair:
+    // a no-op edit bumps the revision without changing what the model gets,
+    // and firing the notice for a change that did not happen would make the
+    // model stop work for nothing. No previous announcement means this is
+    // the model's first continuation, which supersedes nothing.
+    const objectiveUpdated =
+      announcedObjective !== undefined &&
+      announcedObjective !== continuationContext;
+    currentTurnAnnouncement = continuationContext;
+    currentTurnDelivered = false;
+    windDownTurnId = windDown ? startedPermit.turnId : undefined;
     snapshot = { ...snapshot, activity: 'running' };
     broadcast(cause);
     const handleStartFailure = () => {
       void enqueue(async () => {
         if (isCurrentPermit(startedPermit)) {
+          // The prompt never reached a host: discard the announcement
+          // whole so the retry re-derives the notice it carried.
+          settleCurrentTurnAnnouncement(false);
           const nextTurnKey = queuedTurnKey;
           currentPermit = undefined;
           currentPermitHost = undefined;
@@ -503,6 +582,8 @@ export function createGoalRuntime(
       started = scheduledHost.startGoalTurn({
         permit: startedPermit,
         continuationContext,
+        ...(objectiveUpdated ? { objectiveUpdated } : {}),
+        ...(windDown ? { windDown } : {}),
         ...(verifierFeedback ? { verifierFeedback } : {}),
       });
     } catch {
@@ -524,7 +605,15 @@ export function createGoalRuntime(
       return;
     }
     if (isGoalTokenBudgetSpent(snapshot.goal)) {
-      stopForSpentBudget();
+      // A spent window buys one hand-off before it stops. The record marks
+      // the hand-off that finished; until then -- never granted, or granted
+      // and dropped by the host before the model saw it -- grant it.
+      if (snapshot.goal.windDownTurnId !== undefined) {
+        stopForSpentBudget();
+        return;
+      }
+      continuationQueued = true;
+      flushContinuation(cause, true);
       return;
     }
     continuationQueued = true;
@@ -614,7 +703,7 @@ export function createGoalRuntime(
       ...base,
       proposal: { ...attempt.proposal, status: 'blocked' },
       blockedPolicy:
-        'A blocked Goal is resumable. It may be accepted immediately only when the evidence shows that new user authority or a material user choice is required, or that an external state change is required, and no meaningful in-scope work remains. An ordinary technical blocker requires evidence of the same cause from the current and two immediately preceding Goal turns. Difficulty, uncertainty, incomplete work, or a preference for clarification do not by themselves justify blocked.',
+        'A blocked Goal is resumable. It may be accepted immediately only when the evidence shows that new user authority or a material user choice is required, or that an external state change is required, and no meaningful in-scope work remains. An infeasible blocker may also be accepted immediately, only when cited external_fact evidence shows the objective cannot be satisfied as written: it contradicts itself, it names a target that verifiably does not exist, or it requires an action outside what the tools can perform; reject it when the obstacle is difficulty, uncertainty, information the model could still obtain, or a preference to ask. An ordinary technical blocker requires evidence of the same cause from the current and two immediately preceding Goal turns. Difficulty, uncertainty, incomplete work, or a preference for clarification do not by themselves justify blocked.',
     };
   };
 
@@ -665,7 +754,10 @@ export function createGoalRuntime(
           ...snapshot.goal,
           activeTimeMs: elapsedActiveTime(snapshot.goal, now),
           updatedAt: now,
-          lastReason: outcome.result.reason,
+          lastReason:
+            attempt.proposal.blockerKind === 'infeasible'
+              ? `${outcome.result.reason} ${GOAL_INFEASIBLE_NEXT_STEP}`
+              : outcome.result.reason,
         };
         const acceptedSnapshot: GoalSnapshotV2 = {
           v: GOAL_STATE_VERSION,
@@ -698,6 +790,15 @@ export function createGoalRuntime(
         continuationQueued = false;
         nextVerifierFeedback = undefined;
         currentTurnFeedback = undefined;
+        // A completed Goal ended holding the objective the model has; a
+        // fresh Goal after it is a new work item, not a replacement. A
+        // blocked Goal is suspended, not ended: it resumes with the objective
+        // the model already holds, so its announcement stays, exactly as a
+        // usage-limited Goal's does -- otherwise blocked -> edit -> resume
+        // would send no notice for a real change.
+        if (attempt.proposal.status === 'complete') {
+          announcedObjective = undefined;
+        }
         snapshot = structuredClone(terminalSnapshot);
         broadcast(attempt.proposal.status);
         return undefined;
@@ -1346,6 +1447,7 @@ export function createGoalRuntime(
           if (currentTurnFeedback !== undefined) {
             nextVerifierFeedback ??= currentTurnFeedback;
           }
+          settleCurrentTurnAnnouncement(currentTurnDelivered);
           currentPermit = undefined;
           currentPermitHost = undefined;
           currentTurnKey = undefined;
@@ -1385,6 +1487,12 @@ export function createGoalRuntime(
         return released;
       });
     },
+    markTurnDelivered(turnKey: string): void {
+      assertOperational();
+      if (currentPermit && currentTurnKey === turnKey) {
+        currentTurnDelivered = true;
+      }
+    },
     permitForTurn(turnKey: string): GoalTurnPermit | undefined {
       assertOperational();
       return currentPermit && currentTurnKey === turnKey
@@ -1408,11 +1516,20 @@ export function createGoalRuntime(
           if (!isCurrentPermit(permit) || !snapshot.goal) {
             throw new Error(STALE_GOAL_TURN_MESSAGE);
           }
+          // Finishing proves the permit was used, not that the continuation
+          // prompt was sent under it: a system message or a direct user
+          // query can claim a queued continuation's permit and send its own
+          // text instead. Only the host's delivery mark says the model saw
+          // the objective; without it the notice stays owed.
+          settleCurrentTurnAnnouncement(currentTurnDelivered);
           const recordUuid = randomUUID();
+          const finishedWindDown = windDownTurnId === permit.turnId;
           const nextGoal = reduceGoalTurnFinished(snapshot.goal, {
             now: Date.now(),
             tokensUsed: takeTurnTokens(permit.turnId),
+            ...(finishedWindDown ? { windDownTurnId: permit.turnId } : {}),
           });
+          if (finishedWindDown) windDownTurnId = undefined;
           const persistedSnapshot: GoalSnapshotV2 = {
             v: GOAL_STATE_VERSION,
             goal: nextGoal,
@@ -1666,6 +1783,7 @@ export function createGoalRuntime(
           invalidateAttempts(`Goal ${request.action}`);
         }
         if (invalidatesPermit) {
+          settleCurrentTurnAnnouncement(currentTurnDelivered);
           currentPermit = undefined;
           currentPermitHost = undefined;
           currentTurnKey = undefined;
@@ -1676,6 +1794,7 @@ export function createGoalRuntime(
           nextVerifierFeedback = undefined;
           currentTurnFeedback = undefined;
           continuationQueued = false;
+          if (request.action === 'clear') announcedObjective = undefined;
         } else if (request.action === 'resume') {
           blockedAudit = undefined;
         }
@@ -1715,6 +1834,8 @@ export function createGoalRuntime(
       blockedAudit = undefined;
       nextVerifierFeedback = undefined;
       currentTurnFeedback = undefined;
+      currentTurnAnnouncement = undefined;
+      currentTurnDelivered = false;
       preemptHost('Goal runtime disposed', invalidatedHost);
       host = undefined;
       listeners.clear();

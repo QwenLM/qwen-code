@@ -234,6 +234,7 @@ export function createSpawnChannelFactory(
         {
           cwd: workspaceCwd,
           stdio: ['pipe', 'pipe', 'pipe'],
+          detached: process.platform !== 'win32',
           windowsHide: true,
           env: childEnv,
         },
@@ -242,7 +243,7 @@ export function createSpawnChannelFactory(
       reservation.cancel();
       throw error;
     }
-    const trackedChild = reservation.attach(child);
+    const trackedChild = reservation.attach(child, { ownsProcessTree: true });
 
     // Forward child stderr to the daemon's stderr line-by-line, with a
     // `[serve pid=… cwd=…]` prefix on each line so operators can

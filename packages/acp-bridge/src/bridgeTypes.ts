@@ -768,6 +768,8 @@ export interface BridgeSessionGoal {
 export interface SessionPrInfo {
   number: number;
   url: string;
+  /** Snapshot of the PR's state at last bind/refresh; optional. */
+  state?: 'open' | 'merged' | 'closed';
 }
 
 export interface SessionMetadataUpdate {
@@ -1541,6 +1543,9 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
     opts?: CloseSessionOpts,
   ): Promise<void>;
 
+  /** Durably anchor an eligible live default session before task binding. */
+  ensureDefaultSessionPersisted?(sessionId: string): Promise<void>;
+
   /**
    * Update mutable session metadata. Supports `displayName` and `pr`.
    * Throws `SessionNotFoundError` for unknown ids.
@@ -1560,6 +1565,17 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
    * storage-agnostic. Optional so lightweight fakes may omit it.
    */
   seedSessionPrs?(sessionId: string, prs: SessionPrInfo[]): void;
+
+  /**
+   * Replace the in-memory PR binding list of a live session with the
+   * persisted sidecar contents after a rewrite that can evict bindings
+   * (the backfill cap trim). Unlike {@link seedSessionPrs}, overwrites an
+   * entry that already holds bindings, so the summary merge cannot
+   * resurrect evicted numbers from a stale entry. No-op when the entry is
+   * unknown (session not live). Callers own sidecar I/O; the bridge stays
+   * storage-agnostic. Optional so lightweight fakes may omit it.
+   */
+  setSessionPrs?(sessionId: string, prs: SessionPrInfo[]): void;
 
   /**
    * List the structured artifacts registered for a live session. Throws

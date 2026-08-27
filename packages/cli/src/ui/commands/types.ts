@@ -27,6 +27,7 @@ import type {
   ExtensionUpdateStatus,
 } from '../state/extensions.js';
 import type { ExtensionRefreshState } from '../../config/extension-refresh-state.js';
+import type { PeerMessaging } from '../../peerMessaging/peer-messaging.js';
 
 export interface NonInteractiveSlashCommandPolicy {
   readonly allowSessionReset: boolean;
@@ -62,6 +63,11 @@ export interface CommandContext {
     settings: LoadedSettings;
     logger: Logger | null;
     extensionRefreshState?: ExtensionRefreshState;
+    /**
+     * Present only when cross-session messaging is enabled and its socket
+     * bound; `/peers` treats null as "the feature is off".
+     */
+    peerMessaging?: PeerMessaging | null;
   };
   // UI state and history management
   ui: {
@@ -105,7 +111,7 @@ export interface CommandContext {
     /** Refreshes the static history display in Ink. */
     refreshStatic: () => void;
     toggleVimEnabled: () => Promise<boolean>;
-    setGeminiMdFileCount: (count: number) => void;
+    setMemoryFileCount: (count: number) => void;
     reloadCommands: () => void | Promise<void>;
     setSessionName: (name: string | null) => void;
     extensionsUpdateState: Map<string, ExtensionUpdateStatus>;
