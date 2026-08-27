@@ -482,13 +482,11 @@ export async function backfillWorkspaceSessionPrs(
         numbers.push(mapped);
       }
     }
-    if (numbers.length === 0) continue;
-    // The convention number is planned last so a fresh write makes it the
-    // sidecar's newest entry: capped lists evict from the oldest end, which
-    // must stay branch mappings, not the session's own PR.
-    if (candidate.conventionNumber !== undefined) {
-      numbers = [...numbers.slice(1), candidate.conventionNumber];
-    }
+    // The legacy-repair pass below must stay reachable for a session whose
+    // branches no longer map into the list window (its typical state), so
+    // only the GH-shaped path — which has no repairs — skips on empty
+    // numbers before reading the sidecar.
+    if (numbers.length === 0 && !isLegacyFabricated) continue;
     const prPath = sessionService.getPrSessionPathForArchiveState(
       candidate.sessionId,
       candidate.archiveState,
@@ -501,26 +499,6 @@ export async function backfillWorkspaceSessionPrs(
       existing = await readSessionPrs(prPath);
     } catch {
       existing = null;
-    }
-    const existingNumbers = new Set((existing ?? []).map((pr) => pr.number));
-    const urls = new Map<number, string>();
-    const states = new Map<number, SessionPr['state']>();
-    for (const number of numbers) {
-      if (existingNumbers.has(number)) continue;
-      let url = numberToUrl.get(number);
-      if (url === undefined) {
-        url = await resolveNumberUrl(
-          number,
-          number === candidate.conventionNumber,
-        );
-      }
-      if (url === undefined) {
-        result.unresolved += 1;
-        continue;
-      }
-      urls.set(number, url);
-      const state = numberToState.get(number);
-      if (state !== undefined) states.set(number, state);
     }
     // Repair legacy fabricated bindings: re-resolve their numbers through
     // the same capped view path. Successfully viewed ones are rewritten in
@@ -540,6 +518,42 @@ export async function backfillWorkspaceSessionPrs(
           state: numberToState.get(entry.number),
         });
       }
+    }
+    if (numbers.length === 0 && repairs.size === 0) continue;
+    // The convention number is planned last so a fresh write makes it the
+    // sidecar's newest entry: capped lists evict from the oldest end, which
+    // must stay branch mappings, not the session's own PR.
+    if (candidate.conventionNumber !== undefined) {
+      numbers = [...numbers.slice(1), candidate.conventionNumber];
+    }
+    const existingNumbers = new Set((existing ?? []).map((pr) => pr.number));
+    const urls = new Map<number, string>();
+    const states = new Map<number, SessionPr['state']>();
+    for (const number of numbers) {
+      if (existingNumbers.has(number)) {
+        // Aone fails CLOSED on identity: only an mr-view attestation lets
+        // an existing entry pass the same-PR guard, so a number this run
+        // re-planned is re-attested to stay trimmable — without this, a
+        // full sidecar's re-planned entries all count foreign and cap
+        // eviction stalls permanently. GitHub needs no attestation (its
+        // guard fails open for unlisted numbers).
+        if (aoneRepo) await resolveNumberUrl(number, false);
+        continue;
+      }
+      let url = numberToUrl.get(number);
+      if (url === undefined) {
+        url = await resolveNumberUrl(
+          number,
+          number === candidate.conventionNumber,
+        );
+      }
+      if (url === undefined) {
+        result.unresolved += 1;
+        continue;
+      }
+      urls.set(number, url);
+      const state = numberToState.get(number);
+      if (state !== undefined) states.set(number, state);
     }
     // The cap is shared with entries this run did not resolve and cannot
     // re-resolve (dialog-created bindings, PRs that fell out of the gh

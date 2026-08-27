@@ -37,6 +37,41 @@ import {
 
 const execFileAsync = promisify(execFile);
 
+// Only a POSITIVE probe is memoized: a missing or too-old a1 keeps
+// re-checking, so installing/upgrading it takes effect without a daemon
+// restart, while a healthy install costs one probe per daemon lifetime
+// instead of one per mr list/view call.
+let a1AvailabilityVerified = false;
+
+/**
+ * Test seam for the exec layer: the a1 spawn, resolved to stdout. Errors
+ * keep the exec shape (code/stdout/stderr/killed) that the error contract
+ * below keys on.
+ */
+export type A1Exec = (
+  args: readonly string[],
+  options: { timeout: number; maxBuffer?: number },
+) => Promise<{ stdout: string }>;
+
+const defaultA1Exec: A1Exec = async (args, options) => {
+  const { stdout } = await execFileAsync('a1', [...args], {
+    ...options,
+    encoding: 'utf8',
+    windowsHide: true,
+    // No env override: a1 authenticates through its own `a1 auth login`
+    // config (review precedent); there is no A1_* token convention.
+  });
+  return { stdout };
+};
+
+let a1Exec: A1Exec = defaultA1Exec;
+
+/** Test seam: swaps the a1 spawn and resets the version-probe memo. */
+export function setA1ExecForTest(exec?: A1Exec): void {
+  a1Exec = exec ?? defaultA1Exec;
+  a1AvailabilityVerified = false;
+}
+
 const A1_TIMEOUT_MS = 20_000;
 const A1_MAX_BUFFER = 16 * 1024 * 1024;
 const GIT_ORIGIN_TIMEOUT_MS = 5_000;
@@ -198,13 +233,9 @@ function assertA1Version(stdout: string): void {
 async function runA1Json<T>(args: string[]): Promise<T> {
   let stdout: string;
   try {
-    ({ stdout } = await execFileAsync('a1', [...args, '--format', 'json'], {
+    ({ stdout } = await a1Exec([...args, '--format', 'json'], {
       timeout: A1_TIMEOUT_MS,
       maxBuffer: A1_MAX_BUFFER,
-      encoding: 'utf8',
-      windowsHide: true,
-      // No env override: a1 authenticates through its own `a1 auth login`
-      // config (review precedent); there is no A1_* token convention.
     }));
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
@@ -238,20 +269,12 @@ async function runA1Json<T>(args: string[]): Promise<T> {
   return parsed as T;
 }
 
-// Only a POSITIVE probe is memoized: a missing or too-old a1 keeps
-// re-checking, so installing/upgrading it takes effect without a daemon
-// restart, while a healthy install costs one probe per daemon lifetime
-// instead of one per mr list/view call.
-let a1AvailabilityVerified = false;
-
 async function checkA1Available(): Promise<void> {
   if (a1AvailabilityVerified) return;
   let stdout: string;
   try {
-    ({ stdout } = await execFileAsync('a1', ['--version'], {
+    ({ stdout } = await a1Exec(['--version'], {
       timeout: GIT_ORIGIN_TIMEOUT_MS,
-      encoding: 'utf8',
-      windowsHide: true,
     }));
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
@@ -259,8 +282,9 @@ async function checkA1Available(): Promise<void> {
         'a1 CLI not installed; install it and run `a1 auth login`',
       );
     }
-    // An unreadable version is not a hard blocker (review fails open too).
-    a1AvailabilityVerified = true;
+    // An unreadable version is not a hard blocker (review fails open too);
+    // leave the flag unset so the next read re-probes — memoizing a FAILED
+    // probe would silence the version floor for the daemon's lifetime.
     return;
   }
   assertA1Version(stdout);

@@ -116,7 +116,7 @@ Promise<{ repoPath: string } | undefined>` — detection + coordinate in
 Promise<Array<{ number, headRefName, state }>>` — sequential pages of 20,
     stopping at a short page.
   - `viewAoneMergeRequest(repoPath, id) →
-Promise<{ number, url, state, headRefName }>` — `url` = `detailUrl`.
+Promise<{ number, url, state }>` — `url` = `detailUrl`.
   - State mapping: `merged` → `merged`; `closed` → `closed`; anything else
     (`opened`, `reopened`, `accepted`) → `open`. No `draft` variant exists in
     the sidecar (same as gh's mapping).
