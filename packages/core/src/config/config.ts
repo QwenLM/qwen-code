@@ -4214,6 +4214,12 @@ export class Config {
     unregisterSessionModel(previousSessionId);
     this.publishModelEnv();
     this.sessionData = sessionData;
+    if (isSessionTransition) {
+      const skillTool = this.toolRegistry?.getTool?.(ToolNames.SKILL);
+      if (skillTool && 'clearLoadedSkills' in skillTool) {
+        (skillTool as { clearLoadedSkills(): void }).clearLoadedSkills();
+      }
+    }
     this.clearSessionRestoreProjection();
     this.pendingRecoveredAgentsNotice = null;
     this.getOwnActiveTodoReminders().clear();
@@ -4915,9 +4921,7 @@ export class Config {
   }
 
   private forEachReasoningConfig(
-    callback: (cfg: {
-      reasoning?: ContentGeneratorConfig['reasoning'];
-    }) => void,
+    callback: (cfg: ContentGeneratorConfig) => void,
   ): void {
     if (this.contentGeneratorConfig) {
       callback(this.contentGeneratorConfig);
@@ -4929,9 +4933,31 @@ export class Config {
   }
 
   private restoreReasoningDefault(): void {
-    const reasoning = this.modelsConfig.getGenerationConfig().reasoning;
+    const defaults = this.modelsConfig.getGenerationConfig();
     this.forEachReasoningConfig((cfg) => {
-      cfg.reasoning = cloneReasoning(reasoning);
+      cfg.reasoning = cloneReasoning(defaults.reasoning);
+      if (!isTieredEffortWireModel(cfg.model)) return;
+      for (const source of ['extra_body', 'samplingParams'] as const) {
+        const current = cfg[source];
+        const baseline = defaults[source];
+        if (!current && !baseline) continue;
+        const next = { ...(current ?? {}) };
+        for (const field of [
+          'enable_thinking',
+          'reasoning_effort',
+          'thinking_budget',
+        ] as const) {
+          if (
+            baseline &&
+            Object.prototype.hasOwnProperty.call(baseline, field)
+          ) {
+            next[field] = baseline[field];
+          } else {
+            delete next[field];
+          }
+        }
+        cfg[source] = next;
+      }
     });
   }
 
@@ -4941,6 +4967,20 @@ export class Config {
       return;
     }
     this.forEachReasoningConfig((cfg) => {
+      if (
+        DashScopeOpenAICompatibleProvider.isDashScopeProvider(cfg) &&
+        isTieredEffortWireModel(cfg.model)
+      ) {
+        for (const source of ['extra_body', 'samplingParams'] as const) {
+          const layer = cfg[source];
+          if (!layer) continue;
+          const next = { ...layer };
+          delete next['enable_thinking'];
+          delete next['reasoning_effort'];
+          delete next['thinking_budget'];
+          cfg[source] = next;
+        }
+      }
       cfg.reasoning =
         preference === false
           ? false

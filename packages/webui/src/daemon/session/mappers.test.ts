@@ -115,6 +115,33 @@ describe('mapReasoningControls', () => {
       efforts: [],
     });
   });
+
+  it('maps mandatory reasoning without inventing Thinking off', () => {
+    expect(
+      mapReasoningControls([
+        {
+          id: 'reasoning_effort',
+          currentValue: 'xhigh',
+          options: [{ value: 'low' }, { value: 'medium' }, { value: 'xhigh' }],
+          _meta: {
+            'qwenCode/reasoning': {
+              defaultEffort: 'xhigh',
+              thinkingMandatory: true,
+            },
+          },
+        },
+      ]),
+    ).toEqual({
+      enabled: true,
+      effort: 'xhigh',
+      efforts: [
+        { value: 'low', name: 'low' },
+        { value: 'medium', name: 'medium' },
+        { value: 'xhigh', name: 'xhigh' },
+      ],
+      canDisable: false,
+    });
+  });
 });
 
 describe('mapProviderStatus reasoning preview', () => {
@@ -529,6 +556,74 @@ describe('updateConnectionFromDaemonEvent', () => {
         (model) => model.reasoningPreview?.enabled,
       ),
     ).toEqual([false, false]);
+  });
+
+  it('preserves mandatory reasoning constraints while patching settings previews', () => {
+    const providers = workspaceProvidersWithConfigOptions([
+      {
+        id: 'reasoning_effort',
+        currentValue: 'medium',
+        options: [
+          { value: 'low', name: 'Low' },
+          { value: 'medium', name: 'Medium' },
+          { value: 'xhigh', name: 'Extra High' },
+        ],
+        _meta: {
+          'qwenCode/reasoning': {
+            defaultEffort: 'xhigh',
+            thinkingMandatory: true,
+          },
+        },
+      },
+    ]);
+    const projected = mapProviderStatus(providers);
+    const current: DaemonConnectionState = {
+      status: 'connected',
+      providers,
+      models: projected.models,
+      currentModel: projected.currentModel,
+    };
+
+    const disabled = applyEvent(current, {
+      id: 4,
+      v: 1,
+      type: 'settings_changed',
+      data: {
+        key: 'model.reasoningEffort',
+        value: 'none',
+        scope: 'user',
+      },
+    } as DaemonEvent);
+
+    expect(disabled.models?.[0]?.reasoningPreview).toEqual({
+      enabled: true,
+      effort: 'xhigh',
+      efforts: [
+        { value: 'low', name: 'Low' },
+        { value: 'medium', name: 'Medium' },
+        { value: 'xhigh', name: 'Extra High' },
+      ],
+      canDisable: false,
+    });
+
+    const opaque = applyEvent(
+      { status: 'connected', models: projected.models },
+      {
+        id: 5,
+        v: 1,
+        type: 'settings_changed',
+        data: {
+          key: 'model.reasoningEffort',
+          value: 'Vendor.Ultra',
+          scope: 'user',
+        },
+      } as DaemonEvent,
+    );
+    expect(opaque.models?.[0]?.reasoningPreview).toMatchObject({
+      enabled: true,
+      effort: 'Vendor.Ultra',
+      canDisable: false,
+    });
   });
 
   it('updates and clears the authoritative Goal snapshot', () => {

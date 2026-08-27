@@ -10522,6 +10522,58 @@ describe('runQwenServe runtime startup failures', () => {
   });
 });
 
+// Simulate the refresh chunk vanishing under a running daemon (an in-place
+// upgrade replacing dist/): the module factory throws, so the first
+// health-triggered runtime build's dynamic import rejects.
+vi.mock('./server/session-pr-refresh.js', () => {
+  throw new Error(
+    'Cannot find module session-pr-refresh (simulated chunk replacement)',
+  );
+});
+
+describe('session-pr-refresh degraded load on the serve fast path', () => {
+  let tmpDir: string;
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    if (tmpDir) {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('degrades to no PR-state sweep instead of leaking an unhandled rejection', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-pr-refresh-degrade-')),
+    );
+    // The serve fast path installs no process-level unhandledRejection
+    // handler before the runtime builds, so record them here: without the
+    // import's .catch the rejection escapes and Node's default is to exit.
+    const rejections: unknown[] = [];
+    const recordRejection = (reason: unknown): void => {
+      rejections.push(reason);
+    };
+    process.on('unhandledRejection', recordRejection);
+    let handle: RunHandle | undefined;
+    try {
+      ({ handle } = await startDeferredDaemon(tmpDir));
+      const health = await fetch(`${handle.url}/health`);
+      expect(health.status).toBe(200);
+      // The first health schedules the runtime build; the refresh module
+      // import fires inside it and rejects on the next turns.
+      await expect(handle.runtimeReady).resolves.toBeUndefined();
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      expect(rejections).toEqual([]);
+      // The intended degradation is "no PR-state sweep" — the daemon keeps
+      // serving everything else.
+      const healthAfter = await fetch(`${handle.url}/health`);
+      expect(healthAfter.status).toBe(200);
+    } finally {
+      process.off('unhandledRejection', recordRejection);
+      await handle?.close();
+    }
+  });
+});
+
 describe('runQwenServe Web Shell signals on RunHandle', () => {
   let tmpDir: string;
 
@@ -13092,6 +13144,7 @@ describe('runQwenServe channel worker supervisor', () => {
       .spyOn(process, 'exit')
       .mockImplementation((() => undefined) as never);
     const existingSigtermListeners = new Set(process.rawListeners('SIGTERM'));
+    const existingSighupListeners = new Set(process.rawListeners('SIGHUP'));
 
     const handle = await runQwenServe(
       {
@@ -13117,11 +13170,19 @@ describe('runQwenServe channel worker supervisor', () => {
             !existingSigtermListeners.has(listener) &&
             listener.name === 'onSignal',
         ) as ((signal: NodeJS.Signals) => Promise<void>) | undefined;
+      const sighupListener = process
+        .rawListeners('SIGHUP')
+        .find(
+          (listener) =>
+            !existingSighupListeners.has(listener) &&
+            listener.name === 'onSignal',
+        ) as ((signal: NodeJS.Signals) => Promise<void>) | undefined;
       expect(signalListener).toBeDefined();
+      expect(sighupListener).toBe(signalListener);
 
       const firstSignal = signalListener!('SIGTERM');
       await Promise.resolve();
-      const secondSignal = signalListener!('SIGTERM');
+      const secondSignal = sighupListener!('SIGHUP');
       await secondSignal;
 
       expect(worker.killAllSync).toHaveBeenCalled();
@@ -13133,6 +13194,56 @@ describe('runQwenServe channel worker supervisor', () => {
       await firstSignal;
     } finally {
       finishBridgeShutdown?.();
+      await handle.close();
+      exitSpy.mockRestore();
+    }
+  });
+
+  it('routes SIGHUP through graceful shutdown and removes its listener', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-sighup-shutdown-')),
+    );
+    const bridge = makeFakeBridge();
+    const exitSpy = vi
+      .spyOn(process, 'exit')
+      .mockImplementation((() => undefined) as never);
+    const existingSighupListeners = new Set(process.rawListeners('SIGHUP'));
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        serveWebShell: false,
+      },
+      { bridge },
+    );
+    const processRegistry = mockCreateSpawnChannelFactoryOptions.at(-1)?.[
+      'processRegistry'
+    ] as { shutdown: () => Promise<void> };
+    const shutdownSpy = vi.spyOn(processRegistry, 'shutdown');
+
+    try {
+      const signalListener = process
+        .rawListeners('SIGHUP')
+        .find(
+          (listener) =>
+            !existingSighupListeners.has(listener) &&
+            listener.name === 'onSignal',
+        ) as ((signal: NodeJS.Signals) => Promise<void>) | undefined;
+      expect(signalListener).toBeDefined();
+
+      await signalListener!('SIGHUP');
+
+      expect(shutdownSpy).toHaveBeenCalledOnce();
+      expect(bridge.shutdown).toHaveBeenCalledOnce();
+      expect(exitSpy).toHaveBeenCalledWith(0);
+      expect(
+        process
+          .rawListeners('SIGHUP')
+          .some((listener) => !existingSighupListeners.has(listener)),
+      ).toBe(false);
+    } finally {
       await handle.close();
       exitSpy.mockRestore();
     }
@@ -13161,6 +13272,7 @@ describe('runQwenServe channel worker supervisor', () => {
       .mockImplementation((() => undefined) as never);
     const existingSigintListeners = new Set(process.rawListeners('SIGINT'));
     const existingSigtermListeners = new Set(process.rawListeners('SIGTERM'));
+    const existingSighupListeners = new Set(process.rawListeners('SIGHUP'));
 
     await runQwenServe(
       {
@@ -13214,6 +13326,11 @@ describe('runQwenServe channel worker supervisor', () => {
           process.removeListener('SIGTERM', listener as never);
         }
       }
+      for (const listener of process.rawListeners('SIGHUP')) {
+        if (!existingSighupListeners.has(listener)) {
+          process.removeListener('SIGHUP', listener as never);
+        }
+      }
       exitSpy.mockRestore();
     }
   });
@@ -13234,6 +13351,7 @@ describe('runQwenServe channel worker supervisor', () => {
       .mockImplementation((() => undefined) as never);
     const existingSigintListeners = new Set(process.rawListeners('SIGINT'));
     const existingSigtermListeners = new Set(process.rawListeners('SIGTERM'));
+    const existingSighupListeners = new Set(process.rawListeners('SIGHUP'));
 
     await runQwenServe(
       {
@@ -13282,6 +13400,11 @@ describe('runQwenServe channel worker supervisor', () => {
           process.removeListener('SIGTERM', listener as never);
         }
       }
+      for (const listener of process.rawListeners('SIGHUP')) {
+        if (!existingSighupListeners.has(listener)) {
+          process.removeListener('SIGHUP', listener as never);
+        }
+      }
       exitSpy.mockRestore();
     }
   });
@@ -13308,6 +13431,7 @@ describe('runQwenServe channel worker supervisor', () => {
       .mockImplementation((() => undefined) as never);
     const existingSigintListeners = new Set(process.rawListeners('SIGINT'));
     const existingSigtermListeners = new Set(process.rawListeners('SIGTERM'));
+    const existingSighupListeners = new Set(process.rawListeners('SIGHUP'));
 
     await runQwenServe(
       {
@@ -13358,6 +13482,11 @@ describe('runQwenServe channel worker supervisor', () => {
           process.removeListener('SIGTERM', listener as never);
         }
       }
+      for (const listener of process.rawListeners('SIGHUP')) {
+        if (!existingSighupListeners.has(listener)) {
+          process.removeListener('SIGHUP', listener as never);
+        }
+      }
       exitSpy.mockRestore();
     }
   });
@@ -13383,6 +13512,7 @@ describe('runQwenServe channel worker supervisor', () => {
       .mockImplementation((() => undefined) as never);
     const existingSigintListeners = new Set(process.rawListeners('SIGINT'));
     const existingSigtermListeners = new Set(process.rawListeners('SIGTERM'));
+    const existingSighupListeners = new Set(process.rawListeners('SIGHUP'));
 
     const handle = await runQwenServe(
       {
@@ -13430,6 +13560,11 @@ describe('runQwenServe channel worker supervisor', () => {
       for (const listener of process.rawListeners('SIGTERM')) {
         if (!existingSigtermListeners.has(listener)) {
           process.removeListener('SIGTERM', listener as never);
+        }
+      }
+      for (const listener of process.rawListeners('SIGHUP')) {
+        if (!existingSighupListeners.has(listener)) {
+          process.removeListener('SIGHUP', listener as never);
         }
       }
       exitSpy.mockRestore();
@@ -14140,6 +14275,7 @@ describe('runQwenServe channel worker supervisor', () => {
       .mockImplementation((() => undefined) as never);
     const existingSigintListeners = new Set(process.rawListeners('SIGINT'));
     const existingSigtermListeners = new Set(process.rawListeners('SIGTERM'));
+    const existingSighupListeners = new Set(process.rawListeners('SIGHUP'));
     let settled = false;
 
     const running = runQwenServe(
@@ -14198,6 +14334,11 @@ describe('runQwenServe channel worker supervisor', () => {
       for (const listener of process.rawListeners('SIGTERM')) {
         if (!existingSigtermListeners.has(listener)) {
           process.removeListener('SIGTERM', listener as never);
+        }
+      }
+      for (const listener of process.rawListeners('SIGHUP')) {
+        if (!existingSighupListeners.has(listener)) {
+          process.removeListener('SIGHUP', listener as never);
         }
       }
       exitSpy.mockRestore();

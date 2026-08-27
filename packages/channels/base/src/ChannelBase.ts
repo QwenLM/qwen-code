@@ -54,6 +54,7 @@ import {
 import type {
   AvailableCommand,
   ChannelAgentBridge,
+  ChannelPromptImage,
   ChannelLoopToolCreateInput,
   ChannelLoopToolResult,
   PermissionRequestEvent,
@@ -514,7 +515,21 @@ export abstract class ChannelBase {
       await this.pushProactive(target, text);
       return;
     }
-    await this.sendResponseMessage(target.chatId, text, sessionId);
+    await this.deliverBackgroundReply(target.chatId, text, sessionId);
+  }
+
+  /**
+   * Fallback delivery of a background response when proactive send is
+   * unavailable. Adapters whose turn replies bypass sendResponseMessage (to
+   * stay out of turn-scoped streaming state, for example) override only this
+   * step instead of re-implementing the whole dispatch flow.
+   */
+  protected async deliverBackgroundReply(
+    chatId: string,
+    text: string,
+    sessionId: string,
+  ): Promise<void> {
+    await this.sendResponseMessage(chatId, text, sessionId);
   }
 
   async dispatchPermissionRequest(
@@ -5248,15 +5263,22 @@ export abstract class ChannelBase {
       promptText = `[Replying to: "${quoted}"]\n\n${promptText}`;
     }
 
-    // Resolve attachments: extract image for bridge, append file paths to text
+    // Resolve attachments: extract images for bridge, append file paths to text
     let imageBase64 = envelope.imageBase64;
     let imageMimeType = envelope.imageMimeType;
+    const images: ChannelPromptImage[] = [];
+    if (imageBase64 && imageMimeType) {
+      images.push({ data: imageBase64, mimeType: imageMimeType });
+    }
     if (envelope.attachments?.length) {
       const filePaths: string[] = [];
       for (const att of envelope.attachments) {
-        if (att.type === 'image' && att.data && !imageBase64) {
-          imageBase64 = att.data;
-          imageMimeType = att.mimeType;
+        if (att.type === 'image' && att.data) {
+          images.push({ data: att.data, mimeType: att.mimeType });
+          if (!imageBase64) {
+            imageBase64 = att.data;
+            imageMimeType = att.mimeType;
+          }
         } else if (att.filePath) {
           const label = att.type === 'file' ? 'file' : att.type;
           // The filename is attacker-supplied (e.g. DingTalk), so neutralize both
@@ -5655,6 +5677,7 @@ export abstract class ChannelBase {
 
       try {
         const response = await promptBridge.prompt(sessionId, promptToSend, {
+          ...(images.length > 0 ? { images } : {}),
           imageBase64,
           imageMimeType,
           displayText,
@@ -5749,7 +5772,13 @@ export abstract class ChannelBase {
       } finally {
         promptBridge.off('textChunk', onChunk);
         promptBridge.off('responseBoundary', onResponseBoundary);
-        streamer?.stop();
+        if (streamer) {
+          streamer.stop();
+          // Queued block sends belong to this turn: let them land before
+          // onPromptEnd settles turn-scoped adapter state, or a send racing
+          // the settle can recreate discarded state and leak unredacted text.
+          await streamer.drain();
+        }
         // Identity guard: a turn that wedged past /clear's bounded wait gets
         // EVICTED — /clear gives up on active.done, deletes activePrompts, and a
         // turn the user starts AFTER the clear can re-seed activePrompts (and own

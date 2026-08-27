@@ -118,6 +118,8 @@ export interface DaemonReasoningControls {
   enabled: boolean;
   effort: string;
   efforts: DaemonReasoningEffortOption[];
+  /** Defaults to true. False means effort is mutable but thinking is required. */
+  canDisable?: boolean;
 }
 
 export interface DaemonReasoningEffortOption {

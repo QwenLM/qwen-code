@@ -46,8 +46,8 @@ import { HEADLESS_YOLO_NO_SANDBOX_WARNING } from '../utils/headlessSafetyWarning
  * Pause the current async function indefinitely. Used after the daemon
  * listener is up so yargs `parse()` never resolves — if it did, the
  * top-level CLI would fall through to the interactive (TUI) entry point
- * in `gemini.tsx`. SIGINT / SIGTERM in `runQwenServe` is the sole exit
- * route.
+ * in `gemini.tsx`. SIGINT / SIGTERM / SIGHUP in `runQwenServe` is the sole
+ * exit route.
  */
 function blockForever(): Promise<never> {
   return new Promise<never>(() => {});

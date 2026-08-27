@@ -280,7 +280,11 @@ describe('createWorkspaceProvidersStatusProvider', () => {
       model: { name: 'qwen3.8-max', reasoningEffort: 'medium' },
       modelProviders: {
         openai: [
-          { id: 'qwen3.8-max', name: 'Qwen 3.8 Max' },
+          {
+            id: 'qwen3.8-max',
+            name: 'Qwen 3.8 Max',
+            generationConfig: { thinkingMandatory: true },
+          },
           { id: 'qwen3.8-max-preview', name: 'Qwen 3.8 Max Preview' },
           { id: 'qwen3.8-max-latest', name: 'Qwen 3.8 Max Alias' },
           { id: 'qwen-plus', name: 'Qwen Plus' },
@@ -297,12 +301,17 @@ describe('createWorkspaceProvidersStatusProvider', () => {
         id: 'reasoning_effort',
         currentValue: 'medium',
         options: [
-          { value: 'none' },
           { value: 'default' },
           { value: 'low' },
           { value: 'medium' },
           { value: 'xhigh' },
         ],
+        _meta: {
+          'qwenCode/reasoning': {
+            defaultEffort: 'xhigh',
+            thinkingMandatory: true,
+          },
+        },
       },
     ]);
     expect(
@@ -332,7 +341,7 @@ describe('createWorkspaceProvidersStatusProvider', () => {
     ]);
   });
 
-  it('does not project reasoning controls for thinking-mandatory models', async () => {
+  it('projects effort-only controls for thinking-mandatory models', async () => {
     const provider = createWorkspaceProvidersStatusProvider({ env: {} });
     await writeUserSettings({
       security: { auth: { selectedType: 'openai' } },
@@ -353,7 +362,24 @@ describe('createWorkspaceProvidersStatusProvider', () => {
       .flatMap((entry) => entry.models)
       .find((model) => model.baseModelId === 'qwen3.8-max');
 
-    expect(stable?.configOptions).toBeUndefined();
+    expect(stable?.configOptions).toMatchObject([
+      {
+        id: 'reasoning_effort',
+        currentValue: 'xhigh',
+        options: [
+          { value: 'default' },
+          { value: 'low' },
+          { value: 'medium' },
+          { value: 'xhigh' },
+        ],
+        _meta: {
+          'qwenCode/reasoning': {
+            defaultEffort: 'xhigh',
+            thinkingMandatory: true,
+          },
+        },
+      },
+    ]);
   });
 
   it('uses the target model provider reasoning default when no global effort is configured', async () => {

@@ -12427,6 +12427,7 @@ describe('DaemonSessionProvider', () => {
   });
 
   it('preserves session and uses delta resume after a retriable SSE error', async () => {
+    const resumeDelivered = createDeferred<void>();
     let callCount = 0;
     const events = vi.fn(async function* retriableEvents(
       opts: { signal?: AbortSignal } = {},
@@ -12458,6 +12459,7 @@ describe('DaemonSessionProvider', () => {
           },
         },
       } satisfies DaemonEvent;
+      resumeDelivered.resolve();
       await new Promise<void>((resolve) => {
         if (opts.signal?.aborted) {
           resolve();
@@ -12483,8 +12485,9 @@ describe('DaemonSessionProvider', () => {
       maxReconnectDelayMs: 1,
     });
     await act(async () => {
-      await wait(20);
+      await resumeDelivered.promise;
       await flushPromises();
+      await flushTranscriptDispatch();
     });
 
     expect(sdkMocks.MockDaemonSessionClient.load).toHaveBeenCalledTimes(1);

@@ -151,11 +151,13 @@ export function mapReasoningControls(
     return value ? [{ value, name: getString(record, 'name') ?? value }] : [];
   });
   const values = options.map((item) => item.value);
-  if (!values.includes('none')) return undefined;
-  const currentValue = getString(option, 'currentValue');
-  if (!currentValue || !values.includes(currentValue)) return undefined;
   const meta = getRecord(option['_meta']);
   const reasoningMeta = getRecord(meta?.['qwenCode/reasoning']);
+  const thinkingMandatory = reasoningMeta?.['thinkingMandatory'] === true;
+  if (!thinkingMandatory && !values.includes('none')) return undefined;
+  const currentValue = getString(option, 'currentValue');
+  if (!currentValue || !values.includes(currentValue)) return undefined;
+  if (thinkingMandatory && currentValue === 'none') return undefined;
   const efforts = options.filter((item) => item.value !== 'none');
   const selectableValues = efforts.map((item) => item.value);
   if (efforts.length === 0) return undefined;
@@ -164,6 +166,7 @@ export function mapReasoningControls(
       enabled: currentValue !== 'none',
       effort: selectableValues[0]!,
       efforts: [],
+      ...(thinkingMandatory ? { canDisable: false } : {}),
     };
   }
   const defaultEffort = getString(reasoningMeta, 'defaultEffort');
@@ -172,7 +175,12 @@ export function mapReasoningControls(
       (value): value is string =>
         typeof value === 'string' && selectableValues.includes(value),
     ) ?? efforts[0]!.value;
-  return { enabled: currentValue !== 'none', effort, efforts };
+  return {
+    enabled: currentValue !== 'none',
+    effort,
+    efforts,
+    ...(thinkingMandatory ? { canDisable: false } : {}),
+  };
 }
 
 export function mapSessionContextReasoning(
@@ -186,11 +194,12 @@ function patchReasoningControls(
   controls: DaemonReasoningControls,
   value: string,
 ): DaemonReasoningControls {
+  if (value === 'none' && controls.canDisable === false) return controls;
   if (value === 'none') return { ...controls, enabled: false };
   const efforts = controls.efforts.some((effort) => effort.value === value)
     ? controls.efforts
     : [...controls.efforts, { value, name: value }];
-  return { enabled: true, effort: value, efforts };
+  return { ...controls, enabled: true, effort: value, efforts };
 }
 
 function patchReasoningConfigOptions(
@@ -208,13 +217,31 @@ function patchReasoningConfigOptions(
       return candidate;
     }
     const options = option['options'] as unknown[];
+    const values = options.flatMap((item) => {
+      const optionValue = getString(getRecord(item), 'value');
+      return optionValue ? [optionValue] : [];
+    });
+    const meta = getRecord(option['_meta']);
+    const reasoningMeta = getRecord(meta?.['qwenCode/reasoning']);
+    const thinkingMandatory = reasoningMeta?.['thinkingMandatory'] === true;
+    const currentValue = getString(option, 'currentValue');
+    const defaultEffort = getString(reasoningMeta, 'defaultEffort');
+    const nextValue =
+      value === 'none' && thinkingMandatory
+        ? [defaultEffort, currentValue, ...values].find(
+            (candidate): candidate is string =>
+              typeof candidate === 'string' &&
+              candidate !== 'none' &&
+              values.includes(candidate),
+          )
+        : value;
+    if (!nextValue) return candidate;
     const nextOptions =
-      value === 'none' ||
-      options.some((item) => getString(getRecord(item), 'value') === value)
+      nextValue === 'none' || values.includes(nextValue)
         ? options
-        : [...options, { value, name: value }];
+        : [...options, { value: nextValue, name: nextValue }];
     changed = true;
-    return { ...option, currentValue: value, options: nextOptions };
+    return { ...option, currentValue: nextValue, options: nextOptions };
   });
   return changed ? next : configOptions;
 }

@@ -44,6 +44,37 @@ describe('model configuration manifest', () => {
     });
   });
 
+  it('omits Thinking off when qwen3.8-max requires thinking', () => {
+    expect(
+      buildModelReasoningConfigOption('qwen3.8-max', {
+        thinkingMandatory: true,
+      }),
+    ).toMatchObject({
+      currentValue: 'xhigh',
+      options: [
+        { value: 'default' },
+        { value: 'low' },
+        { value: 'medium' },
+        { value: 'xhigh' },
+      ],
+      _meta: {
+        'qwenCode/reasoning': {
+          defaultEffort: 'xhigh',
+          thinkingMandatory: true,
+        },
+      },
+    });
+  });
+
+  it.each(['high', 'max'] as const)(
+    'presents inherited %s as the qwen3.8-max xhigh alias',
+    (effort) => {
+      expect(
+        buildModelReasoningConfigOption('qwen3.8-max', { effort }),
+      ).toMatchObject({ currentValue: 'xhigh' });
+    },
+  );
+
   it.each([
     undefined,
     'qwen3.7-plus',
@@ -176,6 +207,17 @@ describe('model configuration manifest', () => {
     }
   });
 
+  it('preserves mandatory thinking in the workspace preview', () => {
+    expect(
+      buildModelReasoningConfigPreview('qwen3.8-max', {
+        thinkingMandatory: true,
+      }),
+    ).toEqual([
+      buildModelReasoningConfigOption('qwen3.8-max', {
+        thinkingMandatory: true,
+      }),
+    ]);
+  });
   it.each([
     'qwen3.5-plus',
     'qwen3.6-plus',

@@ -6,7 +6,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createHash } from 'node:crypto';
-import { promises as fs } from 'node:fs';
+import { promises as fs, type BigIntStats, type Stats } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -44,6 +44,30 @@ describe('SessionArtifactStore', () => {
       .update(path.resolve(workspace, workspacePath))
       .digest('hex')
       .slice(0, 16);
+  }
+
+  // Forward the options through: the store lstats with { bigint: true }
+  // for the identity check, and a spy that dropped it would hand back
+  // numeric stats that never equal the bigint fstat — hiding a broken
+  // comparison behind a type mismatch.
+  function spyOnLstatForwarding(
+    hook: (
+      entry: Parameters<typeof fs.lstat>[0],
+      stat: Stats | BigIntStats,
+    ) => void | Promise<void>,
+  ) {
+    const originalLstat = fs.lstat.bind(fs);
+    return vi.spyOn(fs, 'lstat').mockImplementation((async (
+      entry: Parameters<typeof fs.lstat>[0],
+      options?: Parameters<typeof fs.lstat>[1],
+    ) => {
+      const stat = await originalLstat(
+        entry,
+        options as Parameters<typeof originalLstat>[1],
+      );
+      await hook(entry, stat);
+      return stat;
+    }) as typeof fs.lstat);
   }
 
   it('lists, removes, and idempotently ignores missing artifact deletes', async () => {
@@ -3244,22 +3268,102 @@ describe('SessionArtifactStore', () => {
 
     vi.useFakeTimers();
     vi.setSystemTime(new Date(Date.now() + 6_000));
-    const originalLstat = fs.lstat.bind(fs);
     let swapped = false;
-    const lstatSpy = vi.spyOn(fs, 'lstat').mockImplementation(async (entry) => {
-      const stat = await originalLstat(entry);
+    const lstatSpy = spyOnLstatForwarding(async (entry) => {
       if (!swapped && String(entry) === realTarget) {
         swapped = true;
         await fs.writeFile(replacement, 'after');
         await fs.rename(replacement, target);
       }
-      return stat;
     });
 
     try {
       const artifact = await store.get(artifactId);
       expect(artifact).toMatchObject({ id: artifactId, status: 'missing' });
       expect(artifact).not.toHaveProperty('workspacePath');
+    } finally {
+      lstatSpy.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it('detects a swap whose file ids differ only above 2^53', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's7-bigint-identity',
+      workspaceCwd: workspace,
+    });
+    await fs.writeFile(path.join(workspace, 'big.txt'), 'content');
+    const created = await store.upsertMany([
+      { title: 'Big', workspacePath: 'big.txt' },
+    ]);
+    const artifactId = created.changes[0]!.artifactId;
+    const realTarget = await fs.realpath(path.join(workspace, 'big.txt'));
+
+    // Injected ids on both sides of 2^53: the replacement rounds to the SAME
+    // Number as the original, so only the bigint comparison can see the swap.
+    const preOpenIno = 2n ** 53n;
+    const injectIno = (stat: Stats | BigIntStats, ino: bigint): void => {
+      stat.ino = typeof stat.ino === 'bigint' ? ino : Number(ino);
+    };
+    const lstatSpy = spyOnLstatForwarding((entry, stat) => {
+      if (String(entry) === realTarget) {
+        injectIno(stat, preOpenIno);
+      }
+    });
+    const originalOpen = fs.open.bind(fs);
+    const openSpy = vi.spyOn(fs, 'open').mockImplementation((async (
+      entry: Parameters<typeof fs.open>[0],
+      flags?: Parameters<typeof fs.open>[1],
+      mode?: Parameters<typeof fs.open>[2],
+    ) => {
+      const handle = await originalOpen(
+        entry,
+        flags as Parameters<typeof originalOpen>[1],
+        mode,
+      );
+      if (String(entry) !== realTarget) {
+        return handle;
+      }
+      const originalStat = handle.stat.bind(handle);
+      handle.stat = (async (options?: Parameters<typeof handle.stat>[0]) => {
+        const stat = await originalStat(options);
+        injectIno(stat, preOpenIno + 1n);
+        return stat;
+      }) as typeof handle.stat;
+      return handle;
+    }) as typeof fs.open);
+
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(Date.now() + 6_000));
+
+    try {
+      const artifact = await store.get(artifactId);
+      expect(artifact).toMatchObject({ id: artifactId, status: 'missing' });
+    } finally {
+      lstatSpy.mockRestore();
+      openSpy.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps an unswapped file available through an options-forwarding lstat spy', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's7-bigint-forwarding',
+      workspaceCwd: workspace,
+    });
+    await fs.writeFile(path.join(workspace, 'keep.txt'), 'content');
+    const created = await store.upsertMany([
+      { title: 'Keep', workspacePath: 'keep.txt' },
+    ]);
+    const artifactId = created.changes[0]!.artifactId;
+
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(Date.now() + 6_000));
+    const lstatSpy = spyOnLstatForwarding(() => {});
+
+    try {
+      const artifact = await store.get(artifactId);
+      expect(artifact).toMatchObject({ id: artifactId, status: 'available' });
     } finally {
       lstatSpy.mockRestore();
       vi.useRealTimers();

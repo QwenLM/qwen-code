@@ -37,15 +37,20 @@ The model manifest distinguishes tiered reasoning from toggle-only reasoning
 and continues to match exact model ids. Toggle-only models produce the same ACP
 configuration option as tiered models, with two values: `none` and `default`.
 Selecting `none` disables thinking for the live session. Selecting `default`
-clears the session override so the existing model or provider default applies.
+clears the live override for ordinary ACP clients so the existing model or
+provider default applies. WebShell's persistent path also clears the selected
+settings scope and adopts the resulting merged preference, which may be an
+inherited setting.
 
 The daemon marks toggle-only options in ACP metadata. WebShell maps them to an
 empty effort list, renders only the Thinking switch, and shows `Thinking` or
 `Thinking Off` on the model chip. Existing tiered controls retain their effort
 rows and labels.
 
-Opening the controls does not mutate generation settings. No provider,
-authentication, persistence, or runtime-snapshot behavior changes.
+Opening the controls does not mutate generation settings. Capability
+registration itself does not change provider, authentication, or
+runtime-snapshot behavior. WebShell selections follow the separate
+[reasoning effort persistence contract](./webshell-reasoning-effort-persistence.md).
 
 ## Deferred models
 

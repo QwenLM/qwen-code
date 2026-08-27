@@ -170,19 +170,17 @@ function buildWorkspaceProvidersStatus(
       const resolvedGeneration = modelsConfig.getResolvedModel(
         model.authType,
         model.id,
-        model.registryBaseUrl,
+        model.registryBaseUrl ?? model.baseUrl,
       )?.generationConfig;
-      const configOptions =
-        modelId.startsWith(ACP_ROUTE_ID_PREFIX) ||
-        resolvedGeneration?.thinkingMandatory === true
-          ? undefined
-          : buildModelReasoningConfigPreview(
-              model.id,
-              resolveReasoningPreviewState(
-                reasoningPreference,
-                resolvedGeneration?.reasoning,
-              ),
-            );
+      const configOptions = modelId.startsWith(ACP_ROUTE_ID_PREFIX)
+        ? undefined
+        : buildModelReasoningConfigPreview(model.id, {
+            ...resolveReasoningPreviewState(
+              reasoningPreference,
+              resolvedGeneration?.reasoning,
+            ),
+            thinkingMandatory: resolvedGeneration?.thinkingMandatory === true,
+          });
       const providerModel: ServeWorkspaceProviderModel = {
         modelId,
         baseModelId: parseAcpBaseModelId(effectiveModelId),

@@ -28,6 +28,8 @@ If the settings write fails, the live session remains updated and the request re
 
 The runtime keeps an explicit reasoning override across authentication refreshes and both hot and full model rebuilds. The override distinguishes disabled reasoning, an opaque effort string, and the provider default. This prevents `none` from being lost merely because it has no `effort` field.
 
+When an explicit preference is active for a tiered qwen3.8 model on DashScope, the runtime removes higher-priority `extra_body` and `samplingParams` thinking knobs from its live configuration with copy-on-write semantics. This keeps the persisted preference effective after new-session construction and authentication refresh without rewriting the model's stored generation configuration. With no explicit preference, those static model defaults remain unchanged.
+
 Model reasoning capabilities advertise options as independent `value` and `name` pairs. WebShell stores and submits `value` while rendering `name`, so model-specific values do not depend on global translation keys.
 
 ## Validation

@@ -1655,7 +1655,9 @@ describe('Server Config (config.ts)', () => {
       });
 
       expect(child.getCwd()).toBe('/tmp/derived');
-      expect(parent.getCwd()).toBe(baseParams.targetDir);
+      // The constructor resolves targetDir, so on win32 the POSIX fixture
+      // spelling comes back drive-qualified — compare the resolved form.
+      expect(parent.getCwd()).toBe(path.resolve(baseParams.targetDir));
       expect(Object.getPrototypeOf(child)).toBe(parent);
     });
 
@@ -2495,6 +2497,28 @@ describe('Server Config (config.ts)', () => {
   });
 
   describe('startNewSession', () => {
+    it('clears loaded Skill state at the session boundary', async () => {
+      const config = new Config({ ...baseParams });
+      await config.initialize({
+        skipGeminiInitialization: true,
+        skipHooks: true,
+        skipMcpDiscovery: true,
+        skipSkillManager: true,
+        skipFileCheckpointing: true,
+      });
+      const clearLoadedSkills = vi.fn();
+      vi.spyOn(config.getToolRegistry(), 'getTool').mockImplementation(
+        (name: string) =>
+          name === ToolNames.SKILL
+            ? ({ clearLoadedSkills } as never)
+            : undefined,
+      );
+
+      config.startNewSession('replacement-session');
+
+      expect(clearLoadedSkills).toHaveBeenCalledOnce();
+    });
+
     it('records no lifecycle transition when resuming the current session id', async () => {
       const sessionId = 'same-session-id';
       const config = new Config({ ...baseParams, sessionId });
@@ -2507,12 +2531,20 @@ describe('Server Config (config.ts)', () => {
       });
       vi.mocked(logSessionEnd).mockClear();
       vi.mocked(logStartSession).mockClear();
+      const clearLoadedSkills = vi.fn();
+      vi.spyOn(config.getToolRegistry(), 'getTool').mockImplementation(
+        (name: string) =>
+          name === ToolNames.SKILL
+            ? ({ clearLoadedSkills } as never)
+            : undefined,
+      );
 
       config.startNewSession(sessionId, {
         conversation: { messages: [] },
       } as unknown as ResumedSessionData);
 
       expect(logSessionEnd).not.toHaveBeenCalled();
+      expect(clearLoadedSkills).not.toHaveBeenCalled();
       expect(logStartSession).toHaveBeenCalledWith(
         config,
         expect.anything(),
@@ -5339,6 +5371,55 @@ describe('Server Config (config.ts)', () => {
       expect(config.getContentGeneratorConfig().reasoning).toBe(false);
     });
 
+    it.each([
+      {
+        label: 'an arbitrary effort',
+        preference: 'Vendor.Ultra' as const,
+        expectedReasoning: { effort: 'Vendor.Ultra' },
+      },
+      {
+        label: 'disabled reasoning',
+        preference: false as const,
+        expectedReasoning: false as const,
+      },
+    ])(
+      'keeps $label effective over static qwen3.8 knobs after auth refresh',
+      async ({ preference, expectedReasoning }) => {
+        const extraBody = { reasoning_effort: 'high', seed: 7 };
+        const samplingParams = { thinking_budget: 4_096, temperature: 0.2 };
+        const config = new Config({
+          ...baseParams,
+          generationConfig: { reasoning: expectedReasoning },
+          reasoningPreference: preference,
+          reasoningDefault: undefined,
+        });
+
+        vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
+          config: {
+            apiKey: 'test-key',
+            model: 'qwen3.8-max',
+            authType: AuthType.QWEN_OAUTH,
+            extra_body: extraBody,
+            samplingParams,
+          } as ContentGeneratorConfig,
+          sources: {},
+        });
+
+        await config.refreshAuth(AuthType.QWEN_OAUTH);
+
+        expect(config.getContentGeneratorConfig()).toMatchObject({
+          reasoning: expectedReasoning,
+          extra_body: { seed: 7 },
+          samplingParams: { temperature: 0.2 },
+        });
+        expect(extraBody).toEqual({ reasoning_effort: 'high', seed: 7 });
+        expect(samplingParams).toEqual({
+          thinking_budget: 4_096,
+          temperature: 0.2,
+        });
+      },
+    );
+
     it('round-trips an arbitrary reasoning effort through the public config API', async () => {
       const config = new Config(baseParams);
       const authType = AuthType.USE_GEMINI;
@@ -5356,6 +5437,78 @@ describe('Server Config (config.ts)', () => {
       config.setReasoningEffort('vendor.ultra');
 
       expect(config.getReasoningEffort()).toBe('vendor.ultra');
+    });
+
+    it('restores static qwen3.8 defaults after clearing an explicit effort', async () => {
+      const authType = AuthType.USE_OPENAI;
+      const baseUrl = 'https://dashscope.aliyuncs.com/compatible-mode/v1';
+      const extraBody = { enable_thinking: true, seed: 7 };
+      const samplingParams = {
+        reasoning_effort: 'high',
+        temperature: 0.2,
+      };
+      const config = new Config({
+        ...baseParams,
+        authType,
+        model: 'qwen3.8-max',
+        generationConfig: {
+          baseUrl,
+          reasoning: { effort: 'xhigh' },
+          extra_body: extraBody,
+          samplingParams,
+        },
+        modelProvidersConfig: {
+          [authType]: [
+            {
+              id: 'qwen3.8-max',
+              baseUrl,
+              generationConfig: {
+                reasoning: { effort: 'xhigh' },
+                extra_body: extraBody,
+                samplingParams,
+              },
+            },
+          ],
+        },
+        reasoningDefault: { effort: 'xhigh' },
+      });
+
+      vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
+        config: {
+          apiKey: 'test-key',
+          model: 'qwen3.8-max',
+          authType,
+          baseUrl,
+          reasoning: { effort: 'xhigh' },
+          extra_body: extraBody,
+          samplingParams,
+        } as ContentGeneratorConfig,
+        sources: {},
+      });
+      await config.refreshAuth(authType);
+
+      config.setReasoningEffort('Vendor.Ultra');
+      expect(config.getContentGeneratorConfig()).toMatchObject({
+        reasoning: { effort: 'Vendor.Ultra' },
+        extra_body: { seed: 7 },
+        samplingParams: { temperature: 0.2 },
+      });
+
+      config.setReasoningEffort(undefined);
+
+      expect(config.getContentGeneratorConfig()).toMatchObject({
+        reasoning: { effort: 'xhigh' },
+        extra_body: { enable_thinking: true, seed: 7 },
+        samplingParams: {
+          reasoning_effort: 'high',
+          temperature: 0.2,
+        },
+      });
+      expect(extraBody).toEqual({ enable_thinking: true, seed: 7 });
+      expect(samplingParams).toEqual({
+        reasoning_effort: 'high',
+        temperature: 0.2,
+      });
     });
 
     it('clears an explicit preference back to the current model default', async () => {
