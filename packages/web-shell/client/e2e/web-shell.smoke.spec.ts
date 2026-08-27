@@ -255,12 +255,13 @@ test('configures qwen3.8-max reasoning from the model popover @smoke', async ({
   const modelButton = page.locator('[data-web-shell-model-button]');
   const modelSubmenu = page.locator('[data-web-shell-model-submenu-trigger]');
   const thinking = controls.locator('[data-web-shell-thinking-toggle]');
-  const modelDefault = controls.locator('[data-web-shell-effort="default"]');
   const medium = controls.locator('[data-web-shell-effort="medium"]');
   const xhigh = controls.locator('[data-web-shell-effort="xhigh"]');
   await expect(controls).toBeVisible();
   await expect(modelSubmenu).toBeVisible();
-  await expect(modelDefault).toBeVisible();
+  await expect(
+    controls.locator('[data-web-shell-effort="default"]'),
+  ).toHaveCount(0);
   await expect(modelButton).toContainText('Extra High');
   await expect(thinking).toBeChecked();
   await expect(xhigh).toHaveAttribute('aria-pressed', 'true');
@@ -292,15 +293,6 @@ test('configures qwen3.8-max reasoning from the model popover @smoke', async ({
   });
   await expect(thinking).toBeChecked();
   await expect(modelButton).toContainText('Medium');
-
-  await modelDefault.click();
-  await expect.poll(() => daemon.configOptionRequests().length).toBe(4);
-  expect(requestBodyRecord(daemon.configOptionRequests()[3]!)).toEqual({
-    configId: 'reasoning_effort',
-    value: 'default',
-  });
-  await expect(modelDefault).toHaveAttribute('aria-pressed', 'true');
-  await expect(modelButton).toContainText('Default');
 
   await modelSubmenu.click();
   await expect(page.locator('[data-web-shell-model-submenu]')).toBeVisible();
@@ -632,7 +624,7 @@ test('keeps mandatory qwen3.8-max effort switchable before lazy session creation
   const thinking = page.locator('[data-web-shell-thinking-toggle]');
   await expect(thinking).toBeChecked();
   await expect(thinking).toBeDisabled();
-  await expect(modelButton).toContainText('Extra High');
+  await expect(modelButton).toContainText('Extra high');
   const medium = page.locator('[data-web-shell-effort="medium"]');
   await expect(medium).toBeEnabled();
   await medium.click();
