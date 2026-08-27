@@ -267,7 +267,10 @@ describe('autofix-status-heartbeat loop', () => {
         killGroup(child);
         resolve('timeout');
       }, timeoutMs);
-      child.on('exit', (code) => {
+      // 'close', not 'exit': Node can deliver 'exit' before the child's
+      // stdio streams are drained, leaving the stderr assertions on ''
+      // under event-loop contention (R17-2, reproduced under full load).
+      child.on('close', (code) => {
         clearTimeout(timer);
         resolve(code);
       });
@@ -439,6 +442,34 @@ describe('autofix-status-heartbeat loop', () => {
     } finally {
       killGroup(magChild);
     }
+    // Bash arithmetic wraps modulo 2^64: an interval of exactly 2^64
+    // wraps to 0 and passes a comparison-only `<= 3600` guard while the
+    // 20-digit string still reaches sleep (the loop never wakes again),
+    // and an age cap of 2^64+20000 wraps INTO the accepted range. The
+    // digit bound must reject both before any arithmetic (R16-2).
+    const wrapDir = freshTmp();
+    const wrapGh = fakeGhBin(wrapDir);
+    const { env: wrapEnv, workdir: wrapWorkdir } = loopEnv(wrapDir, wrapGh, {
+      HB_INTERVAL_SECONDS: '18446744073709551616',
+      HB_MAX_AGE_SECONDS: '18446744073709571616',
+    });
+    const wrapChild = startLoop(wrapEnv);
+    try {
+      const ok = await waitFor(() => {
+        const log = join(wrapWorkdir, 'heartbeat.log');
+        return (
+          existsSync(log) &&
+          readFileSync(log, 'utf8').includes('heartbeat started')
+        );
+      }, 8000);
+      assert.ok(ok, 'the loop must start and log its parameters');
+      assert.match(
+        readFileSync(join(wrapWorkdir, 'heartbeat.log'), 'utf8'),
+        /interval 600s max_age 20400s/,
+      );
+    } finally {
+      killGroup(wrapChild);
+    }
   });
 
   it('runs each PATCH under timeout so a black-holed request cannot outlive the age cap', async () => {
@@ -467,10 +498,16 @@ describe('autofix-status-heartbeat loop', () => {
       assert.equal(ghCall[0], '60', 'the gh bound must be 60s');
       // R10-3: the pid-identity self-check must ALSO be a bounded read, so
       // a planted FIFO at heartbeat.pid cannot block the loop inside the
-      // tick, past the age cap. The shim proves the read ran under
-      // `timeout 5 cat` against the pid file.
-      const pidRead = timeoutCalls.find((c) => c[0] === '5' && c[1] === 'cat');
+      // tick, past the age cap, and R17-1: bounded in BYTES too — a
+      // symlink to an endless stream (/dev/urandom) must not fill the
+      // substitution buffer GB-scale inside one tick. The shim proves
+      // the read ran under `timeout 5 head -c 64` against the pid file.
+      const pidRead = timeoutCalls.find((c) => c[0] === '5' && c[1] === 'head');
       assert.ok(pidRead, 'the pid-identity read must run under timeout 5');
+      assert.ok(
+        pidRead.includes('-c') && pidRead.includes('64'),
+        `the pid read must carry the byte cap: ${pidRead.join(' ')}`,
+      );
       assert.ok(
         pidRead.some((a) => a.endsWith('heartbeat.pid')),
         `the bounded read must target heartbeat.pid: ${pidRead.join(' ')}`,
@@ -973,6 +1010,51 @@ describe('autofix-status-heartbeat loop', () => {
           code,
           0,
           'the bounded read must end the loop cleanly, not block it',
+        );
+        const logText = readFileSync(join(workdir, 'heartbeat.log'), 'utf8');
+        assert.match(logText, /self-exit: pid file removed or replaced/);
+      } finally {
+        killGroup(child);
+      }
+    },
+  );
+
+  it(
+    'a planted endless stream at heartbeat.pid cannot unbound the pid read',
+    {
+      skip: haveSessionKillTools
+        ? false
+        : 'requires coreutils timeout (the bounded-read guard)',
+    },
+    async () => {
+      // R17-1: WORKDIR is sandbox-writable, so the path can hold a
+      // symlink to /dev/urandom — openable, unlike the FIFO arm, and
+      // endless without blocking: an unbounded read streams it into
+      // bash's substitution buffer (probe-verified on the pool host:
+      // multi-hundred-MB capture and a full-core tick), which the time
+      // bound alone cannot stop. The `head -c 64` byte cap must hold;
+      // the identity mismatch then ends the loop cleanly. Real
+      // coreutils timeout runs here — no shim on PATH.
+      const dir = freshTmp();
+      const gh = fakeGhBin(dir);
+      const { env, workdir } = loopEnv(dir, gh);
+      const child = startLoop(env);
+      try {
+        const started = await waitFor(
+          () => existsSync(join(workdir, 'heartbeat.pid')),
+          8000,
+        );
+        assert.ok(started, 'the loop must register its pid first');
+        rmSync(join(workdir, 'heartbeat.pid'));
+        spawnSync('ln', ['-s', '/dev/urandom', join(workdir, 'heartbeat.pid')]);
+        // The bounded read lands on the next 1s tick and exits clean;
+        // an unbounded cat is still churning hundreds of MB when this
+        // budget ends (probe-measured), so it resolves 'timeout'.
+        const code = await awaitExit(child, 8000);
+        assert.equal(
+          code,
+          0,
+          'the byte-bounded read must end the loop cleanly, not stream the plant',
         );
         const logText = readFileSync(join(workdir, 'heartbeat.log'), 'utf8');
         assert.match(logText, /self-exit: pid file removed or replaced/);

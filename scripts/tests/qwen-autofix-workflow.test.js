@@ -16669,14 +16669,17 @@ exit 1
     // finalize DRAINS the in-flight stamp instead — it waits until
     // heartbeat-tick-inflight is ABSENT or older than the 65s
     // completion bound (the tick's 60s gh timeout plus margin), and
-    // only then PATCHes. The read is bounded like the loop's pid-file
-    // read — a planted FIFO at the path must not stall the step.
+    // only then PATCHes. The read is bounded in time AND bytes like
+    // the loop's pid-file read — a planted FIFO must not stall the
+    // step, and a symlink to an endless non-NUL target (/dev/urandom,
+    // a fed FIFO) must not fill the substitution buffer GB-scale and
+    // kill the clean child before the terminal PATCH (R17-3).
     expect(finalizeStatusCommentStep).not.toContain('/usr/bin/sleep 2');
     expect(finalizeStatusCommentStep).toContain(
       'DRAIN_END=$(( $(date +%s) + 65 ))',
     );
     expect(finalizeStatusCommentStep).toContain(
-      'STAMP="$(timeout 5 cat "${WORKDIR}/heartbeat-tick-inflight" 2> /dev/null)" || STAMP=\'\'',
+      'STAMP="$(timeout 5 head -c 64 -- "${WORKDIR}/heartbeat-tick-inflight" 2> /dev/null)" || STAMP=\'\'',
     );
     expect(finalizeStatusCommentStep).toContain(
       '(( STAMP + 65 <= NOW_S )) && break',
@@ -17102,6 +17105,19 @@ exit 1
         expect(fifo.res.status).toBe(0);
         expect(readFileSync(drainProbeOut, 'utf8')).toContain('STUB_GH_RAN');
         expect(fifo.elapsedMs).toBeLessThan(15000);
+        // R17-3: an openable endless non-NUL target — a symlink to
+        // /dev/urandom — is the plant the FIFO arm cannot cover: the
+        // unbounded `cat` form streams it into the substitution buffer
+        // until the allocation fails and kills the clean child before
+        // the terminal PATCH. The vmem cap keeps a regressed unbounded
+        // read failing fast instead of allocating GB on the test host;
+        // the bounded `head -c 64` form passes under it (probe-verified).
+        const endless = runDrainArm(
+          'ulimit -v 200000; ln -s /dev/urandom "${WORKDIR}/heartbeat-tick-inflight"',
+        );
+        expect(endless.res.status).toBe(0);
+        expect(readFileSync(drainProbeOut, 'utf8')).toContain('STUB_GH_RAN');
+        expect(endless.elapsedMs).toBeLessThan(10000);
       } finally {
         rmSync(drainProbeDir, { recursive: true, force: true });
       }
@@ -17115,23 +17131,41 @@ exit 1
     expect(runBodyOf(cleanupStep)).not.toContain(killTarget);
     expect(runBodyOf(cleanupStep)).not.toContain(ticksTarget);
     expect(cleanupStep).toContain('HB_FIELDS=(${HB_REST})');
+    // R17-4: the stat read takes the absolute-path form too — cleanup
+    // runs in the step's OUTER shell, which inherits every $GITHUB_ENV
+    // plant earlier steps left, and a BASH_FUNC_cat%% import shadows
+    // the bare word at bash startup, forging the stat line (the
+    // matching start time sits in this step's own env) so the
+    // lifecycle check passes on a REUSED pid and the kill TERMs an
+    // unrelated process, its group and session.
+    expect(cleanupStep).toContain(
+      'HB_STAT="$(/usr/bin/cat "/proc/${HB_PID}/stat" 2>/dev/null)" || HB_STAT=\'\'',
+    );
     expect(cleanupStep).toContain(
       'if [[ "${#HB_FIELDS[@]}" -gt 19 && -n "${HB_START_TICKS}" && "${HB_FIELDS[19]}" == "${HB_START_TICKS}" ]]; then',
     );
-    expect(cleanupStep).toContain('kill -- -"${HB_PID}"');
-    expect(cleanupStep.indexOf('kill -- -"${HB_PID}"')).toBeLessThan(
+    // Same doctrine for the delivery: a planted kill or PATH-planted
+    // pkill no-ops it, leaving the loop holding the PAT alive to its
+    // age cap — the defended asset is kill-target trust and delivery,
+    // not the token cleanup carries.
+    expect(cleanupStep).toContain(
+      '/usr/bin/kill -- -"${HB_PID}" 2> /dev/null || true',
+    );
+    expect(cleanupStep.indexOf('/usr/bin/kill -- -"${HB_PID}"')).toBeLessThan(
       cleanupStep.indexOf('rm -rf "${WORKDIR}"'),
     );
     // Same-round killers also carry the bare-pid fallback. Finalize holds
     // the PAT inside its env -i clean child, where the builtin form is
     // sound; the gate's kill runs in the OUTER shell (BASH_FUNC_builtin%%
-    // shadowable — R10-1), so it takes the absolute-path form; cleanup
-    // carries no token and keeps the bare form.
+    // shadowable — R10-1), so it takes the absolute-path form, and
+    // cleanup takes it for the R17-4 reasons above.
     expect(gateStep).toContain('/usr/bin/kill "${HB_PID}"');
     expect(finalizeStatusCommentStep).toContain(
       'builtin kill "${HB_PID}" 2>/dev/null || true',
     );
-    expect(cleanupStep).toContain('kill "${HB_PID}"');
+    expect(cleanupStep).toContain(
+      '/usr/bin/kill "${HB_PID}" 2> /dev/null || true',
+    );
     // A kill landing MID-TICK must reach the tick too: each tick's
     // `timeout 60 gh` subtree runs in its OWN process group (coreutils
     // timeout default) inside the loop's setsid session, so the group+pid
@@ -17144,13 +17178,15 @@ exit 1
     expect(finalizeStatusCommentStep).toContain(
       '/usr/bin/pkill -TERM -s "${HB_PID}" 2>/dev/null || true',
     );
-    expect(cleanupStep).toContain('pkill -TERM -s "${HB_PID}"');
+    expect(cleanupStep).toContain(
+      '/usr/bin/pkill -TERM -s "${HB_PID}" 2> /dev/null || true',
+    );
     expect(
       finalizeStatusCommentStep.indexOf('pkill -TERM -s "${HB_PID}"'),
     ).toBeLessThan(finalizeStatusCommentStep.indexOf('--method PATCH'));
-    expect(cleanupStep.indexOf('pkill -TERM -s "${HB_PID}"')).toBeLessThan(
-      cleanupStep.indexOf('rm -rf "${WORKDIR}"'),
-    );
+    expect(
+      cleanupStep.indexOf('/usr/bin/pkill -TERM -s "${HB_PID}"'),
+    ).toBeLessThan(cleanupStep.indexOf('rm -rf "${WORKDIR}"'));
     // Neither reset step carries a kill (a cross-run pid could only come
     // from the untrusted file class; the comments may still explain why),
     // and none of the kill sites EXECUTES the heartbeat script (the

@@ -119,7 +119,7 @@ run_loop() {
     exit 2
   }
   # Binary-resolution channel: the tick resolves its externals (gh,
-  # timeout, sleep, date, cat — and the mktemp below) by name, and the
+  # timeout, sleep, date, head — and the mktemp below) by name, and the
   # ambient PATH carries same-UID-writable dirs ahead of the system ones
   # (the job's own $GITHUB_PATH append puts ${RUNNER_TEMP}/qwen-bin
   # there), so a plant in one of them would be resolved by the next tick
@@ -163,10 +163,13 @@ run_loop() {
   # while a tiny age cap silently kills the pulse after the first
   # sleep — the frozen comment this feature eliminates. Bound the
   # magnitude too; the cap's floor is the 330-minute job envelope, so
-  # a live round's pulse always outlives the round.
-  [[ "${interval}" =~ ^[1-9][0-9]*$ ]] || interval=600
+  # a live round's pulse always outlives the round. The digit bound
+  # runs FIRST: bash arithmetic wraps modulo 2^64, so a 20+-digit plant
+  # would pass the comparisons on its wrapped value while the original
+  # string still reaches sleep — the loop never wakes again (R16-2).
+  [[ "${interval}" =~ ^[1-9][0-9]{0,3}$ ]] || interval=600
   (( interval <= 3600 )) || interval=600
-  [[ "${max_age}" =~ ^[1-9][0-9]*$ ]] || max_age=20400
+  [[ "${max_age}" =~ ^[1-9][0-9]{0,4}$ ]] || max_age=20400
   (( max_age >= 19800 && max_age <= 21600 )) || max_age=20400
   local start="${HB_START_EPOCH}"
   echo "$(date -u +%FT%TZ) heartbeat started: comment ${HB_COMMENT_ID} interval ${interval}s max_age ${max_age}s"
@@ -186,16 +189,20 @@ run_loop() {
     # new round's body on the same comment. The file must still hold THIS
     # loop's own pid — removed OR replaced (by a newer round) ends the loop.
     # This reads the file to self-identify only; it never kills anything.
-    # The read is BOUNDED: WORKDIR is sandbox-writable, so the path can hold
-    # a planted FIFO whose open blocks cat indefinitely — stalling the loop
-    # inside the tick, past the age cap above. Mirrors the gh wrapper's
-    # conditional timeout form below; a timeout kill yields empty → identity
-    # mismatch → the clean self-exit just below.
+    # The read is BOUNDED in time AND bytes: WORKDIR is sandbox-writable,
+    # so the path can hold a planted FIFO whose open blocks the read
+    # indefinitely, or a symlink to an endless non-NUL stream
+    # (/dev/urandom) that an unbounded read would pull into bash's
+    # substitution buffer GB-scale inside one tick of this PAT-holding
+    # loop — pulse death for the rest of the round (R17-1). A pid is
+    # ≤ ~10 digits, so 64 bytes cover any real pid file. Mirrors the gh
+    # wrapper's conditional timeout form below; a timeout kill yields
+    # empty → identity mismatch → the clean self-exit just below.
     local pid_now
     if command -v timeout > /dev/null 2>&1; then
-      pid_now="$(timeout 5 cat "${HB_WORKDIR}/heartbeat.pid" 2> /dev/null)"
+      pid_now="$(timeout 5 head -c 64 -- "${HB_WORKDIR}/heartbeat.pid" 2> /dev/null)"
     else
-      pid_now="$(cat "${HB_WORKDIR}/heartbeat.pid" 2> /dev/null)"
+      pid_now="$(head -c 64 -- "${HB_WORKDIR}/heartbeat.pid" 2> /dev/null)"
     fi
     if [[ "${pid_now}" != "$$" ]]; then
       echo "$(date -u +%FT%TZ) self-exit: pid file removed or replaced"
