@@ -5999,15 +5999,25 @@ export class Config {
       // same daemon-mode leak rationale as the project dir above.
       unregisterSessionModel(this.sessionId);
 
-      // Clear the runtime sidecar when this Config stops serving the
-      // session but the process may keep living for other sessions.
+      // Demote the runtime sidecar when this Config stops serving the
+      // session, keeping dead-pid evidence for ownership checks.
       if (this.runtimeStatusEnabled) {
         this.runtimeStatusEnabled = false;
         await this.flushRuntimeStatusWrites();
         if (!this.sessionWriterHandoffRequested) {
-          await clearRuntimeStatus(
-            this.storage.getRuntimeStatusPath(this.sessionId),
-          );
+          try {
+            await writeRuntimeStatus(
+              this.storage.getRuntimeStatusPath(this.sessionId),
+              {
+                sessionId: this.sessionId,
+                workDir: this.getTargetDir(),
+                pid: 0,
+                qwenVersion: this.cliVersion ?? null,
+              },
+            );
+          } catch {
+            // ignored: best-effort cleanup
+          }
         }
       }
 

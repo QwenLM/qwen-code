@@ -2057,23 +2057,32 @@ describe('Server Config (config.ts)', () => {
   });
 
   describe('shutdown() runtime sidecar cleanup', () => {
-    it('clears the sidecar so a closed session stops claiming a live pid', async () => {
+    it('demotes the sidecar so a closed session stops claiming a live pid', async () => {
       // In multi-session processes (the `qwen serve` ACP child) the pid
       // outlives the session; a leftover live claim would shield the
-      // closed session's entry from the sweep forever.
+      // closed session's entry from the sweep forever. Keep a dead
+      // claim so worktree ownership checks can distinguish clean exit
+      // from missing evidence.
       const config = new Config(baseParams);
       config.markRuntimeStatusEnabled(); // models the successful write
-      const clearSpy = vi
-        .spyOn(runtimeStatus, 'clearRuntimeStatus')
-        .mockResolvedValue(undefined);
+      const writeSpy = vi
+        .spyOn(runtimeStatus, 'writeRuntimeStatus')
+        .mockResolvedValue(
+          config.storage.getRuntimeStatusPath(config.getSessionId()),
+        );
 
       await config.shutdown();
 
-      expect(clearSpy).toHaveBeenCalledWith(
+      expect(writeSpy).toHaveBeenCalledWith(
         config.storage.getRuntimeStatusPath(config.getSessionId()),
+        expect.objectContaining({
+          sessionId: config.getSessionId(),
+          workDir: config.getTargetDir(),
+          pid: 0,
+        }),
       );
 
-      clearSpy.mockRestore();
+      writeSpy.mockRestore();
     });
 
     it('keeps the sidecar when a session-writer handoff was requested', async () => {
@@ -2087,12 +2096,17 @@ describe('Server Config (config.ts)', () => {
       const clearSpy = vi
         .spyOn(runtimeStatus, 'clearRuntimeStatus')
         .mockResolvedValue(undefined);
+      const writeSpy = vi
+        .spyOn(runtimeStatus, 'writeRuntimeStatus')
+        .mockResolvedValue('');
 
       await config.shutdown();
 
       expect(clearSpy).not.toHaveBeenCalled();
+      expect(writeSpy).not.toHaveBeenCalled();
 
       clearSpy.mockRestore();
+      writeSpy.mockRestore();
     });
   });
 
@@ -3760,8 +3774,9 @@ describe('Server Config (config.ts)', () => {
       const root = await mkdtemp(path.join(os.tmpdir(), 'qwen-config-writer-'));
       const runtimeBaseDir = path.join(root, 'runtime');
       const projectDir = path.join(root, 'project');
+      const previousRuntimeDir = process.env['QWEN_RUNTIME_DIR'];
       await mkdir(projectDir, { recursive: true });
-      Storage.setRuntimeBaseDir(runtimeBaseDir);
+      process.env['QWEN_RUNTIME_DIR'] = runtimeBaseDir;
       const config = new Config({
         ...baseParams,
         sessionId: 'pending-baseline',
@@ -3838,6 +3853,11 @@ describe('Server Config (config.ts)', () => {
         releaseRead();
         read.mockRestore();
         Storage.setRuntimeBaseDir(null);
+        if (previousRuntimeDir === undefined) {
+          delete process.env['QWEN_RUNTIME_DIR'];
+        } else {
+          process.env['QWEN_RUNTIME_DIR'] = previousRuntimeDir;
+        }
         await rm(root, { recursive: true, force: true });
       }
     });
@@ -7394,7 +7414,7 @@ describe('Server Config (config.ts)', () => {
     patchSessionRecordSpy.mockRestore();
   });
 
-  it('drains a pending session sidecar write before clearing it at shutdown', async () => {
+  it('drains a pending session sidecar write before demoting it at shutdown', async () => {
     const config = new Config(baseParams);
     config.markRuntimeStatusEnabled();
     let finishWrite!: () => void;
@@ -7404,22 +7424,24 @@ describe('Server Config (config.ts)', () => {
     const writeSpy = vi
       .spyOn(runtimeStatus, 'writeRuntimeStatus')
       .mockReturnValue(pendingWrite);
-    const clearSpy = vi
-      .spyOn(runtimeStatus, 'clearRuntimeStatus')
-      .mockResolvedValue(undefined);
 
     const newSessionId = config.startNewSession('replacement-session');
     const newPath = config.storage.getRuntimeStatusPath(newSessionId);
     const shutdown = config.shutdown();
     await vi.waitFor(() => expect(writeSpy).toHaveBeenCalled());
-    expect(clearSpy).not.toHaveBeenCalledWith(newPath);
+    expect(writeSpy).not.toHaveBeenCalledWith(
+      newPath,
+      expect.objectContaining({ pid: 0 }),
+    );
 
     finishWrite();
     await shutdown;
 
-    expect(clearSpy).toHaveBeenCalledWith(newPath);
+    expect(writeSpy).toHaveBeenCalledWith(
+      newPath,
+      expect.objectContaining({ pid: 0 }),
+    );
     writeSpy.mockRestore();
-    clearSpy.mockRestore();
   });
 
   it('serializes pending registration, transitions, and unregister', async () => {
