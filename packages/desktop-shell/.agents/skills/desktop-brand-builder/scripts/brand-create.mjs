@@ -126,7 +126,12 @@ function patchTauriConfig(shellRoot, brand) {
   if (config.plugins?.updater) {
     config.plugins.updater.endpoints = brand.updaterEndpoints;
     if (brand.updaterEndpoints.length === 0) {
-      delete config.plugins.updater.pubkey;
+      // Keep pubkey as an empty string rather than deleting it: the
+      // tauri-plugin-updater schema declares `pubkey: String` with no
+      // serde default, so removing the field causes deserialization to
+      // fail at startup. An empty string is harmless when endpoints is
+      // also empty (no update check will run).
+      config.plugins.updater.pubkey = '';
     }
   }
   if (brand.updaterEndpoints.length === 0 && config.bundle) {
@@ -150,17 +155,24 @@ function generateIcons(shellRoot, brand) {
   if (result.status === 0) {
     return 'regenerated via tauri icon';
   }
-  // Fallback: keep the build moving but flag that only icon.png changed.
+  // Fallback: keep the build moving but report what actually happened.
   const logoExt = extname(brand.logo).toLowerCase();
   if (logoExt === '.png') {
     copyFileSync(brand.logo, join(shellRoot, 'src-tauri', 'icons', 'icon.png'));
+    console.warn(
+      'brand-create: WARNING: `tauri icon` failed; only icons/icon.png was ' +
+        'replaced (other sizes still show the Qwen Code logo). Regenerate ' +
+        'with: npx --yes @tauri-apps/cli icon <logo>',
+    );
+    return 'fallback: icon.png only';
   }
+  // Non-PNG logo and tauri icon failed — nothing was replaced.
   console.warn(
-    'brand-create: WARNING: `tauri icon` failed; only icons/icon.png was ' +
-      'replaced (other sizes still show the Qwen Code logo). Regenerate ' +
-      'with: npx --yes @tauri-apps/cli icon <logo>',
+    `brand-create: WARNING: \`tauri icon\` failed and the logo is not PNG ` +
+      `(${logoExt}); no icon files were replaced. Convert the logo to PNG ` +
+      `and re-run: npx --yes @tauri-apps/cli icon <logo>`,
   );
-  return 'fallback: icon.png only';
+  return 'fallback: no icons replaced';
 }
 
 function patchBootstrap(shellRoot, brand) {
@@ -168,6 +180,11 @@ function patchBootstrap(shellRoot, brand) {
   const logoExt = extname(brand.logo).toLowerCase() || '.png';
   const brandLogoName = `brand-logo${logoExt}`;
   copyFileSync(brand.logo, join(bootstrapDir, brandLogoName));
+
+  // Escape single quotes for safe injection into JS single-quoted string
+  // literals. Without this, an appName like "Bob's App" would produce
+  // `'Starting Bob's App'` which is a SyntaxError.
+  const appNameJsSafe = brand.appName.replace(/'/g, "\\'");
 
   const patched = [];
   for (const file of ['index.html', 'bootstrap.js']) {
@@ -177,7 +194,13 @@ function patchBootstrap(shellRoot, brand) {
     const before = text;
     // Use function replacers to avoid `$` pattern interpretation
     // (e.g. `$&` in the replacement string would expand to the matched text).
-    text = text.replaceAll('Qwen Code', () => brand.appName);
+    if (file === 'bootstrap.js') {
+      // JS file: appName appears inside single-quoted string literals,
+      // so single quotes must be escaped to avoid SyntaxError.
+      text = text.replaceAll('Qwen Code', () => appNameJsSafe);
+    } else {
+      text = text.replaceAll('Qwen Code', () => brand.appName);
+    }
     if (file === 'index.html') {
       text = text.replaceAll('qwen-code-logo.svg', () => brandLogoName);
     }

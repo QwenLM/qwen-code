@@ -98,10 +98,16 @@ Create a temporary `brand.json` in the build directory:
 }
 ```
 
-Install desktop-shell dependencies if `packages/desktop-shell/node_modules`
-is missing:
+Install dependencies. The brand script itself only needs desktop-shell's
+own `node_modules`, but `npm run build:runtime` shells out to the repo
+root (which uses `cross-env` and other root devDependencies), so the
+root install is also required before packaging:
 
 ```bash
+# Root dependencies (needed by build:runtime → cross-env, esbuild, etc.)
+npm install
+
+# Desktop-shell dependencies
 cd packages/desktop-shell
 npm install --workspaces=false
 cd ../..
@@ -125,8 +131,9 @@ What the script does:
 1. Patches `src-tauri/tauri.conf.json`: `productName`, `identifier`,
    `bundle.shortDescription`, and `plugins.updater.endpoints`. When
    `updaterEndpoints` is empty it also clears `bundle.createUpdaterArtifacts`
-   and removes the official `plugins.updater.pubkey`; a brand supplying its
-   own feed must supply its own pubkey.
+   and blanks the official `plugins.updater.pubkey` (set to empty string
+   rather than deleted, because the updater plugin requires the field);
+   a brand supplying its own feed must supply its own pubkey.
 2. Regenerates the full icon set from the logo via
    `npx --yes @tauri-apps/cli icon <logo>` (falls back to a warning if the
    CLI cannot run; in that case copy the logo over `src-tauri/icons/icon.png`
