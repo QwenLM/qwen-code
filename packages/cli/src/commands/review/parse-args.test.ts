@@ -41,6 +41,7 @@ import {
 const fsState = vi.hoisted(() => ({
   stdin: '',
   written: new Map<string, string>(),
+  effortReadError: undefined as Error | undefined,
 }));
 
 vi.mock('node:fs', async (importOriginal) => {
@@ -51,6 +52,9 @@ vi.mock('node:fs', async (importOriginal) => {
       if (path === 0) return fsState.stdin;
       const key = String(path);
       if (key.endsWith('review-last-effort')) {
+        if (fsState.effortReadError !== undefined) {
+          throw fsState.effortReadError;
+        }
         return fsState.written.get(key);
       }
       return (real['readFileSync'] as (...a: unknown[]) => unknown)(
@@ -1385,6 +1389,7 @@ describe('parseArgsCommand wiring', () => {
   beforeEach(() => {
     fsState.stdin = '';
     fsState.written.clear();
+    fsState.effortReadError = undefined;
     vi.mocked(writeStdoutLine).mockClear();
   });
 
@@ -1515,6 +1520,7 @@ describe('parseArgsCommand — configured defaults wiring', () => {
   beforeEach(() => {
     fsState.stdin = '';
     fsState.written.clear();
+    fsState.effortReadError = undefined;
     vi.mocked(writeStdoutLine).mockClear();
     vi.mocked(writeStderrLineSafe).mockClear();
     reviewSettingsMock.mockReturnValue({});
@@ -1707,6 +1713,19 @@ describe('parseArgsCommand — configured defaults wiring', () => {
     expect(fsState.written.get(storedEffort)).toBe('medium\n');
   });
 
+  it('lets an explicit effort replace valid remembered state', async () => {
+    const storedEffort = lastReviewEffortPath(
+      process.cwd(),
+      process.env['QWEN_CODE_PROJECT_DIR'],
+    );
+    fsState.written.set(storedEffort, 'high\n');
+
+    const got = await verdictFor('src/foo.ts --effort low\n');
+    expect(got.effort).toBe('low');
+    expect(got.effortSource).toBe('explicit');
+    expect(fsState.written.get(storedEffort)).toBe('low\n');
+  });
+
   it('ignores malformed remembered state when no explicit effort replaces it', async () => {
     const storedEffort = lastReviewEffortPath(
       process.cwd(),
@@ -1726,14 +1745,33 @@ describe('parseArgsCommand — configured defaults wiring', () => {
     );
   });
 
-  it('uses an explicit effort when remembering it fails', async () => {
+  it('ignores unreadable remembered state', async () => {
+    const storedEffort = lastReviewEffortPath(
+      process.cwd(),
+      process.env['QWEN_CODE_PROJECT_DIR'],
+    );
+    fsState.written.set(storedEffort, 'low\n');
+    fsState.effortReadError = new Error('EACCES: permission denied');
+
+    const got = await verdictFor('6711\n');
+    expect(got.effort).toBe('high');
+    expect(got.effortSource).toBe('default');
+    expect(vi.mocked(writeStderrLineSafe).mock.calls[0]?.[0]).toContain(
+      `${storedEffort} could not be read`,
+    );
+    expect(vi.mocked(writeStderrLineSafe).mock.calls[0]?.[0]).toContain(
+      'EACCES: permission denied',
+    );
+  });
+
+  it('reports the resolved effort when remembering an explicit effort fails', async () => {
     vi.mocked(atomicWriteFileSync).mockImplementationOnce(() => {
       throw new Error('ENOSPC: no space left on device');
     });
 
-    const got = await verdictFor('6711 --effort low\n');
-    expect(got.effort).toBe('low');
-    expect(got.effortSource).toBe('explicit');
+    const got = await verdictFor('6711 --comment --effort low\n');
+    expect(got.effort).toBe('high');
+    expect(got.effortSource).toBe('forced-by-comment');
     expect(vi.mocked(writeStderrLineSafe).mock.calls[0]?.[0]).toContain(
       'could not be remembered',
     );
@@ -1741,7 +1779,7 @@ describe('parseArgsCommand — configured defaults wiring', () => {
       'ENOSPC: no space left on device',
     );
     expect(vi.mocked(writeStderrLineSafe).mock.calls[0]?.[0]).toContain(
-      'this review still uses low',
+      'this review still uses high',
     );
   });
 

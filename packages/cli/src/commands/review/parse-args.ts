@@ -1162,19 +1162,23 @@ function readLastReviewEffort(path: string): ReviewEffort | undefined {
   return effort;
 }
 
-function writeLastReviewEffort(path: string, effort: ReviewEffort): void {
+function writeLastReviewEffort(
+  path: string,
+  explicitEffort: ReviewEffort,
+  resolvedEffort: ReviewEffort,
+): void {
   try {
     mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-    atomicWriteFileSync(path, `${effort}\n`, {
+    atomicWriteFileSync(path, `${explicitEffort}\n`, {
       mode: 0o600,
       forceMode: true,
       noFollow: true,
     });
   } catch (error) {
     writeStderrLineSafe(
-      `NOTE: the explicit review effort ${effort} could not be remembered at ${path} (${
+      `NOTE: the explicit review effort ${explicitEffort} could not be remembered at ${path} (${
         error instanceof Error ? error.message.split('\n')[0] : String(error)
-      }); this review still uses ${effort}.`,
+      }); this review still uses ${resolvedEffort}.`,
     );
   }
 }
@@ -1190,7 +1194,7 @@ function parseReviewArgsWithMemory(
   });
 
   if (explicitEffort !== undefined) {
-    writeLastReviewEffort(effortPath, explicitEffort);
+    writeLastReviewEffort(effortPath, explicitEffort, initial.effort);
     return initial;
   }
 
