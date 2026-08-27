@@ -86,14 +86,46 @@ export function toPeerSessionInfo(
  */
 export async function listMessageablePeers(): Promise<PeerSessionInfo[]> {
   const records = await listLiveSessions();
-  const candidates = records
-    .map(toPeerSessionInfo)
-    .filter((peer): peer is PeerSessionInfo => peer !== null);
+  const candidates = dedupeBySessionId(
+    records
+      .map(toPeerSessionInfo)
+      .filter((peer): peer is PeerSessionInfo => peer !== null),
+  );
 
   const reachable = await Promise.all(
     candidates.map((peer) => probePeerSocket(peer.ipcPath)),
   );
   return candidates.filter((_, index) => reachable[index]);
+}
+
+/**
+ * Keep one peer per session id, the most recently started.
+ *
+ * The registry is keyed by pid, so one session id can be live under two of
+ * them: `qwen --resume <id>` in a second pane starts another process without
+ * signalling the original, and no lease covers the interactive TUI. Both
+ * records flatten to the same name AND the same ref — every address in the
+ * grammar (`name`, `name [ref]`, `[ref]`, bare ref) then resolves
+ * `ambiguous`, `advertisablePeerAddress` gives up on both, and `list_agents`
+ * omits the session while the send error advises a full `name [ref]` that
+ * cannot resolve either. The session blacks out until one process exits.
+ *
+ * Two value-equal peers are not a real choice — they are one session seen
+ * twice — so collapsing them is what preserves the grammar. Newest-first
+ * matches the registry's own ordering, and is the process a user who just
+ * ran `--resume` is looking at.
+ */
+function dedupeBySessionId(
+  peers: readonly PeerSessionInfo[],
+): PeerSessionInfo[] {
+  const newestBySessionId = new Map<string, PeerSessionInfo>();
+  for (const peer of peers) {
+    const seen = newestBySessionId.get(peer.sessionId);
+    if (!seen || peer.startedAt > seen.startedAt) {
+      newestBySessionId.set(peer.sessionId, peer);
+    }
+  }
+  return [...newestBySessionId.values()];
 }
 
 export type PeerResolution =

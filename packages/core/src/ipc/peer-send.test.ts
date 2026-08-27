@@ -433,6 +433,29 @@ describe('lookupSentPeerMessage', () => {
       kind: 'one',
       peer: s1,
     });
+    // The ledger half: `peer-messaging` forwards `settled.address` into the
+    // notice the sender reads, so recording anything but the round-trippable
+    // address re-advertises the reserved bare name and a re-send lands on the
+    // teammate instead of this peer.
+    expect(
+      lookupSentPeerMessage(sendPeerFrame.mock.calls[0][1].msgId),
+    ).toMatchObject({
+      address: '[aaa111]',
+      peerName: 'docs-cd',
+      state: 'pending',
+    });
+
+    // Same session, spelled with padding the resolver trims: the ledger must
+    // record the address that re-resolves, never the caller's raw target.
+    await sendToPeer({
+      target: '  [aaa111]  ',
+      message: 'hi again',
+      approvalMode: ApprovalMode.DEFAULT,
+      isReserved,
+    });
+    expect(
+      lookupSentPeerMessage(sendPeerFrame.mock.calls[1][1].msgId),
+    ).toMatchObject({ address: '[aaa111]' });
   });
 
   it('keeps a send that timed out, since the peer may still read it', async () => {

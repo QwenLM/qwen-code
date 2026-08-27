@@ -343,7 +343,14 @@ class SendMessageInvocation extends BaseToolInvocation<
       };
     }
 
-    const to = this.params.to;
+    // Normalize once, here at the routing boundary: the in-process rule and
+    // `TeamManager` match the handle exactly, while `resolvePeerTarget` trims
+    // its target. Without a single spelling, a padded reserved handle
+    // (`"leader "`, easily produced by copying from quoted text) slips past
+    // the in-process check and gets delivered to a peer session that happens
+    // to carry that name — the cross-session leak the Route 2 check exists
+    // to prevent.
+    const to = this.params.to?.trim();
     if (!to) {
       const msg = 'Recipient "to" is required.';
       return {

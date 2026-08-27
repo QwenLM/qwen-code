@@ -122,6 +122,39 @@ describe('listMessageablePeers', () => {
     expect(probePeerSocket).toHaveBeenCalledTimes(1);
   });
 
+  it('collapses one session id hosted by two live processes', async () => {
+    // `qwen --resume <id>` in a second pane registers a second pid for the
+    // same session. Both records flatten to the same name AND the same ref,
+    // so every address in the grammar would resolve `ambiguous` and the
+    // session would vanish from list_agents until one process exits.
+    listLiveSessions.mockResolvedValue([
+      record({
+        sessionId: 'shared',
+        pid: 100,
+        ipcPath: '/tmp/a.sock',
+        startedAt: 1_000,
+      }),
+      record({
+        sessionId: 'shared',
+        pid: 101,
+        ipcPath: '/tmp/b.sock',
+        startedAt: 2_000,
+      }),
+    ]);
+
+    const peers = await listMessageablePeers();
+
+    expect(peers).toHaveLength(1);
+    expect(peers[0]).toMatchObject({ sessionId: 'shared', pid: 101 });
+    // Newest wins, and only the survivor is probed.
+    expect(probePeerSocket).toHaveBeenCalledTimes(1);
+    expect(probePeerSocket).toHaveBeenCalledWith('/tmp/b.sock');
+    expect(resolvePeerTarget(peers, 'app-ab')).toEqual({
+      kind: 'one',
+      peer: peers[0],
+    });
+  });
+
   it('skips records whose socket does not answer', async () => {
     listLiveSessions.mockResolvedValue([
       record({ sessionId: 's1', ipcPath: '/tmp/s1.sock' }),

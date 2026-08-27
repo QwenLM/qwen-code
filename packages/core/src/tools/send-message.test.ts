@@ -735,7 +735,11 @@ describe('SendMessageTool — peer mode', () => {
       }),
     );
 
-    for (const to of ['leader', 'Leader', 'lead-1']) {
+    // The padded spellings are the regression: `resolvePeerTarget` trims its
+    // target while the in-process check matches exactly, so without a single
+    // normalization `"leader "` skipped the reservation and was delivered to
+    // whatever peer session happened to carry that name.
+    for (const to of ['leader', 'Leader', 'lead-1', 'leader ', '\nlead-1']) {
       sendMessage.mockClear();
       const result = await runWithTeammateIdentity(
         {
@@ -751,7 +755,7 @@ describe('SendMessageTool — peer mode', () => {
       );
       expect(result.error).toBeUndefined();
       expect(sendMessage).toHaveBeenCalledWith(
-        to,
+        to.trim(),
         'report',
         'alice',
         undefined,
