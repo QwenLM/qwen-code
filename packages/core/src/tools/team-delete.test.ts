@@ -106,6 +106,8 @@ describe('TeamDeleteTool', () => {
     expect(String(result.llmContent)).toContain('cleanup failed');
     expect(String(result.llmContent)).toContain('EACCES: permission denied');
     expect(String(result.llmContent)).not.toContain('deleted.');
+    expect(result.error?.message).toContain('cleanup failed');
+    expect(result.error?.message).toContain('EACCES: permission denied');
   });
 
   it('runs the delayed second sweep even when the first sweep fails', async () => {
