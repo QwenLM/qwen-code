@@ -140,12 +140,14 @@ const mockBridgeGetAvailableCommands = vi.hoisted(() => vi.fn(() => []));
 const mockBridgeRegisterChannelLoopToolHandler = vi.hoisted(() => vi.fn());
 const mockChannelLoopStoreCreate = vi.hoisted(() => vi.fn());
 const mockChannelLoopStoreCreateForTarget = vi.hoisted(() => vi.fn());
+const mockChannelLoopStoreList = vi.hoisted(() => vi.fn());
 const mockChannelLoopStoreListForTarget = vi.hoisted(() => vi.fn());
 const mockChannelLoopStoreDisable = vi.hoisted(() => vi.fn());
 const mockChannelLoopStore = vi.hoisted(() =>
   vi.fn(() => ({
     create: mockChannelLoopStoreCreate,
     createForTarget: mockChannelLoopStoreCreateForTarget,
+    list: mockChannelLoopStoreList,
     listForTarget: mockChannelLoopStoreListForTarget,
     disable: mockChannelLoopStoreDisable,
   })),
@@ -180,6 +182,7 @@ const mockDaemonChannelBridge = vi.hoisted(() =>
 );
 const mockRouterSetChannelScope = vi.hoisted(() => vi.fn());
 const mockRouterSetChannelApprovalMode = vi.hoisted(() => vi.fn());
+const mockRouterSetChannelLoopsEnabled = vi.hoisted(() => vi.fn());
 const mockRouterClearAll = vi.hoisted(() => vi.fn());
 const mockRouterRestoreRoutes = vi.hoisted(() =>
   vi.fn(() => ({ restored: 1, dropped: 0 })),
@@ -195,6 +198,7 @@ const mockSessionRouter = vi.hoisted(() =>
     ) => ({
       setChannelScope: mockRouterSetChannelScope,
       setChannelApprovalMode: mockRouterSetChannelApprovalMode,
+      setChannelLoopsEnabled: mockRouterSetChannelLoopsEnabled,
       clearAll: mockRouterClearAll,
       restoreRoutes: mockRouterRestoreRoutes,
       dispose: mockRouterDispose,
@@ -392,6 +396,7 @@ beforeEach(() => {
   mockParseConfiguredChannels.mockResolvedValue([parsedTelegram]);
   mockChannelLoopStoreCreate.mockResolvedValue({ id: 'job-1' });
   mockChannelLoopStoreCreateForTarget.mockResolvedValue({ id: 'job-1' });
+  mockChannelLoopStoreList.mockResolvedValue([]);
   mockChannelLoopStoreListForTarget.mockResolvedValue([]);
   mockChannelLoopStoreDisable.mockResolvedValue(true);
 });
@@ -1082,6 +1087,74 @@ describe('runChannelDaemonWorker', () => {
     expect(channel.disconnect.mock.invocationCallOrder[0]).toBeLessThan(
       mockBridgeStop.mock.invocationCallOrder[0]!,
     );
+  });
+
+  it('starts named sessions with per-channel state and no loop controller', async () => {
+    const sdk = createSdk();
+    mockParseConfiguredChannels.mockResolvedValueOnce([
+      {
+        ...parsedTelegram,
+        config: {
+          ...parsedTelegram.config,
+          sessionScope: 'user',
+          multiSession: true,
+        },
+      },
+    ]);
+
+    const handle = await runChannelDaemonWorker({
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'names', names: ['telegram'] },
+      loadDaemonSdk: async () => sdk,
+    });
+
+    expect(mockChannelLoopStoreList).toHaveBeenCalledOnce();
+    expect(mockRouterSetChannelLoopsEnabled).toHaveBeenCalledWith(
+      'telegram',
+      false,
+    );
+    expect(mockCreateChannel).toHaveBeenCalledWith(
+      'telegram',
+      expect.objectContaining({ multiSession: true, sessionScope: 'user' }),
+      expect.any(Object),
+      expect.objectContaining({
+        stateDir:
+          '/tmp/qwen/channels/daemon/workspace-hash/instances/telegram-hash',
+      }),
+    );
+    expect(mockCreateChannel.mock.calls[0]![3]).not.toHaveProperty(
+      'loopController',
+    );
+
+    await handle.close();
+  });
+
+  it('fails closed when a named-session channel has an enabled loop', async () => {
+    const sdk = createSdk();
+    mockParseConfiguredChannels.mockResolvedValueOnce([
+      {
+        ...parsedTelegram,
+        config: {
+          ...parsedTelegram.config,
+          sessionScope: 'user',
+          multiSession: true,
+        },
+      },
+    ]);
+    mockChannelLoopStoreList.mockResolvedValueOnce([
+      { channelName: 'telegram', enabled: true },
+    ]);
+
+    await expect(
+      runChannelDaemonWorker({
+        daemonUrl: 'http://127.0.0.1:4170',
+        workspace: '/workspace',
+        selection: { mode: 'names', names: ['telegram'] },
+        loadDaemonSdk: async () => sdk,
+      }),
+    ).rejects.toThrow('Disable the loop first');
+    expect(mockCreateChannel).not.toHaveBeenCalled();
   });
 
   it('keeps disconnected channels out of the loop scheduler', async () => {

@@ -56,6 +56,7 @@ interface CreateServeFeaturesDeps {
   persistentWorkspaceRegistrationAvailable: boolean;
   scratchWorkspaceRegistrationAvailable: () => boolean;
   realtimeVoiceEnabled: () => boolean;
+  standaloneSessionsAvailable?: () => boolean;
   acpHttpEnabled?: boolean;
   workspaceRuntimeRemovalAvailable?: boolean;
   nativeDirectoryPickerAvailable?: boolean;
@@ -92,6 +93,7 @@ export function createServeFeatures(
     persistentWorkspaceRegistrationAvailable,
     scratchWorkspaceRegistrationAvailable,
     realtimeVoiceEnabled,
+    standaloneSessionsAvailable,
     acpHttpEnabled,
     workspaceRuntimeRemovalAvailable,
     nativeDirectoryPickerAvailable,
@@ -152,6 +154,7 @@ export function createServeFeatures(
         workspaceTrustHotReloadAvailable,
         acpHttpEnabled: currentAcpHttpEnabled,
         realtimeVoiceEnabled: realtimeVoiceEnabled(),
+        standaloneSessionsAvailable: standaloneSessionsAvailable?.() === true,
         clientMcpOverWsEnabled: opts.clientMcpOverWs === true,
         cdpTunnelOverWsEnabled: opts.cdpTunnelOverWs === true,
         browserAutomationMcpAvailable: isBrowserAutomationMcpAvailable(

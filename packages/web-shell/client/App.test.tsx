@@ -41,7 +41,17 @@ type MockConnection = {
   workspaceCwd: string;
   currentModel: string;
   currentMode: string;
-  models: Array<{ id: string; label?: string }>;
+  models: Array<{
+    id: string;
+    label?: string;
+    reasoningPreview?: {
+      enabled: boolean;
+      effort: string;
+      efforts: string[];
+      defaultEffort: string;
+      canDisable?: boolean;
+    };
+  }>;
   commands: unknown[];
   skills: string[] | undefined;
   capabilities: { qwenCodeVersion: string; features: string[] };
@@ -98,6 +108,14 @@ type ChatEditorTestProps = {
   disabled?: boolean;
   dialogOpen?: boolean;
   onToggleShortcuts?: () => void;
+  reasoning?: {
+    enabled: boolean;
+    effort: string;
+    efforts: string[];
+    defaultEffort: string;
+    canDisable?: boolean;
+  };
+  onSelectReasoningEffort?: (value: string) => Promise<void> | void;
   voiceTarget?: VoiceWorkspaceTarget;
   voiceStatusRevision?: VoiceStatusRevision;
   placeholderText?: string;
@@ -262,6 +280,7 @@ const {
       }),
       refreshCommands: vi.fn().mockResolvedValue(undefined),
       setModel: vi.fn().mockResolvedValue(undefined),
+      setReasoningEffort: vi.fn().mockResolvedValue(undefined),
       setApprovalMode: vi.fn().mockResolvedValue(undefined),
       getRewindSnapshots: vi.fn().mockResolvedValue([]),
       rewindSession: vi.fn().mockResolvedValue(undefined),
@@ -1039,6 +1058,7 @@ vi.mock('./components/sidebar/WebShellSidebar', async () => {
       onLoadSession?: (sessionId: string) => Promise<void> | void;
       onSessionsDeleted?: (sessionIds: string[]) => void;
       onOpenAddWorkspace?: () => void;
+      showSessionSourceSwitch?: boolean;
     }) => {
       // Expose the Daemon Status / Session Overview openers so tests can
       // exercise those activePanel branches (neither has a slash command).
@@ -1047,6 +1067,9 @@ vi.mock('./components/sidebar/WebShellSidebar', async () => {
         {
           'data-testid': 'sidebar',
           'data-collapsed': String(Boolean(props.collapsed)),
+          'data-show-session-source-switch': String(
+            props.showSessionSourceSwitch,
+          ),
         },
         React.createElement(
           'button',
@@ -5023,6 +5046,7 @@ beforeEach(() => {
   mockConnection.displayName = 'Session One';
   mockConnection.currentMode = 'default';
   mockConnection.currentModel = 'qwen';
+  mockConnection.models = [{ id: 'qwen', label: 'Qwen' }];
   mockConnection.error = undefined;
   mockConnection.errorStatus = undefined;
   mockConnection.missingSession = false;
@@ -5182,6 +5206,7 @@ beforeEach(() => {
   mockSessionActions.reloadSession.mockResolvedValue(undefined);
   mockSessionActions.refreshCommands.mockResolvedValue(undefined);
   mockSessionActions.setModel.mockResolvedValue(undefined);
+  mockSessionActions.setReasoningEffort.mockResolvedValue(undefined);
   mockSessionActions.setApprovalMode.mockResolvedValue(undefined);
   mockSessionActions.getRewindSnapshots.mockResolvedValue([]);
   mockSessionActions.rewindSession.mockResolvedValue(undefined);
@@ -14140,6 +14165,76 @@ describe('App session callbacks', () => {
     ).not.toBeNull();
   });
 
+  it('does not restore a stale welcome disable after mandatory reasoning clears it', async () => {
+    const reasoningPreview = (canDisable: boolean) => ({
+      enabled: true,
+      effort: 'xhigh',
+      efforts: ['low', 'medium', 'xhigh'],
+      defaultEffort: 'xhigh',
+      canDisable,
+    });
+    mockConnection.sessionId = undefined;
+    mockConnection.workspaceCwd = '/workspace';
+    mockConnection.currentModel = 'qwen3.8-max';
+    mockConnection.models = [
+      {
+        id: 'qwen3.8-max',
+        label: 'qwen3.8-max',
+        reasoningPreview: reasoningPreview(true),
+      },
+    ];
+    mockSessionActions.createSession.mockImplementation(async () => {
+      mockConnection.sessionId = 'session-created';
+      return { sessionId: 'session-created' };
+    });
+
+    const { rerender } = renderApp();
+    await flush();
+    act(() => {
+      testState.latestChatEditorProps?.onSelectReasoningEffort?.('none');
+    });
+    await flush();
+    expect(testState.latestChatEditorProps?.reasoning?.enabled).toBe(false);
+
+    mockConnection.models = [
+      {
+        id: 'qwen3.8-max',
+        label: 'qwen3.8-max',
+        reasoningPreview: reasoningPreview(false),
+      },
+    ];
+    rerender();
+    await flush();
+    expect(testState.latestChatEditorProps?.reasoning).toMatchObject({
+      enabled: true,
+      canDisable: false,
+      effort: 'xhigh',
+    });
+
+    mockConnection.models = [
+      {
+        id: 'qwen3.8-max',
+        label: 'qwen3.8-max',
+        reasoningPreview: reasoningPreview(true),
+      },
+    ];
+    rerender();
+    await flush();
+    expect(testState.latestChatEditorProps?.reasoning).toMatchObject({
+      enabled: true,
+      canDisable: true,
+      effort: 'xhigh',
+    });
+
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('first prompt');
+      await vi.waitFor(() => {
+        expect(mockSessionActions.sendPrompt).toHaveBeenCalledOnce();
+      });
+    });
+    expect(mockSessionActions.setReasoningEffort).not.toHaveBeenCalled();
+  });
+
   it('commits the first prompt after creating its session', async () => {
     mockConnection.sessionId = undefined;
     mockSessionActions.createSession.mockImplementation(async () => {
@@ -17862,6 +17957,37 @@ describe('App session callbacks', () => {
     expect(panel).not.toBeNull();
     // The panelHost aria-label distinguishes which panel is up.
     expect(panel?.getAttribute('aria-label')).toBe('Session Overview');
+  });
+
+  it('forwards the session-source switch customization to the sidebar', async () => {
+    const { container, rerender } = renderApp({
+      sidebar: { enabled: true, showSessionSourceSwitch: false },
+    });
+    await flush();
+
+    expect(
+      container
+        .querySelector('[data-testid="sidebar"]')
+        ?.getAttribute('data-show-session-source-switch'),
+    ).toBe('false');
+
+    rerender({ sidebar: { enabled: true } });
+    await flush();
+
+    expect(
+      container
+        .querySelector('[data-testid="sidebar"]')
+        ?.getAttribute('data-show-session-source-switch'),
+    ).toBe('true');
+
+    rerender({ sidebar: true });
+    await flush();
+
+    expect(
+      container
+        .querySelector('[data-testid="sidebar"]')
+        ?.getAttribute('data-show-session-source-switch'),
+    ).toBe('true');
   });
 
   it('opens the split view from the sidebar', async () => {

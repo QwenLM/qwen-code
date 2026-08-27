@@ -32,7 +32,10 @@ import {
   PromptDeadlineExceededError,
   resolvePromptDeadlineMs,
 } from './server.js';
-import { invalidateWorkspaceSessionListCache } from './server/session-list.js';
+import {
+  invalidateWorkspaceSessionListCache,
+  listLiveWorkspaceSessionsForResponse,
+} from './server/session-list.js';
 import type { ChannelWorkerSnapshot } from './channel-worker-supervisor.js';
 import {
   ChannelWorkerControlError,
@@ -691,6 +694,9 @@ const EXPECTED_REGISTERED_FEATURES = [
     }
     if (feature === 'session_tasks') {
       return [feature, 'scheduled_task_session_reuse'];
+    }
+    if (feature === 'session_export') {
+      return [feature, 'standalone_sessions_v1'];
     }
     return [feature];
   }).filter(
@@ -2844,6 +2850,20 @@ describe('createServeApp', () => {
           expect(predicate({})).toBe(false);
           expect(
             getAdvertisedServeFeatures(undefined, { requireAuth: true }),
+          ).toContain(feature);
+          expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
+            feature,
+          );
+          continue;
+        }
+        if (feature === 'standalone_sessions_v1') {
+          expect(predicate({ standaloneSessionsAvailable: true })).toBe(true);
+          expect(predicate({ standaloneSessionsAvailable: false })).toBe(false);
+          expect(predicate({})).toBe(false);
+          expect(
+            getAdvertisedServeFeatures(undefined, {
+              standaloneSessionsAvailable: true,
+            }),
           ).toContain(feature);
           expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
             feature,
@@ -15826,6 +15846,411 @@ describe('createServeApp', () => {
       ]);
     });
 
+    it('prefers the sidecar state over the live bind-time state on merge', async () => {
+      // The refresh timer rewrites `state` in the sidecar while the live
+      // entry keeps the bind-time snapshot — otherwise a live session's PR
+      // would never show as merged until daemon restart.
+      const id = '550e8400-e29b-41d4-a716-44665544a005';
+      await writeStoredSession({
+        sessionId: id,
+        cwd: WS_BOUND,
+        timestamp: '2026-05-17T12:00:00.000Z',
+        prompt: 'stored prompt',
+        mtime: new Date('2026-05-17T12:00:05.000Z'),
+      });
+      const service = new SessionService(WS_BOUND);
+      const sidecarPath = service.getPrSessionPathForArchiveState(id, 'active');
+      await fsp.rm(sidecarPath, { force: true });
+      await upsertSessionPr(sidecarPath, {
+        number: 9517,
+        url: 'https://github.com/o/r/pull/9517',
+        state: 'merged',
+      });
+      // The TTL cache would otherwise keep serving a scan taken before this
+      // test's sidecar write.
+      invalidateWorkspaceSessionListCache({
+        runtimeBaseDir: new Storage(WS_BOUND).getRuntimeBaseDir(),
+        workspaceCwd: WS_BOUND,
+        archiveStates: ['active'],
+      });
+      const bridge = fakeBridge({
+        listImpl: () => [
+          {
+            sessionId: id,
+            workspaceCwd: WS_BOUND,
+            createdAt: '2026-05-17T12:00:00.000Z',
+            clientCount: 1,
+            hasActivePrompt: false,
+            prs: [
+              {
+                number: 9517,
+                url: 'https://github.com/o/r/pull/9517',
+                state: 'open' as const,
+              },
+            ],
+          },
+        ],
+      });
+
+      const result = await listWorkspaceSessionsForResponse(bridge, WS_BOUND);
+
+      const merged = result.sessions.find((s) => s.sessionId === id);
+      expect(merged?.prs).toEqual([
+        {
+          number: 9517,
+          url: 'https://github.com/o/r/pull/9517',
+          state: 'merged',
+        },
+      ]);
+    });
+
+    it('reads the PR sidecar for live-only sessions so refreshed state wins', async () => {
+      // The bind route persists the sidecar before the session's first
+      // flush. Until then the row is live-only, and its bind-time state
+      // must not shadow the sidecar's refreshed state.
+      const id = '550e8400-e29b-41d4-a716-44665544b001';
+      const service = new SessionService(WS_BOUND);
+      const sidecarPath = service.getPrSessionPathForArchiveState(id, 'active');
+      await fsp.rm(sidecarPath, { force: true });
+      await upsertSessionPr(sidecarPath, {
+        number: 9517,
+        url: 'https://github.com/o/r/pull/9517',
+        state: 'merged',
+      });
+      invalidateWorkspaceSessionListCache({
+        runtimeBaseDir: new Storage(WS_BOUND).getRuntimeBaseDir(),
+        workspaceCwd: WS_BOUND,
+        archiveStates: ['active'],
+      });
+      const bridge = fakeBridge({
+        listImpl: () => [
+          {
+            sessionId: id,
+            workspaceCwd: WS_BOUND,
+            createdAt: '2026-05-17T12:00:00.000Z',
+            clientCount: 1,
+            hasActivePrompt: false,
+            prs: [
+              {
+                number: 9517,
+                url: 'https://github.com/o/r/pull/9517',
+                state: 'open' as const,
+              },
+            ],
+          },
+        ],
+      });
+
+      const result = await listWorkspaceSessionsForResponse(bridge, WS_BOUND);
+
+      const live = result.sessions.find((s) => s.sessionId === id);
+      expect(live?.prs).toEqual([
+        {
+          number: 9517,
+          url: 'https://github.com/o/r/pull/9517',
+          state: 'merged',
+        },
+      ]);
+    });
+
+    it('reads the PR sidecar for live-only sessions on the organized path', async () => {
+      const id = '550e8400-e29b-41d4-a716-44665544b002';
+      const service = new SessionService(WS_BOUND);
+      const sidecarPath = service.getPrSessionPathForArchiveState(id, 'active');
+      await fsp.rm(sidecarPath, { force: true });
+      await upsertSessionPr(sidecarPath, {
+        number: 9517,
+        url: 'https://github.com/o/r/pull/9517',
+        state: 'closed',
+      });
+      invalidateWorkspaceSessionListCache({
+        runtimeBaseDir: new Storage(WS_BOUND).getRuntimeBaseDir(),
+        workspaceCwd: WS_BOUND,
+        archiveStates: ['active'],
+      });
+      const bridge = fakeBridge({
+        listImpl: () => [
+          {
+            sessionId: id,
+            workspaceCwd: WS_BOUND,
+            createdAt: '2026-05-17T12:00:00.000Z',
+            clientCount: 1,
+            hasActivePrompt: false,
+            prs: [
+              {
+                number: 9517,
+                url: 'https://github.com/o/r/pull/9517',
+                state: 'open' as const,
+              },
+            ],
+          },
+        ],
+      });
+
+      const result = await listWorkspaceSessionsForResponse(bridge, WS_BOUND, {
+        view: 'organized',
+        group: 'all',
+      });
+
+      const live = result.sessions.find((s) => s.sessionId === id);
+      expect(live?.prs).toEqual([
+        {
+          number: 9517,
+          url: 'https://github.com/o/r/pull/9517',
+          state: 'closed',
+        },
+      ]);
+    });
+
+    it('reads the PR sidecar for live-only sessions on the metadata path', async () => {
+      const id = '550e8400-e29b-41d4-a716-44665544b003';
+      const service = new SessionService(WS_BOUND);
+      const sidecarPath = service.getPrSessionPathForArchiveState(id, 'active');
+      await fsp.rm(sidecarPath, { force: true });
+      await upsertSessionPr(sidecarPath, {
+        number: 9517,
+        url: 'https://github.com/o/r/pull/9517',
+        state: 'merged',
+      });
+      invalidateWorkspaceSessionListCache({
+        runtimeBaseDir: new Storage(WS_BOUND).getRuntimeBaseDir(),
+        workspaceCwd: WS_BOUND,
+        archiveStates: ['active'],
+      });
+      const bridge = fakeBridge({
+        listImpl: () => [
+          {
+            sessionId: id,
+            workspaceCwd: WS_BOUND,
+            createdAt: '2026-05-17T12:00:00.000Z',
+            clientCount: 1,
+            hasActivePrompt: false,
+            sourceType: 'scheduled_task',
+            sourceId: 'task-live',
+            prs: [
+              {
+                number: 9517,
+                url: 'https://github.com/o/r/pull/9517',
+                state: 'open' as const,
+              },
+            ],
+          },
+        ],
+      });
+
+      const result = await listWorkspaceSessionsForResponse(bridge, WS_BOUND, {
+        sourceType: 'scheduled_task',
+        sourceId: 'task-live',
+      });
+
+      const live = result.sessions.find((s) => s.sessionId === id);
+      expect(live?.prs).toEqual([
+        {
+          number: 9517,
+          url: 'https://github.com/o/r/pull/9517',
+          state: 'merged',
+        },
+      ]);
+    });
+
+    it('reads the PR sidecar for live-only sessions on the live-only fast path', async () => {
+      // Secondary workspaces without persisted transcripts take the
+      // live-only fast path; it must render the sidecar's refreshed state
+      // exactly like the persisted paths.
+      const id = '550e8400-e29b-41d4-a716-44665544b004';
+      const service = new SessionService(WS_BOUND);
+      const sidecarPath = service.getPrSessionPathForArchiveState(id, 'active');
+      await fsp.rm(sidecarPath, { force: true });
+      await upsertSessionPr(sidecarPath, {
+        number: 9517,
+        url: 'https://github.com/o/r/pull/9517',
+        state: 'merged',
+      });
+      const bridge = fakeBridge({
+        listImpl: () => [
+          {
+            sessionId: id,
+            workspaceCwd: WS_BOUND,
+            createdAt: '2026-05-17T12:00:00.000Z',
+            clientCount: 1,
+            hasActivePrompt: false,
+            prs: [
+              {
+                number: 9517,
+                url: 'https://github.com/o/r/pull/9517',
+                state: 'open' as const,
+              },
+            ],
+          },
+        ],
+      });
+
+      const result = await listLiveWorkspaceSessionsForResponse(
+        bridge,
+        WS_BOUND,
+      );
+
+      const live = result.sessions.find((s) => s.sessionId === id);
+      expect(live?.prs).toEqual([
+        {
+          number: 9517,
+          url: 'https://github.com/o/r/pull/9517',
+          state: 'merged',
+        },
+      ]);
+    });
+
+    it('reads the PR sidecar for a live-only session whose bridge entry has no prs', async () => {
+      // Bridge entries are re-created without `prs` on daemon restart,
+      // close/reload, and archive/restore; only metadata updates re-seed
+      // them. The live-only fast path must still read the persisted sidecar
+      // for such rows — like the sibling live-only paths — or the badge
+      // vanishes on an unflushed workspace until a re-bind.
+      const id = '550e8400-e29b-41d4-a716-44665544b008';
+      const service = new SessionService(WS_BOUND);
+      const sidecarPath = service.getPrSessionPathForArchiveState(id, 'active');
+      await fsp.rm(sidecarPath, { force: true });
+      await upsertSessionPr(sidecarPath, {
+        number: 9517,
+        url: 'https://github.com/o/r/pull/9517',
+        state: 'merged',
+      });
+      const bridge = fakeBridge({
+        listImpl: () => [
+          {
+            sessionId: id,
+            workspaceCwd: WS_BOUND,
+            createdAt: '2026-05-17T12:00:00.000Z',
+            clientCount: 1,
+            hasActivePrompt: false,
+          },
+        ],
+      });
+
+      const result = await listLiveWorkspaceSessionsForResponse(
+        bridge,
+        WS_BOUND,
+      );
+
+      const live = result.sessions.find((s) => s.sessionId === id);
+      expect(live?.prs).toEqual([
+        {
+          number: 9517,
+          url: 'https://github.com/o/r/pull/9517',
+          state: 'merged',
+        },
+      ]);
+    });
+
+    it('degrades a live-only row to bind-time prs when its sidecar is unreadable', async () => {
+      // readSessionPrs rethrows non-ENOENT I/O errors (EISDIR here); the
+      // live-only enrichment must swallow them and render the bridge's
+      // bind-time prs instead of failing the whole listing request.
+      const id = '550e8400-e29b-41d4-a716-44665544b009';
+      const service = new SessionService(WS_BOUND);
+      const sidecarPath = service.getPrSessionPathForArchiveState(id, 'active');
+      await fsp.rm(sidecarPath, { recursive: true, force: true });
+      await fsp.mkdir(sidecarPath, { recursive: true });
+      try {
+        const bridge = fakeBridge({
+          listImpl: () => [
+            {
+              sessionId: id,
+              workspaceCwd: WS_BOUND,
+              createdAt: '2026-05-17T12:00:00.000Z',
+              clientCount: 1,
+              hasActivePrompt: false,
+              prs: [
+                {
+                  number: 9517,
+                  url: 'https://github.com/o/r/pull/9517',
+                  state: 'open' as const,
+                },
+              ],
+            },
+          ],
+        });
+
+        const result = await listLiveWorkspaceSessionsForResponse(
+          bridge,
+          WS_BOUND,
+        );
+
+        const live = result.sessions.find((s) => s.sessionId === id);
+        expect(live?.prs).toEqual([
+          {
+            number: 9517,
+            url: 'https://github.com/o/r/pull/9517',
+            state: 'open',
+          },
+        ]);
+      } finally {
+        await fsp.rm(sidecarPath, { recursive: true, force: true });
+      }
+    });
+
+    it('reads the live-only PR sidecar from an explicit runtime base dir', async () => {
+      // The route passes `{ runtimeBaseDir: runtime.sessionRuntimeBaseDir }`;
+      // for a managed runtime with a distinct pinned base dir the read must
+      // honor it instead of the ambient default.
+      const id = '550e8400-e29b-41d4-a716-44665544b007';
+      const altBaseDir = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-serve-alt-runtime-'),
+      );
+      try {
+        const sidecarPath = Storage.runWithResolvedRuntimeBaseDir(
+          altBaseDir,
+          () =>
+            new SessionService(WS_BOUND).getPrSessionPathForArchiveState(
+              id,
+              'active',
+            ),
+        );
+        await fsp.rm(sidecarPath, { force: true });
+        await upsertSessionPr(sidecarPath, {
+          number: 9517,
+          url: 'https://github.com/o/r/pull/9517',
+          state: 'merged',
+        });
+        const bridge = fakeBridge({
+          listImpl: () => [
+            {
+              sessionId: id,
+              workspaceCwd: WS_BOUND,
+              createdAt: '2026-05-17T12:00:00.000Z',
+              clientCount: 1,
+              hasActivePrompt: false,
+              prs: [
+                {
+                  number: 9517,
+                  url: 'https://github.com/o/r/pull/9517',
+                  state: 'open' as const,
+                },
+              ],
+            },
+          ],
+        });
+
+        const result = await listLiveWorkspaceSessionsForResponse(
+          bridge,
+          WS_BOUND,
+          undefined,
+          { runtimeBaseDir: altBaseDir },
+        );
+
+        const live = result.sessions.find((s) => s.sessionId === id);
+        expect(live?.prs).toEqual([
+          {
+            number: 9517,
+            url: 'https://github.com/o/r/pull/9517',
+            state: 'merged',
+          },
+        ]);
+      } finally {
+        await fsp.rm(altBaseDir, { recursive: true, force: true });
+      }
+    });
+
     it('survives PR sidecars on the organized listing path', async () => {
       const id = '550e8400-e29b-41d4-a716-446655440005';
       await writeStoredSession({
@@ -18383,6 +18808,47 @@ describe('createServeApp', () => {
         } finally {
           listSessionsSpy.mockRestore();
         }
+      });
+
+      it('renders sidecar prs for a live-only standalone row under its canonical id', async () => {
+        // A standalone session can enter the bridge under a non-canonical
+        // id spelling while its PR sidecar is stored under the canonical
+        // id; the live-only metadata row must be keyed canonically AND
+        // read the sidecar under the canonical id.
+        const canonicalId = standaloneId(12);
+        const service = new SessionService(WS_BOUND);
+        const sidecarPath = service.getPrSessionPathForArchiveState(
+          canonicalId,
+          'active',
+        );
+        await fsp.rm(sidecarPath, { force: true });
+        await upsertSessionPr(sidecarPath, {
+          number: 9729,
+          url: 'https://github.com/o/r/pull/9729',
+        });
+
+        const result = await listWorkspaceSessionsForResponse(
+          fakeBridge({
+            listImpl: () => [
+              {
+                sessionId: canonicalId.toUpperCase(),
+                workspaceCwd: WS_BOUND,
+                createdAt: '2026-05-17T12:00:00.000Z',
+                sourceType: 'standalone',
+                clientCount: 1,
+                hasActivePrompt: false,
+              },
+            ],
+          }),
+          WS_BOUND,
+          { conversationKind: 'standalone-top-level', size: 10 },
+        );
+
+        const row = result.sessions.find(
+          (session) => session.sessionId === canonicalId,
+        );
+        expect(row).toBeDefined();
+        expect(row?.prs?.map((pr) => pr.number)).toEqual([9729]);
       });
     });
 
@@ -26573,6 +27039,27 @@ describe('createServeApp', () => {
       expect(bridge.updateMetadataCalls).toHaveLength(0);
     });
 
+    it('400 message names the state constraint for an invalid pr state', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const res = await auth(
+        request(app).patch(
+          '/session/550e8400-e29b-41d4-a716-446655440321/metadata',
+        ),
+      ).send({
+        pr: {
+          number: 1,
+          url: 'https://github.com/o/r/pull/1',
+          state: 'draft',
+        },
+      });
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('invalid_metadata');
+      expect(res.body.field).toBe('pr');
+      expect(res.body.error).toContain('`state`');
+      expect(bridge.updateMetadataCalls).toHaveLength(0);
+    });
+
     it('400 invalid_metadata when the pr url exceeds the length cap', async () => {
       const bridge = fakeBridge();
       const app = createServeApp(tokenOpts, undefined, {
@@ -34312,6 +34799,36 @@ describe('Live conversation runtime lifecycle', () => {
       },
     };
   }
+
+  it('mounts and advertises standalone sessions only with complete runtime dependencies', async () => {
+    const partial = createServeApp(baseOpts, undefined, {
+      bridge: fakeBridge(),
+    });
+    const partialRoute = await request(partial)
+      .get('/standalone/sessions?cwd=/tmp')
+      .set('Host', `127.0.0.1:${baseOpts.port}`);
+    const partialCapabilities = await request(partial)
+      .get('/capabilities')
+      .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+    expect(partialRoute.status).toBe(404);
+    expect(partialCapabilities.body.features).not.toContain(
+      'standalone_sessions_v1',
+    );
+
+    const complete = setupLiveRuntime();
+    const completeRoute = await supertest(complete.app)
+      .get('/standalone/sessions?cwd=/tmp')
+      .set('Host', `127.0.0.1:${baseOpts.port}`);
+    const completeCapabilities = await supertest(complete.app)
+      .get('/capabilities')
+      .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+    expect(completeRoute.status).toBe(400);
+    expect(completeCapabilities.body.features).toContain(
+      'standalone_sessions_v1',
+    );
+  });
 
   it('blocks REST close and archive for active Live sessions until the call stops', async () => {
     const restoreLiveSettings = await disableLiveVoiceAtBoot();
