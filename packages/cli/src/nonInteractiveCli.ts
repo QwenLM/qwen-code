@@ -1925,12 +1925,17 @@ export async function runNonInteractive(
       const applyToolResultMediaGate = async (
         parts: Part[],
         overrideSelector: string | undefined,
-      ): Promise<Part[]> => {
+      ): Promise<{ parts: Part[]; establishExactRoute: boolean }> => {
         const nested = detectNestedFunctionResponseMedia(parts);
-        if (!nested.hasImage && !nested.hasAudio && !nested.hasUntyped) {
-          return parts;
+        if (
+          !nested.hasImage &&
+          !nested.hasAudio &&
+          !nested.hasUntyped &&
+          !nested.hasForeign
+        ) {
+          return { parts, establishExactRoute: false };
         }
-        if (!overrideSelector) return parts;
+        if (!overrideSelector) return { parts, establishExactRoute: false };
         const routeSelector = overrideSelector.endsWith('\0')
           ? overrideSelector.slice(0, -1)
           : overrideSelector;
@@ -1981,6 +1986,23 @@ export async function runNonInteractive(
             'Media returned by a tool was not sent: it carries no MIME type, so it cannot be routed to the model.',
           );
         }
+        if (nested.hasForeign) {
+          // Fail closed unconditionally: a MIME outside the routable
+          // modalities (image/, audio/) matches NO route — core's slimming
+          // placeholder-substitutes such carriers on every route, so the
+          // model would answer about media it never received. Keying on
+          // carrier presence keeps unbounded tool-supplied MIMEs from
+          // slipping past the gate.
+          result = replaceNestedFunctionResponseMedia(
+            result,
+            'foreign',
+            '[Media content returned by a tool was not sent: its MIME type matches no modality that can be routed to the model.]',
+          );
+          emitBridgeNotice(
+            'tool_result_media',
+            'Media returned by a tool was not sent: its MIME type matches no modality that can be routed to the model.',
+          );
+        }
         if (nested.hasImage && !supportsImage) {
           result = replaceNestedFunctionResponseMedia(
             result,
@@ -2005,7 +2027,21 @@ export async function runNonInteractive(
         }
         // Clamp whatever nested media survives the gate — the exact-route path
         // would otherwise skip QWEN_CODE_MAX_INLINE_MEDIA_BYTES.
-        return normalizePartList(clampNestedFunctionResponseMedia(result));
+        const mediaSurvived =
+          (nested.hasImage && supportsImage) ||
+          (nested.hasAudio && supportsAudio);
+        return {
+          parts: normalizePartList(clampNestedFunctionResponseMedia(result)),
+          // Media that SURVIVED under a BARE persisted selector needs the
+          // route established exactly like the TUI twin does (its
+          // mediaRouted return stamps the NUL exact-route marker at send
+          // time). Without the stamp the continuation sends the bare
+          // selector, core resolves the request modalities from the SESSION
+          // config, and its slimming placeholder-substitutes the very media
+          // this gate just validated (R49-4).
+          establishExactRoute:
+            mediaSurvived && !overrideSelector.endsWith('\0'),
+        };
       };
 
       const processToolCallBatch = async (
@@ -2770,10 +2806,21 @@ export async function runNonInteractive(
           // TUI's applyToolResultMediaGate — see its definition above). Both
           // the goal-turn addHistory branch and the ordinary continuation send
           // below consume the gated parts.
-          const toolResponseParts = await applyToolResultMediaGate(
+          const gatedToolResponse = await applyToolResultMediaGate(
             rawToolResponseParts,
             modelOverride,
           );
+          const toolResponseParts = gatedToolResponse.parts;
+          if (
+            gatedToolResponse.establishExactRoute &&
+            modelOverride !== undefined
+          ) {
+            // Establish the exact route for the rest of the turn: the NUL
+            // stamp makes continuation sends exact-route the override
+            // instead of resolving request modalities from the session
+            // config (which would slim away the media this gate validated).
+            modelOverride = `${modelOverride}\0`;
+          }
 
           if (structuredSubmission !== undefined) {
             // Single-shot terminal contract; aborts in-flight background
@@ -3079,10 +3126,19 @@ export async function runNonInteractive(
                 );
                 // Same nested-media gate as the main-turn loop, scoped to the
                 // per-item override selector.
-                const itemToolResponseParts = await applyToolResultMediaGate(
+                const gatedItemToolResponse = await applyToolResultMediaGate(
                   rawItemToolResponseParts,
                   itemModelOverride,
                 );
+                const itemToolResponseParts = gatedItemToolResponse.parts;
+                if (
+                  gatedItemToolResponse.establishExactRoute &&
+                  itemModelOverride !== undefined
+                ) {
+                  // Same exact-route establishment as the main-turn loop,
+                  // scoped to this drain item's persisted selector.
+                  itemModelOverride = `${itemModelOverride}\0`;
+                }
 
                 if (structuredSubmission !== undefined) {
                   // Stop processing further turns for this drain item;

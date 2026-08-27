@@ -19,6 +19,7 @@ import type {
   TrackedWaitingToolCall,
 } from './useReactToolScheduler.js';
 import { useReactToolScheduler } from './useReactToolScheduler.js';
+import * as nestedMediaModule from '../../utils/nested-function-response-media.js';
 import type {
   Config,
   EditorType,
@@ -777,6 +778,43 @@ describe('useGeminiStream', () => {
     expect(mockSendMessageStream.mock.calls[0]?.[3]).not.toHaveProperty(
       'submittedPrompt',
     );
+  });
+
+  it('re-queues the drained steer when a tool continuation prepare throws', async () => {
+    // A malformed nested part entry used to make the media-gate walker throw
+    // during ToolResult prepare; the walker is now null-safe, but the
+    // prepare-throw catch must still re-queue an attached drained steer —
+    // every other delivery-failure path does. Without the re-queue the
+    // user's typed steer input vanishes: neither sent, recorded, nor
+    // Ctrl+Y-retryable (R49-3).
+    const detectSpy = vi
+      .spyOn(nestedMediaModule, 'detectNestedFunctionResponseMedia')
+      .mockImplementation(() => {
+        throw new TypeError(
+          "Cannot read properties of null (reading 'inlineData')",
+        );
+      });
+
+    const { result } = renderTestHook();
+
+    const restore = vi.fn();
+    const onAdmissionFailed = vi.fn();
+    const steerInput = { restore } as unknown as SteerInput;
+
+    await act(async () => {
+      await expect(
+        result.current.submitQuery(
+          [{ text: 'tool result' }],
+          SendMessageType.ToolResult,
+          'prompt-tool-continuation',
+          { steerInput, onAdmissionFailed },
+        ),
+      ).rejects.toBeInstanceOf(TypeError);
+    });
+
+    expect(onAdmissionFailed).toHaveBeenCalledTimes(1);
+    expect(restore).toHaveBeenCalledTimes(1);
+    detectSpy.mockRestore();
   });
 
   it('converts attached audio before sending it to the primary model', async () => {

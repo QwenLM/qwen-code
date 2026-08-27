@@ -2698,6 +2698,205 @@ describe('runNonInteractive', () => {
     );
   });
 
+  it('fails foreign nested tool-result media closed even on an all-capable route', async () => {
+    // R49-5: the gate keys on carrier presence, not an enumeration of MIME
+    // classes. A carrier whose MIME matches no routable modality (video/*,
+    // application/pdf, application/octet-stream, empty string) is
+    // placeholder-substituted by core route slimming on EVERY route — even
+    // one that supports both image and audio — so it must fail closed
+    // visibly regardless of what the override supports.
+    setupMetricsMock();
+    const nestedVideoData = 'TkVTVEVERVZJREVP';
+    const mockCommand = {
+      name: 'capable-model',
+      description: 'submit to an all-capable model',
+      kind: CommandKind.FILE,
+      action: vi.fn().mockResolvedValue({
+        type: 'submit_prompt',
+        content: [{ text: 'analyze this' }],
+        modelOverride: 'capable-model',
+      }),
+    };
+    mockGetCommands.mockReturnValue([mockCommand]);
+    (mockConfig.getContentGeneratorConfig as Mock).mockReturnValue({
+      authType: AuthType.QWEN_OAUTH,
+    });
+    (
+      mockConfig as unknown as { getAvailableModelsForAuthType: Mock }
+    ).getAvailableModelsForAuthType = vi
+      .fn()
+      .mockReturnValue([
+        { id: 'capable-model', authType: AuthType.QWEN_OAUTH },
+      ]);
+    // The override supports BOTH modalities — the foreign carrier must
+    // still fail closed.
+    const resolveForModel = vi.fn().mockResolvedValue({
+      contentGeneratorConfig: { modalities: { image: true, audio: true } },
+    });
+    (mockConfig as unknown as { getBaseLlmClient: Mock }).getBaseLlmClient = vi
+      .fn()
+      .mockReturnValue({ resolveForModel });
+    Object.assign(mockConfig, {
+      getEffectiveInputModalities: vi.fn().mockReturnValue({}),
+      getDefaultVisionBridgeModel: vi.fn().mockReturnValue(undefined),
+    });
+    mockCoreExecuteToolCall.mockResolvedValue({
+      responseParts: [
+        {
+          functionResponse: {
+            id: 'tool-call-nested-video',
+            name: 'custom_tool',
+            response: { output: 'clip attached' },
+            parts: [
+              {
+                inlineData: { mimeType: 'video/mp4', data: nestedVideoData },
+              },
+            ],
+          },
+        },
+      ],
+    });
+    let requestCount = 0;
+    mockGeminiClient.sendMessageStream.mockImplementation(() => {
+      requestCount += 1;
+      if (requestCount === 1) {
+        return createStreamFromEvents([
+          {
+            type: GeminiEventType.ToolCallRequest,
+            value: {
+              callId: 'tool-call-nested-video',
+              name: 'custom_tool',
+              args: {},
+              isClientInitiated: false,
+              prompt_id: 'prompt-foreign-gate',
+            },
+          },
+        ]);
+      }
+      return createStreamFromEvents(finishedEvents);
+    });
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      '/capable-model',
+      'prompt-foreign-gate',
+    );
+
+    expect(mockGeminiClient.sendMessageStream).toHaveBeenCalledTimes(2);
+    const continuationSent = JSON.stringify(
+      mockGeminiClient.sendMessageStream.mock.calls[1]?.[0],
+    );
+    expect(continuationSent).not.toContain(nestedVideoData);
+    expect(continuationSent).toContain('was not sent');
+    expect(processStderrSpy).toHaveBeenCalledWith(
+      expect.stringContaining(
+        'Media returned by a tool was not sent: its MIME type matches no modality',
+      ),
+    );
+  });
+
+  it('establishes the exact route when nested media survives a bare override', async () => {
+    // R49-4: when media SURVIVES the gate under a BARE persisted selector
+    // (text-only first turn earned no NUL stamp), the continuation must not
+    // send the bare selector — core would resolve the request modalities
+    // from the SESSION config and its slimming would placeholder-substitute
+    // the very media the gate just validated. The gate now reports
+    // route establishment and the loop NUL-stamps the persisted selector,
+    // parity with the TUI twin's mediaRouted stamp.
+    setupMetricsMock();
+    const nestedImageData = 'TkVTVEVESU1BR0Uz';
+    const mockCommand = {
+      name: 'vision-model',
+      description: 'submit text to a media-capable model',
+      kind: CommandKind.FILE,
+      action: vi.fn().mockResolvedValue({
+        type: 'submit_prompt',
+        content: [{ text: 'work on this' }],
+        modelOverride: 'vision-model',
+      }),
+    };
+    mockGetCommands.mockReturnValue([mockCommand]);
+    (mockConfig.getContentGeneratorConfig as Mock).mockReturnValue({
+      authType: AuthType.QWEN_OAUTH,
+    });
+    (
+      mockConfig as unknown as { getAvailableModelsForAuthType: Mock }
+    ).getAvailableModelsForAuthType = vi
+      .fn()
+      .mockReturnValue([{ id: 'vision-model', authType: AuthType.QWEN_OAUTH }]);
+    // Text-only session config, media-capable override: the bare selector's
+    // continuation would resolve modalities from the session (image: false)
+    // and slim the nested image away.
+    const resolveForModel = vi.fn().mockResolvedValue({
+      contentGeneratorConfig: { modalities: { image: true } },
+    });
+    (mockConfig as unknown as { getBaseLlmClient: Mock }).getBaseLlmClient = vi
+      .fn()
+      .mockReturnValue({ resolveForModel });
+    Object.assign(mockConfig, {
+      getEffectiveInputModalities: vi.fn().mockReturnValue({}),
+      getDefaultVisionBridgeModel: vi.fn().mockReturnValue(undefined),
+    });
+    mockCoreExecuteToolCall.mockResolvedValue({
+      responseParts: [
+        {
+          functionResponse: {
+            id: 'tool-call-nested-image-3',
+            name: 'custom_tool',
+            response: { output: 'screenshot attached' },
+            parts: [
+              {
+                inlineData: { mimeType: 'image/png', data: nestedImageData },
+              },
+            ],
+          },
+        },
+      ],
+    });
+    let requestCount = 0;
+    mockGeminiClient.sendMessageStream.mockImplementation(() => {
+      requestCount += 1;
+      if (requestCount === 1) {
+        return createStreamFromEvents([
+          {
+            type: GeminiEventType.ToolCallRequest,
+            value: {
+              callId: 'tool-call-nested-image-3',
+              name: 'custom_tool',
+              args: {},
+              isClientInitiated: false,
+              prompt_id: 'prompt-route-establish',
+            },
+          },
+        ]);
+      }
+      return createStreamFromEvents(finishedEvents);
+    });
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      '/vision-model',
+      'prompt-route-establish',
+    );
+
+    // First send: text-only first turn under the override persists BARE.
+    expect(
+      mockGeminiClient.sendMessageStream.mock.calls[0]?.[3]?.modelOverride,
+    ).toBe('vision-model');
+    // Second send: the surviving media must ride an ESTABLISHED exact route
+    // (NUL-stamped selector), not the bare one.
+    expect(mockGeminiClient.sendMessageStream).toHaveBeenCalledTimes(2);
+    expect(
+      mockGeminiClient.sendMessageStream.mock.calls[1]?.[3]?.modelOverride,
+    ).toBe('vision-model\0');
+    const continuationSent = JSON.stringify(
+      mockGeminiClient.sendMessageStream.mock.calls[1]?.[0],
+    );
+    expect(continuationSent).toContain(nestedImageData);
+  });
+
   it('gates nested tool-result media against a bare fail-closed override', async () => {
     // R46-3: a text-only slash override whose first-turn media was
     // fail-closed persists BARE for the whole turn (nothing survived to earn

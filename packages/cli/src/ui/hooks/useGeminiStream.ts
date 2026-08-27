@@ -1922,7 +1922,12 @@ export const useGeminiStream = (
       mediaRouted?: boolean;
     }> => {
       const nested = detectNestedFunctionResponseMedia(query);
-      if (!nested.hasImage && !nested.hasAudio && !nested.hasUntyped) {
+      if (
+        !nested.hasImage &&
+        !nested.hasAudio &&
+        !nested.hasUntyped &&
+        !nested.hasForeign
+      ) {
         return { parts: query };
       }
       // Gate ANY active override, not only a media-routed one (mirrors the
@@ -1983,6 +1988,27 @@ export const useGeminiStream = (
           {
             type: MessageType.ERROR,
             text: 'Media returned by a tool was not sent: it carries no MIME type, so it cannot be routed to the model.',
+          },
+          timestamp,
+        );
+      }
+      if (nested.hasForeign) {
+        // Fail closed unconditionally: a MIME outside the routable
+        // modalities (image/, audio/) matches NO route — core's slimming
+        // placeholder-substitutes such carriers on every route, even an
+        // all-capable one, so the model would answer about media it never
+        // received. Keying on carrier presence (not an enumeration of MIME
+        // classes) keeps unbounded tool-supplied MIMEs from slipping past.
+        result = replaceNestedFunctionResponseMedia(
+          result,
+          'foreign',
+          '[Media content returned by a tool was not sent: its MIME type matches no modality that can be routed to the model.]',
+        );
+        substituted = true;
+        addItem(
+          {
+            type: MessageType.ERROR,
+            text: 'Media returned by a tool was not sent: its MIME type matches no modality that can be routed to the model.',
           },
           timestamp,
         );
@@ -4586,6 +4612,11 @@ export const useGeminiStream = (
           await releaseUndeliveredGoalTurn(metadata?.userAdmission?.turnKey);
           releaseSubmissionLease();
           metadata?.onAdmissionFailed?.();
+          // A prepare throw is a delivery failure for an attached drained
+          // steer: re-queue it so the user's typed input is not silently
+          // lost (restore is idempotent via its settled flag). Matches every
+          // other delivery-failure path, which re-queue through restore.
+          metadata?.steerInput?.restore();
           throw error;
         }
         const {

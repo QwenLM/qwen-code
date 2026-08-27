@@ -43,6 +43,21 @@ function nestedPartMime(inner: Part): string | undefined {
 }
 
 /**
+ * Extension-supplied parts reach the walkers verbatim and may be null or
+ * non-object; only plain objects can be media carriers. Guarded so a
+ * malformed part list fails closed instead of throwing mid-prepare.
+ */
+function isMediaCarrierCandidate(inner: unknown): inner is Part {
+  return inner !== null && typeof inner === 'object';
+}
+
+/** The only modalities the routing layer can exact-route to a model. */
+function isRoutableMime(mime: string): boolean {
+  const lower = mime.toLowerCase();
+  return lower.startsWith('image/') || lower.startsWith('audio/');
+}
+
+/**
  * Detect inline media nested inside `functionResponse.parts`. The top-level
  * `hasImageParts`/`hasAudioParts` helpers only see top-level `inlineData`, so
  * a tool-result continuation's media is invisible to them.
@@ -56,22 +71,35 @@ function nestedPartMime(inner: Part): string | undefined {
  * `convertToFunctionResponse` nests tool-supplied parts verbatim without
  * normalizing `mimeType`, so untyped custom/extension adapters reach this
  * code path.
+ *
+ * The axes key on CARRIER PRESENCE, not an enumeration of known MIME
+ * classes: any media carrier whose MIME matches no routable modality
+ * (image/ or audio/) is reported as `hasForeign` — `video/*`,
+ * `application/pdf`, `application/octet-stream` (the MCP default for a
+ * MIME-less embedded resource), or an empty-string MIME. Core's slimming
+ * placeholder-substitutes such carriers on every route (they match no
+ * modality), so the gates must fail them closed visibly instead of letting
+ * the model answer about media it never received. Enumerating MIME
+ * prefixes can never converge on an unbounded tool-supplied entrance space.
  */
 export function detectNestedFunctionResponseMedia(parts: PartListUnion): {
   hasImage: boolean;
   hasAudio: boolean;
   hasUntyped: boolean;
+  hasForeign: boolean;
 } {
   const list = Array.isArray(parts) ? parts : [parts];
   let hasImage = false;
   let hasAudio = false;
   let hasUntyped = false;
+  let hasForeign = false;
   for (const part of list) {
-    if (typeof part === 'string') continue;
+    if (!isMediaCarrierCandidate(part)) continue;
     const nested = (part.functionResponse as { parts?: unknown } | undefined)
       ?.parts;
     if (!Array.isArray(nested)) continue;
-    for (const inner of nested as Part[]) {
+    for (const inner of nested as unknown[]) {
+      if (!isMediaCarrierCandidate(inner)) continue;
       if (!nestedPartCarriesMedia(inner)) {
         continue;
       }
@@ -83,12 +111,15 @@ export function detectNestedFunctionResponseMedia(parts: PartListUnion): {
       // Case-insensitive, mirroring the audio bridge's own `isAudioPart`
       // (which lowercases first): an 'AUDIO/WAV' tool result must be policed
       // exactly like 'audio/wav'.
-      const lower = mime.toLowerCase();
-      if (lower.startsWith('image/')) hasImage = true;
-      else if (lower.startsWith('audio/')) hasAudio = true;
+      if (isRoutableMime(mime)) {
+        if (mime.toLowerCase().startsWith('image/')) hasImage = true;
+        else hasAudio = true;
+      } else {
+        hasForeign = true;
+      }
     }
   }
-  return { hasImage, hasAudio, hasUntyped };
+  return { hasImage, hasAudio, hasUntyped, hasForeign };
 }
 
 export function stringifyStructuredToolOutput(value: unknown): string {
@@ -107,13 +138,14 @@ export function stringifyStructuredToolOutput(value: unknown): string {
  */
 export function replaceNestedFunctionResponseMedia(
   parts: PartListUnion,
-  match: 'image' | 'audio' | 'untyped',
+  match: 'image' | 'audio' | 'untyped' | 'foreign',
   note: string,
 ): Part[] {
   const prefix = match === 'image' ? 'image/' : 'audio/';
   const list = Array.isArray(parts) ? parts : [parts];
   return list.map((part) => {
     if (typeof part === 'string') return { text: part };
+    if (!isMediaCarrierCandidate(part)) return part as Part;
     const functionResponse = part.functionResponse as
       | ({ parts?: unknown } & Record<string, unknown>)
       | undefined;
@@ -121,19 +153,28 @@ export function replaceNestedFunctionResponseMedia(
     if (!Array.isArray(nested)) return part;
     let touched = false;
     const retained: Part[] = [];
-    for (const inner of nested as Part[]) {
+    for (const inner of nested as unknown[]) {
+      if (!isMediaCarrierCandidate(inner)) {
+        retained.push(inner as Part);
+        continue;
+      }
       const mime = nestedPartMime(inner);
       // Same predicates as `detectNestedFunctionResponseMedia` — both
       // carriers (`inlineData` and `fileData`), case-insensitive MIME
-      // matching, and MIME-less carriers for the `untyped` axis (core's
-      // slimming placeholder-substitutes them on every route, so the gates
-      // fail them closed visibly).
+      // matching, MIME-less carriers for the `untyped` axis, and any
+      // non-routable MIME for the `foreign` axis (core's slimming
+      // placeholder-substitutes both on every route, so the gates fail them
+      // closed visibly).
       const isMatch =
         match === 'untyped'
           ? mime === undefined && nestedPartCarriesMedia(inner)
-          : mime !== undefined &&
-            mime.toLowerCase().startsWith(prefix) &&
-            nestedPartCarriesMedia(inner);
+          : match === 'foreign'
+            ? mime !== undefined &&
+              nestedPartCarriesMedia(inner) &&
+              !isRoutableMime(mime)
+            : mime !== undefined &&
+              mime.toLowerCase().startsWith(prefix) &&
+              nestedPartCarriesMedia(inner);
       if (isMatch) {
         touched = true;
       } else {
@@ -210,13 +251,15 @@ export function clampNestedFunctionResponseMedia(
   let touched = false;
   const mapped: Part[] = list.map((part) => {
     if (typeof part === 'string') return { text: part };
+    if (!isMediaCarrierCandidate(part)) return part as Part;
     const functionResponse = part.functionResponse as
       | ({ parts?: unknown } & Record<string, unknown>)
       | undefined;
     const nested = functionResponse?.parts;
     if (!Array.isArray(nested)) return part;
     let nestedTouched = false;
-    const clampedInner = (nested as Part[]).map((inner) => {
+    const clampedInner = (nested as unknown[]).map((inner) => {
+      if (!isMediaCarrierCandidate(inner)) return inner as Part;
       const clamped = clampInlineMediaPart(inner);
       if (clamped !== inner) nestedTouched = true;
       return clamped;
