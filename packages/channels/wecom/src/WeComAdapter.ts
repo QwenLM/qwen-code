@@ -440,30 +440,32 @@ export class WeComChannel extends ChannelBase {
         );
         return;
       }
-      attachments = await this.downloadAttachments(
-        body,
-        attachments,
-        messageId,
-        attachmentRouteKey,
-        connectionGeneration,
-      );
-      if (this.disconnectGeneration !== connectionGeneration) {
-        process.stderr.write(
-          `[WeCom:${this.name}] dropping message ${logMessageId}: connection changed during attachment download.\n`,
+      await this.processPreflightedInbound(envelope, async () => {
+        attachments = await this.downloadAttachments(
+          body,
+          attachments,
+          messageId,
+          attachmentRouteKey,
+          connectionGeneration,
         );
-        return;
-      }
-      if (attachments.length) {
-        envelope.attachments = attachments;
-      }
-      if (!envelope.text && attachments.length) {
-        envelope.text = attachments.some((a) => a.type === 'image')
-          ? '(image)'
-          : `(file: ${attachments[0]?.fileName ?? 'file'})`;
-      }
-      if (rawMessageId) this.seenMessages.set(rawMessageId, Date.now());
-      processStarted = true;
-      await this.processInbound(envelope);
+        if (this.disconnectGeneration !== connectionGeneration) {
+          process.stderr.write(
+            `[WeCom:${this.name}] dropping message ${logMessageId}: connection changed during attachment download.\n`,
+          );
+          return;
+        }
+        if (attachments.length) {
+          envelope.attachments = attachments;
+        }
+        if (!envelope.text && attachments.length) {
+          envelope.text = attachments.some((a) => a.type === 'image')
+            ? '(image)'
+            : `(file: ${attachments[0]?.fileName ?? 'file'})`;
+        }
+        if (rawMessageId) this.seenMessages.set(rawMessageId, Date.now());
+        processStarted = true;
+        await this.processInbound(envelope);
+      });
     } catch (err) {
       if (rawMessageId && !processStarted) {
         this.seenMessages.delete(rawMessageId);
