@@ -1,4 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 const wsMock = vi.hoisted(() => ({
   close: vi.fn(),
@@ -18,6 +21,7 @@ vi.mock('@larksuiteoapi/node-sdk', async (importOriginal) => {
 });
 
 import { FeishuChannel } from './FeishuAdapter.js';
+import { PairingStore } from '@qwen-code/channel-base';
 import type {
   ChannelAgentBridge,
   ChannelBaseOptions,
@@ -714,6 +718,100 @@ describe('FeishuChannel', () => {
       fetchSpy.mockRestore();
     }
   });
+
+  it.each([
+    {
+      label: 'group pairing with a user parent',
+      config: { groupPolicy: 'pairing' as const },
+      parentType: 'user',
+      expectedSubject: undefined,
+    },
+    {
+      label: 'sender pairing with a user parent',
+      config: { senderPolicy: 'pairing' as const },
+      parentType: 'user',
+      expectedSubject: undefined,
+    },
+    {
+      label: 'group pairing with a bot parent',
+      config: { groupPolicy: 'pairing' as const },
+      parentType: 'app',
+      expectedSubject: { type: 'group', id: 'oc_group' },
+    },
+    {
+      label: 'sender pairing with a bot parent',
+      config: { senderPolicy: 'pairing' as const },
+      parentType: 'app',
+      expectedSubject: { type: 'user', id: 'ou_user' },
+    },
+  ])(
+    'defers $label until parent authorship is resolved',
+    async ({ config, parentType, expectedSubject }) => {
+      const previousQwenHome = process.env['QWEN_HOME'];
+      const qwenHome = mkdtempSync(join(tmpdir(), 'feishu-pairing-'));
+      process.env['QWEN_HOME'] = qwenHome;
+      const bridge = createMockBridge();
+      const channel = new FeishuChannel(
+        'test',
+        createConfig({ ...config, cwd: '/tmp' }),
+        bridge,
+      );
+      Object.assign(channel as unknown as Record<string, unknown>, {
+        tokenCache: {
+          token: 'test_token',
+          expiresAt: Date.now() + 3_600_000,
+        },
+      });
+      const sendMessage = vi
+        .spyOn(channel as never, 'sendMessage')
+        .mockResolvedValue(undefined);
+      const preflight = vi.spyOn(channel as never, 'preflightInbound');
+      const fetchSpy = vi.spyOn(global, 'fetch').mockResolvedValue(
+        jsonResponse({
+          data: {
+            items: [
+              {
+                msg_type: 'text',
+                body: { content: JSON.stringify({ text: 'parent text' }) },
+                sender: { sender_type: parentType },
+              },
+            ],
+          },
+        }),
+      );
+      const reply = feishuGroupMessage(
+        `message_${parentType}_${config.groupPolicy ?? config.senderPolicy}`,
+      );
+      (reply['message'] as Record<string, unknown>)['parent_id'] = 'om_parent';
+
+      try {
+        getPrivateMethod<(data: unknown) => void>(channel, 'onMessage').call(
+          channel,
+          reply,
+        );
+
+        await vi.waitFor(() => expect(preflight).toHaveBeenCalledTimes(2));
+        await new Promise<void>((resolve) => setImmediate(resolve));
+
+        const requests = new PairingStore('test', '/tmp').listPending();
+        if (expectedSubject) {
+          expect(requests).toHaveLength(1);
+          expect(requests[0]?.subject).toMatchObject(expectedSubject);
+          expect(sendMessage).toHaveBeenCalledOnce();
+        } else {
+          expect(requests).toEqual([]);
+          expect(sendMessage).not.toHaveBeenCalled();
+        }
+        expect(fetchSpy).toHaveBeenCalledOnce();
+        expect(bridge.prompt).not.toHaveBeenCalled();
+      } finally {
+        fetchSpy.mockRestore();
+        if (previousQwenHome === undefined) delete process.env['QWEN_HOME'];
+        else process.env['QWEN_HOME'] = previousQwenHome;
+        rmSync(qwenHome, { recursive: true, force: true });
+      }
+    },
+  );
 
   describe('observed contact enrichment', () => {
     it('resolves labels once and reuses them on later observations', async () => {

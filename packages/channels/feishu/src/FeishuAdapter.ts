@@ -2498,7 +2498,7 @@ export class FeishuChannel extends ChannelBase {
       }
 
       // Parent authorship is resolved under the named-session preparation lock;
-      // non-bot replies run preflight again before they can be processed.
+      // replies run the full preflight again before they can be processed.
       const envelope: Envelope = {
         channelName: this.name,
         senderId,
@@ -2513,16 +2513,20 @@ export class FeishuChannel extends ChannelBase {
         isReplyToBot: Boolean(msg.parent_id),
       };
 
+      const prepareInbound = (prepare: () => Promise<boolean | void>) =>
+        this.prepareThenHandleInbound(envelope, prepare, {
+          deferPairingRequests: Boolean(msg.parent_id),
+        });
       const processMessage = async () => {
         let downloadedFileDir: string | undefined;
         try {
-          await this.prepareThenHandleInbound(envelope, async () => {
+          await prepareInbound(async () => {
             // If this message is a reply/quote, fetch the quoted content as context
             if (msg.parent_id) {
               const { content: quotedContent, isFromBot } =
                 await this.fetchMessageContent(msg.parent_id);
               envelope.isReplyToBot = isFromBot;
-              if (!isFromBot && !(await this.preflightInbound(envelope))) {
+              if (!(await this.preflightInbound(envelope))) {
                 return false;
               }
               if (quotedContent) {

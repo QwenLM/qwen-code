@@ -188,6 +188,10 @@ interface ChannelMemoryReadToken {
   context?: string;
 }
 
+interface PreflightInboundOptions {
+  deferPairingRequests?: boolean;
+}
+
 interface ChannelMemoryRecallCacheEntry {
   revision: string;
   index: ChannelMemoryRecallIndex;
@@ -5191,9 +5195,18 @@ export abstract class ChannelBase {
     return `${GROUP_HISTORY_CONTEXT_MARKER}\n${formatted.join('\n')}\n\n${CURRENT_MESSAGE_MARKER}\n${promptText}`;
   }
 
-  protected preflightInbound(envelope: Envelope): boolean | Promise<boolean> {
-    const groupResult = this.groupGate.check(envelope);
-    if (!groupResult.allowed) {
+  protected preflightInbound(
+    envelope: Envelope,
+    options: PreflightInboundOptions = {},
+  ): boolean | Promise<boolean> {
+    const groupResult = this.groupGate.check(envelope, {
+      createPairingRequest: !options.deferPairingRequests,
+    });
+    const deferredGroupPairing =
+      options.deferPairingRequests === true &&
+      groupResult.reason === 'pairing_trigger_required' &&
+      (envelope.isMentioned || envelope.isReplyToBot);
+    if (!groupResult.allowed && !deferredGroupPairing) {
       if (groupResult.pairing !== undefined) {
         this.logPreflightRejected('group_pairing_required');
         return this.onGroupPairingRequired(
@@ -5230,6 +5243,15 @@ export abstract class ChannelBase {
     }
 
     if (envelope.isGroup && this.config.groupPolicy === 'pairing') {
+      this.markPreflighted(envelope);
+      return true;
+    }
+
+    if (
+      options.deferPairingRequests === true &&
+      this.config.senderPolicy === 'pairing' &&
+      !this.gate.isAllowed(envelope.senderId)
+    ) {
       this.markPreflighted(envelope);
       return true;
     }
@@ -5298,8 +5320,9 @@ export abstract class ChannelBase {
   protected async prepareThenHandleInbound(
     envelope: Envelope,
     prepare: () => Promise<boolean | void>,
+    preflightOptions: PreflightInboundOptions = {},
   ): Promise<void> {
-    const preflight = this.preflightInbound(envelope);
+    const preflight = this.preflightInbound(envelope, preflightOptions);
     if (!(isPromiseLike(preflight) ? await preflight : preflight)) return;
     if (this.namedSessions) {
       const result = await this.namedSessions.resolveAfterPreparation(
