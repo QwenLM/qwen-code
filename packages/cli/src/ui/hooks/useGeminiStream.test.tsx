@@ -13162,6 +13162,343 @@ describe('useGeminiStream', () => {
       releaseMainEnd?.();
     });
 
+    it('keeps a surviving ?btw deferral armed when a queued Cron drain submits after a local cancel', async () => {
+      const getOnComplete = captureSchedulerOnComplete();
+
+      let releaseMainEnd: (() => void) | undefined;
+      const holdMainEnd = new Promise<void>((resolve) => {
+        releaseMainEnd = resolve;
+      });
+      let releaseBtwTcr: (() => void) | undefined;
+      const holdBtwTcr = new Promise<void>((resolve) => {
+        releaseBtwTcr = resolve;
+      });
+      let releaseBtwEnd: (() => void) | undefined;
+      const holdBtwEnd = new Promise<void>((resolve) => {
+        releaseBtwEnd = resolve;
+      });
+
+      let streamCallCount = 0;
+      mockSendMessageStream.mockImplementation(() => {
+        streamCallCount += 1;
+        if (streamCallCount === 1) {
+          return (async function* () {
+            yield {
+              type: ServerGeminiEventType.Content,
+              value: 'main answer',
+            };
+            await holdMainEnd;
+            yield {
+              type: ServerGeminiEventType.Finished,
+              value: { reason: 'STOP', usageMetadata: undefined },
+            };
+          })();
+        }
+        if (streamCallCount === 2) {
+          return (async function* () {
+            yield {
+              type: ServerGeminiEventType.Thought,
+              value: { subject: '', description: 'btw thinking' },
+            };
+            await holdBtwTcr;
+            yield {
+              type: ServerGeminiEventType.ToolCallRequest,
+              value: {
+                callId: 'btw-tc',
+                name: 'read_file',
+                args: { path: '/foo' },
+                isClientInitiated: false,
+                prompt_id: mockSendMessageStream.mock.calls[1]?.[2],
+              },
+            };
+            await holdBtwEnd;
+            yield {
+              type: ServerGeminiEventType.Finished,
+              value: { reason: 'STOP', usageMetadata: undefined },
+            };
+          })();
+        }
+        // The Cron drain admitted after the cancel: a plain turn whose
+        // settlement must not touch the surviving stream's deferral.
+        return (async function* () {
+          yield {
+            type: ServerGeminiEventType.Content,
+            value: 'cron answer',
+          };
+          yield {
+            type: ServerGeminiEventType.Finished,
+            value: { reason: 'STOP', usageMetadata: undefined },
+          };
+        })();
+      });
+
+      const { result } = renderDeferredTestHook();
+
+      await act(async () => {
+        void result.current.submitQuery(
+          'main query',
+          SendMessageType.UserQuery,
+          'main-prompt',
+          { submittedPrompt: 'main query' },
+        );
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      await waitFor(() =>
+        expect(result.current.streamingState).toBe(StreamingState.Responding),
+      );
+
+      await act(async () => {
+        void result.current.submitQuery(
+          '?btw side question',
+          SendMessageType.UserQuery,
+          undefined,
+          { submittedPrompt: '?btw side question' },
+        );
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      await waitFor(() =>
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(2),
+      );
+      const btwPromptId = mockSendMessageStream.mock.calls[1]?.[2] as string;
+      expect(btwPromptId).toBeDefined();
+
+      await act(async () => {
+        releaseBtwTcr?.();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      await waitForDeferralEstablished(result);
+
+      // Local cancel aborts only the foreground controller; the ?btw stream
+      // survives with its deferral armed and no toolCalls scheduled yet, so
+      // the hook drops to Idle and a queued Cron drain is admitted.
+      await act(async () => {
+        result.current.cancelOngoingRequest();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      await waitFor(() =>
+        expect(result.current.streamingState).toBe(StreamingState.Idle),
+      );
+
+      // The drain must settle owner-aware: aborting here would re-home the
+      // surviving stream's frozen thought under the draining turn and strand
+      // its batch without the fold.
+      await act(async () => {
+        void result.current.submitQuery(
+          'queued cron task',
+          SendMessageType.Cron,
+          undefined,
+          { submittedPrompt: 'queued cron task' },
+        );
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      await waitFor(() =>
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(3),
+      );
+      expect(
+        mockAddItem.mock.calls.filter(
+          ([item]) => item.type === 'gemini_thought',
+        ),
+      ).toHaveLength(0);
+      expect(result.current.pendingHistoryItems).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ type: 'gemini_thought', finalized: true }),
+        ]),
+      );
+
+      // The surviving ?btw batch completes and folds its own thought.
+      await act(async () => {
+        await getOnComplete()?.([
+          successfulReadToolCall(btwPromptId, 'btw-tc'),
+        ]);
+      });
+      const thoughtCommits = mockAddItem.mock.calls.filter(
+        ([item]) => item.type === 'gemini_thought',
+      );
+      expect(thoughtCommits).toHaveLength(1);
+      expect(thoughtCommits[0][0].text).toContain('btw thinking');
+      expect(mockAddItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'tool_group',
+          display: expect.objectContaining({ mergedIntoThought: true }),
+        }),
+        expect.any(Number),
+      );
+
+      releaseBtwEnd?.();
+      releaseMainEnd?.();
+    });
+
+    it('does not commit a concurrent stream oversized thought tail at a foreign tool-first boundary', async () => {
+      // The pending slot is shared across concurrent streams. A ?btw stream
+      // whose reasoning exceeds the 16,384-char pending limit leaves its
+      // `gemini_thought_content` tail in the slot while still streaming; a
+      // foreground tool-first ToolCallRequest must not commit that foreign
+      // tail into its own turn region — the tail belongs to the owning
+      // stream's settlement.
+      let releaseMainTcr: (() => void) | undefined;
+      const holdMainTcr = new Promise<void>((resolve) => {
+        releaseMainTcr = resolve;
+      });
+      let releaseMainEnd: (() => void) | undefined;
+      const holdMainEnd = new Promise<void>((resolve) => {
+        releaseMainEnd = resolve;
+      });
+      let releaseBtwMid: (() => void) | undefined;
+      const holdBtwMid = new Promise<void>((resolve) => {
+        releaseBtwMid = resolve;
+      });
+      let releaseBtwEnd: (() => void) | undefined;
+      const holdBtwEnd = new Promise<void>((resolve) => {
+        releaseBtwEnd = resolve;
+      });
+
+      let streamCallCount = 0;
+      mockSendMessageStream.mockImplementation(() => {
+        streamCallCount += 1;
+        if (streamCallCount === 1) {
+          // Foreground: tool-first — a ToolCallRequest with no Thought of
+          // its own, so no deferral arms at its boundary.
+          return (async function* () {
+            yield {
+              type: ServerGeminiEventType.Content,
+              value: 'main working',
+            };
+            await holdMainTcr;
+            yield {
+              type: ServerGeminiEventType.ToolCallRequest,
+              value: {
+                callId: 'main-tc',
+                name: 'read_file',
+                args: { path: '/bar' },
+                isClientInitiated: false,
+                prompt_id: 'main-prompt',
+              },
+            };
+            await holdMainEnd;
+            yield {
+              type: ServerGeminiEventType.Finished,
+              value: { reason: 'STOP', usageMetadata: undefined },
+            };
+          })();
+        }
+        return (async function* () {
+          // Oversized reasoning: the head commits in-stream at the split,
+          // the tail stays pending while this stream keeps streaming.
+          yield {
+            type: ServerGeminiEventType.Thought,
+            value: { subject: '', description: 'B'.repeat(20_000) },
+          };
+          await holdBtwMid;
+          yield {
+            type: ServerGeminiEventType.Thought,
+            value: { subject: '', description: ' tail-more' },
+          };
+          await holdBtwEnd;
+          yield {
+            type: ServerGeminiEventType.Finished,
+            value: { reason: 'STOP', usageMetadata: undefined },
+          };
+        })();
+      });
+
+      const { result } = renderDeferredTestHook();
+
+      await act(async () => {
+        void result.current.submitQuery(
+          'main query',
+          SendMessageType.UserQuery,
+          'main-prompt',
+          { submittedPrompt: 'main query' },
+        );
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      await waitFor(() =>
+        expect(result.current.streamingState).toBe(StreamingState.Responding),
+      );
+
+      await act(async () => {
+        void result.current.submitQuery(
+          '?btw side question',
+          SendMessageType.UserQuery,
+          undefined,
+          { submittedPrompt: '?btw side question' },
+        );
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      await waitFor(() =>
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(2),
+      );
+
+      // The oversized split commits the head in-stream (btw's own commit)
+      // and leaves the tail pending.
+      await waitFor(() => {
+        const headCommits = mockAddItem.mock.calls.filter(
+          ([item]) => item.type === 'gemini_thought',
+        );
+        expect(headCommits).toHaveLength(1);
+      });
+      const tailCommitsAtSplit = mockAddItem.mock.calls.filter(
+        ([item]) => item.type === 'gemini_thought_content',
+      );
+      expect(tailCommitsAtSplit).toHaveLength(0);
+      expect(result.current.pendingHistoryItems).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ type: 'gemini_thought_content' }),
+        ]),
+      );
+
+      // The foreground tool-first boundary must leave the foreign tail
+      // alone: no deferral arms (this turn has no thought of its own) and
+      // the tail is not committed into this turn's region. End the main
+      // stream so its loop settles and schedules the batch.
+      await act(async () => {
+        releaseMainTcr?.();
+        releaseMainEnd?.();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      await waitFor(() => expect(mockScheduleToolCalls).toHaveBeenCalled());
+      expect(
+        mockAddItem.mock.calls.filter(
+          ([item]) => item.type === 'gemini_thought_content',
+        ),
+      ).toHaveLength(0);
+      expect(result.current.pendingHistoryItems).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ type: 'gemini_thought_content' }),
+        ]),
+      );
+
+      // The owning stream keeps streaming, then settles: its own settlement
+      // commits the tail exactly once.
+      await act(async () => {
+        releaseBtwMid?.();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      await act(async () => {
+        releaseBtwEnd?.();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      await waitFor(() => {
+        const tailCommits = mockAddItem.mock.calls.filter(
+          ([item]) => item.type === 'gemini_thought_content',
+        );
+        expect(tailCommits).toHaveLength(1);
+        expect(tailCommits[0][0].text).toContain('tail-more');
+      });
+
+      releaseMainEnd?.();
+    });
+
     it('does not let a ?btw continuation submit overwrite the cancel settlement identity', async () => {
       const getOnComplete = captureSchedulerOnComplete();
 

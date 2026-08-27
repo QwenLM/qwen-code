@@ -1428,20 +1428,21 @@ export const useGeminiStream = (
         return;
       }
       const pending = pendingThoughtItemRef.current;
-      if (pending?.type !== 'gemini_thought') {
-        commitPendingThought(userMessageTimestamp);
+      // The pending slot is shared across concurrent streams: never commit or
+      // arm on content produced by ANOTHER invocation. A foreign stream's
+      // head or oversized `gemini_thought_content` tail (e.g. a ?btw
+      // reasoning chunk flushed before this tool-first turn's first
+      // ToolCallRequest) must NOT be committed here — that stream may still
+      // be streaming it (its local buffer rebuilds the slot on the next
+      // chunk), so committing a partial copy now would be committed AGAIN by
+      // that stream's own settlement, duplicating the reasoning under this
+      // turn's timestamp. Leave it pending for its owner's settlement paths;
+      // this turn simply has no thought to merge.
+      if (pending && pendingThoughtOwnerRef.current !== owner) {
         return;
       }
-      // The pending slot is shared across concurrent streams: arm only when
-      // the thought was produced by THIS invocation. A foreign stream's
-      // thought (e.g. a ?btw reasoning chunk flushed before this tool-first
-      // turn's first ToolCallRequest) must NOT be committed here — that
-      // stream may still be streaming it (its local buffer rebuilds the slot
-      // on the next chunk), so committing a partial copy now would be
-      // committed AGAIN by that stream's own settlement, duplicating the
-      // reasoning. Leave it pending for its owner's settlement paths; this
-      // turn simply has no thought to merge.
-      if (pendingThoughtOwnerRef.current !== owner) {
+      if (pending?.type !== 'gemini_thought') {
+        commitPendingThought(userMessageTimestamp);
         return;
       }
       const frozen = {
@@ -3957,7 +3958,19 @@ export const useGeminiStream = (
           submitType === SendMessageType.Teammate) &&
         thoughtMergeDeferralRef.current
       ) {
-        abortThoughtMergeDeferral(userMessageTimestamp);
+        if (submitType === SendMessageType.UserQuery) {
+          abortThoughtMergeDeferral(userMessageTimestamp);
+        } else {
+          // A Cron/Teammate drain can be admitted right after a foreground
+          // cancel dropped the hook to Idle while a SURVIVING concurrent
+          // stream's deferral is still armed. Aborting unconditionally would
+          // re-home that stream's frozen thought under the draining turn and
+          // strand its batch without the fold; settle owner-aware instead.
+          settleThoughtMergeDeferral(
+            userMessageTimestamp,
+            activeInteractionPromptIdRef.current,
+          );
+        }
       }
 
       // Reset quota error flag when starting a new query (not a continuation).
@@ -4274,9 +4287,15 @@ export const useGeminiStream = (
           // Reset thought when starting a new prompt. An active merge
           // deferral was already resolved above — BEFORE
           // prepareQueryForGemini appended this turn's user item — so the
-          // deferred thought committed above the new prompt, not below it.
+          // deferred thought committed above the new prompt, not below it —
+          // unless the settlement was owner-aware and left a CONCURRENT
+          // stream's deferral armed (a Cron/Teammate drain after cancel):
+          // the armed snapshot owns the slot, so clearing it here would drop
+          // the surviving stream's frozen thought from the pending display.
           setThought(null);
-          setPendingThoughtItem(null);
+          if (!thoughtMergeDeferralRef.current) {
+            setPendingThoughtItem(null);
+          }
         }
 
         if (submitType === SendMessageType.Retry) {
