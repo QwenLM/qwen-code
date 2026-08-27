@@ -568,6 +568,7 @@ export class GeminiClient {
         restoreRuntime.apiHistory,
         sessionStartSource ?? SessionStartSource.Resume,
       );
+      this.restoreLoadedSkillsFromHistory(restoreRuntime.apiHistory);
       const chat = this.getChat();
       if (restoreRuntime.resumeTokenCounts) {
         const counts = restoreRuntime.resumeTokenCounts;
@@ -598,6 +599,7 @@ export class GeminiClient {
         resumedHistory,
         sessionStartSource ?? SessionStartSource.Resume,
       );
+      this.restoreLoadedSkillsFromHistory(resumedHistory);
       const chat = this.getChat();
       if (resumeTokenCounts) {
         chat.seedResumeTokenCounts(
@@ -655,6 +657,13 @@ export class GeminiClient {
         debugLogger.warn('Failed to restore attribution snapshot');
       }
     }
+  }
+
+  private restoreLoadedSkillsFromHistory(history: Content[]): void {
+    const skillTool = this.config.getToolRegistry().getTool(ToolNames.SKILL) as
+      | { restoreLoadedSkillsFromHistory?: (history: Content[]) => void }
+      | undefined;
+    skillTool?.restoreLoadedSkillsFromHistory?.(history);
   }
 
   async addHistory(content: Content) {

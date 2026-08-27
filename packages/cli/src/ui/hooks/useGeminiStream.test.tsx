@@ -299,7 +299,7 @@ describe('useGeminiStream', () => {
       mcpServers: undefined,
       userAgent: 'test-agent',
       userMemory: '',
-      geminiMdFileCount: 0,
+      memoryFileCount: 0,
       alwaysSkipModificationConfirmation: false,
       vertexai: false,
       contextFileName: undefined,
@@ -491,12 +491,17 @@ describe('useGeminiStream', () => {
       permit,
       turnKey: 'goal-runtime:turn-automatic',
       continuationContext: 'continue from the last accepted evidence',
+      objectiveUpdated: true,
       windDown: true,
       verifierFeedback: 'show the final verification result',
     };
     const peekNextUserBatchKey = vi.fn((goalTurnActive?: boolean) =>
       goalTurnActive ? undefined : 'message-queue:next-user',
     );
+    const markTurnDelivered = vi.fn();
+    mockConfig.getGoalRuntime = vi.fn(() => ({
+      markTurnDelivered,
+    })) as unknown as ReturnType<Config['getGoalRuntime']>;
     const { result, mockSendMessageStream: streamMock } = renderTestHook(
       [],
       undefined,
@@ -529,7 +534,8 @@ describe('useGeminiStream', () => {
         '<goal_runtime_data>',
         `{"goalId":"${permit.goalId}","revision":${permit.revision},"objective":"${goal.continuationContext}"}`,
         '</goal_runtime_data>',
-        'The objective in that data block is the current one and supersedes any earlier Goal objective in this conversation, including one you already started working on.',
+        'The objective in that data block is the current one and supersedes any other Goal objective text in this conversation.',
+        'The Goal objective changed since your last turn: the objective above replaces the one you were working on. Stop work that only served the previous objective, and carry over only what also serves this one.',
         'The autonomous token budget for this Goal window is spent. This is the final turn before the Goal stops and waits for the user; do not start new work.',
         'Deliver a concise hand-off: what was accomplished, citing evidence references from get_goal; what remains; and the one concrete next step. Call update_goal only if the objective is already complete or genuinely blocked on the evidence you have. Then end the turn.',
         `Verifier feedback: ${goal.verifierFeedback}`,
@@ -543,6 +549,9 @@ describe('useGeminiStream', () => {
         goalSignal: expect.any(AbortSignal),
         getQueuedGoalTurnKey: expect.any(Function),
       }),
+    );
+    expect(markTurnDelivered).toHaveBeenCalledWith(
+      'goal-runtime:turn-automatic',
     );
     const options = streamMock.mock.calls[0][3] as {
       goalSignal: AbortSignal;
