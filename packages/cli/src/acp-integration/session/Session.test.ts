@@ -988,6 +988,17 @@ describe('Session', () => {
     expect(mockConfig.reloadModelProvidersConfig).not.toHaveBeenCalled();
   });
 
+  it('does not apply stale model providers when the workspace scope cannot reload', () => {
+    vi.mocked(mockSettings.reloadScopeFromDisk)
+      .mockReturnValueOnce(true)
+      .mockReturnValueOnce(false);
+
+    expect(() => session.reloadModelProvidersFromDisk()).toThrow(
+      'Unable to reload model-provider settings from disk.',
+    );
+    expect(mockConfig.reloadModelProvidersConfig).not.toHaveBeenCalled();
+  });
+
   it('bounds textual tool results at the live ACP delivery boundary', async () => {
     const source = `head-${'x'.repeat(499_999)}-tail`;
     await session.sendUpdate({

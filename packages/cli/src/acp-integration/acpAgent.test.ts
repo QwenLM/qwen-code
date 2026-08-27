@@ -4710,29 +4710,45 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
-  it('does not publish a session when the final provider reload fails', async () => {
-    await setupSessionMocks('session-provider-reload-failed');
-    const settings = makeSessionSettings() as LoadedSettings & {
-      reloadScopeFromDisk: ReturnType<typeof vi.fn>;
-    };
-    settings.reloadScopeFromDisk = vi.fn().mockReturnValue(false);
-    vi.mocked(loadSettings).mockReturnValue(settings);
-    const { agent, agentPromise } = await bootAcpAgent();
+  it.each([
+    [SettingScope.User, false, true],
+    [SettingScope.Workspace, true, false],
+  ])(
+    'does not publish a session when the final %s provider reload fails',
+    async (_scope, userReloaded, workspaceReloaded) => {
+      await setupSessionMocks('session-provider-reload-failed');
+      const settings = makeSessionSettings() as LoadedSettings & {
+        reloadScopeFromDisk: ReturnType<typeof vi.fn>;
+      };
+      settings.reloadScopeFromDisk = vi
+        .fn()
+        .mockReturnValueOnce(userReloaded)
+        .mockReturnValueOnce(workspaceReloaded);
+      vi.mocked(loadSettings).mockReturnValue(settings);
+      const { agent, agentPromise } = await bootAcpAgent();
 
-    await expect(
-      agent.newSession({ cwd: '/tmp', mcpServers: [] }),
-    ).rejects.toThrow('Unable to reload model-provider settings from disk.');
-    expect(lastSessionMock?.dispose).toHaveBeenCalledOnce();
-    await expect(
-      agent.prompt({
-        sessionId: 'session-provider-reload-failed',
-        prompt: [{ type: 'text', text: 'hello' }],
-      }),
-    ).rejects.toThrow(/Session not found/);
+      await expect(
+        agent.newSession({ cwd: '/tmp', mcpServers: [] }),
+      ).rejects.toThrow('Unable to reload model-provider settings from disk.');
+      expect(lastSessionMock?.dispose).toHaveBeenCalledOnce();
+      await expect(
+        agent.prompt({
+          sessionId: 'session-provider-reload-failed',
+          prompt: [{ type: 'text', text: 'hello' }],
+        }),
+      ).rejects.toThrow(/Session not found/);
+      settings.reloadScopeFromDisk.mockReset().mockReturnValue(true);
+      await expect(
+        agent.extMethod(
+          SERVE_CONTROL_EXT_METHODS.workspaceModelProvidersReload,
+          { cwd: '/tmp' },
+        ),
+      ).resolves.toEqual({ configsRefreshed: 1, configsFailed: 0 });
 
-    mockConnectionState.resolve();
-    await agentPromise;
-  });
+      mockConnectionState.resolve();
+      await agentPromise;
+    },
+  );
 
   it('treats an idle session cancellation as a no-op', async () => {
     await setupSessionMocks('session-idle-cancel');
@@ -23683,6 +23699,7 @@ describe('sessionLanguage multi-session propagation', () => {
     vi.mocked(cfg2.reloadModelProvidersConfig).mockClear();
     vi.mocked(cfg1.refreshAuth).mockClear();
     vi.mocked(cfg2.refreshAuth).mockClear();
+    vi.mocked(settings.reloadScopeFromDisk).mockClear();
     mergedSettings = {
       modelProviders: { stale: [{ id: 'old-model' }] },
       providerProtocol: { stale: 'openai' },
@@ -23697,6 +23714,14 @@ describe('sessionLanguage multi-session propagation', () => {
       configsRefreshed: 2,
       configsFailed: 1,
     });
+    expect(settings.reloadScopeFromDisk).toHaveBeenNthCalledWith(
+      1,
+      SettingScope.User,
+    );
+    expect(settings.reloadScopeFromDisk).toHaveBeenNthCalledWith(
+      2,
+      SettingScope.Workspace,
+    );
     expect(bootConfig.reloadModelProvidersConfig).toHaveBeenCalledWith(
       providerConfig,
       { idealab: 'openai' },
@@ -23710,7 +23735,10 @@ describe('sessionLanguage multi-session propagation', () => {
     expect(cfg1.switchModel).not.toHaveBeenCalled();
     expect(cfg2.switchModel).not.toHaveBeenCalled();
 
-    vi.mocked(settings.reloadScopeFromDisk).mockReturnValueOnce(false);
+    vi.mocked(settings.reloadScopeFromDisk)
+      .mockReset()
+      .mockReturnValueOnce(true)
+      .mockReturnValueOnce(false);
     vi.mocked(bootConfig.reloadModelProvidersConfig).mockClear();
     reload1.mockClear();
     reload2.mockClear();
