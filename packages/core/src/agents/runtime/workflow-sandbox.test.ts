@@ -2116,6 +2116,87 @@ describe('createWorkflowSandbox primitives', () => {
     expect(sandbox.getLogs()).toEqual([]);
   });
 
+  it("keeps run attribution observing until an immediately-cancelled run's dispatches drain", async () => {
+    // R8-2: cancellation settles the run NOW, while a detached async
+    // wrapper is still awaiting the aborted dispatch. Detaching the
+    // adoption-escape hook in run()'s finally left that late rejection
+    // with no 'unhandledRejection' listener on the process, and Node's
+    // default mode terminates the host — a cancel killing a headless
+    // daemon. The listener must survive settlement until the outstanding
+    // dispatch drains, and must still be retired afterwards so it cannot
+    // leak or go on suppressing unrelated crashes.
+    const controller = new AbortController();
+    let rejectDispatch: (err: Error) => void = () => {};
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      abortOnTimeout: controller,
+      dispatch: () =>
+        new Promise((_resolve, reject) => {
+          rejectDispatch = reject;
+        }),
+    });
+    const baseline = process.listenerCount('unhandledRejection');
+    // The wrapper is detached: nothing in the script ever awaits it, so
+    // its implicit promise is the plain vm-realm promise the mirror
+    // cannot observe and only the process hook can catch.
+    const runPromise = sandbox.run(`
+      (async () => { await agent('inflight'); })();
+      await new Promise(() => {});
+    `);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    controller.abort();
+    await expect(runPromise).rejects.toThrow(/aborted \(cancelled\)/);
+    // Settled, and the dispatch has NOT rejected yet — this is the exact
+    // window the crash lived in.
+    expect(process.listenerCount('unhandledRejection')).toBe(baseline + 1);
+    rejectDispatch(
+      new Error(
+        'Workflow subagent x did not complete (terminate mode: CANCELLED).',
+      ),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    // Bounded: once the dispatch drained, the listener is released.
+    expect(process.listenerCount('unhandledRejection')).toBe(baseline);
+    // ...and the teardown rejection stays out of a correctly cancelled
+    // run's log, exactly as observeDispatch's R11-30 clause requires.
+    expect(sandbox.getLogs()).toEqual([]);
+  });
+
+  it('mirrors a detached wrapper rejection that lands after the run settles', async () => {
+    // Companion to the cancellation case, on the non-abort path: a
+    // fire-and-forget async wrapper outliving the run used to lose its
+    // dispatch failure entirely (the flush had already run and the hook
+    // was already detached). With observation held open across teardown
+    // the failure keeps its one log surface.
+    let rejectDispatch: (err: Error) => void = () => {};
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      dispatch: () =>
+        new Promise((_resolve, reject) => {
+          rejectDispatch = reject;
+        }),
+    });
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => {
+      unhandled.push(reason);
+    };
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      const result = await sandbox.run(`
+        (async () => { await agent('forgotten'); })();
+        return 'done';
+      `);
+      expect(result).toBe('done');
+      rejectDispatch(new Error('late-boom'));
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
+    expect(sandbox.getLogs()).toEqual([
+      'dispatch failed (rejection not handled): late-boom',
+    ]);
+  });
+
   it('does not mirror plain-Error teardown rejections of an aborted run', async () => {
     // R10-1: the dominant cancellation shape is NOT an 'AbortError'.
     // controller.abort() → the subagent returns terminateMode=CANCELLED →

@@ -1896,6 +1896,58 @@ describe('WorkflowRunRegistry', () => {
     expect(r.get('wf_fail')!.recentLogs).toEqual([]);
   });
 
+  // R8-1: the approval contingency fails the entry and aborts the handle
+  // while the sandbox is still collecting the script's `finally` output.
+  // That final account arrives after the entry is terminal, so the blanket
+  // 'failed' rejection above dropped the cleanup diagnostics from both the
+  // persisted entry and the snapshot while the returned failure kept the
+  // external message. The allowance is keyed on the settling handle, not
+  // on the status, so it cannot absorb a stale callback.
+  it("setRecentLogs after a fail transition writes for the settling run's own handle", () => {
+    const r = new WorkflowRunRegistry();
+    r.register(reg('wf_contingency'));
+    const handle = {
+      runId: 'wf_contingency',
+      abort: vi.fn(),
+    } as unknown as WorkflowRunHandle;
+    r.attachHandle(handle);
+    r.fail('wf_contingency', 'approval contingency', 3_000);
+    r.setRecentLogs('wf_contingency', ['cleanup ran'], handle);
+    const e = r.get('wf_contingency')!;
+    expect(e.recentLogs).toEqual(['cleanup ran']);
+    expect(e.status).toBe('failed');
+    // The log-event window is rebuilt from the same tail, so the two
+    // persisted projections still agree.
+    expect(
+      e.events.filter((event) => event.type === 'log').map((event) => event),
+    ).toMatchObject([{ message: 'cleanup ran' }]);
+  });
+
+  it('setRecentLogs after a fail transition rejects a stale or replaced handle', () => {
+    const r = new WorkflowRunRegistry();
+    r.register(reg('wf_stale'));
+    const handle = {
+      runId: 'wf_stale',
+      abort: vi.fn(),
+    } as unknown as WorkflowRunHandle;
+    r.attachHandle(handle);
+    r.fail('wf_stale', 'boom', 3_000);
+
+    // A different handle — the shape a replacement run would present.
+    const replacement = {
+      runId: 'wf_stale',
+      abort: vi.fn(),
+    } as unknown as WorkflowRunHandle;
+    r.setRecentLogs('wf_stale', ['not mine'], replacement);
+    expect(r.get('wf_stale')!.recentLogs).toEqual([]);
+
+    // ...and once the settling run releases its handle, even the original
+    // no longer matches.
+    r.releaseHandle('wf_stale', handle);
+    r.setRecentLogs('wf_stale', ['too late'], handle);
+    expect(r.get('wf_stale')!.recentLogs).toEqual([]);
+  });
+
   // P4 Round 7 (wenshao): WorkflowRunRegistry must expose reset() and
   // abortAll() to match its three sibling registries (agent, shell,
   // monitor). Without these, /clear and session-resume leak prior-

@@ -767,6 +767,53 @@ describe('WorkflowRunner', () => {
     expect(registry.get(handle.runId)?.status).toBe('failed');
   });
 
+  it("keeps an externally failed run's final cleanup logs", async () => {
+    // R8-1: the companion to the settlement guard above. The approval
+    // contingency marks the entry 'failed' and aborts the handle, but the
+    // sandbox still collects whatever the script's `finally` emits. That
+    // final account reached setRecentLogs after the entry was terminal,
+    // and the registry rejected every terminal state except 'cancelled' —
+    // so the failure kept its external message while the persisted entry
+    // and snapshot silently lost the cleanup diagnostics.
+    const { config, registry } = configWithRegistry();
+    let finishDispatch: ((value: string) => void) | undefined;
+    const handle = await WorkflowRunner.start({
+      config,
+      signal: new AbortController().signal,
+      script:
+        'try { return await agent("work"); } finally { log("cleanup ran"); }',
+      args: undefined,
+      runInBackground: true,
+      dispatch: () =>
+        new Promise<string>((resolve) => {
+          finishDispatch = resolve;
+        }),
+    });
+    await vi.waitFor(() => expect(finishDispatch).toBeDefined());
+    registry.fail(
+      handle.runId,
+      'Failed to resolve workflow approval: wfap_1',
+      Date.now(),
+    );
+    handle.abort();
+    finishDispatch?.('done');
+
+    await expect(handle.completion).resolves.toMatchObject({
+      ok: false,
+      message: 'Failed to resolve workflow approval: wfap_1',
+    });
+    const entry = registry.get(handle.runId)!;
+    expect(entry.status).toBe('failed');
+    expect(entry.recentLogs).toContain('cleanup ran');
+    // Both persisted log projections must agree — setRecentLogs rebuilds
+    // the event window from the same tail it mirrors.
+    expect(
+      entry.events
+        .filter((event) => event.type === 'log')
+        .map((event) => (event as { message: string }).message),
+    ).toContain('cleanup ran');
+  });
+
   it('rejects a concurrent resume while the original run is active', async () => {
     const { config, registry } = configWithRegistry();
     const runId = 'wf_1234abcd';

@@ -296,7 +296,7 @@ export class WorkflowRunner {
               entry.description = outcome.meta.name;
             }
           }
-          registry?.setRecentLogs(runId, outcome.logs);
+          registry?.setRecentLogs(runId, outcome.logs, handle);
           // A held successful dispatch resolves its gate on abort, so a
           // run whose entry settled terminal mid-script — cancelled via
           // the dialog, or failed via resolvePendingApproval's
@@ -319,7 +319,8 @@ export class WorkflowRunner {
             error instanceof WorkflowExecutionError ? error : undefined;
           const message = extractErrorMessage(error);
           if (entry && details?.meta && !entry.meta) entry.meta = details.meta;
-          if (details?.logs) registry?.setRecentLogs(runId, details.logs);
+          if (details?.logs)
+            registry?.setRecentLogs(runId, details.logs, handle);
           // Mirror of the guard on the success path. When the entry was
           // settled terminal from outside — the dialog's cancel, or the
           // approval contingency's fail — the abort that follows is what
