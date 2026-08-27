@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { execFileSync, spawnSync } from 'node:child_process';
 import {
   replacementMutantsOf,
@@ -46,6 +46,23 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
+
+// Hermetic git config for every fixture in this file, the same discipline as
+// the sibling integration suites: `sanitizedGitEnv` strips env redirects, but
+// the file scopes stay reachable through $HOME/.gitconfig and /etc/gitconfig.
+// A persistent runner's ambient `core.sparseCheckout` flipped the very
+// semantics the skip-worktree refusal pins — on git 2.39 an active sparse flag
+// makes `checkout --force` clear the bit and read clean — so the refusal never
+// fired and the run died later on a missing vitest.
+let gitIsolation: ReturnType<typeof isolateHostGitConfig>;
+
+beforeEach(() => {
+  gitIsolation = isolateHostGitConfig();
+});
+
+afterEach(() => {
+  gitIsolation.dispose();
+});
 
 // The real root `package.json` workspace list.
 const GLOBS = [
