@@ -22,6 +22,8 @@
  * consumer replacing the other.
  */
 
+import { AsyncLocalStorage } from 'node:async_hooks';
+import type { Config } from '../config/config.js';
 import type { TaskBase, TaskRegistration } from './tasks/types.js';
 import type { WorkflowMeta } from './runtime/workflow-sandbox.js';
 import type { WorkflowRunHandle } from './runtime/workflow-runner.js';
@@ -43,6 +45,69 @@ import { runOutsideAgentContext } from './runtime/agent-context.js';
 import type { WorkflowDispatchState } from './runtime/workflow-dispatch-scheduler.js';
 
 const debugLogger = createDebugLogger('WORKFLOW_REGISTRY');
+
+const mutatingWorkflowTasks = new Map<string, symbol>();
+const workflowTaskMutationContext = new AsyncLocalStorage<
+  ReadonlyMap<string, symbol>
+>();
+const inMemoryMutationScopeIds = new WeakMap<object, number>();
+let nextInMemoryMutationScopeId = 1;
+
+export function getWorkflowTaskMutationKey(
+  config: Config,
+  taskId: string,
+  namespace = 'run',
+): string {
+  const storage = config.storage as
+    | { getWorkflowRunsDir?: () => string }
+    | undefined;
+  const workflowRunsDir = storage?.getWorkflowRunsDir?.();
+  if (workflowRunsDir) {
+    return `${workflowRunsDir}\0${namespace}\0${taskId}`;
+  }
+
+  const owner = storage ?? config.getWorkflowRunRegistry?.() ?? config;
+  let scopeId = inMemoryMutationScopeIds.get(owner);
+  if (scopeId === undefined) {
+    scopeId = nextInMemoryMutationScopeId++;
+    inMemoryMutationScopeIds.set(owner, scopeId);
+  }
+  return `memory:${scopeId}\0${namespace}\0${taskId}`;
+}
+
+export type WorkflowTaskMutationAttempt<T> =
+  | { acquired: true; value: T }
+  | { acquired: false };
+
+export async function tryWithWorkflowTaskMutation<T>(
+  mutationKey: string,
+  operation: () => Promise<T>,
+): Promise<WorkflowTaskMutationAttempt<T>> {
+  const inherited = workflowTaskMutationContext.getStore();
+  const inheritedOwner = inherited?.get(mutationKey);
+  if (
+    inheritedOwner !== undefined &&
+    mutatingWorkflowTasks.get(mutationKey) === inheritedOwner
+  ) {
+    return { acquired: true, value: await operation() };
+  }
+  if (mutatingWorkflowTasks.has(mutationKey)) return { acquired: false };
+
+  const owner = Symbol(mutationKey);
+  mutatingWorkflowTasks.set(mutationKey, owner);
+  const context = new Map(inherited);
+  context.set(mutationKey, owner);
+  try {
+    return {
+      acquired: true,
+      value: await workflowTaskMutationContext.run(context, operation),
+    };
+  } finally {
+    if (mutatingWorkflowTasks.get(mutationKey) === owner) {
+      mutatingWorkflowTasks.delete(mutationKey);
+    }
+  }
+}
 
 /**
  * Cap on terminal entries retained for dialog history. Picked smaller
@@ -380,6 +445,7 @@ interface WorkflowApprovalRuntime {
 export class WorkflowRunRegistry {
   private readonly entries = new Map<string, WorkflowTask>();
   private readonly handles = new Map<string, WorkflowRunHandle>();
+  private readonly starting = new Map<string, AbortController>();
 
   private registerCallback: WorkflowRunRegisterCallback | undefined;
   private statusChangeCallback: WorkflowRunStatusChangeCallback | undefined;
@@ -531,13 +597,47 @@ export class WorkflowRunRegistry {
    * callers can keep using their local reference post-register and
    * observers see updates without an extra `get()`.
    */
-  register(registration: WorkflowTaskRegistration): WorkflowTask {
-    const existing = this.entries.get(registration.runId);
+  reserveStart(
+    runId: string,
+    createController: () => AbortController,
+  ): AbortController {
+    const existing = this.entries.get(runId);
     if (
       (existing && isActiveWorkflowStatus(existing.status)) ||
-      this.handles.has(registration.runId)
+      this.handles.has(runId) ||
+      this.starting.has(runId)
+    ) {
+      throw new Error(`Workflow run ${runId} is already active.`);
+    }
+    const controller = createController();
+    this.starting.set(runId, controller);
+    return controller;
+  }
+
+  releaseStart(runId: string, controller: AbortController): void {
+    if (this.starting.get(runId) === controller) this.starting.delete(runId);
+  }
+
+  isStarting(runId: string): boolean {
+    return this.starting.has(runId);
+  }
+
+  register(
+    registration: WorkflowTaskRegistration,
+    startController?: AbortController,
+  ): WorkflowTask {
+    const existing = this.entries.get(registration.runId);
+    const reservedController = this.starting.get(registration.runId);
+    if (
+      (existing && isActiveWorkflowStatus(existing.status)) ||
+      this.handles.has(registration.runId) ||
+      (reservedController !== undefined &&
+        reservedController !== startController)
     ) {
       throw new Error(`Workflow run ${registration.runId} is already active.`);
+    }
+    if (reservedController === startController) {
+      this.starting.delete(registration.runId);
     }
     const entry = registration as WorkflowTask;
     entry.id = registration.runId;
@@ -623,7 +723,9 @@ export class WorkflowRunRegistry {
   }
 
   releaseHandle(runId: string, handle: WorkflowRunHandle): void {
-    if (this.handles.get(runId) === handle) this.handles.delete(runId);
+    if (this.handles.get(runId) !== handle) return;
+    this.handles.delete(runId);
+    this.evictTerminal();
   }
 
   bridgeApprovalEvents(
@@ -1250,6 +1352,7 @@ export class WorkflowRunRegistry {
    * `reset()` so they settle terminal instead of leaking.
    */
   hasRunningEntries(): boolean {
+    if (this.starting.size > 0) return true;
     for (const entry of this.entries.values()) {
       if (entry.status === 'running' || entry.status === 'pausing') {
         return true;
@@ -1301,6 +1404,9 @@ export class WorkflowRunRegistry {
   abortAll(): void {
     const endTime = Date.now();
     let lastCancelled: WorkflowTask | undefined;
+    for (const controller of this.starting.values()) {
+      controller.abort();
+    }
     for (const entry of Array.from(this.entries.values())) {
       if (!isActiveWorkflowStatus(entry.status)) continue;
       this.rejectPendingApprovals(entry.runId, undefined, endTime);
@@ -1386,8 +1492,10 @@ export class WorkflowRunRegistry {
    * (by `endTime`) are evicted first.
    */
   private evictTerminal(): void {
-    const terminal = this.list().filter((e) =>
-      isTerminalWorkflowStatus(e.status),
+    const terminal = this.list().filter(
+      (entry) =>
+        isTerminalWorkflowStatus(entry.status) &&
+        !this.handles.has(entry.runId),
     );
     if (terminal.length <= MAX_RETAINED_TERMINAL_WORKFLOWS) return;
     terminal.sort((a, b) => (a.endTime ?? 0) - (b.endTime ?? 0));

@@ -20,7 +20,9 @@ import {
   MAX_RETAINED_TERMINAL_WORKFLOWS,
   isActiveWorkflowStatus,
   isTerminalWorkflowStatus,
+  tryWithWorkflowTaskMutation,
   type WorkflowApprovalRequestCallback,
+  type WorkflowTaskMutationAttempt,
   type WorkflowTaskRegistration,
   type WorkflowStatus,
 } from './workflow-run-registry.js';
@@ -75,6 +77,47 @@ function approvalEvent(
 }
 
 describe('WorkflowRunRegistry', () => {
+  it('does not inherit a stale workflow task mutation claim', async () => {
+    const mutationKey = 'scope\0run\0wf_stale';
+    let releaseStale: () => void = () => {};
+    let releaseCompeting: () => void = () => {};
+    let signalCompeting: () => void = () => {};
+    const staleGate = new Promise<void>((resolve) => {
+      releaseStale = resolve;
+    });
+    const competingStarted = new Promise<void>((resolve) => {
+      signalCompeting = resolve;
+    });
+    let staleAttempt: Promise<WorkflowTaskMutationAttempt<string>> | undefined;
+
+    const original = await tryWithWorkflowTaskMutation(
+      mutationKey,
+      async () => {
+        staleAttempt = staleGate.then(() =>
+          tryWithWorkflowTaskMutation(mutationKey, async () => 'stale'),
+        );
+        return 'original';
+      },
+    );
+    const competing = tryWithWorkflowTaskMutation(mutationKey, async () => {
+      signalCompeting();
+      await new Promise<void>((resolve) => {
+        releaseCompeting = resolve;
+      });
+      return 'competing';
+    });
+
+    await competingStarted;
+    releaseStale();
+    const staleResult = await staleAttempt;
+    releaseCompeting();
+    const competingResult = await competing;
+
+    expect(original).toEqual({ acquired: true, value: 'original' });
+    expect(staleResult).toEqual({ acquired: false });
+    expect(competingResult).toEqual({ acquired: true, value: 'competing' });
+  });
+
   it('records rerun lineage and notifies status observers', () => {
     const r = new WorkflowRunRegistry();
     const onStatusChange = vi.fn();
@@ -1075,6 +1118,39 @@ describe('WorkflowRunRegistry', () => {
     expect(r.register(reg(runId)).status).toBe('running');
   });
 
+  it('reserves a run id while a workflow is starting', () => {
+    const r = new WorkflowRunRegistry();
+    const runId = 'wf_starting';
+    const owner = new AbortController();
+    const competing = new AbortController();
+
+    r.reserveStart(runId, () => owner);
+
+    expect(r.isStarting(runId)).toBe(true);
+    expect(r.hasRunningEntries()).toBe(true);
+    expect(() => r.reserveStart(runId, () => competing)).toThrow(
+      /already active/,
+    );
+    expect(() => r.register(reg(runId))).toThrow(/already active/);
+
+    const entry = r.register(reg(runId), owner);
+    expect(entry.runId).toBe(runId);
+    expect(r.isStarting(runId)).toBe(false);
+  });
+
+  it('aborts a workflow that has not registered yet', () => {
+    const r = new WorkflowRunRegistry();
+    const controller = new AbortController();
+
+    r.reserveStart('wf_starting', () => controller);
+    r.abortAll();
+
+    expect(controller.signal.aborted).toBe(true);
+    expect(r.isStarting('wf_starting')).toBe(true);
+    r.releaseStart('wf_starting', controller);
+    expect(r.hasRunningEntries()).toBe(false);
+  });
+
   it('register synthesizes description from meta.name when omitted', () => {
     const r = new WorkflowRunRegistry();
     const entry = r.register(
@@ -1701,6 +1777,30 @@ describe('WorkflowRunRegistry', () => {
     const ids = all.map((e) => e.runId);
     expect(ids).toContain(`wf_${MAX_RETAINED_TERMINAL_WORKFLOWS + 4}`);
     expect(ids).not.toContain('wf_0');
+  });
+
+  it('does not evict a terminal entry until its handle is released', () => {
+    const r = new WorkflowRunRegistry();
+    const held = r.register(reg('wf_held'));
+    const handle = {
+      runId: held.runId,
+      abort: vi.fn(),
+    } as unknown as WorkflowRunHandle;
+    r.attachHandle(handle);
+    r.complete(held.runId, null, 1_000);
+
+    for (let i = 0; i < MAX_RETAINED_TERMINAL_WORKFLOWS; i++) {
+      r.register(reg(`wf_new_${i}`));
+      r.complete(`wf_new_${i}`, null, 2_000 + i);
+    }
+
+    expect(r.get(held.runId)).toBe(held);
+    expect(r.list()).toHaveLength(MAX_RETAINED_TERMINAL_WORKFLOWS + 1);
+
+    r.releaseHandle(held.runId, handle);
+
+    expect(r.get(held.runId)).toBeUndefined();
+    expect(r.list()).toHaveLength(MAX_RETAINED_TERMINAL_WORKFLOWS);
   });
 
   it('active entries are never evicted', () => {

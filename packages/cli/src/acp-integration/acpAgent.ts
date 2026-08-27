@@ -137,7 +137,9 @@ import {
   type WorkflowParams,
   type WorkflowToolResult,
   type WorkflowRunRegistry,
+  getWorkflowTaskMutationKey,
   isTerminalWorkflowStatus,
+  tryWithWorkflowTaskMutation,
   listSavedWorkflows,
   listWorkflowSnapshots,
   type TurnResultRecordPayload,
@@ -3384,29 +3386,6 @@ class QwenAgent implements Agent {
    * an orphaned live run out from under itself. Pruned as they drain.
    */
   private readonly detachedWorkflowRegistries = new Set<WorkflowRunRegistry>();
-  /**
-   * R5-9: mutual exclusion for workflow task mutations, keyed by the task
-   * ALONE — never by session. All sessions in this child share one
-   * snapshot store, so a claim scoped to `sessionId\0taskId` serialized
-   * nothing that matters: a sibling session's retry of the same runId ran
-   * concurrently with a delete-history and neither saw the other. The
-   * retry passes `canStart` (`failed`, no handle), then awaits journal
-   * load/compile before `register()`; a delete landing in that structural
-   * window finds the run terminal and handle-less in every registry,
-   * removes the journal directory and snapshot, and answers
-   * `{changed: true}` — after which the retry's `register()` and its
-   * settlement re-persist the history the user was told was deleted.
-   *
-   * Every mutating action takes this claim (delete-history, retry, rerun,
-   * run-saved) and answers `{changed: false}` when it is already held.
-   * Once a retry has registered, `isWorkflowRunLiveOutsideSession` takes
-   * over and keeps deletion blocked for the life of the run.
-   *
-   * `run-saved` keys off a saved workflow's NAME rather than a runId, so
-   * it claims in its own namespace — a saved workflow named like a runId
-   * must not serialize against that run's history deletion.
-   */
-  private readonly mutatingWorkflowTaskIds = new Set<string>();
   private activePromptCalls = new Map<string, Set<ActivePromptCall>>();
   private workspaceMcpDiscoveryConfig: Config | undefined;
   private workspaceMcpDiscoveryPromise: Promise<void> | undefined;
@@ -10964,71 +10943,74 @@ class QwenAgent implements Agent {
         if (!this.canUseWorkflowControls(config)) {
           return { changed: false };
         }
-        // Task-global, NOT session-scoped — see `mutatingWorkflowTaskIds`.
         const mutationClaim =
-          action === 'run-saved' ? `saved\0${taskId}` : taskId;
+          action === 'run-saved'
+            ? getWorkflowTaskMutationKey(config, taskId, 'saved')
+            : getWorkflowTaskMutationKey(config, taskId);
         if (action === 'delete-history') {
-          if (this.mutatingWorkflowTaskIds.has(mutationClaim)) {
+          const attempt = await tryWithWorkflowTaskMutation(
+            mutationClaim,
+            async () => {
+              const changed = await session.deleteWorkflowHistory(taskId);
+              if (changed) {
+                // Every session shares the one store: drop the sibling
+                // registries' terminal entries too, or a retry from a
+                // sibling re-persists the just-deleted run.
+                for (const [siblingId, sibling] of this.sessions) {
+                  if (siblingId === sessionId) continue;
+                  sibling
+                    .getConfig()
+                    .getWorkflowRunRegistry()
+                    .removeTerminal(taskId);
+                }
+              }
+              return { changed };
+            },
+          );
+          if (!attempt.acquired) {
             return { changed: false };
           }
-          this.mutatingWorkflowTaskIds.add(mutationClaim);
-          try {
-            const changed = await session.deleteWorkflowHistory(taskId);
-            if (changed) {
-              // Every session shares the one store: drop the sibling
-              // registries' terminal entries too, or a retry from a
-              // sibling re-persists the just-deleted run.
-              for (const [siblingId, sibling] of this.sessions) {
-                if (siblingId === sessionId) continue;
-                sibling
-                  .getConfig()
-                  .getWorkflowRunRegistry()
-                  .removeTerminal(taskId);
-              }
-            }
-            return { changed };
-          } finally {
-            this.mutatingWorkflowTaskIds.delete(mutationClaim);
-          }
+          return attempt.value;
         }
         const registry = config.getWorkflowRunRegistry();
         if (action === 'run-saved') {
-          if (this.mutatingWorkflowTaskIds.has(mutationClaim)) {
+          const attempt = await tryWithWorkflowTaskMutation(
+            mutationClaim,
+            async () => {
+              const savedWorkflow = (await listSavedWorkflows(config)).find(
+                (entry) => entry.name === taskId,
+              );
+              if (!savedWorkflow) return { changed: false };
+              const workflowTool = config
+                .getToolRegistry()
+                .getTool(ToolNames.WORKFLOW);
+              if (!isSessionOwnedWorkflowTool(workflowTool)) {
+                throw RequestError.invalidParams(
+                  undefined,
+                  'The workflow tool is unavailable; cannot run this saved workflow.',
+                );
+              }
+              const result = (await workflowTool
+                .buildSessionOwnedBackground({
+                  scriptPath: savedWorkflow.scriptPath,
+                })
+                .execute(new AbortController().signal)) as WorkflowToolResult;
+              const startedTask = result.workflowRunId
+                ? registry.get(result.workflowRunId)
+                : undefined;
+              return startedTask
+                ? {
+                    changed: true,
+                    status: startedTask.status,
+                    taskId: startedTask.runId,
+                  }
+                : { changed: false };
+            },
+          );
+          if (!attempt.acquired) {
             return { changed: false };
           }
-          this.mutatingWorkflowTaskIds.add(mutationClaim);
-          try {
-            const savedWorkflow = (await listSavedWorkflows(config)).find(
-              (entry) => entry.name === taskId,
-            );
-            if (!savedWorkflow) return { changed: false };
-            const workflowTool = config
-              .getToolRegistry()
-              .getTool(ToolNames.WORKFLOW);
-            if (!isSessionOwnedWorkflowTool(workflowTool)) {
-              throw RequestError.invalidParams(
-                undefined,
-                'The workflow tool is unavailable; cannot run this saved workflow.',
-              );
-            }
-            const result = (await workflowTool
-              .buildSessionOwnedBackground({
-                scriptPath: savedWorkflow.scriptPath,
-              })
-              .execute(new AbortController().signal)) as WorkflowToolResult;
-            const startedTask = result.workflowRunId
-              ? registry.get(result.workflowRunId)
-              : undefined;
-            return startedTask
-              ? {
-                  changed: true,
-                  status: startedTask.status,
-                  taskId: startedTask.runId,
-                }
-              : { changed: false };
-          } finally {
-            this.mutatingWorkflowTaskIds.delete(mutationClaim);
-          }
+          return attempt.value;
         }
         const task = registry.get(taskId);
         if (!task) return { changed: false };
@@ -11042,50 +11024,51 @@ class QwenAgent implements Agent {
           if (!canStart || !task.script) {
             return { changed: false, status: task.status };
           }
-          if (this.mutatingWorkflowTaskIds.has(mutationClaim)) {
+          const attempt = await tryWithWorkflowTaskMutation(
+            mutationClaim,
+            async () => {
+              const workflowTool = config
+                .getToolRegistry()
+                .getTool(ToolNames.WORKFLOW);
+              if (!isSessionOwnedWorkflowTool(workflowTool)) {
+                throw RequestError.invalidParams(
+                  undefined,
+                  `The workflow tool is unavailable; cannot ${action} this run.`,
+                );
+              }
+              const startParams: Omit<WorkflowParams, 'run_in_background'> = {
+                script: task.script,
+                args: task.args,
+                ...(action === 'retry' ? { resumeFromRunId: task.runId } : {}),
+              };
+              const result = (await workflowTool
+                .buildSessionOwnedBackground(startParams)
+                .execute(new AbortController().signal)) as WorkflowToolResult;
+              if (action === 'rerun') {
+                const rerunTask = result.workflowRunId
+                  ? registry.get(result.workflowRunId)
+                  : undefined;
+                if (rerunTask) {
+                  registry.setLineage(rerunTask.runId, task.runId, 'rerun');
+                }
+                return rerunTask
+                  ? {
+                      changed: true,
+                      status: rerunTask.status,
+                      taskId: rerunTask.runId,
+                    }
+                  : { changed: false, status: task.status };
+              }
+              return {
+                changed: true,
+                status: registry.get(taskId)?.status,
+              };
+            },
+          );
+          if (!attempt.acquired) {
             return { changed: false, status: task.status };
           }
-          this.mutatingWorkflowTaskIds.add(mutationClaim);
-          try {
-            const workflowTool = config
-              .getToolRegistry()
-              .getTool(ToolNames.WORKFLOW);
-            if (!isSessionOwnedWorkflowTool(workflowTool)) {
-              throw RequestError.invalidParams(
-                undefined,
-                `The workflow tool is unavailable; cannot ${action} this run.`,
-              );
-            }
-            const startParams: Omit<WorkflowParams, 'run_in_background'> = {
-              script: task.script,
-              args: task.args,
-              ...(action === 'retry' ? { resumeFromRunId: task.runId } : {}),
-            };
-            const result = (await workflowTool
-              .buildSessionOwnedBackground(startParams)
-              .execute(new AbortController().signal)) as WorkflowToolResult;
-            if (action === 'rerun') {
-              const rerunTask = result.workflowRunId
-                ? registry.get(result.workflowRunId)
-                : undefined;
-              if (rerunTask) {
-                registry.setLineage(rerunTask.runId, task.runId, 'rerun');
-              }
-              return rerunTask
-                ? {
-                    changed: true,
-                    status: rerunTask.status,
-                    taskId: rerunTask.runId,
-                  }
-                : { changed: false, status: task.status };
-            }
-            return {
-              changed: true,
-              status: registry.get(taskId)?.status,
-            };
-          } finally {
-            this.mutatingWorkflowTaskIds.delete(mutationClaim);
-          }
+          return attempt.value;
         }
         const changed =
           action === 'pause' ? registry.pause(taskId) : registry.resume(taskId);
@@ -13024,6 +13007,7 @@ class QwenAgent implements Agent {
     registry: WorkflowRunRegistry,
     runId: string,
   ): boolean {
+    if (registry.isStarting?.(runId)) return true;
     const entry = registry.get(runId);
     if (entry && !isTerminalWorkflowStatus(entry.status)) return true;
     return registry.getHandle(runId) !== undefined;

@@ -8,11 +8,14 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { getEventListeners } from 'node:events';
 import type { Config } from '../../config/config.js';
 import {
+  getWorkflowTaskMutationKey,
   isTerminalWorkflowStatus,
+  tryWithWorkflowTaskMutation,
   WorkflowRunRegistry,
   type WorkflowTask,
 } from '../workflow-run-registry.js';
 import { AgentEventEmitter } from './agent-events.js';
+import { WorkflowJournal, type JournalReplay } from './workflow-journal.js';
 import {
   WorkflowRunner,
   WorkflowScriptNotLaunchedError,
@@ -23,12 +26,14 @@ const {
   createProductionDispatchMock,
   journalWrites,
   logWorkflowRunMock,
+  resolveSavedWorkflowScriptMock,
   writeLineMock,
   writeWorkflowSnapshotMock,
 } = vi.hoisted(() => ({
   createProductionDispatchMock: vi.fn(),
   journalWrites: [] as Array<() => void>,
   logWorkflowRunMock: vi.fn(),
+  resolveSavedWorkflowScriptMock: vi.fn(),
   writeLineMock: vi.fn(),
   writeWorkflowSnapshotMock: vi.fn().mockResolvedValue(undefined),
 }));
@@ -53,6 +58,14 @@ vi.mock('./workflow-orchestrator.js', async (importOriginal) => {
   return {
     ...actual,
     createProductionDispatch: createProductionDispatchMock,
+  };
+});
+
+vi.mock('./workflow-saved.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./workflow-saved.js')>();
+  return {
+    ...actual,
+    resolveSavedWorkflowScript: resolveSavedWorkflowScriptMock,
   };
 });
 
@@ -95,6 +108,7 @@ describe('WorkflowRunner', () => {
     createProductionDispatchMock.mockReset();
     journalWrites.length = 0;
     logWorkflowRunMock.mockClear();
+    resolveSavedWorkflowScriptMock.mockReset();
     writeLineMock.mockReset();
     writeLineMock.mockResolvedValue(undefined);
     writeWorkflowSnapshotMock.mockClear();
@@ -217,7 +231,50 @@ describe('WorkflowRunner', () => {
   it('records a journal retry as sourced from the same run', async () => {
     const { config, registry } = configWithRegistry();
     const runId = 'wf_1234abcd';
-    const handle = await WorkflowRunner.start({
+    const attempt = await tryWithWorkflowTaskMutation(
+      getWorkflowTaskMutationKey(config, runId),
+      () =>
+        WorkflowRunner.start({
+          config,
+          signal: new AbortController().signal,
+          script: 'return "retried"',
+          args: undefined,
+          resumeFromRunId: runId,
+          runInBackground: true,
+          dispatch: async () => 'unused',
+        }),
+    );
+    expect(attempt.acquired).toBe(true);
+    if (!attempt.acquired) return;
+    const handle = attempt.value;
+
+    await handle.completion;
+
+    expect(registry.get(runId)).toMatchObject({
+      runId,
+      sourceRunId: runId,
+      startMode: 'retry',
+    });
+  });
+
+  it('cancels a pending background resume before registration', async () => {
+    const { config, registry } = configWithRegistry();
+    const runId = 'wf_1234abcd';
+    Object.assign(config, {
+      storage: {
+        getWorkflowRunJournalPath: () => 'probe-journal.jsonl',
+      },
+    });
+    let resolveLoad: ((replay: JournalReplay) => void) | undefined;
+    const loadSpy = vi
+      .spyOn(WorkflowJournal.prototype, 'load')
+      .mockImplementationOnce(
+        () =>
+          new Promise<JournalReplay>((resolve) => {
+            resolveLoad = resolve;
+          }),
+      );
+    const start = WorkflowRunner.start({
       config,
       signal: new AbortController().signal,
       script: 'return "retried"',
@@ -227,13 +284,116 @@ describe('WorkflowRunner', () => {
       dispatch: async () => 'unused',
     });
 
-    await handle.completion;
+    try {
+      await vi.waitFor(() => expect(registry.isStarting(runId)).toBe(true));
+      expect(registry.get(runId)).toBeUndefined();
 
-    expect(registry.get(runId)).toMatchObject({
-      runId,
-      sourceRunId: runId,
-      startMode: 'retry',
+      registry.abortAll();
+      resolveLoad?.({ results: new Map(), started: new Map() });
+
+      await expect(start).rejects.toThrow(
+        'Background workflow start was cancelled.',
+      );
+      expect(registry.isStarting(runId)).toBe(false);
+      expect(registry.get(runId)).toBeUndefined();
+    } finally {
+      resolveLoad?.({ results: new Map(), started: new Map() });
+      await start.catch(() => undefined);
+      loadSpy.mockRestore();
+    }
+  });
+
+  it('cancels a pending background script load before registration', async () => {
+    const { config, registry } = configWithRegistry();
+    Object.assign(config, {
+      storage: {
+        getWorkflowRunJournalPath: () => 'probe-journal.jsonl',
+      },
     });
+    let finishLoad:
+      | ((saved: { name: string; script: string; scriptPath: string }) => void)
+      | undefined;
+    resolveSavedWorkflowScriptMock.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finishLoad = resolve;
+        }),
+    );
+    const start = WorkflowRunner.start({
+      config,
+      signal: new AbortController().signal,
+      scriptPath: '/tmp/review.js',
+      args: undefined,
+      runInBackground: true,
+      dispatch: async () => 'unused',
+    });
+    const saved = {
+      name: 'review',
+      script: 'return "done"',
+      scriptPath: '/tmp/review.js',
+    };
+
+    try {
+      await vi.waitFor(() =>
+        expect(resolveSavedWorkflowScriptMock).toHaveBeenCalledOnce(),
+      );
+      expect(registry.hasRunningEntries()).toBe(true);
+      expect(registry.list()).toEqual([]);
+
+      registry.abortAll();
+      finishLoad?.(saved);
+
+      await expect(start).rejects.toThrow(
+        'Background workflow start was cancelled.',
+      );
+      expect(registry.hasRunningEntries()).toBe(false);
+      expect(registry.list()).toEqual([]);
+    } finally {
+      finishLoad?.(saved);
+      await start.catch(() => undefined);
+    }
+  });
+
+  it('rejects a direct resume while history mutation owns the run', async () => {
+    const { config, registry } = configWithRegistry();
+    const runId = 'wf_1234abcd';
+    let releaseClaim: (() => void) | undefined;
+    let claimReady: (() => void) | undefined;
+    const ready = new Promise<void>((resolve) => {
+      claimReady = resolve;
+    });
+    const claim = tryWithWorkflowTaskMutation(
+      getWorkflowTaskMutationKey(config, runId),
+      async () => {
+        claimReady?.();
+        await new Promise<void>((resolve) => {
+          releaseClaim = resolve;
+        });
+      },
+    );
+    await ready;
+    const loadSpy = vi.spyOn(WorkflowJournal.prototype, 'load');
+
+    try {
+      await expect(
+        WorkflowRunner.start({
+          config,
+          signal: new AbortController().signal,
+          script: 'return "retried"',
+          args: undefined,
+          resumeFromRunId: runId,
+          runInBackground: true,
+          dispatch: async () => 'unused',
+        }),
+      ).rejects.toThrow(`Workflow run ${runId} is already being modified.`);
+      expect(loadSpy).not.toHaveBeenCalled();
+      expect(registry.isStarting(runId)).toBe(false);
+      expect(registry.get(runId)).toBeUndefined();
+    } finally {
+      releaseClaim?.();
+      await claim;
+      loadSpy.mockRestore();
+    }
   });
 
   it('keeps one registry-owned handle through exactly-once completion', async () => {

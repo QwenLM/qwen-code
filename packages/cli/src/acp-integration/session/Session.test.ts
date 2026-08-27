@@ -510,6 +510,7 @@ describe('Session', () => {
     resolvePendingApproval: ReturnType<typeof vi.fn>;
     get: ReturnType<typeof vi.fn>;
     getHandle: ReturnType<typeof vi.fn>;
+    isStarting: ReturnType<typeof vi.fn>;
     removeTerminal: ReturnType<typeof vi.fn>;
     list: ReturnType<typeof vi.fn>;
     abortAll: ReturnType<typeof vi.fn>;
@@ -747,6 +748,7 @@ describe('Session', () => {
       resolvePendingApproval: vi.fn().mockResolvedValue(true),
       get: vi.fn().mockReturnValue(undefined),
       getHandle: vi.fn().mockReturnValue(undefined),
+      isStarting: vi.fn().mockReturnValue(false),
       removeTerminal: vi.fn().mockReturnValue(false),
       list: vi.fn().mockReturnValue([]),
       abortAll: vi.fn(),
@@ -3479,6 +3481,59 @@ describe('Session', () => {
     finishRefresh();
 
     await expect(deletion).resolves.toBe(false);
+    expect(deleteWorkflowSnapshotSpy).not.toHaveBeenCalled();
+  });
+
+  it('keeps deletion atomic with a direct workflow resume', async () => {
+    const snapshot = {
+      runId: 'wf_atomic',
+      meta: null,
+      status: 'failed' as const,
+      script: 'return 1;',
+      phases: [],
+      agentsDispatched: 0,
+      agentsCompleted: 0,
+      tokensSpent: 0,
+      tokenBudgetTotal: null,
+      perPhaseTokens: [],
+      recentLogs: [],
+      startTime: 1_000,
+      endTime: 2_000,
+    };
+    let finishDeletion: ((deleted: boolean) => void) | undefined;
+    deleteWorkflowSnapshotSpy.mockImplementationOnce(
+      () =>
+        new Promise<boolean>((resolve) => {
+          finishDeletion = resolve;
+        }),
+    );
+    listWorkflowSnapshotsSpy.mockResolvedValueOnce([snapshot]);
+    mockWorkflowRunRegistry.get.mockReturnValue({ status: 'failed' });
+
+    const deletion = session.deleteWorkflowHistory(snapshot.runId);
+    await vi.waitFor(() =>
+      expect(deleteWorkflowSnapshotSpy).toHaveBeenCalledOnce(),
+    );
+
+    const resumeAttempt = await core.tryWithWorkflowTaskMutation(
+      core.getWorkflowTaskMutationKey(mockConfig, snapshot.runId),
+      async () => true,
+    );
+    expect(resumeAttempt).toEqual({ acquired: false });
+
+    finishDeletion?.(true);
+    await expect(deletion).resolves.toBe(true);
+  });
+
+  it('rejects history deletion while the workflow is starting', async () => {
+    mockWorkflowRunRegistry.get.mockReturnValue({ status: 'failed' });
+    mockWorkflowRunRegistry.isStarting.mockReturnValue(true);
+
+    await expect(session.deleteWorkflowHistory('wf_starting')).resolves.toBe(
+      false,
+    );
+
+    expect(listWorkflowSnapshotsSpy).not.toHaveBeenCalled();
     expect(deleteWorkflowSnapshotSpy).not.toHaveBeenCalled();
   });
 
@@ -35934,9 +35989,18 @@ describe('Session', () => {
     });
 
     it('classifies workflow notifications from the captured baseline', () => {
-      mockWorkflowRunRegistry.list.mockReturnValue([
-        { runId: 'baseline-workflow', status: 'running' },
-      ]);
+      const baselineWorkflow = {
+        runId: 'baseline-workflow',
+        status: 'running',
+      };
+      let currentWorkflow: typeof baselineWorkflow | undefined =
+        baselineWorkflow;
+      mockWorkflowRunRegistry.list.mockImplementation(() =>
+        currentWorkflow ? [currentWorkflow] : [],
+      );
+      mockWorkflowRunRegistry.get.mockImplementation((runId: string) =>
+        currentWorkflow?.runId === runId ? currentWorkflow : undefined,
+      );
       rebuildSessionWithGuard();
       const internals = session as unknown as {
         notificationProcessing: boolean;
@@ -35964,6 +36028,15 @@ describe('Session', () => {
         status: 'completed',
         todoWorkChainId: 'stale-chain',
       });
+      currentWorkflow = {
+        runId: 'baseline-workflow',
+        status: 'running',
+      };
+      callback('retry result', '<retry-workflow />', {
+        runId: 'baseline-workflow',
+        status: 'completed',
+      });
+      currentWorkflow = undefined;
       callback('new result', '<new-workflow />', {
         runId: 'new-workflow',
         status: 'completed',
@@ -35973,6 +36046,10 @@ describe('Session', () => {
         expect.objectContaining({
           taskId: 'baseline-workflow',
           continuesTodoStopGuardWorkChain: false,
+        }),
+        expect.objectContaining({
+          taskId: 'baseline-workflow',
+          continuesTodoStopGuardWorkChain: true,
         }),
         expect.objectContaining({
           taskId: 'new-workflow',

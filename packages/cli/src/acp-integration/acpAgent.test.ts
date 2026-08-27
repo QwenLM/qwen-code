@@ -293,6 +293,12 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
   isTerminalWorkflowStatus: (
     await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
   ).isTerminalWorkflowStatus,
+  getWorkflowTaskMutationKey: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).getWorkflowTaskMutationKey,
+  tryWithWorkflowTaskMutation: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).tryWithWorkflowTaskMutation,
   listSavedWorkflows: mockListSavedWorkflows,
   listWorkflowSnapshots: mockListWorkflowSnapshots,
   createDebugLogger: () => mockDebugLogger,
@@ -4046,6 +4052,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       getModel: vi.fn().mockReturnValue('m'),
       storage: {
         getProjectRoot: vi.fn().mockReturnValue('/tmp'),
+        getWorkflowRunsDir: vi.fn().mockReturnValue('/tmp/workflows'),
       },
       getProjectRoot: vi.fn().mockReturnValue('/tmp'),
       getTargetDir: vi.fn().mockReturnValue('/tmp'),
@@ -11639,6 +11646,70 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     // Once the orphan settles and releases its handle the retained
     // registry is pruned and the gate stops answering for it.
     registryB.getHandle.mockReturnValue(undefined);
+    expect(predicateA(runId)).toBe(false);
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('retains a closed session registry while a workflow is starting', async () => {
+    const sessionIdA = 'aaaaaaaa-1111-1111-1111-111111111111';
+    const sessionIdB = 'bbbbbbbb-2222-2222-2222-222222222222';
+    const runId = 'wf_starting1';
+    const innerConfigA = await setupSessionMocks(sessionIdA);
+    innerConfigA.isWorkflowsEnabled.mockReturnValue(true);
+    Object.assign(innerConfigA, {
+      getWorkflowRunRegistry: vi.fn().mockReturnValue({
+        get: vi.fn().mockReturnValue({ runId, status: 'failed' }),
+        getHandle: vi.fn().mockReturnValue(undefined),
+        isStarting: vi.fn().mockReturnValue(false),
+        removeTerminal: vi.fn().mockReturnValue(true),
+      }),
+    });
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+    let starting = true;
+    const registryB = {
+      get: vi.fn().mockReturnValue(undefined),
+      getHandle: vi.fn().mockReturnValue(undefined),
+      isStarting: vi.fn(() => starting),
+      removeTerminal: vi.fn().mockReturnValue(false),
+      hasRunningEntries: vi.fn(() => starting),
+      list: vi.fn().mockReturnValue([]),
+      abortAll: vi.fn(),
+    };
+    const innerConfigB = {
+      ...makeInnerConfig(),
+      getSessionId: vi.fn().mockReturnValue(sessionIdB),
+      isWorkflowsEnabled: vi.fn().mockReturnValue(true),
+      getWorkflowRunRegistry: vi.fn().mockReturnValue(registryB),
+    };
+    vi.mocked(loadCliConfig).mockResolvedValue(
+      innerConfigB as unknown as Config,
+    );
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+    const predicateA = vi.mocked(Session).mock.calls[0][7] as (
+      candidateRunId: string,
+    ) => boolean;
+    await agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionClose, {
+      sessionId: sessionIdB,
+    });
+
+    expect(predicateA(runId)).toBe(true);
+    starting = false;
     expect(predicateA(runId)).toBe(false);
 
     mockConnectionState.resolve();

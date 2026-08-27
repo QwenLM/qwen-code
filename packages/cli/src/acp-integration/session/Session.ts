@@ -202,7 +202,9 @@ import {
   toolResultPartDiagnosticValues,
   getInvocationContext,
   runWithInvocationContext,
+  getWorkflowTaskMutationKey,
   isTerminalWorkflowStatus,
+  tryWithWorkflowTaskMutation,
   MAX_RETAINED_SNAPSHOTS,
   toSnapshot,
   deleteWorkflowSnapshot,
@@ -531,7 +533,7 @@ type TodoStopGuardBackgroundBaseline = {
   agents: Set<string>;
   shells: Set<string>;
   monitors: Set<string>;
-  workflows: Set<string>;
+  workflows: Set<WorkflowTask>;
   wakeups: Set<string>;
 };
 
@@ -2967,7 +2969,7 @@ export class Session implements SessionContext {
           .filter((item) => item.kind === 'monitor')
           .map((item) => item.taskId),
       ]),
-      workflows: new Set(workflows.map((task) => task.runId)),
+      workflows: new Set(workflows),
       wakeups: new Set([
         ...wakeups.map((job) => job.id),
         ...this.cronQueue.flatMap((item) =>
@@ -3074,7 +3076,7 @@ export class Session implements SessionContext {
     if (
       workflows.some(
         (task) =>
-          !baseline.workflows.has(task.runId) &&
+          !baseline.workflows.has(task) &&
           !isTerminalWorkflowStatus(task.status),
       )
     ) {
@@ -3432,9 +3434,18 @@ export class Session implements SessionContext {
   }
 
   async deleteWorkflowHistory(runId: string): Promise<boolean> {
+    const attempt = await tryWithWorkflowTaskMutation(
+      getWorkflowTaskMutationKey(this.config, runId),
+      () => this.#deleteWorkflowHistoryClaimed(runId),
+    );
+    return attempt.acquired ? attempt.value : false;
+  }
+
+  async #deleteWorkflowHistoryClaimed(runId: string): Promise<boolean> {
     const registry = this.config.getWorkflowRunRegistry();
     const isDeletable = (): boolean => {
       if (this.isWorkflowRunLiveInSiblingSession(runId)) return false;
+      if (registry.isStarting?.(runId)) return false;
       const current = registry.get(runId);
       return !current || isTerminalWorkflowStatus(current.status);
     };
@@ -8875,6 +8886,7 @@ export class Session implements SessionContext {
       this.unpersistedWorkflowHistory.delete(runId);
     });
     workflowRegistry.setCompletionCallback((displayText, modelText, meta) => {
+      const entry = workflowRegistry.get(meta.runId);
       this.#enqueueBackgroundNotification({
         displayText,
         modelText,
@@ -8882,7 +8894,7 @@ export class Session implements SessionContext {
         status: meta.status,
         kind: 'workflow',
         continuesTodoStopGuardWorkChain:
-          !this.todoStopGuardBackgroundBaseline.workflows.has(meta.runId),
+          !entry || !this.todoStopGuardBackgroundBaseline.workflows.has(entry),
         todoWorkChainId: meta.todoWorkChainId,
       });
     });

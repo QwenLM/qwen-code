@@ -13,7 +13,9 @@ import {
   createChildAbortController,
 } from '../../utils/abortController.js';
 import {
+  getWorkflowTaskMutationKey,
   isTerminalWorkflowStatus,
+  tryWithWorkflowTaskMutation,
   type WorkflowRunRegistry,
   type WorkflowTask,
 } from '../workflow-run-registry.js';
@@ -105,99 +107,126 @@ export class WorkflowRunner {
   static async start(
     options: WorkflowRunnerOptions,
   ): Promise<WorkflowRunHandle> {
+    if (options.resumeFromRunId) {
+      const attempt = await tryWithWorkflowTaskMutation(
+        getWorkflowTaskMutationKey(options.config, options.resumeFromRunId),
+        () => this.startClaimed(options),
+      );
+      if (!attempt.acquired) {
+        throw new Error(
+          `Workflow run ${options.resumeFromRunId} is already being modified.`,
+        );
+      }
+      return attempt.value;
+    }
+    return this.startClaimed(options);
+  }
+
+  private static async startClaimed(
+    options: WorkflowRunnerOptions,
+  ): Promise<WorkflowRunHandle> {
     const config = options.config;
     const runInBackground = options.runInBackground === true;
     const budget = WorkflowBudgetImpl.fromEnv();
-    const loaded =
-      options.scriptPath && options.script === undefined
-        ? await resolveSavedWorkflowScript(
-            { scriptPath: options.scriptPath },
-            config,
-          )
-        : undefined;
-    const script = loaded?.script ?? options.script ?? '';
-    const scriptPath = loaded?.scriptPath ?? options.scriptPath;
-
-    // Refuse a script that cannot compile before anything exists to clean up.
-    // Everything below this line has a cost that outlives a failure: a runId is
-    // minted, a journal file is opened, the run is registered and shows up in
-    // `/workflows`, and the failure path writes a snapshot and a log entry. A
-    // single TypeScript annotation used to produce all of that — a phantom
-    // failed run for a workflow that never started. Compiling first turns it
-    // into a plain refusal with nothing to explain afterwards.
-    try {
-      compileWorkflowScript(script);
-    } catch (error) {
-      throw new WorkflowScriptNotLaunchedError(
-        describeWorkflowCompileError(
-          error,
-          script.split(/\r\n|[\n\r\u2028\u2029]/).length,
-        ),
-      );
-    }
-
     const runId =
       options.resumeFromRunId ?? `wf_${randomBytes(8).toString('hex')}`;
-    const storage = config.storage;
-    const journal = storage
-      ? new WorkflowJournal(storage.getWorkflowRunJournalPath(runId))
-      : undefined;
-    const resumeReplay: JournalReplay | undefined = options.resumeFromRunId
-      ? await journal?.load()
-      : undefined;
-    if (runInBackground && options.signal.aborted) {
-      throw new Error('Background workflow start was cancelled.');
-    }
-    const callerWasAbortedBeforeStart = options.signal.aborted;
     const registry = config.getWorkflowRunRegistry?.();
     let entry: WorkflowTask | undefined;
     const isCurrentEntry = (): boolean =>
       registry === undefined ||
       (entry !== undefined && registry.get(runId) === entry);
-    const controller = runInBackground
-      ? createAbortController()
-      : createChildAbortController(options.signal);
-    const dispatch =
-      options.dispatch ??
-      createProductionDispatch(
-        config,
-        controller.signal,
-        (outputTokens) => budget.recordSpent(outputTokens),
-        registry
-          ? (emitter, dispatchId) =>
-              isCurrentEntry()
-                ? registry.bridgeApprovalEvents(
-                    runId,
-                    emitter,
-                    dispatchId,
-                    entry,
-                  )
-                : () => undefined
-          : undefined,
-      );
-    const orchestrator = new WorkflowOrchestrator(dispatch);
+    const createController = () =>
+      runInBackground
+        ? createAbortController()
+        : createChildAbortController(options.signal);
+    const controller = registry
+      ? registry.reserveStart(runId, createController)
+      : createController();
+    const storage = config.storage;
+    const journal = storage
+      ? new WorkflowJournal(storage.getWorkflowRunJournalPath(runId))
+      : undefined;
+    let script: string;
+    let scriptPath: string | undefined;
+    let resumeReplay: JournalReplay | undefined;
+    let callerWasAbortedBeforeStart: boolean;
+    let orchestrator: WorkflowOrchestrator;
     try {
-      entry = registry?.register({
-        runId,
-        toolUseId: options.toolUseId,
-        meta: null,
-        status: 'running',
-        startTime: Date.now(),
-        outputFile: '',
-        abortController: controller,
-        tokenBudgetTotal: budget.total,
-        script,
-        scriptPath,
-        args: options.args,
-        ...(options.resumeFromRunId
-          ? {
-              sourceRunId: options.resumeFromRunId,
-              startMode: 'retry' as const,
-            }
-          : {}),
-        isBackgrounded: runInBackground,
-      });
+      const loaded =
+        options.scriptPath && options.script === undefined
+          ? await resolveSavedWorkflowScript(
+              { scriptPath: options.scriptPath },
+              config,
+            )
+          : undefined;
+      script = loaded?.script ?? options.script ?? '';
+      scriptPath = loaded?.scriptPath ?? options.scriptPath;
+
+      try {
+        compileWorkflowScript(script);
+      } catch (error) {
+        throw new WorkflowScriptNotLaunchedError(
+          describeWorkflowCompileError(
+            error,
+            script.split(/\r\n|[\n\r\u2028\u2029]/).length,
+          ),
+        );
+      }
+
+      resumeReplay = options.resumeFromRunId
+        ? await journal?.load()
+        : undefined;
+      if (
+        runInBackground &&
+        (controller.signal.aborted || options.signal.aborted)
+      ) {
+        throw new Error('Background workflow start was cancelled.');
+      }
+      callerWasAbortedBeforeStart = options.signal.aborted;
+      const dispatch =
+        options.dispatch ??
+        createProductionDispatch(
+          config,
+          controller.signal,
+          (outputTokens) => budget.recordSpent(outputTokens),
+          registry
+            ? (emitter, dispatchId) =>
+                isCurrentEntry()
+                  ? registry.bridgeApprovalEvents(
+                      runId,
+                      emitter,
+                      dispatchId,
+                      entry,
+                    )
+                  : () => undefined
+            : undefined,
+        );
+      orchestrator = new WorkflowOrchestrator(dispatch);
+      entry = registry?.register(
+        {
+          runId,
+          toolUseId: options.toolUseId,
+          meta: null,
+          status: 'running',
+          startTime: Date.now(),
+          outputFile: '',
+          abortController: controller,
+          tokenBudgetTotal: budget.total,
+          script,
+          scriptPath,
+          args: options.args,
+          ...(options.resumeFromRunId
+            ? {
+                sourceRunId: options.resumeFromRunId,
+                startMode: 'retry' as const,
+              }
+            : {}),
+          isBackgrounded: runInBackground,
+        },
+        controller,
+      );
     } catch (error) {
+      registry?.releaseStart(runId, controller);
       controller.abort();
       throw error;
     }
