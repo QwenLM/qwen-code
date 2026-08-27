@@ -200,10 +200,14 @@ jobs:
           # The docker leg runs vitest directly instead of through
           # test:integration:sandbox:docker: that script would rebuild the image
           # the step above just built.
+          # external-context-mem0-write is quarantined from push E2E while
+          # #10272 (startup hang on macOS/ecs-qwen, bisected to #10128) is
+          # open; the nightly isolated leg below still runs it, same as
+          # cron-interactive (#6986).
           if [[ "${{ matrix.sandbox }}" == "sandbox:docker" ]]; then
-            npx cross-env QWEN_SANDBOX=docker vitest run --root ./integration-tests --exclude '**/interactive/cron-interactive.test.ts' --exclude '**/channel-plugin.test.ts' --shard='${{ matrix.shard }}'
+            npx cross-env QWEN_SANDBOX=docker vitest run --root ./integration-tests --exclude '**/interactive/cron-interactive.test.ts' --exclude '**/channel-plugin.test.ts' --exclude '**/interactive/external-context-mem0-write.test.ts' --shard='${{ matrix.shard }}'
           else
-            npm run test:integration:sandbox:none -- --exclude '**/interactive/cron-interactive.test.ts' --exclude '**/channel-plugin.test.ts' --shard='${{ matrix.shard }}'
+            npm run test:integration:sandbox:none -- --exclude '**/interactive/cron-interactive.test.ts' --exclude '**/channel-plugin.test.ts' --exclude '**/interactive/external-context-mem0-write.test.ts' --shard='${{ matrix.shard }}'
           fi
 
       # The sandbox build retags the same image name every run, so on a
@@ -272,7 +276,9 @@ jobs:
           OPENAI_API_KEY: '${{ secrets.OPENAI_API_KEY }}'
           OPENAI_BASE_URL: '${{ secrets.OPENAI_BASE_URL }}'
           OPENAI_MODEL: '${{ secrets.OPENAI_MODEL }}'
-        run: 'npx cross-env VERBOSE=true KEEP_OUTPUT=true QWEN_SANDBOX=false vitest run --root ./integration-tests --exclude "**/interactive/cron-interactive.test.ts" --exclude "**/channel-plugin.test.ts" --shard="${{ matrix.shard }}"'
+        # Quarantine note: see e2e-test-linux — external-context-mem0-write
+        # hangs at startup on macOS per #10272 and is excluded until fixed.
+        run: 'npx cross-env VERBOSE=true KEEP_OUTPUT=true QWEN_SANDBOX=false vitest run --root ./integration-tests --exclude "**/interactive/cron-interactive.test.ts" --exclude "**/channel-plugin.test.ts" --exclude "**/interactive/external-context-mem0-write.test.ts" --shard="${{ matrix.shard }}"'
 
   isolated-nightly:
     name: '${{ matrix.label }} (nightly)'
@@ -288,6 +294,10 @@ jobs:
             test_file: 'interactive/cron-interactive.test.ts'
           - label: 'channel-plugin E2E'
             test_file: 'channel-plugin.test.ts'
+          # Quarantined from push E2E per #10272; keep nightly coverage so
+          # the fix is visible when it lands.
+          - label: 'external-context mem0 E2E'
+            test_file: 'interactive/external-context-mem0-write.test.ts'
     steps:
       - name: 'Checkout'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
