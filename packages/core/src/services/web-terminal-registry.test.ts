@@ -302,6 +302,23 @@ describe('WebTerminalRegistry', () => {
     });
   });
 
+  it('notifies every exit listener when one releases the session', async () => {
+    const registry = new WebTerminalRegistry();
+    await registry.create({
+      terminalId: 'terminal:exit-listeners',
+      workspaceCwd: '/workspace',
+    });
+    const first = vi.fn(() => registry.release('terminal:exit-listeners'));
+    const second = vi.fn();
+    registry.addExitListener('terminal:exit-listeners', first);
+    registry.addExitListener('terminal:exit-listeners', second);
+
+    onExit({ exitCode: 7 });
+
+    expect(first).toHaveBeenCalledWith({ exitCode: 7 });
+    expect(second).toHaveBeenCalledWith({ exitCode: 7 });
+  });
+
   it('does not spawn a PTY after disposal wins an in-flight create', async () => {
     let resolvePty: ((value: unknown) => void) | undefined;
     getPty.mockReturnValueOnce(

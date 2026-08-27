@@ -263,7 +263,6 @@ export function createTerminalWsHandler(
               message: 'Terminal workspace unavailable',
             });
             cleanup();
-            registry.release(terminalId, workspace.workspaceCwd);
             ws.close(4002, 'Terminal workspace unavailable');
             return;
           }
@@ -277,7 +276,6 @@ export function createTerminalWsHandler(
             message: 'Terminal workspace unavailable',
           });
           cleanup();
-          registry.release(terminalId, workspace.workspaceCwd);
           ws.close(4002, 'Terminal workspace unavailable');
           return;
         }

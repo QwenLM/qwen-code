@@ -678,16 +678,20 @@ describe('terminal WebSocket route', () => {
       expect(ws.sent).toContain(
         '\x00{"type":"error","message":"Terminal workspace unavailable"}',
       );
-      expect(registry.release).toHaveBeenCalledWith(
-        'terminal:manual-1',
-        '/workspace',
-      );
+      expect(registry.release).not.toHaveBeenCalled();
       expect(ws.close).toHaveBeenCalledWith(
         4002,
         'Terminal workspace unavailable',
       );
       expect(registry.write).not.toHaveBeenCalled();
       expect(registry.resize).not.toHaveBeenCalled();
+
+      available = true;
+      await createTerminalWsHandler(registry, () => context).onConnection(
+        new FakeWebSocket() as unknown as WebSocket,
+        request,
+      );
+      expect(registry.addOutputListener).toHaveBeenCalledTimes(2);
     },
   );
 

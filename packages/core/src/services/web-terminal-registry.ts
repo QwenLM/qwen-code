@@ -202,7 +202,7 @@ export class WebTerminalRegistry {
       }
       session.exited = true;
       session.exitCode = e.exitCode;
-      for (const listener of session.exitListeners) listener(e);
+      for (const listener of [...session.exitListeners]) listener(e);
     };
     let dataDisposable: { dispose(): void } | undefined;
     let exitDisposable: { dispose(): void } | undefined;
