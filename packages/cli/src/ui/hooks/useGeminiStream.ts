@@ -1398,9 +1398,15 @@ export const useGeminiStream = (
         }
         return;
       }
-      commitPendingThought(userMessageTimestamp);
+      // No deferral armed: still owner-aware — commit only when the shared
+      // slot holds THIS invocation's thought. The owner-agnostic commit
+      // re-homed a CONCURRENT stream's in-flight thought under this turn's
+      // timestamp (and cleared its owner stamp), so the other stream's next
+      // chunk rebuilt the slot and its settlement committed the same
+      // reasoning again — duplicated, truncated, misplaced (R10-1).
+      commitOwnPendingThought(userMessageTimestamp, streamPromptId);
     },
-    [abortThoughtMergeDeferral, commitOwnPendingThought, commitPendingThought],
+    [abortThoughtMergeDeferral, commitOwnPendingThought],
   );
 
   // Called at the ToolCallRequest boundary. A single pending
@@ -3812,6 +3818,7 @@ export const useGeminiStream = (
         toolContinuationOwner?: ToolContinuationOwner;
       },
     ) => {
+      let outgoingInteractionPromptId: string | undefined;
       const allowConcurrentBtwDuringResponse =
         submitType === SendMessageType.UserQuery &&
         streamingState === StreamingState.Responding &&
@@ -4078,6 +4085,11 @@ export const useGeminiStream = (
       // and stranding its batch without the fold). Mirror the
       // abortControllerRef gate directly above.
       if (!allowConcurrentBtwDuringResponse && !isDetachedToolContinuation) {
+        // Captured before the overwrite: the new-prompt reset below clears
+        // the shared pending slot only when its occupant is unowned or owned
+        // by this outgoing turn — a surviving concurrent stream's thought
+        // must survive the reset for its own settlement (R10-2).
+        outgoingInteractionPromptId = activeInteractionPromptIdRef.current;
         activeInteractionPromptIdRef.current = prompt_id;
         if (
           submitType !== SendMessageType.ToolResult &&
@@ -4293,7 +4305,18 @@ export const useGeminiStream = (
           // the armed snapshot owns the slot, so clearing it here would drop
           // the surviving stream's frozen thought from the pending display.
           setThought(null);
-          if (!thoughtMergeDeferralRef.current) {
+          // Clear the shared slot only when nothing is armed AND the
+          // occupant is not owned by a surviving concurrent stream:
+          // unowned leftovers and the outgoing turn's own unsettled thought
+          // are stale; wiping a concurrent owner's in-flight thought drops
+          // it from history entirely — its settlement then finds an empty
+          // slot and commits nothing (R10-2).
+          const slotOwner = pendingThoughtOwnerRef.current;
+          if (
+            !thoughtMergeDeferralRef.current &&
+            (slotOwner === null ||
+              slotOwner === (outgoingInteractionPromptId ?? null))
+          ) {
             setPendingThoughtItem(null);
           }
         }
