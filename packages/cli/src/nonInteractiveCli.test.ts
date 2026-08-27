@@ -747,6 +747,160 @@ describe('runNonInteractive', () => {
     );
   });
 
+  it('carries the objective-updated notice into a scheduled Goal continuation', async () => {
+    setupMetricsMock();
+    mockGetCommands.mockReturnValue([goalCommand]);
+    await prepareGoalState('paused');
+    mockFinishedGoalWorker();
+    const deliveredSpy = vi.spyOn(goalRuntime, 'markTurnDelivered');
+    vi.mocked(mockConfig.bindGoalTurnHost).mockImplementation((host) =>
+      goalRuntime.bindHost({
+        startGoalTurn: (input) =>
+          host.startGoalTurn({
+            ...input,
+            objectiveUpdated: true,
+          }),
+        preemptGoalTurn: (reason) => host.preemptGoalTurn(reason),
+      }),
+    );
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      '/goal resume',
+      'goal-runtime-notice',
+    );
+
+    expect(mockGeminiClient.sendMessageStream).toHaveBeenCalledOnce();
+    const [parts, , , options] =
+      mockGeminiClient.sendMessageStream.mock.calls[0]!;
+    expect(parts[0]?.text).toContain(
+      'The Goal objective changed since your last turn',
+    );
+    expect(deliveredSpy).toHaveBeenCalledWith(options.goalTurnKey);
+  });
+
+  it('marks a follow-up continuation delivered when the finished turn schedules it', async () => {
+    // The first segment finishes through the real runtime, which schedules
+    // the next continuation into the headless queue; the promotion site has
+    // to mark that turn delivered before its prompt goes out, or a later
+    // fail-closed settle would roll its announcement back and re-fire the
+    // notice.
+    setupMetricsMock();
+    mockGetCommands.mockReturnValue([goalCommand]);
+    await prepareGoalState('paused');
+    const realFinishTurn = goalRuntime.finishTurn.bind(goalRuntime);
+    const finishTurn = vi
+      .spyOn(goalRuntime, 'finishTurn')
+      .mockImplementationOnce(realFinishTurn)
+      .mockResolvedValue(undefined);
+    mockGeminiClient.sendMessageStream.mockImplementation(() =>
+      createStreamFromEvents([
+        {
+          type: GeminiEventType.Finished,
+          value: {
+            reason: undefined,
+            usageMetadata: { totalTokenCount: 0 },
+          },
+        },
+      ]),
+    );
+    const deliveredSpy = vi.spyOn(goalRuntime, 'markTurnDelivered');
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      '/goal resume',
+      'goal-runtime-promoted',
+    );
+
+    expect(finishTurn).toHaveBeenCalledTimes(2);
+    expect(mockGeminiClient.sendMessageStream).toHaveBeenCalledTimes(2);
+    const sentKeys = mockGeminiClient.sendMessageStream.mock.calls.map(
+      (call) => call[3].goalTurnKey,
+    );
+    expect(sentKeys[1]).not.toBe(sentKeys[0]);
+    expect(deliveredSpy.mock.calls.map((call) => call[0])).toEqual(sentKeys);
+    // The promoted turn was marked before its prompt was sent.
+    expect(deliveredSpy.mock.invocationCallOrder[1]!).toBeLessThan(
+      mockGeminiClient.sendMessageStream.mock.invocationCallOrder[1]!,
+    );
+  });
+
+  it('marks a follow-up continuation delivered after a tool-terminated segment', async () => {
+    // Same promotion, other branch: the first segment ends because a tool
+    // result terminated the turn (an update_goal proposal), and the real
+    // runtime schedules the next continuation from there.
+    setupMetricsMock();
+    mockGetCommands.mockReturnValue([goalCommand]);
+    await prepareGoalState('paused');
+    const realFinishTurn = goalRuntime.finishTurn.bind(goalRuntime);
+    const finishTurn = vi
+      .spyOn(goalRuntime, 'finishTurn')
+      .mockImplementationOnce(realFinishTurn)
+      .mockResolvedValue(undefined);
+    mockCoreExecuteToolCall.mockResolvedValue({
+      callId: 'update-goal-promoted',
+      responseParts: [{ text: 'proposal recorded' }],
+      resultDisplay: 'proposal recorded',
+      error: undefined,
+      errorType: undefined,
+      terminateTurn: true,
+    });
+    const finished = () =>
+      createStreamFromEvents([
+        {
+          type: GeminiEventType.Finished,
+          value: {
+            reason: undefined,
+            usageMetadata: { totalTokenCount: 0 },
+          },
+        },
+      ]);
+    mockGeminiClient.sendMessageStream
+      .mockImplementationOnce(
+        (
+          _parts: Part[],
+          _signal: AbortSignal,
+          _promptId: string,
+          sendOptions: { goalPermit?: GoalTurnPermit },
+        ) =>
+          createStreamFromEvents([
+            {
+              type: GeminiEventType.ToolCallRequest,
+              value: {
+                callId: 'update-goal-promoted',
+                name: 'update_goal',
+                args: {},
+                isClientInitiated: false,
+                prompt_id: 'goal-runtime-promoted-tool',
+                goalContext: sendOptions.goalPermit,
+              },
+            },
+          ]),
+      )
+      .mockImplementation(finished);
+    const deliveredSpy = vi.spyOn(goalRuntime, 'markTurnDelivered');
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      '/goal resume',
+      'goal-runtime-promoted-tool',
+    );
+
+    expect(finishTurn).toHaveBeenCalledTimes(2);
+    expect(mockGeminiClient.sendMessageStream).toHaveBeenCalledTimes(2);
+    const sentKeys = mockGeminiClient.sendMessageStream.mock.calls.map(
+      (call) => call[3].goalTurnKey,
+    );
+    expect(sentKeys[1]).not.toBe(sentKeys[0]);
+    expect(deliveredSpy.mock.calls.map((call) => call[0])).toEqual(sentKeys);
+    expect(deliveredSpy.mock.invocationCallOrder[1]!).toBeLessThan(
+      mockGeminiClient.sendMessageStream.mock.invocationCallOrder[1]!,
+    );
+  });
+
   it('renders the wind-down hand-off on a budget-spent Goal continuation', async () => {
     setupMetricsMock();
     mockGetCommands.mockReturnValue([goalCommand]);

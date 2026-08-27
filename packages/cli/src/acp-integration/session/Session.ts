@@ -555,6 +555,7 @@ interface AcpGoalTurn {
   controller: AbortController;
   origin: 'runtime' | 'user';
   continuationContext: string;
+  objectiveUpdated?: boolean;
   windDown?: boolean;
   verifierFeedback?: string;
   modelStarted: boolean;
@@ -2152,6 +2153,9 @@ export class Session implements SessionContext {
             controller: new AbortController(),
             origin: 'runtime',
             continuationContext: input.continuationContext,
+            ...(input.objectiveUpdated
+              ? { objectiveUpdated: input.objectiveUpdated }
+              : {}),
             ...(input.windDown ? { windDown: true } : {}),
             ...(input.verifierFeedback
               ? { verifierFeedback: input.verifierFeedback }
@@ -2412,6 +2416,27 @@ export class Session implements SessionContext {
       void this.#drainCronQueue();
       void this.#drainNotificationQueue();
       void this.#drainGoalQueue();
+    }
+  }
+
+  /**
+   * Confirms the continuation's prompt reached the model.
+   *
+   * `startGoalTurn` resolves at enqueue time, so the runtime cannot tell a
+   * delivered turn from a queued one when it settles; `#settleGoalTurn`'s
+   * degraded-persistence fallback settles a model-started turn through
+   * `releaseTurn`, and only this confirmation keeps that turn's objective
+   * announcement from rolling back and re-firing on the next continuation.
+   */
+  #markGoalTurnDelivered(turnKey: string): void {
+    try {
+      this.config.getGoalRuntime().markTurnDelivered(turnKey);
+    } catch (error) {
+      debugLogger.debug(
+        `Failed to confirm ACP Goal turn delivery: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
     }
   }
 
@@ -5491,7 +5516,12 @@ export class Session implements SessionContext {
                   // a completed iteration — a phantom turn on the goal's
                   // count and a checkpoint recording work that never ran.
                   // Re-assigning on later loop laps is harmless.
-                  if (goalTurn) goalTurn.modelStarted = true;
+                  if (goalTurn) {
+                    goalTurn.modelStarted = true;
+                    if (goalTurn.origin === 'runtime') {
+                      this.#markGoalTurnDelivered(goalTurn.turnKey);
+                    }
+                  }
                   const sendResult =
                     await this.#sendMessageStreamWithAutoCompression(
                       promptId,

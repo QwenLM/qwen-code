@@ -8640,7 +8640,7 @@ async function runQwenServeImpl(
             clearRuntimeStartAfterHealthTimer();
             clearRuntimeStartFallbackTimer();
             cancelDeferredRuntimeStartup();
-            // NOTE: the SIGINT/SIGTERM handlers stay attached during the
+            // NOTE: the shutdown signal handlers stay attached during the
             // drain so a second signal can take the explicit force-exit path
             // above. Detaching them up front would leave Node's default signal
             // behavior in charge and could orphan agent children. We detach
@@ -8673,6 +8673,7 @@ async function runQwenServeImpl(
               if (!preserveSignalHandlers) {
                 process.removeListener('SIGINT', onSignal);
                 process.removeListener('SIGTERM', onSignal);
+                process.removeListener('SIGHUP', onSignal);
               }
               process.removeListener(
                 'uncaughtExceptionMonitor',
@@ -8978,6 +8979,7 @@ async function runQwenServeImpl(
 
       process.on('SIGINT', onSignal);
       process.on('SIGTERM', onSignal);
+      process.on('SIGHUP', onSignal);
       process.on('uncaughtExceptionMonitor', onUncaughtExceptionMonitor);
 
       // The per-attempt boot-error listener was removed by handleListening.
