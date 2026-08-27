@@ -63,11 +63,30 @@ Reading the manifest alone does not inject a default into generation
 configuration, so sessions that never change the controls retain main's
 existing wire behavior.
 
-If the live session already carries a generic effort outside the manifest
-(`high` or `max`), ACP preserves that value through its existing generic
-option and WebShell hides the model-specific controls. This avoids displaying
-an inaccurate tier or changing live configuration merely by opening the
-popover.
+If the live session inherits a generic effort outside the manifest (`high` or
+`max`), ACP projects its documented effective alias, `xhigh`, through the
+registered model-specific choices. The controls stay available instead of
+disappearing after session creation. DashScope likewise maps `minimal` to
+`low`; a static `thinking_budget` maps to `low` at 0–4096 tokens, `medium` at
+4097–16384, and `xhigh` at 16385–262144, following the
+[OpenAI-compatible Qwen API](https://help.aliyun.com/zh/model-studio/qwen-api-via-openai-chat-completions).
+
+If a static DashScope thinking field currently overrides the unified setting,
+ACP projects its effective off state or effort alias through the same controls.
+Selecting a model-specific value removes only the competing thinking fields
+from copied request-parameter maps, preserves both the original shared maps
+and unrelated request parameters, and applies the selected value. This keeps
+the control truthful instead of acknowledging a choice that a higher-priority
+field would silently shadow.
+
+When the active model requires thinking, ACP omits `none` from the option and
+marks that constraint in metadata. WebShell keeps the Thinking switch checked
+and disabled while leaving every supported effort selectable. An unmarked
+generic option without `none` remains incompatible and hidden. Workspace
+previews resolve this constraint from the selected provider-model entry, so the
+same behavior is available before lazy session creation. A stale welcome
+Thinking-off intent is discarded if refreshed model metadata makes thinking
+mandatory before the first prompt.
 
 The daemon exposes one owner-routed config-option mutation. Its public route is
 restricted to `reasoning_effort`; the response carries fresh `configOptions`,
@@ -84,6 +103,7 @@ Included:
   prompt;
 - authoritative replacement by same-session context;
 - the current WebShell conversation;
+- effort changes after completed messages and while a prompt is running;
 - Thinking on/off and `low`, `medium`, `xhigh` effort;
 - browser coverage for welcome, live override, model switching, old daemons,
   and the existing live mutation behavior.

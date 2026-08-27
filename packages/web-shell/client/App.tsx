@@ -6026,8 +6026,9 @@ export function App({
         reasoningIntent &&
         reasoningIntent.modelId === modelId &&
         reasoningPreview &&
-        (reasoningIntent.value === 'none' ||
-          reasoningPreview.efforts.includes(reasoningIntent.value))
+        (reasoningIntent.value === 'none'
+          ? reasoningPreview.canDisable !== false
+          : reasoningPreview.efforts.includes(reasoningIntent.value))
           ? reasoningIntent.value
           : undefined;
       const modeId =
@@ -6543,11 +6544,26 @@ export function App({
       ? connection.models?.find((model) => model.id === currentModel)
           ?.reasoningPreview
       : undefined;
+  useEffect(() => {
+    if (
+      pendingReasoningIntent?.modelId === currentModel &&
+      pendingReasoningIntent.value === 'none' &&
+      welcomeReasoningPreview?.canDisable === false
+    ) {
+      setPendingReasoningIntent(undefined);
+    }
+  }, [
+    currentModel,
+    pendingReasoningIntent,
+    setPendingReasoningIntent,
+    welcomeReasoningPreview,
+  ]);
   const validPendingReasoningIntent =
     pendingReasoningIntent?.modelId === currentModel &&
     welcomeReasoningPreview &&
-    (pendingReasoningIntent.value === 'none' ||
-      welcomeReasoningPreview.efforts.includes(pendingReasoningIntent.value))
+    (pendingReasoningIntent.value === 'none'
+      ? welcomeReasoningPreview.canDisable !== false
+      : welcomeReasoningPreview.efforts.includes(pendingReasoningIntent.value))
       ? pendingReasoningIntent
       : undefined;
   const displayedReasoning = hasAuthoritativeReasoningContext
@@ -11263,6 +11279,7 @@ export function App({
       if (!preview) return;
       const previous = pendingReasoningIntentRef.current;
       if (value === 'none') {
+        if (preview.canDisable === false) return;
         const previousEffort =
           previous?.modelId === modelId &&
           preview.efforts.includes(previous.effort)
