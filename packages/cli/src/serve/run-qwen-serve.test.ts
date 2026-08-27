@@ -4300,6 +4300,15 @@ describe('runQwenServe telemetry validation', () => {
           ([input]) => input.boundWorkspace === secondaryCwd,
         )?.[0],
       ).toMatchObject({ contextFilename: 'SECONDARY.md' });
+      // bootSettings above carries no `context.fileName`, so the primary
+      // workspace must land on the hard-coded `QWEN.md` init default
+      // (`contextFilenameForInit ?? 'QWEN.md'`). Without this assertion the
+      // fallback literal could be swapped without any test noticing.
+      expect(
+        createWorkspaceService.mock.calls.find(
+          ([input]) => input.boundWorkspace === canonicalizeWorkspace(primary),
+        )?.[0],
+      ).toMatchObject({ contextFilename: 'QWEN.md' });
     } finally {
       await handle.close();
     }

@@ -1887,7 +1887,10 @@ export interface DaemonWorkspaceSkillStatus extends DaemonStatusCell {
   installedPath?: string;
   argumentHint?: string;
   model?: string;
+  /** Canonical name of the extension that provides this skill. */
   extensionName?: string;
+  /** Localized presentation name; never use as an extension identity. */
+  extensionDisplayName?: string;
 }
 
 export interface DaemonWorkspaceSkillsStatus {

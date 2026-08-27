@@ -252,7 +252,11 @@ export function sendBridgeError(
         : err.code === 'standalone_session_not_found'
           ? 404
           : err.code === 'standalone_creation_outcome_unknown' ||
-              err.code === 'standalone_creation_rolled_back'
+              err.code === 'standalone_creation_rolled_back' ||
+              err.code === 'standalone_session_operation_failed' ||
+              err.code === 'transcript_deletion_failed' ||
+              err.code === 'transcript_deletion_outcome_unknown' ||
+              err.code === 'working_directory_recovery_failed'
             ? 500
             : 409;
     if (status === 500) recordExpectedBridgeError(err, ctx, daemonLog);

@@ -16,7 +16,7 @@ import { isNarrowWidth } from '../utils/isNarrowWidth.js';
 import { t } from '../../i18n/index.js';
 
 interface ContextSummaryDisplayProps {
-  geminiMdFileCount: number;
+  memoryFileCount: number;
   contextFileNames: string[];
   mcpServers?: Record<string, MCPServerConfig>;
   blockedMcpServers?: Array<{ name: string; extensionName: string }>;
@@ -25,7 +25,7 @@ interface ContextSummaryDisplayProps {
 }
 
 export const ContextSummaryDisplay: React.FC<ContextSummaryDisplayProps> = ({
-  geminiMdFileCount,
+  memoryFileCount,
   contextFileNames,
   mcpServers,
   blockedMcpServers,
@@ -39,7 +39,7 @@ export const ContextSummaryDisplay: React.FC<ContextSummaryDisplayProps> = ({
   const openFileCount = ideContext?.workspaceState?.openFiles?.length ?? 0;
 
   if (
-    geminiMdFileCount === 0 &&
+    memoryFileCount === 0 &&
     mcpServerCount === 0 &&
     blockedMcpServerCount === 0 &&
     openFileCount === 0
@@ -58,19 +58,19 @@ export const ContextSummaryDisplay: React.FC<ContextSummaryDisplayProps> = ({
     return `${fileText} ${t('(ctrl+g to view)')}`;
   })();
 
-  const geminiMdText = (() => {
-    if (geminiMdFileCount === 0) {
+  const memoryFileText = (() => {
+    if (memoryFileCount === 0) {
       return '';
     }
     const allNamesTheSame = new Set(contextFileNames).size < 2;
     const name = allNamesTheSame ? contextFileNames[0] : 'context';
-    return geminiMdFileCount === 1
+    return memoryFileCount === 1
       ? t('{{count}} {{name}} file', {
-          count: String(geminiMdFileCount),
+          count: String(memoryFileCount),
           name,
         })
       : t('{{count}} {{name}} files', {
-          count: String(geminiMdFileCount),
+          count: String(memoryFileCount),
           name,
         });
   })();
@@ -118,7 +118,7 @@ export const ContextSummaryDisplay: React.FC<ContextSummaryDisplayProps> = ({
     return text;
   })();
 
-  const summaryParts = [openFilesText, geminiMdText, mcpText].filter(Boolean);
+  const summaryParts = [openFilesText, memoryFileText, mcpText].filter(Boolean);
 
   if (isNarrow) {
     return (
