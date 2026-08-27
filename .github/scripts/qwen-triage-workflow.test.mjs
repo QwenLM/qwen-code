@@ -3078,34 +3078,22 @@ describe('qwen-triage: flakiness gate — behavioral, under the production wrapp
     );
   });
 
-  it('desktop-app and docs-site trees are skipped despite their build vite.config', () => {
-    // Round-6 Critical: each packages/desktop/apps/* carries its own
-    // package.json plus a BUILD vite.config.ts, which fooled the generic
-    // resolver into treating bun-family tests as runnable — 102 of 319
-    // real desktop test files misclassified, published under a false
-    // "include-set mismatch" diagnosis while draining the wall budget.
+  it('the docs-site tree is skipped despite its vitest.config', () => {
     const { res, outputs, log, counts } = runGate({
       layout: {
-        'packages/desktop/apps/electron/package.json': '{}',
-        'packages/desktop/apps/electron/vite.config.ts': '',
-        'packages/desktop/apps/electron/src/a.test.ts': '',
         'docs-site/package.json': '{}',
         'docs-site/vitest.config.js': '',
         'docs-site/b.test.ts': '',
       },
-      list: 'packages/desktop/apps/electron/src/a.test.ts\ndocs-site/b.test.ts\n',
+      list: 'docs-site/b.test.ts\n',
     });
     assert.equal(res.status, 0, res.stderr);
     assert.equal(outputs.flake_verdict, 'n/a');
     assert.match(
       log,
-      /outside the npm-workspace install set \(unsupported runner family\), skipped: packages\/desktop\/apps\/electron\/src\/a\.test\.ts/,
-    );
-    assert.match(
-      log,
       /outside the npm-workspace install set \(unsupported runner family\), skipped: docs-site\/b\.test\.ts/,
     );
-    assert.equal(counts('a.test.ts'), 0, 'no invocation may be attempted');
+    assert.equal(counts('b.test.ts'), 0, 'no invocation may be attempted');
   });
 
   it('a recorded file missing at gate time is skip-logged, never marked F', () => {

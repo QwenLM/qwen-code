@@ -165,7 +165,14 @@ function buildWorkspaceProvidersStatus(
         currentAuth === model.authType && currentAcpModelId === modelId;
       const configOptions = modelId.startsWith(ACP_ROUTE_ID_PREFIX)
         ? undefined
-        : buildModelReasoningConfigPreview(model.id);
+        : buildModelReasoningConfigPreview(model.id, {
+            thinkingMandatory:
+              modelsConfig.getResolvedModel(
+                model.authType,
+                model.id,
+                model.registryBaseUrl ?? model.baseUrl,
+              )?.generationConfig.thinkingMandatory === true,
+          });
       const providerModel: ServeWorkspaceProviderModel = {
         modelId,
         baseModelId: parseAcpBaseModelId(effectiveModelId),
