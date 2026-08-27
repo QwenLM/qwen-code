@@ -1331,6 +1331,13 @@
             "type": "string"
           }
         },
+        "eager": {
+          "description": "Tool names whose schemas are sent in the initial model request. When set, every other built-in tool is deferred instead: still registered and listed in /tools, still callable, but discovered on demand via tool_search. An explicitly empty list ([]) is an active allowlist naming nothing, so every non-exempt tool is deferred; omit the setting for no restriction. Use this to shrink the tool schemas sent to constrained-decoding backends (llama.cpp, LM Studio, Docker Model Runner). Differs from tools.disabled, which removes tools entirely, and from permissions.allow, which only auto-approves and never hides a tool.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
         "approvalMode": {
           "description": "Approval mode for tool usage. Controls how tools are approved before execution. Options: plan, default, auto-edit, auto, yolo",
           "enum": [

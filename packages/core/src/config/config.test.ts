@@ -8783,8 +8783,8 @@ describe('Server Config (config.ts)', () => {
       expect(wasGrepToolRegistered).toBe(false);
     });
 
-    // ── #9827 / #10075: permissions.allow keeps unlisted schemas out of the
-    // eager model request, but demotes (not removes) the unlisted tools ──
+    // ── #9827 / #10075: tools.eager keeps unlisted schemas out of the eager
+    // model request, but demotes (not removes) the unlisted tools ──
     it('registers tools.eager entries eagerly and demotes the rest to deferred (#9827, #10075)', async () => {
       const settingsAllow = [
         'ReadFile',

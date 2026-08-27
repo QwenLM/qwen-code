@@ -891,8 +891,8 @@ describe('ToolRegistry', () => {
     });
   });
 
-  // #10075: built-in tools an active permissions.allow allowlist does not
-  // cover are demoted to deferred instead of being dropped from the
+  // #10075: built-in tools an active `settings.tools.eager` allowlist does
+  // not name are demoted to deferred instead of being dropped from the
   // registry, so they stay listed in /tools and loadable via ToolSearch
   // while their schemas stay out of the eager model request (#9827).
   describe('permission-deferred tools (#10075)', () => {

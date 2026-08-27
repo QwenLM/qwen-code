@@ -103,10 +103,8 @@ describe('resolveToolName exhaustiveness (#9827)', () => {
   // Every built-in tool's canonical name AND display name must resolve
   // through TOOL_NAME_ALIASES. A tool added to tool-names.ts without a
   // matching rule-parser alias entry silently never matches any permission
-  // rule — the exact #9827 bug class — and under the registry allowlist
-  // such a missed entry now also breaks allowlist coverage (the rule
-  // parses valid, activates the allowlist, yet covers nothing). Let drift
-  // fail CI instead of failing silently for a user.
+  // rule — the exact #9827 bug class. Let drift fail CI instead of
+  // failing silently for a user.
   it.each(
     Object.entries(ToolDisplayNames).map(([key, displayName]) => ({
       key,
@@ -2602,6 +2600,34 @@ describe('PermissionManager', () => {
       expect(await pm.getToolRegistrationStatus('read_file')).toBe(
         'registered',
       );
+    });
+
+    it('permissions.allow never rescues a tool the coreTools allowlist excludes', async () => {
+      // The #10075 decoupling must not revive in reverse: an allow rule
+      // covering a core tool that `coreTools` omits cannot re-register it
+      // — the legacy allowlist's hard `disabled` still wins.
+      pm = new PermissionManager(
+        makeConfig({
+          coreTools: ['read_file'],
+          permissionsAllow: ['edit'],
+        }),
+      );
+      pm.initialize();
+      expect(await pm.getToolRegistrationStatus('edit')).toBe('disabled');
+      expect(await pm.isToolEnabled('edit')).toBe(false);
+      expect(await pm.getToolRegistrationStatus('read_file')).toBe(
+        'registered',
+      );
+    });
+
+    it('permissions.ask never demotes or removes a tool', async () => {
+      // "Always require confirmation" must never become "tool
+      // unavailable": ask rules are pure confirmation routing and have no
+      // registration effect (#10075).
+      pm = new PermissionManager(makeConfig({ permissionsAsk: ['Edit'] }));
+      pm.initialize();
+      expect(await pm.getToolRegistrationStatus('edit')).toBe('registered');
+      expect(await pm.isToolEnabled('edit')).toBe(true);
     });
 
     // Non-core tools bypass coreTools allowlist

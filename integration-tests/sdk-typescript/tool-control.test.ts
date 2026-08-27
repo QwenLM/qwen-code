@@ -2457,7 +2457,7 @@ describe('Tool Control Parameters (E2E)', () => {
   // deferred: their schemas stay out of the eager model request (#9827
   // schema-shrink preserved) but they remain registered, discoverable via
   // tool_search, and callable through the normal approval flow.
-  describe('permissions.allow registry allowlist from settings (#10075)', () => {
+  describe('permissions.allow from settings never removes built-in tools (#10075)', () => {
     beforeEach(async () => {
       testDir = await helper.setup('tool-control-allowlist-10075', {
         settings: {

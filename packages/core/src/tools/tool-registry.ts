@@ -208,8 +208,8 @@ export class ToolRegistry {
   // pinDeferredToolReveal): they survive the `/clear` reset that
   // intentionally drops discovered reveals so the new session starts clean.
   private pinnedDeferredReveals: Set<string> = new Set();
-  // Built-in tools demoted to deferred by an active `permissions.allow`
-  // registry allowlist (#9827, #10075). They are fully registered — listed
+  // Built-in tools demoted to deferred by an active `settings.tools.eager`
+  // allowlist (#9827, #10075). They are fully registered — listed
   // in `/tools`, discoverable and loadable via ToolSearch, callable through
   // the normal approval flow — but their schemas are kept out of the eager
   // model request exactly like `shouldDefer=true` tools. Unlike ordinary
@@ -359,7 +359,7 @@ export class ToolRegistry {
 
   /**
    * Registers a lazy tool factory for a tool that an active
-   * `permissions.allow` registry allowlist demoted to deferred (#9827,
+   * `settings.tools.eager` allowlist demoted to deferred (#9827,
    * #10075). Registration is identical to {@link registerFactory}; the name
    * is additionally tracked so every deferred-hiding decision
    * ({@link getFunctionDeclarations}, {@link isDeferredAndHidden},
@@ -387,8 +387,8 @@ export class ToolRegistry {
 
   /**
    * Whether a tool is deferred for hiding purposes: either the tool class
-   * opted in via `shouldDefer=true`, or an active `permissions.allow`
-   * registry allowlist demoted it (#10075).
+   * opted in via `shouldDefer=true`, or an active `settings.tools.eager`
+   * allowlist demoted it (#10075).
    */
   private isEffectivelyDeferred(tool: AnyDeclarativeTool): boolean {
     return tool.shouldDefer || this.permissionDeferred.has(tool.name);
@@ -873,7 +873,7 @@ export class ToolRegistry {
    * Whether a deferred tool is currently hidden from the model's
    * function-declaration list. Returns `true` when the tool:
    * - is deferred (`shouldDefer=true`, or demoted by an active
-   *   `permissions.allow` registry allowlist, #10075),
+   *   `settings.tools.eager` allowlist, #10075),
    * - is not always-loaded,
    * - has not been revealed this session, AND
    * - is not in the visibleTools config list.
