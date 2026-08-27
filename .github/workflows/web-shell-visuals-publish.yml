@@ -65,6 +65,7 @@ jobs:
           persist-credentials: false
 
       - name: 'Install ossutil'
+        id: 'install-ossutil'
         # Evidence hosting is best-effort: a setup failure must not block the
         # no-image marker-comment path, which has no external dependency
         # (mirrors the qwen-triage.yml twins). The upload below stays loud:
@@ -94,6 +95,7 @@ jobs:
           "$RUNNER_TEMP/ossutil" >/dev/null
 
       - name: 'Configure Aliyun OSS credentials'
+        if: "${{ steps.install-ossutil.outcome == 'success' }}"
         continue-on-error: true
         env:
           ALIYUN_OSS_ACCESS_KEY_ID: '${{ secrets.ALIYUN_OSS_ACCESS_KEY_ID }}'
