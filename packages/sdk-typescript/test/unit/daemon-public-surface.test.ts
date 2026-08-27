@@ -20,6 +20,20 @@ import {
 // gap that two-layer SDK re-exports are easy to drift on.
 import type {
   DaemonClient,
+  CreateStandaloneSessionOptions,
+  DaemonArchiveStandaloneSessionsResult,
+  DaemonDeleteStandaloneSessionsResult,
+  DaemonRestoredStandaloneSession,
+  DaemonSessionRestoreStrategy,
+  DaemonStandaloneCreationRecovery,
+  DaemonStandaloneDirectoryResult,
+  DaemonStandaloneMetadataResult,
+  DaemonStandaloneSession,
+  DaemonStandaloneSessionListOptions,
+  DaemonStandaloneSessionListPage,
+  DaemonStandaloneSessionLookup,
+  DaemonStandaloneSessionSummary,
+  RestoreStandaloneSessionRequest,
   WorkspaceDaemonClient,
   DaemonClientEvictedData,
   DaemonClientEvictedEvent,
@@ -180,6 +194,32 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
     // failure mode caught for PR-21 auth surface).
     expect(typeof Public.isWorkspaceScopedBudgetEvent).toBe('function');
     expect('projectChatRecordsToDaemonTranscript' in Public).toBe(false);
+    expect(Public.STANDALONE_SESSIONS_CAPABILITY).toBe(
+      'standalone_sessions_v1',
+    );
+    expect(typeof Public.isStandaloneSessionNotFoundError).toBe('function');
+    expect(typeof Public.isStandaloneCreationOutcomeUnknown).toBe('function');
+    expect(typeof Public.DaemonStandaloneProtocolError).toBe('function');
+    expect(typeof Public.DaemonStandaloneCreationOutcomeUnknownError).toBe(
+      'function',
+    );
+  });
+
+  it('exports standalone session SDK types from the package entry', () => {
+    expectTypeOf<CreateStandaloneSessionOptions>().not.toBeNever();
+    expectTypeOf<RestoreStandaloneSessionRequest>().not.toBeNever();
+    expectTypeOf<DaemonStandaloneSession>().not.toBeNever();
+    expectTypeOf<DaemonRestoredStandaloneSession>().not.toBeNever();
+    expectTypeOf<DaemonStandaloneSessionSummary>().not.toBeNever();
+    expectTypeOf<DaemonStandaloneSessionLookup>().not.toBeNever();
+    expectTypeOf<DaemonStandaloneSessionListOptions>().not.toBeNever();
+    expectTypeOf<DaemonStandaloneSessionListPage>().not.toBeNever();
+    expectTypeOf<DaemonStandaloneDirectoryResult>().not.toBeNever();
+    expectTypeOf<DaemonStandaloneMetadataResult>().not.toBeNever();
+    expectTypeOf<DaemonArchiveStandaloneSessionsResult>().not.toBeNever();
+    expectTypeOf<DaemonDeleteStandaloneSessionsResult>().not.toBeNever();
+    expectTypeOf<DaemonStandaloneCreationRecovery>().not.toBeNever();
+    expectTypeOf<DaemonSessionRestoreStrategy>().not.toBeNever();
   });
 
   it('round-trips a raw DaemonEvent through the public narrow helper', () => {
