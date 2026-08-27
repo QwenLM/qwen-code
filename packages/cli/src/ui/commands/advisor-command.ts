@@ -140,6 +140,7 @@ export const advisorCommand: SlashCommand = {
       'Get a second opinion on the current conversation from a reviewer model',
     );
   },
+  argumentHint: '[focus]',
   kind: CommandKind.BUILT_IN,
   supportedModes: ['interactive', 'acp'] as const,
   action: async (

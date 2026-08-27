@@ -99,6 +99,7 @@ describe('advisorCommand', () => {
     expect(advisorCommand.name).toBe('advisor');
     expect(advisorCommand.kind).toBe(CommandKind.BUILT_IN);
     expect(advisorCommand.description).toBeTruthy();
+    expect(advisorCommand.argumentHint).toBe('[focus]');
     expect(advisorCommand.supportedModes).toEqual(['interactive', 'acp']);
   });
 
