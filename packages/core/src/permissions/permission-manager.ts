@@ -40,6 +40,24 @@ import type {
 const debugLogger = createDebugLogger('PERMISSIONS');
 
 /**
+ * How a tool participates in the registry for this session.
+ *
+ * - `registered`: fully registered; its schema is sent in the eager model
+ *   request.
+ * - `deferred`: registered but hidden from the eager model request — the
+ *   same treatment `shouldDefer` tools get. The tool stays listed in
+ *   `/tools`, discoverable and loadable via ToolSearch, and a call to it
+ *   goes through the normal approval flow. This is what happens to
+ *   built-in tools not covered by an active `permissions.allow` registry
+ *   allowlist: their schemas stay out of the eager request (#9827) without
+ *   the tools silently disappearing from the session (#10075).
+ * - `disabled`: not registered at all (whole-tool deny rule, or excluded
+ *   by the legacy `coreTools` allowlist — unlisted, or any tool under an
+ *   explicitly empty `tools.core: []`, #10065).
+ */
+export type ToolRegistrationStatus = 'registered' | 'deferred' | 'disabled';
+
+/**
  * Numeric priority for each PermissionDecision.
  * Higher number = more restrictive. Used to combine decisions by taking
  * the most restrictive result across base rules + virtual shell operations.
@@ -97,9 +115,9 @@ export interface PermissionManagerConfig {
    *
    * When this list contains at least one valid rule, the registry-level
    * allowlist activates: built-in tools not covered by ANY in-force allow
-   * rule are excluded from registration, matching the documented migration
-   * semantic of the legacy `tools.core` whitelist ("unlisted tools are
-   * disabled at registry level", #9827).
+   * rule are demoted to deferred — registered and callable, but hidden
+   * from the eager model request so their schemas are not sent (#9827,
+   * #10075).
    */
   getRegistryAllowList?(): string[] | undefined;
 }
@@ -715,127 +733,181 @@ export class PermissionManager {
   }
 
   /**
-   * Determine whether a tool should be present in the tool registry.
+   * Determine whether a tool is callable in this session.
    *
-   * A tool is disabled (returns false) when:
-   * - the coreTools allowlist is explicitly empty (`tools.core: []`) — the
-   *   deliberate "no tools at all" configuration disables EVERY tool,
-   *   non-core tools included (#10065), or
-   * - a non-empty coreTools allowlist is active and the tool is a core
-   *   tool not in the list, or
-   * - the `permissions.allow` registry allowlist is active and the tool is
-   *   not covered by any allow or ask rule (see
-   *   `isPermissionsAllowListActive`; ask rules keep their tool registered
-   *   so "always require confirmation" never silently becomes "tool
-   *   unavailable"), or
-   * - a `deny` rule without a specifier (i.e. a whole-tool deny) matches.
+   * Returns `true` for `registered` AND `deferred` tools: a deferred tool
+   * is still registered — it is merely hidden from the eager model request
+   * and loadable via ToolSearch — so a call to it must flow through the
+   * normal approval evaluation, not a permission error (#10075). Only
+   * `disabled` tools return `false`: a whole-tool deny rule, or the legacy
+   * `coreTools` allowlist — a core tool missing from a non-empty list, or
+   * EVERY tool (non-core included) when the list is explicitly empty
+   * (`tools.core: []`, the deliberate "no tools at all" configuration,
+   * #10065).
    *
-   * Specifier-based deny rules such as `"Bash(rm -rf *)"` do NOT remove the
-   * tool from the registry – they only deny specific invocations at runtime.
-   * Likewise, specifier-based allow rules such as `"Bash(npm test)"` DO keep
-   * the tool in the registry — the allowlist is tool-level, not
+   * Specifier-based deny rules such as `"Bash(rm -rf *)"` never disable the
+   * tool — they only deny specific invocations at runtime. Likewise,
+   * specifier-based allow rules such as `"Bash(npm test)"` cover the tool
+   * for allowlist membership — the allowlist is tool-level, not
    * invocation-level.
    *
    * Non-core tools (MCP, Skill, Agent, etc.) skip a NON-EMPTY coreTools
    * allowlist check because they are dynamically discovered or essential
    * for system operation (an explicitly empty allowlist still disables
-   * them, see above), but they ARE subject to the `permissions.allow` registry
-   * allowlist (except MCP tools, `structured_output`, and the
-   * `computer_use__*` family, see below) — that is the documented migration
-   * semantic of the legacy `tools.core` whitelist ("unlisted tools are
-   * disabled at registry level") and the only way to keep e.g.
-   * `send_message` / `update_goal` schemas out of the model request
-   * (#9827).
+   * them, see {@link isToolDisabledByCoreToolsAllowList}), but they ARE
+   * subject to the `permissions.allow` registry allowlist (except the
+   * exempt families, see {@link getToolRegistrationStatus}) — that is the
+   * documented migration semantic of the legacy `tools.core` whitelist,
+   * and the only way to keep e.g. `send_message` / `update_goal` schemas
+   * out of the eager model request (#9827).
    */
   async isToolEnabled(toolName: string): Promise<boolean> {
+    return (await this.getToolRegistrationStatus(toolName)) !== 'disabled';
+  }
+
+  /**
+   * Whether a tool is excluded by the legacy `coreTools` allowlist
+   * (`--core-tools` / `tools.core`). Unlike the `permissions.allow`
+   * registry allowlist — which demotes uncovered tools to `deferred` —
+   * the legacy coreTools knob keeps its documented hard-disable semantic:
+   * an unlisted core tool is not registered at all.
+   *
+   * An explicitly EMPTY allowlist (`tools.core: []`) is the deliberate
+   * "no tools at all" configuration and excludes EVERY tool — non-core
+   * tools (MCP, Skill, Agent, synthetic system tools) included — so the
+   * documented empty allowlist yields an actual tool-free session instead
+   * of silently sending every schema (#10065). Only a NON-EMPTY allowlist
+   * keeps the historical non-core bypass. `undefined`/`null`/non-array
+   * coreTools mean no restriction (see `initialize()`).
+   */
+  isToolDisabledByCoreToolsAllowList(toolName: string): boolean {
+    if (this.coreToolsAllowList === null) {
+      return false;
+    }
+    if (this.isCoreToolsAllowListEmpty()) {
+      return true;
+    }
+    const canonicalName = resolveToolName(toolName);
+    return (
+      this.isCoreTool(canonicalName) &&
+      !this.coreToolsAllowList.has(canonicalName)
+    );
+  }
+
+  /**
+   * Built-in/system tools that are exempt from the `permissions.allow`
+   * registry allowlist — always `registered` (subject to deny rules). See
+   * {@link getToolRegistrationStatus} for the per-family rationale.
+   */
+  private isExemptFromPermissionsAllowList(canonicalName: string): boolean {
+    return (
+      canonicalName === ToolNames.STRUCTURED_OUTPUT ||
+      PermissionManager.PLAN_LIFECYCLE_TOOLS.has(canonicalName) ||
+      canonicalName === ToolNames.TASK_STOP ||
+      canonicalName === ToolNames.TOOL_SEARCH ||
+      canonicalName.startsWith('mcp__') ||
+      canonicalName.startsWith('computer_use__')
+    );
+  }
+
+  /**
+   * Determine how a tool participates in the registry for this session.
+   *
+   * While the `permissions.allow` registry allowlist is active (see
+   * `isPermissionsAllowListActive`), a built-in tool not covered by any
+   * allow or ask rule is `deferred`, NOT `disabled`: it stays registered —
+   * listed in `/tools`, discoverable and loadable via ToolSearch — but its
+   * schema is kept out of the eager model request, which is the #9827
+   * guarantee. Call-time approval for such a tool falls back to the normal
+   * permission evaluation (ask / approval-mode), the pre-allowlist
+   * behaviour, so existing allowlist users never lose capability silently
+   * (#10075). Ask rules cover a tool for membership so "always require
+   * confirmation" never becomes "not in the eager request" either.
+   *
+   * Exempt from the allowlist (always `registered` unless denied):
+   * - MCP tools (`mcp__*`): dynamically discovered and filtered via the
+   *   per-server `includeTools` / `excludeTools` and `tools.disabled`
+   *   knobs instead — same bypass the legacy coreTools allowlist had.
+   * - `structured_output`: the synthetic terminal contract for
+   *   `--json-schema` runs; removing it leaves such runs with no way to
+   *   finish (deny rules still apply to it).
+   * - Plan-mode lifecycle tools (`exit_plan_mode` / `enter_plan_mode` /
+   *   `ask_user_question`): the plan-mode system reminder tells the model
+   *   to call `exit_plan_mode` to present a plan, so their schemas must
+   *   reach the model for the sanctioned plan flow to complete (#9827).
+   * - `task_stop`: registered tools advertise it to the model —
+   *   `run_shell_command`'s schema says to use `task_stop` to stop a
+   *   background command (and not to use broad process-name kills), and
+   *   the background-promotion result instructs `task_stop({ task_id })`
+   *   verbatim. It is `shouldDefer=true` (task-stop.ts), the exact
+   *   property the computer_use__* exemption below cites: deferred
+   *   schemas never enter the eager model request, so gating it buys
+   *   nothing for the schema-shrink goal and only strips the sanctioned
+   *   stop flow while the tool that advertises it stays listed (#9827).
+   * - Computer Use tools (`computer_use__*`): the generated cua-driver
+   *   surface (35 tools, `computerUseEnabled` defaults to true) has no
+   *   alias entry, meta-category, or wildcard rule form — the wire names
+   *   churn on every cua-driver version bump (see tool-names.ts), so no
+   *   concise allow rule can keep the family listed. Every member is
+   *   `shouldDefer=true`, so the schemas never enter the eager model
+   *   request anyway: gating them buys nothing for the schema-shrink
+   *   goal and only strips capability, including ToolSearch
+   *   discoverability. The legacy `tools.core` gate never dropped them
+   *   either (non-core tools bypassed it) (#9827).
+   * - `tool_search`: the deferred-tool discovery surface itself. When
+   *   ToolSearch is absent from the registry, client.ts
+   *   (`resolveDeferredToolsForReminder`) eagerly force-reveals EVERY
+   *   registered deferred tool — all `mcp__*` tools and the deferred
+   *   `computer_use__*` family — into the eager model request, and
+   *   `preloadDeferredToolsWithinBudget` early-returns without it, so
+   *   gating tool_search under a narrow allowlist inverts the
+   *   schema-shrink goal into maximal schema bloat for exactly the
+   *   deferred families the exemptions above preserve for ToolSearch
+   *   discoverability. tool_search itself is never `shouldDefer`
+   *   (tool-search.ts), so its own schema cost is unchanged by keeping
+   *   it listed. Pre-#9827 it always bypassed the legacy coreTools gate
+   *   as a non-core tool (#9827). ToolSearch is precisely what makes the
+   *   deferred-not-disabled semantic usable (#10075).
+   *
+   * `disabled` is reserved for the hard gates: a whole-tool deny rule
+   * (deny always wins over allowlist membership), or the legacy
+   * `coreTools` allowlist, whose documented semantic is hard exclusion
+   * and which — unlike `permissions.allow` — predates the deferred
+   * demotion and is set deliberately (#9827). That gate runs BEFORE the
+   * allowlist exemptions so an explicitly empty `tools.core: []` disables
+   * even the exempt families (MCP, `structured_output`, ...) (#10065).
+   */
+  async getToolRegistrationStatus(
+    toolName: string,
+  ): Promise<ToolRegistrationStatus> {
     const canonicalName = resolveToolName(toolName);
 
-    // `permissions.allow` registry allowlist: when the session starts with
-    // at least one allow rule, any built-in tool not covered by an allow
-    // or ask rule is never registered, so its schema is not sent to the
-    // model. Exempt:
-    // - MCP tools (`mcp__*`): dynamically discovered and filtered via the
-    //   per-server `includeTools` / `excludeTools` and `tools.disabled`
-    //   knobs instead — same bypass the legacy coreTools allowlist had.
-    // - `structured_output`: the synthetic terminal contract for
-    //   `--json-schema` runs; removing it leaves such runs with no way to
-    //   finish (deny rules still apply to it).
-    // - Plan-mode lifecycle tools (`exit_plan_mode` / `enter_plan_mode` /
-    //   `ask_user_question`): the plan-mode system reminder tells the model
-    //   to call `exit_plan_mode` to present a plan, so their schemas must
-    //   reach the model for the sanctioned plan flow to complete (#9827).
-    // - `task_stop`: registered tools advertise it to the model —
-    //   `run_shell_command`'s schema says to use `task_stop` to stop a
-    //   background command (and not to use broad process-name kills), and
-    //   the background-promotion result instructs `task_stop({ task_id })`
-    //   verbatim. It is `shouldDefer=true` (task-stop.ts), the exact
-    //   property the computer_use__* exemption below cites: deferred
-    //   schemas never enter the eager model request, so gating it buys
-    //   nothing for the schema-shrink goal and only strips the sanctioned
-    //   stop flow while the tool that advertises it stays listed (#9827).
-    // - Computer Use tools (`computer_use__*`): the generated cua-driver
-    //   surface (35 tools, `computerUseEnabled` defaults to true) has no
-    //   alias entry, meta-category, or wildcard rule form — the wire names
-    //   churn on every cua-driver version bump (see tool-names.ts), so no
-    //   concise allow rule can keep the family listed. Every member is
-    //   `shouldDefer=true`, so the schemas never enter the eager model
-    //   request anyway: gating them buys nothing for the schema-shrink
-    //   goal and only strips capability, including ToolSearch
-    //   discoverability. The legacy `tools.core` gate never dropped them
-    //   either (non-core tools bypassed it) (#9827).
-    // - `tool_search`: the deferred-tool discovery surface itself. When
-    //   ToolSearch is absent from the registry, client.ts
-    //   (`resolveDeferredToolsForReminder`) eagerly force-reveals EVERY
-    //   registered deferred tool — all `mcp__*` tools and the deferred
-    //   `computer_use__*` family — into the eager model request, and
-    //   `preloadDeferredToolsWithinBudget` early-returns without it, so
-    //   gating tool_search under a narrow allowlist inverts the
-    //   schema-shrink goal into maximal schema bloat for exactly the
-    //   deferred families the exemptions above preserve for ToolSearch
-    //   discoverability. tool_search itself is never `shouldDefer`
-    //   (tool-search.ts), so its own schema cost is unchanged by keeping
-    //   it listed. Pre-#9827 it always bypassed the legacy coreTools gate
-    //   as a non-core tool (#9827).
+    // Deny rules win over everything: a whole-tool deny removes the tool
+    // from the session regardless of allowlist coverage.
+    // evaluate({ toolName }) without a command will only match rules that
+    // have no specifier, which is the correct registry-level check.
+    const decision = await this.evaluate({ toolName: canonicalName });
+    if (decision === 'deny') {
+      return 'disabled';
+    }
+
+    // The legacy coreTools allowlist keeps its hard-disable semantic — and
+    // an explicitly empty one disables every tool, exempt families
+    // included, so `tools.core: []` is an actual tool-free configuration
+    // rather than silently sending every schema (#10065).
+    if (this.isToolDisabledByCoreToolsAllowList(canonicalName)) {
+      return 'disabled';
+    }
+
     if (
       this.permissionsAllowListActive &&
-      canonicalName !== ToolNames.STRUCTURED_OUTPUT &&
-      !PermissionManager.PLAN_LIFECYCLE_TOOLS.has(canonicalName) &&
-      canonicalName !== ToolNames.TASK_STOP &&
-      canonicalName !== ToolNames.TOOL_SEARCH &&
-      !canonicalName.startsWith('mcp__') &&
-      !canonicalName.startsWith('computer_use__') &&
+      !this.isExemptFromPermissionsAllowList(canonicalName) &&
       !this.isCoveredByAllowOrAskRule(canonicalName)
     ) {
-      return false;
+      return 'deferred';
     }
 
-    // An explicitly empty coreTools allowlist means no tools. Apply this before
-    // the historical non-core exemption so `tools.core: []` is an actual
-    // tool-free configuration rather than silently sending every schema.
-    if (this.isCoreToolsAllowListEmpty()) {
-      return false;
-    }
-
-    // Non-core tools bypass a non-empty coreTools allowlist check.
-    if (!this.isCoreTool(canonicalName)) {
-      const decision = await this.evaluate({ toolName: canonicalName });
-      return decision !== 'deny';
-    }
-
-    // Core tools: if a coreTools allowlist is active, only explicitly listed
-    // tools are registered. This mirrors the legacy `tools.core` whitelist
-    // semantic: any tool NOT in the allowlist is excluded from the registry.
-    if (
-      this.coreToolsAllowList !== null &&
-      !this.coreToolsAllowList.has(canonicalName)
-    ) {
-      return false;
-    }
-
-    // evaluate({ toolName }) without a command will only match rules that have
-    // no specifier, which is the correct registry-level check.
-    const decision = await this.evaluate({ toolName: canonicalName });
-    return decision !== 'deny';
+    return 'registered';
   }
 
   /**
@@ -910,12 +982,12 @@ export class PermissionManager {
    * never ACTIVATE the allowlist (#9827).
    *
    * Caveat: extending membership flips this runtime predicate only. A
-   * mid-session grant can never RESTORE a tool that the startup allowlist
-   * skipped at REGISTRATION — the registry is built once in
-   * `Config.initialize` and `ensureTool` returns undefined for factories
-   * that were never stored, so such a call still fails TOOL_NOT_REGISTERED
-   * until the rule is added to settings `permissions.allow` and the
-   * session restarts (#9827).
+   * mid-session grant can never PROMOTE a tool the startup allowlist left
+   * uncovered into the eager model request — the registry is built once in
+   * `Config.initialize` and such a tool stays permission-deferred (still
+   * registered and callable, loadable via ToolSearch, but its schema not
+   * sent eagerly) until the rule is added to settings `permissions.allow`
+   * and the session restarts (#9827, #10075).
    *
    * Public so the scheduler can tell an allowlist miss (tool genuinely
    * uncovered) apart from a rejection by a different gate — e.g. the
@@ -1247,9 +1319,9 @@ export class PermissionManager {
    *
    * Under an active `permissions.allow` registry allowlist the grant
    * auto-approves matching calls and extends allowlist MEMBERSHIP, but it
-   * cannot REGISTER a tool the startup allowlist skipped — registry
-   * composition is restart-scoped. The first such grant logs a caveat
-   * pointing at the restart path (#9827).
+   * cannot promote a permission-deferred tool into the eager model request
+   * — registry composition is restart-scoped. The first such grant logs a
+   * caveat pointing at the restart path (#9827, #10075).
    *
    * @param raw - The raw rule string, e.g. "Bash(git status)".
    */
@@ -1269,9 +1341,10 @@ export class PermissionManager {
         this.sessionGrantAllowlistCaveatLogged = true;
         debugLogger.warn(
           'Session allow rule granted while the permissions.allow registry allowlist is active: ' +
-            'the grant auto-approves matching calls, but it cannot register a tool the startup ' +
-            'allowlist skipped at registration — an unavailable tool stays unavailable until the ' +
-            'rule is added to settings permissions.allow and the session restarts (#9827).',
+            'the grant auto-approves matching calls and extends allowlist membership, but it cannot ' +
+            'promote a deferred tool into the eager model request — a tool the startup allowlist left ' +
+            'uncovered stays deferred (loadable via ToolSearch, schema not sent eagerly) until the ' +
+            'rule is added to settings permissions.allow and the session restarts (#9827, #10075).',
         );
       }
       // AUTO mode invariant: while dangerous allow rules are stripped,
@@ -1294,6 +1367,13 @@ export class PermissionManager {
         debugLogger.info(
           `Stashed newly added dangerous allow rule while in AUTO mode: ${rule.raw}`,
         );
+        return;
+      }
+      // Deduplicate on raw string — mirrors addPersistentRule and the
+      // dangerous-stash branch above. Reload cycles (e.g. /unskill +
+      // re-invoke) re-run applySkillAllowedTools; without this guard the
+      // skill's allowedTools list would accumulate on every cycle.
+      if (this.sessionRules.allow.some((r) => r.raw === rule.raw)) {
         return;
       }
       this.sessionRules.allow.push(rule);

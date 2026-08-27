@@ -3791,6 +3791,48 @@ describe('loadCliConfig with includeDirectories', () => {
     );
   });
 
+  it('ignores ambient roots and LSP for a host-managed provisional workspace', async () => {
+    const mockCwd = path.resolve(path.sep, 'home', 'user', 'project');
+    process.argv = [
+      'node',
+      'script.js',
+      '--experimental-lsp',
+      '--include-directories',
+      path.resolve(path.sep, 'cli', 'path1'),
+    ];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      context: {
+        includeDirectories: [path.resolve(path.sep, 'settings', 'path1')],
+        loadFromIncludeDirectories: true,
+      },
+    };
+
+    await loadCliConfig(
+      settings,
+      argv,
+      mockCwd,
+      [],
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      false,
+      { provisionalWorkspace: true },
+    );
+
+    expect(mockConfigConstructorParams).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        targetDir: mockCwd,
+        provisionalWorkspace: true,
+        includeDirectories: [],
+        loadMemoryFromIncludeDirectories: false,
+        lsp: { enabled: false },
+      }),
+    );
+    expect(NativeLspService).not.toHaveBeenCalled();
+  });
+
   it('should ignore implicit startup context inputs in bare mode', async () => {
     const mockCwd = path.resolve(path.sep, 'home', 'user', 'project');
     const cliPath = path.resolve(path.sep, 'cli', 'path1');

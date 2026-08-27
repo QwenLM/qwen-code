@@ -367,10 +367,12 @@ interface WebShellSidebarProps {
     sessionId: string,
     displayName: string,
   ) => void;
+  onSessionsDeleted?: (sessionIds: string[]) => void;
   onError: (error: unknown, fallback: string) => void;
   theme: WebShellTheme;
   onThemeChange: (theme: WebShellTheme) => void;
   mobileOpen?: boolean;
+  onMobileClose?: () => void;
   /**
    * Phase 4: workspace cwd picked for the next new session (undefined =
    * primary). Only meaningful on multi-workspace daemons.
@@ -829,10 +831,12 @@ export function WebShellSidebar({
   onLoadSession,
   onSelectCurrentSession,
   onSessionRenameConfirmed,
+  onSessionsDeleted,
   onError,
   theme,
   onThemeChange,
   mobileOpen,
+  onMobileClose,
   selectedWorkspaceCwd,
   onSelectWorkspace,
   onOpenGitDiff,
@@ -1832,6 +1836,8 @@ export function WebShellSidebar({
   const footerTight = !collapsed && sidebarWidth < SIDEBAR_FOOTER_TIGHT_WIDTH;
   const sidebarStyle = {
     '--web-shell-sidebar-width': `${sidebarWidth}px`,
+    '--web-shell-sidebar-min-width': `${SIDEBAR_MIN_WIDTH}px`,
+    '--web-shell-sidebar-max-width': `${getSidebarMaxWidth()}px`,
   } as CSSProperties;
   const newSessionDisabled = creatingSession;
 
@@ -2793,6 +2799,7 @@ export function WebShellSidebar({
     setSessionBusy(sessionId, true, deleteCandidate.workspaceCwd);
     removeSession(sessionId)
       .then(() => {
+        onSessionsDeleted?.([sessionId]);
         bumpWorkspaceReload();
       })
       .catch((err: unknown) => onError(err, t('sidebar.deleteFailed')))
@@ -2812,6 +2819,7 @@ export function WebShellSidebar({
     deleteSession,
     getIdentityForSession,
     onError,
+    onSessionsDeleted,
     primaryWorkspaceCwd,
     resolveSessionWorkspaceScope,
     sessionCatalogController,
@@ -3676,7 +3684,7 @@ export function WebShellSidebar({
 
   const handleResizePointerDown = useCallback(
     (event: ReactPointerEvent<HTMLDivElement>) => {
-      if (collapsed) return;
+      if (collapsed || mobileOpen) return;
       event.preventDefault();
       resizeTeardownRef.current?.(true);
       setIsResizing(true);
@@ -3748,7 +3756,7 @@ export function WebShellSidebar({
         once: true,
       });
     },
-    [collapsed, onCollapsedChange, sidebarWidth],
+    [collapsed, mobileOpen, onCollapsedChange, sidebarWidth],
   );
 
   const deleteCandidateLabel = deleteCandidate
@@ -5471,7 +5479,7 @@ export function WebShellSidebar({
           </SidebarSessionSurface>
         </div>
 
-        {footer !== false && (
+        {(footer !== false || mobileOpen) && (
           <div
             className={cx(
               styles.footer,
@@ -5575,19 +5583,27 @@ export function WebShellSidebar({
                   <ActivityIcon size={16} strokeWidth={1.2} />
                 </button>
               )}
-              {!mobileOpen && footerItems.has('collapse') && (
+              {(mobileOpen || footerItems.has('collapse')) && (
                 <button
                   className={styles.collapseButton}
                   type="button"
                   title={
-                    collapsed ? t('sidebar.expand') : t('sidebar.collapse')
+                    mobileOpen || !collapsed
+                      ? t('sidebar.collapse')
+                      : t('sidebar.expand')
                   }
                   aria-label={
-                    collapsed ? t('sidebar.expand') : t('sidebar.collapse')
+                    mobileOpen || !collapsed
+                      ? t('sidebar.collapse')
+                      : t('sidebar.expand')
                   }
-                  onClick={() => onCollapsedChange(!collapsed)}
+                  onClick={() =>
+                    mobileOpen
+                      ? onMobileClose?.()
+                      : onCollapsedChange(!collapsed)
+                  }
                 >
-                  {collapsed ? (
+                  {collapsed && !mobileOpen ? (
                     <PanelLeftOpenIcon size={16} strokeWidth={1.2} />
                   ) : (
                     <PanelLeftCloseIcon size={16} strokeWidth={1.2} />
