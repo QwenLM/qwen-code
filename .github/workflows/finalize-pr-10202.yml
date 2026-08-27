@@ -1,0 +1,47 @@
+name: Finalize PR 10202 regression validation
+on:
+  push:
+    branches: [fix/10199-mcp-permission-collisions]
+    paths: [.github/workflows/finalize-pr-10202.yml]
+permissions:
+  contents: write
+jobs:
+  finalize:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/10199-mcp-permission-collisions
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Fix fail-closed fallback regression test
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('packages/core/src/core/permissionFlow.test.ts')
+          s = p.read_text()
+          old = '''    await expect(\n      evaluatePermissionFlow(\n        mockConfig({\n          getPermissionManager: vi.fn().mockReturnValue(mockPm),\n          getToolRegistry: vi\n            .fn()\n            .mockReturnValue({}) as unknown as Config['getToolRegistry'],\n        }),\n        invocation,\n        'mcp__srv__foo_bar_0cnn7di',\n        {},\n      ),\n    ).resolves.toBeDefined();\n\n    expect(mockPm.hasRelevantRules).toHaveBeenCalledWith(\n      expect.objectContaining({ toolAliases: [legacyName, rawName] }),\n    );'''
+          new = '''    const result = await evaluatePermissionFlow(\n      mockConfig({\n        getPermissionManager: vi.fn().mockReturnValue(mockPm),\n        getToolRegistry: vi\n          .fn()\n          .mockReturnValue({}) as unknown as Config['getToolRegistry'],\n      }),\n      invocation,\n      'mcp__srv__foo_bar_0cnn7di',\n      {},\n    );\n\n    expect(result.pmCtx.toolAliases).toEqual([rawName]);\n    expect(result.pmCtx.toolAliases).not.toContain(legacyName);'''
+          if old not in s:
+              raise SystemExit('expected fallback test block not found')
+          p.write_text(s.replace(old, new, 1))
+          PY
+      - name: Install and validate focused suites
+        run: |
+          npm ci
+          npx vitest run \
+            packages/core/src/core/permissionFlow.test.ts \
+            packages/core/src/core/permissionFlow.mcp-restrictive-collision.test.ts \
+            packages/core/src/permissions/mcp-permission-collision.test.ts \
+            packages/core/src/permissions/permission-manager.test.ts \
+            packages/core/src/agents/runtime/agent-core.test.ts
+          npx tsc --noEmit -p packages/core/tsconfig.json
+      - name: Commit tested change
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add packages/core/src/core/permissionFlow.test.ts
+          git diff --cached --quiet && exit 0
+          git commit -m "test(permissions): pin fail-closed MCP alias fallback"
+          git push origin HEAD:fix/10199-mcp-permission-collisions
