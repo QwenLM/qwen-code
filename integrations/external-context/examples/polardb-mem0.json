@@ -3,7 +3,7 @@
   "timeoutMs": 5000,
   "provider": {
     "type": "mem0",
-    "preset": "aliyun-polardb-mysql-2026-08",
+    "preset": "polardb-mysql-2026-08",
     "endpoint": {
       "origin": "https://<your-polardb-mem0-endpoint>",
       "basePath": ""

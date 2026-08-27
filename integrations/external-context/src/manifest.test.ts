@@ -245,7 +245,7 @@ describe('extension manifest', () => {
       timeoutMs: 5000,
       provider: {
         type: 'mem0',
-        preset: 'aliyun-polardb-mysql-2026-08',
+        preset: 'polardb-mysql-2026-08',
         endpoint: {
           origin: 'https://<your-polardb-mem0-endpoint>',
           basePath: '',
@@ -276,7 +276,7 @@ describe('extension manifest', () => {
       });
       expect(loaded.provider).toMatchObject({
         type: 'mem0',
-        preset: 'aliyun-polardb-mysql-2026-08',
+        preset: 'polardb-mysql-2026-08',
         scope: { userId: 'example-user', agentId: 'qwen-code' },
       });
       expect(() => createProvider(loaded.provider)).not.toThrow();

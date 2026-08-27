@@ -82,7 +82,7 @@ describe('loadConfig', () => {
   describe('versioned Mem0 provider', () => {
     const provider = {
       type: 'mem0',
-      preset: 'aliyun-polardb-mysql-2026-08',
+      preset: 'polardb-mysql-2026-08',
       endpoint: {
         origin: 'https://mem0.example.com:8443',
         basePath: '',
@@ -104,7 +104,7 @@ describe('loadConfig', () => {
         version: 1,
         provider: {
           type: 'mem0',
-          preset: 'aliyun-polardb-mysql-2026-08',
+          preset: 'polardb-mysql-2026-08',
           endpoint: {
             origin: 'https://mem0.example.com:8443',
             basePath: '',
@@ -177,9 +177,7 @@ describe('loadConfig', () => {
           QWEN_EXTERNAL_CONTEXT_CONFIG: fixture.config,
           MEM0_API_KEY: 'secret-value',
         }),
-      ).rejects.toThrow(
-        'preset "aliyun-polardb-mysql-2026-08" requires "userId"',
-      );
+      ).rejects.toThrow('preset "polardb-mysql-2026-08" requires "userId"');
     });
 
     it('rejects a scope carrying a key the preset does not use', async () => {
@@ -197,9 +195,7 @@ describe('loadConfig', () => {
           QWEN_EXTERNAL_CONTEXT_CONFIG: fixture.config,
           MEM0_API_KEY: 'secret-value',
         }),
-      ).rejects.toThrow(
-        'preset "aliyun-polardb-mysql-2026-08" does not use "appId"',
-      );
+      ).rejects.toThrow('preset "polardb-mysql-2026-08" does not use "appId"');
     });
 
     it('requires only appId for the Platform V3 preset', async () => {

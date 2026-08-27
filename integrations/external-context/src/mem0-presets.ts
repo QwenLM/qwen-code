@@ -36,6 +36,17 @@ interface Mem0ScopeRule {
 }
 
 export interface Mem0Preset {
+  /**
+   * Who controls the build behind the endpoint.
+   *
+   * `managed` is one vendor-operated service with a published contract, so
+   * there is no version skew for the integration to hedge against. Everything
+   * else is deployed by the operator or packaged by a cloud, where the build
+   * is unknown and a preset is a claim rather than a fact. Only the latter can
+   * benefit from the compatibility hedges above, and only the latter should be
+   * probed for them.
+   */
+  deployment: 'managed' | 'operator-deployed';
   authentication: Mem0Authentication;
   scope: {
     userId: Mem0ScopeRule;
@@ -69,6 +80,7 @@ const omittedScope: Mem0ScopeRule = {
 
 export const MEM0_PRESETS: Readonly<Record<Mem0PresetId, Mem0Preset>> = {
   'mem0-platform-v3': {
+    deployment: 'managed',
     authentication: 'authorization-token',
     scope: {
       userId: omittedScope,
@@ -88,6 +100,7 @@ export const MEM0_PRESETS: Readonly<Record<Mem0PresetId, Mem0Preset>> = {
     },
   },
   'mem0-server-rest-2026-08': {
+    deployment: 'operator-deployed',
     authentication: 'x-api-key',
     scope: {
       userId: { required: true, search: 'body-and-filters', write: 'body' },
@@ -106,7 +119,8 @@ export const MEM0_PRESETS: Readonly<Record<Mem0PresetId, Mem0Preset>> = {
       idField: 'id',
     },
   },
-  'aliyun-polardb-mysql-2026-08': {
+  'polardb-mysql-2026-08': {
+    deployment: 'operator-deployed',
     authentication: 'authorization-token',
     scope: {
       userId: { required: true, search: 'filters', write: 'body' },

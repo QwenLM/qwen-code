@@ -756,7 +756,7 @@ function mem0Config(repositoryRoot: string): ExternalContextConfigV2 {
     autoRecall: { repositoryRoot, timeoutMs: 1500 },
     provider: {
       type: 'mem0',
-      preset: 'aliyun-polardb-mysql-2026-08',
+      preset: 'polardb-mysql-2026-08',
       endpoint: { origin: 'https://mem0.example.com', basePath: '' },
       credentialEnv: 'MEM0_API_KEY',
       credential: 'mem0-secret-value',

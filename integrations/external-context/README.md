@@ -12,8 +12,8 @@ three managed deployment variants:
 - **Auto-recall:** version 2 configuration and an administrator-installed
   `UserPromptSubmit` Hook, with no external-context MCP server.
 
-The built-in adapters support Mem0 Platform V3 search, the Aliyun PolarDB
-Mem0 management API, and a small Generic HTTP Search V1 contract for existing
+The built-in adapters support Mem0 Platform V3 search, the PolarDB Mem0
+management API, and a small Generic HTTP Search V1 contract for existing
 knowledge or RAG services. Only the Mem0 providers have an optional write path.
 There is no generic ingestion protocol, personal memory,
 trusted user identity, per-document ACL, or tamper-resistant audit.
@@ -388,7 +388,7 @@ remain administrator-owned:
 ```json
 {
   "type": "mem0",
-  "preset": "aliyun-polardb-mysql-2026-08",
+  "preset": "polardb-mysql-2026-08",
   "endpoint": {
     "origin": "https://memory.example.com",
     "basePath": ""
@@ -409,7 +409,7 @@ The built-in presets are:
   (`server/` in `mem0ai/mem0`) `/search` and `/memories`, `X-API-Key`, fixed
   `userId`, and optional `agentId`. "Server", not "OSS", because that
   abbreviation names an object storage service in some clouds.
-- `aliyun-polardb-mysql-2026-08`: PolarDB `/v2/memories/search` and
+- `polardb-mysql-2026-08`: PolarDB `/v2/memories/search` and
   `/v1/memories`, `Authorization: Token`, fixed `userId`, and optional
   `agentId`.
 
@@ -439,7 +439,7 @@ answer is not visible from the configuration side. Do not guess it - probe it:
 
 ```bash
 MEM0_API_KEY=<credential> node dist/preset-probe-main.js \
-  --preset aliyun-polardb-mysql-2026-08 \
+  --preset polardb-mysql-2026-08 \
   --origin https://memory.example.com \
   --user-id <a scope whose corpus holds at least one memory>
 ```

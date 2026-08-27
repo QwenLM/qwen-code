@@ -42,7 +42,7 @@ The first built-in presets are:
 
 - `mem0-platform-v3`
 - `mem0-server-rest-2026-08`
-- `aliyun-polardb-mysql-2026-08`
+- `polardb-mysql-2026-08`
 
 ## Where preset immutability stops
 
@@ -83,7 +83,7 @@ require less.
   "timeoutMs": 5000,
   "provider": {
     "type": "mem0",
-    "preset": "aliyun-polardb-mysql-2026-08",
+    "preset": "polardb-mysql-2026-08",
     "endpoint": {
       "origin": "https://memory.example.com",
       "basePath": ""
@@ -183,7 +183,7 @@ extraction instead, which the write-result content check catches.
 Bearer-authenticated deployments need a separately verified preset rather than
 a per-instance authentication override.
 
-### Aliyun PolarDB MySQL 2026-08
+### PolarDB MySQL 2026-08
 
 - Search: `POST /v2/memories/search`
 - Authentication: `Authorization: Token`
@@ -195,6 +195,13 @@ a per-instance authentication override.
 An `event_id` alone is never treated as proof of storage. If a later PolarDB
 contract documents asynchronous event polling, that behavior requires a new
 preset and write design rather than changing this preset in place.
+
+The identifier names the contract, not a cloud. PolarDB Mem0 is offered by
+more than one provider, and a preset scoped to one vendor would read as
+inapplicable to an operator running the same contract elsewhere. The mapping
+was verified against an Aliyun deployment; an operator on another provider
+should confirm it with the preset probe before relying on it, which is the
+same evidence this repository asks for when a preset is added.
 
 ## Relationship to provider Extensions
 

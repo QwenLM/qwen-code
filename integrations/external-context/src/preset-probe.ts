@@ -57,7 +57,8 @@ export type PresetProbeVerdict =
   | 'dual-placement-safe'
   | 'dual-placement-unsafe'
   | 'dual-placement-divergent'
-  | 'already-dual-placement';
+  | 'already-dual-placement'
+  | 'managed-contract';
 
 export interface PresetProbeReport {
   preset: Mem0PresetId;
@@ -155,17 +156,28 @@ export async function runPresetProbe(
         ? 'rejected'
         : 'inconclusive';
 
-  const alreadyDual = scopeFields.some(
-    ([key]) => preset.scope[key].search === 'body-and-filters',
-  );
-  if (alreadyDual) {
+  // Comparing placements is only meaningful where the build is unknown. On a
+  // vendor-operated service there is one published contract, and "the other
+  // shape also works" would be an invitation to deviate from it for no gain.
+  const skip =
+    preset.deployment === 'managed'
+      ? 'managed-contract'
+      : scopeFields.some(
+            ([key]) => preset.scope[key].search === 'body-and-filters',
+          )
+        ? 'already-dual-placement'
+        : undefined;
+  if (skip !== undefined) {
     return {
       preset: options.preset,
       searchUrl: searchUrl.toString(),
       ...schema,
       baseline,
       unknownFieldPolicy,
-      verdict: 'already-dual-placement',
+      // A failed baseline is the answer whichever comparison is skipped:
+      // "the baseline above is what matters" must not stand in for a preset
+      // that does not work against this endpoint at all.
+      verdict: baseline.ok ? skip : 'preset-mismatch',
     };
   }
 
@@ -360,6 +372,11 @@ const VERDICT_TEXT: Readonly<Record<PresetProbeVerdict, readonly string[]>> = {
     'DIVERGENT: dual placement returned a different result set than the preset',
     'sends today. Do not change the placement; investigate how this deployment',
     'combines the two positions before trusting either.',
+  ],
+  'managed-contract': [
+    'This preset targets a vendor-operated service with one published',
+    'contract, so there is no deployment build to hedge against. The baseline',
+    'above is the result that matters.',
   ],
   'already-dual-placement': [
     'This preset already sends identity in both positions, so there is nothing',

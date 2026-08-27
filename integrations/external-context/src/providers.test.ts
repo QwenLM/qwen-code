@@ -601,7 +601,7 @@ describe('Mem0CompatibleAdapter', () => {
       createMemoryWriter(
         mem0CompatibleConfig(
           'https://mem0.example.com',
-          'aliyun-polardb-mysql-2026-08',
+          'polardb-mysql-2026-08',
           { userId: 'fixed-user' },
         ),
       ),
@@ -611,7 +611,7 @@ describe('Mem0CompatibleAdapter', () => {
   it('validates endpoint authority, basePath, and preset scope', () => {
     const config = mem0CompatibleConfig(
       'http://192.0.2.1:8080',
-      'aliyun-polardb-mysql-2026-08',
+      'polardb-mysql-2026-08',
       { userId: 'fixed-user' },
     );
     expect(() => new Mem0CompatibleAdapter(config)).toThrow(
@@ -664,7 +664,7 @@ describe('Mem0CompatibleAdapter', () => {
           ...config,
           scope: { appId: 'unused' },
         }),
-    ).toThrow('preset "aliyun-polardb-mysql-2026-08" requires "userId"');
+    ).toThrow('preset "polardb-mysql-2026-08" requires "userId"');
   });
 
   // Every rejection rule, one violation each. The suite previously exercised
@@ -700,7 +700,7 @@ describe('Mem0CompatibleAdapter', () => {
         new Mem0CompatibleAdapter(
           mem0CompatibleConfig(
             'https://mem0.example.com',
-            'aliyun-polardb-mysql-2026-08',
+            'polardb-mysql-2026-08',
             { userId: 'fixed-user' },
             basePath,
           ),
@@ -718,7 +718,7 @@ describe('Mem0CompatibleAdapter', () => {
     await new Mem0CompatibleAdapter(
       mem0CompatibleConfig(
         origin,
-        'aliyun-polardb-mysql-2026-08',
+        'polardb-mysql-2026-08',
         { userId: 'fixed-user' },
         '/proxy/',
       ),
@@ -747,7 +747,7 @@ describe('Mem0CompatibleAdapter', () => {
       new Mem0CompatibleAdapter(
         mem0CompatibleConfig(
           origin,
-          'aliyun-polardb-mysql-2026-08',
+          'polardb-mysql-2026-08',
           { userId: 'fixed-user' },
           '/proxy',
         ),
@@ -797,7 +797,7 @@ describe('Mem0CompatibleAdapter', () => {
       expectedContent: 'server memory',
     },
     {
-      preset: 'aliyun-polardb-mysql-2026-08' as const,
+      preset: 'polardb-mysql-2026-08' as const,
       scope: { userId: 'fixed-user', agentId: 'fixed-agent' },
       path: '/proxy/v2/memories/search',
       authorization: 'Token project-key',
@@ -863,7 +863,7 @@ describe('Mem0CompatibleAdapter', () => {
       apiKey: 'project-key',
     },
     {
-      preset: 'aliyun-polardb-mysql-2026-08' as const,
+      preset: 'polardb-mysql-2026-08' as const,
       path: '/v1/memories',
       scope: { userId: 'fixed-user', agentId: 'fixed-agent' },
       authorization: 'Token project-key',
@@ -935,7 +935,7 @@ describe('Mem0CompatibleAdapter', () => {
 
     await expect(
       new Mem0CompatibleAdapter(
-        mem0CompatibleConfig(origin, 'aliyun-polardb-mysql-2026-08', {
+        mem0CompatibleConfig(origin, 'polardb-mysql-2026-08', {
           userId: 'fixed-user',
         }),
       ).remember({
@@ -1022,7 +1022,7 @@ describe('Mem0CompatibleAdapter', () => {
 
     await expect(
       new Mem0CompatibleAdapter(
-        mem0CompatibleConfig(origin, 'aliyun-polardb-mysql-2026-08', {
+        mem0CompatibleConfig(origin, 'polardb-mysql-2026-08', {
           userId: 'fixed-user',
         }),
       ).remember({ content, signal: AbortSignal.timeout(1000) }),
@@ -1041,7 +1041,7 @@ describe('Mem0CompatibleAdapter', () => {
 
     await expect(
       new Mem0CompatibleAdapter(
-        mem0CompatibleConfig(origin, 'aliyun-polardb-mysql-2026-08', {
+        mem0CompatibleConfig(origin, 'polardb-mysql-2026-08', {
           userId: 'fixed-user',
         }),
       ).remember({
@@ -1065,7 +1065,7 @@ describe('Mem0CompatibleAdapter', () => {
 
     await expect(
       new Mem0CompatibleAdapter(
-        mem0CompatibleConfig(origin, 'aliyun-polardb-mysql-2026-08', {
+        mem0CompatibleConfig(origin, 'polardb-mysql-2026-08', {
           userId: 'fixed-user',
         }),
       ).remember({

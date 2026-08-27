@@ -33,6 +33,8 @@ interface Deployment {
   strict?: boolean;
   /** Reject a search whose identity never reached the root. */
   rootIdentityOnly?: boolean;
+  /** Scope key this deployment reads identity from. */
+  identityField?: 'user_id' | 'app_id';
   memories?: ReadonlyArray<{ id: string; memory: string }>;
   openApi?: boolean;
 }
@@ -86,9 +88,10 @@ async function startDeployment(deployment: Deployment): Promise<string> {
         });
       }
       const filters = (body['filters'] ?? {}) as Record<string, unknown>;
+      const field = deployment.identityField ?? 'user_id';
       const identity = deployment.rootIdentityOnly
-        ? body['user_id']
-        : (body['user_id'] ?? filters['user_id']);
+        ? body[field]
+        : (body[field] ?? filters[field]);
       if (typeof identity !== 'string') {
         return send(500, {
           detail:
@@ -113,7 +116,7 @@ async function readBody(request: IncomingMessage): Promise<string> {
 
 const probe = (origin: string) =>
   runPresetProbe({
-    preset: 'aliyun-polardb-mysql-2026-08',
+    preset: 'polardb-mysql-2026-08',
     origin,
     allowInsecureHttp: true,
     scope: { userId: 'fixed-user' },
@@ -193,10 +196,41 @@ describe('runPresetProbe', () => {
     expect(report.verdict).toBe('already-dual-placement');
   });
 
+  // Recommending a deviation from a published, vendor-operated contract would
+  // be advice with a cost and no benefit, so the comparison is not run at all.
+  it('does not compare placements for a vendor-operated contract', async () => {
+    const report = await runPresetProbe({
+      preset: 'mem0-platform-v3',
+      origin: await startDeployment({ identityField: 'app_id' }),
+      allowInsecureHttp: true,
+      scope: { appId: 'fixed-app' },
+      credential: 'probe-credential',
+      signal: AbortSignal.timeout(5000),
+    });
+
+    expect(report.placements).toBeUndefined();
+    expect(report.verdict).toBe('managed-contract');
+  });
+
+  // A skipped comparison must not paper over a preset that does not work.
+  it('still reports a mismatch when a skipped comparison hides a broken baseline', async () => {
+    const report = await runPresetProbe({
+      preset: 'mem0-platform-v3',
+      origin: await startDeployment({ rootIdentityOnly: true }),
+      allowInsecureHttp: true,
+      scope: { appId: 'fixed-app' },
+      credential: 'probe-credential',
+      signal: AbortSignal.timeout(5000),
+    });
+
+    expect(report.baseline.ok).toBe(false);
+    expect(report.verdict).toBe('preset-mismatch');
+  });
+
   it('rejects a scope the preset does not accept before sending anything', async () => {
     await expect(
       runPresetProbe({
-        preset: 'aliyun-polardb-mysql-2026-08',
+        preset: 'polardb-mysql-2026-08',
         origin: 'https://mem0.example.com',
         scope: { appId: 'unused' },
         credential: 'probe-credential',
@@ -208,7 +242,7 @@ describe('runPresetProbe', () => {
   it('applies the endpoint URL policy', async () => {
     await expect(
       runPresetProbe({
-        preset: 'aliyun-polardb-mysql-2026-08',
+        preset: 'polardb-mysql-2026-08',
         origin: 'http://192.0.2.1:8080',
         scope: { userId: 'fixed-user' },
         credential: 'probe-credential',
@@ -245,7 +279,7 @@ describe('parsePresetProbeArgs', () => {
       parsePresetProbeArgs(
         [
           '--preset',
-          'aliyun-polardb-mysql-2026-08',
+          'polardb-mysql-2026-08',
           '--origin',
           'https://mem0.example.com',
           '--base-path',
@@ -257,7 +291,7 @@ describe('parsePresetProbeArgs', () => {
         { MEM0_API_KEY: 'secret-value' },
       ),
     ).toEqual({
-      preset: 'aliyun-polardb-mysql-2026-08',
+      preset: 'polardb-mysql-2026-08',
       origin: 'https://mem0.example.com',
       basePath: '/proxy',
       allowInsecureHttp: true,
