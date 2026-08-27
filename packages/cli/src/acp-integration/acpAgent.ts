@@ -6833,14 +6833,9 @@ class QwenAgent implements Agent {
       for (const extension of config.getExtensions()) {
         if (extension.isActive) continue;
         for (const skill of extension.skills ?? []) {
-          const extensionName = extension.displayName ?? extension.name;
+          const extensionName = extension.name;
           const key = `extension:${extensionName}:${skill.name}`;
-          if (
-            skillsByKey.has(`extension:${extension.name}:${skill.name}`) ||
-            skillsByKey.has(key)
-          ) {
-            continue;
-          }
+          if (skillsByKey.has(key)) continue;
           skillsByKey.set(
             key,
             mapSkillConfigToStatus(
@@ -6848,6 +6843,7 @@ class QwenAgent implements Agent {
                 ...skill,
                 level: 'extension',
                 extensionName,
+                extensionDisplayName: extension.displayName,
               },
               disablements,
               { disabled: true },
