@@ -1022,7 +1022,9 @@ fi
 # the merge (including the modify/delete shape with no blob on main's side
 # at all). So freight crossing the merge neither charges the round nor
 # shields it, and a weakening introduced while resolving a merge conflict
-# IS counted.
+# IS counted. Freight attribution applies only when the merge's second
+# parent is main-derived -- a side-branch merge has no main side, and its
+# first-parent diff is the round's own work.
 # A file that did not exist at the pre-round ref is not pre-existing
 # coverage and is not measured, whichever commit touched it. Per-file
 # pathspecs are `:(literal)` -- a branch-controlled filename may carry glob
@@ -1033,7 +1035,18 @@ fi
 #     being one that contains `expect(`, `expect.poll(`, `assert(`, or
 #     `assert.` (the repo's idioms; a poll assertion spells its call
 #     `expect.poll(`). An assertion moved within a file nets zero; one moved
-#     OUT of a file nets negative and is answered by naming its new home;
+#     OUT of a file nets negative and is answered by naming its new home.
+#     Removed lines count RAW and added lines count after comment stripping
+#     (both TS comment forms): a commented-out copy of a removed assertion
+#     must not cancel it, while a stripped removal would zero an assertion
+#     that follows an in-string `//` (a URL) and let the deletion through.
+#     When a file's edits move no line signal at all, the assertion density
+#     of the comment-stripped blobs is compared instead -- an assertion
+#     wrapped into a multi-line block comment is anchored away from a -U0
+#     diff entirely, and only the blob comparison sees it. The measurement
+#     diff is --text: a branch-controlled .gitattributes `-diff`/`binary`
+#     rule would otherwise collapse the hunk into a binary banner and zero
+#     every counter;
 #   - a skip/todo marker was added NET: `it`/`test`/`describe` followed by
 #     `.skip`, `.todo`, `.fails`, or `.failing` -- optionally chained with
 #     `.each`/`.for` -- or `xit(`/`xdescribe(`. Markers removed in the same
@@ -1049,7 +1062,13 @@ fi
 WEAKEN_PATHSPEC=(':(glob)**/*.test.*' ':(glob)**/*.spec.*' ':(exclude,glob)**/__snapshots__/**')
 WEAKEN_ASSERT_RE='expect\(|expect\.poll\(|assert\(|assert\.'
 WEAKEN_SKIP_RE='(^|[^A-Za-z0-9_$.])(it|test|describe)[[:space:]]*\.[[:space:]]*(skip|todo|fails|failing)([[:space:]]*\.[[:space:]]*(each|for))?[[:space:]]*[(<]|(^|[^A-Za-z0-9_$.])x(it|describe)([[:space:]]*\.[[:space:]]*each)?[[:space:]]*\('
-WEAKENED=''
+# Measured weakenings travel as parallel indexed arrays, never a
+# newline/tab-joined string: filenames are branch-controlled bytes, and a
+# name carrying a newline or tab splits a delimited record into fragments
+# an ack loop then matches separately -- acknowledging the FRAGMENTS while
+# the actually-weakened file carries no evidence.
+WEAKENED_PATHS=()
+WEAKENED_SIGNALS=()
 WEAKENED_CHARGED=()
 WEAKEN_MEASURED='true'
 # Parallel indexed arrays, not bash-4 associative arrays: this section
@@ -1085,18 +1104,41 @@ weaken_member() {
   done
   return 1
 }
-# Drop pure comment lines and cut //-to-EOL, so a commented-out copy of a
-# removed assertion neither shields an addition nor masks a removal; applied
-# symmetrically to both sides of a diff before counting.
+# Drop comment text so a commented-out copy of a removed assertion neither
+# shields an addition nor masks a removal. Both TS comment forms: //-to-EOL
+# and /* ... */ spans, the block state carried across lines. String literals
+# are not parsed -- the raw del-side count at the call site is what keeps a
+# removed line with an in-string // measured. Applied to the ADDED side
+# only.
 weaken_strip_comments() {
-  sed -e 's|//.*$||' -e '/^[[:space:]]*$/d' -e '/^[[:space:]]*\*/d'
+  awk '
+    BEGIN { inc = 0 }
+    {
+      line = $0; out = ""
+      while (length(line) > 0) {
+        if (inc) {
+          p = index(line, "*/")
+          if (p == 0) { line = ""; break }
+          line = substr(line, p + 2); inc = 0
+          continue
+        }
+        sl = index(line, "//"); bl = index(line, "/*")
+        if (sl == 0 && bl == 0) { out = out line; break }
+        if (sl > 0 && (bl == 0 || sl < bl)) {
+          out = out substr(line, 1, sl - 1); break
+        }
+        out = out substr(line, 1, bl - 1)
+        line = substr(line, bl + 2); inc = 1
+      }
+      if (out !~ /^[[:space:]]*$/) print out
+    }' | sed -e '/^[[:space:]]*\*/d'
 }
 # Fold one commit's diff of one test file into the per-file accumulators.
-# When ${3} is set the commit is a merge: the same file at the merge's
-# second parent decides line authorship, keeping only what the merge
-# resolution itself authored.
+# When ${3} is set the commit is a merge whose second parent is derived
+# from origin/main: the same file at that parent decides line authorship,
+# keeping only what the merge resolution itself authored.
 weaken_count_commit_file() {
-  local c="${1}" f="${2}" is_merge="${3}" p2='' have_p2='' mb='' base_blob='' l diff_body add_lines del_lines weaken_slot
+  local c="${1}" f="${2}" is_merge="${3}" p2='' have_p2='' mb='' base_blob='' l diff_body add_lines del_lines weaken_slot weaken_has_edits='' weaken_old='' weaken_new='' weaken_old_n weaken_new_n
   if [[ -n "${is_merge}" ]]; then
     # An empty blob is not a missing one: key the freight filter on git
     # show's exit status, so a modify/delete resolution (main deleted the
@@ -1108,7 +1150,11 @@ weaken_count_commit_file() {
       p2=''
     fi
   fi
-  if ! diff_body="$(git diff -U0 --no-renames "${c}^" "${c}" -- ":(literal)${f}" 2> /dev/null)"; then
+  # --text: a branch-controlled .gitattributes rule (`<file> -diff` or
+  # `binary`) otherwise collapses this hunk into the "Binary files differ"
+  # banner -- no @@ content, every counter zeroed while the file still
+  # enumerates as changed.
+  if ! diff_body="$(git diff --text -U0 --no-renames "${c}^" "${c}" -- ":(literal)${f}" 2> /dev/null)"; then
     return 1
   fi
   # Everything from the first `@@` on is hunk content, so the ---/+++ file
@@ -1120,6 +1166,7 @@ weaken_count_commit_file() {
   diff_body="$(sed -n '/^@@/,$p' <<< "${diff_body}")"
   add_lines="$(sed -n 's/^+//p' <<< "${diff_body}")"
   del_lines="$(sed -n 's/^-//p' <<< "${diff_body}")"
+  [[ -n "${add_lines}" || -n "${del_lines}" ]] && weaken_has_edits=1
   if [[ -n "${is_merge}" ]]; then
     add_lines="$(while IFS= read -r l; do
       if [[ -n "${l}" ]] && ! grep -qxF -- "${l}" <<< "${p2}"; then
@@ -1147,13 +1194,36 @@ weaken_count_commit_file() {
       printf '%s\n' "${l}"
     done <<< "${del_lines}")"
   fi
+  # Removed lines count RAW: the stripper cuts at the first //, including
+  # one inside a string literal, so stripping the del-side would never
+  # count a removed assertion that follows an in-string // -- the escape
+  # this gate exists to close. Added lines count stripped, so a commented
+  # copy of a removed assertion cannot cancel it. The mirror direction (an
+  # added assertion after an in-string // earns no addition credit) is the
+  # fail-closed one: one recorded entry answers it.
   add_lines="$(weaken_strip_comments <<< "${add_lines}")"
-  del_lines="$(weaken_strip_comments <<< "${del_lines}")"
   local d a sa sd
   d="$(grep -cE "${WEAKEN_ASSERT_RE}" <<< "${del_lines}" || true)"
   a="$(grep -cE "${WEAKEN_ASSERT_RE}" <<< "${add_lines}" || true)"
   sa="$(grep -cE "${WEAKEN_SKIP_RE}" <<< "${add_lines}" || true)"
   sd="$(grep -cE "${WEAKEN_SKIP_RE}" <<< "${del_lines}" || true)"
+  if [[ -z "${is_merge}" && -n "${weaken_has_edits}" ]] && (( d + a + sa + sd == 0 )); then
+    # -U0 anchors a byte-identical line as implicit context, so an
+    # assertion wrapped into a MULTI-line /* ... */ comment never appears
+    # in the diff at all -- the only +/- lines are the bare /* and */, and
+    # every counter above stayed zero. Compare assertion density on the
+    # comment-stripped blobs instead: symmetric stripping nets every
+    # untouched comment line to zero, and the raw line counts already had
+    # their say whenever any of them moved. Merge commits are exempt --
+    # their blob delta carries main-side freight the filter above owns.
+    weaken_old="$(git show "${c}^:${f}" 2> /dev/null)" || weaken_old=''
+    weaken_new="$(git show "${c}:${f}" 2> /dev/null)" || weaken_new=''
+    weaken_old_n="$(weaken_strip_comments <<< "${weaken_old}" | grep -cE "${WEAKEN_ASSERT_RE}" || true)"
+    weaken_new_n="$(weaken_strip_comments <<< "${weaken_new}" | grep -cE "${WEAKEN_ASSERT_RE}" || true)"
+    if (( weaken_old_n > weaken_new_n )); then
+      d=$(( weaken_old_n - weaken_new_n ))
+    fi
+  fi
   if ! weaken_slot="$(weaken_file_slot "${f}")"; then
     weaken_slot="${#WEAKEN_FILE_LIST[@]}"
     WEAKEN_FILE_LIST[weaken_slot]="${f}"
@@ -1174,8 +1244,14 @@ while IFS= read -r c; do
     WEAKEN_MEASURED='false'
     break
   fi
+  # Freight attribution only when the second parent is main-derived
+  # (--is-ancestor, not equality: origin/main may have advanced past the
+  # merge point). A side-branch merge has no main side: its first-parent
+  # diff belongs to the round, and treating the weakened side branch as
+  # "main's side" would invert the attribution and zero every signal.
   is_merge=''
-  if git rev-parse -q --verify "${c}^2" > /dev/null 2>&1; then
+  if git rev-parse -q --verify "${c}^2" > /dev/null 2>&1 &&
+    git merge-base --is-ancestor "${c}^2" origin/main 2> /dev/null; then
     is_merge=1
   fi
   while IFS= read -r -d '' f; do
@@ -1208,10 +1284,12 @@ if [[ "${WEAKEN_MEASURED}" == 'true' ]]; then
     w_skip_add="${WEAKEN_SKIP_ADD_ACC[weaken_idx]}"
     w_skip_del="${WEAKEN_SKIP_DEL_ACC[weaken_idx]}"
     if (( w_del > w_add )); then
-      WEAKENED+="${f}"$'\t'"net $(( w_del - w_add )) assertion line(s) removed"$'\n'
+      WEAKENED_PATHS+=("${f}")
+      WEAKENED_SIGNALS+=("net $(( w_del - w_add )) assertion line(s) removed")
       WEAKENED_CHARGED+=("${f}")
     elif (( w_skip_add > w_skip_del )); then
-      WEAKENED+="${f}"$'\t'"$(( w_skip_add - w_skip_del )) skip/todo marker(s) added"$'\n'
+      WEAKENED_PATHS+=("${f}")
+      WEAKENED_SIGNALS+=("$(( w_skip_add - w_skip_del )) skip/todo marker(s) added")
       WEAKENED_CHARGED+=("${f}")
     fi
   done
@@ -1238,43 +1316,51 @@ while IFS= read -r -d '' f; do
   if weaken_member "${f}" "${WEAKENED_CHARGED[@]}"; then
     continue
   fi
-  WEAKENED+="${f}"$'\t'"test file deleted"$'\n'
+  WEAKENED_PATHS+=("${f}")
+  WEAKENED_SIGNALS+=('test file deleted')
 done < <(git diff --name-only -z --no-renames --diff-filter=D "${ROUND_RANGE}" \
   -- "${WEAKEN_PATHSPEC[@]}" 2> /dev/null)
 if [[ "${WEAKEN_MEASURED}" != 'true' ]]; then
   echo '🧪 test-weakening measurement UNAVAILABLE this round (diff producer failed) — check skipped' | tee -a "${GATE_LOG}"
-elif [[ -n "${WEAKENED}" ]]; then
+elif (( ${#WEAKENED_PATHS[@]} > 0 )); then
   # The acknowledgement is the agent's own machine-readable claim, held to
   # the same shape rules as deferred-findings.json: an array, a string path,
   # and a reason with enough substance to be read as evidence. A malformed or
   # unreadable file acknowledges nothing rather than everything.
-  WEAKEN_ACKED=''
+  # Acknowledged paths travel base64-encoded: newline-safe through the
+  # line-based read below, and comparable against the measured set without
+  # ever decoding branch-controlled bytes through shell parsing.
+  WEAKEN_ACKED=()
   if [[ -s "${WORKDIR}/test-weakening.json" ]]; then
-    WEAKEN_ACKED="$(jq -r '
+    weaken_ack_b64="$(jq -j '
       if type == "array" then
         .[]
         | select((.path? | type) == "string")
         | select((.path | length) > 0)
         | select((.reason? | type) == "string")
         | select((.reason | gsub("\\s+"; " ") | ltrimstr(" ") | rtrimstr(" ") | length) >= 40)
-        | .path
-      else empty end' "${WORKDIR}/test-weakening.json" 2> /dev/null)" || WEAKEN_ACKED=''
+        | (.path | @base64) + "\n"
+      else empty end' "${WORKDIR}/test-weakening.json" 2> /dev/null)" || weaken_ack_b64=''
+    while IFS= read -r weaken_entry; do
+      [[ -n "${weaken_entry}" ]] && WEAKEN_ACKED+=("${weaken_entry}")
+    done <<< "${weaken_ack_b64}"
   fi
   WEAKEN_MISSING=''
   WEAKEN_OK=''
-  WEAKEN_OK_PATHS=''
-  while IFS=$'\t' read -r f signal; do
-    [[ -n "${f}" ]] || continue
+  WEAKEN_OK_B64=''
+  for (( weaken_idx = 0; weaken_idx < ${#WEAKENED_PATHS[@]}; weaken_idx++ )); do
+    f="${WEAKENED_PATHS[weaken_idx]}"
+    signal="${WEAKENED_SIGNALS[weaken_idx]}"
     # Filenames are branch-controlled bytes rendered inside gate-authored
     # (trusted-voice) documents, so they go through the same conservative
     # safe-character set the shrink advisory above uses.
-    if grep -qxF -- "${f}" <<< "${WEAKEN_ACKED}"; then
+    if weaken_member "$(printf '%s' "${f}" | base64 | tr -d '\n')" "${WEAKEN_ACKED[@]}"; then
       WEAKEN_OK+="- \`${f//[^A-Za-z0-9._\/ -]/?}\` — ${signal}"$'\n'
-      WEAKEN_OK_PATHS+="${f}"$'\n'
+      WEAKEN_OK_B64+="$(printf '%s' "${f}" | base64 | tr -d '\n')"$'\n'
     else
       WEAKEN_MISSING+="- \`${f//[^A-Za-z0-9._\/ -]/?}\` — ${signal}"$'\n'
     fi
-  done <<< "${WEAKENED}"
+  done
   if [[ -n "${WEAKEN_MISSING}" ]]; then
     {
       echo 'This round deleted or weakened pre-existing tests without recording the required evidence:'
@@ -1296,8 +1382,8 @@ elif [[ -n "${WEAKENED}" ]]; then
     # Rendered from the MEASURED set, one line per file: the entries are
     # agent-authored and otherwise unbounded, so an ack file stuffed with
     # thousands of junk rows would decide the size of a posted PR comment.
-    jq -r --arg ok "${WEAKEN_OK_PATHS}" '
-      ($ok | split("\n") | map(select(length > 0))) as $ok
+    jq -r --arg ok "${WEAKEN_OK_B64}" '
+      ($ok | split("\n") | map(select(length > 0) | @base64d)) as $ok
       | if type == "array" then
           map(select((.path? | type) == "string")
             | select(.path | IN($ok[]))

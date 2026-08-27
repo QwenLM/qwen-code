@@ -4058,8 +4058,9 @@ keeps failed and in-flight address runs visible as feedback:
 a charge verdict must never see them (a failed own round is
 feedback, not a regression the pushed code authored, and an
 in-flight own check would hold the verdict at pending across
-the trigger family whose suite attaches to the PR head). What remains uncovered is a
-flake: a genuinely flaky check failing on the bot's push
+the trigger family whose suite attaches to the PR
+head). What remains uncovered is a flake: a
+genuinely flaky check failing on the bot's push
 reads as a regression. The consequence is bounded on purpose
 — one regression only declines to RESET a counter that needs
 five consecutive non-progress rounds to trip, and the

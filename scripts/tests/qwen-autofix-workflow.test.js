@@ -21898,6 +21898,127 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
         'git add pkg/a.test.ts && git commit -qm resolution',
       ],
     },
+    // The weakening is committed on a SIDE branch and merged back with
+    // --no-ff: the merge's second parent is NOT origin/main, so no freight
+    // reading may apply — the first-parent diff is the round's own work.
+    'side-branch-merge': {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      round: [
+        'git checkout -qb side-x',
+        ...fixtureWrite({
+          'pkg/a.test.ts': WT_BASE.filter((l) => !l.includes('expect(two())')),
+        }),
+        'git add pkg/a.test.ts && git commit -qm weaken-on-side',
+        'git checkout -q feature',
+        'git merge -q --no-ff side-x -m merge-side',
+      ],
+    },
+    // A single-line /* ... */ copy of the removed assertion: the added
+    // line still carries the token until the block span is stripped.
+    'block-comment-line': {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      round: [
+        ...fixtureWrite({
+          'pkg/a.test.ts': [
+            WT_IMPORT,
+            "it('a', () => {",
+            '  expect(one()).toBe(1);',
+            '  /* expect(two()).toBe(2); */',
+            '});',
+          ],
+        }),
+        AGENT_COMMIT,
+      ],
+    },
+    // The multi-line wrap: under -U0 the wrapped assertion is
+    // byte-identical, git anchors it as implicit context, and it never
+    // appears in the diff at all — only the blob-density probe sees it.
+    'block-comment-wrap': {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      round: [
+        ...fixtureWrite({
+          'pkg/a.test.ts': [
+            WT_IMPORT,
+            "it('a', () => {",
+            '  expect(one()).toBe(1);',
+            '  /*',
+            '  expect(two()).toBe(2);',
+            '  */',
+            '});',
+          ],
+        }),
+        AGENT_COMMIT,
+      ],
+    },
+    // A URL string ahead of the assertion on the SAME line: the stripper
+    // cuts at the in-string //, so the removal must count on the RAW side.
+    'url-line': {
+      files: {
+        'pkg/a.test.ts': [
+          WT_IMPORT,
+          "it('a', () => {",
+          '  expect(one()).toBe(1);',
+          "  const u = 'https://example.com'; expect(fetchData(u)).toBe(2);",
+          '});',
+        ],
+      },
+      round: [
+        ...fixtureWrite({
+          'pkg/a.test.ts': [
+            WT_IMPORT,
+            "it('a', () => {",
+            '  expect(one()).toBe(1);',
+            '});',
+          ],
+        }),
+        AGENT_COMMIT,
+      ],
+    },
+    // The round plants a .gitattributes -diff rule on the very file it
+    // weakens. The class is granted: the PR footprint itself carries a
+    // .gitattributes (any PR touching one licenses the class by design).
+    'attr-binary': {
+      files: {
+        'pkg/a.test.ts': WT_BASE,
+        '.gitattributes': ['# fixture measurement attributes'],
+      },
+      round: [
+        ...fixtureWrite({
+          '.gitattributes': [
+            '# fixture measurement attributes',
+            'pkg/a.test.ts -diff',
+          ],
+          'pkg/a.test.ts': WT_BASE.filter((l) => !l.includes('expect(two())')),
+        }),
+        AGENT_COMMIT,
+      ],
+    },
+    // Newline-named file (git-legal, branch-controlled): the record
+    // framing and the ack matching must survive the trailing LF byte.
+    'newline-name': {
+      files: { 'pkg/a.test.ts\n': WT_BASE },
+      round: [
+        ...fixtureWrite({
+          'pkg/a.test.ts\n': WT_BASE.filter(
+            (l) => !l.includes('expect(two())'),
+          ),
+        }),
+        AGENT_COMMIT,
+      ],
+    },
+    // Tab INSIDE the filename: the old tab-separated record split this at
+    // the ack loop; membership must compare the whole raw path.
+    'tab-name': {
+      files: { 'pkg/a\tb.test.ts': WT_BASE },
+      round: [
+        ...fixtureWrite({
+          'pkg/a\tb.test.ts': WT_BASE.filter(
+            (l) => !l.includes('expect(two())'),
+          ),
+        }),
+        AGENT_COMMIT,
+      ],
+    },
   };
   const runGate = ({
     failAt = [],
@@ -23480,6 +23601,119 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
     expect(r.rejection).toContain('pkg/a.test.ts');
     expect(r.rejection).toContain('assertion line(s) removed');
   });
+
+  it('charges a weakening folded into a side-branch merge', () => {
+    // The merge's second parent is the weakened side branch, not
+    // origin/main: reading it as "main's side" inverts the freight
+    // attribution and zeroes every signal. No freight filter may apply.
+    const r = runGate({ weaken: 'side-branch-merge' });
+    expect(r.status).toBe(1);
+    expect(r.rejection).toContain('pkg/a.test.ts');
+    expect(r.rejection).toContain('assertion line(s) removed');
+  });
+
+  it('rejects a single-line block-comment copy of a removed assertion', () => {
+    // The added /* ... */ line still carries the token; only stripping
+    // the block span from the added side stops it cancelling the removal.
+    const r = runGate({ weaken: 'block-comment-line' });
+    expect(r.status).toBe(1);
+    expect(r.rejection).toContain('pkg/a.test.ts');
+    expect(r.rejection).toContain('assertion line(s) removed');
+  });
+
+  it('rejects a multi-line block-comment wrap of a removed assertion', () => {
+    // Under -U0 the wrapped assertion is byte-identical and git anchors
+    // it as implicit context: it never appears in the diff, the +/- lines
+    // are the bare /* and */, and no line signal fires. The
+    // comment-stripped blob comparison is the only arm that sees it.
+    const r = runGate({ weaken: 'block-comment-wrap' });
+    expect(r.status).toBe(1);
+    expect(r.rejection).toContain('pkg/a.test.ts');
+    expect(r.rejection).toContain('assertion line(s) removed');
+  });
+
+  it('counts a removed assertion that follows an in-string //', () => {
+    // URL strings are routine in this repo's tests; the stripper cuts at
+    // the in-string //, so removals count on the raw del-side or the
+    // deletion is never charged.
+    const r = runGate({ weaken: 'url-line' });
+    expect(r.status).toBe(1);
+    expect(r.rejection).toContain('pkg/a.test.ts');
+    expect(r.rejection).toContain('assertion line(s) removed');
+  });
+
+  it('rejects a weakening hidden behind a planted -diff attribute', () => {
+    // A branch-controlled .gitattributes rule collapses the measurement
+    // diff into a binary banner; --text keeps the hunks readable instead
+    // of zeroing every counter on a file still enumerated as changed.
+    const r = runGate({ weaken: 'attr-binary' });
+    expect(r.status).toBe(1);
+    expect(r.rejection).toContain('pkg/a.test.ts');
+    expect(r.rejection).toContain('assertion line(s) removed');
+  });
+
+  it('rejects a fragment ack for a newline-named test file', () => {
+    // The trailing LF splits a newline-framed record into fragments; an
+    // ack for the fragment is not an ack for the file. The rendered
+    // rejection names the safe-charset form.
+    const r = runGate({
+      weaken: 'newline-name',
+      workdirFiles: {
+        'test-weakening.json': JSON.stringify([
+          { path: 'pkg/a.test.ts', reason: WEAKEN_REASON },
+        ]),
+      },
+    });
+    expect(r.status).toBe(1);
+    expect(r.rejection).toContain('pkg/a.test.ts?');
+  });
+
+  it.skipIf(!hasBashMapfile)(
+    'accepts an honest ack for a newline-named test file',
+    () => {
+      const r = runGate({
+        weaken: 'newline-name',
+        workdirFiles: {
+          'test-weakening.json': JSON.stringify([
+            { path: 'pkg/a.test.ts\n', reason: WEAKEN_REASON },
+          ]),
+        },
+      });
+      expect(r.status).toBe(0);
+      expect(r.advisories).toContain('pkg/a.test.ts?');
+    },
+  );
+
+  it('rejects a prefix-fragment ack for a tab-named test file', () => {
+    // A tab inside the name splits a tab-separated record at the ack
+    // loop; the prefix fragment is not the weakened file.
+    const r = runGate({
+      weaken: 'tab-name',
+      workdirFiles: {
+        'test-weakening.json': JSON.stringify([
+          { path: 'pkg/a', reason: WEAKEN_REASON },
+        ]),
+      },
+    });
+    expect(r.status).toBe(1);
+    expect(r.rejection).toContain('pkg/a?b.test.ts');
+  });
+
+  it.skipIf(!hasBashMapfile)(
+    'accepts an honest ack for a tab-named test file',
+    () => {
+      const r = runGate({
+        weaken: 'tab-name',
+        workdirFiles: {
+          'test-weakening.json': JSON.stringify([
+            { path: 'pkg/a\tb.test.ts', reason: WEAKEN_REASON },
+          ]),
+        },
+      });
+      expect(r.status).toBe(0);
+      expect(r.advisories).toContain('pkg/a?b.test.ts');
+    },
+  );
 });
 
 describe('review-address: regression accounting (af-151)', () => {
