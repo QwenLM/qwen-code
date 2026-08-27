@@ -9553,19 +9553,22 @@ exit 1
     expect(workflow).toContain(
       '.[3] | map(select((.conclusion // .state // "")',
     );
-    // Five sites: the NEWEST computation, the live-watermark revalidation,
-    // the "Failed checks" rendering, the "Still-red checks" rendering, and
-    // the regression classifier (af-148) share the address-check carve-out
-    // (the autofix workflow's OTHER lanes failing is the loop's own
-    // business, not actionable feedback — and not a red the loop may charge
-    // to its own push). The conflict-handoff wake filter deliberately does
-    // NOT share it: under a park no address round can legitimately run, so
-    // it excludes ALL Qwen Autofix checks — the conflict round's own failed
-    // check must not unpark its own park.
+    // Four sites: the NEWEST computation, the live-watermark revalidation,
+    // the "Failed checks" rendering, and the "Still-red checks" rendering
+    // share the address-check carve-out (the autofix workflow's OTHER
+    // lanes failing is the loop's own business, not actionable feedback).
+    // The regression classifier (af-149) deliberately does NOT share it:
+    // the charge verdict excludes ALL own-lane checks via the canonical
+    // five-name filter — a failed or in-flight own run is feedback or
+    // observer noise, not a red the loop may charge to its own push. The
+    // conflict-handoff wake filter also does NOT share it: under a park
+    // no address round can legitimately run, so it excludes ALL Qwen
+    // Autofix checks — the conflict round's own failed check must not
+    // unpark its own park.
     expect(
       prepareBranchAndFeedbackStep.match(/startswith\("review-address"\)/g) ??
         [],
-    ).toHaveLength(5);
+    ).toHaveLength(4);
     expect(prepareBranchAndFeedbackStep).toContain(
       'gsub("[^A-Za-z0-9 _./()-]"; "") | .[0:80]',
     );
@@ -20261,6 +20264,24 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
     '  expect(four()).toBe(4);',
     '});',
   ];
+  // Branch-side drift ADDING an assertion next to a line main REWRITES:
+  // the two edits conflict, so the merge resolution itself decides which
+  // bytes survive the merge commit.
+  const WT_BRANCH_SIDE = [
+    WT_IMPORT,
+    "it('a', () => {",
+    '  expect(one()).toBe(1);',
+    '  expect(two()).toBe(2);',
+    '  expect(branch()).toBe(9);',
+    '});',
+  ];
+  const WT_MAIN_SIDE = [
+    WT_IMPORT,
+    "it('a', () => {",
+    '  expect(one()).toBe(1);',
+    '  expect(two()).toBe(22);',
+    '});',
+  ];
   // Shell commands writing FILES (path → lines) into the fixture repo.
   const fixtureWrite = (files) =>
     Object.entries(files).flatMap(([path, lines]) => [
@@ -20514,6 +20535,84 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
           'pkg/b.test.ts': WT_BASE.filter((l) => !l.includes('expect(two())')),
         }),
         AGENT_COMMIT,
+      ],
+    },
+    // The round replaces an assertion with its commented-out copy: raw
+    // counts are equal on both sides until the comment is stripped.
+    'comment-out': {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      round: [
+        ...fixtureWrite({
+          'pkg/a.test.ts': [
+            WT_IMPORT,
+            "it('a', () => {",
+            '  expect(one()).toBe(1);',
+            '  // expect(two()).toBe(2);',
+            '});',
+          ],
+        }),
+        AGENT_COMMIT,
+      ],
+    },
+    // A pre-existing test deleted in one round commit and re-added WEAKENED
+    // in a later one: the net range shows M, and neither commit alone is M.
+    'delete-readd': {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      round: [
+        'git rm -q pkg/a.test.ts && git commit -qm delete-test',
+        ...fixtureWrite({
+          'pkg/a.test.ts': [
+            WT_IMPORT,
+            "it('a', () => {",
+            '  expect(one()).toBe(1);',
+            '});',
+          ],
+        }),
+        'git add pkg/a.test.ts && git commit -qm readd-weakened',
+      ],
+    },
+    // A pre-existing test replaced by a symlink is git status T, not D:
+    // the path still matches the pathspec and exists at the tip.
+    symlink: {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      round: [
+        'rm pkg/a.test.ts && ln -s /dev/null pkg/a.test.ts && git add pkg/a.test.ts && git commit -qm symlink-swap',
+      ],
+    },
+    // A test file carrying no assertion lines: the per-commit arm measures
+    // zero signal, so the net-range D arm must still name the deletion.
+    'delete-empty': {
+      files: { 'pkg/a.test.ts': [WT_IMPORT, "it('a', () => {});"] },
+      round: ['git rm -q pkg/a.test.ts', AGENT_COMMIT],
+    },
+    // Branch adds an assertion, main rewrites the adjacent line, and the
+    // merge CONFLICTS: the resolution adopts main's bytes, dropping the
+    // branch-authored assertion inside the merge commit itself.
+    'merge-conflict-drop': {
+      onMain: { 'pkg/a.test.ts': WT_BASE },
+      files: { 'pkg/a.test.ts': WT_BRANCH_SIDE },
+      mainMoves: [
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_MAIN_SIDE }),
+        'git add pkg/a.test.ts && git commit -qm main-rewrites',
+      ],
+      round: [
+        'git merge -q --no-edit origin/main || true',
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_MAIN_SIDE }),
+        'git add pkg/a.test.ts && git commit -qm resolution',
+      ],
+    },
+    // Main deletes the file the branch modified: a modify/delete conflict
+    // whose resolution KEEPS the file, weakened — main's side has no blob.
+    'merge-modify-delete': {
+      onMain: { 'pkg/a.test.ts': WT_BASE },
+      files: { 'pkg/a.test.ts': WT_BRANCH_SIDE },
+      mainMoves: ['git rm -q pkg/a.test.ts', 'git commit -qm main-deletes'],
+      round: [
+        'git merge -q --no-edit origin/main || true',
+        ...fixtureWrite({
+          'pkg/a.test.ts': WT_BASE.filter((l) => !l.includes('expect(two())')),
+        }),
+        'git add pkg/a.test.ts && git commit -qm resolution',
       ],
     },
   };
@@ -21103,6 +21202,20 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
         new RegExp(`it\\.skipIf\\(!hasBashMapfile\\)\\(\\s*'${title}'`),
       );
     }
+  });
+
+  it('keeps the first bash-4 boundary at the bite mapfile', () => {
+    // The macOS lane ships bash 3.2: every runGate spawn crossing a
+    // bash >= 4 construct before the mapfile the host probe guards dies
+    // before any verdict, and no probe gates flows that stop short of the
+    // mapfile. declare -A is bash 4.0 — nothing ahead of the boundary may
+    // use it.
+    // Anchor on a mapfile COMMAND at column 1, not on prose mentioning it.
+    const firstMapfile = reviewVerificationRunner.search(/^mapfile\b/m);
+    expect(firstMapfile).toBeGreaterThan(-1);
+    expect(reviewVerificationRunner.slice(0, firstMapfile)).not.toContain(
+      'declare -A',
+    );
   });
 
   it.skipIf(!hasBashMapfile)('keeps the green path intact', () => {
@@ -21780,6 +21893,19 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
     const r = runGate({ weaken: 'delete' });
     expect(r.status).toBe(1);
     expect(r.rejection).toContain('pkg/a.test.ts');
+    // A delete enumerates as D in the per-commit arm and is charged there
+    // as removed assertion lines; the net-range D arm skips the file
+    // rather than adding a duplicate entry for the same path.
+    expect(r.rejection).toContain('assertion line(s) removed');
+    expect(r.rejection).not.toContain('test file deleted');
+  });
+
+  it('rejects deleting a pre-existing test that carries no assertion lines', () => {
+    // Zero per-commit signal: the net-range D arm is the only one that
+    // sees this deletion, so its 'test file deleted' entry must survive.
+    const r = runGate({ weaken: 'delete-empty' });
+    expect(r.status).toBe(1);
+    expect(r.rejection).toContain('pkg/a.test.ts');
     expect(r.rejection).toContain('test file deleted');
   });
 
@@ -22023,6 +22149,54 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
       expect(r.advisories).not.toContain('weakened or removed pre-existing');
     },
   );
+
+  it('rejects commenting out an assertion instead of deleting it', () => {
+    // The commented-out copy contains the same token; only symmetric
+    // comment stripping stops it from cancelling the removal.
+    const r = runGate({ weaken: 'comment-out' });
+    expect(r.status).toBe(1);
+    expect(r.rejection).toContain('pkg/a.test.ts');
+    expect(r.rejection).toContain('assertion line(s) removed');
+  });
+
+  it('rejects deleting a test in one round commit and re-adding it weakened in another', () => {
+    // The net range shows M; neither commit alone is M. Only a per-commit
+    // scan that also enumerates D sees the removed assertions.
+    const r = runGate({ weaken: 'delete-readd' });
+    expect(r.status).toBe(1);
+    expect(r.rejection).toContain('pkg/a.test.ts');
+    expect(r.rejection).toContain('assertion line(s) removed');
+  });
+
+  it('rejects replacing a pre-existing test with a symlink', () => {
+    // A typechange (status T) keeps matching the pathspec and exists at
+    // the tip; vitest collects through the link, so nothing else signals
+    // the original assertion set is gone.
+    const r = runGate({ weaken: 'symlink' });
+    expect(r.status).toBe(1);
+    expect(r.rejection).toContain('pkg/a.test.ts');
+    expect(r.rejection).toContain('assertion line(s) removed');
+  });
+
+  it('charges a weakening folded into a merge-conflict resolution', () => {
+    // The branch-authored assertion the resolution dropped never existed
+    // on main's side: freight it is not, and the merge commit itself must
+    // be charged for it.
+    const r = runGate({ weaken: 'merge-conflict-drop' });
+    expect(r.status).toBe(1);
+    expect(r.rejection).toContain('pkg/a.test.ts');
+    expect(r.rejection).toContain('assertion line(s) removed');
+  });
+
+  it('charges assertion lines a modify/delete resolution drops', () => {
+    // Main deleted the file; the resolution kept it, weakened. With no
+    // blob on main's side the removed branch-authored lines have no
+    // freight shield.
+    const r = runGate({ weaken: 'merge-modify-delete' });
+    expect(r.status).toBe(1);
+    expect(r.rejection).toContain('pkg/a.test.ts');
+    expect(r.rejection).toContain('assertion line(s) removed');
+  });
 });
 
 describe('review-address: regression accounting (af-149)', () => {
@@ -22131,7 +22305,13 @@ describe('review-address: regression accounting (af-149)', () => {
       }).state,
     ).toBe('green');
     // The loop's OWN lanes going red is its business, not the PR's — the
-    // same carve-out the feedback renderer applies, minus review-address.
+    // charge verdict excludes every own-lane workflow (the canonical
+    // five-name filter), with no review-address carve-out: a failed prior
+    // address round is feedback for the next round, not a regression the
+    // pushed code introduced, and an in-flight own check is observer
+    // noise on the triggers whose suite attaches to the PR head. The
+    // carve-out survives at the FEEDBACK sites (N_FAILED_CHECKS /
+    // N_RED_NOW).
     expect(
       run({
         checks: [
@@ -22152,9 +22332,49 @@ describe('review-address: regression accounting (af-149)', () => {
             conclusion: 'FAILURE',
             workflowName: 'Qwen Autofix',
           },
+          ...GREEN,
         ],
       }).state,
-    ).toBe('red');
+    ).toBe('green');
+    expect(
+      run({
+        checks: [
+          {
+            name: 'review-address (1)',
+            conclusion: 'FAILURE',
+            workflowName: 'Qwen Autofix',
+          },
+        ],
+      }).state,
+    ).toBe('none');
+    // A red AUXILIARY lane of the fleet is the loop's own business too.
+    expect(
+      run({
+        checks: [
+          {
+            name: 'review-pr',
+            status: 'COMPLETED',
+            conclusion: 'FAILURE',
+            workflowName: '🧐 Qwen Pull Request Review',
+          },
+          ...GREEN,
+        ],
+      }).state,
+    ).toBe('green');
+    // The round's own in-flight check must not hold the verdict pending.
+    expect(
+      run({
+        checks: [
+          {
+            name: 'review-address (1)',
+            status: 'IN_PROGRESS',
+            conclusion: null,
+            workflowName: 'Qwen Autofix',
+          },
+          ...GREEN,
+        ],
+      }).state,
+    ).toBe('green');
   });
 
   it('charges the prior round only when all four facts hold', () => {
@@ -22181,6 +22401,37 @@ describe('review-address: regression accounting (af-149)', () => {
     ).toBe('');
     // Head is green now — nothing to charge.
     expect(run({ checks: GREEN, comments: pushMarker({}) }).regressed).toBe('');
+    // A failed own address run beside a green suite is feedback, not a
+    // regression: the charge path never bills the prior round for it.
+    expect(
+      run({
+        checks: [
+          {
+            name: 'review-address (1)',
+            status: 'COMPLETED',
+            conclusion: 'FAILURE',
+            workflowName: 'Qwen Autofix',
+          },
+          ...GREEN,
+        ],
+        comments: pushMarker({}),
+      }).regressed,
+    ).toBe('');
+    // Same for a red auxiliary lane of the fleet.
+    expect(
+      run({
+        checks: [
+          {
+            name: 'review-pr',
+            status: 'COMPLETED',
+            conclusion: 'FAILURE',
+            workflowName: '🧐 Qwen Pull Request Review',
+          },
+          ...GREEN,
+        ],
+        comments: pushMarker({}),
+      }).regressed,
+    ).toBe('');
     // No push marker at all (a no-op round pushed nothing that could
     // regress): fail open.
     expect(run({ checks: RED, comments: [] }).regressed).toBe('');

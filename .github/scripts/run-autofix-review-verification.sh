@@ -1012,11 +1012,17 @@ fi
 #
 # Signals, all measured per round COMMIT rather than over the net range:
 # each of the round's own commits is diffed against its first parent, so a
-# base-merging round is judged on its own changes. A merge commit counts
-# only the lines its resolution is responsible for -- an added line main's
-# side did not already carry, a removed line main's side still carries --
-# so freight crossing the merge neither charges the round nor shields it,
-# and a weakening introduced while resolving a merge conflict IS counted.
+# base-merging round is judged on its own changes; the per-commit scan
+# enumerates modified, deleted, and typechanged files (a pre-existing test
+# replaced by a symlink is status T, not a deletion, and still exists at
+# the tip). A merge commit counts only the lines its resolution is
+# responsible for -- an added line main's side did not already carry, a
+# removed line that is not freight -- where freight is exactly what main
+# itself deleted: present at the merge base and absent from main's side of
+# the merge (including the modify/delete shape with no blob on main's side
+# at all). So freight crossing the merge neither charges the round nor
+# shields it, and a weakening introduced while resolving a merge conflict
+# IS counted.
 # A file that did not exist at the pre-round ref is not pre-existing
 # coverage and is not measured, whichever commit touched it. Per-file
 # pathspecs are `:(literal)` -- a branch-controlled filename may carry glob
@@ -1044,17 +1050,63 @@ WEAKEN_PATHSPEC=(':(glob)**/*.test.*' ':(glob)**/*.spec.*' ':(exclude,glob)**/__
 WEAKEN_ASSERT_RE='expect\(|expect\.poll\(|assert\(|assert\.'
 WEAKEN_SKIP_RE='(^|[^A-Za-z0-9_$.])(it|test|describe)[[:space:]]*\.[[:space:]]*(skip|todo|fails|failing)([[:space:]]*\.[[:space:]]*(each|for))?[[:space:]]*[(<]|(^|[^A-Za-z0-9_$.])x(it|describe)([[:space:]]*\.[[:space:]]*each)?[[:space:]]*\('
 WEAKENED=''
+WEAKENED_CHARGED=()
 WEAKEN_MEASURED='true'
-declare -A WEAKEN_FILES=() WEAKEN_DEL_ACC=() WEAKEN_ADD_ACC=() WEAKEN_SKIP_ADD_ACC=() WEAKEN_SKIP_DEL_ACC=()
+# Parallel indexed arrays, not bash-4 associative arrays: this section
+# precedes the bite section's mapfile builtin (bash 4.4) -- the first
+# bash-4 boundary the test suite's host probe gates. On the bash-3.2 macOS
+# lane an unconditional bash-4 builtin here would abort every runGate spawn
+# before any verdict.
+WEAKEN_FILE_LIST=()
+WEAKEN_DEL_ACC=()
+WEAKEN_ADD_ACC=()
+WEAKEN_SKIP_ADD_ACC=()
+WEAKEN_SKIP_DEL_ACC=()
 WEAKEN_ROUND_COMMITS="$(git rev-list --first-parent "origin/${BRANCH}..${BRANCH}" 2> /dev/null)" || WEAKEN_MEASURED='false'
+# The accumulator slot holding ${1}'s counts, or failure on first sight.
+weaken_file_slot() {
+  local f="${1}" weaken_i
+  for (( weaken_i = 0; weaken_i < ${#WEAKEN_FILE_LIST[@]}; weaken_i++ )); do
+    if [[ "${WEAKEN_FILE_LIST[weaken_i]}" == "${f}" ]]; then
+      printf '%s\n' "${weaken_i}"
+      return 0
+    fi
+  done
+  return 1
+}
+# Success when ${1} exactly matches one of the remaining arguments.
+weaken_member() {
+  local f="${1}" weaken_e
+  shift
+  for weaken_e in "$@"; do
+    if [[ "${weaken_e}" == "${f}" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+# Drop pure comment lines and cut //-to-EOL, so a commented-out copy of a
+# removed assertion neither shields an addition nor masks a removal; applied
+# symmetrically to both sides of a diff before counting.
+weaken_strip_comments() {
+  sed -e 's|//.*$||' -e '/^[[:space:]]*$/d' -e '/^[[:space:]]*\*/d'
+}
 # Fold one commit's diff of one test file into the per-file accumulators.
 # When ${3} is set the commit is a merge: the same file at the merge's
 # second parent decides line authorship, keeping only what the merge
 # resolution itself authored.
 weaken_count_commit_file() {
-  local c="${1}" f="${2}" is_merge="${3}" p2='' l diff_body add_lines del_lines
+  local c="${1}" f="${2}" is_merge="${3}" p2='' have_p2='' mb='' base_blob='' l diff_body add_lines del_lines weaken_slot
   if [[ -n "${is_merge}" ]]; then
-    p2="$(git show "${c}^2:${f}" 2> /dev/null)" || p2=''
+    # An empty blob is not a missing one: key the freight filter on git
+    # show's exit status, so a modify/delete resolution (main deleted the
+    # file, the resolution kept it) cannot degrade p2 to '' and drop EVERY
+    # removed line.
+    if p2="$(git show "${c}^2:${f}" 2> /dev/null)"; then
+      have_p2=1
+    else
+      p2=''
+    fi
   fi
   if ! diff_body="$(git diff -U0 --no-renames "${c}^" "${c}" -- ":(literal)${f}" 2> /dev/null)"; then
     return 1
@@ -1074,22 +1126,46 @@ weaken_count_commit_file() {
         printf '%s\n' "${l}"
       fi
     done <<< "${add_lines}")"
+    # A removed line is freight only when MAIN deleted it: present at the
+    # merge base and absent from main's side (or main's side has no blob at
+    # all). A branch-authored line the resolution dropped is the round's
+    # own weakening and is charged.
+    mb="$(git merge-base "${c}^" "${c}^2" 2> /dev/null)" || mb=''
+    if [[ -n "${mb}" ]]; then
+      base_blob="$(git show "${mb}:${f}" 2> /dev/null)" || base_blob=''
+    else
+      base_blob=''
+    fi
     del_lines="$(while IFS= read -r l; do
-      if [[ -n "${l}" ]] && grep -qxF -- "${l}" <<< "${p2}"; then
-        printf '%s\n' "${l}"
+      if [[ -z "${l}" ]]; then
+        continue
       fi
+      if grep -qxF -- "${l}" <<< "${base_blob}" &&
+        { [[ -z "${have_p2}" ]] || ! grep -qxF -- "${l}" <<< "${p2}"; }; then
+        continue
+      fi
+      printf '%s\n' "${l}"
     done <<< "${del_lines}")"
   fi
+  add_lines="$(weaken_strip_comments <<< "${add_lines}")"
+  del_lines="$(weaken_strip_comments <<< "${del_lines}")"
   local d a sa sd
   d="$(grep -cE "${WEAKEN_ASSERT_RE}" <<< "${del_lines}" || true)"
   a="$(grep -cE "${WEAKEN_ASSERT_RE}" <<< "${add_lines}" || true)"
   sa="$(grep -cE "${WEAKEN_SKIP_RE}" <<< "${add_lines}" || true)"
   sd="$(grep -cE "${WEAKEN_SKIP_RE}" <<< "${del_lines}" || true)"
-  WEAKEN_DEL_ACC["${f}"]="$(( ${WEAKEN_DEL_ACC["${f}"]:-0} + d ))"
-  WEAKEN_ADD_ACC["${f}"]="$(( ${WEAKEN_ADD_ACC["${f}"]:-0} + a ))"
-  WEAKEN_SKIP_ADD_ACC["${f}"]="$(( ${WEAKEN_SKIP_ADD_ACC["${f}"]:-0} + sa ))"
-  WEAKEN_SKIP_DEL_ACC["${f}"]="$(( ${WEAKEN_SKIP_DEL_ACC["${f}"]:-0} + sd ))"
-  WEAKEN_FILES["${f}"]=1
+  if ! weaken_slot="$(weaken_file_slot "${f}")"; then
+    weaken_slot="${#WEAKEN_FILE_LIST[@]}"
+    WEAKEN_FILE_LIST[weaken_slot]="${f}"
+    WEAKEN_DEL_ACC[weaken_slot]=0
+    WEAKEN_ADD_ACC[weaken_slot]=0
+    WEAKEN_SKIP_ADD_ACC[weaken_slot]=0
+    WEAKEN_SKIP_DEL_ACC[weaken_slot]=0
+  fi
+  WEAKEN_DEL_ACC[weaken_slot]="$(( WEAKEN_DEL_ACC[weaken_slot] + d ))"
+  WEAKEN_ADD_ACC[weaken_slot]="$(( WEAKEN_ADD_ACC[weaken_slot] + a ))"
+  WEAKEN_SKIP_ADD_ACC[weaken_slot]="$(( WEAKEN_SKIP_ADD_ACC[weaken_slot] + sa ))"
+  WEAKEN_SKIP_DEL_ACC[weaken_slot]="$(( WEAKEN_SKIP_DEL_ACC[weaken_slot] + sd ))"
 }
 while IFS= read -r c; do
   [[ -n "${c}" ]] || continue
@@ -1113,22 +1189,32 @@ while IFS= read -r c; do
       WEAKEN_MEASURED='false'
       break
     fi
-  done < <(git diff --name-only -z --no-renames --diff-filter=M "${c}^" "${c}" \
+  # M, D, and T: a file deleted in one round commit and re-added weakened in
+  # a later one escapes a modify-only scan (the delete commit is D, the
+  # re-add A, neither M), and a pre-existing file replaced by a symlink is
+  # status T while still matching the pathspec and existing at the tip. The
+  # pre-round pre-existence guard above keeps a genuinely round-introduced
+  # file out of the D arm of this filter.
+  done < <(git diff --name-only -z --no-renames --diff-filter=MDT "${c}^" "${c}" \
     -- "${WEAKEN_PATHSPEC[@]}" 2> /dev/null)
 done <<< "${WEAKEN_ROUND_COMMITS}"
 if [[ "${WEAKEN_MEASURED}" == 'true' ]]; then
-  while IFS= read -r f; do
-    [[ -n "${f}" ]] || continue
-    w_del="${WEAKEN_DEL_ACC["${f}"]:-0}"
-    w_add="${WEAKEN_ADD_ACC["${f}"]:-0}"
-    w_skip_add="${WEAKEN_SKIP_ADD_ACC["${f}"]:-0}"
-    w_skip_del="${WEAKEN_SKIP_DEL_ACC["${f}"]:-0}"
+  # Insertion order is deterministic (round commits in rev-list order, each
+  # commit's files in diff order), so the indexed accumulators need no sort.
+  for (( weaken_idx = 0; weaken_idx < ${#WEAKEN_FILE_LIST[@]}; weaken_idx++ )); do
+    f="${WEAKEN_FILE_LIST[weaken_idx]}"
+    w_del="${WEAKEN_DEL_ACC[weaken_idx]}"
+    w_add="${WEAKEN_ADD_ACC[weaken_idx]}"
+    w_skip_add="${WEAKEN_SKIP_ADD_ACC[weaken_idx]}"
+    w_skip_del="${WEAKEN_SKIP_DEL_ACC[weaken_idx]}"
     if (( w_del > w_add )); then
       WEAKENED+="${f}"$'\t'"net $(( w_del - w_add )) assertion line(s) removed"$'\n'
+      WEAKENED_CHARGED+=("${f}")
     elif (( w_skip_add > w_skip_del )); then
       WEAKENED+="${f}"$'\t'"$(( w_skip_add - w_skip_del )) skip/todo marker(s) added"$'\n'
+      WEAKENED_CHARGED+=("${f}")
     fi
-  done < <(printf '%s\n' "${!WEAKEN_FILES[@]}" | LC_ALL=C sort)
+  done
 fi
 # Deletions cannot use not_merge_freight: its content-equality test reads
 # "absent on both sides" as identical, so a round deleting a test the PR
@@ -1144,6 +1230,12 @@ while IFS= read -r -d '' f; do
   [[ -n "${f}" ]] || continue
   if git cat-file -e "${PR_BASE}:${f}" 2> /dev/null &&
     ! git cat-file -e "origin/main:${f}" 2> /dev/null; then
+    continue
+  fi
+  # The per-commit arm already charged this file (a single delete, or a
+  # delete in one round commit re-added weakened in another): a second
+  # entry for the same path would duplicate the rejection and the advisory.
+  if weaken_member "${f}" "${WEAKENED_CHARGED[@]}"; then
     continue
   fi
   WEAKENED+="${f}"$'\t'"test file deleted"$'\n'

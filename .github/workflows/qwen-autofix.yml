@@ -4474,10 +4474,21 @@ jobs:
           # Classify the live head: a round that pushes onto a fully GREEN
           # head and leaves it red introduced the red. Recorded now, charged
           # by the consecutive-failure walk later.
+          # The charge verdict counts ONLY checks outside the loop's own
+          # lanes — the canonical five-name exclusion this file's other
+          # own-lane filters use. A red auxiliary lane (review-pr, patrol,
+          # fork bridge/signal) or the loop's own failed/in-flight
+          # review-address run is the loop's business, not a regression the
+          # pushed code introduced; charging it would bill a round for a
+          # red it never authored, and an in-flight own check would hold
+          # the verdict at pending for the whole trigger family whose suite
+          # attaches to the PR head. The review-address carve-out stays at
+          # the FEEDBACK sites (N_FAILED_CHECKS / N_RED_NOW), where a
+          # failed own round genuinely is new feedback.
           # Full rationale → qwen-autofix.md#af-149
           CHECK_STATE="$(jq -r '
-            [ .[] | select(((.workflowName // "") != "Qwen Autofix")
-                or (((.name // "") | startswith("review-address")))) ] as $c
+            [ .[] | select((((.workflowName // "")
+                | IN("Qwen Autofix", "🧐 Qwen Pull Request Review", "Qwen CI Failure Patrol", "Qwen Autofix Fork Bridge", "Qwen Autofix Fork Signal")) | not)) ] as $c
             | if ($c | length) == 0 then "none"
               elif any($c[]; (.conclusion // .state // "")
                 | IN("FAILURE", "FAILED", "ERROR", "TIMED_OUT", "ACTION_REQUIRED")) then "red"
