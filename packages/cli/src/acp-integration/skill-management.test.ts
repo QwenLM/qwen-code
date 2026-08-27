@@ -481,4 +481,32 @@ describe('managed Skill mutations', () => {
       await fs.rm(tempHome, { recursive: true, force: true });
     }
   });
+
+  it('rejects artifact-shaped slugs reserved by the reinstall swap', async () => {
+    const tempHome = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-skill-'));
+    vi.spyOn(Storage, 'getGlobalQwenDir').mockReturnValue(tempHome);
+    const config = configWith(managerFor('unused'));
+
+    try {
+      // Names shaped exactly like the swap artifacts
+      // (`<slug>.backup-<pid>-<timestamp>` / `.installing-...`) are
+      // skipped by the skill loaders, so installing them must fail loudly
+      // instead of reporting success for a skill that never loads.
+      for (const slug of ['foo.backup-1-2', 'foo.installing-12345-67890']) {
+        await expect(
+          installManagedSkill(config, {
+            skill: {
+              slug,
+              sourceUrl:
+                'https://github.com/anthropics/skills/blob/main/SKILL.md',
+            },
+          }),
+        ).rejects.toThrow('Invalid skill.slug');
+      }
+      expect(downloadSkillMock).not.toHaveBeenCalled();
+      await expect(fs.readdir(path.join(tempHome, 'skills'))).rejects.toThrow();
+    } finally {
+      await fs.rm(tempHome, { recursive: true, force: true });
+    }
+  });
 });

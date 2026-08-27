@@ -66,6 +66,16 @@ export function validateWorkspaceSkillName(name: string): string {
   ) {
     skillError('invalid_skill_name', 'Invalid skill name');
   }
+  // Reserve the reinstall-artifact suffix (`.backup-<pid>-<timestamp>` /
+  // `.installing-<pid>-<timestamp>`): the skill loaders skip directories
+  // shaped exactly like those artifacts, so a name ending in that shape
+  // would install yet never load.
+  if (/\.(backup|installing)-\d+-\d+$/.test(normalized)) {
+    skillError(
+      'invalid_skill_name',
+      'Skill name ends with a reserved install-artifact suffix',
+    );
+  }
   return normalized;
 }
 

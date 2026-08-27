@@ -329,6 +329,28 @@ describe('workspace Skill management', () => {
     ).rejects.toMatchObject({ code: 'invalid_skill_name' });
   });
 
+  it('rejects install-artifact-shaped Skill names before reading their source', async () => {
+    const workspace = await temporaryDirectory('qwen-skill-workspace-');
+    const source = await temporaryDirectory('qwen-skill-source-');
+    await fs.writeFile(path.join(source, 'SKILL.md'), skillMarkdown('demo'));
+
+    // Names shaped exactly like reinstall artifacts are skipped by the
+    // skill loaders, so creating one must fail loudly instead of reporting
+    // success for a skill that would never load.
+    for (const name of ['foo.backup-1-2', 'foo.installing-12345-67890']) {
+      await expect(
+        installWorkspaceSkill(workspace, {
+          name,
+          scope: 'workspace',
+          source: { type: 'folder', path: source },
+        }),
+      ).rejects.toMatchObject({
+        code: 'invalid_skill_name',
+        message: expect.stringContaining('reserved install-artifact suffix'),
+      });
+    }
+  });
+
   it('rejects relative folder paths before reading files', async () => {
     const workspace = await temporaryDirectory('qwen-skill-workspace-');
 
