@@ -234,6 +234,7 @@ import { z } from 'zod';
 import type { CliArgs } from '../config/config.js';
 import {
   buildDisabledSkillNamesProvider,
+  buildProbeResultStoreProvider,
   loadCliConfig,
   SessionIdConflictError,
 } from '../config/config.js';
@@ -3755,6 +3756,7 @@ class QwenAgent implements Agent {
           projectHooks: settings.getProjectHooks(),
         },
         buildDisabledSkillNamesProvider(settings),
+        buildProbeResultStoreProvider(settings),
       ),
     );
     config.setMcpTransportPool(this.mcpPool);
@@ -12487,6 +12489,7 @@ class QwenAgent implements Agent {
       // session. ACP/Zed sessions otherwise leak persisted disabled skills
       // into the first <available_skills> at cold start.
       buildDisabledSkillNamesProvider(settings),
+      buildProbeResultStoreProvider(settings),
       sessionMcpServers,
       // The daemon owns the settings watcher lifecycle.
       undefined,

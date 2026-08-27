@@ -42,6 +42,7 @@ import {
   SchemaValidator,
   type ConfigParameters,
   type MCPServerConfig,
+  type ProbeResultStore,
   type SkillLevel,
   type WebSearchSettings,
   MAX_SUBAGENT_DEPTH_LIMIT,
@@ -1482,6 +1483,25 @@ export function buildDisabledSkillNamesProvider(
 }
 
 /**
+ * Builds the live-read closure for the persisted modality probe results
+ * (`probeResults` settings key, QwenLM/qwen-code#10309). Forwarded to
+ * `ConfigParameters.probeResultStoreProvider` so the model registry's
+ * modality resolution chain (explicit > probe > pattern) reflects verdicts
+ * written by the /model dialog's "Test image support" action without
+ * rebuilding `Config`.
+ *
+ * Like `buildDisabledSkillNamesProvider`, the closure is over the LIVE
+ * `LoadedSettings` instance (reading `merged` on every call), NOT over a
+ * `Settings` snapshot — `LoadedSettings.setValue` replaces `_merged`, so a
+ * snapshot closure would never observe newly written probe verdicts.
+ */
+export function buildProbeResultStoreProvider(
+  loadedSettings: LoadedSettings,
+): () => ProbeResultStore | undefined {
+  return () => loadedSettings.merged.probeResults;
+}
+
+/**
  * Thrown (instead of `process.exit(1)`) when a caller-supplied session id
  * already exists and `throwOnSessionIdConflict` is set. The interactive CLI
  * exits the process on a duplicate id, but that would kill a shared ACP child
@@ -1525,6 +1545,15 @@ export async function loadCliConfig(
    * correctly.
    */
   disabledSkillNamesProvider?: () => ReadonlySet<string>,
+  /**
+   * Live-read provider for the persisted modality probe results. Forwarded
+   * to `ConfigParameters` so the model registry's modality resolution chain
+   * sees probe verdicts written by the /model dialog within the same
+   * process. Callers MUST close over the live `LoadedSettings` instance —
+   * use `buildProbeResultStoreProvider(loadedSettings)` to construct it
+   * correctly.
+   */
+  probeResultStoreProvider?: () => ProbeResultStore | undefined,
   /**
    * MCP servers injected by the embedding session (e.g. ACP / IDE clients).
    * Treated as a session-level source at the TOP of the precedence stack — above
@@ -2339,6 +2368,7 @@ export async function loadCliConfig(
     includePartialMessages,
     modelProvidersConfig,
     providerProtocolConfig,
+    probeResultStoreProvider,
     generationConfigSources: resolvedCliConfig.sources,
     generationConfig: resolvedCliConfig.generationConfig,
     initialModelRegistryBaseUrl: resolvedCliConfig.registryBaseUrl,

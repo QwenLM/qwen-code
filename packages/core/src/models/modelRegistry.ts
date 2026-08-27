@@ -246,6 +246,9 @@ export class ModelRegistry {
       // `modalities` is auto-filled in `resolveModelConfig`, so it is
       // always defined on `ResolvedModelConfig` — no fallback needed here.
       modalities: model.generationConfig.modalities,
+      ...(model.modalitiesSource !== undefined
+        ? { modalitiesSource: model.modalitiesSource }
+        : {}),
       baseUrl: model.baseUrl,
       ...(model.registryBaseUrl !== undefined
         ? { registryBaseUrl: model.registryBaseUrl }

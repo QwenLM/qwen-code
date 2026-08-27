@@ -1594,6 +1594,7 @@ describe('loadCliConfig', () => {
       undefined,
       undefined,
       undefined,
+      undefined,
       sessionMcpServers,
     );
 
@@ -1623,6 +1624,7 @@ describe('loadCliConfig', () => {
       settings,
       argv,
       process.cwd(),
+      undefined,
       undefined,
       undefined,
       undefined,
@@ -1688,6 +1690,7 @@ describe('loadCliConfig', () => {
       undefined,
       undefined,
       undefined,
+      undefined,
       sessionMcpServers,
     );
 
@@ -1746,6 +1749,7 @@ describe('loadCliConfig', () => {
       },
       argv,
       process.cwd(),
+      undefined,
       undefined,
       undefined,
       undefined,
@@ -1818,6 +1822,7 @@ describe('loadCliConfig', () => {
       undefined,
       undefined,
       undefined,
+      undefined,
       false,
       { sessionRestore: { projectionSource } },
     );
@@ -1870,6 +1875,7 @@ describe('loadCliConfig', () => {
     await loadCliConfig(
       { experimental: { sessionWriterLease: true } },
       { resume: sourceSessionId } as CliArgs,
+      undefined,
       undefined,
       undefined,
       undefined,
@@ -2006,6 +2012,7 @@ describe('loadCliConfig', () => {
       undefined,
       undefined,
       undefined,
+      undefined,
       true,
     );
 
@@ -2029,6 +2036,7 @@ describe('loadCliConfig', () => {
       undefined,
       undefined,
       undefined,
+      undefined,
       true,
     );
 
@@ -2044,6 +2052,7 @@ describe('loadCliConfig', () => {
     const config = await loadCliConfig(
       {},
       { sessionId } as CliArgs,
+      undefined,
       undefined,
       undefined,
       undefined,
@@ -3711,6 +3720,7 @@ describe('loadCliConfig with includeDirectories', () => {
       argv,
       mockCwd,
       [],
+      undefined,
       undefined,
       undefined,
       undefined,

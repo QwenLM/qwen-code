@@ -14,7 +14,11 @@ import { ConfigContext } from '../contexts/ConfigContext.js';
 import { SettingsContext } from '../contexts/SettingsContext.js';
 import { UIStateContext, type UIState } from '../contexts/UIStateContext.js';
 import type { Config } from '@qwen-code/qwen-code-core';
-import { AuthType, DEFAULT_QWEN_MODEL } from '@qwen-code/qwen-code-core';
+import {
+  AuthType,
+  DEFAULT_QWEN_MODEL,
+  probeImageSupport,
+} from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../../config/settings.js';
 import { SettingScope } from '../../config/settings.js';
 import { getFilteredQwenModels } from '../models/availableModels.js';
@@ -27,6 +31,15 @@ const mockedUseKeypress = vi.mocked(useKeypress);
 vi.mock('./shared/DescriptiveRadioButtonSelect.js', () => ({
   DescriptiveRadioButtonSelect: vi.fn(() => null),
 }));
+
+// The "Test image support" action must hit a controlled probe, never the
+// network. Everything else from core stays real.
+vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>();
+  return { ...actual, probeImageSupport: vi.fn() };
+});
+const mockedProbeImageSupport = vi.mocked(probeImageSupport);
 
 // Helper to create getAvailableModelsForAuthType mock
 const createMockGetAvailableModelsForAuthType = () =>
@@ -1951,6 +1964,435 @@ describe('<ModelDialog />', () => {
       (m) => m.id === DEFAULT_QWEN_MODEL,
     );
     expect(mockedSelect.mock.calls[1][0].initialIndex).toBe(expectedCoderIndex);
+  });
+
+  // --- Modality provenance badge + "Test image support" action (#10309) ---
+
+  const pressT = async () => {
+    // The dialog registers two useKeypress handlers: [0] escape/left,
+    // [1] the gated 't' probe action.
+    await act(async () => {
+      mockedUseKeypress.mock.calls[1][0]({
+        name: 't',
+        ctrl: false,
+        meta: false,
+        shift: false,
+        paste: false,
+        sequence: 't',
+      });
+      // The probe handler is fire-and-forget async; flush its microtasks
+      // inside act so the verdict state updates land in this batch.
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+  };
+
+  const patternSourceModel = {
+    id: 'pattern-model',
+    label: 'Pattern Model',
+    description: '',
+    authType: AuthType.USE_OPENAI,
+    baseUrl: 'https://api.example.com/v1',
+    envKey: 'MODEL_DIALOG_PROBE_TEST_KEY',
+    modalitiesSource: 'pattern',
+  };
+
+  it('badges pattern-guessed modalities as auto-detected and offers the t action', () => {
+    const { getByText } = renderComponent({}, {
+      getModel: vi.fn(() => 'pattern-model'),
+      getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+      getAllConfiguredModels: vi.fn(() => [patternSourceModel]),
+      getModelsConfig: vi.fn(() => ({
+        getGenerationConfig: vi.fn(() => ({
+          baseUrl: 'https://api.example.com/v1',
+        })),
+      })),
+    } as unknown as Partial<Config>);
+
+    expect(getByText('text-only · auto-detected')).toBeDefined();
+    expect(getByText('t: test image support')).toBeDefined();
+  });
+
+  it('badges probe-tested modalities without offering the t action again', () => {
+    const { getByText, queryByText } = renderComponent({}, {
+      getModel: vi.fn(() => 'vl-model'),
+      getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+      getAllConfiguredModels: vi.fn(() => [
+        {
+          id: 'vl-model',
+          label: 'VL Model',
+          description: '',
+          authType: AuthType.USE_OPENAI,
+          modalities: { image: true },
+          modalitiesSource: 'probe',
+        },
+      ]),
+    } as unknown as Partial<Config>);
+
+    expect(getByText('text · image · probe-tested')).toBeDefined();
+    expect(queryByText('t: test image support')).toBeNull();
+  });
+
+  it('badges explicitly declared modalities as manual', () => {
+    const { getByText } = renderComponent({}, {
+      getModel: vi.fn(() => 'explicit-model'),
+      getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+      getAllConfiguredModels: vi.fn(() => [
+        {
+          id: 'explicit-model',
+          label: 'Explicit Model',
+          description: '',
+          authType: AuthType.USE_OPENAI,
+          modalities: { image: true },
+          modalitiesSource: 'explicit',
+        },
+      ]),
+    } as unknown as Partial<Config>);
+
+    expect(getByText('text · image · manual')).toBeDefined();
+  });
+
+  it('does not run the probe for non-pattern modality sources', async () => {
+    const { mockSettings } = renderComponent({}, {
+      getModel: vi.fn(() => 'explicit-model'),
+      getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+      getAllConfiguredModels: vi.fn(() => [
+        {
+          id: 'explicit-model',
+          label: 'Explicit Model',
+          description: '',
+          authType: AuthType.USE_OPENAI,
+          baseUrl: 'https://api.example.com/v1',
+          envKey: 'MODEL_DIALOG_PROBE_TEST_KEY',
+          modalities: { image: true },
+          modalitiesSource: 'explicit',
+        },
+      ]),
+      getModelsConfig: vi.fn(() => ({
+        getGenerationConfig: vi.fn(() => ({
+          baseUrl: 'https://api.example.com/v1',
+        })),
+      })),
+    } as unknown as Partial<Config>);
+
+    await pressT();
+
+    expect(mockedProbeImageSupport).not.toHaveBeenCalled();
+    expect(mockSettings.setValue).not.toHaveBeenCalled();
+  });
+
+  it('probes a pattern-source entry on t and persists the whole probeResults map', async () => {
+    const previousKey = process.env['MODEL_DIALOG_PROBE_TEST_KEY'];
+    process.env['MODEL_DIALOG_PROBE_TEST_KEY'] = 'sk-probe-test';
+    try {
+      mockedProbeImageSupport.mockResolvedValue({
+        verdict: 'image',
+        httpStatus: 200,
+        snippet: 'ok',
+      });
+      const existingRecord = {
+        verdict: 'text_only' as const,
+        probedAt: '2026-01-01T00:00:00.000Z',
+      };
+      // Scope-targeted read: the write must start from the TARGET scope's
+      // own map (preserving its records) — not from the merged view.
+      const userSettingsFile = {
+        settings: {
+          probeResults: {
+            'openai|older-model|https://older.example.com/v1': existingRecord,
+          },
+        },
+      };
+
+      const { getByText, mockSettings } = renderComponent(
+        {},
+        {
+          getModel: vi.fn(() => 'pattern-model'),
+          getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+          getAllConfiguredModels: vi.fn(() => [patternSourceModel]),
+          getModelsConfig: vi.fn(() => ({
+            getGenerationConfig: vi.fn(() => ({
+              baseUrl: 'https://api.example.com/v1',
+            })),
+          })),
+        } as unknown as Partial<Config>,
+        {
+          forScope: () => userSettingsFile,
+        } as unknown as Partial<LoadedSettings>,
+      );
+
+      await pressT();
+
+      expect(mockedProbeImageSupport).toHaveBeenCalledTimes(1);
+      expect(mockedProbeImageSupport).toHaveBeenCalledWith({
+        model: 'pattern-model',
+        baseUrl: 'https://api.example.com/v1',
+        apiKey: 'sk-probe-test',
+      });
+      expect(mockSettings.setValue).toHaveBeenCalledTimes(1);
+      expect(mockSettings.setValue).toHaveBeenCalledWith(
+        SettingScope.User,
+        'probeResults',
+        {
+          'openai|older-model|https://older.example.com/v1': existingRecord,
+          'openai|pattern-model|https://api.example.com/v1': {
+            verdict: 'image',
+            probedAt: expect.any(String),
+          },
+        },
+      );
+      // Registry entries are not reloaded mid-dialog: BOTH the badge and the
+      // modality value flip to the verdict-consistent presentation from
+      // local dialog state.
+      expect(getByText('text · image · probe-tested')).toBeDefined();
+      expect(getByText('accepts images')).toBeDefined();
+    } finally {
+      if (previousKey === undefined) {
+        delete process.env['MODEL_DIALOG_PROBE_TEST_KEY'];
+      } else {
+        process.env['MODEL_DIALOG_PROBE_TEST_KEY'] = previousKey;
+      }
+    }
+  });
+
+  it('writes nothing when the probe verdict is unknown', async () => {
+    const previousKey = process.env['MODEL_DIALOG_PROBE_TEST_KEY'];
+    process.env['MODEL_DIALOG_PROBE_TEST_KEY'] = 'sk-probe-test';
+    try {
+      mockedProbeImageSupport.mockResolvedValue({
+        verdict: 'unknown',
+        httpStatus: 401,
+        snippet: 'unauthorized',
+      });
+
+      const { getByText, mockSettings } = renderComponent({}, {
+        getModel: vi.fn(() => 'pattern-model'),
+        getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+        getAllConfiguredModels: vi.fn(() => [patternSourceModel]),
+        getModelsConfig: vi.fn(() => ({
+          getGenerationConfig: vi.fn(() => ({
+            baseUrl: 'https://api.example.com/v1',
+          })),
+        })),
+      } as unknown as Partial<Config>);
+
+      await pressT();
+
+      expect(mockedProbeImageSupport).toHaveBeenCalledTimes(1);
+      expect(mockSettings.setValue).not.toHaveBeenCalled();
+      expect(
+        getByText('inconclusive (auth/rate-limit/timeout) — nothing written'),
+      ).toBeDefined();
+    } finally {
+      if (previousKey === undefined) {
+        delete process.env['MODEL_DIALOG_PROBE_TEST_KEY'];
+      } else {
+        process.env['MODEL_DIALOG_PROBE_TEST_KEY'] = previousKey;
+      }
+    }
+  });
+
+  it('reports inconclusive without probing when the API key env is unset', async () => {
+    const previousKey = process.env['MODEL_DIALOG_PROBE_TEST_KEY'];
+    // No key in the environment: the handler must bail out BEFORE any
+    // network attempt and write nothing.
+    delete process.env['MODEL_DIALOG_PROBE_TEST_KEY'];
+    try {
+      const { getByText, mockSettings } = renderComponent({}, {
+        getModel: vi.fn(() => 'pattern-model'),
+        getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+        getAllConfiguredModels: vi.fn(() => [patternSourceModel]),
+        getModelsConfig: vi.fn(() => ({
+          getGenerationConfig: vi.fn(() => ({
+            baseUrl: 'https://api.example.com/v1',
+          })),
+        })),
+      } as unknown as Partial<Config>);
+
+      await pressT();
+
+      expect(mockedProbeImageSupport).not.toHaveBeenCalled();
+      expect(mockSettings.setValue).not.toHaveBeenCalled();
+      expect(
+        getByText('inconclusive (auth/rate-limit/timeout) — nothing written'),
+      ).toBeDefined();
+    } finally {
+      if (previousKey === undefined) {
+        delete process.env['MODEL_DIALOG_PROBE_TEST_KEY'];
+      } else {
+        process.env['MODEL_DIALOG_PROBE_TEST_KEY'] = previousKey;
+      }
+    }
+  });
+
+  it('hydrates a settings-backed API key before probing', async () => {
+    const previousKey = process.env['MODEL_DIALOG_PROBE_TEST_KEY'];
+    // The key exists only in settings.env — NOT in process.env — so the
+    // probe only works if the handler hydrates the env first.
+    delete process.env['MODEL_DIALOG_PROBE_TEST_KEY'];
+    try {
+      mockedProbeImageSupport.mockResolvedValue({
+        verdict: 'text_only',
+        httpStatus: 400,
+        snippet: 'does not support images',
+      });
+
+      const { getByText, mockSettings } = renderComponent(
+        {},
+        {
+          getModel: vi.fn(() => 'pattern-model'),
+          getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+          getAllConfiguredModels: vi.fn(() => [patternSourceModel]),
+          getModelsConfig: vi.fn(() => ({
+            getGenerationConfig: vi.fn(() => ({
+              baseUrl: 'https://api.example.com/v1',
+            })),
+          })),
+        } as unknown as Partial<Config>,
+        {
+          merged: {
+            env: { MODEL_DIALOG_PROBE_TEST_KEY: 'sk-from-settings-env' },
+          },
+          forScope: () => ({ settings: {} }),
+        } as unknown as Partial<LoadedSettings>,
+      );
+
+      await pressT();
+
+      expect(mockedProbeImageSupport).toHaveBeenCalledWith(
+        expect.objectContaining({ apiKey: 'sk-from-settings-env' }),
+      );
+      expect(mockSettings.setValue).toHaveBeenCalledTimes(1);
+      expect(getByText('text only')).toBeDefined();
+    } finally {
+      if (previousKey === undefined) {
+        delete process.env['MODEL_DIALOG_PROBE_TEST_KEY'];
+      } else {
+        process.env['MODEL_DIALOG_PROBE_TEST_KEY'] = previousKey;
+      }
+    }
+  });
+
+  it('displaces the verdict display when the highlight moves to another entry', async () => {
+    const previousKey = process.env['MODEL_DIALOG_PROBE_TEST_KEY'];
+    process.env['MODEL_DIALOG_PROBE_TEST_KEY'] = 'sk-probe-test';
+    try {
+      mockedProbeImageSupport.mockResolvedValue({
+        verdict: 'image',
+        httpStatus: 200,
+        snippet: 'ok',
+      });
+
+      const { getByText, queryByText } = renderComponent(
+        {},
+        {
+          getModel: vi.fn(() => 'pattern-model'),
+          getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+          getAllConfiguredModels: vi.fn(() => [
+            patternSourceModel,
+            {
+              id: 'pattern-model-b',
+              label: 'Pattern Model B',
+              description: '',
+              authType: AuthType.USE_OPENAI,
+              modalitiesSource: 'pattern',
+            },
+          ]),
+          getModelsConfig: vi.fn(() => ({
+            getGenerationConfig: vi.fn(() => ({
+              baseUrl: 'https://api.example.com/v1',
+            })),
+          })),
+        } as unknown as Partial<Config>,
+        {
+          forScope: () => ({ settings: {} }),
+        } as unknown as Partial<LoadedSettings>,
+      );
+
+      await pressT();
+      // Entry A (highlighted) shows the verdict.
+      expect(getByText('text · image · probe-tested')).toBeDefined();
+      // Move the highlight to entry B: B shows its OWN pattern badge and
+      // none of A's verdict display leaks onto it.
+      const selectProps = mockedSelect.mock.calls[0][0];
+      const entryB = selectProps.items[1].value;
+      act(() => {
+        selectProps.onHighlight?.(entryB);
+      });
+      expect(getByText('text-only · auto-detected')).toBeDefined();
+      expect(queryByText('accepts images')).toBeNull();
+      expect(queryByText('text · image · probe-tested')).toBeNull();
+
+      // Moving back to A re-shows A's (uncorrupted) verdict display.
+      act(() => {
+        selectProps.onHighlight?.(selectProps.items[0].value);
+      });
+      expect(getByText('text · image · probe-tested')).toBeDefined();
+      expect(getByText('accepts images')).toBeDefined();
+    } finally {
+      if (previousKey === undefined) {
+        delete process.env['MODEL_DIALOG_PROBE_TEST_KEY'];
+      } else {
+        process.env['MODEL_DIALOG_PROBE_TEST_KEY'] = previousKey;
+      }
+    }
+  });
+
+  it('surfaces a settings-write failure instead of unhandled success', async () => {
+    const previousKey = process.env['MODEL_DIALOG_PROBE_TEST_KEY'];
+    process.env['MODEL_DIALOG_PROBE_TEST_KEY'] = 'sk-probe-test';
+    const setValue = vi.fn(() => {
+      const error = new Error('settings are read-only');
+      Object.assign(error, { code: 'EACCES' });
+      throw error;
+    });
+    try {
+      mockedProbeImageSupport.mockResolvedValue({
+        verdict: 'image',
+        httpStatus: 200,
+        snippet: 'ok',
+      });
+
+      const { getByText, queryByText } = renderComponent(
+        {},
+        {
+          getModel: vi.fn(() => 'pattern-model'),
+          getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+          getAllConfiguredModels: vi.fn(() => [patternSourceModel]),
+          getModelsConfig: vi.fn(() => ({
+            getGenerationConfig: vi.fn(() => ({
+              baseUrl: 'https://api.example.com/v1',
+            })),
+          })),
+        } as unknown as Partial<Config>,
+        {
+          setValue,
+          forScope: () => ({ settings: {} }),
+        } as unknown as Partial<LoadedSettings>,
+      );
+
+      await pressT();
+
+      expect(setValue).toHaveBeenCalledTimes(1);
+      // The failure surfaces through the dialog's error channel...
+      expect(
+        getByText((text) =>
+          text.includes('Image probe verdict could not be saved.'),
+        ),
+      ).toBeDefined();
+      // ...and no success feedback or verdict badge is shown (nothing was
+      // persisted, so the entry's own pattern source stays on display and
+      // the t action remains available for a retry).
+      expect(queryByText('accepts images')).toBeNull();
+      expect(queryByText('text · image · probe-tested')).toBeNull();
+      expect(getByText('text-only · auto-detected')).toBeDefined();
+      expect(getByText('t: test image support')).toBeDefined();
+    } finally {
+      if (previousKey === undefined) {
+        delete process.env['MODEL_DIALOG_PROBE_TEST_KEY'];
+      } else {
+        process.env['MODEL_DIALOG_PROBE_TEST_KEY'] = previousKey;
+      }
+    }
   });
 });
 
