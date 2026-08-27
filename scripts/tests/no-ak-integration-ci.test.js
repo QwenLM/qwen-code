@@ -10,7 +10,9 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   rmSync,
+  symlinkSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -381,6 +383,28 @@ describe('no-AK integration CI wiring', () => {
     expect(configure).toContain(
       "uses: './.github/actions/configure-windows-runner'",
     );
+    const redirectTemp = getWorkflowStep(
+      windowsJob,
+      'Point temp at a short-alias-free directory',
+    );
+    expect(redirectTemp).toContain(
+      "if: \"${{ needs.classify_pr.outputs.skip_ci != 'true' && runner.environment != 'self-hosted' }}\"",
+    );
+    for (const key of ['TEMP', 'TMP']) {
+      expect(redirectTemp).toContain(
+        `"${key}=$temp" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append`,
+      );
+    }
+    const verifyTemp = getWorkflowStep(
+      windowsJob,
+      'Verify temp paths carry no short alias',
+    );
+    expect(verifyTemp).toContain(
+      'if: "${{ needs.classify_pr.outputs.skip_ci != \'true\' }}"',
+    );
+    expect(verifyTemp).toContain('fs.realpathSync(value)');
+    // The guard's decisions are asserted by executing it, below; pinning the
+    // JS text here only fixes its spelling in place.
     const configureAction = readFileSync(
       path.join(ROOT, CONFIGURE_ACTION_PATH),
       'utf8',
@@ -406,6 +430,17 @@ describe('no-AK integration CI wiring', () => {
     const configureUseIndex = windowsJob.indexOf(
       "uses: './.github/actions/configure-windows-runner'",
     );
+    const redirectTempIndex = windowsJob.indexOf(
+      "name: 'Point temp at a short-alias-free directory'",
+    );
+    const hostedNodeIndex = windowsJob.indexOf('actions/setup-node@');
+    const selfHostedNodeIndex = windowsJob.indexOf(
+      "uses: './.github/actions/self-hosted-node'",
+    );
+    const verifyTempIndex = windowsJob.indexOf(
+      "name: 'Verify temp paths carry no short alias'",
+    );
+    const installIndex = windowsJob.indexOf("name: 'Install dependencies'");
     const guardUseIndex = windowsJob.indexOf(
       "uses: './.github/actions/verify-checkout-head'",
     );
@@ -413,6 +448,12 @@ describe('no-AK integration CI wiring', () => {
     expect(autocrlfIndex).toBeGreaterThanOrEqual(0);
     expect(autocrlfIndex).toBeLessThan(windowsCheckoutIndex);
     expect(configureUseIndex).toBeGreaterThan(windowsCheckoutIndex);
+    expect(redirectTempIndex).toBeGreaterThan(configureUseIndex);
+    expect(redirectTempIndex).toBeLessThan(hostedNodeIndex);
+    expect(redirectTempIndex).toBeLessThan(selfHostedNodeIndex);
+    expect(verifyTempIndex).toBeGreaterThan(hostedNodeIndex);
+    expect(verifyTempIndex).toBeGreaterThan(selfHostedNodeIndex);
+    expect(verifyTempIndex).toBeLessThan(installIndex);
     expect(guardUseIndex).toBeGreaterThan(windowsCheckoutIndex);
     expect(configureUseIndex).toBeLessThan(guardUseIndex);
     for (const line of [
@@ -599,5 +640,89 @@ describe('no-AK integration CI wiring', () => {
     expect(webShellJob).toContain('ubuntu_runner');
     expect(webShellJob).toContain("run: 'npx playwright install chromium'");
     expect(webShellJob).toContain('--with-deps chromium');
+  });
+});
+
+// The 8.3 alias this guard exists for (`C:\Users\RUNNER~1` realpathing to
+// `C:\Users\runneradmin`) cannot be reproduced off Windows, but every
+// decision the guard makes is a comparison between an env value and its
+// realpath — and a symlink reproduces each of those on any platform. Run the
+// real script rather than pinning its text: the case-insensitive comparison
+// below is the whole point of the step, and a substring pin cannot tell a
+// working comparison from a reverted one.
+describe('Windows temp short-alias guard', () => {
+  const workflow = readFileSync(
+    path.join(ROOT, '.github/workflows/ci.yml'),
+    'utf8',
+  );
+  const step = getWorkflowStep(
+    getWorkflowJob(workflow, 'test_windows'),
+    'Verify temp paths carry no short alias',
+  );
+  // The script is single-quoted throughout precisely so this stays a
+  // delimiter-safe extraction.
+  const match = /node -e "([^"]+)"/.exec(step);
+  const script = match?.[1];
+
+  // Invoked exactly as the workflow does: `node -e <script>`, no extra argv.
+  const runGuard = (env) =>
+    execFileSync(
+      process.execPath,
+      ['-e', script],
+      // Only TEMP/TMP may reach the guard: inheriting the ambient
+      // environment would let the host's own temp decide the verdict.
+      // stdio 'pipe' captures stderr too, so a failure's message reaches
+      // the assertion instead of the test runner's console.
+      { env, encoding: 'utf8', stdio: 'pipe' },
+    );
+
+  it('extracts a runnable script from the workflow', () => {
+    expect(script).toBeTruthy();
+  });
+
+  it.runIf(process.platform === 'linux')(
+    'accepts, warns, or fails on the three ways an env path can meet its realpath',
+    () => {
+      const base = realpathSync(
+        mkdtempSync(path.join(tmpdir(), 'temp-guard-')),
+      );
+      try {
+        const canonical = path.join(base, 'runneradmin');
+        mkdirSync(canonical);
+
+        // 1. Alias-free: the env value already IS its realpath.
+        expect(() =>
+          runGuard({ TEMP: canonical, TMP: canonical }),
+        ).not.toThrow();
+
+        // 2. Casing-only difference — the regression this guard had to stop
+        // producing. On Windows realpath returns the on-disk casing, so this
+        // is one directory under one spelling: warn, do not fail the lane.
+        const casing = path.join(base, 'RUNNERADMIN');
+        symlinkSync(canonical, casing);
+        let stdout = '';
+        expect(() => {
+          stdout = runGuard({ TEMP: casing, TMP: casing });
+        }).not.toThrow();
+        expect(stdout).toContain('::warning::');
+        expect(stdout).toContain('only by casing');
+
+        // 3. A genuine second spelling, as the 8.3 alias produces: fail.
+        const alias = path.join(base, 'RUNNER~1');
+        symlinkSync(canonical, alias);
+        expect(() => runGuard({ TEMP: alias, TMP: alias })).toThrow(
+          /carries a short alias/,
+        );
+      } finally {
+        rmSync(base, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it('fails loudly when temp is unset instead of throwing on undefined', () => {
+    // configure-windows-runner and the hosted redirect both set TEMP and TMP,
+    // so an unset value means one of them stopped running — a clear message
+    // beats realpathSync(undefined)'s TypeError.
+    expect(() => runGuard({})).toThrow(/TEMP is not set/);
   });
 });
