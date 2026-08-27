@@ -104,6 +104,7 @@ describe('TeamDeleteTool', () => {
     // ...and the result reports failure instead of complete deletion.
     expect(result.error).toBeDefined();
     expect(String(result.llmContent)).toContain('cleanup failed');
+    expect(String(result.llmContent)).toContain('EACCES: permission denied');
     expect(String(result.llmContent)).not.toContain('deleted.');
   });
 
