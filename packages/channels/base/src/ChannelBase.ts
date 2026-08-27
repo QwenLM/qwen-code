@@ -40,6 +40,10 @@ import { SenderGate } from './SenderGate.js';
 import { PairingStore } from './PairingStore.js';
 import type { CreatePairingRequestResult } from './PairingStore.js';
 import { SessionRouter } from './SessionRouter.js';
+import {
+  NamedSessionManager,
+  type NamedSessionOwnerInput,
+} from './named-session-manager.js';
 import { getGlobalQwenDir } from './paths.js';
 import {
   sanitizeSenderName,
@@ -184,6 +188,10 @@ interface ChannelMemoryReadToken {
   context?: string;
 }
 
+interface PreflightInboundOptions {
+  deferPairingRequests?: boolean;
+}
+
 interface ChannelMemoryRecallCacheEntry {
   revision: string;
   index: ChannelMemoryRecallIndex;
@@ -280,6 +288,12 @@ type CollectBufferEntry = {
   text: string;
   displayText: string;
   envelope: Envelope;
+};
+type NamedTurnBinding = {
+  sessionId: string | null;
+  generation: number;
+  claimed: boolean;
+  released: boolean;
 };
 type ActivePrompt = {
   runId: string;
@@ -394,6 +408,7 @@ export abstract class ChannelBase {
   private readonly groupPairingNotified = new Map<string, string>();
   private readonly loopController?: ChannelLoopController;
   private readonly observedContacts?: ChannelBaseOptions['observedContacts'];
+  private readonly namedSessions?: NamedSessionManager;
   private readonly observedContactEnvelopes = new WeakSet<Envelope>();
   private instructedSessions: Set<string> = new Set();
   private unattendedMemorySessions: Set<string> = new Set();
@@ -405,6 +420,8 @@ export abstract class ChannelBase {
   private commands: Map<string, CommandHandler> = new Map();
   /** Per-session promise chain to serialize prompt + send (followup mode). */
   private sessionQueues: Map<string, Promise<void>> = new Map();
+  private queuedTurns: Map<string, number> = new Map();
+  private namedTurnBindings = new WeakMap<Envelope, NamedTurnBinding>();
   private readonly registerBridgeEvents: boolean;
   private readonly bridgeRecovery?: () => Promise<void> | undefined;
   /**
@@ -869,6 +886,25 @@ export abstract class ChannelBase {
     this.router =
       options?.router ||
       new SessionRouter(bridge, config.cwd, config.sessionScope);
+    if (config.multiSession) {
+      if (config.sessionScope !== 'user') {
+        throw new Error(
+          `Channel "${name}" requires sessionScope "user" when multiSession is enabled.`,
+        );
+      }
+      if (!options?.stateDir) {
+        throw new Error(
+          `Channel "${name}" multiSession is available only in daemon-managed mode.`,
+        );
+      }
+      this.namedSessions = new NamedSessionManager({
+        channelName: name,
+        cwd: config.cwd,
+        filePath: join(options.stateDir, 'named-sessions.json'),
+        router: this.router,
+        isBusy: (sessionId) => this.isNamedSessionBusy(sessionId),
+      });
+    }
 
     this.registerSharedCommands();
     if (this.loopController) {
@@ -1457,8 +1493,11 @@ export abstract class ChannelBase {
       imageBase64: undefined,
       imageMimeType: undefined,
     };
+    if (this.namedSessions) {
+      this.bindNamedTurn(syntheticEnvelope, sessionId);
+    }
     this.markPreflighted(syntheticEnvelope);
-    this.processInbound(syntheticEnvelope).catch((err) => {
+    void this.processPreflightedInbound(syntheticEnvelope).catch((err) => {
       process.stderr.write(
         `[${this.name}] dropped ${lost} buffered message(s) after ${taskLabel} for session ${sessionId} (last sender ${lastEnvelope.senderId}): ${
           err instanceof Error ? err.message : String(err)
@@ -2470,7 +2509,9 @@ export abstract class ChannelBase {
         );
         return true;
       }
-      const activeSessionId = this.findActiveSessionId(envelope);
+      const activeSessionId = this.namedSessions
+        ? await this.findNamedActiveSessionId(envelope)
+        : this.findActiveSessionId(envelope);
       if (!activeSessionId) {
         await this.sendThreadMessage(
           envelope.chatId,
@@ -2869,15 +2910,304 @@ export abstract class ChannelBase {
     return true;
   }
 
+  private namedSessionOwner(envelope: Envelope): NamedSessionOwnerInput {
+    return {
+      senderId: envelope.senderId,
+      chatId: envelope.chatId,
+      ...(envelope.threadId !== undefined
+        ? { threadId: envelope.threadId }
+        : {}),
+      ...(envelope.isGroup !== undefined ? { isGroup: envelope.isGroup } : {}),
+    };
+  }
+
+  private async currentSessionId(
+    envelope: Envelope,
+  ): Promise<string | undefined> {
+    if (this.namedSessions) {
+      return (
+        await this.namedSessions.current(this.namedSessionOwner(envelope))
+      )?.sessionId;
+    }
+    return this.router.getSession(
+      this.name,
+      envelope.senderId,
+      envelope.chatId,
+      envelope.threadId,
+    );
+  }
+
+  private reserveQueuedTurn(sessionId: string): void {
+    this.queuedTurns.set(sessionId, (this.queuedTurns.get(sessionId) ?? 0) + 1);
+  }
+
+  private releaseQueuedTurn(sessionId: string): void {
+    const remaining = (this.queuedTurns.get(sessionId) ?? 1) - 1;
+    if (remaining === 0) {
+      this.queuedTurns.delete(sessionId);
+    } else {
+      this.queuedTurns.set(sessionId, remaining);
+    }
+  }
+
+  private bindNamedTurn(
+    envelope: Envelope,
+    sessionId: string,
+  ): NamedTurnBinding {
+    const binding: NamedTurnBinding = {
+      sessionId,
+      generation: this.sessionGenerations.get(sessionId) ?? 0,
+      claimed: false,
+      released: false,
+    };
+    this.namedTurnBindings.set(envelope, binding);
+    this.reserveQueuedTurn(sessionId);
+    return binding;
+  }
+
+  private releaseNamedTurnBinding(binding: NamedTurnBinding): void {
+    if (binding.sessionId === null || binding.claimed || binding.released) {
+      return;
+    }
+    binding.released = true;
+    this.releaseQueuedTurn(binding.sessionId);
+  }
+
+  private finishNamedTurnBinding(envelope: Envelope): void {
+    const binding = this.namedTurnBindings.get(envelope);
+    if (!binding) return;
+    this.releaseNamedTurnBinding(binding);
+    this.namedTurnBindings.delete(envelope);
+  }
+
+  private bypassesNamedTurnBinding(envelope: Envelope): boolean {
+    const parsed = this.parseCommand(envelope.text);
+    if (parsed && this.commands.has(parsed.command)) return true;
+    const bangText = envelope.text.trimStart();
+    return (
+      bangText.startsWith('!') &&
+      (envelope.isGroup || this.isSharedSession(envelope))
+    );
+  }
+
+  private async prepareNamedTurnBinding(envelope: Envelope): Promise<boolean> {
+    const namedSessions = this.namedSessions;
+    if (!namedSessions || this.namedTurnBindings.has(envelope)) return true;
+    if (this.bypassesNamedTurnBinding(envelope)) return true;
+    try {
+      const sessionId = await namedSessions.resolve(
+        this.namedSessionOwner(envelope),
+        undefined,
+        (resolvedSessionId) => {
+          const binding = this.bindNamedTurn(envelope, resolvedSessionId);
+          return () => this.releaseNamedTurnBinding(binding);
+        },
+      );
+      if (!sessionId && !this.namedTurnBindings.has(envelope)) {
+        this.namedTurnBindings.set(envelope, {
+          sessionId: null,
+          generation: 0,
+          claimed: false,
+          released: true,
+        });
+      }
+      return true;
+    } catch (error) {
+      this.finishNamedTurnBinding(envelope);
+      await this.sendNamedSessionError(envelope, error);
+      return false;
+    }
+  }
+
+  private isNamedSessionBusy(sessionId: string): boolean {
+    if ((this.queuedTurns.get(sessionId) ?? 0) > 0) return true;
+    if (this.activePrompts.has(sessionId)) return true;
+    for (const permission of this.pendingPermissions.values()) {
+      if (permission.sessionId === sessionId) return true;
+    }
+    try {
+      return (
+        this.bridge
+          .listSessions?.()
+          .some(
+            (session) =>
+              session.sessionId === sessionId && session.hasActivePrompt,
+          ) ?? false
+      );
+    } catch {
+      return true;
+    }
+  }
+
+  private async sendNamedSessionError(
+    envelope: Envelope,
+    error: unknown,
+  ): Promise<void> {
+    const message =
+      error instanceof Error
+        ? sanitizeDisplayText(error.message, 500)
+        : 'Named-session operation failed.';
+    await this.sendThreadMessage(
+      envelope.chatId,
+      envelope.threadId,
+      message || 'Named-session operation failed.',
+    );
+  }
+
+  private async handleNamedSessionsCommand(
+    envelope: Envelope,
+    args: string,
+  ): Promise<boolean> {
+    const namedSessions = this.namedSessions;
+    if (!namedSessions) return false;
+    const normalized = args.trim().toLowerCase();
+    if (normalized !== '' && normalized !== 'all') {
+      await this.sendThreadMessage(
+        envelope.chatId,
+        envelope.threadId,
+        'Usage: /sessions [all]',
+      );
+      return true;
+    }
+    try {
+      const tasks = await namedSessions.list(
+        this.namedSessionOwner(envelope),
+        normalized === 'all',
+      );
+      if (tasks.length === 0) {
+        await this.sendThreadMessage(
+          envelope.chatId,
+          envelope.threadId,
+          normalized === 'all' ? 'No named tasks.' : 'No open named tasks.',
+        );
+        return true;
+      }
+      await this.sendThreadMessage(
+        envelope.chatId,
+        envelope.threadId,
+        [
+          normalized === 'all' ? 'Tasks:' : 'Open tasks:',
+          ...tasks.map(
+            (task) =>
+              `${task.active ? '*' : '-'} ${task.name} (${task.status}, ${task.isolation})`,
+          ),
+        ].join('\n'),
+      );
+    } catch (error) {
+      await this.sendNamedSessionError(envelope, error);
+    }
+    return true;
+  }
+
+  private async handleNamedSessionCommand(
+    envelope: Envelope,
+    args: string,
+  ): Promise<boolean> {
+    const namedSessions = this.namedSessions;
+    if (!namedSessions) return false;
+    const parts = args.trim().split(/\s+/u).filter(Boolean);
+    const subcommand = parts.shift()?.toLowerCase() ?? '';
+    const owner = this.namedSessionOwner(envelope);
+    try {
+      switch (subcommand) {
+        case 'current': {
+          if (parts.length > 0) break;
+          const current = await namedSessions.current(owner);
+          await this.sendThreadMessage(
+            envelope.chatId,
+            envelope.threadId,
+            current
+              ? `Current task: ${current.name} (${current.isolation})`
+              : 'No task is currently selected. Use /session new <name> or /session use <name>.',
+          );
+          return true;
+        }
+        case 'new': {
+          if (parts.includes('--worktree')) {
+            await this.sendThreadMessage(
+              envelope.chatId,
+              envelope.threadId,
+              'Worktree tasks are not available in Part 2 yet. Create a shared task with /session new <name>.',
+            );
+            return true;
+          }
+          if (parts.length !== 1) break;
+          const created = await namedSessions.create(owner, parts[0]!);
+          await this.sendThreadMessage(
+            envelope.chatId,
+            envelope.threadId,
+            `Created and selected task "${created.name}" (shared workspace).`,
+          );
+          return true;
+        }
+        case 'use': {
+          if (parts.length !== 1) break;
+          const selected = await namedSessions.use(owner, parts[0]!);
+          await this.sendThreadMessage(
+            envelope.chatId,
+            envelope.threadId,
+            `Selected task "${selected.name}" (${selected.isolation} workspace).`,
+          );
+          return true;
+        }
+        case 'close': {
+          if (parts.length !== 1) break;
+          const result = await namedSessions.close(owner, parts[0]!);
+          await this.sendThreadMessage(
+            envelope.chatId,
+            envelope.threadId,
+            result.active
+              ? `Closed task "${result.closed.name}". Selected "${result.active.name}".`
+              : `Closed task "${result.closed.name}". No task is selected.`,
+          );
+          return true;
+        }
+        case 'cancel':
+          await this.sendThreadMessage(
+            envelope.chatId,
+            envelope.threadId,
+            'Named task cancellation is not available in Part 2 yet. Wait for the selected task to finish before switching; Telegram users can use /cancel.',
+          );
+          return true;
+        default:
+          break;
+      }
+    } catch (error) {
+      await this.sendNamedSessionError(envelope, error);
+      return true;
+    }
+    await this.sendThreadMessage(
+      envelope.chatId,
+      envelope.threadId,
+      'Usage: /session current | /session new <name> | /session use <name> | /session close <name> | /session cancel [<name>]',
+    );
+    return true;
+  }
+
   /** Register shared slash commands. Called from constructor. */
   private registerSharedCommands(): void {
     const doClear = async (envelope: Envelope): Promise<void> => {
-      const removedIds = this.router.removeSession(
-        this.name,
-        envelope.senderId,
-        envelope.chatId,
-        envelope.threadId,
-      );
+      let resetTaskName: string | undefined;
+      let removedIds: string[];
+      if (this.namedSessions) {
+        try {
+          const reset = await this.namedSessions.reset(
+            this.namedSessionOwner(envelope),
+          );
+          resetTaskName = reset?.name;
+          removedIds = reset ? [reset.previousSessionId] : [];
+        } catch (error) {
+          await this.sendNamedSessionError(envelope, error);
+          return;
+        }
+      } else {
+        removedIds = this.router.removeSession(
+          this.name,
+          envelope.senderId,
+          envelope.chatId,
+          envelope.threadId,
+        );
+      }
       this.clearPendingGroupHistory(envelope);
       if (removedIds.length > 0) {
         for (const id of removedIds) {
@@ -2987,7 +3317,9 @@ export abstract class ChannelBase {
         await this.sendThreadMessage(
           envelope.chatId,
           envelope.threadId,
-          'Session cleared. The next message starts a fresh conversation.',
+          resetTaskName
+            ? `Task "${resetTaskName}" reset with a fresh conversation.`
+            : 'Session cleared. The next message starts a fresh conversation.',
         );
       } else {
         await this.sendThreadMessage(
@@ -3026,6 +3358,14 @@ export abstract class ChannelBase {
     this.registerCommand('clear', clearHandler);
     this.registerCommand('reset', clearHandler);
     this.registerCommand('new', clearHandler);
+    if (this.namedSessions) {
+      this.registerCommand('sessions', (envelope, args) =>
+        this.handleNamedSessionsCommand(envelope, args),
+      );
+      this.registerCommand('session', (envelope, args) =>
+        this.handleNamedSessionCommand(envelope, args),
+      );
+    }
     this.registerCommand('approve', (envelope, args) =>
       this.handlePermissionResponseCommand(envelope, args, 'approve'),
     );
@@ -3048,12 +3388,14 @@ export abstract class ChannelBase {
         );
         return true;
       }
-      const active = this.router.hasSession(
-        this.name,
-        envelope.senderId,
-        envelope.chatId,
-        envelope.threadId,
-      );
+      const active = this.namedSessions
+        ? Boolean(await this.currentSessionId(envelope))
+        : this.router.hasSession(
+            this.name,
+            envelope.senderId,
+            envelope.chatId,
+            envelope.threadId,
+          );
       // `single` collapses EVERY DM and group to one `__single__` session, so it
       // is shared channel-wide regardless of where the /who came from — report
       // that explicitly (a group `single` session understates its blast radius as
@@ -3101,6 +3443,12 @@ export abstract class ChannelBase {
         '/approve [request-id] — Approve a pending permission request',
         '/approve-always [request-id] — Always approve a pending permission request',
         '/deny [request-id] — Deny a pending permission request',
+        ...(this.namedSessions
+          ? [
+              '/sessions [all] — List your named tasks',
+              '/session current|new|use|close — Manage your named tasks',
+            ]
+          : []),
       ];
 
       // Platform-specific commands (registered by adapters, not shared ones)
@@ -3117,6 +3465,8 @@ export abstract class ChannelBase {
         'forget-channel',
         'who',
         'status',
+        'sessions',
+        'session',
       ]);
       const platformCmds = [...this.commands.keys()].filter(
         (c) => !sharedCmds.has(c),
@@ -3127,12 +3477,7 @@ export abstract class ChannelBase {
         }
       }
 
-      const sessionId = this.router.getSession(
-        this.name,
-        envelope.senderId,
-        envelope.chatId,
-        envelope.threadId,
-      );
+      const sessionId = await this.currentSessionId(envelope);
       const agentCommands = sessionId
         ? this.getAgentCommandsForSession(sessionId)
         : this.bridge.availableCommands;
@@ -3163,12 +3508,14 @@ export abstract class ChannelBase {
         );
         return true;
       }
-      const hasSession = this.router.hasSession(
-        this.name,
-        envelope.senderId,
-        envelope.chatId,
-        envelope.threadId,
-      );
+      const hasSession = this.namedSessions
+        ? Boolean(await this.currentSessionId(envelope))
+        : this.router.hasSession(
+            this.name,
+            envelope.senderId,
+            envelope.chatId,
+            envelope.threadId,
+          );
       const policy = this.config.senderPolicy;
       const lines = [
         `Session: ${hasSession ? 'active' : 'none'}`,
@@ -3667,6 +4014,15 @@ export abstract class ChannelBase {
       envelope.chatId,
       envelope.threadId,
     );
+    return sessionId && this.activePrompts.has(sessionId)
+      ? sessionId
+      : undefined;
+  }
+
+  private async findNamedActiveSessionId(
+    envelope: Envelope,
+  ): Promise<string | undefined> {
+    const sessionId = await this.currentSessionId(envelope);
     return sessionId && this.activePrompts.has(sessionId)
       ? sessionId
       : undefined;
@@ -4853,9 +5209,18 @@ export abstract class ChannelBase {
     return `${GROUP_HISTORY_CONTEXT_MARKER}\n${formatted.join('\n')}\n\n${CURRENT_MESSAGE_MARKER}\n${promptText}`;
   }
 
-  protected preflightInbound(envelope: Envelope): boolean | Promise<boolean> {
-    const groupResult = this.groupGate.check(envelope);
-    if (!groupResult.allowed) {
+  protected preflightInbound(
+    envelope: Envelope,
+    options: PreflightInboundOptions = {},
+  ): boolean | Promise<boolean> {
+    const groupResult = this.groupGate.check(envelope, {
+      createPairingRequest: !options.deferPairingRequests,
+    });
+    const deferredGroupPairing =
+      options.deferPairingRequests === true &&
+      groupResult.reason === 'pairing_trigger_required' &&
+      (envelope.isMentioned || envelope.isReplyToBot);
+    if (!groupResult.allowed && !deferredGroupPairing) {
       if (groupResult.pairing !== undefined) {
         this.logPreflightRejected('group_pairing_required');
         return this.onGroupPairingRequired(
@@ -4892,6 +5257,15 @@ export abstract class ChannelBase {
     }
 
     if (envelope.isGroup && this.config.groupPolicy === 'pairing') {
+      this.markPreflighted(envelope);
+      return true;
+    }
+
+    if (
+      options.deferPairingRequests === true &&
+      this.config.senderPolicy === 'pairing' &&
+      !this.gate.isAllowed(envelope.senderId)
+    ) {
       this.markPreflighted(envelope);
       return true;
     }
@@ -4954,8 +5328,67 @@ export abstract class ChannelBase {
   async handleInbound(envelope: Envelope): Promise<void> {
     const preflight = this.preflightInbound(envelope);
     if (!(isPromiseLike(preflight) ? await preflight : preflight)) return;
+    await this.processPreflightedInbound(envelope);
+  }
 
-    await this.processInbound(envelope);
+  protected async prepareThenHandleInbound(
+    envelope: Envelope,
+    prepare: () => Promise<boolean | void>,
+    preflightOptions: PreflightInboundOptions = {},
+  ): Promise<void> {
+    const preflight = this.preflightInbound(envelope, preflightOptions);
+    if (!(isPromiseLike(preflight) ? await preflight : preflight)) return;
+    if (this.namedSessions) {
+      const result = await this.namedSessions.resolveAfterPreparation(
+        this.namedSessionOwner(envelope),
+        prepare,
+        () => !this.bypassesNamedTurnBinding(envelope),
+        (sessionId) => {
+          const binding = this.bindNamedTurn(envelope, sessionId);
+          return () => this.releaseNamedTurnBinding(binding);
+        },
+      );
+      if (result.status === 'aborted') return;
+      if (result.status === 'resolve_error') {
+        this.finishNamedTurnBinding(envelope);
+        await this.sendNamedSessionError(envelope, result.error);
+        return;
+      }
+      if (
+        result.status === 'resolved' &&
+        !result.sessionId &&
+        !this.namedTurnBindings.has(envelope)
+      ) {
+        this.namedTurnBindings.set(envelope, {
+          sessionId: null,
+          generation: 0,
+          claimed: false,
+          released: true,
+        });
+      }
+    } else if ((await prepare()) === false) {
+      return;
+    }
+    try {
+      await this.handleInbound(envelope);
+    } finally {
+      this.finishNamedTurnBinding(envelope);
+    }
+  }
+
+  protected async processPreflightedInbound(
+    envelope: Envelope,
+    process: () => Promise<void> = () => this.processInbound(envelope),
+  ): Promise<void> {
+    if (this.namedSessions && !(await this.prepareNamedTurnBinding(envelope))) {
+      return;
+    }
+
+    try {
+      await process();
+    } finally {
+      this.finishNamedTurnBinding(envelope);
+    }
   }
 
   protected async recordObservedContact(envelope: Envelope): Promise<void> {
@@ -5148,14 +5581,74 @@ export abstract class ChannelBase {
     // Preprocessing above can await memory/command hooks; recovery may have
     // started since the entry check. Recheck immediately before session routing.
     await this.waitForBridgeRecovery();
-    const sessionId = await this.router.resolve(
-      this.name,
-      envelope.senderId,
-      envelope.chatId,
-      envelope.threadId,
-      this.config.cwd,
-      envelope.isGroup,
-    );
+    let sessionId: string | undefined;
+    let namedTurn = this.namedTurnBindings.get(envelope);
+    if (this.namedSessions && namedTurn) {
+      if (namedTurn.sessionId === null) {
+        await this.sendThreadMessage(
+          envelope.chatId,
+          envelope.threadId,
+          'No task was selected when this message was received. Select a task and send it again.',
+        );
+        return;
+      }
+      if (
+        this.dropQueuedTurnIfStale(
+          namedTurn.sessionId,
+          namedTurn.generation,
+          envelope,
+        )
+      ) {
+        return;
+      }
+      try {
+        sessionId = await this.namedSessions.resolve(
+          this.namedSessionOwner(envelope),
+          namedTurn.sessionId,
+        );
+      } catch (error) {
+        await this.sendNamedSessionError(envelope, error);
+        return;
+      }
+      if (!sessionId) {
+        process.stderr.write(
+          `[${this.name}] dropped collected turn from ${envelope.senderId} for session ${namedTurn.sessionId}: selected task changed before it ran\n`,
+        );
+        return;
+      }
+    } else if (this.namedSessions) {
+      try {
+        sessionId = await this.namedSessions.resolve(
+          this.namedSessionOwner(envelope),
+          undefined,
+          (resolvedSessionId) => {
+            const binding = this.bindNamedTurn(envelope, resolvedSessionId);
+            namedTurn = binding;
+            return () => this.releaseNamedTurnBinding(binding);
+          },
+        );
+      } catch (error) {
+        await this.sendNamedSessionError(envelope, error);
+        return;
+      }
+      if (!sessionId) {
+        await this.sendThreadMessage(
+          envelope.chatId,
+          envelope.threadId,
+          'No task is currently selected. Use /session new <name> or /session use <name>.',
+        );
+        return;
+      }
+    } else {
+      sessionId = await this.router.resolve(
+        this.name,
+        envelope.senderId,
+        envelope.chatId,
+        envelope.threadId,
+        this.config.cwd,
+        envelope.isGroup,
+      );
+    }
 
     // Bang (!) execution — a private 1:1 session has a single operator, so
     // direct shell execution stays allowed. Group/shared contexts were refused
@@ -5461,13 +5954,17 @@ export abstract class ChannelBase {
     // a fresh Promise.resolve()) is what guarantees this turn never runs while the
     // turn it supersedes is still active — see the steer branch above.
     const prev = this.sessionQueues.get(sessionId) ?? Promise.resolve();
-    // Snapshot the session generation at enqueue time to guard against a /clear
-    // racing this turn. There is no await between reading `active` above and this
-    // snapshot, so the capture is atomic with the enqueue; if /clear bumps the
-    // generation before this turn dequeues, the session we captured is gone — bail
-    // (at the dequeue guard below) rather than resurrect it.
-    const generation = this.sessionGenerations.get(sessionId) ?? 0;
+    // Fresh turns snapshot the generation at enqueue time. A collected re-entry
+    // keeps the generation captured when its buffer drained, so /clear cannot
+    // resurrect it while preprocessing runs before this queue.
+    const generation =
+      namedTurn?.generation ?? this.sessionGenerations.get(sessionId) ?? 0;
     const useBlockStreaming = this.config.blockStreaming === 'on';
+    if (namedTurn) {
+      namedTurn.claimed = true;
+    } else {
+      this.reserveQueuedTurn(sessionId);
+    }
     const current = prev.then(async () => {
       // Disarm the steer watchdog: the predecessor's tail has resolved, so this
       // chained turn is no longer wedged behind it. No-op when unarmed (the timer is
@@ -5832,53 +6329,21 @@ export abstract class ChannelBase {
         // settles late can't drain a buffer a later turn now owns. (Belt-and-
         // suspenders: /clear already deletes the buffer on eviction, so this guard
         // is defensive — but it keeps the invariant "only the current turn drains".)
-        const buffer = this.collectBuffers.get(sessionId);
-        if (stillCurrent && buffer && buffer.length > 0) {
-          this.collectBuffers.delete(sessionId);
-          const lost = buffer.length;
-          const coalesced = buffer.map((b) => b.text).join('\n\n');
-          const coalescedDisplayText = buffer
-            .map((b) => b.displayText)
-            .join('\n\n');
-          const lastEnvelope = buffer[buffer.length - 1]!.envelope;
-          this.notifyPromptBufferDrained(
-            lastEnvelope.chatId,
-            sessionId,
-            buffer,
-          );
-          // Re-enter handleInbound with the coalesced message
-          const syntheticEnvelope: Envelope = {
-            ...lastEnvelope,
-            text: coalesced,
-            displayText: coalescedDisplayText,
-            // Coalesced text already carries each message's [sender] prefix.
-            alreadyPrefixed: true,
-            // Clear attachments/references — already resolved in original text
-            referencedText: undefined,
-            mentionedMemberIds: undefined,
-            attachments: undefined,
-            metadata: undefined,
-            imageBase64: undefined,
-            imageMimeType: undefined,
-          };
-          this.markPreflighted(syntheticEnvelope);
-          // Queue the coalesced prompt (don't await to avoid deadlock on the queue).
-          // Surface a drain failure instead of silently losing buffered turns.
-          this.processInbound(syntheticEnvelope).catch((err) => {
-            process.stderr.write(
-              `[${this.name}] dropped ${lost} buffered message(s) on collect re-entry for session ${sessionId} (last sender ${lastEnvelope.senderId}): ${
-                err instanceof Error ? err.message : String(err)
-              }\n`,
-            );
-          });
-        }
+        this.drainCollectBufferForCurrentPrompt(
+          sessionId,
+          stillCurrent,
+          'prompt completion',
+        );
       }
+    });
+    const tracked = current.finally(() => {
+      this.releaseQueuedTurn(sessionId);
     });
     this.sessionQueues.set(
       sessionId,
-      current.catch(() => {}),
+      tracked.catch(() => {}),
     );
-    await current;
+    await tracked;
   }
 
   private pairingRejectionMessage(
