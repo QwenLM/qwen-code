@@ -463,4 +463,65 @@ describe('TeamManager ghost member regression (#10208)', () => {
       .teamFile;
     expect(inMemory.members.map((m) => m.name)).toEqual(['alpha']);
   });
+
+  it('still rejects with the original spawn error when the compensating-write failure notice throws', async () => {
+    const h = await createHarness();
+    const teamName = h.teamName;
+    const backend = h.backend;
+
+    const deferredA = createDeferred<void>();
+    const deferredB = createDeferred<void>();
+    gateSpawns(
+      backend,
+      new Map([
+        [formatAgentId('alpha', teamName), deferredA.promise],
+        [formatAgentId('beta', teamName), deferredB.promise],
+      ]),
+      { passthroughUnknown: true },
+    );
+
+    // Start both spawns so beta is already in the live roster when
+    // alpha's success write lands — that write is what gates beta's
+    // compensating write in.
+    const spawnA = h.teamManager.spawnTeammate({
+      name: 'alpha',
+      cwd: h.tmpDir,
+    });
+    const spawnB = h.teamManager.spawnTeammate({
+      name: 'beta',
+      cwd: h.tmpDir,
+    });
+    await new Promise((r) => setTimeout(r, 50));
+
+    // A succeeds; its success write lands before we arm the spy.
+    deferredA.resolve();
+    await spawnA;
+
+    // The leader notification for a failed compensating write is itself
+    // guarded by an inner try/catch: if the callback throws, the guard
+    // must keep the original spawn error as the rejection reason.
+    // Without the inner catch the callback error escapes the
+    // write-failure handler and masks it.
+    const leaderSpy = vi.fn().mockImplementation(() => {
+      throw new Error('cb boom');
+    });
+    h.teamManager.setLeaderMessageCallback(leaderSpy);
+
+    // Make the next roster write (beta's compensating write) fail.
+    vi.spyOn(teamHelpers, 'writeTeamFile').mockRejectedValueOnce(
+      new Error('ENOSPC: no space left on device'),
+    );
+
+    deferredB.reject(new Error('spawn failed'));
+
+    await expect(spawnB).rejects.toThrow('spawn failed');
+    // The throwing notification was attempted exactly once.
+    expect(leaderSpy).toHaveBeenCalledTimes(1);
+
+    const inMemory = (h.teamManager as unknown as { teamFile: TeamFile })
+      .teamFile;
+    const inMemoryNames = inMemory.members.map((m) => m.name);
+    expect(inMemoryNames).toContain('alpha');
+    expect(inMemoryNames).not.toContain('beta');
+  });
 });
