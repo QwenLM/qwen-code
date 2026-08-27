@@ -193,6 +193,26 @@ describe('AdvisorTool', () => {
     expect(schemaFailure.error?.message).toContain('invalid structured output');
   });
 
+  it('accepts structured Advisor JSON returned as text', async () => {
+    mockRunForkedAgent.mockResolvedValueOnce({
+      text: `\`\`\`json\n${JSON.stringify(review)}\n\`\`\``,
+      jsonResult: undefined,
+      usage: { inputTokens: 10, outputTokens: 5, cacheHitTokens: 0 },
+      model: 'advisor-model',
+    });
+
+    const result = await new AdvisorTool(makeConfig())
+      .build({})
+      .execute(new AbortController().signal);
+
+    expect(result.error).toBeUndefined();
+    expect(result.returnDisplay).toEqual({
+      type: 'advisor_review',
+      model: 'advisor-model',
+      ...review,
+    });
+  });
+
   it('propagates cancellation', async () => {
     const controller = new AbortController();
     const abortError = new Error('cancelled');

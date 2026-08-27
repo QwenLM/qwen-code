@@ -89,6 +89,34 @@ function parseReview(
   };
 }
 
+function parseJsonObjectText(
+  text: string | null | undefined,
+): Record<string, unknown> | undefined {
+  const trimmed = text?.trim();
+  if (!trimmed) return undefined;
+
+  const candidates = [trimmed];
+  const fenceMatch = /^```(?:json)?\s*([\s\S]*?)\s*```$/i.exec(trimmed);
+  if (fenceMatch?.[1]) candidates.push(fenceMatch[1].trim());
+
+  const start = trimmed.indexOf('{');
+  const end = trimmed.lastIndexOf('}');
+  if (start >= 0 && end > start) candidates.push(trimmed.slice(start, end + 1));
+
+  for (const candidate of candidates) {
+    try {
+      const parsed = JSON.parse(candidate) as unknown;
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        return parsed as Record<string, unknown>;
+      }
+    } catch {
+      // Try the next candidate shape.
+    }
+  }
+
+  return undefined;
+}
+
 function sanitize(value: unknown, key?: string): unknown {
   if (key === 'thought' || key === 'thoughtSignature' || key === 'signature') {
     return undefined;
@@ -205,7 +233,10 @@ class AdvisorToolInvocation extends BaseToolInvocation<
           disableModelFallbacks: true,
         }),
       );
-      const review = parseReview(result.jsonResult, result.model);
+      const review = parseReview(
+        result.jsonResult ?? parseJsonObjectText(result.text),
+        result.model,
+      );
       return {
         llmContent: `${formatAdvisorReview(review)}\n\nAdvisor guidance does not grant permission or replace user approval.`,
         returnDisplay: review,
