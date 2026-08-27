@@ -7,6 +7,7 @@
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import process from 'node:process';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   PairingStore,
@@ -1102,29 +1103,37 @@ describe('DwsChannel', () => {
   });
 
   it('lets polling recover a stale replayed direct message', async () => {
-    const client = new FakeDwsClient();
-    const channel = await readyChannel(client);
-    const replay = message(
-      'user_im_message_receive_o2o_all',
-      'replayed-direct',
-      'stale direct request',
-      { eventTime: Date.now() - 60_000 },
-    );
-    client.directMessages = [replay];
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    try {
+      const client = new FakeDwsClient();
+      const channel = await readyChannel(client);
+      const replay = message(
+        'user_im_message_receive_o2o_all',
+        'replayed-direct',
+        'stale direct request',
+        { eventTime: Date.now() - 60_000 },
+      );
+      client.directMessages = [replay];
 
-    await client.emit(1, replay);
-    await channel.poll();
+      await client.emit(1, replay);
+      expect(stderr).toHaveBeenCalledWith(
+        expect.stringContaining('parked a stale direct message'),
+      );
+      await channel.poll();
 
-    expect(channel.inbound).toEqual([
-      expect.objectContaining({
-        chatId: 'cid-1',
-        messageId: 'replayed-direct',
-        text: 'stale direct request',
-      }),
-    ]);
+      expect(channel.inbound).toEqual([
+        expect.objectContaining({
+          chatId: 'cid-1',
+          messageId: 'replayed-direct',
+          text: 'stale direct request',
+        }),
+      ]);
 
-    await channel.poll();
-    expect(channel.inbound).toHaveLength(1);
+      await channel.poll();
+      expect(channel.inbound).toHaveLength(1);
+    } finally {
+      stderr.mockRestore();
+    }
   });
 
   // R4-4: the pullback above only rescues the replay if the poll that was in
@@ -1758,6 +1767,26 @@ describe('DwsChannel', () => {
         isGroup: false,
       }),
     ]);
+  });
+
+  // R1-7: every history window re-opens at `watermark - 5s`, so every
+  // live-dispatched direct message is re-fetched by a later poll. The
+  // processed-key guard is the only thing standing between that refetch and
+  // a duplicate agent turn.
+  it('deduplicates a direct message delivered by the live stream and history', async () => {
+    const client = new FakeDwsClient();
+    const channel = await readyChannel(client);
+    const event = message(
+      'user_im_message_receive_o2o_all',
+      'live-and-history',
+      'hello once',
+    );
+
+    await client.emit(1, event);
+    client.directMessages = [event];
+    await channel.poll();
+
+    expect(channel.inbound).toHaveLength(1);
   });
 
   it('applies sender pairing to a direct message recovered from history', async () => {
@@ -3886,6 +3915,39 @@ describe('DwsChannel', () => {
     expect(channel.inboundAttempts).toBe(5);
   });
 
+  // R1-1: `replayPendingMessages` already re-drives a parked direct message
+  // every poll, so the history dispatch must skip it. Driving it from both
+  // surfaces spent the shared retry budget twice per poll, dropping a message
+  // after a transient outage barely longer than two poll intervals.
+  it('spends one retry per poll on a failed direct message also in history', async () => {
+    const client = new FakeDwsClient();
+    const channel = await readyChannel(client);
+    channel.inboundError = new Error('agent unavailable');
+    const event = message(
+      'user_im_message_receive_o2o_all',
+      'direct-history-retry',
+      'please retry this direct request',
+    );
+    client.directMessages = [event];
+
+    await expect(client.emit(1, event)).rejects.toThrow('agent unavailable');
+    await channel.poll();
+    await channel.poll();
+
+    expect(channel.inboundAttempts).toBe(3);
+
+    channel.inboundError = undefined;
+    await channel.poll();
+
+    expect(channel.inboundAttempts).toBe(4);
+    expect(channel.inbound).toEqual([
+      expect.objectContaining({
+        chatId: 'cid-1',
+        messageId: 'direct-history-retry',
+      }),
+    ]);
+  });
+
   // R4-1: the budget above was wired into the mention path only. A document
   // notification whose turn throws escaped `pollOnce`'s sorted loop, so
   // nothing was marked processed, the checkpoint and watermark never advanced,
@@ -4172,7 +4234,9 @@ describe('DwsChannel', () => {
       'message-1',
       'open-alice',
       'final answer',
-      expect.any(String),
+      expect.stringMatching(
+        /^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-8[0-9a-f]{3}-[0-9a-f]{12}$/,
+      ),
     );
     expect(client.sendImMessage).not.toHaveBeenCalled();
   });

@@ -1128,20 +1128,17 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
       );
       for (const message of page.messages) {
         if (signal.aborted || !this.connected) return;
-        if (this.isSelfMessage(message)) {
-          this.markProcessedMessage(messageKey(message));
+        // A parked message is already re-driven every poll by
+        // `replayPendingMessages`; dispatching it here too would spend the
+        // shared retry budget twice per poll.
+        if (
+          (this.cursor.pendingMessages ?? []).some(
+            (pending) => messageKey(pending.message) === messageKey(message),
+          )
+        ) {
           continue;
         }
-        const key = messageKey(message);
-        if (this.cursor.processedMessages.includes(key)) {
-          continue;
-        }
-        const notification = parseDocumentMentionNotification(message.content);
-        if (notification) {
-          await this.processDocumentNotification(message, key, notification);
-        } else {
-          await this.handleImMessage({ kind: 'direct' }, message, true);
-        }
+        await this.handleImMessage({ kind: 'direct' }, message, true);
       }
       if (this.notificationWatermarkPulledBack) {
         // R4-4: a stale direct message replayed while this window's
@@ -1495,6 +1492,9 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
       // a replay no window will ever cover. Drop the checkpoint here too, so
       // the pullback survives regardless of when it arrived.
       this.cursor.notificationCheckpoint = undefined;
+      process.stderr.write(
+        `[Channel:${this.name}] parked a stale direct message for history polling and pulled the watermark back to ${message.eventTime}: ${sanitizeLogText(message.messageId, 120)}\n`,
+      );
       this.saveCursor();
       return;
     }
