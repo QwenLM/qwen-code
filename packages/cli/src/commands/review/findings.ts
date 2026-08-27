@@ -128,6 +128,25 @@ export interface Finding {
    * recorded string instead of transcribing it twice more.
    */
   fixWitness?: string;
+  /**
+   * An existing fact the fix must not violate, with its source — the quoted
+   * constant or a `file:line`: a configured limit any new bound must stay
+   * within, a second site that reads the field a shape change touches, a
+   * uniqueness a newly shared resource's key currently guarantees.
+   *
+   * `fixWitness` pins the fix's CLAIM — does it do what it says. This pins
+   * the fix's PREMISES — do the assumptions it newly introduces hold. Those
+   * are a different defect class and pass a witnessed test cleanly: two
+   * Criticals on one merged fix each had the test that reds without the
+   * guard, and were still wrong — a hand-picked lineage cap below the
+   * user-configurable `MAX_SUBAGENT_DEPTH_LIMIT`, and a shared registry that
+   * broke a `callId` uniqueness relied on elsewhere (#10153).
+   *
+   * Absence is the whole signal: there is no `N/A` form, because an empty
+   * constraint carries no information and would lengthen every comment, so
+   * the validator drops a literal `N/A` rather than carrying it.
+   */
+  fixConstraint?: string;
   /** Free-form kebab-case tag (`correctness`, `security`, `test-coverage`, …). */
   category?: string;
   /** Every location, in report order. A standalone finding has exactly one. */
@@ -181,6 +200,18 @@ function fail(index: number, message: string): never {
 function asString(o: Record<string, unknown>, key: string): string | undefined {
   const v = o[key];
   return typeof v === 'string' && v.trim() !== '' ? v : undefined;
+}
+
+/** `N/A`, `n/a`, `NA`, `none`, `none observed`, `no constraints observed` —
+ * the placeholders a field with no `N/A` form must not carry; the two long
+ * ones are the exact omission literals the pipeline itself names, so the
+ * finder told to omit the line is the one the drop catches. Kept narrow on
+ * purpose: a real constraint quotes a constant or a `file:line`, and none
+ * of those collapse to one of these words. */
+function isNotApplicable(v: string): boolean {
+  return /^(none observed|no constraints observed|n\/?a|none)\.?$/i.test(
+    v.trim(),
+  );
 }
 
 /** A non-empty array of non-empty strings, or undefined; anything else fails
@@ -422,6 +453,19 @@ export function validateFindings(raw: unknown): Finding[] {
     // a later round comparing what it asked for against what landed.
     const fixWitness = asString(o, 'fixWitness') ?? asString(o, 'fix_witness');
 
+    // And `fixConstraint` beside it — the existing fact the fix must not
+    // violate. Unlike `fixWitness` it has no `N/A` form: absence is the whole
+    // signal, and a finder that copies the sibling field's habit and writes
+    // `N/A` here would otherwise hand Step 7 a "constraint" to post. The
+    // literal is normalised to absence so the comment body can key on
+    // presence alone.
+    const fixConstraintRaw =
+      asString(o, 'fixConstraint') ?? asString(o, 'fix_constraint');
+    const fixConstraint =
+      fixConstraintRaw && !isNotApplicable(fixConstraintRaw)
+        ? fixConstraintRaw
+        : undefined;
+
     return {
       id,
       severity,
@@ -434,6 +478,7 @@ export function validateFindings(raw: unknown): Finding[] {
       failureScenario,
       ...(witness ? { witness } : {}),
       ...(fixWitness ? { fixWitness } : {}),
+      ...(fixConstraint ? { fixConstraint } : {}),
       ...(asString(o, 'suggestedFix') || asString(o, 'suggested_fix')
         ? {
             suggestedFix: (asString(o, 'suggestedFix') ??

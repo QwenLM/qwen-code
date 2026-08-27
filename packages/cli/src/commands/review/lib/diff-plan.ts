@@ -803,3 +803,33 @@ export function chunksCoverDiff(
   }
   return expected === diffLines + 1;
 }
+
+/**
+ * Cut a captured diff down to the file sections named by `keep`, by BYTES.
+ *
+ * The capture contract is bytes end to end: a decode/re-encode rewrites the
+ * content of every hunk touching a file git handed over in a non-UTF-8
+ * encoding. The caller passes the 1-based inclusive LINE ranges `parseDiff`
+ * reported per file (`diffStart`/`diffEnd`), and this maps them to byte
+ * ranges over the same newline structure `parseDiff` walked. Slicing an
+ * existing diff — rather than re-capturing with pathspecs — is also what
+ * keeps RENAME sections intact: a pathspec-scoped `git diff` cannot see the
+ * rename source, un-pairs the rename, and renders the file as a whole-file
+ * add whose hunks exist nowhere in the original diff.
+ */
+export function sliceDiffByLines(
+  diff: Buffer,
+  keep: ReadonlyArray<{ startLine: number; endLine: number }>,
+): Buffer {
+  // Byte offset of the start of each 1-based line; sentinel = buffer length.
+  const starts: number[] = [0];
+  for (let i = 0; i < diff.length; i++) {
+    if (diff[i] === 0x0a) starts.push(i + 1);
+  }
+  const offsetOf = (line1: number): number =>
+    line1 - 1 < starts.length ? starts[line1 - 1] : diff.length;
+  const parts = [...keep]
+    .sort((a, b) => a.startLine - b.startLine)
+    .map((r) => diff.subarray(offsetOf(r.startLine), offsetOf(r.endLine + 1)));
+  return Buffer.concat(parts);
+}
