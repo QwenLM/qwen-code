@@ -5071,6 +5071,46 @@ describe('per-chunk retirement — cold territories stop costing a round', () =>
     expect(out).toContain('chunk 14 — not a delta territory, dry in round 2');
   });
 
+  it('a delta list no chunk covers degrades to the ordinary schedule, never an empty narrowing (#10104)', () => {
+    // A hand-edited plan can name delta files no chunk holds — an honest
+    // capture cannot produce the disjoint state, so the input class is the
+    // corrupted plan these gates exist for. An EMPTY delta-territory set
+    // would treat every chunk as non-delta: from round 3 each leaves after
+    // one dry receipt, the round exits 5 on a false "clean convergence",
+    // and the territory this round exists to audit was examined only in
+    // rounds 1-2. Every sibling reader fails malformed input toward MORE
+    // coverage; the schedule must too — null restores the byte-for-byte
+    // ordinary schedule.
+    const fixAuditPlan = {
+      ...PLAN,
+      incremental: {
+        since: 'a'.repeat(40),
+        effective: true,
+        posture: 'critical',
+        postureCause: 'round',
+        scope: {
+          anchor: 'a'.repeat(40),
+          deltaFiles: ['src/disjoint.ts'],
+          interaction: [],
+        },
+      },
+    };
+    writeFileSync(plan, JSON.stringify(fixAuditPlan));
+    const old = new Date(2020, 0, 1);
+    utimesSync(plan, old, old);
+
+    answerRound(1, { 13: YIELD, 14: DRY, 15: DRY });
+    answerRound(2, { 13: DRY, 14: DRY, 15: DRY });
+    const out = runRound(3);
+
+    expect(process.exitCode).toBeUndefined();
+    // Chunk 13 yielded in round 2, so the ordinary rules keep it hot; 14
+    // and 15 retire on two dry rounds.
+    expect(out).toContain('1 auditors required this round');
+    expect(out).toContain('— chunk 13 ─');
+    expect(out).not.toContain('posture narrowing (#10104)');
+  });
+
   it('round 3 skips a chunk dry in rounds 1 and 2, and the note names it', () => {
     answerRound(1, { 13: DRY, 14: YIELD, 15: YIELD });
     answerRound(2, { 13: DRY, 14: YIELD, 15: YIELD });
@@ -6961,6 +7001,10 @@ describe('incremental-scope briefs', () => {
     const delta = buildChunkAgentPrompt(fixAudit, 1);
     expect(delta).toContain('Fix-audit round (critical posting posture)');
     expect(delta).toContain('the floor governs posting, never');
+    // The banner's deferral claim carries the deterministic carve-out the
+    // reroute applies — an auditor trusting "never posted" unqualified
+    // could drop a `[test]` finding the floor keeps inline at any floor.
+    expect(delta).toContain('never posted — except pre-confirmed');
 
     const seam = buildChunkAgentPrompt(fixAudit, 2);
     expect(seam).toContain('SEAM-BOUNDED: 1 of 4 hunk(s)');

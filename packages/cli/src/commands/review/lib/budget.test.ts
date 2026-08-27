@@ -1280,6 +1280,30 @@ describe('isFixAuditRound and the topology override (#10104)', () => {
         false,
       ),
     ).toBe(10);
+
+    // …but a delta list mixing a valid path with an empty string is one the
+    // brief builder ACCEPTS — `incrementalScopeOf` rejects only non-string
+    // elements and filters '' AFTER admission — so the shape readers must
+    // accept it too, or the briefs render an incremental frame while every
+    // isFixAuditRound reader goes full: the exact two-reader disagreement
+    // this bar exists to eliminate.
+    expect(
+      isFixAuditRound({
+        incremental: {
+          ...POSTURE.incremental,
+          scope: { ...scope, deltaFiles: ['x.ts', ''] },
+        },
+      }),
+    ).toBe(true);
+    expect(
+      isTerritoryFanOut({
+        ...small,
+        incremental: {
+          ...POSTURE.incremental,
+          scope: { ...scope, deltaFiles: ['x.ts', ''] },
+        },
+      }),
+    ).toBe(true);
   });
 
   it('flips a small plan into the territory fan-out', () => {

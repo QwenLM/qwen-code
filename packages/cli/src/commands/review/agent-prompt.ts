@@ -779,7 +779,9 @@ export function buildChunkAgentPrompt(
         0,
         `**Fix-audit round (critical posting posture).** The commits since the anchor ` +
           `answer earlier rounds' findings, and this round's posting floor is Critical — ` +
-          `everything below it is recorded and deferred, never posted. Spend your walk ` +
+          `everything below it is recorded and deferred, never posted — except ` +
+          `pre-confirmed \`[build]\`/\`[test]\`/\`[probe]\` findings, which stay inline at any ` +
+          `floor. Spend your walk ` +
           `where such a round's signal measurably lives: for each change in your ` +
           `territory, work out what the fix changed and what that change could break — ` +
           `the guard added with no test of its own, the caller the moved callee leaves ` +
@@ -2802,7 +2804,13 @@ function noteUncertifiedChunks(planPath: string, diagnostics: string[]): void {
  * a delta file. Null everywhere the posture is off, so the schedule is
  * byte-for-byte what it always was. A chunk holding only interaction files
  * is NOT a delta territory — it is exactly the territory the narrowing
- * exists to stop re-auditing once provably dry.
+ * exists to stop re-auditing once provably dry. Null ALSO when no chunk
+ * covers a delta file: an honest capture cannot produce that disjoint state
+ * (delta files come from the narrowing's own touched set, and chunks tile
+ * the published diff), so the input is a hand-edited plan — and an empty
+ * set would treat EVERY chunk as non-delta, converging the loop after one
+ * dry receipt each. Every sibling reader fails malformed input toward more
+ * coverage; null restores the ordinary schedule and does the same.
  */
 function postureNarrowing(
   report: PlanReport,
@@ -2824,6 +2832,7 @@ function postureNarrowing(
       ids.add(c.id as number);
     }
   }
+  if (ids.size === 0) return null;
   return { deltaChunkIds: ids };
 }
 

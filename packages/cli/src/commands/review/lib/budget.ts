@@ -259,8 +259,9 @@ export interface DiffSize {
  * direction.
  *
  * It lives here beside `isTerritoryFanOut` because this module must stay
- * import-free; the topology gate reads it here, and the roster's Agent-0
- * exclusion plus the brief builder's posture frame read it back directly.
+ * import-free; the topology gate and the round-cap tier read it here, and
+ * the floor's fix-audit arm plus the brief builder's posture frame read it
+ * back directly.
  */
 export function isFixAuditRound(plan: { incremental?: unknown }): boolean {
   const inc = plan?.incremental;
@@ -272,13 +273,17 @@ export function isFixAuditRound(plan: { incremental?: unknown }): boolean {
   };
   if (rec.posture !== 'critical' || rec.effective !== true) return false;
   // The scope must pass the bar the brief builder applies — a non-empty
-  // anchor and a delta list that IS one (present, all non-empty strings) —
-  // or a posture beside a scope `incrementalScopeOf` rejects would shrink
-  // the roster while the briefs degrade to full-scope, two readers
-  // disagreeing about one plan. The bar is stricter than the builder's only
-  // where the builder would still render an incremental frame (an
-  // interaction-only scope): that then reads as the ordinary full shape —
-  // the safe direction, as always here.
+  // anchor and a delta list that IS one — or a posture beside a scope
+  // `incrementalScopeOf` rejects would shrink the roster while the briefs
+  // degrade to full-scope, two readers disagreeing about one plan. The bar
+  // meets the builder's OWN reading of that list: `incrementalScopeOf`
+  // rejects only non-string elements and filters '' AFTER admission, so a
+  // list mixing a valid path with an empty string renders an incremental
+  // frame there and must engage the posture here (an all-or-nothing bar let
+  // the briefs narrow while every reader below went full). The bar is
+  // stricter than the builder's only where the builder would still render
+  // an incremental frame (an interaction-only scope): that then reads as
+  // the ordinary full shape — the safe direction, as always here.
   const scope = rec.scope as
     | { anchor?: unknown; deltaFiles?: unknown }
     | null
@@ -289,8 +294,8 @@ export function isFixAuditRound(plan: { incremental?: unknown }): boolean {
     typeof scope.anchor === 'string' &&
     scope.anchor !== '' &&
     Array.isArray(scope.deltaFiles) &&
-    scope.deltaFiles.length > 0 &&
-    scope.deltaFiles.every((p) => typeof p === 'string' && p !== '')
+    scope.deltaFiles.every((p) => typeof p === 'string') &&
+    scope.deltaFiles.some((p) => typeof p === 'string' && p !== '')
   );
 }
 

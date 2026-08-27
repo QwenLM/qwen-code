@@ -567,8 +567,8 @@ function floorResolvesCritical(
   // The fix-audit arm (#10104): the PLAN records that the capture resolved
   // this round's posture to critical from the same side-file facts the two
   // arms above read — and the round's SHAPE was spent on that resolution
-  // (narrowed fan-out, no Agent 0, seam-bounded republication, narrowed
-  // waves). Where the arms above cannot re-derive it — a context-unavailable
+  // (narrowed fan-out, seam-bounded republication, narrowed waves).
+  // Where the arms above cannot re-derive it — a context-unavailable
   // compose, or a side file rewritten between capture and compose — the
   // plan's own record still resolves the floor, because the alternative is
   // the one combination nothing licenses: a round that narrowed its
@@ -594,9 +594,12 @@ function floorResolvesCritical(
  * exists as code, here, where the drafts are already in hand.
  *
  * Enforcement fires ONLY where the deferral licence already holds: an
- * explicit `critical` floor at any round, `auto` at round ≥ 6, or `auto`
- * with the flat-trend streak at its bar (#9903) — the `auto` arms only
- * with the round knowable. Everything else fails OPEN exactly as the
+ * explicit `critical` floor at any round, `auto` at round ≥ 6, `auto`
+ * with the flat-trend streak at its bar (#9903) — those two `auto` arms
+ * only with the round knowable — or `auto` beside the plan's own fix-audit
+ * record (#10104), which holds even context-unavailable and at round 1
+ * because the capture already spent the round's shape on the resolution.
+ * Everything else fails OPEN exactly as the
  * posture itself does — an unrecognisable floor, `auto` before round 6 with
  * the streak below its bar, `auto` in the context-unavailable state (the
  * round is unknowable), `--severity-floor suggestion` (posture off): a
@@ -2743,12 +2746,14 @@ function composeReviewBody(
   }
   // The channel's OTHER precondition: deferring is only ever licensed by
   // the posture — `critical` at any round; `auto` from round 2 (the
-  // code-age rule) and round 6 (the floor); never an explicit `suggestion`
-  // (the operator turned the posture off) and never round 1 of `auto` (no
-  // posture, no age reference). An unlicensed deferral is a model
-  // mis-execution that would silently un-post findings — but the response
-  // is a CAP, not a refusal: a thrown compose loses the WHOLE round,
-  // Criticals included, and `prevRound` is a best-effort side-file read
+  // code-age rule) and round 6 (the floor); `auto` beside the plan's own
+  // fix-audit record (#10104); never an explicit `suggestion` (the
+  // operator turned the posture off) and never round 1 of `auto` without
+  // that record (no posture, no age reference). An unlicensed deferral
+  // is a model mis-execution that would silently un-post findings — but
+  // the response is a CAP, not a refusal: a thrown compose loses the
+  // WHOLE round, Criticals included, and `prevRound` is a best-effort
+  // side-file read
   // whose every failure mode returns 0 — a missing file at a true round 6
   // must degrade to a disclosed, uncertified verdict, never to no verdict
   // at all. The findings render; the cap keeps anything from certifying
@@ -3353,15 +3358,26 @@ function composeReviewBody(
     'contextUnavailable',
   );
 
+  // The plan's posture record, read BEFORE the licence below (#10104): the
+  // same fact the floor arm in `composeReview` acted on. Where it is
+  // present the round's shape was already spent on the critical resolution,
+  // so its deferrals are licensed even in the two states the doubt arms
+  // below name — the licence may not flag the very deferral the floor arm
+  // enforced. The disclosure further down reads this same const.
+  const fixAudit = fixAuditShapeFacts(input.planPath);
+
   // The deferral licence, decided here because two of its arms need inputs
   // parsed above: deferring is only ever licensed by the posture —
   // `critical` at any round; `auto` from round 2 (the code-age rule) and
-  // round 6 (the floor); never an explicit `suggestion` (posture off),
-  // never round 1 of `auto` (no posture, no age reference), never `auto` in
-  // the context-unavailable state (the round is unknowable — SKILL resolves
-  // it as round 1), and never with the field ABSENT beside a non-empty list
-  // (the licence cannot be checked, and the channel ships in the same PR as
-  // the field — omission is fail-closed, not grandfathered). The response
+  // round 6 (the floor); `auto` beside the plan's own fix-audit record
+  // (#10104), whatever the round or the context state; never an explicit
+  // `suggestion` (posture off), never round 1 of `auto` WITHOUT the plan
+  // record (no posture, no age reference), never `auto` in the
+  // context-unavailable state WITHOUT the plan record (the round is
+  // unknowable — SKILL resolves it as round 1), and never with the field
+  // ABSENT beside a non-empty list (the licence cannot be checked, and the
+  // channel ships in the same PR as the field — omission is fail-closed,
+  // not grandfathered). The response
   // is a CAP, not a refusal: a thrown compose loses the whole round,
   // Criticals included, and `prevRound` is a best-effort side-file read
   // whose every failure mode returns 0 — a missing file at a true round 6
@@ -3375,9 +3391,9 @@ function composeReviewBody(
         ? 'the state carried no recognisable `severityFloor`, so the licence cannot be checked'
         : severityFloor === 'suggestion'
           ? 'the operator turned the posture off (`--severity-floor suggestion`)'
-          : severityFloor === 'auto' && contextUnavailable
+          : severityFloor === 'auto' && contextUnavailable && fixAudit === null
             ? 'the round is unknowable in the context-unavailable state'
-            : severityFloor === 'auto' && prevRound === 0
+            : severityFloor === 'auto' && prevRound === 0 && fixAudit === null
               ? 'no posture is engaged on round 1 and no age reference exists'
               : null;
   const presubmitRaw: unknown = input.presubmit ?? {};
@@ -4802,11 +4818,10 @@ function composeReviewBody(
   // The fix-audit round-shape disclosure (#10104), non-capping: when the
   // capture resolved the critical posture, the round's SHAPE changed — the
   // fan-out covered the delta and its seams instead of the full territory,
-  // interaction files republished seam-bounded, the reverse-audit waves
-  // narrowed, and Agent 0 did not run. Every one of those is a reduction the
+  // interaction files republished seam-bounded, and the reverse-audit waves
+  // narrowed. Every one of those is a reduction the
   // posted record must own rather than leave to a diff of agent counts, the
   // same accounting rule the retirement and floor-enforcement notes follow.
-  const fixAudit = fixAuditShapeFacts(input.planPath);
   const fixAuditCauseEn =
     fixAudit?.cause === 'explicit'
       ? 'the operator-set critical floor'
@@ -4831,25 +4846,34 @@ function composeReviewBody(
   // "recorded and deferred" beside the very Suggestions posting inline in
   // the same body.
   const fixAuditFloorEngaged = convergence?.floorEnforcementEngaged === true;
-  // The open-floor sentence names its true cause: an explicit `suggestion`
-  // floor the operator set, or a floor the state omitted and the strict
-  // reading cannot act on.
+  // The open-floor sentence names its true cause, and the causes are THREE
+  // distinct facts: an explicit `suggestion` floor the operator set, a
+  // floor the state omitted, and a present value the module cannot read —
+  // the strict reading fails open on all of them. Keying the split on the
+  // REPORTING resolution folded the third into the first: the compose state
+  // is model-written, and a transcribed drift ("critcal", "blocker", "")
+  // beside the plan record posted "the operator turned the posture off" —
+  // an operator intent that never happened.
   const fixAuditOpenCauseEn =
-    convergence?.criticalFloorKind === undefined
+    floorRaw === 'suggestion'
       ? '(the operator turned the posture off)'
-      : '(the floor record was absent, and the enforcement reading fails open)';
+      : input.severityFloor === undefined || input.severityFloor === null
+        ? '(the floor record was absent, and the enforcement reading fails open)'
+        : '(the state carried a floor value this module cannot read, and the strict reading cannot act on it)';
   const fixAuditOpenCauseZh =
-    convergence?.criticalFloorKind === undefined
+    floorRaw === 'suggestion'
       ? '（操作者关闭了该姿态）'
-      : '（下限记录缺失，强制读取按开放放行）';
+      : input.severityFloor === undefined || input.severityFloor === null
+        ? '（下限记录缺失，强制读取按开放放行）'
+        : '（状态携带了本模块无法识别的下限值，强制读取无法对其生效）';
   const fixAuditFloorEn = fixAuditFloorEngaged
-    ? 'Findings below Critical were recorded and deferred, never posted.'
+    ? 'Findings below Critical were recorded and deferred, never posted — except pre-confirmed `[build]`/`[test]`/`[probe]` findings, which stay inline at any floor.'
     : 'The posting floor itself resolved OPEN at compose time this round ' +
       fixAuditOpenCauseEn +
       ', so no finding was withheld by a floor — only the narrowed shape ' +
       'above applied.';
   const fixAuditFloorZh = fixAuditFloorEngaged
-    ? '低于 Critical 的发现只记录延后，不发布。'
+    ? '低于 Critical 的发现只记录延后，不发布——除了预确认的 `[build]`/`[test]`/`[probe]` 发现，它们在任何下限下都留在行内。'
     : '但本轮发布下限在 compose 期实际解析为开放' +
       fixAuditOpenCauseZh +
       '，没有任何发现被下限扣留——只有上述收窄形态生效。';
@@ -4869,14 +4893,14 @@ function composeReviewBody(
             `Round shape: this re-review ran as a fix-audit round under the critical ` +
             `posting posture (engaged by ${fixAuditCauseEn}) — the territory fan-out ` +
             `covered the commits since the previous round plus their import-seam ` +
-            `interaction files${fixAuditSeamEn}, the reverse-audit waves re-launched only ` +
-            `delta territories and chunks whose previous wave yielded, and the ` +
-            `issue-fidelity pass was not re-run. ${fixAuditFloorEn}`,
+            `interaction files${fixAuditSeamEn}, and the reverse-audit waves ` +
+            `re-launched only delta territories and chunks whose previous wave ` +
+            `yielded. ${fixAuditFloorEn}`,
           zh:
             `轮次形态：本次 re-review 以 critical 发布姿态下的 fix-audit 轮运行` +
             `（由${fixAuditCauseZh}触发）——领地扇出只覆盖上一轮以来的 commits 及其 ` +
             `import 接缝 interaction 文件${fixAuditSeamZh}，反向审计各波只重发 delta ` +
-            `领地与上一波出过发现的 chunk，且未重跑 issue-fidelity。${fixAuditFloorZh}`,
+            `领地与上一波出过发现的 chunk。${fixAuditFloorZh}`,
         },
       ]
     : [];

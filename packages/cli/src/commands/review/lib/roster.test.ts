@@ -528,7 +528,7 @@ describe('the fix-audit roster (#10104)', () => {
     },
   };
 
-  it('drops Agent 0 and keeps the territory shape on a small delta', () => {
+  it('keeps Agent 0 and the territory shape on a small delta', () => {
     const plan = {
       prNumber: '123',
       ownerRepo: 'o/r',
@@ -540,7 +540,14 @@ describe('the fix-audit roster (#10104)', () => {
       incremental: posture,
     };
     const keys = requiredAgents(plan).map((a) => a.key);
-    expect(keys).not.toContain('0');
+    // The posture's first draft dropped Agent 0 here on the claim that the
+    // one Critical-grade fidelity regression — a fix commit removing
+    // behaviour the issue required — is the removed-behavior audit's
+    // territory. A probe through the real pipeline disproved the claim (see
+    // the roster's gate comment): the class is invisible to every
+    // diff-bounded auditor, so the round keeps the one pass that re-checks
+    // head against the issue.
+    expect(keys).toContain('0');
     // The chunk fan-out, not the 3A dimension set — the posture flips the
     // shared predicate whatever the narrowed delta's size says.
     expect(keys).toContain('chunk-1');
@@ -552,6 +559,28 @@ describe('the fix-audit roster (#10104)', () => {
     expect(keys).toContain('1b');
     expect(keys).toContain('1c');
     expect(keys).toContain('7');
+  });
+
+  it('keeps Agent 0 on a fix-audit round whose published scope shows no deletion', () => {
+    // The canonical hole the exclusion rationale claimed covered: behaviour
+    // the PR itself added is absent at the merge base and, once a fix
+    // commit removes it, absent at head — `base..head` displays it on
+    // NEITHER side, `removedLines` stays 0, `hasDeletions` drops 1b, and no
+    // chunk territory shows the removal. Issue fidelity reads head against
+    // the issue whatever the diff displays, so the roster must require it
+    // exactly on this shape.
+    const plan = {
+      prNumber: '123',
+      ownerRepo: 'o/r',
+      worktreePath: '/wt',
+      srcDiffLines: 120,
+      diffLines: 300,
+      chunks: [{ id: 1 }],
+      files: [{ path: 'src/a.ts', removedLines: 0, fileLines: 10 }],
+      incremental: posture,
+    };
+    const keys = requiredAgents(plan).map((a) => a.key);
+    expect(keys).toContain('0');
   });
 
   it('keeps Agent 0 on the same plan without the posture', () => {

@@ -339,7 +339,7 @@ export interface IncrementalDecision {
    * critical-only (#10104) — present exactly beside an effective scope. It
    * is what flips the round to the fix-audit shape: the territory fan-out
    * regardless of the narrowed delta's size (`isFixAuditRound` in
-   * budget.ts), no Agent 0, seam-bounded interaction republication, and the
+   * budget.ts), seam-bounded interaction republication, and the
    * posture-narrowed reverse-audit schedule.
    */
   posture?: 'critical';
@@ -1428,13 +1428,10 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
               (e) => e.seam !== undefined,
             );
             const kept = bounded.reduce((n, e) => n + (e.seam?.kept ?? 0), 0);
-            const total = bounded.reduce(
-              (n, e) => n + (e.seam?.total ?? 0),
-              0,
-            );
+            const total = bounded.reduce((n, e) => n + (e.seam?.total ?? 0), 0);
             writeStderrLine(
               `Critical posture (${postureCause}): fix-audit round shape — ` +
-                `territory fan-out over the delta, Agent 0 skipped, ` +
+                `territory fan-out over the delta, ` +
                 (bounded.length > 0
                   ? `interaction files seam-bounded to ${kept} of ${total} hunk(s).`
                   : `no interaction file needed seam-bounding.`),

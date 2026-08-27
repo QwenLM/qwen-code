@@ -2197,8 +2197,37 @@ describe('composeReview — the fix-audit round-shape disclosure (#10104)', () =
     // The Suggestion was rerouted into the deferral list, not posted inline.
     expect(r.floorEnforced).toEqual([0]);
     expect(r.body).toContain(
-      'Findings below Critical were recorded and deferred, never posted.',
+      'Findings below Critical were recorded and deferred, never posted — ' +
+        'except pre-confirmed `[build]`/`[test]`/`[probe]` findings, which ' +
+        'stay inline at any floor.',
     );
+    // The plan's posture record IS the deferral licence here: the round's
+    // shape was already spent on the critical resolution, so the licence
+    // block may not flag the very deferral the floor arm enforced — no
+    // unlicensed warning in the body, no false cap on the verdict.
+    expect(r.cappedBy).not.toContain('unlicensed-deferral');
+    expect(r.body).not.toContain('without a posture licence');
+  });
+
+  it('the plan arm licenses a deferral on a round-1 compose with the side file lost (#10104)', () => {
+    // The sibling state: the same postured plan, but the side file was
+    // rewritten between capture and compose, so `prevRound` recovers 0 and
+    // the context IS available. The plan arm still resolves the floor (it
+    // carries no round gate), so the licence block's round-1 doubt arm must
+    // not stamp the ONLY cap — a false cap here flips the composed event and
+    // withholds the incremental anchor over a licensed deferral.
+    const input = rcInput(POSTURE);
+    input.criticalsInline = 0;
+    input.suggestionsInline = 1;
+    input.severityFloor = 'auto';
+    input.draftedComments = [
+      { path: 'src/a.ts', line: 3, body: '**[Suggestion]** untested guard' },
+    ];
+    const r = composeReview(input);
+    expect(r.floorEnforced).toEqual([0]);
+    expect(r.cappedBy).not.toContain('unlicensed-deferral');
+    expect(r.body).not.toContain('without a posture licence');
+    expect(r.event).toBe('APPROVE');
   });
 
   it('an ABSENT floor beside the plan record claims no deferral beside its inline Suggestion (#10104)', () => {
@@ -2246,6 +2275,26 @@ describe('composeReview — the fix-audit round-shape disclosure (#10104)', () =
     }
   });
 
+  it('a drifted floor beside the plan record never claims the operator turned the posture off (#10104)', () => {
+    // The compose state is model-written: a present-but-unrecognisable
+    // floor value ('blocker', a spelling drift, '') is NOT an operator
+    // decision — the open-floor sentence must say the value cannot be
+    // read, not assert a posture-off the operator never made. The cast
+    // simulates the transcribed drift the typed field cannot carry.
+    const input = rcInput(POSTURE);
+    input.criticalsInline = 0;
+    input.suggestionsInline = 1;
+    input.severityFloor = 'blocker' as unknown as 'auto';
+    input.draftedComments = [
+      { path: 'src/a.ts', line: 3, body: '**[Suggestion]** untested guard' },
+    ];
+    const r = composeReview(input);
+    expect(r.floorEnforced).toEqual([]);
+    expect(r.body).toContain('resolved OPEN at compose time');
+    expect(r.body).not.toContain('the operator turned the posture off');
+    expect(r.body).toContain('a floor value this module cannot read');
+  });
+
   it('an explicit `suggestion` floor beats a stale plan posture, and the body says the floor was open', () => {
     const input = rcInput(POSTURE);
     input.criticalsInline = 0;
@@ -2258,6 +2307,26 @@ describe('composeReview — the fix-audit round-shape disclosure (#10104)', () =
     expect(r.floorEnforced).toEqual([]);
     expect(r.body).toContain('resolved OPEN at compose time');
     expect(r.body).not.toContain('recorded and deferred, never posted');
+  });
+
+  it('a deterministic Suggestion stays inline at an engaged floor, and the sentence says so (#10104)', () => {
+    // `floorEnforcedReroute` leaves a `[test]`-tagged Suggestion inline at
+    // ANY floor — so the engaged sentence in the same body may not assert
+    // the unqualified universal that the very same body falsifies.
+    const input = rcInput(POSTURE);
+    input.criticalsInline = 0;
+    input.suggestionsInline = 1;
+    input.severityFloor = 'auto';
+    input.draftedComments = [
+      {
+        path: 'src/a.ts',
+        line: 3,
+        body: '**[Suggestion]** [test] mutation survivor on the retry guard',
+      },
+    ];
+    const r = composeReview(input);
+    expect(r.floorEnforced).toEqual([]);
+    expect(r.body).toContain('recorded and deferred, never posted — except');
   });
 
   it('an RC body owns the reduced shape, cause and seam census', () => {
