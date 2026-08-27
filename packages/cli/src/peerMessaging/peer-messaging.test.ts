@@ -409,10 +409,8 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
     expect(submitted).toHaveLength(0);
     await settle();
     const statuses = receipts
-      .filter(
-        (receipt) =>
-          receipt.type === 'control' && receipt.origMsgId === frame.msgId,
-      )
+      .filter((receipt) => receipt.type === 'control')
+      .filter((receipt) => receipt.origMsgId === frame.msgId)
       .map((receipt) => receipt.status);
     expect(statuses).toEqual(['held', 'misaddressed']);
   });
