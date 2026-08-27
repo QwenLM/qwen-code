@@ -39,6 +39,9 @@ import {
 const sidecarReadHook = vi.hoisted(() => ({
   current: undefined as { path: string; run: () => Promise<void> } | undefined,
 }));
+const sidecarCommitHook = vi.hoisted(() => ({
+  current: undefined as (() => Promise<void>) | undefined,
+}));
 
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   const original =
@@ -58,6 +61,23 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
         if (hook && hook.path === filePath) {
           sidecarReadHook.current = undefined;
           await hook.run();
+        }
+        return result;
+      },
+    ),
+    // Test seam: fires a concurrent writer right after the backfill's
+    // queued rewrite commits, before the continuation that follows it —
+    // the deterministic interleaving the live-entry sync must survive.
+    replaceSessionPrs: vi.fn(
+      async (
+        filePath: string,
+        plan: Parameters<typeof original.replaceSessionPrs>[1],
+      ) => {
+        const result = await original.replaceSessionPrs(filePath, plan);
+        const hook = sidecarCommitHook.current;
+        if (hook) {
+          sidecarCommitHook.current = undefined;
+          await hook();
         }
         return result;
       },
@@ -190,6 +210,7 @@ describe('backfillWorkspaceSessionPrs', () => {
   beforeEach(async () => {
     vi.clearAllMocks();
     sidecarReadHook.current = undefined;
+    sidecarCommitHook.current = undefined;
     runtimeDir = await fsp.mkdtemp(
       path.join(os.tmpdir(), 'qwen-pr-backfill-runtime-'),
     );
@@ -817,10 +838,10 @@ describe('backfillWorkspaceSessionPrs', () => {
     expect(prs?.map((entry) => entry.number)).toEqual([250]);
   });
 
-  it('scans every page of the session listing', async () => {
-    // Backfill pages through listSessions 1000 at a time; a workspace with
-    // more sessions than one page must still be scanned and bound in full —
-    // a cursor that stops advancing silently backfills only the first page.
+  it('scans every session of a workspace beyond one listing page', async () => {
+    // The sweep enumerates every persisted session; a workspace with more
+    // than a thousand sessions must be scanned and bound in full — a scan
+    // that stops at the first page would silently backfill only it.
     const chatsDir = path.join(
       new Storage(workspaceCwd).getProjectDir(),
       'chats',
@@ -850,8 +871,7 @@ describe('backfillWorkspaceSessionPrs', () => {
               })}\n`,
               'utf8',
             )
-            // Distinct mtimes: the listing pages by mtime cursor, and ties
-            // can skip entries at the page boundary.
+            // Distinct mtimes; the mtime-tie hazard has its own test below.
             .then(() => fsp.utimes(filePath, baseSeconds + i, baseSeconds + i)),
         );
       }
@@ -876,6 +896,92 @@ describe('backfillWorkspaceSessionPrs', () => {
       await readSessionPrs(
         sessionService.getPrSessionPathForArchiveState(
           '00000000-0000-4000-8000-000000000000',
+          'active',
+        ),
+      ),
+    ).not.toBeNull();
+  }, 30000);
+
+  it('scans sessions whose mtime ties across the old page boundary', async () => {
+    // listSessions pages with a strict `mtime < cursor` filter and returns
+    // the page's last mtime as the cursor — sessions tied with that entry
+    // are filtered out on every run, the hazard findSessionsByTitle
+    // documents for not paging listSessions. Two files tied across the
+    // 1000-entry boundary must both be scanned and bound.
+    const chatsDir = path.join(
+      new Storage(workspaceCwd).getProjectDir(),
+      'chats',
+    );
+    await fsp.mkdir(chatsDir, { recursive: true });
+    const total = 1001;
+    const baseSeconds = Math.floor(Date.now() / 1000) - total - 10;
+    for (let chunk = 0; chunk < total; chunk += 100) {
+      const batch: Array<Promise<unknown>> = [];
+      for (let i = chunk; i < Math.min(chunk + 100, total); i++) {
+        const sessionId = `00000000-0000-4000-8000-${i
+          .toString(16)
+          .padStart(12, '0')}`;
+        const filePath = path.join(chatsDir, `${sessionId}.jsonl`);
+        batch.push(
+          fsp
+            .writeFile(
+              filePath,
+              `${JSON.stringify({
+                uuid: `${sessionId}-user-1`,
+                parentUuid: null,
+                sessionId,
+                timestamp: '2026-08-01T00:00:00.000Z',
+                type: 'user',
+                message: { role: 'user', parts: [{ text: 'hello' }] },
+                cwd: workspaceCwd,
+              })}\n`,
+              'utf8',
+            )
+            // Sessions 0 and 1 share an mtime; every other file is
+            // distinct, so the tied pair straddles the boundary.
+            .then(() =>
+              fsp.utimes(
+                filePath,
+                i <= 1 ? baseSeconds : baseSeconds + i,
+                i <= 1 ? baseSeconds : baseSeconds + i,
+              ),
+            ),
+        );
+      }
+      await Promise.all(batch);
+    }
+    // Each twin carries a convention binding: whichever side of the lost
+    // listing page one lands on, its binding must still be persisted.
+    await seedWorktreeSidecar(
+      '00000000-0000-4000-8000-000000000000',
+      'pr-9',
+      'worktree-pr-9',
+    );
+    await seedWorktreeSidecar(
+      '00000000-0000-4000-8000-000000000001',
+      'pr-10',
+      'worktree-pr-10',
+    );
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(9, 'worktree-pr-9'), pr(10, 'worktree-pr-10')],
+    });
+
+    const result = await backfillWorkspaceSessionPrs(runtime);
+
+    expect(result).toMatchObject({ scanned: 1001, bound: 2 });
+    expect(
+      await readSessionPrs(
+        sessionService.getPrSessionPathForArchiveState(
+          '00000000-0000-4000-8000-000000000000',
+          'active',
+        ),
+      ),
+    ).not.toBeNull();
+    expect(
+      await readSessionPrs(
+        sessionService.getPrSessionPathForArchiveState(
+          '00000000-0000-4000-8000-000000000001',
           'active',
         ),
       ),
@@ -1326,7 +1432,7 @@ describe('backfillWorkspaceSessionPrs', () => {
     expect(prs?.find((entry) => entry.number === 5)?.url).toBe(
       'https://github.com/other-org/other-repo/pull/5',
     );
-    expect(result).toMatchObject({ bound: 1, alreadyBound: 0, overLimit: 8 });
+    expect(result).toMatchObject({ bound: 1, alreadyBound: 0, overLimit: 7 });
   });
 
   it('binds nothing when unresolvable bindings already fill the cap', async () => {
@@ -1378,7 +1484,7 @@ describe('backfillWorkspaceSessionPrs', () => {
     expect(prs?.map((entry) => entry.number)).toEqual([
       101, 102, 103, 104, 105, 106, 107, 108, 109, 42,
     ]);
-    expect(result).toMatchObject({ bound: 0, overLimit: 2 });
+    expect(result).toMatchObject({ bound: 0, overLimit: 1 });
   });
 
   it('re-plans around a concurrent foreign binding instead of exceeding the cap', async () => {
@@ -1411,7 +1517,7 @@ describe('backfillWorkspaceSessionPrs', () => {
     expect(result).toMatchObject({ bound: 1, overLimit: 1 });
   });
 
-  it('treats a concurrently bound planned number as already bound, not added', async () => {
+  it('does not bill a concurrently bound planned number twice against the cap', async () => {
     await seedSession(SESSION_A);
     await seedTranscriptBranches(SESSION_A, 1, 2);
     const prPath = await seedPrSidecar(
@@ -1422,8 +1528,10 @@ describe('backfillWorkspaceSessionPrs', () => {
       kind: 'ok',
       pullRequests: [pr(1, 'b-1'), pr(2, 'b-2')],
     });
-    // 2 wins the single free slot in the fresh plan and is already present,
-    // so the write adds nothing and bound must stay 0.
+    // The dialog binds #2 in the seam and the run resolves 1 and 2: the
+    // fresh #2 already holds its slot, so the plan must not bill it again
+    // as a member — all ten distinct numbers fit the ten slots, nothing
+    // is trimmed, and the present #2 is not re-added.
     sidecarReadHook.current = {
       path: prPath,
       run: () =>
@@ -1437,9 +1545,9 @@ describe('backfillWorkspaceSessionPrs', () => {
 
     const prs = await readSessionPrs(prPath);
     expect(prs?.map((entry) => entry.number)).toEqual([
-      101, 102, 103, 104, 105, 106, 107, 108, 2,
+      101, 102, 103, 104, 105, 106, 107, 108, 2, 1,
     ]);
-    expect(result).toMatchObject({ bound: 0, alreadyBound: 1, overLimit: 1 });
+    expect(result).toMatchObject({ bound: 1, alreadyBound: 0, overLimit: 0 });
   });
 
   it('keeps a snapshot-held number a client re-binds during the run', async () => {
@@ -1478,12 +1586,52 @@ describe('backfillWorkspaceSessionPrs', () => {
       101, 102, 103, 104, 105, 106, 107, 108, 5, 7,
     ]);
     expect(prs).toHaveLength(SESSION_PR_LIST_LIMIT);
-    expect(result).toMatchObject({ bound: 1, overLimit: 2 });
+    expect(result).toMatchObject({ bound: 1, overLimit: 1 });
     // The live-entry sync must publish the surviving binding, not the
     // cap-trimmed list that dropped it.
     expect(setSessionPrs).toHaveBeenCalledWith(
       SESSION_A,
       expect.arrayContaining([expect.objectContaining({ number: 5 })]),
+    );
+  });
+
+  it('syncs the live entry from the freshest list when a bind lands after the rewrite', async () => {
+    // A dialog bind commits between the queued rewrite and the live-entry
+    // sync: the sync must publish it, not the rewrite-time snapshot that
+    // lacks it — a post-commit call with the snapshot would clobber the
+    // bind from the live entry while the sidecar keeps it.
+    await seedSession(SESSION_A);
+    await seedTranscriptBranches(SESSION_A, 1, 2);
+    const prPath = await seedPrSidecar(
+      SESSION_A,
+      Array.from({ length: 7 }, (_, i) => 101 + i),
+    );
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(1, 'b-1'), pr(2, 'b-2')],
+    });
+    sidecarCommitHook.current = () =>
+      upsertSessionPr(prPath, {
+        number: 99,
+        url: 'https://github.com/o/r/pull/99',
+      }).then(() => undefined);
+    const setSessionPrs = vi.fn();
+    const runtimeWithBridge = {
+      ...runtime,
+      bridge: { markSessionCatalogChanged: vi.fn(), setSessionPrs },
+    } as unknown as WorkspaceRuntime;
+
+    const result = await backfillWorkspaceSessionPrs(runtimeWithBridge);
+
+    expect(result).toMatchObject({ bound: 2, written: 1 });
+    const prs = await readSessionPrs(prPath);
+    expect(prs?.map((entry) => entry.number)).toEqual([
+      101, 102, 103, 104, 105, 106, 107, 1, 2, 99,
+    ]);
+    expect(setSessionPrs).toHaveBeenCalledTimes(1);
+    expect(setSessionPrs).toHaveBeenLastCalledWith(
+      SESSION_A,
+      expect.arrayContaining([expect.objectContaining({ number: 99 })]),
     );
   });
 
@@ -1853,8 +2001,8 @@ describe('registerSessionPrBackfillRoutes', () => {
 
   it('isolates a failing workspace and still backfills the rest', async () => {
     const seeded = await seedTrustedBackfillWorkspace();
-    // A regular file where a workspace cwd belongs makes the session
-    // listing's readdir throw ENOTDIR (a non-ENOENT error listSessions
+    // A regular file where a workspace cwd belongs makes the chats-dir
+    // readdir throw ENOTDIR (a non-ENOENT error the session enumeration
     // rethrows); the route must isolate that workspace's failure instead
     // of failing the whole request.
     const brokenParent = await fsp.mkdtemp(
@@ -1963,9 +2111,9 @@ describe('registerSessionPrBackfillRoutes', () => {
   });
 
   // Seeds a trusted workspace whose single session recorded ten transcript
-  // branches while its sidecar already holds the first nine — the shape a
-  // concurrent dialog binding turns into an eviction-only write.
-  async function seedTrustedEvictionWorkspace(): Promise<{
+  // branches while its sidecar already holds the first nine — one free
+  // slot at the cap, the shape a concurrent dialog binding fills.
+  async function seedTrustedCapWorkspace(): Promise<{
     runtime: WorkspaceRuntime;
     markSessionCatalogChanged: ReturnType<typeof vi.fn>;
     prPath: string;
@@ -2039,8 +2187,8 @@ describe('registerSessionPrBackfillRoutes', () => {
     };
   }
 
-  it('invalidates the cache when a persisted plan evicts without adding', async () => {
-    const seeded = await seedTrustedEvictionWorkspace();
+  it('keeps every binding when a concurrent bind fills the last slot at the cap', async () => {
+    const seeded = await seedTrustedCapWorkspace();
     fetchGitHubPullRequestsMock.mockResolvedValue({
       kind: 'ok',
       pullRequests: Array.from({ length: 10 }, (_, i) =>
@@ -2048,9 +2196,9 @@ describe('registerSessionPrBackfillRoutes', () => {
       ),
     });
     // The dialog binds #10 between the snapshot read and the queued write:
-    // every surviving plan number is then already present, so the cap trim
-    // persists an eviction (of #1) with zero additions — still a catalog
-    // mutation the sidebar must refetch.
+    // the fresh entry already holds its slot, so the plan must not bill it
+    // twice and trim a snapshot binding — all ten numbers fit the ten
+    // slots, nothing is written, and the cache stays untouched.
     sidecarReadHook.current = {
       path: seeded.prPath,
       run: () =>
@@ -2078,14 +2226,14 @@ describe('registerSessionPrBackfillRoutes', () => {
         scanned: 1,
         bound: 0,
         alreadyBound: 9,
-        overLimit: 1,
+        overLimit: 0,
       });
       const after = await readSessionPrs(seeded.prPath);
       expect(after?.map((entry) => entry.number)).toEqual([
-        2, 3, 4, 5, 6, 7, 8, 9, 10,
+        1, 2, 3, 4, 5, 6, 7, 8, 9, 10,
       ]);
-      expect(invalidateSpy).toHaveBeenCalledTimes(1);
-      expect(seeded.markSessionCatalogChanged).toHaveBeenCalledTimes(1);
+      expect(invalidateSpy).not.toHaveBeenCalled();
+      expect(seeded.markSessionCatalogChanged).not.toHaveBeenCalled();
     } finally {
       invalidateSpy.mockRestore();
       await seeded.cleanup();

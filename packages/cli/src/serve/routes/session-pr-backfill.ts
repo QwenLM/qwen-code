@@ -206,50 +206,46 @@ export async function backfillWorkspaceSessionPrs(
   const sessionService = createWorkspaceRuntimeSessionService(runtime);
   const candidates: BackfillCandidate[] = [];
   for (const archiveState of ['active', 'archived'] as const) {
-    let cursor: number | undefined;
-    do {
-      const page = await sessionService.listSessions({
-        cursor,
-        size: 1000,
-        archiveState,
-      });
-      for (const item of page.items) {
-        result.scanned += 1;
-        const dir = path.dirname(
-          sessionService.getWorktreeSessionPathForArchiveState(
-            item.sessionId,
-            archiveState,
-          ),
-        );
-        let worktree: Awaited<ReturnType<typeof readWorktreeSession>>;
-        try {
-          worktree = await readWorktreeSession(
-            path.join(dir, `${item.sessionId}.worktree.json`),
-          );
-        } catch {
-          worktree = null;
-        }
-        const transcriptPath = path.join(dir, `${item.sessionId}.jsonl`);
-        const branches = [
-          ...(worktree ? [worktree.worktreeBranch] : []),
-          ...(await collectTranscriptBranches(transcriptPath)),
-        ];
-        const conventionNumber = worktree
-          ? parsePrNumberFromWorktree(worktree.slug, worktree.worktreeBranch)
-          : undefined;
-        if (branches.length === 0 && conventionNumber === undefined) {
-          continue;
-        }
-        candidates.push({
-          sessionId: item.sessionId,
+    // Tie-safe exhaustive enumeration (see listAllProjectSessionIds): the
+    // paged listSessions mtime cursor silently skips sessions tied with a
+    // page's last entry, which an all-sessions sweep must never do.
+    const sessionIds =
+      await sessionService.listAllProjectSessionIds(archiveState);
+    for (const sessionId of sessionIds) {
+      result.scanned += 1;
+      const dir = path.dirname(
+        sessionService.getWorktreeSessionPathForArchiveState(
+          sessionId,
           archiveState,
-          transcriptPath,
-          conventionNumber,
-          branches,
-        });
+        ),
+      );
+      let worktree: Awaited<ReturnType<typeof readWorktreeSession>>;
+      try {
+        worktree = await readWorktreeSession(
+          path.join(dir, `${sessionId}.worktree.json`),
+        );
+      } catch {
+        worktree = null;
       }
-      cursor = page.nextCursor;
-    } while (cursor !== undefined);
+      const transcriptPath = path.join(dir, `${sessionId}.jsonl`);
+      const branches = [
+        ...(worktree ? [worktree.worktreeBranch] : []),
+        ...(await collectTranscriptBranches(transcriptPath)),
+      ];
+      const conventionNumber = worktree
+        ? parsePrNumberFromWorktree(worktree.slug, worktree.worktreeBranch)
+        : undefined;
+      if (branches.length === 0 && conventionNumber === undefined) {
+        continue;
+      }
+      candidates.push({
+        sessionId,
+        archiveState,
+        transcriptPath,
+        conventionNumber,
+        branches,
+      });
+    }
   }
   if (candidates.length === 0) return result;
 
@@ -407,9 +403,18 @@ export async function backfillWorkspaceSessionPrs(
             samePr
           );
         };
-        const foreignCount = fresh.filter((entry) => !plannedFor(entry)).length;
+        const foreignEntries = fresh.filter((entry) => !plannedFor(entry));
+        // Fresh-foreign numbers already hold their slots; billing them
+        // again as plan members trims a snapshot binding even though the
+        // cap is never exceeded.
+        const foreignNumbers = new Set(
+          foreignEntries.map((entry) => entry.number),
+        );
+        const foreignCount = foreignEntries.length;
         const slots = Math.max(0, SESSION_PR_LIST_LIMIT - foreignCount);
-        let plan = numbers.filter((number) => droppable.has(number));
+        let plan = numbers.filter(
+          (number) => droppable.has(number) && !foreignNumbers.has(number),
+        );
         if (plan.length > slots) {
           result.overLimit += plan.length - slots;
           const convention = candidate.conventionNumber;
@@ -467,15 +472,21 @@ export async function backfillWorkspaceSessionPrs(
         // Every other binding writer keeps the hydrated bridge entry in
         // step with the sidecar; a capped plan can evict numbers, and the
         // stale entry would resurrect them in the summary merge until a
-        // daemon restart. No-op when the session is not live.
-        runtime.bridge.setSessionPrs?.(
-          candidate.sessionId,
-          persisted.map(({ number, url, state }) => ({
-            number,
-            url,
-            ...(state ? { state } : {}),
-          })),
-        );
+        // daemon restart. The sync runs inside the mutation queue against
+        // the freshest list, so a bind queued between the rewrite's commit
+        // and the sync keeps its slot instead of being clobbered by the
+        // rewrite-time snapshot. No-op when the session is not live.
+        await replaceSessionPrs(prPath, (fresh) => {
+          runtime.bridge.setSessionPrs?.(
+            candidate.sessionId,
+            fresh.map(({ number, url, state }) => ({
+              number,
+              url,
+              ...(state ? { state } : {}),
+            })),
+          );
+          return null;
+        });
       }
     } catch {
       // One unwritable sidecar must not abort the whole workspace.

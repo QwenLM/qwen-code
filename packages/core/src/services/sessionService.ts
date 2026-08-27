@@ -2128,6 +2128,50 @@ export class SessionService {
   }
 
   /**
+   * Enumerates every persisted session id of this project for one archive
+   * state by reading the chats dir directly. Unlike {@link listSessions}
+   * there is no mtime cursor and no page size: an exhaustive sweep paged
+   * by the strict `mtime < cursor` filter would silently skip sessions
+   * that share an mtime with a page's last entry, on every run. Same
+   * disk-walk shape as {@link countSessionsInState} — first-record read
+   * for project membership only, no title/prompt hydration.
+   */
+  async listAllProjectSessionIds(
+    archiveState: SessionArchiveState,
+  ): Promise<string[]> {
+    const chatsDir = this.getChatsDirForState(archiveState);
+    let fileNames: string[];
+    try {
+      fileNames = fs.readdirSync(chatsDir);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
+      throw error;
+    }
+    const sessionIds: string[] = [];
+    for (const name of fileNames) {
+      if (!SESSION_FILE_PATTERN.test(name)) continue;
+      const filePath = path.join(chatsDir, name);
+      try {
+        const records = await jsonl.readLines<ChatRecord>(filePath, 1);
+        if (records.length === 0) continue;
+        const firstRecord = records[0]!;
+        if (
+          !(await this.sessionBelongsToCurrentProject(
+            firstRecord.sessionId,
+            firstRecord.cwd,
+          ))
+        ) {
+          continue;
+        }
+        sessionIds.push(firstRecord.sessionId);
+      } catch {
+        continue;
+      }
+    }
+    return sessionIds;
+  }
+
+  /**
    * Reads all records from a session file.
    */
   private async readAllRecords(filePath: string): Promise<ChatRecord[]> {
