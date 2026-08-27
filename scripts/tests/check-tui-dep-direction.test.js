@@ -5,16 +5,20 @@
  */
 
 import { afterEach, describe, expect, it } from 'vitest';
+import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import {
   chmodSync,
+  copyFileSync,
   mkdirSync,
   mkdtempSync,
+  renameSync,
   rmSync,
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import {
   bannedFamily,
@@ -436,4 +440,123 @@ describe('symlinkedPathComponents', () => {
       symlinkedPathComponents(join(anchor, 'nope', 'model'), anchor),
     ).toEqual([]);
   });
+});
+
+describe('end-to-end gate run (main wiring)', () => {
+  // Regression guard for the root-path check wired into main(): the helper
+  // is unit-tested above, but nothing but a full run proves main() actually
+  // invokes it before trusting the scan. Build a fixture checkout inside the
+  // (git-ignored) .qwen dir so the copied script resolves `typescript` from
+  // the real node_modules, run it as a subprocess, and assert exit codes.
+  const gatePath = fileURLToPath(
+    new URL('../check-tui-dep-direction.mjs', import.meta.url),
+  );
+  const repoRoot = fileURLToPath(new URL('../..', import.meta.url));
+
+  function makeFixtureCheckout() {
+    mkdirSync(join(repoRoot, '.qwen'), { recursive: true });
+    const base = mkdtempSync(join(repoRoot, '.qwen', 'gate-e2e-'));
+    temporaryDirectories.push(base);
+    mkdirSync(join(base, 'scripts'));
+    mkdirSync(join(base, 'packages', 'core', 'src'), { recursive: true });
+    mkdirSync(join(base, 'packages', 'cli', 'src', 'ui', 'model'), {
+      recursive: true,
+    });
+    copyFileSync(
+      gatePath,
+      join(base, 'scripts', 'check-tui-dep-direction.mjs'),
+    );
+    writeFileSync(
+      join(base, 'packages', 'core', 'src', 'clean.ts'),
+      "import { z } from 'zod';\n",
+    );
+    writeFileSync(
+      join(base, 'packages', 'cli', 'src', 'ui', 'model', 'model.ts'),
+      "import { z } from 'zod';\n",
+    );
+    return base;
+  }
+
+  function runGate(base) {
+    try {
+      const out = execFileSync(
+        process.execPath,
+        [join(base, 'scripts', 'check-tui-dep-direction.mjs')],
+        { encoding: 'utf8', timeout: 30000 },
+      );
+      return { code: 0, out };
+    } catch (error) {
+      return {
+        code: error.status,
+        out: `${error.stdout ?? ''}${error.stderr ?? ''}`,
+      };
+    }
+  }
+
+  it('passes a clean fixture checkout', () => {
+    const base = makeFixtureCheckout();
+    const { code, out } = runGate(base);
+    expect(code).toBe(0);
+    expect(out).toContain('PASS — dependency direction holds.');
+  }, 40000);
+
+  it('fails when a rule root is itself a symlink', () => {
+    const base = makeFixtureCheckout();
+    const model = join(base, 'packages', 'cli', 'src', 'ui', 'model');
+    rmSync(model, { recursive: true, force: true });
+    mkdirSync(join(base, 'substitute-model'));
+    writeFileSync(
+      join(base, 'substitute-model', 'model.ts'),
+      "import { z } from 'zod';\n",
+    );
+    symlinkSync(join(base, 'substitute-model'), model, 'dir');
+    const { code, out } = runGate(base);
+    expect(code).toBe(1);
+    expect(out).toContain('error: symlink in rule root path');
+  }, 40000);
+
+  it('fails when a rule-root ancestor is a symlink', () => {
+    const base = makeFixtureCheckout();
+    const uiDir = join(base, 'packages', 'cli', 'src', 'ui');
+    renameSync(uiDir, join(base, 'packages', 'cli', 'src', 'ui-real'));
+    symlinkSync(join(base, 'packages', 'cli', 'src', 'ui-real'), uiDir, 'dir');
+    const { code, out } = runGate(base);
+    expect(code).toBe(1);
+    expect(out).toContain('error: symlink in rule root path');
+  }, 40000);
+
+  it('fails on a banned import in the scanned tree', () => {
+    const base = makeFixtureCheckout();
+    writeFileSync(
+      join(base, 'packages', 'core', 'src', 'leak.ts'),
+      "import { render } from 'ink';\n",
+    );
+    const { code, out } = runGate(base);
+    expect(code).toBe(1);
+    expect(out).toContain("import 'ink'");
+    expect(out).toContain('FAIL — dependency-direction violations found.');
+  }, 40000);
+
+  it('fails on a symlink inside the scanned tree', () => {
+    const base = makeFixtureCheckout();
+    symlinkSync(
+      join(base, 'packages', 'core', 'src', 'clean.ts'),
+      join(base, 'packages', 'core', 'src', 'alias.ts'),
+      'file',
+    );
+    const { code, out } = runGate(base);
+    expect(code).toBe(1);
+    expect(out).toContain('error: symlink in scanned tree (not followed)');
+  }, 40000);
+
+  it('fails when a rule root has no source files', () => {
+    const base = makeFixtureCheckout();
+    rmSync(join(base, 'packages', 'core', 'src'), {
+      recursive: true,
+      force: true,
+    });
+    const { code, out } = runGate(base);
+    expect(code).toBe(1);
+    expect(out).toContain('not found or has no source files');
+  }, 40000);
 });
