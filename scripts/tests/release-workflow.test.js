@@ -6,6 +6,8 @@
 
 import { spawnSync } from 'node:child_process';
 import {
+  chmodSync,
+  existsSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
@@ -105,21 +107,6 @@ describe('CUA release workflow', () => {
 // ownership ladder all ship green under substring pins, and each of those
 // mutants reopens the incident class this step exists for.
 const canonicalWipe = `set -uo pipefail
-RUNNER_UID="$(id -u)"
-RUNNER_GID="$(id -g)"
-if [ "$RUNNER_UID" != "0" ]; then
-  chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace ownership; checkout may fail on leftover root-owned files"
-fi
-# chmod -R follows a symlink given as its starting operand: if a
-# previous pool job replaced $GITHUB_WORKSPACE with a symlink, the
-# recursive chmod would descend into the link target. Skip when the
-# workspace is not a real directory; the heal block below will
-# restore it before the wipe runs.
-if [ -L "$GITHUB_WORKSPACE" ] || [ ! -d "$GITHUB_WORKSPACE" ]; then
-  echo "::warning::skipping chmod on \${GITHUB_WORKSPACE}: not a real directory (will be healed below)"
-else
-  chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chmod -R u+rwX "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace write permissions; checkout may fail on leftover read-only files"
-fi
 # Release jobs do not need cross-job workspace reuse: remove every
 # persisted entry, including planted .git config/hooks/attributes,
 # before actions/checkout runs with release credentials. The full
@@ -134,15 +121,25 @@ fi
 # so canonicalize, strip trailing slashes, denylist the known
 # roots, and require the target to sit inside the runner workspace
 # before any rm.
-WS="\${GITHUB_WORKSPACE:?}"
-while [ "\${WS%/}" != "$WS" ]; do WS="\${WS%/}"; done
+#
+# Validate the geometry BEFORE touching anything: the chown/chmod
+# ladder and the wipe must never follow a runner workspace a previous
+# pool job — which may have run contributor code — replaced with a
+# symlink, so refuse one outright; and no ownership/permission change
+# may run on a path the containment below has not accepted.
 RWS="\${RUNNER_WORKSPACE:?}"
+if [ -L "$RWS" ]; then
+  echo "::error::refusing to wipe: runner workspace is a symlink: \${RWS}"
+  exit 1
+fi
 RWS="$(realpath -m -- "$RWS" 2>/dev/null)" || { echo "::error::refusing to wipe: realpath unavailable, cannot canonicalize \${RUNNER_WORKSPACE}"; exit 1; }
 while [ "\${RWS%/}" != "$RWS" ]; do RWS="\${RWS%/}"; done
 if [ -z "$RWS" ]; then echo "::error::refusing to wipe: runner workspace resolved to /"; exit 1; fi
 case "$RWS" in
   ..|../*|*/..|*/../*) echo "::error::refusing runner workspace path containing '..': \${RWS}"; exit 1 ;;
 esac
+WS="\${GITHUB_WORKSPACE:?}"
+while [ "\${WS%/}" != "$WS" ]; do WS="\${WS%/}"; done
 # Heal a workspace a previous job replaced with a symlink (or any
 # non-directory) BEFORE canonicalizing it: afterwards the path
 # resolves to the link's target, the containment below refuses it,
@@ -194,6 +191,18 @@ case "$WS" in
   "$RWS"/*) ;;
   *) echo "::error::refusing to wipe workspace outside the runner workspace: \${WS} (runner workspace: \${RWS})"; exit 1 ;;
 esac
+# Geometry validated — only now may ownership/permissions change.
+# Shared ECS runners can retain root-owned files from an earlier
+# containerized job; restore them so the wipe and checkout succeed.
+RUNNER_UID="$(id -u)"
+RUNNER_GID="$(id -g)"
+if [ "$RUNNER_UID" != "0" ]; then
+  chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace ownership; checkout may fail on leftover root-owned files"
+fi
+# The validation above guarantees $GITHUB_WORKSPACE is a real directory
+# inside the runner workspace (a symlinked leaf was healed, a symlinked
+# runner workspace refused), so the recursive chmod cannot escape it.
+chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chmod -R u+rwX "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace write permissions; checkout may fail on leftover read-only files"
 find "$WS" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
 # Later steps must not read pool-persistent Git, npm, Docker, or
 # setup-node state. A fresh directory avoids an unbounded scrub
@@ -519,6 +528,86 @@ describe('release workflow', () => {
           const entries = readdirSync(workspace);
           expect(entries).toHaveLength(0);
         } finally {
+          rmSync(base, { recursive: true, force: true });
+        }
+      }
+
+      // Symlinked runner workspace: refused BEFORE any chown/chmod/wipe —
+      // a prior pool job may have replaced it with a link to redirect the
+      // whole guard chain (heal, containment, wipe) to an attacker-chosen
+      // location.
+      {
+        const outside = mkdtempSync(join(tmpdir(), 'release-rws-target-'));
+        mkdirSync(join(outside, 'qwen-code'));
+        const decoy = join(outside, 'qwen-code', 'decoy.txt');
+        writeFileSync(decoy, 'must-survive');
+        chmodSync(decoy, 0o400);
+        const base = mkdtempSync(join(tmpdir(), 'release-rws-runner-'));
+        const rwsLink = join(base, 'rws-link');
+        symlinkSync(outside, rwsLink);
+        try {
+          const env = {
+            ...process.env,
+            GITHUB_WORKSPACE: join(rwsLink, 'qwen-code'),
+            RUNNER_WORKSPACE: rwsLink,
+            RUNNER_TEMP: join(base, 'temp'),
+            RUNNER_TOOL_CACHE: join(base, 'tool-cache'),
+            GITHUB_ENV: join(base, 'github-env'),
+            HOME: join(base, 'home'),
+            XDG_CONFIG_HOME: join(base, 'home', '.config'),
+          };
+          mkdirSync(env.HOME);
+          mkdirSync(env.RUNNER_TEMP);
+          const result = spawnSync(
+            'bash',
+            ['-e', '-o', 'pipefail', '-c', wipeScript],
+            { encoding: 'utf8', env },
+          );
+          expect(result.status).not.toBe(0);
+          expect(`${result.stdout}${result.stderr}`).toContain(
+            'refusing to wipe: runner workspace is a symlink',
+          );
+          // Decoy intact — and the ownership ladder did not reach it.
+          expect(readFileSync(decoy, 'utf8')).toBe('must-survive');
+          expect(lstatSync(decoy).mode & 0o777).toBe(0o400);
+        } finally {
+          rmSync(outside, { recursive: true, force: true });
+          rmSync(base, { recursive: true, force: true });
+        }
+      }
+
+      // Same refusal when the redirected target has no qwen-code subdir:
+      // the heal arm must not mkdir at the attacker-chosen location.
+      {
+        const outside = mkdtempSync(join(tmpdir(), 'release-rws-empty-'));
+        const base = mkdtempSync(join(tmpdir(), 'release-rws-runner2-'));
+        const rwsLink = join(base, 'rws-link');
+        symlinkSync(outside, rwsLink);
+        try {
+          const env = {
+            ...process.env,
+            GITHUB_WORKSPACE: join(rwsLink, 'qwen-code'),
+            RUNNER_WORKSPACE: rwsLink,
+            RUNNER_TEMP: join(base, 'temp'),
+            RUNNER_TOOL_CACHE: join(base, 'tool-cache'),
+            GITHUB_ENV: join(base, 'github-env'),
+            HOME: join(base, 'home'),
+            XDG_CONFIG_HOME: join(base, 'home', '.config'),
+          };
+          mkdirSync(env.HOME);
+          mkdirSync(env.RUNNER_TEMP);
+          const result = spawnSync(
+            'bash',
+            ['-e', '-o', 'pipefail', '-c', wipeScript],
+            { encoding: 'utf8', env },
+          );
+          expect(result.status).not.toBe(0);
+          expect(`${result.stdout}${result.stderr}`).toContain(
+            'refusing to wipe: runner workspace is a symlink',
+          );
+          expect(existsSync(join(outside, 'qwen-code'))).toBe(false);
+        } finally {
+          rmSync(outside, { recursive: true, force: true });
           rmSync(base, { recursive: true, force: true });
         }
       }
