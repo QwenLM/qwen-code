@@ -155,8 +155,19 @@ run_loop() {
   local max_age="${HB_MAX_AGE_SECONDS:-20400}"
   # Numeric guards: a malformed or zero override must degrade to the
   # defaults, never into a sleep-less busy loop hammering the API.
+  # Shape alone is not enough: the loop sleeps BEFORE its age check,
+  # so a well-formed huge interval — no production launcher sets
+  # either variable, so such a value can only arrive through an env
+  # plant — means the loop never wakes again (zero pulses, and the
+  # age cap that bounds an orphan's PAT window becomes unreachable),
+  # while a tiny age cap silently kills the pulse after the first
+  # sleep — the frozen comment this feature eliminates. Bound the
+  # magnitude too; the cap's floor is the 330-minute job envelope, so
+  # a live round's pulse always outlives the round.
   [[ "${interval}" =~ ^[1-9][0-9]*$ ]] || interval=600
+  (( interval <= 3600 )) || interval=600
   [[ "${max_age}" =~ ^[1-9][0-9]*$ ]] || max_age=20400
+  (( max_age >= 19800 && max_age <= 21600 )) || max_age=20400
   local start="${HB_START_EPOCH}"
   echo "$(date -u +%FT%TZ) heartbeat started: comment ${HB_COMMENT_ID} interval ${interval}s max_age ${max_age}s"
   while :; do
@@ -232,6 +243,7 @@ run_loop() {
     # failed stamp degrades to the pre-drain race, never stalls the
     # pulse.
     if command -v timeout > /dev/null 2>&1; then
+      # shellcheck disable=SC2016
       timeout 5 bash -c 'date +%s > "$0"' "${HB_WORKDIR}/heartbeat-tick-inflight" 2> /dev/null || true
     else
       date +%s > "${HB_WORKDIR}/heartbeat-tick-inflight" 2> /dev/null || true

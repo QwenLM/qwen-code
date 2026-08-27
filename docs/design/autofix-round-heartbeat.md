@@ -75,7 +75,12 @@ orphan loops unacceptable):
    gate/repair and finalize flips the terminal text.
 2. Kill targets travel through **expression context**: the launch records
    `$!` as a `heartbeat_pid` step output, and the gate / finalize /
-   cleanup kill that value — the pid, its process group, AND its session:
+   cleanup kill that value — routed through each killer's step-level
+   `env:` block (the `STATUS_ID` shape) so the runner sets it as data:
+   a run-body interpolation would substitute a forged output BEFORE
+   the shell parses, so it would execute as shell syntax in the
+   consuming shell (R16-1). The kills cover the pid, its process
+   group, AND its session:
    each tick's `timeout 60 gh` subtree runs in its own process group
    (coreutils `timeout` default) under the loop's setsid session, so a
    group/pid kill alone leaves it alive holding the PAT for up to 60s.

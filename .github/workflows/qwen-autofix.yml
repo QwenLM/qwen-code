@@ -4886,13 +4886,24 @@ jobs:
             # runner, so every killer confirms the pid's start time
             # (field 22 of /proc/<pid>/stat — index 19 after stripping
             # through the LAST ')', since comm can carry spaces)
-            # against this capture before signaling.
+            # against this capture before signaling. The read is
+            # /usr/bin/cat, the gate twin's shadowing doctrine:
+            # a bare cat is shadowed by a $GITHUB_ENV-planted
+            # BASH_FUNC_cat%% function, imported at bash STARTUP
+            # even under --norc, ahead of builtins and PATH, and
+            # a forged start time travels to every killer (R15-3).
             # Full rationale → qwen-autofix.md#af-148
-            HB_STAT="$(cat "/proc/${HEARTBEAT_PID}/stat" 2>/dev/null)" || HB_STAT=''
+            HB_STAT="$(/usr/bin/cat "/proc/${HEARTBEAT_PID}/stat" 2>/dev/null)" || HB_STAT=''
             HB_REST="${HB_STAT##*) }"
             HB_FIELDS=(${HB_REST})
             HEARTBEAT_START_TICKS="${HB_FIELDS[19]:-}"
           fi
+          # Defense in depth on the producer: the ticks come from
+          # the /proc parse above in this PAT-holding shell, and a
+          # non-numeric value must never reach $GITHUB_OUTPUT —
+          # the consumers route them through step env (the
+          # STATUS_ID shape), where the runner sets them as data.
+          [[ "${HEARTBEAT_START_TICKS}" =~ ^[0-9]+$ ]] || HEARTBEAT_START_TICKS=''
           # Hand the id to the finalize step so it does not repeat this scan.
           echo "comment_id=${STATUS_ID}" >> "${GITHUB_OUTPUT}"
           echo "heartbeat_pid=${HEARTBEAT_PID}" >> "${GITHUB_OUTPUT}"
@@ -5052,6 +5063,15 @@ jobs:
           # Growth-audit rounds must carry a valid growth-audit.json verdict;
           # the gate enforces presence + shape before any push decision.
           KISS_AUDIT: '${{ steps.prepare.outputs.kiss_audit }}'
+          # The heartbeat kill targets travel through step env,
+          # the STATUS_ID shape: an expression interpolation
+          # inside the run body substitutes the value BEFORE the
+          # shell parses it, so a forged step output (post_status'
+          # shell is pollutable) would arrive as shell syntax and
+          # execute in this shell; step env is set by the runner
+          # as data (R16-1).
+          HB_PID: '${{ steps.post_status.outputs.heartbeat_pid }}'
+          HB_START_TICKS: '${{ steps.post_status.outputs.heartbeat_start_ticks }}'
         run: |-
           # The round heartbeat ends HERE: this is the first step that runs
           # branch code ON THE HOST (the agent phase sandboxes it in
@@ -5073,8 +5093,6 @@ jobs:
           # the same procps already relied on for pkill.
           # Full rationale → qwen-autofix.md#af-148
           /usr/bin/touch "${WORKDIR}/heartbeat-stop" 2> /dev/null || true
-          HB_PID="${{ steps.post_status.outputs.heartbeat_pid }}"
-          HB_START_TICKS="${{ steps.post_status.outputs.heartbeat_start_ticks }}"
           # Lifecycle-confirmed shutdown: this kill can land the whole
           # agent phase after the launch recorded HB_PID, and a pid
           # that old can already be REUSED — TERMing it would kill an
@@ -6250,6 +6268,13 @@ jobs:
           # can kill its shell at execve, silent exit 0) — the success text
           # must not assert a report that never posted.
           PUSH_REPORTED: '${{ steps.push_report.outputs.round_reported }}'
+          # The heartbeat kill targets ride step env, the STATUS_ID
+          # shape and the gate step's doctrine (R16-1): the clean
+          # child below re-declares them from these pins exactly
+          # like STATUS_ID, so a forged output arrives as data,
+          # never as run-body shell syntax.
+          HB_PID: '${{ steps.post_status.outputs.heartbeat_pid }}'
+          HB_START_TICKS: '${{ steps.post_status.outputs.heartbeat_start_ticks }}'
         run: |-
           # This step holds the PAT, and its shell inherits every
           # $GITHUB_ENV plant earlier steps left — including
@@ -6276,8 +6301,8 @@ jobs:
             GH_HOST=github.com \
             RUNNER_TEMP="${RUNNER_TEMP}" \
             WORKDIR="${WORKDIR}" \
-            HB_PID="${{ steps.post_status.outputs.heartbeat_pid }}" \
-            HB_START_TICKS="${{ steps.post_status.outputs.heartbeat_start_ticks }}" \
+            HB_PID="${HB_PID}" \
+            HB_START_TICKS="${HB_START_TICKS}" \
             STATUS_ID="${STATUS_ID}" \
             PUSH_REPORTED="${PUSH_REPORTED}" \
             OUTCOME="${OUTCOME}" \
@@ -6393,6 +6418,12 @@ jobs:
       # autofix workspace if that PR is never addressed again.
       - name: 'Clean up autofix workdir'
         if: 'always()'
+        env:
+          # The heartbeat kill targets ride step env, the STATUS_ID
+          # shape and the gate step's doctrine (R16-1): the runner
+          # sets them as data, never as run-body shell syntax.
+          HB_PID: '${{ steps.post_status.outputs.heartbeat_pid }}'
+          HB_START_TICKS: '${{ steps.post_status.outputs.heartbeat_start_ticks }}'
         run: |-
           # Last heartbeat kill (the gate and finalize already did this on
           # their paths) from the expression-context pid — never from a
@@ -6402,8 +6433,6 @@ jobs:
           # capture, kill nothing otherwise. The session kill covers
           # the mid-tick subtree, same as its twins.
           # Full rationale → qwen-autofix.md#af-148
-          HB_PID="${{ steps.post_status.outputs.heartbeat_pid }}"
-          HB_START_TICKS="${{ steps.post_status.outputs.heartbeat_start_ticks }}"
           HB_FIELDS=()
           if [[ "${HB_PID:-}" =~ ^[0-9]+$ ]]; then
             HB_STAT="$(cat "/proc/${HB_PID}/stat" 2>/dev/null)" || HB_STAT=''

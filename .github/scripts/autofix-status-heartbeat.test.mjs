@@ -410,6 +410,35 @@ describe('autofix-status-heartbeat loop', () => {
     } finally {
       killGroup(child);
     }
+    // Magnitude plants pass the shape guard and ride the same env
+    // carrier: a huge interval means the loop sleeps past every
+    // bound — zero pulses, and the age cap that limits an orphan's
+    // PAT window becomes unreachable; a tiny age cap kills the pulse
+    // after the first sleep. Both must degrade to the defaults like
+    // the malformed arm (R16-2).
+    const magDir = freshTmp();
+    const magGh = fakeGhBin(magDir);
+    const { env: magEnv, workdir: magWorkdir } = loopEnv(magDir, magGh, {
+      HB_INTERVAL_SECONDS: '99999999999',
+      HB_MAX_AGE_SECONDS: '1',
+    });
+    const magChild = startLoop(magEnv);
+    try {
+      const ok = await waitFor(() => {
+        const log = join(magWorkdir, 'heartbeat.log');
+        return (
+          existsSync(log) &&
+          readFileSync(log, 'utf8').includes('heartbeat started')
+        );
+      }, 8000);
+      assert.ok(ok, 'the loop must start and log its parameters');
+      assert.match(
+        readFileSync(join(magWorkdir, 'heartbeat.log'), 'utf8'),
+        /interval 600s max_age 20400s/,
+      );
+    } finally {
+      killGroup(magChild);
+    }
   });
 
   it('runs each PATCH under timeout so a black-holed request cannot outlive the age cap', async () => {
@@ -590,9 +619,12 @@ describe('autofix-status-heartbeat loop', () => {
   it('self-exits at the age cap', async () => {
     const dir = freshTmp();
     const gh = fakeGhBin(dir);
+    // The cap sits at the magnitude floor: the guards degrade a
+    // smaller plant to the default, so nothing below the job
+    // envelope can exercise this path.
     const { env, workdir } = loopEnv(dir, gh, {
-      HB_MAX_AGE_SECONDS: '1',
-      HB_START_EPOCH: String(Math.floor(Date.now() / 1000) - 5),
+      HB_MAX_AGE_SECONDS: '19800',
+      HB_START_EPOCH: String(Math.floor(Date.now() / 1000) - 19805),
     });
     const child = startLoop(env);
     const code = await awaitExit(child, 8000);

@@ -11691,8 +11691,6 @@ exit 1
     // dead by then.
     const heartbeatKillStatements = [
       '/usr/bin/touch "${WORKDIR}/heartbeat-stop" 2> /dev/null || true',
-      'HB_PID="${{ steps.post_status.outputs.heartbeat_pid }}"',
-      'HB_START_TICKS="${{ steps.post_status.outputs.heartbeat_start_ticks }}"',
       // Lifecycle confirmation before any signal: the pid recorded at
       // launch can be REUSED by the time a kill lands, and a blind kill
       // would TERM an unrelated process, its group and session
@@ -16002,6 +16000,16 @@ exit 1
     // reopen the window this cap exists to shrink.
     expect(heartbeatScript).toContain('HB_MAX_AGE_SECONDS:-20400');
     expect(heartbeatScript).toContain('|| max_age=20400');
+    // Magnitude bounds (R16-2): shape alone admits a well-formed
+    // plant that defeats the pulse — a huge interval the loop never
+    // wakes from (the age cap that bounds an orphan's PAT window
+    // becomes unreachable), or a tiny age cap that kills it after
+    // the first sleep. Overrides outside the accepted range degrade
+    // to the defaults.
+    expect(heartbeatScript).toContain('(( interval <= 3600 )) || interval=600');
+    expect(heartbeatScript).toContain(
+      '(( max_age >= 19800 && max_age <= 21600 )) || max_age=20400',
+    );
     // Every tick's gh call runs under the af-112 hermetic pins: GH_HOST
     // pinned and planted tokens dropped at launch, and the config dir
     // minted PER TICK inside the loop (R11-1) — RUNNER_TEMP is
@@ -16382,7 +16390,7 @@ exit 1
     // spaces.
     expect(postStatusCommentStep).toContain("HEARTBEAT_START_TICKS=''");
     expect(postStatusCommentStep).toContain(
-      'HB_STAT="$(cat "/proc/${HEARTBEAT_PID}/stat" 2>/dev/null)" || HB_STAT=\'\'',
+      'HB_STAT="$(/usr/bin/cat "/proc/${HEARTBEAT_PID}/stat" 2>/dev/null)" || HB_STAT=\'\'',
     );
     expect(postStatusCommentStep).toContain('HB_REST="${HB_STAT##*) }"');
     expect(postStatusCommentStep).toContain('HB_FIELDS=(${HB_REST})');
@@ -16391,6 +16399,18 @@ exit 1
     );
     expect(postStatusCommentStep).toContain(
       'echo "heartbeat_start_ticks=${HEARTBEAT_START_TICKS}" >> "${GITHUB_OUTPUT}"',
+    );
+    // Producer depth (R16-1): the ticks come out of a /proc parse in
+    // this PAT-holding shell; a non-numeric value must be dropped
+    // before it reaches $GITHUB_OUTPUT — the script's own NOW_EPOCH
+    // doctrine applied to the launch.
+    expect(postStatusCommentStep).toContain(
+      '[[ "${HEARTBEAT_START_TICKS}" =~ ^[0-9]+$ ]] || HEARTBEAT_START_TICKS=\'\'',
+    );
+    expect(
+      postStatusCommentStep.indexOf('^[0-9]+$ ]] || HEARTBEAT_START_TICKS'),
+    ).toBeLessThan(
+      postStatusCommentStep.indexOf('echo "heartbeat_start_ticks='),
     );
     // The capture reads the launched pid's stat — it must follow the
     // launch, or it would pin a process that is not this loop.
@@ -16410,6 +16430,15 @@ exit 1
     const killTarget = '${{ steps.post_status.outputs.heartbeat_pid }}';
     const ticksTarget =
       '${{ steps.post_status.outputs.heartbeat_start_ticks }}';
+    // Those expressions may appear ONLY in a step env: block — the
+    // runner sets an env value as data. Inside a run body the runner
+    // substitutes the value BEFORE the shell parses, so a forged
+    // step output (post_status' shell is pollutable) would arrive as
+    // shell syntax and execute in the consuming shell — finalize's
+    // PAT-bearing one among them (R16-1). Every killer therefore
+    // takes the STATUS_ID shape, and no run body may carry either
+    // expression.
+    const runBodyOf = (stepText) => stepText.slice(stepText.indexOf('run: |-'));
     // The review lane's gate — extracted from reviewAddressJob itself, so
     // a kill planted in the issue lane's same-named step cannot satisfy
     // these pins.
@@ -16418,14 +16447,16 @@ exit 1
         /- name: 'Verification gate'[\s\S]*?(?=\n[ ]{6}- name: ')/,
       )?.[0] ?? '';
     expect(gateStep).toContain('heartbeat-stop');
-    expect(gateStep).toContain(`HB_PID="${killTarget}"`);
+    expect(gateStep).toContain(`HB_PID: '${killTarget}'`);
+    expect(gateStep).toContain(`HB_START_TICKS: '${ticksTarget}'`);
+    expect(runBodyOf(gateStep)).not.toContain(killTarget);
+    expect(runBodyOf(gateStep)).not.toContain(ticksTarget);
     expect(gateStep).toContain('kill -- -"${HB_PID}"');
     // Lifecycle confirmation: the pid recorded at launch can be REUSED
     // by the time a kill lands, so each killer confirms the pid's
     // /proc/<pid>/stat start time against the launch capture before
     // signaling — a reused pid carries a different start time and a
     // dead pid has no stat, so a failed check kills nothing.
-    expect(gateStep).toContain(`HB_START_TICKS="${ticksTarget}"`);
     expect(gateStep).toContain('HB_FIELDS=(${HB_REST})');
     expect(gateStep).toContain(
       'if [[ "${#HB_FIELDS[@]}" -gt 19 && -n "${HB_START_TICKS}" && "${HB_FIELDS[19]}" == "${HB_START_TICKS}" ]]; then',
@@ -16443,12 +16474,14 @@ exit 1
     expect(finalizeStatusCommentStep).toContain(
       '/usr/bin/touch "${WORKDIR}/heartbeat-stop" 2> /dev/null || true',
     );
-    expect(finalizeStatusCommentStep).toContain(`HB_PID="${killTarget}"`);
+    expect(finalizeStatusCommentStep).toContain(`HB_PID: '${killTarget}'`);
+    expect(finalizeStatusCommentStep).toContain(
+      `HB_START_TICKS: '${ticksTarget}'`,
+    );
+    expect(runBodyOf(finalizeStatusCommentStep)).not.toContain(killTarget);
+    expect(runBodyOf(finalizeStatusCommentStep)).not.toContain(ticksTarget);
     expect(finalizeStatusCommentStep).toContain(
       'builtin kill -- -"${HB_PID}" 2>/dev/null || true',
-    );
-    expect(finalizeStatusCommentStep).toContain(
-      `HB_START_TICKS="${ticksTarget}"`,
     );
     expect(finalizeStatusCommentStep).toContain(
       'if [[ "${#HB_FIELDS[@]}" -gt 19 && -n "${HB_START_TICKS:-}" && "${HB_FIELDS[19]}" == "${HB_START_TICKS}" ]]; then',
@@ -16523,8 +16556,8 @@ exit 1
       'GH_HOST=github.com',
       'RUNNER_TEMP="${RUNNER_TEMP}"',
       'WORKDIR="${WORKDIR}"',
-      'HB_PID="${{ steps.post_status.outputs.heartbeat_pid }}"',
-      'HB_START_TICKS="${{ steps.post_status.outputs.heartbeat_start_ticks }}"',
+      'HB_PID="${HB_PID}"',
+      'HB_START_TICKS="${HB_START_TICKS}"',
       'STATUS_ID="${STATUS_ID}"',
       'PUSH_REPORTED="${PUSH_REPORTED}"',
       'OUTCOME="${OUTCOME}"',
@@ -16572,10 +16605,11 @@ exit 1
     // the plants and fails here. BASH_ENV/SHELLOPTS/LD_* plants stay out
     // of the probe env on purpose: those are closed by the step-level
     // pins above, which a spawn cannot model.
-    const finalizeRunBody = finalizeStatusCommentStep
-      .slice(finalizeStatusCommentStep.indexOf('run: |-') + 'run: |-'.length)
-      .replaceAll('${{ steps.post_status.outputs.heartbeat_pid }}', '')
-      .replaceAll('${{ steps.post_status.outputs.heartbeat_start_ticks }}', '');
+    // The run body carries NO heartbeat interpolation (pinned above):
+    // the probe executes it exactly as the runner would.
+    const finalizeRunBody = finalizeStatusCommentStep.slice(
+      finalizeStatusCommentStep.indexOf('run: |-') + 'run: |-'.length,
+    );
     const finalizeProbeDir = mkdtempSync(
       join(tmpdir(), 'autofix-finalize-r91-'),
     );
@@ -16666,202 +16700,247 @@ exit 1
       expect(noStatus.status).toBe(0);
       expect(noStatus.stdout).toContain('nothing to finalize');
       expect(existsSync(finalizeProbeOut)).toBe(false);
-    } finally {
-      rmSync(finalizeProbeDir, { recursive: true, force: true });
-    }
-    // Lifecycle-confirmation witness (both arms): run the same child
-    // body against a live unrelated process standing in for a REUSED
-    // pid. A start-time MISMATCH must suppress every kill (the victim
-    // survives and the finalize PATCH still happens); the MATCHING
-    // start time admits the kill (the victim dies). Deleting the
-    // confirmation green-lights the blind kill again and fails the
-    // first arm — the exact defect the confirmation closes.
-    // The victim's stdio must not hold spawnSync's pipe open, or the
-    // launch would block until the victim exits and the pid would be
-    // dead before the probe reads its stat.
-    const lifecycleVictim = spawnSync(
-      'bash',
-      ['-c', 'sleep 30 </dev/null >/dev/null 2>&1 & echo $!'],
-      { encoding: 'utf8' },
-    );
-    const victimPid = lifecycleVictim.stdout.trim();
-    expect(victimPid).toMatch(/^\d+$/);
-    const victimTicks = spawnSync(
-      'bash',
-      ['-c', `awk '{print $22}' /proc/${victimPid}/stat`],
-      { encoding: 'utf8' },
-    ).stdout.trim();
-    expect(victimTicks).toMatch(/^\d+$/);
-    const lifecycleRunBody = finalizeStatusCommentStep
-      .slice(finalizeStatusCommentStep.indexOf('run: |-') + 'run: |-'.length)
-      .replaceAll('${{ steps.post_status.outputs.heartbeat_pid }}', victimPid);
-    const lifecycleProbeDir = mkdtempSync(
-      join(tmpdir(), 'autofix-finalize-lifecycle-'),
-    );
-    const lifecycleProbeBin = join(lifecycleProbeDir, 'bin');
-    mkdirSync(lifecycleProbeBin);
-    const lifecycleProbeOut = join(lifecycleProbeDir, 'probe-out');
-    writeFileSync(
-      join(lifecycleProbeBin, 'gh'),
-      [
-        '#!/usr/bin/env bash',
-        `printf 'STUB_GH_RAN args=%s\\n' "$*" >> "${lifecycleProbeOut}"`,
-        '',
-      ].join('\n'),
-      { mode: 0o755 },
-    );
-    const lifecycleProbeEnv = {
-      TRUSTED_PATH: `${lifecycleProbeBin}:/usr/bin:/bin`,
-      HOME: lifecycleProbeDir,
-      GITHUB_TOKEN: 'SECRET_PAT',
-      RUNNER_TEMP: lifecycleProbeDir,
-      WORKDIR: lifecycleProbeDir,
-      STATUS_ID: '12345',
-      PUSH_REPORTED: 'true',
-      OUTCOME: 'fixed',
-      EFFECTIVE_ROUND: '3',
-      ROUND: '3',
-      RUN_URL: 'https://example.invalid/runs/1',
-      REPO: 'octo/repo',
-      PR: '77',
-    };
-    const processIsAlive = (pid) => {
-      try {
-        process.kill(Number(pid), 0);
-        return true;
-      } catch {
-        return false;
-      }
-    };
-    try {
-      // Mismatch arm: the recorded start time is NOT the victim's (the
-      // pid was reused) — every kill must be suppressed.
-      const mismatch = spawnSync(
-        'bash',
-        [
-          '-e',
-          '-o',
-          'pipefail',
-          '-c',
-          lifecycleRunBody.replaceAll(
-            '${{ steps.post_status.outputs.heartbeat_start_ticks }}',
-            '1',
-          ),
-        ],
-        { encoding: 'utf8', env: lifecycleProbeEnv },
-      );
-      expect(mismatch.status).toBe(0);
-      expect(processIsAlive(victimPid)).toBe(true);
-      expect(readFileSync(lifecycleProbeOut, 'utf8')).toContain('STUB_GH_RAN');
-      // Match arm: the recorded start time IS the victim's — the kill
-      // is admitted and lands.
-      rmSync(lifecycleProbeOut, { force: true });
-      const match = spawnSync(
-        'bash',
-        [
-          '-e',
-          '-o',
-          'pipefail',
-          '-c',
-          lifecycleRunBody.replaceAll(
-            '${{ steps.post_status.outputs.heartbeat_start_ticks }}',
-            victimTicks,
-          ),
-        ],
-        { encoding: 'utf8', env: lifecycleProbeEnv },
-      );
-      expect(match.status).toBe(0);
-      expect(processIsAlive(victimPid)).toBe(false);
-    } finally {
-      try {
-        process.kill(Number(victimPid), 'SIGKILL');
-      } catch {
-        // already gone — the match arm killed it
-      }
-      rmSync(lifecycleProbeDir, { recursive: true, force: true });
-    }
-    // Drain witness: the terminal PATCH waits the in-flight stamp out.
-    // A near-fresh stamp (64s old) makes finalize wait its remaining
-    // bound; an already-aged stamp (70s old) proceeds at once; a planted
-    // FIFO at the stamp path cannot stall the step. A mutant that sleeps
-    // a FIXED span instead of draining fails the aged arm's upper bound
-    // or the fresh arm's lower bound, and deleting the bounded read
-    // hangs the FIFO arm.
-    const drainProbeDir = mkdtempSync(
-      join(tmpdir(), 'autofix-finalize-drain-'),
-    );
-    const drainProbeBin = join(drainProbeDir, 'bin');
-    mkdirSync(drainProbeBin);
-    const drainProbeOut = join(drainProbeDir, 'probe-out');
-    writeFileSync(
-      join(drainProbeBin, 'gh'),
-      [
-        '#!/usr/bin/env bash',
-        `printf 'STUB_GH_RAN\\n' >> "${drainProbeOut}"`,
-        '',
-      ].join('\n'),
-      { mode: 0o755 },
-    );
-    const drainProbeEnv = {
-      TRUSTED_PATH: `${drainProbeBin}:/usr/bin:/bin`,
-      HOME: drainProbeDir,
-      GITHUB_TOKEN: 'SECRET_PAT',
-      RUNNER_TEMP: drainProbeDir,
-      WORKDIR: drainProbeDir,
-      STATUS_ID: '12345',
-      PUSH_REPORTED: 'true',
-      OUTCOME: 'fixed',
-      EFFECTIVE_ROUND: '3',
-      ROUND: '3',
-      RUN_URL: 'https://example.invalid/runs/1',
-      REPO: 'octo/repo',
-      PR: '77',
-    };
-    const stampPath = join(drainProbeDir, 'heartbeat-tick-inflight');
-    const runDrainArm = (prep) => {
-      rmSync(drainProbeOut, { force: true });
-      rmSync(stampPath, { force: true });
-      prep();
-      const startedAt = Date.now();
-      const res = spawnSync(
+      // R16-1 witness: the kill targets ride step env and expand as
+      // DATA — a forged ticks output carrying command substitution
+      // must not execute anywhere in this body.
+      rmSync(finalizeProbeOut, { force: true });
+      const forgedProof = join(finalizeProbeDir, 'forged-proof');
+      const forged = spawnSync(
         'bash',
         ['-e', '-o', 'pipefail', '-c', finalizeRunBody],
         {
           encoding: 'utf8',
-          env: drainProbeEnv,
+          env: {
+            ...finalizeProbeEnv,
+            HB_PID: '999999',
+            HB_START_TICKS: `$(touch "${forgedProof}")`,
+          },
         },
       );
-      return { res, elapsedMs: Date.now() - startedAt };
-    };
-    try {
-      const fresh = runDrainArm(() =>
-        writeFileSync(stampPath, String(Math.floor(Date.now() / 1000) - 64)),
+      expect(forged.status).toBe(0);
+      expect(existsSync(forgedProof)).toBe(false);
+      expect(readFileSync(finalizeProbeOut, 'utf8')).toContain(
+        'STUB_GH_RAN token=SECRET_PAT',
       );
-      expect(fresh.res.status).toBe(0);
-      expect(readFileSync(drainProbeOut, 'utf8')).toContain('STUB_GH_RAN');
-      expect(fresh.elapsedMs).toBeGreaterThanOrEqual(800);
-      expect(fresh.elapsedMs).toBeLessThan(10000);
-      const aged = runDrainArm(() =>
-        writeFileSync(stampPath, String(Math.floor(Date.now() / 1000) - 70)),
-      );
-      expect(aged.res.status).toBe(0);
-      expect(readFileSync(drainProbeOut, 'utf8')).toContain('STUB_GH_RAN');
-      expect(aged.elapsedMs).toBeLessThan(4000);
-      const fifo = runDrainArm(() => {
-        spawnSync('mkfifo', [stampPath]);
-      });
-      expect(fifo.res.status).toBe(0);
-      expect(readFileSync(drainProbeOut, 'utf8')).toContain('STUB_GH_RAN');
-      expect(fifo.elapsedMs).toBeLessThan(15000);
     } finally {
-      rmSync(drainProbeDir, { recursive: true, force: true });
+      rmSync(finalizeProbeDir, { recursive: true, force: true });
+    }
+    // The lifecycle and drain witnesses below shell out to Linux-only
+    // facilities — procfs (the victim start-time read and the body's
+    // stat parse) and unprefixed coreutils `timeout` (the bounded
+    // stamp read) — while the merge_group/schedule/workflow_dispatch-
+    // gated macOS lane collects this suite (the vitest config
+    // excludes it only on win32). Gate on capability, not platform,
+    // mirroring launchWitnessSupported above; on a capable host the
+    // witnesses keep executing, and the string pins stay
+    // unconditional.
+    const lifecycleWitnessSupported =
+      spawnSync('bash', [
+        '-c',
+        'test -r /proc/self/stat && command -v timeout >/dev/null 2>&1',
+      ]).status === 0;
+    if (lifecycleWitnessSupported) {
+      // Lifecycle-confirmation witness (both arms): run the same child
+      // body against a live unrelated process standing in for a REUSED
+      // pid. A start-time MISMATCH must suppress every kill (the victim
+      // survives and the finalize PATCH still happens); the MATCHING
+      // start time admits the kill (the victim dies). Deleting the
+      // confirmation green-lights the blind kill again and fails the
+      // first arm — the exact defect the confirmation closes. The pid
+      // and start time travel to the body through the step env, the
+      // R16-1 shape pinned above.
+      // The victim's stdio must not hold spawnSync's pipe open, or the
+      // launch would block until the victim exits and the pid would be
+      // dead before the probe reads its stat.
+      const lifecycleVictim = spawnSync(
+        'bash',
+        ['-c', 'sleep 30 </dev/null >/dev/null 2>&1 & echo $!'],
+        { encoding: 'utf8' },
+      );
+      const victimPid = lifecycleVictim.stdout.trim();
+      expect(victimPid).toMatch(/^\d+$/);
+      const victimTicks = spawnSync(
+        'bash',
+        ['-c', `awk '{print $22}' /proc/${victimPid}/stat`],
+        { encoding: 'utf8' },
+      ).stdout.trim();
+      expect(victimTicks).toMatch(/^\d+$/);
+      const lifecycleProbeDir = mkdtempSync(
+        join(tmpdir(), 'autofix-finalize-lifecycle-'),
+      );
+      const lifecycleProbeBin = join(lifecycleProbeDir, 'bin');
+      mkdirSync(lifecycleProbeBin);
+      const lifecycleProbeOut = join(lifecycleProbeDir, 'probe-out');
+      writeFileSync(
+        join(lifecycleProbeBin, 'gh'),
+        [
+          '#!/usr/bin/env bash',
+          `printf 'STUB_GH_RAN args=%s\\n' "$*" >> "${lifecycleProbeOut}"`,
+          '',
+        ].join('\n'),
+        { mode: 0o755 },
+      );
+      const lifecycleProbeEnv = {
+        TRUSTED_PATH: `${lifecycleProbeBin}:/usr/bin:/bin`,
+        HOME: lifecycleProbeDir,
+        GITHUB_TOKEN: 'SECRET_PAT',
+        RUNNER_TEMP: lifecycleProbeDir,
+        WORKDIR: lifecycleProbeDir,
+        STATUS_ID: '12345',
+        PUSH_REPORTED: 'true',
+        OUTCOME: 'fixed',
+        EFFECTIVE_ROUND: '3',
+        ROUND: '3',
+        RUN_URL: 'https://example.invalid/runs/1',
+        REPO: 'octo/repo',
+        PR: '77',
+      };
+      const processIsAlive = (pid) => {
+        try {
+          process.kill(Number(pid), 0);
+          return true;
+        } catch {
+          return false;
+        }
+      };
+      try {
+        // Mismatch arm: the recorded start time is NOT the victim's (the
+        // pid was reused) — every kill must be suppressed.
+        const mismatch = spawnSync(
+          'bash',
+          ['-e', '-o', 'pipefail', '-c', finalizeRunBody],
+          {
+            encoding: 'utf8',
+            env: {
+              ...lifecycleProbeEnv,
+              HB_PID: victimPid,
+              HB_START_TICKS: '1',
+            },
+          },
+        );
+        expect(mismatch.status).toBe(0);
+        expect(processIsAlive(victimPid)).toBe(true);
+        expect(readFileSync(lifecycleProbeOut, 'utf8')).toContain(
+          'STUB_GH_RAN',
+        );
+        // Match arm: the recorded start time IS the victim's — the kill
+        // is admitted and lands.
+        rmSync(lifecycleProbeOut, { force: true });
+        const match = spawnSync(
+          'bash',
+          ['-e', '-o', 'pipefail', '-c', finalizeRunBody],
+          {
+            encoding: 'utf8',
+            env: {
+              ...lifecycleProbeEnv,
+              HB_PID: victimPid,
+              HB_START_TICKS: victimTicks,
+            },
+          },
+        );
+        expect(match.status).toBe(0);
+        expect(processIsAlive(victimPid)).toBe(false);
+      } finally {
+        try {
+          process.kill(Number(victimPid), 'SIGKILL');
+        } catch {
+          // already gone — the match arm killed it
+        }
+        rmSync(lifecycleProbeDir, { recursive: true, force: true });
+      }
+      // Drain witness: the terminal PATCH waits the in-flight stamp out.
+      // A near-fresh stamp (63–64s old) makes finalize wait its remaining
+      // bound; an already-aged stamp (70s old) proceeds at once; a planted
+      // FIFO at the stamp path cannot stall the step. A mutant that sleeps
+      // a FIXED span instead of draining fails the aged arm's upper bound
+      // or the fresh arm's lower bound, and deleting the bounded read
+      // hangs the FIFO arm.
+      const drainProbeDir = mkdtempSync(
+        join(tmpdir(), 'autofix-finalize-drain-'),
+      );
+      const drainProbeBin = join(drainProbeDir, 'bin');
+      mkdirSync(drainProbeBin);
+      const drainProbeOut = join(drainProbeDir, 'probe-out');
+      writeFileSync(
+        join(drainProbeBin, 'gh'),
+        [
+          '#!/usr/bin/env bash',
+          `printf 'STUB_GH_RAN\\n' >> "${drainProbeOut}"`,
+          '',
+        ].join('\n'),
+        { mode: 0o755 },
+      );
+      const drainProbeEnv = {
+        TRUSTED_PATH: `${drainProbeBin}:/usr/bin:/bin`,
+        HOME: drainProbeDir,
+        GITHUB_TOKEN: 'SECRET_PAT',
+        RUNNER_TEMP: drainProbeDir,
+        WORKDIR: drainProbeDir,
+        STATUS_ID: '12345',
+        PUSH_REPORTED: 'true',
+        OUTCOME: 'fixed',
+        EFFECTIVE_ROUND: '3',
+        ROUND: '3',
+        RUN_URL: 'https://example.invalid/runs/1',
+        REPO: 'octo/repo',
+        PR: '77',
+      };
+      const stampPath = join(drainProbeDir, 'heartbeat-tick-inflight');
+      // The stamp is planted from INSIDE the probe shell, immediately
+      // before the drain body runs, relative to the drain's own clock —
+      // the shape the real loop stamps in. A wall-clock plant from THIS
+      // process instead leaves the stamp's sub-second age unknown to
+      // the drain: whenever the plant lands late enough in its second,
+      // the first drain check already sees a stamp >= 65s old and
+      // legitimately breaks at once — the assertion red while the drain
+      // behaves exactly as designed (R15-2). Age the fresh stamp 63s,
+      // not 64: the break needs NOW_S >= stamp + 65, and a 63s-old
+      // stamp can satisfy that on no first check, so at least one
+      // `sleep 1` must pass and the lower bound holds deterministically.
+      const runDrainArm = (stampPlant) => {
+        rmSync(drainProbeOut, { force: true });
+        rmSync(stampPath, { force: true });
+        const startedAt = Date.now();
+        const res = spawnSync(
+          'bash',
+          ['-e', '-o', 'pipefail', '-c', `${stampPlant}\n${finalizeRunBody}`],
+          {
+            encoding: 'utf8',
+            env: drainProbeEnv,
+          },
+        );
+        return { res, elapsedMs: Date.now() - startedAt };
+      };
+      try {
+        const fresh = runDrainArm(
+          'echo $(( $(date +%s) - 63 )) > "${WORKDIR}/heartbeat-tick-inflight"',
+        );
+        expect(fresh.res.status).toBe(0);
+        expect(readFileSync(drainProbeOut, 'utf8')).toContain('STUB_GH_RAN');
+        expect(fresh.elapsedMs).toBeGreaterThanOrEqual(800);
+        expect(fresh.elapsedMs).toBeLessThan(10000);
+        const aged = runDrainArm(
+          'echo $(( $(date +%s) - 70 )) > "${WORKDIR}/heartbeat-tick-inflight"',
+        );
+        expect(aged.res.status).toBe(0);
+        expect(readFileSync(drainProbeOut, 'utf8')).toContain('STUB_GH_RAN');
+        expect(aged.elapsedMs).toBeLessThan(4000);
+        const fifo = runDrainArm('mkfifo "${WORKDIR}/heartbeat-tick-inflight"');
+        expect(fifo.res.status).toBe(0);
+        expect(readFileSync(drainProbeOut, 'utf8')).toContain('STUB_GH_RAN');
+        expect(fifo.elapsedMs).toBeLessThan(15000);
+      } finally {
+        rmSync(drainProbeDir, { recursive: true, force: true });
+      }
     }
     const cleanupStep =
       reviewAddressJob.match(
         /- name: 'Clean up autofix workdir'[\s\S]*?(?=\n[ ]{6}- name: '|\n[ ]{2}# ==========|$)/,
       )?.[0] ?? '';
-    expect(cleanupStep).toContain(`HB_PID="${killTarget}"`);
-    expect(cleanupStep).toContain(`HB_START_TICKS="${ticksTarget}"`);
+    expect(cleanupStep).toContain(`HB_PID: '${killTarget}'`);
+    expect(cleanupStep).toContain(`HB_START_TICKS: '${ticksTarget}'`);
+    expect(runBodyOf(cleanupStep)).not.toContain(killTarget);
+    expect(runBodyOf(cleanupStep)).not.toContain(ticksTarget);
     expect(cleanupStep).toContain('HB_FIELDS=(${HB_REST})');
     expect(cleanupStep).toContain(
       'if [[ "${#HB_FIELDS[@]}" -gt 19 && -n "${HB_START_TICKS}" && "${HB_FIELDS[19]}" == "${HB_START_TICKS}" ]]; then',

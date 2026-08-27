@@ -3771,7 +3771,12 @@ flips the terminal text.
 
 KILL TARGETS travel through EXPRESSION CONTEXT: post_status
 records $! as heartbeat_pid, and the gate / finalize / the
-always() cleanup kill that value. Never a pid read from a
+always() cleanup kill that value — delivered through each
+killer's step-level env: block (the STATUS_ID shape), so the
+runner sets it as data; an interpolation inside a run body
+would substitute a forged output BEFORE the shell parses, so
+it would execute as shell syntax in the consuming shell
+(R16-1). Never a pid read from a
 WORKDIR file: the agent's docker sandbox mounts the host
 /tmp on the same path and runs as this same user, so branch
 code the agent executes can plant any value in
