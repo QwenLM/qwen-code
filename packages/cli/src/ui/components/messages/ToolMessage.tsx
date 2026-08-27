@@ -993,6 +993,8 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
                 text={formatAdvisorReview(effectiveDisplayRenderer.data)}
                 model={effectiveDisplayRenderer.data.model ?? description}
                 containerWidth={innerWidth}
+                availableTerminalHeight={availableHeight}
+                isPending={isPending}
               />
             )}
             {effectiveDisplayRenderer.type === 'task' && config && (
