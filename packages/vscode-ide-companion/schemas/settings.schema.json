@@ -49,6 +49,11 @@
       "type": "object",
       "additionalProperties": true
     },
+    "probeResults": {
+      "description": "Persisted one-shot image modality probe verdicts, keyed by \"authType|modelId|baseUrl\". Written by the \"Test image support\" action in /model; feeds the modality resolution chain (explicit modalities > probe result > name-pattern table). Records are advisory metadata, never user declarations.",
+      "type": "object",
+      "additionalProperties": true
+    },
     "plansDirectory": {
       "description": "Custom directory for approved Plan Mode files. Relative paths are resolved from the project root, and the resolved path must stay within the project root. Defaults to ~/.qwen/plans.",
       "type": "string"

@@ -317,6 +317,7 @@ export * from './services/fileHistoryService.js';
 export * from './services/fileReadCache.js';
 export * from './services/fileSystemService.js';
 export * from './services/tool-write-origin.js';
+export type { ModalityProbeRecord } from './services/modalityProbe/probe-store.js';
 export {
   decodeBufferWithEncodingInfo,
   encodeTextFileContent,
