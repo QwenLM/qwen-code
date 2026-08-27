@@ -606,8 +606,9 @@ function floorResolvesCritical(
  * because the capture already spent the round's shape on the resolution.
  * Everything else fails OPEN exactly as the
  * posture itself does — an unrecognisable floor, `auto` before round 6 with
- * the streak below its bar, `auto` in the context-unavailable state (the
- * round is unknowable), `--severity-floor suggestion` (posture off): a
+ * the streak below its bar, `auto` in the context-unavailable state without
+ * a fix-audit plan record (the round is unknowable), `--severity-floor
+ * suggestion` (posture off): a
  * posting bar in doubt posts. The rounds-2–5
  * code-age rule stays model-side on purpose — it needs the worktree git
  * checks this module does not have.
