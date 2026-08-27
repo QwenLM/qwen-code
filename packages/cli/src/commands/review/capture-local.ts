@@ -53,8 +53,7 @@ import {
 } from './lib/report.js';
 import { operatorReviewSettings } from './lib/review-settings.js';
 import { hasReviewDeadline } from './lib/deadline.js';
-import { gitOpt, gitRaw } from './lib/git.js';
-import { LITERAL_PATHSPECS } from './lib/diff-flags.js';
+import { gitOpt } from './lib/git.js';
 import { certifierMatchesRound, roundModelIdFrom } from './lib/round-model.js';
 import {
   changedSince,
@@ -178,50 +177,6 @@ function isDirectorySubject(repoRoot: string, rel: string): boolean {
   }
 }
 
-/**
- * Which of `paths` the tree at `rev` records as a submodule gitlink.
- *
- * Asked of git rather than inferred: `hashWorktreeFiles` and
- * `revisionIdentities` both answer UNHASHABLE for a gitlink, so the
- * placeholder they share cannot tell a submodule from an unreadable name —
- * and only the submodule is one git measures for itself. An unlistable
- * revision answers nothing, which leaves every path refused.
- */
-function gitlinkPathsAt(
-  repoRoot: string,
-  rev: string,
-  paths: readonly string[],
-): Array<{ path: string; oid: string }> {
-  let raw: Buffer;
-  try {
-    raw = gitRaw(
-      '-C',
-      repoRoot,
-      LITERAL_PATHSPECS,
-      'ls-tree',
-      '-z',
-      rev,
-      '--',
-      ...paths,
-    );
-  } catch {
-    return [];
-  }
-  const out: Array<{ path: string; oid: string }> = [];
-  for (const rec of raw.toString('utf8').split('\0')) {
-    // `<mode> SP <type> SP <oid> TAB <path>` — 160000 is the gitlink mode.
-    if (!rec.startsWith('160000 ')) continue;
-    const tab = rec.indexOf('\t');
-    if (tab === -1) continue;
-    const path = rec.slice(tab + 1);
-    const oid = rec.slice(0, tab).split(' ')[2] ?? '';
-    // A decode that mangled the name cannot be matched back to the caller's
-    // spelling; leaving it out keeps it refused.
-    if (!path.includes('\ufffd')) out.push({ path, oid });
-  }
-  return out;
-}
-
 function vanishedStillOnDisk(
   repoRoot: string,
   headSha: string | null,
@@ -292,42 +247,18 @@ function vanishedStillOnDisk(
     foldsExec && id !== undefined && id.startsWith('100755:')
       ? `100644:${id.slice('100755:'.length)}`
       : id;
-  // A path this layer cannot hash on EITHER side is normally uncertifiable —
-  // the `worktree === UNHASHABLE` clause below. One class is different: a
-  // submodule GITLINK is unhashable by design here (a directory in the
-  // worktree, type `commit` in the tree), yet git measures it itself and the
-  // pinned flags keep it in the capture (`--ignore-submodules=none`). So its
-  // absence from the diff IS git's own answer that the pointer did not move,
-  // and refusing it every round wedged the loop for ever on any repo whose
-  // round-1 review touched a submodule (R20-3). Ask git which of them are
-  // gitlinks rather than infer it from the placeholder both sides share:
-  // anything else unhashable — an undecodable name, a FIFO — still refuses.
-  const bothUnhashable = onDisk.filter(
-    (p) => worktree[p] === UNHASHABLE && head[p] === UNHASHABLE,
-  );
-  // Certified by MEASUREMENT, not by the diff's silence: with the
-  // submodule's odb gone, `git diff HEAD` shows nothing for a MOVED pointer
-  // — that emptiness is git unable to answer, not answering "unmoved"
-  // (R20-3 follow-up). So the pointer is read directly from the submodule
-  // and compared to HEAD's recorded oid; a submodule whose HEAD cannot be
-  // read is unmeasurable, and unmeasurable is uncertifiable.
-  const gitlinks = new Set(
-    (bothUnhashable.length === 0 || headSha === null
-      ? []
-      : gitlinkPathsAt(repoRoot, headSha, bothUnhashable)
-    )
-      .filter(
-        ({ path, oid }) =>
-          oid !== '' &&
-          gitOpt('-C', join(repoRoot, path), 'rev-parse', 'HEAD') === oid,
-      )
-      .map(({ path }) => path),
-  );
+  // A path unhashable on the WORKTREE side refuses — unmeasurable is
+  // uncertifiable. Submodule gitlinks are no longer that shape: both sides
+  // answer `160000:<oid>` for a readable, content-clean submodule (see
+  // `gitlinkIdentity` / `revisionIdentities`), so a restored pointer
+  // certifies through the ordinary equality below, and a dirty or
+  // unreadable one stays UNHASHABLE and refuses — the R20-3/R22-1 pair,
+  // closed by making the identity real instead of special-casing the
+  // placeholder.
   return onDisk.filter(
     (path) =>
-      !gitlinks.has(path) &&
-      (identity(worktree[path]) !== identity(head[path]) ||
-        worktree[path] === UNHASHABLE),
+      identity(worktree[path]) !== identity(head[path]) ||
+      worktree[path] === UNHASHABLE,
   );
 }
 

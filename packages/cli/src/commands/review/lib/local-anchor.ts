@@ -188,9 +188,20 @@ export function hashWorktreeFiles(
       // 0655 prints old/new mode lines while g+other bits kept 0o111 truthy).
       modes[p] = (st.mode & 0o100) !== 0 ? '100755' : '100644';
       hashable.push(p);
+    } else if (st.isDirectory()) {
+      // A directory in the population is normally a submodule GITLINK (the
+      // pinned diff flags keep them visible; a plain directory subject is
+      // excluded upstream). Recorded UNHASHABLE it never equals itself, so
+      // a dirty pointer wedged the unchanged-since stop for the change
+      // set's whole lifetime (R22-1) — yet git measures this identity for
+      // itself. A gitlink whose HEAD is readable AND whose content is clean
+      // records `160000:<oid>`, the exact identity `revisionIdentities`
+      // reads out of `ls-tree`; a content-dirty or unreadable submodule
+      // stays UNHASHABLE — the pointer oid says nothing about internal
+      // edits, and unmeasurable is uncertifiable.
+      out[p] = gitlinkIdentity(repoRoot, p);
     } else {
-      // Directories (embedded repos, submodule gitlinks the pinned diff
-      // flags deliberately keep visible), FIFOs, sockets: not capturable.
+      // FIFOs, sockets, and any other shape: not capturable.
       out[p] = UNHASHABLE;
     }
   }
@@ -507,8 +518,14 @@ export function revisionIdentities(
       // A symlink's identity is its stored blob — the link text's bytes —
       // with no rendering suffix: the worktree hasher's exact shape.
       out[path] = `120000:${oid}`;
+    } else if (type === 'commit') {
+      // A gitlink's identity at a revision is the recorded pointer — the
+      // same `160000:<oid>` shape the worktree hasher answers for a clean,
+      // readable submodule, so the two sides compare instead of holding an
+      // UNHASHABLE that never equals itself (R22-1).
+      out[path] = `160000:${oid}`;
     } else {
-      // Trees, gitlinks (submodules), and any other shape: not capturable.
+      // Trees and any other shape: not capturable.
       out[path] = UNHASHABLE;
     }
   }
@@ -520,6 +537,28 @@ export function revisionIdentities(
       a === undefined || a === UNHASHABLE ? UNHASHABLE : `${out[p]}:${a}`;
   }
   return out;
+}
+
+/**
+ * A submodule gitlink's worktree identity: `160000:<oid>` when the pointer
+ * is measurable and the submodule's content is CLEAN, UNHASHABLE otherwise.
+ *
+ * The oid alone would compare equal across an internal edit (`git diff`
+ * renders that as `<oid>-dirty` — a change this identity must not hold
+ * still through), so cleanliness is part of measurability: a dirty
+ * submodule re-reviews every round, the affordable direction, exactly as
+ * an unreadable one does.
+ */
+function gitlinkIdentity(repoRoot: string, path: string): string {
+  const sub = join(repoRoot, path);
+  const oid = gitOpt('-C', sub, 'rev-parse', 'HEAD');
+  if (oid === null || oid === '') return UNHASHABLE;
+  try {
+    const status = gitRaw('-C', sub, 'status', '--porcelain');
+    return status.length === 0 ? `160000:${oid}` : UNHASHABLE;
+  } catch {
+    return UNHASHABLE;
+  }
 }
 
 /**
