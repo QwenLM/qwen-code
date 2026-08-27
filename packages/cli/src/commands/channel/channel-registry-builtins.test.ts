@@ -125,6 +125,7 @@ describe('built-in channel registry', () => {
       'allowedUsers',
       'groupPolicy',
       'sessionScope',
+      'multiSession',
     ]);
     expect(
       entry?.fields.find((field) => field.key === 'senderPolicy'),

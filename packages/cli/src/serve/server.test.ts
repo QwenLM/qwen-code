@@ -694,6 +694,9 @@ const EXPECTED_REGISTERED_FEATURES = [
     if (feature === 'session_tasks') {
       return [feature, 'scheduled_task_session_reuse'];
     }
+    if (feature === 'session_export') {
+      return [feature, 'standalone_sessions_v1'];
+    }
     return [feature];
   }).filter(
     (f) =>
@@ -2845,6 +2848,20 @@ describe('createServeApp', () => {
           expect(predicate({})).toBe(false);
           expect(
             getAdvertisedServeFeatures(undefined, { requireAuth: true }),
+          ).toContain(feature);
+          expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
+            feature,
+          );
+          continue;
+        }
+        if (feature === 'standalone_sessions_v1') {
+          expect(predicate({ standaloneSessionsAvailable: true })).toBe(true);
+          expect(predicate({ standaloneSessionsAvailable: false })).toBe(false);
+          expect(predicate({})).toBe(false);
+          expect(
+            getAdvertisedServeFeatures(undefined, {
+              standaloneSessionsAvailable: true,
+            }),
           ).toContain(feature);
           expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
             feature,
@@ -34944,6 +34961,36 @@ describe('Live conversation runtime lifecycle', () => {
       },
     };
   }
+
+  it('mounts and advertises standalone sessions only with complete runtime dependencies', async () => {
+    const partial = createServeApp(baseOpts, undefined, {
+      bridge: fakeBridge(),
+    });
+    const partialRoute = await request(partial)
+      .get('/standalone/sessions?cwd=/tmp')
+      .set('Host', `127.0.0.1:${baseOpts.port}`);
+    const partialCapabilities = await request(partial)
+      .get('/capabilities')
+      .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+    expect(partialRoute.status).toBe(404);
+    expect(partialCapabilities.body.features).not.toContain(
+      'standalone_sessions_v1',
+    );
+
+    const complete = setupLiveRuntime();
+    const completeRoute = await supertest(complete.app)
+      .get('/standalone/sessions?cwd=/tmp')
+      .set('Host', `127.0.0.1:${baseOpts.port}`);
+    const completeCapabilities = await supertest(complete.app)
+      .get('/capabilities')
+      .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+    expect(completeRoute.status).toBe(400);
+    expect(completeCapabilities.body.features).toContain(
+      'standalone_sessions_v1',
+    );
+  });
 
   it('blocks REST close and archive for active Live sessions until the call stops', async () => {
     const restoreLiveSettings = await disableLiveVoiceAtBoot();
