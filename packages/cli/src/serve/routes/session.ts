@@ -3624,7 +3624,9 @@ export function registerSessionRoutes(
               restoreMetadata.sourceType !== undefined;
             const restoreRequestMetadata = {
               ...restoreMetadata,
-              ...(hasPersistedSource ? {} : restoreSource),
+              ...(hasPersistedSource || isInternalWorkspaceRuntime(runtime)
+                ? {}
+                : restoreSource),
             };
             assertRuntimeGenerationOpen?.();
             if (isInternalWorkspaceRuntime(runtime)) {

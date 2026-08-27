@@ -35682,6 +35682,54 @@ describe('Live conversation runtime lifecycle', () => {
     }
   });
 
+  it('does not apply caller-supplied restore source metadata on the internal Live runtime', async () => {
+    const sessionId = 'legacy-live-channel';
+    const setup = setupLiveRuntime();
+    setup.registry.add(setup.liveRuntime);
+    const findSessionId = vi
+      .spyOn(SessionService.prototype, 'findSessionIdIgnoringCase')
+      .mockResolvedValue(sessionId);
+    const getLocation = vi
+      .spyOn(SessionService.prototype, 'getSessionLocation')
+      .mockResolvedValue('active');
+    const readCreationMetadata = vi
+      .spyOn(SessionService.prototype, 'readCreationMetadata')
+      .mockResolvedValue({});
+    const readCreationMetadataIfReadable = vi
+      .spyOn(SessionService.prototype, 'readCreationMetadataIfReadable')
+      .mockImplementation(async (id, _location) => readCreationMetadata(id));
+    try {
+      const response = await request(setup.app)
+        .post(`/session/${sessionId}/resume`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({
+          cwd: setup.root.canonicalRoot,
+          sourceType: 'channel',
+          sourceId: 'dingtalk-main',
+        });
+
+      expect(response.status).toBe(200);
+      expect(setup.liveBridge.resumeCalls).toContainEqual(
+        expect.objectContaining({
+          sessionId,
+          workspaceCwd: setup.root.canonicalRoot,
+        }),
+      );
+      expect(setup.liveBridge.resumeCalls[0]).not.toHaveProperty(
+        'sourceType',
+      );
+      expect(setup.liveBridge.resumeCalls[0]).not.toHaveProperty('sourceId');
+    } finally {
+      readCreationMetadataIfReadable.mockRestore();
+      readCreationMetadata.mockRestore();
+      getLocation.mockRestore();
+      findSessionId.mockRestore();
+      await (
+        setup.app.locals['sealAndWaitLiveCoordinator'] as () => Promise<void>
+      )();
+    }
+  });
+
   it('adopts a UUID legacy Conversations restore through the standalone service', async () => {
     const sessionId = '550e8400-e29b-41d4-a716-446655440010';
     let restored = false;
