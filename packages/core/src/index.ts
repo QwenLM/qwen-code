@@ -265,6 +265,11 @@ export type {
   PublishedArtifact,
 } from './tools/artifact/publisher.js';
 export type { CronCreateTool, CronCreateParams } from './tools/cron-create.js';
+export type {
+  CurrentSessionScheduledTaskCreateRequest,
+  CurrentSessionScheduledTaskCreateResult,
+  CurrentSessionScheduledTaskCreator,
+} from './config/config.js';
 export type { CronListTool, CronListParams } from './tools/cron-list.js';
 export type { CronDeleteTool, CronDeleteParams } from './tools/cron-delete.js';
 export type { ToolSearchTool, ToolSearchParams } from './tools/tool-search.js';
@@ -287,6 +292,7 @@ export {
   computeThresholds,
   type CompactionThresholds,
 } from './services/chatCompressionService.js';
+export { estimateContextTextTokens } from './services/tokenEstimation.js';
 export {
   resolveSlimmingConfig,
   type ResolvedSlimmingConfig,
@@ -342,6 +348,12 @@ export * from './services/visionBridge/image-capability.js';
 export * from './services/sessionRecap.js';
 export * from './services/session-artifact-persistence.js';
 export * from './services/session-reference-service.js';
+export * from './ipc/inbound-gate.js';
+export * from './ipc/peer-envelope.js';
+export * from './ipc/peer-frames.js';
+export * from './ipc/socket-path.js';
+export * from './ipc/uds-client.js';
+export * from './ipc/uds-inbox.js';
 export * from './services/session-registry.js';
 export * from './services/sessionService.js';
 export {
