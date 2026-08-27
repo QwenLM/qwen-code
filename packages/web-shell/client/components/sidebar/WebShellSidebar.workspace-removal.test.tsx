@@ -3248,6 +3248,41 @@ describe('WebShellSidebar non-primary archive', () => {
     expect(active.archiveSession).not.toHaveBeenCalled();
   });
 
+  it('refuses to archive a running session when the handler is invoked directly', async () => {
+    active.sessions.push({
+      sessionId: 'primary-running',
+      workspaceCwd: '/tmp/project',
+      displayName: 'Primary running',
+      hasActivePrompt: true,
+    });
+
+    renderSidebar({ sessionActions: INLINE_ARCHIVE_ACTIONS });
+    await ensureWorkspaceExpanded('project');
+
+    const runningArchive = archiveButtonFor('Primary running');
+    expect(runningArchive).toBeDefined();
+    // A stale render could leave the button enabled after the turn starts, so
+    // bypass DOM disabled suppression and invoke the React handler itself.
+    const propsKey = Object.keys(runningArchive!).find((key) =>
+      key.startsWith('__reactProps$'),
+    );
+    const onClick = propsKey
+      ? (
+          runningArchive as unknown as Record<
+            string,
+            { onClick?: () => void } | undefined
+          >
+        )[propsKey]?.onClick
+      : undefined;
+    expect(onClick).toBeDefined();
+
+    await act(async () => {
+      onClick!();
+      await Promise.resolve();
+    });
+    expect(active.archiveSession).not.toHaveBeenCalled();
+  });
+
   it('disables the archive menu item while a session has a running turn', async () => {
     active.sessions.push({
       sessionId: 'primary-running',
@@ -3298,7 +3333,7 @@ describe('WebShellSidebar non-primary archive', () => {
         : [],
     );
 
-    renderSidebar();
+    renderSidebar({ sessionActions: INLINE_ARCHIVE_ACTIONS });
     await expandWorkspace('other');
     expect(archiveButtonFor('Secondary active')).toBeUndefined();
     expect(container.textContent).not.toContain('Archived');
