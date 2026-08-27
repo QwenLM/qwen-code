@@ -112,9 +112,17 @@ function loadConfig(path) {
     );
   }
 
-  const updaterEndpoints = Array.isArray(input.updaterEndpoints)
-    ? input.updaterEndpoints
-    : [];
+  if (
+    input.updaterEndpoints !== undefined &&
+    !Array.isArray(input.updaterEndpoints)
+  ) {
+    fail(
+      'updaterEndpoints must be a JSON array of endpoint URLs ' +
+        '(omit it or use [] to disable in-app updates), got: ' +
+        JSON.stringify(input.updaterEndpoints),
+    );
+  }
+  const updaterEndpoints = input.updaterEndpoints ?? [];
   const updaterPubkey = input.updaterPubkey?.trim() || undefined;
 
   // When a brand supplies its own updater feed it MUST also supply the

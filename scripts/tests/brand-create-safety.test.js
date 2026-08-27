@@ -145,6 +145,48 @@ describe('brand-create.mjs safety checks', () => {
     expect(result.stderr).toContain('updaterPubkey');
   });
 
+  // R6-1: a scalar (non-array) updaterEndpoints must fail loudly instead
+  // of being silently coerced to [], which would ship the brand with
+  // in-app updates permanently disabled while brand-create exits 0.
+  it('rejects non-array updaterEndpoints instead of coercing to []', () => {
+    const confPath = join(shellRoot, 'src-tauri', 'tauri.conf.json');
+    const scalars = [
+      'https://updates.acme.ai/feed.json', // typo of the array shape
+      { url: 'https://updates.acme.ai/feed.json' },
+      42,
+      true,
+    ];
+    for (const updaterEndpoints of scalars) {
+      const before = readFileSync(confPath, 'utf8');
+      const result = runBrand(shellRoot, {
+        brandId: 'acme-ai',
+        logo: logoPath,
+        updaterEndpoints,
+      });
+      expect(result.status, result.stderr).not.toBe(0);
+      expect(result.stderr).toContain('JSON array');
+      expect(
+        readFileSync(confPath, 'utf8'),
+        `value=${JSON.stringify(updaterEndpoints)}`,
+      ).toBe(before);
+    }
+  });
+
+  it('still accepts omitted or empty-array updaterEndpoints', () => {
+    for (const extra of [{}, { updaterEndpoints: [] }]) {
+      const root = makeShellRoot();
+      tmpDirs.push(root);
+      seedTauriCliStub(root);
+      const logo = makeLogo(root);
+      const result = runBrand(root, {
+        brandId: 'acme-ai',
+        logo,
+        ...extra,
+      });
+      expect(result.status, result.stderr).toBe(0);
+    }
+  });
+
   it('accepts updaterEndpoints when updaterPubkey is provided', () => {
     const result = runBrand(shellRoot, {
       brandId: 'acme-ai',
