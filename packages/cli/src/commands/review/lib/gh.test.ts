@@ -21,6 +21,9 @@ import {
   setGhHost,
   parseNdjson,
   gh,
+  ghApi,
+  ghApiAll,
+  ghApiAllNested,
   ghRaw,
   ghWithInput,
   ghWithInputRetried,
@@ -149,6 +152,42 @@ describe('parseNdjson (the paginated check-runs decode)', () => {
   it('returns [] for an empty response and ignores blank lines', () => {
     expect(parseNdjson('')).toEqual([]);
     expect(parseNdjson('{"name":"a"}\n\n')).toEqual([{ name: 'a' }]);
+  });
+});
+
+describe('gh API JSON decoding', () => {
+  beforeEach(() => {
+    mockExecFileSync.mockReset();
+  });
+
+  afterEach(() => setGhHost(undefined));
+
+  it('parses colorized JSON from ghApi()', () => {
+    mockExecFileSync.mockReturnValueOnce('\u001b[32m{"body":"ok"}\u001b[39m\n');
+
+    expect(ghApi('repos/o/r/issues/1')).toEqual({ body: 'ok' });
+  });
+
+  it('parses colorized array JSON from ghApiAll()', () => {
+    mockExecFileSync.mockReturnValueOnce(
+      '\u001b[36m[{"id":1},{"id":2}]\u001b[39m\n',
+    );
+
+    expect(ghApiAll('repos/o/r/pulls/1/comments')).toEqual([
+      { id: 1 },
+      { id: 2 },
+    ]);
+  });
+
+  it('parses colorized NDJSON from ghApiAllNested()', () => {
+    mockExecFileSync.mockReturnValueOnce(
+      '\u001b[33m{"name":"linux"}\u001b[39m\n' +
+        '\u001b[35m{"name":"mac"}\u001b[39m\n',
+    );
+
+    expect(
+      ghApiAllNested('repos/o/r/commits/sha/check-runs', 'check_runs'),
+    ).toEqual([{ name: 'linux' }, { name: 'mac' }]);
   });
 });
 
