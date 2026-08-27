@@ -28,6 +28,36 @@ describe('waitForGoalRuntime', () => {
     expect(getGoalRuntimeReady).toHaveBeenCalledTimes(1);
   });
 
+  it('treats a synchronous persistence-unavailable throw as settled', async () => {
+    // Config.getGoalRuntimeReady() THROWS synchronously (rather than
+    // rejecting) when chat recording is disabled, e.g. --no-chat-recording.
+    // The startup gate must swallow that throw exactly like the rejected
+    // promise above; an escaped rejection kills the AppContainer init
+    // effect and freezes the TUI on the init banner forever (#10311).
+    const getGoalRuntimeReady = vi.fn((): Promise<GoalRuntime> => {
+      throw new GoalPersistenceUnavailableError();
+    });
+
+    await expect(waitForGoalRuntime({ getGoalRuntimeReady })).resolves.toBe(
+      true,
+    );
+    await expect(
+      waitForGoalRuntime({ getGoalRuntimeReady }, { timeoutMs: 100 }),
+    ).resolves.toBe(true);
+    expect(getGoalRuntimeReady).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not hide a synchronous throw of any other error', async () => {
+    const failure = new Error('unsupported Goal lifecycle record');
+    const getGoalRuntimeReady = vi.fn((): Promise<GoalRuntime> => {
+      throw failure;
+    });
+
+    await expect(waitForGoalRuntime({ getGoalRuntimeReady })).rejects.toBe(
+      failure,
+    );
+  });
+
   it('does not hide malformed or unsupported persisted Goal state', async () => {
     const failure = new Error('unsupported Goal lifecycle record');
     const getGoalRuntimeReady = vi.fn().mockRejectedValue(failure);

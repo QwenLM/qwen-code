@@ -54,10 +54,14 @@ export async function waitForGoalRuntime(
   config: Pick<Config, 'getGoalRuntimeReady'>,
   options: { timeoutMs?: number } = {},
 ): Promise<boolean> {
-  const ready = config.getGoalRuntimeReady();
   const awaitReady = async (): Promise<void> => {
     try {
-      await ready;
+      // The call must stay inside the try: with chat recording disabled
+      // (--no-chat-recording, settings) getGoalRuntimeReady() THROWS
+      // synchronously instead of rejecting, and an escaped rejection kills
+      // the AppContainer init effect, freezing the TUI on the init banner
+      // forever.
+      await config.getGoalRuntimeReady();
     } catch (error) {
       if (!(error instanceof GoalPersistenceUnavailableError)) throw error;
     }
