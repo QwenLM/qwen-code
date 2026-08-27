@@ -1,0 +1,73 @@
+name: Run PR 10212 review validation
+on:
+  push:
+    branches: [fix/10197-env-prefix-bash-rules]
+    paths: [.github/workflows/finalize-pr-10212-r2-runner.yml]
+permissions:
+  contents: write
+jobs:
+  finalize:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/10197-env-prefix-bash-rules
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Reuse review patch
+        run: |
+          sed -n "/python3 - <<'PY'/,/^          PY$/p" .github/workflows/finalize-pr-10212-r2.yml \
+            | sed '1d;$d;s/^          //' > /tmp/pr10212_patch.py
+          test -s /tmp/pr10212_patch.py
+          python3 /tmp/pr10212_patch.py
+      - name: Install, format and validate
+        run: |
+          npm ci
+          npx prettier --write \
+            packages/core/src/permissions/rule-parser.ts \
+            packages/core/src/permissions/permission-manager.ts \
+            packages/core/src/permissions/dangerousRules.ts \
+            packages/core/src/permissions/rule-parser.env-prefix.test.ts \
+            packages/core/src/permissions/dangerousRules.test.ts \
+            packages/core/src/utils/shellAstParser.ts \
+            packages/core/src/utils/shellAstParser.test.ts
+          npx prettier --check \
+            packages/core/src/permissions/rule-parser.ts \
+            packages/core/src/permissions/permission-manager.ts \
+            packages/core/src/permissions/dangerousRules.ts \
+            packages/core/src/permissions/rule-parser.env-prefix.test.ts \
+            packages/core/src/permissions/dangerousRules.test.ts \
+            packages/core/src/utils/shellAstParser.ts \
+            packages/core/src/utils/shellAstParser.test.ts
+          npx eslint --max-warnings 0 \
+            packages/core/src/permissions/rule-parser.ts \
+            packages/core/src/permissions/permission-manager.ts \
+            packages/core/src/permissions/dangerousRules.ts \
+            packages/core/src/permissions/rule-parser.env-prefix.test.ts \
+            packages/core/src/permissions/dangerousRules.test.ts \
+            packages/core/src/utils/shellAstParser.ts \
+            packages/core/src/utils/shellAstParser.test.ts
+          npx vitest run \
+            packages/core/src/permissions/rule-parser.env-prefix.test.ts \
+            packages/core/src/permissions/permission-manager.test.ts \
+            packages/core/src/permissions/dangerousRules.test.ts \
+            packages/core/src/utils/shellAstParser.test.ts \
+            packages/core/src/permissions/shell-semantics.test.ts \
+            packages/core/src/utils/shell-utils.test.ts
+          npx tsc --noEmit -p packages/core/tsconfig.json
+      - name: Commit tested change
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add \
+            packages/core/src/permissions/rule-parser.ts \
+            packages/core/src/permissions/permission-manager.ts \
+            packages/core/src/permissions/dangerousRules.ts \
+            packages/core/src/permissions/rule-parser.env-prefix.test.ts \
+            packages/core/src/permissions/dangerousRules.test.ts \
+            packages/core/src/utils/shellAstParser.ts \
+            packages/core/src/utils/shellAstParser.test.ts
+          git diff --cached --quiet && exit 0
+          git commit -m "fix(permissions): harden env-prefixed rule semantics"
+          git push origin HEAD:fix/10197-env-prefix-bash-rules
