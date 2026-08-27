@@ -134,6 +134,58 @@ describe('SessionDetailsTooltip', () => {
     act(() => root.unmount());
   });
 
+  it('marks merged and closed pull requests with a state suffix', async () => {
+    vi.useFakeTimers();
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <SessionDetailsTooltip
+            session={{
+              sessionId: 'session-1',
+              workspaceCwd: '/work/qwen-code',
+              clientCount: 1,
+              prs: [
+                {
+                  number: 9500,
+                  url: 'https://github.com/o/r/pull/9500',
+                  state: 'merged',
+                },
+                {
+                  number: 9501,
+                  url: 'https://github.com/o/r/pull/9501',
+                  state: 'closed',
+                },
+                { number: 9502, url: 'https://github.com/o/r/pull/9502' },
+              ],
+            }}
+            label="Fix CI"
+            time=""
+            completedUnread={false}
+          >
+            <button type="button">Fix CI</button>
+          </SessionDetailsTooltip>
+        </I18nProvider>,
+      );
+    });
+
+    await openDetails(container);
+
+    const details = document.querySelector('[role="dialog"]');
+    const byNumber = (number: number) =>
+      details?.querySelector(`a[href="https://github.com/o/r/pull/${number}"]`);
+    // An open (or state-less) binding renders without a suffix; swapped or
+    // deleted label branches are the exact regression this pins.
+    expect(byNumber(9502)?.textContent).toBe('Pull Request #9502');
+    expect(byNumber(9501)?.textContent).toBe('Pull Request #9501 · Closed');
+    expect(byNumber(9500)?.textContent).toBe('Pull Request #9500 · Merged');
+
+    act(() => root.unmount());
+  });
+
   it('does not reopen after a row action opens its menu', async () => {
     vi.useFakeTimers();
     const container = document.createElement('div');
