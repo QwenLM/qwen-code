@@ -535,6 +535,15 @@ export class TeamManager {
       await writeTeamFile(this.teamFile.name, this.teamFile);
     } catch (err) {
       rollback();
+      // Compensating write: if another concurrent spawn already
+      // persisted this member in config.json, rewrite the file so
+      // persisted membership matches the post-rollback in-memory
+      // state. Best-effort — the original error is more important.
+      try {
+        await writeTeamFile(this.teamFile.name, this.teamFile);
+      } catch {
+        // Swallow — original error takes precedence.
+      }
       throw err;
     }
 
