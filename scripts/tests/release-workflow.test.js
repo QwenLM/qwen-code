@@ -95,7 +95,7 @@ describe('CUA release workflow', () => {
   });
 });
 
-// The canonical wipe + user-state neutralization script shared by all five
+// The canonical workspace restoration script shared by all five
 // 'Restore workspace ownership' copies in release.yml. The full wipe (vs
 // serve-ab.yml's keep-and-scrub) is deliberate on this lane: release
 // checkouts carry CI_BOT_PAT and the npm OIDC id-token, so no pre-existing
@@ -195,32 +195,28 @@ case "$WS" in
   *) echo "::error::refusing to wipe workspace outside the runner workspace: \${WS} (runner workspace: \${RWS})"; exit 1 ;;
 esac
 find "$WS" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
-# The workspace wipe cannot see the runner user's HOME, which
-# survives across jobs on this pool: a planted ~/.npmrc
-# script-shell wraps every verdict-determining \`npm run\` in an
-# attacker shell (and can redirect \`npm publish\`), and global git
-# config exec knobs (core.hooksPath, filter.*, url.*.insteadOf,
-# include.*) govern this job's checkout and credential-bearing
-# git steps. Remove the npmrc outright — publish's setup-node
-# recreates the registry config it needs after this step — and
-# strip the git exec keys with the same denylist as
-# qwen-autofix.yml's pre-checkout sanitize and
-# .github/scripts/resanitize-git-config.sh (the inline form is the
-# pre-checkout doctrine: the script file does not exist on disk
-# before checkout). No-op on a fresh hosted runner.
-rm -f -- "\${HOME:?}/.npmrc"
-git_exec_key_pattern='^(core\\.(hookspath|fsmonitor|pager|editor|sshcommand|askpass|alternaterefscommand|gitproxy)$|diff\\.external$|diff\\..+\\.(command|textconv)$|merge\\..+\\.driver$|filter\\.|alias\\.|pager\\.|difftool\\.|mergetool\\.|interactive\\.difffilter$|sequence\\.editor$|gpg\\.(.+\\.)?program$|init\\.templatedir$|remote\\..+\\.(uploadpack|receivepack)$|submodule\\..+\\.update$|url\\..+\\.(insteadof|pushinsteadof)$|http\\.(.+\\.)?(sslverify|sslcainfo)$|include\\.|includeif\\.|protocol\\.(ext\\.)?allow$)'
-for global_file in "\${HOME}/.gitconfig" "\${XDG_CONFIG_HOME:-\${HOME}/.config}/git/config"; do
-  [ -e "$global_file" ] || continue
-  { GIT_CONFIG_GLOBAL="\${global_file}" git config --global --name-only --list 2>/dev/null || true; } \\
-    | { grep -iE "$git_exec_key_pattern" || true; } \\
-    | while IFS= read -r key; do GIT_CONFIG_GLOBAL="\${global_file}" git config --global --unset-all "$key" 2>/dev/null || true; done
-  remaining_keys="$(GIT_CONFIG_GLOBAL="\${global_file}" git config --global --name-only --list)" || { echo "::error::could not verify the global git config scrub in \${global_file}"; exit 1; }
-  if printf '%s\\n' "$remaining_keys" | grep -qiE "$git_exec_key_pattern"; then
-    echo "::error::git exec keys survived the pre-checkout scrub in \${global_file}"
-    exit 1
-  fi
-done`;
+# Later steps must not read pool-persistent Git, npm, Docker, or
+# setup-node state. A fresh directory avoids an unbounded scrub
+# denylist and stale lock files before checkout runs; the reserved
+# RUNNER_TOOL_CACHE variable cannot be overridden, so purge Node.
+TOOL_CACHE="$(realpath -m -- "\${RUNNER_TOOL_CACHE:?}" 2>/dev/null)" || exit 1
+case "$TOOL_CACHE" in
+  "$RWS"/*) ;;
+  *) echo "::error::refusing to purge tool cache outside the runner workspace: \${TOOL_CACHE}"; exit 1 ;;
+esac
+rm -rf -- "\${TOOL_CACHE}/node" 2>/dev/null || sudo -n rm -rf -- "\${TOOL_CACHE}/node" || exit 1
+release_state="$(mktemp -d "\${RUNNER_TEMP:?}/release-state.XXXXXX")" || exit 1
+: > "\${release_state}/gitconfig" || exit 1
+: > "\${release_state}/npmrc" || exit 1
+mkdir "\${release_state}/docker" || exit 1
+{
+  echo 'GIT_CONFIG_COUNT=0'
+  echo 'GIT_CONFIG_NOSYSTEM=1'
+  echo 'GIT_CONFIG_PARAMETERS='
+  echo "GIT_CONFIG_GLOBAL=\${release_state}/gitconfig"
+  echo "NPM_CONFIG_USERCONFIG=\${release_state}/npmrc"
+  echo "DOCKER_CONFIG=\${release_state}/docker"
+} >> "\${GITHUB_ENV:?}"`;
 
 describe('release workflow', () => {
   it('cleans every shared ECS workspace before checkout', () => {
@@ -260,62 +256,10 @@ describe('release workflow', () => {
     }
   });
 
-  it('fails closed when a global git exec key cannot be removed', () => {
-    const base = mkdtempSync(join(tmpdir(), 'release-wipe-'));
-    const home = join(base, 'home');
-    mkdirSync(home);
-    try {
-      const env = {
-        ...process.env,
-        HOME: home,
-        XDG_CONFIG_HOME: join(home, '.config'),
-      };
-      // An ambient GIT_CONFIG_GLOBAL would redirect `git config --global`
-      // (setHook and the post-scrub assertion) away from the synthetic HOME
-      // and defeat the hermetic scrub; the sibling scrub harness in
-      // qwen-autofix-workflow.test.js deletes it for the same reason.
-      delete env['GIT_CONFIG_GLOBAL'];
-      const scrubStart = canonicalWipe.indexOf('rm -f -- "${HOME:?}/.npmrc"');
-      expect(scrubStart).toBeGreaterThan(0);
-      const scrubHome = () =>
-        spawnSync(
-          'bash',
-          ['-e', '-o', 'pipefail', '-c', canonicalWipe.slice(scrubStart)],
-          { encoding: 'utf8', env },
-        );
-      const setHook = () =>
-        spawnSync(
-          'git',
-          ['config', '--global', 'core.hooksPath', join(base, 'hooks')],
-          { env },
-        );
-
-      expect(setHook().status).toBe(0);
-      expect(scrubHome().status).toBe(0);
-      expect(
-        spawnSync('git', ['config', '--global', '--get', 'core.hooksPath'], {
-          env,
-        }).status,
-      ).not.toBe(0);
-
-      expect(setHook().status).toBe(0);
-      writeFileSync(join(home, '.gitconfig.lock'), '');
-      const result = scrubHome();
-      expect(result.status).not.toBe(0);
-      expect(`${result.stdout}${result.stderr}`).toContain(
-        'git exec keys survived the pre-checkout scrub',
-      );
-    } finally {
-      rmSync(base, { recursive: true, force: true });
-    }
-  });
-
   it.skipIf(!hasGnuRealpath || process.getuid?.() === 0)(
     'executes the workspace wipe against guard branches',
     () => {
-    const wipeEnd = canonicalWipe.indexOf('rm -f -- "${HOME:?}/.npmrc"');
-    expect(wipeEnd).toBeGreaterThan(0);
-    const wipeScript = canonicalWipe.slice(0, wipeEnd);
+    const wipeScript = canonicalWipe;
 
     const runWipe = (envOverrides, { preCreateWorkspace } = {}) => {
       const base = mkdtempSync(join(tmpdir(), 'release-wipe-behavioral-'));
@@ -326,11 +270,30 @@ describe('release workflow', () => {
         ...process.env,
         GITHUB_WORKSPACE: workspace,
         RUNNER_WORKSPACE: base,
+        RUNNER_TEMP: join(base, 'temp'),
+        RUNNER_TOOL_CACHE: join(base, 'tool-cache'),
+        GITHUB_ENV: join(base, 'github-env'),
         HOME: join(base, 'home'),
         XDG_CONFIG_HOME: join(base, 'home', '.config'),
         ...envOverrides,
       };
       mkdirSync(env.HOME);
+      mkdirSync(env.RUNNER_TEMP);
+      mkdirSync(join(env.RUNNER_TOOL_CACHE, 'node'), { recursive: true });
+      mkdirSync(join(env.HOME, '.docker'));
+      writeFileSync(
+        join(env.HOME, '.gitconfig'),
+        '[credential]\n\thelper = !false\n',
+      );
+      writeFileSync(join(env.HOME, '.gitconfig.lock'), 'stale');
+      writeFileSync(
+        join(env.HOME, '.docker', 'config.json'),
+        '{"proxies":{"default":{"httpProxy":"http://attacker"}}}',
+      );
+      env.GIT_CONFIG_GLOBAL = join(env.HOME, '.gitconfig');
+      env.GIT_CONFIG_COUNT = '1';
+      env.GIT_CONFIG_KEY_0 = 'credential.helper';
+      env.GIT_CONFIG_VALUE_0 = '!false';
       return {
         result: spawnSync('bash', ['-e', '-o', 'pipefail', '-c', wipeScript], {
           encoding: 'utf8',
@@ -338,6 +301,8 @@ describe('release workflow', () => {
         }),
         base,
         workspace,
+        githubEnv: env.GITHUB_ENV,
+        env,
       };
     };
 
@@ -345,7 +310,7 @@ describe('release workflow', () => {
     // including subdirectories (the wipe's core property: recursive removal
     // of all persisted entries, not just files).
     {
-      const { result, base, workspace } = runWipe(
+      const { result, base, workspace, githubEnv, env } = runWipe(
         {},
         {
           preCreateWorkspace: (_base, ws) => {
@@ -359,6 +324,33 @@ describe('release workflow', () => {
         expect(result.status).toBe(0);
         const entries = readdirSync(workspace);
         expect(entries).toHaveLength(0);
+        const stateEnv = readFileSync(githubEnv, 'utf8');
+        expect(stateEnv).toContain('GIT_CONFIG_COUNT=0\n');
+        expect(stateEnv).toContain('GIT_CONFIG_NOSYSTEM=1\n');
+        expect(stateEnv).toContain('GIT_CONFIG_PARAMETERS=\n');
+        expect(stateEnv).toMatch(
+          /GIT_CONFIG_GLOBAL=.*\/release-state\.[^/]+\/gitconfig\n/,
+        );
+        expect(stateEnv).toMatch(
+          /NPM_CONFIG_USERCONFIG=.*\/release-state\.[^/]+\/npmrc\n/,
+        );
+        expect(stateEnv).toMatch(
+          /DOCKER_CONFIG=.*\/release-state\.[^/]+\/docker\n/,
+        );
+        const isolatedEnv = { ...env };
+        for (const line of stateEnv.trimEnd().split('\n')) {
+          const separator = line.indexOf('=');
+          isolatedEnv[line.slice(0, separator)] = line.slice(separator + 1);
+        }
+        expect(
+          spawnSync(
+            'git',
+            ['config', '--global', '--get', 'credential.helper'],
+            { env: isolatedEnv },
+          ).status,
+        ).not.toBe(0);
+        expect(readdirSync(isolatedEnv.DOCKER_CONFIG)).toHaveLength(0);
+        expect(() => lstatSync(join(base, 'tool-cache', 'node'))).toThrow();
       } finally {
         rmSync(base, { recursive: true, force: true });
       }
@@ -397,6 +389,23 @@ describe('release workflow', () => {
       }
     }
 
+    // The runner-provided cache path is still validated before recursive
+    // deletion so a poisoned intermediate symlink cannot redirect the purge.
+    {
+      const outside = mkdtempSync(join(tmpdir(), 'release-tool-cache-'));
+      const { result, base } = runWipe({ RUNNER_TOOL_CACHE: outside });
+      try {
+        expect(result.status).not.toBe(0);
+        expect(`${result.stdout}${result.stderr}`).toContain(
+          'refusing to purge tool cache outside the runner workspace',
+        );
+        expect(lstatSync(join(outside, 'node')).isDirectory()).toBe(true);
+      } finally {
+        rmSync(outside, { recursive: true, force: true });
+        rmSync(base, { recursive: true, force: true });
+      }
+    }
+
     // Workspace outside runner workspace: refused.
     {
       const outside = mkdtempSync(join(tmpdir(), 'release-wipe-outside-'));
@@ -406,10 +415,14 @@ describe('release workflow', () => {
           ...process.env,
           GITHUB_WORKSPACE: outside,
           RUNNER_WORKSPACE: base,
+          RUNNER_TEMP: join(base, 'temp'),
+          RUNNER_TOOL_CACHE: join(base, 'tool-cache'),
+          GITHUB_ENV: join(base, 'github-env'),
           HOME: join(base, 'home'),
           XDG_CONFIG_HOME: join(base, 'home', '.config'),
         };
         mkdirSync(env.HOME);
+        mkdirSync(env.RUNNER_TEMP);
         const result = spawnSync(
           'bash',
           ['-e', '-o', 'pipefail', '-c', wipeScript],
@@ -440,10 +453,14 @@ describe('release workflow', () => {
           // path.join would normalize it away before the script sees it.
           GITHUB_WORKSPACE: `${base}/sub/../workspace`,
           RUNNER_WORKSPACE: base,
+          RUNNER_TEMP: join(base, 'temp'),
+          RUNNER_TOOL_CACHE: join(base, 'tool-cache'),
+          GITHUB_ENV: join(base, 'github-env'),
           HOME: join(base, 'home'),
           XDG_CONFIG_HOME: join(base, 'home', '.config'),
         };
         mkdirSync(env.HOME);
+        mkdirSync(env.RUNNER_TEMP);
         const result = spawnSync(
           'bash',
           ['-e', '-o', 'pipefail', '-c', wipeScript],

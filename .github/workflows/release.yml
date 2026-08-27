@@ -157,32 +157,28 @@ jobs:
             *) echo "::error::refusing to wipe workspace outside the runner workspace: ${WS} (runner workspace: ${RWS})"; exit 1 ;;
           esac
           find "$WS" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
-          # The workspace wipe cannot see the runner user's HOME, which
-          # survives across jobs on this pool: a planted ~/.npmrc
-          # script-shell wraps every verdict-determining `npm run` in an
-          # attacker shell (and can redirect `npm publish`), and global git
-          # config exec knobs (core.hooksPath, filter.*, url.*.insteadOf,
-          # include.*) govern this job's checkout and credential-bearing
-          # git steps. Remove the npmrc outright — publish's setup-node
-          # recreates the registry config it needs after this step — and
-          # strip the git exec keys with the same denylist as
-          # qwen-autofix.yml's pre-checkout sanitize and
-          # .github/scripts/resanitize-git-config.sh (the inline form is the
-          # pre-checkout doctrine: the script file does not exist on disk
-          # before checkout). No-op on a fresh hosted runner.
-          rm -f -- "${HOME:?}/.npmrc"
-          git_exec_key_pattern='^(core\.(hookspath|fsmonitor|pager|editor|sshcommand|askpass|alternaterefscommand|gitproxy)$|diff\.external$|diff\..+\.(command|textconv)$|merge\..+\.driver$|filter\.|alias\.|pager\.|difftool\.|mergetool\.|interactive\.difffilter$|sequence\.editor$|gpg\.(.+\.)?program$|init\.templatedir$|remote\..+\.(uploadpack|receivepack)$|submodule\..+\.update$|url\..+\.(insteadof|pushinsteadof)$|http\.(.+\.)?(sslverify|sslcainfo)$|include\.|includeif\.|protocol\.(ext\.)?allow$)'
-          for global_file in "${HOME}/.gitconfig" "${XDG_CONFIG_HOME:-${HOME}/.config}/git/config"; do
-            [ -e "$global_file" ] || continue
-            { GIT_CONFIG_GLOBAL="${global_file}" git config --global --name-only --list 2>/dev/null || true; } \
-              | { grep -iE "$git_exec_key_pattern" || true; } \
-              | while IFS= read -r key; do GIT_CONFIG_GLOBAL="${global_file}" git config --global --unset-all "$key" 2>/dev/null || true; done
-            remaining_keys="$(GIT_CONFIG_GLOBAL="${global_file}" git config --global --name-only --list)" || { echo "::error::could not verify the global git config scrub in ${global_file}"; exit 1; }
-            if printf '%s\n' "$remaining_keys" | grep -qiE "$git_exec_key_pattern"; then
-              echo "::error::git exec keys survived the pre-checkout scrub in ${global_file}"
-              exit 1
-            fi
-          done
+          # Later steps must not read pool-persistent Git, npm, Docker, or
+          # setup-node state. A fresh directory avoids an unbounded scrub
+          # denylist and stale lock files before checkout runs; the reserved
+          # RUNNER_TOOL_CACHE variable cannot be overridden, so purge Node.
+          TOOL_CACHE="$(realpath -m -- "${RUNNER_TOOL_CACHE:?}" 2>/dev/null)" || exit 1
+          case "$TOOL_CACHE" in
+            "$RWS"/*) ;;
+            *) echo "::error::refusing to purge tool cache outside the runner workspace: ${TOOL_CACHE}"; exit 1 ;;
+          esac
+          rm -rf -- "${TOOL_CACHE}/node" 2>/dev/null || sudo -n rm -rf -- "${TOOL_CACHE}/node" || exit 1
+          release_state="$(mktemp -d "${RUNNER_TEMP:?}/release-state.XXXXXX")" || exit 1
+          : > "${release_state}/gitconfig" || exit 1
+          : > "${release_state}/npmrc" || exit 1
+          mkdir "${release_state}/docker" || exit 1
+          {
+            echo 'GIT_CONFIG_COUNT=0'
+            echo 'GIT_CONFIG_NOSYSTEM=1'
+            echo 'GIT_CONFIG_PARAMETERS='
+            echo "GIT_CONFIG_GLOBAL=${release_state}/gitconfig"
+            echo "NPM_CONFIG_USERCONFIG=${release_state}/npmrc"
+            echo "DOCKER_CONFIG=${release_state}/docker"
+          } >> "${GITHUB_ENV:?}"
 
       - name: 'Checkout'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
