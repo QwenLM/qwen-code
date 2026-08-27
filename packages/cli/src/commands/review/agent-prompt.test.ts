@@ -4070,20 +4070,31 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
     }
   });
 
-  it('carries the project rules into every reviewing role — and NOT into Agent 7', () => {
+  it('carries the project rules into every reviewing role — and NOT into the executors (7, prose-exec)', () => {
     expect(buildRoleBrief(PLAN, '2', { rules: 'No `any`.' })).toContain(
       'No `any`.',
     );
     // SKILL.md: "Do NOT inject review rules into Agent 7 (Build & Test) — it
     // runs deterministic commands, not code review." The roster path hands the
     // same --rules to every role, so the builder owns the exclusion.
-    const seven = buildRoleBrief(
-      { ...PLAN, prNumber: '1', ownerRepo: 'a/b', worktreePath: 'w' },
-      '7',
-      { rules: 'No `any`.' },
-    );
+    const executorPlan = {
+      ...PLAN,
+      prNumber: '1',
+      ownerRepo: 'a/b',
+      worktreePath: 'w',
+    };
+    const seven = buildRoleBrief(executorPlan, '7', { rules: 'No `any`.' });
     expect(seven).not.toContain('No `any`.');
     expect(seven).not.toContain('Project rules');
+    // prose-exec sits on Agent 7's side of that line: it executes recipes and
+    // files what diverged, and a reviewer's rules stapled onto an executor's
+    // brief steer what it runs. A `role === '7'` mutant that drops the
+    // `|| role === 'prose-exec'` half must fail here.
+    const proseExec = buildRoleBrief(executorPlan, 'prose-exec', {
+      rules: 'No `any`.',
+    });
+    expect(proseExec).not.toContain('No `any`.');
+    expect(proseExec).not.toContain('Project rules');
   });
 
   it('records each role under the key the roster looks it up by', () => {

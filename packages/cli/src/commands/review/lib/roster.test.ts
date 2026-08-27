@@ -163,6 +163,12 @@ describe('requiredAgents — Step 3A', () => {
     expect(
       keys({ ...withSkill, srcDiffLines: 900, diffLines: 4000 }),
     ).toContain('prose-exec');
+    // And in BOTH tree'd modes: a local (uncommitted-change) review runs the
+    // repository's tooling too, so `mode !== 'diff-only'` owes the audit there
+    // as well — narrowing the gate to pr-worktree alone must fail here.
+    expect(
+      keys({ ...withSkill, worktreePath: undefined, untrackedFiles: [] }),
+    ).toContain('prose-exec');
     // Reserved directories hold their files under any basename, and the
     // pipeline's rules file is prose it provably follows: each owes the
     // audit even as the diff's ONLY prompt-path change.
@@ -230,12 +236,25 @@ describe('requiredAgents — Step 3A', () => {
     ['0', false],
     ['', false],
     ['not-a-number', false],
-  ])('requires Agent 0 for prNumber %o → %s', (prNumber, expected) => {
+  ])('gates Agent 0 and 6d on prNumber %o → %s', (prNumber, expected) => {
     // The number arrives from a plan file, so a corrupted or absent value must
     // fail closed to "no PR" rather than demanding an issue agent that has nothing
     // to fetch — but a legitimate numeric string must still count, or every real
     // PR review loses Agent 0.
-    expect(keys({ ...PR, prNumber }).includes('0')).toBe(expected);
+    const k = keys({ ...PR, prNumber });
+    expect(k.includes('0')).toBe(expected);
+    // The counter-frame audit shares the prNumber conjunct, pinned here in
+    // ISOLATION (ownerRepo still present): dropping `isPositivePrNumber` from
+    // `countersFrame` would otherwise ship green, roster 6d on a plan its brief
+    // builder throws on, and wedge `agent-prompt --roster` for the whole review.
+    expect(k.includes('6d')).toBe(expected);
+  });
+
+  it('gates the counter-frame audit on ownerRepo in isolation too', () => {
+    // A valid prNumber with no ownerRepo still has no frame to fetch: the
+    // ownerRepo conjunct of `countersFrame` must hold on its own, or dropping it
+    // rosters 6d on a plan the brief builder rejects.
+    expect(keys({ ...PR, ownerRepo: undefined })).not.toContain('6d');
   });
 
   it('asks for no issue-fidelity agent on a local review — there is no issue', () => {

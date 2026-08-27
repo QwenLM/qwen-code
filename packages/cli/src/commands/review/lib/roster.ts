@@ -76,7 +76,8 @@ export interface RosterPlan {
   /**
    * The review's effort, as the capturing command recorded it (`--effort`).
    * `'medium'` is the balanced tier and drops the adversarial personas
-   * (6a/6b/6c) and the language-pitfall and wrapper/proxy specialists (1d/1e);
+   * (6a/6b/6c), the counter-frame audit (6d) and the language-pitfall and
+   * wrapper/proxy specialists (1d/1e);
    * anything else — including absent — keeps the full roster. It lives in the plan, not in
    * a caller argument, on purpose: the roster this file computes must not be
    * shrinkable by whoever calls `requiredAgents`, or the shrink is what gets

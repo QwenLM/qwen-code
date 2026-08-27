@@ -1275,8 +1275,26 @@ describe('runScratchTree --standalone', () => {
     expect(r.available).toBe(false);
     expect(r.standalone).toBe(true);
     expect(r.note).toContain('symlink');
+    // The residue probe ran BEFORE this refusal, so the report carries its
+    // actual measurement through — the shared tree's path resolves through the
+    // same link and cannot be certified clean — rather than claiming the
+    // command refused before it measured. That claim was the lie that dropped
+    // the warning at the one moment the filesystem is showing signs of
+    // tampering.
+    expect(r.sharedTreeUnmeasured).toContain('resolves through a symlink');
+    expect(r.note).toContain('could not be measured');
+    // The leak witness must name THIS run's own label-derived path (its default
+    // label), not one the command can never create for it: if the refusal
+    // regressed and the clone were made through the link, it would land here.
     expect(
-      existsSync(join(elsewhere, basename(scratchWorktreePath(worktree, 'x')))),
+      existsSync(
+        join(
+          elsewhere,
+          basename(
+            scratchWorktreePath(worktree, 'prose-exec--round-1--abc123'),
+          ),
+        ),
+      ),
     ).toBe(false);
   });
 

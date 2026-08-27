@@ -99,9 +99,11 @@ export interface ScratchTreeReport {
   reused: boolean;
   /**
    * True when the tree is a standalone clone (`--standalone`) rather than a
-   * linked worktree: its `.git` is its own and nothing written under it
-   * reaches the user's repository. Disclosed so a reader of the report knows
-   * which of the two contracts the note is stating.
+   * linked worktree: its `.git` is its own and nothing written into its git
+   * state reaches the user's repository. Disclosed so a reader of the report
+   * knows which of the two contracts the note is stating. (The dependency
+   * farm's links point back at the review worktree; writes THROUGH them are
+   * the exception the dependency note discloses.)
    */
   standalone: boolean;
   /**
@@ -646,6 +648,21 @@ export function runScratchTree(args: ScratchTreeArgs): ScratchTreeReport {
   const tree = scratchWorktreePath(worktree, label);
 
   if (args.standalone) {
+    // Refusals below fire AFTER the residue was measured above, so they carry
+    // that measurement through exactly like the clone-failure catch does —
+    // answering with `unavailable()` would claim the command "refused before it
+    // measured the shared worktree" and discard a contamination measurement that
+    // DID happen, at the one moment the filesystem is showing signs of tampering.
+    const refusal = (note: string): ScratchTreeReport => ({
+      available: false,
+      reused: false,
+      standalone: true,
+      dependencies: null,
+      sharedTreeResidue,
+      sharedTreeResidueTotal: residue.total,
+      sharedTreeUnmeasured: residue.unmeasured,
+      note: note + residueNote,
+    });
     // The path's ancestors must be what they claim, for the same reason the
     // reset gate walks them: a link at `.qwen/tmp` aims both the removal and
     // the clone at wherever it points. Bounded at the repository root like
@@ -660,14 +677,14 @@ export function runScratchTree(args: ScratchTreeArgs): ScratchTreeReport {
         ),
       );
       if (redirectedAncestor(dirname(resolve(tree)), dirname(common))) {
-        return unavailable(
+        return refusal(
           `an ancestor of ${tree} is a symlink — a standalone tree is removed ` +
             'and rebuilt on every call, and both would land wherever the link ' +
             'points; no scratch tree is created there',
         );
       }
     } catch (err) {
-      return unavailable(
+      return refusal(
         `cannot resolve the repository behind ${worktree}: ${inertPath((err as Error).message)}`,
       );
     }
@@ -678,23 +695,12 @@ export function runScratchTree(args: ScratchTreeArgs): ScratchTreeReport {
       discardStandaloneTree(worktree, tree);
       buildStandaloneTree(worktree, tree, headSha);
     } catch (e) {
-      // Not `unavailable()`: the residue was already measured (same reasoning
-      // as the linked rebuild's failure below).
-      return {
-        available: false,
-        reused: false,
-        standalone: true,
-        dependencies: null,
-        sharedTreeResidue,
-        sharedTreeResidueTotal: residue.total,
-        sharedTreeUnmeasured: residue.unmeasured,
-        note:
-          `could not stand up a standalone scratch tree at ${shellQuotePath(tree)}: ` +
+      return refusal(
+        `could not stand up a standalone scratch tree at ${shellQuotePath(tree)}: ` +
           `${inertPath((e as Error).message)}. Do NOT fall back to running in ` +
           'the review worktree — other agents are reading it. A step you ' +
-          'cannot isolate is reported as not-executed, never simulated.' +
-          residueNote,
-      };
+          'cannot isolate is reported as not-executed, never simulated.',
+      );
     }
     const dependencies = farmDependencies(tree, worktree, { rebuild: true });
     return {

@@ -15,7 +15,7 @@
 // happen: a `/review --effort medium` local run had the orchestrator omit the flag,
 // so `plan.effort` was absent and the roster safe-fell-back to the FULL set — the
 // user asked for the reduced medium roster and silently got every agent (6a/6b/6c
-// included). The fix is deterministic: when `--effort` is not given, read the level
+// and 6d included). The fix is deterministic: when `--effort` is not given, read the level
 // `parse-args` already wrote to its conventional report. No model action required.
 
 import { readFileSync } from 'node:fs';

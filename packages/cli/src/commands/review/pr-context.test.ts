@@ -3441,6 +3441,24 @@ describe('runPrContext stale context-file removal (handler level)', () => {
     ).rejects.toThrow(/positive integer/);
     expect(rmSyncMock).not.toHaveBeenCalled();
   });
+
+  it('removes nothing over a malformed owner_repo either', async () => {
+    // The owner_repo shield sits above the removal too: a malformed invocation
+    // must not delete the previous round's context file before rejecting, or the
+    // corrected re-run fetches against nothing and the round proceeds down the
+    // context-unavailable path over a typo. Moving the `indexOf('/')` check below
+    // `rmSync` must fail here.
+    await expect(
+      (prContextCommand.handler as (a: unknown) => Promise<void>)({
+        _: [],
+        $0: 'qwen',
+        pr_number: '6711',
+        owner_repo: 'malformed',
+        out: '/tmp/ctx.md',
+      }),
+    ).rejects.toThrow(/must look like/);
+    expect(rmSyncMock).not.toHaveBeenCalled();
+  });
 });
 
 describe('runPrContext identity failure (handler level)', () => {
