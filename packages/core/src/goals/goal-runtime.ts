@@ -1521,15 +1521,22 @@ export function createGoalRuntime(
           // query can claim a queued continuation's permit and send its own
           // text instead. Only the host's delivery mark says the model saw
           // the objective; without it the notice stays owed.
-          settleCurrentTurnAnnouncement(currentTurnDelivered);
+          const delivered = currentTurnDelivered;
+          settleCurrentTurnAnnouncement(delivered);
           const recordUuid = randomUUID();
-          const finishedWindDown = windDownTurnId === permit.turnId;
+          // The same rule decides the hand-off. The record's marker means
+          // "the user got the hand-off", and the budget gate stops the Goal
+          // on it -- so a wind-down permit that finished under someone
+          // else's text leaves no marker, and the next continuation grants
+          // the hand-off again instead of stopping cold.
+          const heldWindDown = windDownTurnId === permit.turnId;
+          const finishedWindDown = heldWindDown && delivered;
           const nextGoal = reduceGoalTurnFinished(snapshot.goal, {
             now: Date.now(),
             tokensUsed: takeTurnTokens(permit.turnId),
             ...(finishedWindDown ? { windDownTurnId: permit.turnId } : {}),
           });
-          if (finishedWindDown) windDownTurnId = undefined;
+          if (heldWindDown) windDownTurnId = undefined;
           const persistedSnapshot: GoalSnapshotV2 = {
             v: GOAL_STATE_VERSION,
             goal: nextGoal,
