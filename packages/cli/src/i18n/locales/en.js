@@ -543,6 +543,18 @@ export default {
   'Using {{count}} tools': 'Using {{count}} tools',
   'Enter to select, ↑↓ to navigate, Esc to close':
     'Enter to select, ↑↓ to navigate, Esc to close',
+  't: test image support': 't: test image support',
+  'Image probe': 'Image probe',
+  'probe-tested': 'probe-tested',
+  'auto-detected': 'auto-detected',
+  manual: 'manual',
+  'testing…': 'testing…',
+  'accepts images': 'accepts images',
+  'text only': 'text only',
+  'inconclusive (auth/rate-limit/timeout) — nothing written':
+    'inconclusive (auth/rate-limit/timeout) — nothing written',
+  'Image probe verdict could not be saved.':
+    'Image probe verdict could not be saved.',
   'Esc to go back': 'Esc to go back',
   'Enter to confirm, Esc to cancel': 'Enter to confirm, Esc to cancel',
   'Enter to select, ↑↓ to navigate, Esc to go back':

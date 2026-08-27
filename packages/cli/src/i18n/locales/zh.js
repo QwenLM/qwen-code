@@ -526,6 +526,17 @@ export default {
   'Using {{count}} tools': '正在使用 {{count}} 个工具',
   'Enter to select, ↑↓ to navigate, Esc to close':
     'Enter 选择，↑↓ 导航，Esc 关闭',
+  't: test image support': 't: 测试图像支持',
+  'Image probe': '图像探测',
+  'probe-tested': '已实测',
+  'auto-detected': '自动检测',
+  manual: '手动设置',
+  'testing…': '测试中…',
+  'accepts images': '支持图像输入',
+  'text only': '仅文本',
+  'inconclusive (auth/rate-limit/timeout) — nothing written':
+    '结论不明（鉴权/限流/超时）— 未写入任何结果',
+  'Image probe verdict could not be saved.': '图像探测结论保存失败。',
   'Esc to go back': '按 Esc 返回',
   'Enter to confirm, Esc to cancel': 'Enter 确认，Esc 取消',
   'Enter to select, ↑↓ to navigate, Esc to go back':

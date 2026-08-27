@@ -280,6 +280,7 @@ vi.mock('../config/settings-cache.js', async () => {
 vi.mock('../config/config.js', () => ({
   loadCliConfig: vi.fn(),
   buildDisabledSkillNamesProvider: vi.fn(() => () => new Set<string>()),
+  buildProbeResultStoreProvider: vi.fn(() => () => undefined),
 }));
 vi.mock('./session/Session.js', () => ({
   Session: vi.fn(),

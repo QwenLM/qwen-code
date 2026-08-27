@@ -150,6 +150,12 @@ export interface AvailableModel {
   isVision?: boolean;
   contextWindowSize?: number;
   modalities?: InputModalities;
+  /**
+   * Provenance of `modalities` mirrored from `ResolvedModelConfig` so the
+   * /model dialog can badge probe-tested vs pattern-guessed entries
+   * (issue #10309). Absent when modalities were never resolved.
+   */
+  modalitiesSource?: ModalitySource;
   baseUrl?: string;
   /** Exact optional baseUrl used in the model registry key, before defaults. */
   registryBaseUrl?: string;

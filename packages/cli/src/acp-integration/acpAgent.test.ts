@@ -859,6 +859,7 @@ vi.mock('../config/loadedSettingsAdapter.js', () => ({
 vi.mock('../config/config.js', () => ({
   loadCliConfig: vi.fn(),
   buildDisabledSkillNamesProvider: vi.fn(() => () => new Set<string>()),
+  buildProbeResultStoreProvider: vi.fn(() => () => undefined),
   SessionIdConflictError: class SessionIdConflictError extends Error {
     sessionId: string;
     constructor(sessionId: string, message: string) {
@@ -3691,10 +3692,11 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     expect(argv).toMatchObject({
       sessionId: '550e8400-e29b-41d4-a716-446655440000',
     });
-    // Index 8 is `throwOnSessionIdConflict`: it must be true so a duplicate
+    // Index 9 is `throwOnSessionIdConflict`: it must be true so a duplicate
     // caller-supplied id throws (mapped to a RequestError) instead of
-    // process.exit(1)-ing the shared ACP child.
-    expect(vi.mocked(loadCliConfig).mock.calls[0]![8]).toBe(true);
+    // process.exit(1)-ing the shared ACP child. (Index 8 is the settings
+    // watcher; index 6 is the probe-result store provider.)
+    expect(vi.mocked(loadCliConfig).mock.calls[0]![9]).toBe(true);
 
     mockConnectionState.resolve();
     await agentPromise;
@@ -10929,6 +10931,8 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       '/tmp',
       undefined,
       expect.anything(),
+      // disabledSkillNamesProvider, probeResultStoreProvider
+      expect.any(Function),
       expect.any(Function),
       expect.anything(),
       undefined,
@@ -16488,7 +16492,9 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       ],
     });
 
-    const sessionMcpServers = vi.mocked(loadCliConfig).mock.calls[0]?.[6];
+    // Arg index 7 = sessionMcpServers (index 6 is the probe-result store
+    // provider).
+    const sessionMcpServers = vi.mocked(loadCliConfig).mock.calls[0]?.[7];
     const localConfig = sessionMcpServers?.['local'] as unknown as {
       _args: unknown[];
     };
@@ -18847,7 +18853,9 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
     });
     vi.mocked(loadSettings).mockReturnValue(makeRestoreSettings());
     vi.mocked(loadCliConfig).mockImplementation(async (...args: unknown[]) => {
-      const hostPolicy = args[9] as
+      // Index 10 is `hostPolicy` (index 9 is `throwOnSessionIdConflict`;
+      // index 6 is the probe-result store provider).
+      const hostPolicy = args[10] as
         | {
             sessionRestore?: {
               projectionSource: (sessionId: string) => Promise<unknown>;

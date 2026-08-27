@@ -31,6 +31,7 @@ export {
   type ModelConfigSettingsInput,
   type ModelConfigSourcesInput,
   type ModelConfigValidationResult,
+  type ModalitySource,
   ModelRegistry,
   isImageGenerationCapable,
   modelRegistryKey,
@@ -317,7 +318,17 @@ export * from './services/fileHistoryService.js';
 export * from './services/fileReadCache.js';
 export * from './services/fileSystemService.js';
 export * from './services/tool-write-origin.js';
-export type { ModalityProbeRecord } from './services/modalityProbe/probe-store.js';
+export {
+  type ModalityProbeRecord,
+  type ProbeResultStore,
+  withProbeResult,
+} from './services/modalityProbe/probe-store.js';
+export {
+  type ModalityProbeInput,
+  type ModalityProbeResult,
+  type ModalityProbeVerdict,
+  probeImageSupport,
+} from './services/modalityProbe/probe.js';
 export {
   decodeBufferWithEncodingInfo,
   encodeTextFileContent,
