@@ -59,6 +59,7 @@ interface StubBridge {
     req: { sessionId: string; prompt: Array<{ type: 'text'; text: string }> },
   ): Promise<unknown>;
   closeSession(sessionId: string): Promise<unknown>;
+  ensureDefaultSessionPersisted(sessionId: string): Promise<void>;
   updateSessionMetadata(
     sessionId: string,
     metadata: { displayName?: string },
@@ -91,8 +92,10 @@ interface StubBridge {
   spawnParents: Array<string | undefined>;
   prompts: Array<{ sessionId: string; text: string }>;
   closed: string[];
+  persisted: string[];
   named: Array<{ sessionId: string; displayName?: string }>;
   failNext: boolean;
+  persistenceError?: Error;
 }
 
 function makeStubBridge(): StubBridge {
@@ -104,6 +107,7 @@ function makeStubBridge(): StubBridge {
     spawnParents: [],
     prompts: [],
     closed: [],
+    persisted: [],
     named: [],
     markSessionCatalogChanged: vi.fn(),
     failNext: false,
@@ -137,6 +141,13 @@ function makeStubBridge(): StubBridge {
       bridge.closed.push(sessionId);
       bridge.liveSessions.delete(sessionId);
       return undefined;
+    },
+    async ensureDefaultSessionPersisted(sessionId: string) {
+      if (bridge.persistenceError) throw bridge.persistenceError;
+      if (!bridge.liveSessions.has(sessionId)) {
+        throw new SessionNotFoundError(sessionId);
+      }
+      bridge.persisted.push(sessionId);
     },
     updateSessionMetadata(sessionId, metadata) {
       bridge.named.push({ sessionId, ...metadata });
@@ -992,6 +1003,7 @@ describe('scheduled-tasks routes', () => {
     expect(res.status).toBe(201);
     expect(res.body.sessionId).toBe(CALLER_SESSION_ID);
     expect(h.bridge.spawned).toEqual([]);
+    expect(h.bridge.persisted).toEqual([CALLER_SESSION_ID]);
     expect(h.bridge.named).toEqual([]);
     expect(await readCronTasks(h.workspace)).toEqual([
       expect.objectContaining({
@@ -1005,6 +1017,89 @@ describe('scheduled-tasks routes', () => {
       .send({ name: 'Renamed task' })
       .expect(200);
     expect(h.bridge.named).toEqual([]);
+  });
+
+  it('fails closed when existing-session persistence is unavailable', async () => {
+    addLiveSession(h.bridge, CALLER_SESSION_ID, h.workspace);
+    delete (h.bridge as Partial<StubBridge>).ensureDefaultSessionPersisted;
+
+    const res = await create({
+      cron: '0 9 * * *',
+      prompt: 'p',
+      sessionId: CALLER_SESSION_ID,
+    });
+
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('session_binding_unavailable');
+    expect(await readCronTasks(h.workspace)).toEqual([]);
+  });
+
+  it('does not bind a task when the session transcript cannot be persisted', async () => {
+    addLiveSession(h.bridge, CALLER_SESSION_ID, h.workspace);
+    h.bridge.persistenceError = new Error('disk full');
+
+    const res = await create({
+      cron: '0 9 * * *',
+      prompt: 'p',
+      sessionId: CALLER_SESSION_ID,
+    });
+
+    expect(res.status).toBe(500);
+    expect(res.body.code).toBe('session_persistence_failed');
+    expect(await readCronTasks(h.workspace)).toEqual([]);
+  });
+
+  it('returns 404 when the session disappears during persistence', async () => {
+    addLiveSession(h.bridge, CALLER_SESSION_ID, h.workspace);
+    h.bridge.ensureDefaultSessionPersisted = async (sessionId) => {
+      h.bridge.liveSessions.delete(sessionId);
+      throw new SessionNotFoundError(sessionId);
+    };
+
+    const res = await create({
+      cron: '0 9 * * *',
+      prompt: 'p',
+      sessionId: CALLER_SESSION_ID,
+    });
+
+    expect(res.status).toBe(404);
+    expect(res.body.code).toBe('session_not_found');
+    expect(await readCronTasks(h.workspace)).toEqual([]);
+  });
+
+  it('returns 503 when the runtime generation closes during persistence', async () => {
+    await teardown(h);
+    let generationOpen = true;
+    h = await makeHarness(true, {
+      get closed() {
+        return !generationOpen;
+      },
+      assertOpen() {
+        if (!generationOpen) {
+          throw Object.assign(new Error('generation closed'), {
+            code: 'workspace_generation_closed',
+          });
+        }
+      },
+      close() {
+        generationOpen = false;
+      },
+    });
+    addLiveSession(h.bridge, CALLER_SESSION_ID, h.workspace);
+    h.bridge.ensureDefaultSessionPersisted = async () => {
+      generationOpen = false;
+      throw new Error('channel closed');
+    };
+
+    const res = await request(h.app).post('/scheduled-tasks').send({
+      cron: '0 9 * * *',
+      prompt: 'p',
+      sessionId: CALLER_SESSION_ID,
+    });
+
+    expect(res.status).toBe(503);
+    expect(res.body.code).toBe('workspace_runtime_unavailable');
+    expect(await readCronTasks(h.workspace)).toEqual([]);
   });
 
   it('rejects invalid, missing, and busy caller sessions', async () => {
@@ -1095,6 +1190,7 @@ describe('scheduled-tasks routes', () => {
     );
     expect(task.lastFiredAt).not.toBeNull();
     expect(task.lastFiredAt! % 60_000).toBe(0);
+    expect(h.bridge.persisted).toEqual([]);
   });
 
   it('rechecks the exact caller prompt inside the task-file lock', async () => {

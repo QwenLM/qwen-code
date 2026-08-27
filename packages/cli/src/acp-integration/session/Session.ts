@@ -170,6 +170,7 @@ import {
   refreshMemoryAfterManagedWrite,
   refreshMemoryInstruction,
   GoalPersistenceUnavailableError,
+  ambientGoalToolResultProvenance,
   goalTurnContext,
   sessionIdContext,
   promptIdContext,
@@ -561,6 +562,7 @@ interface AcpGoalTurn {
   controller: AbortController;
   origin: 'runtime' | 'user';
   continuationContext: string;
+  windDown?: boolean;
   verifierFeedback?: string;
   modelStarted: boolean;
 }
@@ -1673,12 +1675,12 @@ function collectMcpServerMentionRefs(
  * methods — declaring the tool there would only advertise an action whose
  * every call fails with JSON-RPC -32601.
  *
- * Applies the same `PermissionManager.isToolEnabled()` check that gate does, so
- * an operator's `tools.core` allowlist or a whole-tool deny rule keeps the tool
- * out of the model's action space instead of only failing at execution. Being
- * session-scoped, the tool is absent from the workspace tools inventory the
- * daemon serves from its bootstrap registry — that panel lists workspace tools,
- * and a daemon-only tool that exists per session is deliberately not one.
+ * Applies the same registration-status check as that gate. Disabled tools stay
+ * out of the registry; permission-deferred tools stay behind ToolSearch instead
+ * of being revealed by this late registration path. Being session-scoped, the
+ * tool is absent from the workspace tools inventory the daemon serves from its
+ * bootstrap registry — that panel lists workspace tools, and a daemon-only tool
+ * that exists per session is deliberately not one.
  */
 export async function registerCreateSubSessionTool(
   config: Config,
@@ -1687,13 +1689,23 @@ export async function registerCreateSubSessionTool(
     return;
   }
   const permissionManager = config.getPermissionManager();
-  if (
-    permissionManager &&
-    !(await permissionManager.isToolEnabled(ToolNames.CREATE_SUB_SESSION))
-  ) {
+  const registrationStatus = permissionManager
+    ? await permissionManager.getToolRegistrationStatus(
+        ToolNames.CREATE_SUB_SESSION,
+      )
+    : 'registered';
+  if (registrationStatus === 'disabled') {
     return;
   }
   const toolRegistry = config.getToolRegistry();
+  if (registrationStatus === 'deferred') {
+    toolRegistry.registerPermissionDeferredFactory(
+      ToolNames.CREATE_SUB_SESSION,
+      async () => new CreateSubSessionTool(config),
+    );
+    await config.getGeminiClient().setTools();
+    return;
+  }
   toolRegistry.registerTool(new CreateSubSessionTool(config));
   // The registration lands after `config.initialize()` → `startChat()` already
   // snapshotted the chat's tool declarations, and the tool is deferred — so it
@@ -2149,6 +2161,7 @@ export class Session implements SessionContext {
             controller: new AbortController(),
             origin: 'runtime',
             continuationContext: input.continuationContext,
+            ...(input.windDown ? { windDown: true } : {}),
             ...(input.verifierFeedback
               ? { verifierFeedback: input.verifierFeedback }
               : {}),
@@ -8187,10 +8200,14 @@ export class Session implements SessionContext {
    * `_meta.source='cron'`, streams the model response, and handles tool calls.
    */
   async #executeCronPrompt(item: CronQueueItem): Promise<void> {
-    // Same session-ID binding rationale as #executePrompt.
-    return runWithInvocationContext(undefined, () =>
-      sessionIdContext.run(this.config.getSessionId(), () =>
-        this.#executeCronPromptInner(item),
+    // Same session-ID binding rationale as #executePrompt, and the same
+    // reason to leave the Goal store as the notification drain: a cron turn
+    // is never a Goal turn, whatever lineage it was scheduled from.
+    return goalTurnContext.exit(() =>
+      runWithInvocationContext(undefined, () =>
+        sessionIdContext.run(this.config.getSessionId(), () =>
+          this.#executeCronPromptInner(item),
+        ),
       ),
     );
   }
@@ -8967,9 +8984,17 @@ export class Session implements SessionContext {
         this.currentShellNotificationActive = item.kind === 'shell';
         this.#activeWorkChanged();
         try {
-          await runWithInvocationContext(undefined, () =>
-            sessionIdContext.run(this.config.getSessionId(), () =>
-              this.#executeBackgroundNotificationPromptInner(item),
+          // A notification fires from async resources created inside the
+          // turn that spawned the task, so a Goal permit can reach here by
+          // lineage after that turn is long over. This is not a Goal turn:
+          // leave the store, as #executePrompt does for every non-Goal turn,
+          // or the notification's tool results would be stamped as evidence
+          // for a turn that never made those calls.
+          await goalTurnContext.exit(() =>
+            runWithInvocationContext(undefined, () =>
+              sessionIdContext.run(this.config.getSessionId(), () =>
+                this.#executeBackgroundNotificationPromptInner(item),
+              ),
             ),
           );
         } finally {
@@ -9826,13 +9851,19 @@ export class Session implements SessionContext {
         ) {
           return;
         }
-        this.config
-          .getChatRecordingService()
-          ?.recordToolResult(finalized[index].responseParts, {
+        const goalProvenance = ambientGoalToolResultProvenance(record.toolName);
+        this.config.getChatRecordingService()?.recordToolResult(
+          finalized[index].responseParts,
+          {
             ...record.metadata,
             persistedOutputFiles: finalized[index].persistedOutputFiles,
             artifacts: finalized[index].artifacts,
-          });
+          },
+          // Passed only inside a Goal turn: outside one this call keeps its
+          // former two-argument shape, so nothing about ordinary recording
+          // changes.
+          ...(goalProvenance ? ([goalProvenance] as const) : ([] as const)),
+        );
       });
       return {
         ...result,
