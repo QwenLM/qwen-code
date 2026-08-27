@@ -219,7 +219,10 @@ function checkRule({ label, root, rules }) {
     const source = readFileSync(file, 'utf8');
     for (const imp of findImports(source, file)) {
       specifiers++;
-      const rel = `${file.slice(repoRoot.length + 1)}:${imp.line}`;
+      // Paths are reported relative to the rule root, not the repo root:
+      // slicing by repoRoot corrupts any root outside the checkout, which
+      // is how the unit tests exercise this function.
+      const rel = `${file.slice(root.length + 1)}:${imp.line}`;
       if (rules.noFramework) {
         const family = bannedFamily(imp.spec);
         if (family) {
