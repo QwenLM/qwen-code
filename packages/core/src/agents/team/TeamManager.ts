@@ -1731,10 +1731,38 @@ export class TeamManager {
       emitter.off(AgentEventType.TOOL_WAITING_APPROVAL, onApproval);
     });
 
-    // Reconcile: if agent already reached IDLE before we
-    // attached, flush now.
+    // Reconcile state reached before we attached. The emitter does
+    // not buffer for late subscribers, and the in-process run loop
+    // can settle the initial round while spawnAgent() is still
+    // resolving — those events never reach the bridge.
     const currentStatus = agent.getStatus();
-    if (currentStatus === AgentStatus.IDLE) {
+
+    // Round text emitted before attach survives only in the agent's
+    // message history (AgentCore appends an assistant message per
+    // ROUND_TEXT). Recover the last model-visible answer — mirroring
+    // onRoundText's last-non-empty-text-wins semantics — so the
+    // settlement below reports it instead of the no-visible-answer
+    // fallback. Live ROUND_TEXT events after attach overwrite this
+    // seed as usual; RUNNING/terminal handlers clear it like any
+    // pending report.
+    const preAttachReport = this.lastVisibleAnswer(agent);
+    if (preAttachReport !== undefined) {
+      this.pendingFinalReports.set(agentId, preAttachReport);
+    }
+
+    if (currentStatus === AgentStatus.IDLE && preAttachReport !== undefined) {
+      // The initial round already settled to IDLE before attach.
+      // Replay the STATUS_CHANGE through the same handler the live
+      // path uses so its final report and message flush happen
+      // exactly once. Without pre-attach round text there is no
+      // completed round to report — keep the flush-only behavior.
+      onStatusChange({
+        agentId,
+        previousStatus: AgentStatus.RUNNING,
+        newStatus: AgentStatus.IDLE,
+        timestamp: Date.now(),
+      } as AgentStatusChangeEvent);
+    } else if (currentStatus === AgentStatus.IDLE) {
       this.fireAndForget(
         `flushNextMessage(${agentId})`,
         this.flushNextMessage(agentId, agentName),
@@ -1752,6 +1780,24 @@ export class TeamManager {
         timestamp: Date.now(),
       } as AgentStatusChangeEvent);
     }
+  }
+
+  /**
+   * The last model-visible answer in an agent handle's message
+   * history, or undefined when there is none. Mirrors the live
+   * ROUND_TEXT → pendingFinalReports semantics: the most recent
+   * non-empty, non-thought assistant text wins.
+   */
+  private lastVisibleAnswer(agent: TeamAgentHandle): string | undefined {
+    const messages = agent.getMessages?.();
+    if (!messages) return undefined;
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const message = messages[i];
+      if (message.role !== 'assistant' || message.thought) continue;
+      const text = message.content.trim();
+      if (text) return text;
+    }
+    return undefined;
   }
 
   // ─── Private: Permission fallback ───────────────────────
