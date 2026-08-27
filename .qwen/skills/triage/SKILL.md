@@ -52,10 +52,9 @@ gh label list --repo "$REPO" --limit 200
   maintainer, not rejecting the PR, except where Stage 0 Tier 1 explicitly
   prescribes a `CHANGES_REQUESTED` review for large core refactors, where
   Stage 1-pre prescribes a `CHANGES_REQUESTED` review for a linked issue
-  closed as not planned or a remaining production delta against a merged
-  fix, or where Stage 1-pre prescribes closing a default-branch PR whose
-  entire production diff is fully subsumed by a merged fix for its linked
-  issue.
+  closed as not planned or a remaining delta against a merged fix, or where
+  Stage 1-pre prescribes closing a default-branch PR whose entire diff is
+  fully subsumed by a merged fix for its linked issue.
 - ⛔ **Never execute PR-derived code.** The review is static. Do not run
   `npm`/`node`/`npx`/interpreters/build/test commands against a tree containing
   the PR's changes; do not `gh pr checkout`, `git apply` the diff, or run any

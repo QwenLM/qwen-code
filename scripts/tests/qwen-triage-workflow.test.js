@@ -31,6 +31,7 @@ const prSkill = readFileSync(
   '.qwen/skills/triage/references/pr-workflow.md',
   'utf8',
 );
+const triageSkillDoc = readFileSync('.qwen/skills/triage/SKILL.md', 'utf8');
 const verifySkill = readFileSync('.qwen/skills/verify-pr/SKILL.md', 'utf8');
 const hasGnuRealpath =
   spawnSync('realpath', ['-m', '--', '/'], { stdio: 'ignore' }).status === 0;
@@ -6872,5 +6873,23 @@ describe('stage 1-pre duplicate gate', () => {
     // The ambiguity bullet is the only explicit prohibition against closing
     // on a closer that cannot be resolved; deleting it must make this red.
     expect(section).toContain('never close on ambiguity');
+  });
+
+  it('SKILL.md restates the 1-pre boundary without a production qualifier', () => {
+    // xe6: SKILL.md's escalation summary must match pr-workflow.md's
+    // operational definition — request changes on ANY remaining delta, close
+    // only when the ENTIRE diff is subsumed. Re-qualifying either side with
+    // "production" contradicts "any non-production addition is a remaining
+    // delta" and "a diff with NO production changes is never fully subsumed",
+    // giving a tests-only PR opposite instructions in the two files.
+    const summary = triageSkillDoc.slice(
+      triageSkillDoc.indexOf('The escalation criteria are those defined in'),
+      triageSkillDoc.indexOf('Never execute PR-derived code'),
+    );
+    expect(summary).toContain('a remaining delta');
+    expect(summary).toContain('entire diff');
+    expect(summary).toContain('fully subsumed');
+    expect(summary).not.toContain('production delta');
+    expect(summary).not.toContain('production diff');
   });
 });
