@@ -656,6 +656,7 @@ describe('resolveBootstrapRoute', () => {
 describe('runCliEntry', () => {
   const savedEnv = {
     CLI_VERSION: process.env['CLI_VERSION'],
+    LC_ALL: process.env['LC_ALL'],
     QWEN_CODE_EXTERNAL_TOOL_GUARD_TOKEN:
       process.env['QWEN_CODE_EXTERNAL_TOOL_GUARD_TOKEN'],
     QWEN_CODE_MANAGED_NPM_UPDATE_VERSION:
@@ -691,6 +692,11 @@ describe('runCliEntry', () => {
       delete process.env['CLI_VERSION'];
     } else {
       process.env['CLI_VERSION'] = savedEnv.CLI_VERSION;
+    }
+    if (savedEnv.LC_ALL === undefined) {
+      delete process.env['LC_ALL'];
+    } else {
+      process.env['LC_ALL'] = savedEnv.LC_ALL;
     }
     if (savedEnv.QWEN_CODE_MANAGED_NPM_UPDATE_VERSION === undefined) {
       delete process.env['QWEN_CODE_MANAGED_NPM_UPDATE_VERSION'];
@@ -786,6 +792,18 @@ describe('runCliEntry', () => {
     expect(mocks.tryRunServeFastPath).not.toHaveBeenCalled();
     expect(mocks.initStartupProfiler).not.toHaveBeenCalled();
     expect(mocks.initCpuProfiler).not.toHaveBeenCalled();
+  });
+
+  it('prints fast-path help in English under a German locale', async () => {
+    // Without the `.locale('en')` pin yargs detects LC_ALL and renders its
+    // bundled German boilerplate, reopening the fast/slow output divergence.
+    process.env['LC_ALL'] = 'de_DE.UTF-8';
+
+    await runCliEntry(['--help']);
+
+    const helpText = stdout.join('');
+    expect(helpText).toContain('\nCommands:');
+    expect(helpText).not.toContain('Kommandos:');
   });
 
   it('routes the MCP help path without booting gemini', async () => {
