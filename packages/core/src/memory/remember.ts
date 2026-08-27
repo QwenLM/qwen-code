@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { Config } from '../config/config.js';
+import { deriveConfig, type Config } from '../config/config.js';
 import { ToolNames } from '../tools/tool-names.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { runForkedAgent } from '../agents/forkedAgent.js';
@@ -106,15 +106,17 @@ function createHiddenRememberConfig(
   config: Config,
   options: { disableHooks?: boolean } = {},
 ): Config {
-  const hiddenConfig = Object.create(config) as Config;
-  hiddenConfig.getChatRecordingService = () => undefined;
-  hiddenConfig.getTranscriptPath = () => '';
-  if (options.disableHooks) {
-    hiddenConfig.getDisableAllHooks = () => true;
-    hiddenConfig.getHookSystem = () => undefined;
-    hiddenConfig.getMessageBus = () => undefined;
-  }
-  return hiddenConfig;
+  return deriveConfig(config, {
+    getChatRecordingService: () => undefined,
+    getTranscriptPath: () => '',
+    ...(options.disableHooks
+      ? {
+          getDisableAllHooks: () => true,
+          getHookSystem: () => undefined,
+          getMessageBus: () => undefined,
+        }
+      : {}),
+  });
 }
 
 function uniqueSortedScopes(scopes: Iterable<WorkspaceRememberScope>) {
@@ -165,14 +167,10 @@ export async function runManagedRememberByAgent(params: {
   // section — and in clean mode re-injecting parent-session memory into the
   // intended blank-slate agent. Zero it out for every mode so the section is
   // present exactly once, via the remember system prompt above.
-  const baseConfig = (() => {
-    const derived = Object.create(params.config) as Config;
-    derived.getAutoMemoryPrompt = () => '';
-    if (params.contextMode === 'clean') {
-      derived.getUserMemory = () => '';
-    }
-    return derived;
-  })();
+  const baseConfig = deriveConfig(params.config, {
+    getAutoMemoryPrompt: () => '',
+    ...(params.contextMode === 'clean' ? { getUserMemory: () => '' } : {}),
+  });
   const hiddenConfig = createHiddenRememberConfig(baseConfig, {
     disableHooks: params.contextMode === 'clean',
   });

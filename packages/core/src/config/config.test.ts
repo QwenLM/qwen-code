@@ -15,7 +15,9 @@ import {
   APPROVAL_MODES,
   APPROVAL_MODE_INFO,
   MCPServerConfig,
+  deriveAgentConfig,
   deriveConfig,
+  deriveWorktreeConfig,
   TrustGateError,
   matchesServerPattern,
   matchesAnyServerPattern,
@@ -25,7 +27,7 @@ import { DEFAULT_MAX_TOOL_CALLS_PER_TURN } from '../services/loopDetectionServic
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { setGeminiMdFilename as mockSetGeminiMdFilename } from '../utils/memory-constants.js';
+import { setMemoryFilename as mockSetMemoryFilename } from '../utils/memory-constants.js';
 import {
   DEFAULT_TELEMETRY_TARGET,
   DEFAULT_OTLP_ENDPOINT,
@@ -290,15 +292,15 @@ vi.mock('../tools/read-many-files', () => ({
   ReadManyFilesTool: createToolMock('read_many_files'),
 }));
 vi.mock('../utils/memory-constants.js', () => ({
-  setGeminiMdFilename: vi.fn(),
-  getCurrentGeminiMdFilename: vi.fn(() => 'QWEN.md'), // Mock the original filename
-  getAllGeminiMdFilenames: vi.fn(() => ['QWEN.md', 'AGENTS.md']),
+  setMemoryFilename: vi.fn(),
+  getCurrentMemoryFilename: vi.fn(() => 'QWEN.md'), // Mock the original filename
+  getAllMemoryFilenames: vi.fn(() => ['QWEN.md', 'AGENTS.md']),
   DEFAULT_CONTEXT_FILENAME: 'QWEN.md',
 }));
 vi.mock('../tools/memory-config', () => ({
-  setGeminiMdFilename: vi.fn(),
-  getCurrentGeminiMdFilename: vi.fn(() => 'QWEN.md'),
-  getAllGeminiMdFilenames: vi.fn(() => ['QWEN.md', 'AGENTS.md']),
+  setMemoryFilename: vi.fn(),
+  getCurrentMemoryFilename: vi.fn(() => 'QWEN.md'),
+  getAllMemoryFilenames: vi.fn(() => ['QWEN.md', 'AGENTS.md']),
   DEFAULT_CONTEXT_FILENAME: 'QWEN.md',
   AGENT_CONTEXT_FILENAME: 'AGENTS.md',
   MEMORY_SECTION_HEADER: '## Qwen Added Memories',
@@ -605,6 +607,28 @@ describe('Server Config (config.ts)', () => {
 
       config.setShellExecutionConfig({ terminalWidth: 120 });
       expect(config.getShellExecutionConfig().pager).toBe('less');
+    });
+  });
+
+  describe('memory file count compatibility', () => {
+    it('keeps the legacy parameter and accessors until a future major release', () => {
+      const config = new Config({ ...baseParams, geminiMdFileCount: 2 });
+
+      expect(config.getMemoryFileCount()).toBe(2);
+      expect(config.getGeminiMdFileCount()).toBe(2);
+
+      config.setGeminiMdFileCount(3);
+      expect(config.getMemoryFileCount()).toBe(3);
+    });
+
+    it('prefers the renamed parameter when both names are present', () => {
+      const config = new Config({
+        ...baseParams,
+        geminiMdFileCount: 2,
+        memoryFileCount: 4,
+      });
+
+      expect(config.getMemoryFileCount()).toBe(4);
     });
   });
 
@@ -1667,6 +1691,73 @@ describe('Server Config (config.ts)', () => {
 
       expect(child.getCwd()).toBe(parent.getCwd());
       expect(Object.hasOwn(child, 'getCwd')).toBe(false);
+    });
+
+    it('rebinds worktree getters and private field reads together', () => {
+      const parent = new Config({
+        ...baseParams,
+        fileFiltering: { customIgnoreFiles: ['.cursorignore'] },
+      });
+      const child = deriveWorktreeConfig(parent, '/tmp/worktree', {
+        customIgnoreFiles: ['.cursorignore'],
+      });
+
+      expect(child.getTargetDir()).toBe('/tmp/worktree');
+      expect(child.getCwd()).toBe('/tmp/worktree');
+      expect(child.getWorkingDir()).toBe('/tmp/worktree');
+      expect(child.getProjectRoot()).toBe('/tmp/worktree');
+      expect([...child.getWorkspaceContext().getDirectories()]).toEqual([
+        '/tmp/worktree',
+      ]);
+      expect(child.getFileService()).not.toBe(parent.getFileService());
+      expect(child.getFileService().getQwenIgnoreFileNamesDisplay()).toBe(
+        '.qwenignore, .cursorignore',
+      );
+      const workspaceState = child as unknown as Record<string, unknown>;
+      expect(workspaceState['targetDir']).toBe('/tmp/worktree');
+      expect(workspaceState['cwd']).toBe('/tmp/worktree');
+      expect(Object.hasOwn(child, 'workspaceContext')).toBe(true);
+      expect(Object.hasOwn(child, 'fileDiscoveryService')).toBe(true);
+      expect(parent.getTargetDir()).toBe(TARGET_DIR);
+      expect(parent.getWorkingDir()).toBe('/tmp');
+    });
+
+    it('rebinds agent workspace getters and private field reads together', () => {
+      const parent = new Config({
+        ...baseParams,
+        fileFiltering: { customIgnoreFiles: ['.cursorignore'] },
+      });
+      const agentPlanPath = path.join('/tmp/plans', 'session-agent-1.md');
+      const {
+        config: child,
+        fileService,
+        workspaceContext,
+      } = deriveAgentConfig(parent, '/tmp/agent-workspace', {
+        customIgnoreFiles: ['.cursorignore'],
+        getPlanFilePath: () => agentPlanPath,
+      });
+
+      expect(child.getTargetDir()).toBe('/tmp/agent-workspace');
+      expect(child.getCwd()).toBe('/tmp/agent-workspace');
+      expect(child.getWorkingDir()).toBe('/tmp/agent-workspace');
+      expect(child.getProjectRoot()).toBe('/tmp/agent-workspace');
+      expect(child.getPlanFilePath()).toBe(agentPlanPath);
+      expect(child.getWorkspaceContext()).toBe(workspaceContext);
+      expect([...child.getWorkspaceContext().getDirectories()]).toEqual([
+        '/tmp/agent-workspace',
+      ]);
+      expect(child.getFileService()).toBe(fileService);
+      expect(child.getFileService()).not.toBe(parent.getFileService());
+      expect(child.getFileService().getQwenIgnoreFileNamesDisplay()).toBe(
+        '.qwenignore, .cursorignore',
+      );
+      const workspaceState = child as unknown as Record<string, unknown>;
+      expect(workspaceState['targetDir']).toBe('/tmp/agent-workspace');
+      expect(workspaceState['cwd']).toBe('/tmp/agent-workspace');
+      expect(Object.hasOwn(child, 'workspaceContext')).toBe(true);
+      expect(Object.hasOwn(child, 'fileDiscoveryService')).toBe(true);
+      expect(parent.getTargetDir()).toBe(TARGET_DIR);
+      expect(parent.getWorkingDir()).toBe('/tmp');
     });
 
     it('prohibits inherited session-writer lifecycle access', async () => {
@@ -7712,19 +7803,19 @@ describe('Server Config (config.ts)', () => {
     );
   });
 
-  it('Config constructor should call setGeminiMdFilename with contextFileName if provided', () => {
+  it('Config constructor should call setMemoryFilename with contextFileName if provided', () => {
     const contextFileName = 'CUSTOM_AGENTS.md';
     const paramsWithContextFile: ConfigParameters = {
       ...baseParams,
       contextFileName,
     };
     new Config(paramsWithContextFile);
-    expect(mockSetGeminiMdFilename).toHaveBeenCalledWith(contextFileName);
+    expect(mockSetMemoryFilename).toHaveBeenCalledWith(contextFileName);
   });
 
-  it('Config constructor should not call setGeminiMdFilename if contextFileName is not provided', () => {
+  it('Config constructor should not call setMemoryFilename if contextFileName is not provided', () => {
     new Config(baseParams); // baseParams does not have contextFileName
-    expect(mockSetGeminiMdFilename).not.toHaveBeenCalled();
+    expect(mockSetMemoryFilename).not.toHaveBeenCalled();
   });
 
   it('should set default file filtering settings when not provided', () => {
@@ -10233,6 +10324,59 @@ describe('setApprovalMode with folder trust', () => {
       expect(fs.renameSync).toHaveBeenCalledWith(tmpPath, filePath);
       expect(config.loadPlan()).toBe('# My Plan');
       expect(fs.readFileSync).toHaveBeenCalledWith(filePath, 'utf-8');
+    });
+
+    it('saves a plan on a derived agent config whose cwd differs from the project root', () => {
+      const config = new Config({
+        ...baseParams,
+        sessionId: 'test-session-123',
+        plansDirectory: './project-plans',
+      });
+      // A teammate's working directory outside the parent project root.
+      // The plan file still belongs to the parent's configured plans
+      // directory, so the containment assertions must anchor at the
+      // plans-owning base Config, not at the agent's workspace.
+      const { config: agentConfig } = deriveAgentConfig(
+        config,
+        '/elsewhere/agent-cwd',
+      );
+      const targetDir = path.resolve(baseParams.targetDir);
+      const plansDir = path.join(targetDir, 'project-plans');
+      const filePath = path.join(plansDir, 'test-session-123.md');
+      const tmpPath = `${filePath}.tmp`;
+      const storedFiles = new Map<string, string>();
+      (fs.writeFileSync as Mock).mockImplementation((pathToWrite, contents) => {
+        storedFiles.set(pathToWrite.toString(), contents.toString());
+      });
+      (fs.renameSync as Mock).mockImplementation((fromPath, toPath) => {
+        const contents = storedFiles.get(fromPath.toString());
+        if (contents === undefined) {
+          throw new Error(`missing temp file: ${fromPath.toString()}`);
+        }
+        storedFiles.set(toPath.toString(), contents);
+        storedFiles.delete(fromPath.toString());
+      });
+      (fs.readFileSync as Mock).mockImplementation((pathToRead) => {
+        const contents = storedFiles.get(pathToRead.toString());
+        if (contents === undefined) {
+          const enoent = new Error('ENOENT') as NodeJS.ErrnoException;
+          enoent.code = 'ENOENT';
+          throw enoent;
+        }
+        return contents;
+      });
+
+      expect(() => agentConfig.savePlan('# My Plan')).not.toThrow();
+
+      expect(fs.mkdirSync).toHaveBeenCalledWith(plansDir, { recursive: true });
+      expect(fs.writeFileSync).toHaveBeenCalledWith(
+        tmpPath,
+        '# My Plan',
+        'utf-8',
+      );
+      expect(fs.renameSync).toHaveBeenCalledWith(tmpPath, filePath);
+      expect(agentConfig.loadPlan()).toBe('# My Plan');
+      expect(config.getTargetDir()).toBe(targetDir);
     });
 
     it('should fall back to copyFileSync when renameSync hits EXDEV', () => {

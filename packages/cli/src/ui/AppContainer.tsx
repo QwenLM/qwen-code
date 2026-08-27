@@ -43,7 +43,7 @@ import {
   createDebugLogger,
   describeHoldCause,
   getErrorMessage,
-  getAllGeminiMdFilenames,
+  getAllMemoryFilenames,
   ShellExecutionService,
   Storage,
   createInstructionsLoadedCallback,
@@ -89,7 +89,7 @@ import {
   getStickyTodosRenderKey,
 } from './utils/todoSnapshot.js';
 import type { TodoItem } from './components/TodoDisplay.js';
-import { loadHierarchicalGeminiMemory } from '../config/config.js';
+import { loadHierarchicalMemory } from '../config/config.js';
 import {
   profileCheckpoint,
   finalizeStartupProfile,
@@ -760,8 +760,8 @@ export const AppContainer = (props: AppContainerProps) => {
   const [isProcessing, setIsProcessing] = useState<boolean>(false);
   const [embeddedShellFocused, setEmbeddedShellFocused] = useState(false);
 
-  const [geminiMdFileCount, setGeminiMdFileCount] = useState<number>(
-    initializationResult.geminiMdFileCount,
+  const [memoryFileCount, setMemoryFileCount] = useState<number>(
+    initializationResult.memoryFileCount,
   );
   const [shellModeActive, setShellModeActive] = useState(false);
   const [modelSwitchedFromQuotaError, setModelSwitchedFromQuotaError] =
@@ -2040,7 +2040,7 @@ export const AppContainer = (props: AppContainerProps) => {
     isProcessing,
     setIsProcessing,
     isIdleRef,
-    setGeminiMdFileCount,
+    setMemoryFileCount,
     slashCommandActions,
     extensionsUpdateStateInternal,
     isConfigInitialized,
@@ -2177,12 +2177,12 @@ export const AppContainer = (props: AppContainerProps) => {
     // Safe mode: skip all context file loading, matching refreshHierarchicalMemory()
     if (config.isSafeMode()) {
       config.setUserMemory('');
-      config.setGeminiMdFileCount(0);
+      config.setMemoryFileCount(0);
       config.setContextFilePaths([]);
       config.setConditionalRulesRegistry(
         new ConditionalRulesRegistry([], config.getWorkingDir()),
       );
-      setGeminiMdFileCount(0);
+      setMemoryFileCount(0);
       historyManager.addItem(
         {
           type: MessageType.INFO,
@@ -2207,7 +2207,7 @@ export const AppContainer = (props: AppContainerProps) => {
         contextFilePaths,
         conditionalRules,
         projectRoot,
-      } = await loadHierarchicalGeminiMemory(
+      } = await loadHierarchicalMemory(
         config.getWorkingDir(),
         settings.merged.context?.loadFromIncludeDirectories
           ? config.getWorkspaceContext().getDirectories()
@@ -2226,12 +2226,12 @@ export const AppContainer = (props: AppContainerProps) => {
       );
 
       config.setUserMemory(memoryContent);
-      config.setGeminiMdFileCount(fileCount);
+      config.setMemoryFileCount(fileCount);
       config.setContextFilePaths(contextFilePaths);
       config.setConditionalRulesRegistry(
         new ConditionalRulesRegistry(conditionalRules, projectRoot),
       );
-      setGeminiMdFileCount(fileCount);
+      setMemoryFileCount(fileCount);
 
       historyManager.addItem(
         {
@@ -3389,7 +3389,7 @@ export const AppContainer = (props: AppContainerProps) => {
       ? Array.isArray(fromSettings)
         ? fromSettings
         : [fromSettings]
-      : getAllGeminiMdFilenames();
+      : getAllMemoryFilenames();
   }, [settings.merged.context?.fileName]);
   // Initial prompt handling
   const initialPrompt = useMemo(() => config.getQuestion(), [config]);
@@ -4744,7 +4744,7 @@ export const AppContainer = (props: AppContainerProps) => {
       settingInputRequests,
       pluginChoiceRequests,
       loopDetectionConfirmationRequest,
-      geminiMdFileCount,
+      memoryFileCount,
       streamingState,
       initError,
       pendingGeminiHistoryItems,
@@ -4890,7 +4890,7 @@ export const AppContainer = (props: AppContainerProps) => {
       settingInputRequests,
       pluginChoiceRequests,
       loopDetectionConfirmationRequest,
-      geminiMdFileCount,
+      memoryFileCount,
       streamingState,
       initError,
       pendingGeminiHistoryItems,

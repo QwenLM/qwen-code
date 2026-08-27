@@ -12,11 +12,11 @@ import {
   Config,
   DEFAULT_QWEN_EMBEDDING_MODEL,
   FileDiscoveryService,
-  getAllGeminiMdFilenames,
+  getAllMemoryFilenames,
   loadServerHierarchicalMemory,
   type LoadServerHierarchicalMemoryOptions,
   type LoadServerHierarchicalMemoryResponse,
-  setGeminiMdFilename as setServerGeminiMdFilename,
+  setMemoryFilename as setServerMemoryFilename,
   resolveTelemetrySettings,
   FatalConfigError,
   Storage,
@@ -1165,21 +1165,25 @@ function getLeadingBackgroundCommand(rawArgv: string[]): string | undefined {
   const separatorIndex = rawArgv.indexOf('--');
   const leadingArgv =
     separatorIndex === -1 ? rawArgv : rawArgv.slice(0, separatorIndex);
-  const argv = yargs(leadingArgv)
-    .exitProcess(false)
-    .help(false)
-    .version(false)
-    .parserConfiguration({ 'halt-at-non-option': true })
-    .option('background', {
-      alias: 'bg',
-      type: 'boolean',
-      nargs: 0,
-    })
-    .parseSync();
-  const command = argv._[0];
-  return argv['background'] === true && typeof command === 'string'
-    ? command
-    : undefined;
+  try {
+    const argv = yargs(leadingArgv)
+      .exitProcess(false)
+      .help(false)
+      .version(false)
+      .parserConfiguration({ 'halt-at-non-option': true })
+      .option('background', {
+        alias: 'bg',
+        type: 'boolean',
+        nargs: 0,
+      })
+      .parseSync();
+    const command = argv._[0];
+    return argv['background'] === true && typeof command === 'string'
+      ? command
+      : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 export async function parseArguments(): Promise<CliArgs> {
@@ -1305,9 +1309,9 @@ export async function parseArguments(): Promise<CliArgs> {
 // This function is now a thin wrapper around the server's implementation.
 // It's kept in the CLI for now as App.tsx directly calls it for memory refresh.
 // TODO: Consider if App.tsx should get memory via a server call or if Config should refresh itself.
-export async function loadHierarchicalGeminiMemory(
+export async function loadHierarchicalMemory(
   currentWorkingDirectory: string,
-  includeDirectoriesToReadGemini: readonly string[] = [],
+  includeDirectoriesToReadMemory: readonly string[] = [],
   fileService: FileDiscoveryService,
   extensionContextFilePaths: string[] = [],
   folderTrust: boolean,
@@ -1327,7 +1331,7 @@ export async function loadHierarchicalGeminiMemory(
   // Directly call the server function with the corrected path.
   return loadServerHierarchicalMemory(
     effectiveCwd,
-    includeDirectoriesToReadGemini,
+    includeDirectoriesToReadMemory,
     fileService,
     extensionContextFilePaths,
     folderTrust,
@@ -1745,13 +1749,13 @@ export async function loadCliConfig(
 
   // Set the context filename in the server's memoryTool module BEFORE loading memory
   // TODO(b/343434939): This is a bit of a hack. The contextFileName should ideally be passed
-  // directly to the Config constructor in core, and have core handle setGeminiMdFilename.
-  // However, loadHierarchicalGeminiMemory is called *before* createServerConfig.
+  // directly to the Config constructor in core, and have core handle setMemoryFilename.
+  // However, loadHierarchicalMemory is called *before* createServerConfig.
   if (settings.context?.fileName) {
-    setServerGeminiMdFilename(settings.context.fileName);
+    setServerMemoryFilename(settings.context.fileName);
   } else {
     // Reset to default context filenames if not provided in settings.
-    setServerGeminiMdFilename(getAllGeminiMdFilenames());
+    setServerMemoryFilename(getAllMemoryFilenames());
   }
 
   // Automatically load output-language.md if it exists

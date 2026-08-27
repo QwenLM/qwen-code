@@ -332,6 +332,55 @@ describe('setupStartupWorktree', () => {
     expect(branches.trim()).toContain(creator.context.branch);
   });
 
+  it('treats EPERM from pid liveness checks as a live reattach process', async () => {
+    tempRepo = await makeTempRepo();
+    process.chdir(tempRepo);
+
+    const creator = await setupStartupWorktree('reattach-eperm');
+    expect(creator?.ok).toBe(true);
+    if (!creator?.ok) return;
+
+    process.chdir(tempRepo);
+    const reattacher = await setupStartupWorktree('reattach-eperm');
+    expect(reattacher?.ok).toBe(true);
+    if (!reattacher?.ok) return;
+    expect(reattacher.context.wasReattached).toBe(true);
+
+    const killSpy = vi.spyOn(process, 'kill').mockImplementation(((
+      _pid: number,
+      signal?: NodeJS.Signals | number,
+    ) => {
+      if (signal === 0) {
+        const error = new Error(
+          'operation not permitted',
+        ) as NodeJS.ErrnoException;
+        error.code = 'EPERM';
+        throw error;
+      }
+      return true;
+    }) as typeof process.kill);
+
+    try {
+      await expect(
+        discardCreatedStartupWorktree(creator.context),
+      ).resolves.toEqual({
+        preserved: expect.stringContaining('being re-attached by process'),
+      });
+    } finally {
+      killSpy.mockRestore();
+    }
+
+    expect((await fs.stat(creator.context.worktreePath)).isDirectory()).toBe(
+      true,
+    );
+    const { stdout: branches } = await exec(
+      'git',
+      ['branch', '--list', creator.context.branch],
+      { cwd: tempRepo },
+    );
+    expect(branches.trim()).toContain(creator.context.branch);
+  });
+
   it('rejects invalid slug characters before any git operation', async () => {
     tempRepo = await makeTempRepo();
     process.chdir(tempRepo);

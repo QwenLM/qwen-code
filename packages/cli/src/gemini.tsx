@@ -899,6 +899,34 @@ export async function main() {
         releaseExitedManagedSessionForContinue,
       } = await import('./startup/agent-view-resume-guard.js');
       const agentViewEnabled = settings.merged.experimental?.agentView === true;
+      const releaseManagedSessionForContinue = async (): Promise<boolean> => {
+        let retryableError: unknown;
+        for (let attempt = 0; attempt < 2; attempt++) {
+          try {
+            return await releaseExitedManagedSessionForContinue(
+              sourceSessionId,
+              process.env,
+              agentViewEnabled,
+            );
+          } catch (error) {
+            retryableError = error;
+            if (
+              !(
+                error instanceof Error &&
+                error.message.includes('temporarily unreadable')
+              )
+            ) {
+              break;
+            }
+          }
+        }
+        return await exitStartup(
+          1,
+          retryableError instanceof Error
+            ? retryableError.message
+            : String(retryableError),
+        );
+      };
       if (
         !agentViewEnabled &&
         (await isManagedAgentViewResumeBlocked(sourceSessionId))
@@ -911,11 +939,7 @@ export async function main() {
       let ownershipReleased = false;
       if (await isManagedAgentViewContinueBlocked(sourceSessionId)) {
         if (!argv.forkSession) {
-          ownershipReleased = await releaseExitedManagedSessionForContinue(
-            sourceSessionId,
-            process.env,
-            agentViewEnabled,
-          );
+          ownershipReleased = await releaseManagedSessionForContinue();
         }
         if (!ownershipReleased) {
           await exitStartup(1, MANAGED_AGENT_VIEW_RESUME_MESSAGE);
@@ -938,14 +962,7 @@ export async function main() {
           forkSession: false,
         };
       } else {
-        if (
-          !ownershipReleased &&
-          !(await releaseExitedManagedSessionForContinue(
-            sourceSessionId,
-            process.env,
-            agentViewEnabled,
-          ))
-        ) {
+        if (!ownershipReleased && !(await releaseManagedSessionForContinue())) {
           await exitStartup(1, MANAGED_AGENT_VIEW_RESUME_MESSAGE);
         }
         argv = { ...argv, continue: false, resume: sourceSessionId };

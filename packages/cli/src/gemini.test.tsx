@@ -34,7 +34,7 @@ import { clearCiEnv } from './test-utils/ci-env.js';
 import type { CliArgs } from './config/config.js';
 import { type LoadedSettings } from './config/settings.js';
 import { appEvents, AppEvent } from './utils/events.js';
-import type { Config } from '@qwen-code/qwen-code-core';
+import { SessionService, type Config } from '@qwen-code/qwen-code-core';
 import { ApprovalMode, OutputFormat } from '@qwen-code/qwen-code-core';
 import { EXTERNAL_TOOL_GUARD_REQUIRED_VALUE } from '@qwen-code/acp-bridge/externalToolGuard';
 
@@ -49,6 +49,11 @@ const mockStartNonInteractiveOpenAILogHousekeeping = vi.hoisted(() => vi.fn());
 const mockStopNonInteractiveOpenAILogHousekeeping = vi.hoisted(() =>
   vi.fn(async () => {}),
 );
+const mockSetupStartupWorktree = vi.hoisted(() => vi.fn());
+const mockDiscardCreatedStartupWorktree = vi.hoisted(() => vi.fn());
+const mockIsManagedAgentViewContinueBlocked = vi.hoisted(() => vi.fn());
+const mockIsManagedAgentViewResumeBlocked = vi.hoisted(() => vi.fn());
+const mockReleaseExitedManagedSessionForContinue = vi.hoisted(() => vi.fn());
 const mockUpdateBeforeRelaunch = vi.hoisted(() => vi.fn());
 const mockGetInstallationInfo = vi.hoisted(() => vi.fn());
 const mockRegisterSession = vi.hoisted(
@@ -195,7 +200,7 @@ vi.mock('./core/initializer.js', () => ({
     authError: null,
     themeError: null,
     shouldOpenAuthDialog: false,
-    geminiMdFileCount: 0,
+    memoryFileCount: 0,
   }),
 }));
 
@@ -205,6 +210,44 @@ vi.mock('./startup/startup-prefetch.js', () => ({
   startPostRenderPrefetches: (...args: unknown[]) =>
     mockStartPostRenderPrefetches(...args),
 }));
+
+vi.mock('./startup/worktreeStartup.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('./startup/worktreeStartup.js')>();
+  return {
+    ...actual,
+    setupStartupWorktree: (...args: unknown[]) => {
+      if (mockSetupStartupWorktree.getMockImplementation()) {
+        return mockSetupStartupWorktree(...args);
+      }
+      return actual.setupStartupWorktree(
+        ...(args as Parameters<typeof actual.setupStartupWorktree>),
+      );
+    },
+    discardCreatedStartupWorktree: (...args: unknown[]) => {
+      if (mockDiscardCreatedStartupWorktree.getMockImplementation()) {
+        return mockDiscardCreatedStartupWorktree(...args);
+      }
+      return actual.discardCreatedStartupWorktree(
+        ...(args as Parameters<typeof actual.discardCreatedStartupWorktree>),
+      );
+    },
+  };
+});
+
+vi.mock('./startup/agent-view-resume-guard.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<
+      typeof import('./startup/agent-view-resume-guard.js')
+    >();
+  return {
+    ...actual,
+    isManagedAgentViewContinueBlocked: mockIsManagedAgentViewContinueBlocked,
+    isManagedAgentViewResumeBlocked: mockIsManagedAgentViewResumeBlocked,
+    releaseExitedManagedSessionForContinue:
+      mockReleaseExitedManagedSessionForContinue,
+  };
+});
 
 vi.mock('./ui/update-relaunch.js', () => ({
   updateBeforeRelaunch: (...args: unknown[]) =>
@@ -303,6 +346,16 @@ describe('gemini.tsx main function', () => {
   beforeEach(() => {
     mockStartNonInteractiveOpenAILogHousekeeping.mockClear();
     mockStopNonInteractiveOpenAILogHousekeeping.mockClear();
+    mockSetupStartupWorktree.mockReset();
+    mockDiscardCreatedStartupWorktree.mockReset();
+    mockIsManagedAgentViewContinueBlocked.mockReset();
+    mockIsManagedAgentViewResumeBlocked.mockReset();
+    mockReleaseExitedManagedSessionForContinue.mockReset();
+    mockSetupStartupWorktree.mockResolvedValue(null);
+    mockDiscardCreatedStartupWorktree.mockResolvedValue({});
+    mockIsManagedAgentViewContinueBlocked.mockResolvedValue(false);
+    mockIsManagedAgentViewResumeBlocked.mockResolvedValue(false);
+    mockReleaseExitedManagedSessionForContinue.mockResolvedValue(true);
     lspConfigWatcherMock.instances.length = 0;
     mockUpdateBeforeRelaunch.mockResolvedValue(true);
     mockGetInstallationInfo.mockReturnValue({
@@ -414,7 +467,7 @@ describe('gemini.tsx main function', () => {
         getIdeMode: () => false,
         getExperimentalZedIntegration: () => false,
         getScreenReader: () => false,
-        getGeminiMdFileCount: () => 0,
+        getMemoryFileCount: () => 0,
         getProjectRoot: () => '/',
         getOutputFormat: () => OutputFormat.TEXT,
         getWarnings: () => [],
@@ -811,7 +864,7 @@ describe('gemini.tsx main function', () => {
       getIdeMode: () => false,
       getExperimentalZedIntegration: () => false,
       getScreenReader: () => false,
-      getGeminiMdFileCount: () => 0,
+      getMemoryFileCount: () => 0,
       getProjectRoot: () => '/',
       getOutputFormat: () => OutputFormat.TEXT,
       getWarnings: () => [],
@@ -856,6 +909,91 @@ describe('gemini.tsx main function', () => {
       // settingsWatcher: not started in bare mode
       undefined,
     );
+  });
+
+  it('cleans up startup worktree when managed --continue release is temporarily unreadable', async () => {
+    const originalNoRelaunch = process.env['QWEN_CODE_NO_RELAUNCH'];
+    process.env['QWEN_CODE_NO_RELAUNCH'] = 'true';
+    mockWriteStderrLine.mockClear();
+
+    const processExitSpy = vi
+      .spyOn(process, 'exit')
+      .mockImplementation((code) => {
+        throw new MockProcessExitError(code);
+      });
+    const { parseArguments } = await import('./config/config.js');
+    const { loadSettings } = await import('./config/settings.js');
+    const { loadSandboxConfig } = await import('./config/sandboxConfig.js');
+
+    const context = {
+      worktreePath: '/tmp/qwen-startup-worktree',
+      slug: 'managed-continue',
+      branch: 'worktree-managed-continue',
+      repoRoot: '/tmp/repo',
+      originalBranch: 'main',
+      originalHeadCommit: 'HEAD',
+      isPullRequest: false,
+      wasReattached: false,
+      createdSymlinkPaths: [],
+    };
+    const releaseError = new Error(
+      'session state temporarily unreadable. Retry the operation.',
+    );
+
+    vi.mocked(parseArguments).mockResolvedValue({
+      continue: true,
+      worktree: 'managed-continue',
+    } as unknown as CliArgs);
+    vi.mocked(loadSettings).mockReturnValue({
+      errors: [],
+      merged: {
+        advanced: {},
+        experimental: { agentView: true },
+        security: { auth: {} },
+        ui: {},
+        worktree: {},
+      },
+      setValue: vi.fn(),
+      forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
+      migrationWarnings: [],
+      getUserHooks: () => undefined,
+      getProjectHooks: () => undefined,
+    } as never);
+    vi.mocked(loadSandboxConfig).mockResolvedValue(undefined);
+    mockSetupStartupWorktree.mockResolvedValue({ ok: true, context });
+    mockDiscardCreatedStartupWorktree.mockResolvedValue({});
+    mockIsManagedAgentViewResumeBlocked.mockResolvedValue(false);
+    mockIsManagedAgentViewContinueBlocked.mockResolvedValue(false);
+    mockReleaseExitedManagedSessionForContinue.mockRejectedValue(releaseError);
+    vi.spyOn(SessionService.prototype, 'loadLastSession').mockResolvedValue({
+      conversation: {
+        sessionId: '123e4567-e89b-12d3-a456-426614174000',
+      },
+    } as never);
+
+    try {
+      try {
+        await main();
+      } catch (error) {
+        if (!(error instanceof MockProcessExitError)) {
+          throw error;
+        }
+      }
+
+      expect(mockReleaseExitedManagedSessionForContinue).toHaveBeenCalledTimes(
+        2,
+      );
+      expect(mockDiscardCreatedStartupWorktree).toHaveBeenCalledWith(context);
+      expect(mockWriteStderrLine).toHaveBeenCalledWith(releaseError.message);
+      expect(processExitSpy).toHaveBeenCalledWith(1);
+    } finally {
+      processExitSpy.mockRestore();
+      if (originalNoRelaunch !== undefined) {
+        process.env['QWEN_CODE_NO_RELAUNCH'] = originalNoRelaunch;
+      } else {
+        delete process.env['QWEN_CODE_NO_RELAUNCH'];
+      }
+    }
   });
 
   describe('registerLspHotReload', () => {
@@ -1078,7 +1216,7 @@ describe('gemini.tsx main function', () => {
       authError: null,
       themeError: null,
       shouldOpenAuthDialog: false,
-      geminiMdFileCount: 0,
+      memoryFileCount: 0,
     });
     vi.spyOn(startupWarningsModule, 'getStartupWarnings').mockResolvedValue([]);
     vi.spyOn(
@@ -1107,7 +1245,7 @@ describe('gemini.tsx main function', () => {
       getIdeMode: () => false,
       getExperimentalZedIntegration: () => false,
       getScreenReader: () => false,
-      getGeminiMdFileCount: () => 0,
+      getMemoryFileCount: () => 0,
       getProjectRoot: () => '/',
       getOutputFormat: () => OutputFormat.TEXT,
       getWarnings: () => (initialized ? ['late memory warning'] : []),
@@ -1477,7 +1615,7 @@ describe('gemini.tsx main function', () => {
       authError: null,
       themeError: null,
       shouldOpenAuthDialog: false,
-      geminiMdFileCount: 0,
+      memoryFileCount: 0,
     });
     vi.spyOn(startupWarningsModule, 'getStartupWarnings').mockResolvedValue([]);
     vi.spyOn(
@@ -1525,7 +1663,7 @@ describe('gemini.tsx main function', () => {
       getIdeMode: () => false,
       getExperimentalZedIntegration: () => false,
       getScreenReader: () => false,
-      getGeminiMdFileCount: () => 0,
+      getMemoryFileCount: () => 0,
       getProjectRoot: () => '/',
       getInputFormat: () => 'stream-json',
       getContentGeneratorConfig: () => ({ authType: 'test-auth' }),
@@ -1705,7 +1843,7 @@ describe('gemini.tsx main function kitty protocol', () => {
         authError: null,
         themeError: null,
         shouldOpenAuthDialog: false,
-        geminiMdFileCount: 0,
+        memoryFileCount: 0,
       });
     vi.mocked(loadCliConfig).mockResolvedValue({
       ...sessionRegistryConfigStub,
@@ -1721,7 +1859,7 @@ describe('gemini.tsx main function kitty protocol', () => {
       getIdeMode: () => false,
       getExperimentalZedIntegration: () => false,
       getScreenReader: () => false,
-      getGeminiMdFileCount: () => 0,
+      getMemoryFileCount: () => 0,
       getWarnings: () => [],
       isSafeMode: () => false,
       getModelsConfig: () => ({ getCurrentAuthType: () => null }),
@@ -1832,7 +1970,7 @@ describe('gemini.tsx main function kitty protocol', () => {
         authError: null,
         themeError: null,
         shouldOpenAuthDialog: false,
-        geminiMdFileCount: 0,
+        memoryFileCount: 0,
       });
     vi.mocked(loadCliConfig).mockResolvedValue({
       ...sessionRegistryConfigStub,
@@ -1848,7 +1986,7 @@ describe('gemini.tsx main function kitty protocol', () => {
       getIdeMode: () => false,
       getExperimentalZedIntegration: () => false,
       getScreenReader: () => false,
-      getGeminiMdFileCount: () => 0,
+      getMemoryFileCount: () => 0,
       getWarnings: () => [],
       isSafeMode: () => false,
       getModelsConfig: () => ({ getCurrentAuthType: () => null }),
@@ -1957,7 +2095,7 @@ describe('gemini.tsx main function kitty protocol', () => {
         authError: null,
         themeError: null,
         shouldOpenAuthDialog: false,
-        geminiMdFileCount: 0,
+        memoryFileCount: 0,
       });
     vi.mocked(loadCliConfig).mockResolvedValue({
       ...sessionRegistryConfigStub,
@@ -1974,7 +2112,7 @@ describe('gemini.tsx main function kitty protocol', () => {
       getIdeMode: () => false,
       getExperimentalZedIntegration: () => false,
       getScreenReader: () => false,
-      getGeminiMdFileCount: () => 0,
+      getMemoryFileCount: () => 0,
       getWarnings: () => [],
       isSafeMode: () => false,
       getModelsConfig: () => ({ getCurrentAuthType: () => null }),
@@ -2081,7 +2219,7 @@ describe('gemini.tsx main function kitty protocol', () => {
         authError: null,
         themeError: null,
         shouldOpenAuthDialog: false,
-        geminiMdFileCount: 0,
+        memoryFileCount: 0,
       });
     vi.mocked(loadCliConfig).mockResolvedValue({
       ...sessionRegistryConfigStub,
@@ -2097,7 +2235,7 @@ describe('gemini.tsx main function kitty protocol', () => {
       getIdeMode: () => false,
       getExperimentalZedIntegration: () => true,
       getScreenReader: () => false,
-      getGeminiMdFileCount: () => 0,
+      getMemoryFileCount: () => 0,
       getWarnings: () => [],
       isSafeMode: () => false,
       getModelsConfig: () => ({ getCurrentAuthType: () => null }),
@@ -2239,7 +2377,7 @@ describe('gemini.tsx main function kitty protocol', () => {
       getIdeMode: () => false,
       getExperimentalZedIntegration: () => false,
       getScreenReader: () => false,
-      getGeminiMdFileCount: () => 0,
+      getMemoryFileCount: () => 0,
       getWarnings: () => [],
       isSafeMode: () => false,
       getModelsConfig: () => ({
@@ -2558,7 +2696,7 @@ describe('gemini.tsx main function kitty protocol', () => {
       getIdeMode: () => false,
       getExperimentalZedIntegration: () => false,
       getScreenReader: () => false,
-      getGeminiMdFileCount: () => 0,
+      getMemoryFileCount: () => 0,
       getWarnings: () => [],
       isSafeMode: () => false,
       getModelsConfig: () => ({ getCurrentAuthType: () => null }),
@@ -2736,7 +2874,7 @@ describe('startInteractiveUI', () => {
       authError: null,
       themeError: null,
       shouldOpenAuthDialog: false,
-      geminiMdFileCount: 0,
+      memoryFileCount: 0,
     };
 
     await startInteractiveUI(
@@ -2781,7 +2919,7 @@ describe('startInteractiveUI', () => {
       authError: null,
       themeError: null,
       shouldOpenAuthDialog: false,
-      geminiMdFileCount: 0,
+      memoryFileCount: 0,
     };
 
     await startInteractiveUI(
@@ -2809,7 +2947,7 @@ describe('startInteractiveUI', () => {
       authError: null,
       themeError: null,
       shouldOpenAuthDialog: false,
-      geminiMdFileCount: 0,
+      memoryFileCount: 0,
     };
 
     await startInteractiveUI(
@@ -2833,7 +2971,7 @@ describe('startInteractiveUI', () => {
       authError: null,
       themeError: null,
       shouldOpenAuthDialog: false,
-      geminiMdFileCount: 0,
+      memoryFileCount: 0,
     };
 
     await startInteractiveUI(
@@ -2857,7 +2995,7 @@ describe('startInteractiveUI', () => {
       authError: null,
       themeError: null,
       shouldOpenAuthDialog: false,
-      geminiMdFileCount: 0,
+      memoryFileCount: 0,
     };
 
     await startInteractiveUI(
@@ -2884,7 +3022,7 @@ describe('startInteractiveUI', () => {
       authError: null,
       themeError: null,
       shouldOpenAuthDialog: false,
-      geminiMdFileCount: 0,
+      memoryFileCount: 0,
     };
 
     await startInteractiveUI(
@@ -2924,7 +3062,7 @@ describe('startInteractiveUI', () => {
       authError: null,
       themeError: null,
       shouldOpenAuthDialog: false,
-      geminiMdFileCount: 0,
+      memoryFileCount: 0,
     };
 
     await startInteractiveUI(
@@ -2950,7 +3088,7 @@ describe('startInteractiveUI', () => {
       authError: null,
       themeError: null,
       shouldOpenAuthDialog: false,
-      geminiMdFileCount: 0,
+      memoryFileCount: 0,
     };
 
     await startInteractiveUI(
@@ -2992,7 +3130,7 @@ describe('startInteractiveUI', () => {
       authError: null,
       themeError: null,
       shouldOpenAuthDialog: false,
-      geminiMdFileCount: 0,
+      memoryFileCount: 0,
     };
 
     await startInteractiveUI(
@@ -3019,7 +3157,7 @@ describe('startInteractiveUI', () => {
       authError: null,
       themeError: null,
       shouldOpenAuthDialog: false,
-      geminiMdFileCount: 0,
+      memoryFileCount: 0,
     };
 
     await startInteractiveUI(
@@ -3060,7 +3198,7 @@ describe('startInteractiveUI', () => {
         authError: null,
         themeError: null,
         shouldOpenAuthDialog: false,
-        geminiMdFileCount: 0,
+        memoryFileCount: 0,
       },
     );
 
@@ -3094,7 +3232,7 @@ describe('startInteractiveUI', () => {
         authError: null,
         themeError: null,
         shouldOpenAuthDialog: false,
-        geminiMdFileCount: 0,
+        memoryFileCount: 0,
       },
     );
 
@@ -3127,7 +3265,7 @@ describe('startInteractiveUI', () => {
         authError: null,
         themeError: null,
         shouldOpenAuthDialog: false,
-        geminiMdFileCount: 0,
+        memoryFileCount: 0,
       },
     );
 
@@ -3161,7 +3299,7 @@ describe('startInteractiveUI', () => {
           authError: null,
           themeError: null,
           shouldOpenAuthDialog: false,
-          geminiMdFileCount: 0,
+          memoryFileCount: 0,
         },
       );
 
@@ -3345,7 +3483,7 @@ describe('startInteractiveUI', () => {
           authError: null,
           themeError: null,
           shouldOpenAuthDialog: false,
-          geminiMdFileCount: 0,
+          memoryFileCount: 0,
         },
       );
 
@@ -3380,7 +3518,7 @@ describe('startInteractiveUI', () => {
           authError: null,
           themeError: null,
           shouldOpenAuthDialog: false,
-          geminiMdFileCount: 0,
+          memoryFileCount: 0,
         },
       );
       await vi.advanceTimersByTimeAsync(30_000);

@@ -19,7 +19,7 @@ import {
   createDebugLogger,
   generateSessionRecap,
   findProviderById,
-  getAllGeminiMdFilenames,
+  getAllMemoryFilenames,
   getAutoMemoryRoot,
   getUserAutoMemoryRoot,
   getDefaultBaseUrlForProtocol,
@@ -2305,7 +2305,7 @@ async function resolvePreferredMemoryFile(
   dir: string,
   fallbackFilename: string,
 ): Promise<string> {
-  for (const filename of getAllGeminiMdFilenames()) {
+  for (const filename of getAllMemoryFilenames()) {
     const filePath = path.join(dir, filename);
     try {
       await fs.access(filePath);
@@ -2322,7 +2322,7 @@ async function resolveQwenMemoryPaths(params: {
   cwd: string;
   projectRoot: string;
 }): Promise<QwenMemoryPaths> {
-  const fallbackFilename = getAllGeminiMdFilenames()[0] ?? 'QWEN.md';
+  const fallbackFilename = getAllMemoryFilenames()[0] ?? 'QWEN.md';
   const userMemoryFile = await resolvePreferredMemoryFile(
     Storage.getGlobalQwenDir(),
     fallbackFilename,
