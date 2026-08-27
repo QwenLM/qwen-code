@@ -43,8 +43,8 @@ remain later rollout steps.
 
 ## Non-goals
 
-- Implement the Extension, schemas, provider adapters, or packages in this
-  proposal.
+- Include live provider presets, provider-specific adapters, or
+  provider-specific tests in PR1.
 - Define a dynamic provider ABI, arbitrary request templates, JSONPath,
   scripting, or custom executable hooks.
 - Probe V3, V2, and V1 endpoints automatically or silently fall back between
@@ -93,8 +93,8 @@ contract for each operation.
 ## Instance configuration
 
 An instance selects one immutable preset and supplies deployment-specific
-values. The following shape is conceptual; the implementation pull request
-will publish and validate the canonical schema.
+values. The following shape is illustrative; PR1's published canonical schema
+is authoritative.
 
 ```json
 {
