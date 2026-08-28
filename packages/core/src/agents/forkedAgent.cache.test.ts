@@ -16,15 +16,15 @@ import {
 import type { Content, GenerateContentConfig } from '@google/genai';
 import type { Config } from '../config/config.js';
 import { AuthType } from '../core/contentGenerator.js';
-import { GeminiChat, StreamEventType } from '../core/geminiChat.js';
+import { LlmChat, StreamEventType } from '../core/llm-chat.js';
 import { createRuntimeContentGeneratorView } from '../models/content-generator-config.js';
 import type { RuntimeContentGeneratorView } from './runtime/agent-context.js';
 
-vi.mock('../core/geminiChat.js', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('../core/geminiChat.js')>();
+vi.mock('../core/llm-chat.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../core/llm-chat.js')>();
   return {
     ...actual,
-    GeminiChat: vi.fn(),
+    LlmChat: vi.fn(),
   };
 });
 
@@ -232,12 +232,12 @@ describe('CacheSafeParams', () => {
 describe('createForkedChat', () => {
   beforeEach(() => {
     clearCacheSafeParams();
-    vi.mocked(GeminiChat).mockReset();
+    vi.mocked(LlmChat).mockReset();
   });
 
   it('marks the fork so its history rewrites skip parent skill tracking', () => {
-    const forked = {} as unknown as GeminiChat;
-    vi.mocked(GeminiChat).mockImplementation(() => forked);
+    const forked = {} as unknown as LlmChat;
+    vi.mocked(LlmChat).mockImplementation(() => forked);
 
     saveCacheSafeParams({ systemInstruction: 'si' }, [], 'test-model');
     const chat = createForkedChat(
@@ -252,7 +252,7 @@ describe('createForkedChat', () => {
 describe('runForkedAgent (cache path)', () => {
   beforeEach(() => {
     clearCacheSafeParams();
-    vi.mocked(GeminiChat).mockReset();
+    vi.mocked(LlmChat).mockReset();
     vi.mocked(createRuntimeContentGeneratorView).mockReset();
   });
 
@@ -305,12 +305,12 @@ describe('runForkedAgent (cache path)', () => {
     );
 
     const enableManualPlanExitNotices = vi.fn();
-    vi.mocked(GeminiChat).mockImplementation(
+    vi.mocked(LlmChat).mockImplementation(
       () =>
         ({
           sendMessageStream: mockSendMessageStream,
           enableManualPlanExitNotices,
-        }) as unknown as GeminiChat,
+        }) as unknown as LlmChat,
     );
 
     const mockConfig = {} as unknown as Config;
@@ -321,10 +321,10 @@ describe('runForkedAgent (cache path)', () => {
       cacheSafeParams: getCacheSafeParams()!,
     });
 
-    // Verify GeminiChat was constructed with the full generationConfig
+    // Verify LlmChat was constructed with the full generationConfig
     // (including tools) — createForkedChat retains tools for speculation callers
-    expect(GeminiChat).toHaveBeenCalledOnce();
-    const ctorArgs = vi.mocked(GeminiChat).mock.calls[0];
+    expect(LlmChat).toHaveBeenCalledOnce();
+    const ctorArgs = vi.mocked(LlmChat).mock.calls[0];
     const chatGenerationConfig = ctorArgs[1] as GenerateContentConfig;
     expect(chatGenerationConfig.tools).toEqual([
       {
@@ -381,9 +381,9 @@ describe('runForkedAgent (cache path)', () => {
       }
       return Promise.resolve(generate());
     });
-    vi.mocked(GeminiChat).mockImplementation(
+    vi.mocked(LlmChat).mockImplementation(
       () =>
-        ({ sendMessageStream: mockSendMessageStream }) as unknown as GeminiChat,
+        ({ sendMessageStream: mockSendMessageStream }) as unknown as LlmChat,
     );
 
     const result = await runForkedAgent({
@@ -447,11 +447,11 @@ describe('runForkedAgent (cache path)', () => {
       },
     );
 
-    vi.mocked(GeminiChat).mockImplementation(
+    vi.mocked(LlmChat).mockImplementation(
       () =>
         ({
           sendMessageStream: mockSendMessageStream,
-        }) as unknown as GeminiChat,
+        }) as unknown as LlmChat,
     );
 
     const schema = {
@@ -528,11 +528,11 @@ describe('runForkedAgent (cache path)', () => {
       },
     );
 
-    vi.mocked(GeminiChat).mockImplementation(
+    vi.mocked(LlmChat).mockImplementation(
       () =>
         ({
           sendMessageStream: mockSendMessageStream,
-        }) as unknown as GeminiChat,
+        }) as unknown as LlmChat,
     );
 
     const mockConfig = {
@@ -615,11 +615,11 @@ describe('runForkedAgent (cache path)', () => {
       },
     );
 
-    vi.mocked(GeminiChat).mockImplementation(
+    vi.mocked(LlmChat).mockImplementation(
       () =>
         ({
           sendMessageStream: mockSendMessageStream,
-        }) as unknown as GeminiChat,
+        }) as unknown as LlmChat,
     );
 
     const mockConfig = {
@@ -707,11 +707,11 @@ describe('runForkedAgent (cache path)', () => {
       },
     );
 
-    vi.mocked(GeminiChat).mockImplementation(
+    vi.mocked(LlmChat).mockImplementation(
       () =>
         ({
           sendMessageStream: mockSendMessageStream,
-        }) as unknown as GeminiChat,
+        }) as unknown as LlmChat,
     );
 
     const mockConfig = {
@@ -781,11 +781,11 @@ describe('runForkedAgent (cache path)', () => {
       },
     );
 
-    vi.mocked(GeminiChat).mockImplementation(
+    vi.mocked(LlmChat).mockImplementation(
       () =>
         ({
           sendMessageStream: mockSendMessageStream,
-        }) as unknown as GeminiChat,
+        }) as unknown as LlmChat,
     );
 
     await runForkedAgent({
@@ -840,11 +840,11 @@ describe('runForkedAgent (cache path)', () => {
       },
     );
 
-    vi.mocked(GeminiChat).mockImplementation(
+    vi.mocked(LlmChat).mockImplementation(
       () =>
         ({
           sendMessageStream: mockSendMessageStream,
-        }) as unknown as GeminiChat,
+        }) as unknown as LlmChat,
     );
 
     await runForkedAgent({
@@ -910,11 +910,11 @@ describe('runForkedAgent (cache path)', () => {
       },
     );
 
-    vi.mocked(GeminiChat).mockImplementation(
+    vi.mocked(LlmChat).mockImplementation(
       () =>
         ({
           sendMessageStream: mockSendMessageStream,
-        }) as unknown as GeminiChat,
+        }) as unknown as LlmChat,
     );
 
     const result = await runForkedAgent({
@@ -976,11 +976,11 @@ describe('runForkedAgent (cache path)', () => {
       },
     );
 
-    vi.mocked(GeminiChat).mockImplementation(
+    vi.mocked(LlmChat).mockImplementation(
       () =>
         ({
           sendMessageStream: mockSendMessageStream,
-        }) as unknown as GeminiChat,
+        }) as unknown as LlmChat,
     );
 
     const result = await runForkedAgent({
@@ -1045,11 +1045,11 @@ describe('runForkedAgent (cache path)', () => {
       },
     );
 
-    vi.mocked(GeminiChat).mockImplementation(
+    vi.mocked(LlmChat).mockImplementation(
       () =>
         ({
           sendMessageStream: mockSendMessageStream,
-        }) as unknown as GeminiChat,
+        }) as unknown as LlmChat,
     );
 
     const schema = {
@@ -1099,7 +1099,7 @@ describe('runForkedAgent (cache path)', () => {
     // runForkedAgent cache path requires cacheSafeParams to be passed explicitly;
     // the caller (btwCommand, suggestionGenerator) is responsible for checking
     // getCacheSafeParams() and handling null before calling runForkedAgent.
-    // This test verifies the GeminiChat path is taken when cacheSafeParams present.
+    // This test verifies the LlmChat path is taken when cacheSafeParams present.
     // The null guard lives in the callers.
     void mockConfig; // suppress unused
   });

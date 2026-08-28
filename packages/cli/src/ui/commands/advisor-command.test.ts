@@ -80,7 +80,7 @@ describe('advisorCommand', () => {
   const setValue = vi.fn();
 
   const createConfig = (overrides: Record<string, unknown> = {}) => ({
-    getGeminiClient: () => ({
+    getLlmClient: () => ({
       getHistoryForForkWindow: () => [
         { role: 'user', parts: [{ text: 'hello' }] },
       ],
@@ -411,7 +411,7 @@ describe('advisorCommand', () => {
       mockContext = createMockCommandContext({
         services: {
           config: createConfig({
-            getGeminiClient: () => ({
+            getLlmClient: () => ({
               getHistoryForForkWindow: () => [],
             }),
           }),
