@@ -297,6 +297,10 @@ class TestWeComChannel extends WeComChannel {
   protected override async processInbound(envelope: Envelope): Promise<void> {
     this.envelopes.push(envelope);
   }
+
+  sendAttributed(chatId: string, text: string, sourceLabel: string) {
+    return this.sendThreadMessage(chatId, undefined, text, sourceLabel);
+  }
 }
 
 class PromptEndWeComChannel extends WeComChannel {
@@ -4075,6 +4079,32 @@ describe('WeComChannel', () => {
     expect(first.markdown.content + second.markdown.content).toBe(
       'a'.repeat(3900),
     );
+  });
+
+  it('extracts media first and repeats an escaped label within every byte-limited chunk', async () => {
+    const channel = new TestWeComChannel('bot', makeConfig(), makeBridge());
+    await channel.connect();
+    const client = lastClient();
+    const sourceLabel = '[review_*]';
+
+    await channel.sendAttributed(
+      'chat-1',
+      Array.from(
+        { length: 80 },
+        (_, index) => `paragraph ${index}: ${'x'.repeat(80)}`,
+      ).join('\n'),
+      sourceLabel,
+    );
+
+    const chunks = client.sendMessage.mock.calls.map((call) => {
+      const message = call[1] as { markdown: { content: string } };
+      return message.markdown.content;
+    });
+    expect(chunks.length).toBeGreaterThan(1);
+    for (const chunk of chunks) {
+      expect(chunk.startsWith('\\[review\\_\\*\\] ')).toBe(true);
+      expect(Buffer.byteLength(chunk, 'utf8')).toBeLessThanOrEqual(3800);
+    }
   });
 
   it('splits long markdown responses without array-copying the remaining line', async () => {

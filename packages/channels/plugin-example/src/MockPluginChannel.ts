@@ -5,6 +5,7 @@ import type {
   Envelope,
   ChannelAgentBridge,
   ChannelOutputSegmentContext,
+  ChannelOutputSegmentEndReason,
 } from '@qwen-code/channel-base';
 import WebSocket from 'ws';
 import { AsyncLocalStorage } from 'node:async_hooks';
@@ -22,6 +23,7 @@ export class MockPluginChannel extends ChannelBase {
   private ws: WebSocket | null = null;
   private serverWsUrl: string;
   private inboundMessage = new AsyncLocalStorage<{ messageId?: string }>();
+  private attributedSegments = new Set<string>();
 
   constructor(
     name: string,
@@ -95,9 +97,23 @@ export class MockPluginChannel extends ChannelBase {
       messageId:
         segment?.messageId ?? this.getResponseMessageId(sessionId) ?? 'unknown',
       chatId,
-      text: chunk,
+      text:
+        segment?.sourceLabel && !this.attributedSegments.has(segment.segmentId)
+          ? this.formatAttributedText(chunk, segment.sourceLabel)
+          : chunk,
     };
+    if (segment?.sourceLabel) this.attributedSegments.add(segment.segmentId);
     this.ws.send(JSON.stringify(msg));
+  }
+
+  protected override onOutputSegmentEnd(
+    chatId: string,
+    sessionId: string,
+    segment: ChannelOutputSegmentContext,
+    reason: ChannelOutputSegmentEndReason,
+  ): void | Promise<void> {
+    this.attributedSegments.delete(segment.segmentId);
+    return super.onOutputSegmentEnd(chatId, sessionId, segment, reason);
   }
 
   protected override async onResponseComplete(
@@ -108,7 +124,9 @@ export class MockPluginChannel extends ChannelBase {
   ): Promise<void> {
     this.sendOutbound(
       chatId,
-      fullText,
+      segment?.sourceLabel
+        ? this.formatAttributedText(fullText, segment.sourceLabel)
+        : fullText,
       segment?.messageId ?? this.getResponseMessageId(sessionId),
     );
   }

@@ -38,7 +38,7 @@ function deferred<T>() {
   return { promise, reject, resolve };
 }
 
-function createContext(requestId = 'request-1') {
+function createContext(requestId = 'request-1', sourceLabel?: string) {
   const listeners = new Set<(reason: UserInputSettlementReason) => void>();
   const respond = vi.fn().mockResolvedValue(true);
   const context: ChannelUserInputRequestContext = {
@@ -75,6 +75,7 @@ function createContext(requestId = 'request-1') {
       },
     ],
     submitOptionId: 'proceed_once',
+    ...(sourceLabel ? { sourceLabel } : {}),
     onSettled(listener) {
       listeners.add(listener);
       return () => listeners.delete(listener);
@@ -146,6 +147,31 @@ describe('QuestionCardController', () => {
         }),
       }),
     );
+  });
+
+  it('retains the escaped source label in pending and terminal question cards', async () => {
+    const { client, controller } = createHarness();
+    const { context, settle } = createContext('request-1', '[review_*]');
+
+    await controller.present(context, { chatId: 'cid-1', isGroup: true });
+    expect(client.createAndDeliver).toHaveBeenCalledWith(
+      expect.objectContaining({
+        cardParamMap: expect.objectContaining({
+          question_desc: '\\[review\\_\\*\\]\n\nWhich region?',
+        }),
+      }),
+    );
+
+    settle('cancelled');
+    await vi.waitFor(() => {
+      expect(client.updateInstance).toHaveBeenCalledWith(
+        expect.objectContaining({
+          cardParamMap: expect.objectContaining({
+            question_desc: '\\[review\\_\\*\\]\n\nCancelled.',
+          }),
+        }),
+      );
+    });
   });
 
   it('does not reactivate a request settled during delivery', async () => {

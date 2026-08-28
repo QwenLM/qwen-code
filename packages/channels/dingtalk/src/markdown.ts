@@ -6,12 +6,15 @@
  * - Code fences must be closed/reopened across chunk boundaries
  */
 
-const CHUNK_LIMIT = 3800;
+export const DINGTALK_CHUNK_LIMIT = 3800;
 
 // --- Chunk splitting ---
 
-export function splitChunks(text: string): string[] {
-  if (!text || text.length <= CHUNK_LIMIT) {
+export function splitChunks(
+  text: string,
+  chunkLimit = DINGTALK_CHUNK_LIMIT,
+): string[] {
+  if (!text || text.length <= chunkLimit) {
     return [text];
   }
 
@@ -41,14 +44,14 @@ export function splitChunks(text: string): string[] {
     while (remaining.length > 0 || prefixPending) {
       const prefix = prefixPending ? '\n' : '';
       const fitsAsFinalPiece =
-        remaining.length <= CHUNK_LIMIT - buf.length - prefix.length;
+        remaining.length <= chunkLimit - buf.length - prefix.length;
       const closeFenceOverhead =
         (inCode && !(closesCodeFence && fitsAsFinalPiece)) ||
         (!inCode && leavesCodeFenceOpen)
           ? '\n```'.length
           : 0;
       const available =
-        CHUNK_LIMIT - closeFenceOverhead - buf.length - prefix.length;
+        chunkLimit - closeFenceOverhead - buf.length - prefix.length;
 
       if (available <= 0) {
         flush(inCode || lineOpenedFenceInBuffer);
@@ -124,6 +127,9 @@ export function extractTitle(text: string): string {
 }
 
 /** Split long Markdown messages without changing their formatting. */
-export function normalizeDingTalkMarkdown(text: string): string[] {
-  return splitChunks(text);
+export function normalizeDingTalkMarkdown(
+  text: string,
+  chunkLimit = DINGTALK_CHUNK_LIMIT,
+): string[] {
+  return splitChunks(text, chunkLimit);
 }

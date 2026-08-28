@@ -173,6 +173,69 @@ describe('DingtalkInteractionPresenter', () => {
     });
   });
 
+  it('renders one escaped source label through running, streaming, and terminal cards', async () => {
+    const { client, presenter } = createHarness();
+    presenter.registerRun(
+      'run-1',
+      'owner-1',
+      target,
+      'session-1',
+      undefined,
+      '[review_*]',
+    );
+
+    presenter.startStatusCard('run-1');
+    presenter.appendOutput(segment('segment-1'), 'analysis');
+
+    await vi.waitFor(() => {
+      expect(client.createAndDeliver).toHaveBeenCalledWith(
+        expect.objectContaining({
+          cardParamMap: expect.objectContaining({
+            content: '\\[review\\_\\*\\]',
+          }),
+        }),
+      );
+      expect(client.openOrUpdateStream).toHaveBeenCalledWith(
+        expect.objectContaining({
+          content: '\\[review\\_\\*\\]\n\nanalysis',
+        }),
+      );
+    });
+
+    await presenter.closeOutput('segment-1', 'final answer', 'completed');
+    expect(client.updateInstance).toHaveBeenCalledWith(
+      expect.objectContaining({
+        cardParamMap: expect.objectContaining({
+          content: '\\[review\\_\\*\\]\n\nfinal answer',
+        }),
+      }),
+    );
+  });
+
+  it('preserves model text that starts with the source label', async () => {
+    const { client, presenter } = createHarness();
+    presenter.registerRun(
+      'run-1',
+      'owner-1',
+      target,
+      'session-1',
+      undefined,
+      '[review]',
+    );
+    const response = '[review]\nactual result';
+    presenter.appendOutput(segment('segment-1'), response);
+
+    await presenter.closeOutput('segment-1', response, 'completed');
+
+    expect(client.updateInstance).toHaveBeenCalledWith(
+      expect.objectContaining({
+        cardParamMap: expect.objectContaining({
+          content: '\\[review\\]\n\n[review]\nactual result',
+        }),
+      }),
+    );
+  });
+
   it('adds the group sender only to the final model output', async () => {
     const { client, presenter } = createHarness();
     presenter.registerRun('run-1', 'owner-1', target, 'session-1', {
@@ -675,9 +738,14 @@ describe('DingtalkInteractionPresenter', () => {
 
   it('attributes retained card content when a run completes without a final response', async () => {
     const { client, presenter, sendFallback } = createHarness();
-    presenter.registerRun('run-1', 'owner-1', target, 'session-1', {
-      senderName: '衍*星',
-    });
+    presenter.registerRun(
+      'run-1',
+      'owner-1',
+      target,
+      'session-1',
+      { senderName: '衍*星' },
+      '[review]',
+    );
     presenter.appendOutput(segment('segment-1'), 'intermediate');
     await presenter.closeOutput('segment-1', '', 'response_boundary');
 
@@ -689,8 +757,8 @@ describe('DingtalkInteractionPresenter', () => {
         .mock.calls.map(([request]) => request.cardParamMap)
         .find((payload) => payload.flowStatus === 3);
       expect(terminalPayload).toMatchObject({
-        content: '@衍\\*星\n\nintermediate',
-        copy_content: '@衍\\*星\n\nintermediate',
+        content: '@衍\\*星\n\n\\[review\\]\n\nintermediate',
+        copy_content: '@衍\\*星\n\n\\[review\\]\n\nintermediate',
       });
     });
     expect(sendFallback).not.toHaveBeenCalled();

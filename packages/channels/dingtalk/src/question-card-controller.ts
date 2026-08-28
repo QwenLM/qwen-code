@@ -302,22 +302,28 @@ export class QuestionCardController {
     > = {
       submitted: {
         card_status: 'submitted',
-        question_desc: 'Submitted.',
+        question_desc: this.withSourceLabel(record.context, 'Submitted.'),
         form_btn_text: 'Submitted',
       },
       expired: {
         card_status: 'expired',
-        question_desc: 'This question expired. Please retry.',
+        question_desc: this.withSourceLabel(
+          record.context,
+          'This question expired. Please retry.',
+        ),
         form_btn_text: 'Expired',
       },
       resolved_outside_presenter: {
         card_status: 'expired',
-        question_desc: 'Resolved outside this card.',
+        question_desc: this.withSourceLabel(
+          record.context,
+          'Resolved outside this card.',
+        ),
         form_btn_text: 'Expired',
       },
       cancelled: {
         card_status: 'cancelled',
-        question_desc: 'Cancelled.',
+        question_desc: this.withSourceLabel(record.context, 'Cancelled.'),
         form_btn_text: 'Cancelled',
       },
     };
@@ -327,7 +333,12 @@ export class QuestionCardController {
         cardParamMap: {
           ...cardParamMap[record.terminalState],
           ...(record.terminalDescription
-            ? { question_desc: record.terminalDescription }
+            ? {
+                question_desc: this.withSourceLabel(
+                  record.context,
+                  record.terminalDescription,
+                ),
+              }
             : {}),
         },
       });
@@ -405,7 +416,7 @@ export class QuestionCardController {
     return {
       question_id: context.requestId,
       question_title: first.header,
-      question_desc: first.question,
+      question_desc: this.withSourceLabel(context, first.question),
       card_status: 'pending',
       form_btn_text: 'Submit',
       selected_text: '',
@@ -448,6 +459,21 @@ export class QuestionCardController {
             .join(', ')}`,
       )
       .join('\n');
-    return `The interactive question could not be delivered, so this request was cancelled. Please retry.\n${questions}`;
+    return this.withSourceLabel(
+      context,
+      `The interactive question could not be delivered, so this request was cancelled. Please retry.\n${questions}`,
+    );
+  }
+
+  private withSourceLabel(
+    context: ChannelUserInputRequestContext,
+    text: string,
+  ): string {
+    if (!context.sourceLabel) return text;
+    const label = context.sourceLabel.replace(
+      /([\\`*_[\]{}()#+.!|>~-])/gu,
+      '\\$1',
+    );
+    return `${label}\n\n${text}`;
   }
 }

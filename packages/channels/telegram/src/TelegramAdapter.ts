@@ -373,10 +373,20 @@ export class TelegramChannel extends ChannelBase {
     );
   }
 
+  protected override async sendThreadMessage(
+    chatId: string,
+    threadId: string | undefined,
+    text: string,
+    sourceLabel?: string,
+  ): Promise<void> {
+    await this.sendTelegramMessage(chatId, text, threadId, sourceLabel);
+  }
+
   protected override async sendResponseMessage(
     chatId: string,
     text: string,
     sessionId: string,
+    sourceLabel?: string,
   ): Promise<void> {
     const inboundRoute = this.inboundRoute.getStore();
     const target = this.router.getTarget(sessionId);
@@ -386,23 +396,39 @@ export class TelegramChannel extends ChannelBase {
         : target?.channelName === this.name && target.chatId === chatId
           ? target.threadId
           : undefined;
-    await this.sendTelegramMessage(chatId, text, threadId);
+    await this.sendTelegramMessage(
+      chatId,
+      text,
+      threadId,
+      sourceLabel ?? this.getResponseSourceLabel(sessionId),
+    );
   }
 
   protected override async pushProactive(
     target: SessionTarget,
     text: string,
+    sourceLabel?: string,
   ): Promise<void> {
-    await this.sendTelegramMessage(target.chatId, text, target.threadId);
+    await this.sendTelegramMessage(
+      target.chatId,
+      text,
+      target.threadId,
+      sourceLabel,
+    );
   }
 
   private async sendTelegramMessage(
     chatId: string,
     text: string,
     threadId?: string,
+    sourceLabel?: string,
   ): Promise<void> {
     const html = telegramFormat(text);
-    const chunks = splitHtmlForTelegram(html);
+    const prefix =
+      sourceLabel && text.trim().length > 0
+        ? `${escapeTelegramHtml(sourceLabel)} `
+        : undefined;
+    const chunks = splitAttributedTelegramHtml(html, prefix);
     const options =
       threadId === undefined
         ? { parse_mode: 'HTML' as const }
@@ -412,9 +438,14 @@ export class TelegramChannel extends ChannelBase {
         await this.bot.api.sendMessage(chatId, chunk, options);
       } catch {
         // Fallback to plain text for the failed chunk only
+        const withoutTags = chunk.replace(/<[^>]*>/g, '');
+        const plainText =
+          prefix && sourceLabel && withoutTags.startsWith(prefix)
+            ? `${sourceLabel} ${withoutTags.slice(prefix.length)}`
+            : withoutTags;
         await this.bot.api.sendMessage(
           chatId,
-          chunk.replace(/<[^>]*>/g, ''),
+          plainText,
           threadId === undefined
             ? undefined
             : { message_thread_id: Number(threadId) },
@@ -492,4 +523,37 @@ export class TelegramChannel extends ChannelBase {
       referencedText,
     };
   }
+}
+
+function splitAttributedTelegramHtml(
+  html: string,
+  prefix: string | undefined,
+): string[] {
+  const chunks = splitHtmlForTelegram(html);
+  if (!prefix) return chunks;
+
+  const attributed: string[] = [];
+  const pending = [...chunks];
+  while (pending.length > 0) {
+    const chunk = pending.shift();
+    if (chunk === undefined) break;
+    const split = splitHtmlForTelegram(`${prefix}${chunk}`);
+    if (split.length === 1) {
+      if (split[0].length > 4096) {
+        throw new Error('Telegram attributed message exceeds 4096 characters.');
+      }
+      attributed.push(split[0]);
+      continue;
+    }
+    attributed.push(split[0]);
+    pending.unshift(...split.slice(1));
+  }
+  return attributed;
+}
+
+function escapeTelegramHtml(value: string): string {
+  return value
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;');
 }

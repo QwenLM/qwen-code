@@ -7,7 +7,7 @@
  * - Code fences must be closed/reopened across chunk boundaries
  */
 
-const CHUNK_LIMIT = 4000;
+export const FEISHU_CHUNK_LIMIT = 4000;
 
 /**
  * Split markdown into segments so that each segment contains at most one table.
@@ -205,8 +205,11 @@ export function extractTitle(text: string): string {
  * Split long text into chunks that fit within Feishu's message size limit.
  * Handles code fence boundaries across chunks.
  */
-export function splitChunks(text: string): string[] {
-  if (!text || text.length <= CHUNK_LIMIT) {
+export function splitChunks(
+  text: string,
+  chunkLimit = FEISHU_CHUNK_LIMIT,
+): string[] {
+  if (!text || text.length <= chunkLimit) {
     return [text];
   }
 
@@ -229,10 +232,7 @@ export function splitChunks(text: string): string[] {
 
     // Reserve space for closing fence when inside a code block
     const reserve = willBeInCode ? fenceLine.length + 1 : 0;
-    if (
-      buf.length + line.length + 1 + reserve > CHUNK_LIMIT &&
-      buf.length > 0
-    ) {
+    if (buf.length + line.length + 1 + reserve > chunkLimit && buf.length > 0) {
       if (inCode) {
         buf += '\n```';
       }
@@ -250,9 +250,9 @@ export function splitChunks(text: string): string[] {
     // code line that left the buffer within three characters of the limit
     // passed this loop untouched and was then flushed at CHUNK_LIMIT + 1, over
     // the very limit this function exists to enforce.
-    const budget = willBeInCode ? CHUNK_LIMIT - '\n```'.length : CHUNK_LIMIT;
+    const budget = willBeInCode ? chunkLimit - '\n```'.length : chunkLimit;
     while (buf.length > budget) {
-      const maxSlice = inCode ? CHUNK_LIMIT - '\n```'.length - 1 : CHUNK_LIMIT;
+      const maxSlice = inCode ? chunkLimit - '\n```'.length - 1 : chunkLimit;
       let piece = buf.slice(0, maxSlice);
       buf = buf.slice(maxSlice);
       if (inCode) {

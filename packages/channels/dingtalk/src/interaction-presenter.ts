@@ -25,6 +25,7 @@ interface RunPresentation {
   activeSegmentId?: string;
   senderPrefix?: string;
   senderRawPrefix?: string;
+  sourceLabel?: string;
   cardDelivered?: { text: string; chatId: string; sessionId: string };
   terminal: boolean;
 }
@@ -38,7 +39,12 @@ interface SegmentPresentation {
 export interface DingtalkInteractionPresenterOptions {
   statusCards?: StatusCardController;
   questionCards?: QuestionCardController;
-  sendFallback?(chatId: string, text: string, sessionId: string): Promise<void>;
+  sendFallback?(
+    chatId: string,
+    text: string,
+    sessionId: string,
+    sourceLabel?: string,
+  ): Promise<void>;
 }
 
 export interface DingtalkCardSender {
@@ -73,6 +79,7 @@ export class DingtalkInteractionPresenter {
     target: { chatId: string; isGroup: boolean },
     sessionId = '',
     sender?: DingtalkCardSender,
+    sourceLabel?: string,
   ): void {
     this.runs.set(runId, {
       runId,
@@ -90,9 +97,11 @@ export class DingtalkInteractionPresenter {
           senderId: ownerId,
           isGroup: target.isGroup,
         },
+        sourceLabel,
       },
       projectionChain: Promise.resolve(),
       ...(target.isGroup && sender ? formatSenderPrefixes(sender) : {}),
+      ...(sourceLabel ? { sourceLabel } : {}),
       terminal: false,
     });
   }
@@ -104,7 +113,11 @@ export class DingtalkInteractionPresenter {
     void this.enqueue(run, () => {
       const statusCards = this.options.statusCards;
       const target = this.cardTarget(statusContext.target);
-      statusCards?.ensure(statusContext, target);
+      statusCards?.replace(
+        statusContext,
+        target,
+        this.withSourcePrefix(run, ''),
+      );
     });
   }
 
@@ -136,7 +149,7 @@ export class DingtalkInteractionPresenter {
       this.options.statusCards?.replace(
         statusContext,
         this.cardTarget(statusContext.target),
-        presentation.content,
+        this.withSourcePrefix(run, presentation.content),
       );
     });
   }
@@ -195,7 +208,8 @@ export class DingtalkInteractionPresenter {
           text || presentation.content,
         );
         if (!fallbackText || !this.options.sendFallback) return false;
-        await this.options.sendFallback(
+        await this.sendFallback(
+          run,
           presentation.context.target.chatId,
           fallbackText,
           presentation.context.sessionId,
@@ -215,7 +229,8 @@ export class DingtalkInteractionPresenter {
           text || presentation.content,
         );
         if (!fallbackText || !this.options.sendFallback) return false;
-        await this.options.sendFallback(
+        await this.sendFallback(
+          run,
           presentation.context.target.chatId,
           fallbackText,
           presentation.context.sessionId,
@@ -234,7 +249,8 @@ export class DingtalkInteractionPresenter {
         text || presentation.content,
       );
       if (!fallbackText || !this.options.sendFallback) return false;
-      await this.options.sendFallback(
+      await this.sendFallback(
+        run,
         presentation.context.target.chatId,
         fallbackText,
         presentation.context.sessionId,
@@ -320,7 +336,12 @@ export class DingtalkInteractionPresenter {
             statusContext.segmentId,
             '',
             (retained) =>
-              retained ? this.withSenderPrefix(run, retained) : retained,
+              retained
+                ? this.withSenderPrefix(
+                    run,
+                    this.withoutRenderedSourcePrefix(run, retained),
+                  )
+                : retained,
           );
         }
       }
@@ -369,7 +390,8 @@ export class DingtalkInteractionPresenter {
     const delivered = run.cardDelivered;
     if (!delivered || !this.options.sendFallback) return;
     run.cardDelivered = undefined;
-    await this.options.sendFallback(
+    await this.sendFallback(
+      run,
       delivered.chatId,
       delivered.text,
       delivered.sessionId,
@@ -398,18 +420,44 @@ export class DingtalkInteractionPresenter {
   }
 
   private withSenderPrefix(run: RunPresentation, content: string): string {
-    if (!run.senderPrefix) return this.boundContent(content);
+    const prefixes = [
+      run.senderPrefix,
+      run.sourceLabel ? escapeMarkdownText(run.sourceLabel) : undefined,
+    ].filter((value): value is string => Boolean(value));
+    if (prefixes.length === 0) return this.boundContent(content);
     const body = this.withoutExistingSenderPrefix(run, content);
-    if (!body) return run.senderPrefix;
+    const prefix = prefixes.join('\n\n');
+    if (!body) return prefix;
     const separator = '\n\n';
     const bodyLimit = Math.max(
       0,
-      CONTENT_LIMIT - run.senderPrefix.length - separator.length,
+      CONTENT_LIMIT - prefix.length - separator.length,
     );
-    return `${run.senderPrefix}${separator}${this.boundContent(
-      body,
-      bodyLimit,
+    return `${prefix}${separator}${this.boundContent(body, bodyLimit)}`;
+  }
+
+  private withSourcePrefix(run: RunPresentation, content: string): string {
+    if (!run.sourceLabel) return this.boundContent(content);
+    const sourceLabel = escapeMarkdownText(run.sourceLabel);
+    if (!content) return sourceLabel;
+    return `${sourceLabel}\n\n${this.boundContent(
+      content,
+      Math.max(0, CONTENT_LIMIT - sourceLabel.length - 2),
     )}`;
+  }
+
+  private async sendFallback(
+    run: RunPresentation,
+    chatId: string,
+    text: string,
+    sessionId: string,
+  ): Promise<void> {
+    if (!this.options.sendFallback) return;
+    if (run.sourceLabel) {
+      await this.options.sendFallback(chatId, text, sessionId, run.sourceLabel);
+      return;
+    }
+    await this.options.sendFallback(chatId, text, sessionId);
   }
 
   private withoutExistingSenderPrefix(
@@ -434,6 +482,17 @@ export class DingtalkInteractionPresenter {
       if (!removed) break;
     }
     return body;
+  }
+
+  private withoutRenderedSourcePrefix(
+    run: RunPresentation,
+    content: string,
+  ): string {
+    if (!run.sourceLabel) return content;
+    const rendered = escapeMarkdownText(run.sourceLabel);
+    if (content === rendered) return '';
+    const prefix = `${rendered}\n\n`;
+    return content.startsWith(prefix) ? content.slice(prefix.length) : content;
   }
 
   private ensureStatusContext(

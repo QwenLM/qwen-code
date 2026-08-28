@@ -35,9 +35,19 @@ export const terminalLabels: Record<FeishuQuestionTerminalState, string> = {
 };
 
 export function buildQuestionCard(
-  context: Pick<ChannelUserInputRequestContext, 'requestId' | 'questions'>,
+  context: Pick<
+    ChannelUserInputRequestContext,
+    'requestId' | 'questions' | 'sourceLabel'
+  >,
 ): Record<string, unknown> {
   const elements: Array<Record<string, unknown>> = [];
+
+  if (context.sourceLabel) {
+    elements.push({
+      tag: 'markdown',
+      content: escapeQuestionMarkdown(context.sourceLabel),
+    });
+  }
 
   for (const question of context.questions) {
     const descriptions = question.options
@@ -91,6 +101,7 @@ export function buildQuestionTerminalCard(
   questions: ChannelUserQuestion[],
   state: FeishuQuestionTerminalState,
   answers?: Record<string, string>,
+  sourceLabel?: string,
 ): Record<string, unknown> {
   const details = questions
     .map((question) => {
@@ -107,11 +118,15 @@ export function buildQuestionTerminalCard(
       elements: [
         {
           tag: 'markdown',
-          content: `**${terminalLabels[state]}**\n\n${details}`,
+          content: `${sourceLabel ? `${escapeQuestionMarkdown(sourceLabel)}\n\n` : ''}**${terminalLabels[state]}**\n\n${details}`,
         },
       ],
     },
   };
+}
+
+function escapeQuestionMarkdown(value: string): string {
+  return value.replace(/([\\`*_[\]{}()#+.!|>~-])/gu, '\\$1');
 }
 
 function record(value: unknown): Record<string, unknown> | undefined {

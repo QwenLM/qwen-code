@@ -61,15 +61,22 @@ class TestTelegramChannel extends TelegramChannel {
   pushTestProactive(
     target: { chatId: string; threadId?: string },
     text: string,
+    sourceLabel?: string,
   ) {
     return this.pushProactive(
       { channelName: 'telegram', senderId: '1', ...target },
       text,
+      sourceLabel,
     );
   }
 
-  sendTestResponse(chatId: string, text: string, sessionId: string) {
-    return this.sendResponseMessage(chatId, text, sessionId);
+  sendTestResponse(
+    chatId: string,
+    text: string,
+    sessionId: string,
+    sourceLabel?: string,
+  ) {
+    return this.sendResponseMessage(chatId, text, sessionId, sourceLabel);
   }
 
   sendTestResponseFromThread(
@@ -106,7 +113,7 @@ const config: ChannelConfig = {
 
 function createChannel(
   configOverrides: Partial<ChannelConfig> = {},
-  router: unknown = {},
+  router: unknown = { getTarget: vi.fn() },
 ): TestTelegramChannel {
   return new TestTelegramChannel(
     'telegram',
@@ -446,6 +453,42 @@ describe('TelegramChannel', () => {
       parse_mode: 'HTML',
       message_thread_id: 42,
     });
+  });
+
+  it('escapes and repeats the source label on every bounded HTML chunk', async () => {
+    const channel = createChannel();
+    const bot = installFakeBot(channel);
+    const sourceLabel = '[review_*<&>]';
+    const text = Array.from(
+      { length: 80 },
+      (_, index) => `paragraph ${index}: ${'x'.repeat(80)}`,
+    ).join('\n');
+
+    await channel.sendTestResponse('2', text, 'session-1', sourceLabel);
+
+    const chunks = bot.api.sendMessage.mock.calls.map((call) => call[1]);
+    expect(chunks.length).toBeGreaterThan(1);
+    for (const chunk of chunks) {
+      expect(chunk).toMatch(/^\[review_\*&lt;&amp;&gt;\] /u);
+      expect(chunk.length).toBeLessThanOrEqual(4096);
+    }
+  });
+
+  it('restores the plain source label when an HTML send falls back', async () => {
+    const channel = createChannel();
+    const bot = installFakeBot(channel);
+    bot.api.sendMessage
+      .mockRejectedValueOnce(new Error('HTML rejected'))
+      .mockResolvedValueOnce(undefined);
+
+    await channel.sendTestResponse('2', 'result', 'session-1', '[review_*<&>]');
+
+    expect(bot.api.sendMessage).toHaveBeenNthCalledWith(
+      2,
+      '2',
+      '[review_*<&>] result',
+      undefined,
+    );
   });
 
   it('prefers the current inbound topic over a stale session route', async () => {

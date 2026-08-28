@@ -19,6 +19,10 @@ vi.mock('@qwen-code/channel-base', () => ({
     protected getResponseMessageId(): string | undefined {
       return undefined;
     }
+
+    protected formatAttributedText(text: string, sourceLabel?: string): string {
+      return sourceLabel ? `${sourceLabel} ${text}` : text;
+    }
   },
 }));
 
@@ -155,6 +159,49 @@ describe('MockPluginChannel message correlation', () => {
           chatId: 'shared-chat',
           text: 'final-b',
         },
+      ],
+    );
+  });
+
+  it('attributes the first chunk and the final response for a segment', async () => {
+    const { channel, send } = createChannel();
+    const output = channel as unknown as {
+      onResponseChunk: (
+        chatId: string,
+        chunk: string,
+        sessionId: string,
+        segment: { messageId: string; segmentId: string; sourceLabel: string },
+      ) => void;
+      onResponseComplete: (
+        chatId: string,
+        text: string,
+        sessionId: string,
+        segment: { messageId: string; segmentId: string; sourceLabel: string },
+      ) => Promise<void>;
+    };
+    const segment = {
+      messageId: 'msg-a',
+      segmentId: 'segment-a',
+      sourceLabel: '[review]',
+    };
+
+    output.onResponseChunk('shared-chat', 'first', 'session-a', segment);
+    output.onResponseChunk('shared-chat', 'second', 'session-a', segment);
+    await output.onResponseComplete(
+      'shared-chat',
+      'complete',
+      'session-a',
+      segment,
+    );
+
+    expect(send.mock.calls.map(([frame]) => JSON.parse(String(frame)))).toEqual(
+      [
+        expect.objectContaining({ type: 'chunk', text: '[review] first' }),
+        expect.objectContaining({ type: 'chunk', text: 'second' }),
+        expect.objectContaining({
+          type: 'outbound',
+          text: '[review] complete',
+        }),
       ],
     );
   });

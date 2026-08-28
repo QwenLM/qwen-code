@@ -52,11 +52,13 @@ const questions: ChannelUserQuestion[] = [
   },
 ];
 
-const context: Pick<ChannelUserInputRequestContext, 'requestId' | 'questions'> =
-  {
-    requestId: 'request-1',
-    questions,
-  };
+const context: Pick<
+  ChannelUserInputRequestContext,
+  'requestId' | 'questions' | 'sourceLabel'
+> = {
+  requestId: 'request-1',
+  questions,
+};
 
 function form(card: Record<string, unknown>): CardElement {
   const elements = (card as unknown as QuestionCard).body.elements;
@@ -106,6 +108,26 @@ describe('Feishu question cards', () => {
         ],
       },
     ]);
+  });
+
+  it('renders one escaped source label in initial and terminal cards', () => {
+    const questionForm = form(
+      buildQuestionCard({ ...context, sourceLabel: '[review_*]' }),
+    );
+    expect(questionForm.elements?.[0]).toMatchObject({
+      tag: 'markdown',
+      content: '\\[review\\_\\*\\]',
+    });
+
+    const terminal = buildQuestionTerminalCard(
+      questions,
+      'cancelled',
+      undefined,
+      '[review_*]',
+    ) as unknown as QuestionCard;
+    expect(terminal.body.elements[0]?.content).toContain(
+      '\\[review\\_\\*\\]\n\n**已取消**',
+    );
   });
 
   it('includes correlated submit and cancel actions', () => {

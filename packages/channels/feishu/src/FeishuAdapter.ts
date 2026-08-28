@@ -12,7 +12,12 @@ import {
   isTerminalTaskLifecycleType,
   sanitizeSenderName,
 } from '@qwen-code/channel-base';
-import { buildCardContent, extractTitle, splitChunks } from './markdown.js';
+import {
+  buildCardContent,
+  extractTitle,
+  FEISHU_CHUNK_LIMIT,
+  splitChunks,
+} from './markdown.js';
 import { downloadMedia } from './media.js';
 import { FeishuQuestionCardController } from './question-card-controller.js';
 import type {
@@ -94,6 +99,7 @@ interface CardSessionState {
   /** Stop clicked before any terminal event — render 已停止生成 on every wind-down path. */
   userStopped?: boolean;
   terminalStatus?: FeishuTerminalStatus;
+  sourceLabel?: string;
 }
 
 /** Track seen message IDs to deduplicate retried events. */
@@ -129,6 +135,8 @@ const FEISHU_STATUS_STRINGS = [
 ] as const;
 const escapeRegExp = (value: string) =>
   value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const escapeFeishuMarkdown = (value: string) =>
+  value.replace(/([\\`*_[\]{}()#+.!|>~-])/gu, '\\$1');
 const FEISHU_STATUS_LABELS = `(?:${FEISHU_STATUS_STRINGS.map(escapeRegExp).join('|')})`;
 /** A rendered status block: `---` divider line + `*label*` line,
  *  at line granularity anywhere in the joined card text. */
@@ -224,8 +232,10 @@ export class FeishuChannel extends ChannelBase {
       sendCard: (chatId, card) => this.sendInteractiveCard(chatId, card),
       patchCard: (messageId, card) =>
         this.patchInteractiveCard(messageId, card),
-      sendFallback: (chatId, text) =>
-        this.sendMessageInternal(chatId, text, true),
+      sendFallback: (chatId, text, sourceLabel) =>
+        sourceLabel
+          ? this.sendMessageInternal(chatId, text, true, 'chat_id', sourceLabel)
+          : this.sendMessageInternal(chatId, text, true),
       onError: (operation, error) => {
         process.stderr.write(
           `[Feishu:${this.name}] ${operation} error: ${error instanceof Error ? error.message : error}\n`,
@@ -970,11 +980,37 @@ export class FeishuChannel extends ChannelBase {
     await this.sendMessageInternal(chatId, text, false);
   }
 
+  protected override async sendThreadMessage(
+    chatId: string,
+    _threadId: string | undefined,
+    text: string,
+    sourceLabel?: string,
+  ): Promise<void> {
+    if (sourceLabel) {
+      await this.sendMessageInternal(
+        chatId,
+        text,
+        false,
+        'chat_id',
+        sourceLabel,
+      );
+    } else {
+      await this.sendMessage(chatId, text);
+    }
+  }
+
   protected override async pushProactive(
     target: SessionTarget,
     text: string,
+    sourceLabel?: string,
   ): Promise<void> {
-    await this.sendMessageInternal(target.chatId, text, true);
+    await this.sendMessageInternal(
+      target.chatId,
+      text,
+      true,
+      'chat_id',
+      sourceLabel,
+    );
   }
 
   protected override async pushProactiveDelivery(
@@ -1005,6 +1041,7 @@ export class FeishuChannel extends ChannelBase {
     text: string,
     throwOnFailure: boolean,
     receiveIdType: 'chat_id' | 'open_id' = 'chat_id',
+    sourceLabel?: string,
   ): Promise<void> {
     const token = await this.getTenantAccessToken();
     if (!token) {
@@ -1020,7 +1057,17 @@ export class FeishuChannel extends ChannelBase {
       return;
     }
 
-    const chunks = splitChunks(text);
+    const sourcePrefix =
+      sourceLabel && text.trim().length > 0
+        ? `${escapeFeishuMarkdown(sourceLabel)}\n\n`
+        : '';
+    const contentLimit = FEISHU_CHUNK_LIMIT - sourcePrefix.length;
+    if (contentLimit <= 0) {
+      throw new Error('Feishu source label exceeds the message limit.');
+    }
+    const chunks = splitChunks(text, contentLimit).map(
+      (chunk) => `${sourcePrefix}${chunk}`,
+    );
 
     for (let i = 0; i < chunks.length; i++) {
       const chunk = chunks[i]!;
@@ -1083,6 +1130,16 @@ export class FeishuChannel extends ChannelBase {
         }
       }
     }
+  }
+
+  private sendFallbackMessage(
+    chatId: string,
+    text: string,
+    sourceLabel?: string,
+  ): Promise<void> {
+    return sourceLabel
+      ? this.sendMessageInternal(chatId, text, false, 'chat_id', sourceLabel)
+      : this.sendMessage(chatId, text);
   }
 
   // ----- Interactive Card Streaming -----
@@ -1178,14 +1235,22 @@ export class FeishuChannel extends ChannelBase {
   ): Promise<{ messageId: string; success: boolean }> {
     const cardTitle =
       title || (inboundMsgId && this.msgToQuestion.get(inboundMsgId)) || 'Qwen';
-    const card = buildCardContent(text, {
-      title: cardTitle,
-      showStopButton: true,
-      isStreaming: true,
-      statusLabel: this.statusLabelFor(),
-      collapsible: this.collapsible,
-      collapsibleThreshold: this.collapsibleThreshold,
-    });
+    const statusLabel = this.statusLabelFor();
+    const card = buildCardContent(
+      this.attributedCardText(
+        inboundMsgId,
+        text,
+        `\n\n---\n*${statusLabel}*`.length,
+      ),
+      {
+        title: cardTitle,
+        showStopButton: true,
+        isStreaming: true,
+        statusLabel,
+        collapsible: this.collapsible,
+        collapsibleThreshold: this.collapsibleThreshold,
+      },
+    );
 
     try {
       const messageId = await this.sendInteractiveCard(chatId, card);
@@ -1214,17 +1279,50 @@ export class FeishuChannel extends ChannelBase {
     const cardTitle = inboundMsgId
       ? this.msgToQuestion.get(inboundMsgId) || 'Qwen'
       : 'Qwen';
-    const card = buildCardContent(text, {
-      title: cardTitle,
-      showStopButton: !finished,
-      isStreaming: !finished,
-      statusLabel:
-        statusLabel ?? (!finished ? this.statusLabelFor() : undefined),
-      collapsible: this.collapsible,
-      collapsibleThreshold: this.collapsibleThreshold,
-    });
+    const effectiveStatusLabel =
+      statusLabel ?? (!finished ? this.statusLabelFor() : undefined);
+    const card = buildCardContent(
+      this.attributedCardText(
+        inboundMsgId,
+        text,
+        effectiveStatusLabel ? `\n\n---\n*${effectiveStatusLabel}*`.length : 0,
+      ),
+      {
+        title: cardTitle,
+        showStopButton: !finished,
+        isStreaming: !finished,
+        statusLabel: effectiveStatusLabel,
+        collapsible: this.collapsible,
+        collapsibleThreshold: this.collapsibleThreshold,
+      },
+    );
 
     return this.patchInteractiveCard(messageId, card);
+  }
+
+  private attributedCardText(
+    inboundMsgId: string | undefined,
+    text: string,
+    reservedChars = 0,
+  ): string {
+    if (!inboundMsgId) return this.truncateCardText(text, reservedChars);
+    const sourceLabel = this.cardSessions.get(inboundMsgId)?.sourceLabel;
+    if (!sourceLabel) return this.truncateCardText(text, reservedChars);
+
+    const atPrefix = this.msgToSenderName.get(inboundMsgId);
+    let body = text;
+    const prefixes: string[] = [];
+    if (atPrefix && (body === atPrefix || body.startsWith(`${atPrefix}\n`))) {
+      prefixes.push(atPrefix);
+      body = body.slice(atPrefix.length).replace(/^\s{1,2}/u, '');
+    }
+    prefixes.push(escapeFeishuMarkdown(sourceLabel));
+    const prefix = prefixes.join('\n\n');
+    if (!body) return prefix;
+    return `${prefix}\n\n${this.truncateCardText(
+      body,
+      reservedChars + prefix.length + 2,
+    )}`;
   }
 
   protected override async presentUserInputRequest(
@@ -1280,6 +1378,7 @@ export class FeishuChannel extends ChannelBase {
     chatId: string,
     chunk: string,
     sessionId: string,
+    segment?: ChannelOutputSegmentContext,
   ): void {
     // In blockStreaming mode, the BlockStreamer delivers text as plain messages.
     // Skip card creation/updates to avoid duplicate content and a misleading
@@ -1306,9 +1405,14 @@ export class FeishuChannel extends ChannelBase {
         stopped: false,
         accumulatedText: '',
         lastUpdateAt: Date.now(),
+        sourceLabel:
+          segment?.sourceLabel ?? this.getResponseSourceLabel(sessionId),
       };
       this.cardSessions.set(inboundMsgId, cardState);
     }
+
+    cardState.sourceLabel ??=
+      segment?.sourceLabel ?? this.getResponseSourceLabel(sessionId);
 
     if (cardState.stopped) return;
 
@@ -1605,7 +1709,13 @@ export class FeishuChannel extends ChannelBase {
         }
         if (!updated) {
           await this.deleteCard(cardState.messageId);
-          if (displayText) await this.sendMessage(chatId, displayText);
+          if (displayText) {
+            await this.sendFallbackMessage(
+              chatId,
+              displayText,
+              cardState.sourceLabel,
+            );
+          }
         }
       } else {
         if (cardState.creating) {
@@ -1613,7 +1723,11 @@ export class FeishuChannel extends ChannelBase {
           cardState.abandoned = true;
         }
         if (text) {
-          await this.sendMessage(chatId, displayText);
+          await this.sendFallbackMessage(
+            chatId,
+            displayText,
+            cardState.sourceLabel,
+          );
         }
       }
     } finally {
@@ -1689,7 +1803,11 @@ export class FeishuChannel extends ChannelBase {
       );
       if (!updated) {
         await this.deleteCard(cardState.messageId);
-        await this.sendMessage(chatId, finalText);
+        await this.sendFallbackMessage(
+          chatId,
+          finalText,
+          cardState.sourceLabel,
+        );
       }
     }
 
@@ -1735,17 +1853,21 @@ export class FeishuChannel extends ChannelBase {
     chatId: string,
     fullText: string,
     sessionId: string,
+    segment?: ChannelOutputSegmentContext,
   ): Promise<void> {
+    const sourceLabel =
+      segment?.sourceLabel ?? this.getResponseSourceLabel(sessionId);
     const inboundMsgId = this.sessionToInboundMsg.get(sessionId);
     if (!inboundMsgId) {
       process.stderr.write(
         `[Feishu:${this.name}] onResponseComplete: no inboundMsgId for session ${sessionId}, fallback to sendMessage\n`,
       );
-      await this.sendMessage(chatId, fullText);
+      await this.sendFallbackMessage(chatId, fullText, sourceLabel);
       return;
     }
 
     const cardState = this.cardSessions.get(inboundMsgId);
+    if (cardState) cardState.sourceLabel ??= sourceLabel;
     if (cardState) cardState.completed = true;
 
     if (cardState?.stopped || this.stoppedMessages.has(inboundMsgId)) {
@@ -1805,7 +1927,7 @@ export class FeishuChannel extends ChannelBase {
       cardState.stopped = true;
       cardState.abandoned = true;
       this.cleanupCard(inboundMsgId);
-      await this.sendMessage(chatId, fullText);
+      await this.sendFallbackMessage(chatId, fullText, sourceLabel);
       return;
     }
 
@@ -1865,9 +1987,10 @@ export class FeishuChannel extends ChannelBase {
             // before falling back to sendMessage
             await this.deleteCard(cardState.messageId);
             this.cleanupCard(inboundMsgId);
-            await this.sendMessage(
+            await this.sendFallbackMessage(
               chatId,
               atSender ? `${atSender}\n\n${fullText}` : fullText,
+              sourceLabel,
             );
             return;
           }
@@ -1907,9 +2030,10 @@ export class FeishuChannel extends ChannelBase {
 
     // Fallback to plain message (include @sender prefix for consistency)
     this.cleanupCard(inboundMsgId);
-    await this.sendMessage(
+    await this.sendFallbackMessage(
       chatId,
       atSender ? `${atSender}\n\n${fullText}` : fullText,
+      sourceLabel,
     );
   }
 
@@ -1923,6 +2047,7 @@ export class FeishuChannel extends ChannelBase {
         ? messageId
         : undefined;
     if (inboundMsgId) {
+      const sourceLabel = this.getResponseSourceLabel(sessionId);
       this.sessionToInboundMsg.set(sessionId, inboundMsgId);
       this.addReaction(inboundMsgId, 'OnIt').catch(() => {});
       if (
@@ -1936,7 +2061,11 @@ export class FeishuChannel extends ChannelBase {
           stopped: false,
           accumulatedText: '',
           lastUpdateAt: Date.now(),
+          sourceLabel,
         });
+      } else {
+        const cardState = this.cardSessions.get(inboundMsgId);
+        if (cardState) cardState.sourceLabel ??= sourceLabel;
       }
     }
   }
@@ -2001,7 +2130,11 @@ export class FeishuChannel extends ChannelBase {
             const fallbackText = atPrefix
               ? `${atPrefix}\n\n${cs.accumulatedText}`
               : cs.accumulatedText;
-            this.sendMessage(_chatId, fallbackText).catch(() => {});
+            this.sendFallbackMessage(
+              _chatId,
+              fallbackText,
+              cs.sourceLabel,
+            ).catch(() => {});
           } else if (cs.terminalStatus !== 'completed') {
             // No accumulated text (e.g. a failure before the first chunk, or a
             // post-answer failure after the output card was released for a
@@ -2013,7 +2146,9 @@ export class FeishuChannel extends ChannelBase {
             const errorText = atPrefix
               ? `${atPrefix}\n\n*${fallbackLabel}*`
               : `*${fallbackLabel}*`;
-            this.sendMessage(_chatId, errorText).catch(() => {});
+            this.sendFallbackMessage(_chatId, errorText, cs.sourceLabel).catch(
+              () => {},
+            );
             process.stderr.write(
               `[Feishu:${this.name}] onPromptEnd: no card and no accumulated text for inbound=${inboundMsgId}, sent error fallback\n`,
             );
@@ -2256,11 +2391,12 @@ export class FeishuChannel extends ChannelBase {
             await this.deleteCard(cardState.messageId);
             // Same `---` + label shape as rendered cards so extractCardText
             // strips it from quote-reply context.
-            await this.sendMessage(
+            await this.sendFallbackMessage(
               chatId,
               finalText
                 ? `${finalText}\n\n---\n*${stopLabel}*`
                 : `---\n*${stopLabel}*`,
+              cardState.sourceLabel,
             );
           }
         }
@@ -2427,6 +2563,7 @@ export class FeishuChannel extends ChannelBase {
       lastUpdateAt: Date.now(),
       userStopped: cardState.userStopped,
       terminalStatus: cardState.terminalStatus,
+      sourceLabel: cardState.sourceLabel,
     });
   }
 

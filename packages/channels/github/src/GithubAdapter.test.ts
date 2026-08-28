@@ -2488,6 +2488,49 @@ describe('GithubChannel', () => {
       });
     });
 
+    it('attributes the published comment without changing raw audit metadata', async () => {
+      mockOctokit.rest.issues.createComment.mockResolvedValue({
+        data: { id: 2002, html_url: 'https://example.test/comment/2002' },
+      });
+      await connectForPublication();
+      const response = 'Reviewed the implementation.';
+      const publish = (
+        channel as unknown as {
+          publishFinalResponse: (
+            chatId: string,
+            threadId: string,
+            text: string,
+            sessionId: string,
+            sourceLabel?: string,
+          ) => Promise<void>;
+        }
+      ).publishFinalResponse.bind(channel);
+
+      await publish(
+        'owner/repo',
+        'issue:42',
+        response,
+        'session-publication',
+        '[review_*]',
+      );
+
+      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledWith({
+        owner: 'owner',
+        repo: 'repo',
+        issue_number: 42,
+        body: '\\[review\\_\\*\\] Reviewed the implementation.',
+      });
+      const audits = readFileSync(auditPath(), 'utf-8')
+        .trim()
+        .split('\n')
+        .map((line) => JSON.parse(line) as Record<string, unknown>);
+      expect(audits.at(-1)).toMatchObject({
+        bodyChars: Array.from(response).length,
+        bodySha256: createHash('sha256').update(response).digest('hex'),
+      });
+      expect(JSON.stringify(audits)).not.toContain('review_');
+    });
+
     it('uses the active prompt thread for final delivery', async () => {
       await connectForPublication();
       mockOctokit.rest.issues.createComment.mockResolvedValue({ data: {} });
@@ -2843,8 +2886,11 @@ describe('GithubChannel', () => {
       });
     });
 
-    it('ignores invalid pending final retry records', async () => {
-      writePending([pendingRecord(), { id: 123, bad: true }]);
+    it('preserves attribution while ignoring invalid pending retry records', async () => {
+      writePending([
+        pendingRecord({ sourceLabel: '[review_*]' }),
+        { id: 123, bad: true },
+      ]);
       mockOctokit.rest.issues.createComment.mockResolvedValue({
         data: {
           id: 2004,
@@ -2859,7 +2905,7 @@ describe('GithubChannel', () => {
         owner: 'owner',
         repo: 'repo',
         issue_number: 42,
-        body: 'Final reply',
+        body: '\\[review\\_\\*\\] Final reply',
       });
     });
 

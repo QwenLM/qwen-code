@@ -139,6 +139,9 @@ vi.mock('@qwen-code/channel-base', async () => {
         },
       );
       onSessionDied(_sessionId: string): void {}
+      protected getResponseSourceLabel(_sessionId: string): undefined {
+        return undefined;
+      }
       protected logDebugPayload(platform: string, payload: unknown): void {
         (
           real.ChannelBase.prototype as unknown as {

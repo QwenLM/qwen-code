@@ -100,8 +100,9 @@ class TestableGitlabChannel extends GitlabChannel {
     chatId: string,
     threadId: string,
     text: string,
+    sourceLabel?: string,
   ): Promise<void> {
-    return this.sendThreadMessage(chatId, threadId, text);
+    return this.sendThreadMessage(chatId, threadId, text, sourceLabel);
   }
 }
 
@@ -574,6 +575,23 @@ describe('GitlabChannel', () => {
         'owner/repo',
         42,
         'reply',
+      );
+    });
+
+    it('escapes the source label before posting a note', async () => {
+      await initWithoutLoop();
+
+      await channel.testSendThreadMessage(
+        'owner/repo',
+        'issue:42',
+        'reply',
+        '[review_~~*]',
+      );
+
+      expect(mockApi.IssueNotes.create).toHaveBeenCalledWith(
+        'owner/repo',
+        42,
+        '\\[review\\_\\~\\~\\*\\] reply',
       );
     });
 

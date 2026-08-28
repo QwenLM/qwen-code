@@ -117,6 +117,7 @@ export class GitlabChannel extends PollingChannelBase<GitlabCursor> {
     chatId: string,
     threadId: string | undefined,
     text: string,
+    sourceLabel?: string,
   ): Promise<void> {
     if (!threadId) {
       throw new Error(
@@ -130,7 +131,12 @@ export class GitlabChannel extends PollingChannelBase<GitlabCursor> {
       );
     }
     const targetType = threadId.startsWith('mr:') ? 'mr' : 'issue';
-    await this.createNote(chatId, targetType, Number(match[1]), text);
+    await this.createNote(
+      chatId,
+      targetType,
+      Number(match[1]),
+      this.formatMarkdownAttributedText(text, sourceLabel),
+    );
   }
 
   protected override onPromptStart(

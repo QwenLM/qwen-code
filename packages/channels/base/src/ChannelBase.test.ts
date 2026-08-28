@@ -157,11 +157,15 @@ class TestChannel extends ChannelBase {
   protected override async pushProactive(
     target: SessionTarget,
     text: string,
+    sourceLabel?: string,
   ): Promise<void> {
     if (this.proactiveError) {
       throw this.proactiveError;
     }
-    this.proactive.push({ chatId: target.chatId, text });
+    this.proactive.push({
+      chatId: target.chatId,
+      text: this.formatAttributedText(text, sourceLabel),
+    });
     this.proactiveTargets.push(target);
   }
 
@@ -271,7 +275,12 @@ class TestChannel extends ChannelBase {
       segment,
     });
     await this.responseCompleteGate;
-    await super.onResponseComplete(chatId, fullText, sessionId);
+    await super.onResponseComplete(
+      chatId,
+      fullText,
+      sessionId,
+      segment as ChannelOutputSegmentContext | undefined,
+    );
   }
 }
 
@@ -3520,6 +3529,136 @@ describe('ChannelBase', () => {
           expect.stringContaining('review this change'),
           expect.anything(),
         );
+      } finally {
+        rmSync(stateDir, { recursive: true, force: true });
+      }
+    });
+
+    it('labels direct and group results while preserving raw response contexts', async () => {
+      const directState = mkdtempSync(join(tmpdir(), 'qwen-channel-named-'));
+      const groupState = mkdtempSync(join(tmpdir(), 'qwen-channel-named-'));
+      try {
+        const direct = createChannel(
+          { multiSession: true },
+          { stateDir: directState },
+        );
+        await direct.handleInbound(envelope({ text: '/session new review' }));
+        direct.sent = [];
+        await direct.handleInbound(envelope({ text: 'review it' }));
+
+        expect(direct.sent).toEqual([
+          { chatId: 'chat1', text: '[review] agent response' },
+        ]);
+        expect(direct.responseCompletions[0]).toMatchObject({
+          text: 'agent response',
+          segment: { sourceLabel: '[review]' },
+        });
+        expect(bridge.prompt).toHaveBeenLastCalledWith(
+          's-1',
+          expect.any(String),
+          expect.anything(),
+        );
+
+        const groupBridge = createBridge();
+        bridge = groupBridge;
+        const group = createChannel(
+          { multiSession: true, groupPolicy: 'open' },
+          { stateDir: groupState },
+        );
+        await group.handleInbound(
+          envelope({
+            senderId: 'alice',
+            senderName: 'Alice [lead]',
+            chatId: 'group-1',
+            isGroup: true,
+            isMentioned: true,
+            text: '/session new feature-a',
+          }),
+        );
+        group.sent = [];
+        await group.handleInbound(
+          envelope({
+            senderId: 'alice',
+            senderName: 'Alice [lead]',
+            chatId: 'group-1',
+            isGroup: true,
+            isMentioned: true,
+            text: 'build it',
+          }),
+        );
+
+        expect(group.sent).toEqual([
+          {
+            chatId: 'group-1',
+            text: '[Alice lead · feature-a] agent response',
+          },
+        ]);
+      } finally {
+        rmSync(directState, { recursive: true, force: true });
+        rmSync(groupState, { recursive: true, force: true });
+      }
+    });
+
+    it('labels direct shell results and named permission prompts by exact task', async () => {
+      const stateDir = mkdtempSync(join(tmpdir(), 'qwen-channel-named-'));
+      const shellCommand = vi.fn().mockResolvedValue({
+        exitCode: 0,
+        output: 'ok',
+        aborted: false,
+      });
+      (
+        bridge as unknown as {
+          shellCommand: typeof shellCommand;
+        }
+      ).shellCommand = shellCommand;
+      const ch = createChannel({ multiSession: true }, { stateDir });
+      try {
+        await ch.handleInbound(envelope({ text: '/session new review' }));
+        ch.sent = [];
+        await ch.handleInbound(envelope({ text: '!npm test' }));
+        expect(ch.sent[0]!.text).toBe('[review] $ npm test\n```\nok\n```');
+
+        ch.sent = [];
+        await ch.dispatchPermissionRequest({
+          requestId: 'req-123',
+          sessionId: 's-1',
+          request: {
+            toolCall: { title: 'Run tests' },
+            options: [
+              { optionId: 'once', kind: 'allow_once', name: 'Allow once' },
+              {
+                optionId: 'proceed_always_project',
+                kind: 'allow_always',
+                name: 'Always',
+              },
+              { optionId: 'deny', kind: 'reject_once', name: 'Deny' },
+            ],
+          },
+        });
+        expect(ch.sent[0]!.text).toBe(
+          '[review] Permission required to run a tool\nRequest: req-123\n\nCommand:\nRun tests\n\nReply with:\n/approve req-123          allow once\n/approve-always req-123   always allow for this project\n/deny req-123             deny',
+        );
+
+        ch.sent = [];
+        await ch.handleInbound(envelope({ text: '/approve req-123' }));
+        expect(ch.sent[0]!.text).toBe('[review] Permission approved.');
+      } finally {
+        rmSync(stateDir, { recursive: true, force: true });
+      }
+    });
+
+    it('labels named background delivery and suppresses whitespace-only bodies', async () => {
+      const stateDir = mkdtempSync(join(tmpdir(), 'qwen-channel-named-'));
+      const ch = createChannel({ multiSession: true }, { stateDir });
+      try {
+        await ch.handleInbound(envelope({ text: '/session new review' }));
+        ch.sent = [];
+        await ch.dispatchBackgroundResponse('s-1', 'background result');
+        await ch.dispatchBackgroundResponse('s-1', '   ');
+
+        expect(ch.sent).toEqual([
+          { chatId: 'chat1', text: '[review] background result' },
+        ]);
       } finally {
         rmSync(stateDir, { recursive: true, force: true });
       }
