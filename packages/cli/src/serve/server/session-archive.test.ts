@@ -612,6 +612,7 @@ describe('archiveDaemonSessions', () => {
   it('reconciles stranded sidecars before returning already archived', async () => {
     const sessionId = '550e8400-e29b-41d4-a716-446655440103';
     writeSessionFile(workspaceDir, sessionId, 'archived');
+    fs.writeFileSync(sessionPath(workspaceDir, sessionId, 'archived'), '');
     const service = new SessionService(workspaceDir);
     const sidecars = await writeLifecycleSidecars(service, sessionId, 'active');
 
@@ -1133,6 +1134,10 @@ describe('unarchiveDaemonSessions', () => {
   it('reconciles stranded sidecars before returning already active', async () => {
     const sessionId = '550e8400-e29b-41d4-a716-446655440113';
     writeSessionFile(workspaceDir, sessionId, 'active');
+    fs.writeFileSync(
+      sessionPath(workspaceDir, sessionId, 'active'),
+      '{"uuid":"torn-head"',
+    );
     const service = new SessionService(workspaceDir);
     const sidecars = await writeLifecycleSidecars(
       service,

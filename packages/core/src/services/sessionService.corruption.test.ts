@@ -1076,7 +1076,10 @@ describe('SessionService lifecycle maintenance', () => {
     async (action) => {
       const sourceState = action === 'archive' ? 'active' : 'archived';
       const destinationState = action === 'archive' ? 'archived' : 'active';
-      const { service, sessionId } = createHarness('transcript', sourceState);
+      const { service, sessionId } = createHarness(
+        action === 'archive' ? '' : '{"uuid":"torn-head"',
+        sourceState,
+      );
       const internals = service as unknown as Privates;
       const sourceWorktree = internals.getWorktreeSessionPathForState(
         sessionId,
