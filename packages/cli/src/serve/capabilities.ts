@@ -123,6 +123,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   session_metadata: { since: 'v1' },
   session_organization: { since: 'v1' },
   session_export: { since: 'v1' },
+  standalone_sessions_v1: { since: 'v1' },
   session_transcript: { since: 'v1' },
   session_transcript_pagination: { since: 'v1' },
   // Daemon supports the MCP client guardrail surface: an in-process
@@ -507,6 +508,7 @@ export interface AdvertiseFeatureToggles {
   acpHttpEnabled?: boolean;
   realtimeVoiceEnabled?: boolean;
   workspaceTrustHotReloadAvailable?: boolean;
+  standaloneSessionsAvailable?: boolean;
 }
 
 /**
@@ -546,6 +548,10 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
   (toggles: AdvertiseFeatureToggles) => boolean
 > = new Map<ServeFeature, (toggles: AdvertiseFeatureToggles) => boolean>([
   ['require_auth', (toggles) => toggles.requireAuth === true],
+  [
+    'standalone_sessions_v1',
+    (toggles) => toggles.standaloneSessionsAvailable === true,
+  ],
   ['mcp_workspace_pool', (toggles) => toggles.mcpPoolActive === true],
   ['mcp_pool_restart', (toggles) => toggles.mcpPoolActive === true],
   [

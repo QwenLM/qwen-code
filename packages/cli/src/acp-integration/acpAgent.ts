@@ -2652,7 +2652,7 @@ export async function runAcpAgent(
   beginAcpBootstrapConfigProfiling();
   try {
     await config.initialize({
-      skipGeminiInitialization: true,
+      skipLlmInitialization: true,
       // Bootstrap skips MCP discovery — each session runs its own
       // pool-routed discovery, so bootstrap-level spawns would be
       // redundant subprocess leaks (W119).
@@ -2664,7 +2664,7 @@ export async function runAcpAgent(
   } finally {
     endAcpBootstrapConfigProfiling();
   }
-  // The ACP path exits gemini.tsx before its startup-warning printing runs,
+  // The ACP path exits llm.tsx before its startup-warning printing runs,
   // so config warnings (including initialize-time ones like the WebSearch
   // enablement notice) would otherwise vanish. stderr lands in the client's
   // logs without interfering with the ACP protocol on stdout.
@@ -3670,9 +3670,9 @@ class QwenAgent implements Agent {
         const registry = config.getToolRegistry();
         if (operation === 'discover') {
           await registry?.discoverToolsForServer(serverName);
-          const geminiClient = config.getGeminiClient?.();
-          if (geminiClient?.isInitialized?.()) {
-            await geminiClient.setTools?.();
+          const llmClient = config.getLlmClient?.();
+          if (llmClient?.isInitialized?.()) {
+            await llmClient.setTools?.();
           }
         } else if (operation === 'disable') {
           await registry?.disableMcpServer(serverName);
@@ -3760,7 +3760,7 @@ class QwenAgent implements Agent {
     config.setMcpTransportPool(this.mcpPool);
     try {
       await config.initialize({
-        skipGeminiInitialization: true,
+        skipLlmInitialization: true,
         skipFileCheckpointing: true,
         skipHooks: true,
         skipSkillManager: true,
@@ -3911,9 +3911,9 @@ class QwenAgent implements Agent {
           }
           await Promise.all(
             this.getLiveMcpConfigs(serverName).map(async (config) => {
-              const geminiClient = config.getGeminiClient?.();
-              if (geminiClient?.isInitialized?.()) {
-                await geminiClient.setTools?.();
+              const llmClient = config.getLlmClient?.();
+              if (llmClient?.isInitialized?.()) {
+                await llmClient.setTools?.();
               }
             }),
           );
@@ -6833,14 +6833,9 @@ class QwenAgent implements Agent {
       for (const extension of config.getExtensions()) {
         if (extension.isActive) continue;
         for (const skill of extension.skills ?? []) {
-          const extensionName = extension.displayName ?? extension.name;
+          const extensionName = extension.name;
           const key = `extension:${extensionName}:${skill.name}`;
-          if (
-            skillsByKey.has(`extension:${extension.name}:${skill.name}`) ||
-            skillsByKey.has(key)
-          ) {
-            continue;
-          }
+          if (skillsByKey.has(key)) continue;
           skillsByKey.set(
             key,
             mapSkillConfigToStatus(
@@ -6848,6 +6843,7 @@ class QwenAgent implements Agent {
                 ...skill,
                 level: 'extension',
                 extensionName,
+                extensionDisplayName: extension.displayName,
               },
               disablements,
               { disabled: true },
@@ -8995,9 +8991,9 @@ class QwenAgent implements Agent {
           });
           await Promise.all(
             this.getLiveMcpConfigs(serverName).map(async (liveConfig) => {
-              const geminiClient = liveConfig.getGeminiClient?.();
-              if (geminiClient?.isInitialized?.()) {
-                await geminiClient.setTools?.();
+              const llmClient = liveConfig.getLlmClient?.();
+              if (llmClient?.isInitialized?.()) {
+                await llmClient.setTools?.();
               }
             }),
           );
@@ -10233,7 +10229,7 @@ class QwenAgent implements Agent {
 
           try {
             await config
-              .getGeminiClient()
+              .getLlmClient()
               ?.addWorkingDirectoryChangedContext(
                 settledPreviousCwd,
                 canonicalPath,
@@ -10447,7 +10443,7 @@ class QwenAgent implements Agent {
                   );
                 }
                 await cfg.refreshHierarchicalMemory();
-                await cfg.getGeminiClient()?.refreshSystemInstruction();
+                await cfg.getLlmClient()?.refreshSystemInstruction();
               }),
             );
             const failedCount = results.filter(
@@ -10643,7 +10639,7 @@ class QwenAgent implements Agent {
         let hasHistory = false;
         try {
           hasHistory =
-            (config.getGeminiClient().getHistoryShallow() ?? []).length > 0;
+            (config.getLlmClient().getHistoryShallow() ?? []).length > 0;
         } catch (error) {
           debugLogger.debug('Failed to read history before /fork:', error);
         }
@@ -10684,7 +10680,7 @@ class QwenAgent implements Agent {
         }
 
         try {
-          config.getGeminiClient().addHistory({
+          config.getLlmClient().addHistory({
             role: 'user',
             parts: [
               {
@@ -10717,10 +10713,10 @@ class QwenAgent implements Agent {
         }
         const session = this.sessionOrThrow(sessionId);
         const config = session.getConfig();
-        const geminiClient = config.getGeminiClient()!;
+        const llmClient = config.getLlmClient()!;
         const outputText =
           typeof params['output'] === 'string' ? params['output'] : '';
-        geminiClient.addHistory({
+        llmClient.addHistory({
           role: 'user',
           parts: [
             {
@@ -11181,8 +11177,7 @@ class QwenAgent implements Agent {
           );
         }
         await runRefresh(
-          async () =>
-            await config.getGeminiClient()?.refreshSystemInstruction(),
+          async () => await config.getLlmClient()?.refreshSystemInstruction(),
         );
         await runRefresh(
           async () => await session.sendAvailableCommandsUpdate(),
@@ -12097,7 +12092,7 @@ class QwenAgent implements Agent {
               );
             }
             try {
-              await config.getGeminiClient()?.refreshSystemInstruction();
+              await config.getLlmClient()?.refreshSystemInstruction();
             } catch (err) {
               debugLogger.warn(
                 `reload: refreshSystemInstruction failed for session ${id}: ${err}`,
@@ -12718,11 +12713,11 @@ class QwenAgent implements Agent {
   ): Promise<Session> {
     this.assertManagedSessionAdmission();
     const sessionId = normalizeSessionIdForLookup(config.getSessionId());
-    const geminiClient = config.getGeminiClient();
-    const needsInitialize = !geminiClient.isInitialized();
+    const llmClient = config.getLlmClient();
+    const needsInitialize = !llmClient.isInitialized();
 
     if (needsInitialize && options.deferWorkspaceActivation !== true) {
-      await geminiClient.initialize();
+      await llmClient.initialize();
     }
     this.assertManagedSessionAdmission();
 

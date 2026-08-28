@@ -862,7 +862,7 @@ describe('main-session style: reminder decision matches prompt section', () => {
     }
   }
 
-  // The per-turn gate in GeminiClient is exactly
+  // The per-turn gate in LlmClient is exactly
   // resolveMainSessionOutputStyle(config), so pinning that decision against
   // the rendered prompt means the reminder and the prompt cannot drift when
   // a new prompt condition is added. The client-side wiring is pinned by the
