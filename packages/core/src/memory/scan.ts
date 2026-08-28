@@ -20,6 +20,7 @@ import {
 import {
   AUTO_MEMORY_INDEX_FILENAME,
   getAutoMemoryRoot,
+  getProjectAutoMemoryRoots,
   getMemoryRootTrustedAnchor,
   getTeamAutoMemoryRoot,
   getUserAutoMemoryRoot,
@@ -71,6 +72,16 @@ export interface AutoMemoryScanSnapshot {
   docs: ScannedAutoMemoryDocument[];
   sourceStatus: MemorySourceStatus;
 }
+
+export interface AutoMemoryDocumentCacheEntry {
+  mtimeMs: number;
+  ctimeMs: number;
+  size: number;
+  ino: number;
+  document: ScannedAutoMemoryDocument | null;
+}
+
+export type AutoMemoryDocumentCache = Map<string, AutoMemoryDocumentCacheEntry>;
 
 export interface ScannedAutoMemoryDocument {
   scope: AutoMemoryScope;
@@ -325,6 +336,7 @@ async function scanAutoMemoryDocumentsFromRootWithStatus(
     scope: AutoMemoryScope;
     deterministic?: boolean;
     uncapped?: boolean;
+    documentCache?: AutoMemoryDocumentCache;
   },
 ): Promise<{
   docs: ScannedAutoMemoryDocument[];
@@ -355,10 +367,19 @@ async function scanAutoMemoryDocumentsFromRootWithStatus(
     files.map(async ({ relativePath, resolvedPath: trustedFile }) => {
       const filePath = path.join(root, relativePath);
       try {
-        const [content, stats] = await Promise.all([
-          fs.readFile(trustedFile, 'utf-8'),
-          fs.stat(trustedFile),
-        ]);
+        const stats = await fs.stat(trustedFile);
+        const cacheKey = `${opts.scope}\0${trustedFile}`;
+        const cached = opts.documentCache?.get(cacheKey);
+        if (
+          cached?.mtimeMs === stats.mtimeMs &&
+          cached.ctimeMs === stats.ctimeMs &&
+          cached.size === stats.size &&
+          cached.ino === stats.ino
+        ) {
+          if (cached.document) docs.push(cached.document);
+          return;
+        }
+        const content = await fs.readFile(trustedFile, 'utf-8');
         const parsed = parseAutoMemoryTopicDocument(
           filePath,
           content,
@@ -366,6 +387,13 @@ async function scanAutoMemoryDocumentsFromRootWithStatus(
           relativePath,
           opts.scope,
         );
+        opts.documentCache?.set(cacheKey, {
+          mtimeMs: stats.mtimeMs,
+          ctimeMs: stats.ctimeMs,
+          size: stats.size,
+          ino: stats.ino,
+          document: parsed,
+        });
         if (parsed) {
           docs.push(parsed);
         }
@@ -410,6 +438,7 @@ async function scanAutoMemoryDocumentsFromRoot(
     scope: AutoMemoryScope;
     deterministic?: boolean;
     uncapped?: boolean;
+    documentCache?: AutoMemoryDocumentCache;
   },
 ): Promise<ScannedAutoMemoryDocument[]> {
   const result = await scanAutoMemoryDocumentsFromRootWithStatus(root, opts);
@@ -448,22 +477,20 @@ function dedupeScannedDocuments(
 
 async function scanProjectAutoMemoryWithStatus(
   projectRoot: string,
+  trustedProject: boolean,
   uncapped = false,
+  documentCache?: AutoMemoryDocumentCache,
 ): Promise<{
   docs: ScannedAutoMemoryDocument[];
   incompleteScopes: AutoMemoryIncompleteScope[];
 }> {
-  const configuredRoot = getAutoMemoryRoot(projectRoot);
-  const localRoot = path.join(projectRoot, '.qwen', 'memory');
-  const roots =
-    path.resolve(configuredRoot) === path.resolve(localRoot)
-      ? [configuredRoot]
-      : [configuredRoot, localRoot];
+  const roots = getProjectAutoMemoryRoots(projectRoot, trustedProject);
   const results = await Promise.all(
     roots.map((root) =>
       scanAutoMemoryDocumentsFromRootWithStatus(root, {
         scope: 'project',
         uncapped: true,
+        documentCache,
       }),
     ),
   );
@@ -493,6 +520,7 @@ export async function scanAutoMemorySnapshot(
     teamMemoryEnabled?: boolean;
     trustedProject?: boolean;
     uncapped?: boolean;
+    documentCache?: AutoMemoryDocumentCache;
   } = {},
 ): Promise<AutoMemoryScanSnapshot> {
   const requestedScopes = [...(options.scopes ?? ['project', 'user'])];
@@ -507,9 +535,22 @@ export async function scanAutoMemorySnapshot(
 
   for (const scope of requestedScopes) {
     if (scope === 'project') {
+      const projectRoots = getProjectAutoMemoryRoots(
+        projectRoot,
+        options.trustedProject !== false,
+      );
+      if (projectRoots.length === 0) {
+        unavailableScopes.push({ scope, reason: 'untrusted' });
+        continue;
+      }
       searchedScopes.push(scope);
       scanTasks.push(
-        scanProjectAutoMemoryWithStatus(projectRoot, options.uncapped),
+        scanProjectAutoMemoryWithStatus(
+          projectRoot,
+          options.trustedProject !== false,
+          options.uncapped,
+          options.documentCache,
+        ),
       );
     } else if (scope === 'user') {
       searchedScopes.push(scope);
@@ -517,6 +558,7 @@ export async function scanAutoMemorySnapshot(
         scanAutoMemoryDocumentsFromRootWithStatus(getUserAutoMemoryRoot(), {
           scope,
           uncapped: options.uncapped,
+          documentCache: options.documentCache,
         }),
       );
     } else if (options.teamMemoryEnabled !== true) {
@@ -528,7 +570,12 @@ export async function scanAutoMemorySnapshot(
       scanTasks.push(
         scanAutoMemoryDocumentsFromRootWithStatus(
           getTeamAutoMemoryRoot(projectRoot),
-          { scope, deterministic: true, uncapped: options.uncapped },
+          {
+            scope,
+            deterministic: true,
+            uncapped: options.uncapped,
+            documentCache: options.documentCache,
+          },
         ),
       );
     }
@@ -560,12 +607,14 @@ export async function scanAutoMemoryTopicDocuments(
 
 export async function scanAllAutoMemoryTopicDocuments(
   projectRoot: string,
+  documentCache?: AutoMemoryDocumentCache,
 ): Promise<ScannedAutoMemoryDocument[]> {
   // ponytail: reuse the existing O(n) parsed scan; add a catalog only if
   // measured topic counts make recall scanning too slow.
   return scanAutoMemoryDocumentsFromRoot(getAutoMemoryRoot(projectRoot), {
     scope: 'project',
     uncapped: true,
+    documentCache,
   });
 }
 
@@ -582,12 +631,13 @@ export async function scanUserAutoMemoryTopicDocuments(): Promise<
   });
 }
 
-export async function scanAllUserAutoMemoryTopicDocuments(): Promise<
-  ScannedAutoMemoryDocument[]
-> {
+export async function scanAllUserAutoMemoryTopicDocuments(
+  documentCache?: AutoMemoryDocumentCache,
+): Promise<ScannedAutoMemoryDocument[]> {
   return scanAutoMemoryDocumentsFromRoot(getUserAutoMemoryRoot(), {
     scope: 'user',
     uncapped: true,
+    documentCache,
   });
 }
 

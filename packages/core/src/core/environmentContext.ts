@@ -19,7 +19,6 @@ import {
   renderAvailableSkillsBlock,
   type AvailableSkillEntry,
 } from '../tools/skill-utils.js';
-import { isManagedMemoryPath } from '../memory/paths.js';
 
 const debugLogger = createDebugLogger('ENVIRONMENT_CONTEXT');
 
@@ -61,10 +60,6 @@ export async function getDirectoryContextString(
     workspaceDirectories.map((dir) =>
       getFolderStructure(dir, {
         fileService: config.getFileService(),
-        hideManagedMemory:
-          config.getMemoryRecallMode() === 'structured' &&
-          config.allowsDirectAutoMemoryRead?.() !== true,
-        hideFolder: (folderPath) => isManagedMemoryPath(folderPath, dir),
       }),
     ),
   );

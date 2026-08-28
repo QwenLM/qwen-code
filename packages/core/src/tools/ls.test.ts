@@ -21,7 +21,6 @@ describe('LSTool', () => {
   let tempRootDir: string;
   let tempSecondaryDir: string;
   let mockConfig: Config;
-  let memoryRecallMode: 'legacy' | 'structured';
   const abortSignal = new AbortController().signal;
 
   beforeEach(async () => {
@@ -35,7 +34,6 @@ describe('LSTool', () => {
     ]);
 
     const userSkillsBase = path.join(os.homedir(), '.qwen', 'skills');
-    memoryRecallMode = 'structured';
 
     mockConfig = {
       getTargetDir: () => tempRootDir,
@@ -46,7 +44,6 @@ describe('LSTool', () => {
         respectQwenIgnore: true,
       }),
       getTruncateToolOutputLines: () => 1000,
-      getMemoryRecallMode: () => memoryRecallMode,
       storage: {
         getUserSkillsDirs: () => [userSkillsBase],
       },
@@ -61,18 +58,6 @@ describe('LSTool', () => {
   });
 
   describe('parameter validation', () => {
-    it('documents that managed auto-memory directories are not listable', () => {
-      expect(lsTool.schema.description).toContain(
-        'Do not use this tool for managed auto-memory directories',
-      );
-    });
-
-    it('keeps the Main list_directory description in legacy mode', () => {
-      memoryRecallMode = 'legacy';
-
-      expect(lsTool.schema.description).not.toContain('managed auto-memory');
-    });
-
     it('should accept valid absolute paths within workspace', async () => {
       const testPath = path.join(tempRootDir, 'src');
       await fs.mkdir(testPath);
@@ -157,67 +142,6 @@ describe('LSTool', () => {
 
       expect(result.llmContent).toBe(`Directory ${emptyDir} is empty.`);
       expect(result.returnDisplay).toBe('Directory is empty.');
-    });
-
-    it('should reject direct listing of managed auto-memory directories', async () => {
-      const memoryDir = path.join(tempRootDir, '.qwen', 'memory', 'user');
-      await fs.mkdir(memoryDir, { recursive: true });
-      await fs.writeFile(path.join(memoryDir, 'preference.md'), 'content');
-
-      const invocation = lsTool.build({ path: memoryDir });
-      const result = await invocation.execute(abortSignal);
-
-      expect(result.llmContent).toContain(
-        'Direct list_directory access to managed auto-memory directories is disabled',
-      );
-      expect(result.llmContent).toContain(
-        'Do not answer physical filename or path listing requests from memory metadata',
-      );
-      expect(result.llmContent).not.toContain('Use search_memory.explore');
-      expect(result.returnDisplay).toBe(
-        'Error: Direct auto-memory directory listing is disabled.',
-      );
-      expect(result.error?.type).toBe(ToolErrorType.EXECUTION_DENIED);
-    });
-
-    it('rejects listing the private per-project memory container', async () => {
-      const previousBase = process.env['QWEN_CODE_MEMORY_BASE_DIR'];
-      const memoryBase = path.join(tempRootDir, 'runtime-memory');
-      process.env['QWEN_CODE_MEMORY_BASE_DIR'] = memoryBase;
-      const projectsDir = path.join(memoryBase, 'projects');
-      await fs.mkdir(path.join(projectsDir, 'sibling', 'memory'), {
-        recursive: true,
-      });
-      try {
-        const result = await lsTool
-          .build({ path: projectsDir })
-          .execute(abortSignal);
-
-        expect(result.error?.type).toBe(ToolErrorType.EXECUTION_DENIED);
-      } finally {
-        if (previousBase === undefined) {
-          delete process.env['QWEN_CODE_MEMORY_BASE_DIR'];
-        } else {
-          process.env['QWEN_CODE_MEMORY_BASE_DIR'] = previousBase;
-        }
-      }
-    });
-
-    it('should allow scoped memory agents to list managed auto-memory directories', async () => {
-      const memoryDir = path.join(tempRootDir, '.qwen', 'memory', 'user');
-      await fs.mkdir(memoryDir, { recursive: true });
-      await fs.writeFile(path.join(memoryDir, 'preference.md'), 'content');
-      const scopedConfig = {
-        ...mockConfig,
-        allowsDirectAutoMemoryRead: () => true,
-      } as unknown as Config;
-      const scopedLsTool = new LSTool(scopedConfig);
-
-      const invocation = scopedLsTool.build({ path: memoryDir });
-      const result = await invocation.execute(abortSignal);
-
-      expect(result.llmContent).toContain('preference.md');
-      expect(result.returnDisplay).toBe('Listed 1 item(s)');
     });
 
     it('should respect ignore patterns', async () => {

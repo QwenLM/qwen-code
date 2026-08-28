@@ -23,9 +23,9 @@ import {
   rebuildUserAutoMemoryIndex,
 } from './indexer.js';
 import {
-  AUTO_MEMORY_DIRNAME,
   AUTO_MEMORY_INDEX_FILENAME,
   getAutoMemoryRoot,
+  getProjectAutoMemoryRoots,
   getTeamAutoMemoryRoot,
   getUserAutoMemoryRoot,
   getMemoryRootTrustedAnchor,
@@ -34,7 +34,6 @@ import {
   listTrustedMemoryMarkdownFiles,
   resolveTrustedMemoryFile,
 } from './trusted-memory-filesystem.js';
-import { QWEN_DIR } from '../utils/paths.js';
 import {
   parseAutoMemoryTopicDocument,
   scanAllUserAutoMemoryTopicDocuments,
@@ -193,13 +192,9 @@ export async function scanMemoryMetadataMigrationCandidates(
 
 export function getProjectMetadataMigrationRoots(
   projectRoot: string,
+  trustedProject = true,
 ): string[] {
-  return [
-    ...new Set([
-      getAutoMemoryRoot(projectRoot),
-      path.join(projectRoot, QWEN_DIR, AUTO_MEMORY_DIRNAME),
-    ]),
-  ];
+  return getProjectAutoMemoryRoots(projectRoot, trustedProject);
 }
 
 export async function scanMemoryMetadataCorpusStatus(params: {
@@ -208,10 +203,10 @@ export async function scanMemoryMetadataCorpusStatus(params: {
   trustedProject: boolean;
 }): Promise<MemoryMetadataCorpusStatus> {
   const roots: Array<{ root: string; scope: AutoMemoryScope }> = [
-    ...getProjectMetadataMigrationRoots(params.projectRoot).map((root) => ({
-      root,
-      scope: 'project' as const,
-    })),
+    ...getProjectMetadataMigrationRoots(
+      params.projectRoot,
+      params.trustedProject,
+    ).map((root) => ({ root, scope: 'project' as const })),
     { root: getUserAutoMemoryRoot(), scope: 'user' },
   ];
   if (params.teamMemoryEnabled && params.trustedProject) {

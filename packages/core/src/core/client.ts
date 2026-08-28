@@ -1383,7 +1383,17 @@ export class LlmClient {
       if (!fast) {
         return null;
       }
-      const delivery = this.prepareMemoryDelivery(fast);
+      const currentFast = fast.treeSnapshot
+        ? {
+            ...fast,
+            focusedPrompt: renderAutoMemoryFocusedSubtree(fast.selectedDocs, {
+              bodyPresentVersions: this.config
+                .getMemoryManager()
+                .getBodyPresentVersionsInHistory(),
+            }).prompt,
+          }
+        : fast;
+      const delivery = this.prepareMemoryDelivery(currentFast);
       if (!delivery.prompt) return null;
       return {
         ...delivery,
@@ -1682,6 +1692,10 @@ export class LlmClient {
       return;
     }
 
+    this.cancelPendingMemoryPrefetch('new_query');
+    this.surfacedRelevantAutoMemoryPaths.clear();
+    this.lastDeliveredMemoryTreeRevision = undefined;
+    this.config.getMemoryManager().resetMemoryBodyStateForSession();
     this.cachedGitStatus = undefined;
     await this.refreshSystemInstruction();
     this.getChat().addHistory({
@@ -3460,6 +3474,7 @@ export class LlmClient {
     let normalCompletion = false;
     let hasToolCalls = false;
     let memoryDeliveryToCommit: MemoryDeliveryResult | null = null;
+    let memoryDeliveryStateInvalidated = false;
     let modelRequestAccepted = false;
     // Declared outside the try so the finally block can close it out on
     // uncaught-exception exits too; created (when the hook is registered)
@@ -4078,6 +4093,7 @@ export class LlmClient {
           if (event.type === LlmEventType.ChatCompressed) {
             this.forceFullIdeContext = true;
             this.resetManagedAutoMemoryAfterCompression();
+            memoryDeliveryStateInvalidated = true;
             // Auto-compaction summarized away the startup prelude. Rebuild it
             // before the next turn so env/tool/MCP context isn't lost for the
             // rest of the session (manual /compress gets this via startChat).
@@ -4155,6 +4171,9 @@ export class LlmClient {
         if (memoryDeliveryToCommit && modelRequestAccepted) {
           this.commitManagedAutoMemoryRecallDelivery(memoryDeliveryToCommit);
           memoryDeliveryToCommit = null;
+          if (memoryDeliveryStateInvalidated) {
+            this.resetManagedAutoMemoryAfterCompression();
+          }
         } else if (memoryDeliveryToCommit) {
           this.discardManagedAutoMemoryRecallDelivery(memoryDeliveryToCommit);
           memoryDeliveryToCommit = null;

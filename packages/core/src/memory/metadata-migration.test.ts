@@ -238,6 +238,18 @@ describe('memory metadata migration', () => {
     ).resolves.toMatchObject({ ready: true, legacyFiles: 0 });
   });
 
+  it('does not count repo-local project memory when the project is untrusted', async () => {
+    await write('legacy.md', legacyContent());
+
+    await expect(
+      scanMemoryMetadataCorpusStatus({
+        projectRoot,
+        teamMemoryEnabled: false,
+        trustedProject: false,
+      }),
+    ).resolves.toMatchObject({ ready: true, files: 0, legacyFiles: 0 });
+  });
+
   it('atomically merges metadata while preserving unknown fields and body bytes', async () => {
     const original = legacyContent('BODY\r\nBYTES\r\n');
     await write('project/legacy.md', original);

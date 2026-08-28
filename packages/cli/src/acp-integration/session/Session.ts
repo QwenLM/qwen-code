@@ -5837,10 +5837,25 @@ export class Session implements SessionContext {
                 this.config.getManagedAutoMemoryEnabled()
               ) {
                 const memoryManager = this.config.getMemoryManager();
+                const projectRoot = this.config.getProjectRoot();
                 const history = this.#getCurrentChat().getHistoryShallow();
+                for (const scope of ['project', 'user'] as const) {
+                  void memoryManager
+                    .scheduleMetadataMigration({
+                      projectRoot,
+                      scope,
+                      config: this.config,
+                    })
+                    .catch((error: unknown) => {
+                      debugLogger.warn(
+                        `Failed to schedule ACP ${scope} memory metadata migration.`,
+                        error,
+                      );
+                    });
+                }
                 void memoryManager
                   .scheduleExtract({
-                    projectRoot: this.config.getProjectRoot(),
+                    projectRoot,
                     sessionId: this.config.getSessionId(),
                     history,
                     config: this.config,
@@ -5853,7 +5868,7 @@ export class Session implements SessionContext {
                   });
                 void memoryManager
                   .scheduleDream({
-                    projectRoot: this.config.getProjectRoot(),
+                    projectRoot,
                     sessionId: this.config.getSessionId(),
                     config: this.config,
                   })
@@ -7323,12 +7338,14 @@ export class Session implements SessionContext {
     const responseStream = (async function* () {
       let committed = false;
       let receivedChunk = false;
+      let memoryDeliveryStateInvalidated = false;
       try {
         for await (const event of sourceStream) {
           if (event.type === StreamEventType.CHUNK) {
             receivedChunk = true;
           } else if (event.type === StreamEventType.COMPRESSED) {
             llmClient.resetManagedAutoMemoryAfterCompression();
+            memoryDeliveryStateInvalidated = true;
           } else if (
             event.type === StreamEventType.RETRY ||
             event.type === StreamEventType.MODEL_FALLBACK
@@ -7339,6 +7356,9 @@ export class Session implements SessionContext {
         }
         if (receivedChunk) {
           llmClient.commitManagedAutoMemoryRecallDelivery(memoryDelivery);
+          if (memoryDeliveryStateInvalidated) {
+            llmClient.resetManagedAutoMemoryAfterCompression();
+          }
           committed = true;
         }
       } finally {

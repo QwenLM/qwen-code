@@ -98,6 +98,7 @@ import {
   type PendingSkill,
 } from './pending-skills.js';
 import type { AutoMemoryMetadata } from './types.js';
+import type { AutoMemoryDocumentCache } from './scan.js';
 import type { MemoryBodyCoverage } from './search-memory.js';
 import {
   runMemoryMetadataMigration,
@@ -595,6 +596,7 @@ export class MemoryManager {
   >();
   private readonly exhaustedBodyRefsInCurrentTurn = new Set<string>();
   private readonly searchMemoryRequestsInCurrentTurn = new Set<string>();
+  private readonly recallDocumentCache: AutoMemoryDocumentCache = new Map();
 
   constructor(sessionScanner: SessionScannerFn = defaultSessionScanner) {
     this.sessionScanner = sessionScanner;
@@ -736,7 +738,10 @@ export class MemoryManager {
           : getTeamAutoMemoryRoot(params.projectRoot);
     const roots =
       params.scope === 'project'
-        ? getProjectMetadataMigrationRoots(params.projectRoot)
+        ? getProjectMetadataMigrationRoots(
+            params.projectRoot,
+            params.config.isTrustedFolder(),
+          )
         : [root];
     const domain = `${params.scope}:${root}`;
     const existingId = this.migrationInFlightByDomain.get(domain);
@@ -750,22 +755,31 @@ export class MemoryManager {
     if (params.config.getMemoryRecallMode() === 'structured') {
       return { status: 'skipped', skippedReason: 'complete' };
     }
-    if (
-      (
-        await Promise.all(
-          roots.map((candidateRoot) =>
-            scanMemoryMetadataMigrationCandidates(candidateRoot, params.scope),
-          ),
-        )
-      ).every((candidates) => candidates.length === 0)
-    ) {
-      return { status: 'skipped', skippedReason: 'complete' };
+    activeMigrationDomains.add(domain);
+    try {
+      if (
+        (
+          await Promise.all(
+            roots.map((candidateRoot) =>
+              scanMemoryMetadataMigrationCandidates(
+                candidateRoot,
+                params.scope,
+              ),
+            ),
+          )
+        ).every((candidates) => candidates.length === 0)
+      ) {
+        activeMigrationDomains.delete(domain);
+        return { status: 'skipped', skippedReason: 'complete' };
+      }
+    } catch (error) {
+      activeMigrationDomains.delete(domain);
+      throw error;
     }
     const record = makeTaskRecord('migration', params.projectRoot);
     const abortController = new AbortController();
     this.migrationAbortControllers.set(record.id, abortController);
     this.migrationInFlightByDomain.set(domain, record.id);
-    activeMigrationDomains.add(domain);
     this.storeWith(record, {
       status: 'running',
       progressText: `Migrating ${params.scope} memory metadata.`,
@@ -1316,7 +1330,10 @@ export class MemoryManager {
       params.config.getMemoryRecallMode() !== 'structured' &&
       (
         await Promise.all(
-          getProjectMetadataMigrationRoots(params.projectRoot).map((root) =>
+          getProjectMetadataMigrationRoots(
+            params.projectRoot,
+            params.config.isTrustedFolder(),
+          ).map((root) =>
             scanMemoryMetadataMigrationCandidates(root, 'project'),
           ),
         )
@@ -1994,7 +2011,10 @@ export class MemoryManager {
     query: string,
     options: ResolveRelevantAutoMemoryPromptOptions = {},
   ): Promise<RelevantAutoMemoryPromptResult> {
-    return resolveRelevantAutoMemoryPromptForQuery(projectRoot, query, options);
+    return resolveRelevantAutoMemoryPromptForQuery(projectRoot, query, {
+      ...options,
+      documentCache: this.recallDocumentCache,
+    });
   }
 
   getBodyPresentVersionsInHistory(): Map<string, number> {
@@ -2056,6 +2076,7 @@ export class MemoryManager {
   resetMemoryBodyStateForSession(): void {
     this.bodyPresentVersionsInHistory.clear();
     this.bodyCoverageInHistory.clear();
+    this.recallDocumentCache.clear();
     this.resetExhaustedBodyRefsForCurrentTurn();
   }
 

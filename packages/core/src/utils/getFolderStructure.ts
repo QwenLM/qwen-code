@@ -33,20 +33,14 @@ interface FolderStructureOptions {
   fileService?: FileDiscoveryService;
   /** File filtering ignore options. */
   fileFilteringOptions?: FileFilteringOptions;
-  hideManagedMemory?: boolean;
-  hideFolder?: (folderPath: string) => boolean;
 }
 // Define a type for the merged options where fileIncludePattern remains optional
 type MergedFolderStructureOptions = Required<
-  Omit<
-    FolderStructureOptions,
-    'fileIncludePattern' | 'fileService' | 'hideFolder'
-  >
+  Omit<FolderStructureOptions, 'fileIncludePattern' | 'fileService'>
 > & {
   fileIncludePattern?: RegExp;
   fileService?: FileDiscoveryService;
   fileFilteringOptions?: FileFilteringOptions;
-  hideFolder?: (folderPath: string) => boolean;
 };
 
 /** Represents the full, unfiltered information about a folder and its contents. */
@@ -197,12 +191,7 @@ async function readFullStructure(
               options.fileService.shouldQwenIgnoreFile(subFolderPath));
         }
 
-        if (
-          options.ignoredFolders.has(subFolderName) ||
-          isIgnored ||
-          (options.hideManagedMemory &&
-            isManagedMemoryFolder(rootPath, subFolderPath, options))
-        ) {
+        if (options.ignoredFolders.has(subFolderName) || isIgnored) {
           const ignoredSubFolder: FullFolderInfo = {
             name: subFolderName,
             path: subFolderPath,
@@ -238,19 +227,6 @@ async function readFullStructure(
   }
 
   return rootNode;
-}
-
-function isManagedMemoryFolder(
-  rootPath: string,
-  folderPath: string,
-  options: MergedFolderStructureOptions,
-): boolean {
-  if (options.hideFolder?.(folderPath)) return true;
-  const relativePath = path.relative(rootPath, folderPath);
-  return (
-    relativePath === path.join('.qwen', 'memory') ||
-    relativePath === path.join('.qwen', 'team-memory')
-  );
 }
 
 /**
@@ -346,17 +322,9 @@ export async function getFolderStructure(
     fileService: options?.fileService,
     fileFilteringOptions:
       options?.fileFilteringOptions ?? DEFAULT_FILE_FILTERING_OPTIONS,
-    hideManagedMemory: options?.hideManagedMemory ?? false,
-    hideFolder: options?.hideFolder,
   };
 
   try {
-    if (
-      mergedOptions.hideManagedMemory &&
-      mergedOptions.hideFolder?.(resolvedPath)
-    ) {
-      return `Showing up to ${mergedOptions.maxItems} items:\n\n${resolvedPath}${path.sep}\n└───${TRUNCATION_INDICATOR}`;
-    }
     // 1. Read the structure using BFS, respecting maxItems
     const structureRoot = await readFullStructure(resolvedPath, mergedOptions);
 

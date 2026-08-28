@@ -463,6 +463,7 @@ describe('Session', () => {
     resetManagedAutoMemoryAfterCompression: ReturnType<typeof vi.fn>;
   };
   let mockMemoryManager: {
+    scheduleMetadataMigration: ReturnType<typeof vi.fn>;
     scheduleExtract: ReturnType<typeof vi.fn>;
     scheduleDream: ReturnType<typeof vi.fn>;
     resetExhaustedBodyRefsForCurrentTurn: ReturnType<typeof vi.fn>;
@@ -684,6 +685,7 @@ describe('Session', () => {
       resetManagedAutoMemoryAfterCompression: vi.fn(),
     };
     mockMemoryManager = {
+      scheduleMetadataMigration: vi.fn().mockResolvedValue(undefined),
       scheduleExtract: vi.fn().mockResolvedValue(undefined),
       scheduleDream: vi.fn().mockResolvedValue(undefined),
       resetExhaustedBodyRefsForCurrentTurn: vi.fn(),
@@ -2400,6 +2402,19 @@ describe('Session', () => {
         mockMemoryManager.resetExhaustedBodyRefsForCurrentTurn,
       ).toHaveBeenCalledOnce();
       expect(textParts(firstSentMessage())).toEqual([memoryPrompt, 'hello']);
+      expect(mockMemoryManager.scheduleMetadataMigration).toHaveBeenCalledTimes(
+        2,
+      );
+      expect(mockMemoryManager.scheduleMetadataMigration).toHaveBeenCalledWith({
+        projectRoot: '/repo',
+        scope: 'project',
+        config: mockConfig,
+      });
+      expect(mockMemoryManager.scheduleMetadataMigration).toHaveBeenCalledWith({
+        projectRoot: '/repo',
+        scope: 'user',
+        config: mockConfig,
+      });
       expect(mockMemoryManager.scheduleExtract).toHaveBeenCalledWith({
         projectRoot: '/repo',
         sessionId: 'test-session-id',
@@ -2564,6 +2579,15 @@ describe('Session', () => {
     });
 
     it('resets managed-memory delivery state after stream compression', async () => {
+      const delivery = {
+        prompt: '<system-reminder>tree</system-reminder>',
+        selectedDocs: [],
+        strategy: 'heuristic',
+        deliveredTreeRevision: 'tree-v1',
+      };
+      mockLlmClient.consumeManagedAutoMemoryRecall.mockResolvedValueOnce(
+        delivery,
+      );
       mockChat.sendMessageStream = vi.fn().mockResolvedValue(
         (async function* () {
           yield {
@@ -2588,7 +2612,10 @@ describe('Session', () => {
 
       expect(
         mockLlmClient.resetManagedAutoMemoryAfterCompression,
-      ).toHaveBeenCalledOnce();
+      ).toHaveBeenCalledTimes(2);
+      expect(
+        mockLlmClient.commitManagedAutoMemoryRecallDelivery,
+      ).toHaveBeenCalledWith(delivery);
     });
 
     it('discards delivery when the provider send fails', async () => {

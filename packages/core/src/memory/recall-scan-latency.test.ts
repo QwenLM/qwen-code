@@ -11,6 +11,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { Config } from '../config/config.js';
 import { getAutoMemoryFilePath } from './paths.js';
 import { resolveRelevantAutoMemoryPromptForQuery } from './recall.js';
+import type { AutoMemoryDocumentCache } from './scan.js';
 import { selectRelevantAutoMemoryDocumentsByModel } from './relevanceSelector.js';
 import { ensureAutoMemoryScaffold } from './store.js';
 
@@ -46,6 +47,7 @@ const REPEATS = 5;
 
 let tempDir: string;
 const projectRootByCount = new Map<number, string>();
+const documentCacheByProject = new Map<string, AutoMemoryDocumentCache>();
 
 async function buildMemoryTree(topicCount: number): Promise<string> {
   const projectRoot = path.join(tempDir, `project-${topicCount}`);
@@ -89,6 +91,11 @@ async function buildMemoryTree(topicCount: number): Promise<string> {
 /** Wall-clock ms from the recall call until the fast result is published. */
 async function measureTimeToFastResultMs(projectRoot: string): Promise<number> {
   let elapsed = Number.NaN;
+  let documentCache = documentCacheByProject.get(projectRoot);
+  if (!documentCache) {
+    documentCache = new Map();
+    documentCacheByProject.set(projectRoot, documentCache);
+  }
   const startedAt = performance.now();
   const recall = resolveRelevantAutoMemoryPromptForQuery(
     projectRoot,
@@ -98,6 +105,7 @@ async function measureTimeToFastResultMs(projectRoot: string): Promise<number> {
         getSessionId: () => 'session-scan-bench',
         getModel: () => 'qwen3-coder-plus',
       } as Config,
+      documentCache,
       onFastResult: () => {
         elapsed = performance.now() - startedAt;
       },

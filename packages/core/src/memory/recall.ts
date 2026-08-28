@@ -12,6 +12,7 @@ import {
   scanAllAutoMemoryTopicDocuments,
   scanAllUserAutoMemoryTopicDocuments,
   scanAutoMemorySnapshot,
+  type AutoMemoryDocumentCache,
   type MemorySourceStatus,
   type ScannedAutoMemoryDocument,
 } from './scan.js';
@@ -447,6 +448,8 @@ export interface ResolveRelevantAutoMemoryPromptOptions {
    * deterministic pass finds nothing, it publishes the compact router.
    */
   onFastResult?: (result: RelevantAutoMemoryPromptResult) => void;
+  /** @internal Reuses parsed documents within one Config session. */
+  documentCache?: AutoMemoryDocumentCache;
 }
 
 export interface RelevantAutoMemoryPromptResult {
@@ -536,13 +539,15 @@ export async function resolveRelevantAutoMemoryPromptForQuery(
   const teamMemoryEnabled = options.config?.getTeamMemoryEnabled?.() ?? false;
   const snapshot = legacy
     ? await Promise.all([
-        scanAllAutoMemoryTopicDocuments(projectRoot),
-        scanAllUserAutoMemoryTopicDocuments().catch((error: unknown) => {
-          debugLogger.warn(
-            `User-level auto-memory scan failed; project-level recall continues: ${error instanceof Error ? error.message : String(error)}`,
-          );
-          return [];
-        }),
+        scanAllAutoMemoryTopicDocuments(projectRoot, options.documentCache),
+        scanAllUserAutoMemoryTopicDocuments(options.documentCache).catch(
+          (error: unknown) => {
+            debugLogger.warn(
+              `User-level auto-memory scan failed; project-level recall continues: ${error instanceof Error ? error.message : String(error)}`,
+            );
+            return [];
+          },
+        ),
       ]).then(([projectDocs, userDocs]) => {
         const sourceStatus: MemorySourceStatus = {
           requestedScopes: ['project', 'user'],
@@ -561,6 +566,7 @@ export async function resolveRelevantAutoMemoryPromptForQuery(
         teamMemoryEnabled,
         trustedProject: options.config?.isTrustedFolder?.() ?? false,
         uncapped: true,
+        documentCache: options.documentCache,
       });
   const scanDurationMs = Date.now() - t0;
   let fastDurationMs = 0;

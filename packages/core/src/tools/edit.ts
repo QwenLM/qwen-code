@@ -20,11 +20,7 @@ import { makeRelative, shortenPath, unescapePath } from '../utils/paths.js';
 import { getErrorMessage, isNodeError } from '../utils/errors.js';
 import type { Config } from '../config/config.js';
 import { ApprovalMode } from '../config/config.js';
-import {
-  isAnyAutoMemPath,
-  isManagedMemoryPath,
-  isTeamAutoMemPath,
-} from '../memory/paths.js';
+import { isAnyAutoMemPath, isTeamAutoMemPath } from '../memory/paths.js';
 import { checkTeamMemorySecrets } from '../memory/team-memory-secret-guard.js';
 import {
   FileEncoding,
@@ -400,21 +396,7 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
     if (isTeamAutoMemPath(filePath, projectRoot)) {
       return 'ask';
     }
-    const isLexicalAutoMemoryPath = isAnyAutoMemPath(filePath, projectRoot);
-    const isResolvedManagedMemoryPath = isManagedMemoryPath(
-      filePath,
-      projectRoot,
-    );
-    if (isLexicalAutoMemoryPath && !isResolvedManagedMemoryPath) {
-      return 'deny';
-    }
-    if (
-      isResolvedManagedMemoryPath &&
-      this.config.allowsDirectAutoMemoryWrite?.() !== true
-    ) {
-      return 'deny';
-    }
-    if (isLexicalAutoMemoryPath) {
+    if (isAnyAutoMemPath(filePath, projectRoot)) {
       return 'allow';
     }
     return 'ask';
@@ -493,36 +475,6 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
    * @returns Result of the edit operation
    */
   async execute(signal: AbortSignal): Promise<ToolResult> {
-    const projectRoot = this.config.getProjectRoot();
-    const isLexicalAutoMemoryPath = isAnyAutoMemPath(
-      this.params.file_path,
-      projectRoot,
-    );
-    const isResolvedManagedMemoryPath = isManagedMemoryPath(
-      this.params.file_path,
-      projectRoot,
-    );
-    if (
-      (isLexicalAutoMemoryPath && !isResolvedManagedMemoryPath) ||
-      (isResolvedManagedMemoryPath &&
-        !isTeamAutoMemPath(
-          this.params.file_path,
-          this.config.getProjectRoot(),
-        ) &&
-        this.config.allowsDirectAutoMemoryWrite?.() !== true)
-    ) {
-      const message =
-        'Direct edits to managed auto-memory files are disabled. Use manage_memory instead.';
-      return {
-        llmContent: message,
-        returnDisplay: 'Direct auto-memory file edits are disabled.',
-        error: {
-          message,
-          type: ToolErrorType.EXECUTION_DENIED,
-        },
-      };
-    }
-
     let editData: CalculatedEdit;
     try {
       editData = await this.calculateEdit(this.params);

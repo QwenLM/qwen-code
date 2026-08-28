@@ -22,12 +22,7 @@ import { ToolErrorType } from './tool-error.js';
 import { ToolDisplayNames, ToolNames } from './tool-names.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { Storage } from '../config/storage.js';
-import {
-  getMemoryBaseDir,
-  isManagedMemoryPath,
-  isPrivateMemoryProjectsPath,
-} from '../memory/paths.js';
-import type { FunctionDeclaration } from '@google/genai';
+import { getMemoryBaseDir } from '../memory/paths.js';
 
 const debugLogger = createDebugLogger('LS');
 
@@ -174,19 +169,6 @@ class LSToolInvocation extends BaseToolInvocation<LSToolParams, ToolResult> {
    */
   async execute(_signal: AbortSignal): Promise<ToolResult> {
     try {
-      const absPath = path.resolve(this.params.path);
-      if (
-        (isManagedMemoryPath(absPath, this.config.getTargetDir()) ||
-          isPrivateMemoryProjectsPath(absPath)) &&
-        this.config.allowsDirectAutoMemoryRead?.() !== true
-      ) {
-        return this.errorResult(
-          'Direct list_directory access to managed auto-memory directories is disabled. Do not answer physical filename or path listing requests from memory metadata; explain that direct directory browsing is unavailable.',
-          'Direct auto-memory directory listing is disabled.',
-          ToolErrorType.EXECUTION_DENIED,
-        );
-      }
-
       const stats = await fs.stat(this.params.path);
       if (!stats) {
         // fs.statSync throws on non-existence, so this check might be redundant
@@ -325,16 +307,6 @@ class LSToolInvocation extends BaseToolInvocation<LSToolParams, ToolResult> {
  */
 export class LSTool extends BaseDeclarativeTool<LSToolParams, ToolResult> {
   static readonly Name = ToolNames.LS;
-
-  override get schema(): FunctionDeclaration {
-    const schema = super.schema;
-    return this.config.getMemoryRecallMode?.() === 'structured'
-      ? {
-          ...schema,
-          description: `${schema.description} Do not use this tool for managed auto-memory directories under .qwen/memory, .qwen/team-memory, or ~/.qwen/memories.`,
-        }
-      : schema;
-  }
 
   constructor(private config: Config) {
     super(

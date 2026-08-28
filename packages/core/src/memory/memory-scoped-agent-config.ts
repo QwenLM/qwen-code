@@ -458,7 +458,5 @@ export function createMemoryScopedAgentConfig(
 
   return deriveConfig(config, {
     getPermissionManager: () => scopedPm as unknown as PermissionManager,
-    allowsDirectAutoMemoryRead: () => true,
-    allowsDirectAutoMemoryWrite: () => true,
   });
 }

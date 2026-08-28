@@ -8,11 +8,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import type { Config } from '../config/config.js';
 import { ApprovalMode } from '../config/config.js';
-import {
-  isAnyAutoMemPath,
-  isManagedMemoryPath,
-  isTeamAutoMemPath,
-} from '../memory/paths.js';
+import { isAnyAutoMemPath, isTeamAutoMemPath } from '../memory/paths.js';
 import { checkTeamMemorySecrets } from '../memory/team-memory-secret-guard.js';
 import type {
   FileDiff,
@@ -161,21 +157,7 @@ class WriteFileToolInvocation extends BaseToolInvocation<
     if (isTeamAutoMemPath(filePath, projectRoot)) {
       return 'ask';
     }
-    const isLexicalAutoMemoryPath = isAnyAutoMemPath(filePath, projectRoot);
-    const isResolvedManagedMemoryPath = isManagedMemoryPath(
-      filePath,
-      projectRoot,
-    );
-    if (isLexicalAutoMemoryPath && !isResolvedManagedMemoryPath) {
-      return 'deny';
-    }
-    if (
-      isResolvedManagedMemoryPath &&
-      this.config.allowsDirectAutoMemoryWrite?.() !== true
-    ) {
-      return 'deny';
-    }
-    if (isLexicalAutoMemoryPath) {
+    if (isAnyAutoMemPath(filePath, projectRoot)) {
       return 'allow';
     }
     return 'ask';
@@ -313,30 +295,6 @@ class WriteFileToolInvocation extends BaseToolInvocation<
   async execute(_abortSignal: AbortSignal): Promise<ToolResult> {
     const { file_path, content, ai_proposed_content, modified_by_user } =
       this.params;
-
-    const projectRoot = this.config.getProjectRoot();
-    const isLexicalAutoMemoryPath = isAnyAutoMemPath(file_path, projectRoot);
-    const isResolvedManagedMemoryPath = isManagedMemoryPath(
-      file_path,
-      projectRoot,
-    );
-    if (
-      (isLexicalAutoMemoryPath && !isResolvedManagedMemoryPath) ||
-      (isResolvedManagedMemoryPath &&
-        !isTeamAutoMemPath(file_path, this.config.getProjectRoot()) &&
-        this.config.allowsDirectAutoMemoryWrite?.() !== true)
-    ) {
-      const message =
-        'Direct writes to managed auto-memory files are disabled. Use manage_memory instead.';
-      return {
-        llmContent: message,
-        returnDisplay: 'Direct auto-memory file writes are disabled.',
-        error: {
-          message,
-          type: ToolErrorType.EXECUTION_DENIED,
-        },
-      };
-    }
 
     let fileExists = await isFilefileExists(file_path);
     let originalContent = '';

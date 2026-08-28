@@ -1878,8 +1878,6 @@ export type DerivedConfigOverrides = Partial<
     | 'getMessageBus'
     | 'getAutoMemoryPrompt'
     | 'getUserMemory'
-    | 'allowsDirectAutoMemoryRead'
-    | 'allowsDirectAutoMemoryWrite'
   >
 >;
 
@@ -5791,6 +5789,9 @@ export class Config {
     this.sessionService = undefined;
     this.fileHistoryService = undefined;
     this.getFileReadCache().clear();
+    this.memoryRecallMode = 'legacy';
+    this.memoryCorpusRevision = '';
+    this.memoryRecallModeInitialized = false;
 
     let memoryRefreshError: unknown;
     try {
@@ -6826,7 +6827,10 @@ export class Config {
     const projectRoot = this.getProjectRoot();
     const configuredProjectRoot = getAutoMemoryRoot(projectRoot);
     await Promise.all([
-      ...getProjectMetadataMigrationRoots(projectRoot).map((root) =>
+      ...getProjectMetadataMigrationRoots(
+        projectRoot,
+        this.isTrustedFolder(),
+      ).map((root) =>
         root === configuredProjectRoot
           ? rebuildManagedAutoMemoryIndex(projectRoot)
           : rebuildAutoMemoryIndexAtRoot(root, 'project'),
@@ -9145,14 +9149,6 @@ export class Config {
    */
   getFileReadCacheDisabled(): boolean {
     return this.fileReadCacheDisabled;
-  }
-
-  allowsDirectAutoMemoryRead(): boolean {
-    return this.memoryRecallMode === 'legacy';
-  }
-
-  allowsDirectAutoMemoryWrite(): boolean {
-    return this.memoryRecallMode === 'legacy';
   }
 
   /**

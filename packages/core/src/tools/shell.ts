@@ -53,15 +53,9 @@ import {
   type ShellTaskRegistration,
 } from '../services/backgroundShellRegistry.js';
 import stripAnsi from 'strip-ansi';
-import picomatch from 'picomatch';
 import { formatMemoryUsage } from '../utils/formatters.js';
 import type { AnsiOutput } from '../utils/terminalSerializer.js';
-import {
-  isSubpaths,
-  makeRelative,
-  QWEN_DIR,
-  shortenPath,
-} from '../utils/paths.js';
+import { isSubpaths, makeRelative, shortenPath } from '../utils/paths.js';
 import {
   buildShellExecWarnings,
   detectSelfKillCommand,
@@ -92,13 +86,6 @@ import {
   type ReadTextFileResponse,
 } from '../services/fileSystemService.js';
 import { createPatchSmart, getDiffStat } from './diffOptions.js';
-import {
-  AUTO_MEMORY_DIRNAME,
-  getAutoMemoryRoot,
-  getTeamAutoMemoryRoot,
-  getUserAutoMemoryRoot,
-  isManagedMemoryPath,
-} from '../memory/paths.js';
 
 const debugLogger = createDebugLogger('SHELL');
 const DEFAULT_SHELL_OUTPUT_THRESHOLD = 30_000;
@@ -276,10 +263,7 @@ function pickOuterLastMatch<T extends RegExpMatchArray | null>(
  * the polynomial regex behaviour CodeQL flagged on the previous
  * `\S*\s+`-based slicing loop.
  */
-function tokeniseSegment(
-  segment: string,
-  stripInvocationPrefix = true,
-): string[] | null {
+function tokeniseSegment(segment: string): string[] | null {
   let tokens: string[];
   try {
     // Pass an env getter that preserves `$NAME` references in tokens
@@ -294,12 +278,9 @@ function tokeniseSegment(
     // reference too, but in practice nobody creates a directory named
     // literally `$HOME`, so over-flagging is the conservative-correct
     // choice.
-    tokens = parse(segment, (key) => '$' + key)
-      .map((token) => {
-        if (typeof token === 'string') return token;
-        return 'op' in token && token.op === 'glob' ? token.pattern : undefined;
-      })
-      .filter((token): token is string => token !== undefined);
+    tokens = parse(segment, (key) => '$' + key).filter(
+      (t): t is string => typeof t === 'string',
+    );
   } catch (e) {
     debugLogger.warn(
       `tokeniseSegment: parse failed for "${segment.slice(0, 80)}": ${
@@ -308,7 +289,6 @@ function tokeniseSegment(
     );
     return null;
   }
-  if (!stripInvocationPrefix) return tokens;
   let i = 0;
   // Skip env-var assignments (KEY=value). If the key is one of the
   // git-repo-redirecting variables, refuse to tokenise the segment at
@@ -388,185 +368,6 @@ function tokeniseSegment(
     }
   }
   return tokens.slice(i);
-}
-
-function safeIsManagedMemoryPath(
-  token: string,
-  projectRoot: string,
-  baseDir: string,
-): boolean {
-  try {
-    let candidate = token;
-    const hasNamedTilde = /^~[^/]+(?:\/|$)/.test(candidate);
-    if (
-      candidate === '~' ||
-      candidate.startsWith('~/') ||
-      candidate === '$HOME' ||
-      candidate.startsWith('$HOME/') ||
-      candidate === '${HOME}' ||
-      candidate.startsWith('${HOME}/') ||
-      hasNamedTilde
-    ) {
-      const home = os.homedir();
-      const homeAlias = `~${path.basename(home)}`;
-      if (
-        candidate === '~' ||
-        candidate === '$HOME' ||
-        candidate === '${HOME}' ||
-        candidate === homeAlias
-      ) {
-        candidate = home;
-      } else if (candidate.startsWith('~/')) {
-        candidate = path.join(home, candidate.slice(2));
-      } else if (candidate.startsWith('$HOME/')) {
-        candidate = path.join(home, candidate.slice(6));
-      } else if (candidate.startsWith('${HOME}/')) {
-        candidate = path.join(home, candidate.slice(8));
-      } else if (candidate.startsWith(`${homeAlias}/`)) {
-        candidate = path.join(home, candidate.slice(homeAlias.length + 1));
-      }
-    }
-    const globIndex = candidate.search(/[?*[{]/);
-    if (globIndex >= 0) {
-      const absolutePattern = path.resolve(baseDir, candidate);
-      const roots = [
-        getAutoMemoryRoot(projectRoot),
-        path.join(projectRoot, QWEN_DIR, AUTO_MEMORY_DIRNAME),
-        getUserAutoMemoryRoot(),
-        getTeamAutoMemoryRoot(projectRoot),
-      ];
-      return roots.some((root) => globCanReachPath(absolutePattern, root));
-    }
-    return isManagedMemoryPath(candidate, projectRoot, baseDir);
-  } catch {
-    return /[?*[{]/.test(token);
-  }
-}
-
-function globCanReachPath(pattern: string, target: string): boolean {
-  const expandedPatterns = expandBracePatterns(pattern);
-  if (!expandedPatterns) return true;
-  return expandedPatterns.some((expandedPattern) => {
-    const patternRoot = path.parse(expandedPattern).root;
-    const targetRoot = path.parse(target).root;
-    if (patternRoot !== targetRoot) return false;
-    const patternParts = expandedPattern
-      .slice(patternRoot.length)
-      .split(path.sep);
-    const targetParts = path
-      .resolve(target)
-      .slice(targetRoot.length)
-      .split(path.sep);
-    const sharedLength = Math.min(patternParts.length, targetParts.length);
-    for (let index = 0; index < sharedLength; index += 1) {
-      const part = patternParts[index]!;
-      if (part === '**') return true;
-      if (!picomatch.isMatch(targetParts[index]!, part)) return false;
-    }
-    return true;
-  });
-}
-
-function expandBracePatterns(
-  pattern: string,
-  limit = 64,
-): string[] | undefined {
-  let searchFrom = 0;
-  while (true) {
-    const start = pattern.indexOf('{', searchFrom);
-    if (start < 0) return [pattern];
-    let depth = 0;
-    let end = -1;
-    for (let index = start; index < pattern.length; index += 1) {
-      if (pattern[index] === '{') depth += 1;
-      if (pattern[index] === '}') {
-        depth -= 1;
-        if (depth === 0) {
-          end = index;
-          break;
-        }
-      }
-    }
-    if (end < 0) return undefined;
-    const body = pattern.slice(start + 1, end);
-    const choices: string[] = [];
-    let choiceStart = 0;
-    depth = 0;
-    for (let index = 0; index <= body.length; index += 1) {
-      const char = body[index];
-      if (char === '{') depth += 1;
-      if (char === '}') depth -= 1;
-      if ((char === ',' && depth === 0) || index === body.length) {
-        choices.push(body.slice(choiceStart, index));
-        choiceStart = index + 1;
-      }
-    }
-    if (choices.length < 2) {
-      searchFrom = end + 1;
-      continue;
-    }
-    const prefix = pattern.slice(0, start);
-    const suffix = pattern.slice(end + 1);
-    const expanded: string[] = [];
-    for (const choice of choices) {
-      const nested = expandBracePatterns(`${prefix}${choice}${suffix}`, limit);
-      if (!nested || expanded.length + nested.length > limit) return undefined;
-      expanded.push(...nested);
-    }
-    return expanded;
-  }
-}
-
-function shellPathArgument(token: string): string | undefined {
-  let candidate = token.replace(/^\d*(?:>>?|<<?|<>|>\|)/, '');
-  if (leadingEnvAssignmentKey(candidate) !== null) {
-    candidate = candidate.slice(candidate.indexOf('=') + 1);
-  }
-  if (
-    candidate.length === 0 ||
-    candidate.startsWith('-') ||
-    (candidate.includes('$') &&
-      candidate !== '$HOME' &&
-      !candidate.startsWith('$HOME/') &&
-      candidate !== '${HOME}' &&
-      !candidate.startsWith('${HOME}/'))
-  ) {
-    return undefined;
-  }
-  return path.isAbsolute(candidate) ||
-    candidate === '~' ||
-    candidate.startsWith('~/') ||
-    candidate.startsWith('.') ||
-    candidate.includes('.qwen') ||
-    candidate.includes(path.sep)
-    ? candidate
-    : undefined;
-}
-
-function isManagedMemoryShellAccess(
-  command: string,
-  cwd: string,
-  projectRoot: string,
-): boolean {
-  if (safeIsManagedMemoryPath(cwd, projectRoot, projectRoot)) {
-    return true;
-  }
-  for (const segment of splitCommands(stripShellWrapper(command))) {
-    const tokens = tokeniseSegment(segment, false);
-    if (!tokens || tokens.length === 0) {
-      continue;
-    }
-    for (const token of tokens) {
-      const candidate = shellPathArgument(token);
-      if (!candidate) {
-        continue;
-      }
-      if (safeIsManagedMemoryPath(candidate, projectRoot, cwd)) {
-        return true;
-      }
-    }
-  }
-  return false;
 }
 
 const EXIT_ONE_IS_NOT_ERROR_COMMANDS = new Set([
@@ -2232,14 +2033,6 @@ export class ShellToolInvocation extends BaseToolInvocation<
    * - All other commands → 'ask'
    */
   override async getDefaultPermission(): Promise<PermissionDecision> {
-    if (
-      this.config.getMemoryRecallMode?.() === 'structured' &&
-      (this.config.allowsDirectAutoMemoryRead?.() !== true ||
-        this.config.allowsDirectAutoMemoryWrite?.() !== true)
-    ) {
-      return 'ask';
-    }
-
     // Gate on the RAW command before `stripShellWrapper` runs.
     // `stripShellWrapper` drops leading env-assignment tokens AND
     // unwraps `bash -c '...'` to its inner script — so for
@@ -2421,33 +2214,11 @@ export class ShellToolInvocation extends BaseToolInvocation<
     canPromoteForegroundShell?: () => boolean,
   ): Promise<ToolResult> {
     const strippedCommand = stripShellWrapper(this.params.command);
-    const cwd = this.params.directory || this.config.getTargetDir();
 
     if (signal.aborted) {
       return {
         llmContent: 'Command was cancelled by user before it could start.',
         returnDisplay: 'Command cancelled by user.',
-      };
-    }
-
-    if (
-      (this.config.allowsDirectAutoMemoryRead?.() !== true ||
-        this.config.allowsDirectAutoMemoryWrite?.() !== true) &&
-      isManagedMemoryShellAccess(
-        this.params.command,
-        cwd,
-        this.config.getTargetDir(),
-      )
-    ) {
-      const message =
-        'Direct shell access to managed auto-memory files is disabled. Use search_memory to read memory and manage_memory to change it.';
-      return {
-        llmContent: message,
-        returnDisplay: 'Direct auto-memory shell access is disabled.',
-        error: {
-          message,
-          type: ToolErrorType.EXECUTION_DENIED,
-        },
       };
     }
 
@@ -2527,6 +2298,8 @@ export class ShellToolInvocation extends BaseToolInvocation<
       this.addCoAuthorToGitCommit(this.params.command.trim()),
     );
     const commandToExecute = processedCommand;
+    const cwd = this.params.directory || this.config.getTargetDir();
+
     // Snapshot HEAD before running so attachCommitAttribution can detect
     // commit creation by HEAD movement instead of trusting the shell
     // exit code (which is unreliable for compound commands).
@@ -5206,8 +4979,6 @@ function getShellToolDescription(): string {
   return `Executes a given shell command (as \`${executionWrapper}\`) in a subprocess with optional timeout, ensuring proper handling and security measures.
 
 IMPORTANT: This tool is for terminal operations like git, npm, docker, etc. DO NOT use it for file operations (reading, writing, editing, searching, finding files) - use the specialized tools for this instead.
-
-Managed auto-memory is not a shell filesystem interface. Use search_memory to retrieve memory and manage_memory to change it; never inspect managed-memory paths with shell commands.
 
 **Usage notes**:
 - The command argument is required.

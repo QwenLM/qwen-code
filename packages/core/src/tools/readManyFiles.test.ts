@@ -72,7 +72,6 @@ describe('readManyFiles', () => {
       getFileSystemService: () => new StandardFileSystemService(),
       getContentGeneratorConfig: () => ({ modalities: {} }),
       getModel: () => 'text-only-model',
-      getMemoryRecallMode: () => 'legacy',
     }) as unknown as Config;
 
   // Variant of createMockConfig wired to a live FileReadCache so the
@@ -966,30 +965,6 @@ describe('readManyFiles', () => {
       const content = contentToString(result.contentParts);
       expect(content).toContain('Content from');
       expect(content).toContain('emptydir');
-    });
-
-    it('hides managed memory directories only without direct-read capability', async () => {
-      await createTestFile('.qwen', 'memory', 'user', 'preference.md');
-      const structuredConfig = {
-        ...createMockConfig(tempRootDir),
-        getMemoryRecallMode: () => 'structured',
-      } as Config;
-
-      const hidden = await readManyFiles(structuredConfig, {
-        paths: ['.qwen'],
-      });
-      expect(contentToString(hidden.contentParts)).not.toContain(
-        'preference.md',
-      );
-
-      const visible = await readManyFiles(
-        {
-          ...structuredConfig,
-          allowsDirectAutoMemoryRead: () => true,
-        } as Config,
-        { paths: ['.qwen'] },
-      );
-      expect(contentToString(visible.contentParts)).toContain('preference.md');
     });
   });
 

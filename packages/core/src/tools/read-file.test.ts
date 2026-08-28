@@ -21,11 +21,6 @@ import { StandardFileSystemService } from '../services/fileSystemService.js';
 import { createMockWorkspaceContext } from '../test-utils/mockWorkspaceContext.js';
 import type { ToolInvocation, ToolResult } from './tools.js';
 import type { VisionBridgeNoticeDisplay } from '../services/visionBridge/vision-bridge-service.js';
-import {
-  clearAutoMemoryRootCache,
-  getAutoMemoryRoot,
-  getTeamAutoMemoryRoot,
-} from '../memory/paths.js';
 
 const visionBridgeMocks = vi.hoisted(() => ({
   runVisionBridge: vi.fn(),
@@ -73,7 +68,6 @@ describe('ReadFileTool', () => {
   let tempRootDir: string;
   let tool: ReadFileTool;
   let fileReadCache: FileReadCache;
-  let memoryRecallMode: 'legacy' | 'structured';
   const abortSignal = new AbortController().signal;
 
   beforeEach(async () => {
@@ -100,7 +94,6 @@ describe('ReadFileTool', () => {
       path.join(os.tmpdir(), 'read-file-tool-root-'),
     );
     fileReadCache = new FileReadCache();
-    memoryRecallMode = 'structured';
 
     const mockConfigInstance = {
       getFileService: () => new FileDiscoveryService(tempRootDir),
@@ -120,7 +113,6 @@ describe('ReadFileTool', () => {
       }),
       getFileReadCache: () => fileReadCache,
       getFileReadCacheDisabled: () => false,
-      getMemoryRecallMode: () => memoryRecallMode,
     } as unknown as Config;
     tool = new ReadFileTool(mockConfigInstance);
   });
@@ -133,27 +125,6 @@ describe('ReadFileTool', () => {
   });
 
   describe('build', () => {
-    it('describes managed auto-memory reads as search_memory-only', () => {
-      expect(tool.schema.description).toContain(
-        'Do not use this tool to retrieve managed auto-memory bodies',
-      );
-      expect(tool.schema.description).toContain('.qwen/memory');
-      expect(tool.schema.description).toContain('search_memory.fetch');
-      const parameters = tool.schema.parametersJsonSchema as {
-        properties: { file_path: { description: string } };
-      };
-      expect(parameters.properties.file_path.description).not.toContain(
-        'managed auto-memory',
-      );
-    });
-
-    it('keeps the Main read_file description in legacy mode', () => {
-      memoryRecallMode = 'legacy';
-
-      expect(tool.schema.description).not.toContain('managed auto-memory');
-      expect(tool.schema.description).not.toContain('search_memory');
-    });
-
     it('should return an invocation for valid params (absolute path within root)', () => {
       const params: ReadFileToolParams = {
         file_path: path.join(tempRootDir, 'test.txt'),
@@ -474,156 +445,6 @@ describe('ReadFileTool', () => {
         llmContent: fileContent,
         returnDisplay: '',
       });
-    });
-
-    it('should reject direct reads of managed auto-memory files', async () => {
-      const previousLocal = process.env['QWEN_CODE_MEMORY_LOCAL'];
-      process.env['QWEN_CODE_MEMORY_LOCAL'] = '1';
-      clearAutoMemoryRootCache();
-      try {
-        const memoryRoot = getAutoMemoryRoot(tempRootDir);
-        const filePath = path.join(memoryRoot, 'user', 'preference.md');
-        await fsp.mkdir(path.dirname(filePath), { recursive: true });
-        await fsp.writeFile(filePath, 'remembered preference', 'utf-8');
-        const invocation = tool.build({
-          file_path: filePath,
-        }) as ToolInvocation<ReadFileToolParams, ToolResult>;
-
-        const result = await invocation.execute(abortSignal);
-
-        expect(result).toEqual({
-          llmContent:
-            'Direct read_file access to managed auto-memory files is disabled. Use search_memory.fetch or search_memory.search to retrieve memory content.',
-          returnDisplay: 'Direct auto-memory file reads are disabled.',
-          error: {
-            message:
-              'Direct read_file access to managed auto-memory files is disabled. Use search_memory instead.',
-            type: ToolErrorType.EXECUTION_DENIED,
-          },
-        });
-      } finally {
-        if (previousLocal === undefined) {
-          delete process.env['QWEN_CODE_MEMORY_LOCAL'];
-        } else {
-          process.env['QWEN_CODE_MEMORY_LOCAL'] = previousLocal;
-        }
-        clearAutoMemoryRootCache();
-      }
-    });
-
-    it('should reject direct reads of project-local auto-memory files outside local memory mode', async () => {
-      const previousLocal = process.env['QWEN_CODE_MEMORY_LOCAL'];
-      delete process.env['QWEN_CODE_MEMORY_LOCAL'];
-      clearAutoMemoryRootCache();
-      try {
-        const filePath = path.join(
-          tempRootDir,
-          '.qwen',
-          'memory',
-          'feedback',
-          'preference.md',
-        );
-        await fsp.mkdir(path.dirname(filePath), { recursive: true });
-        await fsp.writeFile(filePath, 'remembered preference', 'utf-8');
-        const invocation = tool.build({
-          file_path: fs.realpathSync(filePath),
-        }) as ToolInvocation<ReadFileToolParams, ToolResult>;
-
-        const result = await invocation.execute(abortSignal);
-
-        expect(result.error?.type).toBe(ToolErrorType.EXECUTION_DENIED);
-        expect(result.llmContent).toContain(
-          'Direct read_file access to managed auto-memory files is disabled.',
-        );
-      } finally {
-        if (previousLocal === undefined) {
-          delete process.env['QWEN_CODE_MEMORY_LOCAL'];
-        } else {
-          process.env['QWEN_CODE_MEMORY_LOCAL'] = previousLocal;
-        }
-        clearAutoMemoryRootCache();
-      }
-    });
-
-    it('should reject case-variant managed-memory paths on case-insensitive filesystems', async () => {
-      const filePath = path.join(
-        tempRootDir,
-        '.qwen',
-        'memory',
-        'feedback',
-        'preference.md',
-      );
-      await fsp.mkdir(path.dirname(filePath), { recursive: true });
-      await fsp.writeFile(filePath, 'remembered preference', 'utf-8');
-      const caseVariant = path.join(
-        tempRootDir,
-        '.QWEN',
-        'Memory',
-        'feedback',
-        'preference.md',
-      );
-      if (!fs.existsSync(caseVariant)) return;
-
-      const result = await (
-        tool.build({ file_path: caseVariant }) as ToolInvocation<
-          ReadFileToolParams,
-          ToolResult
-        >
-      ).execute(abortSignal);
-
-      expect(result.error?.type).toBe(ToolErrorType.EXECUTION_DENIED);
-    });
-
-    it('should allow direct managed auto-memory reads for scoped memory agents', async () => {
-      const previousLocal = process.env['QWEN_CODE_MEMORY_LOCAL'];
-      process.env['QWEN_CODE_MEMORY_LOCAL'] = '1';
-      clearAutoMemoryRootCache();
-      try {
-        const scopedTool = new ReadFileTool({
-          ...(tool as unknown as { config: Config }).config,
-          allowsDirectAutoMemoryRead: () => true,
-        } as unknown as Config);
-        const memoryRoot = getAutoMemoryRoot(tempRootDir);
-        const filePath = path.join(memoryRoot, 'user', 'preference.md');
-        await fsp.mkdir(path.dirname(filePath), { recursive: true });
-        await fsp.writeFile(filePath, 'remembered preference', 'utf-8');
-        const invocation = scopedTool.build({
-          file_path: filePath,
-        }) as ToolInvocation<ReadFileToolParams, ToolResult>;
-
-        expect(await invocation.execute(abortSignal)).toEqual(
-          expect.objectContaining({
-            llmContent: expect.stringContaining('remembered preference'),
-          }),
-        );
-      } finally {
-        if (previousLocal === undefined) {
-          delete process.env['QWEN_CODE_MEMORY_LOCAL'];
-        } else {
-          process.env['QWEN_CODE_MEMORY_LOCAL'] = previousLocal;
-        }
-        clearAutoMemoryRootCache();
-      }
-    });
-
-    it('should allow direct reads of team memory in structured mode', async () => {
-      const filePath = path.join(
-        getTeamAutoMemoryRoot(tempRootDir),
-        'reference',
-        'shared.md',
-      );
-      await fsp.mkdir(path.dirname(filePath), { recursive: true });
-      await fsp.writeFile(filePath, 'shared team memory', 'utf-8');
-
-      const result = await (
-        tool.build({ file_path: filePath }) as ToolInvocation<
-          ReadFileToolParams,
-          ToolResult
-        >
-      ).execute(abortSignal);
-
-      expect(result.error).toBeUndefined();
-      expect(result.llmContent).toContain('shared team memory');
     });
 
     it.skipIf(process.platform === 'win32')(
@@ -1575,12 +1396,8 @@ describe('ReadFileTool', () => {
           await fsp.mkdir(memRoot, { recursive: true });
           const memFile = path.join(memRoot, 'AGENTS.md');
           await fsp.writeFile(memFile, '# memory', 'utf-8');
-          const scopedTool = new ReadFileTool({
-            ...(tool as unknown as { config: Config }).config,
-            allowsDirectAutoMemoryRead: () => true,
-          } as unknown as Config);
 
-          const result = await read({ file_path: memFile }, scopedTool);
+          const result = await read({ file_path: memFile });
           // Slow path returned the actual content (not a placeholder).
           expect(typeof result.llmContent).toBe('string');
           expect(result.llmContent).not.toMatch(/unchanged since/);

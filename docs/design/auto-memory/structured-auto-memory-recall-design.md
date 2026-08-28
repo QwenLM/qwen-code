@@ -45,6 +45,11 @@ honors `QWEN_CODE_MEMORY_LOCAL=1`, which moves it to
 `user/*.md` file under a Project root is still Project Memory. Scope comes from
 the scanned root, not the first relative-path segment.
 
+The private Project root under the global memory base remains available in an
+untrusted workspace. Repo-local compatibility memory is visible only when the
+workspace is trusted. With `QWEN_CODE_MEMORY_LOCAL=1`, the Project root itself
+is repo-local, so Project Memory is unavailable until the workspace is trusted.
+
 Each topic file uses YAML frontmatter followed by a Markdown body:
 
 ```yaml
@@ -105,7 +110,9 @@ The current implementation only transitions `legacy -> structured` within a
 session. A structured session does not immediately fall back because of an
 external file change. Normal Extraction, Remember, Dream, and Migration writes
 must produce valid metadata, and a new session evaluates corpus readiness
-again during initialization.
+again during initialization. Changing the working directory resets the recall
+mode, corpus revision, pending delivery, and body-residency state before the
+new project memory is loaded.
 
 ## Complete Memory Tree
 
@@ -192,14 +199,23 @@ result falls back without stopping the main request. The selector manifest is
 currently capped at 25,000 bytes; this is a context budget and does not promise
 that every candidate in a large corpus reaches the selector.
 
+Recall still enumerates trusted roots and stats every visible file on each
+scan. A cache owned by the session's `MemoryManager` reuses a parsed document
+only when its resolved path, scope, mtime, ctime, size, and inode are unchanged.
+File creation, deletion, in-place modification, and atomic replacement
+therefore invalidate naturally without a process-global snapshot or watcher.
+Session reset and working-directory changes clear the cache.
+
 ## `search_memory`
 
-In structured mode, the main model retrieves managed-memory bodies only
-through `search_memory`:
+In structured mode, the protocol directs the main model to retrieve
+managed-memory bodies through `search_memory`:
 
 - `search` accepts one to five keywords when the exact ref is unknown, with
   optional scopes, categories, and result limit;
 - `fetch` reads a known ref copied exactly from the tree or a search result;
+- `explore` lists bounded category branches as metadata only, with no body
+  content and a cursor for each truncated branch;
 - `cursor` continues an adjacent body window and is not a field for a new
   search request.
 
@@ -240,30 +256,28 @@ mtime. Fetching the same version while it remains present returns
 `alreadyAvailable` without duplicating the body. When microcompaction or
 memory-pressure compaction clears a tool result, it reports the evicted refs
 to the manager before the next Focused Subtree is rendered. The prompt cannot
-claim that an evicted body is still available.
+claim that an evicted body is still available. If compression occurs after a
+delivery was prepared but before its state is committed, both the main loop and
+ACP clear the state again after commit so the deferred commit cannot restore a
+revision or residency marker that compression removed.
 
 On ToolResult turns, size-only microcompaction runs before recall consumes the
 snapshot. The ordering is shared by the normal model loop and ACP sessions.
 
-## Managed-memory Access Boundary
+## Managed-memory Tool Routing
 
-General file tools cannot bypass the structured protocol to read bodies:
+Structured recall does not turn general Core file tools into a Memory
+filesystem sandbox. `read_file`, Glob, Grep, directory listing, write tools,
+and Shell retain Qwen Code's existing permission and sandbox semantics. The
+structured prompt tells the main model to use `search_memory` for body reads
+and `manage_memory` for writes, and not to access managed-memory paths through
+general tools. This is a model routing contract, not a security boundary.
 
-| Caller                | Read                   | Glob                   | Grep                   | LS/Folder              | Shell                     |
-| --------------------- | ---------------------- | ---------------------- | ---------------------- | ---------------------- | ------------------------- |
-| Legacy main model     | Existing behavior      | Existing behavior      | Existing behavior      | Existing behavior      | Existing behavior         |
-| Structured main model | Denied                 | Hidden                 | Excluded               | Hidden                 | Managed roots denied      |
-| Memory scoped agent   | Capability controlled  | Capability controlled  | Capability controlled  | Capability controlled  | Capability plus allowlist |
-| Generic subagent      | Not implicitly granted | Not implicitly granted | Not implicitly granted | Not implicitly granted | Not implicitly granted    |
-
-Dream, User Dream, Extraction, and Remember use scoped configurations with the
-direct-read or direct-write capabilities they need. A generic forked subagent
-does not receive managed-memory access merely because the parent session uses
-structured recall.
-
-The shell gate checks both command arguments and the resolved cwd, preventing
-a command from setting cwd to a memory root and then using bare filenames.
-Project, User, and Team roots use the same containment semantics.
+Memory maintenance agents continue to use their scoped permission managers
+and trusted-root checks for the operations they own. Generic subagents and
+external memory systems receive no new implicit Memory integration, but this
+design does not add capability switches to generic file tools or attempt to
+parse every possible Shell command.
 
 ## Metadata Writers And Background Tasks
 
@@ -276,11 +290,14 @@ Four writing paths maintain structured metadata:
 
 One migration batch attempts at most 10 files and reads at most 40,000 body
 characters. Each completed UserQuery can schedule at most one Project and one
-User batch. If the same scope/root already has an active task, scheduling
-returns `running`; it does not queue an automatic continuation. A one-shot
-headless process does not implicitly self-drain additional batches before
-exit, preserving its latency and background model cost. Existing task surfaces
-show and cancel migration tasks.
+User batch in both the normal model loop and ACP. A process-wide single-flight
+claim is taken before candidate scanning, so sessions in the same process do
+not start the same scope/root concurrently. Scheduling returns `running`; it
+does not queue an automatic continuation. Separate processes do not share a
+migration lock; per-file no-follow and source-hash/CAS checks prevent stale
+writes if they overlap. A one-shot headless process does not implicitly
+self-drain additional batches before exit, preserving its latency and
+background model cost. Existing task surfaces show and cancel migration tasks.
 
 Project Dream and User Dream use PID/mtime locks per root, so multiple sessions
 cannot consolidate the same corpus concurrently. A session that cannot acquire
@@ -316,7 +333,7 @@ Telemetry records:
 
 - recall scan, fast, selector, and delivery timing;
 - Complete Tree delivery and discard reason;
-- search/fetch result counts, body characters, and source status;
+- search/fetch/explore result counts, body characters, and source status;
 - migration scan, legacy, commit, conflict, failure, token, and timing data;
 - recall-mode transitions.
 
@@ -354,8 +371,8 @@ This design does not currently include:
   exits;
 - increasing the selector manifest budget without evaluation evidence;
 - making Dream responsible for full legacy-corpus migration;
-- implicitly granting managed-memory access to generic subagents or external
-  memory systems;
+- automatically injecting structured Memory context or dedicated Memory
+  workflows into generic subagents or external memory systems;
 - committing per-case evaluation data, raw API logs, or full transcripts as
   part of the design.
 
@@ -366,5 +383,5 @@ navigable, searchable, on-demand memory map. The Complete Tree supplies global
 understanding, the Focused Subtree supplies task focus, fast recall and the
 selector choose paths, and `search_memory` manages body windows and residency.
 Legacy fallback and incremental migration protect existing memory, while
-atomic protocol delivery, access boundaries, and compression feedback keep the
-system consistent in long-running and multi-session use.
+atomic protocol delivery, trusted-root checks, and compression feedback keep
+the system consistent in long-running and multi-session use.

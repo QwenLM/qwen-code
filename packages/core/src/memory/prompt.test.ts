@@ -25,7 +25,9 @@ describe('managed auto-memory prompt helpers', () => {
 
     expect(prompt).toContain('complete tree and focused metadata');
     expect(prompt).toContain('search_memory only when');
-    expect(prompt).not.toContain('remember, update, or forget');
+    expect(prompt).toContain(
+      'manage_memory only when the user explicitly asks to remember, update, or forget',
+    );
     expect(prompt).not.toContain('frontmatter');
     expect(prompt).not.toContain('usage_scenarios');
     expect(prompt).not.toContain('## Memory categories');

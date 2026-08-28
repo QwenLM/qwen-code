@@ -15,8 +15,10 @@ import {
 } from './paths.js';
 import {
   parseAutoMemoryTopicDocument,
+  scanAllAutoMemoryTopicDocuments,
   scanAutoMemorySnapshot,
   scanAutoMemoryTopicDocuments,
+  type AutoMemoryDocumentCache,
   validateStructuredAutoMemoryDocument,
 } from './scan.js';
 import { ensureAutoMemoryScaffold } from './store.js';
@@ -521,6 +523,34 @@ describe('auto-memory topic scanning', () => {
     ).toEqual(['a/same.md', 'z/same.md']);
   });
 
+  it('invalidates a parsed document cache after an in-place rewrite', async () => {
+    const filePath = getAutoMemoryFilePath(projectRoot, 'cached.md');
+    const first =
+      '---\ntype: project\nname: First title\ndescription: cache fixture\n---\nbody';
+    const second = first.replace('First title', 'Other title');
+    await fs.writeFile(filePath, first);
+    const originalMtime = (await fs.stat(filePath)).mtime;
+    const documentCache: AutoMemoryDocumentCache = new Map();
+
+    const initial = await scanAllAutoMemoryTopicDocuments(
+      projectRoot,
+      documentCache,
+    );
+    await fs.writeFile(filePath, second);
+    await fs.utimes(filePath, originalMtime, originalMtime);
+    const changed = await scanAllAutoMemoryTopicDocuments(
+      projectRoot,
+      documentCache,
+    );
+
+    expect(initial.find((doc) => doc.relativePath === 'cached.md')?.title).toBe(
+      'First title',
+    );
+    expect(changed.find((doc) => doc.relativePath === 'cached.md')?.title).toBe(
+      'Other title',
+    );
+  });
+
   it('reports requested but disabled team memory as unavailable', async () => {
     const snapshot = await scanAutoMemorySnapshot(projectRoot, {
       scopes: ['team'],
@@ -549,5 +579,49 @@ describe('auto-memory topic scanning', () => {
       { scope: 'team', reason: 'untrusted' },
     ]);
     expect(snapshot.sourceStatus.searchedScopes).toEqual([]);
+  });
+
+  it('does not scan repo-local project memory when the project is untrusted', async () => {
+    const previousLocal = process.env['QWEN_CODE_MEMORY_LOCAL'];
+    process.env['QWEN_CODE_MEMORY_LOCAL'] = '1';
+    clearAutoMemoryRootCache();
+    try {
+      const memoryRoot = getAutoMemoryRoot(projectRoot);
+      await fs.mkdir(memoryRoot, { recursive: true });
+      await fs.writeFile(
+        path.join(memoryRoot, 'payload.md'),
+        [
+          '---',
+          'type: project',
+          'name: Untrusted payload',
+          'description: Repo supplied memory',
+          'keywords:',
+          '  - payload',
+          'usage_scenarios:',
+          '  - Any task',
+          'category: project_introduction',
+          '---',
+          'body',
+        ].join('\n'),
+        'utf-8',
+      );
+
+      const snapshot = await scanAutoMemorySnapshot(projectRoot, {
+        scopes: ['project'],
+        trustedProject: false,
+      });
+
+      expect(snapshot.docs).toEqual([]);
+      expect(snapshot.sourceStatus.unavailableScopes).toEqual([
+        { scope: 'project', reason: 'untrusted' },
+      ]);
+    } finally {
+      if (previousLocal === undefined) {
+        delete process.env['QWEN_CODE_MEMORY_LOCAL'];
+      } else {
+        process.env['QWEN_CODE_MEMORY_LOCAL'] = previousLocal;
+      }
+      clearAutoMemoryRootCache();
+    }
   });
 });

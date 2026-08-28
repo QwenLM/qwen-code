@@ -6940,6 +6940,18 @@ describe('Server Config (config.ts)', () => {
 
   it('relocateWorkingDirectory should update the session working roots', async () => {
     const config = new Config(baseParams);
+    Object.assign(config, {
+      memoryRecallMode: 'structured',
+      memoryRecallModeInitialized: true,
+      memoryCorpusRevision: 'old-project-revision',
+    });
+    vi.mocked(scanMemoryMetadataCorpusStatus).mockResolvedValueOnce({
+      ready: false,
+      revision: 'new-project-revision',
+      files: 1,
+      legacyFiles: 1,
+      legacyByScope: { project: 1, user: 0, team: 0 },
+    });
     const disposeResidentAgents = vi.spyOn(
       config.getBackgroundTaskRegistry(),
       'disposeResidentAgents',
@@ -6960,6 +6972,7 @@ describe('Server Config (config.ts)', () => {
     expect(config.getProjectRoot()).toBe(newDir);
     expect(config.getCwd()).toBe(newDir);
     expect(config.getWorkingDir()).toBe(newDir);
+    expect(config.getMemoryRecallMode()).toBe('legacy');
     expect(config.getWorkspaceContext()).toBe(workspaceContext);
     expect(config.getWorkspaceContext().getDirectories()[0]).toBe(newDir);
     expect(config.storage.getProjectRoot()).toBe(newDir);

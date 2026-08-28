@@ -65,6 +65,7 @@ function makeMockConfig(overrides: Partial<Config> = {}): Config {
     getManagedAutoMemoryEnabled: vi.fn().mockReturnValue(true),
     getManagedAutoDreamEnabled: vi.fn().mockReturnValue(true),
     getMemoryRecallMode: vi.fn().mockReturnValue('legacy'),
+    isTrustedFolder: vi.fn().mockReturnValue(true),
     getSessionId: vi.fn().mockReturnValue('session-1'),
     getModel: vi.fn().mockReturnValue('test-model'),
     logEvent: vi.fn(),
@@ -207,6 +208,60 @@ describe('MemoryManager', () => {
         }),
       ).resolves.toEqual({ status: 'skipped', skippedReason: 'complete' });
       expect(scan).not.toHaveBeenCalled();
+    });
+
+    it('claims a migration domain before scanning candidates', async () => {
+      await writeLegacy(getAutoMemoryRoot(projectRoot), 'project.md');
+      const scanCandidates =
+        metadataMigration.scanMemoryMetadataMigrationCandidates;
+      let releaseScan: (() => void) | undefined;
+      vi.spyOn(
+        metadataMigration,
+        'scanMemoryMetadataMigrationCandidates',
+      ).mockImplementationOnce(async (...args) => {
+        await new Promise<void>((resolve) => {
+          releaseScan = resolve;
+        });
+        return scanCandidates(...args);
+      });
+      vi.spyOn(
+        metadataMigration,
+        'runMemoryMetadataMigration',
+      ).mockResolvedValue({
+        filesScanned: 1,
+        legacyFiles: 1,
+        remainingLegacyFiles: 0,
+        attempted: 1,
+        committed: 1,
+        conflicts: 0,
+        failed: 0,
+        agentDurationMs: 1,
+        inputTokens: 1,
+        outputTokens: 1,
+        totalTokens: 2,
+      });
+      const config = makeMockConfig();
+      const first = new MemoryManager().scheduleMetadataMigration({
+        projectRoot,
+        scope: 'project',
+        config,
+      });
+      await vi.waitFor(() => expect(releaseScan).toBeDefined());
+
+      await expect(
+        new MemoryManager().scheduleMetadataMigration({
+          projectRoot,
+          scope: 'project',
+          config,
+        }),
+      ).resolves.toMatchObject({
+        status: 'skipped',
+        skippedReason: 'running',
+      });
+
+      releaseScan?.();
+      const scheduled = await first;
+      await scheduled.promise;
     });
 
     it('cancels a running migration without overwriting the terminal state', async () => {

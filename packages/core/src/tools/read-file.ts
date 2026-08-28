@@ -16,9 +16,8 @@ import type {
 } from './tools.js';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import { ToolNames, ToolDisplayNames } from './tool-names.js';
-import { ToolErrorType } from './tool-error.js';
 
-import type { FunctionDeclaration, PartListUnion } from '@google/genai';
+import type { PartListUnion } from '@google/genai';
 import type { PermissionDecision } from '../permissions/types.js';
 import {
   processSingleFileContent,
@@ -33,7 +32,7 @@ import { FileOperation } from '../telemetry/metrics.js';
 import { getProgrammingLanguage } from '../telemetry/telemetry-utils.js';
 import { logFileOperation } from '../telemetry/loggers.js';
 import { FileOperationEvent } from '../telemetry/types.js';
-import { isManagedMemoryPath, isTeamAutoMemPath } from '../memory/paths.js';
+import { isAnyAutoMemPath } from '../memory/paths.js';
 import { memoryFreshnessNote } from '../memory/memoryAge.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { getFileReadDefaultPermission } from './file-read-permission.js';
@@ -136,23 +135,7 @@ class ReadFileToolInvocation extends BaseToolInvocation<
     // file_unchanged placeholder would skip that prepend, silently
     // dropping the staleness warning for the rest of the session.
     // These files are small; re-emit them on every read.
-    const isAutoMem = isManagedMemoryPath(absPath, projectRoot);
-    if (
-      isAutoMem &&
-      !isTeamAutoMemPath(absPath, projectRoot) &&
-      this.config.allowsDirectAutoMemoryRead?.() !== true
-    ) {
-      return {
-        llmContent:
-          'Direct read_file access to managed auto-memory files is disabled. Use search_memory.fetch or search_memory.search to retrieve memory content.',
-        returnDisplay: 'Direct auto-memory file reads are disabled.',
-        error: {
-          message:
-            'Direct read_file access to managed auto-memory files is disabled. Use search_memory instead.',
-          type: ToolErrorType.EXECUTION_DENIED,
-        },
-      };
-    }
+    const isAutoMem = isAnyAutoMemPath(absPath, projectRoot);
     // The cache can be disabled at the Config level (escape hatch for
     // sessions where the "model has already seen the prior tool result"
     // assumption breaks down — e.g. after context compaction or
@@ -544,16 +527,6 @@ export class ReadFileTool extends BaseDeclarativeTool<
   ToolResult
 > {
   static readonly Name: string = ToolNames.READ_FILE;
-
-  override get schema(): FunctionDeclaration {
-    const schema = super.schema;
-    return this.config.getMemoryRecallMode?.() === 'structured'
-      ? {
-          ...schema,
-          description: `${schema.description} Do not use this tool to retrieve managed auto-memory bodies under .qwen/memory, .qwen/team-memory, or ~/.qwen/memories; use search_memory.fetch or search_memory.search instead.`,
-        }
-      : schema;
-  }
 
   // Self-managed: ReadFile controls its own size via line-based paging
   // (offset/limit, default truncateToolOutputLines setting), so it is exempt from the scheduler's

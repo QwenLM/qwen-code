@@ -20,7 +20,7 @@ import {
   unescapePath,
 } from '../utils/paths.js';
 
-import { getMemoryBaseDir, isManagedMemoryPath } from '../memory/paths.js';
+import { getMemoryBaseDir } from '../memory/paths.js';
 import { getErrorMessage, isNodeError } from '../utils/errors.js';
 import { isGitRepository } from '../utils/gitUtils.js';
 import type { Config } from '../config/config.js';
@@ -164,19 +164,6 @@ class GrepToolInvocation extends BaseToolInvocation<
           seen.add(key);
           return true;
         });
-      }
-
-      if (
-        this.config.getMemoryRecallMode?.() === 'structured' &&
-        this.config.allowsDirectAutoMemoryRead?.() !== true
-      ) {
-        rawMatches = rawMatches.filter(
-          (match) =>
-            !isManagedMemoryPath(
-              match.absoluteFilePath,
-              this.config.getTargetDir(),
-            ),
-        );
       }
 
       const filterDescription = this.params.glob

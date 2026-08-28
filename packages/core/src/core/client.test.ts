@@ -2861,6 +2861,13 @@ describe('Gemini Client (client.ts)', () => {
         .mockReturnValueOnce('Git snapshot A')
         .mockReturnValueOnce('Git snapshot B');
       vi.mocked(getRecentGitStatus).mockClear();
+      mockMemoryManager.resetMemoryBodyStateForSession.mockClear();
+      const cancelRecall = vi.spyOn(
+        client as unknown as {
+          cancelPendingMemoryPrefetch: (reason: 'new_query') => void;
+        },
+        'cancelPendingMemoryPrefetch',
+      );
 
       await client.startChat();
       expect(client.getChat()['generationConfig'].systemInstruction).toContain(
@@ -2877,6 +2884,10 @@ describe('Gemini Client (client.ts)', () => {
       expect(systemInstruction).not.toContain('Git snapshot A');
       expect(systemInstruction).toContain('Git snapshot B');
       expect(getRecentGitStatus).toHaveBeenCalledTimes(2);
+      expect(cancelRecall).toHaveBeenCalledWith('new_query');
+      expect(
+        mockMemoryManager.resetMemoryBodyStateForSession,
+      ).toHaveBeenCalledOnce();
     });
 
     it('clears cached git status so it can be recomputed for the next session', async () => {
@@ -5120,6 +5131,63 @@ describe('Gemini Client (client.ts)', () => {
       ).toHaveBeenCalledTimes(2);
     });
 
+    it('keeps managed-memory delivery state reset when compression precedes commit', async () => {
+      mockMemoryManager.recall.mockImplementation((_root, _query, options) => {
+        options.onFastResult?.({
+          treeSnapshot: {
+            revision: 'compressed-revision',
+            tree: { categories: [] },
+            routerPrompt:
+              '## Complete memory tree\n\nRouter compressed-revision',
+            sourceStatus: {
+              requestedScopes: ['project'],
+              searchedScopes: ['project'],
+              unavailableScopes: [],
+              complete: true,
+              incompleteScopes: [],
+            },
+          },
+          focusedPrompt: '',
+          prompt: '',
+          selectedDocs: [],
+          strategy: 'none',
+        });
+        return new Promise(() => {});
+      });
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          yield {
+            type: LlmEventType.ChatCompressed,
+            value: {
+              originalTokenCount: 1000,
+              newTokenCount: 200,
+              compressionStatus: CompressionStatus.COMPRESSED,
+            },
+          };
+          yield { type: LlmEventType.Content, value: 'ok' };
+        })(),
+      );
+      client['chat'] = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+        setHistory: vi.fn(),
+      } as unknown as LlmChat;
+      mockMemoryManager.markAllMemoryBodiesEvictedFromHistory.mockClear();
+
+      await fromAsync(
+        client.sendMessageStream(
+          [{ text: 'hi' }],
+          new AbortController().signal,
+          'prompt-compress-before-memory-commit',
+        ),
+      );
+
+      expect(client['lastDeliveredMemoryTreeRevision']).toBeUndefined();
+      expect(
+        mockMemoryManager.markAllMemoryBodiesEvictedFromHistory,
+      ).toHaveBeenCalledTimes(2);
+    });
+
     it('re-prepends the startup prelude after an auto-compaction ChatCompressed event', async () => {
       // Auto-compaction replaces history in place inside
       // chat.sendMessageStream and never routes through startChat, so the
@@ -5587,7 +5655,7 @@ hello
       const secondText = JSON.stringify(mockTurnRunFn.mock.calls.at(-1)?.[1]);
       expect(firstText).toContain('Router revision-1');
       expect(secondText).not.toContain('Router revision-1');
-      expect(secondText).toContain('Current focus');
+      expect(secondText).toContain('[user:focus.md] User Memory');
 
       revision = 'revision-2';
       await fromAsync(
@@ -5754,6 +5822,38 @@ hello
       client.commitManagedAutoMemoryRecallDelivery(retryDelivery);
       expect(handle.fastDelivered).toBe(true);
       expect(handle.fastDeliveredRefs).toEqual(new Set(['user:pending.md']));
+    });
+
+    it('re-renders a fast subtree with current body residency', async () => {
+      const bodyPresentVersions = new Map([['user:resident.md', 1]]);
+      mockMemoryManager.getBodyPresentVersionsInHistory.mockReturnValue(
+        bodyPresentVersions,
+      );
+      const fast = {
+        treeSnapshot: fastTreeSnapshot('resident-revision'),
+        focusedPrompt: '## Memory focus for this turn\n\n[内容已在当前上下文]',
+        prompt: '## Memory focus for this turn\n\n[内容已在当前上下文]',
+        selectedDocs: [fastDoc('/m/resident.md', '- resident body')],
+        strategy: 'heuristic' as const,
+      };
+      client['pendingMemoryPrefetch'] = {
+        promise: new Promise<never>(() => {}),
+        settledAt: null,
+        result: null,
+        consumed: false,
+        terminalLogged: false,
+        fastResultRef: { current: fast },
+        fastDelivered: false,
+        fastDeliveredRefs: new Set<string>(),
+        firedAt: Date.now(),
+        controller: new AbortController(),
+      };
+
+      bodyPresentVersions.clear();
+      const delivery = await client.consumeManagedAutoMemoryRecall('initial');
+
+      expect(delivery?.prompt).toContain('[user:resident.md] User Memory');
+      expect(delivery?.prompt).not.toContain('[内容已在当前上下文]');
     });
 
     it('delivers the deterministic fast result on a tool-free turn when the selector is still in flight', async () => {

@@ -57,19 +57,6 @@ describe('createMemoryScopedAgentConfig', () => {
     return pm;
   }
 
-  it('allows scoped agents to access managed-memory files directly', () => {
-    const config = createMemoryScopedAgentConfig(
-      {
-        allowsDirectAutoMemoryRead: () => false,
-        allowsDirectAutoMemoryWrite: () => false,
-      } as Config,
-      projectRoot,
-    );
-
-    expect(config.allowsDirectAutoMemoryRead()).toBe(true);
-    expect(config.allowsDirectAutoMemoryWrite()).toBe(true);
-  });
-
   it('restricts reads to memory paths only when requested', async () => {
     const unrestricted = permissionManager(
       createMemoryScopedAgentConfig({} as Config, projectRoot),

@@ -89,7 +89,6 @@ describe('EditTool', () => {
       getDefaultFileEncoding: vi.fn().mockReturnValue('utf-8'),
       getFileReadCache: () => fileReadCache,
       getFileReadCacheDisabled: vi.fn().mockReturnValue(false),
-      allowsDirectAutoMemoryWrite: vi.fn().mockReturnValue(true),
       getFileHistoryService: () => mockFileHistoryService,
     } as unknown as Config;
 
@@ -256,42 +255,6 @@ describe('EditTool', () => {
         .build({ file_path: teamFile(), old_string: '', new_string: 'x' })
         .getDefaultPermission();
       expect(permission).toBe('ask');
-    });
-
-    it('denies direct managed-memory edits in structured mode', async () => {
-      (mockConfig.allowsDirectAutoMemoryWrite as Mock).mockReturnValue(false);
-      const file = path.join(rootDir, '.qwen', 'memory', 'direct.md');
-      fs.mkdirSync(path.dirname(file), { recursive: true });
-      fs.writeFileSync(file, 'old', 'utf8');
-      const invocation = tool.build({
-        file_path: file,
-        old_string: 'old',
-        new_string: 'new',
-      });
-
-      expect(await invocation.getDefaultPermission()).toBe('deny');
-      const result = await invocation.execute(new AbortController().signal);
-      expect(result.error?.type).toBe(ToolErrorType.EXECUTION_DENIED);
-      expect(result.llmContent).toContain('Use manage_memory instead');
-      expect(fs.readFileSync(file, 'utf8')).toBe('old');
-    });
-
-    it('keeps team-memory edits confirmable in structured mode', async () => {
-      (mockConfig.allowsDirectAutoMemoryWrite as Mock).mockReturnValue(false);
-      (mockConfig.getFileReadCacheDisabled as Mock).mockReturnValue(true);
-      const file = teamFile();
-      fs.mkdirSync(path.dirname(file), { recursive: true });
-      fs.writeFileSync(file, 'old', 'utf8');
-      const invocation = tool.build({
-        file_path: file,
-        old_string: 'old',
-        new_string: 'new',
-      });
-
-      expect(await invocation.getDefaultPermission()).toBe('ask');
-      const result = await invocation.execute(new AbortController().signal);
-      expect(result.error).toBeUndefined();
-      expect(fs.readFileSync(file, 'utf8')).toBe('new');
     });
 
     it('blocks a secret assembled across edits (scans full result, not just new_string)', async () => {
