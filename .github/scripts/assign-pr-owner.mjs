@@ -259,6 +259,17 @@ function main() {
       assignee,
     ]);
   } catch (error) {
+    if (/assigning agents is not supported/i.test(error.message)) {
+      // A PR that already carries a coding-agent assignee can only change
+      // its actor list through replaceActorsForAssignable, which GitHub
+      // refuses for GitHub App installation tokens. The PR already has an
+      // accountable actor, so skip like the other token-limit cases instead
+      // of failing the check on the contributor's PR.
+      record([
+        'Assignment: skipped — token cannot assign PRs with agent assignees',
+      ]);
+      return;
+    }
     if (
       /permission|403|resource not accessible by integration/i.test(
         error.message,

@@ -451,6 +451,25 @@ describe('assign-pr-owner: apply boundary', () => {
     });
     assert.match(log, /pr edit/);
   });
+
+  it('skips gracefully when GitHub refuses agent-assignee edits for App tokens', () => {
+    // A PR that already carries a coding-agent assignee can only change its
+    // actor list through replaceActorsForAssignable, which GitHub refuses
+    // for GitHub App installation tokens. That refusal must land on the
+    // graceful skip — a rethrow here runs the assignment check red on the
+    // contributor's own PR (@wenshao's F1).
+    const { log, stdout } = runAssign(false, {
+      editExit: 1,
+      editErr:
+        'GraphQL: Assigning agents is not supported with GitHub App installation tokens (HTTP 400)',
+    });
+    assert.doesNotMatch(stdout, /assigned @/);
+    assert.match(
+      stdout,
+      /skipped — token cannot assign PRs with agent assignees/,
+    );
+    assert.match(log, /pr edit/);
+  });
 });
 
 describe('assign-pr-owner: untrusted filename decoding', () => {
