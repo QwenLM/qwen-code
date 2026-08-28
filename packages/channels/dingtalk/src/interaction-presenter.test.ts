@@ -587,15 +587,12 @@ describe('DingtalkInteractionPresenter', () => {
     );
   });
 
-  it('falls back at response boundaries after the card stream fails', async () => {
+  it('recovers at response boundaries after a transient card stream failure', async () => {
     const { client, presenter, sendFallback } = createHarness();
     presenter.appendOutput(segment('segment-1'), 'intermediate result');
     await vi.waitFor(() =>
       expect(client.openOrUpdateStream).toHaveBeenCalledOnce(),
     );
-    // The card already displays this prefix when the stream fails; the
-    // boundary deliberately re-sends the whole segment rather than risk
-    // losing the suffix that never reached the card.
     expect(client.openOrUpdateStream).toHaveBeenCalledWith(
       expect.objectContaining({ content: 'intermediate result' }),
     );
@@ -611,10 +608,12 @@ describe('DingtalkInteractionPresenter', () => {
       presenter.closeOutput('segment-1', '', 'response_boundary'),
     ).resolves.toBe(true);
 
-    expect(sendFallback).toHaveBeenCalledWith(
-      'cid-1',
-      'intermediate result updated',
-      'session-1',
+    expect(sendFallback).not.toHaveBeenCalled();
+    expect(client.openOrUpdateStream).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        content: 'intermediate result updated',
+        finalize: false,
+      }),
     );
   });
 

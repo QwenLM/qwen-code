@@ -1606,6 +1606,16 @@ describe('DingtalkChannel prompt reactions', () => {
 });
 
 describe('DingtalkChannel status cards', () => {
+  it('disposes status-card recovery when disconnected', () => {
+    const channel = createChannel();
+    const dispose = vi.fn();
+    Object.assign(channel, { statusCardController: { dispose } });
+
+    channel.disconnect();
+
+    expect(dispose).toHaveBeenCalledOnce();
+  });
+
   it('passes the configured model to the status card controller', () => {
     const channel = createChannel({ model: 'qwen3.7-max' });
 
@@ -7054,9 +7064,9 @@ describe('DingtalkChannel proactive send', () => {
         ),
     );
 
-    await expect(channel.pushProactive(groupTarget, 'hello')).rejects.toThrow(
-      'gettoken errcode=40089',
-    );
+    const request = channel.pushProactive(groupTarget, 'hello');
+    await expect(request).rejects.toThrow('gettoken errcode=40089');
+    await expect(request).rejects.toMatchObject({ retryable: false });
   });
 
   it('skips blank text without calling the API', async () => {

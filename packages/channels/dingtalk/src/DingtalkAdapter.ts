@@ -36,7 +36,10 @@ import {
   DingtalkConnectionManager,
   type DingtalkManagedSocket,
 } from './DingtalkConnectionManager.js';
-import { DingtalkInteractiveCardClient } from './interactive-card-client.js';
+import {
+  DingtalkCardRequestError,
+  DingtalkInteractiveCardClient,
+} from './interactive-card-client.js';
 import {
   parseDingtalkCardActorId,
   parseDingtalkCardCallback,
@@ -1311,8 +1314,9 @@ export class DingtalkChannel extends ChannelBase {
       process.stderr.write(
         `[DingTalk:${this.name}] access token request failed: gettoken errcode=${data.errcode} ${errmsg}\n`,
       );
-      throw new Error(
+      throw new DingtalkCardRequestError(
         `DingTalk access token request failed: gettoken errcode=${data.errcode}${errmsg ? ` ${errmsg}` : ''}`,
+        false,
       );
     }
     this.proactiveToken = {
@@ -1522,6 +1526,7 @@ export class DingtalkChannel extends ChannelBase {
     if (this.dedupTimer) {
       clearInterval(this.dedupTimer);
     }
+    this.statusCardController?.dispose();
     this.activeReactionKeys.clear();
     this.sessionReactionKeys.clear();
     if (this.connectionManager) {

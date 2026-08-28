@@ -3,6 +3,7 @@ import {
   DingtalkInteractiveCardClient,
   QUESTION_CARD_TEMPLATE_ID,
   STATUS_CARD_TEMPLATE_ID,
+  type DingtalkCardRequestError,
 } from './interactive-card-client.js';
 
 const fetchMock = vi.fn<typeof fetch>();
@@ -152,4 +153,36 @@ describe('DingtalkInteractiveCardClient', () => {
       }),
     ).rejects.toThrow(`${QUESTION_CARD_TEMPLATE_ID}: template denied`);
   });
+
+  it.each([408, 425, 429, 500, 503])(
+    'classifies HTTP %s as retryable',
+    async (status) => {
+      fetchMock.mockResolvedValueOnce(response({}, status));
+
+      await expect(
+        createClient().updateInstance({
+          outTrackId: 'status-1',
+          cardParamMap: {},
+        }),
+      ).rejects.toMatchObject<DingtalkCardRequestError>({
+        retryable: true,
+      });
+    },
+  );
+
+  it.each([400, 401, 403, 404])(
+    'classifies HTTP %s as non-retryable',
+    async (status) => {
+      fetchMock.mockResolvedValueOnce(response({}, status));
+
+      await expect(
+        createClient().updateInstance({
+          outTrackId: 'status-1',
+          cardParamMap: {},
+        }),
+      ).rejects.toMatchObject<DingtalkCardRequestError>({
+        retryable: false,
+      });
+    },
+  );
 });

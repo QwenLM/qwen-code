@@ -1,6 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ChannelOutputSegmentContext } from '@qwen-code/channel-base';
-import type { DingtalkInteractiveCardClient } from './interactive-card-client.js';
+import {
+  DingtalkCardRequestError,
+  type DingtalkInteractiveCardClient,
+} from './interactive-card-client.js';
 import { StatusCardController } from './status-card-controller.js';
 
 type ExpectedCallbackResult =
@@ -489,6 +492,49 @@ describe('StatusCardController', () => {
     );
   });
 
+  it('updates terminal fields when stream finalization fails', async () => {
+    const { client, controller } = createHarness();
+    controller.replace(segment(), target, 'answer');
+    await vi.waitFor(() =>
+      expect(client.openOrUpdateStream).toHaveBeenCalledOnce(),
+    );
+    vi.mocked(client.openOrUpdateStream).mockRejectedValueOnce(
+      new Error('stream finalize unavailable'),
+    );
+
+    await expect(controller.complete('segment-1', 'answer')).resolves.toBe(
+      true,
+    );
+
+    expect(client.updateInstance).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        cardParamMap: expect.objectContaining({
+          flowStatus: 3,
+          hasAction: 'false',
+          stop_action: 'false',
+        }),
+      }),
+    );
+  });
+
+  it('does not retry a non-retryable terminal update', async () => {
+    vi.useFakeTimers();
+    const { client, controller } = createHarness();
+    controller.replace(segment(), target, 'answer');
+    await vi.advanceTimersByTimeAsync(0);
+    vi.mocked(client.updateInstance).mockRejectedValueOnce(
+      new DingtalkCardRequestError('terminal rejected', false),
+    );
+
+    await expect(controller.complete('segment-1', 'answer')).resolves.toBe(
+      false,
+    );
+    expect(client.updateInstance).toHaveBeenCalledOnce();
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(client.updateInstance).toHaveBeenCalledOnce();
+  });
+
   it('allows only the owner to stop the exact current run', async () => {
     const { client, cancelRun, controller } = createHarness();
     controller.replace(segment(), target, 'answer');
@@ -579,7 +625,39 @@ describe('StatusCardController', () => {
     expect(client.openOrUpdateStream).not.toHaveBeenCalled();
   });
 
-  it('stops status refreshes after the content stream fails', async () => {
+  it('finalizes a delivered card when its initial stream fails', async () => {
+    vi.useFakeTimers();
+    const { client, controller } = createHarness();
+    vi.mocked(client.openOrUpdateStream).mockRejectedValueOnce(
+      new Error('initial stream connection lost'),
+    );
+    controller.replace(segment(), target, 'final answer');
+    await vi.advanceTimersByTimeAsync(0);
+    vi.mocked(client.updateInstance).mockRejectedValueOnce(
+      new Error('terminal connection lost'),
+    );
+
+    await expect(
+      controller.complete('segment-1', 'final answer'),
+    ).resolves.toBe(false);
+    expect(client.updateInstance).toHaveBeenCalledOnce();
+
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    expect(client.createAndDeliver).toHaveBeenCalledOnce();
+    expect(client.updateInstance).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        cardParamMap: expect.objectContaining({
+          content: 'final answer',
+          flowStatus: 3,
+          hasAction: 'false',
+          stop_action: 'false',
+        }),
+      }),
+    );
+  });
+
+  it('stops status refreshes after a non-retryable content failure', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(0);
     const onError = vi.fn();
@@ -589,7 +667,7 @@ describe('StatusCardController', () => {
     const gate = deferred<void>();
     vi.mocked(client.openOrUpdateStream).mockImplementationOnce(async () => {
       await gate.promise;
-      throw new Error('stream died');
+      throw new DingtalkCardRequestError('stream rejected', false);
     });
     controller.replace(segment(), target, 'first more');
     await vi.advanceTimersByTimeAsync(500);
@@ -608,32 +686,126 @@ describe('StatusCardController', () => {
     expect(client.updateInstance).not.toHaveBeenCalled();
   });
 
-  it('does not retry the content stream after a latched failure', async () => {
+  it('retries the latest snapshot after a transient content failure', async () => {
     vi.useFakeTimers();
     const onError = vi.fn();
     const { client, controller } = createHarness({ onError });
     controller.replace(segment(), target, 'first');
     await vi.advanceTimersByTimeAsync(0);
-    controller.replace(segment(), target, 'first more');
-    await vi.advanceTimersByTimeAsync(500);
-    expect(client.openOrUpdateStream).toHaveBeenCalledTimes(2);
+    vi.mocked(client.openOrUpdateStream).mockClear();
     vi.mocked(client.openOrUpdateStream).mockRejectedValueOnce(
       new Error('stream died'),
     );
 
-    controller.replace(segment(), target, 'even more');
+    controller.replace(segment(), target, 'first more');
     await vi.advanceTimersByTimeAsync(500);
     expect(onError).toHaveBeenCalledWith(
       'status card streaming',
       expect.any(Error),
     );
+    expect(client.openOrUpdateStream).toHaveBeenCalledOnce();
 
-    vi.mocked(client.openOrUpdateStream).mockClear();
-    controller.replace(segment(), target, 'and again');
-    await vi.advanceTimersByTimeAsync(2_000);
+    controller.replace(segment(), target, 'latest after recovery');
+    await vi.advanceTimersByTimeAsync(999);
+    expect(client.openOrUpdateStream).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(1);
 
-    expect(client.openOrUpdateStream).not.toHaveBeenCalled();
+    expect(client.openOrUpdateStream).toHaveBeenCalledTimes(2);
+    expect(client.openOrUpdateStream).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        content: 'latest after recovery',
+        finalize: false,
+      }),
+    );
+    await expect(controller.isCardLive('segment-1')).resolves.toBe(true);
     expect(onError).toHaveBeenCalledTimes(1);
+  });
+
+  it('recovers terminal state after content and finalization failures', async () => {
+    vi.useFakeTimers();
+    const onError = vi.fn();
+    const { client, controller } = createHarness({ onError });
+    controller.replace(segment(), target, 'first');
+    await vi.advanceTimersByTimeAsync(0);
+    vi.mocked(client.openOrUpdateStream).mockClear();
+    vi.mocked(client.updateInstance).mockClear();
+
+    vi.mocked(client.openOrUpdateStream).mockRejectedValueOnce(
+      new Error('content connection lost'),
+    );
+    controller.replace(segment(), target, 'final answer');
+    await vi.advanceTimersByTimeAsync(500);
+
+    vi.mocked(client.openOrUpdateStream).mockRejectedValueOnce(
+      new Error('finalize connection lost'),
+    );
+    vi.mocked(client.updateInstance).mockRejectedValueOnce(
+      new Error('terminal connection lost'),
+    );
+    await expect(
+      controller.complete('segment-1', 'final answer'),
+    ).resolves.toBe(false);
+
+    expect(client.updateInstance).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(999);
+    expect(client.updateInstance).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(1);
+
+    expect(client.openOrUpdateStream).toHaveBeenLastCalledWith(
+      expect.objectContaining({ finalize: true }),
+    );
+    expect(client.updateInstance).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        cardParamMap: expect.objectContaining({
+          content: 'final answer',
+          flowStatus: 3,
+          hasAction: 'false',
+          stop_action: 'false',
+        }),
+      }),
+    );
+    expect(
+      vi
+        .mocked(client.openOrUpdateStream)
+        .mock.calls.filter(([request]) => !request.finalize),
+    ).toHaveLength(1);
+    expect(onError).toHaveBeenCalledTimes(3);
+  });
+
+  it('cancels pending recovery when disposed', async () => {
+    vi.useFakeTimers();
+    const { client, controller } = createHarness();
+    controller.replace(segment('stream-segment'), target, 'first');
+    await vi.advanceTimersByTimeAsync(0);
+    vi.mocked(client.openOrUpdateStream).mockRejectedValueOnce(
+      new Error('content connection lost'),
+    );
+    controller.replace(segment('stream-segment'), target, 'updated');
+    await vi.advanceTimersByTimeAsync(500);
+
+    controller.replace(segment('terminal-segment'), target, 'answer');
+    await vi.advanceTimersByTimeAsync(0);
+    vi.mocked(client.updateInstance).mockRejectedValueOnce(
+      new Error('terminal connection lost'),
+    );
+    await expect(
+      controller.complete('terminal-segment', 'answer'),
+    ).resolves.toBe(false);
+
+    const streamCalls = vi.mocked(client.openOrUpdateStream).mock.calls.length;
+    const updateCalls = vi.mocked(client.updateInstance).mock.calls.length;
+    const createCalls = vi.mocked(client.createAndDeliver).mock.calls.length;
+    controller.dispose();
+    controller.dispose();
+    controller.replace(segment('late-segment'), target, 'late');
+    await vi.advanceTimersByTimeAsync(60_000);
+
+    expect(client.openOrUpdateStream).toHaveBeenCalledTimes(streamCalls);
+    expect(client.updateInstance).toHaveBeenCalledTimes(updateCalls);
+    expect(client.createAndDeliver).toHaveBeenCalledTimes(createCalls);
+    await expect(
+      controller.complete('stream-segment', 'updated'),
+    ).resolves.toBe(false);
   });
 
   it('resets the status failure breaker after a successful push', async () => {
