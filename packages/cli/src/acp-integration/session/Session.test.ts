@@ -809,6 +809,9 @@ describe('Session', () => {
       setReasoningEffort: vi.fn(),
       getReasoningPreference: vi.fn().mockReturnValue(undefined),
       getModel: vi.fn().mockImplementation(() => currentModel),
+      getModelRouteIdentity: vi
+        .fn()
+        .mockImplementation(() => `${currentAuthType}:${currentModel}`),
       getSessionId: vi.fn().mockReturnValue('test-session-id'),
       getSessionSourceType: vi.fn().mockReturnValue(undefined),
       isProvisionalWorkspace: vi.fn().mockReturnValue(false),
@@ -4589,6 +4592,7 @@ describe('Session', () => {
       mockSettings.user.settings = {
         model: { reasoningEffort: 'ultra' },
       };
+      vi.mocked(mockConfig.getReasoningPreference).mockReturnValue('ultra');
 
       await session.setModel({
         sessionId: 'test-session-id',

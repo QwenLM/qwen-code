@@ -138,6 +138,7 @@ async function switchMainModel(
   persistSelection = true,
 ): Promise<string> {
   const parsed = parseAcpModelOption(modelArg);
+  const previousModelRouteIdentity = config.getModelRouteIdentity?.();
 
   if (parsed.authType) {
     await config.switchModel(
@@ -153,6 +154,7 @@ async function switchMainModel(
       settings,
       parsed.modelId,
       persistSelection,
+      previousModelRouteIdentity,
     );
     if (persistSelection) {
       persistSetting(
@@ -178,6 +180,7 @@ async function switchMainModel(
     settings,
     modelArg,
     persistSelection,
+    previousModelRouteIdentity,
   );
   if (persistSelection) {
     persistSetting(settings, 'model.name', modelArg, scopeOverride);

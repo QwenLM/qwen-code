@@ -217,6 +217,7 @@ interface HandleModelSwitchSuccessParams {
   effectiveBaseUrl: string | undefined;
   isRuntime: boolean;
   persistScope?: 'workspace' | 'user';
+  previousModelRouteIdentity?: string;
 }
 
 function handleModelSwitchSuccess({
@@ -229,8 +230,15 @@ function handleModelSwitchSuccess({
   effectiveBaseUrl,
   isRuntime,
   persistScope,
+  previousModelRouteIdentity,
 }: HandleModelSwitchSuccessParams): void {
-  clearIncompatibleReasoningEffortForModel(config, settings, effectiveModelId);
+  clearIncompatibleReasoningEffortForModel(
+    config,
+    settings,
+    effectiveModelId,
+    true,
+    previousModelRouteIdentity,
+  );
   persistModelSelection(
     settings,
     effectiveModelId,
@@ -956,6 +964,7 @@ export function ModelDialog({
       let effectiveAuthType: AuthType | undefined;
       let effectiveModelId = selected;
       let isRuntime = false;
+      let previousModelRouteIdentity: string | undefined;
 
       if (!config) {
         onClose();
@@ -990,6 +999,7 @@ export function ModelDialog({
 
         selectionInFlightRef.current = true;
         try {
+          previousModelRouteIdentity = config.getModelRouteIdentity?.();
           await config.switchModel(selectedAuthType, modelId, {
             ...(selectedAuthType !== authType &&
             selectedAuthType === AuthType.QWEN_OAUTH
@@ -1045,6 +1055,7 @@ export function ModelDialog({
             : (after?.baseUrl ?? selectedEntry?.model.baseUrl),
           isRuntime,
           persistScope,
+          previousModelRouteIdentity,
         });
       } catch (e) {
         const errorMessage = e instanceof Error ? e.message : String(e);

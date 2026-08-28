@@ -19,9 +19,16 @@ export function clearIncompatibleReasoningEffortForModel(
   settings: LoadedSettings,
   modelId: string,
   persistSettings = true,
+  previousModelRouteIdentity?: string,
 ): boolean {
   const preference = config.getReasoningPreference();
   if (isTieredEffortWireModel(modelId)) {
+    return false;
+  }
+  if (
+    previousModelRouteIdentity !== undefined &&
+    previousModelRouteIdentity === config.getModelRouteIdentity()
+  ) {
     return false;
   }
   const hasOpaquePreference =
@@ -30,39 +37,48 @@ export function clearIncompatibleReasoningEffortForModel(
   const hasIncompatibleLivePreference =
     typeof preference === 'string' && (isToggleOnlyQwen || hasOpaquePreference);
 
-  if (!isToggleOnlyQwen && !hasOpaquePreference) {
-    return false;
-  }
+  const resetLivePreference = () => {
+    const persistedEffort = settings.merged.model?.reasoningEffort;
+    if (persistedEffort === 'none') {
+      config.disableReasoning();
+    } else if (!isToggleOnlyQwen && isBuiltInReasoningEffort(persistedEffort)) {
+      config.setReasoningEffort(persistedEffort);
+    } else {
+      config.setReasoningEffort(undefined);
+    }
+  };
 
   if (!persistSettings) {
     if (!hasIncompatibleLivePreference) {
       return false;
     }
-    config.setReasoningEffort(undefined);
+    resetLivePreference();
     return true;
   }
 
-  const owningScopes = getWritableScopes(settings).filter((scope) =>
-    settingExistsInScope(
-      'model.reasoningEffort',
+  const incompatibleScopes = getWritableScopes(settings).filter((scope) => {
+    const scopeSettings =
       scope === SettingScope.Workspace
         ? settings.workspace.settings
-        : settings.user.settings,
-    ),
-  );
-  if (owningScopes.length === 0) {
-    if (!hasIncompatibleLivePreference) {
+        : settings.user.settings;
+    if (!settingExistsInScope('model.reasoningEffort', scopeSettings)) {
       return false;
     }
-    config.setReasoningEffort(undefined);
-    return true;
-  }
+    const persistedEffort = scopeSettings.model?.reasoningEffort;
+    return (
+      typeof persistedEffort === 'string' &&
+      persistedEffort !== 'none' &&
+      (isToggleOnlyQwen || !isBuiltInReasoningEffort(persistedEffort))
+    );
+  });
 
-  for (const scope of owningScopes) {
+  for (const scope of incompatibleScopes) {
     settings.setValue(scope, 'model.reasoningEffort', undefined, undefined, {
       throwOnWriteFailure: true,
     });
   }
-  config.setReasoningEffort(undefined);
-  return true;
+  if (hasIncompatibleLivePreference) {
+    resetLivePreference();
+  }
+  return incompatibleScopes.length > 0 || hasIncompatibleLivePreference;
 }

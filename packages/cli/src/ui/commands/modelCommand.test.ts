@@ -328,6 +328,48 @@ describe('modelCommand', () => {
     expect(recordSessionModel).not.toHaveBeenCalled();
   });
 
+  it('preserves an opaque effort when reselecting the same model route', async () => {
+    const setValue = vi.fn();
+    const setReasoningEffort = vi.fn();
+    const switchModel = vi.fn().mockResolvedValue(undefined);
+    mockContext = createMockCommandContext({
+      invocation: { raw: '/model glm-5.2', name: 'model', args: 'glm-5.2' },
+      services: {
+        config: {
+          getContentGeneratorConfig: vi.fn().mockReturnValue({
+            model: 'glm-5.2',
+            authType: AuthType.USE_OPENAI,
+          }),
+          getAvailableModelsForAuthType: vi
+            .fn()
+            .mockReturnValue([{ id: 'glm-5.2', label: 'GLM 5.2' }]),
+          getModelRouteIdentity: vi.fn().mockReturnValue('glm-5.2@same-route'),
+          getReasoningPreference: vi.fn().mockReturnValue('Vendor.Ultra'),
+          switchModel,
+          setReasoningEffort,
+          getChatRecordingService: vi.fn().mockReturnValue({
+            recordSessionModel: vi.fn().mockResolvedValue(true),
+          }),
+        },
+        settings: createMockSettings(setValue, {
+          model: { reasoningEffort: 'Vendor.Ultra' },
+        }),
+      },
+    });
+
+    await modelCommand.action!(mockContext, 'glm-5.2');
+
+    expect(switchModel).toHaveBeenCalledWith(
+      AuthType.USE_OPENAI,
+      'glm-5.2',
+      undefined,
+    );
+    expect(
+      setValue.mock.calls.some(([, key]) => key === 'model.reasoningEffort'),
+    ).toBe(false);
+    expect(setReasoningEffort).not.toHaveBeenCalled();
+  });
+
   it('records the session model in ACP mode after switching', async () => {
     const setValue = vi.fn();
     let currentModel = 'old-model';

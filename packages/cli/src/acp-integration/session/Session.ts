@@ -9690,6 +9690,7 @@ export class Session implements SessionContext {
               : {}),
           }
         : undefined;
+    const previousModelRouteIdentity = this.config.getModelRouteIdentity();
     await this.config.switchModel(
       selectedAuthType,
       parsed.modelId,
@@ -9753,6 +9754,7 @@ export class Session implements SessionContext {
       this.settings,
       effectiveModelId,
       persistDefault,
+      previousModelRouteIdentity,
     );
     if (persistDefault) {
       const persistScope = getPersistScopeForModelSelection(this.settings);

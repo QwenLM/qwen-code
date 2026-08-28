@@ -54,6 +54,7 @@ const renderComponent = (
 
   const mockSettings = {
     isTrusted: true,
+    merged: {},
     user: { settings: {} },
     workspace: { settings: {} },
     setValue: vi.fn(),
@@ -495,6 +496,11 @@ describe('<ModelDialog />', () => {
         getAuthType: vi.fn(() => AuthType.USE_OPENAI),
         switchModel,
         setReasoningEffort,
+        getReasoningPreference: vi.fn(() => 'ultra'),
+        getModelRouteIdentity: vi
+          .fn()
+          .mockReturnValueOnce('qwen3.7-max@token-plan')
+          .mockReturnValue('qwen3.7-max@idealab'),
         getAllConfiguredModels: vi.fn(() => [
           {
             id: 'qwen3.7-max',
