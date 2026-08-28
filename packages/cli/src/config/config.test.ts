@@ -3289,9 +3289,9 @@ describe('Approval mode tool exclusion logic', () => {
 
       mockWriteStderrLine.mockClear();
       await loadCliConfig(settings, argv, undefined, []);
-      // Note: safe mode resolves coreTools to the built-in safe-tools
-      // list (not undefined), so only the notice suppression is
-      // asserted here.
+      // Note: safe mode resolves coreTools to `undefined` via the ternary's
+      // `bareMode || safeMode` arm (there is no built-in safe-tools list),
+      // so only the notice suppression is asserted here.
       expect(mockWriteStderrLine).not.toHaveBeenCalledWith(
         expect.stringContaining('tools.core is an empty allowlist'),
       );
