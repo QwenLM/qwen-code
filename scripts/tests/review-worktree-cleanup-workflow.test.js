@@ -176,10 +176,15 @@ function expectQuarantineFallback(run) {
   // The existence guard's `-L` arm is the only thing that sees a dangling
   // symlink (`-e` follows the link and reports it absent), and the chmod
   // guard's `! -L` arm is what keeps `chmod -R u+w` from dereferencing a
-  // symlinked leftover into a tree outside the workspace. No fixture
-  // executes the review-yml copy, so pin both arms here on every copy:
-  // dropping either one keeps this suite green while re-poisoning the
-  // checkout (mutation-probed against qwen-code-pr-review.yml).
+  // symlinked leftover into a tree outside the workspace. The behavioral
+  // fixtures below execute both copies where permission fixtures are
+  // available (skipped on the Windows/root lanes): the dangling-symlink
+  // fixture witnesses the existence guard's `-L` arm behaviorally on each
+  // copy, but the chmod guard's `! -L` arm has no behavioral witness (the
+  // live-symlink fixture asserts content, not mode), so pin both arms
+  // textually here on every copy — dropping `-L` fails the dangling-symlink
+  // fixture, while dropping `! -L` keeps this suite green and re-poisons
+  // the checkout (mutation-probed).
   expect(code).toContain('[ ! -e "$stale_qwen" ] && [ ! -L "$stale_qwen" ]');
   expect(code).toContain('[ -d "$stale_qwen" ] && [ ! -L "$stale_qwen" ]');
   // The move must be the fallback of the removal chain, not an
