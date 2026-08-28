@@ -404,7 +404,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
       perRequestAc?.abort();
     }
 
-    return this.converter.convertAnthropicResponseToGemini(response);
+    return this.converter.convertAnthropicResponseToLlm(response);
   }
 
   async generateContentStream(
@@ -791,7 +791,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
     const cacheRetentionByBlock =
       this.contentGeneratorConfig.cacheRetentionByBlock;
 
-    const { system, messages } = this.converter.convertGeminiRequestToAnthropic(
+    const { system, messages } = this.converter.convertLlmRequestToAnthropic(
       request,
       {
         // DeepSeek normalization and injection run together. Proxy-hosted
@@ -816,15 +816,12 @@ export class AnthropicContentGenerator implements ContentGenerator {
     );
 
     const tools = request.config?.tools
-      ? await this.converter.convertGeminiToolsToAnthropic(
-          request.config.tools,
-          {
-            enableCacheControl,
-            useGlobalCacheScope,
-            cacheRetention,
-            cacheRetentionByBlock,
-          },
-        )
+      ? await this.converter.convertLlmToolsToAnthropic(request.config.tools, {
+          enableCacheControl,
+          useGlobalCacheScope,
+          cacheRetention,
+          cacheRetentionByBlock,
+        })
       : undefined;
 
     // Map Gemini-style toolConfig.functionCallingConfig.mode to Anthropic's
@@ -1338,7 +1335,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
             typeof name === 'string' &&
             name.length > 0
           ) {
-            const chunk = this.buildGeminiChunk(
+            const chunk = this.buildLlmChunk(
               undefined,
               messageId,
               model,
@@ -1359,7 +1356,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
           if (deltaType === 'text_delta') {
             const text = 'text' in event.delta ? event.delta.text : '';
             if (text) {
-              const chunk = this.buildGeminiChunk(
+              const chunk = this.buildLlmChunk(
                 { text },
                 messageId,
                 model,
@@ -1373,7 +1370,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
             const thinking =
               (event.delta as { thinking?: string }).thinking || '';
             if (thinking) {
-              const chunk = this.buildGeminiChunk(
+              const chunk = this.buildLlmChunk(
                 { text: thinking, thought: true },
                 messageId,
                 model,
@@ -1388,7 +1385,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
               (event.delta as { signature?: string }).signature || '';
             if (signature) {
               blockState.signature += signature;
-              const chunk = this.buildGeminiChunk(
+              const chunk = this.buildLlmChunk(
                 { thought: true, thoughtSignature: signature },
                 messageId,
                 model,
@@ -1422,7 +1419,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
                 hasNonObjectToolCall = true;
               }
             } else {
-              const chunk = this.buildGeminiChunk(
+              const chunk = this.buildLlmChunk(
                 {
                   functionCall: {
                     id: blockState.id,
@@ -1528,7 +1525,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
 
           if (finishReason || event.usage) {
             messageStartUsagePending = false;
-            const chunk = this.buildGeminiChunk(
+            const chunk = this.buildLlmChunk(
               undefined,
               messageId,
               model,
@@ -1557,7 +1554,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
             cacheCreationTokensReported
           ) {
             messageStartUsagePending = false;
-            const chunk = this.buildGeminiChunk(
+            const chunk = this.buildLlmChunk(
               undefined,
               messageId,
               model,
@@ -1589,7 +1586,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
     if (upstreamStreamFailed) {
       const upstreamErrorClassification =
         classifyRetryError(upstreamStreamError);
-      // Match GeminiChat's replay boundary: only known mid-SSE socket cuts
+      // Match LlmChat's replay boundary: only known mid-SSE socket cuts
       // may release an already closed batch before the error is propagated.
       if (
         isRetryableStreamTransportError(upstreamErrorClassification) &&
@@ -1682,7 +1679,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
         ...(headers ? { headers } : {}),
       })) as Message;
       reportAnthropicResponse(fallbackAttempt, response);
-      yield this.converter.convertAnthropicResponseToGemini(response);
+      yield this.converter.convertAnthropicResponseToLlm(response);
     } catch (error) {
       throw redactProxyError(error);
     } finally {
@@ -1690,7 +1687,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
     }
   }
 
-  private buildGeminiChunk(
+  private buildLlmChunk(
     part?: {
       text?: string;
       thought?: boolean;
@@ -1711,7 +1708,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
     const candidateParts = part ? [part as unknown as Part] : [];
     const mappedFinishReason =
       finishReason !== undefined
-        ? this.converter.mapAnthropicFinishReasonToGemini(finishReason)
+        ? this.converter.mapAnthropicFinishReasonToLlm(finishReason)
         : undefined;
     response.candidates = [
       {
