@@ -928,7 +928,15 @@ export class SubagentManager {
       const hookSystem = runtimeContext.getHookSystem();
       const hookRegistry = hookSystem?.getRegistry();
       if (config.hooks && Object.keys(config.hooks).length > 0) {
-        if (hookRegistry) {
+        if (config.level === 'project' && !runtimeContext.isTrustedFolder()) {
+          // Project agents load from <repo>/.qwen/agents/ regardless of
+          // trust (read-only use is fine), but their hooks are repo-supplied
+          // code execution — the same gate Config.getProjectHooks() applies
+          // to settings-file hooks.
+          debugLogger.warn(
+            `Subagent "${config.name}" is a project agent in an untrusted folder; ignoring its hooks.`,
+          );
+        } else if (hookRegistry) {
           const agentScope = `agent:${config.name}:${randomUUID()}`;
           unregisterAgentHooks = hookRegistry.addAgentHooks(
             config.hooks as { [K in HookEventName]?: HookDefinition[] },

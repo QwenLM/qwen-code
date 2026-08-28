@@ -37,6 +37,7 @@ export { buildSkillLlmContent } from './skill-utils.js';
 import {
   buildSkillLlmContent,
   applySkillAllowedTools,
+  canApplySkillSideEffects,
   collectAvailableSkillEntries,
   clearCollectedSkillEntriesCache,
 } from './skill-utils.js';
@@ -459,6 +460,36 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
     return 'ask';
   }
 
+  private registerHooks(skill: SkillConfig): void {
+    debugLogger.debug('Skill hooks check:', {
+      hasHooks: !!skill.hooks,
+      hooksKeys: skill.hooks ? Object.keys(skill.hooks) : [],
+      skillName: skill.name,
+    });
+    if (!skill.hooks) {
+      debugLogger.warn(`Skill "${this.params.skill}" has no hooks to register`);
+      return;
+    }
+    const hookSystem = this.config.getHookSystem();
+    const sessionId = this.config.getSessionId();
+    debugLogger.debug('Hook system and session:', {
+      hasHookSystem: !!hookSystem,
+      sessionId,
+    });
+    if (!hookSystem || !sessionId) {
+      return;
+    }
+    const sessionHooksManager = hookSystem.getSessionHooksManager();
+    const hookCount = registerSkillHooks(sessionHooksManager, sessionId, skill);
+    if (hookCount > 0) {
+      debugLogger.info(
+        `Registered ${hookCount} hooks from skill "${this.params.skill}"`,
+      );
+    } else {
+      debugLogger.warn(`No hooks registered from skill "${this.params.skill}"`);
+    }
+  }
+
   private async recordAutoSkillUsageBestEffort(
     skill: SkillConfig,
   ): Promise<void> {
@@ -685,45 +716,16 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
       const llmContent = buildSkillLlmContent(baseDir, skill.body);
       this.onSkillLoaded(this.params.skill, llmContent);
 
-      // Auto-approve the skill's declared allowedTools for the rest of the session.
-      applySkillAllowedTools(
-        this.config.getPermissionManager(),
-        skill.allowedTools,
-      );
-
-      // Register skill hooks if present
-      debugLogger.debug('Skill hooks check:', {
-        hasHooks: !!skill.hooks,
-        hooksKeys: skill.hooks ? Object.keys(skill.hooks) : [],
-        skillName: skill.name,
-      });
-      if (skill.hooks) {
-        const hookSystem = this.config.getHookSystem();
-        const sessionId = this.config.getSessionId();
-        debugLogger.debug('Hook system and session:', {
-          hasHookSystem: !!hookSystem,
-          sessionId,
-        });
-        if (hookSystem && sessionId) {
-          const sessionHooksManager = hookSystem.getSessionHooksManager();
-          const hookCount = registerSkillHooks(
-            sessionHooksManager,
-            sessionId,
-            skill,
-          );
-          if (hookCount > 0) {
-            debugLogger.info(
-              `Registered ${hookCount} hooks from skill "${this.params.skill}"`,
-            );
-          } else {
-            debugLogger.warn(
-              `No hooks registered from skill "${this.params.skill}"`,
-            );
-          }
-        }
+      if (canApplySkillSideEffects(skill, this.config)) {
+        // Auto-approve the skill's declared allowedTools for the rest of the session.
+        applySkillAllowedTools(
+          this.config.getPermissionManager(),
+          skill.allowedTools,
+        );
+        this.registerHooks(skill);
       } else {
         debugLogger.warn(
-          `Skill "${this.params.skill}" has no hooks to register`,
+          `Skill "${this.params.skill}" is a project skill in an untrusted folder; ignoring its allowedTools and hooks.`,
         );
       }
 

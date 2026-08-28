@@ -10,6 +10,7 @@ import {
   appendToLastTextPart,
   buildSkillLlmContent,
   applySkillAllowedTools,
+  canApplySkillSideEffects,
   recordAutoSkillUsage,
 } from '@qwen-code/qwen-code-core';
 import { dirname } from 'node:path';
@@ -152,10 +153,16 @@ export class SkillCommandLoader implements ICommandLoader {
           },
           action: async (context, _args): Promise<SlashCommandActionReturn> => {
             // Auto-approve the skill's declared allowedTools before its body is submitted.
-            applySkillAllowedTools(
-              this.config?.getPermissionManager(),
-              skill.allowedTools,
-            );
+            if (this.config && canApplySkillSideEffects(skill, this.config)) {
+              applySkillAllowedTools(
+                this.config.getPermissionManager(),
+                skill.allowedTools,
+              );
+            } else if (skill.allowedTools?.length) {
+              debugLogger.warn(
+                `Skill "${skill.name}" is a project skill in an untrusted folder; ignoring its allowedTools.`,
+              );
+            }
 
             const body = buildSkillLlmContent(
               dirname(skill.filePath),

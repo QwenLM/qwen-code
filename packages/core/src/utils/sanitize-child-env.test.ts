@@ -7,6 +7,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   INTERNAL_SECRET_ENV_VARS,
+  isInternalSecretEnvVar,
   sanitizeChildEnv,
 } from './sanitize-child-env.js';
 
@@ -67,9 +68,43 @@ describe('sanitizeChildEnv', () => {
     // Guardrail: this list must not grow to include third-party credentials,
     // which the shell tool legitimately inherits (see #6601 discussion).
     expect([...INTERNAL_SECRET_ENV_VARS].sort()).toEqual([
+      'QWEN_CODE_EXTERNAL_TOOL_GUARD_TOKEN',
       'QWEN_CODE_PRIVATE_ACP_CAPABILITY',
       'QWEN_DAEMON_TOKEN',
       'QWEN_SERVER_TOKEN',
     ]);
+  });
+
+  it('removes internal secrets regardless of key casing', () => {
+    // process.env is case-insensitive on Windows, so a lower- or mixed-case
+    // key reads the same value there; the copy must not keep it either.
+    const result = sanitizeChildEnv({
+      qwen_server_token: 'super-secret',
+      Qwen_Daemon_Token: 'also-secret',
+      QWEN_CODE_EXTERNAL_TOOL_GUARD_TOKEN: 'guard',
+      PATH: '/usr/bin',
+    });
+    expect(result).toEqual({ PATH: '/usr/bin' });
+  });
+});
+
+describe('isInternalSecretEnvVar', () => {
+  it('matches every denylisted name in any casing', () => {
+    for (const name of INTERNAL_SECRET_ENV_VARS) {
+      expect(isInternalSecretEnvVar(name)).toBe(true);
+      expect(isInternalSecretEnvVar(name.toLowerCase())).toBe(true);
+    }
+  });
+
+  it('does not match benign or third-party variables', () => {
+    for (const name of [
+      'PATH',
+      'HOME',
+      'GH_TOKEN',
+      'QWEN_HOME',
+      'OPENAI_API_KEY',
+    ]) {
+      expect(isInternalSecretEnvVar(name)).toBe(false);
+    }
   });
 });

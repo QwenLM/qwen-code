@@ -3358,6 +3358,137 @@ describe('Settings Loading and Merging', () => {
     });
   });
 
+  describe('allowedHttpHookUrls scope handling', () => {
+    const WORKSPACE_LIST = ['https://hooks.example.com/*'];
+    const USER_LIST = ['https://hooks.corp.com/*'];
+
+    function mockScopes(files: Record<string, unknown>) {
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          const content = files[p as string];
+          return content === undefined ? '{}' : JSON.stringify(content);
+        },
+      );
+    }
+
+    it('honors a workspace whitelist when no higher scope sets one (a repository may narrow its own hooks)', () => {
+      mockScopes({
+        [MOCK_WORKSPACE_SETTINGS_PATH]: {
+          security: { allowedHttpHookUrls: WORKSPACE_LIST },
+        },
+      });
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      expect(settings.merged.security?.allowedHttpHookUrls).toEqual(
+        WORKSPACE_LIST,
+      );
+      expect(
+        getSettingsWarnings(settings).some((w) =>
+          w.includes('security.allowedHttpHookUrls'),
+        ),
+      ).toBe(false);
+    });
+
+    it('never lets a workspace replace the user whitelist, even with "*"', () => {
+      mockScopes({
+        [USER_SETTINGS_PATH]: { security: { allowedHttpHookUrls: USER_LIST } },
+        [MOCK_WORKSPACE_SETTINGS_PATH]: {
+          security: { allowedHttpHookUrls: ['*'] },
+        },
+      });
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      expect(settings.merged.security?.allowedHttpHookUrls).toEqual(USER_LIST);
+      const warnings = getSettingsWarnings(settings);
+      expect(
+        warnings.some(
+          (w) =>
+            w.includes('security.allowedHttpHookUrls') &&
+            w.includes('User scope settings also set it'),
+        ),
+      ).toBe(true);
+    });
+
+    it('never lets a workspace replace an explicitly empty (allow-all) user whitelist with a stricter-looking one either', () => {
+      // "Higher scope wins" is the whole rule; it does not depend on which
+      // list looks narrower.
+      mockScopes({
+        [USER_SETTINGS_PATH]: { security: { allowedHttpHookUrls: [] } },
+        [MOCK_WORKSPACE_SETTINGS_PATH]: {
+          security: { allowedHttpHookUrls: WORKSPACE_LIST },
+        },
+      });
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      expect(settings.merged.security?.allowedHttpHookUrls).toEqual([]);
+    });
+
+    it('never lets a workspace replace a SystemDefaults whitelist', () => {
+      mockScopes({
+        [getSystemDefaultsPath()]: {
+          security: { allowedHttpHookUrls: USER_LIST },
+        },
+        [MOCK_WORKSPACE_SETTINGS_PATH]: {
+          security: { allowedHttpHookUrls: ['*'] },
+        },
+      });
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      expect(settings.merged.security?.allowedHttpHookUrls).toEqual(USER_LIST);
+      expect(
+        getSettingsWarnings(settings).some((w) =>
+          w.includes('SystemDefaults scope settings also set it'),
+        ),
+      ).toBe(true);
+    });
+
+    it('never lets a workspace replace a System whitelist', () => {
+      mockScopes({
+        [getSystemSettingsPath()]: {
+          security: { allowedHttpHookUrls: USER_LIST },
+        },
+        [MOCK_WORKSPACE_SETTINGS_PATH]: {
+          security: { allowedHttpHookUrls: ['*'] },
+        },
+      });
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      expect(settings.merged.security?.allowedHttpHookUrls).toEqual(USER_LIST);
+    });
+
+    it('still merges the rest of the workspace security section', () => {
+      mockScopes({
+        [USER_SETTINGS_PATH]: { security: { allowedHttpHookUrls: USER_LIST } },
+        [MOCK_WORKSPACE_SETTINGS_PATH]: {
+          security: {
+            allowedHttpHookUrls: ['*'],
+            folderTrust: { enabled: true },
+          },
+        },
+      });
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      expect(settings.merged.security?.allowedHttpHookUrls).toEqual(USER_LIST);
+      expect(settings.merged.security?.folderTrust?.enabled).toBe(true);
+    });
+
+    it('drops the workspace whitelist entirely when the folder is untrusted', () => {
+      vi.mocked(isWorkspaceTrusted).mockReturnValue({
+        isTrusted: false,
+        source: 'file',
+      });
+      mockScopes({
+        [MOCK_WORKSPACE_SETTINGS_PATH]: {
+          security: { allowedHttpHookUrls: WORKSPACE_LIST },
+        },
+      });
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      expect(settings.merged.security?.allowedHttpHookUrls).toBeUndefined();
+    });
+  });
+
   describe('workflowsEnabled scope handling', () => {
     it.each([
       ['system defaults', getSystemDefaultsPath()],

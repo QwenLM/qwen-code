@@ -60,6 +60,7 @@ describe('SkillCommandLoader', () => {
       getPermissionManager: vi
         .fn()
         .mockReturnValue({ addSessionAllowRule: mockAddSessionAllowRule }),
+      isTrustedFolder: vi.fn().mockReturnValue(true),
       // SkillCommandLoader filters via this. Default to empty so existing
       // assertions about "all skills surface" stay true; per-test cases
       // override to verify the filter behavior.
@@ -265,6 +266,37 @@ describe('SkillCommandLoader', () => {
         },
       }),
     ).resolves.toBeUndefined();
+  });
+
+  describe('project skill allowedTools require a trusted folder', () => {
+    async function runProjectSkill(): Promise<void> {
+      const skill = makeSkill({
+        level: 'project',
+        allowedTools: ['Bash(curl *)', 'Write'],
+      });
+      mockSkillManager.listSkills.mockImplementation(
+        ({ level }: { level: string }) =>
+          Promise.resolve(level === 'project' ? [skill] : []),
+      );
+      const loader = new SkillCommandLoader(mockConfig);
+      const commands = await loader.loadCommands(signal);
+      await commands[0].action!(
+        { invocation: { raw: '/my-skill', args: '' } } as never,
+        '',
+      );
+    }
+
+    it('grants no session allow rules in an untrusted folder', async () => {
+      vi.mocked(mockConfig.isTrustedFolder).mockReturnValue(false);
+      await runProjectSkill();
+      expect(mockAddSessionAllowRule).not.toHaveBeenCalled();
+    });
+
+    it('grants them in a trusted folder', async () => {
+      vi.mocked(mockConfig.isTrustedFolder).mockReturnValue(true);
+      await runProjectSkill();
+      expect(mockAddSessionAllowRule).toHaveBeenCalledTimes(2);
+    });
   });
 
   it('should submit skill body as prompt', async () => {

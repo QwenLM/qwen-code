@@ -7,6 +7,7 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import {
   applySkillAllowedTools,
+  canApplySkillSideEffects,
   collectAvailableSkillEntries,
   clearCollectedSkillEntriesCache,
   clearLoadedSkillTracking,
@@ -69,6 +70,25 @@ describe('applySkillAllowedTools', () => {
     expect(addSessionAllowRule).toHaveBeenNthCalledWith(1, 'Bash(unbalanced');
     expect(addSessionAllowRule).toHaveBeenNthCalledWith(2, 'Read');
   });
+});
+
+describe('canApplySkillSideEffects', () => {
+  const trusted = { isTrustedFolder: () => true };
+  const untrusted = { isTrustedFolder: () => false };
+
+  it('gates project skills on folder trust', () => {
+    expect(canApplySkillSideEffects({ level: 'project' }, trusted)).toBe(true);
+    expect(canApplySkillSideEffects({ level: 'project' }, untrusted)).toBe(
+      false,
+    );
+  });
+
+  it.each(['user', 'extension', 'bundled'] as const)(
+    'never gates %s skills, which are not repo-controlled',
+    (level) => {
+      expect(canApplySkillSideEffects({ level }, untrusted)).toBe(true);
+    },
+  );
 });
 
 describe('collectAvailableSkillEntries memoize cache', () => {
