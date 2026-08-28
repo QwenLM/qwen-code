@@ -52,7 +52,7 @@ import {
   runWithInvocationContext,
   type InvocationContextV1,
 } from '../../utils/invocation-context.js';
-import { GeminiChat } from '../../core/geminiChat.js';
+import { LlmChat } from '../../core/llm-chat.js';
 import { ContextState } from './agent-headless.js';
 import type { ToolResultBoundaryObservation } from '../../tools/tool-result-boundary-diagnostics.js';
 import {
@@ -89,7 +89,7 @@ describe('AgentCore.createChat manual plan-exit notice ownership', () => {
       { max_turns: 1 },
     );
     const enableSpy = vi.spyOn(
-      GeminiChat.prototype,
+      LlmChat.prototype,
       'enableManualPlanExitNotices',
     );
 

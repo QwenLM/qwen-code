@@ -89,7 +89,7 @@ vi.mock('../ide/ide-client.js', () => ({
   },
 }));
 vi.mock('../utils/memory-constants.js', () => ({
-  setGeminiMdFilename: vi.fn(),
+  setMemoryFilename: vi.fn(),
 }));
 
 import * as fs from 'node:fs';
@@ -454,7 +454,7 @@ describe('Config.getModelRouteIdentity (#9454 route key)', () => {
     const config = new Config({ ...baseParams });
     await config.refreshAuth(AuthType.USE_GEMINI);
 
-    // Route-scoped caches (e.g. GeminiChat token counts) compare these
+    // Route-scoped caches (e.g. LlmChat token counts) compare these
     // strings for equality — the value must not drift between calls.
     const first = config.getModelRouteIdentity();
     expect(config.getModelRouteIdentity()).toBe(first);
