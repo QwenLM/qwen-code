@@ -817,6 +817,7 @@ describe('main-session style: reminder decision matches prompt section', () => {
     vi.stubEnv('QWEN_SYSTEM_MD', undefined);
     vi.stubEnv('QWEN_SYSTEM_IDENTITY_MD', undefined);
     vi.stubEnv('QWEN_WRITE_SYSTEM_MD', undefined);
+    vi.stubEnv('QWEN_CODE_TOOL_CALL_STYLE', undefined);
   });
 
   afterEach(() => {
