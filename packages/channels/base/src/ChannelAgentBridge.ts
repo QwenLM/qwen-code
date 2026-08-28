@@ -101,11 +101,6 @@ export interface ChannelAgentBridgeSessionOptions {
   /** Whether daemon-managed Channel loop tools may be attached to the session. */
   enableChannelLoops?: boolean;
   /**
-   * Source class stamped as daemon session metadata for new sessions and
-   * restore-time attribution for legacy sessions resumed through a channel.
-   */
-  sourceType?: string;
-  /**
    * Channel instance name (e.g. `feishu-main`) stamped as the daemon `sourceId`
    * for new sessions and restore-time attribution for legacy sessions resumed
    * through a channel.

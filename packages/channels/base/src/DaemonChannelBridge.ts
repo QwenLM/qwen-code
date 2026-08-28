@@ -388,7 +388,6 @@ export class DaemonChannelBridge
       modelServiceId: this.options.modelServiceId,
       sessionScope: this.options.sessionScope ?? 'thread',
       ...(options?.approvalMode ? { approvalMode: options.approvalMode } : {}),
-      ...(options?.sourceType ? { sourceType: options.sourceType } : {}),
       ...(options?.sourceId ? { sourceId: options.sourceId } : {}),
     });
     if (lifecycleGeneration !== this.lifecycleGeneration) {
@@ -417,7 +416,6 @@ export class DaemonChannelBridge
       sessionId,
       sessionScope: this.options.sessionScope ?? 'thread',
       ...(options?.approvalMode ? { approvalMode: options.approvalMode } : {}),
-      ...(options?.sourceType ? { sourceType: options.sourceType } : {}),
       ...(options?.sourceId ? { sourceId: options.sourceId } : {}),
     });
     if (lifecycleGeneration !== this.lifecycleGeneration) {
