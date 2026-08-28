@@ -8,7 +8,7 @@
 import type { Mock, MockInstance } from 'vitest';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { renderHook, act, waitFor } from '@testing-library/react';
-import { useGeminiStream } from './useGeminiStream.js';
+import { useLlmStream } from './use-llm-stream.js';
 import * as atCommandProcessor from './atCommandProcessor.js';
 import type {
   TrackedToolCall,
@@ -21,7 +21,7 @@ import { useReactToolScheduler } from './useReactToolScheduler.js';
 import type {
   Config,
   EditorType,
-  GeminiClient,
+  LlmClient,
   AnyToolInvocation,
   GoalTurnPermit,
   SteerInput,
@@ -30,7 +30,7 @@ import {
   ApprovalMode,
   AUTONOMOUS_SENTINEL_DYNAMIC,
   AuthType,
-  GeminiEventType as ServerGeminiEventType,
+  LlmEventType as ServerLlmEventType,
   MessageSenderType,
   SendMessageType,
   ToolErrorType,
@@ -58,7 +58,7 @@ const mockSendMessageStream = vi
 const mockStartChat = vi.fn();
 const mockRunVisionBridge = vi.hoisted(() => vi.fn());
 
-const MockedGeminiClientClass = vi.hoisted(() =>
+const MockedLlmClientClass = vi.hoisted(() =>
   vi.fn().mockImplementation(function (this: any, _config: any) {
     // _config
     this.startChat = mockStartChat;
@@ -142,7 +142,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   );
   return {
     ...actualCoreModule,
-    GeminiClient: MockedGeminiClientClass,
+    LlmClient: MockedLlmClientClass,
     UserPromptEvent: MockedUserPromptEvent,
     ApiCancelEvent: MockedApiCancelEvent,
     parseAndFormatApiError: mockParseAndFormatApiError,
@@ -215,8 +215,8 @@ vi.mock('./slashCommandProcessor.js', () => ({
 
 // --- END MOCKS ---
 
-// --- Tests for useGeminiStream Hook ---
-describe('useGeminiStream', () => {
+// --- Tests for useLlmStream Hook ---
+describe('useLlmStream', () => {
   let mockAddItem: Mock;
   let mockConfig: Config;
   let mockOnDebugMessage: Mock;
@@ -247,11 +247,11 @@ describe('useGeminiStream', () => {
     // (used by lastTurnUserItemRef's identity check).
     let nextItemId = 1000;
     mockAddItem = vi.fn(() => nextItemId++);
-    // Define the mock for getGeminiClient
-    const mockGetGeminiClient = vi.fn().mockImplementation(() => {
-      // MockedGeminiClientClass is defined in the module scope by the previous change.
+    // Define the mock for getLlmClient
+    const mockGetLlmClient = vi.fn().mockImplementation(() => {
+      // MockedLlmClientClass is defined in the module scope by the previous change.
       // It will use the mockStartChat and mockSendMessageStream that are managed within beforeEach.
-      const clientInstance = new MockedGeminiClientClass(mockConfig);
+      const clientInstance = new MockedLlmClientClass(mockConfig);
       return clientInstance;
     });
 
@@ -296,7 +296,7 @@ describe('useGeminiStream', () => {
       ),
       getProjectRoot: vi.fn(() => '/test/dir'),
       getFileCheckpointingEnabled: vi.fn(() => false),
-      getGeminiClient: mockGetGeminiClient,
+      getLlmClient: mockGetLlmClient,
       getApprovalMode: () => ApprovalMode.DEFAULT,
       getTeamManager: vi.fn(() => null),
       onTeamManagerChange: vi.fn(),
@@ -343,11 +343,11 @@ describe('useGeminiStream', () => {
       mockMarkToolsAsSubmitted,
     ]);
 
-    // Reset mocks for GeminiClient instance methods (startChat and sendMessageStream)
-    // The GeminiClient constructor itself is mocked at the module level.
+    // Reset mocks for LlmClient instance methods (startChat and sendMessageStream)
+    // The LlmClient constructor itself is mocked at the module level.
     mockStartChat.mockClear().mockResolvedValue({
       sendMessageStream: mockSendMessageStream,
-    } as unknown as any); // GeminiChat -> any
+    } as unknown as any); // LlmChat -> any
     mockSendMessageStream
       .mockClear()
       .mockReturnValue((async function* () {})());
@@ -373,11 +373,11 @@ describe('useGeminiStream', () => {
 
   const renderTestHook = (
     initialToolCalls: TrackedToolCall[] = [],
-    geminiClient?: any,
+    llmClient?: any,
     availableTerminalHeightRef?: { current: number },
-    onCancelSubmit: Parameters<typeof useGeminiStream>[15] = () => {},
-    logger?: Parameters<typeof useGeminiStream>[20],
-    goalQueueRef?: Parameters<typeof useGeminiStream>[24],
+    onCancelSubmit: Parameters<typeof useLlmStream>[15] = () => {},
+    logger?: Parameters<typeof useLlmStream>[20],
+    goalQueueRef?: Parameters<typeof useLlmStream>[24],
   ) => {
     let currentToolCalls = initialToolCalls;
     const setToolCalls = (newToolCalls: TrackedToolCall[]) => {
@@ -391,7 +391,7 @@ describe('useGeminiStream', () => {
       mockMarkToolsAsSubmitted,
     ]);
 
-    const client = geminiClient || mockConfig.getGeminiClient();
+    const client = llmClient || mockConfig.getLlmClient();
 
     const { result, rerender } = renderHook(
       (props: {
@@ -411,7 +411,7 @@ describe('useGeminiStream', () => {
         if (props.toolCalls) {
           setToolCalls(props.toolCalls);
         }
-        return useGeminiStream(
+        return useLlmStream(
           props.client,
           props.history,
           props.addItem,
@@ -870,7 +870,7 @@ describe('useGeminiStream', () => {
       mockSendMessageStream.mockReturnValueOnce(
         (async function* () {
           yield {
-            type: ServerGeminiEventType.ToolCallRequest,
+            type: ServerLlmEventType.ToolCallRequest,
             value: toolRequest,
           };
         })(),
@@ -1006,7 +1006,7 @@ describe('useGeminiStream', () => {
               prompt_id: 'prompt-id-skill',
             },
             status: 'success',
-            responseSubmittedToGemini: false,
+            responseSubmittedToLlm: false,
             response: {
               callId: 'skill-call',
               responseParts: [{ text: 'skill loaded' }],
@@ -1528,7 +1528,7 @@ describe('useGeminiStream', () => {
           prompt_id: 'prompt-id-1',
         },
         status: 'success',
-        responseSubmittedToGemini: false,
+        responseSubmittedToLlm: false,
         response: {
           callId: 'call1',
           responseParts: [{ text: 'tool 1 response' }],
@@ -1556,7 +1556,7 @@ describe('useGeminiStream', () => {
           prompt_id: 'prompt-id-1',
         },
         status: 'executing',
-        responseSubmittedToGemini: false,
+        responseSubmittedToLlm: false,
         tool: {
           name: 'tool2',
           displayName: 'tool2',
@@ -1594,7 +1594,7 @@ describe('useGeminiStream', () => {
           prompt_id: 'prompt-id-2',
         },
         status: 'success',
-        responseSubmittedToGemini: false,
+        responseSubmittedToLlm: false,
         response: {
           callId: 'call1',
           responseParts: toolCall1ResponseParts,
@@ -1616,7 +1616,7 @@ describe('useGeminiStream', () => {
           prompt_id: 'prompt-id-2',
         },
         status: 'error',
-        responseSubmittedToGemini: false,
+        responseSubmittedToLlm: false,
         response: {
           callId: 'call2',
           responseParts: toolCall2ResponseParts,
@@ -1636,8 +1636,8 @@ describe('useGeminiStream', () => {
     });
 
     renderHook(() =>
-      useGeminiStream(
-        new MockedGeminiClientClass(mockConfig),
+      useLlmStream(
+        new MockedLlmClientClass(mockConfig),
         [],
         mockAddItem,
         mockConfig,
@@ -1694,7 +1694,7 @@ describe('useGeminiStream', () => {
           prompt_id: 'prompt-batch-id',
         },
         status: 'success',
-        responseSubmittedToGemini: false,
+        responseSubmittedToLlm: false,
         response: {
           callId,
           responseParts: [{ text: `${callId} response` }],
@@ -1715,8 +1715,8 @@ describe('useGeminiStream', () => {
     });
 
     renderHook(() =>
-      useGeminiStream(
-        new MockedGeminiClientClass(mockConfig),
+      useLlmStream(
+        new MockedLlmClientClass(mockConfig),
         [],
         mockAddItem,
         mockConfig,
@@ -1743,7 +1743,7 @@ describe('useGeminiStream', () => {
     mockSendMessageStream.mockReturnValueOnce(
       (async function* () {
         yield {
-          type: ServerGeminiEventType.ToolCallRequest,
+          type: ServerLlmEventType.ToolCallRequest,
           value: { callId: 'next-tool', name: 'testTool', args: {} },
         };
       })(),
@@ -1794,7 +1794,7 @@ describe('useGeminiStream', () => {
           prompt_id: 'prompt-batch-id',
         },
         status: 'success',
-        responseSubmittedToGemini: false,
+        responseSubmittedToLlm: false,
         response: {
           callId,
           responseParts: [{ text: `${callId} response` }],
@@ -1815,8 +1815,8 @@ describe('useGeminiStream', () => {
     });
 
     renderHook(() =>
-      useGeminiStream(
-        new MockedGeminiClientClass(mockConfig),
+      useLlmStream(
+        new MockedLlmClientClass(mockConfig),
         [],
         mockAddItem,
         mockConfig,
@@ -1847,7 +1847,7 @@ describe('useGeminiStream', () => {
       mockSendMessageStream.mockReturnValueOnce(
         (async function* () {
           yield {
-            type: ServerGeminiEventType.ToolCallRequest,
+            type: ServerLlmEventType.ToolCallRequest,
             value: {
               callId: 'reused-X',
               name: 'testTool',
@@ -1911,7 +1911,7 @@ describe('useGeminiStream', () => {
           prompt_id: 'prompt-batch-id',
         },
         status: 'success',
-        responseSubmittedToGemini: false,
+        responseSubmittedToLlm: false,
         response: {
           callId,
           responseParts: [{ text: `${callId} response` }],
@@ -1933,8 +1933,8 @@ describe('useGeminiStream', () => {
 
     const renderStream = () =>
       renderHook(() =>
-        useGeminiStream(
-          new MockedGeminiClientClass(mockConfig),
+        useLlmStream(
+          new MockedLlmClientClass(mockConfig),
           [],
           mockAddItem,
           mockConfig,
@@ -1966,7 +1966,7 @@ describe('useGeminiStream', () => {
       mockSendMessageStream.mockReturnValueOnce(
         (async function* () {
           yield {
-            type: ServerGeminiEventType.ToolCallRequest,
+            type: ServerLlmEventType.ToolCallRequest,
             value: { callId, name: 'testTool', args: {} },
           };
         })(),
@@ -2021,7 +2021,7 @@ describe('useGeminiStream', () => {
         prompt_id: 'prompt-clear-window',
       },
       status: 'success',
-      responseSubmittedToGemini: false,
+      responseSubmittedToLlm: false,
       response: {
         callId: 'window-tool',
         responseParts: [{ text: 'window-tool response' }],
@@ -2063,8 +2063,8 @@ describe('useGeminiStream', () => {
     );
 
     const { result, rerender } = renderHook(() =>
-      useGeminiStream(
-        new MockedGeminiClientClass(mockConfig),
+      useLlmStream(
+        new MockedLlmClientClass(mockConfig),
         [],
         mockAddItem,
         mockConfig,
@@ -2167,7 +2167,7 @@ describe('useGeminiStream', () => {
           goalContext: permit,
         },
         status: 'success',
-        responseSubmittedToGemini: false,
+        responseSubmittedToLlm: false,
         response: {
           callId,
           responseParts: [{ text: `${callId} response` }],
@@ -2186,8 +2186,8 @@ describe('useGeminiStream', () => {
       return [[], mockScheduleToolCalls, mockMarkToolsAsSubmitted];
     });
     renderHook(() =>
-      useGeminiStream(
-        new MockedGeminiClientClass(mockConfig),
+      useLlmStream(
+        new MockedLlmClientClass(mockConfig),
         [],
         mockAddItem,
         mockConfig,
@@ -2253,7 +2253,7 @@ describe('useGeminiStream', () => {
           ...(goalContext ? { goalContext } : {}),
         },
         status: 'success',
-        responseSubmittedToGemini: false,
+        responseSubmittedToLlm: false,
         response: {
           callId,
           responseParts: [{ text: `${callId} response` }],
@@ -2271,12 +2271,12 @@ describe('useGeminiStream', () => {
       capturedOnComplete = onComplete;
       return [[], mockScheduleToolCalls, mockMarkToolsAsSubmitted];
     });
-    const client = new MockedGeminiClientClass(mockConfig);
+    const client = new MockedLlmClientClass(mockConfig);
     client.getHistoryFunctionResponseIds = vi
       .fn()
       .mockReturnValue(new Set(['deduplicated-tool']));
     renderHook(() =>
-      useGeminiStream(
+      useLlmStream(
         client,
         [],
         mockAddItem,
@@ -2370,7 +2370,7 @@ describe('useGeminiStream', () => {
           ...(goalContext ? { goalContext } : {}),
         },
         status: 'success',
-        responseSubmittedToGemini: false,
+        responseSubmittedToLlm: false,
         response: {
           callId,
           responseParts: [{ text: `${callId} response` }],
@@ -2389,8 +2389,8 @@ describe('useGeminiStream', () => {
       return [[], mockScheduleToolCalls, mockMarkToolsAsSubmitted];
     });
     renderHook(() =>
-      useGeminiStream(
-        new MockedGeminiClientClass(mockConfig),
+      useLlmStream(
+        new MockedLlmClientClass(mockConfig),
         [],
         mockAddItem,
         mockConfig,
@@ -2417,7 +2417,7 @@ describe('useGeminiStream', () => {
     mockSendMessageStream.mockReturnValueOnce(
       (async function* () {
         yield {
-          type: ServerGeminiEventType.ToolCallRequest,
+          type: ServerLlmEventType.ToolCallRequest,
           value: { callId: 'cont-tool', name: 'testTool', args: {} },
         };
       })(),
@@ -2510,7 +2510,7 @@ describe('useGeminiStream', () => {
           ...(goalContext ? { goalContext } : {}),
         },
         status: 'success',
-        responseSubmittedToGemini: false,
+        responseSubmittedToLlm: false,
         response: {
           callId,
           responseParts: [{ text: `${callId} response` }],
@@ -2529,8 +2529,8 @@ describe('useGeminiStream', () => {
       return [[], mockScheduleToolCalls, mockMarkToolsAsSubmitted];
     });
     renderHook(() =>
-      useGeminiStream(
-        new MockedGeminiClientClass(mockConfig),
+      useLlmStream(
+        new MockedLlmClientClass(mockConfig),
         [],
         mockAddItem,
         mockConfig,
@@ -2557,7 +2557,7 @@ describe('useGeminiStream', () => {
     mockSendMessageStream.mockReturnValueOnce(
       (async function* () {
         yield {
-          type: ServerGeminiEventType.ToolCallRequest,
+          type: ServerLlmEventType.ToolCallRequest,
           value: { callId: 'cont-tool', name: 'testTool', args: {} },
         };
       })(),
@@ -2640,11 +2640,11 @@ describe('useGeminiStream', () => {
       capturedOnComplete = onComplete;
       return [[], mockScheduleToolCalls, mockMarkToolsAsSubmitted];
     });
-    const client = new MockedGeminiClientClass(mockConfig);
+    const client = new MockedLlmClientClass(mockConfig);
     mockSendMessageStream.mockReturnValueOnce(
       (async function* () {
         yield {
-          type: ServerGeminiEventType.ToolCallRequest,
+          type: ServerLlmEventType.ToolCallRequest,
           value: {
             callId: 'update-goal-1',
             name: 'update_goal',
@@ -2657,7 +2657,7 @@ describe('useGeminiStream', () => {
       })(),
     );
     const { result } = renderHook(() =>
-      useGeminiStream(
+      useLlmStream(
         client,
         [],
         mockAddItem,
@@ -2709,7 +2709,7 @@ describe('useGeminiStream', () => {
             goalContext: permit,
           },
           status: 'success',
-          responseSubmittedToGemini: false,
+          responseSubmittedToLlm: false,
           response: {
             callId: 'update-goal-1',
             responseParts,
@@ -2789,11 +2789,11 @@ describe('useGeminiStream', () => {
       capturedOnComplete = onComplete;
       return [[], mockScheduleToolCalls, mockMarkToolsAsSubmitted];
     });
-    const client = new MockedGeminiClientClass(mockConfig);
+    const client = new MockedLlmClientClass(mockConfig);
     mockSendMessageStream.mockReturnValueOnce(
       (async function* () {
         yield {
-          type: ServerGeminiEventType.ToolCallRequest,
+          type: ServerLlmEventType.ToolCallRequest,
           value: {
             callId: 'update-goal-error',
             name: 'update_goal',
@@ -2806,7 +2806,7 @@ describe('useGeminiStream', () => {
       })(),
     );
     const { result } = renderHook(() =>
-      useGeminiStream(
+      useLlmStream(
         client,
         [],
         mockAddItem,
@@ -2849,7 +2849,7 @@ describe('useGeminiStream', () => {
             goalContext: permit,
           },
           status: 'success',
-          responseSubmittedToGemini: false,
+          responseSubmittedToLlm: false,
           response: {
             callId: 'update-goal-error',
             responseParts: [
@@ -2891,9 +2891,9 @@ describe('useGeminiStream', () => {
     const originalOwner = {};
     const replacementOwner = {};
     mockGetActiveInteractionSpan.mockReturnValue(originalOwner);
-    const client = new MockedGeminiClientClass(mockConfig);
+    const client = new MockedLlmClientClass(mockConfig);
     const { result } = renderHook(() =>
-      useGeminiStream(
+      useLlmStream(
         client,
         [],
         mockAddItem,
@@ -2918,7 +2918,7 @@ describe('useGeminiStream', () => {
     mockSendMessageStream.mockReturnValueOnce(
       (async function* () {
         yield {
-          type: ServerGeminiEventType.ToolCallRequest,
+          type: ServerLlmEventType.ToolCallRequest,
           value: {
             callId: 'replacement-tool',
             name: 'testTool',
@@ -2951,7 +2951,7 @@ describe('useGeminiStream', () => {
             prompt_id: 'prompt-replaced',
           },
           status: 'cancelled',
-          responseSubmittedToGemini: false,
+          responseSubmittedToLlm: false,
           response: {
             callId: 'replacement-tool',
             responseParts: [{ text: 'cancelled' }],
@@ -3012,11 +3012,11 @@ describe('useGeminiStream', () => {
     mockSendMessageStream.mockReturnValueOnce(
       (async function* () {
         yield {
-          type: ServerGeminiEventType.Content,
+          type: ServerLlmEventType.Content,
           value: 'done',
         };
         yield {
-          type: ServerGeminiEventType.Finished,
+          type: ServerLlmEventType.Finished,
           value: {
             reason: undefined,
             usageMetadata: { totalTokenCount: 1 },
@@ -3025,9 +3025,9 @@ describe('useGeminiStream', () => {
       })(),
     );
 
-    const client = new MockedGeminiClientClass(mockConfig);
+    const client = new MockedLlmClientClass(mockConfig);
     renderHook(() =>
-      useGeminiStream(
+      useLlmStream(
         client,
         [],
         mockAddItem,
@@ -3062,7 +3062,7 @@ describe('useGeminiStream', () => {
             goalContext: permit,
           },
           status: 'success',
-          responseSubmittedToGemini: false,
+          responseSubmittedToLlm: false,
           response: {
             callId: 'shell-goal-1',
             responseParts: [
@@ -3132,11 +3132,11 @@ describe('useGeminiStream', () => {
       return [[], mockScheduleToolCalls, mockMarkToolsAsSubmitted];
     });
 
-    const client = new MockedGeminiClientClass(mockConfig);
+    const client = new MockedLlmClientClass(mockConfig);
     mockSendMessageStream.mockReturnValueOnce(
       (async function* () {
         yield {
-          type: ServerGeminiEventType.ToolCallRequest,
+          type: ServerLlmEventType.ToolCallRequest,
           value: {
             callId: 'agent-call',
             name: 'agent',
@@ -3148,7 +3148,7 @@ describe('useGeminiStream', () => {
       })(),
     );
     const { result } = renderHook(() =>
-      useGeminiStream(
+      useLlmStream(
         client,
         [],
         mockAddItem,
@@ -3191,7 +3191,7 @@ describe('useGeminiStream', () => {
             prompt_id: 'prompt-id-agent',
           },
           status: 'success',
-          responseSubmittedToGemini: false,
+          responseSubmittedToLlm: false,
           response: {
             callId: 'agent-call',
             responseParts,
@@ -3253,7 +3253,7 @@ describe('useGeminiStream', () => {
             prompt_id: 'prompt-id-agent-2',
           },
           status: 'success',
-          responseSubmittedToGemini: false,
+          responseSubmittedToLlm: false,
           response: {
             callId: 'agent-call-2',
             responseParts,
@@ -3303,7 +3303,7 @@ describe('useGeminiStream', () => {
           prompt_id: 'prompt-id-midturn',
         },
         status: 'success',
-        responseSubmittedToGemini: false,
+        responseSubmittedToLlm: false,
         response: {
           callId: 'call1',
           responseParts: toolCallResponseParts,
@@ -3334,8 +3334,8 @@ describe('useGeminiStream', () => {
     });
 
     renderHook(() =>
-      useGeminiStream(
-        new MockedGeminiClientClass(mockConfig),
+      useLlmStream(
+        new MockedLlmClientClass(mockConfig),
         [],
         mockAddItem,
         mockConfig,
@@ -3415,8 +3415,8 @@ describe('useGeminiStream', () => {
       .mockReturnValue([]);
 
     const { result } = renderHook(() =>
-      useGeminiStream(
-        new MockedGeminiClientClass(mockConfig),
+      useLlmStream(
+        new MockedLlmClientClass(mockConfig),
         [],
         mockAddItem,
         mockConfig,
@@ -3483,8 +3483,8 @@ describe('useGeminiStream', () => {
     const detachedController = new AbortController();
 
     const { result } = renderHook(() =>
-      useGeminiStream(
-        new MockedGeminiClientClass(mockConfig),
+      useLlmStream(
+        new MockedLlmClientClass(mockConfig),
         [],
         mockAddItem,
         mockConfig,
@@ -3550,8 +3550,8 @@ describe('useGeminiStream', () => {
       .mockReturnValue([]);
 
     const { result } = renderHook(() =>
-      useGeminiStream(
-        new MockedGeminiClientClass(mockConfig),
+      useLlmStream(
+        new MockedLlmClientClass(mockConfig),
         [],
         mockAddItem,
         mockConfig,
@@ -3612,8 +3612,8 @@ describe('useGeminiStream', () => {
       .mockReturnValue([]);
 
     const { result } = renderHook(() =>
-      useGeminiStream(
-        new MockedGeminiClientClass(mockConfig),
+      useLlmStream(
+        new MockedLlmClientClass(mockConfig),
         [],
         mockAddItem,
         mockConfig,
@@ -3681,8 +3681,8 @@ describe('useGeminiStream', () => {
       .mockReturnValue([]);
 
     const { result } = renderHook(() =>
-      useGeminiStream(
-        new MockedGeminiClientClass(mockConfig),
+      useLlmStream(
+        new MockedLlmClientClass(mockConfig),
         [],
         mockAddItem,
         mockConfig,
@@ -3749,8 +3749,8 @@ describe('useGeminiStream', () => {
       .mockReturnValue([]);
 
     const { result } = renderHook(() =>
-      useGeminiStream(
-        new MockedGeminiClientClass(mockConfig),
+      useLlmStream(
+        new MockedLlmClientClass(mockConfig),
         [],
         mockAddItem,
         mockConfig,
@@ -3799,8 +3799,8 @@ describe('useGeminiStream', () => {
       .mockReturnValue([]);
 
     const { result } = renderHook(() =>
-      useGeminiStream(
-        new MockedGeminiClientClass(mockConfig),
+      useLlmStream(
+        new MockedLlmClientClass(mockConfig),
         [],
         mockAddItem,
         mockConfig,
@@ -3873,8 +3873,8 @@ describe('useGeminiStream', () => {
       .mockReturnValue([]);
 
     const { result } = renderHook(() =>
-      useGeminiStream(
-        new MockedGeminiClientClass(mockConfig),
+      useLlmStream(
+        new MockedLlmClientClass(mockConfig),
         [],
         mockAddItem,
         mockConfig,
@@ -3985,7 +3985,7 @@ describe('useGeminiStream', () => {
           prompt_id: 'prompt-id-midturn-image',
         },
         status: 'success',
-        responseSubmittedToGemini: false,
+        responseSubmittedToLlm: false,
         response: {
           callId: 'call1',
           responseParts: toolCallResponseParts,
@@ -4016,8 +4016,8 @@ describe('useGeminiStream', () => {
     });
 
     renderHook(() =>
-      useGeminiStream(
-        new MockedGeminiClientClass(mockConfig),
+      useLlmStream(
+        new MockedLlmClientClass(mockConfig),
         [],
         mockAddItem,
         mockConfig,
@@ -4157,7 +4157,7 @@ describe('useGeminiStream', () => {
           prompt_id: 'prompt-id-midturn-bridge-fail',
         },
         status: 'success',
-        responseSubmittedToGemini: false,
+        responseSubmittedToLlm: false,
         response: {
           callId: 'call1',
           responseParts: toolCallResponseParts,
@@ -4188,8 +4188,8 @@ describe('useGeminiStream', () => {
     });
 
     renderHook(() =>
-      useGeminiStream(
-        new MockedGeminiClientClass(mockConfig),
+      useLlmStream(
+        new MockedLlmClientClass(mockConfig),
         [],
         mockAddItem,
         mockConfig,
@@ -4277,7 +4277,7 @@ describe('useGeminiStream', () => {
           prompt_id: 'prompt-id-midturn-at-error',
         },
         status: 'success',
-        responseSubmittedToGemini: false,
+        responseSubmittedToLlm: false,
         response: {
           callId: 'call1',
           responseParts: toolCallResponseParts,
@@ -4308,8 +4308,8 @@ describe('useGeminiStream', () => {
     });
 
     renderHook(() =>
-      useGeminiStream(
-        new MockedGeminiClientClass(mockConfig),
+      useLlmStream(
+        new MockedLlmClientClass(mockConfig),
         [],
         mockAddItem,
         mockConfig,
@@ -4400,7 +4400,7 @@ describe('useGeminiStream', () => {
           prompt_id: 'prompt-id-midturn-at-throw',
         },
         status: 'success',
-        responseSubmittedToGemini: false,
+        responseSubmittedToLlm: false,
         response: {
           callId: 'call1',
           responseParts: toolCallResponseParts,
@@ -4431,8 +4431,8 @@ describe('useGeminiStream', () => {
     });
 
     renderHook(() =>
-      useGeminiStream(
-        new MockedGeminiClientClass(mockConfig),
+      useLlmStream(
+        new MockedLlmClientClass(mockConfig),
         [],
         mockAddItem,
         mockConfig,
@@ -4528,7 +4528,7 @@ describe('useGeminiStream', () => {
           prompt_id: 'prompt-id-midturn-timeout',
         },
         status: 'success',
-        responseSubmittedToGemini: false,
+        responseSubmittedToLlm: false,
         response: {
           callId: 'call1',
           responseParts: toolCallResponseParts,
@@ -4559,8 +4559,8 @@ describe('useGeminiStream', () => {
     });
 
     renderHook(() =>
-      useGeminiStream(
-        new MockedGeminiClientClass(mockConfig),
+      useLlmStream(
+        new MockedLlmClientClass(mockConfig),
         [],
         mockAddItem,
         mockConfig,
@@ -4641,7 +4641,7 @@ describe('useGeminiStream', () => {
           prompt_id: 'prompt-id-midturn-cancel',
         },
         status: 'success',
-        responseSubmittedToGemini: false,
+        responseSubmittedToLlm: false,
         response: {
           callId: 'call1',
           responseParts: toolCallResponseParts,
@@ -4676,8 +4676,8 @@ describe('useGeminiStream', () => {
     });
 
     const { result } = renderHook(() =>
-      useGeminiStream(
-        new MockedGeminiClientClass(mockConfig),
+      useLlmStream(
+        new MockedLlmClientClass(mockConfig),
         [],
         mockAddItem,
         mockConfig,
@@ -4751,7 +4751,7 @@ describe('useGeminiStream', () => {
           prompt_id: 'prompt-id-midturn-cancel-timeout',
         },
         status: 'success',
-        responseSubmittedToGemini: false,
+        responseSubmittedToLlm: false,
         response: {
           callId: 'call1',
           responseParts: toolCallResponseParts,
@@ -4786,8 +4786,8 @@ describe('useGeminiStream', () => {
     });
 
     const { result } = renderHook(() =>
-      useGeminiStream(
-        new MockedGeminiClientClass(mockConfig),
+      useLlmStream(
+        new MockedLlmClientClass(mockConfig),
         [],
         mockAddItem,
         mockConfig,
@@ -4858,7 +4858,7 @@ describe('useGeminiStream', () => {
           prompt_id: 'prompt-id-midturn',
         },
         status: 'success',
-        responseSubmittedToGemini: false,
+        responseSubmittedToLlm: false,
         response: {
           callId: 'call1',
           responseParts: toolCallResponseParts,
@@ -4889,8 +4889,8 @@ describe('useGeminiStream', () => {
     });
 
     renderHook(() =>
-      useGeminiStream(
-        new MockedGeminiClientClass(mockConfig),
+      useLlmStream(
+        new MockedLlmClientClass(mockConfig),
         [],
         mockAddItem,
         mockConfig,
@@ -4951,7 +4951,7 @@ describe('useGeminiStream', () => {
           responseParts: [{ text: 'cancelled' }],
           errorType: undefined, // FIX: Added missing property
         },
-        responseSubmittedToGemini: false,
+        responseSubmittedToLlm: false,
         tool: {
           displayName: 'mock tool',
         },
@@ -4960,11 +4960,11 @@ describe('useGeminiStream', () => {
         } as unknown as AnyToolInvocation,
       } as TrackedCancelledToolCall,
     ];
-    const client = new MockedGeminiClientClass(mockConfig);
+    const client = new MockedLlmClientClass(mockConfig);
     mockSendMessageStream.mockReturnValueOnce(
       (async function* () {
         yield {
-          type: ServerGeminiEventType.ToolCallRequest,
+          type: ServerLlmEventType.ToolCallRequest,
           value: {
             callId: '1',
             name: 'testTool',
@@ -4987,7 +4987,7 @@ describe('useGeminiStream', () => {
     });
 
     const { result } = renderHook(() =>
-      useGeminiStream(
+      useLlmStream(
         client,
         [],
         mockAddItem,
@@ -5068,7 +5068,7 @@ describe('useGeminiStream', () => {
         error: undefined,
         errorType: undefined, // FIX: Added missing property
       },
-      responseSubmittedToGemini: false,
+      responseSubmittedToLlm: false,
     };
     const cancelledToolCall2: TrackedCancelledToolCall = {
       request: {
@@ -5097,10 +5097,10 @@ describe('useGeminiStream', () => {
         error: undefined,
         errorType: undefined, // FIX: Added missing property
       },
-      responseSubmittedToGemini: false,
+      responseSubmittedToLlm: false,
     };
     const allCancelledTools = [cancelledToolCall1, cancelledToolCall2];
-    const client = new MockedGeminiClientClass(mockConfig);
+    const client = new MockedLlmClientClass(mockConfig);
 
     let capturedOnComplete:
       | ((completedTools: TrackedToolCall[]) => Promise<void>)
@@ -5112,7 +5112,7 @@ describe('useGeminiStream', () => {
     });
 
     renderHook(() =>
-      useGeminiStream(
+      useLlmStream(
         client,
         [],
         mockAddItem,
@@ -5179,7 +5179,7 @@ describe('useGeminiStream', () => {
         // halts the turn. The TUI must NOT execute them — it should halt
         // cleanly like the non-interactive runner.
         yield {
-          type: ServerGeminiEventType.ToolCallRequest,
+          type: ServerLlmEventType.ToolCallRequest,
           value: {
             callId: 'rep-1',
             name: 'run_shell_command',
@@ -5189,7 +5189,7 @@ describe('useGeminiStream', () => {
           },
         };
         yield {
-          type: ServerGeminiEventType.ToolCallRequest,
+          type: ServerLlmEventType.ToolCallRequest,
           value: {
             callId: 'rep-2',
             name: 'run_shell_command',
@@ -5198,13 +5198,13 @@ describe('useGeminiStream', () => {
             prompt_id: 'prompt-loop-halt',
           },
         };
-        yield { type: ServerGeminiEventType.LoopDetected };
+        yield { type: ServerLlmEventType.LoopDetected };
       })(),
     );
 
-    const client = new MockedGeminiClientClass(mockConfig);
+    const client = new MockedLlmClientClass(mockConfig);
     const { result } = renderHook(() =>
-      useGeminiStream(
+      useLlmStream(
         client,
         [],
         mockAddItem,
@@ -5268,7 +5268,7 @@ describe('useGeminiStream', () => {
       .mockReturnValueOnce(
         (async function* () {
           yield {
-            type: ServerGeminiEventType.ToolCallRequest,
+            type: ServerLlmEventType.ToolCallRequest,
             value: {
               callId: 'tool-dup',
               providerCallId: 'tool-dup',
@@ -5279,7 +5279,7 @@ describe('useGeminiStream', () => {
             },
           };
           yield {
-            type: ServerGeminiEventType.ToolCallRequest,
+            type: ServerLlmEventType.ToolCallRequest,
             value: {
               callId: 'tool-dup',
               providerCallId: 'tool-dup',
@@ -5297,19 +5297,19 @@ describe('useGeminiStream', () => {
       .mockReturnValueOnce(
         (async function* () {
           yield {
-            type: ServerGeminiEventType.Content,
+            type: ServerLlmEventType.Content,
             value: 'done',
           };
           yield {
-            type: ServerGeminiEventType.Finished,
+            type: ServerLlmEventType.Finished,
             value: { reason: undefined, usageMetadata: { totalTokenCount: 1 } },
           };
         })(),
       );
 
-    const client = new MockedGeminiClientClass(mockConfig);
+    const client = new MockedLlmClientClass(mockConfig);
     const { result } = renderHook(() =>
-      useGeminiStream(
+      useLlmStream(
         client,
         [],
         mockAddItem,
@@ -5359,7 +5359,7 @@ describe('useGeminiStream', () => {
         prompt_id: 'prompt-tui-dup',
       },
       status: 'success',
-      responseSubmittedToGemini: false,
+      responseSubmittedToLlm: false,
       response: {
         callId: 'tool-dup',
         responseParts: [
@@ -5428,7 +5428,7 @@ describe('useGeminiStream', () => {
   });
 
   it('submits a synthetic response for history-paired duplicate provider ids without scheduling', async () => {
-    const client = new MockedGeminiClientClass(mockConfig);
+    const client = new MockedLlmClientClass(mockConfig);
     client.getHistoryToolCallFingerprints = vi
       .fn()
       .mockReturnValue(
@@ -5444,7 +5444,7 @@ describe('useGeminiStream', () => {
       .mockReturnValueOnce(
         (async function* () {
           yield {
-            type: ServerGeminiEventType.ToolCallRequest,
+            type: ServerLlmEventType.ToolCallRequest,
             value: {
               callId: 'tool-history',
               providerCallId: 'tool-history',
@@ -5459,7 +5459,7 @@ describe('useGeminiStream', () => {
       .mockReturnValueOnce(
         (async function* () {
           yield {
-            type: ServerGeminiEventType.Finished,
+            type: ServerLlmEventType.Finished,
             value: { reason: undefined, usageMetadata: { totalTokenCount: 1 } },
           };
         })(),
@@ -5482,7 +5482,7 @@ describe('useGeminiStream', () => {
   });
 
   it('schedules an id-colliding tool call whose args differ from the handled call', async () => {
-    const client = new MockedGeminiClientClass(mockConfig);
+    const client = new MockedLlmClientClass(mockConfig);
     client.getHistoryToolCallFingerprints = vi
       .fn()
       .mockReturnValue(
@@ -5497,7 +5497,7 @@ describe('useGeminiStream', () => {
     mockSendMessageStream.mockReturnValueOnce(
       (async function* () {
         yield {
-          type: ServerGeminiEventType.ToolCallRequest,
+          type: ServerLlmEventType.ToolCallRequest,
           value: {
             callId: 'tool-history__qwen_dup_2',
             providerCallId: 'tool-history',
@@ -5530,7 +5530,7 @@ describe('useGeminiStream', () => {
   });
 
   it('drops repeated history-paired duplicate provider ids after the first synthetic response', async () => {
-    const client = new MockedGeminiClientClass(mockConfig);
+    const client = new MockedLlmClientClass(mockConfig);
     client.getHistoryToolCallFingerprints = vi
       .fn()
       .mockReturnValue(
@@ -5546,7 +5546,7 @@ describe('useGeminiStream', () => {
       .mockReturnValueOnce(
         (async function* () {
           yield {
-            type: ServerGeminiEventType.ToolCallRequest,
+            type: ServerLlmEventType.ToolCallRequest,
             value: {
               callId: 'tool-history',
               providerCallId: 'tool-history',
@@ -5561,7 +5561,7 @@ describe('useGeminiStream', () => {
       .mockReturnValueOnce(
         (async function* () {
           yield {
-            type: ServerGeminiEventType.ToolCallRequest,
+            type: ServerLlmEventType.ToolCallRequest,
             value: {
               callId: 'tool-history',
               providerCallId: 'tool-history',
@@ -5574,7 +5574,7 @@ describe('useGeminiStream', () => {
             },
           };
           yield {
-            type: ServerGeminiEventType.ToolCallRequest,
+            type: ServerLlmEventType.ToolCallRequest,
             value: {
               callId: 'tool-fresh',
               providerCallId: 'tool-fresh',
@@ -5585,7 +5585,7 @@ describe('useGeminiStream', () => {
             },
           };
           yield {
-            type: ServerGeminiEventType.Finished,
+            type: ServerLlmEventType.Finished,
             value: { reason: undefined, usageMetadata: { totalTokenCount: 1 } },
           };
         })(),
@@ -5616,7 +5616,7 @@ describe('useGeminiStream', () => {
     mockSendMessageStream.mockReturnValueOnce(
       (async function* () {
         yield {
-          type: ServerGeminiEventType.ToolCallRequest,
+          type: ServerLlmEventType.ToolCallRequest,
           value: {
             callId: 'generated-1',
             name: 'shell',
@@ -5626,7 +5626,7 @@ describe('useGeminiStream', () => {
           },
         };
         yield {
-          type: ServerGeminiEventType.ToolCallRequest,
+          type: ServerLlmEventType.ToolCallRequest,
           value: {
             callId: 'generated-2',
             name: 'shell',
@@ -5670,7 +5670,7 @@ describe('useGeminiStream', () => {
         prompt_id: 'prompt-race-a',
       },
       status: 'success',
-      responseSubmittedToGemini: false,
+      responseSubmittedToLlm: false,
       response: {
         callId: 'call_race_A',
         responseParts: [
@@ -5697,7 +5697,7 @@ describe('useGeminiStream', () => {
       } as unknown as AnyToolInvocation,
     } as unknown as TrackedCompletedToolCall;
 
-    const client = new MockedGeminiClientClass(mockConfig);
+    const client = new MockedLlmClientClass(mockConfig);
     // Simulate the chat-internal repair pass having already planted a
     // synthetic functionResponse for the same callId on the previous
     // (Retry) push. The dedup dispatcher consults
@@ -5748,7 +5748,7 @@ describe('useGeminiStream', () => {
     });
 
     renderHook(() =>
-      useGeminiStream(
+      useLlmStream(
         client,
         [],
         mockAddItem,
@@ -5786,7 +5786,7 @@ describe('useGeminiStream', () => {
     // The deduped tool DID run locally — `recordCompletedToolCall` must
     // still fire so toolCallCount / skillsModifiedInSession reflect it,
     // even though the wire-side submission is dropped. Regression guard:
-    // an earlier version filtered deduped tools out of `geminiTools`
+    // an earlier version filtered deduped tools out of `llmTools`
     // without recording, skipping the metric increment.
     expect(client.recordCompletedToolCall).toHaveBeenCalledWith(
       'read_file',
@@ -5802,12 +5802,11 @@ describe('useGeminiStream', () => {
   });
 
   it.each([
-    ['deduped cancellation', true, 'cancelled', 'cancelled'],
-    ['main-loop cancellation after completion', false, 'cancelled', 'success'],
-    ['never-started permission denial', false, 'error', 'not_started'],
+    ['main-loop cancellation after completion', 'cancelled', 'success'],
+    ['never-started permission denial', 'error', 'not_started'],
   ] as const)(
     'forwards structured skill-review outcome for %s',
-    async (_name, deduped, status, executionStatus) => {
+    async (_name, status, executionStatus) => {
       const callId = 'call_work_classification';
       const args = { file_path: '/tmp/file.txt', content: 'x' };
       const toolCall = {
@@ -5819,7 +5818,7 @@ describe('useGeminiStream', () => {
           prompt_id: 'prompt-work-classification',
         },
         status,
-        responseSubmittedToGemini: false,
+        responseSubmittedToLlm: false,
         response: {
           callId,
           responseParts: [
@@ -5849,10 +5848,8 @@ describe('useGeminiStream', () => {
         } as unknown as AnyToolInvocation,
       } as unknown as TrackedToolCall;
 
-      const client = new MockedGeminiClientClass(mockConfig);
-      client.getHistoryFunctionResponseIds = vi
-        .fn()
-        .mockReturnValue(new Set(deduped ? [callId] : []));
+      const client = new MockedLlmClientClass(mockConfig);
+      client.getHistoryFunctionResponseIds = vi.fn().mockReturnValue(new Set());
 
       let capturedOnComplete:
         | ((completedTools: TrackedToolCall[]) => Promise<void>)
@@ -5863,7 +5860,7 @@ describe('useGeminiStream', () => {
       });
 
       renderHook(() =>
-        useGeminiStream(
+        useLlmStream(
           client,
           [],
           mockAddItem,
@@ -5892,11 +5889,6 @@ describe('useGeminiStream', () => {
         }
       });
 
-      if (deduped) {
-        await waitFor(() => {
-          expect(mockMarkToolsAsSubmitted).toHaveBeenCalledWith([callId]);
-        });
-      }
       expect(client.recordCompletedToolCall).toHaveBeenCalledOnce();
       expect(client.recordCompletedToolCall).toHaveBeenCalledWith(
         'write_file',
@@ -5912,6 +5904,136 @@ describe('useGeminiStream', () => {
       );
     },
   );
+
+  it('skips recordCompletedToolCall for deduped CANCELLED tools (telemetry parity)', async () => {
+    // A deduped tool with status='cancelled' never actually produced
+    // model-visible output — counting it via `recordCompletedToolCall`
+    // (which increments toolCallCount and can flip
+    // skillsModifiedInSession on a skill-write path) would inflate the
+    // metric for a call that never ran end-to-end. Dedup must skip
+    // BOTH client-initiated (already skipped) AND cancelled tools,
+    // while still calling `markToolsAsSubmitted` so the scheduler
+    // unblocks.
+    const cancelledDedupedTool = {
+      request: {
+        callId: 'call_dedup_cancelled',
+        name: 'write_file',
+        args: { path: '/tmp/cancelled.txt', content: 'x' },
+        isClientInitiated: false,
+        prompt_id: 'prompt-dedup-cancel',
+      },
+      status: 'cancelled',
+      responseSubmittedToLlm: false,
+      response: {
+        callId: 'call_dedup_cancelled',
+        responseParts: [
+          {
+            functionResponse: {
+              id: 'call_dedup_cancelled',
+              name: 'write_file',
+              response: { error: 'cancelled' },
+            },
+          },
+        ],
+        resultDisplay: undefined,
+        error: undefined,
+        errorType: undefined,
+      },
+      tool: {
+        name: 'write_file',
+        displayName: 'WriteFile',
+        description: 'Write a file',
+        build: vi.fn(),
+      } as any,
+      invocation: {
+        getDescription: () => 'cancelled write',
+      } as unknown as AnyToolInvocation,
+    } as unknown as TrackedCancelledToolCall;
+
+    const client = new MockedLlmClientClass(mockConfig);
+    // Pre-paired in history: dedup will fire for this callId. Wire
+    // the fast-path accessor so the dispatcher takes the
+    // `getHistoryFunctionResponseIds` branch (matches production
+    // path; see the default mock comment in MockedLlmClientClass).
+    client.getHistoryFunctionResponseIds = vi
+      .fn()
+      .mockReturnValue(new Set(['call_dedup_cancelled']));
+    client.getHistory = vi.fn().mockReturnValue([
+      { role: 'user', parts: [{ text: 'cancelled write' }] },
+      {
+        role: 'model',
+        parts: [
+          {
+            functionCall: {
+              id: 'call_dedup_cancelled',
+              name: 'write_file',
+              args: { path: '/tmp/cancelled.txt', content: 'x' },
+            },
+          },
+        ],
+      },
+      {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              id: 'call_dedup_cancelled',
+              name: 'write_file',
+              response: { error: 'synthetic' },
+            },
+          },
+        ],
+      },
+    ]);
+
+    let capturedOnComplete:
+      | ((completedTools: TrackedToolCall[]) => Promise<void>)
+      | null = null;
+    mockUseReactToolScheduler.mockImplementation((onComplete) => {
+      capturedOnComplete = onComplete;
+      return [[], mockScheduleToolCalls, mockMarkToolsAsSubmitted];
+    });
+
+    renderHook(() =>
+      useLlmStream(
+        client,
+        [],
+        mockAddItem,
+        mockConfig,
+        true,
+        mockLoadedSettings,
+        mockOnDebugMessage,
+        mockHandleSlashCommand,
+        false,
+        () => 'vscode' as EditorType,
+        () => {},
+        () => Promise.resolve(),
+        false,
+        () => {},
+        () => {},
+        () => {},
+        () => {},
+        80,
+        24,
+      ),
+    );
+
+    await act(async () => {
+      if (capturedOnComplete) {
+        await capturedOnComplete([cancelledDedupedTool]);
+      }
+    });
+
+    // Scheduler still gets unblocked.
+    await waitFor(() => {
+      expect(mockMarkToolsAsSubmitted).toHaveBeenCalledWith([
+        'call_dedup_cancelled',
+      ]);
+    });
+
+    // Telemetry NOT incremented — the cancelled filter held.
+    expect(client.recordCompletedToolCall).not.toHaveBeenCalled();
+  });
 
   it('runs Race A dedup BEFORE the active-stream early-return (regression guard)', async () => {
     // The dedup block in handleCompletedTools is intentionally placed
@@ -5934,7 +6056,7 @@ describe('useGeminiStream', () => {
         prompt_id: 'prompt-race-a-responding',
       },
       status: 'success',
-      responseSubmittedToGemini: false,
+      responseSubmittedToLlm: false,
       response: {
         callId: 'call_race_A_responding',
         responseParts: [
@@ -5961,10 +6083,10 @@ describe('useGeminiStream', () => {
       } as unknown as AnyToolInvocation,
     } as unknown as TrackedCompletedToolCall;
 
-    const client = new MockedGeminiClientClass(mockConfig);
+    const client = new MockedLlmClientClass(mockConfig);
     // Wire the fast-path accessor so the dispatcher takes the
     // `getHistoryFunctionResponseIds` branch (matches production
-    // path; see the default mock comment in MockedGeminiClientClass).
+    // path; see the default mock comment in MockedLlmClientClass).
     client.getHistoryFunctionResponseIds = vi
       .fn()
       .mockReturnValue(new Set(['call_race_A_responding']));
@@ -6021,7 +6143,7 @@ describe('useGeminiStream', () => {
     mockSendMessageStream.mockReturnValue(heldStream);
 
     const { result } = renderHook(() =>
-      useGeminiStream(
+      useLlmStream(
         client,
         [],
         mockAddItem,
@@ -6098,7 +6220,7 @@ describe('useGeminiStream', () => {
         prompt_id: 'prompt-fast-after-stream',
       },
       status: 'error',
-      responseSubmittedToGemini: false,
+      responseSubmittedToLlm: false,
       response: {
         callId: 'call_fast_after_stream',
         responseParts,
@@ -6118,7 +6240,7 @@ describe('useGeminiStream', () => {
       } as unknown as AnyToolInvocation,
     } as unknown as TrackedCompletedToolCall;
 
-    const client = new MockedGeminiClientClass(mockConfig);
+    const client = new MockedLlmClientClass(mockConfig);
     let capturedOnComplete:
       | ((completedTools: TrackedToolCall[]) => Promise<void>)
       | null = null;
@@ -6138,7 +6260,7 @@ describe('useGeminiStream', () => {
     mockSendMessageStream.mockReturnValue(heldStream);
 
     const { result } = renderHook(() =>
-      useGeminiStream(
+      useLlmStream(
         client,
         [],
         mockAddItem,
@@ -6230,7 +6352,7 @@ describe('useGeminiStream', () => {
         prompt_id: 'prompt-fast-after-cancel',
       },
       status: 'success',
-      responseSubmittedToGemini: false,
+      responseSubmittedToLlm: false,
       response: {
         callId: 'call_fast_after_cancel',
         responseParts,
@@ -6249,7 +6371,7 @@ describe('useGeminiStream', () => {
       } as unknown as AnyToolInvocation,
     } as unknown as TrackedCompletedToolCall;
 
-    const client = new MockedGeminiClientClass(mockConfig);
+    const client = new MockedLlmClientClass(mockConfig);
     let capturedOnComplete:
       | ((completedTools: TrackedCompletedToolCall[]) => Promise<void>)
       | null = null;
@@ -6269,7 +6391,7 @@ describe('useGeminiStream', () => {
     mockSendMessageStream.mockReturnValue(heldStream);
 
     const { result } = renderHook(() =>
-      useGeminiStream(
+      useLlmStream(
         client,
         [],
         mockAddItem,
@@ -6326,7 +6448,7 @@ describe('useGeminiStream', () => {
   });
 
   it('handles a mixed batch (one deduped + one non-deduped) without double-counting telemetry', async () => {
-    // The dedup filter on `geminiTools` (`!historyCallIdsWithResponse.has(callId)`)
+    // The dedup filter on `llmTools` (`!historyCallIdsWithResponse.has(callId)`)
     // is the only thing preventing double `recordCompletedToolCall`
     // for tools whose late real result lands AFTER the orphan-tool_use
     // repair already planted a synthetic. Existing dedup tests supply
@@ -6352,7 +6474,7 @@ describe('useGeminiStream', () => {
         prompt_id: 'prompt-mixed',
       },
       status: 'success',
-      responseSubmittedToGemini: false,
+      responseSubmittedToLlm: false,
       response: {
         callId: 'call_mixed_deduped',
         responseParts: [
@@ -6388,7 +6510,7 @@ describe('useGeminiStream', () => {
         prompt_id: 'prompt-mixed',
       },
       status: 'success',
-      responseSubmittedToGemini: false,
+      responseSubmittedToLlm: false,
       response: {
         callId: 'call_mixed_fresh',
         responseParts: [
@@ -6415,7 +6537,7 @@ describe('useGeminiStream', () => {
       } as unknown as AnyToolInvocation,
     } as unknown as TrackedCompletedToolCall;
 
-    const client = new MockedGeminiClientClass(mockConfig);
+    const client = new MockedLlmClientClass(mockConfig);
     // Wire BOTH the fast-path accessor (`getHistoryFunctionResponseIds`)
     // and the legacy `getHistory()` fallback. Wiring the fast path
     // is the actual point of this test: production code prefers
@@ -6474,7 +6596,7 @@ describe('useGeminiStream', () => {
     });
 
     renderHook(() =>
-      useGeminiStream(
+      useLlmStream(
         client,
         [],
         mockAddItem,
@@ -6515,7 +6637,7 @@ describe('useGeminiStream', () => {
 
     // (b) recordCompletedToolCall fires EXACTLY once per tool (deduped
     // gets one call from the dedup-loop; fresh gets one from the
-    // geminiTools loop). The filter is what prevents the double
+    // llmTools loop). The filter is what prevents the double
     // record on the deduped callId.
     const recordedCallIds = (
       client.recordCompletedToolCall as unknown as ReturnType<typeof vi.fn>
@@ -6555,7 +6677,7 @@ describe('useGeminiStream', () => {
           prompt_id: 'prompt-id-4',
         },
         status: 'executing',
-        responseSubmittedToGemini: false,
+        responseSubmittedToLlm: false,
         tool: {
           name: 'tool1',
           displayName: 'tool1',
@@ -6600,8 +6722,8 @@ describe('useGeminiStream', () => {
     });
 
     const { result, rerender } = renderHook(() =>
-      useGeminiStream(
-        new MockedGeminiClientClass(mockConfig),
+      useLlmStream(
+        new MockedLlmClientClass(mockConfig),
         [],
         mockAddItem,
         mockConfig,
@@ -6681,7 +6803,7 @@ describe('useGeminiStream', () => {
           prompt_id: 'prompt-1',
         },
         status: 'success',
-        responseSubmittedToGemini: false,
+        responseSubmittedToLlm: false,
         tool: {
           name,
           displayName: name,
@@ -6739,8 +6861,8 @@ describe('useGeminiStream', () => {
       ];
 
       renderHook(() =>
-        useGeminiStream(
-          new MockedGeminiClientClass(config),
+        useLlmStream(
+          new MockedLlmClientClass(config),
           historyWithToolGroup,
           mockAddItem,
           config,
@@ -6774,7 +6896,7 @@ describe('useGeminiStream', () => {
         ...mockConfig,
         getEmitToolUseSummaries: vi.fn(() => false),
         getFastModel: vi.fn(() => 'qwen-fast'),
-        getGeminiClient: vi.fn(() => ({
+        getLlmClient: vi.fn(() => ({
           generateContent: vi.fn(),
         })),
       } as unknown as Config;
@@ -6798,7 +6920,7 @@ describe('useGeminiStream', () => {
         ...mockConfig,
         getEmitToolUseSummaries: vi.fn(() => true),
         getFastModel: vi.fn(() => undefined),
-        getGeminiClient: vi.fn(() => ({})),
+        getLlmClient: vi.fn(() => ({})),
         getBaseLlmClient: vi.fn(() => ({ generateText })),
       } as unknown as Config;
 
@@ -6819,7 +6941,7 @@ describe('useGeminiStream', () => {
         getEmitToolUseSummaries: vi.fn(() => true),
         getFastModel: vi.fn(() => 'qwen-fast'),
         getModel: vi.fn(() => 'qwen-main'),
-        getGeminiClient: vi.fn(() => ({})),
+        getLlmClient: vi.fn(() => ({})),
         getBaseLlmClient: vi.fn(() => ({ generateText })),
       } as unknown as Config;
 
@@ -6868,7 +6990,7 @@ describe('useGeminiStream', () => {
         getEmitToolUseSummaries: vi.fn(() => true),
         getFastModel: vi.fn(() => 'qwen-fast'),
         getModel: vi.fn(() => 'qwen-main'),
-        getGeminiClient: vi.fn(() => ({})),
+        getLlmClient: vi.fn(() => ({})),
         getBaseLlmClient: vi.fn(() => ({ generateText })),
       } as unknown as Config;
 
@@ -6921,8 +7043,8 @@ describe('useGeminiStream', () => {
       ];
 
       renderHook(() =>
-        useGeminiStream(
-          new MockedGeminiClientClass(config),
+        useLlmStream(
+          new MockedLlmClientClass(config),
           history,
           mockAddItem,
           config,
@@ -6972,7 +7094,7 @@ describe('useGeminiStream', () => {
         getEmitToolUseSummaries: vi.fn(() => true),
         getFastModel: vi.fn(() => 'qwen-fast'),
         getModel: vi.fn(() => 'qwen-main'),
-        getGeminiClient: vi.fn(() => ({})),
+        getLlmClient: vi.fn(() => ({})),
         getBaseLlmClient: vi.fn(() => ({ generateText })),
       } as unknown as Config;
 
@@ -7002,11 +7124,11 @@ describe('useGeminiStream', () => {
 
       const mockStream = (async function* () {
         yield {
-          type: ServerGeminiEventType.Content,
+          type: ServerLlmEventType.Content,
           value: 'Hel',
         };
         yield {
-          type: ServerGeminiEventType.Content,
+          type: ServerLlmEventType.Content,
           value: 'lo',
         };
         await holdStream;
@@ -7065,7 +7187,7 @@ describe('useGeminiStream', () => {
       mockSendMessageStream.mockReturnValue(
         (async function* () {
           yield {
-            type: ServerGeminiEventType.Content,
+            type: ServerLlmEventType.Content,
             value: 'beforeafter',
             parts: [
               { text: 'before' },
@@ -7132,7 +7254,7 @@ describe('useGeminiStream', () => {
       mockSendMessageStream.mockReturnValue(
         (async function* () {
           yield {
-            type: ServerGeminiEventType.Content,
+            type: ServerLlmEventType.Content,
             value: 'beforeafter',
             parts: [
               { text: 'before' },
@@ -7141,7 +7263,7 @@ describe('useGeminiStream', () => {
             ],
           };
           yield {
-            type: ServerGeminiEventType.ToolCallRequest,
+            type: ServerLlmEventType.ToolCallRequest,
             value: toolCall,
           };
         })(),
@@ -7184,7 +7306,7 @@ describe('useGeminiStream', () => {
       mockSendMessageStream.mockReturnValue(
         (async function* () {
           yield {
-            type: ServerGeminiEventType.Content,
+            type: ServerLlmEventType.Content,
             value: '\n',
             parts: [
               { inlineData: firstImage },
@@ -7239,7 +7361,7 @@ describe('useGeminiStream', () => {
       mockSendMessageStream.mockReturnValue(
         (async function* () {
           yield {
-            type: ServerGeminiEventType.Content,
+            type: ServerLlmEventType.Content,
             value: '',
             parts: images.map((inlineData) => ({ inlineData })),
           };
@@ -7288,13 +7410,13 @@ describe('useGeminiStream', () => {
         (async function* () {
           for (const inlineData of images) {
             yield {
-              type: ServerGeminiEventType.Content,
+              type: ServerLlmEventType.Content,
               value: '',
               parts: [{ inlineData }],
             };
           }
           yield {
-            type: ServerGeminiEventType.Finished,
+            type: ServerLlmEventType.Finished,
             value: { reason: 'STOP', usageMetadata: undefined },
           };
         })(),
@@ -7334,21 +7456,21 @@ describe('useGeminiStream', () => {
       mockSendMessageStream.mockReturnValue(
         (async function* () {
           yield {
-            type: ServerGeminiEventType.Content,
+            type: ServerLlmEventType.Content,
             value: '',
             parts: failedImages.map((inlineData) => ({ inlineData })),
           };
           yield {
-            type: ServerGeminiEventType.Retry,
+            type: ServerLlmEventType.Retry,
             isContinuation: false,
           };
           yield {
-            type: ServerGeminiEventType.Content,
+            type: ServerLlmEventType.Content,
             value: '',
             parts: [{ inlineData: replacementImage }],
           };
           yield {
-            type: ServerGeminiEventType.Finished,
+            type: ServerLlmEventType.Finished,
             value: { reason: 'STOP', usageMetadata: undefined },
           };
         })(),
@@ -7385,23 +7507,23 @@ describe('useGeminiStream', () => {
       mockSendMessageStream.mockReturnValue(
         (async function* () {
           yield {
-            type: ServerGeminiEventType.Content,
+            type: ServerLlmEventType.Content,
             value: '',
             parts: failedImages.map((inlineData) => ({ inlineData })),
           };
           yield {
-            type: ServerGeminiEventType.ModelFallback,
+            type: ServerLlmEventType.ModelFallback,
             fromModel: 'primary-model',
             toModel: 'fallback-model',
             fallbackIndex: 1,
           };
           yield {
-            type: ServerGeminiEventType.Content,
+            type: ServerLlmEventType.Content,
             value: '',
             parts: [{ inlineData: replacementImage }],
           };
           yield {
-            type: ServerGeminiEventType.Finished,
+            type: ServerLlmEventType.Finished,
             value: { reason: 'STOP', usageMetadata: undefined },
           };
         })(),
@@ -7438,21 +7560,21 @@ describe('useGeminiStream', () => {
       mockSendMessageStream.mockReturnValue(
         (async function* () {
           yield {
-            type: ServerGeminiEventType.Content,
+            type: ServerLlmEventType.Content,
             value: '',
             parts: firstOutputImages.map((inlineData) => ({ inlineData })),
           };
           yield {
-            type: ServerGeminiEventType.Finished,
+            type: ServerLlmEventType.Finished,
             value: { reason: 'STOP', usageMetadata: undefined },
           };
           yield {
-            type: ServerGeminiEventType.Content,
+            type: ServerLlmEventType.Content,
             value: '',
             parts: [{ inlineData: nextOutputImage }],
           };
           yield {
-            type: ServerGeminiEventType.Finished,
+            type: ServerLlmEventType.Finished,
             value: { reason: 'STOP', usageMetadata: undefined },
           };
         })(),
@@ -7490,7 +7612,7 @@ describe('useGeminiStream', () => {
       mockSendMessageStream.mockReturnValue(
         (async function* () {
           yield {
-            type: ServerGeminiEventType.Content,
+            type: ServerLlmEventType.Content,
             value: '',
             parts: [
               {
@@ -7544,7 +7666,7 @@ describe('useGeminiStream', () => {
       mockSendMessageStream.mockReturnValue(
         (async function* () {
           yield {
-            type: ServerGeminiEventType.Content,
+            type: ServerLlmEventType.Content,
             value: '\n',
             parts: [{ inlineData: image }, { text: '\n' }],
           };
@@ -7608,7 +7730,7 @@ describe('useGeminiStream', () => {
       mockSendMessageStream.mockReturnValue(
         (async function* () {
           yield {
-            type: ServerGeminiEventType.Content,
+            type: ServerLlmEventType.Content,
             value: 'beforeafter',
             parts: [
               { text: 'before' },
@@ -7618,11 +7740,11 @@ describe('useGeminiStream', () => {
           };
           await waitForRetry;
           yield {
-            type: ServerGeminiEventType.Retry,
+            type: ServerLlmEventType.Retry,
             isContinuation: false,
           };
           yield {
-            type: ServerGeminiEventType.Content,
+            type: ServerLlmEventType.Content,
             value: 'replacement',
           };
           await holdStream;
@@ -7687,7 +7809,7 @@ describe('useGeminiStream', () => {
       mockSendMessageStream.mockReturnValue(
         (async function* () {
           yield {
-            type: ServerGeminiEventType.Content,
+            type: ServerLlmEventType.Content,
             value: 'beforeafter',
             parts: [
               { text: 'before' },
@@ -7697,11 +7819,11 @@ describe('useGeminiStream', () => {
           };
           await waitForRetry;
           yield {
-            type: ServerGeminiEventType.Retry,
+            type: ServerLlmEventType.Retry,
             isContinuation: true,
           };
           yield {
-            type: ServerGeminiEventType.Content,
+            type: ServerLlmEventType.Content,
             value: ' continued',
           };
           await holdStream;
@@ -7762,7 +7884,7 @@ describe('useGeminiStream', () => {
       mockSendMessageStream.mockReturnValue(
         (async function* () {
           yield {
-            type: ServerGeminiEventType.Content,
+            type: ServerLlmEventType.Content,
             value: 'beforeafter',
             parts: [
               { text: 'before' },
@@ -7772,7 +7894,7 @@ describe('useGeminiStream', () => {
           };
           await waitForFallback;
           yield {
-            type: ServerGeminiEventType.ModelFallback,
+            type: ServerLlmEventType.ModelFallback,
             fromModel: 'primary-model',
             toModel: 'fallback-model',
             fallbackIndex: 1,
@@ -7836,7 +7958,7 @@ describe('useGeminiStream', () => {
         .mockReturnValueOnce(
           (async function* () {
             yield {
-              type: ServerGeminiEventType.Content,
+              type: ServerLlmEventType.Content,
               value: 'beforeafter',
               parts: [
                 { text: 'before' },
@@ -7850,11 +7972,11 @@ describe('useGeminiStream', () => {
         .mockReturnValueOnce(
           (async function* () {
             yield {
-              type: ServerGeminiEventType.Content,
+              type: ServerLlmEventType.Content,
               value: 'replacement',
             };
             yield {
-              type: ServerGeminiEventType.Finished,
+              type: ServerLlmEventType.Finished,
               value: { reason: 'STOP', usageMetadata: undefined },
             };
           })(),
@@ -7901,7 +8023,7 @@ describe('useGeminiStream', () => {
         .mockReturnValueOnce(
           (async function* () {
             yield {
-              type: ServerGeminiEventType.Content,
+              type: ServerLlmEventType.Content,
               value: 'beforeafter',
               parts: [
                 { text: 'before' },
@@ -7915,11 +8037,11 @@ describe('useGeminiStream', () => {
         .mockReturnValueOnce(
           (async function* () {
             yield {
-              type: ServerGeminiEventType.Content,
+              type: ServerLlmEventType.Content,
               value: 'next answer',
             };
             yield {
-              type: ServerGeminiEventType.Finished,
+              type: ServerLlmEventType.Finished,
               value: { reason: 'STOP', usageMetadata: undefined },
             };
           })(),
@@ -7962,7 +8084,7 @@ describe('useGeminiStream', () => {
         .mockReturnValueOnce(
           (async function* () {
             yield {
-              type: ServerGeminiEventType.Content,
+              type: ServerLlmEventType.Content,
               value: 'beforeafter',
               parts: [
                 { text: 'before' },
@@ -7976,11 +8098,11 @@ describe('useGeminiStream', () => {
         .mockReturnValueOnce(
           (async function* () {
             yield {
-              type: ServerGeminiEventType.Content,
+              type: ServerLlmEventType.Content,
               value: 'new answer',
             };
             yield {
-              type: ServerGeminiEventType.Finished,
+              type: ServerLlmEventType.Finished,
               value: { reason: 'STOP', usageMetadata: undefined },
             };
           })(),
@@ -8035,12 +8157,12 @@ describe('useGeminiStream', () => {
 
       const mockStream = (async function* () {
         yield {
-          type: ServerGeminiEventType.Content,
+          type: ServerLlmEventType.Content,
           value: '\n\n',
         };
         await waitForNextChunk;
         yield {
-          type: ServerGeminiEventType.Content,
+          type: ServerLlmEventType.Content,
           value: '哈哈',
         };
         await holdStream;
@@ -8100,11 +8222,11 @@ describe('useGeminiStream', () => {
 
       const mockStream = (async function* () {
         yield {
-          type: ServerGeminiEventType.Thought,
+          type: ServerLlmEventType.Thought,
           value: { description: 'Think' },
         };
         yield {
-          type: ServerGeminiEventType.Thought,
+          type: ServerLlmEventType.Thought,
           value: { description: 'ing' },
         };
         await holdStream;
@@ -8166,7 +8288,7 @@ describe('useGeminiStream', () => {
 
       const mockStream = (async function* () {
         yield {
-          type: ServerGeminiEventType.Thought,
+          type: ServerLlmEventType.Thought,
           value: { description: longThought },
         };
         await holdStream;
@@ -8248,7 +8370,7 @@ describe('useGeminiStream', () => {
       });
       const mockStream = (async function* () {
         yield {
-          type: ServerGeminiEventType.Thought,
+          type: ServerLlmEventType.Thought,
           value: { description: longThought },
         };
         await holdStream;
@@ -8329,7 +8451,7 @@ describe('useGeminiStream', () => {
       const mockStream = (async function* () {
         for (const chunk of chunks) {
           yield {
-            type: ServerGeminiEventType.Content,
+            type: ServerLlmEventType.Content,
             value: chunk,
           };
         }
@@ -8397,7 +8519,7 @@ describe('useGeminiStream', () => {
     });
 
     const streamContent = async (
-      result: { current: ReturnType<typeof useGeminiStream> },
+      result: { current: ReturnType<typeof useLlmStream> },
       content: string,
     ) => {
       let releaseStream!: () => void;
@@ -8410,7 +8532,7 @@ describe('useGeminiStream', () => {
       }
       const mockStream = (async function* () {
         for (const chunk of chunks) {
-          yield { type: ServerGeminiEventType.Content, value: chunk };
+          yield { type: ServerLlmEventType.Content, value: chunk };
         }
         await holdStream;
       })();
@@ -8429,7 +8551,7 @@ describe('useGeminiStream', () => {
       return releaseStream;
     };
 
-    const geminiContentItems = () =>
+    const llmContentItems = () =>
       mockAddItem.mock.calls
         .map(([item]) => item as HistoryItem)
         .filter(
@@ -8451,7 +8573,7 @@ describe('useGeminiStream', () => {
       const releaseStream = await streamContent(result, longContent);
 
       // Did not hang (we got here) and nothing was committed via the loop.
-      expect(geminiContentItems().length).toBe(0);
+      expect(llmContentItems().length).toBe(0);
       const pendingText = result.current.pendingHistoryItems[0]?.text ?? '';
       expect(pendingText.split('\n').length).toBe(25);
 
@@ -8478,7 +8600,7 @@ describe('useGeminiStream', () => {
       ).join('\n');
       const releaseStream = await streamContent(result, content);
 
-      expect(geminiContentItems().length).toBe(0);
+      expect(llmContentItems().length).toBe(0);
       const pendingText = result.current.pendingHistoryItems[0]?.text ?? '';
       expect(pendingText.split('\n').length).toBe(20);
 
@@ -8511,7 +8633,7 @@ describe('useGeminiStream', () => {
 
       // Any committed chunk that contains table rows must also contain the
       // separator (i.e. it is a complete table, not an orphaned tail).
-      for (const item of geminiContentItems()) {
+      for (const item of llmContentItems()) {
         const hasTableRow = item.text
           .split('\n')
           .some((l) => /^\s*\|.*\|\s*$/.test(l));
@@ -8557,7 +8679,7 @@ describe('useGeminiStream', () => {
       // The completed tables committed incrementally rather than stalling. All
       // three tables must have committed (a partial stall — one commits, the
       // other two dump together — would leave fewer than three committed items).
-      const committed = geminiContentItems();
+      const committed = llmContentItems();
       expect(committed.length).toBeGreaterThanOrEqual(3);
       for (const marker of ['t1r0', 't2r0', 't3r0']) {
         expect(committed.some((item) => item.text.includes(marker))).toBe(true);
@@ -8616,7 +8738,7 @@ describe('useGeminiStream', () => {
 
       // Committed BEFORE finalize (streamContent holds the stream open): early
       // code lines already landed in <Static> rather than waiting to dump.
-      const committed = geminiContentItems();
+      const committed = llmContentItems();
       expect(committed.length).toBeGreaterThanOrEqual(2);
       expect(committed.some((item) => item.text.includes('int v0 = 0;'))).toBe(
         true,
@@ -8667,7 +8789,7 @@ describe('useGeminiStream', () => {
 
       // Nothing containing mermaid edges was committed mid-block: no committed
       // chunk carries a partial diagram.
-      for (const item of geminiContentItems()) {
+      for (const item of llmContentItems()) {
         expect(item.text.includes('-->')).toBe(false);
       }
       // The whole diagram source sits in the (bounded-by-render) pending item.
@@ -8695,12 +8817,12 @@ describe('useGeminiStream', () => {
 
       const mockStream = (async function* () {
         yield {
-          type: ServerGeminiEventType.Thought,
+          type: ServerLlmEventType.Thought,
           value: { description: '\n\n' },
         };
         await waitForNextChunk;
         yield {
-          type: ServerGeminiEventType.Thought,
+          type: ServerLlmEventType.Thought,
           value: { description: 'Thinking' },
         };
         await holdStream;
@@ -8762,7 +8884,7 @@ describe('useGeminiStream', () => {
 
       const mockStream = (async function* () {
         yield {
-          type: ServerGeminiEventType.Content,
+          type: ServerLlmEventType.Content,
           value: 'Initial',
         };
         await holdStream;
@@ -8854,8 +8976,8 @@ describe('useGeminiStream', () => {
       mockSendMessageStream.mockReturnValue(mockStream);
 
       const { result } = renderHook(() =>
-        useGeminiStream(
-          mockConfig.getGeminiClient(),
+        useLlmStream(
+          mockConfig.getLlmClient(),
           [],
           mockAddItem,
           mockConfig,
@@ -8891,7 +9013,7 @@ describe('useGeminiStream', () => {
 
     it("attaches the cancelled turn's user prompt to onCancelSubmit info.lastTurnUserItem for normal UserQuery", async () => {
       // The ownership guard in AppContainer's auto-restore depends on
-      // useGeminiStream emitting the just-added USER history item via
+      // useLlmStream emitting the just-added USER history item via
       // `info.lastTurnUserItem`. The AppContainer tests fabricate this
       // value — pin the producer side here so a regression that drops
       // `lastTurnUserItemRef.current = { text: trimmedQuery }` cannot
@@ -8904,8 +9026,8 @@ describe('useGeminiStream', () => {
       mockSendMessageStream.mockReturnValue(mockStream);
 
       const { result } = renderHook(() =>
-        useGeminiStream(
-          mockConfig.getGeminiClient(),
+        useLlmStream(
+          mockConfig.getLlmClient(),
           [],
           mockAddItem,
           mockConfig,
@@ -8970,8 +9092,8 @@ describe('useGeminiStream', () => {
       mockSendMessageStream.mockReturnValue(mockStream);
 
       const { result } = renderHook(() =>
-        useGeminiStream(
-          mockConfig.getGeminiClient(),
+        useLlmStream(
+          mockConfig.getLlmClient(),
           [],
           mockAddItem,
           mockConfig,
@@ -9009,9 +9131,9 @@ describe('useGeminiStream', () => {
       expect(info?.lastTurnUserItem).toBeNull();
     });
 
-    it('resets lastTurnUserItem to null when a Retry turn cancels, even though Retry skips prepareQueryForGemini', async () => {
+    it('resets lastTurnUserItem to null when a Retry turn cancels, even though Retry skips prepareQueryForLlm', async () => {
       // Retry takes a shortcut at submitQuery's dispatch site that
-      // bypasses prepareQueryForGemini — and therefore bypasses the
+      // bypasses prepareQueryForLlm — and therefore bypasses the
       // ref reset that lives there. The submit-level reset must fire
       // for every top-level submit so a stale ownership snapshot from
       // an earlier UserQuery can't ride into the retry's cancel info
@@ -9023,15 +9145,15 @@ describe('useGeminiStream', () => {
       // assert on lastTurnUserItem, not on the content flag.)
       const heldStream = () =>
         (async function* () {
-          yield { type: ServerGeminiEventType.Content, value: 'x' };
+          yield { type: ServerLlmEventType.Content, value: 'x' };
           await new Promise(() => {});
         })();
       mockSendMessageStream.mockReturnValueOnce(heldStream());
       mockSendMessageStream.mockReturnValueOnce(heldStream());
 
       const { result } = renderHook(() =>
-        useGeminiStream(
-          mockConfig.getGeminiClient(),
+        useLlmStream(
+          mockConfig.getLlmClient(),
           [],
           mockAddItem,
           mockConfig,
@@ -9073,7 +9195,7 @@ describe('useGeminiStream', () => {
         text: 'first prompt',
       });
 
-      // Retry the same prompt. Retry bypasses prepareQueryForGemini's
+      // Retry the same prompt. Retry bypasses prepareQueryForLlm's
       // reset, so the submit-level reset at the top of submitQuery is
       // the only thing that clears the stale ref carried over from the
       // first turn.
@@ -9106,14 +9228,14 @@ describe('useGeminiStream', () => {
         releaseStream = resolve;
       });
       const mockStream = (async function* () {
-        yield { type: ServerGeminiEventType.Content, value: 'visible reply' };
+        yield { type: ServerLlmEventType.Content, value: 'visible reply' };
         await holdStream;
       })();
       mockSendMessageStream.mockReturnValue(mockStream);
 
       const { result } = renderHook(() =>
-        useGeminiStream(
-          mockConfig.getGeminiClient(),
+        useLlmStream(
+          mockConfig.getLlmClient(),
           [],
           mockAddItem,
           mockConfig,
@@ -9170,8 +9292,8 @@ describe('useGeminiStream', () => {
       mockSendMessageStream.mockReturnValue(mockStream);
 
       const { result } = renderHook(() =>
-        useGeminiStream(
-          mockConfig.getGeminiClient(),
+        useLlmStream(
+          mockConfig.getLlmClient(),
           [],
           mockAddItem,
           mockConfig,
@@ -9219,7 +9341,7 @@ describe('useGeminiStream', () => {
       });
       const mockStream = (async function* () {
         yield {
-          type: ServerGeminiEventType.Content,
+          type: ServerLlmEventType.Content,
           value: 'partial response',
         };
         await holdStream;
@@ -9228,8 +9350,8 @@ describe('useGeminiStream', () => {
 
       const cancelSubmitSpy = vi.fn();
       const { result } = renderHook(() =>
-        useGeminiStream(
-          mockConfig.getGeminiClient(),
+        useLlmStream(
+          mockConfig.getLlmClient(),
           [],
           mockAddItem,
           mockConfig,
@@ -9304,8 +9426,8 @@ describe('useGeminiStream', () => {
       mockSendMessageStream.mockReturnValue(mockStream);
 
       const { result } = renderHook(() =>
-        useGeminiStream(
-          mockConfig.getGeminiClient(),
+        useLlmStream(
+          mockConfig.getLlmClient(),
           [],
           mockAddItem,
           mockConfig,
@@ -9533,7 +9655,7 @@ describe('useGeminiStream', () => {
         {
           request: { callId: 'call1', name: 'tool1', args: {} },
           status: 'executing',
-          responseSubmittedToGemini: false,
+          responseSubmittedToLlm: false,
           tool: {
             name: 'tool1',
             description: 'desc1',
@@ -9613,7 +9735,7 @@ describe('useGeminiStream', () => {
           {
             request: scheduledRequest,
             status: 'executing',
-            responseSubmittedToGemini: false,
+            responseSubmittedToLlm: false,
             tool: { displayName: 'Save Memory' },
             invocation: {
               getDescription: () => 'Saving memory',
@@ -9800,8 +9922,8 @@ describe('useGeminiStream', () => {
         });
 
         const { result } = renderHook(() =>
-          useGeminiStream(
-            new MockedGeminiClientClass(mockConfig),
+          useLlmStream(
+            new MockedLlmClientClass(mockConfig),
             [],
             mockAddItem,
             mockConfig,
@@ -9849,7 +9971,7 @@ describe('useGeminiStream', () => {
               prompt_id: 'prompt-id-skill',
             },
             status: 'success',
-            responseSubmittedToGemini: false,
+            responseSubmittedToLlm: false,
             response: {
               callId: 'skill-call',
               responseParts: [{ text: 'skill loaded' }],
@@ -10247,7 +10369,7 @@ describe('useGeminiStream', () => {
           prompt_id: 'prompt-id-6',
         },
         status: 'success',
-        responseSubmittedToGemini: false,
+        responseSubmittedToLlm: false,
         response: {
           callId: 'save-mem-call-1',
           responseParts: [{ text: 'Memory saved' }],
@@ -10277,8 +10399,8 @@ describe('useGeminiStream', () => {
       });
 
       renderHook(() =>
-        useGeminiStream(
-          new MockedGeminiClientClass(mockConfig),
+        useLlmStream(
+          new MockedLlmClientClass(mockConfig),
           [],
           mockAddItem,
           mockConfig,
@@ -10327,7 +10449,7 @@ describe('useGeminiStream', () => {
           prompt_id: 'prompt-id-memory-write',
         },
         status: 'success',
-        responseSubmittedToGemini: false,
+        responseSubmittedToLlm: false,
         response: {
           callId: 'write-memory-call-1',
           responseParts: [{ text: 'Wrote memory' }],
@@ -10356,8 +10478,8 @@ describe('useGeminiStream', () => {
       });
 
       renderHook(() =>
-        useGeminiStream(
-          new MockedGeminiClientClass(mockConfig),
+        useLlmStream(
+          new MockedLlmClientClass(mockConfig),
           [],
           mockAddItem,
           mockConfig,
@@ -10415,7 +10537,7 @@ describe('useGeminiStream', () => {
           prompt_id: 'prompt-id-bare-remember',
         },
         status: options.status ?? 'success',
-        responseSubmittedToGemini: false,
+        responseSubmittedToLlm: false,
         response: {
           callId,
           responseParts: [{ text: `Ran ${toolName}` }],
@@ -10652,7 +10774,7 @@ describe('useGeminiStream', () => {
           prompt_id: 'prompt-id-save-memory',
         },
         status: 'success',
-        responseSubmittedToGemini: false,
+        responseSubmittedToLlm: false,
         response: {
           callId: 'save-mem-call-1',
           responseParts: [{ text: 'Memory saved' }],
@@ -10679,7 +10801,7 @@ describe('useGeminiStream', () => {
           prompt_id: 'prompt-id-memory-write',
         },
         status: 'success',
-        responseSubmittedToGemini: false,
+        responseSubmittedToLlm: false,
         response: {
           callId: 'write-memory-call-1',
           responseParts: [{ text: 'Wrote memory' }],
@@ -10708,8 +10830,8 @@ describe('useGeminiStream', () => {
       });
 
       renderHook(() =>
-        useGeminiStream(
-          new MockedGeminiClientClass(mockConfig),
+        useLlmStream(
+          new MockedLlmClientClass(mockConfig),
           [],
           mockAddItem,
           mockConfig,
@@ -10785,8 +10907,8 @@ describe('useGeminiStream', () => {
       } as unknown as Config;
 
       const { result } = renderHook(() =>
-        useGeminiStream(
-          new MockedGeminiClientClass(testConfig),
+        useLlmStream(
+          new MockedLlmClientClass(testConfig),
           [],
           mockAddItem,
           testConfig,
@@ -10836,7 +10958,7 @@ describe('useGeminiStream', () => {
             prompt_id: 'prompt-id-1',
           },
           status: 'awaiting_approval',
-          responseSubmittedToGemini: false,
+          responseSubmittedToLlm: false,
           confirmationDetails: {
             onConfirm: mockOnConfirm,
             onCancel: vi.fn(),
@@ -10862,7 +10984,7 @@ describe('useGeminiStream', () => {
             prompt_id: 'prompt-id-1',
           },
           status: 'awaiting_approval',
-          responseSubmittedToGemini: false,
+          responseSubmittedToLlm: false,
           confirmationDetails: {
             onConfirm: mockOnConfirm,
             onCancel: vi.fn(),
@@ -10911,7 +11033,7 @@ describe('useGeminiStream', () => {
             prompt_id: 'prompt-id-1',
           },
           status: 'awaiting_approval',
-          responseSubmittedToGemini: false,
+          responseSubmittedToLlm: false,
           confirmationDetails: {
             onConfirm: mockOnConfirm,
             onCancel: vi.fn(),
@@ -10955,7 +11077,7 @@ describe('useGeminiStream', () => {
             prompt_id: 'prompt-id-1',
           },
           status: 'awaiting_approval',
-          responseSubmittedToGemini: false,
+          responseSubmittedToLlm: false,
           confirmationDetails: {
             onConfirm: mockOnConfirmReplace,
             onCancel: vi.fn(),
@@ -10981,7 +11103,7 @@ describe('useGeminiStream', () => {
             prompt_id: 'prompt-id-1',
           },
           status: 'awaiting_approval',
-          responseSubmittedToGemini: false,
+          responseSubmittedToLlm: false,
           confirmationDetails: {
             onConfirm: mockOnConfirmWrite,
             onCancel: vi.fn(),
@@ -11007,7 +11129,7 @@ describe('useGeminiStream', () => {
             prompt_id: 'prompt-id-1',
           },
           status: 'awaiting_approval',
-          responseSubmittedToGemini: false,
+          responseSubmittedToLlm: false,
           confirmationDetails: {
             onConfirm: mockOnConfirmRead,
             onCancel: vi.fn(),
@@ -11058,7 +11180,7 @@ describe('useGeminiStream', () => {
             prompt_id: 'prompt-id-1',
           },
           status: 'awaiting_approval',
-          responseSubmittedToGemini: false,
+          responseSubmittedToLlm: false,
           confirmationDetails: {
             onConfirm: mockOnConfirm,
             onCancel: vi.fn(),
@@ -11103,7 +11225,7 @@ describe('useGeminiStream', () => {
             prompt_id: 'prompt-id-1',
           },
           status: 'awaiting_approval',
-          responseSubmittedToGemini: false,
+          responseSubmittedToLlm: false,
           confirmationDetails: {
             onConfirm: mockOnConfirmSuccess,
             onCancel: vi.fn(),
@@ -11129,7 +11251,7 @@ describe('useGeminiStream', () => {
             prompt_id: 'prompt-id-1',
           },
           status: 'awaiting_approval',
-          responseSubmittedToGemini: false,
+          responseSubmittedToLlm: false,
           confirmationDetails: {
             onConfirm: mockOnConfirmError,
             onCancel: vi.fn(),
@@ -11170,7 +11292,7 @@ describe('useGeminiStream', () => {
             prompt_id: 'prompt-id-1',
           },
           status: 'awaiting_approval',
-          responseSubmittedToGemini: false,
+          responseSubmittedToLlm: false,
           // No confirmationDetails
           tool: {
             name: 'replace',
@@ -11203,7 +11325,7 @@ describe('useGeminiStream', () => {
             prompt_id: 'prompt-id-1',
           },
           status: 'awaiting_approval',
-          responseSubmittedToGemini: false,
+          responseSubmittedToLlm: false,
           confirmationDetails: {
             onCancel: vi.fn(),
             message: 'Replace text?',
@@ -11244,7 +11366,7 @@ describe('useGeminiStream', () => {
             prompt_id: 'prompt-id-1',
           },
           status: 'awaiting_approval',
-          responseSubmittedToGemini: false,
+          responseSubmittedToLlm: false,
           confirmationDetails: {
             onConfirm: mockOnConfirmAwaiting,
             onCancel: vi.fn(),
@@ -11270,7 +11392,7 @@ describe('useGeminiStream', () => {
             prompt_id: 'prompt-id-1',
           },
           status: 'executing',
-          responseSubmittedToGemini: false,
+          responseSubmittedToLlm: false,
           confirmationDetails: {
             onConfirm: mockOnConfirmExecuting,
             onCancel: vi.fn(),
@@ -11308,19 +11430,19 @@ describe('useGeminiStream', () => {
       mockSendMessageStream.mockReturnValue(
         (async function* () {
           yield {
-            type: ServerGeminiEventType.Content,
+            type: ServerLlmEventType.Content,
             value: 'Hello world',
           };
           yield {
-            type: ServerGeminiEventType.Citation,
+            type: ServerLlmEventType.Citation,
             value: 'Citation text',
           };
           yield {
-            type: ServerGeminiEventType.Content,
+            type: ServerLlmEventType.Content,
             value: ' more',
           };
           yield {
-            type: ServerGeminiEventType.Finished,
+            type: ServerLlmEventType.Finished,
             value: { reason: 'STOP', usageMetadata: undefined },
           };
         })(),
@@ -11363,27 +11485,27 @@ describe('useGeminiStream', () => {
       mockSendMessageStream.mockReturnValue(
         (async function* () {
           yield {
-            type: ServerGeminiEventType.Content,
+            type: ServerLlmEventType.Content,
             value: 'Hello world',
           };
           yield {
-            type: ServerGeminiEventType.Citation,
+            type: ServerLlmEventType.Citation,
             value: 'Citation text',
           };
           yield {
-            type: ServerGeminiEventType.Content,
+            type: ServerLlmEventType.Content,
             value: ' more',
           };
           yield {
-            type: ServerGeminiEventType.Finished,
+            type: ServerLlmEventType.Finished,
             value: { reason: 'STOP', usageMetadata: undefined },
           };
         })(),
       );
 
       const { result } = renderHook(() =>
-        useGeminiStream(
-          new MockedGeminiClientClass(mockConfig),
+        useLlmStream(
+          new MockedLlmClientClass(mockConfig),
           [],
           mockAddItem,
           mockConfig,
@@ -11428,22 +11550,22 @@ describe('useGeminiStream', () => {
       mockSendMessageStream.mockReturnValue(
         (async function* () {
           yield {
-            type: ServerGeminiEventType.Content,
+            type: ServerLlmEventType.Content,
             value: 'before compression',
           };
           yield {
-            type: ServerGeminiEventType.ChatCompressed,
+            type: ServerLlmEventType.ChatCompressed,
             value: {
               originalTokenCount: 100,
               newTokenCount: 50,
             },
           };
           yield {
-            type: ServerGeminiEventType.Content,
+            type: ServerLlmEventType.Content,
             value: 'after compression',
           };
           yield {
-            type: ServerGeminiEventType.Finished,
+            type: ServerLlmEventType.Finished,
             value: { reason: 'STOP', usageMetadata: undefined },
           };
         })(),
@@ -11486,7 +11608,7 @@ describe('useGeminiStream', () => {
       mockSendMessageStream.mockReturnValue(
         (async function* () {
           yield {
-            type: ServerGeminiEventType.ChatCompressed,
+            type: ServerLlmEventType.ChatCompressed,
             value: {
               originalTokenCount: 100,
               newTokenCount: 50,
@@ -11497,7 +11619,7 @@ describe('useGeminiStream', () => {
             },
           };
           yield {
-            type: ServerGeminiEventType.Finished,
+            type: ServerLlmEventType.Finished,
             value: { reason: 'STOP', usageMetadata: undefined },
           };
         })(),
@@ -11522,11 +11644,11 @@ describe('useGeminiStream', () => {
       mockSendMessageStream.mockReturnValue(
         (async function* () {
           yield {
-            type: ServerGeminiEventType.ChatCompressed,
+            type: ServerLlmEventType.ChatCompressed,
             value: null,
           };
           yield {
-            type: ServerGeminiEventType.Finished,
+            type: ServerLlmEventType.Finished,
             value: { reason: 'STOP', usageMetadata: undefined },
           };
         })(),
@@ -11560,7 +11682,7 @@ describe('useGeminiStream', () => {
       mockSendMessageStream.mockReturnValue(
         (async function* () {
           yield {
-            type: ServerGeminiEventType.Content,
+            type: ServerLlmEventType.Content,
             value: 'This is a truncated response...',
             parts: [
               { text: 'This is ' },
@@ -11569,15 +11691,15 @@ describe('useGeminiStream', () => {
             ],
           };
           yield {
-            type: ServerGeminiEventType.Finished,
+            type: ServerLlmEventType.Finished,
             value: { reason: 'MAX_TOKENS', usageMetadata: undefined },
           };
         })(),
       );
 
       const { result } = renderHook(() =>
-        useGeminiStream(
-          new MockedGeminiClientClass(mockConfig),
+        useLlmStream(
+          new MockedLlmClientClass(mockConfig),
           [],
           mockAddItem,
           mockConfig,
@@ -11627,7 +11749,7 @@ describe('useGeminiStream', () => {
     it.each([
       {
         name: 'maximum-turns notice',
-        event: { type: ServerGeminiEventType.MaxSessionTurns },
+        event: { type: ServerLlmEventType.MaxSessionTurns },
         expected: {
           type: 'info',
           text: expect.stringContaining('maximum number of turns'),
@@ -11636,7 +11758,7 @@ describe('useGeminiStream', () => {
       {
         name: 'session-token-limit error',
         event: {
-          type: ServerGeminiEventType.SessionTokenLimitExceeded,
+          type: ServerLlmEventType.SessionTokenLimitExceeded,
           value: {
             currentTokens: 200,
             limit: 100,
@@ -11656,7 +11778,7 @@ describe('useGeminiStream', () => {
       mockSendMessageStream.mockReturnValue(
         (async function* () {
           yield {
-            type: ServerGeminiEventType.Content,
+            type: ServerLlmEventType.Content,
             value: 'beforeafter',
             parts: [
               { text: 'before' },
@@ -11696,19 +11818,19 @@ describe('useGeminiStream', () => {
       mockSendMessageStream.mockReturnValue(
         (async function* () {
           yield {
-            type: ServerGeminiEventType.Content,
+            type: ServerLlmEventType.Content,
             value: 'Complete response',
           };
           yield {
-            type: ServerGeminiEventType.Finished,
+            type: ServerLlmEventType.Finished,
             value: { reason: 'STOP', usageMetadata: undefined },
           };
         })(),
       );
 
       const { result } = renderHook(() =>
-        useGeminiStream(
-          new MockedGeminiClientClass(mockConfig),
+        useLlmStream(
+          new MockedLlmClientClass(mockConfig),
           [],
           mockAddItem,
           mockConfig,
@@ -11750,11 +11872,11 @@ describe('useGeminiStream', () => {
       mockSendMessageStream.mockReturnValue(
         (async function* () {
           yield {
-            type: ServerGeminiEventType.Content,
+            type: ServerLlmEventType.Content,
             value: 'Response with unspecified finish',
           };
           yield {
-            type: ServerGeminiEventType.Finished,
+            type: ServerLlmEventType.Finished,
             value: {
               reason: 'FINISH_REASON_UNSPECIFIED',
               usageMetadata: undefined,
@@ -11764,8 +11886,8 @@ describe('useGeminiStream', () => {
       );
 
       const { result } = renderHook(() =>
-        useGeminiStream(
-          new MockedGeminiClientClass(mockConfig),
+        useLlmStream(
+          new MockedLlmClientClass(mockConfig),
           [],
           mockAddItem,
           mockConfig,
@@ -11866,19 +11988,19 @@ describe('useGeminiStream', () => {
         mockSendMessageStream.mockReturnValue(
           (async function* () {
             yield {
-              type: ServerGeminiEventType.Content,
+              type: ServerLlmEventType.Content,
               value: `Response for ${reason}`,
             };
             yield {
-              type: ServerGeminiEventType.Finished,
+              type: ServerLlmEventType.Finished,
               value: { reason, usageMetadata: undefined },
             };
           })(),
         );
 
         const { result } = renderHook(() =>
-          useGeminiStream(
-            new MockedGeminiClientClass(mockConfig),
+          useLlmStream(
+            new MockedLlmClientClass(mockConfig),
             [],
             mockAddItem,
             mockConfig,
@@ -11932,8 +12054,8 @@ describe('useGeminiStream', () => {
     });
 
     const { result } = renderHook(() =>
-      useGeminiStream(
-        mockConfig.getGeminiClient() as GeminiClient,
+      useLlmStream(
+        mockConfig.getLlmClient() as LlmClient,
         [],
         mockAddItem,
         mockConfig,
@@ -11997,26 +12119,26 @@ describe('useGeminiStream', () => {
       mockSendMessageStream.mockReturnValue(
         (async function* () {
           yield {
-            type: ServerGeminiEventType.Thought,
+            type: ServerLlmEventType.Thought,
             value: {
               subject: 'Previous thought',
               description: 'Old description',
             },
           };
           yield {
-            type: ServerGeminiEventType.Content,
+            type: ServerLlmEventType.Content,
             value: 'Some response content',
           };
           yield {
-            type: ServerGeminiEventType.Finished,
+            type: ServerLlmEventType.Finished,
             value: { reason: 'STOP', usageMetadata: undefined },
           };
         })(),
       );
 
       const { result } = renderHook(() =>
-        useGeminiStream(
-          new MockedGeminiClientClass(mockConfig),
+        useLlmStream(
+          new MockedLlmClientClass(mockConfig),
           [],
           mockAddItem,
           mockConfig,
@@ -12058,11 +12180,11 @@ describe('useGeminiStream', () => {
       mockSendMessageStream.mockReturnValue(
         (async function* () {
           yield {
-            type: ServerGeminiEventType.Content,
+            type: ServerLlmEventType.Content,
             value: 'New response content',
           };
           yield {
-            type: ServerGeminiEventType.Finished,
+            type: ServerLlmEventType.Finished,
             value: { reason: 'STOP', usageMetadata: undefined },
           };
         })(),
@@ -12097,24 +12219,24 @@ describe('useGeminiStream', () => {
       mockSendMessageStream.mockReturnValue(
         (async function* () {
           yield {
-            type: ServerGeminiEventType.Thought,
+            type: ServerLlmEventType.Thought,
             value: { subject: '', description: 'thinking ' },
           };
           yield {
-            type: ServerGeminiEventType.Thought,
+            type: ServerLlmEventType.Thought,
             value: { subject: '', description: 'more' },
           };
           await holdStream;
           yield {
-            type: ServerGeminiEventType.Finished,
+            type: ServerLlmEventType.Finished,
             value: { reason: 'STOP', usageMetadata: undefined },
           };
         })(),
       );
 
       const { result } = renderHook(() =>
-        useGeminiStream(
-          new MockedGeminiClientClass(mockConfig),
+        useLlmStream(
+          new MockedLlmClientClass(mockConfig),
           [],
           mockAddItem,
           mockConfig,
@@ -12164,11 +12286,11 @@ describe('useGeminiStream', () => {
       mockSendMessageStream.mockReturnValue(
         (async function* () {
           yield {
-            type: ServerGeminiEventType.Thought,
+            type: ServerLlmEventType.Thought,
             value: { subject: '', description: 'thinking' },
           };
           yield {
-            type: ServerGeminiEventType.Finished,
+            type: ServerLlmEventType.Finished,
             value: { reason: 'STOP', usageMetadata: undefined },
           };
         })(),
@@ -12189,11 +12311,11 @@ describe('useGeminiStream', () => {
       mockSendMessageStream.mockReturnValue(
         (async function* () {
           yield {
-            type: ServerGeminiEventType.Thought,
+            type: ServerLlmEventType.Thought,
             value: { subject: '', description: '\n\n' },
           };
           yield {
-            type: ServerGeminiEventType.Finished,
+            type: ServerLlmEventType.Finished,
             value: { reason: 'STOP', usageMetadata: undefined },
           };
         })(),
@@ -12212,15 +12334,15 @@ describe('useGeminiStream', () => {
       mockSendMessageStream.mockReturnValue(
         (async function* () {
           yield {
-            type: ServerGeminiEventType.Thought,
+            type: ServerLlmEventType.Thought,
             value: { subject: '', description: 'thinking ' },
           };
           yield {
-            type: ServerGeminiEventType.Thought,
+            type: ServerLlmEventType.Thought,
             value: { subject: '', description: 'more' },
           };
           yield {
-            type: ServerGeminiEventType.Finished,
+            type: ServerLlmEventType.Finished,
             value: { reason: 'STOP', usageMetadata: undefined },
           };
         })(),
@@ -12246,14 +12368,14 @@ describe('useGeminiStream', () => {
       mockSendMessageStream.mockReturnValue(
         (async function* () {
           yield {
-            type: ServerGeminiEventType.Thought,
+            type: ServerLlmEventType.Thought,
             value: {
               subject: 'Evaluating installation approach',
               description: 'The',
             },
           };
           yield {
-            type: ServerGeminiEventType.Thought,
+            type: ServerLlmEventType.Thought,
             value: {
               subject: '',
               description: ' user mentioned globally installed qwen,',
@@ -12261,7 +12383,7 @@ describe('useGeminiStream', () => {
           };
           await holdStream;
           yield {
-            type: ServerGeminiEventType.Finished,
+            type: ServerLlmEventType.Finished,
             value: { reason: 'STOP', usageMetadata: undefined },
           };
         })(),
@@ -12307,11 +12429,11 @@ describe('useGeminiStream', () => {
       mockSendMessageStream.mockReturnValue(
         (async function* () {
           yield {
-            type: ServerGeminiEventType.Thought,
+            type: ServerLlmEventType.Thought,
             value: { subject: '', description: 'reasoning about the problem' },
           };
           yield {
-            type: ServerGeminiEventType.Finished,
+            type: ServerLlmEventType.Finished,
             value: { reason: 'STOP', usageMetadata: undefined },
           };
         })(),
@@ -12341,15 +12463,15 @@ describe('useGeminiStream', () => {
       mockSendMessageStream.mockReturnValue(
         (async function* () {
           yield {
-            type: ServerGeminiEventType.Thought,
+            type: ServerLlmEventType.Thought,
             value: { subject: '', description: 'analyzing the question' },
           };
           yield {
-            type: ServerGeminiEventType.Content,
+            type: ServerLlmEventType.Content,
             value: 'The answer is 42',
           };
           yield {
-            type: ServerGeminiEventType.Finished,
+            type: ServerLlmEventType.Finished,
             value: { reason: 'STOP', usageMetadata: undefined },
           };
         })(),
@@ -12391,10 +12513,10 @@ describe('useGeminiStream', () => {
       mockSendMessageStream.mockReturnValue(
         (async function* () {
           yield {
-            type: ServerGeminiEventType.Thought,
+            type: ServerLlmEventType.Thought,
             value: { subject: '', description: 'deep thinking' },
           };
-          yield { type: ServerGeminiEventType.UserCancelled };
+          yield { type: ServerLlmEventType.UserCancelled };
         })(),
       );
 
@@ -12429,7 +12551,7 @@ describe('useGeminiStream', () => {
       mockSendMessageStream.mockReturnValue(
         (async function* () {
           yield {
-            type: ServerGeminiEventType.Content,
+            type: ServerLlmEventType.Content,
             value: 'partial',
           };
           throw new Error('stream blew up');
@@ -12455,11 +12577,11 @@ describe('useGeminiStream', () => {
       mockSendMessageStream.mockReturnValue(
         (async function* () {
           yield {
-            type: ServerGeminiEventType.Thought,
+            type: ServerLlmEventType.Thought,
             value: { subject: '', description: 'thinking before error' },
           };
           yield {
-            type: ServerGeminiEventType.Error,
+            type: ServerLlmEventType.Error,
             value: { message: 'Something went wrong', retryable: false },
           };
         })(),
@@ -12489,11 +12611,11 @@ describe('useGeminiStream', () => {
       mockSendMessageStream.mockReturnValue(
         (async function* () {
           yield {
-            type: ServerGeminiEventType.Thought,
+            type: ServerLlmEventType.Thought,
             value: { subject: '', description: 'planning tool usage' },
           };
           yield {
-            type: ServerGeminiEventType.ToolCallRequest,
+            type: ServerLlmEventType.ToolCallRequest,
             value: {
               callId: 'tc1',
               name: 'read_file',
@@ -12503,7 +12625,7 @@ describe('useGeminiStream', () => {
             },
           };
           yield {
-            type: ServerGeminiEventType.Finished,
+            type: ServerLlmEventType.Finished,
             value: { reason: 'STOP', usageMetadata: undefined },
           };
         })(),
@@ -12536,7 +12658,7 @@ describe('useGeminiStream', () => {
         mockSendMessageStream.mockReturnValue(
           (async function* () {
             yield {
-              type: ServerGeminiEventType.Thought,
+              type: ServerLlmEventType.Thought,
               value: { subject: '', description: 'reasoning before retry' },
             };
             // Wait for the buffered thought to be flushed to state before
@@ -12545,15 +12667,15 @@ describe('useGeminiStream', () => {
               emitRetry = resolve;
             });
             yield {
-              type: ServerGeminiEventType.Retry,
+              type: ServerLlmEventType.Retry,
               isContinuation: false,
             };
             yield {
-              type: ServerGeminiEventType.Content,
+              type: ServerLlmEventType.Content,
               value: 'retried response',
             };
             yield {
-              type: ServerGeminiEventType.Finished,
+              type: ServerLlmEventType.Finished,
               value: { reason: 'STOP', usageMetadata: undefined },
             };
           })(),
@@ -12610,7 +12732,7 @@ describe('useGeminiStream', () => {
         mockSendMessageStream.mockReturnValue(
           (async function* () {
             yield {
-              type: ServerGeminiEventType.Retry,
+              type: ServerLlmEventType.Retry,
               retryInfo: {
                 message: '[API Error: Rate limit exceeded]',
                 attempt: 1,
@@ -12622,21 +12744,21 @@ describe('useGeminiStream', () => {
               continueToRetryAttempt = resolve;
             });
             yield {
-              type: ServerGeminiEventType.Retry,
+              type: ServerLlmEventType.Retry,
             };
             await new Promise<void>((resolve) => {
               resolveStream = resolve;
             });
             yield {
-              type: ServerGeminiEventType.Finished,
+              type: ServerLlmEventType.Finished,
               value: { reason: 'STOP', usageMetadata: undefined },
             };
           })(),
         );
 
         const { result } = renderHook(() =>
-          useGeminiStream(
-            new MockedGeminiClientClass(mockConfig),
+          useLlmStream(
+            new MockedLlmClientClass(mockConfig),
             [],
             mockAddItem,
             mockConfig,
@@ -12728,7 +12850,7 @@ describe('useGeminiStream', () => {
         mockSendMessageStream.mockReturnValue(
           (async function* () {
             yield {
-              type: ServerGeminiEventType.Retry,
+              type: ServerLlmEventType.Retry,
               retryInfo: {
                 message: '[API Error: Rate limit exceeded]',
                 attempt: 1,
@@ -12740,22 +12862,22 @@ describe('useGeminiStream', () => {
               continueAfterCountdown = resolve;
             });
             yield {
-              type: ServerGeminiEventType.Retry,
+              type: ServerLlmEventType.Retry,
             };
             yield {
-              type: ServerGeminiEventType.Content,
+              type: ServerLlmEventType.Content,
               value: 'Success after retry',
             };
             yield {
-              type: ServerGeminiEventType.Finished,
+              type: ServerLlmEventType.Finished,
               value: { reason: 'STOP', usageMetadata: undefined },
             };
           })(),
         );
 
         const { result } = renderHook(() =>
-          useGeminiStream(
-            new MockedGeminiClientClass(mockConfig),
+          useLlmStream(
+            new MockedLlmClientClass(mockConfig),
             [],
             mockAddItem,
             mockConfig,
@@ -12829,7 +12951,7 @@ describe('useGeminiStream', () => {
       mockSendMessageStream.mockReturnValue(
         (async function* () {
           yield {
-            type: ServerGeminiEventType.Error,
+            type: ServerLlmEventType.Error,
             value: { error: { message: 'Fatal API error' } },
           };
         })(),
@@ -12854,7 +12976,7 @@ describe('useGeminiStream', () => {
       mockSendMessageStream.mockReturnValue(
         (async function* () {
           yield {
-            type: ServerGeminiEventType.Error,
+            type: ServerLlmEventType.Error,
             value: { error: { message: 'Goal stream error' } },
           };
         })(),
@@ -12894,7 +13016,7 @@ describe('useGeminiStream', () => {
         mockSendMessageStream.mockReturnValue(
           (async function* () {
             yield {
-              type: ServerGeminiEventType.Retry,
+              type: ServerLlmEventType.Retry,
               retryInfo: {
                 message: '[API Error: Socket closed]',
                 attempt: 1,
@@ -12906,11 +13028,11 @@ describe('useGeminiStream', () => {
               continueAfterCountdown = resolve;
             });
             yield {
-              type: ServerGeminiEventType.Content,
+              type: ServerLlmEventType.Content,
               value: 'Recovered content',
             };
             yield {
-              type: ServerGeminiEventType.Finished,
+              type: ServerLlmEventType.Finished,
               value: { reason: 'STOP', usageMetadata: undefined },
             };
           })(),
@@ -12972,11 +13094,11 @@ describe('useGeminiStream', () => {
       mockSendMessageStream.mockReturnValue(
         (async function* () {
           yield {
-            type: ServerGeminiEventType.Error,
+            type: ServerLlmEventType.Error,
             value: { error: { message: 'Goal terminal error' } },
           };
           yield {
-            type: ServerGeminiEventType.Finished,
+            type: ServerLlmEventType.Finished,
             value: { reason: 'STOP', usageMetadata: undefined },
           };
         })(),
@@ -13014,11 +13136,11 @@ describe('useGeminiStream', () => {
       mockSendMessageStream.mockReturnValue(
         (async function* () {
           yield {
-            type: ServerGeminiEventType.Error,
+            type: ServerLlmEventType.Error,
             value: { error: { message: 'Goal terminal error' } },
           };
           yield {
-            type: ServerGeminiEventType.Finished,
+            type: ServerLlmEventType.Finished,
             value: { reason: 'STOP', usageMetadata: undefined },
           };
         })(),
@@ -13058,8 +13180,8 @@ describe('useGeminiStream', () => {
       ]);
 
       const { result, rerender } = renderHook(() =>
-        useGeminiStream(
-          mockConfig.getGeminiClient(),
+        useLlmStream(
+          mockConfig.getLlmClient(),
           [],
           mockAddItem,
           mockConfig,
@@ -13121,16 +13243,16 @@ describe('useGeminiStream', () => {
       mockSendMessageStream.mockReturnValue(
         (async function* () {
           yield {
-            type: ServerGeminiEventType.Thought,
+            type: ServerLlmEventType.Thought,
             value: { subject: 'Some thought', description: 'Description' },
           };
-          yield { type: ServerGeminiEventType.UserCancelled };
+          yield { type: ServerLlmEventType.UserCancelled };
         })(),
       );
 
       const { result } = renderHook(() =>
-        useGeminiStream(
-          new MockedGeminiClientClass(mockConfig),
+        useLlmStream(
+          new MockedLlmClientClass(mockConfig),
           [],
           mockAddItem,
           mockConfig,
@@ -13176,14 +13298,14 @@ describe('useGeminiStream', () => {
       mockSendMessageStream.mockReturnValue(
         (async function* () {
           yield {
-            type: ServerGeminiEventType.ToolCallRequest,
+            type: ServerLlmEventType.ToolCallRequest,
             value: {
               callId: 'call_cancelled',
               name: 'write_file',
               args: { path: 'cancelled.txt' },
             },
           };
-          yield { type: ServerGeminiEventType.UserCancelled };
+          yield { type: ServerLlmEventType.UserCancelled };
         })(),
       );
 
@@ -13210,7 +13332,7 @@ describe('useGeminiStream', () => {
       mockSendMessageStream.mockReturnValue(
         (async function* () {
           yield {
-            type: ServerGeminiEventType.ToolCallRequest,
+            type: ServerLlmEventType.ToolCallRequest,
             value: {
               callId: 'call_aborted',
               name: 'write_file',
@@ -13248,19 +13370,19 @@ describe('useGeminiStream', () => {
       mockSendMessageStream.mockReturnValue(
         (async function* () {
           yield {
-            type: ServerGeminiEventType.Thought,
+            type: ServerLlmEventType.Thought,
             value: { subject: 'Some thought', description: 'Description' },
           };
           yield {
-            type: ServerGeminiEventType.Error,
+            type: ServerLlmEventType.Error,
             value: { error: { message: 'Test error' } },
           };
         })(),
       );
 
       const { result } = renderHook(() =>
-        useGeminiStream(
-          new MockedGeminiClientClass(mockConfig),
+        useLlmStream(
+          new MockedLlmClientClass(mockConfig),
           [],
           mockAddItem,
           mockConfig,
@@ -13308,15 +13430,15 @@ describe('useGeminiStream', () => {
       mockSendMessageStream.mockReturnValueOnce(
         (async function* () {
           yield {
-            type: ServerGeminiEventType.Error,
+            type: ServerLlmEventType.Error,
             value: { error: { message: 'First error' } },
           };
         })(),
       );
 
       const { result } = renderHook(() =>
-        useGeminiStream(
-          new MockedGeminiClientClass(mockConfig),
+        useLlmStream(
+          new MockedLlmClientClass(mockConfig),
           [],
           mockAddItem,
           mockConfig,
@@ -13355,7 +13477,7 @@ describe('useGeminiStream', () => {
       mockSendMessageStream.mockReturnValueOnce(
         (async function* () {
           yield {
-            type: ServerGeminiEventType.Content,
+            type: ServerLlmEventType.Content,
             value: 'Success response',
           };
         })(),
@@ -13383,7 +13505,7 @@ describe('useGeminiStream', () => {
       mockSendMessageStream.mockReturnValueOnce(
         (async function* () {
           yield {
-            type: ServerGeminiEventType.Error,
+            type: ServerLlmEventType.Error,
             value: { error: { message: 'First error' } },
           };
         })(),
@@ -13412,7 +13534,7 @@ describe('useGeminiStream', () => {
       mockSendMessageStream.mockReturnValueOnce(
         (async function* () {
           yield {
-            type: ServerGeminiEventType.Content,
+            type: ServerLlmEventType.Content,
             value: 'Second response',
           };
         })(),
@@ -13455,7 +13577,7 @@ describe('useGeminiStream', () => {
 
       const firstStream = (async function* () {
         yield {
-          type: ServerGeminiEventType.Content,
+          type: ServerLlmEventType.Content,
           value: 'First call content',
         };
         await firstCallPromise;
@@ -13507,7 +13629,7 @@ describe('useGeminiStream', () => {
         mainAbortSignal = signal;
         return (async function* () {
           yield {
-            type: ServerGeminiEventType.Content,
+            type: ServerLlmEventType.Content,
             value: 'First call content',
           };
           await firstCallPromise;
@@ -13605,7 +13727,7 @@ describe('useGeminiStream', () => {
           mainAbortSignal = signal;
           return (async function* () {
             yield {
-              type: ServerGeminiEventType.Content,
+              type: ServerLlmEventType.Content,
               value: 'First call content',
             };
             await firstCallPromise;
@@ -13700,7 +13822,7 @@ describe('useGeminiStream', () => {
             mainPromptId = promptId;
             return (async function* () {
               yield {
-                type: ServerGeminiEventType.ToolCallRequest,
+                type: ServerLlmEventType.ToolCallRequest,
                 value: {
                   callId: 'main-tool',
                   name: 'testTool',
@@ -13716,7 +13838,7 @@ describe('useGeminiStream', () => {
             btwPromptId = promptId;
             return (async function* () {
               yield {
-                type: ServerGeminiEventType.ToolCallRequest,
+                type: ServerLlmEventType.ToolCallRequest,
                 value: {
                   callId: 'btw-tool',
                   name: 'testTool',
@@ -13735,8 +13857,8 @@ describe('useGeminiStream', () => {
           return (async function* () {
             await continuationPending;
             yield signal.aborted
-              ? { type: ServerGeminiEventType.UserCancelled }
-              : { type: ServerGeminiEventType.Finished, value: 'STOP' };
+              ? { type: ServerLlmEventType.UserCancelled }
+              : { type: ServerLlmEventType.Finished, value: 'STOP' };
           })();
         },
       );
@@ -13788,7 +13910,7 @@ describe('useGeminiStream', () => {
             ],
             errorType: undefined,
           },
-          responseSubmittedToGemini: false,
+          responseSubmittedToLlm: false,
           tool: { displayName: 'mock tool' },
           invocation: {
             getDescription: () => 'Mock description',
@@ -13869,7 +13991,7 @@ describe('useGeminiStream', () => {
           return (async function* () {
             await mainPending;
             if (signal.aborted) {
-              yield { type: ServerGeminiEventType.UserCancelled };
+              yield { type: ServerLlmEventType.UserCancelled };
             }
           })();
         }
@@ -13877,7 +13999,7 @@ describe('useGeminiStream', () => {
         btwPromptId = promptId;
         return (async function* () {
           yield {
-            type: ServerGeminiEventType.ToolCallRequest,
+            type: ServerLlmEventType.ToolCallRequest,
             value: {
               callId: 'repaired-btw-tool',
               name: 'testTool',
@@ -13948,7 +14070,7 @@ describe('useGeminiStream', () => {
                 ],
                 errorType: undefined,
               },
-              responseSubmittedToGemini: false,
+              responseSubmittedToLlm: false,
               tool: { displayName: 'mock tool' },
               invocation: {
                 getDescription: () => 'Mock description',
@@ -13991,7 +14113,7 @@ describe('useGeminiStream', () => {
           return (async function* () {
             await mainPending;
             if (signal.aborted) {
-              yield { type: ServerGeminiEventType.UserCancelled };
+              yield { type: ServerLlmEventType.UserCancelled };
             }
           })();
         }
@@ -14000,7 +14122,7 @@ describe('useGeminiStream', () => {
           return (async function* () {
             await btwPending;
             yield {
-              type: ServerGeminiEventType.ToolCallRequest,
+              type: ServerLlmEventType.ToolCallRequest,
               value: {
                 callId: 'surviving-btw-tool',
                 name: 'testTool',
@@ -14012,7 +14134,7 @@ describe('useGeminiStream', () => {
           })();
         }
         return (async function* () {
-          yield { type: ServerGeminiEventType.Finished, value: 'STOP' };
+          yield { type: ServerLlmEventType.Finished, value: 'STOP' };
         })();
       });
       mockScheduleToolCalls.mockImplementation((requests, signal) => {
@@ -14089,7 +14211,7 @@ describe('useGeminiStream', () => {
               prompt_id: btwPromptId,
             },
             status: 'executing',
-            responseSubmittedToGemini: false,
+            responseSubmittedToLlm: false,
             tool: { displayName: 'mock tool' },
             invocation: {
               getDescription: () => 'Mock description',
@@ -14153,7 +14275,7 @@ describe('useGeminiStream', () => {
           ownersByPromptId.set(promptId, mainOwner);
           return (async function* () {
             yield {
-              type: ServerGeminiEventType.ToolCallRequest,
+              type: ServerLlmEventType.ToolCallRequest,
               value: {
                 callId: 'main-tool',
                 name: 'testTool',
@@ -14172,7 +14294,7 @@ describe('useGeminiStream', () => {
         ownersByPromptId.set(promptId, btwOwner);
         return (async function* () {
           yield {
-            type: ServerGeminiEventType.ToolCallRequest,
+            type: ServerLlmEventType.ToolCallRequest,
             value: {
               callId: 'btw-cancelled-tool',
               name: 'testTool',
@@ -14192,9 +14314,9 @@ describe('useGeminiStream', () => {
         return [[], mockScheduleToolCalls, mockMarkToolsAsSubmitted];
       });
 
-      const client = new MockedGeminiClientClass(mockConfig);
+      const client = new MockedLlmClientClass(mockConfig);
       const { result } = renderHook(() =>
-        useGeminiStream(
+        useLlmStream(
           client,
           [],
           mockAddItem,
@@ -14269,7 +14391,7 @@ describe('useGeminiStream', () => {
             responseParts: [{ text: 'cancelled' }],
             errorType: undefined,
           },
-          responseSubmittedToGemini: false,
+          responseSubmittedToLlm: false,
           tool: { displayName: 'mock tool' },
           invocation: {
             getDescription: () => 'Mock description',
@@ -14359,15 +14481,6 @@ describe('useGeminiStream', () => {
       await act(async () => {
         await mainRequest;
       });
-
-      expect(client.recordCompletedToolCall).toHaveBeenCalledWith(
-        'testTool',
-        {},
-        expect.objectContaining({
-          callId: 'btw-cancelled-tool',
-          status: 'cancelled',
-        }),
-      );
       expect(mockEndInteractionSpan).toHaveBeenCalledWith('cancelled', {
         promptId: btwPromptId,
       });
@@ -14448,17 +14561,17 @@ describe('useGeminiStream', () => {
           if (streamCount === 1) {
             return (async function* () {
               await mainStream;
-              yield { type: ServerGeminiEventType.Finished, value: 'STOP' };
+              yield { type: ServerLlmEventType.Finished, value: 'STOP' };
             })();
           }
           if (JSON.stringify(query).includes('second-tool')) {
             return (async function* () {
               await concurrentContinuation;
-              yield { type: ServerGeminiEventType.Finished, value: 'STOP' };
+              yield { type: ServerLlmEventType.Finished, value: 'STOP' };
             })();
           }
           return (async function* () {
-            yield { type: ServerGeminiEventType.Finished, value: 'STOP' };
+            yield { type: ServerLlmEventType.Finished, value: 'STOP' };
           })();
         });
 
@@ -14493,7 +14606,7 @@ describe('useGeminiStream', () => {
               ],
               errorType: undefined,
             },
-            responseSubmittedToGemini: false,
+            responseSubmittedToLlm: false,
             tool: { displayName: 'mock tool' },
             invocation: {
               getDescription: () => 'Mock description',
@@ -14512,9 +14625,9 @@ describe('useGeminiStream', () => {
           );
         }
 
-        const client = new MockedGeminiClientClass(mockConfig);
+        const client = new MockedLlmClientClass(mockConfig);
         const { result } = renderHook(() =>
-          useGeminiStream(
+          useLlmStream(
             client,
             [],
             mockAddItem,
@@ -14687,11 +14800,11 @@ describe('useGeminiStream', () => {
           await new Promise<void>((resolve) => {
             resolveStream = resolve;
           });
-          yield { type: ServerGeminiEventType.Finished, value: 'STOP' };
+          yield { type: ServerLlmEventType.Finished, value: 'STOP' };
         })(),
       );
 
-      const client = new MockedGeminiClientClass(mockConfig);
+      const client = new MockedLlmClientClass(mockConfig);
       const { result } = renderTestHook(
         [],
         client,
@@ -14736,21 +14849,21 @@ describe('useGeminiStream', () => {
       // Mock a long-running stream for the first call
       const firstStream = (async function* () {
         yield {
-          type: ServerGeminiEventType.Content,
+          type: ServerLlmEventType.Content,
           value: 'First call content',
         };
         await firstCallPromise; // Wait until we manually resolve
-        yield { type: ServerGeminiEventType.Finished, value: 'STOP' };
+        yield { type: ServerLlmEventType.Finished, value: 'STOP' };
       })();
 
       // Mock a stream for the second call (should not be used)
       const secondStream = (async function* () {
         yield {
-          type: ServerGeminiEventType.Content,
+          type: ServerLlmEventType.Content,
           value: 'Second call content',
         };
         await secondCallPromise;
-        yield { type: ServerGeminiEventType.Finished, value: 'STOP' };
+        yield { type: ServerLlmEventType.Finished, value: 'STOP' };
       })();
 
       let callCount = 0;
@@ -14807,19 +14920,19 @@ describe('useGeminiStream', () => {
         .mockReturnValueOnce(
           (async function* () {
             yield {
-              type: ServerGeminiEventType.Content,
+              type: ServerLlmEventType.Content,
               value: 'First response',
             };
-            yield { type: ServerGeminiEventType.Finished, value: 'STOP' };
+            yield { type: ServerLlmEventType.Finished, value: 'STOP' };
           })(),
         )
         .mockReturnValueOnce(
           (async function* () {
             yield {
-              type: ServerGeminiEventType.Content,
+              type: ServerLlmEventType.Content,
               value: 'Second response',
             };
-            yield { type: ServerGeminiEventType.Finished, value: 'STOP' };
+            yield { type: ServerLlmEventType.Finished, value: 'STOP' };
           })(),
         );
 
@@ -14884,8 +14997,8 @@ describe('useGeminiStream', () => {
       const mockLoopDetectionService = {
         disableForSession: vi.fn(),
       };
-      mockConfig.getGeminiClient = vi.fn().mockReturnValue({
-        ...new MockedGeminiClientClass(mockConfig),
+      mockConfig.getLlmClient = vi.fn().mockReturnValue({
+        ...new MockedLlmClientClass(mockConfig),
         getLoopDetectionService: () => mockLoopDetectionService,
       });
     });
@@ -14894,11 +15007,11 @@ describe('useGeminiStream', () => {
       mockSendMessageStream.mockReturnValue(
         (async function* () {
           yield {
-            type: ServerGeminiEventType.Content,
+            type: ServerLlmEventType.Content,
             value: 'Some content',
           };
           yield {
-            type: ServerGeminiEventType.LoopDetected,
+            type: ServerLlmEventType.LoopDetected,
           };
         })(),
       );
@@ -14929,15 +15042,15 @@ describe('useGeminiStream', () => {
         disableForSession: vi.fn(),
       };
       const mockClient = {
-        ...new MockedGeminiClientClass(mockConfig),
+        ...new MockedLlmClientClass(mockConfig),
         getLoopDetectionService: () => mockLoopDetectionService,
       };
-      mockConfig.getGeminiClient = vi.fn().mockReturnValue(mockClient);
+      mockConfig.getLlmClient = vi.fn().mockReturnValue(mockClient);
 
       mockSendMessageStream.mockReturnValueOnce(
         (async function* () {
           yield {
-            type: ServerGeminiEventType.LoopDetected,
+            type: ServerLlmEventType.LoopDetected,
           };
         })(),
       );
@@ -14983,15 +15096,15 @@ describe('useGeminiStream', () => {
         disableForSession: vi.fn(),
       };
       const mockClient = {
-        ...new MockedGeminiClientClass(mockConfig),
+        ...new MockedLlmClientClass(mockConfig),
         getLoopDetectionService: () => mockLoopDetectionService,
       };
-      mockConfig.getGeminiClient = vi.fn().mockReturnValue(mockClient);
+      mockConfig.getLlmClient = vi.fn().mockReturnValue(mockClient);
 
       mockSendMessageStream.mockReturnValue(
         (async function* () {
           yield {
-            type: ServerGeminiEventType.LoopDetected,
+            type: ServerLlmEventType.LoopDetected,
           };
         })(),
       );
@@ -15037,7 +15150,7 @@ describe('useGeminiStream', () => {
       mockSendMessageStream.mockReturnValueOnce(
         (async function* () {
           yield {
-            type: ServerGeminiEventType.LoopDetected,
+            type: ServerLlmEventType.LoopDetected,
           };
         })(),
       );
@@ -15073,7 +15186,7 @@ describe('useGeminiStream', () => {
       mockSendMessageStream.mockReturnValueOnce(
         (async function* () {
           yield {
-            type: ServerGeminiEventType.LoopDetected,
+            type: ServerLlmEventType.LoopDetected,
           };
         })(),
       );
@@ -15110,11 +15223,11 @@ describe('useGeminiStream', () => {
       mockSendMessageStream.mockReturnValue(
         (async function* () {
           yield {
-            type: ServerGeminiEventType.Content,
+            type: ServerLlmEventType.Content,
             value: 'Some response content',
           };
           yield {
-            type: ServerGeminiEventType.LoopDetected,
+            type: ServerLlmEventType.LoopDetected,
           };
         })(),
       );
@@ -15148,7 +15261,7 @@ describe('useGeminiStream', () => {
       mockSendMessageStream.mockReturnValue(
         (async function* () {
           yield {
-            type: ServerGeminiEventType.UserPromptSubmitBlocked,
+            type: ServerLlmEventType.UserPromptSubmitBlocked,
             value: {
               reason: 'Hook blocked due to security policy',
               originalPrompt: 'This is the original user prompt',
@@ -15182,11 +15295,11 @@ describe('useGeminiStream', () => {
       mockSendMessageStream.mockReturnValue(
         (async function* () {
           yield {
-            type: ServerGeminiEventType.Content,
+            type: ServerLlmEventType.Content,
             value: 'Partial response before block',
           };
           yield {
-            type: ServerGeminiEventType.UserPromptSubmitBlocked,
+            type: ServerLlmEventType.UserPromptSubmitBlocked,
             value: {
               reason: 'Security violation detected',
               originalPrompt: 'Execute system command',
@@ -15239,11 +15352,11 @@ describe('useGeminiStream', () => {
       mockSendMessageStream.mockReturnValue(
         (async function* () {
           yield {
-            type: ServerGeminiEventType.ActiveGoal,
+            type: ServerLlmEventType.ActiveGoal,
             value: activeGoal,
           };
           yield {
-            type: ServerGeminiEventType.ActiveGoal,
+            type: ServerLlmEventType.ActiveGoal,
             value: null,
           };
         })(),
@@ -15275,11 +15388,11 @@ describe('useGeminiStream', () => {
       mockSendMessageStream.mockReturnValue(
         (async function* () {
           yield {
-            type: ServerGeminiEventType.ActiveGoal,
+            type: ServerLlmEventType.ActiveGoal,
             value: activeGoal,
           };
           yield {
-            type: ServerGeminiEventType.ActiveGoal,
+            type: ServerLlmEventType.ActiveGoal,
             value: null,
           };
         })(),
@@ -15303,7 +15416,7 @@ describe('useGeminiStream', () => {
       mockSendMessageStream.mockReturnValue(
         (async function* () {
           yield {
-            type: ServerGeminiEventType.StopHookLoop,
+            type: ServerLlmEventType.StopHookLoop,
             value: {
               iterationCount: 3,
               reasons: [
@@ -15358,7 +15471,7 @@ describe('useGeminiStream', () => {
       mockSendMessageStream.mockReturnValue(
         (async function* () {
           yield {
-            type: ServerGeminiEventType.StopHookLoop,
+            type: ServerLlmEventType.StopHookLoop,
             value: {
               iterationCount: 2,
               reasons: ['controlled continuation prompt'],
@@ -15391,11 +15504,11 @@ describe('useGeminiStream', () => {
       mockSendMessageStream.mockReturnValue(
         (async function* () {
           yield {
-            type: ServerGeminiEventType.Content,
+            type: ServerLlmEventType.Content,
             value: 'Initial response before loop',
           };
           yield {
-            type: ServerGeminiEventType.StopHookLoop,
+            type: ServerLlmEventType.StopHookLoop,
             value: {
               iterationCount: 5,
               reasons: ['Hook reason 1', 'Hook reason 2'],
@@ -15439,7 +15552,7 @@ describe('useGeminiStream', () => {
       mockSendMessageStream.mockReturnValue(
         (async function* () {
           yield {
-            type: ServerGeminiEventType.StopHookLoop,
+            type: ServerLlmEventType.StopHookLoop,
             value: {
               iterationCount: 1,
               reasons: ['Single hook execution'],
@@ -15476,7 +15589,7 @@ describe('useGeminiStream', () => {
       mockSendMessageStream.mockReturnValue(
         (async function* () {
           yield {
-            type: ServerGeminiEventType.Content,
+            type: ServerLlmEventType.Content,
             value: 'Final Goal output',
             parts: [
               { text: 'Final ' },
@@ -15485,7 +15598,7 @@ describe('useGeminiStream', () => {
             ],
           };
           yield {
-            type: ServerGeminiEventType.GoalState,
+            type: ServerLlmEventType.GoalState,
             cause: 'complete' as const,
             value: {
               v: 2 as const,
@@ -15505,11 +15618,11 @@ describe('useGeminiStream', () => {
             },
           };
           yield {
-            type: ServerGeminiEventType.Content,
+            type: ServerLlmEventType.Content,
             value: ' continued',
           };
           yield {
-            type: ServerGeminiEventType.Finished,
+            type: ServerLlmEventType.Finished,
             value: { reason: 'STOP', usageMetadata: undefined },
           };
         })(),
@@ -15540,7 +15653,7 @@ describe('useGeminiStream', () => {
       mockSendMessageStream.mockReturnValue(
         (async function* () {
           yield {
-            type: ServerGeminiEventType.HookSystemMessage,
+            type: ServerLlmEventType.HookSystemMessage,
             value: '◐ Ralph iteration 3 | No completion promise set',
           };
         })(),
@@ -15569,11 +15682,11 @@ describe('useGeminiStream', () => {
       mockSendMessageStream.mockReturnValue(
         (async function* () {
           yield {
-            type: ServerGeminiEventType.Content,
+            type: ServerLlmEventType.Content,
             value: 'Here is the response',
           };
           yield {
-            type: ServerGeminiEventType.HookSystemMessage,
+            type: ServerLlmEventType.HookSystemMessage,
             value: 'Stop hook feedback message',
           };
         })(),
@@ -15612,7 +15725,7 @@ describe('useGeminiStream', () => {
   });
 
   describe('cron scheduler initialization', () => {
-    // Renders useGeminiStream wired to a provided cron scheduler mock, with a
+    // Renders useLlmStream wired to a provided cron scheduler mock, with a
     // controllable isConfigInitialized gate. `config` identity is stable across
     // rerenders so the cron effect only re-runs when `initialized` flips.
     const renderCronHook = (scheduler: unknown, initialized: boolean) => {
@@ -15623,8 +15736,8 @@ describe('useGeminiStream', () => {
       } as unknown as Config;
       return renderHook(
         (props: { initialized: boolean }) =>
-          useGeminiStream(
-            new MockedGeminiClientClass(cronConfig),
+          useLlmStream(
+            new MockedLlmClientClass(cronConfig),
             [],
             mockAddItem,
             cronConfig,
@@ -15760,11 +15873,11 @@ describe('useGeminiStream', () => {
       mockSendMessageStream.mockReturnValueOnce(
         (async function* () {
           yield {
-            type: ServerGeminiEventType.Content,
+            type: ServerLlmEventType.Content,
             value: 'Hello world',
           };
           yield {
-            type: ServerGeminiEventType.Finished,
+            type: ServerLlmEventType.Finished,
             value: {
               reason: undefined,
               usageMetadata: { totalTokenCount: 1 },
@@ -15787,20 +15900,20 @@ describe('useGeminiStream', () => {
         (call: any[]) => call[0]?.type === 'gemini',
       );
       expect(geminiCalls.length).toBeGreaterThanOrEqual(1);
-      const geminiItem = geminiCalls[0][0];
-      expect(typeof geminiItem.timestamp).toBe('number');
-      expect(geminiItem.timestamp).toBeGreaterThan(0);
+      const llmItem = geminiCalls[0][0];
+      expect(typeof llmItem.timestamp).toBe('number');
+      expect(llmItem.timestamp).toBeGreaterThan(0);
     });
 
     it('does not attach timestamp to non-gemini items', async () => {
       mockSendMessageStream.mockReturnValueOnce(
         (async function* () {
           yield {
-            type: ServerGeminiEventType.Content,
+            type: ServerLlmEventType.Content,
             value: 'response',
           };
           yield {
-            type: ServerGeminiEventType.Finished,
+            type: ServerLlmEventType.Finished,
             value: {
               reason: undefined,
               usageMetadata: { totalTokenCount: 1 },
@@ -15841,8 +15954,8 @@ describe('useGeminiStream', () => {
     ];
 
     renderHook(() =>
-      useGeminiStream(
-        new MockedGeminiClientClass(mockConfig),
+      useLlmStream(
+        new MockedLlmClientClass(mockConfig),
         history,
         mockAddItem,
         mockConfig,

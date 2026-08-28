@@ -133,7 +133,7 @@ describe('serve fast-path bundle check', () => {
       'dist/chunks/run-qwen-serve.js': output({
         inputs: [
           'packages/cli/src/serve/run-qwen-serve.ts',
-          'packages/cli/src/gemini.tsx',
+          'packages/cli/src/llm.tsx',
           'packages/cli/src/acp-integration/acpAgent.ts',
         ],
       }),

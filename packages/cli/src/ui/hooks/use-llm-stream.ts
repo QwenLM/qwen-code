@@ -16,20 +16,20 @@ import {
   runOutsideAgentContext,
   type Config,
   type EditorType,
-  type GeminiClient,
+  type LlmClient,
   type Logger,
   type RetryInfo,
-  type ServerGeminiChatCompressedEvent,
-  type ServerGeminiContentEvent as ContentEvent,
-  type ServerGeminiFinishedEvent,
-  type ServerGeminiStreamEvent as GeminiEvent,
+  type ServerLlmChatCompressedEvent,
+  type ServerLlmContentEvent as ContentEvent,
+  type ServerLlmFinishedEvent,
+  type ServerLlmStreamEvent as LlmEvent,
   type ThoughtSummary,
   type ToolCallRequestInfo,
   type ToolCallResponseInfo,
   type LlmErrorEventValue,
   type GoalTurnPermit,
   type SteerInput,
-  GeminiEventType as ServerGeminiEventType,
+  LlmEventType as ServerLlmEventType,
   SendMessageType,
   createDebugLogger,
   ToolNames,
@@ -83,7 +83,7 @@ import type {
   HistoryItem,
   HistoryItemWithoutId,
   HistoryItemToolGroup,
-  HistoryItemGemini,
+  HistoryItemLlm,
   InlineImageData,
   SlashCommandProcessorResult,
 } from '../types.js';
@@ -475,11 +475,11 @@ export interface CancelSubmitInfo {
 }
 
 /**
- * Manages the Gemini stream, including user input, command processing,
+ * Manages the LLM stream, including user input, command processing,
  * API interaction, and tool call lifecycle.
  */
-export const useGeminiStream = (
-  geminiClient: GeminiClient,
+export const useLlmStream = (
+  llmClient: LlmClient,
   history: HistoryItem[],
   addItem: UseHistoryManagerReturn['addItem'],
   config: Config,
@@ -656,9 +656,9 @@ export const useGeminiStream = (
     [goalQueueRef],
   );
   const lastPromptRef = useRef<PartListUnion | null>(null);
-  // Records the USER history item that THIS turn's prepareQueryForGemini
+  // Records the USER history item that THIS turn's prepareQueryForLlm
   // added (if any). Reset to null at the start of every turn (including
-  // Retry, which bypasses prepareQueryForGemini). Cron / Notification /
+  // Retry, which bypasses prepareQueryForLlm). Cron / Notification /
   // slash submit_prompt paths don't add a user item, so this stays null
   // on those turns. The cancel handler uses this to verify that the
   // candidate `lastUserItem` it's about to rewind actually came from the
@@ -692,8 +692,8 @@ export const useGeminiStream = (
   // (same turn, performance-split continuation) does not.
   const commitItem = useCallback(
     (item: HistoryItemWithoutId, userMessageTimestamp: number): number => {
-      if (item.type === 'gemini' && !(item as HistoryItemGemini).timestamp) {
-        (item as HistoryItemGemini).timestamp = Date.now();
+      if (item.type === 'gemini' && !(item as HistoryItemLlm).timestamp) {
+        (item as HistoryItemLlm).timestamp = Date.now();
       }
       return addItem(item, userMessageTimestamp);
     },
@@ -1095,7 +1095,7 @@ export const useGeminiStream = (
     onExec,
     onDebugMessage,
     config,
-    geminiClient,
+    llmClient,
     setShellInputFocused,
     terminalWidth,
     terminalHeight,
@@ -1141,7 +1141,7 @@ export const useGeminiStream = (
             tc.status === 'error' ||
             tc.status === 'cancelled') &&
             !(tc as TrackedCompletedToolCall | TrackedCancelledToolCall)
-              .responseSubmittedToGemini),
+              .responseSubmittedToLlm),
       )
     ) {
       return StreamingState.Responding;
@@ -1401,7 +1401,7 @@ export const useGeminiStream = (
     [addItem, config],
   );
 
-  const prepareQueryForGemini = useCallback(
+  const prepareQueryForLlm = useCallback(
     async (
       query: PartListUnion,
       userMessageTimestamp: number,
@@ -1430,7 +1430,7 @@ export const useGeminiStream = (
         lastTurnUserItemRef.current = null;
       }
 
-      let localQueryToSendToGemini: PartListUnion | null = null;
+      let localQueryToSendToLlm: PartListUnion | null = null;
 
       if (typeof query === 'string') {
         const trimmedQuery = query.trim();
@@ -1491,7 +1491,7 @@ export const useGeminiStream = (
               };
             }
             case 'submit_prompt': {
-              localQueryToSendToGemini = slashCommandResult.content;
+              localQueryToSendToLlm = slashCommandResult.content;
               submitPromptOnCompleteRef.current =
                 slashCommandResult.onComplete ?? null;
               refreshContextFilesOnWriteRef.current = Boolean(
@@ -1526,17 +1526,17 @@ export const useGeminiStream = (
               }
 
               const bridgeResult = await applyVisionBridgeIfNeeded(
-                localQueryToSendToGemini,
+                localQueryToSendToLlm,
                 userMessageTimestamp,
                 abortSignal,
               );
               if (!bridgeResult.shouldProceed) {
                 return { queryToSend: null, shouldProceed: false };
               }
-              localQueryToSendToGemini = bridgeResult.parts;
+              localQueryToSendToLlm = bridgeResult.parts;
 
               return {
-                queryToSend: localQueryToSendToGemini,
+                queryToSend: localQueryToSendToLlm,
                 shouldProceed: true,
               };
             }
@@ -1556,7 +1556,7 @@ export const useGeminiStream = (
           return { queryToSend: null, shouldProceed: false };
         }
 
-        localQueryToSendToGemini = trimmedQuery;
+        localQueryToSendToLlm = trimmedQuery;
 
         // Cron prompts are already rendered as a `● …` notification by
         // their queue drain, so skip the user-message history item to
@@ -1612,30 +1612,30 @@ export const useGeminiStream = (
           if (!atCommandResult.shouldProceed) {
             return { queryToSend: null, shouldProceed: false };
           }
-          localQueryToSendToGemini = atCommandResult.processedQuery;
+          localQueryToSendToLlm = atCommandResult.processedQuery;
         }
 
         const bridgeResult = await applyVisionBridgeIfNeeded(
-          localQueryToSendToGemini,
+          localQueryToSendToLlm,
           userMessageTimestamp,
           abortSignal,
         );
         if (!bridgeResult.shouldProceed) {
           return { queryToSend: null, shouldProceed: false };
         }
-        localQueryToSendToGemini = bridgeResult.parts;
+        localQueryToSendToLlm = bridgeResult.parts;
       } else {
         // It's a function response (PartListUnion that isn't a string)
-        localQueryToSendToGemini = query;
+        localQueryToSendToLlm = query;
       }
 
-      if (localQueryToSendToGemini === null) {
+      if (localQueryToSendToLlm === null) {
         onDebugMessage(
-          'Query processing resulted in null, not sending to Gemini.',
+          'Query processing resulted in null, not sending to the model.',
         );
         return { queryToSend: null, shouldProceed: false };
       }
-      return { queryToSend: localQueryToSendToGemini, shouldProceed: true };
+      return { queryToSend: localQueryToSendToLlm, shouldProceed: true };
     },
     [
       config,
@@ -1656,7 +1656,7 @@ export const useGeminiStream = (
   const handleContentEvent = useCallback(
     (
       eventValue: ContentEvent['value'],
-      currentGeminiMessageBuffer: string,
+      currentLlmMessageBuffer: string,
       userMessageTimestamp: number,
       startAsContinuation = false,
     ): string => {
@@ -1672,15 +1672,15 @@ export const useGeminiStream = (
       // during the pre-cancel flush (their addItem hasn't re-rendered
       // React history by the time AppContainer's guard runs).
       turnSawContentEventRef.current = true;
-      let newGeminiMessageBuffer = currentGeminiMessageBuffer + eventValue;
+      let newLlmMessageBuffer = currentLlmMessageBuffer + eventValue;
       const pendingItem = pendingHistoryItemRef.current;
       if (
         (pendingItem?.type === 'gemini' ||
           pendingItem?.type === 'gemini_content') &&
         (pendingItem.images?.length || pendingItem.omittedImageCount)
       ) {
-        if (newGeminiMessageBuffer.trim().length === 0) {
-          return newGeminiMessageBuffer;
+        if (newLlmMessageBuffer.trim().length === 0) {
+          return newLlmMessageBuffer;
         }
         stagePendingAssistantItem();
       }
@@ -1688,8 +1688,8 @@ export const useGeminiStream = (
         pendingHistoryItemRef.current?.type !== 'gemini' &&
         pendingHistoryItemRef.current?.type !== 'gemini_content'
       ) {
-        if (newGeminiMessageBuffer.trim().length === 0) {
-          return newGeminiMessageBuffer;
+        if (newLlmMessageBuffer.trim().length === 0) {
+          return newLlmMessageBuffer;
         }
         if (pendingHistoryItemRef.current) {
           commitItemInOrder(
@@ -1702,7 +1702,7 @@ export const useGeminiStream = (
             ? { type: 'gemini_content', text: '' }
             : { type: 'gemini', text: '', timestamp: Date.now() },
         );
-        newGeminiMessageBuffer = stripLeadingBlankLines(newGeminiMessageBuffer);
+        newLlmMessageBuffer = stripLeadingBlankLines(newLlmMessageBuffer);
       }
       // Split large messages for better rendering performance. Ideally,
       // we should maximize the amount of output sent to <Static />.
@@ -1714,17 +1714,17 @@ export const useGeminiStream = (
             : startAsContinuation
               ? 'gemini_content'
               : 'gemini';
-      while (newGeminiMessageBuffer.length > STREAM_PENDING_ITEM_MAX_CHARS) {
+      while (newLlmMessageBuffer.length > STREAM_PENDING_ITEM_MAX_CHARS) {
         const splitPoint = findLastSafeSplitPoint(
-          newGeminiMessageBuffer,
+          newLlmMessageBuffer,
           STREAM_PENDING_ITEM_MAX_CHARS,
         );
         const safeSplitPoint =
-          splitPoint > 0 && splitPoint < newGeminiMessageBuffer.length
+          splitPoint > 0 && splitPoint < newLlmMessageBuffer.length
             ? splitPoint
             : STREAM_PENDING_ITEM_MAX_CHARS;
 
-        // This indicates that we need to split up this Gemini Message.
+        // This indicates that we need to split up this LLM message.
         // Splitting a message is primarily a performance consideration. There is a
         // <Static> component at the root of App.tsx which takes care of rendering
         // content statically or dynamically. Everything but the last message is
@@ -1735,7 +1735,7 @@ export const useGeminiStream = (
         // Repair fences when the split lands inside a code block so the tail
         // does not render as prose (see splitFencedMarkdown).
         const { before: beforeText, after: afterText } = splitFencedMarkdown(
-          newGeminiMessageBuffer,
+          newLlmMessageBuffer,
           safeSplitPoint,
         );
         commitItemInOrder(
@@ -1746,7 +1746,7 @@ export const useGeminiStream = (
           userMessageTimestamp,
         );
         nextPendingType = 'gemini_content';
-        newGeminiMessageBuffer = afterText;
+        newLlmMessageBuffer = afterText;
       }
       // Rendered-height-aware incremental commit. Commit whole chunks to
       // <Static> so the pending (live) item's ESTIMATED rendered height stays
@@ -1782,7 +1782,7 @@ export const useGeminiStream = (
       );
       const tableClampRows = Math.max(2, viewportRows - 3);
       while (true) {
-        const bufferLines = newGeminiMessageBuffer.split('\n');
+        const bufferLines = newLlmMessageBuffer.split('\n');
         const { keptLines, clipped } = fitPendingSlice(
           bufferLines,
           commitWidth,
@@ -1819,13 +1819,10 @@ export const useGeminiStream = (
           // gutter), so commit the budget-fit prefix and keep streaming. Restrict
           // this to code blocks: other tall blocks (tables/lists) must stay whole
           // and are still kept pending.
-          const capIndex = charIndexAfterLine(
-            newGeminiMessageBuffer,
-            keptLines,
-          );
+          const capIndex = charIndexAfterLine(newLlmMessageBuffer, keptLines);
           const fenceInfo =
             capIndex > 0
-              ? getEnclosingFenceInfo(newGeminiMessageBuffer, capIndex)
+              ? getEnclosingFenceInfo(newLlmMessageBuffer, capIndex)
               : null;
           // Only hard-split a real code block. Other tall blocks (tables/lists)
           // must stay whole, and mermaid needs its whole source to render a
@@ -1836,20 +1833,17 @@ export const useGeminiStream = (
           }
           target = capIndex;
         } else {
-          target = charIndexAfterLine(newGeminiMessageBuffer, boundaryLine + 1);
+          target = charIndexAfterLine(newLlmMessageBuffer, boundaryLine + 1);
           if (target <= 0) break;
         }
-        const splitPoint = findLastSafeSplitPoint(
-          newGeminiMessageBuffer,
-          target,
-        );
-        if (splitPoint <= 0 || splitPoint >= newGeminiMessageBuffer.length) {
+        const splitPoint = findLastSafeSplitPoint(newLlmMessageBuffer, target);
+        if (splitPoint <= 0 || splitPoint >= newLlmMessageBuffer.length) {
           break;
         }
         // Repair fences when the split lands inside a code block so the tail
         // does not render as prose (see splitFencedMarkdown).
         const { before: beforeText, after: afterText } = splitFencedMarkdown(
-          newGeminiMessageBuffer,
+          newLlmMessageBuffer,
           splitPoint,
         );
         commitItemInOrder(
@@ -1860,22 +1854,22 @@ export const useGeminiStream = (
           userMessageTimestamp,
         );
         nextPendingType = 'gemini_content';
-        newGeminiMessageBuffer = afterText;
+        newLlmMessageBuffer = afterText;
       }
       // Update the existing message with accumulated content.
       setPendingHistoryItem((item) => {
         const base: HistoryItemWithoutId = {
           type: nextPendingType,
-          text: newGeminiMessageBuffer,
+          text: newLlmMessageBuffer,
         };
         if (item && 'timestamp' in item) {
-          (base as HistoryItemGemini).timestamp = (
-            item as HistoryItemGemini
+          (base as HistoryItemLlm).timestamp = (
+            item as HistoryItemLlm
           ).timestamp;
         }
         return base;
       });
-      return newGeminiMessageBuffer;
+      return newLlmMessageBuffer;
     },
     [
       commitItemInOrder,
@@ -2185,7 +2179,7 @@ export const useGeminiStream = (
   );
 
   const handleFinishedEvent = useCallback(
-    (event: ServerGeminiFinishedEvent, userMessageTimestamp: number) => {
+    (event: ServerLlmFinishedEvent, userMessageTimestamp: number) => {
       const finishReason = event.value.reason;
       if (!finishReason) {
         return;
@@ -2243,7 +2237,7 @@ export const useGeminiStream = (
 
   const handleChatCompressionEvent = useCallback(
     (
-      eventValue: ServerGeminiChatCompressedEvent['value'],
+      eventValue: ServerLlmChatCompressedEvent['value'],
       userMessageTimestamp: number,
     ) => {
       autonomousLoopTickResolverRef.current?.resetCache();
@@ -2325,7 +2319,7 @@ export const useGeminiStream = (
       setLoopDetectionConfirmationRequest(null);
 
       if (result.userSelection === 'disable') {
-        config.getGeminiClient().getLoopDetectionService().disableForSession();
+        config.getLlmClient().getLoopDetectionService().disableForSession();
         addItem(
           {
             type: 'info',
@@ -2400,9 +2394,9 @@ export const useGeminiStream = (
     [addItem, commitItemInOrder, pendingHistoryItemRef, setPendingHistoryItem],
   );
 
-  const processGeminiStreamEvents = useCallback(
+  const processLlmStreamEvents = useCallback(
     async (
-      stream: AsyncIterable<GeminiEvent>,
+      stream: AsyncIterable<LlmEvent>,
       userMessageTimestamp: number,
       signal: AbortSignal,
       submitType: SendMessageType,
@@ -2411,7 +2405,7 @@ export const useGeminiStream = (
       trackInteractionOwner = true,
       toolContinuationOwner?: ToolContinuationOwner,
     ): Promise<StreamProcessingResult> => {
-      let geminiMessageBuffer = '';
+      let llmMessageBuffer = '';
       let thoughtBuffer = '';
       let scheduledToolContinuation = false;
       let assistantOutputStarted =
@@ -2466,9 +2460,9 @@ export const useGeminiStream = (
               contentParts.push(queuedContent.value);
             }
 
-            geminiMessageBuffer = handleContentEvent(
+            llmMessageBuffer = handleContentEvent(
               contentParts.join(''),
-              geminiMessageBuffer,
+              llmMessageBuffer,
               userMessageTimestamp,
               assistantOutputStarted,
             );
@@ -2499,7 +2493,7 @@ export const useGeminiStream = (
                 ...pendingItem,
                 omittedImageCount: (pendingItem.omittedImageCount ?? 0) + 1,
               });
-              geminiMessageBuffer = '';
+              llmMessageBuffer = '';
               assistantOutputStarted = true;
               continue;
             }
@@ -2513,7 +2507,7 @@ export const useGeminiStream = (
                 setPendingHistoryItem(null);
               }
             }
-            geminiMessageBuffer = '';
+            llmMessageBuffer = '';
             if (shouldDisplayImage) {
               setPendingHistoryItem({
                 type: assistantOutputStarted ? 'gemini_content' : 'gemini',
@@ -2584,7 +2578,7 @@ export const useGeminiStream = (
           }
           dualOutput?.processEvent(event);
           switch (event.type) {
-            case ServerGeminiEventType.Thought:
+            case ServerLlmEventType.Thought:
               // Subject-only chunks are discrete status updates for the
               // loading indicator and render immediately. Anything carrying
               // streamed text (with or without a subject) goes through the
@@ -2598,7 +2592,7 @@ export const useGeminiStream = (
                 scheduleBufferedStreamFlush();
               }
               break;
-            case ServerGeminiEventType.Content: {
+            case ServerLlmEventType.Content: {
               // Thinking is done once the answer starts streaming; reset the
               // title status. On the thinking→answer transition, flush any
               // buffered reasoning so the full thought is captured, then commit
@@ -2631,7 +2625,7 @@ export const useGeminiStream = (
               scheduleBufferedStreamFlush();
               break;
             }
-            case ServerGeminiEventType.ToolCallRequest:
+            case ServerLlmEventType.ToolCallRequest:
               // Thinking is done once a tool call is issued; flush buffered
               // reasoning then commit it to history (collapsed) above the tool
               // output.
@@ -2656,7 +2650,7 @@ export const useGeminiStream = (
                 // Best-effort — don't block on serialization errors
               }
               break;
-            case ServerGeminiEventType.UserCancelled:
+            case ServerLlmEventType.UserCancelled:
               flushBufferedStreamEvents();
               toolCallRequests.length = 0;
               handleUserCancelledEvent(userMessageTimestamp);
@@ -2664,21 +2658,21 @@ export const useGeminiStream = (
                 status: StreamProcessingStatus.UserCancelled,
                 scheduledToolContinuation: false,
               };
-            case ServerGeminiEventType.Error:
+            case ServerLlmEventType.Error:
               flushBufferedStreamEvents();
               handleErrorEvent(event.value, userMessageTimestamp, submitType);
               break;
-            case ServerGeminiEventType.ChatCompressed:
+            case ServerLlmEventType.ChatCompressed:
               flushBufferedStreamEvents();
               handleChatCompressionEvent(event.value, userMessageTimestamp);
-              geminiMessageBuffer = '';
+              llmMessageBuffer = '';
               assistantOutputStarted = false;
               break;
-            case ServerGeminiEventType.ToolCallConfirmation:
-            case ServerGeminiEventType.ToolCallResponse:
+            case ServerLlmEventType.ToolCallConfirmation:
+            case ServerLlmEventType.ToolCallResponse:
               flushBufferedStreamEvents();
               break;
-            case ServerGeminiEventType.MaxSessionTurns:
+            case ServerLlmEventType.MaxSessionTurns:
               flushBufferedStreamEvents();
               if (pendingHistoryItemRef.current) {
                 commitItemInOrder(
@@ -2688,10 +2682,10 @@ export const useGeminiStream = (
                 setPendingHistoryItem(null);
               }
               handleMaxSessionTurnsEvent();
-              geminiMessageBuffer = '';
+              llmMessageBuffer = '';
               assistantOutputStarted = false;
               break;
-            case ServerGeminiEventType.SessionTokenLimitExceeded:
+            case ServerLlmEventType.SessionTokenLimitExceeded:
               flushBufferedStreamEvents();
               if (pendingHistoryItemRef.current) {
                 commitItemInOrder(
@@ -2701,10 +2695,10 @@ export const useGeminiStream = (
                 setPendingHistoryItem(null);
               }
               handleSessionTokenLimitExceededEvent(event.value);
-              geminiMessageBuffer = '';
+              llmMessageBuffer = '';
               assistantOutputStarted = false;
               break;
-            case ServerGeminiEventType.Finished:
+            case ServerLlmEventType.Finished:
               flushBufferedStreamEvents();
               // A thinking-only turn (no content/tool) still commits its
               // reasoning so it persists collapsed in history.
@@ -2724,31 +2718,31 @@ export const useGeminiStream = (
                 );
                 setPendingHistoryItem(null);
               }
-              geminiMessageBuffer = '';
+              llmMessageBuffer = '';
               thoughtBuffer = '';
               assistantOutputStarted = false;
               assistantInlineImageCount = 0;
               setThought(null);
               handleFinishedEvent(
-                event as ServerGeminiFinishedEvent,
+                event as ServerLlmFinishedEvent,
                 userMessageTimestamp,
               );
               break;
-            case ServerGeminiEventType.Citation:
+            case ServerLlmEventType.Citation:
               flushBufferedStreamEvents();
               handleCitationEvent(event.value, userMessageTimestamp);
               if (showCitations(settings)) {
-                geminiMessageBuffer = '';
+                llmMessageBuffer = '';
                 assistantOutputStarted = false;
               }
               break;
-            case ServerGeminiEventType.LoopDetected:
+            case ServerLlmEventType.LoopDetected:
               flushBufferedStreamEvents();
               // handle later because we want to move pending history to history
               // before we add loop detected message to history
               loopDetectedRef.current = true;
               break;
-            case ServerGeminiEventType.Retry:
+            case ServerLlmEventType.Retry:
               // On fresh restart (escalation / rate-limit / invalid stream),
               // clear pending content and buffers to discard the failed attempt.
               // On continuation (recovery), keep the pending gemini item AND
@@ -2767,14 +2761,14 @@ export const useGeminiStream = (
                 commitPendingThought(userMessageTimestamp);
                 thoughtBuffer = '';
                 setThought(null);
-                geminiMessageBuffer = '';
+                llmMessageBuffer = '';
                 assistantOutputStarted = false;
                 assistantInlineImageCount = 0;
               }
               // Always discard tool call requests from the truncated/failed
               // attempt to prevent duplicate execution after escalation or
               // recovery. The recovery path now skips turns that already
-              // contain a functionCall (see geminiChat.ts), so this only
+              // contain a functionCall (see llm-chat.ts), so this only
               // clears stale requests from pre-RETRY accumulation.
               toolCallRequests.length = 0;
               // Show retry info if available (rate-limit / throttling errors)
@@ -2785,7 +2779,7 @@ export const useGeminiStream = (
                 clearRetryCountdown();
               }
               break;
-            case ServerGeminiEventType.ModelFallback: {
+            case ServerLlmEventType.ModelFallback: {
               // The primary model (or a prior fallback) exhausted its retry
               // budget on a capacity/availability error and the system is
               // switching to the next fallback model. Discard partial content
@@ -2798,7 +2792,7 @@ export const useGeminiStream = (
               commitPendingThought(userMessageTimestamp);
               thoughtBuffer = '';
               setThought(null);
-              geminiMessageBuffer = '';
+              llmMessageBuffer = '';
               assistantOutputStarted = false;
               assistantInlineImageCount = 0;
               toolCallRequests.length = 0;
@@ -2815,7 +2809,7 @@ export const useGeminiStream = (
               );
               break;
             }
-            case ServerGeminiEventType.HookSystemMessage:
+            case ServerLlmEventType.HookSystemMessage:
               flushBufferedStreamEvents();
               // Display system message from Stop hooks with "Stop says:" prefix
               // First commit any pending AI response to ensure correct ordering
@@ -2833,27 +2827,27 @@ export const useGeminiStream = (
                 } as HistoryItemWithoutId,
                 userMessageTimestamp,
               );
-              geminiMessageBuffer = '';
+              llmMessageBuffer = '';
               assistantOutputStarted = false;
               break;
-            case ServerGeminiEventType.UserPromptSubmitBlocked:
+            case ServerLlmEventType.UserPromptSubmitBlocked:
               flushBufferedStreamEvents();
               handleUserPromptSubmitBlockedEvent(
                 event.value,
                 userMessageTimestamp,
               );
-              geminiMessageBuffer = '';
+              llmMessageBuffer = '';
               assistantOutputStarted = false;
               break;
-            case ServerGeminiEventType.StopHookLoop:
+            case ServerLlmEventType.StopHookLoop:
               flushBufferedStreamEvents();
               handleStopHookLoopEvent(event.value, userMessageTimestamp);
-              geminiMessageBuffer = '';
+              llmMessageBuffer = '';
               assistantOutputStarted = false;
               break;
-            case ServerGeminiEventType.ActiveGoal:
+            case ServerLlmEventType.ActiveGoal:
               break;
-            case ServerGeminiEventType.GoalState:
+            case ServerLlmEventType.GoalState:
               if (event.cause && shouldDisplayGoalStateCause(event.cause)) {
                 flushBufferedStreamEvents();
                 if (pendingHistoryItemRef.current) {
@@ -2871,7 +2865,7 @@ export const useGeminiStream = (
                   },
                   userMessageTimestamp,
                 );
-                geminiMessageBuffer = '';
+                llmMessageBuffer = '';
                 assistantOutputStarted = false;
               }
               break;
@@ -2912,7 +2906,7 @@ export const useGeminiStream = (
         // mutation. In-flight entries from this submit fill ids not already
         // present in history (the history fingerprint for an id wins).
         const handledToolCallFingerprints = new Map(
-          geminiClient ? geminiClient.getHistoryToolCallFingerprints() : [],
+          llmClient ? llmClient.getHistoryToolCallFingerprints() : [],
         );
         for (const [
           providerCallId,
@@ -2944,7 +2938,7 @@ export const useGeminiStream = (
         );
         if (repeatedDuplicateRequest?.providerCallId) {
           debugLogger.debug(
-            `[processGeminiStreamEvents] Dropping batch after repeated duplicate provider tool-call id: ${repeatedDuplicateRequest.providerCallId} (tool: ${repeatedDuplicateRequest.name})`,
+            `[processLlmStreamEvents] Dropping batch after repeated duplicate provider tool-call id: ${repeatedDuplicateRequest.providerCallId} (tool: ${repeatedDuplicateRequest.name})`,
           );
           loopDetectedRef.current = true;
           return {
@@ -2968,7 +2962,7 @@ export const useGeminiStream = (
 
             const response = createDuplicateProviderToolCallResponse(request);
             debugLogger.debug(
-              `[processGeminiStreamEvents] Suppressing duplicate provider tool-call id: ${providerCallId} (tool: ${request.name})`,
+              `[processLlmStreamEvents] Suppressing duplicate provider tool-call id: ${providerCallId} (tool: ${request.name})`,
             );
             dualOutput?.emitToolResult(request, response);
             duplicateResponses.push({ request, response });
@@ -3051,7 +3045,7 @@ export const useGeminiStream = (
       handleErrorEvent,
       registerToolBatch,
       scheduleToolCalls,
-      geminiClient,
+      llmClient,
       handleChatCompressionEvent,
       handleFinishedEvent,
       handleMaxSessionTurnsEvent,
@@ -3401,7 +3395,7 @@ export const useGeminiStream = (
       acquireSubmissionLease();
       const submissionGeneration = submissionLeaseGenerationRef.current;
 
-      // loopDetectedRef now gates tool-call scheduling (see processGeminiStream
+      // loopDetectedRef now gates tool-call scheduling (see processLlmStream
       // events), so it must reflect only this turn's state. Reset it
       // unconditionally at entry: if the previous turn detected a loop but threw
       // before its own post-stream reset, a stuck `true` would otherwise make
@@ -3412,7 +3406,7 @@ export const useGeminiStream = (
 
       // Reset turn-local ownership trackers at the very top of every
       // top-level submit (UserQuery, Retry, Cron, Notification, etc.).
-      // `prepareQueryForGemini` also resets `lastTurnUserItemRef`, but
+      // `prepareQueryForLlm` also resets `lastTurnUserItemRef`, but
       // Retry skips that path — without this earlier reset, a stale
       // ownership snapshot from the prior UserQuery would survive into
       // the retry's cancel info and let auto-restore wrongly truncate
@@ -3445,7 +3439,7 @@ export const useGeminiStream = (
       // non-continuation Retry event, so discard every run from the failed
       // attempt before the replacement stream starts. A different top-level
       // turn preserves what the user already saw, but must commit it before
-      // prepareQueryForGemini appends the next user item.
+      // prepareQueryForLlm appends the next user item.
       if (submitType === SendMessageType.Retry) {
         setPendingAssistantItems([]);
         const pendingItem = pendingHistoryItemRef.current;
@@ -3592,7 +3586,7 @@ export const useGeminiStream = (
                 : { queryToSend: null, shouldProceed: false }
               : submitType === SendMessageType.Retry
                 ? { queryToSend: query, shouldProceed: true }
-                : await prepareQueryForGemini(
+                : await prepareQueryForLlm(
                     query,
                     userMessageTimestamp,
                     abortSignal,
@@ -3829,7 +3823,7 @@ export const useGeminiStream = (
           const providerSignal = inheritedToolContinuationOwner
             ? processingSignal
             : abortSignal;
-          const stream = geminiClient.sendMessageStream(
+          const stream = llmClient.sendMessageStream(
             finalQueryToSend,
             providerSignal,
             prompt_id!,
@@ -3856,7 +3850,7 @@ export const useGeminiStream = (
             },
           );
 
-          const processingResult = await processGeminiStreamEvents(
+          const processingResult = await processLlmStreamEvents(
             stream,
             userMessageTimestamp,
             processingSignal,
@@ -4005,9 +3999,9 @@ export const useGeminiStream = (
 
           // After the turn completes, wire up notifications for any background
           // dream / extraction tasks that were kicked off by the client.
-          if (geminiClient) {
+          if (llmClient) {
             const memoryTaskPromises =
-              geminiClient.consumePendingMemoryTaskPromises();
+              llmClient.consumePendingMemoryTaskPromises();
             for (const p of memoryTaskPromises) {
               void p.then((count) => {
                 if (count > 0) {
@@ -4128,8 +4122,8 @@ export const useGeminiStream = (
     [
       streamingState,
       setModelSwitchedFromQuotaError,
-      prepareQueryForGemini,
-      processGeminiStreamEvents,
+      prepareQueryForLlm,
+      processLlmStreamEvents,
       pendingHistoryItemRef,
       addItem,
       commitPendingAssistantItems,
@@ -4137,7 +4131,7 @@ export const useGeminiStream = (
       setPendingAssistantItems,
       setPendingHistoryItem,
       setInitError,
-      geminiClient,
+      llmClient,
       onAuthError,
       config,
       startNewPrompt,
@@ -4305,19 +4299,19 @@ export const useGeminiStream = (
       // wire — same trade-off upstream Claude Code makes when its
       // `StreamingToolExecutor.discard()` follows a
       // `yieldMissingToolResultBlocks` synthesis (`query.ts:733` + `:984`).
-      // Walk raw history WITHOUT cloning — `geminiClient.getHistory()`
+      // Walk raw history WITHOUT cloning — `llmClient.getHistory()`
       // returns `structuredClone(this.history)`, which on long sessions
       // (200+ entries with sizable tool outputs) costs several ms on
       // the React UI thread and visibly stalls streaming when the
       // dedup pass runs on every tool-completion batch.
       // `getHistoryFunctionResponseIds` walks history in place and
       // returns only the id Set this dispatcher needs. The
-      // GeminiClient implementation is mandatory — production and
+      // LlmClient implementation is mandatory — production and
       // test mocks both expose it. Skip the dedup pass entirely if
       // the client is missing (only happens in unit tests that
       // construct a hook without a client).
-      const historyCallIdsWithResponse: Set<string> = geminiClient
-        ? geminiClient.getHistoryFunctionResponseIds()
+      const historyCallIdsWithResponse: Set<string> = llmClient
+        ? llmClient.getHistoryFunctionResponseIds()
         : new Set<string>();
       const dedupedTools = completedAndReadyToSubmitTools.filter((tc) =>
         historyCallIdsWithResponse.has(tc.request.callId),
@@ -4329,9 +4323,30 @@ export const useGeminiStream = (
             `whose callId already has a functionResponse in history: ` +
             `${dedupedCallIds.join(', ')}`,
         );
+        // Even though the wire-side submission is dropped, the tool DID
+        // run locally — `toolCallCount` and `skillsModifiedInSession`
+        // must reflect that. Without this, deduped skill-write tools
+        // (e.g. write_file under a project SKILLS path) would silently
+        // skip the `skillsModifiedInSession` flip that gates the
+        // skills-reload prompt at end-of-turn. Mirrors the
+        // `recordCompletedToolCall` loop below over `llmTools` —
+        // filter to the same shape (non-client-initiated) so client
+        // tools (which the original loop also skipped) stay skipped.
+        //
+        // Cancelled tools are also skipped: `dedupedTools` includes
+        // anything in a terminal state (success | error | cancelled),
+        // but cancelled means the tool never actually ran end-to-end —
+        // the `allToolsCancelled` branch below would have surfaced
+        // them via `addHistory + reportCancelled` rather than the
+        // completed-call metric, and the metric should match. Without
+        // this filter, a deduped + cancelled tool would inflate
+        // `toolCallCount` for a call that never produced a result
+        // (and could also flip `skillsModifiedInSession` for a
+        // never-executed skill-write).
         for (const tc of dedupedTools) {
           if (tc.request.isClientInitiated) continue;
-          geminiClient?.recordCompletedToolCall(
+          if (tc.status === 'cancelled') continue;
+          llmClient?.recordCompletedToolCall(
             tc.request.name,
             tc.request.args as Record<string, unknown>,
             toCompletedToolCallOutcome(
@@ -4430,7 +4445,7 @@ export const useGeminiStream = (
           !processedMemoryToolsRef.current.has(t.request.callId),
       );
 
-      let geminiTools = completedAndReadyToSubmitTools.filter(
+      let llmTools = completedAndReadyToSubmitTools.filter(
         (t) =>
           !t.request.isClientInitiated &&
           !historyCallIdsWithResponse.has(t.request.callId),
@@ -4461,13 +4476,13 @@ export const useGeminiStream = (
           : undefined;
       const ownerToolCall =
         (liveActiveInteractionOwner
-          ? geminiTools.find(
+          ? llmTools.find(
               (toolCall) =>
                 liveOwnerForToolCall(toolCall) === liveActiveInteractionOwner,
             )
           : undefined) ??
-        geminiTools.find((toolCall) => liveOwnerForToolCall(toolCall)) ??
-        geminiTools[0] ??
+        llmTools.find((toolCall) => liveOwnerForToolCall(toolCall)) ??
+        llmTools[0] ??
         completedAndReadyToSubmitTools.find(
           (toolCall) => !toolCall.request.isClientInitiated,
         );
@@ -4479,7 +4494,7 @@ export const useGeminiStream = (
         string
       >();
       const secondaryTools = interactionOwner
-        ? geminiTools.filter(
+        ? llmTools.filter(
             (toolCall) => ownerForToolCall(toolCall) !== interactionOwner,
           )
         : [];
@@ -4491,15 +4506,17 @@ export const useGeminiStream = (
             toolCall.request.prompt_id,
           );
         }
-        geminiClient?.recordCompletedToolCall(
-          toolCall.request.name,
-          toolCall.request.args as Record<string, unknown>,
-          toCompletedToolCallOutcome(
-            toolCall.request.callId,
-            toolCall.status,
-            toolCall.response,
-          ),
-        );
+        if (toolCall.status !== 'cancelled') {
+          llmClient?.recordCompletedToolCall(
+            toolCall.request.name,
+            toolCall.request.args as Record<string, unknown>,
+            toCompletedToolCallOutcome(
+              toolCall.request.callId,
+              toolCall.status,
+              toolCall.response,
+            ),
+          );
+        }
         dualOutput?.emitToolResult(toolCall.request, toolCall.response);
       }
       if (secondaryTools.length > 0) {
@@ -4507,7 +4524,7 @@ export const useGeminiStream = (
           secondaryTools.map((toolCall) => toolCall.request.callId),
         );
         markToolsAsSubmitted([...secondaryCallIds]);
-        geminiTools = geminiTools.filter(
+        llmTools = llmTools.filter(
           (toolCall) => !secondaryCallIds.has(toolCall.request.callId),
         );
       }
@@ -4560,13 +4577,13 @@ export const useGeminiStream = (
         }
       };
       let toolGoalPermit: GoalTurnPermit | undefined;
-      const toolGoalContexts = geminiTools.map(
+      const toolGoalContexts = llmTools.map(
         (toolCall) => toolCall.request.goalContext,
       );
       try {
         toolGoalPermit = sharedGoalPermit(toolGoalContexts);
       } catch (error) {
-        const callIds = geminiTools.map((toolCall) => toolCall.request.callId);
+        const callIds = llmTools.map((toolCall) => toolCall.request.callId);
         markToolsAsSubmitted(callIds);
         const reason = getErrorMessage(error);
         const bindings = new Map<string, GoalTurnBinding>();
@@ -4620,7 +4637,7 @@ export const useGeminiStream = (
         }
         if (active && activeGoalPermitValid) {
           markToolsAsSubmitted(
-            geminiTools.map((toolCall) => toolCall.request.callId),
+            llmTools.map((toolCall) => toolCall.request.callId),
           );
           const reason = 'ToolResult batch is missing the active Goal context';
           await failClosedGoalTurn(active, reason);
@@ -4644,7 +4661,7 @@ export const useGeminiStream = (
         const existing = goalTurnBindingsRef.current.get(toolGoalPermit.turnId);
         if (existing && !sameGoalPermit(existing.permit, toolGoalPermit)) {
           markToolsAsSubmitted(
-            geminiTools.map((toolCall) => toolCall.request.callId),
+            llmTools.map((toolCall) => toolCall.request.callId),
           );
           const reason = 'ToolResult batch has a stale Goal context';
           await failClosedGoalTurn(existing, reason);
@@ -4713,7 +4730,7 @@ export const useGeminiStream = (
         );
       }
       const completedCallIds = new Set(
-        geminiTools.map((toolCall) => toolCall.request.callId),
+        llmTools.map((toolCall) => toolCall.request.callId),
       );
       const secondaryCallIds = new Set(
         secondaryTools.map((toolCall) => toolCall.request.callId),
@@ -4745,8 +4762,8 @@ export const useGeminiStream = (
         promptId = pendingDuplicatePromptId;
       }
 
-      for (const toolCall of geminiTools) {
-        geminiClient?.recordCompletedToolCall(
+      for (const toolCall of llmTools) {
+        llmClient?.recordCompletedToolCall(
           toolCall.request.name,
           toolCall.request.args as Record<string, unknown>,
           toCompletedToolCallOutcome(
@@ -4757,7 +4774,7 @@ export const useGeminiStream = (
         );
       }
 
-      if (geminiTools.length === 0 && pendingDuplicateResponses.length === 0) {
+      if (llmTools.length === 0 && pendingDuplicateResponses.length === 0) {
         if (!promptId && terminalPromptId) {
           promptId = terminalPromptId;
         }
@@ -4796,7 +4813,7 @@ export const useGeminiStream = (
         status: 'success' | 'error' | 'cancelled';
       };
       const executableQueues = new Map<string, ReadyToolResponse[]>();
-      for (const toolCall of geminiTools) {
+      for (const toolCall of llmTools) {
         const queue = executableQueues.get(toolCall.request.callId) ?? [];
         queue.push({
           request: toolCall.request,
@@ -4873,7 +4890,7 @@ export const useGeminiStream = (
 
       if (continuationWasCancelled()) {
         markToolsAsSubmitted(
-          geminiTools.map((toolCall) => toolCall.request.callId),
+          llmTools.map((toolCall) => toolCall.request.callId),
         );
         if (toolGoalBinding) {
           await failClosedGoalTurn(
@@ -4885,16 +4902,16 @@ export const useGeminiStream = (
         return;
       }
 
-      // If all the tools were cancelled, don't submit a response to Gemini.
-      const allToolsCancelled = geminiTools.every(
+      // If all the tools were cancelled, don't submit a response to the model.
+      const allToolsCancelled = llmTools.every(
         (tc) => tc.status === 'cancelled',
       );
 
       if (allToolsCancelled && pendingDuplicateResponses.length === 0) {
-        if (geminiClient) {
+        if (llmClient) {
           // We need to manually add the function responses to the history
           // so the model knows the tools were cancelled.
-          geminiClient.addHistory({
+          llmClient.addHistory({
             role: 'user',
             parts: responsesToSend,
           });
@@ -4903,7 +4920,7 @@ export const useGeminiStream = (
           config.getArenaAgentClient()?.reportCancelled();
         }
 
-        const callIdsToMarkAsSubmitted = geminiTools.map(
+        const callIdsToMarkAsSubmitted = llmTools.map(
           (toolCall) => toolCall.request.callId,
         );
         markToolsAsSubmitted(callIdsToMarkAsSubmitted);
@@ -4917,7 +4934,7 @@ export const useGeminiStream = (
         return;
       }
 
-      const callIdsToMarkAsSubmitted = geminiTools.map(
+      const callIdsToMarkAsSubmitted = llmTools.map(
         (toolCall) => toolCall.request.callId,
       );
 
@@ -4927,7 +4944,7 @@ export const useGeminiStream = (
       // An explicit inline `/model <id> <prompt>` override wins for the whole
       // turn, so skip skill-tool writes (including the undefined-clears case)
       // while it is active.
-      for (const toolCall of geminiTools) {
+      for (const toolCall of llmTools) {
         if ('modelOverride' in toolCall.response) {
           if (
             inlineModelOverrideActiveRef.current ||
@@ -4955,18 +4972,18 @@ export const useGeminiStream = (
 
       // Emit tool results to dual output sidecar (if enabled)
       if (dualOutput) {
-        for (const toolCall of geminiTools) {
+        for (const toolCall of llmTools) {
           dualOutput.emitToolResult(toolCall.request, toolCall.response);
         }
       }
 
       markToolsAsSubmitted(callIdsToMarkAsSubmitted);
 
-      const terminatesGoalTurn = geminiTools.some(
+      const terminatesGoalTurn = llmTools.some(
         (toolCall) => toolCall.response.terminateTurn === true,
       );
       if (terminatesGoalTurn && toolGoalBinding) {
-        geminiClient.addHistory({ role: 'user', parts: responsesToSend });
+        llmClient.addHistory({ role: 'user', parts: responsesToSend });
         let goalFinishFailed = false;
         try {
           await config.getChatRecordingService()?.flush();
@@ -5020,7 +5037,7 @@ export const useGeminiStream = (
       // Fire tool-use summary generation in parallel with the next API call.
       // The fast-model latency is hidden behind the main-model streaming.
       // Fire-and-forget: failures are silent and never block the turn.
-      // Subagent exclusion is implicit — useGeminiStream only drives the
+      // Subagent exclusion is implicit — useLlmStream only drives the
       // main session; subagents run through agents/runtime/ with their own loop.
       if (config.getEmitToolUseSummaries()) {
         // Only summarize successful tools. Error/cancelled entries push
@@ -5031,7 +5048,7 @@ export const useGeminiStream = (
         // prefixes but not prevent this kind of polluted-input hallucination.
         // Goal tools already render authoritative lifecycle copy, which a
         // generated summary can contradict while verification is pending.
-        const successfulTools = geminiTools.filter(
+        const successfulTools = llmTools.filter(
           (tc) =>
             tc.status === 'success' &&
             tc.request.name !== ToolNames.GET_GOAL &&
@@ -5128,7 +5145,7 @@ export const useGeminiStream = (
       const backgroundLaunchExhaustedCapacity =
         backgroundTaskRegistry.getMaxConcurrentBackgroundAgents() === 1 &&
         !backgroundTaskRegistry.canStartBackgroundAgent() &&
-        geminiTools.some((toolCall) => {
+        llmTools.some((toolCall) => {
           const display = toolCall.response.resultDisplay;
           return (
             toolCall.request.name === ToolNames.AGENT &&
@@ -5141,7 +5158,7 @@ export const useGeminiStream = (
           );
         });
       if (backgroundLaunchExhaustedCapacity) {
-        geminiClient?.addHistory({ role: 'user', parts: responsesToSend });
+        llmClient?.addHistory({ role: 'user', parts: responsesToSend });
         if (toolGoalBinding) {
           await failClosedGoalTurn(
             toolGoalBinding,
@@ -5237,7 +5254,7 @@ export const useGeminiStream = (
     [
       submitQuery,
       markToolsAsSubmitted,
-      geminiClient,
+      llmClient,
       performMemoryRefresh,
       modelSwitchedFromQuotaError,
       config,
@@ -5325,7 +5342,7 @@ export const useGeminiStream = (
             const toolName = toolCall.request.name;
             const fileName = path.basename(filePath);
             const toolCallWithSnapshotFileName = `${timestamp}-${fileName}-${toolName}.json`;
-            const clientHistory = geminiClient?.getHistoryShallow();
+            const clientHistory = llmClient?.getHistoryShallow();
             const toolCallWithSnapshotFilePath = path.join(
               checkpointDir,
               toolCallWithSnapshotFileName,
@@ -5359,7 +5376,7 @@ export const useGeminiStream = (
       }
     };
     saveRestorableToolCalls();
-  }, [toolCalls, config, onDebugMessage, history, geminiClient, storage]);
+  }, [toolCalls, config, onDebugMessage, history, llmClient, storage]);
 
   // ─── Unified notification queue (cron + background agents) ──────
   const notificationQueueRef = useRef<
@@ -5791,7 +5808,7 @@ export const useGeminiStream = (
         const batch = teammateQueueRef.current.splice(0);
         // Render one compact `● …` line per teammate report; the full
         // envelope goes only to the model (the USER bubble is suppressed
-        // for SendMessageType.Teammate in prepareQueryForGemini).
+        // for SendMessageType.Teammate in prepareQueryForLlm).
         for (const entry of batch) {
           if (!entry.displayed) {
             addItem(
