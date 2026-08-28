@@ -59,7 +59,7 @@ function createFakeHost(): OpenTuiCommandHost & {
       calls.push('toggleVimEnabled');
       return true;
     },
-    setGeminiMdFileCount: record('setGeminiMdFileCount') as never,
+    setMemoryFileCount: record('setMemoryFileCount') as never,
     reloadCommands: record('reloadCommands'),
     setSessionName: (name: string | null) => {
       calls.push('setSessionName');

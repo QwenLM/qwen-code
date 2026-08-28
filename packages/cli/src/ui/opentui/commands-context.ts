@@ -64,7 +64,7 @@ export interface OpenTuiCommandHost {
   setPendingItem(item: HistoryItemWithoutId | null): void;
   setDebugMessage(message: string): void;
   toggleVimEnabled(): Promise<boolean>;
-  setGeminiMdFileCount(count: number): void;
+  setMemoryFileCount(count: number): void;
   reloadCommands(): void | Promise<void>;
   setSessionName(name: string | null): void;
   /** Parity of `isIdleRef.current` — no model turn in flight. */
@@ -151,7 +151,7 @@ export function createOpenTuiCommandContext(
         },
       },
       toggleVimEnabled: () => host.toggleVimEnabled(),
-      setGeminiMdFileCount: (count) => host.setGeminiMdFileCount(count),
+      setMemoryFileCount: (count) => host.setMemoryFileCount(count),
       reloadCommands: () => host.reloadCommands(),
       setSessionName: (name) => host.setSessionName(name),
       extensionsUpdateState: host.extensionsUpdateState,

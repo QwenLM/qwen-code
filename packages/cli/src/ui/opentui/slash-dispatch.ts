@@ -381,7 +381,7 @@ export async function executeSlashCommand(
       loadHistory: () => {},
       refreshStatic: () => {},
       toggleVimEnabled: async () => false,
-      setGeminiMdFileCount: () => {},
+      setMemoryFileCount: () => {},
       reloadCommands: () => {},
       setSessionName: () => {},
       extensionsUpdateState: new Map(),
