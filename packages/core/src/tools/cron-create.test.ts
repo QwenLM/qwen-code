@@ -14,6 +14,7 @@ let tmpDir: string;
 function makeConfig(
   maxAgeDays = 7,
   currentSessionCreator?: CurrentSessionScheduledTaskCreator,
+  sessionSourceType?: string,
 ) {
   const scheduler = new CronScheduler(tmpDir, maxAgeDays * 24 * 60 * 60 * 1000);
   return {
@@ -21,6 +22,7 @@ function makeConfig(
     getCronRecurringMaxAgeDays: () => maxAgeDays,
     getProjectRoot: () => tmpDir,
     getCurrentSessionScheduledTaskCreator: () => currentSessionCreator,
+    getSessionSourceType: () => sessionSourceType,
     _scheduler: scheduler,
   } as unknown as import('../config/config.js').Config & {
     _scheduler: CronScheduler;
@@ -121,6 +123,22 @@ describe('CronCreateTool', () => {
     const tasks = await readCronTasks(tmpDir);
     expect(tasks).toHaveLength(1);
     expect(tasks[0]!.prompt).toBe('durable check');
+  });
+
+  it('rejects durable jobs for standalone sessions without touching storage', async () => {
+    config = makeConfig(7, undefined, 'standalone');
+    tool = new CronCreateTool(config);
+    const invocation = tool.build({
+      cron: '*/5 * * * *',
+      prompt: 'durable check',
+      durable: true,
+    });
+
+    const result = await invocation.execute(new AbortController().signal);
+
+    expect(result.error?.message).toContain('not supported');
+    expect(config._scheduler.list()).toHaveLength(0);
+    await expect(readCronTasks(tmpDir)).resolves.toEqual([]);
   });
 
   it('does not write to disk when durable=false', async () => {

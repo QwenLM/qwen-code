@@ -58,6 +58,8 @@ import type { DaemonLogger } from '../daemon-logger.js';
 import { mapWorkspaceSkillToggleError } from '../workspace-service/types.js';
 import { sendGenerationClosedError } from '../workspace-route-runtime.js';
 import { DaemonDrainingError } from './session-archive.js';
+import { StandaloneSessionServiceError } from '../conversations/standalone-session-service.js';
+import { ConversationRuntimeOwnershipError } from '../conversations/conversation-runtime-errors.js';
 
 export type BridgeErrorContext = {
   route?: string;
@@ -232,6 +234,39 @@ export function sendBridgeError(
       error: err.message,
       code: err.code,
       errorKind: err.code,
+    });
+    return;
+  }
+  if (err instanceof ConversationRuntimeOwnershipError) {
+    res.status(err.status).json({
+      error: err.message,
+      code: err.code,
+      retryable: err.retryable,
+    });
+    return;
+  }
+  if (err instanceof StandaloneSessionServiceError) {
+    const status =
+      err.code === 'invalid_request'
+        ? 400
+        : err.code === 'standalone_session_not_found'
+          ? 404
+          : err.code === 'standalone_creation_outcome_unknown' ||
+              err.code === 'standalone_creation_rolled_back' ||
+              err.code === 'standalone_session_operation_failed' ||
+              err.code === 'transcript_deletion_failed' ||
+              err.code === 'transcript_deletion_outcome_unknown' ||
+              err.code === 'working_directory_recovery_failed'
+            ? 500
+            : 409;
+    if (status === 500) recordExpectedBridgeError(err, ctx, daemonLog);
+    if (err.retryable) res.set('Retry-After', '5');
+    res.status(status).json({
+      error: err.message,
+      code: err.code,
+      errorKind: err.code,
+      retryable: err.retryable,
+      ...(err.sessionId !== undefined ? { sessionId: err.sessionId } : {}),
     });
     return;
   }
@@ -624,6 +659,8 @@ export function sendBridgeError(
     res.status(409).json({
       error: err.message,
       code: 'session_busy',
+      errorKind: 'session_busy',
+      retryable: true,
       sessionId: err.sessionId,
     });
     return;
@@ -642,6 +679,35 @@ export function sendBridgeError(
     const data = (err as { data?: unknown }).data;
     if (data && typeof data === 'object') {
       const kind = (data as { errorKind?: unknown }).errorKind;
+      if (kind === 'session_busy') {
+        res.set('Retry-After', '5');
+        res.status(409).json({
+          error: 'The session is busy.',
+          code: kind,
+          errorKind: kind,
+          retryable: true,
+          ...(ctx?.sessionId ? { sessionId: ctx.sessionId } : {}),
+        });
+        return;
+      }
+      if (
+        kind === 'working_directory_missing' ||
+        kind === 'working_directory_compromised'
+      ) {
+        const retryable = kind === 'working_directory_missing';
+        if (retryable) res.set('Retry-After', '5');
+        res.status(409).json({
+          error:
+            kind === 'working_directory_missing'
+              ? 'The standalone working directory is missing.'
+              : 'The standalone working directory identity is compromised.',
+          code: kind,
+          errorKind: kind,
+          retryable,
+          ...(ctx?.sessionId ? { sessionId: ctx.sessionId } : {}),
+        });
+        return;
+      }
       if (
         kind === 'session_writer_conflict' ||
         kind === 'session_writer_lost' ||

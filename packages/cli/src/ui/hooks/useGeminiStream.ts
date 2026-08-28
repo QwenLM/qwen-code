@@ -26,13 +26,14 @@ import {
   type ThoughtSummary,
   type ToolCallRequestInfo,
   type ToolCallResponseInfo,
-  type GeminiErrorEventValue,
+  type LlmErrorEventValue,
   type GoalTurnPermit,
   type SteerInput,
   GeminiEventType as ServerGeminiEventType,
   SendMessageType,
   createDebugLogger,
   ToolNames,
+  goalToolResultProvenance,
   getErrorMessage,
   isNodeError,
   MessageSenderType,
@@ -2528,7 +2529,7 @@ export const useGeminiStream = (
 
   const handleErrorEvent = useCallback(
     (
-      eventValue: GeminiErrorEventValue,
+      eventValue: LlmErrorEventValue,
       userMessageTimestamp: number,
       submitType: SendMessageType,
       streamPromptId?: string,
@@ -4118,6 +4119,8 @@ export const useGeminiStream = (
                       goalId: queuedGoal.permit.goalId,
                       revision: queuedGoal.permit.revision,
                       objective: queuedGoal.continuationContext,
+                      objectiveUpdated: queuedGoal.objectiveUpdated,
+                      windDown: queuedGoal.windDown,
                       verifierFeedback: queuedGoal.verifierFeedback,
                     }),
                     shouldProceed: true,
@@ -4372,6 +4375,13 @@ export const useGeminiStream = (
               ? { getSteerInput: drainSteerAtBoundary }
               : {}),
           };
+          if (submitType === SendMessageType.Goal && goalBinding) {
+            try {
+              config.getGoalRuntime().markTurnDelivered(goalBinding.turnKey);
+            } catch {
+              // Goal runtime is optional during early initialization.
+            }
+          }
           const providerSignal = inheritedToolContinuationOwner
             ? processingSignal
             : abortSignal;
@@ -4475,7 +4485,6 @@ export const useGeminiStream = (
             );
             immediateDuplicateToolResponses.responses.forEach(
               ({ request, response }, index) => {
-                const goalContext = request.goalContext;
                 config.getChatRecordingService?.()?.recordToolResult?.(
                   finalized[index].responseParts,
                   {
@@ -4488,15 +4497,7 @@ export const useGeminiStream = (
                     errorType: response.errorType,
                     executionStatus: response.executionStatus,
                   },
-                  goalContext
-                    ? request.name === ToolNames.GET_GOAL ||
-                      request.name === ToolNames.UPDATE_GOAL
-                      ? {
-                          goalContext: { ...goalContext },
-                          provenance: 'goal_runtime' as const,
-                        }
-                      : { goalContext: { ...goalContext } }
-                    : undefined,
+                  goalToolResultProvenance(request),
                 );
               },
             );
@@ -5424,7 +5425,6 @@ export const useGeminiStream = (
         (entry) => entry.responseParts,
       );
       orderedResponses.forEach(({ request, response, status }, index) => {
-        const goalContext = request.goalContext;
         config.getChatRecordingService?.()?.recordToolResult?.(
           finalizedResponses[index].responseParts,
           {
@@ -5438,15 +5438,7 @@ export const useGeminiStream = (
             errorType: response.errorType,
             executionStatus: response.executionStatus,
           },
-          goalContext
-            ? request.name === ToolNames.GET_GOAL ||
-              request.name === ToolNames.UPDATE_GOAL
-              ? {
-                  goalContext: { ...goalContext },
-                  provenance: 'goal_runtime' as const,
-                }
-              : { goalContext: { ...goalContext } }
-            : undefined,
+          goalToolResultProvenance(request),
         );
       });
 

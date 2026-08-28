@@ -628,18 +628,27 @@ function clearActiveAssistant(
 }
 
 /**
- * Fold a round's token usage onto the active top-level assistant block.
+ * Fold a round's token usage onto the latest top-level assistant block in the
+ * current user turn. A tool update finalizes the active text block before the
+ * model stream's trailing usage frame arrives, so the active pointer alone is
+ * not sufficient.
  * Subagent usage stays part of the spawning turn's total for compatibility.
  * Summary projections route it to the parent tool before calling this helper.
  *
- * No active block (a rare usage frame with no preceding top-level assistant
- * text) drops the count rather than minting a stray empty block.
+ * A turn with no preceding top-level assistant text still drops the count
+ * rather than crossing a user boundary or minting a stray empty block.
  */
 function applyAssistantUsage(
   state: DaemonTranscriptState,
   event: Extract<DaemonUiEvent, { type: 'assistant.usage' }>,
 ): void {
-  const block = getWritableBlockById(state, state.activeAssistantBlockId);
+  if (isLegacySubagentUsageDuplicate(state, event)) return;
+  const activeBlockId =
+    state.activeAssistantBlockId ??
+    (event.parentToolCallId
+      ? undefined
+      : latestTopLevelAssistantBlockIdInCurrentTurn(state));
+  const block = getWritableBlockById(state, activeBlockId);
   if (!block || block.kind !== 'assistant') return;
   const prev = block.usage;
   block.usage = {
@@ -648,6 +657,46 @@ function applyAssistantUsage(
     cachedTokens: (prev?.cachedTokens ?? 0) + (event.usage.cachedTokens ?? 0),
   };
   block.updatedAt = state.now;
+}
+
+function isLegacySubagentUsageDuplicate(
+  state: DaemonTranscriptState,
+  event: Extract<DaemonUiEvent, { type: 'assistant.usage' }>,
+): boolean {
+  if (event.parentToolCallId || !event.sourceRecordIds?.length) return false;
+  const sourceRecordIds = new Set(event.sourceRecordIds);
+  for (let i = state.blocks.length - 1; i >= 0; i -= 1) {
+    const block = state.blocks[i]!;
+    if (block.kind === 'user' && !block.parentToolCallId) return false;
+    if (
+      block.kind !== 'tool' ||
+      !block.sourceRecordIds?.some((id) => sourceRecordIds.has(id))
+    ) {
+      continue;
+    }
+    const rawOutput = isRecord(block.rawOutput) ? block.rawOutput : undefined;
+    const summary =
+      rawOutput && isRecord(rawOutput['executionSummary'])
+        ? rawOutput['executionSummary']
+        : undefined;
+    return (
+      summary?.['inputTokens'] === event.usage.inputTokens &&
+      summary['outputTokens'] === event.usage.outputTokens &&
+      (summary['cachedTokens'] ?? 0) === (event.usage.cachedTokens ?? 0)
+    );
+  }
+  return false;
+}
+
+function latestTopLevelAssistantBlockIdInCurrentTurn(
+  state: DaemonTranscriptState,
+): string | undefined {
+  for (let i = state.blocks.length - 1; i >= 0; i -= 1) {
+    const block = state.blocks[i]!;
+    if (block.kind === 'user' && !block.parentToolCallId) return undefined;
+    if (block.kind === 'assistant' && !block.parentToolCallId) return block.id;
+  }
+  return undefined;
 }
 
 function applySubagentUsageToParentTool(

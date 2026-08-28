@@ -77,11 +77,22 @@ class CronCreateInvocation extends BaseToolInvocation<
   }
 
   async execute(): Promise<ToolResult> {
-    const scheduler = this.config.getCronScheduler();
     const recurring = this.params.recurring !== false;
     const durable = this.params.durable === true;
     const useCurrentSession = this.params.sessionMode === 'current';
     const prompt = this.params.prompt.trim();
+
+    if (durable && this.config.getSessionSourceType?.() === 'standalone') {
+      const message =
+        'Durable cron jobs are not supported in standalone sessions.';
+      return {
+        llmContent: message,
+        returnDisplay: message,
+        error: { message },
+      };
+    }
+
+    const scheduler = this.config.getCronScheduler();
 
     try {
       // Validate cron expression before creating the job

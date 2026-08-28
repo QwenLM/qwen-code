@@ -111,7 +111,7 @@ const baseConfigParams: ConfigParameters = {
   targetDir: '/test/dir',
   debugMode: false,
   userMemory: '',
-  geminiMdFileCount: 0,
+  memoryFileCount: 0,
   approvalMode: ApprovalMode.DEFAULT,
 };
 
@@ -888,6 +888,91 @@ describe('ToolRegistry', () => {
       registry.clearRevealedDeferredTools();
 
       expect(registry.isDeferredToolRevealed('ghost')).toBe(false);
+    });
+  });
+
+  // #10075: built-in tools an active permissions.allow allowlist does not
+  // cover are demoted to deferred instead of being dropped from the
+  // registry, so they stay listed in /tools and loadable via ToolSearch
+  // while their schemas stay out of the eager model request (#9827).
+  describe('permission-deferred tools (#10075)', () => {
+    it('registers the tool but hides it from the eager declarations', async () => {
+      toolRegistry.registerTool(new MockTool({ name: 'visible' }));
+      toolRegistry.registerPermissionDeferredFactory(
+        'hidden_by_allowlist',
+        async () => new MockTool({ name: 'hidden_by_allowlist' }),
+      );
+      await toolRegistry.warmAll();
+
+      // Registered: listed for /tools and resolvable like any other tool.
+      expect(toolRegistry.getAllToolNames()).toContain('hidden_by_allowlist');
+      expect(toolRegistry.getTool('hidden_by_allowlist')).toBeDefined();
+      expect(toolRegistry.isPermissionDeferred('hidden_by_allowlist')).toBe(
+        true,
+      );
+
+      // Hidden from the eager model request...
+      expect(toolRegistry.getFunctionDeclarations().map((d) => d.name)).toEqual(
+        ['visible'],
+      );
+      // ...but present in diagnostics / includeDeferred views...
+      expect(
+        toolRegistry
+          .getFunctionDeclarations({ includeDeferred: true })
+          .map((d) => d.name),
+      ).toContain('hidden_by_allowlist');
+      // ...and discoverable through the deferred summary (ToolSearch).
+      expect(
+        toolRegistry.getDeferredToolSummary().map((t) => t.name),
+      ).toContain('hidden_by_allowlist');
+      expect(toolRegistry.isDeferredAndHidden('hidden_by_allowlist')).toBe(
+        true,
+      );
+    });
+
+    it('reveals the schema once ToolSearch loads the tool', async () => {
+      toolRegistry.registerPermissionDeferredFactory(
+        'hidden_by_allowlist',
+        async () => new MockTool({ name: 'hidden_by_allowlist' }),
+      );
+      await toolRegistry.warmAll();
+
+      toolRegistry.revealDeferredTool('hidden_by_allowlist');
+
+      expect(
+        toolRegistry.getFunctionDeclarations().map((d) => d.name),
+      ).toContain('hidden_by_allowlist');
+      expect(toolRegistry.isDeferredAndHidden('hidden_by_allowlist')).toBe(
+        false,
+      );
+    });
+
+    it('is never auto-revealed by the budget preload (#9827)', async () => {
+      // An ordinary deferred tool is preloaded when its schema fits the
+      // budget; a permission-deferred tool must stay hidden regardless —
+      // auto-revealing it would re-add exactly the schema the allowlist
+      // keeps out of the eager request.
+      toolRegistry.registerTool(
+        new MockTool({ name: 'ordinary-deferred', shouldDefer: true }),
+      );
+      toolRegistry.registerPermissionDeferredFactory(
+        'hidden_by_allowlist',
+        async () => new MockTool({ name: 'hidden_by_allowlist' }),
+      );
+      await toolRegistry.warmAll();
+
+      const revealed = toolRegistry.preloadDeferredToolsWithinBudget(1_000_000);
+
+      expect(revealed).toBe(1);
+      expect(toolRegistry.isDeferredToolRevealed('ordinary-deferred')).toBe(
+        true,
+      );
+      expect(toolRegistry.isDeferredToolRevealed('hidden_by_allowlist')).toBe(
+        false,
+      );
+      expect(toolRegistry.getFunctionDeclarations().map((d) => d.name)).toEqual(
+        ['ordinary-deferred'],
+      );
     });
   });
 
