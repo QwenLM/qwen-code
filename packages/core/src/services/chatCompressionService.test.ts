@@ -5,6 +5,9 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import {
   ChatCompressionService,
   COMPACT_MAX_OUTPUT_TOKENS,
@@ -4077,6 +4080,96 @@ describe('ChatCompressionService.compress — single-turn Node REPL image regres
     expect(serialized).not.toContain('inlineData');
     expect(serialized).not.toContain(bigImage);
     expect(serialized).toContain('SUMMARY of the screenshot session');
+  });
+
+  it('suppresses file-restoration blocks too when compaction is payload-overflow driven (#10380)', async () => {
+    // The suppression has two halves; the test above pins maxImages: 0 via
+    // screenshots only. Large sessions are dominated by read_file blocks
+    // (~20KB each) — re-embedding them through the maxFiles half would
+    // re-inflate the rebuilt retry request past the same gateway byte
+    // limit. Goes red if maxFiles reverts to tuning.maxRecentFiles.
+    const dir = mkdtempSync(join(tmpdir(), 'qwen-10408-restore-'));
+    const filePath = join(dir, 'notes.md');
+    const fileBody = 'W3_FILE_RESTORATION_MARKER ' + 'x'.repeat(2_000);
+    writeFileSync(filePath, fileBody, 'utf8');
+    try {
+      const history: Content[] = [
+        { role: 'user', parts: [{ text: 'inspect the notes file' }] },
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                name: 'read_file',
+                args: { file_path: filePath },
+              },
+            },
+          ],
+        },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                name: 'read_file',
+                response: { output: 'file content read ok' },
+              } as unknown as NonNullable<
+                Content['parts']
+              >[number]['functionResponse'],
+            },
+          ],
+        },
+        { role: 'model', parts: [{ text: 'I read the notes.' }] },
+        { role: 'user', parts: [{ text: 'final fresh user message' }] },
+        { role: 'model', parts: [{ text: 'final model reply' }] },
+      ];
+
+      vi.spyOn(sideQueryModule, 'runSideQuery').mockResolvedValue({
+        text: 'SUMMARY of the file-reading session',
+        usage: {
+          promptTokenCount: 170_000,
+          candidatesTokenCount: 500,
+          totalTokenCount: 170_500,
+        },
+      } as never);
+
+      const service = new ChatCompressionService();
+      // Restoration skips file paths outside the workspace root
+      // (Finding 4 guard), so point the fake workspace at the temp dir
+      // that holds the fixture file.
+      const baseOpts = {
+        promptId: 'p',
+        force: true,
+        config: { ...makeFakeConfig(), getTargetDir: () => dir },
+        consecutiveFailures: 0,
+        originalTokenCount: 180_000,
+        trigger: 'auto' as const,
+      };
+
+      // Control: on the token-driven path the recent read_file result IS
+      // re-embedded (the fixture is alive).
+      const restored = await service.compress(makeFakeChat(history), {
+        ...baseOpts,
+      });
+      expect(JSON.stringify(restored.newHistory)).toContain(
+        'W3_FILE_RESTORATION_MARKER',
+      );
+
+      // Payload-overflow path: file restoration suppressed (maxFiles: 0).
+      const suppressed = await service.compress(makeFakeChat(history), {
+        ...baseOpts,
+        requestPayloadTooLarge: true,
+      });
+      expect(suppressed.newHistory).not.toBeNull();
+      const serializedSuppressed = JSON.stringify(suppressed.newHistory);
+      expect(serializedSuppressed).not.toContain('W3_FILE_RESTORATION_MARKER');
+      expect(serializedSuppressed).not.toContain('Recently accessed file');
+      expect(serializedSuppressed).toContain(
+        'SUMMARY of the file-reading session',
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 
