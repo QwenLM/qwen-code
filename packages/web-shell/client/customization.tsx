@@ -232,7 +232,7 @@ export interface WebShellAssistantTurnSettledEvent {
   eventId?: number;
   /** False when bounded live-journal repair could not restore the full turn. */
   transcriptComplete: boolean;
-  /** Final visible assistant message, when the turn produced one. */
+  /** Final visible assistant message when still available in the current transcript. */
   message?: WebShellAssistantMessageInfo;
   error?: {
     message: string;

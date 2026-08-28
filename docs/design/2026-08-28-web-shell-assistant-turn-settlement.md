@@ -14,7 +14,7 @@ The callback is a generic Web Shell lifecycle contract. It is not tied to any em
 - `outcome`: `completed`, `cancelled`, or `failed`;
 - the daemon `stopReason` when a turn completed;
 - `transcriptComplete`, which is false only when bounded live-journal repair could not restore the complete turn;
-- the final visible assistant message when the turn produced one; cancelled and failed turns may omit it or carry partial content.
+- the final visible assistant message when it remains available in the committed current-session transcript; turns without assistant content and events delivered across a session switch omit it, while cancelled and failed turns may carry partial content.
 
 The callback is optional. Existing `onSessionChange({ type: 'turn_complete' })` behavior remains unchanged.
 
