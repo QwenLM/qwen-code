@@ -369,6 +369,11 @@ function deferredEntries(
     for (const loc of locations) {
       const l = loc as { file?: unknown; line?: unknown };
       if (typeof l?.file !== 'string' || l.file.trim() === '') continue;
+      // The artifact carries no `k` disambiguator, so the posted carrier's
+      // stand-in exclusion is unconditional here: path equality over
+      // `(body)` is vacuous, and a standing pathless deferral would absorb
+      // every genuinely new pathless candidate before verification.
+      if (isStandInName(l.file)) continue;
       entries.push({
         id: f.id,
         file: l.file,
@@ -456,7 +461,18 @@ export function runDedupCandidates(args: DedupArgs): LedgerDedupReport {
       existing.diffHash !== undefined &&
       existing.diffHash === diffHash &&
       Array.isArray(existing.dropped) &&
-      existing.dropped.every((d) => d !== null && typeof d === 'object')
+      // Admit only the shape the disclosure quotes — a shapeless entry in a
+      // same-hash file would otherwise merge a phantom set-aside into it.
+      existing.dropped.every(
+        (d) =>
+          d !== null &&
+          typeof d === 'object' &&
+          typeof (d as DroppedCandidate).file === 'string' &&
+          typeof (d as DroppedCandidate).title === 'string' &&
+          typeof (d as DroppedCandidate).matchedId === 'string' &&
+          (LEDGER_ID_SHAPE.test((d as DroppedCandidate).matchedId) ||
+            DEFERRED_ID_SHAPE.test((d as DroppedCandidate).matchedId)),
+      )
     ) {
       cumulative = [...existing.dropped, ...dropped];
     }

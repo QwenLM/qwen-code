@@ -313,6 +313,20 @@ describe('runDedupCandidates — the deferral half reads the findings artifact',
     writeArtifact([deferred()]);
     expect(run([candidate()]).droppedCount).toBe(1);
   });
+
+  it('a stand-in location names no file — a pathless deferral never absorbs', () => {
+    // The artifact carries no `k` disambiguator, so the posted carrier's
+    // `k !== 1` stand-in exclusion is unconditional here: path equality over
+    // `(body)` is vacuous, and a standing pathless deferral would absorb
+    // every genuinely new pathless candidate before any stage ruled on it.
+    writeArtifact([deferred({ locations: [{ file: '(body)' }] })]);
+    expect(run([candidate({ file: '(body)' })]).droppedCount).toBe(0);
+    writeArtifact([deferred({ locations: [{ file: '(unknown)' }] })]);
+    expect(run([candidate({ file: '(unknown)' })]).droppedCount).toBe(0);
+    // Control: the same entry still absorbs through a real location.
+    writeArtifact([deferred()]);
+    expect(run([candidate()]).droppedCount).toBe(1);
+  });
 });
 
 describe('runDedupCandidates — the report on disk', () => {
@@ -403,25 +417,33 @@ describe('runDedupCandidates — the report on disk', () => {
 
   it('a poisoned same-diff report fails open — replaced, never crash-propagated', () => {
     // The report sits beside the plan, another account's writable surface:
-    // a same-hash file whose `dropped` holds a hole must not brick the dedup
-    // for every same-diff retry of the round — the module's own contract is
-    // optimization, not a gate.
+    // a same-hash file whose `dropped` holds a hole or a shapeless entry
+    // must not brick the dedup for every same-diff retry of the round, nor
+    // merge a phantom set-aside into the disclosure — the module's own
+    // contract is optimization, not a gate.
     writeLedger([entry()]);
     const plan = writePlan();
     const diffHash = createHash('sha256')
       .update(readFileSync(join(planDir, 'pr.diff')))
       .digest('hex');
-    writeFileSync(
-      join(planDir, ledgerDedupReportName(PR)),
-      JSON.stringify({ v: 1, diffHash, dropped: [null] }),
-    );
-    const r = runDedupCandidates({
-      plan,
-      candidates: writeCandidates([candidate()]),
-    });
-    expect(r.droppedCount).toBe(1);
-    expect(r.dropped).toHaveLength(1);
-    expect(r.dropped[0].matchedId).toBe('R1-2');
+    for (const poisoned of [
+      [null],
+      [{}],
+      [{ matchedId: 'R9-9' }],
+      [{ file: 'src/a.ts', title: TITLE, matchedId: 'not-an-id' }],
+    ]) {
+      writeFileSync(
+        join(planDir, ledgerDedupReportName(PR)),
+        JSON.stringify({ v: 1, diffHash, dropped: poisoned }),
+      );
+      const r = runDedupCandidates({
+        plan,
+        candidates: writeCandidates([candidate()]),
+      });
+      expect(r.droppedCount).toBe(1);
+      expect(r.dropped).toHaveLength(1);
+      expect(r.dropped[0].matchedId).toBe('R1-2');
+    }
   });
 
   it('keeps every candidate when the diff cannot be hashed — the drop could not be disclosed', () => {
