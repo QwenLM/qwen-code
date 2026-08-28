@@ -3929,6 +3929,77 @@ describe('ChatCompressionService.compress — single-turn Node REPL image regres
     expect(flatText).toContain('mcp__node-repl__node_repl');
     expect(flatText).toContain('"app":"Safari"');
   });
+
+  it('suppresses restoration attachments when compaction is payload-overflow driven (#10380)', async () => {
+    // The 413 recovery exists because the serialized request exceeded the
+    // gateway BYTE limit. Restoration re-embeds full-size image payloads the
+    // slimmed side-query never carried, which would re-inflate the rebuilt
+    // retry request straight back over the same limit and 413 it again.
+    const bigImage = 'B'.repeat(60_000);
+    const screenshot = (data: string): Content => ({
+      role: 'user',
+      parts: [
+        {
+          functionResponse: {
+            name: 'mcp__node-repl__node_repl',
+            response: { output: 'ok' },
+            parts: [{ inlineData: { mimeType: 'image/png', data } }],
+          } as unknown as NonNullable<
+            Content['parts']
+          >[number]['functionResponse'],
+        },
+      ],
+    });
+    const callScreenshot = (app: string): Content => ({
+      role: 'model',
+      parts: [
+        {
+          functionCall: {
+            name: 'mcp__node-repl__node_repl',
+            args: { app },
+          },
+        },
+      ],
+    });
+
+    const history: Content[] = [
+      { role: 'user', parts: [{ text: 'open Safari' }] },
+      callScreenshot('Safari'),
+      screenshot(bigImage),
+      callScreenshot('Safari'),
+      screenshot(bigImage),
+      callScreenshot('Safari'),
+      screenshot(bigImage),
+    ];
+
+    vi.spyOn(sideQueryModule, 'runSideQuery').mockResolvedValue({
+      text: 'SUMMARY of the screenshot session',
+      usage: {
+        promptTokenCount: 170_000,
+        candidatesTokenCount: 500,
+        totalTokenCount: 170_500,
+      },
+    } as never);
+
+    const service = new ChatCompressionService();
+    const result = await service.compress(makeFakeChat(history), {
+      promptId: 'p',
+      force: true,
+      config: makeFakeConfig(),
+      consecutiveFailures: 0,
+      originalTokenCount: 180_000,
+      trigger: 'auto',
+      requestPayloadTooLarge: true,
+    });
+
+    expect(result.newHistory).not.toBeNull();
+    // The rebuilt retry request must be dominated by the summary that just
+    // fit: no restored inlineData image payloads, no file-restoration blocks.
+    const serialized = JSON.stringify(result.newHistory);
+    expect(serialized).not.toContain('inlineData');
+    expect(serialized).not.toContain(bigImage);
+    expect(serialized).toContain('SUMMARY of the screenshot session');
+  });
 });
 
 describe('ChatCompressionService.compress — customInstructions plumbing', () => {

@@ -1071,8 +1071,16 @@ export class ChatCompressionService {
           {
             workspaceRoot: config.getTargetDir(),
             signal,
-            maxFiles: tuning.maxRecentFiles,
-            maxImages: tuning.maxRecentImages,
+            // A payload-overflow compaction (#10380) exists because the
+            // serialized request exceeded the gateway's BYTE limit while
+            // staying under the token threshold. Restoration re-embeds
+            // full-size image payloads and ~20KB file blocks that the
+            // slimmed side-query never carried — re-inflating the rebuilt
+            // retry request straight back over the same limit and defeating
+            // the recovery. Suppress restoration attachments on this path;
+            // the summary that just fit dominates the retried request.
+            maxFiles: opts.requestPayloadTooLarge ? 0 : tuning.maxRecentFiles,
+            maxImages: opts.requestPayloadTooLarge ? 0 : tuning.maxRecentImages,
             // Restore plan-mode reminder + running-subagent snapshot so the
             // post-compact agent does not lose either piece of mid-session
             // state. Both reduce to no-ops when the corresponding source is
