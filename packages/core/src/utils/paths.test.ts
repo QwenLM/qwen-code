@@ -1284,10 +1284,12 @@ describe('isTempDirPath', () => {
     // os.tmpdir() follows TMPDIR/TEMP on every platform; a persistent
     // user root (e.g. $HOME/tmp) must not classify real projects as
     // disposable.
-    withTmpdir(path.join(os.homedir(), 'tmp'), () => {
-      expect(isTempDirPath(path.join(os.homedir(), 'tmp', 'myproj'))).toBe(
-        false,
-      );
+    const persistentRoot =
+      process.platform === 'win32'
+        ? 'C:\\Users\\example\\tmp'
+        : '/nonexistent-persistent-tmp';
+    withTmpdir(persistentRoot, () => {
+      expect(isTempDirPath(path.join(persistentRoot, 'myproj'))).toBe(false);
     });
   });
 

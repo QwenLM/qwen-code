@@ -12,7 +12,9 @@ import { Storage } from './storage.js';
 describe('core test runtime isolation', () => {
   it('keeps Storage runtime output outside the developer home directory', () => {
     const runtimeDir = path.resolve(Storage.getRuntimeBaseDir());
-    const homeDir = path.resolve(os.homedir());
+    const homeDir = path.resolve(
+      process.env['QWEN_CODE_TEST_ORIGINAL_HOME'] || os.homedir(),
+    );
     const relative = path.relative(homeDir, runtimeDir);
 
     expect(relative).not.toBe('');

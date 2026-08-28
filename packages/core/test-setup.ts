@@ -21,15 +21,31 @@ if (process.env['QWEN_DEBUG_LOG_FILE'] === undefined) {
   process.env['QWEN_DEBUG_LOG_FILE'] = '0';
 }
 
-const testRuntimeDir =
+const testHomeDir =
   process.env['QWEN_RUNTIME_DIR'] === undefined
-    ? mkdtempSync(path.join(os.tmpdir(), 'qwen-code-core-test-runtime-'))
+    ? mkdtempSync(path.join(os.tmpdir(), 'qwen-code-core-test-home-'))
     : undefined;
 
-if (testRuntimeDir !== undefined) {
-  process.env['QWEN_RUNTIME_DIR'] = testRuntimeDir;
+if (testHomeDir !== undefined) {
+  const originalHome = process.env['HOME'];
+  const originalUserProfile = process.env['USERPROFILE'];
+  process.env['QWEN_CODE_TEST_ORIGINAL_HOME'] =
+    originalHome ?? originalUserProfile ?? '';
+  process.env['HOME'] = testHomeDir;
+  process.env['USERPROFILE'] = testHomeDir;
   afterAll(() => {
-    rmSync(testRuntimeDir, { recursive: true, force: true });
+    if (originalHome === undefined) {
+      delete process.env['HOME'];
+    } else {
+      process.env['HOME'] = originalHome;
+    }
+    if (originalUserProfile === undefined) {
+      delete process.env['USERPROFILE'];
+    } else {
+      process.env['USERPROFILE'] = originalUserProfile;
+    }
+    delete process.env['QWEN_CODE_TEST_ORIGINAL_HOME'];
+    rmSync(testHomeDir, { recursive: true, force: true });
   });
 }
 
