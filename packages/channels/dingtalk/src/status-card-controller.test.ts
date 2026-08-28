@@ -251,6 +251,141 @@ describe('StatusCardController', () => {
     );
   });
 
+  it('periodically republishes the full content for reconnected clients', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    const { client, controller } = createHarness();
+
+    controller.replace(segment(), target, 'first');
+    await vi.advanceTimersByTimeAsync(0);
+    vi.mocked(client.updateInstance).mockClear();
+
+    controller.replace(
+      segment(),
+      target,
+      'latest [IMAGE: /Users/ben/private/image.png]',
+    );
+    await vi.advanceTimersByTimeAsync(4_999);
+    expect(
+      vi
+        .mocked(client.updateInstance)
+        .mock.calls.filter(([request]) => request.cardParamMap.content),
+    ).toHaveLength(0);
+
+    await vi.advanceTimersByTimeAsync(1);
+    expect(client.updateInstance).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        cardParamMap: {
+          content: 'latest [Image pending]',
+          statusLine: 'Running · 5s',
+        },
+      }),
+    );
+
+    vi.mocked(client.updateInstance).mockClear();
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(client.updateInstance).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        cardParamMap: {
+          content: 'latest [Image pending]',
+          statusLine: 'Running · 10s',
+        },
+      }),
+    );
+  });
+
+  it('retries a failed full-content checkpoint on the next status update', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    const onError = vi.fn();
+    const { client, controller } = createHarness({ onError });
+
+    controller.replace(segment(), target, 'first');
+    await vi.advanceTimersByTimeAsync(0);
+    vi.mocked(client.updateInstance).mockClear();
+    controller.replace(segment(), target, 'latest');
+    let checkpointFailed = false;
+    vi.mocked(client.updateInstance).mockImplementation(async (request) => {
+      if (request.cardParamMap.content && !checkpointFailed) {
+        checkpointFailed = true;
+        throw new Error('checkpoint failed');
+      }
+    });
+
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(client.updateInstance).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        cardParamMap: {
+          content: 'latest',
+          statusLine: 'Running · 5s',
+        },
+      }),
+    );
+    expect(onError).toHaveBeenCalledWith(
+      'status card metadata',
+      expect.any(Error),
+    );
+
+    vi.mocked(client.updateInstance).mockClear();
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(client.updateInstance).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        cardParamMap: {
+          content: 'latest',
+          statusLine: 'Running · 6s',
+        },
+      }),
+    );
+  });
+
+  it('writes terminal state after an in-flight full-content checkpoint', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    const { client, controller } = createHarness();
+    const checkpointStarted = deferred<void>();
+    const checkpointGate = deferred<void>();
+
+    controller.replace(segment(), target, 'first');
+    await vi.advanceTimersByTimeAsync(0);
+    vi.mocked(client.updateInstance).mockClear();
+    vi.mocked(client.updateInstance).mockImplementation(async (request) => {
+      if (
+        request.cardParamMap.content &&
+        request.cardParamMap.flowStatus === undefined
+      ) {
+        checkpointStarted.resolve();
+        await checkpointGate.promise;
+      }
+    });
+
+    controller.replace(segment(), target, 'latest running');
+    await vi.advanceTimersByTimeAsync(5_000);
+    await checkpointStarted.promise;
+    const completion = controller.complete('segment-1', 'final answer');
+    let settled = false;
+    void completion.then(() => {
+      settled = true;
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(settled).toBe(false);
+
+    checkpointGate.resolve();
+    await expect(completion).resolves.toBe(true);
+    expect(client.updateInstance).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        cardParamMap: expect.objectContaining({
+          content: 'final answer',
+          flowStatus: 3,
+          statusLine: 'Completed · 5s',
+        }),
+      }),
+    );
+
+    const updateCount = vi.mocked(client.updateInstance).mock.calls.length;
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(client.updateInstance).toHaveBeenCalledTimes(updateCount);
+  });
+
   it('omits an unconfigured model from running status', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(0);

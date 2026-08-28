@@ -13,6 +13,7 @@ import { sanitizeStreamingImageMarkers } from './outbound-image.js';
 
 const FLUSH_INTERVAL_MS = 500;
 const STATUS_REFRESH_INTERVAL_MS = 1_000;
+const CONTENT_SYNC_INTERVAL_SECONDS = 5;
 const BREAKER_PROBE_INTERVAL_MS = 30_000;
 const MAX_CONSECUTIVE_STATUS_FAILURES = 3;
 const INITIAL_RETRY_INTERVAL_MS = 1_000;
@@ -41,6 +42,7 @@ interface StatusRecord {
   content: string;
   startedAt: number;
   lastStatusSecond: number;
+  lastContentSyncSecond: number;
   ready: Promise<boolean>;
   /** Settles when the current creation attempt does, before any backoff. */
   creationAttempt: Promise<boolean>;
@@ -191,6 +193,7 @@ export class StatusCardController {
       content: boundContent(initialContent),
       startedAt: Date.now(),
       lastStatusSecond: 0,
+      lastContentSyncSecond: 0,
       ready: Promise.resolve(false),
       creationAttempt: Promise.resolve(false),
       terminal: false,
@@ -619,12 +622,21 @@ export class StatusCardController {
     if (this.disposed || record.terminal || record.streamFailed) return;
     const status = this.statusLine(record, 'Running');
     if (status.second === record.lastStatusSecond) return;
+    const syncContent =
+      status.second - record.lastContentSyncSecond >=
+      CONTENT_SYNC_INTERVAL_SECONDS;
     try {
       await this.options.client.updateInstance({
         outTrackId: record.outTrackId,
-        cardParamMap: { statusLine: status.text },
+        cardParamMap: {
+          ...(syncContent
+            ? { content: sanitizeStreamingImageMarkers(record.content) }
+            : {}),
+          statusLine: status.text,
+        },
       });
       record.lastStatusSecond = status.second;
+      if (syncContent) record.lastContentSyncSecond = status.second;
       record.consecutiveStatusFailures = 0;
       // A success revives the per-second chain even when only a low-frequency
       // breaker probe is scheduled.
