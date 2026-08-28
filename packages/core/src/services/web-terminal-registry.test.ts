@@ -6,11 +6,13 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-const { spawn, getPty } = vi.hoisted(() => ({
+const { spawn, getPty, spawnSync } = vi.hoisted(() => ({
   spawn: vi.fn(),
   getPty: vi.fn(),
+  spawnSync: vi.fn(),
 }));
 
+vi.mock('node:child_process', () => ({ spawnSync }));
 vi.mock('../utils/getPty.js', () => ({ getPty }));
 
 import {
@@ -35,6 +37,7 @@ describe('WebTerminalRegistry', () => {
     kill = vi.fn();
     disposeData = vi.fn();
     disposeExit = vi.fn();
+    spawnSync.mockReturnValue({ stdout: '' });
     spawn.mockReturnValue({
       pid: 1,
       write,
@@ -249,25 +252,68 @@ describe('WebTerminalRegistry', () => {
     const detachListener = registry.addOutputListener('terminal:io', listener);
 
     expect(registry.write('terminal:io', 'x'.repeat(256 * 1024 + 1))).toBe(
+      'backpressure',
+    );
+    expect(write).not.toHaveBeenCalled();
+    expect(registry.write('terminal:io', 'x'.repeat(256 * 1024))).toBe(
       'written',
     );
-    expect(registry.write('terminal:io', '\x03')).toBe('backpressure');
+    expect(registry.write('terminal:io', 'x')).toBe('backpressure');
     expect(write).toHaveBeenCalledOnce();
     expect(registry.resize('terminal:io', 120, 40)).toBe(true);
     expect(resize).toHaveBeenCalledWith(120, 40);
 
     detachListener?.();
     registry.addOutputListener('terminal:io', listener);
-    expect(registry.write('terminal:io', '\x03')).toBe('written');
-    expect(registry.write('terminal:io', 'x'.repeat(256 * 1024))).toBe(
-      'written',
-    );
     expect(registry.write('terminal:io', 'x')).toBe('backpressure');
 
     onData('ready');
     expect(listener).toHaveBeenCalledWith('ready');
-    expect(registry.write('terminal:io', 'x')).toBe('written');
+    expect(registry.write('terminal:io', '12345')).toBe('written');
+    expect(registry.write('terminal:io', 'x')).toBe('backpressure');
   });
+
+  it.skipIf(process.platform === 'win32')(
+    'kills every process in the PTY session',
+    async () => {
+      spawn.mockReturnValueOnce({
+        pid: 42,
+        write,
+        resize,
+        kill,
+        onData: vi.fn((listener) => {
+          onData = listener;
+          return { dispose: disposeData };
+        }),
+        onExit: vi.fn((listener) => {
+          onExit = listener;
+          return { dispose: disposeExit };
+        }),
+      });
+      spawnSync.mockReturnValueOnce({
+        stdout: '42 1 42\n43 42 42\n44 43 42\n99 1 99\n',
+      });
+      const processKill = vi
+        .spyOn(process, 'kill')
+        .mockImplementation(() => true);
+      try {
+        const registry = new WebTerminalRegistry();
+        await registry.create({
+          terminalId: 'terminal:process-tree',
+          workspaceCwd: '/workspace',
+        });
+
+        registry.release('terminal:process-tree');
+
+        expect(processKill).toHaveBeenCalledWith(42, 'SIGKILL');
+        expect(processKill).toHaveBeenCalledWith(43, 'SIGKILL');
+        expect(processKill).toHaveBeenCalledWith(44, 'SIGKILL');
+        expect(processKill).not.toHaveBeenCalledWith(99, 'SIGKILL');
+      } finally {
+        processKill.mockRestore();
+      }
+    },
+  );
 
   it('does not count exited sessions against the live terminal limit', async () => {
     const registry = new WebTerminalRegistry();

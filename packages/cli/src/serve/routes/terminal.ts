@@ -237,10 +237,14 @@ export function createTerminalWsHandler(
         detach.exit?.();
         ws.off('message', onMessage);
       };
-      const finishExited = (exitCode: number | undefined) => {
+      const finishExited = (
+        exitCode: number | undefined,
+        releaseAfterReplay = false,
+      ) => {
         sendControl(ws, { type: 'exit', exitCode });
         cleanup();
-        registry.release(terminalId, workspace.workspaceCwd);
+        if (releaseAfterReplay)
+          registry.release(terminalId, workspace.workspaceCwd);
         ws.close(4000, 'Terminal exited');
       };
       const onMessage = (data: unknown, isBinary = false) => {
@@ -331,7 +335,7 @@ export function createTerminalWsHandler(
         return;
       }
       if (snapshot.exited) {
-        finishExited(snapshot.exitCode);
+        finishExited(snapshot.exitCode, true);
         return;
       }
       for (const message of pending) {

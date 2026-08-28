@@ -247,13 +247,15 @@ describe('terminal WebSocket route', () => {
     expect(ws.close).toHaveBeenCalledWith(4002, 'Session unavailable');
   });
 
-  it('forwards a live PTY exit and closes the WebSocket', async () => {
+  it('preserves a live PTY exit until a reconnect replays it', async () => {
     let exit: ((event: { exitCode: number }) => void) | undefined;
-    const registry = registryWithSnapshot({
+    const snapshot = {
       output: '',
       exited: false,
       workspaceCwd: '/workspace',
-    });
+      exitCode: undefined as number | undefined,
+    };
+    const registry = registryWithSnapshot(snapshot);
     vi.mocked(registry.addExitListener).mockImplementationOnce(
       (_terminalId, listener) => {
         exit = listener;
@@ -261,15 +263,23 @@ describe('terminal WebSocket route', () => {
       },
     );
     const ws = new FakeWebSocket();
-    await createTerminalWsHandler(registry, resolveWorkspace).onConnection(
-      ws as unknown as WebSocket,
-      request,
-    );
+    const handler = createTerminalWsHandler(registry, resolveWorkspace);
+    await handler.onConnection(ws as unknown as WebSocket, request);
 
+    snapshot.output = 'done\r\n';
+    snapshot.exited = true;
+    snapshot.exitCode = 9;
+    Object.defineProperty(ws, 'readyState', { value: 3 });
     exit?.({ exitCode: 9 });
 
-    expect(ws.sent).toContain('\x00{"type":"exit","exitCode":9}');
     expect(ws.close).toHaveBeenCalledWith(4000, 'Terminal exited');
+    expect(registry.release).not.toHaveBeenCalled();
+
+    const reconnect = new FakeWebSocket();
+    await handler.onConnection(reconnect as unknown as WebSocket, request);
+
+    expect(sentOutput(reconnect)).toEqual(['done\r\n']);
+    expect(reconnect.sent).toContain('\x00{"type":"exit","exitCode":9}');
     expect(registry.release).toHaveBeenCalledWith(
       'terminal:manual-1',
       '/workspace',

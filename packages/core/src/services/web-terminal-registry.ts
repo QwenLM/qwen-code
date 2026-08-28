@@ -78,6 +78,37 @@ function killPtyTree(pty: WebTerminalPty): void {
     }
   } else {
     if (pty.pid > 1) {
+      const processes = spawnSync('ps', ['-axo', 'pid=,ppid=,sess='], {
+        encoding: 'utf8',
+      });
+      const rows = (processes.stdout?.split('\n') ?? []).map((line) =>
+        line.trim().split(/\s+/).map(Number),
+      );
+      const targets = new Set([pty.pid]);
+      let found = true;
+      while (found) {
+        found = false;
+        for (const [pid, parentPid, sessionId] of rows) {
+          if (
+            pid > 1 &&
+            !targets.has(pid) &&
+            (targets.has(parentPid) || sessionId === pty.pid)
+          ) {
+            targets.add(pid);
+            found = true;
+          }
+        }
+      }
+      let killed = false;
+      for (const pid of [...targets].reverse()) {
+        try {
+          process.kill(pid, 'SIGKILL');
+          killed = true;
+        } catch {
+          // Process already exited.
+        }
+      }
+      if (killed) return;
       try {
         process.kill(-pty.pid, 'SIGKILL');
         return;
@@ -174,7 +205,10 @@ export class WebTerminalRegistry {
         earlyOutput.push(data);
         return;
       }
-      session.unacknowledgedInputBytes = 0;
+      session.unacknowledgedInputBytes = Math.max(
+        0,
+        session.unacknowledgedInputBytes - Buffer.byteLength(data),
+      );
       if (Buffer.byteLength(data) > MAX_BUFFER_BYTES) {
         data = Buffer.from(data).subarray(-MAX_BUFFER_BYTES).toString('utf8');
         while (Buffer.byteLength(data) > MAX_BUFFER_BYTES) data = data.slice(1);
@@ -261,9 +295,6 @@ export class WebTerminalRegistry {
   ): (() => void) | undefined {
     const session = this.sessions.get(terminalId);
     if (!session) return undefined;
-    if (session.outputListeners.size === 0) {
-      session.unacknowledgedInputBytes = 0;
-    }
     session.outputListeners.add(listener);
     this.clearReclaim(session);
     return () => {
@@ -299,12 +330,16 @@ export class WebTerminalRegistry {
   write(terminalId: string, data: string): WebTerminalWriteResult {
     const session = this.sessions.get(terminalId);
     if (!session || session.exited) return 'unavailable';
-    if (session.unacknowledgedInputBytes >= MAX_UNACKNOWLEDGED_INPUT_BYTES) {
+    const bytes = Buffer.byteLength(data);
+    if (
+      session.unacknowledgedInputBytes + bytes >
+      MAX_UNACKNOWLEDGED_INPUT_BYTES
+    ) {
       return 'backpressure';
     }
     try {
       session.pty.write(data);
-      session.unacknowledgedInputBytes += Buffer.byteLength(data);
+      session.unacknowledgedInputBytes += bytes;
       return 'written';
     } catch {
       return 'unavailable';
