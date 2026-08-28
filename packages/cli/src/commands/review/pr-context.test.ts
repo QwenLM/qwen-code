@@ -18,6 +18,7 @@ const {
   ensureAuthenticatedMock,
   setGhHostMock,
   writeFileSyncMock,
+  renameSyncMock,
   rmSyncMock,
   mkdirSyncMock,
   getPlatformReaderMock,
@@ -30,6 +31,7 @@ const {
   ensureAuthenticatedMock: vi.fn(),
   setGhHostMock: vi.fn(),
   writeFileSyncMock: vi.fn(),
+  renameSyncMock: vi.fn(),
   rmSyncMock: vi.fn(),
   mkdirSyncMock: vi.fn(),
   getPlatformReaderMock: vi.fn(),
@@ -87,6 +89,7 @@ vi.mock('node:fs', async (importOriginal) => {
     ...actual,
     mkdirSync: mkdirSyncMock,
     writeFileSync: writeFileSyncMock,
+    renameSync: renameSyncMock,
     rmSync: rmSyncMock,
   };
   return { ...mock, default: mock };
@@ -3558,8 +3561,30 @@ describe('runPrContext identity failure (handler level)', () => {
     });
   const contextWrite = () =>
     (writeFileSyncMock.mock.calls.find(
-      (c) => c[0] === '/tmp/ctx.md',
+      // The context is written temp-then-renamed to --out.
+      (c) => String(c[0]).startsWith('/tmp/ctx.md'),
     )?.[1] as string) ?? '';
+
+  it('writes the context temp-then-rename — a mid-write failure leaves nothing at --out', async () => {
+    // The up-front removal of a STALE file already ran by the time the final
+    // write starts, so a direct writeFileSync that threw mid-write (ENOSPC
+    // creates the file then throws) would leave a truncated-but-readable
+    // context at --out — the one shape the missing-context branches the
+    // launch flow keys on cannot see. The rename is the commit point; a
+    // reverted direct write leaves no tmp path and never calls rename.
+    currentUserMock.mockReturnValue('someone');
+    await run();
+    const tmpWrite = writeFileSyncMock.mock.calls.find(
+      (c) =>
+        String(c[0]).startsWith('/tmp/ctx.md.') &&
+        String(c[0]).endsWith('.tmp'),
+    );
+    expect(tmpWrite).toBeDefined();
+    expect(renameSyncMock).toHaveBeenCalledWith(tmpWrite?.[0], '/tmp/ctx.md');
+    expect(
+      writeFileSyncMock.mock.calls.some((c) => c[0] === '/tmp/ctx.md'),
+    ).toBe(false);
+  });
 
   it('recovery SURVIVES the identity throw — isolation, not just non-deletion', async () => {
     // The marker-less fixture above cannot tell the two arms apart: with the
@@ -4075,9 +4100,10 @@ describe('prContextCommand handler — Aone routing', () => {
       ...extra,
     });
     // The ledger side file is written BEFORE the context file — find the
-    // context by path, not by call order.
+    // context by path, not by call order. The context itself lands at a
+    // `.<pid>.tmp` path first, renamed to --out.
     const call = writeFileSyncMock.mock.calls.find((c) =>
-      String(c[0]).endsWith('ctx-aone.md'),
+      String(c[0]).startsWith('/tmp/ctx-aone.md'),
     );
     return call?.[1] as string;
   }

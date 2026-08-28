@@ -159,15 +159,14 @@ describe('runScratchTree', () => {
     expect(r.note).toContain('filter.planted.smudge');
   });
 
-  it('refuses an include redirect in a scanned config file — the measurement resolves what the scan cannot see', () => {
+  it('refuses an include redirect in a scanned config file — the screen walks the redirect to the filter behind it', () => {
     // Each local file is queried with `--file`, which leaves include
     // directives UNRESOLVED, while the residue measurement's `git status`
     // reads MERGED config that resolves them — so a `filter.*.clean` hidden
-    // behind the redirect executes on a stat-stale tracked file while the
-    // screen answers no filter key and certifies the tree it just executed
-    // in. The redirect itself is the refusal; `--includes` on the scan
-    // would not close it alone, because an `includeIf.gitdir:` condition is
-    // context-dependent from here.
+    // behind the redirect executes on a stat-stale tracked file unless the
+    // screen WALKS the redirect: each target is resolved the way git
+    // resolves it and scanned with the same screen, and the filter that
+    // surfaces behind it is the refusal.
     const included = join(repo, 'included-config');
     const pwned = join(repo, 'PWNED-include');
     writeFileSync(
@@ -199,8 +198,147 @@ describe('runScratchTree', () => {
     });
 
     expect(r.available).toBe(false);
+    // Pins WHICH arm fired: both refusal notes name the offending keys, so
+    // a mutant routing include keys into the filter arm leaves every other
+    // assertion green while the include-specific note is unreachable.
+    expect(r.note).toContain('include directive(s)');
     expect(r.note).toContain('include.path');
     expect(r.note).toContain('includeif.gitdir:');
+    // The walked target's filter is named, not just the redirect.
+    expect(r.note).toContain('filter.evil.clean');
+    expect(existsSync(pwned)).toBe(false);
+  });
+
+  it('tolerates an include redirect whose target defines no filter — the credential shape the deployment writes', () => {
+    // The pipeline's own CI checkout writes includeIf.gitdir: credential
+    // includes into the repo-local common config, pointing at files that
+    // define `[http] extraheader` and nothing executable. The earlier arm
+    // refused EVERY directive, so every call answered unavailable in both
+    // shapes in exactly the deployment the lens ships for. A redirect whose
+    // target scans clean is not a refusal.
+    const included = join(repo, 'git-credentials-run.config');
+    writeFileSync(
+      included,
+      '[http "https://example.invalid"]\n\textraheader = AUTHORIZATION: x\n',
+    );
+    git(worktree, 'config', 'include.path', included);
+    writeFileSync(
+      join(repo, '.git', 'config'),
+      `\n[includeIf "gitdir:${join(repo, '.git')}/"]\n\tpath = ${included}\n`,
+      { flag: 'a' },
+    );
+
+    const r = run();
+
+    expect(r.available).toBe(true);
+    expect(r.note).not.toContain('include directive(s)');
+  });
+
+  it('refuses an include directive whose target it cannot read — fail closed behind the redirect', () => {
+    // The merged-config reads this command authorises would resolve the
+    // redirect; a target the screen cannot read might hold a filter, so the
+    // doubt is a refusal — never a certification.
+    git(worktree, 'config', 'include.path', join(repo, 'never-written.config'));
+
+    const r = run();
+
+    expect(r.available).toBe(false);
+    expect(r.note).toContain('include directive(s)');
+    expect(r.note).toContain('include.path');
+    expect(r.note).toContain('could not be read');
+  });
+
+  it('refuses an include in ANOTHER worktree’s config naming a directory — the readability check, not git, catches it', () => {
+    // A permission-denied or non-file target reached through the review
+    // worktree's OWN config dies loudly at the identity gate — its own
+    // refusal. Planted in another worktree's config.worktree, the gate
+    // never reads it and only the screen's readability check stands:
+    // without it the walk's `git config --file` dies the way git dies, and
+    // the death reads as "no match" — a certification over the doubt.
+    const first = run();
+    expect(first.available).toBe(true);
+    const common = execFileSync(
+      'git',
+      ['rev-parse', '--path-format=absolute', '--git-common-dir'],
+      { cwd: worktree, encoding: 'utf8' },
+    ).trim();
+    const scratchAdmin = join(
+      common,
+      'worktrees',
+      basename(first.path!),
+      'config.worktree',
+    );
+    execFileSync('git', ['config', 'extensions.worktreeConfig', 'true'], {
+      cwd: worktree,
+    });
+    mkdirSync(join(repo, 'not-a-config-file'));
+    writeFileSync(
+      scratchAdmin,
+      `[include]\n\tpath = ${join(repo, 'not-a-config-file')}\n`,
+    );
+
+    const r = run();
+
+    expect(r.available).toBe(false);
+    expect(r.note).toContain('include directive(s)');
+    expect(r.note).toContain('could not be read');
+  });
+
+  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+    'refuses an include whose target exists but cannot be read — permission-denied fails closed',
+    () => {
+      // The chmod half of the readability check: the target exists and is a
+      // file, so the stat passes — only the R_OK probe catches it. Planted
+      // in another worktree's config.worktree, where the identity gate's
+      // merged read never reaches it (a permission-denied target there dies
+      // loudly, its own refusal).
+      const first = run();
+      expect(first.available).toBe(true);
+      const common = execFileSync(
+        'git',
+        ['rev-parse', '--path-format=absolute', '--git-common-dir'],
+        { cwd: worktree, encoding: 'utf8' },
+      ).trim();
+      const scratchAdmin = join(
+        common,
+        'worktrees',
+        basename(first.path!),
+        'config.worktree',
+      );
+      execFileSync('git', ['config', 'extensions.worktreeConfig', 'true'], {
+        cwd: worktree,
+      });
+      const locked = join(repo, 'locked.config');
+      writeFileSync(locked, '[filter "evil"]\n\tclean = touch PWNED\n');
+      chmodSync(locked, 0);
+      try {
+        writeFileSync(scratchAdmin, `[include]\n\tpath = ${locked}\n`);
+
+        const r = run();
+
+        expect(r.available).toBe(false);
+        expect(r.note).toContain('include directive(s)');
+        expect(r.note).toContain('could not be read');
+      } finally {
+        chmodSync(locked, 0o644);
+      }
+    },
+  );
+
+  it('refuses a filter hidden behind a chain of include redirects', () => {
+    // The walk is transitive: a filter two redirects deep still surfaces.
+    const first = join(repo, 'include-first');
+    const second = join(repo, 'include-second');
+    const pwned = join(repo, 'PWNED-chain');
+    writeFileSync(first, `[include]\n\tpath = ${second}\n`);
+    writeFileSync(second, `[filter "evil"]\n\tclean = touch ${pwned} && cat\n`);
+    git(worktree, 'config', 'include.path', first);
+
+    const r = run();
+
+    expect(r.available).toBe(false);
+    expect(r.note).toContain('include directive(s)');
+    expect(r.note).toContain('filter.evil.clean');
     expect(existsSync(pwned)).toBe(false);
   });
 
@@ -1129,10 +1267,10 @@ describe('runScratchTree --standalone', () => {
   // The prose-execution audit's tree. Its input is untrusted — a recipe the
   // PR author wrote — so the tree is a clone with a `.git` of its own, sharing
   // only the object store: what a recipe step writes into config, hooks or
-  // refs lands in the tree and dies with it. The invariant every test here is
-  // about is the one that made the shared-common-dir screen unnecessary: no
-  // git write inside the tree reaches the user's repository, so there is
-  // nothing to screen.
+  // refs lands in the tree and dies with it, so no screen guards writes FROM
+  // the tree. The screen the invocation still runs guards the READS every
+  // shape shares: the repo-local filter config the shared-worktree residue
+  // measurement executes.
   let repo: string;
   let gitIsolation: ReturnType<typeof isolateHostGitConfig>;
   let worktree: string;
@@ -1288,14 +1426,15 @@ describe('runScratchTree --standalone', () => {
     expect(existsSync(pwned)).toBe(false);
   });
 
-  it('refuses an include redirect in BOTH shapes — merged config resolves what the per-file scan cannot', () => {
+  it('refuses an include redirect in BOTH shapes — the walk surfaces the filter behind it', () => {
     // The include directive sits in the common config; the filter it
     // redirects to never appears in a scanned file, so a screen keyed on
-    // filter keys answers clean — while the shared-worktree `git status`
-    // reads merged config, resolves the redirect, and executes the clean
-    // filter on a stat-stale tracked file (the fixture's committed
-    // `.gitattributes` selects it). Both shapes run that measurement, so
-    // neither is safe to stand up.
+    // filter keys alone answers clean — while the shared-worktree
+    // `git status` reads merged config, resolves the redirect, and executes
+    // the clean filter on a stat-stale tracked file (the fixture's committed
+    // `.gitattributes` selects it). Both shapes run that measurement, so the
+    // screen walks the redirect in both, and the surfaced filter is the
+    // refusal.
     const included = join(repo, 'included-config');
     const pwned = join(repo, 'PWNED-include');
     writeFileSync(
@@ -1308,11 +1447,65 @@ describe('runScratchTree --standalone', () => {
 
     const linked = runScratchTree({ worktree, label: 'verify--round-1--inc' });
     expect(linked.available).toBe(false);
+    // Pins WHICH arm fired in each shape: both refusal notes name the
+    // offending keys, so a mutant routing include keys into the filter arm
+    // leaves the key-name assertions green in both.
+    expect(linked.note).toContain('include directive(s)');
     expect(linked.note).toContain('include.path');
 
     const r = run();
     expect(r.available).toBe(false);
+    expect(r.note).toContain('include directive(s)');
     expect(r.note).toContain('include.path');
+    expect(existsSync(pwned)).toBe(false);
+    expect(r.path).toBeUndefined();
+  });
+
+  it('tolerates credential-shaped include redirects in BOTH shapes — a target that defines no filter scans clean', () => {
+    // The deployment shape R3-1 measured live: the CI checkout writes
+    // includeIf.gitdir: credential includes whose targets define
+    // `[http] extraheader` and nothing executable. Both shapes must stand
+    // up there — removing the walk's tolerance restores the arm that
+    // refused every directive and answers unavailable on every call.
+    const included = join(repo, 'git-credentials-run.config');
+    writeFileSync(
+      included,
+      '[http "https://example.invalid"]\n\textraheader = AUTHORIZATION: x\n',
+    );
+    git(repo, 'config', 'include.path', included);
+    writeFileSync(
+      join(repo, '.git', 'config'),
+      `\n[includeIf "gitdir:${join(repo, '.git')}/"]\n\tpath = ${included}\n`,
+      { flag: 'a' },
+    );
+
+    const linked = runScratchTree({ worktree, label: 'verify--round-1--cred' });
+    expect(linked.available).toBe(true);
+
+    const r = run();
+    expect(r.available).toBe(true);
+    expect(r.note).not.toContain('include directive(s)');
+  });
+
+  it('refuses a filter.<name>.process plant in BOTH shapes — `git status` executes it exactly like clean', () => {
+    // The screen refuses the filter NAMESPACE, not an enumeration of its
+    // command-valued keys: process is the third key of the family and the
+    // shared-worktree `git status` runs it on a stat-stale attributed file
+    // (the fixture's committed `.gitattributes` selects it) exactly like a
+    // clean filter — so both shapes refuse before the measurement, naming
+    // the key, with no marker on disk.
+    const pwned = join(repo, 'PWNED-process');
+    git(repo, 'config', 'filter.evil.process', `touch ${pwned} && cat`);
+    const stale = new Date(Date.now() + 60_000);
+    utimesSync(join(worktree, 'a.ts'), stale, stale);
+
+    const linked = runScratchTree({ worktree, label: 'verify--round-1--proc' });
+    expect(linked.available).toBe(false);
+    expect(linked.note).toContain('filter.evil.process');
+
+    const r = run();
+    expect(r.available).toBe(false);
+    expect(r.note).toContain('filter.evil.process');
     expect(existsSync(pwned)).toBe(false);
     expect(r.path).toBeUndefined();
   });

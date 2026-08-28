@@ -2364,7 +2364,7 @@ async function runPrContext(args: PrContextArgs): Promise<void> {
   // SKILL.md's paragraph names the exception. A re-run that behaved as if
   // it had read the context it just lost is the exact invariant the
   // paragraph closes on. The
-  // \`-prev-ledger.json\` side file is deliberately NOT removed:
+  // `-prev-ledger.json` side file is deliberately NOT removed:
   // compose-review reads it for the round counter, and
   // persistRecoveredLedger owns its deletion licensing.
   rmSync(out, { force: true });
@@ -2576,7 +2576,23 @@ async function runPrContext(args: PrContextArgs): Promise<void> {
   );
 
   mkdirSync(dirname(out), { recursive: true });
-  writeFileSync(out, md, 'utf8');
+  // Write-temp-then-rename, the way the `-prev-ledger.json` side file is
+  // written: the up-front removal of a STALE file already ran, so a failure
+  // MID-WRITE of this one (ENOSPC creates the file then throws) would leave
+  // a truncated-but-readable context at `out` — the exact shape the
+  // missing-context branches the launch flow keys on cannot see.
+  const tmp = `${out}.${process.pid}.tmp`;
+  writeFileSync(tmp, md, 'utf8');
+  try {
+    renameSync(tmp, out);
+  } catch (err) {
+    try {
+      rmSync(tmp, { force: true });
+    } catch {
+      /* debris removal is best-effort */
+    }
+    throw err;
+  }
   const meaningfulReviewCount = reviews.filter((r) =>
     isReviewWorthShowing(stripLedgerMarker(r.body ?? '')),
   ).length;
