@@ -3925,9 +3925,12 @@ function composeReviewBody(
   // record (no posture, no age reference), never `auto` in the
   // context-unavailable state WITHOUT the plan record (the round is
   // unknowable — SKILL resolves it as round 1), and never with the field
-  // ABSENT beside a non-empty list (the licence cannot be checked, and the
-  // channel ships in the same PR as the field — omission is fail-closed,
-  // not grandfathered). The response
+  // ABSENT beside a non-empty list when the plan carries no fix-audit
+  // record (the licence cannot be checked, and the channel ships in the
+  // same PR as the field — omission is fail-closed, not grandfathered).
+  // A present plan record IS the licence in that state: the round's shape
+  // was spent on the critical resolution, and the deferral is what the
+  // floor arm enforced. The response
   // is a CAP, not a refusal: a thrown compose loses the whole round,
   // Criticals included, and `prevRound` is a best-effort side-file read
   // whose every failure mode returns 0 — a missing file at a true round 6
@@ -3937,7 +3940,7 @@ function composeReviewBody(
   const unlicensedDeferral =
     deferredSuggestions.length === 0
       ? null
-      : floorAbsent
+      : floorAbsent && fixAudit === null
         ? 'the state carried no recognisable `severityFloor`, so the licence cannot be checked'
         : severityFloor === 'suggestion'
           ? 'the operator turned the posture off (`--severity-floor suggestion`)'

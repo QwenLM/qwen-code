@@ -2405,6 +2405,34 @@ describe('composeReview — the fix-audit round-shape disclosure (#10104)', () =
     expect(r.event).toBe('APPROVE');
   });
 
+  it('an ABSENT floor beside the plan record licences a model-side deferral (#10136)', () => {
+    // The fix-audit round whose compose state omits `severityFloor` —
+    // reachable because the field is model-written and omission is
+    // fail-closed. The model deferred its drafted Suggestion exactly as
+    // the shape intends; the licence chain's unknown-floor arm used to
+    // fire before consulting the plan record, capping the verdict over a
+    // deferral the posture itself produced. The record IS the licence:
+    // the round's shape was spent on the critical resolution. The two
+    // sibling doubt arms already consult it; the unknown-floor arm now
+    // does too.
+    const input = rcInput(POSTURE);
+    input.criticalsInline = 0;
+    input.suggestionsInline = 0;
+    input.deferredSuggestions = [
+      {
+        file: 'src/a.ts',
+        line: 3,
+        source: 'review',
+        severity: 'Suggestion',
+        title: 'untested guard',
+      },
+    ];
+    const r = composeReview(input);
+    expect(r.cappedBy).not.toContain('unlicensed-deferral');
+    expect(r.body).not.toContain('without a posture licence');
+    expect(r.deferredCount).toBe(1);
+  });
+
   it('an ABSENT floor beside the plan record claims no deferral beside its inline Suggestion (#10104)', () => {
     // The default config writes no `severityFloor` ("omit what does not
     // apply"). The REPORTING reading folds absence to `auto` and the plan

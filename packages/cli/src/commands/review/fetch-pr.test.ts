@@ -34,6 +34,7 @@ import { buildDiffPlan } from './lib/diff-plan.js';
 import { buildPlanReport } from './lib/report.js';
 import { operatorReviewSettings } from './lib/review-settings.js';
 import { makeDiff } from './lib/test-utils.js';
+import { requiredAgents } from './lib/roster.js';
 
 describe('classifyHeavy', () => {
   it('flags a substantially rewritten existing file', () => {
@@ -1369,6 +1370,105 @@ describe('fetch-pr report assembly', () => {
     // The recorded round cap prices the territory tier the posture flips to,
     // not the small tier the narrowed sizes would read.
     expect(report.budget.reverseAuditRounds).toBe(5);
+  });
+
+  it('keeps a heavy interaction file unbounded so its invariant agents launch (#10136)', async () => {
+    // Heaviness is classified from the PUBLISHED slice. If the seam bound
+    // trimmed a file whose FULL-RANGE slice clears the heavy bar, the plan
+    // would flip it to non-heavy, `heavyFiles()` would drop it, and the
+    // invariant agents that read it whole from the worktree — the only
+    // auditors of hunks a backward base move smuggles in — would never
+    // launch, on exactly the rounds the bound runs. The bound therefore
+    // lifts wholesale for a heavy full-range slice: no seam record, every
+    // hunk republished, and the roster still owes the invariant agents.
+    anchorIsValid();
+    producerMocks.resolveMergeBase.mockReturnValue({
+      sha: BASE,
+      baseFetchFailed: false,
+    });
+    const heavyBulk = Array.from({ length: 800 }, (_, i) => `+heavy ${i}`);
+    const HEAVY_FULL = [
+      'diff --git a/a.ts b/a.ts',
+      '--- a/a.ts',
+      '+++ b/a.ts',
+      '@@ -1,3 +1,4 @@',
+      ' line',
+      '+added',
+      ' line2',
+      ' line3',
+      '',
+      'diff --git a/b.ts b/b.ts',
+      '--- a/b.ts',
+      '+++ b/b.ts',
+      // Hunk on the seam (the import + its one use)…
+      '@@ -1,1 +1,2 @@',
+      " import { added } from './a.js';",
+      '+added();',
+      // …and a heavy hunk far from it. Full-range changedLines = 801.
+      '@@ -100,2 +101,802 @@',
+      ' ctx',
+      ...heavyBulk,
+      ' ctx2',
+      '',
+    ].join('\n');
+    // fileLines 1102 — preLines = 1102 - 801 = 301 clears the heavy bar's
+    // pre-image floor beside the 801 changed lines.
+    const B_SOURCE =
+      "import { added } from './a.js';\nadded();\n" +
+      Array.from({ length: 1100 }, (_, i) => `filler ${i}`).join('\n');
+    servesBothRanges(HEAVY_FULL, DELTA_DIFF);
+    // The plan report resolves post-image line counts via `git show
+    // <sha>:<path>` — serve b.ts's content there too, or the plan sees a
+    // zero-line file and classifies it non-heavy whatever the bound did.
+    producerMocks.gitRaw.mockImplementation((...args: string[]) =>
+      args[0] === 'show' && args[1] === 'f00df00df00d:b.ts'
+        ? Buffer.from(B_SOURCE)
+        : args.includes(`${ANCHOR}..f00df00df00d`)
+          ? Buffer.from(DELTA_DIFF)
+          : args.includes(`${BASE}..f00df00df00d`)
+            ? Buffer.from(HEAVY_FULL)
+            : Buffer.from(''),
+    );
+    producerMocks.lstatSync.mockImplementation((path?: unknown) => {
+      if (String(path).endsWith('b.ts')) return { isFile: () => true };
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+    producerMocks.readFileSync.mockImplementation((path?: unknown) => {
+      if (String(path).endsWith('b.ts')) {
+        return B_SOURCE;
+      }
+      if (String(path).endsWith('qwen-review-pr-42-prev-ledger.json')) {
+        return JSON.stringify({
+          round: 7,
+          findings: [],
+          posted: 1,
+          floor: 'c',
+        });
+      }
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+
+    const report = await reportFor({ since: ANCHOR });
+
+    expect(report.incremental.posture).toBe('critical');
+    // No seam record: the bound was lifted, so both hunks republish.
+    expect(report.incremental.scope.interaction).toEqual([
+      { path: 'b.ts', importsChanged: ['a.ts'] },
+    ]);
+    const diff = writtenDiff() ?? '';
+    expect(diff).toContain('+added();');
+    expect(diff).toContain('+heavy 0');
+    expect(diff).toContain('+heavy 799');
+    // The plan classifies it heavy from the published slice, and the roster
+    // requires the whole-file invariant agents for it.
+    const b = (report.files as Array<{ path: string; heavy: boolean }>).find(
+      (f) => f.path === 'b.ts',
+    );
+    expect(b?.heavy).toBe(true);
+    const agentKeys = requiredAgents(report).map((a) => a.key);
+    expect(agentKeys).toContain('invariant-a--b.ts');
+    expect(agentKeys).toContain('invariant-b--b.ts');
+    expect(agentKeys).toContain('invariant-c--b.ts');
   });
 
   it('drops a widening candidate whose real path leaves the worktree', async () => {

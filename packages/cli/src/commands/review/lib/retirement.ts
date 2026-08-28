@@ -138,7 +138,7 @@ export interface RoundSchedule {
  * loosely on purpose: its width is the digest function's business, and a key
  * this regex misses is merely history this module cannot see — fail-open.
  */
-const RECORD_KEY_RE = /^reverse-audit--chunk-(\d+)--round-(\d+)--[0-9a-f]+$/;
+const RECORD_KEY_RE = /^reverse-audit--chunk-(\d+)--round-(\d+)--([0-9a-f]+)$/;
 
 /**
  * Every launch the builder emits for this loop carries the literal role id —
@@ -773,6 +773,7 @@ export function scheduleReverseAuditRound(
   const records: Array<{
     chunkId: number;
     round: number;
+    digest: string;
     lines: string[];
     territory: Array<[number, number]>;
     findings: string;
@@ -786,6 +787,7 @@ export function scheduleReverseAuditRound(
     records.push({
       chunkId: Number(m[1]),
       round: r,
+      digest: m[3],
       // Flattened ONCE per record, beside the once-per-transcript flatten
       // below: the pairing walk pays neither half per (record, transcript)
       // pair.
@@ -890,7 +892,14 @@ export function scheduleReverseAuditRound(
   // it dry.
   const history = new Map<
     number,
-    Map<number, { outcomes: AuditOutcome[]; failures: CertificationFailure[] }>
+    Map<
+      number,
+      {
+        outcomes: AuditOutcome[];
+        failures: CertificationFailure[];
+        digests: Set<string>;
+      }
+    >
   >();
   records.forEach((rec, i) => {
     let byRound = history.get(rec.chunkId);
@@ -898,9 +907,14 @@ export function scheduleReverseAuditRound(
       byRound = new Map();
       history.set(rec.chunkId, byRound);
     }
-    const entry = byRound.get(rec.round) ?? { outcomes: [], failures: [] };
+    const entry = byRound.get(rec.round) ?? {
+      outcomes: [],
+      failures: [],
+      digests: new Set<string>(),
+    };
     entry.outcomes.push(...classificationsByRecord[i].map((c) => c.outcome));
     entry.failures.push(...failuresByRecord[i]);
+    entry.digests.add(rec.digest);
     byRound.set(rec.round, entry);
   });
 
@@ -915,6 +929,7 @@ export function scheduleReverseAuditRound(
         round: r,
         outcome: mergeOutcomes(entry.outcomes),
         failures: entry.failures,
+        digests: [...entry.digests],
       }))
       .sort((a, b) => a.round - b.round);
     // The posture narrowing, ruled before retirement so a non-delta chunk
@@ -922,12 +937,26 @@ export function scheduleReverseAuditRound(
     // recent audit being provably dry is the whole bar. Everything less
     // certain — no history, an unknown, a yield — falls through to the
     // ordinary rules and stays hot, the same fail-toward-auditing floor as
-    // every other refusal in this file.
+    // every other refusal in this file. One dry receipt is NOT decisive
+    // when it shares its findings digest with a yielded round: fix-audit
+    // rounds run their first two waves as a convergence pair against the
+    // SAME cumulative list (#10136), so the dry member was built before the
+    // yield's findings entered it — it never saw them, and pricing the
+    // chunk out of the wave on it would certify convergence over live
+    // findings. Serial rounds are untouched: a round built after a yield
+    // carries the merged list's different digest.
     if (narrowing != null && !narrowing.deltaChunkIds.has(chunkId)) {
       const latest = audits[audits.length - 1];
       if (latest !== undefined && latest.outcome === 'dry') {
-        narrowed.push({ chunkId, dryRound: latest.round });
-        continue;
+        const staleAgainstYield = audits.some(
+          (a) =>
+            a.outcome === 'yielded' &&
+            a.digests.some((d) => latest.digests.includes(d)),
+        );
+        if (!staleAgainstYield) {
+          narrowed.push({ chunkId, dryRound: latest.round });
+          continue;
+        }
       }
     }
     const lastTwo = audits.slice(-2);

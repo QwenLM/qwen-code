@@ -44,6 +44,7 @@ import {
   discoverWorkspacePackages,
   seamLines,
 } from './import-graph.js';
+import { classifyHeavy } from './heavy.js';
 
 /** A still-clean file pulled in because it imports a changed one. */
 export interface InteractionFile {
@@ -137,8 +138,15 @@ export function widenScope(input: WidenInput): WidenedScope {
   // file itself always stays in scope (header at minimum), so its chunk
   // agent is still briefed to re-ask the seam question against the worktree.
   // Every doubt state republishes in full: an unreadable source, a section
-  // with no hunks, a scan that keeps everything — each leaves the file
-  // exactly as the unbounded widening published it.
+  // with no hunks, a scan that keeps everything, and a FULL-RANGE slice that
+  // classifies heavy (#10136) — each leaves the file exactly as the
+  // unbounded widening published it. The heavy state is a doubt state
+  // because heaviness is classified from the PUBLISHED slice: bounding a
+  // heavy interaction file would flip it non-heavy, `heavyFiles()` would
+  // drop it, and the invariant agents that read it whole from the worktree
+  // — the only auditors of hunks a backward base move smuggles into the
+  // full-range slice — would never launch on exactly the rounds the bound
+  // runs.
   const hunkKeep = new Map<string, ReadonlySet<number>>();
   const seams = new Map<string, { kept: number; total: number }>();
   if (seamBound === true && interaction.size > 0) {
@@ -148,6 +156,29 @@ export function widenScope(input: WidenInput): WidenedScope {
       if (!section || section.hunks.length === 0) continue;
       const source = readWorktree(path);
       if (source === null) continue;
+      // Heavy exemption (#10136): classify against the FULL-RANGE section,
+      // not the slice the bound would leave — the same counts
+      // `buildPlanReport` derives (added+removed, and preLines from the
+      // post-image line count), so the plan's `heavy` and the roster's
+      // invariant agents agree with what this loop decided to publish.
+      const fileLines =
+        source === ''
+          ? 0
+          : source.split('\n').length - (source.endsWith('\n') ? 1 : 0);
+      if (
+        classifyHeavy({
+          preLines: Math.max(
+            0,
+            fileLines - section.addedLines + section.removedLines,
+          ),
+          fileLines,
+          changedLines: section.addedLines + section.removedLines,
+          binary: section.binary,
+          kind: section.kind,
+        }).heavy
+      ) {
+        continue;
+      }
       const lines = seamLines(path, source, touched, packages);
       const kept = new Set<number>();
       section.hunks.forEach((h, i) => {

@@ -313,6 +313,25 @@ function clauseBindings(clause: string): string[] {
 }
 
 /**
+ * A comment-stripped view of `source`, length- and newline-preserving:
+ * every comment byte becomes a space, nothing else moves, so every position
+ * and line number in it is the same position and line number in the source.
+ * The seam scans run on THIS, because a keyword inside a comment used to
+ * displace the clause-bound scan and parse the clause to the wrong bindings
+ * (#10136) — comment-awareness is the scan's job, and one strip gives it to
+ * every pattern at once. String contents stay: the specifier scan needs its
+ * quotes intact, and a keyword inside a string is caught by the doubt check
+ * below instead. A `//` inside a string literal blanks to the line's end —
+ * the direction is over-marking or doubt, never a silently dropped seam
+ * line.
+ */
+function stripComments(source: string): string {
+  return source
+    .replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, ' '))
+    .replace(/\/\/[^\n]*/g, (m) => ' '.repeat(m.length));
+}
+
+/**
  * The 1-based lines of `source` that touch its seam with the changed files:
  * every import/require statement whose specifier resolves into `changed`,
  * plus every line mentioning a binding such a statement introduces.
@@ -327,6 +346,15 @@ function clauseBindings(clause: string): string[] {
  * round already cleared once, an extra line republishes one hunk more — and
  * the file itself always stays in scope with its brief, so the seam question
  * is asked even when no hunk survives.
+ *
+ * One read fails CLOSED (#10136): a clause the scan cannot parse to
+ * bindings consistent with what the statement visibly declares — a quote
+ * inside the clause (no legal clause carries one; a keyword inside a string
+ * displaced the bound), or a declaration with an expression between its `=`
+ * and a dynamic call (`const api = await import(…)`, whose bindings the
+ * line-shape read cannot collect) — marks EVERY line, the doubt shape
+ * `widenScope` republishes in full. Under-collection of the oracle is the
+ * one error the seam bound must not make.
  */
 export function seamLines(
   fromFile: string,
@@ -334,17 +362,19 @@ export function seamLines(
   changed: ReadonlySet<string>,
   packages: readonly WorkspacePackage[] = [],
 ): number[] {
+  const stripped = stripComments(source);
   const lineOf = (index: number): number => {
     let line = 1;
-    for (let i = 0; i < index && i < source.length; i++) {
-      if (source.charCodeAt(i) === 10) line++;
+    for (let i = 0; i < index && i < stripped.length; i++) {
+      if (stripped.charCodeAt(i) === 10) line++;
     }
     return line;
   };
   const marked = new Set<number>();
   const bindings = new Set<string>();
+  let doubt = false;
   const fromRe = /\bfrom\s*(['"])([^'"\n]+)\1/g;
-  for (const m of source.matchAll(fromRe)) {
+  for (const m of stripped.matchAll(fromRe)) {
     if (resolveSpecifier(fromFile, m[2], changed, packages) === null) continue;
     marked.add(lineOf(m.index ?? 0));
     // The clause sits between the statement keyword and this `from`. The
@@ -353,23 +383,30 @@ export function seamLines(
     // displace the bound inside its own name and parse the clause to zero
     // bindings; a clause the scan cannot bound contributes the statement
     // line alone — fail toward fewer lines, which the always-in-scope
-    // brief backstops.
+    // brief backstops. A clause carrying a quote character is none the
+    // scan can read — no legal clause has one — so the bound fails CLOSED
+    // instead (#10136).
     const at = m.index ?? 0;
     let start = -1;
-    for (const km of source
+    for (const km of stripped
       .slice(0, at)
       .matchAll(/(^|[^\w$])(?:import|export)(?![\w$])/g)) {
       start = (km.index ?? 0) + (km[1]?.length ?? 0);
     }
-    if (start >= 0 && at - start <= 2000) {
-      for (const name of clauseBindings(source.slice(start, at))) {
-        bindings.add(name);
-      }
+    const clause =
+      start >= 0 && at - start <= 2000 ? stripped.slice(start, at) : null;
+    if (clause === null) continue;
+    if (/['"`]/.test(clause)) {
+      doubt = true;
+      break;
+    }
+    for (const name of clauseBindings(clause)) {
+      bindings.add(name);
     }
   }
   const callRe =
     /\b(?:import|require)\s*\(\s*(['"])([^'"\n]+)\1\s*\)|\bimport\s*(['"])([^'"\n]+)\3/g;
-  for (const m of source.matchAll(callRe)) {
+  for (const m of stripped.matchAll(callRe)) {
     const spec = m[2] ?? m[4];
     if (resolveSpecifier(fromFile, spec, changed, packages) === null) continue;
     const at = m.index ?? 0;
@@ -377,8 +414,8 @@ export function seamLines(
     marked.add(line);
     // `const { a, b: c } = require('x')` / `const x = require('x')`: the
     // bindings sit BEFORE the call, on its own line.
-    const lineStart = source.lastIndexOf('\n', at - 1) + 1;
-    const before = source.slice(lineStart, at);
+    const lineStart = stripped.lastIndexOf('\n', at - 1) + 1;
+    const before = stripped.slice(lineStart, at);
     const decl =
       /(?:const|let|var)\s+(?:\{([^}]*)\}|([A-Za-z_$][\w$]*))\s*=\s*$/.exec(
         before,
@@ -395,7 +432,21 @@ export function seamLines(
           if (name && IDENT_RE.test(name)) bindings.add(name);
         }
       }
+    } else if (/(?:const|let|var)[^=\n]*=\s*\S/.test(before)) {
+      // A declaration the line-shape read cannot collect — an expression
+      // between its `=` and the call (`const api = await import(…)`). Its
+      // bindings are seam reads this scan cannot see, so fail CLOSED.
+      doubt = true;
+      break;
     }
+  }
+  if (doubt) {
+    // The clause read could not be trusted: mark every line so `widenScope`
+    // keeps every hunk and republishes the file in full — the same shape a
+    // scan that keeps everything produces, the doubt state its seam record
+    // already reads.
+    const total = source.split('\n').length;
+    return Array.from({ length: total }, (_, i) => i + 1);
   }
   if (bindings.size > 0) {
     // `$` is legal in the identifiers IDENT_RE admits and is a regex anchor,
@@ -405,7 +456,7 @@ export function seamLines(
     // preceded/followed by an identifier character, `$` included.
     const escaped = [...bindings].map((b) => b.replace(/\$/g, '\\$'));
     const usage = new RegExp(`(?<![\\w$])(?:${escaped.join('|')})(?![\\w$])`);
-    const lines = source.split('\n');
+    const lines = stripped.split('\n');
     for (let i = 0; i < lines.length; i++) {
       if (usage.test(lines[i])) marked.add(i + 1);
     }

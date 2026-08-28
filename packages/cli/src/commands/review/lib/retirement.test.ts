@@ -270,6 +270,33 @@ describe('scheduleReverseAuditRound — the scheduler on its own', () => {
     expect(r3.converged).toBe(false);
   });
 
+  it('a dry receipt sharing its digest with a yield does not narrow the chunk out (#10136)', () => {
+    // The convergence-pair shape: a fix-audit round's first two waves run
+    // against the SAME findings digest. Chunk 14's round-1 member YIELDED;
+    // its round-2 member returned a substantive dry receipt that was built
+    // before round 1's findings entered the cumulative list — the receipt
+    // never saw them. Pricing the chunk out of the wave on that receipt
+    // alone would certify convergence over a live finding; the shared
+    // digest is the proof of staleness, so the chunk falls through to the
+    // ordinary rules, which see the yield and keep it hot. Chunk 13 shows
+    // the unaffected shape beside it: dry+dry on one digest, no yield to
+    // be stale against, narrows out exactly as before.
+    transcript(record(1, 13, 'chunk 13 round 1 territory walk'), DRY);
+    transcript(record(2, 13, 'chunk 13 round 2 territory walk'), DRY);
+    transcript(
+      record(1, 14, 'chunk 14 round 1 territory walk', 'feed01'),
+      YIELD,
+    );
+    transcript(record(2, 14, 'chunk 14 round 2 territory walk', 'feed01'), DRY);
+
+    const r3 = scheduleReverseAuditRound(plan, [13, 14], 3, process.env, diff, {
+      deltaChunkIds: new Set([99]),
+    });
+    expect(r3.due).toEqual([14]);
+    expect(r3.narrowed).toEqual([{ chunkId: 13, dryRound: 2 }]);
+    expect(r3.converged).toBe(false);
+  });
+
   it('a retired DELTA chunk still cold-checks; a narrowed one never does', () => {
     dryTwice([13, 14]);
     const narrowing = { deltaChunkIds: new Set([13]) };

@@ -443,6 +443,53 @@ describe('seamLines', () => {
     }
   });
 
+  it('a trailing comment inside a multiline clause does not drop the usage line (#10136)', () => {
+    // The keyword-bound scan used to take the LAST `import` before the
+    // `from` — including the one inside the trailing comment — so the
+    // clause parsed to the comment's word instead of `moved`, and the
+    // usage line dropped from the seam. The scan runs on a comment-stripped
+    // view, so the bound lands on the statement keyword.
+    const source = [
+      'import { moved, // TODO: import more', // 1
+      "} from './changed.js';", // 2
+      'moved();', // 3
+    ].join('\n');
+    expect(seamLines('src/imp.ts', source, changed)).toEqual([1, 2, 3]);
+
+    const block = [
+      "import { moved, /* note: import more */ } from './changed.js';", // 1
+      'moved();', // 2
+    ].join('\n');
+    expect(seamLines('src/imp.ts', block, changed)).toEqual([1, 2]);
+  });
+
+  it('a clause the scan cannot read fails closed to the whole file (#10136)', () => {
+    // A specifier quoted inside a string scans as an import; the keyword
+    // bound lands on the statement keyword BEFORE the string, so the clause
+    // carries the string's quote — a shape no legal clause has. The read
+    // refuses to guess bindings from it and marks every line, which
+    // `widenScope` republishes in full.
+    const source = [
+      'export const note = "} from \'./changed.js\'";', // 1
+      'const unrelated = 1;', // 2
+    ].join('\n');
+    expect(seamLines('src/imp.ts', source, changed)).toEqual([1, 2]);
+  });
+
+  it('an awaited dynamic import fails closed to the whole file (#10136)', () => {
+    // `const api = await import(…)` carries an expression between the `=`
+    // and the call, a declaration shape the line-shape read cannot collect
+    // bindings from. Rather than silently dropping the binding's usage
+    // lines, the scan marks every line and `widenScope` republishes the
+    // file in full.
+    const source = [
+      "const api = await import('./changed.js');", // 1
+      'api.call();', // 2
+      'const unrelated = 1;', // 3
+    ].join('\n');
+    expect(seamLines('src/imp.ts', source, changed)).toEqual([1, 2, 3]);
+  });
+
   it('marks nothing for a file whose imports all resolve elsewhere', () => {
     const source = ["import { a } from './stable.js';", 'a();'].join('\n');
     expect(seamLines('src/imp.ts', source, changed)).toEqual([]);
