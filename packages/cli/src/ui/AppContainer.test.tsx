@@ -951,6 +951,13 @@ describe('AppContainer State Management', () => {
           expect.any(Number),
         );
       });
+      // Pin the read path: the durable file is keyed by a hash of the
+      // project root (getCronFilePath(projectRoot) in cronTasksFile.ts),
+      // and getTargetDir() differs from getProjectRoot() in this suite,
+      // so a call-site switch to getTargetDir() must fail this test.
+      expect(readCronTasksMock).toHaveBeenCalledWith(
+        mockConfig.getProjectRoot(),
+      );
     });
 
     it('formats the startup notice for active scheduled tasks', () => {
@@ -5745,6 +5752,11 @@ describe('AppContainer State Management', () => {
         calls.indexOf(
           'add:1 active scheduled task. Run /loop list (loop skill) to inspect.',
         ),
+      );
+      // Same pin as the startup variant: the durable read must use the
+      // project root, not getTargetDir(), to find this project's tasks.
+      expect(readCronTasksMock).toHaveBeenCalledWith(
+        mockConfig.getProjectRoot(),
       );
     });
 
