@@ -181,12 +181,22 @@ export function useDialogSelect<TItem extends DialogListItem<unknown>>(
     ),
   );
 
+  const numberBuffer = useRef('');
+  const numberTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   // Resync during render when the key changes (React's adjust-state-during-
   // render pattern): consumers that swap views over one mounted hook get
   // the fresh initialIndex instead of the mount-time snapshot.
   const [appliedResyncKey, setAppliedResyncKey] = useState(resyncKey);
   if (appliedResyncKey !== resyncKey) {
     setAppliedResyncKey(resyncKey);
+    // A view swap resets the selection context; an armed numeric flush
+    // from the previous view must not commit a selection in the new one.
+    if (numberTimer.current) {
+      clearTimeout(numberTimer.current);
+      numberTimer.current = null;
+    }
+    numberBuffer.current = '';
     const next = computeInitialActiveIndex(initialIndex, items);
     setActiveIndexState(next);
     setScrollOffset(
@@ -194,8 +204,6 @@ export function useDialogSelect<TItem extends DialogListItem<unknown>>(
     );
   }
 
-  const numberBuffer = useRef('');
-  const numberTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   // The number-select flush reads the highlight at timeout time via a ref,
   // not inside a setState updater — updaters must stay pure (StrictMode
   // double-invokes them) and React re-renders keep the ref current.
@@ -221,6 +229,14 @@ export function useDialogSelect<TItem extends DialogListItem<unknown>>(
     if (next !== scrollOffset) setScrollOffset(next);
   }, [activeIndex, scrollOffset, items.length, maxItemsToShow]);
 
+  const clearNumberBuffer = () => {
+    if (numberTimer.current) {
+      clearTimeout(numberTimer.current);
+      numberTimer.current = null;
+    }
+    numberBuffer.current = '';
+  };
+
   const highlightIndex = (index: number) => {
     if (index < 0 || index >= items.length || index === activeIndex) return;
     if (items[index]?.disabled) return;
@@ -234,6 +250,10 @@ export function useDialogSelect<TItem extends DialogListItem<unknown>>(
   // disabled targets would leave them permanently stuck on a disabled row.
   const setActiveIndex = (index: number) => {
     if (index < 0 || index >= items.length || index === activeIndex) return;
+    // Moving the highlight by any means (wheel, hover) invalidates a
+    // pending numeric flush: the flush must commit the typed row, not
+    // wherever the pointer happened to land.
+    clearNumberBuffer();
     setActiveIndexState(index);
     const item = items[index];
     if (item) onHighlight?.(item.value, index);
@@ -242,20 +262,15 @@ export function useDialogSelect<TItem extends DialogListItem<unknown>>(
   const selectIndex = (index: number) => {
     const item = items[index];
     if (!item || item.disabled) return;
+    // A click selects this row now; an armed numeric flush would fire a
+    // second onSelect later.
+    clearNumberBuffer();
     // ink dispatches SET_ACTIVE_INDEX before SELECT_CURRENT, so highlight
     // consumers (theme preview, scope selection) stay synced on mouse input
     // too, not just keyboard input.
     setActiveIndexState(index);
     onHighlight?.(item.value, index);
     onSelect?.(item.value);
-  };
-
-  const clearNumberBuffer = () => {
-    if (numberTimer.current) {
-      clearTimeout(numberTimer.current);
-      numberTimer.current = null;
-    }
-    numberBuffer.current = '';
   };
 
   useKeyboard((key) => {

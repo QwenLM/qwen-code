@@ -21,6 +21,7 @@
  * together — the same class of limitation terminal auto-detection has.
  */
 
+import stringWidth from 'string-width';
 import {
   BARE_URL_BREAK_CHARACTERS,
   isSafeOscScheme,
@@ -132,15 +133,11 @@ export function readBufferRow(grid: CellGrid, y: number): BufferRow {
     text += cells[x];
     for (let i = 0; i < cells[x].length; i++) cellColumns.push(x);
   }
-  // Trim the trailing whitespace from BOTH arrays: when the last non-space
-  // cell holds a wide character, its UTF-16 unit ends two columns wide, and
-  // an untrimmed cellColumns tail would miss clicks on that cell's right
-  // half (the fallback bound only covers the left half).
-  const trimmed = text.replace(/\s+$/, '');
-  if (trimmed.length < text.length) {
-    cellColumns.length = trimmed.length;
-  }
-  return { text: trimmed, cellColumns };
+  // Trim trailing whitespace from the TEXT only. cellColumns must keep the
+  // mapping for every character of the untrimmed text: truncating it to the
+  // trimmed length degrades the hit-test end boundary to the last+1
+  // fallback, which misses the right-half cell of a wide final glyph.
+  return { text: text.replace(/\s+$/, ''), cellColumns };
 }
 
 /** All safe URL candidates in a rendered row, left to right. */
@@ -176,11 +173,18 @@ export function extractUrlHits(rowText: string): UrlHit[] {
 export function findUrlAtRow(row: BufferRow, x: number): UrlHit | null {
   for (const hit of extractUrlHits(row.text)) {
     const startCell = row.cellColumns[hit.start];
-    const endCellExclusive =
-      hit.end < row.cellColumns.length
-        ? row.cellColumns[hit.end]
-        : (row.cellColumns[row.cellColumns.length - 1] ?? 0) + 1;
-    if (startCell === undefined) continue;
+    let endCellExclusive: number | undefined;
+    if (hit.end < row.cellColumns.length) {
+      endCellExclusive = row.cellColumns[hit.end];
+    } else {
+      // The URL run reaches the end of the row text. The last character
+      // may occupy TWO columns (CJK/emoji): a wide final glyph owns both
+      // its cells, so the boundary is its start column plus its width.
+      const lastChar = row.text[hit.end - 1] ?? '';
+      const lastColumn = row.cellColumns[row.cellColumns.length - 1] ?? 0;
+      endCellExclusive = lastColumn + (stringWidth(lastChar) || 1);
+    }
+    if (startCell === undefined || endCellExclusive === undefined) continue;
     if (x >= startCell && x < endCellExclusive) return hit;
   }
   return null;
