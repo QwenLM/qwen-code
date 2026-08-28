@@ -24,7 +24,10 @@ import {
   LEDGER_MAX_ID,
   LEDGER_MAX_CLOSED,
   LEDGER_ID_SHAPE,
+  axesOf,
+  readClaim,
   isLedgerFinding,
+  normalizeLedgerFinding,
   type Ledger,
   type LedgerFinding,
 } from './ledger.js';
@@ -703,11 +706,30 @@ describe('LEDGER_ID_READBACK', () => {
     ['R3-2] claim', 'R3-2'],
     ['R3-2 claim', 'R3-2'],
     ['R3-2', 'R3-2'],
+    // The marker-separator grammar admits the full-width colon (`[:：]`),
+    // so a carry written with it reads back — self-sufficient, no space
+    // after it in CJK usage (#9940 review).
+    ['R3-2：claim', 'R3-2'],
+    ['R3-2： claim', 'R3-2'],
     ['R3-2-1: extended run', null],
     ['see R3-2: cross-reference', null],
   ];
   it.each(cases)('reads %j as %j', (line, expected) => {
     expect(LEDGER_ID_READBACK.exec(line)?.[1] ?? null).toBe(expected);
+  });
+});
+
+describe('readClaim — the shared claim-line read (#9940 review)', () => {
+  it('reads the full-width-colon carry the separator grammar admits', () => {
+    // Reverting the terminator admission must turn this red: with it
+    // gone, compose's ledger builder mints a fresh id and the stamp
+    // mints a double-id root (`R2-4: R1-2：…`) under the wrong lineage
+    // (#9940 review).
+    expect(readClaim('R1-2：the claim')).toMatchObject({
+      id: 'R1-2',
+      fixInduced: false,
+    });
+    expect(readClaim('R1-2：the claim').title).toBe('the claim');
   });
 });
 
@@ -1413,5 +1435,59 @@ describe('the flat streak', () => {
     expect(parseLedger(handCrafted({ flatRounds: 9999 }))?.flatRounds).toBe(3);
     // A streak AT the honest maximum rides untouched (round 5 → 3).
     expect(parseLedger(handCrafted({ flatRounds: 3 }))?.flatRounds).toBe(3);
+  });
+});
+
+describe('the finding axes (#10291)', () => {
+  it('round-trips a classified Critical, and spends no bytes on an unclassified one', () => {
+    const marker = serializeLedger({
+      v: 1,
+      round: 3,
+      findings: [
+        { id: 'R3-1', sev: 'C', d: 'f', b: 'n', file: 'a.ts', title: 'wedge' },
+        { id: 'R3-2', sev: 'C', d: 'c', file: 'b.ts', title: 'lie' },
+        { id: 'R3-3', sev: 'C', file: 'c.ts', title: 'unclassified' },
+      ],
+    });
+    const back = parseLedger(marker)!;
+    expect(back.findings[0]).toMatchObject({ d: 'f', b: 'n' });
+    expect(back.findings[1]).toMatchObject({ d: 'c' });
+    expect(back.findings[1].b).toBeUndefined();
+    expect(back.findings[2].d).toBeUndefined();
+    expect(back.findings[2].b).toBeUndefined();
+    expect(marker.match(/"d":/g)).toHaveLength(2);
+    expect(marker.match(/"b":/g)).toHaveLength(1);
+  });
+
+  it('normalises an unrecognised axis instead of dropping the finding — the fields decide nothing', () => {
+    // The marker is a cross-environment carrier: a later version adding a
+    // third direction, a hand edit, or a foreign marker must not make an
+    // older CLI drop the finding from the work list.
+    const marker =
+      '<!-- qwen-review-ledger {"v":1,"round":3,"findings":[' +
+      '{"id":"R3-1","sev":"C","file":"a.ts","title":"t","d":"x","b":"n"}' +
+      ']} -->';
+    const parsed = parseLedger(marker)!;
+    expect(parsed.findings).toEqual([
+      { id: 'R3-1', sev: 'C', file: 'a.ts', title: 't', b: 'n' },
+    ]);
+    expect(parsed.dropped).toBeUndefined();
+    expect(
+      normalizeLedgerFinding({
+        id: 'R3-1',
+        sev: 'C',
+        file: 'a.ts',
+        title: 't',
+        d: 'f',
+        b: 'z' as never,
+      }),
+    ).toEqual({ id: 'R3-1', sev: 'C', file: 'a.ts', title: 't', d: 'f' });
+  });
+
+  it('spells the axes out once, for every renderer', () => {
+    expect(axesOf({ d: 'f', b: 'n' })).toBe('fails-closed, new-surface');
+    expect(axesOf({ d: 'c' })).toBe('certifies-falsely');
+    expect(axesOf({ b: 'r' })).toBe('regression');
+    expect(axesOf({})).toBe('');
   });
 });

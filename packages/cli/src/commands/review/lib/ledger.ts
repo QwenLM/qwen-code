@@ -381,9 +381,15 @@ export const LEDGER_ID_TOKEN = String.raw`R\d+-\d+`;
  * (#9212 review). The earlier `\b`-bounded whole-body scan also matched
  * cross-references ("see R3-2 for context") and ids embedded in longer
  * hyphen runs, exempting a re-post under an unrelated thread.
+ *
+ * The full-width colon `：` rides the marker-separator grammar
+ * (`MARKER_SEPARATOR_RE` admits `[:：]`), so a carry written with it must
+ * read back — it terminates on its own: CJK usage puts no space after it,
+ * so the `(?=\s|$)` lookahead that bounds the ASCII set cannot (#9940
+ * review).
  */
 export const LEDGER_ID_READBACK = new RegExp(
-  `^(${LEDGER_ID_TOKEN})[:.)\\]]?(?=\\s|$)\\s*`,
+  `^(${LEDGER_ID_TOKEN})(?:[:.)\\]]?(?=\\s|$)|：)\\s*`,
 );
 
 /**

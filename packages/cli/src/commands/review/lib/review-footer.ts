@@ -460,8 +460,12 @@ const HTML_BLOCK_TAG_NAMES =
  * The simple HTML-block opener the line-map tracks (see `scanLines`): an
  * opening tag, or a CLOSING block-level tag — `</div>` alone on a line
  * starts a blank-line-terminated HTML block exactly as `<div>` does.
+ * Exported for the id stamp's first-line guard (#9940 review): the type-1
+ * end rule (`HTML_TYPE1_OPEN_RE`) does not matter there — open or close,
+ * an opener the stamp breaks flips the block structure the gate
+ * validated.
  */
-const HTML_BLOCK_OPEN_RE = new RegExp(
+export const HTML_BLOCK_OPEN_RE = new RegExp(
   `^(?:<[A-Za-z][^>]*>?|</${HTML_BLOCK_TAG_NAMES}[ \\t]*>)[ \\t]*\\r?$`,
   'i',
 );

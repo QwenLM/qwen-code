@@ -59,6 +59,18 @@ describe('carriedFindingOf — the id a comment body leads with', () => {
     });
   });
 
+  it('reads the id terminated by a full-width colon — the separator grammar admits it (#9940 review)', () => {
+    // MARKER_SEPARATOR_RE admits `[:：]` after the severity marker, so a
+    // carry written `R1-2：claim` is an admitted draft shape; the shared
+    // readback must read it back, or the ledger builder counts the
+    // re-post as first-time work, mints a fresh id, and the stamp mints
+    // a double-id root the original thread never matches (#9940 review).
+    expect(carriedFindingOf('**[Critical]** R1-2：the claim')).toEqual({
+      id: 'R1-2',
+      fixInduced: false,
+    });
+  });
+
   it('reads the (fix-induced) marking beside the id', () => {
     expect(
       carriedFindingOf('**[Critical]** R1-2: (fix-induced) the new hole'),
@@ -436,6 +448,29 @@ describe('stampCarriedId — the write side of the readback', () => {
     ).toBe('**[Suggestion]** R3-2: the claim\n```diff\n-old\n+new\n```');
   });
 
+  it('leaves an HTML-block-opening body un-stamped — a stamp would break the opener (#9940 review)', () => {
+    // The skip guards the marker's projected first line, and an
+    // HTML-block opener (`<div>`, `</div>`, `<pre>`, …) is broken by the
+    // insertion exactly like a fence delimiter: pre-stamp the opener
+    // starts a blank-line-terminated HTML block that masks fence lines,
+    // so the gate passes; the stamp demotes the opener to inline text,
+    // the masked fence re-parses real and unclosed, and the appended
+    // invisible marker posts inside it as visible code — the exact post
+    // the gate's refusal message names. The exposure is attribution-off,
+    // but the skip is attribution-blind like the fence one (#9940
+    // review).
+    for (const draft of [
+      '**[Critical]** <div>\n```\nfoo\n</div>\nclaim',
+      '**[Suggestion]** <details>\nthe log\n</details>',
+    ]) {
+      expect(stampCarriedId(draft, 'R5-3')).toBe(draft);
+    }
+    // An opener on line 2 is untouched by a line-1 stamp.
+    expect(
+      stampCarriedId('**[Critical]** the claim\n<div>\nfoo\n</div>', 'R5-4'),
+    ).toBe('**[Critical]** R5-4: the claim\n<div>\nfoo\n</div>');
+  });
+
   it('stamps the bare-marker draft whose fence opens on line 2 (#9940 review)', () => {
     // The fence skip protects a fence that OPENS on the marker's
     // projected first line: the stamp inserts on line 1, and a fence
@@ -451,6 +486,27 @@ describe('stampCarriedId — the write side of the readback', () => {
     const stamped = stampCarriedId(draft, 'R1-5');
     expect(stamped).toBe(
       '**[Critical]** R1-5: \n```diff\n-old\n+new\n```\nthe claim',
+    );
+    expect(carriedFindingOf(stamped)).toEqual({
+      id: 'R1-5',
+      fixInduced: false,
+    });
+  });
+
+  it('stamps the bare-marker draft whose fence sits past a BARE CR (#9940 review)', () => {
+    // The residue check models a line break the way the pipeline's line
+    // model does — `scanLines`, the bare readback leg and the marker-less
+    // presubmit readback all split on `/\r\n?|\n/` — so a bare CR
+    // between marker and fence pushes the fence to rendered line 2
+    // exactly like an LF, and the line-1 stamp cannot flip it. Testing
+    // `\n` alone held the skip here: the draft posted un-stamped, its
+    // root id-less and permanently unreachable — every later carry
+    // opened a NEW thread, every `fixed` ruling resolved none of the
+    // lineage (#9940 review).
+    const draft = '**[Critical]**\r```diff\n-old\n+new\n```\nthe claim';
+    const stamped = stampCarriedId(draft, 'R1-5');
+    expect(stamped).toBe(
+      '**[Critical]** R1-5: \r```diff\n-old\n+new\n```\nthe claim',
     );
     expect(carriedFindingOf(stamped)).toEqual({
       id: 'R1-5',

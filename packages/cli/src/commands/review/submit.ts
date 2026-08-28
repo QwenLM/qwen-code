@@ -1510,11 +1510,12 @@ function submit(
   // resolves it (#9940 review). GitHub only — the Aone write path has no
   // review-thread graph to reach into. The insertion preserves every
   // property the gate above validated — the severity marker, visibility
-  // and fence state all sit behind it, untouched — because a body whose
-  // fence OPENS on the marker's first line takes no stamp at all
-  // (stampCarriedId leaves it un-stamped, disclosed below): text before
-  // the backticks would stop the posted first line leading the fence
-  // the gate validated (#9940 review).
+  // and fence / HTML-block state all sit behind it, untouched — because
+  // a body whose code fence or HTML-block opener OPENS on the marker's
+  // first line takes no stamp at all (stampCarriedId leaves it
+  // un-stamped, disclosed below): text before the construct would stop
+  // the posted first line leading it, flipping the structure the gate
+  // validated (#9940 review).
   const stampedFresh = new Set<number>();
   let stampSkippedFence = 0;
   if (!aoneWrite && draftedIds !== undefined) {
@@ -1532,8 +1533,9 @@ function submit(
         if (body === c.body) {
           // Unchanged although an id was owed: the body carries one
           // already (the model's carry stays verbatim) or it opens a
-          // code fence and the stamp was skipped — only the latter is a
-          // disclosure (#9940 review).
+          // code fence or HTML block on its first line and the stamp
+          // was skipped — only the latter is a disclosure (#9940
+          // review).
           if (carriedFindingOf(c.body) === null) stampSkippedFence++;
           return c;
         }
@@ -1544,8 +1546,9 @@ function submit(
     if (stampSkippedFence > 0) {
       writeStderrLine(
         `Thread lifecycle: ${stampSkippedFence} draft(s) open a code ` +
-          `fence on their first line and were left un-stamped — a stamp ` +
-          `there would break the fence the gate validated. Their ` +
+          `fence or HTML block on their first line and were left ` +
+          `un-stamped — a stamp there would break the structure the ` +
+          `gate validated. Their ` +
           `thread roots carry no ledger id, so no later carry or ` +
           `fixed ruling can reach them; resolve such threads by hand.`,
       );
