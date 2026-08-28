@@ -51,9 +51,8 @@ const debugLogger = createDebugLogger('PERMISSIONS');
  *   built-in tools not named in an active `settings.tools.eager`
  *   allowlist: their schemas stay out of the eager request (#9827) without
  *   the tools silently disappearing from the session (#10075).
- * - `disabled`: not registered at all (whole-tool deny rule, or excluded
- *   by the legacy `coreTools` allowlist — unlisted, or any tool under an
- *   explicitly empty `tools.core: []`, #10065).
+ * - `disabled`: not registered at all (whole-tool deny rule, or unlisted in
+ *   the legacy `coreTools` allowlist).
  */
 export type ToolRegistrationStatus = 'registered' | 'deferred' | 'disabled';
 
@@ -121,27 +120,6 @@ export interface PermissionManagerConfig {
    * pure auto-approval and never affects registration (#10075).
    */
   getEagerTools?(): readonly string[] | undefined;
-}
-
-/**
- * Classifies a raw `tools.core` entry as name-less: it carries no usable
- * tool name. Non-string entries, empty/whitespace-only strings, malformed
- * rules (unbalanced parens parse to `invalid`), and entries whose tool
- * part parses to the empty string (`"()"`, `"(ls -l)"`) are all name-less.
- *
- * This is the single shared classification behind BOTH faces of the
- * empty-allowlist collapse: the gate in `PermissionManager.initialize()`
- * below and the CLI startup notice in `packages/cli/src/config/config.ts`.
- * They must agree on what counts as name-less, or the notice can stay
- * silent for a list the gate collapses to the empty allowlist — exactly
- * the silent tool-free session #10065 set out to diagnose (#10080).
- */
-export function isNamelessCoreToolsEntry(entry: unknown): boolean {
-  if (typeof entry !== 'string' || entry.trim() === '') {
-    return true;
-  }
-  const rule = parseRule(entry);
-  return rule.invalid || rule.toolName === '';
 }
 
 /**
@@ -238,29 +216,10 @@ export class PermissionManager {
     // Each entry may be a bare name ("Bash", "read_file") or include a specifier
     // ("Bash(ls -l)") – we normalise to canonical tool names and ignore specifiers
     // because the registry check is at the tool level, not the invocation level.
-    // An explicitly configured empty list is still an active allowlist: it
-    // disables every registered tool — core and non-core (MCP, Skill,
-    // Agent, synthetic system tools) alike (see `isToolEnabled`).
-    // Only an array activates the allowlist: `undefined`, `null`, or any
-    // non-array value (e.g. `"tools": { "core": null }`, the common JSON
-    // idiom for clearing this deprecated key) means no restriction.
-    // Entries that carry no tool name — the empty string, whitespace-only
-    // strings, non-string garbage, malformed rules, and entries whose tool
-    // part parses to the empty string (`"()"`, `"(ls -l)"`, e.g. an
-    // unset-variable or template expansion written into settings) — are
-    // dropped via the shared `isNamelessCoreToolsEntry` classification, so
-    // a list made up only of such entries (`[""]`, `["()"]`) collapses to
-    // the explicit EMPTY allowlist with both #10065 diagnostics instead of
-    // a size-1 allowlist that matches nothing and silently disables every
-    // tool while `isCoreToolsAllowListEmpty()` stays false (#10065). The
-    // CLI startup notice uses the same helper, so notice and gate cannot
-    // drift apart (#10080).
     const rawCoreTools = this.config.getCoreTools?.();
-    if (Array.isArray(rawCoreTools)) {
+    if (rawCoreTools && rawCoreTools.length > 0) {
       this.coreToolsAllowList = new Set(
-        rawCoreTools
-          .filter((t) => !isNamelessCoreToolsEntry(t))
-          .map((t) => parseRule(t).toolName),
+        rawCoreTools.map((t) => parseRule(t).toolName),
       );
     }
 
@@ -277,8 +236,7 @@ export class PermissionManager {
     // activates it: `undefined`, `null`, or any non-array value means no
     // restriction, while an explicitly empty array is an active allowlist
     // that names nothing and therefore defers every non-exempt tool.
-    // `tools.core` differs: its explicitly empty list stays active and
-    // disables every tool instead of deferring (#10065).
+    // `tools.core` differs: its empty list is treated as unset.
     //
     // Entries are parsed with the same rule parser the permission rules
     // use so alias forms (`ListFiles`) and stray specifiers
@@ -708,11 +666,8 @@ export class PermissionManager {
    *   `structured_output` (registered only when `--json-schema` is set).
    *   Excluding `structured_output` from `--core-tools` would leave a
    *   `--json-schema` run with no terminal contract, so the synthetic
-   *   tool stays available regardless of a NON-EMPTY allowlist (deny
-   *   rules still apply). An explicitly EMPTY allowlist (`tools.core: []`)
-   *   is the deliberate "no tools at all" configuration and disables even
-   *   these synthetic tools, so a `--json-schema` run under it cannot
-   *   complete (#10065).
+   *   tool stays available regardless of the allowlist (deny rules still
+   *   apply).
    */
   private static readonly CORE_TOOLS = new Set([
     'read_file',
@@ -768,11 +723,8 @@ export class PermissionManager {
    * is still registered — it is merely hidden from the eager model request
    * and loadable via ToolSearch — so a call to it must flow through the
    * normal approval evaluation, not a permission error (#10075). Only
-   * `disabled` tools return `false`: a whole-tool deny rule, or the legacy
-   * `coreTools` allowlist — a core tool missing from a non-empty list, or
-   * EVERY tool (non-core included) when the list is explicitly empty
-   * (`tools.core: []`, the deliberate "no tools at all" configuration,
-   * #10065).
+   * `disabled` tools (whole-tool deny rule, or unlisted in the legacy
+   * `coreTools` allowlist) return `false`.
    *
    * Specifier-based deny rules such as `"Bash(rm -rf *)"` never disable the
    * tool — they only deny specific invocations at runtime. Likewise,
@@ -780,14 +732,12 @@ export class PermissionManager {
    * for allowlist membership — the allowlist is tool-level, not
    * invocation-level.
    *
-   * Non-core tools (MCP, Skill, Agent, etc.) skip the NON-EMPTY coreTools
-   * allowlist check because they are dynamically discovered or essential
-   * for system operation (an explicitly empty allowlist still disables
-   * them, see {@link isToolDisabledByCoreToolsAllowList}). The
-   * `settings.tools.eager` allowlist does apply to them (except the
-   * exempt families, see {@link getToolRegistrationStatus}), which is
-   * how e.g. `send_message` / `update_goal` schemas are kept out of the
-   * eager model request (#9827) — but it only ever demotes them to
+   * Non-core tools (MCP, Skill, Agent, etc.) skip the coreTools allowlist
+   * check because they are dynamically discovered or essential for system
+   * operation. The `settings.tools.eager` allowlist does apply to them
+   * (except the exempt families, see {@link getToolRegistrationStatus}),
+   * which is how e.g. `send_message` / `update_goal` schemas are kept out
+   * of the eager model request (#9827) — but it only ever demotes them to
    * `deferred`, so this method still reports them enabled.
    */
   async isToolEnabled(toolName: string): Promise<boolean> {
@@ -800,25 +750,13 @@ export class PermissionManager {
    * demotes unlisted tools to `deferred` — the legacy coreTools knob keeps
    * its documented hard-disable semantic: an unlisted core tool is not
    * registered at all.
-   *
-   * An explicitly EMPTY allowlist (`tools.core: []`) is the deliberate
-   * "no tools at all" configuration and excludes EVERY tool — non-core
-   * tools (MCP, Skill, Agent, synthetic system tools) included — so the
-   * documented empty allowlist yields an actual tool-free session instead
-   * of silently sending every schema (#10065). Only a NON-EMPTY allowlist
-   * keeps the historical non-core bypass. `undefined`/`null`/non-array
-   * coreTools mean no restriction (see `initialize()`).
    */
   isToolDisabledByCoreToolsAllowList(toolName: string): boolean {
-    if (this.coreToolsAllowList === null) {
-      return false;
-    }
-    if (this.isCoreToolsAllowListEmpty()) {
-      return true;
-    }
     const canonicalName = resolveToolName(toolName);
     return (
       this.isCoreTool(canonicalName) &&
+      this.coreToolsAllowList !== null &&
+      this.coreToolsAllowList.size > 0 &&
       !this.coreToolsAllowList.has(canonicalName)
     );
   }
@@ -905,9 +843,7 @@ export class PermissionManager {
    * (deny always wins over eager-allowlist membership), or the legacy
    * `coreTools` allowlist, whose documented semantic is hard exclusion
    * and which — unlike `tools.eager` — predates the deferred demotion and
-   * is set deliberately (#9827). That gate runs BEFORE the allowlist
-   * exemptions so an explicitly empty `tools.core: []` disables even the
-   * exempt families (MCP, `structured_output`, ...) (#10065).
+   * is set deliberately (#9827).
    */
   async getToolRegistrationStatus(
     toolName: string,
@@ -923,10 +859,7 @@ export class PermissionManager {
       return 'disabled';
     }
 
-    // The legacy coreTools allowlist keeps its hard-disable semantic — and
-    // an explicitly empty one disables every tool, exempt families
-    // included, so `tools.core: []` is an actual tool-free configuration
-    // rather than silently sending every schema (#10065).
+    // The legacy coreTools allowlist keeps its hard-disable semantic.
     if (this.isToolDisabledByCoreToolsAllowList(canonicalName)) {
       return 'disabled';
     }
@@ -951,26 +884,6 @@ export class PermissionManager {
    */
   isEagerToolAllowListActive(): boolean {
     return this.eagerToolAllowList !== null;
-  }
-
-  /**
-   * Whether the coreTools allowlist is explicitly empty (`tools.core: []`
-   * in settings). A bare/valueless `--core-tools` never produces this
-   * state — `loadCliConfig` treats an argv-sourced empty list as absent —
-   * and neither do `null`/non-array values, which `initialize()` treats
-   * as no restriction; an all-empty-string list (`[""]`) does, because
-   * name-less entries are dropped when the allowlist is built (#10065).
-   * When true, `isToolEnabled()` rejects EVERY tool —
-   * core and non-core alike — so user-facing remediation advice must name
-   * this knob instead of promising re-enablement through other gates
-   * (e.g. adding a `permissions.allow` rule can never satisfy an empty
-   * coreTools allowlist, #10065). `undefined`/`null`/non-array coreTools
-   * (no restriction) and non-empty allowlists both return false.
-   */
-  isCoreToolsAllowListEmpty(): boolean {
-    return (
-      this.coreToolsAllowList !== null && this.coreToolsAllowList.size === 0
-    );
   }
 
   /**

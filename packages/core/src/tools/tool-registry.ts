@@ -298,30 +298,6 @@ export class ToolRegistry {
       );
       return;
     }
-    // An explicitly empty coreTools allowlist (`tools.core: []`) disables
-    // every tool. Built-ins are already skipped at `registerLazy`
-    // (config.ts) and command-discovered tools at the async
-    // `isToolEnabled` gate below in `discoverAndRegisterToolsFromCommand`,
-    // but MCP-discovered tools only flow through `registerTool` — both the
-    // legacy `McpClient.discover()` path and the pooled
-    // `SessionMcpView.applyTools` path end here. Without this guard they
-    // would stay registered and advertised under `[]`, then every call
-    // would be rejected at the runtime gate: advertised-then-rejected,
-    // the exact failure mode the empty allowlist is meant to remove
-    // (#10065). The optional call keeps scoped PermissionManager shims
-    // (installed via `as unknown as PermissionManager`) from throwing
-    // until they grow the method.
-    const pmForEmptyGate = this.config.getPermissionManager?.();
-    if (
-      pmForEmptyGate &&
-      typeof pmForEmptyGate.isCoreToolsAllowListEmpty === 'function' &&
-      pmForEmptyGate.isCoreToolsAllowListEmpty()
-    ) {
-      debugLogger.info(
-        `Tool "${tool.name}" skipped: tools.core is an explicitly empty allowlist (#10065).`,
-      );
-      return;
-    }
     // A name collision can happen against either the eager `tools` map
     // (already-instantiated tools) or the lazy `factories` map (registered
     // but not yet constructed — `structured_output` lives here when

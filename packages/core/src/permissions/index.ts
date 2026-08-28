@@ -6,10 +6,7 @@
 
 export * from './types.js';
 export * from './rule-parser.js';
-export {
-  PermissionManager,
-  isNamelessCoreToolsEntry,
-} from './permission-manager.js';
+export { PermissionManager } from './permission-manager.js';
 export type { PermissionManagerConfig } from './permission-manager.js';
 export { extractShellOperations } from './shell-semantics.js';
 export type { ShellOperation } from './shell-semantics.js';

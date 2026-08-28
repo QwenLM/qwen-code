@@ -26,10 +26,7 @@ import {
   buildHumanReadableRuleLabel,
   TOOL_NAME_ALIASES,
 } from './rule-parser.js';
-import {
-  PermissionManager,
-  isNamelessCoreToolsEntry,
-} from './permission-manager.js';
+import { PermissionManager } from './permission-manager.js';
 import type { PermissionManagerConfig } from './permission-manager.js';
 import { normalizeToolNameForProvider } from '../utils/tool-name-utils.js';
 import { ToolNames, ToolDisplayNames } from '../tools/tool-names.js';
@@ -2569,127 +2566,11 @@ describe('PermissionManager', () => {
       expect(await pm.isToolEnabled('read_file')).toBe(false);
     });
 
-    it('empty coreTools disables every tool', async () => {
+    it('empty coreTools: all tools enabled (no whitelist restriction)', async () => {
       pm = new PermissionManager(makeConfig({ coreTools: [] }));
-      pm.initialize();
-      expect(await pm.isToolEnabled('read_file')).toBe(false);
-      expect(await pm.isToolEnabled('run_shell_command')).toBe(false);
-      expect(await pm.isToolEnabled('agent')).toBe(false);
-      // The empty gate must also win against the `isToolEnabled`
-      // exemptions: `structured_output` bypasses the permissions.allow
-      // gate and `mcp__*` names bypass non-empty coreTools allowlists,
-      // so pin both as disabled under `[]` (#10065).
-      expect(await pm.isToolEnabled('structured_output')).toBe(false);
-      expect(await pm.isToolEnabled('mcp__server__tool')).toBe(false);
-    });
-
-    it('all-empty-string coreTools collapses to the empty allowlist, not a [""] allowlist', async () => {
-      // `"core": [""]` (e.g. an unset-variable expansion written into
-      // settings) carries no tool name; it must behave exactly like the
-      // explicit `[]` — `isCoreToolsAllowListEmpty()` true and every tool
-      // rejected — instead of a size-1 allowlist matching nothing that
-      // silently disables tools while neither diagnostic fires (#10065).
-      pm = new PermissionManager(makeConfig({ coreTools: [''] }));
-      pm.initialize();
-      expect(pm.isCoreToolsAllowListEmpty()).toBe(true);
-      expect(await pm.isToolEnabled('read_file')).toBe(false);
-      expect(await pm.isToolEnabled('agent')).toBe(false);
-      expect(await pm.isToolEnabled('structured_output')).toBe(false);
-
-      // Whitespace-only entries carry no name either.
-      pm = new PermissionManager(makeConfig({ coreTools: [' '] }));
-      pm.initialize();
-      expect(pm.isCoreToolsAllowListEmpty()).toBe(true);
-
-      // A list still naming a tool keeps its non-empty semantic.
-      pm = new PermissionManager(makeConfig({ coreTools: ['', 'read_file'] }));
-      pm.initialize();
-      expect(pm.isCoreToolsAllowListEmpty()).toBe(false);
-      expect(await pm.isToolEnabled('read_file')).toBe(true);
-    });
-
-    it('coreTools entries without a usable parsed name collapse to the empty allowlist', async () => {
-      // A non-empty raw string can still carry no tool name: `"()"` and
-      // mangled specifiers like `"(ls -l)"` parse to `toolName: ''`, and
-      // unbalanced-paren entries parse to `invalid` rules. They must be
-      // dropped exactly like empty strings — collapsing such a list to the
-      // explicit empty allowlist with both #10065 diagnostics — instead of
-      // forming a size-1 `{''}` allowlist that matches nothing while
-      // `isCoreToolsAllowListEmpty()` stays false and every core tool is
-      // silently disabled (#10080).
-      for (const coreTools of [['()'], ['(ls -l)'], ['Bash(ls'], ['', '()']]) {
-        pm = new PermissionManager(makeConfig({ coreTools }));
-        pm.initialize();
-        expect(pm.isCoreToolsAllowListEmpty()).toBe(true);
-        expect(await pm.isToolEnabled('read_file')).toBe(false);
-        expect(await pm.isToolEnabled('mcp__server__tool')).toBe(false);
-      }
-
-      // A list still naming a real tool keeps its non-empty semantic even
-      // when mixed with name-less entries.
-      pm = new PermissionManager(
-        makeConfig({ coreTools: ['()', 'read_file'] }),
-      );
-      pm.initialize();
-      expect(pm.isCoreToolsAllowListEmpty()).toBe(false);
-      expect(await pm.isToolEnabled('read_file')).toBe(true);
-    });
-
-    it('non-string coreTools entries are dropped without throwing', async () => {
-      // Settings loading performs no element validation (the schema
-      // declares only `type: 'array'`), so a hand-edited `"core": [42]`
-      // — or a mixed `["read_file", 42]` — reaches `initialize()` raw.
-      // The `typeof t === 'string'` half of the filter must drop the
-      // garbage instead of letting `parseRule(42)` throw while the
-      // allowlist is built (#10080).
-      pm = new PermissionManager(
-        makeConfig({ coreTools: [42 as unknown as string] }),
-      );
-      expect(() => pm.initialize()).not.toThrow();
-      // An all-non-string list names nothing, so it collapses to the
-      // explicit empty allowlist exactly like `[]` / `[""]` — both
-      // #10065 diagnostics stay reachable.
-      expect(pm.isCoreToolsAllowListEmpty()).toBe(true);
-      expect(await pm.isToolEnabled('read_file')).toBe(false);
-
-      // A mixed list keeps its named tool and drops the garbage entry.
-      pm = new PermissionManager(
-        makeConfig({ coreTools: ['read_file', 42 as unknown as string] }),
-      );
-      expect(() => pm.initialize()).not.toThrow();
-      expect(pm.isCoreToolsAllowListEmpty()).toBe(false);
-      expect(await pm.isToolEnabled('read_file')).toBe(true);
-      expect(await pm.isToolEnabled('run_shell_command')).toBe(false);
-    });
-
-    it('undefined coreTools keeps tools enabled', async () => {
-      pm = new PermissionManager(makeConfig());
       pm.initialize();
       expect(await pm.isToolEnabled('read_file')).toBe(true);
       expect(await pm.isToolEnabled('run_shell_command')).toBe(true);
-      expect(await pm.isToolEnabled('agent')).toBe(true);
-    });
-
-    it('null or non-array coreTools is unrestricted, not an empty allowlist', async () => {
-      // `"tools": { "core": null }` is the common JSON idiom for clearing
-      // the deprecated key, and settings loading performs no type
-      // validation, so null (or any non-array value) reaches
-      // `initialize()` raw. It must not throw and must behave like "no
-      // allowlist", not like the tool-disabling explicit `[]`.
-      pm = new PermissionManager(
-        makeConfig({ coreTools: null as unknown as string[] }),
-      );
-      expect(() => pm.initialize()).not.toThrow();
-      expect(pm.isCoreToolsAllowListEmpty()).toBe(false);
-      expect(await pm.isToolEnabled('read_file')).toBe(true);
-      expect(await pm.isToolEnabled('agent')).toBe(true);
-
-      pm = new PermissionManager(
-        makeConfig({ coreTools: {} as unknown as string[] }),
-      );
-      expect(() => pm.initialize()).not.toThrow();
-      expect(pm.isCoreToolsAllowListEmpty()).toBe(false);
-      expect(await pm.isToolEnabled('read_file')).toBe(true);
     });
 
     it('coreTools allowlist + deny rule: deny takes precedence for listed tools', async () => {
@@ -2952,8 +2833,7 @@ describe('PermissionManager', () => {
 
     it('an explicitly empty list is active and defers everything', async () => {
       // `[]` is an active allowlist that names nothing; `tools.core` differs
-      // only in effect: its explicitly empty list stays active and disables
-      // every tool instead of deferring (#10065).
+      // because its empty list is treated as unset.
       // This is the gentler answer for constrained-decoding backends: the
       // eager request carries almost no tool schemas, but every tool is
       // still registered and reachable via ToolSearch.
@@ -4414,25 +4294,5 @@ describe('matchesRule — param matcher type guards', () => {
         { count: 42 },
       ),
     ).toBe(true);
-  });
-});
-describe('isNamelessCoreToolsEntry', () => {
-  // The helper is the single shared classification behind both the gate in
-  // PermissionManager.initialize() and the CLI startup notice; pin it
-  // directly so either call site rewinding to a private inline predicate
-  // cannot hide behind the other (#10080).
-  it('classifies non-strings, blank strings, and unparseable entries as name-less', () => {
-    expect(isNamelessCoreToolsEntry(123)).toBe(true);
-    expect(isNamelessCoreToolsEntry('')).toBe(true);
-    expect(isNamelessCoreToolsEntry(' ')).toBe(true);
-    expect(isNamelessCoreToolsEntry('()')).toBe(true);
-    expect(isNamelessCoreToolsEntry('(ls -l)')).toBe(true);
-    expect(isNamelessCoreToolsEntry('Bash(ls')).toBe(true);
-  });
-
-  it('classifies entries naming a tool as usable', () => {
-    expect(isNamelessCoreToolsEntry('read_file')).toBe(false);
-    expect(isNamelessCoreToolsEntry('Bash(npm test)')).toBe(false);
-    expect(isNamelessCoreToolsEntry(' mcp__server__tool ')).toBe(false);
   });
 });

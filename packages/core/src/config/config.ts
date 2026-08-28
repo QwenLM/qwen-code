@@ -2584,9 +2584,7 @@ export class Config {
     );
     // An explicitly empty array is preserved as an ACTIVE-but-empty
     // allowlist (defer everything); only `undefined` means "no
-    // restriction". `tools.core` differs only in effect: its explicitly
-    // empty list stays active and disables every tool instead of
-    // deferring (#10065).
+    // restriction". `tools.core` differs: its empty list is treated as unset.
     this.eagerTools =
       params.eagerTools === undefined
         ? undefined

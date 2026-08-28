@@ -34,7 +34,6 @@ import {
   createDebugLogger,
   NativeLspService,
   isBareMode,
-  isNamelessCoreToolsEntry,
   isTruthy,
   isSafeModeEnv,
   isToolEnabled,
@@ -918,18 +917,8 @@ export async function parseArguments(): Promise<CliArgs> {
           type: 'array',
           string: true,
           description: 'Core tool paths',
-          // Empty entries carry no tool name (e.g. a script expanding an
-          // unset variable — `qwen --core-tools "$TOOLS"` — hands yargs
-          // `[""]`); drop them so the flag collapses to the absent-flag
-          // path instead of a one-entry allowlist that matches nothing
-          // and silently disables every tool (#10065).
           coerce: (tools: string[]) =>
-            tools.flatMap((tool) =>
-              tool
-                .split(',')
-                .map((t) => t.trim())
-                .filter((t) => t !== ''),
-            ),
+            tools.flatMap((tool) => tool.split(',').map((t) => t.trim())),
         })
         .option('exclude-tools', {
           type: 'array',
@@ -1784,47 +1773,9 @@ export async function loadCliConfig(
       '⚠ Safe mode: --core-tools flag is ignored (settings-sourced core tools are also disabled).\n',
     );
   }
-  // An explicit `tools.core: []` in settings disables every tool for the
-  // session (the empty-allowlist semantic of #10065). Give the user one
-  // visible startup notice instead of failing every tool call silently;
-  // the argv flag wins over settings when valued, so only the settings
-  // path can resolve to the empty allowlist here. Entries carrying no
-  // tool name — empty/whitespace strings, non-string garbage, malformed
-  // rules, and mangled specifiers like `"()"` (e.g. an unset-variable or
-  // template expansion written into settings) — collapse to the same
-  // empty allowlist in `PermissionManager.initialize()`; the gate and
-  // this notice share the `isNamelessCoreToolsEntry` classification from
-  // core so they cannot drift apart (#10065, #10080).
-  if (
-    !bareMode &&
-    !safeMode &&
-    !(argv.coreTools && argv.coreTools.length > 0) &&
-    Array.isArray(settings.tools?.core) &&
-    settings.tools.core.every((t) => isNamelessCoreToolsEntry(t))
-  ) {
-    writeStderrLine(
-      '⚠ tools.core is an empty allowlist: all tools are disabled for this session. Add tool names to tools.core or remove the key to re-enable tools (#10065).\n',
-    );
-  }
-  // Settings loading performs no element validation (the schema declares only
-  // `type: 'array'`), so a hand-edited `"core": [42]` — or a mixed
-  // `["read_file", 42]` — would otherwise reach Config.coreTools and
-  // resolvedCoreTools raw, where `parseRule(42)`/`entry.trim()` throw a
-  // TypeError during tool-registry construction instead of the entry being
-  // dropped (#10080). Only an ARRAY activates the allowlist (a non-array
-  // normalizes to ABSENT/undefined, as the pre-#10065 `||` chain did); drop
-  // non-string entries at the boundary. Empty/whitespace strings are KEPT so
-  // they collapse to the explicit empty allowlist (with both #10065
-  // diagnostics) in PermissionManager.initialize() rather than being treated
-  // as ABSENT.
-  const settingsCoreTools: string[] | undefined = Array.isArray(
-    settings.tools?.core,
-  )
-    ? settings.tools.core.filter((t) => typeof t === 'string')
-    : undefined;
   const resolvedCoreTools: string[] = [
     ...(bareMode || safeMode ? [] : (argv.coreTools ?? [])),
-    ...(bareMode || safeMode ? [] : (settingsCoreTools ?? [])),
+    ...(bareMode || safeMode ? [] : (settings.tools?.core ?? [])),
   ];
   const mergedAllow: string[] = [
     ...(bareMode || safeMode ? [] : (settings.permissions?.allow ?? [])),
@@ -1891,9 +1842,7 @@ export async function loadCliConfig(
   //
   // An explicitly empty array must survive as an empty array, not collapse
   // into "unset": `[]` is an active allowlist naming nothing (defer
-  // everything). `tools.core` differs only in effect: its explicitly
-  // empty list stays active and disables every tool instead of
-  // deferring (#10065).
+  // everything). `tools.core` differs: its empty list is treated as unset.
   // `normalizeDisabledToolList` maps undefined to `[]`,
   // so the Array.isArray guard has to come first — without it, absent and
   // explicitly-empty would reach core as the same value, which is exactly
@@ -2252,26 +2201,10 @@ export async function loadCliConfig(
     systemPrompt: argv.systemPrompt,
     appendSystemPrompt: argv.appendSystemPrompt,
     // Legacy fields – kept for backward compatibility with getCoreTools() etc.
-    // A bare `--core-tools` flag with no values yields `[]` from yargs.
-    // Treat an argv-sourced empty list as ABSENT, not as "disable every
-    // tool": only an explicit `tools.core: []` in settings (or a valued
-    // flag) should carry the empty-allowlist semantic, so a forgotten
-    // flag value — or a script expanding an unset variable into the flag
-    // — cannot silently flip a session to tool-free (#10065). The
-    // settings leg reads `settingsCoreTools` because settings loading
-    // performs no element validation: a hand-edited non-array `"core": ""`
-    // normalizes to ABSENT (as the pre-#10065 `||` chain did), and non-string
-    // array entries (`"core": [42]`) are dropped — either shape flowing raw
-    // into Config.coreTools would make `getCoreTools()?.some(...)` throw
-    // during tool-registry construction (#10080). Empty-string entries are
-    // kept there and dropped where the allowlist is built
-    // (PermissionManager.initialize, #10065).
     coreTools:
       bareMode || safeMode
         ? undefined
-        : argv.coreTools?.length
-          ? argv.coreTools
-          : settingsCoreTools,
+        : argv.coreTools || settings.tools?.core || undefined,
     allowedTools:
       bareMode || safeMode
         ? argv.allowedTools || undefined

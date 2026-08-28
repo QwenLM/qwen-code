@@ -335,11 +335,11 @@ describe('relaxSchemaForFunctionCalling', () => {
     ).toBe(false);
   });
 
-  it('keeps additionalProperties:false when there are no properties to promote', () => {
-    const empty = { type: 'object', additionalProperties: false };
-    expect(relaxSchemaForFunctionCalling(empty)['additionalProperties']).toBe(
-      false,
-    );
+  it('keeps additionalProperties:false when no empty properties map is declared', () => {
+    const schema = { type: 'object', additionalProperties: false };
+    expect(
+      relaxSchemaForFunctionCalling(schema)['additionalProperties'],
+    ).toBe(false);
   });
 
   it('relaxes nested object levels independently', () => {
@@ -496,6 +496,50 @@ describe('relaxSchemaForFunctionCalling', () => {
           },
         },
         disabled: {
+          type: 'array',
+          items: { type: 'string' },
+        },
+      },
+    });
+  });
+
+  it('removes grammar-hostile empty objects and repetition limits', () => {
+    const schema = {
+      type: 'object',
+      properties: {
+        empty: {
+          type: 'object',
+          properties: {},
+          additionalProperties: false,
+        },
+        bounded: { type: 'string', maxLength: 1999 },
+        long: { type: 'string', maxLength: 2000 },
+        padded: { type: 'string', minLength: 2000 },
+        many: {
+          type: 'array',
+          maxItems: 2000,
+          items: { type: 'string' },
+        },
+        largeBatch: {
+          type: 'array',
+          minItems: 2000,
+          items: { type: 'string' },
+        },
+      },
+    };
+
+    expect(relaxSchemaForFunctionCalling(schema)).toEqual({
+      type: 'object',
+      properties: {
+        empty: { type: 'object' },
+        bounded: { type: 'string', maxLength: 1999 },
+        long: { type: 'string' },
+        padded: { type: 'string' },
+        many: {
+          type: 'array',
+          items: { type: 'string' },
+        },
+        largeBatch: {
           type: 'array',
           items: { type: 'string' },
         },

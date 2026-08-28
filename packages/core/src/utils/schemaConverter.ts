@@ -191,14 +191,17 @@ function toOpenAPI30(schema: Record<string, unknown>): Record<string, unknown> {
  * client-side validation error until loop detection kills the run.
  *
  * The relaxation is deliberately surgical:
- * - `additionalProperties: false` is removed ONLY on object levels that
- *   declare optional properties (some `properties` key missing from
- *   `required`). Levels where every property is required keep the
- *   constraint — there is nothing for a gateway to promote.
+ * - `additionalProperties: false` is removed on object levels that declare
+ *   optional properties (some `properties` key missing from `required`) or
+ *   an empty `properties` map. Levels where every property is required keep
+ *   the constraint — there is nothing for a gateway to promote.
  * - `$schema` / `$id` metadata is dropped at every schema level (some
  *   gateways reject unknown keywords).
  * - `uniqueItems` is dropped at every schema level because some
  *   OpenAI-compatible function-calling endpoints reject it.
+ * - Empty object declarations and string / array length limits at or above
+ *   2000 are dropped because grammar-based endpoints can turn them into
+ *   invalid or rejected repetition rules.
  * - Other constraints pass through untouched; client-side
  *   `validateToolParams` still enforces the full source schema, so the
  *   constraint is relaxed on the wire only.
@@ -229,15 +232,33 @@ export function relaxSchemaForFunctionCalling(
       properties !== null &&
       !Array.isArray(properties) &&
       Object.keys(properties).some((key) => !required.includes(key));
+    const hasEmptyProperties =
+      typeof properties === 'object' &&
+      properties !== null &&
+      !Array.isArray(properties) &&
+      Object.keys(properties).length === 0;
 
     for (const [key, value] of Object.entries(source)) {
       if (key === '$schema' || key === '$id' || key === 'uniqueItems') {
         continue;
       }
+      if (key === 'properties' && hasEmptyProperties) {
+        continue;
+      }
+      if (
+        (key === 'minLength' ||
+          key === 'maxLength' ||
+          key === 'minItems' ||
+          key === 'maxItems') &&
+        typeof value === 'number' &&
+        value >= 2000
+      ) {
+        continue;
+      }
       if (
         key === 'additionalProperties' &&
         value === false &&
-        hasOptionalProperties
+        (hasOptionalProperties || hasEmptyProperties)
       ) {
         continue;
       }
