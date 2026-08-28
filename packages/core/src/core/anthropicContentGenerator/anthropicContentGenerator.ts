@@ -27,7 +27,6 @@ type MessageCreateParamsNonStreaming =
   Anthropic.MessageCreateParamsNonStreaming;
 type MessageCreateParamsStreaming = Anthropic.MessageCreateParamsStreaming;
 type RawMessageStreamEvent = Anthropic.RawMessageStreamEvent;
-import { safeJsonParse } from '../../utils/safeJsonParse.js';
 import { AnthropicContentConverter } from './converter.js';
 import { buildAnthropicUsageMetadata } from './usage.js';
 import {
@@ -46,6 +45,10 @@ import {
   parsePositiveIntegerEnvValue,
 } from '../tokenLimits.js';
 import { setToolCallPreparations } from '../tool-call-preparation.js';
+import { InvalidStreamError } from '../invalid-stream-error.js';
+import { parseToolCallArguments } from '../tool-call-arguments.js';
+import { classifyRetryError } from '../../utils/retryErrorClassification.js';
+import { isRetryableStreamTransportError } from '../stream-transport-retry.js';
 import {
   reportAnthropicEvent,
   reportAnthropicFollowingRequest,
@@ -382,7 +385,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
       perRequestAc?.abort();
     }
 
-    return this.converter.convertAnthropicResponseToGemini(response);
+    return this.converter.convertAnthropicResponseToLlm(response);
   }
 
   async generateContentStream(
@@ -743,7 +746,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
     const cacheRetentionByBlock =
       this.contentGeneratorConfig.cacheRetentionByBlock;
 
-    const { system, messages } = this.converter.convertGeminiRequestToAnthropic(
+    const { system, messages } = this.converter.convertLlmRequestToAnthropic(
       request,
       {
         // DeepSeek normalization and injection run together. Proxy-hosted
@@ -768,15 +771,12 @@ export class AnthropicContentGenerator implements ContentGenerator {
     );
 
     const tools = request.config?.tools
-      ? await this.converter.convertGeminiToolsToAnthropic(
-          request.config.tools,
-          {
-            enableCacheControl,
-            useGlobalCacheScope,
-            cacheRetention,
-            cacheRetentionByBlock,
-          },
-        )
+      ? await this.converter.convertLlmToolsToAnthropic(request.config.tools, {
+          enableCacheControl,
+          useGlobalCacheScope,
+          cacheRetention,
+          cacheRetentionByBlock,
+        })
       : undefined;
 
     // Map Gemini-style toolConfig.functionCallingConfig.mode to Anthropic's
@@ -1159,6 +1159,22 @@ export class AnthropicContentGenerator implements ContentGenerator {
     }
   }
 
+  private responseHasAssistantPayload(
+    response: GenerateContentResponse,
+  ): boolean {
+    return Boolean(
+      response.candidates?.some((candidate) =>
+        candidate.content?.parts?.some(
+          (part) =>
+            part.text ||
+            part.thought ||
+            part.thoughtSignature ||
+            part.functionCall,
+        ),
+      ),
+    );
+  }
+
   private async *processStream(
     stream: AsyncIterable<RawMessageStreamEvent>,
     telemetryAttempt: GenAiAttemptHandle | undefined,
@@ -1176,7 +1192,19 @@ export class AnthropicContentGenerator implements ContentGenerator {
     let finishReason: string | undefined;
 
     const blocks = new Map<number, StreamingBlockState>();
+    const deferredToolCalls: GenerateContentResponse[] = [];
+    let hasEmptyToolCall = false;
+    let hasMalformedToolCall = false;
+    let hasNonObjectToolCall = false;
+    let upstreamStreamFailed = false;
+    let upstreamStreamError: unknown;
     const collectedResponses: GenerateContentResponse[] = [];
+    const throwMalformedToolCall = (detail: string): never => {
+      throw new InvalidStreamError(
+        `Anthropic stream contained malformed tool call arguments: ${detail}`,
+        'MALFORMED_TOOL_CALL',
+      );
+    };
     let messageStartUsagePending = false;
     const takePendingMessageStartUsage = () => {
       if (!messageStartUsagePending) return undefined;
@@ -1191,7 +1219,16 @@ export class AnthropicContentGenerator implements ContentGenerator {
       });
     };
 
-    for await (const event of stream) {
+    const capturedStream = (async function* () {
+      try {
+        yield* stream;
+      } catch (error) {
+        upstreamStreamFailed = true;
+        upstreamStreamError = error;
+      }
+    })();
+
+    for await (const event of capturedStream) {
       reportAnthropicEvent(telemetryAttempt, event);
       switch (event.type) {
         case 'message_start': {
@@ -1253,7 +1290,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
             typeof name === 'string' &&
             name.length > 0
           ) {
-            const chunk = this.buildGeminiChunk(
+            const chunk = this.buildLlmChunk(
               undefined,
               messageId,
               model,
@@ -1274,7 +1311,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
           if (deltaType === 'text_delta') {
             const text = 'text' in event.delta ? event.delta.text : '';
             if (text) {
-              const chunk = this.buildGeminiChunk(
+              const chunk = this.buildLlmChunk(
                 { text },
                 messageId,
                 model,
@@ -1288,7 +1325,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
             const thinking =
               (event.delta as { thinking?: string }).thinking || '';
             if (thinking) {
-              const chunk = this.buildGeminiChunk(
+              const chunk = this.buildLlmChunk(
                 { text: thinking, thought: true },
                 messageId,
                 model,
@@ -1303,7 +1340,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
               (event.delta as { signature?: string }).signature || '';
             if (signature) {
               blockState.signature += signature;
-              const chunk = this.buildGeminiChunk(
+              const chunk = this.buildLlmChunk(
                 { thought: true, thoughtSignature: signature },
                 messageId,
                 model,
@@ -1326,22 +1363,33 @@ export class AnthropicContentGenerator implements ContentGenerator {
           const index = event.index ?? 0;
           const blockState = blocks.get(index);
           if (blockState?.type === 'tool_use') {
-            const args = safeJsonParse(blockState.inputJson || '{}', {});
-            const chunk = this.buildGeminiChunk(
-              {
-                functionCall: {
-                  id: blockState.id,
-                  name: blockState.name,
-                  args,
+            const inputJson = blockState.inputJson;
+            const parseResult = inputJson
+              ? parseToolCallArguments(inputJson)
+              : { ok: true as const, value: {} };
+            if (!parseResult.ok) {
+              if (parseResult.reason === 'MALFORMED_JSON') {
+                hasMalformedToolCall = true;
+              } else {
+                hasNonObjectToolCall = true;
+              }
+            } else {
+              const chunk = this.buildLlmChunk(
+                {
+                  functionCall: {
+                    id: blockState.id,
+                    name: blockState.name,
+                    args: parseResult.value,
+                  },
                 },
-              },
-              messageId,
-              model,
-              undefined,
-              takePendingMessageStartUsage(),
-            );
-            collectedResponses.push(chunk);
-            yield chunk;
+                messageId,
+                model,
+                undefined,
+                takePendingMessageStartUsage(),
+              );
+              hasEmptyToolCall ||= !inputJson;
+              deferredToolCalls.push(chunk);
+            }
           }
           blocks.delete(index);
           break;
@@ -1350,6 +1398,49 @@ export class AnthropicContentGenerator implements ContentGenerator {
           const stopReasonValue = event.delta.stop_reason;
           if (stopReasonValue) {
             finishReason = stopReasonValue;
+            const hasOpenToolCall = [...blocks.values()].some(
+              (block) => block.type === 'tool_use',
+            );
+            const hasUnconfirmedEmptyToolCall =
+              hasEmptyToolCall && stopReasonValue !== 'tool_use';
+            const hasTruncatedToolCall =
+              hasMalformedToolCall ||
+              hasOpenToolCall ||
+              hasUnconfirmedEmptyToolCall;
+
+            if (hasNonObjectToolCall) {
+              throwMalformedToolCall(
+                'completed argument buffer had a non-object JSON root',
+              );
+            } else if (
+              hasTruncatedToolCall &&
+              stopReasonValue === 'max_tokens'
+            ) {
+              // A zero-byte, malformed, or open argument buffer at max_tokens is
+              // truncation, not an executable call. Emit only MAX_TOKENS so the
+              // existing output-limit escalation/recovery path can retry with a
+              // larger budget; the entire deferred tool-call batch is discarded.
+              deferredToolCalls.length = 0;
+              hasEmptyToolCall = false;
+              hasMalformedToolCall = false;
+              for (const [index, block] of blocks) {
+                if (block.type === 'tool_use') blocks.delete(index);
+              }
+            } else if (hasTruncatedToolCall) {
+              throwMalformedToolCall(
+                hasOpenToolCall
+                  ? 'tool-use block did not close before the stop reason'
+                  : hasMalformedToolCall
+                    ? 'completed argument buffer was not valid JSON'
+                    : 'empty argument buffer lacked a tool-use stop reason',
+              );
+            } else if (deferredToolCalls.length > 0) {
+              for (const chunk of deferredToolCalls.splice(0)) {
+                collectedResponses.push(chunk);
+                yield chunk;
+              }
+              hasEmptyToolCall = false;
+            }
           }
 
           // Some Anthropic-compatible providers may include additional usage fields
@@ -1389,7 +1480,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
 
           if (finishReason || event.usage) {
             messageStartUsagePending = false;
-            const chunk = this.buildGeminiChunk(
+            const chunk = this.buildLlmChunk(
               undefined,
               messageId,
               model,
@@ -1418,7 +1509,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
             cacheCreationTokensReported
           ) {
             messageStartUsagePending = false;
-            const chunk = this.buildGeminiChunk(
+            const chunk = this.buildLlmChunk(
               undefined,
               messageId,
               model,
@@ -1443,6 +1534,50 @@ export class AnthropicContentGenerator implements ContentGenerator {
           break;
       }
     }
+
+    const hasOpenToolCall = [...blocks.values()].some(
+      (block) => block.type === 'tool_use',
+    );
+    if (upstreamStreamFailed) {
+      const upstreamErrorClassification =
+        classifyRetryError(upstreamStreamError);
+      // Match LlmChat's replay boundary: only known mid-SSE socket cuts
+      // may release an already closed batch before the error is propagated.
+      if (
+        isRetryableStreamTransportError(upstreamErrorClassification) &&
+        deferredToolCalls.length > 0 &&
+        !hasEmptyToolCall &&
+        !hasMalformedToolCall &&
+        !hasNonObjectToolCall &&
+        !hasOpenToolCall
+      ) {
+        for (const chunk of deferredToolCalls.splice(0)) {
+          collectedResponses.push(chunk);
+          yield chunk;
+        }
+      }
+      throw upstreamStreamError;
+    }
+
+    const hasAssistantPayload = collectedResponses.some((response) =>
+      this.responseHasAssistantPayload(response),
+    );
+    if (
+      hasMalformedToolCall ||
+      hasNonObjectToolCall ||
+      deferredToolCalls.length > 0 ||
+      (hasOpenToolCall && hasAssistantPayload)
+    ) {
+      throwMalformedToolCall(
+        hasMalformedToolCall
+          ? 'stream ended with a malformed argument buffer'
+          : hasNonObjectToolCall
+            ? 'stream ended with a non-object argument root'
+            : deferredToolCalls.length > 0
+              ? 'stream ended before deferred tool calls were confirmed'
+              : 'stream ended with an open tool-use block',
+      );
+    }
   }
 
   // Some Anthropic-compatible gateways close the SSE stream with HTTP 200
@@ -1465,15 +1600,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
       hasFinishReason ||= candidates.some(
         (candidate) => candidate.finishReason !== undefined,
       );
-      hasAssistantPayload ||= candidates.some((candidate) =>
-        candidate.content?.parts?.some(
-          (part) =>
-            part.text ||
-            part.thought ||
-            part.thoughtSignature ||
-            part.functionCall,
-        ),
-      );
+      hasAssistantPayload ||= this.responseHasAssistantPayload(chunk);
       yield chunk;
     }
 
@@ -1498,13 +1625,13 @@ export class AnthropicContentGenerator implements ContentGenerator {
         ...(headers ? { headers } : {}),
       })) as Message;
       reportAnthropicResponse(fallbackAttempt, response);
-      yield this.converter.convertAnthropicResponseToGemini(response);
+      yield this.converter.convertAnthropicResponseToLlm(response);
     } catch (error) {
       throw redactProxyError(error);
     }
   }
 
-  private buildGeminiChunk(
+  private buildLlmChunk(
     part?: {
       text?: string;
       thought?: boolean;
@@ -1525,7 +1652,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
     const candidateParts = part ? [part as unknown as Part] : [];
     const mappedFinishReason =
       finishReason !== undefined
-        ? this.converter.mapAnthropicFinishReasonToGemini(finishReason)
+        ? this.converter.mapAnthropicFinishReasonToLlm(finishReason)
         : undefined;
     response.candidates = [
       {

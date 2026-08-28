@@ -296,10 +296,15 @@ describe('qwen serve — capabilities envelope', () => {
     // Pool tags (`mcp_workspace_pool`, `mcp_pool_restart`) ARE present
     // because the workspace MCP pool is on by default, as are
     // `workspace_settings`, `workspace_permissions`, `workspace_voice`,
-    // `workspace_trust`, `workspace_github_setup`, and
-    // `workspace_reload`. The CLI serve path always wires `persistSetting`, the
-    // workspace service, and route-local workspace helpers).
-    expect(caps.features).toEqual([
+    // `workspace_trust`, `workspace_github_setup`, and `workspace_reload`.
+    // `scheduled_task_session_reuse` appears only after the managed runtime
+    // mounts, so the fast-path bootstrap and runtime envelopes legitimately
+    // differ by that tag. Its transition is covered by the serve startup tests.
+    expect(
+      caps.features.filter(
+        (feature) => feature !== 'scheduled_task_session_reuse',
+      ),
+    ).toEqual([
       'health',
       'daemon_status',
       'capabilities',
@@ -353,6 +358,7 @@ describe('qwen serve — capabilities envelope', () => {
       'session_status',
       'session_close',
       'session_archive',
+      'session_storage_conflict_repair',
       'session_metadata',
       'session_organization',
       'session_export',
@@ -407,6 +413,7 @@ describe('qwen serve — capabilities envelope', () => {
       'workspace_qualified_rest_core',
       'extension_management_v2',
       'extension_git_credentials',
+      'extension_local_path_install',
       'workspace_persisted_transcript',
       'workspace_session_export',
       'workspace_archived_session_export',
@@ -414,6 +421,53 @@ describe('qwen serve — capabilities envelope', () => {
       'workspace_session_metadata',
       'voice_transcribe',
     ]);
+  });
+});
+
+describe('qwen serve — local Extension install', () => {
+  it('installs an absolute daemon-local directory into managed storage', async () => {
+    const source = path.join(homeDir, 'local-extension-source');
+    mkdirSync(source, { recursive: true });
+    writeFileSync(
+      path.join(source, 'qwen-extension.json'),
+      JSON.stringify({
+        name: 'daemon-local-path-e2e',
+        version: '1.0.0',
+      }),
+      'utf8',
+    );
+
+    const accepted = await client.installExtension({ source, consent: true });
+    await expect
+      .poll(
+        async () =>
+          (await client.extensionOperationStatus(accepted.operationId)).status,
+        { timeout: 10_000 },
+      )
+      .toBe('succeeded');
+
+    const operation = await client.extensionOperationStatus(
+      accepted.operationId,
+    );
+    expect(operation.result).toMatchObject({
+      status: 'installed',
+      source,
+      name: 'daemon-local-path-e2e',
+    });
+    const status = await client.workspaceExtensions();
+    const installed = status.extensions.find(
+      (extension) => extension.name === 'daemon-local-path-e2e',
+    );
+    expect(installed).toMatchObject({
+      source,
+      installType: 'local',
+    });
+    expect(installed?.path).not.toBe(source);
+    expect(
+      installed?.path.startsWith(
+        `${path.join(homeDir, '.qwen', 'extensions')}${path.sep}`,
+      ),
+    ).toBe(true);
   });
 });
 

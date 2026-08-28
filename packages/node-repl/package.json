@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/node-repl-mcp",
-  "version": "0.21.11",
+  "version": "0.1.0",
   "description": "Standalone MCP server exposing a session-persistent Node.js REPL (node_repl) — independent of qwen-code core.",
   "repository": {
     "type": "git",

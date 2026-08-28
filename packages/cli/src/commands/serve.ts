@@ -46,8 +46,8 @@ import { HEADLESS_YOLO_NO_SANDBOX_WARNING } from '../utils/headlessSafetyWarning
  * Pause the current async function indefinitely. Used after the daemon
  * listener is up so yargs `parse()` never resolves — if it did, the
  * top-level CLI would fall through to the interactive (TUI) entry point
- * in `gemini.tsx`. SIGINT / SIGTERM in `runQwenServe` is the sole exit
- * route.
+ * in `llm.tsx`. SIGINT / SIGTERM / SIGHUP in `runQwenServe` is the sole
+ * exit route.
  */
 function blockForever(): Promise<never> {
   return new Promise<never>(() => {});
@@ -611,9 +611,9 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
       .option('permission-response-timeout-ms', {
         type: 'number',
         description:
-          'Wall-clock timeout for a single human permission / ' +
-          'ask_user_question response in daemon (ACP) mode (ms). ' +
-          '0 = disabled (wait forever). Default: 300000 (5 min).',
+          'Wall-clock timeout for a human permission / ask_user_question ' +
+          'response in daemon (ACP) mode (ms). ' +
+          '0 or unset = disabled (wait indefinitely). Default: 0.',
       })
       .option('external-tool-guard-mode', {
         choices: ['off', 'required'] as const,

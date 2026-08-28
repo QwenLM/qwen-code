@@ -59,15 +59,10 @@ export const ToolNames = {
   READ_MCP_RESOURCE: 'read_mcp_resource',
   ENTER_WORKTREE: 'enter_worktree',
   EXIT_WORKTREE: 'exit_worktree',
-  // Computer Use tools (computer_use__*) are intentionally NOT enumerated here.
-  // Their full 35-tool surface is generated into computer-use/schemas.ts and
-  // registered via computer-use/index.ts (cast to ToolName). Duplicating a
-  // subset here only goes stale on every cua-driver version bump — review
-  // round 1 removed the old ocu-era 9-name list, which still carried
-  // `get_app_state` / `perform_secondary_action` that no longer exist.
   WORKFLOW: 'workflow',
   ARTIFACT: 'artifact',
   RECORD_ARTIFACT: 'record_artifact',
+  REPORT_FINDINGS: 'report_findings',
   GET_GOAL: 'get_goal',
   UPDATE_GOAL: 'update_goal',
   DISPLAY_IMAGE: 'display_image',
@@ -120,10 +115,10 @@ export const ToolDisplayNames = {
   READ_MCP_RESOURCE: 'ReadMcpResource',
   ENTER_WORKTREE: 'EnterWorktree',
   EXIT_WORKTREE: 'ExitWorktree',
-  // computer_use__* display names are not enumerated here (see ToolNames).
   WORKFLOW: 'Workflow',
   ARTIFACT: 'Artifact',
   RECORD_ARTIFACT: 'RecordArtifact',
+  REPORT_FINDINGS: 'ReportFindings',
   GET_GOAL: 'Goal',
   UPDATE_GOAL: 'UpdateGoal',
   DISPLAY_IMAGE: 'DisplayImage',

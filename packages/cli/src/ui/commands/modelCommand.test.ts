@@ -354,6 +354,86 @@ describe('modelCommand', () => {
     });
   });
 
+  it('switches the standalone session model without persisting defaults', async () => {
+    const setValue = vi.fn();
+    const switchModel = vi.fn().mockResolvedValue(undefined);
+    mockContext = createMockCommandContext({
+      executionMode: 'acp',
+      executionPolicy: {
+        allowSessionReset: false,
+        allowWorkspaceSettingsWrite: false,
+        persistModelSelection: false,
+        blockedBuiltinCommandNames: [],
+      },
+      invocation: { raw: '/model qwen-max', name: 'model', args: 'qwen-max' },
+      services: {
+        config: {
+          getContentGeneratorConfig: vi.fn().mockReturnValue({
+            model: 'qwen-plus',
+            authType: AuthType.QWEN_OAUTH,
+          }),
+          getAvailableModelsForAuthType: vi
+            .fn()
+            .mockReturnValue([{ id: 'qwen-max', label: 'Qwen Max' }]),
+          switchModel,
+          getModel: vi.fn().mockReturnValue('qwen-max'),
+          getAuthType: vi.fn().mockReturnValue(AuthType.QWEN_OAUTH),
+          getActiveRuntimeModelSnapshot: vi.fn().mockReturnValue(undefined),
+          getCurrentModelRegistryBaseUrl: vi.fn().mockReturnValue(undefined),
+          getChatRecordingService: vi.fn().mockReturnValue({
+            recordSessionModel: vi.fn().mockResolvedValue(true),
+          }),
+        },
+        settings: createMockSettings(setValue),
+      },
+    });
+
+    await modelCommand.action!(mockContext, 'qwen-max');
+
+    expect(switchModel).toHaveBeenCalledWith(
+      AuthType.QWEN_OAUTH,
+      'qwen-max',
+      undefined,
+    );
+    expect(setValue).not.toHaveBeenCalled();
+  });
+
+  it('rejects standalone model scope and auxiliary selectors before mutation', async () => {
+    const setValue = vi.fn();
+    const switchModel = vi.fn();
+    const setFastModel = vi.fn();
+    mockContext = createMockCommandContext({
+      executionMode: 'acp',
+      executionPolicy: {
+        allowSessionReset: false,
+        allowWorkspaceSettingsWrite: false,
+        persistModelSelection: false,
+        blockedBuiltinCommandNames: [],
+      },
+      services: {
+        config: {
+          getContentGeneratorConfig: vi.fn().mockReturnValue({
+            model: 'qwen-plus',
+            authType: AuthType.QWEN_OAUTH,
+          }),
+          switchModel,
+          setFastModel,
+        },
+        settings: createMockSettings(setValue),
+      },
+    });
+
+    await expect(
+      modelCommand.action!(mockContext, '--project qwen-max'),
+    ).resolves.toMatchObject({ type: 'message', messageType: 'error' });
+    await expect(
+      modelCommand.action!(mockContext, '--fast qwen-flash'),
+    ).resolves.toMatchObject({ type: 'message', messageType: 'error' });
+    expect(switchModel).not.toHaveBeenCalled();
+    expect(setFastModel).not.toHaveBeenCalled();
+    expect(setValue).not.toHaveBeenCalled();
+  });
+
   it('runs a trailing prompt on the given model inline without switching or persisting', async () => {
     const setValue = vi.fn();
     const switchModel = vi.fn().mockResolvedValue(undefined);

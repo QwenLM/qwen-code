@@ -12,11 +12,11 @@ import {
   Config,
   DEFAULT_QWEN_EMBEDDING_MODEL,
   FileDiscoveryService,
-  getAllGeminiMdFilenames,
+  getAllMemoryFilenames,
   loadServerHierarchicalMemory,
   type LoadServerHierarchicalMemoryOptions,
   type LoadServerHierarchicalMemoryResponse,
-  setGeminiMdFilename as setServerGeminiMdFilename,
+  setMemoryFilename as setServerMemoryFilename,
   resolveTelemetrySettings,
   FatalConfigError,
   Storage,
@@ -1176,9 +1176,9 @@ export async function parseArguments(): Promise<CliArgs> {
 // This function is now a thin wrapper around the server's implementation.
 // It's kept in the CLI for now as App.tsx directly calls it for memory refresh.
 // TODO: Consider if App.tsx should get memory via a server call or if Config should refresh itself.
-export async function loadHierarchicalGeminiMemory(
+export async function loadHierarchicalMemory(
   currentWorkingDirectory: string,
-  includeDirectoriesToReadGemini: readonly string[] = [],
+  includeDirectoriesToReadMemory: readonly string[] = [],
   fileService: FileDiscoveryService,
   extensionContextFilePaths: string[] = [],
   folderTrust: boolean,
@@ -1198,7 +1198,7 @@ export async function loadHierarchicalGeminiMemory(
   // Directly call the server function with the corrected path.
   return loadServerHierarchicalMemory(
     effectiveCwd,
-    includeDirectoriesToReadGemini,
+    includeDirectoriesToReadMemory,
     fileService,
     extensionContextFilePaths,
     folderTrust,
@@ -1535,7 +1535,7 @@ export async function loadCliConfig(
    */
   sessionMcpServers?: Record<string, MCPServerConfig>,
   /**
-   * Lifecycle handle for the settings file watcher started in `gemini.tsx`
+   * Lifecycle handle for the settings file watcher started in `llm.tsx`
    * before `Config.initialize()`. Passed through to `Config` so it can be
    * stopped during shutdown — only `stopWatching()` is exposed here to keep
    * core decoupled from the CLI-owned `SettingsWatcher` implementation.
@@ -1555,6 +1555,8 @@ export async function loadCliConfig(
    */
   hostPolicy?: {
     toolInvocationGuard?: ToolInvocationGuard;
+    /** Host-managed session whose exact private cwd is bound after bootstrap. */
+    provisionalWorkspace?: true;
     sessionRestore?: {
       projectionSource: (
         sessionId: string,
@@ -1562,6 +1564,7 @@ export async function loadCliConfig(
     };
   },
 ): Promise<Config> {
+  const provisionalWorkspace = hostPolicy?.provisionalWorkspace === true;
   const debugMode = isDebugMode(argv);
   if (debugMode && process.env['QWEN_DEBUG_LOG_FILE'] === undefined) {
     process.env['QWEN_DEBUG_LOG_FILE'] = '1';
@@ -1613,13 +1616,13 @@ export async function loadCliConfig(
 
   // Set the context filename in the server's memoryTool module BEFORE loading memory
   // TODO(b/343434939): This is a bit of a hack. The contextFileName should ideally be passed
-  // directly to the Config constructor in core, and have core handle setGeminiMdFilename.
-  // However, loadHierarchicalGeminiMemory is called *before* createServerConfig.
+  // directly to the Config constructor in core, and have core handle setMemoryFilename.
+  // However, loadHierarchicalMemory is called *before* createServerConfig.
   if (settings.context?.fileName) {
-    setServerGeminiMdFilename(settings.context.fileName);
+    setServerMemoryFilename(settings.context.fileName);
   } else {
     // Reset to default context filenames if not provided in settings.
-    setServerGeminiMdFilename(getAllGeminiMdFilenames());
+    setServerMemoryFilename(getAllMemoryFilenames());
   }
 
   // Automatically load output-language.md if it exists
@@ -1635,26 +1638,29 @@ export async function loadCliConfig(
 
   let outputLanguageFilePath: string | undefined;
   if (!bareMode && !safeMode) {
-    if (fs.existsSync(projectOutputLanguagePath)) {
+    if (!provisionalWorkspace && fs.existsSync(projectOutputLanguagePath)) {
       outputLanguageFilePath = projectOutputLanguagePath;
     } else if (fs.existsSync(globalOutputLanguagePath)) {
       outputLanguageFilePath = globalOutputLanguagePath;
     }
   }
 
-  const fileService = new FileDiscoveryService(
-    cwd,
-    settings.context?.fileFiltering?.customIgnoreFiles,
-  );
+  const fileService = provisionalWorkspace
+    ? undefined
+    : new FileDiscoveryService(
+        cwd,
+        settings.context?.fileFiltering?.customIgnoreFiles,
+      );
 
-  const includeDirectories = (
-    bareMode || safeMode ? [] : (settings.context?.includeDirectories ?? [])
-  )
-    .map(resolvePath)
-    .concat((argv.includeDirectories || []).map(resolvePath));
+  const includeDirectories = provisionalWorkspace
+    ? []
+    : (bareMode || safeMode ? [] : (settings.context?.includeDirectories ?? []))
+        .map(resolvePath)
+        .concat((argv.includeDirectories || []).map(resolvePath));
 
   // LSP configuration: enabled only via --experimental-lsp flag
-  const lspEnabled = !bareMode && argv.experimentalLsp === true;
+  const lspEnabled =
+    !provisionalWorkspace && !bareMode && argv.experimentalLsp === true;
   let lspClient: LspClient | undefined;
   const question = argv.promptInteractive || argv.prompt || '';
   const inputFormat: InputFormat =
@@ -1999,7 +2005,7 @@ export async function loadCliConfig(
 
     if (argv.resume) {
       // By the time we get here, argv.resume has been resolved to a valid
-      // session UUID by gemini.tsx (which handles custom title lookup and
+      // session UUID by llm.tsx (which handles custom title lookup and
       // the interactive picker for ambiguous matches).
       sessionId = argv.resume;
       deferProjectionUntilWriterLease =
@@ -2142,9 +2148,11 @@ export async function loadCliConfig(
     embeddingModel: DEFAULT_QWEN_EMBEDDING_MODEL,
     sandbox: sandboxConfig,
     targetDir: cwd,
+    provisionalWorkspace,
     includeDirectories,
-    loadMemoryFromIncludeDirectories:
-      bareMode || safeMode
+    loadMemoryFromIncludeDirectories: provisionalWorkspace
+      ? false
+      : bareMode || safeMode
         ? includeDirectories.length > 0
         : (settings.context?.loadFromIncludeDirectories ?? false),
     importFormat: settings.context?.importFormat || 'tree',
@@ -2198,6 +2206,16 @@ export async function loadCliConfig(
       allow: mergedAllow.length > 0 ? mergedAllow : undefined,
       ask: mergedAsk.length > 0 ? mergedAsk : undefined,
       deny: mergedDeny.length > 0 ? mergedDeny : undefined,
+      // Only `settings.permissions.allow` (never `--allowed-tools` nor the
+      // legacy `tools.allowed` key, which stay pure auto-approval grants)
+      // activates the registry-level allowlist that hides unlisted built-in
+      // tools from the model request (#9827).
+      registryAllowList:
+        bareMode || safeMode
+          ? undefined
+          : settings.permissions?.allow?.length
+            ? settings.permissions.allow
+            : undefined,
       autoMode:
         bareMode || safeMode ? undefined : settings.permissions?.autoMode,
     },
@@ -2310,25 +2328,6 @@ export async function loadCliConfig(
           publicBaseUrl: settings.artifact?.oss?.publicBaseUrl,
         }
       : undefined,
-    // CDP tunnel (Plan C, #5626): with the tunnel on, browser automation goes
-    // through the CDP tunnel (far lighter than the OS-level computer-use
-    // driver), so disable computer-use to keep the agent off that heavy path.
-    computerUseEnabled: (() => {
-      const tunnelOn = process.env['QWEN_SERVE_CDP_TUNNEL_OVER_WS'] === '1';
-      // Surface the override when it contradicts an explicit opt-in, so the
-      // effective config isn't a silent surprise during debugging.
-      if (tunnelOn && settings.tools?.computerUse?.enabled === true) {
-        writeStderrLine(
-          'qwen serve: ignoring tools.computerUse.enabled=true — the CDP ' +
-            'tunnel (QWEN_SERVE_CDP_TUNNEL_OVER_WS) routes browser automation ' +
-            'through the CDP tunnel, so computer-use stays disabled.',
-        );
-      }
-      return tunnelOn ? false : (settings.tools?.computerUse?.enabled ?? true);
-    })(),
-    computerUseMaxImageDimension:
-      settings.tools?.computerUse?.maxImageDimension,
-    computerUseIdleTimeoutMs: settings.tools?.computerUse?.idleTimeoutMs,
     emitToolUseSummaries: settings.experimental?.emitToolUseSummaries ?? true,
     listExtensions: argv.listExtensions || false,
     locale: resolveLocaleForExtensions(settings),
@@ -2484,7 +2483,7 @@ export async function loadCliConfig(
         config,
         config.getWorkspaceContext(),
         appEvents,
-        fileService,
+        fileService!,
         ideContextStore,
         {
           requireTrustedWorkspace: folderTrust,
