@@ -2740,6 +2740,7 @@ export const ChatEditor = memo(
                 <input
                   ref={searchInputRef}
                   className={styles.searchInput}
+                  data-web-shell-composer-history-search
                   value={searchQuery}
                   onChange={handleSearchInput}
                   onCompositionEnd={handleSearchCompositionEnd}
