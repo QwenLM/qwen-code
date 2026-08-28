@@ -54,7 +54,7 @@ describe('OmniOcrImageTool', () => {
     return invocation.execute(new AbortController().signal);
   };
 
-  const lastRequestBody = (): Record<string, never> =>
+  const lastRequestBody = (): Record<string, unknown> =>
     JSON.parse(
       (fetchMock.mock.calls[0] as [string, RequestInit])[1].body as string,
     );
@@ -112,9 +112,9 @@ describe('OmniOcrImageTool', () => {
     const content = (
       body as { messages: Array<{ content: Array<Record<string, unknown>> }> }
     ).messages[0].content;
-    expect(content[0].type).toBe('image_url');
-    expect(content[1].type).toBe('text');
-    expect(content[1].text).toContain('OCR');
+    expect(content[0]['type']).toBe('image_url');
+    expect(content[1]['type']).toBe('text');
+    expect(content[1]['text']).toContain('OCR');
 
     expect(result.error).toBeUndefined();
     const artifact = result.artifacts?.[0];

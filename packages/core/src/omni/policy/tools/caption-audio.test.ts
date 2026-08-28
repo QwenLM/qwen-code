@@ -130,12 +130,12 @@ describe('OmniCaptionAudioTool', () => {
     const body = lastRequestBody();
     expect(body.model).toBe(CAPTION_AUDIO_DEFAULTS.model);
     const content = body.messages[0].content;
-    expect(content[0].type).toBe('input_audio');
+    expect(content[0]['type']).toBe('input_audio');
     expect(
       (content[0] as { input_audio: { data: string; format: string } })
         .input_audio.format,
     ).toBe('wav');
-    expect(content[1].text).toBe(CAPTION_AUDIO_DEFAULTS.prompt);
+    expect(content[1]['text']).toBe(CAPTION_AUDIO_DEFAULTS.prompt);
 
     expect(result.error).toBeUndefined();
     const artifact = result.artifacts?.[0];
@@ -154,7 +154,7 @@ describe('OmniCaptionAudioTool', () => {
 
   it('passes a custom prompt through', async () => {
     await run({ prompt: '只描述说话人情绪。' });
-    expect(lastRequestBody().messages[0].content[1].text).toBe(
+    expect(lastRequestBody().messages[0].content[1]['text']).toBe(
       '只描述说话人情绪。',
     );
   });
