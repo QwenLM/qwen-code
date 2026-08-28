@@ -976,4 +976,118 @@ describe('WebShellSidebar pinned group members (issue #10391)', () => {
 
     workspaceActions.listSessionGroups.mockResolvedValue(defaultGroupsCatalog);
   });
+
+  function mockDesignGroupCatalog(): void {
+    workspaceActions.listSessionGroups.mockResolvedValue({
+      groups: [
+        {
+          id: 'design-group',
+          name: 'Design',
+          color: 'blue',
+          order: 0,
+          createdAt: '2026-01-01T00:00:00.000Z',
+          updatedAt: '2026-01-01T00:00:00.000Z',
+        },
+      ],
+      colorOptions: ['red', 'orange', 'yellow', 'green', 'blue', 'purple'],
+    });
+  }
+
+  it('keeps the group section visible when search only matches pinned members', async () => {
+    mockDesignGroupCatalog();
+    const member = makeSession('pinned-member', {
+      displayName: 'Pinned member',
+      groupId: 'design-group',
+      isPinned: true,
+      pinnedAt: '2026-01-02T00:00:00.000Z',
+    });
+    active.sessions = [
+      member,
+      makeSession('plain', { displayName: 'Plain session' }),
+    ];
+    active.data = active.sessions;
+    pinned.sessions = [member];
+    pinned.data = pinned.sessions;
+
+    renderSidebar();
+    await flushSidebar();
+
+    const searchButton = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Search sessions"]',
+    );
+    expect(searchButton).not.toBeNull();
+    act(() => {
+      searchButton!.dispatchEvent(
+        new MouseEvent('click', { bubbles: true }),
+      );
+    });
+    await flushSidebar();
+    const searchInput = container.querySelector<HTMLInputElement>(
+      'input[aria-label="Search sessions"]',
+    );
+    expect(searchInput).not.toBeNull();
+    act(() => {
+      const setValue = Object.getOwnPropertyDescriptor(
+        window.HTMLInputElement.prototype,
+        'value',
+      )!.set!;
+      setValue.call(searchInput, 'Pinned member');
+      searchInput!.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await flushSidebar();
+
+    // The only match is pinned, so the pinned-filtered flat list is empty;
+    // the body must still render the group section holding that member
+    // instead of the empty-state notice.
+    const group = container.querySelector<HTMLElement>(
+      'section[aria-label="Design"]',
+    );
+    expect(group).not.toBeNull();
+    expect(group?.textContent).toContain('Pinned member');
+    expect(group?.textContent).toContain('\u00b7 1');
+    expect(container.textContent ?? '').not.toContain('No sessions');
+
+    workspaceActions.listSessionGroups.mockResolvedValue(defaultGroupsCatalog);
+  });
+
+  it('mounts a single rename form for a pinned member rendered in two rows', async () => {
+    mockDesignGroupCatalog();
+    const member = makeSession('pinned-member', {
+      displayName: 'Pinned member',
+      groupId: 'design-group',
+      isPinned: true,
+      pinnedAt: '2026-01-02T00:00:00.000Z',
+    });
+    active.sessions = [member];
+    active.data = active.sessions;
+    pinned.sessions = [member];
+    pinned.data = pinned.sessions;
+    connection.sessionId = 'pinned-member';
+
+    renderSidebar();
+    await flushSidebar();
+
+    // The member renders twice: in the Pinned section and in its group
+    // section. Starting a rename from the group row must mount one form.
+    const group = container.querySelector<HTMLElement>(
+      'section[aria-label="Design"]',
+    );
+    expect(group).not.toBeNull();
+    const groupRow = Array.from(
+      group!.querySelectorAll<HTMLElement>('[role="button"]'),
+    ).find((element) => element.textContent?.includes('Pinned member'));
+    expect(groupRow).not.toBeUndefined();
+    act(() => {
+      groupRow!.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+    });
+    await flushSidebar();
+
+    expect(
+      container.querySelectorAll('input[aria-label="Rename: Pinned member"]')
+        .length,
+    ).toBe(1);
+
+    workspaceActions.listSessionGroups.mockResolvedValue(defaultGroupsCatalog);
+  });
+
 });

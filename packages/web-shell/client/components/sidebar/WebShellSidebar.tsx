@@ -3835,9 +3835,10 @@ export function WebShellSidebar({
       session: DaemonSessionSummary,
       options: {
         isArchived?: boolean;
+        renameFormDisabled?: boolean;
       } = {},
     ) => {
-      const { isArchived = false } = options;
+      const { isArchived = false, renameFormDisabled = false } = options;
       const sessionIdentity = getIdentityForSession(session);
       const label = getSessionLabel(session);
       const stamp = session.updatedAt || session.createdAt;
@@ -3846,7 +3847,12 @@ export function WebShellSidebar({
       const exporting = exportingSessionIds.has(sessionIdentity);
       const completedUnread =
         !isCurrentSession(session) && completedUnreadIds.has(sessionIdentity);
-      const isEditing = editingSessionIdentity === sessionIdentity;
+      // Pinned group members also render in the Pinned section; callers
+      // suppress the rename form on the duplicate row so only one input can
+      // mount — a rival input's autofocus would blur this one and its blur
+      // handler would cancel the rename.
+      const isEditing =
+        !renameFormDisabled && editingSessionIdentity === sessionIdentity;
       const gitIcon = session.worktree ? (
         <GitForkIcon aria-label={t('sidebar.newWorktreeTask')} />
       ) : session.branch ? (
@@ -4445,7 +4451,6 @@ export function WebShellSidebar({
       filteredSessions.length === 0 &&
       (selectedSessionSource === 'channel' ||
         channelSessionSections !== null ||
-        searchQuery.trim() ||
         !organizationEnabled ||
         sessionSections.length === 0)
     ) {
@@ -4503,7 +4508,14 @@ export function WebShellSidebar({
           deleteLabel={t('sidebar.groupDelete')}
           actionsDisabled={groupBusy}
         >
-          {section.sessions.map((session) => renderSessionRow(session))}
+          {section.sessions.map((session) =>
+            renderSessionRow(session, {
+              // Pinned members also render in the Pinned section; while that
+              // section is expanded its row hosts the rename form, so this
+              // duplicate row must not mount a second autofocused input.
+              renameFormDisabled: Boolean(session.isPinned) && pinnedExpanded,
+            }),
+          )}
         </SessionGroupSection>
       );
     });
@@ -4519,6 +4531,7 @@ export function WebShellSidebar({
     handleRenameGroup,
     loading,
     organizationEnabled,
+    pinnedExpanded,
     reload,
     renderSessionRow,
     searchQuery,
