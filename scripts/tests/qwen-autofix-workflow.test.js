@@ -22150,6 +22150,308 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
         AGENT_COMMIT,
       ],
     },
+    // A non-throwing console.assert( swapped in for a removed assertion:
+    // the member call must not earn assertion-addition credit for a token
+    // that never fails a test.
+    'console-assert': {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      round: [
+        ...fixtureWrite({
+          'pkg/a.test.ts': [
+            WT_IMPORT,
+            "it('a', () => {",
+            '  expect(one()).toBe(1);',
+            "  console.assert(two() === 2, 'msg');",
+            '});',
+          ],
+        }),
+        AGENT_COMMIT,
+      ],
+    },
+    // A regex-literal decoy replacing the removed assertion. The
+    // pattern carries a matcher-shaped tail so the inert expect( earns
+    // both counters' credit unless the stripper tracks regex literals:
+    // the matcher requirement alone does not see through it.
+    'regex-decoy': {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      round: [
+        ...fixtureWrite({
+          'pkg/a.test.ts': [
+            WT_IMPORT,
+            "it('a', () => {",
+            '  expect(one()).toBe(1);',
+            '  const re = /expect(x).toBe(1)/;',
+            '});',
+          ],
+        }),
+        AGENT_COMMIT,
+      ],
+    },
+    // Negative control for the regex state: adding ONLY an inert regex
+    // whose class carries /* must not corrupt the strip into
+    // false-charging an adding-only round.
+    'regex-class-control': {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      round: [
+        ...fixtureWrite({
+          'pkg/a.test.ts': [
+            WT_IMPORT,
+            "it('a', () => {",
+            '  const re = /[/*]/;',
+            '  expect(one()).toBe(1);',
+            '  expect(two()).toBe(2);',
+            '});',
+          ],
+        }),
+        AGENT_COMMIT,
+      ],
+    },
+    // A matcher-less expect( passes for any return value — the maximal
+    // relaxation of an assertion — so the rewrite must measure as a
+    // removal even though the expect( token survives.
+    'matcher-drop': {
+      files: {
+        'pkg/a.test.ts': [
+          WT_IMPORT,
+          "it('a', () => {",
+          '  expect(two()).toBe(2);',
+          '});',
+        ],
+      },
+      round: [
+        ...fixtureWrite({
+          'pkg/a.test.ts': [
+            WT_IMPORT,
+            "it('a', () => {",
+            '  expect(two());',
+            '});',
+          ],
+        }),
+        AGENT_COMMIT,
+      ],
+    },
+    // A multi-line-formatted assertion deleted outright: the bare
+    // expect( line carries no matcher, yet the removal must count —
+    // the del side measures bare expect( calls on purpose.
+    'multiline-assert-delete': {
+      files: {
+        'pkg/a.test.ts': [
+          WT_IMPORT,
+          "it('a', () => {",
+          '  expect(',
+          '    two(),',
+          '  ).toBe(2);',
+          '});',
+        ],
+      },
+      round: [
+        ...fixtureWrite({
+          'pkg/a.test.ts': [WT_IMPORT, "it('a', () => {", '});'],
+        }),
+        AGENT_COMMIT,
+      ],
+    },
+    // A multi-line-formatted assertion swapped for a matcher-less bare
+    // expect( on one line: the blob density nets to zero (one bare call
+    // each side), so only the bare del-side line count sees the removal.
+    'multiline-assert-swap': {
+      files: {
+        'pkg/a.test.ts': [
+          WT_IMPORT,
+          "it('a', () => {",
+          '  expect(',
+          '    two(),',
+          '  ).toBe(2);',
+          '});',
+        ],
+      },
+      round: [
+        ...fixtureWrite({
+          'pkg/a.test.ts': [
+            WT_IMPORT,
+            "it('a', () => {",
+            '  expect(three());',
+            '});',
+          ],
+        }),
+        AGENT_COMMIT,
+      ],
+    },
+    // The newline-split member chain: `it` and `.skip(` on two lines is
+    // valid JS and runs as it.skip.
+    'skip-split-line': {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      round: [
+        ...fixtureWrite({
+          'pkg/a.test.ts': [
+            WT_IMPORT,
+            'it',
+            ".skip('a', () => {",
+            '  expect(one()).toBe(1);',
+            '  expect(two()).toBe(2);',
+            '});',
+          ],
+        }),
+        AGENT_COMMIT,
+      ],
+    },
+    // The chained modifier prefix: a concurrent/sequential/shuffle chain
+    // ahead of the marker.
+    'skip-concurrent': {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      round: [
+        ...fixtureWrite({
+          'pkg/a.test.ts': [
+            WT_IMPORT,
+            "test.concurrent.skip('a', () => {",
+            '  expect(one()).toBe(1);',
+            '  expect(two()).toBe(2);',
+            '});',
+          ],
+        }),
+        AGENT_COMMIT,
+      ],
+    },
+    // The tagged-template call form of the chained each. Hand-written
+    // printf: the backtick tails must survive into the file, and
+    // fixtureWrite's double-quoted lines would let bash eat them as
+    // command substitution.
+    'skip-each-template': {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      round: [
+        'printf \'%s\\n\' "import { it, expect } from \'vitest\';" "it.skip.each\\`table\\`(\'a %s\', (x) => {" "  expect(one()).toBe(1);" "  expect(two()).toBe(2);" "});" > \'pkg/a.test.ts\'',
+        AGENT_COMMIT,
+      ],
+    },
+    // The computed-property accessor: a byte-equivalent it.skip.
+    'skip-computed': {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      round: [
+        ...fixtureWrite({
+          'pkg/a.test.ts': [
+            WT_IMPORT,
+            "it['skip']('a', () => {",
+            '  expect(one()).toBe(1);',
+            '  expect(two()).toBe(2);',
+            '});',
+          ],
+        }),
+        AGENT_COMMIT,
+      ],
+    },
+    // A deleted comment line carrying marker text must not earn the
+    // removal credit that cancels a genuine skip addition.
+    'skip-comment-shield': {
+      files: {
+        'pkg/a.test.ts': [
+          WT_IMPORT,
+          "it('a', () => {",
+          '  expect(one()).toBe(1);',
+          '  expect(two()).toBe(2);',
+          '});',
+          "// it.skip('legacy flaky', () => {});",
+        ],
+      },
+      round: [
+        ...fixtureWrite({
+          'pkg/a.test.ts': [
+            WT_IMPORT,
+            "it.skip('a', () => {",
+            '  expect(one()).toBe(1);',
+            '  expect(two()).toBe(2);',
+            '});',
+          ],
+        }),
+        AGENT_COMMIT,
+      ],
+    },
+    // An in-string /* added textually before a genuine skip marker must
+    // not poison the comment strip into discarding the marker line.
+    'skip-string-poison': {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      round: [
+        ...fixtureWrite({
+          'pkg/a.test.ts': [
+            WT_IMPORT,
+            "const fixture = '/*';",
+            "it.skip('a', () => {",
+            '  expect(one()).toBe(1);',
+            '  expect(two()).toBe(2);',
+            '});',
+          ],
+        }),
+        AGENT_COMMIT,
+      ],
+    },
+    // Main deletes the file; the modify/delete resolution KEEPS it while
+    // dropping a BASE-era assertion. Every surviving line is
+    // resolution-authored, so main's deletion may not freight-shield the
+    // drop.
+    'merge-modify-delete-keep': {
+      onMain: { 'pkg/a.test.ts': WT_BASE },
+      files: {
+        'pkg/a.test.ts': [
+          WT_IMPORT,
+          "it('a renamed', () => {",
+          '  expect(one()).toBe(1);',
+          '  expect(two()).toBe(2);',
+          '});',
+        ],
+      },
+      mainMoves: ['git rm -q pkg/a.test.ts', 'git commit -qm main-deletes'],
+      round: [
+        'git merge -q --no-edit origin/main || true',
+        ...fixtureWrite({
+          'pkg/a.test.ts': [
+            WT_IMPORT,
+            "it('a renamed', () => {",
+            '  expect(one()).toBe(1);',
+            '});',
+          ],
+        }),
+        'git add pkg/a.test.ts && git commit -qm resolution',
+      ],
+    },
+    // The orphan merge-back shape: the branch is rebuilt onto a
+    // parent-less root and the old branch merged back with
+    // --allow-unrelated-histories, so the per-commit measurement goes
+    // UNAVAILABLE — the net-range deletion must still be judged.
+    'orphan-merge-back-delete': {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      round: [
+        'git checkout -q --orphan rebuilt',
+        'git rm -qrf .',
+        'git commit -q --allow-empty -qm orphan-root',
+        'git merge -q --allow-unrelated-histories feature -m merge-back',
+        'git branch -f feature',
+        'git checkout -q feature',
+        'git rm -q pkg/a.test.ts',
+        AGENT_COMMIT,
+      ],
+    },
+    // A nested-template decoy: the inert expect( sits inside the
+    // NESTED template, so the outer template's content strips it — but
+    // only while the blob strip tracks ${} depth; a depth-blind strip
+    // re-pairs the backticks and leaks the decoy as code, earning the
+    // addition credit that cancels the genuine removal. Hand-written
+    // printf: fixtureWrite's double-quoted lines would let bash eat the
+    // backticks and ${ as expansions.
+    'template-nesting-decoy': {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      round: [
+        "printf '%s\\n' \"import { it, expect } from 'vitest';\" \"it('a', () => {\" \"  expect(one()).toBe(1);\" '  const t = `a ${`expect(d()).toBe(1)`} c`;' \"});\" > 'pkg/a.test.ts'",
+        AGENT_COMMIT,
+      ],
+    },
+    // The nested-template sibling of the in-string poison: the /* rides
+    // inside a NESTED template literal ahead of a genuine skip marker.
+    'skip-nested-template-poison': {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      round: [
+        'printf \'%s\\n\' "import { it, expect } from \'vitest\';" \'const fixture = `${`/*`}`;\' "it.skip(\'a\', () => {" "  expect(one()).toBe(1);" "  expect(two()).toBe(2);" "});" > \'pkg/a.test.ts\'',
+        AGENT_COMMIT,
+      ],
+    },
   };
   const runGate = ({
     failAt = [],
@@ -23905,6 +24207,158 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
       expect(r.advisories).toContain('pkg/a?b.test.ts');
     },
   );
+
+  it('rejects swapping a removed assertion for a non-throwing console.assert', () => {
+    // console.assert prints and continues in Node; the member call must
+    // not earn the assert( addition credit that cancels the removal.
+    const r = runGate({ weaken: 'console-assert' });
+    expect(r.status).toBe(1);
+    expect(r.rejection).toContain('pkg/a.test.ts');
+    expect(r.rejection).toContain('assertion line(s) removed');
+  });
+
+  it('rejects a regex-literal decoy replacing a removed assertion', () => {
+    // The inert expect( inside the pattern must earn no addition credit
+    // once the blob strip tracks regex literals.
+    const r = runGate({ weaken: 'regex-decoy' });
+    expect(r.status).toBe(1);
+    expect(r.rejection).toContain('pkg/a.test.ts');
+    expect(r.rejection).toContain('assertion line(s) removed');
+  });
+
+  it.skipIf(!hasBashMapfile)(
+    'does not charge an adding-only round for an inert regex literal',
+    () => {
+      // A /[...]/ class carrying /* must not corrupt the strip into
+      // swallowing the intact assertions that follow it.
+      const r = runGate({ weaken: 'regex-class-control' });
+      expect(r.status).toBe(0);
+      expect(r.outputs).toContain('outcome=fixed');
+      expect(r.advisories).not.toContain('weakened or removed pre-existing');
+    },
+  );
+
+  it('rejects rewriting an assertion to a matcher-less expect call', () => {
+    // expect(two()) passes for any return value — the maximal relaxation.
+    // The token survives on both sides, so only a matcher requirement on
+    // the expect( forms can see it.
+    const r = runGate({ weaken: 'matcher-drop' });
+    expect(r.status).toBe(1);
+    expect(r.rejection).toContain('pkg/a.test.ts');
+    expect(r.rejection).toContain('assertion line(s) removed');
+  });
+
+  it('rejects deleting a multi-line-formatted assertion', () => {
+    // The bare expect( line carries no matcher on it; only the bare
+    // del-side counting sees the removal.
+    const r = runGate({ weaken: 'multiline-assert-delete' });
+    expect(r.status).toBe(1);
+    expect(r.rejection).toContain('pkg/a.test.ts');
+    expect(r.rejection).toContain('assertion line(s) removed');
+  });
+
+  it('rejects swapping a multi-line assertion for a matcher-less bare expect', () => {
+    // Both blobs carry exactly one bare expect( call, so the density
+    // cross-check nets to zero; the bare del-side count is the arm that
+    // sees the matcher vanish.
+    const r = runGate({ weaken: 'multiline-assert-swap' });
+    expect(r.status).toBe(1);
+    expect(r.rejection).toContain('pkg/a.test.ts');
+    expect(r.rejection).toContain('assertion line(s) removed');
+  });
+
+  it('rejects a skip marker split across a newline', () => {
+    // `it` / `.skip(` on two lines is valid JS running as it.skip; the
+    // joined view must measure it like the one-line form.
+    const r = runGate({ weaken: 'skip-split-line' });
+    expect(r.status).toBe(1);
+    expect(r.rejection).toContain('pkg/a.test.ts');
+    expect(r.rejection).toContain('skip/todo marker(s) added');
+  });
+
+  it('rejects a chained concurrent skip modifier', () => {
+    // test.concurrent.skip( nets zero on the raw counters (d=1/a=1
+    // cancel, no anchor adjacent to the modifier); the chain ahead of
+    // the marker must not hide it.
+    const r = runGate({ weaken: 'skip-concurrent' });
+    expect(r.status).toBe(1);
+    expect(r.rejection).toContain('pkg/a.test.ts');
+    expect(r.rejection).toContain('skip/todo marker(s) added');
+  });
+
+  it('rejects a tagged-template skip.each form', () => {
+    // The call tail is a backtick, never ( or <.
+    const r = runGate({ weaken: 'skip-each-template' });
+    expect(r.status).toBe(1);
+    expect(r.rejection).toContain('pkg/a.test.ts');
+    expect(r.rejection).toContain('skip/todo marker(s) added');
+  });
+
+  it('rejects a computed-property skip accessor', () => {
+    // it['skip']('a', ...) is a byte-equivalent property access the
+    // dotted form cannot see.
+    const r = runGate({ weaken: 'skip-computed' });
+    expect(r.status).toBe(1);
+    expect(r.rejection).toContain('pkg/a.test.ts');
+    expect(r.rejection).toContain('skip/todo marker(s) added');
+  });
+
+  it('rejects a new skip whose only offset is a deleted comment', () => {
+    // A deleted // it.skip(...) line carries marker text but no marker;
+    // its removal credit must not cancel the genuine skip addition.
+    const r = runGate({ weaken: 'skip-comment-shield' });
+    expect(r.status).toBe(1);
+    expect(r.rejection).toContain('pkg/a.test.ts');
+    expect(r.rejection).toContain('skip/todo marker(s) added');
+  });
+
+  it('rejects a skip marker preceded by an in-string block-comment opener', () => {
+    // An added const fixture = '/*'; must not set the block-comment
+    // state and discard the genuinely added it.skip( line that follows.
+    const r = runGate({ weaken: 'skip-string-poison' });
+    expect(r.status).toBe(1);
+    expect(r.rejection).toContain('pkg/a.test.ts');
+    expect(r.rejection).toContain('skip/todo marker(s) added');
+  });
+
+  it('charges a modify/delete resolution that keeps the file weakened', () => {
+    // Main deleted the file; the resolution kept it while dropping a
+    // base-era assertion. With no blob on main's side every surviving
+    // line is resolution-authored, so no freight may shield the drop.
+    const r = runGate({ weaken: 'merge-modify-delete-keep' });
+    expect(r.status).toBe(1);
+    expect(r.rejection).toContain('pkg/a.test.ts');
+    expect(r.rejection).toContain('assertion line(s) removed');
+  });
+
+  it('rejects deleting a pre-existing test from a rebuilt orphan history', () => {
+    // The parent-less root puts the per-commit measurement UNAVAILABLE;
+    // the verdict must still judge the net-range deletion instead of
+    // discarding it behind the UNAVAILABLE branch.
+    const r = runGate({ weaken: 'orphan-merge-back-delete' });
+    expect(r.status).toBe(1);
+    expect(r.rejection).toContain('pkg/a.test.ts');
+    expect(r.rejection).toContain('test file deleted');
+  });
+
+  it('rejects a removal cancelled by a nested-template decoy', () => {
+    // The decoy expect( lives inside the NESTED template: the blob
+    // strip's ${} depth keeps it stripped, so the genuine removal is
+    // not cancelled. A depth-blind strip leaks it as code.
+    const r = runGate({ weaken: 'template-nesting-decoy' });
+    expect(r.status).toBe(1);
+    expect(r.rejection).toContain('pkg/a.test.ts');
+    expect(r.rejection).toContain('assertion line(s) removed');
+  });
+
+  it('rejects a skip marker preceded by a nested-template comment opener', () => {
+    // The /* rides inside a nested template literal; it must not open
+    // the block-comment state and discard the added it.skip( line.
+    const r = runGate({ weaken: 'skip-nested-template-poison' });
+    expect(r.status).toBe(1);
+    expect(r.rejection).toContain('pkg/a.test.ts');
+    expect(r.rejection).toContain('skip/todo marker(s) added');
+  });
 });
 
 describe('review-address: regression accounting (af-151)', () => {

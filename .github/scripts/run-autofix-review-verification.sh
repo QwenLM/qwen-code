@@ -1022,7 +1022,10 @@ fi
 # the merge (including the modify/delete shape with no blob on main's side
 # at all). So freight crossing the merge neither charges the round nor
 # shields it, and a weakening introduced while resolving a merge conflict
-# IS counted. Freight attribution applies only when the merge's second
+# IS counted. One exception: a modify/delete resolution that KEEPS the
+# file main deleted authors every surviving line itself, so none of its
+# removals is freight. Freight attribution applies only when the merge's
+# second
 # parent is main-derived -- a side-branch merge has no main side, and its
 # first-parent diff is the round's own work.
 # A file that did not exist at the pre-round ref is not pre-existing
@@ -1031,15 +1034,22 @@ fi
 # magic, and the measurement must see exactly the file's own hunks, not the
 # union of every path its name matches.
 #   - the file was DELETED;
-#   - assertion lines removed exceed assertion lines added, an assertion line
-#     being one that contains `expect(`, `expect.poll(`, `assert(`, or
-#     `assert.` (the repo's idioms; a poll assertion spells its call
-#     `expect.poll(`). An assertion moved within a file nets zero; one moved
-#     OUT of a file nets negative and is answered by naming its new home.
-#     Removed lines count RAW and added lines count after comment stripping
-#     (both TS comment forms): a commented-out copy of a removed assertion
-#     must not cancel it, while a stripped removal would zero an assertion
-#     that follows an in-string `//` (a URL) and let the deletion through.
+#   - assertion lines removed exceed assertion lines added, an assertion
+#     line being one that carries a THROWING assertion: `expect(` or
+#     `expect.poll(` -- with a matcher chain following on the same line
+#     when ADDED, since expect('anything') passes for any value, the
+#     maximal relaxation, while a bare `expect(` removal still counts (a
+#     multi-line-formatted assertion measures as a removal: the
+#     fail-closed direction, one ack entry answers it) -- or
+#     `assert(`/`assert.` with a left boundary (a member call like
+#     console.assert( prints and continues; it never fails a test). An
+#     assertion moved within a file nets zero; one moved OUT of a file
+#     nets negative and is answered by naming its new home. Removed lines
+#     count RAW and added lines count after comment-and-string-aware
+#     stripping: a commented-out copy of a removed assertion must not
+#     cancel it, and an over-charge on the raw del side fails closed (one
+#     ack entry answers it) while an over-credit on the add side would
+#     fail open.
 #     The line counts are cross-checked against the assertion density of
 #     the string-and-comment-stripped WHOLE BLOBS on every edited file:
 #     diff-line grep cannot see tokens that never execute -- an assertion
@@ -1054,20 +1064,45 @@ fi
 #     rule would otherwise collapse the hunk into a binary banner and zero
 #     every counter;
 #   - a skip/todo marker was added NET: `it`/`test`/`describe` followed by
-#     `.skip`, `.todo`, `.fails`, or `.failing` -- optionally chained with
-#     `.each`/`.for` -- or `xit(`/`xdescribe(`. Markers removed in the same
-#     file net against markers added, so touching an already-skipped test
-#     without adding a marker is not charged. `.skipIf` is deliberately NOT
+#     `.skip`, `.todo`, `.fails`, or `.failing` -- optionally behind a
+#     `.concurrent`/`.sequential`/`.shuffle` chain and chained with
+#     `.each`/`.for` (call tail `(`, `<`, or a tagged template) -- the
+#     computed accessor `it['skip'](`, or `xit(`/`xdescribe(`. Markers are
+#     measured on a joined view, so a newline-split member chain
+#     (it / .skip( on two lines) counts like the one-line form, and on the
+#     comment-stripped view on BOTH sides: a deleted comment line that
+#     merely contains marker text earns no removal credit. Markers removed
+#     in the same file net against markers added, so touching an
+#     already-skipped test without adding a marker is not charged.
+#     `.skipIf` is deliberately NOT
 #     a signal -- it is this repo's standard environment guard (237 uses)
 #     and flagging it would charge every platform-conditional test to this
 #     gate.
 # Snapshots are out of scope on both signals: they carry no assertion token,
 # and an obsolete snapshot removed by `vitest -u` is routine bookkeeping.
-# Fails OPEN -- a diff the gate cannot read skips the check rather than
-# rejecting a round it could not measure.
+# Fails OPEN on the measured signals -- a diff the gate cannot read skips
+# them rather than rejecting a round it could not measure. The net-range
+# deletion arm is independent of that walk and still judges: a deletion is
+# proven by the pre-round->tip pair, not by the per-commit producer.
 WEAKEN_PATHSPEC=(':(glob)**/*.test.*' ':(glob)**/*.spec.*' ':(exclude,glob)**/__snapshots__/**')
-WEAKEN_ASSERT_RE='expect\(|expect\.poll\(|assert\(|assert\.'
-WEAKEN_SKIP_RE='(^|[^A-Za-z0-9_$.])(it|test|describe)[[:space:]]*\.[[:space:]]*(skip|todo|fails|failing)([[:space:]]*\.[[:space:]]*(each|for))?[[:space:]]*[(<]|(^|[^A-Za-z0-9_$.])x(it|describe)([[:space:]]*\.[[:space:]]*each)?[[:space:]]*\('
+# Member calls like console.assert( print and continue in Node — they
+# never fail a test — so the assert forms carry the left-boundary idiom
+# the skip RE uses. This del-side/blob RE counts a bare expect( call.
+WEAKEN_ASSERT_RE='(^|[^A-Za-z0-9_$.])assert(\(|\.)|(^|[^A-Za-z0-9_$.])expect(\.poll)?\('
+# Added lines count an expect( only when a matcher chain follows it on
+# the same line: expect('anything') passes for any return value, the
+# maximal relaxation of an assertion. The del side stays bare on
+# purpose: a multi-line-formatted expect(...) then measures as a
+# removal — the fail-closed direction, one ack entry answers it.
+WEAKEN_ASSERT_ADD_RE='(^|[^A-Za-z0-9_$.])assert(\(|\.)|(^|[^A-Za-z0-9_$.])expect(\.poll)?\(.*\)[[:space:]]*\.'
+# Marker shapes beyond the dotted one-line form: a concurrent/
+# sequential/shuffle chain ahead of the modifier (test.concurrent.skip(),
+# describe.concurrent.skip()), the tagged-template each tail
+# (it.skip.each`table`), and the computed-property accessor
+# (it['skip']('a', ...)). Newline-split member chains (it / .skip( on
+# two lines — valid JS running as it.skip) are measured on the joined
+# view weaken_join_markers produces below.
+WEAKEN_SKIP_RE='(^|[^A-Za-z0-9_$.])(it|test|describe)[[:space:]]*(\.[[:space:]]*(concurrent|sequential|shuffle)[[:space:]]*)*\.[[:space:]]*(skip|todo|fails|failing)([[:space:]]*\.[[:space:]]*(each|for))?[[:space:]]*[(<`]|(^|[^A-Za-z0-9_$.])(it|test|describe)[[:space:]]*\[[[:space:]]*('\''|")(skip|todo|fails|failing)('\''|")[[:space:]]*\][[:space:]]*[(<`]|(^|[^A-Za-z0-9_$.])x(it|describe)([[:space:]]*\.[[:space:]]*each)?[[:space:]]*\('
 # Measured weakenings travel as parallel indexed arrays, never a
 # newline/tab-joined string: filenames are branch-controlled bytes, and a
 # name carrying a newline or tab splits a delimited record into fragments
@@ -1112,45 +1147,17 @@ weaken_member() {
 }
 # Drop comment text so a commented-out copy of a removed assertion neither
 # shields an addition nor masks a removal. Both TS comment forms: //-to-EOL
-# and /* ... */ spans, the block state carried across lines. String literals
-# are not parsed -- the raw del-side count at the call site is what keeps a
-# removed line with an in-string // measured. Applied to the ADDED side
-# only.
+# and /* ... */ spans, the block state carried across lines. String and
+# template literals are STATE-tracked — an in-string /* cannot open the
+# block state and discard a genuine marker that follows in the same
+# stream — but their CONTENTS stay in the output: the skip patterns read
+# quoted names (it['skip']) and backtick call tails (it.skip.each`table`),
+# and a removed line with an in-string // must still measure. Applied to
+# the ADDED side and to the del-side skip-marker count only; the del-side
+# ASSERTION count stays raw.
 weaken_strip_comments() {
   awk '
-    BEGIN { inc = 0 }
-    {
-      line = $0; out = ""
-      while (length(line) > 0) {
-        if (inc) {
-          p = index(line, "*/")
-          if (p == 0) { line = ""; break }
-          line = substr(line, p + 2); inc = 0
-          continue
-        }
-        sl = index(line, "//"); bl = index(line, "/*")
-        if (sl == 0 && bl == 0) { out = out line; break }
-        if (sl > 0 && (bl == 0 || sl < bl)) {
-          out = out substr(line, 1, sl - 1); break
-        }
-        out = out substr(line, 1, bl - 1)
-        line = substr(line, bl + 2); inc = 1
-      }
-      if (out !~ /^[[:space:]]*$/) print out
-    }' | sed -e '/^[[:space:]]*\*/d'
-}
-# Comment stripping PLUS string-literal contents, applied to WHOLE blobs
-# with both states carried across lines -- the blob-density cross-check
-# below. A decoy `expect(` inside a string literal must earn no assertion
-# credit, and a decoy line inside a block comment opened ABOVE the diff
-# hunk is only inside it when the state arrives from the unchanged bytes.
-# The line counts keep weaken_strip_comments on purpose: their raw/stripped
-# asymmetry is what keeps an in-string // deletion measured. Single- and
-# double-quoted strings cannot span lines in TS, so a dangling quote at
-# EOL closes there; a template literal carries on.
-weaken_strip_code() {
-  awk '
-    BEGIN { inc = 0; q = "" }
+    BEGIN { inc = 0; q = ""; tpl = 0 }
     {
       line = $0; out = ""; n = length(line); i = 1
       while (i <= n) {
@@ -1160,26 +1167,101 @@ weaken_strip_code() {
           continue
         }
         if (q != "") {
-          if (ch == "\\") { i += 2 }
-          else if (ch == q) { q = ""; i += 1 }
-          else { i += 1 }
+          if (q == "`" && ch == "$" && nx == "{") { out = out ch nx; tpl += 1; q = ""; i += 2; continue }
+          if (ch == "\\") { out = out ch nx; i += 2; continue }
+          out = out ch
+          if (ch == q) q = ""
+          i += 1
           continue
         }
+        if (ch == "}" && tpl > 0) { out = out ch; q = "`"; tpl -= 1; i += 1; continue }
         if (ch == "/" && nx == "/") break
         if (ch == "/" && nx == "*") { inc = 1; i += 2; continue }
-        if (ch == "\047" || ch == "\"" || ch == "`") { q = ch; i += 1; continue }
+        if (ch == "\047" || ch == "\"" || ch == "`") { q = ch }
         out = out ch; i += 1
       }
       if (q != "`") q = ""
       if (out !~ /^[[:space:]]*$/) print out
+    }' | sed -e '/^[[:space:]]*\*/d'
+}
+# Comment stripping PLUS string-literal contents, applied to WHOLE blobs
+# with both states carried across lines -- the blob-density cross-check
+# below. A decoy `expect(` inside a string literal must earn no assertion
+# credit, and a decoy line inside a block comment opened ABOVE the diff
+# hunk is only inside it when the state arrives from the unchanged bytes.
+# Regex literals are state-tracked too, keyed on the last significant
+# output character: an operator (or line start) ahead opens a literal,
+# a value ahead means division -- so an inert expect( decoy inside
+# /expect(x)?/ earns no credit, and a /[...]/ class carrying /* cannot
+# open the block state and swallow the assertions that follow. Template
+# nesting is tracked by depth: an inner backtick under ${} closes the
+# NESTED template, not the outer one. Single- and double-quoted strings
+# cannot span lines in TS, so a dangling quote at EOL closes there; a
+# template literal carries on. A regex literal cannot: an unterminated
+# one at EOL drops its state rather than swallowing the next line.
+weaken_strip_code() {
+  awk '
+    BEGIN { inc = 0; q = ""; tpl = 0; regx = 0; rcls = 0; last = "" }
+    {
+      line = $0; out = ""; n = length(line); i = 1
+      regx = 0; rcls = 0
+      while (i <= n) {
+        ch = substr(line, i, 1); nx = substr(line, i + 1, 1)
+        if (inc) {
+          if (ch == "*" && nx == "/") { inc = 0; i += 2 } else { i += 1 }
+          continue
+        }
+        if (regx) {
+          if (ch == "\\") { i += 2 }
+          else if (rcls) { if (ch == "]") rcls = 0; i += 1 }
+          else if (ch == "[") { rcls = 1; i += 1 }
+          else if (ch == "/") { regx = 0; i += 1 }
+          else { i += 1 }
+          continue
+        }
+        if (q != "") {
+          if (ch == "\\") { i += 2 }
+          else if (q == "`" && ch == "$" && nx == "{") { tpl += 1; q = ""; i += 2 }
+          else if (ch == q) { q = ""; i += 1 }
+          else { i += 1 }
+          continue
+        }
+        if (ch == "}" && tpl > 0) { q = "`"; tpl -= 1; i += 1; continue }
+        if (ch == "/" && nx == "/") break
+        if (ch == "/" && nx == "*") { inc = 1; i += 2; continue }
+        if (ch == "/") {
+          if (last == "" || last ~ /[=(,:;!&|?{}+*%~^<>\[-]/) { regx = 1; i += 1; continue }
+          out = out ch; last = ch; i += 1; continue
+        }
+        if (ch == "\047" || ch == "\"" || ch == "`") { q = ch; i += 1; continue }
+        out = out ch
+        if (ch !~ /[[:space:]]/) last = ch
+        i += 1
+      }
+      if (q != "" && q != "`") q = ""
+      if (out !~ /^[[:space:]]*$/) print out
     }'
+}
+# Join newline-split member chains so a marker written across lines
+# measures like the one-line form: carry a one-line buffer, appending the
+# current line while the joined line still ends in a marker-chain head
+# (it/test/describe, an optional modifier chain, a trailing dot).
+weaken_join_markers() {
+  awk '
+    {
+      if (buf == "") buf = $0
+      else buf = buf $0
+      if (buf ~ /(^|[^A-Za-z0-9_$.])(it|test|describe)([[:space:]]*\.[[:space:]]*(concurrent|sequential|shuffle|skip|todo|fails|failing|each|for))*[[:space:]]*\.?[[:space:]]*$/) next
+      print buf; buf = ""
+    }
+    END { if (buf != "") print buf }'
 }
 # Fold one commit's diff of one test file into the per-file accumulators.
 # When ${3} is set the commit is a merge whose second parent is derived
 # from origin/main: the same file at that parent decides line authorship,
 # keeping only what the merge resolution itself authored.
 weaken_count_commit_file() {
-  local c="${1}" f="${2}" is_merge="${3}" p2='' have_p2='' mb='' base_blob='' l diff_body add_lines del_lines weaken_slot weaken_has_edits='' weaken_old='' weaken_new='' weaken_old_n weaken_new_n weaken_o weaken_mb_n weaken_p2_n
+  local c="${1}" f="${2}" is_merge="${3}" p2='' have_p2='' kept='' mb='' base_blob='' l diff_body add_lines del_lines weaken_slot weaken_has_edits='' weaken_old='' weaken_new='' weaken_old_n weaken_new_n weaken_o weaken_mb_n weaken_p2_n
   if [[ -n "${is_merge}" ]]; then
     # An empty blob is not a missing one: key the freight filter on git
     # show's exit status, so a modify/delete resolution (main deleted the
@@ -1189,6 +1271,13 @@ weaken_count_commit_file() {
       have_p2=1
     else
       p2=''
+    fi
+    # A modify/delete resolution that KEEPS the file authors every line
+    # that survives it: main's side has no blob to freight against, so
+    # none of the kept-side removals may hide behind main's deletion.
+    # Full freight applies only when the result deletes the file too.
+    if [[ -z "${have_p2}" ]] && git cat-file -e "${c}:${f}" 2> /dev/null; then
+      kept=1
     fi
   fi
   # --text: a branch-controlled .gitattributes rule (`<file> -diff` or
@@ -1217,7 +1306,9 @@ weaken_count_commit_file() {
     # A removed line is freight only when MAIN deleted it: present at the
     # merge base and absent from main's side (or main's side has no blob at
     # all). A branch-authored line the resolution dropped is the round's
-    # own weakening and is charged.
+    # own weakening and is charged -- and when the resolution KEPT a file
+    # main deleted (kept above), every surviving line is resolution-
+    # authored, so no removal is freight at all.
     mb="$(git merge-base "${c}^" "${c}^2" 2> /dev/null)" || mb=''
     if [[ -n "${mb}" ]]; then
       base_blob="$(git show "${mb}:${f}" 2> /dev/null)" || base_blob=''
@@ -1228,26 +1319,33 @@ weaken_count_commit_file() {
       if [[ -z "${l}" ]]; then
         continue
       fi
-      if grep -qxF -- "${l}" <<< "${base_blob}" &&
+      if [[ -z "${kept}" ]] && grep -qxF -- "${l}" <<< "${base_blob}" &&
         { [[ -z "${have_p2}" ]] || ! grep -qxF -- "${l}" <<< "${p2}"; }; then
         continue
       fi
       printf '%s\n' "${l}"
     done <<< "${del_lines}")"
   fi
-  # Removed lines count RAW: the stripper cuts at the first //, including
-  # one inside a string literal, so stripping the del-side would never
-  # count a removed assertion that follows an in-string // -- the escape
-  # this gate exists to close. Added lines count stripped, so a commented
-  # copy of a removed assertion cannot cancel it. The mirror direction (an
-  # added assertion after an in-string // earns no addition credit) is the
-  # fail-closed one: one recorded entry answers it.
+  # Assertion counts: removed lines count RAW and added lines count after
+  # comment-and-string-aware stripping, so a commented-out copy of a
+  # removed assertion cannot cancel it. An over-charge on the raw del side
+  # (a commented-out assertion deletion) fails closed -- one ack entry
+  # answers it -- while an over-credit on the add side would fail open,
+  # which is what the stripping prevents.
+  # Skip-marker counts read the stripped view on BOTH sides, and the
+  # joined view: sd's over-count SUBTRACTS, so a deleted comment line
+  # that merely contains marker text must not earn the removal credit
+  # that cancels a genuine marker addition.
   add_lines="$(weaken_strip_comments <<< "${add_lines}")"
+  add_lines="$(weaken_join_markers <<< "${add_lines}")"
+  local del_stripped
+  del_stripped="$(weaken_strip_comments <<< "${del_lines}")"
+  del_stripped="$(weaken_join_markers <<< "${del_stripped}")"
   local d a sa sd
   d="$(grep -cE "${WEAKEN_ASSERT_RE}" <<< "${del_lines}" || true)"
-  a="$(grep -cE "${WEAKEN_ASSERT_RE}" <<< "${add_lines}" || true)"
+  a="$(grep -cE "${WEAKEN_ASSERT_ADD_RE}" <<< "${add_lines}" || true)"
   sa="$(grep -cE "${WEAKEN_SKIP_RE}" <<< "${add_lines}" || true)"
-  sd="$(grep -cE "${WEAKEN_SKIP_RE}" <<< "${del_lines}" || true)"
+  sd="$(grep -cE "${WEAKEN_SKIP_RE}" <<< "${del_stripped}" || true)"
   if [[ -n "${weaken_has_edits}" ]]; then
     # The line counters grep diff LINES for assertion tokens, and -U0
     # anchors a byte-identical line as implicit context: an assertion
@@ -1267,7 +1365,7 @@ weaken_count_commit_file() {
     weaken_old_n="$(weaken_strip_code <<< "${weaken_old}" | grep -cE "${WEAKEN_ASSERT_RE}" || true)"
     weaken_new_n="$(weaken_strip_code <<< "${weaken_new}" | grep -cE "${WEAKEN_ASSERT_RE}" || true)"
     weaken_o=$(( weaken_old_n - weaken_new_n ))
-    if [[ -n "${is_merge}" ]]; then
+    if [[ -n "${is_merge}" && -z "${kept}" ]]; then
       weaken_mb_n="$(weaken_strip_code <<< "${base_blob}" | grep -cE "${WEAKEN_ASSERT_RE}" || true)"
       weaken_p2_n="$(weaken_strip_code <<< "${p2}" | grep -cE "${WEAKEN_ASSERT_RE}" || true)"
       weaken_o=$(( weaken_o - (weaken_mb_n - weaken_p2_n) ))
@@ -1379,11 +1477,14 @@ while IFS= read -r -d '' f; do
   fi
   WEAKENED_PATHS+=("${f}")
   WEAKENED_SIGNALS+=('test file deleted')
-done < <(git diff --name-only -z --no-renames --diff-filter=D "${ROUND_RANGE}" \
+done < <(git diff --name-only -z --no-renames --diff-filter=D "origin/${BRANCH}" "${BRANCH}" \
   -- "${WEAKEN_PATHSPEC[@]}" 2> /dev/null)
-if [[ "${WEAKEN_MEASURED}" != 'true' ]]; then
-  echo '🧪 test-weakening measurement UNAVAILABLE this round (diff producer failed) — check skipped' | tee -a "${GATE_LOG}"
-elif (( ${#WEAKENED_PATHS[@]} > 0 )); then
+# Deletions are judged even when the per-commit measurement went
+# UNAVAILABLE: the explicit pre-round->tip pair above does not need the
+# round's own history to be walkable (a parent-less root in a rebuilt
+# branch breaks the rev-list walk, not this net-range diff). UNAVAILABLE
+# skips the measured signals only — never a deletion.
+if (( ${#WEAKENED_PATHS[@]} > 0 )); then
   # The acknowledgement is the agent's own machine-readable claim, held to
   # the same shape rules as deferred-findings.json: an array, a string path,
   # and a reason with enough substance to be read as evidence. A malformed or
@@ -1458,6 +1559,8 @@ elif (( ${#WEAKENED_PATHS[@]} > 0 )); then
         -e 's/<[sS][uU][mM][mM][aA][rR][yY]/＜summary/g' || true
   } >> "${WORKDIR}/gate-advisories.md"
   echo "🧪 test weakening recorded and acknowledged: $(grep -c '^- ' <<< "${WEAKEN_OK}" || true) file(s)" | tee -a "${GATE_LOG}"
+elif [[ "${WEAKEN_MEASURED}" != 'true' ]]; then
+  echo '🧪 test-weakening measurement UNAVAILABLE this round (diff producer failed) — measured signals skipped' | tee -a "${GATE_LOG}"
 fi
 
 echo '🔬 Re-running deterministic checks (independent of the agent)...'
