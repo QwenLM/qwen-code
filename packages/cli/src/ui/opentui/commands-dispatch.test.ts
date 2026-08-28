@@ -676,7 +676,7 @@ describe('result mapping (all SlashCommandActionReturn kinds)', () => {
     });
   });
 
-  it('/resume <id> awaits handleResume; /branch awaits handleBranch', async () => {
+  it('/resume <id> awaits handleResume', async () => {
     const commands = [
       stub({
         name: 'resume',
@@ -690,10 +690,6 @@ describe('result mapping (all SlashCommandActionReturn kinds)', () => {
           matchedSessions: [],
         }),
       }),
-      stub({
-        name: 'branch',
-        action: () => ({ type: 'dialog', dialog: 'branch', name: 'wip' }),
-      }),
     ];
     const resume = await dispatch('/resume', commands);
     expect(resume.outcome).toEqual({ kind: 'handled' });
@@ -704,9 +700,50 @@ describe('result mapping (all SlashCommandActionReturn kinds)', () => {
       kind: 'open_dialog',
       request: { dialog: 'resume', matchedSessions: [] },
     });
+  });
 
-    const branch = await dispatch('/branch', commands);
-    expect(branch.host.branchNames).toEqual(['wip']);
+  it('/branch awaits handleBranch', async () => {
+    // Gate is held closed. If dispatch properly awaits handleBranch, its promise
+    // stays pending. If dispatch uses void, it resolves immediately.
+    let resolveHandleBranch!: () => void;
+    const handleBranchGate = new Promise<void>((res) => {
+      resolveHandleBranch = res;
+    });
+    const branchNames: Array<string | undefined> = [];
+    const host = createFakeHost();
+    host.handleBranch = async (name) => {
+      await handleBranchGate;
+      branchNames.push(name);
+    };
+
+    const commands = [
+      stub({
+        name: 'branch',
+        action: () => ({ type: 'dialog', dialog: 'branch', name: 'wip' }),
+      }),
+    ];
+    const dispatcher = new OpenTuiSlashDispatcher(host, services, commands);
+
+    const handlePromise = dispatcher.handle('/branch');
+
+    // Race: if dispatch did NOT await handleBranch, it already resolved and wins.
+    // If dispatch IS awaiting, the race times out (undefined sentinel wins).
+    const sentinel = Symbol('pending');
+    const raceResult = await Promise.race([
+      handlePromise.then(() => 'resolved'),
+      Promise.resolve()
+        .then(() => Promise.resolve())
+        .then(() => sentinel),
+    ]);
+
+    // dispatch must still be pending (blocked on the gate) — not yet resolved.
+    expect(raceResult).toBe(sentinel);
+
+    // Now unblock and let everything complete.
+    resolveHandleBranch();
+    const outcome = await handlePromise;
+    expect(outcome).toEqual({ kind: 'handled' });
+    expect(branchNames).toEqual(['wip']);
   });
 
   it('quit and tool results surface untouched', async () => {
