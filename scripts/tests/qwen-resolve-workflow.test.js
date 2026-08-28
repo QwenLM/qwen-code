@@ -787,8 +787,14 @@ describe('qwen resolve workflow', () => {
     expect(resolveJob).toContain('persist-credentials: false');
     // The resolution check carries no writable GitHub token (defense in depth).
     expect(resolveJob).toContain("GITHUB_TOKEN: ''");
-    // The agent runs sandboxed.
-    expect(resolveJob).toContain('"sandbox": true');
+    // The agent runs WITHOUT the container sandbox — measured, not assumed:
+    // the first day `sandbox: true` took effect (#9252, 2026-08-16) /resolve
+    // went from 84% pushed to 0 of 81, dying on a missing versioned image or
+    // hanging to the job timeout. Containment is the no-token agent, the scope
+    // guard and the ephemeral runner. Flipping this back needs a dry-run that
+    // shows the agent finishing inside the container.
+    expect(resolveJob).toContain('"sandbox": false');
+    expect(resolveJob).not.toContain('"sandbox": true');
     // Concurrent /resolve runs must not interleave on the credentialed push.
     expect(resolveJob).toContain('cancel-in-progress: false');
   });
@@ -803,6 +809,56 @@ describe('qwen resolve workflow', () => {
     expect(agentStep).not.toContain('GITHUB_TOKEN');
     expect(agentStep).not.toContain('CI_BOT_PAT');
     expect(agentStep).not.toContain('CI_DEV_BOT_PAT');
+  });
+
+  it('pins the CLI version and bounds the agent step', () => {
+    const agentStep = resolveJob.slice(
+      resolveJob.indexOf("- name: 'Resolve conflicts'"),
+      resolveJob.indexOf("- name: 'Resolution check'"),
+    );
+    // `latest` ties every run to the npm release pipeline of the moment: the
+    // 2026-08-15 dist-tag pointed at an unresolvable 0.21.12 and 14 runs died
+    // on `npm error notarget` before the agent started.
+    expect(agentStep).toMatch(/qwen_cli_version: '\d+\.\d+\.\d+'/);
+    expect(agentStep).not.toContain("qwen_cli_version: 'latest'");
+    // A hung agent must not bill the whole 120-minute job; the step timeout
+    // and the number quoted in the failure comment must agree.
+    const stepTimeout = agentStep.match(/^\s+timeout-minutes: (\d+)$/m);
+    expect(stepTimeout).not.toBeNull();
+    const reportStep = resolveJob.slice(
+      resolveJob.indexOf("- name: 'Report result'"),
+    );
+    expect(reportStep).toContain(`AGENT_TIMEOUT_MINUTES: '${stepTimeout[1]}'`);
+    expect(Number(stepTimeout[1])).toBeLessThan(120);
+  });
+
+  it('reports an agent that never ran as an infrastructure failure, not a verdict', () => {
+    // outcome != success on the agent step means no resolution was attempted
+    // (install/model/infra error, step timeout, cancellation). The comment
+    // must say so and must not invite a re-run, which repeats the failure.
+    expect(resolveJob).toContain(
+      'echo "failure_kind=infra" >> "$GITHUB_OUTPUT"',
+    );
+    expect(resolveJob).toContain(
+      "FAILURE_KIND: '${{ steps.verify.outputs.failure_kind }}'",
+    );
+    expect(resolveJob).toContain(
+      "RESOLVE_OUTCOME: '${{ steps.resolve_conflicts.outcome }}'",
+    );
+    const infraIdx = resolveJob.indexOf(
+      'Qwen Code could not run conflict resolution on this PR',
+    );
+    expect(infraIdx).toBeGreaterThan(-1);
+    const infraLine = resolveJob.slice(
+      infraIdx,
+      resolveJob.indexOf('\n', infraIdx),
+    );
+    expect(infraLine).toContain('This is not a verdict on the conflict');
+    expect(infraLine).not.toContain('Re-run /resolve');
+    // The generic wording survives for the cases where the agent did run.
+    expect(resolveJob).toContain(
+      'Qwen Code attempted to resolve merge conflicts but the run did not complete successfully.',
+    );
   });
 
   it('supports dry-run and workflow_dispatch', () => {

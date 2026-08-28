@@ -241,10 +241,15 @@ describe('qwen-triage: agent tool/permission settings', () => {
 
 // The same settings_json → settings bug survived in two more workflows after
 // the triage fix. An unknown action input is dropped without error, so the
-// /resolve agent ran every time with no turn cap, no tool allowlist, and no
-// sandbox — on a runner pool its runs-on comment chose specifically because
-// `sandbox: true` needs docker — and the follow-up bot ran uncapped too.
-// These blocks were therefore never validated by anything; parse them here.
+// /resolve agent ran every time with no turn cap and no tool allowlist, and
+// the follow-up bot ran uncapped too. These blocks were therefore never
+// validated by anything; parse them here.
+//
+// The sandbox key is pinned to FALSE, not true. The fix that made the block
+// take effect (#9252) also switched the container on, and /resolve went from
+// 84% pushed to 0 of 81 in a row: the versioned ghcr image lags the npm
+// release (#9898) so the agent died at startup, or it hung silently to the job
+// timeout. No sandboxed /resolve run has ever pushed a resolution.
 describe('qwen-code-pr-review.yml resolve-pr: agent settings', () => {
   it('passes `settings:` (not the silently-dropped `settings_json:`)', () => {
     assertSettingsContract(resolveConflictsStep, 'resolve_conflicts');
@@ -275,22 +280,37 @@ describe('qwen-code-pr-review.yml resolve-pr: agent settings', () => {
     ]) {
       assert.ok(core.includes(t), `tools.core must include ${t}`);
     }
-    // The runs-on comment pins this job to hosted runners because the sandbox
-    // needs docker; dropping the key would pay that routing cost for nothing.
+    // Explicit false, not absent: absent means "whatever the CLI defaults to
+    // or QWEN_SANDBOX says", and the one time this flipped on it took the
+    // command down for 13 days (see the describe comment).
     assert.equal(
       settings.tools?.sandbox,
-      true,
-      'tools.sandbox must stay true — the runs-on routing depends on it',
+      false,
+      'tools.sandbox must stay false — every sandboxed /resolve run has failed; re-enable only with a dry-run that finishes inside the container',
     );
   });
 
-  it('keeps resolve-pr on hosted runners (sandbox: true needs docker)', () => {
-    // The routing half of the sandbox coupling: the ECS pool ships no
-    // container runtime, so an ECS-routed sandboxed agent dies at startup.
+  it('pins the CLI version instead of following `latest`', () => {
+    // `latest` ties the job to the npm release pipeline of the moment: on
+    // 2026-08-15 the dist-tag pointed at an unresolvable 0.21.12 and every
+    // /resolve died on `npm error notarget` before the agent started.
+    const version = resolveConflictsStep.with?.qwen_cli_version;
+    assert.match(
+      String(version),
+      /^\d+\.\d+\.\d+$/,
+      'qwen_cli_version must be an exact semver, not a dist-tag',
+    );
+  });
+
+  it('keeps resolve-pr on an ephemeral hosted runner', () => {
+    // This job merges the base branch and force-pushes to the PR head; a fresh
+    // runner is the cheapest guarantee that nothing from an earlier attempt
+    // is carried into the credentialed push. (It used to be pinned for docker
+    // as well; the agent no longer runs sandboxed, so that half is moot.)
     assert.equal(
       resolvePrJob['runs-on'],
       'ubuntu-latest',
-      'resolve-pr must stay on hosted runners — sandbox: true needs docker, absent on the ECS pool',
+      'resolve-pr must stay on an ephemeral hosted runner',
     );
   });
 });

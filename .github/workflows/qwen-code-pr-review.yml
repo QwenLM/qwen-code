@@ -2384,7 +2384,8 @@ jobs:
     # `true`. The variable is daemon state, and autofix's preflight is what
     # checks it up front, failing the job in seconds instead of at agent
     # startup. Anything moving a sandboxed job onto the pool should copy that
-    # preflight — see #9556.
+    # preflight — see #9556. (Moot for now: the agent step below runs with
+    # tools.sandbox false, for the reasons recorded on its settings block.)
     runs-on: 'ubuntu-latest'
     timeout-minutes: 120
     # Shared with qwen-autofix.yml's review-address job — see the rationale
@@ -2594,6 +2595,14 @@ jobs:
         if: "steps.prepare.outputs.decision == 'run'"
         id: 'resolve_conflicts'
         uses: 'QwenLM/qwen-code-action@05f81718976f3b7da657422e6e8e4d372b8621d7'
+        # A pushed resolution takes 6 minutes at the median, 41 at p95 and 70
+        # at p99 (294 runs, request to result comment); only two ever took
+        # longer than 75. The 120-minute job timeout has therefore never ended
+        # a healthy run, only hung ones — and a hang billed the full 120
+        # minutes 40 times in 2026-08. 75 keeps the p99 tail and cuts that
+        # bill by a third. Keep AGENT_TIMEOUT_MINUTES on 'Report result' in
+        # step with this value; a test pins the pair.
+        timeout-minutes: 75
         env:
           PR_NUMBER: '${{ steps.resolve.outputs.pr_number }}'
           BASE_REF: '${{ steps.prepare.outputs.base_ref }}'
@@ -2602,14 +2611,37 @@ jobs:
           OPENAI_API_KEY: '${{ secrets.OPENAI_API_KEY }}'
           OPENAI_BASE_URL: '${{ secrets.OPENAI_BASE_URL }}'
           OPENAI_MODEL: '${{ vars.QWEN_PR_REVIEW_MODEL }}'
+          # Pinned, not `latest`. The action installs the CLI from npm at run
+          # time, so `latest` makes every /resolve depend on the release
+          # pipeline of the moment: on 2026-08-15 the dist-tag moved to
+          # 0.21.12 before the tarball was resolvable and 14 runs in a row
+          # died on `npm error notarget`. 0.21.10 is the last version with a
+          # measured record on this job (16 of 19 requests pushed on
+          # 2026-08-12). Bump it on purpose, the way `uses:` above is bumped,
+          # after a dry-run /resolve on the new version.
+          qwen_cli_version: '0.21.10'
           # The input name is `settings` — this action version has no
           # `settings_json` input, and an unknown input is silently dropped.
-          # That is exactly what happened to this block: every /resolve run so
-          # far ignored it, and the agent ran without the turn cap, toolset
-          # allowlist, or the sandbox the runs-on comment above assumes.
+          # That is exactly what happened to this block until #9252: every
+          # /resolve run before it ignored the block, and the agent ran without
+          # the turn cap or toolset allowlist.
           # tools.core specifiers (e.g. `run_shell_command(git add)`) are advisory:
           # the permission manager keys on the tool name and drops the parenthesised
-          # command. Real containment = sandbox + write authorization + no agent token.
+          # command. Real containment = write authorization + no agent token +
+          # the scope guard in 'Resolution check' + an ephemeral runner.
+          #
+          # tools.sandbox is deliberately false. The day #9252 made this block
+          # take effect, `sandbox: true` took effect with it, and /resolve went
+          # from 84% pushed (273 agent runs, 2026-06-25..08-14) to 0 of 81
+          # (2026-08-15..08-27). Inside the container the agent either died at
+          # startup — the versioned `ghcr.io/qwenlm/qwen-code:<cli>` image lags
+          # the npm release (#9898: `manifest unknown` on 0.21.13, 0.22.0 and
+          # 0.22.1; 24 runs) — or produced no output at all until the job
+          # timeout (40 runs; `git status` afterwards showed the merge had not
+          # even started). No sandboxed /resolve run has ever pushed a
+          # resolution; every pushed one ran without the container. Turning the
+          # sandbox back on needs the same evidence the other way: a dry-run
+          # with `qwen_debug` that shows the agent finishing inside it.
           settings: |-
             {
               "model": {
@@ -2634,7 +2666,7 @@ jobs:
                   "run_shell_command(mkdir)",
                   "run_shell_command(pwd)"
                 ],
-                "sandbox": true
+                "sandbox": false
               }
             }
           prompt: |-
@@ -2690,8 +2722,12 @@ jobs:
           # and the merge-tree check below would misreport "still has conflicts".
           # Surface the real cause instead.
           if [ "$RESOLVE_OUTCOME" != "success" ]; then
-            echo "The conflict-resolution agent step did not succeed (outcome=${RESOLVE_OUTCOME}): API/quota/infrastructure error or cancellation. Check its logs."
+            echo "The conflict-resolution agent step did not succeed (outcome=${RESOLVE_OUTCOME}): CLI install, model endpoint or infrastructure error, its step timeout, or cancellation. Check its logs."
             echo "outcome=failed" >> "$GITHUB_OUTPUT"
+            # Distinguish "never reached a verdict" from "reached a wrong one":
+            # 'Report result' words the comment differently and does not invite
+            # a re-run, because a re-run repeats an infrastructure failure.
+            echo "failure_kind=infra" >> "$GITHUB_OUTPUT"
             exit 1
           fi
 
@@ -2834,6 +2870,10 @@ jobs:
           HEAD_SHA: '${{ steps.prepare.outputs.head_sha }}'
           HEAD_REPO: '${{ steps.prepare.outputs.head_repo }}'
           OUTCOME: '${{ steps.verify.outputs.outcome }}'
+          FAILURE_KIND: '${{ steps.verify.outputs.failure_kind }}'
+          RESOLVE_OUTCOME: '${{ steps.resolve_conflicts.outcome }}'
+          # Mirrors timeout-minutes on 'Resolve conflicts'; a test pins the pair.
+          AGENT_TIMEOUT_MINUTES: '75'
           DRY_RUN: '${{ env.DRY_RUN }}'
           RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
         run: |-
@@ -2957,16 +2997,26 @@ jobs:
                 append_safe_file "${WORKDIR}/no-action.md"
                 ;;
               *)
-                echo "Qwen Code attempted to resolve merge conflicts but the run did not complete successfully."
-                echo
-                for file in failure.md address-summary.md no-action.md; do
-                  if [ -s "${WORKDIR}/${file}" ]; then
-                    echo "### ${file}"
-                    append_safe_file "${WORKDIR}/${file}"
-                    echo
-                  fi
-                done
-                echo "Check the [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) for full logs."
+                if [ "$FAILURE_KIND" = "infra" ]; then
+                  # The agent never reached a verdict: outcome=failure (CLI
+                  # install, model endpoint, crash) or outcome=cancelled (its
+                  # step timeout). Say which, and do not invite a re-run: the
+                  # generic text below reads as "the model gave up", and 13
+                  # days of re-runs against one broken install (#9898) is what
+                  # this branch exists to stop.
+                  echo "Qwen Code could not run conflict resolution on this PR: the agent step ended with \`outcome=${RESOLVE_OUTCOME}\` before producing a result — a CLI install, model endpoint or infrastructure failure, or the step's ${AGENT_TIMEOUT_MINUTES}-minute timeout. This is not a verdict on the conflict. Requesting /resolve again will fail the same way until the cause shown in the [workflow run](${RUN_URL}) is fixed."
+                else
+                  echo "Qwen Code attempted to resolve merge conflicts but the run did not complete successfully."
+                  echo
+                  for file in failure.md address-summary.md no-action.md; do
+                    if [ -s "${WORKDIR}/${file}" ]; then
+                      echo "### ${file}"
+                      append_safe_file "${WORKDIR}/${file}"
+                      echo
+                    fi
+                  done
+                  echo "Check the [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) for full logs."
+                fi
                 ;;
             esac
           } > "${WORKDIR}/report.md"
