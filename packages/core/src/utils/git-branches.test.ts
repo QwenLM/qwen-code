@@ -16,6 +16,7 @@ import {
   gitCreateBranch,
   gitEnv,
   gitPull,
+  GitPullFailure,
   gitPush,
   isValidCheckoutRef,
 } from './git-branches.js';
@@ -55,6 +56,77 @@ function currentBranch(cwd: string): string {
 
 function headSha(cwd: string): string {
   return git(cwd, 'rev-parse', 'HEAD').trim();
+}
+
+/**
+ * Workspace `dir` tracking a bare remote, plus a second clone standing in
+ * for another developer. Both repositories pin `pull.rebase` so a diverged
+ * pull merges instead of depending on whatever the host's git policy is.
+ */
+function makeUpstream(): { dir: string; clone: string } {
+  const dir = makeRepo();
+  const remote = makeBareRemote();
+  git(dir, 'remote', 'add', 'origin', remote);
+  git(dir, 'config', 'pull.rebase', 'false');
+  git(dir, 'push', '-q', '-u', 'origin', 'HEAD');
+  const clone = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-gitclone-'));
+  tmpRoots.push(clone);
+  git(clone, 'clone', '-q', remote, '.');
+  git(clone, 'config', 'user.email', 'other@example.com');
+  git(clone, 'config', 'user.name', 'Other');
+  git(clone, 'config', 'commit.gpgsign', 'false');
+  return { dir, clone };
+}
+
+function commitFile(cwd: string, file: string, content: string): string {
+  fs.mkdirSync(path.dirname(path.join(cwd, file)), { recursive: true });
+  fs.writeFileSync(path.join(cwd, file), content);
+  git(cwd, 'add', '.');
+  git(cwd, 'commit', '-q', '-m', `edit ${file}`);
+  return headSha(cwd);
+}
+
+function remoteCommit(clone: string, file: string, content: string): void {
+  // The workspace may have pushed since the clone was made.
+  git(clone, 'pull', '-q', '--ff-only');
+  commitFile(clone, file, content);
+  git(clone, 'push', '-q', 'origin', 'HEAD');
+}
+
+function stashList(cwd: string): string[] {
+  return git(cwd, 'stash', 'list')
+    .split('\n')
+    .filter((line) => line.trim() !== '');
+}
+
+function read(cwd: string, file: string): string {
+  return fs.readFileSync(path.join(cwd, file), 'utf8');
+}
+
+/**
+ * The code under test honors HOME/XDG config (gitEnv only strips the
+ * GIT_CONFIG_* overrides), so point both at an empty directory: the host's
+ * `~/.gitconfig` must not decide how these merges behave.
+ */
+function hermeticEnv(): Record<string, string | undefined> {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-githome-'));
+  tmpRoots.push(home);
+  return { ...process.env, HOME: home, XDG_CONFIG_HOME: home };
+}
+
+async function expectPullFailure(
+  promise: Promise<unknown>,
+  code: GitPullFailure['code'],
+): Promise<GitPullFailure> {
+  let caught: unknown;
+  try {
+    await promise;
+  } catch (err) {
+    caught = err;
+  }
+  expect(caught).toBeInstanceOf(GitPullFailure);
+  expect((caught as GitPullFailure).code).toBe(code);
+  return caught as GitPullFailure;
 }
 
 afterEach(() => {
@@ -540,6 +612,285 @@ describe('gitPull', () => {
     expect(result.success).toBe(true);
     expect(fs.existsSync(path.join(dir, 'remote-only.txt'))).toBe(true);
     expect(fs.existsSync(path.join(dir, 'local-only.txt'))).toBe(true);
+  });
+});
+
+describe('gitPull with a dirty working tree', () => {
+  it('a plain pull on a dirty tree is still refused by git, unchanged', async () => {
+    const { dir, clone } = makeUpstream();
+    remoteCommit(clone, 'a.txt', 'remote\n');
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'local\n');
+
+    await expect(gitPull(dir, undefined, hermeticEnv())).rejects.toThrow(
+      /would be overwritten/,
+    );
+    expect(read(dir, 'a.txt')).toBe('local\n');
+    expect(stashList(dir)).toEqual([]);
+  });
+
+  it('stash pull updates a dirty tree and restores tracked edits and untracked files', async () => {
+    const { dir, clone } = makeUpstream();
+    remoteCommit(clone, 'remote-only.txt', 'remote\n');
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'local edit\n');
+    fs.writeFileSync(path.join(dir, 'b.txt'), 'untracked\n');
+    const headBefore = headSha(dir);
+
+    const result = await gitPull(dir, { stash: true }, hermeticEnv());
+
+    expect(result.success).toBe(true);
+    expect(result.stashRestoreConflict).toBeUndefined();
+    expect(headSha(dir)).not.toBe(headBefore);
+    expect(read(dir, 'remote-only.txt')).toBe('remote\n');
+    expect(read(dir, 'a.txt')).toBe('local edit\n');
+    expect(read(dir, 'b.txt')).toBe('untracked\n');
+    expect(stashList(dir)).toEqual([]);
+  });
+
+  it('stash pull with nothing to stash is a plain pull', async () => {
+    const { dir, clone } = makeUpstream();
+    remoteCommit(clone, 'remote-only.txt', 'remote\n');
+
+    const result = await gitPull(dir, { stash: true }, hermeticEnv());
+
+    expect(result.success).toBe(true);
+    expect(read(dir, 'remote-only.txt')).toBe('remote\n');
+    expect(stashList(dir)).toEqual([]);
+  });
+
+  it('stash pull with rebase replays the local commit and restores the edits', async () => {
+    const { dir, clone } = makeUpstream();
+    remoteCommit(clone, 'remote-only.txt', 'remote\n');
+    commitFile(dir, 'local-only.txt', 'local\n');
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'local edit\n');
+
+    const result = await gitPull(
+      dir,
+      { stash: true, rebase: true },
+      hermeticEnv(),
+    );
+
+    expect(result.success).toBe(true);
+    expect(read(dir, 'remote-only.txt')).toBe('remote\n');
+    expect(read(dir, 'local-only.txt')).toBe('local\n');
+    expect(read(dir, 'a.txt')).toBe('local edit\n');
+    // Linear history: the local commit was replayed, not merged.
+    expect(git(dir, 'rev-list', '--merges', 'HEAD').trim()).toBe('');
+    expect(stashList(dir)).toEqual([]);
+  });
+
+  it('stash pull reports a conflicting restore and keeps the stash entry', async () => {
+    const { dir, clone } = makeUpstream();
+    remoteCommit(clone, 'a.txt', 'remote\n');
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'local\n');
+    const headBefore = headSha(dir);
+
+    const result = await gitPull(dir, { stash: true }, hermeticEnv());
+
+    expect(result.success).toBe(true);
+    expect(result.stashRestoreConflict).toBe(true);
+    expect(headSha(dir)).not.toBe(headBefore);
+    const entries = stashList(dir);
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toContain('qwen-code: auto-stash before pull');
+    const sha = git(dir, 'rev-parse', 'refs/stash').trim();
+    expect(result.output).toContain(sha);
+    // The entry still carries the local edit.
+    expect(git(dir, 'stash', 'show', '-p', sha)).toContain('+local');
+  });
+
+  it('stash pull restores the pre-pull state when the update fails', async () => {
+    const { dir, clone } = makeUpstream();
+    remoteCommit(clone, 'a.txt', 'remote\n');
+    commitFile(dir, 'a.txt', 'local commit\n');
+    commitFile(dir, 'd.txt', 'd\n');
+    const headBefore = headSha(dir);
+    fs.writeFileSync(path.join(dir, 'd.txt'), 'dirty d\n');
+    fs.writeFileSync(path.join(dir, 'c.txt'), 'untracked\n');
+
+    const failure = await expectPullFailure(
+      gitPull(dir, { stash: true }, hermeticEnv()),
+      'pull_failed',
+    );
+
+    expect(failure.message).toContain('your local changes were restored');
+    expect(failure.message).toContain('CONFLICT');
+    expect(headSha(dir)).toBe(headBefore);
+    expect(fs.existsSync(path.join(dir, '.git', 'MERGE_HEAD'))).toBe(false);
+    expect(read(dir, 'a.txt')).toBe('local commit\n');
+    expect(read(dir, 'd.txt')).toBe('dirty d\n');
+    expect(read(dir, 'c.txt')).toBe('untracked\n');
+    expect(stashList(dir)).toEqual([]);
+  });
+
+  it('stash pull aborts the rebase it started when the replay conflicts', async () => {
+    const { dir, clone } = makeUpstream();
+    remoteCommit(clone, 'a.txt', 'remote\n');
+    commitFile(dir, 'a.txt', 'local commit\n');
+    const headBefore = headSha(dir);
+    fs.writeFileSync(path.join(dir, 'c.txt'), 'untracked\n');
+
+    await expectPullFailure(
+      gitPull(dir, { stash: true, rebase: true }, hermeticEnv()),
+      'pull_failed',
+    );
+
+    expect(headSha(dir)).toBe(headBefore);
+    expect(fs.existsSync(path.join(dir, '.git', 'rebase-merge'))).toBe(false);
+    expect(fs.existsSync(path.join(dir, '.git', 'rebase-apply'))).toBe(false);
+    expect(read(dir, 'a.txt')).toBe('local commit\n');
+    expect(read(dir, 'c.txt')).toBe('untracked\n');
+    expect(stashList(dir)).toEqual([]);
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'stash pull restores its own entry when another stash was pushed meanwhile',
+    async () => {
+      const { dir, clone } = makeUpstream();
+      remoteCommit(clone, 'remote-only.txt', 'remote\n');
+      fs.writeFileSync(path.join(dir, 'a.txt'), 'local edit\n');
+      // A post-merge hook stands in for a terminal pushing to the shared
+      // refs/stash while the pull runs.
+      const hook = path.join(dir, '.git', 'hooks', 'post-merge');
+      fs.writeFileSync(
+        hook,
+        '#!/bin/sh\necho foreign > foreign.txt\ngit stash push -u -q -m foreign-entry\n',
+      );
+      fs.chmodSync(hook, 0o755);
+
+      const result = await gitPull(dir, { stash: true }, hermeticEnv());
+
+      expect(result.success).toBe(true);
+      expect(result.stashRestoreConflict).toBeUndefined();
+      expect(read(dir, 'a.txt')).toBe('local edit\n');
+      // Only the foreign entry remains; ours was applied and dropped by
+      // identity even though it was no longer on top.
+      const entries = stashList(dir);
+      expect(entries).toHaveLength(1);
+      expect(entries[0]).toContain('foreign-entry');
+      expect(fs.existsSync(path.join(dir, 'foreign.txt'))).toBe(false);
+    },
+  );
+
+  it('stash pull fails with the missing-upstream message before stashing', async () => {
+    const dir = makeRepo();
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'local edit\n');
+
+    await expect(gitPull(dir, { stash: true }, hermeticEnv())).rejects.toThrow(
+      /no upstream/i,
+    );
+    expect(read(dir, 'a.txt')).toBe('local edit\n');
+    expect(stashList(dir)).toEqual([]);
+  });
+
+  it('force pull discards local changes, keeps ignored files, and updates', async () => {
+    const { dir, clone } = makeUpstream();
+    commitFile(dir, '.gitignore', 'build/\n');
+    git(dir, 'push', '-q', 'origin', 'HEAD');
+    remoteCommit(clone, 'remote-only.txt', 'remote\n');
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'local edit\n');
+    fs.writeFileSync(path.join(dir, 'b.txt'), 'untracked\n');
+    fs.mkdirSync(path.join(dir, 'build'));
+    fs.writeFileSync(path.join(dir, 'build', 'out.txt'), 'artifact\n');
+
+    const result = await gitPull(dir, { force: true }, hermeticEnv());
+
+    expect(result.success).toBe(true);
+    expect(read(dir, 'remote-only.txt')).toBe('remote\n');
+    expect(read(dir, 'a.txt')).toBe('one\n');
+    expect(fs.existsSync(path.join(dir, 'b.txt'))).toBe(false);
+    expect(read(dir, 'build/out.txt')).toBe('artifact\n');
+    expect(git(dir, 'status', '--porcelain').trim()).toBe('');
+  });
+
+  it('force pull refuses a diverged branch before discarding anything', async () => {
+    const { dir, clone } = makeUpstream();
+    remoteCommit(clone, 'remote-only.txt', 'remote\n');
+    commitFile(dir, 'local-only.txt', 'local\n');
+    const headBefore = headSha(dir);
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'local edit\n');
+    fs.writeFileSync(path.join(dir, 'b.txt'), 'untracked\n');
+
+    await expectPullFailure(
+      gitPull(dir, { force: true }, hermeticEnv()),
+      'diverged',
+    );
+
+    expect(headSha(dir)).toBe(headBefore);
+    expect(read(dir, 'a.txt')).toBe('local edit\n');
+    expect(read(dir, 'b.txt')).toBe('untracked\n');
+  });
+
+  it('force pull from a repository subdirectory refuses without discarding', async () => {
+    const { dir, clone } = makeUpstream();
+    commitFile(dir, 'packages/app/index.txt', 'app\n');
+    git(dir, 'push', '-q', 'origin', 'HEAD');
+    remoteCommit(clone, 'remote-only.txt', 'remote\n');
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'outside edit\n');
+    fs.writeFileSync(path.join(dir, 'packages/app/index.txt'), 'inside edit\n');
+
+    await expectPullFailure(
+      gitPull(
+        path.join(dir, 'packages', 'app'),
+        { force: true },
+        hermeticEnv(),
+      ),
+      'force_unsupported',
+    );
+
+    expect(read(dir, 'a.txt')).toBe('outside edit\n');
+    expect(read(dir, 'packages/app/index.txt')).toBe('inside edit\n');
+  });
+
+  it('rejects combining stash and force', async () => {
+    const dir = makeRepo();
+    await expect(gitPull(dir, { stash: true, force: true })).rejects.toThrow(
+      /mutually exclusive/,
+    );
+  });
+
+  it('refuses stash and force pulls while a merge is in progress, keeping it', async () => {
+    const { dir, clone } = makeUpstream();
+    remoteCommit(clone, 'a.txt', 'remote\n');
+    commitFile(dir, 'a.txt', 'local commit\n');
+    git(dir, 'fetch', '-q');
+    expect(() => git(dir, 'merge', '--no-edit', '@{upstream}')).toThrow();
+    // Resolve the conflict but leave the merge uncommitted: this staged
+    // resolution lives only in MERGE_HEAD, which a stash or reset would drop.
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'resolved\n');
+    git(dir, 'add', 'a.txt');
+    const mergeHead = git(dir, 'rev-parse', 'MERGE_HEAD').trim();
+
+    await expectPullFailure(
+      gitPull(dir, { stash: true }, hermeticEnv()),
+      'operation_in_progress',
+    );
+    await expectPullFailure(
+      gitPull(dir, { force: true }, hermeticEnv()),
+      'operation_in_progress',
+    );
+
+    expect(git(dir, 'rev-parse', 'MERGE_HEAD').trim()).toBe(mergeHead);
+    expect(read(dir, 'a.txt')).toBe('resolved\n');
+    expect(stashList(dir)).toEqual([]);
+  });
+
+  it('refuses a stash pull while a rebase is stopped, keeping the edits', async () => {
+    const { dir, clone } = makeUpstream();
+    remoteCommit(clone, 'a.txt', 'remote\n');
+    commitFile(dir, 'a.txt', 'local commit\n');
+    git(dir, 'fetch', '-q');
+    expect(() => git(dir, 'rebase', '@{upstream}')).toThrow();
+    fs.writeFileSync(path.join(dir, 'b.txt'), 'untracked\n');
+
+    const failure = await expectPullFailure(
+      gitPull(dir, { stash: true }, hermeticEnv()),
+      'operation_in_progress',
+    );
+
+    expect(failure.message).toContain('rebase');
+    expect(fs.existsSync(path.join(dir, '.git', 'rebase-merge'))).toBe(true);
+    expect(read(dir, 'b.txt')).toBe('untracked\n');
+    expect(stashList(dir)).toEqual([]);
   });
 });
 

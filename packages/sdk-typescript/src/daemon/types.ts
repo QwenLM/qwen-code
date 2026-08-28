@@ -347,6 +347,12 @@ export interface DaemonGitPushResult {
 export interface DaemonGitPullResult {
   success: boolean;
   output: string;
+  /**
+   * Present and true when the pull succeeded but restoring the
+   * auto-stashed changes failed; the stash entry is kept, and the
+   * working tree may carry conflict markers.
+   */
+  stashRestoreConflict?: boolean;
 }
 
 /** Response from `POST /workspaces/:workspace/git/commit`. */

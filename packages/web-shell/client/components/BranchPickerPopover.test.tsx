@@ -24,27 +24,35 @@ vi.mock('./ui/popover', async () => {
   };
 });
 
-const { workspaceGitBranches, workspaceGitCreateBranch, workspaceClient } =
-  vi.hoisted(() => {
-    const workspaceGitBranches = vi.fn();
-    const workspaceGitCreateBranch = vi.fn();
-    // A stable client so the popover's memoized workspace handle (and thus its
-    // fetch effect) stays referentially stable across renders.
-    const workspaceClient = {
-      workspaceByCwd: () => ({
-        workspaceGitBranches,
-        workspaceGitCheckout: vi.fn().mockResolvedValue(undefined),
-        workspaceGitCreateBranch,
-        workspaceGitPush: vi
-          .fn()
-          .mockResolvedValue({ success: true, output: '' }),
-        workspaceGitPull: vi
-          .fn()
-          .mockResolvedValue({ success: true, output: '' }),
-      }),
-    };
-    return { workspaceGitBranches, workspaceGitCreateBranch, workspaceClient };
-  });
+const {
+  workspaceGitBranches,
+  workspaceGitCreateBranch,
+  workspaceGitPull,
+  workspaceClient,
+} = vi.hoisted(() => {
+  const workspaceGitBranches = vi.fn();
+  const workspaceGitCreateBranch = vi.fn();
+  const workspaceGitPull = vi.fn();
+  // A stable client so the popover's memoized workspace handle (and thus its
+  // fetch effect) stays referentially stable across renders.
+  const workspaceClient = {
+    workspaceByCwd: () => ({
+      workspaceGitBranches,
+      workspaceGitCheckout: vi.fn().mockResolvedValue(undefined),
+      workspaceGitCreateBranch,
+      workspaceGitPush: vi
+        .fn()
+        .mockResolvedValue({ success: true, output: '' }),
+      workspaceGitPull,
+    }),
+  };
+  return {
+    workspaceGitBranches,
+    workspaceGitCreateBranch,
+    workspaceGitPull,
+    workspaceClient,
+  };
+});
 
 vi.mock('@qwen-code/webui/daemon-react-sdk', async (importOriginal) => {
   const actual =
@@ -58,8 +66,36 @@ vi.mock('@qwen-code/webui/daemon-react-sdk', async (importOriginal) => {
   };
 });
 
+const { DaemonHttpError } = await import('@qwen-code/sdk/daemon');
 const { I18nProvider } = await import('../i18n');
 const { BranchPickerPopover } = await import('./BranchPickerPopover');
+
+const BRANCHES = {
+  v: 1,
+  workspaceCwd: '/repo',
+  available: true,
+  local: [{ name: 'main', isHead: true }],
+  remote: [],
+  tags: [],
+  recent: [],
+  head: 'main',
+  detached: false,
+};
+
+function dirtyTreeError(): Error {
+  return new DaemonHttpError(
+    409,
+    { error: 'dirty_working_tree', message: 'would be overwritten by merge' },
+    'POST /workspaces/:workspace/git/pull: dirty_working_tree',
+  );
+}
+
+function footerText(): string {
+  return (
+    document.body.querySelector('[data-test-popover-content]')?.textContent ??
+    ''
+  );
+}
 
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -77,13 +113,14 @@ function mount(
     onOpenDiff: () => void;
     onOpenCommit: () => void;
     onOpenChange: (open: boolean) => void;
+    open: boolean;
   }> = {},
 ): void {
   act(() => {
     root.render(
       <I18nProvider language="en">
         <BranchPickerPopover
-          open
+          open={overrides.open ?? true}
           onOpenChange={overrides.onOpenChange ?? vi.fn()}
           workspaceCwd="/repo"
           onOpenDiff={overrides.onOpenDiff}
@@ -110,7 +147,16 @@ afterEach(() => {
   act(() => root.unmount());
   container.remove();
   vi.clearAllMocks();
+  workspaceGitPull.mockReset();
 });
+
+function mountWithBranches(): void {
+  workspaceGitBranches.mockResolvedValue(BRANCHES);
+  container = document.createElement('div');
+  document.body.appendChild(container);
+  root = createRoot(container);
+  mount({});
+}
 
 describe('BranchPickerPopover actions', () => {
   it('wires "View Changes" to onOpenDiff and closes', async () => {
@@ -165,6 +211,159 @@ describe('BranchPickerPopover actions', () => {
 
     expect(onOpenCommit).toHaveBeenCalledTimes(1);
     expect(onOpenChange).toHaveBeenCalledWith(false);
+  });
+
+  it('offers stash and discard when the pull hits a dirty tree', async () => {
+    workspaceGitPull.mockRejectedValueOnce(dirtyTreeError());
+    workspaceGitPull.mockResolvedValueOnce({ success: true, output: 'ok' });
+    mountWithBranches();
+    await flush();
+
+    clickButton('Update Project');
+    await flush();
+
+    expect(footerText()).toContain('Update blocked by uncommitted changes');
+    clickButton('Stash Changes and Update');
+    await flush();
+
+    expect(workspaceGitPull).toHaveBeenLastCalledWith(
+      { stash: true },
+      undefined,
+      300_000,
+    );
+    expect(footerText()).not.toContain('Stash Changes and Update');
+    expect(footerText()).toContain('ok');
+  });
+
+  it('requires confirmation before discarding changes for a pull', async () => {
+    workspaceGitPull.mockRejectedValueOnce(dirtyTreeError());
+    workspaceGitPull.mockResolvedValueOnce({ success: true, output: 'ok' });
+    mountWithBranches();
+    await flush();
+
+    clickButton('Update Project');
+    await flush();
+    clickButton('Discard Changes and Update');
+    await flush();
+
+    // The first click only reveals the confirmation; no destructive call yet.
+    expect(workspaceGitPull).toHaveBeenCalledTimes(1);
+    expect(footerText()).toContain('This cannot be undone');
+
+    clickButton('Discard and Update');
+    await flush();
+
+    expect(workspaceGitPull).toHaveBeenLastCalledWith(
+      { force: true },
+      undefined,
+      300_000,
+    );
+  });
+
+  it('keeps the panel mounted while its stash pull is in flight', async () => {
+    let settle:
+      | ((value: { success: boolean; output: string }) => void)
+      | undefined;
+    workspaceGitPull.mockRejectedValueOnce(dirtyTreeError());
+    workspaceGitPull.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          settle = resolve;
+        }),
+    );
+    mountWithBranches();
+    await flush();
+
+    clickButton('Update Project');
+    await flush();
+    clickButton('Stash Changes and Update');
+    await flush();
+
+    const stashButton = Array.from(
+      document.body.querySelectorAll('button'),
+    ).find((b) => b.textContent?.includes('Stash Changes and Update'));
+    expect(stashButton).toBeTruthy();
+    expect(stashButton?.disabled).toBe(true);
+
+    await act(async () => {
+      settle?.({ success: true, output: 'done' });
+    });
+    await flush();
+
+    expect(footerText()).not.toContain('Stash Changes and Update');
+    expect(footerText()).toContain('done');
+  });
+
+  it('shows a warning instead of success when the stash restore conflicts', async () => {
+    workspaceGitPull.mockRejectedValueOnce(dirtyTreeError());
+    workspaceGitPull.mockResolvedValueOnce({
+      success: true,
+      output: 'Updating 1..2',
+      stashRestoreConflict: true,
+    });
+    mountWithBranches();
+    await flush();
+
+    clickButton('Update Project');
+    await flush();
+    clickButton('Stash Changes and Update');
+    await flush();
+
+    expect(footerText()).toContain('restoring your stashed changes failed');
+    expect(footerText()).not.toContain('Updating 1..2');
+  });
+
+  it('shows the daemon message for a refused pull instead of the panel', async () => {
+    workspaceGitPull.mockRejectedValueOnce(
+      new DaemonHttpError(
+        409,
+        {
+          error: 'operation_in_progress',
+          message: 'cannot update: a merge is in progress',
+        },
+        'POST /workspaces/:workspace/git/pull: operation_in_progress',
+      ),
+    );
+    mountWithBranches();
+    await flush();
+
+    clickButton('Update Project');
+    await flush();
+
+    expect(footerText()).toContain('cannot update: a merge is in progress');
+    expect(footerText()).not.toContain('Stash Changes and Update');
+  });
+
+  it('dismisses the panel via Cancel without another pull', async () => {
+    workspaceGitPull.mockRejectedValueOnce(dirtyTreeError());
+    mountWithBranches();
+    await flush();
+
+    clickButton('Update Project');
+    await flush();
+    clickButton('Cancel');
+    await flush();
+
+    expect(workspaceGitPull).toHaveBeenCalledTimes(1);
+    expect(footerText()).not.toContain('Stash Changes and Update');
+    expect(footerText()).not.toContain('Update blocked by uncommitted changes');
+  });
+
+  it('resets the panel when the popover is reopened', async () => {
+    workspaceGitPull.mockRejectedValueOnce(dirtyTreeError());
+    mountWithBranches();
+    await flush();
+
+    clickButton('Update Project');
+    await flush();
+    expect(footerText()).toContain('Stash Changes and Update');
+
+    mount({ open: false });
+    await flush();
+    mount({ open: true });
+    await flush();
+
+    expect(footerText()).not.toContain('Stash Changes and Update');
   });
 
   it('explains an invalid branch name instead of silently returning', async () => {
