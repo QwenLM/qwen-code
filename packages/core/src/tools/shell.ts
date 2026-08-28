@@ -2726,6 +2726,12 @@ export class ShellToolInvocation extends BaseToolInvocation<
     const wasPromoteRefused =
       result.aborted &&
       getShellAbortReasonKind(combinedSignal.reason) === 'background';
+    // Cooperative mid-execution interruption: the tool observed the
+    // abort and killed the child, but resolves error-free. Reported
+    // via ToolResult.aborted so the scheduler does not mistake it for
+    // a cancellation that landed after the work completed.
+    const wasUserCancelled =
+      result.aborted && !wasTimeout && !wasPromoteRefused;
     const timeoutSummary = wasTimeout
       ? `Command timed out after ${effectiveTimeout}ms before it could complete.`
       : undefined;
@@ -3050,6 +3056,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
       llmContent,
       returnDisplay: returnDisplayMessage,
       ...(persistedOutputFiles !== undefined ? { persistedOutputFiles } : {}),
+      ...(wasUserCancelled ? { aborted: true } : {}),
       ...executionError,
     };
   }

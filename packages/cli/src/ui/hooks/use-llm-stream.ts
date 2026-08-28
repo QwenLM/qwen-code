@@ -4332,20 +4332,12 @@ export const useLlmStream = (
         // `recordCompletedToolCall` loop below over `llmTools` —
         // filter to the same shape (non-client-initiated) so client
         // tools (which the original loop also skipped) stay skipped.
-        //
-        // Cancelled tools are also skipped: `dedupedTools` includes
-        // anything in a terminal state (success | error | cancelled),
-        // but cancelled means the tool never actually ran end-to-end —
-        // the `allToolsCancelled` branch below would have surfaced
-        // them via `addHistory + reportCancelled` rather than the
-        // completed-call metric, and the metric should match. Without
-        // this filter, a deduped + cancelled tool would inflate
-        // `toolCallCount` for a call that never produced a result
-        // (and could also flip `skillsModifiedInSession` for a
-        // never-executed skill-write).
+        // No status filter here: cancelled calls without a settled
+        // `executionStatus` are dropped by `didToolCallProduceWork`
+        // inside `recordCompletedToolCall`, while cancellations that
+        // settled first still count (matching the main loop).
         for (const tc of dedupedTools) {
           if (tc.request.isClientInitiated) continue;
-          if (tc.status === 'cancelled') continue;
           llmClient?.recordCompletedToolCall(
             tc.request.name,
             tc.request.args as Record<string, unknown>,
@@ -4506,17 +4498,15 @@ export const useLlmStream = (
             toolCall.request.prompt_id,
           );
         }
-        if (toolCall.status !== 'cancelled') {
-          llmClient?.recordCompletedToolCall(
-            toolCall.request.name,
-            toolCall.request.args as Record<string, unknown>,
-            toCompletedToolCallOutcome(
-              toolCall.request.callId,
-              toolCall.status,
-              toolCall.response,
-            ),
-          );
-        }
+        llmClient?.recordCompletedToolCall(
+          toolCall.request.name,
+          toolCall.request.args as Record<string, unknown>,
+          toCompletedToolCallOutcome(
+            toolCall.request.callId,
+            toolCall.status,
+            toolCall.response,
+          ),
+        );
         dualOutput?.emitToolResult(toolCall.request, toolCall.response);
       }
       if (secondaryTools.length > 0) {

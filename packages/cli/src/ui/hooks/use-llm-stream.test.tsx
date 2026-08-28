@@ -5905,15 +5905,14 @@ describe('useLlmStream', () => {
     },
   );
 
-  it('skips recordCompletedToolCall for deduped CANCELLED tools (telemetry parity)', async () => {
-    // A deduped tool with status='cancelled' never actually produced
-    // model-visible output — counting it via `recordCompletedToolCall`
-    // (which increments toolCallCount and can flip
-    // skillsModifiedInSession on a skill-write path) would inflate the
-    // metric for a call that never ran end-to-end. Dedup must skip
-    // BOTH client-initiated (already skipped) AND cancelled tools,
-    // while still calling `markToolsAsSubmitted` so the scheduler
-    // unblocks.
+  it('forwards deduped CANCELLED tools for client-side filtering (telemetry parity)', async () => {
+    // The dedup loop forwards every non-client-initiated tool to
+    // `recordCompletedToolCall` without a raw status filter: a
+    // cancellation that settled with an `executionStatus` still counts
+    // (matching the main loop), while a never-settled cancellation
+    // carries no `executionStatus` and is dropped by
+    // `didToolCallProduceWork` inside the client. Dedup must still
+    // call `markToolsAsSubmitted` so the scheduler unblocks.
     const cancelledDedupedTool = {
       request: {
         callId: 'call_dedup_cancelled',
@@ -6031,8 +6030,288 @@ describe('useLlmStream', () => {
       ]);
     });
 
-    // Telemetry NOT incremented — the cancelled filter held.
-    expect(client.recordCompletedToolCall).not.toHaveBeenCalled();
+    // Forwarded with no settled executionStatus — the client-side
+    // `didToolCallProduceWork` check drops it, so telemetry stays
+    // accurate for a call that never ran end-to-end.
+    expect(client.recordCompletedToolCall).toHaveBeenCalledTimes(1);
+    expect(client.recordCompletedToolCall).toHaveBeenCalledWith(
+      'write_file',
+      { path: '/tmp/cancelled.txt', content: 'x' },
+      expect.objectContaining({
+        callId: 'call_dedup_cancelled',
+        status: 'cancelled',
+        executionStatus: undefined,
+      }),
+    );
+  });
+
+  it('records a deduped tool cancelled AFTER settling with a success outcome', async () => {
+    // Post-completion cancellations carry a settled `executionStatus`
+    // and still count (design doc: 执行完成后才取消的调用…仍计数).
+    // The dedup loop must forward them exactly like the main loop, or
+    // a deduped skill-write would skip the `skillsModifiedInSession`
+    // flip and undercount `toolCallCount`/`hasSubstantiveWork`.
+    const settledCancelledTool = {
+      request: {
+        callId: 'call_dedup_settled',
+        name: 'write_file',
+        args: { path: '/tmp/settled.txt', content: 'x' },
+        isClientInitiated: false,
+        prompt_id: 'prompt-dedup-settled',
+      },
+      status: 'cancelled',
+      responseSubmittedToLlm: false,
+      response: {
+        callId: 'call_dedup_settled',
+        responseParts: [
+          {
+            functionResponse: {
+              id: 'call_dedup_settled',
+              name: 'write_file',
+              response: { output: 'ok' },
+            },
+          },
+        ],
+        resultDisplay: undefined,
+        error: undefined,
+        errorType: undefined,
+        executionStatus: 'success',
+      },
+      tool: {
+        name: 'write_file',
+        displayName: 'WriteFile',
+        description: 'Write a file',
+        build: vi.fn(),
+      } as any,
+      invocation: {
+        getDescription: () => 'settled write',
+      } as unknown as AnyToolInvocation,
+    } as unknown as TrackedCancelledToolCall;
+
+    const client = new MockedLlmClientClass(mockConfig);
+    client.getHistoryFunctionResponseIds = vi
+      .fn()
+      .mockReturnValue(new Set(['call_dedup_settled']));
+
+    let capturedOnComplete:
+      | ((completedTools: TrackedToolCall[]) => Promise<void>)
+      | null = null;
+    mockUseReactToolScheduler.mockImplementation((onComplete) => {
+      capturedOnComplete = onComplete;
+      return [[], mockScheduleToolCalls, mockMarkToolsAsSubmitted];
+    });
+
+    renderHook(() =>
+      useLlmStream(
+        client,
+        [],
+        mockAddItem,
+        mockConfig,
+        true,
+        mockLoadedSettings,
+        mockOnDebugMessage,
+        mockHandleSlashCommand,
+        false,
+        () => 'vscode' as EditorType,
+        () => {},
+        () => Promise.resolve(),
+        false,
+        () => {},
+        () => {},
+        () => {},
+        () => {},
+        80,
+        24,
+      ),
+    );
+
+    await act(async () => {
+      if (capturedOnComplete) {
+        await capturedOnComplete([settledCancelledTool]);
+      }
+    });
+
+    await waitFor(() => {
+      expect(mockMarkToolsAsSubmitted).toHaveBeenCalledWith([
+        'call_dedup_settled',
+      ]);
+    });
+
+    expect(client.recordCompletedToolCall).toHaveBeenCalledTimes(1);
+    expect(client.recordCompletedToolCall).toHaveBeenCalledWith(
+      'write_file',
+      { path: '/tmp/settled.txt', content: 'x' },
+      expect.objectContaining({
+        callId: 'call_dedup_settled',
+        status: 'cancelled',
+        executionStatus: 'success',
+      }),
+    );
+  });
+
+  it('records a secondary-loop tool cancelled AFTER settling with a success outcome', async () => {
+    // Tools owned by a different interaction span (/btw or
+    // detached-continuation batches) are recorded by the secondary
+    // loop. That loop must not drop settled cancellations either —
+    // otherwise a skill-write that settled right before Esc would
+    // skip the `skillsModifiedInSession` flip.
+    const ownerTool = {
+      request: {
+        callId: 'call_secondary_owner',
+        name: 'read_file',
+        args: { path: '/tmp/owner.txt' },
+        isClientInitiated: false,
+        prompt_id: 'prompt-secondary-owner',
+      },
+      status: 'success',
+      responseSubmittedToLlm: false,
+      response: {
+        callId: 'call_secondary_owner',
+        responseParts: [
+          {
+            functionResponse: {
+              id: 'call_secondary_owner',
+              name: 'read_file',
+              response: { output: 'contents' },
+            },
+          },
+        ],
+        resultDisplay: undefined,
+        error: undefined,
+        errorType: undefined,
+        executionStatus: 'success',
+      },
+      tool: {
+        name: 'read_file',
+        displayName: 'ReadFile',
+        description: 'Read a file',
+        build: vi.fn(),
+      } as any,
+      invocation: {
+        getDescription: () => 'read owner file',
+      } as unknown as AnyToolInvocation,
+    } as unknown as TrackedCompletedToolCall;
+    const settledSecondaryTool = {
+      request: {
+        callId: 'call_secondary_settled',
+        name: 'write_file',
+        args: { path: '/tmp/secondary.txt', content: 'x' },
+        isClientInitiated: false,
+        prompt_id: 'prompt-secondary-detached',
+      },
+      status: 'cancelled',
+      responseSubmittedToLlm: false,
+      response: {
+        callId: 'call_secondary_settled',
+        responseParts: [
+          {
+            functionResponse: {
+              id: 'call_secondary_settled',
+              name: 'write_file',
+              response: { output: 'ok' },
+            },
+          },
+        ],
+        resultDisplay: undefined,
+        error: undefined,
+        errorType: undefined,
+        executionStatus: 'success',
+      },
+      tool: {
+        name: 'write_file',
+        displayName: 'WriteFile',
+        description: 'Write a file',
+        build: vi.fn(),
+      } as any,
+      invocation: {
+        getDescription: () => 'settled secondary write',
+      } as unknown as AnyToolInvocation,
+    } as unknown as TrackedCancelledToolCall;
+
+    const client = new MockedLlmClientClass(mockConfig);
+
+    let capturedOnComplete:
+      | ((completedTools: TrackedToolCall[]) => Promise<void>)
+      | null = null;
+    mockUseReactToolScheduler.mockImplementation((onComplete) => {
+      capturedOnComplete = onComplete;
+      return [[], mockScheduleToolCalls, mockMarkToolsAsSubmitted];
+    });
+
+    const { result } = renderHook(() =>
+      useLlmStream(
+        client,
+        [],
+        mockAddItem,
+        mockConfig,
+        true,
+        mockLoadedSettings,
+        mockOnDebugMessage,
+        mockHandleSlashCommand,
+        false,
+        () => 'vscode' as EditorType,
+        () => {},
+        () => Promise.resolve(),
+        false,
+        () => {},
+        () => {},
+        () => {},
+        () => {},
+        80,
+        24,
+      ),
+    );
+
+    // Schedule 'call_secondary_owner' through a real stream so the
+    // interaction-owner map binds it to the active interaction span
+    // (beforeEach mocks getActiveInteractionSpan to one shared span).
+    // 'call_secondary_settled' completes later without an owner entry,
+    // so it routes through the secondary loop.
+    mockSendMessageStream.mockReturnValueOnce(
+      (async function* () {
+        yield {
+          type: ServerLlmEventType.ToolCallRequest,
+          value: {
+            callId: 'call_secondary_owner',
+            name: 'read_file',
+            args: { path: '/tmp/owner.txt' },
+          },
+        };
+      })(),
+    );
+    await act(async () => {
+      await result.current.submitQuery('main turn');
+    });
+    await waitFor(() => {
+      expect(mockScheduleToolCalls).toHaveBeenCalled();
+    });
+
+    await act(async () => {
+      if (capturedOnComplete) {
+        await capturedOnComplete([ownerTool, settledSecondaryTool]);
+      }
+    });
+
+    // Both recorded: owner tool via the main loop, the settled
+    // cancellation via the secondary loop.
+    expect(client.recordCompletedToolCall).toHaveBeenCalledWith(
+      'read_file',
+      { path: '/tmp/owner.txt' },
+      expect.objectContaining({
+        callId: 'call_secondary_owner',
+        status: 'success',
+        executionStatus: 'success',
+      }),
+    );
+    expect(client.recordCompletedToolCall).toHaveBeenCalledWith(
+      'write_file',
+      { path: '/tmp/secondary.txt', content: 'x' },
+      expect.objectContaining({
+        callId: 'call_secondary_settled',
+        status: 'cancelled',
+        executionStatus: 'success',
+      }),
+    );
   });
 
   it('runs Race A dedup BEFORE the active-stream early-return (regression guard)', async () => {

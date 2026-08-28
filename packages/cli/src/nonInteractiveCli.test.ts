@@ -2586,8 +2586,8 @@ describe('runNonInteractive', () => {
 
   it('preserves scheduler cancellation with a settled success outcome', async () => {
     setupMetricsMock();
-    const toolCallEvent: ServerGeminiStreamEvent = {
-      type: GeminiEventType.ToolCallRequest,
+    const toolCallEvent: ServerLlmStreamEvent = {
+      type: LlmEventType.ToolCallRequest,
       value: {
         callId: 'cancelled-tool',
         name: 'testTool',
@@ -2610,13 +2610,13 @@ describe('runNonInteractive', () => {
         return response;
       },
     );
-    mockGeminiClient.sendMessageStream
+    mockLlmClient.sendMessageStream
       .mockReturnValueOnce(createStreamFromEvents([toolCallEvent]))
       .mockReturnValueOnce(
         createStreamFromEvents([
-          { type: GeminiEventType.Content, value: 'Final answer' },
+          { type: LlmEventType.Content, value: 'Final answer' },
           {
-            type: GeminiEventType.Finished,
+            type: LlmEventType.Finished,
             value: {
               reason: undefined,
               usageMetadata: { totalTokenCount: 10 },
@@ -2632,7 +2632,7 @@ describe('runNonInteractive', () => {
       'prompt-cancelled-tool',
     );
 
-    expect(mockGeminiClient.recordCompletedToolCall).toHaveBeenCalledWith(
+    expect(mockLlmClient.recordCompletedToolCall).toHaveBeenCalledWith(
       'testTool',
       { arg1: 'value1' },
       {
@@ -6499,8 +6499,8 @@ describe('runNonInteractive', () => {
     );
     expect(toolResultBlock?.tool_use_id).toBe('tool-error');
     expect(toolResultBlock?.is_error).toBe(true);
-    expect(mockGeminiClient.recordCompletedToolCall).toHaveBeenCalledOnce();
-    expect(mockGeminiClient.recordCompletedToolCall).toHaveBeenCalledWith(
+    expect(mockLlmClient.recordCompletedToolCall).toHaveBeenCalledOnce();
+    expect(mockLlmClient.recordCompletedToolCall).toHaveBeenCalledWith(
       'errorTool',
       {},
       expect.objectContaining({

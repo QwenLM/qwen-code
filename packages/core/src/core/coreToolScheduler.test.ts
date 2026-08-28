@@ -12853,15 +12853,24 @@ describe('CoreToolScheduler telemetry spans', () => {
     const abortController = new AbortController();
     const { spanRecord, completedCalls } = await runSingleTool({
       abortController,
+      // Cooperative abort (shell shape): the tool observes the signal,
+      // stops mid-execution, and resolves error-free with `aborted:
+      // true`. The recorded outcome must be 'cancelled' so the
+      // experience gate does not count interrupted shells as completed
+      // work (removing the interruption mapping makes this fail).
       execute: vi.fn().mockImplementation(async () => {
         abortController.abort();
-        return { llmContent: 'cancelled', returnDisplay: 'cancelled' };
+        return {
+          llmContent: 'cancelled',
+          returnDisplay: 'cancelled',
+          aborted: true,
+        };
       }),
     });
     expect(completedCalls[0].status).toBe('cancelled');
     expect(
       (completedCalls[0] as CompletedToolCall).response.executionStatus,
-    ).toBe('success');
+    ).toBe('cancelled');
     expect(spanRecord.spanAttributes).toHaveProperty('success', false);
   });
 

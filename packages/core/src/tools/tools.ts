@@ -530,6 +530,14 @@ export interface ToolResult {
   };
 
   /**
+   * Set by abort-aware tools when they observed the abort signal and
+   * stopped mid-execution, but still resolved with an error-free result.
+   * Lets the scheduler tell a cooperative interruption apart from a
+   * cancellation that landed after the work had already completed.
+   */
+  aborted?: boolean;
+
+  /**
    * Optional model override propagated from skill execution.
    * When present, the client should use this model for subsequent
    * turns within the same agentic loop.

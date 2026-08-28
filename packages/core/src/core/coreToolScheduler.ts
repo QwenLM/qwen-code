@@ -5049,6 +5049,17 @@ export class CoreToolScheduler {
       const settledExecutionStatus: ToolExecutionStatus = toolResult.error
         ? 'error'
         : 'success';
+      // A cooperative tool (e.g. shell) observes the abort, kills its
+      // work mid-execution, and still resolves error-free. That is a
+      // cancellation DURING execution — record 'cancelled', not the
+      // settled status, so the experience gate does not count it as
+      // completed work. Abort-unaware tools keep the settled status:
+      // their work finished before the abort landed.
+      const cancelledSettleStatus: ToolExecutionStatus = toolResult.error
+        ? 'error'
+        : toolResult.aborted
+          ? 'cancelled'
+          : 'success';
       executionStatus = aborted ? 'cancelled' : settledExecutionStatus;
       executionSettled = true;
       if (execSpan) {
@@ -5104,7 +5115,7 @@ export class CoreToolScheduler {
         const cancelledResponse = createCancelledResponse(
           scheduledCall.request,
           cancelMessage,
-          settledExecutionStatus,
+          cancelledSettleStatus,
           failureHookArtifacts,
           toolResult.persistedOutputFiles,
         );
