@@ -7030,6 +7030,19 @@ describe('stage 1-pre duplicate gate', () => {
     expect(section).toContain('carries a failure guard');
   });
 
+  it('decides subsumption from two frozen gh pr diff patches, never per-file downloads', () => {
+    // The check compares this PR's patch against each closer's patch —
+    // two `gh pr diff` fetches cover any file count. Downloading
+    // default-branch files one by one via the contents API silently
+    // returns HTTP 200 with empty content above ~1 MiB, re-introducing
+    // the silent large-file failure the linked issue describes;
+    // deleting the patch prescription or the prohibition must make this
+    // red.
+    expect(section).toContain('gh pr diff "$PR_NUMBER"');
+    expect(section).toContain('gh pr diff "$MERGED_PR"');
+    expect(section).toContain('Do NOT download');
+  });
+
   it('scopes linkage extraction to same-repo closing references', () => {
     // A bare `.number` extraction drops the repository qualifier, so a
     // cross-repo closing reference resolves against this repo's
