@@ -151,6 +151,22 @@ function lastSentence(text: string, max: number): string {
   return sentence.length > max ? `${sentence.slice(0, max)}…` : sentence;
 }
 
+/**
+ * The spoken take-away from a long result: its closing sentence. Backend
+ * summaries are tail-clamped, so the head may start mid-sentence — the
+ * final sentence is the model's own conclusion and always complete.
+ */
+function lastSentence(text: string, max: number): string {
+  const trimmed = text.trim().replace(/\s+/g, ' ');
+  if (!trimmed) return '';
+  const parts = trimmed
+    .split(/(?<=[.!?。！？])\s+/)
+    .map((part) => part.trim())
+    .filter(Boolean);
+  const sentence = parts[parts.length - 1] ?? trimmed;
+  return sentence.length > max ? `${sentence.slice(0, max)}…` : sentence;
+}
+
 function formatVoiceContext(
   entries: readonly RealtimeTranscriptEntry[],
 ): string {
