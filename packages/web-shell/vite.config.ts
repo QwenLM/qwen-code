@@ -118,6 +118,9 @@ export default defineConfig(({ command }) => ({
       // `client/voice/*` source modules (e.g. `/voice/voiceModels.ts`), which
       // vite must serve, and blanks the page.
       '/voice/stream': { ...daemonProxy, ws: true },
+      // Interactive terminal WebSocket (`/terminal`); `ws: true` forwards the
+      // HTTP upgrade to the daemon, same as `/voice/stream`.
+      '/terminal': { ...daemonProxy, ws: true },
     },
   },
 }));
