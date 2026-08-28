@@ -8,7 +8,7 @@
  * Helpers for policing inline media nested inside `functionResponse.parts` —
  * the carrier qwen-code uses for tool-result images/audio (see
  * `coreToolScheduler.createFunctionResponsePart`). Both the interactive hook
- * (`useGeminiStream.applyToolResultMediaGate`) and the headless loop
+ * (`useLlmStream.applyToolResultMediaGate`) and the headless loop
  * (`nonInteractiveCli`) gate these against the active media route, so the
  * helpers live here (a leaf module with no UI dependency) and are shared.
  */

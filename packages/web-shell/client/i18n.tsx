@@ -1382,6 +1382,8 @@ const EN: Messages = {
   'sidebar.unarchive': 'Restore',
   'sidebar.moreActions': 'More actions',
   'sidebar.archiveCurrentDisabled': 'The current session cannot be archived',
+  'sidebar.archiveRunningDisabled':
+    'A running session cannot be archived; archiving would end its turn',
   'sidebar.archivedTitle': 'Archived',
   'sidebar.archivedEmpty': 'No archived sessions.',
   'sidebar.archiveFailed': 'Failed to archive session',
@@ -2390,6 +2392,11 @@ const EN: Messages = {
   'skills.notToggleable': 'This skill cannot be enabled or disabled.',
   'skills.run': 'Reference skill',
   'skills.search': 'Search skills…',
+  'skills.settingUpdated': 'Workspace setting updated.',
+  'skills.settingUpdatedAvailabilityUnchanged':
+    'Workspace setting updated. Effective Skill availability did not change.',
+  'skills.settingUnchanged':
+    'Skill already has the requested workspace setting; no setting was changed.',
   'skills.status': 'Status',
   'skills.status.disabled': 'disabled',
   'skills.status.enabled': 'enabled',
@@ -4439,6 +4446,8 @@ const ZH: Messages = {
   'sidebar.unarchive': '恢复',
   'sidebar.moreActions': '更多操作',
   'sidebar.archiveCurrentDisabled': '不能归档当前会话',
+  'sidebar.archiveRunningDisabled':
+    '不能归档运行中的会话，归档会终止其当前回合',
   'sidebar.archivedTitle': '已归档',
   'sidebar.archivedEmpty': '没有已归档的会话。',
   'sidebar.archiveFailed': '归档会话失败',
@@ -5360,6 +5369,10 @@ const ZH: Messages = {
   'skills.notToggleable': '此 Skill 不支持启用或禁用。',
   'skills.run': '引用 skill',
   'skills.search': '搜索 Skills…',
+  'skills.settingUpdated': 'Workspace 设置已更新。',
+  'skills.settingUpdatedAvailabilityUnchanged':
+    'Workspace 设置已更新，Skill 的实际可用状态未改变。',
+  'skills.settingUnchanged': 'Skill 已处于请求的 Workspace 设置，无需更改。',
   'skills.status': '状态',
   'skills.status.disabled': '已禁用',
   'skills.status.enabled': '已启用',
