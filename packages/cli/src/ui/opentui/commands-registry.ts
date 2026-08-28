@@ -47,7 +47,6 @@ export type OpenTuiDialogRequest =
   | { dialog: 'effort' }
   | { dialog: 'delete' }
   | { dialog: 'resume'; matchedSessions?: SessionListItem[] }
-  | { dialog: 'branch'; name?: string }
   | { dialog: 'extensions_manage' }
   | { dialog: 'hooks' }
   | { dialog: 'mcp' }
@@ -104,9 +103,14 @@ export function routeDialogToOpenTui(
         ? { dialog: 'resume', matchedSessions: result.matchedSessions }
         : { dialog: 'resume' };
     case 'branch':
-      return result.name
-        ? { dialog: 'branch', name: result.name }
-        : { dialog: 'branch' };
+      // Never reached: commands-dispatch intercepts dialog-branch as a host
+      // action (handleBranch) before routing. A compile-time exclusion is
+      // not expressible — OpenDialogActionReturn is one interface with a
+      // union dialog field — so fail loudly if a refactor ever drops the
+      // interception instead of returning a request nothing can render.
+      throw new Error(
+        "'/branch' is a host action (handleBranch) and must not route to a dialog",
+      );
     case 'extensions_manage':
       return { dialog: 'extensions_manage' };
     case 'hooks':
@@ -240,7 +244,9 @@ export const OPEN_TUI_COMMAND_ROUTES: readonly CommandRouteSpec[] = [
     results: ['dialog', 'message'],
     dialogs: ['auth'],
   },
-  { name: 'branch', results: ['dialog', 'message'], dialogs: ['branch'] },
+  // /branch returns a dialog-kind result but no renderer opens a dialog for
+  // it — both ink and OpenTUI intercept it as a host action (handleBranch).
+  { name: 'branch', results: ['dialog', 'message'] },
   { name: 'btw', results: ['message'] },
   { name: 'fork', results: ['message'] },
   { name: 'bug', results: ['none'] },
@@ -340,7 +346,7 @@ export const OPEN_TUI_COMMAND_ROUTES: readonly CommandRouteSpec[] = [
     dialogs: ['stats'],
   },
   { name: 'summary', results: ['message', 'stream_messages'] },
-  { name: 'theme', results: ['dialog'], dialogs: ['theme'] },
+  { name: 'theme', results: ['dialog', 'message'], dialogs: ['theme'] },
   { name: 'tools', results: ['none'] },
   { name: 'settings', results: ['dialog'], dialogs: ['settings'] },
   { name: 'vim', results: ['message'] },

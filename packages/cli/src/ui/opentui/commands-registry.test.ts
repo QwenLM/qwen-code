@@ -14,6 +14,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
+import type { Config } from '@qwen-code/qwen-code-core';
 import type { OpenDialogActionReturn } from '../commands/types.js';
 import {
   commandRouteFor,
@@ -22,6 +23,36 @@ import {
   type InkDialogKind,
 } from './commands-registry.js';
 import { loadInteractiveCommands } from './slash-dispatch.js';
+
+/**
+ * Config stub with every BuiltinCommandLoader gate ON plus the checkpointing
+ * flag the /restore factory needs — loading through it registers every
+ * built-in command, so the route table can be checked by set equality
+ * against the real loader output instead of a hand-maintained gate list.
+ */
+function createAllGatesOnConfig(): Config {
+  return {
+    initialize: async () => {},
+    getDisabledSlashCommands: () => [],
+    setModelInvocableCommandsProvider: () => {},
+    setModelInvocableCommandsExecutor: () => {},
+    getBareMode: () => true,
+    isWorkflowsEnabled: () => true,
+    isManagedMemoryAvailable: () => true,
+    getFolderTrust: () => true,
+    getFolderTrustFeature: () => true,
+    getFileCheckpointingEnabled: () => true,
+    isLspEnabled: () => true,
+    isCronEnabled: () => false,
+    getMcpServers: () => ({}),
+    getSkillManager: () => undefined,
+    getDisabledSkillNames: () => new Set<string>(),
+    getPermissionManager: () => undefined,
+    getModel: () => undefined,
+    getCliVersion: () => undefined,
+    getProjectRoot: () => '/nonexistent-opentui-test-root',
+  } as unknown as Config;
+}
 
 /** Every dialog kind from ui/commands/types.ts (checked exhaustively). */
 const ALL_DIALOG_KINDS: readonly InkDialogKind[] = [
@@ -62,7 +93,11 @@ const ALL_DIALOG_KINDS: readonly InkDialogKind[] = [
 
 describe('routeDialogToOpenTui (ink dialog-switch parity)', () => {
   it('routes every dialog kind; none falls through to the error case', () => {
-    for (const dialog of ALL_DIALOG_KINDS) {
+    // 'branch' is the one exception: a host action both renderers intercept
+    // before routing (asserted separately below).
+    const routable = ALL_DIALOG_KINDS.filter((d) => d !== 'branch');
+    expect(routable).toHaveLength(ALL_DIALOG_KINDS.length - 1);
+    for (const dialog of routable) {
       const request = routeDialogToOpenTui({
         type: 'dialog',
         dialog,
@@ -70,6 +105,18 @@ describe('routeDialogToOpenTui (ink dialog-switch parity)', () => {
       expect(request).toBeTruthy();
       expect(request.dialog).toBeTruthy();
     }
+  });
+
+  it("throws on 'branch' — a host action that must never route to a dialog", () => {
+    // If commands-dispatch ever drops its handleBranch interception, this
+    // loud failure replaces a silently unrenderable dialog request.
+    expect(() =>
+      routeDialogToOpenTui({
+        type: 'dialog',
+        dialog: 'branch',
+        name: 'wip',
+      } as OpenDialogActionReturn),
+    ).toThrow(/host action/);
   });
 
   it('maps each dialog kind onto its exact OpenTUI target', () => {
@@ -89,7 +136,6 @@ describe('routeDialogToOpenTui (ink dialog-switch parity)', () => {
       ['effort', 'effort'],
       ['delete', 'delete'],
       ['resume', 'resume'],
-      ['branch', 'branch'],
       ['extensions_manage', 'extensions_manage'],
       ['hooks', 'hooks'],
       ['mcp', 'mcp'],
@@ -162,7 +208,7 @@ describe('routeDialogToOpenTui (ink dialog-switch parity)', () => {
     ).toEqual({ dialog: 'arena', mode: 'status' });
   });
 
-  it('keeps resume matchedSessions and branch name payloads', () => {
+  it('keeps resume matchedSessions payloads', () => {
     expect(
       routeDialogToOpenTui({
         type: 'dialog',
@@ -176,13 +222,6 @@ describe('routeDialogToOpenTui (ink dialog-switch parity)', () => {
         matchedSessions: [],
       } as OpenDialogActionReturn),
     ).toEqual({ dialog: 'resume', matchedSessions: [] });
-    expect(
-      routeDialogToOpenTui({
-        type: 'dialog',
-        dialog: 'branch',
-        name: 'wip',
-      } as OpenDialogActionReturn),
-    ).toEqual({ dialog: 'branch', name: 'wip' });
   });
 });
 
@@ -193,33 +232,45 @@ describe('OPEN_TUI_COMMAND_ROUTES (built-in registry parity)', () => {
   });
 
   it('covers exactly the commands the original loader registers', async () => {
-    // Same loader stack the ink processor uses; with a null config the
-    // gated commands (workflows, dream, forget, trust, lsp) are omitted —
-    // exactly like BuiltinCommandLoader does.
-    const loaded = await loadInteractiveCommands(null);
+    // Load with every gate ON plus the checkpointing flag the /restore
+    // factory needs: every built-in registers, so route table and loader
+    // output must be equal as sets — no hand-maintained gate list, no
+    // escape hatches.
+    const loaded = await loadInteractiveCommands(createAllGatesOnConfig());
     const builtins = loaded.filter((cmd) => cmd.source === 'builtin-command');
     expect(builtins.length).toBeGreaterThan(0);
 
     const loadedNames = new Set(builtins.map((cmd) => cmd.name));
     const routeNames = new Set(OPEN_TUI_COMMAND_ROUTES.map((r) => r.name));
-    const gatedNames = new Set(
-      OPEN_TUI_COMMAND_ROUTES.filter((r) => r.gatedBy).map((r) => r.name),
-    );
 
-    // Every registered built-in command has a route...
     for (const name of loadedNames) {
       expect(routeNames.has(name), `missing route for /${name}`).toBe(true);
     }
-    // ...and every route is either registered or config-gated. `/restore`
-    // is a factory (restoreCommand(config)) that returns null without a
-    // config, so it is absent from the null-config load like gated commands.
     for (const name of routeNames) {
       expect(
-        loadedNames.has(name) || gatedNames.has(name) || name === 'restore',
+        loadedNames.has(name),
         `route /${name} is not a registered built-in`,
       ).toBe(true);
     }
     expect(routeNames.has('restore')).toBe(true);
+  }, 30000);
+
+  it('gated routes are genuinely gated — absent from a gates-off load', async () => {
+    // A route claiming gatedBy must NOT register when the gates are off;
+    // a bogus gate on an always-registered command fails here because that
+    // command IS present in the null-config load.
+    const off = await loadInteractiveCommands(null);
+    const offNames = new Set(
+      off.filter((cmd) => cmd.source === 'builtin-command').map((c) => c.name),
+    );
+    const gatedRoutes = OPEN_TUI_COMMAND_ROUTES.filter((r) => r.gatedBy);
+    expect(gatedRoutes.length).toBeGreaterThan(0);
+    for (const route of gatedRoutes) {
+      expect(
+        offNames.has(route.name),
+        `/${route.name} declares gatedBy but registers with gates off`,
+      ).toBe(false);
+    }
   }, 30000);
 
   it('matches the config-built /restore factory command', async () => {
@@ -238,7 +289,7 @@ describe('OPEN_TUI_COMMAND_ROUTES (built-in registry parity)', () => {
   });
 
   it('matches the real commands’ aliases', async () => {
-    const loaded = await loadInteractiveCommands(null);
+    const loaded = await loadInteractiveCommands(createAllGatesOnConfig());
     const builtins = loaded.filter((cmd) => cmd.source === 'builtin-command');
     for (const cmd of builtins) {
       const route = commandRouteFor(cmd.name);
@@ -248,22 +299,6 @@ describe('OPEN_TUI_COMMAND_ROUTES (built-in registry parity)', () => {
       );
     }
   }, 30000);
-
-  it('declares gates only for the loader-gated commands', () => {
-    // TypeScript enforces at compile time that every gatedBy value is a valid
-    // CommandGate — no runtime loop needed. This check pins the *names* of the
-    // gated routes so a bogus gatedBy on an ungated command is caught here.
-    const gatedNames = OPEN_TUI_COMMAND_ROUTES.filter((r) => r.gatedBy)
-      .map((r) => r.name)
-      .sort();
-    expect(gatedNames).toEqual([
-      'dream',
-      'forget',
-      'lsp',
-      'trust',
-      'workflows',
-    ]);
-  });
 
   it('only lists dialog kinds that exist in the original union', () => {
     const known = new Set<string>(ALL_DIALOG_KINDS);
@@ -290,7 +325,7 @@ describe('OPEN_TUI_COMMAND_ROUTES (built-in registry parity)', () => {
       ['clear', ['message']],
       ['quit', ['quit']],
       ['config', ['message']],
-      ['theme', ['dialog']],
+      ['theme', ['dialog', 'message']],
       ['model', ['dialog', 'message', 'submit_prompt']],
       ['auth', ['dialog', 'message']],
       ['permissions', ['dialog']],
