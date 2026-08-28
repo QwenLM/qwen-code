@@ -35,6 +35,8 @@ interface CommentBodyArgs {
   repo: string;
   prNumber?: number;
   out?: string;
+  /** The `--host` flag, fed to platform detection (an Aone host selects a1). */
+  host?: string;
 }
 
 export function runCommentBody(args: CommentBodyArgs): {
@@ -61,7 +63,16 @@ export function runCommentBody(args: CommentBodyArgs): {
   if (args.out !== undefined) {
     assertWritableOutPath(args.out);
   }
-  const platform = getPlatformReader();
+  const platform = getPlatformReader({ host: args.host });
+  // Aone addresses comment bodies per-MR for EVERY kind — enforce it before
+  // the auth gate (this file's rule: usage errors precede auth; `a1 auth
+  // login` can never fix a missing --pr). The GitHub `kind === 'review'`
+  // guard above gets the same pre-auth treatment.
+  if (platform.kind === 'aone' && args.prNumber === undefined) {
+    throw new TypeError(
+      'aone comment bodies are addressed per-MR — pass `--pr <mr id>`',
+    );
+  }
   platform.ensureAuthenticated();
   const body = platform.getCommentBody(
     args.kind,
@@ -99,7 +110,8 @@ export const commentBodyCommand: CommandModule = {
       })
       .option('pr', {
         type: 'number',
-        describe: 'The PR number — required with --kind review',
+        describe:
+          'The PR number — required with --kind review (GitHub), and with every kind on Aone (comment bodies are addressed per-MR)',
       })
       .option('repo', {
         type: 'string',
@@ -109,7 +121,7 @@ export const commentBodyCommand: CommandModule = {
       .option('host', {
         type: 'string',
         describe:
-          'The PR host (GitHub Enterprise). Omitted: inherit GH_HOST, else github.com.',
+          "The host the target lives on. The canonical Aone hosts (code.alibaba-inc.com / gitlab.alibaba-inc.com) select the a1 backend — a non-canonical *.alibaba-inc.com host is a GitHub Enterprise instance and stays on gh; omitted: detected from the clone's origin, else GitHub (GH_HOST, then github.com).",
       })
       .option('out', {
         type: 'string',
@@ -158,6 +170,7 @@ export const commentBodyCommand: CommandModule = {
         repo: String(argv['repo']),
         prNumber: pr,
         out: (argv as { out?: string }).out,
+        host,
       });
       if (result.outPath !== undefined) {
         writeStdoutLine(

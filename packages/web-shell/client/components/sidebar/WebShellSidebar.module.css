@@ -27,6 +27,23 @@
   align-items: center;
 }
 
+.sidebar.mobileOpen {
+  width: clamp(
+    var(--web-shell-sidebar-min-width, 220px),
+    70%,
+    var(--web-shell-sidebar-max-width, 420px)
+  );
+  min-width: clamp(
+    var(--web-shell-sidebar-min-width, 220px),
+    70%,
+    var(--web-shell-sidebar-max-width, 420px)
+  );
+}
+
+.sidebar.mobileOpen .resizeHandle {
+  display: none;
+}
+
 .newChatButton,
 .pluginButton,
 .footerButton,
@@ -778,6 +795,20 @@
   white-space: nowrap;
 }
 
+/* Match the session-row badge text: neutral muted tone, not the global link
+   blue — a blue/purple link would clash with the merged state icon's purple. */
+.sessionDetailsRow a {
+  color: color-mix(
+    in srgb,
+    var(--muted-foreground, #6b7280) 75%,
+    var(--foreground)
+  );
+}
+
+.sessionDetailsRow a:hover {
+  color: var(--foreground);
+}
+
 .sessionDetailsIdRow {
   min-width: 0;
   display: flex;
@@ -947,6 +978,12 @@
   justify-content: flex-end;
 }
 
+.sessionMetaSlot:not(
+  :has(.sessionLoading, .sessionAttention, .sessionGitIcon)
+) {
+  padding-right: 10px;
+}
+
 .sessionAttention {
   height: 22px;
   display: inline-flex;
@@ -964,10 +1001,6 @@
 .sessionAttentionUserInput {
   background: color-mix(in srgb, var(--agent-blue-500) 10%, transparent);
   color: color-mix(in srgb, var(--agent-blue-500) 95%, var(--foreground));
-}
-
-.sessionAttention + .sessionLoading {
-  margin-left: 10px;
 }
 
 .sessionRow:hover .sessionMetaSlot,
@@ -993,7 +1026,7 @@
 }
 
 .sessionLoading {
-  margin-right: 10px;
+  margin: 0 10px;
   width: 12px;
   height: 12px;
   display: inline-flex;
@@ -1797,9 +1830,6 @@
   .sidebar.mobileOpen {
     display: flex;
     z-index: 50;
-    /* The width var is shared with the desktop resize handle and can be wider
-       than a phone viewport; cap it so the drawer never overflows the screen. */
-    max-width: 100vw;
   }
 
   .resizeHandle {

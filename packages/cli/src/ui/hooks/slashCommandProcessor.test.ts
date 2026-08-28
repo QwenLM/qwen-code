@@ -252,7 +252,7 @@ describe('useSlashCommandProcessor', () => {
         false, // isProcessing
         setIsProcessing,
         isIdleRef,
-        vi.fn(), // setGeminiMdFileCount
+        vi.fn(), // setMemoryFileCount
         createMockActions(),
         new Map(), // extensionsUpdateState
         true, // isConfigInitialized
@@ -489,6 +489,7 @@ describe('useSlashCommandProcessor', () => {
           evidenceCursor: { recordId: 'record-ui' },
           turnCount: 0,
           activeTimeMs: 0,
+          tokensUsed: 0,
           createdAt: 1,
           updatedAt: 1,
         },
@@ -567,6 +568,7 @@ describe('useSlashCommandProcessor', () => {
           evidenceCursor: { recordId: 'record-status' },
           turnCount: 1,
           activeTimeMs: 5,
+          tokensUsed: 0,
           createdAt: 1,
           updatedAt: 2,
         },
@@ -2350,7 +2352,7 @@ describe('useSlashCommandProcessor', () => {
           false, // isProcessing
           vi.fn(), // setIsProcessing
           { current: true }, // isIdleRef
-          vi.fn(), // setGeminiMdFileCount
+          vi.fn(), // setMemoryFileCount
           createMockActions(),
           new Map(), // extensionsUpdateState
           true, // isConfigInitialized

@@ -26,6 +26,7 @@ export interface AtMentionProviderView {
 
 export interface AtMentionItem extends WebShellAtItem {
   kind?: 'insert' | 'directory' | 'mcp-server' | 'upload';
+  fileKind?: DirectoryEntry['kind'];
   targetPath?: string;
   serverName?: string;
 }
@@ -651,6 +652,7 @@ function createComposerTagForItem(
       id: `file:${serialized}`,
       kind: 'file',
       value: item.description ?? item.label,
+      ...(item.fileKind ? { metadata: { fileKind: item.fileKind } } : {}),
       serialized,
     };
   }
@@ -696,6 +698,7 @@ function createFileProvider(
             description: sanitizeDisplayText(dirPath),
             insertText: directoryInsertText(dirPath),
             kind: 'insert',
+            fileKind: 'directory',
           };
           // The upload item only shows with an empty entry query (like the
           // current-directory item) so it never pollutes filtered results.
@@ -722,6 +725,7 @@ function createFileProvider(
                 description: safePath,
                 insertText: fileReferenceInsertText(path),
                 kind: 'insert',
+                fileKind: entry.kind,
               };
             }),
           ].slice(0, entryQuery ? ITEM_LIMIT : FILE_ROOT_ITEM_LIMIT);
@@ -752,6 +756,7 @@ function createFileProvider(
             label: safeDisplayText(file),
             insertText: fileReferenceInsertText(file),
             kind: 'insert',
+            fileKind: 'file',
           }));
       } catch (error) {
         if (!signal.aborted) {

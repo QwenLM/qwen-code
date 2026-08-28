@@ -27,6 +27,14 @@ import type {
   ExtensionUpdateStatus,
 } from '../state/extensions.js';
 import type { ExtensionRefreshState } from '../../config/extension-refresh-state.js';
+import type { PeerMessaging } from '../../peerMessaging/peer-messaging.js';
+
+export interface NonInteractiveSlashCommandPolicy {
+  readonly allowSessionReset: boolean;
+  readonly allowWorkspaceSettingsWrite: boolean;
+  readonly persistModelSelection: boolean;
+  readonly blockedBuiltinCommandNames: readonly string[];
+}
 
 // Grouped dependencies for clarity and easier mocking
 export interface CommandContext {
@@ -38,6 +46,7 @@ export interface CommandContext {
    * - acp: ACP/Zed integration mode
    */
   executionMode?: 'interactive' | 'non_interactive' | 'acp';
+  executionPolicy?: NonInteractiveSlashCommandPolicy;
   // Invocation properties for when commands are called.
   invocation?: {
     /** The raw, untrimmed input string from the user. */
@@ -54,6 +63,11 @@ export interface CommandContext {
     settings: LoadedSettings;
     logger: Logger | null;
     extensionRefreshState?: ExtensionRefreshState;
+    /**
+     * Present only when cross-session messaging is enabled and its socket
+     * bound; `/peers` treats null as "the feature is off".
+     */
+    peerMessaging?: PeerMessaging | null;
   };
   // UI state and history management
   ui: {
@@ -97,7 +111,7 @@ export interface CommandContext {
     /** Refreshes the static history display in Ink. */
     refreshStatic: () => void;
     toggleVimEnabled: () => Promise<boolean>;
-    setGeminiMdFileCount: (count: number) => void;
+    setMemoryFileCount: (count: number) => void;
     reloadCommands: () => void | Promise<void>;
     setSessionName: (name: string | null) => void;
     extensionsUpdateState: Map<string, ExtensionUpdateStatus>;

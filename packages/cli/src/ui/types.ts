@@ -7,6 +7,7 @@
 import type {
   CompactionThresholds,
   CompressionStatus,
+  FindingsResultDisplay,
   MCPServerConfig,
   ThoughtSummary,
   ToolCallConfirmationDetails,
@@ -84,6 +85,12 @@ export interface IndividualToolCallDisplay {
    * is only a count. Undefined → fall back to the summary.
    */
   detailedDisplay?: string;
+  /**
+   * The findings display a later report_findings call replaced. Kept so a
+   * rewind past the replacing call can restore this report's checklist;
+   * dropped by history compaction together with resultDisplay.
+   */
+  supersededFindingsDisplay?: FindingsResultDisplay;
   /** Inline images carried by this tool's persisted response parts. */
   images?: InlineImageData[];
   /** Images hidden after the per-row rendering limit. */
@@ -102,6 +109,21 @@ export interface CompressionProps {
   originalTokenCount: number | null;
   newTokenCount: number | null;
   compressionStatus: CompressionStatus | null;
+  /**
+   * Which compression path produced this item. 'summarize' replaces the
+   * pre-marker history with a synthetic summary prefix; 'fast' (rule-based,
+   * no LLM summary) removes no user prompts from the API history, so its
+   * marker must not be treated as a rewind boundary. Absent on items from
+   * older sessions, which are treated as 'summarize'.
+   */
+  compressionKind?: 'summarize' | 'fast';
+  /**
+   * Token-count provenance (#9309). The compression paths measure on
+   * different scales, so estimated numbers are rendered with a '~' prefix
+   * to keep consecutive banners from reading as lost context.
+   */
+  originalTokenCountIsEstimated?: boolean;
+  newTokenCountIsEstimated?: boolean;
 }
 
 export interface SummaryProps {
@@ -311,6 +333,16 @@ export type HistoryItemToolGroup = HistoryItemBase & {
   /** Count of tool calls that read from managed-auto-memory files. Pre-computed for badge rendering. */
   memoryReadCount?: number;
   isUserInitiated?: boolean;
+  /**
+   * Identity of the scheduler batch that produced this group (#9420).
+   * Minted when the batch is scheduled and stamped on both the live
+   * pending copy and the committed copy, so the transient double render
+   * of one batch collapses by identity — never by callIds, which collide
+   * across unrelated batches. Unique per mount, so ids persisted in
+   * checkpoints can never match newly minted ones; adapter-built groups
+   * carry no id. Neither is ever collapsed.
+   */
+  batchId?: string;
 };
 
 /**

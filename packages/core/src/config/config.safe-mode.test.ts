@@ -62,10 +62,11 @@ vi.mock('../tools/tool-registry', () => {
   return { ToolRegistry: ToolRegistryMock };
 });
 
-vi.mock('../utils/memoryDiscovery.js', () => ({
+vi.mock('../memory/memoryDiscovery.js', () => ({
   loadServerHierarchicalMemory: vi.fn().mockResolvedValue({
     memoryContent: '',
     fileCount: 0,
+    contextFilePaths: [],
     ruleCount: 0,
     conditionalRules: [],
     projectRoot: '/tmp',
@@ -468,7 +469,7 @@ describe('Config safe mode', () => {
       await config.initialize();
       expect(config.getUserMemory()).toBe('');
       expect(config.getAutoMemoryPrompt()).toBe('');
-      expect(config.getGeminiMdFileCount()).toBe(0);
+      expect(config.getMemoryFileCount()).toBe(0);
     });
 
     it('records every fixed Config startup phase in order when skipped', async () => {

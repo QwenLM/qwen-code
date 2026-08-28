@@ -10,6 +10,7 @@ import {
 } from '@qwen-code/acp-bridge/mcpTimeouts';
 import { CHANNEL_CONTROL_DEFAULT_TIMEOUT_MS } from '@qwen-code/acp-bridge/channelControlTimeouts';
 import { DaemonAuthFlow } from './DaemonAuthFlow.js';
+import { isDaemonSessionPrInfo } from './session-pr.js';
 import { DaemonHttpError } from './DaemonHttpError.js';
 import type {
   DaemonSseConnectReason,
@@ -65,6 +66,7 @@ import type {
   DaemonSessionOrganizationResult,
   DaemonSessionOrganizationUpdate,
   DaemonSessionSummary,
+  DaemonSessionPrInfo,
   DaemonSessionSupportedCommandsStatus,
   DaemonSessionStatsStatus,
   DaemonUsageDashboard,
@@ -121,6 +123,8 @@ import type {
   DaemonWorkspaceRemovalResult,
   DaemonWorkspaceUpdate,
   HeartbeatResult,
+  GoalControlRequest,
+  GoalStateResponse,
   PermissionResponse,
   PromptContentBlock,
   PromptResult,
@@ -158,8 +162,8 @@ import type {
   DaemonMcpManageAction,
   DaemonMcpManageResult,
   DaemonSessionBtwResult,
-  DaemonSessionMediaData,
-  DaemonSessionMediaReference,
+  DaemonSessionAttachmentData,
+  DaemonSessionAttachmentReference,
   DaemonSessionGenerationEvent,
   DaemonMidTurnMessageResult,
   DaemonMidTurnMessagesResult,
@@ -190,6 +194,7 @@ import type {
   ExtensionArchiveInstallRequest,
   ExtensionManagementInstallRequest,
   ExtensionActivationState,
+  ExtensionWorkspaceBatchActivationState,
   ExtensionCatalog,
   ExtensionInstallResponse,
   ExtensionInteractionResponse,
@@ -225,6 +230,35 @@ import type {
   DaemonUnarchiveSessionsResult,
 } from './types.js';
 import { parseSseStream } from './sse.js';
+import {
+  DaemonStandaloneCreationOutcomeUnknownError,
+  STANDALONE_SESSIONS_CAPABILITY,
+  isStandaloneCreationOutcomeUnknown,
+  isStandaloneSessionNotFoundError,
+  parseArchiveStandaloneSessionsResult,
+  parseDeleteStandaloneSessionsResult,
+  parseRestoredStandaloneSession,
+  parseStandaloneDirectoryResult,
+  parseStandaloneListPage,
+  parseStandaloneLookup,
+  parseStandaloneMetadataResult,
+  parseStandaloneSession,
+  parseUnarchiveStandaloneSessionsResult,
+  type CreateStandaloneSessionOptions,
+  type DaemonArchiveStandaloneSessionsResult,
+  type DaemonDeleteStandaloneSessionsResult,
+  type DaemonRestoredStandaloneSession,
+  type DaemonStandaloneCreationRecovery,
+  type DaemonStandaloneDirectoryResult,
+  type DaemonStandaloneMetadataResult,
+  type DaemonStandaloneSession,
+  type DaemonStandaloneSessionListOptions,
+  type DaemonStandaloneSessionListPage,
+  type DaemonStandaloneSessionLookup,
+  type DaemonStandaloneSessionSummary,
+  type DaemonUnarchiveStandaloneSessionsResult,
+  type RestoreStandaloneSessionRequest,
+} from './standalone-sessions.js';
 
 const WORKSPACE_MEMORY_REMEMBER_PATH = '/workspace/memory/remember';
 const WORKSPACE_MEMORY_FORGET_PATH = '/workspace/memory/forget';
@@ -501,6 +535,8 @@ export function isDaemonTurnError(error: unknown): error is DaemonTurnError {
     (error as { _daemonTurnError?: unknown })._daemonTurnError === true
   );
 }
+
+export { isDaemonSessionPrInfo } from './session-pr.js';
 
 /**
  * The daemon rejected a session branch because the requested checkpoint is
@@ -1653,6 +1689,23 @@ export class DaemonClient {
     );
   }
 
+  async setExtensionDefaultActivations(
+    extensionNames: readonly string[],
+    state: ExtensionActivationState,
+    clientId?: string,
+  ): Promise<ExtensionMutationResponse> {
+    return await this.jsonRequest<ExtensionMutationResponse>(
+      '/extensions/activation',
+      'PUT /extensions/activation',
+      {
+        method: 'PUT',
+        body: { extensionNames: [...extensionNames], state },
+        clientId,
+        mode: 'rest',
+      },
+    );
+  }
+
   async extensionOperation(
     operationId: string,
     signal?: AbortSignal,
@@ -1803,16 +1856,15 @@ export class DaemonClient {
     opts: { offset?: number; maxBytes?: number } = {},
     clientId?: string,
   ): Promise<DaemonWorkspaceFileBytes> {
-    const url = new URL(`${this.baseUrl}/file/bytes`);
-    url.searchParams.set('path', filePath);
+    const query = new URLSearchParams({ path: filePath });
     if (opts.offset !== undefined) {
-      url.searchParams.set('offset', String(opts.offset));
+      query.set('offset', String(opts.offset));
     }
     if (opts.maxBytes !== undefined) {
-      url.searchParams.set('maxBytes', String(opts.maxBytes));
+      query.set('maxBytes', String(opts.maxBytes));
     }
     return await this.fetchWithTimeout(
-      url.toString(),
+      `${this.baseUrl}/file/bytes?${query.toString()}`,
       { headers: this.headers({}, clientId) },
       async (res) => {
         if (!res.ok) throw await this.failOnError(res, 'GET /file/bytes');
@@ -2502,6 +2554,265 @@ export class DaemonClient {
 
   // -- Sessions ----------------------------------------------------------
 
+  async createStandaloneSession(
+    options: CreateStandaloneSessionOptions = {},
+  ): Promise<DaemonStandaloneSession> {
+    await this.requireCapability(STANDALONE_SESSIONS_CAPABILITY);
+    const { sessionId: requestedSessionId, ...request } = options;
+    const sessionId = (
+      requestedSessionId ?? globalThis.crypto.randomUUID()
+    ).toLowerCase();
+    try {
+      const response = await this.jsonRequest<unknown>(
+        '/standalone/sessions',
+        'POST /standalone/sessions',
+        {
+          method: 'POST',
+          body: { sessionId, ...request },
+          mode: 'rest',
+        },
+      );
+      return parseStandaloneSession(
+        response,
+        'POST /standalone/sessions',
+        sessionId,
+      );
+    } catch (error) {
+      if (
+        error instanceof DaemonHttpError &&
+        !isStandaloneCreationOutcomeUnknown(error)
+      ) {
+        throw error;
+      }
+      const recovery = await this.recoverStandaloneCreation(sessionId);
+      throw new DaemonStandaloneCreationOutcomeUnknownError(
+        sessionId,
+        recovery,
+        error,
+      );
+    }
+  }
+
+  async listStandaloneSessions(
+    options: DaemonStandaloneSessionListOptions = {},
+  ): Promise<DaemonStandaloneSessionSummary[]> {
+    return (await this.listStandaloneSessionsPage(options)).sessions;
+  }
+
+  async listStandaloneSessionsPage(
+    options: DaemonStandaloneSessionListOptions = {},
+  ): Promise<DaemonStandaloneSessionListPage> {
+    const query = new URLSearchParams();
+    if (options.cursor !== undefined) query.set('cursor', options.cursor);
+    if (options.pageSize !== undefined) {
+      query.set('size', String(options.pageSize));
+    }
+    if (options.archiveState !== undefined) {
+      query.set('archiveState', options.archiveState);
+    }
+    const queryString = query.toString();
+    const suffix = queryString ? `?${queryString}` : '';
+    return await this.standaloneJsonRequest(
+      `/standalone/sessions${suffix}`,
+      'GET /standalone/sessions',
+      parseStandaloneListPage,
+    );
+  }
+
+  async getStandaloneSession(
+    sessionId: string,
+  ): Promise<DaemonStandaloneSessionLookup> {
+    await this.requireCapability(STANDALONE_SESSIONS_CAPABILITY);
+    return await this.getStandaloneSessionUnchecked(sessionId.toLowerCase());
+  }
+
+  async loadStandaloneSession(
+    sessionId: string,
+    request: RestoreStandaloneSessionRequest = {},
+    clientId?: string,
+  ): Promise<DaemonRestoredStandaloneSession> {
+    return await this.restoreStandaloneSession(
+      'load',
+      sessionId,
+      request,
+      clientId,
+    );
+  }
+
+  async resumeStandaloneSession(
+    sessionId: string,
+    request: RestoreStandaloneSessionRequest = {},
+    clientId?: string,
+  ): Promise<DaemonRestoredStandaloneSession> {
+    return await this.restoreStandaloneSession(
+      'resume',
+      sessionId,
+      request,
+      clientId,
+    );
+  }
+
+  async repairStandaloneSessionDirectory(
+    sessionId: string,
+  ): Promise<DaemonStandaloneDirectoryResult> {
+    const normalized = sessionId.toLowerCase();
+    const route = 'POST /standalone/sessions/:id/repair-directory';
+    return await this.standaloneJsonRequest(
+      `/standalone/sessions/${urlEncode(normalized)}/repair-directory`,
+      route,
+      (response) => parseStandaloneDirectoryResult(response, route, normalized),
+      { method: 'POST', body: {} },
+    );
+  }
+
+  async renameStandaloneSession(
+    sessionId: string,
+    displayName: string,
+    clientId?: string,
+  ): Promise<DaemonStandaloneMetadataResult> {
+    const normalized = sessionId.toLowerCase();
+    const route = 'PATCH /standalone/sessions/:id/metadata';
+    return await this.standaloneJsonRequest(
+      `/standalone/sessions/${urlEncode(normalized)}/metadata`,
+      route,
+      (response) => parseStandaloneMetadataResult(response, route, normalized),
+      {
+        method: 'PATCH',
+        body: { displayName },
+        clientId,
+      },
+    );
+  }
+
+  async exportStandaloneSession(
+    sessionId: string,
+    options: { format?: DaemonSessionExportFormat } = {},
+  ): Promise<DaemonSessionExportResult> {
+    await this.requireCapability(STANDALONE_SESSIONS_CAPABILITY);
+    return await this.sessionExportRequest(
+      `/standalone/sessions/${urlEncode(sessionId.toLowerCase())}/export`,
+      'GET /standalone/sessions/:id/export',
+      options,
+    );
+  }
+
+  async archiveStandaloneSessions(
+    sessionIds: string[],
+  ): Promise<DaemonArchiveStandaloneSessionsResult> {
+    return await this.standaloneBatchRequest(
+      'archive',
+      sessionIds,
+      parseArchiveStandaloneSessionsResult,
+    );
+  }
+
+  async unarchiveStandaloneSessions(
+    sessionIds: string[],
+  ): Promise<DaemonUnarchiveStandaloneSessionsResult> {
+    return await this.standaloneBatchRequest(
+      'unarchive',
+      sessionIds,
+      parseUnarchiveStandaloneSessionsResult,
+    );
+  }
+
+  async deleteStandaloneSessions(
+    sessionIds: string[],
+  ): Promise<DaemonDeleteStandaloneSessionsResult> {
+    return await this.standaloneBatchRequest(
+      'delete',
+      sessionIds,
+      parseDeleteStandaloneSessionsResult,
+    );
+  }
+
+  private async standaloneJsonRequest<T>(
+    path: string,
+    route: string,
+    parse: (value: unknown, route: string) => T,
+    options: {
+      method?: string;
+      body?: unknown;
+      clientId?: string;
+      timeoutMs?: number;
+    } = {},
+  ): Promise<T> {
+    await this.requireCapability(STANDALONE_SESSIONS_CAPABILITY);
+    const response = await this.jsonRequest<unknown>(path, route, {
+      ...options,
+      mode: 'rest',
+    });
+    return parse(response, route);
+  }
+
+  private async standaloneBatchRequest<T>(
+    action: 'archive' | 'unarchive' | 'delete',
+    sessionIds: string[],
+    parse: (value: unknown, route: string) => T,
+  ): Promise<T> {
+    const route = `POST /standalone/sessions/${action}`;
+    return await this.standaloneJsonRequest(
+      `/standalone/sessions/${action}`,
+      route,
+      parse,
+      {
+        method: 'POST',
+        body: {
+          sessionIds: sessionIds.map((sessionId) => sessionId.toLowerCase()),
+        },
+      },
+    );
+  }
+
+  private async restoreStandaloneSession(
+    action: 'load' | 'resume',
+    sessionId: string,
+    request: RestoreStandaloneSessionRequest,
+    clientId?: string,
+  ): Promise<DaemonRestoredStandaloneSession> {
+    const normalized = sessionId.toLowerCase();
+    const route = `POST /standalone/sessions/:id/${action}`;
+    const { timeoutMs, ...body } = request;
+    return await this.standaloneJsonRequest(
+      `/standalone/sessions/${urlEncode(normalized)}/${action}`,
+      route,
+      (response) => parseRestoredStandaloneSession(response, route, normalized),
+      {
+        method: 'POST',
+        body,
+        clientId,
+        timeoutMs: this.resolveRestoreTimeoutMs(timeoutMs),
+      },
+    );
+  }
+
+  private async getStandaloneSessionUnchecked(
+    sessionId: string,
+  ): Promise<DaemonStandaloneSessionLookup> {
+    const route = 'GET /standalone/sessions/:id';
+    const response = await this.jsonRequest<unknown>(
+      `/standalone/sessions/${urlEncode(sessionId)}`,
+      route,
+      { mode: 'rest' },
+    );
+    return parseStandaloneLookup(response, route, sessionId);
+  }
+
+  private async recoverStandaloneCreation(
+    sessionId: string,
+  ): Promise<DaemonStandaloneCreationRecovery> {
+    try {
+      const lookup = await this.getStandaloneSessionUnchecked(sessionId);
+      return 'state' in lookup
+        ? { state: 'creating', sessionId }
+        : { state: 'existing', session: lookup };
+    } catch (error) {
+      return isStandaloneSessionNotFoundError(error)
+        ? { state: 'absent', sessionId }
+        : { state: 'unknown', sessionId, error };
+    }
+  }
+
   async createOrAttachSession(
     req: CreateSessionRequest,
     clientId?: string,
@@ -2998,23 +3309,37 @@ export class DaemonClient {
     );
   }
 
-  async sessionGoalClear(
+  sessionGoalClear(
     sessionId: string,
     clientId?: string,
   ): Promise<{ cleared: boolean; condition?: string }> {
-    return await this.fetchWithTimeout(
-      `${this.baseUrl}/session/${urlEncode(sessionId)}/goal/clear`,
-      {
-        method: 'POST',
-        headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
-        body: JSON.stringify({}),
-      },
-      async (res) => {
-        if (!res.ok) {
-          throw await this.failOnError(res, 'POST /session/:id/goal/clear');
-        }
-        return (await res.json()) as { cleared: boolean; condition?: string };
-      },
+    return this.jsonRequest<{ cleared: boolean; condition?: string }>(
+      `/session/${urlEncode(sessionId)}/goal/clear`,
+      'POST /session/:id/goal/clear',
+      { method: 'POST', body: {}, clientId },
+    );
+  }
+
+  sessionGoal(
+    sessionId: string,
+    clientId?: string,
+  ): Promise<GoalStateResponse> {
+    return this.jsonRequest<GoalStateResponse>(
+      `/session/${urlEncode(sessionId)}/goal`,
+      'GET /session/:id/goal',
+      { clientId },
+    );
+  }
+
+  sessionGoalControl(
+    sessionId: string,
+    request: GoalControlRequest,
+    clientId?: string,
+  ): Promise<GoalStateResponse> {
+    return this.jsonRequest<GoalStateResponse>(
+      `/session/${urlEncode(sessionId)}/goal`,
+      'POST /session/:id/goal',
+      { method: 'POST', body: request, clientId },
     );
   }
 
@@ -3275,14 +3600,15 @@ export class DaemonClient {
     return (await res.json()) as DaemonSessionBtwResult;
   }
 
-  async uploadSessionMedia(
+  async uploadSessionAttachment(
     sessionId: string,
     data: Blob,
+    name: string,
     mimeType: string,
     opts?: { signal?: AbortSignal; clientId?: string },
-  ): Promise<DaemonSessionMediaReference> {
+  ): Promise<DaemonSessionAttachmentReference> {
     return await this.fetchWithTimeout(
-      `${this.baseUrl}/session/${urlEncode(sessionId)}/media`,
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/attachments?name=${urlEncode(name)}`,
       {
         method: 'POST',
         headers: this.headers({ 'Content-Type': mimeType }, opts?.clientId),
@@ -3291,20 +3617,20 @@ export class DaemonClient {
       },
       async (res) => {
         if (!res.ok) {
-          throw await this.failOnError(res, 'POST /session/:id/media');
+          throw await this.failOnError(res, 'POST /session/:id/attachments');
         }
-        return (await res.json()) as DaemonSessionMediaReference;
+        return (await res.json()) as DaemonSessionAttachmentReference;
       },
     );
   }
 
-  async readSessionMedia(
+  async readSessionAttachment(
     sessionId: string,
-    mediaId: string,
+    attachmentId: string,
     opts?: { signal?: AbortSignal; clientId?: string },
-  ): Promise<DaemonSessionMediaData> {
+  ): Promise<DaemonSessionAttachmentData> {
     return await this.fetchWithTimeout(
-      `${this.baseUrl}/session/${urlEncode(sessionId)}/media/${urlEncode(mediaId)}`,
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/attachments/${urlEncode(attachmentId)}`,
       {
         method: 'GET',
         headers: this.headers({}, opts?.clientId),
@@ -3312,7 +3638,10 @@ export class DaemonClient {
       },
       async (res) => {
         if (!res.ok) {
-          throw await this.failOnError(res, 'GET /session/:id/media/:mediaId');
+          throw await this.failOnError(
+            res,
+            'GET /session/:id/attachments/:attachmentId',
+          );
         }
         const bytes = new Uint8Array(await res.arrayBuffer());
         // This package also targets browsers, where Node's Buffer is absent.
@@ -3332,13 +3661,13 @@ export class DaemonClient {
     );
   }
 
-  async removeSessionMedia(
+  async removeSessionAttachment(
     sessionId: string,
-    mediaId: string,
+    attachmentId: string,
     opts?: { signal?: AbortSignal; clientId?: string },
   ): Promise<boolean> {
     return await this.fetchWithTimeout(
-      `${this.baseUrl}/session/${urlEncode(sessionId)}/media/${urlEncode(mediaId)}`,
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/attachments/${urlEncode(attachmentId)}`,
       {
         method: 'DELETE',
         headers: this.headers({}, opts?.clientId),
@@ -3348,7 +3677,7 @@ export class DaemonClient {
         if (!res.ok) {
           throw await this.failOnError(
             res,
-            'DELETE /session/:id/media/:mediaId',
+            'DELETE /session/:id/attachments/:attachmentId',
           );
         }
         return ((await res.json()) as { removed?: unknown }).removed === true;
@@ -3362,7 +3691,7 @@ export class DaemonClient {
    * turn ends. Every accepted request is daemon-owned; a caller-supplied id
    * makes ambiguous retries idempotent. `opts.content` carries media content
    * image blocks alongside the text — pre-flight the
-   * `session_media` capability; older daemons ignore the
+   * `session_attachments` capability; older daemons ignore the
    * field and drop the media.
    */
   async enqueueMidTurnMessage(
@@ -4978,14 +5307,25 @@ export class DaemonClient {
 
   async archiveSessionsData(
     sessionIds: string[],
+    clientIdOrOptions?: string | { resolveConflicts?: boolean },
     clientId?: string,
   ): Promise<DaemonArchiveSessionsResult> {
+    const options =
+      typeof clientIdOrOptions === 'object' ? clientIdOrOptions : undefined;
     return await this.fetchWithTimeout(
       `${this.baseUrl}/sessions/archive`,
       {
         method: 'POST',
-        headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
-        body: JSON.stringify({ sessionIds }),
+        headers: this.headers(
+          { 'Content-Type': 'application/json' },
+          typeof clientIdOrOptions === 'string' ? clientIdOrOptions : clientId,
+        ),
+        body: JSON.stringify({
+          sessionIds,
+          ...(options?.resolveConflicts !== undefined
+            ? { resolveConflicts: options.resolveConflicts }
+            : {}),
+        }),
       },
       async (res) => {
         if (res.ok) {
@@ -4998,14 +5338,25 @@ export class DaemonClient {
 
   async unarchiveSessionsData(
     sessionIds: string[],
+    clientIdOrOptions?: string | { resolveConflicts?: boolean },
     clientId?: string,
   ): Promise<DaemonUnarchiveSessionsResult> {
+    const options =
+      typeof clientIdOrOptions === 'object' ? clientIdOrOptions : undefined;
     return await this.fetchWithTimeout(
       `${this.baseUrl}/sessions/unarchive`,
       {
         method: 'POST',
-        headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
-        body: JSON.stringify({ sessionIds }),
+        headers: this.headers(
+          { 'Content-Type': 'application/json' },
+          typeof clientIdOrOptions === 'string' ? clientIdOrOptions : clientId,
+        ),
+        body: JSON.stringify({
+          sessionIds,
+          ...(options?.resolveConflicts !== undefined
+            ? { resolveConflicts: options.resolveConflicts }
+            : {}),
+        }),
       },
       async (res) => {
         if (res.ok) {
@@ -5301,7 +5652,7 @@ export class DaemonClient {
    */
   async updateSessionMetadata(
     sessionId: string,
-    metadata: { displayName?: string },
+    metadata: { displayName?: string; pr?: DaemonSessionPrInfo },
     clientId?: string,
   ): Promise<SessionMetadataResult> {
     return await this.fetchWithTimeout(
@@ -5315,10 +5666,20 @@ export class DaemonClient {
         if (res.status === 200) {
           const body = (await res.json()) as {
             displayName?: unknown;
+            prs?: unknown;
           };
-          return typeof body.displayName === 'string'
-            ? { displayName: body.displayName }
-            : {};
+          const result: SessionMetadataResult = {};
+          if (typeof body.displayName === 'string') {
+            result.displayName = body.displayName;
+          }
+          if (Array.isArray(body.prs)) {
+            // Per-entry gate: a buggy or hostile daemon response cannot
+            // surface a non-http(s) url or malformed number downstream (the
+            // tooltip renders these as links). Valid entries survive.
+            const valid = body.prs.filter(isDaemonSessionPrInfo);
+            if (valid.length > 0) result.prs = valid;
+          }
+          return result;
         }
         throw await this.failOnError(res, 'PATCH /session/:id/metadata');
       },
@@ -6076,7 +6437,7 @@ export class WorkspaceDaemonClient {
 
   updateSessionMetadata(
     sessionId: string,
-    metadata: { displayName: string },
+    metadata: { displayName?: string; pr?: DaemonSessionPrInfo },
     clientId?: string,
   ): Promise<SessionMetadataResult> {
     return this.client.workspaceJsonRequest<SessionMetadataResult>(
@@ -6160,25 +6521,41 @@ export class WorkspaceDaemonClient {
 
   archiveSessionsData(
     sessionIds: string[],
+    clientIdOrOptions?: string | { resolveConflicts?: boolean },
     clientId?: string,
   ): Promise<DaemonArchiveSessionsResult> {
+    const options =
+      typeof clientIdOrOptions === 'object' ? clientIdOrOptions : undefined;
     return this.post(
       '/sessions/archive',
       'POST /workspaces/:workspace/sessions/archive',
-      { sessionIds },
-      clientId,
+      {
+        sessionIds,
+        ...(options?.resolveConflicts !== undefined
+          ? { resolveConflicts: options.resolveConflicts }
+          : {}),
+      },
+      typeof clientIdOrOptions === 'string' ? clientIdOrOptions : clientId,
     );
   }
 
   unarchiveSessionsData(
     sessionIds: string[],
+    clientIdOrOptions?: string | { resolveConflicts?: boolean },
     clientId?: string,
   ): Promise<DaemonUnarchiveSessionsResult> {
+    const options =
+      typeof clientIdOrOptions === 'object' ? clientIdOrOptions : undefined;
     return this.post(
       '/sessions/unarchive',
       'POST /workspaces/:workspace/sessions/unarchive',
-      { sessionIds },
-      clientId,
+      {
+        sessionIds,
+        ...(options?.resolveConflicts !== undefined
+          ? { resolveConflicts: options.resolveConflicts }
+          : {}),
+      },
+      typeof clientIdOrOptions === 'string' ? clientIdOrOptions : clientId,
     );
   }
 
@@ -6479,6 +6856,24 @@ export class WorkspaceDaemonClient {
       `/extensions/${urlEncode(extensionId)}/activation`,
       'PUT /workspaces/:workspace/extensions/:extensionId/activation',
       { method: 'PUT', body: { state }, clientId, mode: 'rest' },
+    );
+  }
+
+  setExtensionActivations(
+    extensionNames: readonly string[],
+    state: ExtensionWorkspaceBatchActivationState,
+    clientId?: string,
+  ): Promise<ExtensionMutationResponse> {
+    return this.client.workspaceJsonRequest<ExtensionMutationResponse>(
+      this.workspaceSelector,
+      '/extensions/activation',
+      'PUT /workspaces/:workspace/extensions/activation',
+      {
+        method: 'PUT',
+        body: { extensionNames: [...extensionNames], state },
+        clientId,
+        mode: 'rest',
+      },
     );
   }
 

@@ -200,6 +200,10 @@
   margin-bottom: 8px;
 }
 
+.composerHidden {
+  display: none;
+}
+
 .admissionUnknown {
   display: flex;
   align-items: center;

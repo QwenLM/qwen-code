@@ -69,9 +69,15 @@ export interface RosterPlan {
   prNumber?: unknown;
   untrackedFiles?: unknown;
   /**
+   * The wrapper-vocabulary signal the capturing command computed from the diff
+   * (diff-plan.ts). Gates Agent 1e; the gate fails safe (see `hasWrapperTypes`).
+   */
+  wrapperSignal?: unknown;
+  /**
    * The review's effort, as the capturing command recorded it (`--effort`).
-   * `'medium'` is the balanced tier and drops the adversarial personas; anything
-   * else — including absent — keeps the full roster. It lives in the plan, not in
+   * `'medium'` is the balanced tier and drops the adversarial personas
+   * (6a/6b/6c) and the language-pitfall and wrapper/proxy specialists (1d/1e);
+   * anything else — including absent — keeps the full roster. It lives in the plan, not in
    * a caller argument, on purpose: the roster this file computes must not be
    * shrinkable by whoever calls `requiredAgents`, or the shrink is what gets
    * called. `check-coverage`, `agent-prompt --roster` and `compose-review`'s
@@ -109,6 +115,23 @@ function hasDeletions(plan: RosterPlan): boolean {
   // one return; a removed guard nobody looked for costs whatever it was guarding.
   if (files.length === 0) return true;
   return files.some((f) => Number(f?.removedLines ?? 0) > 0);
+}
+
+/**
+ * Does the diff signal a wrapping type — the gate for Agent 1e.
+ *
+ * Only an EXPLICIT `wrapperSignal: false` answers no. The signal is a cheap
+ * vocabulary heuristic computed at capture time (diff-plan.ts) with imperfect
+ * recall, and since this change also removes the wrapper-routing clause from
+ * Agent 1a, a miss here would leave the class owned by nobody — so everything
+ * but the one value a current capture command writes is "run the check": an
+ * absent field (a plan an older CLI wrote — the version skew this skill has
+ * already measured once), `true`, or junk. Same asymmetry as `hasDeletions`:
+ * an agent with nothing to find costs one return; a wrapper that re-enters
+ * itself costs whatever it wraps.
+ */
+function hasWrapperTypes(plan: RosterPlan): boolean {
+  return plan.wrapperSignal !== false;
 }
 
 /** A PR number the plan actually resolved: a positive integer, as a number or the
@@ -230,6 +253,13 @@ export function requiredAgents(plan: RosterPlan): RequiredAgent[] {
       add('6a');
       add('6b');
       add('6c');
+      // The two checks promoted out of Agent 1a's line-by-line brief (#9788):
+      // a checklist pattern-match and a structural routing expectation are
+      // different attention modes from the walk, and folded into it they were
+      // diluted by its rhythm. 1d always runs at high; 1e runs when the diff
+      // signals a wrapping type — fail-safe, see `hasWrapperTypes`.
+      add('1d');
+      if (hasWrapperTypes(plan)) add('1e');
     }
   }
 
@@ -258,6 +288,24 @@ export function requiredAgents(plan: RosterPlan): RequiredAgent[] {
   // them. Requiring them there demanded agents the review was never meant to launch,
   // and `check-coverage` then exit-3'd an otherwise-complete small PR. Gate the loop
   // on the topology that actually runs them.
+  // A heavy INTERACTION file keeps its invariant agents, even though its
+  // chunk agent is briefed for the seam only.
+  //
+  // Skipping them was tempting and wrong. The premise was that an interaction
+  // file's full-range slice is code the previous round already cleared — true
+  // only while the MERGE BASE holds still between rounds, and nothing
+  // enforces that. The anchor gate validates `--since` against head history;
+  // neither the round cache nor the posted ledger carries a base identity, so
+  // a BACKWARD base move — the author retargets the PR to an older base, an
+  // ordinary GitHub operation — is accepted. `newBase..anchor` then carries
+  // hunks no round has read, they arrive inside a heavy interaction file's
+  // full-range slice, and these three agents are the only ones that would
+  // have walked them. A clean verdict re-anchors past them for good.
+  //
+  // So the skip is off until the anchor can prove base continuity. It costs
+  // three agents on a rare shape — heavy, unchanged since the anchor, and
+  // importing something that moved — and it buys back the one direction this
+  // whole design refuses to lose in.
   if (isTerritoryFanOut(plan)) {
     for (const file of heavyFiles(plan)) {
       add('invariant-a', file);

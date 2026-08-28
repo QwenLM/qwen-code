@@ -44,6 +44,7 @@ import { readFileSync, statSync } from 'node:fs';
 import { resolve, sep } from 'node:path';
 import { readRunTranscripts, type AgentRecord } from './transcripts.js';
 import { REVERSE_AUDIT_EXAMPLE_RECEIPT } from './agent-briefs.js';
+import { readFindingsPointer } from './certification.js';
 import {
   INLINE_LAYER_WALKED_RE,
   LAYER_RECEIPT_LINE_RE,
@@ -79,7 +80,11 @@ export type CertificationFailure =
   | 'territory read missing'
   | 'receipt not matched'
   | 'receipt not alone'
-  | 'receipt clause not substantive'
+  | 'receipt lead contradicts the phrase'
+  | 'receipt clause restates the all-clear'
+  | 'receipt clause contradicts the phrase'
+  | 'receipt clause names no walk'
+  | 'receipt clause too thin'
   | 'findings list unread';
 
 /** One transcript's classified return, with the failed bar when not dry. */
@@ -233,9 +238,6 @@ const DRY_RECEIPT_ZH =
   '|无新的?(?:问题|发现)' +
   '|没有(?:发现)?(?:新的?)?问题';
 
-/** The phrase without filler — the marker test's strip (see its comment). */
-const DRY_RECEIPT_PHRASE_CORE = '(?:' + DRY_RECEIPT_EN + DRY_RECEIPT_ZH + ')';
-
 /**
  * The matcher's phrase: the EN alternative carries the filler between
  * phrase and separator (`were found`, `(chunk 13)`); the zh ones do not.
@@ -302,15 +304,28 @@ const EXAMPLE_RECEIPT_CLAUSE_LC = EXAMPLE_RECEIPT_CLAUSE.toLowerCase();
  * names the marker families the executed leak probes carried — incapacity
  * (`unable`), omission (`failed`, `skipped`, `unchecked`, `untested`), a
  * shallow walk (`skimmed`), zh bare-不 (`打不开`) and 跳过 — with 不过
- * exempted as the pinned innocuous connective. The list has no last word,
- * and the residue is stated rather than papered over: a marker it misses
- * still fails toward RETIREMENT when the clause ALSO names a walk; what
- * closes that class is the form itself — the brief tells an auditor that
- * did not walk its scope to return prose, not the receipt, and prose is
- * not the form.
+ * exempted as the pinned innocuous connective.
+ *
+ * The marker list is BARE on purpose (#9272): an absence-of-problems
+ * exception class (`no regressions`, 没有回归, `fail-open` jargon) was
+ * tried and removed after two review rounds of executed entrances —
+ * passive voice (`no regressions have been verified`), lexicalized
+ * compounds (回归测试), limiter compounds (只不过) — because an
+ * exception list over natural language has no last corner, the same
+ * lesson the polarity guard itself learned in #9213 (the form closes
+ * what enumeration cannot). The stated residue is the honest mirror:
+ * absence-of-problem phrasing that IS honest (`verified no
+ * regressions`, `确认没有回归`) reads `unknown` and the chunk stays
+ * under audit — the never-retire cost this module already declares as
+ * its failure direction, preferable to certifying one admission. The
+ * list has no last word, and the residue is stated rather than
+ * papered over: a marker it misses still fails toward RETIREMENT when the
+ * clause ALSO names a walk; what closes that class is the form itself —
+ * the brief tells an auditor that did not walk its scope to return
+ * prose, not the receipt, and prose is not the form.
  */
 const NEGATION_MARKER_RE =
-  /\bnot\b|n['’]t\b|\bnever\b|\bno\b|\bcannot\b|\bunable\b|\bfail(?:ed|ing|s)?\b|\bskip(?:ped|ping|s)?\b|\bskim(?:med|ming|s)?\b|\bun(?:checked|tested|verified|read|opened)\b|未|没|无法|跳过|不(?!过)/i;
+  /\bnot\b|n['’]t\b|\bnever\b|\bno\b|\bcannot\b|\bunable\b|\bfail(?:ed|ing|s)?\b|\bskip(?:ped|ping|s)?\b|\bskim(?:med|ming|s)?\b|\bun(?:checked|tested|verified|read|opened|examined)\b|未|没|无法|跳过|不(?!过)/i;
 
 /**
  * The brief's own all-clear vocabulary — the exact shapes
@@ -325,19 +340,56 @@ const NEGATION_MARKER_RE =
 const SATURATED_CLAUSE_RE = new RegExp(DRY_RECEIPT_PHRASE, 'gi');
 
 /**
- * The marker test over the clause. Echoed phrases are stripped with the
- * CORE first — never the filler tail: a greedy tail swallowed a marker
- * riding right after an echo (`no issues found but I skipped …` lost
- * `skipped` to the strip and retired the chunk) (#9213). No quoted span
- * is exempted: a quoted `could not open` contradicts the phrase exactly
- * as a bare one — the exemption blanked a self-admission and retired the
- * chunk on it (#9213) — and an honest clause quoting a marker-carrying
- * label now reads `unknown`, the direction every failure here fails.
+ * The walk the FORM's vocabulary names — the brief spells the same
+ * family out when it mandates the receipt. A dry clause must carry one of
+ * verbs, or name an object: a clause that names no walk proves none,
+ * whatever its length and whatever markers it dodges (#9213 — the
+ * unbounded hedge class no marker list closes: `overlooked`, `missed`,
+ * `ignored`, `without checking`, 忽略, 略过, 遗漏 …). The test's misses
+ * fail toward AUDIT — a clause whose walk verb the vocabulary does not
+ * name reads `unknown` and the chunk stays hot — the opposite direction
+ * of a marker miss, and the only one the module header declares.
  */
+const WALK_VERB_SRC =
+  '\\bwalk|\\bverif|\\btrace|\\bexamin|走查|核对|复核|核查|复查|重走';
+const WALK_VERB_RE = new RegExp(WALK_VERB_SRC, 'i');
+
+/**
+ * The polarity guard, closed by FORM rather than enumeration (#9272,
+ * rounds 4–6 — three shipped guard shapes were each falsified by
+ * execution the round they landed: walk-verb lookaheads, passive-head
+ * lookaheads, a `found` exemption; every one left an executed entrance
+ * retiring a chunk on a receipt that admitted the walk was not done).
+ * The bars:
+ *
+ * 1. THE LEAD (the phrase's own side of the separator) is stripped of
+ *    its phrase cores and the residue is marker-tested: a hedge riding
+ *    the filler (`…found but only skimmed.`) contradicts the claim
+ *    exactly as one in the clause.
+ * 2. THE CLAUSE must not contain the receipt's core AT ALL — a clause
+ *    restating the all-clear (`no issues …`, 未发现问题 …) proves no
+ *    walk, whatever follows the restatement, and no regex tells the
+ *    honest `no issues were found verifying X` from the admission `no
+ *    issues were found because nothing was verified`: both refuse as
+ *    `receipt clause restates the all-clear`. This one bar retires the
+ *    entire executed entrance family — passive voice, reduced passives,
+ *    dash- or comma-spliced runs — with no lookahead and no list.
+ * 3. What survives restatement is marker-tested bare: a clause carrying
+ *    ANY negation, incapacity, or omission marker contradicts the
+ *    phrase however long and object-named it is.
+ *
+ * The stated residue, declared rather than papered over: an admission
+ * phrased with no restatement, no listed marker, and a walk verb
+ * (`nothing was verified`, `overlooked the files`, 忽略/略过/遗漏)
+ * still reads dry; what closes that class is the form itself — the
+ * brief tells an auditor that did not walk its scope to return prose,
+ * not the receipt, and prose is not the form — and a wrongly granted
+ * retirement self-corrects at the next even-round cold check.
+ */
+const DRY_RECEIPT_PHRASE_CORE = '(?:' + DRY_RECEIPT_EN + DRY_RECEIPT_ZH + ')';
 const PHRASE_CORE_RE = new RegExp(DRY_RECEIPT_PHRASE_CORE, 'gi');
-function contradictsThePhrase(clause: string): boolean {
-  return NEGATION_MARKER_RE.test(clause.replace(PHRASE_CORE_RE, ' '));
-}
+/** The restatement bar's own copy — non-global, so `.test` carries no lastIndex state. */
+const CLAUSE_CORE_RE = new RegExp(DRY_RECEIPT_PHRASE_CORE, 'i');
 
 /**
  * An ENCLOSED code span or a real path is a named object at any length —
@@ -352,20 +404,6 @@ function namesAnObject(clause: string): boolean {
     /\w[\w.-]+\/[\w$-]+\.\w+/.test(clause)
   );
 }
-
-/**
- * The walk the FORM's vocabulary names — the brief spells the same
- * family out when it mandates the receipt. A dry clause must carry one of
- * verbs, or name an object: a clause that names no walk proves none,
- * whatever its length and whatever markers it dodges (#9213 — the
- * unbounded hedge class no marker list closes: `overlooked`, `missed`,
- * `ignored`, `without checking`, 忽略, 略过, 遗漏 …). The test's misses
- * fail toward AUDIT — a clause whose walk verb the vocabulary does not
- * name reads `unknown` and the chunk stays hot — the opposite direction
- * of a marker miss, and the only one the module header declares.
- */
-const WALK_VERB_RE =
-  /\bwalk|\bverif|\btrace|\bexamin|走查|核对|复核|核查|复查|重走/i;
 
 function namesTheWalk(clause: string): boolean {
   const stripped = clause.replace(SATURATED_CLAUSE_RE, ' ');
@@ -469,24 +507,6 @@ function stripLayerReceiptLines(finalText: string): string {
     kept.push(line);
   }
   return kept.join('\n');
-}
-
-/**
- * Did this transcript's agent successfully `read_file` the findings pointer
- * its record's prompt names? True when the prompt names none.
- *
- * Takes the POINTER, extracted once from the RAW prompt by the same call
- * `findingsListFor` uses: extracting again from trim-normalized lines asked
- * the same question under a different normalization, and trimming defeats
- * the `^…$` anchors that exist to reject indented quotations.
- */
-function readTheFindingsPointer(
-  rec: AgentRecord,
-  pointer: string | null,
-): boolean {
-  if (pointer === null) return true;
-  const needle = JSON.stringify(pointer);
-  return rec.successfulReadFileArgs.some((a) => a.includes(needle));
 }
 
 /**
@@ -596,17 +616,28 @@ function classifyReturn(
   // identical prose on either side of the line, identical `unknown`.
   if (judged.slice(receipt[0].length).trim() !== '')
     return unknown('receipt not alone');
-  // The marker domain is the match's own prefix — phrase, filler and
-  // separator — plus the clause: a hedge riding the filler
+  // The polarity bars, each naming itself (#9259) and each single-domain
+  // (#9272 — no bar reads across the lead/clause boundary, so the split
+  // cannot hide a cross-boundary run from a guard that needs it):
+  //
+  // The LEAD: its own phrase core is expected there — strip it and
+  // marker-test the residue, so a hedge riding the filler
   // (`…found but only skimmed.`) contradicts the claim exactly as one
-  // inside the clause, and the phrase itself is core-stripped out of it.
+  // inside the clause.
   const receiptLead = receipt[0].slice(0, receipt[0].length - clause.length);
-  if (contradictsThePhrase(receiptLead + judgedClause))
-    return unknown('receipt clause not substantive');
+  if (NEGATION_MARKER_RE.test(receiptLead.replace(PHRASE_CORE_RE, ' ')))
+    return unknown('receipt lead contradicts the phrase');
+  // The CLAUSE must not restate the all-clear at all — the form's close
+  // over the executed passive/reduced-passive/spliced entrance family,
+  // no enumeration (#9272).
+  if (CLAUSE_CORE_RE.test(judgedClause))
+    return unknown('receipt clause restates the all-clear');
+  if (NEGATION_MARKER_RE.test(judgedClause))
+    return unknown('receipt clause contradicts the phrase');
   if (!namesTheWalk(judgedClause))
-    return unknown('receipt clause not substantive');
+    return unknown('receipt clause names no walk');
   if (!substantiveClause(judgedClause))
-    return unknown('receipt clause not substantive');
+    return unknown('receipt clause too thin');
   // The DRY bar only, and last: the brief's whole method is the comparison
   // against the cumulative findings list, and a no-issues receipt from an
   // auditor that never opened the list certifies a comparison nobody made.
@@ -799,12 +830,15 @@ export function scheduleReverseAuditRound(
       // the dry branch there: applied out here as a filter it also
       // suppressed filed YIELDS, flipping a round to dry and retiring a
       // chunk that had a live finding. The POINTER was extracted once from
-      // the RAW prompt by the same call `findingsListFor` uses.
+      // the RAW prompt by the same call `findingsListFor` uses: extracting
+      // again from trim-normalized lines asks the same question under a
+      // different normalization, and trimming defeats the `^…$` anchors
+      // that reject indented quotations.
       classifyReturn(
         t,
         records[i].territory,
         records[i].findings,
-        readTheFindingsPointer(t, records[i].pointer),
+        readFindingsPointer(t, records[i].pointer),
       ),
     );
     classificationsByRecord.push(classifications);

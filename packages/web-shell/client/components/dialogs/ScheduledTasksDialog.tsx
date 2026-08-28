@@ -23,6 +23,7 @@ import type {
   DaemonWorkspaceCapability,
   DaemonWorkspaceMcpServerStatus,
   DaemonWorkspaceSkillStatus,
+  DaemonSessionSummary,
 } from '@qwen-code/sdk/daemon';
 import { sanitizeDisplayText } from '../../hooks/useAtMentionMenu';
 import { useI18n } from '../../i18n';
@@ -91,6 +92,8 @@ interface ScheduledTasksDialogProps {
   workspaces?: DaemonWorkspaceCapability[];
   /** Forces all task operations through this workspace's route. */
   lockedWorkspace?: DaemonWorkspaceCapability;
+  currentSession?: DaemonSessionSummary;
+  currentSessionSchedulingAvailable?: boolean;
   onError: (error: unknown, fallback: string) => void;
 }
 
@@ -529,6 +532,8 @@ export function ScheduledTasksDialog({
   onOpenSession,
   workspaces,
   lockedWorkspace,
+  currentSession,
+  currentSessionSchedulingAvailable,
   onError,
 }: ScheduledTasksDialogProps) {
   const { t } = useI18n();
@@ -586,6 +591,12 @@ export function ScheduledTasksDialog({
   const [name, setName] = useState('');
   const [prompt, setPrompt] = useState('');
   const [builder, setBuilder] = useState<BuilderState>(DEFAULT_BUILDER);
+  const [sessionMode, setSessionMode] = useState<'dedicated' | 'current'>(
+    'dedicated',
+  );
+  useEffect(() => {
+    if (!currentSessionSchedulingAvailable) setSessionMode('dedicated');
+  }, [currentSessionSchedulingAvailable]);
   const [submitting, setSubmitting] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
   const [referenceKind, setReferenceKind] = useState<PromptTagKind | null>(
@@ -735,6 +746,43 @@ export function ScheduledTasksDialog({
 
   const previewCron = buildCron(builder);
   const previewLabel = previewCron ? describeCron(previewCron, t) : null;
+  const formWorkspace = lockedWorkspace
+    ? lockedWorkspace
+    : operableWorkspaces.find(
+        (workspace) => workspaceActionId(workspace) === formWorkspaceId,
+      );
+  const currentSessionDisabledReason = (() => {
+    if (!currentSessionSchedulingAvailable) {
+      return t('scheduledTasks.session.currentUnsupported');
+    }
+    if (!currentSession?.sessionId) {
+      return t('scheduledTasks.session.currentUnavailable');
+    }
+    if (
+      currentSession.hasActivePrompt ||
+      (currentSession.pendingInteractionCount ?? 0) > 0
+    ) {
+      return t('scheduledTasks.session.currentBusy');
+    }
+    if (
+      currentSession.parentSessionId !== undefined ||
+      currentSession.sourceId !== undefined ||
+      (currentSession.sourceType !== undefined &&
+        currentSession.sourceType !== 'default')
+    ) {
+      return t('scheduledTasks.session.currentIneligible');
+    }
+    if (
+      formWorkspace?.cwd !== undefined &&
+      currentSession.workspaceCwd !== formWorkspace.cwd
+    ) {
+      return t('scheduledTasks.session.currentWorkspaceMismatch');
+    }
+    if (tasks?.some((task) => task.sessionId === currentSession.sessionId)) {
+      return t('scheduledTasks.session.currentAlreadyBound');
+    }
+    return null;
+  })();
 
   const updateReferencePickerPosition = useCallback(() => {
     const anchor = referencePopoverRef.current;
@@ -892,6 +940,7 @@ export function ScheduledTasksDialog({
     setName('');
     setPrompt('');
     setBuilder(DEFAULT_BUILDER);
+    setSessionMode('dedicated');
     setFormError(null);
     setShowForm(false);
     setEditingId(null);
@@ -907,6 +956,7 @@ export function ScheduledTasksDialog({
     setName('');
     setPrompt('');
     setBuilder(DEFAULT_BUILDER);
+    setSessionMode('dedicated');
     setFormError(null);
     resetReferenceState();
     setShowForm(true);
@@ -923,6 +973,7 @@ export function ScheduledTasksDialog({
       // Reverse the cron back onto the pickers; an expression the pickers can't
       // represent lands in the `custom` field, never silently rewritten.
       setBuilder(parseCronToBuilder(task.cron));
+      setSessionMode('dedicated');
       setFormError(null);
       resetReferenceState();
       setShowForm(true);
@@ -948,6 +999,15 @@ export function ScheduledTasksDialog({
       );
       return;
     }
+    if (!editingId && sessionMode === 'current') {
+      if (currentSessionDisabledReason || !currentSession?.sessionId) {
+        setFormError(
+          currentSessionDisabledReason ??
+            t('scheduledTasks.session.currentUnavailable'),
+        );
+        return;
+      }
+    }
     setSubmitting(true);
     setFormError(null);
     try {
@@ -972,6 +1032,9 @@ export function ScheduledTasksDialog({
             name: name.trim() || null,
             recurring: true,
             enabled: true,
+            ...(sessionMode === 'current' && currentSession?.sessionId
+              ? { sessionId: currentSession.sessionId }
+              : {}),
           },
           formWorkspaceId,
         );
@@ -988,12 +1051,15 @@ export function ScheduledTasksDialog({
   }, [
     actions,
     builder,
+    currentSession,
+    currentSessionDisabledReason,
     editingId,
     formWorkspaceId,
     name,
     prompt,
     reload,
     resetForm,
+    sessionMode,
     t,
   ]);
 
@@ -1057,9 +1123,9 @@ export function ScheduledTasksDialog({
           // One-shot: /run IS its single fire — it deletes the task. Consume it
           // BEFORE enqueuing so it can't ALSO fire at its own scheduled slot (a
           // silent double execution). The trade-off is that a failed delivery
-          // leaves the task gone AND un-run — and reload() has already dropped it
-          // from the list — so surface THAT explicitly rather than the generic
-          // "run failed", which would hide the deletion.
+          // leaves the task gone AND un-run — and reload() has already dropped
+          // it from the list — so surface THAT explicitly rather than the
+          // generic "run failed", which would hide the deletion.
           await actions.runScheduledTask(fresh.id, task.workspaceId);
           await reload();
           try {
@@ -1229,6 +1295,43 @@ export function ScheduledTasksDialog({
                     </option>
                   ))}
                 </select>
+              </label>
+            )}
+
+            {!editingId && currentSessionSchedulingAvailable && (
+              <label className={styles.field}>
+                <span className={styles.fieldLabel}>
+                  {t('scheduledTasks.session.label')}
+                </span>
+                <select
+                  className={styles.select}
+                  value={sessionMode}
+                  onChange={(event) =>
+                    setSessionMode(
+                      event.target.value === 'current'
+                        ? 'current'
+                        : 'dedicated',
+                    )
+                  }
+                >
+                  <option value="dedicated">
+                    {t('scheduledTasks.session.dedicated')}
+                  </option>
+                  <option
+                    value="current"
+                    disabled={currentSessionDisabledReason !== null}
+                  >
+                    {t('scheduledTasks.session.current')}
+                  </option>
+                </select>
+                <span className={styles.fieldHint}>
+                  {currentSessionDisabledReason ??
+                    t(
+                      sessionMode === 'current'
+                        ? 'scheduledTasks.session.currentHint'
+                        : 'scheduledTasks.session.dedicatedHint',
+                    )}
+                </span>
               </label>
             )}
 

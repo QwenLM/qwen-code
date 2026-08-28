@@ -12,6 +12,17 @@ on:
       - 'main'
       - 'release/**'
   merge_group:
+  # The macOS and Windows lanes' ONLY remaining trigger, and therefore this
+  # repository's only signal about a host that is not Linux with a GNU
+  # userland. Those two are otherwise gated on `merge_group`, and the merge
+  # queue is not enabled here — no queue run since 2026-07-02 — while their
+  # pull-request trigger is off until the standing Windows failures are fixed
+  # (see test_macos). A regression therefore surfaces here, one day later, on
+  # `main`, and nowhere else: treat a red nightly as a blocker, not as noise.
+  # Every other job here excludes `schedule` explicitly, so a nightly run is
+  # exactly two jobs.
+  schedule:
+    - cron: '17 19 * * *'
   workflow_dispatch:
     inputs:
       branch_ref:
@@ -50,7 +61,13 @@ env:
   # BOTH the github_ci_only helper step and the full-profile Test step, so a
   # new helper test can't be added to one path and silently dropped from the
   # other.
-  HELPER_TESTS: '.github/scripts/pr-safety-precheck.test.mjs .github/scripts/cap-release-notes.test.mjs .github/scripts/ci/classify-profile.test.mjs .github/scripts/ci/classify-pr-profile.test.mjs .github/scripts/upsert-bot-comment.test.mjs .github/scripts/ci/main-failure-signature.test.mjs .github/scripts/classify-release-notes.test.mjs .github/scripts/dsw-swe-verified/make-manifest.test.mjs .github/scripts/dsw-swe-verified/make-terminal-bench-manifest.test.mjs .github/scripts/resolve-sandbox-image.test.mjs .github/scripts/web-shell-visuals-publish.test.mjs .github/scripts/web-shell-visuals-compose.test.mjs .github/scripts/serve-ab-diff.test.mjs .github/scripts/qwen-triage-workflow.test.mjs .github/scripts/assign-issue-owner.test.mjs .github/scripts/auto-minimize-spam.test.mjs .github/scripts/ci-runner-routing.test.mjs'
+  HELPER_TESTS: '.github/scripts/pr-safety-precheck.test.mjs .github/scripts/cap-release-notes.test.mjs .github/scripts/ci/classify-profile.test.mjs .github/scripts/ci/classify-platform-sensitivity.test.mjs .github/scripts/ci/classify-pr-profile.test.mjs .github/scripts/upsert-bot-comment.test.mjs .github/scripts/ci/main-failure-signature.test.mjs .github/scripts/classify-release-notes.test.mjs .github/scripts/dsw-swe-verified/make-manifest.test.mjs .github/scripts/dsw-swe-verified/make-terminal-bench-manifest.test.mjs .github/scripts/resolve-sandbox-image.test.mjs .github/scripts/web-shell-visuals-publish.test.mjs .github/scripts/web-shell-visuals-compose.test.mjs .github/scripts/serve-ab-diff.test.mjs .github/scripts/serve-ab-drive.test.mjs .github/scripts/qwen-triage-workflow.test.mjs .github/scripts/assign-issue-owner.test.mjs .github/scripts/auto-minimize-spam.test.mjs .github/scripts/ci-runner-routing.test.mjs .github/scripts/autofix-status-heartbeat.test.mjs'
+  # The growth ratchet and its vitest mirror compare each workflow against
+  # the PR's base commit to tell "this PR grew the file" apart from "the
+  # baseline went stale on main" (#9904). Wired once here so every lane
+  # inherits it — the gate step and every `npm run test:ci` step, whatever
+  # it is named — instead of each step hand-wiring a copy.
+  WORKFLOW_SIZE_BASE_SHA: '${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}'
 
 jobs:
   classify_pr:
@@ -62,7 +79,11 @@ jobs:
     # else a busy hosted pool delays it and blocks the ECS-bound jobs. The
     # kill-switch is read here, so flipping it reverts everything to hosted.
     # This runs-on and the pick_runner step below are the canonical home of
-    # the association routing; sdk-java.yml and serve-ab.yml mirror it.
+    # the association routing; sdk-java.yml and serve-ab.yml mirror it (the
+    # routing tests hold the mirrors to it). test_windows deliberately does
+    # not: a pull_request run executes the PR's own YAML, so no runs-on trust
+    # clause is enforceable there and its lane never admits pull requests to
+    # the pool.
     runs-on: '${{ (vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association) || github.event_name == ''merge_group'')) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     continue-on-error: true
     outputs:
@@ -143,7 +164,7 @@ jobs:
     # report; the per-step skip_ci guards below make them no-op (pass) there.
     # Not on push: the merge queue already tested the merged tree, so a
     # post-merge re-run on `main` would be redundant.
-    if: "${{ !cancelled() && github.event_name != 'push' }}"
+    if: "${{ !cancelled() && github.event_name != 'push' && github.event_name != 'schedule' }}"
     runs-on: '${{ fromJSON(needs.classify_pr.outputs.ubuntu_runner || ''["ubuntu-latest"]'') }}'
     timeout-minutes: 60
     outputs:
@@ -179,7 +200,28 @@ jobs:
           set -uo pipefail
           if [ -d "$GITHUB_WORKSPACE/.qwen" ] && [ ! -L "$GITHUB_WORKSPACE/.qwen" ]; then
             chmod -R u+w "$GITHUB_WORKSPACE/.qwen" 2>/dev/null || true
-            rm -rf "$GITHUB_WORKSPACE/.qwen" 2>/dev/null || sudo -n rm -rf "$GITHUB_WORKSPACE/.qwen" 2>/dev/null || echo "::warning::leaked .qwen; runner needs manual cleanup"
+            # Last resort when nothing can DELETE the tree: move it out of the
+            # workspace. Unlinking an entry needs write permission on the
+            # directory holding it — which is exactly what a foreign-owned
+            # leftover denies — while renaming needs it only on the two
+            # parents, and the workspace root is always this runner's own. So
+            # a tree that defeats rm, chmod, and a sudo-less chown still
+            # renames aside, and the checkout below finds nothing to trip on.
+            # Leaving it in place instead poisons EVERY later job scheduled
+            # here, not just this one (measured, run 32621267802: `EACCES
+            # rmdir .qwen/tmp/review-pr-9748-scratch-verify-…/probe-ws/…`
+            # killed checkout for two unrelated PRs on the same runner).
+            rm -rf "$GITHUB_WORKSPACE/.qwen" 2>/dev/null ||
+              sudo -n rm -rf "$GITHUB_WORKSPACE/.qwen" 2>/dev/null ||
+              {
+                quarantine="$(dirname -- "$GITHUB_WORKSPACE")/_qwen-quarantine"
+                mkdir -p "$quarantine" 2>/dev/null || true
+                if mv -- "$GITHUB_WORKSPACE/.qwen" "$quarantine/qwen-$(date -u +%Y%m%dT%H%M%SZ)-$$" 2>/dev/null; then
+                  echo "::warning::could not delete leaked .qwen; moved it to $quarantine so this checkout can proceed — that directory needs manual cleanup"
+                else
+                  echo "::warning::leaked .qwen; runner needs manual cleanup"
+                fi
+              }
           fi
           # Interrupted reviews leave worktree registrations under .qwen/tmp/
           # and qwen-review/* branches behind. prune drops registrations whose
@@ -240,10 +282,13 @@ jobs:
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
           ref: "${{ github.event.inputs.branch_ref || (github.event_name == 'pull_request' && format('refs/pull/{0}/head', github.event.pull_request.number)) || (github.event_name == 'merge_group' && github.event.merge_group.head_sha) || github.ref }}"
-          # Shallow: nothing here walks git history (the verify guard below checks
-          # head.sha == HEAD, schema/tests touch only the working tree). On the
-          # in-repo ECS runner a full-history clone is the heaviest transfer and
-          # chokes the squid egress proxy, flaking checkout. depth 1 is enough.
+          # Shallow: nothing here walks git history except on demand (the
+          # verify guard below checks head.sha == HEAD; the size gate and its
+          # vitest mirror fetch the PR's base commit at depth 1 when the
+          # baseline went stale; everything else touches only the working
+          # tree). On the in-repo ECS runner a full-history clone is the
+          # heaviest transfer and chokes the squid egress proxy, flaking
+          # checkout. depth 1 is enough.
           fetch-depth: 1
 
       # Guard against a stale checkout (e.g. a caching egress proxy serving an old
@@ -288,6 +333,15 @@ jobs:
           fi
           echo "ci_profile=${profile}" >> "${GITHUB_OUTPUT}"
           echo "Selected CI profile: ${profile}"
+
+      # Deliberately gated on skip_ci ONLY, not on the CI profile: a PR that
+      # touches nothing but .github/ classifies as `github_ci_only`, and that
+      # is exactly the PR most likely to push a workflow file past GitHub's
+      # 500 KB start-runs limit — the limit that silently killed the autofix
+      # loop for a day on 2026-08-19. Costs one `wc -c` per workflow file.
+      - name: 'Check workflow file size'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
+        run: '.github/scripts/check-workflow-size.sh'
 
       - name: 'Docs-only CI'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'docs_only' }}"
@@ -359,9 +413,9 @@ jobs:
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
         run: 'npm run check:desktop-isolation'
 
-      - name: 'Check voice guard mirror sync'
+      - name: 'Check TUI dependency direction'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
-        run: 'npm run check:voice-guard-sync'
+        run: 'npm run check:tui-dep-direction'
 
       - name: 'Install linters'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
@@ -574,6 +628,7 @@ jobs:
           IDEALAB_API_KEY: ''
           MINIMAX_API_KEY: ''
           MODELSCOPE_API_KEY: ''
+          MOONSHOT_API_KEY: ''
           OPENROUTER_API_KEY: ''
           REQUESTY_API_KEY: ''
           XAI_API_KEY: ''
@@ -581,6 +636,7 @@ jobs:
           QWEN_DEFAULT_AUTH_TYPE: ''
         run: |-
           mkdir -p "${HOME}" "${QWEN_HOME}"
+          npm run typecheck:integration
           npm run test:integration:no-ak:sandbox:none
 
       - name: 'Publish Test Report (for non-forks)'
@@ -647,7 +703,28 @@ jobs:
           set -uo pipefail
           if [ -d "$GITHUB_WORKSPACE/.qwen" ] && [ ! -L "$GITHUB_WORKSPACE/.qwen" ]; then
             chmod -R u+w "$GITHUB_WORKSPACE/.qwen" 2>/dev/null || true
-            rm -rf "$GITHUB_WORKSPACE/.qwen" 2>/dev/null || sudo -n rm -rf "$GITHUB_WORKSPACE/.qwen" 2>/dev/null || echo "::warning::leaked .qwen; runner needs manual cleanup"
+            # Last resort when nothing can DELETE the tree: move it out of the
+            # workspace. Unlinking an entry needs write permission on the
+            # directory holding it — which is exactly what a foreign-owned
+            # leftover denies — while renaming needs it only on the two
+            # parents, and the workspace root is always this runner's own. So
+            # a tree that defeats rm, chmod, and a sudo-less chown still
+            # renames aside, and the checkout below finds nothing to trip on.
+            # Leaving it in place instead poisons EVERY later job scheduled
+            # here, not just this one (measured, run 32621267802: `EACCES
+            # rmdir .qwen/tmp/review-pr-9748-scratch-verify-…/probe-ws/…`
+            # killed checkout for two unrelated PRs on the same runner).
+            rm -rf "$GITHUB_WORKSPACE/.qwen" 2>/dev/null ||
+              sudo -n rm -rf "$GITHUB_WORKSPACE/.qwen" 2>/dev/null ||
+              {
+                quarantine="$(dirname -- "$GITHUB_WORKSPACE")/_qwen-quarantine"
+                mkdir -p "$quarantine" 2>/dev/null || true
+                if mv -- "$GITHUB_WORKSPACE/.qwen" "$quarantine/qwen-$(date -u +%Y%m%dT%H%M%SZ)-$$" 2>/dev/null; then
+                  echo "::warning::could not delete leaked .qwen; moved it to $quarantine so this checkout can proceed — that directory needs manual cleanup"
+                else
+                  echo "::warning::leaked .qwen; runner needs manual cleanup"
+                fi
+              }
           fi
           # Interrupted reviews leave worktree registrations under .qwen/tmp/
           # and qwen-review/* branches behind. prune drops registrations whose
@@ -769,19 +846,66 @@ jobs:
             packages/web-shell/client/e2e/playwright-report
           if-no-files-found: 'ignore'
 
-  # macOS/Windows: slowest/costliest runners, rare platform regressions — run
-  # only in the merge queue. Skipped on PR (ubuntu is the fast PR signal) and on
-  # push (the queue already tested the merged tree, so a post-merge re-run is
-  # redundant). Two named jobs, not a matrix: a skipped matrix job reports one
-  # collapsed check name, never the per-OS required contexts, so PRs would sit
-  # "Expected" forever and never enter the queue. A skipped named job reports
-  # under its exact name and satisfies the required check (same as the
-  # Integration Tests job).
+  # macOS/Windows: slowest/costliest runners, and the only signal this
+  # repository has about a host that is not Linux with a GNU userland.
+  #
+  # They used to run in the merge queue alone. That queue is not enabled here —
+  # no `merge_group` run since 2026-07-02, and merges land as squashes — so the
+  # gate meant they never ran at all: reported as "skipped" on every pull
+  # request, and never reached afterwards. A macOS-only failure could ship and
+  # sit in `main` indefinitely, which is what happened in #9220 (a GNU-only
+  # `realpath -m` in a workflow guard, with the suite that pinned it red on
+  # every Mac).
+  #
+  # The pull-request trigger is OFF, and this is the whole reason the nightly
+  # above exists. Over the 18 hours measured before it was pulled, the Windows
+  # lane reported 13 failures and 0 successes on pull requests — one standing
+  # set of Windows-only path and symlink failures (resolved paths into
+  # read_many_files, releaseWorktree through an ancestor symlink, the SHA-256
+  # review worktree) repeating across unrelated PRs — and macOS queued for a
+  # p90 of 42 minutes, 159 at worst, on a hosted pool this repository does not
+  # saturate by itself. Neither lane gates a merge: the `main` ruleset carries
+  # no required status check. So the cost landed entirely on contributors, who
+  # read a red X no diff of theirs caused and waited on checks that never had
+  # to pass.
+  #
+  # Two triggers remain, in cost order: the merge queue if it is ever enabled
+  # again, and a nightly run on `main` — which is now the only thing keeping
+  # macOS and Windows visible at all, so it is load-bearing rather than a
+  # backstop. Read a red nightly as a blocker; nothing else will report it.
+  #
+  # Restoring the pull-request trigger is the last step of fixing those
+  # failures, not a separate decision — and it is a REVERT of the commit that
+  # carried this change, not an edit: the classifier job, its `if` arms on
+  # both lanes, and the contract pins in scripts/tests/ci-platform-lanes.
+  # test.js all moved together, and that suite now fails a half-restoration
+  # (a trigger without its classifier, or the reverse). The classifier script
+  # `classify-platform-sensitivity.mjs`, the `platform` mode of
+  # `classify-pr-profile.sh` and both their test files were left untouched
+  # precisely so the revert stays clean. Worth revisiting at the same time:
+  # that classifier calls every fork pull request platform-sensitive, which
+  # is most of the traffic here and most of what the macOS queue was spent
+  # on.
+  #
+  # Two named jobs, not a matrix: a skipped matrix job reports one collapsed
+  # check name, never the per-OS contexts, so a required-check configuration
+  # would sit "Expected" forever. A skipped named job reports under its exact
+  # name. (No status check is required on `main` today — the ruleset carries
+  # only deletion, non-fast-forward and pull_request rules — so this shape is
+  # currently insurance, not a live constraint.)
   test_macos:
     name: 'Test (macos-latest, Node 22.x)'
     needs: 'classify_pr'
-    if: "${{ !cancelled() && github.event_name == 'merge_group' }}"
+    if: |-
+      ${{
+        !cancelled() && (
+          github.event_name == 'merge_group' ||
+          github.event_name == 'schedule' ||
+          github.event_name == 'workflow_dispatch'
+        )
+      }}
     runs-on: 'macos-latest'
+    timeout-minutes: 60
     permissions:
       contents: 'read'
     steps:
@@ -857,16 +981,27 @@ jobs:
 
   # Windows counterpart of test_macos (see that job's note). ECS is the default
   # with a windows-2022 kill-switch fallback; the check name stays unchanged so
-  # it matches the required-status-check context. The job is merge_group-only,
-  # so code reaching it is post-approval; maintainers can still queue fork PRs.
-  # The runs-on expression therefore needs only the kill switch. ECS-only
-  # tuning is gated on runner.environment; the hosted fallback is the pre-ECS
-  # job plus the checkout guard and a job-level timeout-minutes.
+  # it matches the required-status-check context. The `!= 'pull_request'` arm
+  # of `runs-on` is inert while the pull-request trigger is off, and stays for
+  # when it returns: a pull_request run executes the workflow YAML from the
+  # PR's own merge commit, so any PR this lane admits could rewrite `runs-on`
+  # in the same diff that reaches it. A gate the gated tree controls is no
+  # gate; the pool is reached only by triggers an unreviewed PR cannot open —
+  # the post-approval merge queue, schedule and dispatch. ECS-only tuning is
+  # gated on runner.environment; the hosted fallback is the pre-ECS job plus
+  # the checkout guard and a job-level timeout-minutes.
   test_windows:
     name: 'Test (windows-latest, Node 22.x)'
     needs: 'classify_pr'
-    if: "${{ !cancelled() && github.event_name == 'merge_group' }}"
-    runs-on: '${{ vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && fromJSON(''["self-hosted", "Windows", "X64", "ecs-win"]'') || fromJSON(''["windows-2022"]'') }}'
+    if: |-
+      ${{
+        !cancelled() && (
+          github.event_name == 'merge_group' ||
+          github.event_name == 'schedule' ||
+          github.event_name == 'workflow_dispatch'
+        )
+      }}
+    runs-on: '${{ vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && github.event_name != ''pull_request'' && fromJSON(''["self-hosted", "Windows", "X64", "ecs-win"]'') || fromJSON(''["windows-2022"]'') }}'
     timeout-minutes: 60
     permissions:
       contents: 'read'
@@ -898,14 +1033,32 @@ jobs:
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && runner.environment == 'self-hosted' }}"
         uses: './.github/actions/configure-windows-runner'
 
+      # Hosted runners expose TEMP through an 8.3 short alias. Self-hosted
+      # runners keep their configured, alias-free RUNNER_TEMP path.
+      - name: 'Point temp at a short-alias-free directory'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && runner.environment != 'self-hosted' }}"
+        shell: 'powershell'
+        run: |-
+          $temp = Join-Path $env:RUNNER_WORKSPACE 'qwen-code-temp'
+          New-Item -ItemType Directory -Force -Path $temp | Out-Null
+          "TEMP=$temp" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "TMP=$temp" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host "TEMP set to $temp"
+
       # Same stale-checkout guard as the Ubuntu gate: this job now runs on ECS,
       # so fail loud if the checkout lacks the merge-queue head rather than
       # silently testing the wrong tree into a merge.
+      # Written when this lane ran in the merge queue alone, so its expected
+      # SHA named only the queue's event: on any other trigger the input is
+      # empty and the step fails the whole lane before a single test runs.
+      # That is what the revived triggers hit first. Same event-aware shape as
+      # the Ubuntu gate now, and skipped where there is no head to verify —
+      # the scheduled and dispatch runs check out a branch by name.
       - name: 'Verify checkout includes expected head commit'
-        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && (github.event_name == 'pull_request' || github.event_name == 'merge_group') }}"
         uses: './.github/actions/verify-checkout-head'
         with:
-          expected_sha: '${{ github.event.merge_group.head_sha }}'
+          expected_sha: "${{ github.event_name == 'merge_group' && github.event.merge_group.head_sha || github.event.pull_request.head.sha }}"
 
       # Avoid setup-node downloads on ECS, where nodejs.org may be unreachable
       # through the egress proxy; reuse the machine's Node instead.
@@ -921,6 +1074,19 @@ jobs:
       - name: 'Use pre-installed Node.js (self-hosted)'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && runner.environment == 'self-hosted' }}"
         uses: './.github/actions/self-hosted-node'
+
+      # Compare case-insensitively: Windows paths are case-insensitive and
+      # realpathSync returns the on-disk casing, so a drive-letter or
+      # directory-case difference is the SAME directory under one spelling,
+      # not the 8.3 alias this guards. A strict !== there would fail the
+      # self-hosted lane too — it runs this step against the runner's
+      # pre-existing RUNNER_TEMP — for a reason unrelated to the alias. The
+      # alias case (RUNNER~1 -> runneradmin) differs by more than casing and
+      # still fails; a casing-only difference warns so it stays visible.
+      - name: 'Verify temp paths carry no short alias'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
+        run: |-
+          node -e "const fs = require('node:fs'); for (const key of ['TEMP', 'TMP']) { const value = process.env[key]; if (!value) { console.error(key + ' is not set'); process.exitCode = 1; continue; } const real = fs.realpathSync(value); if (real === value) continue; if (real.toLowerCase() === value.toLowerCase()) { console.log('::warning::' + key + ' differs from its real path only by casing: ' + value + ' -> ' + real); continue; } console.error(key + ' carries a short alias: ' + value + ' -> ' + real); process.exitCode = 1; }"
 
       - name: 'Configure persistent npm cache (self-hosted)'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && runner.environment == 'self-hosted' }}"
@@ -1081,7 +1247,28 @@ jobs:
           set -uo pipefail
           if [ -d "$GITHUB_WORKSPACE/.qwen" ] && [ ! -L "$GITHUB_WORKSPACE/.qwen" ]; then
             chmod -R u+w "$GITHUB_WORKSPACE/.qwen" 2>/dev/null || true
-            rm -rf "$GITHUB_WORKSPACE/.qwen" 2>/dev/null || sudo -n rm -rf "$GITHUB_WORKSPACE/.qwen" 2>/dev/null || echo "::warning::leaked .qwen; runner needs manual cleanup"
+            # Last resort when nothing can DELETE the tree: move it out of the
+            # workspace. Unlinking an entry needs write permission on the
+            # directory holding it — which is exactly what a foreign-owned
+            # leftover denies — while renaming needs it only on the two
+            # parents, and the workspace root is always this runner's own. So
+            # a tree that defeats rm, chmod, and a sudo-less chown still
+            # renames aside, and the checkout below finds nothing to trip on.
+            # Leaving it in place instead poisons EVERY later job scheduled
+            # here, not just this one (measured, run 32621267802: `EACCES
+            # rmdir .qwen/tmp/review-pr-9748-scratch-verify-…/probe-ws/…`
+            # killed checkout for two unrelated PRs on the same runner).
+            rm -rf "$GITHUB_WORKSPACE/.qwen" 2>/dev/null ||
+              sudo -n rm -rf "$GITHUB_WORKSPACE/.qwen" 2>/dev/null ||
+              {
+                quarantine="$(dirname -- "$GITHUB_WORKSPACE")/_qwen-quarantine"
+                mkdir -p "$quarantine" 2>/dev/null || true
+                if mv -- "$GITHUB_WORKSPACE/.qwen" "$quarantine/qwen-$(date -u +%Y%m%dT%H%M%SZ)-$$" 2>/dev/null; then
+                  echo "::warning::could not delete leaked .qwen; moved it to $quarantine so this checkout can proceed — that directory needs manual cleanup"
+                else
+                  echo "::warning::leaked .qwen; runner needs manual cleanup"
+                fi
+              }
           fi
           # Interrupted reviews leave worktree registrations under .qwen/tmp/
           # and qwen-review/* branches behind. prune drops registrations whose
@@ -1198,7 +1385,7 @@ jobs:
   desktop_shell:
     name: 'Desktop Shell (${{ matrix.os }})'
     needs: 'classify_pr'
-    if: "${{ !cancelled() && github.event_name != 'push' && needs.classify_pr.outputs.skip_ci != 'true' }}"
+    if: "${{ !cancelled() && github.event_name != 'push' && github.event_name != 'schedule' && needs.classify_pr.outputs.skip_ci != 'true' }}"
     strategy:
       fail-fast: false
       matrix:

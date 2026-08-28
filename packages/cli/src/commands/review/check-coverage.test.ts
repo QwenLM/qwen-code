@@ -797,6 +797,71 @@ describe('budget-gap disclosures — guarded, parsed, never punished', () => {
     ]);
   });
 
+  it('a whole-diff disclosure is silenced only by a compliant gap-free relaunch', () => {
+    // `gapsSuperseded`'s whole-diff branch: the superseding record must have
+    // OPENED the key's brief and be gap-free itself. Neither conjunct was
+    // reached by any test — a revert of the branch shipped green.
+    const p = plan3a();
+    const d = promptRecordDir(p);
+    mkdirSync(d, { recursive: true });
+    const brief = briefPath(p, 'audit-w');
+    writeFileSync(brief, 'The audit-w brief.');
+    const prompt =
+      'You are review agent `audit-w`.\n' +
+      `read_file(file_path="${brief}")\n` +
+      wholeDiff();
+    writeFileSync(join(d, 'audit-w.txt'), prompt);
+    transcript('g1', prompt, {
+      calls: 3,
+      text: 'Walked the diff.\nBudget gap: the reconnect state machine',
+    });
+    // A gap-free relaunch that opened the brief silences the disclosure.
+    transcript('g2', prompt, { calls: 3 });
+    expect(coverageFromTranscripts(p, ENV).budgetGaps).toEqual([]);
+  });
+
+  it('a relaunch that never opened the brief cannot silence the disclosure', () => {
+    const p = plan3a();
+    const d = promptRecordDir(p);
+    mkdirSync(d, { recursive: true });
+    const brief = briefPath(p, 'audit-w');
+    writeFileSync(brief, 'The audit-w brief.');
+    const prompt =
+      'You are review agent `audit-w`.\n' +
+      `read_file(file_path="${brief}")\n` +
+      wholeDiff();
+    writeFileSync(join(d, 'audit-w.txt'), prompt);
+    transcript('g1', prompt, {
+      calls: 3,
+      text: 'Walked the diff.\nBudget gap: the reconnect state machine',
+    });
+    transcript('g2', prompt, { calls: 3, opens: [] });
+    expect(coverageFromTranscripts(p, ENV).budgetGaps).toHaveLength(1);
+  });
+
+  it('a relaunch still disclosing gaps of its own cannot silence anything', () => {
+    const p = plan3a();
+    const d = promptRecordDir(p);
+    mkdirSync(d, { recursive: true });
+    const brief = briefPath(p, 'audit-w');
+    writeFileSync(brief, 'The audit-w brief.');
+    const prompt =
+      'You are review agent `audit-w`.\n' +
+      `read_file(file_path="${brief}")\n` +
+      wholeDiff();
+    writeFileSync(join(d, 'audit-w.txt'), prompt);
+    transcript('g1', prompt, {
+      calls: 3,
+      text: 'Walked the diff.\nBudget gap: the reconnect state machine',
+    });
+    transcript('g2', prompt, {
+      calls: 3,
+      text: 'Walked again.\nBudget gap: the remaining call sites',
+    });
+    // Two live disclosures, neither silenced by the other.
+    expect(coverageFromTranscripts(p, ENV).budgetGaps).toHaveLength(2);
+  });
+
   it('a disclosure costs no coverage credit — the gate must not punish it', () => {
     // An earlier draft narrowed a disclosing agent's credit to its ranged
     // reads. `rangeOf` records only reads carrying a positive `limit`, so
@@ -2291,6 +2356,7 @@ describe('coverage — a resumed run credits the prior attempt through the ledge
   // The run ledger `fetch-pr` writes: S0 is the interrupted attempt, S1 the
   // resumed continuation this suite's ENV runs as. Entries carry a current
   // atMs, which sits inside the epoch fence of the backdated plan.
+  let ledgerNowMs = 0;
   function ledger(planPath: string, ...ids: string[]): void {
     const d = promptRecordDir(planPath);
     mkdirSync(d, { recursive: true });
@@ -2299,6 +2365,7 @@ describe('coverage — a resumed run credits the prior attempt through the ledge
     // evidence at all. The current attempt is stamped last, since each
     // attempt's window closes when the next one opened.
     const nowMs = Date.now();
+    ledgerNowMs = nowMs;
     ids.forEach((id, i) =>
       appendRunSession(
         planPath,
@@ -2325,6 +2392,10 @@ describe('coverage — a resumed run credits the prior attempt through the ledge
       ),
     );
     rmSync(from, { force: true });
+    if (ledgerNowMs > 0) {
+      const at = new Date(ledgerNowMs);
+      utimesSync(to, at, at);
+    }
   }
 
   it('passes 3D on work the interrupted attempt completed, and discloses it', () => {
@@ -2391,19 +2462,26 @@ describe('verificationGaps — a resumed run reads the prior attempt', () => {
   function moveToSession(id: string, session: string): void {
     mkdirSync(join(dir, 'subagents', session), { recursive: true });
     const from = join(dir, 'subagents', 'S1', `agent-${id}.jsonl`);
+    const to = join(dir, 'subagents', session, `agent-${id}.jsonl`);
     writeFileSync(
-      join(dir, 'subagents', session, `agent-${id}.jsonl`),
+      to,
       readFileSync(from, 'utf8').replaceAll(
         '"sessionId":"S1"',
         `"sessionId":"${session}"`,
       ),
     );
     rmSync(from, { force: true });
+    if (ledgerNowMs > 0) {
+      const at = new Date(ledgerNowMs);
+      utimesSync(to, at, at);
+    }
   }
 
   /** The ledger `fetch-pr` writes, through the real writers. */
+  let ledgerNowMs = 0;
   function ledger(planPath: string, ...ids: string[]): void {
     const nowMs = Date.now();
+    ledgerNowMs = nowMs;
     ids.forEach((id, i) =>
       appendRunSession(
         planPath,
@@ -2518,6 +2596,7 @@ describe('verificationGaps — a resumed run reads the prior attempt', () => {
 });
 
 describe('coverage — a stale Uncoverable declaration cannot cap live coverage', () => {
+  let ledgerNowMs = 0;
   function ledger(planPath: string, ...ids: string[]): void {
     const d = promptRecordDir(planPath);
     mkdirSync(d, { recursive: true });
@@ -2526,6 +2605,7 @@ describe('coverage — a stale Uncoverable declaration cannot cap live coverage'
     // evidence at all. The current attempt is stamped last, since each
     // attempt's window closes when the next one opened.
     const nowMs = Date.now();
+    ledgerNowMs = nowMs;
     ids.forEach((id, i) =>
       appendRunSession(
         planPath,
@@ -2551,6 +2631,10 @@ describe('coverage — a stale Uncoverable declaration cannot cap live coverage'
       ),
     );
     rmSync(from, { force: true });
+    if (ledgerNowMs > 0) {
+      const at = new Date(ledgerNowMs);
+      utimesSync(to, at, at);
+    }
   }
 
   it('a superseded prior-attempt declaration does not delete the chunk it covers', () => {
@@ -2628,6 +2712,33 @@ describe('coverage — a stale Uncoverable declaration cannot cap live coverage'
     const r = coverageFromTranscripts(p, ENV);
     expect(r.ok).toBe(true);
     expect(r.recoveredAgents).toBe(0);
+  });
+
+  it('a whole-diff recovery is superseded only by a relaunch that opened the brief', () => {
+    // `keySatisfied` — the chunk-less arm of the supersession predicates —
+    // was reached by no test: its brief requirement could be deleted (or
+    // left dangling) with the suite green. The deciding conjunct is the
+    // relaunch's brief read, so both arms pin it.
+    const p = plan();
+    ledger(p, 'S0', 'S1');
+    const d = promptRecordDir(p);
+    mkdirSync(d, { recursive: true });
+    const brief = briefPath(p, 'audit-w');
+    writeFileSync(brief, 'The audit-w brief.');
+    const prompt =
+      'You are review agent `audit-w`.\n' +
+      `read_file(file_path="${brief}")\n` +
+      wholeDiff();
+    writeFileSync(join(d, 'audit-w.txt'), prompt);
+    transcript('w1', prompt, { calls: 3 });
+    moveToSession('w1', 'S0');
+    // The current relaunch never opened its brief: no supersession, the
+    // prior work still counts as recovered.
+    transcript('w2', prompt, { calls: 3, opens: [] });
+    expect(coverageFromTranscripts(p, ENV).recoveredAgents).toBe(1);
+    // A compliant relaunch supersedes it.
+    transcript('w3', prompt, { calls: 3 });
+    expect(coverageFromTranscripts(p, ENV).recoveredAgents).toBe(0);
   });
 
   it('does NOT credit a prior agent whose text is progress, not a return', () => {

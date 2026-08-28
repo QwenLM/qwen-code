@@ -87,14 +87,14 @@ import {
   relaunchAppInChildProcess,
   relaunchOnExitCode,
 } from './utils/relaunch.js';
-import { start_sandbox } from './utils/sandbox.js';
+import { start_sandbox } from './serve/sandbox.js';
 import { getStartupWarnings } from './utils/startupWarnings.js';
 import { getUserStartupWarnings } from './utils/userStartupWarnings.js';
 import { initializeWarningHandler } from './utils/warningHandler.js';
 import { writeStderrLine, writeStderrLineSafe } from './utils/stdioHelpers.js';
 import { sanitizeTerminalText } from './ui/utils/textUtils.js';
 import { getHeadlessYoloSafetyWarning } from './utils/headlessSafetyWarnings.js';
-import { initializeLlmOutputLanguage } from './utils/languageUtils.js';
+import { initializeLlmOutputLanguage } from './i18n/languageUtils.js';
 import {
   CUSTOM_SANDBOX_IMAGE_ENV_VAR,
   HOST_UPDATE_RELAUNCH_ENV_VAR,
@@ -146,6 +146,15 @@ export function validateDnsResolutionOrder(
 }
 
 function getNodeMemoryArgs(isDebugMode: boolean): string[] {
+  // Bun accepts --max-old-space-size but it is a no-op (Bun's heap limit
+  // starts small and adapts dynamically instead of honouring the flag).
+  // The one-process relaunch below happens unconditionally, so under Bun
+  // this only stops forwarding a flag that does nothing into the
+  // relaunch/sandbox child.
+  if ('bun' in process.versions) {
+    return [];
+  }
+
   const totalMemoryMB = os.totalmem() / (1024 * 1024);
   const heapStats = v8.getHeapStatistics();
   const currentMaxOldSpaceSizeMb = Math.floor(
@@ -518,9 +527,7 @@ export async function main() {
       await initializeI18n(
         resolveLanguageSetting(settings.merged.general?.language as string),
       );
-      const { updateBeforeRelaunch } = await import(
-        './utils/update-relaunch.js'
-      );
+      const { updateBeforeRelaunch } = await import('./ui/update-relaunch.js');
       const shouldRelaunch = await updateBeforeRelaunch(
         settings,
         updateProjectRoot,
@@ -873,7 +880,7 @@ export async function main() {
 
     const nonInteractiveHousekeeping =
       !config.isInteractive() || config.getExperimentalZedIntegration()
-        ? await import('./utils/housekeeping/scheduler.js')
+        ? await import('./services/housekeeping/scheduler.js')
         : undefined;
     if (nonInteractiveHousekeeping) {
       registerCleanup(() =>

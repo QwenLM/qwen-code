@@ -103,7 +103,12 @@ export function GitDialog({
   const resolveSessionRef = useRef(resolveSessionForWorkspace);
   resolveSessionRef.current = resolveSessionForWorkspace;
   const sessionIdRef = useRef(sessionId);
-  sessionIdRef.current = sessionId;
+  // Reset only when the prop actually changes — an unconditional render-body
+  // sync would clobber the fresh id the dialog resolves for its own side
+  // queries (commit-message generation) before the PR binding reads it.
+  useEffect(() => {
+    sessionIdRef.current = sessionId;
+  }, [sessionId]);
 
   // btwSession with automatic retry: if the resolved session is stale
   // (daemon restarted, session evicted), force-create a new one and retry.
@@ -535,6 +540,31 @@ export function GitDialog({
         url: result.url,
       });
       setPrFormOpen(false);
+      // Bind the PR to the current session so the sidebar can badge and
+      // search sessions by PR number. Best-effort: a binding failure must
+      // not shadow the successful PR creation. Binding never creates a
+      // session — when the dialog has no session context (workspace-level
+      // open), the PR simply stays unbound. A session from another
+      // workspace is rejected by the daemon route's workspace-conflict
+      // check and surfaces here as a warning only.
+      if (typeof result.number === 'number' && result.url) {
+        // Newly created → the snapshot starts open; the daemon's refresh
+        // timer advances it to merged/closed.
+        const pr = {
+          number: result.number,
+          url: result.url,
+          state: 'open' as const,
+        };
+        const sid = sessionIdRef.current;
+        if (sid) {
+          ws.updateSessionMetadata(sid, { pr }).catch((err: unknown) => {
+            console.warn(
+              'Failed to bind PR to session:',
+              err instanceof Error ? err.message : String(err),
+            );
+          });
+        }
+      }
     } catch (err) {
       setPrStatus({
         msg: err instanceof Error ? err.message : String(err),

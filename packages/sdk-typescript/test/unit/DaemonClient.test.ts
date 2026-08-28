@@ -24,6 +24,9 @@ import {
 import type {
   BranchSessionRequest,
   DaemonCapabilities,
+  GoalControlRequest,
+  GoalSnapshotV2,
+  GoalStateResponse,
   DaemonSessionContextStatus,
   DaemonSessionLspStatus,
   DaemonSessionOrganizationResult,
@@ -36,6 +39,22 @@ import type {
   DaemonWorkspaceSessionInfo,
   DaemonWorkspaceSkillsStatus,
 } from '../../src/daemon/types.js';
+
+const GOAL_SNAPSHOT: GoalSnapshotV2 = {
+  v: 2,
+  activity: 'running',
+  goal: {
+    goalId: 'goal-1',
+    revision: 3,
+    objective: 'ship it',
+    status: 'active',
+    evidenceCursor: { recordId: 'record-1' },
+    turnCount: 2,
+    activeTimeMs: 4000,
+    createdAt: 1000,
+    updatedAt: 2000,
+  },
+};
 
 function jsonResponse(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), {
@@ -121,6 +140,59 @@ function recordingFetch(
 }
 
 describe('DaemonClient', () => {
+  describe('session Goal lifecycle', () => {
+    it('reads and controls the authoritative snapshot with client identity', async () => {
+      const response: GoalStateResponse = { snapshot: GOAL_SNAPSHOT };
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, response),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const request: GoalControlRequest = {
+        action: 'pause',
+        expectedGoalId: 'goal-1',
+        expectedRevision: 3,
+      };
+
+      await expect(
+        client.sessionGoal('session/1', 'client-1'),
+      ).resolves.toEqual(response);
+      await expect(
+        client.sessionGoalControl('session/1', request, 'client-1'),
+      ).resolves.toEqual(response);
+
+      expect(calls.map(({ url, method }) => ({ url, method }))).toEqual([
+        { url: 'http://daemon/session/session%2F1/goal', method: 'GET' },
+        { url: 'http://daemon/session/session%2F1/goal', method: 'POST' },
+      ]);
+      expect(calls.map((call) => call.headers['x-qwen-client-id'])).toEqual([
+        'client-1',
+        'client-1',
+      ]);
+      expect(JSON.parse(calls[1]!.body!)).toEqual(request);
+    });
+
+    it('preserves a Goal conflict body through DaemonHttpError', async () => {
+      const conflict = {
+        error: 'Goal revision is stale',
+        code: 'goal_conflict',
+        current: GOAL_SNAPSHOT,
+      };
+      const { fetch } = recordingFetch(() => jsonResponse(409, conflict));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      const error = await client
+        .sessionGoalControl('s-1', {
+          action: 'pause',
+          expectedGoalId: 'goal-1',
+          expectedRevision: 2,
+        })
+        .catch((reason: unknown) => reason);
+
+      expect(error).toBeInstanceOf(DaemonHttpError);
+      expect(error).toMatchObject({ status: 409, body: conflict });
+    });
+  });
+
   describe('normalizePendingPromptLimit', () => {
     it('defaults undefined to 5', () => {
       expect(normalizePendingPromptLimit(undefined)).toBe(5);
@@ -508,6 +580,30 @@ describe('DaemonClient', () => {
       ).resolves.toEqual(payload);
       expect(calls[0]?.url).toBe(
         'http://daemon/file/bytes?path=bin.dat&offset=4&maxBytes=2',
+      );
+    });
+
+    it('reads raw bytes with a relative base URL', async () => {
+      const payload = {
+        kind: 'file_bytes' as const,
+        path: 'reports/report.pdf',
+        offset: 0,
+        sizeBytes: 2,
+        returnedBytes: 2,
+        truncated: false,
+        contentBase64: Buffer.from([1, 2]).toString('base64'),
+      };
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, payload));
+      const client = new DaemonClient({ baseUrl: '/daemon', fetch });
+
+      await expect(
+        client.readWorkspaceFileBytes('reports/report.pdf', {
+          offset: 0,
+          maxBytes: 2,
+        }),
+      ).resolves.toEqual(payload);
+      expect(calls[0]?.url).toBe(
+        '/daemon/file/bytes?path=reports%2Freport.pdf&offset=0&maxBytes=2',
       );
     });
 
@@ -3558,6 +3654,7 @@ describe('DaemonClient', () => {
       const result = {
         archived: ['s-1'],
         alreadyArchived: ['s-2'],
+        resolvedConflicts: [],
         notFound: [],
         errors: [],
       };
@@ -3576,6 +3673,7 @@ describe('DaemonClient', () => {
       const result = {
         unarchived: ['s-1'],
         alreadyActive: ['s-2'],
+        resolvedConflicts: [],
         notFound: [],
         errors: [],
       };
@@ -3590,6 +3688,31 @@ describe('DaemonClient', () => {
       expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
       expect(JSON.parse(calls[0]!.body!)).toEqual({
         sessionIds: ['s-1', 's-2'],
+      });
+    });
+
+    it('sends explicit conflict repair without changing the client-id overload', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, {
+          archived: ['s-1'],
+          alreadyArchived: [],
+          resolvedConflicts: ['s-1'],
+          notFound: [],
+          errors: [],
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await client.archiveSessionsData(
+        ['s-1'],
+        { resolveConflicts: true },
+        'client-1',
+      );
+
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+      expect(JSON.parse(calls[0]!.body!)).toEqual({
+        sessionIds: ['s-1'],
+        resolveConflicts: true,
       });
     });
   });
@@ -3633,6 +3756,48 @@ describe('DaemonClient', () => {
       await expect(
         client.updateSessionMetadata('s-1', { displayName: 'test' }),
       ).rejects.toMatchObject({ status: 404 });
+    });
+
+    it('sends a pr binding and parses the returned prs list', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, {
+          sessionId: 's-1',
+          prs: [{ number: 9517, url: 'https://github.com/o/r/pull/9517' }],
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const result = await client.updateSessionMetadata('s-1', {
+        pr: { number: 9517, url: 'https://github.com/o/r/pull/9517' },
+      });
+      expect(JSON.parse(calls[0]!.body!)).toEqual({
+        pr: { number: 9517, url: 'https://github.com/o/r/pull/9517' },
+      });
+      expect(result.prs).toEqual([
+        { number: 9517, url: 'https://github.com/o/r/pull/9517' },
+      ]);
+    });
+
+    it('drops prs entries that fail the shape gate', async () => {
+      // A buggy or hostile daemon response must not surface a javascript:
+      // url or a non-integer number downstream (the tooltip renders these
+      // as links).
+      const { fetch } = recordingFetch(() =>
+        jsonResponse(200, {
+          sessionId: 's-1',
+          prs: [
+            { number: 1, url: 'javascript:alert(1)' },
+            { number: 1.5, url: 'https://github.com/o/r/pull/1' },
+            { number: 9517, url: 'https://github.com/o/r/pull/9517' },
+          ],
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const result = await client.updateSessionMetadata('s-1', {
+        pr: { number: 9517, url: 'https://github.com/o/r/pull/9517' },
+      });
+      expect(result.prs).toEqual([
+        { number: 9517, url: 'https://github.com/o/r/pull/9517' },
+      ]);
     });
   });
 
@@ -5733,6 +5898,33 @@ describe('DaemonClient', () => {
   });
 
   describe('extension operations', () => {
+    it.each(['/tmp/demo-extension', 'C:\\demo-extension'])(
+      'sends daemon-local extension path %s unchanged',
+      async (source) => {
+        const { fetch, calls } = recordingFetch(() =>
+          jsonResponse(202, {
+            accepted: true,
+            operationId: 'op-local',
+          }),
+        );
+        const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+        await expect(
+          client.installExtension({ source, consent: true }, 'client-1'),
+        ).resolves.toEqual({ accepted: true, operationId: 'op-local' });
+
+        expect(calls[0]?.url).toBe(
+          'http://daemon/workspace/extensions/install',
+        );
+        expect(calls[0]?.method).toBe('POST');
+        expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+        expect(JSON.parse(calls[0]!.body!)).toEqual({
+          source,
+          consent: true,
+        });
+      },
+    );
+
     it('POSTs an extension archive as a binary body', async () => {
       let capturedUrl = '';
       let capturedInit: RequestInit | undefined;
@@ -6220,6 +6412,11 @@ describe('DaemonClient', () => {
         'disabled',
         'client-1',
       );
+      await client.setExtensionDefaultActivations(
+        ['demo-a', 'demo-b'],
+        'enabled',
+        'client-1',
+      );
       await client.extensionOperation('op-1');
 
       expect(calls.map((c) => [c.method, c.url])).toEqual([
@@ -6229,8 +6426,15 @@ describe('DaemonClient', () => {
         ['POST', `http://daemon/extensions/${'a'.repeat(64)}/update`],
         ['DELETE', `http://daemon/extensions/${'a'.repeat(64)}`],
         ['PUT', `http://daemon/extensions/${'a'.repeat(64)}/activation`],
+        ['PUT', 'http://daemon/extensions/activation'],
         ['GET', 'http://daemon/extensions/operations/op-1'],
       ]);
+      expect(calls[6]?.body).toBe(
+        JSON.stringify({
+          extensionNames: ['demo-a', 'demo-b'],
+          state: 'enabled',
+        }),
+      );
       expect(transportFetch).not.toHaveBeenCalled();
     });
 
@@ -6279,6 +6483,11 @@ describe('DaemonClient', () => {
 
       await expect(ws.workspaceExtensions()).resolves.toEqual(status);
       await ws.setExtensionActivation('a'.repeat(64), 'enabled', 'client-1');
+      await ws.setExtensionActivations(
+        ['demo-a', 'demo-b'],
+        'inherit',
+        'client-1',
+      );
       await ws.clearExtensionActivation('a'.repeat(64), 'client-1');
       await ws.refreshExtensionRuntime('client-1');
 
@@ -6288,12 +6497,19 @@ describe('DaemonClient', () => {
           'PUT',
           `http://daemon/workspaces/%2Fwork%2Fa/extensions/${'a'.repeat(64)}/activation`,
         ],
+        ['PUT', 'http://daemon/workspaces/%2Fwork%2Fa/extensions/activation'],
         [
           'DELETE',
           `http://daemon/workspaces/%2Fwork%2Fa/extensions/${'a'.repeat(64)}/activation`,
         ],
         ['POST', 'http://daemon/workspaces/%2Fwork%2Fa/extensions/refresh'],
       ]);
+      expect(calls[2]?.body).toBe(
+        JSON.stringify({
+          extensionNames: ['demo-a', 'demo-b'],
+          state: 'inherit',
+        }),
+      );
       expect(transportFetch).not.toHaveBeenCalled();
     });
   });
@@ -7477,12 +7693,14 @@ describe('DaemonClient', () => {
         '/sessions/archive': {
           archived: ['s-1'],
           alreadyArchived: [],
+          resolvedConflicts: [],
           notFound: [],
           errors: [],
         },
         '/sessions/unarchive': {
           unarchived: ['s-1'],
           alreadyActive: [],
+          resolvedConflicts: [],
           notFound: [],
           errors: [],
         },
@@ -7499,7 +7717,11 @@ describe('DaemonClient', () => {
         workspace.deleteSessionsData(['s-1'], 'client-1'),
       ).resolves.toEqual(replies['/sessions/delete']);
       await expect(
-        workspace.archiveSessionsData(['s-1'], 'client-2'),
+        workspace.archiveSessionsData(
+          ['s-1'],
+          { resolveConflicts: true },
+          'client-2',
+        ),
       ).resolves.toEqual(replies['/sessions/archive']);
       await expect(
         workspace.unarchiveSessionsData(['s-1'], 'client-3'),
@@ -7515,9 +7737,11 @@ describe('DaemonClient', () => {
         'client-2',
         'client-3',
       ]);
-      for (const call of calls) {
-        expect(JSON.parse(call.body!)).toEqual({ sessionIds: ['s-1'] });
-      }
+      expect(calls.map((call) => JSON.parse(call.body!))).toEqual([
+        { sessionIds: ['s-1'] },
+        { sessionIds: ['s-1'], resolveConflicts: true },
+        { sessionIds: ['s-1'] },
+      ]);
     });
 
     it('workspace metadata update uses encoded direct REST and client identity', async () => {

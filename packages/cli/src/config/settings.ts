@@ -25,14 +25,16 @@ import { hasOwnModelProviders } from './modelProvidersScope.js';
 import {
   type Settings,
   type MemoryImportFormat,
-  type MergeStrategy,
   type SettingsSchema,
   type SettingDefinition,
   getSettingsSchema,
 } from './settingsSchema.js';
 import { resolveEnvVarsInObject } from '../utils/envVarResolver.js';
-import { setNestedPropertySafe } from '../utils/settingsUtils.js';
-import { customDeepMerge } from '../utils/deepMerge.js';
+import {
+  setNestedPropertySafe,
+  WORKSPACE_RESTRICTED_SETTINGS,
+} from './settingsUtils.js';
+import { customDeepMerge, type MergeStrategy } from '../utils/deepMerge.js';
 import { updateSettingsFilePreservingFormat } from '../utils/jsonc-editor.js';
 import { runMigrations, needsMigration } from './migration/index.js';
 import {
@@ -358,28 +360,22 @@ export function getSettingsWarnings(loadedSettings: LoadedSettings): string[] {
     warningSet.add(warning);
   }
 
-  // security.allowPrivateNetworkHooks is stripped from Workspace scope during
+  // Settings restricted to trusted scopes are stripped from Workspace during
   // the merge; warn so the user knows their workspace setting has no effect.
+  // Driven by WORKSPACE_RESTRICTED_SETTINGS so the warning cannot drift from
+  // the strip that produces it.
   const workspaceFile = loadedSettings.forScope(SettingScope.Workspace);
-  if (
-    workspaceFile.rawJson !== undefined &&
-    workspaceFile.originalSettings.security?.allowPrivateNetworkHooks !==
-      undefined
-  ) {
-    warningSet.add(
-      `Warning: security.allowPrivateNetworkHooks in workspace settings (${workspaceFile.path}) is ignored. This setting is only honored from User, System, or SystemDefaults scope settings.`,
-    );
+  if (workspaceFile.rawJson !== undefined) {
+    for (const { section, key } of WORKSPACE_RESTRICTED_SETTINGS) {
+      const sectionValue = workspaceFile.originalSettings[section] as
+        | Record<string, unknown>
+        | undefined;
+      if (sectionValue?.[key] === undefined) continue;
+      warningSet.add(
+        `Warning: ${section}.${key} in workspace settings (${workspaceFile.path}) is ignored. This setting is only honored from User, System, or SystemDefaults scope settings.`,
+      );
+    }
   }
-  if (
-    workspaceFile.rawJson !== undefined &&
-    workspaceFile.originalSettings.security?.allowedInsecureVoiceBaseUrls !==
-      undefined
-  ) {
-    warningSet.add(
-      `Warning: security.allowedInsecureVoiceBaseUrls in workspace settings (${workspaceFile.path}) is ignored. This setting is only honored from User, System, or SystemDefaults scope settings.`,
-    );
-  }
-
   return [...warningSet];
 }
 
@@ -408,24 +404,21 @@ function tagMcpServerScope(
 }
 
 /**
- * Network security bypasses must never be honored from Workspace scope —
- * otherwise a malicious repository could self-grant access to private
- * infrastructure. Strip them from workspace settings before merging.
- * Returns a shallow copy — never mutates input.
+ * Strip the workspace-restricted settings before merging so a repository
+ * cannot opt the user into those capabilities. Returns a shallow copy, and
+ * the input unchanged when it carries none of them.
  */
-function stripWorkspaceSecurityBypasses(settings: Settings): Settings {
-  if (
-    settings.security?.allowPrivateNetworkHooks === undefined &&
-    settings.security?.allowedInsecureVoiceBaseUrls === undefined
-  ) {
-    return settings;
+function stripWorkspaceRestrictedSettings(settings: Settings): Settings {
+  let stripped: Settings | undefined;
+  for (const { section, key } of WORKSPACE_RESTRICTED_SETTINGS) {
+    const source = (stripped ?? settings)[section] as
+      | Record<string, unknown>
+      | undefined;
+    if (source?.[key] === undefined) continue;
+    const { [key]: _restricted, ...rest } = source;
+    stripped = { ...(stripped ?? settings), [section]: rest } as Settings;
   }
-  const {
-    allowPrivateNetworkHooks: _privateHooks,
-    allowedInsecureVoiceBaseUrls: _insecureVoice,
-    ...restSecurity
-  } = settings.security;
-  return { ...settings, security: restSecurity };
+  return stripped ?? settings;
 }
 
 function mergeSettings(
@@ -436,7 +429,10 @@ function mergeSettings(
   isTrusted: boolean,
 ): Settings {
   const safeWorkspace = isTrusted
-    ? tagMcpServerScope(stripWorkspaceSecurityBypasses(workspace), 'workspace')
+    ? tagMcpServerScope(
+        stripWorkspaceRestrictedSettings(workspace),
+        'workspace',
+      )
     : ({} as Settings);
 
   // Settings are merged with the following precedence (last one wins for
