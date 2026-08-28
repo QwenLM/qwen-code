@@ -2917,6 +2917,83 @@ describe('DaemonClient', () => {
       expect(JSON.parse(calls[0]!.body!)).toEqual({ cwd: '/w' });
     });
 
+    it.each(['load', 'resume'] as const)(
+      'omits restore source metadata over %s when the daemon lacks the capability',
+      async (action) => {
+        const { fetch, calls } = recordingFetch((request) =>
+          request.url.endsWith('/capabilities')
+            ? jsonResponse(200, {
+                v: 1,
+                mode: 'http-bridge',
+                features: ['session_restore'],
+                modelServices: [],
+              })
+            : jsonResponse(200, {
+                sessionId: 's-1',
+                workspaceCwd: '/work/a',
+                attached: false,
+                state: {},
+              }),
+        );
+        const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+        if (action === 'load') {
+          await client.loadSession('s-1', {
+            workspaceCwd: '/work/a',
+            sourceType: 'channel',
+            sourceId: 'dingtalk-main',
+          });
+        } else {
+          await client.resumeSession('s-1', {
+            workspaceCwd: '/work/a',
+            sourceType: 'channel',
+            sourceId: 'dingtalk-main',
+          });
+        }
+
+        expect(calls.map((call) => call.url)).toEqual([
+          'http://daemon/capabilities',
+          `http://daemon/session/s-1/${action}`,
+        ]);
+        expect(JSON.parse(calls[1]!.body!)).toEqual({ cwd: '/work/a' });
+      },
+    );
+
+    it.each(['load', 'resume'] as const)(
+      'fails %s closed when source capability probing fails',
+      async (action) => {
+        const { fetch, calls } = recordingFetch((request) =>
+          request.url.endsWith('/capabilities')
+            ? jsonResponse(500, { error: 'capabilities unavailable' })
+            : jsonResponse(200, {
+                sessionId: 's-1',
+                workspaceCwd: '/work/a',
+                attached: false,
+                state: {},
+              }),
+        );
+        const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+        const restore =
+          action === 'load'
+            ? client.loadSession('s-1', {
+                sourceType: 'channel',
+                sourceId: 'dingtalk-main',
+              })
+            : client.resumeSession('s-1', {
+                sourceType: 'channel',
+                sourceId: 'dingtalk-main',
+              });
+
+        await expect(restore).rejects.toMatchObject({
+          status: 500,
+        });
+        expect(calls.map((call) => call.url)).toEqual([
+          'http://daemon/capabilities',
+        ]);
+      },
+    );
+
     it('throws DaemonHttpError on restore failures', async () => {
       const { fetch } = recordingFetch(() =>
         jsonResponse(404, { error: 'missing' }),
