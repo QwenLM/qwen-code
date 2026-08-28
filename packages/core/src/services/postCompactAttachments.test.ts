@@ -803,7 +803,7 @@ describe('composePostCompactHistory', () => {
   it('emits role-alternating history with multiple file/image attachments merged into a single user Content (Finding 2)', async () => {
     // Regression: prior implementation pushed each file restoration block
     // as its own user Content, producing consecutive user roles which
-    // violates geminiChat.test.ts:6289 strict-alternation assertion and
+    // violates llm-chat.test.ts:6289 strict-alternation assertion and
     // is rejected by Gemini API with "consecutive same-role content".
     const small = join(tmpDir, 'a.ts');
     writeFileSync(small, 'export const a = 1;');

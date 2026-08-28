@@ -29,7 +29,7 @@ import { clearAutoMemoryRootCache } from '../memory/paths.js';
 import path from 'node:path';
 import fs from 'node:fs';
 import os from 'node:os';
-import { GeminiClient } from '../core/client.js';
+import { LlmClient } from '../core/client.js';
 import { createMockWorkspaceContext } from '../test-utils/mockWorkspaceContext.js';
 import { FileReadCache } from '../services/fileReadCache.js';
 import { StandardFileSystemService } from '../services/fileSystemService.js';
@@ -40,7 +40,7 @@ const rootDir = path.resolve(os.tmpdir(), 'qwen-code-test-root');
 // --- MOCKS ---
 vi.mock('../core/client.js');
 
-let mockGeminiClientInstance: Mocked<GeminiClient>;
+let mockLlmClientInstance: Mocked<LlmClient>;
 
 // Mock Config
 const fsService = new StandardFileSystemService();
@@ -51,7 +51,7 @@ const mockConfigInternal = {
   getProjectRoot: () => rootDir,
   getApprovalMode: vi.fn(() => ApprovalMode.DEFAULT),
   setApprovalMode: vi.fn(),
-  getGeminiClient: vi.fn(), // Initialize as a plain mock function
+  getLlmClient: vi.fn(), // Initialize as a plain mock function
   getBaseLlmClient: vi.fn(), // Initialize as a plain mock function
   getFileSystemService: () => fsService,
   getWorkspaceContext: () => createMockWorkspaceContext(rootDir),
@@ -112,16 +112,14 @@ describe('WriteFileTool', () => {
       fs.mkdirSync(rootDir, { recursive: true });
     }
 
-    // Setup GeminiClient mock
-    mockGeminiClientInstance = new (vi.mocked(GeminiClient))(
+    // Setup LlmClient mock
+    mockLlmClientInstance = new (vi.mocked(LlmClient))(
       mockConfig,
-    ) as Mocked<GeminiClient>;
-    vi.mocked(GeminiClient).mockImplementation(() => mockGeminiClientInstance);
+    ) as Mocked<LlmClient>;
+    vi.mocked(LlmClient).mockImplementation(() => mockLlmClientInstance);
 
-    // Now that mockGeminiClientInstance is initialized, set the mock implementation for getGeminiClient
-    mockConfigInternal.getGeminiClient.mockReturnValue(
-      mockGeminiClientInstance,
-    );
+    // Now that mockLlmClientInstance is initialized, set the mock implementation for getLlmClient
+    mockConfigInternal.getLlmClient.mockReturnValue(mockLlmClientInstance);
 
     tool = new WriteFileTool(mockConfig);
 

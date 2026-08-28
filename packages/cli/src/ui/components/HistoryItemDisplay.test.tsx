@@ -389,7 +389,7 @@ describe('<HistoryItemDisplay />', () => {
     expect(lastFrame()).toMatchSnapshot();
   });
 
-  it('should render a full gemini item when using availableTerminalHeightGemini', () => {
+  it('should render a full gemini item when using availableTerminalHeightLlm', () => {
     const item: HistoryItem = {
       id: 1,
       type: 'gemini',
@@ -401,7 +401,7 @@ describe('<HistoryItemDisplay />', () => {
         isPending={false}
         terminalWidth={80}
         availableTerminalHeight={10}
-        availableTerminalHeightGemini={Number.MAX_SAFE_INTEGER}
+        availableTerminalHeightLlm={Number.MAX_SAFE_INTEGER}
       />,
     );
 
@@ -426,7 +426,7 @@ describe('<HistoryItemDisplay />', () => {
     expect(lastFrame()).toMatchSnapshot();
   });
 
-  it('should render a full gemini_content item when using availableTerminalHeightGemini', () => {
+  it('should render a full gemini_content item when using availableTerminalHeightLlm', () => {
     const item: HistoryItem = {
       id: 1,
       type: 'gemini_content',
@@ -438,7 +438,7 @@ describe('<HistoryItemDisplay />', () => {
         isPending={false}
         terminalWidth={80}
         availableTerminalHeight={10}
-        availableTerminalHeightGemini={Number.MAX_SAFE_INTEGER}
+        availableTerminalHeightLlm={Number.MAX_SAFE_INTEGER}
       />,
     );
 

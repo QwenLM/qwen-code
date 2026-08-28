@@ -26,7 +26,7 @@ import {
   executeToolCall,
   shutdownTelemetry,
   isTelemetrySdkInitialized,
-  GeminiEventType,
+  LlmEventType,
   FatalInputError,
   promptIdContext,
   OutputFormat,
@@ -389,7 +389,7 @@ async function emitNonInteractiveFinalMessage(params: {
   // (systemMessage should already be emitted by caller)
   adapter.startAssistantMessage();
   adapter.processEvent({
-    type: GeminiEventType.Content,
+    type: LlmEventType.Content,
     value: message,
   } as unknown as Parameters<JsonOutputAdapterInterface['processEvent']>[0]);
   adapter.finalizeAssistantMessage();
@@ -585,18 +585,18 @@ export async function runNonInteractive(
       });
     };
 
-    const geminiClient = config.getGeminiClient();
+    const llmClient = config.getLlmClient();
     const abortController = options.abortController ?? new AbortController();
     const queuedGoalTurns: HeadlessGoalTurn[] = [];
     let activeGoalTurn: HeadlessGoalTurn | undefined;
     let goalRuntimeUnsubscribe: (() => void) | undefined;
     const emitGoalSnapshot = (snapshot: GoalSnapshotV2) => {
       adapter.processEvent({
-        type: GeminiEventType.GoalState,
+        type: LlmEventType.GoalState,
         value: snapshot,
       });
       adapter.processEvent({
-        type: GeminiEventType.ActiveGoal,
+        type: LlmEventType.ActiveGoal,
         value: projectLegacyActiveGoal(snapshot),
       });
     };
@@ -1086,7 +1086,7 @@ export async function runNonInteractive(
         // runs once per (rare) continue request, so the full clone is fine.
         const recoveryPlan = buildSessionRecoveryPlanFromApiHistory({
           sessionId,
-          apiHistory: geminiClient.getChat().getHistory(),
+          apiHistory: llmClient.getChat().getHistory(),
         });
         debugLogger.info('[runNonInteractive] continueInterrupted recovery', {
           kind: recoveryPlan.kind,
@@ -1283,7 +1283,7 @@ export async function runNonInteractive(
       }
 
       // Inject a worktree context notice into the model's first prompt.
-      // Two sources: the `--worktree` startup flag (set by gemini.tsx
+      // Two sources: the `--worktree` startup flag (set by llm.tsx
       // before loadCliConfig) takes precedence over the Phase C resume
       // restore. TUI does this via historyManager.addItem(INFO); here in
       // headless we prepend a `<system-reminder>` block since there is
@@ -1546,7 +1546,7 @@ export async function runNonInteractive(
       // An explicit inline `/model <id> <prompt>` override wins for the whole
       // turn: while active, skill-tool `modelOverride` writes (including the
       // undefined-clears case) are skipped so they cannot silently revert the
-      // submitted prompt to the session model mid-turn. Unlike useGeminiStream's
+      // submitted prompt to the session model mid-turn. Unlike useLlmStream's
       // ref-based `applyModelOverride`/`clearModelOverride` helpers, this is a
       // run-scoped const — non-interactive mode is single-turn, so there is no
       // retry-clearing or skill-tool takeover to guard against, just the
@@ -1701,7 +1701,7 @@ export async function runNonInteractive(
       // Fresh map per call today; copy so a future cached accessor cannot
       // turn this run's cross-turn recording into shared-state mutation.
       const handledToolCallFingerprints = new Map(
-        geminiClient.getHistoryToolCallFingerprints(),
+        llmClient.getHistoryToolCallFingerprints(),
       );
       // Tracks duplicate-error responses emitted during this headless run.
       // Once a provider id reaches this set, seeing it again is terminal for
@@ -2002,7 +2002,7 @@ export async function runNonInteractive(
           responseByRequest.set(requestInfo, toolResponse);
           terminateTurn ||= toolResponse.terminateTurn === true;
           config
-            .getGeminiClient()
+            .getLlmClient()
             .recordCompletedToolCall(
               requestInfo.name,
               requestInfo.args as Record<string, unknown>,
@@ -2352,7 +2352,7 @@ export async function runNonInteractive(
 
         const toolCallRequests: ToolCallRequestInfo[] = [];
         const apiStartTime = Date.now();
-        const responseStream = geminiClient.sendMessageStream(
+        const responseStream = llmClient.sendMessageStream(
           currentMessages[0]?.parts || [],
           abortController.signal,
           currentPromptId,
@@ -2395,21 +2395,21 @@ export async function runNonInteractive(
           }
           // Use adapter for all event processing
           adapter.processEvent(event);
-          if (event.type === GeminiEventType.ToolCallRequest) {
+          if (event.type === LlmEventType.ToolCallRequest) {
             toolCallRequests.push(event.value);
           }
-          if (event.type === GeminiEventType.ModelFallback) {
+          if (event.type === LlmEventType.ModelFallback) {
             toolCallRequests.length = 0;
           }
           if (
-            event.type === GeminiEventType.Content &&
+            event.type === LlmEventType.Content &&
             plainTextPreview.length < PLAIN_TEXT_PREVIEW_LIMIT
           ) {
             const remaining =
               PLAIN_TEXT_PREVIEW_LIMIT - plainTextPreview.length;
             plainTextPreview += String(event.value).slice(0, remaining);
           }
-          if (event.type === GeminiEventType.LoopDetected) {
+          if (event.type === LlmEventType.LoopDetected) {
             if (!loopDetected) {
               loopDetectedMessage = emitLoopDetectedMessage(
                 config,
@@ -2420,7 +2420,7 @@ export async function runNonInteractive(
           }
           if (
             outputFormat === OutputFormat.TEXT &&
-            event.type === GeminiEventType.Error
+            event.type === LlmEventType.Error
           ) {
             const errorText = parseAndFormatApiError(
               event.value.error,
@@ -2496,7 +2496,7 @@ export async function runNonInteractive(
             return emitLoopDetectedResult();
           }
           if (terminateTurn && activeGoalTurn) {
-            geminiClient.addHistory({
+            llmClient.addHistory({
               role: 'user',
               parts: toolResponseParts,
             });
@@ -2680,7 +2680,7 @@ export async function runNonInteractive(
               const itemToolCallRequests: ToolCallRequestInfo[] = [];
               const itemApiStartTime = Date.now();
               selectActiveInteraction(itemPromptId, itemIsFirstTurn);
-              const itemStream = geminiClient.sendMessageStream(
+              const itemStream = llmClient.sendMessageStream(
                 itemMessages[0]?.parts || [],
                 abortController.signal,
                 itemPromptId,
@@ -2722,10 +2722,10 @@ export async function runNonInteractive(
                   await routeAbort();
                 }
                 adapter.processEvent(event);
-                if (event.type === GeminiEventType.ToolCallRequest) {
+                if (event.type === LlmEventType.ToolCallRequest) {
                   itemToolCallRequests.push(event.value);
                 }
-                if (event.type === GeminiEventType.LoopDetected) {
+                if (event.type === LlmEventType.LoopDetected) {
                   if (!loopDetected) {
                     loopDetectedMessage = emitLoopDetectedMessage(
                       config,
@@ -2736,7 +2736,7 @@ export async function runNonInteractive(
                 }
                 if (
                   outputFormat === OutputFormat.TEXT &&
-                  event.type === GeminiEventType.Error
+                  event.type === LlmEventType.Error
                 ) {
                   const errorText = parseAndFormatApiError(
                     event.value.error,
@@ -2976,7 +2976,7 @@ export async function runNonInteractive(
           }
 
           const memoryTaskPromises = config
-            .getGeminiClient()
+            .getLlmClient()
             .consumePendingMemoryTaskPromises();
           if (memoryTaskPromises.length > 0) {
             await Promise.allSettled(memoryTaskPromises);

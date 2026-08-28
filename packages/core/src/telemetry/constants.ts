@@ -39,7 +39,7 @@ export const EVENT_PROTOCOL_TAG_SANITIZED =
   'qwen-code.chat.protocol_tag_sanitized';
 // Phase 4b — HTTP-status retry telemetry emitted by `retryWithBackoff` for
 // 429 / 5xx errors at LLM call sites. Distinct from EVENT_CONTENT_RETRY,
-// which is fired by geminiChat for InvalidStreamError retries on a separate
+// which is fired by llmChat for InvalidStreamError retries on a separate
 // retry budget. See docs/design/telemetry-llm-request-timing-design.md.
 export const EVENT_API_RETRY = 'qwen-code.api_retry';
 export const EVENT_CONVERSATION_FINISHED = 'qwen-code.conversation_finished';
