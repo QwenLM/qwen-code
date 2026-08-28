@@ -722,7 +722,7 @@ describe('workspace skill settings persistence', () => {
     vi.restoreAllMocks();
   });
 
-  it('canonicalizes, deduplicates, preserves orphans, serializes updates, and enforces user locks', async () => {
+  it('canonicalizes, deduplicates, preserves orphans, and serializes updates across settings scopes', async () => {
     workspace = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-skill-settings-')),
     );
@@ -816,8 +816,33 @@ describe('workspace skill settings persistence', () => {
     expect(saved.skills.disabled).toEqual(['orphan', 'alpha', 'beta']);
     expect(saved.skills.enabled).toEqual(['opt-in-skill']);
     await expect(
+      persistDisabledSkills!(workspace, 'locked-skill', false),
+    ).resolves.toEqual({
+      changed: true,
+      disabled: ['orphan', 'alpha', 'beta', 'locked-skill'],
+      settingsChanges: [
+        {
+          key: 'skills.disabled',
+          value: ['orphan', 'alpha', 'beta', 'locked-skill'],
+        },
+      ],
+    });
+    await expect(
       persistDisabledSkills!(workspace, 'locked-skill', true),
-    ).rejects.toMatchObject({ reason: 'locked', lockedScope: 'user' });
+    ).resolves.toEqual({
+      changed: true,
+      disabled: ['orphan', 'alpha', 'beta'],
+      settingsChanges: [
+        {
+          key: 'skills.disabled',
+          value: ['orphan', 'alpha', 'beta'],
+        },
+      ],
+    });
+    const savedUser = JSON.parse(
+      fs.readFileSync(path.join(qwenHome, 'settings.json'), 'utf8'),
+    ) as { skills: { disabled: string[] } };
+    expect(savedUser.skills.disabled).toEqual(['locked-skill']);
   });
 
   it('produces both skills.disabled and skills.enabled changes when enabling a workspace-hard-disabled default-disabled skill', async () => {
@@ -911,7 +936,7 @@ describe('workspace skill settings persistence', () => {
     expect(setValue.mock.calls[0]?.[3]).toBe(toolGuard);
   });
 
-  it('persists a Skill batch with one settings write and per-target lock outcomes', async () => {
+  it('persists a Skill batch with one settings write across settings scopes', async () => {
     workspace = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-skill-batch-')),
     );
@@ -978,14 +1003,14 @@ describe('workspace skill settings persistence', () => {
       skillName: 'alpha',
       changed: true,
     });
-    expect(result.outcomes[2]).toMatchObject({
+    expect(result.outcomes[2]).toEqual({
       skillName: 'locked-skill',
-      error: { reason: 'locked', lockedScope: 'user' },
+      changed: true,
     });
     expect(result.settingsChanges).toEqual([
       {
         key: 'skills.disabled',
-        value: ['orphan', 'review', 'alpha'],
+        value: ['orphan', 'review', 'alpha', 'locked-skill'],
       },
     ]);
     expect(setValues).toHaveBeenCalledOnce();
@@ -1008,6 +1033,7 @@ describe('workspace skill settings persistence', () => {
       'orphan',
       'review',
       'alpha',
+      'locked-skill',
     ]);
     expect(savedAfterDisable.skills.enabled).toBeUndefined();
     const savedUser = JSON.parse(
@@ -1036,7 +1062,10 @@ describe('workspace skill settings persistence', () => {
       { skillName: 'orphan', changed: true },
     ]);
     expect(preinstallEnable.settingsChanges).toEqual([
-      { key: 'skills.disabled', value: ['review', 'alpha'] },
+      {
+        key: 'skills.disabled',
+        value: ['review', 'alpha', 'locked-skill'],
+      },
     ]);
     expect(setValues).toHaveBeenCalledTimes(2);
 
@@ -1060,7 +1089,11 @@ describe('workspace skill settings persistence', () => {
     const savedAfterEnable = JSON.parse(
       fs.readFileSync(path.join(workspace, '.qwen', 'settings.json'), 'utf8'),
     ) as { skills: { disabled: string[]; enabled: string[] } };
-    expect(savedAfterEnable.skills.disabled).toEqual(['review', 'alpha']);
+    expect(savedAfterEnable.skills.disabled).toEqual([
+      'review',
+      'alpha',
+      'locked-skill',
+    ]);
     expect(savedAfterEnable.skills.enabled).toEqual(['opt-in']);
 
     const guard = vi.fn();
@@ -4200,6 +4233,15 @@ describe('runQwenServe telemetry validation', () => {
           ([input]) => input.boundWorkspace === secondaryCwd,
         )?.[0],
       ).toMatchObject({ contextFilename: 'SECONDARY.md' });
+      // bootSettings above carries no `context.fileName`, so the primary
+      // workspace must land on the hard-coded `QWEN.md` init default
+      // (`contextFilenameForInit ?? 'QWEN.md'`). Without this assertion the
+      // fallback literal could be swapped without any test noticing.
+      expect(
+        createWorkspaceService.mock.calls.find(
+          ([input]) => input.boundWorkspace === canonicalizeWorkspace(primary),
+        )?.[0],
+      ).toMatchObject({ contextFilename: 'QWEN.md' });
     } finally {
       await handle.close();
     }
@@ -13044,6 +13086,7 @@ describe('runQwenServe channel worker supervisor', () => {
       .spyOn(process, 'exit')
       .mockImplementation((() => undefined) as never);
     const existingSigtermListeners = new Set(process.rawListeners('SIGTERM'));
+    const existingSighupListeners = new Set(process.rawListeners('SIGHUP'));
 
     const handle = await runQwenServe(
       {
@@ -13069,11 +13112,19 @@ describe('runQwenServe channel worker supervisor', () => {
             !existingSigtermListeners.has(listener) &&
             listener.name === 'onSignal',
         ) as ((signal: NodeJS.Signals) => Promise<void>) | undefined;
+      const sighupListener = process
+        .rawListeners('SIGHUP')
+        .find(
+          (listener) =>
+            !existingSighupListeners.has(listener) &&
+            listener.name === 'onSignal',
+        ) as ((signal: NodeJS.Signals) => Promise<void>) | undefined;
       expect(signalListener).toBeDefined();
+      expect(sighupListener).toBe(signalListener);
 
       const firstSignal = signalListener!('SIGTERM');
       await Promise.resolve();
-      const secondSignal = signalListener!('SIGTERM');
+      const secondSignal = sighupListener!('SIGHUP');
       await secondSignal;
 
       expect(worker.killAllSync).toHaveBeenCalled();
@@ -13085,6 +13136,56 @@ describe('runQwenServe channel worker supervisor', () => {
       await firstSignal;
     } finally {
       finishBridgeShutdown?.();
+      await handle.close();
+      exitSpy.mockRestore();
+    }
+  });
+
+  it('routes SIGHUP through graceful shutdown and removes its listener', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-sighup-shutdown-')),
+    );
+    const bridge = makeFakeBridge();
+    const exitSpy = vi
+      .spyOn(process, 'exit')
+      .mockImplementation((() => undefined) as never);
+    const existingSighupListeners = new Set(process.rawListeners('SIGHUP'));
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        serveWebShell: false,
+      },
+      { bridge },
+    );
+    const processRegistry = mockCreateSpawnChannelFactoryOptions.at(-1)?.[
+      'processRegistry'
+    ] as { shutdown: () => Promise<void> };
+    const shutdownSpy = vi.spyOn(processRegistry, 'shutdown');
+
+    try {
+      const signalListener = process
+        .rawListeners('SIGHUP')
+        .find(
+          (listener) =>
+            !existingSighupListeners.has(listener) &&
+            listener.name === 'onSignal',
+        ) as ((signal: NodeJS.Signals) => Promise<void>) | undefined;
+      expect(signalListener).toBeDefined();
+
+      await signalListener!('SIGHUP');
+
+      expect(shutdownSpy).toHaveBeenCalledOnce();
+      expect(bridge.shutdown).toHaveBeenCalledOnce();
+      expect(exitSpy).toHaveBeenCalledWith(0);
+      expect(
+        process
+          .rawListeners('SIGHUP')
+          .some((listener) => !existingSighupListeners.has(listener)),
+      ).toBe(false);
+    } finally {
       await handle.close();
       exitSpy.mockRestore();
     }
@@ -13113,6 +13214,7 @@ describe('runQwenServe channel worker supervisor', () => {
       .mockImplementation((() => undefined) as never);
     const existingSigintListeners = new Set(process.rawListeners('SIGINT'));
     const existingSigtermListeners = new Set(process.rawListeners('SIGTERM'));
+    const existingSighupListeners = new Set(process.rawListeners('SIGHUP'));
 
     await runQwenServe(
       {
@@ -13166,6 +13268,11 @@ describe('runQwenServe channel worker supervisor', () => {
           process.removeListener('SIGTERM', listener as never);
         }
       }
+      for (const listener of process.rawListeners('SIGHUP')) {
+        if (!existingSighupListeners.has(listener)) {
+          process.removeListener('SIGHUP', listener as never);
+        }
+      }
       exitSpy.mockRestore();
     }
   });
@@ -13186,6 +13293,7 @@ describe('runQwenServe channel worker supervisor', () => {
       .mockImplementation((() => undefined) as never);
     const existingSigintListeners = new Set(process.rawListeners('SIGINT'));
     const existingSigtermListeners = new Set(process.rawListeners('SIGTERM'));
+    const existingSighupListeners = new Set(process.rawListeners('SIGHUP'));
 
     await runQwenServe(
       {
@@ -13234,6 +13342,11 @@ describe('runQwenServe channel worker supervisor', () => {
           process.removeListener('SIGTERM', listener as never);
         }
       }
+      for (const listener of process.rawListeners('SIGHUP')) {
+        if (!existingSighupListeners.has(listener)) {
+          process.removeListener('SIGHUP', listener as never);
+        }
+      }
       exitSpy.mockRestore();
     }
   });
@@ -13260,6 +13373,7 @@ describe('runQwenServe channel worker supervisor', () => {
       .mockImplementation((() => undefined) as never);
     const existingSigintListeners = new Set(process.rawListeners('SIGINT'));
     const existingSigtermListeners = new Set(process.rawListeners('SIGTERM'));
+    const existingSighupListeners = new Set(process.rawListeners('SIGHUP'));
 
     await runQwenServe(
       {
@@ -13310,6 +13424,11 @@ describe('runQwenServe channel worker supervisor', () => {
           process.removeListener('SIGTERM', listener as never);
         }
       }
+      for (const listener of process.rawListeners('SIGHUP')) {
+        if (!existingSighupListeners.has(listener)) {
+          process.removeListener('SIGHUP', listener as never);
+        }
+      }
       exitSpy.mockRestore();
     }
   });
@@ -13335,6 +13454,7 @@ describe('runQwenServe channel worker supervisor', () => {
       .mockImplementation((() => undefined) as never);
     const existingSigintListeners = new Set(process.rawListeners('SIGINT'));
     const existingSigtermListeners = new Set(process.rawListeners('SIGTERM'));
+    const existingSighupListeners = new Set(process.rawListeners('SIGHUP'));
 
     const handle = await runQwenServe(
       {
@@ -13382,6 +13502,11 @@ describe('runQwenServe channel worker supervisor', () => {
       for (const listener of process.rawListeners('SIGTERM')) {
         if (!existingSigtermListeners.has(listener)) {
           process.removeListener('SIGTERM', listener as never);
+        }
+      }
+      for (const listener of process.rawListeners('SIGHUP')) {
+        if (!existingSighupListeners.has(listener)) {
+          process.removeListener('SIGHUP', listener as never);
         }
       }
       exitSpy.mockRestore();
@@ -14092,6 +14217,7 @@ describe('runQwenServe channel worker supervisor', () => {
       .mockImplementation((() => undefined) as never);
     const existingSigintListeners = new Set(process.rawListeners('SIGINT'));
     const existingSigtermListeners = new Set(process.rawListeners('SIGTERM'));
+    const existingSighupListeners = new Set(process.rawListeners('SIGHUP'));
     let settled = false;
 
     const running = runQwenServe(
@@ -14150,6 +14276,11 @@ describe('runQwenServe channel worker supervisor', () => {
       for (const listener of process.rawListeners('SIGTERM')) {
         if (!existingSigtermListeners.has(listener)) {
           process.removeListener('SIGTERM', listener as never);
+        }
+      }
+      for (const listener of process.rawListeners('SIGHUP')) {
+        if (!existingSighupListeners.has(listener)) {
+          process.removeListener('SIGHUP', listener as never);
         }
       }
       exitSpy.mockRestore();

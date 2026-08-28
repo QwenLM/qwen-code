@@ -1397,6 +1397,8 @@ const EN: Messages = {
   'sidebar.unarchive': 'Restore',
   'sidebar.moreActions': 'More actions',
   'sidebar.archiveCurrentDisabled': 'The current session cannot be archived',
+  'sidebar.archiveRunningDisabled':
+    'A running session cannot be archived; archiving would end its turn',
   'sidebar.archivedTitle': 'Archived',
   'sidebar.archivedEmpty': 'No archived sessions.',
   'sidebar.archiveFailed': 'Failed to archive session',
@@ -2405,6 +2407,11 @@ const EN: Messages = {
   'skills.notToggleable': 'This skill cannot be enabled or disabled.',
   'skills.run': 'Reference skill',
   'skills.search': 'Search skills…',
+  'skills.settingUpdated': 'Workspace setting updated.',
+  'skills.settingUpdatedAvailabilityUnchanged':
+    'Workspace setting updated. Effective Skill availability did not change.',
+  'skills.settingUnchanged':
+    'Skill already has the requested workspace setting; no setting was changed.',
   'skills.status': 'Status',
   'skills.status.disabled': 'disabled',
   'skills.status.enabled': 'enabled',
@@ -2955,6 +2962,9 @@ const EN: Messages = {
     'Messages in the same group or topic share one conversation; best for collaboration.',
   'channels.editor.field.shared.sessionScope.detail.single':
     'Every message shares one conversation; best for a single-bot duty channel.',
+  'channels.editor.field.shared.multiSession': 'Named tasks',
+  'channels.editor.field.shared.multiSession.description':
+    'Keep a separate owner-scoped catalog of named tasks in daemon-managed mode.',
   'channels.editor.policy.pairing.title': 'Pairing',
   'channels.editor.policy.pairing.description':
     'People receive a pairing code and can chat after you approve them.',
@@ -4466,6 +4476,8 @@ const ZH: Messages = {
   'sidebar.unarchive': '恢复',
   'sidebar.moreActions': '更多操作',
   'sidebar.archiveCurrentDisabled': '不能归档当前会话',
+  'sidebar.archiveRunningDisabled':
+    '不能归档运行中的会话，归档会终止其当前回合',
   'sidebar.archivedTitle': '已归档',
   'sidebar.archivedEmpty': '没有已归档的会话。',
   'sidebar.archiveFailed': '归档会话失败',
@@ -5387,6 +5399,10 @@ const ZH: Messages = {
   'skills.notToggleable': '此 Skill 不支持启用或禁用。',
   'skills.run': '引用 skill',
   'skills.search': '搜索 Skills…',
+  'skills.settingUpdated': 'Workspace 设置已更新。',
+  'skills.settingUpdatedAvailabilityUnchanged':
+    'Workspace 设置已更新，Skill 的实际可用状态未改变。',
+  'skills.settingUnchanged': 'Skill 已处于请求的 Workspace 设置，无需更改。',
   'skills.status': '状态',
   'skills.status.disabled': '已禁用',
   'skills.status.enabled': '已启用',
@@ -5903,6 +5919,9 @@ const ZH: Messages = {
     '同一群聊或话题进入同一个对话，适合群内协作。',
   'channels.editor.field.shared.sessionScope.detail.single':
     '所有消息共用一个对话，适合单一机器人值守场景。',
+  'channels.editor.field.shared.multiSession': '命名任务',
+  'channels.editor.field.shared.multiSession.description':
+    '在 daemon 托管模式下，为每位用户保留相互隔离的命名任务目录。',
   'channels.editor.policy.pairing.title': '配对模式',
   'channels.editor.policy.pairing.description':
     '用户会收到配对码，经您批准后才能开始对话。',
