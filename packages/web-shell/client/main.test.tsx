@@ -72,5 +72,8 @@ describe('StandaloneApp', () => {
     expect(new URLSearchParams(window.location.search).get('workspace')).toBe(
       'workspace-1',
     );
+    expect(
+      testState.props?.webShellProps.composerToolbarAdditionalActions,
+    ).toEqual(['addMenu']);
   });
 });

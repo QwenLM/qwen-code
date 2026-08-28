@@ -47,6 +47,7 @@ const LOCAL_OPENAI_NO_PROXY = IS_CONTAINER_SANDBOX
   : '127.0.0.1,localhost';
 const FAKE_SERVER_OPTIONS = fakeServerHostOptions();
 const INITIAL_CONTENT = 'original content';
+let isolatedQwenHome: string;
 
 function fakeModelOptions(baseUrl: string) {
   return {
@@ -59,6 +60,7 @@ function fakeModelOptions(baseUrl: string) {
       OPENAI_BASE_URL: baseUrl,
       OPENAI_MODEL: 'fake-model',
       QWEN_MODEL: 'fake-model',
+      QWEN_HOME: isolatedQwenHome,
     },
   };
 }
@@ -85,12 +87,17 @@ describe('Tool Control Parameters (E2E)', () => {
     testDir = await helper.setup('tool-control', {
       settings: {
         fastModel: 'openai:fake-model',
+        memory: {
+          enableManagedAutoMemory: false,
+          enableManagedAutoDream: false,
+        },
         // list_directory is opt-in (disabled by default). This suite tests
         // coreTools/excludeTools control semantics, so keep it enabled here;
         // an active coreTools allowlist still outranks this flag.
         tools: { listDirectory: { enabled: true } },
       },
     });
+    isolatedQwenHome = await helper.mkdir('global-qwen-home');
   });
 
   afterEach(async () => {

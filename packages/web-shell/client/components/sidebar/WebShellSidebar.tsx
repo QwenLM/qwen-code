@@ -275,7 +275,9 @@ export interface WebShellSidebarSessionActionsOptions {
   /** Session action items to show. Defaults to all. */
   items?: readonly WebShellSidebarSessionActionItem[];
   /**
-   * Which items appear as inline buttons (on hover). Defaults to ['pin', 'archive'].
+   * Which items appear as inline buttons (on hover). Defaults to ['pin'];
+   * archive stays in the dropdown so a stray click on the hover slot cannot
+   * archive a session.
    * Only items that also pass their built-in visibility condition are rendered.
    * Only items with working inline handlers are accepted (details/group are dropdown-only).
    */
@@ -286,7 +288,7 @@ const DEFAULT_SESSION_ACTION_ITEMS: readonly WebShellSidebarSessionActionItem[] 
   ['details', 'rename', 'group', 'export', 'delete', 'pin', 'archive'];
 
 const DEFAULT_INLINE_ACTION_ITEMS: readonly WebShellSidebarSessionInlineActionItem[] =
-  ['pin', 'archive'];
+  ['pin'];
 
 /**
  * Palette order for the quick color-grouping buckets. Mirrors core's
@@ -1800,6 +1802,7 @@ export function WebShellSidebar({
     (session: DaemonSessionSummary) =>
       sessionActionItems.has('archive') &&
       !isCurrentSession(session) &&
+      !session.hasActivePrompt &&
       canMutateSessionArchive(session),
     [canMutateSessionArchive, isCurrentSession, sessionActionItems],
   );
@@ -3984,6 +3987,9 @@ export function WebShellSidebar({
       }
 
       const isCurrent = isCurrentSession(session);
+      // Archiving closes the live session daemon-side, which would end the
+      // running turn; keep the action visible but inert while it runs.
+      const running = Boolean(session.hasActivePrompt);
       const needsUserInput =
         !session.isWaitingForPermission && session.isWaitingForUserQuestion;
       const attention = session.isWaitingForPermission
@@ -4152,10 +4158,12 @@ export function WebShellSidebar({
                           key: 'archive',
                           icon: <ArchiveIcon size={16} strokeWidth={1.2} />,
                           label: t('sidebar.archive'),
-                          disabled: busy || isCurrent,
+                          disabled: busy || isCurrent || running,
                           title: isCurrent
                             ? t('sidebar.archiveCurrentDisabled')
-                            : t('sidebar.archive'),
+                            : running
+                              ? t('sidebar.archiveRunningDisabled')
+                              : t('sidebar.archive'),
                           visible:
                             showArchive && inlineActionItems.has('archive'),
                           onClick: () => handleArchive(session),
@@ -4258,11 +4266,13 @@ export function WebShellSidebar({
                             {showArchive &&
                               !inlineActionItems.has('archive') && (
                                 <DropdownMenuItem
-                                  disabled={busy || isCurrent}
+                                  disabled={busy || isCurrent || running}
                                   title={
                                     isCurrent
                                       ? t('sidebar.archiveCurrentDisabled')
-                                      : undefined
+                                      : running
+                                        ? t('sidebar.archiveRunningDisabled')
+                                        : undefined
                                   }
                                   onSelect={() => handleArchive(session)}
                                 >
