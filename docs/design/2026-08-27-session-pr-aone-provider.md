@@ -147,13 +147,20 @@ Per workspace, after candidate collection (unchanged):
   - Same-PR identity on Aone fails CLOSED: an existing entry passes the
     guard only when it is provably one of this repo's own MRs — either
     mr-view-attested this run, or matching the exact detailUrl SHAPE for
-    this repoPath (`isAoneDetailUrlForRepo`, under either canonical host
-    spelling). The shape check is exact because repoPath is the origin's
-    full group path (no collapse), and it is what keeps a full sidecar's
-    re-planned entries trimmable WITHOUT spending the view budget
-    re-attesting them every run — re-attestation leaked the whole budget in
-    steady state. Anything unprovable stays foreign and kept; the gh path
-    keeps its fail-open default.
+    this repoPath (`isAoneDetailUrlForRepo`). The shape deliberately mirrors
+    the sidecar WRITE path (`updateSessionPrStates` matches by exact
+    `canonicalSessionPrUrl` equality, which preserves scheme/host/port): an
+    entry counts as own/refreshable only if a fetched detailUrl would
+    actually LAND on it. So the shape is the WEB-host, `https`, port-less
+    spelling a1 produces — a binding in any other spelling (the git host,
+    `http:`, an explicit port) is one the write path would also refuse, and
+    is left foreign-and-kept here rather than viewed to no effect. The
+    shape is exact because repoPath is the origin's full group path (no
+    collapse), and it is what keeps a full sidecar's re-planned entries
+    trimmable WITHOUT spending the view budget re-attesting them every run
+    — re-attestation leaked the whole budget in steady state. Anything
+    unprovable stays foreign and kept; the gh path keeps its fail-open
+    default.
   - Legacy repair: bindings the pre-Aone backfill persisted in the fabricated
     `<origin web URL>/pull/<N>` shape are detected and re-resolved through
     the same capped view path, then rewritten in place with the real
@@ -180,15 +187,28 @@ Per workspace, after pending-number collection (unchanged):
   bound by several sessions costs one call), then `viewAoneMergeRequest`
   per unique number.
 - The view window is capped at `AONE_MAX_MR_VIEW_CALLS_PER_RUN` = 25 and
-  ROTATES: the timer advances a per-workspace start offset by the cap each
-  sweep, so a refreshable set larger than the cap is fully refreshed in
-  ceil(size/cap) sweeps instead of starving a fixed prefix.
+  ROTATES: the timer keeps a per-workspace start offset and advances it each
+  sweep by however many views the sweep actually STARTED (`aoneConsumed`,
+  reported in the sweep result), not the fixed cap. Advancing by the cap
+  would, when the aggregate budget truncates a sweep, leave the truncated
+  tail in the gap between consecutive windows forever; advancing by the
+  consumed count tiles windows contiguously. Either way a refreshable set
+  larger than the cap is fully refreshed over consecutive sweeps instead of
+  starving a fixed prefix. The timer prunes a removed workspace's offset
+  each tick (the daemon runs indefinitely, so an entry per ever-seen cwd
+  would otherwise grow without bound).
 - The loop also has an AGGREGATE time budget (`AONE_SWEEP_VIEW_BUDGET_MS`
   = 60s): per-call timeouts bound one view, but 25 sequential hung views
   would outrun the sweep interval and — via the timer's re-entrancy guard —
   pause every workspace's refresh. Past the budget the loop stops STARTING
   views; the remainder degrades like a per-number failure and the rotation
   retries it.
+- The fetched `detailUrl` is re-validated against the sidecar's own URL
+  invariants before it is trusted (`parseAoneMrView`): a detailUrl longer
+  than `SESSION_PR_URL_MAX_LENGTH` or carrying a control character is
+  refused, because persisting either would make `readSessionPrs` reject the
+  ENTIRE list — one malformed a1 answer would void all of the session's
+  bindings. The view then degrades to "unresolved this run".
 - Successful views feed the existing `updateSessionPrStates` write path
   keyed by `{state, url: detailUrl}` — its canonical-URL identity check
   keeps working because `detailUrl` is the canonical form of a bound Aone

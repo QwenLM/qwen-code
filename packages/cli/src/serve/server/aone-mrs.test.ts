@@ -15,6 +15,7 @@ import * as fsp from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { SESSION_PR_URL_MAX_LENGTH } from '@qwen-code/qwen-code-core';
 import {
   A1_MAX_BUFFER,
   A1_TIMEOUT_MS,
@@ -229,6 +230,32 @@ describe('parseAoneMrView', () => {
     ).toThrow(AoneCommandError);
   });
 
+  it('refuses a detailUrl that would void the whole sidecar', () => {
+    // isValidSessionPr rejects the ENTIRE list when one URL exceeds the cap
+    // or carries a control character, so persisting either from an a1
+    // answer would lose the session ALL of its bindings. The view must
+    // degrade to "unresolved this run" instead.
+    const oversized = `https://code.alibaba-inc.com/g/p/codereview/1${'x'.repeat(SESSION_PR_URL_MAX_LENGTH)}`;
+    expect(() =>
+      parseAoneMrView(
+        { mergeRequest: { state: 'opened', detailUrl: oversized } },
+        1,
+      ),
+    ).toThrow(AoneCommandError);
+    expect(() =>
+      parseAoneMrView(
+        {
+          mergeRequest: {
+            state: 'opened',
+            detailUrl:
+              'https://code.alibaba-inc.com/g/p/codereview/1\r\nforged: 1',
+          },
+        },
+        1,
+      ),
+    ).toThrow(AoneCommandError);
+  });
+
   it('refuses a body without mergeRequest', () => {
     expect(() => parseAoneMrView({}, 1)).toThrow(AoneCommandError);
     expect(() => parseAoneMrView(null, 1)).toThrow(AoneCommandError);
@@ -323,6 +350,55 @@ describe('the a1 exec layer', () => {
     await expect(
       listAoneMergeRequests('g/p', { state: 'opened', pages: 1 }),
     ).rejects.toThrow(AoneCliUnavailableError);
+    expect(calls).toEqual([['--version']]);
+  });
+
+  it('keeps re-probing a below-floor a1 on every read', async () => {
+    // The below-floor flag must not memoize: each read re-probes so the
+    // actionable floor error keeps firing (and an upgrade takes effect
+    // without a daemon restart). Swapping `assertA1Version` below the
+    // `a1AvailabilityVerified = true` assignment would make the second read
+    // skip the probe and resolve [] — this must stay red for that mutant.
+    let probes = 0;
+    setA1ExecForTest(async (args) => {
+      if (args.includes('--version')) {
+        probes += 1;
+        return { stdout: 'a1 version 0.1.0' };
+      }
+      return { stdout: JSON.stringify([]) };
+    });
+
+    await expect(
+      listAoneMergeRequests('g/p', { state: 'opened', pages: 1 }),
+    ).rejects.toThrow(AoneCliUnavailableError);
+    await expect(
+      listAoneMergeRequests('g/p', { state: 'opened', pages: 1 }),
+    ).rejects.toThrow(AoneCliUnavailableError);
+    expect(probes).toBe(2);
+  });
+
+  it('applies the version floor on the view path too', async () => {
+    // The refresh sweep's first a1 call of a daemon's lifetime is a VIEW
+    // (no list call at all), so the floor must guard view as well — else a
+    // downgraded a1 fails obscurely with no "upgrade" remedy named.
+    const calls: string[][] = [];
+    setA1ExecForTest(async (args) => {
+      calls.push([...args]);
+      return args.includes('--version')
+        ? { stdout: 'a1 version 0.1.0' }
+        : {
+            stdout: JSON.stringify({
+              mergeRequest: {
+                state: 'merged',
+                detailUrl: 'https://code.alibaba-inc.com/g/p/codereview/7',
+              },
+            }),
+          };
+    });
+
+    await expect(viewAoneMergeRequest('g/p', 7)).rejects.toThrow(
+      AoneCliUnavailableError,
+    );
     expect(calls).toEqual([['--version']]);
   });
 
@@ -468,22 +544,11 @@ describe('the a1 exec layer', () => {
 
 describe('isAoneDetailUrlForRepo', () => {
   const repoPath = 'jspt/agentic_coding';
+  const WEB =
+    'https://code.alibaba-inc.com/jspt/agentic_coding/codereview/26430560';
 
-  it('matches the detailUrl shape under either canonical host', () => {
-    expect(
-      isAoneDetailUrlForRepo(
-        repoPath,
-        26430560,
-        'https://code.alibaba-inc.com/jspt/agentic_coding/codereview/26430560',
-      ),
-    ).toBe(true);
-    expect(
-      isAoneDetailUrlForRepo(
-        repoPath,
-        26430560,
-        'https://gitlab.alibaba-inc.com/jspt/agentic_coding/codereview/26430560',
-      ),
-    ).toBe(true);
+  it('matches only the detailUrl shape a1 actually produces', () => {
+    expect(isAoneDetailUrlForRepo(repoPath, 26430560, WEB)).toBe(true);
     // Case, trailing slash, and query noise normalize away.
     expect(
       isAoneDetailUrlForRepo(
@@ -492,6 +557,42 @@ describe('isAoneDetailUrlForRepo', () => {
         'https://CODE.ALIBABA-INC.COM/jspt/agentic_coding/codereview/26430560/?x=1',
       ),
     ).toBe(true);
+    // `:443` is the https default — WHATWG origin drops it.
+    expect(
+      isAoneDetailUrlForRepo(
+        repoPath,
+        26430560,
+        'https://code.alibaba-inc.com:443/jspt/agentic_coding/codereview/26430560',
+      ),
+    ).toBe(true);
+  });
+
+  it('refuses spellings the sidecar write path would also reject', () => {
+    // Identity must agree with updateSessionPrStates' exact canonical
+    // equality, else the sweep would view a number whose state can never
+    // land (burning a capped slot). Git host, http scheme, and an explicit
+    // port all canonicalize differently from a1's web-host https detailUrl.
+    expect(
+      isAoneDetailUrlForRepo(
+        repoPath,
+        26430560,
+        'https://gitlab.alibaba-inc.com/jspt/agentic_coding/codereview/26430560',
+      ),
+    ).toBe(false);
+    expect(
+      isAoneDetailUrlForRepo(
+        repoPath,
+        26430560,
+        'http://code.alibaba-inc.com/jspt/agentic_coding/codereview/26430560',
+      ),
+    ).toBe(false);
+    expect(
+      isAoneDetailUrlForRepo(
+        repoPath,
+        26430560,
+        'https://code.alibaba-inc.com:8443/jspt/agentic_coding/codereview/26430560',
+      ),
+    ).toBe(false);
   });
 
   it('refuses other repos, other numbers, and other platforms', () => {

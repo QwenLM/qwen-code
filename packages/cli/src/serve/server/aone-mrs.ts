@@ -21,6 +21,7 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import {
+  SESSION_PR_URL_MAX_LENGTH,
   canonicalSessionPrUrl,
   findGitRoot,
   gitEnv,
@@ -82,14 +83,12 @@ export const A1_VERSION_TIMEOUT_MS = 10_000;
 const A1_ERROR_MESSAGE_MAX = 512;
 
 /**
- * The canonical Aone host pair — the web host first: a detailUrl always
- * carries it, and manual bindings spell the review page with it. The git
- * host is the spelling a clone's remote uses; identity checks accept both.
+ * The host an a1 `detailUrl` ALWAYS carries — the Aone Code WEB host. The
+ * git host (`gitlab.alibaba-inc.com`) spells the same platform's clone
+ * remotes, but a detailUrl is never spelled with it (and detection keys on
+ * it separately via `isAoneCanonicalHost`).
  */
-export const AONE_CANONICAL_HOSTS = [
-  'code.alibaba-inc.com',
-  'gitlab.alibaba-inc.com',
-] as const;
+export const AONE_DETAIL_URL_HOST = 'code.alibaba-inc.com';
 
 /** `a1 repo mr list` page size is server-fixed; `--page` only picks one. */
 export const AONE_MR_LIST_PAGE_SIZE = 20;
@@ -203,24 +202,29 @@ export async function resolveAoneWorkspaceRepo(
 
 /**
  * Exact same-MR identity for this workspace's OWN repo: a detailUrl is
- * always `<canonical host>/<repoPath>/codereview/<global id>`, and
- * repoPath here is the origin's exact full group path (no collapse), so the
- * expected shape is exact under either canonical host spelling. Lets the
- * identity guards classify persisted entries WITHOUT an `mr view` — views
- * stay reserved for new bindings and legacy repairs — and lets the refresh
- * sweep drop numbers it can provably never update. This computes an
- * identity shape, it never fabricates a binding URL.
+ * always `<web host>/<repoPath>/codereview/<global id>`, and repoPath here
+ * is the origin's exact full group path (no collapse), so the expected
+ * shape is exact. The comparison deliberately mirrors the sidecar write
+ * path (`updateSessionPrStates` matches by exact `canonicalSessionPrUrl`
+ * equality, which preserves scheme/host/port): an entry only counts as
+ * own/refreshable if a fetched detailUrl would actually LAND on it. A
+ * binding in any other spelling — the git host, `http:`, an explicit port
+ * — is one the write path would also refuse, so classifying it own would
+ * only spend a capped view slot (and part of the sweep budget) on a state
+ * that can never be written. Such entries stay foreign-and-kept in the
+ * backfill trim guard and unrefreshed (their pre-this-feature behavior).
+ * This computes an identity shape; it never fabricates a binding URL.
  */
 export function isAoneDetailUrlForRepo(
   repoPath: string,
   number: number,
   url: string,
 ): boolean {
-  const canonical = canonicalSessionPrUrl(url);
-  return AONE_CANONICAL_HOSTS.some(
-    (host) =>
-      canonical ===
-      canonicalSessionPrUrl(`https://${host}/${repoPath}/codereview/${number}`),
+  return (
+    canonicalSessionPrUrl(url) ===
+    canonicalSessionPrUrl(
+      `https://${AONE_DETAIL_URL_HOST}/${repoPath}/codereview/${number}`,
+    )
   );
 }
 
@@ -390,6 +394,15 @@ export async function listAoneMergeRequests(
   return entries;
 }
 
+// Mirrors the sidecar reader's control-character rule (ESLint forbids
+// control-char regexes).
+function hasControlCharacter(value: string): boolean {
+  return Array.from(value).some((character) => {
+    const code = character.charCodeAt(0);
+    return code <= 31 || code === 127;
+  });
+}
+
 /** Exported for tests — the view-body parse stays testable without exec. */
 export function parseAoneMrView(raw: unknown, id: number): AoneMrView {
   const mr =
@@ -403,6 +416,20 @@ export function parseAoneMrView(raw: unknown, id: number): AoneMrView {
   const url = typeof v['detailUrl'] === 'string' ? v['detailUrl'] : '';
   if (!/^https?:\/\//i.test(url)) {
     throw new AoneCommandError('a1 mr view returned no detailUrl');
+  }
+  // The detailUrl arrives from an a1 stdout this module treats as
+  // untrusted, and it is about to be persisted into the sidecar — whose
+  // reader rejects the ENTIRE list when one entry's URL exceeds the cap or
+  // carries a control character. Refuse such a URL here so one malformed
+  // answer degrades to "unresolved this run, retry next run" instead of
+  // voiding every binding the sidecar holds (and clearing the surviving
+  // badges live via the post-commit bridge sync). The control-character
+  // guard also closes the audit-line forging hazard the cap comment names.
+  if (url.length > SESSION_PR_URL_MAX_LENGTH) {
+    throw new AoneCommandError('a1 mr view returned an oversized detailUrl');
+  }
+  if (hasControlCharacter(url)) {
+    throw new AoneCommandError('a1 mr view returned a malformed detailUrl');
   }
   return {
     number: id,

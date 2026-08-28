@@ -28,6 +28,7 @@ import {
   createWorkspaceGenerationGuard,
   createWorkspaceRegistry,
   type WorkspaceGenerationGuard,
+  type WorkspaceRegistry,
   type WorkspaceRuntime,
 } from '../workspace-registry.js';
 import {
@@ -290,7 +291,7 @@ describe('refreshWorkspaceSessionPrStates', () => {
         aoneBackend: backend,
       });
 
-      expect(result).toEqual({ scanned: 1, updated: 1 });
+      expect(result).toEqual({ scanned: 1, updated: 1, aoneConsumed: 1 });
       expect(fetchGitHubPullRequestsMock).not.toHaveBeenCalled();
       expect(backend.view).toHaveBeenCalledWith(
         'jspt/agentic_coding',
@@ -320,7 +321,7 @@ describe('refreshWorkspaceSessionPrStates', () => {
         aoneBackend: backend,
       });
 
-      expect(result).toEqual({ scanned: 2, updated: 2 });
+      expect(result).toEqual({ scanned: 2, updated: 2, aoneConsumed: 1 });
       expect(backend.view).toHaveBeenCalledTimes(1);
       expect((await readSessionPrs(prPathA))?.[0]?.state).toBe('merged');
       expect((await readSessionPrs(prPathB))?.[0]?.state).toBe('merged');
@@ -352,7 +353,7 @@ describe('refreshWorkspaceSessionPrStates', () => {
         aoneBackend: backend,
       });
 
-      expect(result).toEqual({ scanned: 1, updated: 1 });
+      expect(result).toEqual({ scanned: 1, updated: 1, aoneConsumed: 1 });
       expect((await readSessionPrs(prPath))?.[0]?.state).toBe('open');
     });
 
@@ -373,7 +374,8 @@ describe('refreshWorkspaceSessionPrStates', () => {
         aoneBackend: backend,
       });
 
-      expect(result).toEqual({ scanned: 1, updated: 0 });
+      // consumed counts views STARTED (one was, and failed), not updates.
+      expect(result).toEqual({ scanned: 1, updated: 0, aoneConsumed: 1 });
       expect((await readSessionPrs(prPath))?.[0]?.state).toBeUndefined();
     });
 
@@ -411,6 +413,7 @@ describe('refreshWorkspaceSessionPrStates', () => {
       expect(result).toEqual({
         scanned: 3,
         updated: AONE_MAX_MR_VIEW_CALLS_PER_RUN,
+        aoneConsumed: AONE_MAX_MR_VIEW_CALLS_PER_RUN,
       });
     });
 
@@ -441,7 +444,38 @@ describe('refreshWorkspaceSessionPrStates', () => {
 
       expect(view).toHaveBeenCalledTimes(1);
       expect(view).toHaveBeenCalledWith('jspt/agentic_coding', 26430560);
-      expect(result).toEqual({ scanned: 1, updated: 1 });
+      expect(result).toEqual({ scanned: 1, updated: 1, aoneConsumed: 1 });
+    });
+
+    it('never views a number whose only binding is git-host spelled', async () => {
+      // The identity check must agree with the write path's exact canonical
+      // equality: a detailUrl spelled with the GIT host can never match the
+      // web-host detailUrl a1 attests, so viewing it would spend a capped
+      // slot (and part of the sweep budget) on a state that can never land.
+      // The filter excludes it entirely — no view, no wasted slot.
+      await seedSession(SESSION_A);
+      const prPath = sessionService.getPrSessionPathForArchiveState(
+        SESSION_A,
+        'active',
+      );
+      await upsertSessionPr(prPath, {
+        number: 26430560,
+        url: 'https://gitlab.alibaba-inc.com/jspt/agentic_coding/codereview/26430560',
+      });
+      const view = vi.fn(async (_repoPath: string, id: number) => ({
+        number: id,
+        url: AONE_URL,
+        state: 'merged' as const,
+      }));
+      const backend = fakeAoneBackend({ view });
+
+      const result = await refreshWorkspaceSessionPrStates(runtime, undefined, {
+        aoneBackend: backend,
+      });
+
+      expect(view).not.toHaveBeenCalled();
+      expect(result).toEqual({ scanned: 1, updated: 0, aoneConsumed: 0 });
+      expect((await readSessionPrs(prPath))?.[0]?.state).toBeUndefined();
     });
 
     it('rotates the capped window across sweeps', async () => {
@@ -523,7 +557,44 @@ describe('refreshWorkspaceSessionPrStates', () => {
       });
 
       expect(view).toHaveBeenCalledTimes(4);
-      expect(result).toEqual({ scanned: 1, updated: 4 });
+      expect(result).toEqual({ scanned: 1, updated: 4, aoneConsumed: 4 });
+    });
+
+    it('reports consumed so a truncated window tiles contiguously', async () => {
+      // Under the aggregate budget the timer must advance the rotation by
+      // how far the window actually GOT (aoneConsumed), not the fixed cap —
+      // else the truncated tail falls in the gap between windows. Five
+      // pending numbers, a clock advancing a full per-call timeout per view,
+      // admit four; consumed must report 4, not the cap of 25.
+      await seedSession(SESSION_A);
+      const prPath = sessionService.getPrSessionPathForArchiveState(
+        SESSION_A,
+        'active',
+      );
+      for (let i = 1; i <= 5; i++) {
+        await upsertSessionPr(prPath, {
+          number: i,
+          url: `https://code.alibaba-inc.com/jspt/agentic_coding/codereview/${i}`,
+        });
+      }
+      let clock = 0;
+      const view = vi.fn(async (_repoPath: string, id: number) => {
+        clock += 20_000;
+        return {
+          number: id,
+          url: `https://code.alibaba-inc.com/jspt/agentic_coding/codereview/${id}`,
+          state: 'merged' as const,
+        };
+      });
+      const backend = fakeAoneBackend({ view });
+
+      const result = await refreshWorkspaceSessionPrStates(runtime, undefined, {
+        aoneBackend: backend,
+        now: () => clock,
+      });
+
+      expect(result.aoneConsumed).toBe(4);
+      expect(result.aoneConsumed).toBeLessThan(AONE_MAX_MR_VIEW_CALLS_PER_RUN);
     });
   });
 
@@ -1495,6 +1566,168 @@ describe('startSessionPrRefreshTimer', () => {
       expect.any(Function),
     );
 
+    handle?.dispose();
+  });
+
+  // Seeds `total` detailUrl-shaped pending bindings (all non-merged, so they
+  // stay pending across sweeps) across ceil(total/10) sessions — one sidecar
+  // caps at SESSION_PR_LIST_LIMIT — in a git repo whose origin is Aone, so
+  // the sweep's platform detection keys on the a1 path.
+  async function seedAoneTimerWorkspace(
+    runtime: WorkspaceRuntime,
+    total: number,
+  ): Promise<void> {
+    execSync('git init', { cwd: runtime.workspaceCwd, stdio: 'pipe' });
+    execSync(
+      'git remote add origin git@gitlab.alibaba-inc.com:jspt/agentic_coding.git',
+      { cwd: runtime.workspaceCwd, stdio: 'pipe' },
+    );
+    const service = createWorkspaceRuntimeSessionService(runtime);
+    const chatsDir = path.join(
+      new Storage(runtime.workspaceCwd).getProjectDir(),
+      'chats',
+    );
+    await fsp.mkdir(chatsDir, { recursive: true });
+    let number = 1;
+    let sessionIdx = 0;
+    while (number <= total) {
+      const sessionId = `00000000-0000-4000-8000-${String(300 + sessionIdx).padStart(12, '0')}`;
+      sessionIdx += 1;
+      await fsp.writeFile(
+        path.join(chatsDir, `${sessionId}.jsonl`),
+        `${JSON.stringify({
+          uuid: `${sessionId}-user-1`,
+          parentUuid: null,
+          sessionId,
+          timestamp: '2026-08-01T00:00:00.000Z',
+          type: 'user',
+          message: { role: 'user', parts: [{ text: 'hello' }] },
+          cwd: runtime.workspaceCwd,
+        })}\n`,
+        'utf8',
+      );
+      const prPath = service.getPrSessionPathForArchiveState(
+        sessionId,
+        'active',
+      );
+      for (let i = 0; i < 10 && number <= total; i++, number++) {
+        await upsertSessionPr(prPath, {
+          number,
+          url: `https://code.alibaba-inc.com/jspt/agentic_coding/codereview/${number}`,
+        });
+      }
+    }
+  }
+
+  it('rotates the Aone view window across timer ticks', async () => {
+    // 30 pending (> the 25 cap): tick 1 must view the first window, tick 2
+    // a DIFFERENT window — the timer advances sweepStart, so the union of
+    // the two windows covers all 30. A dropped sweepStart passthrough (a
+    // fixed prefix) would re-view the same first 25 both ticks.
+    const total = 30;
+    const runtime = timerRuntime('aone', trustedCwd, true);
+    await seedAoneTimerWorkspace(runtime, total);
+    const perTickViews: number[][] = [];
+    let current: number[] = [];
+    const view = vi.fn(async (_repoPath: string, id: number) => {
+      current.push(id);
+      return {
+        number: id,
+        url: `https://code.alibaba-inc.com/jspt/agentic_coding/codereview/${id}`,
+        // Non-terminal: nothing leaves the pending set between ticks.
+        state: 'open' as const,
+      };
+    });
+    const backend: AoneMrBackend = { list: vi.fn(async () => []), view };
+    const registry = {
+      listAll: () => [runtime],
+    } as unknown as WorkspaceRegistry;
+    vi.useFakeTimers();
+
+    const handle = startSessionPrRefreshTimer({
+      workspaceRegistry: registry,
+      env: {},
+      aoneBackend: backend,
+    });
+
+    await vi.advanceTimersByTimeAsync(60_000); // crosses the first-run delay
+    await vi.waitFor(() => {
+      expect(view).toHaveBeenCalledTimes(AONE_MAX_MR_VIEW_CALLS_PER_RUN);
+    });
+    perTickViews.push(current);
+    current = [];
+
+    await vi.advanceTimersByTimeAsync(5 * 60_000); // next interval
+    await vi.waitFor(() => {
+      expect(view).toHaveBeenCalledTimes(2 * AONE_MAX_MR_VIEW_CALLS_PER_RUN);
+    });
+    perTickViews.push(current);
+
+    const union = new Set(perTickViews.flat());
+    // Both windows together cover every pending number; a fixed prefix would
+    // cap the union at the window size.
+    expect(union.size).toBe(total);
+    handle?.dispose();
+  });
+
+  it('prunes the sweep offset of a workspace removed from the registry', async () => {
+    // If the offset survived removal, re-adding the workspace would resume the
+    // stale window; pruning resets it to 0, so the re-added workspace's first
+    // sweep re-views the first window (ids 21..25 included, which a stale
+    // offset-25 window would skip).
+    const total = 30;
+    const runtime = timerRuntime('aone', trustedCwd, true);
+    await seedAoneTimerWorkspace(runtime, total);
+    const perTickViews: number[][] = [];
+    let current: number[] = [];
+    const view = vi.fn(async (_repoPath: string, id: number) => {
+      current.push(id);
+      return {
+        number: id,
+        url: `https://code.alibaba-inc.com/jspt/agentic_coding/codereview/${id}`,
+        state: 'open' as const,
+      };
+    });
+    const backend: AoneMrBackend = { list: vi.fn(async () => []), view };
+    const runtimes: WorkspaceRuntime[] = [runtime];
+    const registry = {
+      listAll: () => runtimes,
+    } as unknown as WorkspaceRegistry;
+    vi.useFakeTimers();
+
+    const handle = startSessionPrRefreshTimer({
+      workspaceRegistry: registry,
+      env: {},
+      aoneBackend: backend,
+    });
+
+    // Tick 1: workspace swept, offset advances past 0.
+    await vi.advanceTimersByTimeAsync(60_000);
+    await vi.waitFor(() => {
+      expect(view).toHaveBeenCalledTimes(AONE_MAX_MR_VIEW_CALLS_PER_RUN);
+    });
+    perTickViews.push(current);
+    current = [];
+
+    // Tick 2: workspace removed → not swept, its offset must be pruned.
+    runtimes.length = 0;
+    await vi.advanceTimersByTimeAsync(5 * 60_000);
+    await vi.advanceTimersByTimeAsync(10);
+
+    // Tick 3: workspace re-added → a pruned offset restarts at the first
+    // window (ids 21..25 present); a stale offset would start mid-set.
+    runtimes.push(runtime);
+    await vi.advanceTimersByTimeAsync(5 * 60_000);
+    await vi.waitFor(() => {
+      expect(view).toHaveBeenCalledTimes(2 * AONE_MAX_MR_VIEW_CALLS_PER_RUN);
+    });
+    perTickViews.push(current);
+
+    const readded = new Set(perTickViews[1]);
+    expect(readded.size).toBe(AONE_MAX_MR_VIEW_CALLS_PER_RUN);
+    for (const id of [21, 22, 23, 24, 25]) {
+      expect(readded.has(id)).toBe(true);
+    }
     handle?.dispose();
   });
 });

@@ -115,6 +115,15 @@ export interface SessionPrRefreshResult {
   scanned: number;
   /** Bindings whose state was rewritten (open → merged/closed). */
   updated: number;
+  /**
+   * Aone only: how many unique numbers the view loop actually started this
+   * sweep. The timer advances the rotating window by THIS, not the fixed
+   * cap — when the aggregate budget truncates the sweep, the next window
+   * must pick up where this one stopped, or the truncated tail falls in the
+   * gap between consecutive windows and is never revisited. Absent on the
+   * GitHub path.
+   */
+  aoneConsumed?: number;
 }
 
 /**
@@ -213,6 +222,7 @@ export async function refreshWorkspaceSessionPrStates(
     runtime.workspaceCwd,
     runtime.env.effectiveEnv,
   );
+  let aoneConsumed: number | undefined;
   if (aoneRepo) {
     // A number whose every stored URL misses the detailUrl shape of THIS
     // repo — a foreign manual binding, a legacy fabricated entry awaiting
@@ -250,11 +260,13 @@ export async function refreshWorkspaceSessionPrStates(
     );
     const now = options.now ?? Date.now;
     const deadline = now() + AONE_SWEEP_VIEW_BUDGET_MS;
+    let consumed = 0;
     for (const number of unique) {
       // Aggregate budget: stop STARTING views once spent (the view in
       // flight may still finish out its own per-call timeout); the
       // remainder degrades like a per-number failure.
       if (now() > deadline) break;
+      consumed += 1;
       try {
         const view = await backend.view(aoneRepo.repoPath, number);
         numberToFetch.set(view.number, { state: view.state, url: view.url });
@@ -262,7 +274,13 @@ export async function refreshWorkspaceSessionPrStates(
         // Skip this entry; the rotation retries it on a later sweep.
       }
     }
-    if (numberToFetch.size === 0) return { scanned, updated: 0 };
+    // Report how far the window got: the timer advances the rotation by
+    // this, so a budget-truncated sweep's tail is picked up next sweep
+    // instead of falling in the gap between fixed-cap windows.
+    aoneConsumed = consumed;
+    if (numberToFetch.size === 0) {
+      return { scanned, updated: 0, aoneConsumed };
+    }
   } else {
     const result = await fetchPullRequests(
       runtime.workspaceCwd,
@@ -335,7 +353,7 @@ export async function refreshWorkspaceSessionPrStates(
     });
     runtime.bridge.markSessionCatalogChanged();
   }
-  return { scanned, updated };
+  return { scanned, updated, aoneConsumed };
 }
 
 /**
@@ -352,14 +370,22 @@ export function startSessionPrRefreshTimer(deps: {
    * coordinator on the serve app, which is built after this timer starts.
    */
   getArchiveCoordinator?: () => SessionPrArchiveLane | undefined;
+  /**
+   * Test seam: the a1 backend handed to each sweep. The daemon omits it
+   * (the sweep then uses {@link defaultAoneMrBackend}); tests substitute a
+   * fake to observe the rotating view window without a live a1.
+   */
+  aoneBackend?: AoneMrBackend;
 }): { dispose(): void } | undefined {
   const intervalMs = resolveSessionPrRefreshIntervalMs(deps.env ?? process.env);
   if (intervalMs === undefined) return undefined;
   // Rotating Aone view-window offset per workspace: each sweep advances the
-  // start by the cap so a pending set larger than the cap is fully
-  // refreshed over consecutive sweeps rather than a fixed prefix. Kept
-  // monotonic (not mod'd here) — the sweep reduces it modulo the live set
-  // size itself, so a shrinking set never skews the rotation.
+  // start by however many views the sweep actually STARTED (not the fixed
+  // cap), so a pending set larger than the cap is fully refreshed over
+  // consecutive sweeps, and a budget-truncated sweep's tail is picked up by
+  // the next window instead of falling in the gap between fixed-cap
+  // windows. Kept monotonic (not mod'd here) — the sweep reduces it modulo
+  // the live set size itself, so a shrinking set never skews the rotation.
   const aoneSweepOffsets = new Map<string, number>();
   let running = false;
   const tick = async (): Promise<void> => {
@@ -367,18 +393,24 @@ export function startSessionPrRefreshTimer(deps: {
     running = true;
     try {
       const archiveCoordinator = deps.getArchiveCoordinator?.();
-      for (const runtime of deps.workspaceRegistry.listAll()) {
+      const live = deps.workspaceRegistry.listAll();
+      for (const runtime of live) {
         if (!runtime.trusted) continue;
         const sweepStart = aoneSweepOffsets.get(runtime.workspaceCwd) ?? 0;
         try {
-          await refreshWorkspaceSessionPrStates(runtime, undefined, {
-            archiveCoordinator,
-            sweepStart,
-          });
-          aoneSweepOffsets.set(
-            runtime.workspaceCwd,
-            sweepStart + AONE_MAX_MR_VIEW_CALLS_PER_RUN,
+          const result = await refreshWorkspaceSessionPrStates(
+            runtime,
+            undefined,
+            { archiveCoordinator, sweepStart, aoneBackend: deps.aoneBackend },
           );
+          // Only the Aone path reports a consumed window — the GitHub path
+          // never reads the offset, so don't write one for it.
+          if (result.aoneConsumed !== undefined) {
+            aoneSweepOffsets.set(
+              runtime.workspaceCwd,
+              sweepStart + result.aoneConsumed,
+            );
+          }
         } catch (error) {
           // A draining daemon rejects every workspace the same way.
           if (error instanceof DaemonDrainingError) return;
@@ -386,6 +418,13 @@ export function startSessionPrRefreshTimer(deps: {
           // mid-sweep) must not starve the rest. Leave its offset unmoved
           // so the next tick retries the same window.
         }
+      }
+      // Prune offsets for workspaces no longer in the registry (removed or
+      // never Aone): the daemon runs indefinitely, so an entry per
+      // ever-seen cwd would grow without bound.
+      const liveCwds = new Set(live.map((r) => r.workspaceCwd));
+      for (const cwd of [...aoneSweepOffsets.keys()]) {
+        if (!liveCwds.has(cwd)) aoneSweepOffsets.delete(cwd);
       }
     } finally {
       running = false;
