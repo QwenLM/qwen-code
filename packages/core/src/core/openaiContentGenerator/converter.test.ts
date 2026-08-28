@@ -581,19 +581,19 @@ describe('OpenAIContentConverter', () => {
       const stream = withStreamParser();
       stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
 
-      const reasoning = converter.convertOpenAIChunkToGemini(
+      const reasoning = converter.convertOpenAIChunkToLlm(
         streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
         stream,
       );
-      const opening = converter.convertOpenAIChunkToGemini(
+      const opening = converter.convertOpenAIChunkToLlm(
         streamChunk('opening', { content: '<thinking>' }),
         stream,
       );
-      const closing = converter.convertOpenAIChunkToGemini(
+      const closing = converter.convertOpenAIChunkToLlm(
         streamChunk('closing', { content: 'user asked X</thinking>' }),
         stream,
       );
-      const answer = converter.convertOpenAIChunkToGemini(
+      const answer = converter.convertOpenAIChunkToLlm(
         streamChunk('answer', { content: 'Answer here.' }, 'stop'),
         stream,
       );
@@ -614,19 +614,19 @@ describe('OpenAIContentConverter', () => {
       const stream = withStreamParser();
       stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
 
-      converter.convertOpenAIChunkToGemini(
+      converter.convertOpenAIChunkToLlm(
         streamChunk('reasoning', { reasoning_content: 'phase one' }),
         stream,
       );
-      const first = converter.convertOpenAIChunkToGemini(
+      const first = converter.convertOpenAIChunkToLlm(
         streamChunk('tag-start', { content: '<thi' }),
         stream,
       );
-      const second = converter.convertOpenAIChunkToGemini(
+      const second = converter.convertOpenAIChunkToLlm(
         streamChunk('tag-body', { content: 'nking>recheck</thi' }),
         stream,
       );
-      const third = converter.convertOpenAIChunkToGemini(
+      const third = converter.convertOpenAIChunkToLlm(
         streamChunk('tag-close', { content: 'nking>Done.' }, 'stop'),
         stream,
       );
@@ -648,17 +648,17 @@ describe('OpenAIContentConverter', () => {
       const stream = withStreamParser();
       stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
 
-      converter.convertOpenAIChunkToGemini(
+      converter.convertOpenAIChunkToLlm(
         streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
         stream,
       );
-      const block = converter.convertOpenAIChunkToGemini(
+      const block = converter.convertOpenAIChunkToLlm(
         streamChunk('block', {
           content: '<thinking>user asked X</thinking>',
         }),
         stream,
       );
-      const answer = converter.convertOpenAIChunkToGemini(
+      const answer = converter.convertOpenAIChunkToLlm(
         streamChunk('answer', { content: 'Answer here.' }, 'stop'),
         stream,
       );
@@ -678,11 +678,11 @@ describe('OpenAIContentConverter', () => {
       const stream = withStreamParser();
       stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
 
-      converter.convertOpenAIChunkToGemini(
+      converter.convertOpenAIChunkToLlm(
         streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
         stream,
       );
-      const opening = converter.convertOpenAIChunkToGemini(
+      const opening = converter.convertOpenAIChunkToLlm(
         streamChunk('opening', { content: '<thinking>user asked X' }),
         stream,
       );
@@ -702,15 +702,15 @@ describe('OpenAIContentConverter', () => {
       const stream = withStreamParser();
       stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
 
-      converter.convertOpenAIChunkToGemini(
+      converter.convertOpenAIChunkToLlm(
         streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
         stream,
       );
-      converter.convertOpenAIChunkToGemini(
+      converter.convertOpenAIChunkToLlm(
         streamChunk('opening', { content: '<thinking>' }),
         stream,
       );
-      converter.convertOpenAIChunkToGemini(
+      converter.convertOpenAIChunkToLlm(
         streamChunk('body', { content: 'user asked X' }),
         stream,
       );
@@ -727,11 +727,11 @@ describe('OpenAIContentConverter', () => {
       const stream = withStreamParser();
       stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
 
-      converter.convertOpenAIChunkToGemini(
+      converter.convertOpenAIChunkToLlm(
         streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
         stream,
       );
-      const answer = converter.convertOpenAIChunkToGemini(
+      const answer = converter.convertOpenAIChunkToLlm(
         streamChunk(
           'block',
           { content: '<thinking></thinking>Answer here.' },
@@ -750,15 +750,15 @@ describe('OpenAIContentConverter', () => {
       const stream = withStreamParser();
       stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
 
-      converter.convertOpenAIChunkToGemini(
+      converter.convertOpenAIChunkToLlm(
         streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
         stream,
       );
-      const opening = converter.convertOpenAIChunkToGemini(
+      const opening = converter.convertOpenAIChunkToLlm(
         streamChunk('opening', { content: '<thinking>\n' }),
         stream,
       );
-      const answer = converter.convertOpenAIChunkToGemini(
+      const answer = converter.convertOpenAIChunkToLlm(
         streamChunk('closing', { content: '</thinking>Answer here.' }, 'stop'),
         stream,
       );
@@ -773,11 +773,11 @@ describe('OpenAIContentConverter', () => {
       const stream = withStreamParser();
       stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
 
-      converter.convertOpenAIChunkToGemini(
+      converter.convertOpenAIChunkToLlm(
         streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
         stream,
       );
-      const blocks = converter.convertOpenAIChunkToGemini(
+      const blocks = converter.convertOpenAIChunkToLlm(
         streamChunk(
           'blocks',
           { content: '<thinking>a</thinking><thinking>b</thinking>Done.' },
@@ -800,11 +800,11 @@ describe('OpenAIContentConverter', () => {
       const stream = withStreamParser();
       stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
 
-      converter.convertOpenAIChunkToGemini(
+      converter.convertOpenAIChunkToLlm(
         streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
         stream,
       );
-      const first = converter.convertOpenAIChunkToGemini(
+      const first = converter.convertOpenAIChunkToLlm(
         streamChunk('first-block', { content: '<thinking>a</thinking><thi' }),
         stream,
       );
@@ -812,7 +812,7 @@ describe('OpenAIContentConverter', () => {
       expect(first.candidates?.[0]?.content?.parts).toEqual([]);
       expect(stream.pendingThinkingTagCandidate).toEqual({ text: '<thi' });
 
-      const second = converter.convertOpenAIChunkToGemini(
+      const second = converter.convertOpenAIChunkToLlm(
         streamChunk(
           'second-block',
           { content: 'nking>b</thinking>Done.' },
@@ -835,13 +835,13 @@ describe('OpenAIContentConverter', () => {
       const stream = withStreamParser();
       stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
 
-      converter.convertOpenAIChunkToGemini(
+      converter.convertOpenAIChunkToLlm(
         streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
         stream,
       );
 
       expect(() =>
-        converter.convertOpenAIChunkToGemini(
+        converter.convertOpenAIChunkToLlm(
           streamChunk(
             'embedded',
             {
@@ -862,11 +862,11 @@ describe('OpenAIContentConverter', () => {
       const stream = withStreamParser();
       stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
 
-      converter.convertOpenAIChunkToGemini(
+      converter.convertOpenAIChunkToLlm(
         streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
         stream,
       );
-      const first = converter.convertOpenAIChunkToGemini(
+      const first = converter.convertOpenAIChunkToLlm(
         streamChunk('leading-block', {
           content: '<thinking>a</thinking>Answer ',
         }),
@@ -878,7 +878,7 @@ describe('OpenAIContentConverter', () => {
         { text: 'Answer ' },
       ]);
       expect(() =>
-        converter.convertOpenAIChunkToGemini(
+        converter.convertOpenAIChunkToLlm(
           streamChunk(
             'embedded',
             { content: '<thinking>b</thinking> done' },
@@ -897,11 +897,11 @@ describe('OpenAIContentConverter', () => {
       const stream = withStreamParser();
       stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
 
-      converter.convertOpenAIChunkToGemini(
+      converter.convertOpenAIChunkToLlm(
         streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
         stream,
       );
-      const leading = converter.convertOpenAIChunkToGemini(
+      const leading = converter.convertOpenAIChunkToLlm(
         streamChunk('leading-block', {
           content: '<thinking>a</thinking>Answer ',
         }),
@@ -913,7 +913,7 @@ describe('OpenAIContentConverter', () => {
         { text: 'Answer ' },
       ]);
 
-      const fragment = converter.convertOpenAIChunkToGemini(
+      const fragment = converter.convertOpenAIChunkToLlm(
         streamChunk('tag-fragment', { content: '<thi' }),
         stream,
       );
@@ -921,7 +921,7 @@ describe('OpenAIContentConverter', () => {
       expect(fragment.candidates?.[0]?.content?.parts).toEqual([]);
       expect(stream.pendingPostDemotionTagTail).toBe('<thi');
       expect(() =>
-        converter.convertOpenAIChunkToGemini(
+        converter.convertOpenAIChunkToLlm(
           streamChunk('tag-completes', { content: 'nking>b</thi' }),
           stream,
         ),
@@ -934,21 +934,21 @@ describe('OpenAIContentConverter', () => {
       const stream = withStreamParser();
       stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
 
-      converter.convertOpenAIChunkToGemini(
+      converter.convertOpenAIChunkToLlm(
         streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
         stream,
       );
-      converter.convertOpenAIChunkToGemini(
+      converter.convertOpenAIChunkToLlm(
         streamChunk('leading-block', {
           content: '<thinking>a</thinking>Answer ',
         }),
         stream,
       );
-      converter.convertOpenAIChunkToGemini(
+      converter.convertOpenAIChunkToLlm(
         streamChunk('fragment-1', { content: '<thi' }),
         stream,
       );
-      const middle = converter.convertOpenAIChunkToGemini(
+      const middle = converter.convertOpenAIChunkToLlm(
         streamChunk('fragment-2', { content: 'nki' }),
         stream,
       );
@@ -956,7 +956,7 @@ describe('OpenAIContentConverter', () => {
       expect(middle.candidates?.[0]?.content?.parts).toEqual([]);
       expect(stream.pendingPostDemotionTagTail).toBe('<thinki');
       expect(() =>
-        converter.convertOpenAIChunkToGemini(
+        converter.convertOpenAIChunkToLlm(
           streamChunk(
             'fragment-3',
             { content: 'ng>b</thinking> done' },
@@ -975,17 +975,17 @@ describe('OpenAIContentConverter', () => {
       const stream = withStreamParser();
       stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
 
-      converter.convertOpenAIChunkToGemini(
+      converter.convertOpenAIChunkToLlm(
         streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
         stream,
       );
-      converter.convertOpenAIChunkToGemini(
+      converter.convertOpenAIChunkToLlm(
         streamChunk('leading-block', {
           content: '<thinking>a</thinking>Answer ',
         }),
         stream,
       );
-      const fragment = converter.convertOpenAIChunkToGemini(
+      const fragment = converter.convertOpenAIChunkToLlm(
         streamChunk('tag-fragment', { content: '<thinking' }),
         stream,
       );
@@ -1005,17 +1005,17 @@ describe('OpenAIContentConverter', () => {
       const stream = withStreamParser();
       stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
 
-      converter.convertOpenAIChunkToGemini(
+      converter.convertOpenAIChunkToLlm(
         streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
         stream,
       );
-      converter.convertOpenAIChunkToGemini(
+      converter.convertOpenAIChunkToLlm(
         streamChunk('leading-block', {
           content: '<thinking>a</thinking>Answer ',
         }),
         stream,
       );
-      const fragment = converter.convertOpenAIChunkToGemini(
+      const fragment = converter.convertOpenAIChunkToLlm(
         streamChunk('tag-fragment', { content: '</thinking' }),
         stream,
       );
@@ -1031,13 +1031,13 @@ describe('OpenAIContentConverter', () => {
       const stream = withStreamParser();
       stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
 
-      converter.convertOpenAIChunkToGemini(
+      converter.convertOpenAIChunkToLlm(
         streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
         stream,
       );
 
       expect(() =>
-        converter.convertOpenAIChunkToGemini(
+        converter.convertOpenAIChunkToLlm(
           streamChunk(
             'demote-and-fragment',
             { content: '<thinking>a</thinking>Answer <thinking' },
@@ -1058,17 +1058,17 @@ describe('OpenAIContentConverter', () => {
       const stream = withStreamParser();
       stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
 
-      converter.convertOpenAIChunkToGemini(
+      converter.convertOpenAIChunkToLlm(
         streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
         stream,
       );
-      converter.convertOpenAIChunkToGemini(
+      converter.convertOpenAIChunkToLlm(
         streamChunk('leading-block', {
           content: '<thinking>a</thinking>Answer ',
         }),
         stream,
       );
-      const truncated = converter.convertOpenAIChunkToGemini(
+      const truncated = converter.convertOpenAIChunkToLlm(
         streamChunk('truncated', { content: 'Supplier<T' }, 'length'),
         stream,
       );
@@ -1089,11 +1089,11 @@ describe('OpenAIContentConverter', () => {
       const stream = withStreamParser();
       stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
 
-      converter.convertOpenAIChunkToGemini(
+      converter.convertOpenAIChunkToLlm(
         streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
         stream,
       );
-      converter.convertOpenAIChunkToGemini(
+      converter.convertOpenAIChunkToLlm(
         streamChunk('leading-block', {
           content: '<thinking>a</thinking>Answer ',
         }),
@@ -1101,7 +1101,7 @@ describe('OpenAIContentConverter', () => {
       );
 
       expect(() =>
-        converter.convertOpenAIChunkToGemini(
+        converter.convertOpenAIChunkToLlm(
           streamChunk('padded-tag', {
             content: `<thinking${' '.repeat(200)}`,
           }),
@@ -1116,17 +1116,17 @@ describe('OpenAIContentConverter', () => {
       const stream = withStreamParser();
       stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
 
-      converter.convertOpenAIChunkToGemini(
+      converter.convertOpenAIChunkToLlm(
         streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
         stream,
       );
-      converter.convertOpenAIChunkToGemini(
+      converter.convertOpenAIChunkToLlm(
         streamChunk('leading-block', {
           content: '<thinking>a</thinking>Answer ',
         }),
         stream,
       );
-      const held = converter.convertOpenAIChunkToGemini(
+      const held = converter.convertOpenAIChunkToLlm(
         streamChunk('tag-fragment', {
           content: `<thinking${' '.repeat(100)}`,
         }),
@@ -1135,7 +1135,7 @@ describe('OpenAIContentConverter', () => {
 
       expect(held.candidates?.[0]?.content?.parts).toEqual([]);
       expect(() =>
-        converter.convertOpenAIChunkToGemini(
+        converter.convertOpenAIChunkToLlm(
           streamChunk('padding', { content: ' '.repeat(100) }),
           stream,
         ),
@@ -1149,11 +1149,11 @@ describe('OpenAIContentConverter', () => {
       const stream = withStreamParser();
       stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
 
-      converter.convertOpenAIChunkToGemini(
+      converter.convertOpenAIChunkToLlm(
         streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
         stream,
       );
-      const block = converter.convertOpenAIChunkToGemini(
+      const block = converter.convertOpenAIChunkToLlm(
         streamChunk(
           'nested-block',
           {
@@ -1175,17 +1175,17 @@ describe('OpenAIContentConverter', () => {
       const stream = withStreamParser();
       stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
 
-      converter.convertOpenAIChunkToGemini(
+      converter.convertOpenAIChunkToLlm(
         streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
         stream,
       );
-      const first = converter.convertOpenAIChunkToGemini(
+      const first = converter.convertOpenAIChunkToLlm(
         streamChunk('nested-start', {
           content: '<thinking>outer <thinking>in',
         }),
         stream,
       );
-      const second = converter.convertOpenAIChunkToGemini(
+      const second = converter.convertOpenAIChunkToLlm(
         streamChunk(
           'nested-rest',
           { content: 'ner</thinking> end</thinking>Answer' },
@@ -1207,11 +1207,11 @@ describe('OpenAIContentConverter', () => {
       const stream = withStreamParser();
       stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
 
-      converter.convertOpenAIChunkToGemini(
+      converter.convertOpenAIChunkToLlm(
         streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
         stream,
       );
-      const block = converter.convertOpenAIChunkToGemini(
+      const block = converter.convertOpenAIChunkToLlm(
         streamChunk(
           'uppercase-block',
           { content: '<THINKING>x</THINKING>Answer' },
@@ -1230,11 +1230,11 @@ describe('OpenAIContentConverter', () => {
       const stream = withStreamParser();
       stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
 
-      converter.convertOpenAIChunkToGemini(
+      converter.convertOpenAIChunkToLlm(
         streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
         stream,
       );
-      const block = converter.convertOpenAIChunkToGemini(
+      const block = converter.convertOpenAIChunkToLlm(
         streamChunk(
           'spaced-block',
           { content: '<thinking >x</thinking >Answer' },
@@ -1258,11 +1258,11 @@ describe('OpenAIContentConverter', () => {
       const stream = withStreamParser();
       stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
 
-      converter.convertOpenAIChunkToGemini(
+      converter.convertOpenAIChunkToLlm(
         streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
         stream,
       );
-      const demoted = converter.convertOpenAIChunkToGemini(
+      const demoted = converter.convertOpenAIChunkToLlm(
         streamChunk('block', { content: '<thinking>x</thinking>Ok' }),
         stream,
       );
@@ -1271,7 +1271,7 @@ describe('OpenAIContentConverter', () => {
         { text: 'Ok' },
       ]);
 
-      const replay = converter.convertOpenAIChunkToGemini(
+      const replay = converter.convertOpenAIChunkToLlm(
         streamChunk('replay', { content: '<thinking>x</thinking>Ok' }, 'stop'),
         stream,
       );
@@ -1294,18 +1294,18 @@ describe('OpenAIContentConverter', () => {
       const stream = withStreamParser();
       stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
 
-      const pre = converter.convertOpenAIChunkToGemini(
+      const pre = converter.convertOpenAIChunkToLlm(
         streamChunk('pre', { content: ' ' }),
         stream,
       );
       expect(pre.candidates?.[0]?.content?.parts).toEqual([{ text: ' ' }]);
       expect(stream.hasVisibleContent).toBeUndefined();
 
-      converter.convertOpenAIChunkToGemini(
+      converter.convertOpenAIChunkToLlm(
         streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
         stream,
       );
-      const demoted = converter.convertOpenAIChunkToGemini(
+      const demoted = converter.convertOpenAIChunkToLlm(
         streamChunk('block', { content: '<thinking>x</thinking>Ok' }),
         stream,
       );
@@ -1314,7 +1314,7 @@ describe('OpenAIContentConverter', () => {
         { text: 'Ok' },
       ]);
 
-      const replay = converter.convertOpenAIChunkToGemini(
+      const replay = converter.convertOpenAIChunkToLlm(
         streamChunk('replay', { content: ' <thinking>x</thinking>Ok' }, 'stop'),
         stream,
       );
@@ -1333,15 +1333,15 @@ describe('OpenAIContentConverter', () => {
       const stream = withStreamParser();
       stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
 
-      converter.convertOpenAIChunkToGemini(
+      converter.convertOpenAIChunkToLlm(
         streamChunk('pre', { content: ' ' }),
         stream,
       );
-      converter.convertOpenAIChunkToGemini(
+      converter.convertOpenAIChunkToLlm(
         streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
         stream,
       );
-      const demoted = converter.convertOpenAIChunkToGemini(
+      const demoted = converter.convertOpenAIChunkToLlm(
         streamChunk('block', { content: '<thinking>x</thinking>Ok' }),
         stream,
       );
@@ -1355,7 +1355,7 @@ describe('OpenAIContentConverter', () => {
         emittedLength: 19,
         cumulativeMode: true,
       };
-      const replay = converter.convertOpenAIChunkToGemini(
+      const replay = converter.convertOpenAIChunkToLlm(
         streamChunk(
           'cumulative-replay',
           { content: ' <thinking>x</thinking>OkMore' },
@@ -1382,15 +1382,15 @@ describe('OpenAIContentConverter', () => {
       const stream = withStreamParser();
       stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
 
-      converter.convertOpenAIChunkToGemini(
+      converter.convertOpenAIChunkToLlm(
         streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
         stream,
       );
-      const whitespace = converter.convertOpenAIChunkToGemini(
+      const whitespace = converter.convertOpenAIChunkToLlm(
         streamChunk('whitespace', { content: ' ' }),
         stream,
       );
-      const opening = converter.convertOpenAIChunkToGemini(
+      const opening = converter.convertOpenAIChunkToLlm(
         streamChunk('opening', { content: '<thinking>x' }),
         stream,
       );
@@ -1401,7 +1401,7 @@ describe('OpenAIContentConverter', () => {
         text: ' <thinking>x',
       });
 
-      const replay = converter.convertOpenAIChunkToGemini(
+      const replay = converter.convertOpenAIChunkToLlm(
         streamChunk('cumulative-replay', {
           content: '<thinking>xyz</thinking>Answer',
         }),
@@ -1417,7 +1417,7 @@ describe('OpenAIContentConverter', () => {
 
       // The finish chunk must complete cleanly instead of throwing
       // PROTOCOL_TAG_LEAK on the balanced turn.
-      const finish = converter.convertOpenAIChunkToGemini(
+      const finish = converter.convertOpenAIChunkToLlm(
         streamChunk('finish', {}, 'stop'),
         stream,
       );
@@ -1430,21 +1430,21 @@ describe('OpenAIContentConverter', () => {
       const stream = withStreamParser();
       stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
 
-      converter.convertOpenAIChunkToGemini(
+      converter.convertOpenAIChunkToLlm(
         streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
         stream,
       );
-      converter.convertOpenAIChunkToGemini(
+      converter.convertOpenAIChunkToLlm(
         streamChunk('leading-block', {
           content: '<thinking>a</thinking>Answer ',
         }),
         stream,
       );
-      converter.convertOpenAIChunkToGemini(
+      converter.convertOpenAIChunkToLlm(
         streamChunk('tag-fragment', { content: '<thi' }),
         stream,
       );
-      const repeated = converter.convertOpenAIChunkToGemini(
+      const repeated = converter.convertOpenAIChunkToLlm(
         streamChunk('repeated', { content: '<thi' }),
         stream,
       );
@@ -1454,7 +1454,7 @@ describe('OpenAIContentConverter', () => {
       ]);
       expect(stream.pendingPostDemotionTagTail).toBe('<thi');
 
-      const resolved = converter.convertOpenAIChunkToGemini(
+      const resolved = converter.convertOpenAIChunkToLlm(
         streamChunk('resolved', { content: 's is not a tag.' }, 'stop'),
         stream,
       );
@@ -1471,11 +1471,11 @@ describe('OpenAIContentConverter', () => {
       const stream = withStreamParser();
       stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
 
-      converter.convertOpenAIChunkToGemini(
+      converter.convertOpenAIChunkToLlm(
         streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
         stream,
       );
-      const demoted = converter.convertOpenAIChunkToGemini(
+      const demoted = converter.convertOpenAIChunkToLlm(
         streamChunk('block', {
           content: '<thinking>x</thinking><thinking>y',
         }),
@@ -1488,7 +1488,7 @@ describe('OpenAIContentConverter', () => {
         text: '<thinking>y',
       });
 
-      const replay = converter.convertOpenAIChunkToGemini(
+      const replay = converter.convertOpenAIChunkToLlm(
         streamChunk('replay', {
           content: '<thinking>x</thinking><thinking>y',
         }),
@@ -1499,7 +1499,7 @@ describe('OpenAIContentConverter', () => {
         text: '<thinking>y',
       });
 
-      const rest = converter.convertOpenAIChunkToGemini(
+      const rest = converter.convertOpenAIChunkToLlm(
         streamChunk('rest', { content: ' inner</thinking>Answer' }, 'stop'),
         stream,
       );
@@ -1516,11 +1516,11 @@ describe('OpenAIContentConverter', () => {
       const stream = withStreamParser();
       stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
 
-      converter.convertOpenAIChunkToGemini(
+      converter.convertOpenAIChunkToLlm(
         streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
         stream,
       );
-      const demoted = converter.convertOpenAIChunkToGemini(
+      const demoted = converter.convertOpenAIChunkToLlm(
         streamChunk('block', { content: '<thinking>x</thinking>  ' }),
         stream,
       );
@@ -1529,7 +1529,7 @@ describe('OpenAIContentConverter', () => {
         { text: '  ' },
       ]);
 
-      const replay = converter.convertOpenAIChunkToGemini(
+      const replay = converter.convertOpenAIChunkToLlm(
         streamChunk('replay', { content: '<thinking>x</thinking>  ' }, 'stop'),
         stream,
       );
@@ -1539,21 +1539,21 @@ describe('OpenAIContentConverter', () => {
     it('preserves genuine repeated deltas and rejects genuine tag chunks after demotion (issue #9348)', () => {
       const repeated = withStreamParser();
       repeated.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
-      converter.convertOpenAIChunkToGemini(
+      converter.convertOpenAIChunkToLlm(
         streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
         repeated,
       );
-      const first = converter.convertOpenAIChunkToGemini(
+      const first = converter.convertOpenAIChunkToLlm(
         streamChunk('block', {
           content: '<thinking>a</thinking>x = a <',
         }),
         repeated,
       );
-      const second = converter.convertOpenAIChunkToGemini(
+      const second = converter.convertOpenAIChunkToLlm(
         streamChunk('repeat', { content: '<' }),
         repeated,
       );
-      const third = converter.convertOpenAIChunkToGemini(
+      const third = converter.convertOpenAIChunkToLlm(
         streamChunk('rest', { content: ' b' }, 'stop'),
         repeated,
       );
@@ -1567,16 +1567,16 @@ describe('OpenAIContentConverter', () => {
 
       const stray = withStreamParser();
       stray.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
-      converter.convertOpenAIChunkToGemini(
+      converter.convertOpenAIChunkToLlm(
         streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
         stray,
       );
-      converter.convertOpenAIChunkToGemini(
+      converter.convertOpenAIChunkToLlm(
         streamChunk('block', { content: '<thinking>x</thinking>' }),
         stray,
       );
       expect(() =>
-        converter.convertOpenAIChunkToGemini(
+        converter.convertOpenAIChunkToLlm(
           streamChunk('stray', { content: '</thinking>' }, 'stop'),
           stray,
         ),
@@ -1592,23 +1592,23 @@ describe('OpenAIContentConverter', () => {
       // ever sees it, leaving the branch unexecuted.
       const stream = withStreamParser();
       stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
-      converter.convertOpenAIChunkToGemini(
+      converter.convertOpenAIChunkToLlm(
         streamChunk('pre', { content: ' ' }),
         stream,
       );
-      converter.convertOpenAIChunkToGemini(
+      converter.convertOpenAIChunkToLlm(
         streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
         stream,
       );
-      const first = converter.convertOpenAIChunkToGemini(
+      const first = converter.convertOpenAIChunkToLlm(
         streamChunk('block', { content: '<thinking>x</thinking>Ok' }),
         stream,
       );
-      const second = converter.convertOpenAIChunkToGemini(
+      const second = converter.convertOpenAIChunkToLlm(
         streamChunk('more', { content: 'More' }),
         stream,
       );
-      const replay = converter.convertOpenAIChunkToGemini(
+      const replay = converter.convertOpenAIChunkToLlm(
         streamChunk(
           'cumulative-replay',
           { content: '<thinking>x</thinking>OkMoreDone' },
@@ -1632,19 +1632,19 @@ describe('OpenAIContentConverter', () => {
     it('drops a cumulative replay spanning multiple demotions (issue #9348)', () => {
       const stream = withStreamParser();
       stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
-      converter.convertOpenAIChunkToGemini(
+      converter.convertOpenAIChunkToLlm(
         streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
         stream,
       );
-      converter.convertOpenAIChunkToGemini(
+      converter.convertOpenAIChunkToLlm(
         streamChunk('first', { content: '<thinking>a</thinking> ' }),
         stream,
       );
-      converter.convertOpenAIChunkToGemini(
+      converter.convertOpenAIChunkToLlm(
         streamChunk('second', { content: '<thinking>b</thinking> ' }),
         stream,
       );
-      const replay = converter.convertOpenAIChunkToGemini(
+      const replay = converter.convertOpenAIChunkToLlm(
         streamChunk(
           'replay',
           { content: '<thinking>a</thinking> <thinking>b</thinking> ' },
@@ -1670,11 +1670,11 @@ describe('OpenAIContentConverter', () => {
       const stream = withStreamParser();
       stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
 
-      converter.convertOpenAIChunkToGemini(
+      converter.convertOpenAIChunkToLlm(
         streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
         stream,
       );
-      const demoted = converter.convertOpenAIChunkToGemini(
+      const demoted = converter.convertOpenAIChunkToLlm(
         streamChunk('block', { content: '<thinking>x</thinking>OkMore' }),
         stream,
       );
@@ -1684,7 +1684,7 @@ describe('OpenAIContentConverter', () => {
       ]);
 
       expect(() =>
-        converter.convertOpenAIChunkToGemini(
+        converter.convertOpenAIChunkToLlm(
           streamChunk('rewind-replay', {
             content: '<thinking>x</thinking>Ok',
           }),
@@ -1706,11 +1706,11 @@ describe('OpenAIContentConverter', () => {
       const stream = withStreamParser();
       stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
 
-      converter.convertOpenAIChunkToGemini(
+      converter.convertOpenAIChunkToLlm(
         streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
         stream,
       );
-      const opening = converter.convertOpenAIChunkToGemini(
+      const opening = converter.convertOpenAIChunkToLlm(
         streamChunk('opening', { content: '<thinking>a' }),
         stream,
       );
@@ -1719,7 +1719,7 @@ describe('OpenAIContentConverter', () => {
         text: '<thinking>a',
       });
 
-      const nested = converter.convertOpenAIChunkToGemini(
+      const nested = converter.convertOpenAIChunkToLlm(
         streamChunk('nested-opening', { content: '<thinking>' }),
         stream,
       );
@@ -1728,7 +1728,7 @@ describe('OpenAIContentConverter', () => {
         text: '<thinking>a<thinking>',
       });
 
-      const rest = converter.convertOpenAIChunkToGemini(
+      const rest = converter.convertOpenAIChunkToLlm(
         streamChunk(
           'rest',
           { content: 'b</thinking></thinking>Answer' },
@@ -1753,15 +1753,15 @@ describe('OpenAIContentConverter', () => {
       const stream = withStreamParser();
       stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
 
-      converter.convertOpenAIChunkToGemini(
+      converter.convertOpenAIChunkToLlm(
         streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
         stream,
       );
-      converter.convertOpenAIChunkToGemini(
+      converter.convertOpenAIChunkToLlm(
         streamChunk('opening', { content: '<thinking>x' }),
         stream,
       );
-      const replay = converter.convertOpenAIChunkToGemini(
+      const replay = converter.convertOpenAIChunkToLlm(
         streamChunk('rewind-replay', { content: '<thinking>' }),
         stream,
       );
@@ -1771,7 +1771,7 @@ describe('OpenAIContentConverter', () => {
       });
 
       expect(() =>
-        converter.convertOpenAIChunkToGemini(
+        converter.convertOpenAIChunkToLlm(
           streamChunk('rest', { content: '</thinking>Answer' }, 'stop'),
           stream,
         ),
@@ -1791,18 +1791,18 @@ describe('OpenAIContentConverter', () => {
       const stream = withStreamParser();
       stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
 
-      converter.convertOpenAIChunkToGemini(
+      converter.convertOpenAIChunkToLlm(
         streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
         stream,
       );
-      const demoted = converter.convertOpenAIChunkToGemini(
+      const demoted = converter.convertOpenAIChunkToLlm(
         streamChunk('block', { content: '<thinking>p1</thinking><think' }),
         stream,
       );
       expect(demoted.candidates?.[0]?.content?.parts).toEqual([]);
       expect(stream.pendingThinkingTagCandidate).toEqual({ text: '<think' });
 
-      const replay = converter.convertOpenAIChunkToGemini(
+      const replay = converter.convertOpenAIChunkToLlm(
         streamChunk('replay', { content: '<thinking>p1</thinking>' }),
         stream,
       );
@@ -1817,7 +1817,7 @@ describe('OpenAIContentConverter', () => {
       );
 
       expect(() =>
-        converter.convertOpenAIChunkToGemini(
+        converter.convertOpenAIChunkToLlm(
           streamChunk('rest', { content: 'ing>p2</thinking>' }, 'stop'),
           stream,
         ),
@@ -1841,11 +1841,11 @@ describe('OpenAIContentConverter', () => {
       const stream = withStreamParser();
       stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
 
-      converter.convertOpenAIChunkToGemini(
+      converter.convertOpenAIChunkToLlm(
         streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
         stream,
       );
-      const demoted = converter.convertOpenAIChunkToGemini(
+      const demoted = converter.convertOpenAIChunkToLlm(
         streamChunk('block', {
           content: '<thinking>a</thinking><thinking>b',
         }),
@@ -1857,7 +1857,7 @@ describe('OpenAIContentConverter', () => {
         text: '<thinking>b',
       });
 
-      const resend = converter.convertOpenAIChunkToGemini(
+      const resend = converter.convertOpenAIChunkToLlm(
         streamChunk('superset-resend', {
           content: '<thinking>b</thinking>X',
         }),
@@ -1872,7 +1872,7 @@ describe('OpenAIContentConverter', () => {
       );
 
       expect(() =>
-        converter.convertOpenAIChunkToGemini(
+        converter.convertOpenAIChunkToLlm(
           streamChunk(
             'cumulative-redelivery',
             { content: '<thinking>a</thinking><thinking>b</thinking>XY' },
@@ -1893,11 +1893,11 @@ describe('OpenAIContentConverter', () => {
       const stream = withStreamParser();
       stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
 
-      converter.convertOpenAIChunkToGemini(
+      converter.convertOpenAIChunkToLlm(
         streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
         stream,
       );
-      const first = converter.convertOpenAIChunkToGemini(
+      const first = converter.convertOpenAIChunkToLlm(
         streamChunk('first', { content: '<thinking>a</thinking>' }),
         stream,
       );
@@ -1905,7 +1905,7 @@ describe('OpenAIContentConverter', () => {
         { thought: true, text: 'a' },
       ]);
 
-      const opener = converter.convertOpenAIChunkToGemini(
+      const opener = converter.convertOpenAIChunkToLlm(
         streamChunk('second-opening', { content: '<thinking>' }),
         stream,
       );
@@ -1914,7 +1914,7 @@ describe('OpenAIContentConverter', () => {
         text: '<thinking>',
       });
 
-      const second = converter.convertOpenAIChunkToGemini(
+      const second = converter.convertOpenAIChunkToLlm(
         streamChunk('second-rest', { content: 'b</thinking>Done' }, 'stop'),
         stream,
       );
@@ -1937,11 +1937,11 @@ describe('OpenAIContentConverter', () => {
       const stream = withStreamParser();
       stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
 
-      converter.convertOpenAIChunkToGemini(
+      converter.convertOpenAIChunkToLlm(
         streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
         stream,
       );
-      const first = converter.convertOpenAIChunkToGemini(
+      const first = converter.convertOpenAIChunkToLlm(
         streamChunk('first', {
           content: '<thinking>a</thinking>Answer ',
         }),
@@ -1953,7 +1953,7 @@ describe('OpenAIContentConverter', () => {
       ]);
 
       expect(() =>
-        converter.convertOpenAIChunkToGemini(
+        converter.convertOpenAIChunkToLlm(
           streamChunk('second-opening', { content: '<thinking>' }),
           stream,
         ),
@@ -1973,11 +1973,11 @@ describe('OpenAIContentConverter', () => {
       const stream = withStreamParser();
       stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
 
-      converter.convertOpenAIChunkToGemini(
+      converter.convertOpenAIChunkToLlm(
         streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
         stream,
       );
-      const opening = converter.convertOpenAIChunkToGemini(
+      const opening = converter.convertOpenAIChunkToLlm(
         streamChunk('opening', { content: '<thinking>a' }),
         stream,
       );
@@ -1991,7 +1991,7 @@ describe('OpenAIContentConverter', () => {
         emittedLength: 19,
         cumulativeMode: true,
       };
-      const nested = converter.convertOpenAIChunkToGemini(
+      const nested = converter.convertOpenAIChunkToLlm(
         streamChunk(
           'nested-continuation',
           { content: '<thinking>a</thinking></thinking>Answer' },
@@ -2019,11 +2019,11 @@ describe('OpenAIContentConverter', () => {
       const stream = withStreamParser();
       stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
 
-      converter.convertOpenAIChunkToGemini(
+      converter.convertOpenAIChunkToLlm(
         streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
         stream,
       );
-      const prefix = converter.convertOpenAIChunkToGemini(
+      const prefix = converter.convertOpenAIChunkToLlm(
         streamChunk('closer-prefix', { content: '\n</thinki' }),
         stream,
       );
@@ -2032,7 +2032,7 @@ describe('OpenAIContentConverter', () => {
         text: '\n</thinki',
       });
 
-      const resend = converter.convertOpenAIChunkToGemini(
+      const resend = converter.convertOpenAIChunkToLlm(
         streamChunk('closer-resend', { content: '</thinking>' }),
         stream,
       );
@@ -2045,7 +2045,7 @@ describe('OpenAIContentConverter', () => {
       // The stray closer resolves via the closingTagName route (fail-closed
       // at a plain 'stop' finish), never as raw released text.
       expect(() =>
-        converter.convertOpenAIChunkToGemini(
+        converter.convertOpenAIChunkToLlm(
           streamChunk('finish', {}, 'stop'),
           stream,
         ),
@@ -2059,17 +2059,17 @@ describe('OpenAIContentConverter', () => {
       const stream = withStreamParser();
       stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
 
-      converter.convertOpenAIChunkToGemini(
+      converter.convertOpenAIChunkToLlm(
         streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
         stream,
       );
-      const prefix = converter.convertOpenAIChunkToGemini(
+      const prefix = converter.convertOpenAIChunkToLlm(
         streamChunk('closer-prefix', { content: '\n</thinki' }),
         stream,
       );
       expect(prefix.candidates?.[0]?.content?.parts).toEqual([]);
 
-      const continuation = converter.convertOpenAIChunkToGemini(
+      const continuation = converter.convertOpenAIChunkToLlm(
         streamChunk('closer-rest', { content: 'ng>' }),
         stream,
       );
@@ -2080,7 +2080,7 @@ describe('OpenAIContentConverter', () => {
       });
 
       expect(() =>
-        converter.convertOpenAIChunkToGemini(
+        converter.convertOpenAIChunkToLlm(
           streamChunk('finish', {}, 'stop'),
           stream,
         ),
@@ -2101,17 +2101,17 @@ describe('OpenAIContentConverter', () => {
       const stream = withStreamParser();
       stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
 
-      converter.convertOpenAIChunkToGemini(
+      converter.convertOpenAIChunkToLlm(
         streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
         stream,
       );
-      const opening = converter.convertOpenAIChunkToGemini(
+      const opening = converter.convertOpenAIChunkToLlm(
         streamChunk('opening', { content: '<thinking>' }),
         stream,
       );
       expect(opening.candidates?.[0]?.content?.parts).toEqual([]);
 
-      const repeated = converter.convertOpenAIChunkToGemini(
+      const repeated = converter.convertOpenAIChunkToLlm(
         streamChunk('repeated-opening', { content: '<thinking>' }),
         stream,
       );
@@ -2120,7 +2120,7 @@ describe('OpenAIContentConverter', () => {
         text: '<thinking><thinking>',
       });
 
-      const rest = converter.convertOpenAIChunkToGemini(
+      const rest = converter.convertOpenAIChunkToLlm(
         streamChunk(
           'rest',
           { content: 'inner</thinking>outer</thinking>Answer' },
@@ -2146,11 +2146,11 @@ describe('OpenAIContentConverter', () => {
       const stream = withStreamParser();
       stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
 
-      converter.convertOpenAIChunkToGemini(
+      converter.convertOpenAIChunkToLlm(
         streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
         stream,
       );
-      const first = converter.convertOpenAIChunkToGemini(
+      const first = converter.convertOpenAIChunkToLlm(
         streamChunk('first-block', { content: '<thinking>a</thinking>' }),
         stream,
       );
@@ -2158,7 +2158,7 @@ describe('OpenAIContentConverter', () => {
         { thought: true, text: 'a' },
       ]);
 
-      const second = converter.convertOpenAIChunkToGemini(
+      const second = converter.convertOpenAIChunkToLlm(
         streamChunk('second-block', { content: '<thinking>a</thinking>' }),
         stream,
       );
@@ -2169,7 +2169,7 @@ describe('OpenAIContentConverter', () => {
         '<thinking>a</thinking><thinking>a</thinking>',
       );
 
-      const finish = converter.convertOpenAIChunkToGemini(
+      const finish = converter.convertOpenAIChunkToLlm(
         streamChunk('finish', {}, 'stop'),
         stream,
       );
@@ -2190,11 +2190,11 @@ describe('OpenAIContentConverter', () => {
       const stream = withStreamParser();
       stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
 
-      converter.convertOpenAIChunkToGemini(
+      converter.convertOpenAIChunkToLlm(
         streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
         stream,
       );
-      const demoted = converter.convertOpenAIChunkToGemini(
+      const demoted = converter.convertOpenAIChunkToLlm(
         streamChunk('first-block', {
           content: '<thinking>a</thinking><thinking>b',
         }),
@@ -2207,7 +2207,7 @@ describe('OpenAIContentConverter', () => {
         text: '<thinking>b',
       });
 
-      const nested = converter.convertOpenAIChunkToGemini(
+      const nested = converter.convertOpenAIChunkToLlm(
         streamChunk('nested-restart', { content: '<thinking>b</thinking>' }),
         stream,
       );
@@ -2216,7 +2216,7 @@ describe('OpenAIContentConverter', () => {
         text: '<thinking>b<thinking>b</thinking>',
       });
 
-      const rest = converter.convertOpenAIChunkToGemini(
+      const rest = converter.convertOpenAIChunkToLlm(
         streamChunk('rest', { content: 'c</thinking>Answer' }, 'stop'),
         stream,
       );
@@ -2241,17 +2241,17 @@ describe('OpenAIContentConverter', () => {
       const stream = withStreamParser();
       stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
 
-      converter.convertOpenAIChunkToGemini(
+      converter.convertOpenAIChunkToLlm(
         streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
         stream,
       );
-      const opening = converter.convertOpenAIChunkToGemini(
+      const opening = converter.convertOpenAIChunkToLlm(
         streamChunk('opening', { content: '<thinking>' }),
         stream,
       );
       expect(opening.candidates?.[0]?.content?.parts).toEqual([]);
 
-      const nested = converter.convertOpenAIChunkToGemini(
+      const nested = converter.convertOpenAIChunkToLlm(
         streamChunk('nested-block', { content: '<thinking>inner</thinking>' }),
         stream,
       );
@@ -2260,7 +2260,7 @@ describe('OpenAIContentConverter', () => {
         text: '<thinking><thinking>inner</thinking>',
       });
 
-      const rest = converter.convertOpenAIChunkToGemini(
+      const rest = converter.convertOpenAIChunkToLlm(
         streamChunk('rest', { content: 'outer</thinking>Answer' }, 'stop'),
         stream,
       );
@@ -2286,7 +2286,7 @@ describe('OpenAIContentConverter', () => {
       const stream = withStreamParser();
       stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
 
-      converter.convertOpenAIChunkToGemini(
+      converter.convertOpenAIChunkToLlm(
         streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
         stream,
       );
@@ -2298,14 +2298,14 @@ describe('OpenAIContentConverter', () => {
         '<thinking>body',
       ]) {
         expect(
-          converter.convertOpenAIChunkToGemini(
+          converter.convertOpenAIChunkToLlm(
             streamChunk(`snapshot-${snapshot.length}`, { content: snapshot }),
             stream,
           ).candidates?.[0]?.content?.parts,
         ).toEqual([]);
       }
 
-      const completed = converter.convertOpenAIChunkToGemini(
+      const completed = converter.convertOpenAIChunkToLlm(
         streamChunk('snapshot-complete', {
           content: '<thinking>body</thinking>',
         }),
@@ -2315,7 +2315,7 @@ describe('OpenAIContentConverter', () => {
         { thought: true, text: 'body' },
       ]);
 
-      const finish = converter.convertOpenAIChunkToGemini(
+      const finish = converter.convertOpenAIChunkToLlm(
         streamChunk(
           'answer',
           { content: '<thinking>body</thinking>Answer' },
@@ -2341,18 +2341,18 @@ describe('OpenAIContentConverter', () => {
       const stream = withStreamParser();
       stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
 
-      converter.convertOpenAIChunkToGemini(
+      converter.convertOpenAIChunkToLlm(
         streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
         stream,
       );
-      const subword = converter.convertOpenAIChunkToGemini(
+      const subword = converter.convertOpenAIChunkToLlm(
         streamChunk('sub-word', { content: '<t' }),
         stream,
       );
       expect(subword.candidates?.[0]?.content?.parts).toEqual([]);
       expect(stream.pendingThinkingTagCandidate).toEqual({ text: '<t' });
 
-      const resend = converter.convertOpenAIChunkToGemini(
+      const resend = converter.convertOpenAIChunkToLlm(
         streamChunk(
           'cumulative-resend',
           { content: '<thinking>body</thinking>Answer' },
@@ -2376,11 +2376,11 @@ describe('OpenAIContentConverter', () => {
       const stream = withStreamParser();
       stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
 
-      converter.convertOpenAIChunkToGemini(
+      converter.convertOpenAIChunkToLlm(
         streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
         stream,
       );
-      const demoted = converter.convertOpenAIChunkToGemini(
+      const demoted = converter.convertOpenAIChunkToLlm(
         streamChunk('first-block', {
           content: '<thinking>a</thinking><thinking>b',
         }),
@@ -2391,7 +2391,7 @@ describe('OpenAIContentConverter', () => {
         text: '<thinking>b',
       });
 
-      const nested = converter.convertOpenAIChunkToGemini(
+      const nested = converter.convertOpenAIChunkToLlm(
         streamChunk('nested-respell', { content: '<thinking>b </thinking>' }),
         stream,
       );
@@ -2400,7 +2400,7 @@ describe('OpenAIContentConverter', () => {
         text: '<thinking>b<thinking>b </thinking>',
       });
 
-      const rest = converter.convertOpenAIChunkToGemini(
+      const rest = converter.convertOpenAIChunkToLlm(
         streamChunk('rest', { content: 'c</thinking>Answer' }, 'stop'),
         stream,
       );
@@ -2423,15 +2423,15 @@ describe('OpenAIContentConverter', () => {
       const stream = withStreamParser();
       stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
 
-      converter.convertOpenAIChunkToGemini(
+      converter.convertOpenAIChunkToLlm(
         streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
         stream,
       );
-      converter.convertOpenAIChunkToGemini(
+      converter.convertOpenAIChunkToLlm(
         streamChunk('opening', { content: '<thinking>' }),
         stream,
       );
-      const seeded = converter.convertOpenAIChunkToGemini(
+      const seeded = converter.convertOpenAIChunkToLlm(
         streamChunk('seed', { content: '<thinking>x' }),
         stream,
       );
@@ -2442,7 +2442,7 @@ describe('OpenAIContentConverter', () => {
 
       const body = `x${'y'.repeat(1100)}`;
       const snapshot = `<thinking>${body}</thinking>`;
-      const completed = converter.convertOpenAIChunkToGemini(
+      const completed = converter.convertOpenAIChunkToLlm(
         streamChunk('snapshot', { content: snapshot }),
         stream,
       );
@@ -2451,7 +2451,7 @@ describe('OpenAIContentConverter', () => {
       ]);
       expect(stream.textDeltaState?.emittedLength).toBe(snapshot.length);
 
-      const finish = converter.convertOpenAIChunkToGemini(
+      const finish = converter.convertOpenAIChunkToLlm(
         streamChunk('answer', { content: `${snapshot}Answer` }, 'stop'),
         stream,
       );
@@ -2478,15 +2478,15 @@ describe('OpenAIContentConverter', () => {
       const stream = withStreamParser();
       stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
 
-      converter.convertOpenAIChunkToGemini(
+      converter.convertOpenAIChunkToLlm(
         streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
         stream,
       );
-      converter.convertOpenAIChunkToGemini(
+      converter.convertOpenAIChunkToLlm(
         streamChunk('held', { content: candidate }),
         stream,
       );
-      const respell = converter.convertOpenAIChunkToGemini(
+      const respell = converter.convertOpenAIChunkToLlm(
         streamChunk('nested-respell', { content: candidate }),
         stream,
       );
@@ -2495,7 +2495,7 @@ describe('OpenAIContentConverter', () => {
         text: candidate + candidate,
       });
 
-      const rest = converter.convertOpenAIChunkToGemini(
+      const rest = converter.convertOpenAIChunkToLlm(
         streamChunk(
           'rest',
           { content: '</thinking></thinking>Answer' },
@@ -2527,11 +2527,11 @@ describe('OpenAIContentConverter', () => {
       const stream = withStreamParser();
       stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
 
-      converter.convertOpenAIChunkToGemini(
+      converter.convertOpenAIChunkToLlm(
         streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
         stream,
       );
-      const first = converter.convertOpenAIChunkToGemini(
+      const first = converter.convertOpenAIChunkToLlm(
         streamChunk('first-block', { content: '<thinking>a</thinking>' }),
         stream,
       );
@@ -2539,7 +2539,7 @@ describe('OpenAIContentConverter', () => {
         { thought: true, text: 'a' },
       ]);
 
-      const bundled = converter.convertOpenAIChunkToGemini(
+      const bundled = converter.convertOpenAIChunkToLlm(
         streamChunk('bundled-blocks', {
           content: ' <thinking>a</thinking> <thinking>b</thinking>',
         }),
@@ -2553,7 +2553,7 @@ describe('OpenAIContentConverter', () => {
         '<thinking>a</thinking> <thinking>a</thinking> <thinking>b</thinking>',
       );
 
-      const finish = converter.convertOpenAIChunkToGemini(
+      const finish = converter.convertOpenAIChunkToLlm(
         streamChunk('finish', {}, 'stop'),
         stream,
       );
@@ -2577,22 +2577,22 @@ describe('OpenAIContentConverter', () => {
       const stream = withStreamParser();
       stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
 
-      converter.convertOpenAIChunkToGemini(
+      converter.convertOpenAIChunkToLlm(
         streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
         stream,
       );
-      converter.convertOpenAIChunkToGemini(
+      converter.convertOpenAIChunkToLlm(
         streamChunk('first-block', {
           content: '<thinking>a</thinking><thinking>b',
         }),
         stream,
       );
-      converter.convertOpenAIChunkToGemini(
+      converter.convertOpenAIChunkToLlm(
         streamChunk('nested-respell', { content: '<thinking>bc</thinking>' }),
         stream,
       );
       expect(() =>
-        converter.convertOpenAIChunkToGemini(
+        converter.convertOpenAIChunkToLlm(
           streamChunk('rest', { content: '</thinking>Answer' }, 'stop'),
           stream,
         ),
@@ -2614,15 +2614,15 @@ describe('OpenAIContentConverter', () => {
       const stream = withStreamParser();
       stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
 
-      converter.convertOpenAIChunkToGemini(
+      converter.convertOpenAIChunkToLlm(
         streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
         stream,
       );
-      converter.convertOpenAIChunkToGemini(
+      converter.convertOpenAIChunkToLlm(
         streamChunk('opening', { content: '<thinking>body' }),
         stream,
       );
-      const resend = converter.convertOpenAIChunkToGemini(
+      const resend = converter.convertOpenAIChunkToLlm(
         streamChunk('equal-resend', { content: '<thinking>body' }),
         stream,
       );
@@ -2632,7 +2632,7 @@ describe('OpenAIContentConverter', () => {
       });
 
       expect(() =>
-        converter.convertOpenAIChunkToGemini(
+        converter.convertOpenAIChunkToLlm(
           streamChunk('rest', { content: '</thinking>Answer' }, 'stop'),
           stream,
         ),
@@ -2655,20 +2655,20 @@ describe('OpenAIContentConverter', () => {
       const stream = withStreamParser();
       stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
 
-      converter.convertOpenAIChunkToGemini(
+      converter.convertOpenAIChunkToLlm(
         streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
         stream,
       );
-      converter.convertOpenAIChunkToGemini(
+      converter.convertOpenAIChunkToLlm(
         streamChunk('opening', { content: '<thinking>b' }),
         stream,
       );
-      converter.convertOpenAIChunkToGemini(
+      converter.convertOpenAIChunkToLlm(
         streamChunk('overlap-respell', { content: '<thinking>b</thinking>' }),
         stream,
       );
       expect(() =>
-        converter.convertOpenAIChunkToGemini(
+        converter.convertOpenAIChunkToLlm(
           streamChunk('rest', { content: '</thinking>Answer' }, 'stop'),
           stream,
         ),
@@ -2685,15 +2685,15 @@ describe('OpenAIContentConverter', () => {
       const stream = withStreamParser();
       stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
 
-      const pre = converter.convertOpenAIChunkToGemini(
+      const pre = converter.convertOpenAIChunkToLlm(
         streamChunk('pre', { content: ' ' }),
         stream,
       );
-      converter.convertOpenAIChunkToGemini(
+      converter.convertOpenAIChunkToLlm(
         streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
         stream,
       );
-      const opening = converter.convertOpenAIChunkToGemini(
+      const opening = converter.convertOpenAIChunkToLlm(
         streamChunk('opening', { content: '<' }),
         stream,
       );
@@ -2702,7 +2702,7 @@ describe('OpenAIContentConverter', () => {
       expect(opening.candidates?.[0]?.content?.parts).toEqual([]);
       expect(stream.pendingThinkingTagCandidate).toEqual({ text: '<' });
 
-      const continuation = converter.convertOpenAIChunkToGemini(
+      const continuation = converter.convertOpenAIChunkToLlm(
         streamChunk('continuation', { content: '<EOF' }, 'stop'),
         stream,
       );
@@ -2720,11 +2720,11 @@ describe('OpenAIContentConverter', () => {
       const stream = withStreamParser();
       stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
 
-      converter.convertOpenAIChunkToGemini(
+      converter.convertOpenAIChunkToLlm(
         streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
         stream,
       );
-      converter.convertOpenAIChunkToGemini(
+      converter.convertOpenAIChunkToLlm(
         streamChunk('opening', { content: '<' }),
         stream,
       );
@@ -2734,7 +2734,7 @@ describe('OpenAIContentConverter', () => {
         emittedLength: 19,
         cumulativeMode: true,
       };
-      const continuation = converter.convertOpenAIChunkToGemini(
+      const continuation = converter.convertOpenAIChunkToLlm(
         streamChunk('continuation', { content: '<thinking>x</thinking>' }),
         stream,
       );
@@ -2756,22 +2756,22 @@ describe('OpenAIContentConverter', () => {
       const stream = withStreamParser();
       stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
 
-      converter.convertOpenAIChunkToGemini(
+      converter.convertOpenAIChunkToLlm(
         streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
         stream,
       );
-      converter.convertOpenAIChunkToGemini(
+      converter.convertOpenAIChunkToLlm(
         streamChunk('block', { content: '<thinking>x</thinking>Ok' }),
         stream,
       );
-      const finish = converter.convertOpenAIChunkToGemini(
+      const finish = converter.convertOpenAIChunkToLlm(
         streamChunk('finish', {}, 'stop'),
         stream,
       );
       expect(finish.candidates?.[0]?.finishReason).toBeDefined();
       expect(stream.finishChunkConverted).toBe(true);
 
-      const renormalizedRedelivery = converter.convertOpenAIChunkToGemini(
+      const renormalizedRedelivery = converter.convertOpenAIChunkToLlm(
         streamChunk('redelivery', {
           content: ' <thinking>x</thinking> Ok',
         }),
@@ -2781,7 +2781,7 @@ describe('OpenAIContentConverter', () => {
         [],
       );
 
-      const redelivery = converter.convertOpenAIChunkToGemini(
+      const redelivery = converter.convertOpenAIChunkToLlm(
         streamChunk('prefix-redelivery', {
           content: '<thinking>x</thinking>O',
         }),
@@ -2789,7 +2789,7 @@ describe('OpenAIContentConverter', () => {
       );
       expect(redelivery.candidates?.[0]?.content?.parts).toEqual([]);
 
-      const fullRedelivery = converter.convertOpenAIChunkToGemini(
+      const fullRedelivery = converter.convertOpenAIChunkToLlm(
         streamChunk('full-redelivery', {
           content: '<thinking>x</thinking>Ok',
         }),
@@ -2811,22 +2811,22 @@ describe('OpenAIContentConverter', () => {
       const stream = withStreamParser();
       stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
 
-      converter.convertOpenAIChunkToGemini(
+      converter.convertOpenAIChunkToLlm(
         streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
         stream,
       );
-      converter.convertOpenAIChunkToGemini(
+      converter.convertOpenAIChunkToLlm(
         streamChunk('block', { content: '<thinking>x</thinking>Ok' }),
         stream,
       );
-      const finish = converter.convertOpenAIChunkToGemini(
+      const finish = converter.convertOpenAIChunkToLlm(
         streamChunk('finish', {}, 'stop'),
         stream,
       );
       expect(finish.candidates?.[0]?.finishReason).toBeDefined();
       expect(stream.finishChunkConverted).toBe(true);
 
-      const reasoningRedelivery = converter.convertOpenAIChunkToGemini(
+      const reasoningRedelivery = converter.convertOpenAIChunkToLlm(
         streamChunk('reasoning-redelivery', {
           reasoning_content: 'Let me think.',
         }),
@@ -2834,7 +2834,7 @@ describe('OpenAIContentConverter', () => {
       );
       expect(reasoningRedelivery.candidates?.[0]?.content?.parts).toEqual([]);
 
-      const mixedRedelivery = converter.convertOpenAIChunkToGemini(
+      const mixedRedelivery = converter.convertOpenAIChunkToLlm(
         streamChunk('mixed-redelivery', {
           reasoning_content: 'More reasoning.',
           content: 'More text.',
@@ -2856,7 +2856,7 @@ describe('OpenAIContentConverter', () => {
       // parser entirely, so the redelivered finish converts against the
       // pristine pre-finish parser state.
       const stream = withStreamParser();
-      converter.convertOpenAIChunkToGemini(
+      converter.convertOpenAIChunkToLlm(
         streamChunk('tool-call', {
           tool_calls: [
             {
@@ -2868,7 +2868,7 @@ describe('OpenAIContentConverter', () => {
         }),
         stream,
       );
-      const finish = converter.convertOpenAIChunkToGemini(
+      const finish = converter.convertOpenAIChunkToLlm(
         streamChunk('finish', {}, 'tool_calls'),
         stream,
       );
@@ -2885,7 +2885,7 @@ describe('OpenAIContentConverter', () => {
       ]);
 
       // Redelivered id-less arguments fragment: dropped before the parser.
-      const redeliveredArgs = converter.convertOpenAIChunkToGemini(
+      const redeliveredArgs = converter.convertOpenAIChunkToLlm(
         streamChunk('redelivered-args', {
           tool_calls: [{ index: 0, function: { arguments: '"}' } }],
         }),
@@ -2895,7 +2895,7 @@ describe('OpenAIContentConverter', () => {
       expect(stream.toolCallParser?.hasNamelessToolCall()).toBe(false);
 
       // Redelivered finish: no MALFORMED_TOOL_CALL, same function call.
-      const redeliveredFinish = converter.convertOpenAIChunkToGemini(
+      const redeliveredFinish = converter.convertOpenAIChunkToLlm(
         streamChunk('redelivered-finish', {}, 'tool_calls'),
         stream,
       );
@@ -2915,12 +2915,12 @@ describe('OpenAIContentConverter', () => {
       // estimate.
       const stream = withStreamParser();
       for (const piece of ['Let me ', 'think ', 'hard.']) {
-        converter.convertOpenAIChunkToGemini(
+        converter.convertOpenAIChunkToLlm(
           streamChunk(`reasoning-${piece}`, { reasoning_content: piece }),
           stream,
         );
       }
-      converter.convertOpenAIChunkToGemini(
+      converter.convertOpenAIChunkToLlm(
         streamChunk('finish', {}, 'stop'),
         stream,
       );
@@ -2929,7 +2929,7 @@ describe('OpenAIContentConverter', () => {
         completion_tokens: 10000,
         total_tokens: 10010,
       };
-      const original = converter.convertOpenAIChunkToGemini(
+      const original = converter.convertOpenAIChunkToLlm(
         {
           id: 'usage-1',
           created: 1,
@@ -2943,13 +2943,13 @@ describe('OpenAIContentConverter', () => {
       expect(originalThoughts).toBeGreaterThan(0);
 
       for (const piece of ['Let me ', 'think ', 'hard.']) {
-        const redelivered = converter.convertOpenAIChunkToGemini(
+        const redelivered = converter.convertOpenAIChunkToLlm(
           streamChunk(`redelivered-${piece}`, { reasoning_content: piece }),
           stream,
         );
         expect(redelivered.candidates?.[0]?.content?.parts).toEqual([]);
       }
-      const redeliveredUsage = converter.convertOpenAIChunkToGemini(
+      const redeliveredUsage = converter.convertOpenAIChunkToLlm(
         {
           id: 'usage-2',
           created: 1,
@@ -2971,24 +2971,24 @@ describe('OpenAIContentConverter', () => {
       const stream = withStreamParser();
       stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
 
-      converter.convertOpenAIChunkToGemini(
+      converter.convertOpenAIChunkToLlm(
         streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
         stream,
       );
-      converter.convertOpenAIChunkToGemini(
+      converter.convertOpenAIChunkToLlm(
         streamChunk('leading-block', {
           content: '<thinking>a</thinking>Answer ',
         }),
         stream,
       );
-      const fragment = converter.convertOpenAIChunkToGemini(
+      const fragment = converter.convertOpenAIChunkToLlm(
         streamChunk('tag-fragment', { content: '<thi' }),
         stream,
       );
 
       expect(fragment.candidates?.[0]?.content?.parts).toEqual([]);
 
-      const resolved = converter.convertOpenAIChunkToGemini(
+      const resolved = converter.convertOpenAIChunkToLlm(
         streamChunk('resolved', { content: 's is not a tag.' }, 'stop'),
         stream,
       );
@@ -3009,17 +3009,17 @@ describe('OpenAIContentConverter', () => {
       const stream = withStreamParser();
       stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
 
-      converter.convertOpenAIChunkToGemini(
+      converter.convertOpenAIChunkToLlm(
         streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
         stream,
       );
-      converter.convertOpenAIChunkToGemini(
+      converter.convertOpenAIChunkToLlm(
         streamChunk('leading-block', {
           content: '<thinking>a</thinking>Answer ',
         }),
         stream,
       );
-      const fragment = converter.convertOpenAIChunkToGemini(
+      const fragment = converter.convertOpenAIChunkToLlm(
         streamChunk('mixed-fragment', { content: 'Supplier<T> and <thi' }),
         stream,
       );
@@ -3029,7 +3029,7 @@ describe('OpenAIContentConverter', () => {
       ]);
       expect(stream.pendingPostDemotionTagTail).toBe('<thi');
       expect(() =>
-        converter.convertOpenAIChunkToGemini(
+        converter.convertOpenAIChunkToLlm(
           streamChunk('tag-completes', { content: 'nking> done' }, 'stop'),
           stream,
         ),
@@ -3043,21 +3043,21 @@ describe('OpenAIContentConverter', () => {
       const stream = withStreamParser();
       stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
 
-      converter.convertOpenAIChunkToGemini(
+      converter.convertOpenAIChunkToLlm(
         streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
         stream,
       );
-      converter.convertOpenAIChunkToGemini(
+      converter.convertOpenAIChunkToLlm(
         streamChunk('leading-block', {
           content: '<thinking>a</thinking>Answer ',
         }),
         stream,
       );
-      const fragment = converter.convertOpenAIChunkToGemini(
+      const fragment = converter.convertOpenAIChunkToLlm(
         streamChunk('mixed-fragment', { content: 'Supplier<T> and <thi' }),
         stream,
       );
-      const resolved = converter.convertOpenAIChunkToGemini(
+      const resolved = converter.convertOpenAIChunkToLlm(
         streamChunk('resolved', { content: 's plain text' }, 'stop'),
         stream,
       );
@@ -3075,13 +3075,13 @@ describe('OpenAIContentConverter', () => {
       const stream = withStreamParser();
       stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
 
-      converter.convertOpenAIChunkToGemini(
+      converter.convertOpenAIChunkToLlm(
         streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
         stream,
       );
 
       expect(() =>
-        converter.convertOpenAIChunkToGemini(
+        converter.convertOpenAIChunkToLlm(
           streamChunk(
             'stray-closer',
             { content: '<thinking>a</thinking>b</thinking>' },
@@ -3102,12 +3102,12 @@ describe('OpenAIContentConverter', () => {
       const stream = withStreamParser();
       stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
 
-      converter.convertOpenAIChunkToGemini(
+      converter.convertOpenAIChunkToLlm(
         streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
         stream,
       );
 
-      const truncated = converter.convertOpenAIChunkToGemini(
+      const truncated = converter.convertOpenAIChunkToLlm(
         streamChunk(
           'truncated-prefix',
           { content: '<thinking>a</thinking><thi' },
@@ -3131,11 +3131,11 @@ describe('OpenAIContentConverter', () => {
       const stream = withStreamParser();
       stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
 
-      converter.convertOpenAIChunkToGemini(
+      converter.convertOpenAIChunkToLlm(
         streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
         stream,
       );
-      const first = converter.convertOpenAIChunkToGemini(
+      const first = converter.convertOpenAIChunkToLlm(
         streamChunk('first-block', { content: '<thinking>a</thinking><thi' }),
         stream,
       );
@@ -3157,11 +3157,11 @@ describe('OpenAIContentConverter', () => {
       const stream = withStreamParser();
       stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
 
-      converter.convertOpenAIChunkToGemini(
+      converter.convertOpenAIChunkToLlm(
         streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
         stream,
       );
-      const first = converter.convertOpenAIChunkToGemini(
+      const first = converter.convertOpenAIChunkToLlm(
         streamChunk('first-block', {
           content: '<thinking>a</thinking><think',
         }),
@@ -3182,11 +3182,11 @@ describe('OpenAIContentConverter', () => {
       const stream = withStreamParser();
       stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
 
-      converter.convertOpenAIChunkToGemini(
+      converter.convertOpenAIChunkToLlm(
         streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
         stream,
       );
-      const fragment = converter.convertOpenAIChunkToGemini(
+      const fragment = converter.convertOpenAIChunkToLlm(
         streamChunk('fragment', { content: '<thi' }),
         stream,
       );
@@ -3205,11 +3205,11 @@ describe('OpenAIContentConverter', () => {
       const stream = withStreamParser();
       stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
 
-      converter.convertOpenAIChunkToGemini(
+      converter.convertOpenAIChunkToLlm(
         streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
         stream,
       );
-      converter.convertOpenAIChunkToGemini(
+      converter.convertOpenAIChunkToLlm(
         streamChunk('fragment', { content: '<think' }),
         stream,
       );

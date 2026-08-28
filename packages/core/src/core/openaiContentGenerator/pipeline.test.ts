@@ -3156,8 +3156,8 @@ describe('ContentGenerationPipeline', () => {
         { content: { parts: [], role: 'model' }, index: 0 },
       ];
 
-      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
-      (mockConverter.convertOpenAIChunkToGemini as Mock).mockImplementation(
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockConverter.convertOpenAIChunkToLlm as Mock).mockImplementation(
         (_chunk, context) => {
           context.pendingPostDemotionTagTail = '<thinking';
           return emptyResponse;
@@ -3201,8 +3201,8 @@ describe('ContentGenerationPipeline', () => {
         { content: { parts: [], role: 'model' }, index: 0 },
       ];
 
-      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
-      (mockConverter.convertOpenAIChunkToGemini as Mock).mockImplementation(
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockConverter.convertOpenAIChunkToLlm as Mock).mockImplementation(
         (_chunk, context) => {
           context.pendingPostDemotionTagTail = '<T';
           return emptyResponse;
@@ -3248,8 +3248,8 @@ describe('ContentGenerationPipeline', () => {
         { content: { parts: [], role: 'model' }, index: 0 },
       ];
 
-      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
-      (mockConverter.convertOpenAIChunkToGemini as Mock).mockImplementation(
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockConverter.convertOpenAIChunkToLlm as Mock).mockImplementation(
         (_chunk, context) => {
           context.pendingPostDemotionTagTail = '<thi';
           context.pendingUntrustedResponseParts = [
@@ -3304,8 +3304,8 @@ describe('ContentGenerationPipeline', () => {
         { content: { parts: [], role: 'model' }, index: 0 },
       ];
 
-      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
-      (mockConverter.convertOpenAIChunkToGemini as Mock).mockImplementation(
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockConverter.convertOpenAIChunkToLlm as Mock).mockImplementation(
         (_chunk, context) => {
           context.pendingUntrustedResponseParts = [
             { thought: true, text: 'reasoning' },
@@ -3371,8 +3371,8 @@ describe('ContentGenerationPipeline', () => {
         { content: { parts: [], role: 'model' }, index: 0 },
       ];
 
-      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
-      (mockConverter.convertOpenAIChunkToGemini as Mock).mockImplementation(
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockConverter.convertOpenAIChunkToLlm as Mock).mockImplementation(
         (chunk: OpenAI.Chat.ChatCompletionChunk, context) => {
           const choice = chunk.choices?.[0];
           if (choice?.finish_reason) {
@@ -3459,8 +3459,8 @@ describe('ContentGenerationPipeline', () => {
         { content: { parts: [], role: 'model' }, index: 0 },
       ];
 
-      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
-      (mockConverter.convertOpenAIChunkToGemini as Mock).mockImplementation(
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockConverter.convertOpenAIChunkToLlm as Mock).mockImplementation(
         (chunk: OpenAI.Chat.ChatCompletionChunk, context) => {
           const choice = chunk.choices?.[0];
           if (choice?.finish_reason) {
@@ -3523,8 +3523,8 @@ describe('ContentGenerationPipeline', () => {
         { content: { parts: [], role: 'model' }, index: 0 },
       ];
 
-      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
-      (mockConverter.convertOpenAIChunkToGemini as Mock).mockImplementation(
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockConverter.convertOpenAIChunkToLlm as Mock).mockImplementation(
         (_chunk, context) => {
           context.pendingPostDemotionTagTail = '</think';
           return emptyResponse;
@@ -3568,8 +3568,8 @@ describe('ContentGenerationPipeline', () => {
         { content: { parts: [], role: 'model' }, index: 0 },
       ];
 
-      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
-      (mockConverter.convertOpenAIChunkToGemini as Mock).mockImplementation(
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockConverter.convertOpenAIChunkToLlm as Mock).mockImplementation(
         (_chunk, context) => {
           context.pendingThinkingTagCandidate = { text: '<thi' };
           return emptyResponse;
