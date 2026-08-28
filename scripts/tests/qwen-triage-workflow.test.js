@@ -372,6 +372,63 @@ describe('qwen-triage tmux workflow', () => {
     expect(run({ RESPONSE: 'null' }).status).not.toBe(0);
   });
 
+  it('fails an API-error response instead of passing it as a triage (#10314)', () => {
+    const checkStep = step('Check triage response');
+    const body = checkStep.match(/run: \|-\n([\s\S]*)$/)?.[1];
+    expect(body).toBeTruthy();
+    const script = body.replace(/^ {10}/gm, '');
+    const run = (env) => {
+      const proc = spawnSync('bash', ['-c', script], {
+        env: {
+          ...process.env,
+          RESPONSE: '',
+          TRIAGE_OUTCOME: 'success',
+          ...env,
+        },
+        encoding: 'utf8',
+      });
+      return { status: proc.status, out: `${proc.stdout}${proc.stderr}` };
+    };
+
+    // The verbatim 268-char response of run 33070765162 (triage for #10285):
+    // a bare model-layer connection error that the old check classified as a
+    // successful triage, so nothing retried or alerted.
+    const apiError =
+      '[API Error: Connection error. (cause: connect ETIMEDOUT 47.94.20.201:443; connect ENETUNREACH 2408:400a:3e:effd:6ac1:ae6e:cde9:4efe:443 - Local (:::0); connect ETIMEDOUT 101.201.58.201:443; connect ENETUNREACH 2408:400a:3e:effb:c146:fb04:1e3d:5cc1:443 - Local (:::0))]';
+    const bare = run({ RESPONSE: apiError });
+    expect(bare.status).not.toBe(0);
+    expect(bare.out).toContain('API error');
+
+    // The stream-json adapter appends the formatted error LAST
+    // (BaseJsonOutputAdapter appendText), optionally followed by rate-limit
+    // guidance: an error after partial output and a quota error ending in
+    // the guidance suffix must fail too. Same shapes as
+    // qwen-code-pr-review.yml's classifier.
+    expect(
+      run({ RESPONSE: `Partial triage notes\n${apiError}` }).status,
+    ).not.toBe(0);
+    expect(
+      run({
+        RESPONSE:
+          '[API Error: Quota exceeded.] Please wait and try again later. To increase your limits, request a quota increase through AI Studio, or switch to another /auth method',
+      }).status,
+    ).not.toBe(0);
+
+    // A real summary still passes: one that merely QUOTES an API error
+    // mid-prose keeps writing afterwards (parity with the pr-review
+    // workflow's success_mentions_api_error case), and the normal
+    // empty/'null' behavior is untouched.
+    expect(
+      run({
+        RESPONSE:
+          'This issue reports "[API Error: Connection error.]" which points at the model endpoint; needs the endpoint config.',
+      }).status,
+    ).toBe(0);
+    expect(run({ RESPONSE: 'triaged' }).status).toBe(0);
+    expect(run({ RESPONSE: '' }).status).not.toBe(0);
+    expect(run({ RESPONSE: 'null' }).status).not.toBe(0);
+  });
+
   it('notifies the author when a manual triage re-run posts no review', () => {
     const notifyStep = step('Notify silent triage re-run');
 

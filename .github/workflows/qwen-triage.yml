@@ -942,6 +942,30 @@ jobs:
             fi
             exit 1
           fi
+          # A non-empty response is not necessarily a triage: on an API error
+          # the stream-json adapter appends the formatted error LAST
+          # (BaseJsonOutputAdapter appendText), optionally followed by
+          # rate-limit guidance. Run 33070765162 (triage for #10285) answered
+          # with a bare 268-char "[API Error: Connection error. ...]" that
+          # this step passed as success, so nothing retried or alerted. Strip
+          # the known suffixes, right-trim, then fail on the trailing shape --
+          # a real summary that merely quotes an API error mid-prose keeps
+          # writing afterwards and stays green. Same pattern as
+          # qwen-code-pr-review.yml.
+          BODY="${RESPONSE}"
+          for S in \
+            'Possible quota limitations in place or slow response times detected. Please wait and try again later.' \
+            'Please wait and try again later. To increase your limits, request a quota increase through AI Studio, or switch to another /auth method' \
+            'Please wait and try again later. To increase your limits, request a quota increase through Vertex, or switch to another /auth method'; do
+            BODY="${BODY%"$S"}"
+          done
+          BODY="${BODY%"${BODY##*[![:space:]]}"}"
+          case "${BODY}" in
+            *"[API Error: "*"]")
+              echo "::error title=Triage aborted by an API error::The model API returned an error instead of a triage, so no triage was posted. This is infrastructure, not this issue -- re-run the failed job."
+              exit 1
+              ;;
+          esac
           echo "Triage response received (${#RESPONSE} chars)."
 
       - name: 'Notify silent triage re-run'
