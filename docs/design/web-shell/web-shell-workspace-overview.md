@@ -18,7 +18,9 @@ issue — a frontend-only change on top of daemon routes that already exist.
   prompt in flight (success tone), and the total. A total from a truncated
   catalog page shows as `N+`. Collapsing a row disables its catalog query, so
   the row keeps the last counts it computed: they stay visible while collapsed
-  and refresh on the next expand.
+  and refresh on the next expand. While the query is active and a page is
+  missing (a session-source switch), no counts are shown rather than stale
+  ones above an empty list.
 - The name carries the full path as a tooltip. While the section is expanded
   the path is printed under the header.
 - The Projects label shows the number of registered workspaces once there is
@@ -31,16 +33,18 @@ While a trusted workspace is expanded, a chip row summarizes MCP servers
 `active/total` when they differ), channels (`connected/configured`) and
 context files (count). Hooks are available but off by default.
 
-- MCP, skills, context and hooks are discovered by the workspace's ACP child.
-  Until it reports `initialized`, the chip shows `—` and the tooltip says the
-  runtime is not initialized yet. A placeholder is never rendered as `0`.
+- MCP, skills and hooks are discovered by the workspace's ACP child. Until it
+  reports `initialized`, the chip shows `—` and the tooltip says the runtime
+  is not initialized yet. A placeholder is never rendered as `0`.
+- Context files are read from disk by the daemon itself, so its answer is
+  always definitive: a workspace without a QWEN.md shows `0`.
 - The MCP chip takes the warning tone when a server errored or discovery
   finished with an enabled server still not connected; the channels chip when
   an instance is in the error state.
 - Below the sidebar's tight width the chips drop their text labels.
-- Extensions and channels are daemon-side facets. When they are unknown the
-  daemon lacks the route or the fetch failed, so their tooltip says
-  "unavailable on this daemon" rather than "not initialized yet".
+- Extensions, channels and context files are daemon-side facets. When they
+  are unknown the daemon lacks the route or the fetch failed, so their tooltip
+  says "unavailable on this daemon" rather than "not initialized yet".
 - Chips are read-only. Opening a management page is a menu action, so the
   chips never take the button role and their accessible names cannot collide
   with the navigation buttons that share the same words.
@@ -50,7 +54,9 @@ context files (count). Hooks are available but off by default.
 The hover `⋮` on a workspace row replaces the single-item removal menu:
 
 - Rename… (dynamic registration daemons; opens a dialog; an empty name falls
-  back to the folder name), Copy path, New task, New worktree task.
+  back to the folder name), Copy path, New task, New worktree task (only when
+  the git poll reports a branch — a worktree needs a repository, and the
+  composer would otherwise have no chip to show or undo the armed intent).
 - Manage: MCP servers, Skills, Extensions, Channels, Settings, with the chip
   counts next to the first four.
 - Reload runtime (`POST /workspaces/:w/reload`), then Remove workspace.

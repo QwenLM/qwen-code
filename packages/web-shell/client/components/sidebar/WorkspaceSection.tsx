@@ -87,6 +87,12 @@ function WorkspaceFolderIcon({ open }: { open: boolean }) {
   );
 }
 
+export interface WorkspaceHeaderActionsContext {
+  overview: WorkspaceOverviewSnapshot | undefined;
+  /** Current branch from the git poll; null/undefined when not a git repo or not polled. */
+  gitBranch: string | null | undefined;
+}
+
 interface WorkspaceSectionProps {
   workspace: DaemonWorkspaceCapability;
   renderHeader?: (expanded: boolean) => ReactNode;
@@ -121,11 +127,12 @@ interface WorkspaceSectionProps {
   /**
    * Hover-revealed actions at the right edge of the folder header. Receives
    * the workspace's overview snapshot (undefined until fetched or when the
-   * overview is disabled) so a menu can show live counts.
+   * overview is disabled) so a menu can show live counts, and the polled git
+   * branch so git-only actions can be withheld from non-git workspaces.
    */
   headerActions?: (
     visible: boolean,
-    overview: WorkspaceOverviewSnapshot | undefined,
+    context: WorkspaceHeaderActionsContext,
   ) => ReactNode;
   /**
    * Show session counts in the header and, while expanded, the full path and
@@ -493,12 +500,16 @@ export function WorkspaceSection({
   ]);
   // Collapsing a row disables its catalog query, so keep the last counts the
   // row computed: the header keeps telling how busy the workspace is without
-  // paying for a subscription it no longer lists.
+  // paying for a subscription it no longer lists. While the query is active
+  // a missing page is a fetch in progress (a source switch swapped the query
+  // key), and stale counts above an empty list would mislead — show none.
   const [retainedStats, setRetainedStats] = useState<WorkspaceSessionStats>();
   useEffect(() => {
     if (liveStats) setRetainedStats(liveStats);
   }, [liveStats]);
-  const stats = overviewEnabled ? (liveStats ?? retainedStats) : undefined;
+  const stats = overviewEnabled
+    ? (liveStats ?? (sessionsActive ? undefined : retainedStats))
+    : undefined;
 
   const visibleSessions = useMemo(() => {
     const query = searchQuery.trim().toLowerCase();
@@ -682,7 +693,10 @@ export function WorkspaceSection({
             </button>
           </BranchPickerPopover>
         )}
-        {headerActions?.(actionsVisible, overview)}
+        {headerActions?.(actionsVisible, {
+          overview,
+          gitBranch: gitStatus?.branch,
+        })}
       </div>
       {overviewVisible && gitPollCwd !== undefined && (
         <>

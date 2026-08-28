@@ -1277,3 +1277,78 @@ describe('WorkspaceSection overview', () => {
     ).toBeNull();
   });
 });
+
+describe('WorkspaceSection counts across a source switch', () => {
+  it('shows no counts while the new source is still loading', async () => {
+    let resolveChannel: (page: {
+      sessions: DaemonSessionSummary[];
+    }) => void = () => {};
+    const channelPage = new Promise<{ sessions: DaemonSessionSummary[] }>(
+      (resolve) => {
+        resolveChannel = resolve;
+      },
+    );
+    const defaultPage = Promise.resolve({
+      sessions: [
+        { sessionId: 'a', workspaceCwd: '/tmp/other', hasActivePrompt: true },
+        { sessionId: 'b', workspaceCwd: '/tmp/other' },
+        { sessionId: 'c', workspaceCwd: '/tmp/other' },
+      ] as DaemonSessionSummary[],
+    });
+    const listWorkspaceSessionsPage = vi.fn(
+      (options?: { sourceType?: string }) =>
+        options?.sourceType === 'channel' ? channelPage : defaultPage,
+    );
+    const client = {
+      workspaceByCwd: vi.fn(() => ({
+        workspaceGit,
+        listWorkspaceSessionsPage,
+        listSessionGroups: vi.fn().mockResolvedValue({ groups: [] }),
+      })),
+    } as unknown as DaemonClient;
+    const workspace = { ...trustedWorkspace, id: 'other', cwd: '/tmp/other' };
+    const counts = () =>
+      container.querySelector<HTMLElement>('[class*="headerCounts"]');
+
+    renderSection({
+      client,
+      workspace,
+      expanded: true,
+      overviewEnabled: true,
+      sourceType: 'default',
+    });
+    await flush();
+    expect(counts()?.textContent).toBe('13');
+
+    // The channel query starts without a page: stale default counts above an
+    // empty channel list would mislead, so the header shows none.
+    renderSection({
+      client,
+      workspace,
+      expanded: true,
+      overviewEnabled: true,
+      sourceType: 'channel',
+    });
+    await flush();
+    expect(counts()).toBeNull();
+
+    resolveChannel({
+      sessions: [
+        { sessionId: 'x', workspaceCwd: '/tmp/other', sourceType: 'channel' },
+      ] as DaemonSessionSummary[],
+    });
+    await flush();
+    expect(counts()?.textContent).toBe('1');
+
+    // Collapsing keeps the last counts of the active source.
+    renderSection({
+      client,
+      workspace,
+      expanded: false,
+      overviewEnabled: true,
+      sourceType: 'channel',
+    });
+    await flush();
+    expect(counts()?.textContent).toBe('1');
+  });
+});

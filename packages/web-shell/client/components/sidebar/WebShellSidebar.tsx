@@ -5545,7 +5545,7 @@ export function WebShellSidebar({
                           sessionStats={
                             ws.primary ? primarySessionStats : undefined
                           }
-                          headerActions={(visible, overview) => {
+                          headerActions={(visible, { overview, gitBranch }) => {
                             if (
                               lockedWorkspaceCwd &&
                               lockedWorkspaceOptions?.render
@@ -5581,7 +5581,12 @@ export function WebShellSidebar({
                               ...(ws.trusted
                                 ? { newSession: () => handleNewSession(wsCwd) }
                                 : {}),
-                              ...(ws.trusted && onNewWorktreeSession
+                              // A worktree needs a git repository; without a
+                              // branch the composer never shows the armed
+                              // intent and the daemon rejects the session.
+                              ...(ws.trusted &&
+                              onNewWorktreeSession &&
+                              gitBranch
                                 ? {
                                     newWorktreeSession: () =>
                                       void onNewWorktreeSession(wsCwd),

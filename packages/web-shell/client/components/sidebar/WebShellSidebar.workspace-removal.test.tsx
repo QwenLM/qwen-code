@@ -398,6 +398,8 @@ function renderSidebar(
       workspaceCwd: string,
     ) => void;
     workspaceOverview?: false;
+    onOpenGitDiff?: (cwd: string) => void;
+    onNewWorktreeSession?: (cwd?: string) => void;
     onOpenAddWorkspace?: () => void;
     onNewSession?: (workspaceCwd?: string) => boolean;
     onLoadSession?: (sessionId: string, workspaceCwd?: string) => void;
@@ -447,6 +449,8 @@ function renderSidebar(
           onOpenAddWorkspace={overrides.onOpenAddWorkspace}
           onOpenWorkspaceManagement={overrides.onOpenWorkspaceManagement}
           workspaceOverview={overrides.workspaceOverview}
+          onOpenGitDiff={overrides.onOpenGitDiff}
+          onNewWorktreeSession={overrides.onNewWorktreeSession}
           workspaces={overrides.workspaces}
           lockedWorkspaceCwd={overrides.lockedWorkspaceCwd}
           lockedWorkspace={overrides.lockedWorkspace}
@@ -3078,6 +3082,10 @@ describe('WebShellSidebar workspace removal', () => {
 
   it('copies the workspace path and reports a clipboard failure', async () => {
     const writeText = vi.fn().mockResolvedValue(undefined);
+    const previousClipboard = Object.getOwnPropertyDescriptor(
+      navigator,
+      'clipboard',
+    );
     Object.defineProperty(navigator, 'clipboard', {
       configurable: true,
       value: { writeText },
@@ -3107,11 +3115,76 @@ describe('WebShellSidebar workspace removal', () => {
       expect(onError).toHaveBeenCalledTimes(1);
       expect(onError.mock.calls[0]?.[1]).toBe('Failed to copy workspace path');
     } finally {
-      Object.defineProperty(navigator, 'clipboard', {
-        configurable: true,
-        value: undefined,
-      });
+      // Put the shared jsdom stub back rather than leaving a hole behind.
+      if (previousClipboard) {
+        Object.defineProperty(navigator, 'clipboard', previousClipboard);
+      } else {
+        delete (navigator as { clipboard?: unknown }).clipboard;
+      }
     }
+  });
+
+  it('keeps the rename dialog open and skips the refresh when the daemon rejects', async () => {
+    connection.capabilities = {
+      ...capabilities,
+      features: [...capabilities.features, 'dynamic_workspace_registration'],
+    };
+    workspaceActions.updateWorkspace.mockRejectedValueOnce(new Error('boom'));
+    const onError = vi.fn();
+    renderSidebar({ onError });
+    act(() => click(workspaceAction('/tmp/other')!));
+    const rename = Array.from(
+      document.body.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+    ).find((element) => element.textContent === 'Rename…');
+    act(() => click(rename!));
+    const input = document.querySelector<HTMLInputElement>(
+      '#workspace-display-name',
+    );
+    act(() => setInputValue(input!, 'Other API'));
+    await act(async () => {
+      input!.form!.dispatchEvent(
+        new Event('submit', { bubbles: true, cancelable: true }),
+      );
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(onError.mock.calls[0]?.[1]).toBe('Failed to rename workspace');
+    // The typed name survives for a retry, and nothing was refreshed.
+    expect(
+      document.querySelector<HTMLInputElement>('#workspace-display-name')
+        ?.value,
+    ).toBe('Other API');
+    expect(workspace.refreshCapabilities).not.toHaveBeenCalled();
+  });
+
+  it('offers a worktree task only on workspaces that report a git branch', async () => {
+    const previous = workspace.client.workspaceByCwd.getMockImplementation();
+    workspace.client.workspaceByCwd.mockImplementation((cwd: string) => ({
+      ...(previous?.(cwd) ?? {}),
+      workspaceGit: vi.fn().mockResolvedValue({
+        v: 2,
+        workspaceCwd: cwd,
+        // Only the secondary workspace is a git repository here.
+        branch: cwd === '/tmp/other' ? 'main' : null,
+      }),
+    }));
+    const onNewWorktreeSession = vi.fn();
+    renderSidebar({ onOpenGitDiff: vi.fn(), onNewWorktreeSession });
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    act(() => click(workspaceAction('/tmp/other')!));
+    expect(menuItemLabels()).toContain('New worktree task');
+    const worktree = Array.from(
+      document.body.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+    ).find((element) => element.textContent === 'New worktree task');
+    act(() => click(worktree!));
+    expect(onNewWorktreeSession).toHaveBeenCalledWith('/tmp/other');
+    act(() => click(workspaceAction('/tmp/project')!));
+    expect(menuItemLabels()).toContain('New task');
+    expect(menuItemLabels()).not.toContain('New worktree task');
   });
 
   it('treats a failed capabilities refresh after a rename as converged', async () => {

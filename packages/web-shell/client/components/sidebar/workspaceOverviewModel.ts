@@ -165,6 +165,11 @@ export function summarizeChannels(
   return { configured: instances.length, connected, failed };
 }
 
+/**
+ * Context files are read from disk by the daemon itself (no ACP child), so
+ * the route always answers definitively: `initialized: false` is its way of
+ * saying no context file exists, and renders as a count of 0.
+ */
 export interface WorkspaceContextSummary {
   initialized: boolean;
   fileCount: number;
@@ -213,14 +218,13 @@ export interface WorkspaceOverviewSnapshot {
   fetchedAt: number;
 }
 
-/** Facets the workspace's ACP child discovers; the rest are daemon-side. */
+/**
+ * Facets the workspace's ACP child discovers, which stay unknown until it
+ * reports; extensions, channels and context files are answered by the daemon
+ * itself and are known as soon as the route responds.
+ */
 export function isRuntimeDiscoveredFacet(item: WorkspaceOverviewItem): boolean {
-  return (
-    item === 'mcp' ||
-    item === 'skills' ||
-    item === 'context' ||
-    item === 'hooks'
-  );
+  return item === 'mcp' || item === 'skills' || item === 'hooks';
 }
 
 /**
@@ -243,7 +247,7 @@ export function isOverviewFacetKnown(
     case 'channels':
       return snapshot.channels !== undefined;
     case 'context':
-      return snapshot.context?.initialized === true;
+      return snapshot.context !== undefined;
     case 'hooks':
       return snapshot.hooks?.initialized === true;
     default:

@@ -67,8 +67,24 @@ describe('formatOverviewValue', () => {
     expect(formatOverviewValue(snapshot, 'skills')).toBe('11');
     expect(formatOverviewValue(snapshot, 'extensions')).toBe('4');
     expect(formatOverviewValue(snapshot, 'channels')).toBe('2/2');
-    // Not initialized: unknown, never "0".
-    expect(formatOverviewValue(snapshot, 'context')).toBeUndefined();
+    // The daemon reads context files itself: no files is a known zero.
+    expect(formatOverviewValue(snapshot, 'context')).toBe('0');
+    // A runtime facet that has not reported is unknown, never "0".
+    expect(
+      formatOverviewValue(
+        {
+          mcp: {
+            initialized: false,
+            configured: 0,
+            connected: 0,
+            failed: 0,
+            disabled: 0,
+          },
+          fetchedAt: 1,
+        },
+        'mcp',
+      ),
+    ).toBeUndefined();
     expect(formatOverviewValue(undefined, 'mcp')).toBeUndefined();
   });
 
@@ -95,9 +111,9 @@ describe('WorkspaceOverview', () => {
       'MCP: 3 of 4 connected, 1 failed',
     );
     expect(chip('skills').textContent).toBe('Skills11');
-    expect(chip('context').textContent).toBe('Context—');
+    expect(chip('context').textContent).toBe('Context0');
     expect(chip('context').getAttribute('title')).toBe(
-      'Context: not initialized yet',
+      'Context: 0 context files, 0 rules',
     );
     expect(container.querySelector('[role="list"]')).not.toBeNull();
   });
@@ -157,7 +173,7 @@ describe('WorkspaceOverview', () => {
     await render(
       <WorkspaceOverview
         overview={{ fetchedAt: 1 }}
-        items={['extensions', 'channels', 'mcp']}
+        items={['extensions', 'channels', 'context', 'mcp']}
       />,
     );
     expect(chip('extensions').getAttribute('title')).toBe(
@@ -165,6 +181,9 @@ describe('WorkspaceOverview', () => {
     );
     expect(chip('channels').getAttribute('title')).toBe(
       'Channels: unavailable on this daemon',
+    );
+    expect(chip('context').getAttribute('title')).toBe(
+      'Context: unavailable on this daemon',
     );
     expect(chip('mcp').getAttribute('title')).toBe('MCP: not initialized yet');
   });

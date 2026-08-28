@@ -129,13 +129,26 @@ describe('summarizeHooks', () => {
 describe('isRuntimeDiscoveredFacet', () => {
   it('separates ACP-discovered facets from daemon-side ones', () => {
     expect(
-      (['mcp', 'skills', 'context', 'hooks'] as const).map(
+      (['mcp', 'skills', 'hooks'] as const).map(isRuntimeDiscoveredFacet),
+    ).toEqual([true, true, true]);
+    expect(
+      (['extensions', 'channels', 'context'] as const).map(
         isRuntimeDiscoveredFacet,
       ),
-    ).toEqual([true, true, true, true]);
-    expect(
-      (['extensions', 'channels'] as const).map(isRuntimeDiscoveredFacet),
-    ).toEqual([false, false]);
+    ).toEqual([false, false, false]);
+  });
+});
+
+describe('context facet', () => {
+  it('treats the daemon answer for a workspace without context files as a known zero', () => {
+    // The memory route is filesystem-only: `initialized: false` with no files
+    // is its definitive "nothing here", not a runtime still starting.
+    const snapshot: WorkspaceOverviewSnapshot = {
+      context: { initialized: false, fileCount: 0, ruleCount: 0 },
+      fetchedAt: 1,
+    };
+    expect(isOverviewFacetKnown(snapshot, 'context')).toBe(true);
+    expect(isOverviewFacetKnown({ fetchedAt: 1 }, 'context')).toBe(false);
   });
 });
 

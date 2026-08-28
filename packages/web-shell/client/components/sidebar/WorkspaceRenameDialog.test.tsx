@@ -129,7 +129,7 @@ describe('WorkspaceRenameDialog', () => {
       />,
     );
     expect(input().value).toBe(longName);
-    expect(input().maxLength).toBeGreaterThanOrEqual(256);
+    expect(input().maxLength).toBe(256);
   });
 
   it('keeps save disabled while busy even when the name changed', async () => {
