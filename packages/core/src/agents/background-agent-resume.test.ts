@@ -181,7 +181,7 @@ describe('BackgroundAgentResumeService', () => {
       getSessionId: () => 'session-1',
       getProjectRoot: () => tempDir,
       getCliVersion: () => 'test-version',
-      getGeminiClient: () =>
+      getLlmClient: () =>
         options.currentForkRuntime
           ? {
               getChat: () => ({

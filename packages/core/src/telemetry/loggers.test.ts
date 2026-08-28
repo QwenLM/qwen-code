@@ -16,7 +16,7 @@ import type {
 } from '../index.js';
 import {
   AuthType,
-  GeminiClient,
+  LlmClient,
   ToolConfirmationOutcome,
   ToolErrorType,
   ToolNames,
@@ -1249,7 +1249,7 @@ describe('loggers', () => {
     const cfg1 = {
       getSessionId: () => 'test-session-id',
       getTargetDir: () => 'target-dir',
-      getGeminiClient: () => mockGeminiClient,
+      getLlmClient: () => mockLlmClient,
     } as Config;
     const cfg2 = {
       getSessionId: () => 'test-session-id',
@@ -1279,11 +1279,11 @@ describe('loggers', () => {
       getUserMemory: () => 'user-memory',
     } as unknown as Config;
 
-    const mockGeminiClient = new GeminiClient(cfg2);
+    const mockLlmClient = new LlmClient(cfg2);
     const mockConfig = {
       getSessionId: () => 'test-session-id',
       getTargetDir: () => 'target-dir',
-      getGeminiClient: () => mockGeminiClient,
+      getLlmClient: () => mockLlmClient,
       getUsageStatisticsEnabled: () => true,
       getTelemetryEnabled: () => true,
       getTelemetryLogPromptsEnabled: () => true,

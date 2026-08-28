@@ -7,14 +7,14 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from '../config/config.js';
 import type {
-  ServerGeminiContentEvent,
-  ServerGeminiModelFallbackEvent,
-  ServerGeminiRetryEvent,
-  ServerGeminiStreamEvent,
-  ServerGeminiThoughtEvent,
-  ServerGeminiToolCallRequestEvent,
+  ServerLlmContentEvent,
+  ServerLlmModelFallbackEvent,
+  ServerLlmRetryEvent,
+  ServerLlmStreamEvent,
+  ServerLlmThoughtEvent,
+  ServerLlmToolCallRequestEvent,
 } from '../core/turn.js';
-import { GeminiEventType } from '../core/turn.js';
+import { LlmEventType } from '../core/turn.js';
 import * as loggers from '../telemetry/loggers.js';
 import { LoopType } from '../telemetry/types.js';
 import type { DebugLogger } from '../utils/debugLogger.js';
@@ -75,8 +75,8 @@ describe('LoopDetectionService', () => {
   const createToolCallRequestEvent = (
     name: string,
     args: Record<string, unknown>,
-  ): ServerGeminiToolCallRequestEvent => ({
-    type: GeminiEventType.ToolCallRequest,
+  ): ServerLlmToolCallRequestEvent => ({
+    type: LlmEventType.ToolCallRequest,
     value: {
       name,
       args,
@@ -86,16 +86,16 @@ describe('LoopDetectionService', () => {
     },
   });
 
-  const createContentEvent = (content: string): ServerGeminiContentEvent => ({
-    type: GeminiEventType.Content,
+  const createContentEvent = (content: string): ServerLlmContentEvent => ({
+    type: LlmEventType.Content,
     value: content,
   });
 
   const createThoughtEvent = (
     subject: string,
     description = '',
-  ): ServerGeminiThoughtEvent => ({
-    type: GeminiEventType.Thought,
+  ): ServerLlmThoughtEvent => ({
+    type: LlmEventType.Thought,
     value: { subject, description },
   });
 
@@ -158,8 +158,8 @@ describe('LoopDetectionService', () => {
         param: 'value',
       });
       const otherEvent = {
-        type: GeminiEventType.UserCancelled,
-      } as unknown as ServerGeminiStreamEvent;
+        type: LlmEventType.UserCancelled,
+      } as unknown as ServerLlmStreamEvent;
 
       // Send events just below the threshold
       for (let i = 0; i < TOOL_CALL_LOOP_THRESHOLD - 1; i++) {
@@ -182,8 +182,8 @@ describe('LoopDetectionService', () => {
 
       expect(
         service.checkAlwaysOnSafeties({
-          type: GeminiEventType.Retry,
-        } as ServerGeminiStreamEvent),
+          type: LlmEventType.Retry,
+        } as ServerLlmStreamEvent),
       ).toBe(false);
 
       for (let i = 0; i < TOOL_CALL_LOOP_THRESHOLD - 1; i++) {
@@ -377,8 +377,8 @@ describe('LoopDetectionService', () => {
 
       expect(
         service.checkAlwaysOnSafeties({
-          type: GeminiEventType.Retry,
-        } as ServerGeminiStreamEvent),
+          type: LlmEventType.Retry,
+        } as ServerLlmStreamEvent),
       ).toBe(false);
 
       for (const command of variants) {
@@ -1112,7 +1112,7 @@ describe('LoopDetectionService', () => {
     it('should return false for unhandled event types', () => {
       const otherEvent = {
         type: 'unhandled_event',
-      } as unknown as ServerGeminiStreamEvent;
+      } as unknown as ServerLlmStreamEvent;
       expect(service.addAndCheck(otherEvent)).toBe(false);
       expect(service.addAndCheck(otherEvent)).toBe(false);
     });
@@ -1544,13 +1544,13 @@ describe('LoopDetectionService', () => {
 
     const createRetryEvent = (
       isContinuation?: boolean,
-    ): ServerGeminiRetryEvent => ({
-      type: GeminiEventType.Retry,
+    ): ServerLlmRetryEvent => ({
+      type: LlmEventType.Retry,
       ...(isContinuation !== undefined && { isContinuation }),
     });
 
-    const createModelFallbackEvent = (): ServerGeminiModelFallbackEvent => ({
-      type: GeminiEventType.ModelFallback,
+    const createModelFallbackEvent = (): ServerLlmModelFallbackEvent => ({
+      type: LlmEventType.ModelFallback,
       fromModel: 'primary-model',
       toModel: 'fallback-model',
       fallbackIndex: 1,
@@ -1740,7 +1740,7 @@ describe('LoopDetectionService', () => {
         streamed += piece.length;
         if (
           service.addAndCheck({
-            type: GeminiEventType.Content,
+            type: LlmEventType.Content,
             value: piece,
           })
         ) {
@@ -1770,7 +1770,7 @@ describe('LoopDetectionService', () => {
         const piece = text.slice(i, i + DELTA);
         streamed += piece.length;
         expect(
-          service.addAndCheck({ type: GeminiEventType.Content, value: piece }),
+          service.addAndCheck({ type: LlmEventType.Content, value: piece }),
         ).toBe(false);
         if (streamed === insideSlackBand) {
           // Past the window, inside the slack band: no physical trim yet —
@@ -2158,12 +2158,12 @@ describe('LoopDetectionService', () => {
     });
 
     const retryEvent = {
-      type: GeminiEventType.Retry,
-    } as ServerGeminiStreamEvent;
+      type: LlmEventType.Retry,
+    } as ServerLlmStreamEvent;
     const finishedEvent = {
-      type: GeminiEventType.Finished,
+      type: LlmEventType.Finished,
       value: { reason: 'STOP' },
-    } as unknown as ServerGeminiStreamEvent;
+    } as unknown as ServerLlmStreamEvent;
 
     it('does not fire at or below the soft cap', () => {
       service.reset('');
@@ -2615,7 +2615,7 @@ describe('LoopDetectionService', () => {
     it('does not count a retried replay toward the global-duplicate threshold', () => {
       service.reset('');
       const stuck = createToolCallRequestEvent('stuck_tool', { param: 'same' });
-      const retry = { type: GeminiEventType.Retry } as ServerGeminiStreamEvent;
+      const retry = { type: LlmEventType.Retry } as ServerLlmStreamEvent;
       // Failed attempt streams (threshold - 3) identical calls, then retries.
       for (let i = 0; i < GLOBAL_DUPLICATE_THRESHOLD - 3; i++) {
         expect(service.addAndCheckHeuristicLoops(stuck)).toBe(false);

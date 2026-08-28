@@ -498,7 +498,7 @@ function isModelFunctionCallEntry(content: Content | undefined): boolean {
  *
  * The "every part" requirement is load-bearing. Per-turn reminders (plan
  * mode, subagent list, recalled memory) are prepended as an extra part to the
- * SAME user `Content` as the actual prompt: `GeminiClient.sendMessageStream`
+ * SAME user `Content` as the actual prompt: `LlmClient.sendMessageStream`
  * assembles `[...systemReminders, ...userPrompt]` into one `createUserContent`
  * that persists in history. Such a turn has a non-reminder prompt part, so it
  * is NOT pure — matching on `parts[0]` alone would misclassify a genuine user

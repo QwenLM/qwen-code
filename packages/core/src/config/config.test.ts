@@ -54,7 +54,7 @@ import {
   resolveContentGeneratorConfigWithSources,
 } from '../core/contentGenerator.js';
 import { DEFAULT_TOKEN_LIMIT } from '../core/tokenLimits.js';
-import { GeminiClient } from '../core/client.js';
+import { LlmClient } from '../core/client.js';
 import { ShellTool } from '../tools/shell.js';
 import { canUseRipgrep } from '../utils/ripgrepUtils.js';
 import { getSessionProjectDir } from '../utils/sessionIdContext.js';
@@ -310,7 +310,7 @@ vi.mock('../tools/memory-config', () => ({
 vi.mock('../core/contentGenerator.js');
 
 vi.mock('../core/client.js', () => ({
-  GeminiClient: vi.fn().mockImplementation(() => ({
+  LlmClient: vi.fn().mockImplementation(() => ({
     initialize: vi.fn().mockResolvedValue(undefined),
     isInitialized: vi.fn().mockReturnValue(true),
     setTools: vi.fn(),
@@ -576,7 +576,7 @@ describe('Server Config (config.ts)', () => {
       const config = new Config({ ...baseParams, sessionId });
       expect(getSessionProjectDir(sessionId)).toBeUndefined();
       await config.initialize({
-        skipGeminiInitialization: true,
+        skipLlmInitialization: true,
         skipHooks: true,
         skipMcpDiscovery: true,
         skipSkillManager: true,
@@ -586,6 +586,20 @@ describe('Server Config (config.ts)', () => {
       await config.shutdown();
       // In daemon mode this is what stops the map growing per session.
       expect(getSessionProjectDir(sessionId)).toBeUndefined();
+    });
+
+    it('accepts the deprecated Gemini initialization option', async () => {
+      const config = new Config(baseParams);
+      await config.initialize({
+        skipGeminiInitialization: true,
+        skipHooks: true,
+        skipMcpDiscovery: true,
+        skipSkillManager: true,
+        skipFileCheckpointing: true,
+      });
+
+      expect(config.getGeminiClient()).toBe(config.getLlmClient());
+      await config.shutdown();
     });
   });
 
@@ -2403,7 +2417,7 @@ describe('Server Config (config.ts)', () => {
   describe('MemoryPressureMonitor isolation', () => {
     it('returns a distinct monitor for child Configs created via deriveConfig', async () => {
       const parent = new Config(baseParams);
-      await parent.initialize({ skipGeminiInitialization: true });
+      await parent.initialize({ skipLlmInitialization: true });
       const child = deriveConfig(parent);
 
       const parentMonitor = parent.getMemoryPressureMonitor();
@@ -2417,7 +2431,7 @@ describe('Server Config (config.ts)', () => {
 
     it('resets monitor cleanup state when starting a new session', async () => {
       const config = new Config(baseParams);
-      await config.initialize({ skipGeminiInitialization: true });
+      await config.initialize({ skipLlmInitialization: true });
       const monitor = config.getMemoryPressureMonitor();
       expect(monitor).toBeDefined();
       const resetSpy = vi.spyOn(monitor!, 'resetForNewSession');
@@ -2479,7 +2493,7 @@ describe('Server Config (config.ts)', () => {
       process.env['QWEN_MEMORY_PRESSURE_CRITICAL'] = '0.9';
 
       const config = new Config(baseParams);
-      await config.initialize({ skipGeminiInitialization: true });
+      await config.initialize({ skipLlmInitialization: true });
       mockMemoryRatio(0.35);
 
       expect(config.getMemoryPressureMonitor()?.getPressureLevel()).toBe(
@@ -2494,7 +2508,7 @@ describe('Server Config (config.ts)', () => {
       process.env['QWEN_MEMORY_PRESSURE_CRITICAL'] = '0.9';
 
       const config = new Config(baseParams);
-      await config.initialize({ skipGeminiInitialization: true });
+      await config.initialize({ skipLlmInitialization: true });
       mockMemoryRatio(0.35);
 
       expect(config.getMemoryPressureMonitor()?.getPressureLevel()).toBe(
@@ -2510,7 +2524,7 @@ describe('Server Config (config.ts)', () => {
       process.env['QWEN_MEMORY_PRESSURE_SOFT'] = '0.7';
 
       const config = new Config(baseParams);
-      await config.initialize({ skipGeminiInitialization: true });
+      await config.initialize({ skipLlmInitialization: true });
 
       expect(config.getMemoryPressureMonitor()).toBeDefined();
       expect(stderrSpy).toHaveBeenCalledWith(
@@ -2527,7 +2541,7 @@ describe('Server Config (config.ts)', () => {
         process.env['QWEN_MEMORY_PRESSURE_SOFT'] = value;
 
         const config = new Config(baseParams);
-        await config.initialize({ skipGeminiInitialization: true });
+        await config.initialize({ skipLlmInitialization: true });
         mockMemoryRatio(0.35);
 
         expect(config.getMemoryPressureMonitor()?.getPressureLevel()).toBe(
@@ -2559,7 +2573,7 @@ describe('Server Config (config.ts)', () => {
       });
 
       const config = new Config(baseParams);
-      await config.initialize({ skipGeminiInitialization: true });
+      await config.initialize({ skipLlmInitialization: true });
       mockMemoryRatio(0.85);
 
       config.getMemoryPressureMonitor()?.performCheck();
@@ -2576,7 +2590,7 @@ describe('Server Config (config.ts)', () => {
       process.env['QWEN_MEMORY_PRESSURE_HARD'] = '0.6';
       process.env['QWEN_MEMORY_PRESSURE_CRITICAL'] = '0.9';
       const parent = new Config(baseParams);
-      await parent.initialize({ skipGeminiInitialization: true });
+      await parent.initialize({ skipLlmInitialization: true });
 
       process.env['QWEN_MEMORY_PRESSURE_SOFT'] = '0.9';
       process.env['QWEN_MEMORY_PRESSURE_HARD'] = '0.95';
@@ -2615,7 +2629,7 @@ describe('Server Config (config.ts)', () => {
       const sessionId = 'same-session-id';
       const config = new Config({ ...baseParams, sessionId });
       await config.initialize({
-        skipGeminiInitialization: true,
+        skipLlmInitialization: true,
         skipHooks: true,
         skipMcpDiscovery: true,
         skipSkillManager: true,
@@ -2647,7 +2661,7 @@ describe('Server Config (config.ts)', () => {
     it('pins the outgoing chat recorder to the outgoing session id', async () => {
       const config = new Config({ ...baseParams, chatRecording: true });
       await config.initialize({
-        skipGeminiInitialization: true,
+        skipLlmInitialization: true,
         skipHooks: true,
         skipMcpDiscovery: true,
         skipSkillManager: true,
@@ -2667,7 +2681,7 @@ describe('Server Config (config.ts)', () => {
     it('ends the outgoing session before starting a replacement without continuation', async () => {
       const config = new Config({ ...baseParams });
       await config.initialize({
-        skipGeminiInitialization: true,
+        skipLlmInitialization: true,
         skipHooks: true,
         skipMcpDiscovery: true,
         skipSkillManager: true,
@@ -2697,7 +2711,7 @@ describe('Server Config (config.ts)', () => {
     it('carries the outgoing session id when resuming a different persisted session', async () => {
       const config = new Config({ ...baseParams });
       await config.initialize({
-        skipGeminiInitialization: true,
+        skipLlmInitialization: true,
         skipHooks: true,
         skipMcpDiscovery: true,
         skipSkillManager: true,
@@ -4456,8 +4470,9 @@ describe('Server Config (config.ts)', () => {
         ...baseParams,
         provisionalWorkspace: true,
       });
-      const geminiClient = vi.mocked(GeminiClient).mock.results.at(-1)
-        ?.value as { initialize: Mock } | undefined;
+      const llmClient = vi.mocked(LlmClient).mock.results.at(-1)?.value as
+        | { initialize: Mock }
+        | undefined;
 
       await config.initialize();
 
@@ -4465,14 +4480,14 @@ describe('Server Config (config.ts)', () => {
       expect(loadServerHierarchicalMemory).not.toHaveBeenCalled();
       expect(maybeRunAutoSkillCurator).not.toHaveBeenCalled();
       expect(ToolRegistry.prototype.warmAll).not.toHaveBeenCalled();
-      expect(geminiClient?.initialize).not.toHaveBeenCalled();
+      expect(llmClient?.initialize).not.toHaveBeenCalled();
 
       await Promise.all([
         config.activateProvisionalWorkspace(),
         config.activateProvisionalWorkspace(),
       ]);
 
-      expect(geminiClient?.initialize).toHaveBeenCalledOnce();
+      expect(llmClient?.initialize).toHaveBeenCalledOnce();
       expect(ToolRegistry.prototype.warmAll).toHaveBeenCalledOnce();
       expect(ToolRegistry.prototype.warmAll).toHaveBeenCalledWith({
         strict: true,
@@ -5450,7 +5465,7 @@ describe('Server Config (config.ts)', () => {
       );
       // Verify that contentGeneratorConfig is updated
       expect(config.getContentGeneratorConfig()).toEqual(mockContentConfig);
-      expect(GeminiClient).toHaveBeenCalledWith(config);
+      expect(LlmClient).toHaveBeenCalledWith(config);
     });
 
     it('preserves the user reasoning effort across an auth refresh that wipes it', async () => {

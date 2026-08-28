@@ -63,7 +63,7 @@ import {
   MOCK_TOOL_GET_DEFAULT_PERMISSION,
   MOCK_TOOL_GET_CONFIRMATION_DETAILS,
 } from '../test-utils/mock-tool.js';
-import { GeminiChat } from './geminiChat.js';
+import { LlmChat } from './llm-chat.js';
 import { MessageBusType } from '../confirmation-bus/types.js';
 import type { HookExecutionResponse } from '../confirmation-bus/types.js';
 import { type NotificationType } from '../hooks/types.js';
@@ -825,7 +825,7 @@ describe('CoreToolScheduler', () => {
     onToolCallsUpdate?: ReturnType<typeof vi.fn>;
     memoryMonitor?: { scheduleCheck: () => void };
     toolOutputBatchBudget?: number;
-    getGeminiClient?: () => unknown;
+    getLlmClient?: () => unknown;
     getPlanFilePath?: () => string;
     truncateToolOutputThreshold?: number;
     truncateToolOutputLines?: number;
@@ -943,7 +943,7 @@ describe('CoreToolScheduler', () => {
         getToolRegistry: () => mockToolRegistry,
         getCwd: () => '/repo',
         getUseModelRouter: () => false,
-        getGeminiClient: options.getGeminiClient ?? (() => null),
+        getLlmClient: options.getLlmClient ?? (() => null),
         getPlanFilePath:
           options.getPlanFilePath ?? (() => '/tmp/plans/test-session-id.md'),
         getChatRecordingService: () => undefined,
@@ -1556,8 +1556,8 @@ describe('CoreToolScheduler', () => {
     expect(execute).toHaveBeenCalledWith({ plan: 'Original plan' });
   });
 
-  function createChatWithPlanCall(callId: string, plan: string): GeminiChat {
-    return new GeminiChat({} as unknown as Config, {}, [
+  function createChatWithPlanCall(callId: string, plan: string): LlmChat {
+    return new LlmChat({} as unknown as Config, {}, [
       { role: 'user', parts: [{ text: 'please plan this' }] },
       {
         role: 'model',
@@ -1600,7 +1600,7 @@ describe('CoreToolScheduler', () => {
       toolsByName: new Map([[ToolNames.EXIT_PLAN_MODE, tool]]),
       approvalMode: ApprovalMode.YOLO,
       onAllToolCallsComplete,
-      getGeminiClient: () => ({ getChat: () => chat }),
+      getLlmClient: () => ({ getChat: () => chat }),
       getPlanFilePath: () => planFile,
     });
 
@@ -1667,7 +1667,7 @@ describe('CoreToolScheduler', () => {
       messageBus,
       disableHooks: false,
       onAllToolCallsComplete,
-      getGeminiClient: () => ({ getChat: () => chat }),
+      getLlmClient: () => ({ getChat: () => chat }),
       getPlanFilePath: () => planFile,
     });
 
@@ -1721,7 +1721,7 @@ describe('CoreToolScheduler', () => {
       toolsByName: new Map([[ToolNames.EXIT_PLAN_MODE, tool]]),
       approvalMode: ApprovalMode.YOLO,
       onAllToolCallsComplete,
-      getGeminiClient: () => ({ getChat: () => chat }),
+      getLlmClient: () => ({ getChat: () => chat }),
       getPlanFilePath: () => planFile,
     });
 
@@ -1767,7 +1767,7 @@ describe('CoreToolScheduler', () => {
       toolsByName: new Map([[ToolNames.EXIT_PLAN_MODE, tool]]),
       approvalMode: ApprovalMode.YOLO,
       onAllToolCallsComplete,
-      getGeminiClient: () => ({ getChat: () => chat }),
+      getLlmClient: () => ({ getChat: () => chat }),
       getPlanFilePath: () =>
         path.join(os.tmpdir(), 'qwen-plan-that-does-not-exist.md'),
     });
@@ -1806,7 +1806,7 @@ describe('CoreToolScheduler', () => {
       toolsByName: new Map([[ToolNames.EXIT_PLAN_MODE, tool]]),
       approvalMode: ApprovalMode.YOLO,
       onAllToolCallsComplete,
-      getGeminiClient: () => ({ getChat: () => chat }),
+      getLlmClient: () => ({ getChat: () => chat }),
     });
 
     await scheduler.schedule(
@@ -7206,7 +7206,7 @@ describe('CoreToolScheduler', () => {
       getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
       getToolRegistry: () => mockToolRegistry,
       getUseModelRouter: () => false,
-      getGeminiClient: () => null, // No client needed for these tests
+      getLlmClient: () => null, // No client needed for these tests
       getChatRecordingService: () => undefined,
       getMessageBus: vi.fn().mockReturnValue(undefined),
       getDisableAllHooks: vi.fn().mockReturnValue(true),
@@ -7289,7 +7289,7 @@ describe('CoreToolScheduler', () => {
       getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
       getToolRegistry: () => mockToolRegistry,
       getUseModelRouter: () => false,
-      getGeminiClient: () => null,
+      getLlmClient: () => null,
       getChatRecordingService: () => undefined,
       getMessageBus: vi.fn().mockReturnValue(undefined),
       getDisableAllHooks: vi.fn().mockReturnValue(true),
@@ -7376,7 +7376,7 @@ describe('CoreToolScheduler', () => {
       getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
       getToolRegistry: () => mockToolRegistry,
       getUseModelRouter: () => false,
-      getGeminiClient: () => null,
+      getLlmClient: () => null,
       getChatRecordingService: () => undefined,
       getMessageBus: vi.fn().mockReturnValue(undefined),
       getDisableAllHooks: vi.fn().mockReturnValue(true),
@@ -7431,7 +7431,7 @@ describe('CoreToolScheduler', () => {
       const mockConfig = {
         getToolRegistry: () => mockToolRegistry,
         getUseModelRouter: () => false,
-        getGeminiClient: () => null,
+        getLlmClient: () => null,
         getPermissionsDeny: () => undefined,
         isInteractive: () => true,
         getMessageBus: vi.fn().mockReturnValue(undefined),
@@ -7614,7 +7614,7 @@ describe('CoreToolScheduler', () => {
       const mockConfig = {
         getToolRegistry: () => mockToolRegistry,
         getUseModelRouter: () => false,
-        getGeminiClient: () => null, // No client needed for these tests
+        getLlmClient: () => null, // No client needed for these tests
         getPermissionsDeny: () => undefined,
         isInteractive: () => true,
         getMessageBus: vi.fn().mockReturnValue(undefined),
@@ -7658,7 +7658,7 @@ describe('CoreToolScheduler', () => {
       const mockConfig = {
         getToolRegistry: () => mockToolRegistry,
         getUseModelRouter: () => false,
-        getGeminiClient: () => null,
+        getLlmClient: () => null,
         getPermissionsDeny: () => ['write_file', 'edit', 'run_shell_command'],
         isInteractive: () => false, // Value doesn't matter, but included for completeness
         getMessageBus: vi.fn().mockReturnValue(undefined),
@@ -7691,7 +7691,7 @@ describe('CoreToolScheduler', () => {
       const mockConfig = {
         getToolRegistry: () => mockToolRegistry,
         getUseModelRouter: () => false,
-        getGeminiClient: () => null,
+        getLlmClient: () => null,
         getPermissionsDeny: () => ['write_file', 'edit'],
         isInteractive: () => false, // Value doesn't matter
         getMessageBus: vi.fn().mockReturnValue(undefined),
@@ -7736,7 +7736,7 @@ describe('CoreToolScheduler', () => {
       const mockConfig = {
         getToolRegistry: () => mockToolRegistry,
         getUseModelRouter: () => false,
-        getGeminiClient: () => null,
+        getLlmClient: () => null,
         getPermissionsDeny: () => undefined,
         isInteractive: () => true,
         getMessageBus: vi.fn().mockReturnValue(undefined),
@@ -7784,7 +7784,7 @@ describe('CoreToolScheduler', () => {
       const mockConfig = {
         getToolRegistry: () => mockToolRegistry,
         getUseModelRouter: () => false,
-        getGeminiClient: () => null,
+        getLlmClient: () => null,
         getPermissionsDeny: () => undefined,
         isInteractive: () => true,
         getMessageBus: vi.fn().mockReturnValue(undefined),
@@ -7831,7 +7831,7 @@ describe('CoreToolScheduler', () => {
       const mockConfig = {
         getToolRegistry: () => mockToolRegistry,
         getUseModelRouter: () => false,
-        getGeminiClient: () => null,
+        getLlmClient: () => null,
         getPermissionsDeny: () => undefined,
         isInteractive: () => true,
         getMessageBus: vi.fn().mockReturnValue(undefined),
@@ -7878,7 +7878,7 @@ describe('CoreToolScheduler', () => {
       const mockConfig = {
         getToolRegistry: () => mockToolRegistry,
         getUseModelRouter: () => false,
-        getGeminiClient: () => null,
+        getLlmClient: () => null,
         getPermissionsDeny: () => undefined,
         isInteractive: () => true,
         getMessageBus: vi.fn().mockReturnValue(undefined),
@@ -7952,7 +7952,7 @@ describe('CoreToolScheduler', () => {
         getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
         getToolRegistry: () => mockToolRegistry,
         getUseModelRouter: () => false,
-        getGeminiClient: () => null,
+        getLlmClient: () => null,
         getChatRecordingService: () => undefined,
         getMessageBus: vi.fn().mockReturnValue(undefined),
         getDisableAllHooks: vi.fn().mockReturnValue(true),
@@ -8044,7 +8044,7 @@ describe('CoreToolScheduler', () => {
         getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
         getToolRegistry: () => mockToolRegistry,
         getUseModelRouter: () => false,
-        getGeminiClient: () => null,
+        getLlmClient: () => null,
         getChatRecordingService: () => undefined,
         getMessageBus: vi.fn().mockReturnValue(undefined),
         getDisableAllHooks: vi.fn().mockReturnValue(true),
@@ -8136,7 +8136,7 @@ describe('CoreToolScheduler with payload', () => {
       getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
       getToolRegistry: () => mockToolRegistry,
       getUseModelRouter: () => false,
-      getGeminiClient: () => null, // No client needed for these tests
+      getLlmClient: () => null, // No client needed for these tests
       isInteractive: () => true, // Required to prevent auto-denial of tool calls
       getIdeMode: () => false,
       getExperimentalZedIntegration: () => false,
@@ -8598,7 +8598,7 @@ describe('CoreToolScheduler edit cancellation', () => {
       },
       getToolRegistry: () => mockToolRegistry,
       getUseModelRouter: () => false,
-      getGeminiClient: () => null, // No client needed for these tests
+      getLlmClient: () => null, // No client needed for these tests
       isInteractive: () => true, // Required to prevent auto-denial of tool calls
       getIdeMode: () => false,
       getExperimentalZedIntegration: () => false,
@@ -8706,7 +8706,7 @@ describe('CoreToolScheduler YOLO mode', () => {
       getTruncateToolOutputThreshold: () => 100_000,
       getTruncateToolOutputLines: () => 10_000,
       getUseModelRouter: () => false,
-      getGeminiClient: () => null,
+      getLlmClient: () => null,
       isInteractive: () => isInteractive,
       getIdeMode: () => false,
       getExperimentalZedIntegration: () => false,
@@ -8827,7 +8827,7 @@ describe('CoreToolScheduler YOLO mode', () => {
         DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
       getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
       getUseModelRouter: () => false,
-      getGeminiClient: () => null, // No client needed for these tests
+      getLlmClient: () => null, // No client needed for these tests
       getChatRecordingService: () => undefined,
       getMessageBus: vi.fn().mockReturnValue(undefined),
       getDisableAllHooks: vi.fn().mockReturnValue(true),
@@ -9386,7 +9386,7 @@ describe('CoreToolScheduler request queueing', () => {
       getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
       getToolRegistry: () => mockToolRegistry,
       getUseModelRouter: () => false,
-      getGeminiClient: () => null, // No client needed for these tests
+      getLlmClient: () => null, // No client needed for these tests
       getChatRecordingService: () => undefined,
       getMessageBus: vi.fn().mockReturnValue(undefined),
       getDisableAllHooks: vi.fn().mockReturnValue(true),
@@ -9512,7 +9512,7 @@ describe('CoreToolScheduler request queueing', () => {
       getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
       getToolRegistry: () => mockToolRegistry,
       getUseModelRouter: () => false,
-      getGeminiClient: () => null, // No client needed for these tests
+      getLlmClient: () => null, // No client needed for these tests
       getChatRecordingService: () => undefined,
       getMessageBus: vi.fn().mockReturnValue(undefined),
       getDisableAllHooks: vi.fn().mockReturnValue(true),
@@ -9586,7 +9586,7 @@ describe('CoreToolScheduler request queueing', () => {
         DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
       getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
       getUseModelRouter: () => false,
-      getGeminiClient: () => null, // No client needed for these tests
+      getLlmClient: () => null, // No client needed for these tests
       isInteractive: () => true, // Required to prevent auto-denial of tool calls
       getIdeMode: () => false,
       getExperimentalZedIntegration: () => false,
@@ -9785,7 +9785,7 @@ describe('CoreToolScheduler request queueing', () => {
       getPermissionManager: () => permissionManager,
       getAutoModeDenialState: () => denialState,
       setAutoModeDenialState,
-      getGeminiClient: () => ({ getHistoryTail: () => [] }),
+      getLlmClient: () => ({ getHistoryTail: () => [] }),
       getToolRegistry: () => toolRegistry,
       getAutoModeSettings: () => ({}),
       getModel: () => 'test-model',
@@ -10068,7 +10068,7 @@ describe('CoreToolScheduler truncated output protection', () => {
       getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
       getToolRegistry: () => mockToolRegistry,
       getUseModelRouter: () => false,
-      getGeminiClient: () => null,
+      getLlmClient: () => null,
       getChatRecordingService: () => undefined,
       isInteractive: () => true,
       getMessageBus: vi.fn().mockReturnValue(undefined),
@@ -10376,7 +10376,7 @@ describe('CoreToolScheduler Sequential Execution', () => {
         DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
       getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
       getUseModelRouter: () => false,
-      getGeminiClient: () => null,
+      getLlmClient: () => null,
       getChatRecordingService: () => undefined,
       getMessageBus: vi.fn().mockReturnValue(undefined),
       getDisableAllHooks: vi.fn().mockReturnValue(true),
@@ -10499,7 +10499,7 @@ describe('CoreToolScheduler Sequential Execution', () => {
         DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
       getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
       getUseModelRouter: () => false,
-      getGeminiClient: () => null,
+      getLlmClient: () => null,
       getChatRecordingService: () => undefined,
       getMessageBus: vi.fn().mockReturnValue(undefined),
       getDisableAllHooks: vi.fn().mockReturnValue(true),
@@ -10689,7 +10689,7 @@ describe('CoreToolScheduler plan mode with ask_user_question', () => {
       getConditionalRulesRegistry: () => undefined,
       getSkillManager: () => undefined,
       getUseModelRouter: () => false,
-      getGeminiClient: () => null,
+      getLlmClient: () => null,
       isInteractive: () => true,
       getIdeMode: () => false,
       getExperimentalZedIntegration: () => false,
@@ -11516,7 +11516,7 @@ describe('CoreToolScheduler Plan shell routing', () => {
       getConditionalRulesRegistry: () => undefined,
       getSkillManager: () => undefined,
       getUseModelRouter: () => false,
-      getGeminiClient: () => null,
+      getLlmClient: () => null,
       isInteractive: () => options.interactive ?? true,
       getIdeMode: () => options.ideMode ?? false,
       getExperimentalZedIntegration: () => false,
@@ -12354,7 +12354,7 @@ describe('CoreToolScheduler telemetry spans', () => {
       getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
       getToolRegistry: () => mockToolRegistry,
       getUseModelRouter: () => false,
-      getGeminiClient: () => null,
+      getLlmClient: () => null,
       getChatRecordingService: () => undefined,
       getMessageBus: vi.fn().mockReturnValue(options.messageBus),
       getDisableAllHooks: vi.fn().mockReturnValue(options.disableHooks ?? true),
@@ -14819,7 +14819,7 @@ describe('CoreToolScheduler telemetry spans', () => {
       storage: { getProjectTempDir: () => '/tmp' },
       getToolRegistry: () => mockToolRegistry,
       getUseModelRouter: () => false,
-      getGeminiClient: () => null,
+      getLlmClient: () => null,
       isInteractive: () => true,
       getIdeMode: () => false,
       getExperimentalZedIntegration: () => false,
@@ -15304,7 +15304,7 @@ describe('CoreToolScheduler telemetry spans', () => {
       storage: { getProjectTempDir: () => '/tmp' },
       getToolRegistry: () => mockToolRegistry,
       getUseModelRouter: () => false,
-      getGeminiClient: () => null,
+      getLlmClient: () => null,
       isInteractive: () => true,
       getIdeMode: overrides.getIdeMode ?? (() => false),
       getExperimentalZedIntegration: () => false,
@@ -15410,7 +15410,7 @@ describe('CoreToolScheduler telemetry spans', () => {
       getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
       getToolRegistry: () => mockToolRegistry,
       getUseModelRouter: () => false,
-      getGeminiClient: () => null,
+      getLlmClient: () => null,
       getChatRecordingService: () => undefined,
       isInteractive: () => true,
       getIdeMode: () => false,
@@ -15698,7 +15698,7 @@ describe('CoreToolScheduler telemetry spans', () => {
       storage: { getProjectTempDir: () => '/tmp' },
       getToolRegistry: () => mockToolRegistry,
       getUseModelRouter: () => false,
-      getGeminiClient: () => null,
+      getLlmClient: () => null,
       isInteractive: () => true,
       getIdeMode: () => false,
       getExperimentalZedIntegration: () => false,
@@ -15782,7 +15782,7 @@ describe('CoreToolScheduler telemetry spans', () => {
       storage: { getProjectTempDir: () => '/tmp' },
       getToolRegistry: () => mockToolRegistry,
       getUseModelRouter: () => false,
-      getGeminiClient: () => null,
+      getLlmClient: () => null,
       isInteractive: () => false, // forces non-interactive deny path
       getInputFormat: () => undefined,
       getIdeMode: () => false,
@@ -15868,7 +15868,7 @@ describe('CoreToolScheduler telemetry spans', () => {
       storage: { getProjectTempDir: () => '/tmp' },
       getToolRegistry: () => mockToolRegistry,
       getUseModelRouter: () => false,
-      getGeminiClient: () => null,
+      getLlmClient: () => null,
       isInteractive: () => true,
       getIdeMode: () => false,
       getExperimentalZedIntegration: () => false,
@@ -15941,7 +15941,7 @@ describe('CoreToolScheduler telemetry spans', () => {
       storage: { getProjectTempDir: () => '/tmp' },
       getToolRegistry: () => mockToolRegistry,
       getUseModelRouter: () => false,
-      getGeminiClient: () => null,
+      getLlmClient: () => null,
       isInteractive: () => true,
       getIdeMode: () => false,
       getExperimentalZedIntegration: () => false,
@@ -16072,7 +16072,7 @@ describe('CoreToolScheduler telemetry spans', () => {
       storage: { getProjectTempDir: () => '/tmp' },
       getToolRegistry: () => mockToolRegistry,
       getUseModelRouter: () => false,
-      getGeminiClient: () => null,
+      getLlmClient: () => null,
       isInteractive: () => true,
       getIdeMode: () => false,
       getExperimentalZedIntegration: () => false,
@@ -16182,7 +16182,7 @@ describe('CoreToolScheduler telemetry spans', () => {
       getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
       getToolRegistry: () => mockToolRegistry,
       getUseModelRouter: () => false,
-      getGeminiClient: () => null,
+      getLlmClient: () => null,
       getChatRecordingService: () => undefined,
       getMessageBus: vi.fn(() => {
         throw new Error('prelude boom — getMessageBus throws');
@@ -16345,7 +16345,7 @@ describe('CoreToolScheduler telemetry spans', () => {
       storage: { getProjectTempDir: () => '/tmp' },
       getToolRegistry: () => mockToolRegistry,
       getUseModelRouter: () => false,
-      getGeminiClient: () => null,
+      getLlmClient: () => null,
       isInteractive: () => true,
       getIdeMode: () => false,
       getExperimentalZedIntegration: () => false,
@@ -16581,7 +16581,7 @@ describe('CoreToolScheduler telemetry spans', () => {
       storage: { getProjectTempDir: () => '/tmp' },
       getToolRegistry: () => mockToolRegistry,
       getUseModelRouter: () => false,
-      getGeminiClient: () => null,
+      getLlmClient: () => null,
       isInteractive: () => true,
       getIdeMode: () => false,
       getExperimentalZedIntegration: () => false,
@@ -17230,7 +17230,7 @@ describe('Fire hook functions integration', () => {
         getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
         getToolRegistry: () => mockToolRegistry,
         getUseModelRouter: () => false,
-        getGeminiClient: () => null,
+        getLlmClient: () => null,
         getChatRecordingService: () => undefined,
         getMessageBus: vi.fn().mockReturnValue(undefined),
         getDisableAllHooks: vi.fn().mockReturnValue(true),
@@ -17906,7 +17906,7 @@ describe('CoreToolScheduler IDE interaction', () => {
       getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
       getToolRegistry: () => mockToolRegistry,
       getUseModelRouter: () => false,
-      getGeminiClient: () => null,
+      getLlmClient: () => null,
       isInteractive: () => true,
       getIdeMode: () => overrides.ideMode ?? true,
       getExperimentalZedIntegration: () => false,
@@ -18348,7 +18348,7 @@ describe('CoreToolScheduler validation retry loop detection', () => {
       getTruncateToolOutputLines: () => 10,
       getToolRegistry: () => mockToolRegistry,
       getUseModelRouter: () => false,
-      getGeminiClient: () => null,
+      getLlmClient: () => null,
       isInteractive: () => true,
       getIdeMode: () => false,
       getExperimentalZedIntegration: () => false,
@@ -18832,7 +18832,7 @@ describe('CoreToolScheduler validation retry loop detection', () => {
       getTruncateToolOutputLines: () => 10,
       getToolRegistry: () => mockToolRegistry,
       getUseModelRouter: () => false,
-      getGeminiClient: () => null,
+      getLlmClient: () => null,
       isInteractive: () => true,
       getIdeMode: () => false,
       getExperimentalZedIntegration: () => false,
@@ -19254,7 +19254,7 @@ describe('CoreToolScheduler activation wiring', () => {
       getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
       getToolRegistry: () => mockToolRegistry,
       getUseModelRouter: () => false,
-      getGeminiClient: () => null,
+      getLlmClient: () => null,
       getChatRecordingService: () => undefined,
       getMessageBus: vi.fn().mockReturnValue(undefined),
       getDisableAllHooks: vi.fn().mockReturnValue(true),
@@ -19549,7 +19549,7 @@ describe('CoreToolScheduler activation wiring', () => {
         getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
         getToolRegistry: () => mockToolRegistry,
         getUseModelRouter: () => false,
-        getGeminiClient: () => null,
+        getLlmClient: () => null,
         getChatRecordingService: () => undefined,
         getMessageBus: vi.fn().mockReturnValue(undefined),
         getDisableAllHooks: vi.fn().mockReturnValue(true),
@@ -19666,7 +19666,7 @@ describe('CoreToolScheduler activation wiring', () => {
       getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
       getToolRegistry: () => mockToolRegistry,
       getUseModelRouter: () => false,
-      getGeminiClient: () => null,
+      getLlmClient: () => null,
       getChatRecordingService: () => undefined,
       getMessageBus: vi.fn().mockReturnValue(undefined),
       getDisableAllHooks: vi.fn().mockReturnValue(true),
@@ -19786,7 +19786,7 @@ describe('CoreToolScheduler activation wiring', () => {
       getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
       getToolRegistry: () => mockToolRegistry,
       getUseModelRouter: () => false,
-      getGeminiClient: () => null,
+      getLlmClient: () => null,
       getChatRecordingService: () => undefined,
       getMessageBus: vi.fn().mockReturnValue(undefined),
       getDisableAllHooks: vi.fn().mockReturnValue(true),
@@ -19881,7 +19881,7 @@ describe('CoreToolScheduler activation wiring', () => {
       getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
       getToolRegistry: () => mockToolRegistry,
       getUseModelRouter: () => false,
-      getGeminiClient: () => null,
+      getLlmClient: () => null,
       getChatRecordingService: () => undefined,
       getMessageBus: vi.fn().mockReturnValue(undefined),
       getDisableAllHooks: vi.fn().mockReturnValue(true),
@@ -19977,7 +19977,7 @@ describe('CoreToolScheduler activation wiring', () => {
       getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
       getToolRegistry: () => mockToolRegistry,
       getUseModelRouter: () => false,
-      getGeminiClient: () => null,
+      getLlmClient: () => null,
       getChatRecordingService: () => undefined,
       getMessageBus: vi.fn().mockReturnValue(undefined),
       getDisableAllHooks: vi.fn().mockReturnValue(true),
@@ -20359,7 +20359,7 @@ describe('CoreToolScheduler prompt_id propagation', () => {
       },
       getToolRegistry: () => mockToolRegistry,
       getUseModelRouter: () => false,
-      getGeminiClient: () => null,
+      getLlmClient: () => null,
       isInteractive: () => true,
       getIdeMode: () => false,
       getExperimentalZedIntegration: () => false,
@@ -20441,7 +20441,7 @@ describe('CoreToolScheduler prompt_id propagation', () => {
       },
       getToolRegistry: () => mockToolRegistry,
       getUseModelRouter: () => false,
-      getGeminiClient: () => null,
+      getLlmClient: () => null,
       isInteractive: () => true,
       getIdeMode: () => false,
       getExperimentalZedIntegration: () => false,
@@ -20514,7 +20514,7 @@ describe('CoreToolScheduler prompt_id propagation', () => {
       },
       getToolRegistry: () => mockToolRegistry,
       getUseModelRouter: () => false,
-      getGeminiClient: () => null,
+      getLlmClient: () => null,
       isInteractive: () => true,
       getIdeMode: () => false,
       getExperimentalZedIntegration: () => false,
@@ -20588,7 +20588,7 @@ describe('CoreToolScheduler prompt_id propagation', () => {
       },
       getToolRegistry: () => mockToolRegistry,
       getUseModelRouter: () => false,
-      getGeminiClient: () => null,
+      getLlmClient: () => null,
       isInteractive: () => true,
       getIdeMode: () => false,
       getExperimentalZedIntegration: () => false,

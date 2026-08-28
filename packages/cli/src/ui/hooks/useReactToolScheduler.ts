@@ -50,13 +50,13 @@ export type ScheduleFn = (
 export type MarkToolsAsSubmittedFn = (callIds: string[]) => void;
 
 export type TrackedScheduledToolCall = ScheduledToolCall & {
-  responseSubmittedToGemini?: boolean;
+  responseSubmittedToLlm?: boolean;
 };
 export type TrackedValidatingToolCall = ValidatingToolCall & {
-  responseSubmittedToGemini?: boolean;
+  responseSubmittedToLlm?: boolean;
 };
 export type TrackedWaitingToolCall = WaitingToolCall & {
-  responseSubmittedToGemini?: boolean;
+  responseSubmittedToLlm?: boolean;
 };
 /**
  * NOTE on inherited fields: `pid?` and `promoteAbortController?` come
@@ -90,13 +90,13 @@ const _ASSERT_INHERITED_FIELDS_PRESENT: _AssertExecutingHasPid &
 void _ASSERT_INHERITED_FIELDS_PRESENT;
 
 export type TrackedExecutingToolCall = ExecutingToolCall & {
-  responseSubmittedToGemini?: boolean;
+  responseSubmittedToLlm?: boolean;
 };
 export type TrackedCompletedToolCall = CompletedToolCall & {
-  responseSubmittedToGemini?: boolean;
+  responseSubmittedToLlm?: boolean;
 };
 export type TrackedCancelledToolCall = CancelledToolCall & {
-  responseSubmittedToGemini?: boolean;
+  responseSubmittedToLlm?: boolean;
 };
 
 export type TrackedToolCall =
@@ -157,8 +157,8 @@ export function useReactToolScheduler(
           );
           // Start with the new core state, then layer on the existing UI state
           // to ensure UI-only properties like pid are preserved.
-          const responseSubmittedToGemini =
-            existingTrackedCall?.responseSubmittedToGemini ?? false;
+          const responseSubmittedToLlm =
+            existingTrackedCall?.responseSubmittedToLlm ?? false;
 
           if (coreTc.status === 'executing') {
             // `...coreTc` already spreads `pid` and
@@ -168,7 +168,7 @@ export function useReactToolScheduler(
             // version of this call.
             return {
               ...coreTc,
-              responseSubmittedToGemini,
+              responseSubmittedToLlm,
               liveOutput: (existingTrackedCall as TrackedExecutingToolCall)
                 ?.liveOutput,
             };
@@ -187,7 +187,7 @@ export function useReactToolScheduler(
           // tool call).
           return {
             ...coreTc,
-            responseSubmittedToGemini,
+            responseSubmittedToLlm,
             liveOutput: undefined,
             pid: undefined,
             promoteAbortController: undefined,
@@ -294,7 +294,7 @@ export function useReactToolScheduler(
       setToolCallsForDisplay((prevCalls) =>
         prevCalls.map((tc) =>
           callIdsToMark.includes(tc.request.callId)
-            ? { ...tc, responseSubmittedToGemini: true }
+            ? { ...tc, responseSubmittedToLlm: true }
             : tc,
         ),
       );

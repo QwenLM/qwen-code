@@ -1587,11 +1587,11 @@ export class BackgroundAgentResumeService {
     CurrentForkRuntime | undefined
   > {
     try {
-      const geminiClient = this.config.getGeminiClient();
-      const generationConfig = geminiClient?.getChat().getGenerationConfig();
+      const llmClient = this.config.getLlmClient();
+      const generationConfig = llmClient?.getChat().getGenerationConfig();
       if (!generationConfig?.systemInstruction) {
         debugLogger.debug(
-          '[BackgroundAgentResume] Current fork runtime unavailable (no_system_instruction): parent Gemini client or system instruction is missing.',
+          '[BackgroundAgentResume] Current fork runtime unavailable (no_system_instruction): parent LLM client or system instruction is missing.',
         );
         return undefined;
       }
