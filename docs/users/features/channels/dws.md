@@ -77,6 +77,8 @@ qwen channel pairing approve dws-work CODE
 
 Group mentions use the real-time personal event stream first. The channel also checks recent `@` message history every five seconds, so mentions from external groups are recovered when DingTalk omits them from the personal event stream. Messages are deduplicated by conversation and message ID across both paths.
 
+Ordinary direct messages are recovered the same way: a five-second history check re-drives any direct message the real-time stream omitted, deduplicated by conversation and message ID across both paths.
+
 When a message quotes another DingTalk message, the quoted text is included as reply context for the agent on both the real-time and history fallback paths.
 
 ## Document Mentions
