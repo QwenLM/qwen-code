@@ -180,7 +180,7 @@ const createUIState = (overrides: Partial<UIState> = {}): UIState =>
     memoryFileCount: 0,
     streamingState: {} as UIState['streamingState'],
     initError: null,
-    pendingGeminiHistoryItems: [],
+    pendingLlmHistoryItems: [],
     thought: null,
     shellModeActive: false,
     userMessages: [],
@@ -1410,7 +1410,7 @@ describe('<MainContent />', () => {
       expect(historyItemDisplayPropsSpy.mock.calls.at(-1)?.[0]).toEqual(
         expect.objectContaining({
           availableTerminalHeight: 100,
-          availableTerminalHeightGemini: 65536,
+          availableTerminalHeightLlm: 65536,
         }),
       );
 
@@ -1440,7 +1440,7 @@ describe('<MainContent />', () => {
       expect(historyItemDisplayPropsSpy.mock.calls.at(-1)?.[0]).toEqual(
         expect.objectContaining({
           availableTerminalHeight: undefined,
-          availableTerminalHeightGemini: undefined,
+          availableTerminalHeightLlm: undefined,
         }),
       );
     });
