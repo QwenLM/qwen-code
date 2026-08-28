@@ -44,6 +44,14 @@ const COMPOSER_TOOLBAR_ACTIONS = [
   'voice',
 ] as const satisfies readonly ComposerToolbarAction[];
 
+/**
+ * Bound for a session switch to be confirmed by the embedded shell. When the
+ * daemon is unreachable the shell renders its unavailable state instead of
+ * mounting, so neither `onSessionIdChange` nor `onError` ever fires and the
+ * switch overlay would lock the panel until a webview reload.
+ */
+const SESSION_SWITCH_TIMEOUT_MS = 15_000;
+
 /** Host-only slash entries. Built per language so the menu is not half-English. */
 function buildVsCodeSlashCommands(t: ChromeStrings) {
   return [
@@ -314,6 +322,9 @@ export function EmbeddedApp() {
   const [sessionListError, setSessionListError] = useState<string>();
   const [switchingSessionId, setSwitchingSessionId] = useState<string>();
   const [creatingSession, setCreatingSession] = useState(false);
+  const switchTimeoutRef = useRef<ReturnType<typeof setTimeout> | undefined>(
+    undefined,
+  );
   const [editingMessage, setEditingMessage] = useState<EditingMessage>();
   const historyButtonRef = useRef<HTMLButtonElement>(null);
   const shellRef = useRef<WebShellApi | null>(null);
@@ -338,6 +349,24 @@ export function EmbeddedApp() {
     setInsightProgress(undefined);
     setInsightReportPath(undefined);
   }, []);
+
+  const clearSwitchTimeout = useCallback(() => {
+    if (switchTimeoutRef.current !== undefined) {
+      clearTimeout(switchTimeoutRef.current);
+      switchTimeoutRef.current = undefined;
+    }
+  }, []);
+
+  const armSwitchTimeout = useCallback(() => {
+    clearSwitchTimeout();
+    switchTimeoutRef.current = setTimeout(() => {
+      switchTimeoutRef.current = undefined;
+      setSwitchingSessionId(undefined);
+      setHostNotice({ tone: 'error', text: t('session.switchFailed') });
+    }, SESSION_SWITCH_TIMEOUT_MS);
+  }, [clearSwitchTimeout, t]);
+
+  useEffect(() => clearSwitchTimeout, [clearSwitchTimeout]);
 
   const cancelMessageEditing = useCallback(() => {
     setEditingMessage(undefined);
@@ -811,6 +840,7 @@ export function EmbeddedApp() {
             setEditingMessage(undefined);
             composerRef.current?.clear({ text: true, tags: true });
             setSwitchingSessionId(session.sessionId);
+            armSwitchTimeout();
             setSessionTitle(session.displayName || t('session.past'));
             setRuntime((current) =>
               current && current.sessionId !== session.sessionId
@@ -1246,6 +1276,7 @@ export function EmbeddedApp() {
                 : current,
             );
             if (sessionId === switchingSessionId) {
+              clearSwitchTimeout();
               setSwitchingSessionId(undefined);
             }
           }}
@@ -1264,6 +1295,7 @@ export function EmbeddedApp() {
           onError={(error) => {
             clearInsight();
             setEditingMessage(undefined);
+            clearSwitchTimeout();
             setSwitchingSessionId(undefined);
             setCreatingSession(false);
             setHostNotice({

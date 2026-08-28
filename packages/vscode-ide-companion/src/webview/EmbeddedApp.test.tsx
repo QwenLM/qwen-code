@@ -41,6 +41,10 @@ const mocks = vi.hoisted(() => ({
   embeddedProps: { current: null as CapturedProps | null },
 }));
 
+const daemonMocks = vi.hoisted(() => ({
+  listWorkspaceSessionsPage: vi.fn(),
+}));
+
 vi.mock('@qwen-code/web-shell', () => ({
   WebShellWithProviders: (props: CapturedProps) => {
     mocks.embeddedProps.current = props;
@@ -50,6 +54,18 @@ vi.mock('@qwen-code/web-shell', () => ({
 
 vi.mock('./hooks/useVSCode.js', () => ({
   useVSCode: () => mocks.vscode,
+}));
+
+vi.mock('@qwen-code/sdk/daemon', () => ({
+  DaemonClient: class {
+    workspaceByCwd() {
+      return {
+        listWorkspaceSessionsPage: daemonMocks.listWorkspaceSessionsPage,
+        updateSessionMetadata: async () => ({}),
+        deleteSessionsData: async () => undefined,
+      };
+    }
+  },
 }));
 
 const mounted: RenderedApp[] = [];
@@ -96,6 +112,7 @@ beforeAll(async () => {
 beforeEach(() => {
   vi.clearAllMocks();
   mocks.embeddedProps.current = null;
+  daemonMocks.listWorkspaceSessionsPage.mockResolvedValue({ sessions: [] });
 });
 
 afterEach(() => {
@@ -443,5 +460,94 @@ describe('EmbeddedApp host wiring', () => {
       type: 'updatePanelTitle',
       data: { title: 'My Title' },
     });
+  });
+});
+
+describe('session switch overlay', () => {
+  async function selectPastSession(): Promise<{
+    container: HTMLElement;
+    historyButton: HTMLButtonElement;
+  }> {
+    daemonMocks.listWorkspaceSessionsPage.mockResolvedValueOnce({
+      sessions: [
+        {
+          sessionId: 'session-2',
+          workspaceCwd: '/workspace',
+          displayName: 'Old conversation',
+          updatedAt: Date.now() - 3 * 24 * 60 * 60 * 1000,
+        },
+      ],
+    });
+    await renderApp();
+    const { container } = mounted[mounted.length - 1];
+    const historyButton = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Past conversations"]',
+    );
+    expect(historyButton).not.toBeNull();
+    await act(async () => {
+      historyButton!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      await Promise.resolve();
+    });
+    const row = container.querySelector<HTMLElement>(
+      '[data-session-id="session-2"]',
+    );
+    expect(row).not.toBeNull();
+    await act(async () => {
+      row!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      await Promise.resolve();
+    });
+    return { container, historyButton: historyButton! };
+  }
+
+  it('unlocks the panel when the daemon never confirms a session switch', async () => {
+    // https://github.com/QwenLM/qwen-code/issues/10405 — with the daemon
+    // unreachable the embedded shell can never confirm the switch, so the
+    // "switching session" overlay would lock the panel until a webview
+    // reload. The host must lift the lock on its own so the user can retry.
+    vi.useFakeTimers();
+    try {
+      const { container, historyButton } = await selectPastSession();
+      expect(container.textContent).toContain('Loading conversation…');
+
+      await act(async () => {
+        vi.advanceTimersByTime(60_000);
+        await Promise.resolve();
+      });
+
+      expect(container.textContent).not.toContain('Loading conversation…');
+      expect(historyButton.disabled).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('still clears the overlay at once when the shell confirms the switch', async () => {
+    vi.useFakeTimers();
+    try {
+      const { container } = await selectPastSession();
+      expect(container.textContent).toContain('Loading conversation…');
+
+      await act(async () => {
+        callback<(sessionId: string | undefined) => void>(
+          mocks.embeddedProps.current as CapturedProps,
+          'onSessionIdChange',
+        )('session-2');
+        await Promise.resolve();
+      });
+
+      expect(container.textContent).not.toContain('Loading conversation…');
+
+      // A confirmed switch must also cancel the failure timer, or it would
+      // raise a bogus switch-failed notice after the fact.
+      await act(async () => {
+        vi.advanceTimersByTime(60_000);
+        await Promise.resolve();
+      });
+      expect(container.textContent).not.toContain(
+        'Switching conversations timed out.',
+      );
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
