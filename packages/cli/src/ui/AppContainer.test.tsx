@@ -107,7 +107,7 @@ import {
   type Config,
   makeFakeConfig,
   SendMessageType,
-  type GeminiClient,
+  type LlmClient,
   type GoalTurnHost,
   type HeldMessage,
   type SubagentManager,
@@ -202,7 +202,7 @@ vi.mock('./hooks/slashCommandProcessor.js');
 vi.mock('./hooks/useTerminalSize.js', () => ({
   useTerminalSize: vi.fn(() => ({ columns: 80, rows: 24 })),
 }));
-vi.mock('./hooks/useGeminiStream.js');
+vi.mock('./hooks/use-llm-stream.js');
 vi.mock('./hooks/vim.js');
 vi.mock('./hooks/useFocus.js');
 vi.mock('./hooks/useBracketedPaste.js');
@@ -259,7 +259,7 @@ import { useEditorSettings } from './hooks/useEditorSettings.js';
 import { useSettingsCommand } from './hooks/useSettingsCommand.js';
 import { useModelCommand } from './hooks/useModelCommand.js';
 import { useSlashCommandProcessor } from './hooks/slashCommandProcessor.js';
-import { useGeminiStream } from './hooks/useGeminiStream.js';
+import { useLlmStream } from './hooks/use-llm-stream.js';
 import { useVim } from './hooks/vim.js';
 import { useFolderTrust } from './hooks/useFolderTrust.js';
 import { useIdeTrustListener } from './hooks/useIdeTrustListener.js';
@@ -296,7 +296,7 @@ describe('AppContainer State Management', () => {
   const mockedUseSettingsCommand = useSettingsCommand as Mock;
   const mockedUseModelCommand = useModelCommand as Mock;
   const mockedUseSlashCommandProcessor = useSlashCommandProcessor as Mock;
-  const mockedUseGeminiStream = useGeminiStream as Mock;
+  const mockedUseLlmStream = useLlmStream as Mock;
   const mockedUseVim = useVim as Mock;
   const mockedUseFolderTrust = useFolderTrust as Mock;
   const mockedUseIdeTrustListener = useIdeTrustListener as Mock;
@@ -440,7 +440,7 @@ describe('AppContainer State Management', () => {
       shellConfirmationRequest: null,
       confirmationRequest: null,
     });
-    mockedUseGeminiStream.mockReturnValue({
+    mockedUseLlmStream.mockReturnValue({
       pendingToolCalls: [],
       streamingState: 'idle',
       submitQuery: vi.fn(),
@@ -515,14 +515,14 @@ describe('AppContainer State Management', () => {
     // Mock config's getTargetDir to return consistent workspace directory
     vi.spyOn(mockConfig, 'getTargetDir').mockReturnValue('/test/workspace');
 
-    // Mock GeminiClient to prevent unhandled errors from AgentTool.refreshSubagents
-    const mockGeminiClient: Partial<GeminiClient> = {
+    // Mock LlmClient to prevent unhandled errors from AgentTool.refreshSubagents
+    const mockLlmClient: Partial<LlmClient> = {
       initialize: vi.fn().mockResolvedValue(undefined),
       setTools: vi.fn().mockResolvedValue(undefined),
       isInitialized: vi.fn().mockReturnValue(false), // Return false to prevent setTools from being called
     };
-    vi.spyOn(mockConfig, 'getGeminiClient').mockReturnValue(
-      mockGeminiClient as GeminiClient,
+    vi.spyOn(mockConfig, 'getLlmClient').mockReturnValue(
+      mockLlmClient as LlmClient,
     );
 
     // Mock SubagentManager to prevent errors during AgentTool initialization
@@ -640,7 +640,7 @@ describe('AppContainer State Management', () => {
       filesFailed: string[];
     };
     fileRewindError?: Error;
-    noGeminiClient?: boolean;
+    noLlmClient?: boolean;
     history?: HistoryItem[];
     contextFilePaths?: string[];
   };
@@ -690,15 +690,15 @@ describe('AppContainer State Management', () => {
     ];
     const getHistoryShallow = vi.fn(() => apiHistory);
     const truncateHistory = vi.fn();
-    const geminiClient = {
+    const llmClient = {
       initialize: vi.fn().mockResolvedValue(undefined),
       setTools: vi.fn().mockResolvedValue(undefined),
       isInitialized: vi.fn().mockReturnValue(false),
       getHistoryShallow,
       truncateHistory,
-    } as unknown as GeminiClient;
-    vi.spyOn(mockConfig, 'getGeminiClient').mockReturnValue(
-      options.noGeminiClient ? (null as unknown as GeminiClient) : geminiClient,
+    } as unknown as LlmClient;
+    vi.spyOn(mockConfig, 'getLlmClient').mockReturnValue(
+      options.noLlmClient ? (null as unknown as LlmClient) : llmClient,
     );
 
     const rewind = vi.fn();
@@ -815,7 +815,7 @@ describe('AppContainer State Management', () => {
         token: 'token',
         activeCwd: '/test/workspace',
       });
-      mockedUseGeminiStream.mockReturnValue({
+      mockedUseLlmStream.mockReturnValue({
         pendingToolCalls: [],
         streamingState: StreamingState.Responding,
         submitQuery: vi.fn(),
@@ -851,7 +851,7 @@ describe('AppContainer State Management', () => {
         throw new Error('cancel failed');
       });
       const requestShutdown = vi.fn();
-      mockedUseGeminiStream.mockReturnValue({
+      mockedUseLlmStream.mockReturnValue({
         pendingToolCalls: [],
         streamingState: StreamingState.Responding,
         submitQuery: vi.fn(),
@@ -863,12 +863,12 @@ describe('AppContainer State Management', () => {
         streamingResponseLengthRef: { current: 0 },
         isReceivingContent: false,
       });
-      vi.spyOn(mockConfig, 'getGeminiClient').mockReturnValue({
+      vi.spyOn(mockConfig, 'getLlmClient').mockReturnValue({
         initialize: vi.fn().mockResolvedValue(undefined),
         setTools: vi.fn().mockResolvedValue(undefined),
         isInitialized: vi.fn().mockReturnValue(false),
         requestShutdown,
-      } as unknown as GeminiClient);
+      } as unknown as LlmClient);
 
       render(
         <AppContainer
@@ -893,9 +893,9 @@ describe('AppContainer State Management', () => {
     it('exits the foreground runtime after handing it to Agent View', async () => {
       const requestShutdown = vi.fn();
       const flush = vi.fn().mockResolvedValue(undefined);
-      vi.spyOn(mockConfig, 'getGeminiClient').mockReturnValue({
+      vi.spyOn(mockConfig, 'getLlmClient').mockReturnValue({
         requestShutdown,
-      } as unknown as GeminiClient);
+      } as unknown as LlmClient);
       vi.spyOn(mockConfig, 'getChatRecordingService').mockReturnValue({
         flush,
       } as unknown as NonNullable<
@@ -954,9 +954,9 @@ describe('AppContainer State Management', () => {
         activeCwd: '/repo',
       });
       const requestShutdown = vi.fn();
-      vi.spyOn(mockConfig, 'getGeminiClient').mockReturnValue({
+      vi.spyOn(mockConfig, 'getLlmClient').mockReturnValue({
         requestShutdown,
-      } as unknown as GeminiClient);
+      } as unknown as LlmClient);
       render(
         <AppContainer
           config={mockConfig}
@@ -1109,7 +1109,7 @@ describe('AppContainer State Management', () => {
         shellConfirmationRequest: null,
         confirmationRequest: null,
       });
-      mockedUseGeminiStream.mockReturnValue({
+      mockedUseLlmStream.mockReturnValue({
         pendingToolCalls: [],
         streamingState: 'responding',
         submitQuery,
@@ -1728,7 +1728,7 @@ describe('AppContainer State Management', () => {
         restoreMessages: vi.fn(),
         drainQueue: vi.fn().mockReturnValue([]),
       });
-      mockedUseGeminiStream.mockReturnValue({
+      mockedUseLlmStream.mockReturnValue({
         pendingToolCalls: [],
         streamingState: 'idle',
         submitQuery,
@@ -1934,7 +1934,7 @@ describe('AppContainer State Management', () => {
           | undefined;
         metadata?.onAdmissionFailed?.();
         throw new Error('persistent prepare failure');
-      }) as unknown as ReturnType<typeof useGeminiStream>['submitQuery'];
+      }) as unknown as ReturnType<typeof useLlmStream>['submitQuery'];
       const { rerender } = renderHook(
         ({ pendingSubmissionCount, submissionSettledRevision }) =>
           useQueuedSubmissionDrain({
@@ -2089,7 +2089,7 @@ describe('AppContainer State Management', () => {
           | { onAdmissionFailed?: () => void }
           | undefined;
         metadata?.onAdmissionFailed?.();
-      }) as unknown as ReturnType<typeof useGeminiStream>['submitQuery'];
+      }) as unknown as ReturnType<typeof useLlmStream>['submitQuery'];
 
       renderHook(() =>
         useQueuedSubmissionDrain({
@@ -2140,7 +2140,7 @@ describe('AppContainer State Management', () => {
           | { onDeliveryFailed?: () => void }
           | undefined;
         metadata?.onDeliveryFailed?.();
-      }) as unknown as ReturnType<typeof useGeminiStream>['submitQuery'];
+      }) as unknown as ReturnType<typeof useLlmStream>['submitQuery'];
 
       const { rerender } = renderHook(
         ({ pendingSubmissionCount, submissionSettledRevision }) =>
@@ -2217,7 +2217,7 @@ describe('AppContainer State Management', () => {
           | { onAdmissionFailed?: () => void }
           | undefined;
         metadata?.onAdmissionFailed?.();
-      }) as unknown as ReturnType<typeof useGeminiStream>['submitQuery'];
+      }) as unknown as ReturnType<typeof useLlmStream>['submitQuery'];
 
       const { rerender } = renderHook(
         ({ pendingSubmissionCount, submissionSettledRevision }) =>
@@ -2321,7 +2321,7 @@ describe('AppContainer State Management', () => {
       const mockQueueMessage = vi.fn();
       const mockSubmitQuery = vi.fn();
 
-      mockedUseGeminiStream.mockReturnValue({
+      mockedUseLlmStream.mockReturnValue({
         pendingToolCalls: [],
         streamingState: 'responding',
         submitQuery: mockSubmitQuery,
@@ -2370,7 +2370,7 @@ describe('AppContainer State Management', () => {
       const mockSubmitQuery = vi.fn();
       const mockQueueMessage = vi.fn();
 
-      mockedUseGeminiStream.mockReturnValue({
+      mockedUseLlmStream.mockReturnValue({
         pendingToolCalls: [],
         streamingState: 'responding',
         submitQuery: mockSubmitQuery,
@@ -2422,7 +2422,7 @@ describe('AppContainer State Management', () => {
       const mockSubmitQuery = vi.fn();
       const mockQueueMessage = vi.fn();
 
-      mockedUseGeminiStream.mockReturnValue({
+      mockedUseLlmStream.mockReturnValue({
         pendingToolCalls: [],
         streamingState: 'responding',
         submitQuery: mockSubmitQuery,
@@ -2533,7 +2533,7 @@ describe('AppContainer State Management', () => {
       const mockSubmitQuery = vi.fn();
       const mockQueueMessage = vi.fn();
 
-      mockedUseGeminiStream.mockReturnValue({
+      mockedUseLlmStream.mockReturnValue({
         pendingToolCalls: [],
         streamingState: 'idle',
         submitQuery: mockSubmitQuery,
@@ -2583,7 +2583,7 @@ describe('AppContainer State Management', () => {
       vi.spyOn(mockConfig, 'consumePendingRecoveredAgentsNotice')
         .mockReturnValueOnce('Use list_agents to inspect restored agents.')
         .mockReturnValue(null);
-      mockedUseGeminiStream.mockReturnValue({
+      mockedUseLlmStream.mockReturnValue({
         pendingToolCalls: [],
         streamingState: 'idle',
         submitQuery: vi.fn(),
@@ -3203,7 +3203,7 @@ describe('AppContainer State Management', () => {
           shellConfirmationRequest: null,
           confirmationRequest: null,
         });
-        mockedUseGeminiStream.mockReturnValue({
+        mockedUseLlmStream.mockReturnValue({
           pendingToolCalls: [],
           streamingState: StreamingState.Responding,
           submitQuery: vi.fn(),
@@ -3244,8 +3244,8 @@ describe('AppContainer State Management', () => {
   });
 
   describe('Cancel Handler (issue #3204)', () => {
-    // The cancel handler is wired through useGeminiStream's onCancelSubmit
-    // arg (positional index 15 — see the useGeminiStream call site in
+    // The cancel handler is wired through useLlmStream's onCancelSubmit
+    // arg (positional index 15 — see the useLlmStream call site in
     // AppContainer.tsx). We capture it via mockImplementation so a future
     // signature change surfaces as a clear test failure rather than silently
     // grabbing the wrong callback.
@@ -3294,7 +3294,7 @@ describe('AppContainer State Management', () => {
       streamReturnValue: Record<string, unknown>,
     ) => {
       capturedOnCancelSubmit = null;
-      mockedUseGeminiStream.mockImplementation((...args: unknown[]) => {
+      mockedUseLlmStream.mockImplementation((...args: unknown[]) => {
         const candidate = args[ON_CANCEL_SUBMIT_ARG_INDEX];
         if (typeof candidate === 'function') {
           capturedOnCancelSubmit = candidate as CapturedCancelSubmit;
@@ -3311,7 +3311,7 @@ describe('AppContainer State Management', () => {
     const triggerCancel = (info?: Parameters<CapturedCancelSubmit>[0]) => {
       if (!capturedOnCancelSubmit) {
         throw new Error(
-          `onCancelSubmit was not captured at arg index ${ON_CANCEL_SUBMIT_ARG_INDEX} — useGeminiStream signature may have changed`,
+          `onCancelSubmit was not captured at arg index ${ON_CANCEL_SUBMIT_ARG_INDEX} — useLlmStream signature may have changed`,
         );
       }
       capturedOnCancelSubmit(info);
@@ -3627,15 +3627,15 @@ describe('AppContainer State Management', () => {
         getPreviousUserMessages: vi.fn().mockResolvedValue([]),
         removeLastUserMessage: mockRemoveLastUserMessage,
       });
-      // Extend the default GeminiClient mock with the orphan-strip
+      // Extend the default LlmClient mock with the orphan-strip
       // entry-point so the auto-restore branch's third cleanup leg can
       // be observed.
-      vi.spyOn(mockConfig, 'getGeminiClient').mockReturnValue({
+      vi.spyOn(mockConfig, 'getLlmClient').mockReturnValue({
         initialize: vi.fn().mockResolvedValue(undefined),
         setTools: vi.fn().mockResolvedValue(undefined),
         isInitialized: vi.fn().mockReturnValue(false),
         stripOrphanedUserEntriesFromHistory: mockStripOrphans,
-      } as unknown as GeminiClient);
+      } as unknown as LlmClient);
       installCancelCapture({
         streamingState: 'responding',
         submitQuery: vi.fn(),
@@ -3712,12 +3712,12 @@ describe('AppContainer State Management', () => {
         getPreviousUserMessages: vi.fn().mockResolvedValue([]),
         removeLastUserMessage: mockRemoveLastUserMessage,
       });
-      vi.spyOn(mockConfig, 'getGeminiClient').mockReturnValue({
+      vi.spyOn(mockConfig, 'getLlmClient').mockReturnValue({
         initialize: vi.fn().mockResolvedValue(undefined),
         setTools: vi.fn().mockResolvedValue(undefined),
         isInitialized: vi.fn().mockReturnValue(false),
         stripOrphanedUserEntriesFromHistory: mockStripOrphans,
-      } as unknown as GeminiClient);
+      } as unknown as LlmClient);
       installCancelCapture({
         streamingState: 'responding',
         submitQuery: vi.fn(),
@@ -3780,12 +3780,12 @@ describe('AppContainer State Management', () => {
         getPreviousUserMessages: vi.fn().mockResolvedValue([]),
         removeLastUserMessage: vi.fn().mockResolvedValue(true),
       });
-      vi.spyOn(mockConfig, 'getGeminiClient').mockReturnValue({
+      vi.spyOn(mockConfig, 'getLlmClient').mockReturnValue({
         initialize: vi.fn().mockResolvedValue(undefined),
         setTools: vi.fn().mockResolvedValue(undefined),
         isInitialized: vi.fn().mockReturnValue(false),
         stripOrphanedUserEntriesFromHistory: mockStripOrphans,
-      } as unknown as GeminiClient);
+      } as unknown as LlmClient);
       installCancelCapture({
         streamingState: 'responding',
         submitQuery: vi.fn(),
@@ -3906,7 +3906,7 @@ describe('AppContainer State Management', () => {
 
     it('does not auto-restore when the cancelled turn did not add a user item (e.g. Cron / slash submit_prompt)', async () => {
       // Some submit paths (SendMessageType.Cron, slash submit_prompt) run
-      // through useGeminiStream without pushing a `user` history item.
+      // through useLlmStream without pushing a `user` history item.
       // If history happens to end with an older user prompt followed only
       // by synthetic items (e.g. info), the auto-restore guard must NOT
       // wrongly truncate/restore that older prompt on behalf of the
@@ -4110,7 +4110,7 @@ describe('AppContainer State Management', () => {
     it('does not auto-restore when the sync pendingItem snapshot has meaningful content (closes stale-state race)', async () => {
       // Race scenario from PR review: stream chunk arrives → cancelOngoingRequest
       // commits via addItem → fires onCancelSubmit before React re-renders, so
-      // the consumer's pendingGeminiHistoryItems prop reads as [] even though
+      // the consumer's pendingLlmHistoryItems prop reads as [] even though
       // pendingHistoryItemRef.current was non-null. The synchronous snapshot
       // passed via info.pendingItem must override the stale React-state copy.
       const mockSetText = vi.fn();
@@ -4968,7 +4968,7 @@ describe('AppContainer State Management', () => {
 
       // Mock the streaming state and thought
       const thoughtSubject = 'Processing request';
-      mockedUseGeminiStream.mockReturnValue({
+      mockedUseLlmStream.mockReturnValue({
         pendingToolCalls: [],
         streamingState: 'responding',
         submitQuery: vi.fn(),
@@ -5017,7 +5017,7 @@ describe('AppContainer State Management', () => {
       } as unknown as LoadedSettings;
 
       // Mock the streaming state as Idle with no thought
-      mockedUseGeminiStream.mockReturnValue({
+      mockedUseLlmStream.mockReturnValue({
         pendingToolCalls: [],
         streamingState: 'idle',
         submitQuery: vi.fn(),
@@ -5065,7 +5065,7 @@ describe('AppContainer State Management', () => {
 
       // Mock the streaming state and thought
       const thoughtSubject = 'Confirm tool execution';
-      mockedUseGeminiStream.mockReturnValue({
+      mockedUseLlmStream.mockReturnValue({
         pendingToolCalls: [],
         streamingState: StreamingState.WaitingForConfirmation,
         submitQuery: vi.fn(),
@@ -5115,7 +5115,7 @@ describe('AppContainer State Management', () => {
 
       // Mock the streaming state and thought with a short subject
       const shortTitle = 'Short';
-      mockedUseGeminiStream.mockReturnValue({
+      mockedUseLlmStream.mockReturnValue({
         pendingToolCalls: [],
         streamingState: 'responding',
         submitQuery: vi.fn(),
@@ -5170,7 +5170,7 @@ describe('AppContainer State Management', () => {
 
       // Mock the streaming state and thought
       const title = 'Test Title';
-      mockedUseGeminiStream.mockReturnValue({
+      mockedUseLlmStream.mockReturnValue({
         pendingToolCalls: [],
         streamingState: 'responding',
         submitQuery: vi.fn(),
@@ -5222,7 +5222,7 @@ describe('AppContainer State Management', () => {
       vi.stubEnv('CLI_TITLE', 'Custom Title');
 
       // Mock the streaming state as Idle with no thought
-      mockedUseGeminiStream.mockReturnValue({
+      mockedUseLlmStream.mockReturnValue({
         pendingToolCalls: [],
         streamingState: 'idle',
         submitQuery: vi.fn(),
@@ -5291,7 +5291,7 @@ describe('AppContainer State Management', () => {
         ReturnType<Config['getChatRecordingService']>
       >);
 
-      mockedUseGeminiStream.mockReturnValue({
+      mockedUseLlmStream.mockReturnValue({
         pendingToolCalls: [],
         streamingState: 'idle',
         submitQuery: vi.fn(),
@@ -5392,7 +5392,7 @@ describe('AppContainer State Management', () => {
         ReturnType<Config['getChatRecordingService']>
       >);
 
-      mockedUseGeminiStream.mockReturnValue({
+      mockedUseLlmStream.mockReturnValue({
         pendingToolCalls: [],
         streamingState: 'idle',
         submitQuery: vi.fn(),
@@ -5521,7 +5521,7 @@ describe('AppContainer State Management', () => {
       mockedUseTerminalSize.mockReturnValue({ columns: 80, rows: 5 });
       mockedMeasureElement.mockReturnValue({ width: 80, height: 10 }); // Footer is taller than the screen
 
-      mockedUseGeminiStream.mockReturnValue({
+      mockedUseLlmStream.mockReturnValue({
         pendingToolCalls: [],
         streamingState: 'idle',
         submitQuery: vi.fn(),
@@ -5853,7 +5853,7 @@ describe('AppContainer State Management', () => {
 
     it('should cancel ongoing request on first Ctrl+C', () => {
       const mockCancelOngoingRequest = vi.fn();
-      mockedUseGeminiStream.mockReturnValue({
+      mockedUseLlmStream.mockReturnValue({
         pendingToolCalls: [],
         streamingState: 'responding',
         submitQuery: vi.fn(),
@@ -5932,7 +5932,7 @@ describe('AppContainer State Management', () => {
         request: { callId: 'call-shell-1', name: 'run_shell_command' },
         promoteAbortController: promoteAc,
       };
-      mockedUseGeminiStream.mockReturnValue({
+      mockedUseLlmStream.mockReturnValue({
         streamingState: 'responding',
         submitQuery: vi.fn(),
         initError: null,
@@ -5989,7 +5989,7 @@ describe('AppContainer State Management', () => {
       const promoteAc2 = new AbortController();
       const abortSpy1 = vi.spyOn(promoteAc1, 'abort');
       const abortSpy2 = vi.spyOn(promoteAc2, 'abort');
-      mockedUseGeminiStream.mockReturnValue({
+      mockedUseLlmStream.mockReturnValue({
         streamingState: 'responding',
         submitQuery: vi.fn(),
         initError: null,
@@ -6049,7 +6049,7 @@ describe('AppContainer State Management', () => {
       // Pin the safety contract: pressing Ctrl+B mid-prompt with no
       // pending tool calls must NOT throw — falls through to the input
       // layer's own Ctrl+B (cursor-left).
-      mockedUseGeminiStream.mockReturnValue({
+      mockedUseLlmStream.mockReturnValue({
         streamingState: 'responding',
         submitQuery: vi.fn(),
         initError: null,
@@ -6110,7 +6110,7 @@ describe('AppContainer State Management', () => {
         // be filtered out by the tool-name guard.
         promoteAbortController: fakeNonShellAc,
       };
-      mockedUseGeminiStream.mockReturnValue({
+      mockedUseLlmStream.mockReturnValue({
         streamingState: 'responding',
         submitQuery: vi.fn(),
         initError: null,
@@ -6173,7 +6173,7 @@ describe('AppContainer State Management', () => {
     const ctrlO = makeKey({ name: 'o', ctrl: true, sequence: '\x0f' });
 
     it('Ctrl+O flips the full-detail state that expands thoughts and tool output', () => {
-      mockedUseGeminiStream.mockReturnValue({
+      mockedUseLlmStream.mockReturnValue({
         streamingState: 'idle',
         submitQuery: vi.fn(),
         initError: null,
@@ -6734,7 +6734,7 @@ describe('AppContainer State Management', () => {
     });
 
     it('shows an error and returns for conversation-only rewind with no client', async () => {
-      const harness = renderRewindHarness({ noGeminiClient: true });
+      const harness = renderRewindHarness({ noLlmClient: true });
 
       await runRewind(harness.target, 'conversation');
 
@@ -6751,7 +6751,7 @@ describe('AppContainer State Management', () => {
     });
 
     it('falls back to code restore for both-mode rewind with no client', async () => {
-      const harness = renderRewindHarness({ noGeminiClient: true });
+      const harness = renderRewindHarness({ noLlmClient: true });
 
       await runRewind(harness.target, 'both');
 
@@ -6769,7 +6769,7 @@ describe('AppContainer State Management', () => {
 
     it('surfaces unexpected outer errors through history', async () => {
       const harness = renderRewindHarness();
-      vi.spyOn(mockConfig, 'getGeminiClient').mockImplementation(() => {
+      vi.spyOn(mockConfig, 'getLlmClient').mockImplementation(() => {
         throw new Error('client exploded');
       });
 
@@ -6818,7 +6818,7 @@ describe('AppContainer State Management', () => {
         loadHistory: vi.fn(),
         truncateToItem: vi.fn(),
       });
-      mockedUseGeminiStream.mockReturnValue({
+      mockedUseLlmStream.mockReturnValue({
         pendingToolCalls: [],
         streamingState: 'idle',
         submitQuery: vi.fn(),
@@ -6863,7 +6863,7 @@ describe('AppContainer State Management', () => {
         loadHistory: vi.fn(),
         truncateToItem: vi.fn(),
       });
-      mockedUseGeminiStream.mockReturnValue({
+      mockedUseLlmStream.mockReturnValue({
         pendingToolCalls: [],
         streamingState: 'idle',
         submitQuery: vi.fn(),
@@ -7272,8 +7272,8 @@ describe('AppContainer State Management', () => {
       );
 
       // performMemoryRefresh is the 12th arg (index 11) passed to
-      // useGeminiStream by AppContainer.
-      const calls = mockedUseGeminiStream.mock.calls;
+      // useLlmStream by AppContainer.
+      const calls = mockedUseLlmStream.mock.calls;
       const performMemoryRefresh = calls[
         calls.length - 1
       ]![11] as () => Promise<void>;
@@ -7299,7 +7299,7 @@ describe('AppContainer State Management', () => {
 
   describe('Agent View idle gate state', () => {
     it('passes a populated idle-gate ref to the slash command processor', () => {
-      mockedUseGeminiStream.mockReturnValue({
+      mockedUseLlmStream.mockReturnValue({
         pendingToolCalls: [
           {
             status: 'awaiting_approval',

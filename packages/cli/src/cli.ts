@@ -399,7 +399,7 @@ export async function runCliEntry(
     : undefined;
   acpStartupProfiler?.initializeAcpStartupProfiler();
   acpStartupProfiler?.markAcpStartup('geminiImportStart');
-  const { main } = await import('./gemini.js');
+  const { main } = await import('./llm.js');
   acpStartupProfiler?.markAcpStartup('geminiImportEnd');
   await main();
 }
@@ -513,7 +513,7 @@ export function stampCliEntryEnv(entryPath?: string): void {
 
 // handleUncaughtException and isExpectedPtyRaceError live in
 // ./utils/uncaught-exception-handler.js and are re-exported here for existing
-// importers (cli.test.ts). gemini.tsx must import them from that leaf module
+// importers (cli.test.ts). llm.tsx must import them from that leaf module
 // directly: a static import of this entry file from a module the bundle loads
 // lazily makes esbuild hoist this entry into a shared chunk, which silently
 // disables the bootstrap guard at the bottom.

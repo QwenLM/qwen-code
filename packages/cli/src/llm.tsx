@@ -360,7 +360,7 @@ export async function main() {
   profileCheckpoint('main_entry');
   const acpStartupProfilerEnabled = isAcpStartupProfilerEnabled();
   // Bridge core-package startup events (Config.initialize, MCP discovery,
-  // GeminiClient.setTools) into the cli's startup profiler. Gated on
+  // LlmClient.setTools) into the cli's startup profiler. Gated on
   // `isStartupProfilerEnabled()` so that when QWEN_CODE_PROFILE_STARTUP is
   // unset (the common case) every core-side `recordStartupEvent()` call
   // sees a null sink and short-circuits at the first comparison, instead
