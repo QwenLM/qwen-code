@@ -8,15 +8,37 @@
 # first-parent commit since the head the last completed automatic round
 # reviewed is a two-parent merge of the base branch, and the PR's own
 # three-dot diff kept the same canonical digest — every changed and
-# context byte is hashed after stripping only unstable diff metadata
-# (index lines, hunk offsets), so an upstream edit touching the PR's own
-# hunks (whitespace included) fails the equality and the full round runs.
+# context byte is hashed, binary bytes included (--binary renders them as
+# content-carrying GIT binary patches, not the content-free "Binary files
+# ... differ" marker), after stripping only unstable diff metadata (index
+# lines, hunk offsets), so an upstream edit touching the PR's own hunks
+# (whitespace included) fails the equality and the full round runs.
+#
 # The reviewed head is the newest SUBMITTED ledger-marked review
 # (APPROVED, CHANGES_REQUESTED, or COMMENTED, with a submitted_at) posted
 # by the AUTHENTICATED account — resolved live via `gh api user`, same
 # norm as the fallback dedup — so a participant posting the marker text
 # in their own review, a PENDING draft, or a DISMISSED review can never
-# certify a head this gate would skip.
+# certify a head this gate would skip. The marker's PAYLOAD is the
+# certification, not its presence: only markers carrying a valid `sha`
+# anchor are admitted — the review pipeline withholds that field on
+# fail-closed rounds (an undecided blocker, unproven scope, a truncated
+# finding list), exactly the rounds that must not certify — and the
+# marker's recorded `base` must equal the current base ref, or a round
+# that reviewed against the old base would certify a retargeted one.
+# Markers without a `base` field fail open like any unmatched shape.
+#
+# Scope limit: docs-only-classified PRs never skip — their automatic
+# rounds are downgraded to medium with --comment stripped, and medium
+# posts no review, so such a PR never gains a ledger-marked review for
+# this lookup to resolve.
+#
+# The git calls below run against a reused self-hosted workspace whose
+# .git config and refs an earlier, possibly prompt-injected run can have
+# planted, so they follow the CLI's sanitizedGitEnv() norm: external diff
+# drivers and textconv are disabled (both execute code on a plain
+# `git diff`) and GIT_NO_REPLACE_OBJECTS=1 keeps planted refs/replace/*
+# from falsifying the digest and ancestry computations.
 #
 # Fail-open contract: every probe error or unmatched shape records
 # skip=false and the full round runs, and the script never exits non-zero —
@@ -25,6 +47,7 @@
 #
 # Outputs (GITHUB_OUTPUT): skip=true|false, reviewed_sha, reason.
 set -uo pipefail
+export GIT_NO_REPLACE_OBJECTS=1
 
 # Required environment, restated so a misconfigured caller dies naming the
 # missing input instead of probing git with empty arguments.
@@ -43,10 +66,16 @@ REASON=''
 # Canonical digest of the diff between two commits: every changed and
 # context byte is hashed, stripping only unstable metadata (index lines,
 # hunk offsets). `git patch-id` is whitespace-insensitive and would
-# certify an indentation-only rewrite of PR-owned lines.
+# certify an indentation-only rewrite of PR-owned lines; plain `git diff`
+# renders binary files as one content-free marker line, so --binary keeps
+# their bytes in the hash. --no-ext-diff and --no-textconv keep a planted
+# diff.external / diff.<driver>.textconv from executing code in this
+# PAT-bearing step.
 diff_digest() {
   local diff
-  diff="$(git diff "$1" "$2" 2>/dev/null)" || return 1
+  diff="$(
+    git diff --binary --no-ext-diff --no-textconv "$1" "$2" 2>/dev/null
+  )" || return 1
   [[ -n "${diff}" ]] || return 0
   printf '%s\n' "${diff}" |
     sed -E '/^index [0-9a-f]+\.\.[0-9a-f]+/d; /^@@ /d' |
@@ -65,21 +94,38 @@ decide() {
   fi
 
   REASON='reviewed-head lookup failed'
-  local bot_login reviews
+  local bot_login reviews marker reviewed_base
   bot_login="$(gh api user --jq '.login')" && [[ -n "${bot_login}" ]] || return
   reviews="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/reviews" --method GET --paginate -F per_page=100)" || return
-  REVIEWED_SHA="$(
+  # The marker PAYLOAD is the certification: admit only markers carrying a
+  # valid `sha` anchor (withheld on fail-closed rounds) and report it with
+  # the recorded `base` as "<sha>\t<base>"; anything malformed or withheld
+  # drops out and fails open below. Control characters are stripped from
+  # the untrusted base value so a forged marker cannot inject extra
+  # GITHUB_OUTPUT lines through the reason text.
+  marker="$(
     printf '%s' "${reviews}" | jq -sr --arg login "${bot_login}" '
       [.[][]
        | select(.user.login == $login)
        | select(.state == "APPROVED" or .state == "CHANGES_REQUESTED"
                 or .state == "COMMENTED")
        | select(.submitted_at != null)
-       | select((.body // "") | contains("<!-- qwen-review-ledger"))]
-      | last | .commit_id // empty'
+       | ((.body // "")
+          | capture("<!-- qwen-review-ledger (?<p>\\{.*\\}) -->")
+          | .p
+          | fromjson)?
+       | select((.sha? // "") | test("^[0-9a-f]{7,64}$"))
+       | "\(.sha)\t\((.base // "") | gsub("[\\x00-\\x1f\\x7f]"; ""))"]
+      | last // empty'
   )" || return
+  REVIEWED_SHA="${marker%%$'\t'*}"
+  reviewed_base="${marker#*$'\t'}"
   REASON='no completed automatic round on this PR'
   [[ -n "${REVIEWED_SHA}" ]] || return
+  if [[ "${reviewed_base}" != "${BASE_REF}" ]]; then
+    REASON="reviewed round certified against base '${reviewed_base:-unknown}', not '${BASE_REF}'"
+    return
+  fi
   REASON='reviewed head not in the fetched history'
   git cat-file -e "${REVIEWED_SHA}^{commit}" 2>/dev/null || return
   REASON='reviewed head is not an ancestor of the pushed head'

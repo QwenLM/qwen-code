@@ -3968,8 +3968,24 @@ describe('base-refresh-only synchronize gate (real git, stubbed gh)', () => {
     }
   });
 
-  const LEDGER_BODY =
-    'No issues found. LGTM! ✅\n\n<!-- qwen-review-ledger {"v":1,"round":3,"findings":[]} -->';
+  // The marker PAYLOAD is what the gate certifies — not the marker's
+  // presence: a skip-buying marker carries the reviewed head's `sha`
+  // anchor (withheld by the review pipeline on fail-closed rounds) and
+  // the `base` ref the round reviewed against. Defaults embed both, so a
+  // fixture omitting either is a deliberate fail-closed or legacy shape.
+  const ledgerBody = (sha, opts = {}) => {
+    const payload = { v: 1, round: 3, findings: [] };
+    if (!opts.omitSha) payload.sha = sha;
+    // 'base' in opts (even undefined) is a deliberate shape choice; an
+    // absent key takes the certifying default.
+    const base = 'base' in opts ? opts.base : 'main';
+    if (base !== undefined) payload.base = base;
+    return (
+      'No issues found. LGTM! ✅\n\n<!-- qwen-review-ledger ' +
+      JSON.stringify(payload) +
+      ' -->'
+    );
+  };
   // The gate may certify only submitted, currently-valid bot reviews, so
   // entries default to that shape and invalid-state cases override it.
   const reviewEntry = ({
@@ -3977,13 +3993,13 @@ describe('base-refresh-only synchronize gate (real git, stubbed gh)', () => {
     sha,
     state = 'COMMENTED',
     submittedAt = '2026-08-26T00:00:00Z',
-    body = LEDGER_BODY,
+    body,
   }) => ({
     user: { login },
     commit_id: sha,
     state,
     submitted_at: submittedAt,
-    body,
+    body: body === undefined ? ledgerBody(sha) : body,
   });
   const reviewsFixture = (...entries) => JSON.stringify(entries);
 
@@ -4000,6 +4016,7 @@ describe('base-refresh-only synchronize gate (real git, stubbed gh)', () => {
     git config user.name t
     write_f 0 0
     echo x > other.txt
+    printf 'v1\\x00' > asset.bin
     git add .
     git commit -qm base
     git checkout -qb pr
@@ -4043,6 +4060,46 @@ describe('base-refresh-only synchronize gate (real git, stubbed gh)', () => {
         git checkout -qb s1 main; echo a > a.txt; git add a.txt; git commit -qm s1
         git checkout -qb s2 main; echo b > b.txt; git add b.txt; git commit -qm s2
         git checkout -q pr; git merge -q --no-edit s1 s2 >/dev/null ;;
+      binary_touch)
+        # The PR modifies a binary file and the update-branch merge
+        # rewrites it (conflict resolved to a third payload). A plain
+        # git diff renders both sides as the SAME content-free
+        # "Binary files ... differ" marker text, so only the --binary
+        # payload keeps the digest honest here.
+        printf 'v2\\x00' > asset.bin
+        git commit -qam pr-binary
+        git rev-parse HEAD > ../R
+        git checkout -q main
+        printf 'rewritten-by-the-base-merge\\x00' > asset.bin
+        git commit -qam advance
+        git checkout -q pr
+        if git merge -q --no-edit main >/dev/null 2>&1; then
+          echo "expected a binary merge conflict" >&2
+          exit 1
+        fi
+        printf 'malicious-payload\\x00' > asset.bin
+        git add asset.bin
+        git commit -q --no-edit
+        ;;
+      retargeted_base)
+        # The round reviewed R against main, then the base is retargeted
+        # to release and the PR merges release. The digest equality still
+        # holds — both sides recompute against the live base — so only
+        # the marker's recorded base catches it.
+        git checkout -q main
+        echo d > d.txt
+        git add d.txt
+        git commit -qm divergence
+        git checkout -qb release
+        echo s > s.txt
+        git add s.txt
+        git commit -qm release-only
+        git checkout -q main
+        echo y > other.txt
+        git commit -qam advance
+        git checkout -q pr
+        git merge -q --no-edit release >/dev/null
+        ;;
       non_base_merge)
         git checkout -qb side "$(git rev-parse pr~1)"
         echo s > side.txt; git add side.txt; git commit -qm side
@@ -4067,6 +4124,8 @@ describe('base-refresh-only synchronize gate (real git, stubbed gh)', () => {
       reviewsFail = false,
       existingNoteId = '',
       shapeEnv = {},
+      baseRef = 'main',
+      plant = '',
     } = {},
   ) {
     const dir = mkdtempSync(join(tmpdir(), 'base-refresh-'));
@@ -4077,6 +4136,12 @@ describe('base-refresh-only synchronize gate (real git, stubbed gh)', () => {
         cwd: dir,
         env: { ...process.env, SHAPE: shape, ...shapeEnv },
       });
+      // Runs from the fixture root (cwd of the gate's parent), after the
+      // workspace clone exists, so it can plant .git config and refs the
+      // hardened gate must ignore.
+      if (plant) {
+        execFileSync('bash', ['-c', plant], { cwd: dir });
+      }
       const R = readFileSync(join(dir, 'R'), 'utf8').trim();
       const H = readFileSync(join(dir, 'H'), 'utf8').trim();
       const reviewsFile = join(dir, 'reviews.json');
@@ -4133,7 +4198,7 @@ describe('base-refresh-only synchronize gate (real git, stubbed gh)', () => {
           GITHUB_REPOSITORY: 'QwenLM/qwen-code',
           PR_NUMBER: '9',
           EVENT_HEAD_SHA: H,
-          BASE_REF: 'main',
+          BASE_REF: baseRef,
           RUN_URL: 'https://example.test/run/1',
           GH_LOGIN: 'qwen-code-ci-bot',
           GH_USER_FAIL: userFail ? '1' : '',
@@ -4160,6 +4225,8 @@ describe('base-refresh-only synchronize gate (real git, stubbed gh)', () => {
         H,
         posted: readFileSync(posted, 'utf8'),
         summary: readFileSync(summary, 'utf8'),
+        externalRan: existsSync(join(dir, 'external-ran')),
+        textconvRan: existsSync(join(dir, 'textconv-ran')),
       };
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -4391,4 +4458,168 @@ describe('base-refresh-only synchronize gate (real git, stubbed gh)', () => {
       expect(r.posted).toBe('');
     }
   });
+
+  it.skipIf(skipExecuted)(
+    'reviews when the base merge rewrote a binary the PR touched',
+    () => {
+      // Plain `git diff` renders a binary as the content-free line
+      // "Binary files a/x and b/x differ" — and the sed filter strips the
+      // index line that carries the blob ids — so a merge commit
+      // rewriting the binary hashes identically on both sides; --binary
+      // keeps the real bytes in the digest.
+      const r = runGate('binary_touch');
+      expect(r.status).toBe(0);
+      expect(r.out.skip).toBe('false');
+      expect(r.out.reason).toBe('the PR-side diff changed');
+    },
+  );
+
+  it.skipIf(skipExecuted)(
+    'never certifies a fail-closed round whose marker withholds its sha',
+    () => {
+      // The ledger protocol withholds the sha anchor on fail-closed
+      // rounds — the review posts, the state is valid, but no sha rides
+      // the marker so the next round re-covers the range full-diff.
+      // Certifying on the marker's PRESENCE would spend exactly the
+      // re-cover round the withholding exists to force.
+      const r = runGate('update_branch_only', {
+        reviewsFor: (R) =>
+          reviewsFixture(
+            reviewEntry({ sha: R, body: ledgerBody(R, { omitSha: true }) }),
+          ),
+      });
+      expect(r.status).toBe(0);
+      expect(r.out.skip).toBe('false');
+      expect(r.out.reason).toBe('no completed automatic round on this PR');
+    },
+  );
+
+  it.skipIf(skipExecuted)(
+    'fails open on a legacy marker that carries no base ref',
+    () => {
+      // Every marker the writer has posted so far lacks the `base`
+      // field; until it emits one, the gate fails open on all of them.
+      const r = runGate('update_branch_only', {
+        reviewsFor: (R) =>
+          reviewsFixture(
+            reviewEntry({ sha: R, body: ledgerBody(R, { base: undefined }) }),
+          ),
+      });
+      expect(r.status).toBe(0);
+      expect(r.out.skip).toBe('false');
+      expect(r.out.reason).toBe(
+        "reviewed round certified against base 'unknown', not 'main'",
+      );
+    },
+  );
+
+  it.skipIf(skipExecuted)(
+    'reviews after a base retarget — the round certified the old base',
+    () => {
+      // Round R reviewed against main; the base is retargeted to release
+      // and the PR merges release. Digest equality survives the retarget
+      // (both sides recompute against the live base), so only the
+      // marker's recorded base refuses the skip.
+      const r = runGate('retargeted_base', { baseRef: 'release' });
+      expect(r.status).toBe(0);
+      expect(r.out.skip).toBe('false');
+      expect(r.out.reason).toBe(
+        "reviewed round certified against base 'main', not 'release'",
+      );
+    },
+  );
+
+  // A prior prompt-injected run on the reused self-hosted workspace can
+  // plant .git config and refs the gate's git calls would honor:
+  // diff.external and diff.<driver>.textconv both execute code on a
+  // plain `git diff` (the textconv routes through core.attributesFile,
+  // no worktree file needed), and refs/replace/* silently falsify the
+  // digest and ancestry computations. Every plant below wires all three
+  // channels; the hardened gate must run the shape to its natural verdict
+  // without executing a payload.
+  const plantAttackChannels = () => `
+    set -euo pipefail
+    printf '#!/bin/bash\ntouch "%s/external-ran"\n' "$PWD" > ext-payload.sh
+    printf '#!/bin/bash\ntouch "%s/textconv-ran"\ncat "$1"\n' "$PWD" > textconv-payload.sh
+    chmod +x ext-payload.sh textconv-payload.sh
+    printf '* diff=evil\n' > evil-attributes
+    git -C workspace config diff.external "$PWD/ext-payload.sh"
+    git -C workspace config diff.evil.textconv "$PWD/textconv-payload.sh"
+    git -C workspace config core.attributesFile "$PWD/evil-attributes"
+  `;
+
+  it.skipIf(skipExecuted)(
+    'a forged base value cannot inject step outputs',
+    () => {
+      // The base field is untrusted marker content flowing into the
+      // reason text and thus into GITHUB_OUTPUT: a value carrying a
+      // newline must not be able to append its own `skip=true` line
+      // after the gate's own `skip=false`.
+      const r = runGate('update_branch_only', {
+        reviewsFor: (R) =>
+          reviewsFixture(
+            reviewEntry({
+              sha: R,
+              body: ledgerBody(R, { base: 'evil"\nskip=true\nx="' }),
+            }),
+          ),
+      });
+      expect(r.status).toBe(0);
+      expect(r.out.skip).toBe('false');
+      expect(r.out.reason).not.toContain('\n');
+      expect(r.out.reason).toContain("not 'main'");
+    },
+  );
+
+  it.skipIf(skipExecuted)(
+    'never runs planted diff drivers and ignores planted replace refs',
+    () => {
+      // Replacing the reviewed head with the base tip breaks the walk —
+      // an honored replace ref flips this skip into a fail-open.
+      const r = runGate('update_branch_only', {
+        plant:
+          plantAttackChannels() +
+          `
+    set -euo pipefail
+    R=$(cat R)
+    git -C workspace replace "$R" "$(git -C workspace rev-parse origin/main)"
+  `,
+      });
+      expect(r.status).toBe(0);
+      expect(r.externalRan).toBe(false);
+      expect(r.textconvRan).toBe(false);
+      expect(r.out.skip).toBe('true');
+      expect(r.out.reviewed_sha).toBe(r.R);
+    },
+  );
+
+  it.skipIf(skipExecuted)(
+    'a planted replace remap cannot flip a real push into a skip',
+    () => {
+      // The real-push commit is replaced by a fabricated two-parent
+      // merge whose tree equals the base merge's: honored replace refs
+      // make the walk and the digest equality pass, flipping the natural
+      // skip=false into skip=true — the gate's dangerous direction.
+      const r = runGate('real_push_after_refresh', {
+        plant:
+          plantAttackChannels() +
+          `
+    set -euo pipefail
+    cd workspace
+    git config user.email t@t
+    git config user.name t
+    H=$(cat ../H)
+    M=$(git rev-parse "$H^1")
+    ADV=$(git rev-parse "$M^2")
+    EVIL=$(git commit-tree "$M^{tree}" -p "$M" -p "$ADV" -m evil)
+    git replace "$H" "$EVIL"
+  `,
+      });
+      expect(r.status).toBe(0);
+      expect(r.externalRan).toBe(false);
+      expect(r.textconvRan).toBe(false);
+      expect(r.out.skip).toBe('false');
+      expect(r.out.reason).toMatch(/non-merge commit/);
+    },
+  );
 });
