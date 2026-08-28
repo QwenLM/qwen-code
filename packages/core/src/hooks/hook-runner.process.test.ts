@@ -67,6 +67,80 @@ const isRunning = (pid: number): boolean => {
   return !result.stdout.trim().startsWith('Z');
 };
 
+describe.runIf(process.platform === 'win32')(
+  'HookRunner Windows project directory expansion',
+  () => {
+    it.each(['QWEN_PROJECT_DIR', 'GEMINI_PROJECT_DIR', 'CLAUDE_PROJECT_DIR'])(
+      'expands $%s for cmd.exe',
+      async (variable) => {
+        const tempDir = await mkdtemp(
+          join(tmpdir(), "qwen hook (project) & 'quoted' "),
+        );
+
+        try {
+          const runner = new HookRunner();
+          const input: HookInput = {
+            session_id: 'project-dir-test',
+            transcript_path: join(tempDir, 'transcript.jsonl'),
+            cwd: tempDir,
+            hook_event_name: HookEventName.PreToolUse,
+            timestamp: new Date().toISOString(),
+          };
+
+          const result = await runner.executeHook(
+            {
+              type: HookType.Command,
+              command: `if exist $${variable} (echo FOUND) else (echo MISSING)`,
+              source: HooksConfigSource.Project,
+            },
+            HookEventName.PreToolUse,
+            input,
+          );
+
+          expect(result.success).toBe(true);
+          expect(result.stdout?.trim()).toBe('FOUND');
+        } finally {
+          await rm(tempDir, { recursive: true, force: true });
+        }
+      },
+    );
+
+    it('expands QWEN_PROJECT_DIR for PowerShell', async () => {
+      const tempDir = await mkdtemp(
+        join(tmpdir(), "qwen hook (project) & 'quoted' "),
+      );
+
+      try {
+        const runner = new HookRunner();
+        const input: HookInput = {
+          session_id: 'project-dir-test',
+          transcript_path: join(tempDir, 'transcript.jsonl'),
+          cwd: tempDir,
+          hook_event_name: HookEventName.PreToolUse,
+          timestamp: new Date().toISOString(),
+        };
+
+        const result = await runner.executeHook(
+          {
+            type: HookType.Command,
+            command:
+              "if (Test-Path $QWEN_PROJECT_DIR) { Write-Output 'FOUND' } else { Write-Output 'MISSING' }",
+            source: HooksConfigSource.Project,
+            shell: 'powershell',
+          },
+          HookEventName.PreToolUse,
+          input,
+        );
+
+        expect(result.success).toBe(true);
+        expect(result.stdout?.trim()).toBe('FOUND');
+      } finally {
+        await rm(tempDir, { recursive: true, force: true });
+      }
+    });
+  },
+);
+
 describe.skipIf(process.platform === 'win32')(
   'HookRunner process tree cancellation',
   () => {

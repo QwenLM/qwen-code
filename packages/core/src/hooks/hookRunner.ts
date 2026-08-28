@@ -809,6 +809,8 @@ export class HookRunner {
           cwd: input.cwd,
           stdio: ['pipe', 'pipe', 'pipe'],
           shell: false,
+          windowsVerbatimArguments:
+            process.platform === 'win32' && shellConfig.shell === 'cmd',
           // Own a process group so cancellation can signal the entire tree.
           detached: process.platform !== 'win32',
         },
@@ -1056,6 +1058,7 @@ export class HookRunner {
     debugLogger.debug(`Expanding hook command: ${command} (cwd: ${input.cwd})`);
     const escapedCwd = escapeShellArg(input.cwd, shellType);
     return command
+      .replace(/\$QWEN_PROJECT_DIR/g, () => escapedCwd)
       .replace(/\$GEMINI_PROJECT_DIR/g, () => escapedCwd)
       .replace(/\$CLAUDE_PROJECT_DIR/g, () => escapedCwd); // For compatibility
   }

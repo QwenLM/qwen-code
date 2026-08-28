@@ -924,6 +924,25 @@ describe('HookRunner', () => {
   });
 
   describe('expandCommand', () => {
+    it('should expand QWEN_PROJECT_DIR placeholder', async () => {
+      const mockProcess = createMockProcess(0, 'result');
+      mockSpawn.mockImplementation(() => mockProcess);
+
+      const hookConfig: HookConfig = {
+        type: HookType.Command,
+        command: 'echo $QWEN_PROJECT_DIR',
+        source: HooksConfigSource.Project,
+      };
+      const input = createMockInput({ cwd: '/test/project' });
+
+      await hookRunner.executeHook(hookConfig, HookEventName.PreToolUse, input);
+
+      const spawnCall = mockSpawn.mock.calls[0];
+      const command = spawnCall[1][spawnCall[1].length - 1];
+      expect(command).toContain('/test/project');
+      expect(command).not.toContain('$QWEN_PROJECT_DIR');
+    });
+
     it('should expand GEMINI_PROJECT_DIR placeholder', async () => {
       const mockProcess = createMockProcess(0, 'result');
       mockSpawn.mockImplementation(() => mockProcess);
