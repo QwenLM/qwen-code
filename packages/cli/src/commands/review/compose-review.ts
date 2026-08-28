@@ -287,12 +287,21 @@ function stopSidecarFenced(env: NodeJS.ProcessEnv | undefined): boolean {
 }
 
 /**
- * The OPEN Critical ids in the cache ledger the plan names — the exact set
- * a decided-stop re-rule owes a ruling for. Null when the plan names no
- * cache or the ledger cannot be read: the completeness check then refuses,
- * because a re-rule whose baseline cannot be read cannot be shown complete.
+ * The OPEN Critical entries in the cache ledger the plan names — the exact
+ * set a decided-stop re-rule owes a ruling for, each with the title the
+ * ledger recorded under its id when it carries one (the body↔disposition
+ * cross-check binds a re-assertion's content against it). Null when the
+ * plan names no cache or the ledger cannot be read: the completeness check
+ * then refuses, because a re-rule whose baseline cannot be read cannot be
+ * shown complete. The cache is model-written (Step 8's prose rules), so
+ * every entry is re-validated, and a shape violation is an unreadable
+ * baseline — never a skipped row: skipping shrinks the open set below what
+ * the ledger really holds, and the grant would issue over Criticals it
+ * could not enumerate.
  */
-function openLedgerCriticalIds(planPath: string | undefined): string[] | null {
+function openLedgerCriticalEntries(
+  planPath: string | undefined,
+): Array<{ id: string; title?: string }> | null {
   if (!planPath) return null;
   try {
     const plan = JSON.parse(readFileSync(planPath, 'utf8')) as {
@@ -301,23 +310,42 @@ function openLedgerCriticalIds(planPath: string | undefined): string[] | null {
     if (typeof plan.cachePath !== 'string' || plan.cachePath === '') {
       return null;
     }
-    const cache = JSON.parse(readFileSync(plan.cachePath, 'utf8')) as {
-      findings?: unknown;
-    };
-    if (!Array.isArray(cache.findings)) return [];
-    const ids: string[] = [];
+    const cache = JSON.parse(readFileSync(plan.cachePath, 'utf8')) as unknown;
+    if (typeof cache !== 'object' || cache === null || Array.isArray(cache)) {
+      return null;
+    }
+    // Older caches carry no findings — nothing to track.
+    if (!('findings' in cache)) return [];
+    // Present but not an array — the baseline is unreadable, not empty.
+    if (!Array.isArray(cache.findings)) return null;
+    const entries: Array<{ id: string; title?: string }> = [];
     for (const f of cache.findings) {
-      const e = f as { id?: unknown; severity?: unknown; status?: unknown };
+      const e = f as {
+        id?: unknown;
+        severity?: unknown;
+        status?: unknown;
+        title?: unknown;
+      };
       if (
-        e?.severity === 'Critical' &&
-        e?.status === 'open' &&
-        typeof e.id === 'string' &&
-        e.id !== ''
+        typeof e !== 'object' ||
+        e === null ||
+        typeof e.id !== 'string' ||
+        e.id === '' ||
+        (e.severity !== 'Critical' && e.severity !== 'Suggestion') ||
+        typeof e.status !== 'string'
       ) {
-        ids.push(e.id);
+        return null;
+      }
+      if (e.severity === 'Critical' && e.status === 'open') {
+        entries.push({
+          id: e.id,
+          ...(typeof e.title === 'string' && e.title.trim() !== ''
+            ? { title: e.title.trim() }
+            : {}),
+        });
       }
     }
-    return ids;
+    return entries;
   } catch {
     return null;
   }
@@ -3625,6 +3653,13 @@ function composeReviewBody(
   // deferral channel's relocation push and the gate-repost dedup, so the
   // grant records the rulings and the check binds them to what posts.
   const stopRulings = new Map<string, string>();
+  // The titles the ledger recorded under each open Critical id, captured
+  // inside the grant below for the body↔disposition cross-check: a
+  // re-assertion binds by CONTENT against them, not by id alone.
+  const ledgerTitles = new Map<string, string>();
+  // Re-assertions the id binding admitted but no recorded title vouched
+  // for — they lose the verify-floor exemption below.
+  let unvouchedReAssertions = 0;
   const stopReRuleGranted = (() => {
     const srr = input.stopReRule;
     if (srr === undefined) return false;
@@ -3648,7 +3683,13 @@ function composeReviewBody(
           'a full round takes the regular floors, never the stop re-rule.',
       );
     }
-    const allowedRulings = STOP_REASON_RULINGS[stopReason];
+    // Object.hasOwn, never a bare read: the reason arrives through
+    // model-written plan state, and a prototype-chain key (`__proto__`,
+    // `constructor`) resolves through the table's prototype instead of
+    // undefined — the refusal must name the reason, not throw a TypeError.
+    const allowedRulings = Object.hasOwn(STOP_REASON_RULINGS, stopReason)
+      ? STOP_REASON_RULINGS[stopReason]
+      : undefined;
     if (allowedRulings === undefined) {
       throw new Error(
         `stopReRule refused: unknown stop reason '${stopReason}' — the ` +
@@ -3662,12 +3703,15 @@ function composeReviewBody(
           'shape but never the fence.',
       );
     }
-    const ledger = openLedgerCriticalIds(input.planPath);
+    const ledger = openLedgerCriticalEntries(input.planPath);
     if (ledger === null) {
       throw new Error(
         'stopReRule refused: the ledger the plan names cannot be read — a ' +
           're-rule whose baseline is unreadable cannot be shown complete.',
       );
+    }
+    for (const e of ledger) {
+      if (e.title !== undefined) ledgerTitles.set(e.id, e.title);
     }
     for (const d of srr.dispositions) {
       if (
@@ -3687,7 +3731,7 @@ function composeReviewBody(
       }
       stopRulings.set(d.id, d.ruling);
     }
-    const ledgerSet = new Set(ledger);
+    const ledgerSet = new Set(ledger.map((e) => e.id));
     for (const id of ledgerSet) {
       if (!stopRulings.has(id)) {
         throw new Error(
@@ -3759,7 +3803,14 @@ function composeReviewBody(
       if (ruling === 'still-stands') stillStands.add(id);
     }
     const carriedIds = new Set<string>();
-    const bindEntry = (id: string | undefined): void => {
+    // A re-assertion binds by CONTENT, not by id alone: the claim title
+    // read back from the entry must equal the title the ledger recorded
+    // under that id — the SKILL's verbatim re-assertion contract makes
+    // the equality exact. An id alone would let a brand-new claim wear a
+    // verified id's exemption. An entry the ledger recorded no title for
+    // keeps its id binding but loses the verify-floor exemption below.
+    const bindEntry = (claim: { id?: string; title: string }): void => {
+      const id = claim.id;
       if (id === undefined || !stopRulings.has(id)) {
         throw new Error(
           'stopReRule refused: a body Critical must carry exactly one ' +
@@ -3774,6 +3825,17 @@ function composeReviewBody(
             'Critical still carries its id — one ruling per finding.',
         );
       }
+      const recorded = ledgerTitles.get(id);
+      if (recorded === undefined) {
+        unvouchedReAssertions++;
+      } else if (recorded !== claim.title) {
+        throw new Error(
+          `stopReRule refused: ${id} is re-asserted with content that ` +
+            'departs from the title the ledger recorded — a standing ' +
+            'blocker re-asserts its verified claim, not a new claim ' +
+            'under an old id.',
+        );
+      }
       carriedIds.add(id);
     };
     const ownCount = bodyCriticals.length - relocatedCriticals.length;
@@ -3781,11 +3843,11 @@ function composeReviewBody(
       bindEntry(
         readClaim(
           stripForUnattributedPost(entry).replace(LEADING_INVISIBLE_RE, ''),
-        ).id,
+        ),
       );
     }
     for (const entry of relocatedEntries) {
-      bindEntry(readClaim(entry.title).id);
+      bindEntry(readClaim(entry.title));
     }
     for (const id of stillStands) {
       if (!carriedIds.has(id)) {
@@ -3852,9 +3914,12 @@ function composeReviewBody(
   const criticalsNeedingVerify = stopReRuleGranted
     ? // Every posted blocker on a granted stop re-rule is a re-assertion,
       // under its original id, of a finding a previous full round verified —
-      // and the completeness gate above already proved the set exact. No
-      // verifier ran this round because no agents did.
-      0
+      // and the completeness gate above already proved the set exact. But
+      // the exemption belongs to the entries the ledger's recorded title
+      // vouched for: a re-assertion nobody recorded content for cannot be
+      // SHOWN to be one, and rides the regular floor instead. No verifier
+      // ran this round because no agents did.
+      unvouchedReAssertions
     : criticalsInline + nonDeterministicBodyCriticals;
   // Fail closed at every exit: this flag softens a Request changes below, and
   // it must end up true whenever the review posts non-deterministic Criticals
@@ -3879,6 +3944,9 @@ function composeReviewBody(
     // Nothing to recompute: no agents, no transcripts, no receipts. The
     // grant's two-read gate (the plan's own nothingToReview plus the
     // runId-fenced sidecar) is what stands where coverage proof would.
+    // The verify floor still reads the exemption: a re-assertion the
+    // recorded title could not vouch for leaves its Critical unverified.
+    criticalsUnverified = criticalsNeedingVerify >= 1;
   } else if (!input.planPath) {
     coverageEntries.push({
       subject: 'coverage',

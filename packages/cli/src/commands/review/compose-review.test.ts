@@ -15552,9 +15552,24 @@ describe('composeReview — the decided-stop re-rule', () => {
       cachePath,
       JSON.stringify({
         findings: opts.ledger ?? [
-          { id: 'R1-1', severity: 'Critical', status: 'open' },
-          { id: 'R1-2', severity: 'Critical', status: 'fixed' },
-          { id: 'R1-3', severity: 'Suggestion', status: 'open' },
+          {
+            id: 'R1-1',
+            severity: 'Critical',
+            status: 'open',
+            title: 'the mechanism still fires — re-read at HEAD',
+          },
+          {
+            id: 'R1-2',
+            severity: 'Critical',
+            status: 'fixed',
+            title: 'the patched hole',
+          },
+          {
+            id: 'R1-3',
+            severity: 'Suggestion',
+            status: 'open',
+            title: 'the open suggestion',
+          },
         ],
       }),
     );
@@ -15717,7 +15732,12 @@ describe('composeReview — the decided-stop re-rule', () => {
         reason: 'clean-tree',
         ledger: [
           { id: 'R1-1', severity: 'Critical', status: 'open' },
-          { id: 'R1-10', severity: 'Critical', status: 'open' },
+          {
+            id: 'R1-10',
+            severity: 'Critical',
+            status: 'open',
+            title: 'the mechanism still fires — re-read at HEAD',
+          },
         ],
       }),
       stopReRule: {
@@ -15791,11 +15811,15 @@ describe('composeReview — the decided-stop re-rule', () => {
   });
 
   it('refuses two body entries re-asserting one still-stands id', () => {
+    // Both entries verbatim-match the recorded title, so the content
+    // binding admits them and the COUNT check is what refuses: two
+    // re-assertions of one still-stands ruling would post the blocker
+    // twice.
     expect(() =>
       reRule({
         bodyCriticals: [
-          'R1-1: the mechanism still fires',
-          'R1-1: asserted twice',
+          'R1-1: the mechanism still fires — re-read at HEAD',
+          'R1-1: the mechanism still fires — re-read at HEAD',
         ],
       }),
     ).toThrow(/exactly one body Critical/);
@@ -15857,6 +15881,231 @@ describe('composeReview — the decided-stop re-rule', () => {
         },
       }),
     ).toThrow(/duplicate disposition for R1-1/);
+  });
+
+  it('refuses a cache whose findings field is present but not an array', () => {
+    // A parseable cache with a non-array `findings` is a baseline that
+    // could not be read, not an empty ledger: over it the completeness
+    // check would certify a ruling set of nothing.
+    expect(() =>
+      reRule({
+        planPath: stopPlan({
+          name: 'findings-not-array',
+          ledger: 'R1-1 open' as unknown as unknown[],
+        }),
+      }),
+    ).toThrow(/ledger the plan names cannot be read/);
+  });
+
+  it('refuses a ledger holding an entry that violates the schema', () => {
+    // The cache is model-written, so a drifting entry is an unreadable
+    // baseline, never a row to skip: skipping would shrink the open set
+    // below what the ledger really holds, and the grant would issue over
+    // Criticals it could not enumerate.
+    const drifts: unknown[][] = [
+      [{ id: 'R2-1', severity: 'critical', status: 'open' }],
+      [{ id: 'R2-1', severity: 'Critical' }],
+      [null],
+    ];
+    drifts.forEach((ledger, i) => {
+      expect(() =>
+        reRule({
+          planPath: stopPlan({ name: `schema-drift-${i}`, ledger }),
+        }),
+      ).toThrow(/ledger the plan names cannot be read/);
+    });
+  });
+
+  it('refuses a still-stands re-assertion whose content departs from the recorded title', () => {
+    // The id alone would let a brand-new claim wear a verified id's
+    // exemption; the content the ledger recorded under the id is the
+    // contract a re-assertion is bound by.
+    expect(() =>
+      reRule({
+        planPath: stopPlan({
+          name: 'fabricated',
+          ledger: [
+            {
+              id: 'R1-1',
+              severity: 'Critical',
+              status: 'open',
+              title: 'the mechanism still fires — re-read at HEAD',
+            },
+          ],
+        }),
+        bodyCriticals: ['R1-1: a brand-new claim nobody ever verified'],
+      }),
+    ).toThrow(/re-asserted with content that departs/);
+  });
+
+  it('a re-assertion the ledger recorded no title for loses the verify-floor exemption', () => {
+    // No recorded content to bind against — the re-assertion cannot be
+    // SHOWN, so its Critical rides the regular floor: disclosed, not
+    // blocking.
+    const r = reRule({
+      planPath: stopPlan({
+        name: 'untitled',
+        ledger: [{ id: 'R1-1', severity: 'Critical', status: 'open' }],
+      }),
+    });
+    expect(r.event).toBe('COMMENT');
+    expect(r.baseEvent).toBe('REQUEST_CHANGES');
+    expect(r.cappedBy).toContain('criticals-unverified');
+  });
+
+  it('refuses a prototype-chain stop reason with the designed refusal', () => {
+    // A model-written reason indexes the ruling table: a prototype key
+    // must fail closed as an UNKNOWN reason, not crash on the prototype's
+    // members.
+    for (const reason of [
+      '__proto__',
+      'constructor',
+      'toString',
+      'hasOwnProperty',
+    ]) {
+      expect(() =>
+        reRule({ planPath: stopPlan({ name: `proto-${reason}`, reason }) }),
+      ).toThrow(/unknown stop reason/);
+    }
+  });
+
+  it('composes a stop round holding two still-standing Criticals', () => {
+    // The shape the grant exists for — open Criticals accumulate across
+    // rounds and every one re-asserts. N=1 alone would let a
+    // first-entry-only binding loop ship green.
+    const r = reRule({
+      planPath: stopPlan({
+        name: 'two-standing',
+        ledger: [
+          {
+            id: 'R1-1',
+            severity: 'Critical',
+            status: 'open',
+            title: 'the mechanism still fires — re-read at HEAD',
+          },
+          {
+            id: 'R2-5',
+            severity: 'Critical',
+            status: 'open',
+            title: 'the second gap remains',
+          },
+        ],
+      }),
+      stopReRule: {
+        dispositions: [
+          { id: 'R1-1', ruling: 'still-stands' },
+          { id: 'R2-5', ruling: 'still-stands' },
+        ],
+      },
+      bodyCriticals: [
+        'R1-1: the mechanism still fires — re-read at HEAD',
+        'R2-5: the second gap remains',
+      ],
+    });
+    expect(r.event).toBe('REQUEST_CHANGES');
+    expect(r.body).toContain('R1-1');
+    expect(r.body).toContain('R2-5');
+  });
+
+  it('binds a re-assertion that opens with invisible residue', () => {
+    // The leading strip is what lets a ZWSP/BOM-class residue bind at
+    // all: without it the id readback fails and the grant refuses a
+    // valid re-rule.
+    const r = reRule({
+      bodyCriticals: [
+        '\u200bR1-1: the mechanism still fires — re-read at HEAD',
+      ],
+    });
+    expect(r.event).toBe('REQUEST_CHANGES');
+  });
+
+  it('refuses a superseded ruling under unchanged-since-last-round', () => {
+    // A byte-identical tree replaced nothing, so `superseded` is a
+    // forged disposition there — the licence table's refusal cell.
+    expect(() =>
+      reRule({
+        stopReRule: { dispositions: [{ id: 'R1-1', ruling: 'superseded' }] },
+        bodyCriticals: [],
+      }),
+    ).toThrow(/R1-1 is ruled superseded under unchanged-since-last-round/);
+  });
+
+  it('checks the per-reason licence for every disposition, not only the first', () => {
+    expect(() =>
+      reRule({
+        planPath: stopPlan({
+          name: 'emptied-two',
+          reason: 'scope-emptied',
+          ledger: [
+            {
+              id: 'R1-1',
+              severity: 'Critical',
+              status: 'open',
+              title: 'the mechanism still fires — re-read at HEAD',
+            },
+            {
+              id: 'R2-2',
+              severity: 'Critical',
+              status: 'open',
+              title: 'the second mechanism',
+            },
+          ],
+        }),
+        stopReRule: {
+          dispositions: [
+            { id: 'R1-1', ruling: 'still-stands' },
+            { id: 'R2-2', ruling: 'fixed' },
+          ],
+        },
+        bodyCriticals: ['R1-1: the mechanism still fires — re-read at HEAD'],
+      }),
+    ).toThrow(/R2-2 is ruled fixed under scope-emptied/);
+  });
+
+  it('binds the relocated leg by content, not by id alone', () => {
+    // The deferral channel's relocated Criticals bind through the SAME
+    // content check as the ingested entries: one carrying a still-stands
+    // id with fabricated text is refused exactly like its own-leg twin.
+    expect(() =>
+      reRule({
+        planPath: stopPlan({
+          name: 'reloc-fabricated',
+          reason: 'clean-tree',
+          ledger: [
+            {
+              id: 'R1-1',
+              severity: 'Critical',
+              status: 'open',
+              title: 'the mechanism still fires — re-read at HEAD',
+            },
+          ],
+        }),
+        stopReRule: { dispositions: [{ id: 'R1-1', ruling: 'still-stands' }] },
+        bodyCriticals: [],
+        deferredSuggestions: [
+          {
+            file: 'src/wedge.ts',
+            line: 12,
+            source: 'review',
+            severity: 'Critical',
+            title: 'R1-1: a different claim entirely',
+          },
+        ],
+      }),
+    ).toThrow(/re-asserted with content that departs/);
+  });
+
+  it('refuses a cache that is not an object at all', () => {
+    // A bare-array cache file is unreadable the same way: the grant must
+    // not read it as an empty ledger.
+    const planPath = stopPlan({ name: 'not-object' });
+    const plan = JSON.parse(readFileSync(planPath, 'utf8')) as {
+      cachePath: string;
+    };
+    writeFileSync(plan.cachePath, JSON.stringify([1, 2]));
+    expect(() => reRule({ planPath })).toThrow(
+      /ledger the plan names cannot be read/,
+    );
   });
 });
 
