@@ -682,6 +682,83 @@ describe('runForkedAgent (AgentHeadless path) bound-tool isolation', () => {
     }
   });
 
+  it('reports an external abort that resolves after the write as cancelled', async () => {
+    // Twin of the reject case above. When the external cancel lands on a
+    // batch boundary, agent-core RESOLVES cancelled instead of throwing, so
+    // the catch never runs — the latched early completion then reported the
+    // cancelled run as a successful GOAL. Same user action, opposite outcome
+    // depending only on which event-loop boundary the cancel hit.
+    const parent = new ConfigImpl(baseParams);
+    const parentRegistry = await parent.createToolRegistry(undefined, {
+      skipDiscovery: true,
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (parent as any).toolRegistry = parentRegistry;
+
+    const external = new AbortController();
+    const spy = vi.spyOn(AgentHeadless, 'create').mockImplementation(
+      async (
+        _name,
+        _config,
+        _promptConfig,
+        _modelConfig,
+        _runConfig,
+        _toolConfig,
+        eventEmitter,
+      ) =>
+        ({
+          execute: vi.fn().mockImplementation(async (_context, _signal) => {
+            const emitter = eventEmitter as AgentEventEmitter;
+            emitter.emit(AgentEventType.TOOL_CALL, {
+              subagentId: 'fork',
+              round: 1,
+              callId: 'write-1',
+              name: ToolNames.WRITE_FILE,
+              args: { file_path: '/repo/.qwen/memories/project.md' },
+              description: 'write',
+              timestamp: Date.now(),
+            });
+            emitter.emit(AgentEventType.TOOL_RESULT, {
+              subagentId: 'fork',
+              round: 1,
+              callId: 'write-1',
+              name: ToolNames.WRITE_FILE,
+              success: true,
+              timestamp: Date.now(),
+            });
+            // The external cancel wins the race, and the run then settles
+            // by RESOLVING on the batch boundary rather than throwing.
+            external.abort();
+            await new Promise((resolve) => setImmediate(resolve));
+          }),
+          getTerminateMode: vi
+            .fn()
+            .mockReturnValue(AgentTerminateMode.CANCELLED),
+          getFinalText: vi.fn().mockReturnValue(''),
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        }) as any,
+    );
+
+    try {
+      const result = await runForkedAgent({
+        name: 'test-fork',
+        systemPrompt: 'You are a test fork.',
+        taskPrompt: 'write one file',
+        config: parent,
+        completeAfterFirstSuccessfulWrite: true,
+        abortSignal: external.signal,
+      });
+
+      expect(result.status).not.toBe('completed');
+      expect(result).toMatchObject({
+        status: 'cancelled',
+        terminateReason: AgentTerminateMode.CANCELLED,
+      });
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   it('keeps running past successful writes the early-completion predicate excludes', async () => {
     const parent = new ConfigImpl(baseParams);
     const parentRegistry = await parent.createToolRegistry(undefined, {

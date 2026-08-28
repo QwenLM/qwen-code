@@ -754,7 +754,17 @@ export async function runForkedAgent(
     const touched = [...filesTouched];
     const written = [...filesWritten];
 
-    if (completedAfterWrite) {
+    // The reject path above consults the abort identity; this one must too.
+    // When the external cancel lands on a batch boundary agent-core RESOLVES
+    // cancelled rather than throwing, so the catch never runs — and without
+    // this gate the latched early completion converted that cancellation into
+    // a successful GOAL result. The same user action then yielded opposite
+    // outcomes depending only on which event-loop boundary the cancel hit.
+    if (
+      completedAfterWrite &&
+      (!executionController.signal.aborted ||
+        executionController.signal.reason === selfAbortReason)
+    ) {
       return {
         status: 'completed',
         terminateReason: AgentTerminateMode.GOAL,
