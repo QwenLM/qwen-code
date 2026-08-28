@@ -453,6 +453,17 @@ describe('normalizeRemoteToWebUrl', () => {
     ).toBe('https://host.example.com/team/repo');
   });
 
+  it('keeps an explicit http(s) port', () => {
+    // An https remote's port IS the web port: a self-hosted
+    // `https://ghe.corp:8443/team/repo.git` must link on 8443, not 443.
+    expect(normalizeRemoteToWebUrl('https://ghe.corp:8443/team/repo.git')).toBe(
+      'https://ghe.corp:8443/team/repo',
+    );
+    expect(normalizeRemoteToWebUrl('http://code.local:3000/o/r')).toBe(
+      'http://code.local:3000/o/r',
+    );
+  });
+
   it('accepts any scp-style user, not only git@', () => {
     expect(normalizeRemoteToWebUrl('jdoe@gitlab.corp:team/repo.git')).toBe(
       'https://gitlab.corp/team/repo',

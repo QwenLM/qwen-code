@@ -413,8 +413,14 @@ export function normalizeRemoteToWebUrl(remote: string): string | undefined {
   const trimmed = remote.trim();
   if (!trimmed) return undefined;
   let input = trimmed;
+  // An ssh:// remote's explicit port is the SSH port, almost never the web
+  // port — ssh-derived URLs drop it (scp-style remotes cannot carry one).
+  // An http(s) remote's port IS the web port and must survive: a
+  // self-hosted `https://ghe.corp:8443/team/repo.git` links on 8443.
+  let sshDerived = false;
   if (input.startsWith('ssh://')) {
     input = `https://${input.slice('ssh://'.length)}`;
+    sshDerived = true;
   } else if (!/^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(input)) {
     // scp-style [user@]host:path — any user, not only `git`.
     const scp = /^(?:[^@\s/]+@)?([^:\s/]+):(.+)$/.exec(input);
@@ -424,6 +430,7 @@ export function normalizeRemoteToWebUrl(remote: string): string | undefined {
     // single character, drive letters always are.
     if (/^[A-Za-z]$/.test(scp[1])) return undefined;
     input = `https://${scp[1]}/${scp[2]}`;
+    sshDerived = true;
   }
   let url: URL;
   try {
@@ -434,9 +441,8 @@ export function normalizeRemoteToWebUrl(remote: string): string | undefined {
   if (url.protocol !== 'http:' && url.protocol !== 'https:') return undefined;
   const pathname = url.pathname.replace(/\.git\/?$/, '');
   if (!pathname || pathname === '/') return undefined;
-  // `hostname` drops any port an ssh:// remote carried — a web link must
-  // not point at the SSH port.
-  return `${url.protocol}//${url.hostname}${pathname}`.replace(/\/$/, '');
+  const host = sshDerived ? url.hostname : url.host;
+  return `${url.protocol}//${host}${pathname}`.replace(/\/$/, '');
 }
 
 /**

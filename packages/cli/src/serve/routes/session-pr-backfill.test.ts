@@ -47,7 +47,6 @@ import type { SessionPrInfo } from '@qwen-code/acp-bridge/bridgeTypes';
 import type { AcpSessionBridge } from '../acp-session-bridge.js';
 import {
   backfillWorkspaceSessionPrs,
-  normalizeRemoteToWebUrl,
   parsePrNumberFromWorktree,
   registerSessionPrBackfillRoutes,
 } from './session-pr-backfill.js';
@@ -169,55 +168,6 @@ describe('parsePrNumberFromWorktree', () => {
     expect(parsePrNumberFromWorktree('custom', 'worktree-pr-0')).toBe(
       undefined,
     );
-  });
-});
-
-describe('normalizeRemoteToWebUrl', () => {
-  it('normalizes https remotes, stripping .git', () => {
-    expect(normalizeRemoteToWebUrl('https://github.com/o/r.git')).toBe(
-      'https://github.com/o/r',
-    );
-  });
-
-  it('normalizes scp-style ssh remotes', () => {
-    expect(normalizeRemoteToWebUrl('git@github.com:o/r.git')).toBe(
-      'https://github.com/o/r',
-    );
-  });
-
-  it('normalizes ssh:// remotes', () => {
-    expect(normalizeRemoteToWebUrl('ssh://git@github.com/o/r')).toBe(
-      'https://github.com/o/r',
-    );
-  });
-
-  it('drops the SSH port from ssh:// remotes', () => {
-    // The explicit port is the SSH port, almost never the web port — the
-    // badge would link to a dead address if it survived.
-    expect(
-      normalizeRemoteToWebUrl(
-        'ssh://git@github.example.com:2222/team/repo.git',
-      ),
-    ).toBe('https://github.example.com/team/repo');
-  });
-
-  it('keeps an explicit https port', () => {
-    // An https remote's port IS the web port and must survive.
-    expect(
-      normalizeRemoteToWebUrl('https://code.example.com:8443/team/repo.git'),
-    ).toBe('https://code.example.com:8443/team/repo');
-  });
-
-  it('keeps enterprise hosts', () => {
-    expect(normalizeRemoteToWebUrl('git@code.example.com:team/repo.git')).toBe(
-      'https://code.example.com/team/repo',
-    );
-  });
-
-  it('rejects garbage and non-http protocols', () => {
-    expect(normalizeRemoteToWebUrl('not a url')).toBeUndefined();
-    expect(normalizeRemoteToWebUrl('git://github.com/o/r')).toBeUndefined();
-    expect(normalizeRemoteToWebUrl('')).toBeUndefined();
   });
 });
 
@@ -3371,6 +3321,12 @@ describe('backfillWorkspaceSessionPrs', () => {
 describe('registerSessionPrBackfillRoutes', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    // The repo-key gate makes these fetchers load-bearing for every route
+    // test; `clearAllMocks` keeps implementations, so without explicit
+    // defaults an isolated run (`-t`, IDE single test) would inherit
+    // nothing and destructure undefined at the source.
+    fetchRemoteWebUrlMock.mockResolvedValue('https://github.com/o/r');
+    fetchAttributionRepoKeysMock.mockResolvedValue({});
   });
 
   function runtime(

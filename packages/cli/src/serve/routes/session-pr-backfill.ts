@@ -82,38 +82,6 @@ export function parsePrNumberFromWorktree(
   return undefined;
 }
 
-/**
- * Converts a git remote URL (https / ssh / scp-style) to the repository's
- * web URL, used to build `<repo>/pull/<N>` when `gh` is unavailable.
- */
-export function normalizeRemoteToWebUrl(remote: string): string | undefined {
-  const trimmed = remote.trim();
-  if (!trimmed) return undefined;
-  let input = trimmed;
-  // An ssh:// remote's explicit port is the SSH port, almost never the web
-  // port — ssh-derived URLs drop it (scp-style remotes cannot carry one).
-  // An https remote's port IS the web port and must survive.
-  let sshDerived = false;
-  if (input.startsWith('git@')) {
-    input = `https://${input.slice('git@'.length).replace(':', '/')}`;
-    sshDerived = true;
-  } else if (input.startsWith('ssh://')) {
-    input = `https://${input.slice('ssh://'.length)}`;
-    sshDerived = true;
-  }
-  let url: URL;
-  try {
-    url = new URL(input);
-  } catch {
-    return undefined;
-  }
-  if (url.protocol !== 'http:' && url.protocol !== 'https:') return undefined;
-  const pathname = url.pathname.replace(/\.git\/?$/, '');
-  if (!pathname || pathname === '/') return undefined;
-  const host = sshDerived ? url.hostname : url.host;
-  return `${url.protocol}//${host}${pathname}`.replace(/\/$/, '');
-}
-
 export interface SessionPrBackfillWorkspaceResult {
   workspaceCwd: string;
   /** Persisted sessions scanned (active + archived). */
