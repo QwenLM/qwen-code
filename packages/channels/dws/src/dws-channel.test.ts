@@ -1137,24 +1137,58 @@ describe('DwsChannel', () => {
   });
 
   // R3-2: the stale-replay rescue is deliberately direct-only; every other
-  // source is still marked processed and dropped here. A mention replayed
-  // long after it was sent must not be parked and re-driven as a fresh turn.
+  // source is still marked processed and dropped here. The mark is what keeps
+  // a replayed mention from becoming a fresh turn after a restart: the
+  // persisted mention watermark re-opens the overlap window over the downtime
+  // gap — which can lie entirely before the new connection's drop boundary —
+  // so history polling re-fetches the replay and only the mark drops it.
   it('still drops a stale replayed non-direct message', async () => {
-    const client = new FakeDwsClient();
-    const channel = await readyChannel(client);
-    const replay = message(
-      'user_im_message_receive_at',
-      'stale-at-replay',
-      '@Qwen stale mention',
-      { eventTime: Date.now() - 60_000 },
-    );
-    client.directMessages = [replay];
+    vi.useFakeTimers();
+    try {
+      const name = 'stale-at-replay-dws';
+      const firstClient = new FakeDwsClient();
+      const first = await readyChannel(firstClient, makeConfig(), name);
+      firstClient.mentionedMessages = [
+        message('user_im_message_receive_at', 'seed-mention', '@Qwen seed'),
+      ];
+      await first.poll();
+      expect(first.inbound).toHaveLength(1);
+      first.disconnect();
 
-    await client.emit(0, replay);
-    expect(channel.inbound).toEqual([]);
+      await vi.advanceTimersByTimeAsync(30_000);
 
-    await channel.poll();
-    expect(channel.inbound).toEqual([]);
+      const secondClient = new FakeDwsClient();
+      const second = await readyChannel(secondClient, makeConfig(), name);
+      const replay = message(
+        'user_im_message_receive_at',
+        'stale-at-replay',
+        '@Qwen stale mention',
+        { eventTime: Date.now() - 15_000 },
+      );
+      secondClient.mentionedMessages = [replay];
+      const windows: Array<[number, number]> = [];
+      const listMentionedMessages =
+        secondClient.listMentionedMessages.getMockImplementation();
+      secondClient.listMentionedMessages.mockImplementation(
+        async (startTime, endTime, signal, cursor) => {
+          windows.push([startTime, endTime]);
+          return listMentionedMessages!(startTime, endTime, signal, cursor);
+        },
+      );
+
+      await secondClient.emit(0, replay);
+      expect(second.inbound).toEqual([]);
+
+      await second.poll();
+      expect(second.inbound).toEqual([]);
+      // The restored watermark's window has to actually reach back over the
+      // replay — asserting only on `inbound` would pass on a watermark that
+      // restarted at the second connect and silently vacate the witness.
+      expect(windows[0][0]).toBeLessThanOrEqual(replay.eventTime!);
+      expect(windows[0][1]).toBeGreaterThanOrEqual(replay.eventTime!);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   // R4-4: the pullback above only rescues the replay if the poll that was in
