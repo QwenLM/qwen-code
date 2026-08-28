@@ -52,9 +52,49 @@ export interface LedgerFinding {
    * flag, which is exactly what they mean.
    */
   k?: 1;
+  /**
+   * A Critical's two decision axes (#10291), read off the posted claim
+   * line's `[certifies-falsely]`/`[fails-closed]` and
+   * `[regression]`/`[new-surface]` tags: `d` is the direction (`c` / `f`),
+   * `b` the baseline (`r` / `n`) — one letter each on the body-bytes
+   * discipline, spelled out by `LEDGER_DIRECTIONS` / `LEDGER_BASELINES`.
+   * Absent when the claim carried no tag, which is also how a marker
+   * written before the fields existed reads. They decide nothing in this
+   * module: the next round's Step 6 routing reads them off the side file,
+   * and the autofix tooling keys on them (#9907). A value this version does
+   * not know is normalised to absent like `k`, never used to reject the
+   * entry.
+   */
+  d?: 'c' | 'f';
+  b?: 'r' | 'n';
   line?: number;
   /** One line, capped — enough for the next round to re-locate the claim. */
   title: string;
+}
+
+/** The marker's one-letter direction spellings, and what each means. */
+export const LEDGER_DIRECTIONS = {
+  c: 'certifies-falsely',
+  f: 'fails-closed',
+} as const;
+/** The marker's one-letter baseline spellings, and what each means. */
+export const LEDGER_BASELINES = {
+  r: 'regression',
+  n: 'new-surface',
+} as const;
+
+/**
+ * The axes a finding carries, spelled out — `fails-closed, new-surface` —
+ * or `''` when it carries neither. One renderer for the side-file table and
+ * the terminal, so the two cannot spell a classification differently.
+ */
+export function axesOf(f: Pick<LedgerFinding, 'd' | 'b'>): string {
+  return [
+    f.d === undefined ? undefined : LEDGER_DIRECTIONS[f.d],
+    f.b === undefined ? undefined : LEDGER_BASELINES[f.b],
+  ]
+    .filter((a) => a !== undefined)
+    .join(', ');
 }
 
 /**
@@ -862,7 +902,7 @@ export function isLedgerClosure(
  * hand-edited marker nor a side file is bound by it.
  */
 export function normalizeLedgerFinding(f: LedgerFinding): LedgerFinding {
-  const { k: _k, ...rest } = f;
+  const { k: _k, d: _d, b: _b, ...rest } = f;
   return {
     ...rest,
     id: f.id.slice(0, LEDGER_MAX_ID),
@@ -877,6 +917,10 @@ export function normalizeLedgerFinding(f: LedgerFinding): LedgerFinding {
     // decides-nothing siblings (`posted`, `prevPosted`, `floor`) are all
     // normalised the same way.
     ...(f.k === 1 ? { k: 1 as const } : {}),
+    // The axes too: a spelling this version does not know reads as "not
+    // classified", which every consumer treats as "posts at any floor".
+    ...(f.d === 'c' || f.d === 'f' ? { d: f.d } : {}),
+    ...(f.b === 'r' || f.b === 'n' ? { b: f.b } : {}),
   };
 }
 
