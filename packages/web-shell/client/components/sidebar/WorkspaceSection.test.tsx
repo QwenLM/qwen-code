@@ -1023,7 +1023,8 @@ describe('WorkspaceSection git chip', () => {
       chipButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     });
     await flush();
-    // Opening the picker refreshes the status behind its action hints.
+    // Opening the picker fetches a fresh status for its action hints and
+    // hands it back to the chip.
     expect(workspaceGit).toHaveBeenCalledTimes(2);
 
     // The picker content is portaled outside the section container.

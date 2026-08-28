@@ -28,6 +28,7 @@ import {
 import { useI18n } from '../i18n';
 import { Popover, PopoverContent, PopoverTrigger } from './ui/popover';
 import { validateBranchName } from './GitModePopover';
+import { deriveStatus, hasComputedTreeSummary } from './GitBranchIndicator';
 import styles from './BranchPickerPopover.module.css';
 
 interface BranchPickerPopoverProps {
@@ -38,14 +39,17 @@ interface BranchPickerPopoverProps {
   side?: 'top' | 'right' | 'bottom' | 'left';
   onBranchChanged?: () => void;
   /**
-   * Live working-tree summary from the trigger chip. Drives the hints beside
-   * the Update / Commit / Push actions (dirty counts, in-progress operation);
-   * ahead/behind/upstream prefer the branch listing fetched on open, which is
-   * fresher than the chip's polled snapshot.
+   * Working-tree summary from the trigger chip. Seeds the hints beside the
+   * Update / Commit / Push actions (dirty counts, in-progress operation) until
+   * the popover's own on-open fetch lands; whichever of the two carries the
+   * newer `computedAt` wins.
    */
   status?: DaemonWorkspaceGitStatus;
-  /** Invoked when the popover opens so the caller can refresh `status`. */
-  onRefreshStatus?: () => void;
+  /**
+   * Receives the status the popover fetches for itself on open, so a caller
+   * that renders a chip from the same object can update it in step.
+   */
+  onStatusRefreshed?: (status: DaemonWorkspaceGitStatus) => void;
   onOpenDiff?: () => void;
   onOpenCommit?: () => void;
   children: React.ReactNode;
@@ -72,12 +76,19 @@ type TranslateFn = ReturnType<typeof useI18n>['t'];
 
 /**
  * Derive the per-action hints shown beside Update / Commit / Push so the user
- * can judge before clicking. Hard blockers (in-progress merge/rebase,
- * conflicts, detached HEAD, pull without upstream) disable the action because
- * the daemon would reject it anyway; soft states (up to date, nothing to push,
- * clean tree) only dim the row since the action is still harmless.
+ * can judge before clicking.
  *
- * Exported for tests.
+ * Disabling is reserved for what git itself refuses: `git pull` during a
+ * merge/rebase/cherry-pick, with unmerged entries, on a detached HEAD, or
+ * without a usable upstream; `git push --set-upstream` only on a detached
+ * HEAD (a push does not consult the index, so conflicts and in-progress
+ * operations are shown as warnings on an enabled row). Soft states (up to
+ * date, nothing to push, clean tree) only dim the row since the action is
+ * still harmless.
+ *
+ * The branch listing (fetched on open) provides ahead/behind/upstream; the
+ * status provides the tree counters and the in-progress operation. When the
+ * listing has no head entry the status fills in. Exported for tests.
  */
 export function deriveActionHints(
   t: TranslateFn,
@@ -85,28 +96,23 @@ export function deriveActionHints(
   status: DaemonWorkspaceGitStatus | undefined,
 ): ActionHints {
   const head = data?.local.find((b) => b.isHead);
-  const detached = data?.detached ?? status?.detached ?? false;
-  const operation = status?.operation;
-  const conflicted = status?.conflicted ?? 0;
-  // The branch listing is fetched on open, so it wins over the polled status.
-  const ahead = head?.ahead ?? status?.ahead ?? 0;
-  const behind = head?.behind ?? status?.behind ?? 0;
+  const s = deriveStatus(status);
+  const detached = data?.detached ?? s.detached;
+  const ahead = head?.ahead ?? s.ahead;
+  const behind = head?.behind ?? s.behind;
   const upstream = head?.upstream;
+  const upstreamGone = head?.upstreamGone === true;
   const hasUpstream: boolean | undefined = head
-    ? Boolean(head.upstream)
+    ? Boolean(head.upstream) && !upstreamGone
     : status?.hasUpstream;
-  // Dirty counts only exist on v2 status; `computedAt` marks that the enriched
-  // fields were actually computed rather than defaulted.
-  const hasTreeSummary = status?.computedAt !== undefined;
-  const staged = status?.staged ?? 0;
-  const unstaged = status?.unstaged ?? 0;
-  const untracked = status?.untracked ?? 0;
-  const changed = staged + unstaged + untracked + conflicted;
+  // Entry-granularity counters (a partially staged file counts twice, an
+  // untracked directory once), so the copy says "changes", not "files".
+  const changed = s.staged + s.unstaged + s.untracked + s.conflicted;
 
-  const blocker: ActionHint | undefined = operation
-    ? { text: t(`git.operation.${operation}`), tone: 'warning' }
-    : conflicted > 0
-      ? { text: t('git.conflicted', { count: conflicted }), tone: 'warning' }
+  const blocker: ActionHint | undefined = s.operation
+    ? { text: t(`git.operation.${s.operation}`), tone: 'warning' }
+    : s.conflicted > 0
+      ? { text: t('git.conflicted', { count: s.conflicted }), tone: 'warning' }
       : detached
         ? { text: t('git.detached'), tone: 'warning' }
         : undefined;
@@ -117,7 +123,14 @@ export function deriveActionHints(
     pull = blocker;
     pullDisabled = true;
   } else if (hasUpstream === false) {
-    pull = { text: t('branchPicker.hint.noUpstream'), tone: 'muted' };
+    pull = {
+      text: t(
+        upstreamGone
+          ? 'branchPicker.hint.upstreamGone'
+          : 'branchPicker.hint.noUpstream',
+      ),
+      tone: 'muted',
+    };
     pullDisabled = true;
   } else if (behind > 0) {
     pull =
@@ -135,12 +148,13 @@ export function deriveActionHints(
   }
 
   let push: ActionHint | undefined;
-  let pushDisabled = false;
+  // Only a detached HEAD makes the daemon's `git push --set-upstream` fail;
+  // an in-progress operation or conflicts are surfaced but left clickable.
+  const pushDisabled = detached;
   if (blocker) {
     push = blocker;
-    pushDisabled = true;
   } else if (hasUpstream === false) {
-    push = { text: t('branchPicker.hint.willCreateUpstream'), tone: 'info' };
+    push = { text: t('branchPicker.hint.setsUpstream'), tone: 'info' };
   } else if (ahead > 0 && behind > 0) {
     push = {
       text: t('branchPicker.hint.aheadBehind', { ahead, behind }),
@@ -153,23 +167,60 @@ export function deriveActionHints(
   }
 
   let commit: ActionHint | undefined;
-  if (hasTreeSummary) {
+  if (hasComputedTreeSummary(status)) {
     commit =
       changed > 0
         ? {
             text:
-              untracked > 0
-                ? t('branchPicker.hint.changedFilesUntracked', {
+              s.untracked > 0
+                ? t('branchPicker.hint.changesUntracked', {
                     count: changed,
-                    untracked,
+                    untracked: s.untracked,
                   })
-                : t('branchPicker.hint.changedFiles', { count: changed }),
+                : t('branchPicker.hint.changes', { count: changed }),
             tone: 'info',
           }
         : { text: t('branchPicker.hint.noChanges'), tone: 'muted' };
   }
 
   return { pull, pullDisabled, commit, push, pushDisabled };
+}
+
+/** Of two statuses, the one the daemon computed later (a missing stamp loses). */
+function newerStatus(
+  a: DaemonWorkspaceGitStatus | undefined,
+  b: DaemonWorkspaceGitStatus | undefined,
+): DaemonWorkspaceGitStatus | undefined {
+  if (!a) return b;
+  if (!b) return a;
+  return (b.computedAt ?? -1) >= (a.computedAt ?? -1) ? b : a;
+}
+
+/**
+ * True when a status disagrees with the branch listing on a field the hints
+ * take from the listing — the signal that the listing is stale and should be
+ * re-fetched. Exported for tests.
+ */
+export function listingContradictsStatus(
+  data: DaemonGitBranchesResult,
+  status: DaemonWorkspaceGitStatus,
+): boolean {
+  if (status.detached !== undefined && status.detached !== data.detached) {
+    return true;
+  }
+  const head = data.local.find((b) => b.isHead);
+  if (!head) return false;
+  // The status cannot express a gone upstream (it reports the configured
+  // tracking as present), so the listing's `upstreamGone` is not a
+  // disagreement — only a genuinely set/unset upstream is.
+  const upstreamComparable = !head.upstreamGone;
+  return (
+    (upstreamComparable &&
+      status.hasUpstream !== undefined &&
+      status.hasUpstream !== Boolean(head.upstream)) ||
+    (status.ahead !== undefined && status.ahead !== head.ahead) ||
+    (status.behind !== undefined && status.behind !== head.behind)
+  );
 }
 
 export function BranchPickerPopover({
@@ -180,7 +231,7 @@ export function BranchPickerPopover({
   side = 'bottom',
   onBranchChanged,
   status,
-  onRefreshStatus,
+  onStatusRefreshed,
   onOpenDiff,
   onOpenCommit,
   children,
@@ -213,10 +264,19 @@ export function BranchPickerPopover({
   const searchRef = useRef<HTMLInputElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
   const requestIdRef = useRef(0);
+  // Wall-clock time the current listing was received; lets a status the
+  // daemon computed later trigger a listing re-fetch (see the effect below).
+  const [listingFetchedAt, setListingFetchedAt] = useState<number>();
+  // The popover's own on-open status fetch, so every entry point (sidebar
+  // chip, composer chip, environment panel) sees fresh counters instead of
+  // whatever its caller last polled.
+  const [liveStatus, setLiveStatus] = useState<DaemonWorkspaceGitStatus>();
+  const statusRequestIdRef = useRef(0);
+  const reconciledAtRef = useRef<number | undefined>(undefined);
   // Held in a ref so an inline callback from the parent doesn't re-arm the
-  // open effect on every render (refresh → setState → render → refresh…).
-  const onRefreshStatusRef = useRef(onRefreshStatus);
-  onRefreshStatusRef.current = onRefreshStatus;
+  // open effect on every render (callback → setState → render → refetch…).
+  const onStatusRefreshedRef = useRef(onStatusRefreshed);
+  onStatusRefreshedRef.current = onStatusRefreshed;
 
   const fetchBranches = useCallback(async () => {
     const requestId = ++requestIdRef.current;
@@ -226,6 +286,7 @@ export function BranchPickerPopover({
       const result = await ws.workspaceGitBranches(gitCwd);
       if (requestId !== requestIdRef.current) return;
       setData(result);
+      setListingFetchedAt(Date.now());
     } catch (err) {
       if (requestId !== requestIdRef.current) return;
       setError(err instanceof Error ? err.message : String(err));
@@ -236,10 +297,37 @@ export function BranchPickerPopover({
     }
   }, [ws, gitCwd]);
 
+  const fetchStatus = useCallback(async () => {
+    const requestId = ++statusRequestIdRef.current;
+    try {
+      // Mirrors the app-level poll: a worktree `?cwd=` read always computes
+      // directly, so `wait` only matters for the workspace root.
+      const fresh = await ws.workspaceGit(
+        gitCwd ? { cwd: gitCwd } : { wait: true },
+      );
+      if (requestId !== statusRequestIdRef.current) return;
+      setLiveStatus(fresh);
+      onStatusRefreshedRef.current?.(fresh);
+    } catch {
+      // Keep whatever the caller passed; the hints degrade to the listing.
+    }
+  }, [ws, gitCwd]);
+
+  // A status fetched for a previous workspace must not seed the next one.
+  useEffect(() => {
+    setLiveStatus(undefined);
+    statusRequestIdRef.current++;
+  }, [ws, gitCwd]);
+
+  const effectiveStatus = useMemo(
+    () => newerStatus(status, liveStatus),
+    [status, liveStatus],
+  );
+
   useEffect(() => {
     if (open) {
       void fetchBranches();
-      onRefreshStatusRef.current?.();
+      void fetchStatus();
       setSearch('');
       setNewBranchMode(false);
       setCheckoutRefMode(false);
@@ -248,7 +336,23 @@ export function BranchPickerPopover({
       setStatusMsg(null);
       setTimeout(() => searchRef.current?.focus(), 50);
     }
-  }, [open, fetchBranches]);
+  }, [open, fetchBranches, fetchStatus]);
+
+  // The listing is fetched once on open. If a status the daemon computed
+  // after that disagrees with it (upstream unset, HEAD detached, new commits
+  // from a terminal), re-fetch the listing so the rows follow the repo rather
+  // than the snapshot — once per status, so a persistent disagreement can't
+  // loop.
+  useEffect(() => {
+    if (!open || !data || !effectiveStatus || listingFetchedAt === undefined)
+      return;
+    const at = effectiveStatus.computedAt;
+    if (at === undefined || at <= listingFetchedAt) return;
+    if (reconciledAtRef.current === at) return;
+    if (!listingContradictsStatus(data, effectiveStatus)) return;
+    reconciledAtRef.current = at;
+    void fetchBranches();
+  }, [open, data, effectiveStatus, listingFetchedAt, fetchBranches]);
 
   const showStatus = useCallback(
     (msg: string, type: 'info' | 'error' | 'success' = 'info') => {
@@ -391,8 +495,8 @@ export function BranchPickerPopover({
   }, [filteredRemote]);
 
   const hints = useMemo(
-    () => deriveActionHints(t, data, status),
-    [t, data, status],
+    () => deriveActionHints(t, data, effectiveStatus),
+    [t, data, effectiveStatus],
   );
 
   const actionsVisible =

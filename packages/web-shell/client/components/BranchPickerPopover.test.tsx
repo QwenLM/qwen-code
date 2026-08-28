@@ -28,27 +28,38 @@ vi.mock('./ui/popover', async () => {
   };
 });
 
-const { workspaceGitBranches, workspaceGitCreateBranch, workspaceClient } =
-  vi.hoisted(() => {
-    const workspaceGitBranches = vi.fn();
-    const workspaceGitCreateBranch = vi.fn();
-    // A stable client so the popover's memoized workspace handle (and thus its
-    // fetch effect) stays referentially stable across renders.
-    const workspaceClient = {
-      workspaceByCwd: () => ({
-        workspaceGitBranches,
-        workspaceGitCheckout: vi.fn().mockResolvedValue(undefined),
-        workspaceGitCreateBranch,
-        workspaceGitPush: vi
-          .fn()
-          .mockResolvedValue({ success: true, output: '' }),
-        workspaceGitPull: vi
-          .fn()
-          .mockResolvedValue({ success: true, output: '' }),
-      }),
-    };
-    return { workspaceGitBranches, workspaceGitCreateBranch, workspaceClient };
-  });
+const {
+  workspaceGitBranches,
+  workspaceGitCreateBranch,
+  workspaceGit,
+  workspaceClient,
+} = vi.hoisted(() => {
+  const workspaceGitBranches = vi.fn();
+  const workspaceGitCreateBranch = vi.fn();
+  const workspaceGit = vi.fn();
+  // A stable client so the popover's memoized workspace handle (and thus its
+  // fetch effect) stays referentially stable across renders.
+  const workspaceClient = {
+    workspaceByCwd: () => ({
+      workspaceGitBranches,
+      workspaceGit,
+      workspaceGitCheckout: vi.fn().mockResolvedValue(undefined),
+      workspaceGitCreateBranch,
+      workspaceGitPush: vi
+        .fn()
+        .mockResolvedValue({ success: true, output: '' }),
+      workspaceGitPull: vi
+        .fn()
+        .mockResolvedValue({ success: true, output: '' }),
+    }),
+  };
+  return {
+    workspaceGitBranches,
+    workspaceGitCreateBranch,
+    workspaceGit,
+    workspaceClient,
+  };
+});
 
 vi.mock('@qwen-code/webui/daemon-react-sdk', async (importOriginal) => {
   const actual =
@@ -63,9 +74,8 @@ vi.mock('@qwen-code/webui/daemon-react-sdk', async (importOriginal) => {
 });
 
 const { I18nProvider } = await import('../i18n');
-const { BranchPickerPopover, deriveActionHints } = await import(
-  './BranchPickerPopover'
-);
+const { BranchPickerPopover, deriveActionHints, listingContradictsStatus } =
+  await import('./BranchPickerPopover');
 
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -83,7 +93,7 @@ function mount(
     onOpenDiff: () => void;
     onOpenCommit: () => void;
     onOpenChange: (open: boolean) => void;
-    onRefreshStatus: () => void;
+    onStatusRefreshed: (status: DaemonWorkspaceGitStatus) => void;
     status: DaemonWorkspaceGitStatus;
   }> = {},
 ): void {
@@ -95,7 +105,7 @@ function mount(
           onOpenChange={overrides.onOpenChange ?? vi.fn()}
           workspaceCwd="/repo"
           status={overrides.status}
-          onRefreshStatus={overrides.onRefreshStatus}
+          onStatusRefreshed={overrides.onStatusRefreshed}
           onOpenDiff={overrides.onOpenDiff}
           onOpenCommit={overrides.onOpenCommit}
         >
@@ -120,7 +130,11 @@ afterEach(() => {
   act(() => root.unmount());
   container.remove();
   vi.clearAllMocks();
+  // Default: the popover's own status fetch yields nothing, so hints derive
+  // from the caller's `status` prop alone unless a test resolves it.
+  workspaceGit.mockRejectedValue(new Error('no status'));
 });
+workspaceGit.mockRejectedValue(new Error('no status'));
 
 describe('BranchPickerPopover actions', () => {
   it('wires "View Changes" to onOpenDiff and closes', async () => {
@@ -319,7 +333,7 @@ describe('deriveActionHints', () => {
     expect(h.pullDisabled).toBe(false);
   });
 
-  it('disables pull and announces upstream creation on push without upstream', () => {
+  it('disables pull without upstream and says push will set one', () => {
     const h = deriveActionHints(tKey, branches({ ahead: 1 }), status());
     expect(h.pull).toEqual({
       text: 'branchPicker.hint.noUpstream',
@@ -327,7 +341,25 @@ describe('deriveActionHints', () => {
     });
     expect(h.pullDisabled).toBe(true);
     expect(h.push).toEqual({
-      text: 'branchPicker.hint.willCreateUpstream',
+      text: 'branchPicker.hint.setsUpstream',
+      tone: 'info',
+    });
+    expect(h.pushDisabled).toBe(false);
+  });
+
+  it('treats a gone upstream like no upstream, with its own copy on pull', () => {
+    const h = deriveActionHints(
+      tKey,
+      branches({ upstream: 'origin/feat', upstreamGone: true, ahead: 0 }),
+      status({ hasUpstream: true }),
+    );
+    expect(h.pull).toEqual({
+      text: 'branchPicker.hint.upstreamGone',
+      tone: 'muted',
+    });
+    expect(h.pullDisabled).toBe(true);
+    expect(h.push).toEqual({
+      text: 'branchPicker.hint.setsUpstream',
       tone: 'info',
     });
     expect(h.pushDisabled).toBe(false);
@@ -353,7 +385,7 @@ describe('deriveActionHints', () => {
     });
   });
 
-  it('counts all changed files for commit and calls out untracked ones', () => {
+  it('counts changes (entries, not files) for commit and calls out untracked ones', () => {
     expect(
       deriveActionHints(
         tKey,
@@ -361,7 +393,7 @@ describe('deriveActionHints', () => {
         status({ staged: 1, unstaged: 2 }),
       ).commit,
     ).toEqual({
-      text: 'branchPicker.hint.changedFiles:{"count":3}',
+      text: 'branchPicker.hint.changes:{"count":3}',
       tone: 'info',
     });
     expect(
@@ -371,20 +403,32 @@ describe('deriveActionHints', () => {
         status({ staged: 1, unstaged: 2, untracked: 2 }),
       ).commit,
     ).toEqual({
-      text: 'branchPicker.hint.changedFilesUntracked:{"count":5,"untracked":2}',
+      text: 'branchPicker.hint.changesUntracked:{"count":5,"untracked":2}',
       tone: 'info',
     });
+    // A partially staged file (porcelain `MM`) is one file but two entries;
+    // the copy must not call it "2 files".
+    expect(
+      deriveActionHints(
+        tKey,
+        branches({ upstream: 'origin/main' }),
+        status({ staged: 1, unstaged: 1 }),
+      ).commit?.text,
+    ).toBe('branchPicker.hint.changes:{"count":2}');
   });
 
-  it('blocks pull and push during an in-progress operation, conflicts, or detached HEAD', () => {
+  it('blocks pull during an in-progress operation or conflicts but only warns on push', () => {
+    // `git pull` refuses both states; `git push` does not consult the index,
+    // so the push row stays clickable with the same warning.
     const op = deriveActionHints(
       tKey,
       branches({ upstream: 'origin/main', behind: 1 }),
-      status({ operation: 'rebase' }),
+      status({ operation: 'merge' }),
     );
-    expect(op.pull).toEqual({ text: 'git.operation.rebase', tone: 'warning' });
+    expect(op.pull).toEqual({ text: 'git.operation.merge', tone: 'warning' });
     expect(op.pullDisabled).toBe(true);
-    expect(op.pushDisabled).toBe(true);
+    expect(op.push).toEqual({ text: 'git.operation.merge', tone: 'warning' });
+    expect(op.pushDisabled).toBe(false);
 
     const conflict = deriveActionHints(
       tKey,
@@ -396,16 +440,31 @@ describe('deriveActionHints', () => {
       tone: 'warning',
     });
     expect(conflict.pullDisabled).toBe(true);
-    expect(conflict.pushDisabled).toBe(true);
+    expect(conflict.pushDisabled).toBe(false);
     // Conflicted entries still count as uncommitted work for the commit hint.
-    expect(conflict.commit?.text).toBe(
-      'branchPicker.hint.changedFiles:{"count":2}',
-    );
+    expect(conflict.commit?.text).toBe('branchPicker.hint.changes:{"count":2}');
+  });
 
+  it('blocks both pull and push on a detached HEAD, naming the operation when there is one', () => {
     const detached = deriveActionHints(tKey, branches({}, true), status());
     expect(detached.pull).toEqual({ text: 'git.detached', tone: 'warning' });
     expect(detached.pullDisabled).toBe(true);
+    expect(detached.push).toEqual({ text: 'git.detached', tone: 'warning' });
     expect(detached.pushDisabled).toBe(true);
+
+    // A rebase detaches HEAD: push is blocked for that reason, but the row
+    // says "Rebasing" since that is what the user is in the middle of.
+    const rebase = deriveActionHints(
+      tKey,
+      branches({}, true),
+      status({ operation: 'rebase', detached: true }),
+    );
+    expect(rebase.push).toEqual({
+      text: 'git.operation.rebase',
+      tone: 'warning',
+    });
+    expect(rebase.pushDisabled).toBe(true);
+    expect(rebase.pullDisabled).toBe(true);
   });
 
   it('prefers the freshly fetched branch listing over the polled status for ahead/behind', () => {
@@ -463,17 +522,67 @@ describe('BranchPickerPopover action hints', () => {
     expect(pull?.disabled).toBe(true);
     expect(pull?.textContent).toContain('No upstream');
 
+    // The pull row is dimmed, not just disabled: both the class hook the
+    // stylesheet keys on and the tone attribute must be present.
+    expect(pull?.className).toMatch(/actionItemMuted/);
+    expect(
+      pull
+        ?.querySelector('[data-testid="branch-picker-action-hint"]')
+        ?.getAttribute('data-tone'),
+    ).toBe('muted');
+
     const commit = document.body.querySelector<HTMLButtonElement>(
       '[data-testid="branch-picker-commit"]',
     );
     expect(commit?.disabled).toBe(false);
-    expect(commit?.textContent).toContain('2 files');
+    expect(commit?.textContent).toContain('2 changes');
+    expect(commit?.className).not.toMatch(/actionItemMuted/);
 
     const push = document.body.querySelector<HTMLButtonElement>(
       '[data-testid="branch-picker-push"]',
     );
     expect(push?.disabled).toBe(false);
-    expect(push?.textContent).toContain('Creates remote branch');
+    expect(push?.textContent).toContain('Sets upstream on push');
+    expect(push?.className).not.toMatch(/actionItemMuted/);
+  });
+
+  it('dims every row on an in-sync clean tree', async () => {
+    workspaceGitBranches.mockResolvedValue(
+      branches({ upstream: 'origin/main' }),
+    );
+    setup();
+    mount({ onOpenCommit: vi.fn(), status: status() });
+    await flush();
+
+    for (const id of [
+      'branch-picker-pull',
+      'branch-picker-commit',
+      'branch-picker-push',
+    ]) {
+      const btn = document.body.querySelector<HTMLButtonElement>(
+        `[data-testid="${id}"]`,
+      );
+      expect(btn?.disabled).toBe(false);
+      expect(btn?.className).toMatch(/actionItemMuted/);
+    }
+  });
+
+  it('words a partially staged file as changes, not files', async () => {
+    workspaceGitBranches.mockResolvedValue(
+      branches({ upstream: 'origin/main' }),
+    );
+    setup();
+    mount({
+      onOpenCommit: vi.fn(),
+      status: status({ staged: 1, unstaged: 1 }),
+    });
+    await flush();
+
+    const commit = document.body.querySelector<HTMLButtonElement>(
+      '[data-testid="branch-picker-commit"]',
+    );
+    expect(commit?.textContent).toContain('2 changes');
+    expect(commit?.textContent).not.toContain('files');
   });
 
   it('warns on pull when behind with uncommitted changes and keeps it enabled', async () => {
@@ -495,12 +604,14 @@ describe('BranchPickerPopover action hints', () => {
     expect(hint?.textContent).toBe('↓3 · uncommitted changes');
   });
 
-  it('disables pull and push while a rebase is in progress', async () => {
+  it('disables pull and push while a rebase (detached HEAD) is in progress', async () => {
     workspaceGitBranches.mockResolvedValue(
-      branches({ upstream: 'origin/main', behind: 1 }),
+      branches({ upstream: 'origin/main', behind: 1 }, true),
     );
     setup();
-    mount({ status: status({ operation: 'rebase', conflicted: 1 }) });
+    mount({
+      status: status({ operation: 'rebase', detached: true, conflicted: 1 }),
+    });
     await flush();
 
     for (const id of ['branch-picker-pull', 'branch-picker-push']) {
@@ -512,23 +623,173 @@ describe('BranchPickerPopover action hints', () => {
     }
   });
 
-  it('asks the caller to refresh status once when opened, even with an inline callback', async () => {
+  it('keeps push clickable during a conflicted merge on a branch', async () => {
+    workspaceGitBranches.mockResolvedValue(
+      branches({ upstream: 'origin/main', ahead: 1 }),
+    );
+    setup();
+    mount({ status: status({ operation: 'merge', conflicted: 1 }) });
+    await flush();
+
+    const pull = document.body.querySelector<HTMLButtonElement>(
+      '[data-testid="branch-picker-pull"]',
+    );
+    const push = document.body.querySelector<HTMLButtonElement>(
+      '[data-testid="branch-picker-push"]',
+    );
+    expect(pull?.disabled).toBe(true);
+    expect(push?.disabled).toBe(false);
+    expect(
+      push
+        ?.querySelector('[data-testid="branch-picker-action-hint"]')
+        ?.getAttribute('data-tone'),
+    ).toBe('warning');
+    expect(push?.textContent).toContain('Merging');
+  });
+
+  it('fetches its own status once on open, reports it, and prefers it over an older prop', async () => {
     workspaceGitBranches.mockResolvedValue(
       branches({ upstream: 'origin/main' }),
     );
+    // The caller's snapshot says clean; the daemon now says otherwise.
+    workspaceGit.mockResolvedValue(status({ unstaged: 3, computedAt: 200 }));
     setup();
-    const onRefreshStatus = vi.fn();
-    mount({ onRefreshStatus, status: status() });
-    await flush();
-    // Re-render with a new callback identity and new status, as a parent
-    // whose refresh handler calls setState would.
+    const onStatusRefreshed = vi.fn();
+    const onOpenCommit = vi.fn();
     mount({
-      onRefreshStatus: () => onRefreshStatus(),
-      status: status({ unstaged: 1 }),
+      onOpenCommit,
+      onStatusRefreshed,
+      status: status({ computedAt: 100 }),
+    });
+    await flush();
+    // Re-render with a new callback identity, as a parent whose handler
+    // calls setState would; the open effect must not re-arm.
+    mount({
+      onOpenCommit,
+      onStatusRefreshed: (s) => onStatusRefreshed(s),
+      status: status({ computedAt: 100 }),
     });
     await flush();
 
-    expect(onRefreshStatus).toHaveBeenCalledTimes(1);
+    expect(workspaceGit).toHaveBeenCalledTimes(1);
+    expect(workspaceGit).toHaveBeenCalledWith({ wait: true });
+    expect(onStatusRefreshed).toHaveBeenCalledTimes(1);
+    expect(onStatusRefreshed.mock.calls[0]?.[0]).toMatchObject({
+      unstaged: 3,
+    });
     expect(workspaceGitBranches).toHaveBeenCalledTimes(1);
+    const commit = document.body.querySelector<HTMLButtonElement>(
+      '[data-testid="branch-picker-commit"]',
+    );
+    expect(commit?.textContent).toContain('3 changes');
+  });
+
+  it('reads status through the worktree cwd when one is given', async () => {
+    workspaceGitBranches.mockResolvedValue(
+      branches({ upstream: 'origin/main' }),
+    );
+    workspaceGit.mockResolvedValue(status());
+    setup();
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <BranchPickerPopover
+            open
+            onOpenChange={vi.fn()}
+            workspaceCwd="/repo"
+            gitCwd="/repo/.qwen/worktrees/wt"
+          >
+            <button type="button">trigger</button>
+          </BranchPickerPopover>
+        </I18nProvider>,
+      );
+    });
+    await flush();
+    expect(workspaceGit).toHaveBeenCalledWith({
+      cwd: '/repo/.qwen/worktrees/wt',
+    });
+  });
+
+  it('re-fetches the listing when a newer status contradicts it, once per status', async () => {
+    // Listing on open: tracking origin/main. Then the terminal runs
+    // `git branch --unset-upstream` and a newer status arrives while the
+    // popover is still open; the second listing fetch reflects that.
+    workspaceGitBranches
+      .mockResolvedValueOnce(branches({ upstream: 'origin/main' }))
+      .mockResolvedValue(branches({}));
+    setup();
+    mount({ status: status({ hasUpstream: true, computedAt: 1 }) });
+    await flush();
+    expect(workspaceGitBranches).toHaveBeenCalledTimes(1);
+    expect(
+      document.body.querySelector<HTMLButtonElement>(
+        '[data-testid="branch-picker-pull"]',
+      )?.disabled,
+    ).toBe(false);
+
+    mount({
+      status: status({ hasUpstream: false, computedAt: Date.now() + 60_000 }),
+    });
+    await flush();
+    expect(workspaceGitBranches).toHaveBeenCalledTimes(2);
+    const pull = document.body.querySelector<HTMLButtonElement>(
+      '[data-testid="branch-picker-pull"]',
+    );
+    expect(pull?.disabled).toBe(true);
+    expect(pull?.textContent).toContain('No upstream');
+
+    // The same status arriving again must not fetch again.
+    mount({
+      status: status({ hasUpstream: false, computedAt: Date.now() + 60_000 }),
+    });
+    await flush();
+    expect(workspaceGitBranches).toHaveBeenCalledTimes(2);
+  });
+
+  it('leaves the listing alone when the newer status agrees with it', async () => {
+    workspaceGitBranches.mockResolvedValue(
+      branches({ upstream: 'origin/main', ahead: 2 }),
+    );
+    setup();
+    mount({ status: status({ computedAt: 1 }) });
+    await flush();
+    mount({
+      status: status({
+        hasUpstream: true,
+        ahead: 2,
+        behind: 0,
+        computedAt: Date.now() + 60_000,
+      }),
+    });
+    await flush();
+    expect(workspaceGitBranches).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('listingContradictsStatus', () => {
+  it('flags upstream, detached, and ahead/behind disagreements only', () => {
+    const listing = branches({ upstream: 'origin/main', ahead: 1 });
+    expect(listingContradictsStatus(listing, status())).toBe(false);
+    expect(
+      listingContradictsStatus(listing, status({ hasUpstream: false })),
+    ).toBe(true);
+    expect(listingContradictsStatus(listing, status({ detached: true }))).toBe(
+      true,
+    );
+    expect(listingContradictsStatus(listing, status({ ahead: 2 }))).toBe(true);
+    expect(listingContradictsStatus(listing, status({ behind: 1 }))).toBe(true);
+    // Tree counters are not the listing's business.
+    expect(
+      listingContradictsStatus(listing, status({ unstaged: 5, staged: 2 })),
+    ).toBe(false);
+    // The status cannot express a gone upstream (it still reports tracking),
+    // so a gone listing entry never disagrees on the upstream axis.
+    const gone = branches({ upstream: 'origin/feat', upstreamGone: true });
+    expect(listingContradictsStatus(gone, status({ hasUpstream: true }))).toBe(
+      false,
+    );
+    expect(listingContradictsStatus(gone, status({ hasUpstream: false }))).toBe(
+      false,
+    );
   });
 });
