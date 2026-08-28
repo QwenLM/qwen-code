@@ -309,11 +309,9 @@ export function SkillsManagerDialog({
       settings,
       SettingScope.Workspace,
     ).filter((name): name is string => typeof name === 'string');
-    const lockedNames = new Set(lockedSkills.map((skill) => lower(skill.name)));
     const { disabled, enabled, disabledChanged, enabledChanged } =
       computeWorkspaceSkillListUpdates(
         workspaceDisabled,
-        lockedNames,
         skillSettingStrings(settings, SettingScope.Workspace, 'enabled'),
         unlockedSkills.map((skill) => ({
           name: skill.name,
@@ -397,7 +395,6 @@ export function SkillsManagerDialog({
     addItem,
     initialResolved,
     initialSelectedKeys,
-    lockedSkills,
     reloadCommands,
     selectedKeys,
     settings,
