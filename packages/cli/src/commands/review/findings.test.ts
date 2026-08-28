@@ -769,6 +769,54 @@ describe('findings (command boundary)', () => {
     expect(report.counts.byConfidence['low']).toBe(1);
   });
 
+  it('the artifact compose-review consumes already has an unwitnessed deferrable Critical at low confidence (#10291 × witness rule)', () => {
+    // The two features compose safely only by ORDER: the witness hold runs
+    // here, in Step 6, before compose-review ever reads the artifact — so a
+    // Critical whose axes say fails-closed on new-surface but that no run
+    // confirmed is terminal-only by the time the deferral channel exists,
+    // and the orchestrator has nothing high-confidence to route into
+    // `deferredSuggestions`. Nothing in compose-review can re-check this
+    // (its deferral entries carry no witness field), so the order IS the
+    // contract; moving the hold after the report is built fails here.
+    const input = join(dir, 'in.json');
+    const out = join(dir, 'findings.json');
+    writeFileSync(
+      input,
+      JSON.stringify([
+        {
+          ...base,
+          id: 'd1',
+          direction: 'fails-closed',
+          baseline: 'new-surface',
+        },
+        {
+          ...base,
+          id: 'd2',
+          direction: 'fails-closed',
+          baseline: 'new-surface',
+          witness: 'probe: the sparse clone wedged at step 3',
+        },
+      ]),
+    );
+    runCapturingStderr({ input, out, print: false });
+    const report = JSON.parse(readFileSync(out, 'utf8')) as FindingsReport;
+    const byId = new Map(report.findings.map((f) => [f.id, f]));
+    // Unwitnessed: demoted, axes preserved as facts, never deferrable.
+    expect(byId.get('d1')).toMatchObject({
+      confidence: 'low',
+      direction: 'fails-closed',
+      baseline: 'new-surface',
+    });
+    expect(byId.get('d1')?.failureScenario).toContain('witness rule');
+    // Witnessed: the artifact carries it high with both axes intact — the
+    // only shape the critical floor is ever allowed to defer.
+    expect(byId.get('d2')).toMatchObject({
+      confidence: 'high',
+      direction: 'fails-closed',
+      baseline: 'new-surface',
+    });
+  });
+
   it('announces every hold, naming the finding and the measured file', () => {
     // A severity this command lowered is a change to what the review says. Left
     // unannounced it reads as the reviewer's own judgement, which is the one
@@ -1612,6 +1660,43 @@ describe('holdUnwitnessedFindings — the witness rule has a machine half', () =
     expect(unwitnessed).toEqual(['w1']);
   });
 
+  it('the deferrable axes (#10291) do NOT exempt an unwitnessed Critical — witness first, deferral second', () => {
+    // A Critical tagged fails-closed on new-surface is the ONE combination
+    // the critical floor may defer (compose-review's floorDefersCritical).
+    // Deferral is a posting decision about a CONFIRMED blocker; it is not a
+    // second door past the witness rule the way `heldByMeasurement` is (that
+    // one carries a measurement as its witness). Without this pin, an
+    // unverified Critical could ride its axes straight into the deferral
+    // channel — moved out of the posting set as if it were settled, while no
+    // run ever confirmed it. So: no witness → low confidence (terminal-only,
+    // never drafted, never deferrable), axes or not.
+    const deferrable = {
+      ...critical,
+      direction: 'fails-closed' as const,
+      baseline: 'new-surface' as const,
+    };
+    const held = holdUnwitnessedFindings([deferrable]);
+    expect(held.findings[0].confidence).toBe('low');
+    expect(held.unwitnessed).toEqual(['w1']);
+    // The axes are preserved on the demoted finding — they are facts about
+    // the finding, not a licence — so a later witness can restore it whole.
+    expect(held.findings[0].direction).toBe('fails-closed');
+    expect(held.findings[0].baseline).toBe('new-surface');
+
+    // With a witness the same finding stays high-confidence AND keeps its
+    // axes, which is what lets compose-review defer it: the axes reach the
+    // deferral channel only on a finding that passed the witness rule.
+    const witnessed = holdUnwitnessedFindings([
+      { ...deferrable, witness: 'probe: the sparse clone wedged at step 3' },
+    ]);
+    expect(witnessed.unwitnessed).toEqual([]);
+    expect(witnessed.findings[0]).toMatchObject({
+      confidence: 'high',
+      direction: 'fails-closed',
+      baseline: 'new-surface',
+    });
+  });
+
   it('leaves a witnessed Critical alone — either form of the field counts', () => {
     for (const witness of [
       'BASE: 2 calls / PR: 1 call — probe flipped',
@@ -2253,5 +2338,53 @@ describe('validateFindings — the canonical artifact round-trips', () => {
         { ...base, fixConstraint: 'none of the callers pass 0 (src/a.ts:12)' },
       ])[0].fixConstraint,
     ).toBe('none of the callers pass 0 (src/a.ts:12)');
+  });
+});
+
+describe('the finding axes (#10291)', () => {
+  it('round-trips direction and baseline, and leaves an unclassified finding bare', () => {
+    const [classified, bare] = validateFindings([
+      { ...base, direction: 'fails-closed', baseline: 'new-surface' },
+      { ...base, id: 'f2' },
+    ]);
+    expect(classified.direction).toBe('fails-closed');
+    expect(classified.baseline).toBe('new-surface');
+    expect(bare.direction).toBeUndefined();
+    expect(bare.baseline).toBeUndefined();
+    // Fed back through `--input` (the artifact wrapper), both survive.
+    const again = validateFindings({
+      findings: [classified],
+    } as unknown as Finding[]);
+    expect(again[0]).toMatchObject({
+      direction: 'fails-closed',
+      baseline: 'new-surface',
+    });
+  });
+
+  it('refuses a misspelled axis with the index — a silent drop would post a deferrable blocker', () => {
+    expect(() =>
+      validateFindings([{ ...base, direction: 'fails-open' }]),
+    ).toThrow(
+      /Finding at index 0: has direction "fails-open"; expected one of "certifies-falsely", "fails-closed"/,
+    );
+    expect(() =>
+      validateFindings([{ ...base, baseline: 'old-surface' }]),
+    ).toThrow(
+      /Finding at index 0: has baseline "old-surface"; expected one of "regression", "new-surface"/,
+    );
+  });
+
+  it("renders the axes as the claim line's bracket tags", () => {
+    const report = buildReport(
+      validateFindings([
+        { ...base, direction: 'fails-closed', baseline: 'new-surface' },
+        { ...base, id: 'f2', direction: 'certifies-falsely' },
+        { ...base, id: 'f3' },
+      ]),
+    );
+    const lines = renderFindings(report);
+    expect(lines[0]).toMatch(/^Critical \[fails-closed\] \[new-surface\] — /);
+    expect(lines[1]).toMatch(/^Critical \[certifies-falsely\] — /);
+    expect(lines[2]).toMatch(/^Critical — /);
   });
 });
