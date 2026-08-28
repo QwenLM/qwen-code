@@ -29,6 +29,7 @@ function stubConfig(overrides?: {
   policyTools?: Record<string, unknown>;
   recallMode?: 'active' | 'sideQuery';
   upload?: OmniUploadConfig;
+  fixedPolicies?: unknown[];
 }): Config {
   return {
     isOmniEnabled: vi.fn().mockReturnValue(overrides?.omniEnabled ?? true),
@@ -39,6 +40,13 @@ function stubConfig(overrides?: {
     getModel: vi.fn().mockReturnValue('qwen3.5-omni-plus'),
     getOmniUploadConfig: vi.fn().mockReturnValue(overrides?.upload),
     getOmniPolicyToolsSettings: vi.fn().mockReturnValue(overrides?.policyTools),
+    getOmniProcessingConfig: vi
+      .fn()
+      .mockReturnValue(
+        overrides?.fixedPolicies
+          ? { fixedPolicies: overrides.fixedPolicies }
+          : undefined,
+      ),
     getOmniMemoryConfig: vi
       .fn()
       .mockReturnValue(
@@ -47,6 +55,16 @@ function stubConfig(overrides?: {
           : undefined,
       ),
   } as unknown as Config;
+}
+
+/** A normalized-policy stub carrying the fields the guidance collector
+ * reads: id + priority for ordering, description for the prompt bullet. */
+function policy(
+  id: string,
+  priority: number,
+  description?: string,
+): Record<string, unknown> {
+  return { id, priority, mediaTypes: ['video'], output: {}, description };
 }
 
 describe('buildOmniMediaGuidanceSection', () => {
@@ -137,6 +155,49 @@ describe('buildOmniMediaGuidanceSection', () => {
       }),
     )!;
     expect(section).toContain('No media tools are enabled');
+  });
+});
+
+describe('buildOmniMediaGuidanceSection — policy descriptions', () => {
+  it('injects a described policy verbatim into the prompt', () => {
+    const desc =
+      'Keyframe degradation triggers only when estimated tokens > 10000; ' +
+      'at or below that a clip is delivered at native resolution.';
+    const section = buildOmniMediaGuidanceSection(
+      stubConfig({ fixedPolicies: [policy('movie-keyframes', 60, desc)] }),
+    )!;
+    expect(section).toContain('automatic preprocessing policies');
+    expect(section).toContain(desc);
+  });
+
+  it('omits the block entirely when no policy carries a description', () => {
+    const section = buildOmniMediaGuidanceSection(
+      stubConfig({
+        fixedPolicies: [
+          policy('movie-keyframes', 60),
+          policy('movie-extract-audio', 100),
+        ],
+      }),
+    )!;
+    expect(section).not.toContain('automatic preprocessing policies');
+  });
+
+  it('orders descriptions by priority desc then id, and skips undescribed policies', () => {
+    const section = buildOmniMediaGuidanceSection(
+      stubConfig({
+        fixedPolicies: [
+          policy('movie-keyframes', 60, 'LOW-PRIORITY-DESC'),
+          policy('undescribed', 200), // no description → contributes nothing
+          policy('movie-extract-audio', 100, 'HIGH-PRIORITY-DESC'),
+        ],
+      }),
+    )!;
+    expect(section).toContain('HIGH-PRIORITY-DESC');
+    expect(section).toContain('LOW-PRIORITY-DESC');
+    // Higher priority (100) must precede lower (60).
+    expect(section.indexOf('HIGH-PRIORITY-DESC')).toBeLessThan(
+      section.indexOf('LOW-PRIORITY-DESC'),
+    );
   });
 });
 

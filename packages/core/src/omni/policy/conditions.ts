@@ -42,16 +42,31 @@ export const SESSION_CONDITION_FIELDS = [
   'reservedOutputTokens',
   'availableContextTokens',
 ] as const;
+/** Memory-state fields (policy design §4.1/4.4): 1 when the media
+ * memory subgraph of the item being matched already carries an output
+ * with the corresponding role, 0 when it does not. Numeric so the
+ * comparison operators work unchanged — `["==", ["field",
+ * "memory.hasTranscript"], 0]` reads as "no transcript yet". */
+export const MEMORY_CONDITION_FIELDS = [
+  'hasTranscript',
+  'hasOcr',
+  'hasCaption',
+  'hasSummary',
+  'hasKeyframes',
+  'hasClip',
+] as const;
 
 export type ResourceConditionField = (typeof RESOURCE_CONDITION_FIELDS)[number];
 export type RequestConditionField = (typeof REQUEST_CONDITION_FIELDS)[number];
 export type SessionConditionField = (typeof SESSION_CONDITION_FIELDS)[number];
+export type MemoryConditionField = (typeof MEMORY_CONDITION_FIELDS)[number];
 
 /** Fully-qualified field name, e.g. `resource.sizeBytes`. */
 export type FixedPolicyField =
   | `resource.${ResourceConditionField}`
   | `request.${RequestConditionField}`
-  | `session.${SessionConditionField}`;
+  | `session.${SessionConditionField}`
+  | `memory.${MemoryConditionField}`;
 
 /** Operand of a comparison: a field reference or a bare literal. */
 export type ConditionOperand =
@@ -73,13 +88,18 @@ export type FixedPolicyCondition =
   | ['all' | 'any', ...FixedPolicyCondition[]]
   | ['!', FixedPolicyCondition];
 
-/** Values feeding field resolution. All defined fields are numeric; an
- * absent entry means the field could not be obtained for this resource
- * (e.g. `durationMs` for an image, or a probe that returned nothing). */
+/** Values feeding field resolution. Resource/request/session entries are
+ * numeric; an absent entry means the field could not be obtained for this
+ * resource (e.g. `durationMs` for an image, or a probe that returned
+ * nothing). The memory namespace is numeric too (0/1 presence flags); it
+ * is ABSENT ENTIRELY when memory state could not be consulted (memory
+ * disabled, no binding, store unreadable) — a memory condition then
+ * evaluates `unavailable`, never silently false. */
 export interface FixedPolicyConditionContext {
   resource?: Partial<Record<ResourceConditionField, number>>;
   request?: Partial<Record<RequestConditionField, number>>;
   session?: Partial<Record<SessionConditionField, number>>;
+  memory?: Partial<Record<MemoryConditionField, number>>;
 }
 
 export type ConditionEvaluation =
@@ -120,7 +140,39 @@ const KNOWN_FIELDS: ReadonlySet<string> = new Set([
   ...RESOURCE_CONDITION_FIELDS.map((f) => `resource.${f}`),
   ...REQUEST_CONDITION_FIELDS.map((f) => `request.${f}`),
   ...SESSION_CONDITION_FIELDS.map((f) => `session.${f}`),
+  ...MEMORY_CONDITION_FIELDS.map((f) => `memory.${f}`),
 ]);
+
+/**
+ * Whether a `when` expression references any field of the given
+ * namespace (`resource.` / `request.` / `session.` / `memory.`) — the
+ * orchestrator uses this to skip computing an expensive namespace (the
+ * memory subgraph query) when no policy in play reads it.
+ */
+export function conditionUsesNamespace(
+  condition: FixedPolicyCondition,
+  namespace: string,
+): boolean {
+  const node: unknown = condition;
+  if (!Array.isArray(node)) return false;
+  const prefix = `${namespace}.`;
+  for (const operand of node) {
+    if (!Array.isArray(operand)) continue;
+    if (
+      operand.length === 2 &&
+      operand[0] === 'field' &&
+      typeof operand[1] === 'string'
+    ) {
+      if (operand[1].startsWith(prefix)) return true;
+      continue;
+    }
+    // Nested combinator operands recurse; field refs were handled above.
+    if (conditionUsesNamespace(operand as FixedPolicyCondition, namespace)) {
+      return true;
+    }
+  }
+  return false;
+}
 
 type ResolvedOperand =
   | { ok: true; value: number | string | boolean; describe: string }
@@ -143,7 +195,7 @@ function resolveOperand(
       return { ok: false, missing: field };
     }
     const [namespace, name] = field.split('.') as [
-      'resource' | 'request' | 'session',
+      'resource' | 'request' | 'session' | 'memory',
       string,
     ];
     const value = (

@@ -65,6 +65,8 @@
 
 如果三个字段都不设置,则保留旧行为:当前推理配置本身必须是带静态 API key 的 DashScope 兼容配置,并同时作为上传配置。
 
+> **预设模板**:设计文档 4.1–4.9 的 9 条策略(长视频 ASR 链、大图降采样、上下文紧张抽帧、长音频转写、文档图 OCR、大视频降分辨率、三模态 >10MB 超限兜底)有一份开箱即用的预设 [`omni-fixed-policies-preset.json`](./omni-fixed-policies-preset.json)——把其中的 `omni` 对象合并进 settings.json 即可,策略已按 priority 排好执行顺序(链式派生先于条件分支,超限兜底最后),并附带 ASR 链所需的超时与预算放大。该预设由 `packages/core/src/omni/policy/preset-validation.test.ts` 持续验证可正常归一化。
+
 ---
 
 ## 配置总览
@@ -158,6 +160,12 @@ omni.delivery.upload.urlTtlHours                 上传 URL 缓存时长(≤ 48)
 |             | `promptTokenCount`          | 当前 prompt 已占 token                                                         |
 |             | `reservedOutputTokens`      | 预留输出 token                                                                 |
 |             | `availableContextTokens`    | 剩余可用上下文                                                                 |
+| `memory.`   | `hasTranscript`             | 该文件 memory 子图中已有转写产物(1/0)                                          |
+|             | `hasOcr`                    | 已有 OCR 产物(1/0)                                                             |
+|             | `hasCaption` / `hasSummary` | 已有 caption / 汇总产物(1/0)                                                   |
+|             | `hasKeyframes` / `hasClip`  | 已有关键帧 / 裁剪片段产物(1/0)                                                 |
+
+`memory.*` 字段回答"这个文件的媒体记忆里**已经处理过什么**"(按产物 role 统计,覆盖派生链——如"抽音轨→转写"的转写产物挂在派生音频版本下,查询视频版本同样可见)。典型用法是 §4.1/4.4 的"memory 中无完整 ASR 结果才转写":`["==", ["field", "memory.hasTranscript"], 0]`。记忆未开启、资源无记忆绑定或存储不可读时,整个命名空间为 `unavailable`(不会静默当假),由 `onConditionUnavailable` 决定行为。
 
 ### 三值语义
 
@@ -210,20 +218,26 @@ extract-audio (origins:[user],  reprocessMedia:true, source:keep)
 
 ## 策略工具一览
 
-八个内置媒体策略工具,全部基于 ffmpeg/sharp,产物均携带强制披露:
+十四个内置媒体策略工具(前八个基于 ffmpeg/sharp,后六个含模型调用),产物均携带强制披露:
 
-| 工具                     | 输入 → 输出           | 关键参数(默认)                                                                     | 典型用途                                                                                                                                                           |
-| ------------------------ | --------------------- | ---------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `omni_downsample_image`  | image → JPEG          | `maxDimension` 1568、`quality` 75                                                  | 超大截图降采样                                                                                                                                                     |
-| `omni_convert_image`     | image → JPEG/PNG/WebP | `format` "jpeg"、`quality` 90                                                      | 冷门格式转通用格式                                                                                                                                                 |
-| `omni_downscale_video`   | video → MP4           | `maxHeight` 480、`fps` 10、`crf` 28                                                | 分辨率/帧率双降                                                                                                                                                    |
-| `omni_clip_video`        | video → MP4 片段      | `startSec` 0、`durationSec`(默认到结尾)、`crf` 23                                  | 截取时间区间                                                                                                                                                       |
-| `omni_extract_keyframes` | video → 多张 JPEG     | `maxFrames` 8、`sceneThreshold` 0.2、`maxDimension` 768                            | **全片分桶采样**:时间轴均分为 maxFrames 桶,每桶开窗场景检测、无场景变化则取桶中点,逐帧披露带绝对时间戳                                                             |
-| `omni_extract_audio`     | video → WAV/MP3/M4A   | `format` "wav"、`sampleRateHz` 16000、`channels` 1                                 | 抽出音轨供转写                                                                                                                                                     |
-| `omni_downsample_audio`  | audio → M4A           | `bitrateKbps` 64、`sampleRateHz` 16000、`channels` 1                               | 压音频体积                                                                                                                                                         |
-| `omni_transcribe_audio`  | audio → 文本转写      | `chunkSeconds` 180、`maxInputBytes` 10MiB;运维专用:`model`、`baseUrl`、`apiKeyEnv` | **长音频分段转写**:超过 `chunkSeconds` 自动切段(并发 3、共享时间预算),按 `[MM:SS-MM:SS]`/`[H:MM:SS-…]` 拼装;单段失败内联标注不整体失败;自动检测并截断 ASR 重复退化 |
+| 工具                             | 输入 → 输出              | 关键参数(默认)                                                                                                                        | 典型用途                                                                                                                                                           |
+| -------------------------------- | ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `omni_downsample_image`          | image → JPEG             | `maxDimension` 1568、`quality` 75、`tokenBudget`(256/1024/2048 tokens 档位,吸附 28px patch 网格)                                      | 超大截图降采样;`tokenBudget` 直接按计费 token 说话                                                                                                                 |
+| `omni_convert_image`             | image → JPEG/PNG/WebP    | `format` "jpeg"、`quality` 90                                                                                                         | 冷门格式转通用格式                                                                                                                                                 |
+| `omni_clip_image`                | image → PNG 区域         | `x`/`y`/`width`/`height`(像素,必填)                                                                                                   | 裁剪指定矩形区域(policy 形态,区别于模型直调的 `zoom_image`)                                                                                                        |
+| `omni_caption_image`             | image → 文本描述         | `prompt`(默认整体描述);运维专用:`model`、`baseUrl`、`apiKeyEnv`                                                                       | VL 模型把视觉内容转成文本进上下文(role: caption)                                                                                                                   |
+| `omni_ocr_image`                 | image → 文本             | `language`(默认自动)、`prompt`(默认提取全部可见文字);运维专用:`model` 等                                                              | OCR 提取图片文字(role: ocr),解锁"文档/文字图片 OCR"固定策略                                                                                                        |
+| `omni_downscale_video`           | video → MP4              | `maxHeight` 480、`fps` 10、`crf` 28                                                                                                   | 分辨率/帧率双降                                                                                                                                                    |
+| `omni_clip_video`                | video → MP4 片段         | `startSec` 0、`durationSec`(默认到结尾)、`crf` 23                                                                                     | 截取时间区间                                                                                                                                                       |
+| `omni_extract_keyframes`         | video → 多张 JPEG        | `maxFrames` 8、`sceneThreshold` 0.2、`maxDimension` 768、`strategy` "scene"/"uniform"、"fps"、"startSec"/`endSec`、`frameTokenBudget` | **全片分桶采样**(默认);`uniform` 为时长自适应动态帧率均匀采样(并行 seek 抽帧),长视频自动降采样率                                                                   |
+| `omni_understand_video_segments` | video → 文本理解         | `segmentSeconds` 30(5–60)、`maxParallelSegments` 8、`maxSegmentBytes` 10MiB、`prompt`;运维专用:`model` 等                             | **长视频分段并行理解**:固定时长切片重编码(≤10MB)→ 并行 Omni 逐段 caption → 汇总 `[MM:SS-MM:SS]` 文本(role: summary)                                                |
+| `omni_extract_audio`             | video → WAV/MP3/M4A      | `format` "wav"、`sampleRateHz` 16000、`channels` 1                                                                                    | 抽出音轨供转写                                                                                                                                                     |
+| `omni_downsample_audio`          | audio → M4A              | `bitrateKbps` 64、`sampleRateHz` 16000、`channels` 1                                                                                  | 压音频体积                                                                                                                                                         |
+| `omni_clip_audio`                | audio → WAV/MP3/M4A 片段 | `startMs`、`durationMs`(≥1000,默认到结尾)、`format` "m4a"                                                                             | 音频时间裁剪,与视频裁剪对称                                                                                                                                        |
+| `omni_transcribe_audio`          | audio → 文本转写         | `chunkSeconds` 180、`maxInputBytes` 10MiB;运维专用:`model`、`baseUrl`、`apiKeyEnv`                                                    | **长音频分段转写**:超过 `chunkSeconds` 自动切段(并发 3、共享时间预算),按 `[MM:SS-MM:SS]`/`[H:MM:SS-…]` 拼装;单段失败内联标注不整体失败;自动检测并截断 ASR 重复退化 |
+| `omni_caption_audio`             | audio → 文本描述         | `prompt`(默认语义描述)、`chunkSeconds` 180;运维专用:`model` 等                                                                        | Omni 模型理解音频:语音大意、音色、事件、情绪(非逐字转写;长音频同样分段)(role: caption)                                                                             |
 
-多产物工具(关键帧)在一次调用事务里逐帧提升为独立产物;转写产物走 `【媒体转写】` 文本通道而非媒体通道。
+多产物工具(关键帧)在一次调用事务里逐帧提升为独立产物;转写/caption/OCR/汇总产物走文本通道(`【媒体转写】` 形态)而非媒体通道,memory role 分别为 `transcript`/`caption`/`ocr`/`summary`。
 
 模型直接调用这些工具时,成功结果会列出每个产物的绝对路径,模型可立即用 `read_file` 读取剪辑、音频、关键帧或转写结果。
 

@@ -41,6 +41,7 @@ import {
 import { InvalidStreamError } from '../invalid-stream-error.js';
 import { normalizeMcpToolName } from '../../utils/tool-name-utils.js';
 import { isDisclosureText } from '../../omni/disclosure.js';
+import { evictOldestImagesBeyondCap } from './image-budget.js';
 import { setGenAiUsageProvenance } from '../../telemetry/gen-ai-usage.js';
 
 const debugLogger = createDebugLogger('CONVERTER');
@@ -418,6 +419,12 @@ export function convertGeminiRequestToOpenAI(
     messages = cleanOrphanedToolCalls(messages);
     messages = mergeConsecutiveAssistantMessages(messages);
   }
+
+  // Bound the number of images in the assembled request below the backing
+  // API's hard per-request image cap (256 on qwen-omni). Omni keyframes
+  // accumulate across turns; without this a long look-closer trajectory
+  // eventually sends >256 image parts and the API rejects the whole request.
+  evictOldestImagesBeyondCap(messages);
 
   return messages;
 }

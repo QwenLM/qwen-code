@@ -282,6 +282,28 @@ const MAX_OUTPUT_STEM_LENGTH = 48;
  * the later result supersedes. That is an operation superseding itself,
  * not one artifact destroying an unrelated one.
  */
+/**
+ * The sanitized source stem that {@link policyOutputFileName} prefixes onto
+ * every artifact derived from `inputPath`. Exposed so a tool can reconstruct
+ * the exact prefix of its own outputs (e.g. to count prior artifacts of one
+ * source on disk) without duplicating the sanitization rule.
+ */
+export function policyOutputStem(inputPath: string): string {
+  const raw = path.basename(inputPath, path.extname(inputPath));
+  // Collapse anything outside a conservative portable set (`+` is kept:
+  // it is portable everywhere and appears in this scheme's own variants,
+  // e.g. a clip's `123s+40s`, so derived artifacts of a clip keep a stem
+  // that still round-trips). The stem comes
+  // from user-supplied media names (spaces, quotes, CJK, shell
+  // metacharacters) and is about to become a real path component.
+  return (
+    raw
+      .replace(/[^A-Za-z0-9._+-]+/g, '-')
+      .replace(/^-+|-+$/g, '')
+      .slice(0, MAX_OUTPUT_STEM_LENGTH) || 'media'
+  );
+}
+
 export function policyOutputFileName(params: {
   /** Source the artifact was derived from. */
   inputPath: string;
@@ -292,18 +314,7 @@ export function policyOutputFileName(params: {
   /** Extension WITH the leading dot, e.g. '.mp4'. */
   extension: string;
 }): string {
-  const raw = path.basename(params.inputPath, path.extname(params.inputPath));
-  // Collapse anything outside a conservative portable set (`+` is kept:
-  // it is portable everywhere and appears in this scheme's own variants,
-  // e.g. a clip's `123s+40s`, so derived artifacts of a clip keep a stem
-  // that still round-trips). The stem comes
-  // from user-supplied media names (spaces, quotes, CJK, shell
-  // metacharacters) and is about to become a real path component.
-  const stem =
-    raw
-      .replace(/[^A-Za-z0-9._+-]+/g, '-')
-      .replace(/^-+|-+$/g, '')
-      .slice(0, MAX_OUTPUT_STEM_LENGTH) || 'media';
+  const stem = policyOutputStem(params.inputPath);
   const variant = params.variant ? `-${params.variant}` : '';
   return `${stem}-${params.operation}${variant}${params.extension}`;
 }

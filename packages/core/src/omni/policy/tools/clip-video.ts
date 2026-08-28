@@ -24,6 +24,7 @@ import {
   mediaPolicyToolFailure,
   mediaPolicyToolSuccess,
   policyOutputFileName,
+  policyOutputStem,
   resolvePolicyToolTimeoutMs,
   type MediaPolicyIoParams,
   type MediaPolicyToolConfigView,
@@ -31,13 +32,33 @@ import {
 
 export const OMNI_CLIP_VIDEO_TOOL_NAME = ToolNames.OMNI_CLIP_VIDEO;
 
+/**
+ * Soft budget on model-initiated clips of ONE source before the tool starts
+ * nudging the caller to stop. Measured on Video-MME-v2: items where the model
+ * clipped 1–3 times scored +11.8pt over not clipping, but items that clipped
+ * 4+ times scored identically to not clipping (zero accuracy gain) while
+ * spending 10–50× the tokens — an unbounded "clip → didn't find it → clip
+ * again → sweep the whole film" loop. Past this count the tool appends a brake
+ * to its result: answer from what you have, or densify-locate first. Soft, not
+ * a hard block — a legitimate Nth clip still runs; overridable via
+ * `policyTools.omni_clip_video.settings.softClipBudget`.
+ */
+export const DEFAULT_CLIP_SOFT_BUDGET = 3;
+
 /** Fixed-call default encode parameters (mapping doc §6.1): clip is a
  * time-axis cut, NOT a degradation — crf 23 preserves quality; lowering
- * resolution/bit rate is omni_downscale_video's job. */
+ * resolution/bit rate is omni_downscale_video's job.
+ *
+ * The clip is encoded VIDEO-ONLY (`-an`). A clip is a "look closer" excerpt
+ * for visual detail; the source's dialogue is already captured once by the
+ * full-audio transcript at ingest. Keeping an audio track made every clip
+ * read re-run the extract-audio → downsample → transcribe chain on a redundant
+ * 15–20s slice (each clip is ingested as a fresh media root that does not
+ * inherit the parent's `hasTranscript`), which dominated raw token cost on
+ * multi-clip trajectories. Dropping it removes that re-transcription entirely. */
 export const CLIP_VIDEO_DEFAULTS = {
   crf: 23,
   preset: 'veryfast',
-  audioBitrateKbps: 128,
 } as const;
 
 export interface ClipVideoParams extends MediaPolicyIoParams {
@@ -94,6 +115,7 @@ class ClipVideoInvocation extends BaseMediaPolicyToolInvocation<ClipVideoParams>
   constructor(
     params: ClipVideoParams,
     private readonly timeoutMs: number,
+    private readonly softBudget: number,
   ) {
     super(params);
   }
@@ -173,10 +195,10 @@ class ClipVideoInvocation extends BaseMediaPolicyToolInvocation<ClipVideoParams>
           String(CLIP_VIDEO_DEFAULTS.crf),
           '-preset',
           CLIP_VIDEO_DEFAULTS.preset,
-          '-c:a',
-          'aac',
-          '-b:a',
-          `${CLIP_VIDEO_DEFAULTS.audioBitrateKbps}k`,
+          // Video-only: drop the audio track so a clip read never re-runs the
+          // extract-audio → transcribe chain (the full transcript already
+          // covers this span). See CLIP_VIDEO_DEFAULTS.
+          '-an',
           '-movflags',
           '+faststart',
           outputPath,
@@ -204,9 +226,9 @@ class ClipVideoInvocation extends BaseMediaPolicyToolInvocation<ClipVideoParams>
       const endText = endSec !== undefined ? formatSeconds(endSec) : '结尾';
       const spanText =
         endSec !== undefined ? ` ${formatSeconds(endSec - startSec)}` : '';
-      const disclosure = `原 ${original} → 片段 [${formatSeconds(startSec)}–${endText}]${spanText}，片段外内容全部丢弃`;
+      const disclosure = `原 ${original} → 片段 [${formatSeconds(startSec)}–${endText}]${spanText}，仅画面（无音轨，对白见完整转写），片段外内容全部丢弃`;
 
-      return mediaPolicyToolSuccess({
+      const success = mediaPolicyToolSuccess({
         outputDir: this.params.outputDir,
         outputFileName,
         artifactKind: 'video',
@@ -218,6 +240,40 @@ class ClipVideoInvocation extends BaseMediaPolicyToolInvocation<ClipVideoParams>
         // consumers (output routing selectors, memory coverage).
         role: 'clip',
       });
+      // The clip is not delivered inline; give the model the path to open it.
+      // Whether that read yields native video or gets re-downscaled to
+      // keyframes is decided downstream by the ingest policies (e.g.
+      // movie-keyframes' own duration gate), NOT by this tool — so the hint
+      // stays threshold-agnostic and does not promise "native video". The
+      // length rule and the re-downscale outcome are surfaced where they are
+      // owned: the fixed policy's description, and the keyframe disclosure the
+      // re-ingest emits. Kept out of `disclosure` (the D8 media-adjacent
+      // text) — model-facing only.
+      // Soft clip budget: count clips of THIS source already on disk (they
+      // share the self-describing `<stem>-clip-` prefix, incl. the one just
+      // written). Past the budget, append a brake — unbounded trial-clipping
+      // adds no accuracy over not clipping and burns 10–50× the tokens. Not a
+      // hard block: the clip already ran; this only steers the next turn.
+      let clipBrake = '';
+      try {
+        const prefix = `${policyOutputStem(this.params.inputPath)}-clip-`;
+        const clipCount = (await fs.readdir(this.params.outputDir)).filter(
+          (f) => f.startsWith(prefix) && f.endsWith('.mp4'),
+        ).length;
+        if (clipCount >= this.softBudget) {
+          clipBrake =
+            `。已对该视频切了 ${clipCount} 段：继续逐段盲扫通常不再提升判断、` +
+            `只增开销。请基于已看片段作答；若仍需定位某个画面，先用 ` +
+            `omni_extract_keyframes（strategy='uniform'、startSec、endSec）` +
+            `在疑似区间加密抽帧锁定，再精准切 1 段，不要继续试切`;
+        }
+      } catch {
+        // outputDir unreadable → skip the brake, never fail the clip on it.
+      }
+      return {
+        ...success,
+        llmContent: `${success.llmContent}。用 read_file 打开 ${outputPath} 查看该片段${clipBrake}`,
+      };
     } catch (error) {
       return mediaPolicyToolFailure(error);
     }
@@ -241,9 +297,19 @@ export class OmniClipVideoTool extends BaseMediaPolicyTool<ClipVideoParams> {
         type: 'object',
         properties: {
           ...MEDIA_POLICY_IO_SCHEMA_PROPERTIES,
+          // outputDir is optional for clip: when omitted it defaults to the
+          // source video's own directory (see validateToolParamValues). The
+          // model was otherwise guessing a path — a wrong guess like
+          // `<dir>/clips` failed the call with "output directory not found"
+          // and burned a turn.
+          outputDir: {
+            type: 'string',
+            description:
+              'Optional absolute directory to write the clip into. ' +
+              "Defaults to the source video's own directory when omitted.",
+          },
           ...TUNABLE_SCHEMA_PROPERTIES,
         },
-        required: ['outputDir'],
         additionalProperties: false,
       },
       config,
@@ -257,6 +323,19 @@ export class OmniClipVideoTool extends BaseMediaPolicyTool<ClipVideoParams> {
   protected override validateToolParamValues(
     params: ClipVideoParams,
   ): string | null {
+    // Default a missing outputDir to the source's own directory so the model
+    // never has to invent a path (a wrong guess like `<dir>/clips` used to
+    // fail with "output directory not found" and waste a turn). inputPath is
+    // already resolved — from resourceId if the model passed one — by the
+    // time validation runs, and build() threads this same params object into
+    // createInvocation, so the default reaches execute().
+    if (
+      (params.outputDir as string | undefined) === undefined &&
+      typeof params.inputPath === 'string' &&
+      params.inputPath.length > 0
+    ) {
+      params.outputDir = path.dirname(params.inputPath);
+    }
     const ioError = super.validateToolParamValues(params);
     if (ioError) return ioError;
     // A no-op invocation (full-length "clip") must be rejected at the
@@ -280,6 +359,24 @@ export class OmniClipVideoTool extends BaseMediaPolicyTool<ClipVideoParams> {
     return new ClipVideoInvocation(
       params,
       resolvePolicyToolTimeoutMs(this.configView, this.name),
+      this.resolveSoftBudget(),
     );
+  }
+
+  /** `policyTools.omni_clip_video.settings.softClipBudget` (positive int),
+   * else {@link DEFAULT_CLIP_SOFT_BUDGET}. */
+  private resolveSoftBudget(): number {
+    const entry = this.configView.getOmniPolicyToolsSettings?.()?.[this.name];
+    const settings =
+      entry && typeof entry === 'object'
+        ? (entry as Record<string, unknown>)['settings']
+        : undefined;
+    const raw =
+      settings && typeof settings === 'object'
+        ? (settings as Record<string, unknown>)['softClipBudget']
+        : undefined;
+    return typeof raw === 'number' && Number.isInteger(raw) && raw > 0
+      ? raw
+      : DEFAULT_CLIP_SOFT_BUDGET;
   }
 }
