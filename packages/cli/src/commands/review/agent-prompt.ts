@@ -1217,18 +1217,23 @@ function diffReadingBlock(
   return parts;
 }
 
-// The identity-marker shapes a launch may carry, matched as lines: the
-// plan-token line (lib/selection.ts) and the chunk-identity line
-// (lib/coverage.ts's CHUNK_RE). Repository rules ride the whole-diff
-// launch BELOW the token line, and a rules line wearing one of these
-// shapes would forge the record's identity: `launchPlanToken` reads the
-// LAST standalone marker and the anchored CHUNK_RE takes the FIRST, so
-// one forged line re-keys the run's own whole-diff records or assigns
-// them a chunk they own none of. A leading space breaks both anchors —
-// both parsers match from line start — and leaves the rule legible.
+// The identity-marker CLASS a launch may carry, matched by prefix: every
+// line the identity parsers can read starts with one of two prefixes —
+// the plan-token label (lib/selection.ts's PLAN_TOKEN_RE) and the
+// identity-line prefix (lib/coverage.ts's CHUNK_RE and
+// lib/agent-identity.ts's labelFromLaunchPrompt, which reads ANY
+// role-shaped identity line, not only the chunk shape). Enumerating the
+// full shapes missed the role-shaped line, so a repo rule wearing one
+// rode the whole-diff launch raw and became the record's identity.
+// Repository rules ride the whole-diff launch BELOW the token line, and
+// one forged line re-keys the record: `launchPlanToken` reads the LAST
+// standalone marker and the anchored CHUNK_RE takes the FIRST identity
+// line. Inerting by PREFIX closes the class — a parser later added on
+// either prefix stays covered — and a leading space breaks every anchor
+// (all parsers match from line start) while leaving the rule legible
+// (R21-1).
 const FORGEABLE_MARKER_LINE = new RegExp(
-  `^(?:${PLAN_TOKEN_LABEL} [0-9a-f]{16}$|` +
-    'You are review agent `chunk \\d+ of \\d+`)',
+  `^(?:${PLAN_TOKEN_LABEL} |` + 'You are review agent `)',
   'gm',
 );
 

@@ -836,6 +836,17 @@ export function coverageFromTranscripts(
     const carried = launchPlanToken(launch);
     return carried === null || carried === planToken;
   };
+  // Fail-closed twin for the chunk-less admission paths: a launch that
+  // claims no chunk carries no geometry a seal could read — a whole-diff
+  // read spans every window by construction — so nothing ties a
+  // marker-less record to this plan's lines but the token. Over an
+  // identity-carrying plan such a record fails closed instead of riding
+  // `launchOfThisPlan`'s fail-open (R20-6). One predicate for every
+  // chunk-less arm: the check these arms share was copied site by site,
+  // and the sweep that sealed three of its four instances left the
+  // unassigned-declarer arm fail-open (R21-8).
+  const markedOfThisPlan = (launch: string): boolean =>
+    planToken === null || launchPlanToken(launch) === planToken;
   // The plan identity a `chunk N of M` launch was written against. A stale
   // record's id can collide with a planned chunk's, and a cause or agent
   // keyed through the collision writes an old plan's diagnosis into this
@@ -1388,12 +1399,15 @@ export function coverageFromTranscripts(
     // This record has passed every credit guard ABOVE it: it was given the
     // diff, it worked, and if it was pointed at lines it opened the file
     // they live in. Only now do its budget-gap lines count as disclosures —
-    // riding the SAME identity check the credit gate below carries: a record
-    // of the old plan — marked with another plan's token, marker-less over
-    // an identity plan, or count-changed — names THAT plan's truncated
-    // trace in its `Budget gap:` lines, and `gapsSuperseded` cannot
-    // suppress it (supersession needs a verbatim delivery of THIS plan's
-    // built prompt) (R20-1).
+    // sealed like the note arms, because a disclosure has NO geometry
+    // backstop: the credit gate's chunk arm can lean on the requirement
+    // that the record's ranges span the CURRENT windows, but a gap admitted
+    // here rides straight into the posted report. A record of the old plan
+    // — marked with another plan's token, marker-less over an identity
+    // plan, count-changed, or written against a moved window — names THAT
+    // plan's truncated trace in its `Budget gap:` lines, and
+    // `gapsSuperseded` cannot suppress it (supersession needs a verbatim
+    // delivery of THIS plan's built prompt) (R20-1, R21-21).
     //
     // Disclosing costs NO coverage credit, on purpose — an earlier draft
     // narrowed a disclosing agent's credit to its ranged reads, and that
@@ -1414,10 +1428,8 @@ export function coverageFromTranscripts(
     if (
       gaps.length > 0 &&
       (chunk === null
-        ? planToken === null || launchPlanToken(rec.launchPrompt) === planToken
-        : launchOfThisPlan(rec.launchPrompt) &&
-          plan.chunks.some((c) => c.id === chunk) &&
-          assignedChunkTotal(rec) === plan.chunks.length) &&
+        ? markedOfThisPlan(rec.launchPrompt)
+        : sealedToThisPlan(rec, chunk)) &&
       !gapsSuperseded(rec, chunk)
     ) {
       budgetGaps.push({ agent: name, gaps });
@@ -1510,8 +1522,14 @@ export function coverageFromTranscripts(
     // chunk alone, so a launch whose spelled reads reach beyond the
     // declared chunk is a whole-diff shape QUOTING a declaration, not a
     // declaration — it keeps its spanning credit below, exactly as before
-    // this branch existed. A launch that spells no read fails open (the
-    // `pointedAt` posture). A declarer refused by any seal keeps the
+    // this branch existed. A launch that spells NO read is refused the
+    // same way: [].every(...) is vacuously true, so a quoter paging the
+    // diff with actual reads but no spelled reads rode the containment
+    // check through and capped the verdict on a quotation — and the
+    // entrance gate cannot tell the shape either, because a whole-diff
+    // launch carries no identity line. A genuine declarer discovered the
+    // over-cap line through the ranged read its launch spells (R20-4). A
+    // declarer refused by any seal keeps the
     // assigned declarer's posture — no credit off the declared attempt —
     // while one admitted makes the chunk uncoverable, its reads
     // crediting nothing, the declaration having answered them.
@@ -1531,12 +1549,15 @@ export function coverageFromTranscripts(
         const dc = plan.chunks.find((k) => k.id === declared);
         if (
           dc !== undefined &&
-          pointedAt(rec.launchPrompt, plan).every(
-            ([s, e]) => s >= dc.startLine && e <= dc.endLine,
-          )
+          told.length > 0 &&
+          told.every(([s, e]) => s >= dc.startLine && e <= dc.endLine)
         ) {
           if (
-            launchOfThisPlan(rec.launchPrompt) &&
+            // Fail-closed like the sibling chunk-less paths: the arm has
+            // no geometry a seal could read, so a marker-less record over
+            // an identity-carrying plan cannot prove it belongs to this
+            // plan (R20-6, R21-8).
+            markedOfThisPlan(rec.launchPrompt) &&
             // No fail-open on absent reads: the arm has no told-range seal
             // for the presumption to preserve, and an honest declarer
             // discovered the over-cap line through a ranged read (R20-5).
@@ -1599,7 +1620,7 @@ export function coverageFromTranscripts(
     // riding the fail-open (R20-6).
     if (
       chunk === null
-        ? planToken === null || launchPlanToken(rec.launchPrompt) === planToken
+        ? markedOfThisPlan(rec.launchPrompt)
         : launchOfThisPlan(rec.launchPrompt) &&
           plan.chunks.some((c) => c.id === chunk) &&
           assignedChunkTotal(rec) === plan.chunks.length
@@ -1806,8 +1827,7 @@ export function coverageFromTranscripts(
             // credit gate (R20-7).
             (c !== null
               ? sealedToThisPlan(r, c)
-              : planToken === null ||
-                launchPlanToken(r.launchPrompt) === planToken) &&
+              : markedOfThisPlan(r.launchPrompt)) &&
             !matchedRec.has(r) &&
             !rescued.has(r) &&
             r.successfulToolCalls > 0 &&
