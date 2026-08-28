@@ -280,12 +280,13 @@ export const SLIM_TEXT_TRUNCATION_MARKER = '\n[...truncated for compaction]';
 
 export interface SlimOptions {
   /**
-   * When set, text payloads larger than this (top-level `text` parts and
-   * tool-result `output`/`error` strings) are truncated to this many
-   * characters plus an elision marker. Used when a compaction is triggered
-   * by an HTTP 413 request-body overflow: the side-query must fit under the
-   * same gateway byte limit as the request that was rejected (#10380).
-   * Regular (token-driven) compactions pass nothing and keep text intact.
+   * When set, text payloads larger than this (top-level `text` parts,
+   * tool-result `output`/`error` strings, and `functionCall` string args)
+   * are truncated to this many characters plus an elision marker. Used when
+   * a compaction is triggered by an HTTP 413 request-body overflow: the
+   * side-query must fit under the same gateway byte limit as the request
+   * that was rejected (#10380). Regular (token-driven) compactions pass
+   * nothing and keep text intact.
    */
   maxTextChars?: number;
 }
@@ -423,13 +424,43 @@ function transformPart(
       };
     }
   }
+  // Truncate oversized string args on the payload-overflow path as well:
+  // `write_file`/`edit` carry entire file contents in
+  // `functionCall.args.content`, and `estimatePartChars` bills them through
+  // the JSON.stringify fallthrough — left untouched they ride into the
+  // side-query at full size (#10380). Only top-level string values are
+  // walked: that is where every built-in tool places its large payloads.
+  const fc = nextPart.functionCall;
+  if (maxTextChars !== undefined && fc?.args) {
+    const args = fc.args;
+    let argsTouched = false;
+    const newArgs: Record<string, unknown> = { ...args };
+    for (const [key, value] of Object.entries(args)) {
+      if (typeof value === 'string' && value.length > maxTextChars) {
+        newArgs[key] =
+          value.slice(0, maxTextChars) + SLIM_TEXT_TRUNCATION_MARKER;
+        stats.textPartsTruncated++;
+        argsTouched = true;
+      }
+    }
+    if (argsTouched) {
+      nextPart = {
+        ...nextPart,
+        functionCall: { ...fc, args: newArgs },
+      };
+    }
+  }
   if (
     maxTextChars !== undefined &&
     typeof nextPart.text === 'string' &&
     nextPart.text.length > maxTextChars
   ) {
     stats.textPartsTruncated++;
+    // Spread rather than rebuilding a bare `{ text }` so sibling properties
+    // (`thought`, `thoughtSignature`, ...) survive truncation — the converter
+    // pipeline keys reasoning parts off those flags (#10380).
     return {
+      ...nextPart,
       text: nextPart.text.slice(0, maxTextChars) + SLIM_TEXT_TRUNCATION_MARKER,
     };
   }

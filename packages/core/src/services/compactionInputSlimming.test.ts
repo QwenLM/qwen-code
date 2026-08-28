@@ -715,5 +715,64 @@ describe('compactionInputSlimming', () => {
       expect(slimmedHistory).toBe(history);
       expect(stats.textPartsTruncated).toBe(0);
     });
+
+    it('preserves sibling properties (thought) on truncated text parts', () => {
+      // Reasoning histories carry `{ text, thought: true }` parts; the
+      // converter pipeline keys off the flag, so truncation must not
+      // relabel a thought part as ordinary content (#10380).
+      const history: Content[] = [
+        {
+          role: 'model',
+          parts: [{ text: bigText, thought: true }],
+        },
+      ];
+      const { slimmedHistory, stats } = slimCompactionInput(
+        history,
+        undefined,
+        {
+          maxTextChars: 500,
+        },
+      );
+      expect(stats.textPartsTruncated).toBe(1);
+      const part = slimmedHistory[0]!.parts![0]!;
+      expect(part.text).toBe('T'.repeat(500) + SLIM_TEXT_TRUNCATION_MARKER);
+      expect(part.thought).toBe(true);
+    });
+
+    it('truncates oversized functionCall string args (write_file content carrier)', () => {
+      // write_file/edit place entire file contents in functionCall.args;
+      // estimatePartChars bills them, so the 413 path must slim them too.
+      const history: Content[] = [
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                name: 'write_file',
+                args: { file_path: '/tmp/x.txt', content: bigText },
+              },
+            },
+          ],
+        },
+      ];
+      const { slimmedHistory, stats } = slimCompactionInput(
+        history,
+        undefined,
+        {
+          maxTextChars: 500,
+        },
+      );
+      expect(stats.textPartsTruncated).toBe(1);
+      const fc = slimmedHistory[0]!.parts![0]!.functionCall!;
+      expect(fc.args).toEqual({
+        file_path: '/tmp/x.txt',
+        content: 'T'.repeat(500) + SLIM_TEXT_TRUNCATION_MARKER,
+      });
+      // Input is never mutated.
+      expect(history[0]!.parts![0]!.functionCall!.args).toEqual({
+        file_path: '/tmp/x.txt',
+        content: bigText,
+      });
+    });
   });
 });
