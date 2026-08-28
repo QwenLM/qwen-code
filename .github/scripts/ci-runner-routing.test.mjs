@@ -650,12 +650,17 @@ describe('serve-ab.yml runner routing', () => {
       /refusing to wipe suspicious workspace path/,
       'the wipe must keep the checkout-heal path guard',
     );
+    assert.match(
+      wipe.run,
+      /::error::refusing to wipe: an ancestor of the runner workspace is a symlink/,
+      'the wipe must refuse a runner workspace planted under a symlinked ancestor — realpath would resolve through it and re-root every containment check at the link target',
+    );
     const executed = wipe.run
       .split('\n')
       .map((l) => l.trim())
       .filter((l) => l !== '' && !l.startsWith('#'));
     assert.equal(executed[0], 'set -uo pipefail');
-    const tail = executed.slice(-11);
+    const tail = executed.slice(-15);
     assert.equal(
       tail[0],
       'find "$WS" -mindepth 1 -maxdepth 1 ! \\( -name \'.git\' -type d \\) -exec rm -rf {} +',
@@ -678,36 +683,56 @@ describe('serve-ab.yml runner routing', () => {
     );
     assert.equal(
       tail[4],
+      'if [ -L "$WS/.git/config" ]; then',
+      'the kept .git must lose a symlinked config BEFORE any git call — git creates a plain file there, so a link is state a previous job chose',
+    );
+    assert.equal(
+      tail[5],
+      'echo "::warning::removing planted symlink at ${WS}/.git/config"',
+      'report the planted link before it is gone — the incident leaves no other trace',
+    );
+    assert.equal(
+      tail[6],
+      'rm -f -- "$WS/.git/config"',
+      'remove the link itself, never following it — an unparseable target wedges the bare replace strip (exit 128) on every later job, and a parseable one turns the scrub into writes through the link',
+    );
+    assert.equal(
+      tail[7],
+      'fi',
+      "keep the config-link guard an if-block: under the step's -e a one-line [ -L ] && form fails the step on the false test",
+    );
+    assert.equal(
+      tail[8],
       'rm -f "$(git --git-dir="$WS/.git" rev-parse --git-path config.worktree 2>/dev/null || echo /nonexistent)" 2>/dev/null || true',
       "extensions.worktreeConfig activates .git/config.worktree, a second local file that git config --local neither lists nor unsets — delete it like qwen-triage.yml's hardened config-sanitize",
     );
     assert.equal(
-      tail[5],
+      tail[9],
       'git --git-dir="$WS/.git" config --local --unset-all extensions.worktreeConfig 2>/dev/null || true',
       'drop the extension that re-activates the split config file',
     );
     assert.equal(
-      tail[6],
+      tail[10],
       '{ git --git-dir="$WS/.git" config --local --name-only --list 2>/dev/null || true; } | { grep -ivE \'^(core\\.(repositoryformatversion|bare|filemode|symlinks|ignorecase|precomposeunicode|logallrefupdates|hidedotfiles|protecthfs|protectntfs)|remote\\..+\\.(url|fetch|pushurl)|branch\\.|extensions\\.|gc\\.|pack\\.|fetch\\.|index\\.|safe\\.|submodule\\.[^.]+\\.(url|active|branch))\' || true; } | while IFS= read -r key; do git --git-dir="$WS/.git" config --local --unset-all "$key" 2>/dev/null || true; done',
       "the kept .git config must be scrubbed to an allowlist narrower than qwen-triage.yml's config-sanitize — remote narrowed to url/fetch/pushurl (any other remote key is a knob: vcs execs git-remote-<vcs> on the next fetch), core.worktree dropped (redirects the next checkout outside the workspace) — anchored to $WS/.git so a healed symlinked root never scrubs the link's target",
     );
     assert.equal(
-      tail[7],
+      tail[11],
       'if [ -d "$WS/.git" ]; then',
       'the replace strip guards on a real kept repo: a healed-empty workspace has no refs to strip and must not fail the job here',
     );
     assert.equal(
-      tail[8],
+      tail[12],
       '{ git --git-dir="$WS/.git" for-each-ref --format=\'%(refname)\' refs/replace; } | while IFS= read -r ref; do git --git-dir="$WS/.git" update-ref -d "$ref"; done',
       "a planted refs/replace entry silently substitutes file content in the next job's checkout (actions/checkout passes no --no-replace-objects) — delete every one through git so packed entries drop too",
     );
     assert.equal(
-      tail[9],
+      tail[13],
       'fi',
       'the replace strip stays inside the kept-.git guard',
     );
     assert.equal(
-      tail[10],
+      tail[14],
       'rm -rf "$WS/.git/refs/replace"',
       'and remove the namespace itself so nothing under it survives',
     );
@@ -917,12 +942,17 @@ describe('web-shell-visuals.yml capture runner routing', () => {
       /refusing to wipe suspicious workspace path/,
       'the wipe must keep the checkout-heal path guard',
     );
+    assert.match(
+      wipe.run,
+      /::error::refusing to wipe: an ancestor of the runner workspace is a symlink/,
+      'the wipe must refuse a runner workspace planted under a symlinked ancestor — realpath would resolve through it and re-root every containment check at the link target',
+    );
     const executed = wipe.run
       .split('\n')
       .map((l) => l.trim())
       .filter((l) => l !== '' && !l.startsWith('#'));
     assert.equal(executed[0], 'set -uo pipefail');
-    const tail = executed.slice(-11);
+    const tail = executed.slice(-15);
     assert.equal(
       tail[0],
       'find "$WS" -mindepth 1 -maxdepth 1 ! \\( -name \'.git\' -type d \\) -exec rm -rf {} +',
@@ -945,36 +975,56 @@ describe('web-shell-visuals.yml capture runner routing', () => {
     );
     assert.equal(
       tail[4],
+      'if [ -L "$WS/.git/config" ]; then',
+      'the kept .git must lose a symlinked config BEFORE any git call — git creates a plain file there, so a link is state a previous job chose',
+    );
+    assert.equal(
+      tail[5],
+      'echo "::warning::removing planted symlink at ${WS}/.git/config"',
+      'report the planted link before it is gone — the incident leaves no other trace',
+    );
+    assert.equal(
+      tail[6],
+      'rm -f -- "$WS/.git/config"',
+      'remove the link itself, never following it — an unparseable target wedges the bare replace strip (exit 128) on every later job, and a parseable one turns the scrub into writes through the link',
+    );
+    assert.equal(
+      tail[7],
+      'fi',
+      "keep the config-link guard an if-block: under the step's -e a one-line [ -L ] && form fails the step on the false test",
+    );
+    assert.equal(
+      tail[8],
       'rm -f "$(git --git-dir="$WS/.git" rev-parse --git-path config.worktree 2>/dev/null || echo /nonexistent)" 2>/dev/null || true',
       "extensions.worktreeConfig activates .git/config.worktree, a second local file that git config --local neither lists nor unsets — delete it like qwen-triage.yml's hardened config-sanitize",
     );
     assert.equal(
-      tail[5],
+      tail[9],
       'git --git-dir="$WS/.git" config --local --unset-all extensions.worktreeConfig 2>/dev/null || true',
       'drop the extension that re-activates the split config file',
     );
     assert.equal(
-      tail[6],
+      tail[10],
       '{ git --git-dir="$WS/.git" config --local --name-only --list 2>/dev/null || true; } | { grep -ivE \'^(core\\.(repositoryformatversion|bare|filemode|symlinks|ignorecase|precomposeunicode|logallrefupdates|hidedotfiles|protecthfs|protectntfs)|remote\\..+\\.(url|fetch|pushurl)|branch\\.|extensions\\.|gc\\.|pack\\.|fetch\\.|index\\.|safe\\.|submodule\\.[^.]+\\.(url|active|branch))\' || true; } | while IFS= read -r key; do git --git-dir="$WS/.git" config --local --unset-all "$key" 2>/dev/null || true; done',
       "the kept .git config must be scrubbed to an allowlist narrower than qwen-triage.yml's config-sanitize — remote narrowed to url/fetch/pushurl (any other remote key is a knob: vcs execs git-remote-<vcs> on the next fetch), core.worktree dropped (redirects the next checkout outside the workspace) — anchored to $WS/.git so a healed symlinked root never scrubs the link's target",
     );
     assert.equal(
-      tail[7],
+      tail[11],
       'if [ -d "$WS/.git" ]; then',
       'the replace strip guards on a real kept repo: a healed-empty workspace has no refs to strip and must not fail the job here',
     );
     assert.equal(
-      tail[8],
+      tail[12],
       '{ git --git-dir="$WS/.git" for-each-ref --format=\'%(refname)\' refs/replace; } | while IFS= read -r ref; do git --git-dir="$WS/.git" update-ref -d "$ref"; done',
       "a planted refs/replace entry silently substitutes file content in the next job's checkout (actions/checkout passes no --no-replace-objects) — delete every one through git so packed entries drop too",
     );
     assert.equal(
-      tail[9],
+      tail[13],
       'fi',
       'the replace strip stays inside the kept-.git guard',
     );
     assert.equal(
-      tail[10],
+      tail[14],
       'rm -rf "$WS/.git/refs/replace"',
       'and remove the namespace itself so nothing under it survives',
     );
@@ -1122,6 +1172,80 @@ describe('web-shell-visuals.yml capture runner routing', () => {
     }
   });
 
+  it('removes a symlinked .git/config before the defang dies on its target', () => {
+    // git creates a plain .git/config, so a link there is state a previous
+    // job chose. Unparseable target: every git defang dies on it and the
+    // bare replace strip fails the step exit 128, wedging every later job
+    // on this runner permanently. Parseable target outside the workspace:
+    // the scrub's unset-all writes through the link, escaping the
+    // containment this step exists to bound. Both arms: the wipe must
+    // remove the link — never following it to the target — and complete.
+    for (const parseable of [false, true]) {
+      const arm = parseable ? 'parseable' : 'unparseable';
+      const root = mkdtempSync(
+        join(tmpdir(), `visuals-wipe-cfglink-${arm}-`),
+      );
+      try {
+        const home = join(root, 'home');
+        mkdirSync(home);
+        const rws = join(root, 'rws');
+        const ws = join(rws, 'qwen-code');
+        initProbeRepo(home, ws);
+        // The target sits OUTSIDE the workspace (a pool's RUNNER_TEMP
+        // outlives a run): nothing this step removes may reach it.
+        const target = join(root, 'outside-config');
+        const targetBytes = parseable
+          ? '[core]\n\thooksPath = /evil-hooks\n'
+          : 'not a git config line\n';
+        writeFileSync(target, targetBytes);
+        rmSync(join(ws, '.git', 'config'));
+        symlinkSync(target, join(ws, '.git', 'config'));
+        const res = runWipeStep(wipeStep.run, { home, ws, rws });
+        assert.equal(
+          res.status,
+          0,
+          `the wipe must survive a symlinked config (${arm}): ${res.stdout}${res.stderr}`,
+        );
+        assert.match(
+          res.stdout,
+          /removing planted symlink at .*\.git\/config/,
+          `the planted link must be reported before it is gone (${arm})`,
+        );
+        assert.ok(
+          !existsSync(join(ws, '.git', 'config')),
+          `the symlinked config must be removed (${arm})`,
+        );
+        assert.equal(
+          readFileSync(target, 'utf8'),
+          targetBytes,
+          `the target outside the workspace must be untouched (${arm})`,
+        );
+        // The kept repo stays usable: the next checkout completes.
+        const checkout = spawnSync(
+          hostToolPath('git'),
+          [
+            '--git-dir',
+            join(ws, '.git'),
+            '--work-tree',
+            ws,
+            'checkout',
+            '-q',
+            '-f',
+            'HEAD',
+          ],
+          { cwd: root, encoding: 'utf8', env: wipeGitEnv(home) },
+        );
+        assert.equal(
+          checkout.status,
+          0,
+          `the next checkout must complete (${arm}): ${checkout.stderr}`,
+        );
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    }
+  });
+
   it('strips planted refs/replace, loose and packed, before the next checkout materializes them', () => {
     for (const packed of [false, true]) {
       const arm = packed ? 'packed' : 'loose';
@@ -1257,6 +1381,47 @@ describe('web-shell-visuals.yml capture runner routing', () => {
       assert.ok(
         !lstatSync(rws).isSymbolicLink(),
         'the root must no longer be a symlink',
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses a wipe whose runner workspace sits under a planted ancestor symlink', () => {
+    // A link ABOVE the runner workspace (e.g. the runner's _work dir)
+    // re-roots realpath and every containment check: the root heal never
+    // fires — the last component is a real directory — and the allowlist
+    // matches tautologically on the re-rooted path, so without a refusal
+    // the wipe silently deletes files outside the real workspace with
+    // exit 0 and no annotation. Refuse instead of heal: unlinking an
+    // ancestor the daemon relies on would strand every workspace under it.
+    const root = mkdtempSync(join(tmpdir(), 'visuals-wipe-ancestor-'));
+    try {
+      const home = join(root, 'home');
+      mkdirSync(home);
+      const realWork = join(root, 'real-work');
+      const wsReal = join(realWork, 'qwen-code', 'qwen-code', 'qwen-code');
+      mkdirSync(wsReal, { recursive: true });
+      writeFileSync(join(wsReal, 'victim.txt'), 'x\n');
+      writeFileSync(join(wsReal, 'stale.txt'), 'x\n');
+      symlinkSync(realWork, join(root, 'work'));
+      const rws = join(root, 'work', 'qwen-code', 'qwen-code');
+      const ws = join(rws, 'qwen-code');
+      const res = runWipeStep(wipeStep.run, { home, ws, rws });
+      assert.notEqual(
+        res.status,
+        0,
+        `a non-canonical runner workspace must fail the wipe closed: ${res.stdout}${res.stderr}`,
+      );
+      assert.match(
+        res.stdout,
+        /::error::refusing to wipe: an ancestor of the runner workspace is a symlink/,
+        'the refusal must surface the planted ancestor',
+      );
+      assert.ok(
+        existsSync(join(wsReal, 'victim.txt')) &&
+          existsSync(join(wsReal, 'stale.txt')),
+        'nothing outside the real runner workspace may be wiped',
       );
     } finally {
       rmSync(root, { recursive: true, force: true });
@@ -1500,9 +1665,11 @@ describe('web-shell-visuals.yml capture runner routing', () => {
     );
     // An env override at any of these levels moves the ground under the
     // pinned steps: HOME relocates the library scan, RUNNER_TEMP the stale
-    // clear, GITHUB_WORKSPACE the heal, PATH/BASH_ENV re-resolve (or
-    // pre-load) every command. Check the env map of EACH pinned step — a
-    // step-level override beats the job and workflow levels.
+    // clear, GITHUB_WORKSPACE the heal, RUNNER_ENVIRONMENT re-routes the
+    // lane split (a pool member sent into --with-deps dies on the
+    // password-gated sudo), PATH/BASH_ENV re-resolve (or pre-load) every
+    // command. Check the env map of EACH pinned step — a step-level
+    // override beats the job and workflow levels.
     for (const envMap of [
       steps[install].env,
       steps[clear].env,
@@ -1516,6 +1683,7 @@ describe('web-shell-visuals.yml capture runner routing', () => {
         'HOME',
         'RUNNER_TEMP',
         'GITHUB_WORKSPACE',
+        'RUNNER_ENVIRONMENT',
       ]) {
         assert.ok(
           !envMap || envMap[key] === undefined,

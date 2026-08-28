@@ -156,6 +156,22 @@ jobs:
             rm -f -- "$RWS" || { echo "::error::refusing to continue: could not remove ${RWS}"; exit 1; }
             mkdir -- "$RWS" || { echo "::error::refusing to continue: could not recreate ${RWS}"; exit 1; }
           fi
+          # Fail closed when an ANCESTOR of the runner workspace is a
+          # symlink: realpath below resolves THROUGH it and re-roots every
+          # later containment check at the link's target — tautologically —
+          # so the wipe would silently delete files outside the real
+          # workspace with exit 0 and no annotation. The root heal above
+          # judges $RWS itself; this closes the components above it.
+          # Refuse, never heal: unlinking an ancestor the daemon relies on
+          # (e.g. _work) would strand every repo workspace under it.
+          ANCESTOR="$(dirname -- "$RWS")"
+          while [ "$ANCESTOR" != "/" ] && [ -n "$ANCESTOR" ]; do
+            if [ -L "$ANCESTOR" ]; then
+              echo "::error::refusing to wipe: an ancestor of the runner workspace is a symlink: ${ANCESTOR}"
+              exit 1
+            fi
+            ANCESTOR="$(dirname -- "$ANCESTOR")"
+          done
           # The allowlist root is prepared BEFORE the workspace heal below,
           # because it bounds what the heal may touch: canonical, slash-free
           # and non-degenerate. An empty $RUNNER_WORKSPACE would turn every
@@ -284,6 +300,17 @@ jobs:
           rm -f "$WS/.git/commondir"
           rm -rf "$WS/.git/hooks" "$WS/.git/info/attributes"
           rm -f "$WS/.git/config.lock"
+          # Remove a symlinked .git/config BEFORE any git call: git creates
+          # a plain file there, so a link is state a previous job chose. An
+          # unparseable target kills every git defang below — the bare
+          # replace strip dies exit 128 and wedges every later job on this
+          # runner permanently — and a parseable target outside the
+          # workspace turns the scrub's writes into writes through the
+          # link. rm -f acts on the link itself and never follows it.
+          if [ -L "$WS/.git/config" ]; then
+            echo "::warning::removing planted symlink at ${WS}/.git/config"
+            rm -f -- "$WS/.git/config"
+          fi
           rm -f "$(git --git-dir="$WS/.git" rev-parse --git-path config.worktree 2>/dev/null || echo /nonexistent)" 2>/dev/null || true
           git --git-dir="$WS/.git" config --local --unset-all extensions.worktreeConfig 2>/dev/null || true
           { git --git-dir="$WS/.git" config --local --name-only --list 2>/dev/null || true; } | { grep -ivE '^(core\.(repositoryformatversion|bare|filemode|symlinks|ignorecase|precomposeunicode|logallrefupdates|hidedotfiles|protecthfs|protectntfs)|remote\..+\.(url|fetch|pushurl)|branch\.|extensions\.|gc\.|pack\.|fetch\.|index\.|safe\.|submodule\.[^.]+\.(url|active|branch))' || true; } | while IFS= read -r key; do git --git-dir="$WS/.git" config --local --unset-all "$key" 2>/dev/null || true; done
