@@ -18456,10 +18456,15 @@ describe('App session callbacks', () => {
     });
     await flush();
 
+    // Built-in header actions still exist (Local Control QR entry), but the
+    // token usage action stays behind its chat-header opt-in.
+    const actions = container.querySelector(
+      '[data-testid="split-header-actions"]',
+    );
+    expect(actions).not.toBeNull();
     expect(
-      container.querySelector('[data-testid="split-has-header-actions"]')
-        ?.textContent,
-    ).toBe('no');
+      actions!.querySelector('[aria-label="Session token usage"]'),
+    ).toBeNull();
   });
 
   it('does not reopen controlled split view when the same ids get a new array reference', async () => {

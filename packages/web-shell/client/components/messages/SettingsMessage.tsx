@@ -2,6 +2,7 @@ import {
   useCallback,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type ReactNode,
 } from 'react';
@@ -89,6 +90,8 @@ interface SettingsMessageProps {
   /** Model list/add/delete/select, rendered inside the Model category. */
   modelManagement?: ModelManagementProps;
   embedded?: boolean;
+  /** Category to select on open (deep link, e.g. 'Daemon'). */
+  initialCategory?: string;
 }
 
 export interface SettingsMessageSettingsState {
@@ -419,6 +422,7 @@ export function SettingsMessage({
   onChatWidthModeChange,
   modelManagement,
   embedded = false,
+  initialCategory,
 }: SettingsMessageProps) {
   const { language: selectedLanguage, t } = useI18n();
   const selectedTheme = useTheme();
@@ -501,6 +505,24 @@ export function SettingsMessage({
       setActiveCategory(categories[0]!.id);
     }
   }, [activeCategory, categories]);
+
+  // Deep link: apply the requested category once per value, after the
+  // fallback above so this setState wins when both run in the same batch.
+  // A ref (not a dep on activeCategory) keeps later manual category switches
+  // from being forced back.
+  const appliedInitialCategoryRef = useRef<string | undefined>(undefined);
+  useEffect(() => {
+    if (
+      !initialCategory ||
+      appliedInitialCategoryRef.current === initialCategory
+    ) {
+      return;
+    }
+    if (categories.some((category) => category.id === initialCategory)) {
+      appliedInitialCategoryRef.current = initialCategory;
+      setActiveCategory(initialCategory);
+    }
+  }, [initialCategory, categories]);
 
   useEffect(() => {
     if (error) setMessage(error.message);
