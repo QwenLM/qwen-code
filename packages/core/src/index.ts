@@ -83,8 +83,8 @@ export {
   PLAN_MODE_ENTRY_SIBLING_SKIP_MESSAGE,
   findPlanModeEntryBatchBoundaryIndex,
 } from './core/plan-mode-entry-policy.js';
-export * from './core/geminiChat.js';
-export * from './core/geminiRequest.js';
+export * from './core/llm-chat.js';
+export * from './core/llm-request.js';
 export * from './core/inlineMediaLimit.js';
 export * from './core/insightProtocol.js';
 export * from './core/logger.js';

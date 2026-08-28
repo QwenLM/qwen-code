@@ -18,7 +18,7 @@ interface BlocksScan {
 /**
  * CLI-aligned streaming loading metrics derived from transcript blocks.
  *
- * CLI source (useGeminiStream.ts + LoadingIndicator.tsx):
+ * CLI source (use-llm-stream.ts + LoadingIndicator.tsx):
  * - streamingChars: accumulated from text_delta (+text.length) and
  *   ToolCallRequest (+JSON.stringify(args).length). Reset only on new
  *   user queries, NOT on tool-result continuations.

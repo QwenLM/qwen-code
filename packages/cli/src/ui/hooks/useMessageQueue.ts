@@ -15,6 +15,7 @@ export interface QueuedGoalTurn {
   permit: GoalTurnPermit;
   turnKey: string;
   continuationContext: string;
+  objectiveUpdated?: boolean;
   windDown?: boolean;
   verifierFeedback?: string;
 }
@@ -195,6 +196,9 @@ export function useMessageQueue(): UseMessageQueueReturn {
         permit: { ...input.permit },
         turnKey: `goal-runtime:${input.permit.turnId}`,
         continuationContext: input.continuationContext,
+        ...(input.objectiveUpdated
+          ? { objectiveUpdated: input.objectiveUpdated }
+          : {}),
         ...(input.windDown ? { windDown: true } : {}),
         ...(input.verifierFeedback
           ? { verifierFeedback: input.verifierFeedback }

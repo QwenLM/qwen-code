@@ -95,6 +95,7 @@ describe('useMessageQueue', () => {
     const input: Parameters<GoalTurnHost['startGoalTurn']>[0] = {
       permit,
       continuationContext: 'Continue the active Goal',
+      objectiveUpdated: true,
       windDown: true,
       verifierFeedback: 'Need stronger evidence',
     };
@@ -123,6 +124,7 @@ describe('useMessageQueue', () => {
       permit,
       turnKey: 'goal-runtime:turn-1',
       continuationContext: 'Continue the active Goal',
+      objectiveUpdated: true,
       windDown: true,
       verifierFeedback: 'Need stronger evidence',
     });
