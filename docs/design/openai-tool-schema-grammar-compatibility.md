@@ -10,7 +10,7 @@ Disabling all tools avoids grammar construction but also removes the functionali
 
 Keep the registered tool set unchanged. Before an OpenAI-compatible request is sent, recursively relax only the wire copy of each schema:
 
-- omit empty `properties` maps and `additionalProperties: false` on objects with zero declared properties;
+- omit empty `properties` maps and `additionalProperties: false` on object-capable schemas with zero declared properties;
 - omit `minLength`, `maxLength`, `minItems`, and `maxItems` values at or above the grammar repetition boundary of 2000;
 - preserve smaller limits and all other supported constraints.
 

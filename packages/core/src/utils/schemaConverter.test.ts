@@ -335,11 +335,6 @@ describe('relaxSchemaForFunctionCalling', () => {
     ).toBe(false);
   });
 
-  it('removes additionalProperties:false when no properties are declared', () => {
-    const schema = { type: 'object', additionalProperties: false };
-    expect(relaxSchemaForFunctionCalling(schema)).toEqual({ type: 'object' });
-  });
-
   it('relaxes nested object levels independently', () => {
     const nested = {
       type: 'object',
@@ -511,6 +506,11 @@ describe('relaxSchemaForFunctionCalling', () => {
           additionalProperties: false,
         },
         closed: { type: 'object', additionalProperties: false },
+        typelessClosed: { additionalProperties: false },
+        nullableClosed: {
+          type: ['object', 'null'],
+          additionalProperties: false,
+        },
         bounded: { type: 'string', maxLength: 1999 },
         long: { type: 'string', maxLength: 2000 },
         padded: { type: 'string', minLength: 2000 },
@@ -532,6 +532,8 @@ describe('relaxSchemaForFunctionCalling', () => {
       properties: {
         empty: { type: 'object' },
         closed: { type: 'object' },
+        typelessClosed: {},
+        nullableClosed: { type: ['object', 'null'] },
         bounded: { type: 'string', maxLength: 1999 },
         long: { type: 'string' },
         padded: { type: 'string' },

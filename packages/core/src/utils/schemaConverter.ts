@@ -237,9 +237,13 @@ export function relaxSchemaForFunctionCalling(
       properties !== null &&
       !Array.isArray(properties) &&
       Object.keys(properties).length === 0;
+    const type = source['type'];
+    const canBeObject =
+      type === undefined ||
+      type === 'object' ||
+      (Array.isArray(type) && type.includes('object'));
     const hasNoDeclaredProperties =
-      hasEmptyProperties ||
-      (source['type'] === 'object' && properties === undefined);
+      hasEmptyProperties || (canBeObject && properties === undefined);
 
     for (const [key, value] of Object.entries(source)) {
       if (key === '$schema' || key === '$id' || key === 'uniqueItems') {
