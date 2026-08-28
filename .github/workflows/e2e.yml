@@ -175,7 +175,12 @@ jobs:
       # first re-runs install + build + bundle + pack on the host — all of which
       # the steps above already did, and none of which the image consumes (the
       # Dockerfile rebuilds and packs inside its own builder stage).
+      # continue-on-error is load-bearing: a failed first attempt must not
+      # pre-fail the job, or a successful retry below would still leave the
+      # shard red. The job only fails when the retry fails too.
       - name: 'Build the sandbox image'
+        id: 'build-sandbox'
+        continue-on-error: true
         if: |-
           ${{ matrix.sandbox == 'sandbox:docker' }}
         env:
@@ -185,6 +190,21 @@ jobs:
           QWEN_SANDBOX: 'docker'
           # Without this, build_sandbox.js pipes docker build output to
           # /dev/null — the longest step in the docker leg becomes undiagnosable.
+          VERBOSE: 'true'
+        run: |-
+          npm run build:sandbox -- -s
+
+      # One bounded retry: pool-runner docker builds hit transient
+      # environment failures — run 33139344576 died at this step on one
+      # runner (issue #10355) while the identical build passed on two
+      # sibling runners of the same run, and the re-run passed on another
+      # runner. A retry reuses the docker build cache and almost always
+      # passes; a genuine failure fails this step and with it the job.
+      - name: 'Build the sandbox image (retry)'
+        if: |-
+          ${{ steps.build-sandbox.outcome == 'failure' }}
+        env:
+          QWEN_SANDBOX: 'docker'
           VERBOSE: 'true'
         run: |-
           npm run build:sandbox -- -s
