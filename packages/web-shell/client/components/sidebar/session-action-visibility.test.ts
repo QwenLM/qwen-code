@@ -17,7 +17,7 @@ const ALL_ITEMS: readonly WebShellSidebarSessionActionItem[] = [
 const DEFAULT_ITEMS: readonly WebShellSidebarSessionActionItem[] = ALL_ITEMS;
 
 const DEFAULT_INLINE_ITEMS: readonly WebShellSidebarSessionInlineActionItem[] =
-  ['pin', 'archive'];
+  ['pin'];
 
 /** Items that can never appear as inline buttons. */
 const DROPDOWN_ONLY_ITEMS: readonly WebShellSidebarSessionActionItem[] = [
@@ -71,12 +71,13 @@ function computeVisibility(
 
 describe('session action visibility matrix', () => {
   describe('defaults (no consumer config)', () => {
-    it('shows details on hover, pin+archive inline, and mutations in the dropdown', () => {
+    it('shows details on hover, pin inline, and archive plus mutations in the dropdown', () => {
       const { inline, dropdown, hover, showDropdownTrigger } =
         computeVisibility(DEFAULT_ITEMS, DEFAULT_INLINE_ITEMS);
 
-      expect([...inline].sort()).toEqual(['archive', 'pin']);
+      expect([...inline].sort()).toEqual(['pin']);
       expect([...dropdown].sort()).toEqual([
+        'archive',
         'delete',
         'export',
         'group',
