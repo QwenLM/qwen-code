@@ -5400,10 +5400,26 @@ export function WebShellSidebar({
                           }
                           renderSessions={!ws.primary}
                           renderSession={(session) =>
-                            renderSessionRow({
-                              ...session,
-                              workspaceCwd: ws.cwd,
-                            })
+                            renderSessionRow(
+                              {
+                                ...session,
+                                workspaceCwd: ws.cwd,
+                              },
+                              {
+                                // Pinned members also render in the
+                                // sidebar-level Pinned section; while that
+                                // section is expanded its row hosts the
+                                // rename form, so this duplicate row must
+                                // not mount a second autofocused input.
+                                // Channel mode has no Pinned section, so
+                                // the workspace row is the only copy and
+                                // must stay editable.
+                                renameFormDisabled:
+                                  selectedSessionSource !== 'channel' &&
+                                  Boolean(session.isPinned) &&
+                                  pinnedExpanded,
+                              },
+                            )
                           }
                           showSessionDetails={sessionActionItems.has('details')}
                           headerActions={(visible) => {

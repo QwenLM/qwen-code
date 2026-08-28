@@ -1318,4 +1318,131 @@ describe('WebShellSidebar pinned group members (issue #10391)', () => {
 
     workspaceActions.listSessionGroups.mockResolvedValue(defaultGroupsCatalog);
   });
+
+  it('mounts a single rename form for a secondary-workspace pinned member rendered in two rows', async () => {
+    // The sidebar-level Pinned section lifts pinned rows out of every
+    // workspace; a secondary workspace's own group section keeps the member
+    // too (#10391), so the member renders twice and only one row may host
+    // the rename form.
+    connection.capabilities = {
+      ...organizationCapabilities,
+      // Qualified-rest rename for non-current secondary sessions.
+      features: [
+        ...organizationCapabilities.features,
+        'workspace_session_metadata',
+        'workspace_qualified_rest_core',
+      ],
+    };
+    workspace.capabilities = {
+      ...organizationCapabilities,
+      workspaces: [
+        { id: 'primary', cwd: '/tmp/project', primary: true, trusted: true },
+        {
+          id: 'secondary',
+          cwd: '/tmp/other',
+          primary: false,
+          trusted: true,
+        },
+      ],
+    };
+    const designGroupCatalog = {
+      groups: [
+        {
+          id: 'design-group',
+          name: 'Design',
+          color: 'blue',
+          order: 0,
+          createdAt: '2026-01-01T00:00:00.000Z',
+          updatedAt: '2026-01-01T00:00:00.000Z',
+        },
+      ],
+      colorOptions: ['red', 'orange', 'yellow', 'green', 'blue', 'purple'],
+    };
+    workspaceActions.listSessionGroups.mockResolvedValue({
+      groups: [],
+      colorOptions: ['red', 'orange', 'yellow', 'green', 'blue', 'purple'],
+    });
+    const member = makeSession('secondary-member', {
+      displayName: 'Secondary member',
+      workspaceCwd: '/tmp/other',
+      groupId: 'design-group',
+      isPinned: true,
+      pinnedAt: '2026-01-02T00:00:00.000Z',
+    });
+    // The sidebar's secondary pinned page carries the grouped member.
+    useSessionCatalogQueries.mockImplementation(
+      (
+        _client: unknown,
+        queries: Array<{
+          workspaceCwd: string;
+          options?: Record<string, unknown>;
+        }>,
+      ) =>
+        queries.map((query) => {
+          if (
+            query.workspaceCwd === '/tmp/other' &&
+            query.options?.group === 'pinned'
+          ) {
+            return {
+              page: { sessions: [member] },
+              loading: false,
+              stale: false,
+            };
+          }
+          return {};
+        }),
+    );
+    // The secondary workspace section loads its own session and group pages.
+    workspace.client.workspaceByCwd.mockImplementation((cwd: string) => {
+      if (cwd === '/tmp/other') {
+        return {
+          listWorkspaceSessions: vi.fn().mockResolvedValue([
+            member,
+            makeSession('secondary-plain', {
+              displayName: 'Secondary plain',
+              workspaceCwd: '/tmp/other',
+            }),
+          ]),
+          listSessionGroups: vi.fn().mockResolvedValue(designGroupCatalog),
+        };
+      }
+      return {
+        listWorkspaceSessions: vi.fn().mockResolvedValue([]),
+        listSessionGroups: vi.fn().mockResolvedValue({
+          groups: [],
+          colorOptions: ['red', 'orange', 'yellow', 'green', 'blue', 'purple'],
+        }),
+      };
+    });
+    pinned.sessions = [];
+    pinned.data = pinned.sessions;
+    active.sessions = [];
+    active.data = active.sessions;
+    connection.sessionId = 'secondary-member';
+
+    renderSidebar();
+    await flushSidebar();
+    await flushSidebar();
+
+    // The member renders twice: in the Pinned section and in the secondary
+    // workspace's group section.
+    expect(sessionTitleCount('Secondary member')).toBe(2);
+    const group = Array.from(
+      container.querySelectorAll<HTMLElement>('section[aria-label="Design"]'),
+    ).find((section) => section.textContent?.includes('Secondary member'));
+    expect(group).not.toBeUndefined();
+    const groupRow = Array.from(
+      group!.querySelectorAll<HTMLElement>('[role="button"]'),
+    ).find((element) => element.textContent?.includes('Secondary member'));
+    expect(groupRow).not.toBeUndefined();
+    act(() => {
+      groupRow!.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+    });
+    await flushSidebar();
+
+    expect(
+      container.querySelectorAll('input[aria-label="Rename: Secondary member"]')
+        .length,
+    ).toBe(1);
+  });
 });
