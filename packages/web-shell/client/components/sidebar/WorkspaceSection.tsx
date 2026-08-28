@@ -541,6 +541,8 @@ export function WorkspaceSection({
             onOpenChange={setBranchPickerOpen}
             workspaceCwd={workspace.cwd}
             onBranchChanged={() => void loadGitStatus()}
+            status={gitStatus}
+            onStatusRefreshed={setGitStatus}
             onOpenDiff={() => onOpenGitDiff(workspace.cwd)}
             onOpenCommit={
               onOpenCommit ? () => onOpenCommit(workspace.cwd) : undefined
