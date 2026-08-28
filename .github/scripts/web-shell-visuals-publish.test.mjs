@@ -436,12 +436,29 @@ test('publish workflow passes hosting failures through to the comment builder', 
   const commentIndex = fromFailureWrite.indexOf(commentInvocation);
   assert.ok(commentIndex > 0);
   const beforeComment = fromFailureWrite.slice(0, commentIndex);
-  assert.doesNotMatch(beforeComment, /\bexit 1\b/);
+  assert.doesNotMatch(beforeComment, /\bexit\s+[01]\b/);
 
-  assert.match(
-    workflow,
-    /"\$\{BODY_FILE\}" \\\n\s+"\$\{CHANGED_PATHS_FILE\}" \\\n\s+"\$\{RENDER_STATUS_FILE\}" \\\n\s+"\$\{HOSTING_STATUS_FILE\}"/,
+  const commentBlock = fromFailureWrite.slice(
+    commentIndex,
+    fromFailureWrite.indexOf('          # --- Post or update the PR comment'),
   );
+  const expectedArgs = [
+    '"${STAGE}"',
+    '"${RAW_BASE}"',
+    '"${SHORT_SHA}"',
+    '"${RUN_URL}"',
+    '"${BODY_FILE}"',
+    '"${CHANGED_PATHS_FILE}"',
+    '"${RENDER_STATUS_FILE}"',
+    '"${HOSTING_STATUS_FILE}"',
+  ];
+  let searchFrom = 0;
+  for (const arg of expectedArgs) {
+    const argIndex = commentBlock.indexOf(arg, searchFrom);
+    assert.notEqual(argIndex, -1, `${arg} must be passed to comment CLI`);
+    searchFrom = argIndex + arg.length;
+  }
+  assert.doesNotMatch(commentBlock, /\bexit\s+[01]\b/);
   assert.match(workflow, /echo 'success' > "\$\{HOSTING_STATUS_FILE\}"/);
   assert.match(
     workflow,
