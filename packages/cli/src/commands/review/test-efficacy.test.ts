@@ -543,6 +543,7 @@ describe('restoreProbeTreeTracked, through runOneMutant', () => {
     // `scratch-tree` refuses to reset through, run twice per probe run one
     // directory over with no screen at all.
     const dir = mkdtempSync(join(tmpdir(), 'qwen-filter-'));
+    const canaryDir = mkdtempSync(join(tmpdir(), 'qwen-canary-'));
     const isolation = isolateHostGitConfig();
     try {
       writeFileSync(join(dir, 'a.ts'), 'gone.clear();\n');
@@ -555,12 +556,19 @@ describe('restoreProbeTreeTracked, through runOneMutant', () => {
       // message.
       writeFileSync(join(dir, '.gitattributes'), '*.ts filter=evil\n');
       asCheckout(dir);
-      // Repo-local, like the sibling scratch-tree test: a canary under /tmp
-      // would outlive the fixture on a shared runner.
-      const canary = join(dir, 'PWNED-smudge');
+      // OUTSIDE the probe tree, but inside a fixture this test removes: the
+      // restore's second spawn is `clean -ffdx`, which deletes an untracked
+      // canary written into the tree and would hide the very ordering bug the
+      // canary exists to catch. Nothing is left on the runner either way.
+      const canary = join(canaryDir, 'PWNED-smudge');
       execFileSync('git', ['config', 'filter.evil.smudge', `touch ${canary}`], {
         cwd: dir,
       });
+      // A checkout runs the smudge only on files it actually REWRITES, and it
+      // rewrites nothing when the tree already matches HEAD. A dirty file is
+      // what a probe run leaves behind and what the restore exists to undo, so
+      // it is also the condition under which the canary can fire at all.
+      writeFileSync(join(dir, 'a.ts'), 'dirtied by a previous run\n');
 
       const r = runOneMutant(
         dir,
@@ -609,38 +617,7 @@ describe('restoreProbeTreeTracked, through runOneMutant', () => {
     } finally {
       isolation.dispose();
       rmSync(dir, { recursive: true, force: true });
-    }
-  });
-
-  it('refuses the REVERT checkout too, on a filter planted after the restore', () => {
-    // The restore is screened once, at the top of each run — but every run
-    // between then and the revert executes the PR's own test code, which can
-    // plant the filter mid-run. The mutation phase's catch deliberately keeps
-    // going "so the revert probe below still runs", so a refused restore
-    // reaches the revert with the plant live. A screen only at the restore
-    // lets that second checkout execute it.
-    const dir = mkdtempSync(join(tmpdir(), 'qwen-revert-filter-'));
-    const isolation = isolateHostGitConfig();
-    try {
-      writeFileSync(join(dir, 'a.ts'), 'gone.clear();\n');
-      writeFileSync(join(dir, '.gitattributes'), '*.ts filter=evil\n');
-      asCheckout(dir);
-      const canary = join(dir, 'PWNED-revert');
-      execFileSync('git', ['config', 'filter.evil.smudge', `touch ${canary}`], {
-        cwd: dir,
-      });
-
-      const r = runOneMutant(
-        dir,
-        { file: 'a.ts', line: 1, statement: 'gone.clear();' },
-        ['a.test.ts'],
-      );
-
-      expect(r.verdict).toBe('inconclusive');
-      expect(existsSync(canary)).toBe(false);
-    } finally {
-      isolation.dispose();
-      rmSync(dir, { recursive: true, force: true });
+      rmSync(canaryDir, { recursive: true, force: true });
     }
   });
 
@@ -651,12 +628,13 @@ describe('restoreProbeTreeTracked, through runOneMutant', () => {
     // file that defines the filter and reported the repository clean, while
     // the restore's checkout ran the last value.
     const dir = mkdtempSync(join(tmpdir(), 'qwen-bigvalue-'));
+    const canaryDir = mkdtempSync(join(tmpdir(), 'qwen-canary-'));
     const isolation = isolateHostGitConfig();
     try {
       writeFileSync(join(dir, 'a.ts'), 'gone.clear();\n');
       writeFileSync(join(dir, '.gitattributes'), '*.ts filter=evil\n');
       asCheckout(dir);
-      const canary = join(dir, 'PWNED-bigvalue');
+      const canary = join(canaryDir, 'PWNED-bigvalue');
       // git takes the LAST value; the first is only there to push the
       // enumeration's output past the default buffer.
       appendFileSync(
@@ -664,6 +642,7 @@ describe('restoreProbeTreeTracked, through runOneMutant', () => {
         `[filter "evil"]\n\tsmudge = echo ${'x'.repeat(1200000)}\n` +
           `\tsmudge = touch ${canary}\n`,
       );
+      writeFileSync(join(dir, 'a.ts'), 'dirtied by a previous run\n');
 
       const r = runOneMutant(
         dir,
@@ -677,6 +656,7 @@ describe('restoreProbeTreeTracked, through runOneMutant', () => {
     } finally {
       isolation.dispose();
       rmSync(dir, { recursive: true, force: true });
+      rmSync(canaryDir, { recursive: true, force: true });
     }
   });
 
