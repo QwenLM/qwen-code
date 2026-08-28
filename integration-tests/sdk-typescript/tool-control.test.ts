@@ -22,10 +22,7 @@ import {
 import {
   fakeToolCall,
   startFakeOpenAIServer,
-  userMessageContains,
-  type FakeOpenAIResponse,
   type FakeOpenAIServer,
-  type FakeOpenAIToolCall,
 } from '../fake-openai-server.js';
 import {
   SDKTestHelper,
@@ -50,8 +47,9 @@ const LOCAL_OPENAI_NO_PROXY = IS_CONTAINER_SANDBOX
   : '127.0.0.1,localhost';
 const FAKE_SERVER_OPTIONS = fakeServerHostOptions();
 const INITIAL_CONTENT = 'original content';
+let isolatedQwenHome: string;
 
-function fakeModelOptions(baseUrl: string, helper: SDKTestHelper) {
+function fakeModelOptions(baseUrl: string) {
   return {
     model: 'fake-model',
     authType: 'openai' as const,
@@ -62,36 +60,9 @@ function fakeModelOptions(baseUrl: string, helper: SDKTestHelper) {
       OPENAI_BASE_URL: baseUrl,
       OPENAI_MODEL: 'fake-model',
       QWEN_MODEL: 'fake-model',
-      // Keep the runner's real HOME / ~/.qwen state out of the child CLI.
-      ...helper.isolatedHomeEnv(),
+      QWEN_HOME: isolatedQwenHome,
     },
   };
-}
-
-/**
- * Serves `toolCalls` on the first streaming request whose user messages
- * contain `triggerText`, then `fallback` for everything else. Matching on the
- * prompt (not the request index) keeps the handler correct when non-turn
- * requests — e.g. memory-recall side queries leaked from runner state —
- * reach the fake server before the main request.
- */
-function startSingleTurnToolServer(
-  triggerText: string,
-  toolCalls: FakeOpenAIToolCall[],
-  fallback: FakeOpenAIResponse = { content: 'Done.' },
-) {
-  let served = false;
-  return startFakeOpenAIServer(({ body }) => {
-    if (
-      !served &&
-      body['stream'] === true &&
-      userMessageContains(body, triggerText)
-    ) {
-      served = true;
-      return { toolCalls };
-    }
-    return fallback;
-  }, FAKE_SERVER_OPTIONS);
 }
 
 function advertisedToolNames(fakeServer: FakeOpenAIServer): string[] {
@@ -116,12 +87,17 @@ describe('Tool Control Parameters (E2E)', () => {
     testDir = await helper.setup('tool-control', {
       settings: {
         fastModel: 'openai:fake-model',
+        memory: {
+          enableManagedAutoMemory: false,
+          enableManagedAutoDream: false,
+        },
         // list_directory is opt-in (disabled by default). This suite tests
         // coreTools/excludeTools control semantics, so keep it enabled here;
         // an active coreTools allowlist still outranks this flag.
         tools: { listDirectory: { enabled: true } },
       },
     });
+    isolatedQwenHome = await helper.mkdir('global-qwen-home');
   });
 
   afterEach(async () => {
@@ -135,32 +111,36 @@ describe('Tool Control Parameters (E2E)', () => {
         // Create a test file
         await helper.createFile('test.txt', INITIAL_CONTENT);
 
-        const fakeServer = await startSingleTurnToolServer(
-          'Read the file test.txt and then write "modified" to test.txt. Finally, list the directory.',
-          [
-            fakeToolCall(
-              'read_file',
-              { file_path: helper.getPath('test.txt') },
-              'read-test',
-            ),
-            fakeToolCall(
-              'write_file',
-              {
-                file_path: helper.getPath('test.txt'),
-                content: 'modified',
-              },
-              'write-test',
-            ),
-            fakeToolCall('list_directory', { path: testDir }, 'list-dir'),
-          ],
-        );
+        const fakeServer = await startFakeOpenAIServer(({ requestIndex }) => {
+          if (requestIndex === 0) {
+            return {
+              toolCalls: [
+                fakeToolCall(
+                  'read_file',
+                  { file_path: helper.getPath('test.txt') },
+                  'read-test',
+                ),
+                fakeToolCall(
+                  'write_file',
+                  {
+                    file_path: helper.getPath('test.txt'),
+                    content: 'modified',
+                  },
+                  'write-test',
+                ),
+                fakeToolCall('list_directory', { path: testDir }, 'list-dir'),
+              ],
+            };
+          }
+          return { content: 'Done.' };
+        }, FAKE_SERVER_OPTIONS);
 
         const q = query({
           prompt:
             'Read the file test.txt and then write "modified" to test.txt. Finally, list the directory.',
           options: {
             ...SHARED_TEST_OPTIONS,
-            ...fakeModelOptions(fakeServer.baseUrl, helper),
+            ...fakeModelOptions(fakeServer.baseUrl),
             cwd: testDir,
             permissionMode: 'yolo',
             // Only allow read_file and write_file, exclude list_directory
@@ -233,7 +213,7 @@ describe('Tool Control Parameters (E2E)', () => {
           prompt: 'What is 2 + 2? Just answer with the number.',
           options: {
             ...SHARED_TEST_OPTIONS,
-            ...fakeModelOptions(fakeServer.baseUrl, helper),
+            ...fakeModelOptions(fakeServer.baseUrl),
             cwd: testDir,
             // Only allow thinking, no file operations
             coreTools: [],
@@ -276,31 +256,35 @@ describe('Tool Control Parameters (E2E)', () => {
       async () => {
         await helper.createFile('test.txt', 'test content');
 
-        const fakeServer = await startSingleTurnToolServer(
-          'Read test.txt and then write empty content to it to clear it.',
-          [
-            fakeToolCall(
-              'read_file',
-              { file_path: helper.getPath('test.txt') },
-              'read-test',
-            ),
-            fakeToolCall(
-              'write_file',
-              {
-                file_path: helper.getPath('test.txt'),
-                content: '',
-              },
-              'write-test',
-            ),
-          ],
-        );
+        const fakeServer = await startFakeOpenAIServer(({ requestIndex }) => {
+          if (requestIndex === 0) {
+            return {
+              toolCalls: [
+                fakeToolCall(
+                  'read_file',
+                  { file_path: helper.getPath('test.txt') },
+                  'read-test',
+                ),
+                fakeToolCall(
+                  'write_file',
+                  {
+                    file_path: helper.getPath('test.txt'),
+                    content: '',
+                  },
+                  'write-test',
+                ),
+              ],
+            };
+          }
+          return { content: 'Done.' };
+        }, FAKE_SERVER_OPTIONS);
 
         const q = query({
           prompt:
             'Read test.txt and then write empty content to it to clear it.',
           options: {
             ...SHARED_TEST_OPTIONS,
-            ...fakeModelOptions(fakeServer.baseUrl, helper),
+            ...fakeModelOptions(fakeServer.baseUrl),
             cwd: testDir,
             permissionMode: 'yolo',
             coreTools: ['read_file', 'write_file'],
@@ -351,28 +335,32 @@ describe('Tool Control Parameters (E2E)', () => {
       async () => {
         await helper.createFile('test.txt', 'test content');
 
-        const fakeServer = await startSingleTurnToolServer(
-          'Read test.txt, list the directory, and run "echo hello".',
-          [
-            fakeToolCall(
-              'read_file',
-              { file_path: helper.getPath('test.txt') },
-              'read-test',
-            ),
-            fakeToolCall('list_directory', { path: testDir }, 'list-dir'),
-            fakeToolCall(
-              'run_shell_command',
-              { command: 'echo hello' },
-              'shell-echo',
-            ),
-          ],
-        );
+        const fakeServer = await startFakeOpenAIServer(({ requestIndex }) => {
+          if (requestIndex === 0) {
+            return {
+              toolCalls: [
+                fakeToolCall(
+                  'read_file',
+                  { file_path: helper.getPath('test.txt') },
+                  'read-test',
+                ),
+                fakeToolCall('list_directory', { path: testDir }, 'list-dir'),
+                fakeToolCall(
+                  'run_shell_command',
+                  { command: 'echo hello' },
+                  'shell-echo',
+                ),
+              ],
+            };
+          }
+          return { content: 'Done.' };
+        }, FAKE_SERVER_OPTIONS);
 
         const q = query({
           prompt: 'Read test.txt, list the directory, and run "echo hello".',
           options: {
             ...SHARED_TEST_OPTIONS,
-            ...fakeModelOptions(fakeServer.baseUrl, helper),
+            ...fakeModelOptions(fakeServer.baseUrl),
             cwd: testDir,
             permissionMode: 'yolo',
             // Block multiple tools
@@ -423,27 +411,31 @@ describe('Tool Control Parameters (E2E)', () => {
     it(
       'should block all shell commands when run_shell_command is excluded',
       async () => {
-        const fakeServer = await startSingleTurnToolServer(
-          'Run "echo hello" and "ls -la" commands.',
-          [
-            fakeToolCall(
-              'run_shell_command',
-              { command: 'echo hello' },
-              'shell-echo',
-            ),
-            fakeToolCall(
-              'run_shell_command',
-              { command: 'ls -la' },
-              'shell-ls',
-            ),
-          ],
-        );
+        const fakeServer = await startFakeOpenAIServer(({ requestIndex }) => {
+          if (requestIndex === 0) {
+            return {
+              toolCalls: [
+                fakeToolCall(
+                  'run_shell_command',
+                  { command: 'echo hello' },
+                  'shell-echo',
+                ),
+                fakeToolCall(
+                  'run_shell_command',
+                  { command: 'ls -la' },
+                  'shell-ls',
+                ),
+              ],
+            };
+          }
+          return { content: 'Done.' };
+        }, FAKE_SERVER_OPTIONS);
 
         const q = query({
           prompt: 'Run "echo hello" and "ls -la" commands.',
           options: {
             ...SHARED_TEST_OPTIONS,
-            ...fakeModelOptions(fakeServer.baseUrl, helper),
+            ...fakeModelOptions(fakeServer.baseUrl),
             cwd: testDir,
             permissionMode: 'yolo',
             // Block all shell commands - excludeTools blocks entire tools
@@ -479,26 +471,30 @@ describe('Tool Control Parameters (E2E)', () => {
       async () => {
         await helper.createFile('test.txt', 'test content');
 
-        const fakeServer = await startSingleTurnToolServer(
-          'Clear the content of test.txt by writing empty string to it.',
-          [
-            fakeToolCall(
-              'write_file',
-              {
-                file_path: helper.getPath('test.txt'),
-                content: '',
-              },
-              'write-test',
-            ),
-          ],
-        );
+        const fakeServer = await startFakeOpenAIServer(({ requestIndex }) => {
+          if (requestIndex === 0) {
+            return {
+              toolCalls: [
+                fakeToolCall(
+                  'write_file',
+                  {
+                    file_path: helper.getPath('test.txt'),
+                    content: '',
+                  },
+                  'write-test',
+                ),
+              ],
+            };
+          }
+          return { content: 'Done.' };
+        }, FAKE_SERVER_OPTIONS);
 
         const q = query({
           prompt:
             'Clear the content of test.txt by writing empty string to it.',
           options: {
             ...SHARED_TEST_OPTIONS,
-            ...fakeModelOptions(fakeServer.baseUrl, helper),
+            ...fakeModelOptions(fakeServer.baseUrl),
             cwd: testDir,
             permissionMode: 'default',
             // Conflicting settings: exclude takes priority
@@ -543,27 +539,32 @@ describe('Tool Control Parameters (E2E)', () => {
         await helper.createFile('.env', 'SECRET=password');
         await helper.createFile('data.txt', 'public data');
 
-        const fakeServer = await startSingleTurnToolServer(
-          'Read .env and data.txt.',
-          [
-            fakeToolCall(
-              'read_file',
-              { file_path: helper.getPath('.env') },
-              'read-env',
-            ),
-            fakeToolCall(
-              'read_file',
-              { file_path: helper.getPath('data.txt') },
-              'read-data',
-            ),
-          ],
-        );
+        const fakeServer = await startFakeOpenAIServer(({ requestIndex }) => {
+          if (requestIndex === 0) {
+            return {
+              toolCalls: [
+                fakeToolCall(
+                  'read_file',
+                  { file_path: helper.getPath('.env') },
+                  'read-env',
+                ),
+                fakeToolCall(
+                  'read_file',
+                  { file_path: helper.getPath('data.txt') },
+                  'read-data',
+                ),
+              ],
+            };
+          }
+
+          return { content: 'Done.' };
+        }, FAKE_SERVER_OPTIONS);
 
         const q = query({
           prompt: 'Read .env and data.txt.',
           options: {
             ...SHARED_TEST_OPTIONS,
-            ...fakeModelOptions(fakeServer.baseUrl, helper),
+            ...fakeModelOptions(fakeServer.baseUrl),
             cwd: testDir,
             permissionMode: 'yolo',
             // Block reading .env files
@@ -668,7 +669,7 @@ describe('Tool Control Parameters (E2E)', () => {
           prompt: 'Use the edit tool to modify src/app.ts and readme.md.',
           options: {
             ...SHARED_TEST_OPTIONS,
-            ...fakeModelOptions(fakeServer.baseUrl, helper),
+            ...fakeModelOptions(fakeServer.baseUrl),
             cwd: testDir,
             permissionMode: 'yolo',
             coreTools: ['read_file', 'edit', 'list_directory'],
@@ -711,28 +712,36 @@ describe('Tool Control Parameters (E2E)', () => {
     it(
       'should block specific shell commands with prefix pattern',
       async () => {
-        const fakeServer = await startSingleTurnToolServer(
-          'Run "echo hello", "rm file.txt", and "ls" commands.',
-          [
-            fakeToolCall(
-              'run_shell_command',
-              { command: 'echo hello' },
-              'shell-echo',
-            ),
-            fakeToolCall(
-              'run_shell_command',
-              { command: 'rm file.txt' },
-              'shell-rm',
-            ),
-            fakeToolCall('run_shell_command', { command: 'ls' }, 'shell-ls'),
-          ],
-        );
+        const fakeServer = await startFakeOpenAIServer(({ requestIndex }) => {
+          if (requestIndex === 0) {
+            return {
+              toolCalls: [
+                fakeToolCall(
+                  'run_shell_command',
+                  { command: 'echo hello' },
+                  'shell-echo',
+                ),
+                fakeToolCall(
+                  'run_shell_command',
+                  { command: 'rm file.txt' },
+                  'shell-rm',
+                ),
+                fakeToolCall(
+                  'run_shell_command',
+                  { command: 'ls' },
+                  'shell-ls',
+                ),
+              ],
+            };
+          }
+          return { content: 'Done.' };
+        }, FAKE_SERVER_OPTIONS);
 
         const q = query({
           prompt: 'Run "echo hello", "rm file.txt", and "ls" commands.',
           options: {
             ...SHARED_TEST_OPTIONS,
-            ...fakeModelOptions(fakeServer.baseUrl, helper),
+            ...fakeModelOptions(fakeServer.baseUrl),
             cwd: testDir,
             permissionMode: 'yolo',
             // Block all rm commands
@@ -779,30 +788,34 @@ describe('Tool Control Parameters (E2E)', () => {
 
         let canUseToolCalled = false;
 
-        const fakeServer = await startSingleTurnToolServer(
-          'Read test.txt and write "modified" to it.',
-          [
-            fakeToolCall(
-              'read_file',
-              { file_path: helper.getPath('test.txt') },
-              'read-test',
-            ),
-            fakeToolCall(
-              'write_file',
-              {
-                file_path: helper.getPath('test.txt'),
-                content: 'modified',
-              },
-              'write-test',
-            ),
-          ],
-        );
+        const fakeServer = await startFakeOpenAIServer(({ requestIndex }) => {
+          if (requestIndex === 0) {
+            return {
+              toolCalls: [
+                fakeToolCall(
+                  'read_file',
+                  { file_path: helper.getPath('test.txt') },
+                  'read-test',
+                ),
+                fakeToolCall(
+                  'write_file',
+                  {
+                    file_path: helper.getPath('test.txt'),
+                    content: 'modified',
+                  },
+                  'write-test',
+                ),
+              ],
+            };
+          }
+          return { content: 'Done.' };
+        }, FAKE_SERVER_OPTIONS);
 
         const q = query({
           prompt: 'Read test.txt and write "modified" to it.',
           options: {
             ...SHARED_TEST_OPTIONS,
-            ...fakeModelOptions(fakeServer.baseUrl, helper),
+            ...fakeModelOptions(fakeServer.baseUrl),
             cwd: testDir,
             permissionMode: 'default',
             coreTools: ['read_file', 'write_file'],
@@ -848,27 +861,31 @@ describe('Tool Control Parameters (E2E)', () => {
     it(
       'should allow specific shell commands with pattern matching',
       async () => {
-        const fakeServer = await startSingleTurnToolServer(
-          'Run "touch allowed.txt" and "mkdir allowed-dir" commands.',
-          [
-            fakeToolCall(
-              'run_shell_command',
-              { command: 'touch allowed.txt' },
-              'shell-touch',
-            ),
-            fakeToolCall(
-              'run_shell_command',
-              { command: 'mkdir allowed-dir' },
-              'shell-mkdir',
-            ),
-          ],
-        );
+        const fakeServer = await startFakeOpenAIServer(({ requestIndex }) => {
+          if (requestIndex === 0) {
+            return {
+              toolCalls: [
+                fakeToolCall(
+                  'run_shell_command',
+                  { command: 'touch allowed.txt' },
+                  'shell-touch',
+                ),
+                fakeToolCall(
+                  'run_shell_command',
+                  { command: 'mkdir allowed-dir' },
+                  'shell-mkdir',
+                ),
+              ],
+            };
+          }
+          return { content: 'Done.' };
+        }, FAKE_SERVER_OPTIONS);
 
         const q = query({
           prompt: 'Run "touch allowed.txt" and "mkdir allowed-dir" commands.',
           options: {
             ...SHARED_TEST_OPTIONS,
-            ...fakeModelOptions(fakeServer.baseUrl, helper),
+            ...fakeModelOptions(fakeServer.baseUrl),
             cwd: testDir,
             permissionMode: 'default',
             // Allow specific shell commands
@@ -907,30 +924,34 @@ describe('Tool Control Parameters (E2E)', () => {
 
         const canUseToolCalls: string[] = [];
 
-        const fakeServer = await startSingleTurnToolServer(
-          'Read test.txt and append an empty line to it.',
-          [
-            fakeToolCall(
-              'read_file',
-              { file_path: helper.getPath('test.txt') },
-              'read-test',
-            ),
-            fakeToolCall(
-              'write_file',
-              {
-                file_path: helper.getPath('test.txt'),
-                content: 'test\n',
-              },
-              'write-test',
-            ),
-          ],
-        );
+        const fakeServer = await startFakeOpenAIServer(({ requestIndex }) => {
+          if (requestIndex === 0) {
+            return {
+              toolCalls: [
+                fakeToolCall(
+                  'read_file',
+                  { file_path: helper.getPath('test.txt') },
+                  'read-test',
+                ),
+                fakeToolCall(
+                  'write_file',
+                  {
+                    file_path: helper.getPath('test.txt'),
+                    content: 'test\n',
+                  },
+                  'write-test',
+                ),
+              ],
+            };
+          }
+          return { content: 'Done.' };
+        }, FAKE_SERVER_OPTIONS);
 
         const q = query({
           prompt: 'Read test.txt and append an empty line to it.',
           options: {
             ...SHARED_TEST_OPTIONS,
-            ...fakeModelOptions(fakeServer.baseUrl, helper),
+            ...fakeModelOptions(fakeServer.baseUrl),
             cwd: testDir,
             permissionMode: 'default',
             // Only allow read_file, list_directory should trigger canUseTool
@@ -980,31 +1001,35 @@ describe('Tool Control Parameters (E2E)', () => {
 
         const canUseToolCalls: string[] = [];
 
-        const fakeServer = await startSingleTurnToolServer(
-          'Read test.txt, write "new" to it, and list the directory.',
-          [
-            fakeToolCall(
-              'read_file',
-              { file_path: helper.getPath('test.txt') },
-              'read-test',
-            ),
-            fakeToolCall(
-              'write_file',
-              {
-                file_path: helper.getPath('test.txt'),
-                content: 'new',
-              },
-              'write-test',
-            ),
-            fakeToolCall('list_directory', { path: testDir }, 'list-dir'),
-          ],
-        );
+        const fakeServer = await startFakeOpenAIServer(({ requestIndex }) => {
+          if (requestIndex === 0) {
+            return {
+              toolCalls: [
+                fakeToolCall(
+                  'read_file',
+                  { file_path: helper.getPath('test.txt') },
+                  'read-test',
+                ),
+                fakeToolCall(
+                  'write_file',
+                  {
+                    file_path: helper.getPath('test.txt'),
+                    content: 'new',
+                  },
+                  'write-test',
+                ),
+                fakeToolCall('list_directory', { path: testDir }, 'list-dir'),
+              ],
+            };
+          }
+          return { content: 'Done.' };
+        }, FAKE_SERVER_OPTIONS);
 
         const q = query({
           prompt: 'Read test.txt, write "new" to it, and list the directory.',
           options: {
             ...SHARED_TEST_OPTIONS,
-            ...fakeModelOptions(fakeServer.baseUrl, helper),
+            ...fakeModelOptions(fakeServer.baseUrl),
             cwd: testDir,
             permissionMode: 'auto-edit',
             // Allow list_directory in addition to auto-approved edit tools
@@ -1050,33 +1075,37 @@ describe('Tool Control Parameters (E2E)', () => {
       'should auto-approve specific path patterns with allowedTools',
       async () => {
         const canUseToolCalls: string[] = [];
-        const fakeServer = await startSingleTurnToolServer(
-          'Write config.json and .env files.',
-          [
-            fakeToolCall(
-              'write_file',
-              {
-                file_path: helper.getPath('config.json'),
-                content: '{"key": "value"}',
-              },
-              'write-json',
-            ),
-            fakeToolCall(
-              'write_file',
-              {
-                file_path: helper.getPath('.env'),
-                content: 'SECRET=secret',
-              },
-              'write-env',
-            ),
-          ],
-        );
+        const fakeServer = await startFakeOpenAIServer(({ requestIndex }) => {
+          if (requestIndex === 0) {
+            return {
+              toolCalls: [
+                fakeToolCall(
+                  'write_file',
+                  {
+                    file_path: helper.getPath('config.json'),
+                    content: '{"key": "value"}',
+                  },
+                  'write-json',
+                ),
+                fakeToolCall(
+                  'write_file',
+                  {
+                    file_path: helper.getPath('.env'),
+                    content: 'SECRET=secret',
+                  },
+                  'write-env',
+                ),
+              ],
+            };
+          }
+          return { content: 'Done.' };
+        }, FAKE_SERVER_OPTIONS);
 
         const q = query({
           prompt: 'Write config.json and .env files.',
           options: {
             ...SHARED_TEST_OPTIONS,
-            ...fakeModelOptions(fakeServer.baseUrl, helper),
+            ...fakeModelOptions(fakeServer.baseUrl),
             cwd: testDir,
             permissionMode: 'default',
             allowedTools: ['Edit(*.json)'],
@@ -1124,27 +1153,31 @@ describe('Tool Control Parameters (E2E)', () => {
       'should auto-approve specific shell commands with pattern matching',
       async () => {
         const canUseToolCalls: string[] = [];
-        const fakeServer = await startSingleTurnToolServer(
-          'Run "touch allowed.txt" and "rm blocked.txt" commands.',
-          [
-            fakeToolCall(
-              'run_shell_command',
-              { command: 'touch allowed.txt' },
-              'shell-touch-allowed',
-            ),
-            fakeToolCall(
-              'run_shell_command',
-              { command: 'rm blocked.txt' },
-              'shell-rm',
-            ),
-          ],
-        );
+        const fakeServer = await startFakeOpenAIServer(({ requestIndex }) => {
+          if (requestIndex === 0) {
+            return {
+              toolCalls: [
+                fakeToolCall(
+                  'run_shell_command',
+                  { command: 'touch allowed.txt' },
+                  'shell-touch-allowed',
+                ),
+                fakeToolCall(
+                  'run_shell_command',
+                  { command: 'rm blocked.txt' },
+                  'shell-rm',
+                ),
+              ],
+            };
+          }
+          return { content: 'Done.' };
+        }, FAKE_SERVER_OPTIONS);
 
         const q = query({
           prompt: 'Run "touch allowed.txt" and "rm blocked.txt" commands.',
           options: {
             ...SHARED_TEST_OPTIONS,
-            ...fakeModelOptions(fakeServer.baseUrl, helper),
+            ...fakeModelOptions(fakeServer.baseUrl),
             cwd: testDir,
             permissionMode: 'default',
             // Auto-approve touch commands
@@ -1195,35 +1228,39 @@ describe('Tool Control Parameters (E2E)', () => {
       async () => {
         await helper.createFile('test.txt', 'test');
 
-        const fakeServer = await startSingleTurnToolServer(
-          'Read test.txt and write "modified" to it.',
-          [
-            fakeToolCall(
-              'read_file',
-              { file_path: helper.getPath('test.txt') },
-              'read-test',
-            ),
-            fakeToolCall(
-              'write_file',
-              {
-                file_path: helper.getPath('test.txt'),
-                content: 'modified',
-              },
-              'write-test',
-            ),
-            fakeToolCall(
-              'run_shell_command',
-              { command: 'echo hello' },
-              'shell-test',
-            ),
-          ],
-        );
+        const fakeServer = await startFakeOpenAIServer(({ requestIndex }) => {
+          if (requestIndex === 0) {
+            return {
+              toolCalls: [
+                fakeToolCall(
+                  'read_file',
+                  { file_path: helper.getPath('test.txt') },
+                  'read-test',
+                ),
+                fakeToolCall(
+                  'write_file',
+                  {
+                    file_path: helper.getPath('test.txt'),
+                    content: 'modified',
+                  },
+                  'write-test',
+                ),
+                fakeToolCall(
+                  'run_shell_command',
+                  { command: 'echo hello' },
+                  'shell-test',
+                ),
+              ],
+            };
+          }
+          return { content: 'Done.' };
+        }, FAKE_SERVER_OPTIONS);
 
         const q = query({
           prompt: 'Read test.txt and write "modified" to it.',
           options: {
             ...SHARED_TEST_OPTIONS,
-            ...fakeModelOptions(fakeServer.baseUrl, helper),
+            ...fakeModelOptions(fakeServer.baseUrl),
             cwd: testDir,
             permissionMode: 'default',
             // Limit to specific tools
@@ -1278,33 +1315,37 @@ describe('Tool Control Parameters (E2E)', () => {
       async () => {
         await helper.createFile('test.txt', 'test');
 
-        const fakeServer = await startSingleTurnToolServer(
-          'Read test.txt, write "new content" to it, and list directory.',
-          [
-            fakeToolCall(
-              'read_file',
-              { file_path: helper.getPath('test.txt') },
-              'read-test',
-            ),
-            fakeToolCall('list_directory', { path: testDir }, 'list-dir'),
-            fakeToolCall(
-              'edit',
-              {
-                file_path: helper.getPath('test.txt'),
-                old_string: 'test',
-                new_string: 'modified',
-              },
-              'edit-test',
-            ),
-          ],
-        );
+        const fakeServer = await startFakeOpenAIServer(({ requestIndex }) => {
+          if (requestIndex === 0) {
+            return {
+              toolCalls: [
+                fakeToolCall(
+                  'read_file',
+                  { file_path: helper.getPath('test.txt') },
+                  'read-test',
+                ),
+                fakeToolCall('list_directory', { path: testDir }, 'list-dir'),
+                fakeToolCall(
+                  'edit',
+                  {
+                    file_path: helper.getPath('test.txt'),
+                    old_string: 'test',
+                    new_string: 'modified',
+                  },
+                  'edit-test',
+                ),
+              ],
+            };
+          }
+          return { content: 'Done.' };
+        }, FAKE_SERVER_OPTIONS);
 
         const q = query({
           prompt:
             'Read test.txt, write "new content" to it, and list directory.',
           options: {
             ...SHARED_TEST_OPTIONS,
-            ...fakeModelOptions(fakeServer.baseUrl, helper),
+            ...fakeModelOptions(fakeServer.baseUrl),
             cwd: testDir,
             permissionMode: 'yolo',
             // Allow file operations
@@ -1358,40 +1399,44 @@ describe('Tool Control Parameters (E2E)', () => {
 
         const canUseToolCalls: string[] = [];
 
-        const fakeServer = await startSingleTurnToolServer(
-          'Read test.txt, write "modified" to it, and list the directory.',
-          [
-            fakeToolCall(
-              'read_file',
-              { file_path: helper.getPath('test.txt') },
-              'read-test',
-            ),
-            fakeToolCall(
-              'write_file',
-              {
-                file_path: helper.getPath('test.txt'),
-                content: 'modified',
-              },
-              'write-test',
-            ),
-            fakeToolCall(
-              'edit',
-              {
-                file_path: helper.getPath('test.txt'),
-                old_string: 'test',
-                new_string: 'modified',
-              },
-              'edit-test',
-            ),
-          ],
-        );
+        const fakeServer = await startFakeOpenAIServer(({ requestIndex }) => {
+          if (requestIndex === 0) {
+            return {
+              toolCalls: [
+                fakeToolCall(
+                  'read_file',
+                  { file_path: helper.getPath('test.txt') },
+                  'read-test',
+                ),
+                fakeToolCall(
+                  'write_file',
+                  {
+                    file_path: helper.getPath('test.txt'),
+                    content: 'modified',
+                  },
+                  'write-test',
+                ),
+                fakeToolCall(
+                  'edit',
+                  {
+                    file_path: helper.getPath('test.txt'),
+                    old_string: 'test',
+                    new_string: 'modified',
+                  },
+                  'edit-test',
+                ),
+              ],
+            };
+          }
+          return { content: 'Done.' };
+        }, FAKE_SERVER_OPTIONS);
 
         const q = query({
           prompt:
             'Read test.txt, write "modified" to it, and list the directory.',
           options: {
             ...SHARED_TEST_OPTIONS,
-            ...fakeModelOptions(fakeServer.baseUrl, helper),
+            ...fakeModelOptions(fakeServer.baseUrl),
             cwd: testDir,
             permissionMode: 'default',
             // Limit available tools
@@ -1460,19 +1505,26 @@ describe('Tool Control Parameters (E2E)', () => {
       async () => {
         await helper.createFile('test.txt', 'test');
 
-        const fakeServer = await startSingleTurnToolServer('Read test.txt.', [
-          fakeToolCall(
-            'read_file',
-            { file_path: helper.getPath('test.txt') },
-            'read-test',
-          ),
-        ]);
+        const fakeServer = await startFakeOpenAIServer(({ requestIndex }) => {
+          if (requestIndex === 0) {
+            return {
+              toolCalls: [
+                fakeToolCall(
+                  'read_file',
+                  { file_path: helper.getPath('test.txt') },
+                  'read-test',
+                ),
+              ],
+            };
+          }
+          return { content: 'Done.' };
+        }, FAKE_SERVER_OPTIONS);
 
         const q = query({
           prompt: 'Read test.txt.',
           options: {
             ...SHARED_TEST_OPTIONS,
-            ...fakeModelOptions(fakeServer.baseUrl, helper),
+            ...fakeModelOptions(fakeServer.baseUrl),
             cwd: testDir,
             permissionMode: 'yolo',
             // Non-existent tool names should be ignored
@@ -1506,19 +1558,26 @@ describe('Tool Control Parameters (E2E)', () => {
       async () => {
         await helper.createFile('test.txt', 'test');
 
-        const fakeServer = await startSingleTurnToolServer('Read test.txt.', [
-          fakeToolCall(
-            'read_file',
-            { file_path: helper.getPath('test.txt') },
-            'read-test',
-          ),
-        ]);
+        const fakeServer = await startFakeOpenAIServer(({ requestIndex }) => {
+          if (requestIndex === 0) {
+            return {
+              toolCalls: [
+                fakeToolCall(
+                  'read_file',
+                  { file_path: helper.getPath('test.txt') },
+                  'read-test',
+                ),
+              ],
+            };
+          }
+          return { content: 'Done.' };
+        }, FAKE_SERVER_OPTIONS);
 
         const q = query({
           prompt: 'Read test.txt.',
           options: {
             ...SHARED_TEST_OPTIONS,
-            ...fakeModelOptions(fakeServer.baseUrl, helper),
+            ...fakeModelOptions(fakeServer.baseUrl),
             cwd: testDir,
             permissionMode: 'yolo',
             // Non-existent tool names should be ignored
@@ -1555,21 +1614,25 @@ describe('Tool Control Parameters (E2E)', () => {
         await helper.createFile('test.txt', 'original');
 
         const canUseToolCalls: string[] = [];
-        const fakeServer = await startSingleTurnToolServer(
-          'Read test.txt and write "modified" to it.',
-          [
-            fakeToolCall('read_file', {
-              file_path: helper.getPath('test.txt'),
-            }),
-          ],
-          { content: 'Plan: leave the file unchanged.' },
-        );
+        const fakeServer = await startFakeOpenAIServer(({ requestIndex }) => {
+          if (requestIndex === 0) {
+            return {
+              toolCalls: [
+                fakeToolCall('read_file', {
+                  file_path: helper.getPath('test.txt'),
+                }),
+              ],
+            };
+          }
+
+          return { content: 'Plan: leave the file unchanged.' };
+        }, FAKE_SERVER_OPTIONS);
 
         const q = query({
           prompt: 'Read test.txt and write "modified" to it.',
           options: {
             ...SHARED_TEST_OPTIONS,
-            ...fakeModelOptions(fakeServer.baseUrl, helper),
+            ...fakeModelOptions(fakeServer.baseUrl),
             cwd: testDir,
             permissionMode: 'plan',
             // allowedTools should be overridden by plan mode
@@ -1621,27 +1684,31 @@ describe('Tool Control Parameters (E2E)', () => {
       async () => {
         await helper.createFile('test.txt', 'original');
 
-        const fakeServer = await startSingleTurnToolServer(
-          'Read test.txt and run "echo hello" command.',
-          [
-            fakeToolCall(
-              'read_file',
-              { file_path: helper.getPath('test.txt') },
-              'read-test',
-            ),
-            fakeToolCall(
-              'run_shell_command',
-              { command: 'echo hello' },
-              'shell-echo',
-            ),
-          ],
-        );
+        const fakeServer = await startFakeOpenAIServer(({ requestIndex }) => {
+          if (requestIndex === 0) {
+            return {
+              toolCalls: [
+                fakeToolCall(
+                  'read_file',
+                  { file_path: helper.getPath('test.txt') },
+                  'read-test',
+                ),
+                fakeToolCall(
+                  'run_shell_command',
+                  { command: 'echo hello' },
+                  'shell-echo',
+                ),
+              ],
+            };
+          }
+          return { content: 'Done.' };
+        }, FAKE_SERVER_OPTIONS);
 
         const q = query({
           prompt: 'Read test.txt and run "echo hello" command.',
           options: {
             ...SHARED_TEST_OPTIONS,
-            ...fakeModelOptions(fakeServer.baseUrl, helper),
+            ...fakeModelOptions(fakeServer.baseUrl),
             cwd: testDir,
             permissionMode: 'yolo',
             // Even in yolo mode, excludeTools should block tools
@@ -1689,26 +1756,30 @@ describe('Tool Control Parameters (E2E)', () => {
         const scenarioDir = await helper.mkdir(scenarioDirName);
         let capturedInput: Record<string, unknown> = {};
 
-        const fakeServer = await startSingleTurnToolServer(
-          'Create a new file named test.txt with exactly this content: new content. Use the write_file tool.',
-          [
-            fakeToolCall(
-              'write_file',
-              {
-                file_path: helper.getPath(scenarioDirName + '/test.txt'),
-                content: 'new content',
-              },
-              'write-test',
-            ),
-          ],
-        );
+        const fakeServer = await startFakeOpenAIServer(({ requestIndex }) => {
+          if (requestIndex === 0) {
+            return {
+              toolCalls: [
+                fakeToolCall(
+                  'write_file',
+                  {
+                    file_path: helper.getPath(scenarioDirName + '/test.txt'),
+                    content: 'new content',
+                  },
+                  'write-test',
+                ),
+              ],
+            };
+          }
+          return { content: 'Done.' };
+        }, FAKE_SERVER_OPTIONS);
 
         const q = query({
           prompt:
             'Create a new file named test.txt with exactly this content: new content. Use the write_file tool.',
           options: {
             ...SHARED_TEST_OPTIONS,
-            ...fakeModelOptions(fakeServer.baseUrl, helper),
+            ...fakeModelOptions(fakeServer.baseUrl),
             cwd: scenarioDir,
             permissionMode: 'default',
             coreTools: ['write_file'],
@@ -1756,26 +1827,30 @@ describe('Tool Control Parameters (E2E)', () => {
         const scenarioDir = await helper.mkdir(scenarioDirName);
         let canUseToolCalled = false;
 
-        const fakeServer = await startSingleTurnToolServer(
-          'Create a new file named test.txt with exactly this content: modified. Use the write_file tool.',
-          [
-            fakeToolCall(
-              'write_file',
-              {
-                file_path: helper.getPath(scenarioDirName + '/test.txt'),
-                content: 'modified',
-              },
-              'write-test',
-            ),
-          ],
-        );
+        const fakeServer = await startFakeOpenAIServer(({ requestIndex }) => {
+          if (requestIndex === 0) {
+            return {
+              toolCalls: [
+                fakeToolCall(
+                  'write_file',
+                  {
+                    file_path: helper.getPath(scenarioDirName + '/test.txt'),
+                    content: 'modified',
+                  },
+                  'write-test',
+                ),
+              ],
+            };
+          }
+          return { content: 'Done.' };
+        }, FAKE_SERVER_OPTIONS);
 
         const q = query({
           prompt:
             'Create a new file named test.txt with exactly this content: modified. Use the write_file tool.',
           options: {
             ...SHARED_TEST_OPTIONS,
-            ...fakeModelOptions(fakeServer.baseUrl, helper),
+            ...fakeModelOptions(fakeServer.baseUrl),
             cwd: scenarioDir,
             permissionMode: 'default',
             coreTools: ['write_file'],
@@ -1820,27 +1895,31 @@ describe('Tool Control Parameters (E2E)', () => {
       async () => {
         await helper.createFile('test.txt', 'original');
 
-        const fakeServer = await startSingleTurnToolServer(
-          'Edit test.txt and list the directory.',
-          [
-            fakeToolCall(
-              'edit',
-              {
-                file_path: helper.getPath('test.txt'),
-                old_string: 'original',
-                new_string: 'edited',
-              },
-              'edit-test',
-            ),
-            fakeToolCall('list_directory', { path: testDir }, 'list-dir'),
-          ],
-        );
+        const fakeServer = await startFakeOpenAIServer(({ requestIndex }) => {
+          if (requestIndex === 0) {
+            return {
+              toolCalls: [
+                fakeToolCall(
+                  'edit',
+                  {
+                    file_path: helper.getPath('test.txt'),
+                    old_string: 'original',
+                    new_string: 'edited',
+                  },
+                  'edit-test',
+                ),
+                fakeToolCall('list_directory', { path: testDir }, 'list-dir'),
+              ],
+            };
+          }
+          return { content: 'Done.' };
+        }, FAKE_SERVER_OPTIONS);
 
         const q = query({
           prompt: 'Edit test.txt and list the directory.',
           options: {
             ...SHARED_TEST_OPTIONS,
-            ...fakeModelOptions(fakeServer.baseUrl, helper),
+            ...fakeModelOptions(fakeServer.baseUrl),
             cwd: testDir,
             permissionMode: 'yolo',
             // edit is in coreTools but also in excludeTools
@@ -1876,30 +1955,34 @@ describe('Tool Control Parameters (E2E)', () => {
         await helper.createFile('test.txt', 'original');
         await helper.createFile('other.txt', 'other content');
 
-        const fakeServer = await startSingleTurnToolServer(
-          'Read test.txt and write "modified" to test.txt.',
-          [
-            fakeToolCall(
-              'read_file',
-              { file_path: helper.getPath('test.txt') },
-              'read-test',
-            ),
-            fakeToolCall(
-              'write_file',
-              {
-                file_path: helper.getPath('test.txt'),
-                content: 'modified',
-              },
-              'write-test',
-            ),
-          ],
-        );
+        const fakeServer = await startFakeOpenAIServer(({ requestIndex }) => {
+          if (requestIndex === 0) {
+            return {
+              toolCalls: [
+                fakeToolCall(
+                  'read_file',
+                  { file_path: helper.getPath('test.txt') },
+                  'read-test',
+                ),
+                fakeToolCall(
+                  'write_file',
+                  {
+                    file_path: helper.getPath('test.txt'),
+                    content: 'modified',
+                  },
+                  'write-test',
+                ),
+              ],
+            };
+          }
+          return { content: 'Done.' };
+        }, FAKE_SERVER_OPTIONS);
 
         const q = query({
           prompt: 'Read test.txt and write "modified" to test.txt.',
           options: {
             ...SHARED_TEST_OPTIONS,
-            ...fakeModelOptions(fakeServer.baseUrl, helper),
+            ...fakeModelOptions(fakeServer.baseUrl),
             cwd: testDir,
             permissionMode: 'yolo',
             // write_file is in allowedTools but NOT in coreTools
@@ -1938,27 +2021,31 @@ describe('Tool Control Parameters (E2E)', () => {
         await helper.createFile('a.txt', 'content a');
         await helper.createFile('b.txt', 'content b');
 
-        const fakeServer = await startSingleTurnToolServer(
-          'Read both a.txt and b.txt files.',
-          [
-            fakeToolCall(
-              'read_file',
-              { file_path: helper.getPath('a.txt') },
-              'read-a',
-            ),
-            fakeToolCall(
-              'read_file',
-              { file_path: helper.getPath('b.txt') },
-              'read-b',
-            ),
-          ],
-        );
+        const fakeServer = await startFakeOpenAIServer(({ requestIndex }) => {
+          if (requestIndex === 0) {
+            return {
+              toolCalls: [
+                fakeToolCall(
+                  'read_file',
+                  { file_path: helper.getPath('a.txt') },
+                  'read-a',
+                ),
+                fakeToolCall(
+                  'read_file',
+                  { file_path: helper.getPath('b.txt') },
+                  'read-b',
+                ),
+              ],
+            };
+          }
+          return { content: 'Done.' };
+        }, FAKE_SERVER_OPTIONS);
 
         const q = query({
           prompt: 'Read both a.txt and b.txt files.',
           options: {
             ...SHARED_TEST_OPTIONS,
-            ...fakeModelOptions(fakeServer.baseUrl, helper),
+            ...fakeModelOptions(fakeServer.baseUrl),
             cwd: testDir,
             permissionMode: 'yolo',
             // coreTools is the whitelist - only these tools can be used
@@ -2006,48 +2093,36 @@ describe('Tool Control Parameters (E2E)', () => {
           input: Record<string, unknown>;
         }> = [];
 
-        let servedReadStep = false;
-        let servedWriteStep = false;
+        let streamingRequestIndex = 0;
         const fakeServer = await startFakeOpenAIServer(({ body }) => {
           if (body['stream'] !== true) {
             return { content: '{"selected_memories":[]}' };
           }
-          // Serve read then write on the streaming requests whose user
-          // messages contain the prompt (prompt matching, not request index,
-          // so non-turn requests cannot desync the sequence).
-          if (
-            userMessageContains(
-              body,
-              'Read test.txt and then write "updated" to it.',
-            )
-          ) {
-            if (!servedReadStep) {
-              servedReadStep = true;
-              return {
-                toolCalls: [
-                  fakeToolCall(
-                    'read_file',
-                    { file_path: helper.getPath('test.txt') },
-                    'read-test',
-                  ),
-                ],
-              };
-            }
-            if (!servedWriteStep) {
-              servedWriteStep = true;
-              return {
-                toolCalls: [
-                  fakeToolCall(
-                    'write_file',
-                    {
-                      file_path: helper.getPath('test.txt'),
-                      content: 'updated',
-                    },
-                    'write-test',
-                  ),
-                ],
-              };
-            }
+          const requestIndex = streamingRequestIndex++;
+          if (requestIndex === 0) {
+            return {
+              toolCalls: [
+                fakeToolCall(
+                  'read_file',
+                  { file_path: helper.getPath('test.txt') },
+                  'read-test',
+                ),
+              ],
+            };
+          }
+          if (requestIndex === 1) {
+            return {
+              toolCalls: [
+                fakeToolCall(
+                  'write_file',
+                  {
+                    file_path: helper.getPath('test.txt'),
+                    content: 'updated',
+                  },
+                  'write-test',
+                ),
+              ],
+            };
           }
           return { content: 'Done.' };
         }, FAKE_SERVER_OPTIONS);
@@ -2071,7 +2146,7 @@ describe('Tool Control Parameters (E2E)', () => {
           prompt: createPrompt(),
           options: {
             ...SHARED_TEST_OPTIONS,
-            ...fakeModelOptions(fakeServer.baseUrl, helper),
+            ...fakeModelOptions(fakeServer.baseUrl),
             cwd: testDir,
             permissionMode: 'default',
             coreTools: ['read_file', 'write_file'],
@@ -2143,48 +2218,36 @@ describe('Tool Control Parameters (E2E)', () => {
 
         const resultWaiter = createResultWaiter(1);
 
-        let servedReadStep = false;
-        let servedWriteStep = false;
+        let streamingRequestIndex = 0;
         const fakeServer = await startFakeOpenAIServer(({ body }) => {
           if (body['stream'] !== true) {
             return { content: '{"selected_memories":[]}' };
           }
-          // Serve read then write on the streaming requests whose user
-          // messages contain the prompt (prompt matching, not request index,
-          // so non-turn requests cannot desync the sequence).
-          if (
-            userMessageContains(
-              body,
-              'Read test.txt and then write "modified" to it.',
-            )
-          ) {
-            if (!servedReadStep) {
-              servedReadStep = true;
-              return {
-                toolCalls: [
-                  fakeToolCall(
-                    'read_file',
-                    { file_path: helper.getPath('test.txt') },
-                    'read-test',
-                  ),
-                ],
-              };
-            }
-            if (!servedWriteStep) {
-              servedWriteStep = true;
-              return {
-                toolCalls: [
-                  fakeToolCall(
-                    'write_file',
-                    {
-                      file_path: helper.getPath('test.txt'),
-                      content: 'modified',
-                    },
-                    'write-test',
-                  ),
-                ],
-              };
-            }
+          const requestIndex = streamingRequestIndex++;
+          if (requestIndex === 0) {
+            return {
+              toolCalls: [
+                fakeToolCall(
+                  'read_file',
+                  { file_path: helper.getPath('test.txt') },
+                  'read-test',
+                ),
+              ],
+            };
+          }
+          if (requestIndex === 1) {
+            return {
+              toolCalls: [
+                fakeToolCall(
+                  'write_file',
+                  {
+                    file_path: helper.getPath('test.txt'),
+                    content: 'modified',
+                  },
+                  'write-test',
+                ),
+              ],
+            };
           }
           return { content: 'Done.' };
         }, FAKE_SERVER_OPTIONS);
@@ -2210,7 +2273,7 @@ describe('Tool Control Parameters (E2E)', () => {
           prompt: createPrompt(),
           options: {
             ...SHARED_TEST_OPTIONS,
-            ...fakeModelOptions(fakeServer.baseUrl, helper),
+            ...fakeModelOptions(fakeServer.baseUrl),
             cwd: testDir,
             permissionMode: 'default',
             coreTools: ['read_file', 'write_file'],
@@ -2345,7 +2408,7 @@ describe('Tool Control Parameters (E2E)', () => {
           prompt: createMultiTurnPrompt(),
           options: {
             ...SHARED_TEST_OPTIONS,
-            ...fakeModelOptions(fakeServer.baseUrl, helper),
+            ...fakeModelOptions(fakeServer.baseUrl),
             cwd: testDir,
             permissionMode: 'default',
             coreTools: ['read_file', 'write_file'],
@@ -2418,33 +2481,37 @@ describe('Tool Control Parameters (E2E)', () => {
       async () => {
         await helper.createFile('test.txt', INITIAL_CONTENT);
 
-        const fakeServer = await startSingleTurnToolServer(
-          'Read test.txt, then write "modified" to test.txt.',
-          [
-            fakeToolCall(
-              'read_file',
-              { file_path: helper.getPath('test.txt') },
-              'read-covered',
-            ),
-            // Uncovered by the allowlist — before the fix this was
-            // permission-errored ("not covered by any permissions.allow
-            // rule"), now it must run through the normal approval flow.
-            fakeToolCall(
-              'write_file',
-              {
-                file_path: helper.getPath('test.txt'),
-                content: 'modified',
-              },
-              'write-uncovered',
-            ),
-          ],
-        );
+        const fakeServer = await startFakeOpenAIServer(({ requestIndex }) => {
+          if (requestIndex === 0) {
+            return {
+              toolCalls: [
+                fakeToolCall(
+                  'read_file',
+                  { file_path: helper.getPath('test.txt') },
+                  'read-covered',
+                ),
+                // Uncovered by the allowlist — before the fix this was
+                // permission-errored ("not covered by any permissions.allow
+                // rule"), now it must run through the normal approval flow.
+                fakeToolCall(
+                  'write_file',
+                  {
+                    file_path: helper.getPath('test.txt'),
+                    content: 'modified',
+                  },
+                  'write-uncovered',
+                ),
+              ],
+            };
+          }
+          return { content: 'Done.' };
+        }, FAKE_SERVER_OPTIONS);
 
         const q = query({
           prompt: 'Read test.txt, then write "modified" to test.txt.',
           options: {
             ...SHARED_TEST_OPTIONS,
-            ...fakeModelOptions(fakeServer.baseUrl, helper),
+            ...fakeModelOptions(fakeServer.baseUrl),
             cwd: testDir,
             permissionMode: 'yolo',
             debug: false,
@@ -2489,33 +2556,21 @@ describe('Tool Control Parameters (E2E)', () => {
     it(
       'discovers and loads an uncovered tool via tool_search',
       async () => {
-        let servedDiscoverySteps = 0;
-        const fakeServer = await startFakeOpenAIServer(({ body }) => {
-          // Serve tool_search then write_file on the streaming requests whose
-          // user messages contain the prompt (prompt matching, not request
-          // index, so non-turn requests cannot desync the sequence).
-          if (
-            servedDiscoverySteps < 2 &&
-            body['stream'] === true &&
-            userMessageContains(
-              body,
-              'Find the write tool and create created.txt.',
-            )
-          ) {
-            servedDiscoverySteps += 1;
-            if (servedDiscoverySteps === 1) {
-              // The model does not see write_file in the eager request; it
-              // discovers it on demand via tool_search.
-              return {
-                toolCalls: [
-                  fakeToolCall(
-                    'tool_search',
-                    { query: 'select:write_file' },
-                    'search-write',
-                  ),
-                ],
-              };
-            }
+        const fakeServer = await startFakeOpenAIServer(({ requestIndex }) => {
+          if (requestIndex === 0) {
+            // The model does not see write_file in the eager request; it
+            // discovers it on demand via tool_search.
+            return {
+              toolCalls: [
+                fakeToolCall(
+                  'tool_search',
+                  { query: 'select:write_file' },
+                  'search-write',
+                ),
+              ],
+            };
+          }
+          if (requestIndex === 1) {
             return {
               toolCalls: [
                 fakeToolCall(
@@ -2536,7 +2591,7 @@ describe('Tool Control Parameters (E2E)', () => {
           prompt: 'Find the write tool and create created.txt.',
           options: {
             ...SHARED_TEST_OPTIONS,
-            ...fakeModelOptions(fakeServer.baseUrl, helper),
+            ...fakeModelOptions(fakeServer.baseUrl),
             cwd: testDir,
             permissionMode: 'yolo',
             debug: false,

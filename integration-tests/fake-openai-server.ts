@@ -97,36 +97,6 @@ export function fakeToolCall(
   };
 }
 
-/** True when any user message in the request body contains `text`. */
-export function userMessageContains(body: JsonObject, text: string): boolean {
-  const messages =
-    (body['messages'] as Array<{ role: string; content: unknown }>) ?? [];
-  return messages.some(
-    (m) => m.role === 'user' && messageContentContains(m.content, text),
-  );
-}
-
-/**
- * Matches against the raw text of string content and text blocks, not a
- * JSON serialization of them — JSON.stringify escapes quotes, so prompts
- * containing `"` would never match a stringified form.
- */
-function messageContentContains(content: unknown, text: string): boolean {
-  if (typeof content === 'string') {
-    return content.includes(text);
-  }
-  if (Array.isArray(content)) {
-    return content.some(
-      (block) =>
-        typeof block === 'object' &&
-        block !== null &&
-        typeof (block as { text?: unknown }).text === 'string' &&
-        (block as { text: string }).text.includes(text),
-    );
-  }
-  return false;
-}
-
 export async function startFakeOpenAIServer(
   handler: FakeOpenAIHandler,
   options: FakeOpenAIServerOptions = {},
