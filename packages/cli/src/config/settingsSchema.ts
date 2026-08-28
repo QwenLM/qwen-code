@@ -2639,13 +2639,7 @@ const SETTINGS_SCHEMA = {
             requiresRestart: true,
             default: 10,
             description:
-<<<<<<< HEAD
-              'Context-window percentage used as the session-start budget for preloading deferred tools (bundled built-ins and MCP alike). When every deferred schema fits within the budget, all are declared upfront for direct calls; otherwise they stay behind the stable ToolSearch + ToolCall bridge. Set 0 to always use the bridge.',
-||||||| d6533785b
-              'Context-window percentage used as the session-start budget for preloading deferred tools (bundled built-ins and MCP alike). When every deferred tool schema fits within the budget, all are declared upfront instead of loaded on demand, keeping the prompt prefix stable for KV caching. Set 0 to always load deferred tools on demand.',
-=======
-              'Context-window percentage used as the session-start budget for preloading ordinary deferred tools (bundled built-ins and MCP alike). When every eligible deferred tool schema fits within the budget, all are declared upfront instead of loaded on demand, keeping the prompt prefix stable for KV caching. Tools demoted by tools.eager are excluded from this preload and stay on demand. Set 0 to always load deferred tools on demand.',
->>>>>>> origin/main
+              'Context-window percentage used as the session-start budget for preloading ordinary deferred tools (bundled built-ins and MCP alike). When every eligible deferred schema fits within the budget, all are declared upfront for direct calls, keeping the prompt prefix stable for KV caching; otherwise they stay behind the stable ToolSearch + ToolCall bridge. Tools demoted by tools.eager are excluded from this preload and stay reachable on demand through that bridge. Set 0 to always keep deferred tools behind the bridge.',
             showInDialog: true,
             // A percentage of the context window: values above 100 would set a
             // budget larger than the window and unconditionally preload every

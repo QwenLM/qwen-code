@@ -688,18 +688,10 @@ export class AgentCore {
         (asStrings.length === 0 && onlyInlineDecls.length === 0)
       ) {
         // Subagents inherit ordinary deferred tools (MCP, low-frequency
-<<<<<<< HEAD
-        // built-ins). Permission-allowlist-deferred schemas remain hidden and
-        // are reached through ToolSearch + ToolCall, preserving the registry
-        // allowlist without mutating the declarations.
-||||||| d6533785b
-        // built-ins). Permission-allowlist-deferred schemas remain hidden
-        // until ToolSearch reveals them, preserving the registry allowlist.
-=======
         // built-ins). Tools demoted by the `settings.tools.eager` allowlist
-        // remain hidden until ToolSearch reveals them, preserving the
-        // allowlist's schema shrink.
->>>>>>> origin/main
+        // remain hidden and are reached through the stable ToolSearch +
+        // ToolCall bridge, preserving the allowlist's schema shrink without
+        // mutating the declarations.
         toolsList.push(
           ...toolRegistry
             .getFunctionDeclarations({ includeDeferred: true })

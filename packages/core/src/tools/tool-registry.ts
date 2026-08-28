@@ -207,19 +207,9 @@ export class ToolRegistry {
   // pinDeferredToolReveal): they survive the `/clear` reset that
   // intentionally drops transient reveals so the new session starts clean.
   private pinnedDeferredReveals: Set<string> = new Set();
-<<<<<<< HEAD
-  // Built-in tools demoted to deferred by an active `permissions.allow`
-  // registry allowlist (#9827, #10075). They are fully registered — listed
-  // in `/tools`, discoverable via ToolSearch, callable through ToolCall and
-||||||| d6533785b
-  // Built-in tools demoted to deferred by an active `permissions.allow`
-  // registry allowlist (#9827, #10075). They are fully registered — listed
-  // in `/tools`, discoverable and loadable via ToolSearch, callable through
-=======
   // Built-in tools demoted to deferred by an active `settings.tools.eager`
   // allowlist (#9827, #10075). They are fully registered — listed
-  // in `/tools`, discoverable and loadable via ToolSearch, callable through
->>>>>>> origin/main
+  // in `/tools`, discoverable via ToolSearch, callable through ToolCall and
   // the normal approval flow — but their schemas are kept out of the eager
   // model request exactly like `shouldDefer=true` tools. Unlike ordinary
   // deferred tools they are never auto-revealed by the budget preload:
@@ -754,49 +744,17 @@ export class ToolRegistry {
       // register each function as a tool
       //
       // The same PermissionManager gate that createToolRegistry applies to
-<<<<<<< HEAD
-      // built-ins (via registerLazy) applies here too — but with one
-      // deliberate difference: a discovered tool the active allowlist does
-      // not cover is DROPPED, not demoted to deferred. Discovered tools are
-      // dynamic (their schemas are only known after the discovery command
-      // runs), so keeping an uncovered one registered-and-deferred would
-      // still advertise it in the deferred-tools reminder and let the model
-      // review and invoke it through the bridge — defeating the #9827
-      // schema-shrink
-      // guarantee for exactly the tools the allowlist was configured to
-      // exclude. Gating at registration keeps both sides of the gate
-      // consistent: an uncovered tool is hidden from the model instead of
-      // always failing (#9827). Whole-tool deny rules benefit from the same
-      // consistency ("a whole-tool deny rule also removes the tool from the
-      // registry", settings.md). Deny rules still apply at runtime
-      // regardless.
-||||||| d6533785b
-      // built-ins (via registerLazy) applies here too — but with one
-      // deliberate difference: a discovered tool the active allowlist does
-      // not cover is DROPPED, not demoted to deferred. Discovered tools are
-      // dynamic (their schemas are only known after the discovery command
-      // runs), so keeping an uncovered one registered-and-deferred would
-      // still advertise it in the deferred-tools reminder and let ToolSearch
-      // re-add its schema on demand — defeating the #9827 schema-shrink
-      // guarantee for exactly the tools the allowlist was configured to
-      // exclude. Gating at registration keeps both sides of the gate
-      // consistent: an uncovered tool is hidden from the model instead of
-      // always failing (#9827). Whole-tool deny rules benefit from the same
-      // consistency ("a whole-tool deny rule also removes the tool from the
-      // registry", settings.md). Deny rules still apply at runtime
-      // regardless.
-=======
       // built-ins (via registerLazy) applies here too, with the same
       // three-state outcome. A discovered tool the `tools.eager` allowlist
       // omits is DEFERRED, not dropped: its schema stays out of the eager
       // model request (the #9827 guarantee) while the tool remains listed
-      // in `/tools` and loadable on demand via ToolSearch. Dropping it
-      // instead would recreate exactly the silent-disappearance bug that
-      // #10075 reported for built-ins, just under a different knob.
-      // Whole-tool deny rules still remove the tool outright ("a whole-tool
-      // deny rule also removes the tool from the registry", settings.md),
-      // and deny rules still apply at runtime regardless.
->>>>>>> origin/main
+      // in `/tools` and reachable on demand through the stable ToolSearch +
+      // ToolCall bridge. Dropping it instead would recreate exactly the
+      // silent-disappearance bug that #10075 reported for built-ins, just
+      // under a different knob. Whole-tool deny rules still remove the tool
+      // outright ("a whole-tool deny rule also removes the tool from the
+      // registry", settings.md), and deny rules still apply at runtime
+      // regardless.
       const permissionManager = this.config.getPermissionManager?.();
       for (const func of functions) {
         if (!func.name) {
@@ -994,25 +952,11 @@ export class ToolRegistry {
     for (const tool of this.tools.values()) {
       if (!this.isEffectivelyDeferred(tool) || tool.alwaysLoad) continue;
       // Permission-deferred tools (#10075) are deliberately excluded: the
-<<<<<<< HEAD
-      // budget preload avoids bridge round trips for small ordinary deferred
-      // sets, but auto-revealing an allowlist-demoted tool would
-      // re-add exactly the schema the `permissions.allow` registry
-      // allowlist keeps out of the eager request (#9827). Such tools stay
-      // reachable on demand via ToolSearch + ToolCall.
-||||||| d6533785b
-      // budget preload exists to stabilise the prompt cache for ordinary
-      // deferred tools, but auto-revealing an allowlist-demoted tool would
-      // re-add exactly the schema the `permissions.allow` registry
-      // allowlist keeps out of the eager request (#9827). Such tools stay
-      // loadable on demand via ToolSearch.
-=======
       // budget preload exists to stabilise the prompt cache for ordinary
       // deferred tools, but auto-revealing a demoted tool would re-add
       // exactly the schema the `settings.tools.eager` allowlist keeps out
-      // of the eager request (#9827). Such tools stay loadable on demand
-      // via ToolSearch.
->>>>>>> origin/main
+      // of the eager request (#9827). Such tools stay reachable on demand
+      // via ToolSearch + ToolCall.
       if (this.permissionDeferred.has(tool.name)) continue;
       if (this.config.getVisibleTools().has(tool.name)) continue;
       candidates.push(tool.name);

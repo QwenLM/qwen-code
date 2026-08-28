@@ -1448,19 +1448,9 @@ describe('Gemini Client (client.ts)', () => {
       expect(getHistorySpy).not.toHaveBeenCalled();
     });
 
-<<<<<<< HEAD
-    it('eagerly reveals every deferred tool when the bridge is unavailable', async () => {
+    it('eagerly reveals ordinary deferred tools when the bridge is unavailable', async () => {
       // When either bridge tool is filtered out, the model has no safe way to
       // invoke deferred tools.
-||||||| d6533785b
-    it('eagerly reveals every deferred tool when ToolSearch is unavailable', async () => {
-      // When ToolSearch is filtered out (deny rule / --exclude-tools
-      // tool_search), the model has no way to reach deferred schemas.
-=======
-    it('reveals ordinary deferred tools when ToolSearch is unavailable', async () => {
-      // When ToolSearch is filtered out (deny rule / --exclude-tools
-      // tool_search), the model has no way to reach deferred schemas.
->>>>>>> origin/main
       // Silent disappearance is the worst failure mode — instead, reveal
       // ordinary deferred tools eagerly so they land in the declaration
       // list. The token-saving rationale of deferral was predicated on
@@ -1471,16 +1461,10 @@ describe('Gemini Client (client.ts)', () => {
         { name: 'cron_list', description: 'list' },
         { name: 'write_file', description: 'write' },
       ]);
-<<<<<<< HEAD
       reg.getTool.mockReturnValue(null); // Both bridge tools absent.
-||||||| d6533785b
-      reg.getTool.mockReturnValue(null); // ToolSearch absent
-=======
-      reg.getTool.mockReturnValue(null); // ToolSearch absent
       reg.isPermissionDeferred.mockImplementation(
         (name: string) => name === 'write_file',
       );
->>>>>>> origin/main
       reg.revealDeferredTool.mockClear();
 
       await client.startChat();
@@ -2631,19 +2615,9 @@ describe('Gemini Client (client.ts)', () => {
       );
     });
 
-<<<<<<< HEAD
     it('eagerly reveals every deferred tool when the bridge is unavailable', async () => {
       // Mirrors startChat's silent-disappearance guard: without the complete
       // bridge a deferred MCP tool can't be reached, so the only safe option is
-||||||| d6533785b
-    it('eagerly reveals every deferred tool when ToolSearch is unavailable', async () => {
-      // Mirrors startChat's silent-disappearance guard: without ToolSearch
-      // a deferred MCP tool can't be reached, so the only safe option is
-=======
-    it('reveals ordinary deferred tools when ToolSearch is unavailable', async () => {
-      // Mirrors startChat's silent-disappearance guard: without ToolSearch
-      // a deferred MCP tool can't be reached, so the only safe option is
->>>>>>> origin/main
       // to reveal it so it lands in the declaration list. If setTools()
       // skipped this branch, an MCP tool registered after startChat() in
       // a session with `--exclude-tools tool_search` would be invisible

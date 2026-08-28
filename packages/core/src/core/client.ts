@@ -1667,42 +1667,21 @@ export class LlmClient {
    * inspects the registry's eager state and would otherwise miss factory-
    * backed deferred tools.
    *
-<<<<<<< HEAD
-   * Side effect: when either ToolSearch or ToolCall is not registered, every
-   * deferred tool is eagerly revealed here so it lands in the declaration
-   * list. Skipping this would leave the tool both off the declarations AND off
-   * the deferred-summary list (since `undefined` is returned in that branch).
-||||||| d6533785b
-   * Side effect: when ToolSearch is not registered (e.g. `--exclude-tools
-   * tool_search` or a deny rule), every deferred tool is eagerly revealed
-   * here so it lands in the declaration list. Skipping this would leave the
-   * tool both off the declarations AND off the deferred-summary list (since
-   * `undefined` is returned in that branch) — a silent disappearance that's
-   * harder to diagnose than seeing the tool name absent from `/mcp` output.
-=======
-   * Side effect: when ToolSearch is not registered (e.g. `--exclude-tools
-   * tool_search` or a deny rule), deferred tools are eagerly revealed here so
-   * they land in the declaration list. Tools explicitly demoted by
-   * `tools.eager` stay hidden unless the history-reveal pass above already
-   * re-exposed one for a resumed session — that schema stays in the
+   * Side effect: when either ToolSearch or ToolCall is not registered (e.g.
+   * `--exclude-tools tool_search` or a deny rule), deferred tools are eagerly
+   * revealed here so they land in the declaration list. Tools explicitly
+   * demoted by `tools.eager` stay hidden unless the history-reveal pass above
+   * already re-exposed one for a resumed session — that schema stays in the
    * declarations, so it is not counted unreachable below. Skipping this for
    * ordinary deferred tools would leave them both off the declarations AND
    * off the deferred-summary list
    * (since `undefined` is returned in that branch) — a silent disappearance.
->>>>>>> origin/main
    *
-<<<<<<< HEAD
-   * Returns `undefined` when the bridge is incomplete: reminders must not
-   * advertise tools the model has no way to invoke on demand.
-||||||| d6533785b
-   * Returns `undefined` when ToolSearch is unavailable: reminders must not
-   * advertise tools the model has no way to load on demand.
-=======
-   * Returns `undefined` when ToolSearch is unavailable: reminders must not
-   * advertise tools the model has no way to load on demand. Tools held back
-   * by `tools.eager` in that state are unreachable for the session, which is
-   * warned about once per session.
->>>>>>> origin/main
+   * Returns `undefined` when the bridge is incomplete (ToolSearch or
+   * ToolCall unregistered): reminders must not advertise tools the model has
+   * no way to invoke on demand. Tools held back by `tools.eager` in that
+   * state are unreachable for the session, which is warned about once per
+   * session.
    */
   private resolveDeferredToolsForReminder(
     deferredSummary: readonly DeferredToolSummary[],

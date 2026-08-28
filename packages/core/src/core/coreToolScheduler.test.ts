@@ -839,15 +839,9 @@ describe('CoreToolScheduler', () => {
     permissionManager?: {
       isToolEnabled: (name: string) => Promise<boolean>;
       findMatchingDenyRule: (ctx: unknown) => string | undefined;
-<<<<<<< HEAD
-      isPermissionsAllowListActive: () => boolean;
       hasRelevantRules?: (ctx: unknown) => boolean;
       evaluate?: (ctx: unknown) => Promise<PermissionDecision>;
       hasMatchingAskRule?: (ctx: unknown) => boolean;
-||||||| d6533785b
-      isPermissionsAllowListActive: () => boolean;
-=======
->>>>>>> origin/main
     };
     deferredHiddenNames?: ReadonlySet<string>;
   }) {
@@ -1002,7 +996,6 @@ describe('CoreToolScheduler', () => {
         permissionManager: {
           isToolEnabled,
           findMatchingDenyRule: () => undefined,
-          isPermissionsAllowListActive: () => false,
           hasRelevantRules: () => false,
           evaluate: vi.fn().mockResolvedValue('default'),
           hasMatchingAskRule: () => false,
@@ -1249,7 +1242,6 @@ describe('CoreToolScheduler', () => {
         permissionManager: {
           isToolEnabled,
           findMatchingDenyRule: () => undefined,
-          isPermissionsAllowListActive: () => false,
         },
       });
     const abortController = new AbortController();

@@ -46,19 +46,9 @@ const debugLogger = createDebugLogger('PERMISSIONS');
  *   request.
  * - `deferred`: registered but hidden from the eager model request — the
  *   same treatment `shouldDefer` tools get. The tool stays listed in
-<<<<<<< HEAD
- *   `/tools`, discoverable via ToolSearch, callable through ToolCall, and a
- *   call to it goes through the normal approval flow. This is what happens to
- *   built-in tools not covered by an active `permissions.allow` registry
-||||||| d6533785b
- *   `/tools`, discoverable and loadable via ToolSearch, and a call to it
- *   goes through the normal approval flow. This is what happens to
- *   built-in tools not covered by an active `permissions.allow` registry
-=======
- *   `/tools`, discoverable and loadable via ToolSearch, and a call to it
+ *   `/tools`, discoverable via ToolSearch, callable through ToolCall, and a call to it
  *   goes through the normal approval flow. This is what happens to
  *   built-in tools not named in an active `settings.tools.eager`
->>>>>>> origin/main
  *   allowlist: their schemas stay out of the eager request (#9827) without
  *   the tools silently disappearing from the session (#10075).
  * - `disabled`: not registered at all (whole-tool deny rule, or unlisted in
@@ -791,33 +781,10 @@ export class PermissionManager {
   /**
    * Determine how a tool participates in the registry for this session.
    *
-<<<<<<< HEAD
-   * While the `permissions.allow` registry allowlist is active (see
-   * `isPermissionsAllowListActive`), a built-in tool not covered by any
-   * allow or ask rule is `deferred`, NOT `disabled`: it stays registered —
-   * listed in `/tools`, discoverable and callable through the bridge — but its
-   * schema is kept out of the eager model request, which is the #9827
-   * guarantee. Call-time approval for such a tool falls back to the normal
-   * permission evaluation (ask / approval-mode), the pre-allowlist
-   * behaviour, so existing allowlist users never lose capability silently
-   * (#10075). Ask rules cover a tool for membership so "always require
-   * confirmation" never becomes "not in the eager request" either.
-||||||| d6533785b
-   * While the `permissions.allow` registry allowlist is active (see
-   * `isPermissionsAllowListActive`), a built-in tool not covered by any
-   * allow or ask rule is `deferred`, NOT `disabled`: it stays registered —
-   * listed in `/tools`, discoverable and loadable via ToolSearch — but its
-   * schema is kept out of the eager model request, which is the #9827
-   * guarantee. Call-time approval for such a tool falls back to the normal
-   * permission evaluation (ask / approval-mode), the pre-allowlist
-   * behaviour, so existing allowlist users never lose capability silently
-   * (#10075). Ask rules cover a tool for membership so "always require
-   * confirmation" never becomes "not in the eager request" either.
-=======
    * While the `settings.tools.eager` allowlist is active (see
    * `isEagerToolAllowListActive`), a built-in tool not named in it is
    * `deferred`, NOT `disabled`: it stays registered — listed in `/tools`,
-   * discoverable and loadable via ToolSearch — but its schema is kept out
+   * discoverable and callable through the ToolSearch + ToolCall bridge — but its schema is kept out
    * of the eager model request, which is the #9827 guarantee. Call-time
    * approval for such a tool falls back to the normal permission
    * evaluation (ask / approval-mode), so nothing loses capability
@@ -827,7 +794,6 @@ export class PermissionManager {
    * auto-approval: it never demotes, hides, or removes a tool, which is
    * the #10075 decoupling. Restricting the eager tool surface is the job
    * of the dedicated `tools.eager` key.
->>>>>>> origin/main
    *
    * Exempt from the allowlist (always `registered` unless denied):
    * - MCP tools (`mcp__*`): dynamically discovered and filtered via the
@@ -917,154 +883,8 @@ export class PermissionManager {
    * See the `eagerToolAllowList` field for the activation contract
    * (snapshot at `initialize()`, restart-scoped).
    */
-<<<<<<< HEAD
-  isPermissionsAllowListActive(): boolean {
-    return this.permissionsAllowListActive;
-  }
-
-  /**
-   * All allow rules currently in force: persistent + session + any rules
-   * the AUTO-mode strip moved to the stash (they are configured rules,
-   * merely suspended for runtime auto-approval purposes).
-   */
-  private getEffectiveAllowRules(): PermissionRule[] {
-    return [
-      ...this.sessionRules.allow,
-      ...this.persistentRules.allow,
-      ...(this.strippedAllowRules?.session ?? []),
-      ...(this.strippedAllowRules?.persistent ?? []),
-    ];
-  }
-
-  /**
-   * All ask rules currently in force: persistent + session. AUTO mode
-   * strips only allow rules (the stash in `strippedAllowRules`), so ask
-   * rules are never suspended and no stash applies here.
-   */
-  private getEffectiveAskRules(): PermissionRule[] {
-    return [...this.sessionRules.ask, ...this.persistentRules.ask];
-  }
-
-  /**
-   * Registry-membership check for the `permissions.allow` allowlist: true
-   * when any in-force allow OR ask rule mentions the tool. Ask rules count
-   * because they express "this tool must stay usable, with confirmation" —
-   * a tool covered only by an ask rule must not be silently deregistered
-   * whenever an allowlist is active, or the documented "always require
-   * user confirmation" would become "tool unavailable" and the ask rule
-   * could never fire (#9827). Tool-name matching is specifier-agnostic
-   * (`Bash(npm test)` keeps `run_shell_command` registered) and honours
-   * meta-categories (`Read` covers grep/glob/..., `Bash` covers monitor)
-   * via `toolMatchesRuleToolName`.
-   *
-   * Membership is monotonic within the session: the union of the frozen
-   * startup rule sets (`startupAllowRules` / `startupAskRules`) and the
-   * live rule sets. Removing a STARTUP rule mid-session therefore never
-   * deregisters an already-registered tool (removals take effect at
-   * restart, matching the documented "Requires restart" contract), while
-   * rules granted mid-session — skill `allowedTools`, "Always allow",
-   * `/permissions` writes — extend membership live even though they can
-   * never ACTIVATE the allowlist (#9827).
-   *
-   * Caveat: extending membership flips this runtime predicate only. A
-   * mid-session grant can never PROMOTE a tool the startup allowlist left
-   * uncovered into the eager model request — the registry is built once in
-   * `Config.initialize` and such a tool stays permission-deferred (still
-   * registered and callable through the bridge, but its schema not
-   * sent eagerly) until the rule is added to settings `permissions.allow`
-   * and the session restarts (#9827, #10075).
-   *
-   * Public so the scheduler can tell an allowlist miss (tool genuinely
-   * uncovered) apart from a rejection by a different gate — e.g. the
-   * legacy `coreTools` allowlist — for a tool that IS covered, where
-   * "add a permissions.allow rule" advice would be a no-op (#9827).
-   */
-  isCoveredByAllowOrAskRule(toolName: string): boolean {
-    const canonicalName = resolveToolName(toolName);
-    const covered = (rule: PermissionRule): boolean =>
-      !rule.invalid && toolMatchesRuleToolName(rule.toolName, canonicalName);
-    return (
-      this.startupAllowRules.some(covered) ||
-      this.getEffectiveAllowRules().some(covered) ||
-      this.startupAskRules.some(covered) ||
-      this.getEffectiveAskRules().some(covered)
-    );
-||||||| d6533785b
-  isPermissionsAllowListActive(): boolean {
-    return this.permissionsAllowListActive;
-  }
-
-  /**
-   * All allow rules currently in force: persistent + session + any rules
-   * the AUTO-mode strip moved to the stash (they are configured rules,
-   * merely suspended for runtime auto-approval purposes).
-   */
-  private getEffectiveAllowRules(): PermissionRule[] {
-    return [
-      ...this.sessionRules.allow,
-      ...this.persistentRules.allow,
-      ...(this.strippedAllowRules?.session ?? []),
-      ...(this.strippedAllowRules?.persistent ?? []),
-    ];
-  }
-
-  /**
-   * All ask rules currently in force: persistent + session. AUTO mode
-   * strips only allow rules (the stash in `strippedAllowRules`), so ask
-   * rules are never suspended and no stash applies here.
-   */
-  private getEffectiveAskRules(): PermissionRule[] {
-    return [...this.sessionRules.ask, ...this.persistentRules.ask];
-  }
-
-  /**
-   * Registry-membership check for the `permissions.allow` allowlist: true
-   * when any in-force allow OR ask rule mentions the tool. Ask rules count
-   * because they express "this tool must stay usable, with confirmation" —
-   * a tool covered only by an ask rule must not be silently deregistered
-   * whenever an allowlist is active, or the documented "always require
-   * user confirmation" would become "tool unavailable" and the ask rule
-   * could never fire (#9827). Tool-name matching is specifier-agnostic
-   * (`Bash(npm test)` keeps `run_shell_command` registered) and honours
-   * meta-categories (`Read` covers grep/glob/..., `Bash` covers monitor)
-   * via `toolMatchesRuleToolName`.
-   *
-   * Membership is monotonic within the session: the union of the frozen
-   * startup rule sets (`startupAllowRules` / `startupAskRules`) and the
-   * live rule sets. Removing a STARTUP rule mid-session therefore never
-   * deregisters an already-registered tool (removals take effect at
-   * restart, matching the documented "Requires restart" contract), while
-   * rules granted mid-session — skill `allowedTools`, "Always allow",
-   * `/permissions` writes — extend membership live even though they can
-   * never ACTIVATE the allowlist (#9827).
-   *
-   * Caveat: extending membership flips this runtime predicate only. A
-   * mid-session grant can never PROMOTE a tool the startup allowlist left
-   * uncovered into the eager model request — the registry is built once in
-   * `Config.initialize` and such a tool stays permission-deferred (still
-   * registered and callable, loadable via ToolSearch, but its schema not
-   * sent eagerly) until the rule is added to settings `permissions.allow`
-   * and the session restarts (#9827, #10075).
-   *
-   * Public so the scheduler can tell an allowlist miss (tool genuinely
-   * uncovered) apart from a rejection by a different gate — e.g. the
-   * legacy `coreTools` allowlist — for a tool that IS covered, where
-   * "add a permissions.allow rule" advice would be a no-op (#9827).
-   */
-  isCoveredByAllowOrAskRule(toolName: string): boolean {
-    const canonicalName = resolveToolName(toolName);
-    const covered = (rule: PermissionRule): boolean =>
-      !rule.invalid && toolMatchesRuleToolName(rule.toolName, canonicalName);
-    return (
-      this.startupAllowRules.some(covered) ||
-      this.getEffectiveAllowRules().some(covered) ||
-      this.startupAskRules.some(covered) ||
-      this.getEffectiveAskRules().some(covered)
-    );
-=======
   isEagerToolAllowListActive(): boolean {
     return this.eagerToolAllowList !== null;
->>>>>>> origin/main
   }
 
   /**
@@ -1392,36 +1212,6 @@ export class PermissionManager {
         );
         return;
       }
-<<<<<<< HEAD
-      if (
-        this.permissionsAllowListActive &&
-        !this.sessionGrantAllowlistCaveatLogged
-      ) {
-        this.sessionGrantAllowlistCaveatLogged = true;
-        debugLogger.warn(
-          'Session allow rule granted while the permissions.allow registry allowlist is active: ' +
-            'the grant auto-approves matching calls and extends allowlist membership, but it cannot ' +
-            'promote a deferred tool into the eager model request — a tool the startup allowlist left ' +
-            'uncovered stays deferred (reachable via ToolSearch + ToolCall, schema not sent eagerly) until the ' +
-            'rule is added to settings permissions.allow and the session restarts (#9827, #10075).',
-        );
-      }
-||||||| d6533785b
-      if (
-        this.permissionsAllowListActive &&
-        !this.sessionGrantAllowlistCaveatLogged
-      ) {
-        this.sessionGrantAllowlistCaveatLogged = true;
-        debugLogger.warn(
-          'Session allow rule granted while the permissions.allow registry allowlist is active: ' +
-            'the grant auto-approves matching calls and extends allowlist membership, but it cannot ' +
-            'promote a deferred tool into the eager model request — a tool the startup allowlist left ' +
-            'uncovered stays deferred (loadable via ToolSearch, schema not sent eagerly) until the ' +
-            'rule is added to settings permissions.allow and the session restarts (#9827, #10075).',
-        );
-      }
-=======
->>>>>>> origin/main
       // AUTO mode invariant: while dangerous allow rules are stripped,
       // any newly added allow rule that is itself dangerous must be
       // stashed alongside the strip rather than made active. Without

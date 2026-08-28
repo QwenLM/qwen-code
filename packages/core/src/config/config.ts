@@ -1068,23 +1068,10 @@ export interface ConfigParameters {
   /**
    * Percentage of the model's context window used as the session-start
    * budget for preloading deferred tools. When the combined estimated
-<<<<<<< HEAD
-   * schema size of every deferred tool — bundled built-ins and MCP alike
-   * — fits within the budget, they are all revealed upfront for direct calls
-   * instead of being invoked through `tool_search` + `tool_call`. `0` disables
-   * preloading. Sourced from `settings.tools.toolSearch.threshold`.
-||||||| d6533785b
-   * schema size of every deferred tool — bundled built-ins and MCP alike
-   * — fits within the budget, they are all revealed upfront instead of
-   * loaded on demand via `tool_search`, keeping the declaration list
-   * stable for the whole session (prefix-cache friendly). `0` disables
-   * preloading. Sourced from `settings.tools.toolSearch.threshold`.
-=======
    * schema size of every eligible deferred tool — bundled built-ins and MCP
-   * alike — fits within the budget, they are revealed upfront instead of
-   * loaded on demand via `tool_search`. Tools demoted by `tools.eager` are
+   * alike — fits within the budget, they are revealed upfront for direct calls instead of being invoked through
+   * the `tool_search` + `tool_call` bridge. Tools demoted by `tools.eager` are
    * excluded from this preload. `0` disables preloading.
->>>>>>> origin/main
    */
   toolSearchThreshold?: number;
   /** Merged permission rules from all sources (settings + CLI args). */
@@ -9115,25 +9102,12 @@ export class Config {
       factory: ToolFactory,
     ): Promise<void> => {
       // PermissionManager handles the coreTools allowlist, deny rules, and
-<<<<<<< HEAD
-      // the `permissions.allow` registry allowlist in a single check. A tool
-      // the active allowlist does not cover comes back `deferred`, not
-      // `disabled`: it is still registered — listed in `/tools` and reachable
-      // via ToolSearch + ToolCall — but its schema stays out of the eager
-      // model request (#9827) without the tool silently disappearing (#10075).
-||||||| d6533785b
-      // the `permissions.allow` registry allowlist in a single check. A tool
-      // the active allowlist does not cover comes back `deferred`, not
-      // `disabled`: it is still registered — listed in `/tools` and loadable
-      // via ToolSearch — but its schema stays out of the eager model request
-      // (#9827) without the tool silently disappearing (#10075).
-=======
       // the `tools.eager` allowlist in a single check. A tool the active
       // eager allowlist omits comes back `deferred`, not `disabled`: it is
-      // still registered — listed in `/tools` and loadable via ToolSearch —
+      // still registered — listed in `/tools` and reachable through the
+      // `tool_search` + `tool_call` bridge —
       // but its schema stays out of the eager model request (#9827) without
       // the tool silently disappearing (#10075).
->>>>>>> origin/main
       let status: ToolRegistrationStatus = 'registered';
       try {
         // Resolve through the getter, not the `permissionManager` field: on
