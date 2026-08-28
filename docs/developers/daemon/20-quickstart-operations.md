@@ -225,7 +225,7 @@ qwen serve
 packages/cli/index.ts              main()
    |
    v
-gemini.tsx                         main() - parseArguments()
+llm.tsx                         main() - parseArguments()
    |
    v (yargs assembly)
 config/config.ts                   import { serveCommand } ...
@@ -276,7 +276,7 @@ Key facts:
 
 - **`createServeApp` only builds; it does not listen.** It returns an `express()` instance with middleware and routes mounted. Ordinary-only embedders may continue to own `app.listen()`. Embedders that use Live/Conversations must bind the actual Node server to the exported app lifecycle before listening and await that lifecycle during shutdown.
 - **`() => actualPort` is a lazy closure.** `actualPort` is assigned in the `server.listen` callback. The `hostAllowlist` middleware reads it on demand, so ephemeral ports (`--port 0`) still gate the `Host` header correctly.
-- **`await blockForever()` is intentional.** If `yargs.parse()` resolves, the CLI top level falls through into the interactive TUI entrypoint (`gemini.tsx`). SIGINT / SIGTERM exit through `runQwenServe`'s `onSignal` path.
+- **`await blockForever()` is intentional.** If `yargs.parse()` resolves, the CLI top level falls through into the interactive TUI entrypoint (`llm.tsx`). SIGINT / SIGTERM exit through `runQwenServe`'s `onSignal` path.
 
 ## 10. HTTP route file split
 

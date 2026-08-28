@@ -17,7 +17,7 @@ import {
 import {
   ORPHAN_TOOL_USE_REPAIR_REASON,
   repairOrphanedToolUseTurns,
-} from './geminiChat.js';
+} from './llm-chat.js';
 
 export type SessionRecoveryKind =
   | 'clean'
