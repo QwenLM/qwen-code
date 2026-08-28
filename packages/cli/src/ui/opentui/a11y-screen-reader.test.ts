@@ -175,7 +175,13 @@ describe('hardWrap', () => {
   });
 
   it('keeps a glyph wider than the width on its own line', () => {
-    expect(hardWrap('你好', 1)).toBe('你\n好');
+    // wrap-ansi's exact output for a 2-column glyph at width 1 keeps a
+    // leading empty line — byte parity with ink's screen-reader path.
+    expect(hardWrap('你好', 1)).toBe('\n你\n好');
+  });
+
+  it('wraps at word boundaries like ink (R2-41)', () => {
+    expect(hardWrap('aa bb cc dd', 5)).toBe('aa bb\n cc \ndd');
   });
 });
 
@@ -244,5 +250,21 @@ describe('ScreenReaderOutputWriter (ink append-only parity)', () => {
     writer.clearDynamic();
     writer.updateDynamic('z');
     expect(writes).toEqual(['x\ny', '\x1b[2K\x1b[1A\x1b[2K\x1b[G', 'z']);
+  });
+
+  it('strips ANSI and bare control bytes from written content', () => {
+    const writes: string[] = [];
+    const writer = new ScreenReaderOutputWriter((chunk) => writes.push(chunk));
+    // A model/tool result smuggling an OSC 52 clipboard write must reach
+    // the terminal as plain text only.
+    writer.appendStatic('\x1b]52;c;AAAA\x07copied\x1b[31mred\x1b[0m\x07bell');
+    expect(writes).toEqual(['copiedredbell\n']);
+  });
+
+  it('keeps newlines (the writer appends its own) while dropping other C0 controls', () => {
+    const writes: string[] = [];
+    const writer = new ScreenReaderOutputWriter((chunk) => writes.push(chunk));
+    writer.updateDynamic('a\x00b\x0bc\x7fd\ne');
+    expect(writes).toEqual(['abcd\ne']);
   });
 });

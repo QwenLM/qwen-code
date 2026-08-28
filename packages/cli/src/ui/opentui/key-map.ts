@@ -39,16 +39,28 @@ export interface OpenTuiKeyInput {
 }
 
 /**
+ * Key names @opentui/core emits differently from the original readline
+ * parser. Under the kitty protocol opentui names keypad Enter 'kpenter'
+ * (kittyKeyMap 57414) while the original parser maps 57414 to 'return'
+ * (KeypressContext), so the unnormalized name matches no RETURN/SUBMIT
+ * binding and numpad Enter cannot confirm a dialog in kitty mode.
+ */
+const OPENTUI_KEY_NAME_ALIASES: Readonly<Record<string, string>> = {
+  kpenter: 'return',
+};
+
+/**
  * Maps an OpenTUI key event onto the original qwen-code `Key` shape consumed
  * by `ui/keyMatchers.ts`. OpenTUI already emits the same key names the
- * original readline parser uses ('return', 'escape', 'up', 'backspace', ...),
- * so only modifier normalization is needed: the original single `meta` flag
- * covers Alt/Option (and the `command` binding column), so Option folds into
- * `meta` exactly like the original KeypressContext does for terminals.
+ * original readline parser uses ('return', 'escape', 'up', 'backspace', ...)
+ * modulo the known aliases above, so only modifier normalization is needed:
+ * the original single `meta` flag covers Alt/Option (and the `command`
+ * binding column), so Option folds into `meta` exactly like the original
+ * KeypressContext does for terminals.
  */
 export function toOriginalKey(input: OpenTuiKeyInput): Key {
   return {
-    name: input.name,
+    name: OPENTUI_KEY_NAME_ALIASES[input.name] ?? input.name,
     ctrl: !!input.ctrl,
     meta: !!(input.meta || input.option),
     shift: !!input.shift,
@@ -92,18 +104,35 @@ export const OPENTUI_COMMAND_PRIORITY: readonly Command[] = [
 ];
 
 /**
- * Resolves the highest-priority original command a key triggers, or
- * `undefined` when the key is plain text input (or unbound in slice 1).
+ * All original commands a key triggers, in priority order. Ink broadcasts
+ * every keypress to all subscribers (KeypressContext), so one key can fan
+ * out to several consumers — Ctrl+C binds both QUIT (keyBindings.ts) and
+ * CLEAR_INPUT; consumers acting on the `resolveCommand` winner must also
+ * apply the co-triggered commands (e.g. clear the input buffer on QUIT)
+ * to match ink's net behavior.
+ */
+export function resolveCommands(
+  input: OpenTuiKeyInput,
+  matchers: KeyMatchers = keyMatchers,
+): Command[] {
+  const key = toOriginalKey(input);
+  const matches: Command[] = [];
+  for (const command of OPENTUI_COMMAND_PRIORITY) {
+    if (matchers[command](key)) {
+      matches.push(command);
+    }
+  }
+  return matches;
+}
+
+/**
+ * The highest-priority original command a key triggers, or `undefined` when
+ * the key is plain text input (or unbound in slice 1). See `resolveCommands`
+ * for keys that fan out to several consumers.
  */
 export function resolveCommand(
   input: OpenTuiKeyInput,
   matchers: KeyMatchers = keyMatchers,
 ): Command | undefined {
-  const key = toOriginalKey(input);
-  for (const command of OPENTUI_COMMAND_PRIORITY) {
-    if (matchers[command](key)) {
-      return command;
-    }
-  }
-  return undefined;
+  return resolveCommands(input, matchers)[0];
 }

@@ -22,12 +22,13 @@
  * Pure logic + the append-only writer; the renderer wiring consumes these.
  */
 
-import stringWidth from 'string-width';
+import wrapAnsi from 'wrap-ansi';
 import type { CliRendererConfig } from '@opentui/core';
 import {
   isInteractiveTerminal,
   shouldUseVirtualViewport,
 } from '../utils/terminal-buffer.js';
+import { stripAnsi } from './a11y-plain-text.js';
 
 export interface ScreenReaderPolicy {
   /** Whether screen-reader mode is active. */
@@ -149,34 +150,15 @@ export function eraseLines(count: number): string {
 }
 
 /**
- * Hard-wraps text at `width` display columns (ink parity: `wrapAnsi(output,
- * width, { hard: true })` measures columns, not UTF-16 code units, so CJK
- * glyphs count as 2). Widths <= 0 disable wrapping.
+ * Hard-wraps text at `width` display columns, exactly like ink's
+ * screen-reader path (`wrapAnsi(output, width, {trim: false, hard: true })`
+ * in ink.js): multi-word blocks break at word boundaries and only words
+ * wider than the width are severed; CJK glyphs count as 2 columns. Widths
+ * <= 0 disable wrapping.
  */
 export function hardWrap(text: string, width: number): string {
   if (width <= 0) return text;
-  return text
-    .split('\n')
-    .map((line) => {
-      const parts: string[] = [];
-      let current = '';
-      let currentWidth = 0;
-      for (const char of line) {
-        const charWidth = stringWidth(char);
-        // A glyph wider than the whole width is kept on its own line rather
-        // than wrapped into an unreachable column.
-        if (currentWidth > 0 && currentWidth + charWidth > width) {
-          parts.push(current);
-          current = '';
-          currentWidth = 0;
-        }
-        current += char;
-        currentWidth += charWidth;
-      }
-      parts.push(current);
-      return parts.join('\n');
-    })
-    .join('\n');
+  return wrapAnsi(text, width, { trim: false, hard: true });
 }
 
 export class ScreenReaderOutputWriter {
@@ -189,25 +171,40 @@ export class ScreenReaderOutputWriter {
   ) {}
 
   /**
+   * Content crossing this writer is plain-text-only on the main screen, and
+   * the writer itself enforces that: shell/tool output legitimately carries
+   * captured escape bytes, and without stripping here a malicious model/tool
+   * result could execute OSC 52 clipboard writes or title/cursor sequences
+   * with no renderer buffer in between. Bare C0 controls (except the
+   * newline the writer itself appends) are dropped too.
+   */
+  private sanitize(text: string): string {
+    // eslint-disable-next-line no-control-regex
+    return stripAnsi(text).replace(/[\x00-\x09\x0b-\x1f\x7f]/g, '');
+  }
+
+  /**
    * Writes static (append-only) content exactly once. Ink erases the pending
    * dynamic block before appending static content and resets its height.
    */
   appendStatic(text: string): void {
-    if (text.length === 0) return;
+    const clean = this.sanitize(text);
+    if (clean.length === 0) return;
     if (this.lastDynamicHeight > 0) {
       this.write(eraseLines(this.lastDynamicHeight));
     }
     this.lastDynamic = '';
     this.lastDynamicHeight = 0;
-    this.write(text.endsWith('\n') ? text : `${text}\n`);
+    this.write(clean.endsWith('\n') ? clean : `${clean}\n`);
   }
 
   /**
-   * Replaces the dynamic block in place (no append). The text is hard-wrapped
-   * at the writer's column width; an unchanged block is not rewritten.
+   * Replaces the dynamic block in place (no append). The text is sanitized
+   * and hard-wrapped at the writer's column width; an unchanged block is
+   * not rewritten.
    */
   updateDynamic(text: string): void {
-    const output = hardWrap(text, this.columns());
+    const output = hardWrap(this.sanitize(text), this.columns());
     if (output === this.lastDynamic) return;
     this.write(eraseLines(this.lastDynamicHeight) + output);
     this.lastDynamic = output;

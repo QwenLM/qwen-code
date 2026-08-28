@@ -9,6 +9,7 @@
  * lifecycle and the resyncKey cursor re-sync.
  */
 
+import React from 'react';
 import { act, renderHook } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
@@ -75,6 +76,59 @@ describe('useDialogSelect numeric quick-select', () => {
       vi.advanceTimersByTime(NUMBER_SELECT_TIMEOUT_MS + 10);
     });
     expect(onSelect).not.toHaveBeenCalled();
+  });
+
+  it('fires onSelect exactly once on the timeout flush (R2-1, StrictMode)', () => {
+    const onSelect = vi.fn();
+    const Wrapper = ({ children }: { children: React.ReactNode }) => (
+      <React.StrictMode>{children}</React.StrictMode>
+    );
+    renderHook(() => useDialogSelect({ items, numbers: true, onSelect }), {
+      wrapper: Wrapper,
+    });
+    press({ name: '1', sequence: '1' });
+    act(() => {
+      vi.advanceTimersByTime(NUMBER_SELECT_TIMEOUT_MS + 10);
+    });
+    expect(onSelect).toHaveBeenCalledTimes(1);
+    expect(onSelect).toHaveBeenCalledWith('item-0');
+  });
+});
+
+describe('useDialogSelect setActiveIndex (ink SET_ACTIVE_INDEX parity)', () => {
+  beforeEach(() => {
+    handlers.length = 0;
+  });
+
+  it('setActiveIndex can land on a disabled row (R2-2)', () => {
+    const mixed = [
+      { key: 'a', value: 'a' },
+      { key: 'b', value: 'b', disabled: true },
+      { key: 'c', value: 'c' },
+    ];
+    const { result } = renderHook(() =>
+      useDialogSelect({ items: mixed, numbers: false }),
+    );
+    expect(result.current.activeIndex).toBe(0);
+    // A one-row step toward the disabled row must not get stuck — ink's
+    // SET_ACTIVE_INDEX accepts any in-range index.
+    act(() => result.current.setActiveIndex(1));
+    expect(result.current.activeIndex).toBe(1);
+    act(() => result.current.setActiveIndex(2));
+    expect(result.current.activeIndex).toBe(2);
+  });
+
+  it('highlightIndex still skips disabled rows (arrow-key semantics)', () => {
+    const mixed = [
+      { key: 'a', value: 'a' },
+      { key: 'b', value: 'b', disabled: true },
+      { key: 'c', value: 'c' },
+    ];
+    const { result } = renderHook(() =>
+      useDialogSelect({ items: mixed, numbers: false }),
+    );
+    act(() => result.current.highlightIndex(1));
+    expect(result.current.activeIndex).toBe(0);
   });
 });
 

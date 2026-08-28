@@ -1017,6 +1017,8 @@ export interface WebShellProps {
   shellRef?: React.Ref<WebShellApi>;
   /** Built-in composer toolbar actions to show. Defaults to all actions. */
   composerToolbarActions?: readonly ComposerToolbarAction[];
+  /** Built-in actions appended to the context-sensitive default toolbar. */
+  composerToolbarAdditionalActions?: readonly ComposerToolbarAction[];
   /**
    * Main-composer copy by semantic state. Omitted or blank entries retain the
    * WebShell localized default; shell-mode and follow-up copy still wins.
@@ -1997,6 +1999,7 @@ export function App({
   messageTurnOutputs,
   shellRef,
   composerToolbarActions,
+  composerToolbarAdditionalActions,
   composerPlaceholders,
   compactThinking = false,
   collapseCompletedTurns = true,
@@ -4868,7 +4871,7 @@ export function App({
         if (request !== loadedSkillsRequestRef.current) return;
         setLoadedSkills(availableSkillInfos(status));
         setLoadedSkillsReady(true);
-        return true;
+        return status;
       } catch (error) {
         if (notifyOnError) {
           pushToast(
@@ -4939,17 +4942,36 @@ export function App({
     }
     pendingSkillTogglesByContextRef.current.set(contextKey, pendingToggles);
     let cancelled = false;
-    void reloadLoadedSkills(workspaceCwd, true).then((loaded) => {
-      if (cancelled || !loaded) return;
+    void reloadLoadedSkills(workspaceCwd, true).then((status) => {
+      if (cancelled || !status) return;
       markHandled();
       if (!sessionId) {
         pendingSkillTogglesByContextRef.current.delete(contextKey);
         return;
       }
+      const availableWorkspaceSkillNames = new Set(
+        status.skills
+          .filter((skill) => skill.status === 'ok')
+          .map((skill) => skill.name.toLowerCase()),
+      );
+      const pendingForSession = pendingToggles.filter(
+        (toggle) =>
+          !toggle.enabled ||
+          availableWorkspaceSkillNames.has(toggle.name.toLowerCase()),
+      );
+      if (pendingForSession.length === 0) {
+        pendingSkillTogglesByContextRef.current.delete(contextKey);
+        setLoadedSkillsFallback(undefined);
+        return;
+      }
+      pendingSkillTogglesByContextRef.current.set(
+        contextKey,
+        pendingForSession,
+      );
       const currentSnapshot = connectionSkillSnapshotRef.current;
       if (
         currentSnapshot.sessionId === sessionId &&
-        sessionSkillsReflectToggle(currentSnapshot.skills, pendingToggles)
+        sessionSkillsReflectToggle(currentSnapshot.skills, pendingForSession)
       ) {
         pendingSkillTogglesByContextRef.current.delete(contextKey);
         setLoadedSkillsFallback(undefined);
@@ -11630,6 +11652,23 @@ export function App({
     !showFloatingTodos &&
     !pendingApproval &&
     !btwMessage;
+  const visibleComposerToolbarActions = useMemo<
+    readonly ComposerToolbarAction[]
+  >(() => {
+    if (composerToolbarActions) return composerToolbarActions;
+    const defaults =
+      isChatEmptyState || !environmentGitReplacementEnabled
+        ? DEFAULT_EMPTY_COMPOSER_TOOLBAR_ACTIONS
+        : DEFAULT_COMPOSER_TOOLBAR_ACTIONS;
+    return composerToolbarAdditionalActions?.length
+      ? [...defaults, ...composerToolbarAdditionalActions]
+      : defaults;
+  }, [
+    composerToolbarActions,
+    composerToolbarAdditionalActions,
+    environmentGitReplacementEnabled,
+    isChatEmptyState,
+  ]);
   const useMobileWelcomeMiddleLayout =
     isChatEmptyState && mobileWelcomeFooterMiddle;
   const showMobileWelcomeFooterMiddle =
@@ -13566,13 +13605,7 @@ export function App({
                           chatWidthMode={chatWidthMode}
                           showChatWidthToggle={!isChatEmptyState}
                           chatWidthToggleMin={chatWidthToggleMin}
-                          visibleToolbarActions={
-                            composerToolbarActions ??
-                            (isChatEmptyState ||
-                            !environmentGitReplacementEnabled
-                              ? DEFAULT_EMPTY_COMPOSER_TOOLBAR_ACTIONS
-                              : DEFAULT_COMPOSER_TOOLBAR_ACTIONS)
-                          }
+                          visibleToolbarActions={visibleComposerToolbarActions}
                           tokenCount={connection.tokenCount ?? 0}
                           contextWindow={connection.contextWindow ?? 0}
                           onShowContextUsage={handleShowContextUsage}

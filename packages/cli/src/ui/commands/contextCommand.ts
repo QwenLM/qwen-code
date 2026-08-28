@@ -35,7 +35,7 @@ import * as path from 'node:path';
 
 /**
  * Classify a token count against the three-tier compaction ladder. Mirrors
- * the gating logic in `chatCompressionService` / `geminiChat` so the
+ * the gating logic in `chatCompressionService` / `llmChat` so the
  * `/context` output's "current tier" label reflects exactly which tier the
  * runtime would treat the session as sitting in.
  */
@@ -107,15 +107,15 @@ export async function collectContextData(
   // (#5763). The active chat carries the correct per-session value; fall back
   // to the global singleton only when no chat exists yet (first /context,
   // --continue resume before any send).
-  const geminiClient = config.getGeminiClient?.();
-  const activeChat = geminiClient?.isInitialized?.()
-    ? geminiClient.getChat()
+  const llmClient = config.getLlmClient?.();
+  const activeChat = llmClient?.isInitialized?.()
+    ? llmClient.getChat()
     : undefined;
   const apiTotalTokens = activeChat
     ? activeChat.getLastPromptTokenCount()
     : uiTelemetryService.getLastPromptTokenCount();
   // Cached-content tokens have no per-chat mirror today (only the global
-  // singleton is written, geminiChat.ts), so this read stays global. It only
+  // singleton is written, llm-chat.ts), so this read stays global. It only
   // refines the messages-vs-cache split, not the headline total or tier.
   const apiCachedTokens = uiTelemetryService.getLastCachedContentTokenCount();
 

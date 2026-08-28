@@ -278,6 +278,8 @@ export function OpenTuiThemeDialog(props: OpenTuiThemeDialogProps) {
                 <diff
                   diff={THEME_PREVIEW_DIFF}
                   view="unified"
+                  filetype="python"
+                  syntaxStyle={SYNTAX}
                   fg={C.text}
                   height={layout.diffHeight}
                 />

@@ -12,6 +12,7 @@
 
 import { describe, it, expect, vi } from 'vitest';
 import type { Config } from '@qwen-code/qwen-code-core';
+import type { HistoryItemWithoutId } from '../types.js';
 import type { SlashCommand } from '../commands/types.js';
 import { CommandKind } from '../commands/types.js';
 import {
@@ -70,11 +71,16 @@ const registry: SlashCommand[] = [
   stub({ name: 'hidden', hidden: true }),
 ];
 
-describe('isSlashCommandInput (ink processor guard parity)', () => {
-  it('accepts / and ? prefixes', () => {
+describe('isSlashCommandInput (ink submission gate parity)', () => {
+  it('accepts /-prefixed input', () => {
     expect(isSlashCommandInput('/help')).toBe(true);
     expect(isSlashCommandInput('  /help args  ')).toBe(true);
-    expect(isSlashCommandInput('?')).toBe(true);
+  });
+
+  it('rejects ?-prefixed input — ink routes it to the model/btw path', () => {
+    expect(isSlashCommandInput('?')).toBe(false);
+    expect(isSlashCommandInput('?btw side question')).toBe(false);
+    expect(isSlashCommandInput('?stats')).toBe(false);
   });
 
   it('rejects plain prompts and path-like input', () => {
@@ -145,6 +151,30 @@ describe('executeSlashCommand (result mapping)', () => {
     });
   });
 
+  it('dialog results carry the OpenDialogActionReturn payload (R2-42)', async () => {
+    const commands = [
+      stub({
+        name: 'resume',
+        action: () => ({
+          type: 'dialog' as const,
+          dialog: 'resume' as const,
+          sessionId: 'session-abc-123',
+        }),
+      }),
+    ];
+    const effect = await executeSlashCommand(
+      '/resume session-abc-123',
+      commands,
+      env,
+    );
+    expect(effect).toEqual({
+      kind: 'dialog',
+      dialog: 'resume',
+      command: 'resume',
+      sessionId: 'session-abc-123',
+    });
+  });
+
   it('submit_prompt results stringify content', async () => {
     const effect = await executeSlashCommand('/ask', registry, env);
     expect(effect).toEqual({
@@ -204,6 +234,25 @@ describe('executeSlashCommand ink-processor guards (R1-96/100/101/102)', () => {
     expect(effect).toEqual({ kind: 'handled' });
   });
 
+  it('races non-cooperative actions against the abort signal (R1-18)', async () => {
+    const controller = new AbortController();
+    const commands = [
+      stub({
+        name: 'stuck',
+        action: () =>
+          new Promise(() => {
+            /* never settles on its own, like /compress mid-operation */
+          }),
+      }),
+    ];
+    const pending = executeSlashCommand('/stuck', commands, {
+      config: null,
+      abortSignal: controller.signal,
+    });
+    controller.abort();
+    await expect(pending).resolves.toEqual({ kind: 'handled' });
+  });
+
   it('defers stacked skill invocations instead of leaking the second skill', async () => {
     const skills = [
       stub({ name: 'feat-dev', kind: CommandKind.SKILL }),
@@ -237,6 +286,75 @@ describe('executeSlashCommand ink-processor guards (R1-96/100/101/102)', () => {
     expect(effect.messageType).toBe('info');
     expect(effect.content).toContain('Session Stats');
     expect(effect.content).toContain('Session duration: 9m');
+  });
+
+  it('surfaces added-item text alongside non-handled effects (R1-102)', async () => {
+    const commands = [
+      stub({
+        name: 'init',
+        action: (ctx) => {
+          ctx.ui.addItem(
+            { type: 'info', text: 'Empty QWEN.md created.' },
+            Date.now(),
+          );
+          return {
+            type: 'submit_prompt' as const,
+            content: 'analyze the project',
+          };
+        },
+      }),
+    ];
+    const effect = await executeSlashCommand('/init', commands, {
+      config: null,
+    });
+    expect(effect).toEqual({
+      kind: 'submit',
+      content: 'analyze the project',
+      notice: 'Empty QWEN.md created.',
+    });
+  });
+
+  it('projects message items instead of the generic deferral (R2-5)', async () => {
+    const commands = [
+      stub({
+        name: 'extensions',
+        action: (ctx) => {
+          ctx.ui.addItem(
+            { type: 'error', text: 'Unknown extensions source: bogus.' },
+            Date.now(),
+          );
+        },
+      }),
+    ];
+    const effect = await executeSlashCommand(
+      '/extensions explore bogus',
+      commands,
+      {
+        config: null,
+      },
+    );
+    expect(effect.kind).toBe('message');
+    if (effect.kind !== 'message') return;
+    expect(effect.content).toBe('Unknown extensions source: bogus.');
+    expect(effect.content).not.toContain('not yet available');
+  });
+
+  it('exposes env.history through the command context (R2-6)', async () => {
+    let observed: HistoryItemWithoutId[] | undefined;
+    const commands = [
+      stub({
+        name: 'scan',
+        action: (ctx) => {
+          observed = ctx.ui.history;
+        },
+      }),
+    ];
+    await executeSlashCommand('/scan', commands, {
+      config: null,
+      history: [{ type: 'error', text: 'boom' } as HistoryItemWithoutId],
+    });
+    expect(observed).toHaveLength(1);
+    expect((observed?.[0] as { text?: string })?.text).toBe('boom');
   });
 });
 

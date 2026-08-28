@@ -49,20 +49,29 @@ export interface KittyProbeOptions {
   /** Injectable for tests. */
   stdin?: ProbeStdin;
   stdout?: ProbeStdout;
-  /** Late-reply drain window after settlement (default 50ms). */
-  settleMs?: number;
 }
 
 const KITTY_QUERY = '\x1b[?u'; // progressive-enhancement query
 const DEVICE_ATTRIBUTES_QUERY = '\x1b[c'; // primary DA liveness query
 
-// Kitty answers CSI ? u with CSI ? <flags> u.
+// Kitty answers CSI ? u with CSI ? <flags> u. Real replies always carry a
+// flags parameter (\x1b[?0u even with no flags), so \d+ excludes the probe's
+// own query — in echo environments (PTY harnesses, CI) a canonical echo of
+// KITTY_QUERY would otherwise match and lock the renderer into kitty mode
+// on a terminal that never answers queries.
 // eslint-disable-next-line no-control-regex
-const KITTY_REPLY_RE = /\x1b\[\?\d*u/;
+const KITTY_REPLY_RE = /\x1b\[\?\d+u/;
 // Any primary-device-attributes reply (CSI ? … c) means a terminal answered
-// but does not speak kitty.
+// but does not speak kitty. DA_REPLY_RE needs no echo guard: its query
+// (\x1b[c) has no `?`, so the echoed query cannot match.
 // eslint-disable-next-line no-control-regex
 const DA_REPLY_RE = /\x1b\[\?[0-9;]*c/;
+
+// Genuine kitty/DA replies are tens of bytes. The probe keeps a small tail
+// window instead of the full stream so a PTY pushing non-matching bytes
+// during the probe window costs bounded memory and O(window) rescans, not
+// unbounded growth plus O(n) regex over the whole accumulation.
+const BUFFER_TAIL_BYTES = 256;
 
 /**
  * Resolves true when the terminal answers the kitty keyboard query within
@@ -73,7 +82,6 @@ export async function probeKittyKeyboardSupport(
   options?: KittyProbeOptions,
 ): Promise<boolean> {
   const timeoutMs = options?.timeoutMs ?? 200;
-  const settleMs = options?.settleMs ?? 50;
   const stdin = options?.stdin ?? process.stdin;
   const stdout = options?.stdout ?? process.stdout;
 
@@ -90,7 +98,6 @@ export async function probeKittyKeyboardSupport(
     let buffer = '';
     let settled = false;
     let timeoutId: ReturnType<typeof setTimeout> | undefined;
-    let settleTimer: ReturnType<typeof setTimeout> | undefined;
 
     const finish = (supported: boolean): void => {
       if (settled) return;
@@ -100,22 +107,20 @@ export async function probeKittyKeyboardSupport(
         timeoutId = undefined;
       }
       stdin.removeListener('data', onData);
-      // Consume any late-arriving terminal replies briefly so they do not
-      // leak into application input after we hand stdin back.
-      const drain = (): void => {};
-      stdin.on('data', drain);
-      settleTimer = setTimeout(() => {
-        stdin.removeListener('data', drain);
-        if (!originalRawMode && typeof stdin.setRawMode === 'function') {
-          stdin.setRawMode(false);
-        }
-        resolve(supported);
-      }, settleMs);
-      settleTimer.unref?.();
+      // Late replies are NOT consumed by this probe: an EventEmitter data
+      // listener cannot "eat" chunks from other listeners, so an empty drain
+      // would only discard bytes while the renderer has no listener yet.
+      // Instead, replies arriving after settlement flow to the renderer's
+      // input parser like any other terminal noise; genuine kitty/DA reply
+      // shapes are filtered by the key parser, not quarantined here.
+      if (!originalRawMode && typeof stdin.setRawMode === 'function') {
+        stdin.setRawMode(false);
+      }
+      resolve(supported);
     };
 
     const onData = (data: Buffer | string): void => {
-      buffer += data.toString();
+      buffer = (buffer + data.toString()).slice(-BUFFER_TAIL_BYTES);
       if (KITTY_REPLY_RE.test(buffer)) {
         finish(true);
         return;
