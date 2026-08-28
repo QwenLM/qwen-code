@@ -1386,6 +1386,17 @@ Recommended poll cadence: aligned with whatever already polls `/workspace/mcp`; 
       "userInvocable": false,
       "installedPath": "/home/alice/project/.qwen/skills/review/SKILL.md",
       "argumentHint": "[path]"
+    },
+    {
+      "kind": "skill",
+      "status": "ok",
+      "name": "database-review",
+      "description": "Review database changes",
+      "level": "extension",
+      "modelInvocable": true,
+      "installedPath": "/home/alice/.qwen/extensions/alibabacloud-database-suite/skills/database-review/SKILL.md",
+      "extensionName": "alibabacloud-database-suite",
+      "extensionDisplayName": "Alibaba Cloud Database Suite"
     }
   ]
 }
@@ -1402,6 +1413,11 @@ canonicalizing it. Current daemons emit it for every skill, while clients must
 tolerate its absence from older v1 daemons. Skill bodies, hooks, `skillRoot`,
 and other skill configuration remain excluded. `errors` is omitted when
 discovery succeeds.
+
+For extension-owned skills, `extensionName` is the canonical manifest name and
+is safe to use as the owner identity. `extensionDisplayName` is an optional,
+localized presentation value and may be non-unique. New clients should display
+`extensionDisplayName ?? extensionName`; older daemons omit the display field.
 
 Repeated reads are served from the last committed workspace snapshot,
 periodically revalidated against the child's in-memory cache. A read never
