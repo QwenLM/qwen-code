@@ -106,6 +106,22 @@ When `--max-total-sessions` rejects a fresh session, the same response shape is 
 
 Attaches to existing sessions are NOT counted toward the cap, so an idle daemon's reconnects keep working even when at-capacity.
 
+If the ACP channel initialization budget expires before `newSession` is dispatched, `POST /session` returns `504` with `Retry-After: 5` and:
+
+```json
+{
+  "error": "AcpSessionBridge initialize timed out after 10000ms",
+  "code": "init_timeout",
+  "errorKind": "init_timeout",
+  "retryable": true,
+  "sideEffectPossible": false,
+  "phase": "channel.initialize",
+  "timeoutMs": 10000
+}
+```
+
+The `sideEffectPossible: false` field is authoritative because channel initialization precedes the ACP `newSession` request. A client that understands this structured contract may retry after the advertised delay without risking a duplicate Session. Clients that classify all 5xx mutation responses as ambiguous remain conservatively fail-closed. Other timeouts do not inherit this contract.
+
 `RestoreInProgressError` — emitted by `POST /session/:id/load`, `POST /session/:id/resume`, or a caller-supplied-id `POST /session` when another registration already owns that id — returns `409` and:
 
 ```json

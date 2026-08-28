@@ -100,6 +100,7 @@ import {
 } from '@qwen-code/qwen-code-core';
 import * as qwenCore from '@qwen-code/qwen-code-core';
 import type { DaemonStatusProvider } from '@qwen-code/acp-bridge';
+import { BridgeTimeoutError } from '@qwen-code/acp-bridge/status';
 import {
   CancelSentinelCollisionError,
   InvalidClientIdError,
@@ -11150,6 +11151,32 @@ describe('createServeApp', () => {
   });
 
   describe('POST /session', () => {
+    it('returns a typed safe-retry error when channel initialization times out', async () => {
+      const bridge = fakeBridge({
+        spawnImpl: async () => {
+          throw new BridgeTimeoutError('initialize', 10_000);
+        },
+      });
+      const app = createServeApp(baseOpts, undefined, { bridge });
+
+      const res = await request(app)
+        .post('/session')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ cwd: WS_BOUND });
+
+      expect(res.status).toBe(504);
+      expect(res.headers['retry-after']).toBe('5');
+      expect(res.body).toEqual({
+        error: 'AcpSessionBridge initialize timed out after 10000ms',
+        code: 'init_timeout',
+        errorKind: 'init_timeout',
+        retryable: true,
+        sideEffectPossible: false,
+        phase: 'channel.initialize',
+        timeoutMs: 10_000,
+      });
+    });
+
     it('200 when cwd is omitted (falls back to bound workspace, #3803 §02)', async () => {
       // Legacy primary compatibility: clients may omit `cwd`, in which case
       // the route falls back to `opts.workspace ?? process.cwd()`.

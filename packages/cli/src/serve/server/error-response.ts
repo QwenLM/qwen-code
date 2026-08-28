@@ -18,6 +18,7 @@ import {
 } from '@qwen-code/qwen-code-core';
 import type { Response } from 'express';
 import { restoreRetryAfterSeconds } from '@qwen-code/acp-bridge/sessionRestoreTimeout';
+import { BridgeTimeoutError } from '@qwen-code/acp-bridge/status';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
   BranchWhilePromptActiveError,
@@ -196,6 +197,23 @@ export function sendBridgeError(
   ctx?: BridgeErrorContext,
   daemonLog?: DaemonLogger,
 ): void {
+  if (err instanceof BridgeTimeoutError && err.label === 'initialize') {
+    recordExpectedBridgeError(err, ctx, daemonLog);
+    res.set('Retry-After', '5');
+    // Initialization is attempted before newSession is dispatched, so clients
+    // that understand the structured body can safely distinguish this timeout
+    // from an ambiguous mutation outcome.
+    res.status(504).json({
+      error: err.message,
+      code: 'init_timeout',
+      errorKind: 'init_timeout',
+      retryable: true,
+      sideEffectPossible: false,
+      phase: 'channel.initialize',
+      timeoutMs: err.timeoutMs,
+    });
+    return;
+  }
   if (err instanceof SessionRestoreTimeoutError) {
     recordExpectedBridgeError(err, ctx, daemonLog);
     // The state this 504 leaves behind is the abandoned-restore fence, which
