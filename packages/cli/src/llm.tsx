@@ -60,7 +60,6 @@ import { ExtensionRefreshState } from './config/extension-refresh-state.js';
 import { initializeI18n, resolveLanguageSetting } from './i18n/index.js';
 import {
   setupStartupWorktree,
-  discardCreatedStartupWorktree,
   persistStartupWorktreeSidecar,
   buildStartupWorktreeNotice,
   type StartupWorktreeContext,
@@ -847,6 +846,30 @@ export async function main() {
     );
     process.exit(1);
   }
+
+  const hasAgentViewOneShotInput = (): boolean =>
+    argv.prompt !== undefined ||
+    argv.promptInteractive !== undefined ||
+    argv.query !== undefined ||
+    argv.inputFile !== undefined ||
+    argv.forkSession === true ||
+    !process.stdin.isTTY;
+  if (argv.resume !== undefined && cliConfig.isValidSessionId(argv.resume)) {
+    const { routeManagedAgentViewResume } = await import(
+      './startup/agent-view-resume.js'
+    );
+    if (
+      await routeManagedAgentViewResume(
+        argv.resume,
+        process.env,
+        hasAgentViewOneShotInput(),
+        settings.merged.experimental?.agentView === true,
+      )
+    ) {
+      process.exit(typeof process.exitCode === 'number' ? process.exitCode : 1);
+    }
+  }
+
   {
     const startupRes = await setupStartupWorktree(argv.worktree, {
       symlinkDirectories: settings.merged.worktree?.symlinkDirectories,
@@ -860,16 +883,8 @@ export async function main() {
     }
   }
 
-  const exitStartup = async (
-    code: number,
-    message?: string,
-  ): Promise<never> => {
+  const exitStartup = (code: number, message?: string): never => {
     if (message) writeStderrLine(message);
-    const cleanup = await discardCreatedStartupWorktree(startupWorktreeContext);
-    if (cleanup.error) {
-      writeStderrLine(`Failed to clean up startup worktree: ${cleanup.error}`);
-      code = 1;
-    }
     process.exit(code);
   };
 
@@ -1025,18 +1040,11 @@ export async function main() {
     const { routeManagedAgentViewResume } = await import(
       './startup/agent-view-resume.js'
     );
-    const hasOneShotInput =
-      argv.prompt !== undefined ||
-      argv.promptInteractive !== undefined ||
-      argv.query !== undefined ||
-      argv.inputFile !== undefined ||
-      argv.forkSession === true ||
-      !process.stdin.isTTY;
     if (
       await routeManagedAgentViewResume(
         argv.resume,
         process.env,
-        hasOneShotInput,
+        hasAgentViewOneShotInput(),
         settings.merged.experimental?.agentView === true,
       )
     ) {
@@ -1091,35 +1099,22 @@ export async function main() {
     settingsWatcher?.startWatching();
 
     markAcpStartup('configConstructionStart');
-    let config: Config;
-    try {
-      config = await loadCliConfig(
-        settings.merged,
-        argv.acp || argv.experimentalAcp
-          ? { ...argv, chatRecording: false }
-          : argv,
-        process.cwd(),
-        argv.extensions,
-        // Pass separated hooks for proper source attribution
-        {
-          userHooks: settings.getUserHooks(),
-          projectHooks: settings.getProjectHooks(),
-        },
-        buildDisabledSkillNamesProvider(settings),
-        undefined,
-        settingsWatcher,
-      );
-    } catch (error) {
-      const cleanup = await discardCreatedStartupWorktree(
-        startupWorktreeContext,
-      );
-      if (cleanup.error) {
-        writeStderrLine(
-          `Failed to clean up startup worktree: ${cleanup.error}`,
-        );
-      }
-      throw error;
-    }
+    const config: Config = await loadCliConfig(
+      settings.merged,
+      argv.acp || argv.experimentalAcp
+        ? { ...argv, chatRecording: false }
+        : argv,
+      process.cwd(),
+      argv.extensions,
+      // Pass separated hooks for proper source attribution
+      {
+        userHooks: settings.getUserHooks(),
+        projectHooks: settings.getProjectHooks(),
+      },
+      buildDisabledSkillNamesProvider(settings),
+      undefined,
+      settingsWatcher,
+    );
     markAcpStartup('configConstructionEnd');
     profileCheckpoint('after_load_cli_config');
 

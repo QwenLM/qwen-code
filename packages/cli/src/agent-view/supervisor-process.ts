@@ -1362,6 +1362,7 @@ class AgentViewSupervisorProcessHandler
           : undefined,
       this.store,
     );
+    forgetRetiredInitialPromptTokenDigest(sessionId, this.store);
   }
 
   private async finishRemovingSession(sessionId: string): Promise<void> {
@@ -4638,6 +4639,10 @@ async function retireAgentViewWorkerPids(
 ): Promise<void> {
   const tokenDigest = await clearAgentViewWorkerPids(sessionId, options);
   rememberRetiredInitialPromptTokenDigest(sessionId, tokenDigest, options);
+  const state = await readAgentViewSessionState(sessionId, options);
+  if (state?.initialPromptPending !== true) {
+    forgetRetiredInitialPromptTokenDigest(sessionId, options);
+  }
 }
 
 function hasRetiredInitialPromptTokenDigest(

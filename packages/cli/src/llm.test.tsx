@@ -34,7 +34,7 @@ import { clearCiEnv } from './test-utils/ci-env.js';
 import type { CliArgs } from './config/config.js';
 import { type LoadedSettings } from './config/settings.js';
 import { appEvents, AppEvent } from './utils/events.js';
-import { SessionService, type Config } from '@qwen-code/qwen-code-core';
+import type { Config } from '@qwen-code/qwen-code-core';
 import { ApprovalMode, OutputFormat } from '@qwen-code/qwen-code-core';
 import { EXTERNAL_TOOL_GUARD_REQUIRED_VALUE } from '@qwen-code/acp-bridge/externalToolGuard';
 
@@ -50,7 +50,7 @@ const mockStopNonInteractiveOpenAILogHousekeeping = vi.hoisted(() =>
   vi.fn(async () => {}),
 );
 const mockSetupStartupWorktree = vi.hoisted(() => vi.fn());
-const mockDiscardCreatedStartupWorktree = vi.hoisted(() => vi.fn());
+const mockRouteManagedAgentViewResume = vi.hoisted(() => vi.fn());
 const mockIsManagedAgentViewContinueBlocked = vi.hoisted(() => vi.fn());
 const mockIsManagedAgentViewResumeBlocked = vi.hoisted(() => vi.fn());
 const mockReleaseExitedManagedSessionForContinue = vi.hoisted(() => vi.fn());
@@ -224,14 +224,15 @@ vi.mock('./startup/worktreeStartup.js', async (importOriginal) => {
         ...(args as Parameters<typeof actual.setupStartupWorktree>),
       );
     },
-    discardCreatedStartupWorktree: (...args: unknown[]) => {
-      if (mockDiscardCreatedStartupWorktree.getMockImplementation()) {
-        return mockDiscardCreatedStartupWorktree(...args);
-      }
-      return actual.discardCreatedStartupWorktree(
-        ...(args as Parameters<typeof actual.discardCreatedStartupWorktree>),
-      );
-    },
+  };
+});
+
+vi.mock('./startup/agent-view-resume.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('./startup/agent-view-resume.js')>();
+  return {
+    ...actual,
+    routeManagedAgentViewResume: mockRouteManagedAgentViewResume,
   };
 });
 
@@ -347,12 +348,12 @@ describe('llm.tsx main function', () => {
     mockStartNonInteractiveOpenAILogHousekeeping.mockClear();
     mockStopNonInteractiveOpenAILogHousekeeping.mockClear();
     mockSetupStartupWorktree.mockReset();
-    mockDiscardCreatedStartupWorktree.mockReset();
+    mockRouteManagedAgentViewResume.mockReset();
     mockIsManagedAgentViewContinueBlocked.mockReset();
     mockIsManagedAgentViewResumeBlocked.mockReset();
     mockReleaseExitedManagedSessionForContinue.mockReset();
     mockSetupStartupWorktree.mockResolvedValue(null);
-    mockDiscardCreatedStartupWorktree.mockResolvedValue({});
+    mockRouteManagedAgentViewResume.mockResolvedValue(false);
     mockIsManagedAgentViewContinueBlocked.mockResolvedValue(false);
     mockIsManagedAgentViewResumeBlocked.mockResolvedValue(false);
     mockReleaseExitedManagedSessionForContinue.mockResolvedValue(true);
@@ -911,10 +912,10 @@ describe('llm.tsx main function', () => {
     );
   });
 
-  it('cleans up startup worktree when managed --continue release is temporarily unreadable', async () => {
+  it('routes an explicit managed resume before creating a startup worktree', async () => {
     const originalNoRelaunch = process.env['QWEN_CODE_NO_RELAUNCH'];
+    const originalExitCode = process.exitCode;
     process.env['QWEN_CODE_NO_RELAUNCH'] = 'true';
-    mockWriteStderrLine.mockClear();
 
     const processExitSpy = vi
       .spyOn(process, 'exit')
@@ -923,26 +924,11 @@ describe('llm.tsx main function', () => {
       });
     const { parseArguments } = await import('./config/config.js');
     const { loadSettings } = await import('./config/settings.js');
-    const { loadSandboxConfig } = await import('./config/sandboxConfig.js');
-
-    const context = {
-      worktreePath: '/tmp/qwen-startup-worktree',
-      slug: 'managed-continue',
-      branch: 'worktree-managed-continue',
-      repoRoot: '/tmp/repo',
-      originalBranch: 'main',
-      originalHeadCommit: 'HEAD',
-      isPullRequest: false,
-      wasReattached: false,
-      createdSymlinkPaths: [],
-    };
-    const releaseError = new Error(
-      'session state temporarily unreadable. Retry the operation.',
-    );
+    const sessionId = '123e4567-e89b-12d3-a456-426614174000';
 
     vi.mocked(parseArguments).mockResolvedValue({
-      continue: true,
-      worktree: 'managed-continue',
+      resume: sessionId,
+      worktree: 'managed-resume',
     } as unknown as CliArgs);
     vi.mocked(loadSettings).mockReturnValue({
       errors: [],
@@ -959,17 +945,10 @@ describe('llm.tsx main function', () => {
       getUserHooks: () => undefined,
       getProjectHooks: () => undefined,
     } as never);
-    vi.mocked(loadSandboxConfig).mockResolvedValue(undefined);
-    mockSetupStartupWorktree.mockResolvedValue({ ok: true, context });
-    mockDiscardCreatedStartupWorktree.mockResolvedValue({});
-    mockIsManagedAgentViewResumeBlocked.mockResolvedValue(false);
-    mockIsManagedAgentViewContinueBlocked.mockResolvedValue(false);
-    mockReleaseExitedManagedSessionForContinue.mockRejectedValue(releaseError);
-    vi.spyOn(SessionService.prototype, 'loadLastSession').mockResolvedValue({
-      conversation: {
-        sessionId: '123e4567-e89b-12d3-a456-426614174000',
-      },
-    } as never);
+    mockRouteManagedAgentViewResume.mockImplementation(async () => {
+      process.exitCode = 0;
+      return true;
+    });
 
     try {
       try {
@@ -980,14 +959,17 @@ describe('llm.tsx main function', () => {
         }
       }
 
-      expect(mockReleaseExitedManagedSessionForContinue).toHaveBeenCalledTimes(
-        2,
+      expect(mockRouteManagedAgentViewResume).toHaveBeenCalledWith(
+        sessionId,
+        process.env,
+        true,
+        true,
       );
-      expect(mockDiscardCreatedStartupWorktree).toHaveBeenCalledWith(context);
-      expect(mockWriteStderrLine).toHaveBeenCalledWith(releaseError.message);
-      expect(processExitSpy).toHaveBeenCalledWith(1);
+      expect(mockSetupStartupWorktree).not.toHaveBeenCalled();
+      expect(processExitSpy).toHaveBeenCalledWith(0);
     } finally {
       processExitSpy.mockRestore();
+      process.exitCode = originalExitCode;
       if (originalNoRelaunch !== undefined) {
         process.env['QWEN_CODE_NO_RELAUNCH'] = originalNoRelaunch;
       } else {
