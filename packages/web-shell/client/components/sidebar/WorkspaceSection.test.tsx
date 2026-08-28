@@ -134,6 +134,7 @@ function renderSection(
     sessionGroupCatalog: DaemonSessionGroupCatalog;
     sessionLiveStateEnabled: boolean;
     excludePinned: boolean;
+    searchQuery: string;
   }> = {},
 ): void {
   act(() => {
@@ -156,6 +157,7 @@ function renderSection(
           sessionGroupCatalog={overrides.sessionGroupCatalog}
           sessionLiveStateEnabled={overrides.sessionLiveStateEnabled}
           excludePinned={overrides.excludePinned}
+          searchQuery={overrides.searchQuery}
           sourceType={overrides.sourceType}
           channelGroupingEnabled={overrides.channelGroupingEnabled}
           ungroupedLabel="Ungrouped"
@@ -1278,5 +1280,40 @@ describe('WorkspaceSection pinned group members (issue #10391)', () => {
     expect(groupSection?.textContent).toContain('\u00b7 1');
     expect(groupSection?.textContent).toContain('Pinned member');
     expect(container.textContent ?? '').not.toContain('No sessions');
+  });
+
+  it('keeps a pinned member in its group while searching matches only it', async () => {
+    renderSection({
+      client: makeOrganizationClient([
+        {
+          sessionId: 'pinned-member',
+          displayName: 'Pinned member',
+          groupId: 'design-group',
+          isPinned: true,
+          pinnedAt: '2026-01-02T00:00:00.000Z',
+        },
+        {
+          sessionId: 'active-member',
+          displayName: 'Active member',
+          groupId: 'design-group',
+        },
+      ] as Array<Partial<DaemonSessionSummary>>),
+      expanded: true,
+      organizationEnabled: true,
+      excludePinned: true,
+      searchQuery: 'pinned',
+    });
+    await flush();
+
+    // The query matches only the pinned member, so group items must derive
+    // from the search-filtered list: it stays in its group while the
+    // non-matching member disappears.
+    const groupSection = container.querySelector<HTMLElement>(
+      'section[aria-label="Design"]',
+    );
+    expect(groupSection).not.toBeNull();
+    expect(groupSection?.textContent).toContain('\u00b7 1');
+    expect(groupSection?.textContent).toContain('Pinned member');
+    expect(groupSection?.textContent ?? '').not.toContain('Active member');
   });
 });

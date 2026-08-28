@@ -1204,4 +1204,61 @@ describe('WebShellSidebar pinned group members (issue #10391)', () => {
 
     workspaceActions.listSessionGroups.mockResolvedValue(defaultGroupsCatalog);
   });
+  it('drops a pinned member from its group when search only matches unpinned members', async () => {
+    mockDesignGroupCatalog();
+    const pinnedMember = makeSession('pinned-member', {
+      displayName: 'Pinned member',
+      groupId: 'design-group',
+      isPinned: true,
+      pinnedAt: '2026-01-02T00:00:00.000Z',
+    });
+    active.sessions = [
+      pinnedMember,
+      makeSession('active-member', {
+        displayName: 'Active member',
+        groupId: 'design-group',
+      }),
+    ];
+    active.data = active.sessions;
+    pinned.sessions = [pinnedMember];
+    pinned.data = pinned.sessions;
+
+    renderSidebar();
+    await flushSidebar();
+
+    const searchButton = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Search sessions"]',
+    );
+    expect(searchButton).not.toBeNull();
+    act(() => {
+      searchButton!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    await flushSidebar();
+    const searchInput = container.querySelector<HTMLInputElement>(
+      'input[aria-label="Search sessions"]',
+    );
+    expect(searchInput).not.toBeNull();
+    act(() => {
+      const setValue = Object.getOwnPropertyDescriptor(
+        window.HTMLInputElement.prototype,
+        'value',
+      )!.set!;
+      setValue.call(searchInput, 'Active member');
+      searchInput!.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await flushSidebar();
+
+    // The query matches only the unpinned member: the grouped bucket must
+    // read the search-filtered list, so the pinned member leaves the group
+    // instead of lingering as a stale row with a stale count.
+    const group = container.querySelector<HTMLElement>(
+      'section[aria-label="Design"]',
+    );
+    expect(group).not.toBeNull();
+    expect(group?.textContent).toContain('\u00b7 1');
+    expect(group?.textContent).toContain('Active member');
+    expect(group?.textContent ?? '').not.toContain('Pinned member');
+
+    workspaceActions.listSessionGroups.mockResolvedValue(defaultGroupsCatalog);
+  });
 });
