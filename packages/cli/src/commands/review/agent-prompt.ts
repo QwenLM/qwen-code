@@ -3500,6 +3500,9 @@ function runAgentPrompt(args: AgentPromptArgs): void {
     if (role === 'fix-audit') {
       let hunks: string;
       try {
+        // utf8 on purpose: the artifact holds git's raw patch bytes, and
+        // the prompt is the lossy copy — fidelity is preserved at the
+        // source, not here.
         hunks = readFileSync(args.hunks as string, 'utf8');
       } catch (err) {
         throw new Error(

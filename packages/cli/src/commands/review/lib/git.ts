@@ -8,7 +8,7 @@
 // `execFileSync` pattern as `lib/gh.ts` so quoting / escaping is consistent
 // across platforms.
 
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { redirectedAncestor, sanitizedGitEnv } from './worktree.js';
 import { existsSync, lstatSync, rmSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
@@ -74,6 +74,36 @@ export function gitWithEnv(
   })
     .replace(/\r\n/g, '\n')
     .trim();
+}
+
+/**
+ * `gitWithEnv` with stderr CAPTURED instead of inherited and the exit
+ * status KEPT instead of thrown. The one caller is `fix-delta`'s `add -A`,
+ * which must rule on the child's own notes: an unlistable directory exits 0
+ * with only a warning and leaves its content silently absent from the
+ * index, and a co-occurring failure hides behind a tolerated neighbour's
+ * stderr — neither shape is reachable through a try/catch on the exit
+ * status.
+ */
+export function gitWithEnvReport(
+  extraEnv: Record<string, string>,
+  args: string[],
+): { stdout: string; stderr: string; status: number } {
+  const opts = gitOpts();
+  // spawnSync, not execFileSync: the verdicts need stderr when the child
+  // EXITS 0 too — `execFileSync` only hands back stderr on the throw path,
+  // which is exactly where the exit-0 warning shape never reaches.
+  const result = spawnSync('git', args, {
+    ...opts,
+    env: { ...opts.env, ...extraEnv },
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  return {
+    stdout: result.stdout ?? '',
+    stderr: result.stderr ?? '',
+    status: result.status ?? -1,
+  };
 }
 
 /**

@@ -32,6 +32,7 @@ vi.mock('node:os', async (importOriginal) => {
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import { execFileSync } from 'node:child_process';
 import {
+  chmodSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -47,6 +48,7 @@ import { join } from 'node:path';
 import type { Mock } from 'vitest';
 import yargs from 'yargs';
 import {
+  IGNORED_WALK_BUDGET,
   fixDeltaCommand,
   runFixDelta,
   snapshotWorkingTree,
@@ -488,9 +490,18 @@ describe('fix-delta', () => {
     gitAt(emb, 'commit', '-qm', 'init');
     runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
 
-    // (a) No edits: no false pre-existing note beside the all-clear.
+    // (a) No edits: no false pre-existing note beside the all-clear — and
+    // the all-clear is HEDGED to what the capture can see: edits inside
+    // gitignored paths are outside the model, and the bare claim beside
+    // them is the defect this pins.
     runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() });
-    expect(stderr().some((l) => l.includes('nothing was applied'))).toBe(true);
+    expect(
+      stderr().some((l) =>
+        l.includes('the tree is unchanged since the snapshot'),
+      ),
+    ).toBe(true);
+    expect(stderr().some((l) => l.includes('gitignored'))).toBe(true);
+    expect(stderr().some((l) => l.includes('nothing was applied'))).toBe(false);
     expect(stderr().some((l) => l.includes('pre-existing'))).toBe(false);
 
     // (b) A fix editing inside the nested repo, uncommitted there.
@@ -1110,9 +1121,15 @@ describe('fix-delta', () => {
     gitAt(inner, 'commit', '-qm', 'init');
     runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
 
-    // A no-op run against a CLEAN hidden repo keeps the all-clear.
+    // A no-op run against a CLEAN hidden repo keeps the all-clear —
+    // hedged to the capture's scope, but still the all-clear.
     runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() });
-    expect(stderr().some((l) => l.includes('nothing was applied'))).toBe(true);
+    expect(
+      stderr().some((l) =>
+        l.includes('the tree is unchanged since the snapshot'),
+      ),
+    ).toBe(true);
+    expect(stderr().some((l) => l.includes('gitignored'))).toBe(true);
     expect(stderr().some((l) => l.includes('pre-existing'))).toBe(false);
 
     // …but a fix editing inside it is disclosed.
@@ -1261,6 +1278,263 @@ describe('fix-delta', () => {
     } finally {
       rmSync(other, { recursive: true, force: true });
     }
+  });
+
+  it('keeps the hunks byte-faithful for non-UTF-8 content and names', () => {
+    // The artifact must stay git's patch itself: a lossy `.toString('utf8')`
+    // roundtrip rewrites every non-UTF-8 byte of the fix to U+FFFD — the
+    // hunks stop being `git apply`-replayable — and the same roundtrip
+    // mangles every non-UTF-8 name in the summary.
+    const latinName = Buffer.from([0x62, 0xe9]); // latin-1 'bé'
+    writeFileSync(
+      join(repo, 'latin.txt'),
+      Buffer.from([0x63, 0x61, 0x66, 0xe9]), // latin-1 'café'
+    );
+    writeFileSync(
+      Buffer.concat([Buffer.from(repo), Buffer.from('/'), latinName]),
+      'x\n',
+    );
+    git('add', '-A');
+    git('commit', '-qm', 'latin bytes');
+    runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
+    writeFileSync(
+      join(repo, 'latin.txt'),
+      Buffer.concat([
+        Buffer.from([0x63, 0x61, 0x66, 0xe9]),
+        Buffer.from(' noir\n'),
+      ]),
+    );
+    writeFileSync(
+      Buffer.concat([Buffer.from(repo), Buffer.from('/'), latinName]),
+      'y\n',
+    );
+    runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() });
+
+    const hunks = readFileSync(hunksFile());
+    expect(hunks.includes(0xe9)).toBe(true);
+    expect(hunks.includes(Buffer.from([0xef, 0xbf, 0xbd]))).toBe(false);
+    expect(stderr().some((l) => l.includes(latinName.toString('latin1')))).toBe(
+      true,
+    );
+  });
+
+  it.skipIf(process.platform === 'win32' || process.geteuid?.() === 0)(
+    'refuses a capture an unreadable directory silently truncated',
+    () => {
+      // `git add` prints `warning: could not open directory ... Permission
+      // denied` over a mode-000 directory and EXITS 0, leaving the
+      // directory's content absent from the index — a try/catch on the exit
+      // status never runs, so the capture is ruled on the child's own notes.
+      runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
+      const blocked = join(repo, 'blocked');
+      mkdirSync(blocked);
+      writeFileSync(join(blocked, 'fix.txt'), 'the fix\n');
+      chmodSync(blocked, 0o000);
+      try {
+        expect(() =>
+          runFixDelta({
+            snapshot: false,
+            since: snapshotFile(),
+            out: hunksFile(),
+          }),
+        ).toThrow(/could not capture the whole tree/);
+      } finally {
+        chmodSync(blocked, 0o755);
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32' || process.geteuid?.() === 0)(
+    'refuses when a tolerated failure masks an unreadable directory',
+    () => {
+      // The zero-commit repo's tolerated error beside an unreadable
+      // directory: a substring match over the aggregate message tolerated
+      // the WHOLE failure and silently dropped `blocked/**`. Line-by-line,
+      // the permission warning finds no tolerance.
+      runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
+      const nested = join(repo, 'nested');
+      mkdirSync(nested);
+      gitAt(nested, 'init', '-q', '-b', 'main');
+      const blocked = join(repo, 'blocked');
+      mkdirSync(blocked);
+      writeFileSync(join(blocked, 'fix.txt'), 'the fix\n');
+      chmodSync(blocked, 0o000);
+      try {
+        expect(() =>
+          runFixDelta({
+            snapshot: false,
+            since: snapshotFile(),
+            out: hunksFile(),
+          }),
+        ).toThrow(/could not capture the whole tree/);
+      } finally {
+        chmodSync(blocked, 0o755);
+      }
+    },
+  );
+
+  it('survives the line-ending warnings under core.autocrlf', () => {
+    // The normalisation warnings announce the stored form — the file IS
+    // added. They find tolerance, or every capture under `core.autocrlf`
+    // refuses.
+    git('config', 'core.autocrlf', 'true');
+    runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
+    writeFileSync(join(repo, 'a.ts'), 'export const x = 2;\n');
+    runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() });
+    expect(readFileSync(hunksFile(), 'utf8')).toContain('+export const x = 2;');
+  });
+
+  it.skipIf(process.platform === 'win32' || process.geteuid?.() === 0)(
+    'discloses an unlistable directory instead of silently skipping it',
+    () => {
+      // A directory the walk cannot OPEN hides whatever repositories sit
+      // under it; skipping it silently turned an interior edit into a bare
+      // all-clear. The walk reports what it cannot open, and the failure
+      // direction over-warns.
+      writeFileSync(join(repo, '.gitignore'), 'node_modules\nig/\n');
+      git('add', '-A');
+      git('commit', '-qm', 'ignore ig');
+      const blocked = join(repo, 'ig', 'blocked');
+      const inner = join(blocked, 'more', 'inner');
+      mkdirSync(inner, { recursive: true });
+      gitAt(inner, 'init', '-q', '-b', 'main');
+      gitAt(inner, 'config', 'user.email', 't@t.t');
+      gitAt(inner, 'config', 'user.name', 't');
+      writeFileSync(join(inner, 'f.txt'), 'inside\n');
+      gitAt(inner, 'add', '-A');
+      gitAt(inner, 'commit', '-qm', 'init');
+      chmodSync(blocked, 0o111); // traversable, not listable
+      try {
+        runFixDelta({
+          snapshot: true,
+          since: undefined,
+          out: snapshotFile(),
+        });
+        writeFileSync(join(inner, 'f.txt'), 'the fix — uncommitted inside\n');
+        runFixDelta({
+          snapshot: false,
+          since: snapshotFile(),
+          out: hunksFile(),
+        });
+        const lines = stderr();
+        expect(
+          lines.some(
+            (l) => l.includes('ig/blocked') && l.includes('cannot see'),
+          ),
+        ).toBe(true);
+        expect(lines.some((l) => l.includes('nothing was applied'))).toBe(
+          false,
+        );
+      } finally {
+        chmodSync(blocked, 0o755);
+      }
+    },
+  );
+
+  it("does not re-discover the review's own worktrees under an ignored .qwen", () => {
+    // A repository ignoring `.qwen` collapses it to one `!` entry; the walk
+    // under it then reaches the review's own worktrees, where no pathspec
+    // can follow — the discoveries are checked against the same exclusion
+    // families, or the snapshot records the review's own bookkeeping as
+    // blind-spot dirt.
+    writeFileSync(join(repo, '.gitignore'), 'node_modules\n.qwen/*\n');
+    git('add', '-A');
+    git('commit', '-qm', 'ignore .qwen');
+    git('worktree', 'add', '--detach', join('.qwen', 'tmp', 'review-pr-1'));
+    writeFileSync(
+      join(repo, '.qwen', 'tmp', 'review-pr-1', 'stray.txt'),
+      'x\n',
+    );
+    runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
+    const snap = JSON.parse(
+      readFileSync(snapshotFile(), 'utf8'),
+    ) as FixSnapshot;
+    expect(snap.dirtySubmodules.some((p) => p.includes('review-pr-1'))).toBe(
+      false,
+    );
+    writeFileSync(
+      join(repo, '.qwen', 'tmp', 'review-pr-1', 'stray.txt'),
+      'y\n',
+    );
+    runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() });
+    const lines = stderr();
+    expect(lines.some((l) => l.includes('review-pr-1'))).toBe(false);
+    expect(lines.some((l) => l.includes('cannot see'))).toBe(false);
+    expect(lines.at(-1)).toContain('the tree is unchanged since the snapshot');
+  });
+
+  it('never records an unconfirmed exhaustion stamp in the baseline', () => {
+    // Past the walk budget the directory is UNRESOLVED, not confirmed
+    // dirt: stamped into the baseline, it would filter a fix's real
+    // interior edit out of the warning into a false all-clear — the exact
+    // transition this pins.
+    writeFileSync(join(repo, '.gitignore'), 'node_modules\nbig/\n');
+    git('add', '-A');
+    git('commit', '-qm', 'ignore big');
+    const big = join(repo, 'big');
+    mkdirSync(big);
+    const inner = join(big, 'inner');
+    mkdirSync(inner);
+    gitAt(inner, 'init', '-q', '-b', 'main');
+    for (let i = 0; i <= IGNORED_WALK_BUDGET; i++) {
+      writeFileSync(join(big, `e${i}`), '');
+    }
+    runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
+    const snap = JSON.parse(
+      readFileSync(snapshotFile(), 'utf8'),
+    ) as FixSnapshot;
+    expect(snap.dirtySubmodules).not.toContain('big');
+    writeFileSync(join(inner, 'f.txt'), 'the fix — uncommitted inside\n');
+    runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() });
+    const lines = stderr();
+    expect(
+      lines.some((l) => /\bbig\b/.test(l) && l.includes('cannot see')),
+    ).toBe(true);
+    expect(lines.some((l) => l.includes('nothing was applied'))).toBe(false);
+  }, 30_000);
+
+  it('hedges the all-clear to what the capture can see, beside gitignored edits', () => {
+    // `add -A` never records ignored paths — an edit inside one leaves both
+    // trees byte-identical, and the bare "nothing was applied" beside it is
+    // false. The claim is hedged to the model's scope.
+    writeFileSync(join(repo, '.gitignore'), 'node_modules\n.env\nigdir/\n');
+    writeFileSync(join(repo, '.env'), 'SECRET=v1\n');
+    mkdirSync(join(repo, 'igdir'));
+    writeFileSync(join(repo, 'igdir', 'f.txt'), 'v1\n');
+    git('add', '-A');
+    git('commit', '-qm', 'ignored fixtures');
+    runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
+    writeFileSync(join(repo, '.env'), 'SECRET=v2\n');
+    writeFileSync(join(repo, 'igdir', 'f.txt'), 'v2\n');
+    runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() });
+    expect(readFileSync(hunksFile(), 'utf8')).toBe('');
+    const last = stderr().at(-1) ?? '';
+    expect(last).toContain('the tree is unchanged since the snapshot');
+    expect(last).toContain('gitignored');
+    expect(last).not.toContain('nothing was applied');
+  });
+
+  it('does not call a baseline repo cleaned when the since-time probe cannot run', () => {
+    // A repository dirty at snapshot time whose probe FAILS at comparison
+    // time is unresolved, not gone — the "gone now" note would claim a
+    // content change the model never saw.
+    const emb = join(repo, 'emb');
+    mkdirSync(emb);
+    gitAt(emb, 'init', '-q', '-b', 'main');
+    gitAt(emb, 'config', 'user.email', 't@t.t');
+    gitAt(emb, 'config', 'user.name', 't');
+    writeFileSync(join(emb, 'f.txt'), 'committed inside\n');
+    gitAt(emb, 'add', '-A');
+    gitAt(emb, 'commit', '-qm', 'init');
+    writeFileSync(join(emb, 'f.txt'), 'dirt at snapshot time\n');
+    runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
+    writeFileSync(join(emb, '.git', 'index'), 'garbage\n');
+    runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() });
+    const lines = stderr();
+    expect(
+      lines.some((l) => /\bemb\b/.test(l) && l.includes('could not resolve')),
+    ).toBe(true);
+    expect(lines.some((l) => l.includes('gone now'))).toBe(false);
   });
 
   it('is wired through yargs: --snapshot / --since are the modes, --out is required', async () => {
