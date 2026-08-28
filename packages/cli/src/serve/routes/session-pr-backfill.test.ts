@@ -449,7 +449,6 @@ describe('backfillWorkspaceSessionPrs', () => {
       overrides: Partial<AoneMrBackend> = {},
     ): AoneMrBackend {
       return {
-        list: vi.fn(async () => []),
         view: vi.fn(async (repoPath: string, id: number) => ({
           number: id,
           url: `https://code.alibaba-inc.com/${repoPath}/codereview/${id}`,

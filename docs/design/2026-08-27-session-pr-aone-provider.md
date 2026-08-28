@@ -128,22 +128,29 @@ above; tests substitute fakes.
 
 ### Backfill changes (`session-pr-backfill.ts`)
 
-Per workspace, after candidate collection (unchanged):
+> Updated with #9739: backfill's sources are the `/review <N|#N|url>`
+> commands the user typed and the worktree `pr-<N>` convention — on EVERY
+> platform. Transcript-branch mapping was removed as measured noise on
+> GitHub and is not reintroduced for Aone, so `a1 repo mr list` is no
+> longer on backfill's call path (`listAoneMergeRequests` stays as the
+> exec-layer primitive; the injected `AoneMrBackend` seam is view-only).
+
+Per workspace, after candidate collection:
 
 - GitHub workspace → exactly today's code path.
 - Aone workspace:
-  - Branch mapping: `listAoneMergeRequests` for `opened` then `merged`,
-    `AONE_BACKFILL_PAGES_PER_STATE` = 3 pages each (60 newest MRs per
-    state — a documented window vs gh's single 500-entry call; recent MRs are
-    the ones sessions map to). Same highest-number-wins rule for reused head
-    branches; same default-branch exclusion (`getDefaultBranch` is git-local).
-    AGit-Flow SHA heads simply never match transcript branches.
-  - URL resolution: NEVER fabricate. The `pr-<N>` convention number AND every
-    branch-mapped number that is newly bound this run is resolved through
-    `viewAoneMergeRequest` (the only sanctioned URL source), capped at
-    `AONE_MAX_MR_VIEW_CALLS_PER_RUN` = 25 unique numbers (the same constant
-    bounds the refresh sweep); the excess counts as `unresolved` and the
-    next run retries it.
+  - Candidates: sessions with a `/review` command or a `pr-<N>` worktree
+    sidecar, plus — Aone only — any session already holding a PR sidecar,
+    so the legacy repair below reaches bindings whose worktree sidecar is
+    gone.
+  - URL resolution: NEVER fabricate. Every planned number (`/review`
+    numbers and the convention number) that is newly bound this run is
+    resolved through `viewAoneMergeRequest` (the only sanctioned URL
+    source), capped at `AONE_MAX_MR_VIEW_CALLS_PER_RUN` = 25 unique numbers
+    (the same constant bounds the refresh sweep); the excess counts as
+    `unresolved` and the next run retries it. `/review <url>` forms only
+    recognise `/pull/<N>` URLs, so Aone `codereview/<id>` links are not a
+    form source (a bare `/review <id>` is).
   - Same-PR identity on Aone fails CLOSED: an existing entry passes the
     guard only when it is provably one of this repo's own MRs — either
     mr-view-attested this run, or matching the exact detailUrl SHAPE for
@@ -167,12 +174,10 @@ Per workspace, after candidate collection (unchanged):
     `detailUrl` + state (createdAt preserved). Without this they can never
     match a fetched URL — frozen state and one wasted view call per refresh
     sweep, forever.
-  - A failed `mr list` skips branch mapping for the run (the
-    `ghAvailable: false` degraded mode) while convention bindings survive; a
-    failed `mr view` leaves that number unresolved.
-  - The `getRemoteWebUrl` + `/pull/<N>` fallback applies to GitHub only.
-- Response shape (wire): additive fields only — `platform: 'github' | 'aone'`
-  per workspace result and `aoneAvailable?: boolean` mirroring `ghAvailable`.
+  - A failed `mr view` leaves that number unresolved; the remote web URL
+    - `/pull/<N>` fallback applies to GitHub only.
+- Response shape (wire): one additive field — `platform: 'github' | 'aone'`
+  per workspace result; `ghAvailable` is reported on GitHub only.
 
 ### Refresh changes (`session-pr-refresh.ts`)
 
@@ -248,16 +253,16 @@ and serve → commands imports have precedent (the channel modules).
   feature with its own CI-rollup/review-decision fields.
 - Creating MRs on Aone from the Git dialog.
 - Detecting CLOSED Aone MRs (a1 cannot list them); reopen self-heals.
-- AGit-Flow SHA-head attribution (nothing to match against; convention/slug
-  bindings are unaffected).
+- Transcript-branch → MR mapping (removed as a source on every platform by
+  #9739); AGit-Flow SHA heads are therefore moot.
 - Any change to manual binding, the sidecar schema, or the bridge/ACP wire
   shapes.
 
 ## Risks / open questions
 
-- **Latency**: a large Aone workspace's backfill serializes up to ~6 list
-  calls + ≤25 view calls (each ≤20s timeout, typically ~1s). The route is a
-  manually-triggered maintenance operation; acceptable, documented.
+- **Latency**: a large Aone workspace's backfill serializes ≤25 view calls
+  (each ≤20s timeout, typically ~1s). The route is a manually-triggered
+  maintenance operation; acceptable, documented.
 - **`accepted` semantics**: treated as `open` (approved but unmerged). If
   Aone later distinguishes it in the badge, revisit.
 - **Closed-state string** was never observed in probes; the mapping is

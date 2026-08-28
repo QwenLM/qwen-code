@@ -265,7 +265,6 @@ describe('refreshWorkspaceSessionPrStates', () => {
       overrides: Partial<AoneMrBackend> = {},
     ): AoneMrBackend {
       return {
-        list: vi.fn(async () => []),
         view: vi.fn(async (_repoPath: string, id: number) => ({
           number: id,
           url: AONE_URL,
@@ -1663,7 +1662,7 @@ describe('startSessionPrRefreshTimer', () => {
         state: 'open' as const,
       };
     });
-    const backend: AoneMrBackend = { list: vi.fn(async () => []), view };
+    const backend: AoneMrBackend = { view };
     const registry = {
       listAll: () => [runtime],
     } as unknown as WorkspaceRegistry;
@@ -1715,7 +1714,7 @@ describe('startSessionPrRefreshTimer', () => {
         state: 'open' as const,
       };
     });
-    const backend: AoneMrBackend = { list: vi.fn(async () => []), view };
+    const backend: AoneMrBackend = { view };
     const runtimes: WorkspaceRuntime[] = [runtime];
     const registry = {
       listAll: () => runtimes,
@@ -1787,7 +1786,7 @@ describe('startSessionPrRefreshTimer', () => {
         state: 'open' as const,
       };
     });
-    const backend: AoneMrBackend = { list: vi.fn(async () => []), view };
+    const backend: AoneMrBackend = { view };
     const registry = {
       listAll: () => [runtime],
     } as unknown as WorkspaceRegistry;
@@ -1852,7 +1851,7 @@ describe('startSessionPrRefreshTimer', () => {
         state: 'open' as const,
       };
     });
-    const backend: AoneMrBackend = { list: vi.fn(async () => []), view };
+    const backend: AoneMrBackend = { view };
     const registry = {
       listAll: () => [runtime],
     } as unknown as WorkspaceRegistry;
