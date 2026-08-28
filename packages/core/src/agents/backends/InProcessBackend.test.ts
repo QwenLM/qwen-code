@@ -352,6 +352,69 @@ describe('InProcessBackend', () => {
     expect(registries.size).toBe(sizeBefore);
   });
 
+  it('stopAgent keeps the handle readable for post-stop inspection while freeing the id for respawn', async () => {
+    // ArenaManager resolves transcripts through getAgent after the
+    // arena timeout path stops its agents (collectResults ->
+    // getAgentTranscript). Deleting the handle in stopAgent silently
+    // dropped those reads; retention must also keep respawns working.
+    await backend.init();
+    await backend.spawnAgent(createSpawnConfig('agent-1'));
+    const agent = backend.getAgent('agent-1');
+    expect(agent).toBeDefined();
+
+    backend.stopAgent('agent-1');
+
+    const retained = backend.getAgent('agent-1');
+    expect(retained).toBeDefined();
+    expect(retained).toBe(agent);
+    expect(retained!.getMessages()).toEqual(expect.any(Array));
+
+    // Same-id respawn still succeeds and replaces the retained handle.
+    await backend.spawnAgent(createSpawnConfig('agent-1'));
+    const respawned = backend.getAgent('agent-1');
+    expect(respawned).toBeDefined();
+    expect(respawned).not.toBe(agent);
+
+    // The respawned agent is live again: input and switching work.
+    expect(backend.writeToAgent('agent-1', 'follow-up')).toBe(true);
+    backend.switchTo('agent-1');
+    expect(backend.getActiveAgentId()).toBe('agent-1');
+  });
+
+  it('stopAgent reassigns the active agent and removes the stopped id from navigation', async () => {
+    // Mutation pin for the stopAgent roster bookkeeping: without the
+    // agentOrder splice a same-id respawn duplicates the entry and
+    // navigate() wrap-around skews; without the activeAgentId
+    // reassignment, forwardInput resolves to a stopped agent and
+    // typed input is silently dropped.
+    await backend.init();
+    await backend.spawnAgent(createSpawnConfig('agent-1'));
+    await backend.spawnAgent(createSpawnConfig('agent-2'));
+    expect(backend.getActiveAgentId()).toBe('agent-1');
+
+    backend.stopAgent('agent-1');
+
+    expect(backend.getActiveAgentId()).toBe('agent-2');
+    expect(backend.forwardInput('typed input')).toBe(true);
+    expect(backend.writeToAgent('agent-1', 'to a stopped agent')).toBe(false);
+
+    // Switching back to the stopped agent must not stick the roster
+    // on a dead handle (enqueueMessage would restart its run loop).
+    backend.switchTo('agent-1');
+    expect(backend.getActiveAgentId()).toBe('agent-2');
+
+    // Same-id respawn must not duplicate the roster entry: navigation
+    // cycles over exactly the two surviving ids.
+    await backend.spawnAgent(createSpawnConfig('agent-1'));
+    expect(backend.getActiveAgentId()).toBe('agent-2');
+    backend.switchToNext();
+    expect(backend.getActiveAgentId()).toBe('agent-1');
+    backend.switchToNext();
+    expect(backend.getActiveAgentId()).toBe('agent-2');
+    backend.switchToPrevious();
+    expect(backend.getActiveAgentId()).toBe('agent-1');
+  });
+
   it('cleanup disposes all remaining registries (covers the in-flight shutdown path)', async () => {
     // Even when stopAgent has not been called for every agent (fast-path
     // shutdown / tab close), cleanup must drain the Map so listeners

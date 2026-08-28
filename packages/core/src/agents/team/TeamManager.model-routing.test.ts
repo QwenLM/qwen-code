@@ -407,14 +407,16 @@ describe('TeamManager teammate model routing (#10071)', () => {
       /could not create a dedicated ContentGenerator for model "claude-worker" \(anthropic\): The API key for Anthropic is not set/,
     );
 
-    // Rollback must run: no member persisted, and the backend released
-    // the agent handle during stopAgent — keeping it (the old behaviour
-    // held it until cleanup()) permanently blocks respawning the same
-    // teammate name, masking this route failure behind 'Agent "X"
-    // already exists.' on every retry.
+    // Rollback must run: no member persisted, and the rolled-back id
+    // must stay respawnable — otherwise every retry dies with 'Agent
+    // "X" already exists.' masking this route failure. The stopped
+    // handle itself stays readable for post-stop inspection (Arena
+    // reads transcripts through it on the timeout path); the backend
+    // tracks the stop separately so the respawn gate still clears, as
+    // pinned by the retry test below.
     expect(teamManager.getTeamFile().members).toHaveLength(0);
     const agentId = formatAgentId('w6', TEAM_NAME);
-    expect(backend.getAgent(agentId)).toBeUndefined();
+    expect(backend.getAgent(agentId)?.getStatus()).toBe(AgentStatus.CANCELLED);
   });
 
   it('releases a rolled-back teammate name so the same spawn can retry', async () => {
