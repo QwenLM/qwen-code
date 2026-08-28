@@ -88,7 +88,22 @@ export function registerNewCommands(
   disposables.push(
     vscode.commands.registerCommand(
       closeDiffCommand,
-      async (filePath: string) => diffManager.closeDiff(filePath, true),
+      async (filePath: string) => {
+        // Mirror showDiffCommand: diffs opened with a workspace-relative
+        // path are stored under the resolved absolute path, so closing
+        // them requires the same resolution (issue #10372).
+        let absolutePath = filePath;
+        if (shouldResolveAgainstWorkspace(filePath)) {
+          const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+          if (workspaceFolder) {
+            absolutePath = vscode.Uri.joinPath(
+              workspaceFolder.uri,
+              filePath,
+            ).fsPath;
+          }
+        }
+        await diffManager.closeDiff(absolutePath, true);
+      },
     ),
   );
 

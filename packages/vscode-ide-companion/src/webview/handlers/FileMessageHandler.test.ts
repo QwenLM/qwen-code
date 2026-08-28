@@ -8,6 +8,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { QwenAgentManager } from '../../services/qwenAgentManager.js';
 import type { ConversationStore } from '../../services/conversationStore.js';
 import { FileMessageHandler } from './FileMessageHandler.js';
+import { DiffContentProvider, DiffManager } from '../../diff-manager.js';
+import { registerNewCommands } from '../../commands/index.js';
 import * as vscode from 'vscode';
 
 const shouldIgnoreFileMock = vi.hoisted(() => vi.fn());
@@ -17,16 +19,48 @@ const fileSearchMock = vi.hoisted(() => ({
 }));
 
 const vscodeMock = vi.hoisted(() => {
+  const commandHandlers = new Map<string, (...args: unknown[]) => unknown>();
+
   class Uri {
     fsPath: string;
-    constructor(fsPath: string) {
+    scheme: string;
+    query: string;
+    constructor(fsPath: string, scheme = 'file', query = '') {
       this.fsPath = fsPath;
+      this.scheme = scheme;
+      this.query = query;
+    }
+    with(change: { scheme?: string; query?: string }) {
+      return new Uri(
+        this.fsPath,
+        change.scheme ?? this.scheme,
+        change.query ?? this.query,
+      );
+    }
+    toString() {
+      return `${this.scheme}://${this.fsPath}${this.query ? `?${this.query}` : ''}`;
     }
     static file(fsPath: string) {
       return new Uri(fsPath);
     }
     static joinPath(base: Uri, ...pathSegments: string[]) {
       return new Uri(`${base.fsPath}/${pathSegments.join('/')}`);
+    }
+  }
+
+  class EventEmitter {
+    private readonly listeners = new Set<(e: unknown) => void>();
+    event = (listener: (e: unknown) => void) => {
+      this.listeners.add(listener);
+      return { dispose: () => this.listeners.delete(listener) };
+    };
+    fire(e: unknown) {
+      for (const listener of this.listeners) {
+        listener(e);
+      }
+    }
+    dispose() {
+      this.listeners.clear();
     }
   }
 
@@ -62,11 +96,25 @@ const vscodeMock = vi.hoisted(() => {
 
   return {
     Uri,
+    EventEmitter,
+    commandHandlers,
     Position,
     Selection,
     Range,
     TextEditorRevealType: { InCenter: 2 },
     ViewColumn: { One: 1, Two: 2, Three: 3, Beside: -2 },
+    commands: {
+      registerCommand: vi.fn(
+        (id: string, handler: (...args: unknown[]) => unknown) => {
+          commandHandlers.set(id, handler);
+          return { dispose: vi.fn(() => commandHandlers.delete(id)) };
+        },
+      ),
+      executeCommand: vi.fn(async (id: string, ...args: unknown[]) => {
+        const handler = commandHandlers.get(id);
+        return handler ? handler(...args) : undefined;
+      }),
+    },
     workspace: {
       findFiles: vi.fn(),
       getWorkspaceFolder: vi.fn(),
@@ -85,17 +133,20 @@ const vscodeMock = vi.hoisted(() => {
       activeTextEditor: undefined,
       showTextDocument: vi.fn(),
       showErrorMessage: vi.fn(),
+      onDidChangeActiveTextEditor: vi.fn(() => ({ dispose: vi.fn() })),
       tabGroups: {
         all: [] as Array<{
           tabs: Array<{ input: unknown }>;
           viewColumn: number;
         }>,
+        close: vi.fn(),
       },
     },
   };
 });
 
 vi.mock('vscode', () => vscodeMock);
+vi.mock('../../extension.js', () => ({ DIFF_SCHEME: 'qwen-diff' }));
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   const actual =
     await importOriginal<typeof import('@qwen-code/qwen-code-core')>();
@@ -422,6 +473,97 @@ describe('FileMessageHandler', () => {
         viewColumn: number;
       };
       expect(options.viewColumn).toBe(vscodeMock.ViewColumn.Beside);
+    });
+  });
+
+  describe('closeDiff path resolution (issue #10372)', () => {
+    function diffDocuments(
+      diffManager: DiffManager,
+    ): Map<string, { originalFilePath: string }> {
+      return (
+        diffManager as unknown as {
+          diffDocuments: Map<string, { originalFilePath: string }>;
+        }
+      ).diffDocuments;
+    }
+
+    function setupWithRegisteredCommands() {
+      vscodeMock.commandHandlers.clear();
+      vscodeMock.workspace.workspaceFolders = [
+        { uri: vscode.Uri.file('/workspace'), name: 'workspace', index: 0 },
+      ];
+      vscodeMock.window.tabGroups.all = [];
+      vscodeMock.workspace.openTextDocument.mockResolvedValue({
+        getText: () => 'new-content',
+      });
+
+      const contentProvider = new DiffContentProvider();
+      const diffManager = new DiffManager(() => {}, contentProvider);
+      registerNewCommands(
+        { subscriptions: [] } as never,
+        () => {},
+        diffManager,
+        () => [],
+        vi.fn() as never,
+      );
+
+      const handler = new FileMessageHandler(
+        {} as QwenAgentManager,
+        {} as ConversationStore,
+        null,
+        vi.fn(),
+      );
+      return { diffManager, handler };
+    }
+
+    it('closes a diff opened with a workspace-relative path when closeDiff receives the same relative path', async () => {
+      const { diffManager, handler } = setupWithRegisteredCommands();
+
+      // webview openDiff -> showDiffCommand resolves 'docs/plan.md'
+      // against the workspace before handing it to DiffManager.
+      await handler.handle({
+        type: 'openDiff',
+        data: { path: 'docs/plan.md', oldText: 'old', newText: 'new' },
+      });
+
+      const docs = diffDocuments(diffManager);
+      expect(docs.size).toBe(1);
+      expect([...docs.values()][0]?.originalFilePath).toBe(
+        '/workspace/docs/plan.md',
+      );
+
+      // webview closeDiff sends the same raw workspace-relative path the
+      // transcript produced (EmbeddedApp.closeOpenPermissionDiffs /
+      // reconcile loop).
+      await handler.handle({
+        type: 'closeDiff',
+        data: { path: 'docs/plan.md' },
+      });
+
+      expect(docs.size).toBe(0);
+    });
+
+    it('still closes a diff opened with an absolute path', async () => {
+      const { diffManager, handler } = setupWithRegisteredCommands();
+
+      await handler.handle({
+        type: 'openDiff',
+        data: {
+          path: '/workspace/docs/plan.md',
+          oldText: 'old',
+          newText: 'new',
+        },
+      });
+
+      const docs = diffDocuments(diffManager);
+      expect(docs.size).toBe(1);
+
+      await handler.handle({
+        type: 'closeDiff',
+        data: { path: '/workspace/docs/plan.md' },
+      });
+
+      expect(docs.size).toBe(0);
     });
   });
 });
