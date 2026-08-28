@@ -7069,6 +7069,26 @@ describe('DingtalkChannel proactive send', () => {
     await expect(request).rejects.toMatchObject({ retryable: false });
   });
 
+  it.each([
+    [-1, '系统繁忙'],
+    [88, 'throttled'],
+  ])(
+    'classifies gettoken errcode %s as a retryable token error',
+    async (errcode, errmsg) => {
+      const channel = proactive(createChannel());
+      vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+      stubProactiveFetch(
+        undefined,
+        () =>
+          new Response(JSON.stringify({ errcode, errmsg }), { status: 200 }),
+      );
+
+      const request = channel.pushProactive(groupTarget, 'hello');
+      await expect(request).rejects.toThrow(`gettoken errcode=${errcode}`);
+      await expect(request).rejects.toMatchObject({ retryable: true });
+    },
+  );
+
   it('skips blank text without calling the API', async () => {
     const channel = proactive(createChannel());
     const { spy } = stubProactiveFetch();

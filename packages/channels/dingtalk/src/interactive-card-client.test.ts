@@ -3,7 +3,7 @@ import {
   DingtalkInteractiveCardClient,
   QUESTION_CARD_TEMPLATE_ID,
   STATUS_CARD_TEMPLATE_ID,
-  type DingtalkCardRequestError,
+  DingtalkCardRequestError,
 } from './interactive-card-client.js';
 
 const fetchMock = vi.fn<typeof fetch>();
@@ -152,6 +152,26 @@ describe('DingtalkInteractiveCardClient', () => {
         cardParamMap: {},
       }),
     ).rejects.toThrow(`${QUESTION_CARD_TEMPLATE_ID}: template denied`);
+  });
+
+  it('classifies a per-recipient delivery failure as non-retryable', async () => {
+    fetchMock.mockResolvedValueOnce(
+      response({
+        result: {
+          deliverResults: [{ success: false, errorMsg: 'template denied' }],
+        },
+      }),
+    );
+
+    const request = createClient().createAndDeliver({
+      templateId: STATUS_CARD_TEMPLATE_ID,
+      outTrackId: 'status-1',
+      target: { chatId: 'cid-1', isGroup: true },
+      cardParamMap: {},
+    });
+
+    await expect(request).rejects.toBeInstanceOf(DingtalkCardRequestError);
+    await expect(request).rejects.toMatchObject({ retryable: false });
   });
 
   it.each([408, 425, 429, 500, 503])(

@@ -592,6 +592,14 @@ const DIRECT_MSG_API =
 const PROACTIVE_MSG_KEY = 'sampleMarkdown'; // DingTalk's built-in {title, text} markdown template key
 const TOKEN_API = 'https://oapi.dingtalk.com/gettoken';
 const PROACTIVE_FETCH_TIMEOUT_MS = 15_000;
+/**
+ * gettoken business errors a retry cannot fix: an invalid appkey/secret or a
+ * missing app. Any other errcode (-1 system busy, 88 throttled, ...) is
+ * treated as transient so card recovery keeps retrying through it.
+ */
+const PERMANENT_TOKEN_ERROR_CODES = new Set([
+  40001, 40013, 40089, 90002, 90003,
+]);
 const REPLY_FETCH_TIMEOUT_MS = 15_000;
 // Extensions for generated media store names, keyed by the download's mime
 // type. The agent reads stored media via `read_file`, whose type detection is
@@ -1316,7 +1324,7 @@ export class DingtalkChannel extends ChannelBase {
       );
       throw new DingtalkCardRequestError(
         `DingTalk access token request failed: gettoken errcode=${data.errcode}${errmsg ? ` ${errmsg}` : ''}`,
-        false,
+        !PERMANENT_TOKEN_ERROR_CODES.has(Number(data.errcode)),
       );
     }
     this.proactiveToken = {

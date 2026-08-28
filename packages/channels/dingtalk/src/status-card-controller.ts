@@ -26,6 +26,8 @@ interface TerminalIntent {
   content: string;
   state: Exclude<StatusState, 'Running'>;
   isError: boolean;
+  /** Computed once so terminal retries do not inflate the elapsed time. */
+  statusLine: string;
   streamFinalizeSettled: boolean;
 }
 
@@ -40,9 +42,12 @@ interface StatusRecord {
   startedAt: number;
   lastStatusSecond: number;
   ready: Promise<boolean>;
+  /** Settles when the current creation attempt does, before any backoff. */
+  creationAttempt: Promise<boolean>;
   terminal: boolean;
   streamFailed: boolean;
   streamFailureVersion: number;
+  createRetryAttempt: number;
   streamRetryAttempt: number;
   terminalRetryAttempt: number;
   consecutiveStatusFailures: number;
@@ -51,6 +56,9 @@ interface StatusRecord {
   lastWriteAt: number;
   pendingSnapshot?: string;
   flushTimer?: ReturnType<typeof setTimeout>;
+  createRetryTimer?: ReturnType<typeof setTimeout>;
+  /** Resolves the pending creation backoff early so `ready` settles. */
+  abandonCreation?: () => void;
   streamRetryTimer?: ReturnType<typeof setTimeout>;
   terminalRetryTimer?: ReturnType<typeof setTimeout>;
   statusTimer?: ReturnType<typeof setTimeout>;
@@ -116,13 +124,15 @@ export class StatusCardController {
    * Whether a created, still-running status card is displaying content for
    * this segment. Awaits the in-flight creation so a boundary decision made
    * while creation is pending does not race it. A latched stream failure
-   * means the card can never show further content, so it is not live.
+   * means the card can never show further content, so it is not live. A
+   * creation that is backing off for a retry is not awaited either (see
+   * `awaitDelivery`).
    */
   async isCardLive(segmentId: string): Promise<boolean> {
     if (this.disposed) return false;
     const record = this.recordsBySegment.get(segmentId);
     if (!record || record.terminal || record.streamFailed) return false;
-    return record.ready;
+    return this.awaitDelivery(record);
   }
 
   /**
@@ -135,7 +145,7 @@ export class StatusCardController {
     if (this.disposed) return false;
     const record = this.recordsBySegment.get(segmentId);
     if (!record || record.terminal) return false;
-    if (!(await record.ready)) return false;
+    if (!(await this.awaitDelivery(record))) return false;
     while (!record.terminal && !record.streamFailed) {
       if (record.flushTimer) {
         clearTimeout(record.flushTimer);
@@ -152,6 +162,17 @@ export class StatusCardController {
       if (record.pendingSnapshot === undefined) break;
     }
     return !record.terminal && !record.streamFailed;
+  }
+
+  /**
+   * Resolves once the card is known to be delivered (or not) without waiting
+   * through a creation backoff: `creationAttempt` is the failed attempt until
+   * the retry actually starts, so a boundary reached mid-backoff falls back
+   * to text while the retry keeps running for later output.
+   */
+  private async awaitDelivery(record: StatusRecord): Promise<boolean> {
+    if (!(await record.creationAttempt)) return false;
+    return record.ready;
   }
 
   private createRecord(
@@ -171,9 +192,11 @@ export class StatusCardController {
       startedAt: Date.now(),
       lastStatusSecond: 0,
       ready: Promise.resolve(false),
+      creationAttempt: Promise.resolve(false),
       terminal: false,
       streamFailed: false,
       streamFailureVersion: 0,
+      createRetryAttempt: 0,
       streamRetryAttempt: 0,
       terminalRetryAttempt: 0,
       consecutiveStatusFailures: 0,
@@ -267,22 +290,38 @@ export class StatusCardController {
     record: StatusRecord,
     target: { chatId: string; isGroup: boolean },
   ): Promise<boolean> {
-    try {
-      await this.options.client.createAndDeliver({
-        templateId: STATUS_CARD_TEMPLATE_ID,
-        outTrackId: record.outTrackId,
-        target,
-        cardParamMap: {
-          content: sanitizeStreamingImageMarkers(record.content),
-          flowStatus: 2,
-          statusLine: this.statusLine(record, 'Running').text,
-          hasAction: 'true',
-          stop_action: 'true',
-        },
+    for (;;) {
+      let settleAttempt!: (delivered: boolean) => void;
+      record.creationAttempt = new Promise<boolean>((resolve) => {
+        settleAttempt = resolve;
       });
-    } catch (error) {
-      this.options.onError?.('status card creation', error);
-      return false;
+      try {
+        await this.options.client.createAndDeliver({
+          templateId: STATUS_CARD_TEMPLATE_ID,
+          outTrackId: record.outTrackId,
+          target,
+          cardParamMap: {
+            content: sanitizeStreamingImageMarkers(record.content),
+            flowStatus: 2,
+            statusLine: this.statusLine(record, 'Running').text,
+            hasAction: 'true',
+            stop_action: 'true',
+          },
+        });
+        settleAttempt(true);
+        break;
+      } catch (error) {
+        settleAttempt(false);
+        this.options.onError?.('status card creation', error);
+        if (
+          this.disposed ||
+          record.terminal ||
+          !isRetryableDingtalkCardError(error)
+        ) {
+          return false;
+        }
+        if (!(await this.waitForCreationRetry(record))) return false;
+      }
     }
     if (this.disposed) return false;
 
@@ -297,6 +336,24 @@ export class StatusCardController {
       this.handleStreamFailure(record, error);
     }
     return true;
+  }
+
+  /**
+   * Sleeps for the next creation backoff. Resolves false when finalization or
+   * disposal abandons the creation so `ready` settles without waiting.
+   */
+  private waitForCreationRetry(record: StatusRecord): Promise<boolean> {
+    const delay = this.retryDelay(record.createRetryAttempt++);
+    return new Promise<boolean>((resolve) => {
+      const settle = (resumed: boolean) => {
+        if (record.createRetryTimer) clearTimeout(record.createRetryTimer);
+        record.createRetryTimer = undefined;
+        record.abandonCreation = undefined;
+        resolve(resumed);
+      };
+      record.abandonCreation = () => settle(false);
+      record.createRetryTimer = setTimeout(() => settle(true), delay);
+    });
   }
 
   private scheduleFlush(record: StatusRecord): void {
@@ -321,6 +378,7 @@ export class StatusCardController {
     if (
       this.disposed ||
       record.terminal ||
+      record.streamFailed ||
       record.inFlight ||
       record.pendingSnapshot === undefined
     )
@@ -330,7 +388,7 @@ export class StatusCardController {
     const write = record.writeChain
       .then(async () => {
         const ready = await record.ready;
-        if (!ready || record.terminal) return;
+        if (!ready || record.terminal || record.streamFailed) return;
         await this.options.client.openOrUpdateStream({
           outTrackId: record.outTrackId,
           key: 'content',
@@ -346,9 +404,7 @@ export class StatusCardController {
         record.inFlight = undefined;
       }
       record.lastWriteAt = Date.now();
-      if (record.pendingSnapshot !== undefined && !record.streamRetryTimer) {
-        this.scheduleFlush(record);
-      }
+      if (record.pendingSnapshot !== undefined) this.scheduleFlush(record);
     });
     record.inFlight = tracked;
     record.writeChain = tracked;
@@ -378,6 +434,7 @@ export class StatusCardController {
     if (record.statusTimer) clearTimeout(record.statusTimer);
     record.statusTimer = undefined;
     record.pendingSnapshot = undefined;
+    record.abandonCreation?.();
     if (!(await record.ready)) {
       this.removeRecord(record);
       return false;
@@ -390,6 +447,7 @@ export class StatusCardController {
       content: boundContent(sanitizeStreamingImageMarkers(retained)),
       state,
       isError,
+      statusLine: this.statusLine(record, state).text,
       streamFinalizeSettled: false,
     };
     return this.attemptFinalization(record);
@@ -433,7 +491,7 @@ export class StatusCardController {
           content: intent.content,
           copy_content: intent.content,
           flowStatus: 3,
-          statusLine: this.statusLine(record, intent.state).text,
+          statusLine: intent.statusLine,
           hasAction: 'false',
           stop_action: 'false',
         },
@@ -509,6 +567,7 @@ export class StatusCardController {
   }
 
   private removeRecord(record: StatusRecord): void {
+    record.abandonCreation?.();
     if (record.flushTimer) clearTimeout(record.flushTimer);
     if (record.streamRetryTimer) clearTimeout(record.streamRetryTimer);
     if (record.terminalRetryTimer) clearTimeout(record.terminalRetryTimer);

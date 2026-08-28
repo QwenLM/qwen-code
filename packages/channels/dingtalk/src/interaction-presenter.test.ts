@@ -5,6 +5,7 @@ import type {
   UserInputSettlementReason,
 } from '@qwen-code/channel-base';
 import {
+  DingtalkCardRequestError,
   QUESTION_CARD_TEMPLATE_ID,
   STATUS_CARD_TEMPLATE_ID,
   type DingtalkInteractiveCardClient,
@@ -617,6 +618,32 @@ describe('DingtalkInteractionPresenter', () => {
     );
   });
 
+  it('falls back at response boundaries after a permanent card stream failure', async () => {
+    const { client, presenter, sendFallback } = createHarness();
+    presenter.appendOutput(segment('segment-1'), 'intermediate result');
+    await vi.waitFor(() =>
+      expect(client.openOrUpdateStream).toHaveBeenCalledOnce(),
+    );
+    vi.mocked(client.openOrUpdateStream).mockRejectedValueOnce(
+      new DingtalkCardRequestError('stream rejected', false),
+    );
+    presenter.appendOutput(segment('segment-1'), ' updated');
+    await vi.waitFor(() =>
+      expect(client.openOrUpdateStream).toHaveBeenCalledTimes(2),
+    );
+
+    await expect(
+      presenter.closeOutput('segment-1', '', 'response_boundary'),
+    ).resolves.toBe(true);
+
+    expect(sendFallback).toHaveBeenCalledWith(
+      'cid-1',
+      'intermediate result updated',
+      'session-1',
+    );
+    expect(client.openOrUpdateStream).toHaveBeenCalledTimes(2);
+  });
+
   it.each(['failed', 'input_requested'] as const)(
     'attributes the terminal card to the group sender on %s output close',
     async (reason) => {
@@ -864,7 +891,7 @@ describe('DingtalkInteractionPresenter', () => {
   });
 
   it('falls back at a boundary when the in-flight card creation fails', async () => {
-    const { client, presenter, sendFallback } = createHarness();
+    const { client, presenter, sendFallback, statusCards } = createHarness();
     const creation = deferred<void>();
     vi.mocked(client.createAndDeliver).mockImplementation(async (request) => {
       if (request.templateId === STATUS_CARD_TEMPLATE_ID) {
@@ -886,6 +913,7 @@ describe('DingtalkInteractionPresenter', () => {
       'segment one',
       'session-1',
     );
+    statusCards.dispose();
   });
 
   it.each([
