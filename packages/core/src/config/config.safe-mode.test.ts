@@ -137,9 +137,9 @@ vi.mock('../core/contentGenerator.js', () => ({
 }));
 
 vi.mock('../core/client.js', () => {
-  const GeminiClientMock = vi.fn();
-  GeminiClientMock.prototype.initialize = vi.fn().mockResolvedValue(undefined);
-  return { GeminiClient: GeminiClientMock };
+  const LlmClientMock = vi.fn();
+  LlmClientMock.prototype.initialize = vi.fn().mockResolvedValue(undefined);
+  return { LlmClient: LlmClientMock };
 });
 
 vi.mock('../telemetry/index.js', () => ({
