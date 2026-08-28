@@ -231,15 +231,20 @@ export type SlashEffect =
       persistScope?: 'workspace' | 'user';
     }
   | { kind: 'clear' }
-  | { kind: 'quit' }
+  | { kind: 'quit'; notice?: string }
   | { kind: 'submit'; content: string };
 
 export type SlashEffectWithNotice = SlashEffect & { notice?: string };
 
 export interface SlashDispatchEnv {
   config: Config | null;
-  /** Optional loaded settings; commands reading settings receive them. */
-  settings?: LoadedSettings | null;
+  /**
+   * Loaded settings for the command context. The real
+   * `CommandContext.services.settings` is non-null (commands/types.ts), so
+   * this is required: a null would surface as a generic command failure
+   * the first time a command reads `.merged`.
+   */
+  settings: LoadedSettings;
   abortSignal?: AbortSignal;
   /**
    * Live session stats (start time, metrics, counters) that commands such as
@@ -270,6 +275,7 @@ function stringifyPromptContent(content: unknown): string {
 function mapActionResult(
   result: SlashCommandActionReturn | void,
   command: SlashCommand,
+  env: SlashDispatchEnv,
 ): SlashEffect {
   if (!result) {
     return { kind: 'handled' };
@@ -293,8 +299,13 @@ function mapActionResult(
             name: result.name,
             persistScope: result.persistScope,
           };
-    case 'quit':
-      return { kind: 'quit' };
+    case 'quit': {
+      // ink renders QuitActionReturn.messages via QuittingDisplay (the
+      // `/quit` echo + session-duration summary); carry the projected text
+      // on the effect so the backend can print it during the exit window.
+      const notice = projectItems(result.messages, env);
+      return notice ? { kind: 'quit', notice } : { kind: 'quit' };
+    }
     case 'load_history':
       return result.history.length === 0
         ? { kind: 'clear' }
@@ -425,7 +436,7 @@ export async function executeSlashCommand(
     invocation: { raw: raw.trim(), name: command.name, args },
     services: {
       config: env.config,
-      settings: env.settings ?? null,
+      settings: env.settings,
       logger: null,
     },
     ui: {
@@ -505,7 +516,7 @@ export async function executeSlashCommand(
     if (cleared) {
       return { kind: 'clear' };
     }
-    const effect = mapActionResult(result, command);
+    const effect = mapActionResult(result, command, env);
     if (addedItems.length > 0) {
       const notice = projectAddedItems(addedItems, env);
       if (effect.kind === 'handled') {
@@ -526,6 +537,27 @@ export async function executeSlashCommand(
 }
 
 /**
+ * Projects history items to transcript text (ui.addItem payloads, quit
+ * messages, …); null when none of them has a projection.
+ */
+function projectItems(
+  items: readonly HistoryItemWithoutId[],
+  env: SlashDispatchEnv,
+): string | null {
+  const texts = items
+    .map((item) =>
+      projectSpecialItemText(item, {
+        config: env.config,
+        stats: env.sessionStats,
+        // model-pricing (R1-92) resolves through settings.merged.modelPricing
+        settings: env.settings,
+      }),
+    )
+    .filter((text): text is string => Boolean(text));
+  return texts.length > 0 ? texts.join('\n') : null;
+}
+
+/**
  * Projects history items a command added via `ui.addItem` (e.g. `/stats
  * model`) to transcript text; falls back to an explicit parity deferral
  * when no projection exists.
@@ -534,18 +566,8 @@ function projectAddedItems(
   items: HistoryItemWithoutId[],
   env: SlashDispatchEnv,
 ): string {
-  const texts = items
-    .map((item) =>
-      projectSpecialItemText(item, {
-        config: env.config,
-        stats: env.sessionStats,
-        // model-pricing (R1-92) resolves through settings.merged.modelPricing
-        settings: env.settings ?? undefined,
-      }),
-    )
-    .filter((text): text is string => Boolean(text));
-  if (texts.length > 0) {
-    return texts.join('\n');
-  }
-  return 'This command renders a history item, which is not yet available in the OpenTUI renderer.';
+  return (
+    projectItems(items, env) ??
+    'This command renders a history item, which is not yet available in the OpenTUI renderer.'
+  );
 }

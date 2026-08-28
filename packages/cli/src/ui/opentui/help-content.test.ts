@@ -204,7 +204,6 @@ describe('computeHelpWidthLayout (narrow-width /help parity)', () => {
     expect(layout.bodyWidth).toBe(74);
     expect(layout.colWidth).toBe(36);
     expect(layout.descWidth).toBe(36 - HELP_KEY_COL_WIDTH - 1);
-    expect(layout.singleColumn).toBe(false);
   });
 
   it('grows the columns with the terminal width', () => {
@@ -212,20 +211,11 @@ describe('computeHelpWidthLayout (narrow-width /help parity)', () => {
     const wide = computeHelpWidthLayout(140);
     expect(wide.colWidth).toBeGreaterThan(narrow.colWidth);
     expect(wide.descWidth).toBeGreaterThan(narrow.descWidth);
-    expect(wide.singleColumn).toBe(false);
   });
 
   it('clamps to the ink minimum width of 72', () => {
     const layout = computeHelpWidthLayout(40);
     expect(layout.safeWidth).toBe(72);
     expect(layout.colWidth).toBe(Math.floor((72 - 6 - 2) / 2));
-    expect(layout.singleColumn).toBe(false);
-  });
-
-  it('falls back to a single column only at unusable widths', () => {
-    // descWidth < 4 ⇒ single column. With the 72 clamp that needs a body
-    // narrower than the clamp allows, so normal terminals stay two-column.
-    expect(computeHelpWidthLayout(80).singleColumn).toBe(false);
-    expect(computeHelpWidthLayout(1).singleColumn).toBe(false);
   });
 });

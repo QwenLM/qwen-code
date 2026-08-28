@@ -31,6 +31,7 @@ import type { StreamEvent } from '../model/streaming-model.js';
 import type { TodoItem } from '../components/TodoDisplay.js';
 import type { CompressionProps } from '../types.js';
 import { sanitizeSensitiveText } from '../utils/textUtils.js';
+import { sanitizeDisplayText } from '../../utils/extension-mention.js';
 import { shouldDisplayGoalStateCause } from '../utils/goal-runtime.js';
 
 /**
@@ -250,9 +251,10 @@ export function renderResultDisplay(display: unknown): string {
       return `◌ [${o['progress']}${totalStr}] ${msg}`;
     }
     // mcp_app renders only its fallbackText in ink — the embedded HTML must
-    // never reach output.
-    if (o['type'] === 'mcp_app' && typeof o['fallbackText'] === 'string') {
-      return o['fallbackText'];
+    // never reach output, including the (currently unreachable) case where
+    // the field is absent: the JSON dump would expose the raw HTML.
+    if (o['type'] === 'mcp_app') {
+      return typeof o['fallbackText'] === 'string' ? o['fallbackText'] : '';
     }
     // vision_bridge_notice renders summary\nnotice (ink's
     // formatVisionBridgeNoticeDisplay); the generic summary branch below
@@ -467,6 +469,9 @@ export function createEventMapper(
       }
       case 'error': {
         closeThought();
+        // ink parity: handleErrorEvent clears the retry countdown
+        // unconditionally before adding the pending error item.
+        out.push({ type: 'retry-countdown-clear' });
         // ink parity: handleErrorEvent sets a pending error item rendered by
         // ErrorMessage (`✕` + error color) with the retry hint inline.
         const v = ev.value as { error?: unknown };
@@ -599,11 +604,13 @@ export function createEventMapper(
         // (the retry chain died with the primary model) before the notice.
         out.push({ type: 'retry-countdown-clear' });
         const v = ev as { fromModel?: string; toModel?: string };
+        // ink parity: model names pass through sanitizeDisplayText before
+        // reaching the notice (useGeminiStream).
+        const fromModel = sanitizeDisplayText(v.fromModel ?? '') ?? '(unknown)';
+        const toModel = sanitizeDisplayText(v.toModel ?? '') ?? '(unknown)';
         out.push({
           type: 'info',
-          text:
-            `Model ${v.fromModel ?? '(unknown)'} unavailable, ` +
-            `falling back to ${v.toModel ?? '(unknown)'}`,
+          text: `Model ${fromModel} unavailable, falling back to ${toModel}`,
         });
         break;
       }
@@ -669,6 +676,11 @@ export function createEventMapper(
         const reason = (ev.value as { reason?: string } | undefined)?.reason;
         const message = reason ? FINISH_REASON_NOTICES[reason] : undefined;
         if (message) out.push({ type: 'info', text: `⚠  ${message}` });
+        // ink parity: handleFinishedEvent clears an active auto-retry
+        // countdown — a terminal event inside the countdown window must not
+        // leave a stale ↻ row. The backend treats a redundant clear as a
+        // no-op when no countdown is running.
+        out.push({ type: 'retry-countdown-clear' });
         // Segment marker only — the turn settles when the live generator
         // returns (backend emits `done`), NOT here: `finished` arrives
         // before tool execution, so mapping it to `done` flashed a fake

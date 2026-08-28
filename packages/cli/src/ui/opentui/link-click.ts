@@ -132,7 +132,15 @@ export function readBufferRow(grid: CellGrid, y: number): BufferRow {
     text += cells[x];
     for (let i = 0; i < cells[x].length; i++) cellColumns.push(x);
   }
-  return { text: text.replace(/\s+$/, ''), cellColumns };
+  // Trim the trailing whitespace from BOTH arrays: when the last non-space
+  // cell holds a wide character, its UTF-16 unit ends two columns wide, and
+  // an untrimmed cellColumns tail would miss clicks on that cell's right
+  // half (the fallback bound only covers the left half).
+  const trimmed = text.replace(/\s+$/, '');
+  if (trimmed.length < text.length) {
+    cellColumns.length = trimmed.length;
+  }
+  return { text: trimmed, cellColumns };
 }
 
 /** All safe URL candidates in a rendered row, left to right. */

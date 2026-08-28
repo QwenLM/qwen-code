@@ -43,9 +43,11 @@ export function decodeCapturedInput(buffer: Buffer): string {
       // strip the whole sequence here or the C0 pass below removes the bare
       // ESC and leaks the O+letter payload into the composer.
       .replace(/\u001BO[A-Za-z]/g, '')
-      // A replayed partial tail (ESC [ parameters without a final byte)
-      // would leak '[…' into the composer once the C0 pass drops the ESC.
+      // A replayed partial tail (ESC [ parameters without a final byte,
+      // or ESC O without the SS3 final byte) would leak '[…' or a bare
+      // 'O' into the composer once the C0 pass drops the ESC.
       .replace(/\u001B\[[0-9:;<=>?]*[ -/]*$/, '')
+      .replace(/\u001BO$/, '')
       .replace(/[\u0000-\u0008\u000B-\u001F\u007F]/g, '')
   );
   /* eslint-enable no-control-regex */
