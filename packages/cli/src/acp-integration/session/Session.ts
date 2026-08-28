@@ -277,6 +277,7 @@ import { SettingScope, type LoadedSettings } from '../../config/settings.js';
 import { insertAfterFunctionResponses } from '../../nonInteractive/nonInteractiveHelpers.js';
 import { isSameConversationPath } from '../../utils/conversation-directory-identity.js';
 import { normalizePartList } from '../../utils/normalize-part-list.js';
+import { replaceNestedFunctionResponseMedia } from '../../utils/nested-function-response-media.js';
 import { prefixMidTurnUserMessageParts } from '../../utils/midTurnUserMessage.js';
 import {
   handleSlashCommand,
@@ -7496,8 +7497,10 @@ export class Session implements SessionContext {
       getModelOverride,
       onModelOverrideResolutionFailed,
     });
+    // No abort gate here: a cancellation landing between the drain and the
+    // recheck must not leak the raw staged parts into the preserved message —
+    // the recheck's own abort branches fail close instead (R51-6).
     const toolRunParts =
-      !abortSignal.aborted &&
       modelOverrideBeforeDrain !== undefined &&
       getModelOverride?.() === undefined
         ? await this.#recheckPartsAfterModelOverrideFallback(
@@ -7608,15 +7611,48 @@ export class Session implements SessionContext {
     };
   }
 
+  /**
+   * Fail-closed output for whatever media is still raw when the turn is
+   * cancelled. Mirrors #applyBridgeConversionsIfNeeded's abort return and
+   * #buildMidTurnParts' finalize loop: raw top-level audio becomes the
+   * 'transcription was cancelled' marker, raw top-level images are stripped,
+   * and still-raw nested tool-result carriers (never bridged on an abort
+   * path) become visible markers — so the preserved message never carries
+   * inlineData media and the `interrupted_prompt` continuation never replays
+   * unbridged media against the primary route (R51-6).
+   */
+  #failClosePartsForCancelledTurn(parts: Part[]): Part[] {
+    let result = replaceAudioPartsWithUnavailable(
+      splitImageParts(parts).nonImageParts,
+      'transcription was cancelled',
+    );
+    for (const match of [
+      'image',
+      'audio',
+      'pdf',
+      'video',
+      'untyped',
+      'foreign',
+    ] as const) {
+      result = replaceNestedFunctionResponseMedia(
+        result,
+        match,
+        '[Media content returned by a tool was not sent: the turn was cancelled before it could be bridged.]',
+      );
+    }
+    return result;
+  }
+
   async #recheckPartsAfterModelOverrideFallback(
     parts: Part[],
     abortSignal: AbortSignal,
   ): Promise<Part[]> {
-    // A cancelled turn must keep its media intact: the recheck would rewrite it
-    // into cancellation markers or unavailable notes that then persist in
-    // session history.
+    // A cancelled turn must never persist unbridged media: the
+    // `interrupted_prompt` continuation re-sends persisted parts WITHOUT
+    // re-bridging, so every abort exit fails closed the same way the sibling
+    // paths do (R51-6).
     if (abortSignal.aborted) {
-      return parts;
+      return this.#failClosePartsForCancelledTurn(parts);
     }
     // The selector has already failed and been cleared. Repair both nested
     // tool-result images and top-level media against the primary route, and do
@@ -7642,18 +7678,22 @@ export class Session implements SessionContext {
         );
       }
     }
-    // A cancellation arriving during the awaited bridge work must keep the
-    // original media intact too: the rewritten parts would otherwise flow
-    // into the abort branch's message and persist in session history.
+    // A cancellation arriving during the awaited bridge work fails closed on
+    // the most-processed parts: the nested bridge's completed descriptions
+    // are text and survive, whatever is still raw becomes markers (R51-6).
     if (abortSignal.aborted) {
-      return parts;
+      return this.#failClosePartsForCancelledTurn(nestedChecked);
     }
     const converted = await this.#applyBridgeConversionsIfNeeded(
       nestedChecked,
       abortSignal,
     );
     if (abortSignal.aborted) {
-      return parts;
+      // The conversion's own abort return already fail-closed the top-level
+      // media while keeping any transcripts it completed; fail close whatever
+      // nested carriers remain without recomputing from the raw parts (that
+      // would discard the completed bridge work).
+      return this.#failClosePartsForCancelledTurn(converted);
     }
     return converted;
   }

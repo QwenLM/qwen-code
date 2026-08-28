@@ -8862,13 +8862,16 @@ describe('useLlmStream', () => {
     });
   });
 
-  it('does not report drain routing when the route failed closed mid-drain', async () => {
-    // Segment 1 routes to the skill override; segment 2's capability probe
-    // then fails closed and clears the override, and the recheck re-bridges
-    // segment 1 so no raw media survives. The drain must not keep claiming
-    // `mediaRouted` for a route that no longer exists: core would fall back
-    // to the stale pre-drain selector and exact-route the fully degraded
-    // steer into the route the CLI just dropped.
+  it('keeps the media-routed override when a later segment\'s audio probe fails', async () => {
+    // R51-2: segment 1 routes to the skill override; segment 2's capability
+    // probe then fails. The clear is guarded exactly like the image probe's:
+    // media already routed means clearing would orphan the already-routed
+    // media's exact route, so the override SURVIVES and only the audio fails
+    // closed (bridged). The recheck pass re-bridges segment 1 (its own probe
+    // fails too), so no raw media survives — but the drain keeps reporting
+    // the live route. (Pre-R51-2 the audio branch cleared unguarded, and the
+    // drain reported a dropped route; the guard restores symmetry with the
+    // image probe's R33-2 invariant.)
     const firstAudio = 'listen @/tmp/first.wav';
     const secondAudio = 'listen @/tmp/second.wav';
     const audioPart: Part = {
@@ -8983,13 +8986,15 @@ describe('useLlmStream', () => {
       modelOverride?: string;
       steerInput?: SteerInput;
     };
-    // Every segment degraded to bridge text; the route was cleared mid-drain,
-    // so neither the routing flag nor a selector may be reported.
+    // Every segment degraded to bridge text (each segment's own probe
+    // failed), but the guarded clear kept the override alive, so the drain
+    // reports the surviving route and the steer rides it exactly.
     expect(options.steerInput).toMatchObject({
-      mediaRouted: false,
-      routeSelector: undefined,
+      mediaRouted: true,
+      routeSelector: 'audio-skill-model',
+      overrideCleared: false,
     });
-    expect(options.modelOverride).toBeUndefined();
+    expect(options.modelOverride).toBe('audio-skill-model\0');
     const sent = JSON.stringify(mockSendMessageStream.mock.calls[0]?.[0]);
     expect(sent).toContain('[bridge transcript]');
     expect(sent).not.toContain('audio/wav');
@@ -9889,6 +9894,621 @@ describe('useLlmStream', () => {
     const retried = JSON.stringify(mockSendMessageStream.mock.calls[2]?.[0]);
     expect(retried).toContain('audio/wav');
     expect(retried).toContain('bmVzdGVk');
+
+    // R51-4: the retry's OWN send is saved by payloadCarriesRoutedMedia, but
+    // the gate must also report mediaRouted for an ALREADY-established route
+    // (membership, not just establishment) so the stamp block re-stamps the
+    // retry's fresh prompt_id. Otherwise this media-free continuation —
+    // fresh prompt_id ≠ stale stamp, no media — sends the bare selector and
+    // core slims the routed media against the session modalities.
+    const thirdResponseParts: Part[] = [
+      {
+        functionResponse: {
+          id: 'call3',
+          name: 'testTool',
+          response: { result: 'ok' },
+        },
+      },
+    ];
+    const thirdToolCalls: TrackedToolCall[] = [
+      {
+        request: {
+          callId: 'call3',
+          name: 'testTool',
+          args: {},
+          isClientInitiated: false,
+          // Production tool calls scheduled by the retry's stream inherit the
+          // retry's freshly minted prompt_id (sessionId + '########' +
+          // getPromptCount via the continuation owner); the mocked counter
+          // mints exactly this id for the retry.
+          prompt_id: 'test-session-id########5',
+        },
+        status: 'success',
+        responseSubmittedToLlm: false,
+        response: {
+          callId: 'call3',
+          responseParts: thirdResponseParts,
+          errorType: undefined,
+        },
+        tool: { displayName: 'MockTool' },
+        invocation: {
+          getDescription: () => 'Mock description',
+        } as unknown as AnyToolInvocation,
+      } as TrackedCompletedToolCall,
+    ];
+    await act(async () => {
+      if (capturedOnComplete) {
+        await capturedOnComplete(thirdToolCalls);
+      }
+    });
+    await waitFor(() => expect(mockSendMessageStream).toHaveBeenCalledTimes(4));
+    expect(mockSendMessageStream.mock.calls[3]?.[3]).toMatchObject({
+      modelOverride: 'skill-model\0',
+    });
+  });
+
+  it('resets the media-routed marker when a skill tool displaces the override', async () => {
+    // R51-1: drained audio is routed onto skill override X (marker = X,
+    // stamp = the current prompt_id); a later tool batch sets Y and a
+    // further batch re-asserts X. If the overwrite left the marker pair
+    // alive, the value match re-attaches and the next MEDIA-FREE
+    // continuation sends the trailing-NUL exact route of the freshly
+    // re-installed override instead of the bare selector. Removing the
+    // marker reset in the skill-tool overwrite branch turns this red.
+    const queuedPrompt = 'listen @/tmp/recording.wav';
+    const audioPart: Part = {
+      inlineData: { mimeType: 'audio/wav', data: 'UklGRg==' },
+    };
+    const resolveForModel = vi.fn().mockResolvedValue({
+      contentGeneratorConfig: { modalities: { audio: true } },
+    });
+    Object.assign(mockConfig, {
+      getEffectiveInputModalities: () => ({}),
+      getDefaultVisionBridgeModel: () => undefined,
+      getBaseLlmClient: () => ({ resolveForModel }),
+    });
+    vi.spyOn(atCommandProcessor, 'resolveAtCommandQuery').mockResolvedValue({
+      processedQuery: [{ text: queuedPrompt }, audioPart],
+      shouldProceed: true,
+    });
+    const mkToolCall = (callId: string, modelOverride: string) =>
+      ({
+        request: {
+          callId,
+          name: 'testTool',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-id-marker-reset',
+        },
+        status: 'success',
+        responseSubmittedToLlm: false,
+        response: {
+          callId,
+          responseParts: [
+            {
+              functionResponse: {
+                id: callId,
+                name: 'testTool',
+                response: { result: 'ok' },
+              },
+            },
+          ],
+          errorType: undefined,
+          modelOverride,
+        },
+        tool: { displayName: 'MockTool' },
+        invocation: {
+          getDescription: () => 'Mock description',
+        } as unknown as AnyToolInvocation,
+      }) as TrackedCompletedToolCall;
+    const midTurnDrainRef = {
+      current: vi
+        .fn<() => string[]>()
+        .mockReturnValueOnce([queuedPrompt])
+        .mockReturnValue([]),
+    };
+    let capturedOnComplete:
+      | ((completedTools: TrackedToolCall[]) => Promise<void>)
+      | null = null;
+    mockUseReactToolScheduler.mockImplementation((onComplete) => {
+      capturedOnComplete = onComplete;
+      return [[], mockScheduleToolCalls, mockMarkToolsAsSubmitted];
+    });
+
+    renderHook(() =>
+      useLlmStream(
+        new MockedLlmClientClass(mockConfig),
+        [],
+        mockAddItem,
+        mockConfig,
+        true,
+        mockLoadedSettings,
+        mockOnDebugMessage,
+        mockHandleSlashCommand,
+        false,
+        () => 'vscode' as EditorType,
+        () => {},
+        () => Promise.resolve(),
+        false,
+        () => {},
+        () => {},
+        () => {},
+        () => {},
+        80,
+        24,
+        midTurnDrainRef,
+      ),
+    );
+
+    // Batch 1 installs X and the drain routes the audio onto it (marker = X,
+    // stamp = this prompt).
+    await act(async () => {
+      await capturedOnComplete?.([mkToolCall('call-x1', 'skill-model-X')]);
+    });
+    await waitFor(() => expect(mockSendMessageStream).toHaveBeenCalledTimes(1));
+    expect(mockSendMessageStream.mock.calls[0]?.[3]).toMatchObject({
+      modelOverride: 'skill-model-X\0',
+    });
+
+    // Batch 2 displaces X with Y — the overwrite must reset the marker pair.
+    await act(async () => {
+      await capturedOnComplete?.([mkToolCall('call-y', 'skill-model-Y')]);
+    });
+    await waitFor(() => expect(mockSendMessageStream).toHaveBeenCalledTimes(2));
+    expect(mockSendMessageStream.mock.calls[1]?.[3]).toMatchObject({
+      modelOverride: 'skill-model-Y',
+    });
+
+    // Batch 3 re-asserts X. The freshly re-installed override must ride BARE
+    // for a media-free continuation: the stale marker would otherwise match
+    // by value again and send X\0.
+    await act(async () => {
+      await capturedOnComplete?.([mkToolCall('call-x2', 'skill-model-X')]);
+    });
+    await waitFor(() => expect(mockSendMessageStream).toHaveBeenCalledTimes(3));
+    expect(mockSendMessageStream.mock.calls[2]?.[3]).toMatchObject({
+      modelOverride: 'skill-model-X',
+    });
+  });
+
+  it('does not clear a media-routed override on a stale inherited resolution failure', async () => {
+    // R51-2: under a skill override, drain (1) an image segment that ROUTES
+    // onto it, (2) an image segment whose capability probe REJECTS — the
+    // guarded catch keeps the route and accumulates the resolution-failure
+    // flag — and (3) an audio segment whose probe RESOLVES FINE but without
+    // audio support. Keying the audio branch's clear on the ACCUMULATED
+    // flag would clear a route that resolves fine (orphaning the already-
+    // routed media's exact route and surfacing overrideCleared); keyed on
+    // this probe's own failure, only the audio fails closed (bridged) and
+    // the override survives. Reverting to the accumulated flag turns this
+    // red (overrideCleared true, routeSelector undefined, bare send).
+    const firstImage = 'inspect @/tmp/one.png';
+    const secondImage = 'inspect @/tmp/two.png';
+    const queuedAudio = 'listen @/tmp/recording.wav';
+    const imagePart1: Part = {
+      inlineData: { mimeType: 'image/png', data: 'SU1BR0Ux' },
+    };
+    const imagePart2: Part = {
+      inlineData: { mimeType: 'image/png', data: 'SU1BR0Uy' },
+    };
+    const audioPart: Part = {
+      inlineData: { mimeType: 'audio/wav', data: 'UklGRg==' },
+    };
+    let probeCalls = 0;
+    const resolveForModel = vi.fn(async () => {
+      probeCalls += 1;
+      if (probeCalls === 2) {
+        throw new Error('transient resolution failure');
+      }
+      return {
+        contentGeneratorConfig: { modalities: { image: true } },
+      };
+    });
+    Object.assign(mockConfig, {
+      getEffectiveInputModalities: () => ({}),
+      getDefaultVisionBridgeModel: () => undefined,
+      getBaseLlmClient: () => ({ resolveForModel }),
+    });
+    mockRunAudioBridge.mockResolvedValue({
+      status: 'ok',
+      parts: [{ text: '[audio bridge transcript]' }],
+      audioCount: 1,
+      convertedCount: 1,
+      egressCount: 1,
+      modelId: 'qwen3-asr-flash',
+    });
+    vi.spyOn(atCommandProcessor, 'resolveAtCommandQuery').mockImplementation(
+      async ({ query }) => ({
+        processedQuery:
+          query === firstImage
+            ? [{ text: firstImage }, imagePart1]
+            : query === secondImage
+              ? [{ text: secondImage }, imagePart2]
+              : [{ text: queuedAudio }, audioPart],
+        shouldProceed: true,
+      }),
+    );
+    const completedToolCalls: TrackedToolCall[] = [
+      {
+        request: {
+          callId: 'call-stale-flag',
+          name: 'testTool',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-id-stale-flag',
+        },
+        status: 'success',
+        responseSubmittedToLlm: false,
+        response: {
+          callId: 'call-stale-flag',
+          responseParts: [
+            {
+              functionResponse: {
+                id: 'call-stale-flag',
+                name: 'testTool',
+                response: { result: 'ok' },
+              },
+            },
+          ],
+          errorType: undefined,
+          modelOverride: 'route-model',
+        },
+        tool: { displayName: 'MockTool' },
+        invocation: {
+          getDescription: () => 'Mock description',
+        } as unknown as AnyToolInvocation,
+      } as TrackedCompletedToolCall,
+    ];
+    const midTurnDrainRef = {
+      current: vi
+        .fn<() => string[]>()
+        .mockReturnValueOnce([firstImage, secondImage, queuedAudio])
+        .mockReturnValue([]),
+    };
+    let capturedOnComplete:
+      | ((completedTools: TrackedToolCall[]) => Promise<void>)
+      | null = null;
+    mockUseReactToolScheduler.mockImplementation((onComplete) => {
+      capturedOnComplete = onComplete;
+      return [[], mockScheduleToolCalls, mockMarkToolsAsSubmitted];
+    });
+
+    renderHook(() =>
+      useLlmStream(
+        new MockedLlmClientClass(mockConfig),
+        [],
+        mockAddItem,
+        mockConfig,
+        true,
+        mockLoadedSettings,
+        mockOnDebugMessage,
+        mockHandleSlashCommand,
+        false,
+        () => 'vscode' as EditorType,
+        () => {},
+        () => Promise.resolve(),
+        false,
+        () => {},
+        () => {},
+        () => {},
+        () => {},
+        80,
+        24,
+        midTurnDrainRef,
+      ),
+    );
+
+    await act(async () => {
+      await capturedOnComplete?.(completedToolCalls);
+    });
+
+    await waitFor(() => expect(mockSendMessageStream).toHaveBeenCalledOnce());
+    const options = mockSendMessageStream.mock.calls[0]?.[3] as {
+      modelOverride?: string;
+      steerInput?: SteerInput;
+    };
+    // The audio probe resolved (no audio support): keyed on its own failure
+    // there is nothing to clear — the override survives and the drain keeps
+    // reporting the live route.
+    expect(options.steerInput).toMatchObject({
+      mediaRouted: true,
+      routeSelector: 'route-model',
+      overrideCleared: false,
+    });
+    expect(options.modelOverride).toBe('route-model\0');
+    const sent = JSON.stringify(mockSendMessageStream.mock.calls[0]?.[0]);
+    // The unsupported/failing images fail closed visibly and the audio is
+    // bridged; no raw media survives.
+    expect(sent).toContain('Image was not sent');
+    expect(sent).toContain('[audio bridge transcript]');
+    expect(sent).not.toContain('SU1BR0Ux');
+    expect(sent).not.toContain('SU1BR0Uy');
+    expect(sent).not.toContain('UklGRg');
+    expect(mockAddItem).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        text: expect.stringContaining('Audio was not sent'),
+      }),
+      expect.any(Number),
+    );
+  });
+
+  it('keeps a nested PDF tool result under a pdf-capable override', async () => {
+    // R51-5: core's slimming maps application/pdf onto modalities.pdf, and
+    // an exact-routed send slims against the route's OWN modalities — a
+    // pdf-capable override delivers the carrier intact. The gate must probe
+    // the route's pdf modality instead of erasing the carrier as foreign.
+    const nestedPdfPart: Part = {
+      inlineData: { mimeType: 'application/pdf', data: 'JVBERi0=' },
+    };
+    const resolveForModel = vi.fn().mockResolvedValue({
+      contentGeneratorConfig: { modalities: { image: true, pdf: true } },
+    });
+    Object.assign(mockConfig, {
+      getEffectiveInputModalities: () => ({}),
+      getDefaultVisionBridgeModel: () => undefined,
+      getBaseLlmClient: () => ({ resolveForModel }),
+    });
+    const firstToolCalls: TrackedToolCall[] = [
+      {
+        request: {
+          callId: 'call-pdf-1',
+          name: 'testTool',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-id-nested-pdf',
+        },
+        status: 'success',
+        responseSubmittedToLlm: false,
+        response: {
+          callId: 'call-pdf-1',
+          responseParts: [
+            {
+              functionResponse: {
+                id: 'call-pdf-1',
+                name: 'testTool',
+                response: { result: 'ok' },
+              },
+            },
+          ],
+          errorType: undefined,
+          modelOverride: 'pdf-skill-model',
+        },
+        tool: { displayName: 'MockTool' },
+        invocation: {
+          getDescription: () => 'Mock description',
+        } as unknown as AnyToolInvocation,
+      } as TrackedCompletedToolCall,
+    ];
+    const secondToolCalls: TrackedToolCall[] = [
+      {
+        request: {
+          callId: 'call-pdf-2',
+          name: 'read_file',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-id-nested-pdf',
+        },
+        status: 'success',
+        responseSubmittedToLlm: false,
+        response: {
+          callId: 'call-pdf-2',
+          responseParts: [
+            {
+              functionResponse: {
+                id: 'call-pdf-2',
+                name: 'read_file',
+                response: { output: 'PDF attached' },
+                parts: [nestedPdfPart],
+              },
+            } as never,
+          ],
+          errorType: undefined,
+        },
+        tool: { displayName: 'MockTool' },
+        invocation: {
+          getDescription: () => 'Mock description',
+        } as unknown as AnyToolInvocation,
+      } as TrackedCompletedToolCall,
+    ];
+    let capturedOnComplete:
+      | ((completedTools: TrackedToolCall[]) => Promise<void>)
+      | null = null;
+    mockUseReactToolScheduler.mockImplementation((onComplete) => {
+      capturedOnComplete = onComplete;
+      return [[], mockScheduleToolCalls, mockMarkToolsAsSubmitted];
+    });
+
+    renderHook(() =>
+      useLlmStream(
+        new MockedLlmClientClass(mockConfig),
+        [],
+        mockAddItem,
+        mockConfig,
+        true,
+        mockLoadedSettings,
+        mockOnDebugMessage,
+        mockHandleSlashCommand,
+        false,
+        () => 'vscode' as EditorType,
+        () => {},
+        () => Promise.resolve(),
+        false,
+        () => {},
+        () => {},
+        () => {},
+        () => {},
+        80,
+        24,
+      ),
+    );
+
+    await act(async () => {
+      if (capturedOnComplete) {
+        await capturedOnComplete(firstToolCalls);
+      }
+    });
+    await waitFor(() => expect(mockSendMessageStream).toHaveBeenCalledTimes(1));
+    expect(mockSendMessageStream.mock.calls[0]?.[3]).toMatchObject({
+      modelOverride: 'pdf-skill-model',
+    });
+
+    await act(async () => {
+      if (capturedOnComplete) {
+        await capturedOnComplete(secondToolCalls);
+      }
+    });
+    await waitFor(() => expect(mockSendMessageStream).toHaveBeenCalledTimes(2));
+    const sent = JSON.stringify(mockSendMessageStream.mock.calls[1]?.[0]);
+    // The carrier survives intact under the pdf-capable route — removing the
+    // pdf modality probe from the gate erases it (foreign substitution).
+    expect(sent).toContain('application/pdf');
+    expect(sent).toContain('JVBERi0=');
+    expect(sent).not.toContain('was not sent');
+    // Surviving media establishes the exact route for the turn's remaining
+    // continuations.
+    expect(mockSendMessageStream.mock.calls[1]?.[3]).toMatchObject({
+      modelOverride: 'pdf-skill-model\0',
+    });
+  });
+
+  it('fails closed a nested PDF tool result under a pdf-incapable override', async () => {
+    // R51-5 negative: a route that does not declare the pdf modality still
+    // fails the carrier closed VISIBLY (marker + ERROR item) instead of
+    // exact-routing it into silent placeholder substitution.
+    const nestedPdfPart: Part = {
+      inlineData: { mimeType: 'application/pdf', data: 'JVBERi0=' },
+    };
+    const resolveForModel = vi.fn().mockResolvedValue({
+      contentGeneratorConfig: { modalities: { image: true } },
+    });
+    Object.assign(mockConfig, {
+      getEffectiveInputModalities: () => ({}),
+      getDefaultVisionBridgeModel: () => undefined,
+      getBaseLlmClient: () => ({ resolveForModel }),
+    });
+    const firstToolCalls: TrackedToolCall[] = [
+      {
+        request: {
+          callId: 'call-pdf-incapable-1',
+          name: 'testTool',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-id-nested-pdf-incapable',
+        },
+        status: 'success',
+        responseSubmittedToLlm: false,
+        response: {
+          callId: 'call-pdf-incapable-1',
+          responseParts: [
+            {
+              functionResponse: {
+                id: 'call-pdf-incapable-1',
+                name: 'testTool',
+                response: { result: 'ok' },
+              },
+            },
+          ],
+          errorType: undefined,
+          modelOverride: 'text-skill-model',
+        },
+        tool: { displayName: 'MockTool' },
+        invocation: {
+          getDescription: () => 'Mock description',
+        } as unknown as AnyToolInvocation,
+      } as TrackedCompletedToolCall,
+    ];
+    const secondToolCalls: TrackedToolCall[] = [
+      {
+        request: {
+          callId: 'call-pdf-incapable-2',
+          name: 'read_file',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-id-nested-pdf-incapable',
+        },
+        status: 'success',
+        responseSubmittedToLlm: false,
+        response: {
+          callId: 'call-pdf-incapable-2',
+          responseParts: [
+            {
+              functionResponse: {
+                id: 'call-pdf-incapable-2',
+                name: 'read_file',
+                response: { output: 'PDF attached' },
+                parts: [nestedPdfPart],
+              },
+            } as never,
+          ],
+          errorType: undefined,
+        },
+        tool: { displayName: 'MockTool' },
+        invocation: {
+          getDescription: () => 'Mock description',
+        } as unknown as AnyToolInvocation,
+      } as TrackedCompletedToolCall,
+    ];
+    let capturedOnComplete:
+      | ((completedTools: TrackedToolCall[]) => Promise<void>)
+      | null = null;
+    mockUseReactToolScheduler.mockImplementation((onComplete) => {
+      capturedOnComplete = onComplete;
+      return [[], mockScheduleToolCalls, mockMarkToolsAsSubmitted];
+    });
+
+    renderHook(() =>
+      useLlmStream(
+        new MockedLlmClientClass(mockConfig),
+        [],
+        mockAddItem,
+        mockConfig,
+        true,
+        mockLoadedSettings,
+        mockOnDebugMessage,
+        mockHandleSlashCommand,
+        false,
+        () => 'vscode' as EditorType,
+        () => {},
+        () => Promise.resolve(),
+        false,
+        () => {},
+        () => {},
+        () => {},
+        () => {},
+        80,
+        24,
+      ),
+    );
+
+    await act(async () => {
+      if (capturedOnComplete) {
+        await capturedOnComplete(firstToolCalls);
+      }
+    });
+    await waitFor(() => expect(mockSendMessageStream).toHaveBeenCalledTimes(1));
+
+    await act(async () => {
+      if (capturedOnComplete) {
+        await capturedOnComplete(secondToolCalls);
+      }
+    });
+    await waitFor(() => expect(mockSendMessageStream).toHaveBeenCalledTimes(2));
+    const sent = JSON.stringify(mockSendMessageStream.mock.calls[1]?.[0]);
+    expect(sent).not.toContain('JVBERi0=');
+    expect(sent).toContain(
+      '[PDF content returned by a tool was not sent: the active model override does not support PDF documents.]',
+    );
+    expect(mockAddItem).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: MessageType.ERROR,
+        text: 'PDF returned by a tool was not sent: the active model override does not support PDF documents.',
+      }),
+      expect.any(Number),
+    );
+    // Nothing survived, so the bare selector persists (no NUL stamp).
+    expect(mockSendMessageStream.mock.calls[1]?.[3]).toMatchObject({
+      modelOverride: 'text-skill-model',
+    });
   });
 
   it('keeps an image-only mid-turn message when a bridge failure returns no replacement parts', async () => {

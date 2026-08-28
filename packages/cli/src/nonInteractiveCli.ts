@@ -1377,7 +1377,12 @@ export async function runNonInteractive(
       // semantics and could invert the verdict this run already acted on.
       let inlineOverrideProbeSelector: string | undefined;
       let inlineOverrideProbeVerdict:
-        | { supportsAudio: boolean; supportsImage: boolean }
+        | {
+            supportsAudio: boolean;
+            supportsImage: boolean;
+            supportsPdf: boolean;
+            supportsVideo: boolean;
+          }
         | undefined;
       // Capability-check ANY media against the inline override, not only
       // audio: raw images exact-routed to a target that cannot see them are
@@ -1386,7 +1391,15 @@ export async function runNonInteractive(
       const bridgeImagesForInlineOverride = async (
         parts: Part[],
       ): Promise<Part[]> => {
-        if (!shouldRunVisionBridge(config)) {
+        // R51-3: the RECIPIENT here is the override target, not the session
+        // model — key fail-closed on bridge availability alone.
+        // shouldRunVisionBridge's session-modality conjunct (`image !==
+        // true`) is ALSO false when the SESSION model accepts images, which
+        // would drop the images under a false 'no vision bridge is
+        // available' marker even though runVisionBridge (which never checks
+        // session modalities) could describe them — the identical turn on a
+        // text-only session model gets the image described.
+        if (config.getDefaultVisionBridgeModel?.() === undefined) {
           const reason = 'the active model override does not support images';
           emitBridgeNotice('vision_bridge', `Image was not sent: ${reason}.`);
           // Append a model-facing marker (not just the operator notice): an
@@ -1440,6 +1453,8 @@ export async function runNonInteractive(
       ) {
         let supportsAudio = false;
         let supportsImage = false;
+        let supportsPdf = false;
+        let supportsVideo = false;
         let routeResolutionFailed = false;
         try {
           const runtimeView = await config
@@ -1449,8 +1464,17 @@ export async function runNonInteractive(
             runtimeView.contentGeneratorConfig.modalities?.audio === true;
           supportsImage =
             runtimeView.contentGeneratorConfig.modalities?.image === true;
+          supportsPdf =
+            runtimeView.contentGeneratorConfig.modalities?.pdf === true;
+          supportsVideo =
+            runtimeView.contentGeneratorConfig.modalities?.video === true;
           inlineOverrideProbeSelector = inlineModelOverride;
-          inlineOverrideProbeVerdict = { supportsAudio, supportsImage };
+          inlineOverrideProbeVerdict = {
+            supportsAudio,
+            supportsImage,
+            supportsPdf,
+            supportsVideo,
+          };
         } catch (error) {
           routeResolutionFailed = true;
           debugLogger.warn(
@@ -1944,7 +1968,9 @@ export async function runNonInteractive(
           !nested.hasImage &&
           !nested.hasAudio &&
           !nested.hasUntyped &&
-          !nested.hasForeign
+          !nested.hasForeign &&
+          !nested.hasForeignPdf &&
+          !nested.hasForeignVideo
         ) {
           return { parts, establishExactRoute: false };
         }
@@ -1954,6 +1980,8 @@ export async function runNonInteractive(
           : overrideSelector;
         let supportsImage = false;
         let supportsAudio = false;
+        let supportsPdf = false;
+        let supportsVideo = false;
         const firstTurnProbe =
           inlineOverrideProbeVerdict !== undefined &&
           routeSelector === inlineOverrideProbeSelector
@@ -1962,6 +1990,8 @@ export async function runNonInteractive(
         if (firstTurnProbe) {
           supportsImage = firstTurnProbe.supportsImage;
           supportsAudio = firstTurnProbe.supportsAudio;
+          supportsPdf = firstTurnProbe.supportsPdf;
+          supportsVideo = firstTurnProbe.supportsVideo;
         } else {
           try {
             const runtimeView = await config
@@ -1971,6 +2001,10 @@ export async function runNonInteractive(
               runtimeView.contentGeneratorConfig.modalities?.image === true;
             supportsAudio =
               runtimeView.contentGeneratorConfig.modalities?.audio === true;
+            supportsPdf =
+              runtimeView.contentGeneratorConfig.modalities?.pdf === true;
+            supportsVideo =
+              runtimeView.contentGeneratorConfig.modalities?.video === true;
           } catch (error) {
             // Fail closed: sending under an unresolvable selector would drop
             // the media silently, so treat it as supporting nothing and
@@ -2000,12 +2034,14 @@ export async function runNonInteractive(
           );
         }
         if (nested.hasForeign) {
-          // Fail closed unconditionally: a MIME outside the routable
-          // modalities (image/, audio/) matches NO route — core's slimming
-          // placeholder-substitutes such carriers on every route, so the
-          // model would answer about media it never received. Keying on
-          // carrier presence keeps unbounded tool-supplied MIMEs from
-          // slipping past the gate.
+          // Fail closed unconditionally: a MIME outside every routable
+          // modality (image/, audio/, pdf, video) matches NO route — core's
+          // slimming placeholder-substitutes such carriers on every route,
+          // so the model would answer about media it never received. Keying
+          // on carrier presence keeps unbounded tool-supplied MIMEs from
+          // slipping past the gate. (pdf/video carriers are NOT foreign:
+          // they map onto the pdf/video modalities and are policed by the
+          // route probe below.)
           result = replaceNestedFunctionResponseMedia(
             result,
             'foreign',
@@ -2014,6 +2050,35 @@ export async function runNonInteractive(
           emitBridgeNotice(
             'tool_result_media',
             'Media returned by a tool was not sent: its MIME type matches no modality that can be routed to the model.',
+          );
+        }
+        // pdf/video carriers match the route's OWN pdf/video modalities
+        // (core's supportsMimeType + modalityDefaults), and an exact-routed
+        // send slims against those modalities — a capable route delivers
+        // them intact. Substitute only when the route does not declare the
+        // carrier's modality; erasing them unconditionally would delete
+        // deliverable tool output (read_file on a PDF nests inlineData
+        // application/pdf) and misdiagnose it (R51-5).
+        if (nested.hasForeignPdf && !supportsPdf) {
+          result = replaceNestedFunctionResponseMedia(
+            result,
+            'pdf',
+            '[PDF content returned by a tool was not sent: the active model override does not support PDF documents.]',
+          );
+          emitBridgeNotice(
+            'tool_result_media',
+            'PDF returned by a tool was not sent: the active model override does not support PDF documents.',
+          );
+        }
+        if (nested.hasForeignVideo && !supportsVideo) {
+          result = replaceNestedFunctionResponseMedia(
+            result,
+            'video',
+            '[Video content returned by a tool was not sent: the active model override does not support video.]',
+          );
+          emitBridgeNotice(
+            'tool_result_media',
+            'Video returned by a tool was not sent: the active model override does not support video.',
           );
         }
         if (nested.hasImage && !supportsImage) {
@@ -2042,7 +2107,9 @@ export async function runNonInteractive(
         // would otherwise skip QWEN_CODE_MAX_INLINE_MEDIA_BYTES.
         const mediaSurvived =
           (nested.hasImage && supportsImage) ||
-          (nested.hasAudio && supportsAudio);
+          (nested.hasAudio && supportsAudio) ||
+          (nested.hasForeignPdf && supportsPdf) ||
+          (nested.hasForeignVideo && supportsVideo);
         return {
           parts: normalizePartList(clampNestedFunctionResponseMedia(result)),
           // Media that SURVIVED under a BARE persisted selector needs the

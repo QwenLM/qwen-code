@@ -35942,7 +35942,7 @@ describe('Session', () => {
       );
     });
 
-    it('preserves staged tool images when cancellation empties a fallen-back Guard drain', async () => {
+    it('fail-closes staged tool media when cancellation empties a fallen-back Guard drain', async () => {
       rebuildSessionWithGuard();
       installPendingTodoTool();
       vi.spyOn(audioBridgeService, 'runAudioBridge').mockImplementation(
@@ -36099,10 +36099,17 @@ describe('Session', () => {
             ),
         );
       expect(preserved).toBeDefined();
-      // The cancellation lands between the drain and the recheck, so the
-      // recheck is skipped and the staged image survives verbatim instead of
-      // being rewritten into a marker that would persist in session history.
-      expect(JSON.stringify(preserved)).toContain('image/png');
+      // R51-6: the cancellation lands between the drain and the recheck. A
+      // cancelled turn must never persist unbridged media — the
+      // `interrupted_prompt` continuation re-sends persisted parts WITHOUT
+      // re-bridging — so the recheck's abort branch fail-closes the staged
+      // nested image into a marker instead of persisting it raw (restoring
+      // the old `return parts` abort behavior makes these assertions fail).
+      expect(JSON.stringify(preserved)).not.toContain('image/png');
+      expect(JSON.stringify(preserved)).not.toContain('inlineData');
+      expect(JSON.stringify(preserved)).toContain(
+        'the turn was cancelled before it could be bridged',
+      );
       expect(JSON.stringify(preserved)).not.toContain(
         '[recovered guard image]',
       );

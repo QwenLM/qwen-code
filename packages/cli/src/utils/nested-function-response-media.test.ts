@@ -37,6 +37,8 @@ describe('detectNestedFunctionResponseMedia', () => {
       hasAudio: true,
       hasUntyped: false,
       hasForeign: false,
+      hasForeignPdf: false,
+      hasForeignVideo: false,
     });
   });
 
@@ -48,16 +50,46 @@ describe('detectNestedFunctionResponseMedia', () => {
       hasAudio: false,
       hasUntyped: true,
       hasForeign: false,
+      hasForeignPdf: false,
+      hasForeignVideo: false,
+    });
+  });
+
+  // R51-5: core's slimming maps application/pdf → modalities.pdf and
+  // video/* → modalities.video, so these carriers match SOME routes and are
+  // policed by the route's own modality probe — they must not be lumped
+  // into the unconditional fail-closed foreign axis.
+  it('reports application/pdf carriers on the pdf axis (case-insensitively)', () => {
+    expect(
+      detectNestedFunctionResponseMedia([nestedMediaCarrier('APPLICATION/PDF')]),
+    ).toEqual({
+      hasImage: false,
+      hasAudio: false,
+      hasUntyped: false,
+      hasForeign: false,
+      hasForeignPdf: true,
+      hasForeignVideo: false,
+    });
+  });
+
+  it('reports video/* carriers on the video axis', () => {
+    expect(
+      detectNestedFunctionResponseMedia([nestedMediaCarrier('video/mp4')]),
+    ).toEqual({
+      hasImage: false,
+      hasAudio: false,
+      hasUntyped: false,
+      hasForeign: false,
+      hasForeignPdf: false,
+      hasForeignVideo: true,
     });
   });
 
   it.each([
-    'video/mp4',
-    'application/pdf',
     'application/octet-stream',
     '', // empty-string MIME: defined, but matches no modality
     'text/plain',
-  ])('reports %s carriers as foreign (no routable modality)', (mime) => {
+  ])('reports %s carriers as foreign (matches no modality)', (mime) => {
     expect(
       detectNestedFunctionResponseMedia([nestedMediaCarrier(mime)]),
     ).toEqual({
@@ -65,6 +97,8 @@ describe('detectNestedFunctionResponseMedia', () => {
       hasAudio: false,
       hasUntyped: false,
       hasForeign: true,
+      hasForeignPdf: false,
+      hasForeignVideo: false,
     });
   });
 
@@ -78,7 +112,9 @@ describe('detectNestedFunctionResponseMedia', () => {
         ],
       },
     } as unknown as Part;
-    expect(detectNestedFunctionResponseMedia([part]).hasForeign).toBe(true);
+    expect(detectNestedFunctionResponseMedia([part]).hasForeignVideo).toBe(
+      true,
+    );
   });
 
   it('never throws on malformed part lists (null entries, null inner parts)', () => {
@@ -94,6 +130,8 @@ describe('detectNestedFunctionResponseMedia', () => {
       hasAudio: false,
       hasUntyped: false,
       hasForeign: false,
+      hasForeignPdf: false,
+      hasForeignVideo: false,
     });
   });
 
@@ -108,13 +146,17 @@ describe('detectNestedFunctionResponseMedia', () => {
       hasAudio: false,
       hasUntyped: false,
       hasForeign: false,
+      hasForeignPdf: false,
+      hasForeignVideo: false,
     });
   });
 });
 
 describe('replaceNestedFunctionResponseMedia', () => {
-  it('substitutes only foreign carriers for the foreign match', () => {
+  it('substitutes only foreign carriers for the foreign match (pdf/video are NOT foreign)', () => {
     const parts = [
+      nestedMediaCarrier('application/octet-stream', 'T0NURVQ='),
+      nestedMediaCarrier('application/pdf', 'UERG'),
       nestedMediaCarrier('video/mp4', 'VklERU8='),
       nestedMediaCarrier('image/png', 'SU1BR0U='),
     ];
@@ -124,10 +166,45 @@ describe('replaceNestedFunctionResponseMedia', () => {
       '[foreign media not sent]',
     );
     const serialized = JSON.stringify(replaced);
-    expect(serialized).not.toContain('VklERU8=');
+    expect(serialized).not.toContain('T0NURVQ=');
     expect(serialized).toContain('[foreign media not sent]');
-    // The image carrier is not a foreign match and survives untouched.
+    // R51-5: pdf/video carriers map onto real modalities — the foreign
+    // substitution must not erase them; the image carrier survives too.
+    expect(serialized).toContain('UERG');
+    expect(serialized).toContain('VklERU8=');
     expect(serialized).toContain('SU1BR0U=');
+  });
+
+  it('substitutes only pdf carriers for the pdf match', () => {
+    const parts = [
+      nestedMediaCarrier('application/pdf', 'UERG'),
+      nestedMediaCarrier('video/mp4', 'VklERU8='),
+    ];
+    const replaced = replaceNestedFunctionResponseMedia(
+      parts,
+      'pdf',
+      '[pdf not sent]',
+    );
+    const serialized = JSON.stringify(replaced);
+    expect(serialized).not.toContain('UERG');
+    expect(serialized).toContain('[pdf not sent]');
+    expect(serialized).toContain('VklERU8=');
+  });
+
+  it('substitutes only video carriers for the video match', () => {
+    const parts = [
+      nestedMediaCarrier('application/pdf', 'UERG'),
+      nestedMediaCarrier('video/mp4', 'VklERU8='),
+    ];
+    const replaced = replaceNestedFunctionResponseMedia(
+      parts,
+      'video',
+      '[video not sent]',
+    );
+    const serialized = JSON.stringify(replaced);
+    expect(serialized).not.toContain('VklERU8=');
+    expect(serialized).toContain('[video not sent]');
+    expect(serialized).toContain('UERG');
   });
 
   it('substitutes empty-string-MIME carriers for the foreign match', () => {
@@ -144,14 +221,14 @@ describe('replaceNestedFunctionResponseMedia', () => {
   it('preserves structured tool output when substituting', () => {
     const replaced = replaceNestedFunctionResponseMedia(
       [nestedMediaCarrier('application/pdf', 'UERG')],
-      'foreign',
-      '[foreign media not sent]',
+      'pdf',
+      '[pdf not sent]',
     );
     const fr = (replaced[0] as Part).functionResponse as {
       response: { output: string };
     };
     expect(fr.response.output).toContain('tool output');
-    expect(fr.response.output).toContain('[foreign media not sent]');
+    expect(fr.response.output).toContain('[pdf not sent]');
   });
 
   it('does not throw on malformed part lists', () => {

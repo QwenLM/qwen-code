@@ -58,6 +58,25 @@ function isRoutableMime(mime: string): boolean {
 }
 
 /**
+ * Core's slimming authority (`supportsMimeType`,
+ * compactionInputSlimming.ts) maps `application/pdf` → `modalities.pdf`
+ * and video MIME types → `modalities.video`, and `modalityDefaults`
+ * declares those modalities for whole model families (gemini-* both,
+ * claude-* pdf, qwen-vl-* and others video). A carrier of either class therefore
+ * matches SOME routes — the gates must probe the resolved route's own
+ * `modalities.pdf` / `modalities.video` instead of failing these closed
+ * unconditionally (R51-5).
+ */
+export function isPdfMime(mime: string): boolean {
+  return mime.toLowerCase() === 'application/pdf';
+}
+
+/** See {@link isPdfMime}. Case-insensitive like core's `supportsMimeType`. */
+export function isVideoMime(mime: string): boolean {
+  return mime.toLowerCase().startsWith('video/');
+}
+
+/**
  * Detect inline media nested inside `functionResponse.parts`. The top-level
  * `hasImageParts`/`hasAudioParts` helpers only see top-level `inlineData`, so
  * a tool-result continuation's media is invisible to them.
@@ -73,26 +92,35 @@ function isRoutableMime(mime: string): boolean {
  * code path.
  *
  * The axes key on CARRIER PRESENCE, not an enumeration of known MIME
- * classes: any media carrier whose MIME matches no routable modality
- * (image/ or audio/) is reported as `hasForeign` — `video/*`,
- * `application/pdf`, `application/octet-stream` (the MCP default for a
- * MIME-less embedded resource), or an empty-string MIME. Core's slimming
- * placeholder-substitutes such carriers on every route (they match no
- * modality), so the gates must fail them closed visibly instead of letting
- * the model answer about media it never received. Enumerating MIME
- * prefixes can never converge on an unbounded tool-supplied entrance space.
+ * classes. Three foreign classes are distinguished (R51-5):
+ * - `hasForeignPdf` (`application/pdf`) and `hasForeignVideo` (video MIME types):
+ *   core's slimming maps these onto the `pdf` / `video` modalities
+ *   (`supportsMimeType`, compactionInputSlimming.ts), and `modalityDefaults`
+ *   declares them for whole model families — they match SOME routes, so the
+ *   gates must probe the resolved route's own modalities and substitute only
+ *   when the route does not declare the carrier's modality.
+ * - `hasForeign` — every other non-routable MIME (`application/octet-stream`,
+ *   the MCP default for a MIME-less embedded resource, an empty-string MIME,
+ *   …): matches NO route, so core's slimming placeholder-substitutes such
+ *   carriers on every route and the gates fail them closed unconditionally.
+ * Enumerating MIME prefixes can never converge on an unbounded tool-supplied
+ * entrance space, so anything the routing layer cannot name stays foreign.
  */
 export function detectNestedFunctionResponseMedia(parts: PartListUnion): {
   hasImage: boolean;
   hasAudio: boolean;
   hasUntyped: boolean;
   hasForeign: boolean;
+  hasForeignPdf: boolean;
+  hasForeignVideo: boolean;
 } {
   const list = Array.isArray(parts) ? parts : [parts];
   let hasImage = false;
   let hasAudio = false;
   let hasUntyped = false;
   let hasForeign = false;
+  let hasForeignPdf = false;
+  let hasForeignVideo = false;
   for (const part of list) {
     if (!isMediaCarrierCandidate(part)) continue;
     const nested = (part.functionResponse as { parts?: unknown } | undefined)
@@ -114,12 +142,23 @@ export function detectNestedFunctionResponseMedia(parts: PartListUnion): {
       if (isRoutableMime(mime)) {
         if (mime.toLowerCase().startsWith('image/')) hasImage = true;
         else hasAudio = true;
+      } else if (isPdfMime(mime)) {
+        hasForeignPdf = true;
+      } else if (isVideoMime(mime)) {
+        hasForeignVideo = true;
       } else {
         hasForeign = true;
       }
     }
   }
-  return { hasImage, hasAudio, hasUntyped, hasForeign };
+  return {
+    hasImage,
+    hasAudio,
+    hasUntyped,
+    hasForeign,
+    hasForeignPdf,
+    hasForeignVideo,
+  };
 }
 
 export function stringifyStructuredToolOutput(value: unknown): string {
@@ -138,7 +177,7 @@ export function stringifyStructuredToolOutput(value: unknown): string {
  */
 export function replaceNestedFunctionResponseMedia(
   parts: PartListUnion,
-  match: 'image' | 'audio' | 'untyped' | 'foreign',
+  match: 'image' | 'audio' | 'untyped' | 'foreign' | 'pdf' | 'video',
   note: string,
 ): Part[] {
   const prefix = match === 'image' ? 'image/' : 'audio/';
@@ -161,20 +200,31 @@ export function replaceNestedFunctionResponseMedia(
       const mime = nestedPartMime(inner);
       // Same predicates as `detectNestedFunctionResponseMedia` — both
       // carriers (`inlineData` and `fileData`), case-insensitive MIME
-      // matching, MIME-less carriers for the `untyped` axis, and any
+      // matching, MIME-less carriers for the `untyped` axis, the
+      // modality-probed `pdf` / `video` axes, and any remaining
       // non-routable MIME for the `foreign` axis (core's slimming
-      // placeholder-substitutes both on every route, so the gates fail them
-      // closed visibly).
+      // placeholder-substitutes those on every route, so the gates fail
+      // them closed visibly).
       const isMatch =
         match === 'untyped'
           ? mime === undefined && nestedPartCarriesMedia(inner)
-          : match === 'foreign'
+          : match === 'pdf'
             ? mime !== undefined &&
               nestedPartCarriesMedia(inner) &&
-              !isRoutableMime(mime)
-            : mime !== undefined &&
-              mime.toLowerCase().startsWith(prefix) &&
-              nestedPartCarriesMedia(inner);
+              isPdfMime(mime)
+            : match === 'video'
+              ? mime !== undefined &&
+                nestedPartCarriesMedia(inner) &&
+                isVideoMime(mime)
+              : match === 'foreign'
+                ? mime !== undefined &&
+                  nestedPartCarriesMedia(inner) &&
+                  !isRoutableMime(mime) &&
+                  !isPdfMime(mime) &&
+                  !isVideoMime(mime)
+                : mime !== undefined &&
+                  mime.toLowerCase().startsWith(prefix) &&
+                  nestedPartCarriesMedia(inner);
       if (isMatch) {
         touched = true;
       } else {

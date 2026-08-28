@@ -2392,6 +2392,94 @@ describe('runNonInteractive', () => {
     ).toBe('text-model');
   });
 
+  it('vision-bridges images for a text-only override even when the session model accepts images', async () => {
+    // R51-3: the recipient of an inline-override payload is the override
+    // TARGET, not the session model. shouldRunVisionBridge is ALSO false
+    // when the SESSION model accepts images — gating
+    // bridgeImagesForInlineOverride on it dropped the image under a false
+    // 'no vision bridge is available' marker while runVisionBridge (which
+    // never checks session modalities) could have described it. Keying the
+    // fail-closed branch on bridge availability alone restores the bridge;
+    // reverting the gate turns this red (marker text, no bridge call).
+    setupMetricsMock();
+    const imagePart: Part = {
+      inlineData: { mimeType: 'image/png', data: 'aW1hZ2U=' },
+    };
+    const mockCommand = {
+      name: 'text-model',
+      description: 'submit an image to a text-only model',
+      kind: CommandKind.FILE,
+      action: vi.fn().mockResolvedValue({
+        type: 'submit_prompt',
+        content: [{ text: 'inspect this image' }, imagePart],
+        modelOverride: 'text-model',
+      }),
+    };
+    mockGetCommands.mockReturnValue([mockCommand]);
+    (mockConfig.getContentGeneratorConfig as Mock).mockReturnValue({
+      authType: AuthType.QWEN_OAUTH,
+    });
+    (
+      mockConfig as unknown as { getAvailableModelsForAuthType: Mock }
+    ).getAvailableModelsForAuthType = vi
+      .fn()
+      .mockReturnValue([{ id: 'text-model', authType: AuthType.QWEN_OAUTH }]);
+    const resolveForModel = vi.fn().mockResolvedValue({
+      contentGeneratorConfig: { modalities: {} },
+    });
+    (mockConfig as unknown as { getBaseLlmClient: Mock }).getBaseLlmClient = vi
+      .fn()
+      .mockReturnValue({ resolveForModel });
+    Object.assign(mockConfig, {
+      // Multimodal SESSION model: this is the conflation the gate must not
+      // make — the override target still cannot view images.
+      getEffectiveInputModalities: vi.fn().mockReturnValue({ image: true }),
+      getDefaultVisionBridgeModel: vi.fn().mockReturnValue({
+        id: 'vision-agent',
+        baseUrl: 'https://vision.example.com/v1',
+        agentCapable: true,
+      }),
+    });
+    runVisionBridgeSpy.mockResolvedValue({
+      status: 'ok',
+      applied: true,
+      parts: [
+        { text: 'inspect this image' },
+        { text: '[vision bridge description]' },
+      ],
+      convertedCount: 1,
+      omittedCount: 0,
+      modelId: 'vision-agent',
+      egressOccurred: true,
+    });
+    mockLlmClient.sendMessageStream.mockReturnValue(
+      createStreamFromEvents(finishedEvents),
+    );
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      '/text-model',
+      'prompt-image-bridged-multimodal-session',
+    );
+
+    expect(runVisionBridgeSpy).toHaveBeenCalledWith({
+      config: mockConfig,
+      parts: [{ text: 'inspect this image' }, imagePart],
+      signal: expect.any(AbortSignal),
+    });
+    const sentParts = mockLlmClient.sendMessageStream.mock.calls[0]?.[0];
+    expect(JSON.stringify(sentParts)).toContain('vision bridge description');
+    expect(JSON.stringify(sentParts)).not.toContain('inlineData');
+    // No false 'no vision bridge is available' marker.
+    expect(JSON.stringify(sentParts)).not.toContain(
+      'no vision bridge is available',
+    );
+    expect(
+      mockLlmClient.sendMessageStream.mock.calls[0]?.[3]?.modelOverride,
+    ).toBe('text-model');
+  });
+
   it('fails closed when a slash prompt selects a text-only model', async () => {
     setupMetricsMock();
     const mockCommand = {
@@ -2850,15 +2938,17 @@ describe('runNonInteractive', () => {
     );
   });
 
-  it('fails foreign nested tool-result media closed even on an all-capable route', async () => {
-    // R49-5: the gate keys on carrier presence, not an enumeration of MIME
-    // classes. A carrier whose MIME matches no routable modality (video/*,
-    // application/pdf, application/octet-stream, empty string) is
-    // placeholder-substituted by core route slimming on EVERY route — even
-    // one that supports both image and audio — so it must fail closed
-    // visibly regardless of what the override supports.
+  it('fails genuinely foreign nested tool-result media closed even on an all-capable route', async () => {
+    // R49-5/R51-5: the gate keys on carrier presence, not an enumeration of
+    // MIME classes. A carrier whose MIME matches NO routable modality
+    // (application/octet-stream, empty string, …) is placeholder-substituted
+    // by core route slimming on EVERY route — even one that supports every
+    // modality — so it must fail closed visibly regardless of what the
+    // override supports. (pdf/video carriers are NOT foreign: they map onto
+    // the pdf/video modalities and are policed by the route probe — see the
+    // dedicated pdf/video gate tests below.)
     setupMetricsMock();
-    const nestedVideoData = 'TkVTVEVERVZJREVP';
+    const nestedForeignData = 'TkVTVEVET0NURVQ=';
     const mockCommand = {
       name: 'capable-model',
       description: 'submit to an all-capable model',
@@ -2901,7 +2991,7 @@ describe('runNonInteractive', () => {
             response: { output: 'clip attached' },
             parts: [
               {
-                inlineData: { mimeType: 'video/mp4', data: nestedVideoData },
+                inlineData: { mimeType: 'application/octet-stream', data: nestedForeignData },
               },
             ],
           },
@@ -2939,7 +3029,7 @@ describe('runNonInteractive', () => {
     const continuationSent = JSON.stringify(
       mockLlmClient.sendMessageStream.mock.calls[1]?.[0],
     );
-    expect(continuationSent).not.toContain(nestedVideoData);
+    expect(continuationSent).not.toContain(nestedForeignData);
     expect(continuationSent).toContain('was not sent');
     expect(processStderrSpy).toHaveBeenCalledWith(
       expect.stringContaining(

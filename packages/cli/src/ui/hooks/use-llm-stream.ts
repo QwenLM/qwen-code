@@ -1431,7 +1431,20 @@ export const useLlmStream = (
       if (modelOverrideRef.current?.endsWith('\0')) {
         return { parts, shouldProceed: true };
       }
-      if (!shouldRunVisionBridge(config)) {
+      // R51-3: with an active override the RECIPIENT of the images is the
+      // override target, not the session model — so shouldRunVisionBridge's
+      // session-modality conjunct (`image !== true`) must not gate this path:
+      // it is ALSO false when the SESSION model accepts images, which would
+      // fail the images closed under a false 'no vision bridge is available'
+      // marker even though runVisionBridge (which never checks session
+      // modalities) could describe them. With an override, key on bridge
+      // availability alone; without one the session model IS the recipient
+      // and the full gate applies.
+      const visionBridgeUnavailable =
+        modelOverrideRef.current !== undefined
+          ? config.getDefaultVisionBridgeModel?.() === undefined
+          : !shouldRunVisionBridge(config);
+      if (visionBridgeUnavailable) {
         if (modelOverrideRef.current !== undefined) {
           // Reaching this gate with an active override means the capability
           // probe rejected the images (unsupported or unresolvable target).
@@ -1595,6 +1608,14 @@ export const useLlmStream = (
             ? activeOverride.slice(0, -1)
             : activeOverride;
           let supportsAudio = false;
+          // R51-2: only THIS probe's own failure may clear the override.
+          // `modelOverrideResolutionFailed` accumulates across the drain
+          // (initialized from `inheritedResolutionFailed`) and a successful
+          // probe never resets it — keying the clear on the accumulated flag
+          // would wipe a route that resolves fine whenever an EARLIER
+          // segment's probe failed, orphaning the already-routed media's
+          // exact route.
+          let audioProbeFailed = false;
           try {
             const runtimeView = await config
               .getBaseLlmClient()
@@ -1605,6 +1626,7 @@ export const useLlmStream = (
               runtimeView.contentGeneratorConfig.modalities?.audio === true;
             targetSupportsAudio = supportsAudio;
           } catch (error) {
+            audioProbeFailed = true;
             modelOverrideResolutionFailed = true;
             debugLogger.warn(
               `audio route capability check failed for '${routeSelector}': ${
@@ -1614,7 +1636,18 @@ export const useLlmStream = (
           }
           if (!supportsAudio) {
             const failClosed = inlineModelOverrideActiveRef.current;
-            if (modelOverrideResolutionFailed) {
+            if (
+              audioProbeFailed &&
+              !mediaRouted &&
+              mediaRoutedOverrideRef.current !== modelOverrideRef.current
+            ) {
+              // R33-2 invariant, mirroring the image probe below: a
+              // fail-closed resolution failure clears the override so the
+              // turn degrades to the session model instead of sending the
+              // bare unresolvable selector. When media is already routed —
+              // by this segment or an earlier one — clearing would orphan
+              // the already-routed media's exact route, so only the audio
+              // fails closed (R51-2).
               clearModelOverride(
                 modelOverrideRef,
                 inlineModelOverrideActiveRef,
@@ -1624,7 +1657,7 @@ export const useLlmStream = (
               overrideCleared = true;
             }
             if (failClosed) {
-              const reason = modelOverrideResolutionFailed
+              const reason = audioProbeFailed
                 ? 'the active model override could not be resolved'
                 : 'the active model override does not support audio';
               // The audio bytes only fail closed because of this one-shot
@@ -1927,7 +1960,9 @@ export const useLlmStream = (
         !nested.hasImage &&
         !nested.hasAudio &&
         !nested.hasUntyped &&
-        !nested.hasForeign
+        !nested.hasForeign &&
+        !nested.hasForeignPdf &&
+        !nested.hasForeignVideo
       ) {
         return { parts: query };
       }
@@ -1953,6 +1988,8 @@ export const useLlmStream = (
         : activeOverride;
       let supportsImage = false;
       let supportsAudio = false;
+      let supportsPdf = false;
+      let supportsVideo = false;
       try {
         const runtimeView = await config
           .getBaseLlmClient()
@@ -1961,6 +1998,15 @@ export const useLlmStream = (
           runtimeView.contentGeneratorConfig.modalities?.image === true;
         supportsAudio =
           runtimeView.contentGeneratorConfig.modalities?.audio === true;
+        // Core's slimming maps `application/pdf` → modalities.pdf and
+        // `video/*` → modalities.video (supportsMimeType), and
+        // modalityDefaults declares them for whole model families — probe
+        // them like image/audio so a capable route keeps the carrier
+        // instead of the gate erasing deliverable tool output (R51-5).
+        supportsPdf =
+          runtimeView.contentGeneratorConfig.modalities?.pdf === true;
+        supportsVideo =
+          runtimeView.contentGeneratorConfig.modalities?.video === true;
       } catch (error) {
         // Fail closed: exact-routing an unresolvable selector would drop the
         // media silently, so treat it as supporting nothing and surface the
@@ -1994,12 +2040,14 @@ export const useLlmStream = (
         );
       }
       if (nested.hasForeign) {
-        // Fail closed unconditionally: a MIME outside the routable
-        // modalities (image/, audio/) matches NO route — core's slimming
-        // placeholder-substitutes such carriers on every route, even an
-        // all-capable one, so the model would answer about media it never
-        // received. Keying on carrier presence (not an enumeration of MIME
-        // classes) keeps unbounded tool-supplied MIMEs from slipping past.
+        // Fail closed unconditionally: a MIME outside every routable
+        // modality (image/, audio/, pdf, video) matches NO route — core's
+        // slimming placeholder-substitutes such carriers on every route,
+        // even an all-capable one, so the model would answer about media it
+        // never received. Keying on carrier presence (not an enumeration of
+        // MIME classes) keeps unbounded tool-supplied MIMEs from slipping
+        // past. (pdf/video carriers are NOT foreign: they map onto the
+        // pdf/video modalities and are policed by the route probe below.)
         result = replaceNestedFunctionResponseMedia(
           result,
           'foreign',
@@ -2010,6 +2058,43 @@ export const useLlmStream = (
           {
             type: MessageType.ERROR,
             text: 'Media returned by a tool was not sent: its MIME type matches no modality that can be routed to the model.',
+          },
+          timestamp,
+        );
+      }
+      // R51-5: pdf/video carriers match the route's OWN pdf/video
+      // modalities (core's supportsMimeType + modalityDefaults), and an
+      // exact-routed send slims against those modalities — a capable route
+      // delivers them intact. Substitute only when the route does not
+      // declare the carrier's modality; erasing them unconditionally would
+      // delete deliverable tool output (read_file on a PDF nests
+      // inlineData application/pdf) and misdiagnose it.
+      if (nested.hasForeignPdf && !supportsPdf) {
+        result = replaceNestedFunctionResponseMedia(
+          result,
+          'pdf',
+          '[PDF content returned by a tool was not sent: the active model override does not support PDF documents.]',
+        );
+        substituted = true;
+        addItem(
+          {
+            type: MessageType.ERROR,
+            text: 'PDF returned by a tool was not sent: the active model override does not support PDF documents.',
+          },
+          timestamp,
+        );
+      }
+      if (nested.hasForeignVideo && !supportsVideo) {
+        result = replaceNestedFunctionResponseMedia(
+          result,
+          'video',
+          '[Video content returned by a tool was not sent: the active model override does not support video.]',
+        );
+        substituted = true;
+        addItem(
+          {
+            type: MessageType.ERROR,
+            text: 'Video returned by a tool was not sent: the active model override does not support video.',
           },
           timestamp,
         );
@@ -2044,22 +2129,29 @@ export const useLlmStream = (
           timestamp,
         );
       }
-      // Media that SURVIVED the gate under a not-yet-routed override (bare
-      // inline/skill selectors): establish the route exactly like the
-      // top-level bridges do. Without this the continuation would send the
-      // bare selector, core would resolve the request modalities from the
-      // session config, and its slimming would placeholder-substitute the
-      // very media this gate just validated against the override's own
-      // capabilities. With the route established the send-time marker
-      // exact-routes this payload (it carries routed media) and stamps the
-      // owning prompt, so the remaining tool continuations keep the exact
-      // route too — the same invariant a first-turn media route establishes.
+      // Media that SURVIVED the gate owns the exact route, whether this gate
+      // ESTABLISHED it (a bare inline/skill selector not yet routed) or the
+      // payload merely BELONGS to an already-established route (the marker
+      // already matches the active override). Establishment: without it the
+      // continuation would send the bare selector, core would resolve the
+      // request modalities from the session config, and its slimming would
+      // placeholder-substitute the very media this gate just validated
+      // against the override's own capabilities. Membership (R51-4): a Retry
+      // of a failed continuation mints a fresh prompt_id, and only a returned
+      // mediaRouted makes the stamp block re-stamp it — with establishment-
+      // only routing the retry's media-free tool continuations would send the
+      // bare selector and core would slim the routed media against the
+      // session modalities, splitting the media-routed turn across models.
+      // Either way the send-time marker exact-routes this payload (it carries
+      // routed media) and stamps the owning prompt, so the remaining tool
+      // continuations keep the exact route too — the same invariant a
+      // first-turn media route establishes.
       const mediaSurvived =
         (nested.hasImage && supportsImage) ||
-        (nested.hasAudio && supportsAudio);
-      const establishingRoute =
-        mediaSurvived && mediaRoutedOverrideRef.current !== activeOverride;
-      if (establishingRoute) {
+        (nested.hasAudio && supportsAudio) ||
+        (nested.hasForeignPdf && supportsPdf) ||
+        (nested.hasForeignVideo && supportsVideo);
+      if (mediaSurvived) {
         mediaRoutedOverrideRef.current = activeOverride;
       }
       return {
@@ -2077,7 +2169,7 @@ export const useLlmStream = (
         // marker forever (the exact anti-pattern the top-level audio/image
         // fail-closed branches capture preOverrideParts to prevent).
         ...(substituted ? { preOverrideParts: query } : {}),
-        ...(establishingRoute ? { mediaRouted: true } : {}),
+        ...(mediaSurvived ? { mediaRouted: true } : {}),
       };
     },
     [addItem, config],
@@ -5030,7 +5122,12 @@ export const useLlmStream = (
             hasImageParts(finalQueryToSend) ||
             nestedRoutedMedia.hasImage ||
             nestedRoutedMedia.hasAudio ||
-            nestedRoutedMedia.hasUntyped;
+            nestedRoutedMedia.hasUntyped ||
+            // pdf/video carriers that survived the gate's modality probe are
+            // routed media too (R51-5): unsupported ones were already
+            // substituted, so any carrier still present here is validated.
+            nestedRoutedMedia.hasForeignPdf ||
+            nestedRoutedMedia.hasForeignVideo;
           const sendOptions = {
             type: submitType,
             notificationDisplayText: metadata?.notificationDisplayText,
@@ -6259,6 +6356,18 @@ export const useLlmStream = (
               mediaRoutedPromptIdRef,
             );
           } else {
+            if (toolCall.response.modelOverride !== modelOverrideRef.current) {
+              // R51-1: displacing the override invalidates the established
+              // media route. If the marker pair survived the displacement
+              // (routed onto X, a later batch sets Y, a further batch
+              // re-asserts X), the value match re-attaches: the next
+              // media-free continuation would send the trailing-NUL exact
+              // route of a freshly installed override — skipping compression
+              // and the capability fallback chain — and the stale match
+              // suppresses the gate's re-stamp of a Retry's fresh prompt_id.
+              mediaRoutedOverrideRef.current = undefined;
+              mediaRoutedPromptIdRef.current = undefined;
+            }
             applyModelOverride(
               modelOverrideRef,
               inlineModelOverrideActiveRef,
