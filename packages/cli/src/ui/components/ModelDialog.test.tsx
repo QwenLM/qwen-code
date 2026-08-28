@@ -1999,37 +1999,87 @@ describe('<ModelDialog />', () => {
     modalitiesSource: 'pattern',
   };
 
-  it('badges pattern-guessed modalities as auto-detected and offers the t action', () => {
-    const { getByText } = renderComponent({}, {
-      getModel: vi.fn(() => 'pattern-model'),
+  // The probe suite's explicit-declaration counterpart: same endpoint shape
+  // as patternSourceModel with hand-written modalities.
+  const explicitSourceModel = {
+    id: 'explicit-model',
+    label: 'Explicit Model',
+    description: '',
+    authType: AuthType.USE_OPENAI,
+    baseUrl: 'https://api.example.com/v1',
+    envKey: 'MODEL_DIALOG_PROBE_TEST_KEY',
+    modalities: { image: true },
+    modalitiesSource: 'explicit',
+  };
+
+  /** Minimal dialog Config around a model list: the FIRST model is the
+   * current selection, and getModelsConfig mirrors its baseUrl so the
+   * highlighted row resolves to it. */
+  const probeDialogConfig = (
+    models: Array<Record<string, unknown>>,
+  ): Partial<Config> =>
+    ({
+      getModel: vi.fn(() => models[0]!['id']),
       getAuthType: vi.fn(() => AuthType.USE_OPENAI),
-      getAllConfiguredModels: vi.fn(() => [patternSourceModel]),
+      getAllConfiguredModels: vi.fn(() => models),
       getModelsConfig: vi.fn(() => ({
         getGenerationConfig: vi.fn(() => ({
-          baseUrl: 'https://api.example.com/v1',
+          baseUrl: models[0]!['baseUrl'],
         })),
       })),
-    } as unknown as Partial<Config>);
+    }) as unknown as Partial<Config>;
+
+  /** Mount the probe suite's standard dialog over `models`. */
+  const renderProbeDialog = (
+    models: Array<Record<string, unknown>> = [patternSourceModel],
+    settingsValue?: Partial<LoadedSettings>,
+  ) => renderComponent({}, probeDialogConfig(models), settingsValue);
+
+  /** `it` wrapper that pins MODEL_DIALOG_PROBE_TEST_KEY to `value` (deleted
+   * when undefined) for the body and restores the prior value afterwards. */
+  const itWithProbeKeyEnv = (
+    name: string,
+    value: string | undefined,
+    fn: () => Promise<void> | void,
+  ) =>
+    // The wrapper forwards a literal title from each call site below.
+    // eslint-disable-next-line vitest/valid-title
+    it(name, async () => {
+      const previousKey = process.env['MODEL_DIALOG_PROBE_TEST_KEY'];
+      if (value === undefined) {
+        delete process.env['MODEL_DIALOG_PROBE_TEST_KEY'];
+      } else {
+        process.env['MODEL_DIALOG_PROBE_TEST_KEY'] = value;
+      }
+      try {
+        await fn();
+      } finally {
+        if (previousKey === undefined) {
+          delete process.env['MODEL_DIALOG_PROBE_TEST_KEY'];
+        } else {
+          process.env['MODEL_DIALOG_PROBE_TEST_KEY'] = previousKey;
+        }
+      }
+    });
+
+  it('badges pattern-guessed modalities as auto-detected and offers the t action', () => {
+    const { getByText } = renderProbeDialog();
 
     expect(getByText('text-only · auto-detected')).toBeDefined();
     expect(getByText('t: test image support')).toBeDefined();
   });
 
   it('badges probe-tested modalities without offering the t action again', () => {
-    const { getByText, queryByText } = renderComponent({}, {
-      getModel: vi.fn(() => 'vl-model'),
-      getAuthType: vi.fn(() => AuthType.USE_OPENAI),
-      getAllConfiguredModels: vi.fn(() => [
-        {
-          id: 'vl-model',
-          label: 'VL Model',
-          description: '',
-          authType: AuthType.USE_OPENAI,
-          modalities: { image: true },
-          modalitiesSource: 'probe',
-        },
-      ]),
-    } as unknown as Partial<Config>);
+    const { getByText, queryByText } = renderProbeDialog([
+      {
+        id: 'vl-model',
+        label: 'VL Model',
+        description: '',
+        authType: AuthType.USE_OPENAI,
+        modalities: { image: true },
+        modalitiesSource: 'probe',
+      },
+    ]);
 
     expect(getByText('text · image · probe-tested')).toBeDefined();
     expect(queryByText('t: test image support')).toBeNull();
@@ -2040,29 +2090,16 @@ describe('<ModelDialog />', () => {
     // settings.setValue does not refresh it — but the dialog reads the live
     // settings store, so the persisted verdict must drive BOTH the badge and
     // the t-action gating even while the entry still says 'pattern'.
-    const { getByText, queryByText } = renderComponent(
-      {},
-      {
-        getModel: vi.fn(() => 'pattern-model'),
-        getAuthType: vi.fn(() => AuthType.USE_OPENAI),
-        getAllConfiguredModels: vi.fn(() => [patternSourceModel]),
-        getModelsConfig: vi.fn(() => ({
-          getGenerationConfig: vi.fn(() => ({
-            baseUrl: 'https://api.example.com/v1',
-          })),
-        })),
-      } as unknown as Partial<Config>,
-      {
-        merged: {
-          probeResults: {
-            'openai|pattern-model|https://api.example.com/v1': {
-              verdict: 'text_only',
-              probedAt: '2026-01-01T00:00:00.000Z',
-            },
+    const { getByText, queryByText } = renderProbeDialog(undefined, {
+      merged: {
+        probeResults: {
+          'openai|pattern-model|https://api.example.com/v1': {
+            verdict: 'text_only',
+            probedAt: '2026-01-01T00:00:00.000Z',
           },
         },
-      } as unknown as Partial<LoadedSettings>,
-    );
+      },
+    } as unknown as Partial<LoadedSettings>);
 
     expect(getByText('text-only · probe-tested')).toBeDefined();
     expect(queryByText('t: test image support')).toBeNull();
@@ -2073,29 +2110,8 @@ describe('<ModelDialog />', () => {
     // hand-write modelProviders modalities and reload the registry, which
     // stamps the entry 'explicit'. The live probe read must not shadow
     // that: badge shows manual with the hand-written value.
-    const { getByText, queryByText } = renderComponent(
-      {},
-      {
-        getModel: vi.fn(() => 'explicit-model'),
-        getAuthType: vi.fn(() => AuthType.USE_OPENAI),
-        getAllConfiguredModels: vi.fn(() => [
-          {
-            id: 'explicit-model',
-            label: 'Explicit Model',
-            description: '',
-            authType: AuthType.USE_OPENAI,
-            baseUrl: 'https://api.example.com/v1',
-            envKey: 'MODEL_DIALOG_PROBE_TEST_KEY',
-            modalities: { image: true },
-            modalitiesSource: 'explicit',
-          },
-        ]),
-        getModelsConfig: vi.fn(() => ({
-          getGenerationConfig: vi.fn(() => ({
-            baseUrl: 'https://api.example.com/v1',
-          })),
-        })),
-      } as unknown as Partial<Config>,
+    const { getByText, queryByText } = renderProbeDialog(
+      [explicitSourceModel],
       {
         merged: {
           probeResults: {
@@ -2117,46 +2133,22 @@ describe('<ModelDialog />', () => {
   });
 
   it('badges explicitly declared modalities as manual', () => {
-    const { getByText } = renderComponent({}, {
-      getModel: vi.fn(() => 'explicit-model'),
-      getAuthType: vi.fn(() => AuthType.USE_OPENAI),
-      getAllConfiguredModels: vi.fn(() => [
-        {
-          id: 'explicit-model',
-          label: 'Explicit Model',
-          description: '',
-          authType: AuthType.USE_OPENAI,
-          modalities: { image: true },
-          modalitiesSource: 'explicit',
-        },
-      ]),
-    } as unknown as Partial<Config>);
+    const { getByText } = renderProbeDialog([
+      {
+        id: 'explicit-model',
+        label: 'Explicit Model',
+        description: '',
+        authType: AuthType.USE_OPENAI,
+        modalities: { image: true },
+        modalitiesSource: 'explicit',
+      },
+    ]);
 
     expect(getByText('text · image · manual')).toBeDefined();
   });
 
   it('does not run the probe for non-pattern modality sources', async () => {
-    const { mockSettings } = renderComponent({}, {
-      getModel: vi.fn(() => 'explicit-model'),
-      getAuthType: vi.fn(() => AuthType.USE_OPENAI),
-      getAllConfiguredModels: vi.fn(() => [
-        {
-          id: 'explicit-model',
-          label: 'Explicit Model',
-          description: '',
-          authType: AuthType.USE_OPENAI,
-          baseUrl: 'https://api.example.com/v1',
-          envKey: 'MODEL_DIALOG_PROBE_TEST_KEY',
-          modalities: { image: true },
-          modalitiesSource: 'explicit',
-        },
-      ]),
-      getModelsConfig: vi.fn(() => ({
-        getGenerationConfig: vi.fn(() => ({
-          baseUrl: 'https://api.example.com/v1',
-        })),
-      })),
-    } as unknown as Partial<Config>);
+    const { mockSettings } = renderProbeDialog([explicitSourceModel]);
 
     await pressT();
 
@@ -2164,10 +2156,10 @@ describe('<ModelDialog />', () => {
     expect(mockSettings.setValue).not.toHaveBeenCalled();
   });
 
-  it('probes a pattern-source entry on t and persists the whole probeResults map', async () => {
-    const previousKey = process.env['MODEL_DIALOG_PROBE_TEST_KEY'];
-    process.env['MODEL_DIALOG_PROBE_TEST_KEY'] = 'sk-probe-test';
-    try {
+  itWithProbeKeyEnv(
+    'probes a pattern-source entry on t and persists the whole probeResults map',
+    'sk-probe-test',
+    async () => {
       mockedProbeImageSupport.mockResolvedValue({
         verdict: 'image',
         httpStatus: 200,
@@ -2187,22 +2179,9 @@ describe('<ModelDialog />', () => {
         },
       };
 
-      const { getByText, mockSettings } = renderComponent(
-        {},
-        {
-          getModel: vi.fn(() => 'pattern-model'),
-          getAuthType: vi.fn(() => AuthType.USE_OPENAI),
-          getAllConfiguredModels: vi.fn(() => [patternSourceModel]),
-          getModelsConfig: vi.fn(() => ({
-            getGenerationConfig: vi.fn(() => ({
-              baseUrl: 'https://api.example.com/v1',
-            })),
-          })),
-        } as unknown as Partial<Config>,
-        {
-          forScope: () => userSettingsFile,
-        } as unknown as Partial<LoadedSettings>,
-      );
+      const { getByText, mockSettings } = renderProbeDialog(undefined, {
+        forScope: () => userSettingsFile,
+      } as unknown as Partial<LoadedSettings>);
 
       await pressT();
 
@@ -2229,36 +2208,13 @@ describe('<ModelDialog />', () => {
       // local dialog state.
       expect(getByText('text · image · probe-tested')).toBeDefined();
       expect(getByText('accepts images')).toBeDefined();
-    } finally {
-      if (previousKey === undefined) {
-        delete process.env['MODEL_DIALOG_PROBE_TEST_KEY'];
-      } else {
-        process.env['MODEL_DIALOG_PROBE_TEST_KEY'] = previousKey;
-      }
-    }
-  });
+    },
+  );
 
-  it('hides the t action once a verdict concludes and keeps it after unknown', async () => {
-    const previousKey = process.env['MODEL_DIALOG_PROBE_TEST_KEY'];
-    process.env['MODEL_DIALOG_PROBE_TEST_KEY'] = 'sk-probe-test';
-    const renderPatternDialog = () =>
-      renderComponent(
-        {},
-        {
-          getModel: vi.fn(() => 'pattern-model'),
-          getAuthType: vi.fn(() => AuthType.USE_OPENAI),
-          getAllConfiguredModels: vi.fn(() => [patternSourceModel]),
-          getModelsConfig: vi.fn(() => ({
-            getGenerationConfig: vi.fn(() => ({
-              baseUrl: 'https://api.example.com/v1',
-            })),
-          })),
-        } as unknown as Partial<Config>,
-        {
-          forScope: () => ({ settings: {} }),
-        } as unknown as Partial<LoadedSettings>,
-      );
-    try {
+  itWithProbeKeyEnv(
+    'hides the t action once a verdict concludes and keeps it after unknown',
+    'sk-probe-test',
+    async () => {
       // Concluded verdict: the t action must disappear. Note the mocked
       // setValue does NOT refresh settings.merged, so the live-settings
       // lookup still misses — only the local verdict state gates the action
@@ -2268,7 +2224,9 @@ describe('<ModelDialog />', () => {
         httpStatus: 200,
         snippet: 'ok',
       });
-      const first = renderPatternDialog();
+      const first = renderProbeDialog(undefined, {
+        forScope: () => ({ settings: {} }),
+      } as unknown as Partial<LoadedSettings>);
 
       await pressT();
 
@@ -2283,7 +2241,9 @@ describe('<ModelDialog />', () => {
         httpStatus: 429,
         snippet: 'rate limited',
       });
-      const second = renderPatternDialog();
+      const second = renderProbeDialog(undefined, {
+        forScope: () => ({ settings: {} }),
+      } as unknown as Partial<LoadedSettings>);
 
       await pressT();
 
@@ -2294,35 +2254,20 @@ describe('<ModelDialog />', () => {
       ).toBeDefined();
       expect(second.getByText('t: test image support')).toBeDefined();
       second.unmount();
-    } finally {
-      if (previousKey === undefined) {
-        delete process.env['MODEL_DIALOG_PROBE_TEST_KEY'];
-      } else {
-        process.env['MODEL_DIALOG_PROBE_TEST_KEY'] = previousKey;
-      }
-    }
-  });
+    },
+  );
 
-  it('writes nothing when the probe verdict is unknown', async () => {
-    const previousKey = process.env['MODEL_DIALOG_PROBE_TEST_KEY'];
-    process.env['MODEL_DIALOG_PROBE_TEST_KEY'] = 'sk-probe-test';
-    try {
+  itWithProbeKeyEnv(
+    'writes nothing when the probe verdict is unknown',
+    'sk-probe-test',
+    async () => {
       mockedProbeImageSupport.mockResolvedValue({
         verdict: 'unknown',
         httpStatus: 401,
         snippet: 'unauthorized',
       });
 
-      const { getByText, mockSettings } = renderComponent({}, {
-        getModel: vi.fn(() => 'pattern-model'),
-        getAuthType: vi.fn(() => AuthType.USE_OPENAI),
-        getAllConfiguredModels: vi.fn(() => [patternSourceModel]),
-        getModelsConfig: vi.fn(() => ({
-          getGenerationConfig: vi.fn(() => ({
-            baseUrl: 'https://api.example.com/v1',
-          })),
-        })),
-      } as unknown as Partial<Config>);
+      const { getByText, mockSettings } = renderProbeDialog();
 
       await pressT();
 
@@ -2331,31 +2276,16 @@ describe('<ModelDialog />', () => {
       expect(
         getByText('inconclusive (auth/rate-limit/timeout) — nothing written'),
       ).toBeDefined();
-    } finally {
-      if (previousKey === undefined) {
-        delete process.env['MODEL_DIALOG_PROBE_TEST_KEY'];
-      } else {
-        process.env['MODEL_DIALOG_PROBE_TEST_KEY'] = previousKey;
-      }
-    }
-  });
+    },
+  );
 
-  it('reports inconclusive without probing when the API key env is unset', async () => {
-    const previousKey = process.env['MODEL_DIALOG_PROBE_TEST_KEY'];
-    // No key in the environment: the handler must bail out BEFORE any
-    // network attempt and write nothing.
-    delete process.env['MODEL_DIALOG_PROBE_TEST_KEY'];
-    try {
-      const { getByText, mockSettings } = renderComponent({}, {
-        getModel: vi.fn(() => 'pattern-model'),
-        getAuthType: vi.fn(() => AuthType.USE_OPENAI),
-        getAllConfiguredModels: vi.fn(() => [patternSourceModel]),
-        getModelsConfig: vi.fn(() => ({
-          getGenerationConfig: vi.fn(() => ({
-            baseUrl: 'https://api.example.com/v1',
-          })),
-        })),
-      } as unknown as Partial<Config>);
+  itWithProbeKeyEnv(
+    'reports inconclusive without probing when the API key env is unset',
+    undefined,
+    async () => {
+      // No key in the environment: the handler must bail out BEFORE any
+      // network attempt and write nothing.
+      const { getByText, mockSettings } = renderProbeDialog();
 
       await pressT();
 
@@ -2364,46 +2294,27 @@ describe('<ModelDialog />', () => {
       expect(
         getByText('inconclusive (auth/rate-limit/timeout) — nothing written'),
       ).toBeDefined();
-    } finally {
-      if (previousKey === undefined) {
-        delete process.env['MODEL_DIALOG_PROBE_TEST_KEY'];
-      } else {
-        process.env['MODEL_DIALOG_PROBE_TEST_KEY'] = previousKey;
-      }
-    }
-  });
+    },
+  );
 
-  it('hydrates a settings-backed API key before probing', async () => {
-    const previousKey = process.env['MODEL_DIALOG_PROBE_TEST_KEY'];
-    // The key exists only in settings.env — NOT in process.env — so the
-    // probe only works if the handler hydrates the env first.
-    delete process.env['MODEL_DIALOG_PROBE_TEST_KEY'];
-    try {
+  itWithProbeKeyEnv(
+    'hydrates a settings-backed API key before probing',
+    undefined,
+    async () => {
+      // The key exists only in settings.env — NOT in process.env — so the
+      // probe only works if the handler hydrates the env first.
       mockedProbeImageSupport.mockResolvedValue({
         verdict: 'text_only',
         httpStatus: 400,
         snippet: 'does not support images',
       });
 
-      const { getByText, mockSettings } = renderComponent(
-        {},
-        {
-          getModel: vi.fn(() => 'pattern-model'),
-          getAuthType: vi.fn(() => AuthType.USE_OPENAI),
-          getAllConfiguredModels: vi.fn(() => [patternSourceModel]),
-          getModelsConfig: vi.fn(() => ({
-            getGenerationConfig: vi.fn(() => ({
-              baseUrl: 'https://api.example.com/v1',
-            })),
-          })),
-        } as unknown as Partial<Config>,
-        {
-          merged: {
-            env: { MODEL_DIALOG_PROBE_TEST_KEY: 'sk-from-settings-env' },
-          },
-          forScope: () => ({ settings: {} }),
-        } as unknown as Partial<LoadedSettings>,
-      );
+      const { getByText, mockSettings } = renderProbeDialog(undefined, {
+        merged: {
+          env: { MODEL_DIALOG_PROBE_TEST_KEY: 'sk-from-settings-env' },
+        },
+        forScope: () => ({ settings: {} }),
+      } as unknown as Partial<LoadedSettings>);
 
       await pressT();
 
@@ -2412,46 +2323,30 @@ describe('<ModelDialog />', () => {
       );
       expect(mockSettings.setValue).toHaveBeenCalledTimes(1);
       expect(getByText('text only')).toBeDefined();
-    } finally {
-      if (previousKey === undefined) {
-        delete process.env['MODEL_DIALOG_PROBE_TEST_KEY'];
-      } else {
-        process.env['MODEL_DIALOG_PROBE_TEST_KEY'] = previousKey;
-      }
-    }
-  });
+    },
+  );
 
-  it('displaces the verdict display when the highlight moves to another entry', async () => {
-    const previousKey = process.env['MODEL_DIALOG_PROBE_TEST_KEY'];
-    process.env['MODEL_DIALOG_PROBE_TEST_KEY'] = 'sk-probe-test';
-    try {
+  itWithProbeKeyEnv(
+    'displaces the verdict display when the highlight moves to another entry',
+    'sk-probe-test',
+    async () => {
       mockedProbeImageSupport.mockResolvedValue({
         verdict: 'image',
         httpStatus: 200,
         snippet: 'ok',
       });
 
-      const { getByText, queryByText } = renderComponent(
-        {},
-        {
-          getModel: vi.fn(() => 'pattern-model'),
-          getAuthType: vi.fn(() => AuthType.USE_OPENAI),
-          getAllConfiguredModels: vi.fn(() => [
-            patternSourceModel,
-            {
-              id: 'pattern-model-b',
-              label: 'Pattern Model B',
-              description: '',
-              authType: AuthType.USE_OPENAI,
-              modalitiesSource: 'pattern',
-            },
-          ]),
-          getModelsConfig: vi.fn(() => ({
-            getGenerationConfig: vi.fn(() => ({
-              baseUrl: 'https://api.example.com/v1',
-            })),
-          })),
-        } as unknown as Partial<Config>,
+      const { getByText, queryByText } = renderProbeDialog(
+        [
+          patternSourceModel,
+          {
+            id: 'pattern-model-b',
+            label: 'Pattern Model B',
+            description: '',
+            authType: AuthType.USE_OPENAI,
+            modalitiesSource: 'pattern',
+          },
+        ],
         {
           forScope: () => ({ settings: {} }),
         } as unknown as Partial<LoadedSettings>,
@@ -2477,47 +2372,28 @@ describe('<ModelDialog />', () => {
       });
       expect(getByText('text · image · probe-tested')).toBeDefined();
       expect(getByText('accepts images')).toBeDefined();
-    } finally {
-      if (previousKey === undefined) {
-        delete process.env['MODEL_DIALOG_PROBE_TEST_KEY'];
-      } else {
-        process.env['MODEL_DIALOG_PROBE_TEST_KEY'] = previousKey;
-      }
-    }
-  });
+    },
+  );
 
-  it('surfaces a settings-write failure instead of unhandled success', async () => {
-    const previousKey = process.env['MODEL_DIALOG_PROBE_TEST_KEY'];
-    process.env['MODEL_DIALOG_PROBE_TEST_KEY'] = 'sk-probe-test';
-    const setValue = vi.fn(() => {
-      const error = new Error('settings are read-only');
-      Object.assign(error, { code: 'EACCES' });
-      throw error;
-    });
-    try {
+  itWithProbeKeyEnv(
+    'surfaces a settings-write failure instead of unhandled success',
+    'sk-probe-test',
+    async () => {
+      const setValue = vi.fn(() => {
+        const error = new Error('settings are read-only');
+        Object.assign(error, { code: 'EACCES' });
+        throw error;
+      });
       mockedProbeImageSupport.mockResolvedValue({
         verdict: 'image',
         httpStatus: 200,
         snippet: 'ok',
       });
 
-      const { getByText, queryByText } = renderComponent(
-        {},
-        {
-          getModel: vi.fn(() => 'pattern-model'),
-          getAuthType: vi.fn(() => AuthType.USE_OPENAI),
-          getAllConfiguredModels: vi.fn(() => [patternSourceModel]),
-          getModelsConfig: vi.fn(() => ({
-            getGenerationConfig: vi.fn(() => ({
-              baseUrl: 'https://api.example.com/v1',
-            })),
-          })),
-        } as unknown as Partial<Config>,
-        {
-          setValue,
-          forScope: () => ({ settings: {} }),
-        } as unknown as Partial<LoadedSettings>,
-      );
+      const { getByText, queryByText } = renderProbeDialog(undefined, {
+        setValue,
+        forScope: () => ({ settings: {} }),
+      } as unknown as Partial<LoadedSettings>);
 
       await pressT();
 
@@ -2535,14 +2411,8 @@ describe('<ModelDialog />', () => {
       expect(queryByText('text · image · probe-tested')).toBeNull();
       expect(getByText('text-only · auto-detected')).toBeDefined();
       expect(getByText('t: test image support')).toBeDefined();
-    } finally {
-      if (previousKey === undefined) {
-        delete process.env['MODEL_DIALOG_PROBE_TEST_KEY'];
-      } else {
-        process.env['MODEL_DIALOG_PROBE_TEST_KEY'] = previousKey;
-      }
-    }
-  });
+    },
+  );
 });
 
 describe('encodeAuxModelSelector', () => {
