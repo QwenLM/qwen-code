@@ -54,6 +54,7 @@ describe('reviewCommand', () => {
       'comment-status',
       'load-rules',
       'agent-prompt',
+      'emit-workflow',
       'build-test',
       'base-tree',
       'scratch-tree',
