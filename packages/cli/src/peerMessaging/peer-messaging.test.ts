@@ -98,9 +98,7 @@ async function start(
     settleSentMessage?: (
       msgId: string,
       status: string,
-    ) =>
-      | { address: string; peerName: string; previous: 'pending' | 'held' }
-      | undefined;
+    ) => { address: string; previous: 'pending' | 'held' } | undefined;
     reassertSessionRecord?: () => Promise<void>;
   } = {},
 ): Promise<{
@@ -152,7 +150,6 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
         msgId === 'sent-0001'
           ? {
               address: 'docs-cd [ab12cd]',
-              peerName: 'docs-cd',
               previous: 'pending',
             }
           : undefined,
@@ -229,7 +226,6 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
     const { messaging: m } = await start(ApprovalMode.DEFAULT, {
       settleSentMessage: () => ({
         address: 'docs-cd',
-        peerName: 'docs-cd',
         previous: 'pending',
       }),
     });

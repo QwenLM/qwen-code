@@ -76,7 +76,6 @@ export function senderModeClass(mode: ApprovalMode): 'bypass' | 'prompting' {
 export interface SentPeerMessage {
   /** The address the model used, as list_agents printed it. */
   address: string;
-  peerName: string;
   /** Last receipt applied, or 'pending' before any. */
   state: PeerDeliveryStatus | 'pending';
 }
@@ -84,7 +83,6 @@ export interface SentPeerMessage {
 /** A receipt that moved a sent message to a new state. */
 export interface SettledPeerReceipt {
   address: string;
-  peerName: string;
   previous: PeerDeliveryStatus | 'pending';
 }
 
@@ -150,18 +148,22 @@ export function settleSentPeerMessage(
   }
   const previous = entry.state;
   entry.state = status;
-  return { address: entry.address, peerName: entry.peerName, previous };
+  return { address: entry.address, previous };
 }
 
 /**
- * The send a receipt refers to, if this session made it.
+ * Test-only: the send a receipt refers to, if this session made it.
  *
  * A receipt names a message id, and any process that can reach this
  * session's socket can write a receipt for any id. Only ids this session
  * actually sent are answered for, so a stranger's receipts are noise the
- * inbox drops rather than notices the user reads.
+ * inbox drops rather than notices the user reads — production reads that
+ * through `settleSentPeerMessage`, which is the only caller that needs to
+ * both find the entry and advance it. This is the read-only seam the
+ * ledger's own tests observe the private map through; naming it plainly
+ * kept reading as an unwired production entry point.
  */
-export function lookupSentPeerMessage(
+export function lookupSentPeerMessageForTest(
   msgId: string,
 ): SentPeerMessage | undefined {
   return sentMessages.get(canonicalizeMsgId(msgId));
@@ -291,7 +293,6 @@ export async function sendToPeer(
   // forgets it again.
   trackSent(frame.msgId, {
     address,
-    peerName: peer.name,
     state: 'pending',
   });
   try {

@@ -37,7 +37,7 @@ vi.mock('./peer-directory.js', async () => {
 const {
   describeSendFailure,
   getOwnPeerIdentity,
-  lookupSentPeerMessage,
+  lookupSentPeerMessageForTest,
   MAX_TRACKED_SENDS,
   resetSentPeerMessagesForTest,
   senderModeClass,
@@ -360,7 +360,7 @@ describe('describeSendFailure', () => {
   });
 });
 
-describe('lookupSentPeerMessage', () => {
+describe('lookupSentPeerMessageForTest', () => {
   it('remembers a delivered send under its frame id', async () => {
     const two = peer('s2', 'app-ab', '/w/two');
     listMessageablePeers.mockResolvedValue([peer('s1', 'app-ab'), two]);
@@ -370,12 +370,13 @@ describe('lookupSentPeerMessage', () => {
       approvalMode: ApprovalMode.DEFAULT,
     });
     const frame = sendPeerFrame.mock.calls[0][1];
-    expect(lookupSentPeerMessage(frame.msgId)).toMatchObject({
+    expect(lookupSentPeerMessageForTest(frame.msgId)).toMatchObject({
       address: `app-ab [${two.ref}]`,
-      peerName: 'app-ab',
     });
     // The same equivalence the receiving gate applies to ids.
-    expect(lookupSentPeerMessage(frame.msgId.toUpperCase())).toBeDefined();
+    expect(
+      lookupSentPeerMessageForTest(frame.msgId.toUpperCase()),
+    ).toBeDefined();
   });
 
   it('forgets a send that provably never arrived', async () => {
@@ -389,7 +390,7 @@ describe('lookupSentPeerMessage', () => {
         approvalMode: ApprovalMode.DEFAULT,
       });
       expect(
-        lookupSentPeerMessage(sendPeerFrame.mock.calls[0][1].msgId),
+        lookupSentPeerMessageForTest(sendPeerFrame.mock.calls[0][1].msgId),
       ).toBeUndefined();
     }
   });
@@ -405,7 +406,7 @@ describe('lookupSentPeerMessage', () => {
         approvalMode: ApprovalMode.DEFAULT,
       });
       expect(
-        lookupSentPeerMessage(sendPeerFrame.mock.calls[0][1].msgId),
+        lookupSentPeerMessageForTest(sendPeerFrame.mock.calls[0][1].msgId),
       ).toBeUndefined();
     }
   });
@@ -467,10 +468,9 @@ describe('lookupSentPeerMessage', () => {
     // address re-advertises the reserved bare name and a re-send lands on the
     // teammate instead of this peer.
     expect(
-      lookupSentPeerMessage(sendPeerFrame.mock.calls[0][1].msgId),
+      lookupSentPeerMessageForTest(sendPeerFrame.mock.calls[0][1].msgId),
     ).toMatchObject({
       address: '[aaa111]',
-      peerName: 'docs-cd',
       state: 'pending',
     });
 
@@ -483,7 +483,7 @@ describe('lookupSentPeerMessage', () => {
       isReserved,
     });
     expect(
-      lookupSentPeerMessage(sendPeerFrame.mock.calls[1][1].msgId),
+      lookupSentPeerMessageForTest(sendPeerFrame.mock.calls[1][1].msgId),
     ).toMatchObject({ address: '[aaa111]' });
   });
 
@@ -496,12 +496,12 @@ describe('lookupSentPeerMessage', () => {
       approvalMode: ApprovalMode.DEFAULT,
     });
     expect(
-      lookupSentPeerMessage(sendPeerFrame.mock.calls[0][1].msgId),
+      lookupSentPeerMessageForTest(sendPeerFrame.mock.calls[0][1].msgId),
     ).toMatchObject({ address: 'app-ab', state: 'pending' });
   });
 
   it('answers only for ids this session sent', () => {
-    expect(lookupSentPeerMessage('never-sent')).toBeUndefined();
+    expect(lookupSentPeerMessageForTest('never-sent')).toBeUndefined();
   });
 
   it('forgets the oldest send past the cap', async () => {
@@ -515,8 +515,8 @@ describe('lookupSentPeerMessage', () => {
     }
     const first = sendPeerFrame.mock.calls[0][1].msgId;
     const last = sendPeerFrame.mock.calls.at(-1)![1].msgId;
-    expect(lookupSentPeerMessage(first)).toBeUndefined();
-    expect(lookupSentPeerMessage(last)).toBeDefined();
+    expect(lookupSentPeerMessageForTest(first)).toBeUndefined();
+    expect(lookupSentPeerMessageForTest(last)).toBeDefined();
   });
 });
 
@@ -535,12 +535,10 @@ describe('settleSentPeerMessage', () => {
     const id = await sendOne();
     expect(settleSentPeerMessage(id, 'held')).toEqual({
       address: 'app-ab',
-      peerName: 'app-ab',
       previous: 'pending',
     });
     expect(settleSentPeerMessage(id, 'delivered')).toEqual({
       address: 'app-ab',
-      peerName: 'app-ab',
       previous: 'held',
     });
   });
