@@ -485,11 +485,10 @@ describe('AppContainer State Management', () => {
     // Mock SubagentManager to prevent errors during AgentTool initialization
     const mockSubagentManager: Partial<SubagentManager> = {
       listSubagents: vi.fn().mockResolvedValue([]),
-      getAvailableModelGrades: vi.fn().mockResolvedValue([]),
+      getAvailableModelGrades: vi.fn().mockReturnValue(new Map()),
       addChangeListener: vi.fn(),
       loadSubagent: vi.fn(),
       createSubagent: vi.fn(),
-      getAvailableModelGrades: vi.fn().mockReturnValue(new Map()),
     };
     vi.spyOn(mockConfig, 'getSubagentManager').mockReturnValue(
       mockSubagentManager as SubagentManager,
