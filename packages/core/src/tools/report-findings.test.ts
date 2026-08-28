@@ -594,3 +594,39 @@ describe('compressFindingSummary', () => {
     expect(short).toBe(`${'a'.repeat(58)}…`);
   });
 });
+
+describe('the finding axes (#10291)', () => {
+  it('passes direction and baseline through to the display, and omits them when absent', async () => {
+    const display = displayOf(
+      await run({
+        findings: [
+          finding({ direction: 'fails-closed', baseline: 'new-surface' }),
+          finding({ file: 'src/bar.ts' }),
+        ],
+      }),
+    );
+    // Located by file: the display is sorted, and `src/bar.ts` sorts first.
+    const foo = display.findings.find((f) => f.file === 'src/foo.ts')!;
+    const bar = display.findings.find((f) => f.file === 'src/bar.ts')!;
+    expect(foo).toMatchObject({
+      direction: 'fails-closed',
+      baseline: 'new-surface',
+    });
+    expect(bar.direction).toBeUndefined();
+    expect(bar.baseline).toBeUndefined();
+  });
+
+  it('refuses an axis outside its list', () => {
+    const tool = new ReportFindingsTool();
+    expect(() =>
+      tool.build({
+        findings: [finding({ direction: 'fails-open' as 'fails-closed' })],
+      }),
+    ).toThrow();
+    expect(() =>
+      tool.build({
+        findings: [finding({ baseline: 'old-surface' as 'regression' })],
+      }),
+    ).toThrow();
+  });
+});
