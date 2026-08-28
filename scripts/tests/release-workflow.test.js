@@ -19,7 +19,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, expect, it, onTestFinished } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import { parse } from 'yaml';
 
 // `realpath -m` (the script's canonicalization line) is a GNU coreutils
@@ -203,91 +203,6 @@ fi
 # inside the runner workspace (a symlinked leaf was healed, a symlinked
 # runner workspace refused), so the recursive chmod cannot escape it.
 chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chmod -R u+rwX "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace write permissions; checkout may fail on leftover read-only files"
-# qwen-triage.yml documents this pool's behaviour: a detached
-# postinstall child of a previous job can outlive that job —
-# self-hosted runners do not reap job processes — and a survivor
-# with this job's uid waits out the one-shot sweep below, then
-# re-plants the fresh tree, appends to \`$GITHUB_ENV\`, or rewrites
-# the fresh release-state config files while the secret-bearing
-# steps run (0700 does not exclude the owner). Kill every live
-# process of this user outside the runner agent's own tree BEFORE
-# the file sweep, so the sweep is not racing a live process.
-#
-# The exclusion is the load-bearing part: a bare \`pkill -u\` would
-# kill the Runner.Worker executing this very step. Walk the PPID
-# chain from this shell to collect the agent's ancestor tree; a
-# process is kept only if its own parent chain reaches that tree
-# or one of the user's other runner-agent trees (widened below).
-# Zombies do not count: one has already exited and can no longer
-# re-plant anything — and it cannot be killed either, so counting
-# one means this check can never clear. A root runner skips the
-# reap: as root every system process is killable, so no exclusion
-# can make the sweep safe.
-if [ "$RUNNER_UID" != "0" ]; then
-  REAP_USER="$(id -un)"
-  REAP_TREE=" $$ "
-  reap_pid=$$
-  while :; do
-    reap_pid="$(ps -o ppid= -p "$reap_pid" 2>/dev/null | tr -d '[:space:]')" || break
-    [ -n "$reap_pid" ] || break
-    [ "$reap_pid" -gt 1 ] 2>/dev/null || break
-    REAP_TREE="\${REAP_TREE}\${reap_pid} "
-  done
-  # One pool member hosts every registration under this one uid
-  # (qwen-autofix.md af-014): a concurrent job from another
-  # registration never reaches this shell's chain, so the tree
-  # above alone would SIGKILL it mid-flight. Widen the keep set
-  # to every runner-agent tree of the user; a process is killed
-  # only if it is detached from ALL agent trees.
-  REAP_TREE="$REAP_TREE $(ps -u "$REAP_USER" -o pid= -o args= 2>/dev/null | awk '/runsvc\\.sh|RunnerService|Runner\\./ { printf "%s ", $1 }')" || true
-  live_outside_tree() {
-    # One pid per line: live processes of this user whose parent
-    # chain never reaches the runner agent tree, zombies dropped.
-    ps -o pid= -o ppid= -o stat= -u "$REAP_USER" 2>/dev/null | awk -v tree="$REAP_TREE" '
-      BEGIN {
-        n = split(tree, t, " ")
-        for (i = 1; i <= n; i++) if (t[i] != "") keep[t[i]] = 1
-      }
-      { pids[NR] = $1; pp[$1] = $2; st[$1] = $3 }
-      END {
-        for (i = 1; i <= NR; i++) {
-          p = pids[i]
-          if (st[p] ~ /^Z/) continue
-          q = p
-          inside = (q in keep)
-          for (d = 0; d <= NR && !inside; d++) {
-            if (!(q in pp)) break
-            q = pp[q]
-            if (q in keep) { inside = 1; break }
-            if (q <= 1) break
-          }
-          if (!inside) print p
-        }
-      }'
-  }
-  reap_pids="$(live_outside_tree)" || true
-  if [ -n "$reap_pids" ]; then
-    printf '%s\\n' "$reap_pids" | xargs -r kill -KILL -- 2>/dev/null || true
-  fi
-  for _ in 1 2 3; do
-    reap_pids="$(live_outside_tree)" || true
-    [ -n "$reap_pids" ] || break
-    sleep 1
-    printf '%s\\n' "$reap_pids" | xargs -r kill -KILL -- 2>/dev/null || true
-  done
-  survivors="$(live_outside_tree)" || true
-  if [ -n "$survivors" ]; then
-    # Name them: a bare "processes survived" refusal leaves a real
-    # threat and a harmless leftover indistinguishable — including
-    # to the person reading the failure.
-    echo "::error::Processes of the runner user survived SIGKILL; refusing to run release steps with credentials."
-    printf '%s\\n' "$survivors" | while IFS= read -r survivor_pid; do
-      [ -n "$survivor_pid" ] || continue
-      ps -o pid= -o stat= -o args= -p "$survivor_pid" 2>/dev/null | sed 's/^/::error::  surviving process: /' || true
-    done
-    exit 1
-  fi
-fi
 find "$WS" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
 # Later steps must not read pool-persistent Git, npm, Docker, or
 # gh state. A fresh directory avoids an unbounded scrub denylist
@@ -360,32 +275,14 @@ describe('release workflow', () => {
     }
   });
 
-  // The gate also closes on win32: Git for Windows ships GNU realpath
-  // (so hasGnuRealpath is true on the hosted windows-2022 fallback lane
-  // ci.yml's test_windows uses whenever MAINTAINER_ECS_RUNNER_DISABLED=true),
-  // but PortableGit ships no setsid — the reap fixture would never write
-  // its pid file there and readFileSync(pidFile) would throw ENOENT.
+  it('keeps workspace cleanup from inspecting or signaling host processes', () => {
+    expect(canonicalWipe).not.toMatch(/(?:^|\s)(?:ps|kill|pkill)\s/m);
+  });
+
   it.skipIf(
     !hasGnuRealpath || process.getuid?.() === 0 || process.platform === 'win32',
   )('executes the workspace wipe against guard branches', () => {
     const wipeScript = canonicalWipe;
-
-    // The guard-branch cases below assert geometry and env isolation, not
-    // the reap — but the wipe's reap is genuine: it kills every live
-    // process of the runner user outside the step's ancestor tree. On the
-    // shared ECS pool that would reach into whatever job is co-resident
-    // on the same member under this uid every time the suite runs. Give
-    // the guard-branch cases a `ps` that lists nothing so the reap branch
-    // executes end to end yet kills nothing; the R1-1 case stubs `ps` to
-    // enumerate only its own orphan (real kill, no host enumeration), and
-    // the fail-closed case stubs its own `ps`.
-    const noKillStubDir = mkdtempSync(join(tmpdir(), 'release-reap-nokill-'));
-    writeFileSync(join(noKillStubDir, 'ps'), '#!/bin/bash\nexit 0\n');
-    chmodSync(join(noKillStubDir, 'ps'), 0o755);
-    const noKillPath = `${noKillStubDir}:${process.env.PATH}`;
-    onTestFinished(() =>
-      rmSync(noKillStubDir, { recursive: true, force: true }),
-    );
 
     const runWipe = (envOverrides, { preCreateWorkspace } = {}) => {
       const base = mkdtempSync(join(tmpdir(), 'release-wipe-behavioral-'));
@@ -437,7 +334,7 @@ describe('release workflow', () => {
     // of all persisted entries, not just files).
     {
       const { result, base, workspace, githubEnv, env } = runWipe(
-        { PATH: noKillPath },
+        {},
         {
           preCreateWorkspace: (_base, ws) => {
             writeFileSync(join(ws, 'leftover.txt'), 'stale');
@@ -498,7 +395,7 @@ describe('release workflow', () => {
     // link itself and did not follow/delete the target.
     {
       const { result, base, workspace } = runWipe(
-        { PATH: noKillPath },
+        {},
         {
           preCreateWorkspace: (b, ws) => {
             rmSync(ws, { recursive: true, force: true });
@@ -539,7 +436,6 @@ describe('release workflow', () => {
       try {
         const env = {
           ...process.env,
-          PATH: noKillPath,
           GITHUB_WORKSPACE: workspace,
           RUNNER_WORKSPACE: rws,
           RUNNER_TEMP: join(runnerRoot, 'temp'),
@@ -620,7 +516,6 @@ describe('release workflow', () => {
       try {
         const env = {
           ...process.env,
-          PATH: noKillPath,
           // String concatenation preserves the literal '..' segment —
           // path.join would normalize it away before the script sees it.
           GITHUB_WORKSPACE: `${base}/sub/../workspace`,
@@ -642,207 +537,6 @@ describe('release workflow', () => {
         const entries = readdirSync(workspace);
         expect(entries).toHaveLength(0);
       } finally {
-        rmSync(base, { recursive: true, force: true });
-      }
-    }
-
-    // Process reap (R1-1): a detached survivor of a PREVIOUS pool job —
-    // orphaned to init exactly like a postinstall child that outlives its
-    // job — is killed before the file sweep runs. The orphan's parent
-    // chain never reaches this shell's ancestor tree, so the reap must
-    // reach it; the run still exits 0 and the workspace is wiped. The
-    // case stubs `ps` so the reap enumerates ONLY this test's orphan:
-    // the kill path stays genuine (a real sleeper, a real SIGKILL), but
-    // the suite never reaches the co-resident processes that share this
-    // uid on the pool, and a transient same-uid process on the member
-    // can no longer flake the fail-closed leg.
-    {
-      const pidFile = join(
-        tmpdir(),
-        `release-reap-pid-${process.pid}-${Date.now()}`,
-      );
-      // setsid + an exiting parent orphans the sleeper immediately
-      // (reparented to init, outside the wipe shell's ancestor tree).
-      // The outer loop waits for the pid file so the read cannot race.
-      // The sleeper's stdio goes to /dev/null: a pipe inherited through
-      // the spawn would hold this spawnSync open until the sleeper ends.
-      spawnSync('bash', [
-        '-c',
-        'setsid bash -c \'echo $$ > "$1"; exec sleep 30\' x "$1" </dev/null >/dev/null 2>&1 & ' +
-          'for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do ' +
-          '[ -s "$1" ] && exit 0; sleep 0.1; done; exit 1',
-        'x',
-        pidFile,
-        pidFile,
-      ]);
-      const survivorPid = Number(readFileSync(pidFile, 'utf8').trim());
-      rmSync(pidFile);
-      expect(survivorPid).toBeGreaterThan(1);
-      expect(() => process.kill(survivorPid, 0)).not.toThrow();
-      // The stub's live-listing arm tracks reality (kill -0): once the
-      // reap kills the orphan the retry listing comes back empty, the
-      // way the real ps does.
-      const r11StubDir = mkdtempSync(join(tmpdir(), 'release-reap-r11-'));
-      writeFileSync(
-        join(r11StubDir, 'ps'),
-        [
-          '#!/bin/bash',
-          '# Tree-walk probe: stop the ancestor chain at the wipe shell.',
-          'case "$*" in *-p*) exit 0 ;; esac',
-          '# Agent-root listing: no other registration trees.',
-          'case "$*" in *args=*) exit 0 ;; esac',
-          '# Live listing: ONLY the test orphan — never the host, whose',
-          '# co-resident jobs share this uid on the pool.',
-          'case "$*" in *stat=*)',
-          `  if kill -0 ${survivorPid} 2>/dev/null; then echo "${survivorPid} 1 S orphan-sleeper"; fi`,
-          '  ;;',
-          'esac',
-          'exit 0',
-          '',
-        ].join('\n'),
-      );
-      chmodSync(join(r11StubDir, 'ps'), 0o755);
-      const { result, base } = runWipe({
-        PATH: `${r11StubDir}:${process.env.PATH}`,
-      });
-      try {
-        expect(result.status).toBe(0);
-        // The orphan did not survive the reap.
-        expect(() => process.kill(survivorPid, 0)).toThrow();
-      } finally {
-        try {
-          process.kill(survivorPid, 'SIGKILL');
-        } catch {
-          // already reaped — expected
-        }
-        rmSync(r11StubDir, { recursive: true, force: true });
-        rmSync(base, { recursive: true, force: true });
-      }
-    }
-
-    // Reap fail-closed (R1-1): if a process outside the agent tree
-    // cannot be killed, the wipe must refuse before any checkout with
-    // credentials and name the survivor — never proceed. A stub `ps`
-    // reports one unkillable fake process for the whole run.
-    {
-      const stubDir = mkdtempSync(join(tmpdir(), 'release-reap-stub-'));
-      writeFileSync(
-        join(stubDir, 'ps'),
-        [
-          '#!/bin/bash',
-          '# Tree-walk probe: no parent — the kept tree is the wipe shell.',
-          'case "$*" in "-o ppid= -p "*) exit 0 ;; esac',
-          '# Live listing: always one fake survivor outside the tree.',
-          'case "$*" in *-u*) echo "424242 1 S fake-survivor-unkillable" ;;',
-          ' *) echo "424242 S fake-survivor-unkillable" ;; esac',
-          '',
-        ].join('\n'),
-      );
-      chmodSync(join(stubDir, 'ps'), 0o755);
-      const { result, base } = runWipe({
-        PATH: `${stubDir}:${process.env.PATH}`,
-      });
-      try {
-        expect(result.status).not.toBe(0);
-        expect(`${result.stdout}${result.stderr}`).toContain(
-          'survived SIGKILL; refusing to run release steps with credentials',
-        );
-        expect(`${result.stdout}${result.stderr}`).toContain(
-          'surviving process: 424242',
-        );
-      } finally {
-        rmSync(stubDir, { recursive: true, force: true });
-        rmSync(base, { recursive: true, force: true });
-      }
-    }
-
-    // Concurrent-registration shape (R9-1): one pool member hosts every
-    // registration under this same uid (qwen-autofix.md af-014), so the
-    // keep set must reach beyond this job's own ancestor tree. The `ps`
-    // stub lists a second, DISJOINT agent tree — a fake registration root
-    // whose args match the runner pattern, plus a real bystander sleeper
-    // parented under it — alongside a real detached orphan. The wipe must
-    // kill the orphan, spare the bystander, and exit 0 rather than fail
-    // on the bystander as a survivor. Against the pre-fix keep set the
-    // bystander's chain never reaches this shell's tree, so the wipe
-    // SIGKILLs it and the survival assertion goes red.
-    {
-      const orphanPidFile = join(
-        tmpdir(),
-        `release-reap-orphan-${process.pid}-${Date.now()}`,
-      );
-      const bystanderPidFile = join(
-        tmpdir(),
-        `release-reap-bystander-${process.pid}-${Date.now()}`,
-      );
-      const spawnDetached = (pidFile) => {
-        spawnSync('bash', [
-          '-c',
-          'setsid bash -c \'echo $$ > "$1"; exec sleep 30\' x "$1" </dev/null >/dev/null 2>&1 & ' +
-            'for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do ' +
-            '[ -s "$1" ] && exit 0; sleep 0.1; done; exit 1',
-          'x',
-          pidFile,
-          pidFile,
-        ]);
-        const pid = Number(readFileSync(pidFile, 'utf8').trim());
-        rmSync(pidFile);
-        expect(pid).toBeGreaterThan(1);
-        expect(() => process.kill(pid, 0)).not.toThrow();
-        return pid;
-      };
-      const orphanPid = spawnDetached(orphanPidFile);
-      const bystanderPid = spawnDetached(bystanderPidFile);
-      // A pid no live process holds: the stub fabricates the other
-      // registration's root around the real bystander.
-      const fakeRootPid = 3900000 + (process.pid % 100000);
-      const treeStubDir = mkdtempSync(join(tmpdir(), 'release-reap-tree-'));
-      writeFileSync(
-        join(treeStubDir, 'ps'),
-        [
-          '#!/bin/bash',
-          '# Tree-walk probe: stop the ancestor chain at the wipe shell.',
-          'case "$*" in *-p*) exit 0 ;; esac',
-          '# Agent-root listing: one other registration tree.',
-          `case "$*" in *args=*) echo "${fakeRootPid} /opt/actions-runner/bin/Runner.Listener" ;; esac`,
-          '# Live listing: a detached leftover, a concurrent job parented',
-          "# under that other tree's root, and the root itself. The",
-          '# orphan line tracks reality (kill -0): after the reap kills',
-          '# it, the retry listing must come back empty or the wipe',
-          '# fails closed on a phantom survivor.',
-          'case "$*" in *stat=*)',
-          `  if kill -0 ${orphanPid} 2>/dev/null; then echo "${orphanPid} 1 S orphan-leftover"; fi`,
-          `  echo "${bystanderPid} ${fakeRootPid} S concurrent-job-worker"`,
-          `  echo "${fakeRootPid} 1 S Runner.Listener"`,
-          '  ;;',
-          'esac',
-          'exit 0',
-          '',
-        ].join('\n'),
-      );
-      chmodSync(join(treeStubDir, 'ps'), 0o755);
-      const { result, base } = runWipe({
-        PATH: `${treeStubDir}:${process.env.PATH}`,
-      });
-      try {
-        expect(result.status).toBe(0);
-        expect(`${result.stdout}${result.stderr}`).not.toContain(
-          'survived SIGKILL',
-        );
-        // The detached leftover died...
-        expect(() => process.kill(orphanPid, 0)).toThrow();
-        // ...but the concurrent job under the other registration's
-        // agent tree survived the reap.
-        expect(() => process.kill(bystanderPid, 0)).not.toThrow();
-      } finally {
-        for (const pid of [orphanPid, bystanderPid]) {
-          try {
-            process.kill(pid, 'SIGKILL');
-          } catch {
-            // already reaped — expected
-          }
-        }
-        rmSync(treeStubDir, { recursive: true, force: true });
         rmSync(base, { recursive: true, force: true });
       }
     }
@@ -1255,27 +949,19 @@ describe('Live Host feed contract', () => {
 });
 
 describe('release lane runner routing', () => {
-  // The exact conditional runs-on the ECS migration routes the release
-  // lanes through: repository guard + MAINTAINER_ECS_RUNNER_DISABLED kill
-  // switch + both the ecs-qwen and ubuntu-latest branches. Same pinning
-  // shape as qwen-autofix-workflow.test.js's heavy-job runs-on tripwire.
   const ecsRunsOn =
     '${{ (github.repository == \'QwenLM/qwen-code\' && vars.MAINTAINER_ECS_RUNNER_DISABLED != \'true\') && fromJSON(\'["self-hosted", "linux", "x64", "ecs-qwen"]\') || fromJSON(\'["ubuntu-latest"]\') }}';
 
-  it('pins every routed release job to the conditional ECS runs-on', () => {
-    const conditionalJobs = [
+  it('routes validation jobs to ECS with a hosted emergency fallback', () => {
+    const validationJobs = [
       'prepare',
       'quality',
       'integration_none',
       'integration_docker',
     ];
-    for (const name of conditionalJobs) {
+    for (const name of validationJobs) {
       const job = releaseYaml.jobs[name];
       expect(job, `job missing from release.yml: ${name}`).toBeTruthy();
-      // Reverting any lane to a hosted runner, dropping the kill-switch
-      // clause, or typoing the expression must fail here — an unpinned
-      // revert would silently re-pin releases to hosted capacity (the
-      // stall this migration exists to fix) or defeat the kill switch.
       expect(job['runs-on'], `runs-on drifted on job: ${name}`).toBe(ecsRunsOn);
     }
   });
@@ -1283,14 +969,6 @@ describe('release lane runner routing', () => {
   it('keeps publishing and failure notification on hosted runners', () => {
     expect(releaseYaml.jobs.publish['runs-on']).toBe('ubuntu-latest');
     expect(releaseYaml.jobs.publish['runs-on']).not.toContain('ecs-qwen');
-
-    // notify_failure exists to report failures OF the ECS pool; in
-    // post-claim pool failures (runner crash, pool-wide loss) its `if:`
-    // gate opens while the pool is wedged, so routing it back onto the
-    // pool would kill the alert chain. The job is gh/jq-only, so hosted
-    // capacity costs nothing — sibling failure notifiers (release-sdk*,
-    // release-vscode-companion, qwen-code-pr-review's fallback comment)
-    // stay hosted for exactly this reason.
     expect(releaseYaml.jobs.notify_failure['runs-on']).toBe('ubuntu-latest');
     expect(releaseYaml.jobs.notify_failure['runs-on']).not.toContain(
       'ecs-qwen',
