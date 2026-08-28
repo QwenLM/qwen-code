@@ -1276,6 +1276,27 @@ describe('useAtMentionMenu', () => {
     expect(latest!.state?.items[51]?.label).toBe('file-49.ts');
   });
 
+  it('keeps slash queries on workspace glob search when available', async () => {
+    vi.useFakeTimers();
+    const listDirectory = vi.fn();
+    const globWorkspace = vi.fn().mockResolvedValue({
+      matches: ['src/index.ts'],
+    });
+    mount({ actions: { listDirectory, globWorkspace } });
+
+    act(() => latest!.refreshForView(makeView('@src/')));
+    await runDebounce();
+
+    expect(globWorkspace).toHaveBeenCalledWith(
+      '**/*[sS][rR][cC]/*',
+      expect.objectContaining({ maxResults: 50 }),
+    );
+    expect(listDirectory).not.toHaveBeenCalled();
+    expect(latest!.state?.items.map((item) => item.label)).toEqual([
+      'src/index.ts',
+    ]);
+  });
+
   it('keeps built-in providers when custom provider ids collide', () => {
     const error = vi.spyOn(console, 'error').mockImplementation(() => {});
     const search = vi.fn().mockResolvedValue([]);
