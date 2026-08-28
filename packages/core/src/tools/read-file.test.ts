@@ -566,7 +566,7 @@ describe('ReadFileTool', () => {
       expect(result.llmContent).toEqual([
         {
           text: expect.stringMatching(
-            /Image overview: 20x10; oriented source: 20x10.*tool_search.*zoom_image.*0 to 1000/,
+            /Image overview: 20x10; oriented source: 20x10.*zoom_image.*tool_search.*0 to 1000/,
           ),
         },
         {
