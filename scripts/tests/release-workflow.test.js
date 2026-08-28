@@ -216,7 +216,8 @@ chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chmod -R u+rwX "$GITHU
 # The exclusion is the load-bearing part: a bare \`pkill -u\` would
 # kill the Runner.Worker executing this very step. Walk the PPID
 # chain from this shell to collect the agent's ancestor tree; a
-# process is kept only if its own parent chain reaches that tree.
+# process is kept only if its own parent chain reaches that tree
+# or one of the user's other runner-agent trees (widened below).
 # Zombies do not count: one has already exited and can no longer
 # re-plant anything — and it cannot be killed either, so counting
 # one means this check can never clear. A root runner skips the
@@ -232,6 +233,13 @@ if [ "$RUNNER_UID" != "0" ]; then
     [ "$reap_pid" -gt 1 ] 2>/dev/null || break
     REAP_TREE="\${REAP_TREE}\${reap_pid} "
   done
+  # One pool member hosts every registration under this one uid
+  # (qwen-autofix.md af-014): a concurrent job from another
+  # registration never reaches this shell's chain, so the tree
+  # above alone would SIGKILL it mid-flight. Widen the keep set
+  # to every runner-agent tree of the user; a process is killed
+  # only if it is detached from ALL agent trees.
+  REAP_TREE="$REAP_TREE $(ps -u "$REAP_USER" -o pid= -o args= 2>/dev/null | awk '/runsvc\\.sh|RunnerService|Runner\\./ { printf "%s ", $1 }')" || true
   live_outside_tree() {
     # One pid per line: live processes of this user whose parent
     # chain never reaches the runner agent tree, zombies dropped.
@@ -713,6 +721,97 @@ describe('release workflow', () => {
           );
         } finally {
           rmSync(stubDir, { recursive: true, force: true });
+          rmSync(base, { recursive: true, force: true });
+        }
+      }
+
+      // Concurrent-registration shape (R9-1): one pool member hosts every
+      // registration under this same uid (qwen-autofix.md af-014), so the
+      // keep set must reach beyond this job's own ancestor tree. The `ps`
+      // stub lists a second, DISJOINT agent tree — a fake registration root
+      // whose args match the runner pattern, plus a real bystander sleeper
+      // parented under it — alongside a real detached orphan. The wipe must
+      // kill the orphan, spare the bystander, and exit 0 rather than fail
+      // on the bystander as a survivor. Against the pre-fix keep set the
+      // bystander's chain never reaches this shell's tree, so the wipe
+      // SIGKILLs it and the survival assertion goes red.
+      {
+        const orphanPidFile = join(
+          tmpdir(),
+          `release-reap-orphan-${process.pid}-${Date.now()}`,
+        );
+        const bystanderPidFile = join(
+          tmpdir(),
+          `release-reap-bystander-${process.pid}-${Date.now()}`,
+        );
+        const spawnDetached = (pidFile) => {
+          spawnSync('bash', [
+            '-c',
+            'setsid bash -c \'echo $$ > "$1"; exec sleep 30\' x "$1" </dev/null >/dev/null 2>&1 & ' +
+              'for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do ' +
+              '[ -s "$1" ] && exit 0; sleep 0.1; done; exit 1',
+            'x',
+            pidFile,
+            pidFile,
+          ]);
+          const pid = Number(readFileSync(pidFile, 'utf8').trim());
+          rmSync(pidFile);
+          expect(pid).toBeGreaterThan(1);
+          expect(() => process.kill(pid, 0)).not.toThrow();
+          return pid;
+        };
+        const orphanPid = spawnDetached(orphanPidFile);
+        const bystanderPid = spawnDetached(bystanderPidFile);
+        // A pid no live process holds: the stub fabricates the other
+        // registration's root around the real bystander.
+        const fakeRootPid = 3900000 + (process.pid % 100000);
+        const treeStubDir = mkdtempSync(join(tmpdir(), 'release-reap-tree-'));
+        writeFileSync(
+          join(treeStubDir, 'ps'),
+          [
+            '#!/bin/bash',
+            '# Tree-walk probe: stop the ancestor chain at the wipe shell.',
+            'case "$*" in *-p*) exit 0 ;; esac',
+            '# Agent-root listing: one other registration tree.',
+            `case "$*" in *args=*) echo "${fakeRootPid} /opt/actions-runner/bin/Runner.Listener" ;; esac`,
+            '# Live listing: a detached leftover, a concurrent job parented',
+            "# under that other tree's root, and the root itself. The",
+            '# orphan line tracks reality (kill -0): after the reap kills',
+            '# it, the retry listing must come back empty or the wipe',
+            '# fails closed on a phantom survivor.',
+            'case "$*" in *stat=*)',
+            `  if kill -0 ${orphanPid} 2>/dev/null; then echo "${orphanPid} 1 S orphan-leftover"; fi`,
+            `  echo "${bystanderPid} ${fakeRootPid} S concurrent-job-worker"`,
+            `  echo "${fakeRootPid} 1 S Runner.Listener"`,
+            '  ;;',
+            'esac',
+            'exit 0',
+            '',
+          ].join('\n'),
+        );
+        chmodSync(join(treeStubDir, 'ps'), 0o755);
+        const { result, base } = runWipe({
+          PATH: `${treeStubDir}:${process.env.PATH}`,
+        });
+        try {
+          expect(result.status).toBe(0);
+          expect(`${result.stdout}${result.stderr}`).not.toContain(
+            'survived SIGKILL',
+          );
+          // The detached leftover died...
+          expect(() => process.kill(orphanPid, 0)).toThrow();
+          // ...but the concurrent job under the other registration's
+          // agent tree survived the reap.
+          expect(() => process.kill(bystanderPid, 0)).not.toThrow();
+        } finally {
+          for (const pid of [orphanPid, bystanderPid]) {
+            try {
+              process.kill(pid, 'SIGKILL');
+            } catch {
+              // already reaped — expected
+            }
+          }
+          rmSync(treeStubDir, { recursive: true, force: true });
           rmSync(base, { recursive: true, force: true });
         }
       }
