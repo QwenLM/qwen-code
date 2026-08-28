@@ -360,311 +360,422 @@ describe('release workflow', () => {
     }
   });
 
-  it.skipIf(!hasGnuRealpath || process.getuid?.() === 0)(
-    'executes the workspace wipe against guard branches',
-    () => {
-      const wipeScript = canonicalWipe;
+  // The gate also closes on win32: Git for Windows ships GNU realpath
+  // (so hasGnuRealpath is true on the hosted windows-2022 fallback lane
+  // ci.yml's test_windows uses whenever MAINTAINER_ECS_RUNNER_DISABLED=true),
+  // but PortableGit ships no setsid — the reap fixture would never write
+  // its pid file there and readFileSync(pidFile) would throw ENOENT.
+  it.skipIf(
+    !hasGnuRealpath || process.getuid?.() === 0 || process.platform === 'win32',
+  )('executes the workspace wipe against guard branches', () => {
+    const wipeScript = canonicalWipe;
 
-      // The guard-branch cases below assert geometry and env isolation, not
-      // the reap — but the wipe's reap is genuine: it kills every live
-      // process of the runner user outside the step's ancestor tree. On the
-      // shared ECS pool that would reach into whatever job is co-resident
-      // on the same member under this uid every time the suite runs. Give
-      // the guard-branch cases a `ps` that lists nothing so the reap branch
-      // executes end to end yet kills nothing; the R1-1 case stubs `ps` to
-      // enumerate only its own orphan (real kill, no host enumeration), and
-      // the fail-closed case stubs its own `ps`.
-      const noKillStubDir = mkdtempSync(join(tmpdir(), 'release-reap-nokill-'));
-      writeFileSync(join(noKillStubDir, 'ps'), '#!/bin/bash\nexit 0\n');
-      chmodSync(join(noKillStubDir, 'ps'), 0o755);
-      const noKillPath = `${noKillStubDir}:${process.env.PATH}`;
-      onTestFinished(() =>
-        rmSync(noKillStubDir, { recursive: true, force: true }),
+    // The guard-branch cases below assert geometry and env isolation, not
+    // the reap — but the wipe's reap is genuine: it kills every live
+    // process of the runner user outside the step's ancestor tree. On the
+    // shared ECS pool that would reach into whatever job is co-resident
+    // on the same member under this uid every time the suite runs. Give
+    // the guard-branch cases a `ps` that lists nothing so the reap branch
+    // executes end to end yet kills nothing; the R1-1 case stubs `ps` to
+    // enumerate only its own orphan (real kill, no host enumeration), and
+    // the fail-closed case stubs its own `ps`.
+    const noKillStubDir = mkdtempSync(join(tmpdir(), 'release-reap-nokill-'));
+    writeFileSync(join(noKillStubDir, 'ps'), '#!/bin/bash\nexit 0\n');
+    chmodSync(join(noKillStubDir, 'ps'), 0o755);
+    const noKillPath = `${noKillStubDir}:${process.env.PATH}`;
+    onTestFinished(() =>
+      rmSync(noKillStubDir, { recursive: true, force: true }),
+    );
+
+    const runWipe = (envOverrides, { preCreateWorkspace } = {}) => {
+      const base = mkdtempSync(join(tmpdir(), 'release-wipe-behavioral-'));
+      const workspace = join(base, 'workspace');
+      mkdirSync(workspace);
+      if (preCreateWorkspace) preCreateWorkspace(base, workspace);
+      const env = {
+        ...process.env,
+        GITHUB_WORKSPACE: workspace,
+        RUNNER_WORKSPACE: base,
+        RUNNER_TEMP: join(base, 'temp'),
+        RUNNER_TOOL_CACHE: join(base, 'tool-cache'),
+        GITHUB_ENV: join(base, 'github-env'),
+        HOME: join(base, 'home'),
+        XDG_CONFIG_HOME: join(base, 'home', '.config'),
+        ...envOverrides,
+      };
+      mkdirSync(env.HOME);
+      mkdirSync(env.RUNNER_TEMP);
+      mkdirSync(join(env.RUNNER_TOOL_CACHE, 'node'), { recursive: true });
+      mkdirSync(join(env.HOME, '.docker'));
+      writeFileSync(
+        join(env.HOME, '.gitconfig'),
+        '[credential]\n\thelper = !false\n',
       );
+      writeFileSync(join(env.HOME, '.gitconfig.lock'), 'stale');
+      writeFileSync(
+        join(env.HOME, '.docker', 'config.json'),
+        '{"proxies":{"default":{"httpProxy":"http://attacker"}}}',
+      );
+      env.GIT_CONFIG_GLOBAL = join(env.HOME, '.gitconfig');
+      env.GIT_CONFIG_COUNT = '1';
+      env.GIT_CONFIG_KEY_0 = 'credential.helper';
+      env.GIT_CONFIG_VALUE_0 = '!false';
+      return {
+        result: spawnSync('bash', ['-e', '-o', 'pipefail', '-c', wipeScript], {
+          encoding: 'utf8',
+          env,
+        }),
+        base,
+        workspace,
+        githubEnv: env.GITHUB_ENV,
+        env,
+      };
+    };
 
-      const runWipe = (envOverrides, { preCreateWorkspace } = {}) => {
-        const base = mkdtempSync(join(tmpdir(), 'release-wipe-behavioral-'));
-        const workspace = join(base, 'workspace');
-        mkdirSync(workspace);
-        if (preCreateWorkspace) preCreateWorkspace(base, workspace);
+    // Happy path: a normal workspace inside the runner workspace is wiped,
+    // including subdirectories (the wipe's core property: recursive removal
+    // of all persisted entries, not just files).
+    {
+      const { result, base, workspace, githubEnv, env } = runWipe(
+        { PATH: noKillPath },
+        {
+          preCreateWorkspace: (_base, ws) => {
+            writeFileSync(join(ws, 'leftover.txt'), 'stale');
+            mkdirSync(join(ws, 'leftover-dir'));
+            writeFileSync(join(ws, 'leftover-dir', 'nested.txt'), 'stale');
+          },
+        },
+      );
+      try {
+        expect(result.status).toBe(0);
+        const entries = readdirSync(workspace);
+        expect(entries).toHaveLength(0);
+        const stateEnv = readFileSync(githubEnv, 'utf8');
+        expect(stateEnv).toContain('GIT_CONFIG_COUNT=0\n');
+        expect(stateEnv).toContain('GIT_CONFIG_NOSYSTEM=1\n');
+        expect(stateEnv).toContain('GIT_CONFIG_PARAMETERS=\n');
+        expect(stateEnv).toMatch(
+          /GIT_CONFIG_GLOBAL=.*\/release-state\.[^/]+\/gitconfig\n/,
+        );
+        expect(stateEnv).toMatch(
+          /NPM_CONFIG_USERCONFIG=.*\/release-state\.[^/]+\/npmrc\n/,
+        );
+        expect(stateEnv).toMatch(
+          /DOCKER_CONFIG=.*\/release-state\.[^/]+\/docker\n/,
+        );
+        expect(stateEnv).toMatch(
+          /GH_CONFIG_DIR=.*\/release-state\.[^/]+\/gh\n/,
+        );
+        const isolatedEnv = { ...env };
+        for (const line of stateEnv.trimEnd().split('\n')) {
+          const separator = line.indexOf('=');
+          isolatedEnv[line.slice(0, separator)] = line.slice(separator + 1);
+        }
+        expect(
+          spawnSync(
+            'git',
+            ['config', '--global', '--get', 'credential.helper'],
+            { env: isolatedEnv },
+          ).status,
+        ).not.toBe(0);
+        expect(readdirSync(isolatedEnv.DOCKER_CONFIG)).toHaveLength(0);
+        // The sibling tool cache SURVIVES the wipe: the sweep is scoped
+        // to the workspace, and the pool-wide cache stays untouched on
+        // purpose — the pool-routed release lane never reads it, while
+        // other pool lanes resolve Node from it through un-gated
+        // setup-node.
+        expect(lstatSync(join(base, 'tool-cache', 'node')).isDirectory()).toBe(
+          true,
+        );
+      } finally {
+        rmSync(base, { recursive: true, force: true });
+      }
+    }
+
+    // Symlink heal: a workspace replaced with a symlink inside the runner
+    // workspace is removed and recreated, then wiped. The decoy target
+    // is a real file so the test can verify `rm -f` removed only the
+    // link itself and did not follow/delete the target.
+    {
+      const { result, base, workspace } = runWipe(
+        { PATH: noKillPath },
+        {
+          preCreateWorkspace: (b, ws) => {
+            rmSync(ws, { recursive: true, force: true });
+            const decoyTarget = join(b, 'decoy-target');
+            writeFileSync(decoyTarget, 'must-survive');
+            symlinkSync(decoyTarget, ws);
+          },
+        },
+      );
+      try {
+        expect(result.status).toBe(0);
+        expect(`${result.stdout}${result.stderr}`).toContain(
+          'healing workspace',
+        );
+        const stat = lstatSync(workspace);
+        expect(stat.isDirectory()).toBe(true);
+        // The decoy target must survive: rm -f on the raw path removes
+        // the link itself and never follows it.
+        expect(readFileSync(join(base, 'decoy-target'), 'utf8')).toBe(
+          'must-survive',
+        );
+      } finally {
+        rmSync(base, { recursive: true, force: true });
+      }
+    }
+
+    // Pool geometry: the tool cache is a SIBLING of the runner workspace
+    // (<root>/_work/_tool vs <root>/_work/qwen-code) — the standard
+    // self-hosted layout. The wipe must leave it untouched: other pool
+    // lanes resolve Node from it through un-gated setup-node, while the
+    // pool-routed release jobs never read it.
+    {
+      const runnerRoot = mkdtempSync(join(tmpdir(), 'release-wipe-pool-'));
+      const rws = join(runnerRoot, '_work', 'qwen-code');
+      const workspace = join(rws, 'qwen-code');
+      mkdirSync(workspace, { recursive: true });
+      writeFileSync(join(workspace, 'leftover.txt'), 'stale');
+      try {
         const env = {
           ...process.env,
+          PATH: noKillPath,
           GITHUB_WORKSPACE: workspace,
+          RUNNER_WORKSPACE: rws,
+          RUNNER_TEMP: join(runnerRoot, 'temp'),
+          RUNNER_TOOL_CACHE: join(runnerRoot, '_work', '_tool'),
+          GITHUB_ENV: join(runnerRoot, 'github-env'),
+          HOME: join(runnerRoot, 'home'),
+          XDG_CONFIG_HOME: join(runnerRoot, 'home', '.config'),
+        };
+        mkdirSync(env.HOME);
+        mkdirSync(env.RUNNER_TEMP);
+        mkdirSync(join(env.RUNNER_TOOL_CACHE, 'node'), { recursive: true });
+        writeFileSync(
+          join(env.RUNNER_TOOL_CACHE, 'node', 'marker.txt'),
+          'pool-node',
+        );
+        const result = spawnSync(
+          'bash',
+          ['-e', '-o', 'pipefail', '-c', wipeScript],
+          { encoding: 'utf8', env },
+        );
+        expect(result.status).toBe(0);
+        expect(readdirSync(workspace)).toHaveLength(0);
+        // The sibling tool cache's node directory SURVIVES the wipe.
+        expect(
+          lstatSync(join(env.RUNNER_TOOL_CACHE, 'node')).isDirectory(),
+        ).toBe(true);
+        expect(
+          readFileSync(
+            join(env.RUNNER_TOOL_CACHE, 'node', 'marker.txt'),
+            'utf8',
+          ),
+        ).toBe('pool-node');
+      } finally {
+        rmSync(runnerRoot, { recursive: true, force: true });
+      }
+    }
+
+    // Workspace outside runner workspace: refused.
+    {
+      const outside = mkdtempSync(join(tmpdir(), 'release-wipe-outside-'));
+      const base = mkdtempSync(join(tmpdir(), 'release-wipe-runner-'));
+      try {
+        const env = {
+          ...process.env,
+          GITHUB_WORKSPACE: outside,
           RUNNER_WORKSPACE: base,
           RUNNER_TEMP: join(base, 'temp'),
           RUNNER_TOOL_CACHE: join(base, 'tool-cache'),
           GITHUB_ENV: join(base, 'github-env'),
           HOME: join(base, 'home'),
           XDG_CONFIG_HOME: join(base, 'home', '.config'),
-          ...envOverrides,
         };
         mkdirSync(env.HOME);
         mkdirSync(env.RUNNER_TEMP);
-        mkdirSync(join(env.RUNNER_TOOL_CACHE, 'node'), { recursive: true });
-        mkdirSync(join(env.HOME, '.docker'));
-        writeFileSync(
-          join(env.HOME, '.gitconfig'),
-          '[credential]\n\thelper = !false\n',
+        const result = spawnSync(
+          'bash',
+          ['-e', '-o', 'pipefail', '-c', wipeScript],
+          { encoding: 'utf8', env },
         );
-        writeFileSync(join(env.HOME, '.gitconfig.lock'), 'stale');
-        writeFileSync(
-          join(env.HOME, '.docker', 'config.json'),
-          '{"proxies":{"default":{"httpProxy":"http://attacker"}}}',
+        expect(result.status).not.toBe(0);
+        expect(`${result.stdout}${result.stderr}`).toContain(
+          'refusing to wipe workspace outside the runner workspace',
         );
-        env.GIT_CONFIG_GLOBAL = join(env.HOME, '.gitconfig');
-        env.GIT_CONFIG_COUNT = '1';
-        env.GIT_CONFIG_KEY_0 = 'credential.helper';
-        env.GIT_CONFIG_VALUE_0 = '!false';
-        return {
-          result: spawnSync(
-            'bash',
-            ['-e', '-o', 'pipefail', '-c', wipeScript],
-            {
-              encoding: 'utf8',
-              env,
-            },
-          ),
-          base,
-          workspace,
-          githubEnv: env.GITHUB_ENV,
-          env,
+      } finally {
+        rmSync(outside, { recursive: true, force: true });
+        rmSync(base, { recursive: true, force: true });
+      }
+    }
+
+    // Path with '..' that realpath resolves inside the runner workspace:
+    // canonicalization succeeds, containment passes, wipe proceeds.
+    {
+      const base = mkdtempSync(join(tmpdir(), 'release-wipe-dots-'));
+      const workspace = join(base, 'workspace');
+      mkdirSync(workspace);
+      mkdirSync(join(base, 'sub'));
+      writeFileSync(join(workspace, 'leftover.txt'), 'stale');
+      try {
+        const env = {
+          ...process.env,
+          PATH: noKillPath,
+          // String concatenation preserves the literal '..' segment —
+          // path.join would normalize it away before the script sees it.
+          GITHUB_WORKSPACE: `${base}/sub/../workspace`,
+          RUNNER_WORKSPACE: base,
+          RUNNER_TEMP: join(base, 'temp'),
+          RUNNER_TOOL_CACHE: join(base, 'tool-cache'),
+          GITHUB_ENV: join(base, 'github-env'),
+          HOME: join(base, 'home'),
+          XDG_CONFIG_HOME: join(base, 'home', '.config'),
         };
-      };
-
-      // Happy path: a normal workspace inside the runner workspace is wiped,
-      // including subdirectories (the wipe's core property: recursive removal
-      // of all persisted entries, not just files).
-      {
-        const { result, base, workspace, githubEnv, env } = runWipe(
-          { PATH: noKillPath },
-          {
-            preCreateWorkspace: (_base, ws) => {
-              writeFileSync(join(ws, 'leftover.txt'), 'stale');
-              mkdirSync(join(ws, 'leftover-dir'));
-              writeFileSync(join(ws, 'leftover-dir', 'nested.txt'), 'stale');
-            },
-          },
+        mkdirSync(env.HOME);
+        mkdirSync(env.RUNNER_TEMP);
+        const result = spawnSync(
+          'bash',
+          ['-e', '-o', 'pipefail', '-c', wipeScript],
+          { encoding: 'utf8', env },
         );
-        try {
-          expect(result.status).toBe(0);
-          const entries = readdirSync(workspace);
-          expect(entries).toHaveLength(0);
-          const stateEnv = readFileSync(githubEnv, 'utf8');
-          expect(stateEnv).toContain('GIT_CONFIG_COUNT=0\n');
-          expect(stateEnv).toContain('GIT_CONFIG_NOSYSTEM=1\n');
-          expect(stateEnv).toContain('GIT_CONFIG_PARAMETERS=\n');
-          expect(stateEnv).toMatch(
-            /GIT_CONFIG_GLOBAL=.*\/release-state\.[^/]+\/gitconfig\n/,
-          );
-          expect(stateEnv).toMatch(
-            /NPM_CONFIG_USERCONFIG=.*\/release-state\.[^/]+\/npmrc\n/,
-          );
-          expect(stateEnv).toMatch(
-            /DOCKER_CONFIG=.*\/release-state\.[^/]+\/docker\n/,
-          );
-          expect(stateEnv).toMatch(
-            /GH_CONFIG_DIR=.*\/release-state\.[^/]+\/gh\n/,
-          );
-          const isolatedEnv = { ...env };
-          for (const line of stateEnv.trimEnd().split('\n')) {
-            const separator = line.indexOf('=');
-            isolatedEnv[line.slice(0, separator)] = line.slice(separator + 1);
-          }
-          expect(
-            spawnSync(
-              'git',
-              ['config', '--global', '--get', 'credential.helper'],
-              { env: isolatedEnv },
-            ).status,
-          ).not.toBe(0);
-          expect(readdirSync(isolatedEnv.DOCKER_CONFIG)).toHaveLength(0);
-          // The sibling tool cache SURVIVES the wipe: the sweep is scoped
-          // to the workspace, and the pool-wide cache stays untouched on
-          // purpose — the pool-routed release lane never reads it, while
-          // other pool lanes resolve Node from it through un-gated
-          // setup-node.
-          expect(
-            lstatSync(join(base, 'tool-cache', 'node')).isDirectory(),
-          ).toBe(true);
-        } finally {
-          rmSync(base, { recursive: true, force: true });
-        }
+        expect(result.status).toBe(0);
+        const entries = readdirSync(workspace);
+        expect(entries).toHaveLength(0);
+      } finally {
+        rmSync(base, { recursive: true, force: true });
       }
+    }
 
-      // Symlink heal: a workspace replaced with a symlink inside the runner
-      // workspace is removed and recreated, then wiped. The decoy target
-      // is a real file so the test can verify `rm -f` removed only the
-      // link itself and did not follow/delete the target.
-      {
-        const { result, base, workspace } = runWipe(
-          { PATH: noKillPath },
-          {
-            preCreateWorkspace: (b, ws) => {
-              rmSync(ws, { recursive: true, force: true });
-              const decoyTarget = join(b, 'decoy-target');
-              writeFileSync(decoyTarget, 'must-survive');
-              symlinkSync(decoyTarget, ws);
-            },
-          },
+    // Process reap (R1-1): a detached survivor of a PREVIOUS pool job —
+    // orphaned to init exactly like a postinstall child that outlives its
+    // job — is killed before the file sweep runs. The orphan's parent
+    // chain never reaches this shell's ancestor tree, so the reap must
+    // reach it; the run still exits 0 and the workspace is wiped. The
+    // case stubs `ps` so the reap enumerates ONLY this test's orphan:
+    // the kill path stays genuine (a real sleeper, a real SIGKILL), but
+    // the suite never reaches the co-resident processes that share this
+    // uid on the pool, and a transient same-uid process on the member
+    // can no longer flake the fail-closed leg.
+    {
+      const pidFile = join(
+        tmpdir(),
+        `release-reap-pid-${process.pid}-${Date.now()}`,
+      );
+      // setsid + an exiting parent orphans the sleeper immediately
+      // (reparented to init, outside the wipe shell's ancestor tree).
+      // The outer loop waits for the pid file so the read cannot race.
+      // The sleeper's stdio goes to /dev/null: a pipe inherited through
+      // the spawn would hold this spawnSync open until the sleeper ends.
+      spawnSync('bash', [
+        '-c',
+        'setsid bash -c \'echo $$ > "$1"; exec sleep 30\' x "$1" </dev/null >/dev/null 2>&1 & ' +
+          'for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do ' +
+          '[ -s "$1" ] && exit 0; sleep 0.1; done; exit 1',
+        'x',
+        pidFile,
+        pidFile,
+      ]);
+      const survivorPid = Number(readFileSync(pidFile, 'utf8').trim());
+      rmSync(pidFile);
+      expect(survivorPid).toBeGreaterThan(1);
+      expect(() => process.kill(survivorPid, 0)).not.toThrow();
+      // The stub's live-listing arm tracks reality (kill -0): once the
+      // reap kills the orphan the retry listing comes back empty, the
+      // way the real ps does.
+      const r11StubDir = mkdtempSync(join(tmpdir(), 'release-reap-r11-'));
+      writeFileSync(
+        join(r11StubDir, 'ps'),
+        [
+          '#!/bin/bash',
+          '# Tree-walk probe: stop the ancestor chain at the wipe shell.',
+          'case "$*" in *-p*) exit 0 ;; esac',
+          '# Agent-root listing: no other registration trees.',
+          'case "$*" in *args=*) exit 0 ;; esac',
+          '# Live listing: ONLY the test orphan — never the host, whose',
+          '# co-resident jobs share this uid on the pool.',
+          'case "$*" in *stat=*)',
+          `  if kill -0 ${survivorPid} 2>/dev/null; then echo "${survivorPid} 1 S orphan-sleeper"; fi`,
+          '  ;;',
+          'esac',
+          'exit 0',
+          '',
+        ].join('\n'),
+      );
+      chmodSync(join(r11StubDir, 'ps'), 0o755);
+      const { result, base } = runWipe({
+        PATH: `${r11StubDir}:${process.env.PATH}`,
+      });
+      try {
+        expect(result.status).toBe(0);
+        // The orphan did not survive the reap.
+        expect(() => process.kill(survivorPid, 0)).toThrow();
+      } finally {
+        try {
+          process.kill(survivorPid, 'SIGKILL');
+        } catch {
+          // already reaped — expected
+        }
+        rmSync(r11StubDir, { recursive: true, force: true });
+        rmSync(base, { recursive: true, force: true });
+      }
+    }
+
+    // Reap fail-closed (R1-1): if a process outside the agent tree
+    // cannot be killed, the wipe must refuse before any checkout with
+    // credentials and name the survivor — never proceed. A stub `ps`
+    // reports one unkillable fake process for the whole run.
+    {
+      const stubDir = mkdtempSync(join(tmpdir(), 'release-reap-stub-'));
+      writeFileSync(
+        join(stubDir, 'ps'),
+        [
+          '#!/bin/bash',
+          '# Tree-walk probe: no parent — the kept tree is the wipe shell.',
+          'case "$*" in "-o ppid= -p "*) exit 0 ;; esac',
+          '# Live listing: always one fake survivor outside the tree.',
+          'case "$*" in *-u*) echo "424242 1 S fake-survivor-unkillable" ;;',
+          ' *) echo "424242 S fake-survivor-unkillable" ;; esac',
+          '',
+        ].join('\n'),
+      );
+      chmodSync(join(stubDir, 'ps'), 0o755);
+      const { result, base } = runWipe({
+        PATH: `${stubDir}:${process.env.PATH}`,
+      });
+      try {
+        expect(result.status).not.toBe(0);
+        expect(`${result.stdout}${result.stderr}`).toContain(
+          'survived SIGKILL; refusing to run release steps with credentials',
         );
-        try {
-          expect(result.status).toBe(0);
-          expect(`${result.stdout}${result.stderr}`).toContain(
-            'healing workspace',
-          );
-          const stat = lstatSync(workspace);
-          expect(stat.isDirectory()).toBe(true);
-          // The decoy target must survive: rm -f on the raw path removes
-          // the link itself and never follows it.
-          expect(readFileSync(join(base, 'decoy-target'), 'utf8')).toBe(
-            'must-survive',
-          );
-        } finally {
-          rmSync(base, { recursive: true, force: true });
-        }
-      }
-
-      // Pool geometry: the tool cache is a SIBLING of the runner workspace
-      // (<root>/_work/_tool vs <root>/_work/qwen-code) — the standard
-      // self-hosted layout. The wipe must leave it untouched: other pool
-      // lanes resolve Node from it through un-gated setup-node, while the
-      // pool-routed release jobs never read it.
-      {
-        const runnerRoot = mkdtempSync(join(tmpdir(), 'release-wipe-pool-'));
-        const rws = join(runnerRoot, '_work', 'qwen-code');
-        const workspace = join(rws, 'qwen-code');
-        mkdirSync(workspace, { recursive: true });
-        writeFileSync(join(workspace, 'leftover.txt'), 'stale');
-        try {
-          const env = {
-            ...process.env,
-            PATH: noKillPath,
-            GITHUB_WORKSPACE: workspace,
-            RUNNER_WORKSPACE: rws,
-            RUNNER_TEMP: join(runnerRoot, 'temp'),
-            RUNNER_TOOL_CACHE: join(runnerRoot, '_work', '_tool'),
-            GITHUB_ENV: join(runnerRoot, 'github-env'),
-            HOME: join(runnerRoot, 'home'),
-            XDG_CONFIG_HOME: join(runnerRoot, 'home', '.config'),
-          };
-          mkdirSync(env.HOME);
-          mkdirSync(env.RUNNER_TEMP);
-          mkdirSync(join(env.RUNNER_TOOL_CACHE, 'node'), { recursive: true });
-          writeFileSync(
-            join(env.RUNNER_TOOL_CACHE, 'node', 'marker.txt'),
-            'pool-node',
-          );
-          const result = spawnSync(
-            'bash',
-            ['-e', '-o', 'pipefail', '-c', wipeScript],
-            { encoding: 'utf8', env },
-          );
-          expect(result.status).toBe(0);
-          expect(readdirSync(workspace)).toHaveLength(0);
-          // The sibling tool cache's node directory SURVIVES the wipe.
-          expect(
-            lstatSync(join(env.RUNNER_TOOL_CACHE, 'node')).isDirectory(),
-          ).toBe(true);
-          expect(
-            readFileSync(
-              join(env.RUNNER_TOOL_CACHE, 'node', 'marker.txt'),
-              'utf8',
-            ),
-          ).toBe('pool-node');
-        } finally {
-          rmSync(runnerRoot, { recursive: true, force: true });
-        }
-      }
-
-      // Workspace outside runner workspace: refused.
-      {
-        const outside = mkdtempSync(join(tmpdir(), 'release-wipe-outside-'));
-        const base = mkdtempSync(join(tmpdir(), 'release-wipe-runner-'));
-        try {
-          const env = {
-            ...process.env,
-            GITHUB_WORKSPACE: outside,
-            RUNNER_WORKSPACE: base,
-            RUNNER_TEMP: join(base, 'temp'),
-            RUNNER_TOOL_CACHE: join(base, 'tool-cache'),
-            GITHUB_ENV: join(base, 'github-env'),
-            HOME: join(base, 'home'),
-            XDG_CONFIG_HOME: join(base, 'home', '.config'),
-          };
-          mkdirSync(env.HOME);
-          mkdirSync(env.RUNNER_TEMP);
-          const result = spawnSync(
-            'bash',
-            ['-e', '-o', 'pipefail', '-c', wipeScript],
-            { encoding: 'utf8', env },
-          );
-          expect(result.status).not.toBe(0);
-          expect(`${result.stdout}${result.stderr}`).toContain(
-            'refusing to wipe workspace outside the runner workspace',
-          );
-        } finally {
-          rmSync(outside, { recursive: true, force: true });
-          rmSync(base, { recursive: true, force: true });
-        }
-      }
-
-      // Path with '..' that realpath resolves inside the runner workspace:
-      // canonicalization succeeds, containment passes, wipe proceeds.
-      {
-        const base = mkdtempSync(join(tmpdir(), 'release-wipe-dots-'));
-        const workspace = join(base, 'workspace');
-        mkdirSync(workspace);
-        mkdirSync(join(base, 'sub'));
-        writeFileSync(join(workspace, 'leftover.txt'), 'stale');
-        try {
-          const env = {
-            ...process.env,
-            PATH: noKillPath,
-            // String concatenation preserves the literal '..' segment —
-            // path.join would normalize it away before the script sees it.
-            GITHUB_WORKSPACE: `${base}/sub/../workspace`,
-            RUNNER_WORKSPACE: base,
-            RUNNER_TEMP: join(base, 'temp'),
-            RUNNER_TOOL_CACHE: join(base, 'tool-cache'),
-            GITHUB_ENV: join(base, 'github-env'),
-            HOME: join(base, 'home'),
-            XDG_CONFIG_HOME: join(base, 'home', '.config'),
-          };
-          mkdirSync(env.HOME);
-          mkdirSync(env.RUNNER_TEMP);
-          const result = spawnSync(
-            'bash',
-            ['-e', '-o', 'pipefail', '-c', wipeScript],
-            { encoding: 'utf8', env },
-          );
-          expect(result.status).toBe(0);
-          const entries = readdirSync(workspace);
-          expect(entries).toHaveLength(0);
-        } finally {
-          rmSync(base, { recursive: true, force: true });
-        }
-      }
-
-      // Process reap (R1-1): a detached survivor of a PREVIOUS pool job —
-      // orphaned to init exactly like a postinstall child that outlives its
-      // job — is killed before the file sweep runs. The orphan's parent
-      // chain never reaches this shell's ancestor tree, so the reap must
-      // reach it; the run still exits 0 and the workspace is wiped. The
-      // case stubs `ps` so the reap enumerates ONLY this test's orphan:
-      // the kill path stays genuine (a real sleeper, a real SIGKILL), but
-      // the suite never reaches the co-resident processes that share this
-      // uid on the pool, and a transient same-uid process on the member
-      // can no longer flake the fail-closed leg.
-      {
-        const pidFile = join(
-          tmpdir(),
-          `release-reap-pid-${process.pid}-${Date.now()}`,
+        expect(`${result.stdout}${result.stderr}`).toContain(
+          'surviving process: 424242',
         );
-        // setsid + an exiting parent orphans the sleeper immediately
-        // (reparented to init, outside the wipe shell's ancestor tree).
-        // The outer loop waits for the pid file so the read cannot race.
-        // The sleeper's stdio goes to /dev/null: a pipe inherited through
-        // the spawn would hold this spawnSync open until the sleeper ends.
+      } finally {
+        rmSync(stubDir, { recursive: true, force: true });
+        rmSync(base, { recursive: true, force: true });
+      }
+    }
+
+    // Concurrent-registration shape (R9-1): one pool member hosts every
+    // registration under this same uid (qwen-autofix.md af-014), so the
+    // keep set must reach beyond this job's own ancestor tree. The `ps`
+    // stub lists a second, DISJOINT agent tree — a fake registration root
+    // whose args match the runner pattern, plus a real bystander sleeper
+    // parented under it — alongside a real detached orphan. The wipe must
+    // kill the orphan, spare the bystander, and exit 0 rather than fail
+    // on the bystander as a survivor. Against the pre-fix keep set the
+    // bystander's chain never reaches this shell's tree, so the wipe
+    // SIGKILLs it and the survival assertion goes red.
+    {
+      const orphanPidFile = join(
+        tmpdir(),
+        `release-reap-orphan-${process.pid}-${Date.now()}`,
+      );
+      const bystanderPidFile = join(
+        tmpdir(),
+        `release-reap-bystander-${process.pid}-${Date.now()}`,
+      );
+      const spawnDetached = (pidFile) => {
         spawnSync('bash', [
           '-c',
           'setsid bash -c \'echo $$ > "$1"; exec sleep 30\' x "$1" </dev/null >/dev/null 2>&1 & ' +
@@ -674,259 +785,148 @@ describe('release workflow', () => {
           pidFile,
           pidFile,
         ]);
-        const survivorPid = Number(readFileSync(pidFile, 'utf8').trim());
+        const pid = Number(readFileSync(pidFile, 'utf8').trim());
         rmSync(pidFile);
-        expect(survivorPid).toBeGreaterThan(1);
-        expect(() => process.kill(survivorPid, 0)).not.toThrow();
-        // The stub's live-listing arm tracks reality (kill -0): once the
-        // reap kills the orphan the retry listing comes back empty, the
-        // way the real ps does.
-        const r11StubDir = mkdtempSync(join(tmpdir(), 'release-reap-r11-'));
-        writeFileSync(
-          join(r11StubDir, 'ps'),
-          [
-            '#!/bin/bash',
-            '# Tree-walk probe: stop the ancestor chain at the wipe shell.',
-            'case "$*" in *-p*) exit 0 ;; esac',
-            '# Agent-root listing: no other registration trees.',
-            'case "$*" in *args=*) exit 0 ;; esac',
-            '# Live listing: ONLY the test orphan — never the host, whose',
-            '# co-resident jobs share this uid on the pool.',
-            'case "$*" in *stat=*)',
-            `  if kill -0 ${survivorPid} 2>/dev/null; then echo "${survivorPid} 1 S orphan-sleeper"; fi`,
-            '  ;;',
-            'esac',
-            'exit 0',
-            '',
-          ].join('\n'),
+        expect(pid).toBeGreaterThan(1);
+        expect(() => process.kill(pid, 0)).not.toThrow();
+        return pid;
+      };
+      const orphanPid = spawnDetached(orphanPidFile);
+      const bystanderPid = spawnDetached(bystanderPidFile);
+      // A pid no live process holds: the stub fabricates the other
+      // registration's root around the real bystander.
+      const fakeRootPid = 3900000 + (process.pid % 100000);
+      const treeStubDir = mkdtempSync(join(tmpdir(), 'release-reap-tree-'));
+      writeFileSync(
+        join(treeStubDir, 'ps'),
+        [
+          '#!/bin/bash',
+          '# Tree-walk probe: stop the ancestor chain at the wipe shell.',
+          'case "$*" in *-p*) exit 0 ;; esac',
+          '# Agent-root listing: one other registration tree.',
+          `case "$*" in *args=*) echo "${fakeRootPid} /opt/actions-runner/bin/Runner.Listener" ;; esac`,
+          '# Live listing: a detached leftover, a concurrent job parented',
+          "# under that other tree's root, and the root itself. The",
+          '# orphan line tracks reality (kill -0): after the reap kills',
+          '# it, the retry listing must come back empty or the wipe',
+          '# fails closed on a phantom survivor.',
+          'case "$*" in *stat=*)',
+          `  if kill -0 ${orphanPid} 2>/dev/null; then echo "${orphanPid} 1 S orphan-leftover"; fi`,
+          `  echo "${bystanderPid} ${fakeRootPid} S concurrent-job-worker"`,
+          `  echo "${fakeRootPid} 1 S Runner.Listener"`,
+          '  ;;',
+          'esac',
+          'exit 0',
+          '',
+        ].join('\n'),
+      );
+      chmodSync(join(treeStubDir, 'ps'), 0o755);
+      const { result, base } = runWipe({
+        PATH: `${treeStubDir}:${process.env.PATH}`,
+      });
+      try {
+        expect(result.status).toBe(0);
+        expect(`${result.stdout}${result.stderr}`).not.toContain(
+          'survived SIGKILL',
         );
-        chmodSync(join(r11StubDir, 'ps'), 0o755);
-        const { result, base } = runWipe({
-          PATH: `${r11StubDir}:${process.env.PATH}`,
-        });
-        try {
-          expect(result.status).toBe(0);
-          // The orphan did not survive the reap.
-          expect(() => process.kill(survivorPid, 0)).toThrow();
-        } finally {
+        // The detached leftover died...
+        expect(() => process.kill(orphanPid, 0)).toThrow();
+        // ...but the concurrent job under the other registration's
+        // agent tree survived the reap.
+        expect(() => process.kill(bystanderPid, 0)).not.toThrow();
+      } finally {
+        for (const pid of [orphanPid, bystanderPid]) {
           try {
-            process.kill(survivorPid, 'SIGKILL');
+            process.kill(pid, 'SIGKILL');
           } catch {
             // already reaped — expected
           }
-          rmSync(r11StubDir, { recursive: true, force: true });
-          rmSync(base, { recursive: true, force: true });
         }
+        rmSync(treeStubDir, { recursive: true, force: true });
+        rmSync(base, { recursive: true, force: true });
       }
+    }
 
-      // Reap fail-closed (R1-1): if a process outside the agent tree
-      // cannot be killed, the wipe must refuse before any checkout with
-      // credentials and name the survivor — never proceed. A stub `ps`
-      // reports one unkillable fake process for the whole run.
-      {
-        const stubDir = mkdtempSync(join(tmpdir(), 'release-reap-stub-'));
-        writeFileSync(
-          join(stubDir, 'ps'),
-          [
-            '#!/bin/bash',
-            '# Tree-walk probe: no parent — the kept tree is the wipe shell.',
-            'case "$*" in "-o ppid= -p "*) exit 0 ;; esac',
-            '# Live listing: always one fake survivor outside the tree.',
-            'case "$*" in *-u*) echo "424242 1 S fake-survivor-unkillable" ;;',
-            ' *) echo "424242 S fake-survivor-unkillable" ;; esac',
-            '',
-          ].join('\n'),
-        );
-        chmodSync(join(stubDir, 'ps'), 0o755);
-        const { result, base } = runWipe({
-          PATH: `${stubDir}:${process.env.PATH}`,
-        });
-        try {
-          expect(result.status).not.toBe(0);
-          expect(`${result.stdout}${result.stderr}`).toContain(
-            'survived SIGKILL; refusing to run release steps with credentials',
-          );
-          expect(`${result.stdout}${result.stderr}`).toContain(
-            'surviving process: 424242',
-          );
-        } finally {
-          rmSync(stubDir, { recursive: true, force: true });
-          rmSync(base, { recursive: true, force: true });
-        }
-      }
-
-      // Concurrent-registration shape (R9-1): one pool member hosts every
-      // registration under this same uid (qwen-autofix.md af-014), so the
-      // keep set must reach beyond this job's own ancestor tree. The `ps`
-      // stub lists a second, DISJOINT agent tree — a fake registration root
-      // whose args match the runner pattern, plus a real bystander sleeper
-      // parented under it — alongside a real detached orphan. The wipe must
-      // kill the orphan, spare the bystander, and exit 0 rather than fail
-      // on the bystander as a survivor. Against the pre-fix keep set the
-      // bystander's chain never reaches this shell's tree, so the wipe
-      // SIGKILLs it and the survival assertion goes red.
-      {
-        const orphanPidFile = join(
-          tmpdir(),
-          `release-reap-orphan-${process.pid}-${Date.now()}`,
-        );
-        const bystanderPidFile = join(
-          tmpdir(),
-          `release-reap-bystander-${process.pid}-${Date.now()}`,
-        );
-        const spawnDetached = (pidFile) => {
-          spawnSync('bash', [
-            '-c',
-            'setsid bash -c \'echo $$ > "$1"; exec sleep 30\' x "$1" </dev/null >/dev/null 2>&1 & ' +
-              'for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do ' +
-              '[ -s "$1" ] && exit 0; sleep 0.1; done; exit 1',
-            'x',
-            pidFile,
-            pidFile,
-          ]);
-          const pid = Number(readFileSync(pidFile, 'utf8').trim());
-          rmSync(pidFile);
-          expect(pid).toBeGreaterThan(1);
-          expect(() => process.kill(pid, 0)).not.toThrow();
-          return pid;
+    // Symlinked runner workspace: refused BEFORE any chown/chmod/wipe —
+    // a prior pool job may have replaced it with a link to redirect the
+    // whole guard chain (heal, containment, wipe) to an attacker-chosen
+    // location.
+    {
+      const outside = mkdtempSync(join(tmpdir(), 'release-rws-target-'));
+      mkdirSync(join(outside, 'qwen-code'));
+      const decoy = join(outside, 'qwen-code', 'decoy.txt');
+      writeFileSync(decoy, 'must-survive');
+      chmodSync(decoy, 0o400);
+      const base = mkdtempSync(join(tmpdir(), 'release-rws-runner-'));
+      const rwsLink = join(base, 'rws-link');
+      symlinkSync(outside, rwsLink);
+      try {
+        const env = {
+          ...process.env,
+          GITHUB_WORKSPACE: join(rwsLink, 'qwen-code'),
+          RUNNER_WORKSPACE: rwsLink,
+          RUNNER_TEMP: join(base, 'temp'),
+          RUNNER_TOOL_CACHE: join(base, 'tool-cache'),
+          GITHUB_ENV: join(base, 'github-env'),
+          HOME: join(base, 'home'),
+          XDG_CONFIG_HOME: join(base, 'home', '.config'),
         };
-        const orphanPid = spawnDetached(orphanPidFile);
-        const bystanderPid = spawnDetached(bystanderPidFile);
-        // A pid no live process holds: the stub fabricates the other
-        // registration's root around the real bystander.
-        const fakeRootPid = 3900000 + (process.pid % 100000);
-        const treeStubDir = mkdtempSync(join(tmpdir(), 'release-reap-tree-'));
-        writeFileSync(
-          join(treeStubDir, 'ps'),
-          [
-            '#!/bin/bash',
-            '# Tree-walk probe: stop the ancestor chain at the wipe shell.',
-            'case "$*" in *-p*) exit 0 ;; esac',
-            '# Agent-root listing: one other registration tree.',
-            `case "$*" in *args=*) echo "${fakeRootPid} /opt/actions-runner/bin/Runner.Listener" ;; esac`,
-            '# Live listing: a detached leftover, a concurrent job parented',
-            "# under that other tree's root, and the root itself. The",
-            '# orphan line tracks reality (kill -0): after the reap kills',
-            '# it, the retry listing must come back empty or the wipe',
-            '# fails closed on a phantom survivor.',
-            'case "$*" in *stat=*)',
-            `  if kill -0 ${orphanPid} 2>/dev/null; then echo "${orphanPid} 1 S orphan-leftover"; fi`,
-            `  echo "${bystanderPid} ${fakeRootPid} S concurrent-job-worker"`,
-            `  echo "${fakeRootPid} 1 S Runner.Listener"`,
-            '  ;;',
-            'esac',
-            'exit 0',
-            '',
-          ].join('\n'),
+        mkdirSync(env.HOME);
+        mkdirSync(env.RUNNER_TEMP);
+        const result = spawnSync(
+          'bash',
+          ['-e', '-o', 'pipefail', '-c', wipeScript],
+          { encoding: 'utf8', env },
         );
-        chmodSync(join(treeStubDir, 'ps'), 0o755);
-        const { result, base } = runWipe({
-          PATH: `${treeStubDir}:${process.env.PATH}`,
-        });
-        try {
-          expect(result.status).toBe(0);
-          expect(`${result.stdout}${result.stderr}`).not.toContain(
-            'survived SIGKILL',
-          );
-          // The detached leftover died...
-          expect(() => process.kill(orphanPid, 0)).toThrow();
-          // ...but the concurrent job under the other registration's
-          // agent tree survived the reap.
-          expect(() => process.kill(bystanderPid, 0)).not.toThrow();
-        } finally {
-          for (const pid of [orphanPid, bystanderPid]) {
-            try {
-              process.kill(pid, 'SIGKILL');
-            } catch {
-              // already reaped — expected
-            }
-          }
-          rmSync(treeStubDir, { recursive: true, force: true });
-          rmSync(base, { recursive: true, force: true });
-        }
+        expect(result.status).not.toBe(0);
+        expect(`${result.stdout}${result.stderr}`).toContain(
+          'refusing to wipe: runner workspace is a symlink',
+        );
+        // Decoy intact — and the ownership ladder did not reach it.
+        expect(readFileSync(decoy, 'utf8')).toBe('must-survive');
+        expect(lstatSync(decoy).mode & 0o777).toBe(0o400);
+      } finally {
+        rmSync(outside, { recursive: true, force: true });
+        rmSync(base, { recursive: true, force: true });
       }
+    }
 
-      // Symlinked runner workspace: refused BEFORE any chown/chmod/wipe —
-      // a prior pool job may have replaced it with a link to redirect the
-      // whole guard chain (heal, containment, wipe) to an attacker-chosen
-      // location.
-      {
-        const outside = mkdtempSync(join(tmpdir(), 'release-rws-target-'));
-        mkdirSync(join(outside, 'qwen-code'));
-        const decoy = join(outside, 'qwen-code', 'decoy.txt');
-        writeFileSync(decoy, 'must-survive');
-        chmodSync(decoy, 0o400);
-        const base = mkdtempSync(join(tmpdir(), 'release-rws-runner-'));
-        const rwsLink = join(base, 'rws-link');
-        symlinkSync(outside, rwsLink);
-        try {
-          const env = {
-            ...process.env,
-            GITHUB_WORKSPACE: join(rwsLink, 'qwen-code'),
-            RUNNER_WORKSPACE: rwsLink,
-            RUNNER_TEMP: join(base, 'temp'),
-            RUNNER_TOOL_CACHE: join(base, 'tool-cache'),
-            GITHUB_ENV: join(base, 'github-env'),
-            HOME: join(base, 'home'),
-            XDG_CONFIG_HOME: join(base, 'home', '.config'),
-          };
-          mkdirSync(env.HOME);
-          mkdirSync(env.RUNNER_TEMP);
-          const result = spawnSync(
-            'bash',
-            ['-e', '-o', 'pipefail', '-c', wipeScript],
-            { encoding: 'utf8', env },
-          );
-          expect(result.status).not.toBe(0);
-          expect(`${result.stdout}${result.stderr}`).toContain(
-            'refusing to wipe: runner workspace is a symlink',
-          );
-          // Decoy intact — and the ownership ladder did not reach it.
-          expect(readFileSync(decoy, 'utf8')).toBe('must-survive');
-          expect(lstatSync(decoy).mode & 0o777).toBe(0o400);
-        } finally {
-          rmSync(outside, { recursive: true, force: true });
-          rmSync(base, { recursive: true, force: true });
-        }
+    // Same refusal when the redirected target has no qwen-code subdir:
+    // the heal arm must not mkdir at the attacker-chosen location.
+    {
+      const outside = mkdtempSync(join(tmpdir(), 'release-rws-empty-'));
+      const base = mkdtempSync(join(tmpdir(), 'release-rws-runner2-'));
+      const rwsLink = join(base, 'rws-link');
+      symlinkSync(outside, rwsLink);
+      try {
+        const env = {
+          ...process.env,
+          GITHUB_WORKSPACE: join(rwsLink, 'qwen-code'),
+          RUNNER_WORKSPACE: rwsLink,
+          RUNNER_TEMP: join(base, 'temp'),
+          RUNNER_TOOL_CACHE: join(base, 'tool-cache'),
+          GITHUB_ENV: join(base, 'github-env'),
+          HOME: join(base, 'home'),
+          XDG_CONFIG_HOME: join(base, 'home', '.config'),
+        };
+        mkdirSync(env.HOME);
+        mkdirSync(env.RUNNER_TEMP);
+        const result = spawnSync(
+          'bash',
+          ['-e', '-o', 'pipefail', '-c', wipeScript],
+          { encoding: 'utf8', env },
+        );
+        expect(result.status).not.toBe(0);
+        expect(`${result.stdout}${result.stderr}`).toContain(
+          'refusing to wipe: runner workspace is a symlink',
+        );
+        expect(existsSync(join(outside, 'qwen-code'))).toBe(false);
+      } finally {
+        rmSync(outside, { recursive: true, force: true });
+        rmSync(base, { recursive: true, force: true });
       }
-
-      // Same refusal when the redirected target has no qwen-code subdir:
-      // the heal arm must not mkdir at the attacker-chosen location.
-      {
-        const outside = mkdtempSync(join(tmpdir(), 'release-rws-empty-'));
-        const base = mkdtempSync(join(tmpdir(), 'release-rws-runner2-'));
-        const rwsLink = join(base, 'rws-link');
-        symlinkSync(outside, rwsLink);
-        try {
-          const env = {
-            ...process.env,
-            GITHUB_WORKSPACE: join(rwsLink, 'qwen-code'),
-            RUNNER_WORKSPACE: rwsLink,
-            RUNNER_TEMP: join(base, 'temp'),
-            RUNNER_TOOL_CACHE: join(base, 'tool-cache'),
-            GITHUB_ENV: join(base, 'github-env'),
-            HOME: join(base, 'home'),
-            XDG_CONFIG_HOME: join(base, 'home', '.config'),
-          };
-          mkdirSync(env.HOME);
-          mkdirSync(env.RUNNER_TEMP);
-          const result = spawnSync(
-            'bash',
-            ['-e', '-o', 'pipefail', '-c', wipeScript],
-            { encoding: 'utf8', env },
-          );
-          expect(result.status).not.toBe(0);
-          expect(`${result.stdout}${result.stderr}`).toContain(
-            'refusing to wipe: runner workspace is a symlink',
-          );
-          expect(existsSync(join(outside, 'qwen-code'))).toBe(false);
-        } finally {
-          rmSync(outside, { recursive: true, force: true });
-          rmSync(base, { recursive: true, force: true });
-        }
-      }
-    },
-  );
+    }
+  });
 
   it('checks docker availability before the docker checkout', () => {
     const steps = releaseYaml.jobs.integration_docker.steps;
