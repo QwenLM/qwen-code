@@ -706,15 +706,17 @@ describe('createDaemonSessionActions', () => {
 
   it('keeps the successor exempted when a same-session reload supersedes', async () => {
     const existingSession = createMockSession('session-a');
+    const existingClient = existingSession as unknown as DaemonSessionClient;
+    const controller = new AbortController();
     const { actions, attachmentLifecycle, pendingSessionLoadRef } =
       createActionsHarness({
         connection: { status: 'connected', sessionId: 'session-a' },
         session: existingSession,
       });
 
-    const first = actions.reloadSession();
+    const first = actions.reloadSession(controller.signal);
     const firstSettled = first.catch((error: unknown) => error);
-    expect(attachmentLifecycle.isCleanupDetachPreserved(existingSession)).toBe(
+    expect(attachmentLifecycle.isCleanupDetachPreserved(existingClient)).toBe(
       true,
     );
 
@@ -723,11 +725,11 @@ describe('createDaemonSessionActions', () => {
     // superseded switch's deferred release must not clear the exemption the
     // successor re-preserved — otherwise the runner-effect cleanup detaches
     // the session mid-reload.
-    const second = actions.reloadSession();
+    const second = actions.reloadSession(controller.signal);
     const secondSettled = second.catch((error: unknown) => error);
 
     await expect(firstSettled).resolves.toMatchObject({ name: 'AbortError' });
-    expect(attachmentLifecycle.isCleanupDetachPreserved(existingSession)).toBe(
+    expect(attachmentLifecycle.isCleanupDetachPreserved(existingClient)).toBe(
       true,
     );
     // A superseded load cannot detach: only the surviving reload may.
@@ -735,7 +737,7 @@ describe('createDaemonSessionActions', () => {
 
     attachmentLifecycle.resolvePendingLoad(pendingSessionLoadRef.current!);
     await expect(secondSettled).resolves.toBeUndefined();
-    expect(attachmentLifecycle.isCleanupDetachPreserved(existingSession)).toBe(
+    expect(attachmentLifecycle.isCleanupDetachPreserved(existingClient)).toBe(
       false,
     );
     expect(existingSession.detach).toHaveBeenCalledOnce();
