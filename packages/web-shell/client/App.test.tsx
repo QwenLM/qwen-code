@@ -8143,6 +8143,16 @@ describe('App session callbacks', () => {
     ).toBeNull();
   });
 
+  it('appends composer actions without replacing context-sensitive defaults', () => {
+    mockConnection.sessionId = undefined;
+    testState.messages = [];
+    renderApp({ composerToolbarAdditionalActions: ['addMenu'] });
+
+    expect(testState.latestChatEditorProps?.visibleToolbarActions).toEqual(
+      expect.arrayContaining(['addMenu', 'gitBranch', 'widthMode']),
+    );
+  });
+
   it('lets a custom renderer replace the complete persistent chat header', () => {
     mockConnection.gitBranch = 'main';
     mockConnection.gitStatus = {
