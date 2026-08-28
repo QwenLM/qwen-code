@@ -669,7 +669,7 @@ export class AgentCore {
       if (name === ToolNames.AGENT) return !nestingAllowed;
       return excludedFromSubagents.has(name);
     };
-    const isHiddenByPermissionAllowList = (name: string | undefined): boolean =>
+    const isHiddenByEagerAllowList = (name: string | undefined): boolean =>
       !!name &&
       toolRegistry.isPermissionDeferred?.(name) === true &&
       toolRegistry.isDeferredAndHidden?.(name) === true;
@@ -688,15 +688,23 @@ export class AgentCore {
         (asStrings.length === 0 && onlyInlineDecls.length === 0)
       ) {
         // Subagents inherit ordinary deferred tools (MCP, low-frequency
+<<<<<<< HEAD
         // built-ins). Permission-allowlist-deferred schemas remain hidden and
         // are reached through ToolSearch + ToolCall, preserving the registry
         // allowlist without mutating the declarations.
+||||||| d6533785b
+        // built-ins). Permission-allowlist-deferred schemas remain hidden
+        // until ToolSearch reveals them, preserving the registry allowlist.
+=======
+        // built-ins). Tools demoted by the `settings.tools.eager` allowlist
+        // remain hidden until ToolSearch reveals them, preserving the
+        // allowlist's schema shrink.
+>>>>>>> origin/main
         toolsList.push(
           ...toolRegistry
             .getFunctionDeclarations({ includeDeferred: true })
             .filter(
-              (t) =>
-                !isExcluded(t.name) && !isHiddenByPermissionAllowList(t.name),
+              (t) => !isExcluded(t.name) && !isHiddenByEagerAllowList(t.name),
             ),
         );
       } else {
@@ -705,7 +713,7 @@ export class AgentCore {
         // (CRON_CREATE, TASK_STOP, SEND_MESSAGE, etc.) from leaking into
         // explicitly-configured subagents that happen to list them.
         const allowedNames = asStrings.filter((name) => {
-          if (isExcluded(name) || isHiddenByPermissionAllowList(name)) {
+          if (isExcluded(name) || isHiddenByEagerAllowList(name)) {
             this.runtimeContext
               .getDebugLogger()
               ?.debug(
@@ -726,7 +734,7 @@ export class AgentCore {
       // workflow/cron/team tools into a subagent).
       toolsList.push(
         ...onlyInlineDecls.filter((d) => {
-          if (isExcluded(d.name) || isHiddenByPermissionAllowList(d.name)) {
+          if (isExcluded(d.name) || isHiddenByEagerAllowList(d.name)) {
             this.runtimeContext
               .getDebugLogger()
               ?.debug(
@@ -744,8 +752,7 @@ export class AgentCore {
         ...toolRegistry
           .getFunctionDeclarations({ includeDeferred: true })
           .filter(
-            (t) =>
-              !isExcluded(t.name) && !isHiddenByPermissionAllowList(t.name),
+            (t) => !isExcluded(t.name) && !isHiddenByEagerAllowList(t.name),
           ),
       );
     }

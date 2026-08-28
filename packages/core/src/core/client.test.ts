@@ -557,6 +557,7 @@ describe('Gemini Client (client.ts)', () => {
       revealDeferredTool: vi.fn(),
       preloadDeferredToolsWithinBudget: vi.fn().mockReturnValue(0),
       isDeferredToolRevealed: vi.fn().mockReturnValue(false),
+      isPermissionDeferred: vi.fn().mockReturnValue(false),
       getTool: vi.fn().mockReturnValue(null),
       getMcpServerInstructions: vi.fn().mockReturnValue(new Map()),
     };
@@ -1377,6 +1378,7 @@ describe('Gemini Client (client.ts)', () => {
         getDeferredToolSummary: ReturnType<typeof vi.fn>;
         getTool: ReturnType<typeof vi.fn>;
         isDeferredToolRevealed: ReturnType<typeof vi.fn>;
+        isPermissionDeferred: ReturnType<typeof vi.fn>;
         revealDeferredTool: ReturnType<typeof vi.fn>;
         preloadDeferredToolsWithinBudget: ReturnType<typeof vi.fn>;
       };
@@ -1446,25 +1448,46 @@ describe('Gemini Client (client.ts)', () => {
       expect(getHistorySpy).not.toHaveBeenCalled();
     });
 
+<<<<<<< HEAD
     it('eagerly reveals every deferred tool when the bridge is unavailable', async () => {
       // When either bridge tool is filtered out, the model has no safe way to
       // invoke deferred tools.
+||||||| d6533785b
+    it('eagerly reveals every deferred tool when ToolSearch is unavailable', async () => {
+      // When ToolSearch is filtered out (deny rule / --exclude-tools
+      // tool_search), the model has no way to reach deferred schemas.
+=======
+    it('reveals ordinary deferred tools when ToolSearch is unavailable', async () => {
+      // When ToolSearch is filtered out (deny rule / --exclude-tools
+      // tool_search), the model has no way to reach deferred schemas.
+>>>>>>> origin/main
       // Silent disappearance is the worst failure mode — instead, reveal
-      // every deferred tool eagerly so they all land in the declaration
+      // ordinary deferred tools eagerly so they land in the declaration
       // list. The token-saving rationale of deferral was predicated on
       // the discovery surface being available.
       const reg = getRegistryMock();
       reg.getDeferredToolSummary.mockReturnValue([
         { name: 'cron_create', description: 'schedule' },
         { name: 'cron_list', description: 'list' },
+        { name: 'write_file', description: 'write' },
       ]);
+<<<<<<< HEAD
       reg.getTool.mockReturnValue(null); // Both bridge tools absent.
+||||||| d6533785b
+      reg.getTool.mockReturnValue(null); // ToolSearch absent
+=======
+      reg.getTool.mockReturnValue(null); // ToolSearch absent
+      reg.isPermissionDeferred.mockImplementation(
+        (name: string) => name === 'write_file',
+      );
+>>>>>>> origin/main
       reg.revealDeferredTool.mockClear();
 
       await client.startChat();
 
       expect(reg.revealDeferredTool).toHaveBeenCalledWith('cron_create');
       expect(reg.revealDeferredTool).toHaveBeenCalledWith('cron_list');
+      expect(reg.revealDeferredTool).not.toHaveBeenCalledWith('write_file');
     });
 
     it('does NOT eagerly reveal when both bridge tools are available', async () => {
@@ -2091,6 +2114,7 @@ describe('Gemini Client (client.ts)', () => {
         getDeferredToolSummary: ReturnType<typeof vi.fn>;
         getTool: ReturnType<typeof vi.fn>;
         isDeferredToolRevealed: ReturnType<typeof vi.fn>;
+        isPermissionDeferred: ReturnType<typeof vi.fn>;
         revealDeferredTool: ReturnType<typeof vi.fn>;
         warmAll: ReturnType<typeof vi.fn>;
       };
@@ -2607,9 +2631,19 @@ describe('Gemini Client (client.ts)', () => {
       );
     });
 
+<<<<<<< HEAD
     it('eagerly reveals every deferred tool when the bridge is unavailable', async () => {
       // Mirrors startChat's silent-disappearance guard: without the complete
       // bridge a deferred MCP tool can't be reached, so the only safe option is
+||||||| d6533785b
+    it('eagerly reveals every deferred tool when ToolSearch is unavailable', async () => {
+      // Mirrors startChat's silent-disappearance guard: without ToolSearch
+      // a deferred MCP tool can't be reached, so the only safe option is
+=======
+    it('reveals ordinary deferred tools when ToolSearch is unavailable', async () => {
+      // Mirrors startChat's silent-disappearance guard: without ToolSearch
+      // a deferred MCP tool can't be reached, so the only safe option is
+>>>>>>> origin/main
       // to reveal it so it lands in the declaration list. If setTools()
       // skipped this branch, an MCP tool registered after startChat() in
       // a session with `--exclude-tools tool_search` would be invisible
@@ -2619,7 +2653,11 @@ describe('Gemini Client (client.ts)', () => {
       reg.getDeferredToolSummary.mockReturnValue([
         { name: 'mcp__server__alpha', description: 'a', serverName: 'server' },
         { name: 'mcp__server__beta', description: 'b', serverName: 'server' },
+        { name: 'write_file', description: 'write' },
       ]);
+      reg.isPermissionDeferred.mockImplementation(
+        (name: string) => name === 'write_file',
+      );
       reg.revealDeferredTool.mockClear();
 
       const addHistorySpy = vi.spyOn(client.getChat(), 'addHistory');
@@ -2634,8 +2672,110 @@ describe('Gemini Client (client.ts)', () => {
 
       expect(reg.revealDeferredTool).toHaveBeenCalledWith('mcp__server__alpha');
       expect(reg.revealDeferredTool).toHaveBeenCalledWith('mcp__server__beta');
+      expect(reg.revealDeferredTool).not.toHaveBeenCalledWith('write_file');
       expect(setSystemInstructionSpy).not.toHaveBeenCalled();
       expect(addHistorySpy).not.toHaveBeenCalled();
+    });
+
+    it('warns that tools.eager holds tools back with no way to load them', async () => {
+      // Holding them back is correct — revealing would send exactly the
+      // schemas the allowlist withholds — but with no tool_search the tools
+      // are unreachable for the session while still listed in `/tools`.
+      // #10075 is about silent reshaping of the toolset, so say it.
+      const reg = getRegistryMock();
+      reg.getTool.mockReturnValue(null); // ToolSearch absent.
+      reg.getDeferredToolSummary.mockReturnValue([
+        { name: 'write_file', description: 'write' },
+        { name: 'mcp__server__alpha', description: 'a', serverName: 'server' },
+      ]);
+      reg.isPermissionDeferred.mockImplementation(
+        (name: string) => name === 'write_file',
+      );
+      vi.spyOn(client.getChat(), 'setTools').mockImplementation(() => {});
+      // The contract promise is a warning visible in default runs, and the
+      // debug log file is off there — pin the console channel this uses.
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+      await client.setTools();
+
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining('tools.eager is holding back 1 tool(s)'),
+      );
+      // Names the tool, so the report is actionable without a debug session.
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining('write_file'),
+      );
+      warnSpy.mockRestore();
+    });
+
+    it('does not call a history-revealed eager tool unreachable', async () => {
+      // The history-reveal pass runs before the unreachable warning at both
+      // call sites and re-exposes resume-referenced tools even when
+      // tools.eager demoted them: the model must be able to repeat a call it
+      // already made in the transcript. That tool's schema IS sent in the
+      // declarations, so the "unreachable until restart" warning must not
+      // name it — warning anyway would be false for this session.
+      const reg = getRegistryMock();
+      reg.getTool.mockReturnValue(null); // ToolSearch absent.
+      reg.getDeferredToolSummary.mockReturnValue([
+        { name: 'write_file', description: 'write' },
+      ]);
+      reg.isPermissionDeferred.mockImplementation(
+        (name: string) => name === 'write_file',
+      );
+      reg.isDeferredToolRevealed.mockReturnValue(false);
+      reg.revealDeferredTool.mockImplementation((name: string) => {
+        if (name === 'write_file') {
+          reg.isDeferredToolRevealed.mockImplementation(
+            (n: string) => n === 'write_file',
+          );
+        }
+      });
+      client.setHistory([
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'call-resumed-write',
+                name: 'write_file',
+                args: { path: 'a.txt' },
+              },
+            },
+          ],
+        },
+      ]);
+      vi.spyOn(client.getChat(), 'setTools').mockImplementation(() => {});
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+      await client.setTools();
+
+      expect(reg.revealDeferredTool).toHaveBeenCalledWith('write_file');
+      expect(warnSpy).not.toHaveBeenCalledWith(
+        expect.stringContaining('tools.eager is holding back'),
+      );
+      warnSpy.mockRestore();
+    });
+
+    it('does not warn when tools.eager held nothing back', async () => {
+      // Ordinary deferred tools are revealed here by design; that is not an
+      // allowlist losing its loading path, so the warning must stay quiet.
+      const reg = getRegistryMock();
+      reg.getTool.mockReturnValue(null); // ToolSearch absent.
+      reg.getDeferredToolSummary.mockReturnValue([
+        { name: 'mcp__server__alpha', description: 'a', serverName: 'server' },
+      ]);
+      reg.isPermissionDeferred.mockReturnValue(false);
+      vi.spyOn(client.getChat(), 'setTools').mockImplementation(() => {});
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+      await client.setTools();
+
+      expect(warnSpy).not.toHaveBeenCalledWith(
+        expect.stringContaining('tools.eager'),
+      );
+      expect(reg.revealDeferredTool).toHaveBeenCalledWith('mcp__server__alpha');
+      warnSpy.mockRestore();
     });
 
     it('does not append the same added MCP reminder twice', async () => {
