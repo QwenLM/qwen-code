@@ -371,8 +371,9 @@ describe('release workflow', () => {
       // shared ECS pool that would reach into whatever job is co-resident
       // on the same member under this uid every time the suite runs. Give
       // the guard-branch cases a `ps` that lists nothing so the reap branch
-      // executes end to end yet kills nothing; the R1-1 case keeps the one
-      // genuine reap probe, and the fail-closed case stubs its own `ps`.
+      // executes end to end yet kills nothing; the R1-1 case stubs `ps` to
+      // enumerate only its own orphan (real kill, no host enumeration), and
+      // the fail-closed case stubs its own `ps`.
       const noKillStubDir = mkdtempSync(join(tmpdir(), 'release-reap-nokill-'));
       writeFileSync(join(noKillStubDir, 'ps'), '#!/bin/bash\nexit 0\n');
       chmodSync(join(noKillStubDir, 'ps'), 0o755);
@@ -648,9 +649,12 @@ describe('release workflow', () => {
       // orphaned to init exactly like a postinstall child that outlives its
       // job — is killed before the file sweep runs. The orphan's parent
       // chain never reaches this shell's ancestor tree, so the reap must
-      // reach it; the run still exits 0 and the workspace is wiped. This is
-      // the suite's one genuine reap probe: unlike the guard-branch cases
-      // it deliberately runs without the no-kill `ps` stub.
+      // reach it; the run still exits 0 and the workspace is wiped. The
+      // case stubs `ps` so the reap enumerates ONLY this test's orphan:
+      // the kill path stays genuine (a real sleeper, a real SIGKILL), but
+      // the suite never reaches the co-resident processes that share this
+      // uid on the pool, and a transient same-uid process on the member
+      // can no longer flake the fail-closed leg.
       {
         const pidFile = join(
           tmpdir(),
@@ -674,7 +678,32 @@ describe('release workflow', () => {
         rmSync(pidFile);
         expect(survivorPid).toBeGreaterThan(1);
         expect(() => process.kill(survivorPid, 0)).not.toThrow();
-        const { result, base } = runWipe({});
+        // The stub's live-listing arm tracks reality (kill -0): once the
+        // reap kills the orphan the retry listing comes back empty, the
+        // way the real ps does.
+        const r11StubDir = mkdtempSync(join(tmpdir(), 'release-reap-r11-'));
+        writeFileSync(
+          join(r11StubDir, 'ps'),
+          [
+            '#!/bin/bash',
+            '# Tree-walk probe: stop the ancestor chain at the wipe shell.',
+            'case "$*" in *-p*) exit 0 ;; esac',
+            '# Agent-root listing: no other registration trees.',
+            'case "$*" in *args=*) exit 0 ;; esac',
+            '# Live listing: ONLY the test orphan — never the host, whose',
+            '# co-resident jobs share this uid on the pool.',
+            'case "$*" in *stat=*)',
+            `  if kill -0 ${survivorPid} 2>/dev/null; then echo "${survivorPid} 1 S orphan-sleeper"; fi`,
+            '  ;;',
+            'esac',
+            'exit 0',
+            '',
+          ].join('\n'),
+        );
+        chmodSync(join(r11StubDir, 'ps'), 0o755);
+        const { result, base } = runWipe({
+          PATH: `${r11StubDir}:${process.env.PATH}`,
+        });
         try {
           expect(result.status).toBe(0);
           // The orphan did not survive the reap.
@@ -685,6 +714,7 @@ describe('release workflow', () => {
           } catch {
             // already reaped — expected
           }
+          rmSync(r11StubDir, { recursive: true, force: true });
           rmSync(base, { recursive: true, force: true });
         }
       }
