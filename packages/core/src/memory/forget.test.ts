@@ -691,12 +691,9 @@ describe('selectManagedAutoMemoryForgetCandidates', () => {
         mtimeMs: 1,
       },
     ]);
+    let selectionPrompt: string | undefined;
     vi.mocked(runSideQuery).mockImplementation(async (_config, options) => {
-      const prompt = options.contents[0]?.parts?.[0]?.text ?? '';
-      expect(prompt).toContain('id: user:user/note.md');
-      expect(prompt).toContain('scope: user');
-      expect(prompt).toContain('id: project:user/note.md');
-      expect(prompt).toContain('scope: project');
+      selectionPrompt = options.contents[0]?.parts?.[0]?.text ?? '';
       return {
         selectedCandidateIds: ['user:user/note.md', 'project:user/note.md'],
       };
@@ -708,6 +705,14 @@ describe('selectManagedAutoMemoryForgetCandidates', () => {
       { config: mockConfig },
     );
 
+    // Asserted out here rather than inside the mock: a run that never
+    // reached the selector would have skipped every in-mock expect() and
+    // still reported a pass.
+    expect(selectionPrompt).toBeDefined();
+    expect(selectionPrompt).toContain('id: user:user/note.md');
+    expect(selectionPrompt).toContain('scope: user');
+    expect(selectionPrompt).toContain('id: project:user/note.md');
+    expect(selectionPrompt).toContain('scope: project');
     expect(result.matches).toEqual([
       {
         topic: 'user',
@@ -749,10 +754,9 @@ describe('selectManagedAutoMemoryForgetCandidates', () => {
         mtimeMs: 1,
       },
     ]);
+    let selectionPrompt: string | undefined;
     vi.mocked(runSideQuery).mockImplementation(async (_config, options) => {
-      const prompt = options.contents[0]?.parts?.[0]?.text ?? '';
-      expect(prompt).toContain('id: user:user/shared.md');
-      expect(prompt).not.toContain('id: project:project/local.md');
+      selectionPrompt = options.contents[0]?.parts?.[0]?.text ?? '';
       return { selectedCandidateIds: ['user:user/shared.md'] };
     });
 
@@ -762,6 +766,12 @@ describe('selectManagedAutoMemoryForgetCandidates', () => {
       { config: mockConfig, scope: 'user' },
     );
 
+    // Same reason as the twin above — and it matters more here, because the
+    // load-bearing claim is a NEGATIVE one: 'the excluded store never
+    // reaches the prompt' is exactly what an unreached mock also reports.
+    expect(selectionPrompt).toBeDefined();
+    expect(selectionPrompt).toContain('id: user:user/shared.md');
+    expect(selectionPrompt).not.toContain('id: project:project/local.md');
     expect(result.matches).toEqual([
       {
         topic: 'user',

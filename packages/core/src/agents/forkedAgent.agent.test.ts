@@ -36,6 +36,18 @@ vi.mock('../models/content-generator-config.js', async (importOriginal) => {
   };
 });
 
+/**
+ * `runForkedAgent` defers its early-completion abort to a macrotask so the
+ * batch that triggered it finishes emitting first. A probe that reads
+ * `signal.aborted` in the statement after an emit therefore reports `false`
+ * for every run, aborting or not — it has to yield to the same queue first.
+ */
+function flushDeferredAbort(): Promise<void> {
+  return new Promise<void>((resolve) => {
+    setImmediate(resolve);
+  });
+}
+
 function makeRuntimeView(model: string): RuntimeContentGeneratorView {
   return {
     contentGenerator: {} as RuntimeContentGeneratorView['contentGenerator'],
@@ -358,6 +370,81 @@ describe('runForkedAgent (AgentHeadless path) bound-tool isolation', () => {
         '/repo/.qwen/memories/project.md',
         '/repo/outside.md',
       ]);
+      expect(result.filesWritten).toEqual(['/repo/.qwen/memories/project.md']);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('counts a successful edit as a write and completes early on it', async () => {
+    const parent = new ConfigImpl(baseParams);
+    const parentRegistry = await parent.createToolRegistry(undefined, {
+      skipDiscovery: true,
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (parent as any).toolRegistry = parentRegistry;
+
+    let executeSignal: AbortSignal | undefined;
+    let abortedAfterEdit: boolean | undefined;
+    const spy = vi.spyOn(AgentHeadless, 'create').mockImplementation(
+      async (
+        _name,
+        _config,
+        _promptConfig,
+        _modelConfig,
+        _runConfig,
+        _toolConfig,
+        eventEmitter,
+      ) =>
+        ({
+          execute: vi.fn().mockImplementation(async (_context, signal) => {
+            executeSignal = signal;
+            const emitter = eventEmitter as AgentEventEmitter;
+            emitter.emit(AgentEventType.TOOL_CALL, {
+              subagentId: 'fork',
+              round: 1,
+              callId: 'edit-1',
+              name: ToolNames.EDIT,
+              args: { file_path: '/repo/.qwen/memories/project.md' },
+              description: 'edit',
+              timestamp: Date.now(),
+            });
+            emitter.emit(AgentEventType.TOOL_RESULT, {
+              subagentId: 'fork',
+              round: 1,
+              callId: 'edit-1',
+              name: ToolNames.EDIT,
+              success: true,
+              timestamp: Date.now(),
+            });
+            await flushDeferredAbort();
+            abortedAfterEdit = signal.aborted;
+          }),
+          getTerminateMode: vi
+            .fn()
+            .mockReturnValue(AgentTerminateMode.CANCELLED),
+          getFinalText: vi.fn().mockReturnValue(''),
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        }) as any,
+    );
+
+    try {
+      const result = await runForkedAgent({
+        name: 'test-fork',
+        systemPrompt: 'You are a test fork.',
+        taskPrompt: 'amend one file',
+        config: parent,
+        completeAfterFirstSuccessfulWrite: true,
+      });
+
+      // Every other test in this file drives the write path with
+      // `write_file`, and the one edit it emits fails — so `edit` counting as
+      // a mutating tool was asserted nowhere on its success side. A remember
+      // agent amending an existing entry takes exactly this path.
+      expect(abortedAfterEdit).toBe(true);
+      expect(executeSignal?.aborted).toBe(true);
+      expect(result.status).toBe('completed');
+      expect(result.terminateReason).toBe(AgentTerminateMode.GOAL);
       expect(result.filesWritten).toEqual(['/repo/.qwen/memories/project.md']);
     } finally {
       spy.mockRestore();
@@ -769,6 +856,7 @@ describe('runForkedAgent (AgentHeadless path) bound-tool isolation', () => {
 
     let executeSignal: AbortSignal | undefined;
     let abortedAfterIndexWrite: boolean | undefined;
+    let abortedAfterEntryWrite: boolean | undefined;
     const spy = vi.spyOn(AgentHeadless, 'create').mockImplementation(
       async (
         _name,
@@ -800,6 +888,11 @@ describe('runForkedAgent (AgentHeadless path) bound-tool isolation', () => {
               success: true,
               timestamp: Date.now(),
             });
+            // The early-completion abort is deferred to a macrotask
+            // (`setImmediate` in forkedAgent.ts), so a synchronous read here
+            // is `false` no matter what the predicate decided. Flush first,
+            // and the reading becomes a statement about the predicate.
+            await flushDeferredAbort();
             abortedAfterIndexWrite = signal.aborted;
             emitter.emit(AgentEventType.TOOL_CALL, {
               subagentId: 'fork',
@@ -818,6 +911,8 @@ describe('runForkedAgent (AgentHeadless path) bound-tool isolation', () => {
               success: true,
               timestamp: Date.now(),
             });
+            await flushDeferredAbort();
+            abortedAfterEntryWrite = signal.aborted;
           }),
           getTerminateMode: vi
             .fn()
@@ -839,6 +934,13 @@ describe('runForkedAgent (AgentHeadless path) bound-tool isolation', () => {
 
       // The excluded MEMORY.md write must not abort the run; the entry
       // write that follows must.
+      //
+      // Both probes are read after the deferred abort has had a macrotask
+      // to land. The `true` reading is what makes the `false` one mean
+      // anything: it proves the flush is long enough to observe an abort
+      // that did fire, so `false` after the excluded write is the predicate
+      // holding the run open rather than the probe reading too early.
+      expect(abortedAfterEntryWrite).toBe(true);
       expect(abortedAfterIndexWrite).toBe(false);
       expect(executeSignal?.aborted).toBe(true);
       expect(result.status).toBe('completed');
@@ -862,6 +964,7 @@ describe('runForkedAgent (AgentHeadless path) bound-tool isolation', () => {
 
     let executeSignal: AbortSignal | undefined;
     let abortedAfterFailedWrite: boolean | undefined;
+    let abortedAfterRetryWrite: boolean | undefined;
     const spy = vi.spyOn(AgentHeadless, 'create').mockImplementation(
       async (
         _name,
@@ -893,6 +996,9 @@ describe('runForkedAgent (AgentHeadless path) bound-tool isolation', () => {
               success: false,
               timestamp: Date.now(),
             });
+            // Same deferral as the twin above — read after the flush, or
+            // the probe reports `false` for a run that did abort.
+            await flushDeferredAbort();
             abortedAfterFailedWrite = signal.aborted;
             emitter.emit(AgentEventType.TOOL_CALL, {
               subagentId: 'fork',
@@ -911,6 +1017,8 @@ describe('runForkedAgent (AgentHeadless path) bound-tool isolation', () => {
               success: true,
               timestamp: Date.now(),
             });
+            await flushDeferredAbort();
+            abortedAfterRetryWrite = signal.aborted;
           }),
           getTerminateMode: vi
             .fn()
@@ -930,7 +1038,10 @@ describe('runForkedAgent (AgentHeadless path) bound-tool isolation', () => {
       });
 
       // The failed write must not trigger early completion; the retry's
-      // successful write must.
+      // successful write must. Same pairing as the twin above: without the
+      // `true` reading taken after the same flush, `false` here is satisfied
+      // by a probe that simply ran before the deferred abort landed.
+      expect(abortedAfterRetryWrite).toBe(true);
       expect(abortedAfterFailedWrite).toBe(false);
       expect(executeSignal?.aborted).toBe(true);
       expect(result.status).toBe('completed');

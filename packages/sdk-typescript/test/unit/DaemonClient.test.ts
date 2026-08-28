@@ -7223,6 +7223,43 @@ describe('DaemonClient', () => {
       ]);
     });
 
+    it('sends a user-scoped remember body with the user scope tag', async () => {
+      // The project arm of the pre-flight ternary is covered by the success
+      // test above and the user arm by the refusal test above it, but the
+      // body spread that carries the scope to the daemon has only ever been
+      // asserted for 'project' — a spread hardcoded to it would still pass.
+      const reply = {
+        taskId: 'remember-2',
+        status: 'queued' as const,
+        contextMode: 'workspace' as const,
+        createdAt: '2026-06-26T00:00:00.000Z',
+        updatedAt: '2026-06-26T00:00:00.000Z',
+      };
+      const { fetch, calls } = recordingFetch((request) =>
+        request.url.endsWith('/capabilities')
+          ? jsonResponse(200, {
+              v: 1,
+              mode: 'http-bridge',
+              features: ['workspace_memory_remember_user_scope'],
+            })
+          : jsonResponse(202, reply),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await expect(
+        client.rememberWorkspaceMemory('remember this', { scope: 'user' }),
+      ).resolves.toEqual(reply);
+
+      expect(calls.map((call) => call.url)).toEqual([
+        'http://daemon/capabilities',
+        'http://daemon/workspace/memory/remember',
+      ]);
+      expect(JSON.parse(calls[1]!.body!)).toEqual({
+        content: 'remember this',
+        contextMode: 'workspace',
+        scope: 'user',
+      });
+    });
+
     it('omits the scope key from the remember body when no scope is supplied', async () => {
       // Scope absence is the switch that selects server-side automatic
       // classification; a client-side default would silently convert it into
@@ -7326,6 +7363,69 @@ describe('DaemonClient', () => {
 
       await expect(
         client.forgetWorkspaceMemory('old preference', { scope: 'user' }),
+      ).rejects.toMatchObject({
+        name: 'DaemonCapabilityMissingError',
+        capability: 'workspace_memory_forget_scope',
+      });
+      expect(calls.map((call) => call.url)).toEqual([
+        'http://daemon/capabilities',
+      ]);
+    });
+
+    it('sends a project-scoped forget body', async () => {
+      // Forget is the destructive half, and its body spread has only been
+      // asserted carrying 'user'. One tag gates both scopes, so nothing else
+      // in this file would notice a spread that always sent 'user'.
+      const reply = {
+        taskId: 'forget-3',
+        status: 'queued' as const,
+        createdAt: '2026-07-03T00:00:00.000Z',
+        updatedAt: '2026-07-03T00:00:00.000Z',
+      };
+      const { fetch, calls } = recordingFetch((request) =>
+        request.url.endsWith('/capabilities')
+          ? jsonResponse(200, {
+              v: 1,
+              mode: 'http-bridge',
+              features: ['workspace_memory_forget_scope'],
+            })
+          : jsonResponse(202, reply),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await expect(
+        client.forgetWorkspaceMemory('stale project note', {
+          scope: 'project',
+        }),
+      ).resolves.toEqual(reply);
+
+      expect(calls.map((call) => call.url)).toEqual([
+        'http://daemon/capabilities',
+        'http://daemon/workspace/memory/forget',
+      ]);
+      expect(JSON.parse(calls[1]!.body!)).toEqual({
+        query: 'stale project note',
+        scope: 'project',
+      });
+    });
+
+    it('refuses a project-scoped forget when the daemon lacks the scope capability', async () => {
+      // The gate is `if (opts.scope)`, not a scope-specific branch, so a
+      // project-scoped call must be refused on exactly the same terms as the
+      // user-scoped twin above — an old daemon would run the unscoped forget
+      // and delete from both stores.
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, {
+          v: 1,
+          mode: 'http-bridge',
+          features: ['workspace_memory_forget'],
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(
+        client.forgetWorkspaceMemory('stale project note', {
+          scope: 'project',
+        }),
       ).rejects.toMatchObject({
         name: 'DaemonCapabilityMissingError',
         capability: 'workspace_memory_forget_scope',

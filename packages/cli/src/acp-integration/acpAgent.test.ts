@@ -9416,6 +9416,63 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
+  it('omits scope entirely from an unscoped workspace memory remember', async () => {
+    const refreshHierarchicalMemory = vi.fn().mockResolvedValue(undefined);
+    const refreshSystemInstruction = vi.fn().mockResolvedValue(undefined);
+    Object.assign(mockConfig, {
+      isManagedMemoryAvailable: vi.fn().mockReturnValue(true),
+      getProjectRoot: vi.fn().mockReturnValue('/workspace'),
+      refreshHierarchicalMemory,
+      getLlmClient: vi.fn().mockReturnValue({
+        refreshSystemInstruction,
+      }),
+    });
+    mockRunManagedRememberByAgent.mockResolvedValue({
+      summary: 'saved',
+      filesTouched: ['/mem/MEMORY.md'],
+      touchedScopes: ['project'],
+    });
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceMemoryRemember, {
+        content: 'Remember the workspace uses vitest.',
+      }),
+    ).resolves.toEqual({
+      summary: 'saved',
+      filesTouched: ['/mem/MEMORY.md'],
+      touchedScopes: ['project'],
+    });
+    // The scoped twin above asserts through `objectContaining`, which cannot
+    // see an absent key — so the omitted arm of
+    // `...(rawScope ? { scope: rawScope } : {})` had no pin at all. An
+    // explicit `scope: undefined` reaching the helper reads as a requested
+    // scope to `params.scope &&` further down, which is what selects the
+    // mismatch guard over automatic scope routing.
+    const [args] = mockRunManagedRememberByAgent.mock.calls.at(-1)!;
+    expect(args).not.toHaveProperty('scope');
+    expect(args).toMatchObject({
+      config: mockConfig,
+      projectRoot: '/workspace',
+      content: 'Remember the workspace uses vitest.',
+      contextMode: 'workspace',
+    });
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it('refreshes live sessions after workspace memory remember', async () => {
     const sessionRefreshHierarchicalMemory = vi
       .fn()
