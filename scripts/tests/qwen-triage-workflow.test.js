@@ -6992,6 +6992,17 @@ describe('stage 1-pre duplicate gate', () => {
     expect(section).toContain('every production line this PR deletes');
   });
 
+  it('pins the anti-vacuity clauses of the subsumption definition', () => {
+    // Without the cancellation clause, a line the closer both adds and
+    // deletes counts as covered; without the matched-sections clause, a
+    // rename-only diff closes vacuously against any closer.
+    expect(section).toContain('cancels out and covers neither direction');
+    expect(section).toContain('quantifiers range over matched sections only');
+    expect(section).toContain(
+      'covered only by an equivalent change to the same path',
+    );
+  });
+
   it('never closes a diff with no production changes', () => {
     // Stage 0 exclusions empty the comparison set for tests-only PRs; such a
     // diff must be a remaining delta, never "Fully subsumed".
@@ -7020,6 +7031,17 @@ describe('stage 1-pre duplicate gate', () => {
     expect(section).toContain('never once for all issues');
     expect(section).toContain('bound to the loop');
     expect(section).toContain('FIRST one');
+    expect(section).toContain('the deterministic `$ISSUES` order');
+  });
+
+  it('enumerates the remaining delta per closer, never as a union', () => {
+    // Union quantification ("a line no closer's patch adds") is empty when
+    // a fix is split across two closers (A adds L1, B adds L2, this PR adds
+    // both): the branch would demand a delta it simultaneously denies.
+    // Per-closer quantification matches the "Fully subsumed" check it
+    // negates.
+    expect(section).toContain('ITS patch does not add');
+    expect(section).toContain('ITS patch does not delete');
   });
 
   it('guards every patch fetch fail-closed', () => {

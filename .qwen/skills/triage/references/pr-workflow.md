@@ -197,9 +197,11 @@ issues the branches below read, and they then act on those issues' states.
 The blast radius stays bounded — the only irreversible act (close)
 additionally requires this PR's diff to be fully subsumed by the merged
 fix, which is true only when the change is contained in that fix's own
-patch, so an
-accidental linkage can at worst reach a visible, reversible request-changes
-review or a maintainer escalation, never a substantively wrong close.
+patch — judged against the closer's frozen patch below, not the live
+default branch — so an accidental linkage can at worst reach a close as
+duplicate of a merged fix that contains the change (reversible via the
+reopen invitation in the close comment), or a visible, reversible
+request-changes review or a maintainer escalation.
 
 ```bash
 # Record each linked issue's state; $N feeds the closer query below. The loop
@@ -231,7 +233,7 @@ gh pr review "$PR_NUMBER" --repo "$REPO" --request-changes --body-file /tmp/stag
 ```
 
 - Any linked issue **closed as completed** → resolve one closer candidate
-  per closed-as-completed linked issue, in the ascending `$ISSUES` order:
+  per closed-as-completed linked issue, in the deterministic `$ISSUES` order:
 
   ```bash
   CLOSER=$(gh api graphql -f query='
@@ -289,7 +291,8 @@ gh pr review "$PR_NUMBER" --repo "$REPO" --request-changes --body-file /tmp/stag
   unrelated same-number PR. The gate can only fetch and judge `$REPO`'s
   patches: a foreign-repo closer cannot be verified and is treated as
   unresolved — never resolved to a colliding number. `$MERGED_PRS`
-  lists the resolved closers in ascending linked-issue order.
+  lists the resolved closers in the deterministic `$ISSUES` order, each
+  closer number once even when one closer closed several linked issues.
 
 - Closed by one or more **merged PRs** of this repo (`$MERGED_PRS`
   non-empty) → compare this PR's production diff (exclude test/generated
@@ -355,10 +358,11 @@ gh pr review "$PR_NUMBER" --repo "$REPO" --request-changes --body-file /tmp/stag
     closer fully subsumes this PR, the FIRST one in `$MERGED_PRS` order
     is the duplicate target. → post the terminal comment below, then
     close the PR. This is the ONLY place triage closes a PR.
-  - **Any remaining delta** — no closer fully subsumes this PR: an added
-    production line no closer's patch adds, a deleted production line no
-    closer's patch deletes, or any non-production addition → submit
-    exactly one `CHANGES_REQUESTED` review: name the resolved closers,
+  - **Any remaining delta** — no closer fully subsumes this PR: for each
+    closer, an added production line ITS patch does not add, a deleted
+    production line ITS patch does not delete, or any non-production
+    addition → submit exactly one `CHANGES_REQUESTED` review: name the
+    resolved closers,
     name the remaining delta, ask the author to rebase onto the default
     branch and reduce the PR to that delta (bilingual body whose first
     line is the `<!-- qwen-triage stage=1-pre -->` marker, @mention the
