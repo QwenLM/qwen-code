@@ -97,8 +97,10 @@ export type OpenTuiStreamEvent =
       isContinuation?: boolean;
     }
   /** Retry without retryInfo: the attempt is starting now, so any prior
-   * retry UI is stale (ink clearRetryCountdown). */
-  | { type: 'retry-countdown-clear' }
+   * retry UI is stale (ink clearRetryCountdown). `isContinuation` carries
+   * the keep/discard signal core's continuation retries set without a
+   * retryInfo, so the backend keeps already-streamed text like ink does. */
+  | { type: 'retry-countdown-clear'; isContinuation?: boolean }
   /** Stop-hook system message (ink stop_hook_system_message):
    * `⎿ Stop says:` header + indented markdown body. */
   | { type: 'stop-hook-message'; message: string }
@@ -251,6 +253,46 @@ export function renderResultDisplay(display: unknown): string {
     // never reach output.
     if (o['type'] === 'mcp_app' && typeof o['fallbackText'] === 'string') {
       return o['fallbackText'];
+    }
+    // vision_bridge_notice renders summary\nnotice (ink's
+    // formatVisionBridgeNoticeDisplay); the generic summary branch below
+    // would drop the notice body.
+    if (o['type'] === 'vision_bridge_notice') {
+      const summary = typeof o['summary'] === 'string' ? o['summary'] : '';
+      const notice = typeof o['notice'] === 'string' ? o['notice'] : '';
+      return [summary, notice].filter(Boolean).join('\n');
+    }
+    // task_execution: status line + termination reason and result — the raw
+    // JSON fallback would dump toolCalls[].responseParts (multi-MB base64);
+    // core strips those exact fields in toolResultDisplayCompaction.
+    if (o['type'] === 'task_execution') {
+      const subagent =
+        typeof o['subagentName'] === 'string' ? o['subagentName'] : '';
+      const status = typeof o['status'] === 'string' ? o['status'] : '';
+      const reason =
+        typeof o['terminateReason'] === 'string' ? o['terminateReason'] : '';
+      const result = typeof o['result'] === 'string' ? o['result'] : '';
+      const header = [subagent, status].filter(Boolean).join(': ');
+      return [header, reason, result].filter(Boolean).join('\n');
+    }
+    // findings_list: count + optional severity summary; the raw fallback
+    // dumps every finding object.
+    if (o['type'] === 'findings_list') {
+      const findings = Array.isArray(o['findings'])
+        ? (o['findings'] as unknown[])
+        : [];
+      const level = typeof o['level'] === 'string' ? ` (${o['level']})` : '';
+      const omitted =
+        typeof o['omittedFindings'] === 'number' && o['omittedFindings'] > 0
+          ? `\n${o['omittedFindings']} additional finding(s) were omitted.`
+          : '';
+      return `${findings.length} finding(s)${level}${omitted}`;
+    }
+    // terminal_image: file-path note instead of the multi-MB binary payload
+    // (ink renders the image inline; transcripts keep the path reference).
+    if (o['type'] === 'terminal_image') {
+      const filePath = typeof o['filePath'] === 'string' ? o['filePath'] : '';
+      return filePath ? `[terminal image] ${filePath}` : '';
     }
     if (typeof o['summary'] === 'string') return o['summary'];
     if (typeof o['message'] === 'string') return o['message'];
@@ -453,14 +495,22 @@ export function createEventMapper(
           v?.triggerReason === 'image_overflow'
             ? `accumulated enough tool screenshots to trigger compaction for ${model}`
             : `approached the input token limit for ${model}`;
+        // ink's formatCount (useGeminiStream): estimated counts carry a '~'
+        // prefix so locally-measured figures don't read as API-reported ones.
+        const formatCount = (count?: number, isEstimated?: boolean) =>
+          count === undefined
+            ? 'unknown'
+            : isEstimated
+              ? `~${count}`
+              : String(count);
         const warningSuffix = v?.warning ? `\n⚠️ ${v.warning}` : '';
         out.push({
           type: 'info',
           text:
             `IMPORTANT: This conversation ${reasonClause}. ` +
             `A compressed context will be sent for future messages (compressed from: ` +
-            `${v?.originalTokenCount ?? 'unknown'} to ` +
-            `${v?.newTokenCount ?? 'unknown'} tokens).` +
+            `${formatCount(v?.originalTokenCount, v?.originalTokenCountIsEstimated)} to ` +
+            `${formatCount(v?.newTokenCount, v?.newTokenCountIsEstimated)} tokens).` +
             warningSuffix,
         });
         break;
@@ -536,7 +586,10 @@ export function createEventMapper(
             isContinuation: (ev as { isContinuation?: boolean }).isContinuation,
           });
         } else {
-          out.push({ type: 'retry-countdown-clear' });
+          out.push({
+            type: 'retry-countdown-clear',
+            isContinuation: (ev as { isContinuation?: boolean }).isContinuation,
+          });
         }
         break;
       }

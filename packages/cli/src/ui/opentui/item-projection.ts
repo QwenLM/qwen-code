@@ -40,6 +40,7 @@ import { formatDuration } from '../utils/formatters.js';
 import { levelLabel } from '../utils/skill-level-label.js';
 import type { SessionStatsState } from '../contexts/SessionContext.js';
 import type { LoadedSettings } from '../../config/settings.js';
+import { redactProxy } from '../systemInfoFields.js';
 
 /** Runtime state the host supplies for items that read it in ink. */
 export interface ItemProjectionContext {
@@ -133,24 +134,6 @@ export function projectAbout(systemInfo: Record<string, unknown>): string {
   return lines.join('\n');
 }
 
-/**
- * Parity of systemInfoFields' redactProxy: mask credentials when URL parsing
- * fails (realistic proxy-env typos like an empty or spaced host) instead of
- * leaking the raw string into the shareable transcript.
- */
-function redactProxy(proxy: string): string {
-  try {
-    const url = new URL(proxy);
-    if (url.username || url.password) {
-      url.username = url.username ? '***' : '';
-      url.password = url.password ? '***' : '';
-    }
-    return url.toString();
-  } catch {
-    return proxy.replace(/\/\/[^/]*@/, '//***@');
-  }
-}
-
 /** Parity of views/ToolsList. */
 export function projectToolsList(
   tools: ReadonlyArray<{
@@ -235,6 +218,23 @@ function flattenActiveModels(metrics: SessionMetrics): FlatModelEntry[] {
   }));
 }
 
+/** Per-entry cost: ink looks pricing up under the RAW model name from the
+ * structured key (ModelStatsDisplay getModelName); the display label is
+ * normalized and may carry a ` (source)` suffix that never matches. */
+function entryCost(
+  entry: FlatModelEntry,
+  modelPricing?: Record<string, unknown>,
+): number | null {
+  return calculateCost({
+    inputTokens: entry.metrics.tokens.prompt,
+    outputTokens:
+      entry.metrics.tokens.candidates + entry.metrics.tokens.thoughts,
+    pricing: (modelPricing ?? {})[entry.key.split('::')[0]] as Parameters<
+      typeof calculateCost
+    >[0]['pricing'],
+  });
+}
+
 /** Parity of ModelStatsDisplay (reads uiTelemetryService, not the item). */
 export function projectModelStats(
   metrics: SessionMetrics,
@@ -244,74 +244,46 @@ export function projectModelStats(
   if (entries.length === 0) {
     return 'No API calls have been made in this session.';
   }
+  // ink's ModelStatsDisplay renders one column per (model, source) entry
+  // with per-model values and N/A for unpriced models; collapsing entries
+  // into one set of session totals describes neither model, dilutes the
+  // failing model's error rate, and silently excludes unpriced models from
+  // a single Estimated figure.
+  const hasPricing = entries.some(
+    (entry) => entryCost(entry, modelPricing) != null,
+  );
   const lines = ['Model Stats For Nerds', ''];
-  const totals = entries.reduce(
-    (acc, entry) => {
-      acc.requests += entry.metrics.api.totalRequests;
-      acc.errors += entry.metrics.api.totalErrors;
-      acc.latency += entry.metrics.api.totalLatencyMs;
-      acc.tokens += entry.metrics.tokens.total;
-      acc.prompt += entry.metrics.tokens.prompt;
-      acc.cached += entry.metrics.tokens.cached;
-      acc.thoughts += entry.metrics.tokens.thoughts;
-      acc.output += entry.metrics.tokens.candidates;
-      return acc;
-    },
-    {
-      requests: 0,
-      errors: 0,
-      latency: 0,
-      tokens: 0,
-      prompt: 0,
-      cached: 0,
-      thoughts: 0,
-      output: 0,
-    },
-  );
-  lines.push(`Models: ${entries.map((entry) => entry.label).join(', ')}`);
-  lines.push('');
-  lines.push('API');
-  lines.push(`Requests ${totals.requests.toLocaleString()}`);
-  lines.push(
-    `Errors ${totals.errors.toLocaleString()} (${totals.requests > 0 ? ((totals.errors / totals.requests) * 100).toFixed(1) : '0.0'}%)`,
-  );
-  lines.push(
-    `Avg Latency ${totals.requests > 0 ? formatDuration(totals.latency / totals.requests) : '0s'}`,
-  );
-  lines.push('');
-  lines.push('Tokens');
-  lines.push(`Total ${totals.tokens.toLocaleString()}`);
-  lines.push(` ↳ Prompt ${totals.prompt.toLocaleString()}`);
-  if (entries.some((entry) => entry.metrics.tokens.cached > 0)) {
+  for (const entry of entries) {
+    const m = entry.metrics;
+    lines.push(entry.label);
+    lines.push('API');
+    lines.push(`Requests ${m.api.totalRequests.toLocaleString()}`);
     lines.push(
-      ` ↳ Cached ${totals.cached.toLocaleString()} (${pct(totals.cached, totals.prompt)}%)`,
+      `Errors ${m.api.totalErrors.toLocaleString()} (${m.api.totalRequests > 0 ? ((m.api.totalErrors / m.api.totalRequests) * 100).toFixed(1) : '0.0'}%)`,
     );
-  }
-  if (entries.some((entry) => entry.metrics.tokens.thoughts > 0)) {
-    lines.push(` ↳ Thoughts ${totals.thoughts.toLocaleString()}`);
-  }
-  lines.push(` ↳ Output ${totals.output.toLocaleString()}`);
-  const costs = entries
-    .map((entry) =>
-      calculateCost({
-        inputTokens: entry.metrics.tokens.prompt,
-        outputTokens:
-          entry.metrics.tokens.candidates + entry.metrics.tokens.thoughts,
-        // ink looks pricing up under the RAW model name from the structured
-        // key (ModelStatsDisplay getModelName); the display label is
-        // normalized and may carry a ` (source)` suffix that never matches.
-        pricing: (modelPricing ?? {})[entry.key.split('::')[0]] as Parameters<
-          typeof calculateCost
-        >[0]['pricing'],
-      }),
-    )
-    .filter((cost): cost is number => cost != null);
-  if (costs.length > 0) {
+    lines.push(
+      `Avg Latency ${m.api.totalRequests > 0 ? formatDuration(m.api.totalLatencyMs / m.api.totalRequests) : '0s'}`,
+    );
+    lines.push('Tokens');
+    lines.push(`Total ${m.tokens.total.toLocaleString()}`);
+    lines.push(` ↳ Prompt ${m.tokens.prompt.toLocaleString()}`);
+    if (m.tokens.cached > 0) {
+      lines.push(
+        ` ↳ Cached ${m.tokens.cached.toLocaleString()} (${pct(m.tokens.cached, m.tokens.prompt)}%)`,
+      );
+    }
+    if (m.tokens.thoughts > 0) {
+      lines.push(` ↳ Thoughts ${m.tokens.thoughts.toLocaleString()}`);
+    }
+    lines.push(` ↳ Output ${m.tokens.candidates.toLocaleString()}`);
+    if (hasPricing) {
+      const cost = entryCost(entry, modelPricing);
+      lines.push('Cost');
+      lines.push(`Estimated ${cost != null ? `$${cost.toFixed(4)}` : 'N/A'}`);
+    }
     lines.push('');
-    lines.push('Cost');
-    lines.push(`Estimated $${costs.reduce((a, b) => a + b, 0).toFixed(4)}`);
   }
-  return lines.join('\n');
+  return lines.join('\n').trimEnd();
 }
 
 /** Parity of ToolStatsDisplay. */
@@ -741,7 +713,7 @@ function renderStatsSections(
   lines.push(`Session ID: ${stats.sessionId}`);
   const tools = metrics.tools;
   lines.push(
-    `Tool Calls: ${tools.totalCalls} ( ✓ ${tools.totalSuccess} ✗ ${tools.totalFail} )`,
+    `Tool Calls: ${tools.totalCalls} ( ✓ ${tools.totalSuccess} x ${tools.totalFail} )`,
   );
   lines.push(`Success Rate: ${computed.successRate.toFixed(1)}%`);
   if (computed.totalDecisions > 0) {
@@ -947,6 +919,18 @@ export function projectSpecialItemText(
     case 'btw': {
       const btw = record['btw'] as Parameters<typeof projectBtw>[0] | undefined;
       return btw ? projectBtw(btw) : null;
+    }
+    case 'info':
+    case 'warning':
+    case 'success':
+      return typeof record['text'] === 'string' ? record['text'] : null;
+    case 'error': {
+      // ErrorMessage renders text + an optional secondary-color hint.
+      const hint =
+        typeof record['hint'] === 'string' && record['hint']
+          ? `\n${record['hint']}`
+          : '';
+      return typeof record['text'] === 'string' ? record['text'] + hint : null;
     }
     default:
       return null;

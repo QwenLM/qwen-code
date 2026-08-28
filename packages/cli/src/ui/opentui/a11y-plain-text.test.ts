@@ -30,6 +30,13 @@ describe('stripAnsi', () => {
     expect(stripAnsi('hello world')).toBe('hello world');
     expect(stripAnsi('')).toBe('');
   });
+
+  it('removes device escape sequences (R2-10)', () => {
+    // SGR mouse reports and DEC save/restore cursor leaked past the old
+    // hand-rolled pattern.
+    expect(stripAnsi('\x1b[<0;5;1Mclick')).toBe('click');
+    expect(stripAnsi('\x1b7x\x1b8')).toBe('x');
+  });
 });
 
 describe('markdownToPlainText', () => {
@@ -100,5 +107,22 @@ describe('markdownToPlainText', () => {
   it('keeps code-span contents literal — no link/emphasis consumption (R1-1)', () => {
     expect(markdownToPlainText('`[a](b)`')).toBe('[a](b)');
     expect(markdownToPlainText('`**not bold**`')).toBe('**not bold**');
+  });
+
+  it('tracks fence length — a shorter run does not close a longer fence (R2-10)', () => {
+    expect(
+      markdownToPlainText('````\ncode\n```\nstill code\n````\nafter'),
+    ).toBe('code\n```\nstill code\nafter');
+  });
+
+  it('keeps fence-like quoted lines inside a fence literal (R2-10)', () => {
+    // A de-quoted ``` inside a fenced body must not flip fence state.
+    expect(markdownToPlainText('```\n> ```\n```\nafter **bold**')).toBe(
+      '> ```\nafter bold',
+    );
+  });
+
+  it('keeps inner backticks in multi-backtick code spans (R2-10)', () => {
+    expect(markdownToPlainText('a ``b ` c`` d')).toBe('a b ` c d');
   });
 });

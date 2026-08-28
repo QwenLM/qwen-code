@@ -351,6 +351,29 @@ describe('event-adapter (ServerGeminiStreamEvent -> neutral)', () => {
       ]);
     });
 
+    it('forwards isContinuation on the countdown clear (R2-50)', () => {
+      // Core's continuation/recovery retries carry isContinuation without
+      // retryInfo; the backend keys keep-vs-discard on it like ink does.
+      const map = createEventMapper();
+      expect(
+        map({ type: 'retry', isContinuation: true } as unknown as AnyEv),
+      ).toEqual([{ type: 'retry-countdown-clear', isContinuation: true }]);
+    });
+
+    it('marks estimated token counts with ~ (R2-3, ink formatCount parity)', () => {
+      const map = createEventMapper({ getModelName: () => 'm' });
+      const out = map({
+        type: 'chat_compressed',
+        value: {
+          originalTokenCount: 1200,
+          newTokenCount: 300,
+          newTokenCountIsEstimated: true,
+        },
+      } as unknown as AnyEv);
+      expect((out[1] as { text: string }).text).toContain('~300');
+      expect((out[1] as { text: string }).text).not.toContain('~1200');
+    });
+
     it('maps model_fallback to a retry clear + info notice', () => {
       const map = createEventMapper();
       const out = map({
@@ -638,6 +661,63 @@ describe('event-adapter (ServerGeminiStreamEvent -> neutral)', () => {
         '',
       );
       expect(renderResultDisplay({ type: 'task_list', message: 'y' })).toBe('');
+    });
+
+    it('renders vision_bridge_notice as summary + notice (R2-39)', () => {
+      expect(
+        renderResultDisplay({
+          type: 'vision_bridge_notice',
+          summary: 'S',
+          notice: 'N',
+        }),
+      ).toBe('S\nN');
+    });
+
+    it('renders task_execution without dumping toolCalls payloads (R1-68)', () => {
+      expect(
+        renderResultDisplay({
+          type: 'task_execution',
+          subagentName: 'reviewer',
+          status: 'completed',
+          terminateReason: 'done',
+          result: 'all good',
+          toolCalls: [
+            {
+              callId: 'c1',
+              name: 'read-file',
+              status: 'success',
+              responseParts: [{ inlineData: { data: 'a'.repeat(100) } }],
+            },
+          ],
+        }),
+      ).toBe('reviewer: completed\ndone\nall good');
+    });
+
+    it('renders findings_list as a count summary (R1-68)', () => {
+      expect(
+        renderResultDisplay({
+          type: 'findings_list',
+          level: 'high',
+          findings: [{}, {}, {}],
+        }),
+      ).toBe('3 finding(s) (high)');
+      expect(
+        renderResultDisplay({
+          type: 'findings_list',
+          findings: [{}],
+          omittedFindings: 2,
+        }),
+      ).toBe('1 finding(s)\n2 additional finding(s) were omitted.');
+    });
+
+    it('renders terminal_image as a file-path note (R1-68)', () => {
+      expect(
+        renderResultDisplay({
+          type: 'terminal_image',
+          filePath: '/tmp/chart.png',
+          mimeType: 'image/png',
+        }),
+      ).toBe('[terminal image] /tmp/chart.png');
     });
 
     it('renders mcp_tool_progress with the ink spinner line', () => {

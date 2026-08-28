@@ -196,6 +196,11 @@ export function useDialogSelect<TItem extends DialogListItem<unknown>>(
 
   const numberBuffer = useRef('');
   const numberTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // The number-select flush reads the highlight at timeout time via a ref,
+  // not inside a setState updater — updaters must stay pure (StrictMode
+  // double-invokes them) and React re-renders keep the ref current.
+  const latestRef = useRef({ items, activeIndex, onSelect });
+  latestRef.current = { items, activeIndex, onSelect };
 
   useEffect(
     () => () => {
@@ -219,6 +224,16 @@ export function useDialogSelect<TItem extends DialogListItem<unknown>>(
   const highlightIndex = (index: number) => {
     if (index < 0 || index >= items.length || index === activeIndex) return;
     if (items[index]?.disabled) return;
+    setActiveIndexState(index);
+    const item = items[index];
+    if (item) onHighlight?.(item.value, index);
+  };
+
+  // ink's SET_ACTIVE_INDEX permits landing on any in-range index — callers
+  // like wheel/hover navigation step one row per gesture, and rejecting
+  // disabled targets would leave them permanently stuck on a disabled row.
+  const setActiveIndex = (index: number) => {
+    if (index < 0 || index >= items.length || index === activeIndex) return;
     setActiveIndexState(index);
     const item = items[index];
     if (item) onHighlight?.(item.value, index);
@@ -269,12 +284,11 @@ export function useDialogSelect<TItem extends DialogListItem<unknown>>(
       } else if (result.pendingSelect) {
         numberTimer.current = setTimeout(() => {
           clearNumberBuffer();
-          // Flush against the highlight at timeout time, not at digit time.
-          setActiveIndexState((current) => {
-            const item = items[current];
-            if (item && !item.disabled) onSelect?.(item.value);
-            return current;
-          });
+          // Flush against the highlight at timeout time, outside any setState
+          // updater (updaters are pure and StrictMode re-runs them).
+          const latest = latestRef.current;
+          const item = latest.items[latest.activeIndex];
+          if (item && !item.disabled) latest.onSelect?.(item.value);
         }, NUMBER_SELECT_TIMEOUT_MS);
       }
       return;
@@ -302,7 +316,7 @@ export function useDialogSelect<TItem extends DialogListItem<unknown>>(
     activeIndex,
     scrollOffset,
     setScrollOffset,
-    setActiveIndex: highlightIndex,
+    setActiveIndex,
     selectIndex,
     highlightIndex,
     items,

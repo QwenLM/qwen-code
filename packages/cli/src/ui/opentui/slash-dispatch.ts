@@ -18,19 +18,29 @@
  * submit-to-model); dialogs beyond help report themselves as pending parity.
  */
 
-import type { Config } from '@qwen-code/qwen-code-core';
+import type { Config, SessionListItem } from '@qwen-code/qwen-code-core';
+import {
+  SlashCommandStatus,
+  logSlashCommand,
+  makeSlashCommandEvent,
+  recordSkillInvocation,
+} from '@qwen-code/qwen-code-core';
 import type {
   CommandContext,
   SlashCommand,
   SlashCommandActionReturn,
 } from '../commands/types.js';
+import { CommandKind } from '../commands/types.js';
 import type { LoadedSettings } from '../../config/settings.js';
 import { BuiltinCommandLoader } from '../../services/BuiltinCommandLoader.js';
 import { BundledSkillLoader } from '../../services/BundledSkillLoader.js';
 import { FileCommandLoader } from '../../services/FileCommandLoader.js';
 import { McpPromptLoader } from '../../services/McpPromptLoader.js';
 import { SavedWorkflowLoader } from '../../services/saved-workflow-loader.js';
-import { SkillCommandLoader } from '../../services/SkillCommandLoader.js';
+import {
+  SkillCommandLoader,
+  recordAutoSkillCommandUsage,
+} from '../../services/SkillCommandLoader.js';
 import { CommandService } from '../../services/CommandService.js';
 import {
   parseSlashCommand,
@@ -158,15 +168,13 @@ export async function loadInteractiveCommands(
 
 /**
  * Whether the submitted text must be treated as a slash command. Mirrors the
- * ink processor guard: '/' or '?' prefix, with the shared classifier
- * excluding `//`/`/*` comments and file-path-like input.
+ * ink submission gate (useGeminiStream): only '/'-prefixed input classified
+ * by the shared `isSlashCommand` (which excludes `//`/`/*` comments and
+ * file-path-like input) routes here; '?'-prefixed input reaches the
+ * model/btw path exactly like ink.
  */
 export function isSlashCommandInput(raw: string): boolean {
-  const trimmed = raw.trim();
-  if (trimmed.startsWith('/')) {
-    return isSlashCommand(trimmed);
-  }
-  return trimmed.startsWith('?');
+  return isSlashCommand(raw.trim());
 }
 
 export type SlashResolution =
@@ -194,7 +202,13 @@ export function resolveSlashCommand(
   return { type: 'command', command: commandToExecute, args, canonicalPath };
 }
 
-/** Neutral effects the OpenTUI backend applies for a dispatched command. */
+/**
+ * Neutral effects the OpenTUI backend applies for a dispatched command.
+ * `notice` carries projected text for history items the command added via
+ * `ui.addItem` alongside a non-handled effect (e.g. /init adds an info
+ * notice and returns submit_prompt) — the backend renders it before
+ * applying the effect, mirroring ink's item-then-result ordering.
+ */
 export type SlashEffect =
   | { kind: 'handled' }
   | {
@@ -203,10 +217,24 @@ export type SlashEffect =
       content: string;
     }
   | { kind: 'help' }
-  | { kind: 'dialog'; dialog: string; command: string }
+  | {
+      kind: 'dialog';
+      dialog: string;
+      command: string;
+      /** /resume <id>: the session to open directly. */
+      sessionId?: string;
+      /** /resume <title>: pre-filtered sessions for the picker. */
+      matchedSessions?: SessionListItem[];
+      /** /branch: the name passed through to handleBranch. */
+      name?: string;
+      /** Model dialogs: which settings file the selection persists to. */
+      persistScope?: 'workspace' | 'user';
+    }
   | { kind: 'clear' }
   | { kind: 'quit' }
   | { kind: 'submit'; content: string };
+
+export type SlashEffectWithNotice = SlashEffect & { notice?: string };
 
 export interface SlashDispatchEnv {
   config: Config | null;
@@ -218,6 +246,11 @@ export interface SlashDispatchEnv {
    * /quit and /clear read and persist; the backend owns the true values.
    */
   sessionStats?: SessionStatsState;
+  /**
+   * Live transcript history commands scan through `context.ui.history`
+   * (/doctor's oversized-tool-output check, etc.); absent means empty.
+   */
+  history?: readonly HistoryItemWithoutId[];
 }
 
 function stringifyPromptContent(content: unknown): string {
@@ -251,7 +284,15 @@ function mapActionResult(
     case 'dialog':
       return result.dialog === 'help'
         ? { kind: 'help' }
-        : { kind: 'dialog', dialog: result.dialog, command: command.name };
+        : {
+            kind: 'dialog',
+            dialog: result.dialog,
+            command: command.name,
+            sessionId: result.sessionId,
+            matchedSessions: result.matchedSessions,
+            name: result.name,
+            persistScope: result.persistScope,
+          };
     case 'quit':
       return { kind: 'quit' };
     case 'load_history':
@@ -314,7 +355,7 @@ export async function executeSlashCommand(
   raw: string,
   commands: readonly SlashCommand[],
   env: SlashDispatchEnv,
-): Promise<SlashEffect> {
+): Promise<SlashEffectWithNotice> {
   // ink merges stacked skill invocations (/feat-dev /e2e-testing text);
   // the merge is not ported yet, so report an explicit deferral instead of
   // leaking the second skill token into the first skill's prompt.
@@ -351,6 +392,32 @@ export async function executeSlashCommand(
     return { kind: 'handled' };
   }
 
+  // Telemetry parity (ink slashCommandProcessor): skill invocations feed
+  // /stats skills via recordSkillInvocation + recordAutoSkillCommandUsage,
+  // and every executed command logs a SUCCESS/ERROR slash-command event.
+  const isSkillCommand = command.kind === CommandKind.SKILL;
+  const skillName = command.skillDetail?.name ?? command.name;
+  const subcommand =
+    resolution.canonicalPath.length > 1
+      ? resolution.canonicalPath.slice(1).join(' ')
+      : undefined;
+  const logEvent = (status: SlashCommandStatus) => {
+    if (!env.config) return;
+    logSlashCommand(
+      env.config,
+      makeSlashCommandEvent({
+        command: resolution.canonicalPath[0],
+        subcommand,
+        status,
+      }),
+    );
+  };
+  const recordSkill = (success: boolean) => {
+    if (env.config && isSkillCommand) {
+      recordSkillInvocation(env.config, { skillName, success });
+    }
+  };
+
   let cleared = false;
   const addedItems: HistoryItemWithoutId[] = [];
   const context = {
@@ -362,7 +429,11 @@ export async function executeSlashCommand(
       logger: null,
     },
     ui: {
-      history: [],
+      // Live transcript, not a hardcoded []: /doctor's oversized-tool-output
+      // scan (and any other history reader) must see the real session.
+      get history() {
+        return env.history ? [...env.history] : [];
+      },
       addItem: (item: HistoryItemWithoutId) => {
         addedItems.push(item);
         return 0;
@@ -390,12 +461,13 @@ export async function executeSlashCommand(
     },
     session: {
       // Commands such as /quit read session timing stats and /clear persists
-      // them; supply the backend's real stats when available and refuse to
-      // guess a start time otherwise (a fabricated `new Date()` would stamp
-      // near-zero durations into the persisted usage history).
+      // them; supply the backend's real stats when available. Absent stats
+      // get a start time of now: an epoch fabrication would stamp ~57-year
+      // durations into the persisted usage history (clearCommand's
+      // ?? new Date() guard passes a non-nullish epoch straight through).
       stats: env.sessionStats ?? {
         sessionId: '',
-        sessionStartTime: new Date(0),
+        sessionStartTime: new Date(),
         metrics: {},
         lastPromptTokenCount: 0,
         promptCount: 0,
@@ -406,21 +478,45 @@ export async function executeSlashCommand(
   } as unknown as CommandContext;
 
   try {
-    const result = await command.action(context, args);
-    // ink discards command results once the submission is aborted (commands
-    // like /compress ignore the signal inside their own operation).
+    // ink races the action against the abort signal so ESC cancels
+    // non-cooperative commands (e.g. /compress, whose tryCompressChat takes
+    // no AbortSignal) instead of blocking until they settle.
+    let result: SlashCommandActionReturn | void;
+    if (env.abortSignal) {
+      const signal = env.abortSignal;
+      const aborted = new Promise<undefined>((resolve) => {
+        signal.addEventListener('abort', () => resolve(undefined), {
+          once: true,
+        });
+      });
+      result = await Promise.race([command.action(context, args), aborted]);
+    } else {
+      result = await command.action(context, args);
+    }
+    // ink discards command results once the submission is aborted.
     if (env.abortSignal?.aborted) {
       return { kind: 'handled' };
     }
+    recordSkill(true);
+    if (isSkillCommand && env.config) {
+      void recordAutoSkillCommandUsage(env.config, command);
+    }
+    logEvent(SlashCommandStatus.SUCCESS);
     if (cleared) {
       return { kind: 'clear' };
     }
     const effect = mapActionResult(result, command);
-    if (effect.kind === 'handled' && addedItems.length > 0) {
-      return projectAddedItems(addedItems, env);
+    if (addedItems.length > 0) {
+      const notice = projectAddedItems(addedItems, env);
+      if (effect.kind === 'handled') {
+        return { kind: 'message', messageType: 'info', content: notice };
+      }
+      return { ...effect, notice };
     }
     return effect;
   } catch (error) {
+    recordSkill(false);
+    logEvent(SlashCommandStatus.ERROR);
     return {
       kind: 'message',
       messageType: 'error',
@@ -430,29 +526,26 @@ export async function executeSlashCommand(
 }
 
 /**
- * Surfaces history items a command added via `ui.addItem` (e.g. `/stats
- * model`) by projecting them to transcript text; falls back to an explicit
- * parity deferral when no projection exists.
+ * Projects history items a command added via `ui.addItem` (e.g. `/stats
+ * model`) to transcript text; falls back to an explicit parity deferral
+ * when no projection exists.
  */
 function projectAddedItems(
   items: HistoryItemWithoutId[],
   env: SlashDispatchEnv,
-): SlashEffect {
+): string {
   const texts = items
     .map((item) =>
       projectSpecialItemText(item, {
         config: env.config,
         stats: env.sessionStats,
+        // model-pricing (R1-92) resolves through settings.merged.modelPricing
+        settings: env.settings ?? undefined,
       }),
     )
     .filter((text): text is string => Boolean(text));
   if (texts.length > 0) {
-    return { kind: 'message', messageType: 'info', content: texts.join('\n') };
+    return texts.join('\n');
   }
-  return {
-    kind: 'message',
-    messageType: 'info',
-    content:
-      'This command renders a history item, which is not yet available in the OpenTUI renderer.',
-  };
+  return 'This command renders a history item, which is not yet available in the OpenTUI renderer.';
 }

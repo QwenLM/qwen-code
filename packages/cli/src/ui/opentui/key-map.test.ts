@@ -16,6 +16,7 @@ import {
   OPENTUI_COMMAND_PRIORITY,
   matchesCommand,
   resolveCommand,
+  resolveCommands,
   toOriginalKey,
   type OpenTuiKeyInput,
 } from './key-map.js';
@@ -37,6 +38,15 @@ describe('opentui key-map: translation', () => {
   it('folds the macOS Option flag into meta like the original', () => {
     expect(toOriginalKey({ name: 't', option: true }).meta).toBe(true);
     expect(toOriginalKey({ name: 't', meta: true }).meta).toBe(true);
+  });
+
+  it("normalizes opentui's kitty 'kpenter' onto the original 'return' (R2-44)", () => {
+    expect(
+      toOriginalKey({ name: 'kpenter', sequence: '\x1b[57414u' }).name,
+    ).toBe('return');
+    expect(
+      resolveCommand(key({ name: 'kpenter', sequence: '\x1b[57414u' })),
+    ).toBe(Command.SUBMIT);
   });
 });
 
@@ -173,5 +183,19 @@ describe('opentui key-map: priority resolution', () => {
   it('plain printable characters resolve to nothing', () => {
     expect(resolveCommand(key({ name: 'x', sequence: 'x' }))).toBeUndefined();
     expect(resolveCommand(key({ name: '/', sequence: '/' }))).toBeUndefined();
+  });
+
+  it('resolveCommands exposes ink’s Ctrl+C fan-out: QUIT and CLEAR_INPUT (R2-45)', () => {
+    // ink broadcasts every keypress to all subscribers, so Ctrl+C fires
+    // both AppContainer’s QUIT handler and BaseTextInput’s CLEAR_INPUT.
+    const commands = resolveCommands(key({ name: 'c', ctrl: true }));
+    expect(commands).toContain(Command.QUIT);
+    expect(commands).toContain(Command.CLEAR_INPUT);
+    expect(commands[0]).toBe(Command.QUIT);
+  });
+
+  it('resolveCommands returns all matches in priority order for plain keys', () => {
+    expect(resolveCommands(key({ name: 'return' }))).toEqual([Command.SUBMIT]);
+    expect(resolveCommands(key({ name: 'x', sequence: 'x' }))).toEqual([]);
   });
 });
