@@ -177,7 +177,7 @@ export function StandaloneApp({ daemonToken }: { daemonToken?: string }) {
               items: ['title', 'environment', 'rightPanel', 'tokenUsage'],
             },
             rightPanel: {
-              items: ['review', 'sideTask'],
+              items: ['review', 'sideTask', 'terminal'],
             },
             environmentPanel: {
               items: ['environment', 'subagents', 'backgroundTasks'],
