@@ -5440,6 +5440,8 @@ export function App({
     // The user left the split of their own accord, so a refresh must not bring
     // it back. (A shrink-fold is transient and deliberately doesn't clear it.)
     clearSplitSessions();
+    // Explicit exit also cancels any pending shrink-fold restore.
+    splitFoldedByShrinkRef.current = false;
     openPanel('sessions');
   }, [notifyControlledSplitClose, openPanel]);
   // Built-in pane action follows the same tokenUsage opt-in as the chat header.
@@ -8460,7 +8462,11 @@ export function App({
       closeMobileDrawer();
       // Starting a new chat means the user wants to see it — leave any open
       // Settings/Status panel so the fresh chat is visible (no-op when closed).
-      if (!opts?.keepPanel) closePanel();
+      if (!opts?.keepPanel) {
+        // Explicit navigation cancels any pending shrink-fold split restore.
+        splitFoldedByShrinkRef.current = false;
+        closePanel();
+      }
       if (!opts?.keepView) setMainView('chat');
       let focusRequest: number | undefined;
       try {
@@ -8920,6 +8926,8 @@ export function App({
       // Loading another session should reveal its chat, not stay on the
       // Settings/Status panel (no-op when the panel is closed).
       closePanel();
+      // Explicit navigation cancels any pending shrink-fold split restore.
+      splitFoldedByShrinkRef.current = false;
       try {
         await sessionActions.loadSession(sessionId, { workspaceCwd });
         if (sessionOpenInvocationRef.current === invocation) {
@@ -8940,6 +8948,8 @@ export function App({
   // returns to the chat view and reports load failures.
   const handleOpenSessionFromOverview = useCallback(
     (sessionId: string, workspaceCwd?: string) => {
+      // Explicit navigation cancels any pending shrink-fold split restore.
+      splitFoldedByShrinkRef.current = false;
       setMainView('chat');
       void loadSidebarSession(sessionId, workspaceCwd).catch(
         (error: unknown) => {
@@ -12585,6 +12595,9 @@ export function App({
                           closePanel();
                           return;
                         }
+                        // Explicit navigation cancels any pending shrink-fold
+                        // split restore.
+                        splitFoldedByShrinkRef.current = false;
                         const current = connectionRef.current;
                         const currentWorkspaceCwd =
                           current.workspaceCwd ||
@@ -12757,7 +12770,9 @@ export function App({
                     ) : (
                       <SessionOverviewPanel
                         onOpenSession={handleOpenSessionFromOverview}
-                        onOpenSplit={openSplitView}
+                        // Split view cannot exist below the breakpoint; the
+                        // panel hides the action when the prop is absent.
+                        onOpenSplit={isLargeScreen ? openSplitView : undefined}
                         onCurrentSessionRemoved={async (removed) => {
                           const current = connectionRef.current;
                           const currentWorkspaceCwd =
@@ -12773,10 +12788,13 @@ export function App({
                           ) {
                             return;
                           }
-                          const cleared = await createNewSession(undefined, {
-                            keepView: true,
-                            keepPanel: true,
-                          });
+                          const cleared = await createNewSession(
+                            removed.workspaceCwd || undefined,
+                            {
+                              keepView: true,
+                              keepPanel: true,
+                            },
+                          );
                           const latest = connectionRef.current;
                           const latestWorkspaceCwd =
                             latest.workspaceCwd ||
