@@ -17,7 +17,8 @@
 // file path exists — stays with the caller.
 
 import type { CommandModule } from 'yargs';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { atomicWriteFileSync } from '@qwen-code/qwen-code-core';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import {
   writeStdoutLine,
@@ -27,6 +28,7 @@ import { tokenizeArgs } from '../../utils/shell-args.js';
 import { operatorReviewSettings } from './lib/review-settings.js';
 import { bundleStalenessNotices } from './lib/stale-bundle.js';
 import { isAoneCanonicalHost } from './lib/remote-match.js';
+import { lastReviewEffortPath } from './lib/paths.js';
 
 export type ReviewEffort = 'low' | 'medium' | 'high';
 
@@ -38,6 +40,20 @@ export type ReviewEffort = 'low' | 'medium' | 'high';
  * the review PUBLISHES, never what it finds or verifies.
  */
 export type ReviewSeverityFloor = 'critical' | 'suggestion';
+
+/**
+ * The review topology: which shape the run takes. `auto` is the standing
+ * effort-driven pipeline (the 3A/3B/3C fan-outs). `minimal` is the A/B
+ * comparison arm from issue #9783 — a single careful senior-engineer pass
+ * over the diff in the orchestrator's own context, at most fifteen findings,
+ * each carrying a concrete failure scenario; no subagent fan-out, no
+ * verification, no reverse audit, no posting. It exists so the full pipeline
+ * and the minimal prompt can be run over the same PR set and compared per
+ * model. It is deliberately orthogonal to `effort` — it is a different
+ * _shape_ of review, not a depth of the same one — and selecting it skips the
+ * agent machinery (roster, coverage, budget) entirely rather than shrinking it.
+ */
+export type ReviewTopology = 'auto' | 'minimal';
 
 export type ReviewTarget =
   | { type: 'pr-number'; number: number }
@@ -70,6 +86,7 @@ export interface ParsedReviewArgs {
   effortSource:
     | 'explicit'
     | 'configured'
+    | 'last_used'
     | 'default'
     | 'forced-by-comment'
     | 'forced-by-fix';
@@ -111,6 +128,14 @@ export interface ParsedReviewArgs {
    */
   severityFloor: ReviewSeverityFloor | 'auto';
   severityFloorSource: 'explicit' | 'configured' | 'default';
+  /**
+   * The review topology. `auto` (the default) runs the standing effort-driven
+   * pipeline; `minimal` runs the single-pass A/B arm and, because it neither
+   * posts, edits, nor continues an interrupted pipeline run, forces
+   * `comment.effective`, `fix.effective`, and `resume.effective` to false.
+   */
+  topology: ReviewTopology;
+  topologySource: 'explicit' | 'default';
   /** The `--host` flag's value, when present — recorded verbatim so the
    *  write gate can bind a recorded bare-number target's platform (the
    *  target itself carries no host in that spelling). */
@@ -146,6 +171,24 @@ export const EFFORT_LEVELS: ReadonlySet<string> = new Set([
   'high',
 ]);
 
+/**
+ * The `--effort` option for the three capture commands (fetch-pr,
+ * capture-local, plan-diff), defined once: its describe names what `medium`
+ * drops from the roster, so a roster change edits one string, not three
+ * byte-identical copies that can silently diverge. `run` and `save-artifact`
+ * keep their own shapes (per-target defaults; a resolved value without `low`).
+ */
+export const EFFORT_OPTION = {
+  type: 'string',
+  choices: [...EFFORT_LEVELS],
+  describe:
+    'The review effort. `medium` (balanced) drops the adversarial ' +
+    'personas (6a/6b/6c) and the language-pitfall and wrapper/proxy ' +
+    'specialists (1d/1e) from the required roster; recorded in the plan ' +
+    'so check-coverage, agent-prompt --roster and compose-review all ' +
+    'read one value. Omit for the full (high) roster.',
+} as const;
+
 export const SEVERITY_FLOORS: ReadonlySet<string> = new Set([
   'critical',
   'suggestion',
@@ -153,6 +196,14 @@ export const SEVERITY_FLOORS: ReadonlySet<string> = new Set([
   // default's name, so an operator typing `--severity-floor auto` means
   // "the round-adaptive rule" (overriding a configured floor), not a typo
   // to reject and then promote into a bogus file target.
+  'auto',
+]);
+
+export const TOPOLOGIES: ReadonlySet<string> = new Set([
+  'minimal',
+  // `auto` is a legal EXPLICIT value for the same reason it is for
+  // `--severity-floor`: typing `--topology auto` means "the standing
+  // effort-driven pipeline", not a typo to reject.
   'auto',
 ]);
 
@@ -200,6 +251,11 @@ function asSeverityFloor(value: string): ReviewSeverityFloor | 'auto' | null {
   return SEVERITY_FLOORS.has(lower)
     ? (lower as ReviewSeverityFloor | 'auto')
     : null;
+}
+
+function asTopology(value: string): ReviewTopology | null {
+  const lower = value.toLowerCase();
+  return TOPOLOGIES.has(lower) ? (lower as ReviewTopology) : null;
 }
 
 /**
@@ -301,31 +357,35 @@ function classifyToken(token: string): ReviewTarget | 'invalid-url' | null {
   return { type: 'file', path: token };
 }
 
+interface ReviewArgsDefaults {
+  /**
+   * The standing default from `review.effort`, raw (`auto` already mapped
+   * to undefined by the caller), applied when neither an explicit nor a
+   * remembered effort is present. Validated case-insensitively exactly like
+   * an explicit flag — an invalid value warns and falls back instead of
+   * dropping silently. The `--comment`/`--fix` forcings still override it.
+   */
+  effort?: string;
+  /** The last valid effort explicitly typed for this project. */
+  lastUsedEffort?: ReviewEffort;
+  /**
+   * The standing `review.comment` setting: treat a PR review as if
+   * `--comment` was passed. The target binding is untouched — the run still
+   * authorises only the PR the arguments name.
+   */
+  comment?: boolean;
+  /**
+   * The standing `review.severityFloor` setting, raw (`auto` already mapped
+   * to undefined by the caller). Validated exactly like the flag — a typo
+   * warns and falls back to the round-adaptive default.
+   */
+  severityFloor?: string;
+}
+
 export function parseReviewArgs(
   raw: string,
-  defaults: {
-    /**
-     * The standing default from `review.effort`, raw (`auto` already mapped
-     * to undefined by the caller), applied when no `--effort` flag is
-     * present. Validated case-insensitively exactly like an explicit flag —
-     * an invalid value warns and falls back instead of dropping silently.
-     * An explicit flag still wins; the `--comment`/`--fix` forcings still
-     * override it.
-     */
-    effort?: string;
-    /**
-     * The standing `review.comment` setting: treat a PR review as if
-     * `--comment` was passed. The target binding is untouched — the run still
-     * authorises only the PR the arguments name.
-     */
-    comment?: boolean;
-    /**
-     * The standing `review.severityFloor` setting, raw (`auto` already mapped
-     * to undefined by the caller). Validated exactly like the flag — a typo
-     * warns and falls back to the round-adaptive default.
-     */
-    severityFloor?: string;
-  } = {},
+  defaults: ReviewArgsDefaults = {},
+  rememberExplicitEffort?: (effort: ReviewEffort) => void,
 ): ParsedReviewArgs {
   const tokens = tokenizeArgs(raw);
   const warnings: string[] = [];
@@ -336,6 +396,7 @@ export function parseReviewArgs(
   let resumeRequested = false;
   let explicitEffort: ReviewEffort | null = null;
   let explicitFloor: ReviewSeverityFloor | 'auto' | null = null;
+  let explicitTopology: ReviewTopology | null = null;
   let recordedHostFlag: string | undefined;
 
   // The configured default gets the same validation as an explicit flag:
@@ -384,6 +445,8 @@ export function parseReviewArgs(
   // deferred-warning problem; its issues are a separate list because its
   // resolution sentence is its own.
   const floorIssues: EffortIssue[] = [];
+  // `--topology` shares the value-token grammar too, for the same reason.
+  const topologyIssues: EffortIssue[] = [];
 
   // First pass: pull out flags (and each value-taking flag's value token,
   // when the spaced form legitimately consumes one). Non-flag tokens are kept
@@ -392,7 +455,7 @@ export function parseReviewArgs(
   interface Kept {
     token: string;
     /** Set when this token arrived as an invalid value of the named flag. */
-    invalidValueOf?: '--effort' | '--severity-floor';
+    invalidValueOf?: '--effort' | '--severity-floor' | '--topology';
   }
   const kept: Kept[] = [];
 
@@ -506,6 +569,40 @@ export function parseReviewArgs(
         continue;
       }
       kept.push({ token: next, invalidValueOf: '--severity-floor' });
+      i++;
+      continue;
+    }
+
+    if (token === '--topology' || token.startsWith('--topology=')) {
+      if (token.includes('=')) {
+        const value = token.slice(token.indexOf('=') + 1);
+        const topologyValue = asTopology(value);
+        if (topologyValue !== null) {
+          explicitTopology = topologyValue;
+        } else if (value !== '' && isPrShapedToken(value)) {
+          kept.push({ token: value, invalidValueOf: '--topology' });
+        } else {
+          topologyIssues.push({ kind: 'invalid-eq', value });
+        }
+        continue;
+      }
+      const next = i + 1 < tokens.length ? tokens[i + 1] : undefined;
+      const nextTopology = next !== undefined ? asTopology(next) : null;
+      if (nextTopology !== null) {
+        explicitTopology = nextTopology;
+        i++;
+        continue;
+      }
+      if (next === '') {
+        topologyIssues.push({ kind: 'missing' });
+        i++;
+        continue;
+      }
+      if (next === undefined || isFlag(next)) {
+        topologyIssues.push({ kind: 'missing' });
+        continue;
+      }
+      kept.push({ token: next, invalidValueOf: '--topology' });
       i++;
       continue;
     }
@@ -650,10 +747,18 @@ export function parseReviewArgs(
           (k) => k.invalidValueOf !== undefined && isPrUrlToken(k.token),
         )?.token
       : undefined;
+  // Each flag's deferred-warning list, keyed by the flag an invalid value
+  // arrived as; resolved inside the guard below, where `invalidValueOf` is
+  // known to be set.
+  const issueListFor = {
+    '--effort': effortIssues,
+    '--severity-floor': floorIssues,
+    '--topology': topologyIssues,
+  };
   let rescuedPr = false;
   for (const k of kept) {
-    const issues = k.invalidValueOf === '--effort' ? effortIssues : floorIssues;
     if (k.invalidValueOf !== undefined) {
+      const issues = issueListFor[k.invalidValueOf];
       const survives = isPrShaped(k.token)
         ? !hasValidCandidate && distinctPr.size === 1
         : soleCandidate;
@@ -732,30 +837,64 @@ export function parseReviewArgs(
 
   const isPr = target.type === 'pr-number' || target.type === 'pr-url';
 
+  // The topology resolves like the effort — an explicit flag beats the
+  // standing `auto` default. There is no configured (settings) topology: the
+  // minimal arm is an explicit A/B comparison, never a background default.
+  const topology: ReviewTopology = explicitTopology ?? 'auto';
+  const topologySource: ParsedReviewArgs['topologySource'] =
+    explicitTopology !== null ? 'explicit' : 'default';
+  // The minimal arm is terminal-only — it neither posts to a PR nor edits a
+  // working tree — so both write operations are gated off it, and so is
+  // `--resume`: a fresh single pass cannot continue an interrupted pipeline
+  // run, and letting `fetch-pr --resume` consume that state would destroy a
+  // run this arm never continues. This keeps the guarantee in code rather
+  // than in whichever prose the orchestrator reads.
+  const isMinimal = topology === 'minimal';
+
   const commentRequested = commentRequestedByFlag || defaults.comment === true;
-  const commentEffective = commentRequested && isPr;
+  const commentEffective = commentRequested && isPr && !isMinimal;
   if (commentRequestedByFlag && !isPr) {
     warnings.push(
       'Warning: `--comment` flag is ignored because the review target is not a PR.',
     );
+  } else if (commentRequested && isPr && isMinimal) {
+    // Only when minimal is THE reason a would-be-effective comment is
+    // suppressed: on a non-PR target the comment does not apply anyway, and
+    // that case keeps its usual handling above. The text names the source
+    // the request actually came from, the same distinction the
+    // forced-by-comment warning makes: a setting-driven operator told the
+    // `--comment` flag is ignored goes hunting a flag they never typed.
+    warnings.push(
+      commentRequestedByFlag
+        ? 'Warning: `--comment` is ignored because `--topology minimal` is terminal-only — the minimal arm posts nothing.'
+        : 'Warning: the `review.comment` setting is ignored because `--topology minimal` is terminal-only — the minimal arm posts nothing.',
+    );
   }
 
-  const resumeEffective = resumeRequested && isPr;
+  const resumeEffective = resumeRequested && isPr && !isMinimal;
   if (resumeRequested && !isPr) {
     warnings.push(
       'Warning: `--resume` flag is ignored because the review target is not a PR — only a PR review has interrupted state to continue.',
+    );
+  } else if (resumeRequested && isPr && isMinimal) {
+    warnings.push(
+      'Warning: `--resume` is ignored because `--topology minimal` runs a fresh single pass — it neither continues nor consumes an interrupted run.',
     );
   }
 
   // `--fix` edits a working tree, so it needs one that outlives the review. A
   // PR review's tree is the ephemeral worktree Step 9 removes; a `local` or
   // `file` review's tree is the user's own checkout.
-  const fixEffective = fixRequested && !isPr;
+  const fixEffective = fixRequested && !isPr && !isMinimal;
   if (fixRequested && isPr) {
     warnings.push(
       'Warning: `--fix` flag is ignored because a PR review runs in an ephemeral ' +
         'worktree that is deleted when the review ends — there is no durable tree to ' +
         'fix. Use `--comment` to publish the findings instead.',
+    );
+  } else if (fixRequested && isMinimal) {
+    warnings.push(
+      'Warning: `--fix` is ignored because `--topology minimal` is terminal-only — the minimal arm edits nothing.',
     );
   }
 
@@ -764,6 +903,9 @@ export function parseReviewArgs(
   if (explicitEffort !== null) {
     effort = explicitEffort;
     effortSource = 'explicit';
+  } else if (defaults.lastUsedEffort !== undefined) {
+    effort = defaults.lastUsedEffort;
+    effortSource = 'last_used';
   } else if (configuredEffort !== undefined) {
     effort = configuredEffort;
     effortSource = 'configured';
@@ -800,6 +942,13 @@ export function parseReviewArgs(
     );
   }
 
+  if (effortSource === 'last_used') {
+    const example = effort === 'medium' ? 'high' : 'medium';
+    warnings.push(
+      `No effort level given — reusing ${effort}, the level you typed last time. Type a level like \`/review --effort ${example}\` to change it.`,
+    );
+  }
+
   // Now the resolution is final; compose the deferred effort warnings so
   // each states what is actually in effect.
   const resolution =
@@ -813,7 +962,9 @@ export function parseReviewArgs(
           ? '`--fix` forces at least medium effort'
           : effortSource === 'configured'
             ? 'using the configured review.effort'
-            : 'using the default effort';
+            : effortSource === 'last_used'
+              ? 'using the last explicitly typed effort'
+              : 'using the default effort';
   for (const issue of effortIssues) {
     switch (issue.kind) {
       case 'invalid-eq':
@@ -900,6 +1051,41 @@ export function parseReviewArgs(
     );
   }
 
+  // The topology's deferred warnings, composed now that the resolution is
+  // final — the same shape as the effort's and the floor's.
+  const topologyResolution =
+    topologySource === 'explicit'
+      ? `--topology ${topology} (the last valid occurrence) is in effect`
+      : 'using the default topology (auto)';
+  for (const issue of topologyIssues) {
+    switch (issue.kind) {
+      case 'invalid-eq':
+        warnings.push(
+          `Invalid --topology value ${JSON.stringify(issue.value)}; ${topologyResolution}.`,
+        );
+        break;
+      case 'missing':
+        warnings.push(`--topology requires a value; ${topologyResolution}.`);
+        break;
+      case 'discarded':
+        warnings.push(
+          `Invalid --topology value ${JSON.stringify(issue.value)} discarded; ${topologyResolution}.`,
+        );
+        break;
+      case 'kept-as-target':
+        warnings.push(
+          `Invalid --topology value ${JSON.stringify(issue.value)}; treating it as the review target — ${topologyResolution}.`,
+        );
+        break;
+      default:
+        break;
+    }
+  }
+
+  if (explicitEffort !== null) {
+    rememberExplicitEffort?.(explicitEffort);
+  }
+
   return {
     target,
     effort,
@@ -908,6 +1094,8 @@ export function parseReviewArgs(
     fix: { requested: fixRequested, effective: fixEffective },
     severityFloor,
     severityFloorSource,
+    topology,
+    topologySource,
     ...(recordedHostFlag !== undefined ? { host: recordedHostFlag } : {}),
     resume: { requested: resumeRequested, effective: resumeEffective },
     extraTokens,
@@ -951,10 +1139,75 @@ function reviewDefaultsFromSettings(): {
   };
 }
 
+function readLastReviewEffort(path: string): ReviewEffort | undefined {
+  let value: string;
+  try {
+    if (!existsSync(path)) return undefined;
+    value = readFileSync(path, 'utf8').trim();
+  } catch (error) {
+    writeStderrLineSafe(
+      `NOTE: the remembered review effort at ${path} could not be read (${
+        error instanceof Error ? error.message.split('\n')[0] : String(error)
+      }); resolving from review.effort and the target default instead. Type \`--effort <level>\` to record a new one.`,
+    );
+    return undefined;
+  }
+  const effort = asEffort(value);
+  if (effort === null) {
+    writeStderrLineSafe(
+      `NOTE: ${path} must contain low, medium, or high; got ${JSON.stringify(value)}. Ignoring it; resolving from review.effort and the target default instead. Type \`--effort <level>\` to record a new one.`,
+    );
+    return undefined;
+  }
+  return effort;
+}
+
+function writeLastReviewEffort(
+  path: string,
+  explicitEffort: ReviewEffort,
+  resolvedEffort: ReviewEffort,
+): void {
+  try {
+    mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+    atomicWriteFileSync(path, `${explicitEffort}\n`, {
+      mode: 0o600,
+      forceMode: true,
+      noFollow: true,
+    });
+  } catch (error) {
+    writeStderrLineSafe(
+      `NOTE: the explicit review effort ${explicitEffort} could not be remembered at ${path} (${
+        error instanceof Error ? error.message.split('\n')[0] : String(error)
+      }); this review still uses ${resolvedEffort}.`,
+    );
+  }
+}
+
+function parseReviewArgsWithMemory(
+  raw: string,
+  defaults: ReviewArgsDefaults,
+  effortPath: string,
+): ParsedReviewArgs {
+  let explicitEffort: ReviewEffort | undefined;
+  const initial = parseReviewArgs(raw, defaults, (effort) => {
+    explicitEffort = effort;
+  });
+
+  if (explicitEffort !== undefined) {
+    writeLastReviewEffort(effortPath, explicitEffort, initial.effort);
+    return initial;
+  }
+
+  const lastUsedEffort = readLastReviewEffort(effortPath);
+  return lastUsedEffort === undefined
+    ? initial
+    : parseReviewArgs(raw, { ...defaults, lastUsedEffort });
+}
+
 export const parseArgsCommand: CommandModule = {
   command: 'parse-args [raw]',
   describe:
-    'Parse the /review skill argument string (--comment, --fix, --resume, --effort, --severity-floor, target disambiguation) and emit the verdict as JSON; pass the string on stdin via --stdin (a positional that begins with a dash never reaches this handler — yargs rejects it as an unknown flag)',
+    'Parse the /review skill argument string (--comment, --fix, --resume, --effort, --severity-floor, --topology, target disambiguation) and emit the verdict as JSON; pass the string on stdin via --stdin (a positional that begins with a dash never reaches this handler — yargs rejects it as an unknown flag)',
   builder: (yargs) =>
     yargs
       .positional('raw', {
@@ -1016,7 +1269,16 @@ export const parseArgsCommand: CommandModule = {
       writeStderrLineSafe(bundleNotice);
     }
 
-    const parsed = parseReviewArgs(rawStr, reviewDefaultsFromSettings());
+    const projectRoot = process.cwd();
+    const effortPath = lastReviewEffortPath(
+      projectRoot,
+      process.env['QWEN_CODE_PROJECT_DIR'],
+    );
+    const parsed = parseReviewArgsWithMemory(
+      rawStr,
+      reviewDefaultsFromSettings(),
+      effortPath,
+    );
     const json = JSON.stringify(parsed, null, 2);
     if (out) {
       mkdirSync(dirname(out), { recursive: true });

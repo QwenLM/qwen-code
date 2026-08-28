@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -24,10 +24,24 @@ import {
   buildPermissionRules,
   getRuleDisplayName,
   buildHumanReadableRuleLabel,
+  TOOL_NAME_ALIASES,
 } from './rule-parser.js';
 import { PermissionManager } from './permission-manager.js';
 import type { PermissionManagerConfig } from './permission-manager.js';
 import { normalizeToolNameForProvider } from '../utils/tool-name-utils.js';
+import { ToolNames, ToolDisplayNames } from '../tools/tool-names.js';
+
+const debugLoggerMock = vi.hoisted(() => ({
+  isEnabled: vi.fn().mockReturnValue(false),
+  debug: vi.fn(),
+  info: vi.fn(),
+  warn: vi.fn(),
+  error: vi.fn(),
+}));
+
+vi.mock('../utils/debugLogger.js', () => ({
+  createDebugLogger: () => debugLoggerMock,
+}));
 
 // ─── resolveToolName ─────────────────────────────────────────────────────────
 
@@ -80,6 +94,41 @@ describe('resolveToolName', () => {
   it('returns unknown names unchanged', async () => {
     expect(resolveToolName('my_mcp_tool')).toBe('my_mcp_tool');
     expect(resolveToolName('mcp__server__tool')).toBe('mcp__server__tool');
+  });
+});
+
+// ─── resolveToolName exhaustiveness (#9827) ─────────────────────────────────
+
+describe('resolveToolName exhaustiveness (#9827)', () => {
+  // Every built-in tool's canonical name AND display name must resolve
+  // through TOOL_NAME_ALIASES. A tool added to tool-names.ts without a
+  // matching rule-parser alias entry silently never matches any permission
+  // rule — the exact #9827 bug class — and under the registry allowlist
+  // such a missed entry now also breaks allowlist coverage (the rule
+  // parses valid, activates the allowlist, yet covers nothing). Let drift
+  // fail CI instead of failing silently for a user.
+  it.each(
+    Object.entries(ToolDisplayNames).map(([key, displayName]) => ({
+      key,
+      displayName,
+      canonicalName: ToolNames[key as keyof typeof ToolNames],
+    })),
+  )(
+    'covers $key ($displayName -> $canonicalName)',
+    ({ displayName, canonicalName }) => {
+      expect(canonicalName).toBeDefined();
+      // The canonical name itself is a valid rule spelling.
+      expect(resolveToolName(canonicalName)).toBe(canonicalName);
+      // The /tools display name — the spelling users copy into rules —
+      // must resolve to the canonical tool.
+      expect(resolveToolName(displayName)).toBe(canonicalName);
+    },
+  );
+
+  it('registers every canonical tool name in the alias map', () => {
+    for (const canonicalName of Object.values(ToolNames)) {
+      expect(TOOL_NAME_ALIASES[canonicalName]).toBe(canonicalName);
+    }
   });
 });
 
@@ -1630,6 +1679,13 @@ function makeConfig(
     projectRoot: string;
     cwd: string;
     approvalMode: string;
+    /**
+     * Settings-sourced allow rules (the registry-allowlist activator).
+     * Defaults to `permissionsAllow`, mirroring the CLI path where the
+     * merged list is built from settings; pass [] to simulate rules that
+     * come only from `--allowed-tools` / the SDK `allowedTools` param.
+     */
+    registryAllowList: string[];
   }> = {},
 ): PermissionManagerConfig {
   return {
@@ -1637,6 +1693,7 @@ function makeConfig(
     getPermissionsAsk: () => opts.permissionsAsk,
     getPermissionsDeny: () => opts.permissionsDeny,
     getCoreTools: () => opts.coreTools,
+    getRegistryAllowList: () => opts.registryAllowList ?? opts.permissionsAllow,
     getProjectRoot: () => opts.projectRoot ?? '/project',
     getCwd: () => opts.cwd ?? '/project',
     getApprovalMode: () => opts.approvalMode ?? 'default',
@@ -2529,15 +2586,26 @@ describe('PermissionManager', () => {
       expect(await pm.isToolEnabled('run_shell_command')).toBe(false); // in list but denied
     });
 
-    it('permissionsAllow alone does NOT restrict unlisted tools (not a whitelist)', async () => {
-      // This verifies the previous incorrect behavior is gone: permissionsAllow
-      // only means "auto-approve", it does NOT block unlisted tools.
+    it('permissionsAllow demotes unlisted tools to deferred (docs migration semantic)', async () => {
+      // Per docs/users/configuration/settings.md the `tools.core` whitelist
+      // migrates to `permissions.allow`. Since #10075 an unlisted tool is
+      // not hard-disabled: it is demoted to `deferred` — still registered
+      // and callable, but hidden from the eager model request, which is
+      // what keeps its schema out of the model request (#9827) without the
+      // tool silently disappearing (#10075).
       pm = new PermissionManager(
         makeConfig({ permissionsAllow: ['read_file'] }),
       );
       pm.initialize();
       expect(await pm.isToolEnabled('read_file')).toBe(true);
-      expect(await pm.isToolEnabled('run_shell_command')).toBe(true); // not denied, just unreviewed
+      // unlisted → deferred (registered + callable, schema not sent eagerly)
+      expect(await pm.isToolEnabled('run_shell_command')).toBe(true);
+      expect(await pm.getToolRegistrationStatus('run_shell_command')).toBe(
+        'deferred',
+      );
+      expect(await pm.getToolRegistrationStatus('read_file')).toBe(
+        'registered',
+      );
     });
 
     // Non-core tools bypass coreTools allowlist
@@ -2606,6 +2674,571 @@ describe('PermissionManager', () => {
     });
   });
 
+  describe('permissions.allow registry allowlist (#9827, #10075)', () => {
+    it('unlisted built-in tools are deferred, not disabled (#10075)', async () => {
+      // The reporter's configuration from #9827: only these tools are
+      // covered; send_message / update_goal / loop_wakeup /
+      // read_mcp_resource (whose large maxLength schemas break llama.cpp
+      // grammar compilation) must NOT reach the eager model request.
+      // Since #10075 they are DEFERRED — still registered and callable —
+      // rather than disabled, so they never silently disappear.
+      pm = new PermissionManager(
+        makeConfig({
+          permissionsAllow: [
+            'ReadFile',
+            'WriteFile',
+            'Edit',
+            'Grep',
+            'Glob',
+            'ListFiles',
+            'Shell',
+            'WebFetch',
+          ],
+        }),
+      );
+      pm.initialize();
+      expect(pm.isPermissionsAllowListActive()).toBe(true);
+      // Listed (via display-name aliases) → fully registered
+      expect(await pm.getToolRegistrationStatus('read_file')).toBe(
+        'registered',
+      );
+      expect(await pm.getToolRegistrationStatus('write_file')).toBe(
+        'registered',
+      );
+      expect(await pm.getToolRegistrationStatus('edit')).toBe('registered');
+      expect(await pm.getToolRegistrationStatus('grep_search')).toBe(
+        'registered',
+      );
+      expect(await pm.getToolRegistrationStatus('glob')).toBe('registered');
+      expect(await pm.getToolRegistrationStatus('list_directory')).toBe(
+        'registered',
+      );
+      expect(await pm.getToolRegistrationStatus('run_shell_command')).toBe(
+        'registered',
+      );
+      expect(await pm.getToolRegistrationStatus('web_fetch')).toBe(
+        'registered',
+      );
+      // Unlisted — core AND non-core built-ins alike — are deferred:
+      // callable (isToolEnabled true) but hidden from the eager request.
+      for (const name of [
+        'send_message',
+        'update_goal',
+        'get_goal',
+        'loop_wakeup',
+        'read_mcp_resource',
+        'agent',
+        'todo_write',
+      ]) {
+        expect(await pm.isToolEnabled(name)).toBe(true);
+        expect(await pm.getToolRegistrationStatus(name)).toBe('deferred');
+      }
+      // monitor stays covered: "Shell" rules cover it on purpose so the
+      // shell tool can't be bypassed by switching to monitor (same
+      // meta-category semantic as runtime rule matching).
+      expect(await pm.getToolRegistrationStatus('monitor')).toBe('registered');
+    });
+
+    it('no allow rules → allowlist inactive, all tools stay enabled', async () => {
+      pm = new PermissionManager(makeConfig({}));
+      pm.initialize();
+      expect(pm.isPermissionsAllowListActive()).toBe(false);
+      expect(await pm.isToolEnabled('read_file')).toBe(true);
+      expect(await pm.isToolEnabled('send_message')).toBe(true);
+      expect(await pm.isToolEnabled('agent')).toBe(true);
+      expect(await pm.isToolEnabled('run_shell_command')).toBe(true);
+    });
+
+    it('specifier allow rules keep their tool registered', async () => {
+      // "Bash(npm test)" is an auto-approval grant for one command; the
+      // shell tool itself must stay in the registry (other invocations
+      // still go through the normal approval flow).
+      pm = new PermissionManager(
+        makeConfig({ permissionsAllow: ['Bash(npm test)'] }),
+      );
+      pm.initialize();
+      expect(await pm.getToolRegistrationStatus('run_shell_command')).toBe(
+        'registered',
+      );
+      expect(await pm.getToolRegistrationStatus('read_file')).toBe('deferred');
+    });
+
+    it('meta-category rules cover their tool families', async () => {
+      pm = new PermissionManager(makeConfig({ permissionsAllow: ['Read'] }));
+      pm.initialize();
+      expect(await pm.getToolRegistrationStatus('read_file')).toBe(
+        'registered',
+      );
+      expect(await pm.getToolRegistrationStatus('grep_search')).toBe(
+        'registered',
+      );
+      expect(await pm.getToolRegistrationStatus('glob')).toBe('registered');
+      expect(await pm.getToolRegistrationStatus('list_directory')).toBe(
+        'registered',
+      );
+      expect(await pm.getToolRegistrationStatus('zoom_image')).toBe(
+        'registered',
+      );
+      expect(await pm.getToolRegistrationStatus('edit')).toBe('deferred');
+      // "Bash" covers monitor (same runtime matching semantic)
+      pm = new PermissionManager(makeConfig({ permissionsAllow: ['Bash'] }));
+      pm.initialize();
+      expect(await pm.getToolRegistrationStatus('monitor')).toBe('registered');
+    });
+
+    it('ask rules keep their tool registered under an active allowlist (#9827)', async () => {
+      // `allow: ["ReadFile"]` + `ask: ["Shell"]` is a natural "auto-approve
+      // reads, always confirm shell" posture. The ask rule expresses "this
+      // tool must stay usable, with confirmation", so the shell family must
+      // NOT be silently deregistered just because no ALLOW rule covers it —
+      // otherwise "always require user confirmation" becomes "tool
+      // unavailable" and the ask rule can never fire.
+      pm = new PermissionManager(
+        makeConfig({
+          permissionsAllow: ['ReadFile'],
+          permissionsAsk: ['Shell'],
+        }),
+      );
+      pm.initialize();
+      expect(pm.isPermissionsAllowListActive()).toBe(true);
+      expect(await pm.isToolEnabled('read_file')).toBe(true);
+      expect(await pm.isToolEnabled('run_shell_command')).toBe(true);
+      // "Shell" ask rule covers monitor too (same meta-category semantic).
+      expect(await pm.isToolEnabled('monitor')).toBe(true);
+      // The ask rule still governs the runtime decision.
+      expect(await pm.evaluate({ toolName: 'run_shell_command' })).toBe('ask');
+      // A tool covered by neither an allow nor an ask rule stays deferred.
+      expect(await pm.getToolRegistrationStatus('send_message')).toBe(
+        'deferred',
+      );
+    });
+
+    it('ask-only rules never activate the allowlist (#9827)', async () => {
+      // Complementary activation boundary to the membership test above:
+      // `permissions.ask: ["Shell"]` with NO allow rules is a natural
+      // "always confirm shell" posture. Ask rules count toward membership
+      // under an ACTIVE allowlist, but they must never ACTIVATE it —
+      // otherwise that posture would flip isPermissionsAllowListActive()
+      // to true and deregister every unlisted built-in: "always confirm"
+      // silently becomes "most tools vanish from the model".
+      pm = new PermissionManager(makeConfig({ permissionsAsk: ['Shell'] }));
+      pm.initialize();
+      expect(pm.isPermissionsAllowListActive()).toBe(false);
+      expect(await pm.isToolEnabled('run_shell_command')).toBe(true);
+      expect(await pm.isToolEnabled('send_message')).toBe(true);
+      // The ask rule still governs the runtime decision.
+      expect(await pm.evaluate({ toolName: 'run_shell_command' })).toBe('ask');
+    });
+
+    it('removing a startup ask rule mid-session keeps its tools registered (#9827)', async () => {
+      // Same monotonic-membership contract as allow rules: removing an ask
+      // rule live must not deregister a running tool.
+      pm = new PermissionManager(
+        makeConfig({
+          permissionsAllow: ['ReadFile'],
+          permissionsAsk: ['Shell'],
+        }),
+      );
+      pm.initialize();
+      expect(await pm.isToolEnabled('run_shell_command')).toBe(true);
+      expect(pm.removePersistentRule('Shell', 'ask')).toBe(true);
+      expect(await pm.isToolEnabled('run_shell_command')).toBe(true);
+      expect(await pm.getToolRegistrationStatus('send_message')).toBe(
+        'deferred',
+      );
+    });
+
+    it('deny rules still win over allowlist membership', async () => {
+      pm = new PermissionManager(
+        makeConfig({
+          permissionsAllow: ['Shell'],
+          permissionsDeny: ['Shell'],
+        }),
+      );
+      pm.initialize();
+      expect(await pm.isToolEnabled('run_shell_command')).toBe(false);
+    });
+
+    it('deny via display name removes the tool from the registry', async () => {
+      // The second half of #9827: rules copied from /tools display names
+      // (SendMessage, UpdateGoal, ...) used to silently never match.
+      pm = new PermissionManager(
+        makeConfig({ permissionsDeny: ['SendMessage', 'UpdateGoal'] }),
+      );
+      pm.initialize();
+      expect(await pm.isToolEnabled('send_message')).toBe(false);
+      expect(await pm.isToolEnabled('update_goal')).toBe(false);
+      expect(await pm.isToolEnabled('read_file')).toBe(true);
+    });
+
+    it('MCP tools are exempt from the allowlist', async () => {
+      pm = new PermissionManager(
+        makeConfig({ permissionsAllow: ['read_file'] }),
+      );
+      pm.initialize();
+      expect(
+        await pm.isToolEnabled('mcp__markitdown__convert_to_markdown'),
+      ).toBe(true);
+      expect(await pm.isToolEnabled('mcp__puppeteer__navigate')).toBe(true);
+    });
+
+    it('structured_output is exempt from the allowlist', async () => {
+      // The synthetic --json-schema terminal contract must survive an
+      // active allowlist, same exemption as under --core-tools.
+      pm = new PermissionManager(
+        makeConfig({ permissionsAllow: ['read_file'] }),
+      );
+      pm.initialize();
+      expect(await pm.isToolEnabled('structured_output')).toBe(true);
+    });
+
+    it('computer_use__* tools are exempt from the allowlist (#9827)', async () => {
+      // The generated cua-driver family (35 tools, enabled by default) has
+      // no alias entry, meta-category, or wildcard rule form — its wire
+      // names churn on every cua-driver version bump — and every member is
+      // shouldDefer=true, so the schemas never enter the eager model
+      // request. The gate must not silently deregister the family whenever
+      // the allowlist is active; the legacy tools.core gate never dropped
+      // these either (non-core tools bypassed it).
+      pm = new PermissionManager(
+        makeConfig({ permissionsAllow: ['ReadFile', 'Shell'] }),
+      );
+      pm.initialize();
+      expect(pm.isPermissionsAllowListActive()).toBe(true);
+      expect(await pm.isToolEnabled('computer_use__click')).toBe(true);
+      expect(await pm.isToolEnabled('computer_use__type_text')).toBe(true);
+      expect(await pm.isToolEnabled('computer_use__get_window_state')).toBe(
+        true,
+      );
+      // Unrelated unlisted built-ins stay deferred.
+      expect(await pm.getToolRegistrationStatus('send_message')).toBe(
+        'deferred',
+      );
+    });
+
+    it('a whole-tool deny rule still wins over the computer_use exemption', async () => {
+      pm = new PermissionManager(
+        makeConfig({
+          permissionsAllow: ['read_file'],
+          permissionsDeny: ['computer_use__click'],
+        }),
+      );
+      pm.initialize();
+      expect(await pm.isToolEnabled('computer_use__click')).toBe(false);
+      expect(await pm.isToolEnabled('computer_use__type_text')).toBe(true);
+    });
+
+    it('plan-mode lifecycle tools are exempt from the allowlist (#9827)', async () => {
+      // Under the exact reporter configuration the plan-mode system reminder
+      // still instructs the model to call exit_plan_mode, so the sanctioned
+      // plan-flow tools must stay registered. Same synthetic-system-tool
+      // exemption class as structured_output.
+      pm = new PermissionManager(
+        makeConfig({
+          permissionsAllow: [
+            'ReadFile',
+            'WriteFile',
+            'Edit',
+            'Grep',
+            'Glob',
+            'ListFiles',
+            'Shell',
+            'WebFetch',
+          ],
+        }),
+      );
+      pm.initialize();
+      expect(pm.isPermissionsAllowListActive()).toBe(true);
+      expect(await pm.isToolEnabled('exit_plan_mode')).toBe(true);
+      expect(await pm.isToolEnabled('enter_plan_mode')).toBe(true);
+      expect(await pm.isToolEnabled('ask_user_question')).toBe(true);
+      // Unrelated unlisted built-ins stay deferred.
+      expect(await pm.getToolRegistrationStatus('send_message')).toBe(
+        'deferred',
+      );
+    });
+
+    it('a whole-tool deny rule still wins over the plan-mode exemption', async () => {
+      pm = new PermissionManager(
+        makeConfig({
+          permissionsAllow: ['read_file'],
+          permissionsDeny: ['exit_plan_mode'],
+        }),
+      );
+      pm.initialize();
+      expect(await pm.isToolEnabled('exit_plan_mode')).toBe(false);
+    });
+
+    it('task_stop is exempt from the allowlist (#9827)', async () => {
+      // Under the exact reporter configuration run_shell_command is listed
+      // and its model-facing copy says to use task_stop to stop a
+      // background command (and not to use broad process-name kills); the
+      // background-promotion result instructs `task_stop({ task_id })`
+      // verbatim. task_stop is shouldDefer=true (task-stop.ts), the same
+      // deferred-schema property the computer_use__* exemption cites, so
+      // gating it buys nothing for the schema-shrink goal and only strips
+      // the sanctioned stop flow.
+      pm = new PermissionManager(
+        makeConfig({
+          permissionsAllow: [
+            'ReadFile',
+            'WriteFile',
+            'Edit',
+            'Grep',
+            'Glob',
+            'ListFiles',
+            'Shell',
+            'WebFetch',
+          ],
+        }),
+      );
+      pm.initialize();
+      expect(pm.isPermissionsAllowListActive()).toBe(true);
+      expect(await pm.isToolEnabled('run_shell_command')).toBe(true);
+      expect(await pm.isToolEnabled('task_stop')).toBe(true);
+      // Unrelated unlisted built-ins stay deferred.
+      expect(await pm.getToolRegistrationStatus('send_message')).toBe(
+        'deferred',
+      );
+    });
+
+    it('a whole-tool deny rule still wins over the task_stop exemption', async () => {
+      pm = new PermissionManager(
+        makeConfig({
+          permissionsAllow: ['read_file'],
+          permissionsDeny: ['task_stop'],
+        }),
+      );
+      pm.initialize();
+      expect(await pm.isToolEnabled('task_stop')).toBe(false);
+    });
+
+    it('tool_search is exempt from the allowlist (#9827)', async () => {
+      // When ToolSearch is missing from the registry, client.ts
+      // (`resolveDeferredToolsForReminder`) eagerly force-reveals every
+      // registered deferred tool (all mcp__* and the deferred
+      // computer_use__* family) into the eager model request, and
+      // `preloadDeferredToolsWithinBudget` early-returns without it. Under
+      // the canonical narrow allowlist this would invert the schema-shrink
+      // goal into maximal schema bloat for exactly the deferred families
+      // the other exemptions preserve for ToolSearch discoverability.
+      pm = new PermissionManager(
+        makeConfig({ permissionsAllow: ['Bash(npm test)'] }),
+      );
+      pm.initialize();
+      expect(pm.isPermissionsAllowListActive()).toBe(true);
+      expect(await pm.isToolEnabled('run_shell_command')).toBe(true);
+      expect(await pm.isToolEnabled('tool_search')).toBe(true);
+      // Unrelated unlisted built-ins stay deferred.
+      expect(await pm.getToolRegistrationStatus('read_file')).toBe('deferred');
+    });
+
+    it('a whole-tool deny rule still wins over the tool_search exemption', async () => {
+      // Explicit denial (e.g. the deepseek prefix-cache path pushes
+      // 'tool_search' into mergedDeny) must still remove it.
+      pm = new PermissionManager(
+        makeConfig({
+          permissionsAllow: ['read_file'],
+          permissionsDeny: ['tool_search'],
+        }),
+      );
+      pm.initialize();
+      expect(await pm.isToolEnabled('tool_search')).toBe(false);
+    });
+
+    it('session-granted allow rules extend membership but never activate the allowlist', async () => {
+      // No configured allow rules → allowlist must stay inactive even after
+      // a mid-session "Always allow" / skill allowedTools grant, or one
+      // approval would permission-error every other tool mid-session.
+      pm = new PermissionManager(makeConfig({}));
+      pm.initialize();
+      pm.addSessionAllowRule('edit');
+      expect(pm.isPermissionsAllowListActive()).toBe(false);
+      expect(await pm.isToolEnabled('read_file')).toBe(true);
+      expect(await pm.isToolEnabled('edit')).toBe(true);
+    });
+
+    it('session-granted allow rules flip the runtime gate under an active allowlist', async () => {
+      // Skill allowedTools grants (applySkillAllowedTools) and "Always
+      // allow" choices extend allowlist membership, so the runtime
+      // permission gate auto-approves their tools when the session started
+      // with configured allow rules.
+      //
+      // Narrowed contract (#9827, #10075): this only asserts the
+      // PermissionManager-level half. A grant promotes a deferred tool to
+      // a covered member for runtime approval, but cannot move its schema
+      // into the eager model request — registry composition is
+      // restart-scoped (see the caveat-warning tests below and
+      // `isCoveredByAllowOrAskRule`).
+      pm = new PermissionManager(
+        makeConfig({ permissionsAllow: ['read_file'] }),
+      );
+      pm.initialize();
+      expect(await pm.getToolRegistrationStatus('cron_create')).toBe(
+        'deferred',
+      );
+      pm.addSessionAllowRule('cron_create');
+      expect(await pm.isToolEnabled('cron_create')).toBe(true);
+      expect(await pm.getToolRegistrationStatus('cron_create')).toBe(
+        'registered',
+      );
+      // Unrelated tools stay deferred
+      expect(await pm.getToolRegistrationStatus('send_message')).toBe(
+        'deferred',
+      );
+    });
+
+    it('warns once that a session grant cannot promote a deferred tool (#9827, #10075)', async () => {
+      debugLoggerMock.warn.mockClear();
+      pm = new PermissionManager(
+        makeConfig({ permissionsAllow: ['read_file'] }),
+      );
+      pm.initialize();
+      pm.addSessionAllowRule('run_shell_command');
+      pm.addSessionAllowRule('cron_create');
+      // Once per session, not once per grant.
+      expect(debugLoggerMock.warn).toHaveBeenCalledTimes(1);
+      expect(debugLoggerMock.warn).toHaveBeenCalledWith(
+        expect.stringContaining('cannot promote a deferred tool'),
+      );
+    });
+
+    it('does not log the restart caveat when the allowlist is inactive (#9827)', async () => {
+      debugLoggerMock.warn.mockClear();
+      pm = new PermissionManager(makeConfig({}));
+      pm.initialize();
+      expect(pm.isPermissionsAllowListActive()).toBe(false);
+      pm.addSessionAllowRule('run_shell_command');
+      expect(debugLoggerMock.warn).not.toHaveBeenCalled();
+    });
+
+    it('removing a startup allow rule mid-session keeps its tools registered (restart-scoped, #9827)', async () => {
+      // Registry membership is monotonic for the session: activation and
+      // registration are snapshotted at startup ("Requires restart"), so a
+      // mid-session removal (/permissions or a qwen serve live settings
+      // sync) must not hard-block tools that were legitimately registered.
+      // Pre-fix, every call failed EXECUTION_DENIED citing no deny rule.
+      pm = new PermissionManager(
+        makeConfig({ permissionsAllow: ['Shell', 'read_file'] }),
+      );
+      pm.initialize();
+      expect(pm.isPermissionsAllowListActive()).toBe(true);
+      expect(await pm.isToolEnabled('run_shell_command')).toBe(true);
+      expect(await pm.isToolEnabled('monitor')).toBe(true);
+
+      expect(pm.removePersistentRule('Shell', 'allow')).toBe(true);
+      // Still a registry member...
+      expect(await pm.isToolEnabled('run_shell_command')).toBe(true);
+      expect(await pm.isToolEnabled('monitor')).toBe(true);
+      // ...but the removal revokes auto-approval at runtime (the call
+      // falls back to the normal confirmation flow instead of being
+      // permission-errored).
+      expect(await pm.evaluate({ toolName: 'run_shell_command' })).toBe(
+        'default',
+      );
+      // Unlisted tools stay deferred.
+      expect(await pm.getToolRegistrationStatus('send_message')).toBe(
+        'deferred',
+      );
+    });
+
+    it('removing ALL startup allow rules mid-session keeps registered tools enabled (#9827)', async () => {
+      pm = new PermissionManager(
+        makeConfig({ permissionsAllow: ['Shell', 'ReadFile'] }),
+      );
+      pm.initialize();
+      expect(pm.removePersistentRule('Shell', 'allow')).toBe(true);
+      expect(pm.removePersistentRule('ReadFile', 'allow')).toBe(true);
+      expect(pm.isPermissionsAllowListActive()).toBe(true);
+      expect(await pm.isToolEnabled('run_shell_command')).toBe(true);
+      expect(await pm.isToolEnabled('read_file')).toBe(true);
+      // A tool never covered at startup stays deferred.
+      expect(await pm.getToolRegistrationStatus('send_message')).toBe(
+        'deferred',
+      );
+    });
+
+    it('AUTO-mode-stripped allow rules still activate the allowlist and keep membership', async () => {
+      // Starting in AUTO strips dangerous allow rules from runtime
+      // evaluation; they are still configured rules, so their tools must
+      // remain registry members instead of vanishing.
+      pm = new PermissionManager(
+        makeConfig({
+          permissionsAllow: ['Bash', 'read_file'],
+          approvalMode: 'auto',
+        }),
+      );
+      pm.initialize();
+      expect(pm.isPermissionsAllowListActive()).toBe(true);
+      expect(await pm.isToolEnabled('run_shell_command')).toBe(true);
+      expect(await pm.isToolEnabled('read_file')).toBe(true);
+      expect(await pm.getToolRegistrationStatus('send_message')).toBe(
+        'deferred',
+      );
+    });
+
+    it('combines with the coreTools allowlist', async () => {
+      // Both gates apply: a tool must be covered by permissions.allow AND
+      // pass the legacy coreTools whitelist. The coreTools gate keeps its
+      // hard-disable semantic (#9827): unlisted core tools are `disabled`,
+      // not merely deferred.
+      pm = new PermissionManager(
+        makeConfig({
+          permissionsAllow: ['read_file', 'edit'],
+          coreTools: ['read_file'],
+        }),
+      );
+      pm.initialize();
+      expect(await pm.getToolRegistrationStatus('read_file')).toBe(
+        'registered',
+      );
+      // allowed by permissions.allow, but not in coreTools → disabled
+      expect(await pm.getToolRegistrationStatus('edit')).toBe('disabled');
+      expect(await pm.getToolRegistrationStatus('glob')).toBe('disabled');
+    });
+
+    it('display-name allowlist entries resolve through aliases', async () => {
+      pm = new PermissionManager(
+        makeConfig({ permissionsAllow: ['SendMessage'] }),
+      );
+      pm.initialize();
+      expect(await pm.getToolRegistrationStatus('send_message')).toBe(
+        'registered',
+      );
+      expect(await pm.getToolRegistrationStatus('read_file')).toBe('deferred');
+    });
+
+    it('allow rules from --allowed-tools / SDK allowedTools do not activate the allowlist', async () => {
+      // Simulates the CLI/SDK wiring: the merged allow list contains the
+      // rules, but none of them come from settings.permissions.allow, so
+      // they stay pure auto-approval grants and every tool remains
+      // registered (#9827 — the reporter confirmed --exclude-tools works;
+      // the auto-approve-only contract of --allowed-tools must be kept).
+      pm = new PermissionManager(
+        makeConfig({
+          permissionsAllow: ['Bash(npm test)'],
+          registryAllowList: [],
+        }),
+      );
+      pm.initialize();
+      expect(pm.isPermissionsAllowListActive()).toBe(false);
+      expect(await pm.isToolEnabled('run_shell_command')).toBe(true);
+      expect(await pm.isToolEnabled('read_file')).toBe(true);
+      expect(await pm.isToolEnabled('send_message')).toBe(true);
+    });
+
+    it('a malformed settings allow rule alone does not activate the allowlist', async () => {
+      // A typo must not gate the whole toolset.
+      pm = new PermissionManager(
+        makeConfig({ permissionsAllow: ['Bash(git commit'] }),
+      );
+      pm.initialize();
+      expect(pm.isPermissionsAllowListActive()).toBe(false);
+      expect(await pm.isToolEnabled('read_file')).toBe(true);
+      expect(await pm.isToolEnabled('send_message')).toBe(true);
+    });
+  });
+
   describe('session rules', () => {
     beforeEach(() => {
       pm = new PermissionManager(makeConfig({}));
@@ -2633,6 +3266,15 @@ describe('PermissionManager', () => {
       pm.addSessionAllowRule('run_shell_command');
       pm.addSessionDenyRule('run_shell_command');
       expect(await pm.evaluate({ toolName: 'run_shell_command' })).toBe('deny');
+    });
+
+    it('addSessionAllowRule deduplicates identical rules', () => {
+      pm.addSessionAllowRule('Bash(git *)');
+      pm.addSessionAllowRule('Bash(git *)');
+      expect(
+        (pm as unknown as { sessionRules: { allow: unknown[] } }).sessionRules
+          .allow,
+      ).toHaveLength(1);
     });
 
     it('malformed session allow rule is silently ignored', async () => {

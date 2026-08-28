@@ -17,6 +17,11 @@ import { t } from '../../i18n/index.js';
 // without exposing that failure mode.
 const MAX_COMPRESS_INSTRUCTIONS_CHARS = 2000;
 
+// Estimated counts (#9309) get a '~' prefix so structured/headless consumers
+// don't treat locally estimated numbers as API-reported token counts.
+const formatTokenCount = (count: number, isEstimated?: boolean) =>
+  isEstimated ? `~${count}` : String(count);
+
 export const compressCommand: SlashCommand = {
   name: 'compress',
   altNames: ['summarize'],
@@ -52,8 +57,8 @@ export const compressCommand: SlashCommand = {
     };
 
     const config = context.services.config;
-    const geminiClient = config?.getGeminiClient();
-    if (!config || !geminiClient) {
+    const llmClient = config?.getLlmClient();
+    if (!config || !llmClient) {
       return {
         type: 'message',
         messageType: 'error',
@@ -77,7 +82,7 @@ export const compressCommand: SlashCommand = {
 
     const doCompress = async () => {
       const promptId = `compress-${Date.now()}`;
-      return await geminiClient.tryCompressChat(
+      return await llmClient.tryCompressChat(
         promptId,
         true,
         abortSignal,
@@ -109,7 +114,7 @@ export const compressCommand: SlashCommand = {
           yield {
             messageType: 'info' as const,
             content:
-              `Context compressed (${compressed.originalTokenCount} -> ${compressed.newTokenCount}).` +
+              `Context compressed (${formatTokenCount(compressed.originalTokenCount, compressed.originalTokenCountIsEstimated)} -> ${formatTokenCount(compressed.newTokenCount, compressed.newTokenCountIsEstimated)}).` +
               (compressed.warning ? `\n⚠️ ${compressed.warning}` : ''),
           };
         } catch (e) {
@@ -171,6 +176,9 @@ export const compressCommand: SlashCommand = {
               newTokenCount: compressed.newTokenCount,
               compressionStatus: compressed.compressionStatus,
               compressionKind: 'summarize',
+              originalTokenCountIsEstimated:
+                compressed.originalTokenCountIsEstimated,
+              newTokenCountIsEstimated: compressed.newTokenCountIsEstimated,
             },
           } as HistoryItemCompression,
           Date.now(),
@@ -188,7 +196,7 @@ export const compressCommand: SlashCommand = {
         type: 'message',
         messageType: 'info',
         content:
-          `${truncationNotice ? `${truncationNotice} ` : ''}Context compressed (${compressed.originalTokenCount} -> ${compressed.newTokenCount}).` +
+          `${truncationNotice ? `${truncationNotice} ` : ''}Context compressed (${formatTokenCount(compressed.originalTokenCount, compressed.originalTokenCountIsEstimated)} -> ${formatTokenCount(compressed.newTokenCount, compressed.newTokenCountIsEstimated)}).` +
           (compressed.warning ? `\n⚠️ ${compressed.warning}` : ''),
       };
     } catch (e) {

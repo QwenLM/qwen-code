@@ -9,6 +9,8 @@ import {
   stripExportMeta,
   extractAndStripMeta,
   createWorkflowSandbox,
+  compileWorkflowScript,
+  describeWorkflowCompileError,
 } from './workflow-sandbox.js';
 import { WorkflowDispatchScheduler } from './workflow-dispatch-scheduler.js';
 
@@ -2700,5 +2702,163 @@ describe('createWorkflowSandbox primitives', () => {
     `);
     expect(result).toBe('agent-response:write a hello');
     expect(sandbox.getPhases()).toEqual(['plan']);
+  });
+
+  // ── Compilation ──────────────────────────────────────────────────────
+  describe('compileWorkflowScript', () => {
+    it('compiles a body and hands back its meta', () => {
+      const { script, meta } = compileWorkflowScript(
+        "export const meta = { name: 'n', description: 'd' }\nawait agent('x');",
+      );
+      expect(script).toBeDefined();
+      expect(meta?.name).toBe('n');
+    });
+
+    it('throws on a body that does not parse', () => {
+      expect(() => compileWorkflowScript("const x: string = 'a';")).toThrow(
+        SyntaxError,
+      );
+    });
+
+    // The body runs in strict mode, so an undeclared assignment throws
+    // instead of quietly creating a sandbox global that outlives the
+    // statement. Asserted through a real run, because the directive only
+    // matters at execution time.
+    it('runs the body in strict mode', async () => {
+      const sandbox = createWorkflowSandbox({
+        args: undefined,
+        dispatch: async () => 'ok',
+      });
+      await expect(sandbox.run('undeclaredBinding = 1;')).rejects.toThrow(
+        /not defined/,
+      );
+    });
+
+    it('still allows a declared binding', async () => {
+      const sandbox = createWorkflowSandbox({
+        args: undefined,
+        dispatch: async () => 'ok',
+      });
+      await expect(
+        sandbox.run('const declared = 1; return declared;'),
+      ).resolves.toBe(1);
+    });
+  });
+
+  describe('describeWorkflowCompileError', () => {
+    function renderFor(source: string): string {
+      try {
+        compileWorkflowScript(source);
+      } catch (e) {
+        return describeWorkflowCompileError(
+          e,
+          source.split(/\r\n|[\n\r\u2028\u2029]/).length,
+        );
+      }
+      throw new Error('expected the source to fail compilation');
+    }
+
+    // The wrapper shifts every body line by one, so V8's own line number is
+    // one more than the author's. Reporting the raw number sends them to the
+    // wrong line, which is worse than reporting none.
+    it('reports the line number the author wrote, not the wrapped one', () => {
+      const rendered = renderFor("await agent('a');\nconst x: string = 1;");
+      expect(rendered).toContain('line 2');
+      expect(rendered).not.toContain('workflow.js');
+      expect(rendered).toContain(
+        'SyntaxError: Missing initializer in const declaration',
+      );
+    });
+
+    it('preserves author line numbers after a multiline meta block', () => {
+      const rendered = renderFor(`export const meta = {
+  name: 'n',
+  description: 'd',
+}
+await agent('a');
+const x: string = 1;`);
+      expect(rendered.split('\n')[0]).toBe('line 6');
+      expect(rendered).toContain('const x: string = 1;');
+    });
+
+    it.each([
+      ['CRLF', '\r\n'],
+      ['lone CR', '\r'],
+    ])(
+      'preserves author line numbers after a meta block with %s separators',
+      (_name, separator) => {
+        const rendered = renderFor(
+          [
+            'export const meta = {',
+            "  name: 'n',",
+            "  description: 'd',",
+            '}',
+            'const x: string = 1;',
+          ].join(separator),
+        );
+        expect(rendered.split('\n')[0]).toBe('line 5');
+        expect(rendered).toContain('const x: string = 1;');
+      },
+    );
+
+    it('does not attribute a closing-wrapper error to the author', () => {
+      const rendered = renderFor('await agent(');
+      expect(rendered).toContain('unmatched or incomplete syntax');
+      expect(rendered).toContain('braces');
+      expect(rendered).not.toContain("Unexpected token '}'");
+      expect(rendered).not.toContain('line 2');
+      expect(rendered).not.toContain('})()');
+    });
+
+    it('carries the offending source line and a caret under it', () => {
+      const rendered = renderFor('const x: string = 1;');
+      const lines = rendered.split('\n');
+      expect(lines[1]).toContain('const x');
+      expect(lines[2]).toContain('^');
+      // The caret has to sit under the source line, not float past its end.
+      expect(lines[2].indexOf('^')).toBeLessThanOrEqual(lines[1].length);
+    });
+
+    it('windows a long line while keeping the caret aligned', () => {
+      const padding = 'y'.repeat(300);
+      const rendered = renderFor(
+        `const a = '${padding}'; const x: string = 1;`,
+      );
+      const lines = rendered.split('\n');
+      expect(lines[1].length).toBeLessThan(120);
+      expect(lines[1]).toContain('…');
+      expect(lines[2]).toContain('^');
+      expect(lines[2].indexOf('^')).toBe(lines[1].indexOf('x: string'));
+    });
+
+    it('preserves a multi-column V8 caret on a long line', () => {
+      const padding = 'y'.repeat(120);
+      const rendered = renderFor(`const pad = '${padding}'; const x = 123abc;`);
+      const lines = rendered.split('\n');
+      expect(lines[1]).toContain('123abc');
+      expect(lines[2]).toContain('^^^');
+      expect(lines[2].indexOf('^^^')).toBe(lines[1].indexOf('123abc'));
+    });
+
+    it('keeps an author source line that begins with at', () => {
+      const rendered = renderFor('    at work();');
+      expect(rendered).toContain('line 1');
+      expect(rendered).toContain('    at work();');
+      expect(rendered).toContain('^^^^');
+      expect(rendered).toContain("Unexpected identifier 'work'");
+    });
+
+    it('omits a long source frame when V8 provides no caret', () => {
+      const rendered = renderFor(`const value = ${'a'.repeat(1100)}@;`);
+      expect(rendered).toContain('line 1');
+      expect(rendered).toContain('SyntaxError: Invalid or unexpected token');
+      expect(rendered).not.toContain('const value');
+    });
+
+    it('falls back to the plain message when there is no source frame', () => {
+      expect(
+        describeWorkflowCompileError(new Error('meta must be an object'), 1),
+      ).toBe('meta must be an object');
+    });
   });
 });
