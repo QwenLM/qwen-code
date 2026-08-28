@@ -285,7 +285,7 @@ const createInitialMetrics = (): SessionMetrics => ({
 /**
  * The slice of telemetry state a session-swap replay overwrites.
  *
- * `GeminiClient.initialize()` takes this snapshot immediately before it
+ * `LlmClient.initialize()` takes this snapshot immediately before it
  * replays an incoming session's stored history — it is the only caller that
  * knows whether a replay is about to happen (the decision is the client's
  * private `initializedSessionId`, not the config session id). Everything
@@ -299,7 +299,7 @@ const createInitialMetrics = (): SessionMetrics => ({
  * `persistSessionUsage` would later write that inflated figure out (#9833).
  *
  * Callers never take or restore snapshots directly; they open a swap
- * transaction on `GeminiClient` (`beginTelemetrySwap`), which owns the
+ * transaction on `LlmClient` (`beginTelemetrySwap`), which owns the
  * snapshot for exactly one swap and settles or aborts it.
  * Restore overwrites rather than subtracts, so it is safe to apply after a
  * rollback has already replayed something else on top (the `/branch`
@@ -421,7 +421,7 @@ export class UiTelemetryService extends EventEmitter {
    *
    * `outgoingSessionId` is the session the process was on when the replay
    * begins — the swap transaction's begin-time `outgoingHint`, falling back
-   * to `GeminiClient.initializedSessionId`. An earlier failed swap's abort
+   * to `LlmClient.initializedSessionId`. An earlier failed swap's abort
    * clears `initializedSessionId`, so keying on it alone would capture no
    * outgoing session and lose the live bucket (#9844 review). Its bucket and
    * closed flag are captured too: the `/branch` rollback re-initializes that

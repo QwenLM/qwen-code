@@ -196,6 +196,9 @@ jobs:
           OPENAI_MODEL: '${{ secrets.OPENAI_MODEL }}'
           KEEP_OUTPUT: 'true'
           VERBOSE: 'true'
+          # Mapped for integration-tests/vitest.config.ts, which exempts
+          # self-hosted runners from pressure-flake unhandled errors.
+          RUNNER_ENVIRONMENT: '${{ runner.environment }}'
         run: |-
           # The docker leg runs vitest directly instead of through
           # test:integration:sandbox:docker: that script would rebuild the image

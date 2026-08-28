@@ -2243,7 +2243,7 @@ describe('Settings Loading and Merging', () => {
       const warnings = getSettingsWarnings(result);
 
       // Corruption warning no longer goes through migrationWarnings —
-      // it is emitted via settings.corruptedPath check in gemini.tsx
+      // it is emitted via settings.corruptedPath check in llm.tsx
       // early stderr path instead. Verify corruptedPath is set.
       expect(result.corruptedPath).toBeDefined();
       expect(warnings.some((w) => w.includes('invalid JSON'))).toBe(false);

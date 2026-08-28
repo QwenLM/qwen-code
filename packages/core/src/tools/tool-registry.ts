@@ -893,7 +893,7 @@ export class ToolRegistry {
   }
 
   /**
-   * Clears the set of revealed deferred tools. Called by {@link GeminiClient}
+   * Clears the set of revealed deferred tools. Called by {@link LlmClient}
    * when a chat session is reset (e.g. `/clear`) so the new session starts
    * with no ToolSearch-discovered reveals — the same state as any fresh
    * session. Session-setup reveals pinned via {@link pinDeferredToolReveal}
