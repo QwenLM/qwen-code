@@ -1544,6 +1544,29 @@ describe('loadCliConfig', () => {
       );
     });
 
+    it('strips control sequences before echoing an unknown style name', async () => {
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+      const config = await loadCliConfig(
+        { general: { outputStyle: '\u001b[31mEVIL\u001b[0m' } },
+        argv,
+      );
+      expect(config.getOutputStyle()).toBeUndefined();
+      const emitted = errorSpy.mock.calls.map((call) => call.join(' '));
+      expect(
+        emitted.some((message) =>
+          message.includes('Unknown output style "EVIL"'),
+        ),
+      ).toBe(true);
+      // A repo-committed .qwen/settings.json is untrusted input; the raw
+      // value must never reach the terminal through the warning.
+      for (const message of emitted) {
+        // eslint-disable-next-line no-control-regex
+        expect(message).not.toMatch(/[\u0000-\u001f\u007f]/);
+      }
+    });
+
     it('names the flag when the unknown style came from --output-style', async () => {
       const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
       process.argv = ['node', 'script.js', '--output-style', 'Verbose'];

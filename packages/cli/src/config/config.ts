@@ -48,6 +48,7 @@ import {
   addDaemonRequestAttribute,
   BUILT_IN_OUTPUT_STYLES,
   getBuiltInOutputStyle,
+  stripAnsiAndControl,
   type OutputStyleDefinition,
 } from '@qwen-code/qwen-code-core';
 import { extensionsCommand } from '../commands/extensions.js';
@@ -1535,7 +1536,9 @@ export function resolveOutputStyle(
     );
     return undefined;
   }
-  const name = raw.trim();
+  // A repo-committed .qwen/settings.json is untrusted input; strip control
+  // sequences so the warning cannot inject terminal escapes from it.
+  const name = stripAnsiAndControl(raw).trim();
   if (!name || name.toLowerCase() === 'default') {
     return undefined;
   }
