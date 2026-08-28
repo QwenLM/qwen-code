@@ -303,6 +303,8 @@ export interface DaemonGitBranchInfo {
   name: string;
   isHead: boolean;
   upstream?: string;
+  /** The configured upstream ref no longer exists (git's `[gone]` state). */
+  upstreamGone?: boolean;
   ahead: number;
   behind: number;
   /** Unix epoch seconds of the branch tip commit. */

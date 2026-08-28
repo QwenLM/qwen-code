@@ -336,3 +336,27 @@
   font-size: 12px;
   color: var(--muted-foreground, #888);
 }
+
+.actionItemMuted .actionLabel {
+  color: var(--muted-foreground, #888);
+}
+
+.actionHint {
+  flex-shrink: 0;
+  max-width: 55%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted-foreground, #888);
+}
+
+.actionHint[data-tone='info'] {
+  color: var(--foreground, #e0e0e0);
+  opacity: 0.8;
+}
+
+.actionHint[data-tone='warning'] {
+  color: var(--warning-color, #f59e0b);
+}

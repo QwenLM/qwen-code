@@ -20,6 +20,12 @@ export interface GitBranchInfo {
   name: string;
   isHead: boolean;
   upstream?: string;
+  /**
+   * `true` when the configured upstream ref no longer exists (git's
+   * `[gone]` tracking state, e.g. after the remote branch was deleted and
+   * pruned). `upstream` still names the configured ref in that case.
+   */
+  upstreamGone?: boolean;
   ahead: number;
   behind: number;
   /** Unix epoch seconds of the branch tip commit. */
@@ -200,11 +206,15 @@ function parseBranchLines(raw: string): GitBranchInfo[] {
         const behindMatch = /behind (\d+)/.exec(track);
         if (aheadMatch) ahead = parseInt(aheadMatch[1], 10);
         if (behindMatch) behind = parseInt(behindMatch[1], 10);
+        // `%(upstream:track,nobracket)` prints `gone` when the upstream is
+        // configured but its ref is missing; ahead/behind are meaningless then.
+        const upstreamGone = upstream !== undefined && /\bgone\b/.test(track);
 
         return {
           name,
           isHead,
           upstream,
+          ...(upstreamGone ? { upstreamGone } : {}),
           ahead,
           behind,
           commitDate,

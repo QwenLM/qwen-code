@@ -213,6 +213,40 @@ describe('gitEnv (R12 env isolation)', () => {
   });
 });
 
+describe('fetchGitBranches upstream tracking', () => {
+  it('marks a branch whose upstream ref was deleted and pruned as gone', async () => {
+    const dir = makeRepo();
+    const remote = makeBareRemote();
+    git(dir, 'remote', 'add', 'origin', remote);
+    git(dir, 'push', '-q', '-u', 'origin', 'master');
+    git(dir, 'checkout', '-q', '-b', 'feat');
+    git(dir, 'push', '-q', '-u', 'origin', 'feat');
+
+    const tracked = (await fetchGitBranches(dir)).local.find(
+      (b) => b.name === 'feat',
+    );
+    expect(tracked?.upstream).toBe('origin/feat');
+    expect(tracked?.upstreamGone).toBeUndefined();
+
+    git(dir, 'push', '-q', 'origin', '--delete', 'feat');
+    git(dir, 'fetch', '-q', '--prune', 'origin');
+
+    const gone = (await fetchGitBranches(dir)).local.find(
+      (b) => b.name === 'feat',
+    );
+    // The configured upstream is still reported so the UI can name it, but
+    // the flag says its ref no longer exists.
+    expect(gone?.upstream).toBe('origin/feat');
+    expect(gone?.upstreamGone).toBe(true);
+    expect(gone?.ahead).toBe(0);
+    expect(gone?.behind).toBe(0);
+    const master = (await fetchGitBranches(dir)).local.find(
+      (b) => b.name === 'master',
+    );
+    expect(master?.upstreamGone).toBeUndefined();
+  });
+});
+
 describe('fetchGitBranches recent branches', () => {
   it('lists recently checked-out branches from the reflog', async () => {
     const dir = makeRepo();
