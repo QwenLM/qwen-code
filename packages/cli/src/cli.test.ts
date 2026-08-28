@@ -178,6 +178,23 @@ describe('resolveBootstrapRoute', () => {
     ).toBe('default');
   });
 
+  it('keeps base help routing when -- sits in a base value slot', () => {
+    // The pre-PR scan skipped the token after its hardcoded value flags
+    // unconditionally, even the `--` sentinel, so `qwen --model -- --help`
+    // printed top-level help (exit 0) instead of booting the agent with
+    // the literal prompt `--help`. Derived-only flags keep the conditional
+    // skip (pinned above: the --worktree sentinel shape demotes).
+    expect(resolveBootstrapRoute(['--model', '--', '--help'])).toBe('help');
+    expect(resolveBootstrapRoute(['--prompt', '--', '--help'])).toBe('help');
+    expect(resolveBootstrapRoute(['--resume', '--', '-h'])).toBe('help');
+    expect(resolveBootstrapRoute(['--output-format', '--', '-h'])).toBe('help');
+    expect(resolveBootstrapRoute(['-p', '--', '-h'])).toBe('help');
+    // A real positional after the sentinel still demotes on both paths.
+    expect(resolveBootstrapRoute(['--model', '--', 'foo', '--help'])).toBe(
+      'default',
+    );
+  });
+
   it('does not swallow command tokens after array-option values', () => {
     // yargs detects commands in an earlier pass where these options are
     // unknown and consume at most one token; the scanner must match, or a

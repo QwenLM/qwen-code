@@ -207,6 +207,13 @@ function hasFlag(
     if (arg === '--') {
       return false;
     }
+    // Base parity (mirrors hasVersionToken): the pre-PR scan skipped the
+    // token after the base's hardcoded value flags unconditionally, even
+    // the `--` sentinel, so `qwen --model -- --help` still routed to help.
+    if (BASE_VALUE_FLAGS.has(arg)) {
+      i++;
+      continue;
+    }
     i = skipOptionValues(argv, i);
     if (arg === long || arg === short) {
       return true;
@@ -289,6 +296,12 @@ function firstPositionalArg(argv: readonly string[]): string | undefined {
     const arg = argv[i]!;
     if (arg === '--') {
       return undefined;
+    }
+    // Base parity: same unconditional BASE value-slot skip as hasFlag, so
+    // a sentinel sitting in one of those slots never ends the scan early.
+    if (BASE_VALUE_FLAGS.has(arg)) {
+      i++;
+      continue;
     }
     i = skipOptionValues(argv, i);
     if (!arg.startsWith('-')) {
