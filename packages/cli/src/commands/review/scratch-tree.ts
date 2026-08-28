@@ -424,9 +424,17 @@ export function runScratchTree(args: ScratchTreeArgs): ScratchTreeReport {
   // BEFORE any checkout runs — the reuse path's reset and the rebuild path's
   // `worktree add` both execute configured content filters.
   const filters = localFilterCommands(worktree);
-  if (filters.length > 0) {
+  if (filters.unreadable) {
     return unavailable(
-      `the repository's local config defines content filter(s) ${filters
+      `the repository's local config file ${inertPath(filters.unreadable)} ` +
+        'could not be read to the end, so this command cannot tell whether it ' +
+        'defines a content filter the checkouts below would EXECUTE. A screen ' +
+        'that did not finish is not a clean result — fix or remove that file.',
+    );
+  }
+  if (filters.keys.length > 0) {
+    return unavailable(
+      `the repository's local config defines content filter(s) ${filters.keys
         .map(inertPath)
         .join(', ')} — ` +
         'the checkouts this command runs would EXECUTE them (hooks are disabled, ' +

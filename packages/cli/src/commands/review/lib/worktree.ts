@@ -18,6 +18,8 @@
 
 import { spawnSync } from 'node:child_process';
 import {
+  accessSync,
+  constants as fsConstants,
   existsSync,
   lstatSync,
   mkdtempSync,
@@ -581,9 +583,18 @@ export const RESIDUE_PATH_CAP = 12;
 /**
  * The repo-local `filter.<name>` COMMANDS, when any are defined.
  *
- * Every checkout in this pipeline EXECUTES these — the scratch tree's reset and
- * rebuild, and the probe tree's per-run restore — hooks being disabled covers
- * hooks and not filters. The planting surface is two plain writes a probe can
+ * A checkout EXECUTES these whenever it rewrites a file, and disabling hooks
+ * does not cover filters — they are separate config. The callers that screen
+ * through this function are the scratch tree's reset and rebuild, the probe
+ * tree's per-run restore, and the probe tree's revert. That list is the set of
+ * SCREENED sites, not a census of the pipeline's filter-executing checkouts:
+ * the `worktree add` spawns that CREATE the probe and base trees run
+ * unscreened today, and hooks are neutralised only at the spawns that pass
+ * `core.hooksPath` explicitly, not pipeline-wide. Do not read this comment as
+ * a completeness map — widening the screen means adding a call site, and the
+ * count above is what has one.
+ *
+ * The planting surface is two plain writes a probe can
  * make into the COMMON dir this command's report calls shared:
  * `git config filter.evil.smudge CMD` and one line appended to
  * `$(git rev-parse --git-path info/attributes)`. discard and cleanup never
@@ -597,14 +608,34 @@ export const RESIDUE_PATH_CAP = 12;
  * filter the user set deliberately, and cannot be safely wiped, so a hit is a
  * refusal upstream, not a cleanup here.
  */
-export function localFilterCommands(worktree: string): string[] {
+export interface LocalFilterScreen {
+  /** The repo-local `filter.<name>` command keys found, when any are defined. */
+  keys: string[];
+  /**
+   * The first candidate file the screen could not read to completion, when one
+   * stopped it — otherwise null.
+   *
+   * Exit 1 is git's ordinary "no key matched" and is not a failure. Anything
+   * else is: a spawn error, or the `maxBuffer` kill an attacker reaches by
+   * making the screened file itself large — the value is theirs to write, and
+   * git prints the whole of it. Skipping such a file reports the repository
+   * clean on the one file that defines the filter, so the caller refuses
+   * instead. One file, not a list: the refusal only has to name where the
+   * screen stopped, and an unbounded join is its own denial-of-service.
+   */
+  unreadable: string | null;
+}
+
+export function localFilterCommands(worktree: string): LocalFilterScreen {
   const files = spawnSync(
     'git',
     ['rev-parse', '--git-common-dir', '--git-dir'],
     { cwd: worktree, encoding: 'utf8', env: sanitizedGitEnv() },
   );
   if (files.error || files.status !== 0 || typeof files.stdout !== 'string') {
-    return [];
+    // Not a usable repository from here: the checkout this screen guards has
+    // nothing to run in either, and its own failure is the caller's answer.
+    return { keys: [], unreadable: null };
   }
   const [commonDir, gitDir] = files.stdout.trim().split('\n');
   const common = resolve(worktree, commonDir);
@@ -627,8 +658,27 @@ export function localFilterCommands(worktree: string): string[] {
     // No linked worktrees registered: the two candidates above are all of it.
   }
   const found: string[] = [];
+  let unreadable: string | null = null;
   for (const file of candidates) {
     if (!existsSync(file)) continue;
+    // Existence is not readability, and git does not distinguish them for us:
+    // an unreadable `--file` exits 1 with a warning on stderr — byte-identical
+    // in status to "no key matched" — so asking git and reading the exit code
+    // reports a config this screen never read as clean. Settle it here instead,
+    // by construction: a regular file (git follows symlinks to read config, so
+    // this must too) that this process can open. Anything else is a candidate
+    // the screen could not check, which is a refusal, not a pass.
+    let readable = false;
+    try {
+      readable = statSync(file).isFile();
+      if (readable) accessSync(file, fsConstants.R_OK);
+    } catch {
+      readable = false;
+    }
+    if (!readable) {
+      unreadable ??= file;
+      continue;
+    }
     const r = spawnSync(
       'git',
       [
@@ -641,15 +691,32 @@ export function localFilterCommands(worktree: string): string[] {
         // of three is how the first cut of this screen read as complete.
         '^filter\\..*\\.(smudge|clean|process)$',
       ],
-      { cwd: worktree, encoding: 'utf8', env: sanitizedGitEnv() },
+      {
+        cwd: worktree,
+        encoding: 'utf8',
+        // The screened file is attacker-writable and git prints every matching
+        // value in full, so the DEFAULT 1 MiB buffer is a switch the plant can
+        // flip: pad one `smudge` value past the cap, `spawnSync` kills git with
+        // ENOBUFS, and a screen that skips the file reports clean while the
+        // checkout runs the last value. Sized like the `ls-files` spawn above.
+        maxBuffer: 64 * 1024 * 1024,
+        env: sanitizedGitEnv(),
+      },
     );
-    if (r.error || r.status !== 0 || typeof r.stdout !== 'string') continue;
+    // Exit 1 is "no key matched" — the ordinary clean answer. Every other
+    // outcome means this file was not read to the end, and a screen that did
+    // not finish must not be the reason a checkout is authorised.
+    if (r.error || (r.status !== 0 && r.status !== 1)) {
+      unreadable ??= file;
+      continue;
+    }
+    if (r.status === 1 || typeof r.stdout !== 'string') continue;
     for (const line of r.stdout.split('\n')) {
       const key = line.split(/\s+/)[0];
       if (key && !found.includes(key)) found.push(key);
     }
   }
-  return found;
+  return { keys: found, unreadable };
 }
 
 /**

@@ -970,13 +970,26 @@ process.stdout.write(JSON.stringify({
       `#!/usr/bin/env node
 import path from 'node:path';
 const files = process.argv.slice(2).filter((a) => a.includes('.test.'));
+// Same positive-control semantics as the default fake: the injected
+// always-failing test must actually fail, or the run re-classes to
+// control-failed and never reaches the revert this test is about.
+const st = (f) => {
+  try {
+    return fs.readFileSync(f, 'utf8').includes('QWEN-REVIEW-POSITIVE-CONTROL')
+      ? 'failed'
+      : 'passed';
+  } catch {
+    return 'passed';
+  }
+};
 const results = files.map((f) => ({
   name: path.resolve(f),
-  assertionResults: [{ status: 'passed' }],
+  assertionResults: [{ status: st(f) }],
 }));
+const failed = results.filter((r) => r.assertionResults[0].status === 'failed').length;
 process.stdout.write(JSON.stringify({
-  numPassedTests: results.length,
-  numFailedTests: 0,
+  numPassedTests: results.length - failed,
+  numFailedTests: failed,
   testResults: results,
 }));
 `,
@@ -1668,6 +1681,60 @@ process.stdout.write(JSON.stringify({
         verdict: 'inert',
       }),
     ]);
+  });
+
+  it('refuses the REVERT checkout when the baseline suite planted a filter mid-run', async () => {
+    // The restore is screened once at the top of each run, but what runs
+    // BETWEEN the restore and the revert is the PR's own test code. It can
+    // write two lines into the shared common dir — `filter.evil.smudge` and an
+    // attributes line selecting it — and every later restore then refuses
+    // while the mutation phase's catch deliberately keeps going "so the revert
+    // probe below still runs". With the revert unscreened, that second
+    // checkout rewrites the PR-modified files through the planted smudge and
+    // the command executes on the host, the run looking like a plain
+    // inconclusive. The canary is the assertion; the verdicts are not.
+    const canary = join(repo, 'PWNED-revert-smudge');
+    writeFileSync(
+      vitestScript(),
+      `#!/usr/bin/env node
+import path from 'node:path';
+import fs from 'node:fs';
+import { execFileSync } from 'node:child_process';
+const g = (...a) => execFileSync('git', a, { encoding: 'utf8' }).trim();
+// Plant once — on the baseline — the way a probe's own test code would.
+const common = g('rev-parse', '--git-common-dir');
+const stamp = path.join(common, 'PLANTED');
+if (!fs.existsSync(stamp)) {
+  fs.writeFileSync(stamp, '');
+  execFileSync('git', ['config', 'filter.evil.smudge', 'sh -c "pwd >> ${canary}; cat"']);
+  const attrs = g('rev-parse', '--git-path', 'info/attributes');
+  fs.mkdirSync(path.dirname(attrs), { recursive: true });
+  fs.appendFileSync(attrs, '*.ts filter=evil\\n');
+}
+const files = process.argv.slice(2).filter((a) => a.includes('.test.'));
+const results = files.map((f) => ({
+  name: path.resolve(f),
+  assertionResults: [{ status: 'passed' }],
+}));
+process.stdout.write(JSON.stringify({
+  numPassedTests: results.length,
+  numFailedTests: 0,
+  testResults: results,
+}));
+`,
+    );
+    const { wt, base } = scaffoldModifiedPr();
+
+    await runHandler({
+      report: join(repo, 'report.json'),
+      worktree: wt,
+      base,
+      out: join(repo, 'out.json'),
+    });
+
+    // The screen ran before the revert's checkout, so the planted command was
+    // never executed. Without the revert-phase screen this file exists.
+    expect(existsSync(canary)).toBe(false);
   });
 
   it('never deletes a line that does not hold the selected statement', () => {

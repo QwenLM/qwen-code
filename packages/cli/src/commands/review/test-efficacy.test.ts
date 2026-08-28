@@ -38,6 +38,7 @@ import {
   mkdtempSync,
   mkdirSync,
   writeFileSync,
+  appendFileSync,
   symlinkSync,
   existsSync,
   readFileSync,
@@ -546,12 +547,20 @@ describe('restoreProbeTreeTracked, through runOneMutant', () => {
     try {
       writeFileSync(join(dir, 'a.ts'), 'gone.clear();\n');
       writeFileSync(join(dir, 'b.ts'), 'export const b = 1;\n');
+      // The attributes line is half the plant and belongs in the fixture: a
+      // filter git never SELECTS for a tracked path executes nothing, so
+      // without this the restore is harmless with or without the screen and
+      // the test would stay green if a later edit moved the screen below the
+      // checkout. With it, the canary below pins the ORDER, not just the
+      // message.
+      writeFileSync(join(dir, '.gitattributes'), '*.ts filter=evil\n');
       asCheckout(dir);
-      execFileSync(
-        'git',
-        ['config', 'filter.evil.smudge', 'touch /tmp/qwen-should-never-run'],
-        { cwd: dir },
-      );
+      // Repo-local, like the sibling scratch-tree test: a canary under /tmp
+      // would outlive the fixture on a shared runner.
+      const canary = join(dir, 'PWNED-smudge');
+      execFileSync('git', ['config', 'filter.evil.smudge', `touch ${canary}`], {
+        cwd: dir,
+      });
 
       const r = runOneMutant(
         dir,
@@ -561,6 +570,9 @@ describe('restoreProbeTreeTracked, through runOneMutant', () => {
 
       expect(r.verdict).toBe('inconclusive');
       expect(r.detail).toContain('filter.evil.smudge');
+      // The refusal has to come BEFORE the checkout, not merely instead of a
+      // verdict: this is the assertion that goes red if the screen moves down.
+      expect(existsSync(canary)).toBe(false);
 
       // ...and a filter in the user's GLOBAL config is their own contract, the
       // way it is for any git command they run. `git lfs install` writes one
@@ -591,6 +603,104 @@ describe('restoreProbeTreeTracked, through runOneMutant', () => {
 
       expect(afterDetail).not.toContain('filter.lfs.clean');
       expect(afterDetail).not.toContain('content filter');
+      // The local `evil` filter is gone, so nothing selected by the committed
+      // attributes line remains to execute either.
+      expect(existsSync(canary)).toBe(false);
+    } finally {
+      isolation.dispose();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses the REVERT checkout too, on a filter planted after the restore', () => {
+    // The restore is screened once, at the top of each run — but every run
+    // between then and the revert executes the PR's own test code, which can
+    // plant the filter mid-run. The mutation phase's catch deliberately keeps
+    // going "so the revert probe below still runs", so a refused restore
+    // reaches the revert with the plant live. A screen only at the restore
+    // lets that second checkout execute it.
+    const dir = mkdtempSync(join(tmpdir(), 'qwen-revert-filter-'));
+    const isolation = isolateHostGitConfig();
+    try {
+      writeFileSync(join(dir, 'a.ts'), 'gone.clear();\n');
+      writeFileSync(join(dir, '.gitattributes'), '*.ts filter=evil\n');
+      asCheckout(dir);
+      const canary = join(dir, 'PWNED-revert');
+      execFileSync('git', ['config', 'filter.evil.smudge', `touch ${canary}`], {
+        cwd: dir,
+      });
+
+      const r = runOneMutant(
+        dir,
+        { file: 'a.ts', line: 1, statement: 'gone.clear();' },
+        ['a.test.ts'],
+      );
+
+      expect(r.verdict).toBe('inconclusive');
+      expect(existsSync(canary)).toBe(false);
+    } finally {
+      isolation.dispose();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('still sees a filter whose value is padded past the default spawn buffer', () => {
+    // The screened file is attacker-writable and git prints every matching
+    // value in full, so a `smudge` padded past `spawnSync`'s DEFAULT 1 MiB
+    // buffer used to kill git with ENOBUFS — and the screen skipped the one
+    // file that defines the filter and reported the repository clean, while
+    // the restore's checkout ran the last value.
+    const dir = mkdtempSync(join(tmpdir(), 'qwen-bigvalue-'));
+    const isolation = isolateHostGitConfig();
+    try {
+      writeFileSync(join(dir, 'a.ts'), 'gone.clear();\n');
+      writeFileSync(join(dir, '.gitattributes'), '*.ts filter=evil\n');
+      asCheckout(dir);
+      const canary = join(dir, 'PWNED-bigvalue');
+      // git takes the LAST value; the first is only there to push the
+      // enumeration's output past the default buffer.
+      appendFileSync(
+        join(dir, '.git', 'config'),
+        `[filter "evil"]\n\tsmudge = echo ${'x'.repeat(1200000)}\n` +
+          `\tsmudge = touch ${canary}\n`,
+      );
+
+      const r = runOneMutant(
+        dir,
+        { file: 'a.ts', line: 1, statement: 'gone.clear();' },
+        ['a.test.ts'],
+      );
+
+      expect(r.verdict).toBe('inconclusive');
+      expect(r.detail).toContain('filter.evil.smudge');
+      expect(existsSync(canary)).toBe(false);
+    } finally {
+      isolation.dispose();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses a config candidate it cannot read — not "clean"', () => {
+    // git reports an unreadable `--file` with exit 1 and a warning on stderr —
+    // the same status as "no key matched" — so a screen that asks git and reads
+    // the exit code calls a config it never read clean. The candidate here is
+    // `config.worktree`, which git honors once `extensions.worktreeConfig` is
+    // on; a directory in its place is a candidate the screen cannot check.
+    const dir = mkdtempSync(join(tmpdir(), 'qwen-unreadable-'));
+    const isolation = isolateHostGitConfig();
+    try {
+      writeFileSync(join(dir, 'a.ts'), 'gone.clear();\n');
+      asCheckout(dir);
+      mkdirSync(join(dir, '.git', 'config.worktree'));
+
+      const r = runOneMutant(
+        dir,
+        { file: 'a.ts', line: 1, statement: 'gone.clear();' },
+        ['a.test.ts'],
+      );
+
+      expect(r.verdict).toBe('inconclusive');
+      expect(r.detail).toContain('could not be read to the end');
     } finally {
       isolation.dispose();
       rmSync(dir, { recursive: true, force: true });

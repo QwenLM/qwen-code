@@ -1653,8 +1653,11 @@ function restoreProbeTreeTracked(probeTree: string): string | null {
   // would put every contributor with git-lfs into permanent refusal — the same
   // failure as a tripwire that fires on every healthy run.
   const filters = localFilterCommands(probeTree);
-  if (filters.length > 0) {
-    return `the repository's local config defines content filter(s) ${filters.join(', ')}, which this tree's restore would EXECUTE`;
+  if (filters.unreadable) {
+    return `the repository's local config file ${filters.unreadable} could not be read to the end, so whether this tree's restore would EXECUTE a content filter is unknown`;
+  }
+  if (filters.keys.length > 0) {
+    return `the repository's local config defines content filter(s) ${filters.keys.join(', ')}, which this tree's restore would EXECUTE`;
   }
   // `core.fsmonitor` runs a command on BOTH of these, and the config that sets
   // it lives in the tree they are cleaning: the residue probe empties it for
@@ -2980,6 +2983,30 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
           throw new Error(
             'the probe tree no longer resolves to itself (a symlink at its ' +
               'root), so the revert would run against whatever it points at',
+          );
+        }
+        // Filters, again, and for the same reason the restore screens them:
+        // `checkout base -- <paths>` below rewrites files, and a rewrite
+        // EXECUTES `filter.<name>.smudge`. Screening once at the restore is
+        // not enough — every run between then and here has executed the PR's
+        // own test code, which can plant the filter mid-run, and the mutation
+        // phase's catch deliberately continues so that this revert still runs.
+        // A refused restore therefore reaches this line with the plant live.
+        // The throw lands in this phase's existing catch and is recorded as a
+        // probe that did not run, which is what it is.
+        const revertFilters = localFilterCommands(probeTree);
+        if (revertFilters.unreadable) {
+          throw new Error(
+            `the repository's local config file ${revertFilters.unreadable} ` +
+              'could not be read to the end, so whether this revert would ' +
+              'EXECUTE a content filter is unknown',
+          );
+        }
+        if (revertFilters.keys.length > 0) {
+          throw new Error(
+            "the repository's local config defines content filter(s) " +
+              `${revertFilters.keys.join(', ')}, which this revert's checkout ` +
+              'would EXECUTE',
           );
         }
         // "Revert to base" is two operations, confined to the throwaway tree. A
