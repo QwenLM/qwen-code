@@ -2541,6 +2541,55 @@ describe('bot comment markers', () => {
     expect(ackLine).toContain('[workflow run](%s)');
     expect(ackLine).toContain('"$RUN_URL"');
   });
+
+  describe('queued ack placement', () => {
+    // One ack per PR, but it has to land under the command that asked for
+    // it. The in-place PATCH kept the count at one and left the notice at
+    // the position of the FIRST request — comment #2 of 15 on #10259 — so
+    // a requester reading from the bottom saw nothing start. Delete the
+    // stale ack(s), then post: same count, right position. Nothing keys on
+    // the comment id (autofix filters and the bypass audit match the
+    // marker), so recreating is safe.
+    const ackRun = parse(workflow).jobs['ack-review-request'].steps[0].run;
+
+    it('deletes stale acks and posts a fresh one instead of editing in place', () => {
+      expect(ackRun).not.toContain('--method PATCH');
+      expect(ackRun).toContain(
+        '--method DELETE "repos/${GITHUB_REPOSITORY}/issues/comments/${STALE_ACK_ID}"',
+      );
+      // Every stale ack, not just the last: a PATCH-era thread can carry
+      // several after a failed delete, and `last` would leave the rest.
+      expect(ackRun).not.toMatch(/\|\s*last\s*\|/);
+      // The post is unconditional — no `else` branch that skips it when a
+      // stale ack existed.
+      const postIndex = ackRun.indexOf('gh pr comment "$PR_NUMBER"');
+      expect(postIndex).toBeGreaterThan(ackRun.indexOf('--method DELETE'));
+      expect(ackRun.slice(0, postIndex)).not.toMatch(/^\s*else\s*$/m);
+    });
+
+    it('reacts 👀 to the triggering comment, best effort', () => {
+      expect(ackRun).toContain('-f content=eyes');
+      expect(ackRun).toContain(
+        'repos/${GITHUB_REPOSITORY}/issues/comments/${COMMENT_ID}/reactions',
+      );
+      expect(ackRun).toContain(
+        'repos/${GITHUB_REPOSITORY}/pulls/comments/${COMMENT_ID}/reactions',
+      );
+      // A failed reaction must not abort the ack under `set -e`.
+      expect(ackRun).toMatch(/content=eyes[^\n]*\n\s*\|\| echo/);
+      expect(
+        parse(workflow).jobs['ack-review-request'].steps[0].env.COMMENT_ID,
+      ).toBe('${{ github.event.comment.id }}');
+    });
+
+    it('tells the requester the run is not a PR check', () => {
+      // A command-triggered run executes against the base branch, so its
+      // review-pr check never shows under the PR — the ack link is the only
+      // handle, and the copy has to say so or the requester keeps looking
+      // for a yellow dot.
+      expect(ackRun).toContain('not listed under the checks of this PR');
+    });
+  });
 });
 
 describe('qwen pr review concurrency routing', () => {

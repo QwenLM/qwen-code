@@ -240,6 +240,8 @@ export {
   FINDING_CONFIDENCES,
   FINDING_OUTCOMES,
   FINDING_SOURCES,
+  FINDING_DIRECTIONS,
+  FINDING_BASELINES,
   REPORT_FINDINGS_LEVELS,
   compressFindingSummary,
 } from './tools/report-findings.js';
@@ -250,6 +252,8 @@ export type {
   FindingConfidence,
   FindingOutcome,
   FindingSource,
+  FindingDirection,
+  FindingBaseline,
   ReportFindingsLevel,
 } from './tools/report-findings.js';
 export { CreateSubSessionTool } from './tools/create-sub-session.js';
@@ -425,6 +429,7 @@ export { escapeXml } from './utils/xml.js';
 export * from './services/shellExecutionService.js';
 export * from './services/monitorRegistry.js';
 export * from './services/backgroundShellRegistry.js';
+export * from './services/web-terminal-registry.js';
 export * from './agents/workflow-run-registry.js';
 export * from './agents/workflow-snapshot.js';
 export {

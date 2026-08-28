@@ -732,6 +732,9 @@ pub struct WindowClickInput {
     #[schemars(schema_with = "element_token_schema")]
     pub element_token: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "delivery_mode_schema")]
+    pub delivery_mode: Option<DeliveryMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(schema_with = "number_schema")]
     pub x: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -761,6 +764,9 @@ pub struct DoubleClickInput {
     #[schemars(schema_with = "element_token_schema")]
     pub element_token: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "delivery_mode_schema")]
+    pub delivery_mode: Option<DeliveryMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(schema_with = "number_schema")]
     pub x: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -783,6 +789,9 @@ pub struct RightClickInput {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(schema_with = "element_token_schema")]
     pub element_token: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "delivery_mode_schema")]
+    pub delivery_mode: Option<DeliveryMode>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(schema_with = "number_schema")]
     pub x: Option<f64>,
@@ -919,6 +928,9 @@ pub struct WindowScrollInput {
     #[schemars(schema_with = "element_token_schema")]
     pub element_token: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "delivery_mode_schema")]
+    pub delivery_mode: Option<DeliveryMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(schema_with = "number_schema")]
     pub x: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -969,6 +981,9 @@ pub struct WindowTypeTextInput {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(schema_with = "element_token_schema")]
     pub element_token: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "delivery_mode_schema")]
+    pub delivery_mode: Option<DeliveryMode>,
     pub text: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delay_ms: Option<u64>,
@@ -1074,6 +1089,9 @@ pub struct WindowPressKeyInput {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(schema_with = "element_token_schema")]
     pub element_token: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "delivery_mode_schema")]
+    pub delivery_mode: Option<DeliveryMode>,
     pub key: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(schema_with = "string_list_schema")]
@@ -1117,6 +1135,9 @@ pub struct WindowHotkeyInput {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(schema_with = "element_token_schema")]
     pub element_token: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "delivery_mode_schema")]
+    pub delivery_mode: Option<DeliveryMode>,
     #[schemars(length(min = 2))]
     pub keys: Vec<String>,
 }
@@ -1167,12 +1188,22 @@ mod tests {
     }
 
     #[test]
-    fn generated_drag_schema_exposes_the_runtime_delivery_ladder() {
-        let schema = WindowDragInput::input_schema();
-        assert_eq!(
-            schema["properties"]["delivery_mode"],
-            json!({ "type": "string", "enum": ["background", "foreground"] })
-        );
+    fn exact_window_action_schemas_expose_the_runtime_delivery_ladder() {
+        for schema in [
+            WindowClickInput::input_schema(),
+            DoubleClickInput::input_schema(),
+            RightClickInput::input_schema(),
+            WindowDragInput::input_schema(),
+            WindowScrollInput::input_schema(),
+            WindowTypeTextInput::input_schema(),
+            WindowPressKeyInput::input_schema(),
+            WindowHotkeyInput::input_schema(),
+        ] {
+            assert_eq!(
+                schema["properties"]["delivery_mode"],
+                json!({ "type": "string", "enum": ["background", "foreground"] })
+            );
+        }
     }
 
     #[test]
