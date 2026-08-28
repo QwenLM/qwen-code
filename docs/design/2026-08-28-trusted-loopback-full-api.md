@@ -156,6 +156,10 @@ that address, and verifies after listen that it is `::1` or in the complete
 embed has no socket to verify, so its caller remains responsible for ensuring
 that a declared loopback hostname is bound only to loopback.
 
+Host-header and same-origin checks also admit the exact bound loopback address,
+so valid `127.0.0.0/8` binds do not drift from the trusted-mode predicate while
+unrelated authorities remain rejected.
+
 The guarantee is deliberately no stronger than that. Loopback is not user or
 process identity. Another local account, a compromised browser process, a
 desktop networking proxy, or a container that can reach a host service may be

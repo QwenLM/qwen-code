@@ -1164,7 +1164,7 @@ export function createServeApp(
       }),
     );
 
-  installSelfOriginStripMiddleware(app, getPort);
+  installSelfOriginStripMiddleware(app, getPort, opts.hostname);
 
   // Park the factory on `app.locals` so route handlers can pick it up
   // via `req.app.locals.fsFactory` without re-threading the value

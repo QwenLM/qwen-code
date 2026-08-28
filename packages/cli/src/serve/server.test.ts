@@ -4934,6 +4934,16 @@ describe('createServeApp', () => {
       expect(res.body.features).toContain('session_shell_command');
     });
 
+    it('omits `session_shell_command` in a non-trusted embed', async () => {
+      const app = createServeApp({
+        ...nonTrustedEmbedOpts,
+        enableSessionShell: true,
+      });
+      const res = await request(app).get('/capabilities');
+      expect(res.status).toBe(200);
+      expect(res.body.features).not.toContain('session_shell_command');
+    });
+
     it('advertises `session_shell_command` when enabled with a token', async () => {
       const app = createServeApp({
         ...baseOpts,
@@ -11194,6 +11204,15 @@ describe('createServeApp', () => {
       const res = await request(app)
         .get('/health')
         .set('Host', `host.docker.internal:${baseOpts.port}`);
+      expect(res.status).toBe(200);
+    });
+
+    it('accepts the exact IPv4 loopback address the daemon binds', async () => {
+      const opts = { ...baseOpts, hostname: '127.0.0.2' };
+      const app = createServeApp(opts);
+      const res = await request(app)
+        .get('/health')
+        .set('Host', `127.0.0.2:${opts.port}`);
       expect(res.status).toBe(200);
     });
   });
@@ -20665,6 +20684,22 @@ describe('createServeApp', () => {
       });
     });
 
+    it('denies shell execution in a non-trusted tokenless embed', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(
+        { ...nonTrustedEmbedOpts, enableSessionShell: true },
+        undefined,
+        { bridge },
+      );
+      const res = await request(app)
+        .post('/session/session-A/shell')
+        .set('X-Qwen-Client-Id', 'client-1')
+        .send({ command: 'pwd' });
+      expect(res.status).toBe(401);
+      expect(res.body.code).toBe('token_required');
+      expect(bridge.shellCalls).toHaveLength(0);
+    });
+
     it('keeps trusted-loopback shell disabled without the explicit flag', async () => {
       const bridge = fakeBridge();
       const app = createServeApp(baseOpts, undefined, { bridge });
@@ -29699,6 +29734,11 @@ describe('runQwenServe', () => {
           String(chunk).includes('receive full API authority'),
         ),
       ).toBe(true);
+      expect(
+        stderrSpy.mock.calls.some(([chunk]) =>
+          String(chunk).includes('trusted loopback mode'),
+        ),
+      ).toBe(true);
     } finally {
       stderrSpy.mockRestore();
     }
@@ -32190,6 +32230,18 @@ describe('same-origin Origin-stripping middleware', () => {
       .set('Origin', 'http://[::1]:4170');
     expect(res.status).not.toBe(403);
   });
+
+  it('strips the exact IPv4 loopback Origin the daemon binds', async () => {
+    const opts = { ...baseOpts, hostname: '127.0.0.2' };
+    const app = createServeApp(opts, () => 4170, {
+      bridge: fakeBridge(),
+    });
+    const res = await request(app)
+      .get('/health')
+      .set('Host', `127.0.0.2:${opts.port}`)
+      .set('Origin', 'http://127.0.0.2:4170');
+    expect(res.status).toBe(200);
+  });
 });
 
 describe('--allow-origin CORS allowlist (T2.4 #4514)', () => {
@@ -33006,6 +33058,22 @@ describe('auth device-flow routes', () => {
       .send({ providerId: 'qwen-oauth' });
     expect(res.status).toBe(201);
     expect(res.body.providerId).toBe('qwen-oauth');
+    (
+      app.locals['deviceFlowRegistry'] as DeviceFlowRegistryType | undefined
+    )?.dispose();
+  });
+
+  it('POST is denied in a non-trusted tokenless embed', async () => {
+    const { app, fakeProvider } = buildApp({
+      hostname: '0.0.0.0',
+      token: undefined,
+    });
+    const res = await request(app)
+      .post('/workspace/auth/device-flow')
+      .send({ providerId: 'qwen-oauth' });
+    expect(res.status).toBe(401);
+    expect(res.body.code).toBe('token_required');
+    expect(fakeProvider.startCount()).toBe(0);
     (
       app.locals['deviceFlowRegistry'] as DeviceFlowRegistryType | undefined
     )?.dispose();

@@ -5,7 +5,7 @@
  */
 
 import type { Request, Response, NextFunction, RequestHandler } from 'express';
-import { isLoopbackBind } from './loopback-binds.js';
+import { formatHostForAuthority, isLoopbackBind } from './loopback-binds.js';
 import {
   singleTokenCredentials,
   type ListenerScopedCredentials,
@@ -326,6 +326,7 @@ function buildPrimaryHostGate(
   // is wasted work. Rebuild only when the port changes.
   let cachedPort = -1;
   let cachedAllowed: Set<string> = new Set();
+  const boundHost = formatHostForAuthority(bind);
   const allowedFor = (port: number): Set<string> => {
     if (port === cachedPort) return cachedAllowed;
     cachedPort = port;
@@ -334,6 +335,7 @@ function buildPrimaryHostGate(
       `127.0.0.1:${port}`,
       `[::1]:${port}`,
       `host.docker.internal:${port}`,
+      `${boundHost}:${port}`,
     ]);
     // RFC 7230 §5.4: clients may omit the port suffix when it matches
     // the URI scheme's default. http → 80, https → 443. Accept the
@@ -345,6 +347,7 @@ function buildPrimaryHostGate(
       cachedAllowed.add('127.0.0.1');
       cachedAllowed.add('[::1]');
       cachedAllowed.add('host.docker.internal');
+      cachedAllowed.add(boundHost);
     }
     return cachedAllowed;
   };

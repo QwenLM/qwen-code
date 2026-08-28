@@ -85,7 +85,11 @@ import {
   hostAssignsIpv6Loopback,
   isOwnInterfaceAddress,
 } from './local-bind-addresses.js';
-import { isLoopbackAddress, isLoopbackBind } from './loopback-binds.js';
+import {
+  formatHostForAuthority,
+  isLoopbackAddress,
+  isLoopbackBind,
+} from './loopback-binds.js';
 import { RUNTIME_STARTUP_CANCELLED_MESSAGE } from './runtime-startup-errors.js';
 import { resolveWebShellDir } from './web-shell-resolver.js';
 import { resolveServeToken } from './serve-token.js';
@@ -2387,9 +2391,13 @@ function validateRateLimitOptions(opts: ServeOptions): void {
 function installSameOriginOriginStrip(
   app: Application,
   getPort: () => number,
+  bind: string,
 ): void {
   let cachedStripPort = -1;
   let cachedSelfOrigins: Set<string> = new Set();
+  const boundHost = isLoopbackBind(bind)
+    ? formatHostForAuthority(bind)
+    : undefined;
   app.use((req: Request, _res: Response, next: NextFunction) => {
     const origin = req.headers.origin;
     if (origin) {
@@ -2411,6 +2419,10 @@ function installSameOriginOriginStrip(
           `https://[::1]:${port}`,
           `https://host.docker.internal:${port}`,
         ]);
+        if (boundHost) {
+          cachedSelfOrigins.add(`http://${boundHost}:${port}`);
+          cachedSelfOrigins.add(`https://${boundHost}:${port}`);
+        }
         // RFC 7230 §5.4: browsers omit the port in the Origin header when
         // it matches the scheme default (http→80, https→443). Accept the
         // port-less forms so the origin check doesn't fail on port 443.
@@ -2423,6 +2435,10 @@ function installSameOriginOriginStrip(
           ]) {
             cachedSelfOrigins.add(`http://${host}`);
             cachedSelfOrigins.add(`https://${host}`);
+          }
+          if (boundHost) {
+            cachedSelfOrigins.add(`http://${boundHost}`);
+            cachedSelfOrigins.add(`https://${boundHost}`);
           }
         }
       }
@@ -2568,7 +2584,7 @@ function createBootstrapServeApp(input: {
   // at `createApp` time (server.ts).
   const nativeDirectoryPickerAvailable = isNativeDirectoryPickerAvailable();
 
-  installSameOriginOriginStrip(app, getPort);
+  installSameOriginOriginStrip(app, getPort, opts.hostname);
   if (opts.allowOrigins && opts.allowOrigins.length > 0) {
     app.use(allowOriginCors(parseAllowOriginPatterns(opts.allowOrigins)));
   } else {
@@ -3535,7 +3551,7 @@ async function runQwenServeImpl(
     throw new Error(
       `Refusing to bind ${opts.hostname}:${opts.port} without a bearer token. ` +
         `Set ${QWEN_SERVER_TOKEN_ENV} or pass --token, or rebind to loopback ` +
-        `(127.0.0.1, localhost, ::1, or [::1]).`,
+        `(127.0.0.0/8, localhost, ::1, or [::1]).`,
     );
   }
   // `--require-auth` extends the "must have a token" rule to loopback

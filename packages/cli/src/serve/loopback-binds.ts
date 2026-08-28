@@ -5,15 +5,14 @@
  */
 
 /**
- * The set of `--hostname` values that are treated as loopback. Both the
+ * The canonical `--hostname` values that are treated as loopback. Both the
  * runner (boot-time auth-required check) and the request middleware (Host
  * header allowlist) consult this; keeping the set in one place prevents the
  * two from drifting apart.
  *
  * IPv6 loopback is included so users who prefer `::1`/`[::1]` don't have to
- * configure a token. We compare against the raw hostname string the operator
- * typed, not the resolved interface — both must be loopback for the bind to
- * be auth-free.
+ * configure a token. The complete IPv4 loopback range is handled separately
+ * below.
  */
 export const LOOPBACK_BINDS: ReadonlySet<string> = new Set([
   '127.0.0.1',
@@ -53,4 +52,12 @@ export function isLoopbackAddress(hostname: string): boolean {
   return (
     normalized === '::1' || normalized === '[::1]' || isIpv4Loopback(normalized)
   );
+}
+
+export function formatHostForAuthority(hostname: string): string {
+  const normalized = hostname.toLowerCase();
+  if (normalized.startsWith('[') && normalized.endsWith(']')) {
+    return normalized;
+  }
+  return normalized.includes(':') ? `[${normalized}]` : normalized;
 }

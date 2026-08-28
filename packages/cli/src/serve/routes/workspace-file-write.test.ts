@@ -38,6 +38,7 @@ interface Harness {
 async function makeHarness(opts?: {
   trusted?: boolean;
   token?: string;
+  hostname?: string;
   generationGuard?: { assertOpen(): void };
   workspaceName?: string;
 }): Promise<Harness> {
@@ -58,7 +59,12 @@ async function makeHarness(opts?: {
     ...(opts?.generationGuard ? { generationGuard: opts.generationGuard } : {}),
   });
   const app = createServeApp(
-    { ...baseOpts, workspace, token: opts?.token },
+    {
+      ...baseOpts,
+      workspace,
+      token: opts?.token,
+      hostname: opts?.hostname ?? baseOpts.hostname,
+    },
     undefined,
     { fsFactory },
   );
@@ -177,6 +183,19 @@ describe('POST /file/write', () => {
     expect(await fsp.readFile(path.join(h.workspace, 'a.txt'), 'utf8')).toBe(
       'x',
     );
+  });
+
+  it('denies a non-trusted tokenless embed before writing', async () => {
+    await teardown(h);
+    h = await makeHarness({ hostname: '192.0.2.1' });
+    const res = await request(h.app)
+      .post('/file/write')
+      .send({ path: 'denied.txt', content: 'x', mode: 'create' });
+    expect(res.status).toBe(401);
+    expect(res.body.code).toBe('token_required');
+    await expect(
+      fsp.stat(path.join(h.workspace, 'denied.txt')),
+    ).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
   it('creates a text file with no-store headers', async () => {

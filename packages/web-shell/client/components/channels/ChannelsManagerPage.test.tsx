@@ -801,6 +801,34 @@ describe('ChannelsManagerPage', () => {
     expect(start?.disabled).toBe(true);
   });
 
+  it.each([
+    [
+      'a configured daemon token',
+      { tokenConfigured: true, requireAuth: false, loopbackBind: true },
+    ],
+    [
+      'require-auth',
+      { tokenConfigured: false, requireAuth: true, loopbackBind: true },
+    ],
+    ['an unavailable status report', undefined],
+  ])('fails closed without a bearer under %s', async (_label, security) => {
+    workspaceState.current = {
+      ...workspaceState.current,
+      token: '',
+    };
+    statusState.current.report = security ? { security } : undefined;
+    statusState.current.error = security
+      ? undefined
+      : new Error('status unavailable');
+    await renderPage();
+
+    expect(container.textContent).toContain('Channel management is read-only');
+    const start = Array.from(container.querySelectorAll('button')).find(
+      (item) => item.textContent?.trim() === 'Start',
+    );
+    expect(start?.disabled).toBe(true);
+  });
+
   it('does not load Channel routes when the capability is unavailable', async () => {
     workspaceState.current = {
       ...workspaceState.current,

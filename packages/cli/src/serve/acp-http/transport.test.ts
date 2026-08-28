@@ -10942,6 +10942,7 @@ describe('ACP WebSocket transport security', () => {
       cdpTunnelOverWs?: boolean;
       daemonEnv?: Readonly<NodeJS.ProcessEnv>;
       localControlToken?: string;
+      hostname?: string;
     } = {},
   ) {
     return new Promise<void>((resolve) => {
@@ -10963,6 +10964,7 @@ describe('ACP WebSocket transport security', () => {
         token: opts.token,
         credentials,
         allowedOrigins: opts.allowedOrigins,
+        hostname: opts.hostname,
         workspaceRememberLane: new WorkspaceRememberTaskLane(
           bridge as unknown as HttpAcpBridge,
         ),
@@ -11111,6 +11113,14 @@ describe('ACP WebSocket transport security', () => {
     await startServer();
     const result = await wsConnectRaw('127.0.0.1', undefined);
     // The Host header will be 127.0.0.1:PORT which is in the allowlist
+    expect(result.code).toBe(101);
+  });
+
+  it('accepts the exact IPv4 loopback Host and Origin the daemon binds', async () => {
+    await startServer({ hostname: '127.0.0.2' });
+    const result = await wsConnectRaw('127.0.0.1', `http://127.0.0.2:${port}`, {
+      Host: `127.0.0.2:${port}`,
+    });
     expect(result.code).toBe(101);
   });
 

@@ -5,10 +5,10 @@
 `qwen serve` is a local daemon by default and an exposed surface in the wrong configuration. Its security model is **layered** so that misconfiguration fails closed:
 
 1. **Bind** — non-loopback bind without a bearer token **refuses to start**.
-2. **Bearer auth** — `bearerAuth` middleware with constant-time SHA-256 compare protects every route except `/health` on loopback (`require_auth` extends this to loopback and `/health` too).
-3. **Host header allowlist** — on loopback, only `localhost`, `127.0.0.1`, `[::1]`, `host.docker.internal` (plus port) are accepted; defense against DNS rebinding. The Local Control LAN listener is the exception that always enforces its advertised-authority Host check, whatever the primary bind is.
+2. **Bearer auth** — `bearerAuth` middleware with constant-time SHA-256 compare protects API routes except `/health` on an ordinary loopback bind (`require_auth` moves that endpoint behind the bearer too). Web Shell document and asset routes remain pre-auth in every mode.
+3. **Host header allowlist** — on loopback, only `localhost`, `127.0.0.1`, `[::1]`, `host.docker.internal`, or the exact bound loopback address (plus port) are accepted; defense against DNS rebinding. The Local Control LAN listener is the exception that always enforces its advertised-authority Host check, whatever the primary bind is.
 4. **Origin control** — the runtime app always installs `allowOriginCors` over a mutable allowlist (`MutableOriginAllowlist`): the `--allow-origin <pattern>` entries seed it, and Local Control adds the LAN origin while enabled. Non-matching origins receive the 403 deny envelope. The unconditional deny wall (`denyBrowserOriginCors`) survives only in the bootstrap app that answers before the runtime starts.
-5. **Per-route mutation gate** — strict routes require operator authority. A token-less loopback primary listener is trusted; bearer-authenticated and paired Local Control requests also qualify. Other token-less requests receive the distinct `code: 'token_required'` error.
+5. **Per-route mutation gate** — strict routes require operator authority. A token-less loopback primary listener is trusted; bearer-authenticated and paired Local Control requests also qualify. A token-less primary request that reaches this gate without trusted authority receives the distinct `code: 'token_required'` error. Missing or invalid configured credentials and unpaired Local Control credentials are rejected earlier by their listener-scoped bearer middleware with plain `401 Unauthorized`.
 6. **Device-flow auth** — separate OAuth surface for providers (`POST /workspace/auth/device-flow` + GET/DELETE on `/:id`).
 
 This doc walks through each layer and the explicit invariants the boot path enforces.
@@ -16,7 +16,7 @@ This doc walks through each layer and the explicit invariants the boot path enfo
 ## Responsibilities
 
 - Refuse to boot in unsafe configurations.
-- Gate every HTTP request through bearer (when configured) + host (loopback) + origin checks.
+- Gate API requests through bearer when configured, subject to the loopback `/health` exemption; keep loopback Host and browser Origin checks in front of both authenticated and exempt routes.
 - Provide a per-route mutation gate Wave 4 routes opt into.
 - Host the device-flow registry that drives provider OAuth flows visible via SSE events.
 
@@ -88,8 +88,8 @@ and large bodies are rejected before parsing when a limit is exceeded.
 
 Loopback-only. Maintains a `Set<string>` keyed by port. Allowed Hosts:
 
-- `localhost:<port>`, `127.0.0.1:<port>`, `[::1]:<port>`, `host.docker.internal:<port>`.
-- Plus no-port forms (`localhost`, `127.0.0.1`, `[::1]`, `host.docker.internal`) **only** when bound to port 80 (per RFC 7230 §5.4 default-port omission).
+- `localhost:<port>`, `127.0.0.1:<port>`, `[::1]:<port>`, `host.docker.internal:<port>`, and the exact bound loopback address with the same port. The last form covers the complete supported IPv4 loopback range (`127.0.0.0/8`) without admitting unrelated Hosts.
+- Plus the corresponding no-port forms **only** when bound to port 80 (per RFC 7230 §5.4 default-port omission).
 
 Host comparison is **case-insensitive** — Express normalizes header names but not values, so Docker proxies that capitalize Hosts (`Localhost:4170`, `HOST.docker.internal`) would 403 with an exact-string compare.
 
@@ -99,7 +99,7 @@ Non-loopback binds bypass the primary gate (operator chose the surface area; bea
 
 Reject any request with an `Origin` header. CLI/SDK never set Origin; only browsers do. Returns deterministic `403 { error: 'Request denied by CORS policy' }` rather than the 500 HTML the `cors` package's error-callback would produce. The runtime app no longer installs this wall — it runs `allowOriginCors` over the mutable allowlist (below); the deny behavior survives there as the unmatched-origin branch. The wall remains in the bootstrap app (run-qwen-serve.ts) that serves requests before the runtime starts.
 
-Exception: the Web Shell's same-origin XHRs on a **loopback** bind are handled by a separate middleware (in `server/self-origin.ts`) that strips `Origin` when it matches one of the loopback self-origins (`127.0.0.1`, `localhost`, `[::1]`, `host.docker.internal`). On non-loopback binds the shell's XHRs carry an unmatched `Origin` and need `--allow-origin` for the daemon origin.
+Exception: the Web Shell's same-origin XHRs on a **loopback** bind are handled by a separate middleware (in `server/self-origin.ts`) that strips `Origin` when it matches one of the canonical loopback self-origins (`127.0.0.1`, `localhost`, `[::1]`, `host.docker.internal`) or the exact bound loopback address. On non-loopback binds the shell's XHRs carry an unmatched `Origin` and need `--allow-origin` for the daemon origin.
 
 ### `allowOriginCors` (runtime app, always installed)
 
@@ -123,17 +123,17 @@ Control is enabled (the LAN origin is added/removed with the listener):
 
 Per-route opt-in gate. Behavior matrix:
 
-| daemon/request authority          | route opts      | result                           |
-| --------------------------------- | --------------- | -------------------------------- |
-| token configured                  | any             | passthrough¹                     |
-| trusted-loopback primary listener | any             | passthrough                      |
-| paired Local Control listener     | `strict: true`  | passthrough                      |
-| non-trusted token-less request    | `strict: true`  | `401 { code: 'token_required' }` |
-| any token-less deployment         | `strict: false` | passthrough                      |
+| daemon/request authority                                      | route opts      | result                           |
+| ------------------------------------------------------------- | --------------- | -------------------------------- |
+| token configured                                              | any             | passthrough¹                     |
+| trusted-loopback primary listener                             | any             | passthrough                      |
+| paired Local Control listener                                 | `strict: true`  | passthrough                      |
+| token-less primary request without trusted-loopback authority | `strict: true`  | `401 { code: 'token_required' }` |
+| any token-less deployment                                     | `strict: false` | passthrough                      |
 
-¹ Any token configuration makes global `bearerAuth` enforce bearer-required-everywhere; the gate is redundant but harmless. `--require-auth` is not itself authentication and is valid only with a token.
+¹ Any token configuration makes global `bearerAuth` enforce bearer auth before the gate on API routes, except loopback `/health` unless `--require-auth` is set. The gate is redundant but harmless on routes it protects. `--require-auth` is not itself authentication and is valid only with a token.
 
-Trusted-loopback mode is derived once from `loopback bind && no configured token && !requireAuth`. It authorizes only requests arriving through the primary listener. It does not stamp the internal bearer-authenticated marker, so listener credentials and deployment authority remain distinct facts. The `code: 'token_required'` shape remains for older daemons and non-trusted embeds so SDK clients can render a configuration hint instead of a generic 401.
+Trusted-loopback mode is derived once from `loopback bind && no configured token && !requireAuth`. It authorizes only requests arriving through the primary listener. It does not stamp the internal bearer-authenticated marker, so listener credentials and deployment authority remain distinct facts. The `code: 'token_required'` shape remains for older daemons and token-less non-trusted embeds whose requests reach the strict gate, so SDK clients can render a configuration hint instead of a generic 401. Configured-token and Local Control credential failures retain the earlier plain `401 Unauthorized` response.
 
 Local Control status and enable responses expose their pairing URL and QR only to callers with operator authority: trusted primary-listener callers, bearer-authenticated primary callers, and already paired LAN clients. Unpaired LAN callers and non-trusted embeds cannot retrieve it. Enabling still requires the primary listener; LAN clients may access after pairing or request disable under the existing rules.
 

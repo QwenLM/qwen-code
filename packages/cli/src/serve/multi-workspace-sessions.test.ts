@@ -3490,6 +3490,20 @@ describe('multi-workspace session dispatch', () => {
     expect(secondaryBridge.removeArtifactCalls).toHaveLength(1);
   });
 
+  it('denies secondary continuation in a non-trusted tokenless embed', async () => {
+    const { app, primaryBridge, secondaryBridge } = makeHarness({
+      serveOptions: { hostname: '0.0.0.0' },
+    });
+    const res = await request(app)
+      .post('/session/22222222-2222-4222-a222-222222222222/continue')
+      .send({});
+
+    expect(res.status).toBe(401);
+    expect(res.body.code).toBe('token_required');
+    expect(primaryBridge.continueCalls).toEqual([]);
+    expect(secondaryBridge.continueCalls).toEqual([]);
+  });
+
   it('rejects remaining mutations for an untrusted non-primary owner', async () => {
     const { app, primaryBridge, secondaryBridge } = makeHarness({
       secondaryTrusted: false,

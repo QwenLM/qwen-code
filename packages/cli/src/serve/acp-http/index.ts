@@ -25,6 +25,7 @@ import type { WorkspaceFileSystemFactory } from '../fs/index.js';
 import { resolveAcpHttpEnabled } from '../acp-http-enabled.js';
 import type { DeviceFlowRegistry } from '../auth/device-flow.js';
 import type { ParsedAllowOriginPatterns } from '../auth.js';
+import { formatHostForAuthority, isLoopbackBind } from '../loopback-binds.js';
 import {
   AcpDispatcher,
   type LegacyStandaloneSessionRestorer,
@@ -352,7 +353,11 @@ const WS_READ_METHODS = new Set([
   '_qwen/file/glob',
 ]);
 
-function isSameLoopbackOrigin(origin: string, localPort?: number): boolean {
+function isSameLoopbackOrigin(
+  origin: string,
+  localPort?: number,
+  hostname?: string,
+): boolean {
   if (!localPort) return false;
   const parsed = new URL(origin);
   // Both schemes: under `--tls-cert/--tls-key` the loopback ACP client
@@ -365,6 +370,14 @@ function isSameLoopbackOrigin(origin: string, localPort?: number): boolean {
     `https://127.0.0.1:${localPort}`,
     `https://[::1]:${localPort}`,
   ]);
+  const boundHost =
+    hostname && isLoopbackBind(hostname)
+      ? formatHostForAuthority(hostname)
+      : undefined;
+  if (boundHost) {
+    allowed.add(`http://${boundHost}:${localPort}`);
+    allowed.add(`https://${boundHost}:${localPort}`);
+  }
   // RFC 7230 §5.4: browsers omit the port in the Origin header when it
   // matches the scheme default (http→80, https→443). Accept the port-less
   // forms so the check doesn't fail on default ports.
@@ -372,6 +385,10 @@ function isSameLoopbackOrigin(origin: string, localPort?: number): boolean {
     for (const host of ['localhost', '127.0.0.1', '[::1]']) {
       allowed.add(`http://${host}`);
       allowed.add(`https://${host}`);
+    }
+    if (boundHost) {
+      allowed.add(`http://${boundHost}`);
+      allowed.add(`https://${boundHost}`);
     }
   }
   return allowed.has(parsed.origin.toLowerCase());
@@ -1642,6 +1659,9 @@ export function mountAcpHttp(
           `[::1]:${localPort}`,
           `host.docker.internal:${localPort}`,
         ]);
+        if (opts.hostname && isLoopbackBind(opts.hostname)) {
+          allowed.add(`${formatHostForAuthority(opts.hostname)}:${localPort}`);
+        }
         // RFC 7230 §5.4: browsers omit the port suffix when it matches the
         // scheme default (http→80, https→443). On TLS/port 443 the browser
         // sends `Host: localhost`, which won't match `localhost:443` and
@@ -1652,6 +1672,9 @@ export function mountAcpHttp(
           allowed.add('127.0.0.1');
           allowed.add('[::1]');
           allowed.add('host.docker.internal');
+          if (opts.hostname && isLoopbackBind(opts.hostname)) {
+            allowed.add(formatHostForAuthority(opts.hostname));
+          }
         }
         if (!allowed.has(host)) {
           logReject(`host-not-allowed ${host || '(missing)'}`);
@@ -1667,7 +1690,11 @@ export function mountAcpHttp(
       const origin = req.headers['origin'];
       if (origin) {
         try {
-          const isLoopbackOrigin = isSameLoopbackOrigin(origin, localPort);
+          const isLoopbackOrigin = isSameLoopbackOrigin(
+            origin,
+            localPort,
+            opts.hostname,
+          );
           // `--allow-origin` allowlist (same match semantics as the REST
           // `allowOriginCors`): lets an explicitly permitted non-loopback
           // origin — e.g. a browser extension's `chrome-extension://<id>`
