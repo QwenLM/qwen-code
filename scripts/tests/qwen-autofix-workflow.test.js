@@ -21854,6 +21854,20 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
         'git add pkg/a.test.ts && git commit -qm readd-weakened',
       ],
     },
+    // A pre-existing test deleted in one round commit and restored
+    // BYTE-IDENTICALLY in a later one: the per-commit arm charges the
+    // deletion by its full line count while the re-add is status A and
+    // earns no offsetting credit — the tip-identity netting must drop
+    // the charge, for the net change to pre-existing tests is zero.
+    'delete-readd-identical': {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      round: [
+        'git rm -q pkg/a.test.ts && git commit -qm delete-test',
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE }),
+        'git add pkg/a.test.ts && git commit -qm readd-identical',
+        AGENT_COMMIT,
+      ],
+    },
     // A pre-existing test replaced by a symlink is git status T, not D:
     // the path still matches the pathspec and exists at the tip.
     symlink: {
@@ -21894,6 +21908,50 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
         'git merge -q --no-edit origin/main || true',
         ...fixtureWrite({
           'pkg/a.test.ts': WT_BASE.filter((l) => !l.includes('expect(two())')),
+        }),
+        'git add pkg/a.test.ts && git commit -qm resolution',
+      ],
+    },
+    // The canonical merge-conflict weakening: the resolution wraps a
+    // byte-identical assertion in a multi-line block comment. -U0 anchors
+    // the wrapped line as implicit context, the only +/- lines are the
+    // conflicting header and the bare /* and */, and no line signal
+    // fires — only the freight-attributed density cross-check sees it.
+    'merge-wrap': {
+      onMain: { 'pkg/a.test.ts': WT_BASE },
+      files: {
+        'pkg/a.test.ts': [
+          WT_IMPORT,
+          "it('a branch', () => {",
+          '  expect(one()).toBe(1);',
+          '  expect(two()).toBe(2);',
+          '});',
+        ],
+      },
+      mainMoves: [
+        ...fixtureWrite({
+          'pkg/a.test.ts': [
+            WT_IMPORT,
+            "it('a main', () => {",
+            '  expect(one()).toBe(1);',
+            '  expect(two()).toBe(2);',
+            '});',
+          ],
+        }),
+        'git add pkg/a.test.ts && git commit -qm main-renames',
+      ],
+      round: [
+        'git merge -q --no-edit origin/main || true',
+        ...fixtureWrite({
+          'pkg/a.test.ts': [
+            WT_IMPORT,
+            "it('a main', () => {",
+            '  expect(one()).toBe(1);',
+            '  /*',
+            '  expect(two()).toBe(2);',
+            '  */',
+            '});',
+          ],
         }),
         'git add pkg/a.test.ts && git commit -qm resolution',
       ],
@@ -21944,6 +22002,79 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
             '  /*',
             '  expect(two()).toBe(2);',
             '  */',
+            '});',
+          ],
+        }),
+        AGENT_COMMIT,
+      ],
+    },
+    // The multi-line wrap plus a sibling value change: the moved
+    // assertion line fires the line signal (d=1, a=1), and the
+    // zero-signal gate never lets the blob comparison run — the
+    // always-run density cross-check is the arm that sees the wrap.
+    'wrap-value-change': {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      round: [
+        ...fixtureWrite({
+          'pkg/a.test.ts': [
+            WT_IMPORT,
+            "it('a', () => {",
+            '  expect(one()).toBe(11);',
+            '  /*',
+            '  expect(two()).toBe(2);',
+            '  */',
+            '});',
+          ],
+        }),
+        AGENT_COMMIT,
+      ],
+    },
+    // A decoy line carrying the assertion token inside a STRING literal:
+    // the added-side comment strip does not parse strings, so the decoy
+    // earns an addition credit that cancels the genuine removal — the
+    // string-aware blob strip must not count it.
+    'string-decoy': {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      round: [
+        ...fixtureWrite({
+          'pkg/a.test.ts': [
+            WT_IMPORT,
+            "it('a', () => {",
+            '  expect(one()).toBe(1);',
+            "  const note = 'expect(two()).toBe(2)';",
+            '});',
+          ],
+        }),
+        AGENT_COMMIT,
+      ],
+    },
+    // A decoy assertion line planted inside a block comment OPENED ABOVE
+    // the diff hunk: the added-side strip carries no comment state in
+    // from the unchanged bytes, so the decoy earns an addition credit —
+    // only the whole-blob strip knows the line is commented out.
+    'block-comment-preexisting-decoy': {
+      files: {
+        'pkg/a.test.ts': [
+          WT_IMPORT,
+          '/*',
+          'design notes',
+          '*/',
+          "it('a', () => {",
+          '  expect(one()).toBe(1);',
+          '  expect(two()).toBe(2);',
+          '});',
+        ],
+      },
+      round: [
+        ...fixtureWrite({
+          'pkg/a.test.ts': [
+            WT_IMPORT,
+            '/*',
+            'design notes',
+            '  expect(decoy()).toBe(0);',
+            '*/',
+            "it('a', () => {",
+            '  expect(one()).toBe(1);',
             '});',
           ],
         }),
@@ -22601,6 +22732,9 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
       'does not charge an edit that keeps an existing skip marker',
       'accepts a dash-prefixed filename once acknowledged',
       'does not charge edits to a test the base merge itself introduced',
+      'accepts an honest ack for a newline-named test file',
+      'accepts an honest ack for a tab-named test file',
+      'does not charge a delete restored byte-identically in the same round',
     ]) {
       expect(self).toMatch(
         new RegExp(`it\\.skipIf\\(!hasBashMapfile\\)\\(\\s*'${title}'`),
@@ -23572,6 +23706,20 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
     expect(r.rejection).toContain('assertion line(s) removed');
   });
 
+  it.skipIf(!hasBashMapfile)(
+    'does not charge a delete restored byte-identically in the same round',
+    () => {
+      // The per-commit arm charges the delete commit its full line count
+      // (the re-add is status A, outside the MDT filter, and earns no
+      // credit); a file byte-identical between the pre-round ref and the
+      // tip netted out whichever sequence produced it.
+      const r = runGate({ weaken: 'delete-readd-identical' });
+      expect(r.status).toBe(0);
+      expect(r.outputs).not.toContain('outcome=failed');
+      expect(r.advisories).not.toContain('weakened or removed pre-existing');
+    },
+  );
+
   it('rejects replacing a pre-existing test with a symlink', () => {
     // A typechange (status T) keeps matching the pathspec and exists at
     // the tip; vitest collects through the link, so nothing else signals
@@ -23627,6 +23775,49 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
     // are the bare /* and */, and no line signal fires. The
     // comment-stripped blob comparison is the only arm that sees it.
     const r = runGate({ weaken: 'block-comment-wrap' });
+    expect(r.status).toBe(1);
+    expect(r.rejection).toContain('pkg/a.test.ts');
+    expect(r.rejection).toContain('assertion line(s) removed');
+  });
+
+  it('rejects a block-comment wrap that rides a sibling value change', () => {
+    // The moved assertion line fires the line signal (d=1, a=1), so a
+    // density oracle gated on ZERO line signal never runs — the
+    // always-run cross-check is the arm that sees the wrapped assertion.
+    const r = runGate({ weaken: 'wrap-value-change' });
+    expect(r.status).toBe(1);
+    expect(r.rejection).toContain('pkg/a.test.ts');
+    expect(r.rejection).toContain('assertion line(s) removed');
+  });
+
+  it('rejects a removal cancelled by a string-literal decoy', () => {
+    // The added-side comment strip does not parse strings: a decoy
+    // `expect(` inside a string literal earns an addition credit that
+    // cancels the removal on the line counts. The string-aware blob
+    // strip must not count it.
+    const r = runGate({ weaken: 'string-decoy' });
+    expect(r.status).toBe(1);
+    expect(r.rejection).toContain('pkg/a.test.ts');
+    expect(r.rejection).toContain('assertion line(s) removed');
+  });
+
+  it('rejects a removal cancelled by a decoy inside a pre-existing block comment', () => {
+    // The decoy sits inside a block comment opened above the hunk; the
+    // added-side strip carries no comment state in from the unchanged
+    // bytes and credits it. Only the whole-blob strip knows.
+    const r = runGate({ weaken: 'block-comment-preexisting-decoy' });
+    expect(r.status).toBe(1);
+    expect(r.rejection).toContain('pkg/a.test.ts');
+    expect(r.rejection).toContain('assertion line(s) removed');
+  });
+
+  it('charges a multi-line block-comment wrap folded into a merge resolution', () => {
+    // The wrapped assertion is byte-identical across the merge, so no
+    // line signal fires on the merge commit — the merge exemption may
+    // not blind the density cross-check to it: a weakening introduced
+    // while resolving a merge conflict IS counted, with main's own
+    // density delta neither charging nor shielding.
+    const r = runGate({ weaken: 'merge-wrap' });
     expect(r.status).toBe(1);
     expect(r.rejection).toContain('pkg/a.test.ts');
     expect(r.rejection).toContain('assertion line(s) removed');

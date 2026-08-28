@@ -875,4 +875,31 @@ describe('qwen-autofix.yml design-record pointers', () => {
     );
     expect(listed).toEqual(anchors);
   });
+
+  it('keeps every section anchor outside any fenced code block', () => {
+    // Headings and HTML anchors inside a fenced code block are literal
+    // text on GitHub: a fence one entry leaves OPEN swallows the next
+    // entry's anchor, its heading, and every pointer at it — the entry
+    // renders as code inside its predecessor. Track fence parity line by
+    // line (a closer needs at least the opener's length and nothing but
+    // backticks, so a ``` block cannot close a ```` fence) and require
+    // every anchor to sit outside.
+    let openLen = 0;
+    const fencedAnchors = [];
+    for (const line of doc.split('\n')) {
+      const m = /^ {0,3}(`{3,})/.exec(line);
+      if (m) {
+        if (openLen === 0) {
+          openLen = m[1].length;
+        } else if (m[1].length >= openLen && line.trim() === m[1]) {
+          openLen = 0;
+        }
+      }
+      if (openLen > 0 && line.includes('<a id="af-')) {
+        fencedAnchors.push(line);
+      }
+    }
+    expect(fencedAnchors).toEqual([]);
+    expect(openLen).toBe(0);
+  });
 });

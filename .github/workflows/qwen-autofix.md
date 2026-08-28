@@ -3973,7 +3973,7 @@ planted FIFO cannot stall it.
 
 In `review-address` · `Post autofix status comment`.
 
-````text
+```text
 Deep-link "Watch live progress" to THIS matrix leg's live
 log, not just the run page: the run page lists every leg of
 the scan and the reader must find which one is theirs. The
@@ -3989,6 +3989,7 @@ ends the run page is the right destination (all steps, all
 attempts), and one less thing to re-resolve on the
 crashed-agent paths where this step's outputs may be all
 that survived.
+```
 
 <a id="af-151"></a>
 
@@ -4064,5 +4065,5 @@ genuinely flaky check failing on the bot's push
 reads as a regression. The consequence is bounded on purpose
 — one regression only declines to RESET a counter that needs
 five consecutive non-progress rounds to trip, and the
-recovery is automatic, since a clean push resets it.```
-````
+recovery is automatic, since a clean push resets it.
+```

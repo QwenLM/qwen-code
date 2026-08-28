@@ -1040,10 +1040,16 @@ fi
 #     (both TS comment forms): a commented-out copy of a removed assertion
 #     must not cancel it, while a stripped removal would zero an assertion
 #     that follows an in-string `//` (a URL) and let the deletion through.
-#     When a file's edits move no line signal at all, the assertion density
-#     of the comment-stripped blobs is compared instead -- an assertion
-#     wrapped into a multi-line block comment is anchored away from a -U0
-#     diff entirely, and only the blob comparison sees it. The measurement
+#     The line counts are cross-checked against the assertion density of
+#     the string-and-comment-stripped WHOLE BLOBS on every edited file:
+#     diff-line grep cannot see tokens that never execute -- an assertion
+#     wrapped into a multi-line block comment (the wrapped line stays
+#     byte-identical and never appears in a -U0 diff), a string-literal
+#     decoy, or a decoy planted inside a block comment opened above the
+#     hunk -- while the blob delta under symmetric stripping nets every
+#     untouched region to zero. The larger deletion signal wins. Merge
+#     commits are freight-attributed like the line counts: main's own
+#     density delta neither charges nor shields. The measurement
 #     diff is --text: a branch-controlled .gitattributes `-diff`/`binary`
 #     rule would otherwise collapse the hunk into a binary banner and zero
 #     every counter;
@@ -1133,12 +1139,47 @@ weaken_strip_comments() {
       if (out !~ /^[[:space:]]*$/) print out
     }' | sed -e '/^[[:space:]]*\*/d'
 }
+# Comment stripping PLUS string-literal contents, applied to WHOLE blobs
+# with both states carried across lines -- the blob-density cross-check
+# below. A decoy `expect(` inside a string literal must earn no assertion
+# credit, and a decoy line inside a block comment opened ABOVE the diff
+# hunk is only inside it when the state arrives from the unchanged bytes.
+# The line counts keep weaken_strip_comments on purpose: their raw/stripped
+# asymmetry is what keeps an in-string // deletion measured. Single- and
+# double-quoted strings cannot span lines in TS, so a dangling quote at
+# EOL closes there; a template literal carries on.
+weaken_strip_code() {
+  awk '
+    BEGIN { inc = 0; q = "" }
+    {
+      line = $0; out = ""; n = length(line); i = 1
+      while (i <= n) {
+        ch = substr(line, i, 1); nx = substr(line, i + 1, 1)
+        if (inc) {
+          if (ch == "*" && nx == "/") { inc = 0; i += 2 } else { i += 1 }
+          continue
+        }
+        if (q != "") {
+          if (ch == "\\") { i += 2 }
+          else if (ch == q) { q = ""; i += 1 }
+          else { i += 1 }
+          continue
+        }
+        if (ch == "/" && nx == "/") break
+        if (ch == "/" && nx == "*") { inc = 1; i += 2; continue }
+        if (ch == "\047" || ch == "\"" || ch == "`") { q = ch; i += 1; continue }
+        out = out ch; i += 1
+      }
+      if (q != "`") q = ""
+      if (out !~ /^[[:space:]]*$/) print out
+    }'
+}
 # Fold one commit's diff of one test file into the per-file accumulators.
 # When ${3} is set the commit is a merge whose second parent is derived
 # from origin/main: the same file at that parent decides line authorship,
 # keeping only what the merge resolution itself authored.
 weaken_count_commit_file() {
-  local c="${1}" f="${2}" is_merge="${3}" p2='' have_p2='' mb='' base_blob='' l diff_body add_lines del_lines weaken_slot weaken_has_edits='' weaken_old='' weaken_new='' weaken_old_n weaken_new_n
+  local c="${1}" f="${2}" is_merge="${3}" p2='' have_p2='' mb='' base_blob='' l diff_body add_lines del_lines weaken_slot weaken_has_edits='' weaken_old='' weaken_new='' weaken_old_n weaken_new_n weaken_o weaken_mb_n weaken_p2_n
   if [[ -n "${is_merge}" ]]; then
     # An empty blob is not a missing one: key the freight filter on git
     # show's exit status, so a modify/delete resolution (main deleted the
@@ -1207,21 +1248,32 @@ weaken_count_commit_file() {
   a="$(grep -cE "${WEAKEN_ASSERT_RE}" <<< "${add_lines}" || true)"
   sa="$(grep -cE "${WEAKEN_SKIP_RE}" <<< "${add_lines}" || true)"
   sd="$(grep -cE "${WEAKEN_SKIP_RE}" <<< "${del_lines}" || true)"
-  if [[ -z "${is_merge}" && -n "${weaken_has_edits}" ]] && (( d + a + sa + sd == 0 )); then
-    # -U0 anchors a byte-identical line as implicit context, so an
-    # assertion wrapped into a MULTI-line /* ... */ comment never appears
-    # in the diff at all -- the only +/- lines are the bare /* and */, and
-    # every counter above stayed zero. Compare assertion density on the
-    # comment-stripped blobs instead: symmetric stripping nets every
-    # untouched comment line to zero, and the raw line counts already had
-    # their say whenever any of them moved. Merge commits are exempt --
-    # their blob delta carries main-side freight the filter above owns.
+  if [[ -n "${weaken_has_edits}" ]]; then
+    # The line counters grep diff LINES for assertion tokens, and -U0
+    # anchors a byte-identical line as implicit context: an assertion
+    # wrapped into a MULTI-line /* ... */ comment never appears in the
+    # diff at all, a sibling value change lets the wrap ride on a moved
+    # line signal, and a decoy token inside a string literal or a block
+    # comment opened above the hunk earns an addition credit that
+    # cancels a genuine removal. Cross-check the WHOLE blobs on every
+    # edited file instead of only the zero-signal ones: symmetric
+    # string-and-comment-aware stripping nets every untouched region to
+    # zero, so the blob delta sees exactly what the edits removed, and
+    # take whichever signal measures more deletion. A merge's blob delta
+    # carries main-side freight exactly like the line counts: subtract
+    # main's own density delta so it neither charges nor shields.
     weaken_old="$(git show "${c}^:${f}" 2> /dev/null)" || weaken_old=''
     weaken_new="$(git show "${c}:${f}" 2> /dev/null)" || weaken_new=''
-    weaken_old_n="$(weaken_strip_comments <<< "${weaken_old}" | grep -cE "${WEAKEN_ASSERT_RE}" || true)"
-    weaken_new_n="$(weaken_strip_comments <<< "${weaken_new}" | grep -cE "${WEAKEN_ASSERT_RE}" || true)"
-    if (( weaken_old_n > weaken_new_n )); then
-      d=$(( weaken_old_n - weaken_new_n ))
+    weaken_old_n="$(weaken_strip_code <<< "${weaken_old}" | grep -cE "${WEAKEN_ASSERT_RE}" || true)"
+    weaken_new_n="$(weaken_strip_code <<< "${weaken_new}" | grep -cE "${WEAKEN_ASSERT_RE}" || true)"
+    weaken_o=$(( weaken_old_n - weaken_new_n ))
+    if [[ -n "${is_merge}" ]]; then
+      weaken_mb_n="$(weaken_strip_code <<< "${base_blob}" | grep -cE "${WEAKEN_ASSERT_RE}" || true)"
+      weaken_p2_n="$(weaken_strip_code <<< "${p2}" | grep -cE "${WEAKEN_ASSERT_RE}" || true)"
+      weaken_o=$(( weaken_o - (weaken_mb_n - weaken_p2_n) ))
+    fi
+    if (( weaken_o > 0 && weaken_o > d - a )); then
+      d=$(( a + weaken_o ))
     fi
   fi
   if ! weaken_slot="$(weaken_file_slot "${f}")"; then
@@ -1279,6 +1331,15 @@ if [[ "${WEAKEN_MEASURED}" == 'true' ]]; then
   # commit's files in diff order), so the indexed accumulators need no sort.
   for (( weaken_idx = 0; weaken_idx < ${#WEAKEN_FILE_LIST[@]}; weaken_idx++ )); do
     f="${WEAKEN_FILE_LIST[weaken_idx]}"
+    # A file byte-identical between the pre-round ref and the tip netted
+    # out over the round whichever commit sequence produced it: the
+    # per-commit arm charges a deletion by its full line count (the D
+    # filter), while a later byte-identical restore is status A, outside
+    # that filter, and never earns an offsetting credit. The netting
+    # principle reads the tip, not the sequence.
+    if git diff --quiet "origin/${BRANCH}" "${BRANCH}" -- ":(literal)${f}" 2> /dev/null; then
+      continue
+    fi
     w_del="${WEAKEN_DEL_ACC[weaken_idx]}"
     w_add="${WEAKEN_ADD_ACC[weaken_idx]}"
     w_skip_add="${WEAKEN_SKIP_ADD_ACC[weaken_idx]}"
