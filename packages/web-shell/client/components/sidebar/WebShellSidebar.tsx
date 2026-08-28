@@ -3565,7 +3565,15 @@ export function WebShellSidebar({
       sessionsByGroupId.set(group.id, []);
     }
     const recentSessions: DaemonSessionSummary[] = [];
-    for (const session of filteredSessions) {
+    // Bucket the search-filtered catalog in one pass, pinned rows included:
+    // they are lifted into the Pinned section, but their group/color section
+    // must keep them, otherwise a section whose members are all pinned
+    // rendered `· 0`, indistinguishable from lost memberships (#10391).
+    // One pass (instead of bucketing the unpinned rows first and appending
+    // the pinned ones) preserves the daemon catalog order — pinned rows sort
+    // first there — so a pinned member is never pushed behind its section's
+    // preview limit by rows it sorts ahead of.
+    for (const session of searchedSessions) {
       // Color takes precedence: the picker keeps color and group mutually
       // exclusive, but stay defensive if a store somehow carries both.
       if (session.color && SESSION_GROUP_COLORS.includes(session.color)) {
@@ -3580,25 +3588,14 @@ export function WebShellSidebar({
           : undefined;
       if (groupSessions) {
         groupSessions.push(session);
-      } else {
-        recentSessions.push(session);
+        continue;
       }
-    }
-    // Pinned members are lifted into the Pinned section, but their group must
-    // keep them: without this merge a group whose members are all pinned
-    // rendered `· 0`, indistinguishable from lost memberships (#10391).
-    // The channel source keeps pinned rows in `filteredSessions` already; for
-    // other sources pinned sessions without a group stay Pinned-section-only
-    // and never spill into Ungrouped.
-    if (selectedSessionSource !== 'channel') {
-      for (const session of searchedSessions) {
-        if (!session.isPinned) continue;
-        const groupSessions =
-          session.groupId && validGroupIds.has(session.groupId)
-            ? sessionsByGroupId.get(session.groupId)
-            : undefined;
-        if (groupSessions) groupSessions.push(session);
-      }
+      // On sources with a Pinned section, a pinned session without a
+      // (renderable) group stays Pinned-section-only; it never spills into
+      // Ungrouped. The channel source has no Pinned section, so its pinned
+      // rows keep the normal Ungrouped bucket.
+      if (session.isPinned && selectedSessionSource !== 'channel') continue;
+      recentSessions.push(session);
     }
     const sections: SessionSection[] = [];
     // Color buckets first, in palette order; only render non-empty ones so the
@@ -3640,7 +3637,6 @@ export function WebShellSidebar({
     }
     return sections;
   }, [
-    filteredSessions,
     groups,
     organizationEnabled,
     searchedSessions,

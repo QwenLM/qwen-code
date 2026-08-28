@@ -1017,9 +1017,7 @@ describe('WebShellSidebar pinned group members (issue #10391)', () => {
     );
     expect(searchButton).not.toBeNull();
     act(() => {
-      searchButton!.dispatchEvent(
-        new MouseEvent('click', { bubbles: true }),
-      );
+      searchButton!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     });
     await flushSidebar();
     const searchInput = container.querySelector<HTMLInputElement>(
@@ -1118,14 +1116,91 @@ describe('WebShellSidebar pinned group members (issue #10391)', () => {
     const titles = Array.from(
       group!.querySelectorAll('[data-web-shell-session-title]'),
     ).map((node) => node.textContent ?? '');
-    expect(
-      titles.filter((title) => title === 'Pinned member'),
-    ).toHaveLength(1);
-    expect(
-      titles.filter((title) => title === 'Active member'),
-    ).toHaveLength(1);
+    expect(titles.filter((title) => title === 'Pinned member')).toHaveLength(1);
+    expect(titles.filter((title) => title === 'Active member')).toHaveLength(1);
     // The pinned member still renders in the Pinned section too.
     expect(pinnedListTitles()).toContain('Pinned member');
+
+    workspaceActions.listSessionGroups.mockResolvedValue(defaultGroupsCatalog);
+  });
+
+  it('keeps a pinned color-tagged session in its color section', async () => {
+    mockDesignGroupCatalog();
+    const colorMember = makeSession('pinned-color', {
+      displayName: 'Pinned color',
+      color: 'red',
+      groupId: null,
+      isPinned: true,
+      pinnedAt: '2026-01-02T00:00:00.000Z',
+    });
+    active.sessions = [
+      colorMember,
+      makeSession('plain', { displayName: 'Plain session' }),
+    ];
+    active.data = active.sessions;
+    pinned.sessions = [colorMember];
+    pinned.data = pinned.sessions;
+
+    renderSidebar();
+    await flushSidebar();
+
+    // Color sections render only when non-empty: a pinned row that lost the
+    // color classification would make an all-pinned color section disappear
+    // entirely — the #10391 membership-loss symptom one path over.
+    const colorSection = container.querySelector<HTMLElement>(
+      'section[aria-label="Red"]',
+    );
+    expect(colorSection).not.toBeNull();
+    expect(colorSection?.textContent).toContain('\u00b7 1');
+    expect(colorSection?.textContent).toContain('Pinned color');
+    // The row stays in the Pinned section and never spills into Ungrouped.
+    expect(pinnedListTitles()).toContain('Pinned color');
+    const ungrouped = container.querySelector<HTMLElement>(
+      'section[aria-label="Ungrouped"]',
+    );
+    expect(ungrouped?.textContent ?? '').not.toContain('Pinned color');
+    expect(ungrouped?.textContent).toContain('Plain session');
+
+    workspaceActions.listSessionGroups.mockResolvedValue(defaultGroupsCatalog);
+  });
+
+  it('keeps a pinned member visible in its group preview ahead of unpinned members', async () => {
+    mockDesignGroupCatalog();
+    const pinnedMember = makeSession('pinned-member', {
+      displayName: 'Pinned member',
+      groupId: 'design-group',
+      isPinned: true,
+      pinnedAt: '2026-01-02T00:00:00.000Z',
+    });
+    // One pinned member plus five unpinned: the bucket exceeds the preview
+    // limit (5), so the pinned row must keep its catalog position (pinned
+    // sorts first) instead of being appended after every unpinned member,
+    // which would hide it behind "Show all".
+    const unpinnedMembers = [1, 2, 3, 4, 5].map((index) =>
+      makeSession(`unpinned-${index}`, {
+        displayName: `Unpinned ${index}`,
+        groupId: 'design-group',
+      }),
+    );
+    active.sessions = [pinnedMember, ...unpinnedMembers];
+    active.data = active.sessions;
+    pinned.sessions = [pinnedMember];
+    pinned.data = pinned.sessions;
+
+    renderSidebar();
+    await flushSidebar();
+
+    const group = container.querySelector<HTMLElement>(
+      'section[aria-label="Design"]',
+    );
+    expect(group).not.toBeNull();
+    expect(group?.textContent).toContain('\u00b7 6');
+    const rows = Array.from(
+      group!.querySelectorAll('[data-web-shell-session-title]'),
+    ).map((node) => node.textContent ?? '');
+    expect(rows).toHaveLength(5);
+    expect(rows[0]).toBe('Pinned member');
+    expect(group?.textContent).toContain('Show all');
 
     workspaceActions.listSessionGroups.mockResolvedValue(defaultGroupsCatalog);
   });
