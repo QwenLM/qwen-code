@@ -66,6 +66,10 @@ const gateRunsOn = (cond, event) => {
     [/cancelled\(\)/g, 'false'],
     [/always\(\)/g, 'true'],
     [/github\.event_name/g, `"${event}"`],
+    // These pins model a normal run: a gate keyed on any other value of a
+    // modeled output (e.g. `ci_profile != 'full'`, `skip_ci == 'true'`)
+    // evaluates here at the pin and may mis-report its reachability —
+    // re-derive this helper's verdict before adding such a gate.
     [/needs\.classify_pr\.outputs\.skip_ci/g, '"false"'],
     [/needs\.test\.outputs\.ci_profile/g, '"full"'],
     [
@@ -269,17 +273,15 @@ describe('post-merge push lane', () => {
   });
 
   it('test accepts push while still excluding the nightly', () => {
-    // Both halves are load-bearing. The exclusion checks are not enough on
-    // their own: rewriting `test.if` into allowlist form — `!cancelled() &&
-    // event != 'schedule' && (event == 'pull_request' || event ==
+    // The allowlist rewrite this guard exists to foreclose — `!cancelled()
+    // && event != 'schedule' && (event == 'pull_request' || event ==
     // 'merge_group' || event == 'workflow_dispatch')` — contains no
-    // `!= 'push'`, so it passes them, is skipped by the exclusivity helper
-    // (test is in PUSH_JOBS), and leaves the routing tests green because they
-    // inject EVENT_NAME=push into pick_runner's shell directly. On a real
-    // push, classify_pr would run, test would skip, the run would conclude
-    // `success`, and the failure watcher — gated on `conclusion == 'failure'`
-    // — would file nothing: the lane gone with zero red anywhere. Requiring
-    // the gate to stay exclusion-shaped forecloses that.
+    // `!= 'push'`, so it passes any exclusion-shaped check; the exclusivity
+    // helper's positive half catches it instead (test is in PUSH_JOBS, so it
+    // must reach push). The literal pin below covers what the evaluator
+    // cannot: `!cancelled()` is substituted to a constant, so a gate that
+    // loses that clause evaluates identically on every event and only the
+    // whole-literal pin catches the change.
     expect(condOf('test')).toBe(
       "${{ !cancelled() && github.event_name != 'schedule' }}",
     );
@@ -371,6 +373,18 @@ describe('platform lanes — the retired sensitivity classifier', () => {
     expect(ci.env.HELPER_TESTS).toContain(
       '.github/scripts/ci/classify-pr-profile.test.mjs',
     );
+  });
+});
+
+describe('GitHub helper tests', () => {
+  it('runs every invocation serially', () => {
+    const helperSteps = Object.values(ci.jobs)
+      .flatMap((job) => job.steps ?? [])
+      .filter((step) => String(step.run ?? '').includes('env.HELPER_TESTS'));
+    expect(helperSteps).not.toHaveLength(0);
+    for (const step of helperSteps) {
+      expect(String(step.run), step.name).toContain('--test-concurrency=1');
+    }
   });
 });
 

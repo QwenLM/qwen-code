@@ -1535,7 +1535,7 @@ export async function loadCliConfig(
    */
   sessionMcpServers?: Record<string, MCPServerConfig>,
   /**
-   * Lifecycle handle for the settings file watcher started in `gemini.tsx`
+   * Lifecycle handle for the settings file watcher started in `llm.tsx`
    * before `Config.initialize()`. Passed through to `Config` so it can be
    * stopped during shutdown — only `stopWatching()` is exposed here to keep
    * core decoupled from the CLI-owned `SettingsWatcher` implementation.
@@ -1836,6 +1836,46 @@ export async function loadCliConfig(
     bareMode || safeMode
       ? []
       : normalizeDisabledToolList(settings.tools?.visible);
+  // `tools.eager` restricts which schemas ride in the initial model request
+  // (#9827). Unlisted tools stay registered and reachable via tool_search —
+  // it is a schema-size knob, not an availability knob (#10075).
+  //
+  // An explicitly empty array must survive as an empty array, not collapse
+  // into "unset": `[]` is an active allowlist naming nothing (defer
+  // everything). `tools.core` differs: its empty list is treated as unset.
+  // `normalizeDisabledToolList` maps undefined to `[]`,
+  // so the Array.isArray guard has to come first — without it, absent and
+  // explicitly-empty would reach core as the same value, which is exactly
+  // the SDK divergence #10138 reports for coreTools.
+  const eagerTools =
+    bareMode || safeMode || !Array.isArray(settings.tools?.eager)
+      ? undefined
+      : normalizeDisabledToolList(settings.tools.eager);
+  if (eagerTools !== undefined) {
+    // `normalizeDisabledToolList` strips empty/whitespace-only and
+    // non-string entries before `PermissionManager.initialize()` ever sees
+    // the list, so the dropped-entries warning there can never fire for
+    // that class on the real CLI path — and a degenerate list like
+    // `tools.eager: [""]` would collapse to the active defer-everything
+    // allowlist `[]` in silence. Warn here so the collapse always leaves a
+    // signal (#10075).
+    const droppedEagerEntries = (settings.tools?.eager ?? []).filter(
+      (entry) => typeof entry !== 'string' || entry.trim() === '',
+    );
+    if (droppedEagerEntries.length > 0) {
+      // eslint-disable-next-line no-console -- operator-facing breadcrumb; the debug log file is off in default runs, where this reshaping would otherwise be invisible
+      console.warn(
+        `tools.eager: ignoring ${droppedEagerEntries.length} unusable entr${
+          droppedEagerEntries.length === 1 ? 'y' : 'ies'
+        } (${droppedEagerEntries
+          .map((entry) => JSON.stringify(entry))
+          .join(', ')}). ` +
+          `The allowlist stays active with ${eagerTools.length} entr${
+            eagerTools.length === 1 ? 'y' : 'ies'
+          }, so every other non-exempt tool is deferred to tool_search.`,
+      );
+    }
+  }
 
   // Helper: check if a tool is explicitly covered by an allow rule OR by the
   // coreTools whitelist. Uses alias matching for coreTools (via isToolEnabled)
@@ -2005,7 +2045,7 @@ export async function loadCliConfig(
 
     if (argv.resume) {
       // By the time we get here, argv.resume has been resolved to a valid
-      // session UUID by gemini.tsx (which handles custom title lookup and
+      // session UUID by llm.tsx (which handles custom title lookup and
       // the interactive picker for ambiguous matches).
       sessionId = argv.resume;
       deferProjectionUntilWriterLease =
@@ -2199,6 +2239,7 @@ export async function loadCliConfig(
             .map((d) => d.trim()),
     disabledTools: disabledTools.length > 0 ? disabledTools : undefined,
     visibleTools: visibleTools.length > 0 ? visibleTools : undefined,
+    eagerTools,
     toolSearchThreshold:
       bareMode || safeMode ? 0 : settings.tools?.toolSearch?.threshold,
     // New unified permissions (PermissionManager source of truth).
@@ -2206,16 +2247,6 @@ export async function loadCliConfig(
       allow: mergedAllow.length > 0 ? mergedAllow : undefined,
       ask: mergedAsk.length > 0 ? mergedAsk : undefined,
       deny: mergedDeny.length > 0 ? mergedDeny : undefined,
-      // Only `settings.permissions.allow` (never `--allowed-tools` nor the
-      // legacy `tools.allowed` key, which stay pure auto-approval grants)
-      // activates the registry-level allowlist that hides unlisted built-in
-      // tools from the model request (#9827).
-      registryAllowList:
-        bareMode || safeMode
-          ? undefined
-          : settings.permissions?.allow?.length
-            ? settings.permissions.allow
-            : undefined,
       autoMode:
         bareMode || safeMode ? undefined : settings.permissions?.autoMode,
     },
