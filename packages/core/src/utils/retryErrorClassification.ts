@@ -153,6 +153,24 @@ export function classifyRetryError(
     }
 
     if (statusCode >= 400 && statusCode < 500) {
+      // A 4xx that is actually a wrapped low-level network failure (e.g.
+      // "400 network error ... EOF" when the peer closed mid-request) is
+      // transient, not a permanent client error. There is no provider error
+      // body in that case, and no manual retry (Ctrl+Y) in channel/daemon
+      // paths, so classify it retryable so the bounded auto-retry applies.
+      // Genuine client 4xx (which carry provider fields) stay fail-fast.
+      if (
+        providerCode === undefined &&
+        providerMessage === undefined &&
+        hasNetworkFailureCause(error)
+      ) {
+        return {
+          kind: 'transport',
+          diagnosis: 'retryable',
+          reason: 'network-error',
+          ...common,
+        };
+      }
       return {
         kind,
         diagnosis: 'fail-fast',
@@ -218,6 +236,31 @@ export function getTransportCode(error: unknown): string | undefined {
 
 function isTransportCode(code: string): boolean {
   return TRANSPORT_ERROR_CODES.has(code);
+}
+
+// A peer closing the connection mid-request surfaces as a low-level network
+// failure (EOF / "network error") that some clients/proxies wrap in a 4xx
+// status. Unlike a genuine client error there is no provider error body, so
+// detect it by walking the message/cause chain for a transport code or an
+// EOF / network-error marker. Used to classify such wrapped failures as
+// retryable (there is no manual retry in channel/daemon paths).
+const NETWORK_FAILURE_MESSAGE_RE = /\bEOF\b|network error/i;
+
+export function hasNetworkFailureCause(error: unknown): boolean {
+  if (getTransportCode(error) !== undefined) return true;
+  let current: unknown = error;
+  for (let depth = 0; depth <= MAX_TRANSPORT_CAUSE_DEPTH; depth++) {
+    if (typeof current !== 'object' || current === null) return false;
+    const message = (current as { message?: unknown }).message;
+    if (
+      typeof message === 'string' &&
+      NETWORK_FAILURE_MESSAGE_RE.test(message)
+    ) {
+      return true;
+    }
+    current = current instanceof Error ? current.cause : undefined;
+  }
+  return false;
 }
 
 const TRANSPORT_ERROR_CODES = new Set([

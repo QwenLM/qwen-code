@@ -203,6 +203,43 @@ describe('classifyRetryError', () => {
     });
   });
 
+  it('classifies a 4xx wrapping a low-level network failure (EOF) as retryable', () => {
+    // Mirrors "400 network error for request to ...: EOF" — a peer closing the
+    // connection wrapped in a 4xx with no provider error body. Channel/daemon
+    // paths have no manual retry, so this must be auto-retried (bounded).
+    // Real SDK failures are Error instances (so `message` is not treated as a
+    // provider field), unlike a genuine client-error payload.
+    const err = Object.assign(
+      new Error(
+        'network error for request to http://11.0.0.1:8080/v1/chat/completions: Post "http://11.0.0.1:8080/v1/chat/completions": EOF',
+      ),
+      { status: 400 },
+    );
+    expect(classifyRetryError(err)).toMatchObject({
+      kind: 'transport',
+      diagnosis: 'retryable',
+      statusCode: 400,
+      reason: 'network-error',
+    });
+  });
+
+  it('keeps a 4xx with provider fields fail-fast even if the message mentions EOF', () => {
+    // A genuine client error carries provider fields; the network-failure
+    // exception must not relabel it as retryable.
+    expect(
+      classifyRetryError({
+        status: 400,
+        code: 'invalid_request_error',
+        message: 'bad request EOF',
+      }),
+    ).toMatchObject({
+      kind: 'http',
+      diagnosis: 'fail-fast',
+      statusCode: 400,
+      reason: 'client-error',
+    });
+  });
+
   it('marks auth errors as fail-fast', () => {
     expect(
       classifyRetryError({ status: 401, message: 'Unauthorized' }),
