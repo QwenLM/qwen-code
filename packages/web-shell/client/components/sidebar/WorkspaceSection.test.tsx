@@ -1316,4 +1316,37 @@ describe('WorkspaceSection pinned group members (issue #10391)', () => {
     expect(groupSection?.textContent).toContain('Pinned member');
     expect(groupSection?.textContent ?? '').not.toContain('Active member');
   });
+
+  it('keeps a group-less pinned session out of the Ungrouped section', async () => {
+    renderSection({
+      client: makeOrganizationClient([
+        {
+          sessionId: 'pinned-free',
+          displayName: 'Pinned free',
+          groupId: null,
+          isPinned: true,
+          pinnedAt: '2026-01-02T00:00:00.000Z',
+        },
+        {
+          sessionId: 'plain-session',
+          displayName: 'Plain session',
+          groupId: null,
+        },
+      ] as Array<Partial<DaemonSessionSummary>>),
+      expanded: true,
+      organizationEnabled: true,
+      excludePinned: true,
+    });
+    await flush();
+
+    // `ungrouped` derives from the pinned-filtered list, so the group-less
+    // pinned session never duplicates the Pinned section inside Ungrouped.
+    const ungrouped = container.querySelector<HTMLElement>(
+      'section[aria-label="Ungrouped"]',
+    );
+    expect(ungrouped).not.toBeNull();
+    expect(ungrouped?.textContent).toContain('\u00b7 1');
+    expect(ungrouped?.textContent).toContain('Plain session');
+    expect(ungrouped?.textContent ?? '').not.toContain('Pinned free');
+  });
 });
