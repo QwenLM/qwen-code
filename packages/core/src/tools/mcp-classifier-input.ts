@@ -56,7 +56,13 @@ const ENTRY_OVERHEAD = 2 * MCP_CLASSIFIER_MAX_DEPTH + 8;
 /** Opening bracket, newline, closing indentation and bracket. */
 const CONTAINER_OVERHEAD = 2 * MCP_CLASSIFIER_MAX_DEPTH + 4;
 
-const ANNOTATION_KEYS = [
+/**
+ * Annotation keys forwarded to the classifier. Exported so the classifier
+ * prompt's test can assert the prompt names every key this list forwards:
+ * a key added here without a matching prompt mention would reach the model
+ * as context the prompt never marked as unverified.
+ */
+export const ANNOTATION_KEYS = [
   'readOnlyHint',
   'destructiveHint',
   'idempotentHint',

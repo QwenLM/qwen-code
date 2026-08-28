@@ -15,6 +15,7 @@ import {
   STAGE1_SUFFIX,
   STAGE2_SUFFIX,
 } from './system-prompt.js';
+import { ANNOTATION_KEYS } from '../../tools/mcp-classifier-input.js';
 import type { Config } from '../../config/config.js';
 import type { AutoModeSettings } from '../../config/config.js';
 
@@ -306,10 +307,11 @@ describe('MCP guidance', () => {
     expect(prompt).toMatch(/self-reported by the server/);
     // Every annotation key the projection forwards must be named here, or
     // the classifier sees a key the prompt never marked as unverified.
-    expect(prompt).toMatch(/readOnlyHint/);
-    expect(prompt).toMatch(/destructiveHint/);
-    expect(prompt).toMatch(/idempotentHint/);
-    expect(prompt).toMatch(/openWorldHint/);
+    // Iterating the exported list guards both directions: a key added to
+    // the projection without a prompt mention turns this red.
+    for (const key of ANNOTATION_KEYS) {
+      expect(prompt).toContain(key);
+    }
     // Every marker form the projection emits must be announced.
     expect(prompt).toContain('`…[truncated N chars]`');
     expect(prompt).toContain('`[omitted: …]`');
