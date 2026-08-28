@@ -35,7 +35,7 @@ import type { TeamContext } from '../agents/team/types.js';
 
 // Core
 import { BaseLlmClient } from '../core/baseLlmClient.js';
-import { GeminiClient } from '../core/client.js';
+import { LlmClient } from '../core/client.js';
 import { resolveInteractionMode } from '../core/prompts.js';
 import type { OutputStyleDefinition } from '../core/output-styles.js';
 import {
@@ -1624,9 +1624,11 @@ export interface ConfigInitializeOptions {
    */
   sendSdkMcpMessage?: SendSdkMcpMessage;
   /**
-   * Skip Gemini client chat initialization. Useful for bootstrap paths that
+   * Skip LLM client chat initialization. Useful for bootstrap paths that
    * need config services (hooks, tools, MCP) before a real session exists.
    */
+  skipLlmInitialization?: boolean;
+  /** @deprecated Use `skipLlmInitialization`; retained until a future major release. */
   skipGeminiInitialization?: boolean;
   /**
    * skip MCP
@@ -2147,7 +2149,7 @@ export class Config {
    * headless) reads it via {@link consumePendingStartupWorktreeNotice} on
    * the model's first prompt and skips Phase C's `restoreWorktreeContext`
    * for that turn — startup wins over the resumed-session sidecar. ACP is
-   * gated out earlier in `gemini.tsx` (mutex with `--worktree`) so it
+   * gated out earlier in `llm.tsx` (mutex with `--worktree`) so it
    * never reaches this slot.
    *
    * @invariant At most one consumer per process. If a future entry path
@@ -2293,7 +2295,7 @@ export class Config {
   private userMemory: string;
   /**
    * The cross-session-stable prefix of the main-session system prompt —
-   * the stable → context layers `GeminiClient.getMainSessionSystemInstruction()`
+   * the stable → context layers `LlmClient.getMainSessionSystemInstruction()`
    * assembles before the volatile tails (git status, auto-memory). Recorded
    * so the Anthropic converter can place an early cache breakpoint on the
    * stable prefix; consumers match it via `startsWith` and fail open to the
@@ -2336,7 +2338,7 @@ export class Config {
   private activeTodoReminders = new Map<string, string>();
   private activeTodoWorkChainOwners = new Map<string, string>();
   private activeTodoReminderTurns = new Map<string, number>();
-  private geminiClient!: GeminiClient;
+  private llmClient!: LlmClient;
   private baseLlmClient!: BaseLlmClient;
   private cronScheduler: CronScheduler | null = null;
   private readonly fileFiltering: {
@@ -2402,7 +2404,7 @@ export class Config {
   /**
    * startChat orphan-repair preserve. Defaults to `restoreAskUserQuestion`.
    * A load/resume that will not re-hang (no client, fork) turns this off so
-   * Gemini history is repaired in lockstep with replay finalization.
+   * LLM history is repaired in lockstep with replay finalization.
    */
   private preserveRestorableAskUserQuestion = false;
   private readonly sessionWriterLeaseEnabled: boolean = false;
@@ -2935,7 +2937,7 @@ export class Config {
       // before initialize() awaits (and surfaces) the stored promise.
       this.proxyDispatcherReady.catch(() => {});
     }
-    this.geminiClient = new GeminiClient(this);
+    this.llmClient = new LlmClient(this);
     this.chatRecordingService = this.chatRecordingEnabled
       ? this.createChatRecordingService()
       : undefined;
@@ -3048,7 +3050,7 @@ export class Config {
     }
     const activation = (async () => {
       this.getFileService();
-      await this.geminiClient.initialize();
+      await this.llmClient.initialize();
       await this.toolRegistry.warmAll({ strict: true });
       logStartSession(this, new StartSessionEvent(this));
       this.provisionalWorkspaceActivated = true;
@@ -3488,11 +3490,14 @@ export class Config {
       `Tool registry initialized with ${this.toolRegistry.getAllToolNames().length} tools`,
     );
 
-    if (!options?.skipGeminiInitialization && !this.provisionalWorkspace) {
-      await this.geminiClient.initialize();
-      this.debugLogger.info('Gemini client initialized');
+    if (
+      !(options?.skipLlmInitialization ?? options?.skipGeminiInitialization) &&
+      !this.provisionalWorkspace
+    ) {
+      await this.llmClient.initialize();
+      this.debugLogger.info('LLM client initialized');
     } else {
-      this.debugLogger.info('Gemini client initialization skipped');
+      this.debugLogger.info('LLM client initialization skipped');
     }
 
     // Detect and capture runtime model snapshot (from CLI/ENV/credentials)
@@ -3814,18 +3819,18 @@ export class Config {
       .discoverAllMcpToolsIncremental(this)
       .then(async () => {
         // After background discovery completes, push the newly-registered
-        // MCP tools into the active GeminiChat so the next model request
+        // MCP tools into the active LlmChat so the next model request
         // sees both the updated declarations and added-tool reminder deltas.
         // Interactive mode also calls setTools() via AppContainer's
         // batch-flush effect — this trailing call is idempotent there, but
         // it's the ONLY path that updates `chat.tools` for non-interactive
         // runs (no AppContainer).
         // Without this, `chat.tools` would be frozen at the built-in-only
-        // snapshot taken inside `geminiClient.initialize()` → `startChat()`,
+        // snapshot taken inside `llmClient.initialize()` → `startChat()`,
         // and `runNonInteractive` / stream-json / ACP would silently lose
         // progressive MCP tools — a regression vs the legacy synchronous path.
         try {
-          await this.geminiClient?.setTools();
+          await this.llmClient?.setTools();
         } catch (err) {
           this.debugLogger.error(
             `setTools() after background MCP discovery failed: ${err instanceof Error ? err.message : String(err)}`,
@@ -4876,7 +4881,7 @@ export class Config {
   /**
    * Identity of the currently active model route for consumers that cache
    * route-specific state and must invalidate it when a model/auth/endpoint
-   * switch swaps the content generator — e.g. GeminiChat's API-reported
+   * switch swaps the content generator — e.g. LlmChat's API-reported
    * token counts (#9454). Same identity ⇒ same serialization target.
    */
   getModelRouteIdentity(
@@ -5773,7 +5778,7 @@ export class Config {
   /**
    * Stashes a one-shot context message that the next user prompt will
    * inject into the model (see {@link pendingStartupWorktreeNotice}). Called
-   * from `gemini.tsx` right after `loadCliConfig` when `--worktree` produced
+   * from `llm.tsx` right after `loadCliConfig` when `--worktree` produced
    * a valid worktree. Pass `null` to clear (rarely needed).
    */
   setPendingStartupWorktreeNotice(notice: string | null): void {
@@ -6011,7 +6016,7 @@ export class Config {
 
   /**
    * Swaps the active output style. Callers that change it mid-session must
-   * follow up with `GeminiClient.refreshSystemInstruction()`, since the style
+   * follow up with `LlmClient.refreshSystemInstruction()`, since the style
    * lives in the stable layer of an already-bound system instruction.
    */
   setOutputStyle(style: OutputStyleDefinition | undefined): void {
@@ -7386,8 +7391,13 @@ export class Config {
     return this.gitCoAuthor;
   }
 
-  getGeminiClient(): GeminiClient {
-    return this.geminiClient;
+  getLlmClient(): LlmClient {
+    return this.llmClient;
+  }
+
+  /** @deprecated Use `getLlmClient`; retained until a future major release. */
+  getGeminiClient(): LlmClient {
+    return this.getLlmClient();
   }
 
   private getOwnActiveTodoReminders(): Map<string, string> {
@@ -7883,7 +7893,7 @@ export class Config {
     return this.preserveRestorableAskUserQuestion;
   }
 
-  /** Load/resume declined the re-hang: repair Gemini history like flag-off. */
+  /** Load/resume declined the re-hang: repair LLM history like flag-off. */
   suppressRestorableAskUserQuestionPreservation(): void {
     this.preserveRestorableAskUserQuestion = false;
   }
@@ -9051,7 +9061,7 @@ export class Config {
    * client's `drainSkillAndCommandReminders` consumes these to mark them as
    * announced and avoid a duplicate announcement in the same turn's tail
    * reminder. Keys use the `"skill:<name>"` format matching
-   * `GeminiClient.skillEntryKey`.
+   * `LlmClient.skillEntryKey`.
    */
   addInlineAnnouncedSkillKeys(keys: Iterable<string>): void {
     for (const k of keys) {

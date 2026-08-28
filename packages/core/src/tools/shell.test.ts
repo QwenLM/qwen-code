@@ -155,7 +155,7 @@ describe('ShellTool', () => {
       getTruncateToolOutputLines: vi.fn().mockReturnValue(0),
       isTruncateToolOutputThresholdExplicit: vi.fn().mockReturnValue(false),
       getPermissionManager: vi.fn().mockReturnValue(undefined),
-      getGeminiClient: vi.fn(),
+      getLlmClient: vi.fn(),
       getFileSystemService: vi.fn().mockReturnValue(mockFileSystemService),
       getFileHistoryService: vi.fn().mockReturnValue(mockFileHistoryService),
       getFileReadCache: vi.fn().mockReturnValue(mockFileReadCache),
