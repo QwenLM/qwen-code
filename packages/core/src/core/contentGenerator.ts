@@ -562,10 +562,10 @@ export async function createContentGenerator(
       authType === AuthType.USE_VERTEX_AI
     ) {
       loadBaseGenerator = async () => {
-        const { createGeminiContentGenerator } = await import(
-          './geminiContentGenerator/index.js'
+        const { createLlmContentGenerator } = await import(
+          './llm-content-generator/index.js'
         );
-        return createGeminiContentGenerator(generatorConfig, config);
+        return createLlmContentGenerator(generatorConfig, config);
       };
     } else {
       throw new Error(

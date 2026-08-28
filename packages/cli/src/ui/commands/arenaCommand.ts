@@ -205,7 +205,7 @@ function executeArenaCommand(
   // its worktree directory — keeping the parent's would duplicate it.
   let chatHistory;
   try {
-    const fullHistory = config.getGeminiClient().getChat().getHistoryShallow();
+    const fullHistory = config.getLlmClient().getChat().getHistoryShallow();
     chatHistory = stripStartupContext(fullHistory);
   } catch {
     debugLogger.debug('Could not retrieve chat history for arena agents');

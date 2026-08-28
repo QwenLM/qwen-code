@@ -18,6 +18,7 @@ import { useI18n } from '../../i18n';
 import {
   filterSkills,
   preserveSkillSelection,
+  skillExtensionLabel,
   type SkillLevelFilter,
   type SkillStatusFilter,
 } from './skills-manager-logic';
@@ -517,7 +518,7 @@ export function SkillsManagerPage({
               />
               <DetailField
                 label={t('skills.extension')}
-                value={selectedSkill.extensionName || '-'}
+                value={skillExtensionLabel(selectedSkill)}
               />
               {selectedSkill.hint ? (
                 <div className="sm:col-span-2">

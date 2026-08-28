@@ -12,7 +12,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import type { DaemonSessionPrInfo } from '@qwen-code/sdk/daemon';
 import { I18nProvider } from '../i18n';
 import { SessionPrBadge } from './SessionPrBadge';
-import styles from './SessionPrBadge.module.css';
+import styles from './SessionPrStateIcon.module.css';
 
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -44,19 +44,38 @@ afterEach(() => {
 });
 
 describe('SessionPrBadge', () => {
-  it('dims the badge when the latest bound PR is merged', () => {
-    const container = renderBadge([pr(9517, 'merged')]);
-    const badge = container.querySelector('a');
-    expect(badge?.classList.contains(styles.sessionPrBadgeMerged)).toBe(true);
+  it('shows the GitHub-style state icon of the latest bound PR', () => {
+    const iconOf = (state?: DaemonSessionPrInfo['state']) =>
+      renderBadge([pr(9517, state)]).querySelector('a svg');
+    expect(iconOf('merged')?.classList.contains('lucide-git-merge')).toBe(true);
+    expect(
+      iconOf('merged')?.classList.contains(styles.sessionPrStateMerged),
+    ).toBe(true);
+    expect(
+      iconOf('closed')?.classList.contains('lucide-git-pull-request-closed'),
+    ).toBe(true);
+    expect(
+      iconOf('closed')?.classList.contains(styles.sessionPrStateClosed),
+    ).toBe(true);
+    expect(iconOf('open')?.classList.contains('lucide-git-pull-request')).toBe(
+      true,
+    );
+    expect(iconOf('open')?.classList.contains(styles.sessionPrStateOpen)).toBe(
+      true,
+    );
+    // A state-less binding keeps the neutral icon without a state color.
+    expect(iconOf()?.classList.contains('lucide-git-pull-request')).toBe(true);
+    expect(iconOf()?.className).not.toContain('sessionPrState');
   });
 
-  it('keeps the accent style for open or stateless bindings', () => {
-    for (const state of ['open', undefined] as const) {
-      const container = renderBadge([pr(9517, state)]);
-      const badge = container.querySelector('a');
-      expect(badge?.classList.contains(styles.sessionPrBadgeMerged)).toBe(
-        false,
-      );
-    }
+  it('appends the state name to the aria-label for merged and closed PRs', () => {
+    const labelOf = (state?: DaemonSessionPrInfo['state']) =>
+      renderBadge([pr(9517, state)])
+        .querySelector('a')
+        ?.getAttribute('aria-label');
+    expect(labelOf('merged')).toContain('Merged');
+    expect(labelOf('closed')).toContain('Closed');
+    expect(labelOf('open')).not.toContain('Open');
+    expect(labelOf()).not.toContain('Open');
   });
 });
