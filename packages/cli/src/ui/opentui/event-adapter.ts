@@ -67,6 +67,10 @@ export type OpenTuiStreamEvent =
         totalLines?: number;
         totalBytes?: number;
       };
+      /** Vision-bridge egress disclosure (ink ToolMessage renders the notice
+       * under the result): tells the user their image/prompt left the
+       * machine via the vision model. */
+      visionBridgeNotice?: string;
     }
   | { type: 'confirm'; id: string; tool: string; title: string }
   /** Structured compression item (/compress command): rendered as the ink
@@ -425,14 +429,33 @@ export function createEventMapper(
           error?: unknown;
           resultDisplay?: unknown;
           executionStatus?: string;
+          visionBridgeNotice?: string;
         };
+        // ink parity: the egress disclosure rides the tool card whenever a
+        // response bridged images (ToolMessage renders it under the result).
+        const visionBridgeNotice =
+          typeof v.visionBridgeNotice === 'string' && v.visionBridgeNotice
+            ? v.visionBridgeNotice
+            : undefined;
         const diff = extractFileDiff(v.resultDisplay);
         if (diff) {
-          out.push({ type: 'tool-result', id: v.callId, display: '', diff });
+          out.push({
+            type: 'tool-result',
+            id: v.callId,
+            display: '',
+            diff,
+            ...(visionBridgeNotice ? { visionBridgeNotice } : {}),
+          });
         } else {
           const todos = extractTodos(v.resultDisplay);
           if (todos) {
-            out.push({ type: 'tool-result', id: v.callId, display: '', todos });
+            out.push({
+              type: 'tool-result',
+              id: v.callId,
+              display: '',
+              todos,
+              ...(visionBridgeNotice ? { visionBridgeNotice } : {}),
+            });
           } else {
             const ansi = extractAnsiOutput(v.resultDisplay);
             if (ansi) {
@@ -441,11 +464,17 @@ export function createEventMapper(
                 id: v.callId,
                 display: '',
                 ansi,
+                ...(visionBridgeNotice ? { visionBridgeNotice } : {}),
               });
             } else {
               const display = renderResultDisplay(v.resultDisplay);
               if (display)
-                out.push({ type: 'tool-result', id: v.callId, display });
+                out.push({
+                  type: 'tool-result',
+                  id: v.callId,
+                  display,
+                  ...(visionBridgeNotice ? { visionBridgeNotice } : {}),
+                });
             }
           }
         }

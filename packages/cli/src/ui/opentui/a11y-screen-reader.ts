@@ -186,7 +186,10 @@ export class ScreenReaderOutputWriter {
    */
   appendStatic(text: string): void {
     const clean = this.sanitize(text);
-    if (clean.length === 0) return;
+    // ink's hasStaticOutput guard skips the write entirely when the
+    // sanitized content is empty or exactly '\n': the latter would erase
+    // the dynamic block and emit a spurious blank line.
+    if (clean.length === 0 || clean === '\n') return;
     if (this.lastDynamicHeight > 0) {
       this.write(eraseLines(this.lastDynamicHeight));
     }

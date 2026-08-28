@@ -18,6 +18,7 @@
  * submit-to-model); dialogs beyond help report themselves as pending parity.
  */
 
+import type { PartListUnion } from '@google/genai';
 import type { Config, SessionListItem } from '@qwen-code/qwen-code-core';
 import {
   SlashCommandStatus,
@@ -234,7 +235,11 @@ export type SlashEffect =
   | { kind: 'quit'; notice?: string }
   | {
       kind: 'submit';
-      content: string;
+      /** The prompt content in full: ink keeps the PartListUnion so image
+       * parts (e.g. @{…} file injection) reach the model; `textContent` is
+       * the text-only view for consumers that print it. */
+      content: PartListUnion;
+      textContent: string;
       /** Per-turn model id (ink: /model <id> <prompt> runs on the chosen
        * model without changing the session selection). */
       modelOverride?: string;
@@ -268,6 +273,19 @@ export interface SlashDispatchEnv {
    * (/doctor's oversized-tool-output check, etc.); absent means empty.
    */
   history?: readonly HistoryItemWithoutId[];
+  /**
+   * Toggle vim mode and report the new state (commands-context.ts routes
+   * the same seam to the host); without it /vim would report a fake
+   * "Exited Vim mode." confirmation while toggling nothing.
+   */
+  toggleVimEnabled?: () => Promise<boolean>;
+  /**
+   * The backend's session-stats seam for /clear: core rotates the config
+   * session id and hands the new id back so the backend can reset its
+   * SessionStatsState (start time, counters) instead of leaking pre-clear
+   * state across the boundary.
+   */
+  startNewSession?: (sessionId: string) => void;
 }
 
 function stringifyPromptContent(content: unknown): string {
@@ -329,11 +347,13 @@ function mapActionResult(
     case 'submit_prompt':
       // Carry the full SubmitPromptActionReturn contract: the backend
       // honors modelOverride (/model <id> <prompt>), onComplete (/dream
-      // records manual runs), and refreshContextFilesOnWrite (/remember)
-      // exactly like ink's processor.
+      // records manual runs), refreshContextFilesOnWrite (/remember), and
+      // the PartListUnion content (image parts from @{…} injection) exactly
+      // like ink's processor.
       return {
         kind: 'submit',
-        content: stringifyPromptContent(result.content),
+        content: result.content,
+        textContent: stringifyPromptContent(result.content),
         modelOverride: result.modelOverride,
         onComplete: result.onComplete,
         refreshContextFilesOnWrite: result.refreshContextFilesOnWrite,
@@ -481,7 +501,8 @@ export async function executeSlashCommand(
       isIdleRef: { current: true },
       loadHistory: () => {},
       refreshStatic: () => {},
-      toggleVimEnabled: async () => false,
+      toggleVimEnabled: () =>
+        env.toggleVimEnabled?.() ?? Promise.resolve(false),
       setMemoryFileCount: () => {},
       reloadCommands: () => {},
       setSessionName: () => {},
@@ -502,6 +523,13 @@ export async function executeSlashCommand(
         lastPromptTokenCount: 0,
         promptCount: 0,
       },
+      // /clear calls config.startNewSession() and checks this seam to
+      // hand the new session id to the backend's SessionStatsState; without
+      // it the reset is silently skipped (commands-context.ts wires the
+      // same seam to the host).
+      startNewSession: env.startNewSession
+        ? (sessionId: string) => env.startNewSession!(sessionId)
+        : undefined,
       sessionShellAllowlist: new Set<string>(),
     },
     abortSignal: env.abortSignal,
@@ -514,11 +542,15 @@ export async function executeSlashCommand(
     let result: SlashCommandActionReturn | void;
     if (env.abortSignal) {
       const signal = env.abortSignal;
-      const aborted = new Promise<undefined>((resolve) => {
-        signal.addEventListener('abort', () => resolve(undefined), {
-          once: true,
-        });
-      });
+      // An already-aborted signal never fires addEventListener('abort'),
+      // so resolve immediately in that case instead of hanging.
+      const aborted = signal.aborted
+        ? Promise.resolve(undefined)
+        : new Promise<undefined>((resolve) => {
+            signal.addEventListener('abort', () => resolve(undefined), {
+              once: true,
+            });
+          });
       result = await Promise.race([command.action(context, args), aborted]);
     } else {
       result = await command.action(context, args);

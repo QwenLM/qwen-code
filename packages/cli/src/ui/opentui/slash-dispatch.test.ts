@@ -189,7 +189,8 @@ describe('executeSlashCommand (result mapping)', () => {
     const effect = await executeSlashCommand('/ask', registry, env);
     expect(effect).toEqual({
       kind: 'submit',
-      content: 'part one part two',
+      content: [{ text: 'part one ' }, { text: 'part two' }],
+      textContent: 'part one part two',
       modelOverride: undefined,
       onComplete: undefined,
       refreshContextFilesOnWrite: undefined,
@@ -218,6 +219,7 @@ describe('executeSlashCommand (result mapping)', () => {
     expect(effect).toEqual({
       kind: 'submit',
       content: 'summarize this file',
+      textContent: 'summarize this file',
       modelOverride: 'qwen3-max',
       onComplete,
       refreshContextFilesOnWrite: true,
@@ -372,6 +374,7 @@ describe('executeSlashCommand ink-processor guards (R1-96/100/101/102)', () => {
     expect(effect).toEqual({
       kind: 'submit',
       content: 'analyze the project',
+      textContent: 'analyze the project',
       notice: 'Empty QWEN.md created.',
     });
   });

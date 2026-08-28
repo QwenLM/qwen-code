@@ -251,7 +251,7 @@ describe('projectContextUsage', () => {
         { name: 'shell', tokens: 500 },
       ],
       mcpTools: [{ name: 'search', tokens: 100 }],
-      memoryFiles: [{ name: 'GEMINI.md', tokens: 200 }],
+      memoryFiles: [{ path: 'GEMINI.md', tokens: 200 }],
       skills: [
         { name: 'feat-dev', tokens: 10, loaded: false },
         {
