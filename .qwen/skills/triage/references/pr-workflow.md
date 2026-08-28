@@ -337,9 +337,16 @@ gh pr review "$PR_NUMBER" --repo "$REPO" --request-changes --body-file /tmp/stag
   - **Fully subsumed** — file by file: every production file section in
     this PR's patch has a counterpart section in the closer's patch, and
     within each matched pair, every production line this PR adds also
-    appears among the lines the closer's patch adds to that file, AND
-    every production line this PR deletes also appears among the lines
-    the closer's patch deletes from it. A section with no line-level
+    appears among the lines the closer's patch adds to that file at
+    least as many times as this PR adds it, and, symmetrically for
+    deletions, every production line this PR deletes appears among the
+    lines the closer's patch deletes from it at least as many times as
+    this PR deletes it. The quantifiers count occurrences, not set membership:
+    identical line text occurs many times (blank lines make
+    this commonplace), so one occurrence in the closer's patch covers
+    exactly one occurrence in this PR's patch — a closer that deletes
+    one blank line never covers this PR deleting three. A section with
+    no line-level
     representation (a pure rename, a binary, a mode change, an empty
     file) is covered only by an equivalent change to the same path in
     the closer's patch. A line the closer's patch both adds and deletes
@@ -356,8 +363,12 @@ gh pr review "$PR_NUMBER" --repo "$REPO" --request-changes --body-file /tmp/stag
     subsumed either — anything it adds outside the covered production set
     is itself a remaining delta. If more than one
     closer fully subsumes this PR, the FIRST one in `$MERGED_PRS` order
-    is the duplicate target. → post the terminal comment below, then
-    close the PR. This is the ONLY place triage closes a PR.
+    is the duplicate target, and the close comment names the FIRST linked
+    issue the chosen closer closed, in `$ISSUES` order: `$MERGED_PRS`
+    records closer numbers only, so this rule fixes which #N the singular
+    template names when one closer closed several linked issues. → post
+    the terminal comment below, then close the PR. This is the ONLY place
+    triage closes a PR.
   - **Any remaining delta** — no closer fully subsumes this PR: for each
     closer, an added production line ITS patch does not add, a deleted
     production line ITS patch does not delete, or any non-production
