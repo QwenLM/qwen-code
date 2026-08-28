@@ -1512,12 +1512,11 @@ function SessionOverviewPanelInner({
         viewport.clientHeight -
         (Number.parseFloat(viewportStyle.paddingTop) || 0) -
         (Number.parseFloat(viewportStyle.paddingBottom) || 0);
-      // Asymmetric hysteresis: sticky mode's own decorations change the
-      // measured natural height by -3px (pt-3 +12, border-t +1, -mb-4 -16),
-      // so engage above P+1 but release only below P-3 as measured while
-      // sticky — otherwise the decision flips on its own side effect.
+      // Sticky decorations add 13px to the measured height
+      // (pt-3 +12, border-t +1). Keep a small hysteresis around the
+      // normalized threshold to avoid oscillation.
       setFooterSticky(
-        (prev) => naturalHeight > viewportContentHeight + (prev ? -4 : 1),
+        (prev) => naturalHeight > viewportContentHeight + (prev ? 12 : 1),
       );
     };
     update();
@@ -1561,11 +1560,7 @@ function SessionOverviewPanelInner({
   );
 
   return (
-    <div
-      ref={panelRef}
-      className={cx(styles.panel, footerSticky && styles.panelOverflowing)}
-      data-web-shell-session-panel
-    >
+    <div ref={panelRef} className={styles.panel} data-web-shell-session-panel>
       {/* Row 1: search + workspace filter + refresh (right). */}
       {toolbar}
 
@@ -1596,10 +1591,7 @@ function SessionOverviewPanelInner({
                   ? `${t('sessionsOverview.loadFailed')}: ${error.message}`
                   : t('sessionsOverview.empty')
           }
-          className={cx(
-            styles.tableViewport,
-            footerSticky && `min-h-0 flex-1 ${styles.tableViewportOverflowing}`,
-          )}
+          className={styles.tableViewport}
           rowClassName="cursor-pointer"
           onRowClick={(row) => row.toggleSelected()}
           data-web-shell-session-table-viewport
@@ -1611,7 +1603,7 @@ function SessionOverviewPanelInner({
           className={cx(
             'flex flex-wrap items-center gap-2',
             footerSticky &&
-              'sticky bottom-0 z-30 -mb-4 border-t bg-background pt-3',
+              'sticky bottom-0 z-30 border-t bg-background pt-3 shadow-[0_16px_0_var(--background)]',
           )}
           data-web-shell-session-footer
         >

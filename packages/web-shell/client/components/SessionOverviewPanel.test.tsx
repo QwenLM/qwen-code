@@ -1589,7 +1589,7 @@ describe('SessionOverviewPanel', () => {
     }
   });
 
-  it('sticks and separates the footer only while the panel overflows', () => {
+  it('sticks the footer without moving vertical scrolling into the table', () => {
     const resizeCallbacks = new Set<ResizeObserverCallback>();
     const observedTargets = new Set<Element>();
     const originalResizeObserver = globalThis.ResizeObserver;
@@ -1643,11 +1643,12 @@ describe('SessionOverviewPanel', () => {
         ),
       );
       expect(footer.className).toContain('sticky bottom-0');
+      expect(footer.className).toContain('shadow-[0_16px_0_var(--background)]');
       expect(footer.className).toContain('border-t');
       expect(footer.className).toContain('bg-background');
-      expect(footer.className).toContain('-mb-4');
-      expect(panel.className).toContain('panelOverflowing');
-      expect(tableViewport.className).toContain('tableViewportOverflowing');
+      expect(footer.className).not.toContain('-mb-4');
+      expect(panel.className).not.toContain('panelOverflowing');
+      expect(tableViewport.className).not.toContain('tableViewportOverflowing');
       const headers = Array.from(container!.querySelectorAll('thead th'));
       expect(headers[1]?.className).not.toContain('after:shadow-');
       expect(headers.at(-1)?.className).toContain(
@@ -1710,12 +1711,10 @@ describe('SessionOverviewPanel', () => {
         ),
       );
       expect(footer.className).toContain('sticky bottom-0');
-      // Sticky mode's own decorations shrink the measured natural height by
-      // 3px (pt-3 +12, border-t +1, -mb-4 -16). The decision must hold sticky
-      // through that self-inflicted delta instead of flipping back — a flip
-      // would re-fire the observer and loop forever in that height band.
+      // Sticky mode's own decorations add 13px to the measured natural
+      // height. The decision must hold through that self-inflicted delta.
       Object.defineProperties(panel, {
-        scrollHeight: { configurable: true, value: 399 },
+        scrollHeight: { configurable: true, value: 415 },
       });
       act(() =>
         resizeCallbacks.forEach((callback) =>
@@ -1725,7 +1724,7 @@ describe('SessionOverviewPanel', () => {
       expect(footer.className).toContain('sticky bottom-0');
       // Once the content genuinely fits again, release.
       Object.defineProperties(panel, {
-        scrollHeight: { configurable: true, value: 396 },
+        scrollHeight: { configurable: true, value: 411 },
       });
       act(() =>
         resizeCallbacks.forEach((callback) =>

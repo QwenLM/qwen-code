@@ -172,6 +172,17 @@ function renderAtWidth(element: ReactNode, width: number) {
 }
 
 describe('DataTable', () => {
+  it('keeps vertical scrolling outside the horizontal table scroller', () => {
+    const { container, cleanup } = renderAtWidth(<TableHarness />, 600);
+    try {
+      expect(
+        container.querySelector('[data-slot="table-container"]')?.className,
+      ).toContain('overflow-y-hidden');
+    } finally {
+      cleanup();
+    }
+  });
+
   it('leaves remaining fluid width to columns without an explicit width', () => {
     const { container, cleanup } = renderAtWidth(<TableHarness />, 600);
     try {

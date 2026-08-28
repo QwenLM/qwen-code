@@ -11,17 +11,8 @@
   cursor: not-allowed;
 }
 
-.panelOverflowing {
-  height: 100%;
-  min-height: 0;
-}
-
 .tableViewport {
   overflow: hidden;
-}
-
-.tableViewportOverflowing {
-  overflow-y: auto;
 }
 
 .notice {
