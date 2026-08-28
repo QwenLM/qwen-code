@@ -745,13 +745,13 @@ if (!area) process.exit(0);
 const canWrite = (login) => {
   try {
     return ['admin', 'maintain', 'write'].includes(
-      gh(['api', `repos/${repo}/collaborators/${login}/permission`, '--jq', '.permission']),
+      gh(['api', 'repos/' + repo + '/collaborators/' + login + '/permission', '--jq', '.permission']),
     );
   } catch {
     return false;
   }
 };
-// `"author": null` means the account was deleted — nobody to exclude, and
+// A null author means the account was deleted — nobody to exclude, and
 // dereferencing it would throw, letting 2>/dev/null silently bypass the
 // deterministic resolver (the jq fallback below already defends this shape).
 const authorLogin = pr.author?.login?.toLowerCase() ?? '';
