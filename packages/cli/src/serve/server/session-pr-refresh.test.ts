@@ -1874,10 +1874,21 @@ describe('startSessionPrRefreshTimer', () => {
     current = [];
 
     // Tick 2: guard closed → sweep throws non-draining → offset must NOT
-    // advance. No new views fire.
-    attachTimerGuard(runtime).close();
+    // advance. No new views fire. The guard assert sits AFTER the sweep's
+    // real-fs sidecar scan, so wait on the assert itself — a spy on the
+    // test-owned closed guard — before concluding the tick threw: asserting
+    // the view count alone races the scan, and the guard can be re-opened
+    // before the sweep reaches the assert, so no throw ever happens.
+    const closedGuard = attachTimerGuard(runtime);
+    closedGuard.close();
+    const assertOpen = vi.spyOn(closedGuard, 'assertOpen');
     await vi.advanceTimersByTimeAsync(5 * 60_000);
-    await vi.advanceTimersByTimeAsync(10);
+    await vi.waitFor(
+      () => {
+        expect(assertOpen).toHaveBeenCalled();
+      },
+      { timeout: 30_000 },
+    );
     expect(view).toHaveBeenCalledTimes(AONE_MAX_MR_VIEW_CALLS_PER_RUN);
 
     // Tick 3: guard re-opened → sweep retries the window tick 1 left off at
