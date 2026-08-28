@@ -78,9 +78,13 @@ const CRON_CREATE_INSTRUCTION = 'Call cron_create with cron expression';
 
 function isCronCreateRequest(body: Record<string, unknown>): boolean {
   const messages = body['messages'];
+  const latestMessage = Array.isArray(messages) ? messages.at(-1) : undefined;
   return (
-    Array.isArray(messages) &&
-    JSON.stringify(messages.at(-1))?.includes(CRON_CREATE_INSTRUCTION) === true
+    typeof latestMessage === 'object' &&
+    latestMessage !== null &&
+    'role' in latestMessage &&
+    latestMessage.role === 'user' &&
+    JSON.stringify(latestMessage)?.includes(CRON_CREATE_INSTRUCTION) === true
   );
 }
 
