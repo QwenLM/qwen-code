@@ -5,16 +5,16 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { createGeminiContentGenerator } from './index.js';
-import { GeminiContentGenerator } from './geminiContentGenerator.js';
+import { createLlmContentGenerator } from './index.js';
+import { LlmContentGenerator } from './llm-content-generator.js';
 import type { Config } from '../../config/config.js';
 import { AuthType } from '../contentGenerator.js';
 
-vi.mock('./geminiContentGenerator.js', () => ({
-  GeminiContentGenerator: vi.fn().mockImplementation(() => ({})),
+vi.mock('./llm-content-generator.js', () => ({
+  LlmContentGenerator: vi.fn().mockImplementation(() => ({})),
 }));
 
-describe('createGeminiContentGenerator', () => {
+describe('createLlmContentGenerator', () => {
   let mockConfig: Config;
 
   beforeEach(() => {
@@ -28,16 +28,16 @@ describe('createGeminiContentGenerator', () => {
     } as unknown as Config;
   });
 
-  it('should create a GeminiContentGenerator', () => {
+  it('should create a LlmContentGenerator', () => {
     const config = {
       model: 'gemini-1.5-flash',
       apiKey: 'test-key',
       authType: AuthType.USE_GEMINI,
     };
 
-    const generator = createGeminiContentGenerator(config, mockConfig);
+    const generator = createLlmContentGenerator(config, mockConfig);
 
-    expect(GeminiContentGenerator).toHaveBeenCalled();
+    expect(LlmContentGenerator).toHaveBeenCalled();
     expect(generator).toBeDefined();
   });
 
@@ -49,9 +49,9 @@ describe('createGeminiContentGenerator', () => {
       baseUrl: 'https://proxy.example.com/gemini',
     };
 
-    createGeminiContentGenerator(config, mockConfig);
+    createLlmContentGenerator(config, mockConfig);
 
-    expect(GeminiContentGenerator).toHaveBeenCalledWith(
+    expect(LlmContentGenerator).toHaveBeenCalledWith(
       expect.objectContaining({
         httpOptions: expect.objectContaining({
           headers: expect.objectContaining({
@@ -71,9 +71,9 @@ describe('createGeminiContentGenerator', () => {
       authType: AuthType.USE_GEMINI,
     };
 
-    createGeminiContentGenerator(config, mockConfig);
+    createLlmContentGenerator(config, mockConfig);
 
-    expect(GeminiContentGenerator).toHaveBeenCalledWith(
+    expect(LlmContentGenerator).toHaveBeenCalledWith(
       expect.objectContaining({
         httpOptions: expect.objectContaining({
           headers: expect.objectContaining({
@@ -83,7 +83,7 @@ describe('createGeminiContentGenerator', () => {
       }),
       config,
     );
-    expect(vi.mocked(GeminiContentGenerator).mock.calls[0]?.[0]).not.toEqual(
+    expect(vi.mocked(LlmContentGenerator).mock.calls[0]?.[0]).not.toEqual(
       expect.objectContaining({
         httpOptions: expect.objectContaining({
           baseUrl: expect.any(String),

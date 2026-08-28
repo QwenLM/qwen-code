@@ -11457,7 +11457,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     async generateSessionRecap(sessionId, _context) {
       // Thin pass-through to `qwen/control/session/
       // recap` — the ACP child runs `generateSessionRecap` against the
-      // session's GeminiClient history and returns `{sessionId, recap}`
+      // session's LlmClient history and returns `{sessionId, recap}`
       // where `recap` may be `null` for too-short histories or transient
       // model failures. The core helper is documented to never throw,
       // so the only paths that surface as bridge errors are: unknown
