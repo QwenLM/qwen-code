@@ -431,8 +431,11 @@ function rerenderMessages(
     catchingUp?: boolean;
     isResponding?: boolean;
     hasOlderHistory?: boolean;
+    historyCapacityReached?: boolean;
+    historyPaginationError?: boolean;
     onLoadOlderHistory?: (options?: { force?: boolean }) => Promise<void>;
     sessionKey?: string;
+    onEditUserMessage?: (targetTurnIndex: number, content: string) => void;
   } = {},
 ): void {
   const entry = mounted.find((item) => item.container === container);
@@ -450,8 +453,11 @@ function rerenderMessages(
                 catchingUp={opts.catchingUp}
                 isResponding={opts.isResponding}
                 hasOlderHistory={opts.hasOlderHistory}
+                historyCapacityReached={opts.historyCapacityReached}
+                historyPaginationError={opts.historyPaginationError}
                 onLoadOlderHistory={opts.onLoadOlderHistory}
                 sessionKey={opts.sessionKey}
+                onEditUserMessage={opts.onEditUserMessage}
               />
             </TranscriptRenderModeProvider>
           </CompactModeContext.Provider>
@@ -6581,6 +6587,41 @@ describe('user message edit affordance (issue #10385)', () => {
     clickEdit(c, 'u2');
     expect(onEditUserMessage).toHaveBeenCalledTimes(1);
     expect(onEditUserMessage).toHaveBeenCalledWith(1, 'q');
+  });
+
+  it('re-offers editing when hasOlderHistory flips without a message identity change', () => {
+    const onEditUserMessage = vi.fn();
+    const messages = [userMsg('u4'), asstMsg('a4'), userMsg('u5')];
+    const c = mount(messages, undefined, {
+      hasOlderHistory: true,
+      onEditUserMessage,
+    });
+    expect(c.querySelector('[data-testid="edit-u5"]')).toBeNull();
+    // A load-older request resolving with zero additional turns flips the
+    // flag while the messages array keeps its identity; the render callback
+    // must not hold the stale flag value.
+    rerenderMessages(c, messages, {
+      hasOlderHistory: false,
+      onEditUserMessage,
+    });
+    expect(c.querySelector('[data-testid="edit-u5"]')).not.toBeNull();
+    clickEdit(c, 'u5');
+    expect(onEditUserMessage).toHaveBeenCalledWith(1, 'q');
+  });
+
+  it('re-offers editing when historyCapacityReached flips without a message identity change', () => {
+    const onEditUserMessage = vi.fn();
+    const messages = [userMsg('u4'), asstMsg('a4'), userMsg('u5')];
+    const c = mount(messages, undefined, {
+      historyCapacityReached: true,
+      onEditUserMessage,
+    });
+    expect(c.querySelector('[data-testid="edit-u5"]')).toBeNull();
+    rerenderMessages(c, messages, {
+      historyCapacityReached: false,
+      onEditUserMessage,
+    });
+    expect(c.querySelector('[data-testid="edit-u5"]')).not.toBeNull();
   });
 
   it('does not count user_shell echoes when numbering user turns', () => {
