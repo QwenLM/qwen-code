@@ -304,12 +304,12 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   const hasActiveToolConfirmation = useMemo(
     () =>
       Boolean(uiState.confirmationRequest) ||
-      (uiState.pendingGeminiHistoryItems ?? []).some(
+      (uiState.pendingLlmHistoryItems ?? []).some(
         (item) =>
           item.type === 'tool_group' &&
           item.tools.some((tool) => tool.confirmationDetails),
       ),
-    [uiState.confirmationRequest, uiState.pendingGeminiHistoryItems],
+    [uiState.confirmationRequest, uiState.pendingLlmHistoryItems],
   );
   const [historyRestoredText, setHistoryRestoredText] = useState<string | null>(
     null,

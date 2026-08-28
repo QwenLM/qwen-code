@@ -42,8 +42,8 @@ import {
 import { TextSelectionController } from '../selection/use-text-selection.js';
 import { measureElementPosition } from '../utils/measure-element-position.js';
 
-// Limit Gemini messages to a very high number of lines to mitigate performance
-// issues in the worst case if we somehow get an enormous response from Gemini.
+// Limit LLM messages to a very high number of lines to mitigate performance
+// issues in the worst case if we somehow get an enormous model response.
 // This threshold is arbitrary but should be high enough to never impact normal
 // usage.
 const MAX_GEMINI_MESSAGE_LINES = 65536;
@@ -492,7 +492,7 @@ const MainContentView = ({
           availableTerminalHeight={
             uiState.constrainHeight ? staticAreaMaxItemHeight : undefined
           }
-          availableTerminalHeightGemini={
+          availableTerminalHeightLlm={
             uiState.constrainHeight ? MAX_GEMINI_MESSAGE_LINES : undefined
           }
           item={item}
@@ -583,7 +583,7 @@ const MainContentView = ({
                 terminalWidth={terminalWidth}
                 mainAreaWidth={mainAreaWidth}
                 availableTerminalHeight={staticAreaMaxItemHeight}
-                availableTerminalHeightGemini={MAX_GEMINI_MESSAGE_LINES}
+                availableTerminalHeightLlm={MAX_GEMINI_MESSAGE_LINES}
                 key={h.id}
                 item={h}
                 isPending={false}
