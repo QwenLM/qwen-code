@@ -55,7 +55,6 @@ describe('probeKittyKeyboardSupport', () => {
       stdin,
       stdout,
       timeoutMs: 500,
-      settleMs: 1,
     });
     stdin.emit('data', Buffer.from('\x1b[?1u'));
     await expect(probe).resolves.toBe(true);
@@ -69,7 +68,6 @@ describe('probeKittyKeyboardSupport', () => {
       stdin,
       stdout,
       timeoutMs: 500,
-      settleMs: 1,
     });
     stdin.emit('data', Buffer.from('\x1b[?62;22c'));
     await expect(probe).resolves.toBe(false);
@@ -83,7 +81,6 @@ describe('probeKittyKeyboardSupport', () => {
         stdin,
         stdout,
         timeoutMs: 20,
-        settleMs: 1,
       }),
     ).resolves.toBe(false);
     expect(stdout.writes).toContain('\x1b[?u');
@@ -115,7 +112,6 @@ describe('probeKittyKeyboardSupport', () => {
       stdin,
       stdout,
       timeoutMs: 500,
-      settleMs: 1,
     });
     expect(stdin.isRaw).toBe(true); // enabled while probing
     stdin.emit('data', Buffer.from('\x1b[?1u'));
@@ -130,11 +126,55 @@ describe('probeKittyKeyboardSupport', () => {
       stdin,
       stdout,
       timeoutMs: 500,
-      settleMs: 1,
     });
     stdin.emit('data', Buffer.from('\x1b[?1u'));
     await probe;
     expect(stdout.writes).not.toContain('\x1b[>1u');
     expect(stdout.writes).not.toContain('\x1b[<u');
+  });
+
+  it('does not resolve on an echo of the probe query itself (no flags)', async () => {
+    // Echo environments (PTY harnesses, canonical-mode CI) replay stdout
+    // into stdin; the bare query \x1b[?u has no flags parameter and must
+    // not count as a kitty reply.
+    const stdin = makeStdin();
+    const stdout = makeStdout();
+    const probe = probeKittyKeyboardSupport({
+      stdin,
+      stdout,
+      timeoutMs: 20,
+    });
+    stdin.emit('data', Buffer.from('\x1b[?u'));
+    await expect(probe).resolves.toBe(false);
+  });
+
+  it('bounds the accumulation window under byte floods', async () => {
+    // A PTY streaming non-matching bytes must not grow the buffer or slow
+    // the probe; the timeout still settles the probe.
+    const stdin = makeStdin();
+    const stdout = makeStdout();
+    const probe = probeKittyKeyboardSupport({
+      stdin,
+      stdout,
+      timeoutMs: 20,
+    });
+    for (let i = 0; i < 100; i++) {
+      stdin.emit('data', Buffer.from('x'.repeat(1024)));
+    }
+    await expect(probe).resolves.toBe(false);
+  });
+
+  it('still resolves true when the reply is split across chunks', async () => {
+    const stdin = makeStdin();
+    const stdout = makeStdout();
+    const probe = probeKittyKeyboardSupport({
+      stdin,
+      stdout,
+      timeoutMs: 500,
+    });
+    stdin.emit('data', Buffer.from('\x1b'));
+    stdin.emit('data', Buffer.from('[?1'));
+    stdin.emit('data', Buffer.from('u'));
+    await expect(probe).resolves.toBe(true);
   });
 });

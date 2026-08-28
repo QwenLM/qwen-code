@@ -28,6 +28,7 @@ import {
   isInteractiveTerminal,
   shouldUseVirtualViewport,
 } from '../utils/terminal-buffer.js';
+import { stripAnsi } from './a11y-plain-text.js';
 
 export interface ScreenReaderPolicy {
   /** Whether screen-reader mode is active. */
@@ -170,25 +171,40 @@ export class ScreenReaderOutputWriter {
   ) {}
 
   /**
+   * Content crossing this writer is plain-text-only on the main screen, and
+   * the writer itself enforces that: shell/tool output legitimately carries
+   * captured escape bytes, and without stripping here a malicious model/tool
+   * result could execute OSC 52 clipboard writes or title/cursor sequences
+   * with no renderer buffer in between. Bare C0 controls (except the
+   * newline the writer itself appends) are dropped too.
+   */
+  private sanitize(text: string): string {
+    // eslint-disable-next-line no-control-regex
+    return stripAnsi(text).replace(/[\x00-\x09\x0b-\x1f\x7f]/g, '');
+  }
+
+  /**
    * Writes static (append-only) content exactly once. Ink erases the pending
    * dynamic block before appending static content and resets its height.
    */
   appendStatic(text: string): void {
-    if (text.length === 0) return;
+    const clean = this.sanitize(text);
+    if (clean.length === 0) return;
     if (this.lastDynamicHeight > 0) {
       this.write(eraseLines(this.lastDynamicHeight));
     }
     this.lastDynamic = '';
     this.lastDynamicHeight = 0;
-    this.write(text.endsWith('\n') ? text : `${text}\n`);
+    this.write(clean.endsWith('\n') ? clean : `${clean}\n`);
   }
 
   /**
-   * Replaces the dynamic block in place (no append). The text is hard-wrapped
-   * at the writer's column width; an unchanged block is not rewritten.
+   * Replaces the dynamic block in place (no append). The text is sanitized
+   * and hard-wrapped at the writer's column width; an unchanged block is
+   * not rewritten.
    */
   updateDynamic(text: string): void {
-    const output = hardWrap(text, this.columns());
+    const output = hardWrap(this.sanitize(text), this.columns());
     if (output === this.lastDynamic) return;
     this.write(eraseLines(this.lastDynamicHeight) + output);
     this.lastDynamic = output;
