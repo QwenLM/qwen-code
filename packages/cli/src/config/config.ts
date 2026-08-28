@@ -1851,6 +1851,31 @@ export async function loadCliConfig(
     bareMode || safeMode || !Array.isArray(settings.tools?.eager)
       ? undefined
       : normalizeDisabledToolList(settings.tools.eager);
+  if (eagerTools !== undefined) {
+    // `normalizeDisabledToolList` strips empty/whitespace-only and
+    // non-string entries before `PermissionManager.initialize()` ever sees
+    // the list, so the dropped-entries warning there can never fire for
+    // that class on the real CLI path — and a degenerate list like
+    // `tools.eager: [""]` would collapse to the active defer-everything
+    // allowlist `[]` in silence. Warn here so the collapse always leaves a
+    // signal (#10075).
+    const droppedEagerEntries = (settings.tools?.eager ?? []).filter(
+      (entry) => typeof entry !== 'string' || entry.trim() === '',
+    );
+    if (droppedEagerEntries.length > 0) {
+      // eslint-disable-next-line no-console -- operator-facing breadcrumb; the debug log file is off in default runs, where this reshaping would otherwise be invisible
+      console.warn(
+        `tools.eager: ignoring ${droppedEagerEntries.length} unusable entr${
+          droppedEagerEntries.length === 1 ? 'y' : 'ies'
+        } (${droppedEagerEntries
+          .map((entry) => JSON.stringify(entry))
+          .join(', ')}). ` +
+          `The allowlist stays active with ${eagerTools.length} entr${
+            eagerTools.length === 1 ? 'y' : 'ies'
+          }, so every other non-exempt tool is deferred to tool_search.`,
+      );
+    }
+  }
 
   // Helper: check if a tool is explicitly covered by an allow rule OR by the
   // coreTools whitelist. Uses alias matching for coreTools (via isToolEnabled)

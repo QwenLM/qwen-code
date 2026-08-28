@@ -4120,6 +4120,30 @@ describe('loadCliConfig tools.eager wiring (#9827, #10075)', () => {
     expect(config.getEagerTools()).toEqual([]);
   });
 
+  it('warns when normalization drops tools.eager entries (#10075)', async () => {
+    // Normalization strips empty/non-string entries before
+    // PermissionManager.initialize() sees them, and the collapsed list is
+    // still the ACTIVE defer-everything allowlist — the drop must leave a
+    // signal instead of silently demoting the whole toolset.
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      tools: {
+        eager: [''],
+      },
+    };
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const config = await loadCliConfig(settings, argv, undefined, []);
+
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining('tools.eager: ignoring 1 unusable entry'),
+    );
+    // The collapse to the active-but-empty allowlist is deliberate
+    // (fail-closed); only the silence was the bug.
+    expect(config.getEagerTools()).toEqual([]);
+    warnSpy.mockRestore();
+  });
+
   it('does not treat permissions.allow as the eager allowlist', async () => {
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();
