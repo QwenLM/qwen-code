@@ -36,6 +36,17 @@ const cuaReleaseWorkflow = readFileSync(
 const nodeReplPackage = JSON.parse(
   readFileSync('packages/node-repl/package.json', 'utf8'),
 );
+const cuaSdkPackage = JSON.parse(
+  readFileSync('packages/cua-driver/typescript/package.json', 'utf8'),
+);
+const cuaInstallScript = readFileSync(
+  'packages/cua-driver/scripts/install.sh',
+  'utf8',
+);
+const computerUseGuide = readFileSync(
+  'docs/users/features/computer-use.md',
+  'utf8',
+);
 const desktopReleaseWorkflow = readFileSync(
   '.github/workflows/desktop-release.yml',
   'utf8',
@@ -60,7 +71,7 @@ const liveHostOssWorkflow = readFileSync(
 describe('CUA release workflow', () => {
   it('keeps the Node REPL package independently versioned', () => {
     expect(nodeReplPackage.name).toBe('@qwen-code/node-repl-mcp');
-    expect(nodeReplPackage.version).toBe('0.1.0');
+    expect(nodeReplPackage.version).toBe('0.1.1');
     expect(cuaReleaseWorkflow).toContain(
       "node_repl_version: '${{ steps.release.outputs.node_repl_version }}'",
     );
@@ -79,9 +90,40 @@ describe('CUA release workflow', () => {
     expect(cuaReleaseWorkflow).toMatch(
       /publish-node-repl:[\s\S]*?needs: \['validate-version', 'verify-node-repl-package', 'release'\][\s\S]*?npm view "@qwen-code\/node-repl-mcp@\$\{VERSION\}" dist\.integrity[\s\S]*?npm publish "\$TARBALL" --provenance --access public --tag "\$NPM_TAG"[\s\S]*?Verify npm registry integrity/,
     );
-    expect(cuaReleaseWorkflow).toContain(
-      "needs: ['release', 'publish-sdk', 'publish-node-repl']",
+  });
+
+  it('keeps installer version changes in the feature PR', () => {
+    expect(cuaReleaseWorkflow).not.toContain('sync-installer-version:');
+    expect(cuaReleaseWorkflow).not.toContain('gh pr create');
+    expect(cuaReleaseWorkflow).not.toContain('gh pr merge');
+    expect(cuaInstallScript).toContain(
+      `CUA_DRIVER_RS_VERSION=${cuaSdkPackage.version}`,
     );
+    expect(cuaInstallScript).toContain(
+      `CUA_DRIVER_VERSION=${cuaSdkPackage.version}`,
+    );
+    expect(cuaReleaseWorkflow).toContain(
+      'INSTALL_ENTRYPOINT_RS_VERSION=$(sed -nE',
+    );
+  });
+
+  it('pins exact Computer Use package versions across the skill and user guide', () => {
+    expect(computerUseGuide).toContain(
+      `@qwen-code/node-repl-mcp@${nodeReplPackage.version}`,
+    );
+    expect(computerUseGuide).toContain(
+      `@qwen-code/cua-sdk@${cuaSdkPackage.version}`,
+    );
+    expect(cuaReleaseWorkflow).toContain('SKILL_NODE_REPL_VERSION=$(sed -nE');
+    expect(cuaReleaseWorkflow).toContain(
+      'USER_GUIDE_NODE_REPL_VERSION=$(sed -nE',
+    );
+    expect(cuaReleaseWorkflow).toContain('SKILL_SDK_VERSION=$(sed -nE');
+    expect(cuaReleaseWorkflow).toContain('USER_GUIDE_SDK_VERSION=$(sed -nE');
+    expect(cuaReleaseWorkflow).not.toContain(
+      'grep -Fq "@qwen-code/node-repl-mcp@',
+    );
+    expect(cuaReleaseWorkflow).not.toContain('grep -Fq "@qwen-code/cua-sdk@');
   });
 
   it('bootstraps only Node REPL without replacing an existing CUA release', () => {
