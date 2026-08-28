@@ -87,20 +87,10 @@ function GeneralHelp(props: { layout: HelpWidthLayout }) {
       <text fg={C.text} attributes={1}>
         {t('Shortcuts')}
       </text>
-      {layout.singleColumn ? (
-        <box flexDirection="column">
-          {column(
-            shortcuts,
-            layout.bodyWidth,
-            layout.bodyWidth - HELP_KEY_COL_WIDTH - 1,
-          )}
-        </box>
-      ) : (
-        <box flexDirection="row" gap={2}>
-          {column(left, layout.colWidth, layout.descWidth)}
-          {column(right, layout.colWidth, layout.descWidth)}
-        </box>
-      )}
+      <box flexDirection="row" gap={2}>
+        {column(left, layout.colWidth, layout.descWidth)}
+        {column(right, layout.colWidth, layout.descWidth)}
+      </box>
     </box>
   );
 }
