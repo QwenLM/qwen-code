@@ -212,6 +212,8 @@ describe('HookRunner', () => {
         // Benign inherited env and the hook's own vars are still present.
         expect(spawnOptions.env['PATH']).toBeDefined();
         expect(spawnOptions.env['QWEN_PROJECT_DIR']).toBe('/test');
+        expect(spawnOptions.env['GEMINI_PROJECT_DIR']).toBe('/test');
+        expect(spawnOptions.env['CLAUDE_PROJECT_DIR']).toBe('/test');
       } finally {
         if (originalServerToken === undefined) {
           delete process.env['QWEN_SERVER_TOKEN'];
@@ -992,6 +994,28 @@ describe('HookRunner', () => {
       expect(command).toContain('$QWEN_PROJECT_DIRS');
     });
 
+    it('preserves PowerShell quoting and Unicode variable boundaries', async () => {
+      const mockProcess = createMockProcess(0, 'result');
+      mockSpawn.mockImplementation(() => mockProcess);
+
+      const hookConfig: HookConfig = {
+        type: HookType.Command,
+        command: 'echo $QWEN_PROJECT_DIR $QWEN_PROJECT_DIRé',
+        source: HooksConfigSource.Project,
+        shell: 'powershell',
+      };
+
+      await hookRunner.executeHook(
+        hookConfig,
+        HookEventName.PreToolUse,
+        createMockInput({ cwd: 'C:/test/my project' }),
+      );
+
+      const spawnCall = mockSpawn.mock.calls[0];
+      const command = spawnCall[1][spawnCall[1].length - 1];
+      expect(command).toBe("echo 'C:/test/my project' $QWEN_PROJECT_DIRé");
+    });
+
     it('should expand GEMINI_PROJECT_DIR placeholder', async () => {
       const mockProcess = createMockProcess(0, 'result');
       mockSpawn.mockImplementation(() => mockProcess);
@@ -1000,6 +1024,7 @@ describe('HookRunner', () => {
         type: HookType.Command,
         command: 'echo $GEMINI_PROJECT_DIR',
         source: HooksConfigSource.Project,
+        shell: 'powershell',
       };
       const input = createMockInput({ cwd: '/test/project' });
 
@@ -1019,6 +1044,7 @@ describe('HookRunner', () => {
         type: HookType.Command,
         command: 'echo $CLAUDE_PROJECT_DIR',
         source: HooksConfigSource.Project,
+        shell: 'powershell',
       };
       const input = createMockInput({ cwd: '/test/project' });
 

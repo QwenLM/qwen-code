@@ -1064,7 +1064,7 @@ export class HookRunner {
     }
     const escapedCwd = escapeShellArg(input.cwd, shellType);
     return command.replace(
-      /\$(?:QWEN|GEMINI|CLAUDE)_PROJECT_DIR(?![0-9A-Za-z_])/g,
+      /\$(?:QWEN|GEMINI|CLAUDE)_PROJECT_DIR(?![0-9A-Za-z_\p{L}\p{N}])/gu,
       () => escapedCwd,
     );
   }
