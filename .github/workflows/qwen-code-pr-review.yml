@@ -2791,13 +2791,14 @@ jobs:
           # itself changed (conflict resolutions live in those same files).
           # Anything edited outside that set is out of scope — a prompt-injection
           # symptom — so fail closed and list the offending files. Granularity is
-          # deliberately file-level, not per-hunk: real containment is sandbox +
-          # write authorization + no agent token; this is one defense-in-depth layer.
+          # deliberately file-level, not per-hunk: real containment is write
+          # authorization + no agent token + an ephemeral runner; this is one
+          # defense-in-depth layer.
           merge_base="$(git merge-base "origin/${BASE_REF}" "$HEAD_FETCH_REF")"
           # -z/sort -zu mirrors the conflict-marker check above so unusual
           # filenames in the diff are handled consistently. ponytail: tr back to
           # newlines because bash vars can't hold NUL — a filename containing a
-          # literal newline still splits, but that's covered by the sandbox +
+          # literal newline still splits, but that's covered by the
           # write-authorization + no-token containment this guard backstops.
           base_changed="$(git diff --name-only -z "${merge_base}" "origin/${BASE_REF}" | sort -zu | tr '\0' '\n')"
           agent_changed="$(git diff --name-only -z "$HEAD_FETCH_REF" HEAD | sort -zu | tr '\0' '\n')"
