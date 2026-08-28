@@ -13174,6 +13174,171 @@ describe('useGeminiStream', () => {
       releaseMainEnd?.();
     });
 
+    it('keeps a surviving concurrent deferral armed across the next user query', async () => {
+      // R11-1: Esc-cancel settles owner-aware and leaves an admitted ?btw
+      // stream's ARMED deferral alive. The next UserQuery's pre-query
+      // settlement must be owner-aware too — an unconditional abort would
+      // commit the surviving stream's frozen thought under the new turn and
+      // strand its batch without the fold.
+      const getOnComplete = captureSchedulerOnComplete();
+
+      let releaseMainEnd: (() => void) | undefined;
+      const holdMainEnd = new Promise<void>((resolve) => {
+        releaseMainEnd = resolve;
+      });
+      let releaseBtwTcr: (() => void) | undefined;
+      const holdBtwTcr = new Promise<void>((resolve) => {
+        releaseBtwTcr = resolve;
+      });
+      let releaseBtwEnd: (() => void) | undefined;
+      const holdBtwEnd = new Promise<void>((resolve) => {
+        releaseBtwEnd = resolve;
+      });
+
+      let streamCallCount = 0;
+      mockSendMessageStream.mockImplementation(() => {
+        streamCallCount += 1;
+        if (streamCallCount === 1) {
+          return (async function* () {
+            yield {
+              type: ServerGeminiEventType.Content,
+              value: 'main answer',
+            };
+            await holdMainEnd;
+            yield {
+              type: ServerGeminiEventType.Finished,
+              value: { reason: 'STOP', usageMetadata: undefined },
+            };
+          })();
+        }
+        if (streamCallCount === 2) {
+          return (async function* () {
+            yield {
+              type: ServerGeminiEventType.Thought,
+              value: { subject: '', description: 'btw thinking' },
+            };
+            await holdBtwTcr;
+            yield {
+              type: ServerGeminiEventType.ToolCallRequest,
+              value: {
+                callId: 'btw-tc',
+                name: 'read_file',
+                args: { path: '/foo' },
+                isClientInitiated: false,
+                prompt_id: mockSendMessageStream.mock.calls[1]?.[2],
+              },
+            };
+            await holdBtwEnd;
+            yield {
+              type: ServerGeminiEventType.Finished,
+              value: { reason: 'STOP', usageMetadata: undefined },
+            };
+          })();
+        }
+        return (async function* () {
+          yield {
+            type: ServerGeminiEventType.Content,
+            value: 'next answer',
+          };
+          yield {
+            type: ServerGeminiEventType.Finished,
+            value: { reason: 'STOP', usageMetadata: undefined },
+          };
+        })();
+      });
+
+      const { result } = renderDeferredTestHook();
+
+      await act(async () => {
+        void result.current.submitQuery(
+          'main query',
+          SendMessageType.UserQuery,
+          'main-prompt',
+          { submittedPrompt: 'main query' },
+        );
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      await waitFor(() =>
+        expect(result.current.streamingState).toBe(StreamingState.Responding),
+      );
+
+      await act(async () => {
+        void result.current.submitQuery(
+          '?btw side question',
+          SendMessageType.UserQuery,
+          undefined,
+          { submittedPrompt: '?btw side question' },
+        );
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      await waitFor(() =>
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(2),
+      );
+      const btwPromptId = mockSendMessageStream.mock.calls[1]?.[2] as string;
+      expect(btwPromptId).toBeDefined();
+
+      await act(async () => {
+        releaseBtwTcr?.();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      await waitForDeferralEstablished(result);
+
+      // Esc settles the foreground turn owner-aware; the btw deferral
+      // survives, armed.
+      await act(async () => {
+        result.current.cancelOngoingRequest();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(
+        mockAddItem.mock.calls.filter(
+          ([item]) => item.type === 'gemini_thought',
+        ),
+      ).toHaveLength(0);
+
+      // The next user query must not abort the surviving deferral: nothing
+      // commits, and the frozen thought stays pending for its own batch.
+      await act(async () => {
+        void result.current.submitQuery(
+          'next query',
+          SendMessageType.UserQuery,
+          'next-prompt',
+          { submittedPrompt: 'next query' },
+        );
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(
+        mockAddItem.mock.calls.filter(
+          ([item]) => item.type === 'gemini_thought',
+        ),
+      ).toHaveLength(0);
+      expect(result.current.pendingHistoryItems).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ type: 'gemini_thought', finalized: true }),
+        ]),
+      );
+
+      // The surviving batch completes and folds its own thought.
+      await act(async () => {
+        await getOnComplete()?.([
+          successfulReadToolCall(btwPromptId, 'btw-tc'),
+        ]);
+      });
+      const thoughtCommits = mockAddItem.mock.calls.filter(
+        ([item]) => item.type === 'gemini_thought',
+      );
+      expect(thoughtCommits).toHaveLength(1);
+      expect(thoughtCommits[0][0].text).toContain('btw thinking');
+      expect(thoughtCommits[0][0].toolSummary).toBe('Read /foo');
+
+      releaseBtwEnd?.();
+      releaseMainEnd?.();
+    });
+
     it('does not commit a concurrent in-flight thought when settling without a deferral', async () => {
       // R10-1: cancel settles the foreground turn while a concurrent ?btw
       // stream is mid-thought BEFORE its first ToolCallRequest — nothing is

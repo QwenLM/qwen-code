@@ -3955,30 +3955,26 @@ export const useGeminiStream = (
       // PREVIOUS turn and must land above the new prompt. Committing it
       // after the user item (in the new-prompt reset below) would attribute
       // it to the new turn's region and misgroup findLastUserItemIndex-keyed
-      // turn slicing (rewind selector, ESC auto-restore). A concurrent ?btw
-      // submit also resolves here (pinned by the mid-deferral second-query
-      // test): the thought commits as-is ABOVE the side question's user item
-      // — the pre-PR placement — trading the fold for keeping the thought in
-      // its own turn's region; the owner's batch then completes unmerged.
+      // turn slicing (rewind selector, ESC auto-restore). Settlement is
+      // owner-aware for every submit type (R11-1): activeInteractionPromptIdRef
+      // still holds the OUTGOING turn's prompt id here (it is overwritten
+      // further down), so the outgoing turn's OWN armed deferral matches and
+      // aborts — committing as-is above the new user item, the pinned
+      // mid-deferral second-query contract — while a SURVIVING concurrent
+      // stream's deferral (e.g. an admitted ?btw stream still armed after a
+      // foreground cancel dropped the hook to Idle) is left armed for its
+      // own batch completion instead of being re-homed under the new turn
+      // and stranded without the fold.
       if (
         (submitType === SendMessageType.UserQuery ||
           submitType === SendMessageType.Cron ||
           submitType === SendMessageType.Teammate) &&
         thoughtMergeDeferralRef.current
       ) {
-        if (submitType === SendMessageType.UserQuery) {
-          abortThoughtMergeDeferral(userMessageTimestamp);
-        } else {
-          // A Cron/Teammate drain can be admitted right after a foreground
-          // cancel dropped the hook to Idle while a SURVIVING concurrent
-          // stream's deferral is still armed. Aborting unconditionally would
-          // re-home that stream's frozen thought under the draining turn and
-          // strand its batch without the fold; settle owner-aware instead.
-          settleThoughtMergeDeferral(
-            userMessageTimestamp,
-            activeInteractionPromptIdRef.current,
-          );
-        }
+        settleThoughtMergeDeferral(
+          userMessageTimestamp,
+          activeInteractionPromptIdRef.current,
+        );
       }
 
       // Reset quota error flag when starting a new query (not a continuation).
