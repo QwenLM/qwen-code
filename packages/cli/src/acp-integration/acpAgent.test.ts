@@ -4742,6 +4742,54 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
+  it('refreshes auth when workspace reload changes providers during config setup', async () => {
+    const innerConfig = await setupSessionMocks(
+      'session-workspace-reload-during-config-setup',
+    );
+    let mergedSettings: Record<string, unknown> = {
+      mcpServers: {},
+      modelProviders: { openai: [{ id: 'old-model' }] },
+    };
+    const settings = {
+      get merged() {
+        return mergedSettings;
+      },
+      reloadScopeFromDisk: vi.fn(() => {
+        mergedSettings = {
+          mcpServers: {},
+          modelProviders: { openai: [{ id: 'new-model' }] },
+        };
+      }),
+      reloadScopesFromDiskAtomically: vi.fn().mockReturnValue(true),
+      forScope: vi.fn().mockReturnValue({ settings: { mcpServers: {} } }),
+      getUserHooks: vi.fn().mockReturnValue({}),
+      getProjectHooks: vi.fn().mockReturnValue({}),
+    } as unknown as LoadedSettings;
+    vi.mocked(loadSettings).mockReturnValue(settings);
+    const { agent, agentPromise } = await bootAcpAgent();
+    let resolveConfigSetup!: () => void;
+    const configSetup = new Promise<void>((resolve) => {
+      resolveConfigSetup = resolve;
+    });
+    vi.mocked(loadCliConfig).mockImplementationOnce(async () => {
+      await configSetup;
+      return innerConfig as unknown as Config;
+    });
+
+    const sessionPromise = agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    await vi.waitFor(() => expect(loadCliConfig).toHaveBeenCalledOnce());
+    await agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceReload, {
+      cwd: '/tmp',
+    });
+    resolveConfigSetup();
+    await sessionPromise;
+
+    expect(innerConfig.refreshAuth).toHaveBeenCalledTimes(2);
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it('does not publish a session when the final atomic provider reload fails', async () => {
     await setupSessionMocks('session-provider-reload-failed');
     const settings = makeSessionSettings() as LoadedSettings & {
