@@ -9,6 +9,8 @@ import type { CallableTool, Content } from '@google/genai';
 import { DiscoveredMCPTool } from '../tools/mcp-tool.js';
 import {
   buildClassifierContents,
+  MAX_HISTORICAL_ACTION_CHARS,
+  MAX_HISTORICAL_ACTIONS_TOTAL_CHARS,
   MAX_TRANSCRIPT_MESSAGES,
 } from './classifier-transcript.js';
 import {
@@ -437,5 +439,74 @@ describe('buildClassifierContents with a discovered MCP tool', () => {
     const prior = (result[0].parts?.[0] as { text: string }).text;
     expect(prior).toContain(`Prior action: ${mcpTool.name}(`);
     expect(prior).toContain('"crash on start"');
+  });
+});
+
+describe('historical action budget', () => {
+  const bigTool = new StubTool('run_shell_command', {
+    command: 'x'.repeat(MAX_HISTORICAL_ACTION_CHARS * 2),
+  });
+  const registry = makeRegistry({ run_shell_command: bigTool });
+  const call = (i: number): Content => ({
+    role: 'model',
+    parts: [
+      {
+        functionCall: { name: 'run_shell_command', args: { command: `${i}` } },
+      },
+    ],
+  });
+
+  it('caps each rendered historical action and marks the cut', () => {
+    const result = buildClassifierContents([call(0)], registry, {
+      toolName: 'read_file',
+      toolParams: {},
+    });
+    const prior = (result[0].parts?.[0] as { text: string }).text;
+    expect(prior.length).toBeLessThan(MAX_HISTORICAL_ACTION_CHARS + 40);
+    expect(prior).toMatch(/…\[truncated \d+ chars\]\)$/);
+  });
+
+  it('keeps the newest actions and elides the oldest once the aggregate budget is spent', () => {
+    const messages = Array.from({ length: MAX_TRANSCRIPT_MESSAGES }, (_, i) =>
+      call(i),
+    );
+    const result = buildClassifierContents(messages, registry, {
+      toolName: 'read_file',
+      toolParams: {},
+    });
+    const priors = result
+      .slice(0, -1)
+      .map((c) => (c.parts?.[0] as { text: string }).text);
+    expect(priors).toHaveLength(MAX_TRANSCRIPT_MESSAGES);
+    const total = priors.reduce((n, t) => n + t.length, 0);
+    // Aggregate ≤ budget + one omission line per elided action.
+    expect(total).toBeLessThan(
+      MAX_HISTORICAL_ACTIONS_TOTAL_CHARS + MAX_TRANSCRIPT_MESSAGES * 80,
+    );
+    expect(priors.at(-1)).toContain('xxxx');
+    expect(priors[0]).toBe(
+      'Prior action: run_shell_command([omitted: transcript budget exhausted])',
+    );
+    const kept = priors.filter((t) => t.includes('xxxx')).length;
+    expect(kept).toBe(
+      Math.floor(MAX_HISTORICAL_ACTIONS_TOTAL_CHARS / priors.at(-1)!.length),
+    );
+  });
+
+  it('leaves short histories untouched', () => {
+    const small = new StubTool('read_file', { path: 'a.ts' });
+    const result = buildClassifierContents(
+      [
+        {
+          role: 'model',
+          parts: [{ functionCall: { name: 'read_file', args: {} } }],
+        },
+      ],
+      makeRegistry({ read_file: small }),
+      { toolName: 'read_file', toolParams: {} },
+    );
+    const prior = (result[0].parts?.[0] as { text: string }).text;
+    expect(prior).toContain('Prior action: read_file(');
+    expect(prior).not.toContain('omitted');
   });
 });

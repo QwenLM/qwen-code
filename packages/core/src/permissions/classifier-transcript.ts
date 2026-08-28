@@ -59,6 +59,24 @@ export interface PendingAction {
 export const MAX_TRANSCRIPT_MESSAGES = 40;
 
 /**
+ * Max characters kept for a single rendered historical action
+ * (`Prior action: name({...})`). Projections are already bounded per
+ * tool, but a tool may legitimately forward a large payload (a shell
+ * command, an agent prompt, an MCP call); the transcript does not need
+ * all of it to establish what happened earlier.
+ */
+export const MAX_HISTORICAL_ACTION_CHARS = 4_000;
+
+/**
+ * Aggregate character budget across all rendered historical actions in
+ * the window. Newest actions are kept first; once the budget is spent,
+ * older actions keep only their tool name plus an omission marker so the
+ * sequence of steps stays visible without overflowing the fast
+ * classifier's context.
+ */
+export const MAX_HISTORICAL_ACTIONS_TOTAL_CHARS = 40_000;
+
+/**
  * Build the `contents` array for the classifier sideQuery call.
  *
  * - Keeps user text (user intent is essential context).
@@ -80,6 +98,9 @@ export function buildClassifierContents(
   pendingAction: PendingAction,
 ): Content[] {
   const transcript: Content[] = [];
+  // Indices into `transcript` of rendered historical actions, with the
+  // tool name kept for the omission form.
+  const historical: Array<{ index: number; toolName: string }> = [];
 
   // Slice to the recent window before processing. Truncating after the
   // assistant/user/function filtering would produce uneven windows when a
@@ -104,14 +125,13 @@ export function buildClassifierContents(
       for (const part of msg.parts ?? []) {
         const fc = (part as Part).functionCall;
         if (fc && typeof fc.name === 'string') {
+          historical.push({ index: transcript.length, toolName: fc.name });
           transcript.push({
             role: 'user',
             parts: [
               {
-                text: formatHistoricalActionPrompt(
-                  fc.name,
-                  fc.args,
-                  toolRegistry,
+                text: boundHistoricalAction(
+                  formatHistoricalActionPrompt(fc.name, fc.args, toolRegistry),
                 ),
               },
             ],
@@ -121,6 +141,8 @@ export function buildClassifierContents(
     }
     // role === 'function' (tool results) and any other roles → fully stripped.
   }
+
+  applyHistoricalActionsBudget(transcript, historical);
 
   // Append the pending action as the final user-role turn.
   transcript.push({
@@ -137,6 +159,44 @@ export function buildClassifierContents(
   });
 
   return transcript;
+}
+
+/** Cap one rendered historical action, marking the cut in place. */
+function boundHistoricalAction(text: string): string {
+  if (text.length <= MAX_HISTORICAL_ACTION_CHARS) return text;
+  const omitted = text.length - MAX_HISTORICAL_ACTION_CHARS;
+  return `${text.slice(0, MAX_HISTORICAL_ACTION_CHARS)}…[truncated ${omitted} chars])`;
+}
+
+/**
+ * Enforce {@link MAX_HISTORICAL_ACTIONS_TOTAL_CHARS} across the rendered
+ * historical actions, newest first. Actions that no longer fit are
+ * replaced by `Prior action: name([omitted: transcript budget exhausted])`
+ * — the tool name stays so the step sequence remains legible.
+ */
+function applyHistoricalActionsBudget(
+  transcript: Content[],
+  historical: ReadonlyArray<{ index: number; toolName: string }>,
+): void {
+  let remaining = MAX_HISTORICAL_ACTIONS_TOTAL_CHARS;
+  for (let i = historical.length - 1; i >= 0; i--) {
+    const { index, toolName } = historical[i];
+    const part = transcript[index].parts?.[0];
+    const text = part && typeof part.text === 'string' ? part.text : '';
+    if (remaining > 0 && text.length <= remaining) {
+      remaining -= text.length;
+      continue;
+    }
+    remaining = 0;
+    transcript[index] = {
+      role: 'user',
+      parts: [
+        {
+          text: `Prior action: ${toolName}([omitted: transcript budget exhausted])`,
+        },
+      ],
+    };
+  }
 }
 
 /**

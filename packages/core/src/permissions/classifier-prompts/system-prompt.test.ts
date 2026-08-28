@@ -304,7 +304,12 @@ describe('MCP guidance', () => {
     // never a reason to relax.
     expect(prompt).toMatch(/`arguments`/);
     expect(prompt).toMatch(/self-reported by the server/);
+    // Every marker form the projection emits must be announced.
+    expect(prompt).toContain('`…[truncated N chars]`');
+    expect(prompt).toContain('`[omitted: …]`');
     expect(prompt).toMatch(/arguments_truncated/);
+    expect(prompt).toMatch(/name_truncated/);
+    expect(prompt).toMatch(/Prior action/);
     expect(prompt).toMatch(/never evidence of safety/);
   });
 });

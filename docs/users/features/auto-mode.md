@@ -332,12 +332,16 @@ Tool results (the actual content returned by tools) are stripped from
 the classifier transcript entirely.
 
 MCP tools (`mcp__*`): the server name, the tool name, the server's
-annotations and the call arguments are forwarded. Each string argument
-is cut at 2,000 characters, the whole argument tree shares a 16,000
-character budget, and nesting / entry counts are capped; every cut is
-marked in place (`…[truncated N chars]`) and flagged with
-`arguments_truncated: true` so the classifier never mistakes an
-omission for an absence. The arguments are what the agent is about to
+annotations and the call arguments are forwarded. Each string (value
+or key) is cut at 2,000 characters, names at 200, the whole payload
+shares a 16,000 character budget measured on the pretty-printed form
+the classifier receives, and nesting / entry counts are capped; every
+cut is marked in place (`…[truncated N chars]` or `[omitted: …]`) and
+flagged with `arguments_truncated: true` / `name_truncated: true` so
+the classifier never mistakes an omission for an absence. Historical
+actions in the transcript are capped at 4,000 characters each and
+40,000 in total (newest kept first; older ones keep only their tool
+name). The arguments are what the agent is about to
 send to that server — the classifier's data-exfiltration and
 external-write rules can only be applied to them, and they were
 already produced by the main model, so forwarding them to a classifier
