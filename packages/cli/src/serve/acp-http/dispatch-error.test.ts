@@ -10,6 +10,7 @@ import { DaemonDrainingError } from '../server/session-archive.js';
 import { StandaloneSessionServiceError } from '../conversations/standalone-session-service.js';
 import {
   BridgeChannelQuarantinedError,
+  BridgeTimeoutError,
   InvalidSessionMetadataError,
   RestoreInProgressError,
   SessionRestoreTimeoutError,
@@ -65,6 +66,22 @@ describe('toRpcError', () => {
         sessionId: 'persisted-1',
         action: 'resume',
         timeoutMs: 60_000,
+      },
+    });
+  });
+
+  it('maps session initialization timeouts with the public retry contract', () => {
+    const error = new BridgeTimeoutError('newSession', 10_000);
+    expect(toRpcError(error)).toEqual({
+      code: RPC.INTERNAL_ERROR,
+      message: error.message,
+      data: {
+        code: 'init_timeout',
+        errorKind: 'init_timeout',
+        httpStatus: 504,
+        retryable: true,
+        retryAfterSeconds: 10,
+        timeoutMs: 10_000,
       },
     });
   });
