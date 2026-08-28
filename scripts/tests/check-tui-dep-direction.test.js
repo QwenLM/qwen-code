@@ -56,6 +56,9 @@ describe('bannedFamily', () => {
     ['solid-app-router', 'solid'],
     ['@solidjs/router', 'solid'],
     ['@solid-primitives/utils', 'solid'],
+    ['@solid/meta', 'solid'],
+    ['@react-aria/button', 'react'],
+    ['@react-spring/web', 'react'],
     ['@opentui/core', '@opentui'],
     ['@opentui', '@opentui'],
   ])('bans %s as the %s family', (spec, family) => {
@@ -208,6 +211,42 @@ describe('findImports', () => {
         ].join('\n'),
       ),
     ).toEqual(['require.resolve:ink', 'import.meta.resolve:react']);
+  });
+
+  it('detects the vi module-loading family', () => {
+    expect(
+      specs(
+        [
+          "vi.mock('ink');",
+          "vi.doMock('react');",
+          "await vi.importActual('solid-js');",
+          "await vi.importMock('@opentui/core');",
+        ].join('\n'),
+      ),
+    ).toEqual([
+      'vi.mock:ink',
+      'vi.doMock:react',
+      'vi.importActual:solid-js',
+      'vi.importMock:@opentui/core',
+    ]);
+  });
+
+  it('detects CommonJS require indirections', () => {
+    expect(
+      specs(
+        [
+          "const ink = module.require('ink');",
+          "const react = require.main.require('react');",
+        ].join('\n'),
+      ),
+    ).toEqual(['module.require:ink', 'require.main.require:react']);
+  });
+
+  it('detects ambient module declarations', () => {
+    expect(
+      specs("declare module 'react' { export type X = number; }\n"),
+    ).toEqual(['ambient-module:react']);
+    expect(specs('declare global { const g: number; }\n')).toEqual([]);
   });
 
   it('reports line numbers matching the source', () => {
@@ -369,7 +408,34 @@ describe('checkRule', () => {
     expect(result.symlinks[0]).toContain('link.ts');
   });
 
-  it.skipIf(process.platform === 'win32')(
+  it('flags a bare import of the cli package under noRelativeIntoCli', () => {
+    const root = makeTemporaryDirectory();
+    writeSource(
+      root,
+      'core/a.ts',
+      "import { run } from '@qwen-code/qwen-code';\n",
+    );
+    writeSource(root, 'core/b.ts', "import { z } from 'zod';\n");
+
+    const flagged = checkRule({
+      label: 'bare-cli',
+      root,
+      rules: { noRelativeIntoCli: true },
+    });
+    expect(flagged.violations).toHaveLength(1);
+    expect(flagged.violations[0]).toContain(
+      '(bare import reaches into packages/cli)',
+    );
+
+    const otherRule = checkRule({
+      label: 'bare-cli-other-rules',
+      root,
+      rules: { noFramework: true, selfContained: true },
+    });
+    expect(otherRule.violations).toEqual([]);
+  });
+
+  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
     'reports unlistable directories instead of silently dropping them',
     () => {
       const root = makeTemporaryDirectory();
@@ -466,6 +532,12 @@ describe('end-to-end gate run (main wiring)', () => {
       gatePath,
       join(base, 'scripts', 'check-tui-dep-direction.mjs'),
     );
+    // The gate reads the cli package's own name from its manifest to block
+    // bare imports of it, so the fixture must carry one.
+    writeFileSync(
+      join(base, 'packages', 'cli', 'package.json'),
+      JSON.stringify({ name: '@qwen-code/qwen-code' }),
+    );
     writeFileSync(
       join(base, 'packages', 'core', 'src', 'clean.ts'),
       "import { z } from 'zod';\n",
@@ -498,6 +570,22 @@ describe('end-to-end gate run (main wiring)', () => {
     const { code, out } = runGate(base);
     expect(code).toBe(0);
     expect(out).toContain('PASS — dependency direction holds.');
+  }, 40000);
+
+  it('does not run main when the module is imported, not executed', () => {
+    const base = makeFixtureCheckout();
+    // The entry guard must suppress the scan for library importers; if it
+    // fired, the gate report would appear before the sentinel.
+    const out = execFileSync(
+      process.execPath,
+      [
+        '--input-type=module',
+        '-e',
+        `await import('file://${join(base, 'scripts', 'check-tui-dep-direction.mjs')}'); process.stdout.write('imported-only');`,
+      ],
+      { encoding: 'utf8', timeout: 30000 },
+    );
+    expect(out).toBe('imported-only');
   }, 40000);
 
   it('fails when a rule root is itself a symlink', () => {
@@ -546,10 +634,103 @@ describe('end-to-end gate run (main wiring)', () => {
       join(base, 'packages', 'core', 'src', 'leak.ts'),
       "import { render } from 'ink';\n",
     );
+    // .js is the only enrolled extension with live population under a rule
+    // root, so pin its membership with a planted violation too.
+    writeFileSync(
+      join(base, 'packages', 'core', 'src', 'leak.js'),
+      "import { useState } from 'react';\n",
+    );
     const { code, out } = runGate(base);
     expect(code).toBe(1);
     expect(out).toContain("import 'ink'");
+    expect(out).toContain("import 'react'");
     expect(out).toContain('FAIL — dependency-direction violations found.');
+  }, 40000);
+
+  it('fails on a bare import of the cli package name', () => {
+    const base = makeFixtureCheckout();
+    writeFileSync(
+      join(base, 'packages', 'core', 'src', 'leak.ts'),
+      "import { run } from '@qwen-code/qwen-code';\n",
+    );
+    const { code, out } = runGate(base);
+    expect(code).toBe(1);
+    expect(out).toContain('(bare import reaches into packages/cli)');
+  }, 40000);
+
+  it('fails on a relative import that reaches into packages/cli', () => {
+    const base = makeFixtureCheckout();
+    writeFileSync(
+      join(base, 'packages', 'core', 'src', 'leak.ts'),
+      "import { helper } from '../../cli/src/helper.js';\n",
+    );
+    const { code, out } = runGate(base);
+    expect(code).toBe(1);
+    expect(out).toContain('(relative import reaches into packages/cli)');
+  }, 40000);
+
+  it('fails on violations in the ui/model rule arm', () => {
+    const base = makeFixtureCheckout();
+    writeFileSync(
+      join(base, 'packages', 'cli', 'src', 'ui', 'model', 'leak.ts'),
+      ["import { render } from 'ink';", "import '../outside.js';"].join('\n'),
+    );
+    const { code, out } = runGate(base);
+    expect(code).toBe(1);
+    // Pins the second checkRule wiring (rules object + enumeration): the
+    // noFramework and selfContained arms of Rule 2 must both fire.
+    expect(out).toContain('(ink import in framework-neutral code)');
+    expect(out).toContain(
+      '(relative import escapes the framework-neutral directory)',
+    );
+  }, 40000);
+
+  it('fails when the core rule root is itself a symlink', () => {
+    const base = makeFixtureCheckout();
+    const coreSrc = join(base, 'packages', 'core', 'src');
+    rmSync(coreSrc, { recursive: true, force: true });
+    mkdirSync(join(base, 'substitute-core'));
+    writeFileSync(
+      join(base, 'substitute-core', 'clean.ts'),
+      "import { z } from 'zod';\n",
+    );
+    symlinkSync(join(base, 'substitute-core'), coreSrc, 'dir');
+    const { code, out } = runGate(base);
+    expect(code).toBe(1);
+    expect(out).toContain('error: symlink in rule root path');
+  }, 40000);
+
+  it('fails when the ui/model rule root is empty', () => {
+    const base = makeFixtureCheckout();
+    rmSync(join(base, 'packages', 'cli', 'src', 'ui', 'model', 'model.ts'));
+    const { code, out } = runGate(base);
+    expect(code).toBe(1);
+    expect(out).toContain('packages/cli/src/ui/model');
+    expect(out).toContain('not found or has no source files');
+  }, 40000);
+
+  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+    'fails on an unlistable directory inside the scanned tree',
+    () => {
+      const base = makeFixtureCheckout();
+      const blocked = join(base, 'packages', 'core', 'src', 'blocked');
+      mkdirSync(blocked);
+      writeFileSync(join(blocked, 'hidden.ts'), "import 'ink';\n");
+      chmodSync(blocked, 0o000);
+      const { code, out } = runGate(base);
+      chmodSync(blocked, 0o700);
+      expect(code).toBe(1);
+      expect(out).toContain('error: could not list directory');
+    },
+    40000,
+  );
+
+  it('fails on a skippable directory name inside the scanned tree', () => {
+    const base = makeFixtureCheckout();
+    mkdirSync(join(base, 'packages', 'core', 'src', 'node_modules'));
+    const { code, out } = runGate(base);
+    expect(code).toBe(1);
+    expect(out).toContain('error: skippable directory inside scanned tree');
   }, 40000);
 
   it('fails on a symlink inside the scanned tree', () => {
