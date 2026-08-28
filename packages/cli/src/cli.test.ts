@@ -53,7 +53,7 @@ const mocks = vi.hoisted(() => ({
   installManagedNpmUpdate: vi.fn(),
 }));
 
-vi.mock('./gemini.js', () => ({
+vi.mock('./llm.js', () => ({
   main: mocks.main,
 }));
 
@@ -1128,8 +1128,8 @@ describe('bootstrap import boundaries', () => {
 
     expect(source).not.toContain("import yargs from 'yargs'");
     expect(source).not.toContain("from '@qwen-code/qwen-code-core'");
-    expect(source).not.toContain("import './gemini.js'");
-    expect(source).not.toContain("import { main } from './gemini.js'");
+    expect(source).not.toContain("import './llm.js'");
+    expect(source).not.toContain("import { main } from './llm.js'");
     expect(source).not.toContain("from './utils/acp-startup-profiler.js'");
   });
 
