@@ -251,15 +251,13 @@ describe('WebTerminalRegistry', () => {
     const listener = vi.fn();
     const detachListener = registry.addOutputListener('terminal:io', listener);
 
-    expect(registry.write('terminal:io', 'x'.repeat(256 * 1024 + 1))).toBe(
-      'backpressure',
-    );
-    expect(write).not.toHaveBeenCalled();
     expect(registry.write('terminal:io', 'x'.repeat(256 * 1024))).toBe(
       'written',
     );
+    expect(registry.write('terminal:io', '\x03')).toBe('written');
+    expect(registry.write('terminal:io', '\x04')).toBe('written');
     expect(registry.write('terminal:io', 'x')).toBe('backpressure');
-    expect(write).toHaveBeenCalledOnce();
+    expect(write).toHaveBeenCalledTimes(3);
     expect(registry.resize('terminal:io', 120, 40)).toBe(true);
     expect(resize).toHaveBeenCalledWith(120, 40);
 
@@ -271,6 +269,19 @@ describe('WebTerminalRegistry', () => {
     expect(listener).toHaveBeenCalledWith('ready');
     expect(registry.write('terminal:io', '12345')).toBe('written');
     expect(registry.write('terminal:io', 'x')).toBe('backpressure');
+  });
+
+  it('accepts one complete oversized input frame on an idle session', async () => {
+    const registry = new WebTerminalRegistry();
+    await registry.create({
+      terminalId: 'terminal:paste',
+      workspaceCwd: '/workspace',
+    });
+    const paste = 'x'.repeat(256 * 1024 + 1);
+
+    expect(registry.write('terminal:paste', paste)).toBe('written');
+    expect(registry.write('terminal:paste', paste)).toBe('backpressure');
+    expect(write).toHaveBeenCalledOnce();
   });
 
   it.skipIf(process.platform === 'win32')(
@@ -291,7 +302,7 @@ describe('WebTerminalRegistry', () => {
         }),
       });
       spawnSync.mockReturnValueOnce({
-        stdout: '42 1 42\n43 42 42\n44 43 42\n99 1 99\n',
+        stdout: '42 1 42\n43 42 42\n44 43 42\n45 1 42\n99 1 99\n',
       });
       const processKill = vi
         .spyOn(process, 'kill')
@@ -305,10 +316,72 @@ describe('WebTerminalRegistry', () => {
 
         registry.release('terminal:process-tree');
 
+        expect(spawnSync).toHaveBeenCalledWith(
+          'ps',
+          [
+            '-A',
+            '-o',
+            process.platform === 'linux'
+              ? 'pid=,ppid=,sid='
+              : process.platform === 'darwin'
+                ? 'pid=,ppid=,tdev='
+                : 'pid=,ppid=',
+          ],
+          expect.objectContaining({
+            encoding: 'utf8',
+            maxBuffer: 8 * 1024 * 1024,
+            timeout: 2_000,
+          }),
+        );
         expect(processKill).toHaveBeenCalledWith(42, 'SIGKILL');
         expect(processKill).toHaveBeenCalledWith(43, 'SIGKILL');
         expect(processKill).toHaveBeenCalledWith(44, 'SIGKILL');
+        if (process.platform === 'linux' || process.platform === 'darwin') {
+          expect(processKill).toHaveBeenCalledWith(45, 'SIGKILL');
+        }
+        expect(processKill).toHaveBeenCalledWith(-42, 'SIGKILL');
         expect(processKill).not.toHaveBeenCalledWith(99, 'SIGKILL');
+      } finally {
+        processKill.mockRestore();
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'falls back to the PTY process group when ps fails',
+    async () => {
+      spawn.mockReturnValueOnce({
+        pid: 42,
+        write,
+        resize,
+        kill,
+        onData: vi.fn((listener) => {
+          onData = listener;
+          return { dispose: disposeData };
+        }),
+        onExit: vi.fn((listener) => {
+          onExit = listener;
+          return { dispose: disposeExit };
+        }),
+      });
+      spawnSync.mockReturnValueOnce({
+        stdout: '',
+        error: Object.assign(new Error('ps failed'), { code: 'ENOBUFS' }),
+      });
+      const processKill = vi
+        .spyOn(process, 'kill')
+        .mockImplementation(() => true);
+      try {
+        const registry = new WebTerminalRegistry();
+        await registry.create({
+          terminalId: 'terminal:process-group',
+          workspaceCwd: '/workspace',
+        });
+
+        registry.release('terminal:process-group');
+
+        expect(processKill).toHaveBeenCalledWith(-42, 'SIGKILL');
+        expect(kill).toHaveBeenCalledOnce();
       } finally {
         processKill.mockRestore();
       }

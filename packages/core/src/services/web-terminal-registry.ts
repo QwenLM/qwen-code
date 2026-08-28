@@ -78,40 +78,58 @@ function killPtyTree(pty: WebTerminalPty): void {
     }
   } else {
     if (pty.pid > 1) {
-      const processes = spawnSync('ps', ['-axo', 'pid=,ppid=,sess='], {
-        encoding: 'utf8',
-      });
-      const rows = (processes.stdout?.split('\n') ?? []).map((line) =>
-        line.trim().split(/\s+/).map(Number),
+      const scopeColumn =
+        process.platform === 'linux'
+          ? 'sid='
+          : process.platform === 'darwin'
+            ? 'tdev='
+            : undefined;
+      const processes = spawnSync(
+        'ps',
+        ['-A', '-o', scopeColumn ? `pid=,ppid=,${scopeColumn}` : 'pid=,ppid='],
+        {
+          encoding: 'utf8',
+          maxBuffer: 8 * 1024 * 1024,
+          timeout: 2_000,
+        },
       );
+      const rows = (processes.stdout?.split('\n') ?? []).flatMap((line) => {
+        const [pidText, parentPidText, scope] = line.trim().split(/\s+/);
+        const pid = Number(pidText);
+        const parentPid = Number(parentPidText);
+        return Number.isInteger(pid) && Number.isInteger(parentPid)
+          ? [{ pid, parentPid, scope }]
+          : [];
+      });
+      const rootScope = rows.find(({ pid }) => pid === pty.pid)?.scope;
       const targets = new Set([pty.pid]);
       let found = true;
       while (found) {
         found = false;
-        for (const [pid, parentPid, sessionId] of rows) {
+        for (const { pid, parentPid, scope } of rows) {
           if (
             pid > 1 &&
             !targets.has(pid) &&
-            (targets.has(parentPid) || sessionId === pty.pid)
+            (targets.has(parentPid) ||
+              (rootScope !== undefined &&
+                rootScope !== '0' &&
+                rootScope !== '??' &&
+                scope === rootScope))
           ) {
             targets.add(pid);
             found = true;
           }
         }
       }
-      let killed = false;
       for (const pid of [...targets].reverse()) {
         try {
           process.kill(pid, 'SIGKILL');
-          killed = true;
         } catch {
           // Process already exited.
         }
       }
-      if (killed) return;
       try {
         process.kill(-pty.pid, 'SIGKILL');
-        return;
       } catch {
         // Fall through when the process group has already exited.
       }
@@ -331,15 +349,18 @@ export class WebTerminalRegistry {
     const session = this.sessions.get(terminalId);
     if (!session || session.exited) return 'unavailable';
     const bytes = Buffer.byteLength(data);
+    const isRecoveryControl =
+      data.length === 1 && '\x03\x04\x1a\x1c'.includes(data);
     if (
-      session.unacknowledgedInputBytes + bytes >
-      MAX_UNACKNOWLEDGED_INPUT_BYTES
+      !isRecoveryControl &&
+      session.unacknowledgedInputBytes !== 0 &&
+      session.unacknowledgedInputBytes + bytes > MAX_UNACKNOWLEDGED_INPUT_BYTES
     ) {
       return 'backpressure';
     }
     try {
       session.pty.write(data);
-      session.unacknowledgedInputBytes += bytes;
+      if (!isRecoveryControl) session.unacknowledgedInputBytes += bytes;
       return 'written';
     } catch {
       return 'unavailable';
