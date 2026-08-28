@@ -88,6 +88,7 @@ jobs:
           # symlink, so refuse one outright; and no ownership/permission change
           # may run on a path the containment below has not accepted.
           RWS="${RUNNER_WORKSPACE:?}"
+          while [ "${RWS%/}" != "$RWS" ]; do RWS="${RWS%/}"; done
           if [ -L "$RWS" ]; then
             echo "::error::refusing to wipe: runner workspace is a symlink: ${RWS}"
             exit 1

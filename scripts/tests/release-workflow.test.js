@@ -170,6 +170,7 @@ const canonicalWipe = `set -uo pipefail
 # symlink, so refuse one outright; and no ownership/permission change
 # may run on a path the containment below has not accepted.
 RWS="\${RUNNER_WORKSPACE:?}"
+while [ "\${RWS%/}" != "$RWS" ]; do RWS="\${RWS%/}"; done
 if [ -L "$RWS" ]; then
   echo "::error::refusing to wipe: runner workspace is a symlink: \${RWS}"
   exit 1
@@ -657,6 +658,51 @@ describe('release workflow', () => {
           'refusing to wipe: runner workspace is a symlink',
         );
         expect(existsSync(join(outside, 'qwen-code'))).toBe(false);
+      } finally {
+        rmSync(outside, { recursive: true, force: true });
+        rmSync(base, { recursive: true, force: true });
+      }
+    }
+
+    // Trailing slash on a symlinked runner workspace: [ -L ] does not see
+    // the link through a trailing slash — path resolution dereferences it —
+    // while realpath -m canonicalizes THROUGH it, re-rooting the containment
+    // allow-list at the link's target. The raw value must be stripped
+    // before the -L test (the GITHUB_WORKSPACE side's ordering), or a
+    // mangled env carrying one trailing slash defeats the refusal.
+    {
+      const outside = mkdtempSync(join(tmpdir(), 'release-rws-slash-'));
+      mkdirSync(join(outside, 'qwen-code'));
+      const decoy = join(outside, 'qwen-code', 'decoy.txt');
+      writeFileSync(decoy, 'must-survive');
+      const base = mkdtempSync(join(tmpdir(), 'release-rws-slash-runner-'));
+      const rwsLink = join(base, 'rws-link');
+      symlinkSync(outside, rwsLink);
+      try {
+        const env = {
+          ...process.env,
+          GITHUB_WORKSPACE: join(rwsLink, 'qwen-code'),
+          // String concatenation keeps the literal trailing slash —
+          // path.join would normalize it away before the script sees it.
+          RUNNER_WORKSPACE: `${rwsLink}/`,
+          RUNNER_TEMP: join(base, 'temp'),
+          RUNNER_TOOL_CACHE: join(base, 'tool-cache'),
+          GITHUB_ENV: join(base, 'github-env'),
+          HOME: join(base, 'home'),
+          XDG_CONFIG_HOME: join(base, 'home', '.config'),
+        };
+        mkdirSync(env.HOME);
+        mkdirSync(env.RUNNER_TEMP);
+        const result = spawnSync(
+          'bash',
+          ['-e', '-o', 'pipefail', '-c', wipeScript],
+          { encoding: 'utf8', env },
+        );
+        expect(result.status).not.toBe(0);
+        expect(`${result.stdout}${result.stderr}`).toContain(
+          'refusing to wipe: runner workspace is a symlink',
+        );
+        expect(readFileSync(decoy, 'utf8')).toBe('must-survive');
       } finally {
         rmSync(outside, { recursive: true, force: true });
         rmSync(base, { recursive: true, force: true });
