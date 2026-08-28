@@ -949,20 +949,9 @@ jobs:
           EVENT_NAME: '${{ github.event_name }}'
           EVENT_HEAD_SHA: '${{ github.event.pull_request.head.sha }}'
           MAX_TIMEOUT_MINUTES_VAR: '${{ vars.QWEN_REVIEW_MAX_TIMEOUT_MINUTES }}'
-          # The review worktree `fetch-pr` builds is a bare checkout, and an
-          # install plus the prerequisite builds does not fit inside an
-          # agent's tool budget (issue #10108): every probe that decided to
-          # run a test burned its budget on a doomed install and the round
-          # downgraded to a read-only audit. With this set, `fetch-pr` runs
-          # Agent 7's own `build-test --install --build-only` BEFORE any
-          # agent starts — the same command, environment and sandbox policy,
-          # with a budget sized to this step instead of a tool call — and
-          # records the outcome in the fetch report (`dependencies`).
-          # Whatever it could not do, Agent 7 does on its own path exactly as
-          # before. Opt-in here and nowhere else: a local review must not pay
-          # a multi-minute blocking prefix nobody asked for. The literal is
-          # pinned against the CLI's constant by
-          # scripts/tests/qwen-pr-review-workflow.test.js.
+          # Install and build the review worktree BEFORE any agent starts,
+          # through Agent 7's own build-test (issue #10108). Opt-in here only;
+          # rationale, budget and fail-open contract: cli lib/prebuild.ts.
           QWEN_REVIEW_PREBUILD: '1'
         run: |-
           set -euo pipefail
