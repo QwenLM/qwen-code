@@ -5,15 +5,26 @@ import { createRoot, type Root } from 'react-dom/client';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
-const { actions } = vi.hoisted(() => ({
-  actions: {
-    getAuthProviders: vi.fn(),
-    installAuthProvider: vi.fn(),
-  },
-}));
+const { actions, ownerGuard, ownerState } = vi.hoisted(() => {
+  const ownerState = { version: 0 };
+  return {
+    actions: {
+      getAuthProviders: vi.fn(),
+      installAuthProvider: vi.fn(),
+    },
+    ownerGuard: {
+      capture: vi.fn(() => {
+        const version = ownerState.version;
+        return { isCurrent: () => ownerState.version === version };
+      }),
+    },
+    ownerState,
+  };
+});
 
 vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
   useWorkspaceActions: () => actions,
+  useDaemonSessionOwnerGuard: () => ownerGuard,
 }));
 
 const { AuthMessage } = await import('./AuthMessage');
@@ -23,6 +34,7 @@ let root: Root | undefined;
 let container: HTMLDivElement | undefined;
 
 beforeEach(() => {
+  ownerState.version = 0;
   actions.getAuthProviders.mockResolvedValue({
     v: 1,
     workspaceCwd: '/workspace',
@@ -65,6 +77,10 @@ async function install(
     message: 'Provider saved.',
     ...(runtimeSync ? { runtimeSync: { status: runtimeSync } } : {}),
   });
+  return openAndSave();
+}
+
+async function openAndSave() {
   const onMessage = vi.fn();
   const onClose = vi.fn();
   container = document.createElement('div');
@@ -123,4 +139,49 @@ describe('AuthMessage runtime provider sync', () => {
       expect(onClose).toHaveBeenCalledOnce();
     },
   );
+
+  it('ignores an install completion after the session owner changes', async () => {
+    let resolveInstall:
+      | ((value: {
+          v: 1;
+          providerId: string;
+          providerLabel: string;
+          authType: string;
+          message: string;
+        }) => void)
+      | undefined;
+    actions.installAuthProvider.mockReturnValue(
+      new Promise((resolve) => {
+        resolveInstall = resolve;
+      }),
+    );
+    const { onMessage, onClose } = await openAndSave();
+
+    ownerState.version += 1;
+    await act(async () => {
+      root?.render(
+        <I18nProvider language="en">
+          <AuthMessage onMessage={onMessage} onClose={onClose} />
+        </I18nProvider>,
+      );
+      await Promise.resolve();
+    });
+    await act(async () => {
+      resolveInstall?.({
+        v: 1,
+        providerId: 'custom-openai-compatible',
+        providerLabel: 'Custom OpenAI',
+        authType: 'openai',
+        message: 'Provider saved.',
+      });
+      await Promise.resolve();
+    });
+
+    expect(onMessage).not.toHaveBeenCalled();
+    expect(onClose).not.toHaveBeenCalled();
+    const saveButton = Array.from(
+      container?.querySelectorAll('button') ?? [],
+    ).at(-1);
+    expect(saveButton?.disabled).toBe(false);
+  });
 });

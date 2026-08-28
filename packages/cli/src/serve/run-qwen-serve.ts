@@ -5522,15 +5522,9 @@ async function runQwenServeImpl(
           workspaceTrusted: trustedWorkspace,
         });
         assertGenerationOpen?.();
-        const result = settingsRuntime.settings.reloadEnvironment(
-          fresh.merged,
-          workspace,
-          trustedWorkspace,
-        );
         let refreshedRuntimeEnv: ReturnType<
           EnvironmentRuntime['buildRuntimeEnvironment']
         >;
-        let fallbackReason: string | undefined;
         try {
           refreshedRuntimeEnv =
             settingsRuntime.environment.buildRuntimeEnvironment(
@@ -5540,36 +5534,44 @@ async function runQwenServeImpl(
               trustedWorkspace,
             );
         } catch (err) {
-          fallbackReason = err instanceof Error ? err.message : String(err);
+          const fallbackReason =
+            err instanceof Error ? err.message : String(err);
+          primaryRuntimeEnv.fallbackReason = fallbackReason;
           daemonLog.warn(
-            'failed to rebuild runtime env snapshot after daemon env reload; preserving previous runtime env',
+            'failed to rebuild runtime env snapshot before daemon env reload; preserving previous runtime env',
             {
               error: fallbackReason,
             },
           );
-          refreshedRuntimeEnv = {
-            effectiveEnv: { ...runtimeEffectiveEnv },
-            overlayKeys: [...primaryRuntimeEnv.overlayKeys],
-            envFilePaths: [...primaryRuntimeEnv.envFilePaths],
-            envFileReadFailed: primaryRuntimeEnv.envFileReadFailed ?? false,
-            envFileReadFailures: [
-              ...(primaryRuntimeEnv.envFileReadFailures ?? []),
-            ],
+          return {
+            updatedKeys: [],
+            removedKeys: [],
+            runtimeEnvironmentApplied: false,
           };
         }
         logRuntimeEnvFileReadFailures(workspace, refreshedRuntimeEnv);
-        if (
-          fallbackReason === undefined &&
-          refreshedRuntimeEnv.envFileReadFailed
-        ) {
-          return { ...result, runtimeEnvironmentApplied: false };
+        if (refreshedRuntimeEnv.envFileReadFailed) {
+          return {
+            updatedKeys: [],
+            removedKeys: [],
+            runtimeEnvironmentApplied: false,
+          };
+        }
+        const result = settingsRuntime.settings.reloadEnvironment(
+          fresh.merged,
+          workspace,
+          trustedWorkspace,
+          { failClosedOnEnvFileReadError: true },
+        );
+        if (result.envFileReadFailed) {
+          return {
+            updatedKeys: [],
+            removedKeys: [],
+            runtimeEnvironmentApplied: false,
+          };
         }
         replaceRuntimeEffectiveEnv(refreshedRuntimeEnv.effectiveEnv);
-        if (fallbackReason) {
-          primaryRuntimeEnv.fallbackReason = fallbackReason;
-        } else {
-          delete primaryRuntimeEnv.fallbackReason;
-        }
+        delete primaryRuntimeEnv.fallbackReason;
         primaryRuntimeEnv.envFileReadFailed =
           refreshedRuntimeEnv.envFileReadFailed;
         primaryRuntimeEnv.envFileReadFailures.splice(
@@ -5589,7 +5591,7 @@ async function runQwenServeImpl(
         );
         return {
           ...result,
-          runtimeEnvironmentApplied: fallbackReason === undefined,
+          runtimeEnvironmentApplied: true,
         };
       });
     const workspaceService = runtime.createDaemonWorkspaceService({
@@ -6007,24 +6009,56 @@ async function runQwenServeImpl(
               workspaceTrusted: secondaryTrusted,
             });
             assertGenerationOpen?.();
-            const result = settingsRuntime.settings.reloadEnvironment(
-              fresh.merged,
-              workspace,
-              secondaryTrusted,
-            );
             let runtimeEnvironmentApplied = false;
+            let refreshedRuntimeEnv: ReturnType<
+              EnvironmentRuntime['buildRuntimeEnvironment']
+            >;
             try {
-              const refreshedRuntimeEnv =
+              refreshedRuntimeEnv =
                 settingsRuntime.environment.buildRuntimeEnvironment(
                   fresh.merged,
                   workspace,
                   daemonRuntimeBaseEnv,
                   secondaryTrusted,
                 );
-              logRuntimeEnvFileReadFailures(workspace, refreshedRuntimeEnv);
-              if (refreshedRuntimeEnv.envFileReadFailed) {
-                return { ...result, runtimeEnvironmentApplied: false };
-              }
+            } catch (err) {
+              secondaryEnv.metadata.fallbackReason =
+                err instanceof Error ? err.message : String(err);
+              daemonLog.warn(
+                'failed to rebuild secondary runtime env snapshot before daemon env reload; preserving previous runtime env',
+                {
+                  workspace,
+                  error: secondaryEnv.metadata.fallbackReason,
+                },
+              );
+              return {
+                updatedKeys: [],
+                removedKeys: [],
+                runtimeEnvironmentApplied,
+              };
+            }
+            logRuntimeEnvFileReadFailures(workspace, refreshedRuntimeEnv);
+            if (refreshedRuntimeEnv.envFileReadFailed) {
+              return {
+                updatedKeys: [],
+                removedKeys: [],
+                runtimeEnvironmentApplied: false,
+              };
+            }
+            const result = settingsRuntime.settings.reloadEnvironment(
+              fresh.merged,
+              workspace,
+              secondaryTrusted,
+              { failClosedOnEnvFileReadError: true },
+            );
+            if (result.envFileReadFailed) {
+              return {
+                updatedKeys: [],
+                removedKeys: [],
+                runtimeEnvironmentApplied: false,
+              };
+            }
+            try {
               secondaryEnv.replace(refreshedRuntimeEnv.effectiveEnv);
               secondaryEnv.metadata.envFileReadFailed =
                 refreshedRuntimeEnv.envFileReadFailed;
@@ -6045,18 +6079,19 @@ async function runQwenServeImpl(
               );
               delete secondaryEnv.metadata.fallbackReason;
               runtimeEnvironmentApplied = true;
+              return { ...result, runtimeEnvironmentApplied };
             } catch (err) {
               secondaryEnv.metadata.fallbackReason =
                 err instanceof Error ? err.message : String(err);
               daemonLog.warn(
-                'failed to rebuild secondary runtime env snapshot after daemon env reload; preserving previous runtime env',
+                'failed to apply secondary runtime env snapshot after daemon env reload; preserving previous runtime env',
                 {
                   workspace,
                   error: secondaryEnv.metadata.fallbackReason,
                 },
               );
+              return { ...result, runtimeEnvironmentApplied };
             }
-            return { ...result, runtimeEnvironmentApplied };
           }),
         queryWorkspaceStatus: (method, idle) =>
           secondaryBridge.queryWorkspaceStatus(method, idle),
@@ -6645,27 +6680,59 @@ async function runQwenServeImpl(
                 workspaceTrusted: trusted,
               });
               assertGenerationOpen?.();
-              const result = settingsRuntime.settings.reloadEnvironment(
-                fresh.merged,
-                workspace,
-                trusted,
-              );
               // Mirror the startup secondary-workspace path: rebuild the runtime
               // env snapshot and update the metadata so `.env` changes actually
               // propagate to child processes spawned by this workspace's bridge.
               let runtimeEnvironmentApplied = false;
+              let refreshedRuntimeEnv: ReturnType<
+                EnvironmentRuntime['buildRuntimeEnvironment']
+              >;
               try {
-                const refreshedRuntimeEnv =
+                refreshedRuntimeEnv =
                   settingsRuntime.environment.buildRuntimeEnvironment(
                     fresh.merged,
                     workspace,
                     daemonRuntimeBaseEnv,
                     trusted,
                   );
-                logRuntimeEnvFileReadFailures(workspace, refreshedRuntimeEnv);
-                if (refreshedRuntimeEnv.envFileReadFailed) {
-                  return { ...result, runtimeEnvironmentApplied: false };
-                }
+              } catch (err) {
+                wsEnv.metadata.fallbackReason =
+                  err instanceof Error ? err.message : String(err);
+                daemonLog.warn(
+                  'failed to rebuild dynamic runtime env snapshot before daemon env reload; preserving previous runtime env',
+                  {
+                    workspace,
+                    error: wsEnv.metadata.fallbackReason,
+                  },
+                );
+                return {
+                  updatedKeys: [],
+                  removedKeys: [],
+                  runtimeEnvironmentApplied,
+                };
+              }
+              logRuntimeEnvFileReadFailures(workspace, refreshedRuntimeEnv);
+              if (refreshedRuntimeEnv.envFileReadFailed) {
+                return {
+                  updatedKeys: [],
+                  removedKeys: [],
+                  runtimeEnvironmentApplied: false,
+                };
+              }
+              const result = settingsRuntime.settings.reloadEnvironment(
+                fresh.merged,
+                workspace,
+                trusted,
+                { failClosedOnEnvFileReadError: true },
+              );
+              if (result.envFileReadFailed) {
+                return {
+                  updatedKeys: [],
+                  removedKeys: [],
+                  runtimeEnvironmentApplied: false,
+                };
+              }
+              try {
                 wsEnv.replace(refreshedRuntimeEnv.effectiveEnv);
                 wsEnv.metadata.envFileReadFailed =
                   refreshedRuntimeEnv.envFileReadFailed;
@@ -6686,18 +6753,19 @@ async function runQwenServeImpl(
                 );
                 delete wsEnv.metadata.fallbackReason;
                 runtimeEnvironmentApplied = true;
+                return { ...result, runtimeEnvironmentApplied };
               } catch (err) {
                 wsEnv.metadata.fallbackReason =
                   err instanceof Error ? err.message : String(err);
                 daemonLog.warn(
-                  'failed to rebuild dynamic runtime env snapshot after daemon env reload; preserving previous runtime env',
+                  'failed to apply dynamic runtime env snapshot after daemon env reload; preserving previous runtime env',
                   {
                     workspace,
                     error: wsEnv.metadata.fallbackReason,
                   },
                 );
+                return { ...result, runtimeEnvironmentApplied };
               }
-              return { ...result, runtimeEnvironmentApplied };
             }),
           queryWorkspaceStatus: (method, idle) =>
             wsBridge.queryWorkspaceStatus(method, idle),

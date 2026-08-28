@@ -1009,7 +1009,11 @@ import type {
   SetSessionConfigOptionResponse,
 } from '@agentclientprotocol/sdk';
 import { AgentSideConnection, RequestError } from '@agentclientprotocol/sdk';
-import { loadSettings, SettingScope } from '../config/settings.js';
+import {
+  loadSettings,
+  reloadEnvironment,
+  SettingScope,
+} from '../config/settings.js';
 import { resetTrustedFoldersForTesting } from '../config/trustedFolders.js';
 import {
   MAX_PERMISSION_RULE_LENGTH,
@@ -19658,9 +19662,14 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
         ).not.toHaveBeenCalled();
         expect(innerConfig.loadPausedBackgroundAgents).not.toHaveBeenCalled();
         expect(lastManagedConversationActivation).toEqual(expect.any(Function));
+        vi.mocked(reloadEnvironment).mockClear();
 
         await lastManagedConversationActivation!();
 
+        expect(reloadEnvironment).toHaveBeenCalledWith(
+          expect.any(Object),
+          '/tmp',
+        );
         expect(innerConfig.refreshAuth).toHaveBeenCalledOnce();
         expect(innerConfig.activateProvisionalWorkspace).toHaveBeenCalledOnce();
         expect(

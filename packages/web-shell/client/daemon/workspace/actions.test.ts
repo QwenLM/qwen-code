@@ -81,7 +81,7 @@ describe('workspace actions', () => {
     });
   });
 
-  it('does not preempt the SDK timeout for model-provider mutations', async () => {
+  it('leaves model-provider mutation timeouts to the SDK client', async () => {
     vi.useFakeTimers();
     let resolveInstall!: (value: {
       v: 1;
@@ -136,7 +136,7 @@ describe('workspace actions', () => {
         deleteSettled = true;
       });
 
-    await vi.advanceTimersByTimeAsync(45_000);
+    await vi.advanceTimersByTimeAsync(50_000);
     expect(installSettled).toBe(false);
     expect(deleteSettled).toBe(false);
 
