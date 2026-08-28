@@ -171,6 +171,23 @@ const ACTIVE_TOOLBAR_ACTION_SET = new Set<ComposerToolbarAction>(
   ACTIVE_TOOLBAR_ACTIONS,
 );
 
+const BUILT_IN_REASONING_EFFORT_LABEL_KEYS: Record<string, string> = {
+  default: 'reasoning.effort.default',
+  low: 'reasoning.effort.low',
+  medium: 'reasoning.effort.medium',
+  high: 'reasoning.effort.high',
+  xhigh: 'reasoning.effort.xhigh',
+  max: 'reasoning.effort.max',
+};
+
+function getReasoningEffortLabel(
+  effort: { value: string; name: string },
+  t: (key: string) => string,
+): string {
+  const key = BUILT_IN_REASONING_EFFORT_LABEL_KEYS[effort.value];
+  return key ? t(key) : effort.name;
+}
+
 interface ChatEditorProps {
   onSubmit: (
     text: string,
@@ -1114,7 +1131,7 @@ function ModelReasoningControls({
               disabled={!reasoning.enabled || busy || !onSelect}
               onClick={() => void select(effort.value)}
             >
-              <span>{effort.name}</span>
+              <span>{getReasoningEffortLabel(effort, t)}</span>
               <span className={styles.dropdownItemCheck}>
                 {reasoning.effort === effort.value ? <CheckIcon /> : null}
               </span>
@@ -2379,10 +2396,14 @@ export const ChatEditor = memo(
       lastConfirmedModelLabel,
     });
     const showReasoningOptions = Boolean(reasoning);
+    const selectedReasoningEffort = reasoning?.efforts.find(
+      (option) => option.value === reasoning.effort,
+    );
     const reasoningEffortLabel = reasoning
       ? reasoning.efforts.length > 0
-        ? (reasoning.efforts.find((option) => option.value === reasoning.effort)
-            ?.name ?? reasoning.effort)
+        ? selectedReasoningEffort
+          ? getReasoningEffortLabel(selectedReasoningEffort, t)
+          : reasoning.effort
         : t('reasoning.thinking')
       : '';
     const modelChipLabel = showReasoningOptions

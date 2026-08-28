@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { act, createRef } from 'react';
+import { act, createRef, type ComponentProps } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
@@ -10,7 +10,7 @@ import {
   type WebShellComposerTag,
   type WebShellCustomization,
 } from '../customization';
-import { I18nProvider } from '../i18n';
+import { I18nProvider, type WebShellLanguage } from '../i18n';
 import type {
   MobileComposerBackend,
   SlashMenuState,
@@ -349,6 +349,7 @@ interface ChatEditorRenderProps {
   currentMode?: string;
   currentModel?: string;
   availableModels?: Array<{ id: string; label?: string }>;
+  reasoning?: ComponentProps<typeof ChatEditor>['reasoning'];
   sessionWorkflowEnabled?: boolean;
   onSelectMode?: (mode: string) => void;
   onSelectModel?: (model: string) => void;
@@ -369,6 +370,7 @@ interface ChatEditorRenderProps {
   builtinAtProviders?: WebShellCustomization['builtinAtProviders'];
   atProviders?: WebShellCustomization['atProviders'];
   skills?: Array<{ name: string; description: string }>;
+  language?: WebShellLanguage;
 }
 
 function renderChatEditorInto(
@@ -383,6 +385,7 @@ function renderChatEditorInto(
     customization,
     renderComposerTagTooltip,
     onComposerTagClick,
+    language = 'en',
     ...chatEditorProps
   } = props;
   if (composerTags) {
@@ -405,7 +408,7 @@ function renderChatEditorInto(
             onComposerTagClick,
           }}
         >
-          <I18nProvider language="en">
+          <I18nProvider language={language}>
             <ChatEditor
               onSubmit={() => undefined}
               commands={[]}
@@ -1616,6 +1619,68 @@ describe('ChatEditor toolbar popovers', () => {
     act(() => options[0]?.click());
 
     expect(onSelectModel).toHaveBeenCalledWith('qwen-max');
+  });
+
+  it('localizes built-in reasoning efforts and preserves provider labels', () => {
+    const container = renderChatEditor({
+      language: 'zh-CN',
+      visibleToolbarActions: ['model'],
+      currentModel: 'qwen-max',
+      availableModels: [{ id: 'qwen-max', label: 'Qwen Max' }],
+      reasoning: {
+        enabled: true,
+        effort: 'medium',
+        efforts: [
+          { value: 'default', name: 'Default' },
+          { value: 'low', name: 'Low' },
+          { value: 'medium', name: 'Medium' },
+          { value: 'high', name: 'High' },
+          { value: 'xhigh', name: 'Extra High' },
+          { value: 'max', name: 'Max' },
+          { value: 'Vendor.Ultra', name: 'Vendor Ultra' },
+        ],
+      },
+    });
+
+    const modelButton = container.querySelector<HTMLButtonElement>(
+      '[data-web-shell-model-button]',
+    );
+    expect(modelButton?.textContent).toContain('Qwen Max · 中');
+
+    act(() => modelButton?.click());
+
+    const efforts = Array.from(
+      document.querySelectorAll<HTMLButtonElement>(
+        '[data-web-shell-model-reasoning] [data-web-shell-effort]',
+      ),
+      (button) => button.textContent,
+    );
+    expect(efforts).toEqual([
+      '默认',
+      '低',
+      '中',
+      '高',
+      '极高',
+      '最高',
+      'Vendor Ultra',
+    ]);
+
+    const customContainer = renderChatEditor({
+      language: 'zh-CN',
+      visibleToolbarActions: ['model'],
+      currentModel: 'qwen-max',
+      availableModels: [{ id: 'qwen-max', label: 'Qwen Max' }],
+      reasoning: {
+        enabled: true,
+        effort: 'Vendor.Ultra',
+        efforts: [{ value: 'Vendor.Ultra', name: 'Vendor Ultra' }],
+      },
+    });
+    expect(
+      customContainer.querySelector<HTMLButtonElement>(
+        '[data-web-shell-model-button]',
+      )?.textContent,
+    ).toContain('Qwen Max · Vendor Ultra');
   });
 
   it('displays the model label instead of an opaque route id', () => {
