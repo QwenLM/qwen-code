@@ -1681,6 +1681,23 @@ describe('ChatEditor toolbar popovers', () => {
         '[data-web-shell-model-button]',
       )?.textContent,
     ).toContain('Qwen Max · Vendor Ultra');
+
+    const englishContainer = renderChatEditor({
+      language: 'en',
+      visibleToolbarActions: ['model'],
+      currentModel: 'qwen-max',
+      availableModels: [{ id: 'qwen-max', label: 'Qwen Max' }],
+      reasoning: {
+        enabled: true,
+        effort: 'xhigh',
+        efforts: [{ value: 'xhigh', name: 'Extra high' }],
+      },
+    });
+    expect(
+      englishContainer.querySelector<HTMLButtonElement>(
+        '[data-web-shell-model-button]',
+      )?.textContent,
+    ).toContain('Qwen Max · Extra high');
   });
 
   it('displays the model label instead of an opaque route id', () => {

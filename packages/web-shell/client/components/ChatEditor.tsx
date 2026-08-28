@@ -29,7 +29,7 @@ import type {
 } from '@qwen-code/sdk/daemon';
 import type { CommandDisplayCategoryOrder } from '../utils/commandDisplay';
 import type { SkillInfo } from '../completions/slashCompletion';
-import { useI18n } from '../i18n';
+import { useI18n, type WebShellLanguage } from '../i18n';
 import type { DaemonReasoningControls } from '@qwen-code/webui/daemon-react-sdk';
 import { useWebShellPortalRoot } from '../portalRoot';
 import {
@@ -182,8 +182,10 @@ const BUILT_IN_REASONING_EFFORT_LABEL_KEYS: Record<string, string> = {
 
 function getReasoningEffortLabel(
   effort: { value: string; name: string },
+  language: WebShellLanguage,
   t: (key: string) => string,
 ): string {
+  if (language === 'en') return effort.name;
   const key = BUILT_IN_REASONING_EFFORT_LABEL_KEYS[effort.value];
   return key ? t(key) : effort.name;
 }
@@ -1083,7 +1085,7 @@ function ModelReasoningControls({
   reasoning: DaemonReasoningControls;
   onSelect?: (value: string) => Promise<void> | void;
 }) {
-  const { t } = useI18n();
+  const { language, t } = useI18n();
   const [busy, setBusy] = useState(false);
   const hasEffortOptions = reasoning.efforts.length > 0;
   const select = async (value: string) => {
@@ -1131,7 +1133,7 @@ function ModelReasoningControls({
               disabled={!reasoning.enabled || busy || !onSelect}
               onClick={() => void select(effort.value)}
             >
-              <span>{getReasoningEffortLabel(effort, t)}</span>
+              <span>{getReasoningEffortLabel(effort, language, t)}</span>
               <span className={styles.dropdownItemCheck}>
                 {reasoning.effort === effort.value ? <CheckIcon /> : null}
               </span>
@@ -1699,7 +1701,7 @@ export const ChatEditor = memo(
       editorTheme: CHAT_EDITOR_THEME,
     });
 
-    const { t } = useI18n();
+    const { language, t } = useI18n();
 
     useImperativeHandle(ref, () => core.handle, [core.handle]);
 
@@ -2402,7 +2404,7 @@ export const ChatEditor = memo(
     const reasoningEffortLabel = reasoning
       ? reasoning.efforts.length > 0
         ? selectedReasoningEffort
-          ? getReasoningEffortLabel(selectedReasoningEffort, t)
+          ? getReasoningEffortLabel(selectedReasoningEffort, language, t)
           : reasoning.effort
         : t('reasoning.thinking')
       : '';
