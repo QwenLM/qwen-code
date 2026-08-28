@@ -28292,12 +28292,13 @@ describe('createAcpSessionBridge', () => {
     });
 
     it('reconciles the live list to the authoritative persisted list', async () => {
-      // The sidecar cap evicts by provenance authority while the bridge
-      // merge above capped positionally; once 11 numbers accumulate the
-      // two stores evict DIFFERENT entries. The metadata routes reconcile
-      // the live entry to the persisted list after upsert — without that,
-      // every later event and rename response serves the diverged list
-      // until daemon restart.
+      // The sidecar cap evicts by provenance authority (the created
+      // binding at the head survives, the oldest REVIEW goes) while the
+      // bridge merge above caps positionally (the head goes); once 11
+      // numbers accumulate the two stores evict DIFFERENT entries. The
+      // metadata routes reconcile the live entry to the persisted list
+      // after upsert — without that, every later event and rename
+      // response serves the diverged list until daemon restart.
       const bridge = makeBridge({
         channelFactory: async () => makeChannel().channel,
       });
@@ -28332,9 +28333,10 @@ describe('createAcpSessionBridge', () => {
           url: 'https://github.com/o/r/pull/11',
           source: 'create',
         });
-        // The positional cap evicts the oldest entry (#1).
+        // The authority-ranked cap keeps the created #1 and evicts the
+        // oldest review (#2).
         expect(persisted.map((p) => p.number)).toEqual([
-          2, 3, 4, 5, 6, 7, 8, 9, 10, 11,
+          1, 3, 4, 5, 6, 7, 8, 9, 10, 11,
         ]);
 
         bridge.seedSessionPrs?.(session.sessionId, seeded);
@@ -28346,13 +28348,17 @@ describe('createAcpSessionBridge', () => {
           bridge.getSessionSummary(session.sessionId).prs?.map((p) => p.number),
         ).toEqual([2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
         // …until the route reconciles the entry to the persisted list.
+        const reconciled = persisted.map(({ number, url, state }) => ({
+          number,
+          url,
+          ...(state ? { state } : {}),
+        }));
+        expect(bridge.getSessionSummary(session.sessionId).prs).not.toEqual(
+          reconciled,
+        );
         bridge.setSessionPrs?.(session.sessionId, persisted);
         expect(bridge.getSessionSummary(session.sessionId).prs).toEqual(
-          persisted.map(({ number, url, state }) => ({
-            number,
-            url,
-            ...(state ? { state } : {}),
-          })),
+          reconciled,
         );
 
         await bridge.closeSession(session.sessionId);

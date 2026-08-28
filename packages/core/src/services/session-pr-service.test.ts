@@ -165,6 +165,28 @@ describe('upsertSessionPr', () => {
     );
   });
 
+  it('caps by provenance authority like the batch writer', async () => {
+    // Every writer caps the same way: a GitDialog create landing on a
+    // full list must evict the oldest REVIEWED entry, never the created
+    // binding at the head.
+    const seeded: SessionPr[] = [
+      { ...entry(1), source: 'create' },
+      ...Array.from({ length: SESSION_PR_LIST_LIMIT - 1 }, (_, i) => ({
+        ...entry(i + 2),
+        source: 'review' as const,
+      })),
+    ];
+    await writeSessionPrs(filePath, seeded);
+    const prs = await upsertSessionPr(filePath, {
+      number: 11,
+      url: entry(11).url,
+      source: 'create',
+    });
+    expect(prs.map((p) => p.number)).toEqual([1, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
+    expect(prs[0]).toEqual(seeded[0]);
+    expect(await readSessionPrs(filePath)).toEqual(prs);
+  });
+
   it('waits for a foreign file-lock holder before mutating', async () => {
     // The lock must reach ACROSS processes: another writer holding the
     // sidecar's proper-lockfile lock (the daemon sweep while the session
@@ -185,6 +207,56 @@ describe('upsertSessionPr', () => {
     await release();
     const prs = await pending;
     expect(prs.map((p) => p.number)).toEqual([41, 42]);
+  });
+
+  it('persists a binding when a foreign holder unlinks the sidecar before releasing', async () => {
+    // A cross-process holder whose mutation writes nothing used to unlink
+    // the empty file the lock had materialized; an acquisition that
+    // resolved the file's realpath before retrying then failed ENOENT and
+    // the queued binding was lost. The lock is path-based now: the file
+    // need not exist when the lock lands.
+    await upsertSessionPr(filePath, { number: 41, url: entry(41).url });
+    const release = await lockfile.lock(filePath, { retries: 0 });
+    const pending = upsertSessionPr(filePath, {
+      number: 42,
+      url: entry(42).url,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    await fs.unlink(filePath);
+    await release();
+    const prs = await pending;
+    expect(prs.map((p) => p.number)).toEqual([42]);
+    expect(await readSessionPrs(filePath)).toEqual(prs);
+  });
+
+  it('locks an absent sidecar without materializing it', async () => {
+    // The foreign holder locks the canonical path (a realpath-resolving
+    // holder's lock lands there too); while the mutation waits, no empty
+    // file may appear — a session that never binds a PR must not
+    // accumulate stray sidecars, and a concurrent reader must see "no
+    // bindings", not a materialized empty file.
+    const canonical = path.join(
+      await fs.realpath(tmpDir),
+      path.basename(filePath),
+    );
+    const release = await lockfile.lock(canonical, {
+      realpath: false,
+      retries: 0,
+    });
+    let resolved = false;
+    const pending = upsertSessionPr(filePath, {
+      number: 42,
+      url: entry(42).url,
+    }).then((prs) => {
+      resolved = true;
+      return prs;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    expect(resolved).toBe(false);
+    expect(existsSync(filePath)).toBe(false);
+    await release();
+    const prs = await pending;
+    expect(prs.map((p) => p.number)).toEqual([42]);
   });
 
   it('serializes concurrent upserts so no binding is dropped', async () => {
@@ -406,6 +478,47 @@ describe('upsertSessionPrs', () => {
     expect(await readSessionPrs(filePath)).toEqual(result.prs);
   });
 
+  it('never carries provenance across a URL change', async () => {
+    // The replaced entry's source belongs to the PR it named: a
+    // gh-verified create replacing a foreign worktree binding is
+    // `create`, and a review replacing a foreign create is `review` — the
+    // same boundary the singular upsert draws (its known-entry match
+    // requires number AND url).
+    const foreign: SessionPr = {
+      number: 5,
+      url: 'https://github.com/repo-a/r/pull/5',
+      createdAt: '2026-08-01T00:00:00.000Z',
+      source: 'worktree',
+    };
+    await writeSessionPrs(filePath, [foreign]);
+    const created = await upsertSessionPrs(filePath, [
+      {
+        number: 5,
+        url: 'https://github.com/repo-b/r/pull/5',
+        source: 'create',
+      },
+    ]);
+    expect(created.prs[0]).toMatchObject({
+      url: 'https://github.com/repo-b/r/pull/5',
+      source: 'create',
+    });
+    const reviewed = await upsertSessionPrs(filePath, [
+      {
+        number: 5,
+        url: 'https://github.com/repo-c/r/pull/5',
+        source: 'review',
+      },
+    ]);
+    expect(reviewed.prs[0]).toMatchObject({
+      url: 'https://github.com/repo-c/r/pull/5',
+      source: 'review',
+    });
+    const unstamped = await upsertSessionPrs(filePath, [
+      { number: 5, url: 'https://github.com/repo-d/r/pull/5' },
+    ]);
+    expect(unstamped.prs[0]?.source).toBeUndefined();
+  });
+
   it('upgrades the source in place when a same-URL re-offer is stronger', async () => {
     // Backfill first binds a reviewed number, then discovers the session
     // exists for it (worktree convention): the re-offer must upgrade the
@@ -585,9 +698,9 @@ describe('upsertSessionPrs', () => {
   });
 
   it('leaves no stray sidecar when a batch writes nothing', async () => {
-    // The lock materializes its target before locking; a mutation that
-    // ends without a write must clean the file up, or a session that
-    // never bound a PR accumulates an empty sidecar.
+    // The lock is path-based and never materializes its target; a
+    // mutation that ends without a write leaves nothing behind, or a
+    // session that never bound a PR would accumulate an empty sidecar.
     const result = await upsertSessionPrs(filePath, [{ number: 7 }]);
     expect(result.unresolved).toEqual([7]);
     expect(result.added).toEqual([]);
@@ -837,6 +950,32 @@ describe('replaceSessionPrs', () => {
     // An empty list reads back as null (isValidSessionPrList rejects it).
     expect(await readSessionPrs(filePath)).toBeNull();
   });
+
+  it('declines entries the reader would reject instead of poisoning the list', async () => {
+    // The reader fails the WHOLE list closed on one invalid entry, so a
+    // planner that lets a transcript-sourced url through unchecked would
+    // erase every other binding on the next read.
+    await writeSessionPrs(filePath, [entry(100)]);
+    const persisted = await replaceSessionPrs(filePath, (existing) => [
+      ...existing,
+      {
+        ...entry(101),
+        url: `https://github.com/o/r/pull/${'1'.repeat(SESSION_PR_URL_MAX_LENGTH)}`,
+      },
+      { ...entry(102), url: 'https://github.com/o/r/pull/102\u0007' },
+      entry(103),
+    ]);
+    expect(persisted?.map((p) => p.number)).toEqual([100, 103]);
+    expect(await readSessionPrs(filePath)).toEqual(persisted);
+    // A plan made only of declined entries leaves the file untouched.
+    const before = await fs.readFile(filePath, 'utf-8');
+    expect(
+      await replaceSessionPrs(filePath, () => [
+        { ...entry(104), url: 'ftp://x' },
+      ]),
+    ).toBeNull();
+    expect(await fs.readFile(filePath, 'utf-8')).toBe(before);
+  });
 });
 
 describe('mergeSessionPrLists', () => {
@@ -930,6 +1069,45 @@ describe('commandRunsGhPrCreate', () => {
     // The phrase as a search argument is not an execution.
     expect(commandRunsGhPrCreate(`grep -rn 'gh pr create' .`)).toBe(false);
   });
+
+  it('matches any path-qualified gh spelling', () => {
+    expect(commandRunsGhPrCreate('./gh pr create --fill')).toBe(true);
+    expect(commandRunsGhPrCreate('bin/gh pr create --fill')).toBe(true);
+    expect(commandRunsGhPrCreate('$HOME/bin/gh pr create --fill')).toBe(true);
+    expect(commandRunsGhPrCreate('C:\\tools\\gh.exe pr create --fill')).toBe(
+      true,
+    );
+    expect(
+      commandRunsGhPrCreate('\\\\srv\\share\\gh.exe pr create --fill'),
+    ).toBe(true);
+    // A path that does not END in gh is not the binary.
+    expect(commandRunsGhPrCreate('bin/ghx pr create --fill')).toBe(false);
+    expect(commandRunsGhPrCreate('/usr/bin/git pr create')).toBe(false);
+  });
+
+  it('matches nested wrapper chains', () => {
+    expect(commandRunsGhPrCreate('sudo env GH_TOKEN=x gh pr create')).toBe(
+      true,
+    );
+    expect(
+      commandRunsGhPrCreate(
+        'sudo -u runner env -i GH_TOKEN=x nohup gh pr create',
+      ),
+    ).toBe(true);
+    expect(commandRunsGhPrCreate('command env gh pr create --fill')).toBe(true);
+  });
+
+  it('fails closed on shapes outside the grammar', () => {
+    // Documented limitation: the gate's grammar is a closed set. These
+    // creates still run; only the binding is skipped.
+    expect(commandRunsGhPrCreate('timeout 60 gh pr create --fill')).toBe(false);
+    expect(commandRunsGhPrCreate('bash -c "gh pr create --fill"')).toBe(false);
+    expect(commandRunsGhPrCreate('GH_TOKEN="a b" gh pr create --fill')).toBe(
+      false,
+    );
+    expect(commandRunsGhPrCreate('(gh pr create --fill)')).toBe(false);
+    expect(commandRunsGhPrCreate('gh pr \\\ncreate --fill')).toBe(false);
+  });
 });
 
 describe('ghPrCreateInlineEnv', () => {
@@ -989,6 +1167,73 @@ describe('ghPrCreateInlineEnv', () => {
     expect(
       ghPrCreateInlineEnv('export FOO=bar GH_TOKEN=x; gh pr create --fill'),
     ).toEqual({ GH_TOKEN: 'x' });
+  });
+
+  it('ignores an export that follows the create', () => {
+    // `gh pr create --fill; export GH_TOKEN=late` ran the create WITHOUT
+    // the token; attributing the later export would authenticate the legs
+    // differently from the create.
+    expect(
+      ghPrCreateInlineEnv('gh pr create --fill; export GH_TOKEN=late'),
+    ).toBeUndefined();
+    expect(
+      ghPrCreateInlineEnv(
+        'export GH_TOKEN=early; gh pr create --fill; export GH_TOKEN=late',
+      ),
+    ).toEqual({ GH_TOKEN: 'early' });
+  });
+
+  it('models the removal side: unset, env -u, env -i', () => {
+    // A removal is recorded as `undefined`: the legs must shed the ambient
+    // credential the create explicitly shed.
+    expect(
+      ghPrCreateInlineEnv('export GH_TOKEN=x; unset GH_TOKEN; gh pr create'),
+    ).toEqual({ GH_TOKEN: undefined });
+    expect(ghPrCreateInlineEnv('unset GH_TOKEN; gh pr create --fill')).toEqual({
+      GH_TOKEN: undefined,
+    });
+    expect(ghPrCreateInlineEnv('env -u GH_TOKEN gh pr create --fill')).toEqual({
+      GH_TOKEN: undefined,
+    });
+    // `env -u` of a non-GH name is not a credential change.
+    expect(
+      ghPrCreateInlineEnv('env -u PAGER gh pr create --fill'),
+    ).toBeUndefined();
+    process.env['GH_QWEN_TEST_AMBIENT'] = 'ambient';
+    try {
+      // `env -i` starts from an empty environment: every ambient GH
+      // credential is dropped, and the inline one after it survives.
+      expect(
+        ghPrCreateInlineEnv('env -i GH_TOKEN=x gh pr create --fill'),
+      ).toMatchObject({ GH_QWEN_TEST_AMBIENT: undefined, GH_TOKEN: 'x' });
+    } finally {
+      delete process.env['GH_QWEN_TEST_AMBIENT'];
+    }
+  });
+
+  it('collects through nested wrappers', () => {
+    expect(
+      ghPrCreateInlineEnv('sudo env GH_TOKEN=x nohup gh pr create --fill'),
+    ).toEqual({ GH_TOKEN: 'x' });
+  });
+
+  it('leaves parameter-expansion operators and substitutions literal', () => {
+    process.env['QWEN_TEST_GH_SECRET'] = 's3cret';
+    try {
+      // `${VAR:-default}` cannot be evaluated here; a wrong guess must not
+      // authenticate the legs, so the value stays literal (gh then fails
+      // the legs and the binding is declined, like `$(…)`).
+      expect(
+        ghPrCreateInlineEnv(
+          'GH_TOKEN=${QWEN_TEST_GH_SECRET:-fallback} gh pr create',
+        ),
+      ).toEqual({ GH_TOKEN: '${QWEN_TEST_GH_SECRET:-fallback}' });
+      expect(
+        ghPrCreateInlineEnv('GH_TOKEN=$(gh auth token) gh pr create'),
+      ).toBeUndefined();
+    } finally {
+      delete process.env['QWEN_TEST_GH_SECRET'];
+    }
   });
 
   it('expands quoted and $VAR values the way the child shell would', () => {

@@ -3126,6 +3126,16 @@ export class ShellToolInvocation extends BaseToolInvocation<
    * pre-state proof is per-session: two sessions sharing one checkout can
    * still race inside the snapshot→bind window, which this gate does not
    * serialize.
+   *
+   * Scope (by design): only a FOREGROUND run that settled in this call —
+   * an uninterrupted one, or one whose promote was refused because the
+   * child had already exited — reaches this gate. A run promoted to the
+   * background mid-flight and an `is_background: true` run settle through
+   * the background registry, whose output streams to a file and whose
+   * pre-run snapshot was never taken; they are not bound live, and the
+   * transcript is deliberately not a recovery source (no gh-side
+   * attribution). Such a PR binds through `/review <N>` or the worktree
+   * `pr-<N>` convention.
    */
   private bindGhPrCreate(
     command: string,

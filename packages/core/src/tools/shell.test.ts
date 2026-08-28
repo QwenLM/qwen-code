@@ -684,6 +684,67 @@ describe('ShellTool', () => {
       );
     });
 
+    it('does not bind when a promote succeeds mid-run (documented scope)', async () => {
+      // A create promoted to the background settles through the registry:
+      // its output streams to a file and the foreground gate never sees
+      // it. Binding it is out of scope by design (see bindGhPrCreate).
+      vi.mocked(fs.writeFileSync).mockReturnValue(undefined);
+      // Only the pre-run snapshot is consumed: the post-run leg never runs.
+      fetchCurrentBranchPullRequestMock.mockResolvedValueOnce({
+        status: 'none',
+      });
+      const setPromoteAc = vi.fn();
+      const invocation = shellTool.build({
+        command: 'gh pr create --fill',
+        directory: '/test/dir',
+        is_background: false,
+      });
+      const resultPromise = (invocation as ShellToolInvocation).execute(
+        new AbortController().signal,
+        undefined,
+        {},
+        undefined,
+        setPromoteAc,
+      );
+      await vi.waitFor(() =>
+        expect(mockShellExecutionService).toHaveBeenCalled(),
+      );
+      resolveExecutionPromise({
+        output: 'https://github.com/o/r/pull/77\n',
+        exitCode: 0,
+        aborted: false,
+        promoted: true,
+        pid: 99999,
+      } as ShellExecutionResult);
+      const result = await resultPromise;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+
+      expect(result.llmContent).toContain('promoted to background');
+      expect(upsertSessionPrsMock).not.toHaveBeenCalled();
+    });
+
+    it('does not bind an is_background create (documented scope)', async () => {
+      // No pre-run snapshot is taken for a background run and its settle
+      // never reaches the gate — the documented limitation, pinned so a
+      // change to it is deliberate.
+      const invocation = shellTool.build({
+        command: 'gh pr create --fill',
+        directory: '/test/dir',
+        is_background: true,
+      });
+      const result = await invocation.execute(new AbortController().signal);
+      resolveExecutionPromise({
+        output: 'https://github.com/o/r/pull/77\n',
+        exitCode: 0,
+        aborted: false,
+      } as ShellExecutionResult);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+
+      expect(result.llmContent).toContain('bg_');
+      expect(fetchCurrentBranchPullRequestMock).not.toHaveBeenCalled();
+      expect(upsertSessionPrsMock).not.toHaveBeenCalled();
+    });
+
     it('does not bind when the command switched branches mid-run', async () => {
       // A gate-passing compound that checks out another branch resolves the
       // NEW branch's existing PR post-run (its view segment prints the URL
