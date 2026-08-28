@@ -37,7 +37,7 @@ import type {
   AgentHooks,
 } from '../agents/runtime/agent-events.js';
 import type { Config, MCPServerConfig } from '../config/config.js';
-import { APPROVAL_MODES } from '../config/config.js';
+import { APPROVAL_MODES, deriveConfig } from '../config/config.js';
 import type { HookDefinition, HookEventName } from '../hooks/types.js';
 import type { RuntimeContentGeneratorView } from '../agents/runtime/agent-context.js';
 import {
@@ -831,6 +831,10 @@ export class SubagentManager {
       runtimeAuthOverrides?: AuthOverrides;
       runConfigOverrides?: Partial<RunConfig>;
       toolConfigOverride?: ToolConfig;
+      /** Business/task name used for local per-invocation usage labels. */
+      taskName?: string;
+      /** Stable id used to keep one invocation grouped across resume. */
+      subagentId?: string;
     },
   ): Promise<{ subagent: AgentHeadless; dispose: () => Promise<void> }> {
     // Track per-spawn cleanup callbacks declared outside the inner
@@ -952,6 +956,8 @@ export class SubagentManager {
           options?.eventEmitter,
           options?.hooks,
           runtimeView,
+          options?.taskName,
+          options?.subagentId,
         );
         return { subagent, dispose: runCleanup };
       } catch (innerError) {
@@ -976,8 +982,8 @@ export class SubagentManager {
 
   /**
    * Build the per-subagent Config override used as the AgentHeadless
-   * runtime context. The override is a thin prototype-delegation wrapper
-   * (`Object.create(runtimeContext)`): no method changes, but a distinct
+   * runtime context. The override is a thin factory-derived wrapper: no
+   * method changes, but a distinct
    * instance triggers the lazy own-property init in
    * `Config.getFileReadCache()` so the subagent gets its own cache
    * rather than inheriting the parent's recorded reads — which would
@@ -991,8 +997,8 @@ export class SubagentManager {
    * `agent.ts:createApprovalModeOverride`, which marks itself via a
    * Symbol-keyed flag — Symbol lookup walks the prototype chain, so
    * this also catches wrapper-on-wrapper layering like the background
-   * launch passing its stamped `createApprovalModeOverride` override
-   * directly as `runtimeContext`). Rebuilding twice would waste work,
+   * launch passing its stamped `createApprovalModeOverride` override directly
+   * as `runtimeContext`). Rebuilding twice would waste work,
    * leak listeners on shared managers, and split caches across registry
    * layers.
    */
@@ -1014,8 +1020,7 @@ export class SubagentManager {
      */
     cleanup?: () => Promise<void>;
   }> {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const subagentContext = Object.create(runtimeContext) as any as Config;
+    const subagentContext = deriveConfig(runtimeContext);
 
     // Per-agent MCP server overrides. Frontmatter `mcpServers` entries shadow
     // session-level servers on key collision (more-specific-wins, matching

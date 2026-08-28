@@ -521,7 +521,7 @@ describe('parseArguments', () => {
   it('rejects --json-schema combined with --input-format stream-json', async () => {
     // The "first valid structured_output call ends the session"
     // contract is incompatible with the long-lived stream-json input
-    // protocol. Also load-bearing: gemini.tsx's
+    // protocol. Also load-bearing: llm.tsx's
     // `process.exit(process.exitCode ?? 0)` plumbing in the stream-json
     // branch explicitly relies on this rejection holding. Pair with
     // --output-format stream-json because input/output formats must
@@ -1169,15 +1169,12 @@ describe('loadCliConfig', () => {
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();
     const settings: Settings = {};
-    const setGeminiMdFilenameSpy = vi.spyOn(
-      ServerConfig,
-      'setGeminiMdFilename',
-    );
+    const setMemoryFilenameSpy = vi.spyOn(ServerConfig, 'setMemoryFilename');
 
     await loadCliConfig(settings, argv);
 
-    expect(setGeminiMdFilenameSpy).toHaveBeenCalledTimes(1);
-    expect(setGeminiMdFilenameSpy).toHaveBeenCalledWith([
+    expect(setMemoryFilenameSpy).toHaveBeenCalledTimes(1);
+    expect(setMemoryFilenameSpy).toHaveBeenCalledWith([
       ServerConfig.DEFAULT_CONTEXT_FILENAME,
       ServerConfig.AGENT_CONTEXT_FILENAME,
     ]);
@@ -1270,15 +1267,12 @@ describe('loadCliConfig', () => {
         fileName: 'CUSTOM_AGENTS.md',
       },
     };
-    const setGeminiMdFilenameSpy = vi.spyOn(
-      ServerConfig,
-      'setGeminiMdFilename',
-    );
+    const setMemoryFilenameSpy = vi.spyOn(ServerConfig, 'setMemoryFilename');
 
     await loadCliConfig(settings, argv);
 
-    expect(setGeminiMdFilenameSpy).toHaveBeenCalledTimes(1);
-    expect(setGeminiMdFilenameSpy).toHaveBeenCalledWith('CUSTOM_AGENTS.md');
+    expect(setMemoryFilenameSpy).toHaveBeenCalledTimes(1);
+    expect(setMemoryFilenameSpy).toHaveBeenCalledWith('CUSTOM_AGENTS.md');
   });
 
   it('should propagate stream-json formats to config', async () => {
@@ -2100,9 +2094,9 @@ describe('loadCliConfig', () => {
     const settings: Settings = {};
     const defaultContextFiles = ['QWEN.md', 'AGENTS.md'];
     const getAllSpy = vi
-      .spyOn(ServerConfig, 'getAllGeminiMdFilenames')
+      .spyOn(ServerConfig, 'getAllMemoryFilenames')
       .mockReturnValue(defaultContextFiles);
-    const setFilenameSpy = vi.spyOn(ServerConfig, 'setGeminiMdFilename');
+    const setFilenameSpy = vi.spyOn(ServerConfig, 'setMemoryFilename');
 
     await loadCliConfig(settings, argv);
 
@@ -2114,8 +2108,8 @@ describe('loadCliConfig', () => {
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();
     const settings: Settings = { context: { fileName: 'CUSTOM_CONTEXT.md' } };
-    const getAllSpy = vi.spyOn(ServerConfig, 'getAllGeminiMdFilenames');
-    const setFilenameSpy = vi.spyOn(ServerConfig, 'setGeminiMdFilename');
+    const getAllSpy = vi.spyOn(ServerConfig, 'getAllMemoryFilenames');
+    const setFilenameSpy = vi.spyOn(ServerConfig, 'setMemoryFilename');
 
     await loadCliConfig(settings, argv);
 
@@ -3693,6 +3687,48 @@ describe('loadCliConfig with includeDirectories', () => {
     expect(config.getWorkspaceContext().getDirectories()).toHaveLength(
       expected.length,
     );
+  });
+
+  it('ignores ambient roots and LSP for a host-managed provisional workspace', async () => {
+    const mockCwd = path.resolve(path.sep, 'home', 'user', 'project');
+    process.argv = [
+      'node',
+      'script.js',
+      '--experimental-lsp',
+      '--include-directories',
+      path.resolve(path.sep, 'cli', 'path1'),
+    ];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      context: {
+        includeDirectories: [path.resolve(path.sep, 'settings', 'path1')],
+        loadFromIncludeDirectories: true,
+      },
+    };
+
+    await loadCliConfig(
+      settings,
+      argv,
+      mockCwd,
+      [],
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      false,
+      { provisionalWorkspace: true },
+    );
+
+    expect(mockConfigConstructorParams).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        targetDir: mockCwd,
+        provisionalWorkspace: true,
+        includeDirectories: [],
+        loadMemoryFromIncludeDirectories: false,
+        lsp: { enabled: false },
+      }),
+    );
+    expect(NativeLspService).not.toHaveBeenCalled();
   });
 
   it('should ignore implicit startup context inputs in bare mode', async () => {

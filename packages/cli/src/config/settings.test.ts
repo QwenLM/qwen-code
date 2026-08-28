@@ -2222,7 +2222,7 @@ describe('Settings Loading and Merging', () => {
       const warnings = getSettingsWarnings(result);
 
       // Corruption warning no longer goes through migrationWarnings —
-      // it is emitted via settings.corruptedPath check in gemini.tsx
+      // it is emitted via settings.corruptedPath check in llm.tsx
       // early stderr path instead. Verify corruptedPath is set.
       expect(result.corruptedPath).toBeDefined();
       expect(warnings.some((w) => w.includes('invalid JSON'))).toBe(false);
@@ -3490,6 +3490,93 @@ describe('Settings Loading and Merging', () => {
       expect(WORKSPACE_RESTRICTED_SETTING_KEYS).toContain(
         'tools.workflowsEnabled',
       );
+    });
+  });
+
+  describe('cross-session settings scope handling', () => {
+    it('should honor the cross-session keys from user scope', () => {
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH)
+            return JSON.stringify({
+              agents: {
+                crossSessionMessaging: true,
+                crossSessionInbound: 'hold',
+              },
+            });
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      expect(settings.merged.agents?.crossSessionMessaging).toBe(true);
+      expect(settings.merged.agents?.crossSessionInbound).toBe('hold');
+    });
+
+    it('should strip the cross-session keys from workspace scope even when trusted', () => {
+      // A trusted repository must not be able to self-grant the peer
+      // channel or force the inbound policy: the parity hold is the
+      // feature's own protection, and workspace scope uniquely defeats it.
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === MOCK_WORKSPACE_SETTINGS_PATH)
+            return JSON.stringify({
+              agents: {
+                crossSessionMessaging: true,
+                crossSessionInbound: 'accept',
+                maxParallelAgents: 4,
+              },
+            });
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      expect(settings.merged.agents?.crossSessionMessaging).toBeUndefined();
+      expect(settings.merged.agents?.crossSessionInbound).toBeUndefined();
+      // ...while other workspace agent settings still merge.
+      expect(settings.merged.agents?.maxParallelAgents).toBe(4);
+    });
+
+    it('should warn when workspace settings define agents.crossSessionInbound', () => {
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === MOCK_WORKSPACE_SETTINGS_PATH)
+            return JSON.stringify({
+              agents: { crossSessionInbound: 'accept' },
+            });
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      const warnings = getSettingsWarnings(settings);
+      expect(
+        warnings.some((w) => w.includes('agents.crossSessionInbound')),
+      ).toBe(true);
+    });
+
+    it('should let user scope win over a stripped workspace value', () => {
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH)
+            return JSON.stringify({
+              agents: { crossSessionInbound: 'hold' },
+            });
+          if (p === MOCK_WORKSPACE_SETTINGS_PATH)
+            return JSON.stringify({
+              agents: { crossSessionInbound: 'accept' },
+            });
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      expect(settings.merged.agents?.crossSessionInbound).toBe('hold');
     });
   });
 

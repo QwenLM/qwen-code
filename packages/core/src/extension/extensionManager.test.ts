@@ -4494,7 +4494,7 @@ describe('extension tests', () => {
         const mockSettingsMcpServers = { server: { command: 'cmd' } };
 
         const mockConfig = {
-          getGeminiClient: () => ({
+          getLlmClient: () => ({
             isInitialized: () => false,
             setTools: vi.fn(),
           }),

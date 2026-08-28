@@ -95,6 +95,7 @@ import {
 } from './loop-runtime.js';
 
 const SESSION_SHELL_COMMAND_FEATURE = 'session_shell_command';
+const SESSION_ATTACHMENTS_FEATURE = 'session_attachments';
 const MAX_ACTIVE_WEBHOOK_TASKS = 16;
 const WORKER_SHUTDOWN_DRAIN_MS = 10_000;
 
@@ -324,8 +325,11 @@ function validateDaemonWorkerUrl(daemonUrl: string): void {
   } catch {
     throw new Error(`${QWEN_DAEMON_URL_ENV} must be a valid URL.`);
   }
-  if (parsed.protocol !== 'http:' || !isLoopbackBind(parsed.hostname)) {
-    throw new Error(`${QWEN_DAEMON_URL_ENV} must use an http loopback URL.`);
+  if (
+    (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') ||
+    !isLoopbackBind(parsed.hostname)
+  ) {
+    throw new Error(`${QWEN_DAEMON_URL_ENV} must use an http(s) loopback URL.`);
   }
 }
 
@@ -481,6 +485,24 @@ export async function runChannelDaemonWorker(
   const loopController = loopStore
     ? createChannelLoopController(loopStore)
     : undefined;
+  if (loopStore) {
+    const multiSessionChannels = new Set(
+      parsed
+        .filter(({ config }) => config.multiSession)
+        .map(({ name }) => name),
+    );
+    if (multiSessionChannels.size > 0) {
+      const loops = await abortableStartup(loopStore.list(), startupSignal);
+      const conflicting = loops.find(
+        (loop) => loop.enabled && multiSessionChannels.has(loop.channelName),
+      );
+      if (conflicting) {
+        throw new Error(
+          `Channel "${conflicting.channelName}" cannot enable multiSession while it has an enabled Channel loop. Disable the loop first.`,
+        );
+      }
+    }
+  }
 
   const bridge = new DaemonChannelBridge({
     cwd: daemonWorkspace,
@@ -489,6 +511,9 @@ export async function runChannelDaemonWorker(
       DaemonSessionClient: sdk.DaemonSessionClient,
       clientId: `qwen-channel-worker:${process.pid}`,
     }),
+    sessionAttachments: capabilities.features.includes(
+      SESSION_ATTACHMENTS_FEATURE,
+    ),
     ...(opts.promptAuthorization
       ? { promptAuthorization: opts.promptAuthorization }
       : {}),
@@ -550,6 +575,7 @@ export async function runChannelDaemonWorker(
     router = createdRouter;
     for (const { name, config } of parsed) {
       createdRouter.setChannelScope(name, config.sessionScope);
+      createdRouter.setChannelLoopsEnabled(name, !config.multiSession);
       if (config['webhooks']) {
         createdRouter.setChannelApprovalMode(name, config.approvalMode);
       }
@@ -594,7 +620,9 @@ export async function runChannelDaemonWorker(
                   freshWithinSeconds: OBSERVED_CONTACT_MAX_FRESH_WITHIN_SECONDS,
                 }),
             },
-            ...(loopController ? { loopController } : {}),
+            ...(loopController && !config.multiSession
+              ? { loopController }
+              : {}),
           }),
           startupSignal,
         ),

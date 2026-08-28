@@ -140,6 +140,7 @@ export type InvalidGoalEvidenceReferenceCode =
   | 'wrong_turn_lineage'
   | 'catalog_truncated'
   | 'immediate_blocker_external_evidence_required'
+  | 'infeasible_blocker_external_fact_required'
   | 'immediate_blocker_newer_evidence_required'
   | 'repeated_blocker_turn_coverage';
 
@@ -272,7 +273,7 @@ export class GoalEvidenceRecordIndexAccumulator {
         this.lastPartPreviewValues,
       ).trim();
     }
-    preview = capPreviewBytes(preview);
+    preview = capPreviewBytes(preview, CATALOG_PREVIEW_BYTE_LIMIT);
     const catalogEntry =
       this.provenance && this.parsedGoalContext && preview
         ? {
@@ -890,9 +891,24 @@ function validateBlockerCoverage(
 ): void {
   if (proposal.status !== 'blocked') return;
 
+  // Infeasibility is a claim about the world, so it is held to external
+  // facts only: user input can authorise stopping, but it cannot make an
+  // objective impossible, and assistant prose saying so is exactly the
+  // "I think this can't be done" exit this kind must not become.
+  if (
+    proposal.blockerKind === 'infeasible' &&
+    !citedRecords.some(({ proofKind }) => proofKind === 'external_fact')
+  ) {
+    throw new InvalidGoalEvidenceReferenceError(
+      'infeasible_blocker_external_fact_required',
+      'An infeasible blocker requires cited external tool evidence of the fact that makes the objective unsatisfiable.',
+    );
+  }
+
   if (
     proposal.blockerKind === 'authority' ||
-    proposal.blockerKind === 'external'
+    proposal.blockerKind === 'external' ||
+    proposal.blockerKind === 'infeasible'
   ) {
     if (
       !citedRecords.some(
@@ -959,7 +975,10 @@ function checkpointCatalogEntries(
     uuid: claim.id,
     provenance: 'goal_checkpoint',
     turnId: `checkpoint:${checkpoint.checkpointId}`,
-    preview: capPreviewBytes(claim.claim.slice(0, CATALOG_PREVIEW_LIMIT)),
+    preview: capPreviewBytes(
+      claim.claim.slice(0, CATALOG_PREVIEW_LIMIT),
+      CATALOG_PREVIEW_BYTE_LIMIT,
+    ),
     proofKind: claim.proofKind,
   }));
 }
@@ -1067,18 +1086,17 @@ function legacySafeProvenance(
 }
 
 /**
- * Cut `value` to at most {@link CATALOG_PREVIEW_BYTE_LIMIT} UTF-8 bytes
- * without splitting a code point.
+ * Cut `value` to at most `limit` UTF-8 bytes without splitting a code point.
  */
-function capPreviewBytes(value: string): string {
-  if (Buffer.byteLength(value, 'utf8') <= CATALOG_PREVIEW_BYTE_LIMIT) {
+export function capPreviewBytes(value: string, limit: number): string {
+  if (Buffer.byteLength(value, 'utf8') <= limit) {
     return value;
   }
   let byteLength = 0;
   let cutoff = 0;
   for (const codePoint of value) {
     const codePointBytes = Buffer.byteLength(codePoint, 'utf8');
-    if (byteLength + codePointBytes > CATALOG_PREVIEW_BYTE_LIMIT) break;
+    if (byteLength + codePointBytes > limit) break;
     byteLength += codePointBytes;
     cutoff += codePoint.length;
   }
@@ -1139,6 +1157,7 @@ function evidencePreview(
   if (projection?.displayText !== undefined) {
     return capPreviewBytes(
       projection.displayText.slice(0, CATALOG_PREVIEW_LIMIT).trim(),
+      CATALOG_PREVIEW_BYTE_LIMIT,
     );
   }
   let preview = '';
@@ -1159,7 +1178,7 @@ function evidencePreview(
     }
     if (preview.length >= CATALOG_PREVIEW_LIMIT) break;
   }
-  return capPreviewBytes(preview.trim());
+  return capPreviewBytes(preview.trim(), CATALOG_PREVIEW_BYTE_LIMIT);
 }
 
 function renderToolResponse(functionResponse: {
