@@ -1072,7 +1072,7 @@ describe('LlmClient Goal admission', () => {
     );
     expect(runtime.finishTurn).toHaveBeenCalledOnce();
     expect(events).not.toContainEqual(
-      expect.objectContaining({ type: GeminiEventType.MaxSessionTurns }),
+      expect.objectContaining({ type: LlmEventType.MaxSessionTurns }),
     );
   });
 
