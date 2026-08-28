@@ -40,7 +40,7 @@ function createConfig(projectRoot: string, managed = true): Config {
     isManagedMemoryAvailable: vi.fn().mockReturnValue(managed),
     getProjectRoot: vi.fn().mockReturnValue(projectRoot),
     refreshHierarchicalMemory: vi.fn().mockResolvedValue(undefined),
-    getGeminiClient: vi.fn().mockReturnValue({
+    getLlmClient: vi.fn().mockReturnValue({
       refreshSystemInstruction: vi.fn().mockResolvedValue(undefined),
     }),
   } as unknown as Config;
@@ -309,7 +309,7 @@ describe('managed memory refresh helper', () => {
     expect(rebuildUserAutoMemoryIndex).toHaveBeenCalledTimes(1);
     expect(config.refreshHierarchicalMemory).toHaveBeenCalledTimes(1);
     expect(
-      config.getGeminiClient().refreshSystemInstruction,
+      config.getLlmClient().refreshSystemInstruction,
     ).toHaveBeenCalledTimes(1);
     expect(
       vi.mocked(rebuildManagedAutoMemoryIndex).mock.invocationCallOrder[0],
@@ -338,7 +338,7 @@ describe('managed memory refresh helper', () => {
 
     expect(config.refreshHierarchicalMemory).toHaveBeenCalledTimes(1);
     expect(
-      config.getGeminiClient().refreshSystemInstruction,
+      config.getLlmClient().refreshSystemInstruction,
     ).toHaveBeenCalledTimes(1);
   });
 
@@ -352,7 +352,7 @@ describe('managed memory refresh helper', () => {
 
     expect(config.refreshHierarchicalMemory).toHaveBeenCalledTimes(1);
     expect(
-      config.getGeminiClient().refreshSystemInstruction,
+      config.getLlmClient().refreshSystemInstruction,
     ).toHaveBeenCalledTimes(1);
   });
 
