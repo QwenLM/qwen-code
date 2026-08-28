@@ -3092,6 +3092,16 @@ export class Config {
       try {
         await this.closeSessionWriter();
       } catch (closeError) {
+        if (
+          options?.signal?.aborted &&
+          containsErrorByIdentity(error, options.signal.reason)
+        ) {
+          this.debugLogger.warn(
+            'Chat recording close failed after initialization was aborted:',
+            closeError,
+          );
+          options.signal.throwIfAborted();
+        }
         if (containsErrorByIdentity(error, closeError)) {
           throw error;
         }

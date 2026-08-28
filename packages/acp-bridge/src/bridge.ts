@@ -943,8 +943,8 @@ interface ChannelInfo {
   restoreSettlementTimers: Map<string, NodeJS.Timeout>;
   /** Timed-out newSession requests whose underlying ACP call is still live. */
   unsettledAbandonedNewSessions: Set<symbol>;
-  /** Set once an abandoned newSession outlives one further init budget. */
-  newSessionSettlementOverdue: boolean;
+  /** Abandoned newSession requests that outlived one further init budget. */
+  overdueAbandonedNewSessions: Set<symbol>;
   /** Grace timers armed at newSession abandonment. */
   newSessionSettlementTimers: Map<symbol, NodeJS.Timeout>;
   /** A late-created session could not be closed deterministically. */
@@ -2654,7 +2654,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       if (ci.newSessionCleanupFailed) {
         return { channel: ci, reason: 'new_session_cleanup_failed' };
       }
-      if (ci.newSessionSettlementOverdue) {
+      if (ci.overdueAbandonedNewSessions.size > 0) {
         return { channel: ci, reason: 'new_session_settlement_overdue' };
       }
     }
@@ -3484,7 +3484,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       ci.isQuarantined ||
       ci.restoreSettlementOverdue ||
       ci.newSessionCleanupFailed ||
-      ci.newSessionSettlementOverdue
+      ci.overdueAbandonedNewSessions.size > 0
     );
   }
 
@@ -3538,7 +3538,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       ci.newSessionSettlementTimers.delete(token);
       if (!ci.unsettledAbandonedNewSessions.has(token)) return;
       if (ci.isDying || !aliveChannels.has(ci)) return;
-      ci.newSessionSettlementOverdue = true;
+      ci.overdueAbandonedNewSessions.add(token);
       writeStderrLine(
         `qwen serve: abandoned newSession${requestedSessionId ? ` for ${JSON.stringify(requestedSessionId)}` : ''} has not settled ` +
           `${newSessionSettlementGraceMs}ms after its deadline; refusing fresh sessions on channel ${ci.id} until it settles or drains`,
@@ -3873,12 +3873,15 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
   // `shutdown()`.
   const inFlightSpawns = new Map<string, Promise<BridgeSession>>();
   const abandonedNewSessionSettlements = new Set<Promise<void>>();
-  // Reserves caller-supplied ids before `doSpawn` reaches its first await.
-  // Restore admission checks the same set, closing the opposite race from
-  // `inFlightRestores`: whichever operation reserves the id first owns its
-  // registration window.
-  const inFlightRequestedSessionSpawns = new Map<string, symbol>();
-  const abandonedRequestedSessionSpawns = new Set<symbol>();
+  // Reserves ids before caller-supplied spawns and exact-id late cleanup
+  // reach their first await. Restore admission checks the same map, closing
+  // the opposite race from `inFlightRestores`: whichever operation reserves
+  // the id first owns its registration window.
+  const inFlightSessionIdReservations = new Map<
+    string,
+    { token: symbol; settlementPromise: Promise<void> }
+  >();
+  const abandonedSessionIdReservations = new Set<symbol>();
 
   interface InFlightRestore {
     action: 'load' | 'resume';
@@ -4250,7 +4253,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         restoreSettlementOverdue: false,
         restoreSettlementTimers: new Map(),
         unsettledAbandonedNewSessions: new Set(),
-        newSessionSettlementOverdue: false,
+        overdueAbandonedNewSessions: new Set(),
         newSessionSettlementTimers: new Map(),
         newSessionCleanupFailed: false,
         transportFailed: false,
@@ -4652,8 +4655,34 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           ? { 'session.id': requestedSessionId }
           : {}),
     });
+    let cleanupReservation: symbol | undefined;
+    let resolveCleanupReservation: (() => void) | undefined;
     try {
       if (!lateSessionId) return;
+      while (!byId.has(lateSessionId)) {
+        const restoreOwner = inFlightRestores.get(lateSessionId);
+        if (restoreOwner) {
+          await restoreOwner.settlementPromise.catch(() => undefined);
+          continue;
+        }
+        const spawnOwner = inFlightSessionIdReservations.get(lateSessionId);
+        if (spawnOwner && lateSessionId !== requestedSessionId) {
+          await spawnOwner.settlementPromise;
+          continue;
+        }
+        if (!spawnOwner) {
+          cleanupReservation = Symbol(lateSessionId);
+          const cleanupSettlement = new Promise<void>((resolve) => {
+            resolveCleanupReservation = resolve;
+          });
+          inFlightSessionIdReservations.set(lateSessionId, {
+            token: cleanupReservation,
+            settlementPromise: cleanupSettlement,
+          });
+          abandonedSessionIdReservations.add(cleanupReservation);
+        }
+        break;
+      }
       if (byId.has(lateSessionId)) {
         writeStderrLine(
           `qwen serve: skipping abandoned newSession cleanup for ${JSON.stringify(lateSessionId)}: the id is owned by a live session`,
@@ -4735,14 +4764,23 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         ci.client.markSessionClosed(lateSessionId);
       }
     } finally {
+      if (cleanupReservation !== undefined) {
+        if (
+          lateSessionId !== undefined &&
+          inFlightSessionIdReservations.get(lateSessionId)?.token ===
+            cleanupReservation
+        ) {
+          inFlightSessionIdReservations.delete(lateSessionId);
+        }
+        abandonedSessionIdReservations.delete(cleanupReservation);
+        resolveCleanupReservation?.();
+      }
       ci.unsettledAbandonedNewSessions.delete(token);
+      ci.overdueAbandonedNewSessions.delete(token);
       const graceTimer = ci.newSessionSettlementTimers.get(token);
       if (graceTimer !== undefined) {
         clearTimeout(graceTimer);
         ci.newSessionSettlementTimers.delete(token);
-      }
-      if (ci.unsettledAbandonedNewSessions.size === 0) {
-        ci.newSessionSettlementOverdue = false;
       }
       void reapPendingEmptyChannel(ci);
     }
@@ -4807,6 +4845,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     }
     let sessionRegistered = false;
     let sessionRemovedDuringInitialization = false;
+    let emptyFailureTeardownStarted = false;
     let initializedSessionId: string | undefined;
     const abandonedToken = Symbol(requestedSessionId ?? 'newSession');
     let newSessionResp: {
@@ -4957,11 +4996,8 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           // attaching to the one we're about to tear down. `channelInfo`
           // stays set until OS reap so `killAllSync` mid-SIGTERM still
           // finds a target (BkUyD invariant).
-          ci.isDying = true;
-          ci.channelLiveness?.stop();
-          await ci.channel.kill().catch(() => {
-            /* best-effort — channel.exited handler still runs */
-          });
+          emptyFailureTeardownStarted = true;
+          void killChannelWithLog(ci, 'empty newSession failure');
         } else {
           ci.emptyReapPending = true;
         }
@@ -5200,7 +5236,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       }
       ci.sessionSpawnsInFlight = Math.max(0, ci.sessionSpawnsInFlight - 1);
       if (!sessionRegistered) {
-        await reapPendingEmptyChannel(ci);
+        if (!emptyFailureTeardownStarted) {
+          await reapPendingEmptyChannel(ci);
+        }
       } else if (sessionRemovedDuringInitialization && hasNoChannelWork(ci)) {
         await reapPendingEmptyChannel(ci);
         if (!ci.isDying) {
@@ -7193,13 +7231,13 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       };
     }
 
-    if (inFlightRequestedSessionSpawns.has(req.sessionId)) {
-      const owner = inFlightRequestedSessionSpawns.get(req.sessionId);
+    if (inFlightSessionIdReservations.has(req.sessionId)) {
+      const owner = inFlightSessionIdReservations.get(req.sessionId);
       throw new RestoreInProgressError(
         req.sessionId,
         'spawn',
         action,
-        owner !== undefined && abandonedRequestedSessionSpawns.has(owner)
+        owner !== undefined && abandonedSessionIdReservations.has(owner.token)
           ? {
               reason: 'awaiting_abandoned_cleanup',
               retryAfterSeconds: abandonedNewSessionRetryAfterSeconds,
@@ -8848,13 +8886,14 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
               : undefined,
           );
         }
-        if (inFlightRequestedSessionSpawns.has(req.sessionId)) {
-          const owner = inFlightRequestedSessionSpawns.get(req.sessionId);
+        if (inFlightSessionIdReservations.has(req.sessionId)) {
+          const owner = inFlightSessionIdReservations.get(req.sessionId);
           throw new RestoreInProgressError(
             req.sessionId,
             'spawn',
             'spawn',
-            owner !== undefined && abandonedRequestedSessionSpawns.has(owner)
+            owner !== undefined &&
+            abandonedSessionIdReservations.has(owner.token)
               ? {
                   reason: 'awaiting_abandoned_cleanup',
                   retryAfterSeconds: abandonedNewSessionRetryAfterSeconds,
@@ -8880,28 +8919,36 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
 
       const requestedSessionRegistrationOwner =
         req.sessionId !== undefined ? Symbol(req.sessionId) : undefined;
+      let resolveRequestedSessionSpawnSettlement: (() => void) | undefined;
       if (
         req.sessionId !== undefined &&
         requestedSessionRegistrationOwner !== undefined
       ) {
-        inFlightRequestedSessionSpawns.set(
-          req.sessionId,
-          requestedSessionRegistrationOwner,
-        );
+        const requestedSessionSpawnSettlement = new Promise<void>((resolve) => {
+          resolveRequestedSessionSpawnSettlement = resolve;
+        });
+        inFlightSessionIdReservations.set(req.sessionId, {
+          token: requestedSessionRegistrationOwner,
+          settlementPromise: requestedSessionSpawnSettlement,
+        });
       }
       const releaseRequestedSessionRegistration = () => {
         if (requestedSessionRegistrationOwner !== undefined) {
-          abandonedRequestedSessionSpawns.delete(
+          abandonedSessionIdReservations.delete(
             requestedSessionRegistrationOwner,
           );
         }
         if (
           req.sessionId !== undefined &&
           requestedSessionRegistrationOwner !== undefined &&
-          inFlightRequestedSessionSpawns.get(req.sessionId) ===
+          inFlightSessionIdReservations.get(req.sessionId)?.token ===
             requestedSessionRegistrationOwner
         ) {
-          inFlightRequestedSessionSpawns.delete(req.sessionId);
+          inFlightSessionIdReservations.delete(req.sessionId);
+        }
+        if (requestedSessionRegistrationOwner !== undefined) {
+          resolveRequestedSessionSpawnSettlement?.();
+          resolveRequestedSessionSpawnSettlement = undefined;
         }
       };
       let admission: BridgeFreshSessionReservation | undefined;
@@ -8943,7 +8990,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         (settlement) => {
           abandonedSettlement = settlement;
           if (requestedSessionRegistrationOwner !== undefined) {
-            abandonedRequestedSessionSpawns.add(
+            abandonedSessionIdReservations.add(
               requestedSessionRegistrationOwner,
             );
           }

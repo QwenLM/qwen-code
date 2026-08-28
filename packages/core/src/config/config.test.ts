@@ -3984,6 +3984,34 @@ describe('Server Config (config.ts)', () => {
       ).toEqual([initializationError, closeError]);
     });
 
+    it('preserves initialization cancellation when recording close fails', async () => {
+      const config = new Config(baseParams);
+      const controller = new AbortController();
+      const abortReason = new Error('session initialization deadline exceeded');
+      const closeError = new Error('recording close failed');
+      vi.spyOn(
+        config as unknown as {
+          initializeInternal: (options?: {
+            signal?: AbortSignal;
+          }) => Promise<void>;
+        },
+        'initializeInternal',
+      ).mockImplementation(async (options) => {
+        controller.abort(abortReason);
+        options?.signal?.throwIfAborted();
+      });
+      const close = vi
+        .spyOn(config, 'closeSessionWriter')
+        .mockRejectedValue(closeError);
+
+      const result = await config
+        .initialize({ signal: controller.signal })
+        .catch((error: unknown) => error);
+
+      expect(result).toBe(abortReason);
+      expect(close).toHaveBeenCalledOnce();
+    });
+
     it('runs due auto-skill curation before loading skills when enabled', async () => {
       const config = new Config({ ...baseParams, enableAutoSkill: true });
 
