@@ -4530,9 +4530,9 @@ describe('Server Config (config.ts)', () => {
       const setTools = vi.fn().mockResolvedValue(undefined);
       (
         config as unknown as {
-          geminiClient: { setTools: typeof setTools };
+          llmClient: { setTools: typeof setTools };
         }
-      ).geminiClient = { setTools };
+      ).llmClient = { setTools };
       const registry = config.getToolRegistry();
 
       await config.setAdvisorModel('advisor-model');

@@ -5655,11 +5655,11 @@ describe('useLlmStream', () => {
     mockSendMessageStream.mockReturnValueOnce(
       (async function* () {
         yield {
-          type: ServerGeminiEventType.Content,
+          type: ServerLlmEventType.Content,
           value: 'I will ask the advisor before continuing.',
         };
         yield {
-          type: ServerGeminiEventType.ToolCallRequest,
+          type: ServerLlmEventType.ToolCallRequest,
           value: {
             callId: 'advisor-call',
             name: 'advisor',
@@ -5715,7 +5715,7 @@ describe('useLlmStream', () => {
     mockSendMessageStream.mockReturnValueOnce(
       (async function* () {
         yield {
-          type: ServerGeminiEventType.Content,
+          type: ServerLlmEventType.Content,
           value: 'Here is the final answer.',
         };
         await heldContinuation;
