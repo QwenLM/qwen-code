@@ -13339,6 +13339,89 @@ describe('useLlmStream', () => {
       releaseMainEnd?.();
     });
 
+    it('discards an armed merge deferral and the pending thought when history is replaced', async () => {
+      // R12-1: /clear, /resume, /branch, /restore and Ctrl+L all route
+      // through clearPendingState when they replace the session history.
+      // The deferral machinery and the shared pending slot must be
+      // discarded with it: an armed deferral left behind survives the swap
+      // (the new-prompt reset gate refuses to clear an armed slot), the old
+      // session's finalized thought keeps rendering in the new session, and
+      // the old batch's later completion merges the stale payload into the
+      // swapped-in history.
+      const getOnComplete = captureSchedulerOnComplete();
+
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerLlmEventType.Thought,
+            value: { subject: '', description: 'old session thinking' },
+          };
+          yield {
+            type: ServerLlmEventType.ToolCallRequest,
+            value: {
+              callId: 'tc1',
+              name: 'read_file',
+              args: { path: '/foo' },
+              isClientInitiated: false,
+              prompt_id: 'p1',
+            },
+          };
+          yield {
+            type: ServerLlmEventType.Finished,
+            value: { reason: 'STOP', usageMetadata: undefined },
+          };
+        })(),
+      );
+
+      const { result } = renderDeferredTestHook();
+
+      await act(async () => {
+        void result.current.submitQuery(
+          'think then tool call',
+          SendMessageType.UserQuery,
+          'p1',
+        );
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      await waitForDeferralEstablished(result);
+      await waitFor(() =>
+        expect(result.current.streamingState).toBe(StreamingState.Idle),
+      );
+
+      // The /clear-equivalent clearing path replaces the history: the armed
+      // deferral and its finalized thought must be discarded with it.
+      act(() => {
+        result.current.clearPendingState();
+      });
+      expect(result.current.pendingHistoryItems).not.toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ type: 'gemini_thought' }),
+        ]),
+      );
+
+      // Disarm proof: the old session's batch completes afterwards. With
+      // the deferral still armed this would commit/merge the stale thought
+      // into the swapped-in history; cleared, no thought commits and the
+      // group is not marked merged.
+      await act(async () => {
+        await getOnComplete()?.([successfulReadToolCall('p1', 'tc1')]);
+      });
+      expect(
+        mockAddItem.mock.calls.filter(
+          ([item]) => item.type === 'gemini_thought',
+        ),
+      ).toHaveLength(0);
+      expect(mockAddItem).not.toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'tool_group',
+          display: expect.objectContaining({ mergedIntoThought: true }),
+        }),
+        expect.any(Number),
+      );
+    });
+
     it('does not commit a concurrent in-flight thought when settling without a deferral', async () => {
       // R10-1: cancel settles the foreground turn while a concurrent ?btw
       // stream is mid-thought BEFORE its first ToolCallRequest — nothing is

@@ -909,10 +909,25 @@ export const useLlmStream = (
     setPendingAssistantItems([]);
     setPendingHistoryItem(null);
     setPendingRetryErrorItem(null);
+    // Every caller (/clear, /resume, /branch, /restore, Ctrl+L, rewind)
+    // replaces the session history, so the thought-merge deferral machinery
+    // and the shared pending slot must be discarded with it. An armed
+    // deferral left behind survives the swap: the new-prompt reset gate
+    // refuses to clear an armed slot, so the old session's finalized thought
+    // keeps rendering in the new session and the old batch's later
+    // completion merges the stale payload into the swapped-in history
+    // (R12-1).
+    thoughtMergeDeferralRef.current = null;
+    thoughtMergeDeferralOwnerRef.current = null;
+    thoughtMergeDeferralPayloadRef.current = null;
+    setPendingThoughtItem(null);
+    pendingThoughtOwnerRef.current = null;
+    thoughtStartTimeRef.current = null;
   }, [
     setPendingAssistantItems,
     setPendingHistoryItem,
     setPendingRetryErrorItem,
+    setPendingThoughtItem,
   ]);
   const retryCountdownTimerRef = useRef<ReturnType<typeof setInterval> | null>(
     null,
