@@ -352,7 +352,13 @@ export async function runManagedRememberByAgent(params: {
       filesTouched: result.filesTouched,
       finalTextLength: result.finalText?.length ?? 0,
     });
-    await rebuildWrittenScopes();
+    // Best-effort, exactly as on the failed/cancelled paths above: the
+    // coded error is what every caller branches on, and a rebuild rejection
+    // here would replace it with an uncoded one — the guard would still have
+    // fired, but nothing downstream could tell that it had.
+    await rebuildWrittenScopes().catch((err: unknown) => {
+      debugLogger.error('Memory index rebuild failed:', err);
+    });
     throw Object.assign(new Error('Remember agent did not update any memory'), {
       code: 'remember_no_update',
     });
@@ -362,7 +368,12 @@ export async function runManagedRememberByAgent(params: {
     params.projectRoot,
   );
   if (params.scope && touchedScopes.some((scope) => scope !== params.scope)) {
-    await rebuildWrittenScopes();
+    // Same reason as the no-update guard: `remember_scope_mismatch` is the
+    // signal the scope boundary was crossed, and a rebuild rejection must not
+    // be able to stand in for it.
+    await rebuildWrittenScopes().catch((err: unknown) => {
+      debugLogger.error('Memory index rebuild failed:', err);
+    });
     throw Object.assign(
       new Error(
         `Remember agent wrote outside the requested ${params.scope} scope`,

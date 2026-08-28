@@ -536,6 +536,118 @@ describe('remember memory helper', () => {
     expect(rebuildUserAutoMemoryIndex).not.toHaveBeenCalled();
   });
 
+  it('fails an unscoped remember that completes without writing memory', async () => {
+    vi.mocked(runForkedAgent).mockResolvedValue({
+      status: 'completed',
+      finalText: 'Done.',
+      filesTouched: [],
+      filesWritten: [],
+    } satisfies ForkedAgentResult);
+
+    // The scoped twin above pins `scope: 'project'`. Automatic scope
+    // selection reaches the same guard down a different branch — `params.scope`
+    // is undefined, so nothing narrows the run — and the code is what the
+    // /remember command and the ACP lanes branch on, in both directions.
+    await expect(
+      runManagedRememberByAgent({
+        config: createConfig(projectRoot),
+        projectRoot,
+        content: 'Remember this.',
+        contextMode: 'workspace',
+      }),
+    ).rejects.toMatchObject({ code: 'remember_no_update' });
+    expect(rebuildManagedAutoMemoryIndex).not.toHaveBeenCalled();
+    expect(rebuildUserAutoMemoryIndex).not.toHaveBeenCalled();
+  });
+
+  it('keeps the no-update code when the index repair also fails', async () => {
+    const indexFile = path.join(getAutoMemoryRoot(projectRoot), 'MEMORY.md');
+    vi.mocked(runForkedAgent).mockResolvedValue({
+      status: 'completed',
+      filesTouched: [indexFile],
+      filesWritten: [indexFile],
+    } satisfies ForkedAgentResult);
+    vi.mocked(rebuildManagedAutoMemoryIndex).mockRejectedValue(
+      new Error('index unavailable'),
+    );
+
+    // The repair is best-effort on this path: the guard already decided the
+    // run wrote nothing, and letting a rebuild rejection surface in place of
+    // the coded error would leave callers unable to tell the guard fired.
+    await expect(
+      runManagedRememberByAgent({
+        config: createConfig(projectRoot),
+        projectRoot,
+        content: 'Remember this.',
+        contextMode: 'workspace',
+        scope: 'project',
+      }),
+    ).rejects.toMatchObject({ code: 'remember_no_update' });
+    expect(rebuildManagedAutoMemoryIndex).toHaveBeenCalledWith(projectRoot);
+  });
+
+  it('keeps the scope-mismatch code when the index repair also fails', async () => {
+    const projectFile = path.join(
+      getAutoMemoryRoot(projectRoot),
+      'feedback',
+      'out-of-scope.md',
+    );
+    vi.mocked(runForkedAgent).mockResolvedValue({
+      status: 'completed',
+      finalText: 'Saved.',
+      filesTouched: [projectFile],
+      filesWritten: [projectFile],
+    } satisfies ForkedAgentResult);
+    vi.mocked(rebuildManagedAutoMemoryIndex).mockRejectedValue(
+      new Error('index unavailable'),
+    );
+
+    // Same contract as the no-update twin above: the boundary crossing is
+    // the fact worth surfacing, and the repair may not displace it.
+    await expect(
+      runManagedRememberByAgent({
+        config: createConfig(projectRoot),
+        projectRoot,
+        content: 'Use this preference everywhere.',
+        contextMode: 'workspace',
+        scope: 'user',
+      }),
+    ).rejects.toMatchObject({ code: 'remember_scope_mismatch' });
+    expect(rebuildManagedAutoMemoryIndex).toHaveBeenCalledWith(projectRoot);
+  });
+
+  it('fails an explicit project target when its index cannot be rebuilt', async () => {
+    const projectFile = path.join(
+      getAutoMemoryRoot(projectRoot),
+      'feedback',
+      'in-scope.md',
+    );
+    vi.mocked(runForkedAgent).mockResolvedValue({
+      status: 'completed',
+      finalText: 'Saved.',
+      filesTouched: [projectFile],
+      filesWritten: [projectFile],
+    } satisfies ForkedAgentResult);
+    vi.mocked(rebuildManagedAutoMemoryIndex).mockRejectedValue(
+      new Error('project index unavailable'),
+    );
+
+    // The other direction from 'rebuilds touched project indexes and
+    // best-effort user indexes': the user store is deliberately swallowed
+    // under automatic scope selection, the project store never is. On a
+    // successful write the rebuild rejection is the only signal there is —
+    // a resolved call here would report a memory update whose index is stale.
+    await expect(
+      runManagedRememberByAgent({
+        config: createConfig(projectRoot),
+        projectRoot,
+        content: 'Keep this in the working directory.',
+        contextMode: 'workspace',
+        scope: 'project',
+      }),
+    ).rejects.toThrow('project index unavailable');
+  });
+
   it('repairs a hand-written index even when the run fails or is cancelled', async () => {
     const indexFile = path.join(getAutoMemoryRoot(projectRoot), 'MEMORY.md');
     vi.mocked(runForkedAgent).mockResolvedValueOnce({

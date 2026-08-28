@@ -223,8 +223,17 @@ function realpathOrResolved(filePath: string): string {
  * NOT follow a symlink that lives inside the managed suffix — e.g. a repo-
  * tracked `.qwen -> /outside` under `QWEN_CODE_MEMORY_LOCAL` — which would
  * relocate the "allowed" root out of the project and let the first managed
- * write land outside it. So we canonicalize the trusted anchor only and append
- * the managed suffix literally.
+ * write land outside it. So we canonicalize the trusted anchor and append the
+ * managed suffix literally, with one narrow exception.
+ *
+ * The exception is the shared-project alias: a `projects/<alias>` link created
+ * so two checkouts of the same repository share one memory store.
+ * `resolveSharedProjectAliasRoot` follows it, but only when it resolves to a
+ * direct child of the SAME canonical `projects/` directory — so the resolved
+ * root is a sibling that was already inside managed memory, and following it
+ * cannot move the boundary anywhere the literal suffix could not already
+ * reach. Any other link shape (a different parent, a non-link, a suffix that
+ * is not exactly `projects/<alias>/<leaf>`) falls back to the literal join.
  */
 function resolveTrustedMemoryRoot(literalRoot: string, anchor: string): string {
   const suffix = path.relative(anchor, literalRoot);
