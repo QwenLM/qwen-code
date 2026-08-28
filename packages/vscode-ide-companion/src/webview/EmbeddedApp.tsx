@@ -262,108 +262,27 @@ interface PermissionDiffPreview {
   newText: string;
 }
 
-function asRecord(value: unknown): Record<string, unknown> | undefined {
-  return typeof value === 'object' && value !== null
-    ? (value as Record<string, unknown>)
-    : undefined;
-}
-
-function firstString(
-  record: Record<string, unknown> | undefined,
-  keys: readonly string[],
-): string | undefined {
-  for (const key of keys) {
-    if (typeof record?.[key] === 'string') return record[key] as string;
-  }
-  return undefined;
-}
-
 function permissionDiffPreview(
   block: Extract<DaemonTranscriptBlock, { kind: 'permission' }>,
 ): PermissionDiffPreview | undefined {
-  if (block.preview.kind === 'file_diff') {
-    const { path, oldText, newText } = block.preview;
-    if (
-      typeof path === 'string' &&
-      typeof oldText === 'string' &&
-      typeof newText === 'string'
-    ) {
-      return { path, oldText, newText };
-    }
+  // Trust the SDK's hardened matcher (createDaemonToolPreview): only an
+  // authoritative file_diff preview may drive the native diff. Mining
+  // model-controlled toolCall args here diverged from the daemon's
+  // classification and could present unapproved arguments as the proposed
+  // edit on the very surface the user approves or denies on.
+  if (block.preview.kind !== 'file_diff') {
+    return undefined;
   }
-
-  const toolCall = asRecord(block.toolCall);
-  const location = Array.isArray(toolCall?.locations)
-    ? asRecord(toolCall.locations[0])
-    : undefined;
-  const locationPath = firstString(location, ['path', 'filePath', 'file_path']);
-  const meta = asRecord(toolCall?._meta);
-  const toolName = firstString(meta, ['toolName', 'name']);
-  const toolKind = firstString(toolCall, ['kind']);
-  const title = firstString(toolCall, ['title']);
-  const editLike =
-    toolKind === 'edit' ||
-    /(?:^|[_-])(edit|write|create|replace|patch|update|overwrite)(?:$|[_-])/i.test(
-      toolName ?? '',
-    ) ||
-    /\b(edit|write|create|replace|patch|update|overwrite)\b/i.test(title ?? '');
-
-  if (Array.isArray(toolCall?.content)) {
-    for (const value of toolCall.content) {
-      const content = asRecord(value);
-      if (content?.type !== 'diff') continue;
-      const path =
-        firstString(content, ['path', 'filePath', 'file_path']) ?? locationPath;
-      const oldText = firstString(content, [
-        'oldText',
-        'old_text',
-        'oldString',
-        'old_string',
-      ]);
-      const newText = firstString(content, [
-        'newText',
-        'new_text',
-        'newString',
-        'new_string',
-      ]);
-      if (path && oldText !== undefined && newText !== undefined) {
-        return { path, oldText, newText };
-      }
-    }
+  const { path, oldText, newText } = block.preview;
+  if (
+    typeof path !== 'string' ||
+    (oldText === undefined && newText === undefined)
+  ) {
+    return undefined;
   }
-
-  const rawInputs = [
-    toolCall?.rawInput,
-    toolCall?.input,
-    toolCall?.args,
-    toolCall,
-  ];
-  for (const value of rawInputs) {
-    const input = asRecord(value);
-    const path =
-      firstString(input, ['path', 'filePath', 'file_path', 'absolutePath']) ??
-      locationPath;
-    const oldText = firstString(input, [
-      'oldText',
-      'old_text',
-      'oldString',
-      'old_string',
-      'originalContent',
-      'original_content',
-    ]);
-    const newText = firstString(input, [
-      'newText',
-      'new_text',
-      'newString',
-      'new_string',
-      ...(editLike ? ['newContent', 'new_content', 'content'] : []),
-    ]);
-    if (path && oldText !== undefined && newText !== undefined) {
-      return { path, oldText, newText };
-    }
-  }
-
-  return undefined;
+  // Write/create previews legitimately omit oldText; the diff editor opens
+  // them against an empty old side.
+  return { path, oldText: oldText ?? '', newText: newText ?? '' };
 }
 
 export function EmbeddedApp() {
@@ -404,6 +323,7 @@ export function EmbeddedApp() {
   const openPermissionDiffsRef = useRef(new Map<string, string>());
   const focusedPermissionRequestIdRef = useRef<string | undefined>(undefined);
   const contextMenuRowKeyRef = useRef<string | null>(null);
+  const previousActiveFilePathRef = useRef<string | undefined>(undefined);
   const daemonBaseUrl = runtime?.baseUrl;
   const daemonToken = runtime?.token;
   const daemonClient = useMemo(
@@ -691,7 +611,10 @@ export function EmbeddedApp() {
           setHostNotice({ tone: 'info', text: t('auth.signedIn') });
         }
       } else if (message.type === 'authCancelled') {
-        setAuthenticated(false);
+        // A cancelled auth flow must not hide an already-authenticated
+        // session behind the onboarding screen; only an unknown auth state
+        // settles to unauthenticated here.
+        setAuthenticated((current) => current ?? false);
         setAuthConnecting(false);
         setAuthError(undefined);
         clearInsight();
@@ -776,9 +699,16 @@ export function EmbeddedApp() {
             filePath: data.filePath,
             selection: data.selection,
           });
-          setIncludeActiveFile(true);
+          // The host fires this on every selection change, including plain
+          // cursor moves; only an actual file change may re-arm inclusion,
+          // or a click silently undoes the user's explicit exclusion.
+          if (previousActiveFilePathRef.current !== data.filePath) {
+            setIncludeActiveFile(true);
+          }
+          previousActiveFilePathRef.current = data.filePath;
         } else {
           setActiveFile(undefined);
+          previousActiveFilePathRef.current = undefined;
         }
       } else if (
         message.type === 'modeChanged' ||
@@ -1427,12 +1357,20 @@ export function EmbeddedApp() {
             const selectedLines = activeFile.selection
               ? ` (selected lines ${activeFile.selection.startLine}-${activeFile.selection.endLine})`
               : '';
+            // Mention annotations carry the workspace-relative path the
+            // file picker produced, so compare in both path spaces.
             const alreadyIncluded = submission.inputAnnotations.some(
               (annotation) =>
-                annotation.reference.value === activeFile.filePath,
+                annotation.reference.value === activeFile.filePath ||
+                annotation.reference.value === relativePath,
             );
+            // Bounded match: `@editor.ts` must not suppress a typed
+            // `@editor.tsx` mention of a sibling file.
+            const mentionsReference =
+              submission.prompt === reference ||
+              submission.prompt.startsWith(`${reference} `);
             const prefix =
-              alreadyIncluded || submission.prompt.startsWith(reference)
+              alreadyIncluded || mentionsReference
                 ? ''
                 : `${reference}${selectedLines} `;
             const prompt = `${prefix}${submission.prompt}`;

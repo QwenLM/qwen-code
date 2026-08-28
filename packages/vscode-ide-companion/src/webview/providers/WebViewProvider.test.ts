@@ -1504,6 +1504,74 @@ describe('WebViewProvider initial model inheritance', () => {
     );
     expect(agentManager.setModelFromUi).toHaveBeenCalledWith('glm-5');
   });
+
+  it('does not apply a discontinued initial model to the new session', async () => {
+    const provider = new WebViewProvider(
+      { subscriptions: [] } as never,
+      { fsPath: '/extension-root' } as never,
+    );
+    provider.setInitialModelId('qwen3-coder-plus(qwen-oauth)');
+
+    const agentManager = (
+      provider as unknown as {
+        agentManager: {
+          createNewSession: ReturnType<typeof vi.fn>;
+          setModelFromUi: ReturnType<typeof vi.fn>;
+        };
+      }
+    ).agentManager;
+    agentManager.createNewSession.mockResolvedValue('session-1');
+    agentManager.setModelFromUi.mockResolvedValue({
+      modelId: 'qwen3-coder-plus(qwen-oauth)',
+      name: 'Qwen3 Coder Plus',
+    });
+
+    await (
+      provider as unknown as {
+        loadCurrentSessionMessages: (options?: {
+          autoAuthenticate?: boolean;
+        }) => Promise<boolean>;
+      }
+    ).loadCurrentSessionMessages();
+
+    expect(agentManager.setModelFromUi).not.toHaveBeenCalled();
+  });
+
+  it('still applies a runtime snapshot id that wraps a discontinued model', async () => {
+    const provider = new WebViewProvider(
+      { subscriptions: [] } as never,
+      { fsPath: '/extension-root' } as never,
+    );
+    provider.setInitialModelId(
+      '$runtime|qwen-oauth|qwen3-coder-plus(qwen-oauth)',
+    );
+
+    const agentManager = (
+      provider as unknown as {
+        agentManager: {
+          createNewSession: ReturnType<typeof vi.fn>;
+          setModelFromUi: ReturnType<typeof vi.fn>;
+        };
+      }
+    ).agentManager;
+    agentManager.createNewSession.mockResolvedValue('session-1');
+    agentManager.setModelFromUi.mockResolvedValue({
+      modelId: '$runtime|qwen-oauth|qwen3-coder-plus(qwen-oauth)',
+      name: 'Qwen3 Coder Plus',
+    });
+
+    await (
+      provider as unknown as {
+        loadCurrentSessionMessages: (options?: {
+          autoAuthenticate?: boolean;
+        }) => Promise<boolean>;
+      }
+    ).loadCurrentSessionMessages();
+
+    expect(agentManager.setModelFromUi).toHaveBeenCalledWith(
+      '$runtime|qwen-oauth|qwen3-coder-plus(qwen-oauth)',
+    );
+  });
 });
 
 describe('Notification & dot indicator', () => {

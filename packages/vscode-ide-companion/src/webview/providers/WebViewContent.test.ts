@@ -4,10 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { WebViewContent } from './WebViewContent.js';
 
+const envMock = vi.hoisted(() => ({ language: 'en' }));
+
 vi.mock('vscode', () => ({
+  env: envMock,
   Uri: {
     joinPath: vi.fn((_base: unknown, ...parts: string[]) => ({
       fsPath: `/ext/${parts.join('/')}`,
@@ -35,6 +38,10 @@ function createMockWebview() {
 
 describe('WebViewContent', () => {
   const fakeExtensionUri = { fsPath: '/ext' } as never;
+
+  beforeEach(() => {
+    envMock.language = 'en';
+  });
 
   it('generates HTML when given a raw Webview', () => {
     const webview = createMockWebview();
@@ -112,5 +119,21 @@ describe('WebViewContent', () => {
     const html = WebViewContent.generate(webview as never, fakeExtensionUri);
 
     expect(html).not.toContain('data-web-shell-transcript');
+  });
+
+  it('injects the VS Code locale into the html lang attribute', () => {
+    envMock.language = 'zh-cn';
+    const webview = createMockWebview();
+    const html = WebViewContent.generate(webview as never, fakeExtensionUri);
+
+    expect(html).toContain('<html lang="zh-cn">');
+  });
+
+  it('falls back to en when the VS Code locale is empty', () => {
+    envMock.language = '';
+    const webview = createMockWebview();
+    const html = WebViewContent.generate(webview as never, fakeExtensionUri);
+
+    expect(html).toContain('<html lang="en">');
   });
 });

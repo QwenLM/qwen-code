@@ -17,7 +17,7 @@ type WebviewHost = vscode.Webview | { webview: vscode.Webview };
 export class WebViewContent {
   /**
    * Extract the underlying Webview from various host types.
-   * Accepts a raw Webview, a WebviewPanel, or a WebviewView — so callers
+   * Accepts a raw Webview, a WebviewPanel, or WebviewView — so callers
    * never have to worry about passing the wrong wrapper.
    */
   private static getWebview(host: WebviewHost): vscode.Webview {
@@ -45,13 +45,18 @@ export class WebViewContent {
     const safeExtensionUri = escapeHtml(extensionUriForWebview.toString());
     const safeScriptUri = escapeHtml(scriptUri.toString());
 
+    // Web Shell and the chrome strings read the locale from
+    // `document.documentElement.lang`; VS Code's own locale never reaches
+    // the webview unless it is injected here.
+    const language = escapeHtml(vscode.env.language || 'en');
+
     // The WebShell transcript bundles Shiki, whose Oniguruma engine compiles
     // WASM at runtime, and self-contained KaTeX fonts as data URLs, so the CSP
     // grants both wasm-unsafe-eval and data: fonts.
     const csp = `default-src 'none'; connect-src http://127.0.0.1:* ws://127.0.0.1:*; img-src ${webview.cspSource} data:; font-src data:; script-src ${webview.cspSource} 'wasm-unsafe-eval'; style-src ${webview.cspSource} 'unsafe-inline';`;
 
     return `<!DOCTYPE html>
-<html lang="en">
+<html lang="${language}">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
