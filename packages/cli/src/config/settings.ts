@@ -650,6 +650,28 @@ export class LoadedSettings {
     return reloaded;
   }
 
+  reloadScopesFromDiskAtomically(scopes: readonly SettingScope[]): boolean {
+    const snapshots = scopes.map((scope) => {
+      const file = this.forScope(scope);
+      return {
+        file,
+        settings: structuredClone(file.settings),
+        originalSettings: structuredClone(file.originalSettings),
+        rawJson: file.rawJson,
+      };
+    });
+    const reloaded = scopes.map((scope) => this.reloadScopeFromDisk(scope));
+    if (reloaded.every(Boolean)) return true;
+
+    for (const snapshot of snapshots) {
+      snapshot.file.settings = snapshot.settings;
+      snapshot.file.originalSettings = snapshot.originalSettings;
+      snapshot.file.rawJson = snapshot.rawJson;
+    }
+    this._merged = this.computeMergedSettings();
+    return false;
+  }
+
   /**
    * Get user-level hooks from user settings (not merged with workspace).
    * These hooks should always be loaded regardless of folder trust.

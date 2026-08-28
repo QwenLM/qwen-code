@@ -961,6 +961,58 @@ describe('DaemonClient', () => {
         vi.useRealTimers();
       }
     });
+
+    it.each([
+      ['delete', 10, true],
+      ['delete', 0, false],
+      ['install', 10, true],
+      ['install', 0, false],
+    ] as const)(
+      'honors an explicit %s provider mutation timeout of %sms',
+      async (operation, fetchTimeoutMs, shouldAbort) => {
+        vi.useFakeTimers();
+        try {
+          let signal: AbortSignal | undefined;
+          const fetch = vi.fn(
+            (_input: RequestInfo | URL, init?: RequestInit) =>
+              new Promise<Response>((_resolve, reject) => {
+                signal = init?.signal ?? undefined;
+                signal?.addEventListener(
+                  'abort',
+                  () => reject(signal?.reason),
+                  {
+                    once: true,
+                  },
+                );
+              }),
+          );
+          const client = new DaemonClient({
+            baseUrl: 'http://daemon',
+            fetch,
+            fetchTimeoutMs,
+          });
+          const mutation = (
+            operation === 'delete'
+              ? client.deleteModel({
+                  authType: 'openai',
+                  modelId: 'gpt-4o',
+                })
+              : client.installAuthProvider({
+                  providerId: 'openai',
+                  apiKey: 'key',
+                })
+          ).catch((error: unknown) => error);
+
+          await vi.advanceTimersByTimeAsync(10);
+          expect(signal?.aborted ?? false).toBe(shouldAbort);
+          if (shouldAbort) {
+            await expect(mutation).resolves.toBeInstanceOf(Error);
+          }
+        } finally {
+          vi.useRealTimers();
+        }
+      },
+    );
   });
 
   describe('read-only status routes', () => {

@@ -913,6 +913,7 @@ describe('Session', () => {
       workspace: { settings: {} },
       setValue: vi.fn(),
       reloadScopeFromDisk: vi.fn(),
+      reloadScopesFromDiskAtomically: vi.fn().mockReturnValue(true),
     } as unknown as LoadedSettings;
 
     getAvailableCommandsSpy = vi.mocked(nonInteractiveCliCommands)
@@ -965,14 +966,10 @@ describe('Session', () => {
 
     session.reloadModelProvidersFromDisk();
 
-    expect(mockSettings.reloadScopeFromDisk).toHaveBeenNthCalledWith(
-      1,
+    expect(mockSettings.reloadScopesFromDiskAtomically).toHaveBeenCalledWith([
       SettingScope.User,
-    );
-    expect(mockSettings.reloadScopeFromDisk).toHaveBeenNthCalledWith(
-      2,
       SettingScope.Workspace,
-    );
+    ]);
     expect(mockConfig.reloadModelProvidersConfig).toHaveBeenCalledWith(
       modelProviders,
       { idealab: 'openai' },
@@ -980,18 +977,9 @@ describe('Session', () => {
   });
 
   it('does not apply stale model providers when a settings scope cannot reload', () => {
-    vi.mocked(mockSettings.reloadScopeFromDisk).mockReturnValueOnce(false);
-
-    expect(() => session.reloadModelProvidersFromDisk()).toThrow(
-      'Unable to reload model-provider settings from disk.',
+    vi.mocked(mockSettings.reloadScopesFromDiskAtomically).mockReturnValueOnce(
+      false,
     );
-    expect(mockConfig.reloadModelProvidersConfig).not.toHaveBeenCalled();
-  });
-
-  it('does not apply stale model providers when the workspace scope cannot reload', () => {
-    vi.mocked(mockSettings.reloadScopeFromDisk)
-      .mockReturnValueOnce(true)
-      .mockReturnValueOnce(false);
 
     expect(() => session.reloadModelProvidersFromDisk()).toThrow(
       'Unable to reload model-provider settings from disk.',

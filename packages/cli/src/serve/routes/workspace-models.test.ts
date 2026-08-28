@@ -385,7 +385,12 @@ describe('DELETE /workspace/models', () => {
       modelProviders: { openai: [{ id: 'gpt-4o' }] },
       model: { name: 'gpt-4o' },
     });
-    const { app, persistSettings, broadcastSettingsChanged } = makeApp();
+    const syncModelProvidersRuntime = vi
+      .fn()
+      .mockResolvedValue({ status: 'applied' as const });
+    const { app, persistSettings, broadcastSettingsChanged } = makeApp({
+      syncModelProvidersRuntime,
+    });
     persistSettings.mockImplementationOnce(async (_ws, writes) => {
       // modelProviders committed, model.name/baseUrl did not.
       throw new WorkspaceSettingsPartialPersistError(
@@ -412,6 +417,7 @@ describe('DELETE /workspace/models', () => {
       'user',
       undefined,
     );
+    expect(syncModelProvidersRuntime).toHaveBeenCalledOnce();
   });
 
   it('trims whitespace-padded fields before matching', async () => {

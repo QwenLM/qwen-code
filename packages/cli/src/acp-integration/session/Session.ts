@@ -3372,11 +3372,12 @@ export class Session implements SessionContext {
   }
 
   reloadModelProvidersFromDisk(): void {
-    const userReloaded = this.settings.reloadScopeFromDisk(SettingScope.User);
-    const workspaceReloaded = this.settings.reloadScopeFromDisk(
-      SettingScope.Workspace,
-    );
-    if (userReloaded === false || workspaceReloaded === false) {
+    if (
+      !this.settings.reloadScopesFromDiskAtomically([
+        SettingScope.User,
+        SettingScope.Workspace,
+      ])
+    ) {
       throw new Error('Unable to reload model-provider settings from disk.');
     }
     this.config.reloadModelProvidersConfig(

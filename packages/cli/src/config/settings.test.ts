@@ -3911,6 +3911,49 @@ describe('Settings Loading and Merging', () => {
         expect.stringContaining('reloadScopeFromDisk(User):'),
       );
     });
+
+    it('rolls back every scope when an atomic reload partially fails', () => {
+      let userContent = JSON.stringify({
+        modelProviders: { openai: [{ id: 'old-user' }] },
+      });
+      let workspaceContent = JSON.stringify({
+        modelProviders: { gemini: [{ id: 'old-workspace' }] },
+      });
+      (mockFsExistsSync as Mock).mockImplementation(
+        (p: fs.PathLike) =>
+          p === USER_SETTINGS_PATH || p === MOCK_WORKSPACE_SETTINGS_PATH,
+      );
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH) return userContent;
+          if (p === MOCK_WORKSPACE_SETTINGS_PATH) return workspaceContent;
+          return '{}';
+        },
+      );
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      userContent = JSON.stringify({
+        modelProviders: { openai: [{ id: 'new-user' }] },
+      });
+      workspaceContent = '{bad json';
+
+      expect(
+        settings.reloadScopesFromDiskAtomically([
+          SettingScope.User,
+          SettingScope.Workspace,
+        ]),
+      ).toBe(false);
+
+      expect(settings.user.settings.modelProviders).toEqual({
+        openai: [{ id: 'old-user' }],
+      });
+      expect(settings.workspace.settings.modelProviders).toEqual({
+        gemini: [{ id: 'old-workspace' }],
+      });
+      expect(settings.merged.modelProviders).toEqual({
+        openai: [{ id: 'old-user' }],
+        gemini: [{ id: 'old-workspace' }],
+      });
+    });
   });
 
   describe('setValue persistence', () => {

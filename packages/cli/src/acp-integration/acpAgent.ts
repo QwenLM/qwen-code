@@ -139,6 +139,7 @@ import {
 } from '@qwen-code/qwen-code-core';
 import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
+import { isDeepStrictEqual } from 'node:util';
 import type { JSONRPCMessage } from '@modelcontextprotocol/sdk/types.js';
 import {
   AgentSideConnection,
@@ -3353,6 +3354,7 @@ async function assertManagedConversationDirectoryIdentity(
 
 class QwenAgent implements Agent {
   private sessions: Map<string, Session> = new Map();
+  private modelProviderReloadRevision = 0;
   private readonly historyMutationTails = new Map<string, Promise<void>>();
   private readonly startingSessionIds = new Set<string>();
   private activePromptCalls = new Map<string, Set<ActivePromptCall>>();
@@ -4790,6 +4792,7 @@ class QwenAgent implements Agent {
           );
           this.settings = settings;
           const deferMcpDiscovery = shouldDeferMcpDiscovery(params);
+          const configProviderRevision = this.modelProviderReloadRevision;
           const config = await profiler.time('config_setup', () =>
             this.newSessionConfig(
               cwd,
@@ -4826,6 +4829,7 @@ class QwenAgent implements Agent {
                 ...(initializationDeadline
                   ? { signal: initializationDeadline.signal }
                   : {}),
+                configProviderRevision,
               }),
             );
           } catch (error) {
@@ -5049,6 +5053,7 @@ class QwenAgent implements Agent {
       // agent-level readers at this request's workspace.
       this.settings = settings;
 
+      const configProviderRevision = this.modelProviderReloadRevision;
       const config = await profiler.time('config_setup', () =>
         this.newSessionConfig(
           params.cwd,
@@ -5111,6 +5116,7 @@ class QwenAgent implements Agent {
         await profiler.time('session_register', () =>
           this.createAndStoreSession(config, settings, undefined, {
             deferWorkspaceActivation: provisionalStandalone,
+            configProviderRevision,
             ...(provisionalStandalone
               ? {
                   beforeDeferredWorkspaceActivation: () =>
@@ -5432,6 +5438,7 @@ class QwenAgent implements Agent {
       profiler.setSessionId(sessionId);
       this.settings = settings;
 
+      const configProviderRevision = this.modelProviderReloadRevision;
       const config = await profiler.time('config_setup', () =>
         this.newSessionConfig(
           params.cwd,
@@ -5464,6 +5471,7 @@ class QwenAgent implements Agent {
         await profiler.time('session_register', () =>
           this.createAndStoreSession(config, settings, undefined, {
             deferWorkspaceActivation: provisionalStandalone,
+            configProviderRevision,
             ...(provisionalStandalone
               ? {
                   beforeDeferredWorkspaceActivation: () =>
@@ -12079,13 +12087,13 @@ class QwenAgent implements Agent {
         >;
       }
       case SERVE_CONTROL_EXT_METHODS.workspaceModelProvidersReload: {
-        const userReloaded = this.settings.reloadScopeFromDisk(
-          SettingScope.User,
-        );
-        const workspaceReloaded = this.settings.reloadScopeFromDisk(
-          SettingScope.Workspace,
-        );
-        if (userReloaded === false || workspaceReloaded === false) {
+        this.modelProviderReloadRevision += 1;
+        if (
+          !this.settings.reloadScopesFromDiskAtomically([
+            SettingScope.User,
+            SettingScope.Workspace,
+          ])
+        ) {
           debugLogger.warn('Model-provider settings reload failed');
           return { configsRefreshed: 0, configsFailed: 1 };
         }
@@ -12870,6 +12878,7 @@ class QwenAgent implements Agent {
       replayHistory?: boolean;
       enableLiveScreenContext?: boolean;
       deferWorkspaceActivation?: boolean;
+      configProviderRevision?: number;
       beforeDeferredWorkspaceActivation?: () => Promise<void>;
       prepareBeforeSessionCreate?: () => Promise<void>;
       beforeSessionPublish?: () => void;
@@ -12976,17 +12985,53 @@ class QwenAgent implements Agent {
       // must be declared before the first prompt can be served.
       await registerCreateSubSessionTool(config);
       options.signal?.throwIfAborted();
-      const userReloaded =
-        settings.reloadScopeFromDisk?.(SettingScope.User) !== false;
-      const workspaceReloaded =
-        settings.reloadScopeFromDisk?.(SettingScope.Workspace) !== false;
-      if (!userReloaded || !workspaceReloaded) {
-        throw new Error('Unable to reload model-provider settings from disk.');
+      let forceAuthenticationRefresh =
+        options.deferWorkspaceActivation !== true &&
+        options.configProviderRevision !== this.modelProviderReloadRevision;
+      while (true) {
+        const providerReloadRevision = this.modelProviderReloadRevision;
+        const previousModelProviders = settings.merged.modelProviders;
+        const previousProviderProtocol = settings.merged.providerProtocol;
+        if (
+          settings.reloadScopesFromDiskAtomically?.([
+            SettingScope.User,
+            SettingScope.Workspace,
+          ]) === false
+        ) {
+          throw new Error(
+            'Unable to reload model-provider settings from disk.',
+          );
+        }
+        config.reloadModelProvidersConfig?.(
+          settings.merged.modelProviders,
+          settings.merged.providerProtocol ?? {},
+        );
+        if (options.deferWorkspaceActivation !== true) {
+          const envReload = reloadEnvironment(
+            settings.merged,
+            config.getTargetDir(),
+          );
+          const providerSettingsChanged =
+            !isDeepStrictEqual(
+              previousModelProviders,
+              settings.merged.modelProviders,
+            ) ||
+            !isDeepStrictEqual(
+              previousProviderProtocol,
+              settings.merged.providerProtocol,
+            );
+          if (
+            forceAuthenticationRefresh ||
+            providerSettingsChanged ||
+            envReload.updatedKeys.length > 0 ||
+            envReload.removedKeys.length > 0
+          ) {
+            await this.ensureAuthenticated(config);
+          }
+        }
+        if (providerReloadRevision === this.modelProviderReloadRevision) break;
+        forceAuthenticationRefresh = true;
       }
-      config.reloadModelProvidersConfig?.(
-        settings.merged.modelProviders,
-        settings.merged.providerProtocol ?? {},
-      );
       options.beforeSessionPublish?.();
       options.primeSession?.(session);
       if (options.deferWorkspaceActivation !== true) {

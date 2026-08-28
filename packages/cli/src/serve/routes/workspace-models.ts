@@ -277,6 +277,27 @@ export function registerWorkspaceModelsRoutes(
         // On a partial persist, tell the caller which keys committed so it can
         // reconcile (e.g. modelProviders removed but model.name not cleared).
         if (err instanceof WorkspaceSettingsPartialPersistError) {
+          if (
+            err.committedWrites.some(
+              (write) => write.key === 'modelProviders',
+            ) &&
+            deps.syncModelProvidersRuntime
+          ) {
+            try {
+              await deps.syncModelProvidersRuntime();
+            } catch (syncError) {
+              if (sendGenerationClosedError(res, syncError)) return;
+              writeStderrLine(
+                'qwen serve: DELETE /workspace/models runtime sync failed after partial persistence',
+              );
+            }
+            try {
+              assertGenerationOpen();
+            } catch (generationError) {
+              if (sendGenerationClosedError(res, generationError)) return;
+              throw generationError;
+            }
+          }
           res.status(500).json({
             error: 'Model removal only partially persisted',
             code: 'partial_persist_error',

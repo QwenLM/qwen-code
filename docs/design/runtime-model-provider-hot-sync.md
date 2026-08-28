@@ -56,6 +56,12 @@ Reload is not gated on Session idleness. Each live Session also refreshes its
 own `LoadedSettings`, so a later model-selection write resolves its persistence
 scope from current settings. A final refresh before Session publication closes
 the race where provider mutation overlaps asynchronous Session construction.
+Because an unpublished Session has no active turn to preserve, that final step
+also reloads its environment and, when provider state changed during creation,
+rebuilds its current generator. If another child reload interleaves with the
+asynchronous generator rebuild, the final refresh repeats before the Session is
+published. Provisional Sessions defer the same authentication rebuild to
+workspace activation.
 
 Deleting a model removes it from future route resolution but does not force an
 already-running Session away from its current generator.
