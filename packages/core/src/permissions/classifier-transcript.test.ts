@@ -323,7 +323,7 @@ describe('buildClassifierContents', () => {
   // can overflow the fast model's context window, fail-close the
   // classifier, and trigger denialTracking. The constant is exported
   // so scheduler + Session can request exactly this slice from
-  // GeminiClient.getHistoryTail — verify the truncation actually fires
+  // LlmClient.getHistoryTail — verify the truncation actually fires
   // when the input exceeds the window.
 
   it('exports MAX_TRANSCRIPT_MESSAGES so callers can size getHistoryTail correctly', () => {
