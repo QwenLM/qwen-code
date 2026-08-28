@@ -12,6 +12,7 @@
  */
 
 import fs from 'node:fs';
+import { _recoverObjectsFromLine } from './jsonl-utils.js';
 
 /** Size of the head/tail buffer for lite metadata reads (64KB). */
 export const LITE_READ_BUF_SIZE = 64 * 1024;
@@ -136,22 +137,6 @@ function findNextJsonStringField(
   }
 
   return undefined;
-}
-
-function hasJsonStringFieldStart(text: string, key: string): boolean {
-  const quotedKey = `"${key}"`;
-  let keyOffset = text.indexOf(quotedKey);
-  while (keyOffset >= 0) {
-    let i = keyOffset + quotedKey.length;
-    while (isInlineJsonWhitespace(text[i])) i++;
-    if (text[i] === ':') {
-      i++;
-      while (isInlineJsonWhitespace(text[i])) i++;
-      if (text[i] === '"') return true;
-    }
-    keyOffset = text.indexOf(quotedKey, keyOffset + 1);
-  }
-  return false;
 }
 
 /**
@@ -300,10 +285,48 @@ export function extractJsonStringFieldFromLastMatchingLine(
     const lineStart = text.lastIndexOf('\n', hit) + 1;
     const eol = text.indexOf('\n', hit);
     const line = text.slice(lineStart, eol < 0 ? text.length : eol);
-    const value = extractJsonStringField(line, key);
-    if (value !== undefined || !hasJsonStringFieldStart(line, key)) {
-      return { matched: true, value };
+    try {
+      JSON.parse(line);
+      return {
+        matched: true,
+        value: extractJsonStringField(line, key),
+      };
+    } catch {
+      // Recover complete records from a malformed physical line below.
     }
+    const recovered = _recoverObjectsFromLine<unknown>(line);
+    for (let i = recovered.length - 1; i >= 0; i--) {
+      const record = JSON.stringify(recovered[i]);
+      if (record.includes(lineContains)) {
+        return {
+          matched: true,
+          value: extractJsonStringField(record, key),
+        };
+      }
+    }
+
+    let markerOffset = line.lastIndexOf(lineContains);
+    while (markerOffset >= 0) {
+      const recordStart = line.lastIndexOf('{', markerOffset);
+      if (recordStart >= 0) {
+        try {
+          const record = JSON.stringify(JSON.parse(line.slice(recordStart)));
+          if (record.includes(lineContains)) {
+            return {
+              matched: true,
+              value: extractJsonStringField(record, key),
+            };
+          }
+        } catch {
+          // The marker does not belong to a complete suffix record.
+        }
+      }
+      markerOffset =
+        markerOffset === 0
+          ? -1
+          : line.lastIndexOf(lineContains, markerOffset - 1);
+    }
+
     searchFrom = lineStart;
   }
   return { matched: false, value: undefined };

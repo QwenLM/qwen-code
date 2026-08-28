@@ -1778,7 +1778,7 @@ export class SessionService {
     );
     // Fewer records means the bounded reader reached EOF; exactly the limit
     // may hide a later legacy clear, so that prefix cannot restore a Goal.
-    if (!fromFile.resolved && records.length < MAX_PROMPT_SCAN_LINES) {
+    if (records.length < MAX_PROMPT_SCAN_LINES) {
       return this.extractGoalObjectiveFromRecords(records);
     }
     return fromFile.objective;

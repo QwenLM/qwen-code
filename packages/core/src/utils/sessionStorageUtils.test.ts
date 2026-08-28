@@ -296,6 +296,26 @@ describe('sessionStorageUtils', () => {
       });
     });
 
+    it('uses the newest goal record on a glued physical line', () => {
+      const p = writeFile('glued.jsonl', [
+        `${create('Write the release notes')}${clear}`,
+      ]);
+      expect(readLastMatchingLineFieldSync(p, GOAL, 'objective')).toEqual({
+        matched: true,
+        value: undefined,
+      });
+    });
+
+    it('recovers a clear glued after a torn goal record', () => {
+      const torn =
+        '{"type":"system","subtype":"goal_state","objective":"partial';
+      const p = writeFile('torn-glued.jsonl', [`${torn}${clear}`]);
+      expect(readLastMatchingLineFieldSync(p, GOAL, 'objective')).toEqual({
+        matched: true,
+        value: undefined,
+      });
+    });
+
     it('skips a crash-truncated objective record', () => {
       const truncated =
         '{"type":"system","subtype":"goal_state","objective":"partial';

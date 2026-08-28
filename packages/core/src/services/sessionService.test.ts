@@ -7355,6 +7355,36 @@ describe('SessionService', () => {
       expect(findItem(result.items, sessionId)?.goalObjective).toBeUndefined();
     });
 
+    it('uses complete parsed records when a few large records exceed the tail window', async () => {
+      const sessionId = '29999999-1111-4111-8111-111111111111';
+      const largeNote = (uuid: string) => ({
+        uuid,
+        parentUuid: null,
+        sessionId,
+        type: 'system',
+        subtype: 'note',
+        timestamp: '2026-04-22T00:00:04.000Z',
+        cwd,
+        version: 'test',
+        systemPayload: { text: 'x'.repeat(30 * 1024) },
+      });
+      writeSession(sessionId, [
+        goalStateLine(sessionId, 'Ship the requested change'),
+        largeNote('n1'),
+        largeNote('n2'),
+        largeNote('n3'),
+      ]);
+
+      const result = await service.listSessions();
+
+      expect(findItem(result.items, sessionId)?.goalObjective).toBe(
+        'Ship the requested change',
+      );
+      await expect(
+        service.getSessionListItem(sessionId),
+      ).resolves.toMatchObject({ goalObjective: 'Ship the requested change' });
+    });
+
     it('exposes the Goal objective through the single-session read path', async () => {
       const sessionId = '25555555-5555-4555-8555-555555555555';
       writeSession(sessionId, [
