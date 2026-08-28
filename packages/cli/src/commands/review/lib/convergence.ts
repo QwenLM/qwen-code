@@ -333,7 +333,8 @@ export interface Recommendation {
  */
 export interface MechanismHealth {
   /**
-   * The floor resolved to `critical`, and Suggestions posted inline anyway.
+   * The floor resolved to `critical`, and findings it would have deferred —
+   * Suggestions, or an axes-pair Critical (#10291) — posted inline anyway.
    * The posture is nominally engaged and mechanically is not.
    */
   postureNotEngaging: boolean;
@@ -884,10 +885,10 @@ export function renderMechanismHealth(
   const zh: string[] = [];
   if (h.postureNotEngaging) {
     en.push(
-      `the posting floor for this round resolved to critical, and Suggestion-level findings posted inline anyway — the posture is engaged in name and not in effect`,
+      `the posting floor for this round resolved to critical, and findings the floor would have deferred posted inline anyway — the posture is engaged in name and not in effect`,
     );
     zh.push(
-      `本轮的发布下限解析为 critical，但仍有 Suggestion 级发现以行内评论发布——该姿态名义上生效、实际未生效`,
+      `本轮的发布下限解析为 critical，但仍有本应被下限延后的发现以行内评论发布——该姿态名义上生效、实际未生效`,
     );
   }
   if (h.anchorChainBroken) {
