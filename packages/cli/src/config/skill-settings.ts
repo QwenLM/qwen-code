@@ -159,24 +159,16 @@ export interface WorkspaceSkillListUpdates {
  * Computes the workspace `skills.disabled` / `skills.enabled` lists the skills
  * picker should persist after a set of toggle changes.
  *
- * The seed lists are the workspace's current entries. Locked skills (disabled
- * at a higher scope) are dropped from the seed so we never re-emit redundant
- * entries the higher scope already enforces. Orphaned entries — workspace
- * disables for skills not currently loaded (a different git branch, an
- * uninstalled extension, a deleted skills dir) — are preserved verbatim: only
- * the toggled, currently-loaded skills passed in `toggles` mutate the lists.
- * That preservation is load-bearing; the orphan case is pinned by a test in
- * `skill-settings.test.ts`.
+ * The seed lists are the workspace's current entries. Orphaned entries and
+ * declarations duplicated at a higher scope are preserved verbatim: only the
+ * toggled, currently-loaded skills passed in `toggles` mutate the lists.
  */
 export function computeWorkspaceSkillListUpdates(
   workspaceDisabled: readonly string[],
-  lockedNames: ReadonlySet<string>,
   workspaceEnabled: readonly string[],
   toggles: readonly WorkspaceSkillListToggle[],
 ): WorkspaceSkillListUpdates {
-  const previousDisabled = workspaceDisabled.filter(
-    (name) => !lockedNames.has(name.trim().toLowerCase()),
-  );
+  const previousDisabled = [...workspaceDisabled];
   const previousEnabled = [...workspaceEnabled];
   let next: WorkspaceSkillSettingLists = {
     disabled: previousDisabled,
