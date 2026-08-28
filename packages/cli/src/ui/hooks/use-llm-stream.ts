@@ -4700,7 +4700,6 @@ export const useLlmStream = (
       pendingRetryErrorItemRef,
       setPendingRetryErrorItem,
       setPendingThoughtItem,
-      abortThoughtMergeDeferral,
       settleThoughtMergeDeferral,
       dualOutput,
       drainSteerAtBoundary,
