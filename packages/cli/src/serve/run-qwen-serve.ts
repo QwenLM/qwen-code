@@ -2116,8 +2116,6 @@ async function loadServeRuntimeModules() {
     createDaemonWorkspaceService: workspaceModule.createDaemonWorkspaceService,
     WorkspaceSettingsPartialPersistError:
       workspaceTypesModule.WorkspaceSettingsPartialPersistError,
-    WorkspaceSkillNotToggleableError:
-      workspaceTypesModule.WorkspaceSkillNotToggleableError,
     createDaemonStatusProvider:
       daemonStatusProviderModule.createDaemonStatusProvider,
     createWorkspaceProvidersStatusProvider:
@@ -4999,15 +4997,6 @@ async function runQwenServeImpl(
         const fresh = loadSettingsForPersistence(workspace);
         const normalizedName = skillName.trim().toLowerCase();
         const resolved = resolveSkillSettings(fresh);
-        const disablement = resolved.disablements.get(normalizedName);
-        if (disablement?.reason === 'hard' && disablement.lockedScope) {
-          throw new runtime.WorkspaceSkillNotToggleableError(
-            skillName,
-            'locked',
-            disablement.lockedScope,
-          );
-        }
-
         const workspaceDisabled = skillSettingStrings(
           fresh,
           WORKSPACE_SETTING_SCOPE,
@@ -5092,18 +5081,6 @@ async function runQwenServeImpl(
 
         for (const skillName of skillNames) {
           const normalizedName = skillName.trim().toLowerCase();
-          const disablement = resolved.disablements.get(normalizedName);
-          if (disablement?.reason === 'hard' && disablement.lockedScope) {
-            outcomes.push({
-              skillName,
-              error: new runtime.WorkspaceSkillNotToggleableError(
-                skillName,
-                'locked',
-                disablement.lockedScope,
-              ),
-            });
-            continue;
-          }
           const updated = updateWorkspaceSkillSettingLists(
             next,
             skillName,

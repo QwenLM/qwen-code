@@ -173,7 +173,7 @@ describe('workspace Skill management routes', () => {
     expect(harness.deleteWorkspaceSkill).not.toHaveBeenCalled();
   });
 
-  it('toggles a deduplicated Skill batch and returns per-target outcomes', async () => {
+  it('forwards a deduplicated Skill batch response', async () => {
     const harness = createHarness();
     harness.setWorkspaceSkillsEnabled.mockResolvedValueOnce({
       enabled: false,
@@ -183,16 +183,9 @@ describe('workspace Skill management routes', () => {
       results: [
         { skillName: 'review', enabled: false, changed: true },
         { skillName: 'missing', enabled: false, changed: true },
+        { skillName: 'locked', enabled: false, changed: true },
       ],
-      errors: [
-        {
-          skillName: 'locked',
-          code: 'skill_not_toggleable',
-          error: 'Skill locked is locked by user settings',
-          reason: 'locked',
-          lockedScope: 'user',
-        },
-      ],
+      errors: [],
     });
 
     const response = await request(harness.app)
@@ -219,16 +212,13 @@ describe('workspace Skill management routes', () => {
           enabled: false,
           changed: true,
         },
-      ],
-      errors: [
         {
           skillName: 'locked',
-          code: 'skill_not_toggleable',
-          error: 'Skill locked is locked by user settings',
-          reason: 'locked',
-          lockedScope: 'user',
+          enabled: false,
+          changed: true,
         },
       ],
+      errors: [],
     });
     expect(harness.setWorkspaceSkillsEnabled).toHaveBeenCalledWith(
       expect.objectContaining({
