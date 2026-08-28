@@ -23,6 +23,7 @@
  */
 
 import wrapAnsi from 'wrap-ansi';
+import ansiEscapes from 'ansi-escapes';
 import type { CliRendererConfig } from '@opentui/core';
 import {
   isInteractiveTerminal,
@@ -134,19 +135,13 @@ export function applyScreenReaderPolicy(
 // unchanged dynamic block is not rewritten.
 // ---------------------------------------------------------------------------
 
-const ERASE_LINE = '\x1b[2K';
-const CURSOR_UP = '\x1b[1A';
-const CURSOR_LEFT = '\x1b[G';
-
 /**
- * Escape sequence that erases `count` lines ending at the cursor. Byte-exact
- * ink parity (ansi-escapes `eraseLines`): the trailing cursorLeft is required
- * because EL and CUU preserve the cursor column, so without it the next write
- * would land mid-line on the line above.
+ * Escape sequence that erases `count` lines ending at the cursor — ink
+ * parity via the shared ansi-escapes helper (the trailing cursorLeft is
+ * required because EL and CUU preserve the cursor column).
  */
 export function eraseLines(count: number): string {
-  if (count <= 0) return '';
-  return ERASE_LINE + (CURSOR_UP + ERASE_LINE).repeat(count - 1) + CURSOR_LEFT;
+  return count <= 0 ? '' : ansiEscapes.eraseLines(count);
 }
 
 /**

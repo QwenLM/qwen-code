@@ -132,8 +132,16 @@ export async function probeKittyKeyboardSupport(
     };
 
     stdin.on('data', onData);
-    stdout.write(KITTY_QUERY);
-    stdout.write(DEVICE_ATTRIBUTES_QUERY);
+    // A synchronous write throw (e.g. ERR_STREAM_DESTROYED while isTTY
+    // still reports true) must still settle the probe: finish(false)
+    // restores raw mode and removes the data listener instead of leaking.
+    try {
+      stdout.write(KITTY_QUERY);
+      stdout.write(DEVICE_ATTRIBUTES_QUERY);
+    } catch {
+      finish(false);
+      return;
+    }
     timeoutId = setTimeout(() => finish(false), timeoutMs);
     timeoutId.unref?.();
   });

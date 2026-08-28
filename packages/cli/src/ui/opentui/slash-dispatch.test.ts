@@ -121,8 +121,18 @@ describe('resolveSlashCommand (original parseSlashCommand)', () => {
   });
 });
 
+function makeEnv(
+  extra: Partial<Parameters<typeof executeSlashCommand>[2]> = {},
+): Parameters<typeof executeSlashCommand>[2] {
+  return {
+    config: null,
+    settings: { merged: {} } as never,
+    ...extra,
+  };
+}
+
 describe('executeSlashCommand (result mapping)', () => {
-  const env = { config: null };
+  const env = makeEnv();
 
   it('unknown command → same error as the ink TUI', async () => {
     const effect = await executeSlashCommand('/nope', registry, env);
@@ -218,19 +228,18 @@ describe('executeSlashCommand ink-processor guards (R1-96/100/101/102)', () => {
         },
       }),
     ];
-    const effect = await executeSlashCommand('/wipe', commands, {
-      config: null,
-    });
+    const effect = await executeSlashCommand('/wipe', commands, makeEnv());
     expect(effect).toEqual({ kind: 'clear' });
   });
 
   it('drops the action result once the submission is aborted', async () => {
     const controller = new AbortController();
     controller.abort();
-    const effect = await executeSlashCommand('/ask', registry, {
-      config: null,
-      abortSignal: controller.signal,
-    });
+    const effect = await executeSlashCommand(
+      '/ask',
+      registry,
+      makeEnv({ abortSignal: controller.signal }),
+    );
     expect(effect).toEqual({ kind: 'handled' });
   });
 
@@ -245,10 +254,11 @@ describe('executeSlashCommand ink-processor guards (R1-96/100/101/102)', () => {
           }),
       }),
     ];
-    const pending = executeSlashCommand('/stuck', commands, {
-      config: null,
-      abortSignal: controller.signal,
-    });
+    const pending = executeSlashCommand(
+      '/stuck',
+      commands,
+      makeEnv({ abortSignal: controller.signal }),
+    );
     controller.abort();
     await expect(pending).resolves.toEqual({ kind: 'handled' });
   });
@@ -261,7 +271,7 @@ describe('executeSlashCommand ink-processor guards (R1-96/100/101/102)', () => {
     const effect = await executeSlashCommand(
       '/feat-dev /e2e-testing do it',
       skills,
-      { config: null },
+      makeEnv(),
     );
     expect(effect.kind).toBe('message');
     if (effect.kind !== 'message') return;
@@ -278,9 +288,7 @@ describe('executeSlashCommand ink-processor guards (R1-96/100/101/102)', () => {
         },
       }),
     ];
-    const effect = await executeSlashCommand('/showstats', commands, {
-      config: null,
-    });
+    const effect = await executeSlashCommand('/showstats', commands, makeEnv());
     expect(effect.kind).toBe('message');
     if (effect.kind !== 'message') return;
     expect(effect.messageType).toBe('info');
@@ -304,9 +312,7 @@ describe('executeSlashCommand ink-processor guards (R1-96/100/101/102)', () => {
         },
       }),
     ];
-    const effect = await executeSlashCommand('/init', commands, {
-      config: null,
-    });
+    const effect = await executeSlashCommand('/init', commands, makeEnv());
     expect(effect).toEqual({
       kind: 'submit',
       content: 'analyze the project',
@@ -329,9 +335,7 @@ describe('executeSlashCommand ink-processor guards (R1-96/100/101/102)', () => {
     const effect = await executeSlashCommand(
       '/extensions explore bogus',
       commands,
-      {
-        config: null,
-      },
+      makeEnv(),
     );
     expect(effect.kind).toBe('message');
     if (effect.kind !== 'message') return;
@@ -349,10 +353,13 @@ describe('executeSlashCommand ink-processor guards (R1-96/100/101/102)', () => {
         },
       }),
     ];
-    await executeSlashCommand('/scan', commands, {
-      config: null,
-      history: [{ type: 'error', text: 'boom' } as HistoryItemWithoutId],
-    });
+    await executeSlashCommand(
+      '/scan',
+      commands,
+      makeEnv({
+        history: [{ type: 'error', text: 'boom' } as HistoryItemWithoutId],
+      }),
+    );
     expect(observed).toHaveLength(1);
     expect((observed?.[0] as { text?: string })?.text).toBe('boom');
   });
@@ -375,23 +382,44 @@ describe('original built-in registry', () => {
 
   it('/help dispatches to the help dialog effect', async () => {
     const commands = await loadInteractiveCommands(null);
-    const effect = await executeSlashCommand('/help', commands, {
-      config: null,
-    });
+    const effect = await executeSlashCommand('/help', commands, makeEnv());
     expect(effect).toEqual({ kind: 'help' });
-    const viaAlias = await executeSlashCommand('/?', commands, {
-      config: null,
-    });
+    const viaAlias = await executeSlashCommand('/?', commands, makeEnv());
     expect(viaAlias).toEqual({ kind: 'help' });
   }, 30000);
 
   it('/quit produces the quit effect', async () => {
     const commands = await loadInteractiveCommands(null);
-    const effect = await executeSlashCommand('/quit', commands, {
-      config: null,
-    });
+    const effect = await executeSlashCommand('/quit', commands, makeEnv());
     expect(effect.kind).toBe('quit');
   }, 30000);
+
+  it('/quit carries the quitting messages on the effect (ytahdn-1)', async () => {
+    // ink renders QuitActionReturn.messages via QuittingDisplay (the /quit
+    // echo + session-duration summary); the effect must carry the projected
+    // text or the output is permanently lost under the new renderer.
+    const commands = [
+      stub({
+        name: 'quit',
+        action: () => ({
+          type: 'quit' as const,
+          messages: [
+            { type: 'user', text: '/quit' },
+            { type: 'quit', duration: '2m' },
+          ] as never,
+        }),
+      }),
+    ];
+    const effect = await executeSlashCommand('/quit', commands, makeEnv());
+    expect(effect.kind).toBe('quit');
+    // The quit item projects to the ink QuittingDisplay summary; the user
+    // echo item ({type:'user', text:'/quit'}) has no special-item projection
+    // and the backend's own input echo covers it, exactly like the ink TUI.
+    expect((effect as { notice?: string }).notice).toContain(
+      'Agent powering down. Goodbye!',
+    );
+    expect((effect as { notice?: string }).notice).toContain('2m');
+  });
 
   it('help output matches the original dialog content', async () => {
     const commands = await loadInteractiveCommands(null);
