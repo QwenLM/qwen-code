@@ -5437,6 +5437,15 @@ export const MessageList = memo(
               onEditUserMessage={
                 onEditUserMessage &&
                 !isResponding &&
+                // Rewind snapshots are indexed session-globally, but the
+                // rendered transcript is a capped/paginated window. While
+                // older history is still unloaded (hasOlderHistory) or was
+                // dropped for window capacity (historyCapacityReached), the
+                // window-local user-turn ordinal is not the session-global
+                // turn index, so offering edit here would rewind to the
+                // wrong snapshot (or none at all). Fail closed (#10385).
+                !hasOlderHistory &&
+                !historyCapacityReached &&
                 displayItem.message.role === 'user' &&
                 editableUserContent !== undefined &&
                 displayItem.message.id === editableUserTurn.lastId
@@ -5512,6 +5521,8 @@ export const MessageList = memo(
         onInsightReportOpen,
         onEditUserMessage,
         editableUserTurn,
+        hasOlderHistory,
+        historyCapacityReached,
         generateContent,
         headerOffset,
         visibleItems,

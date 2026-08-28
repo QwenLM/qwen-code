@@ -53,6 +53,7 @@ vi.mock('./MessageItem', async () => {
       assistantTurnFooterInfo,
       sendFailed,
       onRetrySend,
+      onEditUserMessage,
     }: {
       message: Message;
       showAssistantActions?: boolean;
@@ -63,6 +64,7 @@ vi.mock('./MessageItem', async () => {
       assistantTurnFooterInfo?: WebShellAssistantTurnFooterRenderInfo;
       sendFailed?: boolean;
       onRetrySend?: () => void;
+      onEditUserMessage?: () => void;
     }) => {
       if (message.role === 'tool_group') {
         messageItemTestState.toolArrays.push(message.tools);
@@ -106,6 +108,17 @@ vi.mock('./MessageItem', async () => {
               'aria-expanded': 'false',
               'data-testid': `disclosure-${message.id}`,
             })
+          : null,
+        onEditUserMessage
+          ? React.createElement(
+              'button',
+              {
+                'data-testid': `edit-${message.id}`,
+                onClick: onEditUserMessage,
+                type: 'button',
+              },
+              'edit',
+            )
           : null,
         showAssistantBranch
           ? React.createElement('button', {
@@ -353,6 +366,7 @@ function mount(
     pendingApproval?: PermissionRequest | null;
     failedPromptMessageId?: string;
     onRetryFailedPrompt?: () => void;
+    onEditUserMessage?: (targetTurnIndex: number, content: string) => void;
   } = {},
 ): HTMLElement {
   const container = document.createElement('div');
@@ -392,6 +406,7 @@ function mount(
                 onCanScrollToBottomChange={opts.onCanScrollToBottomChange}
                 failedPromptMessageId={opts.failedPromptMessageId}
                 onRetryFailedPrompt={opts.onRetryFailedPrompt}
+                onEditUserMessage={opts.onEditUserMessage}
               />
             </TranscriptRenderModeProvider>
           </CompactModeContext.Provider>
@@ -6503,5 +6518,65 @@ describe('MessageList — turn collapse (DOM)', () => {
       vi.advanceTimersByTime(2_000);
     });
     expect(parallelAgentsSummary(c)).toBeNull();
+  });
+});
+
+describe('user message edit affordance (issue #10385)', () => {
+  function clickEdit(container: HTMLElement, messageId: string): void {
+    const button = container.querySelector(`[data-testid="edit-${messageId}"]`);
+    expect(button).not.toBeNull();
+    act(() => {
+      (button as HTMLButtonElement).dispatchEvent(
+        new MouseEvent('click', { bubbles: true }),
+      );
+    });
+  }
+
+  it('does not offer editing while older history is unloaded', () => {
+    const onEditUserMessage = vi.fn();
+    // Session-global history has more user turns than the loaded window:
+    // only the last two user messages are rendered. The window-local ordinal
+    // of the last message (1) is not its session-global turn index, so the
+    // edit affordance must not be offered while the window is incomplete.
+    const c = mount([userMsg('u4'), asstMsg('a4'), userMsg('u5')], undefined, {
+      hasOlderHistory: true,
+      onLoadOlderHistory: async () => {},
+      onEditUserMessage,
+    });
+    expect(c.querySelector('[data-testid="edit-u5"]')).toBeNull();
+    expect(c.querySelector('[data-testid="edit-u4"]')).toBeNull();
+    expect(onEditUserMessage).not.toHaveBeenCalled();
+  });
+
+  it('does not offer editing when older history was dropped for window capacity', () => {
+    const onEditUserMessage = vi.fn();
+    const c = mount([userMsg('u4'), asstMsg('a4'), userMsg('u5')], undefined, {
+      historyCapacityReached: true,
+      onEditUserMessage,
+    });
+    expect(c.querySelector('[data-testid="edit-u5"]')).toBeNull();
+    expect(onEditUserMessage).not.toHaveBeenCalled();
+  });
+
+  it('offers editing only for the last user message when the window is complete', () => {
+    const onEditUserMessage = vi.fn();
+    const c = mount([userMsg('u1'), asstMsg('a1'), userMsg('u2')], undefined, {
+      onEditUserMessage,
+    });
+    expect(c.querySelector('[data-testid="edit-u1"]')).toBeNull();
+    clickEdit(c, 'u2');
+    expect(onEditUserMessage).toHaveBeenCalledTimes(1);
+    expect(onEditUserMessage).toHaveBeenCalledWith(1, 'q');
+  });
+
+  it('does not count user_shell echoes when numbering user turns', () => {
+    const onEditUserMessage = vi.fn();
+    const c = mount(
+      [userMsg('u1'), userShellMsg('s1'), asstMsg('a1'), userMsg('u2')],
+      undefined,
+      { onEditUserMessage },
+    );
+    clickEdit(c, 'u2');
+    expect(onEditUserMessage).toHaveBeenCalledWith(1, 'q');
   });
 });
