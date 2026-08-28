@@ -149,9 +149,17 @@ function classifyOption(
   optionId: string,
   label: string | undefined,
 ): PermissionOptionKind {
-  const haystack = `${optionId} ${label ?? ''}`.toLowerCase();
-  if (/(allow|proceed|approve|yes|accept)/.test(haystack)) return 'proceed';
-  if (/(deny|reject|refuse|no|cancel)/.test(haystack)) return 'reject';
+  // Snake/kebab ids ("proceed_once") must split into words — `\b` treats
+  // an underscore as a word character and would never match inside them.
+  const haystack = `${optionId} ${label ?? ''}`
+    .toLowerCase()
+    .replace(/[_-]/g, ' ');
+  // Word boundaries matter: a bare /no/ would match inside "notify" and
+  // misroute an allow vote to a reject option.
+  if (/\b(allow|proceed|approve|yes|accept)\b/.test(haystack)) {
+    return 'proceed';
+  }
+  if (/\b(deny|reject|refuse|no|cancel)\b/.test(haystack)) return 'reject';
   return 'other';
 }
 
@@ -284,31 +292,38 @@ export class QwenCodeAdaptor implements BackendAdaptor {
     const state = this.trackSession(handle.id);
 
     if (opts?.steer && state.busy) {
-      const message = blocks
-        .filter(
-          (block): block is Extract<ContentBlock, { type: 'text' }> =>
-            block.type === 'text',
-        )
-        .map((block) => block.text)
-        .join('\n\n');
-      const steered = await this.client.enqueueMidTurnMessage(
-        handle.id,
-        message,
-        state.clientId !== undefined ? { clientId: state.clientId } : {},
-      );
-      if (steered.accepted) {
-        return {
-          status: 'accepted',
-          joinedActiveTurn: true,
-          ...(state.activeJobRef !== undefined
-            ? { jobRef: state.activeJobRef }
-            : {}),
-          note: 'joined the currently running task',
-        };
+      // Mid-turn injection is text-only on the wire; a handoff carrying
+      // image attachments must go through a full prompt so the images are
+      // not silently dropped — the fall-through below queues it as the
+      // session's next turn.
+      const hasImages = blocks.some((block) => block.type === 'image');
+      if (!hasImages) {
+        const message = blocks
+          .filter(
+            (block): block is Extract<ContentBlock, { type: 'text' }> =>
+              block.type === 'text',
+          )
+          .map((block) => block.text)
+          .join('\n\n');
+        const steered = await this.client.enqueueMidTurnMessage(
+          handle.id,
+          message,
+          state.clientId !== undefined ? { clientId: state.clientId } : {},
+        );
+        if (steered.accepted) {
+          return {
+            status: 'accepted',
+            joinedActiveTurn: true,
+            ...(state.activeJobRef !== undefined
+              ? { jobRef: state.activeJobRef }
+              : {}),
+            note: 'joined the currently running task',
+          };
+        }
       }
-      // The turn ended between our busy check and the injection: fall
-      // through to a normal prompt, which is exactly the "queued as the
-      // next turn" tier.
+      // Either the turn ended between our busy check and the injection, or
+      // the payload needs a full prompt: fall through — that is exactly the
+      // "queued as the next turn" tier.
     }
 
     const prompt = await this.buildPromptBlocks(handle.id, blocks);
@@ -321,7 +336,14 @@ export class QwenCodeAdaptor implements BackendAdaptor {
         state.clientId,
       );
     } catch (error) {
-      if (isRecord(error) && error['status'] === 503) {
+      // Queue-full comes in two shapes: DaemonHttpError carries a top-level
+      // 503 status; the SDK's client-side guard throws
+      // DaemonPendingPromptLimitError (no status field).
+      if (
+        isRecord(error) &&
+        (error['status'] === 503 ||
+          error['name'] === 'DaemonPendingPromptLimitError')
+      ) {
         return {
           status: 'rejected',
           note: 'the session is busy and its queue is full; wait or stop the current task first',

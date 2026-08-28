@@ -590,8 +590,12 @@ export async function bootLiveStack(
         /* keep tearing down */
       }
     }
-    for (const dir of [workspaceDir, homeDir, dataDir, discoveryDir]) {
-      rmSync(dir, { recursive: true, force: true });
+    // Debug escape hatch: keep the temp dirs (session JSONL logs live in
+    // `<dataDir>/sessions`) for post-mortem inspection.
+    if (!process.env['QWEN_LIVE_E2E_KEEP']) {
+      for (const dir of [workspaceDir, homeDir, dataDir, discoveryDir]) {
+        rmSync(dir, { recursive: true, force: true });
+      }
     }
   };
 

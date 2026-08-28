@@ -57,11 +57,15 @@ interface StandingRule {
   expiresAt: number;
 }
 
-/** Group similar requests: tool name plus the first token of its detail. */
+/**
+ * Group similar requests: tool name plus the first two tokens of its detail
+ * (for shell-style titles that is the program and its subcommand, so an
+ * "always allow" for `git status` does not silently cover `git push`).
+ */
 function titleKeyOf(title: string): string {
   const [head = '', detail = ''] = title.split(':', 2);
-  const firstWord = detail.trim().split(/\s+/)[0] ?? '';
-  return `${head.trim().toLowerCase()}:${firstWord.toLowerCase()}`;
+  const words = detail.trim().split(/\s+/).slice(0, 2).join(' ');
+  return `${head.trim().toLowerCase()}:${words.toLowerCase()}`;
 }
 
 export class PermissionBroker {
@@ -107,8 +111,22 @@ export class PermissionBroker {
     });
 
     if (this.matchesRule(pending)) {
-      await this.deliver(pending, 'allow', true);
-      return { pending, autoAnswered: true };
+      // A failed silent delivery must not crash the caller or swallow the
+      // request: fall back to asking the user aloud.
+      try {
+        await this.deliver(pending, 'allow', true);
+        return { pending, autoAnswered: true };
+      } catch (error) {
+        this.options.log?.('permission.decision', {
+          requestHandle: pending.requestHandle,
+          requestId: pending.requestId,
+          decision: 'allow',
+          auto: true,
+          outcome: 'delivery_failed',
+          error: error instanceof Error ? error.message : String(error),
+        });
+        return { pending, autoAnswered: false };
+      }
     }
     return { pending, autoAnswered: false };
   }

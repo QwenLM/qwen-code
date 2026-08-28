@@ -11,7 +11,16 @@
  * would stall the realtime response arbitration.
  */
 
-const DEFAULT_HANDLER_TIMEOUT_MS = 5_000;
+/**
+ * Generous by design: the timeout is a last-resort answer for the model,
+ * not a cancellation — the handler keeps running and its side effects
+ * (a created job, a submitted prompt) stay real. The receipt wording must
+ * therefore steer the model away from retrying.
+ */
+const DEFAULT_HANDLER_TIMEOUT_MS = 30_000;
+const TIMEOUT_NOTE =
+  'The action is still running in the background and may yet finish. Do ' +
+  'not retry the call; check on it with session_monitor.';
 
 /** Per-call context threaded through from the realtime function-call event. */
 export interface ToolContext {
@@ -48,6 +57,13 @@ function parseArguments(raw: string): Record<string, unknown> {
   return {};
 }
 
+class ToolTimeoutError extends Error {
+  constructor() {
+    super('tool handler timed out');
+    this.name = 'ToolTimeoutError';
+  }
+}
+
 export class ToolDispatcher {
   private readonly handlers: ReadonlyMap<string, ToolHandler>;
   private readonly timeoutMs: number;
@@ -79,13 +95,19 @@ export class ToolDispatcher {
         Promise.resolve(handler(args, ctx)),
         new Promise<never>((_, reject) => {
           timer = setTimeout(() => {
-            reject(new Error('tool handler timed out'));
+            reject(new ToolTimeoutError());
           }, this.timeoutMs);
           timer.unref?.();
         }),
       ]);
       return { ok: true, receipt: JSON.stringify(outcome) };
     } catch (error) {
+      if (error instanceof ToolTimeoutError) {
+        return {
+          ok: false,
+          receipt: JSON.stringify({ status: 'pending', note: TIMEOUT_NOTE }),
+        };
+      }
       return {
         ok: false,
         receipt: JSON.stringify({

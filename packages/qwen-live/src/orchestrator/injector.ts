@@ -130,7 +130,9 @@ export class Injector {
   enqueue(item: InjectorItem): void {
     if (this.disposed) return;
     if (item.kind === 'progress') {
-      const key = item.jobHandle ?? '';
+      // Throttle per job; jobless progress falls back to a content-prefix
+      // key so unrelated sessions do not share one throttle window.
+      const key = item.jobHandle ?? `ctx:${item.context.slice(0, 32)}`;
       const last = this.lastProgressAt.get(key) ?? 0;
       if (this.now() - last < this.progressThrottleMs) return;
       this.lastProgressAt.set(key, this.now());
@@ -193,7 +195,13 @@ export class Injector {
 
   private flush(): void {
     if (this.queue.length === 0) return;
-    const batch = this.queue;
+    // Permission asks first: the context join is size-capped, and a
+    // truncated [PERMISSION] entry would lose the handle the model needs
+    // for respond_permission.
+    const batch = [
+      ...this.queue.filter((item) => item.kind === 'permission'),
+      ...this.queue.filter((item) => item.kind !== 'permission'),
+    ];
     this.queue = [];
 
     // One combined silent context injection for the whole batch.
@@ -203,15 +211,23 @@ export class Injector {
       .slice(0, MAX_CONTEXT_CHARS);
     const contextAccepted = this.sink.injectContext(context);
 
-    // One combined spoken line for the speech-worthy items.
+    // One combined spoken line for the speech-worthy items — whole lines
+    // only, since the model is told to read the text verbatim.
     const spokenLines = batch
       .map((item) => item.spoken)
       .filter((line): line is string => typeof line === 'string' && !!line);
+    let spoken = '';
+    for (const line of spokenLines) {
+      const candidate = spoken ? `${spoken} ${line}` : line;
+      if (candidate.length > MAX_SPOKEN_CHARS && spoken) break;
+      spoken =
+        candidate.length > MAX_SPOKEN_CHARS
+          ? `${candidate.slice(0, MAX_SPOKEN_CHARS)}…`
+          : candidate;
+    }
     let spokenAccepted = false;
-    if (spokenLines.length > 0) {
-      spokenAccepted = this.sink.injectSpeech(
-        spokenLines.join(' ').slice(0, MAX_SPOKEN_CHARS),
-      );
+    if (spoken) {
+      spokenAccepted = this.sink.injectSpeech(spoken);
     }
 
     if (!contextAccepted && !spokenAccepted) {
