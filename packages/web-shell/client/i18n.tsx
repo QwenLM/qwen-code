@@ -60,8 +60,8 @@ const EN: Messages = {
   'branchPicker.pullDiscardConfirm':
     'Discard ALL uncommitted changes (including untracked files)? This cannot be undone.',
   'branchPicker.pullDiscardGo': 'Discard and Update',
-  'branchPicker.pullStashConflict':
-    'Updated, but restoring your stashed changes failed. They are kept in the stash entry — resolve any conflict markers, then restore the stash manually.',
+  'branchPicker.pullStashConflict': (v) =>
+    `Updated, but restoring your stashed changes failed. They are kept in stash entry ${String(v?.sha ?? '').slice(0, 12) || '(see git stash list)'} — resolve any conflict markers, then restore it manually.`,
   'branchPicker.cancel': 'Cancel',
   'branchPicker.hint.upToDate': 'Up to date',
   'branchPicker.hint.noUpstream': 'No upstream',
@@ -3184,8 +3184,8 @@ const ZH: Messages = {
   'branchPicker.pullDiscardConfirm':
     '将放弃所有未提交的修改（包括未跟踪文件），此操作无法撤销。',
   'branchPicker.pullDiscardGo': '放弃并更新',
-  'branchPicker.pullStashConflict':
-    '更新成功，但恢复 Stash 中的修改失败。修改仍保留在 Stash 条目中 —— 请先解决冲突标记，再手动恢复 Stash。',
+  'branchPicker.pullStashConflict': (v) =>
+    `更新成功，但恢复 Stash 中的修改失败。修改仍保留在 Stash 条目 ${String(v?.sha ?? '').slice(0, 12) || '（见 git stash list）'} 中 —— 请先解决冲突标记，再手动恢复。`,
   'branchPicker.cancel': '取消',
   'branchPicker.hint.upToDate': '已是最新',
   'branchPicker.hint.noUpstream': '无上游分支',

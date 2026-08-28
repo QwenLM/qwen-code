@@ -513,6 +513,8 @@ export interface GitPullResult {
    * notice and the entry's SHA.
    */
   stashRestoreConflict?: boolean;
+  /** SHA of the kept auto-stash entry when `stashRestoreConflict` is set. */
+  stashSha?: string;
 }
 
 export interface GitPullOptions {
@@ -585,6 +587,20 @@ function exitCode(err: unknown): number | undefined {
   return typeof code === 'number' ? code : undefined;
 }
 
+/** Absolute paths of the given `--git-path` names, in order. */
+async function gitPaths(
+  cwd: string,
+  names: readonly string[],
+  env?: Readonly<Record<string, string | undefined>>,
+): Promise<string[]> {
+  const args = ['rev-parse'];
+  for (const name of names) args.push('--git-path', name);
+  return (await runGit(cwd, args, env))
+    .trim()
+    .split('\n')
+    .map((line) => path.resolve(cwd, line));
+}
+
 /**
  * Name of the git operation currently parked in this worktree, if any.
  * Resolved through `--git-path` so linked worktrees and a branch that
@@ -594,20 +610,23 @@ async function operationInProgress(
   cwd: string,
   env?: Readonly<Record<string, string | undefined>>,
 ): Promise<string | undefined> {
-  const args = ['rev-parse'];
-  for (const [statePath] of OPERATION_STATE_PATHS) {
-    args.push('--git-path', statePath);
-  }
-  const lines = (await runGit(cwd, args, env)).trim().split('\n');
+  const paths = await gitPaths(
+    cwd,
+    OPERATION_STATE_PATHS.map(([statePath]) => statePath),
+    env,
+  );
   for (let i = 0; i < OPERATION_STATE_PATHS.length; i++) {
-    const line = lines[i];
-    if (line && fs.existsSync(path.resolve(cwd, line))) {
-      return OPERATION_STATE_PATHS[i]![1];
-    }
+    if (fs.existsSync(paths[i]!)) return OPERATION_STATE_PATHS[i]![1];
   }
   return undefined;
 }
 
+/**
+ * Refuse while an operation is parked. Called immediately before every
+ * command that would absorb or destroy that state (`stash push`, `reset
+ * --hard`), so the window in which a terminal can park one unseen is the
+ * command itself.
+ */
 async function refuseOperationInProgress(
   cwd: string,
   env?: Readonly<Record<string, string | undefined>>,
@@ -621,20 +640,101 @@ async function refuseOperationInProgress(
   }
 }
 
-/** SHA of the top stash entry, or '' when the stash is empty. */
-async function stashRef(
+/**
+ * SHA of the upstream tip of `ref` (the checked-out branch by default), or
+ * '' when it does not resolve.
+ */
+async function upstreamSha(
   cwd: string,
   env?: Readonly<Record<string, string | undefined>>,
+  ref = '',
 ): Promise<string> {
   try {
     return (
-      await runGit(cwd, ['rev-parse', '--verify', '--quiet', 'refs/stash'], env)
+      await runGit(
+        cwd,
+        ['rev-parse', '--verify', '--quiet', `${ref}@{upstream}`],
+        env,
+      )
     ).trim();
-  } catch (err) {
-    // `--quiet` exits 1 for a missing ref; anything else is a real failure.
-    if (exitCode(err) === 1) return '';
-    throw err;
+  } catch {
+    return '';
   }
+}
+
+function readTrimmed(file: string): string {
+  try {
+    return fs.readFileSync(file, 'utf8').trim();
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * Abort a merge or rebase only if it is the one this pull started: the
+ * state must point at the upstream tip the pull was integrating. A merge
+ * or rebase a terminal parked meanwhile targets something else and is left
+ * alone (the stash restore then fails and reports the entry as kept).
+ */
+async function abortOwnPullState(
+  cwd: string,
+  env?: Readonly<Record<string, string | undefined>>,
+): Promise<void> {
+  const [mergeHead, rebaseMergeDir, rebaseApplyDir] = await gitPaths(
+    cwd,
+    ['MERGE_HEAD', 'rebase-merge', 'rebase-apply'],
+    env,
+  );
+  if (fs.existsSync(mergeHead!)) {
+    // A merge keeps HEAD on the branch, so its upstream resolves directly.
+    const upstream = await upstreamSha(cwd, env);
+    if (upstream && readTrimmed(mergeHead!) === upstream) {
+      await runGit(cwd, ['merge', '--abort'], env).catch(() => {});
+    }
+    return;
+  }
+  for (const dir of [rebaseMergeDir!, rebaseApplyDir!]) {
+    if (!fs.existsSync(dir)) continue;
+    // A rebase detaches HEAD; the branch being replayed is recorded in
+    // head-name, and its upstream is what the pull rebased onto.
+    const headName = readTrimmed(path.join(dir, 'head-name')).replace(
+      /^refs\/heads\//,
+      '',
+    );
+    const upstream = headName ? await upstreamSha(cwd, env, headName) : '';
+    if (upstream && readTrimmed(path.join(dir, 'onto')) === upstream) {
+      await runGit(cwd, ['rebase', '--abort'], env).catch(() => {});
+    }
+    return;
+  }
+}
+
+interface StashEntry {
+  sha: string;
+  subject: string;
+}
+
+async function stashEntries(
+  cwd: string,
+  env?: Readonly<Record<string, string | undefined>>,
+): Promise<StashEntry[]> {
+  const raw = await runGit(cwd, ['stash', 'list', '--format=%H%x00%s'], env);
+  return raw
+    .split('\n')
+    .filter((line) => line.includes('\0'))
+    .map((line) => {
+      const [sha, subject] = line.split('\0');
+      return { sha: sha!, subject: subject ?? '' };
+    });
+}
+
+/**
+ * SHA git reports for a dropped entry (`Dropped refs/stash@{1} (<sha>)`,
+ * stable under the `LC_ALL=C` the git env pins). Exported for tests.
+ */
+export function parseDroppedStashSha(output: string): string | undefined {
+  const match = /\(([0-9a-f]{40,64})\)\s*$/m.exec(output.trim());
+  return match?.[1];
 }
 
 interface StashRestore {
@@ -645,7 +745,11 @@ interface StashRestore {
 /**
  * Restore and drop the auto-stash by identity. Never `stash pop`: it takes
  * whatever sits on top of `refs/stash`, which the user's terminal may have
- * pushed to since. A failed apply leaves the entry in place.
+ * pushed to since. A failed apply leaves the entry in place. Git has no
+ * identity-addressed drop, so the drop names the slot resolved right before
+ * it and then checks the SHA git reports as dropped: if a concurrent push
+ * shifted the slots and a different entry went, that entry is stored back
+ * and ours is reported as kept.
  */
 async function restoreStash(
   cwd: string,
@@ -660,21 +764,36 @@ async function restoreStash(
   } catch (err) {
     return { restored: false, output: gitDetail(err) };
   }
-  const entries = (
-    await runGit(cwd, ['stash', 'list', '--format=%H %gd'], env)
-  ).split('\n');
-  const slot = entries
-    .find((line) => line.startsWith(`${sha} `))
-    ?.slice(sha.length + 1)
-    .trim();
-  if (slot) {
-    try {
-      await runGit(cwd, ['stash', 'drop', '--quiet', slot], env);
-    } catch (err) {
-      output = `restored, but stash entry ${slot} could not be dropped:\n${gitDetail(err)}`;
-    }
+  const entries = await stashEntries(cwd, env);
+  const index = entries.findIndex((entry) => entry.sha === sha);
+  if (index === -1) return { restored: true, output };
+  const slot = `stash@{${index}}`;
+  let dropped: string | undefined;
+  try {
+    dropped = parseDroppedStashSha(
+      await runGit(cwd, ['stash', 'drop', slot], env),
+    );
+  } catch (err) {
+    return {
+      restored: true,
+      output: `restored, but stash entry ${slot} could not be dropped:\n${gitDetail(err)}`,
+    };
   }
-  return { restored: true, output: output.trim() };
+  if (dropped !== undefined && dropped !== sha) {
+    // The slot moved under us; put the other entry back where git can see
+    // it and leave ours in place.
+    const subject = (
+      await runGit(cwd, ['log', '-1', '--format=%s', dropped], env).catch(
+        () => '',
+      )
+    ).trim();
+    const storeArgs = ['stash', 'store', '--quiet'];
+    if (subject) storeArgs.push('-m', subject);
+    storeArgs.push(dropped);
+    await runGit(cwd, storeArgs, env).catch(() => {});
+    output = `restored; stash entry ${sha} was kept because the stash changed while dropping it`;
+  }
+  return { restored: true, output };
 }
 
 function pullArgs(opts?: GitPullOptions): string[] {
@@ -692,6 +811,40 @@ async function requireUpstream(
   await runGit(cwd, ['rev-parse', '--abbrev-ref', '@{upstream}'], env);
 }
 
+/**
+ * Push the auto-stash and identify the entry it created by provenance: an
+ * entry absent from the pre-push listing whose subject carries the
+ * auto-stash message. A terminal push landing between ours and the
+ * re-listing sits above it and is left alone. Returns undefined when there
+ * was nothing to stash.
+ */
+async function pushAutoStash(
+  cwd: string,
+  env?: Readonly<Record<string, string | undefined>>,
+): Promise<string | undefined> {
+  const before = new Set((await stashEntries(cwd, env)).map((e) => e.sha));
+  await refuseOperationInProgress(cwd, env);
+  try {
+    await runGit(
+      cwd,
+      ['stash', 'push', '--include-untracked', '-m', AUTO_STASH_MESSAGE],
+      env,
+    );
+  } catch (err) {
+    // Nothing was stashed or pulled (git refuses atomically, e.g. on an
+    // intent-to-add entry); report why the update was not attempted.
+    throw new GitPullFailure(
+      'pull_failed',
+      `cannot stash the local changes, so the update was not attempted:\n${gitDetail(err)}`,
+    );
+  }
+  const created = (await stashEntries(cwd, env)).filter(
+    (e) => !before.has(e.sha) && e.subject.endsWith(AUTO_STASH_MESSAGE),
+  );
+  // Listing is newest-first; ours is the oldest of the new entries.
+  return created.length > 0 ? created[created.length - 1]!.sha : undefined;
+}
+
 async function stashPull(
   cwd: string,
   opts: GitPullOptions,
@@ -699,34 +852,19 @@ async function stashPull(
 ): Promise<GitPullResult> {
   await refuseOperationInProgress(cwd, env);
   await requireUpstream(cwd, env);
-  // Compare refs/stash before/after instead of parsing the push output,
-  // which differs between git versions and locales. An unchanged ref means
-  // there was nothing to stash and the pull is a plain one.
-  const before = await stashRef(cwd, env);
-  await runGit(
-    cwd,
-    ['stash', 'push', '--include-untracked', '-m', AUTO_STASH_MESSAGE],
-    env,
-  );
-  const after = await stashRef(cwd, env);
-  const stashed = after !== '' && after !== before ? after : undefined;
+  const stashed = await pushAutoStash(cwd, env);
 
   let output: string;
   try {
     output = (await runGit(cwd, pullArgs(opts), env)).trim();
   } catch (err) {
-    if (stashed === undefined) throw err;
     const detail = gitDetail(err);
-    // Abort only what this pull started: the guard above proved no merge or
-    // rebase was in progress before it ran, so any state present now is the
-    // pull's own.
-    const operation = await operationInProgress(cwd, env).catch(
-      () => undefined,
-    );
-    if (operation === 'merge') {
-      await runGit(cwd, ['merge', '--abort'], env).catch(() => {});
-    } else if (operation !== undefined) {
-      await runGit(cwd, ['rebase', '--abort'], env).catch(() => {});
+    await abortOwnPullState(cwd, env);
+    if (stashed === undefined) {
+      // Nothing to restore, but the update still failed under the stash
+      // flow — report it as such so the client shows git's reason instead
+      // of re-offering the same resolution.
+      throw new GitPullFailure('pull_failed', `update failed:\n${detail}`);
     }
     const restore = await restoreStash(cwd, stashed, env);
     throw new GitPullFailure(
@@ -744,6 +882,7 @@ async function stashPull(
   return {
     success: true,
     stashRestoreConflict: true,
+    stashSha: stashed,
     output:
       `${output}\nrestoring your local changes failed; they are kept in stash entry ${stashed}:\n${restore.output}`.trim(),
   };
@@ -768,10 +907,17 @@ async function forcePull(
     );
   }
   await requireUpstream(cwd, env);
-  // Validate before destroying anything: fetch, then refuse unless the
-  // update is a fast-forward. A diverged branch would need a merge that
-  // could stop on conflicts after the local changes were already gone.
-  await runGit(cwd, ['fetch'], env);
+  // Validate before destroying anything: fetch (pruning, so a branch deleted
+  // on the remote does not pass the check on its stale tracking ref), then
+  // refuse unless the update is a fast-forward. A diverged branch would need
+  // a merge that could stop on conflicts after the local changes were gone.
+  await runGit(cwd, ['fetch', '--prune'], env);
+  if (!(await upstreamSha(cwd, env))) {
+    throw new GitPullFailure(
+      'pull_failed',
+      'cannot update: the upstream branch no longer exists on the remote; nothing was discarded',
+    );
+  }
   try {
     await runGit(
       cwd,
@@ -787,11 +933,15 @@ async function forcePull(
     }
     throw err;
   }
+  await refuseOperationInProgress(cwd, env);
   await runGit(cwd, ['reset', '--hard'], env);
   await runGit(cwd, ['clean', '-fd'], env);
+  // Integrate exactly the tip that was validated: `git pull` would fetch
+  // again, and a push landing in between could turn the validated
+  // fast-forward into a refusal after the local changes are already gone.
   // A fast-forward is the same commit whether merged or rebased, so the
   // `rebase` option has nothing to add here.
-  const output = await runGit(cwd, ['pull', '--ff-only'], env);
+  const output = await runGit(cwd, ['merge', '--ff-only', '@{upstream}'], env);
   return { success: true, output: output.trim() };
 }
 

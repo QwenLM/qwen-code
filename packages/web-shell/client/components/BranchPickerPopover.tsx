@@ -32,10 +32,12 @@ import { validateBranchName } from './GitModePopover';
 import { deriveStatus, hasComputedTreeSummary } from './GitBranchIndicator';
 import styles from './BranchPickerPopover.module.css';
 
-// The daemon's stash/force pull flows chain several git commands, each with
-// its own 30s budget; size the client fetch timeout for that worst case so
-// the request is not aborted while the daemon keeps mutating the repository.
-const GIT_PULL_FETCH_TIMEOUT_MS = 300_000;
+// The daemon's stash/force pull flows chain git commands, each with its own
+// 30s budget — the stash flow's failure path runs up to 13 of them (guards,
+// listings, push, pull, abort, apply, drop, store). Size the client fetch
+// timeout above that worst case so the request is not aborted while the
+// daemon is still restoring the repository.
+const GIT_PULL_FETCH_TIMEOUT_MS = 420_000;
 
 function daemonErrorBody(err: unknown): Record<string, unknown> | undefined {
   if (!(err instanceof DaemonHttpError)) return undefined;
@@ -45,12 +47,21 @@ function daemonErrorBody(err: unknown): Record<string, unknown> | undefined {
     : undefined;
 }
 
+function pullRefusalCode(err: unknown): string | undefined {
+  if (!(err instanceof DaemonHttpError) || err.status !== 409) return undefined;
+  const code = daemonErrorBody(err)?.['error'];
+  return typeof code === 'string' ? code : undefined;
+}
+
 function isDirtyWorkingTreeError(err: unknown): boolean {
-  return (
-    err instanceof DaemonHttpError &&
-    err.status === 409 &&
-    daemonErrorBody(err)?.['error'] === 'dirty_working_tree'
-  );
+  return pullRefusalCode(err) === 'dirty_working_tree';
+}
+
+// The daemon refuses to discard from a workspace below the repository root,
+// but the tree is still dirty and stashing is still viable: keep the panel
+// up (with the daemon's explanation) instead of hiding the remaining option.
+function isForceUnsupportedError(err: unknown): boolean {
+  return pullRefusalCode(err) === 'force_unsupported';
 }
 
 // The daemon's `message` is the carrier of what went wrong — git's own
@@ -288,6 +299,15 @@ export function BranchPickerPopover({
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [pullBlocked, setPullBlocked] = useState(false);
   const [confirmDiscard, setConfirmDiscard] = useState(false);
+  // Daemon explanation shown in the panel instead of the fixed blocked line,
+  // when the refusal carried one worth reading (a discard the daemon refused).
+  const [pullBlockedDetail, setPullBlockedDetail] = useState<string | null>(
+    null,
+  );
+  // Whether the footer currently shows a stash-restore warning: the only
+  // signal that the user's changes sit in a stash entry, so it must survive
+  // the reopen reset below even when the pull settled while closed.
+  const stickyWarningRef = useRef(false);
   const [collapsed, setCollapsed] = useState<Record<SectionKey, boolean>>({
     recent: false,
     local: false,
@@ -366,9 +386,10 @@ export function BranchPickerPopover({
       setCheckoutRefMode(false);
       setNewBranchName('');
       setCheckoutRefValue('');
-      setStatusMsg(null);
+      if (!stickyWarningRef.current) setStatusMsg(null);
       setPullBlocked(false);
       setConfirmDiscard(false);
+      setPullBlockedDetail(null);
       setTimeout(() => searchRef.current?.focus(), 50);
     }
   }, [open, fetchBranches, fetchStatus]);
@@ -393,6 +414,7 @@ export function BranchPickerPopover({
     (msg: string, type: 'info' | 'error' | 'success' | 'warning' = 'info') => {
       setStatusMsg(msg);
       setStatusType(type);
+      stickyWarningRef.current = type === 'warning';
     },
     [],
   );
@@ -400,9 +422,11 @@ export function BranchPickerPopover({
   const clearPullPanel = useCallback(() => {
     setPullBlocked(false);
     setConfirmDiscard(false);
+    setPullBlockedDetail(null);
     // The panel hides the status line while it is up; drop that stale
     // blocked message too so a competing action starts from a clean footer.
     setStatusMsg(null);
+    stickyWarningRef.current = false;
   }, []);
 
   const handleCheckout = useCallback(
@@ -435,7 +459,6 @@ export function BranchPickerPopover({
 
   const handleNewBranch = useCallback(async () => {
     if (busyAction) return;
-    clearPullPanel();
     if (!validateBranchName(newBranchName)) {
       // An empty name just means "not typed yet"; only explain the rejection
       // once the user has actually entered something invalid.
@@ -444,6 +467,9 @@ export function BranchPickerPopover({
       }
       return;
     }
+    // Only an actual branch creation competes with the pull panel; a
+    // rejected name leaves the resolution offer in place.
+    clearPullPanel();
     setBusyAction('newBranch');
     try {
       await ws.workspaceGitCreateBranch(newBranchName, undefined, gitCwd);
@@ -520,7 +546,12 @@ export function BranchPickerPopover({
         // its own action is in flight; it only closes once the pull settles.
         clearPullPanel();
         if (result.stashRestoreConflict) {
-          showStatus(t('branchPicker.pullStashConflict'), 'warning');
+          showStatus(
+            t('branchPicker.pullStashConflict', {
+              sha: result.stashSha ?? '',
+            }),
+            'warning',
+          );
         } else {
           showStatus(result.output || t('branchPicker.pullSuccess'), 'success');
         }
@@ -530,6 +561,12 @@ export function BranchPickerPopover({
         if (isDirtyWorkingTreeError(err)) {
           setPullBlocked(true);
           setConfirmDiscard(false);
+          setPullBlockedDetail(null);
+          showStatus(t('branchPicker.pullBlocked'), 'error');
+        } else if (isForceUnsupportedError(err)) {
+          setPullBlocked(true);
+          setConfirmDiscard(false);
+          setPullBlockedDetail(pullErrorMessage(err));
           showStatus(t('branchPicker.pullBlocked'), 'error');
         } else {
           clearPullPanel();
@@ -921,7 +958,7 @@ export function BranchPickerPopover({
         {pullBlocked ? (
           <div className={styles.pullBlocked}>
             <div className={styles.pullBlockedMessage}>
-              {t('branchPicker.pullBlocked')}
+              {pullBlockedDetail ?? t('branchPicker.pullBlocked')}
             </div>
             {confirmDiscard ? (
               <>

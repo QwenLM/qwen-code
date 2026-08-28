@@ -19,6 +19,7 @@ import {
   GitPullFailure,
   gitPush,
   isValidCheckoutRef,
+  parseDroppedStashSha,
 } from './git-branches.js';
 import { getDefaultBranch } from './github-prs.js';
 
@@ -112,6 +113,36 @@ function hermeticEnv(): Record<string, string | undefined> {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-githome-'));
   tmpRoots.push(home);
   return { ...process.env, HOME: home, XDG_CONFIG_HOME: home };
+}
+
+/**
+ * A `git` on PATH that runs the real binary but lets a test inject a
+ * terminal's actions immediately before or after one specific invocation
+ * (matched against the joined argument list). This is how the concurrent
+ * interleavings the flows must survive are produced deterministically.
+ */
+function gitShim(
+  env: Record<string, string | undefined>,
+  hooks: ReadonlyArray<{ match: string; before?: string; after?: string }>,
+): Record<string, string | undefined> {
+  const real = execFileSync('sh', ['-c', 'command -v git'], {
+    encoding: 'utf8',
+    env: process.env,
+  }).trim();
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-gitshim-'));
+  tmpRoots.push(dir);
+  const cases = hooks
+    .map(
+      (h) =>
+        `  ${h.match}) ${h.before ?? ':'}; "$REAL" "$@"; rc=$?; ${h.after ?? ':'}; exit $rc ;;`,
+    )
+    .join('\n');
+  fs.writeFileSync(
+    path.join(dir, 'git'),
+    `#!/bin/sh\nREAL="${real}"\ncase "$*" in\n${cases}\nesac\nexec "$REAL" "$@"\n`,
+  );
+  fs.chmodSync(path.join(dir, 'git'), 0o755);
+  return { ...env, PATH: `${dir}:${env['PATH'] ?? process.env['PATH']}` };
 }
 
 async function expectPullFailure(
@@ -925,6 +956,269 @@ describe('gitPull with a dirty working tree', () => {
     expect(fs.existsSync(path.join(dir, '.git', 'rebase-merge'))).toBe(true);
     expect(read(dir, 'b.txt')).toBe('untracked\n');
     expect(stashList(dir)).toEqual([]);
+  });
+});
+
+describe('gitPull dirty-tree flows against a concurrent terminal', () => {
+  const unix = process.platform !== 'win32';
+
+  it('parses the SHA git reports for a dropped entry', () => {
+    expect(
+      parseDroppedStashSha(
+        'Dropped refs/stash@{1} (2ea0b3d3f5c1a4c8e0b2d6f7a9c1e3b5d7f9a1c3)\n',
+      ),
+    ).toBe('2ea0b3d3f5c1a4c8e0b2d6f7a9c1e3b5d7f9a1c3');
+    expect(parseDroppedStashSha('')).toBeUndefined();
+  });
+
+  it.skipIf(!unix)(
+    'captures its own entry by provenance when a terminal pushes right after it',
+    async () => {
+      const { dir, clone } = makeUpstream();
+      remoteCommit(clone, 'remote-only.txt', 'remote\n');
+      fs.writeFileSync(path.join(dir, 'a.txt'), 'local edit\n');
+      const env = gitShim(hermeticEnv(), [
+        {
+          match: '"stash push"*',
+          after:
+            'echo foreign > foreign.txt; "$REAL" stash push -u -q -m foreign-terminal',
+        },
+      ]);
+
+      const result = await gitPull(dir, { stash: true }, env);
+
+      expect(result.success).toBe(true);
+      expect(result.stashRestoreConflict).toBeUndefined();
+      expect(read(dir, 'a.txt')).toBe('local edit\n');
+      expect(fs.existsSync(path.join(dir, 'foreign.txt'))).toBe(false);
+      const entries = stashList(dir);
+      expect(entries).toHaveLength(1);
+      expect(entries[0]).toContain('foreign-terminal');
+    },
+  );
+
+  it.skipIf(!unix)(
+    'keeps the other entry when the stash shifts between slot lookup and drop',
+    async () => {
+      const { dir, clone } = makeUpstream();
+      remoteCommit(clone, 'remote-only.txt', 'remote\n');
+      fs.writeFileSync(path.join(dir, 'a.txt'), 'local edit\n');
+      const env = gitShim(hermeticEnv(), [
+        {
+          match: '"stash drop"*',
+          // Only the terminal's own file goes into its entry; our restored
+          // edit must stay in the tree.
+          before:
+            'echo shift > shift.txt; "$REAL" stash push -u -q -m foreign-shift -- shift.txt',
+        },
+      ]);
+
+      const result = await gitPull(dir, { stash: true }, env);
+
+      expect(result.success).toBe(true);
+      expect(result.output).toContain('was kept');
+      expect(read(dir, 'a.txt')).toBe('local edit\n');
+      const entries = stashList(dir);
+      expect(entries).toHaveLength(2);
+      expect(entries.join('\n')).toContain('foreign-shift');
+      expect(entries.join('\n')).toContain('qwen-code: auto-stash before pull');
+    },
+  );
+
+  it.skipIf(!unix)(
+    'leaves a merge a terminal parked mid-pull alone and reports the entry as kept',
+    async () => {
+      const { dir, clone } = makeUpstream();
+      git(dir, 'branch', 'topic');
+      git(dir, 'checkout', '-q', 'topic');
+      commitFile(dir, 'a.txt', 'topic\n');
+      const topicSha = headSha(dir);
+      git(dir, 'checkout', '-q', 'master');
+      commitFile(dir, 'a.txt', 'main side\n');
+      git(dir, 'push', '-q', 'origin', 'HEAD');
+      remoteCommit(clone, 'remote-only.txt', 'remote\n');
+      fs.writeFileSync(path.join(dir, 'b.txt'), 'untracked\n');
+      const env = gitShim(hermeticEnv(), [
+        // The terminal starts a conflicting merge after the stash and before
+        // the pull runs; the pull then fails on "not concluded your merge".
+        { match: 'pull*', before: '"$REAL" merge topic >/dev/null 2>&1' },
+      ]);
+
+      const failure = await expectPullFailure(
+        gitPull(dir, { stash: true }, env),
+        'pull_failed',
+      );
+
+      expect(failure.message).toContain('kept in stash entry');
+      expect(git(dir, 'rev-parse', 'MERGE_HEAD').trim()).toBe(topicSha);
+      expect(stashList(dir)).toHaveLength(1);
+    },
+  );
+
+  it.skipIf(!unix)(
+    'force pull integrates the validated tip even when the remote moves after the check',
+    async () => {
+      const { dir, clone } = makeUpstream();
+      remoteCommit(clone, 'remote-only.txt', 'remote\n');
+      const validated = git(clone, 'rev-parse', 'HEAD').trim();
+      fs.writeFileSync(path.join(dir, 'a.txt'), 'local edit\n');
+      const env = gitShim(hermeticEnv(), [
+        {
+          match: '"merge-base --is-ancestor"*',
+          after: `cd "${clone}" && "$REAL" checkout -q --orphan rewritten && "$REAL" commit -q -m rewritten && "$REAL" push -q -f origin HEAD:master`,
+        },
+      ]);
+
+      const result = await gitPull(dir, { force: true }, env);
+
+      expect(result.success).toBe(true);
+      expect(headSha(dir)).toBe(validated);
+      expect(read(dir, 'remote-only.txt')).toBe('remote\n');
+      expect(git(dir, 'status', '--porcelain').trim()).toBe('');
+    },
+  );
+
+  it('force pull refuses when the upstream branch was deleted on the remote', async () => {
+    const { dir, clone } = makeUpstream();
+    git(dir, 'checkout', '-q', '-b', 'feature');
+    commitFile(dir, 'feature.txt', 'f\n');
+    git(dir, 'push', '-q', '-u', 'origin', 'feature');
+    git(clone, 'push', '-q', 'origin', '--delete', 'feature');
+    const headBefore = headSha(dir);
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'local edit\n');
+    fs.writeFileSync(path.join(dir, 'b.txt'), 'untracked\n');
+
+    const failure = await expectPullFailure(
+      gitPull(dir, { force: true }, hermeticEnv()),
+      'pull_failed',
+    );
+
+    expect(failure.message).toContain('no longer exists');
+    expect(headSha(dir)).toBe(headBefore);
+    expect(read(dir, 'a.txt')).toBe('local edit\n');
+    expect(read(dir, 'b.txt')).toBe('untracked\n');
+  });
+
+  it('stash pull with nothing to stash still aborts and types a conflicting update', async () => {
+    const { dir, clone } = makeUpstream();
+    remoteCommit(clone, 'a.txt', 'remote\n');
+    commitFile(dir, 'a.txt', 'local commit\n');
+    const headBefore = headSha(dir);
+
+    const failure = await expectPullFailure(
+      gitPull(dir, { stash: true }, hermeticEnv()),
+      'pull_failed',
+    );
+
+    expect(failure.message).toContain('CONFLICT');
+    expect(headSha(dir)).toBe(headBefore);
+    expect(fs.existsSync(path.join(dir, '.git', 'MERGE_HEAD'))).toBe(false);
+    expect(read(dir, 'a.txt')).toBe('local commit\n');
+  });
+
+  it('stash pull types the refusal when edits hidden by skip-worktree block the update', async () => {
+    const { dir, clone } = makeUpstream();
+    remoteCommit(clone, 'a.txt', 'remote\n');
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'hidden edit\n');
+    git(dir, 'update-index', '--skip-worktree', 'a.txt');
+
+    const failure = await expectPullFailure(
+      gitPull(dir, { stash: true }, hermeticEnv()),
+      'pull_failed',
+    );
+
+    expect(failure.message).toContain('update failed');
+    expect(read(dir, 'a.txt')).toBe('hidden edit\n');
+    expect(stashList(dir)).toEqual([]);
+  });
+
+  it('stash pull types the refusal when git cannot stash an intent-to-add entry', async () => {
+    const { dir, clone } = makeUpstream();
+    remoteCommit(clone, 'remote-only.txt', 'remote\n');
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'local edit\n');
+    fs.writeFileSync(path.join(dir, 'new.txt'), 'new\n');
+    git(dir, 'add', '-N', 'new.txt');
+    const headBefore = headSha(dir);
+
+    const failure = await expectPullFailure(
+      gitPull(dir, { stash: true }, hermeticEnv()),
+      'pull_failed',
+    );
+
+    expect(failure.message).toContain('cannot stash the local changes');
+    expect(headSha(dir)).toBe(headBefore);
+    expect(read(dir, 'a.txt')).toBe('local edit\n');
+    expect(read(dir, 'new.txt')).toBe('new\n');
+    expect(stashList(dir)).toEqual([]);
+  });
+
+  it.skipIf(!unix)(
+    'reports the kept entry when a failed update cannot restore the stash',
+    async () => {
+      const { dir, clone } = makeUpstream();
+      remoteCommit(clone, 'a.txt', 'remote\n');
+      commitFile(dir, 'a.txt', 'local commit\n');
+      fs.writeFileSync(path.join(dir, 'c.txt'), 'untracked\n');
+      const env = gitShim(hermeticEnv(), [
+        // After the pull's merge is aborted, an untracked file appears at a
+        // path the stash holds, so `stash apply` refuses to overwrite it.
+        { match: '"merge --abort"*', after: 'echo clash > c.txt' },
+      ]);
+
+      const failure = await expectPullFailure(
+        gitPull(dir, { stash: true }, env),
+        'pull_failed',
+      );
+
+      expect(failure.message).toContain('could not be restored automatically');
+      const entries = stashList(dir);
+      expect(entries).toHaveLength(1);
+      const sha = git(dir, 'rev-parse', 'refs/stash').trim();
+      expect(failure.message).toContain(sha);
+      expect(fs.existsSync(path.join(dir, '.git', 'MERGE_HEAD'))).toBe(false);
+    },
+  );
+
+  it('refuses stash and force pulls while a cherry-pick is parked, keeping it', async () => {
+    const { dir } = makeUpstream();
+    git(dir, 'branch', 'topic');
+    git(dir, 'checkout', '-q', 'topic');
+    commitFile(dir, 'a.txt', 'topic\n');
+    git(dir, 'checkout', '-q', 'master');
+    commitFile(dir, 'a.txt', 'main side\n');
+    expect(() => git(dir, 'cherry-pick', 'topic')).toThrow();
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'resolved\n');
+    git(dir, 'add', 'a.txt');
+    const pickHead = git(dir, 'rev-parse', 'CHERRY_PICK_HEAD').trim();
+
+    const failure = await expectPullFailure(
+      gitPull(dir, { stash: true }, hermeticEnv()),
+      'operation_in_progress',
+    );
+    await expectPullFailure(
+      gitPull(dir, { force: true }, hermeticEnv()),
+      'operation_in_progress',
+    );
+
+    expect(failure.message).toContain('cherry-pick');
+    expect(git(dir, 'rev-parse', 'CHERRY_PICK_HEAD').trim()).toBe(pickHead);
+    expect(read(dir, 'a.txt')).toBe('resolved\n');
+  });
+
+  it('refuses a stash pull while a revert is parked, keeping it', async () => {
+    const { dir } = makeUpstream();
+    commitFile(dir, 'a.txt', 'A\n');
+    const a = headSha(dir);
+    commitFile(dir, 'a.txt', 'B\n');
+    expect(() => git(dir, 'revert', '--no-edit', a)).toThrow();
+
+    const failure = await expectPullFailure(
+      gitPull(dir, { stash: true }, hermeticEnv()),
+      'operation_in_progress',
+    );
+
+    expect(failure.message).toContain('revert');
+    expect(git(dir, 'rev-parse', 'REVERT_HEAD').trim()).toBe(a);
   });
 });
 

@@ -32,12 +32,14 @@ const {
   workspaceGitBranches,
   workspaceGitCreateBranch,
   workspaceGitPull,
+  workspaceGitCheckout,
   workspaceGit,
   workspaceClient,
 } = vi.hoisted(() => {
   const workspaceGitBranches = vi.fn();
   const workspaceGitCreateBranch = vi.fn();
   const workspaceGitPull = vi.fn();
+  const workspaceGitCheckout = vi.fn();
   const workspaceGit = vi.fn();
   // A stable client so the popover's memoized workspace handle (and thus its
   // fetch effect) stays referentially stable across renders.
@@ -45,7 +47,7 @@ const {
     workspaceByCwd: () => ({
       workspaceGitBranches,
       workspaceGit,
-      workspaceGitCheckout: vi.fn().mockResolvedValue(undefined),
+      workspaceGitCheckout,
       workspaceGitCreateBranch,
       workspaceGitPush: vi
         .fn()
@@ -57,6 +59,7 @@ const {
     workspaceGitBranches,
     workspaceGitCreateBranch,
     workspaceGitPull,
+    workspaceGitCheckout,
     workspaceGit,
     workspaceClient,
   };
@@ -171,6 +174,8 @@ afterEach(() => {
   container.remove();
   vi.clearAllMocks();
   workspaceGitPull.mockReset();
+  workspaceGitCheckout.mockReset();
+  workspaceGitCheckout.mockResolvedValue(undefined);
   // Default: the popover's own status fetch yields nothing, so hints derive
   // from the caller's `status` prop alone unless a test resolves it.
   workspaceGit.mockRejectedValue(new Error('no status'));
@@ -256,7 +261,7 @@ describe('BranchPickerPopover actions', () => {
     expect(workspaceGitPull).toHaveBeenLastCalledWith(
       { stash: true },
       undefined,
-      300_000,
+      420_000,
     );
     expect(footerText()).not.toContain('Stash Changes and Update');
     expect(footerText()).toContain('ok');
@@ -283,7 +288,7 @@ describe('BranchPickerPopover actions', () => {
     expect(workspaceGitPull).toHaveBeenLastCalledWith(
       { force: true },
       undefined,
-      300_000,
+      420_000,
     );
   });
 
@@ -391,6 +396,142 @@ describe('BranchPickerPopover actions', () => {
     await flush();
 
     expect(footerText()).not.toContain('Stash Changes and Update');
+  });
+
+  it('clears the panel when a competing checkout runs, showing its outcome', async () => {
+    workspaceGitPull.mockRejectedValueOnce(dirtyTreeError());
+    workspaceGitCheckout.mockRejectedValueOnce(
+      new Error('checkout refused: local changes'),
+    );
+    workspaceGitBranches.mockResolvedValue({
+      ...BRANCHES,
+      local: [...BRANCHES.local, { name: 'dev', isHead: false }],
+    });
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+    mount({});
+    await flush();
+
+    clickButton('Update Project');
+    await flush();
+    expect(footerText()).toContain('Stash Changes and Update');
+
+    clickButton('dev');
+    await flush();
+
+    expect(workspaceGitCheckout).toHaveBeenCalledWith('dev', undefined);
+    expect(footerText()).not.toContain('Stash Changes and Update');
+    expect(footerText()).toContain('checkout refused: local changes');
+  });
+
+  it('keeps the panel when a new-branch submit is rejected as invalid', async () => {
+    workspaceGitPull.mockRejectedValueOnce(dirtyTreeError());
+    mountWithBranches();
+    await flush();
+
+    clickButton('Update Project');
+    await flush();
+    clickButton('New Branch');
+    await flush();
+
+    const input = document.body.querySelector<HTMLInputElement>(
+      'input[placeholder="Branch name"]',
+    );
+    const nativeSetter = Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype,
+      'value',
+    )?.set;
+    await act(async () => {
+      nativeSetter?.call(input, 'bad name');
+      input?.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await act(async () => {
+      input?.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }),
+      );
+    });
+    await flush();
+
+    expect(workspaceGitCreateBranch).not.toHaveBeenCalled();
+    expect(footerText()).toContain('Stash Changes and Update');
+  });
+
+  it('keeps the restore warning, with the stash id, across a reopen', async () => {
+    let settle:
+      | ((value: {
+          success: boolean;
+          output: string;
+          stashRestoreConflict?: boolean;
+          stashSha?: string;
+        }) => void)
+      | undefined;
+    workspaceGitPull.mockRejectedValueOnce(dirtyTreeError());
+    workspaceGitPull.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          settle = resolve;
+        }),
+    );
+    mountWithBranches();
+    await flush();
+
+    clickButton('Update Project');
+    await flush();
+    clickButton('Stash Changes and Update');
+    await flush();
+
+    // The popover closes while the stash pull is still running.
+    mount({ open: false });
+    await flush();
+    await act(async () => {
+      settle?.({
+        success: true,
+        output: 'Updating 1..2',
+        stashRestoreConflict: true,
+        stashSha: 'dcda4a53ed6526ecc6c4cda837d665140a2baff1',
+      });
+    });
+    await flush();
+    mount({ open: true });
+    await flush();
+
+    expect(footerText()).toContain('restoring your stashed changes failed');
+    expect(footerText()).toContain('dcda4a53ed65');
+  });
+
+  it('keeps the panel with the daemon explanation when discarding is unsupported', async () => {
+    workspaceGitPull.mockRejectedValueOnce(dirtyTreeError());
+    workspaceGitPull.mockRejectedValueOnce(
+      new DaemonHttpError(
+        409,
+        {
+          error: 'force_unsupported',
+          message: 'cannot discard changes: the workspace is a subdirectory',
+        },
+        'POST /workspaces/:workspace/git/pull: force_unsupported',
+      ),
+    );
+    mountWithBranches();
+    await flush();
+
+    clickButton('Update Project');
+    await flush();
+    clickButton('Discard Changes and Update');
+    await flush();
+    clickButton('Discard and Update');
+    await flush();
+
+    expect(workspaceGitPull).toHaveBeenLastCalledWith(
+      { force: true },
+      undefined,
+      420_000,
+    );
+    expect(footerText()).toContain(
+      'cannot discard changes: the workspace is a subdirectory',
+    );
+    expect(footerText()).toContain('Stash Changes and Update');
+    expect(footerText()).not.toContain('Discard and Update');
   });
 
   it('explains an invalid branch name instead of silently returning', async () => {

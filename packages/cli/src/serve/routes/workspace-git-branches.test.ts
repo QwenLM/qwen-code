@@ -414,6 +414,58 @@ describe('workspace Git branch routes against a real repo (R10 #2)', () => {
     expect(fs.readFileSync(path.join(dir, 'a.txt'), 'utf8')).toBe('local\n');
   });
 
+  it('maps the subdirectory force refusal to 409 force_unsupported without discarding', async () => {
+    const dir = makeRepo();
+    const clone = makeUpstream(dir);
+    commitAndPush(clone, 'remote-only.txt', 'remote\n');
+    const sub = path.join(dir, 'packages', 'app');
+    fs.mkdirSync(sub, { recursive: true });
+    fs.writeFileSync(path.join(sub, 'index.txt'), 'app\n');
+    git(dir, 'add', '.');
+    git(dir, 'commit', '-q', '-m', 'app');
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'outside edit\n');
+    fs.writeFileSync(path.join(sub, 'index.txt'), 'inside edit\n');
+
+    const response = await request(appWithWorkspace(sub))
+      .post('/workspace/git/pull')
+      .send({ force: true });
+
+    expect(response.status).toBe(409);
+    expect(response.body.error).toBe('force_unsupported');
+    expect(JSON.stringify(response.body)).not.toContain(dir);
+    expect(fs.readFileSync(path.join(dir, 'a.txt'), 'utf8')).toBe(
+      'outside edit\n',
+    );
+    expect(fs.readFileSync(path.join(sub, 'index.txt'), 'utf8')).toBe(
+      'inside edit\n',
+    );
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'redacts the repository path from a successful pull whose restore failed',
+    async () => {
+      const dir = makeRepo();
+      const clone = makeUpstream(dir);
+      commitAndPush(clone, 'remote-only.txt', 'remote\n');
+      fs.writeFileSync(path.join(dir, 'a.txt'), 'local\n');
+      // Wedge refs/stash after the merge so dropping the restored entry
+      // fails with git's "Unable to create '<abs path>.lock'" notice.
+      git(dir, 'config', 'core.hooksPath', path.join(dir, '.git', 'hooks'));
+      const hook = path.join(dir, '.git', 'hooks', 'post-merge');
+      fs.writeFileSync(hook, '#!/bin/sh\n: > .git/refs/stash.lock\n');
+      fs.chmodSync(hook, 0o755);
+
+      const response = await request(appWithWorkspace(dir))
+        .post('/workspace/git/pull')
+        .send({ stash: true });
+
+      expect(response.status).toBe(200);
+      expect(response.body.output).toContain('could not be dropped');
+      expect(response.body.output).toContain('<workspace>');
+      expect(JSON.stringify(response.body)).not.toContain(dir);
+    },
+  );
+
   it('maps an in-progress merge to 409 operation_in_progress', async () => {
     const dir = makeRepo();
     const clone = makeUpstream(dir);

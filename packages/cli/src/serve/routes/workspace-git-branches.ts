@@ -35,13 +35,17 @@ const GIT_ERROR_MESSAGE_MAX = 512;
 // length once, on every response — including the unclassified 500
 // fall-through. Raw git output embeds absolute paths (e.g. a wedged
 // `.git/index.lock`) that must never reach the client.
-function redactGitMessage(detail: string, cwd: string): string {
+function redactGitPaths(detail: string, cwd: string): string {
   const gitRoot = findGitRoot(cwd);
   let message = detail.split(cwd).join('<workspace>');
   if (gitRoot && gitRoot !== cwd) {
     message = message.split(gitRoot).join('<workspace>');
   }
-  return message.slice(0, GIT_ERROR_MESSAGE_MAX);
+  return message;
+}
+
+function redactGitMessage(detail: string, cwd: string): string {
+  return redactGitPaths(detail, cwd).slice(0, GIT_ERROR_MESSAGE_MAX);
 }
 
 function sendGitError(
@@ -286,7 +290,11 @@ async function handlePull(
   }
   try {
     const result = await gitPull(cwd, { rebase, fetchOnly, stash, force }, env);
-    res.status(200).json(result);
+    // A successful stash pull can still carry git's notice about a failed
+    // restore, which embeds absolute paths like any other git output.
+    res
+      .status(200)
+      .json({ ...result, output: redactGitPaths(result.output, cwd) });
   } catch (err) {
     if (err instanceof GitPullFailure) {
       // A typed refusal or a failure the core already recovered from: the
