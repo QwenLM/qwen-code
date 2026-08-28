@@ -41,7 +41,17 @@ function gitOpts() {
     // `GIT_CONFIG_*` family injects config the same way. The disposable-tree
     // commands were given this treatment first; these run against the user's
     // own repository, so they need it more, not less.
-    env: { ...sanitizedGitEnv(), GIT_TERMINAL_PROMPT: '0' },
+    env: {
+      ...sanitizedGitEnv(),
+      GIT_TERMINAL_PROMPT: '0',
+      // Pin the message locale: `fix-delta` rules on the English rendering
+      // of `add`'s tolerated notes, and LANG/LC_* pass through the
+      // sanitizer — a git with translated catalogs would turn every
+      // tolerated shape into a hard refusal. Porcelain output is never
+      // localized, so the pin changes nothing for the other callers.
+      LANG: 'C',
+      LC_ALL: 'C',
+    },
   };
 }
 
@@ -88,7 +98,7 @@ export function gitWithEnv(
 export function gitWithEnvReport(
   extraEnv: Record<string, string>,
   args: string[],
-): { stdout: string; stderr: string; status: number } {
+): { stdout: string; stderr: string; status: number; completed: boolean } {
   const opts = gitOpts();
   // spawnSync, not execFileSync: the verdicts need stderr when the child
   // EXITS 0 too — `execFileSync` only hands back stderr on the throw path,
@@ -97,12 +107,24 @@ export function gitWithEnvReport(
     ...opts,
     env: { ...opts.env, ...extraEnv },
     encoding: 'utf8',
+    // The same raised ceiling `gitRaw` takes: this child's stderr is the
+    // evidence the capture ruling reads, and the per-file autocrlf notes of
+    // a large tree pass Node's 1 MiB default — past it the child is killed
+    // mid-capture and its truncated notes are all the verdict sees.
+    maxBuffer: 512 * 1024 * 1024,
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   return {
     stdout: result.stdout ?? '',
     stderr: result.stderr ?? '',
     status: result.status ?? -1,
+    // A child killed by a signal (timeout, buffer overflow) or never
+    // spawned did not EXIT — its notes are a partial capture, and the
+    // verdict must refuse them instead of ruling on them.
+    completed:
+      result.status !== null &&
+      result.signal === null &&
+      result.error === undefined,
   };
 }
 

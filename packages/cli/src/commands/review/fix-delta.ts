@@ -224,7 +224,21 @@ const TOLERATED_ADD_NOTES = [
   /^warning: in the working copy of '.*', CRLF will be replaced by LF the next time Git touches it$/,
 ];
 
-function assertCompleteCapture(add: { stderr: string; status: number }): void {
+export function assertCompleteCapture(add: {
+  stderr: string;
+  status: number;
+  completed: boolean;
+}): void {
+  // Tolerance belongs to genuine exits alone: a child killed mid-`add`
+  // (timeout, buffer overflow) or never spawned leaves the scratch index at
+  // its seeded state, and ruling on its notes would record HEAD's tree as
+  // the snapshot — a false baseline with no error.
+  if (!add.completed) {
+    throw new Error(
+      `fix-delta: git add could not capture the whole tree (exit ${add.status}): ` +
+        'the child did not exit normally, so its notes are a partial capture.',
+    );
+  }
   const notes = add.stderr
     .split('\n')
     .map((line) => line.trim())
@@ -249,14 +263,17 @@ function assertCompleteCapture(add: { stderr: string; status: number }): void {
  * wildcard matching reads `[]`/`*`/`?` in it as a glob that drops merely
  * matching tracked files from capture and comparison.
  */
-function excludePathspec(root: string): string[] {
+export function excludePathspec(root: string): string[] {
   const specs = ['.'];
   for (const family of FIX_DELTA_EXCLUDES) {
     specs.push(`:(glob,exclude)**/${family}`, `:(glob,exclude)**/${family}/**`);
   }
   const gitDir = inTreeGitDir(root);
   if (gitDir !== null) {
-    specs.push(`:(exclude,literal)${gitDir}`);
+    // `path.relative` emits the platform separator, but pathspec matching
+    // is `/`-based on every platform — a git dir two or more components
+    // below the root must not reach the pathspec with any other separator.
+    specs.push(`:(exclude,literal)${gitDir.split(sep).join('/')}`);
   }
   return specs;
 }
@@ -365,7 +382,15 @@ const DOT_GIT = Buffer.from('.git');
  */
 function decodePath(raw: Buffer): string {
   const utf8 = raw.toString('utf8');
-  return Buffer.from(utf8, 'utf8').equals(raw) ? utf8 : raw.toString('latin1');
+  const decoded = Buffer.from(utf8, 'utf8').equals(raw)
+    ? utf8
+    : raw.toString('latin1');
+  // Walk-discovered names are joined with the platform separator while
+  // git-originated names carry `/` on every platform, and reporting plus
+  // the baseline identity compare the two — so render both in git's
+  // separator. On win32 a backslash cannot be a filename byte; on POSIX it
+  // can, and stays.
+  return sep === '\\' ? decoded.split('\\').join('/') : decoded;
 }
 
 /** Split a `-z` buffer on NUL bytes without a lossy string roundtrip. */
@@ -429,14 +454,18 @@ const EXCLUDED_FAMILY_SEGMENTS = FIX_DELTA_EXCLUDES.map((family) => {
 });
 
 function relPathExcluded(rel: Buffer, gitDirRel: string | null): boolean {
+  // `decodePath` renders both discovery routes — git's `-z` status (`/` on
+  // every platform) and the walk (`sep`) — in git's separator, so the
+  // comparisons below are separator-agnostic on every platform.
   const decoded = decodePath(rel);
+  const gitDir = gitDirRel === null ? null : gitDirRel.split(sep).join('/');
   if (
-    gitDirRel !== null &&
-    (decoded === gitDirRel || decoded.startsWith(gitDirRel + sep))
+    gitDir !== null &&
+    (decoded === gitDir || decoded.startsWith(`${gitDir}/`))
   ) {
     return true;
   }
-  const segments = decoded.split(sep);
+  const segments = decoded.split('/');
   for (const family of EXCLUDED_FAMILY_SEGMENTS) {
     for (let i = 0; i + family.lead.length < segments.length; i++) {
       let matched = true;

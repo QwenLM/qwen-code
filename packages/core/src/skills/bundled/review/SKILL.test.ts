@@ -994,6 +994,26 @@ describe('bundled review skill', () => {
     expect(step).toContain('for every `fixed` the fix audit annotated');
     // The subagent type mandate reaches this launch too.
     expect(step).toContain('`subagent_type: "review-agent"`');
+    // The refusal rule's ONE carve-out: the empty-hunks refusal is a
+    // ledger/tree mismatch whose message is the diagnosis, not an audit
+    // failure to disclose and move past. Folding it back into the blanket
+    // rule re-issues `report_findings` with `fixed` outcomes for edits the
+    // tree does not hold — the artifact lies and the correction the refusal
+    // directs never runs.
+    expect(step).toContain(
+      'The one refusal that is NOT in this class is the empty-hunks refusal',
+    );
+    expect(step).toContain(
+      're-take it before the first edit and re-run the audit',
+    );
+    expect(step).toContain(
+      'correct the ledger, re-run `review findings --outcomes`, and re-issue `report_findings` with the corrected outcomes',
+    );
+    // …and the blanket rule it carves out of still stands for every other
+    // refusal.
+    expect(step).toContain(
+      'disclosed and moved past, never a reason to touch the outcomes or the artifact',
+    );
   });
 
   it('pins the fix-witness mandate in all three of its halves', () => {
