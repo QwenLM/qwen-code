@@ -5,7 +5,6 @@
  */
 
 import type React from 'react';
-import process from 'node:process';
 import { useCallback, useContext, useMemo, useRef, useState } from 'react';
 import { Box, Text } from 'ink';
 import {
@@ -21,9 +20,14 @@ import {
   type Config,
   type ContentGeneratorConfig,
   type InputModalities,
+  type ModalitySource,
 } from '@qwen-code/qwen-code-core';
 import { SettingScope } from '../../config/settings.js';
 import { useKeypress } from '../hooks/useKeypress.js';
+import {
+  hydrateApiKeyEnvFromSettings,
+  useImageSupportProbe,
+} from '../hooks/use-image-support-probe.js';
 import { theme } from '../semantic-colors.js';
 import { DescriptiveRadioButtonSelect } from './shared/DescriptiveRadioButtonSelect.js';
 import { ConfigContext } from '../contexts/ConfigContext.js';
@@ -46,6 +50,22 @@ function formatModalities(modalities?: InputModalities): string {
   if (modalities.video) parts.push(t('video'));
   if (parts.length === 0) return t('text-only');
   return `${t('text')} · ${parts.join(' · ')}`;
+}
+
+/**
+ * Modality provenance suffix for the details panel (issue #10309): the
+ * badge reads the resolver's `modalitiesSource` annotation — never the
+ * settings sources map, which labels probe-derived modalities misleadingly
+ * as 'modelProviders'. Undefined source renders the plain base value.
+ */
+function formatModalitiesWithSource(
+  modalities: InputModalities | undefined,
+  source: ModalitySource | undefined,
+): string {
+  const base = formatModalities(modalities);
+  if (source === 'probe') return `${base} · ${t('probe-tested')}`;
+  if (source === 'pattern') return `${base} · ${t('auto-detected')}`;
+  return source === 'explicit' ? `${base} · ${t('manual')}` : base;
 }
 
 /**
@@ -85,6 +105,29 @@ function parseModelSelectionKey(key: string): {
     };
   }
   return { authType, modelId: rest };
+}
+
+/**
+ * Selection key for a dialog entry: runtime snapshots are keyed by their
+ * snapshot id, registry entries by `authType::modelId[\0baseUrl]`. Every
+ * consumer — the option list, highlight resolution, selection handling, and
+ * the probe flow's `probeTargetKey` displacement guard — must agree
+ * byte-for-byte, so they all go through this one helper.
+ */
+function entrySelectionKey({
+  authType,
+  model,
+  isRuntime,
+  snapshotId,
+}: {
+  authType: AuthType;
+  model: CoreAvailableModel;
+  isRuntime?: boolean;
+  snapshotId?: string;
+}): string {
+  return isRuntime && snapshotId
+    ? snapshotId
+    : buildModelSelectionKey(authType, model.id, model.baseUrl);
 }
 
 /**
@@ -129,13 +172,21 @@ interface ModelDialogProps {
 const MAX_MODEL_ITEMS_TO_SHOW = 10;
 // Non-list dialog chrome to reserve when capping visible model rows: outer
 // round border (2) + outer padding (2) + title (1) + gap before the list (1)
-// + highlighted-entry detail panel (divider + up to 4 detail rows, ~6) +
-// footer gap and hint text (2). The list intentionally omits the ▲/▼ scroll
-// indicators other list dialogs enable: they are two always-rendered chrome
-// rows, and in a height-capped dialog those rows are better spent on two
+// + highlighted-entry detail panel (divider + up to 4 standing detail rows,
+// ~6) + footer gap and hint text (2). The list intentionally omits the ▲/▼
+// scroll indicators other list dialogs enable: they are two always-rendered
+// chrome rows, and in a height-capped dialog those rows are better spent on two
 // more entries — the entry numbering already shows where the visible window
 // sits in the list. Adjust this whenever the surrounding layout changes, and
 // re-verify with an E2E height sweep rather than guessing.
+//
+// Two CONDITIONAL rows are deliberately NOT reserved in this budget (phase-1
+// slack; dynamic counting is a phase-2 nicety): a 5th detail row — the Image
+// probe feedback, rendered while a probe/verdict for the highlighted entry is
+// on screen — and a second footer hint line (`t: test image support`,
+// rendered whenever a pattern-source entry is highlighted; that one is NOT
+// transient). When either renders, a height-capped dialog grows by that row
+// rather than dropping a model entry.
 const MODEL_DIALOG_FIXED_ROWS = 14;
 const MODEL_OPTION_ROW_HEIGHT = 1;
 const MODEL_OPTION_ROW_HEIGHT_WITH_DESCRIPTION = 2;
@@ -186,24 +237,6 @@ function persistAuthTypeSelection(
 ): void {
   const scope = resolvePersistScope(settings, persistScope);
   settings.setValue(scope, 'security.auth.selectedType', authType);
-}
-
-function hydrateApiKeyEnvFromSettings(
-  settings: ReturnType<typeof useSettings>,
-  envKey: string | undefined,
-): void {
-  if (!envKey || process.env[envKey]) {
-    return;
-  }
-  const settingsEnvValue = (
-    settings?.merged?.env as Record<string, unknown> | undefined
-  )?.[envKey];
-  if (
-    typeof settingsEnvValue === 'string' &&
-    settingsEnvValue.trim().length > 0
-  ) {
-    process.env[envKey] = settingsEnvValue;
-  }
 }
 
 interface HandleModelSwitchSuccessParams {
@@ -398,64 +431,58 @@ export function ModelDialog({
 
   const MODEL_OPTIONS = useMemo(
     () =>
-      availableModelEntries.map(
-        ({ authType: t2, model, isRuntime, snapshotId }) => {
-          const value =
-            isRuntime && snapshotId
-              ? snapshotId
-              : buildModelSelectionKey(t2, model.id, model.baseUrl);
+      availableModelEntries.map((entry) => {
+        const { authType: t2, model, isRuntime } = entry;
+        const value = entrySelectionKey(entry);
 
-          const isQwenOAuth = t2 === AuthType.QWEN_OAUTH;
+        const isQwenOAuth = t2 === AuthType.QWEN_OAUTH;
 
-          const title = (
-            <Text>
-              <Text
-                bold
-                color={
-                  isQwenOAuth
+        const title = (
+          <Text>
+            <Text
+              bold
+              color={
+                isQwenOAuth
+                  ? theme.status.warning
+                  : isRuntime
                     ? theme.status.warning
-                    : isRuntime
-                      ? theme.status.warning
-                      : theme.text.accent
-                }
-              >
-                [{t2}]
-              </Text>
-              <Text>{` ${model.label}`}</Text>
-              {model.id !== model.label && (
-                <Text color={theme.text.secondary} italic>
-                  {' '}
-                  ({model.id})
-                </Text>
-              )}
-              {isRuntime && (
-                <Text color={theme.status.warning}> (Runtime)</Text>
-              )}
-              {isQwenOAuth && !isRuntime && (
-                <Text color={theme.status.warning}> ({t('Discontinued')})</Text>
-              )}
+                    : theme.text.accent
+              }
+            >
+              [{t2}]
             </Text>
-          );
+            <Text>{` ${model.label}`}</Text>
+            {model.id !== model.label && (
+              <Text color={theme.text.secondary} italic>
+                {' '}
+                ({model.id})
+              </Text>
+            )}
+            {isRuntime && <Text color={theme.status.warning}> (Runtime)</Text>}
+            {isQwenOAuth && !isRuntime && (
+              <Text color={theme.status.warning}> ({t('Discontinued')})</Text>
+            )}
+          </Text>
+        );
 
-          // Include runtime / discontinued indicator in description
-          let description = model.description || '';
-          if (isRuntime) {
-            description = description
-              ? `${description} (Runtime)`
-              : 'Runtime model';
-          }
-          if (isQwenOAuth && !isRuntime) {
-            description = t('Discontinued — switch to Coding Plan or API Key');
-          }
+        // Include runtime / discontinued indicator in description
+        let description = model.description || '';
+        if (isRuntime) {
+          description = description
+            ? `${description} (Runtime)`
+            : 'Runtime model';
+        }
+        if (isQwenOAuth && !isRuntime) {
+          description = t('Discontinued — switch to Coding Plan or API Key');
+        }
 
-          return {
-            value,
-            title,
-            description,
-            key: value,
-          };
-        },
-      ),
+        return {
+          value,
+          title,
+          description,
+          key: value,
+        };
+      }),
     [availableModelEntries],
   );
   const modelOptionRowHeight = MODEL_OPTIONS.some(
@@ -734,28 +761,56 @@ export function ModelDialog({
   const highlightedEntry = useMemo(() => {
     const key = highlightedValue ?? preferredKey;
     return availableModelEntries.find(
-      ({ authType: t2, model, isRuntime, snapshotId }) => {
-        const v =
-          isRuntime && snapshotId
-            ? snapshotId
-            : buildModelSelectionKey(t2, model.id, model.baseUrl);
-        return v === key;
-      },
+      (entry) => entrySelectionKey(entry) === key,
     );
   }, [highlightedValue, preferredKey, availableModelEntries]);
+
+  const highlightedEntryKey = highlightedEntry
+    ? entrySelectionKey(highlightedEntry)
+    : null;
+
+  // One-shot image modality probe (issue #10309, phase 1): the probe state
+  // machine, the live-verdict read, the t-action gating, and the derived
+  // badge/modality/feedback presentation all live in the hook; this
+  // component keeps only rendering and key binding.
+  const {
+    canTestImageSupport,
+    handleTestImageSupport,
+    displayedModalities,
+    displayedModalitiesSource,
+    probeFeedback,
+  } = useImageSupportProbe({
+    highlightedEntry,
+    highlightedEntryKey,
+    settings,
+    scope: resolvePersistScope(settings, persistScope),
+    setErrorMessage,
+  });
+
+  // Registered separately from the escape handler above: this one depends
+  // on `highlightedEntry` and the probe state, which are computed later in
+  // the component body.
+  useKeypress(
+    (key) => {
+      if (
+        key.name === 't' &&
+        !key.ctrl &&
+        !key.meta &&
+        !key.shift &&
+        canTestImageSupport
+      ) {
+        void handleTestImageSupport();
+      }
+    },
+    { isActive: true },
+  );
 
   const handleSelect = useCallback(
     async (selected: string) => {
       if (selectionInFlightRef.current || selectionCommittedRef.current) return;
       setErrorMessage(null);
       const selectedEntry = availableModelEntries.find(
-        ({ authType: t2, model, isRuntime, snapshotId }) => {
-          const value =
-            isRuntime && snapshotId
-              ? snapshotId
-              : buildModelSelectionKey(t2, model.id, model.baseUrl);
-          return value === selected;
-        },
+        (entry) => entrySelectionKey(entry) === selected,
       );
 
       if (isVoiceModelMode) {
@@ -1152,8 +1207,19 @@ export function ModelDialog({
             )}
           <DetailRow
             label={t('Modality')}
-            value={formatModalities(highlightedEntry.model.modalities)}
+            value={formatModalitiesWithSource(
+              displayedModalities,
+              displayedModalitiesSource,
+            )}
           />
+          {probeFeedback && (
+            <DetailRow
+              label={t('Image probe')}
+              value={
+                <Text color={probeFeedback.color}>{probeFeedback.text}</Text>
+              }
+            />
+          )}
           <DetailRow
             label={t('Context Window')}
             value={formatContextWindow(
@@ -1187,6 +1253,9 @@ export function ModelDialog({
         <Text color={theme.text.secondary}>
           {t('Enter to select, ↑↓ to navigate, Esc to close')}
         </Text>
+        {canTestImageSupport && (
+          <Text color={theme.text.secondary}>{t('t: test image support')}</Text>
+        )}
       </Box>
     </Box>
   );

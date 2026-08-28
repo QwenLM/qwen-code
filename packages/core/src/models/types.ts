@@ -105,6 +105,14 @@ export type ProviderProtocolConfig = {
 };
 
 /**
+ * Provenance of a model's resolved input modalities (issue #10309):
+ * - 'explicit' — declared by the provider entry or settings generationConfig
+ * - 'probe' — one-shot endpoint probe verdict (settings `probeResults`)
+ * - 'pattern' — model-name regex table (`defaultModalities`)
+ */
+export type ModalitySource = 'explicit' | 'probe' | 'pattern';
+
+/**
  * Resolved model config with all defaults applied
  */
 export interface ResolvedModelConfig extends ModelConfig {
@@ -122,6 +130,12 @@ export interface ResolvedModelConfig extends ModelConfig {
   generationConfig: ModelGenerationConfig;
   /** Capabilities (always present, defaults to {}) */
   capabilities: ModelCapabilities;
+  /**
+   * Provenance annotation for `generationConfig.modalities` (non-persisted):
+   * which tier of the resolution chain produced it. Consumed by the /model
+   * dialog badge (issue #10309). Absent when modalities were never resolved.
+   */
+  modalitiesSource?: ModalitySource;
 }
 
 /**
@@ -136,6 +150,12 @@ export interface AvailableModel {
   isVision?: boolean;
   contextWindowSize?: number;
   modalities?: InputModalities;
+  /**
+   * Provenance of `modalities` mirrored from `ResolvedModelConfig` so the
+   * /model dialog can badge probe-tested vs pattern-guessed entries
+   * (issue #10309). Absent when modalities were never resolved.
+   */
+  modalitiesSource?: ModalitySource;
   baseUrl?: string;
   /** Exact optional baseUrl used in the model registry key, before defaults. */
   registryBaseUrl?: string;

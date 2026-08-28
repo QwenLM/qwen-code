@@ -19,6 +19,8 @@ import {
 import { createDebugLogger } from '../utils/debugLogger.js';
 
 import { ModelRegistry } from './modelRegistry.js';
+import { readProbeResult } from '../services/modalityProbe/probe-store.js';
+import type { ProbeResultStore } from '../services/modalityProbe/probe-store.js';
 import {
   type ModelProvidersConfig,
   type ProviderProtocolConfig,
@@ -68,6 +70,12 @@ export interface ModelsConfigOptions {
   initialRegistryBaseUrl?: string | null;
   /** Callback when model changes require refresh */
   onModelChange?: OnModelChangeCallback;
+  /**
+   * Lazy provider for the persisted modality probe store (settings
+   * `probeResults`); consulted between the explicit modalities layer and the
+   * name-pattern table. `undefined` keeps probe-free behavior.
+   */
+  probeResultStoreProvider?: () => ProbeResultStore | undefined;
 }
 
 /**
@@ -110,6 +118,12 @@ export class ModelsConfig {
 
   // Callback for notifying Config of model changes
   private onModelChange?: OnModelChangeCallback;
+
+  /** Lazy provider for the persisted modality probe store (settings
+   * `probeResults`); `undefined` keeps probe-free behavior. */
+  private readonly probeResultStoreProvider?: () =>
+    | ProbeResultStore
+    | undefined;
 
   // Flag indicating whether authType was explicitly provided (not defaulted)
   private readonly authTypeWasExplicitlyProvided: boolean;
@@ -159,8 +173,10 @@ export class ModelsConfig {
     this.modelRegistry = new ModelRegistry(
       options.modelProvidersConfig,
       options.providerProtocolConfig,
+      options.probeResultStoreProvider,
     );
     this.onModelChange = options.onModelChange;
+    this.probeResultStoreProvider = options.probeResultStoreProvider;
 
     // Initialize generation config
     // Note: generationConfig.model should already be fully resolved by ModelConfigResolver
@@ -438,11 +454,33 @@ export class ModelsConfig {
    */
   private applyRawModelDerivedDefaults(modelId: string): void {
     if (this.shouldUpdateModelDerivedDefault('modalities')) {
-      this._generationConfig.modalities = defaultModalities(modelId);
-      this.generationConfigSources['modalities'] = {
-        kind: 'computed',
-        detail: 'auto-detected from model',
-      };
+      // modalities fallback chain: probe verdict > name-pattern table. The
+      // probe lookup is keyed by the baseUrl this raw model actually uses
+      // (the resolver-spelled resolved baseUrl). Read-side hardening: only
+      // verdicts exactly 'image'/'text_only' are honored.
+      const probe =
+        this.currentAuthType !== undefined
+          ? readProbeResult(
+              this.probeResultStoreProvider?.(),
+              this.currentAuthType,
+              modelId,
+              this._generationConfig.baseUrl,
+            )
+          : undefined;
+      if (probe?.verdict === 'image' || probe?.verdict === 'text_only') {
+        this._generationConfig.modalities =
+          probe.verdict === 'image' ? { image: true } : {};
+        this.generationConfigSources['modalities'] = {
+          kind: 'computed',
+          detail: `probe-tested ${probe.probedAt}`,
+        };
+      } else {
+        this._generationConfig.modalities = defaultModalities(modelId);
+        this.generationConfigSources['modalities'] = {
+          kind: 'computed',
+          detail: 'auto-detected from model',
+        };
+      }
     }
 
     if (this.shouldUpdateModelDerivedDefault('contextWindowSize')) {
@@ -932,7 +970,10 @@ export class ModelsConfig {
       };
     }
 
-    // modalities fallback: auto-detect from model when not set by provider
+    // modalities fallback: auto-detect from model when not set by provider.
+    // Defensive only: the registry always pre-fills modalities (the explicit,
+    // probe, and pattern branches all assign in resolveModelConfig), so this
+    // never fires for registry-fed models.
     if (gc.modalities === undefined) {
       this._generationConfig.modalities = defaultModalities(model.id);
       this.generationConfigSources['modalities'] = {

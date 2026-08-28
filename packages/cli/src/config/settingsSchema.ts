@@ -13,6 +13,7 @@ import type {
   ChatCompressionSettings,
   ModelProvidersConfig,
   ProviderProtocolConfig,
+  ModalityProbeRecord,
 } from '@qwen-code/qwen-code-core';
 import {
   ApprovalMode,
@@ -378,6 +379,19 @@ const SETTINGS_SCHEMA = {
       'Maps a custom modelProviders provider id to the SDK protocol that routes its requests (e.g. {"idealab": "openai"}). Lets a custom provider id reuse a built-in protocol. Built-in provider ids (openai, gemini, anthropic, vertex-ai, qwen-oauth) are routed automatically and need no entry.',
     showInDialog: false,
     mergeStrategy: MergeStrategy.REPLACE,
+  },
+
+  // Persisted modality probe results (QwenLM/qwen-code#10309, phase 1).
+  probeResults: {
+    type: 'object',
+    label: 'Modality Probe Results',
+    category: 'Model',
+    requiresRestart: false,
+    default: {} as Record<string, ModalityProbeRecord>,
+    showInDialog: false,
+    mergeStrategy: MergeStrategy.SHALLOW_MERGE,
+    description:
+      'Persisted one-shot image modality probe verdicts, keyed by "authType|modelId|baseUrl". Written by the "Test image support" action in /model; feeds the modality resolution chain (explicit modalities > probe result > name-pattern table). Records are advisory metadata, never user declarations.',
   },
 
   plansDirectory: {

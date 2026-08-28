@@ -138,6 +138,7 @@ vi.mock('./config/config.js', () => ({
   parseArguments: vi.fn().mockResolvedValue({}),
   isDebugMode: vi.fn(() => false),
   buildDisabledSkillNamesProvider: vi.fn(() => () => new Set<string>()),
+  buildProbeResultStoreProvider: vi.fn(() => () => undefined),
   // Mirrors SESSION_ID_REGEX in ./config/config.ts; keep them in sync.
   isValidSessionId: vi.fn((value: string) =>
     /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}(-agent-[a-zA-Z0-9_.-]+)?$/i.test(
@@ -851,6 +852,8 @@ describe('gemini.tsx main function', () => {
         userHooks: undefined,
         projectHooks: undefined,
       },
+      // disabledSkillNamesProvider, probeResultStoreProvider
+      expect.any(Function),
       expect.any(Function),
       undefined,
       // settingsWatcher: not started in bare mode

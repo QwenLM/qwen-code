@@ -14,7 +14,13 @@ export {
   type AvailableModel,
   type ModelSwitchMetadata,
   type RuntimeModelSnapshot,
+  type ModalitySource,
 } from './types.js';
+
+export type {
+  ProbeResultStore,
+  ModalityProbeRecord,
+} from '../services/modalityProbe/probe-store.js';
 
 export {
   ModelRegistry,

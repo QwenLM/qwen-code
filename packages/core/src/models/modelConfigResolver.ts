@@ -23,6 +23,8 @@ import type { ContentGeneratorConfig } from '../core/contentGenerator.js';
 import { DEFAULT_QWEN_MODEL } from '../config/models.js';
 import { defaultModalities } from '../core/modalityDefaults.js';
 import { knownTokenLimit } from '../core/tokenLimits.js';
+import { readProbeResult } from '../services/modalityProbe/probe-store.js';
+import type { ProbeResultStore } from '../services/modalityProbe/probe-store.js';
 import {
   resolveField,
   resolveOptionalField,
@@ -93,6 +95,10 @@ export interface ModelConfigSourcesInput {
 
   /** Proxy URL (computed from Config) */
   proxy?: string;
+
+  /** Persisted modality probe verdicts (settings `probeResults`). Consulted
+   * between the explicit modalities layer and the name-pattern table. */
+  probeResultStore?: ProbeResultStore;
 }
 
 /**
@@ -275,6 +281,8 @@ export function resolveModelConfig(
     authType,
     modelProvider?.id ?? modelResult.value,
     sources,
+    input.probeResultStore,
+    baseUrlResult?.value,
   );
 
   // ---- Env override: QWEN_CODE_API_TIMEOUT_MS ----
@@ -356,6 +364,8 @@ function resolveQwenOAuthConfig(
     AuthType.QWEN_OAUTH,
     resolvedModel,
     sources,
+    input.probeResultStore,
+    undefined,
   );
 
   // ---- Env override: QWEN_CODE_API_TIMEOUT_MS ----
@@ -381,6 +391,8 @@ function resolveGenerationConfig(
   authType: AuthType | undefined,
   modelId: string | undefined,
   sources: ConfigSources,
+  probeResultStore?: ProbeResultStore,
+  baseUrl?: string,
 ): Partial<ContentGeneratorConfig> {
   const result: Partial<ContentGeneratorConfig> = {};
 
@@ -426,9 +438,30 @@ function resolveGenerationConfig(
   // on `modalities === undefined` to mean "unresolved" — use the sources map
   // (kind === 'computed' vs 'modelProviders'/'settings') if that distinction
   // matters.
+  // modalities fallback chain: explicit (handled above via settings/modelProviders
+  // field copying) > persisted probe result > name-pattern table.
+  //
+  // NOTE(#8558/#10309): when the API-backed model metadata catalog (#8558)
+  // lands, its provider-native metadata layer slots in HERE — between the
+  // explicit user/provider layer and the probe layer. Final chain per the
+  // #10309 design discussion: explicit > provider-native catalog (#8558) >
+  // probe result > regex table > conservative defaults.
+  //
+  // Read-side hardening: only a record whose `verdict` is exactly 'image' or
+  // 'text_only' is honored — hand-edited settings.json garbage abstains to the
+  // pattern tier, never a wrong verdict.
   if (result.modalities === undefined && modelId) {
-    result.modalities = defaultModalities(modelId);
-    sources['modalities'] = computedSource('auto-detected from model');
+    const probe =
+      authType !== undefined
+        ? readProbeResult(probeResultStore, authType, modelId, baseUrl)
+        : undefined;
+    if (probe?.verdict === 'image' || probe?.verdict === 'text_only') {
+      result.modalities = probe.verdict === 'image' ? { image: true } : {};
+      sources['modalities'] = computedSource(`probe-tested ${probe.probedAt}`);
+    } else {
+      result.modalities = defaultModalities(modelId);
+      sources['modalities'] = computedSource('auto-detected from model');
+    }
   }
 
   return result;

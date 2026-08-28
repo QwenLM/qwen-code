@@ -9,6 +9,8 @@ import { ModelsConfig } from './modelsConfig.js';
 import { AuthType } from '../core/contentGenerator.js';
 import type { ContentGeneratorConfig } from '../core/contentGenerator.js';
 import type { ModelProvidersConfig } from './types.js';
+import { withProbeResult } from '../services/modalityProbe/probe-store.js';
+import type { ProbeResultStore } from '../services/modalityProbe/probe-store.js';
 
 describe('ModelsConfig', () => {
   function deepClone<T>(value: T): T {
@@ -1620,6 +1622,89 @@ describe('ModelsConfig', () => {
 
     expect(modelsConfig.getGenerationConfig().modalities).toEqual({
       image: true,
+    });
+    expect(modelsConfig.getGenerationConfigSources()['modalities']).toEqual({
+      kind: 'settings',
+      settingsPath: 'model.generationConfig.modalities',
+    });
+  });
+
+  it('flips raw model modalities when a persisted probe verdict matches', async () => {
+    // applyRawModelDerivedDefaults keys the probe by (currentAuthType,
+    // modelId, this._generationConfig.baseUrl) — the session-resolved
+    // baseUrl the raw model actually uses.
+    const makeConfig = (probeResultStoreProvider?: () => ProbeResultStore) =>
+      new ModelsConfig({
+        initialAuthType: AuthType.USE_OPENAI,
+        generationConfig: {
+          model: 'qwen3.6-plus',
+          baseUrl: 'https://example.invalid/v1',
+        },
+        ...(probeResultStoreProvider ? { probeResultStoreProvider } : {}),
+      });
+
+    // Without a record the pattern tier decides: /^qwen/ → text-only.
+    const patternOnly = makeConfig();
+    await patternOnly.setModel('qwen3.7-max');
+    expect(patternOnly.getGenerationConfig().modalities).toEqual({});
+    expect(patternOnly.getGenerationConfigSources()['modalities']).toEqual({
+      kind: 'computed',
+      detail: 'auto-detected from model',
+    });
+
+    // Same raw switch with a persisted 'image' verdict under that key.
+    const probeStore = withProbeResult(
+      undefined,
+      AuthType.USE_OPENAI,
+      'qwen3.7-max',
+      'https://example.invalid/v1',
+      { verdict: 'image', probedAt: '2026-08-27T00:00:00.000Z' },
+    );
+    const probeBacked = makeConfig(() => probeStore);
+    await probeBacked.setModel('qwen3.7-max');
+    expect(probeBacked.getGenerationConfig().modalities).toEqual({
+      image: true,
+    });
+    expect(
+      probeBacked.getGenerationConfigSources()['modalities'],
+    ).toMatchObject({
+      kind: 'computed',
+      detail: expect.stringMatching(/^probe-tested/),
+    });
+  });
+
+  it('does not let a persisted probe verdict override explicit modalities on a raw switch', async () => {
+    const probeStore = withProbeResult(
+      undefined,
+      AuthType.USE_OPENAI,
+      'qwen3.7-max',
+      'https://example.invalid/v1',
+      { verdict: 'text_only', probedAt: '2026-08-27T00:00:00.000Z' },
+    );
+    const modelsConfig = new ModelsConfig({
+      initialAuthType: AuthType.USE_OPENAI,
+      generationConfig: {
+        model: 'qwen3.6-plus',
+        baseUrl: 'https://example.invalid/v1',
+        modalities: { image: true, video: true },
+      },
+      generationConfigSources: {
+        modalities: {
+          kind: 'settings',
+          settingsPath: 'model.generationConfig.modalities',
+        },
+      },
+      probeResultStoreProvider: () => probeStore,
+    });
+
+    await modelsConfig.setModel('qwen3.7-max');
+
+    // Explicit settings modalities outrank the probe layer: the verdict says
+    // text_only (and the pattern tier alone would say {}), yet neither may
+    // replace a kind: 'settings' field (shouldUpdateModelDerivedDefault gate).
+    expect(modelsConfig.getGenerationConfig().modalities).toEqual({
+      image: true,
+      video: true,
     });
     expect(modelsConfig.getGenerationConfigSources()['modalities']).toEqual({
       kind: 'settings',
