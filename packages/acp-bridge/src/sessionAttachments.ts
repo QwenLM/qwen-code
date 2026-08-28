@@ -4,7 +4,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { randomUUID } from 'node:crypto';
 import { constants as fsConstants, promises as fs, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
@@ -334,6 +333,7 @@ export class SessionAttachmentStore {
   private activeDirectory?: string;
   private pendingItems = 0;
   private readonly pendingNames = new Map<string, number>();
+  private readonly removingNames = new Set<string>();
   private readonly pendingDrainWaiters: Array<() => void> = [];
   private readonly copyDrainWaiters: Array<() => void> = [];
   private copying = false;
@@ -401,6 +401,10 @@ export class SessionAttachmentStore {
         const candidateName = deduplicatedName(safeName, suffix);
         if (safeAttachmentName(candidateName) !== candidateName) {
           throw new TypeError('Session attachment name is invalid');
+        }
+        if (this.removingNames.has(candidateName)) {
+          suffix += 1;
+          continue;
         }
         // A legacy fallback copy owns this name; a new upload must not shadow
         // it (reads resolve the primary first, so reusing the ID would make an
@@ -649,14 +653,18 @@ export class SessionAttachmentStore {
       // Primary first so a name held by both roots resolves to the primary;
       // fallback entries copied later with the same name are skipped.
       const copiedNames = new Set<string>();
+      let sourceDirectoryRead = false;
+      let sourceDirectoryError: unknown;
       for (const sourceDirectory of sourceDirectories) {
         let entries;
         try {
           entries = await fs.readdir(sourceDirectory, { withFileTypes: true });
         } catch (error) {
           if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
-          throw error;
+          sourceDirectoryError ??= error;
+          continue;
         }
+        sourceDirectoryRead = true;
         await Promise.all(
           entries
             .filter(
@@ -690,6 +698,9 @@ export class SessionAttachmentStore {
             }),
         );
       }
+      if (!sourceDirectoryRead && sourceDirectoryError !== undefined) {
+        throw sourceDirectoryError;
+      }
     } finally {
       source.copying = false;
       this.copying = false;
@@ -704,19 +715,48 @@ export class SessionAttachmentStore {
       !name ||
       name !== attachmentId ||
       this.copying ||
-      this.pendingNames.has(name)
+      this.pendingNames.has(name) ||
+      this.removingNames.has(name)
     ) {
       return false;
     }
-    // Unlink the fallback first: if a legacy copy fails to unlink (e.g. the
-    // old default dir sits on a read-only volume), the authoritative primary
-    // copy is still intact and remove() can fail cleanly without leaving a
-    // deleted attachment readable through the fallback.
-    const fallbackHit =
-      (await this.tryUnlink(this.persistentFallbackDirectory, name)) === true;
-    const primaryHit =
-      (await this.tryUnlink(await this.peekDirectory(), name)) === true;
-    return primaryHit || fallbackHit;
+    this.removingNames.add(name);
+    try {
+      const primaryDirectory = await this.peekDirectory();
+      // Probe both roots before mutating either so an unreadable root cannot
+      // turn one remove request into a partial deletion.
+      const [fallbackExists, primaryExists] = await Promise.all([
+        this.hasAttachment(this.persistentFallbackDirectory, name),
+        this.hasAttachment(primaryDirectory, name),
+      ]);
+      // Unlink the fallback first: if a legacy copy fails to unlink (e.g. the
+      // old default dir sits on a read-only volume), the authoritative primary
+      // copy is still intact and remove() can fail cleanly without leaving a
+      // deleted attachment readable through the fallback.
+      const fallbackHit =
+        fallbackExists &&
+        (await this.tryUnlink(this.persistentFallbackDirectory, name)) === true;
+      const primaryHit =
+        primaryExists &&
+        (await this.tryUnlink(primaryDirectory, name)) === true;
+      return primaryHit || fallbackHit;
+    } finally {
+      this.removingNames.delete(name);
+    }
+  }
+
+  private async hasAttachment(
+    directory: string | undefined,
+    name: string,
+  ): Promise<boolean> {
+    if (!directory) return false;
+    try {
+      await fs.stat(path.join(directory, name));
+      return true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
+      throw error;
+    }
   }
 
   private async tryUnlink(
@@ -767,7 +807,7 @@ export class SessionAttachmentStore {
     let fallbackError: unknown;
     if (this.persistentFallbackDirectory) {
       try {
-        await this.removeDirectoryWithTombstone(
+        await this.removeDirectoryDurably(
           this.persistentFallbackDirectory,
           options.assertCanCommit,
         );
@@ -848,30 +888,6 @@ export class SessionAttachmentStore {
     } finally {
       await parent.handle.close().catch(() => undefined);
     }
-  }
-
-  /**
-   * Atomically detach `directory` by renaming it to a tombstone, then remove
-   * the tombstone. A concurrent writer that recreates the directory after the
-   * rename lands a fresh directory at the original path, which the tombstone
-   * removal never touches — so a deletion racing a session restore cannot
-   * sweep up a successor directory. ENOENT (nothing to delete) is a no-op.
-   */
-  private async removeDirectoryWithTombstone(
-    directory: string,
-    assertCanCommit?: () => void,
-  ): Promise<void> {
-    assertCanCommit?.();
-    const tombstone = path.join(
-      path.dirname(directory),
-      `.${path.basename(directory)}.deleting-${randomUUID()}`,
-    );
-    try {
-      await fs.rename(directory, tombstone);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-    }
-    await fs.rm(tombstone, { recursive: true, force: true });
   }
 
   private assertStored(reference: SessionAttachmentReference): void {

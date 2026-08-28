@@ -1882,5 +1882,167 @@ describe('SessionAttachmentStore', () => {
         await fs.rm(targetRoot, { recursive: true, force: true });
       }
     });
+
+    it('does not unlink an absent root when the other root holds the attachment', async () => {
+      const { main, fallback } = await createRoots();
+      const store = new SessionAttachmentStore(main, sessionId, fallback);
+      const realUnlink = fs.unlink.bind(fs);
+      const unlink = vi
+        .spyOn(fs, 'unlink')
+        .mockImplementation(async (filePath) => {
+          if (String(filePath).startsWith(fallback)) {
+            throw Object.assign(new Error('fallback unavailable'), {
+              code: 'EACCES',
+            });
+          }
+          return realUnlink(filePath);
+        });
+      try {
+        await writeIn(main, 'primary.txt', 'primary');
+        await expect(store.remove('primary.txt')).resolves.toBe(true);
+
+        unlink.mockImplementation(async (filePath) => {
+          if (String(filePath).startsWith(main)) {
+            throw Object.assign(new Error('primary unavailable'), {
+              code: 'EACCES',
+            });
+          }
+          return realUnlink(filePath);
+        });
+        await writeIn(fallback, 'legacy.txt', 'legacy');
+        await expect(store.remove('legacy.txt')).resolves.toBe(true);
+      } finally {
+        unlink.mockRestore();
+        await store.close();
+        await fs.rm(main, { recursive: true, force: true });
+        await fs.rm(fallback, { recursive: true, force: true });
+      }
+    });
+
+    it('does not mutate either copy when a root lookup is denied', async () => {
+      const { main, fallback } = await createRoots();
+      const store = new SessionAttachmentStore(main, sessionId, fallback);
+      await writeIn(main, 'notes.txt', 'primary');
+      await writeIn(fallback, 'notes.txt', 'fallback');
+      const realStat = fs.stat.bind(fs);
+      const stat = vi
+        .spyOn(fs, 'stat')
+        .mockImplementation((filePath, options) => {
+          if (String(filePath).startsWith(fallback)) {
+            throw Object.assign(new Error('fallback unavailable'), {
+              code: 'EACCES',
+            });
+          }
+          return realStat(filePath, options);
+        });
+      try {
+        await expect(store.remove('notes.txt')).rejects.toThrow(
+          'fallback unavailable',
+        );
+        expect(
+          await fs.readFile(path.join(main, sessionDir, 'notes.txt')),
+        ).toEqual(Buffer.from('primary'));
+        expect(
+          await fs.readFile(path.join(fallback, sessionDir, 'notes.txt')),
+        ).toEqual(Buffer.from('fallback'));
+      } finally {
+        stat.mockRestore();
+        await store.close();
+        await fs.rm(main, { recursive: true, force: true });
+        await fs.rm(fallback, { recursive: true, force: true });
+      }
+    });
+
+    it('keeps a concurrent same-name upload while removing a fallback attachment', async () => {
+      const { main, fallback } = await createRoots();
+      const store = new SessionAttachmentStore(main, sessionId, fallback);
+      await writeIn(fallback, 'notes.txt', 'legacy');
+      const realStat = fs.stat.bind(fs);
+      let notifyPrimaryStatPaused = () => {};
+      const primaryStatPaused = new Promise<void>((resolve) => {
+        notifyPrimaryStatPaused = resolve;
+      });
+      let resumePrimaryStat = () => {};
+      const primaryStatResume = new Promise<void>((resolve) => {
+        resumePrimaryStat = resolve;
+      });
+      const primaryPath = path.join(main, sessionDir, 'notes.txt');
+      const stat = vi.spyOn(fs, 'stat').mockImplementation(async (filePath) => {
+        if (String(filePath) === primaryPath) {
+          notifyPrimaryStatPaused();
+          await primaryStatResume;
+        }
+        return realStat(filePath);
+      });
+      try {
+        const removing = store.remove('notes.txt');
+        await primaryStatPaused;
+        const uploaded = await store.putAttachment(
+          new TextEncoder().encode('fresh'),
+          'text/plain',
+          'notes.txt',
+        );
+        resumePrimaryStat();
+
+        await expect(removing).resolves.toBe(true);
+        expect(uploaded.attachmentId).not.toBe('notes.txt');
+        expect(await store.read(uploaded.attachmentId)).toEqual({
+          data: Buffer.from('fresh'),
+          mimeType: 'text/plain',
+        });
+      } finally {
+        stat.mockRestore();
+        resumePrimaryStat();
+        await store.close();
+        await fs.rm(main, { recursive: true, force: true });
+        await fs.rm(fallback, { recursive: true, force: true });
+      }
+    });
+
+    it('copies fallback attachments when the primary directory is degraded', async () => {
+      const { main, fallback } = await createRoots();
+      const source = new SessionAttachmentStore(main, sessionId, fallback);
+      const targetRoot = await fs.mkdtemp(
+        path.join(tmpdir(), 'qwen-attachments-target-'),
+      );
+      const target = new SessionAttachmentStore(targetRoot, sessionId);
+      await fs.mkdir(path.join(main, sessionDir), { recursive: true });
+      await writeIn(fallback, 'legacy.txt', 'legacy');
+      const readdir = vi
+        .spyOn(fs, 'readdir')
+        .mockRejectedValueOnce(
+          Object.assign(new Error('primary unavailable'), { code: 'EIO' }),
+        );
+      try {
+        await expect(target.copyFrom(source)).resolves.toBeUndefined();
+        expect(await target.read('legacy.txt')).toEqual({
+          data: Buffer.from('legacy'),
+          mimeType: 'text/plain',
+        });
+      } finally {
+        readdir.mockRestore();
+        await source.close();
+        await target.delete();
+        await fs.rm(main, { recursive: true, force: true });
+        await fs.rm(fallback, { recursive: true, force: true });
+        await fs.rm(targetRoot, { recursive: true, force: true });
+      }
+    });
+
+    it('retries a claimed fallback tombstone', async () => {
+      const { main, fallback } = await createRoots();
+      const store = new SessionAttachmentStore(main, sessionId, fallback);
+      const tombstone = path.join(fallback, `.${sessionDir}.deleting`);
+      await fs.mkdir(tombstone, { recursive: true });
+      await fs.writeFile(path.join(tombstone, 'legacy.txt'), 'legacy');
+
+      await store.delete();
+
+      await expect(fs.stat(tombstone)).rejects.toMatchObject({
+        code: 'ENOENT',
+      });
+      await fs.rm(main, { recursive: true, force: true });
+      await fs.rm(fallback, { recursive: true, force: true });
+    });
   });
 });
