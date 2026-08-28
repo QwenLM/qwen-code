@@ -355,7 +355,7 @@ jobs:
           node scripts/lint.js --setup
           node scripts/lint.js --actionlint
           node scripts/lint.js --yamllint
-          node --test --test-concurrency=1 ${{ env.HELPER_TESTS }}
+          node --test ${{ env.HELPER_TESTS }}
 
       # Avoid setup-node downloads on ECS, where nodejs.org may be unreachable
       # through the egress proxy; reuse the machine's Node instead.
@@ -496,7 +496,7 @@ jobs:
       # regression tests. Linux-only (they're platform-independent).
       - name: 'Run .github/scripts helper tests'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
-        run: 'node --test --test-concurrency=1 ${{ env.HELPER_TESTS }}'
+        run: 'node --test ${{ env.HELPER_TESTS }}'
 
       # The install-script packaging suite needs zip/unzip, and throws on a
       # CI host that ships neither, so a silent skip there is impossible.
