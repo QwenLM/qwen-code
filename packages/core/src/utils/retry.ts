@@ -385,7 +385,7 @@ export async function retryWithBackoff<T>(
         );
         // Intentionally throws a plain Error with no `.status`: a 429 status
         // would make isRateLimitError() return true and re-trigger the
-        // stream-side rate-limit retry loop in geminiChat.ts (up to 10 retries
+        // stream-side rate-limit retry loop in llm-chat.ts (up to 10 retries
         // at 1-5 min delays), reintroducing the silent hang this fast-fail
         // eliminates. This also skips model fallback — quota exhaustion is
         // provider-scoped and temporary, so the user should retry after the

@@ -53,10 +53,10 @@ const mockReportOpenAiChunk = vi.hoisted(() => vi.fn());
 
 vi.mock('./converter.js', () => ({
   OpenAIContentConverter: {
-    convertGeminiRequestToOpenAI: vi.fn(),
-    convertOpenAIResponseToGemini: vi.fn(),
-    convertOpenAIChunkToGemini: vi.fn(),
-    convertGeminiToolsToOpenAI: vi.fn(),
+    convertLlmRequestToOpenAI: vi.fn(),
+    convertOpenAIResponseToLlm: vi.fn(),
+    convertOpenAIChunkToLlm: vi.fn(),
+    convertLlmToolsToOpenAI: vi.fn(),
   },
 }));
 vi.mock('openai');
@@ -164,13 +164,13 @@ describe('ContentGenerationPipeline', () => {
         model: 'test-model',
         usage: { prompt_tokens: 10, completion_tokens: 20, total_tokens: 30 },
       } as OpenAI.Chat.ChatCompletion;
-      const mockGeminiResponse = new GenerateContentResponse();
+      const mockLlmResponse = new GenerateContentResponse();
 
-      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue(
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue(
         mockMessages,
       );
-      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
-        mockGeminiResponse,
+      (mockConverter.convertOpenAIResponseToLlm as Mock).mockReturnValue(
+        mockLlmResponse,
       );
       (mockClient.chat.completions.create as Mock).mockResolvedValue(
         mockOpenAIResponse,
@@ -182,8 +182,8 @@ describe('ContentGenerationPipeline', () => {
       const result = await pipeline.execute(request, userPromptId);
 
       // Assert
-      expect(result).toBe(mockGeminiResponse);
-      expect(mockConverter.convertGeminiRequestToOpenAI).toHaveBeenCalledWith(
+      expect(result).toBe(mockLlmResponse);
+      expect(mockConverter.convertLlmRequestToOpenAI).toHaveBeenCalledWith(
         request,
         expect.objectContaining({
           model: 'test-model',
@@ -210,7 +210,7 @@ describe('ContentGenerationPipeline', () => {
         telemetryAttempt,
         mockOpenAIResponse,
       );
-      expect(mockConverter.convertOpenAIResponseToGemini).toHaveBeenCalledWith(
+      expect(mockConverter.convertOpenAIResponseToLlm).toHaveBeenCalledWith(
         mockOpenAIResponse,
         expect.objectContaining({
           model: 'test-model',
@@ -238,13 +238,13 @@ describe('ContentGenerationPipeline', () => {
         created: Date.now(),
         model: 'override-model',
       } as OpenAI.Chat.ChatCompletion;
-      const mockGeminiResponse = new GenerateContentResponse();
+      const mockLlmResponse = new GenerateContentResponse();
 
-      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue(
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue(
         mockMessages,
       );
-      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
-        mockGeminiResponse,
+      (mockConverter.convertOpenAIResponseToLlm as Mock).mockReturnValue(
+        mockLlmResponse,
       );
       (mockClient.chat.completions.create as Mock).mockResolvedValue(
         mockOpenAIResponse,
@@ -254,8 +254,8 @@ describe('ContentGenerationPipeline', () => {
       const result = await pipeline.execute(request, userPromptId);
 
       // Assert — request.model takes precedence over contentGeneratorConfig.model
-      expect(result).toBe(mockGeminiResponse);
-      expect(mockConverter.convertGeminiRequestToOpenAI).toHaveBeenCalledWith(
+      expect(result).toBe(mockLlmResponse);
+      expect(mockConverter.convertLlmRequestToOpenAI).toHaveBeenCalledWith(
         request,
         expect.objectContaining({
           model: 'override-model',
@@ -286,16 +286,16 @@ describe('ContentGenerationPipeline', () => {
         created: Date.now(),
         model: 'test-model',
       } as OpenAI.Chat.ChatCompletion;
-      const mockGeminiResponse = new GenerateContentResponse();
+      const mockLlmResponse = new GenerateContentResponse();
 
       mockProvider.getRequestContextOverrides = vi.fn().mockReturnValue({
         splitToolMedia: true,
       });
-      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue(
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue(
         mockMessages,
       );
-      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
-        mockGeminiResponse,
+      (mockConverter.convertOpenAIResponseToLlm as Mock).mockReturnValue(
+        mockLlmResponse,
       );
       (mockClient.chat.completions.create as Mock).mockResolvedValue(
         mockOpenAIResponse,
@@ -303,7 +303,7 @@ describe('ContentGenerationPipeline', () => {
 
       await pipeline.execute(request, userPromptId);
 
-      expect(mockConverter.convertGeminiRequestToOpenAI).toHaveBeenCalledWith(
+      expect(mockConverter.convertLlmRequestToOpenAI).toHaveBeenCalledWith(
         request,
         expect.objectContaining({
           splitToolMedia: true,
@@ -328,17 +328,17 @@ describe('ContentGenerationPipeline', () => {
         created: Date.now(),
         model: 'test-model',
       } as OpenAI.Chat.ChatCompletion;
-      const mockGeminiResponse = new GenerateContentResponse();
+      const mockLlmResponse = new GenerateContentResponse();
 
       mockContentGeneratorConfig.splitToolMedia = true;
       mockProvider.getRequestContextOverrides = vi.fn().mockReturnValue({
         splitToolMedia: false,
       });
-      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue(
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue(
         mockMessages,
       );
-      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
-        mockGeminiResponse,
+      (mockConverter.convertOpenAIResponseToLlm as Mock).mockReturnValue(
+        mockLlmResponse,
       );
       (mockClient.chat.completions.create as Mock).mockResolvedValue(
         mockOpenAIResponse,
@@ -346,7 +346,7 @@ describe('ContentGenerationPipeline', () => {
 
       await pipeline.execute(request, userPromptId);
 
-      expect(mockConverter.convertGeminiRequestToOpenAI).toHaveBeenCalledWith(
+      expect(mockConverter.convertLlmRequestToOpenAI).toHaveBeenCalledWith(
         request,
         expect.objectContaining({
           splitToolMedia: false,
@@ -371,18 +371,18 @@ describe('ContentGenerationPipeline', () => {
         created: Date.now(),
         model: 'test-model',
       } as OpenAI.Chat.ChatCompletion;
-      const mockGeminiResponse = new GenerateContentResponse();
+      const mockLlmResponse = new GenerateContentResponse();
 
       // Neither the provider nor the content generator config sets
       // splitToolMedia — it must default to true so tool-returned images are
       // moved out of the spec-violating `role: "tool"` message (#4876).
       mockProvider.getRequestContextOverrides = vi.fn().mockReturnValue({});
       mockContentGeneratorConfig.splitToolMedia = undefined;
-      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue(
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue(
         mockMessages,
       );
-      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
-        mockGeminiResponse,
+      (mockConverter.convertOpenAIResponseToLlm as Mock).mockReturnValue(
+        mockLlmResponse,
       );
       (mockClient.chat.completions.create as Mock).mockResolvedValue(
         mockOpenAIResponse,
@@ -390,7 +390,7 @@ describe('ContentGenerationPipeline', () => {
 
       await pipeline.execute(request, userPromptId);
 
-      expect(mockConverter.convertGeminiRequestToOpenAI).toHaveBeenCalledWith(
+      expect(mockConverter.convertLlmRequestToOpenAI).toHaveBeenCalledWith(
         request,
         expect.objectContaining({
           splitToolMedia: true,
@@ -415,15 +415,15 @@ describe('ContentGenerationPipeline', () => {
         created: Date.now(),
         model: 'test-model',
       } as OpenAI.Chat.ChatCompletion;
-      const mockGeminiResponse = new GenerateContentResponse();
+      const mockLlmResponse = new GenerateContentResponse();
 
       mockProvider.getRequestContextOverrides = vi.fn().mockReturnValue({});
       mockContentGeneratorConfig.toolResultContentFormat = 'string';
-      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue(
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue(
         mockMessages,
       );
-      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
-        mockGeminiResponse,
+      (mockConverter.convertOpenAIResponseToLlm as Mock).mockReturnValue(
+        mockLlmResponse,
       );
       (mockClient.chat.completions.create as Mock).mockResolvedValue(
         mockOpenAIResponse,
@@ -431,7 +431,7 @@ describe('ContentGenerationPipeline', () => {
 
       await pipeline.execute(request, userPromptId);
 
-      expect(mockConverter.convertGeminiRequestToOpenAI).toHaveBeenCalledWith(
+      expect(mockConverter.convertLlmRequestToOpenAI).toHaveBeenCalledWith(
         request,
         expect.objectContaining({
           toolResultContentFormat: 'string',
@@ -456,17 +456,17 @@ describe('ContentGenerationPipeline', () => {
         created: Date.now(),
         model: 'test-model',
       } as OpenAI.Chat.ChatCompletion;
-      const mockGeminiResponse = new GenerateContentResponse();
+      const mockLlmResponse = new GenerateContentResponse();
 
       mockContentGeneratorConfig.toolResultContentFormat = 'parts';
       mockProvider.getRequestContextOverrides = vi.fn().mockReturnValue({
         toolResultContentFormat: 'string',
       });
-      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue(
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue(
         mockMessages,
       );
-      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
-        mockGeminiResponse,
+      (mockConverter.convertOpenAIResponseToLlm as Mock).mockReturnValue(
+        mockLlmResponse,
       );
       (mockClient.chat.completions.create as Mock).mockResolvedValue(
         mockOpenAIResponse,
@@ -474,7 +474,7 @@ describe('ContentGenerationPipeline', () => {
 
       await pipeline.execute(request, userPromptId);
 
-      expect(mockConverter.convertGeminiRequestToOpenAI).toHaveBeenCalledWith(
+      expect(mockConverter.convertLlmRequestToOpenAI).toHaveBeenCalledWith(
         request,
         expect.objectContaining({
           toolResultContentFormat: 'string',
@@ -501,13 +501,13 @@ describe('ContentGenerationPipeline', () => {
         created: Date.now(),
         model: 'test-model',
       } as OpenAI.Chat.ChatCompletion;
-      const mockGeminiResponse = new GenerateContentResponse();
+      const mockLlmResponse = new GenerateContentResponse();
 
-      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue(
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue(
         mockMessages,
       );
-      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
-        mockGeminiResponse,
+      (mockConverter.convertOpenAIResponseToLlm as Mock).mockReturnValue(
+        mockLlmResponse,
       );
       (mockClient.chat.completions.create as Mock).mockResolvedValue(
         mockOpenAIResponse,
@@ -517,8 +517,8 @@ describe('ContentGenerationPipeline', () => {
       const result = await pipeline.execute(request, userPromptId);
 
       // Assert — falls back to contentGeneratorConfig.model
-      expect(result).toBe(mockGeminiResponse);
-      expect(mockConverter.convertGeminiRequestToOpenAI).toHaveBeenCalledWith(
+      expect(result).toBe(mockLlmResponse);
+      expect(mockConverter.convertLlmRequestToOpenAI).toHaveBeenCalledWith(
         request,
         expect.objectContaining({
           model: 'test-model',
@@ -565,16 +565,16 @@ describe('ContentGenerationPipeline', () => {
           { message: { content: 'Hello response' }, finish_reason: 'stop' },
         ],
       } as OpenAI.Chat.ChatCompletion;
-      const mockGeminiResponse = new GenerateContentResponse();
+      const mockLlmResponse = new GenerateContentResponse();
 
-      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue(
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue(
         mockMessages,
       );
-      (mockConverter.convertGeminiToolsToOpenAI as Mock).mockResolvedValue(
+      (mockConverter.convertLlmToolsToOpenAI as Mock).mockResolvedValue(
         mockTools,
       );
-      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
-        mockGeminiResponse,
+      (mockConverter.convertOpenAIResponseToLlm as Mock).mockReturnValue(
+        mockLlmResponse,
       );
       (mockClient.chat.completions.create as Mock).mockResolvedValue(
         mockOpenAIResponse,
@@ -584,14 +584,14 @@ describe('ContentGenerationPipeline', () => {
       const result = await pipeline.execute(request, userPromptId);
 
       // Assert
-      expect(result).toBe(mockGeminiResponse);
-      expect(mockConverter.convertGeminiRequestToOpenAI).toHaveBeenCalledWith(
+      expect(result).toBe(mockLlmResponse);
+      expect(mockConverter.convertLlmRequestToOpenAI).toHaveBeenCalledWith(
         request,
         expect.objectContaining({
           model: 'test-model',
         }),
       );
-      expect(mockConverter.convertGeminiToolsToOpenAI).toHaveBeenCalledWith(
+      expect(mockConverter.convertLlmToolsToOpenAI).toHaveBeenCalledWith(
         request.config!.tools,
         'auto',
       );
@@ -621,13 +621,13 @@ describe('ContentGenerationPipeline', () => {
         id: 'response-id',
         choices: [{ message: { content: 'Response' }, finish_reason: 'stop' }],
       } as OpenAI.Chat.ChatCompletion;
-      const mockGeminiResponse = new GenerateContentResponse();
+      const mockLlmResponse = new GenerateContentResponse();
 
-      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue(
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue(
         mockMessages,
       );
-      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
-        mockGeminiResponse,
+      (mockConverter.convertOpenAIResponseToLlm as Mock).mockReturnValue(
+        mockLlmResponse,
       );
       (mockClient.chat.completions.create as Mock).mockResolvedValue(
         mockOpenAIResponse,
@@ -637,7 +637,7 @@ describe('ContentGenerationPipeline', () => {
       await pipeline.execute(request, userPromptId);
 
       // Assert — tools should NOT be in the request
-      expect(mockConverter.convertGeminiToolsToOpenAI).not.toHaveBeenCalled();
+      expect(mockConverter.convertLlmToolsToOpenAI).not.toHaveBeenCalled();
       const apiCall = (mockClient.chat.completions.create as Mock).mock
         .calls[0][0];
       expect(apiCall.tools).toBeUndefined();
@@ -686,13 +686,13 @@ describe('ContentGenerationPipeline', () => {
           },
         ],
       } as OpenAI.Chat.ChatCompletion;
-      const mockGeminiResponse = new GenerateContentResponse();
+      const mockLlmResponse = new GenerateContentResponse();
 
-      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue(
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue(
         mockMessages,
       );
-      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
-        mockGeminiResponse,
+      (mockConverter.convertOpenAIResponseToLlm as Mock).mockReturnValue(
+        mockLlmResponse,
       );
       (mockClient.chat.completions.create as Mock).mockResolvedValue(
         mockOpenAIResponse,
@@ -1090,13 +1090,13 @@ describe('ContentGenerationPipeline', () => {
         },
       };
 
-      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([
         { role: 'user', content: 'Summarize' },
       ]);
-      (mockConverter.convertGeminiToolsToOpenAI as Mock).mockResolvedValue([
+      (mockConverter.convertLlmToolsToOpenAI as Mock).mockResolvedValue([
         { type: 'function', function: { name: 'respond_in_schema' } },
       ]);
-      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+      (mockConverter.convertOpenAIResponseToLlm as Mock).mockReturnValue(
         new GenerateContentResponse(),
       );
       (mockClient.chat.completions.create as Mock).mockResolvedValue({
@@ -1165,13 +1165,13 @@ describe('ContentGenerationPipeline', () => {
         },
       };
 
-      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([
         { role: 'user', content: 'Summarize' },
       ]);
-      (mockConverter.convertGeminiToolsToOpenAI as Mock).mockResolvedValue([
+      (mockConverter.convertLlmToolsToOpenAI as Mock).mockResolvedValue([
         { type: 'function', function: { name: 'respond_in_schema' } },
       ]);
-      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+      (mockConverter.convertOpenAIResponseToLlm as Mock).mockReturnValue(
         new GenerateContentResponse(),
       );
       (mockClient.chat.completions.create as Mock).mockResolvedValue({
@@ -1221,10 +1221,10 @@ describe('ContentGenerationPipeline', () => {
         config: { thinkingConfig: { includeThoughts: true } },
       };
 
-      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([
         { role: 'user', content: 'Summarize' },
       ]);
-      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+      (mockConverter.convertOpenAIResponseToLlm as Mock).mockReturnValue(
         new GenerateContentResponse(),
       );
       (mockClient.chat.completions.create as Mock).mockResolvedValue({
@@ -1272,10 +1272,10 @@ describe('ContentGenerationPipeline', () => {
         realProvider.buildRequest(req, 'prompt-id'),
       );
 
-      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([
         { role: 'user', content: 'Summarize' },
       ]);
-      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+      (mockConverter.convertOpenAIResponseToLlm as Mock).mockReturnValue(
         new GenerateContentResponse(),
       );
       (mockClient.chat.completions.create as Mock).mockResolvedValue({
@@ -1350,13 +1350,13 @@ describe('ContentGenerationPipeline', () => {
         },
       };
 
-      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([
         { role: 'user', content: 'Summarize' },
       ]);
-      (mockConverter.convertGeminiToolsToOpenAI as Mock).mockResolvedValue([
+      (mockConverter.convertLlmToolsToOpenAI as Mock).mockResolvedValue([
         { type: 'function', function: { name: 'respond_in_schema' } },
       ]);
-      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+      (mockConverter.convertOpenAIResponseToLlm as Mock).mockReturnValue(
         new GenerateContentResponse(),
       );
       (mockClient.chat.completions.create as Mock).mockResolvedValue({
@@ -1391,13 +1391,13 @@ describe('ContentGenerationPipeline', () => {
         ...req,
         enable_thinking: true,
       }));
-      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([
         { role: 'user', content: 'What is 2+2?' },
       ]);
-      (mockConverter.convertGeminiToolsToOpenAI as Mock).mockResolvedValue([
+      (mockConverter.convertLlmToolsToOpenAI as Mock).mockResolvedValue([
         { type: 'function', function: { name: 'respond_in_schema' } },
       ]);
-      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+      (mockConverter.convertOpenAIResponseToLlm as Mock).mockReturnValue(
         new GenerateContentResponse(),
       );
 
@@ -1505,10 +1505,10 @@ describe('ContentGenerationPipeline', () => {
           contentGeneratorConfig: mockContentGeneratorConfig,
         });
 
-        (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
+        (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([
           { role: 'user', content: 'What is 2+2?' },
         ]);
-        (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+        (mockConverter.convertOpenAIResponseToLlm as Mock).mockReturnValue(
           new GenerateContentResponse(),
         );
 
@@ -1568,7 +1568,7 @@ describe('ContentGenerationPipeline', () => {
         ...req,
         enable_thinking: true,
       }));
-      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([
         { role: 'user', content: 'What is 2+2?' },
       ]);
 
@@ -1605,7 +1605,7 @@ describe('ContentGenerationPipeline', () => {
         ...req,
         enable_thinking: true,
       }));
-      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([
         { role: 'user', content: 'What is 2+2?' },
       ]);
 
@@ -1657,7 +1657,7 @@ describe('ContentGenerationPipeline', () => {
         };
         pipeline = new ContentGenerationPipeline(mockConfig);
 
-        (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
+        (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([
           { role: 'user', content: 'Hello' },
         ]);
         const error = Object.assign(new Error(message), {
@@ -1699,13 +1699,13 @@ describe('ContentGenerationPipeline', () => {
         id: 'response-id',
         choices: [{ message: { content: 'run tests' }, finish_reason: 'stop' }],
       } as OpenAI.Chat.ChatCompletion;
-      const mockGeminiResponse = new GenerateContentResponse();
+      const mockLlmResponse = new GenerateContentResponse();
 
-      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue(
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue(
         mockMessages,
       );
-      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
-        mockGeminiResponse,
+      (mockConverter.convertOpenAIResponseToLlm as Mock).mockReturnValue(
+        mockLlmResponse,
       );
       (mockClient.chat.completions.create as Mock).mockResolvedValue(
         mockOpenAIResponse,
@@ -1737,10 +1737,10 @@ describe('ContentGenerationPipeline', () => {
         config: { thinkingConfig: { includeThoughts: false } },
       };
 
-      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([
         { role: 'user', content: 'Classify action' },
       ]);
-      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+      (mockConverter.convertOpenAIResponseToLlm as Mock).mockReturnValue(
         new GenerateContentResponse(),
       );
       (mockClient.chat.completions.create as Mock).mockResolvedValue({
@@ -1775,13 +1775,13 @@ describe('ContentGenerationPipeline', () => {
         id: 'response-id',
         choices: [{ message: { content: 'Hi there' }, finish_reason: 'stop' }],
       } as OpenAI.Chat.ChatCompletion;
-      const mockGeminiResponse = new GenerateContentResponse();
+      const mockLlmResponse = new GenerateContentResponse();
 
-      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue(
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue(
         mockMessages,
       );
-      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
-        mockGeminiResponse,
+      (mockConverter.convertOpenAIResponseToLlm as Mock).mockReturnValue(
+        mockLlmResponse,
       );
       (mockClient.chat.completions.create as Mock).mockResolvedValue(
         mockOpenAIResponse,
@@ -1817,14 +1817,14 @@ describe('ContentGenerationPipeline', () => {
         config: { thinkingConfig: { includeThoughts: false } },
       };
 
-      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([
         { role: 'user', content: 'Suggest next' },
       ]);
       (mockProvider.buildRequest as Mock).mockImplementation((request) => ({
         ...request,
         enable_thinking: true,
       }));
-      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+      (mockConverter.convertOpenAIResponseToLlm as Mock).mockReturnValue(
         new GenerateContentResponse(),
       );
       (mockClient.chat.completions.create as Mock).mockResolvedValue({
@@ -1860,10 +1860,10 @@ describe('ContentGenerationPipeline', () => {
         contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
       };
 
-      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([
         { role: 'user', content: 'Hello' },
       ]);
-      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+      (mockConverter.convertOpenAIResponseToLlm as Mock).mockReturnValue(
         new GenerateContentResponse(),
       );
       (mockClient.chat.completions.create as Mock).mockResolvedValue({
@@ -1898,10 +1898,10 @@ describe('ContentGenerationPipeline', () => {
         config: { thinkingConfig: { includeThoughts: false } },
       };
 
-      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([
         { role: 'user', content: 'Suggest' },
       ]);
-      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+      (mockConverter.convertOpenAIResponseToLlm as Mock).mockReturnValue(
         new GenerateContentResponse(),
       );
       (mockClient.chat.completions.create as Mock).mockResolvedValue({
@@ -1938,10 +1938,10 @@ describe('ContentGenerationPipeline', () => {
         config: { thinkingConfig: { includeThoughts: false } },
       };
 
-      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([
         { role: 'user', content: 'Suggest' },
       ]);
-      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+      (mockConverter.convertOpenAIResponseToLlm as Mock).mockReturnValue(
         new GenerateContentResponse(),
       );
       (mockClient.chat.completions.create as Mock).mockResolvedValue({
@@ -1984,10 +1984,10 @@ describe('ContentGenerationPipeline', () => {
         config: { thinkingConfig: { includeThoughts: false } },
       };
 
-      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([
         { role: 'user', content: 'Classify action' },
       ]);
-      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+      (mockConverter.convertOpenAIResponseToLlm as Mock).mockReturnValue(
         new GenerateContentResponse(),
       );
       (mockClient.chat.completions.create as Mock).mockResolvedValue({
@@ -2019,10 +2019,10 @@ describe('ContentGenerationPipeline', () => {
         contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
       };
 
-      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([
         { role: 'user', content: 'Hello' },
       ]);
-      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+      (mockConverter.convertOpenAIResponseToLlm as Mock).mockReturnValue(
         new GenerateContentResponse(),
       );
       (mockClient.chat.completions.create as Mock).mockResolvedValue({
@@ -2057,10 +2057,10 @@ describe('ContentGenerationPipeline', () => {
         contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
       };
 
-      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([
         { role: 'user', content: 'Hello' },
       ]);
-      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+      (mockConverter.convertOpenAIResponseToLlm as Mock).mockReturnValue(
         new GenerateContentResponse(),
       );
       (mockClient.chat.completions.create as Mock).mockResolvedValue({
@@ -2097,10 +2097,10 @@ describe('ContentGenerationPipeline', () => {
         config: { thinkingConfig: { includeThoughts: false } },
       };
 
-      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([
         { role: 'user', content: 'Classify action' },
       ]);
-      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+      (mockConverter.convertOpenAIResponseToLlm as Mock).mockReturnValue(
         new GenerateContentResponse(),
       );
       (mockClient.chat.completions.create as Mock).mockResolvedValue({
@@ -2136,10 +2136,10 @@ describe('ContentGenerationPipeline', () => {
         config: { thinkingConfig: { includeThoughts: false } },
       };
 
-      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([
         { role: 'user', content: 'Classify action' },
       ]);
-      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+      (mockConverter.convertOpenAIResponseToLlm as Mock).mockReturnValue(
         new GenerateContentResponse(),
       );
       (mockClient.chat.completions.create as Mock).mockResolvedValue({
@@ -2175,10 +2175,10 @@ describe('ContentGenerationPipeline', () => {
         config: { thinkingConfig: { includeThoughts: false } },
       };
 
-      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([
         { role: 'user', content: 'Classify action' },
       ]);
-      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+      (mockConverter.convertOpenAIResponseToLlm as Mock).mockReturnValue(
         new GenerateContentResponse(),
       );
       (mockClient.chat.completions.create as Mock).mockResolvedValue({
@@ -2213,10 +2213,10 @@ describe('ContentGenerationPipeline', () => {
         config: { thinkingConfig: { includeThoughts: false } },
       };
 
-      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([
         { role: 'user', content: 'Classify action' },
       ]);
-      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+      (mockConverter.convertOpenAIResponseToLlm as Mock).mockReturnValue(
         new GenerateContentResponse(),
       );
       (mockClient.chat.completions.create as Mock).mockResolvedValue({
@@ -2251,10 +2251,10 @@ describe('ContentGenerationPipeline', () => {
         config: { thinkingConfig: { includeThoughts: false } },
       };
 
-      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([
         { role: 'user', content: 'Classify action' },
       ]);
-      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+      (mockConverter.convertOpenAIResponseToLlm as Mock).mockReturnValue(
         new GenerateContentResponse(),
       );
       (mockClient.chat.completions.create as Mock).mockResolvedValue({
@@ -2289,14 +2289,14 @@ describe('ContentGenerationPipeline', () => {
         contents: [{ parts: [{ text: 'Suggest' }], role: 'user' }],
         config: { thinkingConfig: { includeThoughts: false } },
       };
-      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([
         { role: 'user', content: 'Suggest' },
       ]);
       (mockProvider.buildRequest as Mock).mockImplementation((request) => ({
         ...request,
         enable_thinking: true,
       }));
-      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+      (mockConverter.convertOpenAIResponseToLlm as Mock).mockReturnValue(
         new GenerateContentResponse(),
       );
       (mockClient.chat.completions.create as Mock).mockResolvedValue({
@@ -2328,7 +2328,7 @@ describe('ContentGenerationPipeline', () => {
         contents: [{ parts: [{ text: 'Suggest' }], role: 'user' }],
         config: { thinkingConfig: { includeThoughts: false } },
       };
-      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([
         { role: 'user', content: 'Suggest' },
       ]);
       (mockProvider.buildRequest as Mock).mockImplementation((request) => ({
@@ -2341,7 +2341,7 @@ describe('ContentGenerationPipeline', () => {
           preserved: true,
         },
       }));
-      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+      (mockConverter.convertOpenAIResponseToLlm as Mock).mockReturnValue(
         new GenerateContentResponse(),
       );
       (mockClient.chat.completions.create as Mock).mockResolvedValue({
@@ -2386,10 +2386,10 @@ describe('ContentGenerationPipeline', () => {
         config: { thinkingConfig: { includeThoughts: false } },
       };
 
-      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([
         { role: 'user', content: 'Summarize' },
       ]);
-      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+      (mockConverter.convertOpenAIResponseToLlm as Mock).mockReturnValue(
         new GenerateContentResponse(),
       );
       (mockClient.chat.completions.create as Mock).mockResolvedValue({
@@ -2423,14 +2423,14 @@ describe('ContentGenerationPipeline', () => {
         config: { thinkingConfig: { includeThoughts: false } },
       };
 
-      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([
         { role: 'user', content: 'Summarize' },
       ]);
       (mockProvider.buildRequest as Mock).mockImplementation((request) => ({
         ...request,
         enable_thinking: true,
       }));
-      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+      (mockConverter.convertOpenAIResponseToLlm as Mock).mockReturnValue(
         new GenerateContentResponse(),
       );
       (mockClient.chat.completions.create as Mock).mockResolvedValue({
@@ -2465,10 +2465,10 @@ describe('ContentGenerationPipeline', () => {
         contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
       };
 
-      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([
         { role: 'user', content: 'Hello' },
       ]);
-      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+      (mockConverter.convertOpenAIResponseToLlm as Mock).mockReturnValue(
         new GenerateContentResponse(),
       );
       (mockClient.chat.completions.create as Mock).mockResolvedValue({
@@ -2508,10 +2508,10 @@ describe('ContentGenerationPipeline', () => {
         config: { thinkingConfig: { includeThoughts: false } },
       };
 
-      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([
         { role: 'user', content: 'Hi' },
       ]);
-      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+      (mockConverter.convertOpenAIResponseToLlm as Mock).mockReturnValue(
         new GenerateContentResponse(),
       );
       (mockClient.chat.completions.create as Mock).mockResolvedValue({
@@ -2549,10 +2549,10 @@ describe('ContentGenerationPipeline', () => {
         config: { thinkingConfig: { includeThoughts: false } },
       };
 
-      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([
         { role: 'user', content: 'Hi' },
       ]);
-      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+      (mockConverter.convertOpenAIResponseToLlm as Mock).mockReturnValue(
         new GenerateContentResponse(),
       );
       (mockClient.chat.completions.create as Mock).mockResolvedValue({
@@ -2589,10 +2589,10 @@ describe('ContentGenerationPipeline', () => {
         config: { thinkingConfig: { includeThoughts: false } },
       };
 
-      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([
         { role: 'user', content: 'Suggest' },
       ]);
-      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+      (mockConverter.convertOpenAIResponseToLlm as Mock).mockReturnValue(
         new GenerateContentResponse(),
       );
       (mockClient.chat.completions.create as Mock).mockResolvedValue({
@@ -2636,10 +2636,10 @@ describe('ContentGenerationPipeline', () => {
         config: { thinkingConfig: { includeThoughts: false } },
       };
 
-      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([
         { role: 'user', content: 'Suggest' },
       ]);
-      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+      (mockConverter.convertOpenAIResponseToLlm as Mock).mockReturnValue(
         new GenerateContentResponse(),
       );
       (mockClient.chat.completions.create as Mock).mockResolvedValue({
@@ -2676,10 +2676,10 @@ describe('ContentGenerationPipeline', () => {
         config: { thinkingConfig: { includeThoughts: false } },
       };
 
-      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([
         { role: 'user', content: 'Suggest' },
       ]);
-      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+      (mockConverter.convertOpenAIResponseToLlm as Mock).mockReturnValue(
         new GenerateContentResponse(),
       );
       (mockClient.chat.completions.create as Mock).mockResolvedValue({
@@ -2721,10 +2721,10 @@ describe('ContentGenerationPipeline', () => {
         config: { thinkingConfig: { includeThoughts: false } },
       };
 
-      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([
         { role: 'user', content: 'Suggest' },
       ]);
-      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+      (mockConverter.convertOpenAIResponseToLlm as Mock).mockReturnValue(
         new GenerateContentResponse(),
       );
       (mockClient.chat.completions.create as Mock).mockResolvedValue({
@@ -2760,10 +2760,10 @@ describe('ContentGenerationPipeline', () => {
         config: { thinkingConfig: { includeThoughts: false } },
       };
 
-      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([
         { role: 'user', content: 'Summarize' },
       ]);
-      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+      (mockConverter.convertOpenAIResponseToLlm as Mock).mockReturnValue(
         new GenerateContentResponse(),
       );
       (mockClient.chat.completions.create as Mock).mockResolvedValue({
@@ -2796,10 +2796,10 @@ describe('ContentGenerationPipeline', () => {
         contents: [{ parts: [{ text: 'Summarize' }], role: 'user' }],
         config: { thinkingConfig: { includeThoughts: false } },
       };
-      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([
         { role: 'user', content: 'Summarize' },
       ]);
-      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+      (mockConverter.convertOpenAIResponseToLlm as Mock).mockReturnValue(
         new GenerateContentResponse(),
       );
       (mockClient.chat.completions.create as Mock).mockResolvedValue({
@@ -2837,10 +2837,10 @@ describe('ContentGenerationPipeline', () => {
         config: { thinkingConfig: { includeThoughts: false } },
       };
 
-      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([
         { role: 'user', content: 'Summarize' },
       ]);
-      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+      (mockConverter.convertOpenAIResponseToLlm as Mock).mockReturnValue(
         new GenerateContentResponse(),
       );
       (mockClient.chat.completions.create as Mock).mockResolvedValue({
@@ -2876,10 +2876,10 @@ describe('ContentGenerationPipeline', () => {
         config: { thinkingConfig: { includeThoughts: false } },
       };
 
-      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([
         { role: 'user', content: 'Summarize' },
       ]);
-      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+      (mockConverter.convertOpenAIResponseToLlm as Mock).mockReturnValue(
         new GenerateContentResponse(),
       );
       (mockClient.chat.completions.create as Mock).mockResolvedValue({
@@ -2918,10 +2918,10 @@ describe('ContentGenerationPipeline', () => {
         config: { thinkingConfig: { includeThoughts: false } },
       };
 
-      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([
         { role: 'user', content: 'Summarize' },
       ]);
-      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+      (mockConverter.convertOpenAIResponseToLlm as Mock).mockReturnValue(
         new GenerateContentResponse(),
       );
       (mockClient.chat.completions.create as Mock).mockResolvedValue({
@@ -2945,7 +2945,7 @@ describe('ContentGenerationPipeline', () => {
       const userPromptId = 'test-prompt-id';
       const testError = new Error('API Error');
 
-      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([]);
       (mockClient.chat.completions.create as Mock).mockRejectedValue(testError);
 
       // Act & Assert
@@ -2970,7 +2970,7 @@ describe('ContentGenerationPipeline', () => {
         'connect ECONNREFUSED token@proxy.local:8080',
       );
 
-      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([]);
       (mockClient.chat.completions.create as Mock).mockRejectedValue(testError);
 
       await expect(pipeline.execute(request, userPromptId)).rejects.toThrow(
@@ -2995,8 +2995,8 @@ describe('ContentGenerationPipeline', () => {
         config: { abortSignal: abortController.signal },
       };
 
-      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
-      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockConverter.convertOpenAIResponseToLlm as Mock).mockReturnValue(
         new GenerateContentResponse(),
       );
       (mockClient.chat.completions.create as Mock).mockResolvedValue({
@@ -3023,7 +3023,7 @@ describe('ContentGenerationPipeline', () => {
       };
 
       let capturedSignal: AbortSignal | undefined;
-      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([]);
       (mockClient.chat.completions.create as Mock).mockImplementation(
         (_req: unknown, opts: { signal: AbortSignal }) => {
           capturedSignal = opts.signal;
@@ -3031,7 +3031,7 @@ describe('ContentGenerationPipeline', () => {
           return { choices: [{ message: { content: 'ok' } }] };
         },
       );
-      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+      (mockConverter.convertOpenAIResponseToLlm as Mock).mockReturnValue(
         new GenerateContentResponse(),
       );
 
@@ -3059,7 +3059,7 @@ describe('ContentGenerationPipeline', () => {
         ...req,
         enable_thinking: true,
       }));
-      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([]);
 
       const requiredThinkingError = Object.assign(
         new Error(
@@ -3135,19 +3135,19 @@ describe('ContentGenerationPipeline', () => {
         },
       };
 
-      const mockGeminiResponse1 = new GenerateContentResponse();
-      const mockGeminiResponse2 = new GenerateContentResponse();
-      mockGeminiResponse1.candidates = [
+      const mockLlmResponse1 = new GenerateContentResponse();
+      const mockLlmResponse2 = new GenerateContentResponse();
+      mockLlmResponse1.candidates = [
         { content: { parts: [{ text: 'Hello' }], role: 'model' } },
       ];
-      mockGeminiResponse2.candidates = [
+      mockLlmResponse2.candidates = [
         { content: { parts: [{ text: ' response' }], role: 'model' } },
       ];
 
-      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
-      (mockConverter.convertOpenAIChunkToGemini as Mock)
-        .mockReturnValueOnce(mockGeminiResponse1)
-        .mockReturnValueOnce(mockGeminiResponse2);
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockConverter.convertOpenAIChunkToLlm as Mock)
+        .mockReturnValueOnce(mockLlmResponse1)
+        .mockReturnValueOnce(mockLlmResponse2);
       mockProvider.getResponseParsingOptions = vi.fn().mockReturnValue({
         contentOnlyThinkingTagLeaks: true,
       });
@@ -3169,13 +3169,13 @@ describe('ContentGenerationPipeline', () => {
 
       // Assert
       expect(results).toHaveLength(2);
-      expect(results[0]).toBe(mockGeminiResponse1);
-      expect(results[1]).toBe(mockGeminiResponse2);
+      expect(results[0]).toBe(mockLlmResponse1);
+      expect(results[1]).toBe(mockLlmResponse2);
       const [, firstChunkContext] = (
-        mockConverter.convertOpenAIChunkToGemini as Mock
+        mockConverter.convertOpenAIChunkToLlm as Mock
       ).mock.calls[0];
       const [, secondChunkContext] = (
-        mockConverter.convertOpenAIChunkToGemini as Mock
+        mockConverter.convertOpenAIChunkToLlm as Mock
       ).mock.calls[1];
       expect(firstChunkContext).toEqual(
         expect.objectContaining({
@@ -3261,8 +3261,8 @@ describe('ContentGenerationPipeline', () => {
         { content: { parts: [{ text: 'Hello response' }], role: 'model' } },
       ];
 
-      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
-      (mockConverter.convertOpenAIChunkToGemini as Mock)
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockConverter.convertOpenAIChunkToLlm as Mock)
         .mockReturnValueOnce(mockEmptyCandidateResponse)
         .mockReturnValueOnce(mockEmptyChoicesResponse)
         .mockReturnValueOnce(mockMissingCandidatesResponse)
@@ -3304,8 +3304,8 @@ describe('ContentGenerationPipeline', () => {
         { content: { parts: [], role: 'model' }, index: 0 },
       ];
 
-      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
-      (mockConverter.convertOpenAIChunkToGemini as Mock).mockImplementation(
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockConverter.convertOpenAIChunkToLlm as Mock).mockImplementation(
         (_chunk, context) => {
           context.pendingThinkingTagCandidate = {
             text: '</think>',
@@ -3349,8 +3349,8 @@ describe('ContentGenerationPipeline', () => {
         { content: { parts: [], role: 'model' }, index: 0 },
       ];
 
-      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
-      (mockConverter.convertOpenAIChunkToGemini as Mock).mockImplementation(
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockConverter.convertOpenAIChunkToLlm as Mock).mockImplementation(
         (_chunk, context) => {
           context.pendingThinkingTagCandidate = { text: ' ' };
           return emptyResponse;
@@ -3388,8 +3388,8 @@ describe('ContentGenerationPipeline', () => {
         { content: { parts: [], role: 'model' }, index: 0 },
       ];
 
-      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
-      (mockConverter.convertOpenAIChunkToGemini as Mock).mockImplementation(
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockConverter.convertOpenAIChunkToLlm as Mock).mockImplementation(
         (_chunk, context) => {
           context.pendingThinkingTagCandidate = { text: ' ' };
           context.pendingUntrustedResponseParts = [
@@ -3440,8 +3440,8 @@ describe('ContentGenerationPipeline', () => {
         },
       ];
 
-      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
-      (mockConverter.convertOpenAIChunkToGemini as Mock).mockImplementation(
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockConverter.convertOpenAIChunkToLlm as Mock).mockImplementation(
         (_chunk, context) => {
           context.protocolTagSanitized = {
             tagName: 'think',
@@ -3505,8 +3505,8 @@ describe('ContentGenerationPipeline', () => {
         { content: { parts: [], role: 'model' }, index: 0 },
       ];
 
-      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
-      (mockConverter.convertOpenAIChunkToGemini as Mock).mockImplementation(
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockConverter.convertOpenAIChunkToLlm as Mock).mockImplementation(
         (chunk, context) => {
           if (chunk.id === 'finish-1') {
             context.protocolTagSanitized = {
@@ -3582,8 +3582,8 @@ describe('ContentGenerationPipeline', () => {
       const usageResponse = new GenerateContentResponse();
       usageResponse.usageMetadata = { totalTokenCount: 1 };
 
-      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
-      (mockConverter.convertOpenAIChunkToGemini as Mock).mockImplementation(
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockConverter.convertOpenAIChunkToLlm as Mock).mockImplementation(
         (chunk, context) => {
           if (chunk.id === 'finish-1') return firstFinish;
           if (chunk.id === 'finish-2') {
@@ -3645,8 +3645,8 @@ describe('ContentGenerationPipeline', () => {
         },
       ];
 
-      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
-      (mockConverter.convertOpenAIChunkToGemini as Mock).mockImplementation(
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockConverter.convertOpenAIChunkToLlm as Mock).mockImplementation(
         (chunk, context) => {
           if (chunk.id === 'finish') {
             context.protocolTagSanitized = {
@@ -3713,10 +3713,8 @@ describe('ContentGenerationPipeline', () => {
           },
         ];
 
-        (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue(
-          [],
-        );
-        (mockConverter.convertOpenAIChunkToGemini as Mock).mockImplementation(
+        (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([]);
+        (mockConverter.convertOpenAIChunkToLlm as Mock).mockImplementation(
           (_chunk, context) => {
             context.pendingThinkingTagCandidate = {
               text: '</think>',
@@ -3784,8 +3782,8 @@ describe('ContentGenerationPipeline', () => {
         { content: { parts: [], role: 'model' }, index: 0 },
       ];
 
-      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
-      (mockConverter.convertOpenAIChunkToGemini as Mock).mockImplementation(
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockConverter.convertOpenAIChunkToLlm as Mock).mockImplementation(
         (_chunk, context) => {
           context.pendingThinkingTagCandidate = {
             text: '</think>',
@@ -3833,8 +3831,8 @@ describe('ContentGenerationPipeline', () => {
         { callId: 'call-1', toolName: 'read_file' },
       ]);
 
-      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
-      (mockConverter.convertOpenAIChunkToGemini as Mock).mockReturnValue(
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockConverter.convertOpenAIChunkToLlm as Mock).mockReturnValue(
         preparationResponse,
       );
       (mockClient.chat.completions.create as Mock).mockResolvedValue(
@@ -3869,7 +3867,7 @@ describe('ContentGenerationPipeline', () => {
         },
       };
 
-      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([]);
       (mockClient.chat.completions.create as Mock).mockResolvedValue(
         mockStream,
       );
@@ -3910,7 +3908,7 @@ describe('ContentGenerationPipeline', () => {
       const userPromptId = 'test-prompt-id';
       const testError = new Error('407 via http://user:pass@proxy.local');
 
-      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([]);
       (mockClient.chat.completions.create as Mock).mockRejectedValue(testError);
 
       await expect(
@@ -3943,7 +3941,7 @@ describe('ContentGenerationPipeline', () => {
         }),
       };
 
-      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([]);
       (mockClient.chat.completions.create as Mock).mockResolvedValue(
         mockStream,
       );
@@ -3994,7 +3992,7 @@ describe('ContentGenerationPipeline', () => {
         },
       };
 
-      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([]);
       (mockClient.chat.completions.create as Mock).mockResolvedValue(
         mockStream,
       );
@@ -4011,7 +4009,7 @@ describe('ContentGenerationPipeline', () => {
       }).rejects.toThrow(StreamContentError);
 
       expect(mockErrorHandler.handle).not.toHaveBeenCalled();
-      expect(mockConverter.convertOpenAIChunkToGemini).not.toHaveBeenCalled();
+      expect(mockConverter.convertOpenAIChunkToLlm).not.toHaveBeenCalled();
     });
 
     it('should redact proxy credentials from StreamContentError messages', async () => {
@@ -4034,7 +4032,7 @@ describe('ContentGenerationPipeline', () => {
         },
       };
 
-      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([]);
       (mockClient.chat.completions.create as Mock).mockResolvedValue(
         mockStream,
       );
@@ -4085,7 +4083,7 @@ describe('ContentGenerationPipeline', () => {
           }),
       });
 
-      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([]);
       (mockClient.chat.completions.create as Mock).mockReturnValue(
         mockApiPromise,
       );
@@ -4139,7 +4137,7 @@ describe('ContentGenerationPipeline', () => {
           }),
       });
 
-      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([]);
       (mockClient.chat.completions.create as Mock).mockReturnValue(
         mockApiPromise,
       );
@@ -4193,7 +4191,7 @@ describe('ContentGenerationPipeline', () => {
           }),
       });
 
-      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([]);
       (mockClient.chat.completions.create as Mock).mockReturnValue(
         mockApiPromise,
       );
@@ -4246,7 +4244,7 @@ describe('ContentGenerationPipeline', () => {
           }),
       });
 
-      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([]);
       (mockClient.chat.completions.create as Mock).mockReturnValue(
         mockApiPromise,
       );
@@ -4268,8 +4266,8 @@ describe('ContentGenerationPipeline', () => {
         contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
       };
 
-      const mockGeminiResponse = new GenerateContentResponse();
-      mockGeminiResponse.candidates = [
+      const mockLlmResponse = new GenerateContentResponse();
+      mockLlmResponse.candidates = [
         {
           content: { parts: [{ text: 'Hello' }], role: 'model' },
           finishReason: FinishReason.STOP,
@@ -4307,9 +4305,9 @@ describe('ContentGenerationPipeline', () => {
           }),
       });
 
-      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
-      (mockConverter.convertOpenAIChunkToGemini as Mock).mockReturnValue(
-        mockGeminiResponse,
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockConverter.convertOpenAIChunkToLlm as Mock).mockReturnValue(
+        mockLlmResponse,
       );
       (mockClient.chat.completions.create as Mock).mockReturnValue(
         mockApiPromise,
@@ -4329,8 +4327,8 @@ describe('ContentGenerationPipeline', () => {
         contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
       };
 
-      const mockGeminiResponse = new GenerateContentResponse();
-      mockGeminiResponse.candidates = [
+      const mockLlmResponse = new GenerateContentResponse();
+      mockLlmResponse.candidates = [
         {
           content: { parts: [{ text: 'Hello' }], role: 'model' },
           finishReason: FinishReason.STOP,
@@ -4351,9 +4349,9 @@ describe('ContentGenerationPipeline', () => {
         },
       };
 
-      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
-      (mockConverter.convertOpenAIChunkToGemini as Mock).mockReturnValue(
-        mockGeminiResponse,
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockConverter.convertOpenAIChunkToLlm as Mock).mockReturnValue(
+        mockLlmResponse,
       );
       // Regular mockResolvedValue — no withResponse method
       (mockClient.chat.completions.create as Mock).mockResolvedValue(
@@ -4385,8 +4383,8 @@ describe('ContentGenerationPipeline', () => {
         },
       };
 
-      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
-      (mockConverter.convertOpenAIChunkToGemini as Mock).mockReturnValue(
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockConverter.convertOpenAIChunkToLlm as Mock).mockReturnValue(
         new GenerateContentResponse(),
       );
       (mockClient.chat.completions.create as Mock).mockResolvedValue(
@@ -4422,8 +4420,8 @@ describe('ContentGenerationPipeline', () => {
         },
       };
 
-      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
-      (mockConverter.convertOpenAIChunkToGemini as Mock).mockReturnValue(
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockConverter.convertOpenAIChunkToLlm as Mock).mockReturnValue(
         new GenerateContentResponse(),
       );
       (mockClient.chat.completions.create as Mock).mockResolvedValue(
@@ -4463,8 +4461,8 @@ describe('ContentGenerationPipeline', () => {
         },
       };
 
-      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
-      (mockConverter.convertOpenAIChunkToGemini as Mock).mockReturnValue(
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockConverter.convertOpenAIChunkToLlm as Mock).mockReturnValue(
         new GenerateContentResponse(),
       );
       (mockClient.chat.completions.create as Mock).mockResolvedValue(
@@ -4491,7 +4489,7 @@ describe('ContentGenerationPipeline', () => {
       };
 
       let capturedSignal: AbortSignal | undefined;
-      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([]);
       (mockClient.chat.completions.create as Mock).mockImplementation(
         (_req: unknown, opts: { signal: AbortSignal }) => {
           capturedSignal = opts.signal;
@@ -4582,8 +4580,8 @@ describe('ContentGenerationPipeline', () => {
         cachedInputTokensReported: false,
       });
 
-      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
-      (mockConverter.convertOpenAIChunkToGemini as Mock)
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockConverter.convertOpenAIChunkToLlm as Mock)
         .mockReturnValueOnce(mockContentResponse)
         .mockReturnValueOnce(mockFinishResponse)
         .mockReturnValueOnce(mockEmptyResponse)
@@ -4684,8 +4682,8 @@ describe('ContentGenerationPipeline', () => {
         totalTokenCount: 30,
       };
 
-      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
-      (mockConverter.convertOpenAIChunkToGemini as Mock)
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockConverter.convertOpenAIChunkToLlm as Mock)
         .mockReturnValueOnce(mockContentResponse)
         .mockReturnValueOnce(mockFinalResponse);
       (mockClient.chat.completions.create as Mock).mockResolvedValue(
@@ -4793,8 +4791,8 @@ describe('ContentGenerationPipeline', () => {
         totalTokenCount: 30,
       };
 
-      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
-      (mockConverter.convertOpenAIChunkToGemini as Mock)
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockConverter.convertOpenAIChunkToLlm as Mock)
         .mockReturnValueOnce(mockContentResponse)
         .mockReturnValueOnce(mockFinishResponseWithZeroUsage)
         .mockReturnValueOnce(mockUsageResponse);
@@ -4881,8 +4879,8 @@ describe('ContentGenerationPipeline', () => {
         totalTokenCount: 30,
       };
 
-      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
-      (mockConverter.convertOpenAIChunkToGemini as Mock)
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockConverter.convertOpenAIChunkToLlm as Mock)
         .mockReturnValueOnce(mockContentResponse)
         .mockReturnValueOnce(mockFinalResponse);
       (mockClient.chat.completions.create as Mock).mockResolvedValue(
@@ -5005,8 +5003,8 @@ describe('ContentGenerationPipeline', () => {
       const mockTrailingResponse = new GenerateContentResponse();
       mockTrailingResponse.candidates = [];
 
-      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
-      (mockConverter.convertOpenAIChunkToGemini as Mock)
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockConverter.convertOpenAIChunkToLlm as Mock)
         .mockReturnValueOnce(mockContentResponse)
         .mockReturnValueOnce(mockFinishResponse)
         .mockReturnValueOnce(mockUsageResponse)
@@ -5128,10 +5126,10 @@ describe('ContentGenerationPipeline', () => {
       ] as OpenAI.Chat.ChatCompletionMessageParam[];
       const mockOpenAIResponse = new GenerateContentResponse();
 
-      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue(
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue(
         mockMessages,
       );
-      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+      (mockConverter.convertOpenAIResponseToLlm as Mock).mockReturnValue(
         mockOpenAIResponse,
       );
       (mockClient.chat.completions.create as Mock).mockResolvedValue({
@@ -5169,10 +5167,10 @@ describe('ContentGenerationPipeline', () => {
       ] as OpenAI.Chat.ChatCompletionMessageParam[];
       const mockOpenAIResponse = new GenerateContentResponse();
 
-      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue(
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue(
         mockMessages,
       );
-      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+      (mockConverter.convertOpenAIResponseToLlm as Mock).mockReturnValue(
         mockOpenAIResponse,
       );
       (mockClient.chat.completions.create as Mock).mockResolvedValue({
@@ -5217,10 +5215,10 @@ describe('ContentGenerationPipeline', () => {
         }),
       );
 
-      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue(
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue(
         mockMessages,
       );
-      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+      (mockConverter.convertOpenAIResponseToLlm as Mock).mockReturnValue(
         mockOpenAIResponse,
       );
       (mockClient.chat.completions.create as Mock).mockResolvedValue({
@@ -5270,10 +5268,10 @@ describe('ContentGenerationPipeline', () => {
         { role: 'user', content: 'Hello' },
       ] as OpenAI.Chat.ChatCompletionMessageParam[];
 
-      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue(
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue(
         mockMessages,
       );
-      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+      (mockConverter.convertOpenAIResponseToLlm as Mock).mockReturnValue(
         new GenerateContentResponse(),
       );
       (mockClient.chat.completions.create as Mock).mockResolvedValue({
@@ -5314,10 +5312,10 @@ describe('ContentGenerationPipeline', () => {
         },
       };
 
-      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([
         { role: 'user', content: 'Hello' },
       ]);
-      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+      (mockConverter.convertOpenAIResponseToLlm as Mock).mockReturnValue(
         new GenerateContentResponse(),
       );
       (mockClient.chat.completions.create as Mock).mockResolvedValue({
@@ -5362,10 +5360,10 @@ describe('ContentGenerationPipeline', () => {
         },
       };
 
-      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([
         { role: 'user', content: 'Hello' },
       ]);
-      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+      (mockConverter.convertOpenAIResponseToLlm as Mock).mockReturnValue(
         new GenerateContentResponse(),
       );
       (mockClient.chat.completions.create as Mock).mockResolvedValue({
@@ -5406,10 +5404,10 @@ describe('ContentGenerationPipeline', () => {
       const messages = [
         { role: 'user', content: 'Hello' },
       ] as OpenAI.Chat.ChatCompletionMessageParam[];
-      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue(
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue(
         messages,
       );
-      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+      (mockConverter.convertOpenAIResponseToLlm as Mock).mockReturnValue(
         new GenerateContentResponse(),
       );
       (mockClient.chat.completions.create as Mock).mockResolvedValue({
@@ -5442,10 +5440,10 @@ describe('ContentGenerationPipeline', () => {
       } as unknown as Config;
       mockConfig.cliConfig = mockCliConfig;
       pipeline = new ContentGenerationPipeline(mockConfig);
-      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([
         { role: 'user', content: 'Hello from a subagent' },
       ] as OpenAI.Chat.ChatCompletionMessageParam[]);
-      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+      (mockConverter.convertOpenAIResponseToLlm as Mock).mockReturnValue(
         new GenerateContentResponse(),
       );
       (mockClient.chat.completions.create as Mock).mockResolvedValue({
@@ -5481,10 +5479,10 @@ describe('ContentGenerationPipeline', () => {
       } as unknown as Config;
       mockConfig.cliConfig = mockCliConfig;
       pipeline = new ContentGenerationPipeline(mockConfig);
-      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([
         { role: 'user', content: 'Hello from a fork' },
       ] as OpenAI.Chat.ChatCompletionMessageParam[]);
-      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+      (mockConverter.convertOpenAIResponseToLlm as Mock).mockReturnValue(
         new GenerateContentResponse(),
       );
       (mockClient.chat.completions.create as Mock).mockResolvedValue({
@@ -5528,10 +5526,10 @@ describe('ContentGenerationPipeline', () => {
         { role: 'assistant', content: 'First answer' },
         { role: 'user', content: 'Follow-up question' },
       ] as OpenAI.Chat.ChatCompletionMessageParam[];
-      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue(
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue(
         messages,
       );
-      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+      (mockConverter.convertOpenAIResponseToLlm as Mock).mockReturnValue(
         new GenerateContentResponse(),
       );
       (mockClient.chat.completions.create as Mock).mockResolvedValue({
@@ -5565,10 +5563,10 @@ describe('ContentGenerationPipeline', () => {
       } as unknown as Config;
       mockConfig.cliConfig = mockCliConfig;
       pipeline = new ContentGenerationPipeline(mockConfig);
-      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([
         { role: 'user', content: 'Hello' },
       ] as OpenAI.Chat.ChatCompletionMessageParam[]);
-      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+      (mockConverter.convertOpenAIResponseToLlm as Mock).mockReturnValue(
         new GenerateContentResponse(),
       );
       (mockClient.chat.completions.create as Mock).mockResolvedValue({
@@ -5605,10 +5603,10 @@ describe('ContentGenerationPipeline', () => {
         { role: 'assistant', content: 'main response' },
         { role: 'user', content: 'compression directive' },
       ] as OpenAI.Chat.ChatCompletionMessageParam[];
-      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue(
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue(
         messages,
       );
-      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+      (mockConverter.convertOpenAIResponseToLlm as Mock).mockReturnValue(
         new GenerateContentResponse(),
       );
       (mockClient.chat.completions.create as Mock).mockResolvedValue({
@@ -5648,10 +5646,10 @@ describe('ContentGenerationPipeline', () => {
         { role: 'assistant', content: 'main response' },
         { role: 'user', content: 'compression directive' },
       ] as OpenAI.Chat.ChatCompletionMessageParam[];
-      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue(
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue(
         messages,
       );
-      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+      (mockConverter.convertOpenAIResponseToLlm as Mock).mockReturnValue(
         new GenerateContentResponse(),
       );
       (mockClient.chat.completions.create as Mock).mockResolvedValue({
@@ -5692,13 +5690,13 @@ describe('ContentGenerationPipeline', () => {
       } as unknown as Config;
       mockConfig.cliConfig = mockCliConfig;
       pipeline = new ContentGenerationPipeline(mockConfig);
-      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([
         { role: 'system', content: 'system' },
         { role: 'user', content: 'main request' },
         { role: 'assistant', content: 'main response' },
         { role: 'user', content: 'compression directive' },
       ] as OpenAI.Chat.ChatCompletionMessageParam[]);
-      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+      (mockConverter.convertOpenAIResponseToLlm as Mock).mockReturnValue(
         new GenerateContentResponse(),
       );
       (mockClient.chat.completions.create as Mock).mockResolvedValue({
@@ -5741,8 +5739,8 @@ describe('ContentGenerationPipeline', () => {
         contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
         config: { maxOutputTokens: 32000 },
       };
-      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
-      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockConverter.convertOpenAIResponseToLlm as Mock).mockReturnValue(
         new GenerateContentResponse(),
       );
       (mockClient.chat.completions.create as Mock).mockResolvedValue({
@@ -5782,8 +5780,8 @@ describe('ContentGenerationPipeline', () => {
         contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
         config: { maxOutputTokens: 50000 },
       };
-      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
-      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockConverter.convertOpenAIResponseToLlm as Mock).mockReturnValue(
         new GenerateContentResponse(),
       );
       (mockClient.chat.completions.create as Mock).mockResolvedValue({
@@ -5822,8 +5820,8 @@ describe('ContentGenerationPipeline', () => {
         contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
         config: { maxOutputTokens: 40000 },
       };
-      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
-      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockConverter.convertOpenAIResponseToLlm as Mock).mockReturnValue(
         new GenerateContentResponse(),
       );
       (mockClient.chat.completions.create as Mock).mockResolvedValue({
@@ -5859,8 +5857,8 @@ describe('ContentGenerationPipeline', () => {
         contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
         config: { maxOutputTokens: 777 },
       };
-      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
-      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockConverter.convertOpenAIResponseToLlm as Mock).mockReturnValue(
         new GenerateContentResponse(),
       );
       (mockClient.chat.completions.create as Mock).mockResolvedValue({
@@ -5891,8 +5889,8 @@ describe('ContentGenerationPipeline', () => {
         contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
         config: { temperature: 0.5, topP: 0.6, maxOutputTokens: 2048 },
       };
-      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
-      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockConverter.convertOpenAIResponseToLlm as Mock).mockReturnValue(
         new GenerateContentResponse(),
       );
       (mockClient.chat.completions.create as Mock).mockResolvedValue({
@@ -5925,8 +5923,8 @@ describe('ContentGenerationPipeline', () => {
       const userPromptId = 'test-prompt-id';
       const mockOpenAIResponse = new GenerateContentResponse();
 
-      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
-      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockConverter.convertOpenAIResponseToLlm as Mock).mockReturnValue(
         mockOpenAIResponse,
       );
       (mockClient.chat.completions.create as Mock).mockResolvedValue({
@@ -5957,14 +5955,14 @@ describe('ContentGenerationPipeline', () => {
         },
       };
 
-      const mockGeminiResponse = new GenerateContentResponse();
-      mockGeminiResponse.candidates = [
+      const mockLlmResponse = new GenerateContentResponse();
+      mockLlmResponse.candidates = [
         { content: { parts: [{ text: 'Hello' }], role: 'model' } },
       ];
 
-      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
-      (mockConverter.convertOpenAIChunkToGemini as Mock).mockReturnValue(
-        mockGeminiResponse,
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockConverter.convertOpenAIChunkToLlm as Mock).mockReturnValue(
+        mockLlmResponse,
       );
       (mockClient.chat.completions.create as Mock).mockResolvedValue(
         mockStream,
@@ -6043,8 +6041,8 @@ describe('ContentGenerationPipeline', () => {
       };
 
       // Mock empty Gemini responses for partial chunks (they get filtered)
-      const emptyGeminiResponse1 = new GenerateContentResponse();
-      emptyGeminiResponse1.candidates = [
+      const emptyLlmResponse1 = new GenerateContentResponse();
+      emptyLlmResponse1.candidates = [
         {
           content: { parts: [], role: 'model' },
           index: 0,
@@ -6052,8 +6050,8 @@ describe('ContentGenerationPipeline', () => {
         },
       ];
 
-      const emptyGeminiResponse2 = new GenerateContentResponse();
-      emptyGeminiResponse2.candidates = [
+      const emptyLlmResponse2 = new GenerateContentResponse();
+      emptyLlmResponse2.candidates = [
         {
           content: { parts: [], role: 'model' },
           index: 0,
@@ -6062,8 +6060,8 @@ describe('ContentGenerationPipeline', () => {
       ];
 
       // Mock final Gemini response with tool call
-      const finalGeminiResponse = new GenerateContentResponse();
-      finalGeminiResponse.candidates = [
+      const finalLlmResponse = new GenerateContentResponse();
+      finalLlmResponse.candidates = [
         {
           content: {
             parts: [
@@ -6084,13 +6082,13 @@ describe('ContentGenerationPipeline', () => {
       ];
 
       // Setup converter mocks
-      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([
         { role: 'user', content: 'test' },
       ]);
-      (mockConverter.convertOpenAIChunkToGemini as Mock)
-        .mockReturnValueOnce(emptyGeminiResponse1) // First partial chunk -> empty response
-        .mockReturnValueOnce(emptyGeminiResponse2) // Second partial chunk -> empty response
-        .mockReturnValueOnce(finalGeminiResponse); // Finish chunk -> complete response
+      (mockConverter.convertOpenAIChunkToLlm as Mock)
+        .mockReturnValueOnce(emptyLlmResponse1) // First partial chunk -> empty response
+        .mockReturnValueOnce(emptyLlmResponse2) // Second partial chunk -> empty response
+        .mockReturnValueOnce(finalLlmResponse); // Finish chunk -> complete response
 
       // Mock stream
       const mockStream = {
@@ -6122,7 +6120,7 @@ describe('ContentGenerationPipeline', () => {
 
       // Should only yield the final response (empty ones are filtered)
       expect(responses).toHaveLength(1);
-      expect(responses[0]).toBe(finalGeminiResponse);
+      expect(responses[0]).toBe(finalLlmResponse);
     });
   });
 
@@ -6136,10 +6134,10 @@ describe('ContentGenerationPipeline', () => {
       const mockMessages = [
         { role: 'user', content: 'Hello' },
       ] as OpenAI.Chat.ChatCompletionMessageParam[];
-      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue(
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue(
         mockMessages,
       );
-      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+      (mockConverter.convertOpenAIResponseToLlm as Mock).mockReturnValue(
         new GenerateContentResponse(),
       );
       (mockClient.chat.completions.create as Mock).mockResolvedValue({
@@ -6189,10 +6187,10 @@ describe('ContentGenerationPipeline', () => {
       const mockMessages = [
         { role: 'user', content: 'Hello' },
       ] as OpenAI.Chat.ChatCompletionMessageParam[];
-      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue(
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue(
         mockMessages,
       );
-      (mockConverter.convertOpenAIChunkToGemini as Mock).mockReturnValue(
+      (mockConverter.convertOpenAIChunkToLlm as Mock).mockReturnValue(
         new GenerateContentResponse(),
       );
 
@@ -6237,8 +6235,8 @@ describe('ContentGenerationPipeline', () => {
         contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
       };
 
-      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
-      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockConverter.convertOpenAIResponseToLlm as Mock).mockReturnValue(
         new GenerateContentResponse(),
       );
       (mockClient.chat.completions.create as Mock).mockResolvedValue({
@@ -6391,16 +6389,12 @@ describe('ContentGenerationPipeline', () => {
     }
 
     beforeEach(() => {
-      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
-      (mockConverter.convertOpenAIChunkToGemini as Mock).mockImplementation(
-        () => {
-          const r = new GenerateContentResponse();
-          r.candidates = [
-            { content: { parts: [{ text: 'x' }], role: 'model' } },
-          ];
-          return r;
-        },
-      );
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockConverter.convertOpenAIChunkToLlm as Mock).mockImplementation(() => {
+        const r = new GenerateContentResponse();
+        r.candidates = [{ content: { parts: [{ text: 'x' }], role: 'model' } }];
+        return r;
+      });
       // Clean baseline: ignore any ambient QWEN_STREAM_IDLE_TIMEOUT_MS /
       // QWEN_STREAM_MAX_LIFETIME_MS from the dev/CI shell so the
       // default-timeout tests aren't silently overridden. Env-specific tests
@@ -6435,8 +6429,14 @@ describe('ContentGenerationPipeline', () => {
       expect(err).toBeInstanceOf(StreamInactivityTimeoutError);
       expect((err as Error).message).toBe(
         'No stream activity for 1000ms after 0 chunks ' +
-          '(stream lifetime: 1000ms). Set QWEN_STREAM_IDLE_TIMEOUT_MS ' +
-          'to increase this window (or 0 to disable it).',
+          '(stream lifetime: 1000ms). For provider-backed models, ' +
+          'increase modelProviders[providerId][].generationConfig.streamIdleTimeoutMs; ' +
+          'provider configuration takes precedence, so model.generationConfig is ' +
+          'ignored for those models. For runtime models, increase ' +
+          'model.generationConfig.streamIdleTimeoutMs. Built-in Qwen OAuth models ' +
+          'cannot be overridden via settings. Use QWEN_STREAM_IDLE_TIMEOUT_MS ' +
+          'for them or whenever no explicit value is active. ' +
+          'Set the active value to 0 to disable it.',
       );
       expect(err).toMatchObject({ code: 'ETIMEDOUT' });
       expect((err as StreamInactivityTimeoutError).chunksReceived).toBe(0);
@@ -6445,7 +6445,7 @@ describe('ContentGenerationPipeline', () => {
       expect(mockErrorHandler.handle).not.toHaveBeenCalled();
     });
 
-    it('includes the idle detail and env override hint in timeout errors', async () => {
+    it('includes settings and environment override hints in timeout errors', async () => {
       const gated = gatedStream(); // never push/end → silent
       (mockClient.chat.completions.create as Mock).mockResolvedValue(
         gated.stream,
@@ -6465,6 +6465,10 @@ describe('ContentGenerationPipeline', () => {
       expect(err).toBeInstanceOf(StreamInactivityTimeoutError);
       const message = (err as Error).message;
       expect(message).toContain('No stream activity for 1000ms after 0 chunks');
+      expect(message).toContain('model.generationConfig.streamIdleTimeoutMs');
+      expect(message).toContain(
+        'modelProviders[providerId][].generationConfig.streamIdleTimeoutMs',
+      );
       expect(message).toContain('QWEN_STREAM_IDLE_TIMEOUT_MS');
     });
 

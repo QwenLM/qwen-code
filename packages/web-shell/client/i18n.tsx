@@ -2942,6 +2942,9 @@ const EN: Messages = {
     'Messages in the same group or topic share one conversation; best for collaboration.',
   'channels.editor.field.shared.sessionScope.detail.single':
     'Every message shares one conversation; best for a single-bot duty channel.',
+  'channels.editor.field.shared.multiSession': 'Named tasks',
+  'channels.editor.field.shared.multiSession.description':
+    'Keep a separate owner-scoped catalog of named tasks in daemon-managed mode.',
   'channels.editor.policy.pairing.title': 'Pairing',
   'channels.editor.policy.pairing.description':
     'People receive a pairing code and can chat after you approve them.',
@@ -5877,6 +5880,9 @@ const ZH: Messages = {
     '同一群聊或话题进入同一个对话，适合群内协作。',
   'channels.editor.field.shared.sessionScope.detail.single':
     '所有消息共用一个对话，适合单一机器人值守场景。',
+  'channels.editor.field.shared.multiSession': '命名任务',
+  'channels.editor.field.shared.multiSession.description':
+    '在 daemon 托管模式下，为每位用户保留相互隔离的命名任务目录。',
   'channels.editor.policy.pairing.title': '配对模式',
   'channels.editor.policy.pairing.description':
     '用户会收到配对码，经您批准后才能开始对话。',

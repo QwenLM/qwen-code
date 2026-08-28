@@ -196,9 +196,14 @@ export class StreamInactivityTimeoutError extends Error {
   ) {
     super(
       `No stream activity for ${idleMs}ms after ${chunksReceived} chunks ` +
-        `(stream lifetime: ${streamLifetimeMs}ms). Set ` +
-        `${QWEN_STREAM_IDLE_TIMEOUT_MS_ENV} to increase this window ` +
-        `(or 0 to disable it).`,
+        `(stream lifetime: ${streamLifetimeMs}ms). For provider-backed models, ` +
+        `increase modelProviders[providerId][].generationConfig.streamIdleTimeoutMs; ` +
+        `provider configuration takes precedence, so model.generationConfig is ` +
+        `ignored for those models. For runtime models, increase ` +
+        `model.generationConfig.streamIdleTimeoutMs. Built-in Qwen OAuth models ` +
+        `cannot be overridden via settings. Use ${QWEN_STREAM_IDLE_TIMEOUT_MS_ENV} ` +
+        `for them or whenever no explicit value is active. ` +
+        `Set the active value to 0 to disable it.`,
     );
     this.name = 'StreamInactivityTimeoutError';
   }
@@ -581,13 +586,12 @@ export class ContentGenerationPipeline {
           )) as OpenAI.Chat.ChatCompletion;
           reportOpenAiResponse(telemetryAttempt, openaiResponse);
 
-          const geminiResponse =
-            OpenAIContentConverter.convertOpenAIResponseToGemini(
-              openaiResponse,
-              context,
-            );
+          const llmResponse = OpenAIContentConverter.convertOpenAIResponseToLlm(
+            openaiResponse,
+            context,
+          );
 
-          return geminiResponse;
+          return llmResponse;
         } finally {
           perRequestAc?.abort();
         }
@@ -793,7 +797,7 @@ export class ContentGenerationPipeline {
           throw new StreamContentError(errorContent);
         }
 
-        const response = OpenAIContentConverter.convertOpenAIChunkToGemini(
+        const response = OpenAIContentConverter.convertOpenAIChunkToLlm(
           chunk,
           context,
         );
@@ -1054,7 +1058,7 @@ export class ContentGenerationPipeline {
     context: RequestContext,
     isStreaming: boolean,
   ): Promise<OpenAI.Chat.ChatCompletionCreateParams> {
-    const messages = OpenAIContentConverter.convertGeminiRequestToOpenAI(
+    const messages = OpenAIContentConverter.convertLlmRequestToOpenAI(
       request,
       context,
     );
@@ -1082,11 +1086,10 @@ export class ContentGenerationPipeline {
     // Add tools if present and non-empty.
     // Some providers reject tools: [] (empty array), so skip when there are no tools.
     if (request.config?.tools && request.config.tools.length > 0) {
-      baseRequest.tools =
-        await OpenAIContentConverter.convertGeminiToolsToOpenAI(
-          request.config.tools,
-          this.contentGeneratorConfig.schemaCompliance ?? 'auto',
-        );
+      baseRequest.tools = await OpenAIContentConverter.convertLlmToolsToOpenAI(
+        request.config.tools,
+        this.contentGeneratorConfig.schemaCompliance ?? 'auto',
+      );
 
       // Map Gemini-style toolConfig.functionCallingConfig.mode to OpenAI's
       // tool_choice so structured side queries (e.g. the AUTO-mode

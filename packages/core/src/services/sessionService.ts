@@ -193,6 +193,22 @@ export class SessionStorageEntryError extends Error {
   }
 }
 
+export class SessionTranscriptDurabilityError extends Error {
+  override readonly name = 'SessionTranscriptDurabilityError';
+
+  constructor(options: { cause: unknown }) {
+    super('Session transcript deletion durability could not be confirmed.', {
+      cause: options.cause,
+    });
+  }
+}
+
+export interface SessionTranscriptParentIdentity {
+  device: number;
+  inode: number;
+  inodeVerifiable: boolean;
+}
+
 export class SessionIdCaseConflictError extends Error {
   override readonly name = 'SessionIdCaseConflictError';
 
@@ -414,6 +430,122 @@ async function fsyncDirectoryBestEffort(directory: string): Promise<void> {
   } catch (error) {
     if (process.platform !== 'win32') throw error;
   }
+}
+
+interface DurableDirectoryHandle {
+  directory: string;
+  handle: fs.promises.FileHandle;
+  dev: number;
+  ino: number;
+  inodeVerifiable: boolean;
+}
+
+function sameTranscriptParentIdentity(
+  left: SessionTranscriptParentIdentity,
+  right: SessionTranscriptParentIdentity,
+): boolean {
+  return (
+    left.device === right.device &&
+    left.inodeVerifiable === right.inodeVerifiable &&
+    (!left.inodeVerifiable || left.inode === right.inode)
+  );
+}
+
+function transcriptParentIdentity(
+  directory: DurableDirectoryHandle,
+): SessionTranscriptParentIdentity {
+  return {
+    device: directory.dev,
+    inode: directory.inodeVerifiable ? directory.ino : 0,
+    inodeVerifiable: directory.inodeVerifiable,
+  };
+}
+
+async function assertDurableDirectoryHandle(
+  expected: DurableDirectoryHandle,
+): Promise<void> {
+  const [opened, current] = await Promise.all([
+    expected.handle.stat(),
+    fs.promises.stat(expected.directory),
+  ]);
+  const openedInodeVerifiable = hasVerifiableInode(opened.ino);
+  const currentInodeVerifiable = hasVerifiableInode(current.ino);
+  if (
+    !opened.isDirectory() ||
+    !current.isDirectory() ||
+    opened.dev !== expected.dev ||
+    current.dev !== expected.dev ||
+    openedInodeVerifiable !== expected.inodeVerifiable ||
+    currentInodeVerifiable !== expected.inodeVerifiable ||
+    (expected.inodeVerifiable &&
+      (opened.ino !== expected.ino || current.ino !== expected.ino))
+  ) {
+    throw new Error('Session transcript parent directory changed.');
+  }
+}
+
+async function openDurableDirectory(
+  directory: string,
+  openedHandle?: fs.promises.FileHandle,
+): Promise<DurableDirectoryHandle> {
+  const handle =
+    openedHandle ??
+    (await fs.promises.open(
+      directory,
+      fs.constants.O_RDONLY |
+        (process.platform === 'win32' ? 0 : (fs.constants.O_NOFOLLOW ?? 0)),
+    ));
+  try {
+    const opened = await handle.stat();
+    const expected = {
+      directory,
+      handle,
+      dev: opened.dev,
+      ino: opened.ino,
+      inodeVerifiable: hasVerifiableInode(opened.ino),
+    };
+    await assertDurableDirectoryHandle(expected);
+    return expected;
+  } catch (error) {
+    await handle.close().catch(() => undefined);
+    throw error;
+  }
+}
+
+async function openDurableDirectoryIfPresent(
+  directory: string,
+): Promise<DurableDirectoryHandle | undefined> {
+  let handle: fs.promises.FileHandle;
+  try {
+    handle = await fs.promises.open(
+      directory,
+      fs.constants.O_RDONLY |
+        (process.platform === 'win32' ? 0 : (fs.constants.O_NOFOLLOW ?? 0)),
+    );
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+    throw error;
+  }
+  return openDurableDirectory(directory, handle);
+}
+
+async function syncDurableDirectory(
+  expected: DurableDirectoryHandle,
+): Promise<void> {
+  await assertDurableDirectoryHandle(expected);
+  try {
+    await expected.handle.sync();
+  } catch (error) {
+    if (
+      process.platform !== 'win32' ||
+      !['EACCES', 'EINVAL', 'EPERM'].includes(
+        (error as NodeJS.ErrnoException).code ?? '',
+      )
+    ) {
+      throw error;
+    }
+  }
+  await assertDurableDirectoryHandle(expected);
 }
 
 function validatedBackupPath(directory: string, name: string): string {
@@ -965,6 +1097,13 @@ export class SessionService {
     }
   }
 
+  async getSessionTranscriptLocationForLifecycle(
+    sessionId: string,
+  ): Promise<SessionLocation> {
+    return (await this.resolveMaintainableSessionSnapshot(sessionId, false))
+      .location;
+  }
+
   private async resolveMaintainableSessionSnapshot(
     sessionId: string,
     captureIdentity = true,
@@ -1391,6 +1530,7 @@ export class SessionService {
   private async removeSessionOrganization(
     sessionId: string,
     assertCanMutate?: () => void,
+    propagateFailure = false,
   ): Promise<void> {
     try {
       const service = new SessionOrganizationService(
@@ -1408,6 +1548,7 @@ export class SessionService {
       }
     } catch (error) {
       assertCanMutate?.();
+      if (propagateFailure) throw error;
       this.warn(
         `removeSession: failed to clear session organization for ${sessionId}: ${error}`,
       );
@@ -2374,11 +2515,100 @@ export class SessionService {
     sessionId: string,
     options: RemoveSessionOptions = {},
   ): Promise<boolean> {
-    const removed = await this.removeSessionFiles(sessionId, options);
+    const removed = await this.removeSessionTranscripts(sessionId, options);
     if (removed) {
-      await this.removeSessionOrganization(sessionId, options.assertCanMutate);
+      await this.cleanupRemovedSessionStateInternal(sessionId, options, false);
     }
     return removed;
+  }
+
+  async removeSessionTranscriptForLifecycle(
+    sessionId: string,
+    expectedLocation: SessionArchiveState,
+    expectedParentIdentity: SessionTranscriptParentIdentity,
+    options: RemoveSessionOptions = {},
+  ): Promise<boolean> {
+    return this.removeSessionTranscripts(
+      sessionId,
+      options,
+      expectedLocation,
+      expectedParentIdentity,
+    );
+  }
+
+  async getSessionTranscriptParentIdentityForLifecycle(
+    expectedLocation: SessionArchiveState,
+  ): Promise<SessionTranscriptParentIdentity> {
+    const directory = await openDurableDirectory(
+      this.getChatsDirForState(expectedLocation),
+    );
+    try {
+      return transcriptParentIdentity(directory);
+    } finally {
+      await directory.handle.close().catch(() => undefined);
+    }
+  }
+
+  async confirmSessionTranscriptDeletionForLifecycle(
+    expectedLocation: SessionArchiveState,
+    expectedParentIdentity: SessionTranscriptParentIdentity,
+  ): Promise<void> {
+    let directory: DurableDirectoryHandle | undefined;
+    try {
+      directory = await openDurableDirectory(
+        this.getChatsDirForState(expectedLocation),
+      );
+      if (
+        !sameTranscriptParentIdentity(
+          transcriptParentIdentity(directory),
+          expectedParentIdentity,
+        )
+      ) {
+        throw new Error('Session transcript parent directory changed.');
+      }
+      await syncDurableDirectory(directory);
+    } catch (error) {
+      throw new SessionTranscriptDurabilityError({ cause: error });
+    } finally {
+      await directory?.handle.close().catch(() => undefined);
+    }
+  }
+
+  async cleanupRemovedSessionState(
+    sessionId: string,
+    options: RemoveSessionOptions = {},
+  ): Promise<void> {
+    await this.cleanupRemovedSessionStateInternal(sessionId, options, true);
+  }
+
+  async cleanupRemovedSessionStateForLifecycle(
+    sessionId: string,
+    options: RemoveSessionOptions = {},
+  ): Promise<void> {
+    const parents: DurableDirectoryHandle[] = [];
+    try {
+      for (const directory of [
+        this.getChatsDirForState('active'),
+        this.getChatsDirForState('archived'),
+        path.join(Storage.getGlobalQwenDir(), FILE_HISTORY_DIR),
+        this.storage.getProjectDir(),
+      ]) {
+        const parent = await openDurableDirectoryIfPresent(directory);
+        if (parent) parents.push(parent);
+      }
+      for (const parent of parents) {
+        await assertDurableDirectoryHandle(parent);
+      }
+      await this.cleanupRemovedSessionStateInternal(sessionId, options, true);
+      options.assertCanMutate?.();
+      for (const parent of parents) {
+        await syncDurableDirectory(parent);
+      }
+    } finally {
+      await Promise.all(
+        parents.map((parent) => parent.handle.close().catch(() => undefined)),
+      );
+    }
   }
 
   /**
@@ -2411,18 +2641,29 @@ export class SessionService {
     }
   }
 
-  private async removeSessionFiles(
+  private async removeSessionTranscripts(
     sessionId: string,
     options: RemoveSessionOptions = {},
+    expectedLocation?: SessionArchiveState,
+    expectedParentIdentity?: SessionTranscriptParentIdentity,
   ): Promise<boolean> {
     if (!SESSION_FILE_PATTERN.test(`${sessionId}.jsonl`)) {
       return false;
     }
 
+    let durableParent: DurableDirectoryHandle | undefined;
+    let transcriptRemoved = false;
     try {
       const physicalSnapshot =
         await this.resolveMaintainableSessionSnapshot(sessionId);
       if (physicalSnapshot.location === undefined) return false;
+      if (
+        expectedLocation !== undefined &&
+        (physicalSnapshot.location !== expectedLocation ||
+          physicalSnapshot.identities.length !== 1)
+      ) {
+        throw new SessionTranscriptChangedError();
+      }
       const preparedUsage = new Map<
         string,
         PreparedUsageBeforeTranscriptDeletion
@@ -2437,25 +2678,49 @@ export class SessionService {
           preparedSessionIds.add(prepared.record.sessionId);
         }
       }
+      if (expectedLocation !== undefined) {
+        durableParent = await openDurableDirectory(
+          this.getChatsDirForState(expectedLocation),
+        );
+        if (
+          !expectedParentIdentity ||
+          !sameTranscriptParentIdentity(
+            transcriptParentIdentity(durableParent),
+            expectedParentIdentity,
+          )
+        ) {
+          throw new SessionTranscriptDurabilityError({
+            cause: new Error('Session transcript parent directory changed.'),
+          });
+        }
+      }
       await options.assertStorageUnchanged?.();
       options.assertCanMutate?.();
       this.assertMaintainableSessionUnchanged(sessionId, physicalSnapshot);
+      if (durableParent) {
+        await assertDurableDirectoryHandle(durableParent);
+      }
       for (const identity of physicalSnapshot.identities) {
         this.removeFileIfExists(identity.filePath);
+        transcriptRemoved = true;
         this.commitUsageSalvageBestEffort(
           preparedUsage.get(identity.filePath) ?? null,
         );
       }
-      options.assertCanMutate?.();
-      this.removeWorktreeSidecars(sessionId);
-      options.assertCanMutate?.();
-      this.removePrSidecars(sessionId);
-      options.assertCanMutate?.();
-      this.removePromptLedgers(sessionId);
-      options.assertCanMutate?.();
-      this.removeFileHistoryBackups(sessionId);
+      if (durableParent) {
+        await syncDurableDirectory(durableParent);
+      }
       return true;
     } catch (error) {
+      if (expectedLocation !== undefined) {
+        if (
+          transcriptRemoved &&
+          !(error instanceof SessionTranscriptDurabilityError)
+        ) {
+          throw new SessionTranscriptDurabilityError({ cause: error });
+        }
+        throw error;
+      }
       if (
         error instanceof SessionStorageEntryError &&
         error.reason === 'foreign_project'
@@ -2466,7 +2731,43 @@ export class SessionService {
         return false;
       }
       throw error;
+    } finally {
+      await durableParent?.handle.close().catch(() => undefined);
     }
+  }
+
+  private async cleanupRemovedSessionStateInternal(
+    sessionId: string,
+    options: RemoveSessionOptions,
+    propagateOrganizationFailure: boolean,
+  ): Promise<void> {
+    this.cleanupRemovedSessionFiles(sessionId, options);
+    options.assertCanMutate?.();
+    await this.removeSessionOrganization(
+      sessionId,
+      options.assertCanMutate,
+      propagateOrganizationFailure,
+    );
+  }
+
+  private cleanupRemovedSessionFiles(
+    sessionId: string,
+    options: RemoveSessionOptions,
+  ): void {
+    options.assertCanMutate?.();
+    this.removeWorktreeSidecars(sessionId);
+    options.assertCanMutate?.();
+    this.removePrSidecars(sessionId);
+    options.assertCanMutate?.();
+    this.removePromptLedgers(sessionId);
+    options.assertCanMutate?.();
+    this.removeFileHistoryBackups(sessionId);
+  }
+
+  private async removeSessionFiles(sessionId: string): Promise<boolean> {
+    const removed = await this.removeSessionTranscripts(sessionId);
+    if (removed) this.cleanupRemovedSessionFiles(sessionId, {});
+    return removed;
   }
 
   async archiveSessions(
@@ -2816,10 +3117,62 @@ export class SessionService {
     titleSource: TitleSource = 'manual',
     archiveState: SessionArchiveState = 'active',
   ): Promise<boolean> {
+    return this.renameSessionInternal(
+      sessionId,
+      title,
+      titleSource,
+      archiveState,
+    );
+  }
+
+  async renameSessionForLifecycle(
+    sessionId: string,
+    title: string,
+    titleSource: TitleSource,
+    expectedLocation: SessionArchiveState,
+    options: {
+      assertStorageUnchanged?: () => void | Promise<void>;
+      assertCanMutate?: () => void;
+    } = {},
+  ): Promise<boolean> {
+    return this.renameSessionInternal(
+      sessionId,
+      title,
+      titleSource,
+      expectedLocation,
+      options,
+    );
+  }
+
+  private async renameSessionInternal(
+    sessionId: string,
+    title: string,
+    titleSource: TitleSource,
+    archiveState: SessionArchiveState,
+    lifecycleOptions?: {
+      assertStorageUnchanged?: () => void | Promise<void>;
+      assertCanMutate?: () => void;
+    },
+  ): Promise<boolean> {
     if (!SESSION_FILE_PATTERN.test(`${sessionId}.jsonl`)) {
       return false;
     }
-    const filePath = this.getSessionFilePath(sessionId, archiveState);
+    const physicalSnapshot = lifecycleOptions
+      ? await this.resolveMaintainableSessionSnapshot(sessionId)
+      : undefined;
+    if (physicalSnapshot && physicalSnapshot.location === undefined) {
+      return false;
+    }
+    if (
+      physicalSnapshot &&
+      (physicalSnapshot.location !== archiveState ||
+        physicalSnapshot.identities.length !== 1)
+    ) {
+      throw new SessionTranscriptChangedError();
+    }
+    const filePath =
+      physicalSnapshot?.identities[0]?.filePath ??
+      this.getSessionFilePath(sessionId, archiveState);
 
     try {
       // Verify the file exists and belongs to this project
@@ -2856,6 +3209,11 @@ export class SessionService {
         version: records[0].version,
         systemPayload: { customTitle: title, titleSource },
       };
+      await lifecycleOptions?.assertStorageUnchanged?.();
+      lifecycleOptions?.assertCanMutate?.();
+      if (physicalSnapshot) {
+        this.assertMaintainableSessionUnchanged(sessionId, physicalSnapshot);
+      }
       jsonl.writeLineSync(filePath, titleRecord);
       return true;
     } catch (error) {
