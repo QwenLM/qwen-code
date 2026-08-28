@@ -118,7 +118,11 @@ export function projectAbout(systemInfo: Record<string, unknown>): string {
   addField('Auth', authLabel);
   const isOAuth =
     authLabel === 'Qwen OAuth' || authLabel.startsWith('Qwen OAuth');
-  if (!isOAuth && baseUrl) addField('Base URL', baseUrl);
+  // ink's formatBaseUrl hides the line unless BOTH the auth type and the
+  // base URL are present (systemInfoFields.ts).
+  if (!isOAuth && selectedAuthType && baseUrl) {
+    addField('Base URL', baseUrl);
+  }
   const modelVersion = String(systemInfo['modelVersion'] ?? '');
   addField('Model', modelVersion);
   addField('Fast Model', String(systemInfo['fastModel'] ?? '') || modelVersion);
@@ -176,8 +180,10 @@ export function projectSkillsList(
     lines.push(' No skills available');
     return lines.join('\n');
   }
+  // ink's SkillsList truncate keeps the total length at n (slice to n-1
+  // plus the ellipsis), not n+1 — the description column must not shift.
   const truncate = (s: string, n: number) =>
-    s.length > n ? `${s.slice(0, n)}…` : s;
+    s.length > n ? `${s.slice(0, Math.max(0, n - 1))}…` : s;
   for (const skill of skills) {
     if (skill.description) {
       const name = truncate(skill.name, 24).padEnd(24);
@@ -409,7 +415,7 @@ export function projectContextUsage(item: Record<string, unknown>): string {
   const modelName = String(item['modelName'] ?? '');
   const totalTokens = Number(item['totalTokens'] ?? 0);
   const windowSize = Number(item['contextWindowSize'] ?? 0);
-  const breakdown = (item['breakdown'] ?? {}) as Record<string, number>;
+  const breakdown = (item['breakdown'] ?? {}) as Record<string, unknown>;
   const isEstimated = Boolean(item['isEstimated']);
   const showDetails = Boolean(item['showDetails']);
   const lines = ['Context Usage', ''];
@@ -424,8 +430,8 @@ export function projectContextUsage(item: Record<string, unknown>): string {
     if (isEstimated) {
       lines.push('Token usage is estimated until provider usage is received.');
     }
-    const free = breakdown['freeSpace'] ?? 0;
-    const buffer = breakdown['autocompactBuffer'] ?? 0;
+    const free = Number(breakdown['freeSpace'] ?? 0);
+    const buffer = Number(breakdown['autocompactBuffer'] ?? 0);
     lines.push('');
     lines.push(
       `█ Used ${fmtTokensShort(totalTokens)} tokens (${pct(totalTokens, windowSize)}%)`,
@@ -447,19 +453,114 @@ export function projectContextUsage(item: Record<string, unknown>): string {
     ['Skills', 'skills'],
   ];
   for (const [label, key] of categories) {
-    const value = breakdown[key] ?? 0;
+    const value = Number(breakdown[key] ?? 0);
     if (key === 'mcpTools' && value <= 0) continue;
     lines.push(
       `█ ${label} ${fmtTokensShort(value)} tokens (${pct(value, windowSize)}%)`,
     );
   }
   if (totalTokens > 0) {
-    const messages = breakdown['messages'] ?? 0;
+    const messages = Number(breakdown['messages'] ?? 0);
     lines.push(
       `█ Messages ${fmtTokensShort(messages)} tokens (${pct(messages, windowSize)}%)`,
     );
   }
-  if (!showDetails) {
+  // Three-tier compaction ladder — ink renders it whenever thresholds +
+  // currentTier are present (even while usage is still estimated).
+  const thresholds = breakdown['thresholds'] as
+    | { effectiveWindow: number; warn: number; auto: number; hard: number }
+    | undefined;
+  const currentTier = breakdown['currentTier'] as string | undefined;
+  if (thresholds && currentTier) {
+    lines.push('');
+    lines.push('Compaction thresholds');
+    const tierRows: Array<[string, number, string]> = [
+      ['Effective window', thresholds.effectiveWindow, ''],
+      ['Warn threshold', thresholds.warn, 'warn'],
+      ['Auto threshold', thresholds.auto, 'auto'],
+      ['Hard threshold', thresholds.hard, 'hard'],
+    ];
+    for (const [label, tokens, tier] of tierRows) {
+      const marker = tier && currentTier === tier ? '▶' : ' ';
+      lines.push(`${marker} ${label} ${fmtTokensShort(tokens)} tokens`);
+    }
+    lines.push(`  Current tier ${currentTier}`);
+  }
+  if (showDetails) {
+    const byTokens = (a: { tokens: number }, b: { tokens: number }) =>
+      b.tokens - a.tokens;
+    const detail = (
+      title: string,
+      entries: ReadonlyArray<{ name: string; tokens: number }>,
+    ): void => {
+      if (entries.length === 0) return;
+      lines.push('');
+      lines.push(title);
+      for (const entry of entries) {
+        const name =
+          entry.name.length > 30 ? `${entry.name.slice(0, 29)}…` : entry.name;
+        lines.push(
+          `  └ ${name.padEnd(30)} ${fmtTokensShort(entry.tokens)} tokens`,
+        );
+      }
+    };
+    detail(
+      'Built-in tools',
+      [
+        ...((item['builtinTools'] ?? []) as Array<{
+          name: string;
+          tokens: number;
+        }>),
+      ].sort(byTokens),
+    );
+    detail(
+      'MCP tools',
+      [
+        ...((item['mcpTools'] ?? []) as Array<{
+          name: string;
+          tokens: number;
+        }>),
+      ].sort(byTokens),
+    );
+    detail(
+      'Memory files',
+      [
+        ...((item['memoryFiles'] ?? []) as Array<{
+          name: string;
+          tokens: number;
+        }>),
+      ].sort(byTokens),
+    );
+    const skills = [
+      ...((item['skills'] ?? []) as Array<{
+        name: string;
+        tokens: number;
+        loaded?: boolean;
+        bodyTokens?: number;
+      }>),
+    ];
+    // Loaded skills first, then by total (listing + body) token cost.
+    skills.sort((a, b) => {
+      if (a.loaded !== b.loaded) return a.loaded ? -1 : 1;
+      const aTotal = a.tokens + (a.bodyTokens ?? 0);
+      const bTotal = b.tokens + (b.bodyTokens ?? 0);
+      return bTotal - aTotal;
+    });
+    if (skills.length > 0) {
+      lines.push('');
+      lines.push('Skills');
+      for (const skill of skills) {
+        const name =
+          skill.name.length > 30 ? `${skill.name.slice(0, 29)}…` : skill.name;
+        const suffix = skill.loaded
+          ? ` (+${fmtTokensShort(skill.bodyTokens ?? 0)} body)`
+          : '';
+        lines.push(
+          `  ${skill.loaded ? '*' : ' '} ${name.padEnd(28)} ${fmtTokensShort(skill.tokens)} tokens${suffix}`,
+        );
+      }
+    }
+  } else {
     lines.push('');
     lines.push('Run /context detail for per-item breakdown.');
   }
@@ -508,6 +609,7 @@ export function projectMcpStatus(item: Record<string, unknown>): string {
     serverName: string;
     name: string;
     description?: string;
+    schema?: { parametersJsonSchema?: unknown; parameters?: unknown };
   }>;
   const prompts = (item['prompts'] ?? []) as Array<{
     serverName: string;
@@ -519,6 +621,8 @@ export function projectMcpStatus(item: Record<string, unknown>): string {
     extensionName?: string;
   }>;
   const showDescriptions = Boolean(item['showDescriptions']);
+  const showSchema = Boolean(item['showSchema']);
+  const showTips = Boolean(item['showTips']);
   const discoveryInProgress = Boolean(item['discoveryInProgress']);
   const connecting = (item['connectingServers'] ?? []) as string[];
   if (Object.keys(servers).length === 0 && blocked.length === 0) {
@@ -601,6 +705,23 @@ export function projectMcpStatus(item: Record<string, unknown>): string {
         if (showDescriptions && tool.description) {
           lines.push(`   ${tool.description.trim()}`);
         }
+        // ink's /mcp schema view prints the parameter JSON under each tool.
+        const schemaContent =
+          showSchema &&
+          tool.schema &&
+          (tool.schema.parametersJsonSchema || tool.schema.parameters)
+            ? JSON.stringify(
+                tool.schema.parametersJsonSchema ?? tool.schema.parameters,
+                null,
+                2,
+              )
+            : null;
+        if (schemaContent) {
+          lines.push('     Parameters:');
+          for (const line of schemaContent.split('\n')) {
+            lines.push(`     ${line}`);
+          }
+        }
       }
     }
     if (serverPrompts.length > 0) {
@@ -614,6 +735,13 @@ export function projectMcpStatus(item: Record<string, unknown>): string {
   for (const server of blocked) {
     const from = server.extensionName ? ` (from ${server.extensionName})` : '';
     lines.push(`● ${server.name}${from} - Blocked`);
+  }
+  if (showTips) {
+    lines.push('');
+    lines.push('★ Tips:');
+    lines.push('  - Use /mcp desc to show server and tool descriptions');
+    lines.push('  - Use /mcp schema to show tool parameter schemas');
+    lines.push('  - Use /mcp nodesc to hide descriptions');
   }
   return lines.join('\n').trimEnd();
 }

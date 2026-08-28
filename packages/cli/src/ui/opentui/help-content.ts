@@ -135,10 +135,6 @@ export function groupHelpCommands(
     }));
 }
 
-function truncateText(text: string, maxLength: number): string {
-  return truncateHelpText(text, maxLength);
-}
-
 /**
  * Ellipsis truncation shared by the help overlay and its plain-text
  * formatter (identical semantics to the ink Help dialog's `truncateText`).
@@ -166,8 +162,6 @@ export interface HelpWidthLayout {
   bodyWidth: number;
   colWidth: number;
   descWidth: number;
-  /** Extremely narrow fallback: stack the shortcut grid in one column. */
-  singleColumn: boolean;
 }
 
 export function computeHelpWidthLayout(
@@ -182,7 +176,6 @@ export function computeHelpWidthLayout(
     bodyWidth,
     colWidth,
     descWidth,
-    singleColumn: descWidth < 4,
   };
 }
 
@@ -211,13 +204,13 @@ function buildCommandLines(groups: CommandGroup[], width: number): HelpLine[] {
         .join(' ');
       lines.push({
         type: 'signature',
-        text: truncateText(signature, Math.floor(width * 0.42)),
+        text: truncateHelpText(signature, Math.floor(width * 0.42)),
         meta,
       });
       if (cmd.description) {
         lines.push({
           type: 'description',
-          text: truncateText(cmd.description, Math.max(20, width - 4)),
+          text: truncateHelpText(cmd.description, Math.max(20, width - 4)),
         });
       }
       const subcommands = getCommandSubcommandNames(cmd);
@@ -225,7 +218,7 @@ function buildCommandLines(groups: CommandGroup[], width: number): HelpLine[] {
         const descWidth = Math.max(20, width - 4);
         lines.push({
           type: 'subcommands',
-          text: `${t('subcommands:')} ${truncateText(subcommands.join(', '), descWidth - 13)}`,
+          text: `${t('subcommands:')} ${truncateHelpText(subcommands.join(', '), descWidth - 13)}`,
         });
       }
     });

@@ -182,12 +182,13 @@ describe('event-adapter (ServerGeminiStreamEvent -> neutral)', () => {
           type: 'finished',
           value: { reason: 'STOP' },
         } as unknown as AnyEv),
-      ).toEqual([{ type: 'segment-end' }]);
+      ).toEqual([{ type: 'retry-countdown-clear' }, { type: 'segment-end' }]);
     });
 
     it('maps finished without reason to a bare segment marker', () => {
       const map = createEventMapper();
       expect(map({ type: 'finished', value: {} } as unknown as AnyEv)).toEqual([
+        { type: 'retry-countdown-clear' },
         { type: 'segment-end' },
       ]);
     });
@@ -226,6 +227,7 @@ describe('event-adapter (ServerGeminiStreamEvent -> neutral)', () => {
         value: { error: { message: 'boom' } },
       } as unknown as AnyEv);
       expect(out).toEqual([
+        { type: 'retry-countdown-clear' },
         {
           type: 'error',
           text: 'boom',
@@ -243,6 +245,7 @@ describe('event-adapter (ServerGeminiStreamEvent -> neutral)', () => {
         value: { error: { message: 'quota', status: 429 } },
       } as unknown as AnyEv);
       expect(out).toEqual([
+        { type: 'retry-countdown-clear' },
         {
           type: 'error',
           text: '[API Error: 429]',

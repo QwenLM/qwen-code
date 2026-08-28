@@ -242,7 +242,11 @@ export function useDialogSelect<TItem extends DialogListItem<unknown>>(
   const selectIndex = (index: number) => {
     const item = items[index];
     if (!item || item.disabled) return;
+    // ink dispatches SET_ACTIVE_INDEX before SELECT_CURRENT, so highlight
+    // consumers (theme preview, scope selection) stay synced on mouse input
+    // too, not just keyboard input.
     setActiveIndexState(index);
+    onHighlight?.(item.value, index);
     onSelect?.(item.value);
   };
 

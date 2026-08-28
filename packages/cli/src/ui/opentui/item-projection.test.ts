@@ -205,6 +205,79 @@ describe('projectContextUsage', () => {
     });
     expect(text).toContain('No API response yet.');
   });
+
+  it('renders the compaction-threshold ladder (ytahdn-3)', () => {
+    const text = projectContextUsage({
+      modelName: 'm',
+      totalTokens: 5000,
+      contextWindowSize: 100000,
+      breakdown: {
+        thresholds: {
+          effectiveWindow: 92000,
+          warn: 60000,
+          auto: 80000,
+          hard: 90000,
+        },
+        currentTier: 'warn',
+      },
+      isEstimated: false,
+      showDetails: false,
+    });
+    expect(text).toContain('Compaction thresholds');
+    expect(text).toContain('Effective window 92.0k tokens');
+    expect(text).toContain('▶ Warn threshold 60.0k tokens');
+    expect(text).toContain('  Auto threshold 80.0k tokens');
+    expect(text).toContain('Current tier warn');
+  });
+
+  it('renders per-item detail sections when showDetails is on (ytahdn-3)', () => {
+    const text = projectContextUsage({
+      modelName: 'm',
+      totalTokens: 5000,
+      contextWindowSize: 100000,
+      breakdown: {
+        thresholds: {
+          effectiveWindow: 92000,
+          warn: 60000,
+          auto: 80000,
+          hard: 90000,
+        },
+        currentTier: 'safe',
+      },
+      isEstimated: false,
+      showDetails: true,
+      builtinTools: [
+        { name: 'read-file', tokens: 300 },
+        { name: 'shell', tokens: 500 },
+      ],
+      mcpTools: [{ name: 'search', tokens: 100 }],
+      memoryFiles: [{ name: 'GEMINI.md', tokens: 200 }],
+      skills: [
+        { name: 'feat-dev', tokens: 10, loaded: false },
+        {
+          name: 'e2e-testing',
+          tokens: 20,
+          loaded: true,
+          bodyTokens: 400,
+        },
+      ],
+    });
+    // Sections appear, sorted by token count descending.
+    const shellIdx = text.indexOf('shell');
+    const readIdx = text.indexOf('read-file');
+    expect(shellIdx).toBeGreaterThan(-1);
+    expect(readIdx).toBeGreaterThan(shellIdx);
+    expect(text).toContain('MCP tools');
+    expect(text).toContain('Memory files');
+    expect(text).toContain('GEMINI.md');
+    // Loaded skill (with body cost) precedes the unloaded one.
+    const loadedIdx = text.indexOf('* e2e-testing');
+    const unloadedIdx = text.indexOf('feat-dev');
+    expect(loadedIdx).toBeGreaterThan(-1);
+    expect(unloadedIdx).toBeGreaterThan(loadedIdx);
+    expect(text).toContain('+400 body');
+    expect(text).not.toContain('Run /context detail');
+  });
 });
 
 describe('projectDoctor', () => {
@@ -258,6 +331,53 @@ describe('projectMcpStatus', () => {
     expect(text).toContain('● docs - Ready (1 tool)');
     expect(text).toContain('Tools:');
     expect(text).toContain('- search');
+  });
+
+  it('prints parameter schemas and tips when requested (ytahdn-4)', () => {
+    const text = projectMcpStatus({
+      servers: { docs: {} },
+      tools: [
+        {
+          serverName: 'docs',
+          name: 'search',
+          schema: {
+            parametersJsonSchema: {
+              type: 'object',
+              properties: { query: { type: 'string' } },
+            },
+          },
+        },
+      ],
+      prompts: [],
+      authStatus: {},
+      blockedServers: [],
+      discoveryInProgress: false,
+      connectingServers: [],
+      showDescriptions: false,
+      showSchema: true,
+      showTips: true,
+    });
+    expect(text).toContain('Parameters:');
+    expect(text).toContain('"query"');
+    expect(text).toContain('★ Tips:');
+    expect(text).toContain(
+      'Use /mcp desc to show server and tool descriptions',
+    );
+
+    const plain = projectMcpStatus({
+      servers: { docs: {} },
+      tools: [{ serverName: 'docs', name: 'search' }],
+      prompts: [],
+      authStatus: {},
+      blockedServers: [],
+      discoveryInProgress: false,
+      connectingServers: [],
+      showDescriptions: false,
+      showSchema: false,
+      showTips: false,
+    });
+    expect(plain).not.toContain('Parameters:');
+    expect(plain).not.toContain('★ Tips:');
   });
 });
 
