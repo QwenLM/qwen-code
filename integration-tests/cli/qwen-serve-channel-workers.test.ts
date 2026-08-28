@@ -271,6 +271,7 @@ describe('qwen serve multi-workspace channel workers', () => {
       QWEN_HOME: qwenHome,
       QWEN_RUNTIME_DIR: runtimeDir,
       QWEN_CODE_TRUSTED_FOLDERS_PATH: trustedFoldersPath,
+      SANDBOX_MOUNTS: REPO_ROOT,
       OPENAI_API_KEY: 'fake-key',
       OPENAI_BASE_URL: 'http://127.0.0.1:9/v1',
       OPENAI_MODEL: 'fake-model',

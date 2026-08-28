@@ -562,7 +562,7 @@ describe('SessionWriterLease', () => {
     );
 
     await config.initialize({
-      skipGeminiInitialization: true,
+      skipLlmInitialization: true,
       skipHooks: true,
       skipMcpDiscovery: true,
       skipSkillManager: true,
@@ -622,7 +622,7 @@ describe('SessionWriterLease', () => {
       );
     const initialize = (config: Config) =>
       config.initialize({
-        skipGeminiInitialization: true,
+        skipLlmInitialization: true,
         skipHooks: true,
         skipMcpDiscovery: true,
         skipSkillManager: true,
@@ -739,7 +739,7 @@ describe('SessionWriterLease', () => {
     );
 
     await config.initialize({
-      skipGeminiInitialization: true,
+      skipLlmInitialization: true,
       skipHooks: true,
       skipMcpDiscovery: true,
       skipSkillManager: true,

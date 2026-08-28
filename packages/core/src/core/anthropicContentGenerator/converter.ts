@@ -94,7 +94,7 @@ export type CacheRetentionByBlock = Partial<
   Record<'system' | 'tool' | 'user.last', CacheRetention>
 >;
 
-export interface ConvertGeminiRequestToAnthropicOptions {
+export interface ConvertLlmRequestToAnthropicOptions {
   /**
    * On every assistant turn, fill in `signature: ''` on any `thinking` block
    * that lacks the required `signature` field. Preserves the original
@@ -221,7 +221,7 @@ export class AnthropicContentConverter {
    * Per-request tool ID sanitization state (see {@link resolveToolUseId}).
    * The converter instance is long-lived across requests (constructed once
    * per generator), so this state is reset at the top of every
-   * `convertGeminiRequestToAnthropic` call rather than at construction.
+   * `convertLlmRequestToAnthropic` call rather than at construction.
    */
   private readonly toolIdMap = new Map<string, string>();
   private readonly usedToolIds = new Set<string>();
@@ -236,9 +236,9 @@ export class AnthropicContentConverter {
     this.enableCacheControl = enableCacheControl;
   }
 
-  convertGeminiRequestToAnthropic(
+  convertLlmRequestToAnthropic(
     request: GenerateContentParameters,
-    options: ConvertGeminiRequestToAnthropicOptions = {},
+    options: ConvertLlmRequestToAnthropicOptions = {},
   ): {
     system?: AnthropicTextBlockParam[] | string;
     messages: AnthropicMessageParam[];
@@ -354,8 +354,8 @@ export class AnthropicContentConverter {
     };
   }
 
-  async convertGeminiToolsToAnthropic(
-    geminiTools: ToolListUnion,
+  async convertLlmToolsToAnthropic(
+    llmTools: ToolListUnion,
     options: {
       enableCacheControl?: boolean;
       useGlobalCacheScope?: boolean;
@@ -365,7 +365,7 @@ export class AnthropicContentConverter {
   ): Promise<AnthropicToolParam[]> {
     const tools: AnthropicToolParam[] = [];
 
-    for (const tool of geminiTools) {
+    for (const tool of llmTools) {
       let actualTool: Tool;
 
       if ('tool' in tool) {
@@ -417,7 +417,7 @@ export class AnthropicContentConverter {
     // ship the standard per-session shape so they don't see a scope
     // extension they may not recognize.
     // Per-call overrides mirror the request-shape gates in
-    // `convertGeminiRequestToAnthropic` so a qwen-oauth-style hot flip of
+    // `convertLlmRequestToAnthropic` so a qwen-oauth-style hot flip of
     // `enableCacheControl` (the only field `Config.handleModelChange()`
     // mutates in place without recreating the generator) doesn't leave
     // the tool body and the beta header out of sync. `baseUrl` isn't
@@ -446,10 +446,10 @@ export class AnthropicContentConverter {
     return tools;
   }
 
-  convertAnthropicResponseToGemini(
+  convertAnthropicResponseToLlm(
     response: Anthropic.Message,
   ): GenerateContentResponse {
-    const geminiResponse = new GenerateContentResponse();
+    const llmResponse = new GenerateContentResponse();
     const parts: Part[] = [];
 
     for (const block of response.content || []) {
@@ -506,21 +506,21 @@ export class AnthropicContentConverter {
       safetyRatings: [],
     };
 
-    const finishReason = this.mapAnthropicFinishReasonToGemini(
+    const finishReason = this.mapAnthropicFinishReasonToLlm(
       response.stop_reason,
     );
     if (finishReason) {
       candidate.finishReason = finishReason;
     }
 
-    geminiResponse.candidates = [candidate];
-    geminiResponse.responseId = response.id;
-    geminiResponse.createTime = Date.now().toString();
-    geminiResponse.modelVersion = response.model || undefined;
-    geminiResponse.promptFeedback = { safetyRatings: [] };
+    llmResponse.candidates = [candidate];
+    llmResponse.responseId = response.id;
+    llmResponse.createTime = Date.now().toString();
+    llmResponse.modelVersion = response.model || undefined;
+    llmResponse.promptFeedback = { safetyRatings: [] };
 
     if (response.usage) {
-      geminiResponse.usageMetadata = buildAnthropicUsageMetadata({
+      llmResponse.usageMetadata = buildAnthropicUsageMetadata({
         inputTokens: response.usage.input_tokens || 0,
         cacheReadTokens: response.usage.cache_read_input_tokens || 0,
         cacheCreationTokens: response.usage.cache_creation_input_tokens || 0,
@@ -532,7 +532,7 @@ export class AnthropicContentConverter {
       });
     }
 
-    return geminiResponse;
+    return llmResponse;
   }
 
   private processContents(
@@ -697,7 +697,7 @@ export class AnthropicContentConverter {
    * The same source ID always resolves to the same wire ID within a
    * request (memoized in `toolIdMap`), so a `tool_use`/`tool_result` pair
    * that shares a source ID still links up correctly after sanitization.
-   * State is scoped to a single `convertGeminiRequestToAnthropic` call
+   * State is scoped to a single `convertLlmRequestToAnthropic` call
    * (reset via {@link resetToolIdState}), since the converter instance
    * itself is long-lived across requests.
    */
@@ -904,7 +904,7 @@ export class AnthropicContentConverter {
     return {};
   }
 
-  mapAnthropicFinishReasonToGemini(
+  mapAnthropicFinishReasonToLlm(
     reason?: string | null,
   ): FinishReason | undefined {
     if (!reason) return undefined;
@@ -916,7 +916,7 @@ export class AnthropicContentConverter {
       content_filter: FinishReason.SAFETY,
       // Anthropic's refusal stop_reason is a provider safety decision; it
       // must land in the content-filter family so downstream gates (e.g.
-      // the quiet post-tool-result acceptance in geminiChat, #9026) keep
+      // the quiet post-tool-result acceptance in llmChat, #9026) keep
       // it fatal instead of masking it with an "(empty content)" turn.
       refusal: FinishReason.SAFETY,
     };
@@ -1255,7 +1255,7 @@ export class AnthropicContentConverter {
    * synthetic user turn to satisfy Anthropic's "must end with a user
    * message" requirement (Opus/Sonnet 4.6+, every 5.x family) when the
    * conversation would otherwise end on a non-empty assistant message.
-   * See {@link ConvertGeminiRequestToAnthropicOptions.stripTrailingAssistantPrefill}.
+   * See {@link ConvertLlmRequestToAnthropicOptions.stripTrailingAssistantPrefill}.
    */
   private stripTrailingAssistantPrefill(
     messages: AnthropicMessageParam[],
@@ -1629,7 +1629,7 @@ function cleanOrphanedToolCalls(
  * regardless of whether a signature is present. This arises when a
  * `redacted_thinking` block -- whose opaque `data` doesn't survive the
  * Gemini-`Part` round trip, see
- * {@link AnthropicContentConverter.convertAnthropicResponseToGemini} --
+ * {@link AnthropicContentConverter.convertAnthropicResponseToLlm} --
  * is replayed back through history construction as an empty-text
  * `thinking` block.
  *

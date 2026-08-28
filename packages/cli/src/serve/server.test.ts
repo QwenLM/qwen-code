@@ -165,10 +165,7 @@ import { isValidSessionId } from '../config/config.js';
 import type { DaemonLogger } from './daemon-logger.js';
 import { FsError, type WorkspaceFileSystemFactory } from './fs/index.js';
 import { getRateLimiter } from './rate-limit.js';
-import {
-  WorkspaceSkillNotToggleableError,
-  type DaemonWorkspaceService,
-} from './workspace-service/types.js';
+import type { DaemonWorkspaceService } from './workspace-service/types.js';
 import type { WorkspaceRegistrationStore } from './workspace-registration-store.js';
 import {
   createWorkspaceGenerationGuard,
@@ -617,8 +614,8 @@ const EXPECTED_STAGE1_FEATURES = [
   // init scaffold, and MCP server restart).
   'session_approval_mode_control',
   'workspace_tool_toggle',
-  'workspace_skill_toggle',
-  'workspace_skill_batch_toggle',
+  'workspace_skill_settings_toggle',
+  'workspace_skill_settings_batch_toggle',
   'extension_batch_activation_v2',
   'workspace_skill_manage',
   'workspace_permissions',
@@ -23810,7 +23807,7 @@ describe('createServeApp', () => {
       expect(badBody.body.code).toBe('invalid_enabled_flag');
     });
 
-    it('returns the canonical name and deferred activation without a child', async () => {
+    it('trims and returns the requested name with deferred activation without a child', async () => {
       const bridge = fakeBridge({
         workspaceSkillsImpl: async () => ({
           v: 1,
@@ -23830,12 +23827,12 @@ describe('createServeApp', () => {
         primaryWorkspaceTrusted: true,
       });
       const res = await auth(
-        request(app).post('/workspace/skills/ReViEw/enable'),
+        request(app).post('/workspace/skills/%20ReViEw%20/enable'),
       ).send({ enabled: false });
 
       expect(res.status).toBe(200);
       expect(res.body).toEqual({
-        skillName: 'review',
+        skillName: 'ReViEw',
         enabled: false,
         changed: true,
         activation: 'deferred',
@@ -23844,14 +23841,17 @@ describe('createServeApp', () => {
       });
       expect(persistDisabledSkills).toHaveBeenCalledWith(
         WS_BOUND,
-        'review',
+        'ReViEw',
         false,
         undefined,
       );
     });
 
-    it('returns 404 for an unknown skill', async () => {
-      const persistDisabledSkills = vi.fn();
+    it('persists an unknown Skill name without catalog validation', async () => {
+      const persistDisabledSkills = vi.fn().mockResolvedValue({
+        changed: true,
+        disabled: ['missing'],
+      });
       const app = createServeApp(tokenOpts, undefined, {
         bridge: fakeBridge({
           workspaceSkillsImpl: async () => ({
@@ -23861,15 +23861,25 @@ describe('createServeApp', () => {
             skills: [reviewSkill],
           }),
         }),
+        boundWorkspace: WS_BOUND,
         persistDisabledSkills,
         primaryWorkspaceTrusted: true,
       });
       const res = await auth(
         request(app).post('/workspace/skills/missing/enable'),
       ).send({ enabled: false });
-      expect(res.status).toBe(404);
-      expect(res.body.code).toBe('skill_not_found');
-      expect(persistDisabledSkills).not.toHaveBeenCalled();
+      expect(res.status).toBe(200);
+      expect(res.body).toMatchObject({
+        skillName: 'missing',
+        enabled: false,
+        changed: true,
+      });
+      expect(persistDisabledSkills).toHaveBeenCalledWith(
+        WS_BOUND,
+        'missing',
+        false,
+        undefined,
+      );
     });
 
     it('rejects an unknown workspace client id before persistence', async () => {
@@ -23889,8 +23899,11 @@ describe('createServeApp', () => {
       expect(persistDisabledSkills).not.toHaveBeenCalled();
     });
 
-    it('returns 409 without persisting a non-user-invocable skill', async () => {
-      const persistDisabledSkills = vi.fn();
+    it('persists a non-user-invocable Skill name without catalog validation', async () => {
+      const persistDisabledSkills = vi.fn().mockResolvedValue({
+        changed: true,
+        disabled: ['review'],
+      });
       const app = createServeApp(tokenOpts, undefined, {
         bridge: fakeBridge({
           workspaceSkillsImpl: async () => ({
@@ -23900,22 +23913,32 @@ describe('createServeApp', () => {
             skills: [{ ...reviewSkill, userInvocable: false }],
           }),
         }),
+        boundWorkspace: WS_BOUND,
         persistDisabledSkills,
         primaryWorkspaceTrusted: true,
       });
       const res = await auth(
         request(app).post('/workspace/skills/review/enable'),
       ).send({ enabled: false });
-      expect(res.status).toBe(409);
+      expect(res.status).toBe(200);
       expect(res.body).toMatchObject({
-        code: 'skill_not_toggleable',
-        reason: 'not_user_invocable',
+        skillName: 'review',
+        enabled: false,
+        changed: true,
       });
-      expect(persistDisabledSkills).not.toHaveBeenCalled();
+      expect(persistDisabledSkills).toHaveBeenCalledWith(
+        WS_BOUND,
+        'review',
+        false,
+        undefined,
+      );
     });
 
-    it('returns a dedicated code for an inactive extension skill', async () => {
-      const persistDisabledSkills = vi.fn();
+    it('persists an inactive Extension Skill name without catalog validation', async () => {
+      const persistDisabledSkills = vi.fn().mockResolvedValue({
+        changed: false,
+        disabled: [],
+      });
       const app = createServeApp(tokenOpts, undefined, {
         bridge: fakeBridge({
           workspaceSkillsImpl: async () => ({
@@ -23927,6 +23950,7 @@ describe('createServeApp', () => {
             ],
           }),
         }),
+        boundWorkspace: WS_BOUND,
         persistDisabledSkills,
         primaryWorkspaceTrusted: true,
       });
@@ -23934,40 +23958,18 @@ describe('createServeApp', () => {
         request(app).post('/workspace/skills/review/enable'),
       ).send({ enabled: true });
 
-      expect(res.status).toBe(409);
+      expect(res.status).toBe(200);
       expect(res.body).toMatchObject({
-        code: 'skill_inactive_extension',
-        reason: 'inactive_extension',
+        skillName: 'review',
+        enabled: true,
+        changed: false,
       });
-      expect(persistDisabledSkills).not.toHaveBeenCalled();
-    });
-
-    it('returns the locked scope from persistence validation', async () => {
-      const app = createServeApp(tokenOpts, undefined, {
-        bridge: fakeBridge({
-          workspaceSkillsImpl: async () => ({
-            v: 1,
-            workspaceCwd: WS_BOUND,
-            initialized: true,
-            skills: [reviewSkill],
-          }),
-        }),
-        persistDisabledSkills: vi
-          .fn()
-          .mockRejectedValue(
-            new WorkspaceSkillNotToggleableError('review', 'locked', 'user'),
-          ),
-        primaryWorkspaceTrusted: true,
-      });
-      const res = await auth(
-        request(app).post('/workspace/skills/review/enable'),
-      ).send({ enabled: true });
-      expect(res.status).toBe(409);
-      expect(res.body).toMatchObject({
-        code: 'skill_not_toggleable',
-        reason: 'locked',
-        lockedScope: 'user',
-      });
+      expect(persistDisabledSkills).toHaveBeenCalledWith(
+        WS_BOUND,
+        'review',
+        true,
+        undefined,
+      );
     });
 
     it('rejects writes to an untrusted primary workspace', async () => {
