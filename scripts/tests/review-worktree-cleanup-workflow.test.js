@@ -141,11 +141,16 @@ function expectCleanupRecipe(run) {
 function expectQuarantineFallback(run) {
   const code = stripComments(run);
   expect(code).toContain('_qwen-quarantine');
+  // A cancelled verify can leave the protected tree under the recovery name
+  // seen in run 33146730771, so both known top-level names must be swept.
+  expect(code).toContain(
+    'for stale_qwen in "$GITHUB_WORKSPACE/.qwen" "$GITHUB_WORKSPACE/.qwen.root-orig"; do',
+  );
   // The move must be the fallback of the removal chain, not an
   // unconditional relocation: a workspace that deletes cleanly keeps its
   // caches.
   expect(code).toMatch(
-    /rm -rf "\$GITHUB_WORKSPACE\/\.qwen"[\s\S]*?sudo -n rm -rf[\s\S]*?mv -- "\$GITHUB_WORKSPACE\/\.qwen"/,
+    /rm -rf -- "\$stale_qwen"[\s\S]*?sudo -n rm -rf -- "\$stale_qwen"[\s\S]*?mv -- "\$stale_qwen"/,
   );
   // Same filesystem by construction — a cross-device `mv` degrades to
   // copy-then-unlink, which fails on exactly the residue this exists for.
@@ -155,7 +160,7 @@ function expectQuarantineFallback(run) {
   // The quarantined tree still needs a human: the warning must name where
   // it went, and the terminal warning must survive for the case where even
   // the rename fails.
-  expect(code).toContain('leaked .qwen; runner needs manual cleanup');
+  expect(code).toContain('leaked $stale_name; runner needs manual cleanup');
 }
 
 function expectHardenedGit(run) {
@@ -294,6 +299,31 @@ describe('review worktree cleanup steps', () => {
       expect(run, `job "${id}" sweep drifted from the first copy`).toBe(
         firstCopy.run,
       );
+    }
+  });
+
+  it('removes both known qwen state names without touching .qwenignore', () => {
+    const root = mkdtempSync(join(tmpdir(), 'qwen-ci-cleanup-'));
+    const workspace = join(root, 'workspace');
+    mkdirSync(join(workspace, '.qwen', 'agents'), { recursive: true });
+    mkdirSync(join(workspace, '.qwen.root-orig', 'agents'), {
+      recursive: true,
+    });
+    writeFileSync(join(workspace, '.qwenignore'), 'keep\n');
+
+    try {
+      const result = spawnSync('bash', ['-c', ciCleanSteps[0].run], {
+        cwd: workspace,
+        env: { ...process.env, GITHUB_WORKSPACE: workspace },
+        encoding: 'utf8',
+      });
+
+      expect(result.status, result.stderr).toBe(0);
+      expect(existsSync(join(workspace, '.qwen'))).toBe(false);
+      expect(existsSync(join(workspace, '.qwen.root-orig'))).toBe(false);
+      expect(existsSync(join(workspace, '.qwenignore'))).toBe(true);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
     }
   });
 

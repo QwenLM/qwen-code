@@ -192,14 +192,19 @@ jobs:
           fi
           chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chmod -R u+rwX "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace write permissions; checkout may fail on leftover read-only files"
 
-      # Remove .qwen/ left by a previous job so actions/checkout doesn't trip
-      # on restrictive permissions.
+      # Remove .qwen/ and its recovery backup left by a previous job so
+      # actions/checkout doesn't trip on restrictive permissions.
       - name: 'Clean stale .qwen before checkout'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
         run: |-
           set -uo pipefail
-          if [ -d "$GITHUB_WORKSPACE/.qwen" ] && [ ! -L "$GITHUB_WORKSPACE/.qwen" ]; then
-            chmod -R u+w "$GITHUB_WORKSPACE/.qwen" 2>/dev/null || true
+          for stale_qwen in "$GITHUB_WORKSPACE/.qwen" "$GITHUB_WORKSPACE/.qwen.root-orig"; do
+            if [ ! -e "$stale_qwen" ] && [ ! -L "$stale_qwen" ]; then
+              continue
+            fi
+            if [ -d "$stale_qwen" ] && [ ! -L "$stale_qwen" ]; then
+              chmod -R u+w "$stale_qwen" 2>/dev/null || true
+            fi
             # Last resort when nothing can DELETE the tree: move it out of the
             # workspace. Unlinking an entry needs write permission on the
             # directory holding it — which is exactly what a foreign-owned
@@ -211,18 +216,19 @@ jobs:
             # here, not just this one (measured, run 32621267802: `EACCES
             # rmdir .qwen/tmp/review-pr-9748-scratch-verify-…/probe-ws/…`
             # killed checkout for two unrelated PRs on the same runner).
-            rm -rf "$GITHUB_WORKSPACE/.qwen" 2>/dev/null ||
-              sudo -n rm -rf "$GITHUB_WORKSPACE/.qwen" 2>/dev/null ||
+            rm -rf -- "$stale_qwen" 2>/dev/null ||
+              sudo -n rm -rf -- "$stale_qwen" 2>/dev/null ||
               {
                 quarantine="$(dirname -- "$GITHUB_WORKSPACE")/_qwen-quarantine"
                 mkdir -p "$quarantine" 2>/dev/null || true
-                if mv -- "$GITHUB_WORKSPACE/.qwen" "$quarantine/qwen-$(date -u +%Y%m%dT%H%M%SZ)-$$" 2>/dev/null; then
-                  echo "::warning::could not delete leaked .qwen; moved it to $quarantine so this checkout can proceed — that directory needs manual cleanup"
+                stale_name="$(basename -- "$stale_qwen")"
+                if mv -- "$stale_qwen" "$quarantine/${stale_name#\.}-$(date -u +%Y%m%dT%H%M%SZ)-$$" 2>/dev/null; then
+                  echo "::warning::could not delete leaked $stale_name; moved it to $quarantine so this checkout can proceed — that directory needs manual cleanup"
                 else
-                  echo "::warning::leaked .qwen; runner needs manual cleanup"
+                  echo "::warning::leaked $stale_name; runner needs manual cleanup"
                 fi
               }
-          fi
+          done
           # Interrupted reviews leave worktree registrations under .qwen/tmp/
           # and qwen-review/* branches behind. prune drops registrations whose
           # directories the rm above removed; worktree remove --force then
@@ -701,8 +707,13 @@ jobs:
       - name: 'Clean stale .qwen before checkout'
         run: |-
           set -uo pipefail
-          if [ -d "$GITHUB_WORKSPACE/.qwen" ] && [ ! -L "$GITHUB_WORKSPACE/.qwen" ]; then
-            chmod -R u+w "$GITHUB_WORKSPACE/.qwen" 2>/dev/null || true
+          for stale_qwen in "$GITHUB_WORKSPACE/.qwen" "$GITHUB_WORKSPACE/.qwen.root-orig"; do
+            if [ ! -e "$stale_qwen" ] && [ ! -L "$stale_qwen" ]; then
+              continue
+            fi
+            if [ -d "$stale_qwen" ] && [ ! -L "$stale_qwen" ]; then
+              chmod -R u+w "$stale_qwen" 2>/dev/null || true
+            fi
             # Last resort when nothing can DELETE the tree: move it out of the
             # workspace. Unlinking an entry needs write permission on the
             # directory holding it — which is exactly what a foreign-owned
@@ -714,18 +725,19 @@ jobs:
             # here, not just this one (measured, run 32621267802: `EACCES
             # rmdir .qwen/tmp/review-pr-9748-scratch-verify-…/probe-ws/…`
             # killed checkout for two unrelated PRs on the same runner).
-            rm -rf "$GITHUB_WORKSPACE/.qwen" 2>/dev/null ||
-              sudo -n rm -rf "$GITHUB_WORKSPACE/.qwen" 2>/dev/null ||
+            rm -rf -- "$stale_qwen" 2>/dev/null ||
+              sudo -n rm -rf -- "$stale_qwen" 2>/dev/null ||
               {
                 quarantine="$(dirname -- "$GITHUB_WORKSPACE")/_qwen-quarantine"
                 mkdir -p "$quarantine" 2>/dev/null || true
-                if mv -- "$GITHUB_WORKSPACE/.qwen" "$quarantine/qwen-$(date -u +%Y%m%dT%H%M%SZ)-$$" 2>/dev/null; then
-                  echo "::warning::could not delete leaked .qwen; moved it to $quarantine so this checkout can proceed — that directory needs manual cleanup"
+                stale_name="$(basename -- "$stale_qwen")"
+                if mv -- "$stale_qwen" "$quarantine/${stale_name#\.}-$(date -u +%Y%m%dT%H%M%SZ)-$$" 2>/dev/null; then
+                  echo "::warning::could not delete leaked $stale_name; moved it to $quarantine so this checkout can proceed — that directory needs manual cleanup"
                 else
-                  echo "::warning::leaked .qwen; runner needs manual cleanup"
+                  echo "::warning::leaked $stale_name; runner needs manual cleanup"
                 fi
               }
-          fi
+          done
           # Interrupted reviews leave worktree registrations under .qwen/tmp/
           # and qwen-review/* branches behind. prune drops registrations whose
           # directories the rm above removed; worktree remove --force then
@@ -1245,8 +1257,13 @@ jobs:
       - name: 'Clean stale .qwen before checkout'
         run: |-
           set -uo pipefail
-          if [ -d "$GITHUB_WORKSPACE/.qwen" ] && [ ! -L "$GITHUB_WORKSPACE/.qwen" ]; then
-            chmod -R u+w "$GITHUB_WORKSPACE/.qwen" 2>/dev/null || true
+          for stale_qwen in "$GITHUB_WORKSPACE/.qwen" "$GITHUB_WORKSPACE/.qwen.root-orig"; do
+            if [ ! -e "$stale_qwen" ] && [ ! -L "$stale_qwen" ]; then
+              continue
+            fi
+            if [ -d "$stale_qwen" ] && [ ! -L "$stale_qwen" ]; then
+              chmod -R u+w "$stale_qwen" 2>/dev/null || true
+            fi
             # Last resort when nothing can DELETE the tree: move it out of the
             # workspace. Unlinking an entry needs write permission on the
             # directory holding it — which is exactly what a foreign-owned
@@ -1258,18 +1275,19 @@ jobs:
             # here, not just this one (measured, run 32621267802: `EACCES
             # rmdir .qwen/tmp/review-pr-9748-scratch-verify-…/probe-ws/…`
             # killed checkout for two unrelated PRs on the same runner).
-            rm -rf "$GITHUB_WORKSPACE/.qwen" 2>/dev/null ||
-              sudo -n rm -rf "$GITHUB_WORKSPACE/.qwen" 2>/dev/null ||
+            rm -rf -- "$stale_qwen" 2>/dev/null ||
+              sudo -n rm -rf -- "$stale_qwen" 2>/dev/null ||
               {
                 quarantine="$(dirname -- "$GITHUB_WORKSPACE")/_qwen-quarantine"
                 mkdir -p "$quarantine" 2>/dev/null || true
-                if mv -- "$GITHUB_WORKSPACE/.qwen" "$quarantine/qwen-$(date -u +%Y%m%dT%H%M%SZ)-$$" 2>/dev/null; then
-                  echo "::warning::could not delete leaked .qwen; moved it to $quarantine so this checkout can proceed — that directory needs manual cleanup"
+                stale_name="$(basename -- "$stale_qwen")"
+                if mv -- "$stale_qwen" "$quarantine/${stale_name#\.}-$(date -u +%Y%m%dT%H%M%SZ)-$$" 2>/dev/null; then
+                  echo "::warning::could not delete leaked $stale_name; moved it to $quarantine so this checkout can proceed — that directory needs manual cleanup"
                 else
-                  echo "::warning::leaked .qwen; runner needs manual cleanup"
+                  echo "::warning::leaked $stale_name; runner needs manual cleanup"
                 fi
               }
-          fi
+          done
           # Interrupted reviews leave worktree registrations under .qwen/tmp/
           # and qwen-review/* branches behind. prune drops registrations whose
           # directories the rm above removed; worktree remove --force then
