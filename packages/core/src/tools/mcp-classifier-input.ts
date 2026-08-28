@@ -118,6 +118,7 @@ function fitString(
   limit: number,
   budget: ProjectionBudget,
 ): string {
+  value = value.replace(/[\p{Cc}\p{Zl}\p{Zp}]/gu, ' ');
   let encoded = JSON.stringify(value);
   if (encoded.length - 2 <= limit) {
     charge(budget, encoded.length);
@@ -266,12 +267,11 @@ function projectMcpArgumentsWithBudget(
  * otherwise let a hostile name inject lines into the classifier prompt).
  */
 function fitName(name: string, budget: ProjectionBudget): string {
-  const cleaned = name.replace(/\p{Cc}/gu, ' ');
   const limit = Math.max(
     0,
     Math.min(MCP_CLASSIFIER_MAX_NAME_CHARS, budget.remaining),
   );
-  return fitString(cleaned, limit, budget);
+  return fitString(name, limit, budget);
 }
 
 function projectAnnotations(

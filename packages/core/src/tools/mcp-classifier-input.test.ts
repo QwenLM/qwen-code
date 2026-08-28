@@ -191,6 +191,21 @@ describe('projectMcpArguments', () => {
 });
 
 describe('buildMcpClassifierInput', () => {
+  it('removes Unicode line separators from hostile tool names, keys, and values', () => {
+    const separators = '\u2028\u2029\u0085';
+    const input = buildMcpClassifierInput({
+      serverName: `server${separators}injected`,
+      serverToolName: `tool${separators}injected`,
+      params: { [`key${separators}injected`]: `value${separators}injected` },
+    });
+
+    expect(input).toEqual({
+      server: 'server   injected',
+      tool: 'tool   injected',
+      arguments: { 'key   injected': 'value   injected' },
+    });
+  });
+
   it('surfaces server, tool, arguments and every declared annotation', () => {
     const input = buildMcpClassifierInput({
       serverName: 'github',
