@@ -693,6 +693,90 @@ describe('the log cap', () => {
     }
   });
 
+  it('refuses a non-finite or non-positive time budget up front instead of throwing (R15-2)', () => {
+    // The readiness probe's budget goes to spawnSync's `timeout`, validated as
+    // an unsigned integer: NaN (yargs on `--ready-timeout abc`), Infinity and
+    // a fraction would throw ERR_OUT_OF_RANGE out of the ready loop into the
+    // handler catch-all — exit 1, no report. ab-drive already refuses these.
+    const dir = mkdtempSync(join(tmpdir(), 'drv-budget-'));
+    const exec = (cmd: string, args: string[]): ExecResult => {
+      if (cmd === 'tmux' && args[0] === '-V') return ok();
+      return ok();
+    };
+    // 0 is a legitimate "one poll" budget the suite itself uses; 1e306 is
+    // finite and merely clamped. Only non-finite and negative are refused.
+    for (const readyTimeout of [NaN, Infinity, -1]) {
+      const r = runDrive({
+        script: 'noop',
+        cwd: dir,
+        ready: 'true',
+        readyTimeout,
+        timeout: 1,
+        server: 'budget',
+        exec,
+        logPath: join(dir, 'drive.log'),
+      });
+      expect(r.outcome).toBe('unavailable');
+      expect(r.note).toContain('--ready-timeout');
+    }
+    // A fractional budget must be truncated, not passed through.
+    const seen: number[] = [];
+    runDrive({
+      script: 'noop',
+      cwd: dir,
+      ready: 'true',
+      readyTimeout: 0.5,
+      timeout: 0,
+      server: 'frac',
+      exec: (cmd, args, _i, timeoutMs) => {
+        if (cmd === 'bash' && args[1] === 'true' && timeoutMs !== undefined) {
+          seen.push(timeoutMs);
+        }
+        return ok();
+      },
+      logPath: join(dir, 'drive.log'),
+    });
+    rmSync(dir, { recursive: true, force: true });
+    for (const t of seen) expect(Number.isInteger(t)).toBe(true);
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'a FIFO planted at the sentinel path cannot hang the poll loop (R15-6)',
+    () => {
+      // The sentinel is arm-controlled like the log; a bare blocking read on a
+      // writer-less FIFO would block forever, past --timeout, with the finally
+      // never reached. Read through readCapped: non-blocking, non-file → "no
+      // sentinel yet" → the run times out normally.
+      const dir = mkdtempSync(join(tmpdir(), 'drv-fifo-'));
+      const workDir = join(tmpdir(), 'qwen-review-drive-fifo-sentinel');
+      const exec = (cmd: string, args: string[]): ExecResult => {
+        if (cmd === 'tmux' && args[0] === '-V') return ok();
+        if (cmd === 'tmux' && args[2] === 'new-session') {
+          mkdirSync(workDir, { recursive: true });
+          rmSync(join(workDir, 'drive.rc'), { force: true });
+          spawnSync('mkfifo', [join(workDir, 'drive.rc')]);
+          return ok();
+        }
+        return ok();
+      };
+      const started = Date.now();
+      const r = runDrive({
+        script: 'noop',
+        cwd: dir,
+        readyTimeout: 1,
+        timeout: 0,
+        server: 'fifo-sentinel',
+        exec,
+        logPath: join(dir, 'drive.log'),
+      });
+      rmSync(dir, { recursive: true, force: true });
+      rmSync(workDir, { recursive: true, force: true });
+      expect(r.outcome).toBe('timed-out'); // returned — did not block on the FIFO
+      expect(r.exitCode).toBeNull();
+      expect(Date.now() - started).toBeLessThan(10_000);
+    },
+  );
+
   it('readCapped returns an empty snapshot for a non-regular file (R14-5)', () => {
     // An untrusted arm can swap its log for a DIRECTORY (`rm log; mkdir log`).
     // openSync succeeds, fstat reports a dir, and readSync would throw EISDIR

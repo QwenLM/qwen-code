@@ -49,6 +49,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readlinkSync,
   realpathSync,
   rmSync,
   statSync,
@@ -358,18 +359,28 @@ export function sectionUnsafeToRevert(
   // and extractHunkPatch's rewrite would target the WRONG file even when a
   // decoy at the stripped path lets `git apply -R --check` pass. Ground the
   // rewrite in git's own metadata: refuse when they disagree.
-  if (isMoveOrCopy) {
-    const metaLine = header.find(
-      (l) => l.startsWith('rename to ') || l.startsWith('copy to '),
-    );
-    // A `rename from`/`copy from` with NO destination line is metadata git
-    // never emits (the pair always travels together). Left through, the
-    // cross-check below has nothing to compare against and the gate fails
-    // OPEN — the rewrite then runs on a token it cannot vouch for. Refuse the
-    // incomplete shape instead of trusting it.
-    if (metaLine === undefined) {
-      return `hunk sits in a rename/copy section that carries a \`rename from\`/\`copy from\` line but no \`rename to\`/\`copy to\` — incomplete metadata git does not emit, so the destination the -p1 rewrite would target cannot be verified. This command reverts git-produced diffs; recapture with git.`;
+  // Rename/copy metadata must be exactly ONE paired `from`/`to`, in the
+  // position git emits it (before `---`/`+++`). Every other shape is a
+  // hand-assembled capture: `from` without `to` (the cross-check would fail
+  // OPEN), `to` without `from` or a `to` AFTER the headers (a stray line that
+  // re-keys the reported path away from the tokens git actually resolves), or
+  // two destinations (the cross-check passes on the first while git reverts
+  // under the other). Refuse them all rather than trust one.
+  const toLines = header.filter(
+    (l) => l.startsWith('rename to ') || l.startsWith('copy to '),
+  );
+  const minusIdx = header.findIndex((l) => l.startsWith('--- '));
+  const lateTo = header.findIndex(
+    (l, i) =>
+      i > minusIdx &&
+      minusIdx >= 0 &&
+      (l.startsWith('rename to ') || l.startsWith('copy to ')),
+  );
+  if (isMoveOrCopy || toLines.length > 0) {
+    if (!isMoveOrCopy || toLines.length !== 1 || lateTo >= 0) {
+      return `hunk sits in a section whose rename/copy metadata is malformed (${!isMoveOrCopy ? 'a `rename to`/`copy to` with no `rename from`/`copy from`' : toLines.length === 0 ? 'a `rename from`/`copy from` with no destination line' : toLines.length > 1 ? `${toLines.length} destination lines` : 'a destination line placed after the ---/+++ headers'}) — a shape git does not emit, so the destination the -p1 rewrite would target cannot be verified against the tokens git resolves. This command reverts git-produced diffs; recapture with git.`;
     }
+    const metaLine = toLines[0];
     const metaPath = unquote(
       metaLine.slice(metaLine.startsWith('rename to ') ? 10 : 8),
     );
@@ -597,6 +608,21 @@ function treePath(tree: string, path: Buffer): Buffer {
   return Buffer.concat([Buffer.from(tree + sep, 'utf8'), path]);
 }
 
+/**
+ * lstat that never throws: `throwIfNoEntry:false` suppresses only ENOENT, and a
+ * parent path component that is a regular file (a PR replacing a directory
+ * with a file) throws ENOTDIR, EACCES on a locked parent, and so on. Every
+ * caller treats "cannot stat" the same as "not there", so a throw here must
+ * not escape into the handler's exit-1 catch-all.
+ */
+function safeLstat(p: Buffer): ReturnType<typeof lstatSync> | undefined {
+  try {
+    return lstatSync(p, { throwIfNoEntry: false });
+  } catch {
+    return undefined;
+  }
+}
+
 export function runRevertHunk(args: RevertHunkArgs): RevertHunkReport {
   // 'latin1', not 'utf8', end to end: the pipeline's diff files are byte
   // streams (fetch-diff writes latin1 so "a Latin-1/Shift-JIS diff survives
@@ -676,12 +702,21 @@ export function runRevertHunk(args: RevertHunkArgs): RevertHunkReport {
         // regex below never matches them and only these markers catch them.
         l.startsWith('new file mode 160000') ||
         l.startsWith('deleted file mode 160000') ||
+        // SYMLINKS (mode 120000) are the other non-regular type: a symlink
+        // type-change or retarget section applies with exit 0 without
+        // restoring the file TYPE (a regular file holding the old target
+        // string is left where base had a link), so applied:true would be a
+        // false witness just like a gitlink. Same markers, same refusal.
+        l.startsWith('old mode 120000') ||
+        l.startsWith('new mode 120000') ||
+        l.startsWith('new file mode 120000') ||
+        l.startsWith('deleted file mode 120000') ||
         // Loose like the startsWith siblings: no `$` anchor and uppercase
         // admitted, because an arbitrary --diff can carry trailing whitespace
         // or uppercase SHAs on the index line. Over-refusing to the exit-2
         // harness class is the safe direction; admitting the section lets
         // apply -R exit 0 without moving the pointer — a false applied:true.
-        /^index [0-9a-fA-F]+\.\.[0-9a-fA-F]+ 160000/.test(l),
+        /^index [0-9a-fA-F]+\.\.[0-9a-fA-F]+ (?:160000|120000)/.test(l),
     ) ||
     // A DIRTY submodule (locally modified content, UNCHANGED pointer) carries
     // NO mode or index line — git emits only `Subproject commit <sha>` body
@@ -694,7 +729,7 @@ export function runRevertHunk(args: RevertHunkArgs): RevertHunkReport {
       applied: false,
       hunk: entry,
       harnessFailure: true,
-      note: `hunk ${args.hunk} is a gitlink/submodule change (mode 160000 and/or a Subproject commit body line) — git apply -R reports success without moving the submodule, so applied:true would be a false witness. Reverting a submodule needs index/submodule semantics this command does not implement; nothing was changed.`,
+      note: `hunk ${args.hunk} is a gitlink/submodule (mode 160000 / Subproject commit) or symlink (mode 120000) change — git apply -R reports success without restoring the submodule pointer or the file TYPE, so applied:true would be a false witness. Reverting those needs index/type semantics this command does not implement; nothing was changed.`,
     };
   }
   const unsafe = sectionUnsafeToRevert(diffText, file);
@@ -705,6 +740,34 @@ export function runRevertHunk(args: RevertHunkArgs): RevertHunkReport {
       harnessFailure: true,
       note: `${args.hunk}: ${unsafe} Nothing was changed.`,
     };
+  }
+  // The `@@` header's declared counts are what bound the hunk body (see
+  // hunkBodyEnd) — so an UNDER-declared header (`-1,7 +1,7` over a 10-line
+  // body, a damaged or hand-transcribed capture) would silently extract a
+  // truncated-but-valid hunk that git applies as a PARTIAL revert behind
+  // applied:true. Validate the residue: once the counts exhaust, the next line
+  // must not still be body (` `/`+`/`-`), except the structural format-patch
+  // signature trailer (`-- ` then a version line at EOF).
+  {
+    const h = file.hunks[sel.n - 1];
+    const end = hunkBodyEnd(allLines, h);
+    const next = allLines[end]; // 0-based index `end` == 1-based line end+1
+    const isTrailer =
+      next === '-- ' &&
+      allLines.slice(end + 1).every((l, i) => i === 0 || l === '');
+    if (
+      next !== undefined &&
+      end < h.diffEnd &&
+      /^[ +-]/.test(next) &&
+      !isTrailer
+    ) {
+      return {
+        applied: false,
+        hunk: entry,
+        harnessFailure: true,
+        note: `hunk ${args.hunk}: its @@ header's line counts disagree with its body — the body continues past the declared counts, so the capture is damaged or hand-transcribed and a revert would apply only PART of the hunk while claiming the whole. Recapture the diff from git; nothing was changed.`,
+      };
+    }
   }
   const patch = extractHunkPatch(diffText, file, sel.n);
   // The file `git apply -R -p1` will TOUCH, grounded in the tree rather than a
@@ -752,11 +815,51 @@ export function runRevertHunk(args: RevertHunkArgs): RevertHunkReport {
       note: `--tree ${JSON.stringify(args.tree)} is a SUBDIRECTORY of a work tree, not its root — git apply resolves the patch's paths against the toplevel and silently SKIPS any that fall outside this subdirectory, exiting 0 without touching them, so applied:true would be a false witness over an unchanged file. Point --tree at the work-tree root (the scratch worktree); nothing was changed.`,
     };
   }
+  const targetPath = treePath(tree, targetBytes);
+  // Line-ending regime, pinned like whitespace is. `git apply -R` re-runs EOL
+  // conversion when it writes the restored bytes: `core.autocrlf` is disabled
+  // on the invocations below via `-c`, but a committed `.gitattributes`
+  // `eol=crlf` no config value can override — it would rewrite the restored
+  // bytes (CRLF where base stored LF) behind applied:true, and `git status`
+  // normalises EOL so no tree-grounded check could see it. Ask git for the
+  // target's effective `eol` attribute (path over stdin, byte-faithful) and
+  // refuse a conversion up front as a harness fact.
+  const attr = spawnSync('git', ['check-attr', '-z', '--stdin', 'eol'], {
+    cwd: tree,
+    encoding: 'buffer',
+    env: sanitizedGitEnv(),
+    timeout: 60_000,
+    input: Buffer.concat([targetBytes, Buffer.from([0])]),
+  });
+  if (attr.status === 0 && attr.stdout) {
+    // -z output: path NUL attr NUL value NUL
+    const parts = attr.stdout.toString('latin1').split('\0');
+    const eol = parts[2] ?? '';
+    if (eol === 'crlf') {
+      return {
+        applied: false,
+        hunk: entry,
+        harnessFailure: true,
+        note: `hunk ${args.hunk}: ${JSON.stringify(target)} carries a \`.gitattributes\` \`eol=crlf\` in ${tree}, so git apply -R would rewrite the restored bytes with CRLF line endings — a reverted tree that no longer matches the capture's base side, invisible to git status. Revert this hunk in a scratch tree without that attribute; nothing was changed.`,
+      };
+    }
+  }
   // mkdtemp, not a pid-keyed name: a predictable path in the shared temp dir
   // can be pre-planted as a symlink by a local peer, and `mkdirSync`
   // (recursive) follows it silently. mkdtemp creates a fresh 0700 directory
-  // nothing else can have claimed.
-  const dir = mkdtempSync(join(tmpdir(), 'qwen-review-revert-hunk-'));
+  // nothing else can have claimed. Wrapped: a full or unwritable tmpdir must
+  // return a harness fact, not throw past the handler into exit 1.
+  let dir: string;
+  try {
+    dir = mkdtempSync(join(tmpdir(), 'qwen-review-revert-hunk-'));
+  } catch (e) {
+    return {
+      applied: false,
+      hunk: entry,
+      harnessFailure: true,
+      note: `could not create the patch staging directory under ${tmpdir()}: ${(e as Error).message} — a harness failure (a full or unwritable TMPDIR), not a fact about the hunk; nothing was changed.`,
+    };
+  }
   const patchPath = join(dir, 'hunk.patch');
   const exec = args.exec ?? gitApply;
   try {
@@ -771,7 +874,12 @@ export function runRevertHunk(args: RevertHunkArgs): RevertHunkReport {
     // it re-adds base lines under -R while reporting applied:true — a reverted
     // tree that no longer matches base. `nowarn` is git apply's disable value
     // (there is no `nochange`); it neither warns nor fixes.
+    // `-c core.autocrlf=false -c core.eol=lf`: the config half of the EOL pin
+    // (the attribute half is the check-attr refusal above) — a scratch tree
+    // inheriting a global autocrlf=true must not CRLF-rewrite restored bytes.
+    const gitEol = ['-c', 'core.autocrlf=false', '-c', 'core.eol=lf'];
     const check = exec(tree, [
+      ...gitEol,
       'apply',
       '-R',
       '--whitespace=nowarn',
@@ -808,16 +916,42 @@ export function runRevertHunk(args: RevertHunkArgs): RevertHunkReport {
       // earlier revert) stays tracked and correctly reads as the exit-1
       // conflict class, not a prefix problem. Untracked → harness fact (exit 2);
       // tracked → a real overlap / already-mutated tree stays exit 1.
+      // A ZERO-CONTEXT capture (`git diff -U0`) is refused by git apply without
+      // `--unidiff-zero` even over a perfectly matching tree — a refusal about
+      // the CAPTURE's shape, not a coupling fact about the hunk. Classify it
+      // as a harness fact with recapture advice rather than pass `--unidiff-
+      // zero` (which drops git's own context sanity checks for every capture).
+      // A hunk can legitimately have no context lines only when its file is
+      // tiny; that shape is rare enough that "no context AND --check refused"
+      // is the safe reading.
+      // A whole-file CREATION or DELETION section has no context lines by
+      // nature (there is nothing to surround), so the zero-context reading
+      // applies only to an edit of an existing file.
+      const patchHead = patch.split('\n').slice(0, 12);
+      const isCreateOrDelete = patchHead.some(
+        (l) => l === '--- /dev/null' || l === '+++ /dev/null',
+      );
+      const bodyLines = patch.split('\n').filter((l) => /^[ +-]/.test(l));
+      const hasContext = bodyLines.some((l) => l.startsWith(' '));
+      if (!isCreateOrDelete && !hasContext && bodyLines.length > 0) {
+        return {
+          applied: false,
+          hunk: entry,
+          harnessFailure: true,
+          note: `hunk ${args.hunk}: the capture carries no context lines (a \`git diff -U0\` / \`--unified=0\` capture) and git apply refuses zero-context patches by design, so this refusal is about the capture's shape, not a coupling fact about the hunk. Recapture with git's default three lines of context; nothing was changed.`,
+        };
+      }
       // "Known to the tree" = in the INDEX or PRESENT ON DISK. Index alone is
       // not enough: a file the PR DELETED is legitimately absent from the
       // index of a PR-head checkout, and after a first (un-delete) revert it
       // exists only on disk — a second revert of that deletion hunk is the
       // ordinary already-reverted conflict (exit 1, "reset the scratch tree"),
-      // not a prefix problem. Both checks consume the raw bytes.
+      // not a prefix problem. Both checks consume the raw bytes. The lstat is
+      // guarded: `throwIfNoEntry` suppresses only ENOENT, and a parent path
+      // component that is a regular file throws ENOTDIR — which must read as
+      // "not present", not escape as an exit-1 crash.
       const known =
-        indexHasPath(tree, targetBytes) ||
-        lstatSync(treePath(tree, targetBytes), { throwIfNoEntry: false }) !==
-          undefined;
+        indexHasPath(tree, targetBytes) || safeLstat(targetPath) !== undefined;
       if (!known) {
         return {
           applied: false,
@@ -839,8 +973,7 @@ export function runRevertHunk(args: RevertHunkArgs): RevertHunkReport {
     // applied:true would be a false witness over a byte-identical tree, the
     // shape the submodule gate above also guards. A missing target is fine (a
     // deletion being un-deleted); only an existing NON-file is refused.
-    const targetPath = treePath(tree, targetBytes);
-    const targetStat = lstatSync(targetPath, { throwIfNoEntry: false });
+    const targetStat = safeLstat(targetPath);
     if (targetStat && !targetStat.isFile() && !targetStat.isSymbolicLink()) {
       return {
         applied: false,
@@ -849,23 +982,52 @@ export function runRevertHunk(args: RevertHunkArgs): RevertHunkReport {
         note: `hunk ${args.hunk}: the resolved target ${JSON.stringify(target)} is a directory or special file in ${tree}, not a regular file — git apply -R exits 0 without touching it, so applied:true would be a false witness. Point --tree at the scratch worktree; nothing was changed.`,
       };
     }
-    // Snapshot the target's bytes BEFORE the apply, so `applied:true` can be
-    // grounded in the tree having actually changed rather than in exit 0
-    // alone: a hunk whose `-`/`+` sides are byte-identical (a redaction pass
-    // that equalised both sides, a hand edit) reverse-applies as an exit-0
-    // no-op over an untouched tree, and reporting it applied would send the
-    // verifier to re-probe an unchanged tree and record the hunk as dead
-    // weight. `null` = absent, which a creation-revert (delete) or a
-    // deletion-revert (recreate) legitimately flips.
+    // The before/after snapshot below reads the whole target; past node's
+    // 2 GiB readFileSync cap BOTH reads throw, and "unreadable twice" would be
+    // misread as "unchanged" over a tree that WAS reverted. Refuse up front.
+    const READ_CAP = 2 ** 31 - 1;
+    if (targetStat && targetStat.isFile() && targetStat.size >= READ_CAP) {
+      return {
+        applied: false,
+        hunk: entry,
+        harnessFailure: true,
+        note: `hunk ${args.hunk}: ${JSON.stringify(target)} is ${targetStat.size} bytes, at or past the ${READ_CAP}-byte limit this command can snapshot to verify a revert actually changed the tree — a harness limit, not a fact about the hunk. Revert it by hand in the scratch tree; nothing was changed.`,
+      };
+    }
+    // Snapshot the target BEFORE the apply, so `applied:true` can be grounded
+    // in the tree having actually changed rather than in exit 0 alone: a hunk
+    // whose `-`/`+` sides are byte-identical (a redaction pass that equalised
+    // both sides, a hand edit) reverse-applies as an exit-0 no-op over an
+    // untouched tree, and reporting it applied would send the verifier to
+    // re-probe an unchanged tree and record the hunk as dead weight. `null` =
+    // absent, which a creation-revert (delete) or a deletion-revert
+    // (recreate) legitimately flips. A SYMLINK is snapshotted as its link
+    // target (what git apply -R rewrites for a retarget section), never
+    // followed: following it would read the pointed-to content — or throw
+    // EISDIR twice for a directory link and read as "unchanged".
     const snapshot = (): Buffer | null => {
       try {
+        const st = safeLstat(targetPath);
+        if (st === undefined) return null;
+        if (st.isSymbolicLink()) {
+          return Buffer.concat([
+            Buffer.from('symlink:'),
+            readlinkSync(targetPath, { encoding: 'buffer' }),
+          ]);
+        }
         return readFileSync(targetPath);
       } catch {
         return null;
       }
     };
     const before = snapshot();
-    const apply = exec(tree, ['apply', '-R', '--whitespace=nowarn', patchPath]);
+    const apply = exec(tree, [
+      ...gitEol,
+      'apply',
+      '-R',
+      '--whitespace=nowarn',
+      patchPath,
+    ]);
     if (apply.error !== undefined || apply.signal !== undefined) {
       // Same misclassification the --check guard above closes, one call
       // later — with one difference the note must carry: a git killed
@@ -905,6 +1067,19 @@ export function runRevertHunk(args: RevertHunkArgs): RevertHunkReport {
       applied: true,
       hunk: entry,
       note: `reverted hunk ${args.hunk} (${entry.header}) in ${tree}. Re-run the probe the intact tree passed — the intact/reverted pair is the witness — and reset the scratch tree afterwards. A compiled product needs its rebuild between revert and probe, or the probe measures the previous build.`,
+    };
+  } catch (e) {
+    // Any filesystem throw from inside the body (an ENOSPC on the patch
+    // write, an unexpected stat/read failure) is a HARNESS condition. Left
+    // uncaught it reaches the handler's catch-all, which maps a non-TypeError
+    // to exit 1 — the coupling-fact class this command exists to keep harness
+    // conditions out of — with no JSON report. Classify it instead. The tree
+    // may be partially modified only if the apply had started; say so.
+    return {
+      applied: false,
+      hunk: entry,
+      harnessFailure: true,
+      note: `hunk ${args.hunk}: the harness hit a filesystem error (${(e as NodeJS.ErrnoException).code ?? (e as Error).message}) — a harness failure, not a fact about the hunk. If it occurred after --check passed the tree may be PARTIALLY modified: reset the scratch tree before the next probe.`,
     };
   } finally {
     // Best effort: an EACCES (a same-uid peer chmods the staging dir mid-run;
@@ -970,7 +1145,15 @@ export const revertHunkCommand: CommandModule = {
     ignoreBrokenPipe();
     // Required/mutually-exclusive flags, validated HERE (exit 2, the repairable
     // class) rather than at the yargs layer (exit 1, the coupling-fact class).
-    const diffArg = argv['diff'] as string | undefined;
+    // yargs hands an ARRAY when a flag is passed twice; this is the one flag
+    // validated before the try, so an array's `.trim` would throw a TypeError
+    // out of the handler into the CLI crash path (exit 1, stack trace).
+    const diffArg = argv['diff'] as string | string[] | undefined;
+    if (Array.isArray(diffArg)) {
+      writeStderrLineSafe('revert-hunk: pass --diff exactly once.');
+      process.exitCode = 2;
+      return;
+    }
     if (diffArg === undefined || diffArg.trim() === '') {
       writeStderrLineSafe(
         'revert-hunk: --diff <file> is required (the unified diff the plan records).',

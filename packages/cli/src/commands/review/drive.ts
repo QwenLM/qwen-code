@@ -42,8 +42,6 @@ import { spawnSync } from 'node:child_process';
 import {
   mkdirSync,
   writeFileSync,
-  readFileSync,
-  existsSync,
   rmSync,
   statSync,
   openSync,
@@ -613,6 +611,34 @@ export function runDrive(args: DriveArgs): DriveReport {
       note: `--server ${JSON.stringify(server)} is not a name this command will own: it becomes both a path under the temp dir and a word in the shell line tmux runs, so it is restricted to letters, digits, dot, dash and underscore (max 64). Nothing was started.`,
     };
   }
+  // Non-finite or non-positive time budgets disable every deadline below
+  // (`Date.now() >= NaN` is never true) — and, since the readiness probe's
+  // budget is handed to spawnSync's `timeout` (validated as an unsigned
+  // integer), NaN / Infinity / a fraction would THROW ERR_OUT_OF_RANGE out of
+  // the ready loop into the handler catch-all: exit 1, no report. yargs
+  // `type:'number'` produces NaN from `--timeout abc`. Refuse up front, the
+  // same guard ab-drive applies.
+  for (const [flag, v] of [
+    ['--timeout', args.timeout],
+    ['--ready-timeout', args.readyTimeout],
+  ] as const) {
+    // Zero is a legitimate budget here ("one poll, then stop" — the suite
+    // drives timed-out shapes that way), so only NEGATIVE or non-finite is
+    // refused; the probe's budget is clamped to an integer below.
+    if (!Number.isFinite(v) || v < 0) {
+      return {
+        outcome: 'unavailable',
+        observed: false,
+        exitCode: null,
+        readyAfterMs: null,
+        droveForMs: 0,
+        output: '',
+        truncated: false,
+        killedStale: false,
+        note: `${flag} must be a non-negative, finite number of seconds (got ${v}) — nothing was started.`,
+      };
+    }
+  }
   // Before anything is started, like the server-name check above: a caller who
   // asked for a capture wants it in the witness, and discovering the pattern
   // was malformed after a 300-second drive costs the drive.
@@ -664,7 +690,13 @@ export function runDrive(args: DriveArgs): DriveReport {
       // SIGKILL a probe that traps TERM (untrusted code the brief itself
       // warns about) is waited on by spawnSync forever, hanging the CLI with
       // no report and a leaked tmux server.
-      const budgetMs = Math.max(1, deadline - Date.now());
+      // Integer, and under spawnSync's int32 ceiling: its `timeout` is
+      // validated as an unsigned integer, so a fractional or huge budget would
+      // throw ERR_OUT_OF_RANGE out of this loop.
+      const budgetMs = Math.min(
+        Math.max(1, Math.trunc(deadline - Date.now())),
+        2 ** 31 - 1,
+      );
       if (
         exec('bash', ['-lc', args.ready], undefined, budgetMs, 'SIGKILL')
           .status === 0
@@ -757,9 +789,16 @@ export function runDrive(args: DriveArgs): DriveReport {
         break;
       }
       output = cap.text;
-      exitCode = existsSync(sentinelPath)
-        ? sentinelExitCode(readFileSync(sentinelPath, 'utf8'))
-        : null;
+      // The sentinel is the one other arm-controlled path in this loop (the
+      // arm learns it from the wrapper it runs under): read it through the
+      // same bounded, non-blocking, regular-file-only helper as the log, so a
+      // `rm drive.rc; mkfifo drive.rc` cannot block the poll past --timeout, a
+      // >512 MiB sparse plant cannot throw ERR_STRING_TOO_LONG out of the
+      // loop, and a directory swap cannot throw EISDIR. Absent / non-file /
+      // over-cap all read as "no sentinel yet".
+      const sc = readCapped(sentinelPath, MAX_READ_BYTES);
+      exitCode =
+        sc.overflow || sc.text === '' ? null : sentinelExitCode(sc.text);
       if (exitCode !== null) {
         // Re-read the log now that the sentinel is there, because the read
         // above happened BEFORE it. The wrapper writes the sentinel from an

@@ -712,8 +712,244 @@ describe('runRevertHunk', () => {
     const r = runRevertHunk({ diff: diffPath, tree: dir, hunk: 'y:1' });
     expect(r.applied).toBe(false);
     expect(r.harnessFailure).toBe(true);
-    expect(r.note).toContain('no `rename to`');
+    expect(r.note).toContain('no destination line');
     expect(readFileSync(join(dir, 'y'), 'utf8')).toBe(before); // decoy untouched
+  });
+
+  it('refuses a symlink type-change section — git apply -R restores content, not TYPE (R16-6)', () => {
+    // A single-section symlink→file capture applies with exit 0 leaving a
+    // REGULAR FILE holding the old target string where base had a link. Same
+    // false-witness shape as a gitlink; same refusal.
+    const dir = tempDir('rh-symlink-');
+    git(dir, 'init', '-q', '-b', 'main');
+    git(dir, 'config', 'user.email', 't@t');
+    git(dir, 'config', 'user.name', 't');
+    writeFileSync(join(dir, 'link.txt'), 'target.txt\n'); // post-change state
+    git(dir, 'add', '.');
+    git(dir, 'commit', '-qm', 'base');
+    const diffPath = join(dir, 'sym.diff');
+    writeFileSync(
+      diffPath,
+      [
+        'diff --git a/link.txt b/link.txt',
+        'old mode 120000',
+        'new mode 100644',
+        'index 1111111..2222222',
+        '--- a/link.txt',
+        '+++ b/link.txt',
+        '@@ -1 +1 @@',
+        '-target.txt',
+        '\\ No newline at end of file',
+        '+target.txt',
+        '',
+      ].join('\n'),
+    );
+    const r = runRevertHunk({ diff: diffPath, tree: dir, hunk: 'link.txt:1' });
+    expect(r.applied).toBe(false);
+    expect(r.harnessFailure).toBe(true);
+    expect(r.note).toContain('symlink');
+    expect(readFileSync(join(dir, 'link.txt'), 'utf8')).toBe('target.txt\n');
+  });
+
+  it('classifies a zero-context (-U0) capture refusal as a harness fact, not coupling (R16-4)', () => {
+    // git apply refuses zero-context patches by design even over a matching
+    // tree; recording that as "does not revert independently" fabricates a
+    // coupling fact about the PR for every -U0 hunk.
+    const { dir, diffPath } = twoHunkFixture();
+    const u0 = git(dir, 'diff', '-U0', 'HEAD~1', 'HEAD');
+    const u0Path = join(dir, 'u0.diff');
+    writeFileSync(u0Path, u0);
+    const before = readFileSync(join(dir, 'f.txt'), 'utf8');
+    const r = runRevertHunk({ diff: u0Path, tree: dir, hunk: 'f.txt:1' });
+    if (!r.applied) {
+      // git refused (the common case): must be the exit-2 class with
+      // recapture advice, never the exit-1 coupling class.
+      expect(r.harnessFailure).toBe(true);
+      expect(r.conflict).toBeUndefined();
+      expect(r.note).toContain('no context lines');
+      expect(readFileSync(join(dir, 'f.txt'), 'utf8')).toBe(before);
+    }
+    // Control: the default-context capture of the same hunk reverts.
+    expect(
+      runRevertHunk({ diff: diffPath, tree: dir, hunk: 'f.txt:1' }).applied,
+    ).toBe(true);
+  });
+
+  it('refuses an under-declared @@ header instead of applying a truncated hunk (R16-1)', () => {
+    // `@@ -1,4 +1,4 @@` captured as `-1,2 +1,2` with the body intact: the
+    // counts exhaust two lines early and a valid 2/2 patch containing only the
+    // first change would apply — a PARTIAL revert behind applied:true.
+    const { dir, diffPath } = twoHunkFixture();
+    const damaged = readFileSync(diffPath, 'utf8').replace(
+      '@@ -1,4 +1,4 @@',
+      '@@ -1,2 +1,2 @@',
+    );
+    const damagedPath = join(dir, 'under.diff');
+    writeFileSync(damagedPath, damaged);
+    const before = readFileSync(join(dir, 'f.txt'), 'utf8');
+    const r = runRevertHunk({ diff: damagedPath, tree: dir, hunk: 'f.txt:1' });
+    expect(r.applied).toBe(false);
+    expect(r.harnessFailure).toBe(true);
+    expect(r.note).toContain('line counts disagree');
+    expect(readFileSync(join(dir, 'f.txt'), 'utf8')).toBe(before);
+  });
+
+  it('trailing whitespace on BOTH ---/+++ tokens is a harness fact, not a coupling refusal (R16-5)', () => {
+    // git keeps the space (`f.txt ` — no such file) and refuses; a model that
+    // trimmed the token would call the target tracked and book git's refusal
+    // as a coupling fact. With edge whitespace preserved, the target is
+    // unknown to the tree → exit 2.
+    const { dir, diffPath } = twoHunkFixture();
+    const spaced = readFileSync(diffPath, 'utf8')
+      .replace(/^--- a\/f\.txt$/m, '--- a/f.txt ')
+      .replace(/^\+\+\+ b\/f\.txt$/m, '+++ b/f.txt ');
+    const spacedPath = join(dir, 'spaced.diff');
+    writeFileSync(spacedPath, spaced);
+    const id = listHunks(spaced)[0].id;
+    const r = runRevertHunk({ diff: spacedPath, tree: dir, hunk: id });
+    expect(r.applied).toBe(false);
+    expect(r.harnessFailure).toBe(true);
+    expect(r.conflict).toBeUndefined();
+  });
+
+  it('a timestamped DELETION keys its section by the old path, not /dev/null (R17-17)', () => {
+    // `+++ /dev/null\t<mtime>` must still be recognised as /dev/null so the
+    // section falls back to the `---` path; otherwise a diff -u deletion
+    // capture lists as `/dev/null:1` and the un-delete revert cannot be named.
+    const dir = tempDir('rh-stampdel-');
+    git(dir, 'init', '-q', '-b', 'main');
+    git(dir, 'config', 'user.email', 't@t');
+    git(dir, 'config', 'user.name', 't');
+    git(dir, 'config', 'core.autocrlf', 'false');
+    mkdirSync(join(dir, 'docs'));
+    writeFileSync(join(dir, 'docs', 'old.md'), 'gone\n');
+    writeFileSync(join(dir, 'keep.txt'), 'k\n');
+    git(dir, 'add', '.');
+    git(dir, 'commit', '-qm', 'base');
+    rmSync(join(dir, 'docs', 'old.md'));
+    git(dir, 'add', '-A');
+    git(dir, 'commit', '-qm', 'delete');
+    const stamped = git(dir, 'diff', 'HEAD~1', 'HEAD')
+      .replace(
+        /^--- a\/docs\/old\.md$/m,
+        '--- a/docs/old.md\t2026-08-27 10:00:00',
+      )
+      .replace(/^\+\+\+ \/dev\/null$/m, '+++ /dev/null\t1970-01-01 00:00:00');
+    const stampedPath = join(dir, 'stamped-del.diff');
+    writeFileSync(stampedPath, stamped);
+    expect(listHunks(stamped).map((h) => h.id)).toEqual(['docs/old.md:1']);
+    const r = runRevertHunk({
+      diff: stampedPath,
+      tree: dir,
+      hunk: 'docs/old.md:1',
+    });
+    expect(r.applied).toBe(true);
+    expect(readFileSync(join(dir, 'docs', 'old.md'), 'utf8')).toBe('gone\n');
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'a rename to a path ending in a space keeps the space through the rewrite (R14-7)',
+    () => {
+      // git emits `+++ b/new \t` (space kept, tab-delimited). Trimming before
+      // the tab cut would rewrite `--- a/new` while git targets `new ` — a
+      // MOVE under applied:true. The no-trim cut keeps both sides aligned.
+      const dir = tempDir('rh-trailsp-');
+      git(dir, 'init', '-q', '-b', 'main');
+      git(dir, 'config', 'user.email', 't@t');
+      git(dir, 'config', 'user.name', 't');
+      git(dir, 'config', 'core.autocrlf', 'false');
+      writeFileSync(join(dir, 'old.txt'), 'line1\nline2\nline3\n');
+      git(dir, 'add', '.');
+      git(dir, 'commit', '-qm', 'base');
+      git(dir, 'mv', 'old.txt', 'new ');
+      writeFileSync(join(dir, 'new '), 'line1\nLINE2\nline3\n');
+      git(dir, 'add', '-A');
+      git(dir, 'commit', '-qm', 'rename with trailing space + edit');
+      const diffText = git(dir, 'diff', '-M', 'HEAD~1', 'HEAD');
+      expect(diffText).toContain('+++ b/new \t');
+      const diffPath = join(dir, 'trail.diff');
+      writeFileSync(diffPath, diffText);
+      expect(listHunks(diffText).map((h) => h.id)).toEqual(['new :1']);
+      const r = runRevertHunk({ diff: diffPath, tree: dir, hunk: 'new :1' });
+      expect(r.applied).toBe(true);
+      // Content reverted IN PLACE — no move to a spaceless `new`.
+      expect(readFileSync(join(dir, 'new '), 'utf8')).toBe(
+        'line1\nline2\nline3\n',
+      );
+      expect(existsSync(join(dir, 'new'))).toBe(false);
+    },
+  );
+
+  it('a regular file where a parent DIRECTORY is expected is a harness fact, never a throw (R17-1)', () => {
+    // lstat with throwIfNoEntry:false still throws ENOTDIR when a parent path
+    // component is a regular file; uncaught it reached the handler as exit 1.
+    const dir = tempDir('rh-enotdir-');
+    git(dir, 'init', '-q', '-b', 'main');
+    git(dir, 'config', 'user.email', 't@t');
+    git(dir, 'config', 'user.name', 't');
+    git(dir, 'config', 'core.autocrlf', 'false');
+    mkdirSync(join(dir, 'docs'));
+    writeFileSync(join(dir, 'docs', 'guide.md'), 'g\n');
+    git(dir, 'add', '.');
+    git(dir, 'commit', '-qm', 'base');
+    rmSync(join(dir, 'docs'), { recursive: true });
+    git(dir, 'add', '-A');
+    git(dir, 'commit', '-qm', 'delete docs/guide.md');
+    const diffPath = join(dir, 'del.diff');
+    writeFileSync(diffPath, git(dir, 'diff', 'HEAD~1', 'HEAD'));
+    // Now `docs` is a regular FILE: the deletion hunk's target parent.
+    writeFileSync(join(dir, 'docs'), 'i am a file\n');
+    const r = runRevertHunk({
+      diff: diffPath,
+      tree: dir,
+      hunk: 'docs/guide.md:1',
+    });
+    expect(r.applied).toBe(false);
+    expect(r.harnessFailure).toBe(true);
+  });
+
+  it('refuses a stray `rename to` after the headers and ignores it for the hunk id (R12-1)', () => {
+    // parseDiff must not let a `rename to z` placed after `+++` re-key the
+    // section: every downstream consumer and git itself resolve the ---/+++
+    // tokens, so the report would name a file git never touched.
+    const { dir, diffPath } = twoHunkFixture();
+    const stray = readFileSync(diffPath, 'utf8').replace(
+      /^\+\+\+ b\/f\.txt$/m,
+      '+++ b/f.txt\nrename to z',
+    );
+    expect(listHunks(stray).map((h) => h.id)).toEqual(['f.txt:1', 'f.txt:2']);
+    const strayPath = join(dir, 'stray.diff');
+    writeFileSync(strayPath, stray);
+    const before = readFileSync(join(dir, 'f.txt'), 'utf8');
+    const r = runRevertHunk({ diff: strayPath, tree: dir, hunk: 'f.txt:1' });
+    expect(r.applied).toBe(false);
+    expect(r.harnessFailure).toBe(true);
+    expect(r.note).toContain('malformed');
+    expect(readFileSync(join(dir, 'f.txt'), 'utf8')).toBe(before);
+    expect(existsSync(join(dir, 'z'))).toBe(false);
+  });
+
+  it('refuses to revert into a tree whose .gitattributes would CRLF-rewrite the restored bytes (R16-2)', () => {
+    // `* text eol=crlf` is honoured by git apply on write regardless of
+    // core.autocrlf, and git status normalises EOL so no tree check sees it.
+    const dir = tempDir('rh-eol-');
+    git(dir, 'init', '-q', '-b', 'main');
+    git(dir, 'config', 'user.email', 't@t');
+    git(dir, 'config', 'user.name', 't');
+    git(dir, 'config', 'core.autocrlf', 'false');
+    writeFileSync(join(dir, '.gitattributes'), '* text eol=crlf\n');
+    writeFileSync(join(dir, 'f.txt'), 'a\nb\nc\n');
+    git(dir, 'add', '.');
+    git(dir, 'commit', '-qm', 'base');
+    writeFileSync(join(dir, 'f.txt'), 'a\nB\nc\n');
+    git(dir, 'add', '.');
+    git(dir, 'commit', '-qm', 'pr');
+    const diffPath = join(dir, 'eol.diff');
+    writeFileSync(diffPath, git(dir, 'diff', 'HEAD~1', 'HEAD'));
+    const r = runRevertHunk({ diff: diffPath, tree: dir, hunk: 'f.txt:1' });
+    expect(r.applied).toBe(false);
+    expect(r.harnessFailure).toBe(true);
+    expect(r.note).toContain('eol=crlf');
   });
 
   it('refuses a hand-crafted section whose paths differ without rename metadata', () => {
@@ -1810,5 +2046,21 @@ describe('the command wiring', () => {
     expect(vi.mocked(writeStderrLineSafe)).toHaveBeenCalledWith(
       expect.stringContaining('--tree'),
     );
+
+    // --diff passed TWICE arrives as an array; the pre-try validation must
+    // classify it (exit 2), not throw `diffArg.trim is not a function` out of
+    // the handler into the CLI crash path (R17-20).
+    process.exitCode = 0;
+    expect(() =>
+      (revertHunkCommand.handler as (a: unknown) => void)({
+        diff: ['a.diff', 'b.diff'],
+        list: true,
+      }),
+    ).not.toThrow();
+    expect(process.exitCode).toBe(2);
+    expect(vi.mocked(writeStderrLineSafe)).toHaveBeenCalledWith(
+      expect.stringContaining('exactly once'),
+    );
+    process.exitCode = 0;
   });
 });

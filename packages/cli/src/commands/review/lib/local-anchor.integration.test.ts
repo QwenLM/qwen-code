@@ -391,6 +391,19 @@ const gitSparseCheckRulesSupported = (() => {
   try {
     probe = mkdtempSync(join(tmpdir(), 'qwen-check-rules-probe-'));
     execFileSync('git', ['init', '-q', probe], { stdio: 'pipe' });
+    // `check-rules` fatals (exit 128, "unable to load existing sparse-checkout
+    // patterns") in a repo where sparse-checkout was never configured — even
+    // on gits that fully support the subcommand (2.43 included). Without this
+    // the probe reported "unsupported" on CI's git and silently skipped the
+    // three real-git witnesses below. Configure a cone first; only a missing
+    // subcommand (exit 129, "unknown subcommand") then fails the probe.
+    execFileSync(
+      'git',
+      ['-C', probe, 'sparse-checkout', 'set', '--cone', '.'],
+      {
+        stdio: 'pipe',
+      },
+    );
     execFileSync('git', ['-C', probe, 'sparse-checkout', 'check-rules', '-z'], {
       stdio: 'pipe',
       input: '',

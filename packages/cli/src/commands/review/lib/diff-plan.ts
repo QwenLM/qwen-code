@@ -249,7 +249,11 @@ const HUNK_RE = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/;
  * reviewing — then refers to a file that does not exist.
  */
 export function unquote(raw: string): string {
-  return unquoteCStylePath(raw.trim());
+  // No trim: git keeps edge whitespace as part of the path (a path ending in a
+  // space is emitted unquoted, with a TAB after it to delimit). Trimming here
+  // would make the model resolve `x` while git operates on `x ` — the two
+  // sides of every tree-grounded check then disagree.
+  return unquoteCStylePath(raw);
 }
 
 /** Drop git's `a/` / `b/` decoration. `fetch-pr` pins those prefixes. */
@@ -258,18 +262,17 @@ function stripPrefix(p: string): string {
 }
 
 /**
- * Cut the `\t<timestamp>` suffix that `diff -u` / `diff -ur` / svn captures
- * carry on `---` / `+++` header tokens (`--- a/f.txt\t2026-08-27 10:00:00`).
- * git's own header parser truncates at the tab; a path token that keeps it
- * resolves to a file that never exists. A C-quoted token never carries a raw
- * tab (git escapes an embedded tab as `\t` inside the quotes), so quoted
- * tokens are returned untouched.
+ * Cut at the first raw TAB — the `\t<timestamp>` suffix that `diff -u` /
+ * `diff -ur` / svn captures carry on `---` / `+++` header tokens, and the
+ * delimiter git itself appends after a path that ends in whitespace. git's own
+ * header parser truncates at the tab and KEEPS everything before it (edge
+ * spaces included), so this cuts only, never trims. A C-quoted token never
+ * carries a raw tab (an embedded tab is escaped `\t` inside the quotes), so
+ * the cut cannot land inside a quoted path.
  */
 export function stripHeaderTimestamp(raw: string): string {
-  const t = raw.trim();
-  if (t.startsWith('"')) return t;
-  const tab = t.indexOf('\t');
-  return tab >= 0 ? t.slice(0, tab) : t;
+  const tab = raw.indexOf('\t');
+  return tab >= 0 ? raw.slice(0, tab) : raw;
 }
 
 /** Unquote then de-prefix a `diff --git` / `---` / `+++` path token. */
@@ -441,20 +444,31 @@ export function parseDiff(diffText: string): {
       }
       if (line.startsWith('rename to ')) {
         // A rename states its new path outright, without an `a/`/`b/` prefix.
-        cur.path = unquote(line.slice('rename to '.length));
+        // Honoured only in the position git emits it — paired with a preceding
+        // `rename from`, and BEFORE the `---`/`+++` headers (oldPath is still
+        // unset). A stray or unpaired `rename to` later in the section (a
+        // hand-assembled capture) must not re-key the path away from the
+        // `---`/`+++` tokens that every downstream consumer, and git apply
+        // itself, actually resolves against.
+        if (cur.renameFrom !== undefined && oldPath === '') {
+          cur.path = unquote(line.slice('rename to '.length));
+        }
         continue;
       }
       // `diff --git a/x b/x` is ambiguous when a path contains a space (git
       // only C-quotes non-ASCII and control bytes, not spaces), so prefer the
       // unambiguous `+++` / `---` headers. For a deletion `+++` is `/dev/null`,
       // and the old path from `---` is the right label.
+      // Cut the `\t<timestamp>` suffix BEFORE the /dev/null discrimination:
+      // a `diff -u` deletion reads `+++ /dev/null\t<mtime>`, and comparing the
+      // raw token would key the section `/dev/null` instead of its old path.
       if (line.startsWith('--- ')) {
-        const p = line.slice(4);
+        const p = stripHeaderTimestamp(line.slice(4));
         if (p !== '/dev/null') oldPath = cleanPath(p);
         continue;
       }
       if (line.startsWith('+++ ')) {
-        const p = line.slice(4);
+        const p = stripHeaderTimestamp(line.slice(4));
         if (p !== '/dev/null') cur.path = cleanPath(p);
         else if (oldPath) cur.path = oldPath;
         cur.kind = classifyPath(cur.path);
