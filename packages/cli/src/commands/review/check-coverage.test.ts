@@ -2702,13 +2702,19 @@ describe('coverage — a stale Uncoverable declaration cannot cap live coverage'
     expect(r.recoveredAgents).toBe(0);
   });
 
-  it('two honest returned declarers do not annihilate each other', () => {
-    // Both clear `chunkSatisfied`'s bar (returned, verbatim launch, diff
-    // read), so each superseded the other: both declarations vanished, no
-    // record covered the chunk, and it landed in `missingChunks` — whose
-    // remediation relaunches an agent that re-declares, reproducing the
-    // identical report forever. Supersession now excludes records that
-    // themselves declare the same chunk.
+  it('two honest returned declarers annihilate into the relaunch on untrusted metadata', () => {
+    // Supersession USED to exclude records that themselves declare the
+    // chunk, keeping two honest declarers from annihilating each other —
+    // and that same exclusion read a QUOTATION as a declaration (an
+    // indented quote starts a line, so the regex matches it) and removed
+    // the quoter as the only suppressor, admitting the quote over a chunk
+    // the same run demonstrably read (R20-3). The conjunct is reachable
+    // only when the plan's metadata cannot prove unspannability, and there
+    // any compliant returned record stands the declaration down: two
+    // honest declarers annihilate into `missingChunks`, whose relaunch is
+    // the correct repair — a re-plan re-measures the lines, and a chunk
+    // genuinely unspannable comes back truncatable, where the declaration
+    // is admitted ahead of suppression.
     const p = plan();
     transcript('a1', good(1), {
       calls: 2,
@@ -2721,8 +2727,8 @@ describe('coverage — a stale Uncoverable declaration cannot cap live coverage'
     transcript('a2', good(2), { calls: 2 });
 
     const r = coverageFromTranscripts(p, ENV);
-    expect(r.uncoverableChunks).toEqual([1]);
-    expect(r.missingChunks).toEqual([]);
+    expect(r.uncoverableChunks).toEqual([]);
+    expect(r.missingChunks).toEqual([1]);
     expect(r.coveredChunks).toEqual([2]);
   });
 
@@ -3635,6 +3641,181 @@ describe('coverage — a declaration must be evidenced by the declarer\u2019s ow
     expect(r.coveredChunks).toEqual([1]);
     expect(r.missingChunks).toEqual([]);
     expect(r.ok).toBe(false);
+    // The branch records its own cause and declarer directly: it has
+    // already run its own seals, and `noteChunkCause`'s re-applied
+    // `sealedToThisPlan` cannot hold here — a record reaches this branch
+    // exactly when CHUNK_RE did not match, so the count conjunct
+    // (`assignedChunkTotal === plan.chunks.length`) is guaranteed false
+    // and the cause would be silently dropped, classifying the chunk
+    // `no-agent` while the walk's own admission says a record declared it
+    // unreachable (R17-4).
+    const entry = r.chunkItems.find((i) => i.id === 2);
+    expect(entry?.outcome).toBe('uncoverable');
+    expect(entry?.classification).toBe('declared-uncoverable');
+    expect(entry?.agents).toEqual(['Please review chunk 2 of 2 carefully.']);
+  });
+
+  it('a quoted declaration annihilates into the relaunch on untrusted metadata', () => {
+    // The suppression conjunct's declarer-exclusion reads a QUOTATION the
+    // same as a declaration: the relaunch below merely quotes the template
+    // line indented — normal pipeline prose — and that excludes it as the
+    // declarer's only suppressor. With trusted metadata the truncatable and
+    // contradictory shapes answer first; the conjunct is reachable ONLY on
+    // the untrusted shape (absent or hand-zeroed `maxLineChars`), where
+    // the plan cannot prove unspannability — so any compliant returned
+    // record must stand the declaration down, and two honest declarers
+    // annihilate into `missingChunks`, whose relaunch is the correct
+    // repair there (R20-3).
+    transcript('a1', good(1), { calls: 2 });
+    transcript('a2first', good(2), {
+      calls: 1,
+      range: [100, 100],
+      text: 'Uncoverable: chunk 2 — line exceeds the read limit',
+    });
+    transcript('a2relaunch', good(2), {
+      calls: 1,
+      range: [100, 100],
+      text:
+        'Reviewed again.\n' +
+        '  Uncoverable: chunk 2 — line exceeds the read limit',
+    });
+    transcript('w', wholeDiff(), {
+      ranges: [
+        [0, 100],
+        [100, 100],
+      ],
+    });
+
+    const r = coverageFromTranscripts(plan(), ENV);
+    expect(r.uncoverableChunks).toEqual([]);
+    expect(r.coveredChunks).toEqual([1, 2]);
+  });
+
+  it('the unassigned arm fails toward suppression like the assigned arm', () => {
+    // The suppression conjunct's two call sites share one shape, and the
+    // unassigned arm carried the same defect twice over: the paraphrased
+    // declarer was admitted because its only suppressors — the returned
+    // chunk agents — all wore declarations (one honest, one a QUOTE), and
+    // the exclusion removed every one (R20-3).
+    transcript('a1', good(1), { calls: 2 });
+    transcript('a2honest', good(2), {
+      calls: 1,
+      range: [100, 100],
+      text: 'Uncoverable: chunk 2 — line exceeds the read limit',
+    });
+    transcript('a2quote', good(2), {
+      calls: 1,
+      range: [100, 100],
+      text:
+        'Reviewed again.\n' +
+        '  Uncoverable: chunk 2 — line exceeds the read limit',
+    });
+    transcript(
+      'a2para',
+      'Please review chunk 2 of 2 carefully.\n' +
+        `read_file(file_path="${DIFF}", offset=100, limit=100)`,
+      {
+        calls: 1,
+        range: [100, 100],
+        text: 'Uncoverable: chunk 2 — line exceeds the read limit',
+      },
+    );
+    transcript('w', wholeDiff(), {
+      ranges: [
+        [0, 100],
+        [100, 100],
+      ],
+    });
+
+    const r = coverageFromTranscripts(plan(), ENV);
+    expect(r.uncoverableChunks).toEqual([]);
+    expect(r.coveredChunks).toEqual([1, 2]);
+  });
+
+  it('a role agent quoting the declaration is not an unassigned declarer', () => {
+    // A chunk-scoped role launch carries a role identity line (never
+    // CHUNK_RE-matched), walks chunk-less, and spells exactly the declared
+    // chunk's window — so the containment shape passes for a quotation,
+    // the seals admitted it (truncatable short-circuit), and the quoted
+    // line stripped the live coverage of a chunk the same run demonstrably
+    // read. Role agents never declare chunks: a launch still carrying ANY
+    // intact identity line is not the paraphrased chunk launch this branch
+    // exists for (R20-4).
+    const p = plan(2, { longLineChunk: 2 });
+    transcript('a1', good(1), { calls: 2 });
+    transcript(
+      'ra',
+      'You are review agent `reverse-audit` — Reverse audit (round 1).\n' +
+        `read_file(file_path="${DIFF}", offset=100, limit=100)`,
+      {
+        calls: 1,
+        range: [100, 100],
+        text:
+          'Prior round reported:\n' +
+          '  Uncoverable: chunk 2 — line exceeds the read limit\n' +
+          'Continuing the audit.',
+      },
+    );
+
+    const r = coverageFromTranscripts(p, ENV);
+    expect(r.uncoverableChunks).toEqual([]);
+    expect(r.coveredChunks).toEqual([1, 2]);
+  });
+
+  it('an unassigned declarer with no ranged reads cannot strip a grown window', () => {
+    // The branch's territory substitute is containment, not the assigned
+    // arm's exact-window seal, and `declarerReadItsChunk` fails open on
+    // empty `diffReads` — so a fence-surviving paraphrased declarer whose
+    // spelled OLD window is a strict subset of the re-planned window rode
+    // the fail-open and erased the live agent's spanning coverage of the
+    // grown window. The arm has no told-range seal for the presumption to
+    // preserve: an honest declarer discovered the over-cap line through a
+    // ranged read, so requiring one loses no honest declaration (R20-5).
+    const p = join(dir, 'plan.json');
+    writeFileSync(
+      p,
+      JSON.stringify({
+        diffPathAbsolute: DIFF,
+        srcDiffLines: 5000,
+        diffLines: 300,
+        files: [
+          { path: 'a.ts', kind: 'source', removedLines: 0, heavy: false },
+        ],
+        chunks: [
+          { id: 1, startLine: 1, endLine: 100, maxLineChars: 0 },
+          { id: 2, startLine: 101, endLine: 300, maxLineChars: 0 },
+        ],
+      }),
+    );
+    const live2 =
+      'You are review agent `chunk 2 of 2` — the territory agent for ' +
+      'lines 101-300 of the diff.\n' +
+      `read_file(file_path="${chunkBrief(2)}")\n` +
+      `read_file(file_path="${DIFF}", offset=100, limit=200)`;
+    built(p, 1);
+    built(p, 2, live2);
+    satisfyRoster(p);
+    const old = new Date(2020, 0, 1);
+    utimesSync(p, old, old);
+
+    transcript('a1', good(1), { calls: 2 });
+    // The live agent died before returning — told-range presumption still
+    // credits the grown window — while the stale declarer read the diff
+    // with no positive limit, leaving `diffReads` empty.
+    transcript('a2live', live2, { calls: 1, text: '' });
+    transcript(
+      'a2stale',
+      'Please review chunk 2 of 2 carefully.\n' +
+        `read_file(file_path="${DIFF}", offset=100, limit=100)`,
+      {
+        calls: 1,
+        text: 'Uncoverable: chunk 2 — line exceeds the read limit',
+      },
+    );
+
+    const r = coverageFromTranscripts(p, ENV);
+    expect(r.uncoverableChunks).toEqual([]);
+    expect(r.coveredChunks).toEqual([1, 2]);
   });
 });
 
@@ -3934,6 +4115,133 @@ describe('coverage — the plan-identity token orders records against a re-plan'
     expect(r.ok).toBe(false);
   });
 
+  it('does not rescue a marker-less role delivery the old plan made', () => {
+    // The probe twin of the witness above with the `Plan identity:` line
+    // removed: the chunk-less rescue branch kept a token-only posture, and
+    // `launchOfThisPlan` fails open on a marker-less launch — so the old
+    // plan's role agent rescued this plan's roster requirement off the old
+    // plan's delivery, and `driftedLaunches` affirmatively certified it,
+    // while the role never read this diff. Fail closed like the credit
+    // gate when the plan carries identity and the record carries none
+    // (R20-7).
+    const p = identityPlan(NEW);
+    const current = tokenOf(NEW);
+    built(p, 1, launch(1, current));
+    built(p, 2, launch(2, current));
+    transcript('a1', launch(1, current), {
+      calls: 1,
+      range: [0, 100],
+      toolPath: diffPath,
+    });
+    transcript('a2', launch(2, current), {
+      calls: 1,
+      range: [100, 100],
+      toolPath: diffPath,
+    });
+    rmSync(join(dir, 'subagents', 'S1', 'agent-r-test_matrix.jsonl'), {
+      force: true,
+    });
+    transcript(
+      'stale-matrix',
+      `You are review agent \`test-matrix\` — Test coverage matrix.\n` +
+        `read_file(file_path="${briefPath(p, 'test-matrix')}")\n` +
+        `read_file(file_path="${diffPath}", offset=0, limit=200)`,
+      {
+        calls: 1,
+        range: [0, 200],
+        toolPath: diffPath,
+        opens: [briefPath(p, 'test-matrix')],
+      },
+    );
+
+    const r = coverageFromTranscripts(p, ENV);
+    expect(r.driftedLaunches).toEqual([]);
+    expect(r.missingRoles).toHaveLength(1);
+    expect(r.missingRoles.join(' ')).toContain('its prompt was built');
+    expect(r.missingRoleSelectors).toContain('--role test-matrix');
+    expect(r.ok).toBe(false);
+  });
+
+  it('a marker-less whole-diff record earns no credit off an identity plan', () => {
+    // The credit gate's chunk-less arm collapsed to `launchOfThisPlan`
+    // alone — no geometry at all — and a marker-less launch fails it open,
+    // so a fence-surviving whole-diff record from the OLD plan certified
+    // the re-planned chunks off the old diff's reads, with no disclosure.
+    // Windows and reads cannot tie the record to this plan's lines — a
+    // whole-diff read spans every window by construction — so the arm
+    // fails closed when the plan carries identity and the record carries
+    // none (R20-6).
+    const shrunk = [
+      { id: 1, startLine: 1, endLine: 100, maxLineChars: 0 },
+      { id: 2, startLine: 101, endLine: 185, maxLineChars: 0 },
+    ];
+    writeFileSync(diffPath, NEW);
+    const p = join(dir, 'plan.json');
+    writeFileSync(
+      p,
+      JSON.stringify({
+        diffPathAbsolute: diffPath,
+        srcDiffLines: 5000,
+        diffLines: 185,
+        files: [
+          { path: 'a.ts', kind: 'source', removedLines: 0, heavy: false },
+        ],
+        chunks: shrunk,
+        selection: buildSelectionIdentity(
+          NEW,
+          shrunk as unknown as DiffChunk[],
+          185,
+        ),
+      }),
+    );
+    satisfyRoster(p);
+    const old = new Date(2020, 0, 1);
+    utimesSync(p, old, old);
+    const current = planIdentityToken(
+      buildSelectionIdentity(NEW, shrunk as unknown as DiffChunk[], 185),
+    ) as string;
+    built(
+      p,
+      1,
+      'You are review agent `chunk 1 of 2` — the territory agent for ' +
+        'lines 1-100 of the diff.\n' +
+        `Plan identity: ${current}\n` +
+        `read_file(file_path="${chunkBrief(1)}")\n` +
+        `read_file(file_path="${diffPath}", offset=0, limit=100)`,
+    );
+    built(
+      p,
+      2,
+      'You are review agent `chunk 2 of 2` — the territory agent for ' +
+        'lines 101-185 of the diff.\n' +
+        `Plan identity: ${current}\n` +
+        `read_file(file_path="${chunkBrief(2)}")\n` +
+        `read_file(file_path="${diffPath}", offset=100, limit=85)`,
+    );
+    transcript(
+      'a1',
+      'You are review agent `chunk 1 of 2` — the territory agent for ' +
+        'lines 1-100 of the diff.\n' +
+        `Plan identity: ${current}\n` +
+        `read_file(file_path="${chunkBrief(1)}")\n` +
+        `read_file(file_path="${diffPath}", offset=0, limit=100)`,
+      { calls: 1, range: [0, 100], toolPath: diffPath },
+    );
+    // The stale whole-diff record: no `Plan identity:` line, reads that
+    // strictly contain the re-planned chunk 2.
+    transcript(
+      'wstale',
+      'Security review of the whole diff.\n' +
+        `read_file(file_path="${diffPath}", offset=0, limit=200)`,
+      { calls: 1, range: [0, 200], toolPath: diffPath },
+    );
+
+    const r = coverageFromTranscripts(p, ENV);
+    expect(r.coveredChunks).toEqual([1]);
+    expect(r.missingChunks).toEqual([2]);
+    expect(r.ok).toBe(false);
+  });
+
   it('does not rescue a chunk delivery the old plan made', () => {
     // The chunk twin of the role-rescue witness: the rescue gated on the
     // token conjunct alone, and a marker-less launch rides it through —
@@ -3999,6 +4307,52 @@ describe('coverage — the plan-identity token orders records against a re-plan'
     expect(r.budgetGaps).toEqual([]);
     // The record is still disclosed — as a prompt defect.
     expect(r.rewrittenPrompts.join(' ')).toContain('chunk 2');
+  });
+
+  it('a marker-less count-changed record injects no budget gap either', () => {
+    // The marker-less corner the token conjunct cannot see: a stale record
+    // with no `Plan identity:` line fails `launchOfThisPlan` open, and its
+    // OLD plan's `Budget gap:` disclosures landed in this run's report —
+    // feeding the Step 3D ruling and the not-reviewed rendering — while
+    // the credit gate below refused the SAME record on membership + count.
+    // The gate's own comment claims it rides what the credit gate carries;
+    // mirror the geometry conjuncts (R20-1).
+    const p = identityPlan(NEW);
+    const current = tokenOf(NEW);
+    built(p, 1, launch(1, current));
+    built(p, 2, launch(2, current));
+    transcript('a1', launch(1, current), {
+      calls: 1,
+      range: [0, 100],
+      toolPath: diffPath,
+    });
+    // The live agent died before returning, so it cannot supersede the
+    // stale record's gaps — the refusal must ride the gate, not
+    // suppression.
+    transcript('a2live', launch(2, current), {
+      calls: 1,
+      range: [100, 100],
+      toolPath: diffPath,
+      text: '',
+    });
+    transcript(
+      'stale9',
+      'You are review agent `chunk 2 of 9` — the territory agent for ' +
+        'lines 101-200 of the diff.\n' +
+        `read_file(file_path="${diffPath}", offset=100, limit=100)`,
+      {
+        calls: 1,
+        range: [100, 100],
+        toolPath: diffPath,
+        text: "Budget gap: the old plan's truncated trace",
+      },
+    );
+
+    const r = coverageFromTranscripts(p, ENV);
+    expect(r.budgetGaps).toEqual([]);
+    // The record is still disclosed — as a prompt defect.
+    expect(r.rewrittenPrompts.join(' ')).toContain('chunk 2');
+    expect(r.coveredChunks).toEqual([1, 2]);
   });
 
   it('an identity line forged below a whole-diff launch fails closed, never certifies', () => {

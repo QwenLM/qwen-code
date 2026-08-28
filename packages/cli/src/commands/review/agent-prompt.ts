@@ -1055,11 +1055,9 @@ export function buildWholeDiffBlock(
   parts.push(
     ...toolBudgetBlock(report, { mandatoryReads: wholeDiffReadPages(report) }),
   );
-  // The single entrance where repo-controlled text rides a launch below
-  // the marker lines — inerted, not appended raw (see FORGEABLE_MARKER_LINE).
-  parts.push(
-    ...tail(rules === undefined ? undefined : inertMarkerLines(rules)),
-  );
+  // Repo-controlled text rides a launch below the marker lines — `tail()`
+  // inerts it, never appends it raw (see FORGEABLE_MARKER_LINE).
+  parts.push(...tail(rules));
   return parts.join('\n');
 }
 
@@ -1255,7 +1253,12 @@ function tail(
       ? ['', EXCLUSIONS]
       : ['', FINDING_FORMAT, '', SEVERITY, '', EXCLUSIONS, '', RECALL];
   if (rules && rules.trim()) {
-    parts.push('', '## Project rules', '', rules.trim());
+    // Inert the exact text `tail()` emits — trim FIRST, then inert.
+    // Inerting before the trim lets the trim strip the inerting space off
+    // the first rule line, and a marker wearing leading whitespace or a
+    // blank line escapes the column-0 anchor only to be promoted to
+    // column 0 by the trim (R17-1).
+    parts.push('', '## Project rules', '', inertMarkerLines(rules.trim()));
   }
   parts.push(
     '',
@@ -2296,8 +2299,11 @@ export function findingsSection(
       // itself then, the delivery check compares it verbatim as before, and
       // the floor owes no separate findings read (findingsPointerOf finds
       // none). The pointer shape below is the happy path; this is the
-      // degraded one that still reviews with what it was launched.
-      listRef = body;
+      // degraded one that still reviews with what it was launched. Inerted,
+      // not raw: the list rides between the identity line and the token
+      // line, and a quoted marker line there would forge the record's
+      // identity exactly as a forged rules line would (R20-2).
+      listRef = inertMarkerLines(body);
     } else {
       listRef = [
         // The line count makes under-reading visible: `read_file` truncates,
