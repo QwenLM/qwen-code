@@ -213,6 +213,8 @@ export default {
   'toolDisplayName.Monitor': '监控',
   'toolDisplayName.NotebookEdit': '编辑 Notebook',
   'toolDisplayName.ToolSearch': '工具搜索',
+  'toolDisplayName.ToolCall': '工具调用',
+  'toolDisplayName.Exec': '执行',
   'toolDisplayName.EnterWorktree': '进入 Worktree',
   'toolDisplayName.ExitWorktree': '退出 Worktree',
   'toolDisplayName.Workflow': '工作流',
