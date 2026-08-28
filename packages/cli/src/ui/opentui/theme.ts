@@ -14,8 +14,9 @@
  * `applyOpenTuiTheme`, which maps one of the ink themes (via theme-parity)
  * onto the mutable `C` palette and `SYNTAX` token map.
  */
-import { SyntaxStyle } from '@opentui/core';
+import { SyntaxStyle, type StyleDefinitionInput } from '@opentui/core';
 import type { OpenTuiThemeDefinition } from './theme-parity.js';
+import { toHex } from '../themes/color-utils.js';
 
 export interface Palette {
   text: string;
@@ -170,27 +171,44 @@ export function applyThemeMode(
  * semantic text/status colors but no opentui-only surface colors (bg /
  * selection / hover contrast), so those are re-derived from the built-in
  * dark/light surfaces based on the theme type to keep selection readable.
+ *
+ * Colors are resolved to #rrggbb first: opentui's parseColor recognizes only
+ * a small named-color table, while ink themes accept the ~120 CSS names
+ * ('coral', …) and *bright names — unresolved, they would silently degrade
+ * to magenta. Unresolvable values stay unset (ink degrades similarly).
  */
 export function applyOpenTuiTheme(definition: OpenTuiThemeDefinition): void {
   const light = definition.type === 'light';
   const surface = light ? LIGHT : DARK;
   // Empty-string palette values mean "no color" in ink themes (the NoColor
-  // theme is all empty strings). @opentui/core does not treat '' as unset:
-  // parseColor('') fails its hex regex and falls back to magenta, so the
-  // empties must be skipped to leave the built-in surface color in place.
+  // theme is all empty strings) and must stay unset like unresolvable ones.
   const palette = Object.fromEntries(
-    Object.entries(definition.palette).filter(([, value]) => value !== ''),
-  ) as typeof definition.palette;
+    Object.entries(definition.palette)
+      .map(([key, value]) => [key, value === '' ? undefined : toHex(value)])
+      .filter(([, hex]) => hex !== undefined),
+  ) as Partial<Palette>;
   Object.assign(C, surface, palette);
   // The dark surface intentionally has no `bg` (keeps terminal transparency);
   // Object.assign never clears keys, so reset it explicitly.
   C.bg = surface.bg;
+  const syntaxStyles: Record<string, StyleDefinitionInput> = {};
+  for (const [token, style] of Object.entries(definition.syntaxStyles)) {
+    const resolved: StyleDefinitionInput = { ...style };
+    if (typeof style.fg === 'string') {
+      resolved.fg = toHex(style.fg);
+      if (resolved.fg === undefined) delete resolved.fg;
+    }
+    if (typeof style.bg === 'string') {
+      resolved.bg = toHex(style.bg);
+      if (resolved.bg === undefined) delete resolved.bg;
+    }
+    syntaxStyles[token] = resolved;
+  }
   SYNTAX = SyntaxStyle.fromStyles({
     // `default` colors unstyled markdown chunks (table cells, plain inline
-    // text); anchor it on the theme's own foreground — '' (NoColor) stays
-    // unset, registerStyle guards the empty value.
-    default: { fg: palette.text },
-    ...definition.syntaxStyles,
+    // text); anchor it on the theme's own foreground when it resolved.
+    ...(palette.text ? { default: { fg: palette.text } } : {}),
+    ...syntaxStyles,
     // Markdown structure tokens are not part of the ink hljs maps; keep
     // headings/inline styling alive on the theme's dark/light family.
     ...markdownMarkupTokens(light ? 'light' : 'dark'),

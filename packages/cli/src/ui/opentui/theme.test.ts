@@ -144,7 +144,36 @@ describe('applyOpenTuiTheme (settings ui.theme face)', () => {
     expect(C.text).toBe('#CDD6F4');
     expect(C.hover).toBe('#313244');
     expect(C.bg).toBeUndefined();
-    expect((syntaxTokens()['default'] as { fg?: string }).fg).toBeUndefined();
+    expect(syntaxTokens()['default']).toBeUndefined();
+    // Restore the dark default for other suites.
+    applyThemeMode('dark');
+  });
+
+  it('resolves CSS color names ink accepts (coral) instead of degrading to magenta', () => {
+    // opentui's parseColor knows only a small named table; ink themes
+    // accept the CSS names, so the palette must be resolved to hex first.
+    applyOpenTuiTheme({
+      name: 'Coral Dark',
+      type: 'dark',
+      palette: { ...palette, text: 'coral' },
+      syntaxStyles: {},
+    } satisfies OpenTuiThemeDefinition);
+    expect(C.text).toBe('#ff7f50');
+    // Restore the dark default for other suites.
+    applyThemeMode('dark');
+  });
+
+  it('keeps unresolvable palette values unset instead of degrading to magenta', () => {
+    applyOpenTuiTheme({
+      name: 'Odd Dark',
+      type: 'dark',
+      palette: { ...palette, text: 'not-a-color' },
+      syntaxStyles: { keyword: { fg: 'not-a-color' } },
+    } satisfies OpenTuiThemeDefinition);
+    expect(C.text).toBe('#CDD6F4');
+    // The unresolvable style registered without a fg color.
+    expect(syntaxTokens()['keyword']).toMatchObject({});
+    expect((syntaxTokens()['keyword'] as { fg?: string }).fg).toBeUndefined();
     // Restore the dark default for other suites.
     applyThemeMode('dark');
   });

@@ -175,7 +175,13 @@ describe('hardWrap', () => {
   });
 
   it('keeps a glyph wider than the width on its own line', () => {
-    expect(hardWrap('你好', 1)).toBe('你\n好');
+    // wrap-ansi's exact output for a 2-column glyph at width 1 keeps a
+    // leading empty line — byte parity with ink's screen-reader path.
+    expect(hardWrap('你好', 1)).toBe('\n你\n好');
+  });
+
+  it('wraps at word boundaries like ink (R2-41)', () => {
+    expect(hardWrap('aa bb cc dd', 5)).toBe('aa bb\n cc \ndd');
   });
 });
 

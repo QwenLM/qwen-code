@@ -42,14 +42,30 @@ describe('createExitGuard', () => {
     expect(guard.press('ctrl-d')).toBe('exit');
   });
 
-  it('a different exit key re-arms instead of confirming (ink keeps per-key windows)', () => {
+  it('keeps independent per-key windows (ink ctrlCPressedOnce vs ctrlDPressedOnce)', () => {
     const guard = createExitGuard();
-    expect(guard.press('ctrl-d')).toBe('armed');
-    // Ink: ctrlCPressedOnce / ctrlDPressedOnce are separate flags, and
-    // handleExit fast-quits only on the pressed key's own flag.
+    // A different key arms its own window without cancelling the first
+    // key's pending confirmation.
     expect(guard.press('ctrl-c')).toBe('armed');
-    expect(guard.armedKey()).toBe('ctrl-c');
+    expect(guard.press('ctrl-d')).toBe('armed');
+    expect(guard.armedKey()).toBe('ctrl-d');
+    // The original key still confirms inside its own window.
     expect(guard.press('ctrl-c')).toBe('exit');
+    expect(guard.armedKey()).toBe('ctrl-d');
+    // The other key's window is untouched until its own second press.
+    expect(guard.press('ctrl-d')).toBe('exit');
+    expect(guard.armedKey()).toBeNull();
+  });
+
+  it('expires each per-key window independently', () => {
+    const onWindowExpired = vi.fn();
+    const guard = createExitGuard({ onWindowExpired });
+    guard.press('ctrl-c');
+    guard.press('ctrl-d');
+    vi.advanceTimersByTime(1000);
+    expect(onWindowExpired).toHaveBeenCalledWith('ctrl-c');
+    expect(onWindowExpired).toHaveBeenCalledWith('ctrl-d');
+    expect(guard.press('ctrl-c')).toBe('armed');
   });
 
   it('disarm cancels a pending confirmation', () => {

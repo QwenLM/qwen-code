@@ -22,7 +22,7 @@
  * Pure logic + the append-only writer; the renderer wiring consumes these.
  */
 
-import stringWidth from 'string-width';
+import wrapAnsi from 'wrap-ansi';
 import type { CliRendererConfig } from '@opentui/core';
 import {
   isInteractiveTerminal,
@@ -149,34 +149,15 @@ export function eraseLines(count: number): string {
 }
 
 /**
- * Hard-wraps text at `width` display columns (ink parity: `wrapAnsi(output,
- * width, { hard: true })` measures columns, not UTF-16 code units, so CJK
- * glyphs count as 2). Widths <= 0 disable wrapping.
+ * Hard-wraps text at `width` display columns, exactly like ink's
+ * screen-reader path (`wrapAnsi(output, width, {trim: false, hard: true })`
+ * in ink.js): multi-word blocks break at word boundaries and only words
+ * wider than the width are severed; CJK glyphs count as 2 columns. Widths
+ * <= 0 disable wrapping.
  */
 export function hardWrap(text: string, width: number): string {
   if (width <= 0) return text;
-  return text
-    .split('\n')
-    .map((line) => {
-      const parts: string[] = [];
-      let current = '';
-      let currentWidth = 0;
-      for (const char of line) {
-        const charWidth = stringWidth(char);
-        // A glyph wider than the whole width is kept on its own line rather
-        // than wrapped into an unreachable column.
-        if (currentWidth > 0 && currentWidth + charWidth > width) {
-          parts.push(current);
-          current = '';
-          currentWidth = 0;
-        }
-        current += char;
-        currentWidth += charWidth;
-      }
-      parts.push(current);
-      return parts.join('\n');
-    })
-    .join('\n');
+  return wrapAnsi(text, width, { trim: false, hard: true });
 }
 
 export class ScreenReaderOutputWriter {

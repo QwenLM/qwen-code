@@ -50,9 +50,16 @@ export async function copyText(text: string): Promise<boolean> {
   const isWarp =
     /warp/i.test(process.env['TERM_PROGRAM'] ?? '') ||
     /warp/i.test(process.env['TERMINAL_EMULATOR'] ?? '');
-  if (!isWarp && Buffer.byteLength(text, 'utf8') <= MAX_OSC52_BYTES) {
+  // TTY gate (writeOsc52 convention): piped/redirected stdout would inject
+  // raw escape bytes into the pipe consumer's input stream.
+  const stream = process.stderr.isTTY
+    ? process.stderr
+    : process.stdout.isTTY
+      ? process.stdout
+      : null;
+  if (!isWarp && stream && Buffer.byteLength(text, 'utf8') <= MAX_OSC52_BYTES) {
     try {
-      process.stdout.write(osc52Sequence(text));
+      stream.write(osc52Sequence(text));
     } catch {
       /* ignore */
     }

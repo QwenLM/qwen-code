@@ -39,16 +39,17 @@ export interface ExitGuardOptions {
 export interface ExitGuard {
   /**
    * Register a press. Returns `'exit'` when this press confirms a pending
-   * armed exit (second press of the SAME guard key inside the window — ink
-   * keeps per-key windows, `ctrlCPressedOnce` vs `ctrlDPressedOnce`), or
-   * `'armed'` when it starts (or re-arms) a confirmation window.
+   * armed exit (second press of the SAME guard key inside its own window —
+   * ink keeps per-key windows, `ctrlCPressedOnce` vs `ctrlDPressedOnce`), or
+   * `'armed'` when it starts a confirmation window for that key. A press of
+   * the other key arms its own independent window.
    */
   press(key: ExitGuardKey): 'exit' | 'armed';
-  /** Currently armed key, or null when no confirmation is pending. */
+  /** Most recently armed key, or null when no confirmation is pending. */
   armedKey(): ExitGuardKey | null;
-  /** Cancel a pending confirmation (e.g. the user took another action). */
+  /** Cancel all pending confirmations (e.g. the user took another action). */
   disarm(): void;
-  /** Clear the pending timer; call on unmount. */
+  /** Clear pending timers; call on unmount. */
   dispose(): void;
 }
 
@@ -61,39 +62,48 @@ export function createExitGuard(options: ExitGuardOptions = {}): ExitGuard {
     options.clearTimeoutFn ??
     ((handle: unknown): void =>
       clearTimeout(handle as ReturnType<typeof setTimeout>));
-  let armed: ExitGuardKey | null = null;
-  let timer: unknown = null;
+  // One armed window per key, exactly like ink's ctrlCPressedOnce/ctrlD
+  // pair — a different-key press must not drop the first key's window.
+  const windows = new Map<ExitGuardKey, { timer: unknown }>();
+  let lastArmed: ExitGuardKey | null = null;
 
-  const disarm = () => {
-    if (timer !== null) {
-      clearTimeoutFn(timer);
-      timer = null;
+  const disarmKey = (key: ExitGuardKey) => {
+    const window = windows.get(key);
+    if (window) {
+      clearTimeoutFn(window.timer);
+      windows.delete(key);
     }
-    armed = null;
+    if (lastArmed === key) {
+      lastArmed = [...windows.keys()].at(-1) ?? null;
+    }
   };
 
   return {
     press(key: ExitGuardKey): 'exit' | 'armed' {
-      if (armed === key) {
-        // Second press of the same key inside the window exits.
-        disarm();
+      if (windows.has(key)) {
+        // Second press of the same key inside its own window exits.
+        disarmKey(key);
         return 'exit';
       }
-      // Different key: ink keeps per-key windows, so this does not confirm
-      // — re-arm under the new key instead.
-      if (armed !== null) disarm();
-      armed = key;
-      timer = setTimeoutFn(() => {
-        timer = null;
-        const expired = armed;
-        armed = null;
-        if (expired !== null) options.onWindowExpired?.(expired);
-      }, windowMs);
+      windows.set(key, {
+        timer: setTimeoutFn(() => {
+          windows.delete(key);
+          if (lastArmed === key) {
+            lastArmed = [...windows.keys()].at(-1) ?? null;
+          }
+          options.onWindowExpired?.(key);
+        }, windowMs),
+      });
+      lastArmed = key;
       return 'armed';
     },
-    armedKey: () => armed,
-    disarm,
-    dispose: disarm,
+    armedKey: () => lastArmed,
+    disarm: () => {
+      for (const key of [...windows.keys()]) disarmKey(key);
+    },
+    dispose: () => {
+      for (const key of [...windows.keys()]) disarmKey(key);
+    },
   };
 }
 
