@@ -138,6 +138,22 @@ function findNextJsonStringField(
   return undefined;
 }
 
+function hasJsonStringFieldStart(text: string, key: string): boolean {
+  const quotedKey = `"${key}"`;
+  let keyOffset = text.indexOf(quotedKey);
+  while (keyOffset >= 0) {
+    let i = keyOffset + quotedKey.length;
+    while (isInlineJsonWhitespace(text[i])) i++;
+    if (text[i] === ':') {
+      i++;
+      while (isInlineJsonWhitespace(text[i])) i++;
+      if (text[i] === '"') return true;
+    }
+    keyOffset = text.indexOf(quotedKey, keyOffset + 1);
+  }
+  return false;
+}
+
 /**
  * Extracts a simple JSON string field value from raw text without full parsing.
  * Allows same-line spaces/tabs around the colon.
@@ -259,6 +275,8 @@ export type LastMatchingLineScan =
  * "the field is still whatever the previous record said". `matched: true`
  * with `value: undefined` is that answer, and it is different from
  * `matched: false`, which means no such record was in view at all.
+ * A crash-truncated line that starts the field but never closes its string is
+ * skipped; a well-formed matching line that omits the field remains decisive.
  *
  * The first line is skipped unless `wholeLines` is set: a tail-window read
  * starts mid-record, and a partial line can carry the marker while its
@@ -275,12 +293,20 @@ export function extractJsonStringFieldFromLastMatchingLine(
   const firstLineEnd = text.indexOf('\n');
   // Everything before `floor` belongs to the leading partial line.
   const floor = wholeLines || firstLineEnd < 0 ? 0 : firstLineEnd + 1;
-  const hit = text.lastIndexOf(lineContains);
-  if (hit < floor) return { matched: false, value: undefined };
-  const lineStart = text.lastIndexOf('\n', hit) + 1;
-  const eol = text.indexOf('\n', hit);
-  const line = text.slice(lineStart, eol < 0 ? text.length : eol);
-  return { matched: true, value: extractJsonStringField(line, key) };
+  let searchFrom = text.length;
+  while (searchFrom > floor) {
+    const hit = text.lastIndexOf(lineContains, searchFrom - 1);
+    if (hit < floor) break;
+    const lineStart = text.lastIndexOf('\n', hit) + 1;
+    const eol = text.indexOf('\n', hit);
+    const line = text.slice(lineStart, eol < 0 ? text.length : eol);
+    const value = extractJsonStringField(line, key);
+    if (value !== undefined || !hasJsonStringFieldStart(line, key)) {
+      return { matched: true, value };
+    }
+    searchFrom = lineStart;
+  }
+  return { matched: false, value: undefined };
 }
 
 /**
@@ -294,9 +320,9 @@ export function extractJsonStringFieldFromLastMatchingLine(
  * session really had. A lifecycle field is different — a head-window hit on
  * a file larger than the window means an unknown number of later records,
  * including the one that cleared the state, are unreadable, so the value
- * cannot be trusted. `complete` reports whether the scan saw the whole file,
- * which is what lets a caller tell "no such record exists" from "no such
- * record was reachable".
+ * cannot be trusted. `reason: 'absent'` reports that the scan saw the whole
+ * file, which is what lets a caller tell "no such record exists" from "no
+ * such record was reachable".
  *
  * Worst-case I/O: 1 × LITE_READ_BUF_SIZE per file (plus one re-read when a
  * concurrent writer grows the file, matching the sibling reader's bound).
@@ -319,35 +345,44 @@ export function readLastMatchingLineFieldSync(
         ? scratchBuffer
         : Buffer.alloc(LITE_READ_BUF_SIZE);
 
-    const scanTail = (size: number): LastMatchingLineScan | undefined => {
-      const tailLength = Math.min(size, LITE_READ_BUF_SIZE);
-      const tailOffset = size - tailLength;
-      const tailBytes = fs.readSync(fd!, buffer, 0, tailLength, tailOffset);
-      if (tailBytes <= 0) return undefined;
+    const scanTail = (tail: {
+      text: string;
+      size: number;
+    }): LastMatchingLineScan => {
       const hit = extractJsonStringFieldFromLastMatchingLine(
-        buffer.toString('utf-8', 0, tailBytes),
+        tail.text,
         lineContains,
         key,
-        tailOffset === 0,
+        tail.size <= LITE_READ_BUF_SIZE,
       );
       if (hit.matched) return { matched: true, value: hit.value };
-      return tailOffset === 0
+      return tail.size <= LITE_READ_BUF_SIZE
         ? { matched: false, reason: 'absent' }
         : { matched: false, reason: 'out-of-window' };
     };
 
-    const fromTail = scanTail(fileSize);
-    if (fromTail?.matched) return fromTail;
+    const firstTail = readLatestTailIfGrown(fd, 0, buffer);
+    if (!firstTail) return { matched: false, reason: 'unreadable' };
+    const fromTail = scanTail(firstTail);
+    if (fromTail.matched) return fromTail;
 
     // A concurrent writer may have appended a newer lifecycle record between
     // the stat and the read; one bounded re-read catches it.
-    const grownSize = fs.fstatSync(fd).size;
-    if (grownSize > fileSize) {
-      const fromGrownTail = scanTail(grownSize);
-      if (fromGrownTail) return fromGrownTail;
+    const grownTail = readLatestTailIfGrown(fd, firstTail.size, buffer);
+    if (grownTail) {
+      const fromGrownTail = scanTail(grownTail);
+      if (fromGrownTail.matched) return fromGrownTail;
+      if (
+        fromTail.reason === 'absent' &&
+        fromGrownTail.reason === 'out-of-window' &&
+        grownTail.size - firstTail.size <= LITE_READ_BUF_SIZE
+      ) {
+        return { matched: false, reason: 'absent' };
+      }
+      return fromGrownTail;
     }
 
-    return fromTail ?? { matched: false, reason: 'unreadable' };
+    return fromTail;
   } catch {
     return { matched: false, reason: 'unreadable' };
   } finally {

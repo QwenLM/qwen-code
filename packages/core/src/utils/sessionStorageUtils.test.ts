@@ -296,6 +296,30 @@ describe('sessionStorageUtils', () => {
       });
     });
 
+    it('skips a crash-truncated objective record', () => {
+      const truncated =
+        '{"type":"system","subtype":"goal_state","objective":"partial';
+      const p = writeFile('truncated.jsonl', [create('Ship it'), truncated]);
+      expect(readLastMatchingLineFieldSync(p, GOAL, 'objective')).toEqual({
+        matched: true,
+        value: 'Ship it',
+      });
+    });
+
+    it('keeps a clear authoritative before a crash-truncated record', () => {
+      const truncated =
+        '{"type":"system","subtype":"goal_state","objective":"partial';
+      const p = writeFile('cleared-then-truncated.jsonl', [
+        create('Ship it'),
+        clear,
+        truncated,
+      ]);
+      expect(readLastMatchingLineFieldSync(p, GOAL, 'objective')).toEqual({
+        matched: true,
+        value: undefined,
+      });
+    });
+
     it('reads the clear record when it sits at EOF of a long transcript', () => {
       const p = writeFile('long-cleared.jsonl', [
         create('Write the migration guide'),
@@ -324,6 +348,43 @@ describe('sessionStorageUtils', () => {
 
     it('reports an absent record for a file with no goal line', () => {
       const p = writeFile('none.jsonl', ['{"type":"user","message":"hi"}']);
+      expect(readLastMatchingLineFieldSync(p, GOAL, 'objective')).toEqual({
+        matched: false,
+        reason: 'absent',
+      });
+    });
+
+    it('re-reads a clear appended during the first tail read', () => {
+      const legacy = '{"type":"system","subtype":"slash_command"}';
+      const p = writeFile('grows-with-clear.jsonl', [legacy, clear]);
+      const initialSize = Buffer.byteLength(`${legacy}\n`);
+      const originalFstatSync = fs.fstatSync;
+      let fstatCalls = 0;
+      vi.spyOn(fs, 'fstatSync').mockImplementation(((fd: number) => {
+        const stats = originalFstatSync(fd);
+        if (fstatCalls++ === 0) stats.size = initialSize;
+        return stats;
+      }) as typeof fs.fstatSync);
+
+      expect(readLastMatchingLineFieldSync(p, GOAL, 'objective')).toEqual({
+        matched: true,
+        value: undefined,
+      });
+    });
+
+    it('reports absent when contiguous growth crosses the tail threshold', () => {
+      const initial = `${'x'.repeat(60 * 1024 - 1)}\n`;
+      const p = path.join(tmpDir, 'grows-past-window.jsonl');
+      fs.writeFileSync(p, initial + 'y'.repeat(6 * 1024));
+      const initialSize = Buffer.byteLength(initial);
+      const originalFstatSync = fs.fstatSync;
+      let fstatCalls = 0;
+      vi.spyOn(fs, 'fstatSync').mockImplementation(((fd: number) => {
+        const stats = originalFstatSync(fd);
+        if (fstatCalls++ === 0) stats.size = initialSize;
+        return stats;
+      }) as typeof fs.fstatSync);
+
       expect(readLastMatchingLineFieldSync(p, GOAL, 'objective')).toEqual({
         matched: false,
         reason: 'absent',

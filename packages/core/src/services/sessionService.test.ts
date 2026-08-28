@@ -7202,6 +7202,34 @@ describe('SessionService', () => {
       },
     });
 
+    const legacyGoalLine = (
+      sessionId: string,
+      condition: string,
+      kind: 'checking' | 'aborted' = 'checking',
+      uuid = 'legacy-goal',
+    ) => ({
+      uuid,
+      parentUuid: null,
+      sessionId,
+      type: 'system',
+      subtype: 'slash_command',
+      timestamp: '2026-04-22T00:00:03.000Z',
+      cwd,
+      version: 'test',
+      systemPayload: {
+        phase: 'result',
+        rawCommand: kind === 'checking' ? `/goal ${condition}` : '/goal',
+        outputHistoryItems: [
+          {
+            type: 'goal_status',
+            kind,
+            condition,
+            ...(kind === 'checking' ? { iterations: 1, setAt: 42 } : {}),
+          },
+        ],
+      },
+    });
+
     const fillerLines = (sessionId: string, bytes: number) =>
       Array.from({ length: Math.ceil(bytes / 400) }, (_, i) => ({
         uuid: `f${i}`,
@@ -7215,10 +7243,10 @@ describe('SessionService', () => {
         systemPayload: { text: 'x'.repeat(350) },
       }));
 
-    // These four drive the real tail-window scan over a real transcript, so
-    // they are what pins the production marker (`"subtype":"goal_state"`) and
-    // field name. Mocked-fs tests cannot: the scan fails open into the
-    // records fallback and every assertion still passes.
+    // These cases drive the real tail-window scan over a real transcript, so
+    // they pin the production marker (`"subtype":"goal_state"`) and field
+    // name. Mocked-fs tests cannot: the scan fails open into the records
+    // fallback and every assertion still passes.
     it('labels a prompt-less session with its Goal objective', async () => {
       const sessionId = '21111111-1111-4111-8111-111111111111';
       writeSession(sessionId, [
@@ -7233,21 +7261,34 @@ describe('SessionService', () => {
       });
     });
 
+    it('recovers a legacy Goal after an absent real-file scan', async () => {
+      const sessionId = '28888888-8888-4888-8888-888888888888';
+      const objective = '😀'.repeat(250);
+      writeSession(sessionId, [legacyGoalLine(sessionId, objective)]);
+
+      const result = await service.listSessions();
+
+      expect(findItem(result.items, sessionId)?.goalObjective).toBe(
+        `${'😀'.repeat(200)}...`,
+      );
+    });
+
     it('reads the Goal record through the file scan, not the parsed records', async () => {
       // The goal_state record sits past the ten lines the records fallback
       // reads, so the tail-window scan is the only thing that can answer —
       // this is what pins the production marker and field name. Every other
       // case is masked by the fallback finding the record anyway.
       const sessionId = '27777777-7777-4777-8777-777777777777';
+      const objective = '😀'.repeat(250);
       writeSession(sessionId, [
         ...fillerLines(sessionId, 6 * 1024),
-        goalStateLine(sessionId, 'Ship the requested change'),
+        goalStateLine(sessionId, objective),
       ]);
 
       const result = await service.listSessions();
 
       expect(findItem(result.items, sessionId)?.goalObjective).toBe(
-        'Ship the requested change',
+        `${'😀'.repeat(200)}...`,
       );
     });
 
@@ -7264,6 +7305,24 @@ describe('SessionService', () => {
       const result = await service.listSessions();
 
       expect(findItem(result.items, sessionId)?.goalObjective).toBeUndefined();
+      const item = await service.getSessionListItem(sessionId);
+      expect(item?.goalObjective).toBeUndefined();
+    });
+
+    it('does not resurrect a legacy Goal cleared past the record window', async () => {
+      const sessionId = '29999999-9999-4999-8999-999999999999';
+      const objective = 'Ship the legacy change';
+      writeSession(sessionId, [
+        legacyGoalLine(sessionId, objective),
+        ...fillerLines(sessionId, 6 * 1024),
+        legacyGoalLine(sessionId, objective, 'aborted', 'legacy-clear'),
+      ]);
+
+      const result = await service.listSessions();
+
+      expect(findItem(result.items, sessionId)?.goalObjective).toBeUndefined();
+      const item = await service.getSessionListItem(sessionId);
+      expect(item?.goalObjective).toBeUndefined();
     });
 
     it('reads the clear record when it sits at the end of a long transcript', async () => {

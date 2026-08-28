@@ -1719,12 +1719,13 @@ export class SessionService {
    * — reading "the last objective on any goal_state line" would keep showing
    * a goal the user cleared.
    *
-   * `resolved: false` means the transcript has no v2 `goal_state` line and
-   * the scan saw the whole file, so the caller may map a legacy Goal from the
-   * parsed records. Every other outcome is final: on a file larger than the
-   * tail window with no `goal_state` in view, the newest lifecycle record is
-   * unreachable and the parsed records are the OLDEST part of the file, so
-   * the honest answer is no label rather than a possibly-cleared goal.
+   * `resolved: false` means the transcript has no reachable v2 `goal_state`
+   * line, so the caller may map a legacy Goal only when its parsed-record
+   * prefix also covers the whole transcript. Every other outcome is final:
+   * on a file larger than the tail window with no `goal_state` in view, the
+   * newest lifecycle record is unreachable and the parsed records are the
+   * OLDEST part of the file, so the honest answer is no label rather than a
+   * possibly-cleared goal.
    */
   private readSessionGoalObjectiveFromFile(
     filePath: string,
@@ -1747,7 +1748,8 @@ export class SessionService {
     // Out of window: a newer lifecycle record exists somewhere we cannot
     // reach, and the parsed records are the file's oldest lines — answer "no
     // label" rather than a goal that may have been cleared long ago. An
-    // `absent` or `unreadable` scan proves nothing, so the records may speak.
+    // `absent` or `unreadable` proves nothing about legacy records, so the
+    // caller may consult a demonstrably complete parsed prefix.
     return {
       resolved: scan.reason === 'out-of-window',
       objective: undefined,
@@ -1774,9 +1776,12 @@ export class SessionService {
       filePath,
       tailBuffer,
     );
-    return fromFile.resolved
-      ? fromFile.objective
-      : this.extractGoalObjectiveFromRecords(records);
+    // Fewer records means the bounded reader reached EOF; exactly the limit
+    // may hide a later legacy clear, so that prefix cannot restore a Goal.
+    if (!fromFile.resolved && records.length < MAX_PROMPT_SCAN_LINES) {
+      return this.extractGoalObjectiveFromRecords(records);
+    }
+    return fromFile.objective;
   }
 
   /**
