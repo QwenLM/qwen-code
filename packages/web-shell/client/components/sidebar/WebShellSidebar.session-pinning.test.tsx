@@ -1319,6 +1319,40 @@ describe('WebShellSidebar pinned group members (issue #10391)', () => {
     workspaceActions.listSessionGroups.mockResolvedValue(defaultGroupsCatalog);
   });
 
+  it('keeps a group-less pinned session out of the Ungrouped section', async () => {
+    mockDesignGroupCatalog();
+    const pinnedFree = makeSession('pinned-free', {
+      displayName: 'Pinned free',
+      isPinned: true,
+      pinnedAt: '2026-01-02T00:00:00.000Z',
+      // groupId and color stay null: the row has no color/group bucket.
+    });
+    active.sessions = [
+      pinnedFree,
+      makeSession('plain', { displayName: 'Plain session' }),
+    ];
+    active.data = active.sessions;
+    pinned.sessions = [pinnedFree];
+    pinned.data = pinned.sessions;
+
+    renderSidebar();
+    await flushSidebar();
+
+    // The pinned row stays in the dedicated Pinned section...
+    expect(pinnedListTitles()).toContain('Pinned free');
+
+    // ...and never spills into Ungrouped, which keeps only the plain row.
+    const ungrouped = container.querySelector<HTMLElement>(
+      'section[aria-label="Ungrouped"]',
+    );
+    expect(ungrouped).not.toBeNull();
+    expect(ungrouped?.textContent).toContain('Plain session');
+    expect(ungrouped?.textContent).toContain('\u00b7 1');
+    expect(ungrouped?.textContent ?? '').not.toContain('Pinned free');
+
+    workspaceActions.listSessionGroups.mockResolvedValue(defaultGroupsCatalog);
+  });
+
   it('mounts a single rename form for a secondary-workspace pinned member rendered in two rows', async () => {
     // The sidebar-level Pinned section lifts pinned rows out of every
     // workspace; a secondary workspace's own group section keeps the member
