@@ -407,11 +407,11 @@ export interface QueryOptions {
    * activates a registry-level allowlist: when at least one valid allow
    * rule is configured there (malformed entries do not count), built-in
    * tools not covered by any allow or ask rule are demoted to deferred —
-   * they stay registered and loadable via `tool_search`, but their schemas
-   * are not sent in the eager model request and a call still goes through
-   * the normal approval flow (MCP tools, the `--json-schema`
+   * they stay registered and reachable through `tool_search` + `tool_call`,
+   * but their schemas are not sent in the eager model request and a call still
+   * goes through the normal approval flow (MCP tools, the `--json-schema`
    * `structured_output` contract, the plan-mode lifecycle tools,
-   * `task_stop`, `tool_search`, and the `computer_use__*` family are
+   * `task_stop`, `tool_search`, `tool_call`, and the `computer_use__*` family are
    * exempt) (#9827, #10075). The SDK `allowedTools` parameter cannot
    * activate the allowlist on its own, but while the allowlist is active
    * its rules are merged into the effective allow set and count toward
@@ -461,7 +461,7 @@ export interface QueryOptions {
    *   the eager model request, set `permissions.allow` in settings.json
    *   (requires restart); that key activates the registry allowlist, which
    *   demotes unlisted tools to deferred (still registered and loadable
-   *   via `tool_search`, #10075)
+   *   via `tool_search` + `tool_call`, #10075)
    *
    * **Pattern matching:**
    * - Tool name: `'write_file'`

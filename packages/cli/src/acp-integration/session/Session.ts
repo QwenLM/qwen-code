@@ -53,6 +53,7 @@ import type {
   TurnResultRecordPayload,
   WorkflowApproval,
   BranchPoint,
+  ToolCallRuntime,
 } from '@qwen-code/qwen-code-core';
 import {
   AuthType,
@@ -205,6 +206,11 @@ import {
   collectSessionTurnState,
   computeInitialTurnFromHistory as computeInitialTurnFromHistoryCore,
   buildGoalContinuationParts,
+  runWithToolCallRuntime,
+  runWithToolCallSource,
+  getCurrentToolCallSource,
+  toolCallResponseValue,
+  isCodeModeCallableTool,
 } from '@qwen-code/qwen-code-core';
 import { NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE } from '@qwen-code/acp-bridge/bridgeErrors';
 import { CHANNEL_PROMPT_META_KEY } from '@qwen-code/channel-base';
@@ -10406,6 +10412,7 @@ export class Session implements SessionContext {
     onFullTurnModel?: (model: string) => boolean,
   ): Promise<RunToolResult> {
     const callId = fc.id ?? generatedCallId ?? `${fc.name}-${Date.now()}`;
+    const codeModeSource = getCurrentToolCallSource();
     let args = (fc.args ?? {}) as Record<string, unknown>;
     let executionStatus: ToolExecutionStatus = 'not_started';
     let executionErrorType: ToolErrorType | undefined;
@@ -10683,6 +10690,13 @@ export class Session implements SessionContext {
         // matching daemon/ACP tool spans during the migration window.
         call_id: callId,
         tool_name: policyToolName,
+        ...(codeModeSource
+          ? {
+              'qwen.tool.source': codeModeSource.kind,
+              'qwen.tool.parent_call_id': codeModeSource.parentCallId,
+              'qwen.tool.nested_call_id': codeModeSource.nestedCallId,
+            }
+          : {}),
       },
       tool.description,
       promptId,
@@ -11905,10 +11919,51 @@ export class Session implements SessionContext {
             executionStatus = 'error';
             executeAttempted = true;
             try {
-              toolResult = await invocation.execute(
-                activeToolAbortSignal,
-                onToolProgress,
-              );
+              const execute = () =>
+                invocation.execute(activeToolAbortSignal, onToolProgress);
+              if (policyToolName === ToolNames.EXEC) {
+                const nestedRuntime: ToolCallRuntime = {
+                  dispatch: async ({ name, args, source, signal }) => {
+                    if (
+                      !isCodeModeCallableTool(name) ||
+                      !toolRegistry.getTool(name)
+                    ) {
+                      throw new Error(
+                        `Tool ${JSON.stringify(name)} is not callable from code mode.`,
+                      );
+                    }
+                    const nestedCallId = `${source.parentCallId}:code:${source.nestedCallId}`;
+                    const nestedResult = await runWithToolCallSource(
+                      source,
+                      () =>
+                        this.runTool(
+                          signal,
+                          promptId,
+                          { id: nestedCallId, name, args },
+                          onStopAfterPermissionCancel,
+                          toolLoopState,
+                          undefined,
+                          undefined,
+                          nestedCallId,
+                          onFullTurnModel,
+                        ),
+                    );
+                    return toolCallResponseValue({
+                      callId: nestedCallId,
+                      responseParts: nestedResult.parts,
+                      resultDisplay: undefined,
+                      error: undefined,
+                      errorType: undefined,
+                    });
+                  },
+                };
+                toolResult = await runWithToolCallRuntime(
+                  nestedRuntime,
+                  execute,
+                );
+              } else {
+                toolResult = await execute();
+              }
               executeReturned = true;
               try {
                 settledArtifacts = toolResult.artifacts;

@@ -26450,6 +26450,87 @@ describe('Session', () => {
       );
     }
 
+    it('routes code mode calls back through the ACP tool pipeline', async () => {
+      mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(true);
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+      mockConfig.getPermissionManager = vi.fn().mockReturnValue(null);
+      const nestedExecute = vi.fn().mockResolvedValue({
+        llmContent: 'nested read',
+        returnDisplay: 'nested read',
+      });
+      const readTool = mockAllowedTool(core.ToolNames.READ_FILE, nestedExecute);
+      const execExecute = vi.fn(async (signal: AbortSignal) => {
+        const runtime = core.getCurrentToolCallRuntime();
+        expect(runtime).toBeDefined();
+        const value = await runtime!.dispatch({
+          name: core.ToolNames.READ_FILE,
+          args: { file_path: 'nested.txt' },
+          source: {
+            kind: 'code_mode',
+            parentCallId: 'exec-call',
+            nestedCallId: '1',
+          },
+          signal,
+        });
+        return {
+          llmContent: JSON.stringify(value),
+          returnDisplay: JSON.stringify(value),
+        };
+      });
+      const execTool = {
+        name: core.ToolNames.EXEC,
+        kind: core.Kind.Other,
+        displayName: 'Exec',
+        description: 'Exec',
+        build: vi.fn().mockReturnValue({
+          params: { source: 'await tools.read_file({})' },
+          execute: execExecute,
+          getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+          getDescription: vi.fn().mockReturnValue('Exec'),
+          toolLocations: vi.fn().mockReturnValue([]),
+        }),
+        canUpdateOutput: false,
+        isOutputMarkdown: true,
+      };
+      mockToolRegistry.getTool.mockImplementation((name: string) =>
+        name === core.ToolNames.EXEC
+          ? execTool
+          : name === core.ToolNames.READ_FILE
+            ? readTool
+            : undefined,
+      );
+
+      const result = await (
+        session as unknown as ToolCallInternals
+      ).runToolCalls(new AbortController().signal, 'prompt-code-mode', [
+        {
+          id: 'exec-call',
+          name: core.ToolNames.EXEC,
+          args: { source: 'await tools.read_file({})' },
+        },
+      ]);
+
+      expect(nestedExecute).toHaveBeenCalledOnce();
+      expect(result.parts).toHaveLength(1);
+      expect(result.parts[0].functionResponse).toMatchObject({
+        id: 'exec-call',
+        name: core.ToolNames.EXEC,
+      });
+      expect(result.parts[0].functionResponse?.response).toEqual({
+        output: '{"output":"nested read"}',
+      });
+      expect(startToolSpanSpy).toHaveBeenCalledWith(
+        core.ToolNames.READ_FILE,
+        expect.objectContaining({
+          'qwen.tool.source': 'code_mode',
+          'qwen.tool.parent_call_id': 'exec-call',
+          'qwen.tool.nested_call_id': '1',
+        }),
+        core.ToolNames.READ_FILE,
+        'prompt-code-mode',
+      );
+    });
+
     it('blocks standalone worktree actions before building the tool', async () => {
       recreateStandaloneSession();
       const builds: Array<ReturnType<typeof vi.fn>> = [];

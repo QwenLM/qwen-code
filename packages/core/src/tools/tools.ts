@@ -222,9 +222,9 @@ export abstract class DeclarativeTool<
     /**
      * When true, this tool is hidden from the initial function-declaration list
      * sent to the model to save tokens. The model discovers it on-demand via the
-     * {@link ToolNames.TOOL_SEARCH} tool, which injects the full schema into
-     * subsequent API requests. Mirrors the `shouldDefer` field described in
-     * Claude Code's tool framework.
+     * {@link ToolNames.TOOL_SEARCH} tool and invokes it through
+     * {@link ToolNames.TOOL_CALL}, keeping the declaration list stable. Mirrors
+     * the `shouldDefer` field described in Claude Code's tool framework.
      */
     readonly shouldDefer: boolean = false,
     /**

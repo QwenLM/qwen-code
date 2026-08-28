@@ -55,6 +55,7 @@ export const ToolNames = {
   STRUCTURED_OUTPUT: 'structured_output',
   MONITOR: 'monitor',
   NOTEBOOK_EDIT: 'notebook_edit',
+  TOOL_CALL: 'tool_call',
   TOOL_SEARCH: 'tool_search',
   READ_MCP_RESOURCE: 'read_mcp_resource',
   ENTER_WORKTREE: 'enter_worktree',
@@ -66,6 +67,7 @@ export const ToolNames = {
   GET_GOAL: 'get_goal',
   UPDATE_GOAL: 'update_goal',
   DISPLAY_IMAGE: 'display_image',
+  EXEC: 'exec',
 } as const;
 
 /**
@@ -111,6 +113,7 @@ export const ToolDisplayNames = {
   STRUCTURED_OUTPUT: 'StructuredOutput',
   MONITOR: 'Monitor',
   NOTEBOOK_EDIT: 'NotebookEdit',
+  TOOL_CALL: 'ToolCall',
   TOOL_SEARCH: 'ToolSearch',
   READ_MCP_RESOURCE: 'ReadMcpResource',
   ENTER_WORKTREE: 'EnterWorktree',
@@ -122,6 +125,7 @@ export const ToolDisplayNames = {
   GET_GOAL: 'Goal',
   UPDATE_GOAL: 'UpdateGoal',
   DISPLAY_IMAGE: 'DisplayImage',
+  EXEC: 'Exec',
 } as const;
 
 // Migration from old tool names to new tool names

@@ -86,6 +86,7 @@ import { recordStartupEvent } from '../utils/startupEventSink.js';
 import { ToolRegistry, type ToolFactory } from '../tools/tool-registry.js';
 import type { McpBudgetEvent } from '../tools/mcp-client-manager.js';
 import { ToolNames } from '../tools/tool-names.js';
+import { ToolMode } from '../tools/tool-mode.js';
 import type {
   ArtifactHostConfig,
   ArtifactOssConfig,
@@ -1064,6 +1065,8 @@ export interface ConfigParameters {
    * preloading. Sourced from `settings.tools.toolSearch.threshold`.
    */
   toolSearchThreshold?: number;
+  /** Enable the experimental CodeModeOnly model-facing tool surface. */
+  codeModeOnly?: boolean;
   /** Merged permission rules from all sources (settings + CLI args). */
   permissions?: {
     allow?: string[];
@@ -2245,6 +2248,7 @@ export class Config {
   private disabledTools: ReadonlySet<string>;
   private readonly visibleTools: ReadonlySet<string>;
   private readonly toolSearchThreshold: number;
+  private readonly codeModeOnly: boolean;
   private readonly permissionsAllow: string[];
   private readonly permissionsAsk: string[];
   private readonly permissionsDeny: string[];
@@ -2589,6 +2593,7 @@ export class Config {
     );
     this.toolSearchThreshold =
       params.toolSearchThreshold ?? DEFAULT_TOOL_SEARCH_THRESHOLD;
+    this.codeModeOnly = params.codeModeOnly === true;
     this.permissionsAllow = params.permissions?.allow || [];
     this.permissionsAsk = params.permissions?.ask || [];
     this.permissionsDeny = params.permissions?.deny || [];
@@ -6172,6 +6177,10 @@ export class Config {
     return this.toolSearchThreshold;
   }
 
+  getEffectiveToolMode(): ToolMode {
+    return this.codeModeOnly ? ToolMode.CodeModeOnly : ToolMode.Direct;
+  }
+
   /**
    * Replace the in-process `disabledTools`
    * snapshot with a fresh set sourced from the workspace settings.
@@ -9148,7 +9157,7 @@ export class Config {
       // the `permissions.allow` registry allowlist in a single check. A tool
       // the active allowlist does not cover comes back `deferred`, not
       // `disabled`: it is still registered — listed in `/tools` and loadable
-      // via ToolSearch — but its schema stays out of the eager model request
+      // via ToolSearch + ToolCall — but its schema stays out of the eager model request
       // (#9827) without the tool silently disappearing (#10075).
       let status: ToolRegistrationStatus = 'registered';
       try {
@@ -9211,7 +9220,16 @@ export class Config {
       });
     };
 
+    const registerExecIfRequested = async (): Promise<void> => {
+      if (this.getEffectiveToolMode() !== ToolMode.CodeModeOnly) return;
+      await registerLazy(ToolNames.EXEC, async () => {
+        const { ExecTool } = await import('../tools/exec.js');
+        return new ExecTool(this);
+      });
+    };
+
     if (this.getBareMode()) {
+      await registerExecIfRequested();
       await registerLazy(ToolNames.READ_FILE, async () => {
         const { ReadFileTool } = await import('../tools/read-file.js');
         return new ReadFileTool(this);
@@ -9237,7 +9255,12 @@ export class Config {
     }
 
     // --- Core tools (always registered) ---
+    await registerExecIfRequested();
     await registerGoalWorkerTools();
+    await registerLazy(ToolNames.TOOL_CALL, async () => {
+      const { ToolCallTool } = await import('../tools/tool-call.js');
+      return new ToolCallTool();
+    });
     await registerLazy(ToolNames.TOOL_SEARCH, async () => {
       const { ToolSearchTool } = await import('../tools/tool-search.js');
       return new ToolSearchTool(this);

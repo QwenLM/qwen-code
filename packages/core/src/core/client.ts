@@ -88,6 +88,7 @@ import { buildRelevantAutoMemoryPrompt } from '../memory/recall.js';
 import { isManagedMemoryPath } from '../memory/paths.js';
 import { isProjectSkillPath } from '../skills/skill-paths.js';
 import { ToolNames } from '../tools/tool-names.js';
+import { ToolMode } from '../tools/tool-mode.js';
 
 // Telemetry
 import {
@@ -1570,9 +1571,7 @@ export class LlmClient {
    * alike — at session start when the combined estimated size of their
    * schemas fits within `tools.toolSearch.threshold` percent of the
    * context window. A small deferred set is cheaper to declare upfront
-   * than to load on demand: with nothing left for ToolSearch to reveal,
-   * the declaration list stays stable for the whole session and no
-   * reveal ever invalidates the prompt-cache prefix.
+   * than to load on demand through the bridge.
    *
    * Deliberately NOT called from setTools(): revealing a tool the startup
    * reminder already announced would make queueAddedMcpToolsReminder flag
@@ -1582,9 +1581,12 @@ export class LlmClient {
    */
   private preloadDeferredToolsWithinBudget(): void {
     const toolRegistry = this.config.getToolRegistry();
-    // Without ToolSearch, resolveDeferredToolsForReminder() eagerly
+    // Without either bridge, resolveDeferredToolsForReminder() eagerly
     // reveals everything — there is no budget decision to make.
-    if (!toolRegistry.getTool(ToolNames.TOOL_SEARCH)) {
+    if (
+      !toolRegistry.getTool(ToolNames.TOOL_SEARCH) ||
+      !toolRegistry.getTool(ToolNames.TOOL_CALL)
+    ) {
       return;
     }
     const thresholdPercent = this.config.getToolSearchThreshold();
@@ -1665,22 +1667,25 @@ export class LlmClient {
    * inspects the registry's eager state and would otherwise miss factory-
    * backed deferred tools.
    *
-   * Side effect: when ToolSearch is not registered (e.g. `--exclude-tools
-   * tool_search` or a deny rule), every deferred tool is eagerly revealed
-   * here so it lands in the declaration list. Skipping this would leave the
-   * tool both off the declarations AND off the deferred-summary list (since
-   * `undefined` is returned in that branch) — a silent disappearance that's
-   * harder to diagnose than seeing the tool name absent from `/mcp` output.
+   * Side effect: when either ToolSearch or ToolCall is not registered, every
+   * deferred tool is eagerly revealed here so it lands in the declaration
+   * list. Skipping this would leave the tool both off the declarations AND off
+   * the deferred-summary list (since `undefined` is returned in that branch).
    *
-   * Returns `undefined` when ToolSearch is unavailable: reminders must not
-   * advertise tools the model has no way to load on demand.
+   * Returns `undefined` when the bridge is incomplete: reminders must not
+   * advertise tools the model has no way to invoke on demand.
    */
   private resolveDeferredToolsForReminder(
     deferredSummary: readonly DeferredToolSummary[],
   ): DeferredToolSummary[] | undefined {
+    if (this.config.getEffectiveToolMode() === ToolMode.CodeModeOnly) {
+      return [];
+    }
     const toolRegistry = this.config.getToolRegistry();
-    const toolSearchAvailable = !!toolRegistry.getTool(ToolNames.TOOL_SEARCH);
-    if (!toolSearchAvailable) {
+    const bridgeAvailable =
+      !!toolRegistry.getTool(ToolNames.TOOL_SEARCH) &&
+      !!toolRegistry.getTool(ToolNames.TOOL_CALL);
+    if (!bridgeAvailable) {
       if (deferredSummary.length > 0) {
         for (const t of deferredSummary) {
           toolRegistry.revealDeferredTool(t.name);

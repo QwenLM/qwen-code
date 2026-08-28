@@ -24,6 +24,7 @@ import {
 } from './config.js';
 import { Storage } from './storage.js';
 import { DEFAULT_MAX_TOOL_CALLS_PER_TURN } from '../services/loopDetectionService.js';
+import { ToolMode } from '../tools/tool-mode.js';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -599,6 +600,20 @@ describe('Server Config (config.ts)', () => {
 
       expect(config.getGeminiClient()).toBe(config.getLlmClient());
       await config.shutdown();
+    });
+  });
+
+  describe('tool mode', () => {
+    it('defaults to Direct and enables CodeModeOnly explicitly', () => {
+      expect(new Config(baseParams).getEffectiveToolMode()).toBe(
+        ToolMode.Direct,
+      );
+      expect(
+        new Config({
+          ...baseParams,
+          codeModeOnly: true,
+        }).getEffectiveToolMode(),
+      ).toBe(ToolMode.CodeModeOnly);
     });
   });
 

@@ -124,22 +124,22 @@ export async function collectContextData(
 
   const toolRegistry = config.getToolRegistry();
   const allTools = toolRegistry ? toolRegistry.getAllTools() : [];
-  // Match what's actually sent to the model: deferred tools — MCP tools and
-  // low-frequency built-ins like web_fetch / monitor / cron_* — are absent
-  // from the prompt unless ToolSearch has revealed them this session. See
-  // client.ts which calls getFunctionDeclarations() with no args. The
-  // per-tool loop below applies the same filter so allToolsTokens stays
-  // aligned with the breakdown sum.
+  // Match exactly what is sent to the model after deferred-state and tool-mode
+  // exposure filtering. The per-tool loop below uses the same declaration set
+  // so its breakdown stays aligned with allToolsTokens.
   const toolDeclarations = toolRegistry
     ? toolRegistry.getFunctionDeclarations()
     : [];
+  const declaredToolNames = new Set(
+    toolDeclarations.map((declaration) => declaration.name),
+  );
   const toolsJsonStr = JSON.stringify(toolDeclarations);
   const allToolsTokens = estimateContextTextTokens(toolsJsonStr);
 
   const builtinTools: ContextToolDetail[] = [];
   const mcpTools: ContextToolDetail[] = [];
   for (const tool of allTools) {
-    if (toolRegistry?.isDeferredAndHidden(tool.name)) {
+    if (!declaredToolNames.has(tool.name)) {
       continue;
     }
     const toolJsonStr = JSON.stringify(tool.schema);

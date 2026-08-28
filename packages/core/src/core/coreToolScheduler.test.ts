@@ -96,6 +96,7 @@ import {
   todoWorkChainContext,
 } from '../utils/promptIdContext.js';
 import type { ToolResultBoundaryObservation } from '../tools/tool-result-boundary-diagnostics.js';
+import { getCurrentToolCallRuntime } from '../tools/tool-call-runtime.js';
 
 type ToolSpanRecord = {
   name: string;
@@ -840,7 +841,11 @@ describe('CoreToolScheduler', () => {
       isToolEnabled: (name: string) => Promise<boolean>;
       findMatchingDenyRule: (ctx: unknown) => string | undefined;
       isPermissionsAllowListActive: () => boolean;
+      hasRelevantRules?: (ctx: unknown) => boolean;
+      evaluate?: (ctx: unknown) => Promise<PermissionDecision>;
+      hasMatchingAskRule?: (ctx: unknown) => boolean;
     };
+    deferredHiddenNames?: ReadonlySet<string>;
   }) {
     const ensureTool = vi.fn(
       async (name: string) =>
@@ -860,6 +865,8 @@ describe('CoreToolScheduler', () => {
       getAllTools: () => [...options.toolsByName.values()],
       getToolsByServer: () => [],
       getAllToolNames: () => [...options.toolsByName.keys()],
+      isDeferredAndHidden: (name: string) =>
+        options.deferredHiddenNames?.has(name) ?? false,
     } as unknown as ToolRegistry;
 
     const onAllToolCallsComplete = options.onAllToolCallsComplete ?? vi.fn();
@@ -933,6 +940,8 @@ describe('CoreToolScheduler', () => {
         getWorkspaceContext: () => ({
           isPathWithinWorkspace: () => false,
         }),
+        getConditionalRulesRegistry: () => undefined,
+        getSkillManager: () => undefined,
         isInteractive: () => true,
         getInputFormat: () => undefined,
         getExperimentalZedIntegration: () => false,
@@ -955,6 +964,370 @@ describe('CoreToolScheduler', () => {
       onToolCallsUpdate,
     };
   }
+
+  it('dispatches code-mode calls through a reentrant scheduler lane', async () => {
+    const nestedExecute = vi.fn().mockResolvedValue({
+      llmContent: 'nested result',
+      returnDisplay: 'nested result',
+    });
+    const exec = new MockTool({
+      name: ToolNames.EXEC,
+      execute: async (_params, signal) => {
+        const runtime = getCurrentToolCallRuntime();
+        expect(runtime).toBeDefined();
+        const result = await runtime!.dispatch({
+          name: ToolNames.READ_FILE,
+          args: { file_path: 'README.md' },
+          source: {
+            kind: 'code_mode',
+            parentCallId: 'exec-call',
+            nestedCallId: '1',
+          },
+          signal: signal ?? new AbortController().signal,
+        });
+        return {
+          llmContent: JSON.stringify(result),
+          returnDisplay: JSON.stringify(result),
+        };
+      },
+    });
+    const nested = new MockTool({
+      name: ToolNames.READ_FILE,
+      execute: nestedExecute,
+    });
+    const isToolEnabled = vi.fn().mockResolvedValue(true);
+    const recordToolResult = vi.fn();
+    const messageBus = {
+      request: vi.fn().mockImplementation(
+        async (request: {
+          eventName: string;
+        }): Promise<HookExecutionResponse> => ({
+          type: MessageBusType.HOOK_EXECUTION_RESPONSE,
+          correlationId: `${request.eventName}-hook`,
+          success: true,
+          output: { decision: 'allow' },
+        }),
+      ),
+    };
+    const { scheduler, onAllToolCallsComplete, onToolCallsUpdate } =
+      createSchedulerForLegacyToolTests({
+        toolsByName: new Map([
+          [exec.name, exec],
+          [nested.name, nested],
+        ]),
+        permissionManager: {
+          isToolEnabled,
+          findMatchingDenyRule: () => undefined,
+          isPermissionsAllowListActive: () => false,
+          hasRelevantRules: () => false,
+          evaluate: vi.fn().mockResolvedValue('default'),
+          hasMatchingAskRule: () => false,
+        },
+        messageBus,
+        disableHooks: false,
+        chatRecordingService: {
+          recordToolResult,
+        } as unknown as ChatRecordingService,
+      });
+
+    await scheduler.schedule(
+      {
+        callId: 'exec-call',
+        name: ToolNames.EXEC,
+        args: { source: 'ignored by this scheduler contract test' },
+        isClientInitiated: false,
+        prompt_id: 'prompt-code-mode',
+      },
+      new AbortController().signal,
+    );
+
+    expect(nestedExecute).toHaveBeenCalledOnce();
+    expect(isToolEnabled).toHaveBeenCalledWith(ToolNames.READ_FILE);
+    for (const eventName of ['PreToolUse', 'PostToolUse']) {
+      expect(
+        messageBus.request.mock.calls.some(
+          ([request]) =>
+            request.eventName === eventName &&
+            (request as { input?: { tool_name?: string } }).input?.tool_name ===
+              ToolNames.READ_FILE,
+        ),
+      ).toBe(true);
+    }
+    expect(
+      onToolCallsUpdate.mock.calls
+        .flatMap((call) => call[0] as ToolCall[])
+        .some(
+          (call) =>
+            call.request.name === ToolNames.READ_FILE &&
+            call.request.codeMode?.parentCallId === 'exec-call',
+        ),
+    ).toBe(true);
+    const completed = onAllToolCallsComplete.mock.calls.at(-1)?.[0]?.[0] as
+      | ToolCall
+      | undefined;
+    expect(completed).toMatchObject({
+      status: 'success',
+      request: { name: ToolNames.EXEC },
+    });
+    expect(recordToolResult).toHaveBeenCalledOnce();
+    expect(
+      recordToolResult.mock.calls[0]?.[0]?.[0]?.functionResponse?.name,
+    ).toBe(ToolNames.EXEC);
+  });
+
+  it('applies nested permission denial to the real code-mode tool', async () => {
+    const nestedExecute = vi.fn();
+    const exec = new MockTool({
+      name: ToolNames.EXEC,
+      execute: async () => {
+        const runtime = getCurrentToolCallRuntime();
+        await runtime!.dispatch({
+          name: ToolNames.READ_FILE,
+          args: { file_path: 'secret.txt' },
+          source: {
+            kind: 'code_mode',
+            parentCallId: 'exec-denied',
+            nestedCallId: '1',
+          },
+          signal: new AbortController().signal,
+        });
+        return { llmContent: 'unreachable', returnDisplay: 'unreachable' };
+      },
+    });
+    const nested = new MockTool({
+      name: ToolNames.READ_FILE,
+      execute: nestedExecute,
+    });
+    const isToolEnabled = vi.fn(
+      async (name: string) => name !== ToolNames.READ_FILE,
+    );
+    const { scheduler, onAllToolCallsComplete } =
+      createSchedulerForLegacyToolTests({
+        toolsByName: new Map([
+          [exec.name, exec],
+          [nested.name, nested],
+        ]),
+        permissionManager: {
+          isToolEnabled,
+          findMatchingDenyRule: () => undefined,
+          isPermissionsAllowListActive: () => false,
+          hasRelevantRules: () => false,
+          evaluate: vi.fn().mockResolvedValue('default'),
+          hasMatchingAskRule: () => false,
+        },
+      });
+
+    await scheduler.schedule(
+      {
+        callId: 'exec-denied',
+        name: ToolNames.EXEC,
+        args: { source: 'ignored' },
+        isClientInitiated: false,
+        prompt_id: 'prompt-exec-denied',
+      },
+      new AbortController().signal,
+    );
+
+    expect(isToolEnabled).toHaveBeenCalledWith(ToolNames.READ_FILE);
+    expect(nestedExecute).not.toHaveBeenCalled();
+    const completed = onAllToolCallsComplete.mock.calls.at(-1)?.[0]?.[0] as
+      | ToolCall
+      | undefined;
+    expect(completed?.status).toBe('error');
+  });
+
+  it('routes nested code-mode approval to its scheduler lane', async () => {
+    const nestedExecute = vi.fn().mockResolvedValue({
+      llmContent: 'approved result',
+      returnDisplay: 'approved result',
+    });
+    const exec = new MockTool({
+      name: ToolNames.EXEC,
+      execute: async () => {
+        const runtime = getCurrentToolCallRuntime();
+        const result = await runtime!.dispatch({
+          name: ToolNames.READ_FILE,
+          args: { file_path: 'approval.txt' },
+          source: {
+            kind: 'code_mode',
+            parentCallId: 'exec-ask',
+            nestedCallId: '1',
+          },
+          signal: new AbortController().signal,
+        });
+        return {
+          llmContent: JSON.stringify(result),
+          returnDisplay: JSON.stringify(result),
+        };
+      },
+    });
+    const nested = new MockTool({
+      name: ToolNames.READ_FILE,
+      getDefaultPermission: MOCK_TOOL_GET_DEFAULT_PERMISSION,
+      getConfirmationDetails: MOCK_TOOL_GET_CONFIRMATION_DETAILS,
+      execute: nestedExecute,
+    });
+    const signal = new AbortController().signal;
+    const { scheduler, onAllToolCallsComplete, onToolCallsUpdate } =
+      createSchedulerForLegacyToolTests({
+        toolsByName: new Map([
+          [exec.name, exec],
+          [nested.name, nested],
+        ]),
+        approvalMode: ApprovalMode.DEFAULT,
+      });
+
+    const scheduling = scheduler.schedule(
+      {
+        callId: 'exec-ask',
+        name: ToolNames.EXEC,
+        args: { source: 'ignored' },
+        isClientInitiated: false,
+        prompt_id: 'prompt-exec-ask',
+      },
+      signal,
+    );
+    let waiting: WaitingToolCall | undefined;
+    await vi.waitFor(() => {
+      waiting = onToolCallsUpdate.mock.calls
+        .flatMap((call) => call[0] as ToolCall[])
+        .find(
+          (call): call is WaitingToolCall =>
+            call.status === 'awaiting_approval' &&
+            call.request.name === ToolNames.READ_FILE,
+        );
+      expect(waiting).toBeDefined();
+    });
+    await scheduler.handleConfirmationResponse(
+      waiting!.request.callId,
+      waiting!.confirmationDetails.onConfirm,
+      ToolConfirmationOutcome.ProceedOnce,
+      signal,
+    );
+    await scheduling;
+
+    expect(nestedExecute).toHaveBeenCalledOnce();
+    const completed = onAllToolCallsComplete.mock.calls.at(-1)?.[0]?.[0] as
+      | ToolCall
+      | undefined;
+    expect(completed?.status).toBe('success');
+  });
+
+  it('routes tool_call through the underlying tool while preserving the model-facing response name', async () => {
+    const execute = vi.fn().mockResolvedValue({
+      llmContent: 'created issue',
+      returnDisplay: 'created issue',
+    });
+    const bridge = new MockTool({ name: ToolNames.TOOL_CALL });
+    const deferred = new MockTool({
+      name: 'mcp__github__create_issue',
+      shouldDefer: true,
+      execute,
+    });
+    const isToolEnabled = vi.fn().mockResolvedValue(true);
+    const messageBus = {
+      request: vi.fn().mockImplementation(
+        async (request: {
+          eventName: string;
+        }): Promise<HookExecutionResponse> => ({
+          type: MessageBusType.HOOK_EXECUTION_RESPONSE,
+          correlationId: `${request.eventName}-hook`,
+          success: true,
+          output: { decision: 'allow' },
+        }),
+      ),
+    };
+    const { scheduler, onAllToolCallsComplete } =
+      createSchedulerForLegacyToolTests({
+        toolsByName: new Map([
+          [bridge.name, bridge],
+          [deferred.name, deferred],
+        ]),
+        deferredHiddenNames: new Set([deferred.name]),
+        permissionManager: {
+          isToolEnabled,
+          findMatchingDenyRule: () => undefined,
+          isPermissionsAllowListActive: () => false,
+          hasRelevantRules: () => false,
+          evaluate: vi.fn().mockResolvedValue('default'),
+          hasMatchingAskRule: () => false,
+        },
+        messageBus,
+        disableHooks: false,
+      });
+
+    await scheduler.schedule(
+      {
+        callId: 'bridge-call',
+        name: ToolNames.TOOL_CALL,
+        args: {
+          name: deferred.name,
+          arguments: { title: 'Cache-safe tools' },
+        },
+        isClientInitiated: false,
+        prompt_id: 'prompt-bridge',
+      },
+      new AbortController().signal,
+    );
+
+    expect(execute).toHaveBeenCalledOnce();
+    expect(isToolEnabled).toHaveBeenCalledWith(ToolNames.TOOL_CALL);
+    expect(isToolEnabled).toHaveBeenCalledWith(deferred.name);
+    expect(messageBus.request.mock.calls[0][0]).toEqual(
+      expect.objectContaining({
+        eventName: 'PreToolUse',
+        input: expect.objectContaining({
+          tool_name: deferred.name,
+          tool_input: { title: 'Cache-safe tools' },
+        }),
+      }),
+    );
+
+    const completed = onAllToolCallsComplete.mock.calls[0][0][0] as ToolCall;
+    expect(completed.request.name).toBe(deferred.name);
+    expect(completed.request.args).toEqual({ title: 'Cache-safe tools' });
+    expect(
+      completed.status === 'success'
+        ? completed.response.responseParts[0]?.functionResponse?.name
+        : undefined,
+    ).toBe(ToolNames.TOOL_CALL);
+  });
+
+  it('rejects tool_call targets that are not hidden deferred tools', async () => {
+    const execute = vi.fn();
+    const bridge = new MockTool({ name: ToolNames.TOOL_CALL });
+    const visible = new MockTool({ name: ToolNames.READ_FILE, execute });
+    const { scheduler, onAllToolCallsComplete } =
+      createSchedulerForLegacyToolTests({
+        toolsByName: new Map([
+          [bridge.name, bridge],
+          [visible.name, visible],
+        ]),
+      });
+
+    await scheduler.schedule(
+      {
+        callId: 'bridge-visible',
+        name: ToolNames.TOOL_CALL,
+        args: { name: visible.name, arguments: { file_path: 'README.md' } },
+        isClientInitiated: false,
+        prompt_id: 'prompt-bridge-visible',
+      },
+      new AbortController().signal,
+    );
+
+    const completed = onAllToolCallsComplete.mock.calls[0][0][0] as ToolCall;
+    expect(completed.status).toBe('error');
+    if (completed.status === 'error') {
+      expect(completed.response.errorType).toBe(
+        ToolErrorType.INVALID_TOOL_PARAMS,
+      );
+      expect(completed.response.responseParts[0]?.functionResponse?.name).toBe(
+        ToolNames.TOOL_CALL,
+      );
+    }
+    expect(execute).not.toHaveBeenCalled();
+  });
 
   it('restores the invocation context when a delayed confirmation executes', async () => {
     const invocationContext: InvocationContextV1 = {

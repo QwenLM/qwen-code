@@ -95,6 +95,7 @@ import {
 import { collectAvailableSkillEntries } from '../tools/skill-utils.js';
 import type { AvailableSkillEntry } from '../tools/skill-utils.js';
 import { ToolNames } from '../tools/tool-names.js';
+import { ToolMode } from '../tools/tool-mode.js';
 import {
   __resetActiveGoalStoreForTests,
   clearActiveGoal,
@@ -573,6 +574,7 @@ describe('Gemini Client (client.ts)', () => {
         .mockReturnValue(contentGeneratorConfig),
       getToolRegistry: vi.fn().mockReturnValue(mockToolRegistry),
       getToolSearchThreshold: vi.fn().mockReturnValue(10),
+      getEffectiveToolMode: vi.fn().mockReturnValue(ToolMode.Direct),
       getModel: vi.fn().mockReturnValue('test-model'),
       getEmbeddingModel: vi.fn().mockReturnValue('test-embedding-model'),
       getApiKey: vi.fn().mockReturnValue('test-key'),
@@ -1211,7 +1213,9 @@ describe('Gemini Client (client.ts)', () => {
         { name: 'cron_create', description: 'schedule' },
       ]);
       toolRegistry.getTool.mockImplementation((name: string) =>
-        name === ToolNames.TOOL_SEARCH ? ({} as never) : null,
+        name === ToolNames.TOOL_SEARCH || name === ToolNames.TOOL_CALL
+          ? ({} as never)
+          : null,
       );
       vi.mocked(getInitialChatHistory).mockResolvedValueOnce([
         [
@@ -1333,7 +1337,9 @@ describe('Gemini Client (client.ts)', () => {
         { name: 'cron_create', description: 'schedule' },
       ]);
       toolRegistry.getTool.mockImplementation((name: string) =>
-        name === ToolNames.TOOL_SEARCH ? ({} as never) : null,
+        name === ToolNames.TOOL_SEARCH || name === ToolNames.TOOL_CALL
+          ? ({} as never)
+          : null,
       );
       vi.mocked(getInitialChatHistory).mockResolvedValueOnce([
         [
@@ -1390,7 +1396,7 @@ describe('Gemini Client (client.ts)', () => {
       ]);
       // ToolSearch is available so we DON'T enter the eager-reveal branch.
       reg.getTool.mockImplementation((n: string) =>
-        n === 'tool_search' ? ({} as never) : null,
+        n === 'tool_search' || n === 'tool_call' ? ({} as never) : null,
       );
       reg.revealDeferredTool.mockClear();
 
@@ -1427,7 +1433,7 @@ describe('Gemini Client (client.ts)', () => {
         { name: 'cron_create', description: 'schedule' },
       ]);
       reg.getTool.mockImplementation((name: string) =>
-        name === 'tool_search' ? ({} as never) : null,
+        name === 'tool_search' || name === 'tool_call' ? ({} as never) : null,
       );
       const getHistorySpy = vi.spyOn(client, 'getHistoryShallow');
 
@@ -1462,15 +1468,15 @@ describe('Gemini Client (client.ts)', () => {
       expect(reg.revealDeferredTool).toHaveBeenCalledWith('cron_list');
     });
 
-    it('does NOT eagerly reveal when ToolSearch is available', async () => {
-      // When ToolSearch IS registered, deferred tools stay hidden until
-      // the model discovers them — that's the whole point of deferral.
+    it('does NOT eagerly reveal when both bridge tools are available', async () => {
+      // With both bridge tools registered, deferred schemas stay hidden while
+      // remaining invocable through tool_search + tool_call.
       const reg = getRegistryMock();
       reg.getDeferredToolSummary.mockReturnValue([
         { name: 'cron_create', description: 'schedule' },
       ]);
       reg.getTool.mockImplementation((n: string) =>
-        n === 'tool_search' ? ({} as never) : null,
+        n === 'tool_search' || n === 'tool_call' ? ({} as never) : null,
       );
       reg.revealDeferredTool.mockClear();
 
@@ -1480,10 +1486,46 @@ describe('Gemini Client (client.ts)', () => {
       expect(reg.revealDeferredTool).not.toHaveBeenCalled();
     });
 
+    it('does not announce deferred bridge tools in code mode', async () => {
+      const reg = getRegistryMock();
+      reg.getDeferredToolSummary.mockReturnValue([
+        { name: 'cron_create', description: 'schedule' },
+      ]);
+      vi.mocked(mockConfig.getEffectiveToolMode).mockReturnValue(
+        ToolMode.CodeModeOnly,
+      );
+      reg.revealDeferredTool.mockClear();
+
+      await client.startChat();
+
+      expect(reg.revealDeferredTool).not.toHaveBeenCalled();
+      expect(
+        sessionStartProfilerMocks.profilers.at(-1)?.finish,
+      ).toHaveBeenCalledWith(
+        expect.objectContaining({ deferredReminderCount: 0 }),
+      );
+    });
+
+    it('eagerly reveals deferred tools when ToolCall is unavailable', async () => {
+      const reg = getRegistryMock();
+      reg.getDeferredToolSummary.mockReturnValue([
+        { name: 'cron_create', description: 'schedule' },
+      ]);
+      reg.getTool.mockImplementation((name: string) =>
+        name === ToolNames.TOOL_SEARCH ? ({} as never) : null,
+      );
+      reg.revealDeferredTool.mockClear();
+
+      await client.startChat();
+
+      expect(reg.revealDeferredTool).toHaveBeenCalledWith('cron_create');
+      expect(reg.preloadDeferredToolsWithinBudget).not.toHaveBeenCalled();
+    });
+
     it('preloads deferred tools with a threshold-derived budget', async () => {
       const reg = getRegistryMock();
       reg.getTool.mockImplementation((n: string) =>
-        n === 'tool_search' ? ({} as never) : null,
+        n === 'tool_search' || n === 'tool_call' ? ({} as never) : null,
       );
       reg.preloadDeferredToolsWithinBudget.mockClear();
 
@@ -1500,7 +1542,7 @@ describe('Gemini Client (client.ts)', () => {
     it('uses the configured context window for the preload budget', async () => {
       const reg = getRegistryMock();
       reg.getTool.mockImplementation((n: string) =>
-        n === 'tool_search' ? ({} as never) : null,
+        n === 'tool_search' || n === 'tool_call' ? ({} as never) : null,
       );
       vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
         model: 'test-model',
@@ -1519,7 +1561,7 @@ describe('Gemini Client (client.ts)', () => {
     it('skips deferred preload when the threshold is 0', async () => {
       const reg = getRegistryMock();
       reg.getTool.mockImplementation((n: string) =>
-        n === 'tool_search' ? ({} as never) : null,
+        n === 'tool_search' || n === 'tool_call' ? ({} as never) : null,
       );
       vi.mocked(mockConfig.getToolSearchThreshold).mockReturnValue(0);
       reg.preloadDeferredToolsWithinBudget.mockClear();
@@ -1532,7 +1574,7 @@ describe('Gemini Client (client.ts)', () => {
     it('skips deferred preload when the threshold is not finite', async () => {
       const reg = getRegistryMock();
       reg.getTool.mockImplementation((n: string) =>
-        n === 'tool_search' ? ({} as never) : null,
+        n === 'tool_search' || n === 'tool_call' ? ({} as never) : null,
       );
       vi.mocked(mockConfig.getToolSearchThreshold).mockReturnValue(NaN);
       reg.preloadDeferredToolsWithinBudget.mockClear();
@@ -1545,7 +1587,7 @@ describe('Gemini Client (client.ts)', () => {
     it('clamps a threshold above 100% to a full-context budget', async () => {
       const reg = getRegistryMock();
       reg.getTool.mockImplementation((n: string) =>
-        n === 'tool_search' ? ({} as never) : null,
+        n === 'tool_search' || n === 'tool_call' ? ({} as never) : null,
       );
       // A misconfigured threshold (e.g. 200) must not produce a budget larger
       // than the context window, which would unconditionally preload every
@@ -2258,7 +2300,7 @@ describe('Gemini Client (client.ts)', () => {
     it('queues and drains a reminder for newly registered MCP deferred tools', async () => {
       const reg = getRegistryMock();
       reg.getTool.mockImplementation((n: string) =>
-        n === 'tool_search' ? ({} as never) : null,
+        n === 'tool_search' || n === 'tool_call' ? ({} as never) : null,
       );
       reg.getDeferredToolSummary.mockReturnValue([
         {
@@ -2307,7 +2349,7 @@ describe('Gemini Client (client.ts)', () => {
     it('does not announce MCP removal before an added tool was drained', async () => {
       const reg = getRegistryMock();
       reg.getTool.mockImplementation((n: string) =>
-        n === 'tool_search' ? ({} as never) : null,
+        n === 'tool_search' || n === 'tool_call' ? ({} as never) : null,
       );
       const tool = {
         name: 'mcp__flaky__do',
@@ -2331,7 +2373,7 @@ describe('Gemini Client (client.ts)', () => {
     it('omits already-revealed deferred tools from added reminders', async () => {
       const reg = getRegistryMock();
       reg.getTool.mockImplementation((n: string) =>
-        n === 'tool_search' ? ({} as never) : null,
+        n === 'tool_search' || n === 'tool_call' ? ({} as never) : null,
       );
       reg.getDeferredToolSummary.mockReturnValue([
         { name: 'mcp__server__alpha', description: 'a', serverName: 'server' },
@@ -2360,7 +2402,7 @@ describe('Gemini Client (client.ts)', () => {
     it('re-announces an MCP tool after its server disconnects and reconnects', async () => {
       const reg = getRegistryMock();
       reg.getTool.mockImplementation((n: string) =>
-        n === 'tool_search' ? ({} as never) : null,
+        n === 'tool_search' || n === 'tool_call' ? ({} as never) : null,
       );
       const tool = {
         name: 'mcp__flaky__do',
@@ -2396,7 +2438,7 @@ describe('Gemini Client (client.ts)', () => {
     it('announces removed MCP deferred tools after disconnect', async () => {
       const reg = getRegistryMock();
       reg.getTool.mockImplementation((n: string) =>
-        n === 'tool_search' ? ({} as never) : null,
+        n === 'tool_search' || n === 'tool_call' ? ({} as never) : null,
       );
       const tool = {
         name: 'mcp__gone__do',
@@ -2441,7 +2483,9 @@ describe('Gemini Client (client.ts)', () => {
       let revealed = false;
       let registered = true;
       reg.getTool.mockImplementation((name: string) =>
-        name === 'tool_search' || (name === tool.name && registered)
+        name === 'tool_search' ||
+        name === 'tool_call' ||
+        (name === tool.name && registered)
           ? ({} as never)
           : null,
       );
@@ -2535,7 +2579,7 @@ describe('Gemini Client (client.ts)', () => {
     it('re-reveals MCP tools from resumed history after progressive discovery', async () => {
       const reg = getRegistryMock();
       reg.getTool.mockImplementation((name: string) =>
-        name === 'tool_search' ? ({} as never) : null,
+        name === 'tool_search' || name === 'tool_call' ? ({} as never) : null,
       );
 
       // The resumed chat is constructed before progressive MCP discovery, so
@@ -2618,7 +2662,7 @@ describe('Gemini Client (client.ts)', () => {
     it('does not append the same added MCP reminder twice', async () => {
       const reg = getRegistryMock();
       reg.getTool.mockImplementation((n: string) =>
-        n === 'tool_search' ? ({} as never) : null,
+        n === 'tool_search' || n === 'tool_call' ? ({} as never) : null,
       );
       reg.getDeferredToolSummary.mockReturnValue([
         {
@@ -2646,7 +2690,7 @@ describe('Gemini Client (client.ts)', () => {
     it('does not drain queued MCP reminders on tool-result turns', async () => {
       const reg = getRegistryMock();
       reg.getTool.mockImplementation((n: string) =>
-        n === 'tool_search' ? ({} as never) : null,
+        n === 'tool_search' || n === 'tool_call' ? ({} as never) : null,
       );
       reg.getDeferredToolSummary.mockReturnValue([
         {

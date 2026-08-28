@@ -32,14 +32,14 @@ rmSync(path.resolve(__dirname, 'dist'), { recursive: true, force: true });
  *
  * The `?binary` suffix is a build-time hint: at bundle time (esbuild) the WASM
  * bytes are embedded as base64 and exported as a default Uint8Array, so no
- * external vendor files are needed at runtime.  In source / transpiled mode
- * the dynamic import throws and the caller falls back to reading from
- * node_modules via `require.resolve`.
+ * external vendor files are needed at runtime. In source / transpiled mode
+ * the dynamic import throws and the caller falls back to the variant's
+ * packaged WASM loader.
  */
 const wasmBinaryPlugin = {
   name: 'wasm-binary',
   setup(build) {
-    build.onResolve({ filter: /\.wasm\?binary$/ }, (args) => {
+    build.onResolve({ filter: /\?binary$/ }, (args) => {
       const specifier = args.path.replace(/\?binary$/, '');
       const localRequire = createRequire(
         path.resolve(args.resolveDir || __dirname, '_dummy_.js'),
@@ -276,7 +276,27 @@ const workerBuild = esbuild.build({
   keepNames: true,
 });
 
-Promise.all([mainBuild, workerBuild])
+// CodeModeOnly worker — the model-authored source is evaluated by QuickJS
+// inside this worker. Keep it standalone so the host can hard-terminate CPU
+// loops, and embed the exact QuickJS WASM bytes so published CLIs never fall
+// back to an ambient runtime or a missing node_modules asset.
+const codeModeWorkerBuild = esbuild.build({
+  entryPoints: ['packages/core/src/tools/code-mode-worker.ts'],
+  bundle: true,
+  outfile: 'dist/codeModeWorker.js',
+  platform: 'node',
+  format: 'esm',
+  target: 'node22',
+  external,
+  packages: 'bundle',
+  inject: [path.resolve(__dirname, 'scripts/esbuild-shims.js')],
+  banner: { js: `"use strict";` },
+  plugins: [wasmBinaryPlugin],
+  write: true,
+  keepNames: true,
+});
+
+Promise.all([mainBuild, workerBuild, codeModeWorkerBuild])
   .then(([{ metafile }]) => {
     if (process.env.DEV === 'true') {
       writeFileSync('./dist/esbuild.json', JSON.stringify(metafile, null, 2));

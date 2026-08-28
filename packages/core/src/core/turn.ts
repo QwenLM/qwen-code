@@ -148,6 +148,11 @@ export interface ToolCallRequestInfo {
   /** Set to true when the LLM response was truncated due to max_tokens. */
   wasOutputTruncated?: boolean;
   goalContext?: GoalTurnPermit;
+  codeMode?: {
+    source: 'code_mode';
+    parentCallId: string;
+    nestedCallId: string;
+  };
 }
 
 export type ToolExecutionStatus =

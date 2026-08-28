@@ -107,6 +107,9 @@ export * from './core/turn-interruption.js';
 
 // Tool names and registry
 export * from './tools/tool-names.js';
+export * from './tools/tool-mode.js';
+export * from './tools/tool-exposure.js';
+export * from './tools/tool-call-runtime.js';
 export * from './tools/tool-error.js';
 export * from './tools/tool-registry.js';
 export * from './tools/tools.js';
@@ -266,6 +269,8 @@ export type {
 } from './config/config.js';
 export type { CronListTool, CronListParams } from './tools/cron-list.js';
 export type { CronDeleteTool, CronDeleteParams } from './tools/cron-delete.js';
+export type { ToolCallTool, ToolCallParams } from './tools/tool-call.js';
+export type { ExecTool, ExecParams } from './tools/exec.js';
 export type { ToolSearchTool, ToolSearchParams } from './tools/tool-search.js';
 export type {
   TeamPlanApprovalTool,

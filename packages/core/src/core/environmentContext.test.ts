@@ -42,6 +42,7 @@ import { SendMessageTool } from '../tools/send-message.js';
 import { getFolderStructure } from '../utils/getFolderStructure.js';
 import { collectAvailableSkillEntries } from '../tools/skill-utils.js';
 import type { AvailableSkillEntry } from '../tools/skill-utils.js';
+import { ToolMode } from '../tools/tool-mode.js';
 
 vi.mock('../config/config.js');
 vi.mock('../utils/getFolderStructure.js', () => ({
@@ -200,6 +201,7 @@ describe('getInitialChatHistory', () => {
       getFileService: vi.fn(),
       getToolRegistry: vi.fn().mockReturnValue(mockToolRegistry),
       getSkillManager: vi.fn().mockReturnValue(null),
+      getEffectiveToolMode: vi.fn().mockReturnValue(ToolMode.Direct),
     };
   });
 
@@ -312,6 +314,23 @@ describe('getInitialChatHistory', () => {
     expect(history[0]?.parts?.[0]?.text).not.toContain('"cron_list"');
   });
 
+  it('suppresses deferred bridge reminders in code mode', async () => {
+    mockToolRegistry.getDeferredToolSummary.mockReturnValue([
+      { name: 'cron_list', description: 'List scheduled jobs.' },
+    ]);
+    vi.mocked(mockConfig.getEffectiveToolMode!).mockReturnValue(
+      ToolMode.CodeModeOnly,
+    );
+
+    const [history] = await getInitialChatHistory(mockConfig as Config);
+
+    expect(history).toHaveLength(1);
+    expect(history[0]?.parts).toHaveLength(1);
+    expect(history[0]?.parts?.[0]?.text).not.toContain('"cron_list"');
+    expect(history[0]?.parts?.[0]?.text).not.toContain('tool_search');
+    expect(history[0]?.parts?.[0]?.text).not.toContain('tool_call');
+  });
+
   it('returns empty history when skipping startup context without extras', async () => {
     mockConfig.getSkipStartupContext = vi.fn().mockReturnValue(true);
     mockConfig.getWorkspaceContext = vi.fn(() => {
@@ -335,9 +354,13 @@ describe('getInitialChatHistory', () => {
 
     const parts = history[0]?.parts ?? [];
     const lastText = parts[parts.length - 1]?.text;
-    expect(lastText).toContain('reachable via `tool_search`');
+    expect(lastText).toContain(
+      'reachable through `tool_search` and `tool_call`',
+    );
     expect(lastText).toContain('web_fetch');
-    expect(parts[0]?.text).not.toContain('reachable via `tool_search`');
+    expect(parts[0]?.text).not.toContain(
+      'reachable through `tool_search` and `tool_call`',
+    );
   });
 });
 
@@ -1031,7 +1054,7 @@ describe('changed capability reminders', () => {
     expect(result).toContain('"mcp__old__tool"');
   });
 
-  it('renders tool_search hint for MCP tools in mixed added and removed reminders', () => {
+  it('renders bridge hints for MCP tools in mixed added and removed reminders', () => {
     const result = buildChangedMcpToolsReminder(
       [
         {
@@ -1044,8 +1067,10 @@ describe('changed capability reminders', () => {
     );
 
     expect(result).not.toBeNull();
-    expect(result).toContain('reachable via `tool_search`');
-    expect(result).toContain('Call with `select:<name>`');
+    expect(result).toContain('reachable through `tool_search` and `tool_call`');
+    expect(result).toContain(
+      'Review a schema, then invoke it through the bridge',
+    );
     expect(result).toContain('"mcp__new__tool"');
     expect(result).toContain('"mcp__old__tool"');
   });

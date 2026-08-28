@@ -2989,6 +2989,39 @@ describe('AnthropicContentConverter', () => {
   });
 
   describe('convertLlmToolsToAnthropic', () => {
+    it('preserves the structured exec declaration', async () => {
+      const tools = [
+        {
+          functionDeclarations: [
+            {
+              name: 'exec',
+              description: 'Execute JavaScript.',
+              parametersJsonSchema: {
+                type: 'object',
+                properties: { source: { type: 'string' } },
+                required: ['source'],
+                additionalProperties: false,
+              },
+            },
+          ],
+        },
+      ] as Tool[];
+
+      const result = await converter.convertLlmToolsToAnthropic(tools);
+
+      expect(result[0]).toEqual({
+        name: 'exec',
+        description: 'Execute JavaScript.',
+        input_schema: {
+          type: 'object',
+          properties: { source: { type: 'string' } },
+          required: ['source'],
+          additionalProperties: false,
+        },
+        cache_control: { type: 'ephemeral' },
+      });
+    });
+
     it('converts Tool.functionDeclarations to Anthropic tools and runs schema conversion', async () => {
       const tools = [
         {

@@ -29,6 +29,7 @@ import {
 } from '../../utils/subagentNameContext.js';
 import { runInForkContext } from '../../tools/agent/fork-subagent.js';
 import { ToolNames } from '../../tools/tool-names.js';
+import { ToolMode } from '../../tools/tool-mode.js';
 import {
   getAgentName,
   getTeammateContext,
@@ -1197,6 +1198,7 @@ describe('AgentCore.prepareTools', () => {
     fnDeclarations: FunctionDeclaration[],
     maxSubagentDepth = 5,
     toolOutputBatchBudget = Number.POSITIVE_INFINITY,
+    toolMode = ToolMode.Direct,
   ): {
     core: AgentCore;
     debugSpy: ReturnType<typeof vi.fn>;
@@ -1224,6 +1226,7 @@ describe('AgentCore.prepareTools', () => {
       getMaxSubagentDepth: vi.fn().mockReturnValue(maxSubagentDepth),
       getToolOutputBatchBudget: vi.fn().mockReturnValue(toolOutputBatchBudget),
       getToolResultBytesWritten: vi.fn().mockReturnValue(500 * 1024 * 1024),
+      getEffectiveToolMode: vi.fn().mockReturnValue(toolMode),
     } as unknown as Config;
 
     const core = new AgentCore(
@@ -1309,6 +1312,35 @@ describe('AgentCore.prepareTools', () => {
     await core.prepareTools();
 
     expect(getFunctionDeclarationsSpy).not.toHaveBeenCalled();
+  });
+
+  it('adds only exec to an explicit CodeModeOnly subagent surface', async () => {
+    const declarations = [
+      { name: ToolNames.READ_FILE } as FunctionDeclaration,
+      { name: ToolNames.EXEC } as FunctionDeclaration,
+    ];
+    const { core, getFunctionDeclarationsFilteredSpy } = buildAgentForTools(
+      { tools: [ToolNames.READ_FILE] },
+      declarations,
+      5,
+      Number.POSITIVE_INFINITY,
+      ToolMode.CodeModeOnly,
+    );
+    getFunctionDeclarationsFilteredSpy.mockImplementation((names: string[]) =>
+      declarations.filter(
+        (declaration) =>
+          declaration.name === ToolNames.EXEC &&
+          names.includes(declaration.name),
+      ),
+    );
+
+    const tools = await core.prepareTools();
+
+    expect(getFunctionDeclarationsFilteredSpy).toHaveBeenCalledWith([
+      ToolNames.READ_FILE,
+      ToolNames.EXEC,
+    ]);
+    expect(tools.map((tool) => tool.name)).toEqual([ToolNames.EXEC]);
   });
 
   it.each([{ tools: ['*'] }, { tools: ['visible', 'hidden_by_allowlist'] }])(

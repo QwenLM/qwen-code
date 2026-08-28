@@ -3275,7 +3275,9 @@ const ZH: Messages = {
   'toolName.structured_output': '结构化输出',
   'toolName.monitor': '监控',
   'toolName.notebook_edit': '编辑 Notebook',
+  'toolName.tool_call': '工具调用',
   'toolName.tool_search': '工具搜索',
+  'toolName.exec': '代码执行',
   'toolName.enter_worktree': '进入 Worktree',
   'toolName.exit_worktree': '退出 Worktree',
   'toolName.workflow': '工作流',
@@ -6120,7 +6122,7 @@ const ZH: Messages = {
     '搜索文件时启用模糊搜索。',
   'settings.label.tools.toolSearch.enabled': '启用 ToolSearch',
   'settings.description.tools.toolSearch.enabled':
-    '启用后，MCP 工具会通过 ToolSearch 按需加载，以减少提示词大小。对于依赖前缀 KV 缓存的模型（如 DeepSeek），可关闭此项来保持提示词前缀稳定并提高缓存命中率。',
+    '启用后，deferred 工具会先通过 ToolSearch 检查 schema，再通过 ToolCall 调用；工具声明列表保持稳定，以减少提示词大小并提高缓存命中率。',
   'settings.label.tools.shell.enableInteractiveShell': '交互式 Shell（PTY）',
   'settings.description.tools.shell.enableInteractiveShell':
     '使用 node-pty 提供交互式 shell 体验。PTY 不可用时回退到 child_process。',

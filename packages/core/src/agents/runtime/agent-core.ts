@@ -111,6 +111,8 @@ import { AgentEventEmitter, AgentEventType } from './agent-events.js';
 import { AgentStatistics, type AgentStatsSummary } from './agent-statistics.js';
 import { matchesMcpPattern } from '../../permissions/rule-parser.js';
 import { ToolNames } from '../../tools/tool-names.js';
+import { ToolMode } from '../../tools/tool-mode.js';
+import { isModelVisibleTool } from '../../tools/tool-exposure.js';
 import { DEFAULT_QWEN_MODEL } from '../../config/models.js';
 import { type ContextState, templateString } from './agent-headless.js';
 import { getResponseText } from '../../utils/partUtils.js';
@@ -641,6 +643,8 @@ export class AgentCore {
     const toolRegistry = this.runtimeContext.getToolRegistry();
     await toolRegistry.warmAll();
     const toolsList: FunctionDeclaration[] = [];
+    const toolMode =
+      this.runtimeContext.getEffectiveToolMode?.() ?? ToolMode.Direct;
 
     const excludedFromSubagents = getExcludedToolsForCurrentContext();
 
@@ -688,8 +692,9 @@ export class AgentCore {
         (asStrings.length === 0 && onlyInlineDecls.length === 0)
       ) {
         // Subagents inherit ordinary deferred tools (MCP, low-frequency
-        // built-ins). Permission-allowlist-deferred schemas remain hidden
-        // until ToolSearch reveals them, preserving the registry allowlist.
+        // built-ins). Permission-allowlist-deferred schemas remain hidden and
+        // are reached through ToolSearch + ToolCall, preserving the registry
+        // allowlist without mutating the declarations.
         toolsList.push(
           ...toolRegistry
             .getFunctionDeclarations({ includeDeferred: true })
@@ -703,7 +708,11 @@ export class AgentCore {
         // the recursion guard). This prevents control-plane tools
         // (CRON_CREATE, TASK_STOP, SEND_MESSAGE, etc.) from leaking into
         // explicitly-configured subagents that happen to list them.
-        const allowedNames = asStrings.filter((name) => {
+        const configuredNames =
+          toolMode === ToolMode.CodeModeOnly
+            ? [...new Set([...asStrings, ToolNames.EXEC])]
+            : asStrings;
+        const allowedNames = configuredNames.filter((name) => {
           if (isExcluded(name) || isHiddenByPermissionAllowList(name)) {
             this.runtimeContext
               .getDebugLogger()
@@ -725,7 +734,11 @@ export class AgentCore {
       // workflow/cron/team tools into a subagent).
       toolsList.push(
         ...onlyInlineDecls.filter((d) => {
-          if (isExcluded(d.name) || isHiddenByPermissionAllowList(d.name)) {
+          if (
+            !isModelVisibleTool(d.name ?? '', toolMode) ||
+            isExcluded(d.name) ||
+            isHiddenByPermissionAllowList(d.name)
+          ) {
             this.runtimeContext
               .getDebugLogger()
               ?.debug(

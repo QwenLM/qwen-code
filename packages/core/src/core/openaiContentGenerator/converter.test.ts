@@ -5849,6 +5849,39 @@ describe('OpenAIContentConverter', () => {
   });
 
   describe('convertLlmToolsToOpenAI', () => {
+    it('preserves the structured exec declaration', async () => {
+      const sourceSchema = {
+        type: 'object',
+        properties: { source: { type: 'string' } },
+        required: ['source'],
+        additionalProperties: false,
+      };
+      const tools = [
+        {
+          functionDeclarations: [
+            {
+              name: 'exec',
+              description: 'Execute JavaScript.',
+              parametersJsonSchema: sourceSchema,
+            },
+          ],
+        },
+      ] as Tool[];
+
+      const result = await converter.convertLlmToolsToOpenAI(tools);
+
+      expect(result).toEqual([
+        {
+          type: 'function',
+          function: {
+            name: 'exec',
+            description: 'Execute JavaScript.',
+            parameters: sourceSchema,
+          },
+        },
+      ]);
+    });
+
     it('removes uniqueItems from function-calling wire schemas', async () => {
       const parametersJsonSchema = {
         type: 'object',

@@ -2892,6 +2892,14 @@ describe('PermissionManager', () => {
       expect(await pm.isToolEnabled('structured_output')).toBe(true);
     });
 
+    it('exec is exempt from the allowlist in CodeModeOnly', async () => {
+      pm = new PermissionManager(
+        makeConfig({ permissionsAllow: ['read_file'] }),
+      );
+      pm.initialize();
+      expect(await pm.isToolEnabled('exec')).toBe(true);
+    });
+
     it('computer_use__* tools are exempt from the allowlist (#9827)', async () => {
       // The generated cua-driver family (35 tools, enabled by default) has
       // no alias entry, meta-category, or wildcard rule form — its wire
@@ -3013,7 +3021,7 @@ describe('PermissionManager', () => {
       expect(await pm.isToolEnabled('task_stop')).toBe(false);
     });
 
-    it('tool_search is exempt from the allowlist (#9827)', async () => {
+    it('tool_search and tool_call are exempt from the allowlist (#9827)', async () => {
       // When ToolSearch is missing from the registry, client.ts
       // (`resolveDeferredToolsForReminder`) eagerly force-reveals every
       // registered deferred tool (all mcp__* and the deferred
@@ -3029,6 +3037,7 @@ describe('PermissionManager', () => {
       expect(pm.isPermissionsAllowListActive()).toBe(true);
       expect(await pm.isToolEnabled('run_shell_command')).toBe(true);
       expect(await pm.isToolEnabled('tool_search')).toBe(true);
+      expect(await pm.isToolEnabled('tool_call')).toBe(true);
       // Unrelated unlisted built-ins stay deferred.
       expect(await pm.getToolRegistrationStatus('read_file')).toBe('deferred');
     });

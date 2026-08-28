@@ -148,7 +148,11 @@ import { ShellToolInvocation } from '../tools/shell.js';
 import { DiscoveredMCPTool } from '../tools/mcp-tool.js';
 import { IdeClient } from '../ide/ide-client.js';
 import {
+  getLeaderOnlyToolUnavailableMessage,
   getPlanRequiredTeammatePreApprovalMessage,
+  getSubagentPlanToolUnavailableMessage,
+  isLeaderOnlyToolUnavailableInSubagent,
+  isPlanLifecycleToolUnavailableInSubagent,
   isPlanRequiredTeammateAwaitingApproval,
   isPlanRequiredTeammatePreApprovalAllowedTool,
   shouldUsePlanOnlyReminderInSubagentContext,
@@ -206,6 +210,13 @@ import {
 import { evaluateToolInvocationGuard } from './tool-invocation-guard.js';
 import { goalTurnContext } from '../goals/goal-turn-context.js';
 import { goalToolResultProvenance } from '../goals/goal-tool-result-provenance.js';
+import {
+  runWithToolCallRuntime,
+  runWithToolCallSource,
+  toolCallResponseValue,
+  type ToolCallRuntime,
+} from '../tools/tool-call-runtime.js';
+import { isCodeModeCallableTool } from '../tools/tool-exposure.js';
 
 const debugLogger = createDebugLogger('TOOL_SCHEDULER');
 
@@ -908,6 +919,20 @@ function toParts(input: PartListUnion): Part[] {
 
 const VALIDATION_RETRY_LOOP_THRESHOLD = 3;
 
+type SchedulerToolCallRequestInfo = ToolCallRequestInfo & {
+  modelFacingName?: string;
+  bridgeResolutionError?: {
+    error: Error;
+    type: ToolErrorType;
+  };
+};
+
+function getModelFacingToolName(request: ToolCallRequestInfo): string {
+  return (
+    (request as SchedulerToolCallRequestInfo).modelFacingName ?? request.name
+  );
+}
+
 // NOTE: the `⚠` in this and TRUNCATION_RETRY_LOOP_DIRECTIVE below is part of an
 // LLM-facing prompt directive (injected into the model prompt, not rendered in
 // the TUI). The width-1 glyph rationale used elsewhere in this change does not
@@ -939,7 +964,7 @@ const createErrorResponse = (
     {
       functionResponse: {
         id: request.callId,
-        name: request.name,
+        name: getModelFacingToolName(request),
         response: { error: error.message },
       },
     },
@@ -968,7 +993,7 @@ const createCancelledResponse = (
       {
         functionResponse: {
           id: request.callId,
-          name: request.name,
+          name: getModelFacingToolName(request),
           response: { error: errorMessage },
         },
       },
@@ -1416,6 +1441,8 @@ export class CoreToolScheduler {
   private onToolResultFullTurnModel?: (model: string) => boolean;
   private shouldObserveProducer: (callId: string) => boolean;
   private hasSkillToolOverride?: () => boolean;
+  private readonly nestedSchedulers = new Map<string, CoreToolScheduler>();
+  private readonly nestedToolCalls = new Map<string, ToolCall>();
   private isFinalizingToolCalls = false;
   private postToolBatchEnabledForBatch = false;
   private postToolBatchSpanCallId: string | undefined;
@@ -1487,6 +1514,74 @@ export class CoreToolScheduler {
     this.onToolResultFullTurnModel = options.onToolResultFullTurnModel;
     this.shouldObserveProducer = options.shouldObserveProducer ?? (() => true);
     this.hasSkillToolOverride = options.hasSkillTool;
+  }
+
+  private createCodeModeToolCallRuntime(
+    parentRequest: ToolCallRequestInfo,
+  ): ToolCallRuntime {
+    return {
+      dispatch: async ({ name, args, source, signal }) => {
+        if (!isCodeModeCallableTool(name) || !this.toolRegistry.getTool(name)) {
+          throw new Error(
+            `Tool ${JSON.stringify(name)} is not callable from code mode.`,
+          );
+        }
+        const callId = `${source.parentCallId}:code:${source.nestedCallId}`;
+        const nestedRequest: ToolCallRequestInfo = {
+          callId,
+          name,
+          args,
+          isClientInitiated: false,
+          prompt_id: parentRequest.prompt_id,
+          response_id: parentRequest.response_id,
+          goalContext: parentRequest.goalContext,
+          codeMode: {
+            source: 'code_mode',
+            parentCallId: source.parentCallId,
+            nestedCallId: source.nestedCallId,
+          },
+        };
+
+        return new Promise<unknown>((resolve, reject) => {
+          const cleanup = () => {
+            this.nestedSchedulers.delete(callId);
+            this.nestedToolCalls.delete(callId);
+            this.notifyToolCallsUpdate();
+          };
+          const nestedScheduler = new CoreToolScheduler({
+            config: this.config,
+            outputUpdateHandler: this.outputUpdateHandler,
+            getPreferredEditor: this.getPreferredEditor,
+            onEditorClose: this.onEditorClose,
+            onToolResultFullTurnModel: this.onToolResultFullTurnModel,
+            shouldObserveProducer: this.shouldObserveProducer,
+            hasSkillTool: this.hasSkillToolOverride,
+            onToolCallsUpdate: (calls) => {
+              for (const call of calls) {
+                this.nestedToolCalls.set(call.request.callId, call);
+              }
+              this.notifyToolCallsUpdate();
+            },
+            onAllToolCallsComplete: async (calls) => {
+              try {
+                resolve(toolCallResponseValue(calls[0].response));
+              } catch (error) {
+                reject(error);
+              } finally {
+                cleanup();
+              }
+            },
+          });
+          this.nestedSchedulers.set(callId, nestedScheduler);
+          void runWithToolCallSource(source, () =>
+            nestedScheduler.schedule(nestedRequest, signal),
+          ).catch((error: unknown) => {
+            cleanup();
+            reject(error);
+          });
+        });
+      },
+    };
   }
 
   private get memoryMonitor(): MemoryPressureMonitor | undefined {
@@ -1688,7 +1783,7 @@ export class CoreToolScheduler {
                   {
                     functionResponse: {
                       id: currentCall.request.callId,
-                      name: currentCall.request.name,
+                      name: getModelFacingToolName(currentCall.request),
                       response: {
                         error: errorMessage,
                       },
@@ -2251,6 +2346,124 @@ export class CoreToolScheduler {
     }
   }
 
+  private async resolveToolCallBridgeRequest(
+    request: ToolCallRequestInfo,
+  ): Promise<SchedulerToolCallRequestInfo> {
+    if (canonicalToolName(request.name) !== ToolNames.TOOL_CALL) {
+      return request;
+    }
+
+    const permissionManager = this.config.getPermissionManager?.();
+    if (
+      permissionManager &&
+      !(await permissionManager.isToolEnabled(ToolNames.TOOL_CALL))
+    ) {
+      return request;
+    }
+
+    const bridgeTool = await runInRequestGoalContext(request, () =>
+      this.toolRegistry.ensureTool(ToolNames.TOOL_CALL),
+    );
+    if (!bridgeTool) {
+      return request;
+    }
+
+    const bridgeInvocation = runInRequestGoalContext(request, () =>
+      this.buildInvocation(
+        bridgeTool,
+        request.args,
+        request.callId,
+        request.prompt_id,
+      ),
+    );
+    if (bridgeInvocation instanceof Error) {
+      return {
+        ...request,
+        bridgeResolutionError: {
+          error: bridgeInvocation,
+          type: ToolErrorType.INVALID_TOOL_PARAMS,
+        },
+      };
+    }
+
+    const params = bridgeInvocation.params as {
+      name: string;
+      arguments: Record<string, unknown>;
+    };
+    const targetName = canonicalToolName(params.name);
+    if (
+      targetName === ToolNames.TOOL_CALL ||
+      targetName === ToolNames.TOOL_SEARCH
+    ) {
+      return {
+        ...request,
+        bridgeResolutionError: {
+          error: new Error(
+            `tool_call cannot invoke bridge tool "${targetName}".`,
+          ),
+          type: ToolErrorType.INVALID_TOOL_PARAMS,
+        },
+      };
+    }
+
+    const targetTool = await runInRequestGoalContext(request, () =>
+      this.toolRegistry.ensureTool(targetName),
+    );
+    if (!targetTool) {
+      return {
+        ...request,
+        bridgeResolutionError: {
+          error: new Error(
+            `Deferred tool "${params.name}" is not registered in this session. Run tool_search again to inspect the available tools.`,
+          ),
+          type: ToolErrorType.TOOL_NOT_REGISTERED,
+        },
+      };
+    }
+
+    if (!this.toolRegistry.isDeferredAndHidden(targetTool.name)) {
+      return {
+        ...request,
+        bridgeResolutionError: {
+          error: new Error(
+            `Tool "${targetTool.name}" is already visible to the model or is not deferred. Call it directly instead of using tool_call.`,
+          ),
+          type: ToolErrorType.INVALID_TOOL_PARAMS,
+        },
+      };
+    }
+
+    if (isPlanLifecycleToolUnavailableInSubagent(targetTool.name)) {
+      return {
+        ...request,
+        bridgeResolutionError: {
+          error: new Error(
+            getSubagentPlanToolUnavailableMessage(targetTool.name),
+          ),
+          type: ToolErrorType.EXECUTION_DENIED,
+        },
+      };
+    }
+    if (isLeaderOnlyToolUnavailableInSubagent(targetTool.name)) {
+      return {
+        ...request,
+        bridgeResolutionError: {
+          error: new Error(
+            getLeaderOnlyToolUnavailableMessage(targetTool.name),
+          ),
+          type: ToolErrorType.EXECUTION_DENIED,
+        },
+      };
+    }
+
+    return {
+      ...request,
+      name: targetTool.name,
+      args: structuredClone(params.arguments),
+      modelFacingName: request.name,
+    };
+  }
+
   schedule(
     request: ToolCallRequestInfo | ToolCallRequestInfo[],
     signal: AbortSignal,
@@ -2367,9 +2580,16 @@ export class CoreToolScheduler {
           'Cannot schedule new tool calls while other tool calls are actively running (executing or awaiting approval).',
         );
       }
-      const requestsToProcess = dedupeRequestsByCallId(
-        Array.isArray(request) ? request : [request],
-      ).map((item) => ({ ...item, args: structuredClone(item.args) }));
+      const requestsToProcess = await Promise.all(
+        dedupeRequestsByCallId(
+          Array.isArray(request) ? request : [request],
+        ).map((item) =>
+          this.resolveToolCallBridgeRequest({
+            ...item,
+            args: structuredClone(item.args),
+          }),
+        ),
+      );
       // args are cloned at intake: callers pass args that may alias the
       // model-emitted functionCall part stored in chat history, and
       // _executeToolCallBody later rewrites PATH_ARG_KEYS on request.args in
@@ -2451,6 +2671,21 @@ export class CoreToolScheduler {
                 reqInfo,
                 new Error(PLAN_MODE_ENTRY_SIBLING_SKIP_MESSAGE),
                 ToolErrorType.EXECUTION_DENIED,
+                'not_started',
+              ),
+              durationMs: 0,
+            });
+            continue;
+          }
+
+          if (reqInfo.bridgeResolutionError) {
+            newToolCalls.push({
+              status: 'error',
+              request: reqInfo,
+              response: createErrorResponse(
+                reqInfo,
+                reqInfo.bridgeResolutionError.error,
+                reqInfo.bridgeResolutionError.type,
                 'not_started',
               ),
               durationMs: 0,
@@ -2763,6 +2998,13 @@ export class CoreToolScheduler {
             'gen_ai.tool.call.id': reqInfo.providerCallId ?? reqInfo.callId,
             call_id: reqInfo.callId,
             tool_name: canonicalName,
+            ...(reqInfo.codeMode
+              ? {
+                  'qwen.tool.source': reqInfo.codeMode.source,
+                  'qwen.tool.parent_call_id': reqInfo.codeMode.parentCallId,
+                  'qwen.tool.nested_call_id': reqInfo.codeMode.nestedCallId,
+                }
+              : {}),
           },
           toolCall.tool.description,
           reqInfo.prompt_id,
@@ -3774,6 +4016,16 @@ export class CoreToolScheduler {
     signal: AbortSignal,
     payload?: ToolConfirmationPayload,
   ): Promise<void> {
+    const nestedScheduler = this.nestedSchedulers.get(callId);
+    if (nestedScheduler) {
+      return nestedScheduler.handleConfirmationResponse(
+        callId,
+        originalOnConfirm,
+        outcome,
+        signal,
+        payload,
+      );
+    }
     const runtimeView = this.runtimeContentGeneratorViews.get(callId);
     if (runtimeView && getRuntimeContentGenerator() !== runtimeView) {
       return runWithRuntimeContentGenerator(runtimeView, () =>
@@ -4331,6 +4583,15 @@ export class CoreToolScheduler {
           'gen_ai.tool.call.id': scheduledCall.request.providerCallId ?? callId,
           call_id: callId, // legacy alias — see _schedule for context
           tool_name: canonical, // legacy alias — see _schedule for context
+          ...(scheduledCall.request.codeMode
+            ? {
+                'qwen.tool.source': scheduledCall.request.codeMode.source,
+                'qwen.tool.parent_call_id':
+                  scheduledCall.request.codeMode.parentCallId,
+                'qwen.tool.nested_call_id':
+                  scheduledCall.request.codeMode.nestedCallId,
+              }
+            : {}),
         },
         scheduledCall.tool.description,
         scheduledCall.request.prompt_id,
@@ -4896,11 +5157,18 @@ export class CoreToolScheduler {
               callId,
             });
             executionStatus = 'error';
-            return invocation.execute(
-              execSignal,
-              liveOutputCallback,
-              shellExecutionConfig,
-            );
+            const execute = () =>
+              invocation.execute(
+                execSignal,
+                liveOutputCallback,
+                shellExecutionConfig,
+              );
+            return canonicalName === ToolNames.EXEC
+              ? runWithToolCallRuntime(
+                  this.createCodeModeToolCallRuntime(scheduledCall.request),
+                  execute,
+                )
+              : execute();
           }),
         );
       }
@@ -5486,7 +5754,7 @@ export class CoreToolScheduler {
           typeof content === 'string' ? content.length : undefined;
 
         const convertedResponse = convertToFunctionResponse(
-          toolName,
+          getModelFacingToolName(scheduledCall.request),
           callId,
           content,
         );
@@ -6301,7 +6569,10 @@ export class CoreToolScheduler {
       return;
     }
     try {
-      this.onToolCallsUpdate([...this.toolCalls]);
+      this.onToolCallsUpdate([
+        ...this.toolCalls,
+        ...this.nestedToolCalls.values(),
+      ]);
     } catch (error) {
       debugLogger.error(
         `Tool call update observer failed: ${

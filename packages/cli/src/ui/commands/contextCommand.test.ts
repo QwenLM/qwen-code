@@ -234,8 +234,31 @@ describe('collectContextData (contextCommand)', () => {
 
     expect(data.builtinTools).toHaveLength(0);
     expect(data.mcpTools).toHaveLength(0);
-    expect(isDeferredAndHidden).toHaveBeenCalledWith('web_fetch');
-    expect(isDeferredAndHidden).toHaveBeenCalledWith('mcp__server__tool');
+    expect(isDeferredAndHidden).not.toHaveBeenCalled();
+  });
+
+  it('excludes non-deferred tools hidden by CodeModeOnly exposure', async () => {
+    const hiddenTool = {
+      name: 'read_file',
+      schema: { name: 'read_file', description: 'ordinary tool' },
+      shouldDefer: false,
+      alwaysLoad: false,
+    };
+    const config = {
+      ...makeMockConfig(),
+      getToolRegistry: vi.fn().mockReturnValue({
+        getAllTools: vi.fn().mockReturnValue([hiddenTool]),
+        getFunctionDeclarations: vi
+          .fn()
+          .mockReturnValue([
+            { name: 'exec', description: 'code mode control' },
+          ]),
+      }),
+    } as unknown as Config;
+
+    const data = await collectContextData(config, true);
+
+    expect(data.builtinTools).toHaveLength(0);
   });
 
   it('includes visibleTools in per-tool breakdown when deferred and not revealed (#6372)', async () => {

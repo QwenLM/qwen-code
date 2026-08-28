@@ -1236,11 +1236,11 @@
           }
         },
         "toolSearch": {
-          "description": "Settings for the ToolSearch discovery mechanism.",
+          "description": "Settings for deferred-tool discovery and invocation.",
           "type": "object",
           "properties": {
             "enabled": {
-              "description": "When enabled, MCP tools are loaded on-demand via ToolSearch to reduce prompt size. Disable this for models that rely on prefix-based KV caching (e.g. DeepSeek) to keep the prompt prefix stable and maximize cache hit rates.",
+              "description": "When enabled, deferred tools are reviewed via ToolSearch and invoked through the stable ToolCall bridge. This reduces prompt size without changing the model-facing tool list or prompt-cache prefix.",
               "type": "boolean",
               "default": true
             },
@@ -1249,9 +1249,14 @@
               "minimum": 0,
               "maximum": 100,
               "default": 10,
-              "description": "Context-window percentage used as the session-start budget for preloading deferred tools (bundled built-ins and MCP alike). When every deferred tool schema fits within the budget, all are declared upfront instead of loaded on demand, keeping the prompt prefix stable for KV caching. Set 0 to always load deferred tools on demand."
+              "description": "Context-window percentage used as the session-start budget for preloading deferred tools (bundled built-ins and MCP alike). When every deferred schema fits within the budget, all are declared upfront for direct calls; otherwise they stay behind the stable ToolSearch + ToolCall bridge. Set 0 to always use the bridge."
             }
           }
+        },
+        "codeModeOnly": {
+          "description": "Experimental. Replace ordinary direct tool declarations with a sandboxed exec({ source }) bridge while retaining audited control-plane tools. Disabled by default.",
+          "type": "boolean",
+          "default": false
         },
         "listDirectory": {
           "description": "Settings for the built-in list_directory tool. Opt-in: the tool is disabled by default because glob covers directory listing in most cases.",
