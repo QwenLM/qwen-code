@@ -8,6 +8,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import {
   fakeToolCall,
   startFakeOpenAIServer,
+  userMessageContains,
   type FakeOpenAIServer,
 } from './fake-openai-server.js';
 
@@ -318,5 +319,60 @@ describe('fake OpenAI server', () => {
         }),
       }),
     ).rejects.toThrow();
+  });
+});
+
+describe('userMessageContains', () => {
+  it('matches plain string user content', () => {
+    const body = {
+      messages: [{ role: 'user', content: 'Read test.txt.' }],
+    };
+    expect(userMessageContains(body, 'Read test.txt.')).toBe(true);
+  });
+
+  it('matches text blocks sent by the CLI stream-json format', () => {
+    const body = {
+      messages: [
+        {
+          role: 'user',
+          content: [
+            {
+              type: 'text',
+              text: '<system-reminder>context</system-reminder>',
+            },
+            { type: 'text', text: 'Create hello.txt.' },
+          ],
+        },
+      ],
+    };
+    expect(userMessageContains(body, 'Create hello.txt.')).toBe(true);
+  });
+
+  it('matches prompts containing quotes against raw text', () => {
+    // JSON.stringify would escape the quotes, so matching on a serialized
+    // form would miss every prompt containing `"` — the exact prompts the
+    // tool-control suite triggers on.
+    const body = {
+      messages: [
+        { role: 'user', content: 'Run "echo hello" and "ls -la" commands.' },
+      ],
+    };
+    expect(
+      userMessageContains(body, 'Run "echo hello" and "ls -la" commands.'),
+    ).toBe(true);
+  });
+
+  it('ignores non-user messages and absent content', () => {
+    const body = {
+      messages: [
+        { role: 'system', content: 'Read test.txt.' },
+        {
+          role: 'assistant',
+          content: [{ type: 'text', text: 'Read test.txt.' }],
+        },
+      ],
+    };
+    expect(userMessageContains(body, 'Read test.txt.')).toBe(false);
+    expect(userMessageContains({}, 'Read test.txt.')).toBe(false);
   });
 });

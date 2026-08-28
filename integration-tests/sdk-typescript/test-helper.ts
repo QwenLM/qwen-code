@@ -57,6 +57,7 @@ export interface SDKTestHelperOptions {
 export class SDKTestHelper {
   testDir: string | null = null;
   testName?: string;
+  homeDir: string | null = null;
   private baseDir: string;
 
   constructor() {
@@ -86,6 +87,10 @@ export class SDKTestHelper {
     await rm(this.testDir, { recursive: true, force: true });
     await mkdir(this.testDir, { recursive: true });
 
+    // Scratch HOME for the spawned CLI, see isolatedHomeEnv().
+    this.homeDir = join(this.testDir, 'home');
+    await mkdir(this.homeDir, { recursive: true });
+
     // Optionally create .qwen/settings.json for CLI configuration
     if (options.createQwenConfig !== false) {
       const qwenDir = join(this.testDir, '.qwen');
@@ -96,6 +101,11 @@ export class SDKTestHelper {
         typeof optionsSettings['general'] === 'object' &&
         optionsSettings['general'] !== null
           ? (optionsSettings['general'] as Record<string, unknown>)
+          : {};
+      const memorySettings =
+        typeof optionsSettings['memory'] === 'object' &&
+        optionsSettings['memory'] !== null
+          ? (optionsSettings['memory'] as Record<string, unknown>)
           : {};
 
       const settings = {
@@ -108,6 +118,16 @@ export class SDKTestHelper {
           // Default to disabling chat recording unless explicitly enabled
           ...(options.chatRecording !== true ? { chatRecording: false } : {}),
         },
+        memory: {
+          // Managed auto-memory defaults to on and issues side model
+          // requests (recall selection, background extraction) against the
+          // configured model endpoint. On shared runners that leaks
+          // host memory state into the fake server and desyncs tests that
+          // key responses off request order.
+          enableManagedAutoMemory: false,
+          enableManagedAutoDream: false,
+          ...memorySettings,
+        },
       };
 
       await writeFile(
@@ -118,6 +138,24 @@ export class SDKTestHelper {
     }
 
     return this.testDir;
+  }
+
+  /**
+   * Env that isolates the spawned CLI from the host user's HOME and global
+   * ~/.qwen state. The SDK merges options.env over process.env, so passing
+   * this to query() keeps shared-runner state (global settings, auth, memory
+   * recall config, goals) out of the child process. Without it, persistent
+   * self-hosted runners leak extra model requests into the fake server,
+   * desyncing tests that key responses off request order.
+   */
+  isolatedHomeEnv(): Record<string, string> {
+    if (!this.testDir || !this.homeDir) {
+      throw new Error('Test directory not initialized. Call setup() first.');
+    }
+    return {
+      HOME: this.homeDir,
+      QWEN_HOME: join(this.homeDir, '.qwen'),
+    };
   }
 
   /**

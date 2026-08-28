@@ -19,7 +19,11 @@ import {
   type SDKMessage,
   type SDKUserMessage,
 } from '@qwen-code/sdk';
-import { fakeToolCall, startFakeOpenAIServer } from '../fake-openai-server.js';
+import {
+  fakeToolCall,
+  startFakeOpenAIServer,
+  userMessageContains,
+} from '../fake-openai-server.js';
 import {
   IS_CONTAINER_SANDBOX,
   CONTAINER_SANDBOX_NO_PROXY,
@@ -42,7 +46,7 @@ const LOCAL_OPENAI_NO_PROXY = IS_CONTAINER_SANDBOX
   : '127.0.0.1,localhost';
 const FAKE_SERVER_OPTIONS = fakeServerHostOptions();
 
-function fakeModelOptions(baseUrl: string) {
+function fakeModelOptions(baseUrl: string, helper: SDKTestHelper) {
   return {
     model: 'fake-model',
     authType: 'openai' as const,
@@ -53,6 +57,8 @@ function fakeModelOptions(baseUrl: string) {
       OPENAI_BASE_URL: baseUrl,
       OPENAI_MODEL: 'fake-model',
       QWEN_MODEL: 'fake-model',
+      // Keep the runner's real HOME / ~/.qwen state out of the child CLI.
+      ...helper.isolatedHomeEnv(),
     },
   };
 }
@@ -64,37 +70,25 @@ function startFakeTextServer() {
   );
 }
 
-/** Returns a tool call on request 0, then plain text for all subsequent requests. */
-function startFakeToolServer(toolName: string, input: Record<string, unknown>) {
-  return startFakeOpenAIServer(({ requestIndex }) => {
-    if (requestIndex === 0) {
-      return { toolCalls: [fakeToolCall(toolName, input)] };
-    }
-    return { content: 'Done.' };
-  }, FAKE_SERVER_OPTIONS);
-}
-
-/** True when any user message in the request body contains `text`. */
-function userMessageContains(
-  body: Record<string, unknown>,
-  text: string,
-): boolean {
-  const messages =
-    (body['messages'] as Array<{ role: string; content: unknown }>) ?? [];
-  return messages.some(
-    (m) => m.role === 'user' && JSON.stringify(m.content).includes(text),
-  );
-}
-
-/** Serves a tool call on the first request whose user messages contain `triggerText`. */
-function startFakeToolServerOnMatch(
+/**
+ * Serves a tool call on the first streaming request whose user messages
+ * contain `triggerText`, then plain text for everything else. Matching on the
+ * prompt (not the request index) keeps the handler correct when non-turn
+ * requests — e.g. memory-recall side queries leaked from runner state —
+ * reach the fake server before the main request.
+ */
+function startFakeToolServer(
   triggerText: string,
   toolName: string,
   input: Record<string, unknown>,
 ) {
   let served = false;
   return startFakeOpenAIServer(({ body }) => {
-    if (!served && userMessageContains(body, triggerText)) {
+    if (
+      !served &&
+      body['stream'] === true &&
+      userMessageContains(body, triggerText)
+    ) {
       served = true;
       return { toolCalls: [fakeToolCall(toolName, input)] };
     }
@@ -193,13 +187,17 @@ describe('Permission Control (E2E)', () => {
         file_path: helper.getPath(fileName),
         content: 'denied',
       };
-      const fakeServer = await startFakeToolServer('write_file', input);
+      const fakeServer = await startFakeToolServer(
+        `Create ${fileName}.`,
+        'write_file',
+        input,
+      );
 
       const q = query({
         prompt: `Create ${fileName}.`,
         options: {
           ...SHARED_TEST_OPTIONS,
-          ...fakeModelOptions(fakeServer.baseUrl),
+          ...fakeModelOptions(fakeServer.baseUrl, helper),
           permissionMode: 'default',
           cwd: testDir,
           coreTools: ['write_file'],
@@ -231,16 +229,20 @@ describe('Permission Control (E2E)', () => {
     it('should allow tool execution when canUseTool returns allow', async () => {
       let callbackInvoked = false;
       const fileName = 'hello.txt';
-      const fakeServer = await startFakeToolServer('write_file', {
-        file_path: helper.getPath(fileName),
-        content: 'world',
-      });
+      const fakeServer = await startFakeToolServer(
+        `Create ${fileName}.`,
+        'write_file',
+        {
+          file_path: helper.getPath(fileName),
+          content: 'world',
+        },
+      );
 
       const q = query({
         prompt: `Create ${fileName}.`,
         options: {
           ...SHARED_TEST_OPTIONS,
-          ...fakeModelOptions(fakeServer.baseUrl),
+          ...fakeModelOptions(fakeServer.baseUrl, helper),
           permissionMode: 'default',
           cwd: testDir,
           coreTools: ['write_file'],
@@ -271,16 +273,20 @@ describe('Permission Control (E2E)', () => {
 
     it('should pass suggestions to canUseTool callback', async () => {
       let receivedSuggestions: unknown;
-      const fakeServer = await startFakeToolServer('write_file', {
-        file_path: helper.getPath('data.txt'),
-        content: 'data',
-      });
+      const fakeServer = await startFakeToolServer(
+        'Create data.txt.',
+        'write_file',
+        {
+          file_path: helper.getPath('data.txt'),
+          content: 'data',
+        },
+      );
 
       const q = query({
         prompt: 'Create data.txt.',
         options: {
           ...SHARED_TEST_OPTIONS,
-          ...fakeModelOptions(fakeServer.baseUrl),
+          ...fakeModelOptions(fakeServer.baseUrl, helper),
           permissionMode: 'default',
           cwd: testDir,
           coreTools: ['write_file'],
@@ -318,16 +324,20 @@ describe('Permission Control (E2E)', () => {
       // write_file call. In default mode write_file requires permission, so
       // canUseTool always fires — a real model may answer in text and never
       // invoke the callback, which is the flake this guards against.
-      const fakeServer = await startFakeToolServer('write_file', {
-        file_path: helper.getPath('signal.txt'),
-        content: 'signal test',
-      });
+      const fakeServer = await startFakeToolServer(
+        'Create a file named signal.txt',
+        'write_file',
+        {
+          file_path: helper.getPath('signal.txt'),
+          content: 'signal test',
+        },
+      );
 
       const q = query({
         prompt: 'Create a file named signal.txt',
         options: {
           ...SHARED_TEST_OPTIONS,
-          ...fakeModelOptions(fakeServer.baseUrl),
+          ...fakeModelOptions(fakeServer.baseUrl, helper),
           permissionMode: 'default',
           cwd: testDir,
           coreTools: ['write_file'],
@@ -369,7 +379,7 @@ describe('Permission Control (E2E)', () => {
         prompt: generator,
         options: {
           ...SHARED_TEST_OPTIONS,
-          ...fakeModelOptions(fakeServer.baseUrl),
+          ...fakeModelOptions(fakeServer.baseUrl, helper),
           cwd: testDir,
           permissionMode: 'default',
           debug: true,
@@ -443,7 +453,7 @@ describe('Permission Control (E2E)', () => {
 
     it('should block write tools after changing permission mode from yolo to plan', async () => {
       const fileName = 'plan-after-switch.txt';
-      const fakeServer = await startFakeToolServerOnMatch(
+      const fakeServer = await startFakeToolServer(
         `Create ${fileName}`,
         'write_file',
         { file_path: helper.getPath(fileName), content: 'should be blocked' },
@@ -459,7 +469,7 @@ describe('Permission Control (E2E)', () => {
         prompt: generator,
         options: {
           ...SHARED_TEST_OPTIONS,
-          ...fakeModelOptions(fakeServer.baseUrl),
+          ...fakeModelOptions(fakeServer.baseUrl, helper),
           cwd: testDir,
           permissionMode: 'yolo',
           coreTools: ['write_file'],
@@ -542,7 +552,7 @@ describe('Permission Control (E2E)', () => {
     it('should auto-approve write tools after changing permission mode to auto-edit', async () => {
       let callbackInvoked = false;
       const fileName = 'auto-edit-after-switch.txt';
-      const fakeServer = await startFakeToolServerOnMatch(
+      const fakeServer = await startFakeToolServer(
         `Create ${fileName}`,
         'write_file',
         { file_path: helper.getPath(fileName), content: 'auto-edit works' },
@@ -558,7 +568,7 @@ describe('Permission Control (E2E)', () => {
         prompt: generator,
         options: {
           ...SHARED_TEST_OPTIONS,
-          ...fakeModelOptions(fakeServer.baseUrl),
+          ...fakeModelOptions(fakeServer.baseUrl, helper),
           cwd: testDir,
           permissionMode: 'default',
           coreTools: ['write_file'],
@@ -681,30 +691,44 @@ describe('Permission Control (E2E)', () => {
       }> = [];
       const firstFile = 'first.txt';
       const secondFile = 'second.txt';
-      const fakeServer = await startFakeOpenAIServer(({ requestIndex }) => {
-        // Turn 1 consumes requests 0 (tool call) and 1 ('Done.'), so turn 2's
-        // tool call is request 2. Absolute indexing is deliberate: the fake
-        // server never retries, so an extra model request means the protocol
-        // sequence changed and this test should fail loudly rather than drift.
-        if (requestIndex === 0) {
-          return {
-            toolCalls: [
-              fakeToolCall('write_file', {
-                file_path: helper.getPath(firstFile),
-                content: 'first',
-              }),
-            ],
-          };
-        }
-        if (requestIndex === 2) {
-          return {
-            toolCalls: [
-              fakeToolCall('write_file', {
-                file_path: helper.getPath(secondFile),
-                content: 'second',
-              }),
-            ],
-          };
+      let servedFirstTurn = false;
+      let servedSecondTurn = false;
+      const fakeServer = await startFakeOpenAIServer(({ body }) => {
+        // Serve each turn's tool call on the first streaming request whose
+        // user messages contain that turn's prompt. Matching on the prompt
+        // (not the request index) keeps the sequence correct when non-turn
+        // requests — e.g. runner state leaking a side query — reach the fake
+        // server before the main request.
+        if (body['stream'] === true) {
+          if (
+            !servedFirstTurn &&
+            userMessageContains(body, `Create ${firstFile}.`)
+          ) {
+            servedFirstTurn = true;
+            return {
+              toolCalls: [
+                fakeToolCall('write_file', {
+                  file_path: helper.getPath(firstFile),
+                  content: 'first',
+                }),
+              ],
+            };
+          }
+          if (
+            servedFirstTurn &&
+            !servedSecondTurn &&
+            userMessageContains(body, `Create ${secondFile}.`)
+          ) {
+            servedSecondTurn = true;
+            return {
+              toolCalls: [
+                fakeToolCall('write_file', {
+                  file_path: helper.getPath(secondFile),
+                  content: 'second',
+                }),
+              ],
+            };
+          }
         }
         return { content: 'Done.' };
       }, FAKE_SERVER_OPTIONS);
@@ -720,7 +744,7 @@ describe('Permission Control (E2E)', () => {
         prompt: generator,
         options: {
           ...SHARED_TEST_OPTIONS,
-          ...fakeModelOptions(fakeServer.baseUrl),
+          ...fakeModelOptions(fakeServer.baseUrl, helper),
           permissionMode: 'default',
           cwd: testDir,
           coreTools: ['write_file'],
@@ -809,15 +833,19 @@ describe('Permission Control (E2E)', () => {
         'should auto-deny tools requiring confirmation without canUseTool callback',
         async () => {
           const fileName = 'test-default-deny.txt';
-          const fakeServer = await startFakeToolServer('write_file', {
-            file_path: helper.getPath(fileName),
-            content: 'hello',
-          });
+          const fakeServer = await startFakeToolServer(
+            `Create ${fileName}.`,
+            'write_file',
+            {
+              file_path: helper.getPath(fileName),
+              content: 'hello',
+            },
+          );
           const q = query({
             prompt: `Create ${fileName}.`,
             options: {
               ...SHARED_TEST_OPTIONS,
-              ...fakeModelOptions(fakeServer.baseUrl),
+              ...fakeModelOptions(fakeServer.baseUrl, helper),
               permissionMode: 'default',
               cwd: testDir,
               coreTools: ['write_file'],
@@ -849,15 +877,19 @@ describe('Permission Control (E2E)', () => {
         async () => {
           const fileName = 'read-only-test.txt';
           await helper.createFile(fileName, 'content for read-only test');
-          const fakeServer = await startFakeToolServer('read_file', {
-            file_path: helper.getPath(fileName),
-          });
+          const fakeServer = await startFakeToolServer(
+            `Read ${fileName}.`,
+            'read_file',
+            {
+              file_path: helper.getPath(fileName),
+            },
+          );
 
           const q = query({
             prompt: `Read ${fileName}.`,
             options: {
               ...SHARED_TEST_OPTIONS,
-              ...fakeModelOptions(fakeServer.baseUrl),
+              ...fakeModelOptions(fakeServer.baseUrl, helper),
               permissionMode: 'default',
               cwd: testDir,
               coreTools: ['read_file'],
@@ -886,16 +918,20 @@ describe('Permission Control (E2E)', () => {
         async () => {
           let callbackInvoked = false;
           const fileName = 'test-yolo-no-callback.txt';
-          const fakeServer = await startFakeToolServer('write_file', {
-            file_path: helper.getPath(fileName),
-            content: 'yolo',
-          });
+          const fakeServer = await startFakeToolServer(
+            `Create ${fileName}.`,
+            'write_file',
+            {
+              file_path: helper.getPath(fileName),
+              content: 'yolo',
+            },
+          );
 
           const q = query({
             prompt: `Create ${fileName}.`,
             options: {
               ...SHARED_TEST_OPTIONS,
-              ...fakeModelOptions(fakeServer.baseUrl),
+              ...fakeModelOptions(fakeServer.baseUrl, helper),
               permissionMode: 'yolo',
               cwd: testDir,
               coreTools: ['write_file'],
@@ -929,15 +965,19 @@ describe('Permission Control (E2E)', () => {
       it(
         'should execute shell commands without confirmation in yolo mode',
         async () => {
-          const fakeServer = await startFakeToolServer('run_shell_command', {
-            command: 'echo "dangerous operation"',
-          });
+          const fakeServer = await startFakeToolServer(
+            'Run command: echo "dangerous operation"',
+            'run_shell_command',
+            {
+              command: 'echo "dangerous operation"',
+            },
+          );
 
           const q = query({
             prompt: 'Run command: echo "dangerous operation"',
             options: {
               ...SHARED_TEST_OPTIONS,
-              ...fakeModelOptions(fakeServer.baseUrl),
+              ...fakeModelOptions(fakeServer.baseUrl, helper),
               permissionMode: 'yolo',
               cwd: testDir,
               coreTools: ['run_shell_command'],
@@ -969,7 +1009,7 @@ describe('Permission Control (E2E)', () => {
             prompt: 'List files in the current directory',
             options: {
               ...SHARED_TEST_OPTIONS,
-              ...fakeModelOptions(fakeServer.baseUrl),
+              ...fakeModelOptions(fakeServer.baseUrl, helper),
               permissionMode: 'plan',
               cwd: testDir,
             },
@@ -996,16 +1036,20 @@ describe('Permission Control (E2E)', () => {
         'should block write tools in plan mode',
         async () => {
           const fileName = 'test-plan-write.txt';
-          const fakeServer = await startFakeToolServer('write_file', {
-            file_path: helper.getPath(fileName),
-            content: 'blocked',
-          });
+          const fakeServer = await startFakeToolServer(
+            `Create ${fileName}.`,
+            'write_file',
+            {
+              file_path: helper.getPath(fileName),
+              content: 'blocked',
+            },
+          );
 
           const q = query({
             prompt: `Create ${fileName}.`,
             options: {
               ...SHARED_TEST_OPTIONS,
-              ...fakeModelOptions(fakeServer.baseUrl),
+              ...fakeModelOptions(fakeServer.baseUrl, helper),
               permissionMode: 'plan',
               cwd: testDir,
               coreTools: ['write_file'],
@@ -1046,13 +1090,24 @@ describe('Permission Control (E2E)', () => {
           const filePath = helper.getPath(fileName);
           // Read the file first so prior-read enforcement passes and the
           // plan-mode policy is the gate that actually blocks the edit.
-          const fakeServer = await startFakeOpenAIServer(({ requestIndex }) => {
-            if (requestIndex === 0) {
-              return {
-                toolCalls: [fakeToolCall('read_file', { file_path: filePath })],
-              };
-            }
-            if (requestIndex === 1) {
+          let servedPlanSteps = 0;
+          const fakeServer = await startFakeOpenAIServer(({ body }) => {
+            // Serve read then edit on the first two streaming requests whose
+            // user messages contain the prompt (prompt matching, not request
+            // index, so non-turn requests cannot desync the sequence).
+            if (
+              servedPlanSteps < 2 &&
+              body['stream'] === true &&
+              userMessageContains(body, `Edit ${fileName}.`)
+            ) {
+              servedPlanSteps += 1;
+              if (servedPlanSteps === 1) {
+                return {
+                  toolCalls: [
+                    fakeToolCall('read_file', { file_path: filePath }),
+                  ],
+                };
+              }
               return {
                 toolCalls: [
                   fakeToolCall('edit', {
@@ -1070,7 +1125,7 @@ describe('Permission Control (E2E)', () => {
             prompt: `Edit ${fileName}.`,
             options: {
               ...SHARED_TEST_OPTIONS,
-              ...fakeModelOptions(fakeServer.baseUrl),
+              ...fakeModelOptions(fakeServer.baseUrl, helper),
               permissionMode: 'plan',
               cwd: testDir,
               coreTools: ['read_file', 'edit'],
@@ -1108,15 +1163,19 @@ describe('Permission Control (E2E)', () => {
       it(
         'should block run_shell_command in plan mode',
         async () => {
-          const fakeServer = await startFakeToolServer('run_shell_command', {
-            command: 'touch plan-shell-blocked.txt',
-          });
+          const fakeServer = await startFakeToolServer(
+            'Run touch plan-shell-blocked.txt.',
+            'run_shell_command',
+            {
+              command: 'touch plan-shell-blocked.txt',
+            },
+          );
 
           const q = query({
             prompt: 'Run touch plan-shell-blocked.txt.',
             options: {
               ...SHARED_TEST_OPTIONS,
-              ...fakeModelOptions(fakeServer.baseUrl),
+              ...fakeModelOptions(fakeServer.baseUrl, helper),
               permissionMode: 'plan',
               cwd: testDir,
               coreTools: ['run_shell_command'],
@@ -1155,15 +1214,19 @@ describe('Permission Control (E2E)', () => {
           let callbackInvoked = false;
           const fileName = 'test-plan-read.txt';
           await helper.createFile(fileName, 'plan read');
-          const fakeServer = await startFakeToolServer('read_file', {
-            file_path: helper.getPath(fileName),
-          });
+          const fakeServer = await startFakeToolServer(
+            `Read ${fileName}.`,
+            'read_file',
+            {
+              file_path: helper.getPath(fileName),
+            },
+          );
 
           const q = query({
             prompt: `Read ${fileName}.`,
             options: {
               ...SHARED_TEST_OPTIONS,
-              ...fakeModelOptions(fakeServer.baseUrl),
+              ...fakeModelOptions(fakeServer.baseUrl, helper),
               permissionMode: 'plan',
               cwd: testDir,
               coreTools: ['read_file'],
@@ -1200,16 +1263,20 @@ describe('Permission Control (E2E)', () => {
         async () => {
           let callbackInvoked = false;
           const fileName = 'test-auto-edit-no-callback.txt';
-          const fakeServer = await startFakeToolServer('write_file', {
-            file_path: helper.getPath(fileName),
-            content: 'auto-edit callback test',
-          });
+          const fakeServer = await startFakeToolServer(
+            `Create ${fileName}.`,
+            'write_file',
+            {
+              file_path: helper.getPath(fileName),
+              content: 'auto-edit callback test',
+            },
+          );
 
           const q = query({
             prompt: `Create ${fileName}.`,
             options: {
               ...SHARED_TEST_OPTIONS,
-              ...fakeModelOptions(fakeServer.baseUrl),
+              ...fakeModelOptions(fakeServer.baseUrl, helper),
               permissionMode: 'auto-edit',
               cwd: testDir,
               coreTools: ['write_file'],
@@ -1250,15 +1317,19 @@ describe('Permission Control (E2E)', () => {
             fileName,
             'This is a test file for read-only tool verification.',
           );
-          const fakeServer = await startFakeToolServer('read_file', {
-            file_path: helper.getPath(fileName),
-          });
+          const fakeServer = await startFakeToolServer(
+            `Read ${fileName}.`,
+            'read_file',
+            {
+              file_path: helper.getPath(fileName),
+            },
+          );
 
           const q = query({
             prompt: `Read ${fileName}.`,
             options: {
               ...SHARED_TEST_OPTIONS,
-              ...fakeModelOptions(fakeServer.baseUrl),
+              ...fakeModelOptions(fakeServer.baseUrl, helper),
               cwd: testDir,
               permissionMode: 'auto-edit',
               coreTools: ['read_file'],
