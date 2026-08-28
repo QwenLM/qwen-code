@@ -1117,6 +1117,7 @@ export interface BridgeDaemonStatusLimits {
   } | null;
   channelIdleTimeoutMs: number;
   sessionIdleTimeoutMs: number;
+  sessionPromptSettledCloseGraceMs: number;
 }
 
 export interface BridgeDaemonSessionDiagnostic {

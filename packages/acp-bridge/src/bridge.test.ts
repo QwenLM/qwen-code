@@ -33352,3 +33352,107 @@ describe('createAcpSessionBridge — child-resource refresh', () => {
     }
   });
 });
+
+describe('DAEMON-005: sessionPromptSettledCloseGraceMs — deferred prompt-settled close', () => {
+  it('keeps session alive during grace window after prompt settles with no subscriber', async () => {
+    vi.useFakeTimers();
+    try {
+      const handle = makeChannel();
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        sessionPromptSettledCloseGraceMs: 30_000,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      await bridge.sendPrompt(session.sessionId, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'hi' }],
+      });
+
+      // Client detaches after receiving the result
+      await bridge.detachClient(session.sessionId, session.clientId);
+      expect(bridge.sessionCount).toBe(1);
+
+      // Advance to just before the grace window ends — session must survive
+      await vi.advanceTimersByTimeAsync(29_000);
+      expect(bridge.sessionCount).toBe(1);
+
+      // Advance past the grace window — session should now close
+      await vi.advanceTimersByTimeAsync(2_000);
+      await vi.waitFor(() => {
+        expect(bridge.sessionCount).toBe(0);
+      });
+
+      await bridge.shutdown();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('cancels deferred close when a poll-based client re-subscribes within grace window', async () => {
+    vi.useFakeTimers();
+    try {
+      const handle = makeChannel();
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        sessionPromptSettledCloseGraceMs: 30_000,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      await bridge.sendPrompt(session.sessionId, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'hi' }],
+      });
+
+      // Client detaches — starts the grace timer
+      await bridge.detachClient(session.sessionId, session.clientId);
+      expect(bridge.sessionCount).toBe(1);
+
+      // Advance into the grace window
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(bridge.sessionCount).toBe(1);
+
+      // Poll client reconnects via subscribeEvents — must cancel the timer
+      const abort = new AbortController();
+      bridge.subscribeEvents(session.sessionId, { signal: abort.signal });
+
+      // Advance well past the original deadline — session must still be alive
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(bridge.sessionCount).toBe(1);
+
+      abort.abort();
+      await bridge.shutdown();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('closes session immediately after prompt settles when grace is 0 (default)', async () => {
+    vi.useFakeTimers();
+    try {
+      const handle = makeChannel();
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        // default: 0 — original behavior preserved
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      await bridge.sendPrompt(session.sessionId, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'hi' }],
+      });
+
+      // Detach the only client
+      await bridge.detachClient(session.sessionId, session.clientId);
+
+      // With grace=0 the session closes synchronously on detach (no timer)
+      await vi.waitFor(() => {
+        expect(bridge.sessionCount).toBe(0);
+      });
+
+      await bridge.shutdown();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});

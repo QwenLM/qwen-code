@@ -1273,6 +1273,19 @@ interface SessionEntry {
    * Undefined until the first running turn settles in this bridge.
    */
   lastTurnEndedAtMs?: number;
+  /**
+   * DAEMON-005: timestamp (Date.now()) when the last prompt settled with no
+   * active subscriber attached, or `null` when no deferred close is pending.
+   * Used by `entryIsAutoCloseCandidate` to hold the session open during the
+   * `sessionPromptSettledCloseGraceMs` window so poll-based clients can
+   * reconnect without triggering a session-rebuild epoch_reset resync.
+   */
+  promptSettledAt: number | null;
+  /** Timer handle for the deferred `maybeCloseIdleSession` scheduled by
+   * `schedulePromptSettledClose`. `undefined` when grace is 0 or no close
+   * is pending. Cancelled by `clearPromptSettledClose` when a subscriber
+   * reconnects or the session is explicitly closed / killed. */
+  promptSettledCloseTimer: ReturnType<typeof setTimeout> | undefined;
 }
 
 function isServeDebugLoggingEnabled(): boolean {
@@ -2529,6 +2542,10 @@ const DEFAULT_PERMISSION_TIMEOUT_MS = 0;
 const DEFAULT_MAX_PENDING_PER_SESSION = 64;
 const DEFAULT_SESSION_REAP_INTERVAL_MS = 60_000;
 const DEFAULT_SESSION_IDLE_TIMEOUT_MS = 30 * 60_000;
+/** Default grace period for the prompt-settled close deferral. 0 = disabled
+ * (original behavior). Poll-based CLI callers opt in via BridgeOptions or the
+ * `qwen serve --session-prompt-settled-close-grace-ms` flag. */
+const DEFAULT_SESSION_PROMPT_SETTLED_CLOSE_GRACE_MS = 0;
 
 export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
   let liveScreenContextCaptureHandler:
@@ -2832,6 +2849,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     opts.sessionIdleTimeoutMs,
     DEFAULT_SESSION_IDLE_TIMEOUT_MS,
   );
+  const sessionPromptSettledCloseGraceMs = resolvePositiveFiniteMs(
+    opts.sessionPromptSettledCloseGraceMs,
+    DEFAULT_SESSION_PROMPT_SETTLED_CLOSE_GRACE_MS,
+  );
   let sessionReaper: ReturnType<typeof setInterval> | undefined;
 
   // Tracks the most recent "activity" event for idle-detection by
@@ -2968,6 +2989,16 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     ) {
       return false;
     }
+    // DAEMON-005: hold the session open during the prompt-settled grace
+    // window so a poll-based client can reconnect without forcing a
+    // session-rebuild epoch_reset resync.
+    if (
+      entry.promptSettledAt !== null &&
+      sessionPromptSettledCloseGraceMs > 0 &&
+      Date.now() - entry.promptSettledAt < sessionPromptSettledCloseGraceMs
+    ) {
+      return false;
+    }
     return !childReportsHeldWork(entry);
   }
 
@@ -2981,6 +3012,45 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
    */
   function isClosingOrAuthorizingClose(entry: SessionEntry): boolean {
     return entry.closing || entry.activeWorkCloseInFlight;
+  }
+
+  /**
+   * DAEMON-005: schedule (or immediately fire) the prompt-settled auto-close.
+   *
+   * Called from `result.finally` when a prompt settles with no subscriber.
+   * When `sessionPromptSettledCloseGraceMs > 0`, stamps `promptSettledAt` and
+   * schedules a deferred `maybeCloseIdleSession` so a reconnecting poll-based
+   * client has time to cancel the timer via `subscribeEvents` →
+   * `clearPromptSettledClose`. When grace is 0, fires immediately (original
+   * behavior).
+   */
+  function schedulePromptSettledClose(entry: SessionEntry): void {
+    entry.promptSettledAt = Date.now();
+    if (sessionPromptSettledCloseGraceMs <= 0) {
+      entry.promptSettledAt = null;
+      void maybeCloseIdleSession(entry, 'prompt_settled');
+      return;
+    }
+    entry.promptSettledCloseTimer = setTimeout(() => {
+      entry.promptSettledCloseTimer = undefined;
+      entry.promptSettledAt = null;
+      void maybeCloseIdleSession(entry, 'prompt_settled');
+    }, sessionPromptSettledCloseGraceMs);
+    // Node timer must not prevent process exit.
+    entry.promptSettledCloseTimer.unref?.();
+  }
+
+  /**
+   * DAEMON-005: cancel any pending prompt-settled deferred close.
+   * Called when a subscriber reconnects (clearing the grace hold) or when
+   * the session is explicitly closed / killed (avoiding a stale fire).
+   */
+  function clearPromptSettledClose(entry: SessionEntry): void {
+    if (entry.promptSettledCloseTimer !== undefined) {
+      clearTimeout(entry.promptSettledCloseTimer);
+      entry.promptSettledCloseTimer = undefined;
+    }
+    entry.promptSettledAt = null;
   }
 
   /**
@@ -6066,6 +6136,8 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       childHoldsAt: null,
       activeWorkCloseInFlight: false,
       retryAllowed: false,
+      promptSettledAt: null,
+      promptSettledCloseTimer: undefined,
     };
     ci.sessionIds.add(entry.sessionId);
     byId.set(entry.sessionId, entry);
@@ -7626,6 +7698,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       originatorClientId = resolveTrustedClientId(entry, context.clientId);
     }
     entry.closing = true;
+    clearPromptSettledClose(entry);
     const reason = closeOpts?.reason ?? 'client_close';
     writeStderrLine(
       `qwen serve: closing session ${JSON.stringify(sessionId)}` +
@@ -7949,6 +8022,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
               : null,
           channelIdleTimeoutMs: resolvedChannelIdleTimeoutMs(),
           sessionIdleTimeoutMs,
+          sessionPromptSettledCloseGraceMs,
         },
         sessionCount: byId.size,
         pendingPermissionCount: permissionMediator.pendingCount,
@@ -9138,7 +9212,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           // exact entry is still registered — after killSession's eager
           // delete the same persisted id can be re-registered as a NEW
           // entry by `session/load`, which a late settle must not close.
-          void maybeCloseIdleSession(entry, 'prompt_settled');
+          // schedulePromptSettledClose defers the close by
+          // sessionPromptSettledCloseGraceMs (default 0 = immediate) so
+          // poll-based clients can reconnect without a session rebuild.
+          schedulePromptSettledClose(entry);
         })
         .catch(() => {});
       return result;
@@ -9244,6 +9321,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     subscribeEvents(sessionId, subOpts) {
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
+      // DAEMON-005: a reconnecting poll-based client cancels the deferred
+      // prompt-settled close — the session should stay alive.
+      clearPromptSettledClose(entry);
       const raw = entry.events.subscribe(subOpts);
       if (!subOpts?.snapshot) return raw;
 
@@ -12439,6 +12519,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         return true;
       }
       entry.closing = true;
+      clearPromptSettledClose(entry);
       const ci = channelInfoForEntry(entry);
       if (!ci) {
         writeStderrLine(

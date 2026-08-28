@@ -104,13 +104,14 @@ const BASE_BRIDGE_SNAPSHOT: BridgeDaemonStatusSnapshot = {
   limits: {
     maxSessions: 20,
     maxPendingPromptsPerSession: 5,
-    eventRingSize: 8000,
+    eventRingSize: 32_000,
     compactedReplayMaxBytes: 4 * 1024 * 1024,
     maxJournalEvents: 10_000,
     maxJournalBytes: 8 * 1024 * 1024,
     journalGrowth: null,
     channelIdleTimeoutMs: 0,
     sessionIdleTimeoutMs: 1_800_000,
+    sessionPromptSettledCloseGraceMs: 0,
   },
   sessionCount: 0,
   pendingPermissionCount: 0,
@@ -3957,7 +3958,10 @@ describe('runQwenServe session reaper timeout validation', () => {
   }
 
   async function runWithReaperOption(
-    optionName: 'sessionReapIntervalMs' | 'sessionIdleTimeoutMs',
+    optionName:
+      | 'sessionReapIntervalMs'
+      | 'sessionIdleTimeoutMs'
+      | 'sessionPromptSettledCloseGraceMs',
     value: number,
   ) {
     tmpDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'qws-rt-')));
@@ -3992,6 +3996,10 @@ describe('runQwenServe session reaper timeout validation', () => {
     ['sessionIdleTimeoutMs', 1.5],
     ['sessionIdleTimeoutMs', Number.NaN],
     ['sessionIdleTimeoutMs', Number.POSITIVE_INFINITY],
+    ['sessionPromptSettledCloseGraceMs', -1],
+    ['sessionPromptSettledCloseGraceMs', 1.5],
+    ['sessionPromptSettledCloseGraceMs', Number.NaN],
+    ['sessionPromptSettledCloseGraceMs', Number.POSITIVE_INFINITY],
   ] as const)('rejects invalid %s=%s', async (optionName, value) => {
     await expect(runWithReaperOption(optionName, value)).rejects.toThrow(
       optionName,
@@ -4001,6 +4009,7 @@ describe('runQwenServe session reaper timeout validation', () => {
   it.each([
     ['sessionReapIntervalMs', 0],
     ['sessionIdleTimeoutMs', 0],
+    ['sessionPromptSettledCloseGraceMs', 0],
   ] as const)(
     'keeps %s=0 as the disabled sentinel',
     async (optionName, value) => {
@@ -8012,7 +8021,7 @@ describe('runQwenServe runtime startup failures', () => {
           maxSessions: 1,
           maxPendingPromptsPerSession: 5,
           listenerMaxConnections: 256,
-          eventRingSize: 8000,
+          eventRingSize: 32_000,
           compactedReplayMaxBytes: 4 * 1024 * 1024,
           maxJournalEvents: 10_000,
           maxJournalBytes: 8 * 1024 * 1024,
@@ -8020,6 +8029,7 @@ describe('runQwenServe runtime startup failures', () => {
           writerIdleTimeoutMs: null,
           channelIdleTimeoutMs: 0,
           sessionIdleTimeoutMs: 1_800_000,
+          sessionPromptSettledCloseGraceMs: 0,
           acpConnectionCap: null,
           memory: expect.objectContaining({ enforced: false }),
         },
