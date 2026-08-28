@@ -139,3 +139,6 @@ tmp/
 # Auto-generated computer-use marker can also appear under nested packages.
 **/.qwen/computer-use/
 .playwright-mcp/
+
+# Brand build workspaces (created by the desktop-brand-builder skill)
+brand-builds/

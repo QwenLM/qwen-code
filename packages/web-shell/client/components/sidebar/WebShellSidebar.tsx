@@ -274,7 +274,9 @@ export interface WebShellSidebarSessionActionsOptions {
   /** Session action items to show. Defaults to all. */
   items?: readonly WebShellSidebarSessionActionItem[];
   /**
-   * Which items appear as inline buttons (on hover). Defaults to ['pin'].
+   * Which items appear as inline buttons (on hover). Defaults to ['pin'];
+   * archive stays in the dropdown so a stray click on the hover slot cannot
+   * archive a session.
    * Only items that also pass their built-in visibility condition are rendered.
    * Only items with working inline handlers are accepted
    * (details/group/archive are dropdown-only).
@@ -366,10 +368,12 @@ interface WebShellSidebarProps {
     sessionId: string,
     displayName: string,
   ) => void;
+  onSessionsDeleted?: (sessionIds: string[]) => void;
   onError: (error: unknown, fallback: string) => void;
   theme: WebShellTheme;
   onThemeChange: (theme: WebShellTheme) => void;
   mobileOpen?: boolean;
+  onMobileClose?: () => void;
   /**
    * Phase 4: workspace cwd picked for the next new session (undefined =
    * primary). Only meaningful on multi-workspace daemons.
@@ -392,6 +396,8 @@ interface WebShellSidebarProps {
   lockedWorkspace?: WebShellSidebarLockedWorkspace;
   branding?: false | WebShellSidebarBranding;
   primaryNav?: WebShellSidebarPrimaryNavOptions;
+  /** Whether to show the Tasks/Channels session-source switch. Defaults to true. */
+  showSessionSourceSwitch?: boolean;
   /** Whether to hide the "Projects" header row (with search and add workspace). Defaults to false (shown). */
   hideProjectHeader?: boolean;
   /** Customize which action buttons appear on session rows. */
@@ -828,10 +834,12 @@ export function WebShellSidebar({
   onLoadSession,
   onSelectCurrentSession,
   onSessionRenameConfirmed,
+  onSessionsDeleted,
   onError,
   theme,
   onThemeChange,
   mobileOpen,
+  onMobileClose,
   selectedWorkspaceCwd,
   onSelectWorkspace,
   onOpenGitDiff,
@@ -842,6 +850,7 @@ export function WebShellSidebar({
   lockedWorkspace: lockedWorkspaceOptions,
   branding,
   primaryNav: primaryNavOptions,
+  showSessionSourceSwitch = true,
   hideProjectHeader,
   sessionActions: sessionActionsOptions,
   footer,
@@ -890,8 +899,15 @@ export function WebShellSidebar({
   );
   const [sessionSource, setSessionSource] =
     useState<SidebarSessionSource>('default');
+  // Reset before commit so effects that key bookkeeping by the raw source
+  // cannot observe a hidden switch with channel state and default catalogs.
+  if (!showSessionSourceSwitch && sessionSource !== 'default') {
+    setSessionSource('default');
+  }
   const selectedSessionSource = sourceMetadataEnabled
-    ? sessionSource
+    ? showSessionSourceSwitch
+      ? sessionSource
+      : 'default'
     : undefined;
   const channelGroupingEnabled = Boolean(
     selectedSessionSource === 'channel' &&
@@ -1785,6 +1801,7 @@ export function WebShellSidebar({
     (session: DaemonSessionSummary) =>
       sessionActionItems.has('archive') &&
       !isCurrentSession(session) &&
+      !session.hasActivePrompt &&
       canMutateSessionArchive(session),
     [canMutateSessionArchive, isCurrentSession, sessionActionItems],
   );
@@ -1831,6 +1848,8 @@ export function WebShellSidebar({
   const footerTight = !collapsed && sidebarWidth < SIDEBAR_FOOTER_TIGHT_WIDTH;
   const sidebarStyle = {
     '--web-shell-sidebar-width': `${sidebarWidth}px`,
+    '--web-shell-sidebar-min-width': `${SIDEBAR_MIN_WIDTH}px`,
+    '--web-shell-sidebar-max-width': `${getSidebarMaxWidth()}px`,
   } as CSSProperties;
   const newSessionDisabled = creatingSession;
 
@@ -2792,6 +2811,7 @@ export function WebShellSidebar({
     setSessionBusy(sessionId, true, deleteCandidate.workspaceCwd);
     removeSession(sessionId)
       .then(() => {
+        onSessionsDeleted?.([sessionId]);
         bumpWorkspaceReload();
       })
       .catch((err: unknown) => onError(err, t('sidebar.deleteFailed')))
@@ -2811,6 +2831,7 @@ export function WebShellSidebar({
     deleteSession,
     getIdentityForSession,
     onError,
+    onSessionsDeleted,
     primaryWorkspaceCwd,
     resolveSessionWorkspaceScope,
     sessionCatalogController,
@@ -3675,7 +3696,7 @@ export function WebShellSidebar({
 
   const handleResizePointerDown = useCallback(
     (event: ReactPointerEvent<HTMLDivElement>) => {
-      if (collapsed) return;
+      if (collapsed || mobileOpen) return;
       event.preventDefault();
       resizeTeardownRef.current?.(true);
       setIsResizing(true);
@@ -3747,7 +3768,7 @@ export function WebShellSidebar({
         once: true,
       });
     },
-    [collapsed, onCollapsedChange, sidebarWidth],
+    [collapsed, mobileOpen, onCollapsedChange, sidebarWidth],
   );
 
   const deleteCandidateLabel = deleteCandidate
@@ -3965,12 +3986,21 @@ export function WebShellSidebar({
       }
 
       const isCurrent = isCurrentSession(session);
+      // Archiving closes the live session daemon-side, which would end the
+      // running turn; keep the action visible but inert while it runs.
+      const running = Boolean(session.hasActivePrompt);
       const needsUserInput =
         !session.isWaitingForPermission && session.isWaitingForUserQuestion;
-      const attentionLabel = session.isWaitingForPermission
-        ? t('sidebar.waitingForApproval')
+      const attention = session.isWaitingForPermission
+        ? {
+            full: t('sidebar.waitingForApproval'),
+            short: t('sidebar.waitingForApprovalShort'),
+          }
         : needsUserInput
-          ? t('sidebar.userInputNeeded')
+          ? {
+              full: t('sidebar.userInputNeeded'),
+              short: t('sidebar.userInputNeededShort'),
+            }
           : null;
       const showPin = canOrganizeSession(session, 'pin');
       const showArchive =
@@ -4069,15 +4099,15 @@ export function WebShellSidebar({
                     : undefined
                 }
               >
-                {attentionLabel && (
+                {attention && (
                   <span
                     className={cx(
                       styles.sessionAttention,
                       needsUserInput && styles.sessionAttentionUserInput,
                     )}
-                    aria-label={attentionLabel}
+                    aria-label={attention.full}
                   >
-                    {attentionLabel}
+                    {attention.short}
                   </span>
                 )}
                 {session.hasActivePrompt ? (
@@ -4085,7 +4115,7 @@ export function WebShellSidebar({
                     className={styles.sessionLoading}
                     aria-label={t('sidebar.running')}
                   />
-                ) : !attentionLabel && gitIcon ? (
+                ) : !attention && gitIcon ? (
                   <span className={styles.sessionGitIcon}>{gitIcon}</span>
                 ) : null}
                 {(showPin ||
@@ -4219,11 +4249,13 @@ export function WebShellSidebar({
                             )}
                             {showArchive && (
                               <DropdownMenuItem
-                                disabled={busy || isCurrent}
+                                disabled={busy || isCurrent || running}
                                 title={
                                   isCurrent
                                     ? t('sidebar.archiveCurrentDisabled')
-                                    : undefined
+                                    : running
+                                      ? t('sidebar.archiveRunningDisabled')
+                                      : undefined
                                 }
                                 onSelect={() => handleArchive(session)}
                               >
@@ -5075,7 +5107,7 @@ export function WebShellSidebar({
             onOpenChange={setCollapsedSessionsOpen}
             isCloseBlocked={isCollapsedCloseBlocked}
           >
-            {sourceMetadataEnabled && (
+            {showSessionSourceSwitch && sourceMetadataEnabled && (
               <Tabs
                 className="px-2 pb-2"
                 value={sessionSource}
@@ -5456,7 +5488,7 @@ export function WebShellSidebar({
           </SidebarSessionSurface>
         </div>
 
-        {footer !== false && (
+        {(footer !== false || mobileOpen) && (
           <div
             className={cx(
               styles.footer,
@@ -5560,19 +5592,27 @@ export function WebShellSidebar({
                   <ActivityIcon size={16} strokeWidth={1.2} />
                 </button>
               )}
-              {!mobileOpen && footerItems.has('collapse') && (
+              {(mobileOpen || footerItems.has('collapse')) && (
                 <button
                   className={styles.collapseButton}
                   type="button"
                   title={
-                    collapsed ? t('sidebar.expand') : t('sidebar.collapse')
+                    mobileOpen || !collapsed
+                      ? t('sidebar.collapse')
+                      : t('sidebar.expand')
                   }
                   aria-label={
-                    collapsed ? t('sidebar.expand') : t('sidebar.collapse')
+                    mobileOpen || !collapsed
+                      ? t('sidebar.collapse')
+                      : t('sidebar.expand')
                   }
-                  onClick={() => onCollapsedChange(!collapsed)}
+                  onClick={() =>
+                    mobileOpen
+                      ? onMobileClose?.()
+                      : onCollapsedChange(!collapsed)
+                  }
                 >
-                  {collapsed ? (
+                  {collapsed && !mobileOpen ? (
                     <PanelLeftOpenIcon size={16} strokeWidth={1.2} />
                   ) : (
                     <PanelLeftCloseIcon size={16} strokeWidth={1.2} />

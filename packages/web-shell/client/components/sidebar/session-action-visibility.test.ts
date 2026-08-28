@@ -72,11 +72,11 @@ function computeVisibility(
 
 describe('session action visibility matrix', () => {
   describe('defaults (no consumer config)', () => {
-    it('shows details on hover, pin inline, and mutations in the dropdown', () => {
+    it('shows details on hover, pin inline, and archive plus mutations in the dropdown', () => {
       const { inline, dropdown, hover, showDropdownTrigger } =
         computeVisibility(DEFAULT_ITEMS, DEFAULT_INLINE_ITEMS);
 
-      expect([...inline]).toEqual(['pin']);
+      expect([...inline].sort()).toEqual(['pin']);
       expect([...dropdown].sort()).toEqual([
         'archive',
         'delete',

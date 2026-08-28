@@ -32,4 +32,58 @@ describe('e2e workflow', () => {
     expect(group).toContain('github.event_name');
     expect(group).toContain('github.head_ref || github.ref_name');
   });
+
+  describe('sandbox image build retry', () => {
+    // Run 33139344576 (issue #10355) died at 'Build the sandbox image' on one
+    // pool runner while the identical build passed on two sibling runners of
+    // the same run, and the re-run passed on another runner. The bounded retry
+    // keeps one transient environment failure from exiting the shard red.
+    const steps = yml.jobs['e2e-test-linux'].steps;
+    const buildStep = steps.find(
+      (step) => step.name === 'Build the sandbox image',
+    );
+    const retryStep = steps.find(
+      (step) => step.name === 'Build the sandbox image (retry)',
+    );
+
+    it('keeps a failed first attempt from pre-failing the job', () => {
+      // Without continue-on-error a successful retry would leave the shard red
+      // (GitHub computes the job conclusion from every step conclusion).
+      expect(buildStep['continue-on-error']).toBe(true);
+    });
+
+    it('pins the first build step id the retry gate references', () => {
+      // steps.build-sandbox.outcome only resolves when this exact id exists;
+      // renaming the step would silently disable the retry.
+      expect(buildStep.id).toBe('build-sandbox');
+    });
+
+    it('gates the retry on the first attempt outcome only', () => {
+      expect(retryStep.if).toContain(
+        "steps.build-sandbox.outcome == 'failure'",
+      );
+      // failure() would be false once continue-on-error absorbs the first
+      // attempt, silently skipping the retry.
+      expect(retryStep.if).not.toContain('failure()');
+    });
+
+    it('lets a failed retry fail the job', () => {
+      // continue-on-error on the retry would absorb a genuine build failure
+      // and hand the test step a sandbox image that was never built.
+      expect(retryStep['continue-on-error']).toBeUndefined();
+    });
+
+    it('rebuilds with the same script and the same skip flag', () => {
+      expect(buildStep.run).toContain('npm run build:sandbox -- -s');
+      expect(retryStep.run).toContain('npm run build:sandbox -- -s');
+    });
+
+    it('keeps the docker leg env on the retry', () => {
+      // Without QWEN_SANDBOX, build_sandbox.js cannot resolve the container
+      // command on Linux; without VERBOSE the retry's build log goes to
+      // /dev/null and a second failure is undiagnosable.
+      expect(retryStep.env.QWEN_SANDBOX).toBe('docker');
+      expect(retryStep.env.VERBOSE).toBe('true');
+    });
+  });
 });

@@ -319,6 +319,25 @@ describe('the review footer and the regex that strips it', () => {
       expect(stripForUnattributedPost(quoted)).toBe(quoted);
     });
 
+    it("the full chain leaves comment grammar alone — neutralizing it is the body exits' job", () => {
+      // The chain is shared with submit's inline-comment transform, whose
+      // pinned contract keeps a quoted marker MENTION verbatim (`posts
+      // <!-- qwen-review suggestion --> verbatim` is text, not a bare
+      // marker), and with the ledger's id read, which steps over a
+      // leading comment as render-nothing residue. Weaving the grammar
+      // strip in here broke both: the mention posted as visible words and
+      // the residue became prose ahead of the carried id. The body exits
+      // neutralize before they call this chain (`quotedProse` in
+      // compose-review), so a comment-wrapped forged footer still strips
+      // there — without the inline channel paying for it.
+      const mention =
+        'the sample posts <!-- qwen-review suggestion --> verbatim';
+      expect(stripForUnattributedPost(mention)).toBe(mention);
+      const wrapped =
+        'blocker <!-- _— m via Qwen Code /review (v1)_ --> stands';
+      expect(stripForUnattributedPost(wrapped)).toBe(wrapped);
+    });
+
     it('keeps blank runs inside a type-1 HTML quotation when a drop lands in it', () => {
       // HTML-block content lines are the ONE quotation kind a map can
       // drop: the drop-collapse must not treat the quotation's own blank

@@ -105,6 +105,12 @@ export function getConversationDirectoryName(storageSessionId: string): string {
     .digest('hex')}`;
 }
 
+export function getConversationStagedDirectoryName(
+  storageSessionId: string,
+): string {
+  return `${getConversationDirectoryName(storageSessionId)}.deleting`;
+}
+
 function validateDirectoryStats(
   stats: Stats,
   scope: ConversationDirectoryIdentityScope,
@@ -155,14 +161,15 @@ function hasExpectedDirectoryIdentity(
   identity: ConversationDirectoryIdentity,
   expected: ConversationDirectoryIdentity,
 ): boolean {
-  const inodesProvable =
-    hasVerifiableInode(identity.inode) && hasVerifiableInode(expected.inode);
+  const identityInodeVerifiable = hasVerifiableInode(identity.inode);
+  const expectedInodeVerifiable = hasVerifiableInode(expected.inode);
   return (
     identity.storageSessionId === expected.storageSessionId &&
     identity.name === expected.name &&
     isSameConversationPath(identity.canonicalPath, expected.canonicalPath) &&
     identity.device === expected.device &&
-    (!inodesProvable || identity.inode === expected.inode) &&
+    identityInodeVerifiable === expectedInodeVerifiable &&
+    (!identityInodeVerifiable || identity.inode === expected.inode) &&
     isSameConversationPath(
       identity.root.configuredRoot,
       expected.root.configuredRoot,
@@ -172,8 +179,8 @@ function hasExpectedDirectoryIdentity(
       expected.root.canonicalRoot,
     ) &&
     identity.root.device === expected.root.device &&
+    identity.root.inodeVerifiable === expected.root.inodeVerifiable &&
     (!identity.root.inodeVerifiable ||
-      !expected.root.inodeVerifiable ||
       identity.root.inode === expected.root.inode)
   );
 }
@@ -295,13 +302,13 @@ export async function assertExactConversationRootIdentity(
   return root;
 }
 
-export async function inspectConversationDirectoryIdentity(
+async function inspectConversationNamedDirectoryIdentity(
   root: ConversationRootIdentity,
   storageSessionId: string,
+  name: string,
   expected?: ConversationDirectoryIdentity,
 ): Promise<ConversationDirectoryIdentity | undefined> {
   await revalidateConversationRootIdentity(root);
-  const name = getConversationDirectoryName(storageSessionId);
   const candidate = join(root.canonicalRoot, name);
   let before: Stats;
   try {
@@ -352,6 +359,52 @@ export async function inspectConversationDirectoryIdentity(
     );
   }
   return identity;
+}
+
+export async function inspectConversationDirectoryIdentity(
+  root: ConversationRootIdentity,
+  storageSessionId: string,
+  expected?: ConversationDirectoryIdentity,
+): Promise<ConversationDirectoryIdentity | undefined> {
+  return inspectConversationNamedDirectoryIdentity(
+    root,
+    storageSessionId,
+    getConversationDirectoryName(storageSessionId),
+    expected,
+  );
+}
+
+export async function inspectConversationStagedDirectoryIdentity(
+  root: ConversationRootIdentity,
+  storageSessionId: string,
+): Promise<ConversationDirectoryIdentity | undefined> {
+  return inspectConversationNamedDirectoryIdentity(
+    root,
+    storageSessionId,
+    getConversationStagedDirectoryName(storageSessionId),
+  );
+}
+
+export function isSameConversationDirectoryObject(
+  identity: ConversationDirectoryIdentity,
+  expected: ConversationDirectoryIdentity,
+): boolean {
+  const identityInodeVerifiable = hasVerifiableInode(identity.inode);
+  const expectedInodeVerifiable = hasVerifiableInode(expected.inode);
+  return (
+    identity.storageSessionId === expected.storageSessionId &&
+    identity.device === expected.device &&
+    identityInodeVerifiable === expectedInodeVerifiable &&
+    (!identityInodeVerifiable || identity.inode === expected.inode) &&
+    isSameConversationPath(
+      identity.root.canonicalRoot,
+      expected.root.canonicalRoot,
+    ) &&
+    identity.root.device === expected.root.device &&
+    identity.root.inodeVerifiable === expected.root.inodeVerifiable &&
+    (!identity.root.inodeVerifiable ||
+      identity.root.inode === expected.root.inode)
+  );
 }
 
 export async function materializeConversationDirectoryIdentity(
