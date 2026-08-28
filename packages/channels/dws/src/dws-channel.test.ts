@@ -7,6 +7,7 @@
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import process from 'node:process';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   PairingStore,
@@ -1101,6 +1102,95 @@ describe('DwsChannel', () => {
     ]);
   });
 
+  it('lets polling recover a stale replayed direct message', async () => {
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    try {
+      const client = new FakeDwsClient();
+      const channel = await readyChannel(client);
+      const replay = message(
+        'user_im_message_receive_o2o_all',
+        'replayed-direct',
+        'stale direct request',
+        { eventTime: Date.now() - 60_000 },
+      );
+      client.directMessages = [replay];
+
+      await client.emit(1, replay);
+      expect(stderr).toHaveBeenCalledWith(
+        expect.stringContaining('parked a stale direct message'),
+      );
+      await channel.poll();
+
+      expect(channel.inbound).toEqual([
+        expect.objectContaining({
+          chatId: 'cid-1',
+          messageId: 'replayed-direct',
+          text: 'stale direct request',
+        }),
+      ]);
+
+      await channel.poll();
+      expect(channel.inbound).toHaveLength(1);
+    } finally {
+      stderr.mockRestore();
+    }
+  });
+
+  // R3-2: the stale-replay rescue is deliberately direct-only; every other
+  // source is still marked processed and dropped here. The mark is what keeps
+  // a replayed mention from becoming a fresh turn after a restart: the
+  // persisted mention watermark re-opens the overlap window over the downtime
+  // gap — which can lie entirely before the new connection's drop boundary —
+  // so history polling re-fetches the replay and only the mark drops it.
+  it('still drops a stale replayed non-direct message', async () => {
+    vi.useFakeTimers();
+    try {
+      const name = 'stale-at-replay-dws';
+      const firstClient = new FakeDwsClient();
+      const first = await readyChannel(firstClient, makeConfig(), name);
+      firstClient.mentionedMessages = [
+        message('user_im_message_receive_at', 'seed-mention', '@Qwen seed'),
+      ];
+      await first.poll();
+      expect(first.inbound).toHaveLength(1);
+      first.disconnect();
+
+      await vi.advanceTimersByTimeAsync(30_000);
+
+      const secondClient = new FakeDwsClient();
+      const second = await readyChannel(secondClient, makeConfig(), name);
+      const replay = message(
+        'user_im_message_receive_at',
+        'stale-at-replay',
+        '@Qwen stale mention',
+        { eventTime: Date.now() - 15_000 },
+      );
+      secondClient.mentionedMessages = [replay];
+      const windows: Array<[number, number]> = [];
+      const listMentionedMessages =
+        secondClient.listMentionedMessages.getMockImplementation();
+      secondClient.listMentionedMessages.mockImplementation(
+        async (startTime, endTime, signal, cursor) => {
+          windows.push([startTime, endTime]);
+          return listMentionedMessages!(startTime, endTime, signal, cursor);
+        },
+      );
+
+      await secondClient.emit(0, replay);
+      expect(second.inbound).toEqual([]);
+
+      await second.poll();
+      expect(second.inbound).toEqual([]);
+      // The restored watermark's window has to actually reach back over the
+      // replay — asserting only on `inbound` would pass on a watermark that
+      // restarted at the second connect and silently vacate the witness.
+      expect(windows[0][0]).toBeLessThanOrEqual(replay.eventTime!);
+      expect(windows[0][1]).toBeGreaterThanOrEqual(replay.eventTime!);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   // R4-4: the pullback above only rescues the replay if the poll that was in
   // flight when it happened does not finish by writing its own window's end
   // back over it. `checkpoint.endTime` is always past the replay's `eventTime`,
@@ -1709,6 +1799,193 @@ describe('DwsChannel', () => {
         text: expect.stringContaining('reply with the document code'),
       }),
     ]);
+  });
+
+  it('dispatches an ordinary direct message when the event stream misses it', async () => {
+    const client = new FakeDwsClient();
+    const channel = await readyChannel(client);
+    client.directMessages = [
+      message(
+        'user_im_message_receive_o2o_all',
+        'history-direct',
+        'recover this request',
+      ),
+    ];
+
+    await channel.poll();
+
+    expect(channel.inbound).toEqual([
+      expect.objectContaining({
+        chatId: 'cid-1',
+        messageId: 'history-direct',
+        text: 'recover this request',
+        isGroup: false,
+      }),
+    ]);
+  });
+
+  // R1-7: every history window re-opens at `watermark - 5s`, so every
+  // live-dispatched direct message is re-fetched by a later poll. The
+  // processed-key guard is the only thing standing between that refetch and
+  // a duplicate agent turn.
+  it('deduplicates a direct message delivered by the live stream and history', async () => {
+    const client = new FakeDwsClient();
+    const channel = await readyChannel(client);
+    const event = message(
+      'user_im_message_receive_o2o_all',
+      'live-and-history',
+      'hello once',
+    );
+
+    await client.emit(1, event);
+    client.directMessages = [event];
+    await channel.poll();
+
+    expect(channel.inbound).toHaveLength(1);
+  });
+
+  // R2-1: the history loop dispatches every DM-history message, and
+  // `handleImMessage`'s self-message check is the only filter keeping the
+  // bot's own replies — now ordinary sent messages that reappear in every
+  // overlap window — out of the agent. If that check were ever conditioned
+  // on `!fromHistory`, every poll would re-dispatch them as fresh turns.
+  it('does not dispatch self-sent messages recovered from direct-message history', async () => {
+    const client = new FakeDwsClient();
+    const channel = await readyChannel(client);
+    client.directMessages = [
+      message('user_im_message_receive_o2o_all', 'own-reply', 'bot text', {
+        senderId: 'open-self',
+      }),
+    ];
+
+    await channel.poll();
+    expect(channel.inbound).toEqual([]);
+
+    await channel.poll();
+    expect(channel.inbound).toEqual([]);
+  });
+
+  // R1-1 (fix-induced): without the loop-level processed-key skip, every
+  // re-fetched self-message re-enters `handleImMessage`, whose self branch
+  // persists the whole cursor before the processed-key early return — one
+  // blocking mkdir/write/rename per own reply per poll on top of the
+  // end-of-poll persist.
+  it('saves the cursor once per poll for own replies re-fetched in the overlap window', async () => {
+    const client = new FakeDwsClient();
+    const channel = await readyChannel(client);
+    client.directMessages = [
+      message('user_im_message_receive_o2o_all', 'own-reply-cost', 'bot text', {
+        senderId: 'open-self',
+      }),
+    ];
+    await channel.poll();
+    const saveCursor = vi.spyOn(
+      channel as unknown as { saveCursor: () => void },
+      'saveCursor',
+    );
+
+    await channel.poll();
+
+    expect(channel.inbound).toEqual([]);
+    expect(saveCursor).toHaveBeenCalledTimes(1);
+  });
+
+  // R2-2: an inbound-turn failure during history dispatch escaped into the
+  // fetch catch, logged an agent-side failure as "failed to poll DWS
+  // direct-message history", and aborted the page. A failed direct message
+  // is parked for replay, so the page can keep moving instead.
+  it('keeps the page moving when a direct-message turn fails mid-window', async () => {
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    try {
+      const client = new FakeDwsClient();
+      const channel = await readyChannel(client);
+      channel.inboundError = new Error('agent unavailable');
+      const now = Date.now();
+      client.directMessages = [
+        message('user_im_message_receive_o2o_all', 'failing-first', 'first', {
+          eventTime: now - 1,
+        }),
+        message('user_im_message_receive_o2o_all', 'waiting-second', 'second', {
+          eventTime: now,
+        }),
+      ];
+
+      await channel.poll();
+
+      expect(channel.inboundAttempts).toBe(2);
+      const logged = stderr.mock.calls.map((call) => String(call[0])).join('');
+      expect(logged).toContain('DWS message turn failed (attempt 1/5)');
+      expect(logged).toContain('parked for retry');
+      expect(logged).not.toContain('failed to poll DWS direct-message history');
+
+      channel.inboundError = undefined;
+      await channel.poll();
+
+      expect(channel.inboundAttempts).toBe(4);
+      expect(channel.inbound.map((envelope) => envelope.messageId)).toEqual([
+        'failing-first',
+        'waiting-second',
+      ]);
+    } finally {
+      stderr.mockRestore();
+    }
+  });
+
+  // R2-2 discriminator: a document notification whose turn fails is NOT
+  // parked, so the mid-window catch must rethrow it — the pinned watermark
+  // is its only retry path. Swallowing it would advance the watermark, the
+  // notification would fall out of the overlap window, and its remaining
+  // budget would never run.
+  it('keeps spending the retry budget of an unparked document notification', async () => {
+    vi.useFakeTimers();
+    try {
+      const client = new FakeDwsClient();
+      const channel = await readyChannel(client);
+      client.directMessages = [
+        message(
+          'user_im_message_receive_o2o_all',
+          'stuck-notification',
+          documentMentionCard('doc-stuck', 'd'.repeat(45)),
+          { eventTime: Date.now() },
+        ),
+      ];
+      channel.inboundHandler = async () => {
+        throw new Error('agent unavailable');
+      };
+
+      for (let round = 0; round < 5; round += 1) {
+        await channel.poll();
+        await vi.advanceTimersByTimeAsync(6_000);
+      }
+
+      expect(channel.inboundAttempts).toBe(5);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('applies sender pairing to a direct message recovered from history', async () => {
+    const client = new FakeDwsClient();
+    const { channel, bridge } = await readyPolicyChannel(
+      client,
+      makeConfig({ senderPolicy: 'pairing' }),
+    );
+    client.directMessages = [
+      message(
+        'user_im_message_receive_o2o_all',
+        'history-pairing',
+        'please help',
+      ),
+    ];
+
+    await channel.poll();
+
+    expect(bridge.prompt).not.toHaveBeenCalled();
+    expect(client.sendImMessage).toHaveBeenCalledWith(
+      { kind: 'direct', openDingTalkId: 'open-alice' },
+      expect.stringContaining('pairing code'),
+      expect.any(String),
+    );
   });
 
   it('dispatches a group mention when the event stream misses it', async () => {
@@ -2826,7 +3103,7 @@ describe('DwsChannel', () => {
     );
 
     expect(bridge.prompt).toHaveBeenCalledOnce();
-    expect(client.replyToImMessage).toHaveBeenCalledOnce();
+    expect(client.sendImMessage).toHaveBeenCalledOnce();
   });
 
   it('removes a working reaction that finishes attaching after the task', async () => {
@@ -3739,10 +4016,9 @@ describe('DwsChannel', () => {
     expect(channel.inboundAttempts).toBe(5);
   });
 
-  // R12-1: a plain direct message whose turn throws had no redelivery path —
-  // the at-most-once event stream already consumed it, the DM history loop
-  // dispatches only document-mention notifications, and the pending queue
-  // parked only group sources. One transient failure lost it forever.
+  // R12-1: keep a local redelivery path when a direct-message turn throws.
+  // The event stream is at most once and remote history can be unavailable,
+  // so one transient failure must not lose the message forever.
   it('replays a failed direct message on the next poll', async () => {
     const client = new FakeDwsClient();
     const channel = await readyChannel(client);
@@ -3812,6 +4088,146 @@ describe('DwsChannel', () => {
     }
 
     expect(channel.inboundAttempts).toBe(5);
+  });
+
+  // R1-1: `replayPendingMessages` already re-drives a parked direct message
+  // every poll, so the history dispatch must skip it. Driving it from both
+  // surfaces spent the shared retry budget twice per poll, dropping a message
+  // after a transient outage barely longer than two poll intervals.
+  it('spends one retry per poll on a failed direct message also in history', async () => {
+    const client = new FakeDwsClient();
+    const channel = await readyChannel(client);
+    channel.inboundError = new Error('agent unavailable');
+    const event = message(
+      'user_im_message_receive_o2o_all',
+      'direct-history-retry',
+      'please retry this direct request',
+    );
+    client.directMessages = [event];
+
+    await expect(client.emit(1, event)).rejects.toThrow('agent unavailable');
+    await channel.poll();
+    await channel.poll();
+
+    expect(channel.inboundAttempts).toBe(3);
+
+    channel.inboundError = undefined;
+    await channel.poll();
+
+    expect(channel.inboundAttempts).toBe(4);
+    expect(channel.inbound).toEqual([
+      expect.objectContaining({
+        chatId: 'cid-1',
+        messageId: 'direct-history-retry',
+      }),
+    ]);
+  });
+
+  // R3-1: history dispatch skips messages that are ALREADY parked, but a
+  // direct message whose live turn is still in flight passes the skip and
+  // blocks in `handleImMessage`'s in-flight wait. When the live turn then
+  // fails it parks the message and spends attempt 1 — parked ≠ processed, so
+  // the waiting history dispatch must not start a second turn in the same
+  // poll and spend attempt 2.
+  it('spends one retry per poll when the live turn fails while history waits on it', async () => {
+    const client = new FakeDwsClient();
+    const channel = await readyChannel(client);
+    const event = message(
+      'user_im_message_receive_o2o_all',
+      'direct-inflight-retry',
+      'please retry this direct request',
+    );
+    client.directMessages = [event];
+
+    let turnEntered!: () => void;
+    let failTurn!: () => void;
+    const entered = new Promise<void>((resolve) => {
+      turnEntered = resolve;
+    });
+    const failing = new Promise<void>((resolve) => {
+      failTurn = resolve;
+    });
+    channel.inboundHandler = async () => {
+      turnEntered();
+      await failing;
+      throw new Error('agent unavailable');
+    };
+
+    const liveTurn = client.emit(1, event).then(
+      () => undefined,
+      () => undefined,
+    );
+    await entered;
+    const poll = channel.poll();
+    // Let the poll's history dispatch reach the in-flight wait before the
+    // live turn is allowed to fail.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    failTurn();
+    await Promise.all([liveTurn, poll]);
+
+    expect(channel.inboundAttempts).toBe(1);
+
+    channel.inboundHandler = undefined;
+    await channel.poll();
+
+    expect(channel.inboundAttempts).toBe(2);
+    expect(channel.inbound).toEqual([
+      expect.objectContaining({
+        chatId: 'cid-1',
+        messageId: 'direct-inflight-retry',
+      }),
+    ]);
+  });
+
+  // The gated in-flight re-check rethrows instead of returning:
+  // `replayPendingMessages` deletes the parked entry after any normal
+  // return, so a redelivered duplicate whose turn fails while the replay
+  // waits on it must not make the replay drop the parking.
+  it('keeps a parked message parked when its replay waits on a failed duplicate turn', async () => {
+    const client = new FakeDwsClient();
+    const channel = await readyChannel(client);
+    const event = message(
+      'user_im_message_receive_o2o_all',
+      'direct-parked-duplicate',
+      'please retry this direct request',
+    );
+    channel.inboundError = new Error('agent unavailable');
+
+    await expect(client.emit(1, event)).rejects.toThrow('agent unavailable');
+
+    let releaseDuplicate!: () => void;
+    const held = new Promise<void>((resolve) => {
+      releaseDuplicate = resolve;
+    });
+    channel.inboundHandler = async () => {
+      await held;
+      throw new Error('agent unavailable');
+    };
+    channel.inboundError = undefined;
+    const duplicateTurn = client.emit(1, event).then(
+      () => undefined,
+      () => undefined,
+    );
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const poll = channel.poll();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    releaseDuplicate();
+    await Promise.all([duplicateTurn, poll]);
+
+    // The duplicate turn spent attempt 2; the replay spent nothing and must
+    // have kept the parked entry.
+    expect(channel.inboundAttempts).toBe(2);
+
+    channel.inboundHandler = undefined;
+    await channel.poll();
+
+    expect(channel.inboundAttempts).toBe(3);
+    expect(channel.inbound).toEqual([
+      expect.objectContaining({
+        chatId: 'cid-1',
+        messageId: 'direct-parked-duplicate',
+      }),
+    ]);
   });
 
   // R4-1: the budget above was wired into the mention path only. A document
@@ -4055,16 +4471,48 @@ describe('DwsChannel', () => {
     ]);
   });
 
-  it('uses the originating message for an idempotent final reply', async () => {
+  it('sends an idempotent ordinary message for a final direct response', async () => {
     const client = new FakeDwsClient();
     const channel = await readyChannel(client);
+    await client.emit(
+      1,
+      message('user_im_message_receive_o2o_all', 'message-1', 'hello'),
+    );
     channel.responseMessageId = 'message-1';
     channel.responseSenderId = 'open-alice';
 
     await channel.respond('cid-1', 'final answer');
+    const firstKey = client.sendImMessage.mock.calls[0]?.[2];
+    await channel.respond('cid-1', 'final answer');
+
+    expect(client.sendImMessage).toHaveBeenNthCalledWith(
+      1,
+      { kind: 'direct', openDingTalkId: 'open-alice' },
+      'final answer',
+      expect.stringMatching(
+        /^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-8[0-9a-f]{3}-[0-9a-f]{12}$/,
+      ),
+    );
+    expect(client.sendImMessage.mock.calls[1]?.[2]).toBe(firstKey);
+    expect(client.replyToImMessage).not.toHaveBeenCalled();
+  });
+
+  it('uses the originating message for a final group reply', async () => {
+    const client = new FakeDwsClient();
+    const channel = await readyChannel(client);
+    await client.emit(
+      0,
+      message('user_im_message_receive_at', 'message-1', '@Qwen hello', {
+        conversationId: 'group-1',
+      }),
+    );
+    channel.responseMessageId = 'message-1';
+    channel.responseSenderId = 'open-alice';
+
+    await channel.respond('group-1', 'final answer');
 
     expect(client.replyToImMessage).toHaveBeenCalledWith(
-      'cid-1',
+      'group-1',
       'message-1',
       'open-alice',
       'final answer',
@@ -4072,6 +4520,7 @@ describe('DwsChannel', () => {
         /^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-8[0-9a-f]{3}-[0-9a-f]{12}$/,
       ),
     );
+    expect(client.sendImMessage).not.toHaveBeenCalled();
   });
 
   // R1-7: the unknown-outcome swallow decides whether a finished task is

@@ -26,7 +26,7 @@ import type {
 import type { AgentStatsSummary } from './agent-statistics.js';
 import type { AgentCore } from './agent-core.js';
 import type { ContextState } from './agent-headless.js';
-import type { GeminiChat } from '../../core/geminiChat.js';
+import type { LlmChat } from '../../core/llm-chat.js';
 import type { FunctionDeclaration } from '@google/genai';
 import {
   ToolConfirmationOutcome,
@@ -77,7 +77,7 @@ export class AgentInteractive {
   private executionPromise: Promise<void> | undefined;
   private masterAbortController = createAbortController();
   private roundAbortController: AbortController | undefined;
-  private chat: GeminiChat | undefined;
+  private chat: LlmChat | undefined;
   private toolsList: FunctionDeclaration[] = [];
   private processing = false;
   private roundCancelledByUser = false;

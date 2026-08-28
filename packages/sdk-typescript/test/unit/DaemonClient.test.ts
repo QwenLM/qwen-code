@@ -346,7 +346,7 @@ describe('DaemonClient', () => {
           supported: ['v1'],
         },
         mode: 'http-bridge' as const,
-        features: ['health', 'capabilities', 'workspace_skill_toggle'],
+        features: ['health', 'capabilities', 'workspace_skill_settings_toggle'],
         modelServices: [],
         workspaceCwd: '/work/bound',
       };
@@ -354,7 +354,7 @@ describe('DaemonClient', () => {
       const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
       const caps = await client.capabilities();
       expect(caps).toEqual(envelope);
-      expect(caps.features).toContain('workspace_skill_toggle');
+      expect(caps.features).toContain('workspace_skill_settings_toggle');
       // #3803 §02: clients use `workspaceCwd` to pre-flight check +
       // omit `cwd` from `POST /session` (route falls back).
       expect(caps.workspaceCwd).toBe('/work/bound');
@@ -5898,6 +5898,33 @@ describe('DaemonClient', () => {
   });
 
   describe('extension operations', () => {
+    it.each(['/tmp/demo-extension', 'C:\\demo-extension'])(
+      'sends daemon-local extension path %s unchanged',
+      async (source) => {
+        const { fetch, calls } = recordingFetch(() =>
+          jsonResponse(202, {
+            accepted: true,
+            operationId: 'op-local',
+          }),
+        );
+        const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+        await expect(
+          client.installExtension({ source, consent: true }, 'client-1'),
+        ).resolves.toEqual({ accepted: true, operationId: 'op-local' });
+
+        expect(calls[0]?.url).toBe(
+          'http://daemon/workspace/extensions/install',
+        );
+        expect(calls[0]?.method).toBe('POST');
+        expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+        expect(JSON.parse(calls[0]!.body!)).toEqual({
+          source,
+          consent: true,
+        });
+      },
+    );
+
     it('POSTs an extension archive as a binary body', async () => {
       let capturedUrl = '';
       let capturedInit: RequestInit | undefined;

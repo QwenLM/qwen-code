@@ -109,12 +109,14 @@ describe('WeixinChannel', () => {
     expect(setTyping).toHaveBeenCalledTimes(2);
   });
 
-  it('clears failed start typing state so a later started event can retry', async () => {
+  it('retries a failed initial typing request while the session is active', async () => {
     const channel = createChannel();
     const chatId = 'user-retry';
-    const activeTypingChats = (
-      channel as unknown as { activeTypingChats: Set<string> }
-    ).activeTypingChats;
+    const activeTypingSessions = (
+      channel as unknown as {
+        activeTypingSessions: Map<string, Map<string, number>>;
+      }
+    ).activeTypingSessions;
 
     apiMocks.getConfig.mockResolvedValue({ typing_ticket: 'ticket-1' });
     apiMocks.sendTyping
@@ -134,15 +136,46 @@ describe('WeixinChannel', () => {
 
     await vi.waitFor(() => {
       expect(apiMocks.sendTyping).toHaveBeenCalledTimes(1);
-      expect(activeTypingChats.has(chatId)).toBe(false);
+      expect(activeTypingSessions.get(chatId)?.has('session-2')).toBe(true);
     });
 
-    channel.emitLifecycle({ ...baseEvent, type: 'started' });
-
+    await vi.advanceTimersByTimeAsync(4000);
     await vi.waitFor(() => {
       expect(apiMocks.sendTyping).toHaveBeenCalledTimes(2);
-      expect(activeTypingChats.has(chatId)).toBe(true);
     });
+  });
+
+  it('keeps typing until every session in the same chat terminates', () => {
+    const channel = createChannel();
+    const setTyping = vi.fn().mockResolvedValue(true);
+    (channel as unknown as { setTyping: typeof setTyping }).setTyping =
+      setTyping;
+    const base = {
+      channelName: 'weixin',
+      chatId: 'shared-chat',
+      messageId: 'message',
+      identity: { id: 'channel:weixin', displayName: 'weixin' },
+      memoryScope: { namespace: 'channel:weixin', mode: 'metadata-only' },
+    } satisfies Omit<LifecycleBase, 'sessionId'>;
+
+    channel.emitLifecycle({ ...base, sessionId: 'session-a', type: 'started' });
+    channel.emitLifecycle({ ...base, sessionId: 'session-b', type: 'started' });
+    channel.emitLifecycle({
+      ...base,
+      sessionId: 'session-a',
+      type: 'completed',
+    });
+
+    expect(setTyping).toHaveBeenCalledTimes(1);
+    expect(setTyping).toHaveBeenLastCalledWith('shared-chat', true);
+
+    channel.emitLifecycle({
+      ...base,
+      sessionId: 'session-b',
+      type: 'completed',
+    });
+    expect(setTyping).toHaveBeenCalledTimes(2);
+    expect(setTyping).toHaveBeenLastCalledWith('shared-chat', false);
   });
 
   it('stops typing again when a late lifecycle start resolves after terminal cleanup', async () => {
@@ -183,9 +216,11 @@ describe('WeixinChannel', () => {
     const setTyping = vi.fn().mockResolvedValue(true);
     (channel as unknown as { setTyping: typeof setTyping }).setTyping =
       setTyping;
-    const activeTypingChats = (
-      channel as unknown as { activeTypingChats: Set<string> }
-    ).activeTypingChats;
+    const activeTypingSessions = (
+      channel as unknown as {
+        activeTypingSessions: Map<string, Map<string, number>>;
+      }
+    ).activeTypingSessions;
 
     channel.emitLifecycle({
       type: 'started',
@@ -196,11 +231,11 @@ describe('WeixinChannel', () => {
       identity: { id: 'channel:weixin', displayName: 'weixin' },
       memoryScope: { namespace: 'channel:weixin', mode: 'metadata-only' },
     });
-    expect(activeTypingChats.has('user-disconnect')).toBe(true);
+    expect(activeTypingSessions.has('user-disconnect')).toBe(true);
 
     channel.disconnect();
 
-    expect(activeTypingChats.has('user-disconnect')).toBe(false);
+    expect(activeTypingSessions.has('user-disconnect')).toBe(false);
   });
 
   describe('typing keepalive', () => {
@@ -246,7 +281,7 @@ describe('WeixinChannel', () => {
       expect(setTyping).toHaveBeenCalledTimes(5);
     });
 
-    it('does not arm the keepalive when the initial TYPING fails', async () => {
+    it('retries through keepalive when the initial TYPING fails', async () => {
       const channel = createChannel();
       const setTyping = vi.fn().mockResolvedValue(false);
       installSetTypingMock(channel, setTyping);
@@ -255,7 +290,7 @@ describe('WeixinChannel', () => {
       channel.emitLifecycle({ ...base, type: 'started' });
       await vi.advanceTimersByTimeAsync(20000);
 
-      expect(setTyping).toHaveBeenCalledTimes(1);
+      expect(setTyping).toHaveBeenCalledTimes(6);
       expect(setTyping).toHaveBeenLastCalledWith('user-keepalive-fail', true);
     });
 
@@ -464,6 +499,53 @@ describe('WeixinChannel', () => {
       expect(setTyping).toHaveBeenCalledTimes(callsAtBackstop);
     });
 
+    it('expires an old session without cancelling a newer session in the same chat', async () => {
+      const channel = createChannel();
+      const setTyping = vi.fn().mockResolvedValue(true);
+      installSetTypingMock(channel, setTyping);
+      const oldSession = keepaliveEvent('user-shared', 'session-old');
+      const newSession = keepaliveEvent('user-shared', 'session-new');
+
+      channel.emitLifecycle({ ...oldSession, type: 'started' });
+      await vi.advanceTimersByTimeAsync(TYPING_KEEPALIVE_MAX_MS - 4000);
+      channel.emitLifecycle({ ...newSession, type: 'started' });
+
+      await vi.advanceTimersByTimeAsync(4000);
+      expect(setTyping).toHaveBeenLastCalledWith('user-shared', true);
+
+      const activeTypingSessions = (
+        channel as unknown as {
+          activeTypingSessions: Map<string, Map<string, number>>;
+        }
+      ).activeTypingSessions;
+      expect(activeTypingSessions.get('user-shared')?.has('session-old')).toBe(
+        false,
+      );
+      expect(activeTypingSessions.get('user-shared')?.has('session-new')).toBe(
+        true,
+      );
+
+      channel.emitLifecycle({ ...newSession, type: 'completed' });
+      expect(setTyping).toHaveBeenLastCalledWith('user-shared', false);
+    });
+
+    it('removes only the dead session from a shared chat', () => {
+      const channel = createChannel();
+      const setTyping = vi.fn().mockResolvedValue(true);
+      installSetTypingMock(channel, setTyping);
+      const sessionA = keepaliveEvent('user-session-died', 'session-a');
+      const sessionB = keepaliveEvent('user-session-died', 'session-b');
+
+      channel.emitLifecycle({ ...sessionA, type: 'started' });
+      channel.emitLifecycle({ ...sessionB, type: 'started' });
+      channel.onSessionDied('session-a');
+      expect(setTyping).toHaveBeenCalledTimes(1);
+
+      channel.onSessionDied('session-b');
+      expect(setTyping).toHaveBeenCalledTimes(2);
+      expect(setTyping).toHaveBeenLastCalledWith('user-session-died', false);
+    });
+
     it('ignores a stale failed initial TYPING from a previous turn', async () => {
       const channel = createChannel();
       const stale = deferredPromise<boolean>();
@@ -594,13 +676,13 @@ describe('WeixinChannel', () => {
       const priv = channel as unknown as {
         typingKeepaliveIntervals: Map<string, unknown>;
         typingKeepaliveInFlight: Set<string>;
-        typingKeepaliveArmedAt: Map<string, number>;
         typingGenerations: Map<string, number>;
+        activeTypingSessions: Map<string, Map<string, number>>;
       };
       expect(priv.typingKeepaliveIntervals.size).toBe(0);
       expect(priv.typingKeepaliveInFlight.size).toBe(0);
-      expect(priv.typingKeepaliveArmedAt.size).toBe(0);
       expect(priv.typingGenerations.size).toBe(0);
+      expect(priv.activeTypingSessions.size).toBe(0);
 
       // A fresh turn on the reused adapter must not be reaped early by
       // stale backstop state: it should refresh, not CANCEL.

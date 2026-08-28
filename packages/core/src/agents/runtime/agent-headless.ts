@@ -16,7 +16,7 @@
 
 import type { Content, FunctionDeclaration } from '@google/genai';
 import type { Config } from '../../config/config.js';
-import type { GeminiChat } from '../../core/geminiChat.js';
+import type { LlmChat } from '../../core/llm-chat.js';
 import type { RuntimeContentGeneratorView } from './agent-context.js';
 import { createChildAbortController } from '../../utils/abortController.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
@@ -141,7 +141,7 @@ export class AgentHeadless {
   private terminateMode: AgentTerminateMode = AgentTerminateMode.ERROR;
   // Which loop detector fired when terminateMode is LOOP_DETECTED (#9450).
   private loopType: string | null = null;
-  private chat?: GeminiChat;
+  private chat?: LlmChat;
   private toolsList?: FunctionDeclaration[];
   private executing = false;
   private hasStartedReasoning = false;
@@ -166,6 +166,10 @@ export class AgentHeadless {
    * @param toolConfig - Optional configuration for tools available to the subagent.
    * @param eventEmitter - Optional event emitter for streaming events to UI.
    * @param hooks - Optional lifecycle hooks.
+   * @param runtimeView - Optional runtime view override.
+   * @param taskName - Optional business/task name for local per-invocation
+   *   usage labels.
+   * @param subagentId - Optional stable invocation id.
    */
   static async create(
     name: string,
@@ -177,6 +181,8 @@ export class AgentHeadless {
     eventEmitter?: AgentEventEmitter,
     hooks?: AgentHooks,
     runtimeView?: RuntimeContentGeneratorView,
+    taskName?: string,
+    subagentId?: string,
   ): Promise<AgentHeadless> {
     const core = new AgentCore(
       name,
@@ -188,6 +194,8 @@ export class AgentHeadless {
       eventEmitter,
       hooks,
       runtimeView,
+      taskName,
+      subagentId,
     );
     return new AgentHeadless(core);
   }

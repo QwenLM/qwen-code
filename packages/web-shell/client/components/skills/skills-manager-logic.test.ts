@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import type { DaemonWorkspaceSkillStatus } from '@qwen-code/webui/daemon-react-sdk';
-import { filterSkills, preserveSkillSelection } from './skills-manager-logic';
+import {
+  filterSkills,
+  preserveSkillSelection,
+  skillExtensionLabel,
+} from './skills-manager-logic';
 
 const skills: DaemonWorkspaceSkillStatus[] = [
   {
@@ -11,6 +15,7 @@ const skills: DaemonWorkspaceSkillStatus[] = [
     level: 'extension',
     modelInvocable: true,
     extensionName: 'design-pack',
+    extensionDisplayName: 'Design Pack',
   },
   {
     kind: 'skill',
@@ -54,5 +59,16 @@ describe('skills manager logic', () => {
   it('preserves only a selection that still exists', () => {
     expect(preserveSkillSelection('review', skills)).toBe('review');
     expect(preserveSkillSelection('removed', skills)).toBeNull();
+  });
+
+  it('uses the extension display name only for presentation', () => {
+    expect(skillExtensionLabel(skills[0])).toBe('Design Pack');
+    expect(
+      skillExtensionLabel({
+        ...skills[0],
+        extensionDisplayName: undefined,
+      }),
+    ).toBe('design-pack');
+    expect(skillExtensionLabel(skills[1])).toBe('-');
   });
 });

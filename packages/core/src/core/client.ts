@@ -57,7 +57,7 @@ import { createSessionStartProfiler } from './session-start-profiler.js';
 const debugLogger = createDebugLogger('CLIENT');
 
 // Core modules
-import { GeminiChat, type RepairOrphanedToolUseOptions } from './geminiChat.js';
+import { LlmChat, type RepairOrphanedToolUseOptions } from './llm-chat.js';
 import { restorableAskUserQuestionCallIds } from './ask-user-question-restore.js';
 import { getRecentGitStatus } from '../utils/gitUtils.js';
 import {
@@ -70,10 +70,10 @@ import {
 } from './prompts.js';
 import {
   CompressionStatus,
-  GeminiEventType,
+  LlmEventType,
   Turn,
   type ChatCompressionInfo,
-  type ServerGeminiStreamEvent,
+  type ServerLlmStreamEvent,
 } from './turn.js';
 
 // Services
@@ -261,16 +261,13 @@ function sameGoalPermit(
 }
 
 type ActiveGoalEventValue = Exclude<
-  Extract<
-    ServerGeminiStreamEvent,
-    { type: GeminiEventType.ActiveGoal }
-  >['value'],
+  Extract<ServerLlmStreamEvent, { type: LlmEventType.ActiveGoal }>['value'],
   null
 >;
 
 type GoalStateStreamEvent = Extract<
-  ServerGeminiStreamEvent,
-  { type: GeminiEventType.GoalState }
+  ServerLlmStreamEvent,
+  { type: LlmEventType.GoalState }
 >;
 
 function projectActiveGoal(
@@ -374,8 +371,8 @@ export function getMainSessionBaseSystemPrompt(
       );
 }
 
-export class GeminiClient {
-  private chat?: GeminiChat;
+export class LlmClient {
+  private chat?: LlmChat;
   private initializedSessionId: string | undefined;
   /**
    * Open session-swap telemetry transaction, if any. See
@@ -450,7 +447,7 @@ export class GeminiClient {
     snapshotEntries: AvailableSkillEntry[],
   ): void {
     this.announcedSkillReminderKeys = new Set(
-      snapshotEntries.map(GeminiClient.skillEntryKey),
+      snapshotEntries.map(LlmClient.skillEntryKey),
     );
     this.skillRemindersInitialized = true;
   }
@@ -520,6 +517,7 @@ export class GeminiClient {
         restoreRuntime.apiHistory,
         sessionStartSource ?? SessionStartSource.Resume,
       );
+      this.restoreLoadedSkillsFromHistory(restoreRuntime.apiHistory);
       const chat = this.getChat();
       if (restoreRuntime.resumeTokenCounts) {
         const counts = restoreRuntime.resumeTokenCounts;
@@ -550,6 +548,7 @@ export class GeminiClient {
         resumedHistory,
         sessionStartSource ?? SessionStartSource.Resume,
       );
+      this.restoreLoadedSkillsFromHistory(resumedHistory);
       const chat = this.getChat();
       if (resumeTokenCounts) {
         chat.seedResumeTokenCounts(
@@ -609,11 +608,18 @@ export class GeminiClient {
     }
   }
 
+  private restoreLoadedSkillsFromHistory(history: Content[]): void {
+    const skillTool = this.config.getToolRegistry().getTool(ToolNames.SKILL) as
+      | { restoreLoadedSkillsFromHistory?: (history: Content[]) => void }
+      | undefined;
+    skillTool?.restoreLoadedSkillsFromHistory?.(history);
+  }
+
   async addHistory(content: Content) {
     this.getChat().addHistory(content);
   }
 
-  getChat(): GeminiChat {
+  getChat(): LlmChat {
     if (!this.chat) {
       throw new Error('Chat not initialized');
     }
@@ -838,7 +844,7 @@ export class GeminiClient {
   /**
    * Fire-and-forget StopFailure hook for loop-detection early returns.
    * Matches the detached pattern used by the CLI's API-error path
-   * (useGeminiStream.ts) — output and errors are ignored.
+   * (use-llm-stream.ts) — output and errors are ignored.
    */
   private fireLoopDetectedStopFailure(loopType: string | null): void {
     if (this.config.getDisableAllHooks()) return;
@@ -854,13 +860,13 @@ export class GeminiClient {
   /**
    * Walk-only accessor for the set of `functionResponse.id` strings in
    * raw history. Callers that only need the dedup id set (notably
-   * `useGeminiStream.handleCompletedTools`) MUST prefer this over
+   * `useLlmStream.handleCompletedTools`) MUST prefer this over
    * {@link getHistory}, which deep-clones the entire conversation via
    * `structuredClone` on every call. On long sessions with sizable
    * tool outputs the clone is a multi-millisecond hit on the React UI
    * thread; running it on every tool-completion batch caused visible
    * frame drops during streaming. See
-   * `GeminiChat.getHistoryFunctionResponseIds` for the implementation.
+   * `LlmChat.getHistoryFunctionResponseIds` for the implementation.
    */
   getHistoryFunctionResponseIds(): Set<string> {
     return this.getChat().getHistoryFunctionResponseIds();
@@ -870,7 +876,7 @@ export class GeminiClient {
    * Walk-only accessor for the handled tool-call id → (name, args)
    * fingerprint map used by duplicate provider-id replay detection. Same
    * no-clone rationale as {@link getHistoryFunctionResponseIds}. See
-   * `GeminiChat.getHistoryToolCallFingerprints` for the implementation.
+   * `LlmChat.getHistoryToolCallFingerprints` for the implementation.
    */
   getHistoryToolCallFingerprints(): Map<string, string> {
     return this.getChat().getHistoryToolCallFingerprints();
@@ -922,7 +928,7 @@ export class GeminiClient {
    * {@link stripOrphanedUserEntriesFromHistory}, which only handles trailing
    * `user` entries.
    *
-   * This `GeminiClient` method is the resume-path entry point — called once
+   * This `LlmClient` method is the resume-path entry point — called once
    * from {@link startChat} after the transcript loads, covering `--resume`
    * of a session that crashed between a partial-tool_use push and the
    * tool's eventual completion.
@@ -930,14 +936,14 @@ export class GeminiClient {
    * The other two coverage points (Retry submit path after
    * `stripOrphanedUserEntriesFromHistory`, and the defensive pass at the
    * start of every UserQuery / Cron send) live one layer down inside
-   * `GeminiChat.sendMessageStream` and call the standalone
+   * `LlmChat.sendMessageStream` and call the standalone
    * `repairOrphanedToolUseTurns(history)` function directly — they don't
    * route through this wrapper. Anyone tracing the repair-pass coupling
    * between the client and chat layers should follow that path
    * separately rather than expect everything to funnel through here.
    *
    * Synthesizes an `error` `functionResponse`. The React tool scheduler
-   * (`useGeminiStream.handleCompletedTools`) MUST dedupe by `callId` against
+   * (`useLlmStream.handleCompletedTools`) MUST dedupe by `callId` against
    * the live history before submitting its own `tool_result` — otherwise a
    * late real result lands as a second `user[tool_result]` block (orphan
    * because the synthetic already consumed the matching `tool_use`).
@@ -1101,6 +1107,98 @@ export class GeminiClient {
       result,
       everyDocAlreadyDelivered ? 'already_delivered' : discardReason,
     );
+  }
+
+  /** @internal */
+  beginManagedAutoMemoryRecall(query: string, signal: AbortSignal): void {
+    if (
+      !this.config.isManagedMemoryAvailable() ||
+      !this.config.getManagedAutoMemoryEnabled()
+    ) {
+      return;
+    }
+
+    // A previous recall may still be pending (slow side-query, new user turn
+    // arrived before it settled). Abort it before installing the new handle so
+    // the orphan doesn't keep running indefinitely.
+    this.cancelPendingMemoryPrefetch('new_query');
+    const controller = new AbortController();
+    // Bridge the caller's signal into the prefetch controller so a user abort
+    // on the parent turn also terminates the recall side-query.
+    let prefetchAbortReason: MemoryRecallDiscardReason | null = null;
+    const onParentAbort = () => {
+      prefetchAbortReason = 'abort';
+      controller.abort();
+      this.cancelPendingMemoryPrefetch('abort');
+    };
+    if (signal.aborted) {
+      prefetchAbortReason = 'abort';
+      controller.abort();
+    } else {
+      signal.addEventListener('abort', onParentAbort, { once: true });
+    }
+    const fastResultRef: MemoryFastResultBox = { current: null };
+    const promise = this.config
+      .getMemoryManager()
+      .recall(this.config.getProjectRoot(), query, {
+        config: this.config,
+        excludedFilePaths: this.surfacedRelevantAutoMemoryPaths,
+        recentTools: [...this.recentCompletedToolNames],
+        abortSignal: controller.signal,
+        onFastResult: (result) => {
+          fastResultRef.current = result;
+          fastResultRef.onArrive?.();
+        },
+      })
+      .catch((error: unknown) => {
+        if (error instanceof DOMException && error.name === 'AbortError') {
+          debugLogger.debug('Managed auto-memory recall prefetch aborted.');
+        } else {
+          debugLogger.warn(
+            'Managed auto-memory recall prefetch failed.',
+            error,
+          );
+        }
+        return EMPTY_RELEVANT_AUTO_MEMORY_RESULT;
+      });
+    const handle: MemoryPrefetchHandle = {
+      promise,
+      settledAt: null,
+      result: null,
+      consumed: false,
+      terminalLogged: false,
+      firedAt: Date.now(),
+      controller,
+      fastResultRef,
+      fastDelivered: false,
+      fastDeliveredPaths: new Set<string>(),
+    };
+    void promise.then((result) => {
+      handle.result = result;
+    });
+    void promise.finally(() => {
+      handle.settledAt = Date.now();
+      signal.removeEventListener('abort', onParentAbort);
+    });
+    this.pendingMemoryPrefetch = handle;
+    if (prefetchAbortReason) {
+      this.cancelPendingMemoryPrefetch(prefetchAbortReason);
+    }
+  }
+
+  /** @internal */
+  consumeManagedAutoMemoryRecall(
+    deliveryPoint: 'initial' | 'tool_result',
+  ): Promise<RelevantAutoMemoryPromptResult | null> {
+    return this.tryConsumeMemoryPrefetch(
+      deliveryPoint,
+      deliveryPoint === 'initial' ? INITIAL_MEMORY_RECALL_WAIT_MS : 0,
+    );
+  }
+
+  /** @internal */
+  finishManagedAutoMemoryRecall(): void {
+    this.cancelPendingMemoryPrefetch('no_safe_delivery_point');
   }
 
   private cancelPendingMemoryPrefetch(
@@ -1412,7 +1510,7 @@ export class GeminiClient {
   /**
    * Re-prepend a fresh startup-context prelude after auto-compaction.
    *
-   * Auto-compaction runs in-place inside `GeminiChat.sendMessageStream`
+   * Auto-compaction runs in-place inside `LlmChat.sendMessageStream`
    * (`setHistory([summary, ack, ...kept])`) and does NOT route through
    * `tryCompressChat` → `startChat`, so — unlike manual `/compress` — the
    * startup prelude at history[0] is consumed into the summary and never
@@ -1737,7 +1835,7 @@ export class GeminiClient {
       return;
     }
 
-    const currentKeys = new Set(entries.map(GeminiClient.skillEntryKey));
+    const currentKeys = new Set(entries.map(LlmClient.skillEntryKey));
     const wasInitialized = this.skillRemindersInitialized;
     const removedNames: string[] = [];
 
@@ -1779,7 +1877,7 @@ export class GeminiClient {
     // by coreToolScheduler above.
     const newEntries: AvailableSkillEntry[] = [];
     for (const entry of entries) {
-      const key = GeminiClient.skillEntryKey(entry);
+      const key = LlmClient.skillEntryKey(entry);
       if (this.announcedSkillReminderKeys.has(key)) {
         continue;
       }
@@ -1903,7 +2001,7 @@ export class GeminiClient {
     sessionStartSource = extraHistory
       ? SessionStartSource.Resume
       : SessionStartSource.Startup,
-  ): Promise<GeminiChat> {
+  ): Promise<LlmChat> {
     this.forceFullIdeContext = true;
     this.lastInjectedDate = undefined;
     // Clear stale cache params on session reset to prevent cross-session leakage
@@ -1976,7 +2074,7 @@ export class GeminiClient {
       const chat = profiler.timeSync(
         'gemini_chat_construct',
         () =>
-          new GeminiChat(
+          new LlmChat(
             this.config,
             {
               systemInstruction,
@@ -2517,7 +2615,7 @@ export class GeminiClient {
     prompt_id: string,
     options?: SendMessageOptions,
     turns: number = MAX_TURNS,
-  ): AsyncGenerator<ServerGeminiStreamEvent, Turn> {
+  ): AsyncGenerator<ServerLlmStreamEvent, Turn> {
     const messageType = options?.type ?? SendMessageType.UserQuery;
     const startsInteraction =
       messageType === SendMessageType.UserQuery ||
@@ -2601,18 +2699,18 @@ export class GeminiClient {
       if (unsubscribeGoalState) return;
       unsubscribeGoalState = runtime.subscribe((value, cause) => {
         pendingGoalStateEvents.push({
-          type: GeminiEventType.GoalState,
+          type: LlmEventType.GoalState,
           value,
           ...(cause !== undefined ? { cause } : {}),
         });
       });
       pendingGoalStateEvents.push({
-        type: GeminiEventType.GoalState,
+        type: LlmEventType.GoalState,
         value: runtime.getSnapshot(),
       });
     };
-    const takePendingGoalEvents = (): ServerGeminiStreamEvent[] => {
-      const events: ServerGeminiStreamEvent[] = [];
+    const takePendingGoalEvents = (): ServerLlmStreamEvent[] => {
+      const events: ServerLlmStreamEvent[] = [];
       for (const stateEvent of pendingGoalStateEvents.splice(
         0,
         pendingGoalStateEvents.length,
@@ -2624,7 +2722,7 @@ export class GeminiClient {
           lastEmittedActiveGoal = nextActiveGoal;
           if (nextActiveGoal) {
             events.push({
-              type: GeminiEventType.ActiveGoal,
+              type: LlmEventType.ActiveGoal,
               value: nextActiveGoal,
             });
           }
@@ -2633,7 +2731,7 @@ export class GeminiClient {
         ) {
           lastEmittedActiveGoal = nextActiveGoal;
           events.push({
-            type: GeminiEventType.ActiveGoal,
+            type: LlmEventType.ActiveGoal,
             value: nextActiveGoal ?? null,
           });
         }
@@ -2713,7 +2811,7 @@ export class GeminiClient {
       return takePendingGoalEvents();
     };
     let strippedRetryEntries: Content[] = [];
-    // Snapshot of GeminiChat's user-content push counter, taken right after the
+    // Snapshot of LlmChat's user-content push counter, taken right after the
     // strip. The Retry's re-submitted content is the first thing the send
     // pushes, so if the counter advances at all that content landed.
     let pushCountAfterStrip = 0;
@@ -2894,7 +2992,7 @@ export class GeminiClient {
             endCurrentInteraction('cancelled');
           }
           yield {
-            type: GeminiEventType.UserPromptSubmitBlocked,
+            type: LlmEventType.UserPromptSubmitBlocked,
             value: {
               reason: hookOutput.getEffectiveReason(),
               originalPrompt: promptText,
@@ -3093,94 +3191,10 @@ export class GeminiClient {
         messageType === SendMessageType.UserQuery ||
         messageType === SendMessageType.Cron
       ) {
-        if (
-          this.config.isManagedMemoryAvailable() &&
-          this.config.getManagedAutoMemoryEnabled()
-        ) {
-          // A previous recall may still be pending (slow side-query, new user
-          // turn arrived before it settled). Abort it before installing the
-          // new handle so the orphan doesn't keep running indefinitely.
-          this.cancelPendingMemoryPrefetch('new_query');
-          const controller = new AbortController();
-          // Bridge the caller's signal into the prefetch controller so a user
-          // abort (Ctrl-C / Esc) on the parent turn also terminates the
-          // recall side-query. `{ once: true }` lets the listener clean itself
-          // up after firing; we still call removeEventListener on the promise's
-          // finally to cover the normal-completion case so a long-lived parent
-          // signal doesn't accumulate listeners across many turns.
-          let prefetchAbortReason: MemoryRecallDiscardReason | null = null;
-          const onParentAbort = () => {
-            prefetchAbortReason = 'abort';
-            controller.abort();
-            this.cancelPendingMemoryPrefetch('abort');
-          };
-          if (signal.aborted) {
-            prefetchAbortReason = 'abort';
-            controller.abort();
-          } else {
-            signal.addEventListener('abort', onParentAbort, { once: true });
-          }
-          const fastResultRef: MemoryFastResultBox = { current: null };
-          const promise = this.config
-            .getMemoryManager()
-            .recall(
-              this.config.getProjectRoot(),
-              preHookUserPromptText ?? partToString(request),
-              {
-                config: this.config,
-                excludedFilePaths: this.surfacedRelevantAutoMemoryPaths,
-                recentTools: [...this.recentCompletedToolNames],
-                abortSignal: controller.signal,
-                onFastResult: (result) => {
-                  fastResultRef.current = result;
-                  fastResultRef.onArrive?.();
-                },
-              },
-            )
-            .catch((error: unknown) => {
-              // Abort sources are now numerous (caller signal, new UserQuery,
-              // cleanup paths, safety-net timeout). Keep a debug trace so
-              // operators can diagnose missing-memory scenarios without
-              // raising noise on the common abort path.
-              if (
-                error instanceof DOMException &&
-                error.name === 'AbortError'
-              ) {
-                debugLogger.debug(
-                  'Managed auto-memory recall prefetch aborted.',
-                );
-              } else {
-                debugLogger.warn(
-                  'Managed auto-memory recall prefetch failed.',
-                  error,
-                );
-              }
-              return EMPTY_RELEVANT_AUTO_MEMORY_RESULT;
-            });
-          const handle: MemoryPrefetchHandle = {
-            promise,
-            settledAt: null,
-            result: null,
-            consumed: false,
-            terminalLogged: false,
-            firedAt: Date.now(),
-            controller,
-            fastResultRef,
-            fastDelivered: false,
-            fastDeliveredPaths: new Set<string>(),
-          };
-          void promise.then((result) => {
-            handle.result = result;
-          });
-          void promise.finally(() => {
-            handle.settledAt = Date.now();
-            signal.removeEventListener('abort', onParentAbort);
-          });
-          this.pendingMemoryPrefetch = handle;
-          if (prefetchAbortReason) {
-            this.cancelPendingMemoryPrefetch(prefetchAbortReason);
-          }
-        }
+        this.beginManagedAutoMemoryRecall(
+          preHookUserPromptText ?? partToString(request),
+          signal,
+        );
 
         // Track prompt count for commit attribution. Only the user typing a
         // fresh prompt should bump the counter — `ToolResult` (tool-call
@@ -3278,7 +3292,7 @@ export class GeminiClient {
           this.sessionTurnCount > this.config.getMaxSessionTurns()
         ) {
           this.cancelPendingMemoryPrefetch('no_safe_delivery_point');
-          yield { type: GeminiEventType.MaxSessionTurns };
+          yield { type: LlmEventType.MaxSessionTurns };
           endCurrentInteraction(
             'error',
             'max session turns exceeded',
@@ -3329,7 +3343,7 @@ export class GeminiClient {
         return steerInput;
       };
 
-      // Auto-compaction happens inside GeminiChat.sendMessageStream and surfaces
+      // Auto-compaction happens inside LlmChat.sendMessageStream and surfaces
       // via the `compressed → ChatCompressed` bridge in turn.ts. Manual /compress
       // still calls tryCompressChat directly for the full reset (env refresh +
       // forceFullIdeContext flip).
@@ -3337,10 +3351,10 @@ export class GeminiClient {
       const sessionTokenLimit = this.config.getSessionTokenLimit();
       if (sessionTokenLimit > 0) {
         // An exact `\0` full-turn route selector resolves to its route before
-        // GeminiChat.sendMessageStream stamps counts under it, so the gate
+        // LlmChat.sendMessageStream stamps counts under it, so the gate
         // must key the resolved route too — the raw selector key can never
         // match a stamped count. Mirrors the resolution at the top of
-        // GeminiChat.sendMessageStream (#9454).
+        // LlmChat.sendMessageStream (#9454).
         const exactRoute = model.endsWith('\0')
           ? await this.config
               .getBaseLlmClient()
@@ -3355,7 +3369,7 @@ export class GeminiClient {
         if (lastPromptTokenCount > sessionTokenLimit) {
           this.cancelPendingMemoryPrefetch('no_safe_delivery_point');
           yield {
-            type: GeminiEventType.SessionTokenLimitExceeded,
+            type: LlmEventType.SessionTokenLimitExceeded,
             value: {
               currentTokens: lastPromptTokenCount,
               limit: sessionTokenLimit,
@@ -3507,12 +3521,10 @@ export class GeminiClient {
           }
         }
 
-        const userQueryMemory = await this.tryConsumeMemoryPrefetch(
-          'initial',
+        const userQueryMemory =
           messageType === SendMessageType.UserQuery
-            ? INITIAL_MEMORY_RECALL_WAIT_MS
-            : 0,
-        );
+            ? await this.consumeManagedAutoMemoryRecall('initial')
+            : await this.tryConsumeMemoryPrefetch('initial');
         if (userQueryMemory?.prompt) {
           // Unshift to the front of systemReminders: on a UserQuery turn
           // requestToSend leads with user text, so positioning memory at
@@ -3585,7 +3597,7 @@ export class GeminiClient {
             }
             const loopType = this.loopDetector.getLastLoopType();
             yield {
-              type: GeminiEventType.LoopDetected,
+              type: LlmEventType.LoopDetected,
               ...(loopType && { value: { loopType } }),
             };
             await arenaAgentClient?.reportError('Loop detected');
@@ -3597,7 +3609,7 @@ export class GeminiClient {
           }
         }
         const toolResultMemory =
-          await this.tryConsumeMemoryPrefetch('tool_result');
+          await this.consumeManagedAutoMemoryRecall('tool_result');
         if (toolResultMemory?.prompt) {
           // Append (not prepend): on a ToolResult turn, requestToSend leads
           // with functionResponse parts that must immediately follow the
@@ -3639,7 +3651,7 @@ export class GeminiClient {
         : getActiveGoal(this.config.getSessionId());
       if (activeGoalAtTurnStart) {
         yield {
-          type: GeminiEventType.ActiveGoal,
+          type: LlmEventType.ActiveGoal,
           value: activeGoalAtTurnStart,
         };
       }
@@ -3648,13 +3660,13 @@ export class GeminiClient {
       // Mutates `lastEmittedActiveGoal` when an event is returned.
       const maybeEmitActiveGoalChange = (
         nextActiveGoal: ActiveGoal | undefined,
-      ): ServerGeminiStreamEvent | undefined => {
+      ): ServerLlmStreamEvent | undefined => {
         if (activeGoalEquals(lastEmittedActiveGoal, nextActiveGoal)) {
           return undefined;
         }
         lastEmittedActiveGoal = nextActiveGoal;
         return {
-          type: GeminiEventType.ActiveGoal,
+          type: LlmEventType.ActiveGoal,
           value: nextActiveGoal ?? null,
         };
       };
@@ -3708,25 +3720,25 @@ export class GeminiClient {
             settleSteerInput(attachedSteerInput, attachedSteerPushCount);
             steerInputSettled = true;
           }
-          if (event.type === GeminiEventType.ToolCallRequest) {
+          if (event.type === LlmEventType.ToolCallRequest) {
             hasToolCalls = true;
           } else if (
-            event.type === GeminiEventType.Retry ||
-            event.type === GeminiEventType.ModelFallback
+            event.type === LlmEventType.Retry ||
+            event.type === LlmEventType.ModelFallback
           ) {
             hasToolCalls = false;
             loopGuardFedCallIds.clear();
             agentOutput.restartAttempt(
-              event.type === GeminiEventType.Retry &&
+              event.type === LlmEventType.Retry &&
                 event.isContinuation === true,
             );
           }
-          if (event.type === GeminiEventType.Content) {
+          if (event.type === LlmEventType.Content) {
             agentOutput.appendText(event.value);
-          } else if (event.type === GeminiEventType.Finished) {
+          } else if (event.type === LlmEventType.Finished) {
             agentOutput.observeFinishReason(event.value?.reason);
           }
-          if (messageDisplay && event.type === GeminiEventType.Content) {
+          if (messageDisplay && event.type === LlmEventType.Content) {
             messageDisplay.addChunk(event.value);
           }
           if (shouldUpdateIdeContextState && !didUpdateIdeContextState) {
@@ -3742,7 +3754,7 @@ export class GeminiClient {
           // stateful poller (issue #9450). The event itself still flows to
           // consumers below; only the guard feed is deduped.
           let duplicateLoopGuardRequest = false;
-          if (event.type === GeminiEventType.ToolCallRequest) {
+          if (event.type === LlmEventType.ToolCallRequest) {
             const fedCallId = event.value.callId;
             if (fedCallId) {
               duplicateLoopGuardRequest = loopGuardFedCallIds.has(fedCallId);
@@ -3770,7 +3782,7 @@ export class GeminiClient {
             }
             const loopType = this.loopDetector.getLastLoopType();
             yield {
-              type: GeminiEventType.LoopDetected,
+              type: LlmEventType.LoopDetected,
               ...(loopType && { value: { loopType } }),
             };
             if (arenaAgentClient) {
@@ -3803,7 +3815,7 @@ export class GeminiClient {
             }
             const loopType = this.loopDetector.getLastLoopType();
             yield {
-              type: GeminiEventType.LoopDetected,
+              type: LlmEventType.LoopDetected,
               ...(loopType && { value: { loopType } }),
             };
             if (arenaAgentClient) {
@@ -3819,14 +3831,14 @@ export class GeminiClient {
           }
           // Update arena status on Finished events — stats are derived
           // automatically from uiTelemetryService by the reporter.
-          if (arenaAgentClient && event.type === GeminiEventType.Finished) {
+          if (arenaAgentClient && event.type === LlmEventType.Finished) {
             await arenaAgentClient.updateStatus();
           }
 
           // Re-send a full IDE context blob on the next regular message — auto
           // compaction inside chat.sendMessageStream may have summarized away
           // the previous merged IDE context.
-          if (event.type === GeminiEventType.ChatCompressed) {
+          if (event.type === LlmEventType.ChatCompressed) {
             this.forceFullIdeContext = true;
             // Auto-compaction summarized away the startup prelude. Rebuild it
             // before the next turn so env/tool/MCP context isn't lost for the
@@ -3863,15 +3875,15 @@ export class GeminiClient {
             yield goalEvent;
           }
           if (
-            (event.type === GeminiEventType.UserCancelled && signal.aborted) ||
-            event.type === GeminiEventType.Error
+            (event.type === LlmEventType.UserCancelled && signal.aborted) ||
+            event.type === LlmEventType.Error
           ) {
             for (const goalEvent of await finalizeInterruptedGoalTurn()) {
               yield goalEvent;
             }
           }
           yield event;
-          if (event.type === GeminiEventType.Error) {
+          if (event.type === LlmEventType.Error) {
             this.forceFullIdeContext = true;
             if (arenaAgentClient) {
               const status = event.value.error?.status;
@@ -4025,7 +4037,7 @@ export class GeminiClient {
         // This should happen regardless of the hook's decision
         if (stopOutput?.systemMessage) {
           yield {
-            type: GeminiEventType.HookSystemMessage,
+            type: LlmEventType.HookSystemMessage,
             value: stopOutput.systemMessage,
           };
         }
@@ -4050,7 +4062,7 @@ export class GeminiClient {
               stopHookBlockingCap,
             );
             yield {
-              type: GeminiEventType.HookSystemMessage,
+              type: LlmEventType.HookSystemMessage,
               value: warning,
             };
             debugLogger.warn(warning);
@@ -4064,7 +4076,7 @@ export class GeminiClient {
               yield goalEvent;
             }
             yield {
-              type: GeminiEventType.StopHookLoop,
+              type: LlmEventType.StopHookLoop,
               value: {
                 iterationCount: currentIterationCount,
                 reasons: currentReasons,
@@ -4172,7 +4184,7 @@ export class GeminiClient {
               yield activeGoalEvent;
             }
             yield {
-              type: GeminiEventType.HookSystemMessage,
+              type: LlmEventType.HookSystemMessage,
               value: warning,
             };
             debugLogger.warn(warning);
@@ -4188,7 +4200,7 @@ export class GeminiClient {
           }
 
           yield {
-            type: GeminiEventType.StopHookLoop,
+            type: LlmEventType.StopHookLoop,
             value: {
               iterationCount: currentIterationCount,
               reasons: currentReasons,
@@ -4437,7 +4449,7 @@ export class GeminiClient {
       // pending, preserve the handle so the next ToolResult turn can
       // consume it (the fire-and-forget design).
       if (!hasToolCalls) {
-        this.cancelPendingMemoryPrefetch('no_safe_delivery_point');
+        this.finishManagedAutoMemoryRecall();
       }
       for (const goalEvent of takePendingGoalEvents()) {
         yield goalEvent;
@@ -4610,7 +4622,7 @@ export class GeminiClient {
   }
 
   /**
-   * Wrapper around {@link GeminiChat.tryCompress} that restores main-session
+   * Wrapper around {@link LlmChat.tryCompress} that restores main-session
    * startup context after successful compaction and flips the IDE full-context
    * flag for the next regular message.
    */
@@ -4645,7 +4657,7 @@ export class GeminiClient {
           previousSessionStartSource,
         );
       }
-      // startChat() creates a new GeminiChat without touching FileReadCache,
+      // startChat() creates a new LlmChat without touching FileReadCache,
       // so prior read_file results that were summarised away would still
       // resolve to the file_unchanged placeholder. Clear so post-compaction
       // Reads re-emit bytes the model can no longer see in history.
@@ -4719,7 +4731,7 @@ export class GeminiClient {
 
   /**
    * Fast, rule-based compression without any LLM side-query.
-   * Delegates to {@link GeminiChat.compressFast} and handles post-compression
+   * Delegates to {@link LlmChat.compressFast} and handles post-compression
    * FileReadCache disarming.
    */
   async tryCompressChatFast(): Promise<ChatCompressionInfo> {
@@ -4740,3 +4752,6 @@ export class GeminiClient {
     return info;
   }
 }
+
+/** @deprecated Use `LlmClient`; retained until a future major release. */
+export { LlmClient as GeminiClient };

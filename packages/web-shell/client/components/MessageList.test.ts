@@ -1133,6 +1133,7 @@ function collapseItems(
     waitForUnmatchedAgentCompletions: boolean;
     terminalBackgroundShellTaskIds: ReadonlySet<string>;
     automaticallyExpandedAgentKeys: ReadonlySet<string>;
+    paginatedExpanded: ReadonlySet<string>;
     enabled: boolean;
   }> = {},
 ): DisplayItem[] {
@@ -1145,6 +1146,7 @@ function collapseItems(
       opts.waitForUnmatchedAgentCompletions ?? true,
     terminalBackgroundShellTaskIds: opts.terminalBackgroundShellTaskIds,
     automaticallyExpandedAgentKeys: opts.automaticallyExpandedAgentKeys,
+    paginatedExpanded: opts.paginatedExpanded,
     enabled: opts.enabled ?? true,
   });
 }
@@ -1218,6 +1220,50 @@ describe('applyTurnCollapse', () => {
       collapsed: false,
       hiddenCount: 1,
     });
+  });
+
+  it('keeps a turn expanded when its tail was shown before pagination completed its head', () => {
+    const items = groupParallelAgents([
+      makeUserMessage('u1'),
+      makeMultiToolGroup('g1'),
+      makeAssistantMessage('a1'),
+      makeUserMessage('u2'),
+      makeMultiToolGroup('g2'),
+      makeAssistantMessage('a2'),
+    ]);
+    const out = collapseItems(items, {
+      paginatedExpanded: new Set(['u1']),
+    });
+    // The pagination-completed turn stays open (its steps are visible); the
+    // following complete turn still collapses as usual.
+    expect(rowIds(out)).toEqual([
+      'u1',
+      'tc-u1',
+      'g1',
+      'a1',
+      'u2',
+      'tc-u2',
+      'a2',
+    ]);
+    expect(collapseOf(out, 0)).toMatchObject({
+      collapsed: false,
+      hiddenCount: 1,
+    });
+    expect(collapseOf(out, 4)).toMatchObject({ collapsed: true });
+  });
+
+  it('lets an explicit user toggle override the pagination keep-open', () => {
+    const items = groupParallelAgents([
+      makeUserMessage('u1'),
+      makeMultiToolGroup('g1'),
+      makeAssistantMessage('a1'),
+    ]);
+    const out = collapseItems(items, {
+      paginatedExpanded: new Set(['u1']),
+      overrides: new Map([['u1', false]]),
+    });
+    expect(rowIds(out)).toEqual(['u1', 'tc-u1', 'a1']);
+    expect(collapseOf(out, 0)).toMatchObject({ collapsed: true });
   });
 
   it('keeps every row but still tags the head when the turn is expanded', () => {

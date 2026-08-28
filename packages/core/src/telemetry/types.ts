@@ -209,7 +209,7 @@ export class ToolCallEvent implements BaseTelemetryEvent {
     // placeholder constant so consumers still see the call happened —
     // duration, success, decision metrics are preserved — but the
     // payload itself doesn't ride along. The same constant is used by
-    // `redactStructuredOutputArgsForRecording` in `core/geminiChat.ts`
+    // `redactStructuredOutputArgsForRecording` in `core/llm-chat.ts`
     // for the on-disk JSONL surface so neither side can silently drift.
     this.function_args =
       call.request.name === ToolNames.STRUCTURED_OUTPUT
@@ -838,7 +838,7 @@ export class ProtocolTagSanitizedEvent implements BaseTelemetryEvent {
  * Phase 4b — HTTP-status retry telemetry. Emitted by `retryWithBackoff` (via
  * the `onRetry` callback opt-in) for HTTP 429 / 5xx retries at LLM call sites.
  *
- * Distinct from {@link ContentRetryEvent}, which is emitted by `geminiChat`'s
+ * Distinct from {@link ContentRetryEvent}, which is emitted by `llmChat`'s
  * for-loop for `InvalidStreamError` retries that use
  * `INVALID_STREAM_RETRY_CONFIG`, not `retryWithBackoff`. A single user prompt
  * may fire BOTH event types; sum across event types to count total retries per
