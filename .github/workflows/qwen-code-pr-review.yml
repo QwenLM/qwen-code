@@ -530,6 +530,33 @@ jobs:
           "${GIT_SAFE[@]}" worktree prune -v || true
           echo "stale agent state cleaned"
 
+      # A cancelled verify can leave either the active project state or its
+      # protected recovery backup unreadable to the runner user. Remove only
+      # those two known names before checkout reuses the workspace.
+      - name: 'Clean stale .qwen before checkout'
+        run: |-
+          set -uo pipefail
+          for stale_qwen in "$GITHUB_WORKSPACE/.qwen" "$GITHUB_WORKSPACE/.qwen.root-orig"; do
+            if [ ! -e "$stale_qwen" ] && [ ! -L "$stale_qwen" ]; then
+              continue
+            fi
+            if [ -d "$stale_qwen" ] && [ ! -L "$stale_qwen" ]; then
+              chmod -R u+w "$stale_qwen" 2>/dev/null || true
+            fi
+            rm -rf -- "$stale_qwen" 2>/dev/null ||
+              sudo -n rm -rf -- "$stale_qwen" 2>/dev/null ||
+              {
+                quarantine="$(dirname -- "$GITHUB_WORKSPACE")/_qwen-quarantine"
+                mkdir -p "$quarantine" 2>/dev/null || true
+                stale_name="$(basename -- "$stale_qwen")"
+                if mv -- "$stale_qwen" "$quarantine/${stale_name#\.}-$(date -u +%Y%m%dT%H%M%SZ)-$$" 2>/dev/null; then
+                  echo "::warning::could not delete leaked $stale_name; moved it to $quarantine so this checkout can proceed — that directory needs manual cleanup"
+                else
+                  echo "::warning::leaked $stale_name; runner needs manual cleanup"
+                fi
+              }
+          done
+
       # SECURITY: checkout trusted base code; /review fetches PR diff context.
       # Self-heals on the reused self-hosted pool in two observed shapes: a
       # transient network drop mid-fetch (curl 92 / early EOF), and a

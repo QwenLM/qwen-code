@@ -80,6 +80,14 @@ const reviewCleanStep = reviewCleanSteps[reviewCleanIndex].run;
 const agentStateCleanStep = reviewCleanSteps.find(
   (s) => s.name === 'Clean stale agent state',
 ).run;
+const reviewPreCheckoutSweepIndex = reviewCleanSteps.findIndex(
+  (s) => s.name === 'Clean stale .qwen before checkout',
+);
+const reviewPreCheckoutSweepStep =
+  reviewCleanSteps[reviewPreCheckoutSweepIndex]?.run;
+const reviewCheckoutIndex = reviewCleanSteps.findIndex(
+  (s) => s.name === 'Checkout base branch',
+);
 // The step's owner-extraction awk is not a worktree filter: anchor on the
 // filter's shape, not the first awk in the step. Derive it once here so the
 // pinning test and the behavioral test always execute the same filter.
@@ -327,6 +335,17 @@ describe('review worktree cleanup steps', () => {
     }
   });
 
+  it('sweeps both known qwen state names before the review checkout', () => {
+    expect(reviewPreCheckoutSweepStep).toBeDefined();
+    expect(reviewPreCheckoutSweepIndex).toBeGreaterThan(
+      reviewCleanSteps.findIndex(
+        (s) => s.name === 'Restore workspace ownership',
+      ),
+    );
+    expect(reviewPreCheckoutSweepIndex).toBeLessThan(reviewCheckoutIndex);
+    expectQuarantineFallback(reviewPreCheckoutSweepStep);
+  });
+
   it.skipIf(!permissionFixturesAvailable)(
     'ci sweep unlinks a dangling-symlink .qwen via the -L existence arm',
     () => {
@@ -348,6 +367,34 @@ describe('review worktree cleanup steps', () => {
 
         expect(result.status, result.stderr).toBe(0);
         expect(linkExists(link)).toBe(false);
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(!permissionFixturesAvailable)(
+    'ci sweep unlinks a live-symlink .qwen without touching its target',
+    () => {
+      const root = mkdtempSync(join(tmpdir(), 'qwen-ci-cleanup-'));
+      const workspace = join(root, 'workspace');
+      const target = join(root, 'outside-target');
+      const marker = join(target, 'marker.txt');
+      mkdirSync(workspace, { recursive: true });
+      mkdirSync(target, { recursive: true });
+      writeFileSync(marker, 'keep\n');
+      const link = join(workspace, '.qwen');
+      try {
+        symlinkSync(target, link);
+        const result = spawnSync('bash', ['-c', ciCleanSteps[0].run], {
+          cwd: workspace,
+          env: { ...process.env, GITHUB_WORKSPACE: workspace },
+          encoding: 'utf8',
+        });
+
+        expect(result.status, result.stderr).toBe(0);
+        expect(linkExists(link)).toBe(false);
+        expect(readFileSync(marker, 'utf8')).toBe('keep\n');
       } finally {
         rmSync(root, { recursive: true, force: true });
       }
