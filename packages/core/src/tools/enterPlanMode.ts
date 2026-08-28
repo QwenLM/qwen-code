@@ -152,7 +152,7 @@ class EnterPlanModeToolInvocation extends BaseToolInvocation<
 
     // Reveal the exit_plan_mode deferred tool so the model can call it
     // directly without needing to search for it first. This mirrors the
-    // pattern in ToolSearch's select: path (reveal + setTools sync).
+    // session-setup reveal pattern (reveal + setTools sync).
     try {
       const registry = this.config.getToolRegistry();
       const exitPlanModeName = ToolNames.EXIT_PLAN_MODE;
@@ -175,8 +175,8 @@ class EnterPlanModeToolInvocation extends BaseToolInvocation<
       }
     } catch (error) {
       // Non-fatal: log the failure but still return success for
-      // entering plan mode. The model can use ToolSearch to find
-      // exit_plan_mode if the reveal failed.
+      // entering plan mode. The model can use ToolSearch + ToolCall if the
+      // reveal failed.
       debugLogger.warn(
         `[EnterPlanModeTool] Failed to reveal exit_plan_mode: ${error instanceof Error ? error.message : String(error)}`,
       );

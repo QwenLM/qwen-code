@@ -200,17 +200,16 @@ export class ToolRegistry {
   // In-flight factory promises — ensures concurrent ensureTool() calls for the
   // same name share one promise instead of running the factory multiple times.
   private inflight: Map<string, Promise<AnyDeclarativeTool>> = new Map();
-  // Deferred tools that ToolSearch has loaded this session. Once revealed, a
-  // tool's schema is included in subsequent function-declaration lists even
-  // though it would normally be hidden.
+  // Deferred tools promoted into the declaration list by session setup,
+  // compatibility replay, or an explicit runtime flow.
   private revealedDeferred: Set<string> = new Set();
-  // Reveals that are session SETUP rather than ToolSearch discovery (see
+  // Reveals that are session setup rather than transient runtime state (see
   // pinDeferredToolReveal): they survive the `/clear` reset that
-  // intentionally drops discovered reveals so the new session starts clean.
+  // intentionally drops transient reveals so the new session starts clean.
   private pinnedDeferredReveals: Set<string> = new Set();
   // Built-in tools demoted to deferred by an active `permissions.allow`
   // registry allowlist (#9827, #10075). They are fully registered — listed
-  // in `/tools`, discoverable and loadable via ToolSearch, callable through
+  // in `/tools`, discoverable via ToolSearch, callable through ToolCall and
   // the normal approval flow — but their schemas are kept out of the eager
   // model request exactly like `shouldDefer=true` tools. Unlike ordinary
   // deferred tools they are never auto-revealed by the budget preload:
@@ -242,7 +241,7 @@ export class ToolRegistry {
   }
 
   // Stable declaration order keeps the serialized tools block independent of
-  // async registration history (MCP discovery, reconnects, ToolSearch reveals).
+  // async registration history (MCP discovery, reconnects, deferred reveals).
   private static compareToolsByDeclarationName(
     a: AnyDeclarativeTool,
     b: AnyDeclarativeTool,
@@ -624,8 +623,8 @@ export class ToolRegistry {
         this.tools.delete(name);
         // Drop reveal state too so a re-discovered tool of the same
         // name doesn't inherit a `revealed: true` from before the
-        // disconnect (would surface in declarations before any
-        // ToolSearch call this session).
+        // disconnect (would surface in declarations immediately after
+        // reconnection).
         this.revealedDeferred.delete(name);
       }
     }
@@ -747,8 +746,9 @@ export class ToolRegistry {
       // not cover is DROPPED, not demoted to deferred. Discovered tools are
       // dynamic (their schemas are only known after the discovery command
       // runs), so keeping an uncovered one registered-and-deferred would
-      // still advertise it in the deferred-tools reminder and let ToolSearch
-      // re-add its schema on demand — defeating the #9827 schema-shrink
+      // still advertise it in the deferred-tools reminder and let the model
+      // review and invoke it through the bridge — defeating the #9827
+      // schema-shrink
       // guarantee for exactly the tools the allowlist was configured to
       // exclude. Gating at registration keeps both sides of the gate
       // consistent: an uncovered tool is hidden from the model instead of
@@ -800,7 +800,7 @@ export class ToolRegistry {
    * Includes discovered (vs registered) tools if configured.
    *
    * By default, tools marked `shouldDefer=true` are excluded (they are
-   * discovered by the model on demand via the ToolSearch tool). Pass
+   * discovered and invoked by the model through the stable bridge). Pass
    * `{ includeDeferred: true }` to include them, e.g. for diagnostics.
    *
    * Tools marked `alwaysLoad=true` are always included regardless of
@@ -827,8 +827,8 @@ export class ToolRegistry {
   /**
    * Marks a deferred tool as revealed. Revealed tools are included in
    * {@link getFunctionDeclarations} output for the rest of the session, even
-   * though they are normally hidden. Called by the ToolSearch tool after it
-   * successfully loads a tool so the model can invoke it on subsequent turns.
+   * though they are normally hidden. Used by startup preload, plan lifecycle
+   * setup, and compatibility replay for histories with direct deferred calls.
    */
   revealDeferredTool(name: string): void {
     this.revealedDeferred.add(name);
@@ -849,12 +849,8 @@ export class ToolRegistry {
   }
 
   /**
-   * Removes a single tool from the revealed-deferred set. Used for rollback
-   * when a `setTools()` re-sync fails after revealing — leaving the tool
-   * "revealed" in the registry while the chat's declaration list never
-   * received the schema would mean future ToolSearch keyword queries
-   * exclude the tool (per `collectCandidates`'s isDeferredToolRevealed
-   * filter), making it unreachable until `/clear`.
+   * Removes a single tool from the revealed-deferred set. Used to roll back an
+   * explicit reveal when the corresponding declaration refresh fails.
    */
   unrevealDeferredTool(name: string): void {
     this.revealedDeferred.delete(name);
@@ -888,7 +884,7 @@ export class ToolRegistry {
   /**
    * Clears the set of revealed deferred tools. Called by {@link LlmClient}
    * when a chat session is reset (e.g. `/clear`) so the new session starts
-   * with no ToolSearch-discovered reveals — the same state as any fresh
+   * with no transient deferred reveals — the same state as any fresh
    * session. Session-setup reveals pinned via {@link pinDeferredToolReveal}
    * survive the reset (while still registered and deferred): they are part
    * of that fresh session's setup, not of the dropped session's discovery.
@@ -907,7 +903,7 @@ export class ToolRegistry {
    * Returns a lightweight summary of tools that are
    * deferred from the initial function-declaration list. Used to describe the
    * set of on-demand tools in the startup reminder so the model knows what is
-   * reachable via ToolSearch. `alwaysLoad` tools and tools listed in
+   * reachable via ToolSearch + ToolCall. `alwaysLoad` tools and tools listed in
    * {@link Config.getVisibleTools} are excluded.
    */
   getDeferredToolSummary(): DeferredToolSummary[] {
@@ -935,12 +931,9 @@ export class ToolRegistry {
   /**
    * Reveals every deferred tool — bundled built-ins and MCP alike — when
    * the combined estimated token footprint of their schemas fits within
-   * `budgetTokens`. Every mid-session reveal rewrites the declaration
-   * list and invalidates the prompt-cache prefix, so the prefix only
-   * stays stable when NOTHING is left for ToolSearch to reveal: a small
-   * deferred set is cheaper to declare upfront in full than to load one
-   * cache-busting piece at a time. All-or-nothing on purpose — a partial
-   * reveal would leave an arbitrary subset behind ToolSearch.
+   * `budgetTokens`. A small deferred set can be cheaper to declare upfront
+   * than to pay for bridge round trips. All-or-nothing on purpose — a partial
+   * reveal would leave an arbitrary subset behind the bridge.
    *
    * Already-revealed tools count toward the total (reveal is
    * idempotent), so repeated calls cannot ratchet past the budget as MCP
@@ -952,11 +945,11 @@ export class ToolRegistry {
     for (const tool of this.tools.values()) {
       if (!this.isEffectivelyDeferred(tool) || tool.alwaysLoad) continue;
       // Permission-deferred tools (#10075) are deliberately excluded: the
-      // budget preload exists to stabilise the prompt cache for ordinary
-      // deferred tools, but auto-revealing an allowlist-demoted tool would
+      // budget preload avoids bridge round trips for small ordinary deferred
+      // sets, but auto-revealing an allowlist-demoted tool would
       // re-add exactly the schema the `permissions.allow` registry
       // allowlist keeps out of the eager request (#9827). Such tools stay
-      // loadable on demand via ToolSearch.
+      // reachable on demand via ToolSearch + ToolCall.
       if (this.permissionDeferred.has(tool.name)) continue;
       if (this.config.getVisibleTools().has(tool.name)) continue;
       candidates.push(tool.name);
@@ -971,7 +964,7 @@ export class ToolRegistry {
     }
     if (estimatedTokens > budgetTokens) {
       debugLogger.debug(
-        `preloadDeferredToolsWithinBudget: keeping ${candidates.length} deferred tool(s) behind ToolSearch ` +
+        `preloadDeferredToolsWithinBudget: keeping ${candidates.length} deferred tool(s) behind ToolSearch + ToolCall ` +
           `(estimated ${estimatedTokens} tokens > budget ${budgetTokens} tokens).`,
       );
       return 0;

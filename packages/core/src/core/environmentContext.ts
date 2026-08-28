@@ -214,7 +214,7 @@ export function buildDeferredToolsReminder(
 
   return buildDeferredToolsReminderForSummary(
     deferredTools,
-    `The following tools are reachable via \`${ToolNames.TOOL_SEARCH}\`. Call with \`select:<name>\` or a keyword query.`,
+    `The following tools are reachable through \`${ToolNames.TOOL_SEARCH}\` and \`${ToolNames.TOOL_CALL}\`. Review a schema with \`select:<name>\` or a keyword query, then invoke it with \`${ToolNames.TOOL_CALL}\`.`,
   );
 }
 
@@ -237,7 +237,7 @@ export function buildChangedMcpToolsReminder(
   if (removed.length === 0) {
     return buildDeferredToolsReminderForSummary(
       mcpTools,
-      `The following MCP tools became available after startup and are reachable via \`${ToolNames.TOOL_SEARCH}\`. Call with \`select:<name>\` or a keyword query.`,
+      `The following MCP tools became available after startup and are reachable through \`${ToolNames.TOOL_SEARCH}\` and \`${ToolNames.TOOL_CALL}\`. Review a schema, then invoke it through the bridge.`,
     );
   }
 
@@ -248,7 +248,7 @@ export function buildChangedMcpToolsReminder(
   if (mcpTools.length > 0) {
     const addedBody = buildDeferredToolsReminderBody(
       mcpTools,
-      `The following MCP tools are now available and are reachable via \`${ToolNames.TOOL_SEARCH}\`. Call with \`select:<name>\` or a keyword query.`,
+      `The following MCP tools are now available and are reachable through \`${ToolNames.TOOL_SEARCH}\` and \`${ToolNames.TOOL_CALL}\`. Review a schema, then invoke it through the bridge.`,
     );
     if (addedBody) {
       bodyParts.push(addedBody);
@@ -512,8 +512,8 @@ export async function getInitialChatHistory(
     : null;
 
   // Stable parts first (MCP, skills, startup) so prefix-caching servers
-  // retain the KV-cache for the shared prefix. Deferred-tools is last
-  // because tool_search revelations change it — only the tail recomputes.
+  // retain the KV-cache for the shared prefix. Deferred-tools is last because
+  // progressive MCP discovery can change it — only the tail recomputes.
   const reminderParts = [
     buildMcpServerInstructionsReminder(toolRegistry),
     skillsResult?.reminder ?? null,

@@ -2619,7 +2619,7 @@ const SETTINGS_SCHEMA = {
         category: 'Tools',
         requiresRestart: true,
         default: {},
-        description: 'Settings for the ToolSearch discovery mechanism.',
+        description: 'Settings for deferred-tool discovery and invocation.',
         showInDialog: false,
         properties: {
           enabled: {
@@ -2629,7 +2629,7 @@ const SETTINGS_SCHEMA = {
             requiresRestart: true,
             default: true,
             description:
-              'When enabled, MCP tools are loaded on-demand via ToolSearch to reduce prompt size. Disable this for models that rely on prefix-based KV caching (e.g. DeepSeek) to keep the prompt prefix stable and maximize cache hit rates.',
+              'When enabled, deferred tools are reviewed via ToolSearch and invoked through the stable ToolCall bridge. This reduces prompt size without changing the model-facing tool list or prompt-cache prefix.',
             showInDialog: true,
           },
           threshold: {
@@ -2639,7 +2639,7 @@ const SETTINGS_SCHEMA = {
             requiresRestart: true,
             default: 10,
             description:
-              'Context-window percentage used as the session-start budget for preloading deferred tools (bundled built-ins and MCP alike). When every deferred tool schema fits within the budget, all are declared upfront instead of loaded on demand, keeping the prompt prefix stable for KV caching. Set 0 to always load deferred tools on demand.',
+              'Context-window percentage used as the session-start budget for preloading deferred tools (bundled built-ins and MCP alike). When every deferred schema fits within the budget, all are declared upfront for direct calls; otherwise they stay behind the stable ToolSearch + ToolCall bridge. Set 0 to always use the bridge.',
             showInDialog: true,
             // A percentage of the context window: values above 100 would set a
             // budget larger than the window and unconditionally preload every

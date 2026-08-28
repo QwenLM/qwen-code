@@ -230,6 +230,11 @@ export const TOOL_NAME_ALIASES: Readonly<Record<string, string>> = {
   ToolSearch: 'tool_search',
   ToolSearchTool: 'tool_search',
 
+  // Deferred-tool invocation bridge
+  tool_call: 'tool_call',
+  ToolCall: 'tool_call',
+  ToolCallTool: 'tool_call',
+
   // Structured output (synthetic --json-schema contract)
   structured_output: 'structured_output',
   StructuredOutput: 'structured_output',

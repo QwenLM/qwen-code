@@ -984,7 +984,7 @@ export class DiscoveredMCPTool extends BaseDeclarativeTool<
       parameterSchema,
       true, // isOutputMarkdown
       true, // canUpdateOutput — enables streaming progress for MCP tools
-      true, // shouldDefer — MCP tools are discovered via ToolSearch to keep the
+      true, // shouldDefer — MCP tools use ToolSearch + ToolCall to keep the
       //   initial tool-declaration list small when many MCP servers are attached.
       alwaysLoad,
       // searchHint: server name boosts fuzzy matching when the user references

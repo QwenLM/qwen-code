@@ -9202,8 +9202,8 @@ describe('Server Config (config.ts)', () => {
       // Unlisted built-ins are NOT registered eagerly — their schemas are
       // never sent in the eager model request (#9827). But since #10075 they
       // are demoted to deferred rather than dropped: still registered, so
-      // they stay listed in /tools and loadable via ToolSearch instead of
-      // silently disappearing.
+      // they stay listed in /tools and reachable via ToolSearch + ToolCall
+      // instead of silently disappearing.
       expect(registered).not.toContain(ToolNames.SEND_MESSAGE);
       expect(registered).not.toContain(ToolNames.UPDATE_GOAL);
       expect(registered).not.toContain(ToolNames.GET_GOAL);

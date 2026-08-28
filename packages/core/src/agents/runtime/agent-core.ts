@@ -110,7 +110,7 @@ import type {
 import { AgentEventEmitter, AgentEventType } from './agent-events.js';
 import { AgentStatistics, type AgentStatsSummary } from './agent-statistics.js';
 import { matchesMcpPattern } from '../../permissions/rule-parser.js';
-import { ToolNames } from '../../tools/tool-names.js';
+import { canonicalToolName, ToolNames } from '../../tools/tool-names.js';
 import { DEFAULT_QWEN_MODEL } from '../../config/models.js';
 import { type ContextState, templateString } from './agent-headless.js';
 import { getResponseText } from '../../utils/partUtils.js';
@@ -688,8 +688,9 @@ export class AgentCore {
         (asStrings.length === 0 && onlyInlineDecls.length === 0)
       ) {
         // Subagents inherit ordinary deferred tools (MCP, low-frequency
-        // built-ins). Permission-allowlist-deferred schemas remain hidden
-        // until ToolSearch reveals them, preserving the registry allowlist.
+        // built-ins). Permission-allowlist-deferred schemas remain hidden and
+        // are reached through ToolSearch + ToolCall, preserving the registry
+        // allowlist without mutating the declarations.
         toolsList.push(
           ...toolRegistry
             .getFunctionDeclarations({ includeDeferred: true })
@@ -1799,6 +1800,11 @@ export class AgentCore {
     // onToolCallsUpdate only fires the transition event once per callId even
     // though the callback runs repeatedly while the tool executes.
     const executionStartedEmitted = new Set<string>();
+    // ToolCall bridge requests are resolved by CoreToolScheduler. Only those
+    // starts are deferred to its first update; ordinary tools keep their
+    // existing pre-schedule event timing.
+    const pendingToolCallStarts = new Set<string>();
+    const executionRequestByCallId = new Map<string, ToolCallRequestInfo>();
     const approvalDeliveryByDetails = new WeakMap<
       ToolCallConfirmationDetails,
       ApprovalDeliveryState
@@ -1816,6 +1822,27 @@ export class AgentCore {
         retireApprovalDelivery(state);
       }
       currentApprovalDeliveries.clear();
+    };
+    const emitToolCallStart = (request: ToolCallRequestInfo) => {
+      const { callId, name: toolName, args } = request;
+      this.eventEmitter?.emit(AgentEventType.TOOL_CALL, {
+        subagentId: this.subagentId,
+        round: currentRound,
+        callId,
+        name: toolName,
+        args,
+        description: this.getToolDescription(toolName, args),
+        isOutputMarkdown: this.getToolIsOutputMarkdown(toolName),
+        timestamp: Date.now(),
+      } as AgentToolCallEvent);
+
+      void this.hooks?.preToolUse?.({
+        subagentId: this.subagentId,
+        name: this.name,
+        toolName,
+        args,
+        timestamp: Date.now(),
+      });
     };
     const deliverApproval = (state: ApprovalDeliveryState) => {
       if (
@@ -1953,6 +1980,13 @@ export class AgentCore {
         resolveBatch?.();
       },
       onToolCallsUpdate: (calls: ToolCall[]) => {
+        for (const call of calls) {
+          const { callId } = call.request;
+          if (!pendingToolCallStarts.delete(callId)) continue;
+          executionRequestByCallId.set(callId, call.request);
+          emitToolCallStart(call.request);
+        }
+
         const awaitingByCallId = new Map(
           calls
             .filter(
@@ -2097,7 +2131,8 @@ export class AgentCore {
       onEditorClose: () => {},
     });
 
-    // Prepare requests and emit TOOL_CALL events
+    // Prepare requests. Bridge events wait for scheduler resolution; ordinary
+    // tool events retain their existing pre-schedule timing.
     const requests: ToolCallRequestInfo[] = authorizedCalls.map((fc) => {
       const toolName = String(fc.name || 'unknown');
       const callId = callIdByFunctionCall.get(fc)!;
@@ -2114,27 +2149,11 @@ export class AgentCore {
         wasOutputTruncated,
       };
 
-      const description = this.getToolDescription(toolName, args);
-      const isOutputMarkdown = this.getToolIsOutputMarkdown(toolName);
-      this.eventEmitter?.emit(AgentEventType.TOOL_CALL, {
-        subagentId: this.subagentId,
-        round: currentRound,
-        callId,
-        name: toolName,
-        args,
-        description,
-        isOutputMarkdown,
-        timestamp: Date.now(),
-      } as AgentToolCallEvent);
-
-      // pre-tool hook
-      void this.hooks?.preToolUse?.({
-        subagentId: this.subagentId,
-        name: this.name,
-        toolName,
-        args,
-        timestamp: Date.now(),
-      });
+      if (canonicalToolName(toolName) === ToolNames.TOOL_CALL) {
+        pendingToolCallStarts.add(callId);
+      } else {
+        emitToolCallStart(request);
+      }
 
       return request;
     });
@@ -2157,6 +2176,8 @@ export class AgentCore {
           if (emittedCallIds.has(req.callId)) continue;
           emittedCallIds.add(req.callId);
 
+          const executionRequest = executionRequestByCallId.get(req.callId);
+          const toolName = executionRequest?.name ?? req.name;
           const errorMessage = 'Tool call cancelled by user abort.';
           const responseParts: Part[] = [
             {
@@ -2167,11 +2188,11 @@ export class AgentCore {
               },
             },
           ];
-          this.recordToolCallStats(req.name, false, 0, errorMessage);
+          this.recordToolCallStats(toolName, false, 0, errorMessage);
 
           this.observeSyntheticToolResultProducer({
             callId: req.callId,
-            name: req.name,
+            name: toolName,
             responseParts,
           });
 
@@ -2179,7 +2200,7 @@ export class AgentCore {
             subagentId: this.subagentId,
             round: currentRound,
             callId: req.callId,
-            name: req.name,
+            name: toolName,
             success: false,
             error: errorMessage,
             responseParts,
@@ -2191,7 +2212,7 @@ export class AgentCore {
             timestamp: Date.now(),
           } as AgentToolResultEvent);
           responseByCallId.set(req.callId, {
-            toolName: req.name,
+            toolName,
             responseParts,
             durationMs: 0,
           });

@@ -5,13 +5,14 @@
  */
 
 /**
- * ToolSearch — discovery tool for on-demand loading of deferred tool schemas.
+ * ToolSearch — discovery tool for reviewing deferred tool schemas on demand.
  *
  * Only a curated set of core tools are included in the initial
  * function-declaration list sent to the model; tools marked `shouldDefer=true`
  * (MCP tools, low-frequency built-ins) are hidden to keep the system prompt
  * small. The model uses this tool to look up those hidden tools by keyword or
- * exact name, which loads their full schemas into the next API request.
+ * exact name, which returns their full schemas for use with the ToolCall
+ * bridge without changing the active function-declaration list.
  *
  * Two query modes:
  *   - `select:Name1,Name2` — exact lookup by tool name
@@ -112,11 +113,11 @@ interface ScoredTool {
   score: number;
 }
 
-const toolSearchDescription = `Fetches function declarations for deferred tools and registers them with the active session so subsequent turns can call them.
+const toolSearchDescription = `Reviews function declarations for deferred tools without changing the active tool list.
 
-Deferred tools appear by name in the deferred-tools startup reminder. Until fetched, only the name is known — there is no parameter schema, so the tool cannot be invoked. This tool takes a query, matches it against the deferred tool list, and returns the matched tools' function declarations (name + description + parameter schema) inside a <functions> block.
+Deferred tools appear by name in the deferred-tools startup reminder. This tool takes a query, matches it against the deferred tool list, and returns the matched tools' function declarations (name + description + parameter schema) inside a <functions> block.
 
-The returned <functions> block is informational — it shows what the schema looks like. Calling the tool itself happens via the model's normal function-call mechanism on the NEXT turn, after the active session's declaration list has been updated. Tools fetched here remain available for the rest of the session.
+The returned <functions> block is informational. After reviewing a hidden deferred tool's schema, invoke it through tool_call with its exact name and schema-shaped arguments. Do not call a hidden deferred tool directly: its declaration remains hidden so the model-facing tool list and prompt-cache prefix stay stable. If select: returns a tool that is already declared, call that tool directly; tool_call accepts hidden deferred tools only.
 
 Query forms:
 - "select:ToolA,ToolB" — fetch these exact tools by name
@@ -162,7 +163,7 @@ class ToolSearchInvocation extends BaseToolInvocation<
     // an unbounded number of full schemas (token bloat). When truncation
     // happens, surface the dropped names in the result so the model knows
     // to re-issue another ToolSearch for them instead of silently
-    // assuming they were loaded.
+    // assuming they were reviewed.
     if (query.toLowerCase().startsWith('select:')) {
       const seen = new Set<string>();
       const names: string[] = [];
@@ -185,7 +186,7 @@ class ToolSearchInvocation extends BaseToolInvocation<
         }
         names.push(stripped);
       }
-      return this.loadAndReturnSchemas(names, truncated);
+      return this.returnSchemas(names, truncated);
     }
 
     // Mode 2: keyword search. Require-word prefix with "+" boosts mandatory
@@ -228,21 +229,18 @@ class ToolSearchInvocation extends BaseToolInvocation<
         returnDisplay: `No matches for '${query}'`,
       };
     }
-    return this.loadAndReturnSchemas(matches);
+    return this.returnSchemas(matches);
   }
 
   /**
-   * Candidates for keyword search: only deferred tools that have NOT yet
-   * been revealed this session. Already-loaded (core) tools are in the
-   * model's tool-declaration list already, so surfacing them here would
-   * be noise. Already-revealed deferred tools were loaded via a prior
-   * `select:` or keyword search and ARE in the declaration list too —
-   * re-surfacing them in subsequent searches wastes tokens and risks
-   * the model retrying a tool it already has.
+   * Candidates for keyword search: only deferred tools that are currently
+   * hidden. Eager core, preloaded, and explicitly visible tools
+   * are in the model's tool-declaration list already, so surfacing them here
+   * would be noise.
    *
    * `select:<name>` mode is unrestricted — the model may legitimately
-   * want to re-inspect the schema of a loaded tool — and handles its
-   * own lookup via {@link loadAndReturnSchemas}.
+   * want to re-inspect the schema of a visible tool — and handles its
+   * own lookup via {@link returnSchemas}.
    */
   private collectCandidates(): AnyDeclarativeTool[] {
     const registry = this.config.getToolRegistry();
@@ -251,7 +249,7 @@ class ToolSearchInvocation extends BaseToolInvocation<
       .filter((t) => registry.isDeferredAndHidden(t.name));
   }
 
-  private async loadAndReturnSchemas(
+  private async returnSchemas(
     names: string[],
     truncated: string[] = [],
   ): Promise<ToolResult> {
@@ -264,7 +262,7 @@ class ToolSearchInvocation extends BaseToolInvocation<
     }
 
     const registry = this.config.getToolRegistry();
-    const loaded: AnyDeclarativeTool[] = [];
+    const reviewed: AnyDeclarativeTool[] = [];
     const missing: string[] = [];
     const blocked: string[] = [];
 
@@ -276,10 +274,6 @@ class ToolSearchInvocation extends BaseToolInvocation<
       lowerIndex.set(realName.toLowerCase(), realName);
     }
 
-    // Track only the tools this call newly reveals so we can roll them
-    // back if setTools() throws. Tools already revealed by an earlier
-    // ToolSearch must stay revealed regardless of this call's outcome.
-    const newlyRevealed: string[] = [];
     for (const requested of names) {
       const canonical = lowerIndex.get(requested.toLowerCase());
       if (!canonical) {
@@ -293,11 +287,9 @@ class ToolSearchInvocation extends BaseToolInvocation<
         blocked.push(canonical);
         continue;
       }
-      // Treat ensureTool throws the same as a null return: log + report
-      // missing. Without this, an exception mid-batch would propagate
-      // out of the loop with previous tools already revealed but never
-      // setTools()-synced — same orphaned-reveal failure mode the
-      // setTools() catch block guards against.
+      // Treat ensureTool throws the same as a null return: log the factory
+      // failure, report this entry as missing, and keep reviewing the rest of
+      // the batch.
       let tool: AnyDeclarativeTool | undefined;
       try {
         tool = await registry.ensureTool(canonical);
@@ -320,85 +312,7 @@ class ToolSearchInvocation extends BaseToolInvocation<
         missing.push(requested);
         continue;
       }
-      // Only reveal + count toward the setTools() trigger when the tool
-      // is actually deferred. `select:` mode also accepts already-loaded
-      // / alwaysLoad tools (the model may use it to re-inspect a schema)
-      // — those don't need reveal (they're already in the declaration
-      // list) and pulling them through setTools() would risk a spurious
-      // "LlmClient not initialised" failure for what is just a
-      // schema-inspection call.
-      const isLoadable = registry.isDeferredAndHidden(canonical);
-      if (isLoadable) {
-        const wasRevealed = registry.isDeferredToolRevealed(canonical);
-        registry.revealDeferredTool(canonical);
-        if (!wasRevealed) {
-          newlyRevealed.push(canonical);
-        }
-      }
-      loaded.push(tool);
-    }
-
-    // Re-sync the active chat's tool list ONLY when this call newly
-    // revealed deferred tools (otherwise the declaration list is
-    // already correct and setTools() is wasted work — and worse, a
-    // null/uninitialised client would surface as a fake error for
-    // what is just a schema-inspection request).
-    let setToolsError: string | undefined;
-    if (newlyRevealed.length > 0) {
-      const llmClient = this.config.getLlmClient();
-      if (!llmClient) {
-        // Optional chaining (`?.setTools()`) used to silently no-op here,
-        // leaving the registry with reveals the API never received —
-        // exactly the inconsistency `setTools() throws` already guards
-        // against. Treat null client identically: rollback + surface an
-        // error so the caller can retry once init is complete.
-        setToolsError = 'LlmClient not initialised';
-      } else {
-        try {
-          await llmClient.setTools();
-        } catch (err) {
-          setToolsError = err instanceof Error ? err.message : String(err);
-          // Same rationale as ensureTool above: debugLogger.warn is
-          // off in production, so a setTools() failure during reveal
-          // would be invisible to operators. The error already lands
-          // in the tool's ToolResult, but a stderr write helps when
-          // someone is debugging from outside the agent transcript.
-          debugLogger.warn(
-            'setTools() failed while revealing deferred tools:',
-            err,
-          );
-          process.stderr.write(
-            `[ToolSearch] setTools() failed while revealing deferred tools: ${setToolsError}\n`,
-          );
-        }
-      }
-
-      if (setToolsError) {
-        // Surface as a tool error so the agent knows the loaded tools
-        // aren't actually available, instead of silently swallowing into
-        // debugLogger.warn (which is off in production). Schemas are
-        // withheld from llmContent (built below only when no error) so
-        // the model doesn't think the tool is callable while the API
-        // declaration list doesn't have it.
-        //
-        // Roll back this call's reveals so the registry stays consistent
-        // with the API's declaration list. Without this, keyword search
-        // would treat these tools as "already loaded" and exclude them
-        // from candidates while the API still has no schema for them.
-        for (const name of newlyRevealed) {
-          registry.unrevealDeferredTool(name);
-        }
-      }
-    }
-
-    if (setToolsError) {
-      return {
-        llmContent: `Error: tools were located but could not be exposed to the API (setTools failed: ${setToolsError}). Retry the search next turn or call ToolSearch again with select:Name1,Name2 — re-running tool registration usually clears transient init races.`,
-        returnDisplay: `setTools failed: ${setToolsError}`,
-        error: {
-          message: `setTools failed while revealing deferred tools: ${setToolsError}`,
-        },
-      };
+      reviewed.push(tool);
     }
 
     // Escape `<` in the JSON-stringified schema so any `</function>`
@@ -407,7 +321,7 @@ class ToolSearchInvocation extends BaseToolInvocation<
     // `<` JSON unicode escape decodes back to `<` when the model
     // interprets the JSON, but as raw text inside the wrapper it's no
     // longer the start of a closing tag.
-    const schemaBlocks = loaded.map(
+    const schemaBlocks = reviewed.map(
       (tool) =>
         `<function>${JSON.stringify(tool.schema).replace(/</g, '\\u003c')}</function>`,
     );
@@ -433,22 +347,23 @@ class ToolSearchInvocation extends BaseToolInvocation<
     if (truncated.length > 0) {
       // Surface the dropped names so the model knows it must re-issue
       // another ToolSearch for them — without this, the model would
-      // assume every requested name was loaded and later receive an
+      // assume every requested name was reviewed and later receive an
       // "unknown tool" API error.
       const header = llmContent ? '\n\n' : '';
       llmContent += `${header}Truncated by max_results — request these in a follow-up call: ${truncated.join(', ')}`;
     }
 
     const displayParts: string[] = [];
-    if (loaded.length > 0) displayParts.push(`Loaded ${loaded.length} tool(s)`);
+    if (reviewed.length > 0)
+      displayParts.push(`Reviewed ${reviewed.length} tool(s)`);
     if (missing.length > 0) displayParts.push(`${missing.length} missing`);
     if (blocked.length > 0) displayParts.push(`${blocked.length} unavailable`);
     if (truncated.length > 0)
       displayParts.push(`${truncated.length} truncated`);
-    const returnDisplay = displayParts.join(', ') || 'No tools loaded';
+    const returnDisplay = displayParts.join(', ') || 'No tools reviewed';
 
     const result: ToolResult = { llmContent, returnDisplay };
-    if (blockedErrorMessage && loaded.length === 0) {
+    if (blockedErrorMessage && reviewed.length === 0) {
       result.error = { message: blockedErrorMessage };
     }
     return result;

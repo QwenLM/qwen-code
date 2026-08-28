@@ -490,6 +490,7 @@ describe('Session', () => {
   let mockToolRegistry: {
     getTool: ReturnType<typeof vi.fn>;
     ensureTool: ReturnType<typeof vi.fn>;
+    isDeferredAndHidden: ReturnType<typeof vi.fn>;
     registerTool: ReturnType<typeof vi.fn>;
     registerPermissionDeferredFactory: ReturnType<typeof vi.fn>;
     revealDeferredTool: ReturnType<typeof vi.fn>;
@@ -781,6 +782,7 @@ describe('Session', () => {
     mockToolRegistry = {
       getTool: vi.fn(),
       ensureTool: vi.fn().mockResolvedValue(true),
+      isDeferredAndHidden: vi.fn().mockReturnValue(false),
       registerTool: vi.fn(),
       registerPermissionDeferredFactory: vi.fn(),
       revealDeferredTool: vi.fn(),
@@ -10355,6 +10357,98 @@ describe('Session', () => {
             }),
           ],
         });
+      });
+
+      it('routes tool_call through a hidden deferred tool in ACP', async () => {
+        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+        const execute = vi.fn().mockResolvedValue({
+          llmContent: 'created issue',
+          returnDisplay: 'created issue',
+        });
+        const bridge = {
+          name: core.ToolNames.TOOL_CALL,
+          kind: core.Kind.Other,
+          description: 'Deferred tool bridge',
+          build: vi.fn((params: Record<string, unknown>) => ({ params })),
+        };
+        const target = {
+          name: 'mcp__github__create_issue',
+          kind: core.Kind.Other,
+          displayName: 'CreateIssue',
+          description: 'Creates an issue',
+          canUpdateOutput: false,
+          isOutputMarkdown: false,
+          build: vi.fn().mockImplementation((params) => ({
+            params,
+            getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+            getDescription: vi.fn().mockReturnValue('create issue'),
+            toolLocations: vi.fn().mockReturnValue([]),
+            execute,
+          })),
+        };
+        mockToolRegistry.getTool.mockImplementation((name: string) =>
+          name === bridge.name
+            ? bridge
+            : name === target.name
+              ? target
+              : undefined,
+        );
+        mockToolRegistry.ensureTool.mockImplementation(async (name: string) =>
+          name === bridge.name
+            ? bridge
+            : name === target.name
+              ? target
+              : undefined,
+        );
+        mockToolRegistry.isDeferredAndHidden.mockImplementation(
+          (name: string) => name === target.name,
+        );
+        const toolLoopState = {
+          totalToolCalls: 0,
+          invalidToolParamErrors: new Map<string, number>(),
+          toolCallKeyCounts: new Map<string, number>(),
+          maxToolCallKeyRepeat: 0,
+          loopDetected: false,
+        };
+
+        const result = await (
+          session as unknown as {
+            runToolCalls: (
+              abortSignal: AbortSignal,
+              promptId: string,
+              calls: FunctionCall[],
+              loopState: typeof toolLoopState,
+            ) => Promise<{ parts: Part[] }>;
+          }
+        ).runToolCalls(
+          new AbortController().signal,
+          'prompt-tool-call-bridge',
+          [
+            {
+              id: 'bridge-call',
+              name: core.ToolNames.TOOL_CALL,
+              args: {
+                name: target.name,
+                arguments: { title: 'Cache-safe tools' },
+              },
+            },
+          ],
+          toolLoopState,
+        );
+
+        expect(execute).toHaveBeenCalledOnce();
+        expect(target.build).toHaveBeenCalledWith({
+          title: 'Cache-safe tools',
+        });
+        expect(result.parts[0]?.functionResponse).toMatchObject({
+          id: 'bridge-call',
+          name: core.ToolNames.TOOL_CALL,
+          response: { output: 'created issue' },
+        });
+        expect(mockLlmClient.recordCompletedToolCall).toHaveBeenCalledWith(
+          target.name,
+          { title: 'Cache-safe tools' },
+        );
       });
 
       it('does not stop disabled tools as repeated invalid parameter calls', async () => {

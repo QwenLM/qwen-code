@@ -2748,7 +2748,7 @@ describe('mergeExcludeTools', () => {
     expect(config.getPermissionsDeny()).toHaveLength(2);
   });
 
-  it('should add tool_search to deny list when tools.toolSearch.enabled is false', async () => {
+  it('should disable both deferred-tool bridges when tools.toolSearch.enabled is false', async () => {
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();
     const settings: Settings = {
@@ -2756,25 +2756,28 @@ describe('mergeExcludeTools', () => {
     };
     const config = await loadCliConfig(settings, argv, undefined, []);
     expect(config.getPermissionsDeny()).toContain('tool_search');
+    expect(config.getPermissionsDeny()).toContain('tool_call');
   });
 
-  it('should auto-disable tool_search for deepseek-v4 models', async () => {
+  it('should keep the stable bridge enabled for deepseek-v4 models', async () => {
     process.argv = ['node', 'script.js', '--model', 'deepseek-v4-flash'];
     const argv = await parseArguments();
     const settings: Settings = {};
     const config = await loadCliConfig(settings, argv, undefined, []);
-    expect(config.getPermissionsDeny()).toContain('tool_search');
+    expect(config.getPermissionsDeny()).not.toContain('tool_search');
+    expect(config.getPermissionsDeny()).not.toContain('tool_call');
   });
 
-  it('should auto-disable tool_search for deepseek-v3 models', async () => {
+  it('should keep the stable bridge enabled for deepseek-v3 models', async () => {
     process.argv = ['node', 'script.js', '--model', 'deepseek-v3'];
     const argv = await parseArguments();
     const settings: Settings = {};
     const config = await loadCliConfig(settings, argv, undefined, []);
-    expect(config.getPermissionsDeny()).toContain('tool_search');
+    expect(config.getPermissionsDeny()).not.toContain('tool_search');
+    expect(config.getPermissionsDeny()).not.toContain('tool_call');
   });
 
-  it('should auto-disable tool_search for deepseek-chat models with provider prefix', async () => {
+  it('should keep the stable bridge enabled for prefixed deepseek-chat models', async () => {
     process.argv = [
       'node',
       'script.js',
@@ -2784,18 +2787,20 @@ describe('mergeExcludeTools', () => {
     const argv = await parseArguments();
     const settings: Settings = {};
     const config = await loadCliConfig(settings, argv, undefined, []);
-    expect(config.getPermissionsDeny()).toContain('tool_search');
+    expect(config.getPermissionsDeny()).not.toContain('tool_search');
+    expect(config.getPermissionsDeny()).not.toContain('tool_call');
   });
 
-  it('should not auto-disable tool_search for non-deepseek models', async () => {
+  it('should keep the stable bridge enabled for non-deepseek models', async () => {
     process.argv = ['node', 'script.js', '--model', 'qwen-max'];
     const argv = await parseArguments();
     const settings: Settings = {};
     const config = await loadCliConfig(settings, argv, undefined, []);
     expect(config.getPermissionsDeny()).not.toContain('tool_search');
+    expect(config.getPermissionsDeny()).not.toContain('tool_call');
   });
 
-  it('should respect explicit enabled:true override for deepseek models', async () => {
+  it('should accept explicit enabled:true for deepseek models', async () => {
     process.argv = ['node', 'script.js', '--model', 'deepseek-v4-flash'];
     const argv = await parseArguments();
     const settings: Settings = {
@@ -2803,6 +2808,7 @@ describe('mergeExcludeTools', () => {
     };
     const config = await loadCliConfig(settings, argv, undefined, []);
     expect(config.getPermissionsDeny()).not.toContain('tool_search');
+    expect(config.getPermissionsDeny()).not.toContain('tool_call');
   });
 
   it('should pass tools.toolSearch.threshold through to the config', async () => {

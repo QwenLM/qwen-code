@@ -1058,9 +1058,8 @@ export interface ConfigParameters {
    * Percentage of the model's context window used as the session-start
    * budget for preloading deferred tools. When the combined estimated
    * schema size of every deferred tool — bundled built-ins and MCP alike
-   * — fits within the budget, they are all revealed upfront instead of
-   * loaded on demand via `tool_search`, keeping the declaration list
-   * stable for the whole session (prefix-cache friendly). `0` disables
+   * — fits within the budget, they are all revealed upfront for direct calls
+   * instead of being invoked through `tool_search` + `tool_call`. `0` disables
    * preloading. Sourced from `settings.tools.toolSearch.threshold`.
    */
   toolSearchThreshold?: number;
@@ -9147,9 +9146,9 @@ export class Config {
       // PermissionManager handles the coreTools allowlist, deny rules, and
       // the `permissions.allow` registry allowlist in a single check. A tool
       // the active allowlist does not cover comes back `deferred`, not
-      // `disabled`: it is still registered — listed in `/tools` and loadable
-      // via ToolSearch — but its schema stays out of the eager model request
-      // (#9827) without the tool silently disappearing (#10075).
+      // `disabled`: it is still registered — listed in `/tools` and reachable
+      // via ToolSearch + ToolCall — but its schema stays out of the eager
+      // model request (#9827) without the tool silently disappearing (#10075).
       let status: ToolRegistrationStatus = 'registered';
       try {
         status = this.permissionManager
@@ -9238,6 +9237,10 @@ export class Config {
 
     // --- Core tools (always registered) ---
     await registerGoalWorkerTools();
+    await registerLazy(ToolNames.TOOL_CALL, async () => {
+      const { ToolCallTool } = await import('../tools/tool-call.js');
+      return new ToolCallTool();
+    });
     await registerLazy(ToolNames.TOOL_SEARCH, async () => {
       const { ToolSearchTool } = await import('../tools/tool-search.js');
       return new ToolSearchTool(this);

@@ -67,6 +67,9 @@ describe('SAFE_TOOL_ALLOWLIST', () => {
       ToolNames.CRON_CREATE,
       ToolNames.CRON_DELETE,
       ToolNames.LOOP_WAKEUP,
+      // The bridge inherits the deferred target's safety classification and
+      // must never bypass it as a safe wrapper.
+      ToolNames.TOOL_CALL,
       // `send_message` injects arbitrary text into another running agent
       // as a new instruction — the classifier must see destination + body
       // so it can detect inter-agent steering toward destructive actions.

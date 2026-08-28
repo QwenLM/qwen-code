@@ -108,7 +108,7 @@ describe('collectContextData (contextCommand)', () => {
   it('queries getFunctionDeclarations with no args, matching the actual API request', async () => {
     // /context should reflect what's actually sent to the model. Deferred
     // tools (MCP tools default to shouldDefer=true) are excluded from the
-    // prompt unless ToolSearch has revealed them this session — see
+    // prompt unless session setup has revealed them — see
     // client.ts which calls getFunctionDeclarations() with no options.
     // Pinning the call here keeps the /context token estimate aligned with
     // the real request, instead of overcounting by the full MCP tool pool.

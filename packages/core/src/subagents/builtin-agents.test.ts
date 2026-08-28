@@ -247,11 +247,9 @@ describe('BuiltinAgentRegistry', () => {
       expect(agent).not.toBeNull();
       const tools = agent!.tools ?? [];
 
-      // TOOL_SEARCH lets an agent reveal deferred tools at runtime, which
-      // defeats a closed list — and at 357 tokens/turn it costs more than
-      // two of the tools kept. (It does not leak into the parent: every
-      // launch is given its own rebuilt registry.)
+      // Both halves of the deferred-tool bridge would defeat a closed list.
       expect(tools).not.toContain(ToolNames.TOOL_SEARCH);
+      expect(tools).not.toContain(ToolNames.TOOL_CALL);
       // SKILL is not merely unused: its presence injects the startup skills
       // catalogue into the agent's first user turn, which measured 3,623
       // tokens against 504 without it.

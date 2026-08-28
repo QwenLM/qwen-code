@@ -1,5 +1,11 @@
 # ToolSearch preload threshold
 
+> **Update:** The on-demand reveal and `setTools()` behavior described below is
+> superseded by [Deferred Tool Call Bridge](deferred-tool-call-bridge.md).
+> Session-start threshold preloading remains; tools that stay deferred are now
+> reviewed through ToolSearch and invoked through ToolCall without changing the
+> declaration list.
+
 ## Problem
 
 Deferred tools (`shouldDefer=true`) are unconditionally hidden behind

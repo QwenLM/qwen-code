@@ -64,6 +64,8 @@ import { ToolConfirmationOutcome } from '../../tools/tools.js';
 import {
   AgentEventType,
   type AgentApprovalRequestEvent,
+  type AgentToolCallEvent,
+  type AgentToolResultEvent,
 } from './agent-events.js';
 
 const boundaryObserveMock = vi.hoisted(() =>
@@ -496,6 +498,78 @@ describe('AgentCore approval response deduplication', () => {
     );
     return { core, errorSpy };
   }
+
+  it('emits scheduler-resolved tool identity for bridged calls', async () => {
+    const { core } = buildApprovalCore();
+    const toolCallEvents: AgentToolCallEvent[] = [];
+    const toolResultEvents: AgentToolResultEvent[] = [];
+    core.getEventEmitter().on(AgentEventType.TOOL_CALL, (event) => {
+      toolCallEvents.push(event);
+    });
+    core.getEventEmitter().on(AgentEventType.TOOL_RESULT, (event) => {
+      toolResultEvents.push(event);
+    });
+
+    const targetRequest = {
+      callId: 'call-bridge',
+      name: 'mcp__docs__read',
+      args: { path: 'README.md' },
+      isClientInitiated: true,
+      prompt_id: 'prompt-bridge',
+    };
+    const scheduleSpy = vi
+      .spyOn(CoreToolScheduler.prototype, 'schedule')
+      .mockImplementation(async function (this: CoreToolScheduler) {
+        const scheduler = this as unknown as {
+          onToolCallsUpdate?: (calls: ToolCall[]) => void;
+        };
+        scheduler.onToolCallsUpdate?.([
+          {
+            status: 'scheduled',
+            request: targetRequest,
+          } as unknown as ToolCall,
+        ]);
+      });
+    const abortController = new AbortController();
+
+    const processing = core.processFunctionCalls(
+      [
+        {
+          id: targetRequest.callId,
+          name: ToolNames.TOOL_CALL,
+          args: {
+            name: targetRequest.name,
+            arguments: targetRequest.args,
+          },
+        },
+      ],
+      abortController,
+      targetRequest.prompt_id,
+      1,
+      [{ name: ToolNames.TOOL_CALL } as FunctionDeclaration],
+    );
+    try {
+      await vi.waitFor(() => expect(toolCallEvents).toHaveLength(1));
+      expect(toolCallEvents[0]).toMatchObject({
+        callId: targetRequest.callId,
+        name: targetRequest.name,
+        args: targetRequest.args,
+      });
+    } finally {
+      abortController.abort();
+      await processing;
+      scheduleSpy.mockRestore();
+    }
+    expect(toolResultEvents).toHaveLength(1);
+    expect(toolResultEvents[0]).toMatchObject({
+      callId: targetRequest.callId,
+      name: targetRequest.name,
+      success: false,
+    });
+    expect(toolResultEvents[0].responseParts?.[0]?.functionResponse?.name).toBe(
+      ToolNames.TOOL_CALL,
+    );
+  });
 
   it('retries only a transiently failed listener', async () => {
     const { core, errorSpy } = buildApprovalCore();

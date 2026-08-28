@@ -312,12 +312,9 @@ Guidelines:
       // Deliberately absent, each a real narrowing rather than a free saving —
       // `getFunctionDeclarationsFiltered` drops unknown names silently, and
       // naming a deferred tool here would declare it, so nothing is zero-cost:
-      //   TOOL_SEARCH (357 tokens/turn) — would let an agent widen the list
-      //     at runtime, which is the opposite of what a closed list is for,
-      //     and it costs more than two of the tools actually kept. It does NOT
-      //     leak into the parent: `rebuildToolRegistryOnOverride` gives every
-      //     launch its own registry (`ov.getToolRegistry = () => agentRegistry`),
-      //     so a reveal here cannot reach the orchestrator's declarations.
+      //   TOOL_SEARCH + TOOL_CALL — together they would let an agent inspect
+      //     and invoke tools outside this closed list. Neither bridge is
+      //     declared here, so deferred tools stay unavailable to review parts.
       //   AGENT — `prepareTools` special-cases it and would have granted it
       //     (nesting is allowed to depth 5), so this DOES remove a capability
       //     the inherited surface had. Review parts are leaf workers: the

@@ -840,7 +840,11 @@ describe('CoreToolScheduler', () => {
       isToolEnabled: (name: string) => Promise<boolean>;
       findMatchingDenyRule: (ctx: unknown) => string | undefined;
       isPermissionsAllowListActive: () => boolean;
+      hasRelevantRules?: (ctx: unknown) => boolean;
+      evaluate?: (ctx: unknown) => Promise<PermissionDecision>;
+      hasMatchingAskRule?: (ctx: unknown) => boolean;
     };
+    deferredHiddenNames?: ReadonlySet<string>;
   }) {
     const ensureTool = vi.fn(
       async (name: string) =>
@@ -860,6 +864,8 @@ describe('CoreToolScheduler', () => {
       getAllTools: () => [...options.toolsByName.values()],
       getToolsByServer: () => [],
       getAllToolNames: () => [...options.toolsByName.keys()],
+      isDeferredAndHidden: (name: string) =>
+        options.deferredHiddenNames?.has(name) ?? false,
     } as unknown as ToolRegistry;
 
     const onAllToolCallsComplete = options.onAllToolCallsComplete ?? vi.fn();
@@ -955,6 +961,314 @@ describe('CoreToolScheduler', () => {
       onToolCallsUpdate,
     };
   }
+
+  it('routes tool_call through the underlying tool while preserving the model-facing response name', async () => {
+    boundaryDiagnosticsEnabled.value = true;
+    const execute = vi.fn().mockResolvedValue({
+      llmContent: 'created issue',
+      returnDisplay: 'created issue',
+    });
+    const bridge = new MockTool({ name: ToolNames.TOOL_CALL });
+    const deferred = new MockTool({
+      name: 'mcp__github__create_issue',
+      shouldDefer: true,
+      execute,
+    });
+    const isToolEnabled = vi.fn().mockResolvedValue(true);
+    const messageBus = {
+      request: vi.fn().mockImplementation(
+        async (request: {
+          eventName: string;
+        }): Promise<HookExecutionResponse> => ({
+          type: MessageBusType.HOOK_EXECUTION_RESPONSE,
+          correlationId: `${request.eventName}-hook`,
+          success: true,
+          output: { decision: 'allow' },
+        }),
+      ),
+    };
+    const { scheduler, onAllToolCallsComplete } =
+      createSchedulerForLegacyToolTests({
+        toolsByName: new Map([
+          [bridge.name, bridge],
+          [deferred.name, deferred],
+        ]),
+        deferredHiddenNames: new Set([deferred.name]),
+        permissionManager: {
+          isToolEnabled,
+          findMatchingDenyRule: () => undefined,
+          isPermissionsAllowListActive: () => false,
+          hasRelevantRules: () => false,
+          evaluate: vi.fn().mockResolvedValue('default'),
+          hasMatchingAskRule: () => false,
+        },
+        messageBus,
+        disableHooks: false,
+      });
+
+    await scheduler.schedule(
+      {
+        callId: 'bridge-call',
+        name: ToolNames.TOOL_CALL,
+        args: {
+          name: deferred.name,
+          arguments: { title: 'Cache-safe tools' },
+        },
+        isClientInitiated: false,
+        prompt_id: 'prompt-bridge',
+      },
+      new AbortController().signal,
+    );
+
+    expect(execute).toHaveBeenCalledOnce();
+    expect(isToolEnabled).toHaveBeenCalledWith(ToolNames.TOOL_CALL);
+    expect(isToolEnabled).toHaveBeenCalledWith(deferred.name);
+    expect(messageBus.request.mock.calls[0][0]).toEqual(
+      expect.objectContaining({
+        eventName: 'PreToolUse',
+        input: expect.objectContaining({
+          tool_name: deferred.name,
+          tool_input: { title: 'Cache-safe tools' },
+        }),
+      }),
+    );
+
+    await vi.waitFor(() => expect(onAllToolCallsComplete).toHaveBeenCalled());
+    const completed = onAllToolCallsComplete.mock.calls[0][0][0] as ToolCall;
+    expect(completed.request.name).toBe(deferred.name);
+    expect(completed.request.args).toEqual({ title: 'Cache-safe tools' });
+    expect(
+      completed.status === 'success'
+        ? completed.response.responseParts[0]?.functionResponse?.name
+        : undefined,
+    ).toBe(ToolNames.TOOL_CALL);
+    const producerObservations = boundaryObserveMock.mock.calls
+      .map(([observation]) => observation)
+      .filter(
+        (observation) =>
+          observation.toolCallId === 'bridge-call' &&
+          observation.stage.startsWith('producer_'),
+      );
+    expect(producerObservations).toHaveLength(2);
+    for (const observation of producerObservations) {
+      expect(
+        typeof observation.mutated === 'function'
+          ? observation.mutated()
+          : observation.mutated,
+      ).toBe(false);
+    }
+  });
+
+  it('rejects tool_call targets that are not hidden deferred tools', async () => {
+    const execute = vi.fn();
+    const bridge = new MockTool({ name: ToolNames.TOOL_CALL });
+    const visible = new MockTool({ name: ToolNames.READ_FILE, execute });
+    const { scheduler, onAllToolCallsComplete } =
+      createSchedulerForLegacyToolTests({
+        toolsByName: new Map([
+          [bridge.name, bridge],
+          [visible.name, visible],
+        ]),
+      });
+
+    await scheduler.schedule(
+      {
+        callId: 'bridge-visible',
+        name: ToolNames.TOOL_CALL,
+        args: { name: visible.name, arguments: { file_path: 'README.md' } },
+        isClientInitiated: false,
+        prompt_id: 'prompt-bridge-visible',
+      },
+      new AbortController().signal,
+    );
+
+    const completed = onAllToolCallsComplete.mock.calls[0][0][0] as ToolCall;
+    expect(completed.status).toBe('error');
+    if (completed.status === 'error') {
+      expect(completed.response.errorType).toBe(
+        ToolErrorType.INVALID_TOOL_PARAMS,
+      );
+      expect(completed.response.responseParts[0]?.functionResponse?.name).toBe(
+        ToolNames.TOOL_CALL,
+      );
+    }
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it('does not unwrap tool_call denied by the legacy permission fallback', async () => {
+    const execute = vi.fn();
+    const bridge = new MockTool({ name: ToolNames.TOOL_CALL });
+    const deferred = new MockTool({
+      name: 'mcp__github__create_issue',
+      shouldDefer: true,
+      execute,
+    });
+    const { scheduler, ensureTool, onAllToolCallsComplete } =
+      createSchedulerForLegacyToolTests({
+        toolsByName: new Map([
+          [bridge.name, bridge],
+          [deferred.name, deferred],
+        ]),
+        deferredHiddenNames: new Set([deferred.name]),
+        getPermissionsDeny: () => [ToolNames.TOOL_CALL],
+      });
+
+    await scheduler.schedule(
+      {
+        callId: 'bridge-legacy-deny',
+        name: ToolNames.TOOL_CALL,
+        args: { name: deferred.name, arguments: {} },
+        isClientInitiated: false,
+        prompt_id: 'prompt-bridge-legacy-deny',
+      },
+      new AbortController().signal,
+    );
+
+    expect(ensureTool).not.toHaveBeenCalled();
+    expect(execute).not.toHaveBeenCalled();
+    const completed = onAllToolCallsComplete.mock.calls[0][0][0] as ToolCall;
+    expect(completed.status).toBe('error');
+    if (completed.status === 'error') {
+      expect(completed.response.errorType).toBe(ToolErrorType.EXECUTION_DENIED);
+      expect(completed.response.responseParts[0]?.functionResponse?.name).toBe(
+        ToolNames.TOOL_CALL,
+      );
+    }
+  });
+
+  it('preserves the bridge response name when a deferred target times out', async () => {
+    const bridge = new MockTool({ name: ToolNames.TOOL_CALL });
+    const deferred = new MockTool({
+      name: 'mcp__slow__operation',
+      shouldDefer: true,
+      execute: vi.fn().mockResolvedValue({
+        llmContent: 'timed out',
+        returnDisplay: 'timed out',
+        error: {
+          message: 'timed out',
+          type: ToolErrorType.EXECUTION_TIMEOUT,
+        },
+      }),
+    });
+    const { scheduler, onAllToolCallsComplete } =
+      createSchedulerForLegacyToolTests({
+        toolsByName: new Map([
+          [bridge.name, bridge],
+          [deferred.name, deferred],
+        ]),
+        deferredHiddenNames: new Set([deferred.name]),
+      });
+
+    await scheduler.schedule(
+      {
+        callId: 'bridge-timeout',
+        name: ToolNames.TOOL_CALL,
+        args: { name: deferred.name, arguments: {} },
+        isClientInitiated: false,
+        prompt_id: 'prompt-bridge-timeout',
+      },
+      new AbortController().signal,
+    );
+
+    const completed = onAllToolCallsComplete.mock.calls[0][0][0] as ToolCall;
+    expect(completed.status).toBe('error');
+    if (completed.status === 'error') {
+      expect(completed.response.responseParts[0]?.functionResponse?.name).toBe(
+        ToolNames.TOOL_CALL,
+      );
+    }
+  });
+
+  it('does not resolve a deferred target when tool_call is already aborted', async () => {
+    const bridge = new MockTool({ name: ToolNames.TOOL_CALL });
+    const deferred = new MockTool({
+      name: 'mcp__github__create_issue',
+      shouldDefer: true,
+      execute: vi.fn(),
+    });
+    const { scheduler, ensureTool, onAllToolCallsComplete } =
+      createSchedulerForLegacyToolTests({
+        toolsByName: new Map([
+          [bridge.name, bridge],
+          [deferred.name, deferred],
+        ]),
+        deferredHiddenNames: new Set([deferred.name]),
+      });
+    const abortController = new AbortController();
+    abortController.abort();
+
+    await scheduler.schedule(
+      {
+        callId: 'bridge-pre-aborted',
+        name: ToolNames.TOOL_CALL,
+        args: { name: deferred.name, arguments: {} },
+        isClientInitiated: false,
+        prompt_id: 'prompt-bridge-pre-aborted',
+      },
+      abortController.signal,
+    );
+
+    expect(ensureTool).not.toHaveBeenCalled();
+    expect(deferred.execute).not.toHaveBeenCalled();
+    const completed = onAllToolCallsComplete.mock.calls[0][0][0] as ToolCall;
+    expect(completed.status).toBe('cancelled');
+    expect(
+      completed.status === 'cancelled'
+        ? completed.response.responseParts[0]?.functionResponse?.name
+        : undefined,
+    ).toBe(ToolNames.TOOL_CALL);
+  });
+
+  it('does not resolve a deferred target when tool_call is aborted during bridge permission lookup', async () => {
+    const bridge = new MockTool({ name: ToolNames.TOOL_CALL });
+    const deferred = new MockTool({
+      name: 'mcp__github__create_issue',
+      shouldDefer: true,
+      execute: vi.fn(),
+    });
+    let releasePermission!: () => void;
+    const permissionPending = new Promise<void>((resolve) => {
+      releasePermission = resolve;
+    });
+    const isToolEnabled = vi.fn().mockImplementation(async () => {
+      await permissionPending;
+      return true;
+    });
+    const { scheduler, ensureTool, onAllToolCallsComplete } =
+      createSchedulerForLegacyToolTests({
+        toolsByName: new Map([
+          [bridge.name, bridge],
+          [deferred.name, deferred],
+        ]),
+        deferredHiddenNames: new Set([deferred.name]),
+        permissionManager: {
+          isToolEnabled,
+          findMatchingDenyRule: () => undefined,
+          isPermissionsAllowListActive: () => false,
+        },
+      });
+    const abortController = new AbortController();
+
+    const scheduled = scheduler.schedule(
+      {
+        callId: 'bridge-aborted-during-permission',
+        name: ToolNames.TOOL_CALL,
+        args: { name: deferred.name, arguments: {} },
+        isClientInitiated: false,
+        prompt_id: 'prompt-bridge-aborted-during-permission',
+      },
+      abortController.signal,
+    );
+    await vi.waitFor(() => expect(isToolEnabled).toHaveBeenCalledOnce());
+    abortController.abort();
+    releasePermission();
+    await scheduled;
+
+    expect(ensureTool).not.toHaveBeenCalled();
+    expect(deferred.execute).not.toHaveBeenCalled();
+    const completed = onAllToolCallsComplete.mock.calls[0][0][0] as ToolCall;
+    expect(completed.status).toBe('cancelled');
+  });
 
   it('restores the invocation context when a delayed confirmation executes', async () => {
     const invocationContext: InvocationContextV1 = {
