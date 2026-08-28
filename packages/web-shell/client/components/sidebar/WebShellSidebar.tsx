@@ -3491,19 +3491,15 @@ export function WebShellSidebar({
     ],
   );
 
-  const filteredSessions = useMemo(() => {
+  const searchedSessions = useMemo(() => {
     const query = searchQuery.trim().toLowerCase();
     const sourceScopedSessions = sessions
       .map(applyOptimisticPin)
       .filter((session) =>
         matchesSessionSource(session, selectedSessionSource),
       );
-    const unpinnedSessions =
-      selectedSessionSource === 'channel'
-        ? sourceScopedSessions
-        : sourceScopedSessions.filter((session) => !session.isPinned);
-    const nextSessions = query
-      ? unpinnedSessions.filter((session) => {
+    return query
+      ? sourceScopedSessions.filter((session) => {
           const label = getSessionLabel(session).toLowerCase();
           return (
             label.includes(query) ||
@@ -3511,7 +3507,14 @@ export function WebShellSidebar({
             sessionMatchesGitQuery(session, query)
           );
         })
-      : unpinnedSessions.slice();
+      : sourceScopedSessions;
+  }, [applyOptimisticPin, searchQuery, selectedSessionSource, sessions]);
+  const filteredSessions = useMemo(() => {
+    const unpinnedSessions =
+      selectedSessionSource === 'channel'
+        ? searchedSessions
+        : searchedSessions.filter((session) => !session.isPinned);
+    const nextSessions = unpinnedSessions.slice();
     if (organizationEnabled) {
       return nextSessions;
     }
@@ -3526,13 +3529,7 @@ export function WebShellSidebar({
         (createdTimeById.get(b.sessionId) ?? 0) -
         (createdTimeById.get(a.sessionId) ?? 0),
     );
-  }, [
-    applyOptimisticPin,
-    organizationEnabled,
-    searchQuery,
-    selectedSessionSource,
-    sessions,
-  ]);
+  }, [organizationEnabled, searchedSessions, selectedSessionSource]);
 
   const channelCatalogLoaded = channelCatalogData !== undefined;
   const channelSessionSections = useMemo(
@@ -3587,6 +3584,22 @@ export function WebShellSidebar({
         recentSessions.push(session);
       }
     }
+    // Pinned members are lifted into the Pinned section, but their group must
+    // keep them: without this merge a group whose members are all pinned
+    // rendered `· 0`, indistinguishable from lost memberships (#10391).
+    // The channel source keeps pinned rows in `filteredSessions` already; for
+    // other sources pinned sessions without a group stay Pinned-section-only
+    // and never spill into Ungrouped.
+    if (selectedSessionSource !== 'channel') {
+      for (const session of searchedSessions) {
+        if (!session.isPinned) continue;
+        const groupSessions =
+          session.groupId && validGroupIds.has(session.groupId)
+            ? sessionsByGroupId.get(session.groupId)
+            : undefined;
+        if (groupSessions) groupSessions.push(session);
+      }
+    }
     const sections: SessionSection[] = [];
     // Color buckets first, in palette order; only render non-empty ones so the
     // sidebar never shows six empty color headers.
@@ -3626,7 +3639,15 @@ export function WebShellSidebar({
       });
     }
     return sections;
-  }, [filteredSessions, groups, organizationEnabled, searchQuery, t]);
+  }, [
+    filteredSessions,
+    groups,
+    organizationEnabled,
+    searchedSessions,
+    searchQuery,
+    selectedSessionSource,
+    t,
+  ]);
 
   useEffect(() => {
     const activeSections = channelSessionSections ?? sessionSections;

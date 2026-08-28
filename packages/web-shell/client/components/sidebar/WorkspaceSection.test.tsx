@@ -133,6 +133,7 @@ function renderSection(
     sessionCatalogRequestsEnabled: boolean;
     sessionGroupCatalog: DaemonSessionGroupCatalog;
     sessionLiveStateEnabled: boolean;
+    excludePinned: boolean;
   }> = {},
 ): void {
   act(() => {
@@ -154,6 +155,7 @@ function renderSection(
           }
           sessionGroupCatalog={overrides.sessionGroupCatalog}
           sessionLiveStateEnabled={overrides.sessionLiveStateEnabled}
+          excludePinned={overrides.excludePinned}
           sourceType={overrides.sourceType}
           channelGroupingEnabled={overrides.channelGroupingEnabled}
           ungroupedLabel="Ungrouped"
@@ -1149,5 +1151,103 @@ describe('isAbsolutePath', () => {
     expect(isAbsolutePath('\\\\server\\share')).toBe(true);
     expect(isAbsolutePath('relative/path')).toBe(false);
     expect(isAbsolutePath('name')).toBe(false);
+  });
+});
+
+describe('WorkspaceSection pinned group members (issue #10391)', () => {
+  function makeOrganizationClient(
+    sessions: Array<Partial<DaemonSessionSummary>>,
+  ): DaemonClient {
+    return {
+      workspaceByCwd: vi.fn(() => ({
+        workspaceGit,
+        listWorkspaceSessionsPage: vi.fn().mockResolvedValue({ sessions }),
+        listSessionGroups: vi.fn().mockResolvedValue({
+          groups: [
+            {
+              id: 'design-group',
+              name: 'Design',
+              color: 'blue',
+              order: 0,
+              createdAt: '2026-01-01T00:00:00.000Z',
+              updatedAt: '2026-01-01T00:00:00.000Z',
+            },
+          ],
+        }),
+      })),
+    } as unknown as DaemonClient;
+  }
+
+  it('keeps pinned members in their group section and count', async () => {
+    renderSection({
+      client: makeOrganizationClient([
+        {
+          sessionId: 'pinned-member',
+          displayName: 'Pinned member',
+          groupId: 'design-group',
+          isPinned: true,
+          pinnedAt: '2026-01-02T00:00:00.000Z',
+        },
+        {
+          sessionId: 'plain-session',
+          displayName: 'Plain session',
+          groupId: null,
+        },
+      ] as Array<Partial<DaemonSessionSummary>>),
+      expanded: true,
+      organizationEnabled: true,
+      excludePinned: true,
+    });
+    await flush();
+
+    const groupSection = container.querySelector<HTMLElement>(
+      'section[aria-label="Design"]',
+    );
+    expect(groupSection).not.toBeNull();
+    // The reported symptom: a group whose members are all pinned rendered
+    // `· 0`, visually identical to lost memberships.
+    expect(groupSection?.textContent).toContain('· 1');
+    expect(groupSection?.textContent).toContain('Pinned member');
+
+    // Pinned members keep their group and must not fall into Ungrouped.
+    const ungrouped = container.querySelector<HTMLElement>(
+      'section[aria-label="Ungrouped"]',
+    );
+    expect(ungrouped?.textContent).toContain('Plain session');
+    expect(ungrouped?.textContent ?? '').not.toContain('Pinned member');
+  });
+
+  it('still renders unpinned members when pinned rows are lifted into the group', async () => {
+    renderSection({
+      client: makeOrganizationClient([
+        {
+          sessionId: 'pinned-member',
+          displayName: 'Pinned member',
+          groupId: 'design-group',
+          isPinned: true,
+          pinnedAt: '2026-01-02T00:00:00.000Z',
+        },
+        {
+          sessionId: 'active-member',
+          displayName: 'Active member',
+          groupId: 'design-group',
+        },
+      ] as Array<Partial<DaemonSessionSummary>>),
+      expanded: true,
+      organizationEnabled: true,
+      excludePinned: true,
+    });
+    await flush();
+
+    const groupSection = container.querySelector<HTMLElement>(
+      'section[aria-label="Design"]',
+    );
+    expect(groupSection?.textContent).toContain('· 2');
+    expect(groupSection?.textContent).toContain('Active member');
+    expect(groupSection?.textContent).toContain('Pinned member');
+    // Every session belongs to the group, so no Ungrouped bucket renders.
+    expect(
+      container.querySelector('section[aria-label="Ungrouped"]'),
+    ).toBeNull();
   });
 });

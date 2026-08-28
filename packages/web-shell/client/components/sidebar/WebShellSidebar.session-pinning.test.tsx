@@ -918,3 +918,62 @@ describe('WebShellSidebar session pinning (issue #9465)', () => {
     expect(pinnedListTitles()).toEqual(['Only pinned']);
   });
 });
+
+describe('WebShellSidebar pinned group members (issue #10391)', () => {
+  const defaultGroupsCatalog = {
+    groups: [],
+    colorOptions: ['red', 'orange', 'yellow', 'green', 'blue', 'purple'],
+  };
+
+  it('keeps pinned sessions inside their group section instead of rendering the group empty', async () => {
+    workspaceActions.listSessionGroups.mockResolvedValue({
+      groups: [
+        {
+          id: 'design-group',
+          name: 'Design',
+          color: 'blue',
+          order: 0,
+          createdAt: '2026-01-01T00:00:00.000Z',
+          updatedAt: '2026-01-01T00:00:00.000Z',
+        },
+      ],
+      colorOptions: ['red', 'orange', 'yellow', 'green', 'blue', 'purple'],
+    });
+    const member = makeSession('pinned-member', {
+      displayName: 'Pinned member',
+      groupId: 'design-group',
+      isPinned: true,
+      pinnedAt: '2026-01-02T00:00:00.000Z',
+    });
+    active.sessions = [
+      member,
+      makeSession('plain', { displayName: 'Plain session' }),
+    ];
+    active.data = active.sessions;
+    pinned.sessions = [member];
+    pinned.data = pinned.sessions;
+
+    renderSidebar();
+    await flushSidebar();
+
+    const group = container.querySelector<HTMLElement>(
+      'section[aria-label="Design"]',
+    );
+    expect(group).not.toBeNull();
+    // Reported symptom: every member pinned -> group rendered `· 0`.
+    expect(group?.textContent).toContain('· 1');
+    expect(group?.textContent).toContain('Pinned member');
+
+    // The pinned row also stays in the dedicated Pinned section.
+    expect(pinnedListTitles()).toContain('Pinned member');
+
+    // ...and it does not fall into Ungrouped.
+    const ungrouped = container.querySelector<HTMLElement>(
+      'section[aria-label="Ungrouped"]',
+    );
+    expect(ungrouped?.textContent ?? '').not.toContain('Pinned member');
+    expect(ungrouped?.textContent).toContain('Plain session');
+
+    workspaceActions.listSessionGroups.mockResolvedValue(defaultGroupsCatalog);
+  });
+});
