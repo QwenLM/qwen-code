@@ -7053,8 +7053,12 @@ describe('DingtalkChannel proactive send', () => {
   });
 
   it.each([
+    [40001, 'invalid credential'],
+    [40013, 'invalid appKey'],
     [40089, 'invalid credential'],
     [40096, 'invalid appKey or appSecret'],
+    [90002, 'invalid appKey'],
+    [90003, 'app not found'],
   ])(
     'classifies gettoken errcode %s as a non-retryable token error',
     async (errcode, errmsg) => {
