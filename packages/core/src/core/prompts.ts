@@ -11,7 +11,6 @@ import { ToolNames } from '../tools/tool-names.js';
 import process from 'node:process';
 import { isGitRepository } from '../utils/gitUtils.js';
 import { QWEN_DIR } from '../config/storage.js';
-import type { Config } from '../config/config.js';
 import type { GenerateContentConfig } from '@google/genai';
 import { InputFormat } from '../output/types.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
@@ -452,16 +451,6 @@ Interaction mode reminder: ${interaction.questions}
 `.trim();
 }
 
-type MainSessionPromptConfig = Pick<
-  Config,
-  | 'getSystemPrompt'
-  | 'getModel'
-  | 'getOutputStyle'
-  | 'getExperimentalZedIntegration'
-  | 'getInputFormat'
-  | 'isInteractive'
->;
-
 /**
  * The output style a main session's prompt actually carries — the single
  * decision the prompt builders and the per-turn style reminder consult
@@ -486,21 +475,6 @@ export function resolveMainSessionOutputStyle(config: {
     config.getOutputStyle(),
     resolveInteractionMode(config),
   );
-}
-
-export function getMainSessionBaseSystemPrompt(
-  config: MainSessionPromptConfig,
-): string {
-  const overrideSystemPrompt = config.getSystemPrompt();
-  return overrideSystemPrompt
-    ? getCustomSystemPrompt(overrideSystemPrompt)
-    : getCoreSystemPrompt(
-        undefined,
-        config.getModel(),
-        undefined,
-        resolveInteractionMode(config),
-        resolveMainSessionOutputStyle(config),
-      );
 }
 
 /**

@@ -9,7 +9,6 @@ import {
   assembleSystemPrompt,
   getCoreSystemPrompt,
   getCustomSystemPrompt,
-  getMainSessionBaseSystemPrompt,
   getManualPlanExitSystemReminder,
   getPlanModeSystemReminder,
   resolvePathFromEnv,
@@ -17,6 +16,10 @@ import {
   resolveInteractionMode,
   resolveMainSessionOutputStyle,
 } from './prompts.js';
+// The base-prompt builder lives with the client that calls it; these tests
+// pin it against the resolver here so the prompt and the per-turn reminder
+// cannot drift apart.
+import { getMainSessionBaseSystemPrompt } from './client.js';
 import {
   BUILT_IN_OUTPUT_STYLES,
   getBuiltInOutputStyle,

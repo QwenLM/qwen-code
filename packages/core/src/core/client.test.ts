@@ -80,8 +80,8 @@ vi.mock('../utils/retry.js', () => ({
   isUnattendedMode: vi.fn(() => false),
 }));
 import {
+  getCoreSystemPrompt,
   getCustomSystemPrompt,
-  getMainSessionBaseSystemPrompt,
   getPlanModeSystemReminder,
 } from './prompts.js';
 import { getBuiltInOutputStyle } from './output-styles.js';
@@ -175,7 +175,6 @@ vi.mock('./prompts', async (importOriginal) => {
     ...actual,
     getCustomSystemPrompt: vi.fn(),
     getCoreSystemPrompt: vi.fn(),
-    getMainSessionBaseSystemPrompt: vi.fn(),
     getCompressionPrompt: vi.fn(),
     getProjectSummaryPrompt: vi.fn(),
     getPlanModeSystemReminder: vi.fn(),
@@ -488,7 +487,7 @@ describe('Gemini Client (client.ts)', () => {
     mockInteractionTelemetry.getActiveInteractionSpan.mockReturnValue({});
     // The client concatenates these with the auto-memory suffix, so the
     // default mock must return a string, not undefined.
-    vi.mocked(getMainSessionBaseSystemPrompt).mockReturnValue('');
+    vi.mocked(getCoreSystemPrompt).mockReturnValue('');
     vi.mocked(getCustomSystemPrompt).mockReturnValue('');
     sessionStartProfilerMocks.profilers.length = 0;
     sessionStartProfilerMocks.createSessionStartProfiler.mockImplementation(
@@ -1697,7 +1696,7 @@ describe('Gemini Client (client.ts)', () => {
     });
 
     it('preserves existing system prompt suffixes when SessionStart additionalContext is applied', async () => {
-      vi.mocked(getMainSessionBaseSystemPrompt).mockReturnValue(
+      vi.mocked(getCoreSystemPrompt).mockReturnValue(
         'Base instruction\n\n---\n\nUser memory\n\n---\n\nAppended rule',
       );
       const hookSystem = {
@@ -1723,10 +1722,9 @@ describe('Gemini Client (client.ts)', () => {
     });
 
     it('re-applies SessionStart additionalContext after refreshing the system instruction', async () => {
-      // startChat() builds the main-session base prompt for the initial
-      // LlmChat construction. The second call is refreshSystemInstruction
-      // under test.
-      vi.mocked(getMainSessionBaseSystemPrompt)
+      // startChat() calls getCoreSystemPrompt for the initial LlmChat
+      // construction. The second call is refreshSystemInstruction under test.
+      vi.mocked(getCoreSystemPrompt)
         .mockReturnValueOnce('Base instruction')
         .mockReturnValueOnce('Updated instruction');
       const hookSystem = {
@@ -1780,9 +1778,7 @@ describe('Gemini Client (client.ts)', () => {
       // and git status). Guard the append with a non-empty getAutoMemoryPrompt
       // so a future refactor dropping it fails here instead of silently
       // shipping a prompt without managed memory.
-      vi.mocked(getMainSessionBaseSystemPrompt).mockReturnValue(
-        'Base instruction',
-      );
+      vi.mocked(getCoreSystemPrompt).mockReturnValue('Base instruction');
       vi.mocked(mockConfig.getAutoMemoryPrompt).mockReturnValue(
         '# auto memory\nMEMORY_INDEX_MARKER',
       );
@@ -2282,12 +2278,12 @@ describe('Gemini Client (client.ts)', () => {
         .mockImplementation(() => {});
       const addHistorySpy = vi.spyOn(client.getChat(), 'addHistory');
       vi.spyOn(client.getChat(), 'setTools').mockImplementation(() => {});
-      vi.mocked(getMainSessionBaseSystemPrompt).mockClear();
+      vi.mocked(getCoreSystemPrompt).mockClear();
 
       await client.setTools();
 
       expect(setSystemInstructionSpy).not.toHaveBeenCalled();
-      expect(vi.mocked(getMainSessionBaseSystemPrompt)).not.toHaveBeenCalled();
+      expect(vi.mocked(getCoreSystemPrompt)).not.toHaveBeenCalled();
       expect(buildChangedMcpToolsReminder).not.toHaveBeenCalled();
       expect(addHistorySpy).not.toHaveBeenCalled();
 
@@ -2614,7 +2610,7 @@ describe('Gemini Client (client.ts)', () => {
         'setSystemInstruction',
       );
       vi.spyOn(client.getChat(), 'setTools').mockImplementation(() => {});
-      vi.mocked(getMainSessionBaseSystemPrompt).mockClear();
+      vi.mocked(getCoreSystemPrompt).mockClear();
 
       await client.setTools();
 
@@ -2721,9 +2717,7 @@ describe('Gemini Client (client.ts)', () => {
     });
 
     it('preserves SessionStart additionalContext because setTools does not rewrite the system instruction', async () => {
-      vi.mocked(getMainSessionBaseSystemPrompt).mockReturnValue(
-        'Base instruction',
-      );
+      vi.mocked(getCoreSystemPrompt).mockReturnValue('Base instruction');
       const hookSystem = {
         fireSessionStartEvent: vi.fn().mockResolvedValue(
           createHookOutput('SessionStart', {
@@ -2777,9 +2771,7 @@ describe('Gemini Client (client.ts)', () => {
 
   describe('getMainSessionSystemInstruction', () => {
     it('records the gitStatus-free base as the static system prefix on Config', () => {
-      vi.mocked(getMainSessionBaseSystemPrompt).mockReturnValueOnce(
-        'core base prompt',
-      );
+      vi.mocked(getCoreSystemPrompt).mockReturnValueOnce('core base prompt');
       vi.mocked(getRecentGitStatus).mockReturnValueOnce('Git snapshot A');
 
       const instruction = (
@@ -13485,10 +13477,6 @@ Other open files:
       const generationConfig = { temperature: 0.5 };
       const abortSignal = new AbortController().signal;
 
-      vi.mocked(getMainSessionBaseSystemPrompt).mockReturnValueOnce(
-        'Main session base',
-      );
-
       await client.generateContent(
         contents,
         generationConfig,
@@ -13501,7 +13489,7 @@ Other open files:
           model: DEFAULT_QWEN_FLASH_MODEL,
           config: expect.objectContaining({
             abortSignal,
-            systemInstruction: 'Main session base',
+            systemInstruction: getCoreSystemPrompt(''),
             temperature: 0.5,
           }),
           contents,
@@ -13691,7 +13679,7 @@ Other open files:
       vi.spyOn(client['config'], 'getUserMemory').mockReturnValue(
         'Saved memory',
       );
-      vi.mocked(getMainSessionBaseSystemPrompt).mockReturnValueOnce(
+      vi.mocked(getCustomSystemPrompt).mockReturnValueOnce(
         'Override prompt with memory',
       );
 
@@ -13703,8 +13691,8 @@ Other open files:
       );
 
       // The override is the stable base only; user memory flows through
-      // assembleSystemPrompt as the context layer. Routing the override to
-      // the custom base is pinned by prompts.test.ts.
+      // assembleSystemPrompt as the context layer.
+      expect(getCustomSystemPrompt).toHaveBeenCalledWith('Override prompt');
       expect(mockContentGenerator.generateContent).toHaveBeenCalledWith(
         expect.objectContaining({
           config: expect.objectContaining({
@@ -13720,6 +13708,7 @@ Other open files:
       const contents = [{ role: 'user', parts: [{ text: 'hello' }] }];
       const abortSignal = new AbortController().signal;
 
+      vi.mocked(getCoreSystemPrompt).mockClear();
       vi.spyOn(client['config'], 'getAppendSystemPrompt').mockReturnValue(
         'Be extra concise.',
       );
@@ -13731,8 +13720,15 @@ Other open files:
         DEFAULT_QWEN_FLASH_MODEL,
       );
 
-      // The prompt-layer base is the stable base only; the append prompt
-      // flows through assembleSystemPrompt as a context-layer slot.
+      // The core prompt is requested as the stable base only; the append
+      // prompt flows through assembleSystemPrompt as a context-layer slot.
+      expect(getCoreSystemPrompt).toHaveBeenCalledWith(
+        undefined,
+        'test-model',
+        undefined,
+        'headless',
+        undefined,
+      );
       expect(mockContentGenerator.generateContent).toHaveBeenCalledWith(
         expect.objectContaining({
           config: expect.objectContaining({
@@ -13743,12 +13739,12 @@ Other open files:
       );
     });
 
-    it('hands the live config to the prompt layer for the style decision', async () => {
+    it('passes the active output style to the core system prompt', async () => {
       const contents = [{ role: 'user', parts: [{ text: 'hello' }] }];
       const abortSignal = new AbortController().signal;
       const concise = getBuiltInOutputStyle('Concise');
 
-      vi.mocked(getMainSessionBaseSystemPrompt).mockClear();
+      vi.mocked(getCoreSystemPrompt).mockClear();
       vi.spyOn(client['config'], 'getOutputStyle').mockReturnValue(concise);
 
       await client.generateContent(
@@ -13758,13 +13754,47 @@ Other open files:
         DEFAULT_QWEN_FLASH_MODEL,
       );
 
-      // Style and interaction-mode resolution live in the prompt layer
-      // (resolveMainSessionOutputStyle, pinned by prompts.test.ts); the
-      // client's contract is to hand it the live config.
-      expect(getMainSessionBaseSystemPrompt).toHaveBeenCalledWith(
-        client['config'],
+      expect(getCoreSystemPrompt).toHaveBeenCalledWith(
+        undefined,
+        'test-model',
+        undefined,
+        'headless',
+        concise,
       );
     });
+
+    it.each([
+      ['interactive', true, false],
+      ['acp', false, true],
+      ['headless', false, false],
+    ] as const)(
+      'should pass %s mode to the core system prompt',
+      async (mode, interactive, acp) => {
+        const contents = [{ role: 'user', parts: [{ text: 'hello' }] }];
+        const abortSignal = new AbortController().signal;
+
+        vi.mocked(getCoreSystemPrompt).mockClear();
+        vi.mocked(client['config'].isInteractive).mockReturnValue(interactive);
+        vi.mocked(
+          client['config'].getExperimentalZedIntegration,
+        ).mockReturnValue(acp);
+
+        await client.generateContent(
+          contents,
+          {},
+          abortSignal,
+          DEFAULT_QWEN_FLASH_MODEL,
+        );
+
+        expect(getCoreSystemPrompt).toHaveBeenCalledWith(
+          undefined,
+          'test-model',
+          undefined,
+          mode,
+          undefined,
+        );
+      },
+    );
 
     it('should append config appendSystemPrompt after a config system prompt override', async () => {
       const contents = [{ role: 'user', parts: [{ text: 'hello' }] }];
@@ -13779,7 +13809,7 @@ Other open files:
       vi.spyOn(client['config'], 'getUserMemory').mockReturnValue(
         'Saved memory',
       );
-      vi.mocked(getMainSessionBaseSystemPrompt).mockReturnValueOnce(
+      vi.mocked(getCustomSystemPrompt).mockReturnValueOnce(
         'Override prompt with memory and append',
       );
 
@@ -13793,6 +13823,7 @@ Other open files:
       // The override is the stable base; memory and append flow through
       // assembleSystemPrompt in canonical layer order (context files before
       // the append prompt).
+      expect(getCustomSystemPrompt).toHaveBeenCalledWith('Override prompt');
       expect(mockContentGenerator.generateContent).toHaveBeenCalledWith(
         expect.objectContaining({
           config: expect.objectContaining({
@@ -13810,7 +13841,7 @@ Other open files:
 
       vi.mocked(getRecentGitStatus).mockReturnValue('Git snapshot cached');
       vi.mocked(getRecentGitStatus).mockClear();
-      vi.mocked(getMainSessionBaseSystemPrompt).mockReturnValue('Core prompt');
+      vi.mocked(getCoreSystemPrompt).mockReturnValue('Core prompt');
 
       await client.generateContent(
         contents,

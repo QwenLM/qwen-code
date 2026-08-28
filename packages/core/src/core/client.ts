@@ -63,9 +63,10 @@ import { getRecentGitStatus } from '../utils/gitUtils.js';
 import {
   assembleSystemPrompt,
   getArenaSystemReminder,
+  getCoreSystemPrompt,
   getCustomSystemPrompt,
-  getMainSessionBaseSystemPrompt,
   getPlanModeSystemReminder,
+  resolveInteractionMode,
   resolveMainSessionOutputStyle,
 } from './prompts.js';
 import { getOutputStyleTurnReminder } from './output-styles.js';
@@ -347,6 +348,35 @@ const SKILL_WRITE_TOOL_NAMES: ReadonlySet<string> = new Set([
   ToolNames.WRITE_FILE,
   ToolNames.EDIT,
 ]);
+
+type MainSessionPromptConfig = Pick<
+  Config,
+  | 'getSystemPrompt'
+  | 'getModel'
+  | 'getOutputStyle'
+  | 'getExperimentalZedIntegration'
+  | 'getInputFormat'
+  | 'isInteractive'
+>;
+
+export function getMainSessionBaseSystemPrompt(
+  config: MainSessionPromptConfig,
+): string {
+  const overrideSystemPrompt = config.getSystemPrompt();
+  return overrideSystemPrompt
+    ? getCustomSystemPrompt(overrideSystemPrompt)
+    : getCoreSystemPrompt(
+        undefined,
+        config.getModel(),
+        undefined,
+        resolveInteractionMode(config),
+        // The prompt and the per-turn reminder must agree on which style is
+        // in force, so both read it from the same resolver rather than from
+        // `getOutputStyle()` directly — a prompt override carries no style
+        // section, and a session must not be reminded of one it lacks.
+        resolveMainSessionOutputStyle(config),
+      );
+}
 
 export class LlmClient {
   private chat?: LlmChat;
