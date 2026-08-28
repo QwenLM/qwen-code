@@ -2064,24 +2064,69 @@ describe('Server Config (config.ts)', () => {
       // claim so worktree ownership checks can distinguish clean exit
       // from missing evidence.
       const config = new Config(baseParams);
+      const sessionId = config.getSessionId();
+      const statusPath = config.storage.getRuntimeStatusPath(sessionId);
       config.markRuntimeStatusEnabled(); // models the successful write
+      const readSpy = vi
+        .spyOn(runtimeStatus, 'readRuntimeStatus')
+        .mockResolvedValue({
+          schemaVersion: runtimeStatus.RUNTIME_STATUS_SCHEMA_VERSION,
+          pid: process.pid,
+          sessionId,
+          workDir: config.getTargetDir(),
+          hostname: os.hostname(),
+          startedAt: Date.now() / 1000,
+          qwenVersion: null,
+          pidNamespaceId: null,
+          procStartToken: null,
+        });
       const writeSpy = vi
         .spyOn(runtimeStatus, 'writeRuntimeStatus')
-        .mockResolvedValue(
-          config.storage.getRuntimeStatusPath(config.getSessionId()),
-        );
+        .mockResolvedValue(statusPath);
 
       await config.shutdown();
 
       expect(writeSpy).toHaveBeenCalledWith(
-        config.storage.getRuntimeStatusPath(config.getSessionId()),
+        statusPath,
         expect.objectContaining({
-          sessionId: config.getSessionId(),
+          sessionId,
           workDir: config.getTargetDir(),
           pid: 0,
         }),
       );
 
+      readSpy.mockRestore();
+      writeSpy.mockRestore();
+    });
+
+    it('does not demote a sidecar claimed by another process', async () => {
+      const config = new Config(baseParams);
+      const sessionId = config.getSessionId();
+      const statusPath = config.storage.getRuntimeStatusPath(sessionId);
+      config.markRuntimeStatusEnabled();
+      const readSpy = vi
+        .spyOn(runtimeStatus, 'readRuntimeStatus')
+        .mockResolvedValue({
+          schemaVersion: runtimeStatus.RUNTIME_STATUS_SCHEMA_VERSION,
+          pid: process.pid + 1,
+          sessionId,
+          workDir: config.getTargetDir(),
+          hostname: os.hostname(),
+          startedAt: Date.now() / 1000,
+          qwenVersion: null,
+          pidNamespaceId: null,
+          procStartToken: null,
+        });
+      const writeSpy = vi
+        .spyOn(runtimeStatus, 'writeRuntimeStatus')
+        .mockResolvedValue(statusPath);
+
+      await config.shutdown();
+
+      expect(readSpy).toHaveBeenCalledWith(statusPath);
+      expect(writeSpy).not.toHaveBeenCalled();
+
+      readSpy.mockRestore();
       writeSpy.mockRestore();
     });
 
@@ -7424,6 +7469,19 @@ describe('Server Config (config.ts)', () => {
     const writeSpy = vi
       .spyOn(runtimeStatus, 'writeRuntimeStatus')
       .mockReturnValue(pendingWrite);
+    const readSpy = vi
+      .spyOn(runtimeStatus, 'readRuntimeStatus')
+      .mockResolvedValue({
+        schemaVersion: runtimeStatus.RUNTIME_STATUS_SCHEMA_VERSION,
+        pid: process.pid,
+        sessionId: 'replacement-session',
+        workDir: config.getTargetDir(),
+        hostname: os.hostname(),
+        startedAt: Date.now() / 1000,
+        qwenVersion: null,
+        pidNamespaceId: null,
+        procStartToken: null,
+      });
 
     const newSessionId = config.startNewSession('replacement-session');
     const newPath = config.storage.getRuntimeStatusPath(newSessionId);
@@ -7441,6 +7499,7 @@ describe('Server Config (config.ts)', () => {
       newPath,
       expect.objectContaining({ pid: 0 }),
     );
+    readSpy.mockRestore();
     writeSpy.mockRestore();
   });
 

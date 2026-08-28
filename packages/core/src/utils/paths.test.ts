@@ -1273,9 +1273,14 @@ describe('isTempDirPath', () => {
         ? 'C:\\Windows\\Temp'
         : '/nonexistent-tmp-root',
       () => {
-        expect(isTempDirPath(path.join(os.homedir(), 'my-project'))).toBe(
-          false,
-        );
+        expect(
+          isTempDirPath(
+            path.join(
+              process.env['QWEN_CODE_TEST_ORIGINAL_HOME'] || os.homedir(),
+              'my-project',
+            ),
+          ),
+        ).toBe(false);
       },
     );
   });

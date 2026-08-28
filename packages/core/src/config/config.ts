@@ -227,6 +227,7 @@ import { CHARS_PER_TOKEN } from '../services/tokenEstimation.js';
 import { sanitizeCwd } from '../utils/paths.js';
 import {
   clearRuntimeStatus,
+  readRuntimeStatus,
   writeRuntimeStatus,
 } from '../utils/runtimeStatus.js';
 import {
@@ -6006,15 +6007,21 @@ export class Config {
         await this.flushRuntimeStatusWrites();
         if (!this.sessionWriterHandoffRequested) {
           try {
-            await writeRuntimeStatus(
-              this.storage.getRuntimeStatusPath(this.sessionId),
-              {
+            const statusPath = this.storage.getRuntimeStatusPath(
+              this.sessionId,
+            );
+            const status = await readRuntimeStatus(statusPath);
+            if (
+              status?.pid === process.pid &&
+              status.sessionId === this.sessionId
+            ) {
+              await writeRuntimeStatus(statusPath, {
                 sessionId: this.sessionId,
                 workDir: this.getTargetDir(),
                 pid: 0,
                 qwenVersion: this.cliVersion ?? null,
-              },
-            );
+              });
+            }
           } catch {
             // ignored: best-effort cleanup
           }

@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterAll } from 'vitest';
@@ -21,16 +21,49 @@ if (process.env['QWEN_DEBUG_LOG_FILE'] === undefined) {
   process.env['QWEN_DEBUG_LOG_FILE'] = '0';
 }
 
-const testHomeDir =
+function isInsidePath(parent: string, child: string): boolean {
+  const relative = path.relative(path.resolve(parent), path.resolve(child));
+  return (
+    relative === '' ||
+    (!relative.startsWith('..') && !path.isAbsolute(relative))
+  );
+}
+
+function getTestHomeBase(originalHome: string | undefined): string | undefined {
+  const candidates =
+    process.platform === 'win32'
+      ? [
+          os.tmpdir(),
+          process.env['SystemRoot']
+            ? path.join(process.env['SystemRoot'], 'Temp')
+            : undefined,
+        ]
+      : [os.tmpdir(), '/tmp'];
+
+  for (const candidate of candidates) {
+    if (!candidate || !existsSync(candidate)) continue;
+    if (originalHome && isInsidePath(originalHome, candidate)) continue;
+    return candidate;
+  }
+  return undefined;
+}
+
+const originalHome = process.env['HOME'];
+const originalUserProfile = process.env['USERPROFILE'];
+const originalQwenHome = process.env['QWEN_HOME'];
+const testHomeBase =
   process.env['QWEN_RUNTIME_DIR'] === undefined
-    ? mkdtempSync(path.join(os.tmpdir(), 'qwen-code-core-test-home-'))
+    ? getTestHomeBase(originalHome ?? originalUserProfile)
     : undefined;
+const testHomeDir =
+  testHomeBase === undefined
+    ? undefined
+    : mkdtempSync(path.join(testHomeBase, 'qwen-code-core-test-home-'));
 
 if (testHomeDir !== undefined) {
-  const originalHome = process.env['HOME'];
-  const originalUserProfile = process.env['USERPROFILE'];
   process.env['QWEN_CODE_TEST_ORIGINAL_HOME'] =
     originalHome ?? originalUserProfile ?? '';
+  delete process.env['QWEN_HOME'];
   process.env['HOME'] = testHomeDir;
   process.env['USERPROFILE'] = testHomeDir;
   afterAll(() => {
@@ -43,6 +76,11 @@ if (testHomeDir !== undefined) {
       delete process.env['USERPROFILE'];
     } else {
       process.env['USERPROFILE'] = originalUserProfile;
+    }
+    if (originalQwenHome === undefined) {
+      delete process.env['QWEN_HOME'];
+    } else {
+      process.env['QWEN_HOME'] = originalQwenHome;
     }
     delete process.env['QWEN_CODE_TEST_ORIGINAL_HOME'];
     rmSync(testHomeDir, { recursive: true, force: true });
