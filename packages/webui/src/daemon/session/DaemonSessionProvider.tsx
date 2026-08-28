@@ -115,6 +115,7 @@ import type {
   DaemonSessionOwnerGuard,
   DaemonSessionProviderProps,
   DaemonWorkspaceEventSignals,
+  PendingSessionLoad,
   SettledPrompt,
 } from './types.js';
 
@@ -1310,6 +1311,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               attachedExistingSession = true;
             }
           }
+          // R9-1: the load this iteration attempted, lifted out of the
+          // !session block so the post-restore success path can tell its own
+          // load apart from a successor's re-preserved one.
+          let attemptedLoadForRun: PendingSessionLoad | undefined;
           if (!session) {
             if (!preservingTranscriptDuringLoad) {
               setConnection((current) => ({
@@ -1511,6 +1516,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               attachmentLifecycle.pendingLoad?.sessionId === targetSessionId
                 ? attachmentLifecycle.pendingLoad
                 : undefined;
+            attemptedLoadForRun = attemptedLoad;
             const restoreRequestTimeoutMs =
               attemptedLoad?.requestTimeoutMs ??
               resolveSessionRestoreTimeouts(capabilities).requestTimeoutMs;
@@ -1607,8 +1613,12 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 attemptedLoad,
                 new DOMException('Session load cancelled', 'AbortError'),
               );
+              // R9-1: pass the load this run attempted — without it this
+              // release matches a successor's re-preserved exemption by
+              // session identity alone and clears it.
               attachmentLifecycle.releaseCleanupDetachExemption(
                 previousSession,
+                attemptedLoad,
               );
               loadingRequestedSession = false;
               if (previousSession?.sessionId === nextSession.sessionId) {
@@ -1655,8 +1665,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                       : 'Fresh replay does not contain the complete target turn',
                   ),
                 );
+                // R9-1: same load-identity guard as the tail-cancel twin.
                 attachmentLifecycle.releaseCleanupDetachExemption(
                   previousSession,
+                  attemptedLoad,
                 );
                 if (previousSession?.sessionId === nextSession.sessionId) {
                   session = previousSession;
@@ -1758,8 +1770,15 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           setPromptStatus(hasSessionActivePrompt() ? 'streaming' : 'idle');
 
           const pendingLoad = attachmentLifecycle.pendingLoad;
+          // R9-1: a superseded run that attempted a load must not adopt the
+          // successor's re-preserved one — session identity alone cannot tell
+          // them apart. A run that attempted no load keeps the pre-R9-1
+          // adoption behaviour (creation flows register the load after the
+          // capture above).
           const pendingLoadToResolve =
-            pendingLoad?.sessionId === activeSession.sessionId
+            pendingLoad?.sessionId === activeSession.sessionId &&
+            (attemptedLoadForRun === undefined ||
+              pendingLoad === attemptedLoadForRun)
               ? pendingLoad
               : undefined;
 
@@ -2235,7 +2254,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             lastHandledWorkspaceRef.current = activeSession.workspaceCwd;
             lastHandledClientIdRef.current = undefined;
             attachmentLifecycle.resolvePendingLoad(pendingLoadToResolve);
-            attachmentLifecycle.releaseCleanupDetachExemption(activeSession);
+            attachmentLifecycle.releaseCleanupDetachExemption(
+              activeSession,
+              pendingLoadToResolve,
+            );
           }
 
           const canReuseSessionMetadata =
