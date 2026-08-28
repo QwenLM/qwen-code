@@ -96,6 +96,13 @@ interface ShareSettings {
   };
   netlify: {
     siteId: string;
+    /**
+     * The site id was created by this flow, so it holds nothing but published
+     * artifacts and its access settings are ours to relax. `siteId` alone
+     * cannot say that: `connectSite` persists the same key when it adopts a
+     * user's own empty linked site.
+     */
+    dedicatedSiteId: string;
   };
 }
 
@@ -415,6 +422,7 @@ function readShareSettings(workspaceCwd: string): ShareSettings {
     },
     netlify: {
       siteId: str('artifact.share.netlify.siteId'),
+      dedicatedSiteId: str('artifact.share.netlify.dedicatedSiteId'),
     },
   };
 }
@@ -499,6 +507,10 @@ function netlifyCommandTokens(config: ArtifactHostConfig): string[] {
   }
 }
 
+function withHttpsScheme(url: string): string {
+  return /^https?:\/\//i.test(url) ? url : `https://${url}`;
+}
+
 function isNetlifyExecutable(command: string | undefined): boolean {
   const executable = command
     ?.replaceAll('\\', '/')
@@ -506,15 +518,6 @@ function isNetlifyExecutable(command: string | undefined): boolean {
     .pop()
     ?.toLowerCase();
   return executable === 'netlify' || executable === 'netlify.cmd';
-}
-
-function isNodeExecutable(command: string | undefined): boolean {
-  const executable = command
-    ?.replaceAll('\\', '/')
-    .split('/')
-    .pop()
-    ?.toLowerCase();
-  return executable === 'node' || executable === 'node.exe';
 }
 
 function isNetlifyEntry(command: string | undefined): boolean {
@@ -529,9 +532,17 @@ function isNetlifyEntry(command: string | undefined): boolean {
 function netlifyDeployArgs(config: ArtifactHostConfig): string[] | undefined {
   const [command, ...args] = netlifyCommandTokens(config);
   if (isNetlifyExecutable(command)) return args;
-  if (isNodeExecutable(command) && isNetlifyEntry(args[0])) {
-    return args.slice(1);
-  }
+  // The entry path identifies the daemon's own invocation; the interpreter's
+  // basename does not. `netlifyUploadCommand` persists `<process.execPath>
+  // <entry> deploy ...`, and execPath is whatever runs this daemon — a
+  // version-named `/usr/bin/node-22`, Debian's `nodejs`, a volta/pnpm shim.
+  // Requiring the basename to be exactly `node`/`node.exe` left the daemon
+  // unable to re-parse the command it had just written on those hosts:
+  // `connectSite`'s post-persist refresh found no configuration, the stage
+  // stayed `connect`, and setup answered 500 after the site was created.
+  // Detection only gates offering "configured" — execution always uses the
+  // daemon-resolved entrypoint.
+  if (isNetlifyEntry(args[0])) return args.slice(1);
   return undefined;
 }
 
@@ -787,12 +798,22 @@ async function readLinkedSite(
   }
 }
 
+/**
+ * The site record, `undefined` when the API answered but named no site, and
+ * `UNREACHABLE` when the call itself failed.
+ *
+ * Callers need the difference: "this site is gone" is a real state change,
+ * while "the API timed out" says nothing about the site. Collapsing both to
+ * `undefined` made a transient failure look like a deconfigured workspace.
+ */
+const UNREACHABLE = Symbol('netlify-site-unreachable');
+
 async function readSiteRecord(
   command: NetlifyCommand,
   siteId: string,
   runtime: WorkspaceRuntime,
   run: ArtifactRouteCommandRunner,
-): Promise<Record<string, unknown> | undefined> {
+): Promise<Record<string, unknown> | undefined | typeof UNREACHABLE> {
   try {
     const output = await runNetlify(
       command,
@@ -804,7 +825,7 @@ async function readSiteRecord(
     return parseJsonRecord(output);
   } catch {
     assertRuntimeOpen(runtime);
-    return undefined;
+    return UNREACHABLE;
   }
 }
 
@@ -853,10 +874,34 @@ async function loadSetupStatus(
   const configuredSiteId =
     settings.netlify.siteId || netlifyConfiguredSiteId(settings.host);
   if (configuredSiteId) {
-    const configuredSite = siteFromRecord(
-      await readSiteRecord(command, configuredSiteId, runtime, run),
+    const record = await readSiteRecord(
+      command,
+      configuredSiteId,
+      runtime,
+      run,
     );
-    if (configuredSite?.id === configuredSiteId) {
+    if (record === UNREACHABLE) {
+      // The workspace IS configured; the API just could not be reached.
+      // Reporting `connect` here dropped a ready workspace back to setup on
+      // every transient failure, and `connectSite` then treated the
+      // configured site as non-dedicated.
+      return {
+        command,
+        status: {
+          stage: 'ready',
+          cliInstalled: true,
+          authenticated: true,
+          linked: true,
+          configured: true,
+        },
+      };
+    }
+    const configuredSite = siteFromRecord(record);
+    // `getSite` was asked for exactly this identifier, so any record it
+    // returns IS the configured site. Re-comparing ids rejected every
+    // non-canonical form the API resolves — a site name or subdomain alias
+    // in `settings.netlify.siteId` or in a host `uploadCommand`'s `--site`.
+    if (configuredSite) {
       return {
         command,
         status: {
@@ -1008,8 +1053,13 @@ function vercelProjects(output: string): {
               {
                 id: item['id'],
                 name: item['name'],
+                // The Vercel CLI's `project ls --json` already returns a
+                // scheme-bearing `latestProductionUrl` (getLatestProdUrl
+                // yields `https://<alias>`), unlike Cloudflare's bare
+                // `Project Domains` hostnames this prefix was written for.
+                // Prefixing unconditionally emitted `https://https://...`.
                 ...(typeof item['latestProductionUrl'] === 'string'
-                  ? { url: `https://${item['latestProductionUrl']}` }
+                  ? { url: withHttpsScheme(item['latestProductionUrl']) }
                   : {}),
               },
             ]
@@ -1661,6 +1711,26 @@ async function connectSite(
     );
   }
 
+  // `artifact.host.uploadCommand` predates this flow: a user may have written
+  // their own uploader there. Connecting overwrites that key, so a command
+  // this flow did not write is refused rather than silently replaced — the
+  // user has to clear it themselves, which is the point at which they find
+  // out it is going away.
+  const existingHost = readShareSettings(runtime.workspaceCwd).host;
+  // Parsing as a Netlify deploy invocation is the test, not carrying a
+  // `--site`: a migrated or hand-edited managed command may have no site yet,
+  // and rewriting that one is the whole point of connecting.
+  if (
+    existingHost.uploadCommand &&
+    netlifyDeployArgs(existingHost) === undefined
+  ) {
+    throw new SetupError(
+      409,
+      'netlify_upload_command_conflict',
+      'This workspace already has a custom artifact.host.uploadCommand. Clear it in Settings before connecting Netlify.',
+    );
+  }
+
   if (initial.status.stage === 'ready' && initial.status.linkedSite) {
     return initial.status;
   }
@@ -1675,24 +1745,37 @@ async function connectSite(
   }
 
   let selected = knownSite;
+  // Whether this flow created the site, as opposed to adopting one the user
+  // had already linked. Publishing may relax access settings only on a site
+  // that exists to hold artifacts — see `makeSitePublic`.
+  let createdHere = false;
   if (!selected && linkedSite) {
+    // netlify-cli resolves the link by walking up from the workspace cwd
+    // (findUpSync on `.netlify/state.json`), so `readLinkedSite` can report a
+    // site linked by a repo-committable file ABOVE this workspace. Creation
+    // has always refused to run in a nested workspace; adoption inherits the
+    // same boundary, or a nested workspace silently adopts — and then
+    // publishes to — the parent repository's site.
+    await assertLinkBoundary(runtime);
     const site = await readSiteRecord(
       initial.command,
       linkedSite.id,
       runtime,
       commandRunner(deps),
     );
-    if (!site) {
+    if (!site || site === UNREACHABLE) {
       throw new SetupError(
         502,
         'netlify_site_check_failed',
         'Could not verify the connected Netlify project. Try again.',
       );
     }
-    selected =
-      site['published_deploy'] == null
-        ? linkedSite
-        : await createSite(initial.command, runtime, deps);
+    if (site['published_deploy'] == null) {
+      selected = linkedSite;
+    } else {
+      selected = await createSite(initial.command, runtime, deps);
+      createdHere = true;
+    }
   }
   if (!selected) {
     if (requestedSiteId) {
@@ -1703,6 +1786,7 @@ async function connectSite(
       );
     }
     selected = await createSite(initial.command, runtime, deps);
+    createdHere = true;
   }
 
   assertRuntimeOpen(runtime);
@@ -1732,6 +1816,18 @@ async function connectSite(
           key: 'artifact.share.netlify.siteId',
           value: selected.id,
         },
+        // Recorded as an id rather than a flag so it invalidates itself: a
+        // later setup that adopts a different site writes a `siteId` this
+        // marker no longer matches.
+        ...(createdHere
+          ? [
+              {
+                scope: SettingScope.Workspace,
+                key: 'artifact.share.netlify.dedicatedSiteId',
+                value: selected.id,
+              },
+            ]
+          : []),
       ],
       () => assertRuntimeOpen(runtime),
     );
@@ -2209,6 +2305,24 @@ async function connectVercel(
     let confirmed = pendingName
       ? await confirmVercelProject(current.command, runtime, deps, name)
       : undefined;
+    // Adoption matches on the project NAME, resolved in whatever scope the
+    // CLI is authenticated under right now. Once an id has been persisted,
+    // that name alone is not identity: after a team switch another scope's
+    // same-named project would be adopted, its id and scope written over
+    // this workspace's, and artifacts published into a stranger's project.
+    // Creating one instead would be just as wrong, so the mismatch is
+    // surfaced rather than resolved.
+    if (
+      pendingName &&
+      settings.vercel.projectId &&
+      confirmed?.project.id !== settings.vercel.projectId
+    ) {
+      throw new SetupError(
+        409,
+        'vercel_project_scope_mismatch',
+        `This workspace publishes to the Vercel project ${settings.vercel.projectName} in ${settings.vercel.scope || 'another scope'}, which the current Vercel login cannot see. Switch back to that scope, or clear artifact.share.vercel.* in Settings to connect a new project.`,
+      );
+    }
     if (!confirmed) {
       let createError: unknown;
       try {
@@ -2706,7 +2820,14 @@ function publicSiteRequest(siteId: string): string {
 
 function isPublicSite(output: string): boolean {
   const site = parseJsonRecord(output);
-  return site?.['sso_login'] === false && site['has_password'] === false;
+  if (!site) return false;
+  // Absent means "the site does not have this protection", not "unknown":
+  // Netlify omits these fields on sites that never had a password or SSO,
+  // and the shape varies across CLI and API versions. Requiring the literal
+  // `false` made every such site read as protected, so `makeSitePublic`
+  // threw `netlify_public_access_failed` after a publish that had in fact
+  // succeeded on a fully public site. Only a truthy value means protected.
+  return !site['sso_login'] && !site['has_password'];
 }
 
 async function makeSitePublic(
@@ -2818,10 +2939,16 @@ async function verifyProviderTarget(
 ): Promise<void> {
   const run = commandRunner(deps);
   if (resolved.provider === 'netlify') {
-    const approvedSite = siteFromRecord(
-      await readSiteRecord(resolved.command, resolved.targetId, runtime, run),
+    const record = await readSiteRecord(
+      resolved.command,
+      resolved.targetId,
+      runtime,
+      run,
     );
-    if (approvedSite?.id === resolved.targetId) return;
+    // An unreachable API is not evidence that the target changed, and the
+    // record `getSite` returns for this exact identifier is the target even
+    // when the identifier is a name or alias rather than the canonical id.
+    if (record === UNREACHABLE || siteFromRecord(record)) return;
   } else if (resolved.provider === 'cloudflare' && resolved.accountId) {
     try {
       const projects = cloudflareProjects(
@@ -2970,9 +3097,18 @@ async function handlePublish(
             `Could not publish the artifact through ${selectedProvider}. Try again.`,
           );
         });
-      if (selectedProvider === 'netlify' && settings.netlify.siteId) {
+      if (
+        selectedProvider === 'netlify' &&
+        settings.netlify.dedicatedSiteId &&
+        settings.netlify.dedicatedSiteId === resolvedPublisher.targetId
+      ) {
         // Only the dedicated site this flow created may have protection
-        // stripped; a host-configured site keeps its password/SSO settings.
+        // stripped. `siteId` alone could not say that — `connectSite`
+        // persists it for an adopted user-linked site too, so this guard
+        // used to strip the password and SSO settings off that site on its
+        // first publish, silently and without consent. An adopted site that
+        // really is protected now surfaces as `netlify_public_access_failed`
+        // from the public-URL check below instead.
         await makeSitePublic(
           resolvedPublisher.command,
           resolvedPublisher.targetId,

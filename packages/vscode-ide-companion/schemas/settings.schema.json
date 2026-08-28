@@ -3775,6 +3775,11 @@
                 "siteId": {
                   "type": "string",
                   "default": ""
+                },
+                "dedicatedSiteId": {
+                  "description": "Set by the sharing setup when it creates a Netlify site of its own. Publishing relaxes a site's password and SSO protection only when this matches the target site, so a project you had already linked yourself keeps its access settings.",
+                  "type": "string",
+                  "default": ""
                 }
               }
             }

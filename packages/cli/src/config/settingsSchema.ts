@@ -4055,6 +4055,16 @@ const SETTINGS_SCHEMA = {
                 default: '',
                 showInDialog: false,
               },
+              dedicatedSiteId: {
+                type: 'string',
+                label: 'Netlify Dedicated Site ID',
+                category: 'Experimental',
+                requiresRestart: false,
+                default: '',
+                description:
+                  "Set by the sharing setup when it creates a Netlify site of its own. Publishing relaxes a site's password and SSO protection only when this matches the target site, so a project you had already linked yourself keeps its access settings.",
+                showInDialog: false,
+              },
             },
           },
         },

@@ -345,6 +345,108 @@ describe('GET /workspace/artifact/publish-config', () => {
     expect(JSON.stringify(response.body)).not.toContain('my-bucket');
   });
 
+  it('recognizes the command it wrote on a host whose node is not named "node"', async () => {
+    // `netlifyUploadCommand` persists `<process.execPath> <entry> deploy ...`,
+    // and execPath is whatever runs this daemon — `/usr/bin/node-22`, Debian's
+    // `nodejs`, a volta shim. Requiring the basename to be exactly `node` left
+    // the daemon unable to re-parse its own command on those hosts.
+    const primary = runtime('primary', '/workspace', { primary: true });
+    mockSettings({
+      '/workspace': {
+        host: {
+          uploadCommand:
+            '/usr/bin/node-22 /opt/qwen/node_modules/netlify-cli/bin/run.js deploy --dir {dir} --json --no-build --prod --site site-id',
+          urlFromCommandOutput: true,
+        },
+      },
+    });
+
+    const response = await request(makePrimaryApp(primary, readyNetlify)).get(
+      '/workspace/artifact/publish-config',
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.body.providers).toContainEqual({
+      kind: 'netlify',
+      configured: true,
+    });
+  });
+
+  it('stays configured when the Netlify API cannot be reached', async () => {
+    // `readSiteRecord` used to collapse a transient API failure into the same
+    // `undefined` it returns for "no such site", so a ready workspace fell
+    // back to the never-configured `connect` stage on every blip — and
+    // `connectSite` then treated its configured site as non-dedicated.
+    const primary = runtime('primary', '/workspace', { primary: true });
+    mockSettings({
+      '/workspace': {
+        host: NETLIFY_HOST,
+        share: { netlify: { siteId: 'site-id' } },
+      },
+    });
+    const flakyNetlify: ArtifactRouteCommandRunner = vi.fn(
+      async (_command, args) => {
+        if (args[0] === '--version') return '27.1.2';
+        if (args[0] === 'api' && args[1] === 'getCurrentUser') {
+          return JSON.stringify({ id: 'user-id' });
+        }
+        if (args[0] === 'api' && args[1] === 'getSite') {
+          throw new Error('ETIMEDOUT');
+        }
+        if (args[0] === 'status') throw new Error('not linked');
+        throw new Error(`Unexpected command: ${args.join(' ')}`);
+      },
+    );
+
+    const response = await request(makePrimaryApp(primary, flakyNetlify)).get(
+      '/workspace/artifact/publish-config',
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.body.providers).toContainEqual({
+      kind: 'netlify',
+      configured: true,
+    });
+  });
+
+  it('accepts a configured Netlify site named by a non-canonical identifier', async () => {
+    // `getSite` was asked for exactly this identifier, so whatever record it
+    // returns IS the configured site. Re-comparing ids rejected every form
+    // the API resolves other than the canonical one — a site name or a
+    // subdomain alias.
+    const primary = runtime('primary', '/workspace', { primary: true });
+    mockSettings({
+      '/workspace': {
+        host: NETLIFY_HOST,
+        share: { netlify: { siteId: 'report-site' } },
+      },
+    });
+    const aliasNetlify: ArtifactRouteCommandRunner = vi.fn(
+      async (_command, args) => {
+        if (args[0] === '--version') return '27.1.2';
+        if (args[0] === 'api' && args[1] === 'getCurrentUser') {
+          return JSON.stringify({ id: 'user-id' });
+        }
+        if (args[0] === 'api' && args[1] === 'getSite') {
+          // The API resolves the alias and answers with the canonical id.
+          return JSON.stringify({ id: 'site-id', name: 'report-site' });
+        }
+        if (args[0] === 'status') throw new Error('not linked');
+        throw new Error(`Unexpected command: ${args.join(' ')}`);
+      },
+    );
+
+    const response = await request(makePrimaryApp(primary, aliasNetlify)).get(
+      '/workspace/artifact/publish-config',
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.body.providers).toContainEqual({
+      kind: 'netlify',
+      configured: true,
+    });
+  });
+
   it('accepts the --dir={dir} Netlify form', async () => {
     const primary = runtime('primary', '/workspace', { primary: true });
     mockSettings({
@@ -1228,6 +1330,101 @@ describe('POST /workspace/artifact/netlify/setup', () => {
     ).toBe(false);
   });
 
+  it('does not adopt a linked Netlify site for a nested workspace', async () => {
+    // netlify-cli resolves the link by walking up from the workspace cwd
+    // (findUpSync on `.netlify/state.json`), so `status` can report a site
+    // linked by a repo-committable file ABOVE this workspace. Creation
+    // already refused here; adoption walked straight past the same boundary
+    // and would then publish into the parent repository's site.
+    const workspaceCwd = `${process.cwd()}/src`;
+    const primary = runtime('primary', workspaceCwd, { primary: true });
+    const runCommand: ArtifactRouteCommandRunner = vi.fn(
+      async (_command, args) => {
+        if (args[0] === '--version') return '27.1.2';
+        if (args[0] === 'api' && args[1] === 'getCurrentUser') {
+          return JSON.stringify({ id: 'user-id' });
+        }
+        if (args[0] === 'status') {
+          return JSON.stringify({
+            siteData: { id: 'parent-site', name: 'Parent site' },
+          });
+        }
+        if (args[0] === 'api' && args[1] === 'getSite') {
+          return JSON.stringify({
+            id: 'parent-site',
+            name: 'Parent site',
+            published_deploy: null,
+          });
+        }
+        if (args[0] === 'sites:create') throw new Error('must not run');
+        throw new Error(`Unexpected command: ${args.join(' ')}`);
+      },
+    );
+    const persistSettings = vi.fn();
+    const app = express();
+    app.use(express.json());
+    registerWorkspaceArtifactPublishRoutes(app, {
+      getPrimaryRuntime: () => primary,
+      sendBridgeError,
+      mutate: allowMutations,
+      runCommand: adaptTestRunner(runCommand),
+      persistSettings,
+    });
+
+    const response = await request(app)
+      .post('/workspace/artifact/netlify/setup')
+      .send({ action: 'connect' });
+
+    expect(response.status).toBe(409);
+    expect(response.body.code).toBe('netlify_link_outside_workspace');
+    expect(persistSettings).not.toHaveBeenCalled();
+  });
+
+  it('refuses to overwrite a user-authored artifact.host.uploadCommand', async () => {
+    // `artifact.host.uploadCommand` predates this flow. Connecting used to
+    // replace whatever was there with the managed Netlify command, silently
+    // retargeting a user's own uploader.
+    const workspaceCwd = '/setup-foreign-host';
+    const primary = runtime('primary', workspaceCwd, { primary: true });
+    mockSettings({
+      [workspaceCwd]: {
+        host: {
+          uploadCommand: 'aws s3 cp {dir} s3://my-bucket/ --recursive',
+          urlTemplate: 'https://cdn.example.com/{key}',
+        },
+      },
+    });
+    const runCommand: ArtifactRouteCommandRunner = vi.fn(
+      async (_command, args) => {
+        if (args[0] === '--version') return '27.1.2';
+        if (args[0] === 'api' && args[1] === 'getCurrentUser') {
+          return JSON.stringify({ id: 'user-id' });
+        }
+        if (args[0] === 'status') throw new Error('not linked');
+        if (args[0] === 'sites:create') throw new Error('must not run');
+        throw new Error(`Unexpected command: ${args.join(' ')}`);
+      },
+    );
+    const persistSettings = vi.fn();
+    const app = express();
+    app.use(express.json());
+    registerWorkspaceArtifactPublishRoutes(app, {
+      getPrimaryRuntime: () => primary,
+      sendBridgeError,
+      mutate: allowMutations,
+      runCommand: adaptTestRunner(runCommand),
+      persistSettings,
+    });
+
+    const response = await request(app)
+      .post('/workspace/artifact/netlify/setup')
+      .send({ action: 'connect' });
+
+    expect(response.status).toBe(409);
+    expect(response.body.code).toBe('netlify_upload_command_conflict');
+    expect(persistSettings).not.toHaveBeenCalled();
+  });
+
   it('does not create a Netlify project for a nested workspace', async () => {
     const workspaceCwd = `${process.cwd()}/src`;
     const primary = runtime('primary', workspaceCwd, { primary: true });
@@ -1600,6 +1797,53 @@ describe('multi-provider artifact setup', () => {
           ([, args]) => args[0] === 'pages' && args[2] === 'create',
         ),
     ).toBe(false);
+  });
+
+  it('keeps the scheme the Vercel CLI already put on latestProductionUrl', async () => {
+    // `project ls --json` returns a scheme-bearing `latestProductionUrl`
+    // (the CLI computes `https://<alias>`), unlike Cloudflare's bare
+    // `Project Domains` hostnames the prefix was written for. Prefixing
+    // unconditionally emitted `https://https://acme.vercel.app`.
+    const primary = runtime('primary', '/workspace', { primary: true });
+    mockSettings({
+      '/workspace': {
+        share: {
+          vercel: {
+            projectId: 'prj_artifact',
+            projectName: 'artifact-vercel',
+            scope: 'personal-scope',
+          },
+        },
+      },
+    });
+    const runCommand: ArtifactRouteCommandRunner = vi.fn(
+      async (command, args) => {
+        if (command !== 'vercel') throw new Error('provider unavailable');
+        if (args[0] === '--version') return '59.9.1';
+        if (args[0] === 'whoami') return 'tester';
+        if (args[0] === 'project' && args[1] === 'ls') {
+          return JSON.stringify({
+            projects: [
+              {
+                id: 'prj_artifact',
+                name: 'artifact-vercel',
+                latestProductionUrl: 'https://acme.vercel.app',
+              },
+            ],
+            contextName: 'personal-scope',
+          });
+        }
+        throw new Error(`Unexpected command: ${command} ${args.join(' ')}`);
+      },
+    );
+
+    const response = await request(makePrimaryApp(primary, runCommand)).get(
+      '/workspace/artifact/publish-config',
+    );
+
+    expect(response.status).toBe(200);
+    expect(JSON.stringify(response.body)).not.toContain('https://https://');
+    expect(JSON.stringify(response.body)).toContain('https://acme.vercel.app');
   });
 
   it('installs and authorizes Vercel before pinning its project', async () => {
@@ -2029,7 +2273,9 @@ describe('POST /workspace/artifact/publish', () => {
     mockSettings({
       '/workspace': {
         host: NETLIFY_HOST,
-        share: { netlify: { siteId: 'site-id' } },
+        share: {
+          netlify: { siteId: 'site-id', dedicatedSiteId: 'site-id' },
+        },
       },
     });
 
@@ -2059,6 +2305,84 @@ describe('POST /workspace/artifact/publish', () => {
     expect(mocked.hostPublish.mock.invocationCallOrder[0]).toBeLessThan(
       vi.mocked(readyNetlify).mock.invocationCallOrder[updateCallIndex]!,
     );
+  });
+
+  it('treats a site record without protection fields as public', async () => {
+    // Netlify omits `sso_login`/`has_password` on sites that never had them,
+    // and the shape varies across CLI versions. Requiring the literal `false`
+    // made every such site read as protected, so a publish that had actually
+    // succeeded on a fully public site failed with netlify_public_access_failed.
+    const readBytesWindow = windowReader(HTML);
+    const primary = runtime('primary', '/workspace', {
+      primary: true,
+      readBytesWindow,
+    });
+    mockSettings({
+      '/workspace': {
+        host: NETLIFY_HOST,
+        share: {
+          netlify: { siteId: 'site-id', dedicatedSiteId: 'site-id' },
+        },
+      },
+    });
+    const sparseNetlify: ArtifactRouteCommandRunner = vi.fn(
+      async (_command, args, options) => {
+        if (args[0] === '--version') return '27.1.2';
+        if (args[0] === 'api' && args[1] === 'getCurrentUser') {
+          return JSON.stringify({ id: 'user-id' });
+        }
+        if (args[0] === 'api' && args[1] === 'updateSite') return '{}';
+        if (args[0] === 'api' && args[1] === 'getSite') {
+          return JSON.stringify({ id: 'site-id', name: 'Report site' });
+        }
+        if (args[0] === 'status') {
+          return JSON.stringify({
+            siteData: { id: 'site-id', name: 'Report site' },
+          });
+        }
+        if (args[0] === 'deploy') {
+          return `${options.cwd}|${options.env['WORKSPACE_SHARE_TOKEN'] ?? ''}`;
+        }
+        throw new Error(`Unexpected command: ${args.join(' ')}`);
+      },
+    );
+
+    const response = await request(makePrimaryApp(primary, sparseNetlify))
+      .post('/workspace/artifact/publish')
+      .send({ path: 'out/report.html', provider: 'netlify' });
+
+    expect(response.status).toBe(200);
+    expect(response.body.code).toBeUndefined();
+  });
+
+  it("leaves an adopted Netlify site's protection untouched", async () => {
+    // `connectSite` persists `netlify.siteId` for a site the user had linked
+    // themselves, not only for one this flow created, so keying the strip on
+    // it removed that site's password and SSO settings on the first publish —
+    // silently and without consent. Only `dedicatedSiteId` says "ours".
+    const readBytesWindow = windowReader(HTML);
+    const primary = runtime('primary', '/workspace', {
+      primary: true,
+      readBytesWindow,
+    });
+    mockSettings({
+      '/workspace': {
+        host: NETLIFY_HOST,
+        share: { netlify: { siteId: 'site-id' } },
+      },
+    });
+
+    const response = await request(makePrimaryApp(primary))
+      .post('/workspace/artifact/publish')
+      .send({ path: 'out/report.html', provider: 'netlify' });
+
+    expect(response.status).toBe(200);
+    const updateCall = vi
+      .mocked(readyNetlify)
+      .mock.calls.find(
+        ([, args]) => args[0] === 'api' && args[1] === 'updateSite',
+      );
+    expect(updateCall).toBeUndefined();
   });
 
   it('publishes through a pinned Cloudflare Pages project', async () => {
@@ -2655,7 +2979,9 @@ describe('POST /workspace/artifact/publish', () => {
     mockSettings({
       '/workspace': {
         host: NETLIFY_HOST,
-        share: { netlify: { siteId: 'site-id' } },
+        share: {
+          netlify: { siteId: 'site-id', dedicatedSiteId: 'site-id' },
+        },
       },
     });
     const protectedNetlify: ArtifactRouteCommandRunner = vi.fn(

@@ -205,13 +205,28 @@ export function ShareArtifactDialog({
   );
 
   const mountedRef = useRef(true);
+  /**
+   * The one-shot operation (setup or publish) currently in flight. Starting
+   * one cancels the previous one — they are alternatives, and only the newest
+   * click should land.
+   *
+   * The authorization poll is deliberately NOT kept here. It is a background
+   * loop that coexists with those operations, and sharing one slot made them
+   * abort each other: a publish killed the poll, whose catch returns early on
+   * `signal.aborted` without clearing `pollingProvider` — the effect cleanup
+   * cannot run either, because no dependency changed — leaving the dialog
+   * polling forever with nothing scheduled; and re-establishing the poll
+   * killed an in-flight publish the same way.
+   */
   const activeOperationRef = useRef<AbortController | null>(null);
+  const pollingOperationRef = useRef<AbortController | null>(null);
   const authorizationWindowRef = useRef<Window | null>(null);
   useEffect(() => {
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
       activeOperationRef.current?.abort();
+      pollingOperationRef.current?.abort();
       authorizationWindowRef.current?.close();
     };
   }, []);
@@ -219,6 +234,8 @@ export function ShareArtifactDialog({
   const stopActiveOperation = useCallback(() => {
     activeOperationRef.current?.abort();
     activeOperationRef.current = null;
+    pollingOperationRef.current?.abort();
+    pollingOperationRef.current = null;
     authorizationWindowRef.current?.close();
     authorizationWindowRef.current = null;
     setSetupBusy(false);
@@ -286,8 +303,8 @@ export function ShareArtifactDialog({
     let cancelled = false;
     let timer: number | undefined;
     const controller = new AbortController();
-    activeOperationRef.current?.abort();
-    activeOperationRef.current = controller;
+    pollingOperationRef.current?.abort();
+    pollingOperationRef.current = controller;
     const checkAuthorization = async () => {
       try {
         const checked = await workspaceActions.setupArtifactProvider(
@@ -320,8 +337,8 @@ export function ShareArtifactDialog({
     return () => {
       cancelled = true;
       controller.abort();
-      if (activeOperationRef.current === controller) {
-        activeOperationRef.current = null;
+      if (pollingOperationRef.current === controller) {
+        pollingOperationRef.current = null;
       }
       if (timer !== undefined) window.clearTimeout(timer);
     };
@@ -343,14 +360,19 @@ export function ShareArtifactDialog({
     const controller = new AbortController();
     activeOperationRef.current?.abort();
     activeOperationRef.current = controller;
-    const authWindow =
-      selectedProvider === 'netlify' && !setup?.authenticated
-        ? window.open(
-            '',
-            'qwen-netlify-authorization',
-            'popup,width=720,height=760',
-          )
-        : null;
+    const wantsAuthWindow =
+      selectedProvider === 'netlify' && !setup?.authenticated;
+    const authWindow = wantsAuthWindow
+      ? window.open(
+          '',
+          'qwen-netlify-authorization',
+          'popup,width=720,height=760',
+        )
+      : null;
+    // A pre-opened popup returning null IS reliable evidence that the browser
+    // blocked it — this call keeps its opener handle. That is the only place
+    // blocking is detectable; see the `_blank` fallback below.
+    const popupBlocked = wantsAuthWindow && authWindow === null;
     if (authWindow) {
       authWindow.opener = null;
       authorizationWindowRef.current = authWindow;
@@ -371,25 +393,30 @@ export function ShareArtifactDialog({
         authWindow?.close();
         return;
       }
-      let authorizationOpened = true;
       if (prepared.authorizationUrl) {
         if (authWindow) {
           authWindow.location.href = prepared.authorizationUrl;
         } else {
-          authorizationOpened = Boolean(
-            window.open(
-              prepared.authorizationUrl,
-              '_blank',
-              'noopener,noreferrer',
-            ),
+          // `noopener` severs the opener handle, so this returns null per
+          // spec whether or not the tab opened. Testing its result reported
+          // "popup blocked" on every successful authorization and, worse,
+          // suppressed the poll that authorization depends on. Blocking is
+          // read from the pre-open above instead.
+          window.open(
+            prepared.authorizationUrl,
+            '_blank',
+            'noopener,noreferrer',
           );
         }
-        if (!authorizationOpened) setCurrentError(t('share.popupBlocked'));
+        if (popupBlocked) setCurrentError(t('share.popupBlocked'));
       } else {
         authWindow?.close();
       }
       applyConfig(prepared);
-      if (prepared.setup.authorizationPending && authorizationOpened) {
+      // Armed whenever the server says authorization is pending: the tab may
+      // well have opened, and a poll that is running when it should not be is
+      // recoverable (Cancel stops it) where a missing one strands the flow.
+      if (prepared.setup.authorizationPending) {
         setPollingProvider(selectedProvider);
       }
     } catch {
