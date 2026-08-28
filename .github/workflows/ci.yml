@@ -194,6 +194,15 @@ jobs:
 
       # Remove .qwen/ and its recovery backup left by a previous job so
       # actions/checkout doesn't trip on restrictive permissions.
+      # `.qwen.root-orig` is emitted by recovery tooling OUTSIDE this repo —
+      # nothing here produces it (git grep matches only these sweep copies
+      # and their pins in scripts/tests/review-worktree-cleanup-workflow.
+      # test.js). It is the backup name a cancelled verify's recovery leaves
+      # after renaming an unreadable, root-owned `.qwen` aside (observed on
+      # the shared pool; first recorded around review run 33146730771). If
+      # that producer's naming changes or a third residue name appears,
+      # update the for-loop list in every sweep copy or the checkout
+      # poisoning this sweep exists for silently recurs.
       - name: 'Clean stale .qwen before checkout'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
         run: |-
@@ -703,7 +712,9 @@ jobs:
 
       # Same pre-checkout recovery as the test job: this job lands on the
       # same reused pool, so leftover review worktrees and branches from an
-      # interrupted review would break this checkout too.
+      # interrupted review would break this checkout too. The
+      # `.qwen.root-orig` name's provenance (an external recovery tool) is
+      # documented on the test job's copy.
       - name: 'Clean stale .qwen before checkout'
         run: |-
           set -uo pipefail
@@ -1253,7 +1264,9 @@ jobs:
 
       # Same pre-checkout recovery as the test job: this job lands on the
       # same reused pool, so leftover review worktrees and branches from an
-      # interrupted review would break this checkout too.
+      # interrupted review would break this checkout too. The
+      # `.qwen.root-orig` name's provenance (an external recovery tool) is
+      # documented on the test job's copy.
       - name: 'Clean stale .qwen before checkout'
         run: |-
           set -uo pipefail

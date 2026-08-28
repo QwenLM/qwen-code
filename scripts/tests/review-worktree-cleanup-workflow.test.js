@@ -151,6 +151,12 @@ function expectQuarantineFallback(run) {
   expect(code).toContain('_qwen-quarantine');
   // A cancelled verify can leave the protected tree under the recovery name
   // seen in run 33146730771, so both known top-level names must be swept.
+  // `.qwen.root-orig` is emitted by recovery tooling OUTSIDE this repo —
+  // nothing here produces it (git grep matches only the sweep copies and
+  // these pins), so the pins keep the copies honest, not the producer: if
+  // its naming changes or a third residue name appears on the pool, update
+  // the for-loop list in ci.yml and qwen-code-pr-review.yml, or the sweep
+  // silently no-ops and the checkout poisoning recurs.
   expect(code).toContain(
     'for stale_qwen in "$GITHUB_WORKSPACE/.qwen" "$GITHUB_WORKSPACE/.qwen.root-orig"; do',
   );
