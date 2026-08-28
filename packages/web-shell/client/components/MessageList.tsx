@@ -5439,13 +5439,17 @@ export const MessageList = memo(
                 !isResponding &&
                 // Rewind snapshots are indexed session-globally, but the
                 // rendered transcript is a capped/paginated window. While
-                // older history is still unloaded (hasOlderHistory) or was
-                // dropped for window capacity (historyCapacityReached), the
-                // window-local user-turn ordinal is not the session-global
-                // turn index, so offering edit here would rewind to the
-                // wrong snapshot (or none at all). Fail closed (#10385).
+                // older history is still unloaded (hasOlderHistory), was
+                // dropped for window capacity (historyCapacityReached), or
+                // the load-older page failed terminally
+                // (historyPaginationError — the provider then latches
+                // hasMore=false and merges nothing), the window-local
+                // user-turn ordinal is not the session-global turn index,
+                // so offering edit here would rewind to the wrong snapshot
+                // (or none at all). Fail closed (#10385).
                 !hasOlderHistory &&
                 !historyCapacityReached &&
+                !historyPaginationError &&
                 displayItem.message.role === 'user' &&
                 editableUserContent !== undefined &&
                 displayItem.message.id === editableUserTurn.lastId
@@ -5523,6 +5527,7 @@ export const MessageList = memo(
         editableUserTurn,
         hasOlderHistory,
         historyCapacityReached,
+        historyPaginationError,
         generateContent,
         headerOffset,
         visibleItems,

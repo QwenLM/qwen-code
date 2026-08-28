@@ -6558,6 +6558,20 @@ describe('user message edit affordance (issue #10385)', () => {
     expect(onEditUserMessage).not.toHaveBeenCalled();
   });
 
+  it('does not offer editing while an older-history page terminally failed to load', () => {
+    const onEditUserMessage = vi.fn();
+    // A non-retryable load-older failure latches the provider at
+    // hasMore=false, capacityReached=false, paginationError=true while the
+    // window is still missing older turns, so the window-local ordinal of
+    // the last message (1) is not its session-global turn index either.
+    const c = mount([userMsg('u4'), asstMsg('a4'), userMsg('u5')], undefined, {
+      historyPaginationError: true,
+      onEditUserMessage,
+    });
+    expect(c.querySelector('[data-testid="edit-u5"]')).toBeNull();
+    expect(onEditUserMessage).not.toHaveBeenCalled();
+  });
+
   it('offers editing only for the last user message when the window is complete', () => {
     const onEditUserMessage = vi.fn();
     const c = mount([userMsg('u1'), asstMsg('a1'), userMsg('u2')], undefined, {
