@@ -5,7 +5,7 @@
  */
 
 import { spawn, spawnSync } from 'node:child_process';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -598,6 +598,65 @@ setInterval(() => {}, 1000);
       }
     }, 10_000);
 
+    it('preserves a surviving hook exit code 124 before its deadline', async () => {
+      const runner = new HookRunner();
+      const result = await runner.executeHook(
+        {
+          type: HookType.Command,
+          command: 'exit 124',
+          source: HooksConfigSource.Project,
+          shell: 'bash',
+          timeout: 10_000,
+        },
+        HookEventName.SessionDelete,
+        {
+          session_id: 'surviving-exit-124-test',
+          transcript_path: '/tmp/transcript.jsonl',
+          cwd: tmpdir(),
+          hook_event_name: HookEventName.SessionDelete,
+          timestamp: new Date().toISOString(),
+        },
+      );
+
+      expect(result).toMatchObject({ success: false, exitCode: 124 });
+      expect(result.error).toBeUndefined();
+    }, 10_000);
+
+    it('isolates the supervisor from hook NODE_OPTIONS', async () => {
+      const tempDir = await mkdtemp(join(tmpdir(), 'qwen-hook-node-options-'));
+      const preloadPath = join(tempDir, 'preload.cjs');
+      const markerPath = join(tempDir, 'hook-node-options.txt');
+      const nodeOptions = `--require=${preloadPath}`;
+
+      try {
+        await writeFile(preloadPath, 'process.exit(42);\n');
+        const runner = new HookRunner();
+        const result = await runner.executeHook(
+          {
+            type: HookType.Command,
+            command: `printf '%s' "$NODE_OPTIONS" > ${JSON.stringify(markerPath)}`,
+            source: HooksConfigSource.Project,
+            shell: 'bash',
+            timeout: 1000,
+            env: { NODE_OPTIONS: nodeOptions },
+          },
+          HookEventName.StopFailure,
+          {
+            session_id: 'surviving-node-options-test',
+            transcript_path: join(tempDir, 'transcript.jsonl'),
+            cwd: tempDir,
+            hook_event_name: HookEventName.StopFailure,
+            timestamp: new Date().toISOString(),
+          },
+        );
+
+        expect(result.success).toBe(true);
+        expect(await readFile(markerPath, 'utf8')).toBe(nodeOptions);
+      } finally {
+        await rm(tempDir, { recursive: true, force: true });
+      }
+    }, 10_000);
+
     it('forwards abort through a surviving hook supervisor', async () => {
       const tempDir = await mkdtemp(join(tmpdir(), 'qwen-hook-abort-'));
       const fixturePath = join(tempDir, 'hook.mjs');
@@ -762,7 +821,7 @@ process.exit(0);
         );
         await writeFile(
           fixturePath,
-          `import { readFileSync, writeFileSync } from 'node:fs';
+          `import { fstatSync, readFileSync, writeFileSync } from 'node:fs';
 
 writeFileSync(process.argv[3], String(process.pid));
 const input = readFileSync(0, 'utf8');
@@ -770,7 +829,7 @@ let displayedLength;
 try {
   displayedLength = JSON.parse(input).displayed_text.length;
 } catch {}
-writeFileSync(process.argv[2], JSON.stringify({ bytes: Buffer.byteLength(input), displayedLength }));
+writeFileSync(process.argv[2], JSON.stringify({ bytes: Buffer.byteLength(input), displayedLength, mode: fstatSync(0).mode & 0o777 }));
 `,
         );
 
@@ -798,6 +857,7 @@ writeFileSync(process.argv[2], JSON.stringify({ bytes: Buffer.byteLength(input),
           ],
           {
             cwd: fileURLToPath(new URL('../../../../', import.meta.url)),
+            env: { ...process.env, TMPDIR: tempDir },
             stdio: 'ignore',
           },
         );
@@ -819,11 +879,20 @@ writeFileSync(process.argv[2], JSON.stringify({ bytes: Buffer.byteLength(input),
         const received = JSON.parse(await readFile(resultPath, 'utf8')) as {
           bytes: number;
           displayedLength?: number;
+          mode: number;
         };
         expect(received).toEqual({
           bytes: Buffer.byteLength(JSON.stringify(driverInput)),
           displayedLength: displayedTextLength,
+          mode: 0o600,
         });
+        await waitFor(
+          async () =>
+            !(await readdir(tempDir)).some((name) =>
+              name.startsWith('qwen-hook-input-'),
+            ),
+          1000,
+        );
       } finally {
         if (hookPid && isRunning(hookPid)) {
           try {

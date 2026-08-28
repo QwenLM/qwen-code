@@ -5,6 +5,9 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { mkdtemp, readdir, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { HookRunner } from './hookRunner.js';
 import {
   HookEventName,
@@ -1134,6 +1137,33 @@ describe('HookRunner', () => {
         }
       },
     );
+
+    it('removes staged input when the supervisor spawn throws', async () => {
+      const tempDir = await mkdtemp(join(tmpdir(), 'qwen-hook-spawn-error-'));
+      const originalTmpDir = process.env['TMPDIR'];
+      process.env['TMPDIR'] = tempDir;
+      mockSpawn.mockImplementation(() => {
+        throw new Error('spawn failed');
+      });
+
+      try {
+        const result = await hookRunner.executeHook(
+          hookConfig,
+          HookEventName.SessionDelete,
+          createMockInput({ hook_event_name: HookEventName.SessionDelete }),
+        );
+
+        expect(result.error?.message).toBe('spawn failed');
+        expect(await readdir(tempDir)).toEqual([]);
+      } finally {
+        if (originalTmpDir === undefined) {
+          delete process.env['TMPDIR'];
+        } else {
+          process.env['TMPDIR'] = originalTmpDir;
+        }
+        await rm(tempDir, { recursive: true, force: true });
+      }
+    });
 
     it('keeps output capture for process-scoped async hooks', async () => {
       mockSpawn.mockReturnValue(createMockProcess());

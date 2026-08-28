@@ -67,12 +67,20 @@ const SURVIVING_HOOK_SUPERVISOR_SOURCE = String.raw`
 const { execFile, spawn } = require('node:child_process');
 const { closeSync, openSync, rmSync } = require('node:fs');
 
-const [inputPath, timeoutValue, graceValue, executable, argsValue] =
+const [
+  inputPath,
+  timeoutValue,
+  graceValue,
+  executable,
+  argsValue,
+  nodeOptionsValue,
+] =
   process.argv.slice(1);
 const timeout = Number(timeoutValue);
 const grace = Number(graceValue);
 const args = JSON.parse(argsValue);
-const pollInterval = 50;
+const originalNodeOptions = JSON.parse(nodeOptionsValue);
+const pollInterval = ${HOOK_PROCESS_GROUP_POLL_MS};
 const timeoutExitCode = ${SURVIVING_HOOK_TIMEOUT_EXIT_CODE};
 const signalExitCode = 143;
 let hook;
@@ -129,13 +137,11 @@ const terminateWindowsTree = () =>
       resolve();
       return;
     }
-    const taskkill =
-      (process.env.SystemRoot || 'C:\\Windows') +
-      '\\System32\\taskkill.exe';
+    const taskkill = ${JSON.stringify(WINDOWS_TASKKILL)};
     execFile(
       taskkill,
       ['/f', '/t', '/pid', String(hook.pid)],
-      { windowsHide: true, timeout: 2000 },
+      { windowsHide: true, timeout: ${WINDOWS_TASKKILL_TIMEOUT_MS} },
       () => {
         try {
           hook.kill('SIGKILL');
@@ -180,9 +186,15 @@ for (const signal of ['SIGHUP', 'SIGINT', 'SIGQUIT', 'SIGTERM']) {
 let inputFd;
 try {
   inputFd = openSync(inputPath, 'r');
+  const hookEnv = { ...process.env };
+  if (originalNodeOptions === null) {
+    delete hookEnv.NODE_OPTIONS;
+  } else {
+    hookEnv.NODE_OPTIONS = originalNodeOptions;
+  }
   hook = spawn(executable, args, {
     cwd: process.cwd(),
-    env: process.env,
+    env: hookEnv,
     stdio: [inputFd, 'ignore', 'ignore'],
     shell: false,
     detached: process.platform !== 'win32',
@@ -979,7 +991,7 @@ export class HookRunner {
         shellConfig.shell,
       );
 
-      const env = {
+      const env: NodeJS.ProcessEnv = {
         // Hook commands are child processes launched on the agent's behalf,
         // so they must not inherit Qwen-internal daemon secrets.
         ...sanitizeChildEnv(process.env),
@@ -998,6 +1010,8 @@ export class HookRunner {
       let child: ChildProcess;
       if (survivesParentExit) {
         parentIndependentInputPath = createSurvivingHookInputFile(input);
+        const supervisorEnv = { ...env };
+        delete supervisorEnv['NODE_OPTIONS'];
         try {
           child = spawn(
             process.execPath,
@@ -1010,9 +1024,10 @@ export class HookRunner {
               String(HOOK_TERMINATE_GRACE_MS),
               shellConfig.executable,
               JSON.stringify([...shellConfig.argsPrefix, command]),
+              JSON.stringify(env['NODE_OPTIONS'] ?? null),
             ],
             {
-              env,
+              env: supervisorEnv,
               cwd: input.cwd,
               stdio: 'ignore',
               shell: false,
@@ -1214,7 +1229,8 @@ export class HookRunner {
 
         if (
           survivesParentExit &&
-          exitCode === SURVIVING_HOOK_TIMEOUT_EXIT_CODE
+          exitCode === SURVIVING_HOOK_TIMEOUT_EXIT_CODE &&
+          duration >= timeout
         ) {
           timedOut = true;
           finish({
