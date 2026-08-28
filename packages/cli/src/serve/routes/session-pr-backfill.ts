@@ -23,6 +23,13 @@ import {
   type SessionPrSource,
 } from '@qwen-code/qwen-code-core';
 import type { SendBridgeError } from '../server/error-response.js';
+import {
+  AONE_MAX_MR_VIEW_CALLS_PER_RUN,
+  defaultAoneMrBackend,
+  isAoneDetailUrlForRepo,
+  resolveAoneWorkspaceRepo,
+  type AoneMrBackend,
+} from '../server/aone-mrs.js';
 import { DaemonDrainingError } from '../server/session-archive.js';
 import { invalidateWorkspaceSessionListCache } from '../server/session-list.js';
 import type { SessionPrArchiveLane } from '../server/session-pr-refresh.js';
@@ -41,6 +48,11 @@ export interface SessionPrBackfillOptions {
    * app-wide coordinator; only tests omit it.
    */
   archiveCoordinator?: SessionPrArchiveLane;
+  /**
+   * The a1 read backend for Aone workspaces. Tests substitute fakes; the
+   * daemon uses {@link defaultAoneMrBackend}.
+   */
+  aoneBackend?: AoneMrBackend;
 }
 
 // `--worktree=#<N>` launches persist slug `pr-<N>` with branch
@@ -112,14 +124,22 @@ export interface SessionPrBackfillWorkspaceResult {
   alreadyBound: number;
   /** Resolved numbers skipped because they exceed the sidecar cap. */
   overLimit: number;
-  /** Candidate numbers whose URL could not be resolved. */
+  /**
+   * Planned numbers whose URL could not be resolved this run. On GitHub a
+   * number with no gh page entry, no `/review <url>` form and no
+   * resolvable remote; on Aone any planned number, since every URL comes
+   * from a capped `mr view` and can fail or lose the view-budget race.
+   */
   unresolved: number;
   /**
-   * Whether the workspace's `gh pr list` succeeded. False means URL/state
-   * resolution degraded to the remote-web-URL fallback (convention numbers
-   * only), so a zero `bound` count is a degraded run, not an empty one.
+   * GitHub only: whether the workspace's `gh pr list` succeeded. False
+   * means URL/state resolution degraded to the `/review <url>` forms and
+   * the remote-web-URL fallback, so a zero `bound` count is a degraded
+   * run, not an empty one.
    */
   ghAvailable?: boolean;
+  /** The detected PR platform for this workspace's origin. */
+  platform?: 'github' | 'aone';
   /** Sidecar writes that failed; the affected session keeps its bindings. */
   writeErrors?: number;
   error?: string;
@@ -231,9 +251,13 @@ function collectReviewedPrNumbers(raw: string): {
  * session git branches are deliberately NOT sources: text alone carries no
  * gh-side attribution (a forged binding vector), and the branch source
  * bound the workspace's current-branch PR onto every session (measured
- * pure noise). Numbers resolve to URLs via one batched
- * `gh pr list --state all` per workspace (repo-gated), else `/review <url>`
- * forms, else the workspace's git remote web URL (convention numbers only).
+ * pure noise) — on every platform. GitHub workspaces resolve numbers to
+ * URLs via one batched `gh pr list --state all` per workspace (repo-gated),
+ * else `/review <url>` forms, else the workspace's git remote web URL.
+ * Aone workspaces view each planned number through `a1 repo mr view`
+ * (capped per run) — Aone links are never assembled from the remote — and
+ * repair the fabricated `<origin>/pull/<N>` bindings the pre-Aone backfill
+ * persisted.
  */
 export async function backfillWorkspaceSessionPrs(
   runtime: WorkspaceRuntime,
@@ -265,6 +289,13 @@ export async function backfillWorkspaceSessionPrs(
     runtime.env.effectiveEnv,
   );
   const workspaceRepoKey = remote ? repoKeyFromWebUrl(remote) : undefined;
+  // Origin-based platform detection, before the scan: on Aone a session
+  // holding a sidecar is a candidate even without a source, so the legacy
+  // repair below reaches bindings whose worktree sidecar is gone.
+  const aoneRepo = await resolveAoneWorkspaceRepo(
+    runtime.workspaceCwd,
+    runtime.env.effectiveEnv,
+  );
   const candidates: BackfillCandidate[] = [];
   for (const archiveState of ['active', 'archived'] as const) {
     // Tie-safe exhaustive enumeration (see listAllProjectSessionIds): the
@@ -306,10 +337,19 @@ export async function backfillWorkspaceSessionPrs(
       const conventionNumber = worktree
         ? parsePrNumberFromWorktree(worktree.slug, worktree.worktreeBranch)
         : undefined;
+      const hasSidecar =
+        aoneRepo !== undefined &&
+        existsSync(
+          sessionService.getPrSessionPathForArchiveState(
+            sessionId,
+            archiveState,
+          ),
+        );
       if (
         conventionNumber === undefined &&
         reviewed.reviewed.length === 0 &&
-        reviewed.reviewedUrlForms.length === 0
+        reviewed.reviewedUrlForms.length === 0 &&
+        !hasSidecar
       ) {
         continue;
       }
@@ -339,12 +379,6 @@ export async function backfillWorkspaceSessionPrs(
   // `/review <url>` forms naming it are legitimate even though the
   // workspace origin's key is the fork's.
   let pageRepoKey: string | undefined;
-  const prs = await fetchPullRequests(
-    runtime.workspaceCwd,
-    runtime.env.effectiveEnv,
-    { state: 'all', limit: 500, slim: true },
-  );
-  result.ghAvailable = prs.kind === 'ok';
   // gh's page may only feed bindings when it lists the workspace's OWN
   // repo or a CONFIRMED fork parent: gh's repo resolution is git-config
   // driven (`gh repo set-default`, remaining remotes), so it can diverge
@@ -353,7 +387,62 @@ export async function backfillWorkspaceSessionPrs(
   // when the workspace key is unknown (no resolvable origin): the remote
   // fallback is already disabled in that state.
   let pageMapTrusted = false;
-  if (prs.kind === 'ok') {
+  // Aone only: resolves a planned number's URL through one capped, cached
+  // `mr view` — the sole sanctioned source of an Aone MR URL. The view is
+  // this repo's own attested read, so its entries feed the trusted page
+  // maps (URL, state) and the same-PR identity guard directly.
+  let resolveAoneUrl:
+    | ((number: number) => Promise<string | undefined>)
+    | undefined;
+  // Aone only: recognises the fabricated `<origin>/pull/<N>` URLs the
+  // pre-Aone backfill persisted, so the plan can repair them in place.
+  let isLegacyFabricated:
+    | ((url: string, number: number) => boolean)
+    | undefined;
+  if (aoneRepo) {
+    result.platform = 'aone';
+    const aoneBackend = options.aoneBackend ?? defaultAoneMrBackend;
+    const viewCache = new Map<number, string | undefined>();
+    let viewCalls = 0;
+    resolveAoneUrl = async (number) => {
+      if (viewCache.has(number)) return viewCache.get(number);
+      let url: string | undefined;
+      if (viewCalls < AONE_MAX_MR_VIEW_CALLS_PER_RUN) {
+        viewCalls += 1;
+        try {
+          const view = await aoneBackend.view(aoneRepo.repoPath, number);
+          url = view.url;
+          numberToUrl.set(number, url);
+          pageUrlByNumber.set(number, url);
+          pageStateByNumber.set(number, view.state);
+        } catch {
+          url = undefined;
+        }
+      }
+      viewCache.set(number, url);
+      return url;
+    };
+    pageMapTrusted = true;
+    // Such an entry can never match a real detailUrl — its state would
+    // stay frozen, and it would spend one view call per refresh sweep,
+    // forever. Detect exactly that shape; any other URL keeps its
+    // foreign-repo protection.
+    isLegacyFabricated = (url, number) =>
+      remote !== undefined &&
+      canonicalSessionPrUrl(url) ===
+        canonicalSessionPrUrl(`${remote}/pull/${number}`);
+  } else {
+    result.platform = 'github';
+  }
+  const prs = aoneRepo
+    ? undefined
+    : await fetchPullRequests(runtime.workspaceCwd, runtime.env.effectiveEnv, {
+        state: 'all',
+        limit: 500,
+        slim: true,
+      });
+  if (prs) result.ghAvailable = prs.kind === 'ok';
+  if (prs?.kind === 'ok') {
     for (const pr of prs.pullRequests) {
       // The sidecar snapshot has no 'draft' variant — a draft is still open.
       const state = pr.state === 'draft' ? 'open' : pr.state;
@@ -428,7 +517,10 @@ export async function backfillWorkspaceSessionPrs(
       numbers.length = 0;
       numbers.push(...rest, conventionNumber);
     }
-    if (numbers.length === 0) continue;
+    // The legacy-repair pass below must stay reachable for a session with
+    // nothing planned this run, so only the GitHub path — which has no
+    // repairs — skips on empty numbers before reading the sidecar.
+    if (numbers.length === 0 && !isLegacyFabricated) continue;
     // Re-resolve the session's CURRENT archive state immediately before the
     // snapshot read and locked write: an archive/restore transition landing
     // during the scan and gh window above must not strand the new bindings
@@ -465,6 +557,26 @@ export async function backfillWorkspaceSessionPrs(
     } catch {
       existing = null;
     }
+    // Repair legacy fabricated bindings (Aone only): re-resolve their
+    // numbers through the same capped view path. Successfully viewed ones
+    // are rewritten in the commit below (keeping their createdAt and
+    // provenance); failed ones stay as they are and the next run retries.
+    const repairs = new Map<
+      number,
+      { url: string; state: SessionPr['state'] | undefined }
+    >();
+    if (isLegacyFabricated && resolveAoneUrl && existing) {
+      for (const entry of existing) {
+        if (!isLegacyFabricated(entry.url, entry.number)) continue;
+        const url = await resolveAoneUrl(entry.number);
+        if (url === undefined) continue;
+        repairs.set(entry.number, {
+          url,
+          state: pageStateByNumber.get(entry.number),
+        });
+      }
+    }
+    if (numbers.length === 0 && repairs.size === 0) continue;
     const existingNumbers = new Set((existing ?? []).map((pr) => pr.number));
     const urls = new Map<number, string>();
     const states = new Map<number, SessionPr['state']>();
@@ -476,12 +588,19 @@ export async function backfillWorkspaceSessionPrs(
         url = pageUrlByNumber.get(number);
       }
       if (url === undefined) {
-        // Fork layout: the RELATED page (confirmed fork parent) is preferred
-        // over a synthesized fork URL (forks host no PRs; the link would
-        // 404). Only a number the page lacks entirely falls back to the
-        // workspace remote (gh unavailable, divergent page, or outside the
-        // list window) — a bare reviewed number names this repo's PR N.
-        if (remote !== undefined) url = `${remote}/pull/${number}`;
+        if (resolveAoneUrl) {
+          // Aone links are never assembled: a number the view budget or
+          // the platform declines stays unresolved for the next run.
+          url = await resolveAoneUrl(number);
+        } else if (remote !== undefined) {
+          // Fork layout: the RELATED page (confirmed fork parent) is
+          // preferred over a synthesized fork URL (forks host no PRs; the
+          // link would 404). Only a number the page lacks entirely falls
+          // back to the workspace remote (gh unavailable, divergent page,
+          // or outside the list window) — a bare reviewed number names
+          // this repo's PR N.
+          url = `${remote}/pull/${number}`;
+        }
       }
       if (url === undefined) {
         result.unresolved += 1;
@@ -525,7 +644,26 @@ export async function backfillWorkspaceSessionPrs(
         // removed by a path that takes no lane, so the plan never
         // resurrects a sidecar for a session gone from this archive state.
         if (!existsSync(transcriptPath)) return null;
-        const freshNumbers = new Set(fresh.map((entry) => entry.number));
+        // Repair legacy fabricated URLs first (Aone only), so the repaired
+        // entries plan under their real identity and their state unblocks
+        // the refresh sweep. The re-check keeps a concurrently landed
+        // non-legacy rewrite of the same number untouched.
+        const base =
+          repairs.size === 0
+            ? fresh
+            : fresh.map((entry) => {
+                const repair = repairs.get(entry.number);
+                return repair && isLegacyFabricated?.(entry.url, entry.number)
+                  ? {
+                      ...entry,
+                      url: repair.url,
+                      ...(repair.state !== undefined
+                        ? { state: repair.state }
+                        : {}),
+                    }
+                  : entry;
+              });
+        const freshNumbers = new Set(base.map((entry) => entry.number));
         // Only entries seen in the snapshot are subject to this plan; newer
         // ones are bindings this run never planned for and must keep.
         // Snapshot-held numbers this run re-offers are occupants, not
@@ -538,10 +676,23 @@ export async function backfillWorkspaceSessionPrs(
           // trimming it would let a later run flip it to this repo's PR.
           const resolved =
             numberToUrl.get(entry.number) ?? urls.get(entry.number);
-          const samePr =
-            resolved === undefined ||
-            canonicalSessionPrUrl(entry.url) ===
-              canonicalSessionPrUrl(resolved);
+          // Aone fails CLOSED unless the entry is provably one of this
+          // repo's own MRs — either view-attested this run, or matching
+          // the exact detailUrl shape for this repoPath (the shape a
+          // previous successful bind or repair persisted). The shape check
+          // is what keeps a full sidecar's re-planned entries trimmable
+          // WITHOUT spending the view budget re-attesting them every run;
+          // anything else stays foreign and kept. GitHub keeps the
+          // fail-open default: an unlisted convention binding stays
+          // re-plannable.
+          const samePr = aoneRepo
+            ? (resolved !== undefined &&
+                canonicalSessionPrUrl(entry.url) ===
+                  canonicalSessionPrUrl(resolved)) ||
+              isAoneDetailUrlForRepo(aoneRepo.repoPath, entry.number, entry.url)
+            : resolved === undefined ||
+              canonicalSessionPrUrl(entry.url) ===
+                canonicalSessionPrUrl(resolved);
           return (
             droppable.has(entry.number) &&
             existingNumbers.has(entry.number) &&
@@ -549,7 +700,7 @@ export async function backfillWorkspaceSessionPrs(
             samePr
           );
         };
-        const foreignEntries = fresh.filter((entry) => !plannedFor(entry));
+        const foreignEntries = base.filter((entry) => !plannedFor(entry));
         // Fresh-foreign numbers already hold their slots; billing them
         // again as plan members trims a snapshot binding even though the
         // cap is never exceeded.
@@ -585,7 +736,7 @@ export async function backfillWorkspaceSessionPrs(
         result.alreadyBound += plan.filter((number) =>
           freshNumbers.has(number),
         ).length;
-        const kept = fresh.filter(
+        const kept = base.filter(
           (entry) => planSet.has(entry.number) || !plannedFor(entry),
         );
         const additions: SessionPr[] = [];
@@ -610,6 +761,9 @@ export async function backfillWorkspaceSessionPrs(
         }
         added = additions.length;
         const next = [...kept, ...additions];
+        // Compare against the PERSISTED list, not the repaired one: when a
+        // repair rewrote an entry in `base`, `next` matching `base` is the
+        // change that must commit, not a no-op.
         return next.length === fresh.length &&
           next.every((entry, index) => entry === fresh[index])
           ? null
