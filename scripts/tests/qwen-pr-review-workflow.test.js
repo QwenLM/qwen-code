@@ -64,6 +64,44 @@ function retryLoopSource() {
   return run.slice(start, end);
 }
 
+// A timeout(1) stub that ENFORCES the bound, for the replay harnesses: the
+// workflow's salvage-signal reads are `timeout 5 head/node ...` opens, and a
+// lane without GNU coreutils (macOS) ships no timeout(1) — without the stub
+// the bounded-read condition exits 127 instead of resolving (R6-3). Run the
+// child, SIGKILL it past the leading duration, exit 124 like the real tool.
+// A bare pass-through is not sufficient: a rename-swapped FIFO then blocks
+// the open forever.
+function boundedTimeoutStub() {
+  const js =
+    'const [dur, ...cmd] = process.argv.slice(1);' +
+    'const ms = Math.max(0, Number.parseFloat(dur) || 0) * 1000;' +
+    'const child = require("child_process").spawn(cmd[0], cmd.slice(1), { stdio: "inherit" });' +
+    'let killed = false;' +
+    'const timer = setTimeout(() => { killed = true; try { child.kill("SIGKILL"); } catch (e) {} }, ms);' +
+    'child.on("exit", (code, signal) => { clearTimeout(timer); process.exit(killed ? 124 : code === null ? (signal ? 137 : 1) : code); });';
+  return `#!/bin/bash\nexec "${process.execPath}" -e '${js}' "$@"\n`;
+}
+
+// A reader stub (installed as head AND cat) that rename-swaps a FIFO onto
+// its target at open time — the exact check-then-open window a [ -f ] gate
+// cannot refuse — then blocks exactly like a real open would (no writer).
+// Only a timeout bound resolves the read (R8-10). Shimming both readers
+// keeps the wedge witness red even for a regression that swaps the bounded
+// `timeout 5 head -c N` back to a bare `cat`.
+function swapAtOpenStub() {
+  return (
+    [
+      '#!/bin/bash',
+      'for last in "$@"; do :; done',
+      'if [ -n "$last" ] && [ -f "$last" ]; then',
+      '  rm -f "$last"',
+      '  mkfifo "$last"',
+      'fi',
+      'exec cat "$last"',
+    ].join('\n') + '\n'
+  );
+}
+
 // Drive the extracted loop with a stub qwen whose stream-json `result` event is
 // scripted per attempt, plus stub timeout/sleep so the test is instant.
 function runScenario(
@@ -96,12 +134,24 @@ function runScenario(
       'timeout',
       [
         '#!/bin/bash',
-        'echo "$2" >> "$DUR"',
-        'if [ "${SCENARIO:-}" = "timeout_kill" ]; then exit 124; fi',
-        'shift',
-        'shift',
-        'if [ "${SCENARIO:-}" = "timeout_partial_line" ]; then "$@"; exit 124; fi',
-        'exec "$@"',
+        // The attempt wrapper always leads with --kill-after; the watcher's
+        // bounded signal reads lead with a bare duration (timeout 5 head
+        // ...). Record only the attempt budgets — anything else in $DUR
+        // would poison the duration assertions.
+        'case "${1:-}" in',
+        '--kill-after*)',
+        '  echo "$2" >> "$DUR"',
+        '  if [ "${SCENARIO:-}" = "timeout_kill" ]; then exit 124; fi',
+        '  shift',
+        '  shift',
+        '  if [ "${SCENARIO:-}" = "timeout_partial_line" ]; then "$@"; exit 124; fi',
+        '  exec "$@"',
+        '  ;;',
+        '*)',
+        '  shift',
+        '  exec "$@"',
+        '  ;;',
+        'esac',
       ].join('\n') + '\n',
     );
     // The retry backoff and the watcher's poll loop are the sleeps in the
@@ -266,6 +316,12 @@ function runScenario(
         // dies as killed — the watcher's local kill record is the only
         // departure witness, since a normal push emits no force-push event.
         '  cede_revert_ff_kill) if [ "$n" -eq 1 ]; then i=0; until [ -f "$SUPERSEDE_FILE" ] || [ "$i" -ge 400 ]; do /bin/sleep 0.05; i=$((i+1)); done; exit 143; else r success false "attempt 2 must not run"; fi ;;',
+        // R4-1 agent-side forgery: the kill dir is never exported, but it
+        // is minted under the enumerable RUNNER_TEMP with a fixed prefix —
+        // the stub DISCOVERS it by listing (no derivation), plants the kill
+        // record plus SUPERSEDE_FILE, and dies non-retryably (a fatal
+        // skips the retry reset that clears plants).
+        '  supersede_forged_kill_record) for d in "${RUNNER_TEMP}"/qwen-review-supersede-kill.*; do if [ -d "$d" ]; then printf "head-b" > "$d/killed"; fi; done; printf "head-b" > "$SUPERSEDE_FILE"; exit 3 ;;',
         '  retry_watcher_relaunch) if [ "$n" -eq 1 ]; then r success false "[API Error: 503 upstream overloaded]"; else i=0; until [ -f "$SUPERSEDE_FILE" ] || [ "$i" -ge 200 ]; do /bin/sleep 0.05; i=$((i+1)); done; r success false "[API Error: 503 upstream overloaded]"; fi ;;',
         '  retry_clears_stale_signals) if [ "$n" -eq 1 ]; then r success false "[API Error: 503 upstream overloaded]"; else { [ -f "$SUPERSEDE_FILE" ] && echo present || echo absent; } >> "$OBS"; r success false "ok"; fi ;;',
         '  compose_latch_reset) if [ "$n" -eq 1 ]; then r success false "[API Error: 503 upstream overloaded]"; : > "$SALVAGE_DIR/compose-seen"; else { [ -f "$SALVAGE_DIR/compose-seen" ] && echo present || echo absent; } >> "$OBS"; r success false "[API Error: 503 upstream overloaded]"; fi ;;',
@@ -4205,6 +4261,7 @@ describe('review supersede salvage (#10110)', () => {
     docsOnly = false,
     pct = 50,
     swapArtifactOnRead = false,
+    swapAttemptStartOnRead = false,
     plant = {},
     failFirstPoll = false,
     emptyFirstPoll = false,
@@ -4266,6 +4323,12 @@ describe('review supersede salvage (#10110)', () => {
           : `#!/bin/bash\necho "${liveHead}"\n`,
       );
       write('pkill', `#!/bin/bash\necho "$*" >> "${pkillLog}"\n`);
+      // The watcher's bounded reads (timeout 5 node/head ...) need a
+      // timeout(1) on every lane: macOS ships none, and a missing binary
+      // makes the latch/read condition exit 127 — the compose latch then
+      // never fires and the KEEP arms fail (R6-3). Enforce the bound: a
+      // pass-through leaves a rename-swapped FIFO wedged forever.
+      write('timeout', boundedTimeoutStub());
       if (swapArtifactOnRead) {
         // The R6-3 witness: the latch's [ -f ] passes the real artifact,
         // and the node invocation swaps a FIFO in at the reopen moment —
@@ -4285,6 +4348,14 @@ describe('review supersede salvage (#10110)', () => {
             `exec "${process.execPath}" "$@"`,
           ].join('\n') + '\n',
         );
+      }
+      if (swapAttemptStartOnRead) {
+        // The R8-10 (1/3) witness: the attempt-start read meets a FIFO
+        // rename-swapped in at open time — the window [ -f ] cannot
+        // refuse. Only the timeout bound resolves the read; an unbounded
+        // open wedges the poll and the harness dies on its own timeout.
+        write('head', swapAtOpenStub());
+        write('cat', swapAtOpenStub());
       }
       const eligible =
         run.match(/salvage_eligible\(\) \{[\s\S]*?\n\}/)?.[0] ?? '';
@@ -4377,10 +4448,10 @@ describe('review supersede salvage (#10110)', () => {
     // Every signal name is agent-derivable (SALVAGE_DIR derives from the
     // exported marker path), so the reviewed agent can mkfifo one and
     // block a direct open: write-side the CEDE/KEEP decision, read-side
-    // the attempt-start poll. Writes go aside-then-rename and the read
-    // gates on [ -f ], so all three plants still reach the one-shot
-    // decision inside the bounded timeout — a direct `>` or an ungated
-    // cat hangs and this test dies on the timeout instead.
+    // the attempt-start poll. Writes go aside-then-rename and every read
+    // is one timeout-bounded open, so all three plants still reach the
+    // one-shot decision inside the bounded timeout — a direct `>` or an
+    // unbounded cat hangs and this test dies on the timeout instead.
     const cede = runWatcher({ plant: { superseded: 'fifo' } });
     expect(cede.superseded).toBe('head-b');
     expect(cede.pkilled).toBe(true);
@@ -4447,6 +4518,19 @@ describe('review supersede salvage (#10110)', () => {
       swapArtifactOnRead: true,
     });
     expect(r.marker).toBeNull();
+    expect(r.superseded).toBe('head-b');
+    expect(r.pkilled).toBe(true);
+  });
+
+  it('bounds the attempt-start read against a rename-swapped FIFO (replayed watcher)', () => {
+    // R8-10 (1/3): a FIFO rename-swapped into the attempt-start
+    // check-then-open window (no writer) wedges an unbounded cat forever
+    // and the one-shot watcher never decides — a real head move then
+    // burns the budget re-reviewing the dead head. The head stub swaps at
+    // open time; the timeout bound keeps the decision inside the harness
+    // bound (removing it turns this test into a harness timeout). Takes
+    // the ~5s of the production bound.
+    const r = runWatcher({ swapAttemptStartOnRead: true });
     expect(r.superseded).toBe('head-b');
     expect(r.pkilled).toBe(true);
   });
@@ -5051,6 +5135,56 @@ describe('review supersede salvage (#10110)', () => {
     }
   });
 
+  it('refuses a forged kill record when the head never moved (replayed loop)', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'review-salvage-'));
+    try {
+      const supersedeFile = join(dir, 'superseded');
+      // R4-1: SUPERSEDE_KILL_DIR is never exported, but it is minted with
+      // mktemp -d under the enumerable RUNNER_TEMP with a fixed prefix —
+      // non-export stops DERIVATION, not DISCOVERY by the same-uid agent.
+      // The stub qwen plays the injected agent: it lists RUNNER_TEMP,
+      // plants the kill record, plants SUPERSEDE_FILE, and dies
+      // non-retryably (a fatal skips the retry reset that clears plants).
+      // With the live head UNMOVED and the timeline silent the run must
+      // fail red — accepted alone, the planted record used to cede
+      // green: no review posted, no failure fallback, no replacement run.
+      // RUNNER_TEMP is this test's private dir so the glob finds exactly
+      // this run's minted kill dir.
+      const base = {
+        SUPERSEDE_FILE: supersedeFile,
+        EXPECTED_HEAD_SHA: 'head-a',
+        STUB_LIVE_HEAD: 'head-a',
+        REPO: 'o/r',
+        SLEEP_FAIL_AFTER: '0',
+        RUNNER_TEMP: dir,
+      };
+      const r = runScenario('supersede_forged_kill_record', {
+        armWatcher: true,
+        extraEnv: base,
+      });
+      expect(r.attempts).toBe(1);
+      expect(r.status).toBe(1);
+      expect(r.raw).toContain('FAIL ');
+      expect(r.raw).not.toContain('Superseded early:');
+      // A timeline event between two OTHER heads is not corroboration:
+      // the back-push must land ON the expected head, so a record planted
+      // beside an unrelated force-push still fails red.
+      const unrelated = runScenario('supersede_forged_kill_record', {
+        armWatcher: true,
+        extraEnv: {
+          ...base,
+          STUB_TIMELINE: `deadbeef cafebabe ${new Date().toISOString()}`,
+        },
+      });
+      expect(unrelated.attempts).toBe(1);
+      expect(unrelated.status).toBe(1);
+      expect(unrelated.raw).toContain('FAIL ');
+      expect(unrelated.raw).not.toContain('Superseded early:');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('relaunches a spent watcher and clears stale signals for a retry (replayed loop)', () => {
     const dir = mkdtempSync(join(tmpdir(), 'review-salvage-'));
     try {
@@ -5263,18 +5397,80 @@ describe('review supersede salvage (#10110)', () => {
     return run.match(/read_head_signal\(\) \{[\s\S]*?\n\}/)?.[0] ?? '';
   }
 
+  function cedeSupersededSource() {
+    return run.match(/cede_superseded\(\) \{[\s\S]*?\n\}/)?.[0] ?? '';
+  }
+
+  // Drive the cede's SUPERSEDE_FILE read (read_head_signal) directly: the
+  // swap-at-open / huge-plant witnesses need the read site itself, not the
+  // retry loop around it.
+  function runCedeRead({ swapOnRead = false, huge = false } = {}) {
+    const dir = mkdtempSync(join(tmpdir(), 'review-cede-read-'));
+    try {
+      const supersedeFile = join(dir, 'superseded');
+      if (huge) {
+        spawnSync('sh', [
+          '-c',
+          `head -c 1500000000 /dev/zero | tr '\\0' 'a' > "${supersedeFile}"`,
+        ]);
+      } else {
+        writeFileSync(supersedeFile, 'b'.repeat(40));
+      }
+      const bin = join(dir, 'bin');
+      mkdirSync(bin);
+      const timeoutPath = join(bin, 'timeout');
+      writeFileSync(timeoutPath, boundedTimeoutStub());
+      chmodSync(timeoutPath, 0o755);
+      if (swapOnRead) {
+        for (const name of ['head', 'cat']) {
+          const stubPath = join(bin, name);
+          writeFileSync(stubPath, swapAtOpenStub());
+          chmodSync(stubPath, 0o755);
+        }
+      }
+      const summary = join(dir, 'gss');
+      const harness = [
+        'set -euo pipefail',
+        readHeadSignalSource(),
+        cedeSupersededSource(),
+        'PR_NUMBER=1; EXPECTED_HEAD_SHA=head-a',
+        `SUPERSEDE_FILE="${supersedeFile}"`,
+        `GITHUB_STEP_SUMMARY="${summary}"; : > "$GITHUB_STEP_SUMMARY"`,
+        'cede_superseded',
+      ].join('\n');
+      const r = spawnSync('bash', ['-c', harness], {
+        encoding: 'utf8',
+        timeout: 30_000,
+        env: { ...process.env, PATH: `${bin}:${process.env.PATH}` },
+      });
+      expect(r.status).toBe(0);
+      return readFileSync(summary, 'utf8');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
   function runSalvageOutputs({
     marker = 'head-a',
     movedTo = null,
     liveHead = 'head-b',
     movedToFifo = false,
+    movedToSwapOnRead = false,
+    movedToHuge = false,
   } = {}) {
     const dir = mkdtempSync(join(tmpdir(), 'review-salvage-out-'));
     try {
       const salvage = join(dir, 'salvage');
       mkdirSync(salvage);
       if (marker !== null) writeFileSync(join(salvage, 'salvage-ok'), marker);
-      if (movedToFifo) {
+      if (movedToHuge) {
+        // ~1.5GB of hex chars: an unbounded cat slurps it past the
+        // harness bound; head -c 64 reads 64 bytes and closes.
+        spawnSync('sh', [
+          '-c',
+          `head -c 1500000000 /dev/zero | tr '\\0' 'a' > "${join(salvage, 'moved-to')}"`,
+        ]);
+      } else if (movedToFifo) {
         execFileSync('mkfifo', [join(salvage, 'moved-to')]);
       } else if (movedTo !== null) {
         writeFileSync(join(salvage, 'moved-to'), movedTo);
@@ -5284,6 +5480,16 @@ describe('review supersede salvage (#10110)', () => {
       const ghPath = join(bin, 'gh');
       writeFileSync(ghPath, `#!/bin/bash\necho "${liveHead}"\n`);
       chmodSync(ghPath, 0o755);
+      const timeoutPath = join(bin, 'timeout');
+      writeFileSync(timeoutPath, boundedTimeoutStub());
+      chmodSync(timeoutPath, 0o755);
+      if (movedToSwapOnRead) {
+        for (const name of ['head', 'cat']) {
+          const stubPath = join(bin, name);
+          writeFileSync(stubPath, swapAtOpenStub());
+          chmodSync(stubPath, 0o755);
+        }
+      }
       const gho = join(dir, 'gho');
       const harness = [
         'set -euo pipefail',
@@ -5327,7 +5533,7 @@ describe('review supersede salvage (#10110)', () => {
     expect(runSalvageOutputs({ liveHead: 'head-a' })).toEqual([]);
     expect(runSalvageOutputs({ liveHead: '' })).toEqual([]);
     // A FIFO planted at moved-to must not hang the finished step; the
-    // [ -f ] gate degrades the read to unknown (bounded by the timeout).
+    // bounded read degrades it to unknown inside the timeout bound.
     expect(runSalvageOutputs({ movedToFifo: true })).toEqual([
       'salvaged=true',
       'salvage_moved_to=unknown',
@@ -5347,6 +5553,33 @@ describe('review supersede salvage (#10110)', () => {
       'salvaged=true',
       'salvage_moved_to=unknown',
     ]);
+  });
+
+  it('bounds the moved-to read against a wedge or a huge plant (replayed block)', () => {
+    // R8-10 (3/3): read_head_signal is one timeout-bounded, size-capped
+    // open. A FIFO rename-swapped in at open time must degrade to
+    // `unknown` inside the bound instead of hanging the finished step; a
+    // huge regular plant must not be slurped into the command
+    // substitution (unbounded, the ~1.5GB plant out-runs the harness
+    // bound).
+    expect(
+      runSalvageOutputs({ movedTo: 'b'.repeat(40), movedToSwapOnRead: true }),
+    ).toEqual(['salvaged=true', 'salvage_moved_to=unknown']);
+    expect(runSalvageOutputs({ movedToHuge: true })).toEqual([
+      'salvaged=true',
+      'salvage_moved_to=unknown',
+    ]);
+  });
+
+  it('bounds the superseded read against a wedge or a huge plant (replayed cede)', () => {
+    // R8-10 (3/3): cede_superseded reads SUPERSEDE_FILE through
+    // read_head_signal. The control cedes with the recorded head; a FIFO
+    // swapped in at open time must cede with `unknown` inside the bound
+    // (an unbounded open wedges the exit and this test dies on the
+    // harness timeout); a huge plant must not be slurped.
+    expect(runCedeRead()).toContain(`to ${'b'.repeat(40)} before`);
+    expect(runCedeRead({ swapOnRead: true })).toContain('to unknown before');
+    expect(runCedeRead({ huge: true })).toContain('to unknown before');
   });
 
   it('reads the salvage threshold from the repo variable with a 50 default', () => {
@@ -5416,131 +5649,201 @@ describe('review supersede salvage (#10110)', () => {
     );
   });
 
-  it('skips a delayed run whose live head already carries a posted bot review (replayed delay step)', () => {
-    // R5-4: with cancel-in-progress scoped to `closed`, an away-and-back
-    // push inside the watcher's poll gap leaves the in-flight run and the
-    // queued replacement both owing the SAME head — two full reviews of
-    // one commit. The delay job's re-check dedups on the machine-ledger
-    // anchor of an already-posted bot review. The bot login is pinned to
-    // the review-config constant, and every lookup failure must fail OPEN
-    // (a missed dedup costs one duplicate review; a false skip loses one).
-    const delay = doc.jobs['delay-automatic-review'].steps.find(
-      (s) => s.id === 'pr_state',
-    );
-    expect(delay.run).toContain(`--arg bot "${botLogin}"`);
-    const H = 'a'.repeat(40);
-    const OTHER = 'b'.repeat(40);
-    const ledgerFor = (sha) =>
-      `findings posted <!-- qwen-review-ledger {"v":1,"round":2,"findings":[{"id":"R1-1","sev":"C"}],"sha":"${sha}"} -->`;
-    const runDelayStep = ({
-      currentHead = H,
-      eventHead = H,
-      reviews = [],
-      apiStatus = 0,
-      prState = 'OPEN',
-    }) => {
-      const dir = mkdtempSync(join(tmpdir(), 'review-delay-'));
-      try {
-        const bin = join(dir, 'bin');
-        mkdirSync(bin);
-        // gh pr view answers the state/draft/head tsv; gh api runs the
-        // step's OWN --jq program (with the step's --arg values passed
-        // through) over the fixture reviews, so the replay exercises the
-        // real filter, not a paraphrase.
-        writeFileSync(
-          join(bin, 'gh'),
-          [
-            '#!/bin/bash',
-            'if [ "${1:-}" = "pr" ]; then',
-            `  printf '%s\\tfalse\\t%s\\n' "$STUB_PR_STATE" "$STUB_CURRENT_HEAD"`,
-            '  exit 0',
-            'fi',
-            'if [ "${1:-}" = "api" ]; then',
-            '  filter=""; args=()',
-            '  shift',
-            '  while [ $# -gt 0 ]; do',
-            '    case "$1" in',
-            '      --jq) filter="$2"; shift 2 ;;',
-            '      --arg) args+=(--arg "$2" "$3"); shift 3 ;;',
-            '      *) shift ;;',
-            '    esac',
-            '  done',
-            `  printf '%s' "$STUB_REVIEWS" | jq -r "\${args[@]}" "$filter"`,
-            '  exit "${STUB_API_STATUS}"',
-            'fi',
-            'exit 1',
-          ].join('\n') + '\n',
-        );
-        chmodSync(join(bin, 'gh'), 0o755);
-        const out = join(dir, 'gho');
-        const summary = join(dir, 'gss');
-        writeFileSync(out, '');
-        writeFileSync(summary, '');
-        execFileSync('bash', ['-c', delay.run], {
-          encoding: 'utf8',
-          timeout: 30_000,
-          env: {
-            ...process.env,
-            PATH: `${bin}:${process.env.PATH}`,
-            GITHUB_REPOSITORY: 'o/r',
-            PR_NUMBER: '7',
-            EVENT_HEAD_SHA: eventHead,
-            GITHUB_OUTPUT: out,
-            GITHUB_STEP_SUMMARY: summary,
-            STUB_PR_STATE: prState,
-            STUB_CURRENT_HEAD: currentHead,
-            STUB_REVIEWS: JSON.stringify(reviews),
-            STUB_API_STATUS: String(apiStatus),
+  // The stub below answers the dedup lookup by running the step's OWN --jq
+  // program with real jq — the filter IS the thing under test — so skip
+  // honestly on hosts without jq (the suite's hasJq convention) instead of
+  // reporting the dedup broken there.
+  const delayStepHasJq = (() => {
+    try {
+      execFileSync('jq', ['--version'], { stdio: 'ignore' });
+      return true;
+    } catch {
+      return false;
+    }
+  })();
+
+  it.skipIf(!delayStepHasJq)(
+    'skips a delayed run whose live head already carries a posted bot review (replayed delay step)',
+    () => {
+      // R5-4: with cancel-in-progress scoped to `closed`, an away-and-back
+      // push inside the watcher's poll gap leaves the in-flight run and the
+      // queued replacement both owing the SAME head — two full reviews of
+      // one commit. The delay job's re-check dedups on the machine-ledger
+      // anchor of an already-posted bot review. The bot login is pinned to
+      // the review-config constant, and every lookup failure must fail OPEN
+      // (a missed dedup costs one duplicate review; a false skip loses one).
+      const delay = doc.jobs['delay-automatic-review'].steps.find(
+        (s) => s.id === 'pr_state',
+      );
+      // gh's --jq takes no --arg (fleet-shepherd documents the same
+      // limit), so the constant bot login is interpolated — and the stub
+      // below rejects any unknown flag exactly like real gh.
+      expect(delay.run).toContain(`== "${botLogin}"`);
+      expect(delay.run).not.toContain('--arg');
+      const H = 'a'.repeat(40);
+      const OTHER = 'b'.repeat(40);
+      const ledgerFor = (sha) =>
+        `findings posted <!-- qwen-review-ledger {"v":1,"round":2,"findings":[{"id":"R1-1","sev":"C"}],"sha":"${sha}"} -->`;
+      const runDelayStep = ({
+        currentHead = H,
+        eventHead = H,
+        reviews = [],
+        apiStatus = 0,
+        prState = 'OPEN',
+      }) => {
+        const dir = mkdtempSync(join(tmpdir(), 'review-delay-'));
+        try {
+          const bin = join(dir, 'bin');
+          mkdirSync(bin);
+          // gh pr view answers the state/draft/head tsv; gh api runs the
+          // step's OWN --jq program over the fixture reviews, so the replay
+          // exercises the real filter, not a paraphrase. Faithful to real gh
+          // on flags: --arg is a jq flag, not a gh flag — real gh dies on it
+          // at flag parse, before any request, and a stub that emulated it
+          // let the dead dedup ship green for a round (R9-1).
+          writeFileSync(
+            join(bin, 'gh'),
+            [
+              '#!/bin/bash',
+              'if [ "${1:-}" = "pr" ]; then',
+              `  printf '%s\\tfalse\\t%s\\n' "$STUB_PR_STATE" "$STUB_CURRENT_HEAD"`,
+              '  exit 0',
+              'fi',
+              'if [ "${1:-}" = "api" ]; then',
+              '  shift',
+              '  filter=""',
+              '  while [ $# -gt 0 ]; do',
+              '    case "$1" in',
+              '      --jq) filter="$2"; shift 2 ;;',
+              '      --paginate) shift ;;',
+              '      --*) echo "unknown flag: $1" >&2; exit 1 ;;',
+              '      *) shift ;;',
+              '    esac',
+              '  done',
+              `  printf '%s' "$STUB_REVIEWS" | jq -r "$filter"`,
+              '  exit "${STUB_API_STATUS}"',
+              'fi',
+              'exit 1',
+            ].join('\n') + '\n',
+          );
+          chmodSync(join(bin, 'gh'), 0o755);
+          const out = join(dir, 'gho');
+          const summary = join(dir, 'gss');
+          writeFileSync(out, '');
+          writeFileSync(summary, '');
+          execFileSync('bash', ['-c', delay.run], {
+            encoding: 'utf8',
+            timeout: 30_000,
+            env: {
+              ...process.env,
+              PATH: `${bin}:${process.env.PATH}`,
+              GITHUB_REPOSITORY: 'o/r',
+              PR_NUMBER: '7',
+              EVENT_HEAD_SHA: eventHead,
+              GITHUB_OUTPUT: out,
+              GITHUB_STEP_SUMMARY: summary,
+              STUB_PR_STATE: prState,
+              STUB_CURRENT_HEAD: currentHead,
+              STUB_REVIEWS: JSON.stringify(reviews),
+              STUB_API_STATUS: String(apiStatus),
+            },
+          });
+          return {
+            outputs: readFileSync(out, 'utf8'),
+            summary: readFileSync(summary, 'utf8'),
+          };
+        } finally {
+          rmSync(dir, { recursive: true, force: true });
+        }
+      };
+      // A posted bot review anchored on the live head: nothing to do. The
+      // marker sha must also match the review's server-recorded commit_id —
+      // the body is model-authored text and never dedups alone.
+      const deduped = runDelayStep({
+        reviews: [
+          { user: { login: botLogin }, body: ledgerFor(H), commit_id: H },
+        ],
+      });
+      expect(deduped.outputs).toContain('should_review=false');
+      expect(deduped.summary).toContain(
+        'already carries a posted automatic review',
+      );
+      // An anchor on a DIFFERENT head (e.g. a salvaged historical-head
+      // review whose delta this run must still cover): proceed — marker sha
+      // and commit_id agree with each other, but not with the live head.
+      const otherAnchor = runDelayStep({
+        reviews: [
+          {
+            user: { login: botLogin },
+            body: ledgerFor(OTHER),
+            commit_id: OTHER,
           },
-        });
-        return {
-          outputs: readFileSync(out, 'utf8'),
-          summary: readFileSync(summary, 'utf8'),
-        };
-      } finally {
-        rmSync(dir, { recursive: true, force: true });
-      }
-    };
-    // A posted bot review anchored on the live head: nothing to do.
-    const deduped = runDelayStep({
-      reviews: [{ user: { login: botLogin }, body: ledgerFor(H) }],
-    });
-    expect(deduped.outputs).toContain('should_review=false');
-    expect(deduped.summary).toContain(
-      'already carries a posted automatic review',
-    );
-    // An anchor on a DIFFERENT head (e.g. a salvaged historical-head
-    // review whose delta this run must still cover): proceed.
-    const otherAnchor = runDelayStep({
-      reviews: [{ user: { login: botLogin }, body: ledgerFor(OTHER) }],
-    });
-    expect(otherAnchor.outputs).toContain('should_review=true');
-    // A ledger-shaped marker on a NON-bot review (anyone can submit a
-    // review on a public PR) must not suppress the automatic one.
-    const forged = runDelayStep({
-      reviews: [{ user: { login: 'malicious-actor' }, body: ledgerFor(H) }],
-    });
-    expect(forged.outputs).toContain('should_review=true');
-    // A ledger whose sha did not survive (truncation, fail-closed round):
-    // no anchor, no skip.
-    const noSha = runDelayStep({
-      reviews: [
-        {
-          user: { login: botLogin },
-          body: '<!-- qwen-review-ledger {"v":1,"round":3} -->',
-        },
-      ],
-    });
-    expect(noSha.outputs).toContain('should_review=true');
-    // Lookup failure fails OPEN — the review runs.
-    const apiDown = runDelayStep({ apiStatus: 1 });
-    expect(apiDown.outputs).toContain('should_review=true');
-    // Controls: the pre-existing guards keep their shape.
-    expect(
-      runDelayStep({ currentHead: OTHER, eventHead: H }).outputs,
-    ).toContain('should_review=false');
-    expect(runDelayStep({ prState: 'MERGED' }).outputs).toContain(
-      'should_review=false',
-    );
-  });
+        ],
+      });
+      expect(otherAnchor.outputs).toContain('should_review=true');
+      // A ledger-shaped marker on a NON-bot review (anyone can submit a
+      // review on a public PR) must not suppress the automatic one.
+      const forged = runDelayStep({
+        reviews: [{ user: { login: 'malicious-actor' }, body: ledgerFor(H) }],
+      });
+      expect(forged.outputs).toContain('should_review=true');
+      // A forged marker sha naming the live head must not manufacture the
+      // false skip this gate exists to prevent: the sha is authenticated
+      // against the review's server-recorded commit_id (R5-4).
+      const mismatchedCommit = runDelayStep({
+        reviews: [
+          { user: { login: botLogin }, body: ledgerFor(H), commit_id: OTHER },
+        ],
+      });
+      expect(mismatchedCommit.outputs).toContain('should_review=true');
+      // Only the LAST ledger marker per body counts (compose appends the
+      // genuine one last — the CLI's parseLedger reads the last for the same
+      // reason): a forged marker PLACED BEFORE the genuine one must not win
+      // the capture and skip the live head's review.
+      const forgedFirstMarker = runDelayStep({
+        reviews: [
+          {
+            user: { login: botLogin },
+            body: `${ledgerFor(H)}\n\n${ledgerFor(OTHER)}`,
+            commit_id: OTHER,
+          },
+        ],
+      });
+      expect(forgedFirstMarker.outputs).toContain('should_review=true');
+      // Control for the direction above: genuine marker last, authenticated —
+      // the dedup still skips.
+      const genuineLast = runDelayStep({
+        reviews: [
+          {
+            user: { login: botLogin },
+            body: `${ledgerFor(OTHER)}\n\n${ledgerFor(H)}`,
+            commit_id: H,
+          },
+        ],
+      });
+      expect(genuineLast.outputs).toContain('should_review=false');
+      // A ledger whose sha did not survive (truncation, fail-closed round):
+      // no anchor, no skip.
+      const noSha = runDelayStep({
+        reviews: [
+          {
+            user: { login: botLogin },
+            body: '<!-- qwen-review-ledger {"v":1,"round":3} -->',
+            commit_id: H,
+          },
+        ],
+      });
+      expect(noSha.outputs).toContain('should_review=true');
+      // Lookup failure fails OPEN — the review runs.
+      const apiDown = runDelayStep({ apiStatus: 1 });
+      expect(apiDown.outputs).toContain('should_review=true');
+      // Controls: the pre-existing guards keep their shape.
+      expect(
+        runDelayStep({ currentHead: OTHER, eventHead: H }).outputs,
+      ).toContain('should_review=false');
+      expect(runDelayStep({ prState: 'MERGED' }).outputs).toContain(
+        'should_review=false',
+      );
+    },
+  );
 });

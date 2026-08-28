@@ -7,6 +7,7 @@
 import {
   chmodSync,
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
@@ -55,6 +56,40 @@ function reviewGhWrapper(runStep) {
   return runStep.slice(bodyStart, end).replace(/^ {10}/gm, '');
 }
 
+// A timeout(1) stub that ENFORCES the bound: the wrapper's salvage marker
+// read is a `timeout 5 head -c 128` open, and a lane without GNU coreutils
+// (macOS) ships no timeout(1). A bare pass-through is not sufficient: a
+// rename-swapped FIFO then blocks the open forever (R8-10).
+function boundedTimeoutStub() {
+  const js =
+    'const [dur, ...cmd] = process.argv.slice(1);' +
+    'const ms = Math.max(0, Number.parseFloat(dur) || 0) * 1000;' +
+    'const child = require("child_process").spawn(cmd[0], cmd.slice(1), { stdio: "inherit" });' +
+    'let killed = false;' +
+    'const timer = setTimeout(() => { killed = true; try { child.kill("SIGKILL"); } catch (e) {} }, ms);' +
+    'child.on("exit", (code, signal) => { clearTimeout(timer); process.exit(killed ? 124 : code === null ? (signal ? 137 : 1) : code); });';
+  return `#!/bin/bash\nexec "${process.execPath}" -e '${js}' "$@"\n`;
+}
+
+// A reader stub (installed as head AND cat) that rename-swaps a FIFO onto
+// its target at open time — the window [ -f ] cannot refuse — then blocks
+// like a real open (no writer). Only a timeout bound resolves the read;
+// shimming both readers keeps the wedge red for a regression back to a
+// bare `cat`.
+function swapAtOpenStub() {
+  return (
+    [
+      '#!/bin/bash',
+      'for last in "$@"; do :; done',
+      'if [ -n "$last" ] && [ -f "$last" ]; then',
+      '  rm -f "$last"',
+      '  mkfifo "$last"',
+      'fi',
+      'exec cat "$last"',
+    ].join('\n') + '\n'
+  );
+}
+
 function runReviewGhWrapper(
   runStep,
   args,
@@ -63,8 +98,10 @@ function runReviewGhWrapper(
   expectedHead = 'head-a',
   // salvageContent: when set, a salvage marker file with that content is
   // created and exported as QWEN_CI_REVIEW_SALVAGE_OK_FILE — the supersede
-  // watcher's past-threshold pin (#10110).
-  { salvageContent } = {},
+  // watcher's past-threshold pin (#10110). salvageFifo plants a static
+  // FIFO at the marker; swapSalvageOnRead rename-swaps one in at the
+  // read's open — the window [ -f ] cannot refuse (R8-10).
+  { salvageContent, salvageFifo = false, swapSalvageOnRead = false } = {},
 ) {
   const tempDir = mkdtempSync(path.join(tmpdir(), 'qwen-review-gh-'));
   try {
@@ -72,7 +109,10 @@ function runReviewGhWrapper(
     const realGhPath = path.join(tempDir, 'real-gh');
     const ghLogPath = path.join(tempDir, 'gh.log');
     let salvagePath = '';
-    if (salvageContent !== undefined) {
+    if (salvageFifo) {
+      salvagePath = path.join(tempDir, 'salvage-ok');
+      spawnSync('mkfifo', [salvagePath]);
+    } else if (salvageContent !== undefined) {
       salvagePath = path.join(tempDir, 'salvage-ok');
       writeFileSync(salvagePath, salvageContent);
     }
@@ -92,11 +132,29 @@ function runReviewGhWrapper(
     writeFileSync(ghLogPath, '');
     chmodSync(wrapperPath, 0o755);
     chmodSync(realGhPath, 0o755);
+    // The marker read is a bounded `timeout 5 head -c 128` open: give the
+    // wrapper a bound-enforcing timeout(1) on every lane (macOS ships
+    // none) — and the swap head stub when the wedge arm is requested.
+    const binDir = path.join(tempDir, 'bin');
+    mkdirSync(binDir);
+    writeFileSync(path.join(binDir, 'timeout'), boundedTimeoutStub());
+    chmodSync(path.join(binDir, 'timeout'), 0o755);
+    if (swapSalvageOnRead) {
+      for (const name of ['head', 'cat']) {
+        writeFileSync(path.join(binDir, name), swapAtOpenStub());
+        chmodSync(path.join(binDir, name), 0o755);
+      }
+    }
 
     const result = spawnSync(wrapperPath, args, {
       encoding: 'utf8',
+      // A regression that unbounds the marker read must turn the suite
+      // RED on the harness bound, not hang it: spawnSync kills the child
+      // at 30s and the status assertions fail on the missing exit.
+      timeout: 30_000,
       env: {
         ...process.env,
+        PATH: `${binDir}:${process.env.PATH}`,
         FAKE_GH_LOG: ghLogPath,
         FAKE_HEAD_SHA: currentHead,
         FAKE_PR_STATE: prState,
@@ -702,6 +760,43 @@ describe('qwen resolve workflow', () => {
       'Blocked PR write: PR #123 is CLOSED',
     );
     expect(closedSalvage.ghLog).toBe('');
+  });
+
+  it('bounds the salvage marker read on the posting path (#10110)', () => {
+    const runStep = step(reviewJob, 'Run review');
+    // R8-10: the escape's marker read is one timeout-bounded, size-capped
+    // open. A FIFO rename-swapped in at open time — or planted statically —
+    // must fail CLOSED to the block inside the bound: an unbounded open
+    // wedges the posting path forever, the attempt budget bleeds out, and
+    // the salvage-armed cede then discards a finished review with no
+    // failure signal at all.
+    const wedged = runReviewGhWrapper(
+      runStep,
+      ['api', 'repos/owner/repo/pulls/123/reviews', '--input', 'review.json'],
+      'OPEN',
+      'head-b',
+      'head-a',
+      { salvageContent: 'head-a', swapSalvageOnRead: true },
+    );
+    expect(wedged.status).toBe(90);
+    expect(wedged.stderr).toContain(
+      'Blocked PR write: PR #123 moved from head-a to head-b',
+    );
+    expect(wedged.ghLog).toBe('');
+
+    const fifo = runReviewGhWrapper(
+      runStep,
+      ['api', 'repos/owner/repo/pulls/123/reviews', '--input', 'review.json'],
+      'OPEN',
+      'head-b',
+      'head-a',
+      { salvageFifo: true },
+    );
+    expect(fifo.status).toBe(90);
+    expect(fifo.stderr).toContain(
+      'Blocked PR write: PR #123 moved from head-a to head-b',
+    );
+    expect(fifo.ghLog).toBe('');
   });
 
   it('allows wrapped gh review writes when the PR is still current', () => {

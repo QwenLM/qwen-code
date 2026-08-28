@@ -282,9 +282,18 @@ jobs:
           # run has nothing to do. Fail-open: any lookup trouble falls
           # through to the review — a missed dedup costs one duplicate
           # review, a false skip would lose one.
+          # The marker sha is body text the reviewed agent authors, so it
+          # never dedups alone: only the LAST ledger marker per body
+          # counts (compose appends the genuine one last — the CLI's
+          # parseLedger reads the last marker for the same reason), and it
+          # must equal the review's server-recorded commit_id. A salvaged
+          # historical-head review posts under a NEWER commit_id, so it
+          # never dedups the live head here. gh's --jq accepts a single
+          # expression only (no jq argument flags — fleet-shepherd
+          # documents the same limit), so the constant bot login is
+          # interpolated.
           reviewed_shas="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/reviews" --paginate \
-            --arg bot "qwen-code-ci-bot" \
-            --jq '.[] | select((.user.login // "") == $bot) | (.body // "") | select(contains("<!-- qwen-review-ledger ")) | capture("\"sha\":\"(?<sha>[0-9a-f]{7,64})\"")? | .sha' 2>/dev/null)" || reviewed_shas=""
+            --jq '.[] | select((.user.login // "") == "qwen-code-ci-bot") | ((.body // "") | [match("<!-- qwen-review-ledger [^\n]*"; "g")] | .[-1].string // "") as $marker | (($marker | capture("\"sha\":\"(?<sha>[0-9a-f]{7,64})\"").sha)? // "") as $sha | select(($sha | length) > 0 and $sha == (.commit_id // "")) | $sha' 2>/dev/null)" || reviewed_shas=""
           if [ -n "$current_head" ] && printf '%s\n' "$reviewed_shas" | grep -qx "$current_head"; then
             echo "Skipping delayed review: PR #${PR_NUMBER} head ${current_head} already carries a posted automatic review." >> "$GITHUB_STEP_SUMMARY"
             echo "should_review=false" >> "$GITHUB_OUTPUT"
@@ -1098,12 +1107,15 @@ jobs:
               # re-checks the live head too, so a forged marker cannot trade
               # up to a false historical-head note on an unmoved PR). The
               # OPEN check above still applies.
-              # The marker read gates on [ -f ] like every salvage-signal
-              # read: the path is agent-derivable, and a planted FIFO would
-              # block this cat — and with it the posting path — forever.
-              if [ -n "${QWEN_CI_REVIEW_SALVAGE_OK_FILE:-}" ] \
-                && [ -f "${QWEN_CI_REVIEW_SALVAGE_OK_FILE}" ] \
-                && [ "$(cat "${QWEN_CI_REVIEW_SALVAGE_OK_FILE}" 2>/dev/null)" = "$expected_head" ]; then
+              # The marker read is one timeout-bounded, size-capped open
+              # like every salvage-signal read: the path is agent-derivable,
+              # and an unbounded open of a planted or rename-swapped-in
+              # FIFO would block this read — and with it the posting path —
+              # forever; a wedged, stale or missing pin fails closed to the
+              # block below.
+              local salvage_pin
+              salvage_pin="$(timeout 5 head -c 128 "${QWEN_CI_REVIEW_SALVAGE_OK_FILE:-}" 2>/dev/null || true)"
+              if [ "$salvage_pin" = "$expected_head" ]; then
                 echo "PR write allowed (salvage): PR #${pr_number} moved from ${expected_head} to ${current_head} past the salvage threshold; posting against the reviewed head." >&2
               else
                 echo "Blocked PR write: PR #${pr_number} moved from ${expected_head} to ${current_head}." >&2
@@ -1622,8 +1634,10 @@ jobs:
           # exported environment — so a write-open of one can hit a planted
           # FIFO and block, and a read-open can hang the same way. Every
           # signal write therefore goes to a fresh temp and renames over
-          # the target (rename never opens the target); every read gates
-          # on [ -f ] before the cat.
+          # the target (rename never opens the target); every read is one
+          # timeout-bounded, size-capped open — a [ -f ] gate alone leaves
+          # a rename-swap window between check and open, and cannot cap a
+          # planted huge file.
           write_signal() {
             local tmp
             tmp="$(mktemp "${SALVAGE_DIR}/.sig.XXXXXX")" || return 1
@@ -1718,10 +1732,7 @@ jobs:
               # leading-zero plant: bash arithmetic reads a leading 0 as
               # octal, so a forged `08` would abort the poll and silently
               # kill the watcher (epoch seconds start with 0 only past 2286).
-              attempt_start=""
-              if [ -f "${SALVAGE_DIR}/attempt-start" ]; then
-                attempt_start="$(cat "${SALVAGE_DIR}/attempt-start" 2>/dev/null || true)"
-              fi
+              attempt_start="$(timeout 5 head -c 64 "${SALVAGE_DIR}/attempt-start" 2>/dev/null || true)"
               case "$attempt_start" in
                 ''|0*|*[!0-9]*) attempt_start="$START_TS" ;;
               esac
@@ -1780,15 +1791,14 @@ jobs:
           }
           # The supersede/moved-to files carry a head SHA this step
           # interpolates into stdout, the step summary, and $GITHUB_OUTPUT;
-          # both are agent-writable. Gate the read on [ -f ] (a planted
-          # FIFO blocks the cat) and accept only the watcher's 40-hex
-          # shape — embedded newlines would survive command substitution
+          # both are agent-writable. The read is one timeout-bounded
+          # head -c 64 — a planted FIFO cannot wedge the step and a huge
+          # plant cannot be slurped — and only the watcher's 40-hex shape
+          # passes: embedded newlines would survive command substitution
           # and land as forged workflow commands or output lines.
           read_head_signal() {
-            local content='unknown'
-            if [ -f "${1:-}" ]; then
-              content="$(cat "$1" 2>/dev/null || echo unknown)"
-            fi
+            local content
+            content="$(timeout 5 head -c 64 "${1:-}" 2>/dev/null || echo unknown)"
             case "$content" in
               ''|*[!0-9a-f]*) content='unknown' ;;
               *) [ "${#content}" -eq 40 ] || content='unknown' ;;
@@ -1812,22 +1822,35 @@ jobs:
           # unavailable or silent timeline keeps the red failure.
           supersede_reverted_during_run() {
             local owner repo events before after at departed=0
-            # Primary witness — the watcher's own kill record: a normal
-            # fast-forward departure emits no force-push event, so the
-            # timeline pair below misses the modal supersede shape (the
-            # departure side is invisible and the lone back-push is rightly
-            # rejected). The record is written only on a REAL polled head
-            # move, into a dir never exported — the agent cannot derive or
-            # plant it. The timeline stays the fallback for a lost record.
-            if [ -n "${SUPERSEDE_KILL_DIR:-}" ] && [ -f "${SUPERSEDE_KILL_DIR}/killed" ]; then
-              return 0
-            fi
             owner="${REPO:-}"
             repo="${owner##*/}"
             owner="${owner%%/*}"
             events="$(gh api graphql -f query='query($owner:String!, $repo:String!, $number:Int!) { repository(owner: $owner, name: $repo) { pullRequest(number: $number) { timelineItems(last: 25, itemTypes: [HEAD_REF_FORCE_PUSHED_EVENT]) { nodes { ... on HeadRefForcePushedEvent { createdAt beforeCommit { oid } afterCommit { oid } } } } } } }' -F owner="$owner" -F repo="$repo" -F number="${PR_NUMBER:-}" --jq '.data.repository.pullRequest.timelineItems.nodes[]? | (.beforeCommit.oid // "") + " " + (.afterCommit.oid // "") + " " + (.createdAt // "")' 2>/dev/null)" || return 1
             [ -n "$events" ] || return 1
-            # Ascending events: cede only on the FULL move-then-revert pair
+            # The watcher's kill record covers the modal supersede shape —
+            # a normal fast-forward departure emits no force-push event, so
+            # the pair check below misses it — but its dir is minted under
+            # the enumerable RUNNER_TEMP with a fixed prefix: never-exported
+            # stops the agent DERIVING the path, not DISCOVERING it (same
+            # uid lists the dir and writes). Accepted alone, a planted
+            # record plus a planted SUPERSEDE_FILE cedes green with the
+            # head never moved — silent suppression of the whole review.
+            # The record therefore cedes only corroborated by a server-side
+            # back-push onto the expected head during the run — always
+            # present when a real move reverted (the return is
+            # non-fast-forward), absent in the pure forgery.
+            if [ -n "${SUPERSEDE_KILL_DIR:-}" ] && [ -f "${SUPERSEDE_KILL_DIR}/killed" ]; then
+              while read -r before after at; do
+                at="$(date -d "$at" +%s 2>/dev/null || echo 0)"
+                [ "$at" -ge "$(( START_TS - 15 ))" ] || continue
+                if [ "$after" = "${EXPECTED_HEAD_SHA:-}" ]; then
+                  return 0
+                fi
+              done <<< "$events"
+              return 1
+            fi
+            # Lost record — the timeline pair is the fallback. Ascending
+            # events: cede only on the FULL move-then-revert pair
             # landing during this run — a departure from the expected head
             # with a back-push to it after. A lone back-push matches the
             # triggering push of a reopened/ready_for_review run (its event
