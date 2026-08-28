@@ -41,8 +41,8 @@ function makeConfigWithRegistry(): {
   const registry = new ToolRegistry(config);
   vi.spyOn(config, 'getToolRegistry').mockReturnValue(registry);
   // Stub out the chat client reference so ToolSearch can sync newly
-  // revealed tools via setTools() without a real GeminiClient.
-  vi.spyOn(config, 'getGeminiClient').mockReturnValue({
+  // revealed tools via setTools() without a real LlmClient.
+  vi.spyOn(config, 'getLlmClient').mockReturnValue({
     setTools: vi.fn().mockResolvedValue(undefined),
   } as never);
   return { config, registry };
@@ -540,13 +540,13 @@ describe('ToolSearchTool', () => {
     // the revealedDeferred set (which is meant to track on-demand
     // reveals only) and must not trigger setTools(): the tool is
     // already in the chat's declaration list. Triggering setTools()
-    // here also risks a spurious "GeminiClient not initialised"
+    // here also risks a spurious "LlmClient not initialised"
     // failure when the inspection happens before init completes.
     registry.registerTool(
       new MockTool({ name: 'core_tool', shouldDefer: false }),
     );
     const setToolsSpy = vi.fn().mockResolvedValue(undefined);
-    vi.spyOn(config, 'getGeminiClient').mockReturnValue({
+    vi.spyOn(config, 'getLlmClient').mockReturnValue({
       setTools: setToolsSpy,
     } as never);
 
@@ -576,7 +576,7 @@ describe('ToolSearchTool', () => {
       }),
     );
     const setToolsSpy = vi.fn().mockResolvedValue(undefined);
-    vi.spyOn(config, 'getGeminiClient').mockReturnValue({
+    vi.spyOn(config, 'getLlmClient').mockReturnValue({
       setTools: setToolsSpy,
     } as never);
 
@@ -599,7 +599,7 @@ describe('ToolSearchTool', () => {
       }),
     );
     const setToolsSpy = vi.fn().mockResolvedValue(undefined);
-    vi.spyOn(config, 'getGeminiClient').mockReturnValue({
+    vi.spyOn(config, 'getLlmClient').mockReturnValue({
       setTools: setToolsSpy,
     } as never);
 
@@ -643,7 +643,7 @@ describe('ToolSearchTool', () => {
         }),
       );
       const setToolsSpy = vi.fn().mockResolvedValue(undefined);
-      vi.spyOn(config, 'getGeminiClient').mockReturnValue({
+      vi.spyOn(config, 'getLlmClient').mockReturnValue({
         setTools: setToolsSpy,
       } as never);
 
@@ -864,7 +864,7 @@ describe('ToolSearchTool', () => {
         shouldDefer: true,
       }),
     );
-    vi.spyOn(config, 'getGeminiClient').mockReturnValue({
+    vi.spyOn(config, 'getLlmClient').mockReturnValue({
       setTools: vi.fn().mockRejectedValue(new Error('chat not initialised')),
     } as never);
 
@@ -901,7 +901,7 @@ describe('ToolSearchTool', () => {
     // reveals, not pre-existing ones.
     registry.revealDeferredTool('cron_list');
 
-    vi.spyOn(config, 'getGeminiClient').mockReturnValue({
+    vi.spyOn(config, 'getLlmClient').mockReturnValue({
       setTools: vi.fn().mockRejectedValue(new Error('chat not initialised')),
     } as never);
 
@@ -948,7 +948,7 @@ describe('ToolSearchTool', () => {
     expect(registry.isDeferredToolRevealed('bravo')).toBe(false);
   });
 
-  it('treats a null GeminiClient identically to setTools() throwing', async () => {
+  it('treats a null LlmClient identically to setTools() throwing', async () => {
     // Without the explicit null-check, optional chaining (`?.setTools()`)
     // silently no-ops if init hasn't completed yet, leaving the reveal
     // in the registry while the API never received the schema. The
@@ -957,8 +957,8 @@ describe('ToolSearchTool', () => {
     registry.registerTool(
       new MockTool({ name: 'cron_create', shouldDefer: true }),
     );
-    vi.spyOn(config, 'getGeminiClient').mockReturnValue(
-      null as unknown as ReturnType<typeof config.getGeminiClient>,
+    vi.spyOn(config, 'getLlmClient').mockReturnValue(
+      null as unknown as ReturnType<typeof config.getLlmClient>,
     );
 
     const tool = new ToolSearchTool(config);
@@ -967,7 +967,7 @@ describe('ToolSearchTool', () => {
       .execute(new AbortController().signal);
 
     expect(result.error).toBeDefined();
-    expect(result.error?.message).toContain('GeminiClient not initialised');
+    expect(result.error?.message).toContain('LlmClient not initialised');
     expect(String(result.llmContent)).not.toContain('"name":"cron_create"');
     // Reveal rolled back so subsequent ToolSearch can find the tool.
     expect(registry.isDeferredToolRevealed('cron_create')).toBe(false);
@@ -995,7 +995,7 @@ describe('ToolSearchTool', () => {
     );
 
     vi.spyOn(visibleConfig, 'getToolRegistry').mockReturnValue(visibleRegistry);
-    vi.spyOn(visibleConfig, 'getGeminiClient').mockReturnValue({
+    vi.spyOn(visibleConfig, 'getLlmClient').mockReturnValue({
       setTools: vi.fn().mockResolvedValue(undefined),
       refreshStartupContextReminder: vi.fn().mockResolvedValue(undefined),
     } as never);
@@ -1023,7 +1023,7 @@ describe('ToolSearchTool', () => {
     vi.spyOn(visibleConfig, 'getToolRegistry').mockReturnValue(visibleRegistry);
 
     const mockSetTools = vi.fn().mockResolvedValue(undefined);
-    vi.spyOn(visibleConfig, 'getGeminiClient').mockReturnValue({
+    vi.spyOn(visibleConfig, 'getLlmClient').mockReturnValue({
       setTools: mockSetTools,
       refreshStartupContextReminder: vi.fn().mockResolvedValue(undefined),
     } as never);
@@ -1072,7 +1072,7 @@ describe('ToolSearchTool', () => {
     vi.spyOn(visibleConfig, 'getToolRegistry').mockReturnValue(visibleRegistry);
 
     const mockSetTools = vi.fn().mockResolvedValue(undefined);
-    vi.spyOn(visibleConfig, 'getGeminiClient').mockReturnValue({
+    vi.spyOn(visibleConfig, 'getLlmClient').mockReturnValue({
       setTools: mockSetTools,
       refreshStartupContextReminder: vi.fn().mockResolvedValue(undefined),
     } as never);
