@@ -1619,6 +1619,31 @@ describe('startSessionPrRefreshTimer', () => {
     }
   }
 
+  function attachTimerGuard(
+    target: WorkspaceRuntime,
+  ): WorkspaceGenerationGuard {
+    const guard = createWorkspaceGenerationGuard();
+    (target as { generationGuard?: WorkspaceGenerationGuard }).generationGuard =
+      guard;
+    return guard;
+  }
+
+  // The sweep's observable completion signal: the bridge notification fires
+  // only after the LAST sidecar commit of the tick. Waiting on it before
+  // crossing the next interval is what keeps these timer tests deterministic
+  // under full-suite load — advancing the fake clock the instant the VIEW
+  // count lands races the tick's real-fs commit tail, and the re-entrancy
+  // guard then silently skips the next tick (intermittent red).
+  const sweepDone = (runtime: WorkspaceRuntime, times: number): Promise<void> =>
+    vi.waitFor(
+      () => {
+        expect(
+          runtime.bridge.markSessionCatalogChanged as ReturnType<typeof vi.fn>,
+        ).toHaveBeenCalledTimes(times);
+      },
+      { timeout: 30_000 },
+    );
+
   it('rotates the Aone view window across timer ticks', async () => {
     // 30 pending (> the 25 cap): tick 1 must view the first window, tick 2
     // a DIFFERENT window — the timer advances sweepStart, so the union of
@@ -1654,6 +1679,7 @@ describe('startSessionPrRefreshTimer', () => {
     await vi.waitFor(() => {
       expect(view).toHaveBeenCalledTimes(AONE_MAX_MR_VIEW_CALLS_PER_RUN);
     });
+    await sweepDone(runtime, 1); // tick 1 fully committed before next tick
     perTickViews.push(current);
     current = [];
 
@@ -1661,6 +1687,7 @@ describe('startSessionPrRefreshTimer', () => {
     await vi.waitFor(() => {
       expect(view).toHaveBeenCalledTimes(2 * AONE_MAX_MR_VIEW_CALLS_PER_RUN);
     });
+    await sweepDone(runtime, 2);
     perTickViews.push(current);
 
     const union = new Set(perTickViews.flat());
@@ -1706,6 +1733,7 @@ describe('startSessionPrRefreshTimer', () => {
     await vi.waitFor(() => {
       expect(view).toHaveBeenCalledTimes(AONE_MAX_MR_VIEW_CALLS_PER_RUN);
     });
+    await sweepDone(runtime, 1); // tick 1 fully committed before removal
     perTickViews.push(current);
     current = [];
 
@@ -1721,6 +1749,11 @@ describe('startSessionPrRefreshTimer', () => {
     await vi.waitFor(() => {
       expect(view).toHaveBeenCalledTimes(2 * AONE_MAX_MR_VIEW_CALLS_PER_RUN);
     });
+    // Tick 3 re-views the first window, already 'open' from tick 1, so it
+    // commits nothing and the catalog notification does not refire — wait on
+    // the view count and let the tick's synchronous tail settle instead of
+    // sweepDone.
+    await vi.advanceTimersByTimeAsync(10);
     perTickViews.push(current);
 
     const readded = new Set(perTickViews[1]);
@@ -1728,6 +1761,142 @@ describe('startSessionPrRefreshTimer', () => {
     for (const id of [21, 22, 23, 24, 25]) {
       expect(readded.has(id)).toBe(true);
     }
+    handle?.dispose();
+  });
+
+  it('advances the rotation by the consumed count when the budget truncates', async () => {
+    // R1-4 witness: the timer must advance the offset by however many views
+    // the sweep actually STARTED (aoneConsumed), not the fixed cap. Each
+    // fake view hangs for the full per-call timeout against the injected
+    // clock, so the 60s budget truncates the window well below the cap; the
+    // next sweep must then begin at the truncation point. Mutant
+    // `sweepStart + AONE_MAX_MR_VIEW_CALLS_PER_RUN` would start the second
+    // window cap positions ahead and leave the truncated tail unviewed.
+    const total = 30;
+    const runtime = timerRuntime('aone', trustedCwd, true);
+    await seedAoneTimerWorkspace(runtime, total);
+    const perTickViews: number[][] = [];
+    let current: number[] = [];
+    let clock = 0;
+    const view = vi.fn(async (_repoPath: string, id: number) => {
+      current.push(id);
+      clock += 20_000; // each view burns the per-call timeout
+      return {
+        number: id,
+        url: `https://code.alibaba-inc.com/jspt/agentic_coding/codereview/${id}`,
+        state: 'open' as const,
+      };
+    });
+    const backend: AoneMrBackend = { list: vi.fn(async () => []), view };
+    const registry = {
+      listAll: () => [runtime],
+    } as unknown as WorkspaceRegistry;
+    vi.useFakeTimers();
+
+    const handle = startSessionPrRefreshTimer({
+      workspaceRegistry: registry,
+      env: {},
+      aoneBackend: backend,
+      now: () => clock,
+    });
+
+    // Tick 1: budget admits far fewer views than the cap.
+    await vi.advanceTimersByTimeAsync(60_000);
+    await vi.waitFor(() => {
+      expect(view.mock.calls.length).toBeGreaterThan(0);
+      expect(view.mock.calls.length).toBeLessThan(
+        AONE_MAX_MR_VIEW_CALLS_PER_RUN,
+      );
+    });
+    await sweepDone(runtime, 1);
+    const consumed = current.length;
+    expect(consumed).toBeLessThan(AONE_MAX_MR_VIEW_CALLS_PER_RUN);
+    perTickViews.push(current);
+    current = [];
+
+    // Tick 2: must begin at the truncation point, not cap positions ahead.
+    await vi.advanceTimersByTimeAsync(5 * 60_000);
+    await vi.waitFor(() => {
+      expect(view.mock.calls.length).toBeGreaterThan(consumed);
+    });
+    await sweepDone(runtime, 2);
+    perTickViews.push(current);
+
+    // Pending numbers are the consecutive 1..30, so the window that begins
+    // at the truncation offset picks up exactly where tick 1's window left
+    // off. A cap-advance mutant would start the second window cap positions
+    // ahead and leave a gap.
+    expect(perTickViews[1][0]).toBe(
+      perTickViews[0][perTickViews[0].length - 1] + 1,
+    );
+    handle?.dispose();
+  });
+
+  it('keeps the offset unmoved when a sweep throws, retrying the window', async () => {
+    // R4-4 witness: a workspace whose sweep throws (non-draining) must keep
+    // its offset so the next tick retries the same window. Mutant "advance
+    // the offset in the catch / move the write into finally" would skip the
+    // failed window. Tick 1 views window 1; tick 2 throws (generation guard
+    // closed); tick 3 must start where tick 1 left off (offset 25), not cap
+    // positions further ahead.
+    const total = 30;
+    const runtime = timerRuntime('aone', trustedCwd, true);
+    await seedAoneTimerWorkspace(runtime, total);
+    const perTickViews: number[][] = [];
+    let current: number[] = [];
+    const view = vi.fn(async (_repoPath: string, id: number) => {
+      current.push(id);
+      return {
+        number: id,
+        url: `https://code.alibaba-inc.com/jspt/agentic_coding/codereview/${id}`,
+        state: 'open' as const,
+      };
+    });
+    const backend: AoneMrBackend = { list: vi.fn(async () => []), view };
+    const registry = {
+      listAll: () => [runtime],
+    } as unknown as WorkspaceRegistry;
+    vi.useFakeTimers();
+
+    const handle = startSessionPrRefreshTimer({
+      workspaceRegistry: registry,
+      env: {},
+      aoneBackend: backend,
+    });
+
+    // Tick 1: window 1 viewed, offset advances to 25.
+    await vi.advanceTimersByTimeAsync(60_000);
+    await vi.waitFor(() => {
+      expect(view).toHaveBeenCalledTimes(AONE_MAX_MR_VIEW_CALLS_PER_RUN);
+    });
+    await sweepDone(runtime, 1);
+    perTickViews.push(current);
+    current = [];
+
+    // Tick 2: guard closed → sweep throws non-draining → offset must NOT
+    // advance. No new views fire.
+    attachTimerGuard(runtime).close();
+    await vi.advanceTimersByTimeAsync(5 * 60_000);
+    await vi.advanceTimersByTimeAsync(10);
+    expect(view).toHaveBeenCalledTimes(AONE_MAX_MR_VIEW_CALLS_PER_RUN);
+
+    // Tick 3: guard re-opened → sweep retries the window tick 1 left off at
+    // (offset 25), not the window a cap-advance would have jumped to.
+    attachTimerGuard(runtime);
+    await vi.advanceTimersByTimeAsync(5 * 60_000);
+    await vi.waitFor(() => {
+      expect(view).toHaveBeenCalledTimes(2 * AONE_MAX_MR_VIEW_CALLS_PER_RUN);
+    });
+    await sweepDone(runtime, 2);
+    perTickViews.push(current);
+
+    // Offset stayed put across the thrown tick: tick 3's window picks up
+    // exactly where tick 1's left off (pending numbers are the consecutive
+    // 1..30). A cap-advance mutant would have jumped the window cap
+    // positions ahead on the thrown tick.
+    expect(perTickViews[1][0]).toBe(
+      perTickViews[0][perTickViews[0].length - 1] + 1,
+    );
     handle?.dispose();
   });
 });

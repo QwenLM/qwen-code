@@ -376,6 +376,12 @@ export function startSessionPrRefreshTimer(deps: {
    * fake to observe the rotating view window without a live a1.
    */
   aoneBackend?: AoneMrBackend;
+  /**
+   * Test seam: the clock handed to each sweep's aggregate-budget deadline.
+   * The daemon omits it (the sweep then uses Date.now); tests substitute a
+   * controllable clock to drive budget truncation at the timer level.
+   */
+  now?: () => number;
 }): { dispose(): void } | undefined {
   const intervalMs = resolveSessionPrRefreshIntervalMs(deps.env ?? process.env);
   if (intervalMs === undefined) return undefined;
@@ -401,7 +407,12 @@ export function startSessionPrRefreshTimer(deps: {
           const result = await refreshWorkspaceSessionPrStates(
             runtime,
             undefined,
-            { archiveCoordinator, sweepStart, aoneBackend: deps.aoneBackend },
+            {
+              archiveCoordinator,
+              sweepStart,
+              aoneBackend: deps.aoneBackend,
+              now: deps.now,
+            },
           );
           // Only the Aone path reports a consumed window — the GitHub path
           // never reads the offset, so don't write one for it.
