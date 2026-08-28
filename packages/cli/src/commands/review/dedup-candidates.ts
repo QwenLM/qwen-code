@@ -15,8 +15,9 @@
 // mechanical step between the finder union and the verify shard: it matches
 // the pooled candidates against the carried ledger — the prev-ledger side
 // file's posted work list, plus the previous round's saved findings
-// artifact's deferral entries when that artifact exists on this machine — and
-// drops a match before any verifier is spent on it. In the spirit of #7751's
+// artifact's deferral entries when that artifact exists on this machine AND
+// is from the side file's own round — and drops a match before any verifier
+// is spent on it. In the spirit of #7751's
 // script-lint gate, the model is out of the matching loop: the report it
 // writes is what the orchestrator shards from and what `compose-review`
 // reads to disclose the set-aside count.
@@ -48,6 +49,7 @@ import {
   isLedgerFinding,
   isStandInName,
   normalizeLedgerFinding,
+  parseLedger,
   type Ledger,
   type LedgerFinding,
 } from './lib/ledger.js';
@@ -317,11 +319,16 @@ function postedEntries(
  * revival of the very claim it closed. Local-only by nature, exactly like
  * the incremental cache: a CI or fresh-clone round has no artifact and
  * loses only the deferral half.
+ *
+ * The return also carries the round that SAVED the artifact, recovered
+ * from the ledger marker inside the composed body `save-artifact`
+ * persisted — the caller fences on it, because the entry outcomes above
+ * are only as fresh as that round (see `runDedupCandidates`).
  */
 function deferredEntries(
   planDir: string,
   pr: unknown,
-): { entries: CarriedEntry[]; name: string } | null {
+): { entries: CarriedEntry[]; name: string; round: number | undefined } | null {
   const reviewsDir = resolve(planDir, '..', 'reviews');
   const pattern = new RegExp(`^\\d{4}-\\d{2}-\\d{2}-\\d{6}-pr-${pr}\\.json$`);
   let newest: string | undefined;
@@ -334,7 +341,11 @@ function deferredEntries(
     return null;
   }
   if (!newest) return null;
-  let artifact: { schemaVersion?: unknown; findings?: unknown };
+  let artifact: {
+    schemaVersion?: unknown;
+    findings?: unknown;
+    verdict?: unknown;
+  };
   try {
     artifact = JSON.parse(readFileSync(join(reviewsDir, newest), 'utf8'));
   } catch {
@@ -343,6 +354,16 @@ function deferredEntries(
   if (artifact?.schemaVersion !== 1 || !Array.isArray(artifact.findings)) {
     return null;
   }
+  // The saving round rides where the artifact already persists it: the
+  // composed body's ledger marker, stamped by the very round that posted
+  // and then saved this artifact.
+  const verdict =
+    artifact.verdict !== null && typeof artifact.verdict === 'object'
+      ? (artifact.verdict as { body?: unknown })
+      : undefined;
+  const round = parseLedger(
+    typeof verdict?.body === 'string' ? verdict.body : undefined,
+  )?.round;
   const entries: CarriedEntry[] = [];
   for (const raw of artifact.findings) {
     const f = raw as {
@@ -386,7 +407,7 @@ function deferredEntries(
       });
     }
   }
-  return { entries, name: newest };
+  return { entries, name: newest, round };
 }
 
 export function runDedupCandidates(args: DedupArgs): LedgerDedupReport {
@@ -412,7 +433,22 @@ export function runDedupCandidates(args: DedupArgs): LedgerDedupReport {
   const pr = isPositivePrNumber(plan.prNumber) ? plan.prNumber : undefined;
   const diffHash = diffHashOf(plan.diffPathAbsolute);
   const posted = pr !== undefined ? postedEntries(planDir, pr) : null;
-  const deferred = pr !== undefined ? deferredEntries(planDir, pr) : null;
+  const deferredLoaded = pr !== undefined ? deferredEntries(planDir, pr) : null;
+  // The round fence: the artifact's deferral outcomes are only as fresh as
+  // the round that saved it, and rounds alternate machines by design — a
+  // deferral another machine's round closed still reads as standing in this
+  // machine's older copy, so dropping a re-derived candidate against it
+  // would lose the claim on no ledger, off the standing record, and before
+  // any verifier saw it: the unrecoverable direction. The half runs only
+  // when the artifact IS the side file's round; every other state (an older
+  // artifact, an unrecoverable round, no side file to fence against) skips
+  // it, the conservative direction the module header declares.
+  const deferred =
+    deferredLoaded !== null &&
+    posted !== null &&
+    deferredLoaded.round === posted.round
+      ? deferredLoaded
+      : null;
   // Posted first: when a claim exists in both carriers, the drop should cite
   // the id the Step 6 ruling will use.
   const carried = [...(posted?.entries ?? []), ...(deferred?.entries ?? [])];
@@ -474,7 +510,18 @@ export function runDedupCandidates(args: DedupArgs): LedgerDedupReport {
             DEFERRED_ID_SHAPE.test((d as DroppedCandidate).matchedId)),
       )
     ) {
-      cumulative = [...existing.dropped, ...dropped];
+      cumulative = [
+        // Re-validate a leftover against the carriers THIS invocation
+        // loaded: a cross-run report can cite an entry a later round
+        // closed or lost, and only this round's carriers say what still
+        // stands — a stale citation would disclose a set-aside that this
+        // round never made. Within-round repeats reload the same
+        // carriers, so the filter is lossless there.
+        ...existing.dropped.filter((d) =>
+          carried.some((e) => e.id === d.matchedId),
+        ),
+        ...dropped,
+      ];
     }
   } catch {
     // No usable prior report — this invocation's drops stand alone.
@@ -509,7 +556,9 @@ export function runDedupCandidates(args: DedupArgs): LedgerDedupReport {
   parts.push(
     deferred
       ? `Deferral record: ${deferred.name}, ${deferred.entries.length} entries.`
-      : `No findings artifact for this PR on this machine — deferral dedup skipped.`,
+      : deferredLoaded === null
+        ? `No findings artifact for this PR on this machine — deferral dedup skipped.`
+        : `Findings artifact ${deferredLoaded.name} cannot be fenced to the recovered work list's round — deferral dedup skipped.`,
   );
   if (diffHash === undefined) {
     parts.push(

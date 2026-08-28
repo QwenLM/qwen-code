@@ -85,10 +85,26 @@ function writeLedger(
 function writeArtifact(
   findings: Array<Record<string, unknown>>,
   name = `2026-08-25-101010-pr-${PR}.json`,
+  round?: number,
 ): void {
+  // save-artifact persists the composed body verbatim, and compose-review
+  // stamps the ledger marker into it — the marker is the only carrier of
+  // the saving round the deferral fence keys on.
   writeFileSync(
     join(reviewsDir, name),
-    JSON.stringify({ schemaVersion: 1, findings }),
+    JSON.stringify({
+      schemaVersion: 1,
+      findings,
+      ...(round !== undefined
+        ? {
+            verdict: {
+              body:
+                'review body\n\n' +
+                `<!-- qwen-review-ledger {"v":1,"round":${round},"findings":[]} -->`,
+            },
+          }
+        : {}),
+    }),
   );
 }
 
@@ -242,6 +258,13 @@ describe('runDedupCandidates — matching against the posted work list', () => {
 });
 
 describe('runDedupCandidates — the deferral half reads the findings artifact', () => {
+  beforeEach(() => {
+    // The round fence (pinned in its own describe below) admits only an
+    // artifact from the side file's own round: give every case here a
+    // matching pair, so the entry-level guards stay what is under test.
+    writeLedger([], 3);
+  });
+
   const deferred = (over: Record<string, unknown> = {}) => ({
     id: 'D2-1',
     severity: 'Suggestion',
@@ -253,7 +276,7 @@ describe('runDedupCandidates — the deferral half reads the findings artifact',
   });
 
   it('drops a candidate restating a deferral, and cites the D id', () => {
-    writeArtifact([deferred()]);
+    writeArtifact([deferred()], undefined, 3);
     const r = run([candidate()]);
     expect(r.droppedCount).toBe(1);
     expect(r.dropped[0]).toMatchObject({ matchedId: 'D2-1', via: 'deferred' });
@@ -261,13 +284,13 @@ describe('runDedupCandidates — the deferral half reads the findings artifact',
   });
 
   it('artifact R entries never participate — posted matching is the side file alone', () => {
-    writeArtifact([deferred({ id: 'R2-1' })]);
+    writeArtifact([deferred({ id: 'R2-1' })], undefined, 3);
     expect(run([candidate()]).droppedCount).toBe(0);
   });
 
   it('reads the NEWEST artifact for the PR', () => {
-    writeArtifact([deferred()], `2026-08-20-090909-pr-${PR}.json`);
-    writeArtifact([], `2026-08-25-101010-pr-${PR}.json`);
+    writeArtifact([deferred()], `2026-08-20-090909-pr-${PR}.json`, 3);
+    writeArtifact([], `2026-08-25-101010-pr-${PR}.json`, 3);
     const r = run([candidate()]);
     expect(r.droppedCount).toBe(0);
     expect(r.sources.artifact).toMatchObject({
@@ -290,10 +313,10 @@ describe('runDedupCandidates — the deferral half reads the findings artifact',
     // Terminal-only: it is on no ledger, on no standing deferral record,
     // and Step 6 never rules on it — a match would simply vanish, the
     // unrecoverable direction the module header names.
-    writeArtifact([deferred({ confidence: 'low' })]);
+    writeArtifact([deferred({ confidence: 'low' })], undefined, 3);
     expect(run([candidate()]).droppedCount).toBe(0);
     // The control: the identical entry at high confidence still drops.
-    writeArtifact([deferred({ confidence: 'high' })]);
+    writeArtifact([deferred({ confidence: 'high' })], undefined, 3);
     expect(run([candidate()]).droppedCount).toBe(1);
   });
 
@@ -301,16 +324,16 @@ describe('runDedupCandidates — the deferral half reads the findings artifact',
     // `fixed` and `no_change_needed` both take the claim off the plate
     // (findings.ts: one applied, one retracted), so the entry is no longer
     // standing — matching it would lose a regression or a revival.
-    writeArtifact([deferred({ outcome: 'fixed' })]);
+    writeArtifact([deferred({ outcome: 'fixed' })], undefined, 3);
     expect(run([candidate()]).droppedCount).toBe(0);
-    writeArtifact([deferred({ outcome: 'no_change_needed' })]);
+    writeArtifact([deferred({ outcome: 'no_change_needed' })], undefined, 3);
     expect(run([candidate()]).droppedCount).toBe(0);
   });
 
   it('a skipped or outcome-less deferral stays standing and still absorbs', () => {
-    writeArtifact([deferred({ outcome: 'skipped' })]);
+    writeArtifact([deferred({ outcome: 'skipped' })], undefined, 3);
     expect(run([candidate()]).droppedCount).toBe(1);
-    writeArtifact([deferred()]);
+    writeArtifact([deferred()], undefined, 3);
     expect(run([candidate()]).droppedCount).toBe(1);
   });
 
@@ -319,13 +342,83 @@ describe('runDedupCandidates — the deferral half reads the findings artifact',
     // `k !== 1` stand-in exclusion is unconditional here: path equality over
     // `(body)` is vacuous, and a standing pathless deferral would absorb
     // every genuinely new pathless candidate before any stage ruled on it.
-    writeArtifact([deferred({ locations: [{ file: '(body)' }] })]);
+    writeArtifact(
+      [deferred({ locations: [{ file: '(body)' }] })],
+      undefined,
+      3,
+    );
     expect(run([candidate({ file: '(body)' })]).droppedCount).toBe(0);
-    writeArtifact([deferred({ locations: [{ file: '(unknown)' }] })]);
+    writeArtifact(
+      [deferred({ locations: [{ file: '(unknown)' }] })],
+      undefined,
+      3,
+    );
     expect(run([candidate({ file: '(unknown)' })]).droppedCount).toBe(0);
     // Control: the same entry still absorbs through a real location.
-    writeArtifact([deferred()]);
+    writeArtifact([deferred()], undefined, 3);
     expect(run([candidate()]).droppedCount).toBe(1);
+  });
+});
+
+describe('runDedupCandidates — the deferral half is fenced to the side file’s round', () => {
+  // Rounds alternate machines by design — the side file exists precisely
+  // for that shape — so the newest local artifact can be OLDER than the
+  // recovered work list. A deferral another machine's round closed
+  // (`fixed` / `no_change_needed`) still reads as standing in the stale
+  // copy, and dropping a re-derived candidate against it would lose the
+  // claim on every carrier at once. The artifact's outcomes are only as
+  // fresh as the round that saved it, so the half runs only when the
+  // artifact IS that round's; every other state skips it — the module's
+  // declared conservative direction.
+  const deferredD31 = (over: Record<string, unknown> = {}) => ({
+    id: 'D3-1',
+    severity: 'Suggestion',
+    confidence: 'high',
+    outcome: 'skipped',
+    summary: TITLE,
+    shortSummary: 'precheck-pr: unpinned action',
+    locations: [{ file: 'src/a.ts', line: 40 }],
+    ...over,
+  });
+  const NAME = `2026-08-25-101010-pr-${PR}.json`;
+
+  it('a stale artifact behind the side file’s round is fenced out', () => {
+    writeLedger([], 5);
+    writeArtifact([deferredD31()], NAME, 3);
+    const r = run([candidate()]);
+    expect(r.droppedCount).toBe(0);
+    expect(r.sources.artifact).toBeNull();
+    expect(r.note).toContain('deferral dedup skipped');
+  });
+
+  it('a gap of exactly one round is fenced too', () => {
+    // The interleaving the fence exists for: round N saves the artifact
+    // here, round N+1 closes the deferral elsewhere, round N+2 is back
+    // here — the gap is exactly 1, so a gap fence misses it.
+    writeLedger([], 4);
+    writeArtifact([deferredD31()], NAME, 3);
+    expect(run([candidate()]).droppedCount).toBe(0);
+  });
+
+  it('a same-round artifact still absorbs — the machine the side file came from', () => {
+    writeLedger([], 5);
+    writeArtifact([deferredD31()], NAME, 5);
+    const r = run([candidate()]);
+    expect(r.droppedCount).toBe(1);
+    expect(r.dropped[0]).toMatchObject({ matchedId: 'D3-1', via: 'deferred' });
+  });
+
+  it('an artifact whose round is unrecoverable is fenced out', () => {
+    writeLedger([], 5);
+    writeArtifact([deferredD31()], NAME); // no marker in the body
+    expect(run([candidate()]).droppedCount).toBe(0);
+    expect(run([candidate()]).sources.artifact).toBeNull();
+  });
+
+  it('no recovered side file, no round to fence against — skipped', () => {
+    writeArtifact([deferredD31()], NAME, 5);
+    expect(run([candidate()]).droppedCount).toBe(0);
+    expect(run([candidate()]).sources.artifact).toBeNull();
   });
 });
 
@@ -361,6 +454,59 @@ describe('runDedupCandidates — the report on disk', () => {
     // kept is THIS invocation's — earlier batches are already sharded.
     expect(r2.kept).toHaveLength(1);
     expect(r2.kept[0].file).toBe('src/new.ts');
+  });
+
+  it('a merged leftover citing an entry no longer carried falls out', () => {
+    // Run A dropped a candidate against D3-1, wrote the report, and died
+    // before cleanup; Step 6 closed D3-1 (`no_change_needed`) into the
+    // artifact; run B restarts on the unchanged diff with the closed
+    // entry excluded from the carried set. The same-hash merge must
+    // re-validate the leftover against the carriers THIS invocation
+    // loaded, or the posted body discloses a set-aside against a
+    // deferral the previous round closed.
+    writeLedger([entry()], 5);
+    writeArtifact(
+      [
+        {
+          id: 'D3-1',
+          severity: 'Suggestion',
+          confidence: 'high',
+          outcome: 'no_change_needed',
+          summary: TITLE,
+          shortSummary: 'precheck-pr: unpinned action',
+          locations: [{ file: 'src/a.ts', line: 40 }],
+        },
+      ],
+      `2026-08-25-101010-pr-${PR}.json`,
+      5,
+    );
+    const plan = writePlan();
+    const diffHash = createHash('sha256')
+      .update(readFileSync(join(planDir, 'pr.diff')))
+      .digest('hex');
+    writeFileSync(
+      join(planDir, ledgerDedupReportName(PR)),
+      JSON.stringify({
+        v: 1,
+        diffHash,
+        dropped: [
+          {
+            file: 'src/z.ts',
+            line: 7,
+            title: 'leftover claim from the killed run',
+            severity: 'Suggestion',
+            matchedId: 'D3-1',
+            matchedTitle: 'precheck-pr: unpinned action',
+            via: 'deferred',
+          },
+        ],
+      }),
+    );
+    const r = runDedupCandidates({
+      plan,
+      candidates: writeCandidates([candidate()]),
+    });
+    expect(r.dropped.map((d) => d.matchedId)).toEqual(['R1-2']);
   });
 
   it('a repeated invocation over overlapping candidates counts each drop once', () => {
