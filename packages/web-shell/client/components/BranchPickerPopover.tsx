@@ -9,6 +9,7 @@ import { useWorkspace } from '@qwen-code/webui/daemon-react-sdk';
 import type {
   DaemonGitBranchesResult,
   DaemonGitBranchInfo,
+  DaemonWorkspaceGitStatus,
 } from '@qwen-code/sdk/daemon';
 import {
   ArrowDownToLineIcon,
@@ -36,12 +37,140 @@ interface BranchPickerPopoverProps {
   gitCwd?: string;
   side?: 'top' | 'right' | 'bottom' | 'left';
   onBranchChanged?: () => void;
+  /**
+   * Live working-tree summary from the trigger chip. Drives the hints beside
+   * the Update / Commit / Push actions (dirty counts, in-progress operation);
+   * ahead/behind/upstream prefer the branch listing fetched on open, which is
+   * fresher than the chip's polled snapshot.
+   */
+  status?: DaemonWorkspaceGitStatus;
+  /** Invoked when the popover opens so the caller can refresh `status`. */
+  onRefreshStatus?: () => void;
   onOpenDiff?: () => void;
   onOpenCommit?: () => void;
   children: React.ReactNode;
 }
 
 type SectionKey = 'recent' | 'local' | 'remote' | 'tags';
+
+type HintTone = 'muted' | 'info' | 'warning';
+
+interface ActionHint {
+  text: string;
+  tone: HintTone;
+}
+
+interface ActionHints {
+  pull?: ActionHint;
+  pullDisabled: boolean;
+  commit?: ActionHint;
+  push?: ActionHint;
+  pushDisabled: boolean;
+}
+
+type TranslateFn = ReturnType<typeof useI18n>['t'];
+
+/**
+ * Derive the per-action hints shown beside Update / Commit / Push so the user
+ * can judge before clicking. Hard blockers (in-progress merge/rebase,
+ * conflicts, detached HEAD, pull without upstream) disable the action because
+ * the daemon would reject it anyway; soft states (up to date, nothing to push,
+ * clean tree) only dim the row since the action is still harmless.
+ *
+ * Exported for tests.
+ */
+export function deriveActionHints(
+  t: TranslateFn,
+  data: DaemonGitBranchesResult | null,
+  status: DaemonWorkspaceGitStatus | undefined,
+): ActionHints {
+  const head = data?.local.find((b) => b.isHead);
+  const detached = data?.detached ?? status?.detached ?? false;
+  const operation = status?.operation;
+  const conflicted = status?.conflicted ?? 0;
+  // The branch listing is fetched on open, so it wins over the polled status.
+  const ahead = head?.ahead ?? status?.ahead ?? 0;
+  const behind = head?.behind ?? status?.behind ?? 0;
+  const upstream = head?.upstream;
+  const hasUpstream: boolean | undefined = head
+    ? Boolean(head.upstream)
+    : status?.hasUpstream;
+  // Dirty counts only exist on v2 status; `computedAt` marks that the enriched
+  // fields were actually computed rather than defaulted.
+  const hasTreeSummary = status?.computedAt !== undefined;
+  const staged = status?.staged ?? 0;
+  const unstaged = status?.unstaged ?? 0;
+  const untracked = status?.untracked ?? 0;
+  const changed = staged + unstaged + untracked + conflicted;
+
+  const blocker: ActionHint | undefined = operation
+    ? { text: t(`git.operation.${operation}`), tone: 'warning' }
+    : conflicted > 0
+      ? { text: t('git.conflicted', { count: conflicted }), tone: 'warning' }
+      : detached
+        ? { text: t('git.detached'), tone: 'warning' }
+        : undefined;
+
+  let pull: ActionHint | undefined;
+  let pullDisabled = false;
+  if (blocker) {
+    pull = blocker;
+    pullDisabled = true;
+  } else if (hasUpstream === false) {
+    pull = { text: t('branchPicker.hint.noUpstream'), tone: 'muted' };
+    pullDisabled = true;
+  } else if (behind > 0) {
+    pull =
+      changed > 0
+        ? {
+            text: t('branchPicker.hint.behindDirty', { count: behind }),
+            tone: 'warning',
+          }
+        : {
+            text: upstream ? `↓${behind} · ${upstream}` : `↓${behind}`,
+            tone: 'info',
+          };
+  } else if (hasUpstream) {
+    pull = { text: t('branchPicker.hint.upToDate'), tone: 'muted' };
+  }
+
+  let push: ActionHint | undefined;
+  let pushDisabled = false;
+  if (blocker) {
+    push = blocker;
+    pushDisabled = true;
+  } else if (hasUpstream === false) {
+    push = { text: t('branchPicker.hint.willCreateUpstream'), tone: 'info' };
+  } else if (ahead > 0 && behind > 0) {
+    push = {
+      text: t('branchPicker.hint.aheadBehind', { ahead, behind }),
+      tone: 'warning',
+    };
+  } else if (ahead > 0) {
+    push = { text: `↑${ahead}`, tone: 'info' };
+  } else if (hasUpstream) {
+    push = { text: t('branchPicker.hint.nothingToPush'), tone: 'muted' };
+  }
+
+  let commit: ActionHint | undefined;
+  if (hasTreeSummary) {
+    commit =
+      changed > 0
+        ? {
+            text:
+              untracked > 0
+                ? t('branchPicker.hint.changedFilesUntracked', {
+                    count: changed,
+                    untracked,
+                  })
+                : t('branchPicker.hint.changedFiles', { count: changed }),
+            tone: 'info',
+          }
+        : { text: t('branchPicker.hint.noChanges'), tone: 'muted' };
+  }
+
+  return { pull, pullDisabled, commit, push, pushDisabled };
+}
 
 export function BranchPickerPopover({
   open,
@@ -50,6 +179,8 @@ export function BranchPickerPopover({
   gitCwd,
   side = 'bottom',
   onBranchChanged,
+  status,
+  onRefreshStatus,
   onOpenDiff,
   onOpenCommit,
   children,
@@ -82,6 +213,10 @@ export function BranchPickerPopover({
   const searchRef = useRef<HTMLInputElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
   const requestIdRef = useRef(0);
+  // Held in a ref so an inline callback from the parent doesn't re-arm the
+  // open effect on every render (refresh → setState → render → refresh…).
+  const onRefreshStatusRef = useRef(onRefreshStatus);
+  onRefreshStatusRef.current = onRefreshStatus;
 
   const fetchBranches = useCallback(async () => {
     const requestId = ++requestIdRef.current;
@@ -104,6 +239,7 @@ export function BranchPickerPopover({
   useEffect(() => {
     if (open) {
       void fetchBranches();
+      onRefreshStatusRef.current?.();
       setSearch('');
       setNewBranchMode(false);
       setCheckoutRefMode(false);
@@ -254,6 +390,11 @@ export function BranchPickerPopover({
     return groups;
   }, [filteredRemote]);
 
+  const hints = useMemo(
+    () => deriveActionHints(t, data, status),
+    [t, data, status],
+  );
+
   const actionsVisible =
     !q ||
     t('branchPicker.action.pull').toLowerCase().includes(q) ||
@@ -321,9 +462,10 @@ export function BranchPickerPopover({
                 <>
                   <button
                     type="button"
-                    className={styles.actionItem}
-                    disabled={!!busyAction}
+                    className={`${styles.actionItem} ${hints.pull?.tone === 'muted' ? styles.actionItemMuted : ''}`}
+                    disabled={!!busyAction || hints.pullDisabled}
                     onClick={() => void handlePull()}
+                    data-testid="branch-picker-pull"
                   >
                     {busyAction === 'pull' ? (
                       <Loader2Icon
@@ -339,28 +481,32 @@ export function BranchPickerPopover({
                     <span className={styles.actionLabel}>
                       {t('branchPicker.action.pull')}
                     </span>
+                    <ActionHintLabel hint={hints.pull} />
                   </button>
                   {onOpenCommit && (
                     <button
                       type="button"
-                      className={styles.actionItem}
+                      className={`${styles.actionItem} ${hints.commit?.tone === 'muted' ? styles.actionItemMuted : ''}`}
                       disabled={!!busyAction}
                       onClick={() => {
                         onOpenCommit();
                         onOpenChange(false);
                       }}
+                      data-testid="branch-picker-commit"
                     >
                       <GitCommitIcon size={14} className={styles.actionIcon} />
                       <span className={styles.actionLabel}>
                         {t('branchPicker.action.commit')}
                       </span>
+                      <ActionHintLabel hint={hints.commit} />
                     </button>
                   )}
                   <button
                     type="button"
-                    className={styles.actionItem}
-                    disabled={!!busyAction}
+                    className={`${styles.actionItem} ${hints.push?.tone === 'muted' ? styles.actionItemMuted : ''}`}
+                    disabled={!!busyAction || hints.pushDisabled}
                     onClick={() => void handlePush()}
+                    data-testid="branch-picker-push"
                   >
                     {busyAction === 'push' ? (
                       <Loader2Icon
@@ -376,6 +522,7 @@ export function BranchPickerPopover({
                     <span className={styles.actionLabel}>
                       {t('branchPicker.action.push')}
                     </span>
+                    <ActionHintLabel hint={hints.push} />
                   </button>
                   {onOpenDiff && (
                     <button
@@ -581,6 +728,19 @@ export function BranchPickerPopover({
         )}
       </PopoverContent>
     </Popover>
+  );
+}
+
+function ActionHintLabel({ hint }: { hint?: ActionHint }) {
+  if (!hint) return null;
+  return (
+    <span
+      className={styles.actionHint}
+      data-tone={hint.tone}
+      data-testid="branch-picker-action-hint"
+    >
+      {hint.text}
+    </span>
   );
 }
 
