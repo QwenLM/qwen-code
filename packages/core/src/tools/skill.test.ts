@@ -98,7 +98,7 @@ describe('SkillTool', () => {
       getAutoSkillEnabled: vi.fn().mockReturnValue(true),
       getSessionId: vi.fn().mockReturnValue('test-session-id'),
       getSkillManager: vi.fn(),
-      getGeminiClient: vi.fn().mockReturnValue(undefined),
+      getLlmClient: vi.fn().mockReturnValue(undefined),
       getModelInvocableCommandsProvider: vi.fn().mockReturnValue(null),
       getModelInvocableCommandsExecutor: vi.fn().mockReturnValue(null),
       getPermissionManager: vi
