@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { defineConfig } from 'vite';
+import { defineConfig } from 'vitest/config';
 import react from '@vitejs/plugin-react';
 import dts from 'vite-plugin-dts';
 import { resolve } from 'path';
@@ -73,5 +73,15 @@ export default defineConfig(({ command }) => ({
     sourcemap: true,
     minify: false,
     cssCodeSplit: false,
+  },
+  test: {
+    // The worker->main `onTaskUpdate` RPC runs on a 60s budget; under the
+    // resource pressure of the Windows/macOS runners a stall longer than
+    // that surfaces as an unhandled error and exits an all-green run red
+    // (the same failure class the core, cli, and scripts suites hit on
+    // these lanes). Test failures still fail the run; only unhandled
+    // errors stop being fatal, and only off Linux — the ubuntu lane and
+    // Linux local runs keep the unhandled-error signal.
+    dangerouslyIgnoreUnhandledErrors: process.platform !== 'linux',
   },
 }));
