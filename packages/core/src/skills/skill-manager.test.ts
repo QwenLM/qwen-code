@@ -1550,7 +1550,7 @@ Body.
       // Regression for /review: when a single tool call yields multiple
       // candidate paths (e.g. ripGrep `paths: [a, b, c]`), the per-path
       // listener fire was triggering N successive SkillTool.refreshSkills /
-      // geminiClient.setTools() round-trips. The batch API should fire
+      // llmClient.setTools() round-trips. The batch API should fire
       // listeners once with the union of activations.
       vi.mocked(fs.readdir).mockResolvedValue([
         {

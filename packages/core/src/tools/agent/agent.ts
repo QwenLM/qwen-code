@@ -791,9 +791,9 @@ export class AgentTool extends BaseDeclarativeTool<AgentParams, ToolResult> {
       this.updateDescriptionAndSchema();
     } finally {
       // Update the client with the new tools
-      const geminiClient = this.config.getGeminiClient();
-      if (geminiClient) {
-        await geminiClient.setTools();
+      const llmClient = this.config.getLlmClient();
+      if (llmClient) {
+        await llmClient.setTools();
       }
     }
   }
@@ -1631,8 +1631,8 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     taskPrompt: string;
     toolConfig: ToolConfig;
   }> {
-    const geminiClient = this.config.getGeminiClient();
-    const generationConfig = geminiClient?.getChat().getGenerationConfig();
+    const llmClient = this.config.getLlmClient();
+    const generationConfig = llmClient?.getChat().getGenerationConfig();
     const parentToolNames = generationConfig?.systemInstruction
       ? extractParentToolNames(generationConfig)
       : [];
@@ -1648,7 +1648,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           );
     const profilePromptHint = this.forkProfile?.promptHint;
     let rawHistory: Content[] = [];
-    if (geminiClient) {
+    if (llmClient) {
       // The `all` and numeric paths curate history differently on purpose.
       // `all` takes curated history directly. The numeric path reads
       // *uncurated* history so the startup context can be sliced off on its own
@@ -1659,13 +1659,12 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       // reminder into the first turn and break bounded selection.
       if (forkTurns === 'all') {
         rawHistory = selectForkHistory(
-          geminiClient.getHistoryShallow?.(true) ??
-            geminiClient.getHistory(true),
+          llmClient.getHistoryShallow?.(true) ?? llmClient.getHistory(true),
           forkTurns,
         );
       } else {
         const comprehensiveHistory =
-          geminiClient.getHistoryShallow?.() ?? geminiClient.getHistory();
+          llmClient.getHistoryShallow?.() ?? llmClient.getHistory();
         const startupContext = comprehensiveHistory.slice(
           0,
           getStartupContextLength(comprehensiveHistory),
@@ -1681,8 +1680,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
             // startupContext above prepends it again, duplicating startup.
             // Uncurated history keeps the startup reminder as its own pure
             // entry, which selectForkHistory strips cleanly.
-            geminiClient.getHistoryForForkWindow?.() ??
-              geminiClient.getHistory(),
+            llmClient.getHistoryForForkWindow?.() ?? llmClient.getHistory(),
             forkTurns,
           ),
         ];

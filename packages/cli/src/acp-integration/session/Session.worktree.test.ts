@@ -18,7 +18,7 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { Session } from './Session.js';
-import type { Config, GeminiChat } from '@qwen-code/qwen-code-core';
+import type { Config, LlmChat } from '@qwen-code/qwen-code-core';
 import {
   ApprovalMode,
   AuthType,
@@ -66,7 +66,7 @@ describe('Session.pendingWorktreeNotice', () => {
 
   /** Parts arrays captured on each sendMessageStream call. */
   let capturedMessages: unknown[][];
-  let mockChat: GeminiChat;
+  let mockChat: LlmChat;
   let mockConfig: Config;
   let mockClient: AgentSideConnection;
   let mockSettings: LoadedSettings;
@@ -93,9 +93,9 @@ describe('Session.pendingWorktreeNotice', () => {
       setHistory: vi.fn(),
       truncateHistory: vi.fn(),
       stripThoughtsFromHistory: vi.fn(),
-    } as unknown as GeminiChat;
+    } as unknown as LlmChat;
 
-    const mockGeminiClient = {
+    const mockLlmClient = {
       getChat: vi.fn().mockReturnValue(mockChat),
       tryCompressChat: vi.fn().mockResolvedValue({
         originalTokenCount: 0,
@@ -163,7 +163,7 @@ describe('Session.pendingWorktreeNotice', () => {
       getAuthType: vi.fn().mockReturnValue(AuthType.USE_OPENAI),
       isCronEnabled: vi.fn().mockReturnValue(false),
       getSessionTokenLimit: vi.fn().mockReturnValue(0),
-      getGeminiClient: vi.fn().mockReturnValue(mockGeminiClient),
+      getLlmClient: vi.fn().mockReturnValue(mockLlmClient),
       getManagedAutoMemoryEnabled: vi.fn().mockReturnValue(false),
       getDisableAllHooks: vi.fn().mockReturnValue(true),
       hasHooksForEvent: vi.fn().mockReturnValue(false),
