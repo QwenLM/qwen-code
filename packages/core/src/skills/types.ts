@@ -45,7 +45,10 @@ export interface SkillConfig {
    * allow rule, so matching tool calls are auto-approved instead of prompting.
    *
    * This is an additive grant only: it never hides or restricts the tools the
-   * model can see. Malformed entries are ignored. See `applySkillAllowedTools`.
+   * model can see. Under an active `permissions.allow` registry allowlist it
+   * still cannot register a tool the startup allowlist skipped — that tool
+   * needs the rule in settings `permissions.allow` plus a restart (#9827).
+   * Malformed entries are ignored. See `applySkillAllowedTools`.
    */
   allowedTools?: string[];
 
@@ -86,9 +89,15 @@ export interface SkillConfig {
   body: string;
 
   /**
-   * For extension-level skills: the name of the providing extension
+   * For extension-level skills: the canonical name of the providing extension
    */
   extensionName?: string;
+
+  /**
+   * For extension-level skills: the localized display name of the providing
+   * extension. Presentation only; never use this field as an identity.
+   */
+  extensionDisplayName?: string;
 
   /**
    * Argument hint shown after the slash command name in completion menus.

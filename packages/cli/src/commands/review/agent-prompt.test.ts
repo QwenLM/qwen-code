@@ -2775,6 +2775,38 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
     );
   });
 
+  it('welds the fix-constraint format into the launched finder briefs', () => {
+    // The premise half of #10153, pinned where it reaches the agents. Four
+    // clauses have to survive together: the format has to ASK for the fact,
+    // the omission has to stay an omission (a finder copying the Fix witness
+    // habit would write `N/A` and lengthen every comment), the evidence bar
+    // has to stay at witness grade (a wrong constraint is misdirection the
+    // fixer follows, so prose with no source is forbidden outright), and the
+    // field must not become a bar on reporting.
+    const brief = buildRoleBrief(PLAN, '1a');
+    expect(brief).toContain(
+      '**Fix constraint:** <an existing fact the fix must not violate, with its source',
+    );
+    expect(brief).toContain(
+      'OMIT THIS LINE when you observed none; never write "N/A"',
+    );
+    expect(brief).toContain(
+      'quote the constant or give the `file:line`, or omit the line',
+    );
+    expect(brief).toContain(
+      'is forbidden in this field exactly as "this looks risky" is forbidden in the failure scenario',
+    );
+    expect(brief).toContain(
+      'Like Fix witness, this field never gates reporting',
+    );
+    // And the two fields stay two: the constraint paragraph opens by parting
+    // claim from premise, so a rewrite that folds one into the other — "put
+    // the limit in the Fix witness" — reds here rather than shipping green.
+    expect(brief).toContain(
+      "Fix witness pins the fix's *claim*: does it do what it says. Nothing pins the fix's *premises*",
+    );
+  });
+
   it('keeps the language-agnostic falsy-zero shape in the Agent 1a brief', () => {
     // The #9788 split moved the language-pitfall CHECKLIST and wrapper/proxy
     // routing out of 1a, but the falsy-zero shape is general correctness, not
@@ -2960,11 +2992,36 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
     expect(p).toContain('A vacuous test is a **Suggestion**');
     expect(p).toContain('report **that behaviour** as the Critical');
     expect(p).not.toContain('is a **Critical**: a green-no-matter-what');
+    // The brief's mutation analysis is reading-based — executed verdicts
+    // belong to Agent 7's efficacy probe — so its mutation claims must be
+    // phrased as hypotheses or carry an explicit not-run witness, never the
+    // execution-grade "verified N/N green" (issue #9901). The rule anchors on
+    // ownership, not on a capability claim: the review-agent tool table is
+    // role-neutral and includes the shell, so "you have no runner" would be
+    // false and must never come back.
+    expect(p).toContain('An unrun mutation is a hypothesis');
+    expect(p).toContain('ships N/N green');
+    expect(p).toContain('verified N/N green');
+    expect(p).toContain('witness: not run —');
+    expect(p).toContain('Executed mutation verdicts belong to Agent 7');
+    expect(p).not.toContain('you have no runner');
     // The test-matrix agent applies Agent 5's rules to the behaviour/test pairing
     // it owns, so its severity must move in lockstep — a revert of just this bullet
     // would let the two agents grade the same inert test differently on one PR.
     expect(buildRoleBrief(PLAN, 'test-matrix')).toContain(
       'a **Suggestion** on its own, Critical only when',
+    );
+    // And the witness discipline must move in lockstep too — test-matrix is the
+    // same reading-based mutation analysis, so it carries the same bar on
+    // execution-grade phrasing.
+    expect(buildRoleBrief(PLAN, 'test-matrix')).toContain('witness: not run —');
+    expect(buildRoleBrief(PLAN, 'test-matrix')).toContain('ships N/N green');
+    expect(buildRoleBrief(PLAN, 'test-matrix')).toContain('verified N/N green');
+    expect(buildRoleBrief(PLAN, 'test-matrix')).toContain(
+      'phrase an unrun mutation as a reasoned hypothesis',
+    );
+    expect(buildRoleBrief(PLAN, 'test-matrix')).not.toContain(
+      'you have no runner',
     );
   });
 

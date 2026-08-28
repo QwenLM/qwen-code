@@ -342,6 +342,12 @@ describe('WebShellTranscript DOM integration', () => {
       <WebShellTranscript blocks={blocks} collapseCompletedTurns={false} />,
     );
 
+    const summary = container.querySelector('button')!;
+    expect(summary.textContent).toContain('Asked 1 question');
+    expect(summary.getAttribute('aria-expanded')).toBe('false');
+
+    act(() => summary.click());
+
     expect(container.textContent).toContain('Ask user 1 question');
     expect(container.textContent).toContain('User answer: Staging');
     expect(container.querySelector('button[type="submit"]')).toBeNull();

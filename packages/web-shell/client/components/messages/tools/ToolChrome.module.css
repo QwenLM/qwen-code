@@ -398,11 +398,6 @@
   grid-template-rows: 1fr;
   min-height: 0;
   overflow: hidden;
-  transition: grid-template-rows 180ms ease;
-}
-
-.chatSummaryContentCollapsed {
-  grid-template-rows: 0fr;
 }
 
 .chatSummaryContentInner {
@@ -432,9 +427,11 @@
 
 .lineName {
   flex-shrink: 0;
+  font-size: 13px;
 }
 
 .lineArg {
+  font-size: 13px;
   min-width: 0;
   flex: 1;
   overflow: hidden;

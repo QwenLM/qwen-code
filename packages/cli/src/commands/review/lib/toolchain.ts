@@ -5,6 +5,7 @@
  */
 
 import type { BuildTestReport, CommandResult } from '../build-test.js';
+import type { CommandKind } from './sandboxed-exec.js';
 
 export interface ToolchainRunArgs {
   root: string;
@@ -29,7 +30,18 @@ export interface ToolchainRunArgs {
    * which is every call that is not a continuation.
    */
   previous?: BuildTestReport;
-  exec: (command: string, cwd: string, timeoutMs: number) => CommandResult;
+  /**
+   * `kind` decides the containment policy when the reviewed repository's
+   * commands run sandboxed (#9556): only an install is given the network.
+   * Optional, and it defaults to the RESTRICTIVE side, so an adapter that
+   * does not pass it cannot silently grant egress.
+   */
+  exec: (
+    command: string,
+    cwd: string,
+    timeoutMs: number,
+    kind?: CommandKind,
+  ) => CommandResult;
 }
 
 export interface ReviewToolchainAdapter {
