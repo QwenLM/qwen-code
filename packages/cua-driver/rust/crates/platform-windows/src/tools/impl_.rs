@@ -5759,11 +5759,24 @@ static PERFORM_SECONDARY_ACTION_DEF: std::sync::OnceLock<ToolDef> = std::sync::O
 #[async_trait]
 impl Tool for PerformSecondaryActionTool {
     fn def(&self) -> &ToolDef {
-        PERFORM_SECONDARY_ACTION_DEF.get_or_init(|| {
-            ToolDef::from_contract(
-                &cua_driver_contract::tool_contract("perform_secondary_action")
-                    .expect("perform_secondary_action contract"),
-            )
+        PERFORM_SECONDARY_ACTION_DEF.get_or_init(|| ToolDef {
+            name: "perform_secondary_action".into(),
+            description: "Perform one exact action name advertised by a cached UIA element. Unavailable actions fail closed and never fall back to a primary action or pixels.".into(),
+            input_schema: json!({
+                "type": "object",
+                "required": ["pid", "element_token", "action"],
+                "properties": {
+                    "pid": { "type": "integer", "minimum": 1 },
+                    "window_id": { "type": "integer", "minimum": 1 },
+                    "element_token": cua_driver_core::tool_schema::element_token_schema(),
+                    "action": { "type": "string" }
+                },
+                "additionalProperties": false
+            }),
+            read_only: false,
+            destructive: true,
+            idempotent: false,
+            open_world: true,
         })
     }
 
@@ -5958,6 +5971,28 @@ impl Tool for PerformSecondaryActionTool {
                 .with_structured(json!({ "code": "secondary_action_unavailable" })),
             Err(error) => ToolResult::error(format!("secondary action task failed: {error}")),
         }
+    }
+}
+
+#[cfg(test)]
+mod perform_secondary_action_schema_tests {
+    use super::{PerformSecondaryActionTool, ToolState};
+    use cua_driver_core::tool::Tool;
+
+    #[test]
+    fn runtime_schema_stays_platform_owned() {
+        let tool = PerformSecondaryActionTool {
+            state: ToolState::new(),
+        };
+        let def = tool.def();
+        assert_eq!(def.name, "perform_secondary_action");
+        assert!(def.description.contains("cached UIA element"));
+        assert_eq!(def.input_schema["required"].as_array().unwrap().len(), 3);
+        assert_eq!(
+            def.input_schema["properties"]["action"],
+            serde_json::json!({ "type": "string" })
+        );
+        assert_eq!(def.input_schema["additionalProperties"], false);
     }
 }
 

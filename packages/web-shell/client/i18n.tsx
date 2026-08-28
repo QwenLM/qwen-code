@@ -584,7 +584,7 @@ const EN: Messages = {
   'common.previous': 'previous',
   'common.expand': 'Expand',
   'common.collapse': 'Collapse',
-  'common.refresh': 'refresh',
+  'common.refresh': 'Refresh',
   'common.search': 'Search',
   'common.valid': 'valid',
   'common.clients': (v) => `${v?.count ?? 0} clients`,
@@ -1098,6 +1098,25 @@ const EN: Messages = {
     'Help me set up a recurring scheduled task (keep it long-term). What I want: ',
   'scheduledTasks.name': 'Name',
   'scheduledTasks.workspace': 'Workspace',
+  'scheduledTasks.session.label': 'Conversation',
+  'scheduledTasks.session.dedicated': 'Dedicated task conversation',
+  'scheduledTasks.session.current': 'Current conversation',
+  'scheduledTasks.session.dedicatedHint':
+    'Runs are kept in a separate conversation created for this task.',
+  'scheduledTasks.session.currentHint':
+    'Future runs continue in the conversation that is open now.',
+  'scheduledTasks.session.currentUnsupported':
+    'Current-conversation scheduling is unavailable on this daemon.',
+  'scheduledTasks.session.currentUnavailable':
+    'Open an existing conversation before selecting the current conversation.',
+  'scheduledTasks.session.currentBusy':
+    'Wait for the current turn or pending interaction to finish.',
+  'scheduledTasks.session.currentIneligible':
+    'This conversation type cannot own a scheduled task.',
+  'scheduledTasks.session.currentWorkspaceMismatch':
+    'The current conversation belongs to a different workspace.',
+  'scheduledTasks.session.currentAlreadyBound':
+    'The current conversation is already bound to a scheduled task.',
   'scheduledTasks.taskId': 'Task ID',
   'scheduledTasks.schedule': 'Schedule',
   'scheduledTasks.type': 'Type',
@@ -1363,6 +1382,8 @@ const EN: Messages = {
   'sidebar.unarchive': 'Restore',
   'sidebar.moreActions': 'More actions',
   'sidebar.archiveCurrentDisabled': 'The current session cannot be archived',
+  'sidebar.archiveRunningDisabled':
+    'A running session cannot be archived; archiving would end its turn',
   'sidebar.archivedTitle': 'Archived',
   'sidebar.archivedEmpty': 'No archived sessions.',
   'sidebar.archiveFailed': 'Failed to archive session',
@@ -1379,10 +1400,14 @@ const EN: Messages = {
   'sidebar.clients': (v) => `${v?.count ?? 0} client(s)`,
   'sidebar.running': 'Running',
   'sidebar.waitingForApproval': 'Waiting for approval',
+  'sidebar.waitingForApprovalShort': 'Approval',
   'sidebar.sessionPr': (v) => `Pull Request #${v?.number ?? ''}`,
   'sidebar.sessionPrMultiple': (v) =>
     `Pull Request #${v?.number ?? ''} (${v?.count ?? 0} total)`,
+  'sidebar.sessionPrStateMerged': 'Merged',
+  'sidebar.sessionPrStateClosed': 'Closed',
   'sidebar.userInputNeeded': 'User input needed',
+  'sidebar.userInputNeededShort': 'Input',
   'sidebar.completedUnread': 'Finished',
   'sidebar.pin': 'Pin',
   'sidebar.unpin': 'Unpin',
@@ -1613,6 +1638,8 @@ const EN: Messages = {
   'skilldesc.dataviz': 'Design guidance for charts and data visualizations',
   'skilldesc.extensionCreator':
     'Create, test, and customize Qwen Code extensions',
+  'skilldesc.goalDraft':
+    'Turn a fuzzy intention into a verifiable /goal objective',
   'skilldesc.loop': 'Run a prompt on a schedule or self-paced wakeups',
   'skilldesc.newApp': 'Workflow for building a new app from scratch',
   'skilldesc.qcHelper': 'Answer questions about using Qwen Code',
@@ -2095,7 +2122,8 @@ const EN: Messages = {
   'goals.newHint':
     'The goal starts in a new session and runs until its condition holds.',
   'goals.condition': 'Condition',
-  'goals.conditionPlaceholder': 'e.g. all tests pass and the lint is clean',
+  'goals.conditionPlaceholder':
+    'e.g. `npm test` exits 0 and `npm run lint` reports no warnings (paste the output); do not modify test files; stop as blocked after 20 turns',
   'goals.cancel': 'Cancel',
   'goals.create': 'Set goal',
   'goals.creating': 'Starting…',
@@ -2364,6 +2392,11 @@ const EN: Messages = {
   'skills.notToggleable': 'This skill cannot be enabled or disabled.',
   'skills.run': 'Reference skill',
   'skills.search': 'Search skills…',
+  'skills.settingUpdated': 'Workspace setting updated.',
+  'skills.settingUpdatedAvailabilityUnchanged':
+    'Workspace setting updated. Effective Skill availability did not change.',
+  'skills.settingUnchanged':
+    'Skill already has the requested workspace setting; no setting was changed.',
   'skills.status': 'Status',
   'skills.status.disabled': 'disabled',
   'skills.status.enabled': 'enabled',
@@ -2421,6 +2454,27 @@ const EN: Messages = {
   'stats.toolTime': 'Tool Time',
   'stats.total': 'Total',
   'stats.totalReviewed': 'Total Reviewed Suggestions:',
+  'tokenUsage.avgLatency': 'Avg latency',
+  'tokenUsage.cached': 'Cached input',
+  'tokenUsage.input': 'Input',
+  'tokenUsage.loadError': 'Failed to load token usage.',
+  'tokenUsage.models': 'By model',
+  'tokenUsage.noData': 'No API calls in this session yet.',
+  'tokenUsage.noSubagents': 'No subagent calls in this session yet.',
+  'tokenUsage.noTools': 'No tool calls in this session yet.',
+  'tokenUsage.open': 'Session token usage',
+  'tokenUsage.output': 'Total output',
+  'tokenUsage.refresh': 'Refresh',
+  'tokenUsage.requests': 'Requests',
+  'tokenUsage.retry': 'Retry',
+  'tokenUsage.subagents': 'Subagents',
+  'tokenUsage.thoughts': 'Reasoning (included in total output)',
+  'tokenUsage.title': 'Token Usage',
+  'tokenUsage.toolRow': (v) =>
+    `${v?.count ?? 0} calls · ${v?.rate ?? 0}% ok · ${v?.duration ?? ''}`,
+  'tokenUsage.tools': 'Tools',
+  'tokenUsage.updatedAt': (v) => `Updated ${v?.time ?? ''}`,
+  'tokenUsage.unavailable': 'Token usage is unavailable for this session.',
   'status.contextUsed': (v) => `${v?.pct ?? '0.0'}% context used`,
   'status.disconnected': 'Disconnected',
   'status.modeHint': '(shift + tab or click to switch)',
@@ -2613,11 +2667,11 @@ const EN: Messages = {
   'toolGroup.summary.ranAgents': (v) =>
     `Ran ${v?.count ?? 0} agent${v?.count === 1 ? '' : 's'}`,
   'toolGroup.summary.editedFiles': (v) =>
-    `Edited ${v?.count ?? 0} file${v?.count === 1 ? '' : 's'}`,
+    `Edited files ${v?.count ?? 0} time${v?.count === 1 ? '' : 's'}`,
   'toolGroup.summary.ranCommands': (v) =>
     `Ran ${v?.count ?? 0} command${v?.count === 1 ? '' : 's'}`,
   'toolGroup.summary.readFiles': (v) =>
-    `Read ${v?.count ?? 0} file${v?.count === 1 ? '' : 's'}`,
+    `Read files ${v?.count ?? 0} time${v?.count === 1 ? '' : 's'}`,
   'toolGroup.summary.searched': (v) =>
     `Searched ${v?.count ?? 0} time${v?.count === 1 ? '' : 's'}`,
   'toolGroup.summary.updatedTodos': (v) =>
@@ -2893,6 +2947,9 @@ const EN: Messages = {
     'Messages in the same group or topic share one conversation; best for collaboration.',
   'channels.editor.field.shared.sessionScope.detail.single':
     'Every message shares one conversation; best for a single-bot duty channel.',
+  'channels.editor.field.shared.multiSession': 'Named tasks',
+  'channels.editor.field.shared.multiSession.description':
+    'Keep a separate owner-scoped catalog of named tasks in daemon-managed mode.',
   'channels.editor.policy.pairing.title': 'Pairing',
   'channels.editor.policy.pairing.description':
     'People receive a pairing code and can chat after you approve them.',
@@ -3164,21 +3221,20 @@ const ZH: Messages = {
   'workspace.paneLabel': (v) => `工作区：${v?.name ?? ''}`,
   // Tool display names (chat-stream badge labels). Keyed by `toolName.<wire>`;
   // a wire name with no entry here falls back to the English display name via
-  // `localizeToolDisplayName`. Proper tool names / acronyms stay in English
-  // (Agent, Grep, Glob, LSP); a product name (e.g. `Notebook`) stays verbatim.
+  // `localizeToolDisplayName`. Acronyms and product names stay verbatim.
   'toolName.edit': '编辑',
   'toolName.write_file': '写入文件',
   'toolName.read_file': '读取文件',
   'toolName.zoom_image': '图片放大',
   'toolName.grep': '搜索内容',
   'toolName.grep_search': '搜索内容',
-  'toolName.glob': 'Glob',
+  'toolName.glob': '查找文件',
   'toolName.run_shell_command': '运行命令',
   'toolName.todo_write': '任务清单',
   'toolName.get_goal': '目标',
   'toolName.update_goal': '更新目标',
   'toolName.save_memory': '保存记忆',
-  'toolName.agent': 'Agent',
+  'toolName.agent': '智能体',
   'toolName.skill': '查看技能',
   'toolName.enter_plan_mode': '进入计划模式',
   'toolName.exit_plan_mode': '退出计划模式',
@@ -4127,6 +4183,20 @@ const ZH: Messages = {
   'scheduledTasks.chatStarter': '帮我创建一个长期保留的定时任务，我想：',
   'scheduledTasks.name': '名称',
   'scheduledTasks.workspace': '工作区',
+  'scheduledTasks.session.label': '会话',
+  'scheduledTasks.session.dedicated': '独立任务会话',
+  'scheduledTasks.session.current': '当前会话',
+  'scheduledTasks.session.dedicatedHint':
+    '任务运行记录保存在单独创建的会话中。',
+  'scheduledTasks.session.currentHint': '后续运行继续在当前打开的会话中。',
+  'scheduledTasks.session.currentUnsupported':
+    '当前 daemon 不支持绑定当前会话。',
+  'scheduledTasks.session.currentUnavailable': '请先打开一个已有会话。',
+  'scheduledTasks.session.currentBusy': '请等待当前执行或待处理交互结束。',
+  'scheduledTasks.session.currentIneligible': '此类会话不能绑定定时任务。',
+  'scheduledTasks.session.currentWorkspaceMismatch':
+    '当前会话属于另一个工作区。',
+  'scheduledTasks.session.currentAlreadyBound': '当前会话已绑定其他定时任务。',
   'scheduledTasks.taskId': '任务 ID',
   'scheduledTasks.schedule': '计划',
   'scheduledTasks.type': '类型',
@@ -4376,6 +4446,8 @@ const ZH: Messages = {
   'sidebar.unarchive': '恢复',
   'sidebar.moreActions': '更多操作',
   'sidebar.archiveCurrentDisabled': '不能归档当前会话',
+  'sidebar.archiveRunningDisabled':
+    '不能归档运行中的会话，归档会终止其当前回合',
   'sidebar.archivedTitle': '已归档',
   'sidebar.archivedEmpty': '没有已归档的会话。',
   'sidebar.archiveFailed': '归档会话失败',
@@ -4392,10 +4464,14 @@ const ZH: Messages = {
   'sidebar.clients': (v) => `${v?.count ?? 0} 个客户端`,
   'sidebar.running': '运行中',
   'sidebar.waitingForApproval': '等待批准',
+  'sidebar.waitingForApprovalShort': '待批准',
   'sidebar.sessionPr': (v) => `合并请求 #${v?.number ?? ''}`,
   'sidebar.sessionPrMultiple': (v) =>
     `合并请求 #${v?.number ?? ''}（共 ${v?.count ?? 0} 个）`,
+  'sidebar.sessionPrStateMerged': '已合入',
+  'sidebar.sessionPrStateClosed': '已关闭',
   'sidebar.userInputNeeded': '需要用户输入',
+  'sidebar.userInputNeededShort': '需输入',
   'sidebar.completedUnread': '刚完成',
   'sidebar.pin': '置顶',
   'sidebar.unpin': '取消置顶',
@@ -4599,6 +4675,7 @@ const ZH: Messages = {
   'skilldesc.batch': '并行批量处理多个文件',
   'skilldesc.dataviz': '图表与数据可视化设计指南',
   'skilldesc.extensionCreator': '创建、测试和定制 Qwen Code 扩展',
+  'skilldesc.goalDraft': '将模糊意图改写为可验证的 /goal 目标',
   'skilldesc.loop': '按计划或自定节奏循环运行提示词',
   'skilldesc.newApp': '从零构建新应用的工作流',
   'skilldesc.qcHelper': '解答 Qwen Code 使用相关问题',
@@ -5041,7 +5118,8 @@ const ZH: Messages = {
   'goals.new': '新建目标',
   'goals.newHint': '目标会在一个新会话中启动，并持续运行直到条件满足。',
   'goals.condition': '条件',
-  'goals.conditionPlaceholder': '例如：所有测试通过且 lint 无告警',
+  'goals.conditionPlaceholder':
+    '例如：`npm test` 退出码为 0 且 `npm run lint` 无告警（贴出输出）；不得修改测试文件；20 轮内未达成则以 blocked 结束',
   'goals.cancel': '取消',
   'goals.create': '设置目标',
   'goals.creating': '正在启动…',
@@ -5291,6 +5369,10 @@ const ZH: Messages = {
   'skills.notToggleable': '此 Skill 不支持启用或禁用。',
   'skills.run': '引用 skill',
   'skills.search': '搜索 Skills…',
+  'skills.settingUpdated': 'Workspace 设置已更新。',
+  'skills.settingUpdatedAvailabilityUnchanged':
+    'Workspace 设置已更新，Skill 的实际可用状态未改变。',
+  'skills.settingUnchanged': 'Skill 已处于请求的 Workspace 设置，无需更改。',
   'skills.status': '状态',
   'skills.status.disabled': '已禁用',
   'skills.status.enabled': '已启用',
@@ -5346,6 +5428,27 @@ const ZH: Messages = {
   'stats.toolTime': '工具耗时',
   'stats.total': '总计',
   'stats.totalReviewed': '已审核建议总数：',
+  'tokenUsage.avgLatency': '平均延迟',
+  'tokenUsage.cached': '缓存输入',
+  'tokenUsage.input': '输入',
+  'tokenUsage.loadError': 'Token 消耗加载失败。',
+  'tokenUsage.models': '按模型',
+  'tokenUsage.noData': '本会话还没有 API 调用。',
+  'tokenUsage.noSubagents': '本会话还没有子 agent 调用。',
+  'tokenUsage.noTools': '本会话还没有工具调用。',
+  'tokenUsage.open': '会话 Token 消耗',
+  'tokenUsage.output': '总输出',
+  'tokenUsage.refresh': '刷新',
+  'tokenUsage.requests': '请求',
+  'tokenUsage.retry': '重试',
+  'tokenUsage.subagents': '子agent',
+  'tokenUsage.thoughts': '思考（包含在总输出中）',
+  'tokenUsage.title': 'Token 消耗',
+  'tokenUsage.toolRow': (v) =>
+    `${v?.count ?? 0} 次 · 成功率 ${v?.rate ?? 0}% · ${v?.duration ?? ''}`,
+  'tokenUsage.tools': '工具',
+  'tokenUsage.updatedAt': (v) => `更新于 ${v?.time ?? ''}`,
+  'tokenUsage.unavailable': '当前会话无法读取 Token 消耗。',
   'status.contextUsed': (v) => `上下文已用 ${v?.pct ?? '0.0'}%`,
   'status.disconnected': '断开连接',
   'status.modeHint': '(shift + tab 或点击切换)',
@@ -5525,9 +5628,9 @@ const ZH: Messages = {
   'toolGroup.moreKinds': (v) => ` +${v?.count ?? 0}`,
   'toolGroup.summary': (v) => `调用了 ${v?.count ?? 0} 个工具`,
   'toolGroup.summary.ranAgents': (v) => `已运行 ${v?.count ?? 0} 个智能体`,
-  'toolGroup.summary.editedFiles': (v) => `已编辑 ${v?.count ?? 0} 个文件`,
+  'toolGroup.summary.editedFiles': (v) => `已编辑文件 ${v?.count ?? 0} 次`,
   'toolGroup.summary.ranCommands': (v) => `已运行 ${v?.count ?? 0} 条命令`,
-  'toolGroup.summary.readFiles': (v) => `已读取 ${v?.count ?? 0} 个文件`,
+  'toolGroup.summary.readFiles': (v) => `已读取文件 ${v?.count ?? 0} 次`,
   'toolGroup.summary.searched': (v) => `已搜索 ${v?.count ?? 0} 次`,
   'toolGroup.summary.updatedTodos': (v) =>
     Number(v?.count ?? 0) > 1
@@ -5786,6 +5889,9 @@ const ZH: Messages = {
     '同一群聊或话题进入同一个对话，适合群内协作。',
   'channels.editor.field.shared.sessionScope.detail.single':
     '所有消息共用一个对话，适合单一机器人值守场景。',
+  'channels.editor.field.shared.multiSession': '命名任务',
+  'channels.editor.field.shared.multiSession.description':
+    '在 daemon 托管模式下，为每位用户保留相互隔离的命名任务目录。',
   'channels.editor.policy.pairing.title': '配对模式',
   'channels.editor.policy.pairing.description':
     '用户会收到配对码，经您批准后才能开始对话。',

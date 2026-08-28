@@ -47,7 +47,7 @@ import { parsePositiveIntegerEnv } from '../../utils/env.js';
  * Sized against the `retryWithBackoff` silent retry ladder rather than against
  * a guess at model latency. That ladder is the binding case, not the only
  * watchdog-invisible wait: stream-side rate-limit sleeps
- * (`RATE_LIMIT_RETRY_OPTIONS` in geminiChat.ts — 60s/120s/240s/300s, so two
+ * (`RATE_LIMIT_RETRY_OPTIONS` in llm-chat.ts — 60s/120s/240s/300s, so two
  * consecutive sleeps already reach 180s), a provider `Retry-After` honored
  * unclamped on the normal HTTP path, and unattended-mode persistent backoff
  * (up to 5 min per exponential sleep — but a provider `Retry-After` on that

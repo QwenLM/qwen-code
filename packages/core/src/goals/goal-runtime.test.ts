@@ -8,10 +8,12 @@ import { describe, expect, it, vi } from 'vitest';
 import type { GoalEvidenceRecord } from './goal-evidence.js';
 import type { GoalRecoveryRecord } from './goal-persistence.js';
 import {
+  GOAL_INFEASIBLE_NEXT_STEP,
   GOAL_CHECKPOINT_CLAIM_LIMIT,
   GOAL_CHECKPOINT_REQUEST_TOO_LARGE_REASON,
   GOAL_CHECKPOINT_STALL_LIMIT,
   GOAL_CHECKPOINT_STALLED_REASON,
+  GOAL_DEFAULT_TOKEN_BUDGET,
   GOAL_PROPOSAL_REASON_MAX_BYTES,
   type GoalSnapshotV2,
   type GoalStateCause,
@@ -329,6 +331,437 @@ describe('goal runtime', () => {
     expect(asked).toEqual([permit.turnId]);
   });
 
+  it('arms the default token budget when no grant is supplied', async () => {
+    const runtime = createGoalRuntime({ journal: fakeGoalJournal() });
+    await runtime.dispatch({ action: 'create', objective: 'ship' });
+
+    expect(runtime.getSnapshot().goal?.tokenBudget).toBe(
+      GOAL_DEFAULT_TOKEN_BUDGET,
+    );
+    // The wiring assertion above moves with the constant, so only this
+    // literal pin catches a silent rescale of the production default.
+    expect(GOAL_DEFAULT_TOKEN_BUDGET).toBe(30_000_000);
+  });
+
+  it('stops autonomous continuation when the budget is spent, and resume re-arms it', async () => {
+    const journal = fakeGoalJournal();
+    const host = fakeGoalTurnHost();
+    const spend = new Map<string, number>();
+    const runtime = createGoalRuntime({
+      journal,
+      tokenLedger: {
+        takeGoalTurnTokens: (turnId: string) => {
+          const tokens = spend.get(turnId) ?? 0;
+          spend.delete(turnId);
+          return tokens;
+        },
+      },
+      tokenBudgetGrant: 1_000,
+    });
+    runtime.bindHost(host);
+    await runtime.dispatch({ action: 'create', objective: 'ship' });
+    const created = runtime.getSnapshot().goal!;
+    expect(created).toMatchObject({ tokenBudget: 1_000, tokensUsed: 0 });
+
+    spend.set(host.started[0]!.turnId, 1_500);
+    await runtime.finishTurn(host.started[0]!);
+
+    // The spent window buys exactly one more continuation, flagged so the
+    // prompt asks for a hand-off instead of more work.
+    expect(host.started).toHaveLength(2);
+    expect(host.inputs[1]).toMatchObject({ windDown: true });
+    expect(host.inputs[0]).not.toHaveProperty('windDown');
+    expect(runtime.getSnapshot().goal?.status).toBe('active');
+
+    // The hand-off reached the model: only a delivered wind-down turn
+    // stamps the record.
+    runtime.markTurnDelivered(`goal-runtime:${host.started[1]!.turnId}`);
+    await runtime.finishTurn(host.started[1]!);
+
+    // The hand-off turn stamps the record, and the stop settles on the
+    // dispatch tail where the next continuation was refused.
+    await vi.waitFor(() => {
+      expect(runtime.getSnapshot().goal?.status).toBe('usage_limited');
+    });
+    expect(runtime.getSnapshot().goal).toMatchObject({
+      limitKind: 'token_budget',
+      tokensUsed: 1_500,
+      tokenBudget: 1_000,
+      windDownTurnId: host.started[1]!.turnId,
+      lastReason: expect.stringContaining('autonomous token budget'),
+    });
+    // No third turn: the hand-off is one per window.
+    expect(host.started).toHaveLength(2);
+    expect(journal.appended.map((payload) => payload.cause)).toEqual([
+      'create',
+      'turn_finished',
+      'turn_finished',
+      'usage_limited',
+    ]);
+    expect(journal.appended[1]!.snapshot.goal).not.toHaveProperty(
+      'windDownTurnId',
+    );
+    expect(journal.appended[2]!.snapshot.goal).toMatchObject({
+      windDownTurnId: host.started[1]!.turnId,
+    });
+
+    // Resuming IS the user paying for another window: the ceiling moves ahead
+    // of the meter, and the re-armed window admits a real continuation again.
+    const resumed = await runtime.dispatch({
+      action: 'resume',
+      expectedGoalId: created.goalId,
+      expectedRevision: created.revision,
+    });
+    expect(resumed.snapshot.goal).toMatchObject({
+      status: 'active',
+      tokensUsed: 1_500,
+      tokenBudget: 2_500,
+    });
+    expect(resumed.snapshot.goal?.limitKind).toBeUndefined();
+    // The re-armed window owes its own hand-off: the old marker is gone and
+    // the continuation it admits is ordinary work again.
+    expect(resumed.snapshot.goal).not.toHaveProperty('windDownTurnId');
+    expect(host.started).toHaveLength(3);
+    expect(host.inputs[2]).not.toHaveProperty('windDown');
+  });
+
+  it('stops at an exact-ceiling spend without minting another turn', async () => {
+    const journal = fakeGoalJournal();
+    const host = fakeGoalTurnHost();
+    const spend = new Map<string, number>();
+    const runtime = createGoalRuntime({
+      journal,
+      tokenLedger: {
+        takeGoalTurnTokens: (turnId: string) => {
+          const tokens = spend.get(turnId) ?? 0;
+          spend.delete(turnId);
+          return tokens;
+        },
+      },
+      tokenBudgetGrant: 1_000,
+    });
+    runtime.bindHost(host);
+    await runtime.dispatch({ action: 'create', objective: 'ship' });
+
+    // Spend lands exactly on the ceiling: still spent, so the only further
+    // turn is the hand-off.
+    spend.set(host.started[0]!.turnId, 1_000);
+    await runtime.finishTurn(host.started[0]!);
+    expect(host.started).toHaveLength(2);
+    expect(host.inputs[1]).toMatchObject({ windDown: true });
+    // The hand-off reached the model: only a delivered wind-down turn
+    // stamps the record.
+    runtime.markTurnDelivered(`goal-runtime:${host.started[1]!.turnId}`);
+    await runtime.finishTurn(host.started[1]!);
+
+    await vi.waitFor(() => {
+      expect(runtime.getSnapshot().goal?.status).toBe('usage_limited');
+    });
+    expect(runtime.getSnapshot().goal).toMatchObject({
+      limitKind: 'token_budget',
+      tokensUsed: 1_000,
+      tokenBudget: 1_000,
+    });
+    expect(host.started).toHaveLength(2);
+  });
+
+  it('shows the budget stop even when the settle write fails', async () => {
+    const journal = fakeGoalJournal({
+      appendErrors: [
+        undefined,
+        undefined,
+        undefined,
+        new Error('writer unavailable'),
+      ],
+    });
+    const host = fakeGoalTurnHost();
+    const spend = new Map<string, number>();
+    const runtime = createGoalRuntime({
+      journal,
+      tokenLedger: {
+        takeGoalTurnTokens: (turnId: string) => {
+          const tokens = spend.get(turnId) ?? 0;
+          spend.delete(turnId);
+          return tokens;
+        },
+      },
+      tokenBudgetGrant: 1_000,
+    });
+    const causes: Array<GoalStateCause | undefined> = [];
+    runtime.subscribe((_snapshot, cause) => causes.push(cause));
+    runtime.bindHost(host);
+    await runtime.dispatch({ action: 'create', objective: 'ship' });
+
+    spend.set(host.started[0]!.turnId, 1_500);
+    await runtime.finishTurn(host.started[0]!);
+    // The hand-off reached the model: only a delivered wind-down turn
+    // stamps the record.
+    runtime.markTurnDelivered(`goal-runtime:${host.started[1]!.turnId}`);
+    await runtime.finishTurn(host.started[1]!);
+
+    await vi.waitFor(() => {
+      expect(runtime.getSnapshot().goal?.status).toBe('usage_limited');
+    });
+    // The failed write never reaches the journal, but the visible state
+    // still settles: the gate refuses continuations either way, and the
+    // user's next action surfaces the persistence loss.
+    expect(journal.appended.map((payload) => payload.cause)).toEqual([
+      'create',
+      'turn_finished',
+      'turn_finished',
+    ]);
+    expect(runtime.getSnapshot().goal).toMatchObject({
+      limitKind: 'token_budget',
+      tokensUsed: 1_500,
+      tokenBudget: 1_000,
+    });
+    expect(causes).toContain('usage_limited');
+    expect(host.started).toHaveLength(2);
+  });
+
+  it('mints the hand-off again when the host dropped it undelivered', async () => {
+    const journal = fakeGoalJournal();
+    const spend = new Map<string, number>();
+    const failures: Array<Error | undefined> = [];
+    const inputs: Array<Parameters<GoalTurnHost['startGoalTurn']>[0]> = [];
+    const started: GoalTurnPermit[] = [];
+    const host: GoalTurnHost = {
+      async startGoalTurn(input) {
+        const failure = failures.shift();
+        if (failure) throw failure;
+        started.push(structuredClone(input.permit));
+        inputs.push(structuredClone(input));
+      },
+      preemptGoalTurn: vi.fn(),
+    };
+    const runtime = createGoalRuntime({
+      journal,
+      tokenLedger: {
+        takeGoalTurnTokens: (turnId: string) => spend.get(turnId) ?? 0,
+      },
+      tokenBudgetGrant: 1_000,
+    });
+    runtime.bindHost(host);
+    await runtime.dispatch({ action: 'create', objective: 'ship' });
+
+    // The hand-off's start is refused, so the model never saw it. Only the
+    // turn that finishes stamps the record, and nothing finished.
+    failures.push(new Error('host is not accepting turns'));
+    spend.set(started[0]!.turnId, 1_500);
+    await runtime.finishTurn(started[0]!);
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(runtime.getSnapshot().goal?.status).toBe('active');
+    expect(runtime.getSnapshot().goal).not.toHaveProperty('windDownTurnId');
+
+    runtime.bindHost(host);
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(inputs.at(-1)).toMatchObject({ windDown: true });
+    expect(started).toHaveLength(2);
+  });
+
+  it('grants the hand-off again when its turn finished without being delivered', async () => {
+    // A system message or a direct user query can claim the wind-down
+    // continuation's permit and send its own text under it. The turn then
+    // finishes, but the user never got the hand-off -- so the record must
+    // not say they did, and the next continuation owes it again.
+    const journal = fakeGoalJournal();
+    const host = fakeGoalTurnHost();
+    const spend = new Map<string, number>();
+    const runtime = createGoalRuntime({
+      journal,
+      tokenLedger: {
+        takeGoalTurnTokens: (turnId: string) => spend.get(turnId) ?? 0,
+      },
+      tokenBudgetGrant: 1_000,
+    });
+    runtime.bindHost(host);
+    await runtime.dispatch({ action: 'create', objective: 'ship' });
+    spend.set(host.started[0]!.turnId, 1_500);
+    await runtime.finishTurn(host.started[0]!);
+    expect(host.inputs[1]).toMatchObject({ windDown: true });
+
+    // Finished under the wind-down permit, never marked delivered.
+    await runtime.finishTurn(host.started[1]!);
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(runtime.getSnapshot().goal?.status).toBe('active');
+    expect(runtime.getSnapshot().goal).not.toHaveProperty('windDownTurnId');
+    expect(journal.appended.at(-1)!.snapshot.goal).not.toHaveProperty(
+      'windDownTurnId',
+    );
+    expect(host.started).toHaveLength(3);
+    expect(host.inputs[2]).toMatchObject({ windDown: true });
+  });
+
+  it('stops after the hand-off once a delivered wind-down turn finishes', async () => {
+    const journal = fakeGoalJournal();
+    const host = fakeGoalTurnHost();
+    const spend = new Map<string, number>();
+    const runtime = createGoalRuntime({
+      journal,
+      tokenLedger: {
+        takeGoalTurnTokens: (turnId: string) => spend.get(turnId) ?? 0,
+      },
+      tokenBudgetGrant: 1_000,
+    });
+    runtime.bindHost(host);
+    await runtime.dispatch({ action: 'create', objective: 'ship' });
+    spend.set(host.started[0]!.turnId, 1_500);
+    await runtime.finishTurn(host.started[0]!);
+    const windDown = host.started[1]!;
+    expect(host.inputs[1]).toMatchObject({ windDown: true });
+
+    runtime.markTurnDelivered(`goal-runtime:${windDown.turnId}`);
+    await runtime.finishTurn(windDown);
+
+    await vi.waitFor(() => {
+      expect(runtime.getSnapshot().goal?.status).toBe('usage_limited');
+    });
+    expect(runtime.getSnapshot().goal).toMatchObject({
+      limitKind: 'token_budget',
+      windDownTurnId: windDown.turnId,
+    });
+    expect(host.started).toHaveLength(2);
+  });
+
+  it('completes a Goal whose hand-off turn proves the objective done', async () => {
+    const journal = fakeGoalJournal();
+    let records: readonly RuntimeRecord[] = [];
+    const evidenceSource = fakeEvidenceSource(() => records);
+    const verifier: GoalVerifier = vi.fn(async () => ({
+      decision: 'accept' as const,
+      reason: 'Evidence satisfies the objective',
+    }));
+    const host = fakeGoalTurnHost();
+    const spend = new Map<string, number>();
+    const runtime = createGoalRuntime({
+      journal,
+      evidenceSource,
+      verifier,
+      tokenLedger: {
+        takeGoalTurnTokens: (turnId: string) => spend.get(turnId) ?? 0,
+      },
+      tokenBudgetGrant: 1_000,
+    });
+    runtime.bindHost(host);
+    await runtime.dispatch({ action: 'create', objective: 'deliver result' });
+    spend.set(host.started[0]!.turnId, 1_500);
+    await runtime.finishTurn(host.started[0]!);
+    await vi.waitFor(() => expect(host.started).toHaveLength(2));
+    const windDown = host.started[1]!;
+    expect(host.inputs[1]).toMatchObject({ windDown: true });
+
+    // The hand-off finds the objective already met and says so. A budget
+    // stop must not overrule a completion the verifier accepted.
+    const cursorId = runtime.getSnapshot().goal!.evidenceCursor.recordId!;
+    records = verifierEvidenceRecords(windDown, cursorId);
+    runtime.recordTerminalProposal(windDown, {
+      status: 'complete',
+      reason: 'Delivered',
+      evidenceRefs: ['assistant-evidence'],
+    });
+    await runtime.finishTurn(windDown);
+
+    await vi.waitFor(() => {
+      expect(runtime.getSnapshot().goal?.status).toBe('complete');
+    });
+    expect(journal.appended.map((payload) => payload.cause)).not.toContain(
+      'usage_limited',
+    );
+    expect(host.started).toHaveLength(2);
+  });
+
+  it('does not grant a second hand-off after a restart that already saw one', async () => {
+    const journal = fakeGoalJournal();
+    const host = fakeGoalTurnHost();
+    const runtime = createGoalRuntime({ journal, tokenBudgetGrant: 1_000 });
+    runtime.bindHost(host);
+    await runtime.restore([
+      goalStateRecord(
+        {
+          v: 2,
+          activity: 'idle',
+          goal: {
+            goalId: 'g-1',
+            revision: 1,
+            objective: 'keep going',
+            status: 'active',
+            evidenceCursor: { recordId: 'limit-record' },
+            turnCount: 3,
+            activeTimeMs: 1_000,
+            tokensUsed: 1_500,
+            tokenBudget: 1_000,
+            windDownTurnId: 'turn-before-restart',
+            createdAt: 1,
+            updatedAt: 2,
+          },
+        },
+        'turn_finished',
+      ),
+    ]);
+
+    // The record says the hand-off already finished; the restart changes
+    // nothing about that, so the only thing left to do is stop.
+    await vi.waitFor(() => {
+      expect(runtime.getSnapshot().goal?.status).toBe('usage_limited');
+    });
+    expect(runtime.getSnapshot().goal).toMatchObject({
+      limitKind: 'token_budget',
+      windDownTurnId: 'turn-before-restart',
+    });
+    expect(host.started).toHaveLength(0);
+  });
+
+  it('grants the hand-off after a restart that interrupted it', async () => {
+    const journal = fakeGoalJournal();
+    const host = fakeGoalTurnHost();
+    const runtime = createGoalRuntime({ journal, tokenBudgetGrant: 1_000 });
+    runtime.bindHost(host);
+    await runtime.restore([
+      goalStateRecord(
+        {
+          v: 2,
+          activity: 'idle',
+          goal: {
+            goalId: 'g-1',
+            revision: 1,
+            objective: 'keep going',
+            status: 'active',
+            evidenceCursor: { recordId: 'limit-record' },
+            turnCount: 3,
+            activeTimeMs: 1_000,
+            tokensUsed: 1_500,
+            tokenBudget: 1_000,
+            createdAt: 1,
+            updatedAt: 2,
+          },
+        },
+        'turn_finished',
+      ),
+    ]);
+
+    // No marker: either the window was never handed off, or the process
+    // died mid-hand-off. Both mean the user never got one, so it is owed.
+    await vi.waitFor(() => expect(host.started).toHaveLength(1));
+    expect(host.inputs[0]).toMatchObject({ windDown: true });
+    expect(runtime.getSnapshot().goal?.status).toBe('active');
+  });
+
+  it('never arms a budget when the runtime opts out with an unbounded grant', async () => {
+    const journal = fakeGoalJournal();
+    const host = fakeGoalTurnHost();
+    const runtime = createGoalRuntime({
+      journal,
+      tokenBudgetGrant: Number.POSITIVE_INFINITY,
+    });
+    runtime.bindHost(host);
+    await runtime.dispatch({ action: 'create', objective: 'ship' });
+    expect(runtime.getSnapshot().goal).not.toHaveProperty('tokenBudget');
+    await runtime.finishTurn(host.started[0]!);
+    expect(runtime.getSnapshot().goal?.status).toBe('active');
+    expect(host.started).toHaveLength(2);
+  });
+
   it('bills nothing when no ledger is configured', async () => {
     const journal = fakeGoalJournal();
     const host = fakeGoalTurnHost();
@@ -462,6 +895,82 @@ describe('goal runtime', () => {
       }),
       expect.any(AbortSignal),
     );
+  });
+
+  it('accepts an evidenced infeasible blocker on its first turn, with the next step spelled out', async () => {
+    const journal = fakeGoalJournal();
+    let records: readonly RuntimeRecord[] = [];
+    const evidenceSource = fakeEvidenceSource(() => records);
+    const verifier: GoalVerifier = vi.fn(async () => ({
+      decision: 'accept' as const,
+      reason: 'The named branch does not exist',
+    }));
+    const host = fakeGoalTurnHost();
+    const runtime = createGoalRuntime({ journal, evidenceSource, verifier });
+    runtime.bindHost(host);
+    await runtime.dispatch({
+      action: 'create',
+      objective: 'Rebase onto the v9 branch',
+    });
+    const permit = host.started[0]!;
+    const cursorId = runtime.getSnapshot().goal!.evidenceCursor.recordId!;
+    const base = verifierEvidenceRecords(permit, cursorId, 'probe');
+    records = [
+      base[0]!,
+      {
+        ...base[1]!,
+        type: 'tool_result',
+        provenance: 'tool_result',
+        message: {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                name: 'shell',
+                response: { output: "fatal: branch 'v9' not found" },
+              },
+            },
+          ],
+        },
+      },
+    ];
+
+    // No three-turn streak: the whole point is to stop before the budget
+    // does, and the evidence bar (an external fact) is what earns that.
+    const receipt = runtime.recordTerminalProposal(permit, {
+      status: 'blocked',
+      blockerKind: 'infeasible',
+      reason:
+        'Checked the remote: no v9 branch exists, so nothing in scope can rebase onto it.',
+      evidenceRefs: ['probe'],
+    });
+    expect(receipt).toEqual({ recorded: true, readyForVerification: true });
+
+    await runtime.finishTurn(permit);
+
+    expect(verifier).toHaveBeenCalledWith(
+      expect.objectContaining({
+        proposal: expect.objectContaining({ blockerKind: 'infeasible' }),
+        blockedPolicy: expect.stringContaining(
+          'An infeasible blocker may also be accepted immediately',
+        ),
+      }),
+      expect.any(AbortSignal),
+    );
+    expect(journal.appended.map((payload) => payload.cause)).toEqual([
+      'create',
+      'turn_finished',
+      'verifier_accept',
+      'blocked',
+    ]);
+    expect(runtime.getSnapshot()).toMatchObject({
+      activity: 'idle',
+      goal: {
+        status: 'blocked',
+        lastReason: `The named branch does not exist ${GOAL_INFEASIBLE_NEXT_STEP}`,
+      },
+    });
+    expect(host.started).toHaveLength(1);
   });
 
   it('rejects an invalid evidence reference without calling the verifier', async () => {
@@ -4501,5 +5010,530 @@ describe('goal runtime', () => {
     ).resolves.toBeDefined();
     await new Promise((resolve) => setImmediate(resolve));
     expect(runtime.getSnapshot().activity).toBe('idle');
+  });
+
+  describe('objective-updated notice', () => {
+    const flagsOf = (host: ReturnType<typeof fakeGoalTurnHost>) =>
+      host.inputs.map((input) => input.objectiveUpdated ?? false);
+    // Real hosts mark a continuation delivered when they send its prompt;
+    // the fake host records the hand-off and nothing else, so tests that
+    // mean "the model saw this turn" say so before finishing it.
+    const finishDelivered = async (
+      runtime: ReturnType<typeof createGoalRuntime>,
+      permit: GoalTurnPermit,
+    ) => {
+      runtime.markTurnDelivered(`goal-runtime:${permit.turnId}`);
+      await runtime.finishTurn(permit);
+    };
+
+    it('stays off for a Goal whose objective never changed', async () => {
+      const journal = fakeGoalJournal();
+      const host = fakeGoalTurnHost();
+      const runtime = createGoalRuntime({ journal });
+      runtime.bindHost(host);
+      await runtime.dispatch({ action: 'create', objective: 'ship' });
+      await finishDelivered(runtime, host.started[0]!);
+      await finishDelivered(runtime, host.started[1]!);
+
+      // Including the very first continuation: a new Goal supersedes nothing.
+      expect(flagsOf(host)).toEqual([false, false, false]);
+    });
+
+    it('fires once after an edit, then goes quiet again', async () => {
+      const journal = fakeGoalJournal();
+      const host = fakeGoalTurnHost();
+      const runtime = createGoalRuntime({ journal });
+      runtime.bindHost(host);
+      await runtime.dispatch({ action: 'create', objective: 'ship' });
+      await finishDelivered(runtime, host.started[0]!);
+      await runtime.dispatch({
+        action: 'edit',
+        objective: 'ship the rest',
+        expectedGoalId: runtime.getSnapshot().goal!.goalId,
+        expectedRevision: 1,
+      });
+      await finishDelivered(runtime, host.started.at(-1)!);
+
+      // create, continuation, edit -> notice, next continuation -> quiet.
+      expect(flagsOf(host)).toEqual([false, false, true, false]);
+      expect(host.inputs.at(-2)?.continuationContext).toBe('ship the rest');
+    });
+
+    it('fires after a replace, which supersedes a different Goal entirely', async () => {
+      const journal = fakeGoalJournal();
+      const host = fakeGoalTurnHost();
+      const runtime = createGoalRuntime({ journal });
+      runtime.bindHost(host);
+      await runtime.dispatch({ action: 'create', objective: 'ship' });
+      await finishDelivered(runtime, host.started[0]!);
+      await runtime.dispatch({
+        action: 'replace',
+        objective: 'ship something else',
+        expectedGoalId: runtime.getSnapshot().goal!.goalId,
+        expectedRevision: 1,
+      });
+
+      // The new Goal is revision 1 like a fresh create, so the notice cannot
+      // key on the revision alone -- what changed is the objective, which the
+      // replaced Goal's finished turn handed to the model.
+      expect(runtime.getSnapshot().goal).toMatchObject({ revision: 1 });
+      expect(flagsOf(host)).toEqual([false, false, true]);
+    });
+
+    it('stays off across pause and resume, which change no objective', async () => {
+      const journal = fakeGoalJournal();
+      const host = fakeGoalTurnHost();
+      const runtime = createGoalRuntime({ journal });
+      runtime.bindHost(host);
+      await runtime.dispatch({ action: 'create', objective: 'ship' });
+      const goalId = runtime.getSnapshot().goal!.goalId;
+      await runtime.releaseTurn(`goal-runtime:${host.started[0]!.turnId}`);
+      await runtime.dispatch({
+        action: 'pause',
+        expectedGoalId: goalId,
+        expectedRevision: 1,
+      });
+      await runtime.dispatch({
+        action: 'resume',
+        expectedGoalId: goalId,
+        expectedRevision: 1,
+      });
+
+      expect(flagsOf(host).some(Boolean)).toBe(false);
+    });
+
+    it('redelivers the notice when the host never took the prompt', async () => {
+      const journal = fakeGoalJournal();
+      const failures: Array<Error | undefined> = [];
+      const inputs: Array<Parameters<GoalTurnHost['startGoalTurn']>[0]> = [];
+      const started: GoalTurnPermit[] = [];
+      const host: GoalTurnHost = {
+        async startGoalTurn(input) {
+          const failure = failures.shift();
+          if (failure) throw failure;
+          started.push(structuredClone(input.permit));
+          inputs.push(structuredClone(input));
+        },
+        preemptGoalTurn: vi.fn(),
+      };
+      const runtime = createGoalRuntime({ journal });
+      runtime.bindHost(host);
+      await runtime.dispatch({ action: 'create', objective: 'ship' });
+      const goalId = runtime.getSnapshot().goal!.goalId;
+      await finishDelivered(runtime, started[0]!);
+
+      // The edit's continuation is refused by the host, so the notice it
+      // carried never reached the model. Marking it announced there would
+      // drop it for good.
+      failures.push(new Error('host is not accepting turns'));
+      await runtime.dispatch({
+        action: 'edit',
+        objective: 'ship the rest',
+        expectedGoalId: goalId,
+        expectedRevision: 1,
+      });
+      await new Promise((resolve) => setImmediate(resolve));
+      runtime.bindHost(host);
+      await new Promise((resolve) => setImmediate(resolve));
+
+      expect(inputs.at(-1)?.objectiveUpdated).toBe(true);
+      expect(inputs.at(-1)?.continuationContext).toBe('ship the rest');
+    });
+
+    it('redelivers the notice when an accepted turn is dropped before delivery', async () => {
+      const journal = fakeGoalJournal();
+      const host = fakeGoalTurnHost();
+      const runtime = createGoalRuntime({ journal });
+      runtime.bindHost(host);
+      await runtime.dispatch({ action: 'create', objective: 'ship' });
+      const goalId = runtime.getSnapshot().goal!.goalId;
+      await finishDelivered(runtime, host.started[0]!);
+      await runtime.dispatch({
+        action: 'edit',
+        objective: 'ship the rest',
+        expectedGoalId: goalId,
+        expectedRevision: 1,
+      });
+
+      // The notice-carrying continuation was accepted by the host (queued)
+      // but the host drops it before the model sees it -- the TUI Escape
+      // path, ACP cancelPendingPrompt. Its replacement carries the same
+      // (goalId, revision) pair, so the notice must still be owed.
+      expect(host.inputs.at(-1)?.objectiveUpdated).toBe(true);
+      await runtime.releaseTurn(`goal-runtime:${host.started.at(-1)!.turnId}`);
+
+      expect(host.inputs.at(-1)?.objectiveUpdated).toBe(true);
+      expect(host.inputs.at(-1)?.continuationContext).toBe('ship the rest');
+    });
+
+    it('stays quiet when the dropped notice was carried back by its replacement', async () => {
+      const journal = fakeGoalJournal();
+      const host = fakeGoalTurnHost();
+      const runtime = createGoalRuntime({ journal });
+      runtime.bindHost(host);
+      await runtime.dispatch({ action: 'create', objective: 'ship' });
+      const goalId = runtime.getSnapshot().goal!.goalId;
+      await finishDelivered(runtime, host.started[0]!);
+      await runtime.dispatch({
+        action: 'edit',
+        objective: 'ship the rest',
+        expectedGoalId: goalId,
+        expectedRevision: 1,
+      });
+      await runtime.releaseTurn(`goal-runtime:${host.started.at(-1)!.turnId}`);
+      await finishDelivered(runtime, host.started.at(-1)!);
+
+      // The redelivered notice landed; the continuation after it is quiet.
+      expect(flagsOf(host)).toEqual([false, false, true, true, false]);
+    });
+
+    it('does not fire for a Goal that replaced one never handed to the model', async () => {
+      const journal = fakeGoalJournal();
+      const host = fakeGoalTurnHost();
+      const runtime = createGoalRuntime({ journal });
+      runtime.bindHost(host);
+      await runtime.dispatch({ action: 'create', objective: 'ship' });
+
+      // The create's continuation sat accepted-but-undelivered when replace
+      // superseded it: the model never received the old objective, so the
+      // new Goal's first continuation cannot claim it replaces one.
+      await runtime.dispatch({
+        action: 'replace',
+        objective: 'ship something else',
+        expectedGoalId: runtime.getSnapshot().goal!.goalId,
+        expectedRevision: 1,
+      });
+
+      expect(runtime.getSnapshot().goal).toMatchObject({ revision: 1 });
+      expect(flagsOf(host)).toEqual([false, false]);
+    });
+
+    it('does not fire for a delivered turn that settles through releaseTurn', async () => {
+      // The ACP degraded-persistence fallback settles a model-started turn
+      // with releaseTurn. That turn WAS delivered, so its announcement must
+      // stand instead of rolling back and re-firing on the next continuation.
+      const journal = fakeGoalJournal();
+      const host = fakeGoalTurnHost();
+      const runtime = createGoalRuntime({ journal });
+      runtime.bindHost(host);
+      await runtime.dispatch({ action: 'create', objective: 'ship' });
+      const goalId = runtime.getSnapshot().goal!.goalId;
+      await finishDelivered(runtime, host.started[0]!);
+      await runtime.dispatch({
+        action: 'edit',
+        objective: 'ship the rest',
+        expectedGoalId: goalId,
+        expectedRevision: 1,
+      });
+      const delivered = host.started.at(-1)!;
+      runtime.markTurnDelivered(`goal-runtime:${delivered.turnId}`);
+
+      await runtime.releaseTurn(`goal-runtime:${delivered.turnId}`);
+
+      expect(host.inputs.at(-1)?.objectiveUpdated).toBeFalsy();
+    });
+
+    it('keeps the announcement of a delivered turn across a mid-turn pause', async () => {
+      const journal = fakeGoalJournal();
+      const host = fakeGoalTurnHost();
+      const runtime = createGoalRuntime({ journal });
+      runtime.bindHost(host);
+      await runtime.dispatch({ action: 'create', objective: 'ship' });
+      const goalId = runtime.getSnapshot().goal!.goalId;
+      await finishDelivered(runtime, host.started[0]!);
+      await runtime.dispatch({
+        action: 'edit',
+        objective: 'ship the rest',
+        expectedGoalId: goalId,
+        expectedRevision: 1,
+      });
+      const inFlight = host.started.at(-1)!;
+      runtime.markTurnDelivered(`goal-runtime:${inFlight.turnId}`);
+      await runtime.dispatch({
+        action: 'pause',
+        expectedGoalId: goalId,
+        expectedRevision: 2,
+      });
+      await runtime.dispatch({
+        action: 'resume',
+        expectedGoalId: goalId,
+        expectedRevision: 2,
+      });
+
+      // The pause interrupted a turn that already handed the model the new
+      // objective; resuming it changes nothing the notice could assert.
+      expect(host.inputs.at(-1)?.objectiveUpdated).toBeFalsy();
+    });
+
+    it('stays off for a Goal created after a cleared one', async () => {
+      const journal = fakeGoalJournal();
+      const host = fakeGoalTurnHost();
+      const runtime = createGoalRuntime({ journal });
+      runtime.bindHost(host);
+      await runtime.dispatch({ action: 'create', objective: 'ship' });
+      await finishDelivered(runtime, host.started[0]!);
+      await runtime.dispatch({
+        action: 'clear',
+        expectedGoalId: runtime.getSnapshot().goal!.goalId,
+        expectedRevision: 1,
+      });
+      await runtime.dispatch({
+        action: 'create',
+        objective: 'do something else',
+      });
+
+      // The first continuation of a fresh Goal supersedes nothing, even when
+      // an earlier Goal announced an objective in this session.
+      expect(flagsOf(host)).toEqual([false, false, false]);
+    });
+
+    it('stays off for a Goal that replaces a verifier-accepted one', async () => {
+      const journal = fakeGoalJournal();
+      let records: readonly RuntimeRecord[] = [];
+      const evidenceSource = fakeEvidenceSource(() => records);
+      const verifier: GoalVerifier = vi.fn(async () => ({
+        decision: 'accept' as const,
+        reason: 'Evidence satisfies the objective',
+      }));
+      const host = fakeGoalTurnHost();
+      const runtime = createGoalRuntime({ journal, evidenceSource, verifier });
+      runtime.bindHost(host);
+      await runtime.dispatch({ action: 'create', objective: 'deliver result' });
+      const permit = host.started[0]!;
+      const cursorId = runtime.getSnapshot().goal!.evidenceCursor.recordId!;
+      records = verifierEvidenceRecords(permit, cursorId);
+      runtime.recordTerminalProposal(permit, {
+        status: 'complete',
+        reason: 'Delivered',
+        evidenceRefs: ['assistant-evidence'],
+      });
+      await finishDelivered(runtime, permit);
+
+      // Replace directly over the completed Goal -- no clear in between, so
+      // only the accept-time reset keeps the old announcement from firing.
+      // The previous Goal completed with the verifier's blessing: nothing
+      // was swapped out mid-work, so the new Goal's first turn carries no
+      // notice.
+      await runtime.dispatch({
+        action: 'replace',
+        objective: 'next goal',
+        expectedGoalId: permit.goalId,
+        expectedRevision: permit.revision,
+      });
+
+      expect(host.inputs.at(-1)?.objectiveUpdated).toBeFalsy();
+    });
+
+    it("does not leak a refused turn's announcement into a promoted user turn", async () => {
+      const journal = fakeGoalJournal();
+      const failures: Array<Error | undefined> = [];
+      const inputs: Array<Parameters<GoalTurnHost['startGoalTurn']>[0]> = [];
+      const started: GoalTurnPermit[] = [];
+      const host: GoalTurnHost = {
+        async startGoalTurn(input) {
+          const failure = failures.shift();
+          if (failure) throw failure;
+          started.push(structuredClone(input.permit));
+          inputs.push(structuredClone(input));
+        },
+        preemptGoalTurn: vi.fn(),
+      };
+      const runtime = createGoalRuntime({ journal });
+      runtime.bindHost(host);
+      await runtime.dispatch({ action: 'create', objective: 'ship' });
+      const goalId = runtime.getSnapshot().goal!.goalId;
+      await finishDelivered(runtime, started[0]!);
+
+      // The edit's continuation is refused by the host; a user turn queued
+      // behind it is promoted by the failure settlement. The refused turn's
+      // announcement must not ride along into that user turn.
+      failures.push(new Error('host is not accepting turns'));
+      await runtime.dispatch({
+        action: 'edit',
+        objective: 'ship the rest',
+        expectedGoalId: goalId,
+        expectedRevision: 1,
+      });
+      runtime.beginTurn('user-turn-1');
+      await new Promise((resolve) => setImmediate(resolve));
+      const userPermit = runtime.permitForTurn('user-turn-1');
+      expect(userPermit).toBeDefined();
+      await finishDelivered(runtime, userPermit!);
+      runtime.bindHost(host);
+
+      // Editing back to the original text hands the model nothing new.
+      await runtime.dispatch({
+        action: 'edit',
+        objective: 'ship',
+        expectedGoalId: goalId,
+        expectedRevision: 2,
+      });
+
+      expect(inputs.at(-1)?.objectiveUpdated).toBeFalsy();
+      expect(inputs.at(-1)?.continuationContext).toBe('ship');
+    });
+
+    it('stays off for edits that leave the objective text unchanged', async () => {
+      const journal = fakeGoalJournal();
+      const host = fakeGoalTurnHost();
+      const runtime = createGoalRuntime({ journal });
+      runtime.bindHost(host);
+      await runtime.dispatch({ action: 'create', objective: 'ship' });
+      const goalId = runtime.getSnapshot().goal!.goalId;
+      await finishDelivered(runtime, host.started[0]!);
+
+      await runtime.dispatch({
+        action: 'edit',
+        objective: 'ship',
+        expectedGoalId: goalId,
+        expectedRevision: 1,
+      });
+      await runtime.dispatch({
+        action: 'edit',
+        objective: ' ship ',
+        expectedGoalId: goalId,
+        expectedRevision: 2,
+      });
+
+      // Both edits bumped the revision, but the objective the model is handed
+      // is byte-identical to the one it already has: no change, no notice.
+      expect(flagsOf(host)).toEqual([false, false, false, false]);
+
+      await runtime.dispatch({
+        action: 'edit',
+        objective: 'ship the rest',
+        expectedGoalId: goalId,
+        expectedRevision: 3,
+      });
+      expect(host.inputs.at(-1)?.objectiveUpdated).toBe(true);
+    });
+
+    it('keeps the notice owed when a turn finishes under the permit without the prompt', async () => {
+      // A system message or a direct user query can claim a queued
+      // continuation's permit and send its own text under it; the turn then
+      // finishes normally without the continuation prompt ever being sent.
+      // Finishing is not delivery: the next continuation still owes the
+      // notice.
+      const journal = fakeGoalJournal();
+      const host = fakeGoalTurnHost();
+      const runtime = createGoalRuntime({ journal });
+      runtime.bindHost(host);
+      await runtime.dispatch({ action: 'create', objective: 'ship' });
+      const goalId = runtime.getSnapshot().goal!.goalId;
+      await finishDelivered(runtime, host.started[0]!);
+      await runtime.dispatch({
+        action: 'edit',
+        objective: 'ship the rest',
+        expectedGoalId: goalId,
+        expectedRevision: 1,
+      });
+
+      await runtime.finishTurn(host.started.at(-1)!);
+
+      expect(flagsOf(host)).toEqual([false, false, true, true]);
+    });
+
+    it('ignores a delivery mark carrying a stale turn key', async () => {
+      // The mark names the turn it is about; a mark for an earlier turn
+      // must not flip the in-flight one to delivered, or a release would
+      // commit an announcement the model never received.
+      const journal = fakeGoalJournal();
+      const host = fakeGoalTurnHost();
+      const runtime = createGoalRuntime({ journal });
+      runtime.bindHost(host);
+      await runtime.dispatch({ action: 'create', objective: 'ship' });
+      const goalId = runtime.getSnapshot().goal!.goalId;
+      const first = host.started[0]!;
+      await finishDelivered(runtime, first);
+      await runtime.dispatch({
+        action: 'edit',
+        objective: 'ship the rest',
+        expectedGoalId: goalId,
+        expectedRevision: 1,
+      });
+      const inFlight = host.started.at(-1)!;
+
+      runtime.markTurnDelivered(`goal-runtime:${first.turnId}`);
+      await runtime.releaseTurn(`goal-runtime:${inFlight.turnId}`);
+
+      expect(flagsOf(host)).toEqual([false, false, true, true]);
+    });
+
+    it('fires after an edit made while the Goal was blocked', async () => {
+      // A blocked Goal is suspended, not ended: the model still holds the
+      // objective it was given, so an edit followed by resume is exactly
+      // the change the notice exists for -- same as pause -> edit -> resume.
+      const journal = fakeGoalJournal();
+      let records: readonly RuntimeRecord[] = [];
+      const evidenceSource = fakeEvidenceSource(() => records);
+      const verifier: GoalVerifier = vi.fn(async () => ({
+        decision: 'accept' as const,
+        reason: 'User authority is required',
+      }));
+      const host = fakeGoalTurnHost();
+      const runtime = createGoalRuntime({ journal, evidenceSource, verifier });
+      runtime.bindHost(host);
+      await runtime.dispatch({ action: 'create', objective: 'deliver result' });
+      const permit = host.started[0]!;
+      records = verifierUserEvidenceRecords(
+        permit,
+        runtime.getSnapshot().goal!.evidenceCursor.recordId!,
+      );
+      runtime.recordTerminalProposal(permit, {
+        status: 'blocked',
+        blockerKind: 'authority',
+        reason: 'Needs sign-off',
+        evidenceRefs: ['user-evidence'],
+      });
+      await finishDelivered(runtime, permit);
+      expect(runtime.getSnapshot().goal?.status).toBe('blocked');
+
+      await runtime.dispatch({
+        action: 'edit',
+        objective: 'deliver the other result',
+        expectedGoalId: permit.goalId,
+        expectedRevision: permit.revision,
+      });
+      await runtime.dispatch({
+        action: 'resume',
+        expectedGoalId: permit.goalId,
+        expectedRevision: permit.revision + 1,
+      });
+
+      expect(host.inputs.at(-1)?.objectiveUpdated).toBe(true);
+    });
+
+    it('stays off for a Goal created after a completed one was cleared', async () => {
+      const journal = fakeGoalJournal();
+      let records: readonly RuntimeRecord[] = [];
+      const evidenceSource = fakeEvidenceSource(() => records);
+      const verifier: GoalVerifier = vi.fn(async () => ({
+        decision: 'accept' as const,
+        reason: 'Evidence satisfies the objective',
+      }));
+      const host = fakeGoalTurnHost();
+      const runtime = createGoalRuntime({ journal, evidenceSource, verifier });
+      runtime.bindHost(host);
+      await runtime.dispatch({ action: 'create', objective: 'deliver result' });
+      const permit = host.started[0]!;
+      const cursorId = runtime.getSnapshot().goal!.evidenceCursor.recordId!;
+      records = verifierEvidenceRecords(permit, cursorId);
+      runtime.recordTerminalProposal(permit, {
+        status: 'complete',
+        reason: 'Delivered',
+        evidenceRefs: ['assistant-evidence'],
+      });
+      await finishDelivered(runtime, permit);
+      expect(runtime.getSnapshot().goal?.status).toBe('complete');
+
+      await runtime.dispatch({
+        action: 'clear',
+        expectedGoalId: permit.goalId,
+        expectedRevision: permit.revision,
+      });
+      await runtime.dispatch({ action: 'create', objective: 'next goal' });
+
+      expect(host.inputs.at(-1)?.objectiveUpdated).toBeFalsy();
+    });
   });
 });
