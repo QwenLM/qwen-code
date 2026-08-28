@@ -196,7 +196,8 @@ The parser is not intent-aware — prose like "resolves #123's closer" links
 issues the branches below read, and they then act on those issues' states.
 The blast radius stays bounded — the only irreversible act (close)
 additionally requires this PR's diff to be fully subsumed by the merged
-fix, which is true only when the change is already landed, so an
+fix, which is true only when the change is contained in that fix's own
+patch, so an
 accidental linkage can at worst reach a visible, reversible request-changes
 review or a maintainer escalation, never a substantively wrong close.
 
@@ -333,9 +334,12 @@ gh pr review "$PR_NUMBER" --repo "$REPO" --request-changes --body-file /tmp/stag
     has that same-path counterpart. The closer's patch is frozen against
     ITS merge base, so a line later edited or reverted on the default
     branch still counts as covered here — the close comment below invites
-    reopening for exactly that case. A diff with NO production changes
-    (e.g. tests-only) is never fully subsumed — any file it adds outside
-    the production set is itself a remaining delta. If more than one
+    reopening for exactly that case. Subsumption ranges over the ENTIRE diff,
+    not the production sections alone: a diff with NO production changes
+    (e.g. tests-only) is never fully subsumed, and a diff whose production
+    lines are fully covered but which ALSO changes tests or docs is not
+    subsumed either — anything it adds outside the covered production set
+    is itself a remaining delta. If more than one
     closer fully subsumes this PR, the FIRST one in `$MERGED_PRS` order
     is the duplicate target. → post the terminal comment below, then
     close the PR. This is the ONLY place triage closes a PR.
@@ -383,14 +387,15 @@ cat > /tmp/stage-1pre-duplicate.md <<'EOF'
 <!-- qwen-triage stage=1-pre -->
 
 The linked issue #N was already fixed by #M, and every production change in
-this PR is already on the default branch — closing as a duplicate of #M. If
-something here is NOT covered by #M, say so and this can be reopened.
+this PR is covered by #M's merged fix — closing as a duplicate of #M. If
+something here is NOT covered by #M, or #M's fix was later edited or
+reverted on the default branch, say so and this can be reopened.
 
 <details>
 <summary>中文说明</summary>
 
-关联 issue #N 已由 #M 修复，本 PR 的生产代码改动均已存在于默认分支，
-现作为 #M 的重复 PR 关闭。如本 PR 有 #M 未覆盖的内容，请说明，可以重新打开。
+关联 issue #N 已由 #M 修复，本 PR 的生产代码改动均已被 #M 的合并修复覆盖，
+现作为 #M 的重复 PR 关闭。如本 PR 有 #M 未覆盖的内容，或 #M 的修复后续在默认分支上被修改或回退，请说明，可以重新打开。
 
 </details>
 
