@@ -456,12 +456,14 @@ class SendMessageInvocation extends BaseToolInvocation<
       let errMsg = error instanceof Error ? error.message : String(error);
       // The team's "not found" is only half the answer once the peer
       // directory was searched too.
-      if (
-        !inProcessRecipient &&
-        !this.peerMessagingOff &&
-        /not found/i.test(errMsg)
-      ) {
-        errMsg += ` No reachable session has that name either; use list_agents to see who is reachable.`;
+      if (!inProcessRecipient && /not found/i.test(errMsg)) {
+        // Branch, do not suppress: with messaging off the team's "not
+        // found" was the whole answer the model got, so it never learned
+        // that the name it wants could belong to a session this setting
+        // is hiding.
+        errMsg += this.peerMessagingOff
+          ? ` Cross-session messaging is not enabled in this session (agents.crossSessionMessaging), so another session could not have taken that name either.`
+          : ` No reachable session has that name either; use list_agents to see who is reachable.`;
       }
       return {
         llmContent: `Failed to send message: ${errMsg}`,

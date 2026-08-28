@@ -498,4 +498,33 @@ describe('suggestPeerNames', () => {
     );
     expect(suggestPeerNames(many, 'app')).toHaveLength(3);
   });
+
+  it('suggests for a bracketed target by its name part', () => {
+    expect(suggestPeerNames([a, b, c], `docs-cd [${c.ref}]`)).toEqual([
+      'docs-cd',
+    ]);
+  });
+
+  it('suggests for a truncated bracket too', () => {
+    expect(suggestPeerNames([a, b, c], 'docs-cd [aa')).toEqual(['docs-cd']);
+  });
+
+  it('keeps a non-hex bracket that is part of the name', () => {
+    const n = peer({ sessionId: 's9', name: 'notes [draft]' });
+    expect(suggestPeerNames([n], 'notes [draft]')).toEqual(['notes [draft]']);
+  });
+
+  it('ranks prefix matches ahead of substring matches before the cap', () => {
+    const peers = [
+      peer({ sessionId: 'x1', name: 'my-app-1' }),
+      peer({ sessionId: 'x2', name: 'my-app-2' }),
+      peer({ sessionId: 'x3', name: 'my-app-3' }),
+      peer({ sessionId: 'x4', name: 'app-server' }),
+    ];
+    expect(suggestPeerNames(peers, 'app')).toEqual([
+      'app-server',
+      'my-app-1',
+      'my-app-2',
+    ]);
+  });
 });

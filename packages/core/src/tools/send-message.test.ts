@@ -803,6 +803,29 @@ describe('SendMessageTool — peer mode', () => {
     );
   });
 
+  it("names the disabled setting in the team's not-found error", async () => {
+    sendToPeer.mockResolvedValue({ kind: 'disabled' });
+    const tool = new SendMessageTool(
+      makeTeamConfig({
+        teamManager: {
+          sendMessage: vi
+            .fn()
+            .mockRejectedValue(new Error('Teammate "zed" not found.')),
+          broadcast: vi.fn(),
+        },
+      }),
+    );
+    const result = await tool
+      .build({ to: 'zed', message: 'hi' })
+      .execute(new AbortController().signal);
+    expect(result.error).toBeDefined();
+    expect(result.llmContent).toContain('Teammate "zed" not found.');
+    expect(result.llmContent).toContain('agents.crossSessionMessaging');
+    expect(result.llmContent).not.toContain(
+      'No reachable session has that name',
+    );
+  });
+
   it('says messaging is off, rather than that a lookup found nothing', async () => {
     sendToPeer.mockResolvedValue({ kind: 'disabled' });
     const result = await toolWithoutTeam()

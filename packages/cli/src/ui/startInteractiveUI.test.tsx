@@ -175,6 +175,29 @@ describe('startInteractiveUI cross-session messaging', () => {
     });
   });
 
+  it('wires the session-id pin and the misaddressed self-heal', async () => {
+    // The only production wiring of either: the gate reads getSessionId to
+    // judge a frame's pin, and answers a misaddressed one by reasserting
+    // the registry record. Asserting PeerMessaging.start was called says
+    // nothing about the two callbacks, so either could be dropped without
+    // a test noticing.
+    const reassertSessionRegistryRecord = vi.fn().mockResolvedValue(undefined);
+    const config = Object.assign(makeConfig(), {
+      reassertSessionRegistryRecord,
+    });
+
+    await start(config, enabledSettings);
+    await vi.waitFor(() => expect(peerMessagingStart).toHaveBeenCalled());
+
+    const options = peerMessagingStart.mock.calls[0]?.[0] as {
+      getSessionId: () => string;
+      reassertSessionRecord: () => Promise<void>;
+    };
+    expect(options.getSessionId()).toBe('session-123');
+    await options.reassertSessionRecord();
+    expect(reassertSessionRegistryRecord).toHaveBeenCalledTimes(1);
+  });
+
   it('does not bind an inbox unless the setting is on', async () => {
     const config = makeConfig();
 

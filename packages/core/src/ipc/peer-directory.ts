@@ -256,13 +256,28 @@ export function suggestPeerNames(
   limit = 3,
   isReserved?: (address: string) => boolean,
 ): string[] {
-  const needle = target.trim().toLowerCase();
+  // The model is told to address a session as `name [ref]`, so a near-miss
+  // usually arrives in that form — and matching the whole string against a
+  // bare name never hits, which turned every bracketed typo into zero
+  // suggestions. Match on the name part instead. The closing bracket is
+  // optional: a truncated `name [ab` is exactly the typo worth catching.
+  // A hex-looking bracket only; `notes [draft]` is a legitimate name.
+  const needle = target
+    .trim()
+    .replace(/\s*\[[0-9a-f]{0,12}\]?$/i, '')
+    .trim()
+    .toLowerCase();
   if (needle.length === 0) return [];
+  // Ranked before the cap, not filtered by a disjunction: `includes`
+  // subsumes `startsWith`, so the prefix arm never decided anything and
+  // registry order could push the better matches past `limit`.
   return peers
-    .filter((peer) => {
-      const name = peer.name.toLowerCase();
-      return name.startsWith(needle) || name.includes(needle);
-    })
+    .filter((peer) => peer.name.toLowerCase().includes(needle))
+    .sort(
+      (a, b) =>
+        Number(!a.name.toLowerCase().startsWith(needle)) -
+        Number(!b.name.toLowerCase().startsWith(needle)),
+    )
     .slice(0, limit)
     .map((peer) => formatPeerAddress(peer, peers, isReserved));
 }

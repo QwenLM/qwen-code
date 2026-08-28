@@ -797,7 +797,7 @@ qwen sessions ps
 qwen sessions ps --json | jq -r .cwd
 ```
 
-#### Messaging another running session
+## 6. Messaging Another Running Session
 
 Two interactive sessions on the same machine can send each other
 messages. The feature is experimental and **off by default**; turn it on

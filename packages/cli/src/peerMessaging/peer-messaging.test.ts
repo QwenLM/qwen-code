@@ -201,6 +201,30 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
     expect(seen).toEqual([]);
   });
 
+  it('settles receipts through the real ledger when none is injected', async () => {
+    // Production passes no settleSentMessage, so the default
+    // settleSentPeerMessage runs — a path every other receipt test stubs
+    // out. The ledger's own outcomes are covered in peer-send.test.ts;
+    // what needs pinning here is that the default is wired at all, so an
+    // id this session never sent settles to nothing and the frame is
+    // dropped rather than announced or thrown on.
+    const { messaging: m } = await start(ApprovalMode.DEFAULT);
+    const seen: unknown[] = [];
+    m.onReceipt((receipt) => seen.push(receipt));
+
+    await sendPeerFrame(
+      m.socketPath!,
+      buildDeliveryStatusFrame({
+        status: 'denied',
+        origMsgId: 'never-sent-by-this-session',
+        from: '/tmp/peer.sock',
+      }),
+    );
+    await settle();
+
+    expect(seen).toEqual([]);
+  });
+
   it('keeps delivering receipts when one listener throws', async () => {
     const { messaging: m } = await start(ApprovalMode.DEFAULT, {
       settleSentMessage: () => ({
