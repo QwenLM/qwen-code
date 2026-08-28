@@ -193,8 +193,8 @@ function toOpenAPI30(schema: Record<string, unknown>): Record<string, unknown> {
  * The relaxation is deliberately surgical:
  * - `additionalProperties: false` is removed on object levels that declare
  *   optional properties (some `properties` key missing from `required`) or
- *   an empty `properties` map. Levels where every property is required keep
- *   the constraint — there is nothing for a gateway to promote.
+ *   no declared properties. Levels where every property is required keep the
+ *   constraint — there is nothing for a gateway to promote.
  * - `$schema` / `$id` metadata is dropped at every schema level (some
  *   gateways reject unknown keywords).
  * - `uniqueItems` is dropped at every schema level because some
@@ -237,6 +237,9 @@ export function relaxSchemaForFunctionCalling(
       properties !== null &&
       !Array.isArray(properties) &&
       Object.keys(properties).length === 0;
+    const hasNoDeclaredProperties =
+      hasEmptyProperties ||
+      (source['type'] === 'object' && properties === undefined);
 
     for (const [key, value] of Object.entries(source)) {
       if (key === '$schema' || key === '$id' || key === 'uniqueItems') {
@@ -258,7 +261,7 @@ export function relaxSchemaForFunctionCalling(
       if (
         key === 'additionalProperties' &&
         value === false &&
-        (hasOptionalProperties || hasEmptyProperties)
+        (hasOptionalProperties || hasNoDeclaredProperties)
       ) {
         continue;
       }
