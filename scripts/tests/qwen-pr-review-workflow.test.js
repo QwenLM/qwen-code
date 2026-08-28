@@ -4006,6 +4006,11 @@ function runDepsCacheStep({ stubs = {}, prepare = null } = {}) {
     // Default stub: the checkout's HEAD, read when sealing and verifying an
     // entry's recorded source revision.
     write('git', `echo "${DEPS_STUB_REV}"`);
+    // Default stub: NO passwordless sudo. The root-ownership publish is the
+    // degraded user-owned one here, deterministically on hosts whose real
+    // sudo would otherwise flip the scenarios; the elevation scenario below
+    // overrides this with a recording shim.
+    write('sudo', 'exit 1');
     // Deterministic disk headroom: the gate reads the REAL host filesystem
     // otherwise, and a developer machine (or this CI runner) under 10G free
     // would flip every population scenario into the skip branch.
@@ -4080,6 +4085,11 @@ function runDepsCacheStep({ stubs = {}, prepare = null } = {}) {
       entryRootPkg: existsSync(
         join(entry, 'node_modules', 'dep-a', 'index.js'),
       ),
+      // The mode of a published payload file, read BEFORE the fixture tree
+      // is torn down: the immutability seal asserts on it.
+      entryDepMode: existsSync(join(entry, 'node_modules', 'dep-a', 'index.js'))
+        ? statSync(join(entry, 'node_modules', 'dep-a', 'index.js')).mode
+        : null,
       entryNpmMarker: existsSync(
         join(entry, 'node_modules', '.package-lock.json'),
       ),
@@ -4123,6 +4133,13 @@ describe.skipIf(!hasGnuDepsToolchain)(
       expect(r.entryNestedNm).toBe(true);
       expect(r.entryMemberDist).toBe(true);
       expect(r.entryRootDist).toBe(false);
+      // The published entry is immutable: the seal that makes a write
+      // through a farm link die EACCES instead of corrupting every later
+      // review served from this entry (R3-3).
+      expect(r.entryDepMode).not.toBe(null);
+      expect(r.entryDepMode & 0o222).toBe(0);
+      // Without sudo the publish stays user-owned: no elevation ran.
+      expect(r.calls).not.toContain('chown');
       // No torn stage left behind.
       expect(r.stages).toEqual([]);
       // The built state moved to the cache; the workspace is left lean so the
@@ -4130,6 +4147,35 @@ describe.skipIf(!hasGnuDepsToolchain)(
       expect(r.workspaceNm).toBe(false);
       expect(r.workspaceDist).toBe(false);
       expect(r.workspaceMemberDist).toBe(false);
+    });
+
+    it('elevates the publish to root ownership where sudo is available', () => {
+      // Trust separation is the primary seal (R1-1): with passwordless sudo
+      // the entry and the cache root publish root-owned, and the unsandboxed
+      // PR code this job executes next loses every write path into them.
+      // The recording shim stands in for sudo — chown/chmod report success
+      // without a real elevation, everything else executes for real.
+      const r = runDepsCacheStep({
+        stubs: {
+          sudo: [
+            'case "$1" in -n) shift ;; esac',
+            'case "$1" in chown|chmod) exit 0 ;; esac',
+            'exec "$@"',
+          ].join('\n'),
+        },
+      });
+      expect(r.status).toBe(0);
+      expect(r.stdout).toContain('dependency cache populated');
+      // The probe and every elevation leg ran through sudo...
+      expect(r.calls).toContain('sudo -n true');
+      expect(r.calls).toContain('chown -R root:root');
+      expect(r.calls).toContain('chown root:root');
+      expect(r.calls).toContain('chmod go-w');
+      expect(r.calls).toContain('mv -T');
+      // ...and the entry still landed whole and sealed.
+      expect(r.entryComplete).toBe(true);
+      expect(r.entryManifest).toBe(true);
+      expect(r.entries).toEqual([depsLockHash]);
     });
 
     it('exports the cache root for fetch-pr — the literal the CLI reads', () => {
@@ -4301,9 +4347,11 @@ describe('dependency-cache step wiring', () => {
       "- name: 'Provision review dependency cache'",
     );
     expect(provision).toBeGreaterThan(-1);
-    expect(provision).toBeGreaterThan(
-      workflow.indexOf("- name: 'Resolve PR context'"),
-    );
+    // Existence asserted, or indexOf's -1 would make the ordering below pass
+    // trivially exactly when the anchor step is renamed or removed (R3-6).
+    const resolveContext = workflow.indexOf("- name: 'Resolve PR context'");
+    expect(resolveContext).toBeGreaterThan(-1);
+    expect(provision).toBeGreaterThan(resolveContext);
     expect(provision).toBeLessThan(workflow.indexOf("- name: 'Run review'"));
   });
 });

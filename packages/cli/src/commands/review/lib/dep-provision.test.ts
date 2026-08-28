@@ -6,6 +6,7 @@
 
 import { afterEach, describe, expect, it } from 'vitest';
 import {
+  chmodSync,
   existsSync,
   lstatSync,
   mkdirSync,
@@ -59,6 +60,25 @@ describe('provisionWorktreeDependencies', () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  /**
+   * Mirror the population step's read-only seal over the entry's files
+   * (provision-review-deps.sh chmods a-w at publish): provisioning must
+   * survive entries its own copies inherit that mode from.
+   */
+  const chmodEntryReadOnly = (entry: string): void => {
+    const files: string[] = [];
+    const walk = (dir: string): void => {
+      for (const d of readdirSync(dir, { withFileTypes: true })) {
+        if (d.isSymbolicLink()) continue;
+        const full = join(dir, d.name);
+        if (d.isDirectory()) walk(full);
+        else if (d.isFile()) files.push(full);
+      }
+    };
+    walk(entry);
+    for (const f of files) chmodSync(f, 0o444);
+  };
 
   /**
    * A cache entry the CI population step would produce: the lockfile copy,
@@ -171,6 +191,7 @@ describe('provisionWorktreeDependencies', () => {
   it('farms a matching entry: links, self-links, nested installs, dist copies', () => {
     const cache = tmp('depprov-cache-');
     const entry = makeEntry(cache);
+    chmodEntryReadOnly(entry);
     const wt = makeWorktree();
 
     const got = provisionWorktreeDependencies(wt, cache);
@@ -215,6 +236,20 @@ describe('provisionWorktreeDependencies', () => {
     expect(
       readFileSync(join(wt, 'packages', 'core', 'dist', 'index.js'), 'utf8'),
     ).toBe('built at base\n');
+    // The entry published its files read-only, but the COPY is what Agent 7's
+    // scoped build overwrites in place — the copy must come back writable
+    // (R3-1) or that build dies EACCES on a cache-only false failure.
+    writeFileSync(
+      join(wt, 'packages', 'core', 'dist', 'index.js'),
+      'rebuilt\n',
+    );
+    expect(
+      readFileSync(join(wt, 'packages', 'core', 'dist', 'index.js'), 'utf8'),
+    ).toBe('rebuilt\n');
+    // ...and the shared entry's copy stayed what it was.
+    expect(
+      readFileSync(join(entry, 'packages', 'core', 'dist', 'index.js'), 'utf8'),
+    ).toBe('built at base\n');
     // `.bin` is a REAL dir in the worktree: member binaries resolve into the
     // worktree member, never the entry's base copy...
     expect(lstatSync(join(wt, 'node_modules', '.bin')).isSymbolicLink()).toBe(
@@ -235,6 +270,21 @@ describe('provisionWorktreeDependencies', () => {
     expect(
       readFileSync(join(wt, 'node_modules', PROVISION_MARKER), 'utf8').trim(),
     ).toBe(realpathSync(entry));
+  });
+
+  it('refuses an entry name planted as a symlink out of the cache root', () => {
+    // The entry is resolved before it is served; a link at the entry name
+    // that escapes the cache root is a farm of someone else's choosing.
+    const cache = tmp('depprov-cache-');
+    const outside = tmp('depprov-outside-');
+    const foreign = makeEntry(outside);
+    const hash = createHash('sha256').update(LOCK).digest('hex');
+    symlinkSync(foreign, join(cache, hash));
+
+    const got = provisionWorktreeDependencies(makeWorktree(), cache);
+
+    expect(got.provisioned).toBe(false);
+    expect(got.reason).toContain('outside the cache root');
   });
 
   it('falls back on a cold cache with the lockfile hash in the reason', () => {
@@ -273,6 +323,18 @@ describe('provisionWorktreeDependencies', () => {
     const got = provisionWorktreeDependencies(makeWorktree(), cache);
     expect(got.provisioned).toBe(false);
     expect(got.reason).toContain('.package-lock.json');
+  });
+
+  it('refuses a committed DANGLING symlink at node_modules', () => {
+    // existsSync would read the dangling link as ABSENT and the farm's mkdir
+    // then dies EEXIST — the guard's lstatSync exists for exactly this shape.
+    const cache = tmp('depprov-cache-');
+    makeEntry(cache);
+    const wt = makeWorktree();
+    symlinkSync(join(wt, 'no-such-target'), join(wt, 'node_modules'));
+    const got = provisionWorktreeDependencies(wt, cache);
+    expect(got.provisioned).toBe(false);
+    expect(got.reason).toContain('already carries a node_modules');
   });
 
   it('refuses a worktree that already carries a node_modules (PR content)', () => {
@@ -470,6 +532,70 @@ describe('provisionWorktreeDependencies', () => {
     );
   });
 
+  it('COUNTS a member bin whose link name or target escapes', () => {
+    // The bin object's keys become paths under `.bin` and its values are
+    // where the links resolve; `../` in either must die contained, not
+    // rm/create outside the farm (R1-25).
+    const cache = tmp('depprov-cache-');
+    makeEntry(cache);
+    const wt = makeWorktree();
+    writeFileSync(
+      join(wt, 'packages', 'core', 'package.json'),
+      JSON.stringify({ name: '@fix/core', bin: { '../evil': './cli.js' } }),
+    );
+
+    const got = provisionWorktreeDependencies(wt, cache);
+
+    expect(got.provisioned).toBe(false);
+    expect(got.failed).toBeGreaterThan(0);
+    expect(existsSync(join(wt, 'node_modules', 'evil'))).toBe(false);
+    expect(existsSync(join(wt, 'evil'))).toBe(false);
+
+    // A contained name but an escaping bin target.
+    const cache2 = tmp('depprov-cache-');
+    makeEntry(cache2);
+    const wt2 = makeWorktree();
+    writeFileSync(
+      join(wt2, 'packages', 'core', 'package.json'),
+      JSON.stringify({
+        name: '@fix/core',
+        bin: { corebin: '../../escaped-cli.js' },
+      }),
+    );
+
+    const got2 = provisionWorktreeDependencies(wt2, cache2);
+
+    expect(got2.provisioned).toBe(false);
+    expect(got2.failed).toBeGreaterThan(0);
+    expect(existsSync(join(wt2, 'escaped-cli.js'))).toBe(false);
+    // The farm failed, so no marker: build-test installs on its own path.
+    expect(existsSync(join(wt2, 'node_modules', '.package-lock.json'))).toBe(
+      false,
+    );
+  });
+
+  it('COUNTS an entry .bin link that reaches outside the entry', () => {
+    // The .bin rebuild mirrors the entry's third-party bin links by their
+    // LINK TEXT; a text pointing out of the entry must get the same escape
+    // verdict every other mirrored link gets, not land in the worktree.
+    // (Symlinks are not manifest-listed files, so the seal still verifies.)
+    const cache = tmp('depprov-cache-');
+    const entry = makeEntry(cache);
+    symlinkSync(
+      '/etc/passwd',
+      join(entry, 'node_modules', '.bin', 'trojanbin'),
+    );
+
+    const wt = makeWorktree();
+    const got = provisionWorktreeDependencies(wt, cache);
+
+    expect(got.provisioned).toBe(false);
+    expect(got.failed).toBeGreaterThan(0);
+    expect(existsSync(join(wt, 'node_modules', '.bin', 'trojanbin'))).toBe(
+      false,
+    );
+  });
+
   it('falls back when the entry content no longer hashes to its manifest', () => {
     // The entry sits on a path writable by the unsandboxed PR code the same
     // job executes; a written-through or pre-planted tree must fail closed,
@@ -582,6 +708,49 @@ describe('provisionWorktreeDependencies', () => {
     );
   });
 
+  it('COUNTS a member whose devDependency the entry lacks', () => {
+    // The demanded set is not just dependencies: a missing devDependency
+    // that passes the farm would surface as MODULE_NOT_FOUND behind the
+    // marker build-test trusts.
+    const cache = tmp('depprov-cache-');
+    makeEntry(cache);
+    const wt = makeWorktree();
+    writeFileSync(
+      join(wt, 'packages', 'core', 'package.json'),
+      JSON.stringify({
+        name: '@fix/core',
+        devDependencies: { 'left-pad': '^1.3.0' },
+      }),
+    );
+
+    const got = provisionWorktreeDependencies(wt, cache);
+
+    expect(got.provisioned).toBe(false);
+    expect(got.failed).toBeGreaterThan(0);
+    expect(existsSync(join(wt, 'node_modules', '.package-lock.json'))).toBe(
+      false,
+    );
+  });
+
+  it('accepts a satisfied devDependency and an absent OPTIONAL peer', () => {
+    const cache = tmp('depprov-cache-');
+    makeEntry(cache);
+    const wt = makeWorktree();
+    writeFileSync(
+      join(wt, 'packages', 'core', 'package.json'),
+      JSON.stringify({
+        name: '@fix/core',
+        devDependencies: { 'plain-pkg': '*' },
+        peerDependencies: { 'opt-peer': '^1.0.0' },
+        peerDependenciesMeta: { 'opt-peer': { optional: true } },
+      }),
+    );
+
+    const got = provisionWorktreeDependencies(wt, cache);
+
+    expect(got.provisioned).toBe(true);
+  });
+
   it('accepts a member whose manifest demand the entry satisfies', () => {
     const cache = tmp('depprov-cache-');
     makeEntry(cache);
@@ -597,6 +766,80 @@ describe('provisionWorktreeDependencies', () => {
     const got = provisionWorktreeDependencies(wt, cache);
 
     expect(got.provisioned).toBe(true);
+  });
+
+  // A lockfile that RECORDS the installed version, so the demand check can
+  // do what npm ci does — compare the manifest's range against it.
+  const RANGED_LOCK = JSON.stringify({
+    name: 'fixture',
+    lockfileVersion: 3,
+    packages: {
+      '': { name: 'fixture' },
+      'node_modules/plain-pkg': { version: '1.0.0' },
+    },
+  });
+
+  it('COUNTS a member whose manifest range the locked version does not satisfy', () => {
+    // Presence alone is not npm's sync check: a manifest bumped past its
+    // locked version must fail the farm before the marker hides the desync.
+    const cache = tmp('depprov-cache-');
+    makeEntry(cache, RANGED_LOCK);
+    const wt = makeWorktree(RANGED_LOCK);
+    writeFileSync(
+      join(wt, 'packages', 'core', 'package.json'),
+      JSON.stringify({
+        name: '@fix/core',
+        dependencies: { 'plain-pkg': '^2.0.0' },
+      }),
+    );
+
+    const got = provisionWorktreeDependencies(wt, cache);
+
+    expect(got.provisioned).toBe(false);
+    expect(got.failed).toBeGreaterThan(0);
+    expect(existsSync(join(wt, 'node_modules', '.package-lock.json'))).toBe(
+      false,
+    );
+  });
+
+  it('accepts a member whose range the locked version satisfies', () => {
+    const cache = tmp('depprov-cache-');
+    makeEntry(cache, RANGED_LOCK);
+    const wt = makeWorktree(RANGED_LOCK);
+    writeFileSync(
+      join(wt, 'packages', 'core', 'package.json'),
+      JSON.stringify({
+        name: '@fix/core',
+        dependencies: { 'plain-pkg': '^1.0.0' },
+      }),
+    );
+
+    const got = provisionWorktreeDependencies(wt, cache);
+
+    expect(got.provisioned).toBe(true);
+  });
+
+  it('COUNTS a ROOT manifest demand the entry lacks', () => {
+    // Root dependencies ride the same pass; without a workspaces field the
+    // member loop never runs and the root check is the only demand check.
+    const cache = tmp('depprov-cache-');
+    makeEntry(cache);
+    const wt = makeWorktree();
+    writeFileSync(
+      join(wt, 'package.json'),
+      JSON.stringify({
+        name: 'single',
+        dependencies: { 'left-pad': '^1.3.0' },
+      }),
+    );
+
+    const got = provisionWorktreeDependencies(wt, cache);
+
+    expect(got.provisioned).toBe(false);
+    expect(got.failed).toBeGreaterThan(0);
+    expect(existsSync(join(wt, 'node_modules', '.package-lock.json'))).toBe(
+      false,
+    );
   });
 
   it('falls back without a worktree lockfile to key the cache', () => {

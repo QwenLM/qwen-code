@@ -49,6 +49,7 @@
 // before this module existed.
 
 import {
+  chmodSync,
   copyFileSync,
   cpSync,
   existsSync,
@@ -59,12 +60,14 @@ import {
   readlinkSync,
   realpathSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import type { Dirent } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import semver from 'semver';
 import { readWorkspacePackages } from './workspaces.js';
 
 /**
@@ -172,12 +175,21 @@ export function provisionWorktreeDependencies(
     return fallback('the worktree has no package-lock.json to key the cache');
   }
   const hash = createHash('sha256').update(lockBytes).digest('hex');
+  let cacheRootReal: string;
   let entry: string;
   try {
+    cacheRootReal = realpathSync(cacheRoot);
     entry = realpathSync(join(cacheRoot, hash));
   } catch {
     return fallback(
       `no cache entry for lockfile ${hash.slice(0, 12)} (cold cache, or the PR changed the lockfile)`,
+    );
+  }
+  if (!insideDir(cacheRootReal, entry)) {
+    // A symlink planted AT the entry name resolves outside the cache; the
+    // farm refuses it exactly like a missing entry (R1-1).
+    return fallback(
+      `cache entry ${entry} resolves outside the cache root; refusing it`,
     );
   }
   if (!existsSync(join(entry, DEPS_COMPLETE_MARKER))) {
@@ -363,6 +375,15 @@ export function provisionWorktreeDependencies(
           cpSync(join(source, 'dist'), join(target, 'dist'), {
             recursive: true,
           });
+          // The entry publishes its files read-only and cpSync preserves
+          // the mode; a scoped rebuild overwrites the copied outputs in
+          // place and would die EACCES on them (R3-1). Restore owner-write
+          // on the COPY — the shared entry stays immutable.
+          const copiedFiles: string[] = [];
+          walkFiles(join(target, 'dist'), copiedFiles);
+          for (const f of copiedFiles) {
+            chmodSync(f, statSync(f).mode | 0o200);
+          }
           tally.distCopied++;
         } catch {
           tally.failed++;
@@ -371,15 +392,73 @@ export function provisionWorktreeDependencies(
     }
   }
 
-  // The member manifests are PR content the lockfile key cannot see: `npm ci`
+  // The manifests are PR content the lockfile key cannot see: `npm ci`
   // rejects a manifest/lockfile desync loudly, but this farm would link
   // everything the entry has and claim a completeness the entry cannot
   // satisfy — the missing module then surfaces as a defect in the diff.
-  // Demand what npm's sync check demands (minus the optionals npm may
-  // legitimately leave out, like platform binaries) and count the member
-  // failed when the entry cannot resolve it. The same pass collects each
-  // member's declared bins for the `.bin` rebuild below.
-  const memberBins: Array<{ linkName: string; target: string }> = [];
+  // Demand what npm's sync check demands: presence AND range satisfaction
+  // against the lockfile this farm already holds (a manifest bumped past
+  // its locked version passes a presence-only check, and npm's marker —
+  // what build-test reads — then hides the desync from everywhere, R1-16),
+  // minus the optionals npm may legitimately leave out, like platform
+  // binaries. The ROOT manifest joins the pass: without a `workspaces`
+  // field the member loop never runs, and root dependencies are exactly
+  // what a desync hits. The same pass collects each member's declared bins
+  // for the `.bin` rebuild below.
+  const lockPackages = parseLockfilePackages(lockBytes);
+  const demandUnmet = (
+    manifest: MemberManifest,
+    nestedSource: string | null,
+  ): boolean => {
+    const demanded = new Set<string>([
+      ...Object.keys(manifest.dependencies ?? {}),
+      ...Object.keys(manifest.devDependencies ?? {}),
+      ...Object.keys(manifest.peerDependencies ?? {}),
+    ]);
+    for (const [dep, meta] of Object.entries(
+      manifest.peerDependenciesMeta ?? {},
+    )) {
+      if (meta?.optional === true) demanded.delete(dep);
+    }
+    for (const dep of demanded) {
+      const inEntry = existsSync(
+        join(entryReal, 'node_modules', ...dep.split('/')),
+      );
+      const inNested =
+        nestedSource !== null &&
+        existsSync(join(nestedSource, 'node_modules', ...dep.split('/')));
+      if (!inEntry && !inNested) return true;
+      const spec =
+        manifest.dependencies?.[dep] ??
+        manifest.devDependencies?.[dep] ??
+        manifest.peerDependencies?.[dep];
+      const locked = lockPackages?.[`node_modules/${dep}`];
+      // Presence-only for non-semver specs (file:, git+, links) and for
+      // lockfiles that record no version — the check npm reduces those to.
+      if (
+        typeof spec === 'string' &&
+        semver.validRange(spec) !== null &&
+        typeof locked?.version === 'string' &&
+        !semver.satisfies(locked.version, spec)
+      ) {
+        return true;
+      }
+    }
+    return false;
+  };
+  try {
+    const rootManifest = JSON.parse(
+      readFileSync(join(worktreeReal, 'package.json'), 'utf8'),
+    ) as MemberManifest;
+    if (demandUnmet(rootManifest, null)) tally.failed++;
+  } catch {
+    // A worktree whose root manifest is unreadable demands nothing.
+  }
+  const memberBins: Array<{
+    linkName: string;
+    target: string;
+    memberDir: string;
+  }> = [];
   for (const { dir, name } of members) {
     const target = containedIn(worktreeReal, dir);
     if (target === null) continue;
@@ -391,31 +470,7 @@ export function provisionWorktreeDependencies(
     } catch {
       continue;
     }
-    const demanded = new Set<string>([
-      ...Object.keys(manifest.dependencies ?? {}),
-      ...Object.keys(manifest.devDependencies ?? {}),
-      ...Object.keys(manifest.peerDependencies ?? {}),
-    ]);
-    for (const [dep, meta] of Object.entries(
-      manifest.peerDependenciesMeta ?? {},
-    )) {
-      if (meta?.optional === true) demanded.delete(dep);
-    }
-    const source = containedIn(entryReal, dir);
-    let unmet = false;
-    for (const dep of demanded) {
-      const inEntry = existsSync(
-        join(entryReal, 'node_modules', ...dep.split('/')),
-      );
-      const inNested =
-        source !== null &&
-        existsSync(join(source, 'node_modules', ...dep.split('/')));
-      if (!inEntry && !inNested) {
-        unmet = true;
-        break;
-      }
-    }
-    if (unmet) {
+    if (demandUnmet(manifest, containedIn(entryReal, dir))) {
       tally.failed++;
       continue;
     }
@@ -425,10 +480,15 @@ export function provisionWorktreeDependencies(
         // npm names a string bin after the package itself.
         linkName: name.split('/').pop() ?? name,
         target: join(target, bin),
+        memberDir: target,
       });
     } else if (bin) {
       for (const [linkName, binPath] of Object.entries(bin)) {
-        memberBins.push({ linkName, target: join(target, binPath) });
+        memberBins.push({
+          linkName,
+          target: join(target, binPath),
+          memberDir: target,
+        });
       }
     }
   }
@@ -500,21 +560,39 @@ export function provisionWorktreeDependencies(
     } catch {
       // An entry without `.bin` links no third-party binaries.
     }
+    const entryBinDir = join(entryReal, 'node_modules', '.bin');
     for (const b of entryBins) {
       if (!b.isSymbolicLink()) continue;
       try {
-        symlinkSync(
-          readlinkSync(join(entryReal, 'node_modules', '.bin', b.name)),
-          join(binDir, b.name),
-        );
+        const linkText = readlinkSync(join(entryBinDir, b.name));
+        // The link text is entry content: mirror only links whose target
+        // stays inside the entry, the same verdict every other mirrored
+        // link gets — a tampered text must never reach out of the cache
+        // through the worktree's `.bin` (R1-1).
+        if (!insideDir(entryReal, resolve(entryBinDir, linkText))) {
+          tally.failed++;
+          continue;
+        }
+        symlinkSync(linkText, join(binDir, b.name));
       } catch {
         tally.failed++;
       }
     }
-    for (const { linkName, target } of memberBins) {
+    for (const { linkName, target, memberDir } of memberBins) {
+      // Both halves are PR content this loop places: the link NAME becomes
+      // a path under `.bin` it rm/symlinks at, and the bin PATH is where
+      // the link resolves — `../` in either escapes the farm (R1-25).
+      const linkPath = resolve(binDir, linkName);
+      if (
+        !insideDir(binDir, linkPath) ||
+        !insideDir(memberDir, resolve(target))
+      ) {
+        tally.failed++;
+        continue;
+      }
       try {
-        rmSync(join(binDir, linkName), { force: true });
-        symlinkSync(relative(binDir, target), join(binDir, linkName));
+        rmSync(linkPath, { force: true });
+        symlinkSync(relative(binDir, target), linkPath);
       } catch {
         tally.failed++;
       }
@@ -740,6 +818,26 @@ function farmFromEntry(
     place(sourceEntry, targetEntry);
   }
   return true;
+}
+
+/**
+ * The lockfile's v3 `packages` map, or null when it carries none. The
+ * demand check reads each demanded dep's locked VERSION out of it — the
+ * manifest/lockfile sync `npm ci` enforces (R1-16).
+ */
+function parseLockfilePackages(
+  lockBytes: Buffer,
+): Record<string, { version?: unknown }> | null {
+  try {
+    const parsed = JSON.parse(lockBytes.toString('utf8')) as {
+      packages?: Record<string, { version?: unknown }>;
+    };
+    return parsed.packages && typeof parsed.packages === 'object'
+      ? parsed.packages
+      : null;
+  } catch {
+    return null;
+  }
 }
 
 /** The manifest fields the farm's demand check and bin rebuild read. */
