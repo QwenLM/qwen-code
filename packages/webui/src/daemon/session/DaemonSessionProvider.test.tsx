@@ -31,6 +31,7 @@ import {
   useDaemonConnection,
   useDaemonSessionNotices,
   useDaemonPendingPermissions,
+  useDaemonPromptSettled,
   useDaemonPromptStatus,
   useDaemonStreamingState,
   useDaemonTranscriptBlocks,
@@ -42,6 +43,7 @@ import {
   type DaemonConnectionState,
   type DaemonSessionActions,
   type DaemonSessionNotice,
+  type DaemonPromptSettledEvent,
   type DaemonWorkspaceEventSignals,
 } from './DaemonSessionProvider.js';
 import {
@@ -5771,6 +5773,7 @@ describe('DaemonSessionProvider', () => {
       let signals: DaemonWorkspaceEventSignals | undefined;
       let connection: DaemonConnectionState | undefined;
       let actions: DaemonSessionActions | undefined;
+      const settlements: DaemonPromptSettledEvent[] = [];
 
       function Harness() {
         blocks = useDaemonTranscriptBlocks();
@@ -5778,6 +5781,7 @@ describe('DaemonSessionProvider', () => {
         signals = useDaemonWorkspaceEventSignals();
         connection = useDaemonConnection();
         actions = useDaemonActions();
+        useDaemonPromptSettled((event) => settlements.push(event));
         return null;
       }
 
@@ -5811,6 +5815,7 @@ describe('DaemonSessionProvider', () => {
         await flushPromises();
       });
       expect(sdkMocks.MockDaemonSessionClient.load).toHaveBeenCalledTimes(1);
+      expect(settlements).toEqual([]);
       let localPrompt: Promise<unknown> | undefined;
       if (_label === 'complete') {
         await act(async () => {
@@ -5895,6 +5900,19 @@ describe('DaemonSessionProvider', () => {
       expect(
         sdkMocks.MockDaemonSessionClient.load.mock.calls[1]?.[2],
       ).not.toHaveProperty('historyPageSize');
+      expect(settlements).toEqual([
+        expect.objectContaining({
+          sessionId: 'session-live-repair',
+          promptId: 'prompt-live',
+          outcome:
+            _label === 'cancelled'
+              ? 'cancelled'
+              : _label === 'error'
+                ? 'failed'
+                : 'completed',
+          transcriptComplete: true,
+        }),
+      ]);
       expect(initialSession.prompt).not.toHaveBeenCalled();
       expect(repairedSession.prompt).not.toHaveBeenCalled();
       const midTurnInjected = getSidechannelMidTurnInjected();
@@ -6323,11 +6341,13 @@ describe('DaemonSessionProvider', () => {
       let blocks: readonly DaemonTranscriptBlock[] = [];
       let notices: readonly DaemonSessionNotice[] = [];
       let connection: DaemonConnectionState | undefined;
+      const settlements: DaemonPromptSettledEvent[] = [];
 
       function Harness() {
         blocks = useDaemonTranscriptBlocks();
         notices = useDaemonSessionNotices().notices;
         connection = useDaemonConnection();
+        useDaemonPromptSettled((event) => settlements.push(event));
         return null;
       }
 
@@ -6378,6 +6398,14 @@ describe('DaemonSessionProvider', () => {
           (notice) => notice.code === 'daemon.live_journal_repair.failed',
         ),
       ).toHaveLength(1);
+      expect(settlements).toEqual([
+        expect.objectContaining({
+          sessionId: 'session-live-invalid-repair',
+          promptId: 'prompt-live',
+          outcome: 'completed',
+          transcriptComplete: false,
+        }),
+      ]);
       if (
         invalidCase === 'network error' ||
         invalidCase === 'auth error' ||
@@ -11487,10 +11515,12 @@ describe('DaemonSessionProvider', () => {
     let actions: DaemonUiSessionActions | undefined;
     let streamingState: ReturnType<typeof useDaemonStreamingState> = 'idle';
     let blocks: readonly DaemonTranscriptBlock[] = [];
+    const settlements: DaemonPromptSettledEvent[] = [];
     function Harness() {
       actions = useDaemonActions();
       streamingState = useDaemonStreamingState();
       blocks = useDaemonTranscriptBlocks();
+      useDaemonPromptSettled((event) => settlements.push(event));
       return null;
     }
 
@@ -11531,6 +11561,16 @@ describe('DaemonSessionProvider', () => {
         }),
       ]),
     );
+    expect(settlements).toEqual([
+      {
+        sessionId: 'session-ring-active-prompt',
+        promptId: 'prompt-1',
+        outcome: 'completed',
+        stopReason: 'end_turn',
+        eventId: 13,
+        transcriptComplete: true,
+      },
+    ]);
   });
 
   it('rejects active prompts from replay turn_error after ring eviction', async () => {
@@ -15084,6 +15124,230 @@ describe('DaemonSessionProvider', () => {
     expect(sdkMocks.MockDaemonSessionClient.load.mock.calls[0]?.[3]).toBe(
       'client-b',
     );
+  });
+
+  it('publishes authoritative prompt settlements once after terminal transcript commit', async () => {
+    const delivered = createDeferred<void>();
+    const listener = vi.fn((_event: DaemonPromptSettledEvent) =>
+      delivered.resolve(),
+    );
+    const terminal: DaemonEvent = {
+      id: 4,
+      v: 1,
+      type: 'turn_complete',
+      promptId: 'prompt-live',
+      data: { promptId: 'prompt-live', stopReason: 'end_turn' },
+    };
+    sdkMocks.sessions.push(
+      createMockSession({
+        events: async function* settlementEvents() {
+          yield {
+            id: 1,
+            v: 1,
+            type: 'session_update',
+            promptId: 'prompt-live',
+            data: {
+              update: {
+                sessionUpdate: 'agent_message_chunk',
+                content: { type: 'text', text: 'before tool' },
+              },
+            },
+          } satisfies DaemonEvent;
+          yield {
+            id: 2,
+            v: 1,
+            type: 'session_update',
+            promptId: 'prompt-live',
+            data: {
+              update: {
+                sessionUpdate: 'agent_message_chunk',
+                content: { type: 'text', text: 'final answer' },
+              },
+            },
+          } satisfies DaemonEvent;
+          yield terminal;
+          yield terminal;
+        },
+      }),
+    );
+    let store: DaemonTranscriptStore | undefined;
+
+    function Harness() {
+      store = useDaemonTranscriptStore();
+      useDaemonPromptSettled(listener);
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, { autoConnect: true });
+    await act(async () => {
+      await delivered.promise;
+      await flushPromises();
+    });
+
+    expect(listener).toHaveBeenCalledOnce();
+    expect(listener).toHaveBeenCalledWith({
+      sessionId: 'session-1',
+      promptId: 'prompt-live',
+      outcome: 'completed',
+      stopReason: 'end_turn',
+      eventId: 4,
+      transcriptComplete: true,
+    });
+    expect(store?.getSnapshot().blocks).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: 'assistant',
+          text: 'before toolfinal answer',
+          streaming: false,
+          promptId: 'prompt-live',
+        }),
+      ]),
+    );
+  });
+
+  it('isolates prompt settlement listener failures', async () => {
+    const delivered = createDeferred<void>();
+    const failingListener = vi.fn(() => {
+      throw new Error('host callback failed');
+    });
+    const healthyListener = vi.fn(() => delivered.resolve());
+    const consoleError = vi
+      .spyOn(console, 'error')
+      .mockImplementation(() => {});
+    sdkMocks.sessions.push(
+      createMockSession({
+        events: async function* terminalEvent() {
+          yield {
+            id: 1,
+            v: 1,
+            type: 'turn_complete',
+            promptId: 'prompt-live',
+            data: { promptId: 'prompt-live', stopReason: 'end_turn' },
+          } satisfies DaemonEvent;
+        },
+      }),
+    );
+
+    function Harness() {
+      useDaemonPromptSettled(failingListener);
+      useDaemonPromptSettled(healthyListener);
+      return null;
+    }
+
+    try {
+      await renderWithProvider(<Harness />, { autoConnect: true });
+      await act(async () => {
+        await delivered.promise;
+        await flushPromises();
+      });
+
+      expect(failingListener).toHaveBeenCalledOnce();
+      expect(healthyListener).toHaveBeenCalledOnce();
+      expect(consoleError).toHaveBeenCalledWith(
+        '[DaemonSessionProvider] prompt settlement listener failed',
+        expect.objectContaining({ message: 'host callback failed' }),
+      );
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
+
+  it('publishes failed and confirmed cancelled settlements but not waits, cancellation requests, or history replay', async () => {
+    const terminalsDelivered = createDeferred<void>();
+    const listener = vi.fn((event: DaemonPromptSettledEvent) => {
+      if (event.outcome === 'cancelled') terminalsDelivered.resolve();
+    });
+    sdkMocks.sessions.push(
+      createMockSession({
+        replaySnapshot: {
+          compactedReplay: [
+            {
+              id: 1,
+              v: 1,
+              type: 'turn_complete',
+              promptId: 'prompt-history',
+              data: { promptId: 'prompt-history', stopReason: 'end_turn' },
+            },
+          ],
+          liveJournal: [],
+        },
+        events: async function* failureEvents() {
+          yield {
+            id: 2,
+            v: 1,
+            type: 'permission_request',
+            promptId: 'prompt-waiting',
+            data: {
+              requestId: 'permission-1',
+              sessionId: 'session-1',
+              title: 'Ask user 1 question',
+              toolCall: {
+                toolCallId: 'tool-1',
+                rawInput: { questions: [] },
+              },
+              options: [],
+            },
+          } satisfies DaemonEvent;
+          yield {
+            id: 3,
+            v: 1,
+            type: 'prompt_cancelled',
+            data: { sessionId: 'session-1', reason: 'user_cancel' },
+          } satisfies DaemonEvent;
+          yield {
+            id: 4,
+            v: 1,
+            type: 'turn_error',
+            promptId: 'prompt-failed',
+            data: {
+              promptId: 'prompt-failed',
+              message: 'model unavailable',
+              code: 'model_error',
+            },
+          } satisfies DaemonEvent;
+          yield {
+            id: 5,
+            v: 1,
+            type: 'turn_complete',
+            promptId: 'prompt-cancelled',
+            data: {
+              promptId: 'prompt-cancelled',
+              stopReason: 'cancelled',
+            },
+          } satisfies DaemonEvent;
+        },
+      }),
+    );
+
+    function Harness() {
+      useDaemonPromptSettled(listener);
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, { autoConnect: true });
+    await act(async () => {
+      await terminalsDelivered.promise;
+      await flushPromises();
+    });
+
+    expect(listener.mock.calls.map(([event]) => event)).toEqual([
+      {
+        sessionId: 'session-1',
+        promptId: 'prompt-failed',
+        outcome: 'failed',
+        eventId: 4,
+        transcriptComplete: true,
+        error: { message: 'model unavailable', code: 'model_error' },
+      },
+      {
+        sessionId: 'session-1',
+        promptId: 'prompt-cancelled',
+        outcome: 'cancelled',
+        stopReason: 'cancelled',
+        eventId: 5,
+        transcriptComplete: true,
+      },
+    ]);
   });
 
   async function renderWithProvider(

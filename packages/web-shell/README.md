@@ -175,6 +175,32 @@ export function App() {
 > **注意**：不要在已有 `DaemonSessionProvider` 下使用
 > `WebShellWithProviders`，否则会创建嵌套的重复 Provider。
 
+### Assistant Turn 终态回调
+
+宿主需要在一轮 Assistant 回答真正结束后处理结果时，应使用
+`onAssistantTurnSettled`，不要从 `onStreamingStateChange('idle')` 推断：
+
+```tsx
+<WebShellWithProviders
+  onAssistantTurnSettled={(event) => {
+    const key = `${event.sessionId}:${event.promptId}`;
+    persistResultOnce(key, event.message?.content, event.outcome);
+  }}
+/>
+```
+
+该回调来自 daemon 的 prompt 终态，并在终态 transcript 已提交后触发。普通历史加载、
+分支回放和向前分页不会触发；断线期间遗漏、重连后补收的活动 prompt 终态可以触发。
+`(sessionId, promptId)` 是跨挂载幂等键。单个 Provider 挂载期间重复终态会被抑制，
+宿主仍应使用该键做持久化幂等。
+
+`outcome` 为 `completed`、`cancelled` 或 `failed`。取消和失败可能没有 Assistant
+消息，也可能携带终止前的部分内容。`transcriptComplete: false` 表示 Web Shell 已收到
+终态，但无法从受限的 live journal 中恢复完整 transcript。等待 permission 或
+`ask_user_question` 不属于终态。Artifact 和 workspace projection 有各自的生命周期，
+不由该回调表示。进程硬崩溃且没有送达 prompt 终态时不会触发回调；连接失败应由连接
+状态单独处理，不能被当作已完成的 turn。
+
 ### 3. 只读 ChatRecord JSONL
 
 `WebShellTranscript` 只接收已经投影完成的 blocks，不连接 daemon，也不提供 composer、

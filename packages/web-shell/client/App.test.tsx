@@ -393,6 +393,17 @@ const {
         | { data: string; media_type: string }[]
         | undefined,
       streamingState: 'idle' as StreamingState,
+      promptSettledListener: undefined as
+        | ((event: {
+            sessionId: string;
+            promptId: string;
+            outcome: 'completed' | 'cancelled' | 'failed';
+            stopReason?: string;
+            eventId?: number;
+            transcriptComplete: boolean;
+            error?: { message: string; code?: string };
+          }) => void)
+        | undefined,
       sessionHasActivePrompt: false,
       blocks: [] as unknown[],
       liveBlocks: undefined as unknown[] | undefined,
@@ -554,6 +565,11 @@ vi.mock('@qwen-code/webui/daemon-react-sdk', () => {
     useActions: () => mockSessionActions,
     useConnection: () => mockConnection,
     useDaemonSessionOwnerGuard: () => ownerGuard,
+    useDaemonPromptSettled: (
+      listener: typeof testState.promptSettledListener,
+    ) => {
+      testState.promptSettledListener = listener;
+    },
     useDaemonFollowupSuggestion: () => ({
       followupState: null,
       clear: mockFollowup.clear,
@@ -5211,6 +5227,7 @@ beforeEach(() => {
   testState.inputAnnotations = undefined;
   testState.promptImages = undefined;
   testState.streamingState = 'idle';
+  testState.promptSettledListener = undefined;
   testState.sessionHasActivePrompt = false;
   testState.blocks = [];
   testState.liveBlocks = undefined;
@@ -12784,6 +12801,149 @@ describe('App session callbacks', () => {
     expect(snapshots.at(-1)).toMatchObject({
       goal: { goalId: 'goal-1', objective: 'ship it' },
     });
+  });
+
+  it('exposes the final assistant message for an authoritative settled turn', async () => {
+    const base = {
+      promptId: 'prompt-1',
+      clientReceivedAt: 1,
+      createdAt: 1,
+      updatedAt: 1,
+    };
+    testState.blocks = [
+      { ...base, id: 'user-1', kind: 'user', text: 'question' },
+      {
+        ...base,
+        id: 'assistant-before-tool',
+        kind: 'assistant',
+        text: 'I will check.',
+        streaming: false,
+      },
+      {
+        ...base,
+        id: 'tool-1',
+        kind: 'tool',
+        toolCallId: 'call-1',
+        title: 'Lookup',
+        status: 'completed',
+        preview: { kind: 'generic' },
+      },
+      {
+        ...base,
+        id: 'assistant-final',
+        kind: 'assistant',
+        text: 'The final answer.',
+        streaming: false,
+        serverTimestamp: 42,
+      },
+    ];
+    const onAssistantTurnSettled = vi.fn();
+    renderApp({ onAssistantTurnSettled });
+    await flush();
+
+    act(() => {
+      testState.promptSettledListener?.({
+        sessionId: 'session-1',
+        promptId: 'prompt-1',
+        outcome: 'completed',
+        stopReason: 'end_turn',
+        eventId: 10,
+        transcriptComplete: true,
+      });
+    });
+
+    expect(onAssistantTurnSettled).toHaveBeenCalledWith({
+      sessionId: 'session-1',
+      promptId: 'prompt-1',
+      outcome: 'completed',
+      stopReason: 'end_turn',
+      eventId: 10,
+      transcriptComplete: true,
+      message: {
+        id: 'assistant-final',
+        content: 'The final answer.',
+        isStreaming: false,
+        timestamp: 42,
+      },
+    });
+  });
+
+  it('does not project a previous session terminal onto the current transcript', async () => {
+    testState.blocks = [
+      {
+        id: 'assistant-current',
+        kind: 'assistant',
+        promptId: 'shared-prompt-id',
+        text: 'Current session answer',
+        streaming: false,
+        clientReceivedAt: 1,
+        createdAt: 1,
+        updatedAt: 1,
+      },
+    ];
+    const onAssistantTurnSettled = vi.fn();
+    renderApp({ onAssistantTurnSettled });
+    await flush();
+
+    act(() => {
+      testState.promptSettledListener?.({
+        sessionId: 'previous-session',
+        promptId: 'shared-prompt-id',
+        outcome: 'completed',
+        stopReason: 'end_turn',
+        eventId: 10,
+        transcriptComplete: true,
+      });
+    });
+
+    expect(onAssistantTurnSettled).toHaveBeenCalledWith({
+      sessionId: 'previous-session',
+      promptId: 'shared-prompt-id',
+      outcome: 'completed',
+      stopReason: 'end_turn',
+      eventId: 10,
+      transcriptComplete: true,
+    });
+  });
+
+  it('includes available partial assistant content for a failed turn', async () => {
+    testState.blocks = [
+      {
+        id: 'assistant-partial',
+        kind: 'assistant',
+        promptId: 'prompt-failed',
+        text: 'Partial answer before failure',
+        streaming: false,
+        clientReceivedAt: 1,
+        createdAt: 1,
+        updatedAt: 1,
+      },
+    ];
+    const onAssistantTurnSettled = vi.fn();
+    renderApp({ onAssistantTurnSettled });
+    await flush();
+
+    act(() => {
+      testState.promptSettledListener?.({
+        sessionId: 'session-1',
+        promptId: 'prompt-failed',
+        outcome: 'failed',
+        eventId: 11,
+        transcriptComplete: true,
+        error: { message: 'model unavailable', code: 'model_error' },
+      });
+    });
+
+    expect(onAssistantTurnSettled).toHaveBeenCalledWith(
+      expect.objectContaining({
+        outcome: 'failed',
+        message: expect.objectContaining({
+          id: 'assistant-partial',
+          content: 'Partial answer before failure',
+          isStreaming: false,
+        }),
+      }),
+    );
   });
 
   it('gates direct submissions and dispatches compatible submit events', async () => {

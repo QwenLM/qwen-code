@@ -160,6 +160,9 @@ export { useDaemonTranscriptStore as useTranscriptStore } from './daemon/session
 /** Low-level prompt lifecycle status (queued, streaming, idle). */
 export { useDaemonPromptStatus as usePromptStatus } from './daemon/session/index.js';
 
+/** Subscribe to authoritative prompt terminal events after transcript commit. */
+export { useDaemonPromptSettled } from './daemon/session/index.js';
+
 /** Server-pushed prompt follow-up suggestions for daemon-backed UIs. */
 export { useDaemonFollowupSuggestion } from './daemon/index.js';
 
@@ -218,6 +221,9 @@ export type {
   DaemonStreamingState,
   /** Prompt submission status: `'idle' | 'waiting' | 'streaming'`. */
   DaemonPromptStatus,
+  DaemonPromptSettledEvent,
+  DaemonPromptSettledListener,
+  DaemonPromptSettlementOutcome,
   DaemonReasoningControls,
   /** Hook return value for daemon follow-up suggestions. */
   UseDaemonFollowupSuggestionReturn,

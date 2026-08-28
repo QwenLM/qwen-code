@@ -219,6 +219,27 @@ export interface WebShellAssistantMessageInfo {
   timestamp?: number;
 }
 
+export type WebShellAssistantTurnOutcome = 'completed' | 'cancelled' | 'failed';
+
+export interface WebShellAssistantTurnSettledEvent {
+  sessionId: string;
+  /** Daemon-assigned prompt identifier and canonical turn identity. */
+  promptId: string;
+  outcome: WebShellAssistantTurnOutcome;
+  /** Daemon terminal reason. Present for completed and cancelled turns. */
+  stopReason?: string;
+  /** Terminal SSE cursor when available; not a replacement for the idempotency key. */
+  eventId?: number;
+  /** False when bounded live-journal repair could not restore the full turn. */
+  transcriptComplete: boolean;
+  /** Final visible assistant message, when the turn produced one. */
+  message?: WebShellAssistantMessageInfo;
+  error?: {
+    message: string;
+    code?: string;
+  };
+}
+
 export interface WebShellAssistantTurnFooterRenderInfo {
   /** User-message id for the head of the completed turn. */
   turnId: string;

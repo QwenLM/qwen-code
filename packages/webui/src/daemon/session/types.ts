@@ -196,6 +196,35 @@ export interface DaemonSessionProviderProps {
 
 export type DaemonPromptStatus = 'idle' | 'waiting' | 'streaming';
 
+export type DaemonPromptSettlementOutcome =
+  | 'completed'
+  | 'cancelled'
+  | 'failed';
+
+export interface DaemonPromptSettledEvent {
+  sessionId: string;
+  promptId: string;
+  outcome: DaemonPromptSettlementOutcome;
+  /** Daemon terminal reason. Present for `turn_complete` settlements. */
+  stopReason?: string;
+  /** Terminal SSE cursor when available; not a replacement for the idempotency key. */
+  eventId?: number;
+  /** False when live-journal repair could not restore the complete turn. */
+  transcriptComplete: boolean;
+  error?: {
+    message: string;
+    code?: string;
+  };
+}
+
+export type DaemonPromptSettledListener = (
+  event: DaemonPromptSettledEvent,
+) => void;
+
+export interface DaemonPromptSettlementSource {
+  subscribe(listener: DaemonPromptSettledListener): () => void;
+}
+
 export type DaemonNoticeSeverity = 'info' | 'warning' | 'error';
 
 export type DaemonNoticeCategory =

@@ -19,6 +19,7 @@ import {
   useActions,
   useConnection,
   useDaemonFollowupSuggestion,
+  useDaemonPromptSettled,
   useSettings,
   useProviders,
   useSessionNotices,
@@ -65,7 +66,10 @@ import {
   WEB_SHELL_SIDE_TASK_SOURCE_TYPE,
 } from './constants/sessions';
 import { extractPendingPermission } from './adapters/transcriptAdapter';
-import { isRetryableTurnErrorKind } from './adapters/transcriptToMessages';
+import {
+  isRetryableTurnErrorKind,
+  transcriptBlocksToDaemonMessages,
+} from './adapters/transcriptToMessages';
 import { MessageList, type MessageListHandle } from './components/MessageList';
 import { SubagentDetailsProvider } from './subagentDetailsContext';
 import { MonitorDetailsProvider } from './monitorDetailsContext';
@@ -346,6 +350,8 @@ import {
   type WebShellBottomStatusItem,
   type WebShellPreparedSubmit,
   type WebShellSubmitSnapshot,
+  type WebShellAssistantMessageInfo,
+  type WebShellAssistantTurnSettledEvent,
 } from './customization';
 import type { CommandDisplayCategoryOrder } from './utils/commandDisplay';
 import { WebShellPortalRootContext } from './portalRoot';
@@ -699,6 +705,26 @@ function getLatestUserBlock(
   return undefined;
 }
 
+function getSettledAssistantMessage(
+  blocks: readonly DaemonTranscriptBlock[],
+  promptId: string,
+): WebShellAssistantMessageInfo | undefined {
+  const messages = transcriptBlocksToDaemonMessages(
+    blocks.filter((block) => block.promptId === promptId),
+  );
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (message?.role !== 'assistant') continue;
+    return {
+      id: message.id,
+      content: message.content,
+      isStreaming: message.isStreaming,
+      timestamp: message.timestamp,
+    };
+  }
+  return undefined;
+}
+
 function matchesUserMessageIdentity(
   block: DaemonTranscriptBlock | undefined,
   identity: TranscriptUserMessageIdentity | undefined,
@@ -1037,6 +1063,11 @@ export interface WebShellProps {
   onConnectionChange?: (status: string) => void;
   /** Called when prompt status changes (idle/waiting/responding). */
   onStreamingStateChange?: (state: DaemonStreamingState) => void;
+  /**
+   * Called after an authoritative daemon prompt terminal has been committed to
+   * the transcript. Ordinary history replay does not emit this callback.
+   */
+  onAssistantTurnSettled?: (event: WebShellAssistantTurnSettledEvent) => void;
   /**
    * Called with the initial merged agent task snapshot and when its roster,
    * status, or stable metadata changes. Poll-only runtime, stats, and activity
@@ -1968,6 +1999,7 @@ export function App({
   shadowDom,
   onConnectionChange,
   onStreamingStateChange,
+  onAssistantTurnSettled,
   onError,
   onBugReport,
   hiddenSlashCommands,
@@ -2277,10 +2309,19 @@ export function App({
   const CustomComposerHeader = renderComposerHeader;
   const CustomComposerFooter = renderComposerFooter;
   const store = useTranscriptStore();
+  const connection = useConnection();
+  useDaemonPromptSettled((event) => {
+    const callback = onAssistantTurnSettled;
+    if (!callback) return;
+    const message =
+      connection.sessionId === event.sessionId
+        ? getSettledAssistantMessage(store.getSnapshot().blocks, event.promptId)
+        : undefined;
+    callback({ ...event, ...(message ? { message } : {}) });
+  });
   const { blocks, blockChangeSummary } = useAnimationFrameTranscriptSnapshot({
     structuralOnly: true,
   });
-  const connection = useConnection();
   const logicalSessionKey = getLogicalSessionKey(
     connection.sessionId,
     connection.workspaceCwd,

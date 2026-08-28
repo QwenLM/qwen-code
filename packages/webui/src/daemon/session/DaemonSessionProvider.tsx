@@ -108,6 +108,9 @@ import type {
   AddDaemonSessionNotice,
   DaemonConnectionState,
   DaemonPromptStatus,
+  DaemonPromptSettledEvent,
+  DaemonPromptSettledListener,
+  DaemonPromptSettlementSource,
   DaemonSessionActions,
   DaemonSessionContextValue,
   DaemonSessionNotice,
@@ -127,6 +130,9 @@ export type {
   DaemonNoticeOperation,
   DaemonNoticeSeverity,
   DaemonPromptImage,
+  DaemonPromptSettledEvent,
+  DaemonPromptSettledListener,
+  DaemonPromptSettlementOutcome,
   DaemonPromptStatus,
   DaemonSessionActions,
   DaemonSessionContextValue,
@@ -158,6 +164,7 @@ interface LiveJournalRepairEpisode {
   lastObservedEventId: number;
   terminalSeen: boolean;
   attempted: boolean;
+  pendingSettlement?: DaemonPromptSettledEvent;
   controller?: AbortController;
 }
 
@@ -230,6 +237,44 @@ function assistantDoneFromTurnEvent(
           branchRecordId: checkpointUuid,
         }
       : {}),
+  };
+}
+
+function promptSettledFromTurnEvent(
+  sessionId: string,
+  event: DaemonEvent,
+  transcriptComplete = true,
+): DaemonPromptSettledEvent | undefined {
+  if (event.type !== 'turn_complete' && event.type !== 'turn_error') {
+    return undefined;
+  }
+  const promptId = eventPromptId(event);
+  if (!promptId) return undefined;
+  const data = isRecord(event.data) ? event.data : undefined;
+  if (event.type === 'turn_complete') {
+    const stopReason =
+      typeof data?.['stopReason'] === 'string'
+        ? data['stopReason']
+        : 'end_turn';
+    return {
+      sessionId,
+      promptId,
+      outcome: stopReason === 'cancelled' ? 'cancelled' : 'completed',
+      stopReason,
+      ...(event.id !== undefined ? { eventId: event.id } : {}),
+      transcriptComplete,
+    };
+  }
+  const message =
+    typeof data?.['message'] === 'string' ? data['message'] : 'Turn failed';
+  const code = typeof data?.['code'] === 'string' ? data['code'] : undefined;
+  return {
+    sessionId,
+    promptId,
+    outcome: 'failed',
+    ...(event.id !== undefined ? { eventId: event.id } : {}),
+    transcriptComplete,
+    error: { message, ...(code ? { code } : {}) },
   };
 }
 
@@ -620,6 +665,9 @@ const DaemonTranscriptHistoryContext = createContext<
 const DaemonPromptStatusContext = createContext<DaemonPromptStatus | undefined>(
   undefined,
 );
+const DaemonPromptSettlementContext = createContext<
+  DaemonPromptSettlementSource | undefined
+>(undefined);
 interface SessionNoticesValue {
   notices: readonly DaemonSessionNotice[];
   dismissNotice(id: string): void;
@@ -952,6 +1000,42 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
   const liveJournalRepairRef = useRef<LiveJournalRepairEpisode | undefined>(
     undefined,
   );
+  const promptSettlementListenersRef = useRef<Set<DaemonPromptSettledListener>>(
+    new Set(),
+  );
+  const publishedPromptSettlementsRef = useRef<Set<string>>(new Set());
+  const promptSettlementSource = useMemo<DaemonPromptSettlementSource>(
+    () => ({
+      subscribe(listener) {
+        promptSettlementListenersRef.current.add(listener);
+        return () => promptSettlementListenersRef.current.delete(listener);
+      },
+    }),
+    [],
+  );
+  const publishPromptSettlement = useCallback(
+    (event: DaemonPromptSettledEvent) => {
+      const key = getPromptSettledKey(event.sessionId, event.promptId);
+      if (publishedPromptSettlementsRef.current.has(key)) return;
+      publishedPromptSettlementsRef.current.add(key);
+      const listeners = [...promptSettlementListenersRef.current];
+      if (listeners.length === 0) return;
+      queueMicrotask(() => {
+        for (const listener of listeners) {
+          if (!promptSettlementListenersRef.current.has(listener)) continue;
+          try {
+            listener(event);
+          } catch (error) {
+            console.error(
+              '[DaemonSessionProvider] prompt settlement listener failed',
+              error,
+            );
+          }
+        }
+      });
+    },
+    [],
+  );
   const repairReloadRef = useRef<
     DaemonSessionActions['reloadSession'] | undefined
   >(undefined);
@@ -1217,6 +1301,12 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               error instanceof Error ? error.message : String(error),
             recoverable: true,
           });
+          if (repair.pendingSettlement) {
+            publishPromptSettlement({
+              ...repair.pendingSettlement,
+              transcriptComplete: false,
+            });
+          }
           liveJournalRepairRef.current = undefined;
         },
       );
@@ -2127,6 +2217,12 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                       };
               } else if (repairingEpisode) {
                 liveJournalRepairRef.current = undefined;
+                if (repairingEpisode.pendingSettlement) {
+                  publishPromptSettlement({
+                    ...repairingEpisode.pendingSettlement,
+                    transcriptComplete: true,
+                  });
+                }
               }
             } else if (allUiEvents.length > 0) {
               store.dispatch(allUiEvents);
@@ -2190,7 +2286,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               });
             }
             for (const replayEvent of replayEvents) {
-              settleActivePromptFromTurnEvent(
+              const activePromptSettled = settleActivePromptFromTurnEvent(
                 activePromptsRef.current,
                 settledPromptsRef.current,
                 activeSession.sessionId,
@@ -2200,6 +2296,22 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 passiveAssistantDoneTimerRef,
                 { requireBoundPromptId: true },
               );
+              if (!activePromptSettled) continue;
+              const settlement = promptSettledFromTurnEvent(
+                activeSession.sessionId,
+                replayEvent,
+              );
+              if (!settlement) continue;
+              const repair = liveJournalRepairRef.current;
+              if (
+                repair?.sessionId === activeSession.sessionId &&
+                repair.target.promptId === settlement.promptId
+              ) {
+                repair.pendingSettlement = settlement;
+                repair.terminalSeen = true;
+              } else {
+                publishPromptSettlement(settlement);
+              }
             }
             setConnection((c) => ({ ...c, catchingUp: undefined }));
             // Release the raw snapshot only after the injection above
@@ -2819,7 +2931,21 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                   () => setPromptStatus('idle'),
                 );
               }
+              if (
+                event.type === 'turn_complete' ||
+                event.type === 'turn_error'
+              ) {
+                // `turn_error` itself projects an error block after
+                // assistant.done. Commit that terminal projection before
+                // exposing settlement to subscribers.
+                flushTranscriptSync();
+              }
+              const settlement = promptSettledFromTurnEvent(
+                activeSession.sessionId,
+                event,
+              );
               const pendingRepair = liveJournalRepairRef.current;
+              let settlementDelayedForRepair = false;
               if (
                 pendingRepair?.sessionId === activeSession.sessionId &&
                 (event.type === 'turn_complete' ||
@@ -2827,9 +2953,16 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 eventPromptId(event) === pendingRepair.target.promptId
               ) {
                 pendingRepair.terminalSeen = true;
+                if (settlement) {
+                  pendingRepair.pendingSettlement = settlement;
+                  settlementDelayedForRepair = true;
+                }
                 queueMicrotask(tryLiveJournalRepair);
               } else if (pendingRepair?.terminalSeen) {
                 queueMicrotask(tryLiveJournalRepair);
+              }
+              if (settlement && !settlementDelayedForRepair) {
+                publishPromptSettlement(settlement);
               }
               // ── state_resync_required handling ──────────────────────
               // Resyncs are transcript recovery signals, not prompt terminal
@@ -3339,6 +3472,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     clearNotices,
     addNotice,
     dismissNotice,
+    publishPromptSettlement,
     setConnectionSynchronous,
   ]);
 
@@ -3942,27 +4076,29 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
 
   return (
     <DaemonStoreContext.Provider value={store}>
-      <DaemonConnectionContext.Provider value={connection}>
-        <DaemonPromptStatusContext.Provider value={promptStatus}>
-          <DaemonSessionNoticesContext.Provider value={noticesValue}>
-            <DaemonWorkspaceEventSignalsContext.Provider
-              value={workspaceEventSignals}
-            >
-              <DaemonActionsContext.Provider value={actions}>
-                <DaemonSessionOwnerGuardContext.Provider
-                  value={ownerGuardValue}
-                >
-                  <DaemonTranscriptHistoryContext.Provider
-                    value={transcriptHistoryValue}
+      <DaemonPromptSettlementContext.Provider value={promptSettlementSource}>
+        <DaemonConnectionContext.Provider value={connection}>
+          <DaemonPromptStatusContext.Provider value={promptStatus}>
+            <DaemonSessionNoticesContext.Provider value={noticesValue}>
+              <DaemonWorkspaceEventSignalsContext.Provider
+                value={workspaceEventSignals}
+              >
+                <DaemonActionsContext.Provider value={actions}>
+                  <DaemonSessionOwnerGuardContext.Provider
+                    value={ownerGuardValue}
                   >
-                    {children}
-                  </DaemonTranscriptHistoryContext.Provider>
-                </DaemonSessionOwnerGuardContext.Provider>
-              </DaemonActionsContext.Provider>
-            </DaemonWorkspaceEventSignalsContext.Provider>
-          </DaemonSessionNoticesContext.Provider>
-        </DaemonPromptStatusContext.Provider>
-      </DaemonConnectionContext.Provider>
+                    <DaemonTranscriptHistoryContext.Provider
+                      value={transcriptHistoryValue}
+                    >
+                      {children}
+                    </DaemonTranscriptHistoryContext.Provider>
+                  </DaemonSessionOwnerGuardContext.Provider>
+                </DaemonActionsContext.Provider>
+              </DaemonWorkspaceEventSignalsContext.Provider>
+            </DaemonSessionNoticesContext.Provider>
+          </DaemonPromptStatusContext.Provider>
+        </DaemonConnectionContext.Provider>
+      </DaemonPromptSettlementContext.Provider>
     </DaemonStoreContext.Provider>
   );
 }
@@ -4336,6 +4472,23 @@ export function useDaemonPromptStatus(): DaemonPromptStatus {
     );
   }
   return promptStatus;
+}
+
+export function useDaemonPromptSettled(
+  listener: DaemonPromptSettledListener | undefined,
+): void {
+  const source = useContext(DaemonPromptSettlementContext);
+  if (!source) {
+    throw new Error(
+      'useDaemonPromptSettled must be used within DaemonSessionProvider',
+    );
+  }
+  const listenerRef = useRef(listener);
+  listenerRef.current = listener;
+  useEffect(
+    () => source.subscribe((event) => listenerRef.current?.(event)),
+    [source],
+  );
 }
 
 export function useDaemonConnection(): DaemonConnectionState {
