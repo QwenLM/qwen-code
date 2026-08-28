@@ -3102,6 +3102,40 @@ describe('ChatCompressionService.compress cache sharing', () => {
     expect(generateText).not.toHaveBeenCalled();
     expect(coldSpy).toHaveBeenCalledTimes(1);
   });
+
+  it('keeps payload-overflow recoveries on the slimmed cold path (#10380)', async () => {
+    // Every other canShareCache conjunct holds in this fixture (main
+    // model, cache control enabled, provider-reported anchor, window
+    // headroom), but the shared request is built from the UNSLIMMED
+    // history — the exact payload a 413 gateway just rejected.
+    // Re-uploading it would 413 again (and log a misleading cache-sharing
+    // failure) before the slimmed cold path recovers anyway. Removing the
+    // requestPayloadTooLarge conjunct makes generateText reappear (red).
+    const { chat, config, generateText } = makeFixture();
+    const coldSpy = vi
+      .spyOn(sideQueryModule, 'runSideQuery')
+      .mockResolvedValue({
+        text: '<state_snapshot>cold summary</state_snapshot>',
+        usage: {
+          promptTokenCount: 170_000,
+          candidatesTokenCount: 500,
+          totalTokenCount: 170_500,
+        },
+      } as never);
+
+    const result = await new ChatCompressionService().compress(chat, {
+      promptId: 'p',
+      force: true,
+      config,
+      consecutiveFailures: 0,
+      originalTokenCount: 180_000,
+      requestPayloadTooLarge: true,
+    });
+
+    expect(generateText).not.toHaveBeenCalled();
+    expect(coldSpy).toHaveBeenCalledTimes(1);
+    expect(result.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+  });
 });
 
 describe('ChatCompressionService.compress cheap-gate uses estimated tokens', () => {

@@ -809,7 +809,14 @@ export class ChatCompressionService {
       usesMainModel &&
       providerSupportsCacheSharing &&
       hasProviderTokenCount &&
-      sharedRequestFits;
+      sharedRequestFits &&
+      // The shared request is built from the UNSLIMMED history. A
+      // payload-overflow compaction exists because that exact payload was
+      // just rejected at the gateway's byte limit — re-uploading it would
+      // 413 again (logging a misleading cache-sharing failure) before the
+      // slimmed cold path recovers anyway. Keep 413 recoveries on the
+      // slimmed cold path exclusively (#10380).
+      !opts.requestPayloadTooLarge;
     if (!canShareCache) {
       const reason = !usesMainModel
         ? 'distinct compaction model'
@@ -817,9 +824,11 @@ export class ChatCompressionService {
           ? 'provider does not support cache sharing'
           : !hasProviderTokenCount
             ? 'no provider-reported token-count anchor'
-            : `shared request exceeds context window: prompt=${sharedPromptTokenCount}, ` +
-              `directive=${sharedDirectiveTokenCount}, reserve=${COMPACT_MAX_OUTPUT_TOKENS}, ` +
-              `window=${contextLimit}`;
+            : !sharedRequestFits
+              ? `shared request exceeds context window: prompt=${sharedPromptTokenCount}, ` +
+                `directive=${sharedDirectiveTokenCount}, reserve=${COMPACT_MAX_OUTPUT_TOKENS}, ` +
+                `window=${contextLimit}`
+              : 'payload-overflow recovery ships the slimmed cold path only';
       debugLogger.debug(`[compaction] skipping cache sharing: ${reason}`);
     }
     if (canShareCache) {
