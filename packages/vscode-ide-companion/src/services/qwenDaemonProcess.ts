@@ -128,14 +128,18 @@ export class QwenDaemonProcess {
       child.once('exit', (code, signal) => {
         if (settled) {
           // Died after a successful start. Retract the runtime so the next
-          // start() respawns instead of handing out a dead base URL, but only
-          // while this child is still the live one.
+          // start() respawns instead of handing out a dead base URL, and
+          // report the exit — but only while this child is still the live
+          // one. A superseded child (a workspace switch kills it) and a
+          // dispose() kill both still fire exit; reporting those would show
+          // a crash banner for a healthy replacement daemon or a panel that
+          // is tearing down on purpose.
           if (this.child === child) {
             this.child = null;
             this.runtime = null;
             this.boundWorkspaceCwd = null;
+            this.onExit?.();
           }
-          this.onExit?.();
           return;
         }
         finish(

@@ -566,4 +566,46 @@ describe('FileMessageHandler', () => {
       expect(docs.size).toBe(0);
     });
   });
+
+  it('closeDiff resolves workspace-relative paths before closing the diff', async () => {
+    vscodeMock.workspace.workspaceFolders = [
+      { uri: vscode.Uri.file('/workspace'), name: 'workspace', index: 0 },
+    ];
+    const registeredCommands = new Map<
+      string,
+      (...args: unknown[]) => unknown
+    >();
+    vscodeMock.commands.registerCommand.mockImplementation(
+      (id: string, handler: (...args: unknown[]) => unknown) => {
+        registeredCommands.set(id, handler);
+        return { dispose: vi.fn() };
+      },
+    );
+    vscodeMock.commands.executeCommand.mockImplementation(
+      async (id: string, ...args: unknown[]) =>
+        registeredCommands.get(id)?.(...args),
+    );
+    const closeDiff = vi.fn().mockResolvedValue(undefined);
+    registerNewCommands(
+      { subscriptions: [] } as never,
+      vi.fn(),
+      { showDiff: vi.fn(), closeDiff } as never,
+      () => [],
+      vi.fn() as never,
+    );
+
+    const handler = new FileMessageHandler(
+      {} as QwenAgentManager,
+      {} as ConversationStore,
+      null,
+      vi.fn(),
+    );
+
+    await handler.handle({
+      type: 'closeDiff',
+      data: { path: 'src/foo.ts' },
+    });
+
+    expect(closeDiff).toHaveBeenCalledWith('/workspace/src/foo.ts', true);
+  });
 });

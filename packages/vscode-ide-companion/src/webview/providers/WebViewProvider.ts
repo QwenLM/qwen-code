@@ -27,6 +27,7 @@ import { WebViewContent } from './WebViewContent.js';
 import { getFileName } from '../utils/webviewUtils.js';
 import { truncatePanelTitle } from '../utils/panelTitleUtils.js';
 import { createImagePathResolver } from '../utils/imageHandler.js';
+import { isDiscontinuedModel } from '../utils/discontinuedModel.js';
 import { type ApprovalModeValue } from '../../types/approvalModeValueTypes.js';
 import { isAuthenticationRequiredError } from '../../utils/authErrors.js';
 import { getErrorMessage } from '../../utils/errorMessage.js';
@@ -1718,6 +1719,17 @@ export class WebViewProvider {
 
     const modelId = this.initialModelId;
     this.initialModelId = null;
+
+    // The discontinued Qwen OAuth free tier must not be re-applied to a
+    // fresh session through the initial-model route; the legacy setModel
+    // guard in SessionMessageHandler does not cover this path.
+    if (isDiscontinuedModel(modelId)) {
+      logger.warn(
+        '[WebViewProvider] Skipping discontinued initial model:',
+        modelId,
+      );
+      return;
+    }
 
     try {
       await this.agentManager.setModelFromUi(modelId);
