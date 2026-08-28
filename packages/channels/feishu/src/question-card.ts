@@ -126,7 +126,11 @@ export function buildQuestionTerminalCard(
 }
 
 function escapeQuestionMarkdown(value: string): string {
-  return value.replace(/([\\`*_[\]{}()#+.!|>~-])/gu, '\\$1');
+  return value
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replace(/([\\`*_[\]{}()#+.!|>~-])/gu, '\\$1');
 }
 
 function record(value: unknown): Record<string, unknown> | undefined {

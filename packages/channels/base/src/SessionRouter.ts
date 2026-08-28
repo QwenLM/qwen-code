@@ -386,6 +386,10 @@ export class SessionRouter {
     return this.toTarget.get(sessionId);
   }
 
+  isSessionLive(sessionId: string): boolean {
+    return this.toTarget.has(sessionId) && this.isLive(sessionId);
+  }
+
   getSession(
     channelName: string,
     senderId: string,

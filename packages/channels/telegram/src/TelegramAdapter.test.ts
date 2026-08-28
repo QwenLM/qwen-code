@@ -22,6 +22,7 @@ type TestTelegramMessage = {
 type TestTelegramEntity = { type: string; offset: number; length: number };
 
 class TestTelegramChannel extends TelegramChannel {
+  inboundErrorLabel?: string;
   readonly inboundPreparations: Array<{
     envelope: Envelope;
     prepare: () => Promise<boolean | void>;
@@ -96,6 +97,28 @@ class TestTelegramChannel extends TelegramChannel {
     return inboundRoute.run(route, () =>
       this.sendResponseMessage(chatId, text, sessionId),
     );
+  }
+
+  reportInboundErrorForTest(
+    inbound: Envelope,
+    error: unknown,
+    reply: () => Promise<unknown>,
+  ): void {
+    (
+      this as unknown as {
+        reportInboundError(
+          inbound: Envelope,
+          error: unknown,
+          reply: () => Promise<unknown>,
+        ): void;
+      }
+    ).reportInboundError(inbound, error, reply);
+  }
+
+  protected override getInboundErrorSourceLabel(
+    _envelope: Envelope,
+  ): string | undefined {
+    return this.inboundErrorLabel;
   }
 }
 
@@ -368,6 +391,28 @@ describe('TelegramChannel', () => {
     );
   });
 
+  it('routes attributed inbound failures through the originating topic', async () => {
+    const channel = createChannel();
+    const bot = installFakeBot(channel);
+    const reply = vi.fn().mockResolvedValue(undefined);
+    channel.inboundErrorLabel = '[review]';
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+
+    channel.reportInboundErrorForTest(
+      envelope({ chatId: '2', threadId: '42' }),
+      new Error('agent unavailable'),
+      reply,
+    );
+    await Promise.resolve();
+
+    expect(bot.api.sendMessage).toHaveBeenCalledWith(
+      '2',
+      '[review] Sorry, something went wrong processing your message.',
+      { parse_mode: 'HTML', message_thread_id: 42 },
+    );
+    expect(reply).not.toHaveBeenCalled();
+  });
+
   it('enters inbound routing before downloading a photo', async () => {
     const channel = createChannel();
     const bot = installFakeBot(channel);
@@ -471,6 +516,50 @@ describe('TelegramChannel', () => {
     for (const chunk of chunks) {
       expect(chunk).toMatch(/^\[review_\*&lt;&amp;&gt;\] /u);
       expect(chunk.length).toBeLessThanOrEqual(4096);
+    }
+  });
+
+  it('falls back to bounded labeled plain text for one oversized HTML block', async () => {
+    const channel = createChannel();
+    const bot = installFakeBot(channel);
+    const text = 'x'.repeat(4090);
+
+    await channel.sendTestResponse('2', text, 'session-1', '[review]');
+
+    const calls = bot.api.sendMessage.mock.calls;
+    expect(calls).toHaveLength(2);
+    expect(
+      calls
+        .map((call) => call[1])
+        .join('')
+        .replaceAll('[review] ', ''),
+    ).toBe(text);
+    for (const [, chunk, options] of calls) {
+      expect(chunk).toMatch(/^\[review\] /u);
+      expect(chunk.length).toBeLessThanOrEqual(4096);
+      expect(options).toBeUndefined();
+    }
+  });
+
+  it('falls back without looping for a code block with one oversized line', async () => {
+    const channel = createChannel();
+    const bot = installFakeBot(channel);
+    const text = `\`\`\`text\n${'x'.repeat(5000)}\n\`\`\``;
+
+    await channel.sendTestResponse('2', text, 'session-1', '[review]');
+
+    const calls = bot.api.sendMessage.mock.calls;
+    expect(calls.length).toBeGreaterThan(1);
+    expect(
+      calls
+        .map((call) => call[1])
+        .join('')
+        .replaceAll('[review] ', ''),
+    ).toBe(text);
+    for (const [, chunk, options] of calls) {
+      expect(chunk).toMatch(/^\[review\] /u);
+      expect(chunk.length).toBeLessThanOrEqual(4096);
+      expect(options).toBeUndefined();
     }
   });
 

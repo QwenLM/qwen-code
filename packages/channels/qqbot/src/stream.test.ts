@@ -63,7 +63,7 @@ vi.mock('@qwen-code/channel-base', () => ({
       sourceLabel?: string,
     ): string {
       const label = sourceLabel?.replace(/([\\`*_[\]{}()#+.!|>~-])/gu, '\\$1');
-      return label ? `${label} ${text}` : text;
+      return label ? `${label}\n${text}` : text;
     }
     protected formatAttributedText(text: string, sourceLabel?: string): string {
       return sourceLabel ? `${sourceLabel} ${text}` : text;
@@ -271,7 +271,7 @@ describe('onResponseChunk', () => {
     const body = mockSendQQMessage.mock.calls[0]?.[3] as {
       markdown: { content: string };
     };
-    expect(body.markdown.content).toBe('\\[review\\_\\*\\] raw response');
+    expect(body.markdown.content).toBe('\\[review\\_\\*\\]\nraw response');
   });
 
   it('accumulates multiple chunks into the same session buffer', () => {

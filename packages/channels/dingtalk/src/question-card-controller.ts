@@ -40,7 +40,11 @@ interface QuestionRecord {
 export interface QuestionCardControllerOptions {
   client: DingtalkInteractiveCardClient;
   timeoutMs: number;
-  sendFallback(chatId: string, text: string): Promise<void>;
+  sendFallback(
+    chatId: string,
+    text: string,
+    sourceLabel?: string,
+  ): Promise<void>;
   reserveRunProjection?(
     runId: string,
   ): ((operation: () => Promise<void>) => Promise<void>) | undefined;
@@ -117,6 +121,7 @@ export class QuestionCardController {
         await this.options.sendFallback(
           context.target.chatId,
           this.fallbackText(context),
+          ...(context.sourceLabel ? [context.sourceLabel] : []),
         );
       } catch (fallbackError) {
         this.options.onError?.('question fallback delivery', fallbackError);
@@ -459,10 +464,7 @@ export class QuestionCardController {
             .join(', ')}`,
       )
       .join('\n');
-    return this.withSourceLabel(
-      context,
-      `The interactive question could not be delivered, so this request was cancelled. Please retry.\n${questions}`,
-    );
+    return `The interactive question could not be delivered, so this request was cancelled. Please retry.\n${questions}`;
   }
 
   private withSourceLabel(

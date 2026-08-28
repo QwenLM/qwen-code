@@ -10,6 +10,18 @@ export const DINGTALK_CHUNK_LIMIT = 3800;
 
 // --- Chunk splitting ---
 
+function safeUtf16SliceEnd(value: string, end: number): number {
+  if (end <= 0 || end >= value.length) return end;
+  const previous = value.charCodeAt(end - 1);
+  const next = value.charCodeAt(end);
+  return previous >= 0xd800 &&
+    previous <= 0xdbff &&
+    next >= 0xdc00 &&
+    next <= 0xdfff
+    ? end - 1
+    : end;
+}
+
 export function splitChunks(
   text: string,
   chunkLimit = DINGTALK_CHUNK_LIMIT,
@@ -74,8 +86,14 @@ export function splitChunks(
           }
         }
       }
+      pieceLength = safeUtf16SliceEnd(remaining, pieceLength);
 
       if (pieceLength === 0 && remaining.length > 0) {
+        if (!buf) {
+          throw new RangeError(
+            'chunk limit cannot contain one Unicode character',
+          );
+        }
         flush(inCode || lineOpenedFenceInBuffer);
         continue;
       }

@@ -201,6 +201,18 @@ export function extractTitle(text: string): string {
   return cleaned || 'Qwen Code';
 }
 
+function safeUtf16SliceEnd(value: string, end: number): number {
+  if (end <= 0 || end >= value.length) return end;
+  const previous = value.charCodeAt(end - 1);
+  const next = value.charCodeAt(end);
+  return previous >= 0xd800 &&
+    previous <= 0xdbff &&
+    next >= 0xdc00 &&
+    next <= 0xdfff
+    ? end - 1
+    : end;
+}
+
 /**
  * Split long text into chunks that fit within Feishu's message size limit.
  * Handles code fence boundaries across chunks.
@@ -253,8 +265,14 @@ export function splitChunks(
     const budget = willBeInCode ? chunkLimit - '\n```'.length : chunkLimit;
     while (buf.length > budget) {
       const maxSlice = inCode ? chunkLimit - '\n```'.length - 1 : chunkLimit;
-      let piece = buf.slice(0, maxSlice);
-      buf = buf.slice(maxSlice);
+      const sliceEnd = safeUtf16SliceEnd(buf, maxSlice);
+      if (sliceEnd === 0) {
+        throw new RangeError(
+          'chunk limit cannot contain one Unicode character',
+        );
+      }
+      let piece = buf.slice(0, sliceEnd);
+      buf = buf.slice(sliceEnd);
       if (inCode) {
         piece += '\n```';
         buf = fenceLine + '\n' + buf;

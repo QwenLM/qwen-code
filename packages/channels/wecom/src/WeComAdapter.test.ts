@@ -4102,8 +4102,29 @@ describe('WeComChannel', () => {
     });
     expect(chunks.length).toBeGreaterThan(1);
     for (const chunk of chunks) {
-      expect(chunk.startsWith('\\[review\\_\\*\\] ')).toBe(true);
+      expect(chunk.startsWith('\\[review\\_\\*\\]\n')).toBe(true);
       expect(Buffer.byteLength(chunk, 'utf8')).toBeLessThanOrEqual(3800);
+    }
+  });
+
+  it('keeps attributed fenced-code openings line-leading in every chunk', async () => {
+    const channel = new TestWeComChannel('bot', makeConfig(), makeBridge());
+    await channel.connect();
+    const client = lastClient();
+
+    await channel.sendAttributed(
+      'chat-1',
+      `\`\`\`text\n${'x'.repeat(3900)}\n\`\`\``,
+      '[review]',
+    );
+
+    const chunks = client.sendMessage.mock.calls.map((call) => {
+      const message = call[1] as { markdown: { content: string } };
+      return message.markdown.content;
+    });
+    expect(chunks.length).toBeGreaterThan(1);
+    for (const chunk of chunks) {
+      expect(chunk).toMatch(/^\\\[review\\\]\n(?:```|~~~)/u);
     }
   });
 

@@ -21,7 +21,9 @@ vi.mock('@qwen-code/channel-base', () => ({
     }
 
     protected formatAttributedText(text: string, sourceLabel?: string): string {
-      return sourceLabel ? `${sourceLabel} ${text}` : text;
+      return sourceLabel && text.trim().length > 0
+        ? `${sourceLabel} ${text}`
+        : text;
     }
   },
 }));
@@ -202,6 +204,40 @@ describe('MockPluginChannel message correlation', () => {
           type: 'outbound',
           text: '[review] complete',
         }),
+      ],
+    );
+    expect(
+      (
+        channel as unknown as {
+          attributedSegments: Set<string>;
+        }
+      ).attributedSegments.size,
+    ).toBe(0);
+  });
+
+  it('waits for non-whitespace content before marking a segment attributed', () => {
+    const { channel, send } = createChannel();
+    const output = channel as unknown as {
+      onResponseChunk: (
+        chatId: string,
+        chunk: string,
+        sessionId: string,
+        segment: { messageId: string; segmentId: string; sourceLabel: string },
+      ) => void;
+    };
+    const segment = {
+      messageId: 'msg-a',
+      segmentId: 'segment-a',
+      sourceLabel: '[review]',
+    };
+
+    output.onResponseChunk('shared-chat', '   ', 'session-a', segment);
+    output.onResponseChunk('shared-chat', 'body', 'session-a', segment);
+
+    expect(send.mock.calls.map(([frame]) => JSON.parse(String(frame)))).toEqual(
+      [
+        expect.objectContaining({ type: 'chunk', text: '   ' }),
+        expect.objectContaining({ type: 'chunk', text: '[review] body' }),
       ],
     );
   });

@@ -130,6 +130,23 @@ describe('Feishu question cards', () => {
     );
   });
 
+  it('neutralizes Feishu mention markup in source labels', () => {
+    const sourceLabel = '[Alice <at id=ou_other></at> & review]';
+    const questionForm = form(buildQuestionCard({ ...context, sourceLabel }));
+    const terminal = buildQuestionTerminalCard(
+      questions,
+      'cancelled',
+      undefined,
+      sourceLabel,
+    ) as unknown as QuestionCard;
+
+    expect(questionForm.elements?.[0]?.content).toContain(
+      String.raw`&lt;at id=ou\_other&gt;&lt;/at&gt; &amp;`,
+    );
+    expect(questionForm.elements?.[0]?.content).not.toContain('<at');
+    expect(terminal.body.elements[0]?.content).not.toContain('<at');
+  });
+
   it('includes correlated submit and cancel actions', () => {
     const elements = form(buildQuestionCard(context)).elements!;
 

@@ -136,7 +136,11 @@ const FEISHU_STATUS_STRINGS = [
 const escapeRegExp = (value: string) =>
   value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 const escapeFeishuMarkdown = (value: string) =>
-  value.replace(/([\\`*_[\]{}()#+.!|>~-])/gu, '\\$1');
+  value
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replace(/([\\`*_[\]{}()#+.!|>~-])/gu, '\\$1');
 const FEISHU_STATUS_LABELS = `(?:${FEISHU_STATUS_STRINGS.map(escapeRegExp).join('|')})`;
 /** A rendered status block: `---` divider line + `*label*` line,
  *  at line granularity anywhere in the joined card text. */
@@ -1042,6 +1046,7 @@ export class FeishuChannel extends ChannelBase {
     throwOnFailure: boolean,
     receiveIdType: 'chat_id' | 'open_id' = 'chat_id',
     sourceLabel?: string,
+    leadingPrefix?: string,
   ): Promise<void> {
     const token = await this.getTenantAccessToken();
     if (!token) {
@@ -1057,16 +1062,20 @@ export class FeishuChannel extends ChannelBase {
       return;
     }
 
+    const hasVisibleContent = text.trim().length > 0 || Boolean(leadingPrefix);
     const sourcePrefix =
-      sourceLabel && text.trim().length > 0
+      sourceLabel && hasVisibleContent
         ? `${escapeFeishuMarkdown(sourceLabel)}\n\n`
         : '';
-    const contentLimit = FEISHU_CHUNK_LIMIT - sourcePrefix.length;
+    const firstPrefix = leadingPrefix ? `${leadingPrefix}\n\n` : '';
+    const contentLimit =
+      FEISHU_CHUNK_LIMIT - sourcePrefix.length - firstPrefix.length;
     if (contentLimit <= 0) {
-      throw new Error('Feishu source label exceeds the message limit.');
+      throw new Error('Feishu attribution exceeds the message limit.');
     }
     const chunks = splitChunks(text, contentLimit).map(
-      (chunk) => `${sourcePrefix}${chunk}`,
+      (chunk, index) =>
+        `${index === 0 ? firstPrefix : ''}${sourcePrefix}${chunk}`,
     );
 
     for (let i = 0; i < chunks.length; i++) {
@@ -1136,10 +1145,21 @@ export class FeishuChannel extends ChannelBase {
     chatId: string,
     text: string,
     sourceLabel?: string,
+    leadingPrefix?: string,
   ): Promise<void> {
     return sourceLabel
-      ? this.sendMessageInternal(chatId, text, false, 'chat_id', sourceLabel)
-      : this.sendMessage(chatId, text);
+      ? this.sendMessageInternal(
+          chatId,
+          text,
+          false,
+          'chat_id',
+          sourceLabel,
+          leadingPrefix,
+        )
+      : this.sendMessage(
+          chatId,
+          leadingPrefix ? `${leadingPrefix}\n\n${text}` : text,
+        );
   }
 
   // ----- Interactive Card Streaming -----
@@ -1712,8 +1732,9 @@ export class FeishuChannel extends ChannelBase {
           if (displayText) {
             await this.sendFallbackMessage(
               chatId,
-              displayText,
+              text,
               cardState.sourceLabel,
+              atPrefix,
             );
           }
         }
@@ -1725,8 +1746,9 @@ export class FeishuChannel extends ChannelBase {
         if (text) {
           await this.sendFallbackMessage(
             chatId,
-            displayText,
+            text,
             cardState.sourceLabel,
+            atPrefix,
           );
         }
       }
@@ -1805,8 +1827,9 @@ export class FeishuChannel extends ChannelBase {
         await this.deleteCard(cardState.messageId);
         await this.sendFallbackMessage(
           chatId,
-          finalText,
+          contentPart,
           cardState.sourceLabel,
+          prefix,
         );
       }
     }
@@ -1989,8 +2012,9 @@ export class FeishuChannel extends ChannelBase {
             this.cleanupCard(inboundMsgId);
             await this.sendFallbackMessage(
               chatId,
-              atSender ? `${atSender}\n\n${fullText}` : fullText,
+              fullText,
               sourceLabel,
+              atSender,
             );
             return;
           }
@@ -2030,11 +2054,7 @@ export class FeishuChannel extends ChannelBase {
 
     // Fallback to plain message (include @sender prefix for consistency)
     this.cleanupCard(inboundMsgId);
-    await this.sendFallbackMessage(
-      chatId,
-      atSender ? `${atSender}\n\n${fullText}` : fullText,
-      sourceLabel,
-    );
+    await this.sendFallbackMessage(chatId, fullText, sourceLabel, atSender);
   }
 
   protected override onPromptStart(
@@ -2127,13 +2147,11 @@ export class FeishuChannel extends ChannelBase {
           // Card creation failed — fallback to plain message delivery
           if (cs.accumulatedText) {
             const atPrefix = this.msgToSenderName.get(inboundMsgId) || '';
-            const fallbackText = atPrefix
-              ? `${atPrefix}\n\n${cs.accumulatedText}`
-              : cs.accumulatedText;
             this.sendFallbackMessage(
               _chatId,
-              fallbackText,
+              cs.accumulatedText,
               cs.sourceLabel,
+              atPrefix,
             ).catch(() => {});
           } else if (cs.terminalStatus !== 'completed') {
             // No accumulated text (e.g. a failure before the first chunk, or a
@@ -2143,12 +2161,12 @@ export class FeishuChannel extends ChannelBase {
             const fallbackLabel = cs.terminalStatus
               ? this.statusLabelFor(cs.terminalStatus)
               : '出错了，请重试';
-            const errorText = atPrefix
-              ? `${atPrefix}\n\n*${fallbackLabel}*`
-              : `*${fallbackLabel}*`;
-            this.sendFallbackMessage(_chatId, errorText, cs.sourceLabel).catch(
-              () => {},
-            );
+            this.sendFallbackMessage(
+              _chatId,
+              `*${fallbackLabel}*`,
+              cs.sourceLabel,
+              atPrefix,
+            ).catch(() => {});
             process.stderr.write(
               `[Feishu:${this.name}] onPromptEnd: no card and no accumulated text for inbound=${inboundMsgId}, sent error fallback\n`,
             );
@@ -2393,10 +2411,11 @@ export class FeishuChannel extends ChannelBase {
             // strips it from quote-reply context.
             await this.sendFallbackMessage(
               chatId,
-              finalText
-                ? `${finalText}\n\n---\n*${stopLabel}*`
+              contentPart
+                ? `${contentPart}\n\n---\n*${stopLabel}*`
                 : `---\n*${stopLabel}*`,
               cardState.sourceLabel,
+              prefix,
             );
           }
         }

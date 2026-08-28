@@ -142,6 +142,12 @@ vi.mock('@qwen-code/channel-base', async () => {
       protected getResponseSourceLabel(_sessionId: string): undefined {
         return undefined;
       }
+      protected getInboundErrorSourceLabel(
+        _envelope: Envelope,
+      ): string | undefined {
+        return (this as unknown as { inboundErrorSourceLabelForTest?: string })
+          .inboundErrorSourceLabelForTest;
+      }
       protected logDebugPayload(platform: string, payload: unknown): void {
         (
           real.ChannelBase.prototype as unknown as {
@@ -2107,6 +2113,10 @@ describe('DingtalkChannel status cards', () => {
 });
 
 describe('DingtalkChannel question cards', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
   it.each([
     undefined,
     { enabled: false },
@@ -2161,6 +2171,68 @@ describe('DingtalkChannel question cards', () => {
         }
       ).questionCardController,
     ).toBeDefined();
+  });
+
+  it('repeats the source label on every split question fallback', async () => {
+    const channel = createChannel();
+    seedWebhook(channel, 'cid-1');
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(new Response('{}', { status: 200 }));
+    const cardClient = (
+      channel as unknown as {
+        interactiveCardClient: { createAndDeliver: ReturnType<typeof vi.fn> };
+      }
+    ).interactiveCardClient;
+    cardClient.createAndDeliver = vi
+      .fn()
+      .mockRejectedValue(new Error('card unavailable'));
+    const controller = (
+      channel as unknown as {
+        questionCardController: {
+          present(
+            context: ChannelUserInputRequestContext,
+            target: { chatId: string; isGroup: boolean },
+          ): Promise<unknown>;
+        };
+      }
+    ).questionCardController;
+    const context = {
+      requestId: 'request-1',
+      sessionId: 'session-1',
+      runId: 'run-1',
+      owner: { kind: 'channel_user', id: 'owner-1' },
+      target: {
+        channelName: 'dingtalk',
+        chatId: 'cid-1',
+        senderId: 'owner-1',
+        isGroup: true,
+      },
+      questions: [
+        {
+          answerKey: '0',
+          header: 'Review',
+          question: 'x'.repeat(7600),
+          options: [{ label: 'Continue', description: 'Continue.' }],
+          multiSelect: false,
+        },
+      ],
+      submitOptionId: 'proceed_once',
+      sourceLabel: '[review]',
+      onSettled: () => () => {},
+      respond: vi.fn().mockResolvedValue(true),
+    } as ChannelUserInputRequestContext;
+
+    await controller.present(context, { chatId: 'cid-1', isGroup: true });
+
+    const bodies = fetchSpy.mock.calls.map(([, init]) =>
+      JSON.parse(String((init as RequestInit).body)),
+    );
+    expect(bodies.length).toBeGreaterThan(1);
+    for (const body of bodies) {
+      expect(body.markdown.text).toMatch(/^\\\[review\\\]\n\n/u);
+      expect(body.markdown.text.length).toBeLessThanOrEqual(3800);
+    }
   });
 
   it('presents through the matching attended run only', async () => {
@@ -2359,6 +2431,51 @@ describe('DingtalkChannel unroutable-message logging', () => {
 });
 
 describe('DingtalkChannel parsed-message logging', () => {
+  it('labels the fallback when a named inbound turn rejects', async () => {
+    const channel = createChannel();
+    const error = new Error('agent unavailable');
+    vi.mocked(channel.handleInbound).mockRejectedValueOnce(error);
+    Object.assign(channel, { inboundErrorSourceLabelForTest: '[review]' });
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(new Response('{}', { status: 200 }));
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const downstream = {
+      data: JSON.stringify({
+        msgId: 'failed-named-turn',
+        conversationType: '1',
+        conversationId: 'cid123',
+        sessionWebhook:
+          'https://oapi.dingtalk.com/robot/send?access_token=token',
+        senderNick: 'Alice',
+        senderStaffId: 'staff-1',
+        senderId: 'sender-1',
+        isInAtList: false,
+        text: { content: 'hello' },
+      }),
+      headers: { messageId: 'failed-named-turn' },
+    } as unknown as DWClientDownStream;
+
+    try {
+      (
+        channel as unknown as { onMessage(d: DWClientDownStream): void }
+      ).onMessage(downstream);
+      await vi.waitFor(() => expect(fetchSpy).toHaveBeenCalledOnce());
+
+      const body = JSON.parse(
+        String((fetchSpy.mock.calls[0]![1] as RequestInit).body),
+      );
+      expect(body.markdown.text).toBe(
+        '\\[review\\]\n\nSorry, something went wrong processing your message.',
+      );
+    } finally {
+      stderrSpy.mockRestore();
+      fetchSpy.mockRestore();
+    }
+  });
+
   it('forwards the inbound conversation title as the group name', () => {
     const channel = createChannel();
     const downstream = {

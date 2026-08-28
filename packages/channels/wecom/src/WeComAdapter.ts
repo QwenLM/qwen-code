@@ -326,7 +326,7 @@ export class WeComChannel extends ChannelBase {
     const { cleanedText, media } = parseOutboundMediaMarkers(text);
     const prefix =
       sourceLabel && (cleanedText.trim().length > 0 || media.length > 0)
-        ? `${escapeWeComMarkdown(sourceLabel)} `
+        ? `${escapeWeComMarkdown(sourceLabel)}\n`
         : undefined;
     const chunks = splitMarkdownChunks(cleanedText, prefix);
     if (chunks.length === 0 && media.length > 0 && prefix) {

@@ -29,6 +29,7 @@ const TELEGRAM_BOT_COMMANDS = [
   { command: 'cancel', description: 'Cancel the running request' },
   { command: 'status', description: 'Show session info' },
 ] as const;
+const TELEGRAM_MESSAGE_LIMIT = 4096;
 
 const TELEGRAM_START_MESSAGE = [
   'Qwen Code Telegram bot',
@@ -87,6 +88,26 @@ export class TelegramChannel extends ChannelBase {
     return `https://api.telegram.org/file/bot${this.bot.token}/${filePath}`;
   }
 
+  private reportInboundError(
+    envelope: Envelope,
+    error: unknown,
+    reply: () => Promise<unknown>,
+  ): void {
+    process.stderr.write(
+      `[Telegram:${this.name}] Error handling message: ${error}\n`,
+    );
+    const sourceLabel = this.getInboundErrorSourceLabel(envelope);
+    const delivery = sourceLabel
+      ? this.sendThreadMessage(
+          envelope.chatId,
+          envelope.threadId,
+          'Sorry, something went wrong processing your message.',
+          sourceLabel,
+        )
+      : reply();
+    delivery.catch(() => {});
+  }
+
   async connect(): Promise<void> {
     if (this.hasConnectedOnce) {
       this.bot = this.createBot();
@@ -106,12 +127,9 @@ export class TelegramChannel extends ChannelBase {
 
       // Don't await — long prompts would block the update loop
       this.handleInbound(envelope).catch((err) => {
-        process.stderr.write(
-          `[Telegram:${this.name}] Error handling message: ${err}\n`,
+        this.reportInboundError(envelope, err, () =>
+          ctx.reply('Sorry, something went wrong processing your message.'),
         );
-        ctx
-          .reply('Sorry, something went wrong processing your message.')
-          .catch(() => {});
       });
     });
 
@@ -143,12 +161,9 @@ export class TelegramChannel extends ChannelBase {
           );
         }
       }).catch((err) => {
-        process.stderr.write(
-          `[Telegram:${this.name}] Error handling message: ${err}\n`,
+        this.reportInboundError(envelope, err, () =>
+          ctx.reply('Sorry, something went wrong processing your message.'),
         );
-        ctx
-          .reply('Sorry, something went wrong processing your message.')
-          .catch(() => {});
       });
     });
 
@@ -199,12 +214,9 @@ export class TelegramChannel extends ChannelBase {
             `\n\n(User sent a file "${fileName}" but download failed)`;
         }
       }).catch((err) => {
-        process.stderr.write(
-          `[Telegram:${this.name}] Error handling message: ${err}\n`,
+        this.reportInboundError(envelope, err, () =>
+          ctx.reply('Sorry, something went wrong processing your message.'),
         );
-        ctx
-          .reply('Sorry, something went wrong processing your message.')
-          .catch(() => {});
       });
     });
 
@@ -252,12 +264,9 @@ export class TelegramChannel extends ChannelBase {
             `\n\n(User sent a voice message but download failed)`;
         }
       }).catch((err) => {
-        process.stderr.write(
-          `[Telegram:${this.name}] Error handling message: ${err}\n`,
+        this.reportInboundError(envelope, err, () =>
+          ctx.reply('Sorry, something went wrong processing your message.'),
         );
-        ctx
-          .reply('Sorry, something went wrong processing your message.')
-          .catch(() => {});
       });
     });
 
@@ -429,6 +438,22 @@ export class TelegramChannel extends ChannelBase {
         ? `${escapeTelegramHtml(sourceLabel)} `
         : undefined;
     const chunks = splitAttributedTelegramHtml(html, prefix);
+    if (
+      !chunks ||
+      chunks.some((chunk) => chunk.length > TELEGRAM_MESSAGE_LIMIT)
+    ) {
+      const plainChunks = splitAttributedTelegramText(text, sourceLabel);
+      for (const chunk of plainChunks) {
+        await this.bot.api.sendMessage(
+          chatId,
+          chunk,
+          threadId === undefined
+            ? undefined
+            : { message_thread_id: Number(threadId) },
+        );
+      }
+      return;
+    }
     const options =
       threadId === undefined
         ? { parse_mode: 'HTML' as const }
@@ -528,8 +553,11 @@ export class TelegramChannel extends ChannelBase {
 function splitAttributedTelegramHtml(
   html: string,
   prefix: string | undefined,
-): string[] {
+): string[] | undefined {
   const chunks = splitHtmlForTelegram(html);
+  if (chunks.some((chunk) => chunk.length > TELEGRAM_MESSAGE_LIMIT)) {
+    return undefined;
+  }
   if (!prefix) return chunks;
 
   const attributed: string[] = [];
@@ -538,17 +566,48 @@ function splitAttributedTelegramHtml(
     const chunk = pending.shift();
     if (chunk === undefined) break;
     const split = splitHtmlForTelegram(`${prefix}${chunk}`);
+    if (split.some((part) => part.length > TELEGRAM_MESSAGE_LIMIT)) {
+      return undefined;
+    }
     if (split.length === 1) {
-      if (split[0].length > 4096) {
-        throw new Error('Telegram attributed message exceeds 4096 characters.');
-      }
       attributed.push(split[0]);
       continue;
     }
+    const remainder = split.slice(1);
+    if (remainder.some((part) => part.length >= chunk.length)) {
+      return undefined;
+    }
     attributed.push(split[0]);
-    pending.unshift(...split.slice(1));
+    pending.unshift(...remainder);
   }
   return attributed;
+}
+
+function splitAttributedTelegramText(
+  text: string,
+  sourceLabel: string | undefined,
+): string[] {
+  if (text.length === 0) return [];
+  const prefix = sourceLabel ? `${sourceLabel} ` : '';
+  const contentLimit = TELEGRAM_MESSAGE_LIMIT - prefix.length;
+  if (contentLimit <= 0) {
+    throw new Error('Telegram source label exceeds the message limit.');
+  }
+
+  const chunks: string[] = [];
+  for (let offset = 0; offset < text.length; ) {
+    let end = Math.min(offset + contentLimit, text.length);
+    if (
+      end < text.length &&
+      /[\uD800-\uDBFF]/u.test(text[end - 1] ?? '') &&
+      /[\uDC00-\uDFFF]/u.test(text[end] ?? '')
+    ) {
+      end--;
+    }
+    chunks.push(`${prefix}${text.slice(offset, end)}`);
+    offset = end;
+  }
+  return chunks;
 }
 
 function escapeTelegramHtml(value: string): string {

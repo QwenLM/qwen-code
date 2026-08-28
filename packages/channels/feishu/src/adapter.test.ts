@@ -77,6 +77,10 @@ class TestableFeishuChannel extends FeishuChannel {
   pushLoop(target: SessionTarget, text: string): Promise<void> {
     return this.pushProactive(target, text);
   }
+
+  sendAttributed(chatId: string, text: string, sourceLabel: string) {
+    return this.sendThreadMessage(chatId, undefined, text, sourceLabel);
+  }
 }
 
 function createTestableChannel(
@@ -3965,6 +3969,30 @@ describe('FeishuChannel', () => {
       fetchSpy.mockRestore();
     });
 
+    it('neutralizes Feishu mention markup in attributed messages', async () => {
+      const channel = createTestableChannel();
+      (channel as unknown as Record<string, unknown>)['tokenCache'] = {
+        token: 'tenant-token',
+        expiresAt: Date.now() + 3600_000,
+      };
+      const fetchSpy = vi
+        .spyOn(global, 'fetch')
+        .mockResolvedValue(new Response('{}', { status: 200 }));
+
+      await channel.sendAttributed(
+        'oc_chat_id',
+        'done',
+        '[Alice <at id=ou_other></at> & review]',
+      );
+
+      const body = String(fetchSpy.mock.calls[0]?.[1]?.body);
+      expect(body).toContain('&lt;at');
+      expect(body).toContain('&lt;/at&gt;');
+      expect(body).toContain('&amp;');
+      expect(body).not.toContain('<at');
+      fetchSpy.mockRestore();
+    });
+
     it('maps typed chat and user deliveries to Feishu receive ID types', async () => {
       const channel = createTestableChannel();
       (channel as unknown as Record<string, unknown>)['tokenCache'] = {
@@ -5129,6 +5157,55 @@ describe('FeishuChannel', () => {
       const stoppedCard = updateCard.mock.calls[1]![1] as string;
       expect(stoppedCard).toContain('已停止生成');
       expect(stoppedCard).not.toContain('已完成');
+    });
+
+    it('keeps the sender mention before attribution in stopped-card fallback', async () => {
+      const channel = createChannel();
+      (channel as unknown as Record<string, unknown>)['tokenCache'] = {
+        token: 'tenant-token',
+        expiresAt: Date.now() + 3600_000,
+      };
+      const fetchSpy = vi
+        .spyOn(global, 'fetch')
+        .mockResolvedValue(new Response('{}', { status: 200 }));
+      const cardState = {
+        messageId: 'om_valid_message_id',
+        created: true,
+        creating: false,
+        stopped: true,
+        accumulatedText: 'partial answer',
+        atPrefix: '好的，<at id=ou_sender></at>',
+        sourceLabel: '[Alice · review_*]',
+        lastUpdateAt: Date.now(),
+      };
+      Object.assign(channel as unknown as Record<string, unknown>, {
+        updateCard: vi.fn().mockResolvedValue(false),
+        deleteCard: vi.fn().mockResolvedValue(true),
+      });
+
+      await getPrivateMethod<
+        (
+          inboundMsgId: string,
+          state: typeof cardState,
+          chatId: string,
+        ) => Promise<boolean>
+      >(channel, 'finalizeStoppedCardUpdate').call(
+        channel,
+        'inbound_1',
+        cardState,
+        'oc_chat_id',
+      );
+
+      expect(fetchSpy).toHaveBeenCalledOnce();
+      const body = JSON.parse(String(fetchSpy.mock.calls[0]?.[1]?.body));
+      const card = JSON.parse(body.content) as {
+        body: { elements: Array<{ content?: string }> };
+      };
+      const content = card.body.elements[0]?.content ?? '';
+      expect(content).toBe(
+        '好的，<at id=ou_sender></at>\n\n\\[Alice · review\\_\\*\\]\n\npartial answer\n\n---\n*已停止生成*',
+      );
+      expect(content.match(/<at id=ou_sender><\/at>/g)).toHaveLength(1);
     });
 
     it('keeps the card running when cancellation fails mid-finalization', async () => {

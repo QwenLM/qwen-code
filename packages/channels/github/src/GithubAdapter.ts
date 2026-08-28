@@ -1765,6 +1765,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
           posted = await this.postErrorComment(
             envelope.chatId,
             task.issueNumber,
+            this.getInboundErrorSourceLabel(envelope),
           );
         }
         this.transitionInboundTask(task.id, 'failed', {
@@ -2184,6 +2185,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
   private async postErrorComment(
     chatId: string,
     issueNumber: number,
+    sourceLabel?: string,
   ): Promise<boolean> {
     try {
       await this.githubApi(
@@ -2192,7 +2194,10 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
             owner: chatId.split('/')[0],
             repo: chatId.split('/')[1],
             issue_number: issueNumber,
-            body: '⚠️ Failed to process this request. Please re-mention the bot to retry.',
+            body: this.formatMarkdownAttributedText(
+              '⚠️ Failed to process this request. Please re-mention the bot to retry.',
+              sourceLabel,
+            ),
           }),
         `postErrorComment(${chatId}#${issueNumber})`,
       );

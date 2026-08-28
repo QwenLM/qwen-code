@@ -92,17 +92,25 @@ export class MockPluginChannel extends ChannelBase {
   ): void {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
 
+    let text = chunk;
+    if (
+      segment?.sourceLabel &&
+      !this.attributedSegments.has(segment.segmentId)
+    ) {
+      const attributed = this.formatAttributedText(chunk, segment.sourceLabel);
+      if (attributed !== chunk) {
+        text = attributed;
+        this.attributedSegments.add(segment.segmentId);
+      }
+    }
+
     const msg: ChunkMessage = {
       type: 'chunk',
       messageId:
         segment?.messageId ?? this.getResponseMessageId(sessionId) ?? 'unknown',
       chatId,
-      text:
-        segment?.sourceLabel && !this.attributedSegments.has(segment.segmentId)
-          ? this.formatAttributedText(chunk, segment.sourceLabel)
-          : chunk,
+      text,
     };
-    if (segment?.sourceLabel) this.attributedSegments.add(segment.segmentId);
     this.ws.send(JSON.stringify(msg));
   }
 
@@ -122,13 +130,19 @@ export class MockPluginChannel extends ChannelBase {
     sessionId: string,
     segment?: ChannelOutputSegmentContext,
   ): Promise<void> {
-    this.sendOutbound(
-      chatId,
-      segment?.sourceLabel
-        ? this.formatAttributedText(fullText, segment.sourceLabel)
-        : fullText,
-      segment?.messageId ?? this.getResponseMessageId(sessionId),
-    );
+    try {
+      this.sendOutbound(
+        chatId,
+        segment?.sourceLabel
+          ? this.formatAttributedText(fullText, segment.sourceLabel)
+          : fullText,
+        segment?.messageId ?? this.getResponseMessageId(sessionId),
+      );
+    } finally {
+      if (segment?.sourceLabel) {
+        this.attributedSegments.delete(segment.segmentId);
+      }
+    }
   }
 
   async sendMessage(chatId: string, text: string): Promise<void> {

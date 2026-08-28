@@ -35,6 +35,20 @@ describe('DingTalk markdown utilities', () => {
       });
     });
 
+    it('does not split surrogate pairs at an odd chunk boundary', () => {
+      const text = '😀'.repeat(2500);
+      const chunks = splitChunks(text, 3799);
+
+      expect(chunks.join('')).toBe(text);
+      chunks.forEach((chunk) => {
+        expect(chunk.length).toBeLessThanOrEqual(3799);
+        const last = chunk.charCodeAt(chunk.length - 1);
+        const first = chunk.charCodeAt(0);
+        expect(last < 0xd800 || last > 0xdbff).toBe(true);
+        expect(first < 0xdc00 || first > 0xdfff).toBe(true);
+      });
+    });
+
     it('preserves surrounding newlines when splitting a long line', () => {
       const text = ['before', 'b'.repeat(5000), 'after'].join('\n');
       const chunks = splitChunks(text);

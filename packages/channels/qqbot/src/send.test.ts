@@ -125,7 +125,7 @@ vi.mock('@qwen-code/channel-base', async () => {
           /([\\`*_[\]{}()#+.!|>~-])/gu,
           '\\$1',
         );
-        return label ? `${label} ${text}` : text;
+        return label ? `${label}\n${text}` : text;
       }
       protected formatAttributedText(
         text: string,
@@ -920,7 +920,7 @@ describe('sendMessage', () => {
       '[review_*]',
     );
     expect(mockSendQQMessage.mock.calls[0]?.[3]).toMatchObject({
-      markdown: { content: '\\[review\\_\\*\\] result' },
+      markdown: { content: '\\[review\\_\\*\\]\nresult' },
     });
   });
 

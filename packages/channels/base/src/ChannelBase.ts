@@ -426,6 +426,7 @@ export abstract class ChannelBase {
   private sessionQueues: Map<string, Promise<void>> = new Map();
   private queuedTurns: Map<string, number> = new Map();
   private namedTurnBindings = new WeakMap<Envelope, NamedTurnBinding>();
+  private readonly inboundErrorSourceLabels = new WeakMap<Envelope, string>();
   private readonly registerBridgeEvents: boolean;
   private readonly bridgeRecovery?: () => Promise<void> | undefined;
   /**
@@ -524,7 +525,7 @@ export abstract class ChannelBase {
     sessionId: string,
     text: string,
   ): Promise<void> {
-    const target = this.router.getTarget(sessionId);
+    let target = this.router.getTarget(sessionId);
     if (
       !target ||
       target.channelName !== this.name ||
@@ -536,13 +537,22 @@ export abstract class ChannelBase {
     if (this.namedSessions) {
       const presentation =
         await this.namedSessions.resolvePresentation(sessionId);
+      const currentTarget = this.router.getTarget(sessionId);
+      const currentPresentation = this.namedSessions.presentation(sessionId);
       if (
         !presentation ||
         presentation.status !== 'open' ||
-        !this.sameTaskOwner(target, presentation.target)
+        !currentTarget ||
+        !this.router.isSessionLive(sessionId) ||
+        !currentPresentation ||
+        currentPresentation.status !== 'open' ||
+        currentPresentation.taskName !== presentation.taskName ||
+        !this.sameTaskOwner(target, currentTarget) ||
+        !this.sameTaskOwner(currentTarget, currentPresentation.target)
       ) {
         throw new Error('Named background response ownership is unavailable.');
       }
+      target = currentTarget;
       sourceLabel = this.createSourceLabel(presentation, target);
     }
     if (this.supportsProactiveSend() && this.supportsProactiveTarget(target)) {
@@ -599,13 +609,37 @@ export abstract class ChannelBase {
     let sourceLabel: string | undefined;
     let taskName: string | undefined;
     if (this.namedSessions) {
-      const presentation = await this.namedSessions.resolvePresentation(
+      let presentation: NamedSessionTaskReference | undefined;
+      try {
+        presentation = await this.namedSessions.resolvePresentation(
+          event.sessionId,
+        );
+      } catch (err) {
+        try {
+          await this.bridge.respondToPermission?.(event.requestId, {
+            outcome: { outcome: 'cancelled' },
+          });
+        } catch (respondErr) {
+          process.stderr.write(
+            `[${this.name}] permission cancellation failed for request ${sanitizeLogText(event.requestId, 128)}: ${this.lifecycleError(respondErr)}\n`,
+          );
+        }
+        throw err;
+      }
+      const currentTarget = this.permissionTargetForEvent(event);
+      const currentPresentation = this.namedSessions.presentation(
         event.sessionId,
       );
       if (
         !presentation ||
         presentation.status !== 'open' ||
-        !this.sameTaskOwner(target, presentation.target)
+        !currentTarget ||
+        !this.router.isSessionLive(event.sessionId) ||
+        !currentPresentation ||
+        currentPresentation.status !== 'open' ||
+        currentPresentation.taskName !== presentation.taskName ||
+        !this.sameTaskOwner(target, currentTarget) ||
+        !this.sameTaskOwner(currentTarget, currentPresentation.target)
       ) {
         try {
           await this.bridge.respondToPermission?.(event.requestId, {
@@ -618,11 +652,22 @@ export abstract class ChannelBase {
         }
         return;
       }
-      sourceLabel = this.createSourceLabel(
-        presentation,
-        target,
-        this.activePrompts.get(event.sessionId),
-      );
+      const active = this.activePrompts.get(event.sessionId);
+      sourceLabel = active
+        ? active.sourceLabel
+        : this.createSourceLabel(presentation, target);
+      if (!sourceLabel) {
+        try {
+          await this.bridge.respondToPermission?.(event.requestId, {
+            outcome: { outcome: 'cancelled' },
+          });
+        } catch (respondErr) {
+          process.stderr.write(
+            `[${this.name}] permission cancellation failed for request ${sanitizeLogText(event.requestId, 128)}: ${this.lifecycleError(respondErr)}\n`,
+          );
+        }
+        return;
+      }
       taskName = presentation.taskName;
     }
     this.removePendingPermission(event.requestId);
@@ -2548,6 +2593,10 @@ export abstract class ChannelBase {
 
   protected getResponseSourceLabel(sessionId: string): string | undefined {
     return this.activePrompts.get(sessionId)?.sourceLabel;
+  }
+
+  protected getInboundErrorSourceLabel(envelope: Envelope): string | undefined {
+    return this.inboundErrorSourceLabels.get(envelope);
   }
 
   /**
@@ -5588,7 +5637,8 @@ export abstract class ChannelBase {
       /([\\`*_[\]{}()#+\-.!|>~])/gu,
       '\\$1',
     );
-    return this.formatAttributedText(text, escapedLabel);
+    if (!escapedLabel || text.trim().length === 0) return text;
+    return `${escapedLabel}\n${text}`;
   }
 
   private sameTaskOwner(a: SessionTarget, b: SessionTarget): boolean {
@@ -6487,6 +6537,9 @@ export abstract class ChannelBase {
         }
         if (promptState.cancelled) {
           return;
+        }
+        if (sourceLabel) {
+          this.inboundErrorSourceLabels.set(envelope, sourceLabel);
         }
         throw err;
       } finally {

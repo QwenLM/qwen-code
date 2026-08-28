@@ -4546,6 +4546,25 @@ describe('DwsChannel', () => {
     );
   });
 
+  it('keeps attributed todo Markdown fenced code line-leading', async () => {
+    const client = new FakeDwsClient();
+    const channel = await readyChannel(client);
+    (
+      channel as unknown as { todoTargets: Map<string, string> }
+    ).todoTargets.set('todo:task-1', 'task-1');
+
+    await channel.respond(
+      'todo:task-1',
+      '```ts\nconst x = 1;\n```',
+      '[review_*]',
+    );
+
+    expect(client.addTodoComment).toHaveBeenCalledWith(
+      'task-1',
+      '\\[review\\_\\*\\]\n```ts\nconst x = 1;\n```',
+    );
+  });
+
   // R1-7: the unknown-outcome swallow decides whether a finished task is
   // rerun and its final comment posted twice. Pin both directions: an
   // ambiguous CLI outcome resolves the turn, a definitive rejection

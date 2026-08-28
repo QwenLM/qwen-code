@@ -158,6 +158,9 @@ For a plain message, the label prefixes the first line:
 [feature-a] Result text
 ```
 
+For a Markdown message, the escaped label occupies its own first line so the
+body's line-leading block syntax, including fenced code, remains intact.
+
 Every independently sent block or platform chunk repeats the label. A card
 replacement contains one label because it replaces one visible object. Token
 updates within the same card are not individually prefixed.
@@ -535,8 +538,10 @@ classification remain unchanged.
 Telegram converts the source label to escaped HTML separately from the body and
 uses a local prefix-aware HTML splitter. The helper preserves the existing
 Telegram tag/code-block rules while accepting an effective content limit of
-`4096 - prefix.length`; every returned chunk is independently valid HTML,
-contains the prefix, and is at most 4096 characters.
+`4096 - prefix.length`; every returned HTML chunk is independently valid,
+contains the prefix, and is at most 4096 characters. If the dependency leaves
+one indivisible block above that effective limit, the sender falls back to
+bounded plain-text chunks and repeats the label on each chunk.
 
 `sendThreadMessage`, `sendResponseMessage`, and `pushProactive` delegate to this
 helper. This is required because direct shell/permission text and Telegram

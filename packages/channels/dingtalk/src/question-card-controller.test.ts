@@ -219,6 +219,22 @@ describe('QuestionCardController', () => {
     });
   });
 
+  it('passes the source label separately when card delivery falls back', async () => {
+    const { client, controller, sendFallback } = createHarness();
+    vi.mocked(client.createAndDeliver).mockRejectedValue(
+      new Error('template unavailable'),
+    );
+    const { context } = createContext('request-1', '[review_*]');
+
+    await controller.present(context, { chatId: 'cid-1', isGroup: true });
+
+    expect(sendFallback).toHaveBeenCalledWith(
+      'cid-1',
+      expect.not.stringContaining('[review'),
+      '[review_*]',
+    );
+  });
+
   it('does not cancel again when delivery fails after external settlement', async () => {
     const delivery = deferred<void>();
     const { client, controller, sendFallback } = createHarness();

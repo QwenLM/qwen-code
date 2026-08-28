@@ -362,6 +362,23 @@ export class GitlabChannel extends PollingChannelBase<GitlabCursor> {
     }
     try {
       await this.handleInbound(envelope);
+    } catch (err) {
+      process.stderr.write(
+        `[Channel:${this.name}] error processing todo ${todo.id}: ${err}\n`,
+      );
+      try {
+        await this.createNote(
+          chatId,
+          targetType,
+          target.iid,
+          this.formatMarkdownAttributedText(
+            '⚠️ Failed to process this request. Please re-mention the bot to retry.',
+            this.getInboundErrorSourceLabel(envelope),
+          ),
+        );
+      } catch {
+        // best-effort error comment
+      }
     } finally {
       this.reactions.delete(messageId);
     }

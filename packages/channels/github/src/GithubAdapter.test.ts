@@ -247,6 +247,7 @@ class TestableGithubChannel extends GithubChannel {
   sourceMessageId: string | undefined;
   sourceSenderId: string | undefined;
   sourceMetadata: string | undefined;
+  inboundErrorSourceLabel: string | undefined;
   handleInboundHook: ((envelope: Envelope) => void | Promise<void>) | undefined;
 
   protected getResponseMessageId(_sessionId: string): string | undefined {
@@ -259,6 +260,12 @@ class TestableGithubChannel extends GithubChannel {
 
   protected getResponseMetadata(_sessionId: string): string | undefined {
     return this.sourceMetadata;
+  }
+
+  protected getInboundErrorSourceLabel(
+    _envelope: Envelope,
+  ): string | undefined {
+    return this.inboundErrorSourceLabel;
   }
 
   override async handleInbound(envelope: Envelope): Promise<void> {
@@ -2518,7 +2525,7 @@ describe('GithubChannel', () => {
         owner: 'owner',
         repo: 'repo',
         issue_number: 42,
-        body: '\\[review\\_\\*\\] Reviewed the implementation.',
+        body: '\\[review\\_\\*\\]\nReviewed the implementation.',
       });
       const audits = readFileSync(auditPath(), 'utf-8')
         .trim()
@@ -2905,7 +2912,7 @@ describe('GithubChannel', () => {
         owner: 'owner',
         repo: 'repo',
         issue_number: 42,
-        body: '\\[review\\_\\*\\] Final reply',
+        body: '\\[review\\_\\*\\]\nFinal reply',
       });
     });
 
@@ -3590,8 +3597,9 @@ describe('GithubChannel', () => {
   });
 
   describe('error handling', () => {
-    it('posts error comment when handleInbound fails', async () => {
+    it('attributes the error comment when a named inbound turn fails', async () => {
       channel.handleInboundError = new Error('agent down');
+      channel.inboundErrorSourceLabel = '[review_*]';
       await initWithoutLoop();
       mockOctokit.paginate
         .mockResolvedValueOnce([makeNotification()])
@@ -3600,7 +3608,7 @@ describe('GithubChannel', () => {
 
       expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledWith(
         expect.objectContaining({
-          body: expect.stringContaining('Failed to process'),
+          body: '\\[review\\_\\*\\]\n⚠️ Failed to process this request. Please re-mention the bot to retry.',
         }),
       );
     });
