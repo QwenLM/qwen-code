@@ -592,10 +592,14 @@ export interface BridgeOptions {
    * `0` (the default) preserves the original behavior: close fires
    * immediately when the session is idle at prompt-settle time. Library
    * consumers embedding the bridge directly are unaffected unless they opt
-   * in by setting this value. The `qwen serve` CLI sets 60_000.
+   * in by setting this value. For `qwen serve`, pass
+   * `--session-prompt-settled-close-grace-ms 60000` (or similar) to enable
+   * protection for poll-based clients.
    *
-   * Does not affect `last_client_detached`, `idle_timeout`, `killSession`,
-   * or any explicit close path — only the `prompt_settled` auto-close.
+   * The grace hold lives in `entryIsAutoCloseCandidate`, which gates every
+   * automatic close path — including `last_client_detached` and
+   * `idle_timeout` — so during the window none of those triggers close the
+   * session either. Only explicit close, kill, and shutdown bypass the hold.
    */
   sessionPromptSettledCloseGraceMs?: number;
   /**

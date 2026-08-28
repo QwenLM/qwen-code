@@ -3079,6 +3079,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
    * behavior).
    */
   function schedulePromptSettledClose(entry: SessionEntry): void {
+    if (entry.promptSettledCloseTimer !== undefined) {
+      clearTimeout(entry.promptSettledCloseTimer);
+      entry.promptSettledCloseTimer = undefined;
+    }
     entry.promptSettledAt = Date.now();
     if (sessionPromptSettledCloseGraceMs <= 0) {
       entry.promptSettledAt = null;
@@ -3095,9 +3099,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
   }
 
   /**
-   * DAEMON-005: cancel any pending prompt-settled deferred close.
-   * Called when a subscriber reconnects (clearing the grace hold) or when
-   * the session is explicitly closed / killed (avoiding a stale fire).
+   * DAEMON-005: cancel any pending prompt-settled deferred close and clear the
+   * stamp. Called when the session is explicitly closed or killed so the stale
+   * timer never fires.
    */
   function clearPromptSettledClose(entry: SessionEntry): void {
     if (entry.promptSettledCloseTimer !== undefined) {
@@ -3105,6 +3109,50 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       entry.promptSettledCloseTimer = undefined;
     }
     entry.promptSettledAt = null;
+  }
+
+  /**
+   * DAEMON-005: cancel the pending timer but keep `promptSettledAt` set.
+   *
+   * Called from `subscribeEvents` when a poll-based client reconnects. Stopping
+   * the timer prevents a double-fire when the client is actively draining, but
+   * leaving the stamp in place means `entryIsAutoCloseCandidate` continues to
+   * hold the session open through the subscriber's churn (subscribe → drain →
+   * detach). `rearmPromptSettledClose` reschedules the close for the remaining
+   * grace time once the last subscriber detaches.
+   */
+  function cancelPromptSettledTimer(entry: SessionEntry): void {
+    if (entry.promptSettledCloseTimer !== undefined) {
+      clearTimeout(entry.promptSettledCloseTimer);
+      entry.promptSettledCloseTimer = undefined;
+    }
+  }
+
+  /**
+   * DAEMON-005: re-arm the grace timer after a subscriber detaches, using the
+   * time remaining from the original `promptSettledAt` stamp.
+   *
+   * Called from `detachClient` when `promptSettledAt` is still set but no timer
+   * is running — i.e. after a poll-based client subscribed (cancelling the
+   * timer via `cancelPromptSettledTimer`) and then disconnected. If the full
+   * grace window has already elapsed the session is closed immediately.
+   */
+  function rearmPromptSettledClose(entry: SessionEntry): void {
+    if (entry.promptSettledAt === null) return;
+    if (entry.promptSettledCloseTimer !== undefined) return;
+    const elapsed = Date.now() - entry.promptSettledAt;
+    const remaining = sessionPromptSettledCloseGraceMs - elapsed;
+    if (remaining <= 0) {
+      entry.promptSettledAt = null;
+      void maybeCloseIdleSession(entry, 'prompt_settled');
+      return;
+    }
+    entry.promptSettledCloseTimer = setTimeout(() => {
+      entry.promptSettledCloseTimer = undefined;
+      entry.promptSettledAt = null;
+      void maybeCloseIdleSession(entry, 'prompt_settled');
+    }, remaining);
+    entry.promptSettledCloseTimer.unref?.();
   }
 
   /**
@@ -9551,9 +9599,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     subscribeEvents(sessionId, subOpts) {
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
-      // DAEMON-005: a reconnecting poll-based client cancels the deferred
-      // prompt-settled close — the session should stay alive.
-      clearPromptSettledClose(entry);
+      // DAEMON-005: a reconnecting poll-based client stops the deferred timer
+      // but keeps the grace-hold stamp alive so the session survives the
+      // subscribe → drain → detach cycle. `detachClient` re-arms the timer
+      // for the remaining window once the last subscriber drops.
+      cancelPromptSettledTimer(entry);
       const raw = entry.events.subscribe(subOpts);
       if (!subOpts?.snapshot) return raw;
 
@@ -13166,6 +13216,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       // path settles last. The JSONL transcript on disk survives either way,
       // so session/load can restore it later.
       await maybeCloseIdleSession(entry, 'last_client_detached');
+      // DAEMON-005: if a poll-based client subscribed and then dropped (timer
+      // was cancelled via cancelPromptSettledTimer but stamp is still set),
+      // re-arm the grace timer for the remaining window so the session closes
+      // on schedule rather than waiting for the idle reaper.
+      rearmPromptSettledClose(entry);
     },
 
     killAllSync() {
