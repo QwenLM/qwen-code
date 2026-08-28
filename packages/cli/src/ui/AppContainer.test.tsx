@@ -928,9 +928,14 @@ describe('AppContainer State Management', () => {
         createdAt: 1,
         lastFiredAt: null,
       };
+      // Seed a mix of active and inactive durable tasks so the notice
+      // count pins the call site's countActiveScheduledTasks filter:
+      // announcing raw durableTasks.length (4) would fail this test.
       readCronTasksMock.mockResolvedValue([
         durableTask,
         { ...durableTask, id: 'second-task' },
+        { ...durableTask, id: 'disabled-task', enabled: false },
+        { ...durableTask, id: 'invalid-cron', cron: 'not a cron expression' },
       ]);
 
       render(
