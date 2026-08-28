@@ -130,7 +130,7 @@ export async function generateToolUseSummary(
 
     const userPrompt = `${contextPrefix}Tools completed:\n\n${toolSummaries}\n\nLabel:`;
 
-    if (!config.getGeminiClient()) {
+    if (!config.getLlmClient()) {
       debugLogger.debug('No gemini client available — skipping');
       return null;
     }

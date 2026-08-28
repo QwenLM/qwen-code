@@ -5,8 +5,8 @@
  */
 
 import { createHash } from 'node:crypto';
-import type { ServerGeminiStreamEvent } from '../core/turn.js';
-import { GeminiEventType } from '../core/turn.js';
+import type { ServerLlmStreamEvent } from '../core/turn.js';
+import { LlmEventType } from '../core/turn.js';
 import type { ThoughtSummary } from '../utils/thoughtUtils.js';
 import {
   logLoopDetected,
@@ -304,7 +304,7 @@ export class LoopDetectionService {
    * @param event - The stream event to process
    * @returns true if any tier detects a loop, false otherwise
    */
-  addAndCheck(event: ServerGeminiStreamEvent): boolean {
+  addAndCheck(event: ServerLlmStreamEvent): boolean {
     if (this.checkAlwaysOnSafeties(event)) {
       return true;
     }
@@ -312,13 +312,13 @@ export class LoopDetectionService {
     return this.addAndCheckHeuristicLoops(event);
   }
 
-  addAndCheckHeuristicLoops(event: ServerGeminiStreamEvent): boolean {
+  addAndCheckHeuristicLoops(event: ServerLlmStreamEvent): boolean {
     if (this.loopDetected || this.disabledForSession) {
       return this.loopDetected;
     }
 
     switch (event.type) {
-      case GeminiEventType.ToolCallRequest: {
+      case LlmEventType.ToolCallRequest: {
         // content chanting only happens in one single stream, reset if there
         // is a tool call in between
         this.resetContentTracking();
@@ -338,7 +338,7 @@ export class LoopDetectionService {
           globalDup || alternating || readFileLoop || actionStagnation;
         break;
       }
-      case GeminiEventType.Retry: {
+      case LlmEventType.Retry: {
         // A retry replays the failed attempt's tool calls (Turn clears
         // pendingToolCalls on retry), so drop the heuristic duplicate counters
         // to avoid firing on a duplicated replay — e.g. 3 identical calls +
@@ -365,7 +365,7 @@ export class LoopDetectionService {
         }
         break;
       }
-      case GeminiEventType.ModelFallback: {
+      case LlmEventType.ModelFallback: {
         // The fallback model restarts the attempt from scratch: Turn clears
         // pending tool calls and stream consumers discard the failed model's
         // buffer, so the failed model's streamed content/thought text and
@@ -378,11 +378,11 @@ export class LoopDetectionService {
         this.thoughtHistory = [];
         break;
       }
-      case GeminiEventType.Content: {
+      case LlmEventType.Content: {
         this.loopDetected = this.checkContentLoop(event.value);
         break;
       }
-      case GeminiEventType.Thought: {
+      case LlmEventType.Thought: {
         this.trackThought(event.value);
         this.loopDetected = this.checkRepetitiveThoughts();
         if (!this.loopDetected) {
@@ -419,7 +419,7 @@ export class LoopDetectionService {
    * explicit in-session disable; the cap is additionally tunable via the
    * `model.maxToolCallsPerTurn` setting.
    */
-  checkAlwaysOnSafeties(event: ServerGeminiStreamEvent): boolean {
+  checkAlwaysOnSafeties(event: ServerLlmStreamEvent): boolean {
     if (this.loopDetected) {
       return true;
     }
@@ -428,7 +428,7 @@ export class LoopDetectionService {
     // count as the rollback floor. The per-turn total accumulates across
     // ToolResult continuations, so the floor must track the last committed
     // round-trip rather than resetting to zero.
-    if (event.type === GeminiEventType.Finished) {
+    if (event.type === LlmEventType.Finished) {
       this.turnToolCallTotalCommitted = this.turnToolCallTotal;
       return false;
     }
@@ -441,7 +441,7 @@ export class LoopDetectionService {
     // cleared (consistent with how the heuristic path clears
     // globalToolCallCounts on retry): the replayed calls re-populate it, and a
     // stuck pattern simply re-accumulates toward the threshold.
-    if (event.type === GeminiEventType.Retry) {
+    if (event.type === LlmEventType.Retry) {
       this.turnToolCallTotal = this.turnToolCallTotalCommitted;
       this.resetToolCallCount();
       this.capKeyCounts.clear();
@@ -449,7 +449,7 @@ export class LoopDetectionService {
       return false;
     }
 
-    if (event.type !== GeminiEventType.ToolCallRequest) {
+    if (event.type !== LlmEventType.ToolCallRequest) {
       return false;
     }
 
