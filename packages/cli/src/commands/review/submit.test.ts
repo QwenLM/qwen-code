@@ -3110,6 +3110,49 @@ describe('payload consistency — refuse before GitHub sees it', () => {
     expect(out.floorEnforced).toBe(2);
   });
 
+  it('names a moved Critical by its axes — the move an operator would not expect from a floor (#10291)', () => {
+    const review = file('floor-critical-axes.json', {
+      ...REVIEW,
+      state: { ...REVIEW.state, severityFloor: 'critical' },
+      comments: [
+        {
+          path: 'a.ts',
+          line: 3,
+          body: '**[Critical]** [certifies-falsely] [new-surface] a decided stop over unread bytes',
+        },
+        {
+          path: 'b.ts',
+          line: 7,
+          body: '**[Critical]** [fails-closed] [new-surface] sparse checkout wedges the round',
+        },
+        { path: 'c.ts', line: 9, body: '**[Suggestion]** tidy this' },
+      ],
+    });
+
+    runSubmit(authorized({ review }));
+    expect(ghMock).toHaveBeenCalledOnce();
+    const sent = JSON.parse(ghMock.mock.calls[0][0] as string);
+    // The wrong-result Critical posts; the fails-closed, new-surface one
+    // and the Suggestion move into the body's deferral list.
+    expect(sent.comments.map((c: { path: string }) => c.path)).toEqual([
+      'a.ts',
+    ]);
+    expect(sent.body).toContain(
+      'b.ts:7 — [review] Critical [fails-closed] [new-surface] sparse checkout wedges the round',
+    );
+    expect(
+      writeStderrSpy.mock.calls.some((c) =>
+        String(c[0]).includes(
+          'Floor enforcement: 1 Suggestion comment(s) and 1 fails-closed, new-surface Critical comment(s) drafted past',
+        ),
+      ),
+    ).toBe(true);
+    const out = JSON.parse(writeStdoutSpy.mock.calls.at(-1)![0] as string) as {
+      floorEnforced: number;
+    };
+    expect(out.floorEnforced).toBe(2);
+  });
+
   it('rejects a line that is not a positive whole number', () => {
     // Every one of these 422s, and a 422 discards every blocker in the review.
     for (const [i, line] of [-1, 0, 2.5, NaN, Infinity].entries()) {
