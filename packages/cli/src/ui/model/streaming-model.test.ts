@@ -150,6 +150,27 @@ describe('streamingModel', () => {
         streaming: false,
       });
     });
+
+    it('resets the existing item when a tool-start is replayed', () => {
+      // A retry/reconnect can re-emit a start whose id already exists; a
+      // duplicate item would strand later events (first id hit) and leave
+      // the ghost at done:false forever.
+      const state = reduceAll([
+        { type: 'tool-start', id: 't1', tool: 'Bash', title: 'ls' },
+        { type: 'tool-output', id: 't1', delta: 'stale' },
+        { type: 'tool-start', id: 't1', tool: 'Bash', title: 'ls -la' },
+        { type: 'tool-output', id: 't1', delta: 'fresh' },
+        { type: 'tool-end', id: 't1', success: true, summary: 'ok' },
+      ]);
+      expect(
+        selectItems(state).filter((item) => item.kind === 'tool'),
+      ).toHaveLength(1);
+      expect(selectItemById(state, 't1')).toMatchObject({
+        title: 'ls -la',
+        output: 'fresh',
+        done: true,
+      });
+    });
   });
 
   describe('user events', () => {
@@ -221,6 +242,24 @@ describe('streamingModel', () => {
         { type: 'task-end', id: 'ghost', tools: 1, seconds: 1, tokens: '1' },
       ]);
       expect(after.items).toEqual(before.items);
+    });
+
+    it('resets the existing item when a task-start is replayed', () => {
+      const state = reduceAll([
+        { type: 'task-start', id: 's1', name: 'n', description: 'd' },
+        { type: 'task-progress', id: 's1', line: 'stale' },
+        { type: 'task-start', id: 's1', name: 'n2', description: 'd2' },
+        { type: 'task-progress', id: 's1', line: 'fresh' },
+        { type: 'task-end', id: 's1', tools: 1, seconds: 1, tokens: '1' },
+      ]);
+      expect(
+        selectItems(state).filter((item) => item.kind === 'task'),
+      ).toHaveLength(1);
+      expect(selectItemById(state, 's1')).toMatchObject({
+        name: 'n2',
+        progress: ['fresh'],
+        done: true,
+      });
     });
 
     it('closes the task with formatted stats', () => {
@@ -349,6 +388,16 @@ describe('streamingModel', () => {
         { type: 'task-start', id: 's1', name: 'n', description: 'd' },
         { type: 'task-end', id: 's1', tools: 1, seconds: 1, tokens: '1' },
       ],
+      // closeTrailingAssistant rewrites the streaming assistant when a
+      // start/user/done event lands — pin the rewrite through a captured
+      // snapshot that must survive the fold.
+      [
+        { type: 'text', delta: 'a' },
+        { type: 'tool-start', id: 't1', tool: 'Bash', title: 'ls' },
+      ],
+      [{ type: 'text', delta: 'a' }, { type: 'done' }],
+      // thinking-end rewrites the trailing thinking item to done.
+      [{ type: 'thinking', delta: 'a' }, { type: 'thinking-end' }],
     ];
     for (const events of scenarios) {
       let state = initialStreamingModelState;

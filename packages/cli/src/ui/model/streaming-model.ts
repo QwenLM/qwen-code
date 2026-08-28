@@ -166,14 +166,23 @@ export function reduceStreamEvent(
     }
     case 'tool-start': {
       closeTrailingAssistant();
-      items.push({
+      const fresh: HistoryItem = {
         kind: 'tool',
         id: event.id,
         tool: event.tool,
         title: event.title,
         output: '',
         done: false,
-      });
+      };
+      // A retry/reconnect can replay a start for an id that already exists;
+      // reset that item instead of pushing a duplicate that later events
+      // (which match the first id hit) would leave stranded at done:false.
+      const index = findItemIndex(items, 'tool', event.id);
+      if (index >= 0) {
+        items[index] = fresh;
+      } else {
+        items.push(fresh);
+      }
       break;
     }
     case 'tool-output': {
@@ -199,14 +208,21 @@ export function reduceStreamEvent(
     }
     case 'task-start': {
       closeTrailingAssistant();
-      items.push({
+      const fresh: HistoryItem = {
         kind: 'task',
         id: event.id,
         name: event.name,
         description: event.description,
         progress: [],
         done: false,
-      });
+      };
+      // Replayed-start reset; see the tool-start case for the reasoning.
+      const index = findItemIndex(items, 'task', event.id);
+      if (index >= 0) {
+        items[index] = fresh;
+      } else {
+        items.push(fresh);
+      }
       break;
     }
     case 'task-progress': {
