@@ -373,6 +373,40 @@ describe('MediaMemoryService.commitPolicySucceeded', () => {
     expect(entry.artifactRef?.managedId).toBe(`sha256/${SHA_OUT}`);
   });
 
+  it.each([
+    ['image', 'caption', ['visual']],
+    ['audio', 'caption', ['acoustic']],
+    ['video', 'summary', ['visual', 'acoustic']],
+  ] as const)(
+    'derives %s %s text channels from the source modality',
+    async (mediaType, role, expectedChannels) => {
+      const source = (await service.recordFileRecognized(
+        recognizedEvent({ mediaType }),
+      ))!;
+      const commit = await service.commitPolicySucceeded(
+        succeededInput(source, {
+          outputs: [
+            {
+              kind: 'text',
+              objectPath: `/store/objects/${SHA_TEXT}.txt`,
+              sha256: SHA_TEXT,
+              mimeType: 'text/plain',
+              text: `${mediaType} ${role}`,
+              sizeBytes: 20,
+              role,
+            },
+          ],
+        }),
+      );
+      const snapshot = await readSnapshot();
+      const entry =
+        snapshot.entries[
+          snapshot.executions[commit!.executionId].outputRefs[0]
+        ];
+      expect(entry.channels).toEqual(expectedChannels);
+    },
+  );
+
   it('records every output of a multi-output execution under one execution', async () => {
     // Real policy runs deliver more than one artifact (extract the audio
     // track AND its transcript; downscale AND a poster frame). Recording

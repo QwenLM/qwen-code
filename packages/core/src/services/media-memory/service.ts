@@ -170,7 +170,7 @@ export interface PolicySucceededCommit {
   created: boolean;
 }
 
-/** Conservative v1 channel derivation by modality/role. */
+/** Conservative v1 channel derivation by output or source modality/role. */
 function channelsFor(
   mediaType: OmniModality | undefined,
   role: string | undefined,
@@ -808,7 +808,11 @@ function commitExecution(
         : {}),
       scope: {},
       channels: channelsFor(
-        output.kind === 'media' ? output.mediaType : undefined,
+        output.kind === 'media'
+          ? output.mediaType
+          : output.role === 'caption' || output.role === 'summary'
+            ? sourceVersion?.mediaType
+            : undefined,
         output.role,
       ),
       coverage: coverageFor(output.role),

@@ -77,10 +77,8 @@ describe('OmniClipVideoTool', () => {
     expect(tool.name).toBe(OMNI_CLIP_VIDEO_TOOL_NAME);
     expect(tool.mediaPolicyDescriptor).toEqual({
       kind: 'media_policy',
-      // Bumped with the `omniRole: 'clip'` annotation so pre-role cache
-      // entries and recorded executions cannot converge onto this
-      // fingerprint and keep reporting an excerpt as complete coverage.
-      version: '2',
+      // Bumped because clips now retain their source audio.
+      version: '3',
       inputMediaTypes: ['video'],
       outputs: [
         {
@@ -92,6 +90,7 @@ describe('OmniClipVideoTool', () => {
         { kind: 'text', role: 'disclosure', required: true },
       ],
       settingsSchema: expect.objectContaining({ type: 'object' }),
+      operatorOnlyParams: ['softClipBudget'],
     });
     expect(CLIP_VIDEO_DEFAULTS).toEqual({
       crf: 23,
@@ -126,7 +125,10 @@ describe('OmniClipVideoTool', () => {
         '23',
         '-preset',
         'veryfast',
-        '-an',
+        '-c:a',
+        'aac',
+        '-b:a',
+        '128k',
         '-movflags',
         '+faststart',
         outputPath,
@@ -147,7 +149,7 @@ describe('OmniClipVideoTool', () => {
         sizeBytes: OUTPUT_SIZE,
         metadata: {
           omniDisclosure:
-            '原 63s → 片段 [10s–25s] 15s，仅画面（无音轨，对白见完整转写），片段外内容全部丢弃',
+            '原 63s → 片段 [10s–25s] 15s，保留画面与原有音轨，片段外内容全部丢弃',
           omniRole: 'clip',
         },
       },
@@ -160,7 +162,7 @@ describe('OmniClipVideoTool', () => {
     const args = mocks.runFfmpeg.mock.calls[0][0] as string[];
     expect(args).not.toContain('-t');
     expect(result.artifacts?.[0]?.metadata?.['omniDisclosure']).toBe(
-      '原 63s → 片段 [10s–63s] 53s，仅画面（无音轨，对白见完整转写），片段外内容全部丢弃',
+      '原 63s → 片段 [10s–63s] 53s，保留画面与原有音轨，片段外内容全部丢弃',
     );
   });
 
@@ -168,7 +170,7 @@ describe('OmniClipVideoTool', () => {
     probe({ durationMs: 63_000 });
     const { result } = await run({ startSec: 50, durationSec: 100 });
     expect(result.artifacts?.[0]?.metadata?.['omniDisclosure']).toBe(
-      '原 63s → 片段 [50s–63s] 13s，仅画面（无音轨，对白见完整转写），片段外内容全部丢弃',
+      '原 63s → 片段 [50s–63s] 13s，保留画面与原有音轨，片段外内容全部丢弃',
     );
   });
 
@@ -176,7 +178,7 @@ describe('OmniClipVideoTool', () => {
     probe({});
     const { result } = await run({ startSec: 10, durationSec: 15 });
     expect(result.artifacts?.[0]?.metadata?.['omniDisclosure']).toBe(
-      '原 未知时长 → 片段 [10s–25s] 15s，仅画面（无音轨，对白见完整转写），片段外内容全部丢弃',
+      '原 未知时长 → 片段 [10s–25s] 15s，保留画面与原有音轨，片段外内容全部丢弃',
     );
   });
 
@@ -285,6 +287,16 @@ describe('OmniClipVideoTool', () => {
     probe({ durationMs: 630_000 });
     const { result } = await run({ startSec: 300, durationSec: 15 });
     expect(String(result.llmContent)).not.toContain('已对该视频切了');
+  });
+
+  it('honors an operator-provided soft clip budget', async () => {
+    probe({ durationMs: 630_000 });
+    const { result } = await run({
+      startSec: 300,
+      durationSec: 15,
+      softClipBudget: 1,
+    });
+    expect(String(result.llmContent)).toContain('已对该视频切了 1 段');
   });
 
   it('rejects a probed full-span request without transcoding', async () => {

@@ -382,6 +382,22 @@ describe('OmniExtractKeyframesTool', () => {
       expect(args.join(' ')).toContain("'min(512,iw)':'min(512,ih)'");
     });
 
+    it('honors a zero scene threshold from tool settings', async () => {
+      probe({});
+      mocks.runFfmpeg.mockImplementation(framesRun(1, [0]));
+      const configured = new OmniExtractKeyframesTool({
+        getOmniPolicyToolsSettings: () => ({
+          [OMNI_EXTRACT_KEYFRAMES_TOOL_NAME]: {
+            settings: { maxFrames: 1, sceneThreshold: 0 },
+          },
+        }),
+      });
+      const invocation = configured.build({ inputPath, outputDir });
+      await invocation.execute(new AbortController().signal);
+      const args = mocks.runFfmpeg.mock.calls[0][0] as string[];
+      expect(args.join(' ')).toContain('gt(scene,0)');
+    });
+
     it('threads policyTools.<tool>.runtime.timeoutMs into runFfmpeg', async () => {
       probe({ durationMs: 63_000 });
       mocks.runFfmpeg.mockImplementation(framesRun(1, [0]));

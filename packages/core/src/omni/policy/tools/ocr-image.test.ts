@@ -15,7 +15,15 @@ import {
   OmniOcrImageTool,
 } from './ocr-image.js';
 
-/** Minimal PNG header so recognition sniffs image/png. */
+const mocks = vi.hoisted(() => ({
+  probeMediaMetadata: vi.fn(),
+}));
+
+vi.mock('../../ffmpeg.js', () => ({
+  probeMediaMetadata: mocks.probeMediaMetadata,
+}));
+
+/** PNG signature so recognition sniffs image/png. */
 const PNG_BYTES = Buffer.concat([
   Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
   Buffer.alloc(1024),
@@ -54,12 +62,18 @@ describe('OmniOcrImageTool', () => {
     return invocation.execute(new AbortController().signal);
   };
 
-  const lastRequestBody = (): Record<string, never> =>
+  const lastRequestBody = (): {
+    messages: Array<{
+      content: Array<{ type?: string; text?: string }>;
+    }>;
+  } =>
     JSON.parse(
       (fetchMock.mock.calls[0] as [string, RequestInit])[1].body as string,
     );
 
   beforeEach(async () => {
+    vi.clearAllMocks();
+    mocks.probeMediaMetadata.mockResolvedValue({ width: 1, height: 1 });
     fetchMock = vi.fn();
     vi.stubGlobal('fetch', fetchMock);
     fetchReturnsSse('发票编号：INV-2026-0817');
@@ -108,10 +122,7 @@ describe('OmniOcrImageTool', () => {
     const result = await run();
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
-    const body = lastRequestBody();
-    const content = (
-      body as { messages: Array<{ content: Array<Record<string, unknown>> }> }
-    ).messages[0].content;
+    const content = lastRequestBody().messages[0].content;
     expect(content[0].type).toBe('image_url');
     expect(content[1].type).toBe('text');
     expect(content[1].text).toContain('OCR');
@@ -133,17 +144,13 @@ describe('OmniOcrImageTool', () => {
 
   it('appends the language hint to the default instruction', async () => {
     await run({ language: 'en' });
-    const body = lastRequestBody() as {
-      messages: Array<{ content: Array<{ text?: string }> }>;
-    };
+    const body = lastRequestBody();
     expect(body.messages[0].content[1].text).toContain('文字语言：en');
   });
 
   it('honors a custom OCR instruction verbatim', async () => {
     await run({ prompt: '只提取表格内容。' });
-    const body = lastRequestBody() as {
-      messages: Array<{ content: Array<{ text?: string }> }>;
-    };
+    const body = lastRequestBody();
     expect(body.messages[0].content[1].text).toBe('只提取表格内容。');
   });
 

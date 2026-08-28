@@ -15,7 +15,15 @@ import {
   OmniCaptionImageTool,
 } from './caption-image.js';
 
-/** Minimal PNG header so recognition sniffs image/png. */
+const mocks = vi.hoisted(() => ({
+  probeMediaMetadata: vi.fn(),
+}));
+
+vi.mock('../../ffmpeg.js', () => ({
+  probeMediaMetadata: mocks.probeMediaMetadata,
+}));
+
+/** PNG signature so recognition sniffs image/png. */
 const PNG_BYTES = Buffer.concat([
   Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
   Buffer.alloc(1024),
@@ -55,6 +63,8 @@ describe('OmniCaptionImageTool', () => {
   };
 
   beforeEach(async () => {
+    vi.clearAllMocks();
+    mocks.probeMediaMetadata.mockResolvedValue({ width: 1, height: 1 });
     fetchMock = vi.fn();
     vi.stubGlobal('fetch', fetchMock);
     fetchReturnsSse('一只橘猫趴在沙发上。');
