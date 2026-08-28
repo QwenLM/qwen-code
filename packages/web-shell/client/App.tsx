@@ -3157,9 +3157,8 @@ export function App({
     if (createSideTask()) return;
     pushToast('error', t('sideTask.createFailed'));
   }, [createSideTask, pushToast, t]);
-  const nextTerminalTabIdRef = useRef(0);
   const openTerminalTab = useCallback(() => {
-    const id = `terminal:${Date.now()}:${++nextTerminalTabIdRef.current}`;
+    const id = `terminal:${crypto.randomUUID()}`;
     const count = artifactPanelTabsRef.current.filter(
       (tab) => tab.kind === 'terminal',
     ).length;

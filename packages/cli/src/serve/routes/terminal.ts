@@ -247,6 +247,21 @@ export function createTerminalWsHandler(
           registry.release(terminalId, workspace.workspaceCwd);
         ws.close(4000, 'Terminal exited');
       };
+      const ensureWorkspaceAvailable = () => {
+        if (
+          resolveWorkspace(workspaceSelector)?.workspaceCwd ===
+          workspace.workspaceCwd
+        ) {
+          return true;
+        }
+        sendControl(ws, {
+          type: 'error',
+          message: 'Terminal workspace unavailable',
+        });
+        cleanup();
+        ws.close(4002, 'Terminal workspace unavailable');
+        return false;
+      };
       const onMessage = (data: unknown, isBinary = false) => {
         const text = toText(data);
         const control = isBinary ? null : parseControl(text);
@@ -260,29 +275,11 @@ export function createTerminalWsHandler(
           return;
         }
         if (control?.type === 'resize') {
-          const currentWorkspace = resolveWorkspace(workspaceSelector);
-          if (currentWorkspace?.workspaceCwd !== workspace.workspaceCwd) {
-            sendControl(ws, {
-              type: 'error',
-              message: 'Terminal workspace unavailable',
-            });
-            cleanup();
-            ws.close(4002, 'Terminal workspace unavailable');
-            return;
-          }
+          if (!ensureWorkspaceAvailable()) return;
           registry.resize(terminalId, control.cols, control.rows);
           return;
         }
-        const currentWorkspace = resolveWorkspace(workspaceSelector);
-        if (currentWorkspace?.workspaceCwd !== workspace.workspaceCwd) {
-          sendControl(ws, {
-            type: 'error',
-            message: 'Terminal workspace unavailable',
-          });
-          cleanup();
-          ws.close(4002, 'Terminal workspace unavailable');
-          return;
-        }
+        if (!ensureWorkspaceAvailable()) return;
         const writeResult = registry.write(terminalId, text);
         if (writeResult !== 'written') {
           sendControl(ws, {
@@ -303,6 +300,7 @@ export function createTerminalWsHandler(
       };
 
       detach.output = registry.addOutputListener(terminalId, (data) => {
+        if (!ensureWorkspaceAvailable()) return;
         if (!sendOutput(ws, data)) {
           cleanup();
           ws.close(1013, 'Terminal output backpressure');
@@ -329,6 +327,7 @@ export function createTerminalWsHandler(
       ws.on('close', cleanup);
       ws.off('error', markClosed);
       ws.on('error', cleanup);
+      if (!ensureWorkspaceAvailable()) return;
       if (!sendOutput(ws, snapshot.output)) {
         cleanup();
         ws.close(1013, 'Terminal output backpressure');

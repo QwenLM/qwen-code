@@ -705,6 +705,38 @@ describe('terminal WebSocket route', () => {
     },
   );
 
+  it('stops output when the workspace becomes unavailable', async () => {
+    let available = true;
+    let output: ((data: string) => void) | undefined;
+    const registry = registryWithSnapshot({
+      output: '',
+      exited: false,
+      workspaceCwd: '/workspace',
+    });
+    vi.mocked(registry.addOutputListener).mockImplementationOnce(
+      (_terminalId, listener) => {
+        output = listener;
+        return vi.fn();
+      },
+    );
+    const ws = new FakeWebSocket();
+    await createTerminalWsHandler(registry, () =>
+      available ? context : undefined,
+    ).onConnection(ws as unknown as WebSocket, request);
+
+    available = false;
+    output?.('secret output');
+
+    expect(sentOutput(ws)).not.toContain('secret output');
+    expect(ws.sent).toContain(
+      '\x00{"type":"error","message":"Terminal workspace unavailable"}',
+    );
+    expect(ws.close).toHaveBeenCalledWith(
+      4002,
+      'Terminal workspace unavailable',
+    );
+  });
+
   it('rejects create failures with a non-retryable close code', async () => {
     const registry = registryWithSnapshot(undefined);
     vi.mocked(registry.create).mockResolvedValueOnce({
