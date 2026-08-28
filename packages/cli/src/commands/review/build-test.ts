@@ -43,6 +43,24 @@ import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
+  boxedRunLeftContainer,
+  containerCommand,
+  containerName,
+  containerPathFor,
+  handOffRefused,
+  killContainer,
+  sandboxPolicy,
+  mountRootFor,
+  refuseUnsandboxedPhase,
+  reviewSandboxImage,
+  runtimeIsRootless,
+  runtimeClientEnv,
+  sandboxVerdict,
+  type CommandKind,
+  type SandboxPolicy,
+  type ContainerRuntime,
+} from './lib/sandboxed-exec.js';
+import {
   DEFAULT_COMMAND_TIMEOUT_S,
   DEFAULT_WHOLE_CALL_BUDGET_S,
 } from './lib/build-budget.js';
@@ -110,7 +128,14 @@ export interface CommandResult {
 
 export interface BuildTestReport {
   /** The scoped toolchain that ran, or `unsupported` when selection was unsafe. */
-  toolchain: 'npm' | 'unsupported';
+  /**
+   * `refused` is not a kind of repository — it is the absence of a run.
+   * `unsupported` means "this command could not scope your repo, go run the
+   * build yourself", which is a real instruction the brief acts on; routing a
+   * sandbox refusal into it would send the agent to run the reviewed code by
+   * hand with its own shell, which is the exact thing the policy forbade.
+   */
+  toolchain: 'npm' | 'unsupported' | 'refused';
   /** Workspace dirs the diff changed. */
   affected: string[];
   /** What was built, dependencies first — after any widening. */
@@ -128,6 +153,24 @@ export interface BuildTestReport {
   install: CommandResult | null;
   build: CommandResult[];
   test: CommandResult[];
+  /**
+   * True when the run was a deliberate `--build-only` probe. Structural,
+   * because `--resume`'s nothing-to-resume answer keys on it: a probe's
+   * report has no tests and no scope BY CHOICE, and without the stamp that
+   * shape is indistinguishable from a completed zero-suite run.
+   */
+  buildOnly?: boolean;
+  /**
+   * True when the test phase was ENTERED and ran nothing — the whole-call
+   * budget fell below the attempt floor (or the unbuilt closure covered
+   * every suite) before the first test command started. Structural for the
+   * same reason `buildOnly` is: a single-root run in this state carries no
+   * `testScope` and keeps `ok: true` (the build passed), so without the
+   * stamp `--resume` read it as a COMPLETED zero-suite run — certifying an
+   * existing, unrun suite as finished and dropping the re-run advice that
+   * is the only path to ever running it.
+   */
+  endedBeforeTests?: boolean;
   /**
    * What the test phase covered, so the review can state exactly what was and
    * was not run: `workspaces` lists exactly the suites the run executes, and
@@ -292,10 +335,58 @@ export function buildRunEnv(
  * set is measured HERE, off the raw text, and survives a trim that drops the
  * FAIL lines it was parsed from.
  */
+/**
+ * The container argv for one reviewed-repository command, or null to run it
+ * directly.
+ *
+ * Null covers three cases and they are not the same thing: the policy is off
+ * (today's behaviour), no runtime answered under `auto`, or this command's cwd
+ * is not inside a review temp dir — which is the case for a `/review` of a
+ * local checkout, where the tree under test IS the user's own working copy and
+ * there is no `.qwen/tmp` sibling layout to mount. The `required` policy is
+ * NOT handled here: refusing is the caller's decision, because only the caller
+ * knows what evidence it is about to mark unavailable.
+ */
+function containerised(
+  command: string,
+  cwd: string,
+  kind: CommandKind,
+): {
+  file: string;
+  args: string[];
+  name: string;
+  runtime: ContainerRuntime;
+} | null {
+  const verdict = sandboxVerdict();
+  if (verdict.kind !== 'container') return null;
+  const tmpDir = mountRootFor(cwd);
+  if (tmpDir === null) return null;
+  // The CANONICAL spelling, matching the mount: the bind mount is created from
+  // the root's realpath, so a lexical `--workdir` names a directory the
+  // container does not have and every command fails before it starts.
+  const workdir = containerPathFor(cwd);
+  if (workdir === null) return null;
+  const name = containerName();
+  return {
+    ...containerCommand(command, {
+      cwd: workdir,
+      tmpDir,
+      kind,
+      name,
+      runtime: verdict.runtime,
+      rootless: runtimeIsRootless(verdict.runtime),
+      image: reviewSandboxImage(),
+    }),
+    name,
+    runtime: verdict.runtime,
+  };
+}
+
 export function run(
   command: string,
   cwd: string,
   timeoutMs: number,
+  kind: CommandKind = 'test',
 ): CommandResult {
   const started = Date.now();
   // spawnSync validates `timeout` as an unsigned integer: the adapters'
@@ -304,16 +395,50 @@ export function run(
   // with no report, or zero, which arms no kill timer at all. Coerce once
   // at the one boundary every command crosses.
   const deadlineMs = Math.max(1, Math.round(timeoutMs));
-  const r = spawnSync(command, {
-    cwd,
-    shell: true,
-    encoding: 'utf8',
-    timeout: deadlineMs,
-    maxBuffer: 64 * 1024 * 1024,
-    // A build that asks a question is a build that hangs until the deadline.
-    stdio: ['ignore', 'pipe', 'pipe'],
-    env: buildRunEnv(),
-  });
+  // This is the reviewed repository's own command — `npm ci` with whatever
+  // install scripts the PR committed, its build, its suite — so it is the
+  // thing #9556 is about. `containerised` returns null when the run is not
+  // sandboxed, and the direct spawn below is unchanged for that case.
+  const boxed = containerised(command, cwd, kind);
+  const r = boxed
+    ? spawnSync(boxed.file, boxed.args, {
+        cwd,
+        encoding: 'utf8',
+        timeout: deadlineMs,
+        maxBuffer: 64 * 1024 * 1024,
+        // SIGKILL, not the default SIGTERM, and only on the boxed branch.
+        // `spawnSync` sends its `killSignal` at the deadline and then WAITS for
+        // the child to exit — so an attached runtime client that forwards the
+        // signal and keeps waiting on a workload whose own trap ignores it
+        // never returns, and the `killContainer` below is never reached. That
+        // is what made the round-4 machinery unreachable rather than wrong.
+        // SIGKILL cannot be ignored, so the client dies, the call returns, and
+        // the container is then reaped BY NAME at the daemon — which is where
+        // the deadline had to be enforced all along.
+        killSignal: 'SIGKILL',
+        stdio: ['ignore', 'pipe', 'pipe'],
+        // NOT `buildRunEnv()`: the container gets an allowlist instead (see
+        // `containerEnv`), and this env is the RUNTIME CLIENT's — the caller's
+        // PATH and nothing from the review, minus the daemon-selecting
+        // variables a repository could have shipped in its own `.env`.
+        env: runtimeClientEnv(),
+      })
+    : spawnSync(command, {
+        cwd,
+        shell: true,
+        encoding: 'utf8',
+        timeout: deadlineMs,
+        maxBuffer: 64 * 1024 * 1024,
+        // A build that asks a question is a build that hangs until the deadline.
+        stdio: ['ignore', 'pipe', 'pipe'],
+        env: buildRunEnv(),
+      });
+  if (boxed && boxedRunLeftContainer(r.status)) {
+    // The deadline killed the CLIENT; the container outlives it — see the
+    // `--name` comment in `containerCommand`. Reach the daemon instead, then
+    // report the timeout exactly as before.
+    killContainer(boxed.runtime, boxed.name);
+  }
   // `spawnSync` sets `error.code === 'ETIMEDOUT'` when the deadline fired — that is
   // the authoritative signal. The `SIGTERM`/null-status pair is only a fallback: it
   // also matches an external SIGTERM (a container stop), and it misses a non-default
@@ -528,6 +653,20 @@ function previousReport(out: string | undefined): BuildTestReport {
   const strings = (v: unknown): boolean =>
     Array.isArray(v) && v.every((e) => typeof e === 'string' && e.length > 0);
   const affectedOk = strings((parsed as { affected?: unknown }).affected);
+  // Read by the nothing-to-resume split (deliberate probe vs completed
+  // zero-suite run) — validated like every other field the continuation
+  // reads, so a corrupted stamp refuses here instead of steering the
+  // message off a non-boolean truthiness.
+  const buildOnlyShape = (parsed as { buildOnly?: unknown }).buildOnly;
+  const buildOnlyOk =
+    buildOnlyShape === undefined || typeof buildOnlyShape === 'boolean';
+  const endedBeforeShape = (parsed as { endedBeforeTests?: unknown })
+    .endedBeforeTests;
+  const endedBeforeOk =
+    endedBeforeShape === undefined || typeof endedBeforeShape === 'boolean';
+  // Same rule for `ok`, which the split reads beside it: required on the
+  // report, so undefined is refused too.
+  const okOk = typeof (parsed as { ok?: unknown }).ok === 'boolean';
   const notBuiltShape = (parsed as { notBuilt?: unknown }).notBuilt;
   const notBuiltOk = notBuiltShape === undefined || strings(notBuiltShape);
   const scope = shape.testScope;
@@ -547,6 +686,9 @@ function previousReport(out: string | undefined): BuildTestReport {
     !commandsOk(shape.build) ||
     !strings(shape.timedOut) ||
     !affectedOk ||
+    !buildOnlyOk ||
+    !endedBeforeOk ||
+    !okOk ||
     !notBuiltOk ||
     !scopeOk ||
     !runOk
@@ -579,7 +721,53 @@ function previousReport(out: string | undefined): BuildTestReport {
   return parsed as BuildTestReport;
 }
 
-export function runBuildTest(args: BuildTestArgs): BuildTestReport {
+/**
+ * A report that says the phase ran nothing, and why.
+ *
+ * Module scope because two callers need it: the phase gate inside the run, and
+ * the hand-off conversion at the exit.
+ */
+function refusedReport(why: string): BuildTestReport {
+  return {
+    toolchain: 'refused',
+    affected: [],
+    buildSet: [],
+    widenedWith: [],
+    install: null,
+    build: [],
+    test: [],
+    timedOut: [],
+    // NOT `ok: true`. `unsupportedReport`'s hand-off is `ok` because nothing
+    // was found wrong; here something WAS — the phase could not be run under
+    // the policy in force — and a reader that treats this as a clean hand-off
+    // would go do by hand exactly what the policy just refused.
+    ok: false,
+    note:
+      `no build or test evidence: ${why}. This phase would have had to run ` +
+      `the reviewed repository's own commands, which is what the policy ` +
+      `forbids — so it ran nothing rather than running them unsandboxed. Do ` +
+      `not read this as a passing build, and do not run the commands by hand ` +
+      `to fill the gap.`,
+  };
+}
+
+/**
+ * The hand-off is an EXECUTION too, and it is the one that leaves this
+ * process: `unsupportedReport` tells the agent to install and build with its
+ * own shell — see the `toolchain: "unsupported"` rule in the brief — and that
+ * shell is contained by nothing here. The phase gate cannot catch it, because
+ * the gate passes exactly when a runtime answered and the tree is mountable,
+ * which is when a repo the adapters cannot scope still reaches the hand-off.
+ *
+ * At the ONE exit every report crosses, and that placement is the point. The
+ * first attempt tested a precondition (`!applicable` — the filtered adapter
+ * ARRAY, never falsy) and was dead code. The second wrapped the two
+ * `adapter.run` returns and missed the `!adapter` branch's own `unsupported`
+ * report. Both were the same mistake at different addresses: guarding routes
+ * one at a time in a function with several. There is exactly one place a
+ * report can reach a caller, so the conversion belongs there.
+ */
+function runBuildTestUnguarded(args: BuildTestArgs): BuildTestReport {
   // yargs `type: 'number'` coerces `--timeout abc` to NaN rather than
   // rejecting it; NaN defeats every budget-floor comparison and reaches
   // spawnSync as an invalid deadline — ERR_OUT_OF_RANGE with no report.
@@ -704,6 +892,33 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
     previous,
     exec: args.exec ?? run,
   };
+  // BEFORE anything is executed or handed off. Under `review.sandbox: required`
+  // with no container runtime answering, this phase must produce no build/test
+  // evidence rather than produce it by running the reviewed repository's code
+  // unsandboxed. It sits here and not at the spawn because one route never
+  // reaches a spawn at all: a repo this adapter cannot scope is handed to the
+  // AGENT's own shell (`unsupportedReport`), which would otherwise run the
+  // install and the suite with nothing consulted.
+  const refusal = refuseUnsandboxedPhase(root);
+  if (refusal && args.resume) {
+    // THROW on a continuation, never return. The handler writes whatever this
+    // returns to `--out`, which on a resume is the very report the call was
+    // asked to continue — so returning the refusal below would overwrite a
+    // partial run's install, builds and finished suites, and the refusal
+    // report carries no run identity, so every later `--resume` would fail the
+    // identity check ("records no run identity") even after a runtime came
+    // back. One transient probe failure would cost the round its whole
+    // build-test chain. This is the invariant the `!adapter` branch below
+    // states in its own words; a policy refusal is subject to it too.
+    throw new Error(
+      `refusing to continue this run: ${refusal}. The report at ${args.out} ` +
+        `is left as it was — re-run without --resume once the policy can be ` +
+        `satisfied, or lower review.sandbox.`,
+    );
+  }
+  if (refusal) {
+    return refusedReport(refusal);
+  }
   const { adapter, applicable } = selectToolchainAdapter(
     root,
     toolchainAdapters,
@@ -870,3 +1085,72 @@ export const buildTestCommand: CommandModule = {
     }
   },
 };
+
+/**
+ * Turn a hand-off into a refusal when the policy forbids one.
+ *
+ * Exported and separate from `runBuildTest` so the conversion — the half that
+ * has been wrong twice, first as a dead precondition and then as a wrapper on
+ * two of the three routes — is reachable by a test without a live container
+ * runtime. What stays unpinned is only that `runBuildTest` calls it, which is
+ * one visible line rather than a branch hiding in a long function.
+ */
+/**
+ * Whether converting this report would destroy the run it was asked to
+ * continue.
+ *
+ * A predicate for the same reason `applyHandOffPolicy` is one: the conversion
+ * it guards returns a report, the handler writes whatever is returned, and a
+ * fresh refusal carries no run identity — so on a `--resume` it replaces the
+ * in-flight report and every later resume fails the identity check. The other
+ * two continuation exits enforce that invariant with a throw; this one was
+ * added after both and did not.
+ */
+export function resumeWouldDestroyReport(
+  report: BuildTestReport,
+  resume: boolean,
+  policy: SandboxPolicy = sandboxPolicy(),
+): boolean {
+  return resume && handOffRefused(report.toolchain, policy);
+}
+
+export function applyHandOffPolicy(
+  report: BuildTestReport,
+  policy: SandboxPolicy = sandboxPolicy(),
+): BuildTestReport {
+  return handOffRefused(report.toolchain, policy)
+    ? refusedReport(
+        `review.sandbox is "required" and no toolchain adapter could scope ` +
+          `this repository, so the only remaining route was to hand its ` +
+          `install, build and test commands to an agent shell this policy ` +
+          `cannot contain`,
+      )
+    : report;
+}
+
+export function runBuildTest(args: BuildTestArgs): BuildTestReport {
+  const report = runBuildTestUnguarded(args);
+  // The THIRD continuation exit, and the one the invariant had not reached.
+  // "A continuation must never answer with a FRESH report" is enforced by a
+  // throw at the refusal gate and at `!adapter`; this conversion was added
+  // after both and returns a report of its own, which the handler writes
+  // unconditionally — so a policy that tightened between the first call and
+  // the resume would replace the in-flight report with an identity-less
+  // refusal, and every later `--resume` would fail the identity check. That
+  // costs the round its whole build-test chain over a setting change.
+  //
+  // The trigger is ordinary: the policy is read per call, so an operator
+  // raising it — or a workflow's `env:` — between call one and the resume is
+  // enough, on the unscopeable repo shapes (yarn/pnpm/bun) that reach a
+  // hand-off in the first place.
+  if (resumeWouldDestroyReport(report, args.resume === true)) {
+    throw new Error(
+      `refusing to continue this run: this repository's toolchain cannot be ` +
+        `scoped, and review.sandbox is now "required", so continuing would ` +
+        `replace the report at ${args.out} with a refusal that records no run ` +
+        `identity — killing the resume chain. Re-run without --resume under ` +
+        `the new policy.`,
+    );
+  }
+  return applyHandOffPolicy(report);
+}

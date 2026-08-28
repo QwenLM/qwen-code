@@ -98,9 +98,13 @@ jobs:
       - name: 'Install Dependencies'
         env:
           NPM_CONFIG_PREFER_OFFLINE: 'true'
-          QWEN_SKIP_PREPARE: '1'
         run: |-
-          npm ci --no-audit --progress=false
+          npm ci --ignore-scripts --no-audit --progress=false
+          # Replay the root postinstall (patch-package) and commit-info
+          # generation; dependency and workspace lifecycle scripts remain
+          # disabled.
+          npm run postinstall
+          npm run generate
 
       - name: 'Get the version'
         id: 'version'
@@ -169,9 +173,13 @@ jobs:
       - name: 'Install Dependencies'
         env:
           NPM_CONFIG_PREFER_OFFLINE: 'true'
-          QWEN_SKIP_PREPARE: '1'
         run: |-
-          npm ci --no-audit --progress=false
+          npm ci --ignore-scripts --no-audit --progress=false
+          # Replay the root postinstall (patch-package) and commit-info
+          # generation; dependency and workspace lifecycle scripts remain
+          # disabled.
+          npm run postinstall
+          npm run generate
 
       - name: 'Format Project'
         run: |-
@@ -227,9 +235,13 @@ jobs:
       - name: 'Install Dependencies'
         env:
           NPM_CONFIG_PREFER_OFFLINE: 'true'
-          QWEN_SKIP_PREPARE: '1'
         run: |-
-          npm ci --no-audit --progress=false
+          npm ci --ignore-scripts --no-audit --progress=false
+          # Replay the root postinstall (patch-package) and commit-info
+          # generation; dependency and workspace lifecycle scripts remain
+          # disabled.
+          npm run postinstall
+          npm run generate
 
       - name: 'Build Bundle'
         run: |-
@@ -274,9 +286,13 @@ jobs:
       - name: 'Install Dependencies'
         env:
           NPM_CONFIG_PREFER_OFFLINE: 'true'
-          QWEN_SKIP_PREPARE: '1'
         run: |-
-          npm ci --no-audit --progress=false
+          npm ci --ignore-scripts --no-audit --progress=false
+          # Replay the root postinstall (patch-package) and commit-info
+          # generation; dependency and workspace lifecycle scripts remain
+          # disabled.
+          npm run postinstall
+          npm run generate
 
       - name: 'Build Bundle'
         run: |-
@@ -371,11 +387,10 @@ jobs:
       - name: 'Checkout'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
-          # Persist the bot PAT for release-branch pushes so downstream CI
-          # workflows are triggered.
           token: '${{ secrets.CI_BOT_PAT }}'
           ref: '${{ github.event.inputs.ref || github.sha }}'
           fetch-depth: 0
+          persist-credentials: false
 
       - name: 'Setup Node.js'
         uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
@@ -386,12 +401,19 @@ jobs:
           registry-url: 'https://registry.npmjs.org'
           scope: '@qwen-code'
 
+      - name: 'Install npm 11'
+        run: 'npm install --global npm@11.19.0'
+
       - name: 'Install Dependencies'
         env:
           NPM_CONFIG_PREFER_OFFLINE: 'true'
-          QWEN_SKIP_PREPARE: '1'
         run: |-
-          npm ci --no-audit --progress=false
+          npm ci --ignore-scripts --no-audit --progress=false
+          # Replay the root postinstall (patch-package) and commit-info
+          # generation; dependency and workspace lifecycle scripts remain
+          # disabled.
+          npm run postinstall
+          npm run generate
 
       - name: 'Configure Git User'
         run: |-
@@ -422,14 +444,25 @@ jobs:
           IS_DRY_RUN: '${{ needs.prepare.outputs.is_dry_run }}'
           RELEASE_TAG: '${{ needs.prepare.outputs.release_tag }}'
           RELEASE_VERSION: '${{ needs.prepare.outputs.release_version }}'
+          CI_BOT_PAT: '${{ secrets.CI_BOT_PAT }}'
         run: |-
-          git add package.json package-lock.json packages/*/package.json packages/channels/*/package.json integrations/external-context/package.json
+          git add package.json package-lock.json packages/*/package.json packages/channels/*/package.json integrations/*/package.json
           if git diff --staged --quiet; then
             echo "No version changes to commit"
           else
             git commit -m "chore(release): ${RELEASE_TAG}"
           fi
           if [[ "${IS_DRY_RUN}" == "false" ]]; then
+            # Restore the bot PAT in this step rather than persisting it in
+            # git credentials at checkout, so dependency installation and
+            # build tooling in earlier steps cannot read write credentials.
+            # The push itself needs the PAT (not the job token): pushes made
+            # with GITHUB_TOKEN do not trigger downstream CI workflows.
+            # Export (not inline) so GH_TOKEN is still set when `git push`
+            # invokes the credential helper, which re-resolves the token at
+            # push time rather than at `gh auth setup-git` time.
+            export GH_TOKEN="${CI_BOT_PAT}"
+            gh auth setup-git
             # The guard runs scripts/get-release-version.js from the
             # checked-out ref — the operator-controlled dispatch input `ref`
             # — not the branch this workflow file came from. A ref predating
@@ -529,9 +562,8 @@ jobs:
             echo "::notice::${PACKAGE_NAME}@${RELEASE_VERSION} already published; skipping"
             exit 0
           fi
-          npm publish "${PUBLISH_ARGS[@]}"
+          npm publish --provenance "${PUBLISH_ARGS[@]}"
         env:
-          NODE_AUTH_TOKEN: '${{ secrets.NPM_TOKEN }}'
           RELEASE_VERSION: '${{ needs.prepare.outputs.release_version }}'
           NPM_TAG: '${{ needs.prepare.outputs.npm_tag }}'
           IS_DRY_RUN: '${{ needs.prepare.outputs.is_dry_run }}'
@@ -547,9 +579,8 @@ jobs:
             echo "::notice::${PACKAGE_NAME}@${RELEASE_VERSION} already published; skipping"
             exit 0
           fi
-          npm publish "${PUBLISH_ARGS[@]}"
+          npm publish --provenance "${PUBLISH_ARGS[@]}"
         env:
-          NODE_AUTH_TOKEN: '${{ secrets.NPM_TOKEN }}'
           RELEASE_VERSION: '${{ needs.prepare.outputs.release_version }}'
           NPM_TAG: '${{ needs.prepare.outputs.npm_tag }}'
           IS_DRY_RUN: '${{ needs.prepare.outputs.is_dry_run }}'
@@ -565,9 +596,8 @@ jobs:
             echo "::notice::${PACKAGE_NAME}@${RELEASE_VERSION} already published; skipping"
             exit 0
           fi
-          npm publish "${PUBLISH_ARGS[@]}"
+          npm publish --provenance "${PUBLISH_ARGS[@]}"
         env:
-          NODE_AUTH_TOKEN: '${{ secrets.NPM_TOKEN }}'
           RELEASE_VERSION: '${{ needs.prepare.outputs.release_version }}'
           NPM_TAG: '${{ needs.prepare.outputs.npm_tag }}'
           IS_DRY_RUN: '${{ needs.prepare.outputs.is_dry_run }}'
@@ -577,7 +607,7 @@ jobs:
         run: |-
           # Explicit allowlist: new channel workspaces require release approval.
           PUBLISH_MARKER="$(mktemp)"
-          for channel in dingtalk feishu github qqbot telegram wecom weixin; do
+          for channel in dingtalk dws feishu github qqbot telegram wecom weixin; do
             echo "::group::Publishing @qwen-code/channel-${channel}"
             (
               cd "${channel}"
@@ -589,7 +619,7 @@ jobs:
                 echo "::notice::${PACKAGE_NAME}@${RELEASE_VERSION} already published; skipping"
                 exit 0
               fi
-              npm publish "${PUBLISH_ARGS[@]}"
+              npm publish --provenance "${PUBLISH_ARGS[@]}"
               echo "${channel}" >> "${PUBLISH_MARKER}"
             )
             echo "::endgroup::"
@@ -598,7 +628,6 @@ jobs:
             echo "::warning::Every channel package was already published; nothing shipped"
           fi
         env:
-          NODE_AUTH_TOKEN: '${{ secrets.NPM_TOKEN }}'
           RELEASE_VERSION: '${{ needs.prepare.outputs.release_version }}'
           NPM_TAG: '${{ needs.prepare.outputs.npm_tag }}'
           IS_DRY_RUN: '${{ needs.prepare.outputs.is_dry_run }}'

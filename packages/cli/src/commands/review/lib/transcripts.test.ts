@@ -30,6 +30,7 @@ import {
   transcriptDir,
   TranscriptsUnavailableError,
   type AgentRecord,
+  serializedArgsNamePath,
 } from './transcripts.js';
 import { appendRunSession, recordResume } from './run-ledger.js';
 
@@ -232,6 +233,81 @@ describe('readTranscripts — defensive parsing', () => {
     expect(rec.successfulReadFileArgs).toHaveLength(1);
     expect(rec.successfulReadFileArgs[0]).toContain('/r/f.findings.md');
     expect(rec.successfulReadFileArgs[0]).not.toContain('search_file_content');
+  });
+
+  it('counts a diff read via serializedArgsNamePath, not a look-alike', () => {
+    // The diff-read half of the shared needle: `diffToolCalls` is populated
+    // only when `diffPath` is passed, and no other test passes one. A swap of
+    // the two args at the `serializedArgsNamePath(JSON.stringify(args), path)`
+    // call site (both strings, so it compiles) ships green and every coverage
+    // gate then reads `diffToolCalls: 0`. Pin it with the exact read counted
+    // and two look-alikes — a `.bak` sibling and a shell command that only
+    // NAMES the diff — refused.
+    const b = { agentId: 'a1', agentName: 'general-purpose', sessionId: 'S1' };
+    const call = (
+      name: string,
+      args: object,
+      response: object = { output: 'ok' },
+    ): object[] => [
+      {
+        ...b,
+        type: 'assistant',
+        message: { role: 'model', parts: [{ functionCall: { name, args } }] },
+      },
+      {
+        ...b,
+        type: 'tool_result',
+        message: {
+          role: 'user',
+          parts: [{ functionResponse: { name, response } }],
+        },
+      },
+    ];
+    file(
+      'agent-a1.jsonl',
+      [
+        // A plain object literal like its siblings — pre-stringifying it here
+        // would let the trailing `.map` encode it twice, so `parseTranscript`
+        // parses a bare string and silently drops the launch line.
+        {
+          ...b,
+          type: 'user',
+          message: { role: 'user', parts: [{ text: 'chunk 1 of 1' }] },
+        },
+        ...call('read_file', { file_path: '/d.txt', offset: 0, limit: 40 }),
+        ...call('read_file', { file_path: '/d.txt.bak' }),
+        ...call('run_shell_command', { command: 'rm /d.txt' }),
+        // A FAILED read of the diff: names it, but the response is an error.
+        // Hoisting the `diffToolCalls++` / `diffReads.push` out of the
+        // `!isErrorPart` branch would count this as a diff read.
+        ...call(
+          'read_file',
+          { file_path: '/d.txt', offset: 40, limit: 40 },
+          { error: 'denied' },
+        ),
+      ]
+        .map((r) => JSON.stringify(r))
+        .join('\n') + '\n',
+    );
+    const [rec] = readTranscripts(undefined, ENV, '/d.txt');
+    // The launch line survived — proof the fixture is single-encoded.
+    expect(rec.launchPrompt).toBe('chunk 1 of 1');
+    // Only the ONE successful, exact-path read counts: not the `.bak`
+    // sibling, not the shell mention, not the denied read.
+    expect(rec.diffToolCalls).toBe(1);
+    // The RANGE too, not only the count: `range` is wired through the same
+    // `namedTheDiff` decision, so dropping that wiring leaves the count
+    // right and every chunk-coverage ruling — which reads the lines, not
+    // the tally — with nothing to rule on. The denied read's [41, 80] is
+    // absent, pinning the success gate on `diffReads` as well.
+    expect(rec.diffReads).toEqual([[1, 40]]);
+    // The same gate guards the evidence lists the certification atoms read
+    // (`openedBrief`, `readBrief`, `readFindingsPointer`): the denied read
+    // must stay out of them too, not only out of the diff fields.
+    expect(rec.successfulCallArgs).toHaveLength(3);
+    expect(rec.successfulReadFileArgs).toHaveLength(2);
+    // And with no diffPath the field stays 0, whatever was read.
+    expect(readTranscripts(undefined, ENV)[0].diffToolCalls).toBe(0);
   });
 });
 
@@ -728,5 +804,34 @@ describe('the incomplete-transcript shapes the resume path reads', () => {
       ].join('\n') + '\n',
     );
     expect(readTranscripts(undefined, ENV)).toHaveLength(1);
+  });
+});
+
+describe('serializedArgsNamePath — the one needle both halves use', () => {
+  const brief = '/plan/chunk-3.brief.md';
+
+  it('matches the path as a whole JSON string value', () => {
+    expect(
+      serializedArgsNamePath(JSON.stringify({ absolute_path: brief }), brief),
+    ).toBe(true);
+  });
+
+  it('does not credit a longer path holding this one as a prefix', () => {
+    expect(
+      serializedArgsNamePath(
+        JSON.stringify({ absolute_path: `${brief}.bak` }),
+        brief,
+      ),
+    ).toBe(false);
+  });
+
+  it('does not credit a shell command that merely mentions the path', () => {
+    // The divergence the review measured between this and the prose-boundary
+    // `namesPath` in `findings.ts`, which returns true here. Both the
+    // diff-read half and the brief atoms route through THIS one, so the
+    // certification bar cannot credit `rm <file>` as opening it.
+    expect(
+      serializedArgsNamePath(JSON.stringify({ command: `rm ${brief}` }), brief),
+    ).toBe(false);
   });
 });

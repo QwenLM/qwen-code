@@ -281,6 +281,17 @@
   outline: none;
 }
 
+/* Pending-approval rows are inert placeholders: no pointer affordance, no
+   hover highlight. */
+.row[aria-disabled='true'] {
+  cursor: default;
+}
+
+.row[aria-disabled='true']:hover,
+.row[aria-disabled='true']:focus-visible {
+  background: transparent;
+}
+
 .rowStatus {
   width: 14px;
   min-width: 14px;

@@ -22,6 +22,7 @@ interface WorkspacePollState {
   reconcileRetryAt: number;
   lastReconcileAt: number;
   fallbackAttempted: boolean;
+  interactiveRefreshRequested: boolean;
   reconcileRequested: boolean;
   invalidationRequested: boolean;
   invalidationReconcileAt: number;
@@ -137,6 +138,7 @@ export function useWorkspaceSessionLiveState(
       reconcileRetryAt: 0,
       lastReconcileAt: Number.NEGATIVE_INFINITY,
       fallbackAttempted: false,
+      interactiveRefreshRequested: false,
       reconcileRequested: false,
       invalidationRequested: false,
       invalidationReconcileAt: Number.NEGATIVE_INFINITY,
@@ -198,8 +200,8 @@ export function useWorkspaceSessionLiveState(
       const request = catalogStore.consumeWorkspaceLiveStateRefreshRequest(
         state.workspaceCwd,
       );
-      state.reconcileRequested =
-        state.reconcileRequested || request === 'interactive';
+      const interactive = request === 'interactive';
+      state.reconcileRequested = state.reconcileRequested || interactive;
       state.invalidationRequested =
         state.invalidationRequested || request === 'invalidated';
     };
@@ -248,12 +250,25 @@ export function useWorkspaceSessionLiveState(
       if (
         disposed ||
         state.inFlight ||
-        Date.now() < state.liveRetryAt ||
         (typeof document !== 'undefined' && document.hidden)
       ) {
         return;
       }
+      const bypassRetry = state.interactiveRefreshRequested;
+      if (!bypassRetry && Date.now() < state.liveRetryAt) return;
+      state.interactiveRefreshRequested = false;
       state.inFlight = true;
+      const finish = (): void => {
+        state.inFlight = false;
+        if (state.interactiveRefreshRequested) void poll(state);
+      };
+      // Contract: only a response from a request started after a completion
+      // was recorded may settle it, so the pending set is snapshotted before
+      // the request goes out. Completions recorded mid-flight keep their
+      // newer sequence and settle on the next tick.
+      const pendingActivity = catalogStore.snapshotSessionActivity(
+        state.workspaceCwd,
+      );
       let live: DaemonWorkspaceSessionLiveState;
       try {
         live = await readLiveState(state.workspaceCwd);
@@ -275,22 +290,44 @@ export function useWorkspaceSessionLiveState(
             }
           }
         }
-        state.inFlight = false;
+        finish();
         return;
       }
       if (disposed) {
-        state.inFlight = false;
+        finish();
         return;
       }
-      catalogStore.applyLiveState(state.workspaceCwd, live.sessions);
+      const absorbedActivity = catalogStore.applyLiveState(
+        state.workspaceCwd,
+        live.sessions,
+      );
       state.liveRetryAt = 0;
+      if (pendingActivity) {
+        for (const [sessionId, sequence] of pendingActivity) {
+          // applyLiveState reports which sessions absorbed a usable watermark
+          // on a loaded active page; anything else (missing row, absent or
+          // invalid stamp, row outside the loaded catalog) falls back to the
+          // rate-limited full reconcile.
+          if (!absorbedActivity.has(sessionId)) {
+            state.invalidationRequested = true;
+          }
+          catalogStore.resolveSessionActivity(
+            state.workspaceCwd,
+            sessionId,
+            sequence,
+          );
+        }
+      }
       consumeRefreshRequest(state);
+      const bypassReconcileRetry =
+        bypassRetry || state.interactiveRefreshRequested;
+      state.interactiveRefreshRequested = false;
       if (
         !state.reconcileRequested &&
         !state.invalidationRequested &&
         versionsEqual(state.acceptedVersion, live.catalogVersion)
       ) {
-        state.inFlight = false;
+        finish();
         return;
       }
       // Interactive requests bypass the reconcile cooldown. Lifecycle
@@ -298,14 +335,14 @@ export function useWorkspaceSessionLiveState(
       // on a separate timestamp so a single local create stays immediate
       // while sustained event churn stays rate-limited.
       if (
-        Date.now() < state.reconcileRetryAt ||
+        (!bypassReconcileRetry && Date.now() < state.reconcileRetryAt) ||
         (!state.reconcileRequested &&
           (state.invalidationRequested
             ? Date.now() - state.invalidationReconcileAt
             : Date.now() - state.lastReconcileAt) <
             SESSION_LIVE_STATE_RECONCILE_COOLDOWN_MS)
       ) {
-        state.inFlight = false;
+        finish();
         return;
       }
       try {
@@ -321,19 +358,24 @@ export function useWorkspaceSessionLiveState(
           console.warn('[session-live-state] reconciliation failed:', error);
         }
       } finally {
-        state.inFlight = false;
+        finish();
       }
     };
 
     // Interactive refresh requests (explicit refresh(), expiring
-    // maxAgeMs subscriptions, group-membership growth) wake the loop
-    // immediately instead of waiting for the next 2s tick.
-    const stopWake = catalogStore.onLiveStateWake((workspaceCwd) => {
-      const state = states.find(
-        (candidate) => candidate.workspaceCwd === workspaceCwd,
-      );
-      if (state) void poll(state);
-    });
+    // maxAgeMs subscriptions, group-membership growth) and recorded turn
+    // completions wake the loop immediately instead of waiting for the
+    // next 2s tick.
+    const stopWake = catalogStore.onLiveStateWake(
+      (workspaceCwd, bypassRetry) => {
+        const state = states.find(
+          (candidate) => candidate.workspaceCwd === workspaceCwd,
+        );
+        if (!state) return;
+        if (bypassRetry) state.interactiveRefreshRequested = true;
+        void poll(state);
+      },
+    );
     const onVisibilityWake = (): void => {
       if (typeof document !== 'undefined' && document.hidden) return;
       for (const state of states) void poll(state);

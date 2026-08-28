@@ -205,10 +205,48 @@ describe('validateFindings', () => {
     ).toThrow(/location 0 has an invalid "line"/);
   });
 
-  it('rejects a top-level input that is not an array', () => {
-    expect(() => validateFindings({ findings: [] })).toThrow(
+  it('rejects a top-level input that is neither an array nor a findings wrapper', () => {
+    expect(() => validateFindings({ findings: 'not-an-array' })).toThrow(
       /must be a JSON array/,
     );
+    expect(() => validateFindings({ verdict: 'approve' })).toThrow(
+      /must be a JSON array/,
+    );
+  });
+
+  it('accepts the saved-artifact and report wrappers the recovery path feeds it', () => {
+    // Step 9 cleanup deletes the findings-in.json side file a later-session
+    // outcome path needs; the saved artifact (Step 8) and this command's own
+    // report survive it, and both wrap the array. `--input` must recover
+    // from that surviving state instead of dying on the missing side file.
+    const canonical = validateFindings([
+      { ...base, id: 'R1-1' },
+      { ...base, id: 'R1-2', severity: 'Suggestion' },
+    ]);
+    const report = buildReport(canonical);
+    const fromReport = validateFindings(report);
+    expect(fromReport.map((f) => f.id)).toEqual(['R1-1', 'R1-2']);
+
+    // The ReviewArtifactV1 shape: the same array under review metadata.
+    const artifact = {
+      schemaVersion: 1,
+      reviewId: 'review-1',
+      findings: report.findings,
+      counts: report.counts,
+    };
+    const fromArtifact = validateFindings(artifact);
+    expect(fromArtifact.map((f) => f.id)).toEqual(['R1-1', 'R1-2']);
+
+    // The wrapper round-trips the outcome merge end to end: outcomes apply
+    // to the unwrapped list exactly as they would to the bare array.
+    const withOutcomes = applyOutcomes(
+      validateFindings(report),
+      validateOutcomes([
+        { id: 'R1-1', outcome: 'fixed' },
+        { id: 'R1-2', outcome: 'skipped', note: 'intended behaviour' },
+      ]),
+    );
+    expect(withOutcomes.map((f) => f.outcome)).toEqual(['fixed', 'skipped']);
   });
 });
 
@@ -424,6 +462,24 @@ describe('validateOutcomes', () => {
     expect(() => validateOutcomes([{ outcome: 'fixed' }])).toThrow(
       /index 0 is missing a string "id"/,
     );
+  });
+
+  it('rejects a skipped outcome with no note', () => {
+    // `skipped` keeps the finding on the reader's plate and the note is the
+    // reader's only handle on it — and the report_findings contract refuses
+    // a skipped outcome that carries none, so the ledger feeding it must not
+    // accept one either.
+    expect(() => validateOutcomes([{ id: 'f1', outcome: 'skipped' }])).toThrow(
+      /"skipped" with no note/,
+    );
+    expect(() =>
+      validateOutcomes([{ id: 'f1', outcome: 'skipped', note: '   ' }]),
+    ).toThrow(/"skipped" with no note/);
+    expect(
+      validateOutcomes([
+        { id: 'f1', outcome: 'skipped', note: 'needs a product call' },
+      ]),
+    ).toEqual([{ id: 'f1', outcome: 'skipped', note: 'needs a product call' }]);
   });
 });
 
@@ -2022,5 +2078,89 @@ describe('validateFindings — the canonical artifact round-trips', () => {
     ]);
     expect(f.witness).toBe('BASE: 2 calls / PR: 1 call — probe flipped');
     expect(validateFindings([{ ...base }])[0].witness).toBeUndefined();
+  });
+
+  it('keeps fixWitness, and keeps it distinct from witness', () => {
+    // The acceptance criterion the finding hands to whoever fixes it — the
+    // reviewer-side half of #9578, and the field Step 7's comment body reads
+    // back. It is NOT the reviewer's own evidence: a round that collapsed the
+    // two would post the proof of the defect where the test to write belongs,
+    // or demand a test as the price of confirming a bug.
+    const [f] = validateFindings([
+      {
+        ...base,
+        witness: 'BASE: 2 calls / PR: 1 call — probe flipped',
+        fixWitness:
+          'src/retry.test.ts — asserts the guard rejects a negative delay; ' +
+          'reds with the guard removed',
+      },
+    ]);
+    expect(f.witness).toBe('BASE: 2 calls / PR: 1 call — probe flipped');
+    expect(f.fixWitness).toContain('reds with the guard removed');
+    // snake_case is accepted for the same reason every sibling field accepts
+    // it, and absence stays absence — `N/A` is a value a finding writes, not
+    // a default this validator invents.
+    expect(
+      validateFindings([{ ...base, fix_witness: 'N/A' }])[0].fixWitness,
+    ).toBe('N/A');
+    expect(validateFindings([{ ...base }])[0].fixWitness).toBeUndefined();
+  });
+
+  it('keeps fixConstraint, and drops the N/A its sibling field allows', () => {
+    // The fact the fix must not violate — the premise half of #10153, beside
+    // the claim half `fixWitness` carries. It round-trips like every sibling
+    // so Step 7's comment body reads it from data rather than re-deriving a
+    // constant or a file:line the finder already quoted.
+    const constraint =
+      'any bound here must be <= MAX_SUBAGENT_DEPTH_LIMIT = 100 ' +
+      '(packages/core/src/config/config.ts:1533)';
+    const [f] = validateFindings([
+      {
+        ...base,
+        fixWitness: 'N/A',
+        fixConstraint: constraint,
+      },
+    ]);
+    expect(f.fixConstraint).toBe(constraint);
+    expect(f.fixWitness).toBe('N/A');
+    expect(
+      validateFindings([{ ...base, fix_constraint: constraint }])[0]
+        .fixConstraint,
+    ).toBe(constraint);
+    // Absence stays absence: the field has no `N/A` form, because an empty
+    // constraint carries no information and would lengthen every posted
+    // comment (#9177). A finder that copies the fixWitness habit and writes
+    // the placeholder anyway must not hand the poster a "constraint" — the
+    // literal is normalised to absence so presence alone is the signal.
+    expect(validateFindings([{ ...base }])[0].fixConstraint).toBeUndefined();
+    for (const placeholder of [
+      'N/A',
+      'n/a',
+      'NA',
+      'none',
+      'None.',
+      ' N/A ',
+      // The omission literals the finding format and the posting rule name
+      // — the finder told to omit the line is the one most likely to write
+      // one, and carried through it would hand Step 7 a "constraint" that
+      // names no constant and no file:line.
+      'none observed',
+      'None observed',
+      'None observed.',
+      'no constraints observed',
+    ]) {
+      expect(
+        validateFindings([{ ...base, fixConstraint: placeholder }])[0]
+          .fixConstraint,
+      ).toBeUndefined();
+    }
+    // And the drop is narrow: a real constraint that merely CONTAINS one of
+    // the words survives — the bar for the field is a quoted constant or a
+    // file:line, and neither collapses to a placeholder.
+    expect(
+      validateFindings([
+        { ...base, fixConstraint: 'none of the callers pass 0 (src/a.ts:12)' },
+      ])[0].fixConstraint,
+    ).toBe('none of the callers pass 0 (src/a.ts:12)');
   });
 });

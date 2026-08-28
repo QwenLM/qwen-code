@@ -28,7 +28,22 @@ describe('ListAgentsTool', () => {
 
     expect(tool.name).toBe('list_agents');
     expect(result.llmContent).toBe(
-      'No background agents are available in this session.',
+      'No ordinary background subagents are available in this session. ' +
+        'Named Agent Team teammates are not listed here; their results are ' +
+        'delivered automatically through team messaging, so do not use ' +
+        'list_agents to wait for a teammate.',
+    );
+  });
+
+  it('states the Agent Team boundary in the tool description', () => {
+    expect(tool.description).toContain(
+      'Named Agent Team teammates are NOT listed here',
+    );
+    expect(tool.description).toContain(
+      'deliver their final reports automatically',
+    );
+    expect(tool.description).toContain(
+      'do not use list_agents (or poll task_list) to wait for a teammate',
     );
   });
 

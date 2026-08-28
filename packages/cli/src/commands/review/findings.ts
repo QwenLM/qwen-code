@@ -42,20 +42,31 @@ import {
 } from 'node:fs';
 import type { Stats } from 'node:fs';
 import { dirname, resolve, sep } from 'node:path';
+import {
+  FINDING_SEVERITIES,
+  FINDING_CONFIDENCES,
+  FINDING_OUTCOMES,
+  FINDING_SOURCES,
+  compressFindingSummary,
+} from '@qwen-code/qwen-code-core';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import type { AnchorRequest } from './lib/anchors.js';
 import { isSameFile } from './lib/same-file.js';
 
-// These four lists have a second consumer: the Web Shell review renderer
+// These four lists are DEFINED in core (`core/src/tools/report-findings.ts`,
+// the `report_findings` tool's contract) and re-exported here under this
+// module's historical names. They still have one further deliberate consumer:
+// the Web Shell review renderer
 // (packages/web-shell/client/components/artifacts/CodeReviewArtifactDetail.tsx)
-// keeps its own copy and fails closed on any value it does not know, so a
-// value added here breaks rendering of every saved artifact that carries one.
-// Update the renderer copy in the same change.
+// is a browser bundle that cannot import Node-side packages, keeps its own
+// copy, and fails closed on any value it does not know — so a value added in
+// core breaks rendering of every saved artifact that carries one. Update the
+// renderer copy in the same change.
 /** The severity ladder, most severe first — this array IS the sort order. */
-export const SEVERITIES = ['Critical', 'Suggestion', 'Nice to have'] as const;
+export const SEVERITIES = FINDING_SEVERITIES;
 export type Severity = (typeof SEVERITIES)[number];
 
-export const CONFIDENCES = ['high', 'low'] as const;
+export const CONFIDENCES = FINDING_CONFIDENCES;
 export type Confidence = (typeof CONFIDENCES)[number];
 
 /**
@@ -67,11 +78,11 @@ export type Confidence = (typeof CONFIDENCES)[number];
  * already handled" and takes it off. They are different claims about the code,
  * so they are different words, and the fixer has to pick one.
  */
-export const OUTCOMES = ['fixed', 'skipped', 'no_change_needed'] as const;
+export const OUTCOMES = FINDING_OUTCOMES;
 export type Outcome = (typeof OUTCOMES)[number];
 
 /** Where a finding came from — the tag that decides whether it was verified. */
-export const SOURCES = ['review', 'build', 'test', 'probe', 'lint'] as const;
+export const SOURCES = FINDING_SOURCES;
 export type Source = (typeof SOURCES)[number];
 
 /** One location a finding applies to. A pattern aggregate carries several. */
@@ -101,6 +112,41 @@ export interface Finding {
    */
   witness?: string;
   suggestedFix?: string;
+  /**
+   * The test that must go red if the fix is removed — the file and the
+   * behaviour it pins, or `N/A` when the fix adds no guard, branch or
+   * behaviour a test can pin.
+   *
+   * `witness` is the reviewer's evidence that the defect is real; this is the
+   * ACCEPTANCE CRITERION handed to whoever fixes it, and the two are not
+   * interchangeable. It exists because the fix round is the review loop's
+   * largest source of its own next round: measured across six multi-round
+   * pull requests, roughly a third of every post-first-round finding was
+   * introduced by the fix immediately preceding it, and the dominant shape
+   * was a guard or branch added with no test of its own. Carried as data for
+   * the same reason `witness` is — the report and the comment body quote one
+   * recorded string instead of transcribing it twice more.
+   */
+  fixWitness?: string;
+  /**
+   * An existing fact the fix must not violate, with its source — the quoted
+   * constant or a `file:line`: a configured limit any new bound must stay
+   * within, a second site that reads the field a shape change touches, a
+   * uniqueness a newly shared resource's key currently guarantees.
+   *
+   * `fixWitness` pins the fix's CLAIM — does it do what it says. This pins
+   * the fix's PREMISES — do the assumptions it newly introduces hold. Those
+   * are a different defect class and pass a witnessed test cleanly: two
+   * Criticals on one merged fix each had the test that reds without the
+   * guard, and were still wrong — a hand-picked lineage cap below the
+   * user-configurable `MAX_SUBAGENT_DEPTH_LIMIT`, and a shared registry that
+   * broke a `callId` uniqueness relied on elsewhere (#10153).
+   *
+   * Absence is the whole signal: there is no `N/A` form, because an empty
+   * constraint carries no information and would lengthen every comment, so
+   * the validator drops a literal `N/A` rather than carrying it.
+   */
+  fixConstraint?: string;
   /** Free-form kebab-case tag (`correctness`, `security`, `test-coverage`, …). */
   category?: string;
   /** Every location, in report order. A standalone finding has exactly one. */
@@ -144,20 +190,8 @@ export interface FindingsReport {
   outcomesRecorded: boolean;
 }
 
-/** `shortSummary`, when the caller did not supply one. */
-export function compressSummary(summary: string, max = 60): string {
-  // Collapse whitespace first: a summary that wrapped across lines in the source
-  // prose would otherwise carry its newlines into a single-line list cell.
-  const flat = summary.replace(/\s+/g, ' ').trim();
-  if (flat.length <= max) return flat;
-  // Cut on a word boundary when one is reasonably near the limit, so the label
-  // reads as a clause rather than a severed word. `max - 1` leaves room for the
-  // ellipsis, which is one character (U+2026), not three dots.
-  const head = flat.slice(0, max - 1);
-  const space = head.lastIndexOf(' ');
-  const cut = space >= max * 0.6 ? head.slice(0, space) : head;
-  return `${cut.trimEnd()}…`;
-}
+/** `shortSummary`, when the caller did not supply one. Defined in core. */
+export const compressSummary = compressFindingSummary;
 
 function fail(index: number, message: string): never {
   throw new Error(`Finding at index ${index}: ${message}`);
@@ -166,6 +200,18 @@ function fail(index: number, message: string): never {
 function asString(o: Record<string, unknown>, key: string): string | undefined {
   const v = o[key];
   return typeof v === 'string' && v.trim() !== '' ? v : undefined;
+}
+
+/** `N/A`, `n/a`, `NA`, `none`, `none observed`, `no constraints observed` —
+ * the placeholders a field with no `N/A` form must not carry; the two long
+ * ones are the exact omission literals the pipeline itself names, so the
+ * finder told to omit the line is the one the drop catches. Kept narrow on
+ * purpose: a real constraint quotes a constant or a `file:line`, and none
+ * of those collapse to one of these words. */
+function isNotApplicable(v: string): boolean {
+  return /^(none observed|no constraints observed|n\/?a|none)\.?$/i.test(
+    v.trim(),
+  );
 }
 
 /** A non-empty array of non-empty strings, or undefined; anything else fails
@@ -289,8 +335,23 @@ function parseLocations(
  * are derived or dropped, never demanded.
  */
 export function validateFindings(raw: unknown): Finding[] {
+  // Step 9 cleanup deletes the side files `--input` normally receives, but
+  // not the saved artifact (Step 8, under .qwen/reviews/) nor a surviving
+  // `--out` report — and both wrap the findings array. Accept the wrapper,
+  // so a later outcome path can recover from the state that survives the
+  // cleanup instead of dying on a missing findings-in.json.
+  if (
+    !Array.isArray(raw) &&
+    raw !== null &&
+    typeof raw === 'object' &&
+    Array.isArray((raw as { findings?: unknown }).findings)
+  ) {
+    raw = (raw as { findings: unknown }).findings;
+  }
   if (!Array.isArray(raw)) {
-    throw new Error('Input must be a JSON array of findings.');
+    throw new Error(
+      'Input must be a JSON array of findings, or a saved review artifact/report object carrying one as "findings".',
+    );
   }
   const findings = raw.map((r, i) => {
     if (r === null || typeof r !== 'object' || Array.isArray(r)) {
@@ -387,6 +448,24 @@ export function validateFindings(raw: unknown): Finding[] {
     // it back out of the artifact instead of transcribing the evidence again.
     const witness = asString(o, 'witness');
 
+    // And `fixWitness` round-trips beside it: the acceptance criterion is
+    // written once, at the finding, and read back by the comment body and by
+    // a later round comparing what it asked for against what landed.
+    const fixWitness = asString(o, 'fixWitness') ?? asString(o, 'fix_witness');
+
+    // And `fixConstraint` beside it — the existing fact the fix must not
+    // violate. Unlike `fixWitness` it has no `N/A` form: absence is the whole
+    // signal, and a finder that copies the sibling field's habit and writes
+    // `N/A` here would otherwise hand Step 7 a "constraint" to post. The
+    // literal is normalised to absence so the comment body can key on
+    // presence alone.
+    const fixConstraintRaw =
+      asString(o, 'fixConstraint') ?? asString(o, 'fix_constraint');
+    const fixConstraint =
+      fixConstraintRaw && !isNotApplicable(fixConstraintRaw)
+        ? fixConstraintRaw
+        : undefined;
+
     return {
       id,
       severity,
@@ -398,6 +477,8 @@ export function validateFindings(raw: unknown): Finding[] {
         : compressSummary(summary),
       failureScenario,
       ...(witness ? { witness } : {}),
+      ...(fixWitness ? { fixWitness } : {}),
+      ...(fixConstraint ? { fixConstraint } : {}),
       ...(asString(o, 'suggestedFix') || asString(o, 'suggested_fix')
         ? {
             suggestedFix: (asString(o, 'suggestedFix') ??
@@ -743,6 +824,13 @@ export function validateOutcomes(raw: unknown): OutcomeEntry[] {
           `expected one of ${OUTCOMES.map((s) => JSON.stringify(s)).join(', ')}.`,
       );
     }
+    // The report_findings contract refuses a skipped outcome the reader
+    // cannot inspect; the ledger feeding it must not accept one either.
+    if (outcome === 'skipped' && !asString(o, 'note')) {
+      throw new Error(
+        `Outcome for ${JSON.stringify(id)} is "skipped" with no note — the reader is owed the reason for work not done.`,
+      );
+    }
     return {
       id,
       outcome,
@@ -990,7 +1078,8 @@ export const findingsCommand: CommandModule = {
       .option('input', {
         type: 'string',
         demandOption: true,
-        describe: 'JSON array of findings written by the review',
+        describe:
+          'JSON array of findings written by the review (or a saved review artifact/report object carrying the array as "findings")',
       })
       .option('out', {
         type: 'string',

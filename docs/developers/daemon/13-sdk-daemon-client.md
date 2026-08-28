@@ -152,9 +152,9 @@ await client
   .setWorkspaceSkillEnabled('review', true, { clientId: 'dashboard-1' });
 ```
 
-Pre-flight `capabilities.features.includes('workspace_skill_toggle')`. The typed `DaemonSkillToggleResult` reports the canonical `skillName`, whether disk state `changed`, activation state (`applied`, `deferred`, or `partial`), and refreshed/failed session counts. `DaemonWorkspaceSkillStatus.userInvocable` is an optional false-only field; absence means the skill is user-invocable.
+Pre-flight `capabilities.features.includes('workspace_skill_settings_toggle')`. The typed `DaemonSkillToggleResult` reports the trimmed requested `skillName`, whether disk state `changed`, activation state (`applied`, `deferred`, or `partial`), and refreshed/failed session counts. The write is settings-only and does not require the name to appear in `DaemonWorkspaceSkillStatus`; that status type's optional false-only `userInvocable` field remains useful for rendering the live catalog but does not gate persistence. The retired `workspace_skill_toggle` tag described the earlier catalog-validated behavior and is not advertised for this contract.
 
-For batch changes, pre-flight `workspace_skill_batch_toggle` and call either client shape with the same contract:
+For batch changes, pre-flight `workspace_skill_settings_batch_toggle` and call either client shape with the same contract. The routes and request bodies are unchanged:
 
 ```ts
 await client.setWorkspaceSkillsEnabled(['review', 'deploy'], false, {
@@ -165,7 +165,27 @@ await client
   .setWorkspaceSkillsEnabled(['review', 'deploy'], true);
 ```
 
-`DaemonSkillBatchToggleResult` contains ordered successful `results`, per-target `errors`, and batch-level activation/session-refresh counts. The daemon persists valid targets together and refreshes active sessions once; one expected target error does not block other valid targets. The method throws only on a non-200 response; a 200 does not mean every target was applied, so always inspect `errors` before treating the batch as successful.
+`DaemonSkillBatchToggleResult` contains ordered `results`, a compatibility `errors` array, and batch-level activation/session-refresh counts. Current daemons process every structurally valid name in request order, persist all resulting declaration changes together in at most one locked settings write, refresh active sessions once when anything changed, and return an empty `errors` array without consulting the loaded Skill catalog. Enabling a name with no existing workspace declaration and no effective `skills.defaultDisabled` entry returns `changed: false` and performs no write. The error item types remain available so the SDK can still decode responses from older daemons. The method throws on a non-200 response.
+
+V2 Extension batch activation retains the asynchronous Extension operation model. Pre-flight `extension_batch_activation_v2`, submit a global default batch or a selected-workspace override batch, then poll it with the existing operation helper:
+
+```ts
+const globalHandle = await client.setExtensionDefaultActivations(
+  ['formatter', 'review-tools'],
+  'disabled',
+  'dashboard-1',
+);
+const workspaceHandle = await client
+  .workspaceByCwd('/work/secondary')
+  .setExtensionActivations(
+    ['formatter', 'review-tools'],
+    'inherit',
+    'dashboard-1',
+  );
+const operation = await client.waitForExtensionOperation(workspaceHandle);
+```
+
+The terminal operation result contains ordered `results`. Targets do not need to be installed when setting `enabled` or `disabled`: the daemon stores a name declaration and preserves that activation policy when an Extension with that name is installed later. All changed targets share one Extension Store generation and one reconciliation pass. Global default batches reconcile every registered runtime; workspace batches resolve and reconcile only the selected trusted runtime. Workspace `inherit` clears the exact override but does not create a declaration for an unknown name; an all-unknown clear succeeds as a no-op without reconciliation. Singular activation methods remain installed-only.
 
 Workspace display names are optional presentation metadata. Pre-flight `capabilities.features.includes('workspace_display_name')`; workspace ids and canonical paths remain the only selectors, and duplicate display names are valid.
 
@@ -392,7 +412,7 @@ When `workspace_session_export` is advertised, `client.workspaceById(workspaceId
 
 When `workspace_archived_session_export` is advertised, use `client.workspaceById(workspaceId).exportArchivedSession(sessionId, { format })` or the corresponding `workspaceByCwd` method to export only the selected workspace's archived persisted transcript. The method uses the same result type and native REST behavior as active export, but it never falls back to an active session; support cannot be inferred from any active export capability.
 
-When `workspace_session_live_state` is advertised, `client.getWorkspaceSessionLiveState(workspaceCwd)` or the scoped `client.workspaceById(workspaceId).getSessionLiveState()` / `client.workspaceByCwd(workspaceCwd).getSessionLiveState()` reads the selected trusted workspace's memory-only live-session snapshot plus its catalog version, returning `DaemonWorkspaceSessionLiveState` (`{ v: 1, catalogVersion: DaemonSessionCatalogVersion, sessions: DaemonSessionLiveState[] }`). These methods always use native REST with bearer authentication and an encoded workspace selector, preserve optional client identity, and use the existing short-request timeout. They do not call `requireCapability()` — a capability probe on every poll would double request volume — so consumers pre-flight `workspace_session_live_state` once from their already-loaded capabilities and fall back to existing catalog polling when the tag is absent. Do not infer support from `workspace_qualified_rest_core`.
+When `workspace_session_live_state` is advertised, `client.getWorkspaceSessionLiveState(workspaceCwd)` or the scoped `client.workspaceById(workspaceId).getSessionLiveState()` / `client.workspaceByCwd(workspaceCwd).getSessionLiveState()` reads the selected trusted workspace's memory-only live-session snapshot plus its catalog version, returning `DaemonWorkspaceSessionLiveState` (`{ v: 1, catalogVersion: DaemonSessionCatalogVersion, sessions: DaemonSessionLiveState[] }`). These methods always use native REST with bearer authentication and an encoded workspace selector, preserve optional client identity, and use the existing short-request timeout. They do not call `requireCapability()` — a capability probe on every poll would double request volume — so consumers pre-flight `workspace_session_live_state` once from their already-loaded capabilities and fall back to existing catalog polling when the tag is absent. Do not infer support from `workspace_qualified_rest_core`. Each `DaemonSessionLiveState` carries an optional `updatedAt` activity watermark that lets a consumer refresh the recency of a catalog row it already holds instead of reloading the catalog after a completed turn; it is absent before the first running-turn terminal in the current bridge and after a daemon or runtime replacement, so a consumer must keep its existing catalog fallback for a missing value rather than treating absence as unsupported.
 
 ### Seeding `lastEventId` at Construction
 

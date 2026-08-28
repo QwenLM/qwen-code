@@ -170,7 +170,6 @@ describe('DiscoveredMCPTool', () => {
             [INVOCATION_CONTEXT_META_KEY]: invocationContext,
           },
         },
-        undefined,
         expect.objectContaining({ onprogress: expect.any(Function) }),
       );
     });
@@ -921,7 +920,7 @@ describe('DiscoveredMCPTool', () => {
       it('forwards parent abort into the combined signal passed to the direct SDK client', async () => {
         let capturedSignal: AbortSignal | undefined;
         const mockDirectCallTool = vi.fn<McpDirectClient['callTool']>(
-          async (_params, _schema, options) => {
+          async (_params, options) => {
             capturedSignal = options?.signal;
             return new Promise(() => {});
           },
@@ -1148,6 +1147,181 @@ describe('DiscoveredMCPTool', () => {
       const invocation = tool.build(params);
       const description = invocation.getDescription();
       expect(description).toBe('{"param":"testValue","param2":"anotherOne"}');
+    });
+  });
+
+  describe('MCP Apps display', () => {
+    const createAppTool = (
+      mcpClient: McpDirectClient,
+      appResourceUi?: Record<string, unknown>,
+    ) =>
+      new DiscoveredMCPTool(
+        mockCallableToolInstance,
+        serverName,
+        serverToolName,
+        baseDescription,
+        inputSchema,
+        undefined,
+        undefined,
+        undefined,
+        mcpClient,
+        undefined,
+        undefined,
+        undefined,
+        false,
+        false,
+        'ui://demo/dashboard',
+        appResourceUi,
+      );
+
+    it('loads an MCP App resource without changing model-visible content', async () => {
+      const mcpClient: McpDirectClient = {
+        callTool: vi.fn(async () => ({
+          content: [{ type: 'text', text: 'Dashboard ready' }],
+          structuredContent: { revenue: 42 },
+        })),
+        readResource: vi.fn(async () => ({
+          contents: [
+            {
+              uri: 'ui://demo/dashboard',
+              mimeType: 'text/html;profile=mcp-app',
+              text: '<main>Revenue</main>',
+              _meta: {
+                ui: {
+                  csp: { connectDomains: ['https://api.example.com'] },
+                  permissions: { clipboardWrite: {} },
+                },
+              },
+            },
+          ],
+        })),
+      };
+
+      const result = await createAppTool(mcpClient)
+        .build({ param: 'test' })
+        .execute(new AbortController().signal);
+
+      expect(result.llmContent).toEqual([{ text: 'Dashboard ready' }]);
+      expect(result.returnDisplay).toMatchObject({
+        type: 'mcp_app',
+        resourceUri: 'ui://demo/dashboard',
+        html: '<main>Revenue</main>',
+        toolArguments: { param: 'test' },
+        fallbackText: 'Dashboard ready',
+        csp: { connectDomains: ['https://api.example.com'] },
+        permissions: { clipboardWrite: {} },
+      });
+    });
+
+    it('uses listing-level app metadata when resources/read omits content _meta', async () => {
+      const mcpClient: McpDirectClient = {
+        callTool: vi.fn(async () => ({
+          content: [{ type: 'text', text: 'Dashboard ready' }],
+        })),
+        readResource: vi.fn(async () => ({
+          contents: [
+            {
+              uri: 'ui://demo/dashboard',
+              mimeType: 'text/html;profile=mcp-app',
+              text: '<main>Revenue</main>',
+            },
+          ],
+        })),
+      };
+
+      const result = await createAppTool(mcpClient, {
+        csp: { connectDomains: ['https://api.example.com'] },
+        permissions: { clipboardWrite: {} },
+      })
+        .build({ param: 'test' })
+        .execute(new AbortController().signal);
+
+      expect(result.returnDisplay).toMatchObject({
+        type: 'mcp_app',
+        html: '<main>Revenue</main>',
+        csp: { connectDomains: ['https://api.example.com'] },
+        permissions: { clipboardWrite: {} },
+      });
+    });
+
+    it('lets content-level app metadata win over listing-level defaults', async () => {
+      const mcpClient: McpDirectClient = {
+        callTool: vi.fn(async () => ({
+          content: [{ type: 'text', text: 'Dashboard ready' }],
+        })),
+        readResource: vi.fn(async () => ({
+          contents: [
+            {
+              uri: 'ui://demo/dashboard',
+              mimeType: 'text/html;profile=mcp-app',
+              text: '<main>Revenue</main>',
+              _meta: {
+                ui: {
+                  csp: { connectDomains: ['https://content.example.com'] },
+                },
+              },
+            },
+          ],
+        })),
+      };
+
+      const result = await createAppTool(mcpClient, {
+        csp: { connectDomains: ['https://listing.example.com'] },
+        permissions: { clipboardWrite: {} },
+      })
+        .build({ param: 'test' })
+        .execute(new AbortController().signal);
+
+      expect(result.returnDisplay).toMatchObject({
+        type: 'mcp_app',
+        csp: { connectDomains: ['https://content.example.com'] },
+      });
+      expect(
+        (result.returnDisplay as { permissions?: unknown }).permissions,
+      ).toBeUndefined();
+    });
+
+    it('falls back to the normal tool text when the app resource is invalid', async () => {
+      const mcpClient: McpDirectClient = {
+        callTool: vi.fn(async () => ({
+          content: [{ type: 'text', text: 'Dashboard ready' }],
+        })),
+        readResource: vi.fn(async () => ({
+          contents: [
+            {
+              uri: 'ui://demo/dashboard',
+              mimeType: 'text/html',
+              text: '<main>Wrong MIME</main>',
+            },
+          ],
+        })),
+      };
+
+      const result = await createAppTool(mcpClient)
+        .build({ param: 'test' })
+        .execute(new AbortController().signal);
+
+      expect(result.returnDisplay).toBe('Dashboard ready');
+    });
+
+    it('keeps the tool result when aborting the optional app resource fetch', async () => {
+      const controller = new AbortController();
+      const mcpClient: McpDirectClient = {
+        callTool: vi.fn(async () => ({
+          content: [{ type: 'text', text: 'Dashboard ready' }],
+        })),
+        readResource: vi.fn(async () => {
+          controller.abort();
+          throw new DOMException('Aborted', 'AbortError');
+        }),
+      };
+
+      const result = await createAppTool(mcpClient)
+        .build({ param: 'test' })
+        .execute(controller.signal);
+
+      expect(result.llmContent).toEqual([{ text: 'Dashboard ready' }]);
+      expect(result.returnDisplay).toBe('Dashboard ready');
     });
   });
 
@@ -1391,7 +1565,7 @@ describe('DiscoveredMCPTool', () => {
       // When callTool is called with an onprogress callback, it invokes
       // the callback to simulate the MCP server sending progress updates.
       const mockMcpClient: McpDirectClient = {
-        callTool: vi.fn(async (_params, _schema, options) => {
+        callTool: vi.fn(async (_params, options) => {
           // Simulate 3 progress notifications from the MCP server
           for (let i = 1; i <= 3; i++) {
             await new Promise((resolve) => setTimeout(resolve, 10));
@@ -1472,7 +1646,7 @@ describe('DiscoveredMCPTool', () => {
       ];
 
       const mockMcpClient: McpDirectClient = {
-        callTool: vi.fn(async (_params, _schema, options) => {
+        callTool: vi.fn(async (_params, options) => {
           for (let i = 0; i < steps.length; i++) {
             await new Promise((resolve) => setTimeout(resolve, 10));
             options?.onprogress?.({
@@ -1806,12 +1980,13 @@ describe('DiscoveredMCPTool', () => {
         tool: vi.fn(),
         callTool: vi.fn().mockRejectedValueOnce(new Error('Connection closed')),
       } as unknown as Mocked<CallableTool>;
-      const discoverToolsForServer = vi.fn();
+      const discoverToolsForServer = vi.fn().mockResolvedValue(undefined);
+      const ensureTool = vi.fn();
       const mockConfig = {
         isTrustedFolder: () => true,
         getToolRegistry: () => ({
           discoverToolsForServer,
-          ensureTool: vi.fn(),
+          ensureTool,
         }),
       };
       const unsafeTool = new DiscoveredMCPTool(
@@ -1836,8 +2011,12 @@ describe('DiscoveredMCPTool', () => {
           .execute(new AbortController().signal),
       ).rejects.toThrow(unsafeReplayErrorMessage);
 
+      // The call itself is never replayed (its outcome is ambiguous)...
       expect(initialCallable.callTool).toHaveBeenCalledTimes(1);
-      expect(discoverToolsForServer).not.toHaveBeenCalled();
+      // ...but the dead connection is still repaired so the next call can
+      // succeed (issue #9944).
+      expect(discoverToolsForServer).toHaveBeenCalledTimes(1);
+      expect(ensureTool).toHaveBeenCalledTimes(1);
     });
 
     it.each<{
@@ -1890,7 +2069,7 @@ describe('DiscoveredMCPTool', () => {
             new Error('Connection closed after side effect completed'),
           ),
       };
-      const discoverToolsForServer = vi.fn();
+      const discoverToolsForServer = vi.fn().mockResolvedValue(undefined);
       const ensureTool = vi.fn();
       const mockConfig = {
         isTrustedFolder: () => testCase.trustedFolder,
@@ -1918,9 +2097,154 @@ describe('DiscoveredMCPTool', () => {
           .execute(new AbortController().signal),
       ).rejects.toThrow(unsafeReplayErrorMessage);
 
+      // No replay of the ambiguous call...
       expect(initialClient.callTool).toHaveBeenCalledTimes(1);
-      expect(discoverToolsForServer).not.toHaveBeenCalled();
-      expect(ensureTool).not.toHaveBeenCalled();
+      // ...but the connection is still repaired best-effort so the next
+      // call does not inherit the dead session (issue #9944).
+      expect(discoverToolsForServer).toHaveBeenCalledTimes(1);
+      expect(ensureTool).toHaveBeenCalledTimes(1);
+    });
+
+    it('repairs the session of an unannotated tool after the server restarted (issue #9944)', async () => {
+      // An HTTP MCP server that restarted comes back with a fresh
+      // `mcp-session-id` space and answers our stale session with
+      // `-32001 "Session not found"`. The tool carries no
+      // readOnlyHint/idempotentHint annotations, so pre-fix the reconnect
+      // path never ran and the tool stayed unusable until a full session
+      // restart. The ambiguous call must still not be replayed — but the
+      // session repair (fresh initialize + tool reload) has to happen.
+      const sessionNotFoundError = Object.assign(
+        new Error(
+          'Error POSTing to endpoint: {"jsonrpc":"2.0","error":{"code":-32001,"message":"Session not found"},"id":null}',
+        ),
+        { code: -32001 },
+      );
+      const initialClient: McpDirectClient = {
+        callTool: vi.fn().mockRejectedValueOnce(sessionNotFoundError),
+      };
+      const discoverToolsForServer = vi.fn().mockResolvedValue(undefined);
+      const ensureTool = vi.fn();
+      const mockConfig = {
+        isTrustedFolder: () => true,
+        getToolRegistry: () => ({ discoverToolsForServer, ensureTool }),
+      };
+      const tool = new DiscoveredMCPTool(
+        mockCallableToolInstance,
+        serverName,
+        serverToolName,
+        baseDescription,
+        inputSchema,
+        true,
+        undefined,
+        mockConfig as any,
+        initialClient,
+        undefined,
+        undefined,
+        undefined, // no annotations
+      );
+
+      updateMCPServerStatus(serverName, MCPServerStatus.DISCONNECTED);
+      await expect(
+        tool.build({ param: 'test' }).execute(new AbortController().signal),
+      ).rejects.toThrow(unsafeReplayErrorMessage);
+
+      expect(initialClient.callTool).toHaveBeenCalledTimes(1);
+      expect(discoverToolsForServer).toHaveBeenCalledWith(serverName);
+      expect(ensureTool).toHaveBeenCalledTimes(1);
+    });
+
+    it.each(['Session not found', 'Session terminated', 'Session expired'])(
+      'routes "%s" to the reconnect path even while the status is still CONNECTED (issue #9944)',
+      async (sessionMessage) => {
+        // Servers that keep no GET SSE stream never flip the client status
+        // to DISCONNECTED when the session dies; the stale `-32001` code
+        // would then be misread as an execution timeout and the reconnect
+        // path would never run. The session-error carve-out must win for
+        // every dead-session phrasing a server may use — not just
+        // "Session not found" — so all three variants exercise it.
+        const sessionError = Object.assign(
+          new Error(
+            `Error POSTing to endpoint: {"jsonrpc":"2.0","error":{"code":-32001,"message":"${sessionMessage}"},"id":null}`,
+          ),
+          { code: -32001 },
+        );
+        const initialClient: McpDirectClient = {
+          callTool: vi.fn().mockRejectedValueOnce(sessionError),
+        };
+        const discoverToolsForServer = vi.fn().mockResolvedValue(undefined);
+        const ensureTool = vi.fn();
+        const mockConfig = {
+          isTrustedFolder: () => true,
+          getToolRegistry: () => ({ discoverToolsForServer, ensureTool }),
+        };
+        const tool = new DiscoveredMCPTool(
+          mockCallableToolInstance,
+          serverName,
+          serverToolName,
+          baseDescription,
+          inputSchema,
+          true,
+          undefined,
+          mockConfig as any,
+          initialClient,
+          undefined,
+          undefined,
+          undefined, // no annotations → no replay, but repair must still run
+        );
+
+        updateMCPServerStatus(serverName, MCPServerStatus.CONNECTED);
+        await expect(
+          tool.build({ param: 'test' }).execute(new AbortController().signal),
+        ).rejects.toThrow(unsafeReplayErrorMessage);
+
+        expect(discoverToolsForServer).toHaveBeenCalledWith(serverName);
+      },
+    );
+
+    it('routes an HTTP 404 dead-session response to the reconnect path even with unenumerated prose (issue #9944)', async () => {
+      // Per spec, a restarted HTTP server MUST answer a POST carrying a
+      // stale `mcp-session-id` with 404 (the SDK surfaces it as a
+      // StreamableHTTPError whose `code` is the HTTP status); the prose it
+      // wraps the 404 in is server-defined. "Unknown session" matches none
+      // of the enumerated `MCP_DEAD_SESSION_ERROR_PATTERN` phrasings, so
+      // only the structural `code: 404` signal can trigger recovery here —
+      // without it every subsequent call re-POSTs the stale session id and
+      // fails.
+      const unknownSessionError = Object.assign(new Error('Unknown session'), {
+        code: 404,
+      });
+      const initialClient: McpDirectClient = {
+        callTool: vi.fn().mockRejectedValueOnce(unknownSessionError),
+      };
+      const discoverToolsForServer = vi.fn().mockResolvedValue(undefined);
+      const ensureTool = vi.fn();
+      const mockConfig = {
+        isTrustedFolder: () => true,
+        getToolRegistry: () => ({ discoverToolsForServer, ensureTool }),
+      };
+      const tool = new DiscoveredMCPTool(
+        mockCallableToolInstance,
+        serverName,
+        serverToolName,
+        baseDescription,
+        inputSchema,
+        true,
+        undefined,
+        mockConfig as any,
+        initialClient,
+        undefined,
+        undefined,
+        undefined, // no annotations → no replay, but repair must still run
+      );
+
+      updateMCPServerStatus(serverName, MCPServerStatus.CONNECTED);
+      await expect(
+        tool.build({ param: 'test' }).execute(new AbortController().signal),
+      ).rejects.toThrow(unsafeReplayErrorMessage);
+
+      expect(initialClient.callTool).toHaveBeenCalledTimes(1);
+      expect(discoverToolsForServer).toHaveBeenCalledWith(serverName);
+      expect(ensureTool).toHaveBeenCalledTimes(1);
     });
 
     it('should not retry on non-connection errors', async () => {
@@ -2464,7 +2788,7 @@ describe('DiscoveredMCPTool', () => {
       const discoverToolsForServer = vi.fn();
       const mockMcpClient: McpDirectClient = {
         callTool: vi.fn().mockImplementation(
-          (_params, _schema, options) =>
+          (_params, options) =>
             new Promise((_resolve, reject) => {
               options?.signal?.addEventListener(
                 'abort',
@@ -2588,7 +2912,7 @@ describe('DiscoveredMCPTool', () => {
       const idleTimeoutMs = 1000; // 1 second for testing
       const mockMcpClient: McpDirectClient = {
         callTool: vi.fn().mockImplementation(
-          (_params, _schema, options) =>
+          (_params, options) =>
             new Promise((_resolve, reject) => {
               // Simulate SDK behavior: reject when signal is aborted
               options?.signal?.addEventListener('abort', () => {
@@ -2642,7 +2966,7 @@ describe('DiscoveredMCPTool', () => {
         const idleTimeoutMs = 1000;
         const mockMcpClient: McpDirectClient = {
           callTool: vi.fn().mockImplementation(
-            (_params, _schema, options) =>
+            (_params, options) =>
               new Promise((_resolve, reject) => {
                 options?.signal?.addEventListener('abort', () => {
                   queueMicrotask(() => reject(options.signal?.reason));
@@ -2686,7 +3010,7 @@ describe('DiscoveredMCPTool', () => {
       let onProgressCallback: ((progress: any) => void) | undefined;
 
       const mockMcpClient: McpDirectClient = {
-        callTool: vi.fn().mockImplementation((_params, _schema, options) => {
+        callTool: vi.fn().mockImplementation((_params, options) => {
           onProgressCallback = options?.onprogress;
           return new Promise((resolve, reject) => {
             // Listen for abort signal to properly reject when timeout fires

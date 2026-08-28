@@ -742,7 +742,10 @@ const ZH_DONE = '(?:均|都|皆)?(?:已|均已|都已)?(?:完成|完毕|结束|�
 const ZH_BUDGET_TAIL =
   '(?:[，,、]?\\s*(?:未触及|未达到|未超出|未用尽|没有触及|在|不超过)' +
   '(?:工具)?(?:调用)?预算(?:上限|限制|范围内)?)?';
-const ZH_TAIL = '[。．.!！…,，;；:：\\s]*$';
+// ？ (U+FF1F) and 、 (U+3001) mirror the fold key's trailing strip:
+// a wrapped placeholder's inner text must judge identically to its
+// bare form, which loses those tails before the classifier sees it.
+const ZH_TAIL = '[。．.!！…,，;；:：？、\\s]*$';
 // NO whitespace between the pieces. Four optional groups chained across `\s*`
 // is the overlapping-quantifier shape this module's header bans and its
 // 'stays linear on pathological inputs' test exists for — and Chinese does not
@@ -818,7 +821,15 @@ function stripWrappers(s: string): string {
   return out;
 }
 
-const TRAILING_GAP_CHAR_RE = /[.!…,;:\s]/;
+// Both scripts' trailing punctuation: the fold key promises that a gap
+// restated with and without a trailing stop discloses once, and a key that
+// stripped only the ASCII set kept `渗透测试未进行。` and `渗透测试未进行` as
+// two gaps — double-spending MAX_GAPS_PER_AGENT slots in exactly the
+// output language the ZH branch exists for. The class mirrors ZH_TAIL's
+// full stop set — including the fullwidth full stop ．(U+FF0E) beside 。
+// (U+3002): the classifier treats both as trailing, and a fold key that
+// dropped only one of them kept the double-spend open for the other.
+const TRAILING_GAP_CHAR_RE = /[.!…,;:\s。，；：！？、．]/;
 
 /** Trailing punctuation/whitespace strip for the normalize and fold keys. */
 function stripTrailingGapChars(s: string): string {
@@ -882,17 +893,30 @@ export function budgetGapDisclosures(finalText: string): string[] {
     const normalized = stripTrailingGapChars(raw).trim();
     // Judged on the paren-stripped text, bare and wrapped alike, by the
     // one strict classifier — its doc names why the shapes are narrow.
-    const unparenthesized =
-      normalized.startsWith('(') && normalized.endsWith(')')
+    // Both paren shapes: under `outputLanguage: 中文` the full-width pair
+    // （U+FF08/U+FF09）is what an IME produces, and a strip that knew only
+    // the ASCII pair let `（无 — 所有检查均完成）` through as a phantom gap —
+    // the #9094 incident shape this classifier exists to kill, surviving
+    // in exactly the output language the ZH branch was added for. Only a
+    // SYMMETRIC pair is unwrapped, so a mixed or unbalanced wrap stays
+    // whole and errs toward disclosure. The inner text is trailing-stripped
+    // exactly as the bare form already was (`normalized` above): the EN tail
+    // classes are ASCII-only, so a wrapped `none。` kept its CJK tail and
+    // survived as a phantom while its identical bare twin dropped — one
+    // normalize, one judgment, bare and wrapped alike.
+    const unparenthesized = stripTrailingGapChars(
+      (normalized.startsWith('(') && normalized.endsWith(')')) ||
+        (normalized.startsWith('（') && normalized.endsWith('）'))
         ? normalized.slice(1, -1).trim()
-        : normalized;
+        : normalized,
+    );
     if (normalized.length === 0 || PLACEHOLDER_GAP_RE.test(unparenthesized)) {
       continue;
     }
-    // Folded on the paren-stripped text with its OWN trailing punctuation
-    // gone, so one gap restated with and without parentheses — `(auth
-    // flow untested.)` and `auth flow untested` — discloses once.
-    const key = stripTrailingGapChars(unparenthesized).toLowerCase();
+    // Folded on the same normalized text the classifier judged, so one gap
+    // restated with and without parentheses — `(auth flow untested.)` and
+    // `auth flow untested` — discloses once.
+    const key = unparenthesized.toLowerCase();
     if (seen.has(key)) continue;
     seen.add(key);
     gaps.push(truncateGap(raw));

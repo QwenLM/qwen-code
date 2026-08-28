@@ -448,12 +448,30 @@ finding, not a pass.
 Report the mutation matrix **including the mutations that changed nothing**:
 one row per guard the PR introduces, the suite that should catch it, and
 pinned / not-pinned. Survivors are not noise — classify each as an ordinary
-**coverage gap** (the behaviour is right, nothing asserts it) or as **dead
-code** (the clause cannot decide any outcome), and say which. A guard whose
-deletion leaves every test green is one of those two things, and the
-difference matters to the author. Where a survivor mirrors a pre-existing gap
+**coverage gap** (the behaviour is right, nothing asserts it), as **dead
+code** (the clause cannot decide any outcome), or as **redundant defence** (a
+sibling hunk in this same PR closes the same hazard, so nothing can observe
+this one alone), and say which. A guard whose deletion leaves every test
+green is one of those three, and the difference matters to the author: the
+first is a test to write, the second is code to delete, and the third is
+correct exactly as it stands. Where a survivor mirrors a pre-existing gap
 rather than something the PR introduced, say so — and label the whole set as
 completeness reporting, not merge conditions, unless one of them is load-bearing.
+
+**Layered guards hide each other — revert the set, not only the hunk.** A
+one-row-per-guard matrix is blind to defence in depth, which is exactly the
+shape a careful author ships: two hunks closing one hazard from different
+directions. Revert either alone and the other still holds the line, so both
+rows read "survived" and the matrix reports two coverage gaps that do not
+exist. When two or more hunks in the PR defend the same hazard, add a
+**combination row** that reverts the set together. A hazard that appears only
+in the combination row is the proof the set is load-bearing, and it
+reclassifies every single-hunk survivor in that set as redundant defence.
+Measured example: on a session-list change, reverting the every-page live
+merge alone changed nothing and reverting the emitted-identity cursor alone
+changed nothing, while reverting both returned one session twice across a
+paginated walk — a duplicate neither single-hunk row could see, on a PR whose
+two guards were both correct.
 
 **A surviving mutation needs a positive control before it becomes a
 finding.** An unmutated green run proves the suite passes; it does not prove
@@ -464,6 +482,18 @@ worth believing only because a third mutation, deleting a clause a known
 test pins, turned exactly one test red. Without that row, "your suite does
 not cover this" and "my harness never ran your suite" are the same
 observation.
+
+**Land that control in the same file as the mutant.** A control that turns a
+test red somewhere else proves the runner runs; it does not prove the command
+you chose collects anything that exercises the file you mutated. Measured
+example: deleting a route's entire response projection left all 1021 tests of
+its package's main server suite green, and the survivor was on its way into
+the report as a coverage gap — the coverage lived in a second test file the
+chosen command never collected, and running that one turned three tests red.
+Six other mutations in the same round were all caught, so the harness-level
+control was green the whole time and said nothing about this one. Either land
+the control in the mutated file, or show that the chosen command collects at
+least one test that imports it.
 
 The mutation runs in reverse too: when the round produces a **candidate
 further fix** (a sibling shape closed, a guard tightened), apply it in a

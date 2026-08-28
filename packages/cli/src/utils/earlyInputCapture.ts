@@ -232,7 +232,7 @@ function shouldReplayPendingAtStop(pending: Buffer): boolean {
 
 /**
  * Start early input capture
- * Call immediately after setting raw mode in gemini.tsx
+ * Call immediately after setting raw mode in llm.tsx
  */
 export function startEarlyInputCapture(): void {
   if (isCapturing || !process.stdin.isTTY) {

@@ -47,6 +47,7 @@ const LOCAL_OPENAI_NO_PROXY = IS_CONTAINER_SANDBOX
   : '127.0.0.1,localhost';
 const FAKE_SERVER_OPTIONS = fakeServerHostOptions();
 const INITIAL_CONTENT = 'original content';
+let isolatedQwenHome: string;
 
 function fakeModelOptions(baseUrl: string) {
   return {
@@ -59,6 +60,7 @@ function fakeModelOptions(baseUrl: string) {
       OPENAI_BASE_URL: baseUrl,
       OPENAI_MODEL: 'fake-model',
       QWEN_MODEL: 'fake-model',
+      QWEN_HOME: isolatedQwenHome,
     },
   };
 }
@@ -83,8 +85,19 @@ describe('Tool Control Parameters (E2E)', () => {
   beforeEach(async () => {
     helper = new SDKTestHelper();
     testDir = await helper.setup('tool-control', {
-      settings: { fastModel: 'openai:fake-model' },
+      settings: {
+        fastModel: 'openai:fake-model',
+        memory: {
+          enableManagedAutoMemory: false,
+          enableManagedAutoDream: false,
+        },
+        // list_directory is opt-in (disabled by default). This suite tests
+        // coreTools/excludeTools control semantics, so keep it enabled here;
+        // an active coreTools allowlist still outranks this flag.
+        tools: { listDirectory: { enabled: true } },
+      },
     });
+    isolatedQwenHome = await helper.mkdir('global-qwen-home');
   });
 
   afterEach(async () => {
@@ -162,7 +175,7 @@ describe('Tool Control Parameters (E2E)', () => {
           expect(listDirectoryResults).toHaveLength(1);
           expect(listDirectoryResults[0]).toMatchObject({
             isError: true,
-            content: expect.stringContaining('was declined'),
+            content: expect.stringContaining('active core tools allowlist'),
           });
           expect(advertisedTools).not.toContain('list_directory');
 
@@ -1281,7 +1294,7 @@ describe('Tool Control Parameters (E2E)', () => {
           expect(shellResults).toHaveLength(1);
           expect(shellResults[0]).toMatchObject({
             isError: true,
-            content: expect.stringContaining('was declined'),
+            content: expect.stringContaining('active core tools allowlist'),
           });
           expect(advertisedTools).not.toContain('run_shell_command');
 
@@ -1466,7 +1479,7 @@ describe('Tool Control Parameters (E2E)', () => {
           expect(editResults).toHaveLength(1);
           expect(editResults[0]).toMatchObject({
             isError: true,
-            content: expect.stringContaining('was declined'),
+            content: expect.stringContaining('active core tools allowlist'),
           });
           expect(advertisedTools).not.toContain('edit');
 
@@ -2435,6 +2448,175 @@ describe('Tool Control Parameters (E2E)', () => {
           const content = await helper.readFile('data.txt');
           expect(content).toContain('initial data');
           expect(content).toContain(' - updated');
+        } finally {
+          await q.close();
+          await fakeServer.close();
+        }
+      },
+      TEST_TIMEOUT,
+    );
+  });
+
+  // Regression guard for #10075: a pre-existing `permissions.allow`
+  // allowlist must not silently remove uncovered built-in tools (0.22.1
+  // unregistered them — absent from /tools, unfindable via tool_search,
+  // permission-errored at call time). Since the fix they are demoted to
+  // deferred: their schemas stay out of the eager model request (#9827
+  // schema-shrink preserved) but they remain registered, discoverable via
+  // tool_search, and callable through the normal approval flow.
+  describe('permissions.allow registry allowlist from settings (#10075)', () => {
+    beforeEach(async () => {
+      testDir = await helper.setup('tool-control-allowlist-10075', {
+        settings: {
+          fastModel: 'openai:fake-model',
+          // Covers read_file + shell family only — write_file/edit stay
+          // uncovered, exactly the reporter's configuration shape.
+          permissions: { allow: ['ReadFile', 'Shell'] },
+        },
+      });
+    });
+
+    it(
+      'keeps uncovered tools callable while excluding their schemas from the eager request',
+      async () => {
+        await helper.createFile('test.txt', INITIAL_CONTENT);
+
+        const fakeServer = await startFakeOpenAIServer(({ requestIndex }) => {
+          if (requestIndex === 0) {
+            return {
+              toolCalls: [
+                fakeToolCall(
+                  'read_file',
+                  { file_path: helper.getPath('test.txt') },
+                  'read-covered',
+                ),
+                // Uncovered by the allowlist — before the fix this was
+                // permission-errored ("not covered by any permissions.allow
+                // rule"), now it must run through the normal approval flow.
+                fakeToolCall(
+                  'write_file',
+                  {
+                    file_path: helper.getPath('test.txt'),
+                    content: 'modified',
+                  },
+                  'write-uncovered',
+                ),
+              ],
+            };
+          }
+          return { content: 'Done.' };
+        }, FAKE_SERVER_OPTIONS);
+
+        const q = query({
+          prompt: 'Read test.txt, then write "modified" to test.txt.',
+          options: {
+            ...SHARED_TEST_OPTIONS,
+            ...fakeModelOptions(fakeServer.baseUrl),
+            cwd: testDir,
+            permissionMode: 'yolo',
+            debug: false,
+          },
+        });
+
+        const messages: SDKMessage[] = [];
+
+        try {
+          for await (const message of q) {
+            messages.push(message);
+          }
+
+          // Schema-shrink side (#9827): the covered tool is in the eager
+          // request, the uncovered one is not.
+          const advertisedTools = advertisedToolNames(fakeServer);
+          expect(advertisedTools).toContain('read_file');
+          expect(advertisedTools).not.toContain('write_file');
+          expect(advertisedTools).not.toContain('edit');
+
+          // Capability side (#10075): the uncovered tool is still
+          // registered and executes instead of being permission-errored.
+          const toolNames = findToolCalls(messages).map(
+            (tc) => tc.toolUse.name,
+          );
+          expect(toolNames).toContain('write_file');
+
+          const writeResults = findToolResults(messages, 'write_file');
+          expect(writeResults.length).toBeGreaterThan(0);
+          for (const result of writeResults) {
+            expect(result.isError).toBe(false);
+            expect(result.content).not.toContain('permissions.allow');
+          }
+        } finally {
+          await q.close();
+          await fakeServer.close();
+        }
+      },
+      TEST_TIMEOUT,
+    );
+
+    it(
+      'discovers and loads an uncovered tool via tool_search',
+      async () => {
+        const fakeServer = await startFakeOpenAIServer(({ requestIndex }) => {
+          if (requestIndex === 0) {
+            // The model does not see write_file in the eager request; it
+            // discovers it on demand via tool_search.
+            return {
+              toolCalls: [
+                fakeToolCall(
+                  'tool_search',
+                  { query: 'select:write_file' },
+                  'search-write',
+                ),
+              ],
+            };
+          }
+          if (requestIndex === 1) {
+            return {
+              toolCalls: [
+                fakeToolCall(
+                  'write_file',
+                  {
+                    file_path: helper.getPath('created.txt'),
+                    content: 'modified',
+                  },
+                  'write-after-search',
+                ),
+              ],
+            };
+          }
+          return { content: 'Done.' };
+        }, FAKE_SERVER_OPTIONS);
+
+        const q = query({
+          prompt: 'Find the write tool and create created.txt.',
+          options: {
+            ...SHARED_TEST_OPTIONS,
+            ...fakeModelOptions(fakeServer.baseUrl),
+            cwd: testDir,
+            permissionMode: 'yolo',
+            debug: false,
+          },
+        });
+
+        const messages: SDKMessage[] = [];
+
+        try {
+          for await (const message of q) {
+            messages.push(message);
+          }
+
+          // tool_search loads the deferred tool (it must be registered, or
+          // the lookup would report it missing).
+          const searchResults = findToolResults(messages, 'tool_search');
+          expect(searchResults.length).toBeGreaterThan(0);
+          expect(searchResults[0].isError).toBe(false);
+
+          // After discovery the tool executes normally.
+          const writeResults = findToolResults(messages, 'write_file');
+          expect(writeResults.length).toBeGreaterThan(0);
+          for (const result of writeResults) {
+            expect(result.isError).toBe(false);
+          }
         } finally {
           await q.close();
           await fakeServer.close();

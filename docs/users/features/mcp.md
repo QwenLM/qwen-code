@@ -261,6 +261,28 @@ The existing `timeout` field is **tool-call** timeout (used for each
 `discoveryTimeoutMs` — a long-running tool invocation is not a startup
 pathology.
 
+### Automatic stdio negotiation
+
+Stdio servers use the single-process legacy initialize flow by default. To
+connect to a modern-only stdio server, opt into automatic protocol negotiation:
+
+```jsonc
+{
+  "mcpServers": {
+    "modern-server": {
+      "command": "node",
+      "args": ["./server.js"],
+      "versionNegotiation": "auto",
+    },
+  },
+}
+```
+
+Automatic negotiation runs a short-lived copy of the configured server before
+starting the session process and can use up to five seconds of the discovery
+budget. Keep the default legacy policy for servers with non-idempotent startup
+side effects, single-owner locks or PID files, or slow initialize handshakes.
+
 ### Rolling back progressive MCP
 
 If you need the old synchronous behavior (cli waits for every MCP server
@@ -472,18 +494,19 @@ Required (one of the following):
 
 Optional:
 
-| Property               | Type/Default                 | Description                                                                                                                                                                                                                                                       |
-| ---------------------- | ---------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `args`                 | array                        | Command-line arguments for Stdio transport                                                                                                                                                                                                                        |
-| `headers`              | object                       | Custom HTTP headers when using `url` or `httpUrl`                                                                                                                                                                                                                 |
-| `env`                  | object                       | Environment variables for the server process. Values can reference environment variables using `$VAR_NAME` or `${VAR_NAME}` syntax                                                                                                                                |
-| `cwd`                  | string                       | Working directory for Stdio transport                                                                                                                                                                                                                             |
-| `timeout`              | number<br>(default: 600,000) | Request timeout in milliseconds (default: 600,000ms = 10 minutes)                                                                                                                                                                                                 |
-| `trust`                | boolean<br>(default: false)  | When `true`, bypasses tool call confirmations for this server in a trusted workspace (default: `false`)                                                                                                                                                           |
-| `includeTools`         | array                        | List of tool names to include from this MCP server. When specified, only the tools listed here will be available from this server (allowlist behavior). If not specified, all tools from the server are enabled by default.                                       |
-| `excludeTools`         | array                        | List of tool names to exclude from this MCP server. Tools listed here will not be available to the model, even if they are exposed by the server.<br>Note: `excludeTools` takes precedence over `includeTools` - if a tool is in both lists, it will be excluded. |
-| `targetAudience`       | string                       | The OAuth Client ID allowlisted on the IAP-protected application you are trying to access. Used with `authProviderType: 'service_account_impersonation'`.                                                                                                         |
-| `targetServiceAccount` | string                       | The email address of the Google Cloud Service Account to impersonate. Used with `authProviderType: 'service_account_impersonation'`.                                                                                                                              |
+| Property               | Type/Default                                  | Description                                                                                                                                                                                                                                                       |
+| ---------------------- | --------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `args`                 | array                                         | Command-line arguments for Stdio transport                                                                                                                                                                                                                        |
+| `headers`              | object                                        | Custom HTTP headers when using `url` or `httpUrl`                                                                                                                                                                                                                 |
+| `env`                  | object                                        | Environment variables for the server process. Values can reference environment variables using `$VAR_NAME` or `${VAR_NAME}` syntax                                                                                                                                |
+| `cwd`                  | string                                        | Working directory for Stdio transport                                                                                                                                                                                                                             |
+| `timeout`              | number<br>(default: 600,000)                  | Request timeout in milliseconds (default: 600,000ms = 10 minutes)                                                                                                                                                                                                 |
+| `versionNegotiation`   | `"auto" \| "legacy"`<br>(default: `"legacy"`) | For Stdio servers, `"auto"` opts into protocol negotiation on a disposable sibling process. The default `"legacy"` starts only the session process.                                                                                                               |
+| `trust`                | boolean<br>(default: false)                   | When `true`, bypasses tool call confirmations for this server in a trusted workspace (default: `false`)                                                                                                                                                           |
+| `includeTools`         | array                                         | List of tool names to include from this MCP server. When specified, only the tools listed here will be available from this server (allowlist behavior). If not specified, all tools from the server are enabled by default.                                       |
+| `excludeTools`         | array                                         | List of tool names to exclude from this MCP server. Tools listed here will not be available to the model, even if they are exposed by the server.<br>Note: `excludeTools` takes precedence over `includeTools` - if a tool is in both lists, it will be excluded. |
+| `targetAudience`       | string                                        | The OAuth Client ID allowlisted on the IAP-protected application you are trying to access. Used with `authProviderType: 'service_account_impersonation'`.                                                                                                         |
+| `targetServiceAccount` | string                                        | The email address of the Google Cloud Service Account to impersonate. Used with `authProviderType: 'service_account_impersonation'`.                                                                                                                              |
 
 <a id="qwen-mcp-cli"></a>
 

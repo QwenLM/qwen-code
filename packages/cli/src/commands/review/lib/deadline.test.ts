@@ -53,6 +53,7 @@ import {
   budgetStopEntryZh,
   claimRetirementDegradeNote,
   clearBudgetStop,
+  clearRoundStamps,
   expectedAdmissionSeconds,
   expectedRoundSeconds,
   readBudgetStop,
@@ -1009,5 +1010,32 @@ describe('verifyBudgetExhausted — the compose floor the verifier answers to', 
       composeFloorSeconds: DEFAULT_COMPOSE_FLOOR_SECONDS,
     });
     expect(msg).toContain('0 minute(s) remain');
+  });
+});
+
+describe('clearRoundStamps — the resume hygiene', () => {
+  const dirs: string[] = [];
+  afterEach(() => {
+    for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
+  });
+  function plan(): string {
+    const dir = mkdtempSync(join(tmpdir(), 'deadline-clear-'));
+    dirs.push(dir);
+    const p = join(dir, 'plan.json');
+    writeFileSync(p, '{}');
+    backdatePlan(p);
+    return p;
+  }
+
+  it('removes the stamps so the gate falls back to its constant', () => {
+    const p = plan();
+    stampRound(p, 1, NOW_MS - 2_400_000);
+    expect(expectedRoundSeconds(p, 2, NOW_MS)).toBe(2400);
+    clearRoundStamps(p);
+    expect(expectedRoundSeconds(p, 2, NOW_MS)).toBe(DEFAULT_ROUND_SECONDS);
+  });
+
+  it('is silent when there is nothing to remove', () => {
+    expect(() => clearRoundStamps(plan())).not.toThrow();
   });
 });

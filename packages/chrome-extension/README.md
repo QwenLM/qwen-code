@@ -40,6 +40,8 @@ Shell be framed by the extension (the `frame-ancestors` CSP) and accepts the
 extension's requests. The side panel reads the id at runtime via
 `chrome.runtime.id`, so you never have to look it up.
 
+Do not replace this command with `--open-with-auth`. That mode delivers its generated bearer only to the tab it opens; the extension cannot discover it. To protect a daemon used by the extension, set `QWEN_SERVER_TOKEN` explicitly and configure the same stable token in every authorized client.
+
 Once the daemon is reachable and permits framing, the side panel swaps the
 welcome screen for the chat UI automatically.
 

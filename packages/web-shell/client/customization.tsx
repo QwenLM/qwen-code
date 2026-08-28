@@ -11,7 +11,10 @@ import type {
   MarkdownChartLabelOverrides,
 } from '@datafe-open/markdown-chart';
 import type { MarkdownChartReactErrorHandler } from '@datafe-open/markdown-chart-react';
-import type { DaemonInputAnnotation } from '@qwen-code/sdk/daemon';
+import type {
+  DaemonInputAnnotation,
+  GoalSnapshotV2,
+} from '@qwen-code/sdk/daemon';
 import type { DaemonStreamingState } from '@qwen-code/webui/daemon-react-sdk';
 import type { ACPToolCall } from './adapters/types';
 import type { WelcomeHeaderProps } from './components/WelcomeHeader';
@@ -115,10 +118,14 @@ export type ToolHeaderExtraRenderer = (
 export type WelcomeHeaderRenderer = (props: WelcomeHeaderProps) => ReactNode;
 export type WelcomeFooterRenderer = (props: WelcomeHeaderProps) => ReactNode;
 
-export type WebShellChatHeaderItem = 'title' | 'environment' | 'rightPanel';
+export type WebShellChatHeaderItem =
+  | 'title'
+  | 'environment'
+  | 'rightPanel'
+  | 'tokenUsage';
 
 export interface WebShellChatHeaderOptions {
-  /** Built-in header actions to show. Defaults to all actions. */
+  /** Built-in header actions to show. Token usage is opt-in. */
   items?: readonly WebShellChatHeaderItem[];
 }
 
@@ -157,6 +164,8 @@ export interface ChatHeaderRenderInfo {
   onEnvironmentPanelOpenChange: (open: boolean) => void;
   /** Opens or closes the right extension panel. */
   onRightPanelOpenChange: (open: boolean) => void;
+  /** Opens token usage for the current session, when available. */
+  onOpenTokenUsage?: () => void;
 }
 
 /**
@@ -168,8 +177,25 @@ export type ChatHeaderRenderer = (info: ChatHeaderRenderInfo) => ReactNode;
 export interface UserMessageContentRenderInfo {
   content: string;
   images?: readonly { data: string; mimeType: string }[];
-  files?: readonly { name: string; mimeType: string }[];
+  files?: readonly {
+    name: string;
+    mimeType: string;
+    data?: Blob;
+    text?: string;
+    attachmentId?: string;
+  }[];
   inputAnnotations?: readonly DaemonInputAnnotation[];
+}
+
+export interface WebShellPreparedSubmit {
+  prompt: string;
+  inputAnnotations?: readonly DaemonInputAnnotation[];
+}
+
+export interface WebShellSubmitSnapshot {
+  sessionId?: string;
+  prompt: string;
+  inputAnnotations: readonly DaemonInputAnnotation[];
 }
 
 export type UserMessageContentRenderer = (
@@ -451,6 +477,9 @@ export interface WebShellFooterRenderInfo {
   model: string;
   streamingState: DaemonStreamingState;
   contextUsageRatio: number;
+  /** Canonical daemon-owned Goal state for the active session. */
+  goalSnapshot: GoalSnapshotV2 | null;
+  /** @deprecated Prefer goalSnapshot. */
   activeGoal: { condition: string; setAt: number } | null;
   tasks: readonly WebShellTaskInfo[];
   availableModes: readonly string[];

@@ -8,6 +8,7 @@ import { promises as fsp } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { SessionIdCaseConflictError } from '@qwen-code/qwen-code-core';
 import type { AcpSessionBridge } from './acp-session-bridge.js';
 import { SessionNotFoundError } from './acp-session-bridge.js';
 import { SessionArchiveCoordinator } from './server/session-archive.js';
@@ -47,15 +48,15 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
         private readonly options: { runtimeBaseDir: string },
       ) {}
 
-      async getSessionLocation(
+      async findSessionIdIgnoringCase(
         sessionId: string,
-      ): Promise<'active' | undefined> {
+      ): Promise<string | undefined> {
         return (await sessionServiceMock.exists(
           this.cwd,
           this.options.runtimeBaseDir,
           sessionId,
         ))
-          ? 'active'
+          ? sessionId
           : undefined;
       }
 
@@ -222,6 +223,30 @@ describe('RequestedSessionIdAdmission', () => {
       });
     },
   );
+
+  it('treats a case-only transcript conflict as persisted occupancy', async () => {
+    const bridge = fakeBridge();
+    const admission = createRequestedSessionIdAdmission({
+      archiveCoordinator: new SessionArchiveCoordinator(),
+      getBridges: () => [bridge],
+      getPersistenceTargets: () => [
+        { workspaceCwd: '/one', runtimeBaseDir: '/runtime-one' },
+      ],
+    });
+    sessionServiceMock.exists.mockRejectedValueOnce(
+      new SessionIdCaseConflictError(SESSION_ID),
+    );
+
+    await expect(
+      admission.reserveCreate(SESSION_ID, {
+        bridge,
+        workspaceCwd: '/one',
+      }),
+    ).rejects.toMatchObject({
+      code: 'session_id_conflict',
+      details: { conflict: 'persisted' },
+    });
+  });
 
   it('shares restore claims only on the same bridge generation', () => {
     const firstBridge = fakeBridge();
@@ -399,8 +424,12 @@ describe('RequestedSessionIdAdmission', () => {
     tempDirs.push(tempDir);
     const nonDirectory = path.join(tempDir, 'not-a-directory');
     await fsp.writeFile(nonDirectory, 'file');
+    // Traversing a regular file raises ENOTDIR only on POSIX; Windows reports
+    // ENOENT, which the admission legitimately reads as "no persisted
+    // session". A NUL byte makes fs.access reject with ERR_INVALID_ARG_VALUE
+    // on every platform, keeping the non-ENOENT contract under test.
     sessionServiceMock.sidecarPath.mockReturnValue(
-      path.join(nonDirectory, 'sidecar.json'),
+      path.join(nonDirectory, 'sidecar\0.json'),
     );
 
     await expect(

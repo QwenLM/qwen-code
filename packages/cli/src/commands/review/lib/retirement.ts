@@ -44,6 +44,7 @@ import { readFileSync, statSync } from 'node:fs';
 import { resolve, sep } from 'node:path';
 import { readRunTranscripts, type AgentRecord } from './transcripts.js';
 import { REVERSE_AUDIT_EXAMPLE_RECEIPT } from './agent-briefs.js';
+import { readFindingsPointer } from './certification.js';
 import {
   INLINE_LAYER_WALKED_RE,
   LAYER_RECEIPT_LINE_RE,
@@ -509,24 +510,6 @@ function stripLayerReceiptLines(finalText: string): string {
 }
 
 /**
- * Did this transcript's agent successfully `read_file` the findings pointer
- * its record's prompt names? True when the prompt names none.
- *
- * Takes the POINTER, extracted once from the RAW prompt by the same call
- * `findingsListFor` uses: extracting again from trim-normalized lines asked
- * the same question under a different normalization, and trimming defeats
- * the `^…$` anchors that exist to reject indented quotations.
- */
-function readTheFindingsPointer(
-  rec: AgentRecord,
-  pointer: string | null,
-): boolean {
-  if (pointer === null) return true;
-  const needle = JSON.stringify(pointer);
-  return rec.successfulReadFileArgs.some((a) => a.includes(needle));
-}
-
-/**
  * Classify one auditor's return.
  *
  * `yielded` outranks everything: a return that files a finding against a
@@ -847,12 +830,15 @@ export function scheduleReverseAuditRound(
       // the dry branch there: applied out here as a filter it also
       // suppressed filed YIELDS, flipping a round to dry and retiring a
       // chunk that had a live finding. The POINTER was extracted once from
-      // the RAW prompt by the same call `findingsListFor` uses.
+      // the RAW prompt by the same call `findingsListFor` uses: extracting
+      // again from trim-normalized lines asks the same question under a
+      // different normalization, and trimming defeats the `^…$` anchors
+      // that reject indented quotations.
       classifyReturn(
         t,
         records[i].territory,
         records[i].findings,
-        readTheFindingsPointer(t, records[i].pointer),
+        readFindingsPointer(t, records[i].pointer),
       ),
     );
     classificationsByRecord.push(classifications);

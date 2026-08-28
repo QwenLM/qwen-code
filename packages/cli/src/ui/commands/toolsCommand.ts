@@ -18,6 +18,7 @@ export const toolsCommand: SlashCommand = {
     return t('List available Qwen Code tools. Usage: /tools [desc]');
   },
   kind: CommandKind.BUILT_IN,
+  canRunDuringStreaming: true,
   action: async (context: CommandContext, args?: string): Promise<void> => {
     const subCommand = args?.trim();
 
@@ -41,11 +42,11 @@ export const toolsCommand: SlashCommand = {
 
     const tools = toolRegistry.getAllTools();
     // Filter out MCP tools by checking for the absence of a serverName property
-    const geminiTools = tools.filter((tool) => !('serverName' in tool));
+    const llmTools = tools.filter((tool) => !('serverName' in tool));
 
     const toolsListItem: HistoryItemToolsList = {
       type: MessageType.TOOLS_LIST,
-      tools: geminiTools.map((tool) => ({
+      tools: llmTools.map((tool) => ({
         name: tool.name,
         displayName: tool.displayName,
         description: tool.description,

@@ -86,6 +86,7 @@ The global surface is:
 
 ```text
 GET    /extensions
+PUT    /extensions/activation
 POST   /extensions/install
 POST   /extensions/check-updates
 POST   /extensions/:extensionId/update
@@ -113,6 +114,7 @@ The workspace projection is:
 
 ```text
 GET    /workspaces/:workspace/extensions
+PUT    /workspaces/:workspace/extensions/activation
 PUT    /workspaces/:workspace/extensions/:extensionId/activation
 DELETE /workspaces/:workspace/extensions/:extensionId/activation
 POST   /workspaces/:workspace/extensions/refresh
@@ -211,7 +213,9 @@ runtime. The legacy operation endpoint maps V2 warning completion back to the
 published legacy refresh-error status.
 
 Clients must check `extension_management_v2`; neither daemon mode nor another
-workspace capability implies this API. The abandoned
+workspace capability implies this API. Batch activation additionally requires
+`extension_batch_activation_v2`, because older V2 daemons expose only singular
+activation routes. The abandoned
 `workspace_qualified_extensions` proposal is not part of the protocol.
 
 ## Non-goals

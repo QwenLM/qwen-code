@@ -40,7 +40,7 @@ import type {
   GoalStateRecordPayloadV2,
   GoalTurnPermit,
 } from '../goals/goal-protocol.js';
-import type { ToolResultBoundaryObservation } from '../utils/tool-result-boundary-diagnostics.js';
+import type { ToolResultBoundaryObservation } from '../tools/tool-result-boundary-diagnostics.js';
 
 function branchTestRecord(
   uuid: string,
@@ -84,10 +84,10 @@ const boundaryObserveMock = vi.hoisted(() =>
   vi.fn((_observation: ToolResultBoundaryObservation) => false),
 );
 vi.mock(
-  '../utils/tool-result-boundary-diagnostics.js',
+  '../tools/tool-result-boundary-diagnostics.js',
   async (importOriginal) => ({
     ...(await importOriginal<
-      typeof import('../utils/tool-result-boundary-diagnostics.js')
+      typeof import('../tools/tool-result-boundary-diagnostics.js')
     >()),
     observeToolResultBoundary: boundaryObserveMock,
   }),
@@ -350,11 +350,11 @@ describe('ChatRecordingService', () => {
       expect(record.systemPayload).toEqual({ displayText: 'save logs' });
     });
 
-    it('records mid-turn media references without inline bytes', async () => {
-      const mediaReferences = [
+    it('records mid-turn attachment references without inline bytes', async () => {
+      const attachmentReferences = [
         {
           type: 'image' as const,
-          mediaId: 'media-1',
+          attachmentId: 'image.png',
           mimeType: 'image/png',
           size: 3,
         },
@@ -364,7 +364,7 @@ describe('ChatRecordingService', () => {
         [{ text: 'inspect image' }],
         'inspect image',
         undefined,
-        mediaReferences,
+        attachmentReferences,
       );
       await chatRecordingService.flush();
 
@@ -375,15 +375,15 @@ describe('ChatRecordingService', () => {
       });
       expect(record.systemPayload).toEqual({
         displayText: 'inspect image',
-        mediaReferences,
+        attachmentReferences,
       });
     });
 
-    it('records media references when the mid-turn display text is empty', async () => {
-      const mediaReferences = [
+    it('records attachment references when the mid-turn display text is empty', async () => {
+      const attachmentReferences = [
         {
           type: 'image' as const,
-          mediaId: 'media-only',
+          attachmentId: 'image.png',
           mimeType: 'image/png',
           size: 3,
         },
@@ -393,14 +393,14 @@ describe('ChatRecordingService', () => {
         [{ text: '[User message received during tool execution]: ' }],
         '',
         undefined,
-        mediaReferences,
+        attachmentReferences,
       );
       await chatRecordingService.flush();
 
       const record = vi.mocked(jsonl.writeLine).mock.calls[0][1] as ChatRecord;
       expect(record.systemPayload).toEqual({
         displayText: '',
-        mediaReferences,
+        attachmentReferences,
       });
     });
 
@@ -908,6 +908,7 @@ describe('ChatRecordingService', () => {
           evidenceCursor: { recordId: 'goal-record' },
           turnCount: 0,
           activeTimeMs: 0,
+          tokensUsed: 0,
           createdAt: 100,
           updatedAt: 100,
         },
@@ -1111,6 +1112,94 @@ describe('ChatRecordingService', () => {
         ),
       ).rejects.toMatchObject({ name: 'SessionWriterUnavailableError' });
       expect(jsonl.writeLine).not.toHaveBeenCalled();
+    });
+
+    it('restores session model bindings for duplicate suppression', async () => {
+      const service = new ChatRecordingService(mockConfig, undefined, false, {
+        lastCompletedUuid: 'projected-leaf',
+        turnParentUuids: [null],
+        sessionModel: {
+          modelId: 'qwen3-coder-plus',
+          authType: 'openai',
+        },
+      });
+      vi.mocked(jsonl.writeLine).mockClear();
+      await expect(
+        service.recordSessionModel({
+          modelId: 'qwen3-coder-plus',
+          authType: 'openai',
+        }),
+      ).resolves.toBe(true);
+      expect(jsonl.writeLine).not.toHaveBeenCalled();
+    });
+
+    it('restores session model bindings from a full-record replay', async () => {
+      vi.mocked(mockConfig.getResumedSessionData).mockReturnValue({
+        conversation: {
+          messages: [
+            {
+              uuid: 'model-1',
+              parentUuid: null,
+              sessionId: 'test-session-id',
+              timestamp: '2026-06-27T00:00:00.000Z',
+              type: 'system',
+              subtype: 'session_model',
+              cwd: '/test/project/root',
+              version: '1.0.0',
+              systemPayload: {
+                modelId: 'qwen3-coder-plus',
+                authType: 'openai',
+              },
+            },
+          ],
+        },
+        lastCompletedUuid: 'model-1',
+      } as unknown as ReturnType<Config['getResumedSessionData']>);
+      const service = new ChatRecordingService(mockConfig, undefined, false);
+      vi.mocked(jsonl.writeLine).mockClear();
+      await expect(
+        service.recordSessionModel({
+          modelId: 'qwen3-coder-plus',
+          authType: 'openai',
+        }),
+      ).resolves.toBe(true);
+      expect(jsonl.writeLine).not.toHaveBeenCalled();
+    });
+
+    it('skips a non-string session_model payload during full-record replay', async () => {
+      vi.mocked(mockConfig.getResumedSessionData).mockReturnValue({
+        conversation: {
+          messages: [
+            {
+              uuid: 'model-1',
+              parentUuid: null,
+              sessionId: 'test-session-id',
+              timestamp: '2026-06-27T00:00:00.000Z',
+              type: 'system',
+              subtype: 'session_model',
+              cwd: '/test/project/root',
+              version: '1.0.0',
+              systemPayload: {
+                modelId: 42,
+                authType: 'openai',
+              },
+            },
+          ],
+        },
+        lastCompletedUuid: 'model-1',
+      } as unknown as ReturnType<Config['getResumedSessionData']>);
+      expect(
+        () => new ChatRecordingService(mockConfig, undefined, false),
+      ).not.toThrow();
+      const service = new ChatRecordingService(mockConfig, undefined, false);
+      vi.mocked(jsonl.writeLine).mockClear();
+      await expect(
+        service.recordSessionModel({
+          modelId: 'qwen3-coder-plus',
+          authType: 'openai',
+        }),
+      ).resolves.toBe(true);
+      expect(jsonl.writeLine).toHaveBeenCalledOnce();
     });
   });
 
@@ -2566,6 +2655,223 @@ describe('ChatRecordingService', () => {
     });
   });
 
+  describe('recordSessionModel', () => {
+    it('appends a session_model record and skips identical payloads', async () => {
+      vi.mocked(jsonl.writeLine).mockClear();
+      await expect(
+        chatRecordingService.recordSessionModel({
+          modelId: 'qwen3-coder-plus',
+          authType: 'openai',
+        }),
+      ).resolves.toBe(true);
+      expect(jsonl.writeLine).toHaveBeenCalledOnce();
+      const record = vi.mocked(jsonl.writeLine).mock.calls[0][1] as ChatRecord;
+      expect(record).toMatchObject({
+        type: 'system',
+        subtype: 'session_model',
+        systemPayload: {
+          modelId: 'qwen3-coder-plus',
+          authType: 'openai',
+        },
+      });
+
+      vi.mocked(jsonl.writeLine).mockClear();
+      await expect(
+        chatRecordingService.recordSessionModel({
+          modelId: 'qwen3-coder-plus',
+          authType: 'openai',
+        }),
+      ).resolves.toBe(true);
+      expect(jsonl.writeLine).not.toHaveBeenCalled();
+    });
+
+    it('writes a new record when the model changes', async () => {
+      await chatRecordingService.recordSessionModel({
+        modelId: 'qwen3-coder-plus',
+        authType: 'openai',
+      });
+      vi.mocked(jsonl.writeLine).mockClear();
+      await expect(
+        chatRecordingService.recordSessionModel({
+          modelId: 'qwen3-coder-flash',
+          authType: 'openai',
+        }),
+      ).resolves.toBe(true);
+      expect(jsonl.writeLine).toHaveBeenCalledOnce();
+    });
+
+    it('canonicalizes a runtime-prefixed modelId before writing', async () => {
+      vi.mocked(jsonl.writeLine).mockClear();
+      await expect(
+        chatRecordingService.recordSessionModel({
+          modelId: '$runtime|openai|custom-runtime',
+          authType: 'openai',
+          isRuntime: true,
+        }),
+      ).resolves.toBe(true);
+      const record = vi.mocked(jsonl.writeLine).mock.calls[0][1] as ChatRecord;
+      expect(record.systemPayload).toEqual({
+        modelId: 'custom-runtime',
+        authType: 'openai',
+        isRuntime: true,
+      });
+
+      vi.mocked(jsonl.writeLine).mockClear();
+      await expect(
+        chatRecordingService.recordSessionModel({
+          modelId: '$runtime|openai|custom-runtime',
+          authType: 'openai',
+          isRuntime: true,
+        }),
+      ).resolves.toBe(true);
+      expect(jsonl.writeLine).not.toHaveBeenCalled();
+    });
+
+    it('re-anchors the live session model onto the rewind branch', async () => {
+      chatRecordingService.recordUserMessage([{ text: 'first' }]);
+      await chatRecordingService.recordSessionModel({
+        modelId: 'qwen3-coder-plus',
+        authType: 'openai',
+      });
+      chatRecordingService.recordUserMessage([{ text: 'second' }]);
+      await chatRecordingService.recordSessionModel({
+        modelId: 'qwen3-coder-flash',
+        authType: 'openai',
+      });
+      vi.mocked(jsonl.writeLine).mockClear();
+
+      chatRecordingService.rewindRecording(1, { truncatedCount: 1 });
+      await chatRecordingService.flush();
+
+      const written = vi
+        .mocked(jsonl.writeLine)
+        .mock.calls.map((call) => call[1] as ChatRecord);
+      expect(written.map((record) => record.subtype)).toEqual([
+        'rewind',
+        'session_model',
+      ]);
+      expect(written[1]?.parentUuid).toBe(written[0]?.uuid);
+      expect(written[1]?.systemPayload).toEqual({
+        modelId: 'qwen3-coder-flash',
+        authType: 'openai',
+      });
+
+      vi.mocked(jsonl.writeLine).mockClear();
+      await expect(
+        chatRecordingService.recordSessionModel({
+          modelId: 'qwen3-coder-flash',
+          authType: 'openai',
+        }),
+      ).resolves.toBe(true);
+      expect(jsonl.writeLine).not.toHaveBeenCalled();
+    });
+
+    it('writes a second record when only the isRuntime flag differs', async () => {
+      await chatRecordingService.recordSessionModel({
+        modelId: 'qwen3-coder-plus',
+        authType: 'openai',
+      });
+      vi.mocked(jsonl.writeLine).mockClear();
+      await expect(
+        chatRecordingService.recordSessionModel({
+          modelId: 'qwen3-coder-plus',
+          authType: 'openai',
+          isRuntime: true,
+        }),
+      ).resolves.toBe(true);
+      expect(jsonl.writeLine).toHaveBeenCalledOnce();
+      const record = vi.mocked(jsonl.writeLine).mock.calls[0][1] as ChatRecord;
+      expect(record.systemPayload).toEqual({
+        modelId: 'qwen3-coder-plus',
+        authType: 'openai',
+        isRuntime: true,
+      });
+    });
+
+    it('writes a new record when only the baseUrl differs', async () => {
+      await chatRecordingService.recordSessionModel({
+        modelId: 'qwen3-coder-plus',
+        authType: 'openai',
+        baseUrl: 'https://a.example/v1',
+      });
+      vi.mocked(jsonl.writeLine).mockClear();
+      await expect(
+        chatRecordingService.recordSessionModel({
+          modelId: 'qwen3-coder-plus',
+          authType: 'openai',
+          baseUrl: 'https://b.example/v1',
+        }),
+      ).resolves.toBe(true);
+      expect(jsonl.writeLine).toHaveBeenCalledOnce();
+    });
+
+    it('skips a payload identical on the isRuntime and baseUrl dimensions', async () => {
+      await chatRecordingService.recordSessionModel({
+        modelId: 'qwen3-coder-plus',
+        authType: 'openai',
+        baseUrl: 'https://a.example/v1',
+        isRuntime: true,
+      });
+      vi.mocked(jsonl.writeLine).mockClear();
+      await expect(
+        chatRecordingService.recordSessionModel({
+          modelId: 'qwen3-coder-plus',
+          authType: 'openai',
+          baseUrl: 'https://a.example/v1',
+          isRuntime: true,
+        }),
+      ).resolves.toBe(true);
+      expect(jsonl.writeLine).not.toHaveBeenCalled();
+    });
+
+    it('re-anchors the pending new binding when a rewind lands mid-write', async () => {
+      chatRecordingService.recordUserMessage([{ text: 'first' }]);
+      await chatRecordingService.recordSessionModel({
+        modelId: 'qwen3-coder-plus',
+        authType: 'openai',
+      });
+      chatRecordingService.recordUserMessage([{ text: 'second' }]);
+
+      // Hold the next session_model write at the IO layer so the rewind
+      // lands inside the pending-write window.
+      vi.mocked(jsonl.writeLine).mockClear();
+      let releaseWrite: (() => void) | undefined;
+      vi.mocked(jsonl.writeLine).mockImplementationOnce(
+        () =>
+          new Promise<void>((resolve) => {
+            releaseWrite = resolve;
+          }),
+      );
+      const pendingSwitch = chatRecordingService.recordSessionModel({
+        modelId: 'qwen3-coder-flash',
+        authType: 'openai',
+      });
+      await vi.waitFor(() => {
+        expect(vi.mocked(jsonl.writeLine).mock.calls.length).toBe(1);
+      });
+
+      chatRecordingService.rewindRecording(1, { truncatedCount: 1 });
+      releaseWrite?.();
+      await pendingSwitch;
+      await chatRecordingService.flush();
+
+      const written = vi
+        .mocked(jsonl.writeLine)
+        .mock.calls.map((call) => call[1] as ChatRecord);
+      const rewindIndex = written.findIndex(
+        (record) => record.subtype === 'rewind',
+      );
+      expect(rewindIndex).toBeGreaterThanOrEqual(0);
+      const reAppended = written[rewindIndex + 1];
+      expect(reAppended?.subtype).toBe('session_model');
+      expect(reAppended?.parentUuid).toBe(written[rewindIndex]?.uuid);
+      expect(reAppended?.systemPayload).toEqual({
+        modelId: 'qwen3-coder-flash',
+        authType: 'openai',
+      });
+    });
+  });
+
   describe('legacy recorder', () => {
     it('restores reduced recorder state without the full conversation', async () => {
       const service = new ChatRecordingService(mockConfig, undefined, false, {
@@ -2641,6 +2947,30 @@ describe('ChatRecordingService', () => {
       service.recordUserMessage([{ text: 'legacy' }]);
       await service.flush();
 
+      expect(jsonl.writeLine).toHaveBeenCalledOnce();
+    });
+
+    it('retries an identical session_model payload after a synchronous failure', async () => {
+      const writeFileSpy = vi.spyOn(fs, 'writeFileSync');
+      writeFileSpy.mockImplementationOnce(() => {
+        throw Object.assign(new Error('ENOSPC'), { code: 'ENOSPC' });
+      });
+      const service = new ChatRecordingService(mockConfig, undefined, false);
+
+      await expect(
+        service.recordSessionModel({
+          modelId: 'qwen3-coder-plus',
+          authType: 'openai',
+        }),
+      ).resolves.toBe(false);
+      expect(jsonl.writeLine).not.toHaveBeenCalled();
+
+      await expect(
+        service.recordSessionModel({
+          modelId: 'qwen3-coder-plus',
+          authType: 'openai',
+        }),
+      ).resolves.toBe(true);
       expect(jsonl.writeLine).toHaveBeenCalledOnce();
     });
 
@@ -3033,9 +3363,146 @@ describe('ChatRecordingService', () => {
       await expect(chatRecordingService.close()).rejects.toBe(cleanupFailure);
       expect(chatRecordingService.hasWriteOwnership()).toBe(false);
     });
+
+    it('retries release durability without reporting stale write ownership', async () => {
+      const cleanupFailure = new SessionWriterUnavailableError();
+      let released = false;
+      let durabilityPending = false;
+      Object.defineProperties(mockLease, {
+        isReleased: {
+          configurable: true,
+          get: () => released,
+        },
+        isReleaseDurabilityPending: {
+          configurable: true,
+          get: () => durabilityPending,
+        },
+      });
+      vi.mocked(mockLease.release)
+        .mockImplementationOnce(async () => {
+          released = true;
+          durabilityPending = true;
+          throw cleanupFailure;
+        })
+        .mockImplementationOnce(async () => {
+          durabilityPending = false;
+        });
+
+      await expect(chatRecordingService.close()).rejects.toBe(cleanupFailure);
+      expect(chatRecordingService.hasWriteOwnership()).toBe(false);
+
+      await expect(chatRecordingService.close()).resolves.toBeUndefined();
+      expect(mockLease.release).toHaveBeenCalledTimes(2);
+      expect(chatRecordingService.hasWriteOwnership()).toBe(false);
+    });
   });
 
   // Note: Session management tests (listSessions, loadSession, deleteSession, etc.)
   // have been moved to sessionService.test.ts
   // Session resume integration tests should test via SessionService mock
+});
+
+describe('Goal turn token ledger', () => {
+  it('bills a Goal turn from the assistant records it produced', () => {
+    // The wiring that matters: recordAssistantTurn must feed the ledger. A
+    // ledger that is never fed reports every Goal turn as free.
+    const service = Object.create(
+      ChatRecordingService.prototype,
+    ) as ChatRecordingService;
+    const appended: unknown[] = [];
+    Object.assign(service, {
+      createBaseRecord: () => ({ type: 'assistant' }),
+      appendRecord: (record: unknown) => appended.push(record),
+      maybeTriggerAutoTitle: () => {},
+    });
+    const goalContext = { goalId: 'goal-1', revision: 1, turnId: 'turn-1' };
+
+    service.recordAssistantTurn({
+      model: 'qwen',
+      tokens: { totalTokenCount: 900 },
+      goalContext,
+    });
+    service.recordAssistantTurn({
+      model: 'qwen',
+      tokens: { totalTokenCount: 100 },
+      goalContext,
+    });
+    // A record with no Goal permit belongs to no Goal turn.
+    service.recordAssistantTurn({
+      model: 'qwen',
+      tokens: { totalTokenCount: 5_000 },
+    });
+
+    expect(appended).toHaveLength(3);
+    expect(service.takeGoalTurnTokens('turn-1')).toBe(1_000);
+  });
+
+  function recorderForGoalSpend() {
+    const service = Object.create(
+      ChatRecordingService.prototype,
+    ) as ChatRecordingService;
+    return service;
+  }
+
+  const permit = (turnId: string) => ({
+    goalId: 'goal-1',
+    revision: 1,
+    turnId,
+  });
+
+  it("sums a turn's usage and hands it over once", () => {
+    const service = recorderForGoalSpend();
+    const accumulate = (
+      service as unknown as {
+        accumulateGoalTurnTokens: (
+          turnId: string,
+          usage: { totalTokenCount?: number },
+        ) => void;
+      }
+    ).accumulateGoalTurnTokens.bind(service);
+
+    accumulate(permit('turn-1').turnId, { totalTokenCount: 1_000 });
+    accumulate(permit('turn-1').turnId, { totalTokenCount: 250 });
+
+    expect(service.takeGoalTurnTokens('turn-1')).toBe(1_250);
+    // Consumed: a turn is billed once.
+    expect(service.takeGoalTurnTokens('turn-1')).toBe(0);
+  });
+
+  it("does not bill one turn for another turn's usage", () => {
+    const service = recorderForGoalSpend();
+    const accumulate = (
+      service as unknown as {
+        accumulateGoalTurnTokens: (
+          turnId: string,
+          usage: { totalTokenCount?: number },
+        ) => void;
+      }
+    ).accumulateGoalTurnTokens.bind(service);
+
+    accumulate('turn-1', { totalTokenCount: 1_000 });
+    // A record stamped with the next turn ends the previous one.
+    accumulate('turn-2', { totalTokenCount: 40 });
+
+    expect(service.takeGoalTurnTokens('turn-1')).toBe(0);
+    expect(service.takeGoalTurnTokens('turn-2')).toBe(40);
+  });
+
+  it('ignores usage with no usable total', () => {
+    const service = recorderForGoalSpend();
+    const accumulate = (
+      service as unknown as {
+        accumulateGoalTurnTokens: (
+          turnId: string,
+          usage: { totalTokenCount?: number },
+        ) => void;
+      }
+    ).accumulateGoalTurnTokens.bind(service);
+
+    accumulate('turn-1', {});
+    accumulate('turn-1', { totalTokenCount: Number.NaN });
+    accumulate('turn-1', { totalTokenCount: -5 });
+
+    expect(service.takeGoalTurnTokens('turn-1')).toBe(0);
+  });
 });

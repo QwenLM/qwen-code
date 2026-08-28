@@ -48,7 +48,10 @@ import {
   type ClientMcpFrame,
 } from '@qwen-code/qwen-code-core';
 import type { JSONRPCMessage } from '@modelcontextprotocol/sdk/types.js';
-import { BridgeClient } from './bridgeClient.js';
+import {
+  BridgeClient,
+  type BridgeClientDeferredArtifactBatch,
+} from './bridgeClient.js';
 import {
   type LiveSpeakToUserHandler,
   MAX_SUB_SESSION_NAME_CHARS,
@@ -66,14 +69,17 @@ import {
   MID_TURN_RECONCILIATION_RING_SIZE,
   TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD,
 } from './bridgeTypes.js';
-import type { ClientMcpMessageSender } from './bridgeOptions.js';
+import type {
+  ClientMcpMessageSender,
+  CurrentSessionScheduledTaskCreateInfo,
+} from './bridgeOptions.js';
 import { CancelSentinelCollisionError } from './bridgeErrors.js';
 import { CANCEL_VOTE_SENTINEL } from './permissionMediator.js';
 import { SessionArtifactStore } from './sessionArtifacts.js';
 import {
-  SESSION_MEDIA_MAX_ITEM_BYTES,
-  SessionMediaStore,
-} from './sessionMedia.js';
+  SESSION_ATTACHMENT_MAX_ITEM_BYTES,
+  SessionAttachmentStore,
+} from './sessionAttachments.js';
 
 /**
  * Minimal-stub constructor for a `BridgeClient` whose only purpose is
@@ -93,6 +99,13 @@ function makeClient(
     ownsSession?: (sessionId: string) => boolean;
     handler: ExternalToolGuardHandler;
   },
+  currentSessionTask?: {
+    resolveEntry: (sessionId?: string) => unknown;
+    ownsSession?: (sessionId: string) => boolean;
+    handler: NonNullable<
+      import('./bridgeOptions.js').BridgeOptions['onCreateCurrentSessionScheduledTask']
+    >;
+  },
 ): BridgeClient {
   const noPermissionFlow = () => {
     throw new Error('test: permission flow should not run in fs-path tests');
@@ -104,7 +117,9 @@ function makeClient(
   // required (policy/vote/forgetSession/peekSessionFor/pendingCount).
   const throwerMediator = { request: noPermissionFlow } as never;
   return new BridgeClient(
-    (managedGuard?.resolveEntry ?? noPermissionFlow) as never, // resolveEntry
+    (managedGuard?.resolveEntry ??
+      currentSessionTask?.resolveEntry ??
+      noPermissionFlow) as never, // resolveEntry
     noPermissionFlow as never, // resolvePendingRestoreEvents
     throwerMediator, // mediator (F3 Commit 3)
     0, // permissionTimeoutMs (disabled)
@@ -113,7 +128,9 @@ function makeClient(
     undefined,
     undefined,
     undefined,
-    managedGuard?.ownsSession ?? (() => true),
+    managedGuard?.ownsSession ??
+      currentSessionTask?.ownsSession ??
+      (() => true),
     undefined,
     undefined,
     undefined,
@@ -124,6 +141,10 @@ function makeClient(
     undefined,
     undefined,
     managedGuard?.handler,
+    undefined,
+    undefined,
+    undefined,
+    currentSessionTask?.handler,
   );
 }
 
@@ -211,6 +232,96 @@ describe('BridgeClient — background notification turn boundary', () => {
       type: 'background_notification_turn_complete',
       data: { sessionId, reason: 'end_turn' },
     });
+  });
+
+  it('marks the session active for a goal-turn start signal', async () => {
+    const sessionId = 'session-goal';
+    const publish = vi.fn();
+    const entry = { sessionId, events: { publish }, goalTurnActive: false };
+    const noFlow = () => {
+      throw new Error('test: permission flow should not run');
+    };
+    const client = new BridgeClient(
+      ((id: string) => (id === sessionId ? entry : undefined)) as never,
+      noFlow as never,
+      { request: noFlow } as never,
+      0,
+      Infinity,
+    );
+
+    await client.extNotification('_qwencode/start_turn', {
+      sessionId,
+      source: 'goal',
+    });
+
+    expect(entry.goalTurnActive).toBe(true);
+    expect(publish).not.toHaveBeenCalled();
+
+    await client.extNotification('_qwencode/end_turn', {
+      sessionId,
+      reason: 'end_turn',
+      source: 'goal',
+      promptId: 'session-goal########1',
+    });
+
+    expect(entry.goalTurnActive).toBe(false);
+  });
+
+  it('publishes a real turn_complete for a goal-turn end signal', async () => {
+    const sessionId = 'session-goal';
+    const publish = vi.fn().mockReturnValue(true);
+    const entry = { sessionId, events: { publish } };
+    const noFlow = () => {
+      throw new Error('test: permission flow should not run');
+    };
+    const client = new BridgeClient(
+      ((id: string) => (id === sessionId ? entry : undefined)) as never,
+      noFlow as never,
+      { request: noFlow } as never,
+      0,
+      Infinity,
+    );
+
+    await client.extNotification('_qwencode/end_turn', {
+      sessionId,
+      reason: 'end_turn',
+      source: 'goal',
+      promptId: 'session-goal########3',
+    });
+
+    expect(publish).toHaveBeenCalledWith({
+      type: 'turn_complete',
+      promptId: 'session-goal########3',
+      data: {
+        sessionId,
+        stopReason: 'end_turn',
+        promptId: 'session-goal########3',
+      },
+    });
+  });
+
+  it('drops a goal-turn end signal without a promptId', async () => {
+    const sessionId = 'session-goal';
+    const publish = vi.fn();
+    const entry = { sessionId, events: { publish } };
+    const noFlow = () => {
+      throw new Error('test: permission flow should not run');
+    };
+    const client = new BridgeClient(
+      ((id: string) => (id === sessionId ? entry : undefined)) as never,
+      noFlow as never,
+      { request: noFlow } as never,
+      0,
+      Infinity,
+    );
+
+    await client.extNotification('_qwencode/end_turn', {
+      sessionId,
+      reason: 'end_turn',
+      source: 'goal',
+    });
+
+    expect(publish).not.toHaveBeenCalled();
   });
 
   it('drops malformed or foreign end-turn signals', async () => {
@@ -1559,6 +1670,142 @@ describe('BridgeClient — create-sub-session extMethod dispatch', () => {
   });
 });
 
+describe('BridgeClient — current-session scheduled-task dispatch', () => {
+  const request = {
+    callerSessionId: 'session-1',
+    promptId: 'prompt-1',
+    cron: '5 9 * * *',
+    prompt: 'continue the work',
+    recurring: true,
+  };
+
+  function makeCurrentSessionClient(
+    overrides: Record<string, unknown> = {},
+    ownsSession: (sessionId: string) => boolean = () => true,
+  ) {
+    const entry = {
+      sessionId: 'session-1',
+      workspaceCwd: '/workspace',
+      effectiveCwd: '/workspace',
+      promptActive: true,
+      activePromptId: 'prompt-1',
+      ...overrides,
+    };
+    const handler = vi.fn(
+      async (_info: CurrentSessionScheduledTaskCreateInfo) => ({
+        id: 'cron-1',
+        cron: request.cron,
+      }),
+    );
+    const client = makeClient(undefined, undefined, {
+      resolveEntry: (sessionId) =>
+        sessionId === entry.sessionId ? entry : undefined,
+      ownsSession,
+      handler,
+    });
+    return { client, entry, handler };
+  }
+
+  it('forwards only the bridge-owned active prompt', async () => {
+    const { client, handler } = makeCurrentSessionClient();
+
+    await expect(
+      client.extMethod(
+        SERVE_CONTROL_EXT_METHODS.createCurrentSessionScheduledTask,
+        request,
+      ),
+    ).resolves.toEqual({ id: 'cron-1', cron: request.cron });
+    expect(handler).toHaveBeenCalledWith({
+      ...request,
+      assertCallerPromptActive: expect.any(Function),
+    });
+  });
+
+  it('lets the host revalidate the exact prompt before committing', async () => {
+    const { client, entry, handler } = makeCurrentSessionClient();
+    handler.mockImplementation(async (info) => {
+      info.assertCallerPromptActive();
+      entry.activePromptId = 'prompt-2';
+      expect(() => info.assertCallerPromptActive()).toThrow(/active prompt/i);
+      throw new Error('stale prompt');
+    });
+
+    await expect(
+      client.extMethod(
+        SERVE_CONTROL_EXT_METHODS.createCurrentSessionScheduledTask,
+        request,
+      ),
+    ).rejects.toThrow('stale prompt');
+  });
+
+  it('preserves scheduled-task business rejections as structured ACP errors', async () => {
+    const { client, handler } = makeCurrentSessionClient();
+    const rejection = new Error('The caller session has a pending interaction');
+    rejection.name = 'ExistingSessionScheduledTaskCreateError';
+    Object.assign(rejection, { status: 409, code: 'session_busy' });
+    handler.mockRejectedValueOnce(rejection);
+
+    const error = await client
+      .extMethod(
+        SERVE_CONTROL_EXT_METHODS.createCurrentSessionScheduledTask,
+        request,
+      )
+      .catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(RequestError);
+    expect(error).toMatchObject({
+      code: -32602,
+      message: 'The caller session has a pending interaction',
+      data: {
+        errorKind: 'session_busy',
+        status: 409,
+        hint: 'The caller session has a pending interaction',
+      },
+    });
+  });
+
+  it('rejects a forged session or prompt identity', async () => {
+    const { client, handler } = makeCurrentSessionClient(
+      {},
+      (sessionId) => sessionId === 'session-1',
+    );
+
+    await expect(
+      client.extMethod(
+        SERVE_CONTROL_EXT_METHODS.createCurrentSessionScheduledTask,
+        { ...request, callerSessionId: 'session-2' },
+      ),
+    ).rejects.toThrow(/callerSessionId/i);
+    await expect(
+      client.extMethod(
+        SERVE_CONTROL_EXT_METHODS.createCurrentSessionScheduledTask,
+        { ...request, promptId: 'prompt-2' },
+      ),
+    ).rejects.toThrow(/active prompt/i);
+    expect(handler).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { parentSessionId: 'parent-1' },
+    { sourceType: 'channel' },
+    { sourceType: 'scheduled_task' },
+    { sourceType: 'standalone' },
+    { sourceType: 'live_voice' },
+    { sourceType: 'unknown' },
+    { sourceId: 'source-1' },
+  ])('rejects an ineligible session source: %j', async (overrides) => {
+    const { client, handler } = makeCurrentSessionClient(overrides);
+
+    await expect(
+      client.extMethod(
+        SERVE_CONTROL_EXT_METHODS.createCurrentSessionScheduledTask,
+        request,
+      ),
+    ).rejects.toThrow(/source/i);
+    expect(handler).not.toHaveBeenCalled();
+  });
+});
+
 describe('BridgeClient — Live screen-context extMethod dispatch', () => {
   function makeLiveClient(
     handler:
@@ -1887,6 +2134,9 @@ describe('BridgeClient — artifact ingress', () => {
       const fakeEntry = {
         sessionId,
         events: { publish },
+        artifactWorkspaceReady: true,
+        deferredArtifactBatches: [],
+        deferredArtifactInputCount: 0,
         artifacts: new SessionArtifactStore({
           sessionId,
           workspaceCwd: workspace,
@@ -1972,6 +2222,9 @@ describe('BridgeClient — artifact ingress', () => {
     const fakeEntry = {
       sessionId,
       events: { publish },
+      artifactWorkspaceReady: true,
+      deferredArtifactBatches: [] as BridgeClientDeferredArtifactBatch[],
+      deferredArtifactInputCount: 0,
       artifacts: {
         inputBatchLimit: () => 1,
         upsertMany,
@@ -2045,6 +2298,9 @@ describe('BridgeClient — artifact ingress', () => {
     const fakeEntry = {
       sessionId,
       events: { publish },
+      artifactWorkspaceReady: true,
+      deferredArtifactBatches: [] as BridgeClientDeferredArtifactBatch[],
+      deferredArtifactInputCount: 0,
       artifacts: {
         inputBatchLimit: () => 400,
         upsertMany,
@@ -2109,6 +2365,9 @@ describe('BridgeClient — artifact ingress', () => {
     const fakeEntry = {
       sessionId,
       events: { publish },
+      artifactWorkspaceReady: true,
+      deferredArtifactBatches: [],
+      deferredArtifactInputCount: 0,
       artifacts: {
         inputBatchLimit: () => 1,
         upsertMany,
@@ -2159,6 +2418,9 @@ describe('BridgeClient — artifact ingress', () => {
       const fakeEntry = {
         sessionId,
         events: { publish },
+        artifactWorkspaceReady: true,
+        deferredArtifactBatches: [],
+        deferredArtifactInputCount: 0,
         artifacts: new SessionArtifactStore({
           sessionId,
           workspaceCwd: workspace,
@@ -2223,6 +2485,9 @@ describe('BridgeClient — artifact ingress', () => {
       const fakeEntry = {
         sessionId,
         events: { publish },
+        artifactWorkspaceReady: true,
+        deferredArtifactBatches: [],
+        deferredArtifactInputCount: 0,
         artifacts: new SessionArtifactStore({
           sessionId,
           workspaceCwd: workspace,
@@ -2514,6 +2779,9 @@ describe('BridgeClient — artifact ingress', () => {
     const fakeEntry = {
       sessionId,
       events: { publish },
+      artifactWorkspaceReady: true,
+      deferredArtifactBatches: [],
+      deferredArtifactInputCount: 0,
       artifacts: {
         inputBatchLimit: () => 400,
         upsertMany,
@@ -2569,6 +2837,9 @@ describe('BridgeClient — artifact ingress', () => {
     const fakeEntry = {
       sessionId,
       events: { publish },
+      artifactWorkspaceReady: true,
+      deferredArtifactBatches: [],
+      deferredArtifactInputCount: 0,
       artifacts: {
         inputBatchLimit: () => 400,
         upsertMany: vi
@@ -2615,6 +2886,9 @@ describe('BridgeClient — artifact ingress', () => {
     const fakeEntry = {
       sessionId,
       events: { publish },
+      artifactWorkspaceReady: true,
+      deferredArtifactBatches: [],
+      deferredArtifactInputCount: 0,
       artifacts: {
         inputBatchLimit: () => 2,
         upsertMany,
@@ -2666,6 +2940,149 @@ describe('BridgeClient — artifact ingress', () => {
     }
   });
 
+  it('retains deferred artifact batches until each write succeeds', async () => {
+    const sessionId = 'sess:deferred-artifact-retry';
+    const upsertMany = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('transient artifact failure'))
+      .mockResolvedValue({ changes: [] });
+    const fakeEntry = {
+      sessionId,
+      events: { publish: vi.fn().mockReturnValue(true) },
+      artifactWorkspaceReady: false,
+      deferredArtifactBatches: [] as BridgeClientDeferredArtifactBatch[],
+      deferredArtifactInputCount: 0,
+      artifacts: { inputBatchLimit: () => 2, upsertMany },
+      pendingPermissionIds: new Set<string>(),
+      pendingInteractions: new Map(),
+      midTurnMessageQueue: [] as MidTurnQueueEntry[],
+      settledMidTurnMessageIds: [] as string[],
+    };
+    const client = new BridgeClient(
+      ((sid: string) => (sid === sessionId ? fakeEntry : undefined)) as never,
+      noPermissionFlow as never,
+      { request: noPermissionFlow } as never,
+      0,
+      Infinity,
+    );
+    const emit = (title: string) =>
+      client.extNotification('qwen/notify/session/artifact-event', {
+        sessionId,
+        artifacts: [{ title, url: `https://example.com/${title}` }],
+      });
+
+    await emit('one');
+    await emit('two');
+    fakeEntry.artifactWorkspaceReady = true;
+
+    await expect(
+      client.drainDeferredSessionArtifacts(fakeEntry as never),
+    ).rejects.toThrow('Deferred artifact ingestion failed');
+    expect(fakeEntry.deferredArtifactBatches).toHaveLength(2);
+    expect(fakeEntry.deferredArtifactInputCount).toBe(2);
+
+    await client.drainDeferredSessionArtifacts(fakeEntry as never);
+    expect(
+      upsertMany.mock.calls.map(([artifacts]) => artifacts[0]?.title),
+    ).toEqual(['one', 'one', 'two']);
+    expect(fakeEntry.deferredArtifactBatches).toEqual([]);
+    expect(fakeEntry.deferredArtifactInputCount).toBe(0);
+  });
+
+  it('defers a ready artifact batch when workspace preparation fails', async () => {
+    const sessionId = 'sess:deferred-artifact-prepare';
+    const upsertMany = vi.fn().mockResolvedValue({ changes: [] });
+    const clientRef: { current?: BridgeClient } = {};
+    const fakeEntry = {
+      sessionId,
+      events: { publish: vi.fn().mockReturnValue(true) },
+      artifactWorkspaceReady: true,
+      deferredArtifactBatches: [] as BridgeClientDeferredArtifactBatch[],
+      deferredArtifactInputCount: 0,
+      artifacts: { inputBatchLimit: () => 2, upsertMany },
+      prepareArtifactWorkspace: vi
+        .fn()
+        .mockRejectedValueOnce(new Error('transient preparation failure'))
+        .mockImplementation(() =>
+          clientRef.current!.drainDeferredSessionArtifacts(fakeEntry as never),
+        ),
+      pendingPermissionIds: new Set<string>(),
+      pendingInteractions: new Map(),
+      midTurnMessageQueue: [] as MidTurnQueueEntry[],
+      settledMidTurnMessageIds: [] as string[],
+    };
+    const client = new BridgeClient(
+      ((sid: string) => (sid === sessionId ? fakeEntry : undefined)) as never,
+      noPermissionFlow as never,
+      { request: noPermissionFlow } as never,
+      0,
+      Infinity,
+    );
+    clientRef.current = client;
+    const emit = (title: string) =>
+      client.extNotification('qwen/notify/session/artifact-event', {
+        sessionId,
+        artifacts: [{ title, url: `https://example.com/${title}` }],
+      });
+
+    await expect(emit('one')).resolves.toBeUndefined();
+    expect(upsertMany).not.toHaveBeenCalled();
+    expect(fakeEntry.deferredArtifactBatches).toHaveLength(1);
+    expect(fakeEntry.deferredArtifactInputCount).toBe(1);
+
+    await emit('two');
+    expect(
+      upsertMany.mock.calls.map(([artifacts]) => artifacts[0]?.title),
+    ).toEqual(['one', 'two']);
+    expect(fakeEntry.deferredArtifactBatches).toEqual([]);
+    expect(fakeEntry.deferredArtifactInputCount).toBe(0);
+  });
+
+  it('caps deferred artifacts across batches before workspace activation', async () => {
+    const sessionId = 'sess:deferred-artifact-cap';
+    const upsertMany = vi.fn().mockResolvedValue({ changes: [] });
+    const fakeEntry = {
+      sessionId,
+      events: { publish: vi.fn().mockReturnValue(true) },
+      artifactWorkspaceReady: false,
+      deferredArtifactBatches: [] as BridgeClientDeferredArtifactBatch[],
+      deferredArtifactInputCount: 0,
+      artifacts: { inputBatchLimit: () => 2, upsertMany },
+      pendingPermissionIds: new Set<string>(),
+      pendingInteractions: new Map(),
+      midTurnMessageQueue: [] as MidTurnQueueEntry[],
+      settledMidTurnMessageIds: [] as string[],
+    };
+    const client = new BridgeClient(
+      ((sid: string) => (sid === sessionId ? fakeEntry : undefined)) as never,
+      noPermissionFlow as never,
+      { request: noPermissionFlow } as never,
+      0,
+      Infinity,
+    );
+    const emit = (title: string) =>
+      client.extNotification('qwen/notify/session/artifact-event', {
+        sessionId,
+        artifacts: [{ title, url: `https://example.com/${title}` }],
+      });
+
+    await emit('one');
+    await emit('two');
+    await emit('three');
+    expect(fakeEntry.deferredArtifactInputCount).toBe(2);
+    expect(
+      fakeEntry.deferredArtifactBatches.map(
+        (batch) => batch.artifacts[0]?.title,
+      ),
+    ).toEqual(['two', 'three']);
+
+    fakeEntry.artifactWorkspaceReady = true;
+    await client.drainDeferredSessionArtifacts(fakeEntry as never);
+    expect(
+      upsertMany.mock.calls.map(([artifacts]) => artifacts[0]?.title),
+    ).toEqual(['two', 'three']);
+  });
+
   it('stores hook artifact events for child-initiated turns', async () => {
     const sessionId = 'sess:child-artifacts';
     const publish = vi.fn().mockReturnValue(true);
@@ -2675,6 +3092,9 @@ describe('BridgeClient — artifact ingress', () => {
     const fakeEntry = {
       sessionId,
       events: { publish },
+      artifactWorkspaceReady: true,
+      deferredArtifactBatches: [],
+      deferredArtifactInputCount: 0,
       artifacts: new SessionArtifactStore({
         sessionId,
         workspaceCwd: workspace,
@@ -3119,7 +3539,7 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
           events: { publish: ReturnType<typeof vi.fn> };
           activePromptId?: string;
           promptActive?: boolean;
-          media?: SessionMediaStore;
+          attachments?: SessionAttachmentStore;
         }
       | undefined,
     ownsSession?: (sessionId: string) => boolean,
@@ -3127,7 +3547,7 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
     const resolvedEntry = entry
       ? {
           ...entry,
-          media: entry.media ?? new SessionMediaStore(),
+          attachments: entry.attachments ?? new SessionAttachmentStore(),
           pendingPromptList: entry.pendingPromptList ?? [],
           settledMidTurnMessageIds: entry.settledMidTurnMessageIds ?? [],
         }
@@ -3283,11 +3703,14 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
     });
   });
 
-  it('resolves media references for the child and preserves their replay metadata', async () => {
+  it('resolves attachment references for the child and preserves their replay metadata', async () => {
     const publish = vi.fn().mockReturnValue(true);
-    const media = new SessionMediaStore();
+    const media = new SessionAttachmentStore();
     try {
-      const reference = await media.put(Uint8Array.of(1, 2, 3), 'image/png');
+      const reference = await media.putAttachment(
+        Uint8Array.of(1, 2, 3),
+        'image/png',
+      );
       const entry = {
         sessionId: 'sess:media-reference',
         midTurnMessageQueue: [
@@ -3299,7 +3722,7 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
         ],
         settledMidTurnMessageIds: [] as string[],
         events: { publish },
-        media,
+        attachments: media,
       };
       const client = makeClientWithEntry('sess:media-reference', entry);
 
@@ -3314,7 +3737,7 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
               { type: 'text', text: 'look' },
               { type: 'image', data: 'AQID', mimeType: 'image/png' },
             ],
-            mediaReferences: [reference],
+            attachmentReferences: [reference],
           },
         ],
       });
@@ -3323,11 +3746,14 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
     }
   });
 
-  it('degrades a mediaId reused across drained messages after its first use', async () => {
+  it('degrades a attachmentId reused across drained messages after its first use', async () => {
     const publish = vi.fn().mockReturnValue(true);
-    const media = new SessionMediaStore();
+    const media = new SessionAttachmentStore();
     try {
-      const reference = await media.put(Uint8Array.of(1, 2, 3), 'image/png');
+      const reference = await media.putAttachment(
+        Uint8Array.of(1, 2, 3),
+        'image/png',
+      );
       const read = vi.spyOn(media, 'read');
       const entry = {
         sessionId: 'sess:shared-media',
@@ -3339,7 +3765,7 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
         ],
         settledMidTurnMessageIds: [] as string[],
         events: { publish },
-        media,
+        attachments: media,
       };
       const client = makeClientWithEntry('sess:shared-media', entry);
 
@@ -3359,7 +3785,7 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
             content: [
               {
                 type: 'text',
-                text: 'b\n[Attached media is no longer available]',
+                text: 'b\n[Attachment is no longer available]',
               },
             ],
           },
@@ -3367,7 +3793,7 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
             content: [
               {
                 type: 'text',
-                text: 'c\n[Attached media is no longer available]',
+                text: 'c\n[Attachment is no longer available]',
               },
             ],
           },
@@ -3375,7 +3801,7 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
             content: [
               {
                 type: 'text',
-                text: 'd\n[Attached media is no longer available]',
+                text: 'd\n[Attachment is no longer available]',
               },
             ],
           },
@@ -3398,7 +3824,7 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
         await gate;
         return content ?? [];
       }),
-    } as unknown as SessionMediaStore;
+    } as unknown as SessionAttachmentStore;
     const entry = {
       sessionId: 'sess:slow-media',
       midTurnMessageQueue: [
@@ -3412,7 +3838,7 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
       ],
       settledMidTurnMessageIds: [] as string[],
       events: { publish: vi.fn().mockReturnValue(true) },
-      media,
+      attachments: media,
     };
     const client = makeClientWithEntry('sess:slow-media', entry);
 
@@ -3439,7 +3865,7 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
       content: [
         {
           type: 'image' as const,
-          mediaId: 'expired',
+          attachmentId: 'expired',
           mimeType: 'image/png',
           size: 3,
         },
@@ -3468,7 +3894,7 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
           content: [
             {
               type: 'text',
-              text: 'look at this\n[Attached media is no longer available]',
+              text: 'look at this\n[Attachment is no longer available]',
             },
           ],
         },
@@ -3484,14 +3910,14 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
     expect(publish).toHaveBeenCalledOnce();
   });
 
-  it('drains every valid media reference even when their total exceeds 16 MiB', async () => {
-    const media = new SessionMediaStore();
+  it('drains every valid attachment reference even when their total exceeds 16 MiB', async () => {
+    const media = new SessionAttachmentStore();
     try {
-      const large = new Uint8Array(SESSION_MEDIA_MAX_ITEM_BYTES);
+      const large = new Uint8Array(SESSION_ATTACHMENT_MAX_ITEM_BYTES);
       const refs = [
-        await media.put(large, 'image/png'),
-        await media.put(large, 'image/png'),
-        await media.put(Uint8Array.of(1), 'image/png'),
+        await media.putAttachment(large, 'image/png'),
+        await media.putAttachment(large, 'image/png'),
+        await media.putAttachment(Uint8Array.of(1), 'image/png'),
       ];
       const entry = {
         sessionId: 'sess:large-drain',
@@ -3500,7 +3926,7 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
         ],
         settledMidTurnMessageIds: [] as string[],
         events: { publish: vi.fn().mockReturnValue(true) },
-        media,
+        attachments: media,
       };
       const client = makeClientWithEntry('sess:large-drain', entry);
 
@@ -3509,14 +3935,14 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
       })) as {
         items: Array<{
           content: Array<Record<string, unknown>>;
-          mediaReferences?: unknown[];
+          attachmentReferences?: unknown[];
         }>;
       };
 
       expect(
         result.items[0]?.content.filter((block) => block['type'] === 'image'),
       ).toHaveLength(3);
-      expect(result.items[0]?.mediaReferences).toEqual(refs);
+      expect(result.items[0]?.attachmentReferences).toEqual(refs);
     } finally {
       await media.close();
     }
@@ -3527,14 +3953,17 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
     // media of every queued message: the store still holds the bytes, so the
     // drain surfaces the error and hands the messages back for the next one.
     const publish = vi.fn().mockReturnValue(true);
-    const media = new SessionMediaStore();
+    const media = new SessionAttachmentStore();
     const readFile = vi
       .spyOn(fsp, 'readFile')
       .mockRejectedValueOnce(
         Object.assign(new Error('too many open files'), { code: 'EMFILE' }),
       );
     try {
-      const reference = await media.put(Uint8Array.of(1, 2, 3), 'image/png');
+      const reference = await media.putAttachment(
+        Uint8Array.of(1, 2, 3),
+        'image/png',
+      );
       const entry = {
         sessionId: 'sess:emfile',
         midTurnMessageQueue: [
@@ -3543,7 +3972,7 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
         ],
         settledMidTurnMessageIds: [] as string[],
         events: { publish },
-        media,
+        attachments: media,
       };
       const client = makeClientWithEntry('sess:emfile', entry);
 
@@ -3588,11 +4017,14 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
     // One dead reference must drop only itself, not the whole message's
     // media: the sibling the store still holds reaches the child.
     const publish = vi.fn().mockReturnValue(true);
-    const media = new SessionMediaStore();
+    const media = new SessionAttachmentStore();
     try {
-      const live = await media.put(Uint8Array.of(1, 2, 3), 'image/png');
-      const gone = await media.put(Uint8Array.of(4, 5), 'image/png');
-      await media.remove(gone.mediaId);
+      const live = await media.putAttachment(
+        Uint8Array.of(1, 2, 3),
+        'image/png',
+      );
+      const gone = await media.putAttachment(Uint8Array.of(4, 5), 'image/png');
+      await media.remove(gone.attachmentId);
       const entry = {
         sessionId: 'sess:mixed',
         midTurnMessageQueue: [
@@ -3600,7 +4032,7 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
         ],
         settledMidTurnMessageIds: [] as string[],
         events: { publish },
-        media,
+        attachments: media,
       };
       const client = makeClientWithEntry('sess:mixed', entry);
 
@@ -3615,11 +4047,11 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
             content: [
               {
                 type: 'text',
-                text: 'mixed\n[Attached media is no longer available]',
+                text: 'mixed\n[Attachment is no longer available]',
               },
               { type: 'image', data: 'AQID', mimeType: 'image/png' },
             ],
-            mediaReferences: [live],
+            attachmentReferences: [live],
           },
         ],
       });

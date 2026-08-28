@@ -69,9 +69,28 @@ const verdict = {
   deferredCount: 2,
   // Non-empty for the same reason — absent defaults to [].
   floorEnforced: [1],
-  // Also non-default on purpose, for the same reason.
+  // Non-zero on purpose too, but for the OPPOSITE reason to its siblings:
+  // this field's absence is preserved, not defaulted, so the fixture value
+  // proves passthrough against a validator that would otherwise omit the
+  // field entirely.
+  postedInline: 3,
+  // Also non-default on purpose — and on the DEFAULTING side, with
+  // `deferredCount` and `floorEnforced`: an absent `bodyTrim` reads as an
+  // untrimmed one and the field is always emitted. Spelled out rather than
+  // said as "the same reason", which would now resolve against the
+  // preserved-absence block above it and teach the opposite of what
+  // `save-artifact.ts` does.
   bodyTrim: { sections: 2, deferralList: true, fold: true, truncated: true },
   lowSignal: { agents: 4, srcDiffLines: 120 },
+  // Populated on purpose, like `deferredCount` above: the copy test then
+  // proves passthrough rather than only the validator's absent-means-null.
+  approachSignal: {
+    round: 6,
+    src0: 228,
+    srcDiffLines: 920,
+    growth: 920 / 228,
+    nonConverged: true,
+  },
   verdictLine: 'Verdict: Comment — Request changes was downgraded',
 };
 
@@ -390,6 +409,228 @@ describe('saveReviewArtifact', () => {
     },
   );
 
+  it.each([
+    ['a string', 'three'],
+    ['a negative', -1],
+    ['a fraction', 1.5],
+  ])(
+    'refuses a present postedInline of the wrong shape (%s)',
+    (_label, bad) => {
+      // The sibling discipline: the absent-means-zero arm exists for
+      // pre-telemetry composed files and must not launder a present value
+      // that says nothing true into the durable artifact.
+      const paths = fixture();
+      writeJson(paths.composed, { ...verdict, postedInline: bad });
+
+      expect(() =>
+        saveReviewArtifact({ ...paths, target: 'local', effort: 'medium' }),
+      ).toThrow(/postedInline/);
+      expect(existsSync(paths.out)).toBe(false);
+    },
+  );
+
+  it('PRESERVES an absent or null postedInline — zero would assert an unobserved count', () => {
+    // The one field here whose absence is not defaulted. Its siblings'
+    // defaults are true of a pre-feature round (it deferred nothing,
+    // enforced nothing, trimmed nothing); a pre-telemetry round DID post,
+    // so a written zero would invent a count — and would be
+    // indistinguishable from a genuinely converged round. `lowSignal` in
+    // the same function already persists null rather than a default.
+    const paths = fixture();
+    const { postedInline: _absent, ...preTelemetry } = verdict;
+    for (const composed of [preTelemetry, { ...verdict, postedInline: null }]) {
+      writeJson(paths.composed, composed);
+      saveReviewArtifact({ ...paths, target: 'local', effort: 'medium' });
+      const saved = JSON.parse(readFileSync(paths.out, 'utf8'));
+      expect('postedInline' in saved.verdict).toBe(false);
+      rmSync(paths.out, { force: true });
+    }
+  });
+
+  it('persists a recorded zero — a converged round is an observation', () => {
+    // The other half of the same distinction: absence is unknown, zero is a
+    // measurement, and the artifact must carry the difference.
+    const paths = fixture();
+    writeJson(paths.composed, { ...verdict, postedInline: 0 });
+    saveReviewArtifact({ ...paths, target: 'local', effort: 'medium' });
+    expect(
+      JSON.parse(readFileSync(paths.out, 'utf8')).verdict.postedInline,
+    ).toBe(0);
+  });
+
+  it('carries the fresh count and the convergence paragraph into the artifact', () => {
+    // Both are new surfaces on the composed result, and the allow-list is
+    // where a new field silently stops existing. The paragraph matters most:
+    // the overflow ladder sheds it LAST, so a round that lost it from the
+    // body lost every other rank too, and the artifact may be the only
+    // durable copy.
+    const paths = fixture();
+    writeJson(paths.composed, {
+      ...verdict,
+      postedFresh: 2,
+      convergence: { en: 'Convergence: …', zh: '收敛情况：…' },
+    });
+    saveReviewArtifact({ ...paths, target: 'local', effort: 'medium' });
+    const saved = JSON.parse(readFileSync(paths.out, 'utf8'));
+    expect(saved.verdict.postedFresh).toBe(2);
+    expect(saved.verdict.convergence.en).toBe('Convergence: …');
+    expect(saved.verdict.convergence.zh).toBe('收敛情况：…');
+  });
+
+  it('carries the matched recommendation codes into the artifact', () => {
+    // The machine-readable half. Dropped by the allow-list, a caller reading
+    // the durable record sees the prose and not the codes it would key on.
+    const paths = fixture();
+    writeJson(paths.composed, {
+      ...verdict,
+      recommendations: [
+        { code: 'root-cause-triage', basis: '2 file(s) …' },
+        { code: 'land-and-defer', basis: 'this round posts no Critical …' },
+      ],
+    });
+    saveReviewArtifact({ ...paths, target: 'local', effort: 'medium' });
+    const saved = JSON.parse(readFileSync(paths.out, 'utf8'));
+    expect(
+      saved.verdict.recommendations.map((r: { code: string }) => r.code),
+    ).toEqual(['root-cause-triage', 'land-and-defer']);
+    expect(saved.verdict.recommendations[0].basis).toBe('2 file(s) …');
+    rmSync(paths.out, { force: true });
+
+    // A present value of the wrong shape is refused like every sibling.
+    writeJson(paths.composed, { ...verdict, recommendations: 'nope' });
+    expect(() =>
+      saveReviewArtifact({ ...paths, target: 'local', effort: 'medium' }),
+    ).toThrow(/recommendations/);
+
+    // ...and the code is checked against the closed set, not cast into it: a
+    // set a caller wires actions to is a contract, and a cast writes
+    // whatever string it was handed under a type that says otherwise.
+    writeJson(paths.composed, {
+      ...verdict,
+      recommendations: [{ code: 'make-coffee', basis: 'x' }],
+    });
+    expect(() =>
+      saveReviewArtifact({ ...paths, target: 'local', effort: 'medium' }),
+    ).toThrow(/recommendation codes/);
+  });
+
+  it('carries the mechanism-health note into the artifact', () => {
+    // The first clause the overflow ladder sheds, so the artifact may be its
+    // only durable copy on the rounds it fires.
+    const paths = fixture();
+    writeJson(paths.composed, {
+      ...verdict,
+      health: { en: 'Mechanism health: …', zh: '机制健康：…' },
+    });
+    saveReviewArtifact({ ...paths, target: 'local', effort: 'medium' });
+    const saved = JSON.parse(readFileSync(paths.out, 'utf8'));
+    expect(saved.verdict.health.en).toBe('Mechanism health: …');
+    expect(saved.verdict.health.zh).toBe('机制健康：…');
+    rmSync(paths.out, { force: true });
+
+    // A present value of the wrong shape is refused, like every sibling.
+    writeJson(paths.composed, { ...verdict, health: { en: 'x' } });
+    expect(() =>
+      saveReviewArtifact({ ...paths, target: 'local', effort: 'medium' }),
+    ).toThrow(/health\.zh/);
+  });
+
+  it('carries the residual-risk advisory into the artifact (#9526)', () => {
+    // For the reason its sibling paragraph above is carried: rank 2 sheds
+    // before the not-reviewed disclosures, so the rounds that fire the
+    // advisory are exactly the long rounds whose body is most likely to drop
+    // it — and a maintainer reading `.qwen/reviews` to make the
+    // `land-with-residual-risk` call would otherwise find a "did not fit"
+    // breadcrumb and none of the facts behind it.
+    const paths = fixture();
+    writeJson(paths.composed, {
+      ...verdict,
+      residualRisk: {
+        shape: 'persistently-critical',
+        recommendation: 'land-with-residual-risk',
+        criticals: 2,
+        fresh: 3,
+        prevFresh: 3,
+      },
+    });
+    saveReviewArtifact({ ...paths, target: 'local', effort: 'medium' });
+    const saved = JSON.parse(readFileSync(paths.out, 'utf8'));
+    expect(saved.verdict.residualRisk).toEqual({
+      shape: 'persistently-critical',
+      recommendation: 'land-with-residual-risk',
+      criticals: 2,
+      fresh: 3,
+      prevFresh: 3,
+      // Absent in the composed JSON reads as "not disclosed", never as a
+      // refusal — an artifact written before the caveat existed still saves.
+      prevTruncated: false,
+    });
+  });
+
+  it('refuses a residual-risk advisory of the wrong shape (#9526)', () => {
+    // Shape-checked rather than passed through, like every other field on
+    // this boundary: the composed JSON is a file on disk between two
+    // processes, and a consumer reading `criticals` off a hand-edited
+    // artifact must not read a string. Absence stays absence — a round that
+    // did not fire the signal is not a malformed round.
+    const paths = fixture();
+    saveReviewArtifact({ ...paths, target: 'local', effort: 'medium' });
+    expect(
+      'residualRisk' in JSON.parse(readFileSync(paths.out, 'utf8')).verdict,
+    ).toBe(false);
+    for (const bad of [
+      {
+        shape: 'something-else',
+        recommendation: 'land-with-residual-risk',
+        criticals: 1,
+        posted: 1,
+        prevPosted: 1,
+      },
+      {
+        shape: 'persistently-critical',
+        recommendation: 'merge-it',
+        criticals: 1,
+        posted: 1,
+        prevPosted: 1,
+      },
+      {
+        shape: 'persistently-critical',
+        recommendation: 'land-with-residual-risk',
+        criticals: '1',
+        posted: 1,
+        prevPosted: 1,
+      },
+      {
+        shape: 'persistently-critical',
+        recommendation: 'land-with-residual-risk',
+        criticals: 1,
+        posted: -1,
+        prevPosted: 1,
+      },
+    ]) {
+      writeJson(paths.composed, { ...verdict, residualRisk: bad });
+      expect(() =>
+        saveReviewArtifact({ ...paths, target: 'local', effort: 'medium' }),
+      ).toThrow(/residualRisk/);
+    }
+  });
+
+  it('PRESERVES an absent postedFresh and refuses a present one of the wrong shape', () => {
+    // Same distinction as its sibling: a round that recorded no fresh count
+    // is not a round that produced none.
+    const paths = fixture();
+    saveReviewArtifact({ ...paths, target: 'local', effort: 'medium' });
+    expect(
+      'postedFresh' in JSON.parse(readFileSync(paths.out, 'utf8')).verdict,
+    ).toBe(false);
+    rmSync(paths.out, { force: true });
+
+    writeJson(paths.composed, { ...verdict, postedFresh: -1 });
+    expect(() =>
+      saveReviewArtifact({ ...paths, target: 'local', effort: 'medium' }),
+    ).toThrow(/postedFresh/);
+  });
+
   it('reads an absent or null floorEnforced as empty — a pre-enforcement composed file must still save', () => {
     // Null rides the same absence semantics as the sibling deferredCount
     // pair — an undefined-only check would refuse a composed file that
@@ -445,6 +686,77 @@ describe('saveReviewArtifact', () => {
       expect(
         JSON.parse(readFileSync(paths.out, 'utf8')).verdict.deferredCount,
       ).toBe(0);
+    }
+  });
+
+  it.each(['round', 'src0', 'srcDiffLines'] as const)(
+    'refuses a zero-valued approachSignal.%s',
+    (key) => {
+      const paths = fixture();
+      writeJson(paths.composed, {
+        ...verdict,
+        approachSignal: { ...verdict.approachSignal, [key]: 0 },
+      });
+
+      expect(() =>
+        saveReviewArtifact({
+          ...paths,
+          target: 'local',
+          effort: 'medium',
+        }),
+      ).toThrow(new RegExp(`approachSignal\\.${key}`));
+      expect(existsSync(paths.out)).toBe(false);
+    },
+  );
+
+  it.each([
+    ['a negative round', { round: -1 }],
+    ['a fractional round', { round: 1.5 }],
+    ['a non-numeric round', { round: 'six' }],
+    ['a negative growth', { growth: -1 }],
+    ['a non-numeric growth', { growth: 'big' }],
+    ['a non-boolean nonConverged', { nonConverged: 'yes' }],
+  ] as Array<[string, Record<string, unknown>]>)(
+    'refuses a present approachSignal carrying %s',
+    (_label, bad) => {
+      // Same discipline as deferredCount: the absent-means-null default
+      // must not swallow a PRESENT malformed value into the durable artifact.
+      const paths = fixture();
+      writeJson(paths.composed, {
+        ...verdict,
+        approachSignal: { ...verdict.approachSignal, ...bad },
+      });
+
+      expect(() =>
+        saveReviewArtifact({ ...paths, target: 'local', effort: 'medium' }),
+      ).toThrow(/approachSignal/);
+      expect(existsSync(paths.out)).toBe(false);
+    },
+  );
+
+  it('refuses a present approachSignal that is not an object', () => {
+    const paths = fixture();
+    writeJson(paths.composed, { ...verdict, approachSignal: 'junk' });
+
+    expect(() =>
+      saveReviewArtifact({ ...paths, target: 'local', effort: 'medium' }),
+    ).toThrow(/approachSignal/);
+    expect(existsSync(paths.out)).toBe(false);
+  });
+
+  it('reads an absent or null approachSignal as null — a pre-signal composed file must still save', () => {
+    // Null rides the same absence semantics as the sibling deferredCount:
+    // a presence-required read would refuse every composed file written
+    // before this field existed.
+    const paths = fixture();
+    const { approachSignal: _absent, ...preSignal } = verdict;
+    for (const composed of [preSignal, { ...verdict, approachSignal: null }]) {
+      writeJson(paths.composed, composed);
+      saveReviewArtifact({ ...paths, target: 'local', effort: 'medium' });
+      expect(
+        JSON.parse(readFileSync(paths.out, 'utf8')).verdict.approachSignal,
+      ).toBeNull();
+      rmSync(paths.out, { force: true });
     }
   });
 

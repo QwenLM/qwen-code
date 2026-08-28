@@ -5,8 +5,6 @@
  */
 
 import type {
-  CountTokensParameters,
-  CountTokensResponse,
   EmbedContentParameters,
   EmbedContentResponse,
   GenerateContentParameters,
@@ -33,7 +31,7 @@ import { preloadRuntimeFetchModule } from '../utils/runtimeFetchOptions.js';
 import type { ReasoningEffort } from './reasoning-effort.js';
 
 /**
- * Interface abstracting the core functionalities for generating content and counting tokens.
+ * Interface abstracting the core content generation functionality.
  */
 export interface ContentGenerator {
   generateContent(
@@ -46,20 +44,11 @@ export interface ContentGenerator {
     userPromptId: string,
   ): Promise<AsyncGenerator<GenerateContentResponse>>;
 
-  countTokens(request: CountTokensParameters): Promise<CountTokensResponse>;
-
   embedContent(request: EmbedContentParameters): Promise<EmbedContentResponse>;
-
-  useSummarizedThinking(): boolean;
 }
 
-export enum AuthType {
-  USE_OPENAI = 'openai',
-  QWEN_OAUTH = 'qwen-oauth',
-  USE_GEMINI = 'gemini',
-  USE_VERTEX_AI = 'vertex-ai',
-  USE_ANTHROPIC = 'anthropic',
-}
+import { AuthType } from '../utils/auth-type.js';
+export { AuthType };
 
 export type PromptCacheSharingParameters = GenerateContentParameters & {
   /**
@@ -148,8 +137,9 @@ export type ContentGeneratorConfig = {
         // each provider adapter maps + clamps this tier onto the active model:
         //   - 'xhigh'/'max' are extra-strong tiers (DeepSeek `reasoning_effort`,
         //     Anthropic `output_config.effort` on Opus 4.7+, OpenAI `xhigh`).
-        //   - The default OpenAI-compatible pipeline forwards the tier verbatim
-        //     (no 'max' clamp); Gemini caps at 'high'.
+        //   - Generic OpenAI-compatible endpoints and the DashScope
+        //     qwen3.8-max family cap at 'xhigh' ('max' is a vendor extension,
+        //     not part of the generic ladder); Gemini caps at 'high'.
         //   - Real Anthropic clamps each tier to the active model's supported
         //     set (Opus 4.7+/5.x accept 'xhigh'/'max'; Opus/Sonnet 4.6 accept
         //     'max'; older models cap at 'high'), logged once per generator via
@@ -290,6 +280,40 @@ export interface ModelConfigValidationResult {
   errors: Error[];
 }
 
+export const VERTEX_PROJECT_ENV_VAR = 'GOOGLE_CLOUD_PROJECT';
+
+/**
+ * Single definition of "a Vertex project is configured", shared by every gate
+ * that decides whether Application Default Credentials are usable. Callers that
+ * read from somewhere other than the process environment pass their own lookup
+ * so all gates agree on whitespace handling.
+ */
+export function hasVertexProjectConfigured(
+  lookup: (key: string) => string | undefined = (key) => process.env[key],
+): boolean {
+  return !!lookup(VERTEX_PROJECT_ENV_VAR)?.trim();
+}
+
+/**
+ * Vertex AI accepts Application Default Credentials in place of an API key:
+ * with a project configured and no key passed, the @google/genai client
+ * resolves ADC itself. Passing any key value instead switches the client to
+ * Vertex Express mode and disables ADC, so the key must stay absent.
+ *
+ * An entry that declares its own key variable is excluded: falling back to ADC
+ * there would authenticate as a different principal than the one configured,
+ * silently, whenever that variable failed to be injected.
+ */
+function usesVertexApplicationDefaultCredentials(
+  config: ContentGeneratorConfig,
+): boolean {
+  return (
+    config.authType === AuthType.USE_VERTEX_AI &&
+    !config.apiKeyEnvKey &&
+    hasVertexProjectConfigured()
+  );
+}
+
 /**
  * Validate a resolved model configuration.
  * This is the single validation entry point used across Core.
@@ -306,7 +330,7 @@ export function validateModelConfig(
   }
 
   // API key is required for all other auth types
-  if (!config.apiKey) {
+  if (!config.apiKey && !usesVertexApplicationDefaultCredentials(config)) {
     if (isStrictModelProvider) {
       errors.push(
         new StrictMissingCredentialsError(
@@ -324,6 +348,7 @@ export function validateModelConfig(
           model: config.model,
           baseUrl: config.baseUrl,
           envKey,
+          explicitEnvKey: config.apiKeyEnvKey,
         }),
       );
     }
@@ -403,10 +428,7 @@ class LazyContentGenerator implements ContentGenerator {
   private generatorPromise?: Promise<ContentGenerator>;
   private preloadedOnly = false;
 
-  constructor(
-    private readonly loader: () => Promise<ContentGenerator>,
-    private readonly summarizedThinking: boolean,
-  ) {}
+  constructor(private readonly loader: () => Promise<ContentGenerator>) {}
 
   private getGenerator(): Promise<ContentGenerator> {
     this.generatorPromise ??= this.loader();
@@ -451,20 +473,10 @@ class LazyContentGenerator implements ContentGenerator {
     );
   }
 
-  async countTokens(
-    request: CountTokensParameters,
-  ): Promise<CountTokensResponse> {
-    return (await this.getGeneratorForUse()).countTokens(request);
-  }
-
   async embedContent(
     request: EmbedContentParameters,
   ): Promise<EmbedContentResponse> {
     return (await this.getGeneratorForUse()).embedContent(request);
-  }
-
-  useSummarizedThinking(): boolean {
-    return this.summarizedThinking;
   }
 }
 
@@ -550,10 +562,10 @@ export async function createContentGenerator(
       authType === AuthType.USE_VERTEX_AI
     ) {
       loadBaseGenerator = async () => {
-        const { createGeminiContentGenerator } = await import(
-          './geminiContentGenerator/index.js'
+        const { createLlmContentGenerator } = await import(
+          './llm-content-generator/index.js'
         );
-        return createGeminiContentGenerator(generatorConfig, config);
+        return createLlmContentGenerator(generatorConfig, config);
       };
     } else {
       throw new Error(
@@ -564,22 +576,19 @@ export async function createContentGenerator(
     throw wrapProviderLoadError(error, authType);
   }
 
-  return new LazyContentGenerator(
-    async () => {
-      try {
-        const [baseGenerator, { LoggingContentGenerator }] = await Promise.all([
-          loadBaseGenerator(),
-          import('./loggingContentGenerator/index.js'),
-        ]);
-        return new LoggingContentGenerator(
-          baseGenerator,
-          config,
-          generatorConfig,
-        );
-      } catch (error) {
-        throw wrapProviderLoadError(error, authType);
-      }
-    },
-    authType === AuthType.USE_GEMINI || authType === AuthType.USE_VERTEX_AI,
-  );
+  return new LazyContentGenerator(async () => {
+    try {
+      const [baseGenerator, { LoggingContentGenerator }] = await Promise.all([
+        loadBaseGenerator(),
+        import('./loggingContentGenerator/index.js'),
+      ]);
+      return new LoggingContentGenerator(
+        baseGenerator,
+        config,
+        generatorConfig,
+      );
+    } catch (error) {
+      throw wrapProviderLoadError(error, authType);
+    }
+  });
 }

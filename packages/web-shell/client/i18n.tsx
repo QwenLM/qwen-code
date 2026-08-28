@@ -364,6 +364,7 @@ const EN: Messages = {
   'agentType.general-purpose': 'General-purpose',
   'agentType.explore': 'Explore',
   'agentType.statusline-setup': 'Status Line Setup',
+  'agentType.review-agent': 'Review Agent',
   'agentType.test-engineer': 'Test Engineer',
   'agentType.fork': 'Fork',
   'timeline.parallelAgents': 'Parallel agents',
@@ -505,6 +506,15 @@ const EN: Messages = {
   'toast.dismissShort': 'Dismiss',
   'insight.ready': 'Insight report generated successfully!',
   'request.cancelled': 'Request cancelled.',
+  'visionBridge.model': 'vision model',
+  'visionBridge.skipped': (v) =>
+    `Vision bridge cancelled.${v?.egressOccurred === 1 ? ` Your image and prompt/context were sent to ${v?.target ?? ''}.` : ''}`,
+  'visionBridge.failed': (v) =>
+    v?.egressOccurred === 1
+      ? `Vision bridge (${v?.modelName ?? ''}) failed: the vision model request failed. Your image and prompt/context were sent to ${v?.target ?? ''}. The image was not interpreted.`
+      : `Vision bridge (${v?.target ?? ''}) failed: the vision bridge could not run. The image was not interpreted.`,
+  'visionBridge.ok': (v) =>
+    `Converted ${v?.convertedCount ?? 0} image(s)${Number(v?.omittedCount ?? 0) > 0 ? ` (${v?.omittedCount ?? 0} image(s) omitted)` : ''} to text via ${v?.target ?? ''}.${v?.egressOccurred === 1 ? ' Your image and prompt/context were sent to that model.' : ''}`,
   'approval.execQuestion': (v) => `Allow execution of: '${v?.tool ?? ''}'?`,
   'approval.changeQuestion': 'Apply this change?',
   'approval.launchAgentQuestion': 'Launch this agent?',
@@ -539,6 +549,16 @@ const EN: Messages = {
   'composer.upload.dismiss': 'Dismiss',
   'composer.upload.renamed': 'Saved as',
   'composer.upload.drop': 'Drop files',
+  'composer.dropChoice.title': (v) =>
+    Number(v?.count) === 1
+      ? 'Add dropped file'
+      : `Add ${v?.count ?? 0} dropped files`,
+  'composer.dropChoice.description':
+    'Attach the files to this message for the agent to read, or upload them to the workspace and insert @ references.',
+  'composer.dropChoice.cancel': 'Cancel',
+  'composer.dropChoice.upload': 'Upload to workspace',
+  'composer.dropChoice.reference': 'Attach to message',
+  'composer.dropChoice.moreFiles': (v) => `and ${v?.count ?? 0} more files`,
   'at.category.mcpResources': 'MCP resources',
   'at.category.mcpResources.description': 'Reference MCP server resources',
   'at.menu': 'Reference menu',
@@ -564,7 +584,7 @@ const EN: Messages = {
   'common.previous': 'previous',
   'common.expand': 'Expand',
   'common.collapse': 'Collapse',
-  'common.refresh': 'refresh',
+  'common.refresh': 'Refresh',
   'common.search': 'Search',
   'common.valid': 'valid',
   'common.clients': (v) => `${v?.count ?? 0} clients`,
@@ -1014,7 +1034,7 @@ const EN: Messages = {
   'editor.shellPlaceholder': 'Enter terminal command',
   'editor.send': 'Send message',
   'editor.imagesSkipped': (v) =>
-    `${v?.count ?? 0} unsupported file(s) were skipped.`,
+    `${v?.count ?? 0} file(s) were unavailable and skipped.`,
   'editor.imagesReadFailed': (v) =>
     `${v?.count ?? 0} file(s) could not be read.`,
   'editor.imagesTooLarge': (v) =>
@@ -1078,6 +1098,25 @@ const EN: Messages = {
     'Help me set up a recurring scheduled task (keep it long-term). What I want: ',
   'scheduledTasks.name': 'Name',
   'scheduledTasks.workspace': 'Workspace',
+  'scheduledTasks.session.label': 'Conversation',
+  'scheduledTasks.session.dedicated': 'Dedicated task conversation',
+  'scheduledTasks.session.current': 'Current conversation',
+  'scheduledTasks.session.dedicatedHint':
+    'Runs are kept in a separate conversation created for this task.',
+  'scheduledTasks.session.currentHint':
+    'Future runs continue in the conversation that is open now.',
+  'scheduledTasks.session.currentUnsupported':
+    'Current-conversation scheduling is unavailable on this daemon.',
+  'scheduledTasks.session.currentUnavailable':
+    'Open an existing conversation before selecting the current conversation.',
+  'scheduledTasks.session.currentBusy':
+    'Wait for the current turn or pending interaction to finish.',
+  'scheduledTasks.session.currentIneligible':
+    'This conversation type cannot own a scheduled task.',
+  'scheduledTasks.session.currentWorkspaceMismatch':
+    'The current conversation belongs to a different workspace.',
+  'scheduledTasks.session.currentAlreadyBound':
+    'The current conversation is already bound to a scheduled task.',
   'scheduledTasks.taskId': 'Task ID',
   'scheduledTasks.schedule': 'Schedule',
   'scheduledTasks.type': 'Type',
@@ -1133,6 +1172,8 @@ const EN: Messages = {
   'scheduledTasks.error.emptyPrompt': 'Prompt is required',
   'scheduledTasks.error.promptTooLong': (v) =>
     `Prompt exceeds ${v?.max ?? 100_000}-character limit`,
+  'scheduledTasks.error.goalActive':
+    'Cannot start a scheduled task while a Goal is active.',
   'scheduledTasks.error.toggleFailed': 'Failed to update task',
   'scheduledTasks.error.deleteFailed': 'Failed to delete task',
   'scheduledTasks.edit': 'Edit',
@@ -1214,6 +1255,13 @@ const EN: Messages = {
   'sideTask.new': 'New',
   'sideTask.create': 'New side task',
   'rightPanel.add': 'Add panel',
+  'attachment.showPreview': 'Preview',
+  'attachment.showSource': 'Source',
+  'attachment.previewUnsupported':
+    'Preview is not available for this file type.',
+  'attachment.readFailed': 'Failed to read attachment.',
+  'attachment.loadingFile': 'Loading file...',
+  'attachment.loadingPreview': 'Loading preview...',
   'sideTask.creating': 'Creating side task…',
   'sideTask.createFailed': 'Failed to create side task',
   'sideTask.promptFailed': 'Failed to send the side-task question',
@@ -1221,6 +1269,9 @@ const EN: Messages = {
   'turnOutputs.preview': 'Preview',
   'turnOutputs.collapseFiles': 'Collapse files',
   'turnOutputs.showMoreFiles': (v) => `Show ${v?.count ?? 0} more files`,
+  'turnOutputs.collapseArtifacts': 'Collapse artifacts',
+  'turnOutputs.showMoreArtifacts': (v) =>
+    `Show ${v?.count ?? 0} more artifacts`,
   'turnOutputs.previousTurn': 'Previous turn',
   'turnOutputs.fileCount': (v) => `${v?.count ?? 0} files`,
   'turnOutputs.openFileTree': 'Open file tree',
@@ -1331,6 +1382,8 @@ const EN: Messages = {
   'sidebar.unarchive': 'Restore',
   'sidebar.moreActions': 'More actions',
   'sidebar.archiveCurrentDisabled': 'The current session cannot be archived',
+  'sidebar.archiveRunningDisabled':
+    'A running session cannot be archived; archiving would end its turn',
   'sidebar.archivedTitle': 'Archived',
   'sidebar.archivedEmpty': 'No archived sessions.',
   'sidebar.archiveFailed': 'Failed to archive session',
@@ -1347,7 +1400,14 @@ const EN: Messages = {
   'sidebar.clients': (v) => `${v?.count ?? 0} client(s)`,
   'sidebar.running': 'Running',
   'sidebar.waitingForApproval': 'Waiting for approval',
+  'sidebar.waitingForApprovalShort': 'Approval',
+  'sidebar.sessionPr': (v) => `Pull Request #${v?.number ?? ''}`,
+  'sidebar.sessionPrMultiple': (v) =>
+    `Pull Request #${v?.number ?? ''} (${v?.count ?? 0} total)`,
+  'sidebar.sessionPrStateMerged': 'Merged',
+  'sidebar.sessionPrStateClosed': 'Closed',
   'sidebar.userInputNeeded': 'User input needed',
+  'sidebar.userInputNeededShort': 'Input',
   'sidebar.completedUnread': 'Finished',
   'sidebar.pin': 'Pin',
   'sidebar.unpin': 'Unpin',
@@ -1390,6 +1450,7 @@ const EN: Messages = {
     'Unsupported theme. Use /theme light or /theme dark.',
   'queue.delete': 'Delete',
   'queue.edit': 'Edit',
+  'queue.insert': 'Insert',
   'queue.cleared': 'Queue cleared.',
   'queue.deleteTip': 'Remove from queue',
   'queue.editTip': 'Remove from queue and edit again',
@@ -1397,6 +1458,7 @@ const EN: Messages = {
   'queue.midTurnQueued': 'Queued...',
   'queue.serverQueued': 'Queued on server...',
   'queue.editing': 'Editing...',
+  'queue.inserting': 'Inserting...',
   'queue.removing': 'Updating...',
   'queue.submittingDisabled': 'Submitting queued message...',
   'queue.summaryEditDisabled':
@@ -1410,6 +1472,8 @@ const EN: Messages = {
     'The prompt may already be running. Continue editing only if you accept the risk of sending it twice.',
   'queue.commandBlocked':
     "Slash commands can't be queued while a turn is running.",
+  'queue.commandGoalBlocked':
+    'Slash commands are unavailable while a Goal owns the session or its state is loading.',
   'queue.shellQueued':
     'Shell command queued — it will run after the current turn finishes.',
   'queue.shellDropped': (v) => {
@@ -1421,6 +1485,9 @@ const EN: Messages = {
   'queue.queueFailed': 'Failed to queue message',
   'queue.deleteFailed': 'Failed to move message out of queue',
   'queue.editFailed': 'Failed to edit queued message',
+  'queue.insertFailed': 'Failed to insert queued message',
+  'queue.insertTip': 'Insert into the current turn',
+  'queue.insertCommandDisabled': 'Commands cannot be inserted mid-turn',
   'queue.footer':
     'Press ↑ to edit the latest queued message · Esc to clear queue',
   'queue.imageCount': (v) => `(+${v?.count ?? 0} images)`,
@@ -1454,7 +1521,6 @@ const EN: Messages = {
   'help.shortcut.shell': 'Run shell commands',
   'help.shortcut.togglePanel': 'Toggle this panel',
   'help.shortcut.retry': 'Retry last request',
-  'help.shortcut.compact': 'Toggle compact mode',
   'retry.hint': 'Press Ctrl+Y to retry or click to retry',
   'retry.none': 'No failed request to retry.',
   'system.taskNotification': 'Task notification',
@@ -1520,9 +1586,6 @@ const EN: Messages = {
   'error.loopDetected':
     'The model got stuck while using tools or reached a safety limit, so this turn was stopped. Your session is still open—try a more specific instruction to continue.',
   'shell.command': 'Shell Command',
-  'compact.enabled': 'Compact mode enabled',
-  'compact.disabled': 'Compact mode disabled',
-  'compact.saveFailed': 'Failed to save compact mode',
   'help.subcommands': 'subcommands',
   'help.tab.commands': 'Built-in commands',
   'help.tab.custom': 'custom-commands',
@@ -1575,6 +1638,8 @@ const EN: Messages = {
   'skilldesc.dataviz': 'Design guidance for charts and data visualizations',
   'skilldesc.extensionCreator':
     'Create, test, and customize Qwen Code extensions',
+  'skilldesc.goalDraft':
+    'Turn a fuzzy intention into a verifiable /goal objective',
   'skilldesc.loop': 'Run a prompt on a schedule or self-paced wakeups',
   'skilldesc.newApp': 'Workflow for building a new app from scratch',
   'skilldesc.qcHelper': 'Answer questions about using Qwen Code',
@@ -1590,15 +1655,12 @@ const EN: Messages = {
   'skilldesc.bugfix': 'Fix a bug from a GitHub issue, reproduce-first',
   'skilldesc.codegraph': 'Analyze the codebase via graph and vector index',
   'skilldesc.createIssue': 'Draft and submit a GitHub issue from an idea',
-  'skilldesc.desktopPet': 'Create a pixel-art desktop pet for Qwen Code',
   'skilldesc.docsAuditAndRefresh':
     'Audit and refresh docs/ against the codebase',
   'skilldesc.docsUpdateFromDiff': 'Update official docs from local git diff',
   'skilldesc.e2eTesting': 'Run end-to-end tests of the Qwen Code CLI',
   'skilldesc.featDev': 'End-to-end workflow for a non-trivial feature',
   'skilldesc.memoryLeakDebug': 'Diagnose CLI memory leaks via heap snapshots',
-  'skilldesc.openworkDesktopSync':
-    'Sync packages/desktop with openwork commit-by-commit',
   'skilldesc.preparePr': 'Prepare a GitHub PR title and body from the branch',
   'skilldesc.qwenCodeClaw': 'Use Qwen Code as a code-understanding agent',
   'skilldesc.structuredDebugging':
@@ -2034,6 +2096,17 @@ const EN: Messages = {
   'goal.notYetMet': 'not yet met',
   'goal.set': 'Goal set',
   'goal.statusActive': '/goal active',
+  'goal.status.active': 'In progress',
+  'goal.status.paused': 'Paused',
+  'goal.status.blocked': 'Blocked',
+  'goal.status.usage_limited': 'Usage limited',
+  'goal.status.complete': 'Complete',
+  'goal.activity.idle': 'Waiting',
+  'goal.activity.running': 'Working',
+  'goal.activity.verifying': 'Verifying',
+  'goal.edit': 'Edit goal',
+  'goal.pause': 'Pause goal',
+  'goal.resume': 'Resume goal',
   'goal.turn': (v) => `${v?.count ?? 0} turn`,
   'goal.turnLabel': (v) => `turn ${v?.count ?? 0}`,
   'goal.turns': (v) => `${v?.count ?? 0} turns`,
@@ -2049,10 +2122,15 @@ const EN: Messages = {
   'goals.newHint':
     'The goal starts in a new session and runs until its condition holds.',
   'goals.condition': 'Condition',
-  'goals.conditionPlaceholder': 'e.g. all tests pass and the lint is clean',
+  'goals.conditionPlaceholder':
+    'e.g. `npm test` exits 0 and `npm run lint` reports no warnings (paste the output); do not modify test files; stop as blocked after 20 turns',
   'goals.cancel': 'Cancel',
   'goals.create': 'Set goal',
   'goals.creating': 'Starting…',
+  'goals.saving': 'Saving…',
+  'goals.save': 'Save',
+  'goals.edit': 'Edit goal',
+  'goals.objective': 'Objective',
   'goals.clear': 'Clear goal',
   'goals.clearConfirm': (v) => `Clear the goal "${v?.condition ?? ''}"?`,
   'goals.running': 'Working',
@@ -2065,7 +2143,21 @@ const EN: Messages = {
   'goals.error.clearKeyword': (v) =>
     `"${v?.word ?? ''}" clears a goal rather than setting one. Describe the condition to work toward.`,
   'goals.error.createFailed': 'Failed to start the goal',
+  'goals.error.saveFailed': 'Failed to save the goal',
+  'goals.error.goalUnavailable': 'The goal is no longer available.',
+  'goals.error.requiresObjective': (v) =>
+    `/goal ${v?.keyword ?? 'set'} requires an objective.`,
+  'goals.error.invalidCommand': 'Invalid /goal command',
+  'goals.error.goalsUnavailable':
+    'The goals view is not available on this surface.',
+  'goals.error.attachmentsUnsupported':
+    'Remove attachments before using /goal.',
+  'goals.error.editFailed': 'Failed to edit the goal',
+  'goals.error.pauseFailed': 'Failed to pause the goal',
+  'goals.error.resumeFailed': 'Failed to resume the goal',
   'goals.error.clearFailed': 'Failed to clear the goal',
+  'goals.error.controlBusy':
+    'Another goal control is still running. Try again once it finishes.',
   'memory.add': 'Add',
   'memory.add.desc': 'Write a durable memory',
   'memory.autoDream': (v) =>
@@ -2300,6 +2392,11 @@ const EN: Messages = {
   'skills.notToggleable': 'This skill cannot be enabled or disabled.',
   'skills.run': 'Reference skill',
   'skills.search': 'Search skills…',
+  'skills.settingUpdated': 'Workspace setting updated.',
+  'skills.settingUpdatedAvailabilityUnchanged':
+    'Workspace setting updated. Effective Skill availability did not change.',
+  'skills.settingUnchanged':
+    'Skill already has the requested workspace setting; no setting was changed.',
   'skills.status': 'Status',
   'skills.status.disabled': 'disabled',
   'skills.status.enabled': 'enabled',
@@ -2357,6 +2454,27 @@ const EN: Messages = {
   'stats.toolTime': 'Tool Time',
   'stats.total': 'Total',
   'stats.totalReviewed': 'Total Reviewed Suggestions:',
+  'tokenUsage.avgLatency': 'Avg latency',
+  'tokenUsage.cached': 'Cached input',
+  'tokenUsage.input': 'Input',
+  'tokenUsage.loadError': 'Failed to load token usage.',
+  'tokenUsage.models': 'By model',
+  'tokenUsage.noData': 'No API calls in this session yet.',
+  'tokenUsage.noSubagents': 'No subagent calls in this session yet.',
+  'tokenUsage.noTools': 'No tool calls in this session yet.',
+  'tokenUsage.open': 'Session token usage',
+  'tokenUsage.output': 'Total output',
+  'tokenUsage.refresh': 'Refresh',
+  'tokenUsage.requests': 'Requests',
+  'tokenUsage.retry': 'Retry',
+  'tokenUsage.subagents': 'Subagents',
+  'tokenUsage.thoughts': 'Reasoning (included in total output)',
+  'tokenUsage.title': 'Token Usage',
+  'tokenUsage.toolRow': (v) =>
+    `${v?.count ?? 0} calls · ${v?.rate ?? 0}% ok · ${v?.duration ?? ''}`,
+  'tokenUsage.tools': 'Tools',
+  'tokenUsage.updatedAt': (v) => `Updated ${v?.time ?? ''}`,
+  'tokenUsage.unavailable': 'Token usage is unavailable for this session.',
   'status.contextUsed': (v) => `${v?.pct ?? '0.0'}% context used`,
   'status.disconnected': 'Disconnected',
   'status.modeHint': '(shift + tab or click to switch)',
@@ -2546,12 +2664,14 @@ const EN: Messages = {
   'toolGroup.moreKinds': (v) => ` +${v?.count ?? 0}`,
   'toolGroup.summary': (v) =>
     `Ran ${v?.count ?? 0} tool${v?.count === 1 ? '' : 's'}`,
+  'toolGroup.summary.ranAgents': (v) =>
+    `Ran ${v?.count ?? 0} agent${v?.count === 1 ? '' : 's'}`,
   'toolGroup.summary.editedFiles': (v) =>
-    `Edited ${v?.count ?? 0} file${v?.count === 1 ? '' : 's'}`,
+    `Edited files ${v?.count ?? 0} time${v?.count === 1 ? '' : 's'}`,
   'toolGroup.summary.ranCommands': (v) =>
     `Ran ${v?.count ?? 0} command${v?.count === 1 ? '' : 's'}`,
   'toolGroup.summary.readFiles': (v) =>
-    `Read ${v?.count ?? 0} file${v?.count === 1 ? '' : 's'}`,
+    `Read files ${v?.count ?? 0} time${v?.count === 1 ? '' : 's'}`,
   'toolGroup.summary.searched': (v) =>
     `Searched ${v?.count ?? 0} time${v?.count === 1 ? '' : 's'}`,
   'toolGroup.summary.updatedTodos': (v) =>
@@ -2827,6 +2947,9 @@ const EN: Messages = {
     'Messages in the same group or topic share one conversation; best for collaboration.',
   'channels.editor.field.shared.sessionScope.detail.single':
     'Every message shares one conversation; best for a single-bot duty channel.',
+  'channels.editor.field.shared.multiSession': 'Named tasks',
+  'channels.editor.field.shared.multiSession.description':
+    'Keep a separate owner-scoped catalog of named tasks in daemon-managed mode.',
   'channels.editor.policy.pairing.title': 'Pairing',
   'channels.editor.policy.pairing.description':
     'People receive a pairing code and can chat after you approve them.',
@@ -3098,21 +3221,20 @@ const ZH: Messages = {
   'workspace.paneLabel': (v) => `工作区：${v?.name ?? ''}`,
   // Tool display names (chat-stream badge labels). Keyed by `toolName.<wire>`;
   // a wire name with no entry here falls back to the English display name via
-  // `localizeToolDisplayName`. Proper tool names / acronyms stay in English
-  // (Agent, Grep, Glob, LSP); a product name (e.g. `Notebook`) stays verbatim.
+  // `localizeToolDisplayName`. Acronyms and product names stay verbatim.
   'toolName.edit': '编辑',
   'toolName.write_file': '写入文件',
   'toolName.read_file': '读取文件',
   'toolName.zoom_image': '图片放大',
   'toolName.grep': '搜索内容',
   'toolName.grep_search': '搜索内容',
-  'toolName.glob': 'Glob',
+  'toolName.glob': '查找文件',
   'toolName.run_shell_command': '运行命令',
   'toolName.todo_write': '任务清单',
   'toolName.get_goal': '目标',
   'toolName.update_goal': '更新目标',
   'toolName.save_memory': '保存记忆',
-  'toolName.agent': 'Agent',
+  'toolName.agent': '智能体',
   'toolName.skill': '查看技能',
   'toolName.enter_plan_mode': '进入计划模式',
   'toolName.exit_plan_mode': '退出计划模式',
@@ -3133,6 +3255,7 @@ const ZH: Messages = {
   'toolName.team_create': '创建团队',
   'toolName.team_delete': '删除团队',
   'toolName.send_message': '发送消息',
+  'toolName.request_shutdown': '请求下线',
   'toolName.list_agents': '列出 Agent',
   'toolName.structured_output': '结构化输出',
   'toolName.monitor': '监控',
@@ -3147,6 +3270,7 @@ const ZH: Messages = {
   'toolName.read_mcp_resource': '读取 MCP 资源',
   'toolName.artifact': '制品',
   'toolName.record_artifact': '记录制品',
+  'toolName.report_findings': '上报评审发现',
   'toolName.image_gen': '生成图片',
   'toolName.display_image': '显示图片',
   // web-shell-only wire aliases (see TOOL_DISPLAY_NAMES in toolFormatting.ts)
@@ -3369,6 +3493,7 @@ const ZH: Messages = {
   'agentType.general-purpose': '通用',
   'agentType.explore': '探索',
   'agentType.statusline-setup': '状态栏设置',
+  'agentType.review-agent': '代码评审',
   'agentType.test-engineer': '测试工程师',
   'agentType.fork': '分支',
   'timeline.parallelAgents': '并行智能体',
@@ -3507,6 +3632,15 @@ const ZH: Messages = {
   'toast.dismissShort': '关闭',
   'insight.ready': 'Insight 报告已生成！',
   'request.cancelled': '请求已取消。',
+  'visionBridge.model': '视觉模型',
+  'visionBridge.skipped': (v) =>
+    `视觉桥接已取消。${v?.egressOccurred === 1 ? `你的图片及提示词/上下文已发送至 ${v?.target ?? ''}。` : ''}`,
+  'visionBridge.failed': (v) =>
+    v?.egressOccurred === 1
+      ? `视觉桥接（${v?.modelName ?? ''}）失败：视觉模型请求失败。你的图片及提示词/上下文已发送至 ${v?.target ?? ''}。图片未被解析。`
+      : `视觉桥接（${v?.target ?? ''}）失败：视觉桥接无法运行。图片未被解析。`,
+  'visionBridge.ok': (v) =>
+    `已通过 ${v?.target ?? ''} 将 ${v?.convertedCount ?? 0} 张图片转换为文本${Number(v?.omittedCount ?? 0) > 0 ? `（已忽略 ${v?.omittedCount ?? 0} 张图片）` : ''}。${v?.egressOccurred === 1 ? '你的图片及提示词/上下文已发送至该模型。' : ''}`,
   'approval.execQuestion': (v) => `允许执行：'${v?.tool ?? ''}'？`,
   'approval.changeQuestion': '是否继续？',
   'approval.launchAgentQuestion': '启动这个 agent？',
@@ -3540,6 +3674,13 @@ const ZH: Messages = {
   'composer.upload.dismiss': '关闭',
   'composer.upload.renamed': '已保存为',
   'composer.upload.drop': '拖放文件',
+  'composer.dropChoice.title': (v) => `添加拖入的 ${v?.count ?? 0} 个文件`,
+  'composer.dropChoice.description':
+    '可作为当前消息的附件供 Agent 读取，或上传到工作区并插入 @ 引用。',
+  'composer.dropChoice.cancel': '取消',
+  'composer.dropChoice.upload': '上传到工作区',
+  'composer.dropChoice.reference': '添加为附件',
+  'composer.dropChoice.moreFiles': (v) => `另有 ${v?.count ?? 0} 个文件`,
   'at.category.mcpResources': 'MCP 资源',
   'at.category.mcpResources.description': '引用 MCP server 资源',
   'at.menu': '引用菜单',
@@ -3985,7 +4126,7 @@ const ZH: Messages = {
   'history.retry': '重试',
   'editor.shellPlaceholder': '请输入终端命令',
   'editor.send': '发送消息',
-  'editor.imagesSkipped': (v) => `已跳过 ${v?.count ?? 0} 个不支持的文件。`,
+  'editor.imagesSkipped': (v) => `已跳过 ${v?.count ?? 0} 个不可读取的文件。`,
   'editor.imagesReadFailed': (v) => `${v?.count ?? 0} 个文件读取失败。`,
   'editor.imagesTooLarge': (v) => `${v?.count ?? 0} 个文件超过附件大小限制。`,
   'editor.connectionDisconnected': '连接已中断，请在恢复后重试。',
@@ -4042,6 +4183,20 @@ const ZH: Messages = {
   'scheduledTasks.chatStarter': '帮我创建一个长期保留的定时任务，我想：',
   'scheduledTasks.name': '名称',
   'scheduledTasks.workspace': '工作区',
+  'scheduledTasks.session.label': '会话',
+  'scheduledTasks.session.dedicated': '独立任务会话',
+  'scheduledTasks.session.current': '当前会话',
+  'scheduledTasks.session.dedicatedHint':
+    '任务运行记录保存在单独创建的会话中。',
+  'scheduledTasks.session.currentHint': '后续运行继续在当前打开的会话中。',
+  'scheduledTasks.session.currentUnsupported':
+    '当前 daemon 不支持绑定当前会话。',
+  'scheduledTasks.session.currentUnavailable': '请先打开一个已有会话。',
+  'scheduledTasks.session.currentBusy': '请等待当前执行或待处理交互结束。',
+  'scheduledTasks.session.currentIneligible': '此类会话不能绑定定时任务。',
+  'scheduledTasks.session.currentWorkspaceMismatch':
+    '当前会话属于另一个工作区。',
+  'scheduledTasks.session.currentAlreadyBound': '当前会话已绑定其他定时任务。',
   'scheduledTasks.taskId': '任务 ID',
   'scheduledTasks.schedule': '计划',
   'scheduledTasks.type': '类型',
@@ -4096,6 +4251,7 @@ const ZH: Messages = {
   'scheduledTasks.error.emptyPrompt': '提示词不能为空',
   'scheduledTasks.error.promptTooLong': (v) =>
     `提示词超过 ${v?.max ?? 100_000} 字符限制`,
+  'scheduledTasks.error.goalActive': '目标运行期间无法启动定时任务。',
   'scheduledTasks.error.toggleFailed': '更新任务失败',
   'scheduledTasks.error.deleteFailed': '删除任务失败',
   'scheduledTasks.edit': '编辑',
@@ -4173,6 +4329,12 @@ const ZH: Messages = {
   'sideTask.new': '新增',
   'sideTask.create': '新建侧边任务',
   'rightPanel.add': '添加页签',
+  'attachment.showPreview': '预览',
+  'attachment.showSource': '源码',
+  'attachment.previewUnsupported': '暂不支持预览此文件类型。',
+  'attachment.readFailed': '读取附件失败。',
+  'attachment.loadingFile': '正在加载文件...',
+  'attachment.loadingPreview': '正在加载预览...',
   'sideTask.creating': '正在创建侧边任务…',
   'sideTask.createFailed': '创建侧边任务失败',
   'sideTask.promptFailed': '发送侧边任务问题失败',
@@ -4180,6 +4342,8 @@ const ZH: Messages = {
   'turnOutputs.preview': '预览',
   'turnOutputs.collapseFiles': '收起文件',
   'turnOutputs.showMoreFiles': (v) => `再展示 ${v?.count ?? 0} 个文件`,
+  'turnOutputs.collapseArtifacts': '收起产物',
+  'turnOutputs.showMoreArtifacts': (v) => `再展示 ${v?.count ?? 0} 个产物`,
   'turnOutputs.previousTurn': '上轮对话',
   'turnOutputs.fileCount': (v) => `${v?.count ?? 0} 个文件`,
   'turnOutputs.openFileTree': '打开文件树',
@@ -4282,6 +4446,8 @@ const ZH: Messages = {
   'sidebar.unarchive': '恢复',
   'sidebar.moreActions': '更多操作',
   'sidebar.archiveCurrentDisabled': '不能归档当前会话',
+  'sidebar.archiveRunningDisabled':
+    '不能归档运行中的会话，归档会终止其当前回合',
   'sidebar.archivedTitle': '已归档',
   'sidebar.archivedEmpty': '没有已归档的会话。',
   'sidebar.archiveFailed': '归档会话失败',
@@ -4298,7 +4464,14 @@ const ZH: Messages = {
   'sidebar.clients': (v) => `${v?.count ?? 0} 个客户端`,
   'sidebar.running': '运行中',
   'sidebar.waitingForApproval': '等待批准',
+  'sidebar.waitingForApprovalShort': '待批准',
+  'sidebar.sessionPr': (v) => `合并请求 #${v?.number ?? ''}`,
+  'sidebar.sessionPrMultiple': (v) =>
+    `合并请求 #${v?.number ?? ''}（共 ${v?.count ?? 0} 个）`,
+  'sidebar.sessionPrStateMerged': '已合入',
+  'sidebar.sessionPrStateClosed': '已关闭',
   'sidebar.userInputNeeded': '需要用户输入',
+  'sidebar.userInputNeededShort': '需输入',
   'sidebar.completedUnread': '刚完成',
   'sidebar.pin': '置顶',
   'sidebar.unpin': '取消置顶',
@@ -4340,6 +4513,7 @@ const ZH: Messages = {
     '不支持该主题。请使用 /theme light 或 /theme dark。',
   'queue.delete': '删除',
   'queue.edit': '编辑',
+  'queue.insert': '插入',
   'queue.cleared': '队列已清空。',
   'queue.deleteTip': '移出队列',
   'queue.editTip': '移出队列并将内容放回输入框',
@@ -4347,6 +4521,7 @@ const ZH: Messages = {
   'queue.midTurnQueued': '排队中...',
   'queue.serverQueued': '服务器排队中...',
   'queue.editing': '编辑中...',
+  'queue.inserting': '插入中...',
   'queue.removing': '处理中...',
   'queue.submittingDisabled': '排队消息正在提交中...',
   'queue.summaryEditDisabled': '恢复的队列摘要无法还原原始附件。',
@@ -4357,12 +4532,17 @@ const ZH: Messages = {
   'queue.continueEditingConfirm':
     '这条消息可能已经在执行。只有在接受重复发送风险时才继续编辑。',
   'queue.commandBlocked': '当前回合运行时，Slash 命令不能进入排队。',
+  'queue.commandGoalBlocked':
+    'Goal 正在占用会话或状态仍在加载，暂时无法执行 Slash 命令。',
   'queue.shellQueued': 'Shell 命令已排队，将在当前回合结束后执行。',
   'queue.shellDropped': (v) =>
     `${v?.count ?? 0} 条排队的 Shell 命令将不会执行。`,
   'queue.queueFailed': '排队消息失败',
   'queue.deleteFailed': '移出队列失败',
   'queue.editFailed': '编辑排队消息失败',
+  'queue.insertFailed': '插入排队消息失败',
+  'queue.insertTip': '插入当前回合',
+  'queue.insertCommandDisabled': '命令不能插入当前回合',
   'queue.footer': '按 ↑ 编辑最后一条排队消息 · Esc 清空队列',
   'queue.imageCount': (v) => `（+${v?.count ?? 0} 张图片）`,
   'queue.fileCount': (v) => `（+${v?.count ?? 0} 个文件）`,
@@ -4394,7 +4574,6 @@ const ZH: Messages = {
   'help.shortcut.shell': '运行 shell 命令',
   'help.shortcut.togglePanel': '切换此面板',
   'help.shortcut.retry': '重试上次请求',
-  'help.shortcut.compact': '切换紧凑模式',
   'retry.hint': '按 Ctrl+Y 重试或点击重试',
   'retry.none': '没有可重试的失败请求。',
   'system.taskNotification': '后台任务通知',
@@ -4450,9 +4629,6 @@ const ZH: Messages = {
   'error.loopDetected':
     '模型在调用工具时反复尝试或达到了安全上限，因此系统停止了本轮操作。会话并未结束，你可以换一个更明确的指令继续。',
   'shell.command': 'Shell 命令',
-  'compact.enabled': '紧凑模式已开启',
-  'compact.disabled': '紧凑模式已关闭',
-  'compact.saveFailed': '保存紧凑模式失败',
   'help.subcommands': '子命令',
   'help.tab.commands': '内置命令',
   'help.tab.custom': '自定义命令',
@@ -4499,6 +4675,7 @@ const ZH: Messages = {
   'skilldesc.batch': '并行批量处理多个文件',
   'skilldesc.dataviz': '图表与数据可视化设计指南',
   'skilldesc.extensionCreator': '创建、测试和定制 Qwen Code 扩展',
+  'skilldesc.goalDraft': '将模糊意图改写为可验证的 /goal 目标',
   'skilldesc.loop': '按计划或自定节奏循环运行提示词',
   'skilldesc.newApp': '从零构建新应用的工作流',
   'skilldesc.qcHelper': '解答 Qwen Code 使用相关问题',
@@ -4512,13 +4689,11 @@ const ZH: Messages = {
   'skilldesc.bugfix': '按先复现流程修复 GitHub issue 中的 bug',
   'skilldesc.codegraph': '通过图数据库和向量索引分析代码库',
   'skilldesc.createIssue': '根据想法或 bug 描述起草并提交 GitHub issue',
-  'skilldesc.desktopPet': '为 Qwen Code 创建像素风桌面宠物',
   'skilldesc.docsAuditAndRefresh': '对照代码库审计并刷新 docs/ 文档',
   'skilldesc.docsUpdateFromDiff': '按本地 git diff 更新官方文档',
   'skilldesc.e2eTesting': '运行 Qwen Code CLI 的端到端测试',
   'skilldesc.featDev': '实现非平凡功能的端到端工作流',
   'skilldesc.memoryLeakDebug': '用堆快照诊断 CLI 内存泄漏',
-  'skilldesc.openworkDesktopSync': '将 packages/desktop 与 openwork 逐提交同步',
   'skilldesc.preparePr': '从当前分支准备 GitHub PR 标题和正文',
   'skilldesc.qwenCodeClaw': '将 Qwen Code 用作代码理解智能体',
   'skilldesc.structuredDebugging': '假设驱动的疑难 bug 调试方法',
@@ -4919,6 +5094,17 @@ const ZH: Messages = {
   'goal.notYetMet': '尚未满足',
   'goal.set': '目标已设置',
   'goal.statusActive': '/goal 运行中',
+  'goal.status.active': '进行中',
+  'goal.status.paused': '已暂停',
+  'goal.status.blocked': '已阻塞',
+  'goal.status.usage_limited': '用量受限',
+  'goal.status.complete': '已完成',
+  'goal.activity.idle': '等待中',
+  'goal.activity.running': '执行中',
+  'goal.activity.verifying': '验证中',
+  'goal.edit': '编辑目标',
+  'goal.pause': '暂停目标',
+  'goal.resume': '继续目标',
   'goal.turn': (v) => `${v?.count ?? 0} 轮`,
   'goal.turnLabel': (v) => `第 ${v?.count ?? 0} 轮`,
   'goal.turns': (v) => `${v?.count ?? 0} 轮`,
@@ -4932,10 +5118,15 @@ const ZH: Messages = {
   'goals.new': '新建目标',
   'goals.newHint': '目标会在一个新会话中启动，并持续运行直到条件满足。',
   'goals.condition': '条件',
-  'goals.conditionPlaceholder': '例如：所有测试通过且 lint 无告警',
+  'goals.conditionPlaceholder':
+    '例如：`npm test` 退出码为 0 且 `npm run lint` 无告警（贴出输出）；不得修改测试文件；20 轮内未达成则以 blocked 结束',
   'goals.cancel': '取消',
   'goals.create': '设置目标',
   'goals.creating': '正在启动…',
+  'goals.saving': '正在保存…',
+  'goals.save': '保存',
+  'goals.edit': '编辑目标',
+  'goals.objective': '目标',
   'goals.clear': '清除目标',
   'goals.clearConfirm': (v) => `确定清除目标“${v?.condition ?? ''}”？`,
   'goals.running': '工作中',
@@ -4948,7 +5139,18 @@ const ZH: Messages = {
   'goals.error.clearKeyword': (v) =>
     `“${v?.word ?? ''}”是清除目标的指令，不是一个条件。请描述要达成的条件。`,
   'goals.error.createFailed': '启动目标失败',
+  'goals.error.saveFailed': '保存目标失败',
+  'goals.error.goalUnavailable': '该目标已不可用。',
+  'goals.error.requiresObjective': (v) =>
+    `/goal ${v?.keyword ?? 'set'} 需要提供目标内容。`,
+  'goals.error.invalidCommand': '无效的 /goal 命令',
+  'goals.error.goalsUnavailable': '当前界面不支持打开目标视图。',
+  'goals.error.attachmentsUnsupported': '使用 /goal 前请先移除附件。',
+  'goals.error.editFailed': '编辑目标失败',
+  'goals.error.pauseFailed': '暂停目标失败',
+  'goals.error.resumeFailed': '继续目标失败',
   'goals.error.clearFailed': '清除目标失败',
+  'goals.error.controlBusy': '还有一个目标操作正在进行，请等它完成后再试。',
   'memory.add': '添加',
   'memory.add.desc': '写入一条持久 memory',
   'memory.autoDream': (v) =>
@@ -5167,6 +5369,10 @@ const ZH: Messages = {
   'skills.notToggleable': '此 Skill 不支持启用或禁用。',
   'skills.run': '引用 skill',
   'skills.search': '搜索 Skills…',
+  'skills.settingUpdated': 'Workspace 设置已更新。',
+  'skills.settingUpdatedAvailabilityUnchanged':
+    'Workspace 设置已更新，Skill 的实际可用状态未改变。',
+  'skills.settingUnchanged': 'Skill 已处于请求的 Workspace 设置，无需更改。',
   'skills.status': '状态',
   'skills.status.disabled': '已禁用',
   'skills.status.enabled': '已启用',
@@ -5222,6 +5428,27 @@ const ZH: Messages = {
   'stats.toolTime': '工具耗时',
   'stats.total': '总计',
   'stats.totalReviewed': '已审核建议总数：',
+  'tokenUsage.avgLatency': '平均延迟',
+  'tokenUsage.cached': '缓存输入',
+  'tokenUsage.input': '输入',
+  'tokenUsage.loadError': 'Token 消耗加载失败。',
+  'tokenUsage.models': '按模型',
+  'tokenUsage.noData': '本会话还没有 API 调用。',
+  'tokenUsage.noSubagents': '本会话还没有子 agent 调用。',
+  'tokenUsage.noTools': '本会话还没有工具调用。',
+  'tokenUsage.open': '会话 Token 消耗',
+  'tokenUsage.output': '总输出',
+  'tokenUsage.refresh': '刷新',
+  'tokenUsage.requests': '请求',
+  'tokenUsage.retry': '重试',
+  'tokenUsage.subagents': '子agent',
+  'tokenUsage.thoughts': '思考（包含在总输出中）',
+  'tokenUsage.title': 'Token 消耗',
+  'tokenUsage.toolRow': (v) =>
+    `${v?.count ?? 0} 次 · 成功率 ${v?.rate ?? 0}% · ${v?.duration ?? ''}`,
+  'tokenUsage.tools': '工具',
+  'tokenUsage.updatedAt': (v) => `更新于 ${v?.time ?? ''}`,
+  'tokenUsage.unavailable': '当前会话无法读取 Token 消耗。',
   'status.contextUsed': (v) => `上下文已用 ${v?.pct ?? '0.0'}%`,
   'status.disconnected': '断开连接',
   'status.modeHint': '(shift + tab 或点击切换)',
@@ -5400,9 +5627,10 @@ const ZH: Messages = {
   'tool.status.failed': '执行失败',
   'toolGroup.moreKinds': (v) => ` +${v?.count ?? 0}`,
   'toolGroup.summary': (v) => `调用了 ${v?.count ?? 0} 个工具`,
-  'toolGroup.summary.editedFiles': (v) => `已编辑 ${v?.count ?? 0} 个文件`,
+  'toolGroup.summary.ranAgents': (v) => `已运行 ${v?.count ?? 0} 个智能体`,
+  'toolGroup.summary.editedFiles': (v) => `已编辑文件 ${v?.count ?? 0} 次`,
   'toolGroup.summary.ranCommands': (v) => `已运行 ${v?.count ?? 0} 条命令`,
-  'toolGroup.summary.readFiles': (v) => `已读取 ${v?.count ?? 0} 个文件`,
+  'toolGroup.summary.readFiles': (v) => `已读取文件 ${v?.count ?? 0} 次`,
   'toolGroup.summary.searched': (v) => `已搜索 ${v?.count ?? 0} 次`,
   'toolGroup.summary.updatedTodos': (v) =>
     Number(v?.count ?? 0) > 1
@@ -5661,6 +5889,9 @@ const ZH: Messages = {
     '同一群聊或话题进入同一个对话，适合群内协作。',
   'channels.editor.field.shared.sessionScope.detail.single':
     '所有消息共用一个对话，适合单一机器人值守场景。',
+  'channels.editor.field.shared.multiSession': '命名任务',
+  'channels.editor.field.shared.multiSession.description':
+    '在 daemon 托管模式下，为每位用户保留相互隔离的命名任务目录。',
   'channels.editor.policy.pairing.title': '配对模式',
   'channels.editor.policy.pairing.description':
     '用户会收到配对码，经您批准后才能开始对话。',
@@ -5837,12 +6068,6 @@ const ZH: Messages = {
   'settings.label.ui.enableFollowupSuggestions': '启用后续建议',
   'settings.description.ui.enableFollowupSuggestions':
     '任务完成后显示上下文相关的后续建议。按 Tab 或右方向键接受，按 Enter 接受并提交。',
-  'settings.label.ui.compactMode': '紧凑模式',
-  'settings.description.ui.compactMode':
-    '隐藏工具输出和思考内容，显示更简洁的视图（可用 Ctrl+O 切换）。',
-  'settings.label.ui.compactInline': '紧凑内联',
-  'settings.description.ui.compactInline':
-    '在每个分组内紧凑显示工具内容，而不是跨分组合并。需要先启用紧凑模式。',
   'settings.label.ui.shellOutputMaxLines': 'Shell 输出最大行数',
   'settings.description.ui.shellOutputMaxLines':
     '内联显示的 shell 输出最大行数。设为 0 可取消限制并显示完整输出；隐藏行数仍会通过 +N lines 指示器展示。',
@@ -5869,9 +6094,6 @@ const ZH: Messages = {
   'settings.label.tools.shell.enableInteractiveShell': '交互式 Shell（PTY）',
   'settings.description.tools.shell.enableInteractiveShell':
     '使用 node-pty 提供交互式 shell 体验。PTY 不可用时回退到 child_process。',
-  'settings.label.tools.computerUse.enabled': '启用 Computer Use',
-  'settings.description.tools.computerUse.enabled':
-    '启用后（默认），会注册 9 个 computer_use__* 延迟内置工具。',
   'settings.label.policy.permissionStrategy': '权限协调策略',
   'settings.description.policy.permissionStrategy':
     '多个客户端连接时权限请求的决策方式。first-responder 表示任意客户端先响应者生效；designated 表示仅提示发起方决策；consensus 表示需要 N-of-M 投票同意；local-only 表示只有 loopback 客户端可决策。需要重启 daemon 后生效。',
@@ -5887,7 +6109,7 @@ const ZH: Messages = {
     '显示 Session Workflow DAG，并将 Plan 模式展示为计划并审阅。',
   'settings.label.experimental.emitToolUseSummaries': '工具使用摘要',
   'settings.description.experimental.emitToolUseSummaries':
-    '每个工具批次完成后生成一个简短的 LLM 标签。紧凑模式下会替代通用的 Tool × N 标题；完整模式下显示为工具组下方的弱化 ● <label> 行。需要配置快速模型。',
+    '每个工具批次完成后生成一个简短的 LLM 标签。已完成工具组的标签会替代通用的 Tool × N 标题；强制展开的工具组下方显示弱化的 ● <label> 行。需要配置快速模型。',
   'settings.label.agents.arena.preserveArtifacts': '保留 Arena 产物',
   'settings.description.agents.arena.preserveArtifacts':
     '启用后，Arena worktree 和会话状态文件会在会话结束或主智能体退出后保留。',

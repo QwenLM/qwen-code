@@ -10,6 +10,7 @@ import * as path from 'node:path';
 import type { DaemonStatusProvider } from '@qwen-code/acp-bridge';
 import {
   hashDaemonWorkspace,
+  readCronTasks,
   Storage,
   type DurableCronTask,
 } from '@qwen-code/qwen-code-core';
@@ -66,8 +67,10 @@ import { CdpTunnelRegistry } from './cdp-tunnel/cdp-tunnel-registry.js';
 import {
   canonicalizeWorkspace,
   createAcpSessionBridge,
+  createSpawnChannelFactory,
   MAX_SESSION_RESTORE_TIMEOUT_MS,
   resolveSessionRestoreTimeoutMs,
+  SessionNotFoundError,
   type AcpSessionBridge,
 } from './acp-session-bridge.js';
 import {
@@ -77,10 +80,12 @@ import {
   type ChannelWebhookConfigSource,
   type ServeOptions,
 } from './types.js';
+import { acpChildExtraArgs } from './acp-child-extra-args.js';
 import {
   mountWebShellAssets,
   mountWebShellSpaFallback,
 } from './web-shell-static.js';
+import { mountMcpAppSandbox } from './mcp-app-sandbox.js';
 import {
   mountWorkspaceMemoryRoutes,
   mountWorkspaceQualifiedMemoryRoutes,
@@ -118,7 +123,12 @@ import {
 } from './routes/workspace-trust.js';
 import { registerPermissionRoutes } from './routes/permission.js';
 import { registerSessionRoutes } from './routes/session.js';
-import { createRequestedSessionIdAdmission } from './session-id-admission.js';
+import { registerSessionPrBackfillRoutes } from './routes/session-pr-backfill.js';
+import { registerStandaloneSessionRoutes } from './routes/standalone-sessions.js';
+import {
+  createRequestedSessionIdAdmission,
+  requestedSessionIdPersistenceExists,
+} from './session-id-admission.js';
 import {
   registerScheduledTasksRoutes,
   registerWorkspaceQualifiedScheduledTasksRoutes,
@@ -127,6 +137,7 @@ import { registerChannelNotifyRoutes } from './routes/channel-notify.js';
 import { registerGoalsRoutes } from './routes/goals.js';
 import { registerUsageStatsRoutes } from './routes/usage-stats.js';
 import {
+  collectBoundSessionIds,
   startScheduledTaskKeepalive,
   rehydrateScheduledTaskSessions,
 } from './scheduled-task-keepalive.js';
@@ -182,7 +193,10 @@ import {
   parseClientIdHeader,
   safeBody,
 } from './server/request-helpers.js';
-import { daemonTelemetryMiddleware } from './server/telemetry.js';
+import {
+  daemonInboundTraceIdCaptureMiddleware,
+  daemonTelemetryMiddleware,
+} from './server/telemetry.js';
 import { installAccessLogMiddleware } from './server/access-log.js';
 import { setupDeviceFlowRegistry } from './server/device-flow-registry.js';
 import {
@@ -287,8 +301,13 @@ import { LiveSetupController } from './live/live-setup-controller.js';
 import { LiveTaskService } from './live/live-task-service.js';
 import type { ConversationWorkspace } from './conversations/conversation-workspace.js';
 import { ConversationRuntimeActivityGate } from './conversations/conversation-runtime-activity.js';
-import { conversationRootCompromisedError } from './conversations/conversation-runtime-errors.js';
+import {
+  conversationRootCompromisedError,
+  conversationRuntimeUnavailableError,
+} from './conversations/conversation-runtime-errors.js';
 import { ConversationRuntimeManager } from './conversations/conversation-runtime-manager.js';
+import { StandaloneSessionService } from './conversations/standalone-session-service.js';
+import { StandaloneDeletionJournal } from './conversations/standalone-deletion-journal.js';
 import {
   createConversationRuntimeOwnership,
   type ConversationRuntimeOwnership,
@@ -305,6 +324,7 @@ import {
   type LiveProviderCredential,
 } from './live/provider-credentials.js';
 import type { ChildHeapPolicySnapshot } from '@qwen-code/acp-bridge/childHeapPolicy';
+import { invalidateWorkspaceSessionListCache } from './server/session-list.js';
 
 export {
   createDefaultFsAuditEmit,
@@ -428,6 +448,9 @@ export interface ServeAppDeps {
    * a heartbeat timer.
    */
   manageScheduledTaskSessions?: boolean;
+  /** Advertise current-session task binding only when every managed daemon
+   * runtime installs the private cron-tool callback. */
+  currentSessionSchedulingAvailable?: boolean;
   /**
    * Directory of the built Web Shell SPA (`index.html` + `assets/`). When
    * set (and `opts.serveWebShell !== false`), `createServeApp` mounts the
@@ -607,6 +630,9 @@ export interface ServeAppDeps {
   liveHostInstaller?: LiveHostInstaller;
   liveSessionCoordinator?: LiveSessionCoordinator;
   liveConversationWorkspace?: ConversationWorkspace;
+  readLiveConversationScheduledTasks?: () => Promise<
+    readonly DurableCronTask[]
+  >;
   liveDiscoveryStableBaseDir?: string;
   conversationRuntimeOwnershipFactory?: (
     pid: number,
@@ -900,6 +926,7 @@ export function createServeApp(
     }
     return () => guard.assertOpen();
   };
+  let standaloneSessionsAvailable = false;
   const { languageCodes, currentServeFeatures, invalidateServeFeaturesCache } =
     createServeFeatures({
       opts,
@@ -916,6 +943,9 @@ export function createServeApp(
           )
         );
       },
+      currentSessionSchedulingAvailable:
+        deps.manageScheduledTaskSessions === true &&
+        deps.currentSessionSchedulingAvailable === true,
       workspaceGenerationAvailable: () => {
         const entry = workspaceRegistry.primaryEntry;
         const runtime =
@@ -972,6 +1002,7 @@ export function createServeApp(
       realtimeVoiceEnabled: () =>
         (app.locals as { liveVoiceEnabled?: boolean }).liveVoiceEnabled ===
         true,
+      standaloneSessionsAvailable: () => standaloneSessionsAvailable,
       acpHttpEnabled: acpHttpEnabledAtBoot,
       workspaceRuntimeRemovalAvailable:
         deps.workspaceRuntimeRemoval !== undefined,
@@ -1015,10 +1046,15 @@ export function createServeApp(
   const defaultSessionOwnerIndex = !injectedWorkspaceRegistry
     ? createWorkspaceSessionOwnerIndex()
     : undefined;
+  const acpChildArgs = acpChildExtraArgs(opts);
   const bridge =
     injectedWorkspaceRegistry?.primary.bridge ??
     deps.bridge ??
     createAcpSessionBridge({
+      sessionAttachmentsRoot: path.join(
+        new Storage(boundWorkspace).getProjectTempDir(),
+        'attachments',
+      ),
       maxSessions: opts.maxSessions,
       ...(totalSessionAdmission
         ? { freshSessionAdmission: totalSessionAdmission.admit }
@@ -1037,6 +1073,16 @@ export function createServeApp(
       initializeTimeoutMs: opts.initializeTimeoutMs,
       sessionRestoreTimeoutMs,
       permissionResponseTimeoutMs: opts.permissionResponseTimeoutMs,
+      ...(opts.restoreAskUserQuestion === true
+        ? { restoreAskUserQuestion: true }
+        : {}),
+      ...(acpChildArgs
+        ? {
+            channelFactory: createSpawnChannelFactory({
+              extraArgs: acpChildArgs,
+            }),
+          }
+        : {}),
       boundWorkspace,
       sessionShellCommandEnabled,
       // Wire the production status provider so direct embeds / tests
@@ -1057,9 +1103,11 @@ export function createServeApp(
     defaultBridgeForAdmission = bridge;
   }
   const archiveCoordinator = new SessionArchiveCoordinator();
-  const conversationRuntimeActivity = deps.liveConversationWorkspace
-    ? new ConversationRuntimeActivityGate()
-    : undefined;
+  const conversationRuntimeActivity =
+    deps.liveConversationWorkspace ||
+    injectedWorkspaceRegistry?.listAll().some(isInternalWorkspaceRuntime)
+      ? new ConversationRuntimeActivityGate()
+      : undefined;
   (
     app.locals as {
       sessionArchiveCoordinator?: SessionArchiveCoordinator;
@@ -1213,11 +1261,12 @@ export function createServeApp(
     );
   (app.locals as { workspaceRegistry?: WorkspaceRegistry }).workspaceRegistry =
     workspaceRegistry;
+  const getSessionBridges =
+    deps.getSessionBridges ??
+    (() => workspaceRegistry.listManaged().map((runtime) => runtime.bridge));
   const requestedSessionIdAdmission = createRequestedSessionIdAdmission({
     archiveCoordinator,
-    getBridges:
-      deps.getSessionBridges ??
-      (() => workspaceRegistry.listManaged().map((runtime) => runtime.bridge)),
+    getBridges: getSessionBridges,
     getPersistenceTargets: () =>
       workspaceRegistry.listManaged().map((runtime) => ({
         workspaceCwd: runtime.workspaceCwd,
@@ -1347,6 +1396,7 @@ export function createServeApp(
           message: 'The Live Appshot channel is unavailable.',
         },
   );
+  let standaloneSessionService: StandaloneSessionService | undefined;
   const conversationRuntimeManager = deps.liveConversationWorkspace
     ? new ConversationRuntimeManager({
         ownership: conversationRuntimeOwnership!,
@@ -1367,6 +1417,30 @@ export function createServeApp(
           );
           invalidateServeFeaturesCache();
           return runtime;
+        },
+        quarantineRuntime: async (runtime) => {
+          liveCoordinatorSealed = true;
+          liveVoiceEnabled = false;
+          (app.locals as { liveVoiceEnabled?: boolean }).liveVoiceEnabled =
+            false;
+          liveCoordinator.setAppshotReadiness({
+            state: 'unavailable',
+            message: 'The Live Appshot channel is unavailable.',
+          });
+          invalidateServeFeaturesCache();
+          await Promise.all([
+            (
+              app.locals as {
+                sealAndWaitLiveCoordinator?: () => Promise<void>;
+              }
+            ).sealAndWaitLiveCoordinator?.() ?? Promise.resolve(),
+            conversationRuntimeActivity!.sealAndWait(),
+            publishLiveVoiceEnabled(false),
+          ]);
+          await workspaceManagementHandle.quarantineOwnedRuntime(runtime);
+        },
+        onTerminalQuarantine: (runtime) => {
+          standaloneSessionService?.freezeForTerminalQuarantine(runtime);
         },
       })
     : undefined;
@@ -1471,13 +1545,95 @@ export function createServeApp(
   if (liveVoiceEnabled) {
     serveAppLifecycle.setBootStarter(startConversationRuntimeBoot);
   }
+  if (deps.manageScheduledTaskSessions && deps.liveConversationWorkspace) {
+    const readTasks =
+      deps.readLiveConversationScheduledTasks ??
+      (() => readCronTasks(deps.liveConversationWorkspace!.rootPath));
+    void readTasks()
+      .then((tasks) => {
+        if (collectBoundSessionIds(tasks).length > 0) {
+          return startConversationRuntimeBoot();
+        }
+        return undefined;
+      })
+      .catch((error) => {
+        process.stderr.write(
+          `qwen serve: failed to restore the Conversations runtime for scheduled tasks: ${
+            error instanceof Error ? error.message : String(error)
+          }\n`,
+        );
+      });
+  }
   const ensureConversationRuntimeWithLifecycle = async () => {
     await serveAppLifecycle.startBoot(startConversationRuntimeBoot);
     if (!liveRuntimeBootResult) {
-      throw new Error('Live conversation runtime is unavailable.');
+      throw conversationRuntimeUnavailableError();
     }
     return liveRuntimeBootResult;
   };
+  if (
+    conversationRuntimeManager &&
+    conversationRuntimeActivity &&
+    deps.liveConversationWorkspace
+  ) {
+    const deletionJournal = new StandaloneDeletionJournal(
+      path.resolve(
+        deps.liveDiscoveryStableBaseDir ?? getStableLiveDiscoveryBaseDir(),
+      ),
+    );
+    standaloneSessionService = new StandaloneSessionService({
+      ensureRuntime: ensureConversationRuntimeWithLifecycle,
+      assertRuntimeCurrent: (runtime) => {
+        conversationRuntimeManager.assertCurrent(runtime);
+      },
+      quarantineRuntime: (runtime) =>
+        conversationRuntimeManager.quarantine(
+          runtime,
+          'standalone_session_containment_failed',
+        ),
+      runRuntimeActivity: (_runtime, operation) =>
+        conversationRuntimeActivity.run(operation),
+      workspace: deps.liveConversationWorkspace,
+      deletionJournal,
+      lifecycle: archiveCoordinator,
+      requestedSessionIdAdmission,
+      hasForeignSessionOwner: async (runtime, sessionId) => {
+        for (const candidate of new Set(getSessionBridges())) {
+          if (candidate === runtime.bridge) continue;
+          try {
+            candidate.getSessionSummary(sessionId);
+            return true;
+          } catch (error) {
+            if (error instanceof SessionNotFoundError) continue;
+            throw error;
+          }
+        }
+        for (const candidate of workspaceRegistry.listManaged()) {
+          if (candidate === runtime) continue;
+          if (
+            await requestedSessionIdPersistenceExists(
+              createWorkspaceRuntimeSessionService(candidate),
+              sessionId,
+            )
+          ) {
+            return true;
+          }
+        }
+        return false;
+      },
+      invalidateSessionListCache: (runtime) =>
+        invalidateWorkspaceSessionListCache({
+          runtimeBaseDir: runtime.sessionRuntimeBaseDir,
+          workspaceCwd: runtime.workspaceCwd,
+          archiveStates: ['active', 'archived'],
+        }),
+    });
+    (
+      app.locals as {
+        standaloneSessionService?: StandaloneSessionService;
+      }
+    ).standaloneSessionService = standaloneSessionService;
+  }
   const verifyLiveAppshotChannel = (): Promise<void> => {
     if (liveAppshotChannelPromise) return liveAppshotChannelPromise;
     const pending = ensureConversationRuntimeWithLifecycle()
@@ -1505,17 +1661,13 @@ export function createServeApp(
   const liveTaskService = new LiveTaskService({
     workspaceRegistry,
     ensureConversationRuntime: ensureConversationRuntimeWithLifecycle,
+    ...(standaloneSessionService ? { standaloneSessionService } : {}),
     materializeConversationDirectory: async (sessionId) => {
       const conversationWorkspace = deps.liveConversationWorkspace;
       if (!conversationWorkspace) {
         throw new Error('Live conversation workspace is unavailable.');
       }
       return conversationWorkspace.materializeConversationDirectory(sessionId);
-    },
-    discardEmptyConversationDirectory: async (sessionId) => {
-      const conversationWorkspace = deps.liveConversationWorkspace;
-      if (!conversationWorkspace) return false;
-      return conversationWorkspace.discardEmptyConversationDirectory(sessionId);
     },
   });
   const liveSessionCoordinator =
@@ -1723,6 +1875,12 @@ export function createServeApp(
 
   installAccessLogMiddleware(app, daemonLog);
 
+  // Capture the caller trace id BEFORE authenticate / rate limiter / body
+  // parser: those layers short-circuit (401/429/400) before the telemetry
+  // middleware ever runs, and the access log still needs the captured id
+  // to join their log lines (and 404s) with the caller's trace.
+  app.use(daemonInboundTraceIdCaptureMiddleware);
+
   // Serve the Web Shell static assets (/ and /assets) BEFORE bearerAuth. The
   // static shell carries no secrets and a browser cannot attach an
   // Authorization header to a `<script src>` subresource or an address-bar
@@ -1751,6 +1909,7 @@ export function createServeApp(
       : [];
   if (webShellDir) {
     mountWebShellAssets(app, webShellDir, webShellFrameAncestors);
+    mountMcpAppSandbox(app);
   }
 
   if (deps.enqueueChannelWebhookTask) {
@@ -2058,6 +2217,12 @@ export function createServeApp(
     workspaceRegistry,
     sendBridgeError,
     mutate,
+  });
+  registerSessionPrBackfillRoutes(app, {
+    workspaceRegistry,
+    sendBridgeError,
+    mutate,
+    archiveCoordinator,
   });
 
   // Workspace memory + agents CRUD routes.
@@ -2452,13 +2617,14 @@ export function createServeApp(
     sessionShellCommandEnabled,
     languageCodes,
     virtualSubagentSessions,
+    conversationRuntimeActivity,
+    ...(standaloneSessionService ? { standaloneSessionService } : {}),
     isLiveSessionActive: (sessionId: string) =>
       liveCoordinator.isActiveSession(sessionId),
     ...(liveConversationWorkspaceForRoutes
       ? {
           ensureConversationRuntime: ensureConversationRuntimeWithLifecycle,
           liveConversationRootPath: liveConversationWorkspaceForRoutes.rootPath,
-          conversationRuntimeActivity: conversationRuntimeActivity!,
           materializeLiveConversationDirectory: (sessionId: string) =>
             liveConversationWorkspaceForRoutes.materializeConversationDirectory(
               sessionId,
@@ -2466,6 +2632,15 @@ export function createServeApp(
         }
       : {}),
   });
+
+  if (standaloneSessionService) {
+    registerStandaloneSessionRoutes(app, {
+      service: standaloneSessionService,
+      mutate,
+      sendBridgeError,
+    });
+    standaloneSessionsAvailable = true;
+  }
 
   registerWorkspaceMcpControlRoutes(app, {
     boundWorkspace: primaryBoundWorkspace,
@@ -2622,6 +2797,7 @@ export function createServeApp(
         ? workspaceRegistry.primaryEntry.current?.runtime
         : undefined,
     cleanupSession,
+    workspaceRegistry,
     channelDeliveryAuthorizations: deps.channelDeliveryAuthorizations,
   });
 
@@ -2724,7 +2900,6 @@ export function createServeApp(
     // own cron file + bridge.
     const keepaliveStops = new Map<string, () => void>();
     const startKeepaliveForWorkspace = (runtime: WorkspaceRuntime) => {
-      if (runtime.provenance === 'live-conversation') return;
       const trusted = runtime.primary
         ? isPrimaryWorkspaceTrusted()
         : runtime.trusted;
@@ -2780,6 +2955,7 @@ export function createServeApp(
     daemonLog,
     mutate,
     sendPermissionVoteError,
+    conversationRuntimeActivity,
   });
 
   registerSseEventsRoutes(app, {
@@ -2789,6 +2965,7 @@ export function createServeApp(
     writerIdleTimeoutMs: opts.writerIdleTimeoutMs,
     sendBridgeError,
     virtualSubagentSessions,
+    conversationRuntimeActivity,
   });
 
   // Official ACP Streamable HTTP transport (RFD #721) mounted at `/acp`
@@ -2838,6 +3015,7 @@ export function createServeApp(
           },
         }
       : {}),
+    ...(standaloneSessionService ? { standaloneSessionService } : {}),
     checkRate: rateLimiter?.checkRate,
     clientMcpOverWs: opts.clientMcpOverWs === true,
     // Reverse tool channel (issue #5626, Phase 2). Per-connection provider:
