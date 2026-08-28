@@ -423,8 +423,15 @@ export class ChatCompressionService {
     // Why this compaction fired, surfaced on the COMPRESSED result so the UI
     // notice is accurate. Defaults by trigger; the gate below upgrades it to
     // 'image_overflow' when the screenshot trigger is what let it through.
-    let triggerReason: CompactionTriggerReason =
-      compactTrigger === 'manual' ? 'manual' : 'token_limit';
+    // 413-driven compactions report 'payload_overflow' so the notice (and the
+    // recorded payload) doesn't claim a token overflow the request never
+    // reached (#10380). The reactive 413 path is force=true, so the
+    // non-forced gate below cannot overwrite this.
+    let triggerReason: CompactionTriggerReason = opts.requestPayloadTooLarge
+      ? 'payload_overflow'
+      : compactTrigger === 'manual'
+        ? 'manual'
+        : 'token_limit';
     const chatCompressionSettings = config.getChatCompression();
     const slimmingConfig = resolveSlimmingConfig(chatCompressionSettings);
     const tuning = resolveCompactionTuning(chatCompressionSettings);

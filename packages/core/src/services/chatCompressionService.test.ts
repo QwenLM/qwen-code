@@ -897,6 +897,50 @@ describe('ChatCompressionService', () => {
     expect(serialized).toContain('[...truncated for compaction]');
   });
 
+  it('reports payload_overflow as the trigger reason for 413-driven compactions (#10380)', async () => {
+    // 413 recoveries fire BELOW the token threshold; reporting
+    // 'token_limit' makes the CLI notice claim a token overflow that
+    // never happened and pollutes the recorded payload (#10380).
+    const history: Content[] = [
+      { role: 'user', parts: [{ text: 'context msg' }] },
+      { role: 'model', parts: [{ text: 'ack' }] },
+      { role: 'user', parts: [{ text: 'final fresh user message' }] },
+      { role: 'model', parts: [{ text: 'final model reply' }] },
+    ];
+    vi.mocked(mockChat.getHistory).mockReturnValue(history);
+    // Large enough that the 250-token summary is not an inflation.
+    vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(
+      90_000,
+    );
+    vi.mocked(tokenLimit).mockReturnValue(1000);
+
+    const mockGenerateText = vi.fn().mockResolvedValue({
+      text: 'Summary',
+      // Input above the 1000-token system overhead so the accounting
+      // credits a real reduction; output small enough not to inflate.
+      usage: {
+        promptTokenCount: 90_000,
+        candidatesTokenCount: 50,
+        totalTokenCount: 90_050,
+      },
+    });
+    vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+      generateText: mockGenerateText,
+    } as unknown as BaseLlmClient);
+
+    const result = await service.compress(mockChat, {
+      promptId: mockPromptId,
+      force: true,
+      config: mockConfig,
+      consecutiveFailures: 0,
+      originalTokenCount: uiTelemetryService.getLastPromptTokenCount(),
+      requestPayloadTooLarge: true,
+    });
+
+    expect(result.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+    expect(result.info.triggerReason).toBe('payload_overflow');
+  });
+
   it('keeps tool-result text intact in the side-query for token-driven compactions (#10380)', async () => {
     const hugeOutput = 'O'.repeat(50_000);
     const history: Content[] = [
