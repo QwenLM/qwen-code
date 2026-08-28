@@ -17,6 +17,8 @@
 // `Verdict: Approve` over a Critical the report itself listed. One counting
 // function, fed by the comments array both callers already hold.
 
+import { LEDGER_ID_READBACK } from './ledger.js';
+
 /** The severity prefixes the skill mandates on every posted inline comment. */
 export const CRITICAL_PREFIX = '**[Critical]**';
 export const SUGGESTION_PREFIX = '**[Suggestion]**';
@@ -179,4 +181,108 @@ export function unmarkedComments(
     if (severityOf(c) === null) out.push(i);
   });
   return out;
+}
+
+/**
+ * The fix-induced marking, read from the head of the CLAIM — after the id
+ * and its separator, never inside the id grammar. Case-insensitive, and
+ * tolerant of inner spacing, because it governs only whether a comment
+ * counts as first-time work — never which finding it is.
+ */
+export const FIX_INDUCED_READBACK = /^\(\s*fix-induced\s*\)[:.,-]?\s*/i;
+
+const HEAD_AXIS_TAG_RE =
+  /^\[(certifies-falsely|fails-closed|regression|new-surface)\]\s*/i;
+const HEAD_SOURCE_TAG_RE = /^\[(build|test|probe)\]\s*/i;
+
+/** What a claim line's head slot carries — see `readClaimHead`. */
+export interface ClaimHead {
+  /** The carried ledger id, wherever in the head slot it sits. */
+  id?: string;
+  /** The `(fix-induced)` marking — honoured only beside a carried id. */
+  fixInduced: boolean;
+  /** The axis tags in the slot, lower-cased, in order; duplicates kept. */
+  axes: string[];
+  /** The deterministic source tag in the slot, lower-cased. */
+  source?: 'build' | 'test' | 'probe';
+  /** The source tag's verbatim token (trailing whitespace included). */
+  sourceText?: string;
+  /** The claim past the head slot. */
+  title: string;
+  /**
+   * The line with ONLY the axis tags removed — id, marking, source tag and
+   * title all where they were — for the readers that anchor an id at `^`.
+   */
+  stripped: string;
+}
+
+/**
+ * The claim line's HEAD SLOT: the contiguous run of machine tokens the
+ * posting contract puts before the title — a carried id (`R7-2:`), the
+ * `(fix-induced)` marking, the deterministic source tag (`[probe]`) and the
+ * two axis tags (`[fails-closed] [new-surface]`, #10291) — in any order,
+ * ending at the first token that is none of them.
+ *
+ * The ONE statement of that grammar. Every reader that anchors on the id or
+ * acts on the axes goes through here, so a title that merely QUOTES a tag
+ * in its prose — natural when the review target is the review pipeline
+ * itself — is never read as a classification, and a tag placed before the
+ * id never hides the id from an anchored readback: the axis read and the
+ * axis strip share one window, the slot, not the line and not the body.
+ */
+export function readClaimHead(line: string): ClaimHead {
+  let rest = line.trim();
+  let id: string | undefined;
+  let marked = false;
+  const axes: string[] = [];
+  let source: ClaimHead['source'];
+  let sourceText: string | undefined;
+  const kept: string[] = [];
+  for (;;) {
+    if (id === undefined) {
+      const m = LEDGER_ID_READBACK.exec(rest);
+      if (m) {
+        id = m[1];
+        kept.push(m[0]);
+        rest = rest.slice(m[0].length);
+        continue;
+      }
+    }
+    // Only ever a marking on a CARRIED id: on a fresh finding there is no
+    // entry for the defect to have been induced by, so the token is prose.
+    if (id !== undefined) {
+      const f = FIX_INDUCED_READBACK.exec(rest);
+      if (f) {
+        marked = true;
+        kept.push(f[0]);
+        rest = rest.slice(f[0].length);
+        continue;
+      }
+    }
+    const a = HEAD_AXIS_TAG_RE.exec(rest);
+    if (a) {
+      axes.push(a[1].toLowerCase());
+      rest = rest.slice(a[0].length);
+      continue;
+    }
+    if (source === undefined) {
+      const s = HEAD_SOURCE_TAG_RE.exec(rest);
+      if (s) {
+        source = s[1].toLowerCase() as ClaimHead['source'];
+        sourceText = s[0];
+        kept.push(s[0]);
+        rest = rest.slice(s[0].length);
+        continue;
+      }
+    }
+    break;
+  }
+  return {
+    ...(id === undefined ? {} : { id }),
+    fixInduced: marked,
+    axes,
+    ...(source === undefined ? {} : { source, sourceText }),
+    title: rest.trim(),
+    stripped: (kept.join('') + rest).trim(),
+  };
 }

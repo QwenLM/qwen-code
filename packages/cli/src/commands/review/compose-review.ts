@@ -117,6 +117,8 @@ import {
   carriedClaimLine,
   countInlineFindings,
   markerStrippedBody,
+  readClaimHead,
+  FIX_INDUCED_READBACK,
   severityOf,
   stripSeverityPrefix,
   unmarkedComments,
@@ -231,31 +233,27 @@ const MAX_DEFERRED_SUGGESTION_CHARS = 240;
 const DETERMINISTIC_TAG_RE = /\[(?:build|test|probe)\]/i;
 
 /**
- * The claim-line axis tags (#10291) — `[certifies-falsely]` /
+ * The axes a claim line carries (#10291) — `[certifies-falsely]` /
  * `[fails-closed]` for the direction, `[regression]` / `[new-surface]` for
- * the baseline — read over the SAME window `DETERMINISTIC_TAG_RE` is: the
- * claim line only, never the body's writable tail (a forged pair in a footer
- * would otherwise defer every drafted Critical at once). The posted comment
- * carries them visibly, the way it carries `[probe]`: the classification is
- * the review's own claim about the finding, and the autofix grep reads the
- * same line.
- */
-const AXIS_TAG_RE =
-  /\[(certifies-falsely|fails-closed|regression|new-surface)\]/gi;
-
-/**
- * The axes a claim line carries. An axis carrying BOTH of its tags is a
- * contradiction and reads as unclassified — which every consumer treats as
- * "posts" — rather than as either value: the tags decide whether a blocker
- * leaves the posting set, and a guess there is the direction that loses work.
+ * the baseline — read from the claim line's HEAD SLOT only (`readClaimHead`):
+ * never the title's prose, where a review of this very pipeline quotes the
+ * tags without meaning them, and never the body's writable tail, where a
+ * forged pair in a footer would defer every drafted Critical at once. The
+ * posted comment carries them visibly, the way it carries `[probe]`: the
+ * classification is the review's own claim about the finding, and the
+ * autofix grep reads the same line.
+ *
+ * An axis carrying BOTH of its tags is a contradiction and reads as
+ * unclassified — which every consumer treats as "posts" — rather than as
+ * either value: the tags decide whether a blocker leaves the posting set,
+ * and a guess there is the direction that loses work.
  */
 function axesOfClaim(claim: string | null): {
   direction?: Direction;
   baseline?: Baseline;
 } {
   if (claim === null) return {};
-  const seen = new Set<string>();
-  for (const m of claim.matchAll(AXIS_TAG_RE)) seen.add(m[1].toLowerCase());
+  const seen = new Set(readClaimHead(claim).axes);
   const one = <T extends string>(list: readonly T[]): T | undefined => {
     const hits = list.filter((v) => seen.has(v));
     return hits.length === 1 ? hits[0] : undefined;
@@ -283,15 +281,6 @@ function floorDefersCritical(axes: {
   baseline?: Baseline;
 }): boolean {
   return axes.direction === 'fails-closed' && axes.baseline === 'new-surface';
-}
-
-/**
- * A claim line without its axis tags — `readClaim` applies it before the
- * id and fix-induced readback, so the marker carries the axes as fields and
- * the title never re-spells them.
- */
-function stripAxisTags(line: string): string {
-  return line.replace(AXIS_TAG_RE, '').replace(/ {2,}/g, ' ').trim();
 }
 
 /** The marker's one-letter spellings of the axes a claim carries. */
@@ -374,14 +363,18 @@ export function renderDeferredEntry(entry: DeferredEntry): string {
     entry.locations && entry.locations > 0
       ? ` (+${entry.locations} locations)`
       : '';
-  // A Critical in the list is the one line there whose severity the reader
-  // cannot assume, so it says so and carries the axes that put it there —
-  // as the same bracket tags the posted claim line uses.
-  const axes =
-    entry.severity === 'Critical' && entry.direction && entry.baseline
-      ? ` Critical [${entry.direction}] [${entry.baseline}]`
-      : '';
-  return `${loc}${agg} — [${entry.source}]${axes} ${entry.title}`;
+  // A classified Critical in the list is the one line there whose severity
+  // the reader cannot assume, so it says so and carries every axis it
+  // settled — as the same bracket tags the posted claim line uses. Each
+  // axis present, not both-or-nothing: a half-classified Critical the
+  // verifier could settle on one side only keeps that side on its record.
+  const axes = [entry.direction, entry.baseline]
+    .filter((a) => a !== undefined)
+    .map((a) => ` [${a}]`)
+    .join('');
+  const classified =
+    entry.severity === 'Critical' && axes !== '' ? ` Critical${axes}` : '';
+  return `${loc}${agg} — [${entry.source}]${classified} ${entry.title}`;
 }
 
 /**
@@ -563,6 +556,12 @@ function splitDeferralChannel(
 ): {
   deferred: DeferredEntry[];
   relocated: string[];
+  /**
+   * The relocated entries themselves, parallel to `relocated`: the ledger
+   * build stamps a relocated Critical's axes from the TYPED entry, never
+   * by re-parsing the rendered line it posts as (#10291).
+   */
+  relocatedEntries: DeferredEntry[];
   /** Relocated entries whose `source` is deterministic — no verifier owed. */
   relocatedDeterministic: number;
 } {
@@ -573,6 +572,7 @@ function splitDeferralChannel(
   const relocatedEntries = entries.filter((e) => !defers(e));
   return {
     deferred: entries.filter(defers),
+    relocatedEntries,
     relocated: relocatedEntries.map(
       (e) =>
         `${mdField(boundDeferredLine(renderDeferredEntry(e)))} _(relocated from the deferral channel — a Critical is deferred only as fails-closed on new surface at a critical floor; this one posts)_`,
@@ -796,10 +796,10 @@ export function floorEnforcedReroute(
     const file =
       typeof c.path === 'string' && c.path.trim() !== '' ? c.path : null;
     if (file === null) return;
-    // A moved Critical keeps the source its claim line declares, so a
-    // `[probe]`-confirmed one is not charged a second verifier delivery it
-    // never owed; the Suggestion arm never reaches here with a tag.
-    const declared = /\[(build|test|probe)\]/i.exec(claim ?? '');
+    // A moved Critical keeps the source its claim line's head slot declares,
+    // so a `[probe]`-confirmed one is not charged a second verifier delivery
+    // it never owed; the Suggestion arm never reaches here with a tag.
+    const head = readClaimHead(claim ?? '');
     // The title carries the WHOLE marker-stripped body, collapsed to one
     // line — not just the claim line: the skill mandates multi-line
     // Suggestion bodies (failure scenario, suggested fix), and a moved
@@ -812,17 +812,19 @@ export function floorEnforcedReroute(
     // fallback the ledger builder uses.
     // A moved Critical's record drops the tags the entry now carries as
     // fields — the axis pair, and the source tag it was read from — so the
-    // rendered line does not spell them twice.
-    const whole = collapseToLine(
-      stripReviewFooter(markerStrippedBody(body) ?? ''),
+    // rendered line does not spell them twice. From the claim line's HEAD
+    // SLOT only: a bracketed axis word in the body prose ("not a
+    // [regression] — the surface is new") is the record's own text, and
+    // the deferral line is the moved blocker's only published surface.
+    const stripped = markerStrippedBody(body) ?? '';
+    const nl = stripped.indexOf('\n');
+    const first = nl === -1 ? stripped : stripped.slice(0, nl);
+    const record = critical
+      ? readClaimHead(first).stripped.replace(head.sourceText ?? '', '')
+      : first;
+    const title = collapseToLine(
+      stripReviewFooter(record + (nl === -1 ? '' : stripped.slice(nl))),
     );
-    const title = critical
-      ? collapseToLine(
-          stripAxisTags(
-            declared === null ? whole : whole.replace(declared[0], ''),
-          ),
-        )
-      : whole;
     indices.push(i);
     entries.push({
       file,
@@ -831,10 +833,7 @@ export function floorEnforcedReroute(
       c.line > 0
         ? { line: c.line }
         : {}),
-      source:
-        critical && declared !== null
-          ? (declared[1].toLowerCase() as Source)
-          : 'review',
+      source: critical && head.source !== undefined ? head.source : 'review',
       severity: critical ? 'Critical' : 'Suggestion',
       ...(critical
         ? {
@@ -901,10 +900,11 @@ export interface ComposeReviewInput {
    * streak engages the floor, #9903 — or under an explicit
    * `--severity-floor critical`, and the rounds-2-5 code-age rule). TYPED
    * entries — see
-   * `DeferredEntry`: only otherwise-postable high-confidence Suggestions
-   * belong here (a `Critical` is relocated into the body Criticals, a
-   * `Nice to have` is refused; low-confidence findings stay terminal-only and
-   * never enter the state). They are neither drafted inline nor counted
+   * `DeferredEntry`: otherwise-postable high-confidence Suggestions belong
+   * here, and — at a floor in effect — a Critical whose axes are
+   * fails-closed on new-surface (#10291); any other `Critical` is relocated
+   * into the body Criticals, a `Nice to have` is refused; low-confidence
+   * findings stay terminal-only and never enter the state). They are neither drafted inline nor counted
    * toward `S` — a deferral must not regenerate a review round — but they
    * must not vanish either: the body renders them as a disclosed,
    * NON-capping list, so the record survives on the PR while the round
@@ -1057,7 +1057,8 @@ export interface ComposeReviewResult {
    */
   remediation: string[];
   /**
-   * How many non-Critical findings the convergence posture deferred — the
+   * How many findings the convergence posture deferred — Suggestions, and
+   * the Criticals the critical floor deferred by their axes (#10291) — the
    * count of `deferredSuggestions` entries that survived validation, plus
    * any CLI floor-enforced reroutes (below). On the verdict surface so
    * `verdictLine` can say a deferrals-only Approve deferred findings
@@ -1066,9 +1067,11 @@ export interface ComposeReviewResult {
    */
   deferredCount: number;
   /**
-   * Indices (into the caller's drafted-comments array) of Suggestion
+   * Indices (into the caller's drafted-comments array) of the drafted
    * comments the CLI moved into the deferral list under a resolved
-   * `critical` posting floor — SKILL Step 6's posture, enforced in code as
+   * `critical` posting floor — Suggestions, and Criticals whose claim line
+   * carries the fails-closed/new-surface pair (#10291) — SKILL Step 6's
+   * posture, enforced in code as
    * the backstop for the model-side resolution (`floorEnforcedReroute`).
    * The caller that owns the posting array (`submit`) removes exactly
    * these before the write; they are already counted in `deferredCount`,
@@ -2029,7 +2032,12 @@ export function composeReview(
   const repostedIds = new Set<string>();
   let repostUnidentified = false;
   for (const e of repostEntries) {
-    const carried = LEDGER_ID_READBACK.exec(e.title)?.[1];
+    // Through the same head-slot strip the ledger builder applies: an
+    // entry whose title leads with the axis tags before its id still
+    // names the claim it re-posts (#10291).
+    const carried = LEDGER_ID_READBACK.exec(
+      readClaimHead(e.title).stripped,
+    )?.[1];
     // The same membership test `isCarry` applies in the build: an id the
     // complete previous list never held is a stray — a renumbered or
     // re-minted token, not a carry — and reading it as one would shield a
@@ -2673,6 +2681,10 @@ function buildPostedLedger(
 ): Ledger | null {
   const planPath = input.planPath;
   if (planPath === undefined || !planNamesPr(planPath)) return null;
+  const split = splitDeferralChannel(
+    input.deferredSuggestions,
+    criticalDeferralLicensed,
+  );
   return buildLedger(
     // Capped by the caller, because the round is the id space and the parser
     // refuses an id from past the cap: an uncapped stamp of prevRound + 1 met
@@ -2698,13 +2710,15 @@ function buildPostedLedger(
         scriptLintGate(planPath).criticals,
       ),
       // The same split the body performed: a relocated Critical is a
-      // posted, counted blocker and must enter the work list — and a
-      // Critical the floor DEFERRED by its axes stays out of it, like any
-      // other deferral.
-      ...splitDeferralChannel(
-        input.deferredSuggestions,
-        criticalDeferralLicensed,
-      ).relocated,
+      // posted, counted blocker and must enter the work list — carrying
+      // the axes its TYPED entry settled (#10291), a half-classified one
+      // included — and a Critical the floor DEFERRED by its axes stays out
+      // of it, like any other deferral.
+      ...split.relocated.map((text, i) => ({
+        text,
+        direction: split.relocatedEntries[i].direction,
+        baseline: split.relocatedEntries[i].baseline,
+      })),
       // The gate's Criticals, for the same reason: a gate Critical is a
       // posted, counted blocker too — leaving it out let the next
       // round's persistence half read "no prior Critical" over a round
@@ -3171,7 +3185,21 @@ function composeReviewBody(
   // rendered list is capped at MAX_DEFERRED_SUGGESTION_LINES, and an
   // enforcement note pointing at a list that truncated away the entries
   // it names would be a disclosure contradicting its own record.
-  const deferredSuggestions = [...reroute.entries, ...modelDeferred];
+  // Criticals FIRST, in either channel (#10291): the rendered list is
+  // capped at MAX_DEFERRED_SUGGESTION_LINES, and a deferred Critical's line
+  // is the moved blocker's only published surface — the one that carries
+  // its id across rounds — so it must never be the entry a round of twenty
+  // rerouted Suggestions pushes past the cap. Within each class the
+  // enforced entries still come before the model's, and the enforcement
+  // note below counts what actually rendered.
+  const isCriticalEntry = (e: DeferredEntry): boolean =>
+    e.severity === 'Critical';
+  const deferredSuggestions = [
+    ...reroute.entries.filter(isCriticalEntry),
+    ...modelDeferred.filter(isCriticalEntry),
+    ...reroute.entries.filter((e) => !isCriticalEntry(e)),
+    ...modelDeferred.filter((e) => !isCriticalEntry(e)),
+  ];
   for (const stray of relocatedCriticals) {
     bodyCriticals.push(stray);
   }
@@ -5134,8 +5162,9 @@ function composeReviewBody(
       ]
     : [];
 
-  // Non-Critical findings the convergence posture deferred: disclosed on
-  // EVERY event, never capping. The disclosure is the record the round
+  // Findings the convergence posture deferred — Suggestions, and the
+  // axes-classified Criticals (#10291): disclosed on EVERY event, never
+  // capping. The disclosure is the record the round
   // discipline demands — a deferral silently dropped is a finding lost, and
   // a deferral that capped would withhold the incremental anchor and
   // regenerate exactly the full-diff re-review the posture exists to end.
@@ -5191,10 +5220,10 @@ function composeReviewBody(
   // them — the overflow identities survive in the run report, and a
   // universal "listed below" over an absent entry is a false record on
   // exactly the accuracy surface this disclosure exists for.
-  const enforcedShown = Math.min(
-    reroute.entries.length,
-    MAX_DEFERRED_SUGGESTION_LINES,
-  );
+  const enforcedEntries = new Set<DeferredEntry>(reroute.entries);
+  const enforcedShown = deferredSuggestions
+    .slice(0, MAX_DEFERRED_SUGGESTION_LINES)
+    .filter((e) => enforcedEntries.has(e)).length;
   const enforcedOverflow = reroute.entries.length - enforcedShown;
   // Why the floor engaged, when it engaged ahead of the round-6 schedule:
   // the signal-driven trigger (#9903) is the one posture change the round's
@@ -5378,8 +5407,10 @@ function composeReviewBody(
         // Nominally engaged, mechanically not: the floor resolved to
         // critical and Suggestion-level findings posted inline anyway.
         // The REPORTING reading resolved the floor to critical, the
-        // enforcement backstop did not, AND a Suggestion posted inline
-        // because of it. All three, because the sentence asserts all three.
+        // enforcement backstop did not, AND a finding the floor would have
+        // deferred — a Suggestion, or an axes-pair Critical (#10291) —
+        // posted inline because of it. All three, because the sentence
+        // asserts all three.
         //
         // The first two hold on EVERY default-config round from 6 on — the
         // readings differ only in folding an absent floor to `auto` — so
@@ -6721,7 +6752,8 @@ export const composeReviewCommand: CommandModule = {
  * Case-insensitive, and tolerant of inner spacing, because it governs only
  * whether a comment counts as first-time work — never which finding it is.
  */
-const FIX_INDUCED_READBACK = /^\(\s*fix-induced\s*\)[:.,-]?\s*/i;
+// The regex itself lives in lib/inline-counts.ts, beside the claim-head
+// reader that tokenises the same slot.
 
 /**
  * The id a claim line carries, whether that id fronts a NEW defect, and the
@@ -6747,10 +6779,11 @@ function readClaim(rest: string): {
   title: string;
 } {
   // The axis tags come off FIRST (#10291): they are fields the marker
-  // carries, not title text, and wherever the model placed them on the
-  // line — before the `(fix-induced)` marking, after it — they must not
-  // stand between the id and the marking this reader anchors on.
-  const line = stripAxisTags(rest.split('\n')[0].trim());
+  // carries, not title text, and wherever the model placed them in the
+  // claim's head slot — before the id, before the `(fix-induced)` marking,
+  // after it — they must not stand between the id and the marking this
+  // reader anchors on. Slot only: a tag quoted in the title's prose stays.
+  const line = readClaimHead(rest.split('\n')[0].trim()).stripped;
   const carried = LEDGER_ID_READBACK.exec(line);
   const afterId = (carried ? line.slice(carried[0].length) : line).trim();
   // Only ever a marking on a CARRIED id. On a fresh finding there is no
@@ -6873,6 +6906,13 @@ export function draftedFindingsOf(drafted: unknown): DraftedFinding[] {
   return out;
 }
 
+/** A body Critical with the axes its typed source entry settled. */
+export interface BodyCritical {
+  text: string;
+  direction?: Direction;
+  baseline?: Baseline;
+}
+
 /**
  * The next round's ledger: every finding this review is posting as its own —
  * the drafted inline comments plus the body Criticals. Low-confidence findings
@@ -6882,7 +6922,12 @@ export function draftedFindingsOf(drafted: unknown): DraftedFinding[] {
 export function buildLedger(
   round: number,
   drafted: Array<{ path?: unknown; line?: unknown; body?: unknown }>,
-  bodyCriticals: string[],
+  /**
+   * The body Criticals as posted — free text, or a relocated entry whose
+   * axes travel TYPED beside its rendered text (#10291): the rendered line
+   * wraps the claim in a code span, so nothing can be read back off it.
+   */
+  bodyCriticals: ReadonlyArray<string | BodyCritical>,
   /**
    * The previous round's work list, when this round recovered one, and
    * whether that list was COMPLETE.
@@ -6996,7 +7041,8 @@ export function buildLedger(
       ),
     });
   }
-  for (const b of bodyCriticals) {
+  for (const entry of bodyCriticals) {
+    const b = typeof entry === 'string' ? entry : entry.text;
     // The title strips through the same fixpoint chain the visible list
     // uses — the ledger marker rides the posted body as an HTML comment,
     // and the autofix grep reads the whole body, comments included.
@@ -7008,9 +7054,12 @@ export function buildLedger(
     findings.push({
       id: idFor(carried),
       sev: 'C',
-      // Read off the entry's first line — the same window the drafted leg
-      // reads, since a body Critical's claim line is its first line too.
-      ...ledgerAxes(axesOfClaim(head.split('\n')[0])),
+      // A typed entry's axes as settled; a free-text entry's off its first
+      // line's head slot — the same window the drafted leg reads, since a
+      // body Critical's claim line is its first line too.
+      ...ledgerAxes(
+        typeof entry === 'string' ? axesOfClaim(head.split('\n')[0]) : entry,
+      ),
       file: LEDGER_BODY_FILE,
       // The title is the visible item's text: the same neutralize-then-
       // strip order, so a forged footer that rode in wrapped in comment

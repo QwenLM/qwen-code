@@ -450,7 +450,7 @@ describe('bundled review skill', () => {
     // The posture is the reviewer-side brake on the review→fix→re-review
     // bloat loop. Each clause below carries a distinct obligation a later
     // "simplify the prose" edit is most likely to drop: the floor's
-    // round-adaptive default, the never-defer-Criticals rule, the
+    // round-adaptive default, the axes-only Critical deferral rule, the
     // record-not-request contract, and the age-reference/anchor distinction
     // (conflating `commitId` with the ledger `sha` would scope an
     // incremental review past scope a fail-closed round never certified).
@@ -459,15 +459,31 @@ describe('bundled review skill', () => {
     expect(body).toContain('**from round 6 it is `critical`**');
     // A Critical leaves the posting set by its AXES, never by severity, and
     // only at floor `critical` (#10291): the one deferrable shape is named,
-    // the regression/wrong-result/unclassified arms all post, and the
-    // rounds-2–5 age rule is kept off Criticals.
+    // the wrong-result and regression arms are pinned as always posting,
+    // the unclassified arm too, and the rounds-2–5 age rule is kept off
+    // Criticals.
     expect(body).toContain(
       'A Critical is deferred by its axes, never by its severity — and only at floor `critical`.',
     );
     expect(body).toContain(
       '`direction: fails-closed` AND `baseline: new-surface`',
     );
+    expect(body).toContain('Every other Critical posts');
+    expect(body).toContain('`certifies-falsely` at either baseline');
+    expect(body).toContain('`regression` in either direction');
     expect(body).toContain('a blocker in doubt posts');
+    // The deferrable-set definition names the Critical shape where it is
+    // introduced, and the deterministic carve-out is scoped to Suggestions.
+    expect(body).toContain(
+      'plus, at floor `critical` only, the fails-closed/new-surface Criticals described below',
+    );
+    expect(body).toContain(
+      'a deterministic Critical the axes classify defers like any other axes-Critical',
+    );
+    // The in-band report copies the axes too — one copy list, not two.
+    expect(body).toContain(
+      '`summary`, `shortSummary`, `failureScenario`, `category`, `direction`, `baseline` — never re-typed',
+    );
     expect(body).toContain(
       'the rounds-2–5 code-age rule never touches a Critical',
     );
@@ -790,6 +806,12 @@ describe('bundled review skill', () => {
     const body = skillBody();
     expect(body).toContain(
       'a `Critical` entry placed in `deferredSuggestions` is relocated here unless the floor is `critical` and the entry is `fails-closed` on `new-surface`',
+    );
+    // The fix-witness invariant on body Criticals carves the deferral
+    // channel out explicitly: its line carries neither witness nor
+    // constraint, and the artifact keeps the full entry.
+    expect(body).toContain(
+      "the deferral channel's disclosed line is the one exception",
     );
   });
 

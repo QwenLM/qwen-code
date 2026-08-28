@@ -12,8 +12,9 @@ damping at round 17: new Criticals per round ran 7, 5, 3, 5, 4, 1, 6 over
 rounds 17–23 with near-zero false positives. The floor could filter nothing
 because the `Critical` class collapsed three orthogonal merge decisions into
 one bit — which way the defect fails, what it is measured against, how often
-it triggers. About 6 of the ~25 findings certified falsely (a wrong result
-presented as correct); the other ~19 were fail-closed corners on defenses
+it triggers. Of the ~25 findings the issue classified (31 new in all across
+the seven rounds), about 6 certified falsely (a wrong result presented as
+correct); the other ~19 were fail-closed corners on defenses
 added in earlier rounds, most of them zero-regression against the merge base
 (before the PR, a sparse checkout had no incremental review either).
 
@@ -64,14 +65,20 @@ ledger build, the body composer and the mechanism-health check. A Critical
 entry arriving when the floor is not in effect is relocated into the body
 Criticals and posts — the fail-toward-posting direction every arm of the
 floor takes. A deferred Critical never caps, never withholds the anchor,
-leaves the work list, and joins the closure mint by the id its title carries
-(so the successor-chain sentinel does not read it as a fix).
+leaves the work list, and — on its first deferral — joins the closure mint
+by the id its title carries, so the successor-chain sentinel does not read
+it as a fix. A re-deferral bears an id the previous posted work list never
+held, fails the mint's membership leg, and that round's mint fails closed
+(absence never reads as a fix, at the cost of that round's true closures);
+carrying the round's deferred ids in the marker would let a re-deferral
+join by them and is left for a follow-up.
 
 ### Trust boundaries
 
-- Tags are read off the claim line only, like `[probe]`: the body's tail is
-  writable surface, and a forged pair in a footer would defer every drafted
-  Critical at once.
+- Tags are read off the claim line's head slot only — the machine tokens
+  before the title, like `[probe]`: a title that merely quotes a tag is
+  prose, the body's tail is writable surface, and a forged pair in either
+  would otherwise defer a drafted Critical.
 - An axis carrying both of its tags reads as unclassified — the backstop
   never guesses a blocker out of the posting set.
 - The marker fields decide nothing in code; a spelling this version does not

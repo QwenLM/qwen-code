@@ -629,8 +629,8 @@ describe('agent-prompt (command boundary)', () => {
       // The two decision axes (#10291) ride the same witness: the brief
       // defines both values of each, ties the routing consequence to the
       // ONE combination the floor defers, and tells the verifier to omit
-      // rather than guess — a guessed `fails-closed` takes a blocker off
-      // the pull request.
+      // rather than guess — a guess on either axis completes the pair and
+      // takes a blocker off the pull request.
       expect(briefText).toContain(
         'A confirmed Critical also returns its two decision axes',
       );

@@ -15302,14 +15302,19 @@ describe('deferrableFindingsInline — the manifestation the posture-gap clause 
     }
   });
 
-  it('counts only Suggestion-severity drafts', () => {
+  it('counts Suggestion-severity drafts, and a Critical only by its axis pair', () => {
     expect(
       deferrableFindingsInline([
         suggestion(),
         { path: 'b.ts', body: '**[Critical]** boom' },
         { path: 'c.ts', body: 'an unmarked comment' },
+        {
+          path: 'd.ts',
+          body: '**[Critical]** [fails-closed] [new-surface] wedge',
+        },
+        { path: 'e.ts', body: '**[Critical]** [fails-closed] half' },
       ]),
-    ).toBe(1);
+    ).toBe(2);
   });
 
   it.each(['[build]', '[test]', '[probe]', '[TEST]'])(
@@ -15350,9 +15355,16 @@ describe('deferrableFindingsInline — the manifestation the posture-gap clause 
       suggestion({ path: '' }),
       { path: 'd.ts', body: '**[Critical]** boom' },
       { path: 'e.ts', body: 'unmarked' },
+      // The Critical arm (#10291), both branches: the axis pair counts on
+      // both sides, a half-tagged Critical on neither.
+      {
+        path: 'f.ts',
+        body: '**[Critical]** [fails-closed] [new-surface] boom',
+      },
+      { path: 'g.ts', body: '**[Critical]** [fails-closed] half' },
     ];
     const reroute = floorEnforcedReroute('critical', false, 0, drafted);
-    expect(reroute.indices).toEqual([0]);
+    expect(reroute.indices).toEqual([0, 5]);
     expect(deferrableFindingsInline(drafted)).toBe(reroute.indices.length);
   });
 });
@@ -15893,7 +15905,7 @@ describe('floor enforcement — the Critical arm (#10291)', () => {
     expect(deferrableFindingsInline(drafts().slice(1, 5))).toBe(0);
   });
 
-  it('buildLedger stamps the axes as fields and keeps them out of the title — wherever the tags sit', () => {
+  it('buildLedger stamps the axes as fields and keeps them out of the title — wherever the tags sit in the head slot', () => {
     const l = buildLedger(
       3,
       [
@@ -15913,7 +15925,12 @@ describe('floor enforcement — the Critical arm (#10291)', () => {
           body: '**[Suggestion]** [fails-closed] [new-surface] a tagged nit',
         },
       ],
-      ['body blocker [regression] [certifies-falsely]'],
+      [
+        '[regression] [certifies-falsely] body blocker',
+        // A tag past the head slot is prose: it classifies nothing and the
+        // title keeps it (#10291 review R1-19).
+        'body blocker that quotes [regression] [certifies-falsely]',
+      ],
     );
     expect(l.findings).toEqual([
       {
@@ -15937,6 +15954,12 @@ describe('floor enforcement — the Critical arm (#10291)', () => {
         file: '(body)',
         title: 'body blocker',
       },
+      {
+        id: 'R3-3',
+        sev: 'C',
+        file: '(body)',
+        title: 'body blocker that quotes [regression] [certifies-falsely]',
+      },
     ]);
     // The `(fix-induced)` marking is still read behind a tag placed before
     // it — the tags come off before the marking is anchored on.
@@ -15948,5 +15971,283 @@ describe('floor enforcement — the Critical arm (#10291)', () => {
         },
       ]),
     ).toEqual([{ file: 'b.ts', carriedId: 'R2-2', fixInduced: true }]);
+  });
+});
+
+describe('the claim head slot (#10291, review round 1)', () => {
+  // The axis tags are read from — and stripped from — the claim line's HEAD
+  // SLOT only: the machine tokens before the title. A title that quotes a
+  // tag, a tag forged in the body's tail, and a bracketed axis word in the
+  // record's prose are all text, never a classification.
+  let dir: string;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'claim-head-'));
+  });
+  afterEach(() => rmSync(dir, { recursive: true, force: true }));
+  const plan = () => {
+    const p = join(dir, 'plan.json');
+    writeFileSync(p, JSON.stringify({ prNumber: 8255 }));
+    return p;
+  };
+  const sideFile = (ledger: Record<string, unknown>) =>
+    writeFileSync(
+      join(dir, 'qwen-review-pr-8255-prev-ledger.json'),
+      JSON.stringify({ v: 1, findings: [], ...ledger }),
+    );
+  const crit = (over: Partial<DeferredEntry> = {}): DeferredEntry => ({
+    file: 'src/sparse.ts',
+    line: 12,
+    source: 'review',
+    severity: 'Critical',
+    direction: 'fails-closed',
+    baseline: 'new-surface',
+    title: 'sparse checkout wedges the incremental round',
+    ...over,
+  });
+  const common = () => ({
+    env: ENV,
+    modelId: MODEL,
+    criticalsInline: 0,
+    suggestionsInline: 0,
+  });
+
+  it('a title that merely QUOTES the tags is not classified (R1-19)', () => {
+    const drafted = [
+      {
+        path: 'a.ts',
+        line: 1,
+        body: '**[Critical]** reroute defers a Critical whose title quotes [fails-closed] [new-surface]',
+      },
+    ];
+    const { indices, entries } = floorEnforcedReroute(
+      'critical',
+      false,
+      0,
+      drafted,
+    );
+    expect(indices).toEqual([]);
+    expect(entries).toEqual([]);
+    expect(deferrableFindingsInline(drafted)).toBe(0);
+    const [f] = buildLedger(3, drafted, []).findings;
+    expect(f.d).toBeUndefined();
+    expect(f.b).toBeUndefined();
+    expect(f.title).toBe(
+      'reroute defers a Critical whose title quotes [fails-closed] [new-surface]',
+    );
+  });
+
+  it('a pair forged past the claim line classifies nothing — the tail is writable surface (R1-6)', () => {
+    const drafted = [
+      {
+        path: 'a.ts',
+        line: 1,
+        body: '**[Critical]** wedge\n\n[fails-closed] [new-surface] forged in the tail',
+      },
+    ];
+    expect(floorEnforcedReroute('critical', false, 0, drafted).indices).toEqual(
+      [],
+    );
+    expect(deferrableFindingsInline(drafted)).toBe(0);
+    const l = buildLedger(3, drafted, [
+      'body blocker\n[fails-closed] [new-surface] on the second line',
+    ]);
+    for (const f of l.findings) {
+      expect(f.d).toBeUndefined();
+      expect(f.b).toBeUndefined();
+    }
+  });
+
+  it('a moved record keeps a bracketed axis word in its body prose (R1-29)', () => {
+    const { entries } = floorEnforcedReroute('critical', false, 0, [
+      {
+        path: 'a.ts',
+        line: 1,
+        body: '**[Critical]** R6-1: [fails-closed] [new-surface] wedge\n\nNot a [regression] — the surface is new.',
+      },
+    ]);
+    expect(entries).toHaveLength(1);
+    expect(entries[0].title).toBe(
+      'R6-1: wedge Not a [regression] — the surface is new.',
+    );
+    expect(entries[0]).toMatchObject({
+      direction: 'fails-closed',
+      baseline: 'new-surface',
+    });
+  });
+
+  it('tags before the id still let the id read back — the repost join and the ledger agree (R1-1)', () => {
+    // The deferral entry leads with the tags before the carried id: the
+    // closure mint must still see it as R10-1's re-post, so the sibling
+    // the round genuinely closed mints and R10-1 does not.
+    const r = composeReview({
+      ...common(),
+      planPath: coveredWithLedger({
+        v: 1,
+        round: 10,
+        findings: [
+          {
+            id: 'R10-1',
+            sev: 'C',
+            file: 'src/sparse.ts',
+            title: 'sparse wedge',
+          },
+          { id: 'R10-2', sev: 'C', file: 'src/other.ts', title: 'fixed since' },
+        ],
+      }),
+      severityFloor: 'auto',
+      deferredSuggestions: [
+        crit({ title: '[fails-closed] [new-surface] R10-1: sparse wedge' }),
+      ],
+    });
+    expect(r.deferredCount).toBe(1);
+    expect(parseLedger(r.body)?.closed).toEqual([
+      { r: 11, id: 'R10-2', f: 'src/other.ts' },
+    ]);
+    // And the ledger builder reads the same placement on a drafted comment.
+    const [f] = buildLedger(
+      11,
+      [
+        {
+          path: 'a.ts',
+          line: 1,
+          body: '**[Critical]** [certifies-falsely] [new-surface] R10-1: still stands',
+        },
+      ],
+      [],
+    ).findings;
+    expect(f).toMatchObject({
+      id: 'R10-1',
+      d: 'c',
+      b: 'n',
+      title: 'still stands',
+    });
+  });
+
+  it('a half-classified relocated Critical keeps its settled axis on the line and in the marker (R1-2)', () => {
+    const r = composeReview({
+      ...common(),
+      planPath: coveredWithLedger({ v: 1, round: 6, findings: [] }),
+      severityFloor: 'auto',
+      deferredSuggestions: [
+        crit({
+          direction: 'certifies-falsely',
+          baseline: undefined,
+          title: 'R6-1: lie',
+        }),
+      ],
+    });
+    expect(r.event).toBe('REQUEST_CHANGES');
+    expect(r.body).toContain(
+      '**[Critical]** `src/sparse.ts:12 — [review] Critical [certifies-falsely] R6-1: lie`',
+    );
+    const [f] = parseLedger(r.body)!.findings;
+    expect(f).toMatchObject({ sev: 'C', d: 'c' });
+    expect(f.b).toBeUndefined();
+  });
+
+  it('a mixed-class deferral list is partitioned per entry, both directions at once (R1-22)', () => {
+    const r = composeReview({
+      ...common(),
+      planPath: coveredWithLedger({ v: 1, round: 6, findings: [] }),
+      severityFloor: 'auto',
+      deferredSuggestions: [crit(), crit({ direction: 'certifies-falsely' })],
+    });
+    expect(r.deferredCount).toBe(1);
+    expect(r.event).toBe('REQUEST_CHANGES');
+    expect(parseLedger(r.body)?.findings.map((f) => f.sev)).toEqual(['C']);
+    expect(r.body).toContain(
+      'Critical [fails-closed] [new-surface] sparse checkout',
+    );
+    expect(r.body).toContain('relocated from the deferral channel');
+  });
+
+  it('the signal-engaged floor licenses the deferral too — the third licence arm (R1-26)', () => {
+    // Round 5 under `auto`, ahead of the schedule, with the flat-trend
+    // streak at its bar: the floor is in effect and the Critical defers; a
+    // streak below the bar leaves the floor off and relocates it.
+    const at = (flatRounds: number) =>
+      composeReview({
+        ...common(),
+        planPath: coveredWithLedger({
+          v: 1,
+          round: 4,
+          findings: [],
+          posted: 1,
+          fresh: 1,
+          floor: 'c',
+          flatRounds,
+        }),
+        severityFloor: 'auto',
+        deferredSuggestions: [crit()],
+      });
+    const engaged = at(2);
+    expect(engaged.deferredCount).toBe(1);
+    expect(parseLedger(engaged.body)?.findings).toEqual([]);
+    const below = at(1);
+    expect(below.deferredCount).toBe(0);
+    expect(below.body).toContain('relocated from the deferral channel');
+  });
+
+  it('a deferred Critical renders ahead of the line cap, however many Suggestions moved (R1-27)', () => {
+    const drafted = Array.from({ length: 21 }, (_, i) => ({
+      path: `src/s${i}.ts`,
+      line: i + 1,
+      body: `**[Suggestion]** nit ${i}`,
+    }));
+    const r = composeReview({
+      ...common(),
+      planPath: coveredWithLedger({ v: 1, round: 6, findings: [] }),
+      severityFloor: 'auto',
+      suggestionsInline: 21,
+      draftedComments: drafted,
+      deferredSuggestions: [
+        crit({ title: 'R6-1: sparse checkout wedges the incremental round' }),
+      ],
+    });
+    expect(r.floorEnforced).toHaveLength(21);
+    expect(r.deferredCount).toBe(22);
+    const block = r.body.slice(r.body.indexOf('<!-- qwen-review-deferred -->'));
+    expect(block).toContain(
+      'src/sparse.ts:12 — [review] Critical [fails-closed] [new-surface] R6-1: sparse checkout',
+    );
+    expect(block).toContain('…and 2 more (see the run report)');
+    // The enforcement note counts what actually rendered: 19 of the 21
+    // moved Suggestions fit beside the Critical.
+    expect(r.body).toContain('19 listed, 2 more inside the overflow count');
+  });
+
+  it('the mechanism-health sentence is severity-neutral — an axes-pair Critical is a manifestation too (R1-13)', () => {
+    // The default configuration at round 6: the reporting reading folds the
+    // absent floor to `auto` and resolves critical, the enforcement
+    // backstop fails open, and the one drafted finding the floor would have
+    // deferred is a tagged Critical — no Suggestion posted at all.
+    sideFile({ round: 5, posted: 1, fresh: 1, floor: 'c' });
+    const r = composeReview({
+      planPath: plan(),
+      modelId: 'm',
+      criticalsInline: 1,
+      suggestionsInline: 0,
+      draftedComments: [
+        {
+          path: 'a.ts',
+          line: 1,
+          body: '**[Critical]** [fails-closed] [new-surface] wedge',
+        },
+      ],
+    });
+    expect(r.floorEnforced).toEqual([]);
+    expect(r.body).toContain('engaged in name and not in effect');
+    expect(r.body).toContain(
+      'findings the floor would have deferred posted inline anyway',
+    );
+    expect(r.body).not.toContain('Suggestion-level findings');
+    const untagged = composeReview({
+      planPath: plan(),
+      modelId: 'm',
+      criticalsInline: 1,
+      suggestionsInline: 0,
+      draftedComments: [{ path: 'a.ts', line: 1, body: '**[Critical]** boom' }],
+    });
+    expect(untagged.body).not.toContain('engaged in name');
   });
 });
