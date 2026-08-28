@@ -102,6 +102,8 @@ import {
 } from './lib/deadline.js';
 import { certifierMatchesRound, roundModelIdFrom } from './lib/round-model.js';
 import {
+  PREBUILD_BUDGET_S,
+  PREBUILD_ENV,
   prebuildRequested,
   prebuildWorktree,
   type WorktreeDependencies,
@@ -201,8 +203,9 @@ type FetchPrResult = PlanReport & {
    * agent starts and outside every agent's budget. `installed: true` means
    * the tree holds a complete `node_modules` (npm's own marker, the gate
    * Agent 7 reads), `built: true` that the scoped build closure compiled too,
-   * so a probe can run a test before Agent 7 finishes and Agent 7's install
-   * and build are no-ops. Anything else carries a `note` and the review
+   * so a probe can run a test before Agent 7 finishes; Agent 7's install is
+   * a no-op on such a tree (its build recompiles — the per-package build
+   * script pre-cleans `dist`). Anything else carries a `note` and the review
    * behaves exactly as it did before the prebuild existed. Absent entirely
    * when no prebuild was asked for (every local run) and on an empty diff,
    * where the skill stops before any agent runs.
@@ -1727,6 +1730,13 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
     //    throwing — and absent from the report entirely when not asked for,
     //    so every local review reads the plan it always did.
     if (prebuildRequested() && !emptyDiff) {
+      // The call below is a blocking prefix of up to PREBUILD_BUDGET_S that
+      // emits nothing until it returns (runBuildTest captures its stdio), so
+      // a run killed mid-prebuild must leave a line naming where it died.
+      writeStderrLine(
+        `Prebuilding the worktree via build-test (${PREBUILD_ENV}=1, ` +
+          `budget ${PREBUILD_BUDGET_S}s)...`,
+      );
       result.dependencies = prebuildWorktree({
         plan: out,
         worktree: wt,
@@ -1738,7 +1748,8 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
       writeStderrLine(
         deps.installed && deps.built
           ? `Prebuilt the worktree in ${took}: dependencies installed and the ` +
-              `scoped build closure compiled; build-test will find both in place.`
+              `scoped build closure compiled; build-test's install is a no-op ` +
+              `on this tree.`
           : `Prebuild did not complete in ${took} (installed: ${deps.installed}, ` +
               `built: ${deps.built}${deps.note ? `; ${deps.note}` : ''}); ` +
               `build-test installs and builds on its own path as before.`,

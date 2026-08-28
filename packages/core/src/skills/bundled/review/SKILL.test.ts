@@ -1649,5 +1649,12 @@ describe('the worktree prebuild (issue #10108)', () => {
     expect(body).toContain(
       "never install by hand, and on a prebuilt tree `build-test`'s own install gate makes Agent 7's install a no-op",
     );
+    // The no-op claim is scoped to the install half: Agent 7's build
+    // recompiles the closure (the per-package build script pre-cleans
+    // `dist`), so the field text must not promise a build no-op.
+    expect(body).toContain(
+      "Agent 7's install is a no-op on such a tree (its build recompiles",
+    );
+    expect(body).not.toContain('install and build are no-ops');
   });
 });

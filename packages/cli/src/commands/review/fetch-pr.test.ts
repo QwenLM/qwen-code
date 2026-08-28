@@ -27,6 +27,7 @@ import {
 } from '../../services/review-worktree-lease.js';
 import { classifyHeavy } from './lib/heavy.js';
 import { DEADLINE_ENV, hasReviewDeadline } from './lib/deadline.js';
+import { PREBUILD_BUDGET_S, PREBUILD_ENV } from './lib/prebuild.js';
 import type { MergeBaseResult } from './lib/merge-base.js';
 import { buildRoleBrief } from './agent-prompt.js';
 import { PARSE_ARGS_REPORT, tmpFile, worktreePath } from './lib/paths.js';
@@ -907,6 +908,55 @@ describe('fetch-pr report assembly', () => {
       expect(report.emptyDiff).toBe(true);
       expect(report).not.toHaveProperty('dependencies');
       expect(producerMocks.prebuildWorktree).not.toHaveBeenCalled();
+    });
+
+    it('announces the prebuild on stderr before the call, and the outcome after', async () => {
+      // The call is a blocking prefix that emits nothing until it returns,
+      // so the start line must precede it — a run killed mid-prebuild
+      // otherwise ends its log at the plan write with no trace of where it
+      // died. DEPS' 1234ms rounds to the 1s the success line quotes.
+      await reportFor({});
+      const calls = producerMocks.writeStderrLine.mock.calls;
+      const startIdx = calls.findIndex(([line]: unknown[]) =>
+        String(line).startsWith('Prebuilding the worktree via build-test'),
+      );
+      expect(startIdx).toBeGreaterThanOrEqual(0);
+      const prebuildOrder =
+        producerMocks.prebuildWorktree.mock.invocationCallOrder[0];
+      expect(
+        producerMocks.writeStderrLine.mock.invocationCallOrder[startIdx],
+      ).toBeLessThan(prebuildOrder);
+      expect(String(calls[startIdx][0])).toContain(
+        `(${PREBUILD_ENV}=1, budget ${PREBUILD_BUDGET_S}s)`,
+      );
+      const doneIdx = calls.findIndex(([line]: unknown[]) =>
+        String(line).startsWith('Prebuilt the worktree in'),
+      );
+      expect(doneIdx).toBeGreaterThan(startIdx);
+      expect(String(calls[doneIdx][0])).toBe(
+        'Prebuilt the worktree in 1s: dependencies installed and the ' +
+          "scoped build closure compiled; build-test's install is a no-op " +
+          'on this tree.',
+      );
+    });
+
+    it('discloses an incomplete prebuild on stderr, with the note', async () => {
+      producerMocks.prebuildWorktree.mockReturnValue({
+        installed: false,
+        built: false,
+        note: 'npm ci exited 1',
+        report: null,
+        durationMs: 4321,
+      });
+      await reportFor({});
+      const line = producerMocks.writeStderrLine.mock.calls
+        .map(([l]: unknown[]) => String(l))
+        .find((l) => l.startsWith('Prebuild did not complete in'));
+      expect(line).toBe(
+        'Prebuild did not complete in 4s (installed: false, built: false; ' +
+          'npm ci exited 1); build-test installs and builds on its own ' +
+          'path as before.',
+      );
     });
   });
 

@@ -2323,6 +2323,9 @@ describe('review worktree prebuild (issue #10108)', () => {
   const envName = source.match(
     /export const PREBUILD_ENV = '([A-Z0-9_]+)'/,
   )?.[1];
+  const budgetS = Number(
+    source.match(/export const PREBUILD_BUDGET_S = (\d+)/)?.[1],
+  );
 
   it('sets the variable the CLI reads on the Run review step', () => {
     expect(envName).toBe('QWEN_REVIEW_PREBUILD');
@@ -2338,6 +2341,22 @@ describe('review worktree prebuild (issue #10108)', () => {
         expect(step.env?.[envName]).toBeUndefined();
       }
     }
+  });
+
+  it('covers the prebuild call with a session shell timeout carrying the budget', () => {
+    // The prebuild runs INSIDE fetch-pr, which the skill executes through
+    // the agent's shell tool: 120s built-in foreground default, 600s
+    // per-call ceiling (shell.ts) — neither holds the budget, so the step
+    // raises the session default in the per-run agent home's settings,
+    // gated on the same variable as the opt-in. A rename or a value below
+    // the budget reds this test instead of silently killing fetch-pr
+    // mid-`npm ci` on every CI review.
+    expect(budgetS).toBeGreaterThan(600);
+    const cover = review.run.match(/"defaultTimeoutMs":\s*(\d+)/);
+    expect(cover).not.toBeNull();
+    expect(Number(cover[1])).toBeGreaterThanOrEqual(budgetS * 1000);
+    expect(review.run).toContain('"$QWEN_HOME/settings.json"');
+    expect(review.run).toContain(`"\${${envName}:-}"`);
   });
 });
 

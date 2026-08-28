@@ -22,10 +22,12 @@
  * policy, environment and toolchain adapter Agent 7 would run minutes later,
  * with one difference: it runs here, on the orchestrator's clock, with a
  * budget sized to a workflow step instead of a shell tool call. Agent 7 then
- * finds npm's completeness marker and an up-to-date build, so its own install
- * and build phases are no-ops, and every probe started before Agent 7
- * finishes has a tree to run in. Nothing about what runs, or as whom, or with
- * which environment, is decided here — only WHEN.
+ * finds npm's completeness marker, so its own install phase is a no-op, and
+ * every probe started before Agent 7 finishes has a tree to run in — its
+ * build phase recompiles the closure regardless, because the per-package
+ * build script pre-cleans `dist`, so the win is the install and the probes,
+ * not a skipped build. Nothing about what runs, or as whom, or with which
+ * environment, is decided here — only WHEN.
  *
  * Opt-in by environment ({@link PREBUILD_ENV}), because a local review must
  * not pay a multi-minute blocking prefix nobody asked for — the SKILL's "do
@@ -43,10 +45,10 @@
  * report (`dependencies`) — never a finding, never a throw.
  */
 
-import { existsSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { writeFileSync } from 'node:fs';
 import { isFileSourcedEnvKey } from '../../../config/environment.js';
 import { runBuildTest, type BuildTestReport } from '../build-test.js';
+import { npmInstallComplete } from './npm-toolchain.js';
 
 /**
  * Set to `1` (or `true`) to run the prebuild. CI's review workflow sets it on
@@ -76,15 +78,6 @@ export const PREBUILD_BUDGET_S = 1800;
  * that `build-test` removes, which is the bare tree Agent 7 always had.
  */
 export const PREBUILD_COMMAND_TIMEOUT_S = 1200;
-
-/**
- * npm's completeness marker — the file `npm ci` writes only once the tree is
- * fully materialised, and the exact gate `build-test`'s install phase reads
- * (`installComplete` in `npm-toolchain.ts`). `installed` below is defined by
- * it so the fetch report and Agent 7 can never disagree about whether the
- * tree needs an install.
- */
-const NPM_COMPLETENESS_MARKER = join('node_modules', '.package-lock.json');
 
 /** What the prebuild did to the worktree — the fetch report's `dependencies`. */
 export interface WorktreeDependencies {
@@ -184,12 +177,19 @@ export function prebuildWorktree(args: PrebuildArgs): WorktreeDependencies {
     // path as before.
     note = `prebuild did not run: ${(err as Error).message}`;
   }
-  const installed = existsSync(join(args.worktree, NPM_COMPLETENESS_MARKER));
-  // A build the budget truncated is not a compiled closure: a probe against
+  const installed = npmInstallComplete(args.worktree);
+  // The same rule `base-tree` applies to the merge-base tree: `ok: true` is
+  // not a compiled closure — an `unsupported` hand-off and an npm scope with
+  // nothing to build both return it with zero build commands run, and
+  // `notBuilt` names what a truncated budget never compiled. A probe against
   // packages that were never built manufactures resolution failures that
-  // read as defects in the diff — the same rule `base-tree` applies.
+  // read as defects in the diff.
   const built =
-    report !== null && report.ok && (report.notBuilt?.length ?? 0) === 0;
+    report !== null &&
+    report.ok &&
+    report.toolchain === 'npm' &&
+    report.build.length > 0 &&
+    (report.notBuilt?.length ?? 0) === 0;
   return {
     installed,
     built,

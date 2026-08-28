@@ -16,7 +16,7 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { BuildTestReport } from '../build-test.js';
+import type { BuildTestReport, CommandResult } from '../build-test.js';
 import {
   PREBUILD_BUDGET_S,
   PREBUILD_COMMAND_TIMEOUT_S,
@@ -72,13 +72,21 @@ describe('prebuildWorktree', () => {
     rmSync(root, { recursive: true, force: true });
   });
 
+  const builtCmd: CommandResult = {
+    command: 'npm run build --workspace="packages/cli"',
+    exitCode: 0,
+    seconds: 12,
+    timedOut: false,
+    output: '',
+  };
+
   const green: BuildTestReport = {
     toolchain: 'npm',
     affected: ['packages/cli'],
     buildSet: ['packages/core', 'packages/cli'],
     widenedWith: [],
     install: null,
-    build: [],
+    build: [builtCmd],
     test: [],
     buildOnly: true,
     ok: true,
@@ -146,6 +154,37 @@ describe('prebuildWorktree', () => {
       worktree,
       report,
       run: installs({ ...green, notBuilt: ['packages/cli'] }),
+    });
+    expect(out.installed).toBe(true);
+    expect(out.built).toBe(false);
+  });
+
+  it('is not built when build-test handed the repo to the brief', () => {
+    // The `unsupported` hand-off carries `ok: true` — a hand-off, not a
+    // failure — but it is not an npm compile; base-tree refuses the same
+    // shape (`toolchain !== 'npm'`), and the report must agree.
+    const out = prebuildWorktree({
+      plan,
+      worktree,
+      report,
+      run: vi.fn(() => ({
+        ...green,
+        toolchain: 'unsupported' as const,
+        note: 'fall back to the build/test precedence in your brief',
+      })),
+    });
+    expect(out.installed).toBe(false);
+    expect(out.built).toBe(false);
+  });
+
+  it('is not built when the npm scope had nothing to compile', () => {
+    // The docs-only shape: no affected workspace returns `ok: true` with
+    // zero build commands. Nothing compiled is not a compiled closure.
+    const out = prebuildWorktree({
+      plan,
+      worktree,
+      report,
+      run: installs({ ...green, build: [] }),
     });
     expect(out.installed).toBe(true);
     expect(out.built).toBe(false);

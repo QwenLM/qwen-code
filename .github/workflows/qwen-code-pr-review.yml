@@ -1324,6 +1324,29 @@ jobs:
 
           QWEN_TIMEOUT="$EFFECTIVE_TIMEOUT_MINUTES"
 
+          # The prebuild (QWEN_REVIEW_PREBUILD above) runs install and build
+          # INSIDE fetch-pr, which the skill executes through the agent's
+          # shell tool: 120s built-in foreground default, 600s per-call
+          # ceiling — neither carries the prebuild's budget (measured cost
+          # ~4-5 minutes), so without a cover the tool kills fetch-pr
+          # mid-`npm ci` and the review stops over a partial tree. Weld the
+          # cover where the opt-in is welded: raise the session default in
+          # this per-run agent home's settings (shell-tool precedence:
+          # per-call timeout, then tools.shell.defaultTimeoutMs, then the
+          # built-in). The value is PREBUILD_BUDGET_S x 1000; deliberately
+          # above the setting's interactive 600000 ceiling — the startup
+          # loader does not range-check, the runtime gate accepts it, and
+          # the per-call ceiling cannot hold the budget it exists to escape.
+          # The prebuild's own budget still bounds a hang from inside, and
+          # the GNU timeout below bounds the whole attempt.
+          # scripts/tests/qwen-pr-review-workflow.test.js pins this value
+          # against PREBUILD_BUDGET_S in lib/prebuild.ts.
+          if [ "${QWEN_REVIEW_PREBUILD:-}" = '1' ]; then
+            mkdir -p "$QWEN_HOME"
+            printf '%s\n' '{"tools":{"shell":{"defaultTimeoutMs":1800000}}}' \
+              > "$QWEN_HOME/settings.json"
+          fi
+
           # One attempt of the qwen review. Sets OUTCOME (success | retryable |
           # quota | timeout | fatal), plus REASON/KIND for the failure paths.
           # A transient abort (dropped connection, a non-quota API/rate-limit
