@@ -84,6 +84,7 @@ import {
 import {
   discardWorktree,
   exposeDependencies,
+  localFilterCommands,
   redirectedAncestor,
   sanitizedGitEnv,
   worktreeCreateFailureDetail,
@@ -1643,6 +1644,18 @@ function restoreProbeTreeTracked(probeTree: string): string | null {
   // in a tree this code is defending against, so it is emptied here the way
   // every other checkout in this pipeline empties it. `--` and a pathspec:
   // this restores FILES and never moves HEAD.
+  // Filters, before either spawn. A checkout EXECUTES `filter.<name>.smudge`
+  // whenever it rewrites a file, and the restore below rewrites every tracked
+  // file this tree has — so the same surface `scratch-tree` refuses to reset
+  // through was, one directory over, run through twice per probe run. The
+  // screen reads repo-LOCAL config only: `git lfs install` writes
+  // `filter.lfs.clean` into the user's GLOBAL config, and refusing on that
+  // would put every contributor with git-lfs into permanent refusal — the same
+  // failure as a tripwire that fires on every healthy run.
+  const filters = localFilterCommands(probeTree);
+  if (filters.length > 0) {
+    return `the repository's local config defines content filter(s) ${filters.join(', ')}, which this tree's restore would EXECUTE`;
+  }
   // `core.fsmonitor` runs a command on BOTH of these, and the config that sets
   // it lives in the tree they are cleaning: the residue probe empties it for
   // exactly this reason and these two spawns were the ones still steerable.

@@ -113,9 +113,19 @@ describe('runScratchTree', () => {
       existsSync(scratchWorktreePath(worktree, 'verify--round-1--abc123')),
     ).toBe(false);
 
+    // `process` is the third executable key — a long-running filter git speaks
+    // a protocol to — and enumerating `smudge`/`clean` and stopping is how the
+    // first cut of this screen read as complete.
+    git(worktree, 'config', '--unset', 'filter.evil.smudge');
+    git(worktree, 'config', 'filter.evil.process', `touch ${pwned}`);
+    const viaProcess = run();
+    expect(viaProcess.available).toBe(false);
+    expect(viaProcess.note).toContain('filter.evil.process');
+    expect(existsSync(pwned)).toBe(false);
+
     // A repo WITHOUT the filter still gets a tree (the global-config filters
     // a user's own git-lfs install carries are not this surface).
-    git(worktree, 'config', '--unset', 'filter.evil.smudge');
+    git(worktree, 'config', '--unset', 'filter.evil.process');
     expect(run().available).toBe(true);
   });
 

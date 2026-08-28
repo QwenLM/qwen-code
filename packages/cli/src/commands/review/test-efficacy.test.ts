@@ -536,6 +536,67 @@ describe('restoreProbeTreeTracked, through runOneMutant', () => {
     }
   });
 
+  it('refuses to run through a repo-LOCAL content filter, and only a local one', () => {
+    // The restore rewrites every tracked file in this tree, and a checkout
+    // EXECUTES `filter.<name>.smudge` whenever it does — the same surface
+    // `scratch-tree` refuses to reset through, run twice per probe run one
+    // directory over with no screen at all.
+    const dir = mkdtempSync(join(tmpdir(), 'qwen-filter-'));
+    const isolation = isolateHostGitConfig();
+    try {
+      writeFileSync(join(dir, 'a.ts'), 'gone.clear();\n');
+      writeFileSync(join(dir, 'b.ts'), 'export const b = 1;\n');
+      asCheckout(dir);
+      execFileSync(
+        'git',
+        ['config', 'filter.evil.smudge', 'touch /tmp/qwen-should-never-run'],
+        { cwd: dir },
+      );
+
+      const r = runOneMutant(
+        dir,
+        { file: 'a.ts', line: 1, statement: 'gone.clear();' },
+        ['a.test.ts'],
+      );
+
+      expect(r.verdict).toBe('inconclusive');
+      expect(r.detail).toContain('filter.evil.smudge');
+
+      // ...and a filter in the user's GLOBAL config is their own contract, the
+      // way it is for any git command they run. `git lfs install` writes one
+      // there, so refusing on it would put every contributor with git-lfs into
+      // permanent refusal — the failure mode a blanket rule reproduces.
+      execFileSync('git', ['config', '--unset', 'filter.evil.smudge'], {
+        cwd: dir,
+      });
+      execFileSync(
+        'git',
+        ['config', '--global', 'filter.lfs.clean', 'git-lfs clean -- %f'],
+        { cwd: dir },
+      );
+
+      // It gets all the way to the runner, which this bare fixture does not
+      // have — the throw is from `findVitestBin`, and that IS the observation:
+      // the restore did not refuse, so the phase proceeded.
+      let afterDetail: string;
+      try {
+        afterDetail = runOneMutant(
+          dir,
+          { file: 'a.ts', line: 1, statement: 'gone.clear();' },
+          ['a.test.ts'],
+        ).detail;
+      } catch (e) {
+        afterDetail = e instanceof Error ? e.message : String(e);
+      }
+
+      expect(afterDetail).not.toContain('filter.lfs.clean');
+      expect(afterDetail).not.toContain('content filter');
+    } finally {
+      isolation.dispose();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('refuses to run when the index hides a tracked file from the restore', () => {
     // `checkout --force` SILENTLY skips a file carrying skip-worktree, and
     // `clean` never touches a tracked file — so a bit the guest suite sets with

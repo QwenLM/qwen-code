@@ -579,6 +579,80 @@ function trackedIgnoreSources(
 export const RESIDUE_PATH_CAP = 12;
 
 /**
+ * The repo-local `filter.<name>` COMMANDS, when any are defined.
+ *
+ * Every checkout in this pipeline EXECUTES these — the scratch tree's reset and
+ * rebuild, and the probe tree's per-run restore — hooks being disabled covers
+ * hooks and not filters. The planting surface is two plain writes a probe can
+ * make into the COMMON dir this command's report calls shared:
+ * `git config filter.evil.smudge CMD` and one line appended to
+ * `$(git rev-parse --git-path info/attributes)`. discard and cleanup never
+ * wipe the common dir, so a filter planted while reviewing one PR fires on
+ * every later matching checkout of the user's OWN repository — persistence
+ * planted by reviewing a malicious PR, measured live. The two local config
+ * files are checked with `--file` rather than merged config because filters
+ * in the user's global config (git-lfs is the common one) are the user's own
+ * contract, exactly like any git command they run — while a probe's planting
+ * surface is the repo-local files. The state cannot be told apart from a
+ * filter the user set deliberately, and cannot be safely wiped, so a hit is a
+ * refusal upstream, not a cleanup here.
+ */
+export function localFilterCommands(worktree: string): string[] {
+  const files = spawnSync(
+    'git',
+    ['rev-parse', '--git-common-dir', '--git-dir'],
+    { cwd: worktree, encoding: 'utf8', env: sanitizedGitEnv() },
+  );
+  if (files.error || files.status !== 0 || typeof files.stdout !== 'string') {
+    return [];
+  }
+  const [commonDir, gitDir] = files.stdout.trim().split('\n');
+  const common = resolve(worktree, commonDir);
+  const candidates = [
+    join(common, 'config'),
+    join(resolve(worktree, gitDir), 'config.worktree'),
+  ];
+  // Every OTHER worktree's per-worktree config too. This screen runs against
+  // the review worktree, but the checkout it authorises runs in the SCRATCH
+  // tree, whose own `<common>/worktrees/<label>/config.worktree` is honored
+  // once `extensions.worktreeConfig` is on and was never read here — a filter
+  // planted there executed during the reset while this function reported the
+  // repository clean. The admin directory is one `readdir`, and a filter in
+  // any of these is a plant whichever tree carries it.
+  try {
+    for (const entry of readdirSync(join(common, 'worktrees'))) {
+      candidates.push(join(common, 'worktrees', entry, 'config.worktree'));
+    }
+  } catch {
+    // No linked worktrees registered: the two candidates above are all of it.
+  }
+  const found: string[] = [];
+  for (const file of candidates) {
+    if (!existsSync(file)) continue;
+    const r = spawnSync(
+      'git',
+      [
+        'config',
+        '--file',
+        file,
+        '--get-regexp',
+        // `process` beside the pair: it is the third executable key (a
+        // long-running filter git speaks a protocol to), and enumerating two
+        // of three is how the first cut of this screen read as complete.
+        '^filter\\..*\\.(smudge|clean|process)$',
+      ],
+      { cwd: worktree, encoding: 'utf8', env: sanitizedGitEnv() },
+    );
+    if (r.error || r.status !== 0 || typeof r.stdout !== 'string') continue;
+    for (const line of r.stdout.split('\n')) {
+      const key = line.split(/\s+/)[0];
+      if (key && !found.includes(key)) found.push(key);
+    }
+  }
+  return found;
+}
+
+/**
  * The paths a tree carries that its HEAD commit does not — probe residue, seen
  * from the reading side (#9207).
  *
