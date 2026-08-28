@@ -7007,6 +7007,7 @@ describe('stage 1-pre duplicate gate', () => {
     // is pinned too — every stage-local variable is bound in a snippet.
     expect(section).toContain('repository { nameWithOwner }');
     expect(section).toContain('read -r MERGED_PR MERGED_FLAG MERGED_REPO');
+    expect(section).toContain('[ "$MERGED_REPO" = "$REPO" ]');
     expect(section).toContain('never resolved to a colliding number');
   });
 
@@ -7027,6 +7028,12 @@ describe('stage 1-pre duplicate gate', () => {
     // unverifiable and routes to the unresolved-closer escalation.
     expect(section).toContain('|| exit 1');
     expect(section).toContain('[ -s /tmp/stage-1pre-pr.patch ]');
+    expect(section).toContain(
+      '> "/tmp/stage-1pre-closer-$MERGED_PR.patch" || continue',
+    );
+    expect(section).toContain(
+      '[ -s "/tmp/stage-1pre-closer-$MERGED_PR.patch" ] || continue',
+    );
     expect(section).toContain('carries a failure guard');
   });
 
