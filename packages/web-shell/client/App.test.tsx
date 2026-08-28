@@ -208,6 +208,7 @@ const {
   qualifiedWorkspaceProviders,
   qualifiedSetWorkspaceSetting,
   sessionCatalogController,
+  mockReleaseWebTerminal,
 } = vi.hoisted(() => {
   const connection: MockConnection = {
     status: 'connected',
@@ -538,6 +539,7 @@ const {
       renamed: vi.fn(),
       turnCompleted: vi.fn(),
     },
+    mockReleaseWebTerminal: vi.fn(),
   };
 });
 
@@ -1825,6 +1827,18 @@ vi.doMock('./components/messages/BtwMessage', async () => {
     },
   };
 });
+vi.doMock('./components/terminal/TerminalPanel', async () => {
+  const React = await import('react');
+  return {
+    releaseWebTerminal: mockReleaseWebTerminal,
+    TerminalPanel: (props: { terminalId: string }) =>
+      React.createElement('div', {
+        'data-testid': 'terminal-panel',
+        'data-web-terminal': '',
+        'data-terminal-id': props.terminalId,
+      }),
+  };
+});
 mockComponent('./components/QueuedPromptDisplay', 'QueuedPromptDisplay');
 
 const {
@@ -2788,6 +2802,54 @@ describe('artifact panel fullscreen', () => {
       `${portal} [data-slot="drawer-content"]`,
     );
     expect(restoredContent?.className).toContain('min(520px');
+  });
+
+  it('leaves terminal Escape to xterm in the floating drawer', async () => {
+    Object.defineProperty(window, 'matchMedia', {
+      configurable: true,
+      value: vi.fn().mockImplementation((query: string) => ({
+        matches: false,
+        media: query,
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+      })),
+    });
+    mockConnection.capabilities.features = ['web_terminal'];
+    const { container } = renderApp({
+      rightPanel: { items: ['terminal'] },
+    });
+    await flush();
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>(
+          'button[aria-label="Toggle right panel"]',
+        )
+        ?.click();
+    });
+    await flush();
+    act(() => {
+      Array.from(document.querySelectorAll<HTMLButtonElement>('button'))
+        .find((button) => button.textContent?.includes('Terminal'))
+        ?.click();
+    });
+    await flush();
+    const terminal = document.querySelector('[data-web-terminal]');
+    const escape = new KeyboardEvent('keydown', {
+      key: 'Escape',
+      bubbles: true,
+      cancelable: true,
+    });
+
+    await act(async () => {
+      terminal?.dispatchEvent(escape);
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(escape.defaultPrevented).toBe(true);
+    expect(
+      document.querySelector('aside[aria-label="Right panel"]'),
+    ).not.toBeNull();
   });
 
   it('leaves an IME-composition Escape to the composer in the fullscreen drawer', async () => {
@@ -4111,6 +4173,41 @@ describe('artifact panel fullscreen', () => {
     ).not.toBeNull();
   });
 
+  it('leaves terminal Escape to xterm while the session drawer is open', async () => {
+    const shellRef = createRef<WebShellApi>();
+    const { container } = renderApp({ sidebar: true, shellRef });
+    await flush();
+    await act(async () => {
+      shellRef.current?.openSessionDrawer();
+      await Promise.resolve();
+    });
+    const host = document.createElement('div');
+    const shadow = host.attachShadow({ mode: 'open' });
+    document.body.append(host);
+    const terminal = document.createElement('div');
+    terminal.dataset['webTerminal'] = '';
+    const input = document.createElement('textarea');
+    terminal.append(input);
+    shadow.append(terminal);
+    const escape = new KeyboardEvent('keydown', {
+      key: 'Escape',
+      bubbles: true,
+      cancelable: true,
+      composed: true,
+    });
+
+    await act(async () => {
+      input.dispatchEvent(escape);
+      await Promise.resolve();
+    });
+
+    expect(escape.defaultPrevented).toBe(false);
+    expect(
+      container.querySelector('[data-sidebar-shell][role="dialog"]'),
+    ).not.toBeNull();
+    host.remove();
+  });
+
   it('reveals the covered shells in the commit that closes the fullscreen panel', async () => {
     const { container } = renderApp();
     await flush();
@@ -5051,6 +5148,7 @@ beforeEach(() => {
   // auto-restore into the next test's App mount.
   sessionStorage.clear();
   localStorage.removeItem('qwen-code-web-shell-chat-width');
+  mockReleaseWebTerminal.mockReset();
   Object.defineProperty(document, 'hidden', {
     configurable: true,
     get: () => false,
@@ -5395,6 +5493,36 @@ describe('App global shortcuts', () => {
       'ui.compactMode',
       expect.anything(),
     );
+  });
+
+  it.each(['o', 'b'])('leaves Ctrl+%s to xterm', async (key) => {
+    const { container } = renderApp();
+    const host = document.createElement('div');
+    const shadow = host.attachShadow({ mode: 'open' });
+    document.body.append(host);
+    const terminal = document.createElement('div');
+    terminal.dataset['webTerminal'] = '';
+    const input = document.createElement('textarea');
+    terminal.append(input);
+    shadow.append(terminal);
+    const event = new KeyboardEvent('keydown', {
+      bubbles: true,
+      cancelable: true,
+      composed: true,
+      ctrlKey: true,
+      key,
+    });
+    const sidebar = container.querySelector('[data-testid="sidebar"]');
+    const collapsed = sidebar?.getAttribute('data-collapsed');
+
+    await act(async () => {
+      input.dispatchEvent(event);
+      await Promise.resolve();
+    });
+
+    expect(event.defaultPrevented).toBe(false);
+    expect(sidebar?.getAttribute('data-collapsed')).toBe(collapsed);
+    host.remove();
   });
 });
 
@@ -8530,6 +8658,86 @@ describe('App session callbacks', () => {
       header?.parentElement?.parentElement?.parentElement,
     );
     expect(header?.parentElement?.contains(artifactDock ?? null)).toBe(false);
+  });
+
+  it('shows the manual terminal action when configured and advertised', () => {
+    mockConnection.capabilities.features = ['web_terminal'];
+    const { container } = renderApp({
+      rightPanel: { items: ['terminal'] },
+    });
+    act(() =>
+      container
+        .querySelector<HTMLButtonElement>(
+          'button[aria-label="Toggle right panel"]',
+        )
+        ?.click(),
+    );
+
+    const actions = Array.from(
+      container.querySelectorAll<HTMLButtonElement>(
+        '[data-testid="right-panel-empty-actions"] button',
+      ),
+    );
+    expect(
+      actions.find((button) => button.textContent?.includes('Terminal')),
+    ).toBeDefined();
+
+    act(() =>
+      actions
+        .find((button) => button.textContent?.includes('Terminal'))
+        ?.click(),
+    );
+    const terminalId = container
+      .querySelector('[data-testid="terminal-panel"]')
+      ?.getAttribute('data-terminal-id');
+    expect(terminalId).toBeTruthy();
+    act(() =>
+      container
+        .querySelector<HTMLButtonElement>('button[aria-label="Close Terminal"]')
+        ?.click(),
+    );
+    expect(mockReleaseWebTerminal).toHaveBeenCalledWith(terminalId);
+  });
+
+  it('hides the manual terminal action without the capability', () => {
+    const { container } = renderApp({
+      rightPanel: { items: ['terminal'] },
+    });
+    act(() =>
+      container
+        .querySelector<HTMLButtonElement>(
+          'button[aria-label="Toggle right panel"]',
+        )
+        ?.click(),
+    );
+
+    expect(
+      Array.from(
+        container.querySelectorAll<HTMLButtonElement>(
+          '[data-testid="right-panel-empty-actions"] button',
+        ),
+      ).some((button) => button.textContent?.includes('Terminal')),
+    ).toBe(false);
+  });
+
+  it('hides the manual terminal action when it is not configured', () => {
+    mockConnection.capabilities.features = ['web_terminal'];
+    const { container } = renderApp();
+    act(() =>
+      container
+        .querySelector<HTMLButtonElement>(
+          'button[aria-label="Toggle right panel"]',
+        )
+        ?.click(),
+    );
+
+    expect(
+      Array.from(
+        container.querySelectorAll<HTMLButtonElement>(
+          '[data-testid="right-panel-empty-actions"] button',
+        ),
+      ).some((button) => button.textContent?.includes('Terminal')),
+    ).toBe(false);
   });
 
   it('opens the latest reviewable turn from the empty right panel', () => {
