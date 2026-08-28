@@ -5,8 +5,10 @@
  */
 
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import {
+  chmodSync,
+  copyFileSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -17,6 +19,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
+import { parse } from 'yaml';
 
 import {
   buildComment,
@@ -42,6 +45,107 @@ const publishWorkflow = () =>
 const publishScriptPath = fileURLToPath(
   new URL('./web-shell-visuals-publish.mjs', import.meta.url),
 );
+const publishStep = () => {
+  const workflow = parse(publishWorkflow());
+  return workflow.jobs.publish.steps.find(
+    (step) => step.name === 'Publish visuals to the PR',
+  ).run;
+};
+
+const writeExecutable = (path, source) => {
+  writeFileSync(path, source);
+  chmodSync(path, 0o755);
+};
+
+const runPublishStep = ({ pushSucceeds, script = publishStep() }) => {
+  const root = mkdtempSync(join(tmpdir(), 'web-shell-visuals-workflow-'));
+  try {
+    const workspace = join(root, 'workspace');
+    const runnerTemp = join(root, 'runner');
+    const bin = join(root, 'bin');
+    const callLog = join(root, 'calls.log');
+    const scriptDir = join(workspace, '.github', 'scripts');
+    mkdirSync(join(workspace, 'visuals', 'screenshots'), { recursive: true });
+    mkdirSync(join(workspace, 'visuals', 'gifs'), { recursive: true });
+    mkdirSync(scriptDir, { recursive: true });
+    mkdirSync(runnerTemp);
+    mkdirSync(bin);
+    writeFileSync(join(workspace, 'visuals', 'pr.txt'), '7\n');
+    writeFileSync(
+      join(workspace, 'visuals', 'screenshots', 'home-light.png'),
+      Buffer.from(PNG, 'hex'),
+    );
+    writeFileSync(join(workspace, 'visuals', 'render-status.txt'), 'success\n');
+    copyFileSync(
+      publishScriptPath,
+      join(scriptDir, 'web-shell-visuals-publish.mjs'),
+    );
+
+    writeExecutable(
+      join(bin, 'git'),
+      `#!/usr/bin/env node
+const args = process.argv.slice(2);
+if (args[0] === 'push') process.exit(process.env.PUSH_SUCCEEDS === '1' ? 0 : 1);
+if (args[0] === 'rev-parse') process.stdout.write('asset123\\n');
+`,
+    );
+    writeExecutable(
+      join(bin, 'gh'),
+      `#!/usr/bin/env node
+const args = process.argv.slice(2);
+require('node:fs').appendFileSync(process.env.CALL_LOG, args.join(' ') + '\\n');
+const endpoint = args[1] ?? '';
+if (endpoint === 'user') {
+  process.stdout.write('qwen-code-bot\\n');
+} else if (endpoint.endsWith('/pulls/7')) {
+  process.stdout.write(JSON.stringify({
+    state: 'open',
+    head: {
+      sha: process.env.RUN_HEAD_SHA,
+      repo: { full_name: process.env.RUN_HEAD_REPO },
+      ref: process.env.RUN_HEAD_BRANCH,
+    },
+  }));
+} else if (endpoint.endsWith('/issues/7/comments') && args.includes('--method')) {
+  process.stdout.write('[]\\n');
+}
+`,
+    );
+    writeExecutable(join(bin, 'sleep'), '#!/bin/sh\nexit 0\n');
+
+    const result = spawnSync('bash', ['-c', script], {
+      cwd: workspace,
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        PATH: `${bin}:${process.env.PATH}`,
+        CALL_LOG: callLog,
+        PUSH_SUCCEEDS: pushSucceeds ? '1' : '0',
+        GH_TOKEN: 'test-token',
+        GITHUB_REPOSITORY: 'QwenLM/qwen-code',
+        GITHUB_WORKSPACE: workspace,
+        RUNNER_TEMP: runnerTemp,
+        RUN_ID: '99',
+        RUN_URL: 'https://run.example/99',
+        RUN_HEAD_SHA: '1234567890abcdef',
+        RUN_HEAD_REPO: 'fork/qwen-code',
+        RUN_HEAD_BRANCH: 'fix/visuals',
+      },
+    });
+    const bodyPath = join(runnerTemp, 'visuals-comment.md');
+    return {
+      ...result,
+      body: readFileSync(bodyPath, 'utf8'),
+      calls: readFileSync(callLog, 'utf8'),
+      hostingStatus: readFileSync(
+        join(runnerTemp, 'visuals-hosting-status.txt'),
+        'utf8',
+      ).trim(),
+    };
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+};
 
 test('sanitizeName preserves the extension (regression: a trailing char broke the .png filter)', () => {
   assert.equal(
@@ -420,48 +524,36 @@ test('buildComment: render-failure note omits the run link when runUrl is absent
   assert.doesNotMatch(body, /\[workflow run\]/); // no dangling empty link
 });
 
-test('publish workflow passes hosting failures through to the comment builder', () => {
-  const workflow = publishWorkflow();
-  assert.match(
-    workflow,
-    /HOSTING_STATUS_FILE="\$\{RUNNER_TEMP\}\/visuals-hosting-status\.txt"/,
+test('publish workflow carries a hosting failure into the posted body', () => {
+  const renamedSection = publishStep().replace(
+    '# --- Post or update the PR comment',
+    '# Write the PR comment',
   );
-
-  const failureWrite = `echo 'failure' > "\${HOSTING_STATUS_FILE}"`;
-  const commentInvocation =
-    'node .github/scripts/web-shell-visuals-publish.mjs comment';
-  const failureWriteIndex = workflow.indexOf(failureWrite);
-  assert.notEqual(failureWriteIndex, -1);
-  const fromFailureWrite = workflow.slice(failureWriteIndex);
-  const commentIndex = fromFailureWrite.indexOf(commentInvocation);
-  assert.ok(commentIndex > 0);
-  const beforeComment = fromFailureWrite.slice(0, commentIndex);
-  assert.doesNotMatch(beforeComment, /\bexit\s+[01]\b/);
-
-  const commentBlock = fromFailureWrite.slice(
-    commentIndex,
-    fromFailureWrite.indexOf('          # --- Post or update the PR comment'),
-  );
-  const expectedArgs = [
-    '"${STAGE}"',
-    '"${RAW_BASE}"',
-    '"${SHORT_SHA}"',
-    '"${RUN_URL}"',
-    '"${BODY_FILE}"',
-    '"${CHANGED_PATHS_FILE}"',
-    '"${RENDER_STATUS_FILE}"',
-    '"${HOSTING_STATUS_FILE}"',
-  ];
-  let searchFrom = 0;
-  for (const arg of expectedArgs) {
-    const argIndex = commentBlock.indexOf(arg, searchFrom);
-    assert.notEqual(argIndex, -1, `${arg} must be passed to comment CLI`);
-    searchFrom = argIndex + arg.length;
-  }
-  assert.doesNotMatch(commentBlock, /\bexit\s+[01]\b/);
-  assert.match(workflow, /echo 'success' > "\$\{HOSTING_STATUS_FILE\}"/);
+  const result = runPublishStep({
+    pushSucceeds: false,
+    script: renamedSection,
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.hostingStatus, 'failure');
+  assert.match(result.body, /failed to host/i);
+  assert.doesNotMatch(result.body, /<img /);
   assert.match(
-    workflow,
-    /if \[ "\$\{pushed\}" -ne 1 \]; then\n\s+echo "::warning::[^\n]*"\n\s+echo 'failure' > "\$\{HOSTING_STATUS_FILE\}"/,
+    result.calls,
+    /api repos\/QwenLM\/qwen-code\/issues\/7\/comments -F body=@/,
+  );
+});
+
+test('publish workflow keeps successful hosting out of the failure path', () => {
+  const result = runPublishStep({ pushSucceeds: true });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.hostingStatus, 'success');
+  assert.doesNotMatch(result.body, /failed to host/i);
+  assert.match(
+    result.body,
+    /https:\/\/raw\.githubusercontent\.com\/QwenLM\/qwen-code\/asset123\/imgs\/home-light\.png/,
+  );
+  assert.match(
+    result.calls,
+    /api repos\/QwenLM\/qwen-code\/issues\/7\/comments -F body=@/,
   );
 });
