@@ -195,8 +195,8 @@ The parser is not intent-aware — prose like "resolves #123's closer" links
 `ISSUES`. There is no deterministic intent check: the linkage decides WHICH
 issues the branches below read, and they then act on those issues' states.
 The blast radius stays bounded — the only irreversible act (close)
-additionally requires this PR's diff to be fully subsumed by the default
-branch, which is true only when the change is already landed, so an
+additionally requires this PR's diff to be fully subsumed by the merged
+fix, which is true only when the change is already landed, so an
 accidental linkage can at worst reach a visible, reversible request-changes
 review or a maintainer escalation, never a substantively wrong close.
 
@@ -259,24 +259,44 @@ nothing (the number is a PR, not an issue; the issue does not exist; the
 latest close was manual), treat the closer as unresolved.
 
 - Closed by a **merged PR** → compare this PR's production diff (exclude
-  test/generated files per the Stage 0 size rules) against the default
-  branch (`$DEFAULT_BRANCH` — this PR's base, per the scope check above):
-  - **Fully subsumed** — applying this PR's ENTIRE diff to the default
-    branch would change nothing: every production line this PR adds already
-    exists there, AND every production line this PR deletes is already
-    absent there (check per file via
-    `gh api "repos/$REPO/contents/<path>?ref=$DEFAULT_BRANCH"`). A diff
-    with NO production changes (e.g. tests-only) is never fully subsumed —
-    any file it adds outside the production set is itself a remaining
-    delta. → post the terminal comment below, then close the PR. This is
-    the ONLY place triage closes a PR.
+  test/generated files per the Stage 0 size rules) against the merged
+  closer's production diff (`$MERGED_PR` — the closer number resolved
+  above). Read each patch once; two calls cover any number of files:
+
+```bash
+gh pr diff "$PR_NUMBER" --repo "$REPO" > /tmp/stage-1pre-pr.patch
+gh pr diff "$MERGED_PR" --repo "$REPO" > /tmp/stage-1pre-closer.patch
+```
+
+  Do NOT download the default branch's files one by one via
+  `gh api "repos/$REPO/contents/<path>?ref=$DEFAULT_BRANCH"`: above ~1 MiB
+  that endpoint silently returns HTTP 200 with empty content
+  (`content_len: 0`, `encoding: "none"`, no error), so a per-file download
+  can never confirm subsumption for large files — the check would fail
+  silently exactly where a duplicate is most expensive. It would also
+  spend one REST call per file against the shared CI PAT's rate limit and
+  transit every full blob through the agent's context. Two frozen patches
+  cost two calls for any N and keep the verdict atomic with respect to
+  base-branch movement during the check. Judge the production sections of
+  the two patches line by line:
+  - **Fully subsumed** — every production line this PR adds also appears
+    among the lines the closer's patch adds, AND every production line
+    this PR deletes also appears among the lines the closer's patch
+    deletes. The closer's patch is frozen against ITS merge base, so a
+    line later edited or reverted on the default branch still counts as
+    covered here — the close comment below invites reopening for exactly
+    that case. A diff with NO production changes (e.g. tests-only) is
+    never fully subsumed — any file it adds outside the production set is
+    itself a remaining delta. → post the terminal comment below, then
+    close the PR. This is the ONLY place triage closes a PR.
   - **Any remaining delta** — everything else: an added production line
-    that is missing there, a deleted production line that still exists
-    there, or any non-production addition → submit exactly one
-    `CHANGES_REQUESTED` review: name the merged PR, name the remaining
-    delta, ask the author to rebase onto the default branch and reduce the
-    PR to that delta (bilingual body whose first line is the
-    `<!-- qwen-triage stage=1-pre -->` marker, @mention the author). Stop:
+    the closer's patch does not add, a deleted production line the
+    closer's patch does not delete, or any non-production addition →
+    submit exactly one `CHANGES_REQUESTED` review: name the merged PR,
+    name the remaining delta, ask the author to rebase onto the default
+    branch and reduce the PR to that delta (bilingual body whose first
+    line is the `<!-- qwen-triage stage=1-pre -->` marker, @mention the
+    author). Stop:
 
 ```bash
 gh pr review "$PR_NUMBER" --repo "$REPO" --request-changes --body-file /tmp/stage-1pre-remaining-delta.md
