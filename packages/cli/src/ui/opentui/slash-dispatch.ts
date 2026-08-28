@@ -232,7 +232,19 @@ export type SlashEffect =
     }
   | { kind: 'clear' }
   | { kind: 'quit'; notice?: string }
-  | { kind: 'submit'; content: string };
+  | {
+      kind: 'submit';
+      content: string;
+      /** Per-turn model id (ink: /model <id> <prompt> runs on the chosen
+       * model without changing the session selection). */
+      modelOverride?: string;
+      /** Invoked after the agent turn completes successfully (ink: /dream
+       * records the manual run this way). */
+      onComplete?: () => Promise<void>;
+      /** Refresh context-file-backed instructions after this prompt
+       * writes them (ink: /remember). */
+      refreshContextFilesOnWrite?: boolean;
+    };
 
 export type SlashEffectWithNotice = SlashEffect & { notice?: string };
 
@@ -315,9 +327,16 @@ function mapActionResult(
             content: `'/${command.name}' history restore is not yet available in the OpenTUI renderer.`,
           };
     case 'submit_prompt':
+      // Carry the full SubmitPromptActionReturn contract: the backend
+      // honors modelOverride (/model <id> <prompt>), onComplete (/dream
+      // records manual runs), and refreshContextFilesOnWrite (/remember)
+      // exactly like ink's processor.
       return {
         kind: 'submit',
         content: stringifyPromptContent(result.content),
+        modelOverride: result.modelOverride,
+        onComplete: result.onComplete,
+        refreshContextFilesOnWrite: result.refreshContextFilesOnWrite,
       };
     case 'tool':
       return {
@@ -526,6 +545,12 @@ export async function executeSlashCommand(
     }
     return effect;
   } catch (error) {
+    // ink's mirrored catch checks the signal first: an ESC-cancelled
+    // command (the action rejects with AbortError) is the user's own
+    // cancellation, not a failure — no error telemetry, no error message.
+    if (env.abortSignal?.aborted) {
+      return { kind: 'handled' };
+    }
     recordSkill(false);
     logEvent(SlashCommandStatus.ERROR);
     return {

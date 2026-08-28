@@ -125,4 +125,13 @@ describe('markdownToPlainText', () => {
   it('keeps inner backticks in multi-backtick code spans (R2-10)', () => {
     expect(markdownToPlainText('a ``b ` c`` d')).toBe('a b ` c d');
   });
+
+  it('a fence line with info text does not close an open fence (R3-3)', () => {
+    // CommonMark: a closing fence cannot carry info text, so ```js inside
+    // an open block is literal body — not an early close that drops the
+    // block and inverts parse state for the rest of the document.
+    expect(markdownToPlainText('```\n```js\nbody\n```\nafter **x**')).toBe(
+      '```js\nbody\nafter x',
+    );
+  });
 });
