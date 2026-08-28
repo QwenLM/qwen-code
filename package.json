@@ -19,6 +19,7 @@
     "packages/channels/gitlab",
     "packages/channels/plugin-example",
     "integrations/external-context",
+    "integrations/external-context-mem0",
     "!packages/desktop-shell",
     "!packages/live-host"
   ],
