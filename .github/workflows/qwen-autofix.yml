@@ -6183,17 +6183,33 @@ jobs:
                   # the merge while it holds.
                   # Full rationale → qwen-autofix.md#af-154
                   CONV_PARKED_R='false'
-                  gh api "repos/${REPO}/pulls/${PR}/reviews" --paginate \
-                    | jq -s 'add // []' > "${WORKDIR}/rv.report.json"
-                  gh api "repos/${REPO}/pulls/${PR}/comments" --paginate \
-                    | jq -s 'add // []' > "${WORKDIR}/rc.report.json"
-                  gh api "repos/${REPO}/issues/${PR}/comments" --paginate \
-                    | jq -s 'add // []' > "${WORKDIR}/ic.report.json"
+                  # Each fetch sits in an errexit-exempt condition: under the
+                  # step shell's -eo pipefail a transient gh failure (5xx,
+                  # secondary rate limit, network reset) would otherwise abort
+                  # the whole step before the report comment and eval marker
+                  # post, so the watermark never advances and the same feedback
+                  # re-dispatches. A failed fetch also leaves the derivation
+                  # below reading an empty park state, so the merge gate fails
+                  # CLOSED on it — skipping update-branch keeps the park
+                  # invariant; the step still posts the report.
+                  CONV_FETCH_R='true'
+                  if ! gh api "repos/${REPO}/pulls/${PR}/reviews" --paginate \
+                    | jq -s 'add // []' > "${WORKDIR}/rv.report.json"; then
+                    CONV_FETCH_R='false'
+                  fi
+                  if ! gh api "repos/${REPO}/pulls/${PR}/comments" --paginate \
+                    | jq -s 'add // []' > "${WORKDIR}/rc.report.json"; then
+                    CONV_FETCH_R='false'
+                  fi
+                  if ! gh api "repos/${REPO}/issues/${PR}/comments" --paginate \
+                    | jq -s 'add // []' > "${WORKDIR}/ic.report.json"; then
+                    CONV_FETCH_R='false'
+                  fi
                   CONV_REARM_KEY_R="$(jq -r --arg ab "${AUTOFIX_BOT}" '
                     [ .[] | select((.user.login // "") == $ab)
                       | select(((.body // "") | contains("<!-- takeover-ack engaged -->"))
                             or ((.body // "") | contains("<!-- autofix-rearm -->")))
-                      | .created_at ] | max // "none"' "${WORKDIR}/ic.report.json")"
+                      | .created_at ] | max // "none"' "${WORKDIR}/ic.report.json" || echo none)"
                   [[ "${CONVERGENCE_BREAK_ROUNDS}" =~ ^[1-9][0-9]{0,2}$ ]] || CONVERGENCE_BREAK_ROUNDS=3
                   CONV_SINCE_R="${CONV_REARM_KEY_R}"
                   [[ "${CONV_SINCE_R}" == 'none' ]] && CONV_SINCE_R=''
@@ -6240,6 +6256,8 @@ jobs:
                   fi
                   if [[ "${CONV_PARKED_R}" == 'true' ]]; then
                     echo "🫥 #${PR}: convergence-parked — the stale-base merge would self-lift the park; skipping update-branch"
+                  elif [[ "${CONV_FETCH_R}" != 'true' ]]; then
+                    echo "🫥 #${PR}: convergence guard fetch failed — the park state is unreadable; skipping the stale-base merge (fail closed)"
                   else
                     MAIN_HEAD_R="$(gh api "repos/${REPO}/commits/${DEFAULT_BRANCH:-main}" --jq '.sha' 2> /dev/null || echo '')"
                     if [[ -n "${MAIN_HEAD_R}" && -n "${REPORT_HEAD}" ]]; then

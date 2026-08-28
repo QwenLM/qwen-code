@@ -19923,7 +19923,15 @@ exit 1
     const runMark = (env) =>
       execFileSync(
         'bash',
-        ['-c', `${markBlock}\nprintf '%s|%s' "$MARK_TS" "$MARK_ROUND"`],
+        // The mark chain nests the report stale-base retry, whose
+        // convergence guard now fetches and speaks on failure: stub gh to
+        // silent success (the fetches read '[]', the guard stays quiet and
+        // falls through exactly as before) and give the fetch files a real
+        // directory, so the exact-output mark assertions stay exact.
+        [
+          '-c',
+          `WORKDIR='${tmpdir()}'\ngh() { :; }\n${markBlock}\nprintf '%s|%s' "$MARK_TS" "$MARK_ROUND"`,
+        ],
         {
           env: {
             ...process.env,
@@ -22102,7 +22110,13 @@ describe('growth-audit hardening: park wake set and verdict pipeline (round 3)',
         })} -->`,
       });
       const T = (h) => `2026-01-01T0${h}:00:00Z`;
-      const runRetry = ({ rv, ic = [], verdict = 'sound' }) => {
+      const runRetry = ({
+        rv,
+        ic = [],
+        verdict = 'sound',
+        shellOpts = 'set -e',
+        fetchFail = false,
+      }) => {
         writeFileSync(join(dir, 'rv.fixture.json'), JSON.stringify(rv));
         writeFileSync(join(dir, 'rc.fixture.json'), JSON.stringify([]));
         writeFileSync(join(dir, 'ic.fixture.json'), JSON.stringify(ic));
@@ -22112,7 +22126,8 @@ describe('growth-audit hardening: park wake set and verdict pipeline (round 3)',
           'bash',
           [
             '-c',
-            `set -e\nWORKDIR='${dir}'\nREPO='example-owner/example-repo'\nPR=1\n` +
+            `${shellOpts}\nWORKDIR='${dir}'\nREPO='example-owner/example-repo'\nPR=1\n` +
+              `FETCH_FAIL='${fetchFail}'\n` +
               `DEFAULT_BRANCH='main'\nAUDIT_VERDICT='${verdict}'\nREPORT_HEAD='reportheadsha'\n` +
               `REVIEW_BOT=qwen-code-ci-bot\nAUTOFIX_BOT=qwen-code-dev-bot\n` +
               `TRUSTED_ASSOC='["OWNER", "MEMBER", "COLLABORATOR"]'\n` +
@@ -22123,6 +22138,8 @@ describe('growth-audit hardening: park wake set and verdict pipeline (round 3)',
               `    api)\n` +
               `      if [[ "$*" == *'update-branch'* ]]; then\n` +
               `        printf '%s\\n' "api \${*:2}" >> "\${WORKDIR}/gh-calls"\n` +
+              `      elif [[ "\${FETCH_FAIL}" == 'true' ]] && [[ "$*" == *'/pulls/1/reviews'* || "$*" == *'/pulls/1/comments'* || "$*" == *'/issues/1/comments'* ]]; then\n` +
+              `        return 1\n` +
               `      elif [[ "$*" == *'/pulls/1/reviews'* ]]; then\n` +
               `        cat "\${WORKDIR}/rv.fixture.json"\n` +
               `      elif [[ "$*" == *'/pulls/1/comments'* ]]; then\n` +
@@ -22192,6 +22209,27 @@ describe('growth-audit hardening: park wake set and verdict pipeline (round 3)',
       const clean = runRetry({ rv: [] });
       expect(clean.calls).toContain('update-branch');
       expect(clean.stale).toBe(true);
+      // R3-8's witness, executed under the step shell's production
+      // semantics: a transient gh failure of the guard's three fresh
+      // fetches must NOT abort the report step under -eo pipefail — the
+      // errexit-exempt fetches let the block run to completion (the report
+      // comment and eval marker still post), and the merge gate fails
+      // CLOSED on the unreadable park state: no update-branch.
+      const fetchFailed = runRetry({
+        rv: [],
+        fetchFail: true,
+        shellOpts: 'set -eo pipefail',
+      });
+      expect(fetchFailed.out).toContain('STALE_BASE_RETRY=false');
+      expect(fetchFailed.calls).not.toContain('update-branch');
+      expect(fetchFailed.out).toContain('fail closed');
+      // Comparator under the same shell: healthy fetches still merge.
+      const healthyPipefail = runRetry({
+        rv: [],
+        shellOpts: 'set -eo pipefail',
+      });
+      expect(healthyPipefail.calls).toContain('update-branch');
+      expect(healthyPipefail.stale).toBe(true);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
