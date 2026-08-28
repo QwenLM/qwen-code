@@ -942,7 +942,7 @@ describe('<MainContent />', () => {
         verify: () =>
           expect(lastDisplayPropsFor(1)).toMatchObject({
             availableTerminalHeight: 100,
-            availableTerminalHeightGemini: 65536,
+            availableTerminalHeightLlm: 65536,
           }),
       },
       {
