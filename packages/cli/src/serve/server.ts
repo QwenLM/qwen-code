@@ -72,6 +72,7 @@ import {
   createSpawnChannelFactory,
   MAX_SESSION_RESTORE_TIMEOUT_MS,
   resolveSessionRestoreTimeoutMs,
+  SessionNotFoundError,
   type AcpSessionBridge,
 } from './acp-session-bridge.js';
 import {
@@ -124,7 +125,12 @@ import {
 } from './routes/workspace-trust.js';
 import { registerPermissionRoutes } from './routes/permission.js';
 import { registerSessionRoutes } from './routes/session.js';
-import { createRequestedSessionIdAdmission } from './session-id-admission.js';
+import { registerSessionPrBackfillRoutes } from './routes/session-pr-backfill.js';
+import { registerStandaloneSessionRoutes } from './routes/standalone-sessions.js';
+import {
+  createRequestedSessionIdAdmission,
+  requestedSessionIdPersistenceExists,
+} from './session-id-admission.js';
 import {
   registerScheduledTasksRoutes,
   registerWorkspaceQualifiedScheduledTasksRoutes,
@@ -302,6 +308,7 @@ import {
 } from './conversations/conversation-runtime-errors.js';
 import { ConversationRuntimeManager } from './conversations/conversation-runtime-manager.js';
 import { StandaloneSessionService } from './conversations/standalone-session-service.js';
+import { StandaloneDeletionJournal } from './conversations/standalone-deletion-journal.js';
 import {
   createConversationRuntimeOwnership,
   type ConversationRuntimeOwnership,
@@ -929,6 +936,7 @@ export function createServeApp(
     }
     return () => guard.assertOpen();
   };
+  let standaloneSessionsAvailable = false;
   const { languageCodes, currentServeFeatures, invalidateServeFeaturesCache } =
     createServeFeatures({
       opts,
@@ -1004,6 +1012,7 @@ export function createServeApp(
       realtimeVoiceEnabled: () =>
         (app.locals as { liveVoiceEnabled?: boolean }).liveVoiceEnabled ===
         true,
+      standaloneSessionsAvailable: () => standaloneSessionsAvailable,
       acpHttpEnabled: acpHttpEnabledAtBoot,
       workspaceRuntimeRemovalAvailable:
         deps.workspaceRuntimeRemoval !== undefined,
@@ -1262,11 +1271,12 @@ export function createServeApp(
     );
   (app.locals as { workspaceRegistry?: WorkspaceRegistry }).workspaceRegistry =
     workspaceRegistry;
+  const getSessionBridges =
+    deps.getSessionBridges ??
+    (() => workspaceRegistry.listManaged().map((runtime) => runtime.bridge));
   const requestedSessionIdAdmission = createRequestedSessionIdAdmission({
     archiveCoordinator,
-    getBridges:
-      deps.getSessionBridges ??
-      (() => workspaceRegistry.listManaged().map((runtime) => runtime.bridge)),
+    getBridges: getSessionBridges,
     getPersistenceTargets: () =>
       workspaceRegistry.listManaged().map((runtime) => ({
         workspaceCwd: runtime.workspaceCwd,
@@ -1576,6 +1586,11 @@ export function createServeApp(
     conversationRuntimeActivity &&
     deps.liveConversationWorkspace
   ) {
+    const deletionJournal = new StandaloneDeletionJournal(
+      path.resolve(
+        deps.liveDiscoveryStableBaseDir ?? getStableLiveDiscoveryBaseDir(),
+      ),
+    );
     standaloneSessionService = new StandaloneSessionService({
       ensureRuntime: ensureConversationRuntimeWithLifecycle,
       assertRuntimeCurrent: (runtime) => {
@@ -1589,13 +1604,38 @@ export function createServeApp(
       runRuntimeActivity: (_runtime, operation) =>
         conversationRuntimeActivity.run(operation),
       workspace: deps.liveConversationWorkspace,
+      deletionJournal,
       lifecycle: archiveCoordinator,
       requestedSessionIdAdmission,
+      hasForeignSessionOwner: async (runtime, sessionId) => {
+        for (const candidate of new Set(getSessionBridges())) {
+          if (candidate === runtime.bridge) continue;
+          try {
+            candidate.getSessionSummary(sessionId);
+            return true;
+          } catch (error) {
+            if (error instanceof SessionNotFoundError) continue;
+            throw error;
+          }
+        }
+        for (const candidate of workspaceRegistry.listManaged()) {
+          if (candidate === runtime) continue;
+          if (
+            await requestedSessionIdPersistenceExists(
+              createWorkspaceRuntimeSessionService(candidate),
+              sessionId,
+            )
+          ) {
+            return true;
+          }
+        }
+        return false;
+      },
       invalidateSessionListCache: (runtime) =>
         invalidateWorkspaceSessionListCache({
           runtimeBaseDir: runtime.sessionRuntimeBaseDir,
           workspaceCwd: runtime.workspaceCwd,
-          archiveStates: ['active'],
+          archiveStates: ['active', 'archived'],
         }),
     });
     (
@@ -2180,6 +2220,12 @@ export function createServeApp(
     sendBridgeError,
     mutate,
   });
+  registerSessionPrBackfillRoutes(app, {
+    workspaceRegistry,
+    sendBridgeError,
+    mutate,
+    archiveCoordinator,
+  });
 
   // Workspace memory + agents CRUD routes.
   mountWorkspaceMemoryRoutes(app, {
@@ -2588,6 +2634,15 @@ export function createServeApp(
         }
       : {}),
   });
+
+  if (standaloneSessionService) {
+    registerStandaloneSessionRoutes(app, {
+      service: standaloneSessionService,
+      mutate,
+      sendBridgeError,
+    });
+    standaloneSessionsAvailable = true;
+  }
 
   registerWorkspaceMcpControlRoutes(app, {
     boundWorkspace: primaryBoundWorkspace,

@@ -1,8 +1,5 @@
 # AGENTS.md
 
-This file provides guidance to Qwen Code when working with code in this
-repository.
-
 ## Working Principles
 
 ### Simplicity First
@@ -18,8 +15,6 @@ repository.
 
 Ask yourself: "Would a senior engineer say this is overcomplicated?" If yes,
 simplify.
-
-_Adapted from Andrej Karpathy's [CLAUDE.md](https://github.com/multica-ai/andrej-karpathy-skills/blob/main/CLAUDE.md)._
 
 ### Core Infrastructure Is Maintainer-Only (triage gate, two-tier rule)
 
@@ -63,10 +58,6 @@ npm run build:all  # Build everything including sandbox container
 npm run bundle     # Bundle dist/ into a single dist/cli.js via esbuild
                    # (requires build first)
 ```
-
-`npm run build` compiles TS into each package's `dist/`. `npm run bundle`
-takes that output and produces a single `dist/cli.js` via esbuild. Bundle
-requires build to have run first.
 
 ### Development
 
