@@ -3,10 +3,21 @@
 name: 'Qwen Code CI'
 
 on:
-  # No `push` trigger: every job here is gated to pull_request / merge_group, so
-  # a push to `main` ran nothing (CodeQL was the last push job and moved to its
-  # own scheduled codeql.yml). The merge queue validates the merged tree before
-  # it lands, so there is nothing left to run on the post-merge push.
+  # The reason the `push` trigger was removed no longer holds. It said the
+  # merge queue validates the merged tree before it lands, so a post-merge run
+  # would be redundant — but no merge queue is enabled here (no queue run since
+  # 2026-07-02), so nothing validated that tree on either side of the merge.
+  # `main` was left with no gate before a merge and no check faster than the
+  # ~40-minute E2E after one, which is how a regression can sit in `main` for
+  # hours. Only `test` accepts this trigger (see its `if`); every other job
+  # still excludes push, so a post-merge run is exactly Classify PR + Test.
+  # The no-AK integration gate inside `test` stays gated to pull_request /
+  # merge_group, so this lane is the lint, static-analysis and unit-test
+  # subset — a fast signal, not a second full gate. Remove this trigger again
+  # once the merge queue is actually enabled and validates the merged tree.
+  push:
+    branches:
+      - 'main'
   pull_request:
     branches:
       - 'main'
@@ -72,7 +83,7 @@ env:
 jobs:
   classify_pr:
     name: 'Classify PR'
-    if: "${{ github.event_name == 'pull_request' || github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch' }}"
+    if: "${{ github.event_name == 'pull_request' || github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch' || github.event_name == 'push' }}"
     # Gate runs on ECS for in-repo PRs, fork PRs whose author has write access
     # (OWNER/MEMBER/COLLABORATOR association — a write-access author is as
     # trusted as an in-repo branch), and the merge queue (base-repo context),
@@ -127,9 +138,19 @@ jobs:
           echo "skip_ci=${skip_ci}"
 
       # In-repo PRs, fork PRs whose author has write access
-      # (OWNER/MEMBER/COLLABORATOR association), and the merge queue
-      # (base-repo context) run the Linux jobs on ECS; other fork PRs stay
-      # hosted. Disable via repo var MAINTAINER_ECS_RUNNER_DISABLED=true.
+      # (OWNER/MEMBER/COLLABORATOR association), the merge queue (base-repo
+      # context) and a push to `main` run the Linux jobs on ECS; other fork
+      # PRs stay hosted. Disable via repo var
+      # MAINTAINER_ECS_RUNNER_DISABLED=true.
+      #
+      # push is deliberately absent from the `runs-on` expression above, so on
+      # a post-merge run classify_pr itself stays hosted while the Test job it
+      # feeds goes to ECS. That asymmetry is intentional: the expression is the
+      # canonical association-routing text mirrored by sdk-java.yml and
+      # serve-ab.yml, a push carries no author association to route on, and
+      # classify_pr is a seconds-long job whose pool costs nothing — while Test
+      # is the ten-plus-minute job that should not spend a scarce hosted Linux
+      # runner on every merge.
       - name: 'Select Linux runner'
         id: 'pick_runner'
         env:
@@ -148,7 +169,7 @@ jobs:
             if [[ "${ECS_DISABLED}" != "true" && "${DISPATCH_LINUX_RUNNER}" == "self-hosted" ]]; then
               ubuntu_runner='["self-hosted", "linux", "x64", "ecs-qwen"]'
             fi
-          elif [[ "${ECS_DISABLED}" != "true" && ( "${SAME_REPO}" == "true" || "${trusted_author}" == "true" || "${EVENT_NAME}" == "merge_group" ) ]]; then
+          elif [[ "${ECS_DISABLED}" != "true" && ( "${SAME_REPO}" == "true" || "${trusted_author}" == "true" || "${EVENT_NAME}" == "merge_group" || "${EVENT_NAME}" == "push" ) ]]; then
             ubuntu_runner='["self-hosted", "linux", "x64", "ecs-qwen"]'
           fi
           echo "ubuntu_runner=${ubuntu_runner}" >> "${GITHUB_OUTPUT}"
@@ -162,9 +183,14 @@ jobs:
     needs: 'classify_pr'
     # Stay running on release-sync PRs so the required Test contexts still
     # report; the per-step skip_ci guards below make them no-op (pass) there.
-    # Not on push: the merge queue already tested the merged tree, so a
-    # post-merge re-run on `main` would be redundant.
-    if: "${{ !cancelled() && github.event_name != 'push' && github.event_name != 'schedule' }}"
+    # Accepts push on `main`: this is the only post-merge check faster than the
+    # ~40-minute E2E, and with no merge queue enabled nothing validates the
+    # merged tree before it lands either. The expensive and PR-shaped steps
+    # stay off it on their own gates — the no-AK integration gate, the
+    # checkout-head verifier and the test reporter are each already restricted
+    # to pull_request / merge_group — so a push run is lint, static analysis
+    # and unit tests.
+    if: "${{ !cancelled() && github.event_name != 'schedule' }}"
     runs-on: '${{ fromJSON(needs.classify_pr.outputs.ubuntu_runner || ''["ubuntu-latest"]'') }}'
     timeout-minutes: 60
     outputs:

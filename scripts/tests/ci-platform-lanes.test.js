@@ -41,9 +41,9 @@ const condOf = (job) => String(ci.jobs[job].if ?? '');
 
 describe('platform lanes — triggers', () => {
   it('gives the workflow a scheduled trigger', () => {
-    // Without it the lanes have no path to `main` at all: `ci.yml` has no
-    // push trigger by design, so a merge-queue-only gate on a repository with
-    // no merge queue is an off switch.
+    // Without it the lanes have no path to `main` at all: `ci.yml`'s push
+    // trigger is accepted by the `test` job alone, so a merge-queue-only gate
+    // on a repository with no merge queue is an off switch for these two.
     expect(triggers.schedule).toBeDefined();
     expect(Array.isArray(triggers.schedule)).toBe(true);
     expect(triggers.schedule[0].cron).toMatch(/^\S+ \S+ \S+ \S+ \S+$/);
