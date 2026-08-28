@@ -184,53 +184,53 @@ export class WeixinChannel extends ChannelBase {
     image?: CdnRef,
     file?: FileCdnRef,
   ): Promise<void> {
-    // Download image from CDN
-    if (image) {
-      try {
-        const imageData = await downloadAndDecrypt(
-          image.encryptQueryParam,
-          image.aesKey,
-        );
-        envelope.imageBase64 = imageData.toString('base64');
-        envelope.imageMimeType = detectImageMime(imageData);
-      } catch (err) {
-        process.stderr.write(
-          `[Weixin:${this.name}] Failed to download image: ${err instanceof Error ? err.message : err}\n`,
-        );
+    await this.prepareThenHandleInbound(envelope, async () => {
+      // Download image from CDN
+      if (image) {
+        try {
+          const imageData = await downloadAndDecrypt(
+            image.encryptQueryParam,
+            image.aesKey,
+          );
+          envelope.imageBase64 = imageData.toString('base64');
+          envelope.imageMimeType = detectImageMime(imageData);
+        } catch (err) {
+          process.stderr.write(
+            `[Weixin:${this.name}] Failed to download image: ${err instanceof Error ? err.message : err}\n`,
+          );
+        }
       }
-    }
 
-    // Download file from CDN, save to temp dir
-    if (file) {
-      try {
-        const fileData = await downloadAndDecrypt(
-          file.encryptQueryParam,
-          file.aesKey,
-        );
-        const dir = join(tmpdir(), 'channel-files', randomUUID());
-        mkdirSync(dir, { recursive: true });
-        const filePath = join(
-          dir,
-          basename(file.fileName) || `file_${Date.now()}`,
-        );
-        writeFileSync(filePath, fileData);
-        envelope.attachments = [
-          {
-            type: 'file',
-            filePath,
-            mimeType: 'application/octet-stream',
-            fileName: file.fileName,
-          },
-        ];
-      } catch (err) {
-        process.stderr.write(
-          `[Weixin:${this.name}] Failed to download file: ${err instanceof Error ? err.message : err}\n`,
-        );
-        envelope.text = `(User sent a file "${file.fileName}" but download failed)`;
+      // Download file from CDN, save to temp dir
+      if (file) {
+        try {
+          const fileData = await downloadAndDecrypt(
+            file.encryptQueryParam,
+            file.aesKey,
+          );
+          const dir = join(tmpdir(), 'channel-files', randomUUID());
+          mkdirSync(dir, { recursive: true });
+          const filePath = join(
+            dir,
+            basename(file.fileName) || `file_${Date.now()}`,
+          );
+          writeFileSync(filePath, fileData);
+          envelope.attachments = [
+            {
+              type: 'file',
+              filePath,
+              mimeType: 'application/octet-stream',
+              fileName: file.fileName,
+            },
+          ];
+        } catch (err) {
+          process.stderr.write(
+            `[Weixin:${this.name}] Failed to download file: ${err instanceof Error ? err.message : err}\n`,
+          );
+          envelope.text = `(User sent a file "${file.fileName}" but download failed)`;
+        }
       }
-    }
-
-    await super.handleInbound(envelope);
+    });
   }
 
   async sendMessage(chatId: string, text: string): Promise<void> {

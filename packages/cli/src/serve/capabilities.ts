@@ -123,6 +123,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   session_metadata: { since: 'v1' },
   session_organization: { since: 'v1' },
   session_export: { since: 'v1' },
+  standalone_sessions_v1: { since: 'v1' },
   session_transcript: { since: 'v1' },
   session_transcript_pagination: { since: 'v1' },
   // Daemon supports the MCP client guardrail surface: an in-process
@@ -189,8 +190,8 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // unregistered — the toggle takes effect on the next ACP child spawn
   // (`tools.disabled` is consulted at `Config` construction time).
   workspace_tool_toggle: { since: 'v1' },
-  workspace_skill_toggle: { since: 'v1' },
-  workspace_skill_batch_toggle: { since: 'v1' },
+  workspace_skill_settings_toggle: { since: 'v1' },
+  workspace_skill_settings_batch_toggle: { since: 'v1' },
   extension_batch_activation_v2: { since: 'v1' },
   workspace_skill_manage: { since: 'v1' },
   workspace_settings: { since: 'v1' },
@@ -208,13 +209,12 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // Workspace trust policy changes rebuild the affected runtime generation
   // without restarting the daemon. V2 trust status exposes convergence.
   workspace_trust_hot_reload: { since: 'v1' },
-  // `POST /workspace/init` scaffolds an empty
-  // `QWEN.md` (or whatever `getCurrentGeminiMdFilename()` returns) at
-  // the bound workspace root. Body: `{force?: boolean}`. Default
+  // `POST /workspace/init` scaffolds an empty `QWEN.md` (or the
+  // workspace `context.fileName` value injected as `contextFilename`)
+  // at the bound workspace root. Body: `{force?: boolean}`. Default
   // refuses with 409 when the file already exists; `force: true`
-  // overwrites. Mechanical only — does NOT call the LLM. To AI-fill
-  // the file, the caller should follow up with
-  // `POST /session/:id/prompt`.
+  // overwrites. Mechanical only — does NOT call the LLM. To AI-fill the
+  // file, the caller should follow up with `POST /session/:id/prompt`.
   workspace_init: { since: 'v1' },
   // `POST /workspace/setup-github` installs the fixed
   // qwen-code-action workflow set into the bound workspace after
@@ -448,6 +448,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // gate. `/live/status` remains the dynamic readiness surface for the Host,
   // permissions, self-checks, and provider reachability.
   realtime_voice: { since: 'v1' },
+  web_terminal: { since: 'v1' },
 } as const satisfies Record<string, ServeCapabilityDescriptor>;
 
 export type ServeFeature = keyof typeof SERVE_CAPABILITY_REGISTRY;
@@ -508,6 +509,7 @@ export interface AdvertiseFeatureToggles {
   acpHttpEnabled?: boolean;
   realtimeVoiceEnabled?: boolean;
   workspaceTrustHotReloadAvailable?: boolean;
+  standaloneSessionsAvailable?: boolean;
 }
 
 /**
@@ -547,6 +549,10 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
   (toggles: AdvertiseFeatureToggles) => boolean
 > = new Map<ServeFeature, (toggles: AdvertiseFeatureToggles) => boolean>([
   ['require_auth', (toggles) => toggles.requireAuth === true],
+  [
+    'standalone_sessions_v1',
+    (toggles) => toggles.standaloneSessionsAvailable === true,
+  ],
   ['mcp_workspace_pool', (toggles) => toggles.mcpPoolActive === true],
   ['mcp_pool_restart', (toggles) => toggles.mcpPoolActive === true],
   [
@@ -678,6 +684,7 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
     (toggles) =>
       toggles.acpHttpEnabled === true && toggles.realtimeVoiceEnabled === true,
   ],
+  ['web_terminal', (toggles) => toggles.acpHttpEnabled === true],
 ]);
 
 export const SERVE_FEATURES = Object.freeze(

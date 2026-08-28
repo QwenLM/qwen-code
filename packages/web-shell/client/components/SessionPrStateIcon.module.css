@@ -1,0 +1,14 @@
+/* GitHub-style PR state: open green, merged purple, closed red. The class is
+   doubled because consumers like `.sessionDetailsRow svg` set a default muted
+   icon color at specificity (0,1,1); these rules must outrank it. */
+.sessionPrStateOpen.sessionPrStateOpen {
+  color: var(--success-color, #22c55e);
+}
+
+.sessionPrStateMerged.sessionPrStateMerged {
+  color: var(--color-accent-fg, #8b5cf6);
+}
+
+.sessionPrStateClosed.sessionPrStateClosed {
+  color: var(--destructive, #ef4444);
+}
