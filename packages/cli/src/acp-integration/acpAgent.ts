@@ -96,6 +96,7 @@ import {
   startEventLoopLagMonitor,
   refreshMemoryInstruction,
   REASONING_EFFORT_TIERS,
+  isQwenFamilyWireModel,
   addDaemonRequestAttribute,
   extractDaemonTraceContext,
   withDaemonSpan,
@@ -13011,6 +13012,13 @@ class QwenAgent implements Agent {
       currentValue: currentModelId,
       options: configModelOptions,
     };
+
+    if (
+      isQwenFamilyWireModel(rawCurrentModelId) &&
+      getModelConfiguration(rawCurrentModelId)?.reasoning?.thinking !== true
+    ) {
+      return [modeConfigOption, modelConfigOption];
+    }
 
     const generation = config.getContentGeneratorConfig();
     const modelReasoning = this.getModelReasoningConfiguration(

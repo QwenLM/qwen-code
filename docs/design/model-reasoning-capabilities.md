@@ -63,6 +63,9 @@ whose selected value is not sent correctly.
 Qwen aliases, dated variants, coder models, and models with a preset default
 that differs from the model default are also deferred. They require separate
 capability or resolved-configuration semantics rather than broadened matching.
+Deferred Qwen-family models expose no ACP reasoning option until their exact
+model id is registered. The generic ACP reasoning option remains available for
+non-Qwen models so existing provider-specific behavior is preserved.
 
 ## Compatibility
 

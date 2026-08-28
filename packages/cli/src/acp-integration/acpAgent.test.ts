@@ -319,6 +319,9 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
     return config.getReasoningEffort() === effort;
   },
   REASONING_EFFORT_TIERS: ['low', 'medium', 'high', 'xhigh', 'max'],
+  isQwenFamilyWireModel: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).isQwenFamilyWireModel,
   ApprovalMode: { YOLO: 'yolo' },
   isGatedMcpScope: (scope: unknown) =>
     scope === 'project' || scope === 'workspace',
@@ -8072,6 +8075,31 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         'Reasoning effort cannot be applied while thinking is disabled',
       );
       expect(innerConfig.setReasoningEffort).toHaveBeenCalledTimes(4);
+    } finally {
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
+  });
+
+  it('hides the ACP reasoning selector for unregistered Qwen models', async () => {
+    const sessionId = 'unregistered-qwen-reasoning-session';
+    const innerConfig = await setupSessionMocks(sessionId);
+    innerConfig.getModel = vi.fn().mockReturnValue('qwen3.7-plus-2026-05-26');
+
+    const { agent, agentPromise } = await bootAcpAgent();
+    try {
+      const session = (await agent.newSession({
+        cwd: '/tmp',
+        mcpServers: [],
+      })) as {
+        configOptions: Array<{ id: string }>;
+      };
+
+      expect(
+        session.configOptions.some(
+          (option) => option.id === 'reasoning_effort',
+        ),
+      ).toBe(false);
     } finally {
       mockConnectionState.resolve();
       await agentPromise;
