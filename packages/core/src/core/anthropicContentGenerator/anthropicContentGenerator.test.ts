@@ -957,7 +957,7 @@ describe('AnthropicContentGenerator', () => {
     });
 
     it('splits the system prompt at the Config-recorded static prefix (4-breakpoint layout)', async () => {
-      // End-to-end through the generator: `GeminiClient` records the
+      // End-to-end through the generator: `LlmClient` records the
       // gitStatus-free base on Config, the generator reads it per request,
       // and the converter splits the system prompt there — static prefix
       // carries scope:'global' (cross-session reuse), volatile suffix stays
@@ -1409,7 +1409,7 @@ describe('AnthropicContentGenerator', () => {
       const convertResponseSpy = vi
         .spyOn(
           AnthropicContentConverter.prototype,
-          'convertAnthropicResponseToGemini',
+          'convertAnthropicResponseToLlm',
         )
         .mockReturnValue(
           (() => {
