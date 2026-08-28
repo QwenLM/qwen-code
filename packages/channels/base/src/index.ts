@@ -38,7 +38,7 @@ export type {
 } from './DaemonChannelBridge.js';
 export { BlockStreamer } from './BlockStreamer.js';
 export type { BlockStreamerOptions } from './BlockStreamer.js';
-export { ChannelBase } from './ChannelBase.js';
+export { ChannelBase, CLEAR_CANCEL_TIMEOUT_MS } from './ChannelBase.js';
 export {
   CHANNEL_PROACTIVE_DELIVERY_ERROR_CODE,
   ChannelProactiveDeliveryError,
