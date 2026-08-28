@@ -1056,11 +1056,17 @@ export class HookRunner {
     shellType: ShellType,
   ): string {
     debugLogger.debug(`Expanding hook command: ${command} (cwd: ${input.cwd})`);
+    // Bash already expands QWEN/GEMINI/CLAUDE_PROJECT_DIR from the child
+    // environment. Leave its command text untouched so placeholders in
+    // comments, quoted strings, and shell assignments retain native semantics.
+    if (shellType === 'bash') {
+      return command;
+    }
     const escapedCwd = escapeShellArg(input.cwd, shellType);
-    return command
-      .replace(/\$QWEN_PROJECT_DIR/g, () => escapedCwd)
-      .replace(/\$GEMINI_PROJECT_DIR/g, () => escapedCwd)
-      .replace(/\$CLAUDE_PROJECT_DIR/g, () => escapedCwd); // For compatibility
+    return command.replace(
+      /\$(?:QWEN|GEMINI|CLAUDE)_PROJECT_DIR(?![0-9A-Za-z_])/g,
+      () => escapedCwd,
+    );
   }
 
   /**

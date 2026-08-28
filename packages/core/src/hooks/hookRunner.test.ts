@@ -932,6 +932,7 @@ describe('HookRunner', () => {
         type: HookType.Command,
         command: 'echo $QWEN_PROJECT_DIR',
         source: HooksConfigSource.Project,
+        shell: 'powershell',
       };
       const input = createMockInput({ cwd: '/test/project' });
 
@@ -941,6 +942,54 @@ describe('HookRunner', () => {
       const command = spawnCall[1][spawnCall[1].length - 1];
       expect(command).toContain('/test/project');
       expect(command).not.toContain('$QWEN_PROJECT_DIR');
+    });
+
+    it('leaves bash placeholders to the child environment', async () => {
+      const mockProcess = createMockProcess(0, 'result');
+      mockSpawn.mockImplementation(() => mockProcess);
+
+      const hookConfig: HookConfig = {
+        type: HookType.Command,
+        command: '# note $QWEN_PROJECT_DIR\necho $QWEN_PROJECT_DIRS',
+        source: HooksConfigSource.Project,
+        shell: 'bash',
+      };
+
+      await hookRunner.executeHook(
+        hookConfig,
+        HookEventName.PreToolUse,
+        createMockInput({ cwd: '/test/project' }),
+      );
+
+      const spawnCall = mockSpawn.mock.calls[0];
+      expect(spawnCall[1][spawnCall[1].length - 1]).toBe(
+        '# note $QWEN_PROJECT_DIR\necho $QWEN_PROJECT_DIRS',
+      );
+    });
+
+    it('expands all supported placeholders without rescanning the path', async () => {
+      const mockProcess = createMockProcess(0, 'result');
+      mockSpawn.mockImplementation(() => mockProcess);
+
+      const hookConfig: HookConfig = {
+        type: HookType.Command,
+        command:
+          'echo $QWEN_PROJECT_DIR $GEMINI_PROJECT_DIR $CLAUDE_PROJECT_DIR $QWEN_PROJECT_DIRS',
+        source: HooksConfigSource.Project,
+        shell: 'powershell',
+      };
+
+      await hookRunner.executeHook(
+        hookConfig,
+        HookEventName.PreToolUse,
+        createMockInput({ cwd: 'C:/test/$CLAUDE_PROJECT_DIR' }),
+      );
+
+      const spawnCall = mockSpawn.mock.calls[0];
+      const command = spawnCall[1][spawnCall[1].length - 1];
+      expect(command).toContain('C:/test/$CLAUDE_PROJECT_DIR');
+      expect(command.match(/C:\/test\/\$CLAUDE_PROJECT_DIR/g)).toHaveLength(3);
+      expect(command).toContain('$QWEN_PROJECT_DIRS');
     });
 
     it('should expand GEMINI_PROJECT_DIR placeholder', async () => {
