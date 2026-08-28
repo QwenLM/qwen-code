@@ -89,9 +89,6 @@ function makeEnv() {
   const config: any = {
     getSessionId: () => sessionId,
     getResumedSessionData: () => resumedData,
-    // initialize() restores loaded skills through the tool registry on the
-    // resume paths; this test's partial mock only needs a no-op registry.
-    getToolRegistry: () => ({ getTool: () => undefined }),
     swap(id: string, data?: ResumedSessionData) {
       sessionId = id;
       resumedData = data;

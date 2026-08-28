@@ -115,9 +115,12 @@ const rootDir = join(__dirname, '..');
 // main to 199KB merges within this headroom, so no further bump is needed.
 // Bumped from 206KB to 208KB for transcript block change summaries used to
 // avoid complete Web Shell projection on every streamed text update.
-// Bumped from 208KB to 209KB for artifact provider setup, publication status,
-// and cancellable publish calls on both daemon client classes.
-const MAX_DAEMON_BROWSER_BUNDLE_BYTES = 209 * 1024;
+// Bumped from 208KB to 215KB for the complete standalone-session lifecycle,
+// response validation, and outcome-unknown recovery surface.
+// Artifact provider setup, publication status, and cancellable publish calls
+// on both daemon client classes merge within this headroom (they separately
+// bumped 208KB to 209KB), so no further bump is needed.
+const MAX_DAEMON_BROWSER_BUNDLE_BYTES = 215 * 1024;
 // The opt-in `daemon/transports` browser bundle legitimately ships the concrete
 // ACP transports (AcpHttpTransport/AcpWsTransport/AutoReconnect + negotiate), so
 // it's larger than the default barrel — but still budgeted so a future PR can't
