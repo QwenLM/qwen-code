@@ -108,7 +108,7 @@ Baseline tags are not present in the `Map` and are advertised unconditionally. T
 
 Foundation: `health`, `daemon_status`, `capabilities`.
 
-Sessions: `session_create`, `session_id_override`, `session_scope_override`, `session_load`, `session_resume`, `unstable_session_resume`, `session_list`, `session_info`, `session_prompt`, `session_mid_turn_message_mutation`, `session_cancel`, `session_events`, `session_set_model`, `session_close`, `session_metadata`, `session_archive`, `session_export`, `session_transcript`, `session_context`, `session_context_usage`, `session_supported_commands`, `session_tasks`, `session_monitor_tool_correlation`, `session_stats`, `session_lsp`, `session_status`, `session_approval_mode_control`, `session_recap`, `session_btw`, **`session_shell_command`** (conditional), `session_language`, `session_rewind`, `session_hooks`, `session_branch`.
+Sessions: `session_create`, `session_id_override`, `session_scope_override`, `session_load`, `session_resume`, `unstable_session_resume`, `session_list`, `session_info`, `session_prompt`, `session_mid_turn_message_mutation`, `session_cancel`, `session_events`, `session_set_model`, `session_close`, `session_metadata`, `session_archive`, `session_storage_conflict_repair`, `session_export`, `session_transcript`, `session_context`, `session_context_usage`, `session_supported_commands`, `session_tasks`, `session_monitor_tool_correlation`, `session_stats`, `session_lsp`, `session_status`, `session_approval_mode_control`, `session_recap`, `session_btw`, **`session_shell_command`** (conditional), `session_language`, `session_rewind`, `session_hooks`, `session_branch`.
 
 Streaming: `slow_client_warning`, `typed_event_schema`.
 
@@ -119,6 +119,8 @@ Permissions: `session_permission_vote`, `permission_vote`, **`permission_mediati
 Workspace read-only snapshots: `workspace_mcp`, `workspace_skills`, `workspace_providers`, `workspace_acp_status`, `workspace_env`, `workspace_preflight`, `workspace_hooks`, `workspace_extensions`.
 
 Extension management: `extension_management_v2` adds the global `/extensions/*` catalog/mutation/operation contract and the workspace activation projection. It is separate from the published `workspace_extensions` compatibility surface and from `workspace_qualified_rest_core`.
+
+Local Extension installation: `extension_local_path_install` allows an absolute path on the daemon host in the existing `source` field of both Extension install routes. It is separate from `extension_management_v2` because the primary-workspace compatibility route also supports it, and clients must not send local paths to older daemons.
 
 V2 Extension batch activation: `extension_batch_activation_v2` adds queued global default-activation and selected-workspace override batches to `extension_management_v2`. Clients must pre-flight it independently because older V2 daemons expose only singular activation routes.
 

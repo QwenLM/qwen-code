@@ -697,8 +697,10 @@ describe('runNonInteractive', () => {
       mockGeminiClient.sendMessageStream.mock.calls[0]!;
     expect(parts[0]?.text).toContain('Continue working on the active Goal.');
     expect(parts[0]?.text).toContain(
-      'Runtime continuation context: existing goal',
+      `<goal_runtime_data>\n{"goalId":"${options.goalPermit.goalId}","revision":${options.goalPermit.revision},"objective":"existing goal"}\n</goal_runtime_data>`,
     );
+    expect(parts[0]?.text).toContain('contains no new real user input');
+    expect(parts[0]?.text).toContain('not evidence that the user supplied it');
     expect(options).toMatchObject({
       type: SendMessageType.Goal,
       goalOrigin: 'runtime',
@@ -742,6 +744,187 @@ describe('runNonInteractive', () => {
     const [parts] = mockGeminiClient.sendMessageStream.mock.calls[0]!;
     expect(parts[0]?.text).toContain(
       'Verifier feedback: Need independent evidence',
+    );
+  });
+
+  it('carries the objective-updated notice into a scheduled Goal continuation', async () => {
+    setupMetricsMock();
+    mockGetCommands.mockReturnValue([goalCommand]);
+    await prepareGoalState('paused');
+    mockFinishedGoalWorker();
+    const deliveredSpy = vi.spyOn(goalRuntime, 'markTurnDelivered');
+    vi.mocked(mockConfig.bindGoalTurnHost).mockImplementation((host) =>
+      goalRuntime.bindHost({
+        startGoalTurn: (input) =>
+          host.startGoalTurn({
+            ...input,
+            objectiveUpdated: true,
+          }),
+        preemptGoalTurn: (reason) => host.preemptGoalTurn(reason),
+      }),
+    );
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      '/goal resume',
+      'goal-runtime-notice',
+    );
+
+    expect(mockGeminiClient.sendMessageStream).toHaveBeenCalledOnce();
+    const [parts, , , options] =
+      mockGeminiClient.sendMessageStream.mock.calls[0]!;
+    expect(parts[0]?.text).toContain(
+      'The Goal objective changed since your last turn',
+    );
+    expect(deliveredSpy).toHaveBeenCalledWith(options.goalTurnKey);
+  });
+
+  it('marks a follow-up continuation delivered when the finished turn schedules it', async () => {
+    // The first segment finishes through the real runtime, which schedules
+    // the next continuation into the headless queue; the promotion site has
+    // to mark that turn delivered before its prompt goes out, or a later
+    // fail-closed settle would roll its announcement back and re-fire the
+    // notice.
+    setupMetricsMock();
+    mockGetCommands.mockReturnValue([goalCommand]);
+    await prepareGoalState('paused');
+    const realFinishTurn = goalRuntime.finishTurn.bind(goalRuntime);
+    const finishTurn = vi
+      .spyOn(goalRuntime, 'finishTurn')
+      .mockImplementationOnce(realFinishTurn)
+      .mockResolvedValue(undefined);
+    mockGeminiClient.sendMessageStream.mockImplementation(() =>
+      createStreamFromEvents([
+        {
+          type: GeminiEventType.Finished,
+          value: {
+            reason: undefined,
+            usageMetadata: { totalTokenCount: 0 },
+          },
+        },
+      ]),
+    );
+    const deliveredSpy = vi.spyOn(goalRuntime, 'markTurnDelivered');
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      '/goal resume',
+      'goal-runtime-promoted',
+    );
+
+    expect(finishTurn).toHaveBeenCalledTimes(2);
+    expect(mockGeminiClient.sendMessageStream).toHaveBeenCalledTimes(2);
+    const sentKeys = mockGeminiClient.sendMessageStream.mock.calls.map(
+      (call) => call[3].goalTurnKey,
+    );
+    expect(sentKeys[1]).not.toBe(sentKeys[0]);
+    expect(deliveredSpy.mock.calls.map((call) => call[0])).toEqual(sentKeys);
+    // The promoted turn was marked before its prompt was sent.
+    expect(deliveredSpy.mock.invocationCallOrder[1]!).toBeLessThan(
+      mockGeminiClient.sendMessageStream.mock.invocationCallOrder[1]!,
+    );
+  });
+
+  it('marks a follow-up continuation delivered after a tool-terminated segment', async () => {
+    // Same promotion, other branch: the first segment ends because a tool
+    // result terminated the turn (an update_goal proposal), and the real
+    // runtime schedules the next continuation from there.
+    setupMetricsMock();
+    mockGetCommands.mockReturnValue([goalCommand]);
+    await prepareGoalState('paused');
+    const realFinishTurn = goalRuntime.finishTurn.bind(goalRuntime);
+    const finishTurn = vi
+      .spyOn(goalRuntime, 'finishTurn')
+      .mockImplementationOnce(realFinishTurn)
+      .mockResolvedValue(undefined);
+    mockCoreExecuteToolCall.mockResolvedValue({
+      callId: 'update-goal-promoted',
+      responseParts: [{ text: 'proposal recorded' }],
+      resultDisplay: 'proposal recorded',
+      error: undefined,
+      errorType: undefined,
+      terminateTurn: true,
+    });
+    const finished = () =>
+      createStreamFromEvents([
+        {
+          type: GeminiEventType.Finished,
+          value: {
+            reason: undefined,
+            usageMetadata: { totalTokenCount: 0 },
+          },
+        },
+      ]);
+    mockGeminiClient.sendMessageStream
+      .mockImplementationOnce(
+        (
+          _parts: Part[],
+          _signal: AbortSignal,
+          _promptId: string,
+          sendOptions: { goalPermit?: GoalTurnPermit },
+        ) =>
+          createStreamFromEvents([
+            {
+              type: GeminiEventType.ToolCallRequest,
+              value: {
+                callId: 'update-goal-promoted',
+                name: 'update_goal',
+                args: {},
+                isClientInitiated: false,
+                prompt_id: 'goal-runtime-promoted-tool',
+                goalContext: sendOptions.goalPermit,
+              },
+            },
+          ]),
+      )
+      .mockImplementation(finished);
+    const deliveredSpy = vi.spyOn(goalRuntime, 'markTurnDelivered');
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      '/goal resume',
+      'goal-runtime-promoted-tool',
+    );
+
+    expect(finishTurn).toHaveBeenCalledTimes(2);
+    expect(mockGeminiClient.sendMessageStream).toHaveBeenCalledTimes(2);
+    const sentKeys = mockGeminiClient.sendMessageStream.mock.calls.map(
+      (call) => call[3].goalTurnKey,
+    );
+    expect(sentKeys[1]).not.toBe(sentKeys[0]);
+    expect(deliveredSpy.mock.calls.map((call) => call[0])).toEqual(sentKeys);
+    expect(deliveredSpy.mock.invocationCallOrder[1]!).toBeLessThan(
+      mockGeminiClient.sendMessageStream.mock.invocationCallOrder[1]!,
+    );
+  });
+
+  it('renders the wind-down hand-off on a budget-spent Goal continuation', async () => {
+    setupMetricsMock();
+    mockGetCommands.mockReturnValue([goalCommand]);
+    await prepareGoalState('paused');
+    mockFinishedGoalWorker();
+    vi.mocked(mockConfig.bindGoalTurnHost).mockImplementation((host) =>
+      goalRuntime.bindHost({
+        startGoalTurn: (input) =>
+          host.startGoalTurn({ ...input, windDown: true }),
+        preemptGoalTurn: (reason) => host.preemptGoalTurn(reason),
+      }),
+    );
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      '/goal resume',
+      'goal-runtime-wind-down',
+    );
+
+    expect(mockGeminiClient.sendMessageStream).toHaveBeenCalledOnce();
+    const [parts] = mockGeminiClient.sendMessageStream.mock.calls[0]!;
+    expect(parts[0]?.text).toContain(
+      'The autonomous token budget for this Goal window is spent.',
     );
   });
 
@@ -2810,6 +2993,154 @@ describe('runNonInteractive', () => {
           .filter((metadata) => metadata.callId !== 'enter-plan')
           .map((metadata) => metadata.executionStatus),
       ).toEqual(['not_started', 'not_started', 'not_started']);
+    });
+
+    it('stamps a Goal turn’s tool results with the permit that asked for them', async () => {
+      // The evidence catalog derives provenance from this stamp; without it a
+      // headless Goal produces no `external_fact` at all, so a completion can
+      // only ever cite the model's own words and the verifier refuses it.
+      setupMetricsMock();
+      const recordToolResult = vi.fn();
+      (
+        mockConfig as Config & {
+          getChatRecordingService: () => {
+            recordToolResult: typeof recordToolResult;
+            finalize: ReturnType<typeof vi.fn>;
+            flush: ReturnType<typeof vi.fn>;
+          };
+        }
+      ).getChatRecordingService = () => ({
+        recordToolResult,
+        finalize: vi.fn(),
+        flush: vi.fn().mockResolvedValue(undefined),
+      });
+      vi.mocked(mockToolRegistry.getTool).mockReturnValue({
+        kind: Kind.Read,
+      } as unknown as ReturnType<typeof mockToolRegistry.getTool>);
+      const permit = { goalId: 'g-1', revision: 2, turnId: 't-1' };
+      mockCoreExecuteToolCall.mockImplementation(
+        async (
+          _config: unknown,
+          request: { callId: string; name: string },
+        ) => ({
+          responseParts: [
+            {
+              functionResponse: {
+                id: request.callId,
+                name: request.name,
+                response:
+                  request.callId === 'shell-failed'
+                    ? { error: 'command failed' }
+                    : { output: 'ok' },
+              },
+            },
+          ],
+          resultDisplay:
+            request.callId === 'shell-failed' ? 'command failed' : 'ok',
+          ...(request.callId === 'shell-failed'
+            ? {
+                error: new Error('command failed'),
+                errorType: ToolErrorType.EXECUTION_FAILED,
+              }
+            : {}),
+        }),
+      );
+      const goalToolCall = (callId: string, name: string) => ({
+        type: GeminiEventType.ToolCallRequest,
+        value: {
+          callId,
+          name,
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'p-goal',
+          goalContext: permit,
+        },
+      });
+      mockGeminiClient.sendMessageStream
+        .mockReturnValueOnce(
+          createStreamFromEvents([
+            goalToolCall('shell-1', ToolNames.READ_FILE),
+            goalToolCall('goal-read', ToolNames.GET_GOAL),
+            goalToolCall('shell-failed', ToolNames.SHELL),
+          ] as unknown as ServerGeminiStreamEvent[]),
+        )
+        .mockReturnValueOnce(createStreamFromEvents(finishTurn));
+
+      await runNonInteractive(mockConfig, 'work the goal', 'p-goal');
+
+      const optionsByCallId = new Map(
+        recordToolResult.mock.calls.map((call) => [call[1]?.callId, call[2]]),
+      );
+      // An ordinary tool becomes citable external evidence...
+      expect(optionsByCallId.get('shell-1')).toEqual({ goalContext: permit });
+      // ...while the Goal's own reads stay out of the catalog.
+      expect(optionsByCallId.get('goal-read')).toEqual({
+        goalContext: permit,
+        provenance: 'goal_runtime',
+      });
+      // A failed command is evidence too -- it is exactly what an
+      // `infeasible` completion cites -- so the stamp must not depend on the
+      // tool succeeding.
+      expect(
+        recordToolResult.mock.calls.find(
+          (call) => call[1]?.callId === 'shell-failed',
+        )?.[1],
+      ).toMatchObject({ status: 'error' });
+      expect(optionsByCallId.get('shell-failed')).toEqual({
+        goalContext: permit,
+      });
+    });
+
+    it('leaves tool results outside a Goal turn unstamped', async () => {
+      setupMetricsMock();
+      const recordToolResult = vi.fn();
+      (
+        mockConfig as Config & {
+          getChatRecordingService: () => {
+            recordToolResult: typeof recordToolResult;
+            finalize: ReturnType<typeof vi.fn>;
+            flush: ReturnType<typeof vi.fn>;
+          };
+        }
+      ).getChatRecordingService = () => ({
+        recordToolResult,
+        finalize: vi.fn(),
+        flush: vi.fn().mockResolvedValue(undefined),
+      });
+      vi.mocked(mockToolRegistry.getTool).mockReturnValue({
+        kind: Kind.Read,
+      } as unknown as ReturnType<typeof mockToolRegistry.getTool>);
+      mockCoreExecuteToolCall.mockImplementation(
+        async (
+          _config: unknown,
+          request: { callId: string; name: string },
+        ) => ({
+          responseParts: [
+            {
+              functionResponse: {
+                id: request.callId,
+                name: request.name,
+                response: { output: 'ok' },
+              },
+            },
+          ],
+          resultDisplay: 'ok',
+        }),
+      );
+      mockGeminiClient.sendMessageStream
+        .mockReturnValueOnce(
+          createStreamFromEvents(
+            toolCallEvents(['plain-1'], ToolNames.READ_FILE, 'p-plain'),
+          ),
+        )
+        .mockReturnValueOnce(createStreamFromEvents(finishTurn));
+
+      await runNonInteractive(mockConfig, 'plain work', 'p-plain');
+
+      expect(recordToolResult).toHaveBeenCalled();
+      for (const call of recordToolResult.mock.calls) {
+        expect(call[2]).toBeUndefined();
+      }
     });
 
     it('runs a batch of concurrency-safe tool calls concurrently', async () => {

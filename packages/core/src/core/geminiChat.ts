@@ -56,6 +56,7 @@ import {
 } from './tokenLimits.js';
 import { hasCycleInSchema } from '../tools/tools.js';
 import { ToolNames, canonicalToolName } from '../tools/tool-names.js';
+import { clearLoadedSkillTracking } from '../tools/skill-utils.js';
 import * as fs from 'node:fs';
 import { PLAN_EXIT_APPROVED_LLM_CONTENT_PREFIXES } from '../tools/exitPlanMode.js';
 import { isManagedMemoryPath } from '../memory/paths.js';
@@ -149,11 +150,15 @@ function hasCandidateOutput(response: GenerateContentResponse): boolean {
 /**
  * True when the chunk carries model output beyond ephemeral reasoning:
  * any candidate part without the `thought` flag (text, functionCall,
- * inlineData, …). Thought parts stream reasoning that is never recorded
- * as the assistant's final response in history, so replaying a request
- * that has produced only thought parts cannot duplicate user-visible
- * output — the distinction the transport stream retry gate relies on
- * (#7832).
+ * inlineData, …). What makes a replay after thinking-only output safe
+ * is NOT that thought parts stay out of history — the successful
+ * attempt's thoughts are recorded there. It is that a failed attempt
+ * that produced only thought parts persists nothing: error-path
+ * persistence requires a delivered functionCall, which the replay
+ * gate excludes. `popPendingPartialAssistantTurn()` before the retry
+ * is defense in depth — it has nothing to pop on this path today, but
+ * keeps the replay safe if that persistence policy ever widens. The
+ * transport stream retry gate relies on this distinction (#7832).
  */
 function hasNonThoughtCandidateParts(
   response: GenerateContentResponse,
@@ -445,13 +450,26 @@ export type StreamEvent =
   | { type: StreamEventType.COMPRESSED; info: ChatCompressionInfo }
   | { type: StreamEventType.MODEL_FALLBACK; info: ModelFallbackInfo };
 
-export interface GeminiChatSendOptions {
+export interface LlmChatSendOptions {
   /** Skip only the configured model fallback chain for this request. */
   disableModelFallbacks?: boolean;
 }
 
+/** @deprecated Use `LlmChatSendOptions`; retained until a future major release. */
+export type GeminiChatSendOptions = LlmChatSendOptions;
+
 interface TryCompressOptions {
-  originalTokenCountOverride?: number;
+  /**
+   * Explicit original token count for this attempt, with its provenance.
+   * Only a provider-reported count (e.g. `actualTokens` parsed from a
+   * context-overflow error) may claim `isEstimated: false`; limit/config/
+   * default fallbacks must carry `isEstimated: true` so UIs mark them
+   * instead of presenting them as API-reported counts.
+   */
+  originalTokenCountOverride?: {
+    count: number;
+    isEstimated: boolean;
+  };
   trigger?: CompactTrigger;
   /**
    * Pending user message about to be sent. Threaded through to the
@@ -1942,7 +1960,8 @@ export class GeminiChat {
    */
   private pendingPartialAssistantTurnIndex: number | null = null;
   private pendingPartialAssistantRecord:
-    Parameters<ChatRecordingService['recordAssistantTurn']>[0] | null = null;
+    | Parameters<ChatRecordingService['recordAssistantTurn']>[0]
+    | null = null;
 
   private readonly imagePayloadStore = new InMemoryImagePayloadStore();
 
@@ -1957,6 +1976,15 @@ export class GeminiChat {
    */
   private userContentPushCount = 0;
   private manualPlanExitNoticesEnabled = false;
+
+  /**
+   * True for forked/speculative chats built by `createForkedChat` on the
+   * parent's Config. They share the parent's ToolRegistry (and the single
+   * SkillTool tracking instance) while rewriting only a copy of a parent
+   * history slice, so their rewrites must not touch loaded-skill tracking —
+   * only the chat owning the authoritative session may.
+   */
+  isForkedChat = false;
 
   /**
    * Reset both partial-push markers in lockstep. Every history-mutation
@@ -2296,19 +2324,37 @@ export class GeminiChat {
     // route so the adoption never re-adopts the active route's retained
     // counts mid-send (#9506).
     this.adoptTokenCountsForRoute(options?.requestRouteKey);
+
+    const originalTokenCountOverride = options?.originalTokenCountOverride;
+    // Provenance follows the count source selected for THIS attempt, not
+    // which inputs merely happen to be present:
+    // - an override is authoritative only when it carries a provider-reported
+    //   count (reactive overflow `actualTokens`); limit/config/default
+    //   fallbacks stay estimated;
+    // - a caller-precomputed effective count (auto-compaction / hard-tier
+    //   rescue) always folds in locally estimated parts (pending user
+    //   message, previous output), so it stays estimated even when the
+    //   stored baseline came from the API;
+    // - otherwise the count is the stored lastPromptTokenCount and inherits
+    //   the provenance tracked for it.
     const originalTokenCountIsEstimated =
-      options?.originalTokenCountOverride === undefined &&
-      this.promptCountIsEstimateDerived();
-    const originalTokenCount = originalTokenCountIsEstimated
-      ? (options?.precomputedEffectiveTokens ??
-        estimateContentTokens(
-          options?.pendingUserMessage
-            ? [...this.getHistoryShallow(true), options.pendingUserMessage]
-            : this.getHistoryShallow(true),
-          resolveSlimmingConfig(this.config.getChatCompression())
-            .imageTokenEstimate,
-        ))
-      : (options?.originalTokenCountOverride ?? this.lastPromptTokenCount);
+      originalTokenCountOverride !== undefined
+        ? originalTokenCountOverride.isEstimated
+        : options?.precomputedEffectiveTokens !== undefined ||
+          this.promptCountIsEstimateDerived();
+    const originalTokenCount =
+      originalTokenCountOverride !== undefined
+        ? originalTokenCountOverride.count
+        : originalTokenCountIsEstimated
+          ? (options?.precomputedEffectiveTokens ??
+            estimateContentTokens(
+              options?.pendingUserMessage
+                ? [...this.getHistoryShallow(true), options.pendingUserMessage]
+                : this.getHistoryShallow(true),
+              resolveSlimmingConfig(this.config.getChatCompression())
+                .imageTokenEstimate,
+            ))
+          : this.lastPromptTokenCount;
     debugLogger.debug(
       `[compaction] token-count provenance: prompt_id=${promptId}, ` +
         `originalTokenCount=${originalTokenCount}, ` +
@@ -2328,6 +2374,11 @@ export class GeminiChat {
       customInstructions: options?.customInstructions,
       signal,
     });
+    // The service owns the compression outcome; GeminiChat owns the input
+    // provenance. Expose it so UIs can mark estimated banner numbers
+    // instead of presenting cross-path scale changes as lost context
+    // (#9309).
+    info.originalTokenCountIsEstimated = originalTokenCountIsEstimated;
 
     // ChatCompressionService reads the keyless count getters, which adopt
     // the ACTIVE route — flipping the slots away from the request route
@@ -2357,6 +2408,8 @@ export class GeminiChat {
       // the session-token-limit gate blocks a prompt that fits the
       // compressed history (#9506).
       this.tokenCountsByRouteKey.clear();
+      // Loaded-skill tracking was conservatively cleared by the setHistory
+      // above — no second sync here.
       this.setLastPromptTokenCount(
         info.newTokenCount,
         info.newTokenCountIsEstimated,
@@ -2449,6 +2502,7 @@ export class GeminiChat {
         info: {
           originalTokenCount: apiBaseline,
           newTokenCount: apiBaseline,
+          originalTokenCountIsEstimated: this.promptCountIsEstimateDerived(),
           compressionStatus: CompressionStatus.NOOP,
         },
       };
@@ -2467,6 +2521,7 @@ export class GeminiChat {
     const info: ChatCompressionInfo = {
       originalTokenCount: apiBaseline,
       newTokenCount: adjustedTokenCount,
+      originalTokenCountIsEstimated: baselineIsEstimated,
       newTokenCountIsEstimated: true,
       compressionStatus: CompressionStatus.COMPRESSED,
       triggerReason: 'manual',
@@ -2558,7 +2613,7 @@ export class GeminiChat {
     params: SendMessageParameters,
     prompt_id: string,
     goalContext?: GoalTurnPermit,
-    options?: GeminiChatSendOptions,
+    options?: LlmChatSendOptions,
   ): Promise<AsyncGenerator<StreamEvent>> {
     const turnGoalContext = goalContext ? { ...goalContext } : undefined;
     const fullTurnRoute = model.endsWith('\0');
@@ -2833,6 +2888,8 @@ export class GeminiChat {
           // state. The JSONL compression checkpoint is intentionally not
           // written because the send is about to be rejected.
           this.setHistory(historyBeforeHardRescue);
+          // setHistory conservatively cleared loaded-skill tracking; the
+          // restored bodies re-arm it on their next invoke.
           this.lastPromptTokenCount = lastPromptTokenCountBeforeHardRescue;
           this.lastPromptTokenCountIsEstimated =
             lastPromptTokenCountWasEstimatedBeforeHardRescue;
@@ -3374,13 +3431,15 @@ export class GeminiChat {
             }
 
             // Replay only curated socket-level failures before any
-            // user-visible content has reached callers. Thinking-only
-            // output does not block the replay: thought parts are
-            // ephemeral (never recorded as the assistant's response in
-            // history), so retrying after them cannot duplicate visible
-            // output — and thinking models can spend minutes in that
-            // phase, exactly when gateways close long-lived SSE
-            // connections (#7832).
+            // content (non-thought output) has reached callers.
+            // Thinking-only output does not block the replay: such an
+            // attempt persists nothing (error-path persistence
+            // requires a delivered functionCall, which this gate
+            // excludes), and the partial turn is popped wholesale
+            // below as defense in depth — so nothing the caller saw
+            // from that attempt can appear twice. Thinking models can
+            // spend minutes in that phase, exactly when gateways
+            // close long-lived SSE connections (#7832).
             if (
               isRetryableStreamTransportError(classification) &&
               !streamYieldedContentChunk &&
@@ -3507,6 +3566,11 @@ export class GeminiChat {
             if (contextOverflow.isExceeded) {
               if (!exactRoute && !reactiveCompressionAttempted) {
                 reactiveCompressionAttempted = true;
+                // Only the provider-reported actual count is authoritative.
+                // Limit/config/default fallbacks are projections and must
+                // keep the estimated marker in compression banners.
+                const reactiveOriginalTokenCountIsEstimated =
+                  contextOverflow.actualTokens === undefined;
                 const reactiveOriginalTokenCount =
                   contextOverflow.actualTokens ??
                   contextOverflow.limitTokens ??
@@ -3521,7 +3585,10 @@ export class GeminiChat {
                     true,
                     params.config?.abortSignal,
                     {
-                      originalTokenCountOverride: reactiveOriginalTokenCount,
+                      originalTokenCountOverride: {
+                        count: reactiveOriginalTokenCount,
+                        isEstimated: reactiveOriginalTokenCountIsEstimated,
+                      },
                       precomputedEffectiveTokens: reactiveOriginalTokenCount,
                       requestGenerationConfig: params.config,
                       requestRouteKey,
@@ -4834,9 +4901,18 @@ export class GeminiChat {
     // stash too: its referent (the model turn at the old index) is gone.
     this.clearPendingPartialState();
     this.redactApprovedPlansFromLoadedHistory();
+    // Wholesale replacement can drop resident skill bodies (compression,
+    // /restore, session-manager load_history, ACP restoreSessionHistory
+    // all land here). Conservatively clear the tracking so an evicted
+    // skill never stays stuck behind the dedup guard; a still-resident
+    // body costs at most one duplicate injection on the next invoke.
+    if (!this.isForkedChat) {
+      clearLoadedSkillTracking(this.config.getToolRegistry(), 'setHistory');
+    }
   }
 
   truncateHistory(keepCount: number): void {
+    const prevLen = this.history.length;
     this.history = this.history.slice(0, keepCount);
     // Truncation can drop the entry the partial-push marker points at,
     // or leave it valid but shift the meaning of nearby indices. Reset
@@ -4844,6 +4920,14 @@ export class GeminiChat {
     // ephemeral, so losing them across a truncate is safe (the
     // sendMessageStream that pushed them has already finished or will
     // start fresh on the next call).
+    if (this.history.length < prevLen && !this.isForkedChat) {
+      // Truncation may have dropped a skill body; conservative clear
+      // re-arms reload (see setHistory for the trade-off).
+      clearLoadedSkillTracking(
+        this.config.getToolRegistry(),
+        'truncateHistory',
+      );
+    }
     this.clearPendingPartialState();
   }
 
@@ -4900,6 +4984,16 @@ export class GeminiChat {
     // `sendMessageStream` would otherwise leave a stale marker that
     // happens to line up with whatever model entry is at that index
     // in the meanwhile.
+    if (strippedEntries.length > 0 && !this.isForkedChat) {
+      // The stripped entries may have carried a skill body; conservative
+      // clear re-arms reload (see setHistory for the trade-off). A forked
+      // chat shares the parent's tracker while holding only a tail slice,
+      // so only the authoritative session's chat may clear.
+      clearLoadedSkillTracking(
+        this.config.getToolRegistry(),
+        'stripOrphanedUserEntries',
+      );
+    }
     this.clearPendingPartialState();
     return strippedEntries;
   }

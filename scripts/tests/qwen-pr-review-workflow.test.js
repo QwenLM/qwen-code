@@ -5,7 +5,7 @@
  */
 
 import { afterAll, describe, expect, it } from 'vitest';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import {
   chmodSync,
   existsSync,
@@ -163,6 +163,11 @@ function runScenario(scenario, { timeoutMinutes = 180, logPath } = {}) {
           ATT: attemptFile,
           DUR: durationFile,
           PRM: promptFile,
+          // The step initializes PROXY_BIN before the retry loop and the
+          // agent invocation's decoy GITHUB_PATH/GITHUB_ENV wiring expands
+          // it; the extraction starts at OUTCOME='', past the init, so the
+          // harness must supply it (set -u would otherwise abort the loop).
+          PROXY_BIN: join(dir, 'proxy-bin'),
         },
       });
     } catch (e) {
@@ -3008,10 +3013,13 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
     expect(
       inJobStep.run.match(/See \[workflow logs\]\(\$\{RUN_URL\}\)\./g),
     ).toHaveLength(4);
-    // Same invariant for the fallback job's body: the cross-job dedup
-    // matches `actions/runs/<id>)`, anchored on the markdown link's closing
-    // paren — a body that rendered the URL differently would escape it.
-    expect(step.run).toContain('See [workflow logs](${RUN_URL}).');
+    // Same invariant for the fallback job's TWO bodies (failure and
+    // cancelled): the cross-job dedup matches `actions/runs/<id>)`, anchored
+    // on the markdown link's closing paren — a body that rendered the URL
+    // differently would escape it.
+    expect(
+      step.run.match(/See \[workflow logs\]\(\$\{RUN_URL\}\)\./g),
+    ).toHaveLength(2);
     expect(inJobStep.run).toContain(
       `body="$(printf '%s\\n\\n%s' "$FALLBACK_MARKER" "$body")"`,
     );
@@ -3023,6 +3031,16 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
         `body="$(printf '%s\\n\\n%s' "$FALLBACK_MARKER" "$body")"`,
       ),
     ).toBeLessThan(inJobStep.run.indexOf('gh pr comment'));
+  });
+
+  it('wires the needs result the cancelled-body branch keys on (issue #10109)', () => {
+    // The step's bash runs under `set -u`, so dropping this env wiring
+    // fails the step loudly instead of silently reverting every cancelled
+    // run to the false "pipeline failed" body.
+    expect(step.env.REVIEW_PR_RESULT).toBe('${{ needs.review-pr.result }}');
+    expect(step.run).toContain(
+      'if [ "$REVIEW_PR_RESULT" = "cancelled" ]; then',
+    );
   });
 
   it('scopes the dedup to the authenticated bot login, resolved dynamically', () => {
@@ -3138,6 +3156,21 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
     expect(run.trim()).toMatch(/exit "\$status"$/);
   });
 
+  // The repair path names its canary with GNU `mktemp -u` (print-only):
+  // BSD mktemp's `-u` still tries to create the file, so in the unwritable
+  // directory the repair case breaks it exits nonzero with an empty name
+  // and the post-repair touch can never succeed. The health probe only
+  // runs on Linux runners (the review pool is Linux-only, same as the
+  // realpath case above), so the defect cannot exist in production; probe
+  // the host, not the platform — a BSD host with GNU coreutils fronting
+  // PATH keeps the coverage.
+  const hasGnuMktemp =
+    spawnSync(
+      'mktemp',
+      ['-u', join(tmpdir(), 'qwen-no-such-dir', '.probe-XXXXXX')],
+      { stdio: 'ignore' },
+    ).status === 0;
+
   // Executed shape for the health probe: run the step's REAL bash against
   // a fake runner tree with a stub sudo, so the repair-vs-fail-fast
   // decision is exercised, not just textually pinned.
@@ -3210,13 +3243,16 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
     expect(r.stdout).not.toContain('repaired');
   });
 
-  it('repairs a single unwritable directory instead of failing fast', () => {
-    // Mutant control: a status=1 right after the first failed touch would
-    // abort this repairable runner (exit 1) — a false fail-fast.
-    const r = runHealthProbe({ breakDir: 'home' });
-    expect(r.status).toBe(0);
-    expect(r.stdout).toContain('repaired write access');
-  });
+  it.skipIf(!hasGnuMktemp)(
+    'repairs a single unwritable directory instead of failing fast',
+    () => {
+      // Mutant control: a status=1 right after the first failed touch would
+      // abort this repairable runner (exit 1) — a false fail-fast.
+      const r = runHealthProbe({ breakDir: 'home' });
+      expect(r.status).toBe(0);
+      expect(r.stdout).toContain('repaired write access');
+    },
+  );
 
   it('fails fast when repair is impossible', () => {
     // Mutant control: dropping the post-repair re-probe would report this
@@ -3263,6 +3299,7 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
       reviews = '[]',
       runCreated = '',
       runStartedAttempt = '',
+      reviewPrResult = 'failure',
     } = {},
   ) {
     const dir = mkdtempSync(join(tmpdir(), 'fallback-comment-'));
@@ -3390,6 +3427,7 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
               REVIEWS_JSON: reviews,
               RUN_CREATED: runCreated,
               RUN_STARTED_ATTEMPT: runStartedAttempt,
+              REVIEW_PR_RESULT: reviewPrResult,
             },
           },
         );
@@ -3414,6 +3452,33 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
     expect(r.status).toBe(0);
     expect(r.posted.startsWith(`${marker}\n\n`)).toBe(true);
     expect(r.posted).toContain('actions/runs/12345');
+  });
+
+  it('posts the cancellation body, not the failure one, for a cancelled review-pr', () => {
+    // Issue #10109: a cancelled review-pr reaches the gate two ways — its
+    // own job-level timeout, and a run/job cancel landing after the
+    // upstream chain finished (run 32875478404) — and for neither is
+    // "pipeline failed / retried automatically" true. Silence would regress
+    // the timeout flavor, so the cancelled case gets its own body.
+    const cancelled = runFallbackStep('default', {
+      reviewPrResult: 'cancelled',
+    });
+    expect(cancelled.status).toBe(0);
+    expect(cancelled.posted.startsWith(`${marker}\n\n`)).toBe(true);
+    expect(cancelled.posted).toContain('cancelled');
+    // The claims the issue calls out must not ride a cancellation...
+    expect(cancelled.posted).not.toContain('did not complete successfully');
+    expect(cancelled.posted).not.toContain('The review pipeline failed');
+    expect(cancelled.posted).not.toContain(
+      'A transient error is retried automatically',
+    );
+    // ...while the `)`-anchored run URL the cross-job dedup matches and the
+    // retry instruction (the job-timeout flavor's reader needs it) stay.
+    expect(cancelled.posted).toContain('actions/runs/12345)');
+    expect(cancelled.posted).toContain('@qwen-code /review');
+    // The failure path keeps the original body.
+    const failed = runFallbackStep('default', { reviewPrResult: 'failure' });
+    expect(failed.posted).toContain('did not complete successfully');
   });
 
   it('dedupes on the marker plus this run URL', () => {

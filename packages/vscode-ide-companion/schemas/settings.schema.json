@@ -231,8 +231,17 @@
           "type": "boolean",
           "default": true
         },
+        "sandbox": {
+          "description": "Run the REVIEWED repository's own commands — `npm ci` with its install scripts, the build, the test suite, and every mutation probe — inside a container instead of directly as you. A review executes the code it is reviewing, and today those commands inherit the review process's whole environment (on CI that includes the model and GitHub credentials). \"auto\" uses a container when docker or podman answers and runs directly when neither does; \"required\" refuses to run them unsandboxed, which makes the evidence that depends on execution (build/test findings, mutation verdicts, `Source: [probe]`) unavailable for that run rather than ending the review; \"off\" is today's behaviour and stays the default, because containerising a build by surprise changes what native modules compile against. Only honored from User, System, and SystemDefaults settings scopes; values set in Workspace settings are ignored, so a repository cannot switch off the containment that exists to contain it. Options: off, auto, required",
+          "enum": [
+            "off",
+            "auto",
+            "required"
+          ],
+          "default": "off"
+        },
         "effort": {
-          "description": "Default effort for /review when --effort is not given. \"auto\" keeps the built-in rule (high for PRs, medium for local changes). An explicit --effort still wins; an effective --comment still forces high and --fix still floors at medium. Only honored from User, System, and SystemDefaults settings scopes; values set in Workspace settings are ignored, so a repository cannot set review policy for its reviewers. Options: auto, low, medium, high",
+          "description": "Default effort for /review when neither --effort nor a project-remembered explicitly typed level applies. \"auto\" keeps the built-in rule (high for PRs, medium for local changes). An explicit or remembered level wins; an effective --comment still forces high and --fix still floors at medium. Only honored from User, System, and SystemDefaults settings scopes; values set in Workspace settings are ignored, so a repository cannot set review policy for its reviewers. Options: auto, low, medium, high",
           "enum": [
             "auto",
             "low",
@@ -316,7 +325,7 @@
           "default": false
         },
         "statusLine": {
-          "description": "Status line display configuration. Use `type: \"preset\"` with built-in item ids, or `type: \"command\"` with a shell command. Optional command `refreshInterval` (seconds, >= 1) re-runs the command on a timer so external data stays fresh. Set `respectUserColors: true` to preserve ANSI color codes in command output instead of applying dim/theme styling. Set `hideContextIndicator: true` to hide the built-in context usage indicator in the footer right section, or `false` to always show it. When `hideContextIndicator` is unset, the footer indicator is hidden automatically for preset status lines that already include `context-used` or `context-remaining`, and shown otherwise (including for `command` status lines). When unset (default), the built-in default preset (model, git branch, context usage, current dir) is shown automatically; set to `null` to explicitly disable the status line.",
+          "description": "Status line display configuration. Use `type: \"preset\"` with built-in item ids, or `type: \"command\"` with a shell command. Optional command `refreshInterval` (seconds, >= 1) re-runs the command on a timer so external data stays fresh. Set `respectUserColors: true` to preserve ANSI color codes in command output instead of applying dim/theme styling. Set `hideContextIndicator: true` to hide the built-in context usage indicator in the footer right section, or `false` to always show it. When `hideContextIndicator` is unset, the footer indicator is hidden automatically for preset status lines that already include `context-used` or `context-remaining`, and shown otherwise (including for `command` status lines). When unset (default), the built-in default preset (project name, git branch, model, context usage) is shown automatically; set to `null` to explicitly disable the status line.",
           "type": "object",
           "additionalProperties": true
         },
@@ -442,7 +451,7 @@
           "default": 0
         },
         "compactMode": {
-          "description": "Compact view (web shell only; not used by the TUI).",
+          "description": "Retired: compact view is always on in both the TUI and the web shell. The key is kept so existing settings files do not warn.",
           "type": "boolean",
           "default": false
         },
@@ -1383,7 +1392,7 @@
       "type": "object",
       "properties": {
         "permissionStrategy": {
-          "description": "How permission requests resolve when multiple clients are attached. `first-responder` (default) = any client decides, first wins. `designated` = only the prompt originator decides; falls back to first-responder if originator is anonymous. NOTE: client identity comes from self-declared X-Qwen-Client-Id with no proof-of-possession (pair-token identity is not implemented yet), so any client observing originatorClientId on SSE frames can register with the same id and impersonate the originator. `consensus` = N-of-M voters must agree. Default N=floor(M/2)+1, which means UNANIMITY for M=2 (quorum=2, both must agree) and supermajority for larger even M (M=4 → quorum=3; M=6 → quorum=4). For M=2 specifically, split votes resolve only via permissionTimeoutMs. `local-only` = only loopback clients can RESOLVE; remote clients can still ABORT a pending permission via the cancel sentinel ({outcome:\"cancelled\"}) — cancel stays cross-policy for consistency. Strict-cancel-too deployments need a dedicated loopback-bound daemon. Requires daemon restart — read once at boot. Options: first-responder, designated, consensus, local-only",
+          "description": "How permission requests resolve when multiple clients are attached. `first-responder` (default) = any client decides, first wins. `designated` = only the prompt originator decides; falls back to first-responder if originator is anonymous. NOTE: client identity comes from self-declared X-Qwen-Client-Id with no proof-of-possession (pair-token identity is not implemented yet), so any client observing originatorClientId on SSE frames can register with the same id and impersonate the originator. `consensus` = N-of-M voters must agree. Default N=floor(M/2)+1, which means UNANIMITY for M=2 (quorum=2, both must agree) and supermajority for larger even M (M=4 → quorum=3; M=6 → quorum=4). For M=2 specifically, split votes resolve only via the configured permission timeout, voter cancellation, or session cancellation. `local-only` = only loopback clients can RESOLVE; remote clients can still ABORT a pending permission via the cancel sentinel ({outcome:\"cancelled\"}) — cancel stays cross-policy for consistency. Strict-cancel-too deployments need a dedicated loopback-bound daemon. Requires daemon restart — read once at boot. Options: first-responder, designated, consensus, local-only",
           "enum": [
             "first-responder",
             "designated",
@@ -1546,6 +1555,19 @@
               "default": "inherit"
             }
           }
+        },
+        "crossSessionMessaging": {
+          "description": "Experimental. Let Qwen Code sessions on this machine send each other messages over a per-session local socket. Off by default; turning it on both opens this session to peer messages and makes it discoverable to others.",
+          "type": "boolean",
+          "default": false
+        },
+        "crossSessionInbound": {
+          "description": "What happens to messages other sessions send this one. \"accept\" delivers them; \"hold\" parks them for your review without letting the model act; \"refuse\" opts this session out. Unset means approval-mode parity: a message auto-delivers only when this session reviews every action, or when both sessions declare a mode that can apply actions without per-action review. Other messages are held for you to review. Options: accept, hold, refuse",
+          "enum": [
+            "accept",
+            "hold",
+            "refuse"
+          ]
         },
         "modelGrades": {
           "type": "object",
