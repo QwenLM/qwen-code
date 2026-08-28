@@ -302,10 +302,13 @@ describe('backfillWorkspaceSessionPrs', () => {
     );
   }
 
+  // `source` stamps every seeded entry; omitted, the entries model
+  // pre-provenance bindings (the sidecar ladder ranks those above reviews).
   async function seedPrSidecar(
     sessionId: string,
     numbers: readonly number[],
     archiveState: 'active' | 'archived' = 'active',
+    source?: 'create' | 'worktree' | 'review',
   ): Promise<string> {
     const prPath = sessionService.getPrSessionPathForArchiveState(
       sessionId,
@@ -319,6 +322,7 @@ describe('backfillWorkspaceSessionPrs', () => {
           number,
           url: `https://github.com/o/r/pull/${number}`,
           createdAt: '2026-08-01T00:00:00.000Z',
+          ...(source ? { source } : {}),
         })),
       }),
       'utf8',
@@ -1230,7 +1234,7 @@ describe('backfillWorkspaceSessionPrs', () => {
       sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
     );
     // The pr-<N> slug names the session's own PR — the cap slice must not
-    // evict it in favor of branch-mapped numbers, and it is planned last so
+    // evict it in favor of reviewed numbers, and it is planned last so
     // it stays the sidecar's newest entry.
     expect(prs?.map((entry) => entry.number)).toEqual([
       4, 5, 6, 7, 8, 9, 10, 11, 12, 50,
@@ -1263,7 +1267,7 @@ describe('backfillWorkspaceSessionPrs', () => {
     ).toContain(50);
 
     // A new branch appears in the transcript and gh knows its PR: the new
-    // binding must evict a branch-mapped number, not the convention one.
+    // binding must evict a reviewed number, not the convention one.
     await seedReviewedNumbers(SESSION_A, 13, 13);
     fetchFor(13);
 
@@ -1324,8 +1328,14 @@ describe('backfillWorkspaceSessionPrs', () => {
       'active',
     );
     // A pre-fix run left the convention number in the oldest slot; planning
-    // counts it against the cap up front, so no write ever evicts it.
-    await seedPrSidecar(SESSION_A, [50, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    // counts it against the cap up front, so no write ever evicts it. The
+    // occupants are review bindings, so the trim is positional among them.
+    await seedPrSidecar(
+      SESSION_A,
+      [50, 1, 2, 3, 4, 5, 6, 7, 8, 9],
+      'active',
+      'review',
+    );
     fetchGitHubPullRequestsMock.mockResolvedValue({
       kind: 'ok',
       pullRequests: [
@@ -1352,8 +1362,13 @@ describe('backfillWorkspaceSessionPrs', () => {
     );
     // Already at the cap, with the convention number in the oldest slot and
     // a dialog-bound entry (99) this run cannot re-resolve; the new binding
-    // displaces a branch-mapped number, never 50 or 99.
-    await seedPrSidecar(SESSION_A, [50, 1, 2, 3, 4, 5, 6, 7, 8, 99]);
+    // displaces the oldest reviewed number, never 50 or 99.
+    await seedPrSidecar(
+      SESSION_A,
+      [50, 1, 2, 3, 4, 5, 6, 7, 8, 99],
+      'active',
+      'review',
+    );
     fetchGitHubPullRequestsMock.mockResolvedValue({
       kind: 'ok',
       pullRequests: [
@@ -1377,10 +1392,15 @@ describe('backfillWorkspaceSessionPrs', () => {
       SESSION_A,
       'active',
     );
-    // 99 was bound from the Git dialog; its head branch never appears in
-    // the transcript, so no backfill run can ever re-resolve it — every run
-    // must plan around it instead of evicting it.
-    await seedPrSidecar(SESSION_A, [1, 2, 3, 4, 5, 6, 7, 8, 9, 99]);
+    // 99 was bound from the Git dialog and is never re-mentioned, so no
+    // backfill run can ever re-resolve it — every run must plan around it
+    // instead of evicting it. The reviewed occupants trim positionally.
+    await seedPrSidecar(
+      SESSION_A,
+      [1, 2, 3, 4, 5, 6, 7, 8, 9, 99],
+      'active',
+      'review',
+    );
     fetchGitHubPullRequestsMock.mockResolvedValue({
       kind: 'ok',
       pullRequests: Array.from({ length: 10 }, (_, i) =>
@@ -1413,7 +1433,12 @@ describe('backfillWorkspaceSessionPrs', () => {
     // rendered badge list even grows past the cap.
     await seedSession(SESSION_A);
     await seedReviewedNumbers(SESSION_A, 1, 12);
-    await seedPrSidecar(SESSION_A, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+    await seedPrSidecar(
+      SESSION_A,
+      [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+      'active',
+      'review',
+    );
     // Models the real bridge: the live entry is hydrated from the full
     // sidecar (as a metadata PATCH does), and setSessionPrs overwrites it.
     const hydrated = Array.from({ length: 10 }, (_, i) => ({
@@ -1504,10 +1529,15 @@ describe('backfillWorkspaceSessionPrs', () => {
       SESSION_A,
       'active',
     );
-    // The dialog binding is the OLDEST entry with displaced branch numbers
-    // still on disk: sequential capped writes would rotate through them and
-    // evict it mid-loop; a single planned write must keep it.
-    await seedPrSidecar(SESSION_A, [99, 1, 2, 3, 4, 5, 6, 7, 8]);
+    // The dialog binding is the OLDEST entry with displaced reviewed
+    // numbers still on disk: sequential capped writes would rotate through
+    // them and evict it mid-loop; a single planned write must keep it.
+    await seedPrSidecar(
+      SESSION_A,
+      [99, 1, 2, 3, 4, 5, 6, 7, 8],
+      'active',
+      'review',
+    );
     fetchGitHubPullRequestsMock.mockResolvedValue({
       kind: 'ok',
       pullRequests: [
@@ -2837,6 +2867,52 @@ describe('backfillWorkspaceSessionPrs', () => {
     expect(await readSessionPrs(prPath)).toEqual([
       expect.objectContaining({ number: 7 }),
     ]);
+  });
+
+  it('keeps re-offered pre-provenance occupants ahead of fresh reviews', async () => {
+    // Every binding persisted before `source` was recorded is source-less —
+    // GitDialog creates included, since the metadata routes only stamp
+    // `create` from this diff on. The sidecar ladder ranks such entries
+    // above reviews so a weak candidate never displaces them; the planner
+    // must rank them the same way, or a session's own PR bound before
+    // provenance existed is evicted by fresh reviews forever.
+    await seedSession(SESSION_A);
+    const prPath = await seedPrSidecar(
+      SESSION_A,
+      [100, 1, 2, 3, 4, 5, 6, 7, 8, 9],
+    );
+    await seedReviewedNumbers(SESSION_A, 100, 100);
+    await seedReviewedNumbers(SESSION_A, 1, 10);
+    fetchGitHubPullRequestsMock.mockResolvedValue({ kind: 'cli_unavailable' });
+
+    const result = await backfillWorkspaceSessionPrs(runtime);
+
+    expect(result).toMatchObject({ bound: 0, alreadyBound: 10, overLimit: 1 });
+    expect((await readSessionPrs(prPath))?.map((p) => p.number)).toEqual([
+      100, 1, 2, 3, 4, 5, 6, 7, 8, 9,
+    ]);
+  });
+
+  it('binds the /review #N form', async () => {
+    await seedSession(SESSION_A);
+    await appendUserText(SESSION_A, '/review #61');
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(61, 'b-61', 'merged')],
+    });
+
+    const result = await backfillWorkspaceSessionPrs(runtime);
+
+    expect(result).toMatchObject({ bound: 1 });
+    const prs = await readSessionPrs(
+      sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
+    );
+    expect(prs?.[0]).toMatchObject({
+      number: 61,
+      url: 'https://github.com/o/r/pull/61',
+      state: 'merged',
+      source: 'review',
+    });
   });
 
   it('keeps a re-offered created binding when the trim overflows', async () => {

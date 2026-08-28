@@ -165,6 +165,29 @@ describe('upsertSessionPr', () => {
     );
   });
 
+  it('stamps the candidate source on a different-URL re-bind', async () => {
+    // The same number in another repository is another PR: no known entry
+    // matches, so an explicit `review` must persist as such instead of
+    // losing to the absent entry's higher pre-provenance rank.
+    await writeSessionPrs(filePath, [
+      {
+        ...entry(5),
+        url: 'https://github.com/repo-a/r/pull/5',
+        source: 'create',
+      },
+    ]);
+    const prs = await upsertSessionPr(filePath, {
+      number: 5,
+      url: 'https://github.com/repo-b/r/pull/5',
+      source: 'review',
+    });
+    expect(prs).toHaveLength(1);
+    expect(prs[0]).toMatchObject({
+      url: 'https://github.com/repo-b/r/pull/5',
+      source: 'review',
+    });
+  });
+
   it('caps by provenance authority like the batch writer', async () => {
     // Every writer caps the same way: a GitDialog create landing on a
     // full list must evict the oldest REVIEWED entry, never the created

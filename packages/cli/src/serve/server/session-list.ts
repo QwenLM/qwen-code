@@ -555,11 +555,11 @@ function sidecarToPrInfos(sidecar: readonly SessionPr[]): SessionPrInfo[] {
  * at bind-time. A binding present only in the live entry was either bound
  * this daemon lifetime and has not landed in the sidecar yet (the newest
  * binding), or was EVICTED from the sidecar: the sidecar-only writers (the
- * shell hook, backfill) never touch the live entry, and its tail cap drops
- * the oldest binding once it overflows. Eviction only happens at the cap,
- * so below it a live-only entry is genuinely the newest; at the cap it is
- * an evicted oldest binding and must not be re-appended as the session's
- * latest.
+ * shell hook, backfill) never touch the live entry, and its cap drops the
+ * weakest binding (lowest provenance, oldest within a rank) once it
+ * overflows. Eviction only happens at the cap, so below it a live-only
+ * entry is genuinely the newest; at the cap it is an evicted binding and
+ * must not be re-appended as the session's latest.
  */
 function mergeSummaryPrs(
   persistedPrs: readonly SessionPrInfo[] | undefined,

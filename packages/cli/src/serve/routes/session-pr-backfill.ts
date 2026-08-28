@@ -720,11 +720,13 @@ export async function backfillWorkspaceSessionPrs(
           // ranks as what this run would stamp it (the convention number
           // as the session's own PR, everything else as a review), and a
           // re-offered occupant additionally keeps the rank its persisted
-          // entry carries: a session's created PR re-mentioned as
-          // `/review 100` must not be demoted to a review and displaced by
-          // newer reviews. An occupant persisted without provenance ranks
-          // by this run's stamp alone — the transcript proves at least
-          // that, the absent stamp proves nothing more.
+          // entry carries on the sidecar's ladder: a session's created PR
+          // re-mentioned as `/review 100` must not be demoted to a review
+          // and displaced by newer reviews — and an occupant persisted
+          // WITHOUT provenance (every binding from before source was
+          // recorded, GitDialog creates included) sits above reviews on
+          // that ladder for the same reason, so a weak candidate never
+          // displaces it either.
           result.overLimit += plan.length - slots;
           const heldSource = new Map(
             base.map((entry) => [entry.number, entry.source] as const),
@@ -733,10 +735,12 @@ export async function backfillWorkspaceSessionPrs(
             const stamp = sessionPrSourceAuthority(
               number === candidate.conventionNumber ? 'worktree' : 'review',
             );
-            const held = heldSource.get(number);
-            return held === undefined
-              ? stamp
-              : Math.max(stamp, sessionPrSourceAuthority(held));
+            return heldSource.has(number)
+              ? Math.max(
+                  stamp,
+                  sessionPrSourceAuthority(heldSource.get(number)),
+                )
+              : stamp;
           };
           const evicted = new Set(
             plan

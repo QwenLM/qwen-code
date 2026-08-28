@@ -529,12 +529,16 @@ export function upsertSessionPr(
     // DOWNGRADES it: the worktree convention binding names the PR the
     // session exists for, and a client-driven re-bind stamping 'create'
     // must not drop it into the rank the tail cap evicts first.
+    // No known entry (a new number, or the number re-bound to ANOTHER PR)
+    // takes the candidate's own source; a known one keeps the stronger.
     const source =
-      pr.source !== undefined &&
-      sessionPrSourceAuthority(pr.source) >=
-        sessionPrSourceAuthority(known?.source)
+      known === undefined
         ? pr.source
-        : known?.source;
+        : pr.source !== undefined &&
+            sessionPrSourceAuthority(pr.source) >=
+              sessionPrSourceAuthority(known.source)
+          ? pr.source
+          : known.source;
     const state = pr.state ?? known?.state;
     const entry: SessionPr = {
       number: pr.number,

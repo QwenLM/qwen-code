@@ -67,14 +67,14 @@ Web Shell 同时运行 20+ 会话时，侧栏信息不足以回答"哪个会话�
 - **明确不用 transcript `gh pr create` 痕迹**：历史命令没有 gh 侧归因（`echo "...gh pr create...url"` 一类命令即可骗过纯文本闸门并打印任意同仓库 URL 伪造绑定），已移除该源；实时创建由 shell post-hook 归因绑定（见写入端章节）。
 - **明确不用裸 `gitBranch`**：首版曾把 transcript gitBranch 与 gh headRefName 交集作为来源，实测是纯噪声——workspace 当时所在分支的 PR 被绑到**所有**会话（主 workspace 272 命中全是这类，含 review 其他 PR 的会话与无关闲聊）。已移除并按 createdAt 时间窗清理错误绑定后重跑。
 - **Aone workspace**（origin 为 Aone 主机时，见 `docs/design/2026-08-27-session-pr-aone-provider.md`）：来源与上面完全相同（`/review` 指令 + worktree 约定，**任何平台都不用 transcript 分支映射**，因此 `a1 repo mr list` 不在 backfill 的调用面上）；每个待绑定号经一次有上限、带缓存的 `a1 repo mr view` 取 `detailUrl` + state（**绝不从 remote 拼 URL**，view 失败或超预算计 `unresolved` 待下轮）；同 PR 身份判定 fail-closed（本轮 view 证明过、或 URL 恰为该 repoPath 的 detailUrl 形状）；Aone 化之前 backfill 伪造的 `<origin>/pull/<N>` 条目在计划里原地修复（保留 createdAt/provenance），持有这类条目的会话即使本轮无来源也进入候选。响应带 `platform: 'github' | 'aone'`；`ghAvailable` 仅 GitHub。
-- 每 workspace 一次 `fetchGitHubPullRequests({state:'all', limit:500, slim:true})` 提供 number→url/state 映射；`slim` 只取 number/url/headRefName/state/updatedAt（全字段 + 500 触发 GitHub GraphQL 504，slim 约 4s/60KB）。
+- 每 workspace 一次 `fetchGitHubPullRequests({state:'all', limit:500, slim:true})` 提供 number→url/state 映射；`slim` 只取 number/url/headRefName/state（全字段 + 500 触发 GitHub GraphQL 504，slim 约 4s/60KB）。
 - **gh 页按仓库 key 闸门**：fork 布局（origin=fork）下 `gh pr list` 解析的是**父仓库**，页内 PR 属于另一仓库——与 workspace origin key 不一致的条目一律跳过（fail-closed）；workspace key 不可解析时同样 fail-closed。约定号不受闸门影响：gh 页已归属该号时取 gh 自己的权威 URL（父仓库），不与 origin 推导混用。
 - URL 兜底链：gh 映射（`gh pr list` 页内条目）→ `/review <url>` 形态命名的 URL → gh 页按号归属（fork 布局下页属父仓库，仍优先 gh 自己的权威 URL，不同步合成 fork URL）→ git remote web URL 推导 `<repo>/pull/<N>`（`fetchRemoteWebUrl`，支持 https / scp 风格 ssh / `ssh://` 与 enterprise host）；解析不到号的会话原样跳过。
   - **URL 形态的两道闸**：仓库 key 须为 workspace 自身或 gh 页解析到的仓库（fork 父仓库）；URL 还须过 sidecar 的形状校验（≤2048、http(s)、无控制字符，`isValidSessionPrUrl`）——transcript 是用户可控文本，读侧对整份 sidecar fail-closed，写入一条毒 URL 会抹掉全部绑定并每轮再毒。`replaceSessionPrs` 在写边界同样拒绝读侧会拒绝的条目。
   - **同号借用规则**：裸 `/review N` 与约定号 `pr-N` 指的是**本仓库**的 PR N；URL 形态只有在其仓库 key 属于「workspace 自身或已确认的 fork 父仓库」时才把 URL 借给同号，来自未信任（divergent）gh 页仓库的形态只绑定它自己命名的 PR，不借给裸号/约定号（否则 `gh repo set-default` 到陌生仓库就能把陌生仓库的 PR N 绑到"为本仓库 PR N 存在"的会话上）。
 - 每会话一次锁定内的读-改-写（`replaceSessionPrs` 计划器，进程内队列 + 跨进程文件锁）：已绑定同一 number 的候选跳过（不刷新 createdAt、不重排，保持绑定序）；本轮未再提供、或本轮无法解析的既有条目视为外来占位者先占槽位；合并列表超过 tail-10 时**按 provenance 排序裁剪**（与 sidecar 自身 cap 规则一致：worktree > create > 无 provenance > review，同级按最旧位置），本轮重新提供的占位者取「持久化 source」与「本轮 stamp」中的高者——`gh pr create` 创建的 PR 被 `/review 100` 重提后不会被降级成 review 挤出。单份上限列表一次写入，失败不会残留半成品；重复调用幂等；按候选隔离——单个 sidecar 写失败计入 `writeErrors` 并继续，不中止整个 workspace 运行。
-- 路由在 `bound > 0` 时 `markSessionCatalogChanged()`，live-state 客户端 ~2s 内 refetch。
-- 响应按 workspace 聚合 `scanned/bound/alreadyBound/unresolved/failed`；untrusted workspace 跳过。
+- 路由在 `written > 0`（有 sidecar 重写，含仅挤出的计划）时失效列表缓存并 `markSessionCatalogChanged()`，live-state 客户端 ~2s 内 refetch。
+- 响应按 workspace 聚合 `scanned/bound/written/alreadyBound/overLimit/unresolved/writeErrors/ghAvailable/platform`（失败的 workspace 带 `error`）；untrusted workspace 跳过。
 
 ### 合入状态快照 + 定时刷新
 

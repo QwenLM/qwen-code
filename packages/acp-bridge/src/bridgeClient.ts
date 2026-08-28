@@ -20,7 +20,10 @@ import type {
   WriteTextFileResponse,
 } from '@agentclientprotocol/sdk';
 import { RequestError } from '@agentclientprotocol/sdk';
-import { APPROVAL_MODES } from '@qwen-code/qwen-code-core';
+import {
+  APPROVAL_MODES,
+  SESSION_PR_URL_MAX_LENGTH,
+} from '@qwen-code/qwen-code-core';
 import type { BridgeEvent, EventBus } from './eventBus.js';
 // Wire constants shared with the child-side caller (`Session.ts`) and, for the
 // SSE event type, the SDK validator + browser consumer — single sources of truth
@@ -72,7 +75,6 @@ import {
 } from './bridgeOptions.js';
 import type { BridgeFileSystem } from './bridgeFileSystem.js';
 import { CANCEL_VOTE_SENTINEL } from './permissionMediator.js';
-import { SESSION_PR_URL_MAX_LENGTH } from '@qwen-code/qwen-code-core';
 // Narrowed from the concrete `MultiClientPermissionMediator` to the
 // sub-interface this class actually uses (`request` only). Structural
 // typing lets the bridge factory pass the full mediator instance
