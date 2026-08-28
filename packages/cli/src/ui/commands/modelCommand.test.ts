@@ -25,10 +25,13 @@ function createMockConfig(
   };
 }
 
-function createMockSettings(setValue = vi.fn()): Partial<LoadedSettings> {
+function createMockSettings(
+  setValue = vi.fn(),
+  user: Record<string, unknown> = {},
+): Partial<LoadedSettings> {
   return {
     merged: {},
-    user: { settings: {} },
+    user: { settings: user },
     workspace: { settings: {} },
     isTrusted: false,
     setValue,
@@ -257,6 +260,7 @@ describe('modelCommand', () => {
 
   it('should switch a dual-role model directly in interactive mode', async () => {
     const setValue = vi.fn();
+    const setReasoningEffort = vi.fn();
     const switchModel = vi.fn().mockResolvedValue(undefined);
     const recordSessionModel = vi.fn().mockResolvedValue(true);
     mockContext = createMockCommandContext({
@@ -275,11 +279,14 @@ describe('modelCommand', () => {
             },
           ]),
           switchModel,
+          setReasoningEffort,
           getChatRecordingService: vi.fn().mockReturnValue({
             recordSessionModel,
           }),
         },
-        settings: createMockSettings(setValue),
+        settings: createMockSettings(setValue, {
+          model: { reasoningEffort: 'ultra' },
+        }),
       },
     });
 
@@ -303,6 +310,14 @@ describe('modelCommand', () => {
       'model.baseUrl',
       '',
     );
+    expect(setValue).toHaveBeenCalledWith(
+      SettingScope.User,
+      'model.reasoningEffort',
+      undefined,
+      undefined,
+      { throwOnWriteFailure: true },
+    );
+    expect(setReasoningEffort).toHaveBeenCalledWith(undefined);
     expect(result).toEqual({
       type: 'message',
       messageType: 'info',

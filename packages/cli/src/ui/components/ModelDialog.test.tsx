@@ -486,34 +486,44 @@ describe('<ModelDialog />', () => {
 
   it('persists model.baseUrl alongside model.name when the selected provider has a baseUrl', async () => {
     const switchModel = vi.fn().mockResolvedValue(undefined);
-    const { props, mockSettings } = renderComponent({}, {
-      getModel: vi.fn(() => 'qwen3.7-max'),
-      getAuthType: vi.fn(() => AuthType.USE_OPENAI),
-      switchModel,
-      getAllConfiguredModels: vi.fn(() => [
-        {
-          id: 'qwen3.7-max',
-          label: '[Token Plan] qwen3.7-max',
-          description: '',
+    const setReasoningEffort = vi.fn();
+    const { props, mockSettings } = renderComponent(
+      {},
+      {
+        getModel: vi.fn(() => 'qwen3.7-max'),
+        getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+        switchModel,
+        setReasoningEffort,
+        getAllConfiguredModels: vi.fn(() => [
+          {
+            id: 'qwen3.7-max',
+            label: '[Token Plan] qwen3.7-max',
+            description: '',
+            authType: AuthType.USE_OPENAI,
+            baseUrl: 'https://token-plan.example.com/v1',
+            envKey: 'TOKEN_PLAN_KEY',
+          },
+          {
+            id: 'qwen3.7-max',
+            label: '[IdeaLab] qwen3.7-max',
+            description: '',
+            authType: AuthType.USE_OPENAI,
+            baseUrl: 'https://idealab.example.com/v1',
+            envKey: 'IDEALAB_KEY',
+          },
+        ]),
+        getContentGeneratorConfig: vi.fn(() => ({
           authType: AuthType.USE_OPENAI,
-          baseUrl: 'https://token-plan.example.com/v1',
-          envKey: 'TOKEN_PLAN_KEY',
-        },
-        {
-          id: 'qwen3.7-max',
-          label: '[IdeaLab] qwen3.7-max',
-          description: '',
-          authType: AuthType.USE_OPENAI,
+          model: 'qwen3.7-max',
           baseUrl: 'https://idealab.example.com/v1',
-          envKey: 'IDEALAB_KEY',
+        })),
+      } as unknown as Partial<Config>,
+      {
+        user: {
+          settings: { model: { reasoningEffort: 'ultra' } },
         },
-      ]),
-      getContentGeneratorConfig: vi.fn(() => ({
-        authType: AuthType.USE_OPENAI,
-        model: 'qwen3.7-max',
-        baseUrl: 'https://idealab.example.com/v1',
-      })),
-    } as unknown as Partial<Config>);
+      } as unknown as Partial<LoadedSettings>,
+    );
 
     const childOnSelect = mockedSelect.mock.calls[0][0].onSelect;
     // Select the IdeaLab entry (second provider with the same id).
@@ -538,6 +548,14 @@ describe('<ModelDialog />', () => {
       'model.baseUrl',
       'https://idealab.example.com/v1',
     );
+    expect(mockSettings.setValue).toHaveBeenCalledWith(
+      SettingScope.User,
+      'model.reasoningEffort',
+      undefined,
+      undefined,
+      { throwOnWriteFailure: true },
+    );
+    expect(setReasoningEffort).toHaveBeenCalledWith(undefined);
     expect(props.onClose).toHaveBeenCalledTimes(1);
   });
 

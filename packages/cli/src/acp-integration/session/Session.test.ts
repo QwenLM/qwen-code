@@ -806,6 +806,7 @@ describe('Session', () => {
       getApprovalMode: vi.fn().mockReturnValue(ApprovalMode.DEFAULT),
       getApprovalModeRevision: vi.fn().mockReturnValue(0),
       switchModel: switchModelSpy,
+      setReasoningEffort: vi.fn(),
       getModel: vi.fn().mockImplementation(() => currentModel),
       getSessionId: vi.fn().mockReturnValue('test-session-id'),
       getSessionSourceType: vi.fn().mockReturnValue(undefined),
@@ -4583,6 +4584,26 @@ describe('Session', () => {
       });
     });
 
+    it('clears persisted effort when switching the default to a toggle-only Qwen model', async () => {
+      mockSettings.user.settings = {
+        model: { reasoningEffort: 'ultra' },
+      };
+
+      await session.setModel({
+        sessionId: 'test-session-id',
+        modelId: `qwen3.7-max(${AuthType.USE_OPENAI})`,
+      });
+
+      expect(mockSettings.setValue).toHaveBeenCalledWith(
+        SettingScope.User,
+        'model.reasoningEffort',
+        undefined,
+        undefined,
+        { throwOnWriteFailure: true },
+      );
+      expect(mockConfig.setReasoningEffort).toHaveBeenCalledWith(undefined);
+    });
+
     it('emits a current_model_update extNotification after switching (A1)', async () => {
       await session.setModel({
         sessionId: 'test-session-id',
@@ -4769,6 +4790,9 @@ describe('Session', () => {
     });
 
     it('can switch the session model without persisting a new default', async () => {
+      mockSettings.user.settings = {
+        model: { reasoningEffort: 'ultra' },
+      };
       await session.setModel(
         {
           sessionId: 'test-session-id',
@@ -4783,6 +4807,7 @@ describe('Session', () => {
         undefined,
       );
       expect(mockSettings.setValue).not.toHaveBeenCalled();
+      expect(mockConfig.setReasoningEffort).not.toHaveBeenCalled();
       expect(mockChatRecordingService.recordSessionModel).toHaveBeenCalledWith({
         modelId: 'qwen3-coder-flash',
         authType: AuthType.USE_OPENAI,

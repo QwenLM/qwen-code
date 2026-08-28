@@ -30,6 +30,7 @@ import { ConfigContext } from '../contexts/ConfigContext.js';
 import { UIStateContext, type UIState } from '../contexts/UIStateContext.js';
 import { useSettings } from '../contexts/SettingsContext.js';
 import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
+import { clearReasoningEffortForToggleOnlyModel } from '../../config/reasoning-effort-persistence.js';
 import { t } from '../../i18n/index.js';
 import {
   formatUnsupportedVoiceModelMessage,
@@ -229,6 +230,7 @@ function handleModelSwitchSuccess({
   isRuntime,
   persistScope,
 }: HandleModelSwitchSuccessParams): void {
+  clearReasoningEffortForToggleOnlyModel(config, settings, effectiveModelId);
   persistModelSelection(
     settings,
     effectiveModelId,

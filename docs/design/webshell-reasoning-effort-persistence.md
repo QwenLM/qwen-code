@@ -16,6 +16,8 @@ There is no global normalization, ordering, allowlist, or fallback for persisted
 
 ACP uses `default` only as an interaction instruction to remove `model.reasoningEffort`; that ACP path never writes the sentinel. The open setting does not reserve `default` globally, so a value authored directly in settings remains an opaque provider value. After clearing the selected scope, the live session adopts the resulting merged value, including an inherited opaque string from a lower-precedence scope.
 
+Persisting a model switch to a toggle-only Qwen model clears `model.reasoningEffort` from every active writable settings scope and clears the live override after the switch succeeds. This avoids carrying a tiered or provider-specific value into a model that accepts only `enable_thinking`. Session-only model switches do not mutate the persisted default, and switches to tiered qwen3.8-max models preserve the effort value.
+
 ## Persistence boundary
 
 The WebShell daemon route marks its ACP `reasoning_effort` update as persistent. The ACP agent applies the selection to the live session first, then writes through the `Session` instance's own loaded settings using the same scope selection as model persistence. Direct ACP calls without the private marker remain session-only.
@@ -34,4 +36,4 @@ Model reasoning capabilities advertise options as independent `value` and `name`
 
 ## Validation
 
-Unit and integration coverage verifies opaque string round trips, `none`, clearing to provider defaults, lifecycle rebuilds, capability labels, the private persistence marker, write failures, welcome previews, and provider wire behavior. Real-daemon E2E compares a clean baseline and this change with isolated configuration directories for both Medium and Thinking Off across a daemon restart and a newly created session.
+Unit and integration coverage verifies opaque string round trips, `none`, clearing to provider defaults, lifecycle rebuilds, capability labels, the private persistence marker, write failures, welcome previews, provider wire behavior, and persisted model switches into toggle-only Qwen models. Real-daemon E2E compares a clean baseline and this change with isolated configuration directories for both Medium and Thinking Off across a daemon restart and a newly created session, then verifies that switching to a toggle-only Qwen model removes the persisted effort before the next request.
