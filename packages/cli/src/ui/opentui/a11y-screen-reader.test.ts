@@ -267,4 +267,20 @@ describe('ScreenReaderOutputWriter (ink append-only parity)', () => {
     writer.updateDynamic('a\x00b\x0bc\x7fd\ne');
     expect(writes).toEqual(['abcd\ne']);
   });
+
+  it('keeps TAB — it separates words in tool/model output (R3-6)', () => {
+    const writes: string[] = [];
+    const writer = new ScreenReaderOutputWriter((chunk) => writes.push(chunk));
+    writer.appendStatic('NAME\tSIZE\nfoo\t10');
+    expect(writes).toEqual(['NAME\tSIZE\nfoo\t10\n']);
+    // The dynamic path hard-wraps via wrap-ansi, which expands tabs to the
+    // next tab stop — word separation survives either way, which is the
+    // point: deleting TAB outright fuses adjacent tokens.
+    const dynamicWrites: string[] = [];
+    const dynamicWriter = new ScreenReaderOutputWriter((chunk) =>
+      dynamicWrites.push(chunk),
+    );
+    dynamicWriter.updateDynamic('a\tb');
+    expect(dynamicWrites[0]).toMatch(/^a {2,}b$/);
+  });
 });

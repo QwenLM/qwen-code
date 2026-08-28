@@ -190,7 +190,39 @@ describe('executeSlashCommand (result mapping)', () => {
     expect(effect).toEqual({
       kind: 'submit',
       content: 'part one part two',
+      modelOverride: undefined,
+      onComplete: undefined,
+      refreshContextFilesOnWrite: undefined,
     });
+  });
+
+  it('submit_prompt carries modelOverride/onComplete/refreshContextFilesOnWrite (R3-2)', async () => {
+    // Ink honors all three: /model <id> <prompt> runs on the chosen model,
+    // /dream records manual runs via onComplete, /remember refreshes
+    // context files. The effect must carry them or the backend degrades
+    // them silently.
+    const onComplete = vi.fn();
+    const commands = [
+      stub({
+        name: 'ask',
+        action: () => ({
+          type: 'submit_prompt' as const,
+          content: 'summarize this file',
+          modelOverride: 'qwen3-max',
+          onComplete,
+          refreshContextFilesOnWrite: true,
+        }),
+      }),
+    ];
+    const effect = await executeSlashCommand('/ask', commands, env);
+    expect(effect).toEqual({
+      kind: 'submit',
+      content: 'summarize this file',
+      modelOverride: 'qwen3-max',
+      onComplete,
+      refreshContextFilesOnWrite: true,
+    });
+    expect(onComplete).not.toHaveBeenCalled();
   });
 
   it('parent commands without an action list their subcommands', async () => {
@@ -261,6 +293,30 @@ describe('executeSlashCommand ink-processor guards (R1-96/100/101/102)', () => {
     );
     controller.abort();
     await expect(pending).resolves.toEqual({ kind: 'handled' });
+  });
+
+  it('an AbortError from a pre-aborted signal is handled, not a failure (R3-1)', async () => {
+    // ESC before dispatch reaches the race: the signal is already aborted,
+    // addEventListener never fires, and the action's I/O rejects with
+    // AbortError into the catch — the user's own cancellation must not be
+    // recorded as a command failure or shown as an error message.
+    const controller = new AbortController();
+    controller.abort();
+    const commands = [
+      stub({
+        name: 'doctor',
+        action: (ctx) => {
+          void ctx.abortSignal;
+          return Promise.reject(new Error('This operation was aborted'));
+        },
+      }),
+    ];
+    const effect = await executeSlashCommand(
+      '/doctor',
+      commands,
+      makeEnv({ abortSignal: controller.signal }),
+    );
+    expect(effect).toEqual({ kind: 'handled' });
   });
 
   it('defers stacked skill invocations instead of leaking the second skill', async () => {
@@ -340,6 +396,29 @@ describe('executeSlashCommand ink-processor guards (R1-96/100/101/102)', () => {
     expect(effect.kind).toBe('message');
     if (effect.kind !== 'message') return;
     expect(effect.content).toBe('Unknown extensions source: bogus.');
+    // Info items with a link (like /bug) append the link footer — ink's
+    // InfoMessage renders it, and headless/SSH users need the URL printed.
+    const bugCommands = [
+      stub({
+        name: 'bug',
+        action: (ctx) => {
+          ctx.ui.addItem(
+            {
+              type: 'info',
+              text: 'To report a bug, open:',
+              linkUrl: 'https://example.com/report',
+              linkText: 'Open GitHub bug report form',
+            },
+            Date.now(),
+          );
+        },
+      }),
+    ];
+    const bugEffect = await executeSlashCommand('/bug', bugCommands, makeEnv());
+    expect(bugEffect.kind).toBe('message');
+    if (bugEffect.kind !== 'message') return;
+    expect(bugEffect.content).toContain('https://example.com/report');
+    expect(bugEffect.content).toContain('Open GitHub bug report form');
     expect(effect.content).not.toContain('not yet available');
   });
 

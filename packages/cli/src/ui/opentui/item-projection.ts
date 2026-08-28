@@ -1048,7 +1048,21 @@ export function projectSpecialItemText(
       const btw = record['btw'] as Parameters<typeof projectBtw>[0] | undefined;
       return btw ? projectBtw(btw) : null;
     }
-    case 'info':
+    case 'info': {
+      // ink's InfoMessage renders linkUrl/linkText as a footer link (the
+      // URL prints when the terminal cannot render links), so headless/SSH
+      // users can still recover it (/bug).
+      const text = typeof record['text'] === 'string' ? record['text'] : null;
+      const linkUrl =
+        typeof record['linkUrl'] === 'string' ? record['linkUrl'] : null;
+      if (!text) return null;
+      if (!linkUrl) return text;
+      const linkText =
+        typeof record['linkText'] === 'string' && record['linkText']
+          ? `${record['linkText']}: `
+          : '';
+      return `${text}\n${linkText}${linkUrl}`;
+    }
     case 'warning':
     case 'success':
       return typeof record['text'] === 'string' ? record['text'] : null;
