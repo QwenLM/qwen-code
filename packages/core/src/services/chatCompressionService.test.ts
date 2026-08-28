@@ -18,7 +18,7 @@ import type { Content } from '@google/genai';
 import { CompressionStatus } from '../core/turn.js';
 import { uiTelemetryService } from '../telemetry/uiTelemetry.js';
 import { tokenLimit } from '../core/tokenLimits.js';
-import type { GeminiChat } from '../core/geminiChat.js';
+import type { LlmChat } from '../core/llm-chat.js';
 import type { Config } from '../config/config.js';
 import { ApprovalMode } from '../config/config.js';
 import type {
@@ -39,7 +39,7 @@ vi.mock('../telemetry/loggers.js');
 
 describe('ChatCompressionService', () => {
   let service: ChatCompressionService;
-  let mockChat: GeminiChat;
+  let mockChat: LlmChat;
   let mockConfig: Config;
   const mockPromptId = 'test-prompt-id';
   let mockGetHookSystem: ReturnType<typeof vi.fn>;
@@ -52,7 +52,7 @@ describe('ChatCompressionService', () => {
         mockChat.getHistory(curated),
       ),
       appendSystemInstruction: vi.fn(),
-    } as unknown as GeminiChat;
+    } as unknown as LlmChat;
     mockGetHookSystem = vi.fn().mockReturnValue({});
     mockConfig = {
       getChatCompression: vi.fn(),
@@ -2076,7 +2076,7 @@ describe('ChatCompressionService.compress sideQuery config', () => {
     const mockChat = {
       getHistory: getHistoryMock,
       getHistoryShallow: getHistoryMock,
-    } as unknown as GeminiChat;
+    } as unknown as LlmChat;
     const mockConfig = {
       getChatCompression: vi.fn(),
       getAutoCompactThreshold: vi.fn(),
@@ -2141,7 +2141,7 @@ describe('ChatCompressionService.compress sideQuery config', () => {
     const mockChat = {
       getHistory: getHistoryMock,
       getHistoryShallow: getHistoryMock,
-    } as unknown as GeminiChat;
+    } as unknown as LlmChat;
     const warn = vi.fn();
     const mockConfig = {
       getChatCompression: vi.fn(),
@@ -2228,7 +2228,7 @@ describe('ChatCompressionService.compress cache sharing', () => {
     lastPromptTokenCountIsEstimated?: boolean;
     lastOutputTokenCount?: number;
   }): {
-    chat: GeminiChat;
+    chat: LlmChat;
     config: Config;
     generateText: ReturnType<typeof vi.fn>;
   } {
@@ -2262,7 +2262,7 @@ describe('ChatCompressionService.compress cache sharing', () => {
       getLastOutputTokenCount: vi
         .fn()
         .mockReturnValue(options?.lastOutputTokenCount ?? 0),
-    } as unknown as GeminiChat;
+    } as unknown as LlmChat;
     const config = {
       getChatCompression: vi.fn(),
       getAutoCompactThreshold: vi.fn(),
@@ -2964,7 +2964,7 @@ describe('ChatCompressionService.compress cheap-gate uses estimated tokens', () 
   // mockChat/mockConfig rather than shared factories, so we follow that
   // pattern here. getHistory(true) returns a non-empty array so the cheap-
   // gate flow can reach the spy when the threshold is crossed.
-  function makeFakeChat(): GeminiChat {
+  function makeFakeChat(): LlmChat {
     const history: Content[] = [
       { role: 'user', parts: [{ text: 'msg1' }] },
       { role: 'model', parts: [{ text: 'msg2' }] },
@@ -2973,7 +2973,7 @@ describe('ChatCompressionService.compress cheap-gate uses estimated tokens', () 
     return {
       getHistory: getHistoryMock,
       getHistoryShallow: getHistoryMock,
-    } as unknown as GeminiChat;
+    } as unknown as LlmChat;
   }
 
   function makeFakeConfig(opts: { contextWindowSize: number }): Config {
@@ -3222,12 +3222,12 @@ describe('ChatCompressionService.compress — claude-code-style full-history com
     vi.restoreAllMocks();
   });
 
-  function makeFakeChat(history: Content[]): GeminiChat {
+  function makeFakeChat(history: Content[]): LlmChat {
     const getHistoryMock = vi.fn().mockReturnValue(history);
     return {
       getHistory: getHistoryMock,
       getHistoryShallow: getHistoryMock,
-    } as unknown as GeminiChat;
+    } as unknown as LlmChat;
   }
 
   function makeFakeConfig(): Config {
@@ -3453,7 +3453,7 @@ describe('ChatCompressionService.compress cheap-gate uses computeThresholds.auto
     vi.restoreAllMocks();
   });
 
-  function makeFakeChat(): GeminiChat {
+  function makeFakeChat(): LlmChat {
     const history: Content[] = [
       { role: 'user', parts: [{ text: 'msg1' }] },
       { role: 'model', parts: [{ text: 'msg2' }] },
@@ -3462,7 +3462,7 @@ describe('ChatCompressionService.compress cheap-gate uses computeThresholds.auto
     return {
       getHistory: getHistoryMock,
       getHistoryShallow: getHistoryMock,
-    } as unknown as GeminiChat;
+    } as unknown as LlmChat;
   }
 
   function makeFakeConfig(opts: { contextWindowSize: number }): Config {
@@ -3576,7 +3576,7 @@ describe('ChatCompressionService.compress cheap-gate runs against the full windo
     vi.restoreAllMocks();
   });
 
-  function makeFakeChat(): GeminiChat {
+  function makeFakeChat(): LlmChat {
     const history: Content[] = [
       { role: 'user', parts: [{ text: 'msg1' }] },
       { role: 'model', parts: [{ text: 'msg2' }] },
@@ -3585,7 +3585,7 @@ describe('ChatCompressionService.compress cheap-gate runs against the full windo
     return {
       getHistory: getHistoryMock,
       getHistoryShallow: getHistoryMock,
-    } as unknown as GeminiChat;
+    } as unknown as LlmChat;
   }
 
   function makeFakeConfig(opts: { contextWindowSize: number }): Config {
@@ -3693,12 +3693,12 @@ describe('ChatCompressionService.compress — single-turn Node REPL image regres
     vi.restoreAllMocks();
   });
 
-  function makeFakeChat(history: Content[]): GeminiChat {
+  function makeFakeChat(history: Content[]): LlmChat {
     const getHistoryMock = vi.fn().mockReturnValue(history);
     return {
       getHistory: getHistoryMock,
       getHistoryShallow: getHistoryMock,
-    } as unknown as GeminiChat;
+    } as unknown as LlmChat;
   }
 
   function makeFakeConfig(): Config {
@@ -3858,7 +3858,7 @@ describe('ChatCompressionService.compress — customInstructions plumbing', () =
     const mockChat = {
       getHistory: getHistoryMock,
       getHistoryShallow: getHistoryMock,
-    } as unknown as GeminiChat;
+    } as unknown as LlmChat;
     const hookSystem = opts.hookSystem ?? {
       firePreCompactEvent: vi.fn().mockResolvedValue(undefined),
       firePostCompactEvent: vi.fn().mockResolvedValue(undefined),
@@ -3920,7 +3920,7 @@ describe('ChatCompressionService.compress — customInstructions plumbing', () =
     const mockChat = {
       getHistory: getHistoryMock,
       getHistoryShallow: getHistoryMock,
-    } as unknown as GeminiChat;
+    } as unknown as LlmChat;
     const mockConfig = {
       getChatCompression: vi.fn(),
       getAutoCompactThreshold: vi.fn(),
@@ -4144,7 +4144,7 @@ describe('ChatCompressionService.compress — plan-mode + subagent attachment wi
     const mockChat = {
       getHistory: getHistoryMock,
       getHistoryShallow: getHistoryMock,
-    } as unknown as GeminiChat;
+    } as unknown as LlmChat;
     const mockConfig = {
       getChatCompression: vi.fn(),
       getAutoCompactThreshold: vi.fn(),
@@ -4338,7 +4338,7 @@ describe('ChatCompressionService.compress — plan-mode + subagent attachment wi
     const mockChat = {
       getHistory: getHistoryMock,
       getHistoryShallow: getHistoryMock,
-    } as unknown as GeminiChat;
+    } as unknown as LlmChat;
     const mockConfig = {
       getChatCompression: vi.fn(),
       getAutoCompactThreshold: vi.fn(),
@@ -4439,7 +4439,7 @@ const WINDOW = 65_536;
 
 describe('issue #7960: compression side-query output budget vs small windows', () => {
   let service: ChatCompressionService;
-  let mockChat: GeminiChat;
+  let mockChat: LlmChat;
   let mockConfig: Config;
   let capturedPromptTokens: number | undefined;
   let capturedMaxOutputTokens: number | undefined;
@@ -4455,7 +4455,7 @@ describe('issue #7960: compression side-query output budget vs small windows', (
       getHistoryShallow: vi.fn((curated?: boolean) =>
         mockChat.getHistory(curated),
       ),
-    } as unknown as GeminiChat;
+    } as unknown as LlmChat;
     mockConfig = {
       getChatCompression: vi.fn(),
       getAutoCompactThreshold: vi.fn(),

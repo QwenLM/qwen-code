@@ -149,7 +149,7 @@ const createMockUIState = (overrides: Partial<UIState> = {}): UIState =>
     streamingResponseLengthRef: { current: 0 },
     voiceMicWarnedStatusRef: { current: null },
     isReceivingContent: false,
-    pendingGeminiHistoryItems: [],
+    pendingLlmHistoryItems: [],
     terminalWidth: 80,
     ...overrides,
   }) as UIState;
