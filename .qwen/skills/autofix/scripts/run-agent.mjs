@@ -18,7 +18,11 @@ const skillPath = resolve(
   '..',
   'SKILL.md',
 );
-const QWEN_TIMEOUT_MS = Number(process.env.QWEN_TIMEOUT_MS) || 50 * 60 * 1000;
+// Default absolute budget, 90m. Only the issue lane's `develop-issue` leg
+// relies on it (every other leg pins QWEN_TIMEOUT_MS in the workflow): at
+// the former 50m, 6 of the 13 develop attempts observed 2026-08-20..26 died
+// at the budget with the branch discarded, against 2 that published a PR.
+const QWEN_TIMEOUT_MS = Number(process.env.QWEN_TIMEOUT_MS) || 90 * 60 * 1000;
 // Idle watchdog: a wedged sandbox produces NOTHING — four observed hangs
 // (#8663 x2, #8761 r3, #8763 r4) each printed their last byte at docker
 // container entry and then sat silent for the whole absolute budget,
@@ -28,8 +32,9 @@ const QWEN_TIMEOUT_MS = Number(process.env.QWEN_TIMEOUT_MS) || 50 * 60 * 1000;
 // ~1M-token contexts, so twice that is the default. Distinct from
 // QWEN_TIMEOUT_MS so
 // the failure comment says which limit fired; a leg whose absolute budget is
-// shorter than this window (the review workflow's 18-minute repair pass)
-// always reaches the absolute timer first.
+// shorter than this window would always reach the absolute timer first
+// (none today — the shortest leg is the issue lane's 50-minute assess
+// pass).
 const parsedIdleTimeoutMs = Number(process.env.QWEN_IDLE_TIMEOUT_MS);
 // Reject negative/0/NaN: Number('-1') is truthy, so a bare `|| default`
 // guard would arm a sub-second window and kill every agent at the first
