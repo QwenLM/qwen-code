@@ -3008,6 +3008,7 @@ export interface DaemonSkillToggleResult {
   sessionsFailed: number;
 }
 
+/** Per-target error codes returned by older daemon versions. */
 export type DaemonSkillBatchToggleErrorCode =
   | 'skill_not_found'
   | 'skill_not_toggleable'
