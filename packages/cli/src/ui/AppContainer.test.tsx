@@ -5458,6 +5458,76 @@ describe('AppContainer State Management', () => {
       ).toBe(true);
     });
 
+    it('seeds the prompt counter from the max persisted snapshot suffix on resume (R13-1)', async () => {
+      // Retry/Teammate submits mint prompt-id suffixes without persisting a
+      // counted user record, so seeding only from the user-record count
+      // re-mints an already-used suffix after any retry: Q1 (suffix 0) ->
+      // error retry (suffix 1, no user record) -> resume (seed would be 1)
+      // -> the next query mints suffix 1 again, colliding with the retry's
+      // file-history snapshot (last-occurrence-wins lookups would then
+      // resolve rewind/diffs to the wrong turn).
+      const seedPromptCount = vi.fn();
+      mockedUseSessionStats.mockReturnValue({
+        stats: {},
+        seedPromptCount,
+      });
+      mockedUseHistory.mockReturnValue({
+        history: [] as HistoryItem[],
+        addItem: vi.fn(),
+        updateItem: vi.fn(),
+        clearItems: vi.fn(),
+        loadHistory: vi.fn(),
+        truncateToItem: vi.fn(),
+      });
+      vi.spyOn(mockConfig, 'getContentGenerator').mockReturnValue(
+        {} as unknown as ReturnType<typeof mockConfig.getContentGenerator>,
+      );
+      vi.spyOn(mockConfig, 'initialize').mockResolvedValue(undefined);
+      vi.spyOn(mockConfig, 'loadPausedBackgroundAgents').mockResolvedValue([]);
+      vi.spyOn(mockConfig, 'getResumedSessionData').mockReturnValue({
+        conversation: {
+          sessionId: 'session-1',
+          projectHash: 'test-project-hash',
+          startTime: '2024-01-01T00:00:00Z',
+          lastUpdated: '2024-01-01T00:00:01Z',
+          messages: [
+            {
+              uuid: 'u1',
+              parentUuid: null,
+              sessionId: 'session-1',
+              timestamp: '2024-01-01T00:00:00Z',
+              type: 'user',
+              message: { role: 'user', parts: [{ text: 'hello' }] },
+              cwd: '/test/workspace',
+              version: '1.0.0',
+            },
+          ],
+        },
+        // One user record, but snapshots stamped up to suffix 1 by the retry.
+        fileHistorySnapshots: [
+          { promptId: 'session-1########0', trackedFileBackups: {} },
+          { promptId: 'session-1########1', trackedFileBackups: {} },
+        ],
+        filePath: '/tmp/session.jsonl',
+        lastCompletedUuid: 'u1',
+      } as ReturnType<typeof mockConfig.getResumedSessionData>);
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      // max(userTurnCount=1, maxSuffix+1=2) — without the snapshot-derived
+      // seed this would have been called with 1.
+      await vi.waitFor(() => {
+        expect(seedPromptCount).toHaveBeenCalledWith(2);
+      });
+    });
+
     it('does not remeasure footer height for sticky todo status-only updates', async () => {
       // Scoped stub: makeFakeConfig().initialize() rejects on React's
       // double-mount, which leaks async renders and destabilizes the

@@ -1088,8 +1088,25 @@ export const AppContainer = (props: AppContainerProps) => {
             m.subtype !== 'mid_turn_user_message' &&
             m.subtype !== 'realtime_message',
         ).length;
-        if (userTurnCount > 0) {
-          seedPromptCount(userTurnCount);
+        // R13-1: the user-record count alone under-seeds whenever Retry or
+        // Teammate submits consumed prompt-id suffixes without persisting a
+        // counted user record — after any such retry, the first post-resume
+        // UserQuery would re-mint an already-used suffix, and file-history
+        // lookups are last-occurrence-wins, so rewind/diffs would resolve to
+        // the wrong turn. Seed from the maximum persisted snapshot suffix as
+        // well: snapshots are the prompt_id-keyed state the collision harms.
+        let maxPersistedSuffix = -1;
+        for (const snapshot of resumedSessionData.fileHistorySnapshots ?? []) {
+          const separatorIndex = snapshot.promptId.lastIndexOf('########');
+          if (separatorIndex === -1) continue;
+          const suffixText = snapshot.promptId.slice(separatorIndex + 8);
+          if (!/^\d+$/.test(suffixText)) continue;
+          const suffix = Number(suffixText);
+          if (suffix > maxPersistedSuffix) maxPersistedSuffix = suffix;
+        }
+        const promptCountSeed = Math.max(userTurnCount, maxPersistedSuffix + 1);
+        if (promptCountSeed > 0) {
+          seedPromptCount(promptCountSeed);
         }
 
         const recovered = await config.loadPausedBackgroundAgents(
