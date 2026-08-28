@@ -3287,7 +3287,12 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                     creationRecovery: error.recovery,
                     errorCode: getDaemonErrorCode(error.originalError),
                   }
-                : { errorCode: getDaemonErrorCode(error) },
+                : {
+                    errorCode:
+                      error instanceof DaemonCapabilityMissingError
+                        ? error.capability
+                        : getDaemonErrorCode(error),
+                  },
               error: message,
               errorStatus: resolveConnectionErrorStatus(
                 outcomeUnknown
@@ -4219,6 +4224,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
   const lastHandledClientIdRef = useRef<string | undefined>(undefined);
 
   useEffect(() => {
+    if (sessionContextResolutionError) return;
     const targetSessionContext =
       resolvedSessionContext ??
       // A failed controlled load leaves the target's workspace on the
@@ -4238,7 +4244,6 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     lastHandledSessionIdRef.current = sessionId;
     lastHandledSessionContextRef.current = targetSessionContext;
     lastHandledClientIdRef.current = clientId;
-    setRestoreSessionContext(targetSessionContext);
 
     const currentSessionId = connectionRef.current.sessionId;
     if (
@@ -4248,6 +4253,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     ) {
       return;
     }
+    setRestoreSessionContext(targetSessionContext);
 
     const request = sessionId
       ? actions.loadSession(sessionId, {
@@ -4267,7 +4273,13 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
         error,
       );
     });
-  }, [actions, clientId, resolvedSessionContext, sessionId]);
+  }, [
+    actions,
+    clientId,
+    resolvedSessionContext,
+    sessionContextResolutionError,
+    sessionId,
+  ]);
 
   const ownerGuardValue = useMemo<DaemonSessionOwnerGuard>(
     () => ({

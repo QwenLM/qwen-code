@@ -662,6 +662,12 @@ export function createDaemonSessionActions({
         currentSessionContext?.kind === 'live' ||
         targetSessionContext?.kind === 'standalone' ||
         targetSessionContext?.kind === 'live');
+    const switchesNonWorkspaceSession =
+      currentConnection.sessionId !== undefined &&
+      currentConnection.sessionId !== sessionId &&
+      currentSessionContext?.kind === targetSessionContext?.kind &&
+      (targetSessionContext?.kind === 'standalone' ||
+        targetSessionContext?.kind === 'live');
     if (currentSession) {
       const detachCurrentSession = () =>
         currentSession.detach().catch((error: unknown) => {
@@ -686,9 +692,10 @@ export function createDaemonSessionActions({
     if (!reloadingCurrentSession) sessionRef.current = undefined;
     if (!reloadingCurrentSession) {
       setConnection((current) => {
-        const base = crossesNonWorkspaceBoundary
-          ? getConnectionAfterSessionClear(current, currentSessionId, false)
-          : current;
+        const base =
+          crossesNonWorkspaceBoundary || switchesNonWorkspaceSession
+            ? getConnectionAfterSessionClear(current, currentSessionId, false)
+            : current;
         return {
           ...base,
           status: 'connecting',
@@ -1536,25 +1543,35 @@ export function createDaemonSessionActions({
           kind: 'workspace' as const,
           cwd: nextSession.workspaceCwd,
         };
-        setConnection((current) => ({
-          ...current,
-          status: 'connected',
-          sessionId: nextSession.sessionId,
-          sessionContext: createdSessionContext,
-          goalState: undefined,
-          ...(nextSession.clientId ? { clientId: nextSession.clientId } : {}),
-          workspaceCwd:
+        setConnection((current) => {
+          const base =
             createdSessionContext.kind === 'workspace'
-              ? createdSessionContext.cwd
-              : undefined,
-          standaloneSession:
-            createdSessionContext.kind === 'standalone'
-              ? getStandaloneConnectionState(nextSession.session)
-              : undefined,
-          error: undefined,
-          errorStatus: undefined,
-          missingSession: false,
-        }));
+              ? current
+              : getConnectionAfterSessionClear(
+                  current,
+                  current.sessionId,
+                  false,
+                );
+          return {
+            ...base,
+            status: 'connected',
+            sessionId: nextSession.sessionId,
+            sessionContext: createdSessionContext,
+            goalState: undefined,
+            ...(nextSession.clientId ? { clientId: nextSession.clientId } : {}),
+            workspaceCwd:
+              createdSessionContext.kind === 'workspace'
+                ? createdSessionContext.cwd
+                : undefined,
+            standaloneSession:
+              createdSessionContext.kind === 'standalone'
+                ? getStandaloneConnectionState(nextSession.session)
+                : undefined,
+            error: undefined,
+            errorStatus: undefined,
+            missingSession: false,
+          };
+        });
         return nextSession;
       } catch (error) {
         if (rawCreateStarted && !rawCreateSettled) retireLateResult = true;

@@ -69,12 +69,18 @@ export function resolveActionSessionContext(
 export function resolveLiveSessionWorkspaceCwd(
   capabilities: DaemonCapabilities,
 ): string {
-  if (!capabilities.features.includes('multi_workspace_sessions')) {
+  if (
+    !Array.isArray(capabilities.features) ||
+    !capabilities.features.includes('multi_workspace_sessions')
+  ) {
     throw new Error(
       'Daemon does not advertise multi-workspace session routing',
     );
   }
-  const liveWorkspaces = (capabilities.workspaces ?? []).filter(
+  const workspaces = Array.isArray(capabilities.workspaces)
+    ? capabilities.workspaces
+    : [];
+  const liveWorkspaces = workspaces.filter(
     (workspace) => workspace.kind === 'live',
   );
   if (liveWorkspaces.length !== 1) {
@@ -85,16 +91,24 @@ export function resolveLiveSessionWorkspaceCwd(
     );
   }
   const workspace = liveWorkspaces[0]!;
-  const normalizedWorkspaceCwd = normalizeWorkspaceCwd(workspace.cwd);
   if (
     workspace.trusted !== true ||
     workspace.primary !== false ||
-    !workspace.id ||
-    !workspace.cwd ||
-    capabilities.workspaces?.filter((entry) => entry.id === workspace.id)
-      .length !== 1 ||
-    capabilities.workspaces?.filter(
-      (entry) => normalizeWorkspaceCwd(entry.cwd) === normalizedWorkspaceCwd,
+    typeof workspace.id !== 'string' ||
+    workspace.id.length === 0 ||
+    typeof workspace.cwd !== 'string' ||
+    workspace.cwd.length === 0
+  ) {
+    throw new Error('Daemon Live session runtime is not uniquely trusted');
+  }
+  const normalizedWorkspaceCwd = normalizeWorkspaceCwd(workspace.cwd);
+  if (
+    workspaces.filter((entry) => entry.id === workspace.id).length !== 1 ||
+    workspaces.filter(
+      (entry) =>
+        typeof entry.cwd === 'string' &&
+        entry.cwd.length > 0 &&
+        normalizeWorkspaceCwd(entry.cwd) === normalizedWorkspaceCwd,
     ).length !== 1
   ) {
     throw new Error('Daemon Live session runtime is not uniquely trusted');

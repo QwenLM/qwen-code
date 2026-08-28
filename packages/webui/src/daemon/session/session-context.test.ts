@@ -39,6 +39,15 @@ describe('session context', () => {
   it('rejects conflicting or workspace-qualified non-workspace contexts', () => {
     expect(() =>
       resolveProviderSessionContext(
+        { kind: 'workspace' } as unknown as Parameters<
+          typeof resolveProviderSessionContext
+        >[0],
+        undefined,
+        undefined,
+      ),
+    ).toThrow('Workspace session context requires a cwd');
+    expect(() =>
+      resolveProviderSessionContext(
         { kind: 'workspace', cwd: '/one' },
         '/two',
         undefined,
@@ -212,6 +221,87 @@ describe('session context', () => {
         ],
       }),
     ).toThrow('not uniquely trusted');
+    expect(() =>
+      resolveLiveSessionWorkspaceCwd({
+        v: 1,
+        mode: 'native',
+        features: ['multi_workspace_sessions'],
+        modelServices: [],
+        workspaces: [
+          {
+            id: 'live',
+            cwd: '/conversations',
+            primary: false,
+            trusted: true,
+            kind: 'live',
+          },
+          {
+            id: 'live',
+            cwd: '/other',
+            primary: false,
+            trusted: true,
+          },
+        ],
+      }),
+    ).toThrow('not uniquely trusted');
+    expect(() =>
+      resolveLiveSessionWorkspaceCwd({
+        v: 1,
+        mode: 'native',
+        features: ['multi_workspace_sessions'],
+        modelServices: [],
+        workspaces: [
+          {
+            id: '',
+            cwd: '/conversations',
+            primary: false,
+            trusted: true,
+            kind: 'live',
+          },
+        ],
+      }),
+    ).toThrow('not uniquely trusted');
+    expect(() =>
+      resolveLiveSessionWorkspaceCwd({
+        v: 1,
+        mode: 'native',
+        features: ['multi_workspace_sessions'],
+        modelServices: [],
+        workspaces: [
+          {
+            id: 'live',
+            cwd: '',
+            primary: false,
+            trusted: true,
+            kind: 'live',
+          },
+        ],
+      }),
+    ).toThrow('not uniquely trusted');
+    expect(() =>
+      resolveLiveSessionWorkspaceCwd({
+        v: 1,
+        mode: 'native',
+        features: ['multi_workspace_sessions'],
+        modelServices: [],
+        workspaces: [
+          {
+            id: 'live',
+            primary: false,
+            trusted: true,
+            kind: 'live',
+          } as unknown as DaemonWorkspaceCapability,
+        ],
+      }),
+    ).toThrow('not uniquely trusted');
+    expect(() =>
+      resolveLiveSessionWorkspaceCwd({
+        v: 1,
+        mode: 'native',
+        modelServices: [],
+        workspaces: [],
+      } as unknown as Parameters<typeof resolveLiveSessionWorkspaceCwd>[0]),
+    ).toThrow('does not advertise multi-workspace session routing');
   });
 
   it('builds stable keys and reads structured daemon error codes', () => {
@@ -228,6 +318,30 @@ describe('session context', () => {
     expect(restoreSessionContextMatches(undefined, { kind: 'live' })).toBe(
       false,
     );
+    expect(
+      restoreSessionContextMatches(
+        { kind: 'workspace', cwd: '/same' },
+        { kind: 'workspace', cwd: '/same' },
+      ),
+    ).toBe(true);
+    expect(
+      restoreSessionContextMatches(
+        { kind: 'workspace', cwd: '/one' },
+        { kind: 'workspace', cwd: '/two' },
+      ),
+    ).toBe(false);
+    expect(
+      restoreSessionContextMatches(
+        { kind: 'standalone' },
+        { kind: 'standalone' },
+      ),
+    ).toBe(true);
+    expect(
+      restoreSessionContextMatches({ kind: 'live' }, { kind: 'live' }),
+    ).toBe(true);
+    expect(
+      restoreSessionContextMatches({ kind: 'standalone' }, undefined),
+    ).toBe(false);
     expect(
       getDaemonErrorCode({ body: { code: 'working_directory_missing' } }),
     ).toBe('working_directory_missing');

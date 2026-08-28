@@ -17,6 +17,7 @@ import {
 import type {
   ActivePrompt,
   DaemonConnectionState,
+  DaemonProductSessionContext,
   PendingSessionLoad,
   SettledPrompt,
 } from './types';
@@ -231,6 +232,7 @@ describe('getConnectionAfterSessionClear', () => {
         providers: [],
       },
       gitBranch: 'main',
+      gitStatus: {} as never,
       standaloneSession: {
         projectlessOutputDirectory: '/output/standalone-a',
       },
@@ -246,6 +248,7 @@ describe('getConnectionAfterSessionClear', () => {
     expect(next).not.toHaveProperty('models');
     expect(next).not.toHaveProperty('providers');
     expect(next).not.toHaveProperty('gitBranch');
+    expect(next).not.toHaveProperty('gitStatus');
     expect(next).not.toHaveProperty('standaloneSession');
     expect(getWorkspaceModelsAfterSessionClear(current)).toBeUndefined();
   });
@@ -501,6 +504,106 @@ describe('createDaemonSessionActions', () => {
     });
   });
 
+  it('uses the default standalone context for a contextless create', async () => {
+    const nextSession = createMockSession('standalone-default');
+    Object.assign(nextSession, {
+      session: {
+        sessionId: 'standalone-default',
+        workspaceCwd: '/private/standalone-default',
+        sourceType: 'standalone',
+        context: { kind: 'standalone' },
+        workingDirectory: { state: 'ready' },
+      },
+    });
+    const createDetachedSession = vi.fn();
+    const createDetachedStandaloneSession = vi.fn(async () => nextSession);
+    const { actions } = createActionsHarness({
+      connection: { status: 'connected' },
+      createDetachedSession,
+      createDetachedStandaloneSession,
+      getDefaultSessionContext: () => ({ kind: 'standalone' }),
+    });
+
+    await expect(actions.createSession()).resolves.toBe(nextSession);
+    expect(createDetachedStandaloneSession).toHaveBeenCalledOnce();
+    expect(createDetachedSession).not.toHaveBeenCalled();
+  });
+
+  it('returns a detached standalone result without replacing an active session', async () => {
+    const activeSession = createMockSession('workspace-a');
+    const nextSession = createMockSession('standalone-b');
+    const standaloneRecord = {
+      sessionId: 'standalone-b',
+      workspaceCwd: '/private/standalone-b',
+      sourceType: 'standalone',
+      context: { kind: 'standalone' as const },
+      workingDirectory: { state: 'ready' as const },
+    };
+    Object.assign(nextSession, { session: standaloneRecord });
+    const createDetachedStandaloneSession = vi.fn(async () => nextSession);
+    const connection: DaemonConnectionState = {
+      status: 'connected',
+      sessionId: 'workspace-a',
+      sessionContext: { kind: 'workspace', cwd: '/workspace' },
+      workspaceCwd: '/workspace',
+    };
+    const { actions, getConnection } = createActionsHarness({
+      connection,
+      session: activeSession,
+      createDetachedStandaloneSession,
+    });
+
+    await expect(
+      actions.createSession({ sessionContext: { kind: 'standalone' } }),
+    ).resolves.toBe(standaloneRecord);
+    expect(activeSession.client.createOrAttachSession).not.toHaveBeenCalled();
+    expect(getConnection()).toEqual(connection);
+  });
+
+  it('clears workspace metadata before publishing a fresh standalone session', async () => {
+    const nextSession = createMockSession('standalone-b');
+    Object.assign(nextSession, {
+      session: {
+        sessionId: 'standalone-b',
+        workspaceCwd: '/private/standalone-b',
+        sourceType: 'standalone',
+        context: { kind: 'standalone' },
+        workingDirectory: { state: 'ready' },
+      },
+    });
+    const { actions, getConnection } = createActionsHarness({
+      connection: {
+        status: 'connected',
+        sessionContext: { kind: 'workspace', cwd: '/workspace' },
+        workspaceCwd: '/workspace',
+        commands: [commandInfo('workspace-command')],
+        skills: ['workspace-skill'],
+        models: [{ id: 'workspace-model', label: 'Workspace model' }],
+        providers: {
+          v: 1,
+          workspaceCwd: '/workspace',
+          initialized: true,
+          providers: [],
+        },
+        gitBranch: 'main',
+        gitStatus: {} as never,
+      },
+      createDetachedStandaloneSession: vi.fn(async () => nextSession),
+    });
+
+    await actions.clearSession();
+    await actions.createSession({ sessionContext: { kind: 'standalone' } });
+
+    expect(getConnection().sessionContext).toEqual({ kind: 'standalone' });
+    expect(getConnection().workspaceCwd).toBeUndefined();
+    expect(getConnection().commands).toBeUndefined();
+    expect(getConnection().skills).toBeUndefined();
+    expect(getConnection().models).toBeUndefined();
+    expect(getConnection().providers).toBeUndefined();
+    expect(getConnection().gitBranch).toBeUndefined();
+    expect(getConnection().gitStatus).toBeUndefined();
+  });
+
   it('surfaces standalone create recovery without retrying create', async () => {
     const originalError = new DaemonHttpError(
       503,
@@ -542,6 +645,49 @@ describe('createDaemonSessionActions', () => {
         errorCode: 'standalone_session_creating',
       },
       errorStatus: 503,
+    });
+  });
+
+  it('publishes standalone recovery after a workspace predecessor is cleared', async () => {
+    const originalError = new DaemonHttpError(
+      503,
+      { code: 'standalone_session_creating' },
+      'outcome unknown',
+    );
+    const error = new DaemonStandaloneCreationOutcomeUnknownError(
+      '019cf000-0000-7000-8000-000000000003',
+      {
+        state: 'creating',
+        sessionId: '019cf000-0000-7000-8000-000000000003',
+      },
+      originalError,
+    );
+    const { actions, getConnection } = createActionsHarness({
+      connection: {
+        status: 'connected',
+        sessionContext: { kind: 'workspace', cwd: '/workspace' },
+        workspaceCwd: '/workspace',
+      },
+      createDetachedStandaloneSession: vi.fn(async () => {
+        throw error;
+      }),
+    });
+
+    await actions.clearSession();
+    await expect(
+      actions.createSession({ sessionContext: { kind: 'standalone' } }),
+    ).rejects.toBe(error);
+    expect(getConnection()).toMatchObject({
+      status: 'error',
+      sessionContext: { kind: 'standalone' },
+      sessionId: '019cf000-0000-7000-8000-000000000003',
+      workspaceCwd: undefined,
+      standaloneSession: {
+        creationRecovery: {
+          state: 'creating',
+          sessionId: '019cf000-0000-7000-8000-000000000003',
+        },
+      },
     });
   });
 
@@ -603,6 +749,78 @@ describe('createDaemonSessionActions', () => {
     );
     expect(createDetachedSession).not.toHaveBeenCalled();
     expect(createDetachedStandaloneSession).not.toHaveBeenCalled();
+  });
+
+  it('rejects newSession in the Live context without changing state', async () => {
+    const connection: DaemonConnectionState = {
+      status: 'connected',
+      sessionId: 'live-a',
+      sessionContext: { kind: 'live' },
+      displayName: 'Live A',
+    };
+    const { actions, getConnection } = createActionsHarness({ connection });
+
+    await expect(actions.newSession()).rejects.toThrow(
+      'Live session context does not support create',
+    );
+    expect(getConnection()).toEqual(connection);
+  });
+
+  it('rejects workspace-only create options for standalone sessions', async () => {
+    const createDetachedSession = vi.fn();
+    const createDetachedStandaloneSession = vi.fn();
+    const { actions } = createActionsHarness({
+      connection: {
+        status: 'connected',
+        sessionContext: { kind: 'standalone' },
+      },
+      createDetachedSession,
+      createDetachedStandaloneSession,
+    });
+
+    await expect(
+      actions.createSession({ sourceType: 'default' }),
+    ).rejects.toThrow(
+      'Standalone session creation does not support sourceType, worktree, or branch options',
+    );
+    expect(createDetachedSession).not.toHaveBeenCalled();
+    expect(createDetachedStandaloneSession).not.toHaveBeenCalled();
+  });
+
+  it('does not apply the generic create timeout to standalone create', async () => {
+    vi.useFakeTimers();
+    try {
+      const deferred = createDeferred<DaemonSessionClient>();
+      const nextSession = createMockSession('standalone-b');
+      Object.assign(nextSession, {
+        session: {
+          sessionId: 'standalone-b',
+          workspaceCwd: '/private/standalone-b',
+          sourceType: 'standalone',
+          context: { kind: 'standalone' },
+          workingDirectory: { state: 'ready' },
+        },
+      });
+      const { actions } = createActionsHarness({
+        connection: {
+          status: 'connected',
+          sessionContext: { kind: 'standalone' },
+        },
+        createDetachedStandaloneSession: vi.fn(() => deferred.promise),
+      });
+
+      const pending = actions.createSession();
+      let settled = false;
+      void pending.finally(() => {
+        settled = true;
+      });
+      await vi.advanceTimersByTimeAsync(30_001);
+      expect(settled).toBe(false);
+      deferred.resolve(nextSession as unknown as DaemonSessionClient);
+      await expect(pending).resolves.toBe(nextSession);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('forwards options.workspaceCwd to the detached create branch', async () => {
@@ -804,6 +1022,42 @@ describe('createDaemonSessionActions', () => {
     expect(getConnection().models).toBeUndefined();
     expect(getConnection().providers).toBeUndefined();
     expect(getConnection().gitBranch).toBeUndefined();
+  });
+
+  it('drops stale previews when switching between standalone sessions', () => {
+    const existingSession = createMockSession('standalone-a');
+    const { actions, getConnection } = createActionsHarness({
+      connection: {
+        status: 'connected',
+        sessionId: 'standalone-a',
+        sessionContext: { kind: 'standalone' },
+        commands: [commandInfo('standalone-command')],
+        skills: ['standalone-skill'],
+        models: [{ id: 'standalone-model', label: 'Standalone model' }],
+        currentModel: 'standalone-model',
+        currentMode: 'yolo',
+        contextWindow: 32_000,
+      },
+      session: existingSession,
+    });
+
+    void actions
+      .loadSession('standalone-b', {
+        sessionContext: { kind: 'standalone' },
+      })
+      .catch(() => undefined);
+
+    expect(getConnection()).toMatchObject({
+      status: 'connecting',
+      sessionId: 'standalone-b',
+      sessionContext: { kind: 'standalone' },
+    });
+    expect(getConnection().commands).toBeUndefined();
+    expect(getConnection().skills).toBeUndefined();
+    expect(getConnection().models).toBeUndefined();
+    expect(getConnection().currentModel).toBeUndefined();
+    expect(getConnection().currentMode).toBeUndefined();
+    expect(getConnection().contextWindow).toBeUndefined();
   });
 
   it('drops standalone previews when switching to a workspace target', () => {
@@ -1025,6 +1279,32 @@ describe('createDaemonSessionActions', () => {
     expect(setRestoreSessionContext).toHaveBeenCalledWith({
       kind: 'workspace',
       cwd: '/workspace/secondary',
+    });
+  });
+
+  it('uses the default standalone context after a failed connection', () => {
+    const setRestoreSessionContext = vi.fn();
+    const { actions, getConnection } = createActionsHarness({
+      connection: {
+        status: 'error',
+        error: 'previous load failed',
+        sessionContext: { kind: 'workspace', cwd: '/failed-target' },
+        workspaceCwd: '/failed-target',
+      },
+      getDefaultSessionContext: () => ({ kind: 'standalone' }),
+      setRestoreSessionContext,
+    });
+
+    void actions.loadSession('standalone-b').catch(() => undefined);
+
+    expect(setRestoreSessionContext).toHaveBeenCalledWith({
+      kind: 'standalone',
+    });
+    expect(getConnection()).toMatchObject({
+      status: 'connecting',
+      sessionId: 'standalone-b',
+      sessionContext: { kind: 'standalone' },
+      workspaceCwd: undefined,
     });
   });
 
@@ -2889,6 +3169,7 @@ function createActionsHarness(
     setAttachSessionNonce?: ReturnType<typeof vi.fn>;
     setRestoreSessionId?: ReturnType<typeof vi.fn>;
     setRestoreSessionContext?: ReturnType<typeof vi.fn>;
+    getDefaultSessionContext?: () => DaemonProductSessionContext | undefined;
   } = {},
 ) {
   let connection: DaemonConnectionState = opts.connection ?? {
@@ -2941,7 +3222,8 @@ function createActionsHarness(
             'detached-standalone-session',
           ) as unknown as DaemonSessionClient,
       )) as () => Promise<DaemonSessionClient>,
-    getDefaultSessionContext: () => undefined,
+    getDefaultSessionContext:
+      opts.getDefaultSessionContext ?? (() => undefined),
     getConnection: () => connection,
     hasSessionActivePrompt: () => false,
     resetCurrentSessionActivePrompt: vi.fn(),
