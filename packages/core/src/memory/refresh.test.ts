@@ -21,7 +21,7 @@ import {
 import {
   AGENT_CONTEXT_FILENAME,
   DEFAULT_CONTEXT_FILENAME,
-  setGeminiMdFilename,
+  setMemoryFilename,
 } from '../utils/memory-constants.js';
 import {
   didWriteManagedMemory,
@@ -40,7 +40,7 @@ function createConfig(projectRoot: string, managed = true): Config {
     isManagedMemoryAvailable: vi.fn().mockReturnValue(managed),
     getProjectRoot: vi.fn().mockReturnValue(projectRoot),
     refreshHierarchicalMemory: vi.fn().mockResolvedValue(undefined),
-    getGeminiClient: vi.fn().mockReturnValue({
+    getLlmClient: vi.fn().mockReturnValue({
       refreshSystemInstruction: vi.fn().mockResolvedValue(undefined),
     }),
   } as unknown as Config;
@@ -61,7 +61,7 @@ describe('managed memory refresh helper', () => {
     vi.mocked(rebuildUserAutoMemoryIndex).mockReset();
     vi.mocked(rebuildManagedAutoMemoryIndex).mockResolvedValue('');
     vi.mocked(rebuildUserAutoMemoryIndex).mockResolvedValue('');
-    setGeminiMdFilename([DEFAULT_CONTEXT_FILENAME, AGENT_CONTEXT_FILENAME]);
+    setMemoryFilename([DEFAULT_CONTEXT_FILENAME, AGENT_CONTEXT_FILENAME]);
   });
 
   afterEach(async () => {
@@ -259,7 +259,7 @@ describe('managed memory refresh helper', () => {
   });
 
   it('detects configured project context file writes', () => {
-    setGeminiMdFilename('PROJECT_CONTEXT.md');
+    setMemoryFilename('PROJECT_CONTEXT.md');
 
     expect(
       didWriteProjectContextFile(
@@ -309,7 +309,7 @@ describe('managed memory refresh helper', () => {
     expect(rebuildUserAutoMemoryIndex).toHaveBeenCalledTimes(1);
     expect(config.refreshHierarchicalMemory).toHaveBeenCalledTimes(1);
     expect(
-      config.getGeminiClient().refreshSystemInstruction,
+      config.getLlmClient().refreshSystemInstruction,
     ).toHaveBeenCalledTimes(1);
     expect(
       vi.mocked(rebuildManagedAutoMemoryIndex).mock.invocationCallOrder[0],
@@ -338,7 +338,7 @@ describe('managed memory refresh helper', () => {
 
     expect(config.refreshHierarchicalMemory).toHaveBeenCalledTimes(1);
     expect(
-      config.getGeminiClient().refreshSystemInstruction,
+      config.getLlmClient().refreshSystemInstruction,
     ).toHaveBeenCalledTimes(1);
   });
 
@@ -352,7 +352,7 @@ describe('managed memory refresh helper', () => {
 
     expect(config.refreshHierarchicalMemory).toHaveBeenCalledTimes(1);
     expect(
-      config.getGeminiClient().refreshSystemInstruction,
+      config.getLlmClient().refreshSystemInstruction,
     ).toHaveBeenCalledTimes(1);
   });
 

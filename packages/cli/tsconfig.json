@@ -104,7 +104,7 @@
     "src/ui/hooks/useCommandCompletion.test.ts",
     "src/ui/hooks/useFocus.test.ts",
     "src/ui/hooks/useFolderTrust.test.ts",
-    "src/ui/hooks/useGeminiStream.test.tsx",
+    "src/ui/hooks/use-llm-stream.test.tsx",
     "src/ui/hooks/useKeypress.test.ts",
     "src/ui/hooks/usePhraseCycler.test.ts",
     "src/ui/utils/computeStats.test.ts",
