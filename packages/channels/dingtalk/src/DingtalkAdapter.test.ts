@@ -7052,22 +7052,25 @@ describe('DingtalkChannel proactive send', () => {
     expect(tokenCalls()).toHaveLength(2);
   });
 
-  it('throws when the token endpoint rejects', async () => {
-    const channel = proactive(createChannel());
-    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
-    stubProactiveFetch(
-      undefined,
-      () =>
-        new Response(
-          JSON.stringify({ errcode: 40089, errmsg: 'invalid credential' }),
-          { status: 200 },
-        ),
-    );
+  it.each([
+    [40089, 'invalid credential'],
+    [40096, 'invalid appKey or appSecret'],
+  ])(
+    'classifies gettoken errcode %s as a non-retryable token error',
+    async (errcode, errmsg) => {
+      const channel = proactive(createChannel());
+      vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+      stubProactiveFetch(
+        undefined,
+        () =>
+          new Response(JSON.stringify({ errcode, errmsg }), { status: 200 }),
+      );
 
-    const request = channel.pushProactive(groupTarget, 'hello');
-    await expect(request).rejects.toThrow('gettoken errcode=40089');
-    await expect(request).rejects.toMatchObject({ retryable: false });
-  });
+      const request = channel.pushProactive(groupTarget, 'hello');
+      await expect(request).rejects.toThrow(`gettoken errcode=${errcode}`);
+      await expect(request).rejects.toMatchObject({ retryable: false });
+    },
+  );
 
   it.each([
     [-1, '系统繁忙'],

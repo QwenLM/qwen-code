@@ -598,7 +598,7 @@ const PROACTIVE_FETCH_TIMEOUT_MS = 15_000;
  * treated as transient so card recovery keeps retrying through it.
  */
 const PERMANENT_TOKEN_ERROR_CODES = new Set([
-  40001, 40013, 40089, 90002, 90003,
+  40001, 40013, 40089, 40096, 90002, 90003,
 ]);
 const REPLY_FETCH_TIMEOUT_MS = 15_000;
 // Extensions for generated media store names, keyed by the download's mime

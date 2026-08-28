@@ -25,7 +25,6 @@ type StatusState = 'Running' | 'Completed' | 'Failed' | 'Stopped' | 'Cancelled';
 
 interface TerminalIntent {
   content: string;
-  state: Exclude<StatusState, 'Running'>;
   isError: boolean;
   /** Computed once so terminal retries do not inflate the elapsed time. */
   statusLine: string;
@@ -448,7 +447,6 @@ export class StatusCardController {
       (retainedContent ? retainedContent(record.content) : record.content);
     record.terminalIntent = {
       content: boundContent(sanitizeStreamingImageMarkers(retained)),
-      state,
       isError,
       statusLine: this.statusLine(record, state).text,
       streamFinalizeSettled: false,
