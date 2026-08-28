@@ -41,9 +41,9 @@ on:
 jobs:
   prepare:
     name: 'Prepare Release Metadata'
-    # Route to the ECS self-hosted pool like the review/CI lanes; the
-    # MAINTAINER_ECS_RUNNER_DISABLED repo variable restores the hosted
-    # ubuntu-latest fallback without a code change.
+    # Process cleanup belongs to the runner service/cgroup boundary. This
+    # workflow only resets job-owned filesystem state on the shared pool.
+    # MAINTAINER_ECS_RUNNER_DISABLED restores the hosted fallback.
     runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     timeout-minutes: 30
     if: |-
@@ -163,91 +163,6 @@ jobs:
           # inside the runner workspace (a symlinked leaf was healed, a symlinked
           # runner workspace refused), so the recursive chmod cannot escape it.
           chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chmod -R u+rwX "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace write permissions; checkout may fail on leftover read-only files"
-          # qwen-triage.yml documents this pool's behaviour: a detached
-          # postinstall child of a previous job can outlive that job —
-          # self-hosted runners do not reap job processes — and a survivor
-          # with this job's uid waits out the one-shot sweep below, then
-          # re-plants the fresh tree, appends to `$GITHUB_ENV`, or rewrites
-          # the fresh release-state config files while the secret-bearing
-          # steps run (0700 does not exclude the owner). Kill every live
-          # process of this user outside the runner agent's own tree BEFORE
-          # the file sweep, so the sweep is not racing a live process.
-          #
-          # The exclusion is the load-bearing part: a bare `pkill -u` would
-          # kill the Runner.Worker executing this very step. Walk the PPID
-          # chain from this shell to collect the agent's ancestor tree; a
-          # process is kept only if its own parent chain reaches that tree
-          # or one of the user's other runner-agent trees (widened below).
-          # Zombies do not count: one has already exited and can no longer
-          # re-plant anything — and it cannot be killed either, so counting
-          # one means this check can never clear. A root runner skips the
-          # reap: as root every system process is killable, so no exclusion
-          # can make the sweep safe.
-          if [ "$RUNNER_UID" != "0" ]; then
-            REAP_USER="$(id -un)"
-            REAP_TREE=" $$ "
-            reap_pid=$$
-            while :; do
-              reap_pid="$(ps -o ppid= -p "$reap_pid" 2>/dev/null | tr -d '[:space:]')" || break
-              [ -n "$reap_pid" ] || break
-              [ "$reap_pid" -gt 1 ] 2>/dev/null || break
-              REAP_TREE="${REAP_TREE}${reap_pid} "
-            done
-            # One pool member hosts every registration under this one uid
-            # (qwen-autofix.md af-014): a concurrent job from another
-            # registration never reaches this shell's chain, so the tree
-            # above alone would SIGKILL it mid-flight. Widen the keep set
-            # to every runner-agent tree of the user; a process is killed
-            # only if it is detached from ALL agent trees.
-            REAP_TREE="$REAP_TREE $(ps -u "$REAP_USER" -o pid= -o args= 2>/dev/null | awk '/runsvc\.sh|RunnerService|Runner\./ { printf "%s ", $1 }')" || true
-            live_outside_tree() {
-              # One pid per line: live processes of this user whose parent
-              # chain never reaches the runner agent tree, zombies dropped.
-              ps -o pid= -o ppid= -o stat= -u "$REAP_USER" 2>/dev/null | awk -v tree="$REAP_TREE" '
-                BEGIN {
-                  n = split(tree, t, " ")
-                  for (i = 1; i <= n; i++) if (t[i] != "") keep[t[i]] = 1
-                }
-                { pids[NR] = $1; pp[$1] = $2; st[$1] = $3 }
-                END {
-                  for (i = 1; i <= NR; i++) {
-                    p = pids[i]
-                    if (st[p] ~ /^Z/) continue
-                    q = p
-                    inside = (q in keep)
-                    for (d = 0; d <= NR && !inside; d++) {
-                      if (!(q in pp)) break
-                      q = pp[q]
-                      if (q in keep) { inside = 1; break }
-                      if (q <= 1) break
-                    }
-                    if (!inside) print p
-                  }
-                }'
-            }
-            reap_pids="$(live_outside_tree)" || true
-            if [ -n "$reap_pids" ]; then
-              printf '%s\n' "$reap_pids" | xargs -r kill -KILL -- 2>/dev/null || true
-            fi
-            for _ in 1 2 3; do
-              reap_pids="$(live_outside_tree)" || true
-              [ -n "$reap_pids" ] || break
-              sleep 1
-              printf '%s\n' "$reap_pids" | xargs -r kill -KILL -- 2>/dev/null || true
-            done
-            survivors="$(live_outside_tree)" || true
-            if [ -n "$survivors" ]; then
-              # Name them: a bare "processes survived" refusal leaves a real
-              # threat and a harmless leftover indistinguishable — including
-              # to the person reading the failure.
-              echo "::error::Processes of the runner user survived SIGKILL; refusing to run release steps with credentials."
-              printf '%s\n' "$survivors" | while IFS= read -r survivor_pid; do
-                [ -n "$survivor_pid" ] || continue
-                ps -o pid= -o stat= -o args= -p "$survivor_pid" 2>/dev/null | sed 's/^/::error::  surviving process: /' || true
-              done
-              exit 1
-            fi
-          fi
           find "$WS" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
           # Later steps must not read pool-persistent Git, npm, Docker, or
           # gh state. A fresh directory avoids an unbounded scrub denylist
@@ -380,9 +295,6 @@ jobs:
 
   quality:
     name: 'Quality Checks'
-    # Route to the ECS self-hosted pool like the review/CI lanes; the
-    # MAINTAINER_ECS_RUNNER_DISABLED repo variable restores the hosted
-    # ubuntu-latest fallback without a code change.
     runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     timeout-minutes: 120
     needs: 'prepare'
@@ -459,9 +371,6 @@ jobs:
 
   integration_none:
     name: 'Integration Tests (No Sandbox)'
-    # Route to the ECS self-hosted pool like the review/CI lanes; the
-    # MAINTAINER_ECS_RUNNER_DISABLED repo variable restores the hosted
-    # ubuntu-latest fallback without a code change.
     runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     timeout-minutes: 120
     needs: 'prepare'
@@ -527,9 +436,6 @@ jobs:
 
   integration_docker:
     name: 'Integration Tests (Docker)'
-    # Route to the ECS self-hosted pool like the review/CI lanes; the
-    # MAINTAINER_ECS_RUNNER_DISABLED repo variable restores the hosted
-    # ubuntu-latest fallback without a code change.
     runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     timeout-minutes: 120
     needs: 'prepare'
