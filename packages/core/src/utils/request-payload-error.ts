@@ -97,3 +97,17 @@ export const REQUEST_PAYLOAD_TOO_LARGE_RECOVERY_MESSAGE =
   'Model request exceeds the endpoint request-body limit (HTTP 413) and ' +
   'automatic compaction could not reduce it enough. Start a new session ' +
   '(e.g. /clear) and retry.';
+
+/**
+ * Actionable error surfaced when a 413-driven reactive compaction NOOPed:
+ * there was no earlier conversation history to compress, so the oversize
+ * sits in the current request itself (first-turn prompt/attachments, or
+ * system prompt/tools). Starting a new session would reproduce the
+ * identical failure — tell the user to reduce the current request instead
+ * (#10380).
+ */
+export const REQUEST_PAYLOAD_TOO_LARGE_NOOP_MESSAGE =
+  'Model request exceeds the endpoint request-body limit (HTTP 413) and ' +
+  'there is no earlier conversation history to compress. Reduce the ' +
+  'current request (smaller message or smaller/fewer attachments) and ' +
+  'retry.';

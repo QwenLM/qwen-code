@@ -18624,6 +18624,77 @@ describe('LlmChat', async () => {
         expect((caught as Error).message).toMatch(/start a new session/i);
         expect((caught as { status?: number }).status).toBe(413);
       });
+
+      it('propagates the original 413 when the reactive compaction attempt fails transiently', async () => {
+        // A transient side-query failure (504/reset) must not earn the
+        // destructive new-session advice: reactiveCompressionAttempted is
+        // per-send, so the next prompt gets a fresh one-shot and may
+        // recover (#10380).
+        vi.spyOn(ChatCompressionService.prototype, 'compress')
+          .mockResolvedValueOnce({
+            newHistory: null,
+            info: {
+              originalTokenCount: 0,
+              newTokenCount: 0,
+              compressionStatus: CompressionStatus.NOOP,
+            },
+          })
+          .mockRejectedValueOnce(new Error('504 gateway timeout'));
+        vi.mocked(
+          mockContentGenerator.generateContentStream,
+        ).mockRejectedValueOnce(sdkStyle413());
+
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          { message: 'next prompt' },
+          'prompt-id-413-transient-compaction-failure',
+        );
+        let caught: unknown;
+        try {
+          await consumeStream(stream);
+        } catch (error) {
+          caught = error;
+        }
+        expect(caught).toBeInstanceOf(Error);
+        expect((caught as Error).message).not.toMatch(/start a new session/i);
+        expect((caught as Error).message).toMatch(/413/);
+        expect((caught as { status?: number }).status).toBe(413);
+      });
+
+      it('advises reducing the current request when compaction NOOPs on a 413', async () => {
+        // NOOP means there was no earlier history to compress — the
+        // oversize sits in the current request itself, so /clear + retry
+        // would reproduce the identical failure (#10380).
+        noopThen({
+          newHistory: null,
+          info: {
+            originalTokenCount: 0,
+            newTokenCount: 0,
+            compressionStatus: CompressionStatus.NOOP,
+          },
+        });
+        vi.mocked(
+          mockContentGenerator.generateContentStream,
+        ).mockRejectedValueOnce(sdkStyle413());
+
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          { message: 'next prompt' },
+          'prompt-id-413-noop-compaction',
+        );
+        let caught: unknown;
+        try {
+          await consumeStream(stream);
+        } catch (error) {
+          caught = error;
+        }
+        expect(caught).toBeInstanceOf(Error);
+        expect((caught as Error).message).not.toMatch(/start a new session/i);
+        expect((caught as Error).message).not.toMatch(/\/clear/);
+        expect((caught as Error).message).toMatch(
+          /reduce the current request/i,
+        );
+      });
     });
   });
 });

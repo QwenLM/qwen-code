@@ -109,6 +109,7 @@ import { type ChatCompressionInfo, CompressionStatus } from './turn.js';
 import { getContextLengthExceededInfo } from '../utils/contextLengthError.js';
 import {
   getRequestPayloadTooLargeInfo,
+  REQUEST_PAYLOAD_TOO_LARGE_NOOP_MESSAGE,
   REQUEST_PAYLOAD_TOO_LARGE_RECOVERY_MESSAGE,
 } from '../utils/request-payload-error.js';
 import {
@@ -3589,6 +3590,14 @@ export class LlmChat {
               // still a payload overflow, the wrap below turns it into an
               // actionable error (#10380).
               let attemptedPayloadRecovery = false;
+              // Which outcome the one-shot payload-overflow recovery ended
+              // on. The wrap below advises by outcome: a transient
+              // compaction failure keeps the original 413 (the next send
+              // gets a fresh one-shot), a NOOP means the oversize sits in
+              // the current request itself, and only "compaction ran and
+              // still did not fit" earns the new-session advice (#10380).
+              let payloadRecoveryNoop = false;
+              let payloadRecoveryThrew = false;
               if (!exactRoute && !reactiveCompressionAttempted) {
                 reactiveCompressionAttempted = true;
                 attemptedPayloadRecovery = requestPayloadOverflow.isTooLarge;
@@ -3682,6 +3691,11 @@ export class LlmChat {
                     continue;
                   }
 
+                  if (
+                    reactiveInfo.compressionStatus === CompressionStatus.NOOP
+                  ) {
+                    payloadRecoveryNoop = true;
+                  }
                   debugLogger.warn(
                     `Reactive compression did not recover context overflow: ` +
                       `status=${reactiveInfo.compressionStatus}.`,
@@ -3712,6 +3726,7 @@ export class LlmChat {
                   ) {
                     throw compressionError;
                   }
+                  payloadRecoveryThrew = requestPayloadOverflow.isTooLarge;
                   debugLogger.warn(
                     'Reactive compression failed.',
                     compressionError,
@@ -3728,24 +3743,43 @@ export class LlmChat {
                 );
               }
               if (attemptedPayloadRecovery) {
-                // The one-shot recovery is spent: compaction either was
-                // already attempted or could not shrink the request below
-                // the gateway's byte limit. Re-sending the same history
-                // would keep failing every prompt, so surface an
-                // actionable next step instead of the bare 413 (#10380).
-                const actionableError = new Error(
-                  REQUEST_PAYLOAD_TOO_LARGE_RECOVERY_MESSAGE,
-                  { cause: error },
-                );
-                // Reuse the cause-aware lookup that detected the 413: the
-                // shallow top-level getErrorStatus misses cause-wrapped
-                // statuses, and the actionable error would lose its .status
-                // for downstream bucketing (#10380).
-                const payloadStatus = requestPayloadOverflow.status;
-                if (payloadStatus !== undefined) {
-                  Object.assign(actionableError, { status: payloadStatus });
+                if (payloadRecoveryThrew) {
+                  // The compaction attempt itself failed transiently
+                  // (side-query 5xx/reset): this send's one-shot is spent,
+                  // but reactiveCompressionAttempted is per-send, so the
+                  // next prompt starts fresh and may recover. Propagate the
+                  // original 413 — the new-session advice is unearned
+                  // (#10380).
+                  debugLogger.warn(
+                    'Request payload overflow recovery failed transiently; ' +
+                      'propagating the original 413 so the next send can ' +
+                      'retry recovery.',
+                  );
+                } else {
+                  // The one-shot recovery is spent: compaction either was
+                  // already attempted or could not shrink the request below
+                  // the gateway's byte limit. Re-sending the same history
+                  // would keep failing every prompt, so surface an
+                  // actionable next step instead of the bare 413 (#10380).
+                  // A NOOP means the oversize sits in the current request
+                  // itself (no earlier history to compress), where a new
+                  // session would reproduce the identical failure.
+                  const actionableError = new Error(
+                    payloadRecoveryNoop
+                      ? REQUEST_PAYLOAD_TOO_LARGE_NOOP_MESSAGE
+                      : REQUEST_PAYLOAD_TOO_LARGE_RECOVERY_MESSAGE,
+                    { cause: error },
+                  );
+                  // Reuse the cause-aware lookup that detected the 413: the
+                  // shallow top-level getErrorStatus misses cause-wrapped
+                  // statuses, and the actionable error would lose its .status
+                  // for downstream bucketing (#10380).
+                  const payloadStatus = requestPayloadOverflow.status;
+                  if (payloadStatus !== undefined) {
+                    Object.assign(actionableError, { status: payloadStatus });
+                  }
+                  lastError = actionableError;
                 }
-                lastError = actionableError;
               }
               break;
             }
