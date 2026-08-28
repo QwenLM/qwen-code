@@ -154,6 +154,7 @@ test('scopes full and pinned sessions to the requested workspace', async ({
       updatedAt: '2026-07-03T00:00:00.000Z',
       displayName: 'Primary regular',
       clientCount: 0,
+      sourceType: 'scheduled_task',
     },
     {
       sessionId: 'primary-pinned',
@@ -163,6 +164,24 @@ test('scopes full and pinned sessions to the requested workspace', async ({
       displayName: 'Primary pinned',
       clientCount: 0,
       isPinned: true,
+      sourceType: 'scheduled_task',
+    },
+    {
+      sessionId: 'primary-default',
+      workspaceCwd: primaryCwd,
+      createdAt: '2026-07-03T00:00:00.000Z',
+      updatedAt: '2026-07-03T00:00:00.000Z',
+      displayName: 'Primary default',
+      clientCount: 0,
+    },
+    {
+      sessionId: 'secondary-regular',
+      workspaceCwd: secondaryCwd,
+      createdAt: '2026-07-03T00:00:00.000Z',
+      updatedAt: '2026-07-03T00:00:00.000Z',
+      displayName: 'Secondary regular',
+      clientCount: 0,
+      sourceType: 'scheduled_task',
     },
     {
       sessionId: 'secondary-pinned',
@@ -172,6 +191,15 @@ test('scopes full and pinned sessions to the requested workspace', async ({
       displayName: 'Secondary pinned',
       clientCount: 0,
       isPinned: true,
+      sourceType: 'scheduled_task',
+    },
+    {
+      sessionId: 'secondary-default',
+      workspaceCwd: secondaryCwd,
+      createdAt: '2026-07-03T00:00:00.000Z',
+      updatedAt: '2026-07-03T00:00:00.000Z',
+      displayName: 'Secondary default',
+      clientCount: 0,
     },
   ] satisfies DaemonSessionSummary[];
   const scenario = createWebShellDaemonScenario({
@@ -202,35 +230,53 @@ test('scopes full and pinned sessions to the requested workspace', async ({
   });
   const baseURL = String(testInfo.project.use.baseURL);
 
-  const primaryCatalog = await page.evaluate(
-    async ({ baseURL, cwd }) => {
-      const response = await fetch(
-        `${baseURL}/workspaces/${encodeURIComponent(cwd)}/sessions`,
-      );
-      return response.json();
-    },
-    { baseURL, cwd: primaryCwd },
-  );
-  const secondaryPinned = await page.evaluate(
-    async ({ baseURL, cwd }) => {
-      const response = await fetch(
-        `${baseURL}/workspaces/${encodeURIComponent(cwd)}/sessions?view=organized&group=pinned`,
-      );
-      return response.json();
-    },
-    { baseURL, cwd: secondaryCwd },
-  );
+  const fetchSessions = (cwd: string, query: string) =>
+    page.evaluate(
+      async ({ baseURL, cwd, query }) => {
+        const response = await fetch(
+          `${baseURL}/workspaces/${encodeURIComponent(cwd)}/sessions${query}`,
+        );
+        return response.json();
+      },
+      { baseURL, cwd, query },
+    ) as Promise<{ sessions: DaemonSessionSummary[] }>;
 
+  const [
+    primaryCatalog,
+    secondaryCatalog,
+    primaryScheduled,
+    secondaryScheduled,
+    primaryPinned,
+    secondaryPinned,
+  ] = await Promise.all([
+    fetchSessions(primaryCwd, ''),
+    fetchSessions(secondaryCwd, ''),
+    fetchSessions(primaryCwd, '?sourceType=scheduled_task'),
+    fetchSessions(secondaryCwd, '?sourceType=scheduled_task'),
+    fetchSessions(primaryCwd, '?view=organized&group=pinned'),
+    fetchSessions(secondaryCwd, '?view=organized&group=pinned'),
+  ]);
+
+  expect(primaryCatalog.sessions.map((session) => session.sessionId)).toEqual([
+    'primary-regular',
+    'primary-pinned',
+    'primary-default',
+  ]);
+  expect(secondaryCatalog.sessions.map((session) => session.sessionId)).toEqual(
+    ['secondary-regular', 'secondary-pinned', 'secondary-default'],
+  );
+  expect(primaryScheduled.sessions.map((session) => session.sessionId)).toEqual(
+    ['primary-regular', 'primary-pinned'],
+  );
   expect(
-    primaryCatalog.sessions.map(
-      (session: DaemonSessionSummary) => session.sessionId,
-    ),
-  ).toEqual(['primary-regular', 'primary-pinned']);
-  expect(
-    secondaryPinned.sessions.map(
-      (session: DaemonSessionSummary) => session.sessionId,
-    ),
-  ).toEqual(['secondary-pinned']);
+    secondaryScheduled.sessions.map((session) => session.sessionId),
+  ).toEqual(['secondary-regular', 'secondary-pinned']);
+  expect(primaryPinned.sessions.map((session) => session.sessionId)).toEqual([
+    'primary-pinned',
+  ]);
+  expect(secondaryPinned.sessions.map((session) => session.sessionId)).toEqual([
+    'secondary-pinned',
+  ]);
 });
 
 test('ignores malformed workspace session route encodings', async ({
