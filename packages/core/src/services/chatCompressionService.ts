@@ -9,7 +9,7 @@ import type { Config } from '../config/config.js';
 import { ApprovalMode } from '../config/config.js';
 import type { GenerateTextResult } from '../core/baseLlmClient.js';
 import { AuthType } from '../core/contentGenerator.js';
-import type { GeminiChat } from '../core/geminiChat.js';
+import type { LlmChat } from '../core/llm-chat.js';
 import {
   type ChatCompressionInfo,
   type CompactionTriggerReason,
@@ -137,7 +137,7 @@ export const HARD_BUFFER = 3_000;
  * Auto-compaction consecutive-failure circuit breaker. After this many
  * consecutive failures the cheap-gate NOOPs until a successful force
  * compress resets the counter. Co-located here with other compaction-
- * tuning constants; the counter state itself lives on GeminiChat.
+ * tuning constants; the counter state itself lives on LlmChat.
  */
 export const MAX_CONSECUTIVE_FAILURES = 3;
 
@@ -390,7 +390,7 @@ function hasStateSnapshot(summary: string): boolean {
 
 export class ChatCompressionService {
   async compress(
-    chat: GeminiChat,
+    chat: LlmChat,
     opts: CompressOptions,
   ): Promise<{ newHistory: Content[] | null; info: ChatCompressionInfo }> {
     const {

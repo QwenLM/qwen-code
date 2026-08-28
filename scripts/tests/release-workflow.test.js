@@ -80,6 +80,12 @@ describe('CUA release workflow', () => {
 });
 
 describe('release workflow', () => {
+  it('stages every integration package manifest after versioning', () => {
+    expect(workflow).toContain(
+      'git add package.json package-lock.json packages/*/package.json packages/channels/*/package.json integrations/*/package.json',
+    );
+  });
+
   it('fires the fleet-moving npm-published dispatch on stable releases only', () => {
     // This gate is the sole protection keeping a nightly/preview/dry-run
     // release from moving the ECS fleet; the triggered update workflow
