@@ -19,6 +19,8 @@ import './styles/standalone.css';
 
 const DAEMON_BASE_URL = getDaemonBaseUrl();
 
+const STANDALONE_COMPOSER_TOOLBAR_ADDITIONS = ['addMenu'] as const;
+
 const LANGUAGE_STORAGE_KEY = 'qwen-code-web-shell-language';
 const THEME_STORAGE_KEY = 'qwen-code-web-shell-theme';
 
@@ -172,16 +174,18 @@ export function StandaloneApp({ daemonToken }: { daemonToken?: string }) {
             onSessionIdChange: handleSessionIdChange,
             sidebar: true,
             header: {
-              items: ['title', 'environment', 'rightPanel'],
+              items: ['title', 'environment', 'rightPanel', 'tokenUsage'],
             },
             rightPanel: {
-              items: ['review', 'sideTask'],
+              items: ['review', 'sideTask', 'terminal'],
             },
             environmentPanel: {
               items: ['environment', 'subagents', 'backgroundTasks'],
             },
             compactThinking: true,
             markdownTableMode: 'advanced',
+            composerToolbarAdditionalActions:
+              STANDALONE_COMPOSER_TOOLBAR_ADDITIONS,
           }}
         />
       </DaemonWorkspaceProvider>

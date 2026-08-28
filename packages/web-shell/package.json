@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/web-shell",
-  "version": "0.22.0",
+  "version": "0.22.2",
   "type": "module",
   "main": "./dist/index.js",
   "module": "./dist/index.js",
@@ -44,6 +44,8 @@
     "@datafe-open/markdown-chart-react": "^0.1.12",
     "@modelcontextprotocol/ext-apps": "^1.7.5",
     "@tanstack/react-virtual": "^3.13.26",
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/xterm": "^6.0.0",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "codemirror": "^6.0.0",

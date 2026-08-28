@@ -12,11 +12,11 @@ import {
   Config,
   DEFAULT_QWEN_EMBEDDING_MODEL,
   FileDiscoveryService,
-  getAllGeminiMdFilenames,
+  getAllMemoryFilenames,
   loadServerHierarchicalMemory,
   type LoadServerHierarchicalMemoryOptions,
   type LoadServerHierarchicalMemoryResponse,
-  setGeminiMdFilename as setServerGeminiMdFilename,
+  setMemoryFilename as setServerMemoryFilename,
   resolveTelemetrySettings,
   FatalConfigError,
   Storage,
@@ -1176,9 +1176,9 @@ export async function parseArguments(): Promise<CliArgs> {
 // This function is now a thin wrapper around the server's implementation.
 // It's kept in the CLI for now as App.tsx directly calls it for memory refresh.
 // TODO: Consider if App.tsx should get memory via a server call or if Config should refresh itself.
-export async function loadHierarchicalGeminiMemory(
+export async function loadHierarchicalMemory(
   currentWorkingDirectory: string,
-  includeDirectoriesToReadGemini: readonly string[] = [],
+  includeDirectoriesToReadMemory: readonly string[] = [],
   fileService: FileDiscoveryService,
   extensionContextFilePaths: string[] = [],
   folderTrust: boolean,
@@ -1198,7 +1198,7 @@ export async function loadHierarchicalGeminiMemory(
   // Directly call the server function with the corrected path.
   return loadServerHierarchicalMemory(
     effectiveCwd,
-    includeDirectoriesToReadGemini,
+    includeDirectoriesToReadMemory,
     fileService,
     extensionContextFilePaths,
     folderTrust,
@@ -1535,7 +1535,7 @@ export async function loadCliConfig(
    */
   sessionMcpServers?: Record<string, MCPServerConfig>,
   /**
-   * Lifecycle handle for the settings file watcher started in `gemini.tsx`
+   * Lifecycle handle for the settings file watcher started in `llm.tsx`
    * before `Config.initialize()`. Passed through to `Config` so it can be
    * stopped during shutdown — only `stopWatching()` is exposed here to keep
    * core decoupled from the CLI-owned `SettingsWatcher` implementation.
@@ -1555,6 +1555,8 @@ export async function loadCliConfig(
    */
   hostPolicy?: {
     toolInvocationGuard?: ToolInvocationGuard;
+    /** Host-managed session whose exact private cwd is bound after bootstrap. */
+    provisionalWorkspace?: true;
     sessionRestore?: {
       projectionSource: (
         sessionId: string,
@@ -1562,6 +1564,7 @@ export async function loadCliConfig(
     };
   },
 ): Promise<Config> {
+  const provisionalWorkspace = hostPolicy?.provisionalWorkspace === true;
   const debugMode = isDebugMode(argv);
   if (debugMode && process.env['QWEN_DEBUG_LOG_FILE'] === undefined) {
     process.env['QWEN_DEBUG_LOG_FILE'] = '1';
@@ -1613,13 +1616,13 @@ export async function loadCliConfig(
 
   // Set the context filename in the server's memoryTool module BEFORE loading memory
   // TODO(b/343434939): This is a bit of a hack. The contextFileName should ideally be passed
-  // directly to the Config constructor in core, and have core handle setGeminiMdFilename.
-  // However, loadHierarchicalGeminiMemory is called *before* createServerConfig.
+  // directly to the Config constructor in core, and have core handle setMemoryFilename.
+  // However, loadHierarchicalMemory is called *before* createServerConfig.
   if (settings.context?.fileName) {
-    setServerGeminiMdFilename(settings.context.fileName);
+    setServerMemoryFilename(settings.context.fileName);
   } else {
     // Reset to default context filenames if not provided in settings.
-    setServerGeminiMdFilename(getAllGeminiMdFilenames());
+    setServerMemoryFilename(getAllMemoryFilenames());
   }
 
   // Automatically load output-language.md if it exists
@@ -1635,26 +1638,29 @@ export async function loadCliConfig(
 
   let outputLanguageFilePath: string | undefined;
   if (!bareMode && !safeMode) {
-    if (fs.existsSync(projectOutputLanguagePath)) {
+    if (!provisionalWorkspace && fs.existsSync(projectOutputLanguagePath)) {
       outputLanguageFilePath = projectOutputLanguagePath;
     } else if (fs.existsSync(globalOutputLanguagePath)) {
       outputLanguageFilePath = globalOutputLanguagePath;
     }
   }
 
-  const fileService = new FileDiscoveryService(
-    cwd,
-    settings.context?.fileFiltering?.customIgnoreFiles,
-  );
+  const fileService = provisionalWorkspace
+    ? undefined
+    : new FileDiscoveryService(
+        cwd,
+        settings.context?.fileFiltering?.customIgnoreFiles,
+      );
 
-  const includeDirectories = (
-    bareMode || safeMode ? [] : (settings.context?.includeDirectories ?? [])
-  )
-    .map(resolvePath)
-    .concat((argv.includeDirectories || []).map(resolvePath));
+  const includeDirectories = provisionalWorkspace
+    ? []
+    : (bareMode || safeMode ? [] : (settings.context?.includeDirectories ?? []))
+        .map(resolvePath)
+        .concat((argv.includeDirectories || []).map(resolvePath));
 
   // LSP configuration: enabled only via --experimental-lsp flag
-  const lspEnabled = !bareMode && argv.experimentalLsp === true;
+  const lspEnabled =
+    !provisionalWorkspace && !bareMode && argv.experimentalLsp === true;
   let lspClient: LspClient | undefined;
   const question = argv.promptInteractive || argv.prompt || '';
   const inputFormat: InputFormat =
@@ -1830,6 +1836,46 @@ export async function loadCliConfig(
     bareMode || safeMode
       ? []
       : normalizeDisabledToolList(settings.tools?.visible);
+  // `tools.eager` restricts which schemas ride in the initial model request
+  // (#9827). Unlisted tools stay registered and reachable via tool_search —
+  // it is a schema-size knob, not an availability knob (#10075).
+  //
+  // An explicitly empty array must survive as an empty array, not collapse
+  // into "unset": `[]` is an active allowlist naming nothing (defer
+  // everything). `tools.core` differs: its empty list is treated as unset.
+  // `normalizeDisabledToolList` maps undefined to `[]`,
+  // so the Array.isArray guard has to come first — without it, absent and
+  // explicitly-empty would reach core as the same value, which is exactly
+  // the SDK divergence #10138 reports for coreTools.
+  const eagerTools =
+    bareMode || safeMode || !Array.isArray(settings.tools?.eager)
+      ? undefined
+      : normalizeDisabledToolList(settings.tools.eager);
+  if (eagerTools !== undefined) {
+    // `normalizeDisabledToolList` strips empty/whitespace-only and
+    // non-string entries before `PermissionManager.initialize()` ever sees
+    // the list, so the dropped-entries warning there can never fire for
+    // that class on the real CLI path — and a degenerate list like
+    // `tools.eager: [""]` would collapse to the active defer-everything
+    // allowlist `[]` in silence. Warn here so the collapse always leaves a
+    // signal (#10075).
+    const droppedEagerEntries = (settings.tools?.eager ?? []).filter(
+      (entry) => typeof entry !== 'string' || entry.trim() === '',
+    );
+    if (droppedEagerEntries.length > 0) {
+      // eslint-disable-next-line no-console -- operator-facing breadcrumb; the debug log file is off in default runs, where this reshaping would otherwise be invisible
+      console.warn(
+        `tools.eager: ignoring ${droppedEagerEntries.length} unusable entr${
+          droppedEagerEntries.length === 1 ? 'y' : 'ies'
+        } (${droppedEagerEntries
+          .map((entry) => JSON.stringify(entry))
+          .join(', ')}). ` +
+          `The allowlist stays active with ${eagerTools.length} entr${
+            eagerTools.length === 1 ? 'y' : 'ies'
+          }, so every other non-exempt tool is deferred to tool_search.`,
+      );
+    }
+  }
 
   // Helper: check if a tool is explicitly covered by an allow rule OR by the
   // coreTools whitelist. Uses alias matching for coreTools (via isToolEnabled)
@@ -1984,7 +2030,7 @@ export async function loadCliConfig(
 
     if (argv.resume) {
       // By the time we get here, argv.resume has been resolved to a valid
-      // session UUID by gemini.tsx (which handles custom title lookup and
+      // session UUID by llm.tsx (which handles custom title lookup and
       // the interactive picker for ambiguous matches).
       sessionId = argv.resume;
       deferProjectionUntilWriterLease =
@@ -2127,9 +2173,11 @@ export async function loadCliConfig(
     embeddingModel: DEFAULT_QWEN_EMBEDDING_MODEL,
     sandbox: sandboxConfig,
     targetDir: cwd,
+    provisionalWorkspace,
     includeDirectories,
-    loadMemoryFromIncludeDirectories:
-      bareMode || safeMode
+    loadMemoryFromIncludeDirectories: provisionalWorkspace
+      ? false
+      : bareMode || safeMode
         ? includeDirectories.length > 0
         : (settings.context?.loadFromIncludeDirectories ?? false),
     importFormat: settings.context?.importFormat || 'tree',
@@ -2176,6 +2224,7 @@ export async function loadCliConfig(
             .map((d) => d.trim()),
     disabledTools: disabledTools.length > 0 ? disabledTools : undefined,
     visibleTools: visibleTools.length > 0 ? visibleTools : undefined,
+    eagerTools,
     toolSearchThreshold:
       bareMode || safeMode ? 0 : settings.tools?.toolSearch?.threshold,
     // New unified permissions (PermissionManager source of truth).
@@ -2450,7 +2499,7 @@ export async function loadCliConfig(
         config,
         config.getWorkspaceContext(),
         appEvents,
-        fileService,
+        fileService!,
         ideContextStore,
         {
           requireTrustedWorkspace: folderTrust,

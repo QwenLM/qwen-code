@@ -16,6 +16,7 @@ import type {
   AnsiOutput,
   AnsiOutputDisplay,
   Config,
+  TodoResultDisplay,
 } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../../../config/settings.js';
 import { getScreenBuffer } from '../../selection/screen-buffer.js';
@@ -89,8 +90,8 @@ vi.mock('../TerminalImage.js', () => ({
 }));
 
 // Mock child components or utilities if they are complex or have side effects
-vi.mock('../GeminiRespondingSpinner.js', () => ({
-  GeminiRespondingSpinner: ({
+vi.mock('../RespondingSpinner.js', () => ({
+  RespondingSpinner: ({
     nonRespondingDisplay,
   }: {
     nonRespondingDisplay?: string;
@@ -139,6 +140,14 @@ vi.mock('./ToolConfirmationMessage.js', () => ({
       </Text>
     );
   },
+}));
+
+vi.mock('../TodoDisplay.js', () => ({
+  TodoDisplay: ({
+    todos,
+  }: {
+    todos: Array<{ content: string; status: string }>;
+  }) => <Text>{todos.map((t) => t.content).join(', ')}</Text>,
 }));
 
 // Mock settings
@@ -191,6 +200,55 @@ describe('<ToolMessage />', () => {
     expect(output).toContain('✓');
     expect(output).toContain('ReadFile');
     expect(output).not.toContain('MockMarkdown:Test result'); // collapsed
+  });
+
+  it('routes a findings_list result to the findings renderer', () => {
+    // Pins the ToolMessage discriminator itself: FindingsDisplay has its own
+    // render tests, but without this the routing branch could be removed and
+    // every test would stay green (the display would fall through to the
+    // JSON-string path, which never joins file and line as `file:line`).
+    const { lastFrame } = renderWithContext(
+      <ToolMessage
+        {...baseProps}
+        name="ReportFindings"
+        resultDisplay={{
+          type: 'findings_list',
+          level: 'high',
+          findings: [
+            {
+              id: 'R1-1',
+              severity: 'Critical',
+              confidence: 'high',
+              file: 'src/foo.ts',
+              line: 42,
+              // shortSummary differs from summary so this also pins that the
+              // routed renderer shows the compact label, not the summary.
+              summary:
+                'the provider returns the wrong value on every cold-cache lookup',
+              shortSummary: 'cold-cache wrong return',
+              failureScenario: 'first call after start returns undefined',
+            },
+            {
+              severity: 'Suggestion',
+              confidence: 'low',
+              file: 'src/bar.ts',
+              summary: 'the helper is duplicated between bar.ts and baz.ts',
+              shortSummary: 'duplicated helper',
+              failureScenario: 'two copies drift',
+            },
+          ],
+        }}
+      />,
+      StreamingState.Idle,
+    );
+    const output = lastFrame()!;
+    expect(output).toContain('src/foo.ts:42');
+    expect(output).toContain('cold-cache wrong return');
+    expect(output).toContain('(low confidence)');
+    expect(output).not.toContain('"findings"'); // not the JSON fallback
+    expect(output.replace(/\s+/g, ' ')).not.toContain(
+      'wrong value on every cold-cache lookup',
+    );
   });
 
   it('renders inline images returned by a tool', () => {
@@ -800,6 +858,57 @@ describe('<ToolMessage />', () => {
     );
     // Check that the output contains the MockDiff content as part of the whole message
     expect(lastFrame()).toMatch(/MockDiff:--- a\/file\.txt/);
+  });
+
+  it('suppresses todo panel when resultDisplay has unchanged flag', () => {
+    const { lastFrame } = renderWithContext(
+      <ToolMessage
+        {...baseProps}
+        name="TodoWrite"
+        description="Update todos"
+        resultDisplay={
+          {
+            type: 'todo_list',
+            todos: [
+              { id: '1', content: 'Task A', status: 'in_progress' },
+              { id: '2', content: 'Task B', status: 'pending' },
+            ],
+            unchanged: true,
+          } as TodoResultDisplay
+        }
+        forceShowResult
+      />,
+      StreamingState.Idle,
+    );
+    const output = lastFrame() ?? '';
+    expect(output).toContain('TodoWrite');
+    // TodoDisplay should NOT render when unchanged is true
+    expect(output).not.toContain('Task A');
+    expect(output).not.toContain('Task B');
+    expect(output).not.toContain('in_progress');
+  });
+
+  it('renders todo panel normally when unchanged flag is absent', () => {
+    const { lastFrame } = renderWithContext(
+      <ToolMessage
+        {...baseProps}
+        name="TodoWrite"
+        description="Update todos"
+        resultDisplay={{
+          type: 'todo_list',
+          todos: [
+            { id: '1', content: 'Task A', status: 'in_progress' },
+            { id: '2', content: 'Task B', status: 'pending' },
+          ],
+        }}
+        forceShowResult
+      />,
+      StreamingState.Idle,
+    );
+    const output = lastFrame() ?? '';
+    expect(output).toContain('TodoWrite');
+    expect(output).toContain('Task A');
+    expect(output).toContain('Task B');
   });
 
   it('diff results are not collapsed for completed collapsible tools (bypass shouldCollapseResult)', () => {
