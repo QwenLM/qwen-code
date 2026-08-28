@@ -643,6 +643,51 @@ describe('ContentGenerationPipeline', () => {
       expect(apiCall.tools).toBeUndefined();
     });
 
+    it('should skip the wrapped-empty tools shape produced by client.setTools() on an empty registry', async () => {
+      // Arrange — the #10065 empty allowlist disables every tool, so
+      // client.setTools() wraps ZERO declarations as
+      // `[{ functionDeclarations: [] }]`. The wrapper's `.length` is 1, so
+      // a length-only guard would still ship `tools: []` on the wire,
+      // which some providers reject (#10080). The converted declarations
+      // are empty, so the field must be omitted entirely.
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+        config: { tools: [{ functionDeclarations: [] }] },
+      };
+      const userPromptId = 'test-prompt-id';
+
+      const mockMessages = [
+        { role: 'user', content: 'Hello' },
+      ] as OpenAI.Chat.ChatCompletionMessageParam[];
+      const mockOpenAIResponse = {
+        id: 'response-id',
+        choices: [{ message: { content: 'Response' }, finish_reason: 'stop' }],
+      } as OpenAI.Chat.ChatCompletion;
+      const mockLlmResponse = new GenerateContentResponse();
+
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue(
+        mockMessages,
+      );
+      (mockConverter.convertLlmToolsToOpenAI as Mock).mockResolvedValue([]);
+      (mockConverter.convertOpenAIResponseToLlm as Mock).mockReturnValue(
+        mockLlmResponse,
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        mockOpenAIResponse,
+      );
+
+      // Act
+      await pipeline.execute(request, userPromptId);
+
+      // Assert — conversion ran (wrapper is non-empty) but the empty
+      // result must not reach the wire.
+      expect(mockConverter.convertLlmToolsToOpenAI).toHaveBeenCalled();
+      const apiCall = (mockClient.chat.completions.create as Mock).mock
+        .calls[0][0];
+      expect(apiCall.tools).toBeUndefined();
+    });
+
     it('should override enable_thinking when thinkingConfig disables it', async () => {
       // Arrange — provider injects enable_thinking: true via extra_body
       // (e.g. user configured `enableThinking: true` via setup wizard,

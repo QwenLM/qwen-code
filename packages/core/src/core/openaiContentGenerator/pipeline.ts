@@ -1079,25 +1079,35 @@ export class ContentGenerationPipeline {
     }
 
     // Add tools if present and non-empty.
-    // Some providers reject tools: [] (empty array), so skip when there are no tools.
+    // Some providers reject tools: [] (empty array), so skip when there are
+    // no tools. Guard on the CONVERTED declarations, not the wrapper length:
+    // client.setTools() always wraps declarations as `[{ functionDeclarations }]`
+    // even when the registry is empty (the #10065 empty allowlist disables
+    // every tool), so the wrapper's own `.length` is 1 while it carries zero
+    // declarations — without this guard an empty allowlist would still ship
+    // `tools: []` on the wire (#10080).
     if (request.config?.tools && request.config.tools.length > 0) {
-      baseRequest.tools = await OpenAIContentConverter.convertLlmToolsToOpenAI(
-        request.config.tools,
-        this.contentGeneratorConfig.schemaCompliance ?? 'auto',
-      );
+      const convertedTools =
+        await OpenAIContentConverter.convertLlmToolsToOpenAI(
+          request.config.tools,
+          this.contentGeneratorConfig.schemaCompliance ?? 'auto',
+        );
+      if (convertedTools.length > 0) {
+        baseRequest.tools = convertedTools;
 
-      // Map Gemini-style toolConfig.functionCallingConfig.mode to OpenAI's
-      // tool_choice so structured side queries (e.g. the AUTO-mode
-      // classifier's respond_in_schema) can force the model to emit a tool
-      // call instead of free-texting. Without this, thinking-heavy models
-      // may consume the tiny output budget on reasoning and skip the tool.
-      const fcMode = request.config?.toolConfig?.functionCallingConfig?.mode;
-      if (fcMode === 'ANY') {
-        (baseRequest as unknown as Record<string, unknown>)['tool_choice'] =
-          'required';
-      } else if (fcMode === 'NONE') {
-        (baseRequest as unknown as Record<string, unknown>)['tool_choice'] =
-          'none';
+        // Map Gemini-style toolConfig.functionCallingConfig.mode to OpenAI's
+        // tool_choice so structured side queries (e.g. the AUTO-mode
+        // classifier's respond_in_schema) can force the model to emit a tool
+        // call instead of free-texting. Without this, thinking-heavy models
+        // may consume the tiny output budget on reasoning and skip the tool.
+        const fcMode = request.config?.toolConfig?.functionCallingConfig?.mode;
+        if (fcMode === 'ANY') {
+          (baseRequest as unknown as Record<string, unknown>)['tool_choice'] =
+            'required';
+        } else if (fcMode === 'NONE') {
+          (baseRequest as unknown as Record<string, unknown>)['tool_choice'] =
+            'none';
+        }
       }
     }
 
