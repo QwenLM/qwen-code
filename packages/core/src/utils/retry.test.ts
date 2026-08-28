@@ -735,7 +735,7 @@ describe('retryWithBackoff', () => {
     it('thrown error must not be a rate-limit error (pins no-status intent)', async () => {
       // The thrown error deliberately carries no .status so that
       // isRateLimitError() returns false — preventing the stream-side
-      // rate-limit retry loop in geminiChat.ts from re-driving it.
+      // rate-limit retry loop in llm-chat.ts from re-driving it.
       const quotaError = Object.assign(
         new Error(
           '429 Your token-plan 1-week quota has been exhausted. The quota will reset at 07-27 09:25:00 UTC.',

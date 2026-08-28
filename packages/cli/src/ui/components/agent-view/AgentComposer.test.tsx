@@ -67,11 +67,13 @@ describe('AgentComposer', () => {
       agentInputBufferText: '',
       agentTabBarFocused: false,
       agentApprovalModes: new Map(),
+      agentMessageQueues: new Map(),
     } as never);
     vi.mocked(useAgentViewActions).mockReturnValue({
       setAgentInputBufferText,
       setAgentTabBarFocused,
       setAgentApprovalMode,
+      setAgentMessageQueue: vi.fn(),
     } as never);
     vi.mocked(useConfig).mockReturnValue({
       getContentGeneratorConfig: () => undefined,
