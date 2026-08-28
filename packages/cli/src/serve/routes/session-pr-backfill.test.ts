@@ -20,6 +20,12 @@ import {
   type SessionService,
 } from '@qwen-code/qwen-code-core';
 import { SessionArchivingError } from '@qwen-code/acp-bridge/bridgeErrors';
+import {
+  AONE_BACKFILL_PAGES_PER_STATE,
+  AONE_MAX_MR_VIEW_CALLS_PER_RUN,
+  AoneCommandError,
+  type AoneMrBackend,
+} from '../server/aone-mrs.js';
 import { sendBridgeError } from '../server/error-response.js';
 import {
   DaemonDrainingError,
@@ -454,6 +460,653 @@ describe('backfillWorkspaceSessionPrs', () => {
       sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
     );
     expect(prs?.[0]).toMatchObject({ number: 31, state: 'merged' });
+  });
+
+  describe('on an Aone workspace', () => {
+    function fakeAoneBackend(
+      overrides: Partial<AoneMrBackend> = {},
+    ): AoneMrBackend {
+      return {
+        list: vi.fn(async () => []),
+        view: vi.fn(async (repoPath: string, id: number) => ({
+          number: id,
+          url: `https://code.alibaba-inc.com/${repoPath}/codereview/${id}`,
+          state: 'merged' as const,
+        })),
+        ...overrides,
+      };
+    }
+
+    function aoneOrigin(): void {
+      execSync(
+        'git remote add origin git@gitlab.alibaba-inc.com:jspt/agentic_coding.git',
+        { cwd: workspaceCwd, stdio: 'pipe' },
+      );
+    }
+
+    it('resolves the slug convention through mr view, never fabricating', async () => {
+      aoneOrigin();
+      await seedSession(SESSION_A);
+      await seedWorktreeSidecar(SESSION_A, 'pr-26430560', 'wt-local-only');
+      const backend = fakeAoneBackend();
+
+      const result = await backfillWorkspaceSessionPrs(runtime, undefined, {
+        aoneBackend: backend,
+      });
+
+      expect(result).toMatchObject({
+        scanned: 1,
+        bound: 1,
+        unresolved: 0,
+        platform: 'aone',
+        aoneAvailable: true,
+      });
+      expect(fetchGitHubPullRequestsMock).not.toHaveBeenCalled();
+      expect(backend.view).toHaveBeenCalledWith(
+        'jspt/agentic_coding',
+        26430560,
+      );
+      const prs = await readSessionPrs(
+        sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
+      );
+      expect(prs).toEqual([
+        {
+          number: 26430560,
+          url: 'https://code.alibaba-inc.com/jspt/agentic_coding/codereview/26430560',
+          createdAt: expect.any(String),
+          state: 'merged',
+        },
+      ]);
+    });
+
+    it('maps transcript branches through mr list', async () => {
+      aoneOrigin();
+      await seedTranscriptBranchNames(SESSION_A, ['yongxun']);
+      const backend = fakeAoneBackend({
+        list: vi.fn(async (_repoPath, state) =>
+          state === 'merged'
+            ? [
+                {
+                  number: 26430560,
+                  headRefName: 'yongxun',
+                  state: 'merged' as const,
+                },
+              ]
+            : [],
+        ),
+      });
+
+      const result = await backfillWorkspaceSessionPrs(runtime, undefined, {
+        aoneBackend: backend,
+      });
+
+      expect(result).toMatchObject({ bound: 1, platform: 'aone' });
+      const prs = await readSessionPrs(
+        sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
+      );
+      expect(prs?.[0]).toMatchObject({
+        number: 26430560,
+        url: 'https://code.alibaba-inc.com/jspt/agentic_coding/codereview/26430560',
+        state: 'merged',
+      });
+    });
+
+    it('excludes the default branch from head mapping', async () => {
+      aoneOrigin();
+      // beforeEach points refs/remotes/origin/HEAD at origin/main.
+      await seedTranscriptBranchNames(SESSION_A, ['main']);
+      const backend = fakeAoneBackend({
+        list: vi.fn(async (_repoPath, state) =>
+          state === 'merged'
+            ? [{ number: 5, headRefName: 'main', state: 'merged' as const }]
+            : [],
+        ),
+      });
+
+      const result = await backfillWorkspaceSessionPrs(runtime, undefined, {
+        aoneBackend: backend,
+      });
+
+      expect(result).toMatchObject({ bound: 0, platform: 'aone' });
+      expect(backend.view).not.toHaveBeenCalled();
+    });
+
+    it('fails closed on head-branch mapping when the default branch is unknown', async () => {
+      // Aone mirror of the gh guard: an origin added by hand (git init +
+      // remote add, no clone) has no refs/remotes/origin/HEAD, and the
+      // exclusion would degenerate to `headRefName !== undefined`.
+      aoneOrigin();
+      execSync('git symbolic-ref --delete refs/remotes/origin/HEAD', {
+        cwd: workspaceCwd,
+        stdio: 'pipe',
+      });
+      await seedSession(SESSION_A);
+      await seedTranscriptBranchNames(SESSION_A, ['main']);
+      await seedSession(SESSION_B);
+      await seedWorktreeSidecar(SESSION_B, 'pr-7', 'worktree-pr-7');
+      const backend = fakeAoneBackend({
+        list: vi.fn(async (_repoPath, state) =>
+          state === 'merged'
+            ? [
+                {
+                  number: 9199,
+                  headRefName: 'main',
+                  state: 'merged' as const,
+                },
+              ]
+            : [],
+        ),
+      });
+
+      const result = await backfillWorkspaceSessionPrs(runtime, undefined, {
+        aoneBackend: backend,
+      });
+
+      expect(result).toMatchObject({
+        scanned: 2,
+        bound: 1,
+        platform: 'aone',
+      });
+      expect(
+        await readSessionPrs(
+          sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
+        ),
+      ).toBeNull();
+      const prsB = await readSessionPrs(
+        sessionService.getPrSessionPathForArchiveState(SESSION_B, 'active'),
+      );
+      expect(prsB?.map((entry) => entry.number)).toEqual([7]);
+    });
+
+    it('keeps convention bindings when mr list fails', async () => {
+      aoneOrigin();
+      await seedSession(SESSION_A);
+      await seedWorktreeSidecar(SESSION_A, 'pr-777', 'wt-local-only');
+      const backend = fakeAoneBackend({
+        list: vi.fn(async () => {
+          throw new AoneCommandError('boom');
+        }),
+      });
+
+      const result = await backfillWorkspaceSessionPrs(runtime, undefined, {
+        aoneBackend: backend,
+      });
+
+      expect(result).toMatchObject({
+        bound: 1,
+        platform: 'aone',
+        aoneAvailable: false,
+      });
+      const prs = await readSessionPrs(
+        sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
+      );
+      expect(prs?.[0]?.url).toBe(
+        'https://code.alibaba-inc.com/jspt/agentic_coding/codereview/777',
+      );
+    });
+
+    it('counts a number whose mr view fails as unresolved', async () => {
+      aoneOrigin();
+      await seedSession(SESSION_A);
+      await seedWorktreeSidecar(SESSION_A, 'pr-888', 'wt-local-only');
+      const backend = fakeAoneBackend({
+        view: vi.fn(async () => {
+          throw new AoneCommandError('403 Forbidden');
+        }),
+      });
+
+      const result = await backfillWorkspaceSessionPrs(runtime, undefined, {
+        aoneBackend: backend,
+      });
+
+      expect(result).toMatchObject({
+        bound: 0,
+        unresolved: 1,
+        platform: 'aone',
+      });
+    });
+
+    it('caps mr view calls per run', async () => {
+      aoneOrigin();
+      // Distinct convention numbers across sessions, one view each, until
+      // the cap; the excess stays unresolved for the next run.
+      const view = vi.fn(async (repoPath: string, id: number) => ({
+        number: id,
+        url: `https://code.alibaba-inc.com/${repoPath}/codereview/${id}`,
+        state: 'merged' as const,
+      }));
+      for (let i = 0; i < AONE_MAX_MR_VIEW_CALLS_PER_RUN + 2; i++) {
+        const sessionId = `00000000-0000-4000-8000-${String(100 + i).padStart(12, '0')}`;
+        await seedSession(sessionId);
+        await seedWorktreeSidecar(sessionId, `pr-${9000 + i}`, 'wt-local-only');
+      }
+      const backend = fakeAoneBackend({ view });
+
+      const result = await backfillWorkspaceSessionPrs(runtime, undefined, {
+        aoneBackend: backend,
+      });
+
+      expect(view).toHaveBeenCalledTimes(AONE_MAX_MR_VIEW_CALLS_PER_RUN);
+      expect(result).toMatchObject({
+        bound: AONE_MAX_MR_VIEW_CALLS_PER_RUN,
+        unresolved: 2,
+        platform: 'aone',
+      });
+
+      // Steady state: the second run re-plans all 25 already-bound numbers
+      // but must NOT spend the view budget re-attesting them (their stored
+      // URLs match this repo's detailUrl shape) — the two still-unbound
+      // sessions get the budget and converge. A re-attestation regressor
+      // exhausts the 25 calls on the bound numbers and leaves run 2 with
+      // bound: 0, unresolved: 2, forever.
+      const second = await backfillWorkspaceSessionPrs(runtime, undefined, {
+        aoneBackend: backend,
+      });
+      expect(view).toHaveBeenCalledTimes(AONE_MAX_MR_VIEW_CALLS_PER_RUN + 2);
+      expect(second).toMatchObject({
+        bound: 2,
+        unresolved: 0,
+        platform: 'aone',
+      });
+    });
+
+    it.each([
+      [250, 100],
+      [100, 250],
+    ])(
+      'maps a reused head branch to the highest MR number (%j arrival)',
+      async (first, second) => {
+        aoneOrigin();
+        await seedTranscriptBranchNames(SESSION_A, ['yongxun']);
+        const backend = fakeAoneBackend({
+          // a1 lists newest-updated first and Aone ids are monotonic, so
+          // descending is the typical arrival — pin both directions so the
+          // highest-number-wins rule cannot hide an arrival-order quirk.
+          list: vi.fn(async (_repoPath, state) =>
+            state === 'merged'
+              ? [
+                  {
+                    number: first,
+                    headRefName: 'yongxun',
+                    state: 'merged' as const,
+                  },
+                  {
+                    number: second,
+                    headRefName: 'yongxun',
+                    state: 'merged' as const,
+                  },
+                ]
+              : [],
+          ),
+        });
+
+        const result = await backfillWorkspaceSessionPrs(runtime, undefined, {
+          aoneBackend: backend,
+        });
+
+        expect(result).toMatchObject({ bound: 1, platform: 'aone' });
+        const prs = await readSessionPrs(
+          sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
+        );
+        expect(prs?.map((p) => p.number)).toEqual([250]);
+      },
+    );
+
+    it('keeps a GHE-shaped origin on the GitHub path', async () => {
+      // `*.alibaba-inc.com` also names GitHub Enterprise instances; such a
+      // workspace must stay on gh (which resolves the enterprise host from
+      // the origin) instead of being displaced onto a1.
+      execSync(
+        'git remote add origin git@ghe.alibaba-inc.com:team/project.git',
+        { cwd: workspaceCwd, stdio: 'pipe' },
+      );
+      await seedSession(SESSION_A);
+      await seedWorktreeSidecar(SESSION_A, 'pr-5', 'worktree-pr-5');
+      fetchGitHubPullRequestsMock.mockResolvedValue({
+        kind: 'ok',
+        pullRequests: [pr(5, 'worktree-pr-5', 'merged')],
+      });
+      const backend = fakeAoneBackend();
+
+      const result = await backfillWorkspaceSessionPrs(runtime, undefined, {
+        aoneBackend: backend,
+      });
+
+      expect(result).toMatchObject({ platform: 'github', bound: 1 });
+      expect(backend.list).not.toHaveBeenCalled();
+      expect(backend.view).not.toHaveBeenCalled();
+      const prs = await readSessionPrs(
+        sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
+      );
+      expect(prs?.[0]).toMatchObject({
+        number: 5,
+        url: 'https://github.com/o/r/pull/5',
+        state: 'merged',
+      });
+    });
+
+    it('binds branches that only match an opened MR', async () => {
+      aoneOrigin();
+      await seedTranscriptBranchNames(SESSION_A, ['open-work']);
+      const list = vi.fn(async (_repoPath: string, state: string) =>
+        state === 'opened'
+          ? [{ number: 300, headRefName: 'open-work', state: 'open' as const }]
+          : [],
+      );
+      // The bound state is the view's attestation (the authoritative
+      // single-MR read at bind time), so let it agree with the list.
+      const backend = fakeAoneBackend({
+        list,
+        view: vi.fn(async (repoPath: string, id: number) => ({
+          number: id,
+          url: `https://code.alibaba-inc.com/${repoPath}/codereview/${id}`,
+          state: 'open' as const,
+        })),
+      });
+
+      const result = await backfillWorkspaceSessionPrs(runtime, undefined, {
+        aoneBackend: backend,
+      });
+
+      expect(list).toHaveBeenCalledWith(
+        'jspt/agentic_coding',
+        'opened',
+        AONE_BACKFILL_PAGES_PER_STATE,
+      );
+      expect(list).toHaveBeenCalledWith(
+        'jspt/agentic_coding',
+        'merged',
+        AONE_BACKFILL_PAGES_PER_STATE,
+      );
+      expect(result).toMatchObject({ bound: 1, platform: 'aone' });
+      const prs = await readSessionPrs(
+        sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
+      );
+      expect(prs?.[0]).toMatchObject({
+        number: 300,
+        url: 'https://code.alibaba-inc.com/jspt/agentic_coding/codereview/300',
+        state: 'open',
+      });
+    });
+
+    it('keeps a foreign same-numbered binding out of the cap plan', async () => {
+      aoneOrigin();
+      // Two planned numbers: a branch mapping colliding with a foreign
+      // binding, plus a convention number — the cap pressure that trims the
+      // colliding number unless the identity guard keeps it foreign.
+      await seedTranscriptBranchNames(SESSION_A, ['yongxun']);
+      await seedWorktreeSidecar(SESSION_A, 'pr-500', 'wt-local-only');
+      // Fill the sidecar to the cap; the metadata route accepts any http(s)
+      // pr.url, so a foreign entry can carry the colliding number.
+      const foreign: number[] = [];
+      for (let i = 1; i < SESSION_PR_LIST_LIMIT; i++) {
+        foreign.push(1000 + i);
+      }
+      await seedPrSidecar(SESSION_A, foreign);
+      const prPath = sessionService.getPrSessionPathForArchiveState(
+        SESSION_A,
+        'active',
+      );
+      await upsertSessionPr(prPath, {
+        number: 26430560,
+        url: 'https://github.com/elsewhere/other/pull/26430560',
+      });
+      const backend = fakeAoneBackend({
+        list: vi.fn(async (_repoPath, state) =>
+          state === 'merged'
+            ? [
+                {
+                  number: 26430560,
+                  headRefName: 'yongxun',
+                  state: 'merged' as const,
+                },
+              ]
+            : [],
+        ),
+      });
+
+      const result = await backfillWorkspaceSessionPrs(runtime, undefined, {
+        aoneBackend: backend,
+      });
+
+      expect(result).toMatchObject({
+        bound: 0,
+        platform: 'aone',
+        overLimit: 1,
+      });
+      const prs = await readSessionPrs(prPath);
+      const collided = prs?.find((p) => p.number === 26430560);
+      expect(collided?.url).toBe(
+        'https://github.com/elsewhere/other/pull/26430560',
+      );
+      expect(prs).toHaveLength(SESSION_PR_LIST_LIMIT);
+    });
+
+    it('evicts a re-planned entry when a full sidecar gains a new MR', async () => {
+      aoneOrigin();
+      // A long-lived session at the cap: entry 1's branch still maps this
+      // run, MR 11 on a new branch does not exist in the sidecar yet.
+      await seedTranscriptBranchNames(SESSION_A, ['b-1', 'b-new']);
+      const prPath = sessionService.getPrSessionPathForArchiveState(
+        SESSION_A,
+        'active',
+      );
+      await fsp.mkdir(path.dirname(prPath), { recursive: true });
+      await fsp.writeFile(
+        prPath,
+        JSON.stringify({
+          prs: Array.from({ length: SESSION_PR_LIST_LIMIT }, (_, i) => ({
+            number: i + 1,
+            url: `https://code.alibaba-inc.com/jspt/agentic_coding/codereview/${i + 1}`,
+            createdAt: '2026-08-01T00:00:00.000Z',
+            state: 'merged',
+          })),
+        }),
+        'utf8',
+      );
+      const view = vi.fn(async (repoPath: string, id: number) => ({
+        number: id,
+        url: `https://code.alibaba-inc.com/${repoPath}/codereview/${id}`,
+        state: 'merged' as const,
+      }));
+      const backend = fakeAoneBackend({
+        list: vi.fn(async (_repoPath, state) =>
+          state === 'merged'
+            ? [
+                { number: 1, headRefName: 'b-1', state: 'merged' as const },
+                {
+                  number: 11,
+                  headRefName: 'b-new',
+                  state: 'merged' as const,
+                },
+              ]
+            : [],
+        ),
+        view,
+      });
+
+      const result = await backfillWorkspaceSessionPrs(runtime, undefined, {
+        aoneBackend: backend,
+      });
+
+      // The existing entries match the exact detailUrl shape of this
+      // repoPath, so the closed identity guard classifies them own — and
+      // trimmable — WITHOUT a re-attestation view; the only view is the
+      // new binding's. Without the shape check every entry counted
+      // foreign, slots fell to zero, and the new MR was overLimit forever.
+      expect(view).toHaveBeenCalledTimes(1);
+      expect(view).toHaveBeenCalledWith('jspt/agentic_coding', 11);
+      expect(result).toMatchObject({
+        bound: 1,
+        overLimit: 1,
+        platform: 'aone',
+      });
+      const prs = await readSessionPrs(prPath);
+      expect(prs?.map((p) => p.number)).toEqual([
+        2, 3, 4, 5, 6, 7, 8, 9, 10, 11,
+      ]);
+    });
+
+    it('repairs a legacy fabricated /pull/ binding via mr view', async () => {
+      aoneOrigin();
+      await seedSession(SESSION_A);
+      await seedWorktreeSidecar(SESSION_A, 'pr-777', 'wt-local-only');
+      // The pre-Aone backfill persisted this fabricated shape (baseline
+      // evidence in .qwen/e2e-tests/aone-session-pr.md); without repair its
+      // state stays frozen and burns one view call per refresh sweep.
+      const prPath = sessionService.getPrSessionPathForArchiveState(
+        SESSION_A,
+        'active',
+      );
+      const seeded = await upsertSessionPr(prPath, {
+        number: 777,
+        url: 'https://gitlab.alibaba-inc.com/jspt/agentic_coding/pull/777',
+      });
+
+      const result = await backfillWorkspaceSessionPrs(runtime, undefined, {
+        aoneBackend: fakeAoneBackend(),
+      });
+
+      expect(result).toMatchObject({ platform: 'aone' });
+      const prs = await readSessionPrs(prPath);
+      expect(prs).toEqual([
+        {
+          number: 777,
+          url: 'https://code.alibaba-inc.com/jspt/agentic_coding/codereview/777',
+          createdAt: seeded[0]?.createdAt,
+          state: 'merged',
+        },
+      ]);
+    });
+
+    it('leaves a legacy fabricated binding untouched when mr view fails', async () => {
+      aoneOrigin();
+      await seedSession(SESSION_A);
+      await seedWorktreeSidecar(SESSION_A, 'pr-888', 'wt-local-only');
+      const prPath = sessionService.getPrSessionPathForArchiveState(
+        SESSION_A,
+        'active',
+      );
+      const seeded = await upsertSessionPr(prPath, {
+        number: 888,
+        url: 'https://gitlab.alibaba-inc.com/jspt/agentic_coding/pull/888',
+      });
+      const backend = fakeAoneBackend({
+        view: vi.fn(async () => {
+          throw new AoneCommandError('403 Forbidden');
+        }),
+      });
+
+      const result = await backfillWorkspaceSessionPrs(runtime, undefined, {
+        aoneBackend: backend,
+      });
+
+      expect(result).toMatchObject({ bound: 0, platform: 'aone' });
+      const prs = await readSessionPrs(prPath);
+      expect(prs).toEqual([
+        {
+          number: 888,
+          url: 'https://gitlab.alibaba-inc.com/jspt/agentic_coding/pull/888',
+          createdAt: seeded[0]?.createdAt,
+        },
+      ]);
+    });
+
+    it('repairs an unplanned fabricated entry alongside a planned binding', async () => {
+      aoneOrigin();
+      // The fabricated number sits OUTSIDE this run's planned list while a
+      // transcript branch still maps — repair iterates every existing entry,
+      // never just the planned ones.
+      await seedTranscriptBranchNames(SESSION_A, ['feature-x']);
+      const prPath = sessionService.getPrSessionPathForArchiveState(
+        SESSION_A,
+        'active',
+      );
+      const seeded = await upsertSessionPr(prPath, {
+        number: 999,
+        url: 'https://gitlab.alibaba-inc.com/jspt/agentic_coding/pull/999',
+      });
+      const backend = fakeAoneBackend({
+        list: vi.fn(async (_repoPath, state) =>
+          state === 'opened'
+            ? [
+                {
+                  number: 500,
+                  headRefName: 'feature-x',
+                  state: 'open' as const,
+                },
+              ]
+            : [],
+        ),
+        view: vi.fn(async (repoPath: string, id: number) => ({
+          number: id,
+          url: `https://code.alibaba-inc.com/${repoPath}/codereview/${id}`,
+          state: id === 500 ? ('open' as const) : ('merged' as const),
+        })),
+      });
+
+      const result = await backfillWorkspaceSessionPrs(runtime, undefined, {
+        aoneBackend: backend,
+      });
+
+      expect(result).toMatchObject({ bound: 1, platform: 'aone' });
+      const prs = await readSessionPrs(prPath);
+      expect(prs).toEqual([
+        {
+          number: 999,
+          url: 'https://code.alibaba-inc.com/jspt/agentic_coding/codereview/999',
+          createdAt: seeded[0]?.createdAt,
+          state: 'merged',
+        },
+        {
+          number: 500,
+          url: 'https://code.alibaba-inc.com/jspt/agentic_coding/codereview/500',
+          createdAt: expect.any(String),
+          state: 'open',
+        },
+      ]);
+    });
+
+    it('repairs a legacy fabricated binding when no branch maps this run', async () => {
+      aoneOrigin();
+      // The session's branches fell out of the mr list window, so nothing is
+      // planned — repair must still run, or the fabricated entry stays
+      // frozen and burns one capped view call per refresh sweep, forever.
+      await seedTranscriptBranchNames(SESSION_A, ['gone-from-window']);
+      const prPath = sessionService.getPrSessionPathForArchiveState(
+        SESSION_A,
+        'active',
+      );
+      const seeded = await upsertSessionPr(prPath, {
+        number: 777,
+        url: 'https://gitlab.alibaba-inc.com/jspt/agentic_coding/pull/777',
+      });
+      const view = vi.fn(async (repoPath: string, id: number) => ({
+        number: id,
+        url: `https://code.alibaba-inc.com/${repoPath}/codereview/${id}`,
+        state: 'merged' as const,
+      }));
+
+      const result = await backfillWorkspaceSessionPrs(runtime, undefined, {
+        aoneBackend: fakeAoneBackend({ view }),
+      });
+
+      expect(view).toHaveBeenCalledWith('jspt/agentic_coding', 777);
+      expect(result).toMatchObject({
+        bound: 0,
+        written: 1,
+        platform: 'aone',
+      });
+      const prs = await readSessionPrs(prPath);
+      expect(prs).toEqual([
+        {
+          number: 777,
+          url: 'https://code.alibaba-inc.com/jspt/agentic_coding/codereview/777',
+          createdAt: seeded[0]?.createdAt,
+          state: 'merged',
+        },
+      ]);
+    });
   });
 
   it('ignores gitBranch keys nested inside structured record values', async () => {
