@@ -469,11 +469,11 @@ describe('useLlmStream', () => {
       mockSendMessageStream.mockReturnValue(
         (async function* () {
           yield {
-            type: ServerGeminiEventType.Content,
+            type: ServerLlmEventType.Content,
             value: 'first',
           };
           yield {
-            type: ServerGeminiEventType.Content,
+            type: ServerLlmEventType.Content,
             value: 'second',
           };
         })(),
@@ -522,14 +522,14 @@ describe('useLlmStream', () => {
       mockSendMessageStream.mockReturnValue(
         (async function* () {
           yield {
-            type: ServerGeminiEventType.ChatCompressed,
+            type: ServerLlmEventType.ChatCompressed,
             value: { originalTokenCount: 100, newTokenCount: 50 },
           };
           // Reactive overflow recovery rebuilds the payload; the retry is
           // tagged so consumers report a delivery failure authoritatively.
-          yield { type: ServerGeminiEventType.Retry, payloadRebuilt: true };
+          yield { type: ServerLlmEventType.Retry, payloadRebuilt: true };
           yield {
-            type: ServerGeminiEventType.Content,
+            type: ServerLlmEventType.Content,
             value: 'compressed retry response',
           };
         })(),
@@ -557,11 +557,11 @@ describe('useLlmStream', () => {
       mockSendMessageStream.mockReturnValue(
         (async function* () {
           yield {
-            type: ServerGeminiEventType.ChatCompressed,
+            type: ServerLlmEventType.ChatCompressed,
             value: { originalTokenCount: 100, newTokenCount: 50 },
           };
           yield {
-            type: ServerGeminiEventType.Content,
+            type: ServerLlmEventType.Content,
             value: 'response after auto-compression',
           };
         })(),
@@ -589,16 +589,16 @@ describe('useLlmStream', () => {
       mockSendMessageStream.mockReturnValue(
         (async function* () {
           yield {
-            type: ServerGeminiEventType.ChatCompressed,
+            type: ServerLlmEventType.ChatCompressed,
             value: { originalTokenCount: 100, newTokenCount: 50 },
           };
           // A rate-limit retry after pre-send compression re-sends the
           // identical payload (no payloadRebuilt tag), so the delivery is
           // intact and must not be reported as failed — the ordering
           // [Compressed, Retry] alone cannot prove a rebuilt payload.
-          yield { type: ServerGeminiEventType.Retry };
+          yield { type: ServerLlmEventType.Retry };
           yield {
-            type: ServerGeminiEventType.Content,
+            type: ServerLlmEventType.Content,
             value: 'response after transient retry',
           };
         })(),
@@ -627,7 +627,7 @@ describe('useLlmStream', () => {
         createStream: () =>
           (async function* () {
             yield {
-              type: ServerGeminiEventType.Error,
+              type: ServerLlmEventType.Error,
               value: { error: { message: 'provider error' } },
             };
           })(),
@@ -636,14 +636,14 @@ describe('useLlmStream', () => {
         caseName: 'a cancellation event',
         createStream: () =>
           (async function* () {
-            yield { type: ServerGeminiEventType.UserCancelled };
+            yield { type: ServerLlmEventType.UserCancelled };
           })(),
       },
       {
         caseName: 'a local maximum-turns event',
         createStream: () =>
           (async function* () {
-            yield { type: ServerGeminiEventType.MaxSessionTurns };
+            yield { type: ServerLlmEventType.MaxSessionTurns };
           })(),
       },
       {
@@ -651,7 +651,7 @@ describe('useLlmStream', () => {
         createStream: () =>
           (async function* () {
             yield {
-              type: ServerGeminiEventType.SessionTokenLimitExceeded,
+              type: ServerLlmEventType.SessionTokenLimitExceeded,
               value: {
                 currentTokens: 200,
                 limit: 100,
@@ -664,7 +664,7 @@ describe('useLlmStream', () => {
         caseName: 'a retry control event',
         createStream: () =>
           (async function* () {
-            yield { type: ServerGeminiEventType.Retry };
+            yield { type: ServerLlmEventType.Retry };
           })(),
       },
       {
@@ -672,7 +672,7 @@ describe('useLlmStream', () => {
         createStream: () =>
           (async function* () {
             yield {
-              type: ServerGeminiEventType.ModelFallback,
+              type: ServerLlmEventType.ModelFallback,
               fromModel: 'primary',
               toModel: 'fallback',
               fallbackIndex: 1,
@@ -684,7 +684,7 @@ describe('useLlmStream', () => {
         createStream: () =>
           (async function* () {
             yield {
-              type: ServerGeminiEventType.LoopDetected,
+              type: ServerLlmEventType.LoopDetected,
               value: { loopType: 'consecutive_identical_tool_calls' },
             };
           })(),
@@ -1583,7 +1583,7 @@ describe('useLlmStream', () => {
   it('expands autonomous loop wakeup sentinels before queuing them', async () => {
     mockSendMessageStream.mockImplementation(() =>
       (async function* () {
-        yield { type: ServerGeminiEventType.Content, value: 'done' };
+        yield { type: ServerLlmEventType.Content, value: 'done' };
       })(),
     );
     let schedulerCallback:
@@ -2938,7 +2938,7 @@ describe('useLlmStream', () => {
       return [[], mockScheduleToolCalls, mockMarkToolsAsSubmitted];
     });
     renderHook(() =>
-      useGeminiStream(
+      useLlmStream(
         new MockedGeminiClientClass(mockConfig),
         [],
         mockAddItem,
@@ -3026,7 +3026,7 @@ describe('useLlmStream', () => {
         ownersByPromptId.set(promptId, mainOwner);
         return (async function* () {
           yield {
-            type: ServerGeminiEventType.ToolCallRequest,
+            type: ServerLlmEventType.ToolCallRequest,
             value: {
               callId: 'owner-tool',
               name: 'testTool',
@@ -3043,7 +3043,7 @@ describe('useLlmStream', () => {
         ownersByPromptId.set(promptId, btwOwner);
         return (async function* () {
           yield {
-            type: ServerGeminiEventType.ToolCallRequest,
+            type: ServerLlmEventType.ToolCallRequest,
             value: {
               callId: 'secondary-search',
               name: 'tool_search',
@@ -3068,7 +3068,7 @@ describe('useLlmStream', () => {
 
     const client = new MockedGeminiClientClass(mockConfig);
     const { result } = renderHook(() =>
-      useGeminiStream(
+      useLlmStream(
         client,
         [],
         mockAddItem,
@@ -3277,7 +3277,7 @@ describe('useLlmStream', () => {
         // stream is active and gets DEFERRED).
         return (async function* () {
           yield {
-            type: ServerGeminiEventType.ToolCallRequest,
+            type: ServerLlmEventType.ToolCallRequest,
             value: {
               callId: 'deferred-search',
               name: 'tool_search',
@@ -3293,7 +3293,7 @@ describe('useLlmStream', () => {
       // can complete a second batch inside the acceptance window.
       return (async function* () {
         await continuationGate;
-        yield { type: ServerGeminiEventType.Content, value: 'ok' };
+        yield { type: ServerLlmEventType.Content, value: 'ok' };
       })();
     });
 
@@ -3365,7 +3365,7 @@ describe('useLlmStream', () => {
 
     const client = new MockedGeminiClientClass(mockConfig);
     const { result } = renderHook(() =>
-      useGeminiStream(
+      useLlmStream(
         client,
         [],
         mockAddItem,
@@ -3502,7 +3502,7 @@ describe('useLlmStream', () => {
     mockSendMessageStream.mockImplementation(() =>
       (async function* () {
         yield {
-          type: ServerGeminiEventType.ToolCallRequest,
+          type: ServerLlmEventType.ToolCallRequest,
           value: {
             callId: 'goal-search',
             name: 'tool_search',
@@ -3513,7 +3513,7 @@ describe('useLlmStream', () => {
           },
         };
         yield {
-          type: ServerGeminiEventType.ToolCallRequest,
+          type: ServerLlmEventType.ToolCallRequest,
           value: {
             callId: 'goal-finisher',
             name: 'update_goal',
@@ -3601,7 +3601,7 @@ describe('useLlmStream', () => {
 
     const client = new MockedGeminiClientClass(mockConfig);
     const { result } = renderHook(() =>
-      useGeminiStream(
+      useLlmStream(
         client,
         [],
         mockAddItem,
@@ -4345,7 +4345,7 @@ describe('useLlmStream', () => {
   it('records mid-turn queued user messages after tool results accept them', async () => {
     mockSendMessageStream.mockReturnValue(
       (async function* () {
-        yield { type: ServerGeminiEventType.Content, value: '' };
+        yield { type: ServerLlmEventType.Content, value: '' };
       })(),
     );
     const queuedPrompt = 'save the logs locally first';
@@ -4996,7 +4996,7 @@ describe('useLlmStream', () => {
   it('resolves mid-turn @ image messages before submitting tool results', async () => {
     mockSendMessageStream.mockReturnValue(
       (async function* () {
-        yield { type: ServerGeminiEventType.Content, value: '' };
+        yield { type: ServerLlmEventType.Content, value: '' };
       })(),
     );
     const queuedPrompt = 'inspect @/tmp/screenshot.png';
@@ -5178,7 +5178,7 @@ describe('useLlmStream', () => {
   it('forwards mid-turn text when a bridge failure returns no replacement parts', async () => {
     mockSendMessageStream.mockReturnValue(
       (async function* () {
-        yield { type: ServerGeminiEventType.Content, value: '' };
+        yield { type: ServerLlmEventType.Content, value: '' };
       })(),
     );
     const queuedPrompt = 'inspect @/tmp/screenshot.png and summarize';
@@ -5918,7 +5918,7 @@ describe('useLlmStream', () => {
   it('handles mid-turn drain when chat recording is not configured', async () => {
     mockSendMessageStream.mockReturnValue(
       (async function* () {
-        yield { type: ServerGeminiEventType.Content, value: '' };
+        yield { type: ServerLlmEventType.Content, value: '' };
       })(),
     );
     const queuedPrompt = 'save the logs locally first';
@@ -6987,7 +6987,7 @@ describe('useLlmStream', () => {
     });
 
     renderHook(() =>
-      useGeminiStream(
+      useLlmStream(
         client,
         [],
         mockAddItem,
@@ -7408,7 +7408,7 @@ describe('useLlmStream', () => {
     })();
     mockSendMessageStream.mockReturnValueOnce(heldStream).mockReturnValueOnce(
       (async function* () {
-        yield { type: ServerGeminiEventType.Content, value: 'done' };
+        yield { type: ServerLlmEventType.Content, value: 'done' };
       })(),
     );
 

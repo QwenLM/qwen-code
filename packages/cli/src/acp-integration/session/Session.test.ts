@@ -3192,7 +3192,7 @@ describe('Session', () => {
       mockChat.getHistory = vi
         .fn()
         .mockReturnValue([{ role: 'user', parts: [{ text: 'unanswered' }] }]);
-      mockGeminiClient.stripOrphanedUserEntriesFromHistory.mockReturnValue([
+      mockLlmClient.stripOrphanedUserEntriesFromHistory.mockReturnValue([
         { role: 'user', parts: [{ text: 'unanswered' }] },
       ]);
       // No token limit, so we reach the send; the send then throws.
@@ -3212,7 +3212,7 @@ describe('Session', () => {
       );
 
       expect(
-        mockGeminiClient.stripOrphanedUserEntriesFromHistory,
+        mockLlmClient.stripOrphanedUserEntriesFromHistory,
       ).toHaveBeenCalled();
       expect(
         mockChat.stripOrphanedUserEntriesFromHistory,
@@ -3228,7 +3228,7 @@ describe('Session', () => {
     });
 
     it('uses the client history wrapper when a daemon retry strips an orphan', async () => {
-      mockGeminiClient.stripOrphanedUserEntriesFromHistory.mockReturnValue([]);
+      mockLlmClient.stripOrphanedUserEntriesFromHistory.mockReturnValue([]);
       mockChat.sendMessageStream = vi
         .fn()
         .mockResolvedValue(createEmptyStream());
@@ -3240,7 +3240,7 @@ describe('Session', () => {
       } as Parameters<typeof session.prompt>[0]);
 
       expect(
-        mockGeminiClient.stripOrphanedUserEntriesFromHistory,
+        mockLlmClient.stripOrphanedUserEntriesFromHistory,
       ).toHaveBeenCalledOnce();
       expect(
         mockChat.stripOrphanedUserEntriesFromHistory,
@@ -4223,7 +4223,7 @@ describe('Session', () => {
       const result = session.rewindToTurn(1);
 
       expect(result).toEqual({ targetTurnIndex: 1, apiTruncateIndex: 2 });
-      expect(mockGeminiClient.truncateHistory).toHaveBeenCalledWith(2);
+      expect(mockLlmClient.truncateHistory).toHaveBeenCalledWith(2);
       expect(mockChat.truncateHistory).not.toHaveBeenCalled();
       expect(mockChat.stripThoughtsFromHistory).toHaveBeenCalled();
       const request = await runExitPlanModeApprovalPrompt();
@@ -4259,7 +4259,7 @@ describe('Session', () => {
       const result = session.rewindToTurn(1, { rewindFiles: false });
 
       expect(result).toEqual({ targetTurnIndex: 1, apiTruncateIndex: 2 });
-      expect(mockGeminiClient.truncateHistory).toHaveBeenCalledWith(2);
+      expect(mockLlmClient.truncateHistory).toHaveBeenCalledWith(2);
       expect(
         mockFileHistoryService.restoreFromSnapshots,
       ).not.toHaveBeenCalled();
@@ -4289,7 +4289,7 @@ describe('Session', () => {
       const result = session.rewindToTurn(0);
 
       expect(result).toEqual({ targetTurnIndex: 0, apiTruncateIndex: 1 });
-      expect(mockGeminiClient.truncateHistory).toHaveBeenCalledWith(1);
+      expect(mockLlmClient.truncateHistory).toHaveBeenCalledWith(1);
     });
 
     it('counts only real user prompts as rewindable turns', () => {
@@ -4353,7 +4353,7 @@ describe('Session', () => {
       // Keep startup + turn 1 + the MCP reminder (indices 0–3); truncate at
       // the second prompt (index 4). Counting the reminder would return 3.
       expect(result).toEqual({ targetTurnIndex: 1, apiTruncateIndex: 4 });
-      expect(mockGeminiClient.truncateHistory).toHaveBeenCalledWith(4);
+      expect(mockLlmClient.truncateHistory).toHaveBeenCalledWith(4);
     });
 
     it('does not count Todo Stop Guard continuations as user turns', () => {
@@ -4384,7 +4384,7 @@ describe('Session', () => {
         targetTurnIndex: 1,
         apiTruncateIndex: 6,
       });
-      expect(mockGeminiClient.truncateHistory).toHaveBeenCalledWith(6);
+      expect(mockLlmClient.truncateHistory).toHaveBeenCalledWith(6);
     });
 
     it('counts user text that only resembles a Todo Stop Guard prompt', () => {
@@ -4428,7 +4428,7 @@ describe('Session', () => {
       expect(() => session.rewindToTurn(2)).toThrow(
         'Cannot rewind to the requested turn',
       );
-      expect(mockGeminiClient.truncateHistory).not.toHaveBeenCalled();
+      expect(mockLlmClient.truncateHistory).not.toHaveBeenCalled();
     });
 
     it('rejects rewinds while a cron prompt is mutating history', () => {
@@ -4437,14 +4437,14 @@ describe('Session', () => {
       expect(() => session.rewindToTurn(0)).toThrow(
         'Cannot rewind while a prompt is running',
       );
-      expect(mockGeminiClient.truncateHistory).not.toHaveBeenCalled();
+      expect(mockLlmClient.truncateHistory).not.toHaveBeenCalled();
     });
 
     it('rejects invalid target turn indexes', () => {
       expect(() => session.rewindToTurn(-1)).toThrow(
         'targetTurnIndex must be a non-negative integer',
       );
-      expect(mockGeminiClient.truncateHistory).not.toHaveBeenCalled();
+      expect(mockLlmClient.truncateHistory).not.toHaveBeenCalled();
     });
 
     it('rejects rewinds while a prompt is running', () => {
@@ -4454,7 +4454,7 @@ describe('Session', () => {
       expect(() => session.rewindToTurn(0)).toThrow(
         'Cannot rewind while a prompt is running',
       );
-      expect(mockGeminiClient.truncateHistory).not.toHaveBeenCalled();
+      expect(mockLlmClient.truncateHistory).not.toHaveBeenCalled();
     });
 
     it('rejects history mutation until an aborted prompt actually settles', () => {
@@ -4470,8 +4470,8 @@ describe('Session', () => {
       expect(() => session.restoreHistory([])).toThrow(
         'Cannot restore history while a prompt is running',
       );
-      expect(mockGeminiClient.truncateHistory).not.toHaveBeenCalled();
-      expect(mockGeminiClient.setHistory).not.toHaveBeenCalled();
+      expect(mockLlmClient.truncateHistory).not.toHaveBeenCalled();
+      expect(mockLlmClient.setHistory).not.toHaveBeenCalled();
     });
 
     it('rejects history mutation while close is in progress', () => {
@@ -4494,7 +4494,7 @@ describe('Session', () => {
       expect(() => session.rewindToTurn(0)).toThrow(
         'Cannot rewind while a prompt is running',
       );
-      expect(mockGeminiClient.truncateHistory).not.toHaveBeenCalled();
+      expect(mockLlmClient.truncateHistory).not.toHaveBeenCalled();
     });
 
     it('rejects rewinds while a notification prompt is processing', () => {
@@ -4505,7 +4505,7 @@ describe('Session', () => {
       expect(() => session.rewindToTurn(0)).toThrow(
         'Cannot rewind while a prompt is running',
       );
-      expect(mockGeminiClient.truncateHistory).not.toHaveBeenCalled();
+      expect(mockLlmClient.truncateHistory).not.toHaveBeenCalled();
     });
 
     it('rejects rewinds while a notification abort controller is active', () => {
@@ -4516,7 +4516,7 @@ describe('Session', () => {
       expect(() => session.rewindToTurn(0)).toThrow(
         'Cannot rewind while a prompt is running',
       );
-      expect(mockGeminiClient.truncateHistory).not.toHaveBeenCalled();
+      expect(mockLlmClient.truncateHistory).not.toHaveBeenCalled();
     });
 
     it('restores a captured history snapshot', () => {
@@ -4530,7 +4530,7 @@ describe('Session', () => {
       session.restoreHistory(snapshot);
 
       expect(snapshot).toEqual(history);
-      expect(mockGeminiClient.setHistory).toHaveBeenCalledWith(history);
+      expect(mockLlmClient.setHistory).toHaveBeenCalledWith(history);
       expect(mockChat.setHistory).not.toHaveBeenCalled();
       expect(mockChat.getHistory).not.toHaveBeenCalled();
     });
@@ -4568,7 +4568,7 @@ describe('Session', () => {
       expect(() => session.restoreHistory([])).toThrow(
         'Cannot restore history while a prompt is running',
       );
-      expect(mockGeminiClient.setHistory).not.toHaveBeenCalled();
+      expect(mockLlmClient.setHistory).not.toHaveBeenCalled();
     });
 
     it('rejects history restore while a cron prompt is mutating history', () => {
@@ -4577,7 +4577,7 @@ describe('Session', () => {
       expect(() => session.restoreHistory([])).toThrow(
         'Cannot restore history while a prompt is running',
       );
-      expect(mockGeminiClient.setHistory).not.toHaveBeenCalled();
+      expect(mockLlmClient.setHistory).not.toHaveBeenCalled();
     });
 
     it('rejects history restore while a cron abort is active', () => {
@@ -4588,7 +4588,7 @@ describe('Session', () => {
       expect(() => session.restoreHistory([])).toThrow(
         'Cannot restore history while a prompt is running',
       );
-      expect(mockGeminiClient.setHistory).not.toHaveBeenCalled();
+      expect(mockLlmClient.setHistory).not.toHaveBeenCalled();
     });
 
     it('rejects history restore while a notification prompt is processing', () => {
@@ -4599,7 +4599,7 @@ describe('Session', () => {
       expect(() => session.restoreHistory([])).toThrow(
         'Cannot restore history while a prompt is running',
       );
-      expect(mockGeminiClient.setHistory).not.toHaveBeenCalled();
+      expect(mockLlmClient.setHistory).not.toHaveBeenCalled();
     });
 
     it('rejects history restore while a notification abort controller is active', () => {
@@ -4610,7 +4610,7 @@ describe('Session', () => {
       expect(() => session.restoreHistory([])).toThrow(
         'Cannot restore history while a prompt is running',
       );
-      expect(mockGeminiClient.setHistory).not.toHaveBeenCalled();
+      expect(mockLlmClient.setHistory).not.toHaveBeenCalled();
     });
   });
 
@@ -32417,7 +32417,7 @@ describe('Session', () => {
       // the backing tool_search results were just summarized out of active
       // history, so resurrecting the marks would reopen the #6721 gate on
       // invisible schemas.
-      mockGeminiClient.tryCompressChat = vi.fn().mockImplementation(() => {
+      mockLlmClient.tryCompressChat = vi.fn().mockImplementation(() => {
         mockToolRegistry.clearProxySchemaPresentations();
         return Promise.resolve({
           originalTokenCount: 100,
@@ -32447,7 +32447,7 @@ describe('Session', () => {
       expect(
         mockToolRegistry.restoreProxySchemaPresentationSnapshot,
       ).toHaveBeenCalled();
-      expect(mockGeminiClient.tryCompressChat).toHaveBeenCalledTimes(2);
+      expect(mockLlmClient.tryCompressChat).toHaveBeenCalledTimes(2);
     });
 
     it('rolls the ledger back on main-loop send failure without an intervening clear', async () => {

@@ -3240,7 +3240,7 @@ describe('runNonInteractive', () => {
           },
         }),
       );
-      mockGeminiClient.sendMessageStream
+      mockLlmClient.sendMessageStream
         .mockReturnValueOnce(createStreamFromEvents(calls))
         .mockReturnValueOnce(createStreamFromEvents(finishTurn));
 
@@ -3316,7 +3316,7 @@ describe('runNonInteractive', () => {
           },
         },
       ];
-      mockGeminiClient.sendMessageStream
+      mockLlmClient.sendMessageStream
         .mockReturnValueOnce(createStreamFromEvents(calls))
         .mockReturnValueOnce(createStreamFromEvents(finishTurn));
 
@@ -3330,7 +3330,7 @@ describe('runNonInteractive', () => {
       // Only the search executed; the wrapper call was rejected by the
       // pre-execution batch gate.
       expect(executed).toEqual([ToolNames.TOOL_SEARCH]);
-      const nextTurnParts = mockGeminiClient.sendMessageStream.mock
+      const nextTurnParts = mockLlmClient.sendMessageStream.mock
         .calls[1][0] as Part[];
       const proxyResponse = nextTurnParts.find(
         (part) => part.functionResponse?.id === 'proxy-call',
@@ -3397,7 +3397,7 @@ describe('runNonInteractive', () => {
           prompt_id: 'p-gate-retry',
         },
       });
-      mockGeminiClient.sendMessageStream
+      mockLlmClient.sendMessageStream
         .mockReturnValueOnce(
           createStreamFromEvents([wrapperEvent('proxy-attempt-1')]),
         )
@@ -3410,7 +3410,7 @@ describe('runNonInteractive', () => {
 
       // Turn 1: the gate rejected (no presented schema) and shipped the
       // re-call instruction.
-      const turn2Parts = mockGeminiClient.sendMessageStream.mock
+      const turn2Parts = mockLlmClient.sendMessageStream.mock
         .calls[1][0] as Part[];
       const rejection = turn2Parts.find(
         (part) => part.functionResponse?.id === 'proxy-attempt-1',
@@ -3429,7 +3429,7 @@ describe('runNonInteractive', () => {
       expect(executed).toEqual([
         { callId: 'proxy-attempt-2', name: ToolNames.DEFERRED_TOOL_CALL },
       ]);
-      const turn3Parts = mockGeminiClient.sendMessageStream.mock
+      const turn3Parts = mockLlmClient.sendMessageStream.mock
         .calls[2][0] as Part[];
       expect(
         turn3Parts.some(
@@ -3520,9 +3520,9 @@ describe('runNonInteractive', () => {
       const chatStub = {
         getUserContentPushCount: vi.fn(() => pushCount),
       };
-      mockGeminiClient.getChat = vi.fn(
+      mockLlmClient.getChat = vi.fn(
         () => chatStub,
-      ) as unknown as typeof mockGeminiClient.getChat;
+      ) as unknown as typeof mockLlmClient.getChat;
 
       mockCoreExecuteToolCall.mockImplementation(
         async (_config: unknown, request: ToolCallRequestInfo) => {
@@ -3545,7 +3545,7 @@ describe('runNonInteractive', () => {
       );
 
       let markAtCarryingSend: string | undefined;
-      mockGeminiClient.sendMessageStream
+      mockLlmClient.sendMessageStream
         .mockReturnValueOnce(
           createStreamFromEvents([
             {
@@ -3607,9 +3607,9 @@ describe('runNonInteractive', () => {
       const chatStub = {
         getUserContentPushCount: vi.fn(() => pushCount),
       };
-      mockGeminiClient.getChat = vi.fn(
+      mockLlmClient.getChat = vi.fn(
         () => chatStub,
-      ) as unknown as typeof mockGeminiClient.getChat;
+      ) as unknown as typeof mockLlmClient.getChat;
 
       mockCoreExecuteToolCall.mockImplementation(
         async (_config: unknown, request: ToolCallRequestInfo) => {
@@ -3628,7 +3628,7 @@ describe('runNonInteractive', () => {
         },
       );
 
-      mockGeminiClient.sendMessageStream
+      mockLlmClient.sendMessageStream
         .mockReturnValueOnce(
           createStreamFromEvents([
             {
@@ -3697,9 +3697,9 @@ describe('runNonInteractive', () => {
       const chatStub = {
         getUserContentPushCount: vi.fn(() => pushCount),
       };
-      mockGeminiClient.getChat = vi.fn(
+      mockLlmClient.getChat = vi.fn(
         () => chatStub,
-      ) as unknown as typeof mockGeminiClient.getChat;
+      ) as unknown as typeof mockLlmClient.getChat;
 
       let teammatesActive = true;
       const teamEvents = new EventEmitter();
@@ -3734,7 +3734,7 @@ describe('runNonInteractive', () => {
       );
 
       let markAtCarryingSend: string | undefined;
-      mockGeminiClient.sendMessageStream
+      mockLlmClient.sendMessageStream
         .mockImplementationOnce(() => {
           // Producing send: pushes the user prompt, model emits a search.
           pushCount += 1;
@@ -3823,9 +3823,9 @@ describe('runNonInteractive', () => {
       const chatStub = {
         getUserContentPushCount: vi.fn(() => pushCount),
       };
-      mockGeminiClient.getChat = vi.fn(
+      mockLlmClient.getChat = vi.fn(
         () => chatStub,
-      ) as unknown as typeof mockGeminiClient.getChat;
+      ) as unknown as typeof mockLlmClient.getChat;
 
       mockCoreExecuteToolCall.mockImplementation(
         async (_config: unknown, request: ToolCallRequestInfo) => {
@@ -3846,7 +3846,7 @@ describe('runNonInteractive', () => {
         },
       );
 
-      mockGeminiClient.sendMessageStream.mockImplementationOnce(() => {
+      mockLlmClient.sendMessageStream.mockImplementationOnce(() => {
         // Producing send pushes; the model emits a tool_search alongside a
         // real (MCP-style) tool literally named structured_output.
         pushCount += 1;
@@ -3885,7 +3885,7 @@ describe('runNonInteractive', () => {
       // (the producing one) — the carrying send never shipped the batch's
       // tool results, yet it committed a presentation mark.
       expect(exitCode).toBe(0);
-      expect(mockGeminiClient.sendMessageStream).toHaveBeenCalledTimes(1);
+      expect(mockLlmClient.sendMessageStream).toHaveBeenCalledTimes(1);
       // The armed snapshot was force-restored at the early-return site:
       // the unbacked mark must not outlive the run.
       expect(restoreSpy).toHaveBeenCalledTimes(1);
@@ -3918,9 +3918,9 @@ describe('runNonInteractive', () => {
       const chatStub = {
         getUserContentPushCount: vi.fn(() => pushCount),
       };
-      mockGeminiClient.getChat = vi.fn(
+      mockLlmClient.getChat = vi.fn(
         () => chatStub,
-      ) as unknown as typeof mockGeminiClient.getChat;
+      ) as unknown as typeof mockLlmClient.getChat;
 
       mockCoreExecuteToolCall.mockImplementation(
         async (_config: unknown, request: ToolCallRequestInfo) => {
@@ -3940,7 +3940,7 @@ describe('runNonInteractive', () => {
       );
 
       const turnAbortController = new AbortController();
-      mockGeminiClient.sendMessageStream
+      mockLlmClient.sendMessageStream
         .mockReturnValueOnce(
           createStreamFromEvents([
             {
@@ -7479,7 +7479,7 @@ describe('runNonInteractive', () => {
         return response;
       },
     );
-    mockGeminiClient.sendMessageStream
+    mockLlmClient.sendMessageStream
       .mockReturnValueOnce(createStreamFromEvents([toolCall]))
       .mockReturnValueOnce(
         createStreamFromEvents([
@@ -7509,7 +7509,7 @@ describe('runNonInteractive', () => {
       }),
       expect.anything(),
     );
-    expect(mockGeminiClient.recordCompletedToolCall).toHaveBeenCalledWith(
+    expect(mockLlmClient.recordCompletedToolCall).toHaveBeenCalledWith(
       ToolNames.CRON_CREATE,
       { schedule: '0 9 * * *' },
     );
