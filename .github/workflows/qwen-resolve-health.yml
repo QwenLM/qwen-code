@@ -1,0 +1,50 @@
+name: 'qwen_resolve_health'
+
+# Files (and later closes) one issue when `@qwen-code /resolve` is failing in
+# a row. The command's baseline is ~84% of agent runs pushing a resolution; in
+# 2026-08 it failed 81 times in a row for thirteen days before anyone noticed,
+# because each failure looked like one more hard conflict. The script reads
+# the bot's result comments on recent PRs and alarms on a trailing streak of
+# failures or on requests that never got any result. See
+# .github/scripts/resolve-health.mjs for the rules.
+
+on:
+  schedule:
+    # Four times a day; the streak threshold, not the cadence, sets the noise.
+    - cron: '23 */6 * * *'
+  workflow_dispatch:
+    inputs:
+      threshold:
+        description: 'Consecutive failures that raise the alarm (default 5)'
+        required: false
+        default: '5'
+        type: 'string'
+
+permissions: {}
+
+jobs:
+  check:
+    if: "github.repository == 'QwenLM/qwen-code'"
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 10
+    permissions:
+      contents: 'read'
+      issues: 'write'
+    steps:
+      - name: 'Checkout repository'
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
+        with:
+          persist-credentials: false
+          sparse-checkout: '.github/scripts'
+
+      - name: 'Set up Node.js'
+        uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
+        with:
+          node-version: '22.x'
+
+      - name: 'Assess /resolve health and file or close the tracking issue'
+        env:
+          GH_TOKEN: '${{ github.token }}'
+          REPO: '${{ github.repository }}'
+          RESOLVE_HEALTH_THRESHOLD: '${{ github.event.inputs.threshold || 5 }}'
+        run: 'node .github/scripts/resolve-health.mjs'
