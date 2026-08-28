@@ -3737,7 +3737,11 @@ export class LlmChat {
                   REQUEST_PAYLOAD_TOO_LARGE_RECOVERY_MESSAGE,
                   { cause: error },
                 );
-                const payloadStatus = getErrorStatus(error);
+                // Reuse the cause-aware lookup that detected the 413: the
+                // shallow top-level getErrorStatus misses cause-wrapped
+                // statuses, and the actionable error would lose its .status
+                // for downstream bucketing (#10380).
+                const payloadStatus = requestPayloadOverflow.status;
                 if (payloadStatus !== undefined) {
                   Object.assign(actionableError, { status: payloadStatus });
                 }

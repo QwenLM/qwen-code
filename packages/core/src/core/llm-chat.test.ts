@@ -18589,6 +18589,41 @@ describe('LlmChat', async () => {
           expect.not.objectContaining({ requestPayloadTooLarge: true }),
         );
       });
+
+      it('keeps the deep 413 status on the actionable error for cause-wrapped failures', async () => {
+        // Detection walks the .cause chain, so the status copy onto the
+        // actionable error must use the same deep lookup — otherwise
+        // downstream status bucketing records unknown for cause-wrapped
+        // 413s (#10380).
+        const causeWrapped413 = (): Error =>
+          new Error('request failed', { cause: sdkStyle413() });
+        noopThen({
+          newHistory: [{ role: 'user', parts: [{ text: 'summary' }] }],
+          info: {
+            originalTokenCount: 90_000,
+            newTokenCount: 4_000,
+            compressionStatus: CompressionStatus.COMPRESSED,
+          },
+        });
+        vi.mocked(mockContentGenerator.generateContentStream)
+          .mockRejectedValueOnce(causeWrapped413())
+          .mockRejectedValueOnce(causeWrapped413());
+
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          { message: 'next prompt' },
+          'prompt-id-413-cause-wrapped-status',
+        );
+        let caught: unknown;
+        try {
+          await consumeStream(stream);
+        } catch (error) {
+          caught = error;
+        }
+        expect(caught).toBeInstanceOf(Error);
+        expect((caught as Error).message).toMatch(/start a new session/i);
+        expect((caught as { status?: number }).status).toBe(413);
+      });
     });
   });
 });

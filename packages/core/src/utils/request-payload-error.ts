@@ -24,6 +24,14 @@ import { getErrorStatus } from './errors.js';
 export interface RequestPayloadTooLargeInfo {
   isTooLarge: boolean;
   message: string;
+  /**
+   * The HTTP status found by the same cause-aware walk (`findStatus`) that
+   * classified the 413, when any level of the chain carries one. Callers
+   * copying a status onto a re-thrown error MUST use this instead of a
+   * top-level-only lookup, or a cause-wrapped 413 loses its status and
+   * downstream status bucketing records unknown (#10380).
+   */
+  status?: number;
 }
 
 /**
@@ -71,11 +79,12 @@ export function getRequestPayloadTooLargeInfo(
       ? ((error as { message?: string }).message as string)
       : String(error);
 
+  const status = findStatus(error);
   const isTooLarge =
-    findStatus(error) === 413 ||
+    status === 413 ||
     PAYLOAD_TOO_LARGE_PATTERNS.some((pattern) => pattern.test(message));
 
-  return { isTooLarge, message };
+  return { isTooLarge, message, status };
 }
 
 /**

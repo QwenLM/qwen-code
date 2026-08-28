@@ -40,6 +40,18 @@ describe('getRequestPayloadTooLargeInfo', () => {
     expect(getRequestPayloadTooLargeInfo(wrapped).isTooLarge).toBe(true);
   });
 
+  it('exposes the deep-found status so re-thrown errors keep it', () => {
+    // The actionable-error copy in llm-chat must reuse this cause-aware
+    // result; a shallow top-level lookup returns undefined here (#10380).
+    const wrapped = new Error('request failed', { cause: sdkStyle413() });
+    expect(getRequestPayloadTooLargeInfo(wrapped).status).toBe(413);
+    expect(getRequestPayloadTooLargeInfo(sdkStyle413()).status).toBe(413);
+    // A wording-only match carries no status.
+    expect(
+      getRequestPayloadTooLargeInfo(new Error('payload too large')).status,
+    ).toBeUndefined();
+  });
+
   it('falls back to standard 413 reason phrases when status is lost', () => {
     for (const message of [
       'Request Entity Too Large',
