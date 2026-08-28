@@ -67,6 +67,7 @@ import ansiEscapes from 'ansi-escapes';
 import {
   type Config,
   makeFakeConfig,
+  MCPDiscoveryState,
   SendMessageType,
   type LlmClient,
   type GoalTurnHost,
@@ -115,7 +116,13 @@ vi.mock('ink', async (importOriginal) => {
   return {
     ...actual,
     useStdout: () => ({ stdout: mockStdout }),
-    measureElement: vi.fn(),
+    // Must return a measurement, not undefined: AppContainer's footer
+    // re-measurement layout effect dereferences `.height` on the result.
+    // An undefined return throws inside the commit; ink's error handling
+    // catches it, tears down the AppContainer tree, and renders an error
+    // panel in its place, so NO post-mount state update is ever observed
+    // (#10430).
+    measureElement: vi.fn(() => ({ width: 80, height: 5 })),
   };
 });
 
@@ -136,6 +143,25 @@ function TestContextConsumer() {
 vi.mock('./App.js', () => ({
   App: TestContextConsumer,
 }));
+
+/**
+ * AppContainer's config-initialization effect is async: it awaits
+ * `config.initialize()` and `waitForGoalRuntime(config)` before flipping
+ * `isConfigInitialized`. Effects gated on that flag — notably the
+ * queued-submission drain — only see the flip on the re-render that
+ * follows, so tests that render `AppContainer` must wait for it before
+ * asserting on post-init behaviour (#10430).
+ */
+async function flushConfigInitialization() {
+  // Real config I/O (session writer, goal runtime) backs this flip; give
+  // it a generous bound instead of vi.waitFor's 1s default.
+  await vi.waitFor(
+    () => {
+      expect(capturedUIState?.isConfigInitialized).toBe(true);
+    },
+    { timeout: 10000 },
+  );
+}
 
 // AppContainer reads the peer inbox through this hook; a holder keeps the
 // value swappable without wrapping every render in a provider.
@@ -414,15 +440,32 @@ describe('AppContainer State Management', () => {
       needsRestart: false,
       restartReason: 'NONE',
     });
+    // Complete UseMessageQueueReturn shape. AppContainer destructures all
+    // of these and passes the drain fields straight into
+    // useQueuedSubmissionDrain; a mock missing them leaves the drain with
+    // undefined inputs, so no rendered test could ever exercise it. The
+    // idle defaults (count 0, pop -> null) keep the drain quiescent for
+    // tests that don't queue anything (#10430).
     mockedUseMessageQueue.mockReturnValue({
       removeGoalTurns: vi.fn().mockReturnValue([]),
       messageQueue: [],
+      pendingSubmissionCount: 0,
       addMessage: vi.fn(),
+      addPeerMessage: vi.fn(),
+      enqueueGoalTurn: vi.fn(),
+      peekNextUserBatchKey: vi.fn(),
+      hasQueuedUserMessages: vi.fn().mockReturnValue(false),
+      getPendingSubmissionCount: vi.fn().mockReturnValue(0),
+      getQueuedPeerCount: vi.fn().mockReturnValue(0),
+      claimGoalTurn: vi.fn(),
+      claimDirectUserAdmission: vi.fn(),
       clearQueue: vi.fn(),
       getQueuedMessagesText: vi.fn().mockReturnValue(''),
       popAllMessages: vi.fn().mockReturnValue(null),
+      popNextSubmission: vi.fn().mockReturnValue(null),
+      restoreMessages: vi.fn(),
+      restorePeerMessage: vi.fn(),
       drainQueue: vi.fn().mockReturnValue([]),
-      popNextTurn: vi.fn().mockReturnValue(null),
     });
     mockedUseAutoAcceptIndicator.mockReturnValue(false);
     mockedUseGitBranchName.mockReturnValue('main');
@@ -1383,7 +1426,10 @@ describe('AppContainer State Management', () => {
       expect(capturedUIState.historyRemountKey).toBe(remountKeyBefore);
 
       vi.useRealTimers();
-      (measureElement as Mock).mockReturnValue(undefined);
+      // mockReset() restores the shared default (a real measurement);
+      // leaving an `undefined` override here would re-break every render
+      // test that runs after this one (#10430).
+      (measureElement as Mock).mockReset();
     });
 
     it('handleClearScreen avoids a second clearTerminal write', () => {
@@ -2137,6 +2183,90 @@ describe('AppContainer State Management', () => {
           }),
         );
       });
+    });
+
+    it('drains a queued submission through a rendered AppContainer (#10430)', async () => {
+      const submitQuery = vi.fn().mockResolvedValue(undefined);
+      mockedUseLlmStream.mockReturnValue({
+        streamingState: StreamingState.Idle,
+        submitQuery,
+        initError: null,
+        pendingHistoryItems: [],
+        thought: null,
+        cancelOngoingRequest: vi.fn(),
+        retryLastPrompt: vi.fn(),
+        streamingResponseLengthRef: { current: 0 },
+        isReceivingContent: false,
+      });
+      let popped = false;
+      const popNextSubmission = vi.fn(() => {
+        if (popped) return null;
+        popped = true;
+        return {
+          kind: 'user' as const,
+          modelText: 'queued before startup settled',
+          turnKey: 'message-queue:startup-queued',
+        };
+      });
+      mockedUseMessageQueue.mockReturnValue({
+        removeGoalTurns: vi.fn().mockReturnValue([]),
+        messageQueue: [],
+        pendingSubmissionCount: 1,
+        addMessage: vi.fn(),
+        addPeerMessage: vi.fn(),
+        enqueueGoalTurn: vi.fn(),
+        peekNextUserBatchKey: vi.fn(),
+        hasQueuedUserMessages: vi.fn().mockReturnValue(false),
+        getPendingSubmissionCount: vi.fn(() => (popped ? 0 : 1)),
+        getQueuedPeerCount: vi.fn().mockReturnValue(0),
+        claimGoalTurn: vi.fn(),
+        claimDirectUserAdmission: vi.fn(),
+        clearQueue: vi.fn(),
+        getQueuedMessagesText: vi.fn().mockReturnValue(''),
+        popAllMessages: vi.fn().mockReturnValue(null),
+        popNextSubmission,
+        restoreMessages: vi.fn(),
+        restorePeerMessage: vi.fn(),
+        drainQueue: vi.fn().mockReturnValue([]),
+      });
+      vi.spyOn(mockConfig, 'initialize').mockResolvedValue(undefined);
+      // The profile-finalize effect runs on the init flip and dereferences
+      // the tool registry's MCP client manager; without a stub the effect
+      // throws mid-commit, React aborts the passive flush, and the drain
+      // effect never observes the flip (#10430).
+      vi.spyOn(mockConfig, 'getToolRegistry').mockReturnValue({
+        getMcpClientManager: () => ({
+          getDiscoveryState: () => MCPDiscoveryState.COMPLETED,
+        }),
+      } as unknown as ReturnType<Config['getToolRegistry']>);
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      // Async config init gates the drain; wait for the gate to flip on a
+      // live re-render before expecting drain activity.
+      await flushConfigInitialization();
+
+      await vi.waitFor(
+        () => {
+          expect(popNextSubmission).toHaveBeenCalledWith('normal');
+        },
+        { timeout: 5000 },
+      );
+      expect(submitQuery).toHaveBeenCalledWith(
+        'queued before startup settled',
+        SendMessageType.UserQuery,
+        undefined,
+        expect.objectContaining({
+          userAdmission: { turnKey: 'message-queue:startup-queued' },
+        }),
+      );
     });
 
     it('marks Ctrl+Q submissions to wait for the idle boundary', () => {
