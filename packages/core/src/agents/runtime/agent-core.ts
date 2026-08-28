@@ -673,7 +673,7 @@ export class AgentCore {
       if (name === ToolNames.AGENT) return !nestingAllowed;
       return excludedFromSubagents.has(name);
     };
-    const isHiddenByPermissionAllowList = (name: string | undefined): boolean =>
+    const isHiddenByEagerAllowList = (name: string | undefined): boolean =>
       !!name &&
       toolRegistry.isPermissionDeferred?.(name) === true &&
       toolRegistry.isDeferredAndHidden?.(name) === true;
@@ -692,15 +692,15 @@ export class AgentCore {
         (asStrings.length === 0 && onlyInlineDecls.length === 0)
       ) {
         // Subagents inherit ordinary deferred tools (MCP, low-frequency
-        // built-ins). Permission-allowlist-deferred schemas remain hidden and
-        // are reached through ToolSearch + ToolCall, preserving the registry
-        // allowlist without mutating the declarations.
+        // built-ins). Tools demoted by the `settings.tools.eager` allowlist
+        // remain hidden and are reached through the ToolSearch + ToolCall
+        // bridge, preserving the allowlist's schema shrink without mutating
+        // the declarations.
         toolsList.push(
           ...toolRegistry
             .getFunctionDeclarations({ includeDeferred: true })
             .filter(
-              (t) =>
-                !isExcluded(t.name) && !isHiddenByPermissionAllowList(t.name),
+              (t) => !isExcluded(t.name) && !isHiddenByEagerAllowList(t.name),
             ),
         );
       } else {
@@ -713,7 +713,7 @@ export class AgentCore {
             ? [...new Set([...asStrings, ToolNames.EXEC])]
             : asStrings;
         const allowedNames = configuredNames.filter((name) => {
-          if (isExcluded(name) || isHiddenByPermissionAllowList(name)) {
+          if (isExcluded(name) || isHiddenByEagerAllowList(name)) {
             this.runtimeContext
               .getDebugLogger()
               ?.debug(
@@ -737,7 +737,7 @@ export class AgentCore {
           if (
             !isModelVisibleTool(d.name ?? '', toolMode) ||
             isExcluded(d.name) ||
-            isHiddenByPermissionAllowList(d.name)
+            isHiddenByEagerAllowList(d.name)
           ) {
             this.runtimeContext
               .getDebugLogger()
@@ -756,8 +756,7 @@ export class AgentCore {
         ...toolRegistry
           .getFunctionDeclarations({ includeDeferred: true })
           .filter(
-            (t) =>
-              !isExcluded(t.name) && !isHiddenByPermissionAllowList(t.name),
+            (t) => !isExcluded(t.name) && !isHiddenByEagerAllowList(t.name),
           ),
       );
     }

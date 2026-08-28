@@ -209,8 +209,8 @@ export class ToolRegistry {
   // pinDeferredToolReveal): they survive the `/clear` reset that
   // intentionally drops transient reveals so the new session starts clean.
   private pinnedDeferredReveals: Set<string> = new Set();
-  // Built-in tools demoted to deferred by an active `permissions.allow`
-  // registry allowlist (#9827, #10075). They are fully registered — listed
+  // Built-in tools demoted to deferred by an active `settings.tools.eager`
+  // allowlist (#9827, #10075). They are fully registered — listed
   // in `/tools`, discoverable via ToolSearch, callable through ToolCall and
   // the normal approval flow — but their schemas are kept out of the eager
   // model request exactly like `shouldDefer=true` tools. Unlike ordinary
@@ -360,7 +360,7 @@ export class ToolRegistry {
 
   /**
    * Registers a lazy tool factory for a tool that an active
-   * `permissions.allow` registry allowlist demoted to deferred (#9827,
+   * `settings.tools.eager` allowlist demoted to deferred (#9827,
    * #10075). Registration is identical to {@link registerFactory}; the name
    * is additionally tracked so every deferred-hiding decision
    * ({@link getFunctionDeclarations}, {@link isDeferredAndHidden},
@@ -388,8 +388,8 @@ export class ToolRegistry {
 
   /**
    * Whether a tool is deferred for hiding purposes: either the tool class
-   * opted in via `shouldDefer=true`, or an active `permissions.allow`
-   * registry allowlist demoted it (#10075).
+   * opted in via `shouldDefer=true`, or an active `settings.tools.eager`
+   * allowlist demoted it (#10075).
    */
   private isEffectivelyDeferred(tool: AnyDeclarativeTool): boolean {
     return tool.shouldDefer || this.permissionDeferred.has(tool.name);
@@ -473,6 +473,9 @@ export class ToolRegistry {
         !this.tools.has(tool.name)
       ) {
         this.tools.set(tool.name, tool);
+        if (source.isPermissionDeferred(tool.name)) {
+          this.permissionDeferred.add(tool.name);
+        }
       }
     }
   }
@@ -748,36 +751,34 @@ export class ToolRegistry {
       // register each function as a tool
       //
       // The same PermissionManager gate that createToolRegistry applies to
-      // built-ins (via registerLazy) applies here too — but with one
-      // deliberate difference: a discovered tool the active allowlist does
-      // not cover is DROPPED, not demoted to deferred. Discovered tools are
-      // dynamic (their schemas are only known after the discovery command
-      // runs), so keeping an uncovered one registered-and-deferred would
-      // still advertise it in the deferred-tools reminder and let ToolSearch
-      // re-add its schema on demand — defeating the #9827 schema-shrink
-      // guarantee for exactly the tools the allowlist was configured to
-      // exclude. Gating at registration keeps both sides of the gate
-      // consistent: an uncovered tool is hidden from the model instead of
-      // always failing (#9827). Whole-tool deny rules benefit from the same
-      // consistency ("a whole-tool deny rule also removes the tool from the
-      // registry", settings.md). Deny rules still apply at runtime
-      // regardless.
+      // built-ins (via registerLazy) applies here too, with the same
+      // three-state outcome. A discovered tool the `tools.eager` allowlist
+      // omits is DEFERRED, not dropped: its schema stays out of the eager
+      // model request (the #9827 guarantee) while the tool remains listed
+      // in `/tools` and loadable on demand via ToolSearch. Dropping it
+      // instead would recreate exactly the silent-disappearance bug that
+      // #10075 reported for built-ins, just under a different knob.
+      // Whole-tool deny rules still remove the tool outright ("a whole-tool
+      // deny rule also removes the tool from the registry", settings.md),
+      // and deny rules still apply at runtime regardless.
       const permissionManager = this.config.getPermissionManager?.();
       for (const func of functions) {
         if (!func.name) {
           debugLogger.warn('Discovered a tool with no name. Skipping.');
           continue;
         }
+        let deferred = false;
         if (permissionManager) {
           const status = await permissionManager.getToolRegistrationStatus(
             func.name,
           );
-          if (status !== 'registered') {
+          if (status === 'disabled') {
             debugLogger.info(
-              `Discovered tool "${func.name}" skipped: not covered by the permission manager (permissions.allow registry allowlist or whole-tool deny rule, #9827).`,
+              `Discovered tool "${func.name}" skipped: removed by a whole-tool deny rule or the legacy coreTools allowlist.`,
             );
             continue;
           }
+          deferred = status === 'deferred';
         }
         const parameters =
           func.parametersJsonSchema &&
@@ -793,6 +794,12 @@ export class ToolRegistry {
             parameters as Record<string, unknown>,
           ),
         );
+        // Mark AFTER registerTool so every deferred-hiding decision
+        // (getFunctionDeclarations / isDeferredAndHidden /
+        // getDeferredToolSummary) treats it like a `shouldDefer` tool.
+        if (deferred) {
+          this.permissionDeferred.add(func.name);
+        }
       }
     } catch (e) {
       debugLogger.error(`Tool discovery command "${discoveryCmd}" failed:`, e);
@@ -876,7 +883,7 @@ export class ToolRegistry {
    * Whether a deferred tool is currently hidden from the model's
    * function-declaration list. Returns `true` when the tool:
    * - is deferred (`shouldDefer=true`, or demoted by an active
-   *   `permissions.allow` registry allowlist, #10075),
+   *   `settings.tools.eager` allowlist, #10075),
    * - is not always-loaded,
    * - has not been revealed this session, AND
    * - is not in the visibleTools config list.
@@ -956,11 +963,11 @@ export class ToolRegistry {
     for (const tool of this.tools.values()) {
       if (!this.isEffectivelyDeferred(tool) || tool.alwaysLoad) continue;
       // Permission-deferred tools (#10075) are deliberately excluded: the
-      // budget preload avoids bridge round trips for small ordinary deferred
-      // sets, but auto-revealing an allowlist-demoted tool would
-      // re-add exactly the schema the `permissions.allow` registry
-      // allowlist keeps out of the eager request (#9827). Such tools stay
-      // reachable on demand via ToolSearch + ToolCall.
+      // budget preload exists to stabilise the prompt cache for ordinary
+      // deferred tools, but auto-revealing a demoted tool would re-add
+      // exactly the schema the `settings.tools.eager` allowlist keeps out
+      // of the eager request (#9827). Such tools stay reachable on demand
+      // via ToolSearch + ToolCall.
       if (this.permissionDeferred.has(tool.name)) continue;
       if (this.config.getVisibleTools().has(tool.name)) continue;
       candidates.push(tool.name);

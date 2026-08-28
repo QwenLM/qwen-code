@@ -421,6 +421,7 @@ export class LlmClient {
   private announcedMcpToolNames = new Set<string>();
   private pendingAddedMcpTools = new Map<string, DeferredToolSummary>();
   private pendingRemovedMcpToolNames = new Set<string>();
+  private warnedAboutUnreachableEagerTools = false;
   // Dedup state for the per-turn skill/command "now available" delta reminders
   // (drainSkillAndCommandReminders). Keys are "skill:<name>" / "cmd:<name>". The
   // set is seeded on the first drain from the current skills (the startup
@@ -1667,13 +1668,20 @@ export class LlmClient {
    * inspects the registry's eager state and would otherwise miss factory-
    * backed deferred tools.
    *
-   * Side effect: when either ToolSearch or ToolCall is not registered, every
-   * deferred tool is eagerly revealed here so it lands in the declaration
-   * list. Skipping this would leave the tool both off the declarations AND off
-   * the deferred-summary list (since `undefined` is returned in that branch).
+   * Side effect: when either ToolSearch or ToolCall is not registered
+   * (e.g. `--exclude-tools tool_search` or a deny rule), deferred tools are
+   * eagerly revealed here so they land in the declaration list. Tools
+   * explicitly demoted by `tools.eager` stay hidden unless the history-reveal
+   * pass above already re-exposed one for a resumed session — that schema
+   * stays in the declarations, so it is not counted unreachable below.
+   * Skipping this for ordinary deferred tools would leave them both off the
+   * declarations AND off the deferred-summary list
+   * (since `undefined` is returned in that branch) — a silent disappearance.
    *
    * Returns `undefined` when the bridge is incomplete: reminders must not
-   * advertise tools the model has no way to invoke on demand.
+   * advertise tools the model has no way to invoke on demand. Tools held
+   * back by `tools.eager` in that state are unreachable for the session,
+   * which is warned about once per session.
    */
   private resolveDeferredToolsForReminder(
     deferredSummary: readonly DeferredToolSummary[],
@@ -1687,8 +1695,29 @@ export class LlmClient {
       !!toolRegistry.getTool(ToolNames.TOOL_CALL);
     if (!bridgeAvailable) {
       if (deferredSummary.length > 0) {
+        const withheld: string[] = [];
         for (const t of deferredSummary) {
+          if (toolRegistry.isPermissionDeferred(t.name)) {
+            // The history-reveal pass runs first at both call sites and
+            // re-exposes resume-referenced tools regardless of why they
+            // are deferred. Such a tool's schema IS in the declarations,
+            // so calling it unreachable would be false for this session.
+            if (!toolRegistry.isDeferredToolRevealed(t.name)) {
+              withheld.push(t.name);
+            }
+            continue;
+          }
           toolRegistry.revealDeferredTool(t.name);
+        }
+        if (withheld.length > 0 && !this.warnedAboutUnreachableEagerTools) {
+          this.warnedAboutUnreachableEagerTools = true;
+          // eslint-disable-next-line no-console -- operator-facing breadcrumb; the debug log file is off in default runs, where this reshaping would otherwise be invisible
+          console.warn(
+            `tools.eager is holding back ${withheld.length} tool(s) in a session with no tool_search, ` +
+              `so nothing can load them on demand and they are unreachable until restart: ${withheld.join(', ')}. ` +
+              `Enable tools.toolSearch.enabled (and drop any tool_search deny rule) to keep them loadable, ` +
+              `list them in tools.eager to send their schemas upfront, or use permissions.deny if removal was the intent.`,
+          );
         }
       }
       return undefined;

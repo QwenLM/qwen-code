@@ -1089,7 +1089,7 @@ pub fn authorize_tool_call_with_context(
 ) -> Result<RiskAssessment, crate::policy::AuthorizationError> {
     enforce_hard_invariants(tool, args)?;
     if context.is_expired() {
-        return Err(crate::policy::AuthorizationError::Denied(
+        return Err(crate::policy::AuthorizationError::Expired(
             "authorization context expired".to_owned(),
         ));
     }
