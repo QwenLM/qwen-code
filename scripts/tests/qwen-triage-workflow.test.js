@@ -6999,6 +6999,37 @@ describe('stage 1-pre duplicate gate', () => {
     expect(section).toContain('never fully subsumed');
   });
 
+  it('resolves the closer repository and rejects colliding foreign numbers', () => {
+    // A closing keyword can close an issue from a merged PR in another
+    // repository, and PR numbers restart at 1 everywhere, so a foreign
+    // closer number would fetch this repo's unrelated same-number PR
+    // unless the closer's repository is selected and matched. The capture
+    // is pinned too — every stage-local variable is bound in a snippet.
+    expect(section).toContain('repository { nameWithOwner }');
+    expect(section).toContain('read -r MERGED_PR MERGED_FLAG MERGED_REPO');
+    expect(section).toContain('never resolved to a colliding number');
+  });
+
+  it('compares against every resolved closer in one fixed order', () => {
+    // Multiple closed-as-completed issues each resolve a closer; the query
+    // runs once per issue — never once outside the per-issue iteration,
+    // where bash leaves $N bound to the last element — and the first
+    // subsuming closer in the fixed order wins, so multiple closers have
+    // exactly one outcome.
+    expect(section).toContain('never once for all issues');
+    expect(section).toContain('bound to the loop');
+    expect(section).toContain('FIRST one');
+  });
+
+  it('guards every patch fetch fail-closed', () => {
+    // '>' truncates the target before gh runs; a failed or empty fetch
+    // must never be judged as an empty patch — an unfetchable closer is
+    // unverifiable and routes to the unresolved-closer escalation.
+    expect(section).toContain('|| exit 1');
+    expect(section).toContain('[ -s /tmp/stage-1pre-pr.patch ]');
+    expect(section).toContain('carries a failure guard');
+  });
+
   it('scopes linkage extraction to same-repo closing references', () => {
     // A bare `.number` extraction drops the repository qualifier, so a
     // cross-repo closing reference resolves against this repo's

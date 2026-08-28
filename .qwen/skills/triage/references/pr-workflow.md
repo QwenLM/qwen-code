@@ -229,44 +229,82 @@ proceed to 1a.
 gh pr review "$PR_NUMBER" --repo "$REPO" --request-changes --body-file /tmp/stage-1pre-not-planned.md
 ```
 
-- Any linked issue **closed as completed** → find what closed it (GraphQL —
-  the REST timeline's `closed` event carries no reliable closer reference):
+- Any linked issue **closed as completed** → resolve one closer candidate
+  per closed-as-completed linked issue, in the ascending `$ISSUES` order:
 
-```bash
-gh api graphql -f query='
-  query($owner: String!, $name: String!, $n: Int!) {
-    repository(owner: $owner, name: $name) {
-      issue(number: $n) {
-        timelineItems(last: 20, itemTypes: [CLOSED_EVENT]) {
-          nodes {
-            ... on ClosedEvent {
-              closer {
-                ... on PullRequest { number state merged }
-                ... on Commit { oid }
+  ```bash
+  CLOSER=$(gh api graphql -f query='
+    query($owner: String!, $name: String!, $n: Int!) {
+      repository(owner: $owner, name: $name) {
+        issue(number: $n) {
+          timelineItems(last: 20, itemTypes: [CLOSED_EVENT]) {
+            nodes {
+              ... on ClosedEvent {
+                closer {
+                  ... on PullRequest {
+                    number
+                    state
+                    merged
+                    repository { nameWithOwner }
+                  }
+                  ... on Commit { oid }
+                }
               }
             }
           }
         }
       }
-    }
-  }' -f owner="${REPO%%/*}" -f name="${REPO##*/}" -F n="$N" \
-  --jq '.data.repository.issue.timelineItems.nodes // [] | last | .closer | select(. != null and .number != null) | "\(.number) \(.merged)"'
-```
+    }' -f owner="${REPO%%/*}" -f name="${REPO##*/}" -F n="$N" \
+    --jq '.data.repository.issue.timelineItems.nodes // [] | last | .closer
+      | select(. != null and .number != null)
+      | "\(.number) \(.merged) \(.repository.nameWithOwner)"')
+  read -r MERGED_PR MERGED_FLAG MERGED_REPO <<< "$CLOSER"
+  if [ "$MERGED_FLAG" = "true" ] && [ "$MERGED_REPO" = "$REPO" ]; then
+    MERGED_PRS="$MERGED_PRS $MERGED_PR"   # ascending linked-issue order
+  fi
+  ```
 
-Only the LAST (most recent) close event counts — earlier closes belong to
-reopen cycles and their closers are stale. If the query fails or emits
-nothing (the number is a PR, not an issue; the issue does not exist; the
-latest close was manual), treat the closer as unresolved.
+  One query run resolves one issue's closer — run it once per issue
+  with that issue's `$N`, never once for all issues: bash leaves `$N`
+  bound to the loop's last element, so a single out-of-loop query
+  resolves only the last issue's closer. GraphQL is the closer source —
+  the REST timeline's `closed` event carries no reliable closer
+  reference. Only the LAST (most recent) close event counts — earlier
+  closes belong to reopen cycles and their closers are stale. If the
+  query fails or emits
+  nothing (the number is a PR, not an issue; the issue does not exist;
+  the latest close was manual), treat that issue's closer as unresolved.
+  The closer must also be a merged PR of `$REPO` itself (`MERGED_FLAG`
+  true and `MERGED_REPO` equal to `$REPO`): a closing keyword can close
+  an issue from a merged PR in a DIFFERENT repository, and PR numbers
+  restart at 1 in every repository, so a foreign closer's number
+  collides within `$REPO` — `gh pr diff` would fetch this repo's
+  unrelated same-number PR. The gate can only fetch and judge `$REPO`'s
+  patches: a foreign-repo closer cannot be verified and is treated as
+  unresolved — never resolved to a colliding number. `$MERGED_PRS`
+  lists the resolved closers in ascending linked-issue order.
 
-- Closed by a **merged PR** → compare this PR's production diff (exclude
-  test/generated files per the Stage 0 size rules) against the merged
-  closer's production diff (`$MERGED_PR` — the closer number resolved
-  above). Read each patch once; two calls cover any number of files:
+- Closed by one or more **merged PRs** of this repo (`$MERGED_PRS`
+  non-empty) → compare this PR's production diff (exclude test/generated
+  files per the Stage 0 size rules) against each resolved closer's
+  production diff. Read each patch once; two calls per closer cover any
+  number of files. Every fetch carries a failure guard: a failed or
+  empty fetch never reaches the judgment as an empty patch — an
+  unfetchable closer is dropped as unverifiable (if no resolved closer
+  remains, the unresolved-closer branch below applies), and an
+  unfetchable PR patch aborts the run fail-closed:
 
-```bash
-gh pr diff "$PR_NUMBER" --repo "$REPO" > /tmp/stage-1pre-pr.patch
-gh pr diff "$MERGED_PR" --repo "$REPO" > /tmp/stage-1pre-closer.patch
-```
+  ```bash
+  gh pr diff "$PR_NUMBER" --repo "$REPO" > /tmp/stage-1pre-pr.patch || exit 1
+  [ -s /tmp/stage-1pre-pr.patch ] || exit 1
+  for MERGED_PR in $MERGED_PRS; do
+    # failed or empty: this closer is unverifiable — drop it, never judge
+    # an empty patch
+    gh pr diff "$MERGED_PR" --repo "$REPO" \
+      > "/tmp/stage-1pre-closer-$MERGED_PR.patch" || continue
+    [ -s "/tmp/stage-1pre-closer-$MERGED_PR.patch" ] || continue
+  done
+  ```
 
   Do NOT download the default branch's files one by one via
   `gh api "repos/$REPO/contents/<path>?ref=$DEFAULT_BRANCH"`: above ~1 MiB
@@ -276,35 +314,49 @@ gh pr diff "$MERGED_PR" --repo "$REPO" > /tmp/stage-1pre-closer.patch
   silently exactly where a duplicate is most expensive. It would also
   spend one REST call per file against the shared CI PAT's rate limit and
   transit every full blob through the agent's context. Two frozen patches
-  cost two calls for any N and keep the verdict atomic with respect to
-  base-branch movement during the check. Judge the production sections of
-  the two patches line by line:
-  - **Fully subsumed** — every production line this PR adds also appears
-    among the lines the closer's patch adds, AND every production line
-    this PR deletes also appears among the lines the closer's patch
-    deletes. The closer's patch is frozen against ITS merge base, so a
-    line later edited or reverted on the default branch still counts as
-    covered here — the close comment below invites reopening for exactly
-    that case. A diff with NO production changes (e.g. tests-only) is
-    never fully subsumed — any file it adds outside the production set is
-    itself a remaining delta. → post the terminal comment below, then
+  per closer cost two calls for any file count and keep the verdict atomic
+  with respect to base-branch movement during the check. Judge this PR's
+  patch against each closer's patch in `$MERGED_PRS` order, comparing
+  within the same file:
+  - **Fully subsumed** — file by file: every production file section in
+    this PR's patch has a counterpart section in the closer's patch, and
+    within each matched pair, every production line this PR adds also
+    appears among the lines the closer's patch adds to that file, AND
+    every production line this PR deletes also appears among the lines
+    the closer's patch deletes from it. A section with no line-level
+    representation (a pure rename, a binary, a mode change, an empty
+    file) is covered only by an equivalent change to the same path in
+    the closer's patch. A line the closer's patch both adds and deletes
+    in that file cancels out and covers neither direction, and the
+    quantifiers range over matched sections only, so they never hold
+    vacuously — a rename-only diff closes only when its rename section
+    has that same-path counterpart. The closer's patch is frozen against
+    ITS merge base, so a line later edited or reverted on the default
+    branch still counts as covered here — the close comment below invites
+    reopening for exactly that case. A diff with NO production changes
+    (e.g. tests-only) is never fully subsumed — any file it adds outside
+    the production set is itself a remaining delta. If more than one
+    closer fully subsumes this PR, the FIRST one in `$MERGED_PRS` order
+    is the duplicate target. → post the terminal comment below, then
     close the PR. This is the ONLY place triage closes a PR.
-  - **Any remaining delta** — everything else: an added production line
-    the closer's patch does not add, a deleted production line the
-    closer's patch does not delete, or any non-production addition →
-    submit exactly one `CHANGES_REQUESTED` review: name the merged PR,
+  - **Any remaining delta** — no closer fully subsumes this PR: an added
+    production line no closer's patch adds, a deleted production line no
+    closer's patch deletes, or any non-production addition → submit
+    exactly one `CHANGES_REQUESTED` review: name the resolved closers,
     name the remaining delta, ask the author to rebase onto the default
     branch and reduce the PR to that delta (bilingual body whose first
     line is the `<!-- qwen-triage stage=1-pre -->` marker, @mention the
     author). Stop:
 
-```bash
-gh pr review "$PR_NUMBER" --repo "$REPO" --request-changes --body-file /tmp/stage-1pre-remaining-delta.md
-```
+  ```bash
+  gh pr review "$PR_NUMBER" --repo "$REPO" --request-changes --body-file /tmp/stage-1pre-remaining-delta.md
+  ```
 
-- Closed manually (no close commit) or the closer cannot be resolved →
-  never close on ambiguity: flag it in the Stage 1 comment and escalate to
-  the maintainer.
+- No resolved and fetchable closer remains (`$MERGED_PRS` empty — every
+  close was manual or by a commit, or every closer is unmerged or from
+  a foreign repository — or every closer fetch failed) → the gate must
+  never close on ambiguity: flag it in the Stage 1 comment and escalate
+  to the maintainer.
 
 **Reopen guard.** The close below is the gate's only irreversible act, and an
 explicit `@qwen-code /triage` re-run executes every stage again — including
