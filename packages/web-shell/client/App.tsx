@@ -5353,14 +5353,18 @@ export function App({
   >(null);
   const activePanelRef = useRef(activePanel);
   // Deep-link target for the Settings panel (e.g. 'Daemon' from the Local
-  // Control QR popover); cleared when the panel closes.
+  // Control QR popover). Cleared on any panel close/switch, not just
+  // closePanel — several paths call setActivePanel directly (approval
+  // overlay auto-close, openScheduledTasks, openSplitView, ...).
   const [settingsInitialCategory, setSettingsInitialCategory] = useState<
     string | undefined
   >();
-  const closePanel = useCallback(() => {
-    setActivePanel(null);
-    setSettingsInitialCategory(undefined);
-  }, []);
+  useEffect(() => {
+    if (activePanel !== 'settings') {
+      setSettingsInitialCategory(undefined);
+    }
+  }, [activePanel]);
+  const closePanel = useCallback(() => setActivePanel(null), []);
   const handleUseSkill = useCallback(
     (name: string) => {
       closePanel();

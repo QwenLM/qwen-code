@@ -50,6 +50,14 @@ vi.mock('@qwen-code/webui/daemon-react-sdk', async (importOriginal) => {
   };
 });
 
+const { writeClipboardText } = vi.hoisted(() => ({
+  writeClipboardText: vi.fn().mockResolvedValue(undefined),
+}));
+vi.mock('../utils/clipboard', () => ({
+  writeClipboardText,
+  warnClipboardWriteFailure: vi.fn(),
+}));
+
 const { I18nProvider } = await import('../i18n');
 const { LocalControlQrButton } = await import('./LocalControlQrButton');
 
@@ -102,6 +110,7 @@ async function openPopover(): Promise<void> {
 
 beforeEach(() => {
   vi.stubGlobal('fetch', vi.fn());
+  writeClipboardText.mockClear();
 });
 
 afterEach(() => {
@@ -159,5 +168,40 @@ describe('LocalControlQrButton', () => {
     await openPopover();
 
     expect(container.textContent).toContain('daemon unreachable');
+  });
+
+  it('shows the redacted hint when the daemon withholds the pairing URL', async () => {
+    vi.mocked(fetch).mockResolvedValue(
+      localControlResponse({ active: true, urlRedacted: true }),
+    );
+    mount();
+    await openPopover();
+
+    expect(container.textContent).toContain(
+      'The pairing URL is not shown here',
+    );
+  });
+
+  it('copies the pairing URL from the Copy button', async () => {
+    vi.mocked(fetch).mockResolvedValue(
+      localControlResponse({
+        active: true,
+        url: 'http://192.168.1.2:8080/ws#token=abc',
+        qrText: 'QR-TEXT',
+      }),
+    );
+    mount();
+    await openPopover();
+
+    const button = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('button'),
+    ).find((el) => el.textContent?.includes('Copy'));
+    if (!button) throw new Error('Copy button not found');
+    act(() => {
+      button.click();
+    });
+    expect(writeClipboardText).toHaveBeenCalledWith(
+      'http://192.168.1.2:8080/ws#token=abc',
+    );
   });
 });

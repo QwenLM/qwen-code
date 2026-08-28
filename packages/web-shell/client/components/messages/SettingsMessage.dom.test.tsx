@@ -235,7 +235,7 @@ describe('SettingsMessage initialCategory', () => {
     return el;
   }
 
-  it('selects the requested category on open', () => {
+  it('selects the requested category on open', async () => {
     // The Daemon category's Local Control card fetches status on mount.
     vi.stubGlobal(
       'fetch',
@@ -250,6 +250,10 @@ describe('SettingsMessage initialCategory', () => {
       makeState([boolSetting(), daemonSetting()], vi.fn()),
       { initialCategory: 'Daemon' },
     );
+    // Flush the card's status fetch under act so it doesn't warn.
+    await act(async () => {
+      await Promise.resolve();
+    });
 
     expect(activeCategoryButton(container).textContent).toContain('Daemon');
     vi.unstubAllGlobals();
@@ -261,6 +265,61 @@ describe('SettingsMessage initialCategory', () => {
     );
 
     expect(activeCategoryButton(container).textContent).toContain('General');
+  });
+
+  it('does not force the deep-linked category again after a manual switch', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        statusText: 'OK',
+        text: () => Promise.resolve(JSON.stringify({ active: false })),
+      }),
+    );
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    const renderWith = (state: SettingsMessageSettingsState) =>
+      act(() => {
+        root.render(
+          <I18nProvider language="en">
+            <SettingsMessage
+              settingsState={state}
+              embedded
+              initialCategory="Daemon"
+              onLanguageChange={noop}
+              onThemeChange={noop}
+              onSubDialog={noop}
+              chatWidthMode="1000"
+              onChatWidthModeChange={noop}
+            />
+          </I18nProvider>,
+        );
+      });
+
+    renderWith(makeState([boolSetting(), daemonSetting()], vi.fn()));
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(activeCategoryButton(container).textContent).toContain('Daemon');
+
+    // The user manually switches to General.
+    const generalButton = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('button'),
+    ).find((el) => el.textContent?.includes('General'));
+    if (!generalButton) throw new Error('General category button not found');
+    act(() => {
+      generalButton.click();
+    });
+    expect(activeCategoryButton(container).textContent).toContain('General');
+
+    // A re-render with a fresh settings identity (re-running the deep-link
+    // effect) must not override the manual choice.
+    renderWith(makeState([boolSetting(), daemonSetting()], vi.fn()));
+    expect(activeCategoryButton(container).textContent).toContain('General');
+    vi.unstubAllGlobals();
   });
 });
 
