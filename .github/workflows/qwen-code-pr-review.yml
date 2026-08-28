@@ -2859,6 +2859,9 @@ jobs:
           HEAD_REF: '${{ steps.prepare.outputs.head_ref }}'
           HEAD_SHA: '${{ steps.prepare.outputs.head_sha }}'
           HEAD_REPO: '${{ steps.prepare.outputs.head_repo }}'
+          # The replay merges the base branch again; without this the step's
+          # `set -u` aborts on the first ${BASE_REF} — a test pins env coverage.
+          BASE_REF: '${{ steps.prepare.outputs.base_ref }}'
           OUTCOME: '${{ steps.verify.outputs.outcome }}'
           DRY_RUN: '${{ env.DRY_RUN }}'
           RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'

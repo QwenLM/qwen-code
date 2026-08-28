@@ -1103,6 +1103,58 @@ describe('qwen resolve workflow: recovering requests that used to be lost', () =
     expect(reportStep).toContain('the resolution was replayed on top of it');
   });
 
+  it('defines every uppercase variable the resolve-pr run blocks expand', () => {
+    // The steps run under `set -u`; a ${NAME} the env block does not define
+    // aborts the step at first use. The replay was shipped once with BASE_REF
+    // missing from 'Report result' — the fixture test injected it, so nothing
+    // noticed. Cover every run block of the job, not just that one.
+    const jobEnv = new Set(
+      [...resolveJob.matchAll(/^ {6}([A-Z][A-Z0-9_]*): /gm)].map((m) => m[1]),
+    );
+    const builtins = new Set([
+      'GITHUB_OUTPUT',
+      'GITHUB_REPOSITORY',
+      'GITHUB_STEP_SUMMARY',
+      'RUNNER_TEMP',
+      'HOME',
+      'PATH',
+    ]);
+    const stepBlocks = resolveJob.split(/\n {6}- name: /).slice(1);
+    for (const block of stepBlocks) {
+      if (!/\n {8}run: \|-?\n/.test(block)) {
+        continue;
+      }
+      const name = block.slice(0, block.indexOf('\n'));
+      const stepEnv = new Set(
+        [...block.matchAll(/^ {10}([A-Z][A-Z0-9_]*): /gm)].map((m) => m[1]),
+      );
+      const run = block.slice(block.search(/\n {8}run: \|-?\n/));
+      const assigned = new Set(
+        [...run.matchAll(/(?:^|[\s;{(])([A-Z][A-Z0-9_]*)=/gm)].map((m) => m[1]),
+      );
+      const referenced = new Set(
+        [...run.matchAll(/\$\{?([A-Z][A-Z0-9_]+)\b/g)]
+          .map((m) => m[1])
+          .filter((v) => !v.startsWith('GITHUB_')),
+      );
+      const missing = [...referenced].filter(
+        (v) =>
+          !jobEnv.has(v) &&
+          !stepEnv.has(v) &&
+          !assigned.has(v) &&
+          !builtins.has(v),
+      );
+      expect(
+        missing,
+        `step ${name} expands undefined: ${missing.join(', ')}`,
+      ).toEqual([]);
+    }
+    // And the one that shipped missing is now there.
+    expect(step(resolveJob, 'Report result')).toContain(
+      "BASE_REF: '${{ steps.prepare.outputs.base_ref }}'",
+    );
+  });
+
   it('refuses fork PRs the bot cannot push to before spending an agent run', () => {
     expect(prepareStep).toContain('maintainerCanModify');
     expect(prepareStep).toContain(
