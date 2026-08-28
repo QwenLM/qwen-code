@@ -320,6 +320,7 @@ export function SkillsManagerDialog({
           defaultDisabled:
             initialResolved.defaultDisabledNames.has(lower(skill.name)) &&
             !initialResolved.enabledNames.has(lower(skill.name)),
+          extensionName: skill.extensionName,
         })),
       );
     if (!disabledChanged && !enabledChanged) return 'ok';

@@ -161,16 +161,38 @@ export function skillSettingEntriesMatchAny(
   return false;
 }
 
+/**
+ * The settings-list spellings that belong to a toggled skill: its canonical
+ * registry name plus, for a collision-qualified `<owner>:<name>`, the pre-rename
+ * bare form it used to persist under (#9408). A bare name yields only itself, so
+ * a bare toggle never reaches a qualified entry another skill owns (R3-1). The
+ * owner is read from the name's prefix when the caller has no explicit
+ * `extensionName` (e.g. the daemon, which resolves skills by canonical name).
+ */
+function toggledSkillSettingKeys(
+  skillName: string,
+  extensionName?: string,
+): string[] {
+  const lowered = skillName.trim().toLowerCase();
+  const owner =
+    extensionName?.trim().toLowerCase() ??
+    (lowered.includes(':')
+      ? lowered.slice(0, lowered.indexOf(':'))
+      : undefined);
+  return skillSettingKeys({ name: skillName, extensionName: owner });
+}
+
 function updateTarget(
   names: string[],
   skillName: string,
   include: boolean,
+  extensionName: string | undefined,
 ): string[] {
-  const normalizedName = skillName.trim().toLowerCase();
+  const keys = new Set(toggledSkillSettingKeys(skillName, extensionName));
   const next: string[] = [];
   let found = false;
   for (const name of names) {
-    if (!skillSettingEntriesMatch(name, normalizedName)) {
+    if (!keys.has(name.trim().toLowerCase())) {
       next.push(name);
     } else if (include && !found) {
       next.push(skillName);
@@ -186,24 +208,27 @@ export function updateWorkspaceSkillSettingLists(
   skillName: string,
   enabled: boolean,
   defaultDisabled: boolean,
+  extensionName?: string,
 ): WorkspaceSkillSettingLists {
   const hadExplicitEnable = lists.enabled.some((name) =>
-    skillSettingEntriesMatch(name, skillName),
+    toggledSkillSettingKeys(skillName, extensionName).includes(
+      name.trim().toLowerCase(),
+    ),
   );
 
   if (enabled) {
     return {
-      disabled: updateTarget(lists.disabled, skillName, false),
+      disabled: updateTarget(lists.disabled, skillName, false, extensionName),
       enabled:
         defaultDisabled || hadExplicitEnable
-          ? updateTarget(lists.enabled, skillName, true)
+          ? updateTarget(lists.enabled, skillName, true, extensionName)
           : lists.enabled,
     };
   }
 
   return {
-    disabled: updateTarget(lists.disabled, skillName, true),
-    enabled: updateTarget(lists.enabled, skillName, false),
+    disabled: updateTarget(lists.disabled, skillName, true, extensionName),
+    enabled: updateTarget(lists.enabled, skillName, false, extensionName),
   };
 }
 
@@ -213,6 +238,8 @@ export interface WorkspaceSkillListToggle {
   isEnabled: boolean;
   /** Record an explicit `skills.enabled` opt-in when enabling this skill. */
   defaultDisabled: boolean;
+  /** The toggled skill's extension owner, if it is an extension skill. */
+  extensionName?: string;
 }
 
 export interface WorkspaceSkillListUpdates {
@@ -248,6 +275,7 @@ export function computeWorkspaceSkillListUpdates(
       toggle.name,
       toggle.isEnabled,
       toggle.defaultDisabled,
+      toggle.extensionName,
     );
   }
   return {
