@@ -167,7 +167,7 @@ export function useResumeCommand(
             } as HistoryItemWithoutId,
             Date.now(),
           );
-          config.getGeminiClient()?.commitTelemetrySwap?.();
+          config.getLlmClient()?.commitTelemetrySwap?.();
           return;
         }
 

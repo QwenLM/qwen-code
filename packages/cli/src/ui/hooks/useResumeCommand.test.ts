@@ -5,7 +5,7 @@
  */
 
 import { act, renderHook } from '@testing-library/react';
-import { describe, it, expect, vi } from 'vitest';
+import { beforeEach, describe, it, expect, vi } from 'vitest';
 import {
   BACKGROUND_WORK_SWITCH_BLOCKED_MESSAGE,
   useResumeCommand,
@@ -164,6 +164,12 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
 });
 
 describe('useResumeCommand', () => {
+  beforeEach(() => {
+    resumeMocks.reset();
+    mockIsManagedAgentViewResumeBlocked.mockReset();
+    mockIsManagedAgentViewResumeBlocked.mockResolvedValue(false);
+  });
+
   it('should initialize with dialog closed', () => {
     const { result } = renderHook(() =>
       useResumeCommand({
@@ -806,7 +812,7 @@ describe('useResumeCommand', () => {
       calls.push('guard');
       return true;
     });
-    const geminiClient = {
+    const llmClient = {
       beginTelemetrySwap: vi.fn(() => {
         calls.push('begin');
         return true;
@@ -826,7 +832,7 @@ describe('useResumeCommand', () => {
       getBackgroundShellRegistry: () => ({ hasRunningEntries: () => false }),
       getMonitorRegistry: () => ({ getRunning: () => [] }),
       getWorkflowRunRegistry: () => ({ hasRunningEntries: () => false }),
-      getGeminiClient: () => geminiClient,
+      getLlmClient: () => llmClient,
       getSessionId: () => 'current-session',
       getTargetDir: () => '/tmp',
     } as unknown as import('@qwen-code/qwen-code-core').Config;
@@ -849,8 +855,8 @@ describe('useResumeCommand', () => {
       expect.any(Number),
     );
     expect(calls).toEqual(['begin', 'guard', 'commit']);
-    expect(geminiClient.beginTelemetrySwap).toHaveBeenCalledTimes(1);
-    expect(geminiClient.commitTelemetrySwap).toHaveBeenCalledTimes(1);
+    expect(llmClient.beginTelemetrySwap).toHaveBeenCalledTimes(1);
+    expect(llmClient.commitTelemetrySwap).toHaveBeenCalledTimes(1);
   });
 
   it('blocks resume when the current session still has a running monitor', async () => {
