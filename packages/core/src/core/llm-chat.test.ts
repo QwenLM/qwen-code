@@ -11098,6 +11098,50 @@ describe('LlmChat', async () => {
       ).toHaveLength(0);
     });
 
+    it('does not replay a marker-matched 4xx network failure mid-stream', async () => {
+      // The 4xx network-failure classification deliberately reports no
+      // transportCode, so the transportCode-keyed replay/continuation gates
+      // stay shut for it even though the establishment predicate retries it.
+      const transportError = Object.assign(
+        new Error(
+          'network error for request to http://h:8080/v1/chat/completions: EOF',
+        ),
+        {
+          status: 400,
+          cause: Object.assign(new Error('socket reset'), {
+            code: 'ECONNRESET',
+          }),
+        },
+      );
+
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        (async function* () {
+          throw transportError;
+
+          yield {} as GenerateContentResponse;
+        })(),
+      );
+
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'test' },
+        'prompt-transport-4xx-marker-no-replay',
+      );
+      const events: StreamEvent[] = [];
+      await expect(async () => {
+        for await (const event of stream) {
+          events.push(event);
+        }
+      }).rejects.toThrow('network error for request');
+
+      expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(
+        1,
+      );
+      expect(
+        events.filter((event) => event.type === StreamEventType.RETRY),
+      ).toHaveLength(0);
+    });
+
     it('does not retry a transport code outside the stream allow-list', async () => {
       // ECONNREFUSED classifies as transport/retryable but is excluded from
       // RETRYABLE_STREAM_TRANSPORT_CODES (permanent misconfiguration, not a
@@ -11999,6 +12043,58 @@ describe('LlmChat', async () => {
         expect(
           mockContentGenerator.generateContentStream,
         ).toHaveBeenCalledTimes(1);
+      });
+
+      it('retries a provider-body-less 400 wrapping a network failure', async () => {
+        // Incident shape from #10346: a peer close surfaces as
+        // "400 network error for request ...: EOF" with no provider error
+        // body. The establishment predicate must consult the classifier
+        // before rejecting status 400.
+        const networkFailure = Object.assign(
+          new Error(
+            'network error for request to http://11.0.0.1:8080/v1/chat/completions: Post "http://11.0.0.1:8080/v1/chat/completions": EOF',
+          ),
+          { status: 400 },
+        );
+
+        vi.mocked(mockContentGenerator.generateContentStream)
+          .mockRejectedValueOnce(networkFailure)
+          .mockResolvedValueOnce(
+            (async function* () {
+              yield {
+                candidates: [
+                  {
+                    content: { parts: [{ text: 'Recovered after EOF 400' }] },
+                    finishReason: 'STOP',
+                  },
+                ],
+              } as unknown as GenerateContentResponse;
+            })(),
+          );
+
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          { message: 'test' },
+          'prompt-id-400-network-failure',
+        );
+
+        const events: StreamEvent[] = [];
+        for await (const event of stream) {
+          events.push(event);
+        }
+
+        // Should be called twice (initial + retry)
+        expect(
+          mockContentGenerator.generateContentStream,
+        ).toHaveBeenCalledTimes(2);
+        expect(
+          events.some(
+            (e) =>
+              e.type === StreamEventType.CHUNK &&
+              e.value.candidates?.[0]?.content?.parts?.[0]?.text ===
+                'Recovered after EOF 400',
+          ),
+        ).toBe(true);
       });
 
       it('should retry on 429 Rate Limit errors', async () => {

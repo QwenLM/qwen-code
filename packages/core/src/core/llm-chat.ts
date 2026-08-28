@@ -4465,7 +4465,15 @@ export class LlmChat {
         }
 
         const status = getErrorStatus(error);
-        if (status === 400) return false;
+        if (status === 400) {
+          // A provider-body-less 400 wrapping a low-level network failure
+          // ("network error for request ...") classifies as transport and is
+          // transient; genuine client 400s stay kind 'http' and fail fast.
+          return (
+            classifyRetryError(error, { authType, extraRetryErrorCodes })
+              .kind === 'transport'
+          );
+        }
         if (status === 429) return true;
         if (status && status >= 500 && status < 600) return true;
 

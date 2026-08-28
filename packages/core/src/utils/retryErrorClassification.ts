@@ -114,6 +114,8 @@ export function classifyRetryError(
   // classification, so it wins, with the HTTP status reported as secondary
   // context. A definitive 4xx status (auth/client error) stays authoritative —
   // a transient socket code must not relabel a permanent failure as retryable.
+  // The one exception is a provider-body-less 4xx carrying the network-failure
+  // message marker, relabeled in the 4xx block below.
   const transportCode = getTransportCode(error);
   if (
     transportCode !== undefined &&
@@ -159,6 +161,9 @@ export function classifyRetryError(
       // body in that case, and no manual retry (Ctrl+Y) in channel/daemon
       // paths, so classify it retryable so the bounded auto-retry applies.
       // Genuine client 4xx (which carry provider fields) stay fail-fast.
+      // `transportCode` is deliberately left unset: populating it would admit
+      // these 4xx-wrapped failures into the transportCode-keyed stream
+      // replay/continuation gates.
       if (
         providerCode === undefined &&
         providerMessage === undefined &&
@@ -239,15 +244,15 @@ function isTransportCode(code: string): boolean {
 }
 
 // A peer closing the connection mid-request surfaces as a low-level network
-// failure (EOF / "network error") that some clients/proxies wrap in a 4xx
-// status. Unlike a genuine client error there is no provider error body, so
-// detect it by walking the message/cause chain for a transport code or an
-// EOF / network-error marker. Used to classify such wrapped failures as
-// retryable (there is no manual retry in channel/daemon paths).
-const NETWORK_FAILURE_MESSAGE_RE = /\bEOF\b|network error/i;
+// failure that some clients/proxies wrap in a 4xx status. Unlike a genuine
+// client error there is no provider error body, so detect the demonstrated
+// wrapper shape by its message marker, walking the cause chain (SDKs nest
+// the failing request a level or two down). Transport codes are deliberately
+// not admitted here: a 4xx carrying a socket code stays fail-fast, as the
+// transport block above pins.
+const NETWORK_FAILURE_MESSAGE_RE = /network error for request /i;
 
 export function hasNetworkFailureCause(error: unknown): boolean {
-  if (getTransportCode(error) !== undefined) return true;
   let current: unknown = error;
   for (let depth = 0; depth <= MAX_TRANSPORT_CAUSE_DEPTH; depth++) {
     if (typeof current !== 'object' || current === null) return false;
