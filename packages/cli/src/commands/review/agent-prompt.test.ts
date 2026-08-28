@@ -630,6 +630,26 @@ describe('agent-prompt (command boundary)', () => {
       );
       expect(briefText).toContain('witness: not run —');
       expect(briefText).toContain('sweep the real population');
+      // The two decision axes (#10291) ride the same witness: the brief
+      // defines both values of each, ties the routing consequence to the
+      // ONE combination the floor defers, and tells the verifier to omit
+      // rather than guess — a guess on either axis completes the pair and
+      // takes a blocker off the pull request.
+      expect(briefText).toContain(
+        'A confirmed Critical also returns its two decision axes',
+      );
+      for (const value of [
+        'direction: certifies-falsely',
+        'direction: fails-closed',
+        'baseline: regression',
+        'baseline: new-surface',
+      ]) {
+        expect(briefText).toContain(value);
+      }
+      expect(briefText).toContain(
+        'only a Critical that is both fails-closed and new-surface is recorded as a deferral',
+      );
+      expect(briefText).toContain('OMIT that line rather than guess');
       // The incidental channel and the run-pairing capabilities the brief
       // gained with it: dropping any of these silently reverts the verifier
       // to a reader.
