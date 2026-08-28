@@ -6158,12 +6158,12 @@ export class Config {
 
     if (preparedProjectRuntime) {
       try {
-        await this.geminiClient?.refreshSystemInstruction();
+        await this.llmClient?.refreshSystemInstruction();
       } catch (error) {
         projectRuntimeRefreshErrors.push(error);
       }
       try {
-        await this.geminiClient?.setTools();
+        await this.llmClient?.setTools();
       } catch (error) {
         projectRuntimeRefreshErrors.push(error);
       }
