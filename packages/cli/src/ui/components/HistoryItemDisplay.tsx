@@ -83,7 +83,7 @@ interface HistoryItemDisplayProps {
   commands?: readonly SlashCommand[];
   activeShellPtyId?: number | null;
   embeddedShellFocused?: boolean;
-  availableTerminalHeightGemini?: number;
+  availableTerminalHeightLlm?: number;
   sourceCopyIndexOffsets?: MarkdownSourceCopyIndexOffsets;
   /** Force thinking blocks expanded (e.g. in SessionPreview). */
   thoughtExpanded?: boolean;
@@ -243,7 +243,7 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
   isFocused = true,
   activeShellPtyId,
   embeddedShellFocused,
-  availableTerminalHeightGemini,
+  availableTerminalHeightLlm,
   sourceCopyIndexOffsets,
   thoughtExpanded,
   fullDetail = false,
@@ -312,7 +312,7 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
             omittedImageCount={itemForDisplay.omittedImageCount}
             isPending={isPending}
             availableTerminalHeight={
-              availableTerminalHeightGemini ?? availableTerminalHeight
+              availableTerminalHeightLlm ?? availableTerminalHeight
             }
             contentWidth={contentWidth}
             sourceCopyIndexOffsets={sourceCopyIndexOffsets}
@@ -326,7 +326,7 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
           omittedImageCount={itemForDisplay.omittedImageCount}
           isPending={isPending}
           availableTerminalHeight={
-            availableTerminalHeightGemini ?? availableTerminalHeight
+            availableTerminalHeightLlm ?? availableTerminalHeight
           }
           contentWidth={contentWidth}
           sourceCopyIndexOffsets={sourceCopyIndexOffsets}
@@ -338,7 +338,7 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
           isPending={isPending}
           expanded={resolvedThoughtExpanded}
           availableTerminalHeight={
-            availableTerminalHeightGemini ?? availableTerminalHeight
+            availableTerminalHeightLlm ?? availableTerminalHeight
           }
           contentWidth={contentWidth}
           durationMs={itemForDisplay.durationMs}
@@ -353,7 +353,7 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
           isPending={isPending}
           expanded={resolvedThoughtExpanded}
           availableTerminalHeight={
-            availableTerminalHeightGemini ?? availableTerminalHeight
+            availableTerminalHeightLlm ?? availableTerminalHeight
           }
           contentWidth={contentWidth}
         />
