@@ -272,6 +272,24 @@ jobs:
             echo "should_review=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
+          # Head-level dedup: cancel-in-progress fires on `closed` only
+          # (#10110), so an away-and-back push that fits inside the
+          # watcher's poll gap leaves TWO runs owing the same head — the
+          # in-flight one reviews and posts it, and the queued replacement
+          # would review the identical commit again. Every posted review
+          # carries the machine-ledger marker naming the reviewed head; if
+          # the live head already carries one of the bot's reviews, this
+          # run has nothing to do. Fail-open: any lookup trouble falls
+          # through to the review — a missed dedup costs one duplicate
+          # review, a false skip would lose one.
+          reviewed_shas="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/reviews" --paginate \
+            --arg bot "qwen-code-ci-bot" \
+            --jq '.[] | select((.user.login // "") == $bot) | (.body // "") | select(contains("<!-- qwen-review-ledger ")) | capture("\"sha\":\"(?<sha>[0-9a-f]{7,64})\"")? | .sha' 2>/dev/null)" || reviewed_shas=""
+          if [ -n "$current_head" ] && printf '%s\n' "$reviewed_shas" | grep -qx "$current_head"; then
+            echo "Skipping delayed review: PR #${PR_NUMBER} head ${current_head} already carries a posted automatic review." >> "$GITHUB_STEP_SUMMARY"
+            echo "should_review=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           echo "should_review=true" >> "$GITHUB_OUTPUT"
 
   authorize:
@@ -989,7 +1007,7 @@ jobs:
           # number), so a planted directory there must not skip the reap and
           # leak the watcher — rm -rf absorbs it. The kill itself tolerates an
           # already-reaped watcher (salvage arming exits it on the spot).
-          trap '[ -z "${WATCHER_PID:-}" ] || kill "${WATCHER_PID}" 2>/dev/null || true; rm -rf "$LOG_PATH"; [ -z "$PROXY_BIN" ] || rm -rf "$PROXY_BIN"; [ -z "${SALVAGE_DIR:-}" ] || rm -rf "${SALVAGE_DIR}"' EXIT
+          trap '[ -z "${WATCHER_PID:-}" ] || kill "${WATCHER_PID}" 2>/dev/null || true; rm -rf "$LOG_PATH"; [ -z "$PROXY_BIN" ] || rm -rf "$PROXY_BIN"; [ -z "${SALVAGE_DIR:-}" ] || rm -rf "${SALVAGE_DIR}"; [ -z "${SUPERSEDE_KILL_DIR:-}" ] || rm -rf "${SUPERSEDE_KILL_DIR}"' EXIT
 
           if [ -z "${GH_TOKEN:-}" ]; then
             fail "CI_BOT_PAT secret is required for Qwen PR review."
@@ -1676,9 +1694,13 @@ jobs:
               # object; a torn mid-write fails the parse and latches on the
               # next poll instead. Residual risk, documented like the marker
               # escape: an agent can write valid JSON too, but it already
-              # authors the review this signal describes.
+              # authors the review this signal describes. The reopen is
+              # timeout-bounded: [ -f ] refuses a statically planted FIFO,
+              # but one rename-swapped in during the check-then-open window
+              # would otherwise block readFileSync forever (no writer) and
+              # kill the watcher permanently.
               if [ ! -f "${SALVAGE_DIR}/compose-seen" ] && [ -f "$COMPOSED_ARTIFACT" ] \
-                && node -e 'const v=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));if(typeof v!=="object"||v===null||Array.isArray(v))process.exit(1);' "$COMPOSED_ARTIFACT" 2>/dev/null; then
+                && timeout 5 node -e 'const v=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));if(typeof v!=="object"||v===null||Array.isArray(v))process.exit(1);' "$COMPOSED_ARTIFACT" 2>/dev/null; then
                 write_signal "${SALVAGE_DIR}/compose-seen" '' || true
               fi
               live_head="$(gh pr view "$PR_NUMBER" --repo "$REPO" --json headRefOid --jq '.headRefOid' 2>/dev/null)" || continue
@@ -1722,6 +1744,9 @@ jobs:
                 return 0
               fi
               write_signal "$SUPERSEDE_FILE" "$live_head" || true
+              if [ -n "${SUPERSEDE_KILL_DIR:-}" ]; then
+                write_signal "${SUPERSEDE_KILL_DIR}/killed" "$live_head" || true
+              fi
               echo "qwen-review-salvage: head moved to ${live_head} ${elapsed}s in, before the salvage threshold — ending this review so the queued replacement covers the new head (#10110)"
               pkill -U "$(id -u)" -TERM -f "${REVIEW_URL}($|[^0-9])" 2>/dev/null || true
               sleep 15
@@ -1730,7 +1755,14 @@ jobs:
             done
           }
           WATCHER_PID=""
+          SUPERSEDE_KILL_DIR=""
           if [ "${AUTO_REVIEW:-false}" = "true" ]; then
+            # The revert cede's local witness (supersede_reverted_during_run):
+            # a fresh dir minted here and never exported, so the reviewed
+            # agent cannot derive its path the way it derives every
+            # SALVAGE_DIR signal — only the watcher can record its kill
+            # there. mktemp failure degrades to the timeline witness alone.
+            SUPERSEDE_KILL_DIR="$(mktemp -d "${RUNNER_TEMP:-/tmp}/qwen-review-supersede-kill.XXXXXX" 2>/dev/null || true)"
             supersede_watcher &
             WATCHER_PID=$!
           fi
@@ -1780,6 +1812,16 @@ jobs:
           # unavailable or silent timeline keeps the red failure.
           supersede_reverted_during_run() {
             local owner repo events before after at departed=0
+            # Primary witness — the watcher's own kill record: a normal
+            # fast-forward departure emits no force-push event, so the
+            # timeline pair below misses the modal supersede shape (the
+            # departure side is invisible and the lone back-push is rightly
+            # rejected). The record is written only on a REAL polled head
+            # move, into a dir never exported — the agent cannot derive or
+            # plant it. The timeline stays the fallback for a lost record.
+            if [ -n "${SUPERSEDE_KILL_DIR:-}" ] && [ -f "${SUPERSEDE_KILL_DIR}/killed" ]; then
+              return 0
+            fi
             owner="${REPO:-}"
             repo="${owner##*/}"
             owner="${owner%%/*}"
@@ -1812,8 +1854,11 @@ jobs:
             # and during the retry backoff its pkill matched nothing (qwen
             # not running) — without this the next attempt re-reviews the
             # dead head for the whole remaining budget while the queued
-            # replacement waits (#10110).
-            if [ -f "${SUPERSEDE_FILE:-}" ] && live_head_moved; then
+            # replacement waits (#10110). AUTO_REVIEW-gated like the sibling
+            # cedes: an explicit run has no watcher that could write the file
+            # and no queued replacement to cede to, so there the derivable
+            # file must fail loudly, not exit green.
+            if [ "${AUTO_REVIEW:-false}" = "true" ] && [ -f "${SUPERSEDE_FILE:-}" ] && live_head_moved; then
               cede_superseded
             fi
             reset_attempt_salvage_state
@@ -1835,7 +1880,11 @@ jobs:
             # ${VAR:-} defaults: the retry-loop replay in
             # scripts/tests/qwen-pr-review-workflow.test.js extracts this loop
             # verbatim and runs it under set -u without the salvage setup.
-            if [ "$OUTCOME" != "success" ] && [ -f "${SUPERSEDE_FILE:-}" ] && live_head_moved; then
+            # The same AUTO_REVIEW gate as the sibling cede below: an
+            # explicit run has no watcher that could write the file and no
+            # queued replacement to cede to, so there the derivable file
+            # must fail loudly, not exit green.
+            if [ "$OUTCOME" != "success" ] && [ "${AUTO_REVIEW:-false}" = "true" ] && [ -f "${SUPERSEDE_FILE:-}" ] && live_head_moved; then
               cede_superseded
             fi
             if [ "${AUTO_REVIEW:-false}" = "true" ] && [ "$OUTCOME" != "success" ] && [ -f "${QWEN_CI_REVIEW_SALVAGE_OK_FILE:-}" ] && live_head_moved; then
@@ -1873,7 +1922,8 @@ jobs:
               # so a probe-gated relaunch skips and attempt 2 runs
               # unwatched. The wait reaps the zombie and bounds a draining
               # watcher well inside the backoff.
-              rm -rf "${SALVAGE_DIR}/moved-to" "${QWEN_CI_REVIEW_SALVAGE_OK_FILE:-}" "${SUPERSEDE_FILE:-}"
+              rm -rf "${SALVAGE_DIR}/moved-to" "${QWEN_CI_REVIEW_SALVAGE_OK_FILE:-}" "${SUPERSEDE_FILE:-}" \
+                "${SUPERSEDE_KILL_DIR:+${SUPERSEDE_KILL_DIR}/killed}"
               if [ -n "${WATCHER_PID:-}" ]; then
                 kill "${WATCHER_PID}" 2>/dev/null || true
                 wait "${WATCHER_PID}" 2>/dev/null || true

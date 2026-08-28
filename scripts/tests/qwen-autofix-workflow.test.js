@@ -9601,6 +9601,83 @@ exit 1
     );
   });
 
+  it('never counts or renders the salvage note as actionable feedback (R5-3)', () => {
+    // The salvage step posts the historical-head note with CI_BOT_PAT —
+    // the REVIEW_BOT account the fleet scan counts as actionable. Its
+    // marker must sit in every exclusion that counts or renders REVIEW_BOT
+    // issue comments: without it, a salvaged APPROVE (N_REVIEWS counts
+    // only CHANGES_REQUESTED/COMMENTED) flips "nothing new since
+    // watermark" into a full review-address round dispatched on the bot's
+    // own note, and the NEWEST computation advances the watermark onto
+    // it. Behavioral witness first: the scan's N_ISSUE_COMMENTS filter,
+    // extracted VERBATIM, replayed over the exact note body plus one
+    // human comment.
+    const scanStep =
+      workflow.match(
+        /- name: 'Scan for PRs with new feedback'[\s\S]*?(?=\n[ ]{6}- name: )/,
+      )?.[0] ?? '';
+    const filterDef = scanStep.match(/BOT_COMMENT_FILTER='([^']+)'/)?.[1];
+    expect(filterDef).toContain('qwen-review-salvaged');
+    const cmd =
+      scanStep.match(/N_ISSUE_COMMENTS="\$\(jq[\s\S]*?ic\.json"\)"/)?.[0] ?? '';
+    const jqProgram = cmd.slice(cmd.indexOf("'") + 1, cmd.lastIndexOf("'"));
+    expect(jqProgram).toContain('| length');
+    const note = {
+      user: { login: 'qwen-code-ci-bot' },
+      author_association: 'NONE',
+      created_at: '2026-08-02T00:00:00Z',
+      body:
+        '<!-- qwen-review-salvaged e2b07356f5d2e56197a89e438535edfc8e23823e -->\n\n' +
+        '⏳ **Historical-head review** — head moved while this review was in flight.',
+    };
+    const human = {
+      user: { login: 'maintainer' },
+      author_association: 'MEMBER',
+      created_at: '2026-08-02T01:00:00Z',
+      body: 'please address the remaining findings',
+    };
+    const countComments = (comments) =>
+      execFileSync(
+        'jq',
+        [
+          '--arg',
+          'wm',
+          '2026-08-01T00:00:00Z',
+          '--arg',
+          'rb',
+          'qwen-code-ci-bot',
+          '--arg',
+          'ab',
+          'qwen-code-dev-bot',
+          '--argjson',
+          'trust',
+          '["OWNER","MEMBER","COLLABORATOR"]',
+          '--arg',
+          'bf',
+          filterDef,
+          '--arg',
+          'cf',
+          '^\\s*@qwen-code /',
+          jqProgram,
+        ],
+        { input: JSON.stringify(comments), encoding: 'utf8' },
+      ).trim();
+    // The note alone adds nothing actionable; the human comment still
+    // counts beside it.
+    expect(countComments([note])).toBe('0');
+    expect(countComments([note, human])).toBe('1');
+    expect(countComments([human])).toBe('1');
+    // Shape pin: the marker rides the shared alternation at the four
+    // sibling sites that count or render REVIEW_BOT issue comments
+    // (NEWEST, LIVE_NEW, and both feedback renderers) plus the scan
+    // filter's BOT_COMMENT_FILTER — and at no other site (the
+    // conflict-wake and over-budget filters already exclude REVIEW_BOT
+    // by login).
+    expect(
+      workflow.match(/qwen-review-ack\|qwen-review-salvaged/g) ?? [],
+    ).toHaveLength(5);
+  });
+
   it('keeps forced issue routing bounded to open issues', () => {
     expect(workflow).toContain(
       '--json number,title,body,labels,createdAt,url,state',
