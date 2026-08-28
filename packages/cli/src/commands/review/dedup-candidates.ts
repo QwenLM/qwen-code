@@ -293,7 +293,10 @@ function postedEntries(
     // A stand-in path (`(body)`, `(unknown)`) names no file unless the `k`
     // flag says it literally is one — same exclusion the convergence join
     // applies, or a body-only Critical would match any pathless claim.
-    .filter((f) => !isStandInName(f.file) || f.k === 1)
+    // Compared through normalizePath because candidateMatches does: a padded
+    // spelling that slips past the raw comparison matches a pathless
+    // candidate after trimming and drops it.
+    .filter((f) => !isStandInName(normalizePath(f.file)) || f.k === 1)
     .map((f) => ({
       id: f.id,
       file: f.file,
@@ -394,7 +397,8 @@ function deferredEntries(
       // stand-in exclusion is unconditional here: path equality over
       // `(body)` is vacuous, and a standing pathless deferral would absorb
       // every genuinely new pathless candidate before verification.
-      if (isStandInName(l.file)) continue;
+      // Normalized like the posted arm, for the same trimmed-match reason.
+      if (isStandInName(normalizePath(l.file))) continue;
       entries.push({
         id: f.id,
         file: l.file,

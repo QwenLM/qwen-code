@@ -2167,6 +2167,28 @@ describe('composeReview — pre-verify carried-ledger dedup disclosure (#10105)'
     expect(r.lowSignal).toBeNull();
   });
 
+  it('caps the quoted ids at twelve and names the overflow count', () => {
+    const drops = Array.from({ length: 14 }, (_, i) =>
+      dropEntry(`R3-${i + 1}`),
+    );
+    const r = composeReview(
+      input(planWithReport({ dropped: drops, droppedCount: drops.length })),
+    );
+    expect(r.body).toContain(
+      '(R3-1, R3-2, R3-3, R3-4, R3-5, R3-6, R3-7, R3-8, R3-9, R3-10, R3-11, R3-12, +2 more)',
+    );
+    expect(r.body).not.toContain('R3-13');
+    // Exactly at the cap there is no overflow suffix — no ", +0 more".
+    const atCap = drops.slice(0, 12);
+    const r2 = composeReview(
+      input(planWithReport({ dropped: atCap, droppedCount: atCap.length })),
+    );
+    expect(r2.body).toContain(
+      '(R3-1, R3-2, R3-3, R3-4, R3-5, R3-6, R3-7, R3-8, R3-9, R3-10, R3-11, R3-12)',
+    );
+    expect(r2.body).not.toContain('more)');
+  });
+
   it('a dedup-only APPROVE keeps its paragraph break before the disclosure', () => {
     const r = composeReview(input(planWithReport()));
     // The separator ternary's dedup arm is the only thing standing between

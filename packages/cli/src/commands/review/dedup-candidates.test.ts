@@ -242,6 +242,29 @@ describe('runDedupCandidates — matching against the posted work list', () => {
     expect(run([candidate({ file: '(body)' })]).droppedCount).toBe(1);
   });
 
+  it('a padded stand-in is still a stand-in — the exclusion trims like the match', () => {
+    // candidateMatches compares through normalizePath (trimmed), so an
+    // exclusion comparing the raw string lets ' (body)' through, where it
+    // equals a genuinely new pathless candidate's '(body)' and drops it —
+    // the exact false-drop direction the exclusion exists to close.
+    writeLedger([entry({ file: ' (body)' })]);
+    expect(run([candidate({ file: '(body)' })]).droppedCount).toBe(0);
+    writeLedger([entry({ file: '(unknown) ' })]);
+    expect(run([candidate({ file: '(unknown)' })]).droppedCount).toBe(0);
+  });
+
+  it('both match bars are inclusive at their exact boundaries', () => {
+    // Anchor distance exactly the tolerance still matches.
+    writeLedger([entry({ line: 40 })]);
+    expect(run([candidate({ line: 45 })]).droppedCount).toBe(1);
+    // Lineless Jaccard exactly 0.75: 3 shared tokens over a 4-token union.
+    writeLedger([entry({ title: 'alpha beta gamma delta', line: undefined })]);
+    expect(
+      run([candidate({ title: 'alpha beta gamma', line: undefined })])
+        .droppedCount,
+    ).toBe(1);
+  });
+
   it('keeps everything on a plan without a PR, and says which sources were skipped', () => {
     writeLedger([entry()]);
     const r = run([candidate()], { prNumber: undefined });
@@ -354,6 +377,13 @@ describe('runDedupCandidates — the deferral half reads the findings artifact',
       3,
     );
     expect(run([candidate({ file: '(unknown)' })]).droppedCount).toBe(0);
+    // Padded stand-ins too: matching trims, so the exclusion must.
+    writeArtifact(
+      [deferred({ locations: [{ file: ' (body)' }] })],
+      undefined,
+      3,
+    );
+    expect(run([candidate({ file: '(body)' })]).droppedCount).toBe(0);
     // Control: the same entry still absorbs through a real location.
     writeArtifact([deferred()], undefined, 3);
     expect(run([candidate()]).droppedCount).toBe(1);
