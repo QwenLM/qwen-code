@@ -24,14 +24,21 @@
 /** Error-text phrases that express a modality rejection. Observed in the wild
  * (2026-08-27, four-endpoint validation — see issue #10309): DeepSeek/Ollama
  * reject via error.message; Zhipu phrases it as content.type enum validation;
- * OpenRouter's router returns 404 "No endpoints found that support image input". */
+ * OpenRouter's router returns 404 "No endpoints found that support image input".
+ *
+ * Phrases carry their object ("...image", "不支持图片/图像"): objectless
+ * variants ("not supported", "不支持") also appear in region/entitlement
+ * errors like "not supported in your region" (403) or "此模型在您的区域不受
+ * 支持" (400), and matching those would persist a wrong text_only verdict —
+ * phase 1 has no re-probe escape hatch once a verdict is written. */
 const MODALITY_ERROR_HINTS = [
-  'not support',
+  'not support image',
   'text-only',
   'text only',
   'multimodal',
   'modalit',
-  '不支持',
+  '不支持图片',
+  '不支持图像',
   '多模态',
   '识图',
   '无法处理图片',

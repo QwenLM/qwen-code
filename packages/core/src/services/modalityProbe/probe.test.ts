@@ -52,6 +52,41 @@ describe('classifyProbeResponse', () => {
         }),
       ),
     ).toEqual('text_only');
+    expect(
+      classifyProbeResponse(
+        400,
+        JSON.stringify({ error: { message: '当前模型不支持图片输入' } }),
+      ),
+    ).toEqual('text_only');
+    expect(
+      classifyProbeResponse(
+        400,
+        JSON.stringify({ error: { message: '该模型不支持图像理解' } }),
+      ),
+    ).toEqual('text_only');
+  });
+
+  it('abstains on region-unsupported errors despite "not supported" phrasing', () => {
+    // Objectless "not supported" is entitlement/region vocabulary, not a
+    // modality rejection — a wrong text_only here would be persisted with no
+    // re-probe escape hatch in phase 1.
+    expect(
+      classifyProbeResponse(
+        403,
+        JSON.stringify({
+          error: { message: 'Model o1 is not supported in your region' },
+        }),
+      ),
+    ).toEqual('unknown');
+  });
+
+  it('abstains on Chinese region-unsupported errors despite "不支持" phrasing', () => {
+    expect(
+      classifyProbeResponse(
+        400,
+        JSON.stringify({ error: { message: '此模型在您的区域不受支持' } }),
+      ),
+    ).toEqual('unknown');
   });
 
   it('abstains on non-modality errors', () => {

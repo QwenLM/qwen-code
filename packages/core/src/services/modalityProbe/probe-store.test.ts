@@ -10,6 +10,7 @@ import {
   readProbeResult,
   withProbeResult,
   type ModalityProbeRecord,
+  type ProbeResultStore,
 } from './probe-store.js';
 
 describe('probeStore', () => {
@@ -59,5 +60,23 @@ describe('probeStore', () => {
     });
     expect(second['openai|m1|']?.verdict).toEqual('text_only');
     expect(Object.keys(second)).toHaveLength(1);
+  });
+
+  it('treats a hand-corrupted non-object store as empty on write', () => {
+    // Spreading a raw string would materialize index keys ("0", "1", ...)
+    // and persist them; the write must start from an empty map instead.
+    const record: ModalityProbeRecord = {
+      verdict: 'image',
+      probedAt: '2026-08-28T00:00:00Z',
+    };
+    const next = withProbeResult(
+      'corrupted' as unknown as ProbeResultStore,
+      'openai',
+      'm1',
+      '',
+      record,
+    );
+    expect(next).toEqual({ 'openai|m1|': record });
+    expect(Object.keys(next)).toHaveLength(1);
   });
 });
