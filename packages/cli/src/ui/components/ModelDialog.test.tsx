@@ -2035,6 +2035,20 @@ describe('<ModelDialog />', () => {
     settingsValue?: Partial<LoadedSettings>,
   ) => renderComponent({}, probeDialogConfig(models), settingsValue);
 
+  /** Settings value giving every scope an empty settings object — the
+   * standard "no pre-existing probe records" persistence target. */
+  const emptyScopeSettings = {
+    forScope: () => ({ settings: {} }),
+  } as unknown as Partial<LoadedSettings>;
+
+  /** Pin the mocked probe endpoint's next verdict. */
+  const mockProbeVerdict = (
+    verdict: 'image' | 'text_only' | 'unknown',
+    httpStatus: number,
+    snippet: string,
+  ) =>
+    mockedProbeImageSupport.mockResolvedValue({ verdict, httpStatus, snippet });
+
   /** `it` wrapper that pins MODEL_DIALOG_PROBE_TEST_KEY to `value` (deleted
    * when undefined) for the body and restores the prior value afterwards. */
   const itWithProbeKeyEnv = (
@@ -2160,11 +2174,7 @@ describe('<ModelDialog />', () => {
     'probes a pattern-source entry on t and persists the whole probeResults map',
     'sk-probe-test',
     async () => {
-      mockedProbeImageSupport.mockResolvedValue({
-        verdict: 'image',
-        httpStatus: 200,
-        snippet: 'ok',
-      });
+      mockProbeVerdict('image', 200, 'ok');
       const existingRecord = {
         verdict: 'text_only' as const,
         probedAt: '2026-01-01T00:00:00.000Z',
@@ -2219,14 +2229,8 @@ describe('<ModelDialog />', () => {
       // setValue does NOT refresh settings.merged, so the live-settings
       // lookup still misses — only the local verdict state gates the action
       // here, which is exactly the fallback under test.
-      mockedProbeImageSupport.mockResolvedValue({
-        verdict: 'image',
-        httpStatus: 200,
-        snippet: 'ok',
-      });
-      const first = renderProbeDialog(undefined, {
-        forScope: () => ({ settings: {} }),
-      } as unknown as Partial<LoadedSettings>);
+      mockProbeVerdict('image', 200, 'ok');
+      const first = renderProbeDialog(undefined, emptyScopeSettings);
 
       await pressT();
 
@@ -2236,14 +2240,8 @@ describe('<ModelDialog />', () => {
 
       // Unknown verdict: nothing was written and no conclusion exists, so
       // retry stays available (phase 1 has no other re-probe entry point).
-      mockedProbeImageSupport.mockResolvedValue({
-        verdict: 'unknown',
-        httpStatus: 429,
-        snippet: 'rate limited',
-      });
-      const second = renderProbeDialog(undefined, {
-        forScope: () => ({ settings: {} }),
-      } as unknown as Partial<LoadedSettings>);
+      mockProbeVerdict('unknown', 429, 'rate limited');
+      const second = renderProbeDialog(undefined, emptyScopeSettings);
 
       await pressT();
 
@@ -2261,11 +2259,7 @@ describe('<ModelDialog />', () => {
     'writes nothing when the probe verdict is unknown',
     'sk-probe-test',
     async () => {
-      mockedProbeImageSupport.mockResolvedValue({
-        verdict: 'unknown',
-        httpStatus: 401,
-        snippet: 'unauthorized',
-      });
+      mockProbeVerdict('unknown', 401, 'unauthorized');
 
       const { getByText, mockSettings } = renderProbeDialog();
 
@@ -2303,11 +2297,7 @@ describe('<ModelDialog />', () => {
     async () => {
       // The key exists only in settings.env — NOT in process.env — so the
       // probe only works if the handler hydrates the env first.
-      mockedProbeImageSupport.mockResolvedValue({
-        verdict: 'text_only',
-        httpStatus: 400,
-        snippet: 'does not support images',
-      });
+      mockProbeVerdict('text_only', 400, 'does not support images');
 
       const { getByText, mockSettings } = renderProbeDialog(undefined, {
         merged: {
@@ -2330,11 +2320,7 @@ describe('<ModelDialog />', () => {
     'displaces the verdict display when the highlight moves to another entry',
     'sk-probe-test',
     async () => {
-      mockedProbeImageSupport.mockResolvedValue({
-        verdict: 'image',
-        httpStatus: 200,
-        snippet: 'ok',
-      });
+      mockProbeVerdict('image', 200, 'ok');
 
       const { getByText, queryByText } = renderProbeDialog(
         [
@@ -2347,9 +2333,7 @@ describe('<ModelDialog />', () => {
             modalitiesSource: 'pattern',
           },
         ],
-        {
-          forScope: () => ({ settings: {} }),
-        } as unknown as Partial<LoadedSettings>,
+        emptyScopeSettings,
       );
 
       await pressT();
@@ -2384,16 +2368,12 @@ describe('<ModelDialog />', () => {
         Object.assign(error, { code: 'EACCES' });
         throw error;
       });
-      mockedProbeImageSupport.mockResolvedValue({
-        verdict: 'image',
-        httpStatus: 200,
-        snippet: 'ok',
-      });
+      mockProbeVerdict('image', 200, 'ok');
 
       const { getByText, queryByText } = renderProbeDialog(undefined, {
         setValue,
-        forScope: () => ({ settings: {} }),
-      } as unknown as Partial<LoadedSettings>);
+        ...emptyScopeSettings,
+      });
 
       await pressT();
 
