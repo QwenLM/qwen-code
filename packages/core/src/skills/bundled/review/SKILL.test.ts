@@ -505,16 +505,50 @@ describe('bundled review skill', () => {
     // The posture is the reviewer-side brake on the review→fix→re-review
     // bloat loop. Each clause below carries a distinct obligation a later
     // "simplify the prose" edit is most likely to drop: the floor's
-    // round-adaptive default, the never-defer-Criticals rule, the
+    // round-adaptive default, the axes-only Critical deferral rule, the
     // record-not-request contract, and the age-reference/anchor distinction
     // (conflating `commitId` with the ledger `sha` would scope an
     // incremental review past scope a fail-closed round never certified).
     const body = skillBody();
     expect(body).toContain('Through round 5 the floor is `suggestion`');
     expect(body).toContain('**from round 6 it is `critical`**');
+    // A Critical leaves the posting set by its AXES, never by severity, and
+    // only at floor `critical` (#10291): the one deferrable shape is named,
+    // the wrong-result and regression arms are pinned as always posting,
+    // the unclassified arm too, and the rounds-2–5 age rule is kept off
+    // Criticals.
     expect(body).toContain(
-      'A Critical is never deferred — any round, any floor',
+      'A Critical is deferred by its axes, never by its severity — and only at floor `critical`.',
     );
+    expect(body).toContain(
+      '`direction: fails-closed` AND `baseline: new-surface`',
+    );
+    expect(body).toContain('Every other Critical posts');
+    expect(body).toContain('`certifies-falsely` at either baseline');
+    expect(body).toContain('`regression` in either direction');
+    expect(body).toContain('a blocker in doubt posts');
+    // The deferrable-set definition names the Critical shape where it is
+    // introduced, and the deterministic carve-out is scoped to Suggestions.
+    expect(body).toContain(
+      'plus, at floor `critical` only, the fails-closed/new-surface Criticals described below',
+    );
+    expect(body).toContain(
+      'a deterministic Critical the axes classify defers like any other axes-Critical',
+    );
+    // The orchestrator-side no-guess rule — the only instruction keeping the
+    // orchestrator from completing a deferrable pair — pinned like its
+    // verifier-side twin in agent-prompt.test.ts.
+    expect(body).toContain('an axis the verifier omitted stays absent');
+    expect(body).toContain("never fill one in from the finding's prose");
+    expect(body).toContain('a guess on EITHER axis of the pair');
+    // The in-band report copies the axes too — one copy list, not two.
+    expect(body).toContain(
+      '`summary`, `shortSummary`, `failureScenario`, `category`, `direction`, `baseline` — never re-typed',
+    );
+    expect(body).toContain(
+      'the rounds-2–5 code-age rule never touches a Critical',
+    );
+    expect(body).toContain('no issue is filed by the review');
     expect(body).toContain('an **age reference, never an incremental anchor**');
     expect(body).toContain('skip the age rule, not the review');
     // The explicit knob's two directions: `critical` from round 1, and
@@ -826,12 +860,19 @@ describe('bundled review skill', () => {
 
   it('names the deferral channel in the bodyCriticals sources', () => {
     // Revert guard: compose-review relocates a `Critical` entry written
-    // into `deferredSuggestions` into the body Criticals (a Critical is
-    // never deferred); the bodyCriticals bullet must name that mechanical
-    // relocation beside the two model-written sources.
+    // into `deferredSuggestions` into the body Criticals — unless it is the
+    // one shape the floor defers (#10291); the bodyCriticals bullet must
+    // name that mechanical relocation, and its one exception, beside the
+    // two model-written sources.
     const body = skillBody();
     expect(body).toContain(
-      'a `Critical` entry placed in `deferredSuggestions` is relocated here, never deferred',
+      'a `Critical` entry placed in `deferredSuggestions` is relocated here unless the floor is `critical` and the entry is `fails-closed` on `new-surface`',
+    );
+    // The fix-witness invariant on body Criticals carves the deferral
+    // channel out explicitly: its line carries neither witness nor
+    // constraint, and the artifact keeps the full entry.
+    expect(body).toContain(
+      "the deferral channel's disclosed line is the one exception",
     );
   });
 
