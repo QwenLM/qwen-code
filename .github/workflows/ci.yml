@@ -3,18 +3,17 @@
 name: 'Qwen Code CI'
 
 on:
-  # The reason the `push` trigger was removed no longer holds. It said the
-  # merge queue validates the merged tree before it lands, so a post-merge run
-  # would be redundant — but no merge queue is enabled here (no queue run since
-  # 2026-07-02), so nothing validated that tree on either side of the merge.
-  # `main` was left with no gate before a merge and no check faster than the
-  # ~40-minute E2E after one, which is how a regression can sit in `main` for
-  # hours. Only `test` accepts this trigger (see its `if`); every other job
-  # still excludes push, so a post-merge run is exactly Classify PR + Test.
-  # The no-AK integration gate inside `test` stays gated to pull_request /
-  # merge_group, so this lane is the lint, static-analysis and unit-test
-  # subset — a fast signal, not a second full gate. Remove this trigger again
-  # once the merge queue is actually enabled and validates the merged tree.
+  # This trigger was removed on the premise that the merge queue validates the
+  # merged tree before it lands. No queue is enabled (none since 2026-07-02),
+  # so nothing validated that tree on either side of a merge: `main` had no
+  # gate before one and nothing faster than the ~40-minute E2E after one.
+  # Only `test` and the `classify_pr` it depends on accept it (see their
+  # `if`s); every other job excludes push, so a post-merge run is exactly
+  # Classify PR + Test, and the no-AK gate inside `test` stays on
+  # pull_request / merge_group — this lane is lint, static analysis and unit
+  # tests. Removing it once the queue is enabled means dropping the trigger
+  # AND the push arm from BOTH those `if`s: a half-removal leaves every merge
+  # running Classify PR alone, publishing outputs nothing consumes.
   push:
     branches:
       - 'main'
@@ -51,7 +50,15 @@ on:
           - 'hosted'
 
 concurrency:
-  group: '${{ github.workflow }}-${{ github.head_ref || github.ref }}'
+  # Scoped by event as well as ref, like `e2e.yml` and for the same collision
+  # class. Unscoped, the group collapses onto `Qwen Code CI-refs/heads/main`
+  # and the post-merge run shares it with (1) the nightly's 60-minute lanes,
+  # neither cancelling on `main`, so merges inside that window queue behind it
+  # and supersede each other unreported; and (2) any PR from a fork branch
+  # named literally `refs/heads/main` — a legal ref name whose `head_ref` makes
+  # the group byte-identical while that run cancels in progress, letting an
+  # actor with no repo access kill the signal on every merge.
+  group: '${{ github.workflow }}-${{ github.event_name }}-${{ github.head_ref || github.ref }}'
   cancel-in-progress: |-
     ${{ github.ref != 'refs/heads/main' && !startsWith(github.ref, 'refs/heads/release/') }}
 
@@ -78,7 +85,15 @@ env:
   # baseline went stale on main" (#9904). Wired once here so every lane
   # inherits it — the gate step and every `npm run test:ci` step, whatever
   # it is named — instead of each step hand-wiring a copy.
-  WORKFLOW_SIZE_BASE_SHA: '${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}'
+  # `github.event.before` is the push lane's base: on a squash-merge push it is
+  # main's previous tip, restoring the PR lane's leniency for a baseline that
+  # went stale on main. Without it both enforcers see an empty base and fail
+  # closed, so the next stale baseline reddens every merge while every PR stays
+  # green — telling you to "update .size-baseline in this PR" when no PR
+  # exists. `github.sha` is deliberately not used: on workflow_dispatch it
+  # resolves to the checked-out commit and would compare the file against
+  # itself, failing open. An all-zeros `before` still fails closed.
+  WORKFLOW_SIZE_BASE_SHA: '${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}'
 
 jobs:
   classify_pr:
@@ -143,14 +158,12 @@ jobs:
       # PRs stay hosted. Disable via repo var
       # MAINTAINER_ECS_RUNNER_DISABLED=true.
       #
-      # push is deliberately absent from the `runs-on` expression above, so on
-      # a post-merge run classify_pr itself stays hosted while the Test job it
-      # feeds goes to ECS. That asymmetry is intentional: the expression is the
-      # canonical association-routing text mirrored by sdk-java.yml and
-      # serve-ab.yml, a push carries no author association to route on, and
-      # classify_pr is a seconds-long job whose pool costs nothing — while Test
-      # is the ten-plus-minute job that should not spend a scarce hosted Linux
-      # runner on every merge.
+      # push is deliberately absent from the `runs-on` expression above, so a
+      # post-merge run leaves classify_pr hosted while the Test job it feeds
+      # goes to ECS. That is intentional: the expression is the canonical
+      # association-routing text sdk-java.yml and serve-ab.yml mirror, a push
+      # has no author association to route on, and classify_pr costs seconds —
+      # while Test should not spend a scarce hosted runner on every merge.
       - name: 'Select Linux runner'
         id: 'pick_runner'
         env:
@@ -307,7 +320,17 @@ jobs:
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
-          ref: "${{ github.event.inputs.branch_ref || (github.event_name == 'pull_request' && format('refs/pull/{0}/head', github.event.pull_request.number)) || (github.event_name == 'merge_group' && github.event.merge_group.head_sha) || github.ref }}"
+          # Pin push runs to the event SHA: the `github.ref` fallback resolves
+          # `refs/heads/main` at fetch time — a moving tip — while the check run
+          # attaches to the triggering commit, so the lane would validate a tree
+          # it does not report on. Nothing detects that (the checkout-head
+          # verifier is gated to pull_request / merge_group, and its ancestor
+          # check passes for a newer tip regardless), and merges land close
+          # enough together to hit it routinely. Regressions are still caught —
+          # the tested tree is a descendant — but attribution breaks: red on a
+          # clean commit, autofix filed against the wrong merge. `e2e.yml` pins
+          # the event SHA by taking actions/checkout's default.
+          ref: "${{ github.event.inputs.branch_ref || (github.event_name == 'pull_request' && format('refs/pull/{0}/head', github.event.pull_request.number)) || (github.event_name == 'merge_group' && github.event.merge_group.head_sha) || (github.event_name == 'push' && github.sha) || github.ref }}"
           # Shallow: nothing here walks git history except on demand (the
           # verify guard below checks head.sha == HEAD; the size gate and its
           # vitest mirror fetch the PR's base commit at depth 1 when the
@@ -683,8 +706,11 @@ jobs:
           name: 'test-results-fork-22.x-ubuntu-latest'
           path: 'packages/*/junit.xml'
 
+      # Excludes push: the only consumer, `post_coverage_comment`, is gated to
+      # pull_request and nothing else reads `coverage-reports-*`, so uploading
+      # on every merge spends egress and retention on a lane with no reader.
       - name: 'Upload coverage reports'
-        if: "${{ always() && needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
+        if: "${{ always() && needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && github.event_name != 'push' }}"
         uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
         with:
           name: 'coverage-reports-22.x-ubuntu-latest'

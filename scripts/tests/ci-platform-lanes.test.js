@@ -42,8 +42,9 @@ const condOf = (job) => String(ci.jobs[job].if ?? '');
 describe('platform lanes — triggers', () => {
   it('gives the workflow a scheduled trigger', () => {
     // Without it the lanes have no path to `main` at all: `ci.yml`'s push
-    // trigger is accepted by the `test` job alone, so a merge-queue-only gate
-    // on a repository with no merge queue is an off switch for these two.
+    // trigger is accepted only by `test` and the `classify_pr` it depends on,
+    // so a merge-queue-only gate on a repository with no merge queue is an off
+    // switch for these two.
     expect(triggers.schedule).toBeDefined();
     expect(Array.isArray(triggers.schedule)).toBe(true);
     expect(triggers.schedule[0].cron).toMatch(/^\S+ \S+ \S+ \S+ \S+$/);
@@ -171,6 +172,107 @@ describe('platform lanes — triggers', () => {
       ).not.toContain("github.event_name == 'schedule'");
       expect(cond, `${name} has no event gate at all`).not.toBe('');
     }
+  });
+});
+
+// The post-merge push lane on `main`.
+//
+// `ci.yml` carried no push trigger while no merge queue was enabled, so
+// nothing validated the merged tree before it landed and the only check after
+// it was the ~40-minute E2E — a regression could sit in `main` for hours. The
+// trigger is back, taken by `test` and the `classify_pr` it depends on.
+//
+// The runner-routing tests in `.github/scripts/ci-runner-routing.test.mjs`
+// cannot reach any of this: they drive `pick_runner`'s shell directly with
+// EVENT_NAME=push, bypassing the trigger and both job gates, so they stay
+// green if either loses its push arm. What is pinned here is the YAML half —
+// the same class of invariant as `keeps a nightly run to exactly the two
+// lanes` above, and for the same reason: every mutation below leaves the whole
+// suite green while silently turning the lane off, widening it, or pointing it
+// at the wrong tree.
+describe('post-merge push lane', () => {
+  const PUSH_JOBS = ['classify_pr', 'test'];
+  const stepOf = (job, name) =>
+    (ci.jobs[job].steps ?? []).find((s) => s.name === name);
+
+  it('is triggered on main and nowhere else', () => {
+    // Drop the trigger and the post-merge signal is gone with it; widen the
+    // branch list and every dev branch push spends a pool runner.
+    expect(triggers.push).toBeDefined();
+    expect(triggers.push.branches).toEqual(['main']);
+  });
+
+  it('classify_pr admits push in its event allowlist', () => {
+    // `test` reads `needs.classify_pr.outputs.ubuntu_runner`. If classify_pr
+    // stops accepting push, `test` still runs but that output is empty and
+    // `fromJSON(... || '["ubuntu-latest"]')` silently demotes every
+    // post-merge run to a scarce hosted runner.
+    expect(condOf('classify_pr')).toContain("github.event_name == 'push'");
+  });
+
+  it('test accepts push while still excluding the nightly', () => {
+    const cond = condOf('test');
+    expect(cond).not.toContain("github.event_name != 'push'");
+    expect(cond).toContain("github.event_name != 'schedule'");
+  });
+
+  it('keeps a post-merge run to exactly classify_pr and test', () => {
+    // The mirror of the nightly assertion: a `push:` trigger fires the whole
+    // workflow, so every other job must exclude push outright or gate on an
+    // allowlist that cannot contain it. Otherwise a merge quietly becomes a
+    // full CI run — desktop_shell's cargo build included.
+    for (const [name, job] of Object.entries(ci.jobs)) {
+      if (PUSH_JOBS.includes(name)) continue;
+      const cond = String(job.if ?? '');
+      const excluded =
+        cond.includes("github.event_name != 'push'") ||
+        /github\.event_name == '(pull_request|merge_group|workflow_dispatch|schedule)'/.test(
+          cond,
+        );
+      expect(excluded, `${name} would also run on a post-merge push`).toBe(
+        true,
+      );
+      expect(cond, `${name} admits push explicitly`).not.toContain(
+        "github.event_name == 'push'",
+      );
+    }
+  });
+
+  it('checks out the commit the push reported, not the branch tip', () => {
+    // `github.ref` resolves `refs/heads/main` at fetch time — a moving tip —
+    // while the check run attaches to `github.sha`. Without a push arm the
+    // lane can validate a tree it does not report on, and nothing detects it:
+    // `Verify checkout includes expected head commit` is gated to
+    // pull_request / merge_group, and its `merge-base --is-ancestor` check
+    // passes for a newer tip regardless. Order matters as much as presence —
+    // the arm has to sit before the `github.ref` fallback to ever be reached.
+    const checkout = (ci.jobs.test.steps ?? []).find((s) =>
+      String(s.uses ?? '').startsWith('actions/checkout'),
+    );
+    expect(checkout).toBeDefined();
+    const ref = String(checkout.with?.ref ?? '');
+    const arm = "github.event_name == 'push' && github.sha";
+    expect(ref).toContain(arm);
+    expect(ref.indexOf(arm)).toBeLessThan(ref.lastIndexOf('github.ref '));
+  });
+
+  it('does not upload coverage from a post-merge run', () => {
+    // The artifact's only consumer, post_coverage_comment, is gated to
+    // pull_request; nothing else under .github/ reads coverage-reports-*.
+    // Without this exclusion every merge spends pool egress and artifact
+    // retention on a lane with no reader.
+    const step = stepOf('test', 'Upload coverage reports');
+    expect(step).toBeDefined();
+    expect(String(step.if)).toContain("github.event_name != 'push'");
+  });
+
+  it('scopes the concurrency group by event', () => {
+    // Unscoped, the group collapses onto `Qwen Code CI-refs/heads/main` and
+    // the post-merge run shares it with the nightly (60-minute lanes, no
+    // cancellation on main) and with any PR from a fork branch named
+    // literally `refs/heads/main` — a legal ref name whose `head_ref` makes
+    // the group byte-identical while its own run cancels in progress.
+    expect(String(ci.concurrency.group)).toContain('github.event_name');
   });
 });
 
