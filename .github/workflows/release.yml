@@ -93,7 +93,17 @@ jobs:
             echo "::error::refusing to wipe: runner workspace is a symlink: ${RWS}"
             exit 1
           fi
+          # `-L` only sees the LEAF: the kernel resolves intermediate
+          # components too, so compare the symlink-blind lexical form
+          # against the full canonicalization — any difference means some
+          # component was a symlink re-rooting the whole chain below
+          # (heal, allow-list, wipe) at the link's target.
+          RWS_LEX="$(realpath -m -s -- "$RWS" 2>/dev/null)" || { echo "::error::refusing to wipe: realpath unavailable, cannot canonicalize ${RUNNER_WORKSPACE}"; exit 1; }
           RWS="$(realpath -m -- "$RWS" 2>/dev/null)" || { echo "::error::refusing to wipe: realpath unavailable, cannot canonicalize ${RUNNER_WORKSPACE}"; exit 1; }
+          if [ "$RWS" != "$RWS_LEX" ]; then
+            echo "::error::refusing to wipe: runner workspace resolves through a symlinked component: ${RWS_LEX} resolves to ${RWS}"
+            exit 1
+          fi
           while [ "${RWS%/}" != "$RWS" ]; do RWS="${RWS%/}"; done
           if [ -z "$RWS" ]; then echo "::error::refusing to wipe: runner workspace resolved to /"; exit 1; fi
           case "$RWS" in
@@ -137,7 +147,15 @@ jobs:
             rm -f -- "$WS" || { echo "::error::refusing to continue: could not remove ${WS}"; exit 1; }
             mkdir -- "$WS" || { echo "::error::refusing to continue: could not recreate ${WS}"; exit 1; }
           fi
+          # Heal only guarantees the LEAF is real; a symlinked component
+          # between the runner workspace and the leaf re-roots the
+          # containment below the same way, so apply the same comparison.
+          WS_LEX="$(realpath -m -s -- "$WS" 2>/dev/null)" || { echo "::error::refusing to wipe: realpath unavailable, cannot canonicalize ${GITHUB_WORKSPACE}"; exit 1; }
           WS="$(realpath -m -- "$WS" 2>/dev/null)" || { echo "::error::refusing to wipe: realpath unavailable, cannot canonicalize ${GITHUB_WORKSPACE}"; exit 1; }
+          if [ "$WS" != "$WS_LEX" ]; then
+            echo "::error::refusing to wipe: workspace resolves through a symlinked component: ${WS_LEX} resolves to ${WS}"
+            exit 1
+          fi
           while [ "${WS%/}" != "$WS" ]; do WS="${WS%/}"; done
           case "$WS" in
             ..|../*|*/..|*/../*) echo "::error::refusing to wipe path containing '..': ${WS}"; exit 1 ;;

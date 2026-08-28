@@ -25,7 +25,9 @@ import { parse } from 'yaml';
 // `realpath -m` (the script's canonicalization line) is a GNU coreutils
 // extension. Probe the host before asserting GNU-specific path behavior.
 const hasGnuRealpath =
-  spawnSync('realpath', ['-m', '--', '/'], { stdio: 'ignore' }).status === 0;
+  spawnSync('realpath', ['-m', '--', '/'], { stdio: 'ignore' }).status === 0 &&
+  spawnSync('realpath', ['-m', '-s', '--', '/'], { stdio: 'ignore' }).status ===
+    0;
 
 const workflow = readFileSync('.github/workflows/release.yml', 'utf8');
 const releaseYaml = parse(workflow);
@@ -175,7 +177,17 @@ if [ -L "$RWS" ]; then
   echo "::error::refusing to wipe: runner workspace is a symlink: \${RWS}"
   exit 1
 fi
+# \`-L\` only sees the LEAF: the kernel resolves intermediate
+# components too, so compare the symlink-blind lexical form
+# against the full canonicalization — any difference means some
+# component was a symlink re-rooting the whole chain below
+# (heal, allow-list, wipe) at the link's target.
+RWS_LEX="$(realpath -m -s -- "$RWS" 2>/dev/null)" || { echo "::error::refusing to wipe: realpath unavailable, cannot canonicalize \${RUNNER_WORKSPACE}"; exit 1; }
 RWS="$(realpath -m -- "$RWS" 2>/dev/null)" || { echo "::error::refusing to wipe: realpath unavailable, cannot canonicalize \${RUNNER_WORKSPACE}"; exit 1; }
+if [ "$RWS" != "$RWS_LEX" ]; then
+  echo "::error::refusing to wipe: runner workspace resolves through a symlinked component: \${RWS_LEX} resolves to \${RWS}"
+  exit 1
+fi
 while [ "\${RWS%/}" != "$RWS" ]; do RWS="\${RWS%/}"; done
 if [ -z "$RWS" ]; then echo "::error::refusing to wipe: runner workspace resolved to /"; exit 1; fi
 case "$RWS" in
@@ -219,7 +231,15 @@ if [ -L "$WS" ] || [ ! -d "$WS" ]; then
   rm -f -- "$WS" || { echo "::error::refusing to continue: could not remove \${WS}"; exit 1; }
   mkdir -- "$WS" || { echo "::error::refusing to continue: could not recreate \${WS}"; exit 1; }
 fi
+# Heal only guarantees the LEAF is real; a symlinked component
+# between the runner workspace and the leaf re-roots the
+# containment below the same way, so apply the same comparison.
+WS_LEX="$(realpath -m -s -- "$WS" 2>/dev/null)" || { echo "::error::refusing to wipe: realpath unavailable, cannot canonicalize \${GITHUB_WORKSPACE}"; exit 1; }
 WS="$(realpath -m -- "$WS" 2>/dev/null)" || { echo "::error::refusing to wipe: realpath unavailable, cannot canonicalize \${GITHUB_WORKSPACE}"; exit 1; }
+if [ "$WS" != "$WS_LEX" ]; then
+  echo "::error::refusing to wipe: workspace resolves through a symlinked component: \${WS_LEX} resolves to \${WS}"
+  exit 1
+fi
 while [ "\${WS%/}" != "$WS" ]; do WS="\${WS%/}"; done
 case "$WS" in
   ..|../*|*/..|*/../*) echo "::error::refusing to wipe path containing '..': \${WS}"; exit 1 ;;
@@ -705,6 +725,135 @@ describe('release workflow', () => {
         expect(readFileSync(decoy, 'utf8')).toBe('must-survive');
       } finally {
         rmSync(outside, { recursive: true, force: true });
+        rmSync(base, { recursive: true, force: true });
+      }
+    }
+
+    // Symlinked INTERMEDIATE runner-workspace component: [ -L ] only
+    // sees the leaf, so a `_work` replaced with a link passes it, and
+    // realpath then re-roots the whole chain (heal, containment, wipe)
+    // at the link's target — the leaf test alone accepts the geometry
+    // and wipes the attacker-chosen tree. The lexical-vs-canonical
+    // comparison must refuse BEFORE any chown/chmod/wipe.
+    {
+      const outside = mkdtempSync(join(tmpdir(), 'release-rws-mid-'));
+      mkdirSync(join(outside, 'qwen-code', 'qwen-code'), { recursive: true });
+      const decoy = join(outside, 'qwen-code', 'qwen-code', 'decoy.txt');
+      writeFileSync(decoy, 'must-survive');
+      chmodSync(decoy, 0o400);
+      const runnerRoot = mkdtempSync(join(tmpdir(), 'release-rws-mid-runner-'));
+      symlinkSync(outside, join(runnerRoot, '_work'));
+      const rws = join(runnerRoot, '_work', 'qwen-code');
+      try {
+        const env = {
+          ...process.env,
+          GITHUB_WORKSPACE: join(rws, 'qwen-code'),
+          RUNNER_WORKSPACE: rws,
+          RUNNER_TEMP: join(runnerRoot, 'temp'),
+          RUNNER_TOOL_CACHE: join(runnerRoot, 'tool-cache'),
+          GITHUB_ENV: join(runnerRoot, 'github-env'),
+          HOME: join(runnerRoot, 'home'),
+          XDG_CONFIG_HOME: join(runnerRoot, 'home', '.config'),
+        };
+        mkdirSync(env.HOME);
+        mkdirSync(env.RUNNER_TEMP);
+        const result = spawnSync(
+          'bash',
+          ['-e', '-o', 'pipefail', '-c', wipeScript],
+          { encoding: 'utf8', env },
+        );
+        expect(result.status).not.toBe(0);
+        expect(`${result.stdout}${result.stderr}`).toContain(
+          'refusing to wipe: runner workspace resolves through a symlinked component',
+        );
+        // Decoy intact — and the ownership ladder did not reach it.
+        expect(readFileSync(decoy, 'utf8')).toBe('must-survive');
+        expect(lstatSync(decoy).mode & 0o777).toBe(0o400);
+        expect(existsSync(env.GITHUB_ENV)).toBe(false);
+      } finally {
+        rmSync(outside, { recursive: true, force: true });
+        rmSync(runnerRoot, { recursive: true, force: true });
+      }
+    }
+
+    // Same refusal when the redirected target lacks the leaf: without
+    // the comparison the heal arm would judge the re-rooted parent
+    // INSIDE the re-rooted runner workspace and mkdir the leaf at the
+    // attacker-chosen location.
+    {
+      const outside = mkdtempSync(join(tmpdir(), 'release-rws-mid-empty-'));
+      mkdirSync(join(outside, 'qwen-code'));
+      const runnerRoot = mkdtempSync(
+        join(tmpdir(), 'release-rws-mid-empty-runner-'),
+      );
+      symlinkSync(outside, join(runnerRoot, '_work'));
+      const rws = join(runnerRoot, '_work', 'qwen-code');
+      try {
+        const env = {
+          ...process.env,
+          GITHUB_WORKSPACE: join(rws, 'qwen-code'),
+          RUNNER_WORKSPACE: rws,
+          RUNNER_TEMP: join(runnerRoot, 'temp'),
+          RUNNER_TOOL_CACHE: join(runnerRoot, 'tool-cache'),
+          GITHUB_ENV: join(runnerRoot, 'github-env'),
+          HOME: join(runnerRoot, 'home'),
+          XDG_CONFIG_HOME: join(runnerRoot, 'home', '.config'),
+        };
+        mkdirSync(env.HOME);
+        mkdirSync(env.RUNNER_TEMP);
+        const result = spawnSync(
+          'bash',
+          ['-e', '-o', 'pipefail', '-c', wipeScript],
+          { encoding: 'utf8', env },
+        );
+        expect(result.status).not.toBe(0);
+        expect(`${result.stdout}${result.stderr}`).toContain(
+          'refusing to wipe: runner workspace resolves through a symlinked component',
+        );
+        expect(existsSync(join(outside, 'qwen-code', 'qwen-code'))).toBe(false);
+      } finally {
+        rmSync(outside, { recursive: true, force: true });
+        rmSync(runnerRoot, { recursive: true, force: true });
+      }
+    }
+
+    // Symlinked intermediate component BELOW the runner workspace: RWS
+    // itself is clean, so only the workspace-side comparison catches
+    // the re-rooting. The link points INSIDE the runner workspace,
+    // where the containment allow-list alone would pass — without the
+    // comparison the wipe would run on the wrong sibling directory.
+    {
+      const base = mkdtempSync(join(tmpdir(), 'release-ws-mid-'));
+      const rws = join(base, 'rws');
+      mkdirSync(join(rws, 'elsewhere', 'qwen-code'), { recursive: true });
+      const decoy = join(rws, 'elsewhere', 'qwen-code', 'decoy.txt');
+      writeFileSync(decoy, 'must-survive');
+      symlinkSync(join(rws, 'elsewhere'), join(rws, 'qwen-code'));
+      const workspace = join(rws, 'qwen-code', 'qwen-code');
+      try {
+        const env = {
+          ...process.env,
+          GITHUB_WORKSPACE: workspace,
+          RUNNER_WORKSPACE: rws,
+          RUNNER_TEMP: join(base, 'temp'),
+          RUNNER_TOOL_CACHE: join(base, 'tool-cache'),
+          GITHUB_ENV: join(base, 'github-env'),
+          HOME: join(base, 'home'),
+          XDG_CONFIG_HOME: join(base, 'home', '.config'),
+        };
+        mkdirSync(env.HOME);
+        mkdirSync(env.RUNNER_TEMP);
+        const result = spawnSync(
+          'bash',
+          ['-e', '-o', 'pipefail', '-c', wipeScript],
+          { encoding: 'utf8', env },
+        );
+        expect(result.status).not.toBe(0);
+        expect(`${result.stdout}${result.stderr}`).toContain(
+          'refusing to wipe: workspace resolves through a symlinked component',
+        );
+        expect(readFileSync(decoy, 'utf8')).toBe('must-survive');
+      } finally {
         rmSync(base, { recursive: true, force: true });
       }
     }
