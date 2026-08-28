@@ -576,6 +576,12 @@ jobs:
           # failing run captures the spike, and dump full state on failure.
           # Keep Linux temp paths real and short on disk-backed /var/tmp.
           # Symlink aliases break tests that intentionally compare real paths.
+          # The sample-file setup sits BEFORE the TMPDIR routing block (#10035)
+          # because no-ak-integration-ci pins that block byte-identical across
+          # the test/test_macos/test_windows legs; each DFSAMPLE line already
+          # carries the routed tmpdir, so the header only needs job/runner ids.
+          DISK_SAMPLES="${RUNNER_TEMP}/disk-pressure-samples.log"
+          echo "DISKCONTEXT $(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null) runner[${RUNNER_NAME:-unknown}] run[${GITHUB_RUN_ID:-local}/${GITHUB_RUN_ATTEMPT:-1}] job[${GITHUB_JOB:-test}]" > "$DISK_SAMPLES" 2>/dev/null || true
           export TMPDIR="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
           if [ "${RUNNER_OS:-}" = "Linux" ]; then
             QWEN_CI_TMPDIR="$(mktemp -d /var/tmp/qwen-ci-XXXXXX 2>/dev/null || true)"
@@ -585,12 +591,7 @@ jobs:
               trap 'rm -rf "$TMPDIR" 2>/dev/null || true' EXIT
             fi
           fi
-          # Tee the samples to a file as well as the live log (#10035): after
-          # cleanup reclaims the host, this file is the only surviving record
-          # of the peak, and the header ties it to the job and runner.
-          DISK_SAMPLES="${RUNNER_TEMP}/disk-pressure-samples.log"
-          echo "DISKCONTEXT $(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null) runner[${RUNNER_NAME:-unknown}] run[${GITHUB_RUN_ID:-local}/${GITHUB_RUN_ATTEMPT:-1}] job[${GITHUB_JOB:-test}] tmpdir[${TMPDIR}]" > "$DISK_SAMPLES" 2>/dev/null || true
-          ( while true; do echo "DFSAMPLE $(date -u +%H:%M:%S 2>/dev/null) tmpdir[${TMPDIR}] space[$(df -h "${TMPDIR}" 2>/dev/null | tail -1)] inodes[$(df -i "${TMPDIR}" 2>/dev/null | tail -1)] memavail[$(awk '/MemAvailable/ {print $2, $3}' /proc/meminfo 2>/dev/null)]" 2>/dev/null; sleep 10; done ) | tee -a "$DISK_SAMPLES" &
+          ( while true; do echo "DFSAMPLE $(date -u +%H:%M:%S 2>/dev/null) tmpdir[${TMPDIR}] space[$(df -h "${TMPDIR}" 2>/dev/null | tail -1)] inodes[$(df -i "${TMPDIR}" 2>/dev/null | tail -1)] memavail[$(awk '/MemAvailable/ {print $2, $3}' /proc/meminfo 2>/dev/null)]" 2>/dev/null; sleep 10; done ) | tee -a "$DISK_SAMPLES" 2>/dev/null &
           SAMPLER_PID=$!
           set +e
           npm run test:ci
