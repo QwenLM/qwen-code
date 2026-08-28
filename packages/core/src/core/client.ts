@@ -1272,6 +1272,14 @@ export class LlmClient {
   }
 
   /** @internal */
+  resetManagedAutoMemoryAfterCompression(): void {
+    this.lastDeliveredMemoryTreeRevision = undefined;
+    this.surfacedRelevantAutoMemoryPaths.clear();
+    this.config.getMemoryManager().resetExhaustedBodyRefsForCurrentTurn();
+    this.config.getMemoryManager().markAllMemoryBodiesEvictedFromHistory();
+  }
+
+  /** @internal */
   finishManagedAutoMemoryRecall(): void {
     this.cancelPendingMemoryPrefetch('no_safe_delivery_point');
   }
@@ -3946,11 +3954,11 @@ export class LlmClient {
       try {
         for await (const event of resultStream) {
           const acceptsModelInput =
-            event.type === GeminiEventType.Content ||
-            event.type === GeminiEventType.Thought ||
-            event.type === GeminiEventType.ToolCallRequest ||
-            event.type === GeminiEventType.Finished ||
-            event.type === GeminiEventType.Citation;
+            event.type === LlmEventType.Content ||
+            event.type === LlmEventType.Thought ||
+            event.type === LlmEventType.ToolCallRequest ||
+            event.type === LlmEventType.Finished ||
+            event.type === LlmEventType.Citation;
           if (acceptsModelInput && !modelRequestAccepted) {
             modelRequestAccepted = true;
             if (messageType === SendMessageType.ToolResult) {
@@ -4069,13 +4077,7 @@ export class LlmClient {
           // the previous merged IDE context.
           if (event.type === LlmEventType.ChatCompressed) {
             this.forceFullIdeContext = true;
-            this.lastDeliveredMemoryTreeRevision = undefined;
-            this.config
-              .getMemoryManager()
-              .resetExhaustedBodyRefsForCurrentTurn();
-            this.config
-              .getMemoryManager()
-              .markAllMemoryBodiesEvictedFromHistory();
+            this.resetManagedAutoMemoryAfterCompression();
             // Auto-compaction summarized away the startup prelude. Rebuild it
             // before the next turn so env/tool/MCP context isn't lost for the
             // rest of the session (manual /compress gets this via startChat).

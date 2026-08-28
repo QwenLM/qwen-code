@@ -5077,6 +5077,7 @@ describe('Gemini Client (client.ts)', () => {
         compressionStatus: CompressionStatus.NOOP,
       });
       client['lastDeliveredMemoryTreeRevision'] = 'before-auto-compression';
+      client['surfacedRelevantAutoMemoryPaths'].add('/memory/legacy.md');
       mockMemoryManager.markAllMemoryBodiesEvictedFromHistory.mockClear();
       mockTurnRunFn.mockReturnValue(
         (async function* () {
@@ -5110,6 +5111,7 @@ describe('Gemini Client (client.ts)', () => {
 
       expect(client['forceFullIdeContext']).toBe(true);
       expect(client['lastDeliveredMemoryTreeRevision']).toBeUndefined();
+      expect(client['surfacedRelevantAutoMemoryPaths'].size).toBe(0);
       expect(
         mockMemoryManager.markAllMemoryBodiesEvictedFromHistory,
       ).toHaveBeenCalledOnce();
@@ -5569,7 +5571,7 @@ hello
       client['chat'] = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
-      } as unknown as GeminiChat;
+      } as unknown as LlmChat;
 
       for (const id of ['first', 'second']) {
         await fromAsync(
@@ -5620,7 +5622,7 @@ hello
       client['chat'] = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
-      } as unknown as GeminiChat;
+      } as unknown as LlmChat;
 
       await expect(
         fromAsync(
@@ -5648,7 +5650,7 @@ hello
       mockTurnRunFn.mockReturnValue(
         (async function* () {
           yield {
-            type: GeminiEventType.Error,
+            type: LlmEventType.Error,
             value: new Error('request rejected'),
           };
         })(),
@@ -5656,7 +5658,7 @@ hello
       client['chat'] = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
-      } as unknown as GeminiChat;
+      } as unknown as LlmChat;
 
       await fromAsync(
         client.sendMessageStream(
@@ -5689,10 +5691,10 @@ hello
       });
       mockTurnRunFn.mockReturnValue(
         (async function* () {
-          yield { type: GeminiEventType.Content, value: 'discarded attempt' };
-          yield { type: GeminiEventType.Retry };
+          yield { type: LlmEventType.Content, value: 'discarded attempt' };
+          yield { type: LlmEventType.Retry };
           yield {
-            type: GeminiEventType.Error,
+            type: LlmEventType.Error,
             value: new Error('all retries failed'),
           };
         })(),
@@ -5700,7 +5702,7 @@ hello
       client['chat'] = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
-      } as unknown as GeminiChat;
+      } as unknown as LlmChat;
 
       await fromAsync(
         client.sendMessageStream(
@@ -6591,7 +6593,7 @@ hello
       client['chat'] = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
-      } as unknown as GeminiChat;
+      } as unknown as LlmChat;
 
       for await (const _ of client.sendMessageStream(
         [{ text: 'First question' }],
@@ -9116,13 +9118,13 @@ hello
       mockMemoryManager.scheduleMetadataMigration.mockReturnValue(migration);
       mockTurnRunFn.mockReturnValue(
         (async function* () {
-          yield { type: GeminiEventType.Content, value: 'Done' };
+          yield { type: LlmEventType.Content, value: 'Done' };
         })(),
       );
       client['chat'] = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
-      } as unknown as GeminiChat;
+      } as unknown as LlmChat;
 
       await expect(
         fromAsync(
@@ -9132,7 +9134,7 @@ hello
             'prompt-id-background-migration',
           ),
         ),
-      ).resolves.toEqual([{ type: GeminiEventType.Content, value: 'Done' }]);
+      ).resolves.toEqual([{ type: LlmEventType.Content, value: 'Done' }]);
 
       expect(mockMemoryManager.scheduleMetadataMigration).toHaveBeenCalledTimes(
         2,
@@ -9158,7 +9160,7 @@ hello
         },
       );
       const mockStream = (async function* () {
-        yield { type: GeminiEventType.Content, value: 'Done' };
+        yield { type: LlmEventType.Content, value: 'Done' };
       })();
       mockTurnRunFn.mockReturnValue(mockStream);
       client['chat'] = {
@@ -9168,7 +9170,7 @@ hello
         setHistory,
         setSystemInstruction: vi.fn(),
         setTools: vi.fn(),
-      } as unknown as GeminiChat;
+      } as unknown as LlmChat;
 
       await fromAsync(
         client.sendMessageStream(
@@ -9223,7 +9225,7 @@ hello
       client['chat'] = {
         setSystemInstruction,
         setTools,
-      } as unknown as GeminiChat;
+      } as unknown as LlmChat;
 
       await (
         client as unknown as {
@@ -9291,7 +9293,7 @@ hello
             installedTools.push(JSON.stringify(tools));
             throw new Error('structured tool refresh failed');
           }),
-      } as unknown as GeminiChat;
+      } as unknown as LlmChat;
 
       await (
         client as unknown as {
@@ -9338,7 +9340,7 @@ hello
       ).mockRejectedValue(new Error('tool refresh failed'));
       client['chat'] = {
         setSystemInstruction: vi.fn(),
-      } as unknown as GeminiChat;
+      } as unknown as LlmChat;
 
       await expect(
         (
@@ -9511,7 +9513,7 @@ hello
         .mockResolvedValueOnce(undefined);
       mockTurnRunFn.mockReturnValue(
         (async function* () {
-          yield { type: GeminiEventType.Content, value: 'Done' };
+          yield { type: LlmEventType.Content, value: 'Done' };
         })(),
       );
       client['chat'] = {
@@ -9519,7 +9521,7 @@ hello
         getHistory: vi.fn().mockReturnValue([]),
         getHistoryShallow: vi.fn().mockReturnValue([]),
         setSystemInstruction: vi.fn(),
-      } as unknown as GeminiChat;
+      } as unknown as LlmChat;
 
       await fromAsync(
         client.sendMessageStream(
@@ -9558,7 +9560,7 @@ hello
       );
       mockTurnRunFn.mockImplementation(() =>
         (async function* () {
-          yield { type: GeminiEventType.Content, value: 'Done' };
+          yield { type: LlmEventType.Content, value: 'Done' };
         })(),
       );
       client['chat'] = {
@@ -9567,7 +9569,7 @@ hello
         getHistoryShallow: vi.fn().mockReturnValue([]),
         setSystemInstruction: vi.fn(),
         setTools: vi.fn(),
-      } as unknown as GeminiChat;
+      } as unknown as LlmChat;
 
       await fromAsync(
         client.sendMessageStream(

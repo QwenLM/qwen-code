@@ -317,6 +317,28 @@ describe('memory metadata migration', () => {
     ).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
+  it('does not migrate files through a symlinked directory', async () => {
+    const outsideRoot = path.join(tempDir, 'outside-directory');
+    const outsideFile = path.join(outsideRoot, 'legacy.md');
+    await fs.mkdir(outsideRoot, { recursive: true });
+    await fs.writeFile(outsideFile, legacyContent(), 'utf-8');
+    await fs.symlink(
+      outsideRoot,
+      path.join(memoryRoot, 'link'),
+      process.platform === 'win32' ? 'junction' : 'dir',
+    );
+
+    const candidates = await scanMemoryMetadataMigrationCandidates(
+      memoryRoot,
+      'project',
+    );
+
+    expect(candidates).toEqual([]);
+    await expect(fs.readFile(outsideFile, 'utf-8')).resolves.toBe(
+      legacyContent(),
+    );
+  });
+
   it('treats deletion and rename after selection as CAS conflicts', async () => {
     const deletedPath = await write('project/deleted.md', legacyContent());
     const renamedPath = await write('project/renamed.md', legacyContent());

@@ -161,13 +161,21 @@ class WriteFileToolInvocation extends BaseToolInvocation<
     if (isTeamAutoMemPath(filePath, projectRoot)) {
       return 'ask';
     }
+    const isLexicalAutoMemoryPath = isAnyAutoMemPath(filePath, projectRoot);
+    const isResolvedManagedMemoryPath = isManagedMemoryPath(
+      filePath,
+      projectRoot,
+    );
+    if (isLexicalAutoMemoryPath && !isResolvedManagedMemoryPath) {
+      return 'deny';
+    }
     if (
-      isManagedMemoryPath(filePath, projectRoot) &&
+      isResolvedManagedMemoryPath &&
       this.config.allowsDirectAutoMemoryWrite?.() !== true
     ) {
       return 'deny';
     }
-    if (isAnyAutoMemPath(filePath, projectRoot)) {
+    if (isLexicalAutoMemoryPath) {
       return 'allow';
     }
     return 'ask';
@@ -306,10 +314,17 @@ class WriteFileToolInvocation extends BaseToolInvocation<
     const { file_path, content, ai_proposed_content, modified_by_user } =
       this.params;
 
+    const projectRoot = this.config.getProjectRoot();
+    const isLexicalAutoMemoryPath = isAnyAutoMemPath(file_path, projectRoot);
+    const isResolvedManagedMemoryPath = isManagedMemoryPath(
+      file_path,
+      projectRoot,
+    );
     if (
-      isManagedMemoryPath(file_path, this.config.getProjectRoot()) &&
-      !isTeamAutoMemPath(file_path, this.config.getProjectRoot()) &&
-      this.config.allowsDirectAutoMemoryWrite?.() !== true
+      (isLexicalAutoMemoryPath && !isResolvedManagedMemoryPath) ||
+      (isResolvedManagedMemoryPath &&
+        !isTeamAutoMemPath(file_path, this.config.getProjectRoot()) &&
+        this.config.allowsDirectAutoMemoryWrite?.() !== true)
     ) {
       const message =
         'Direct writes to managed auto-memory files are disabled. Use manage_memory instead.';

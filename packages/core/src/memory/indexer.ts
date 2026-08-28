@@ -12,12 +12,14 @@ import { QWEN_DIR } from '../utils/paths.js';
 import {
   getAutoMemoryIndexPath,
   getAutoMemoryMetadataPath,
+  getMemoryRootTrustedAnchor,
   getTeamAutoMemoryIndexPath,
   getTeamAutoMemoryRoot,
   getUserAutoMemoryIndexPath,
   getUserAutoMemoryRoot,
   TEAM_AUTO_MEMORY_DIRNAME,
 } from './paths.js';
+import { resolveTrustedMemoryRoot } from './trusted-memory-filesystem.js';
 import {
   scanAllAutoMemoryTopicDocumentsFromRoot,
   scanAutoMemoryTopicDocuments,
@@ -255,6 +257,7 @@ export async function rebuildAutoMemoryIndexAtRoot(
   scope: AutoMemoryScope,
 ): Promise<string> {
   if (!existsSync(root)) return '';
+  await resolveTrustedMemoryRoot(root, getMemoryRootTrustedAnchor(root));
   const docs = await scanAllAutoMemoryTopicDocumentsFromRoot(root, scope);
   const content = buildManagedAutoMemoryIndex(docs);
   await atomicWriteFile(path.join(root, 'MEMORY.md'), content, {

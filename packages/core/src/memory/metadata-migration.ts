@@ -28,7 +28,12 @@ import {
   getAutoMemoryRoot,
   getTeamAutoMemoryRoot,
   getUserAutoMemoryRoot,
+  getMemoryRootTrustedAnchor,
 } from './paths.js';
+import {
+  listTrustedMemoryMarkdownFiles,
+  resolveTrustedMemoryFile,
+} from './trusted-memory-filesystem.js';
 import { QWEN_DIR } from '../utils/paths.js';
 import {
   parseAutoMemoryTopicDocument,
@@ -147,40 +152,11 @@ function splitFrontmatter(content: string): FrontmatterParts {
 }
 
 async function listMemoryFiles(root: string): Promise<string[]> {
-  const rootStats = await fs.lstat(root).catch((error: unknown) => {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
-    throw error;
-  });
-  if (!rootStats) return [];
-  if (rootStats.isSymbolicLink()) {
-    throw new Error(`Refusing to migrate symlinked memory root: ${root}`);
-  }
-  const entries = await fs
-    .readdir(root, { recursive: true })
-    .catch((error: unknown) => {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
-      throw error;
-    });
-  const candidates = entries
-    .filter(
-      (entry): entry is string =>
-        typeof entry === 'string' &&
-        entry.endsWith('.md') &&
-        path.basename(entry) !== AUTO_MEMORY_INDEX_FILENAME,
-    )
-    .map((entry) => entry.replaceAll('\\', '/'))
-    .sort();
-  const files = await Promise.all(
-    candidates.map(async (entry) => {
-      try {
-        return (await fs.lstat(path.join(root, entry))).isFile() ? entry : null;
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
-        throw error;
-      }
-    }),
+  return listTrustedMemoryMarkdownFiles(
+    root,
+    getMemoryRootTrustedAnchor(root),
+    AUTO_MEMORY_INDEX_FILENAME,
   );
-  return files.filter((entry): entry is string => entry !== null);
 }
 
 export async function scanMemoryMetadataMigrationCandidates(
@@ -189,10 +165,16 @@ export async function scanMemoryMetadataMigrationCandidates(
 ): Promise<MemoryMetadataMigrationCandidate[]> {
   const candidates: MemoryMetadataMigrationCandidate[] = [];
   for (const relativePath of await listMemoryFiles(root)) {
+    const trustedFile = await resolveTrustedMemoryFile(
+      root,
+      getMemoryRootTrustedAnchor(root),
+      relativePath,
+    );
+    if (!trustedFile) continue;
     const filePath = path.join(root, relativePath);
     let content: string;
     try {
-      content = await fs.readFile(filePath, 'utf-8');
+      content = await fs.readFile(trustedFile, 'utf-8');
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
       throw error;
@@ -324,20 +306,30 @@ export async function commitMigratedMemoryMetadata(
 ): Promise<'committed' | 'conflict' | 'invalid'> {
   const merged = mergeMetadata(candidate, metadata);
   if (!merged) return 'invalid';
-  const current = await fs
-    .readFile(candidate.filePath, 'utf-8')
-    .catch(() => null);
+  const trustedFile = await resolveTrustedMemoryFile(
+    candidate.root,
+    getMemoryRootTrustedAnchor(candidate.root),
+    candidate.relativePath,
+  );
+  if (
+    !trustedFile ||
+    (await fs.realpath(candidate.filePath).catch(() => undefined)) !==
+      trustedFile
+  ) {
+    return 'conflict';
+  }
+  const current = await fs.readFile(trustedFile, 'utf-8').catch(() => null);
   if (current === null || hash(current) !== candidate.sourceHash) {
     return 'conflict';
   }
   try {
-    await atomicWriteFile(candidate.filePath, merged, {
+    await atomicWriteFile(trustedFile, merged, {
       encoding: 'utf-8',
       noFollow: true,
       assertCanCommit: () => {
         let latest: string;
         try {
-          latest = fsSync.readFileSync(candidate.filePath, 'utf-8');
+          latest = fsSync.readFileSync(trustedFile, 'utf-8');
         } catch {
           throw new MigrationConflictError();
         }

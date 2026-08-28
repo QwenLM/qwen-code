@@ -180,6 +180,29 @@ describe('LSTool', () => {
       expect(result.error?.type).toBe(ToolErrorType.EXECUTION_DENIED);
     });
 
+    it('rejects listing the private per-project memory container', async () => {
+      const previousBase = process.env['QWEN_CODE_MEMORY_BASE_DIR'];
+      const memoryBase = path.join(tempRootDir, 'runtime-memory');
+      process.env['QWEN_CODE_MEMORY_BASE_DIR'] = memoryBase;
+      const projectsDir = path.join(memoryBase, 'projects');
+      await fs.mkdir(path.join(projectsDir, 'sibling', 'memory'), {
+        recursive: true,
+      });
+      try {
+        const result = await lsTool
+          .build({ path: projectsDir })
+          .execute(abortSignal);
+
+        expect(result.error?.type).toBe(ToolErrorType.EXECUTION_DENIED);
+      } finally {
+        if (previousBase === undefined) {
+          delete process.env['QWEN_CODE_MEMORY_BASE_DIR'];
+        } else {
+          process.env['QWEN_CODE_MEMORY_BASE_DIR'] = previousBase;
+        }
+      }
+    });
+
     it('should allow scoped memory agents to list managed auto-memory directories', async () => {
       const memoryDir = path.join(tempRootDir, '.qwen', 'memory', 'user');
       await fs.mkdir(memoryDir, { recursive: true });

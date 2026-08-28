@@ -20,9 +20,14 @@ import {
 import {
   AUTO_MEMORY_INDEX_FILENAME,
   getAutoMemoryRoot,
+  getMemoryRootTrustedAnchor,
   getTeamAutoMemoryRoot,
   getUserAutoMemoryRoot,
 } from './paths.js';
+import {
+  listTrustedMemoryMarkdownFiles,
+  resolveTrustedMemoryFile,
+} from './trusted-memory-filesystem.js';
 
 const debugLogger = createDebugLogger('AUTO_MEMORY_SCAN');
 
@@ -290,39 +295,11 @@ export function parseAutoMemoryTopicDocument(
 }
 
 async function listMarkdownFiles(root: string): Promise<string[]> {
-  try {
-    const entries = await fs.readdir(root, { recursive: true });
-    const candidates = entries
-      .filter(
-        (entry): entry is string =>
-          typeof entry === 'string' &&
-          entry.endsWith('.md') &&
-          path.basename(entry) !== AUTO_MEMORY_INDEX_FILENAME,
-      )
-      // Normalize to forward slashes so relative paths are valid URL segments
-      // on all platforms (Windows readdir returns backslash-separated paths).
-      .map((entry) => entry.replaceAll('\\', '/'))
-      .sort();
-    const files = await Promise.all(
-      candidates.map(async (entry) => {
-        try {
-          return (await fs.lstat(path.join(root, entry))).isFile()
-            ? entry
-            : null;
-        } catch (error) {
-          if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
-          throw error;
-        }
-      }),
-    );
-    return files.filter((entry): entry is string => entry !== null);
-  } catch (error) {
-    const nodeError = error as NodeJS.ErrnoException;
-    if (nodeError.code === 'ENOENT') {
-      return [];
-    }
-    throw error;
-  }
+  return listTrustedMemoryMarkdownFiles(
+    root,
+    getMemoryRootTrustedAnchor(root),
+    AUTO_MEMORY_INDEX_FILENAME,
+  );
 }
 
 function sortScannedDocuments(
@@ -355,6 +332,7 @@ async function scanAutoMemoryDocumentsFromRootWithStatus(
 ): Promise<{
   docs: ScannedAutoMemoryDocument[];
   incompleteScopes: AutoMemoryIncompleteScope[];
+  rootError?: unknown;
 }> {
   let relativePaths: string[];
   try {
@@ -363,6 +341,7 @@ async function scanAutoMemoryDocumentsFromRootWithStatus(
     debugLogger.debug(`failed to list memory root ${root}`, error);
     return {
       docs: [],
+      rootError: error,
       incompleteScopes: [
         {
           scope: opts.scope,
@@ -377,11 +356,20 @@ async function scanAutoMemoryDocumentsFromRootWithStatus(
   let fileReadFailures = 0;
   await Promise.all(
     relativePaths.map(async (relativePath) => {
+      const trustedFile = await resolveTrustedMemoryFile(
+        root,
+        getMemoryRootTrustedAnchor(root),
+        relativePath,
+      );
+      if (!trustedFile) {
+        fileReadFailures += 1;
+        return;
+      }
       const filePath = path.join(root, relativePath);
       try {
         const [content, stats] = await Promise.all([
-          fs.readFile(filePath, 'utf-8'),
-          fs.stat(filePath),
+          fs.readFile(trustedFile, 'utf-8'),
+          fs.stat(trustedFile),
         ]);
         const parsed = parseAutoMemoryTopicDocument(
           filePath,
@@ -437,6 +425,13 @@ async function scanAutoMemoryDocumentsFromRoot(
   },
 ): Promise<ScannedAutoMemoryDocument[]> {
   const result = await scanAutoMemoryDocumentsFromRootWithStatus(root, opts);
+  if (
+    result.incompleteScopes.some(
+      (incomplete) => incomplete.reason === 'root_read_failed',
+    )
+  ) {
+    throw result.rootError;
+  }
   return result.docs;
 }
 

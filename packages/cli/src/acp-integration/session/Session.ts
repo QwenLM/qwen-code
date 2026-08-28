@@ -7327,6 +7327,8 @@ export class Session implements SessionContext {
         for await (const event of sourceStream) {
           if (event.type === StreamEventType.CHUNK) {
             receivedChunk = true;
+          } else if (event.type === StreamEventType.COMPRESSED) {
+            llmClient.resetManagedAutoMemoryAfterCompression();
           } else if (
             event.type === StreamEventType.RETRY ||
             event.type === StreamEventType.MODEL_FALLBACK

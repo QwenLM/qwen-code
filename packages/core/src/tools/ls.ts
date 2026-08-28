@@ -22,7 +22,11 @@ import { ToolErrorType } from './tool-error.js';
 import { ToolDisplayNames, ToolNames } from './tool-names.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { Storage } from '../config/storage.js';
-import { getMemoryBaseDir, isManagedMemoryPath } from '../memory/paths.js';
+import {
+  getMemoryBaseDir,
+  isManagedMemoryPath,
+  isPrivateMemoryProjectsPath,
+} from '../memory/paths.js';
 import type { FunctionDeclaration } from '@google/genai';
 
 const debugLogger = createDebugLogger('LS');
@@ -172,7 +176,8 @@ class LSToolInvocation extends BaseToolInvocation<LSToolParams, ToolResult> {
     try {
       const absPath = path.resolve(this.params.path);
       if (
-        isManagedMemoryPath(absPath, this.config.getTargetDir()) &&
+        (isManagedMemoryPath(absPath, this.config.getTargetDir()) ||
+          isPrivateMemoryProjectsPath(absPath)) &&
         this.config.allowsDirectAutoMemoryRead?.() !== true
       ) {
         return this.errorResult(

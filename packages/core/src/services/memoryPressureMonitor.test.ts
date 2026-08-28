@@ -1484,7 +1484,7 @@ describe('MemoryPressureMonitor', () => {
         );
       }
       const config = createMockConfig({
-        geminiClient: {
+        llmClient: {
           isInitialized: () => true,
           getChat: () => ({
             getHistoryShallow: () => toolHistory,

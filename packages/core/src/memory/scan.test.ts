@@ -325,6 +325,12 @@ describe('auto-memory topic scanning', () => {
   });
 
   it('returns sourceStatus for a complete project and user snapshot', async () => {
+    const previousBaseDir = process.env['QWEN_CODE_MEMORY_BASE_DIR'];
+    process.env['QWEN_CODE_MEMORY_BASE_DIR'] = path.join(
+      tempDir,
+      'memory-base',
+    );
+    clearAutoMemoryRootCache();
     const projectPath = getAutoMemoryFilePath(
       projectRoot,
       path.join('project', 'context.md'),
@@ -350,6 +356,36 @@ describe('auto-memory topic scanning', () => {
       complete: true,
       incompleteScopes: [],
     });
+    if (previousBaseDir === undefined) {
+      delete process.env['QWEN_CODE_MEMORY_BASE_DIR'];
+    } else {
+      process.env['QWEN_CODE_MEMORY_BASE_DIR'] = previousBaseDir;
+    }
+    clearAutoMemoryRootCache();
+  });
+
+  it('does not follow symlinked directories while scanning memory', async () => {
+    const memoryRoot = getAutoMemoryRoot(projectRoot);
+    const outsideRoot = path.join(tempDir, 'outside');
+    const outsideFile = path.join(outsideRoot, 'victim.md');
+    await fs.mkdir(outsideRoot, { recursive: true });
+    await fs.writeFile(
+      outsideFile,
+      '---\ntype: project\nname: Outside\ndescription: private\n---\nbody',
+      'utf-8',
+    );
+    await fs.symlink(
+      outsideRoot,
+      path.join(memoryRoot, 'link'),
+      process.platform === 'win32' ? 'junction' : 'dir',
+    );
+
+    const docs = await scanAutoMemoryTopicDocuments(projectRoot);
+
+    expect(docs.some((doc) => doc.relativePath === 'link/victim.md')).toBe(
+      false,
+    );
+    await expect(fs.readFile(outsideFile, 'utf-8')).resolves.toContain('body');
   });
 
   it('also scans project-local memory files when project memory uses runtime storage', async () => {

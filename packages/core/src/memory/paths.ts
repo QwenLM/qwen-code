@@ -173,6 +173,21 @@ export function getAutoMemoryTrustedAnchor(projectRoot: string): string {
     : getMemoryBaseDir();
 }
 
+export function getMemoryRootTrustedAnchor(root: string): string {
+  const baseDir = path.resolve(getMemoryBaseDir());
+  const resolvedRoot = path.resolve(root);
+  const relativeToBase = path.relative(baseDir, resolvedRoot);
+  if (
+    relativeToBase === '' ||
+    (!relativeToBase.startsWith(`..${path.sep}`) &&
+      relativeToBase !== '..' &&
+      !path.isAbsolute(relativeToBase))
+  ) {
+    return baseDir;
+  }
+  return path.dirname(path.dirname(resolvedRoot));
+}
+
 /**
  * Returns the project-level state directory that holds auxiliary files
  * (meta.json, extract-cursor.json, consolidation.lock) for the given project.
@@ -345,6 +360,21 @@ export function isManagedMemoryPath(
 ): boolean {
   const absolutePath = path.resolve(baseDir, filePath);
   const resolvedPath = path.normalize(realpathNearestExisting(absolutePath));
+  const projectsRoot = path.normalize(
+    realpathNearestExisting(path.join(getMemoryBaseDir(), 'projects')),
+  );
+  const projectRelative = path.relative(projectsRoot, resolvedPath);
+  const projectSegments = projectRelative.split(path.sep);
+  if (
+    projectRelative !== '' &&
+    projectRelative !== '..' &&
+    !projectRelative.startsWith(`..${path.sep}`) &&
+    !path.isAbsolute(projectRelative) &&
+    projectSegments.length >= 2 &&
+    projectSegments[1] === AUTO_MEMORY_DIRNAME
+  ) {
+    return true;
+  }
   const roots = [
     getAutoMemoryRoot(projectRoot),
     path.join(projectRoot, QWEN_DIR, AUTO_MEMORY_DIRNAME),
@@ -356,6 +386,22 @@ export function isManagedMemoryPath(
     const rel = path.relative(resolvedRoot, resolvedPath);
     return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
   });
+}
+
+export function isPrivateMemoryProjectsPath(filePath: string): boolean {
+  const resolvedPath = path.normalize(
+    realpathNearestExisting(path.resolve(filePath)),
+  );
+  const projectsRoot = path.normalize(
+    realpathNearestExisting(path.join(getMemoryBaseDir(), 'projects')),
+  );
+  const relative = path.relative(projectsRoot, resolvedPath);
+  return (
+    relative === '' ||
+    (relative !== '..' &&
+      !relative.startsWith(`..${path.sep}`) &&
+      !path.isAbsolute(relative))
+  );
 }
 
 /**

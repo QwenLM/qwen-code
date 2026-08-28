@@ -7,7 +7,7 @@
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   AUTO_MEMORY_PINNED_DIRNAME,
   clearAutoMemoryRootCache,
@@ -23,6 +23,9 @@ import {
   rebuildUserAutoMemoryIndex,
 } from './indexer.js';
 import { ensureAutoMemoryScaffold } from './store.js';
+import * as trustedMemoryFilesystem from './trusted-memory-filesystem.js';
+
+vi.mock('./trusted-memory-filesystem.js', { spy: true });
 
 // Extract the Markdown link target from a `- [title](target) — desc` line. The
 // encoder leaves no raw ')' in the target, so the first ')' is the link close.
@@ -72,6 +75,42 @@ describe('managed auto-memory indexer', () => {
     await expect(fs.stat(missingRoot)).rejects.toMatchObject({
       code: 'ENOENT',
     });
+  });
+
+  it('does not rebuild an index through a symlinked root', async () => {
+    const outsideRoot = path.join(tempDir, 'outside');
+    const linkedRoot = path.join(tempDir, 'linked-memory');
+    const outsideIndex = path.join(outsideRoot, 'MEMORY.md');
+    await fs.mkdir(outsideRoot, { recursive: true });
+    await fs.writeFile(outsideIndex, 'SENTINEL\n', 'utf-8');
+    await fs.symlink(
+      outsideRoot,
+      linkedRoot,
+      process.platform === 'win32' ? 'junction' : 'dir',
+    );
+
+    await expect(
+      rebuildAutoMemoryIndexAtRoot(linkedRoot, 'project'),
+    ).rejects.toThrow('symlinked memory root');
+    await expect(fs.readFile(outsideIndex, 'utf-8')).resolves.toBe(
+      'SENTINEL\n',
+    );
+  });
+
+  it('preserves an existing index when the root cannot be read', async () => {
+    const root = path.join(tempDir, 'compat-memory');
+    const index = path.join(root, 'MEMORY.md');
+    await fs.mkdir(root, { recursive: true });
+    await fs.writeFile(index, 'GOOD INDEX\n', 'utf-8');
+    const error = Object.assign(new Error('denied'), { code: 'EACCES' });
+    vi.mocked(
+      trustedMemoryFilesystem.listTrustedMemoryMarkdownFiles,
+    ).mockRejectedValueOnce(error);
+
+    await expect(rebuildAutoMemoryIndexAtRoot(root, 'project')).rejects.toBe(
+      error,
+    );
+    await expect(fs.readFile(index, 'utf-8')).resolves.toBe('GOOD INDEX\n');
   });
 
   it('does not create a missing user root while rebuilding', async () => {

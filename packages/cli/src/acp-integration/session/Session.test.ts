@@ -460,6 +460,7 @@ describe('Session', () => {
     discardManagedAutoMemoryRecallDelivery: ReturnType<typeof vi.fn>;
     finishManagedAutoMemoryRecall: ReturnType<typeof vi.fn>;
     recordCompletedToolCall: ReturnType<typeof vi.fn>;
+    resetManagedAutoMemoryAfterCompression: ReturnType<typeof vi.fn>;
   };
   let mockMemoryManager: {
     scheduleExtract: ReturnType<typeof vi.fn>;
@@ -680,6 +681,7 @@ describe('Session', () => {
       discardManagedAutoMemoryRecallDelivery: vi.fn(),
       finishManagedAutoMemoryRecall: vi.fn(),
       recordCompletedToolCall: vi.fn(),
+      resetManagedAutoMemoryAfterCompression: vi.fn(),
     };
     mockMemoryManager = {
       scheduleExtract: vi.fn().mockResolvedValue(undefined),
@@ -2559,6 +2561,34 @@ describe('Session', () => {
       expect(
         mockLlmClient.discardManagedAutoMemoryRecallDelivery,
       ).not.toHaveBeenCalled();
+    });
+
+    it('resets managed-memory delivery state after stream compression', async () => {
+      mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+        (async function* () {
+          yield {
+            type: core.StreamEventType.COMPRESSED,
+            info: {
+              originalTokenCount: 1000,
+              newTokenCount: 200,
+              compressionStatus: core.CompressionStatus.COMPRESSED,
+            },
+          } as const;
+          yield {
+            type: core.StreamEventType.CHUNK,
+            value: { text: 'ok' },
+          } as const;
+        })(),
+      );
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'hello' }],
+      });
+
+      expect(
+        mockLlmClient.resetManagedAutoMemoryAfterCompression,
+      ).toHaveBeenCalledOnce();
     });
 
     it('discards delivery when the provider send fails', async () => {

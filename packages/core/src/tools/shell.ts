@@ -5207,6 +5207,8 @@ function getShellToolDescription(): string {
 
 IMPORTANT: This tool is for terminal operations like git, npm, docker, etc. DO NOT use it for file operations (reading, writing, editing, searching, finding files) - use the specialized tools for this instead.
 
+Managed auto-memory is not a shell filesystem interface. Use search_memory to retrieve memory and manage_memory to change it; never inspect managed-memory paths with shell commands.
+
 **Usage notes**:
 - The command argument is required.
 - You can specify an optional timeout in milliseconds (up to 600000ms / 10 minutes). If not specified, commands will timeout after 120000ms (2 minutes).

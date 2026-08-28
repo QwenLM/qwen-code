@@ -310,6 +310,27 @@ describe('WriteFileTool', () => {
       expect(fs.existsSync(filePath)).toBe(false);
     });
 
+    it('denies a managed-memory symlink that resolves outside the root', async () => {
+      mockConfigInternal.allowsDirectAutoMemoryWrite.mockReturnValue(false);
+      const memoryRoot = path.join(rootDir, '.qwen', 'memory');
+      const outsideFile = path.join(rootDir, 'outside-memory-target.md');
+      const link = path.join(memoryRoot, 'escape.md');
+      fs.mkdirSync(memoryRoot, { recursive: true });
+      fs.writeFileSync(outsideFile, 'sentinel', 'utf-8');
+      fs.symlinkSync(outsideFile, link);
+      try {
+        const invocation = tool.build({ file_path: link, content: 'changed' });
+
+        expect(await invocation.getDefaultPermission()).toBe('deny');
+        const result = await invocation.execute(abortSignal);
+        expect(result.error?.type).toBe(ToolErrorType.EXECUTION_DENIED);
+        expect(fs.readFileSync(outsideFile, 'utf-8')).toBe('sentinel');
+      } finally {
+        fs.rmSync(link, { force: true });
+        fs.rmSync(outsideFile, { force: true });
+      }
+    });
+
     it('keeps team-memory writes confirmable in structured mode', async () => {
       mockConfigInternal.allowsDirectAutoMemoryWrite.mockReturnValue(false);
       const filePath = path.join(

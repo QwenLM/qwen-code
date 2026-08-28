@@ -708,6 +708,37 @@ describe('GrepTool', () => {
       expect(scopedResult.llmContent).toContain('preference.md');
     });
 
+    it('filters private memory belonging to a sibling project', async () => {
+      const previousBase = process.env['QWEN_CODE_MEMORY_BASE_DIR'];
+      const memoryBase = path.join(tempRootDir, 'runtime-memory');
+      process.env['QWEN_CODE_MEMORY_BASE_DIR'] = memoryBase;
+      const siblingFile = path.join(
+        memoryBase,
+        'projects',
+        'sibling',
+        'memory',
+        'private.md',
+      );
+      await fs.mkdir(path.dirname(siblingFile), { recursive: true });
+      await fs.writeFile(siblingFile, 'sibling private phrase');
+      try {
+        const result = await new GrepTool({
+          ...mockConfig,
+          getMemoryRecallMode: () => 'structured',
+        } as Config)
+          .build({ pattern: 'sibling private phrase', path: memoryBase })
+          .execute(abortSignal);
+
+        expect(result.llmContent).not.toContain('private.md');
+      } finally {
+        if (previousBase === undefined) {
+          delete process.env['QWEN_CODE_MEMORY_BASE_DIR'];
+        } else {
+          process.env['QWEN_CODE_MEMORY_BASE_DIR'] = previousBase;
+        }
+      }
+    });
+
     it('should handle regex special characters correctly', async () => {
       const params: GrepToolParams = { pattern: 'foo.*bar' }; // Matches 'const foo = "bar";'
       const invocation = grepTool.build(params);

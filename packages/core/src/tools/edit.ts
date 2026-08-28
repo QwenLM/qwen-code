@@ -400,13 +400,21 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
     if (isTeamAutoMemPath(filePath, projectRoot)) {
       return 'ask';
     }
+    const isLexicalAutoMemoryPath = isAnyAutoMemPath(filePath, projectRoot);
+    const isResolvedManagedMemoryPath = isManagedMemoryPath(
+      filePath,
+      projectRoot,
+    );
+    if (isLexicalAutoMemoryPath && !isResolvedManagedMemoryPath) {
+      return 'deny';
+    }
     if (
-      isManagedMemoryPath(filePath, projectRoot) &&
+      isResolvedManagedMemoryPath &&
       this.config.allowsDirectAutoMemoryWrite?.() !== true
     ) {
       return 'deny';
     }
-    if (isAnyAutoMemPath(filePath, projectRoot)) {
+    if (isLexicalAutoMemoryPath) {
       return 'allow';
     }
     return 'ask';
@@ -485,13 +493,23 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
    * @returns Result of the edit operation
    */
   async execute(signal: AbortSignal): Promise<ToolResult> {
+    const projectRoot = this.config.getProjectRoot();
+    const isLexicalAutoMemoryPath = isAnyAutoMemPath(
+      this.params.file_path,
+      projectRoot,
+    );
+    const isResolvedManagedMemoryPath = isManagedMemoryPath(
+      this.params.file_path,
+      projectRoot,
+    );
     if (
-      isManagedMemoryPath(
-        this.params.file_path,
-        this.config.getProjectRoot(),
-      ) &&
-      !isTeamAutoMemPath(this.params.file_path, this.config.getProjectRoot()) &&
-      this.config.allowsDirectAutoMemoryWrite?.() !== true
+      (isLexicalAutoMemoryPath && !isResolvedManagedMemoryPath) ||
+      (isResolvedManagedMemoryPath &&
+        !isTeamAutoMemPath(
+          this.params.file_path,
+          this.config.getProjectRoot(),
+        ) &&
+        this.config.allowsDirectAutoMemoryWrite?.() !== true)
     ) {
       const message =
         'Direct edits to managed auto-memory files are disabled. Use manage_memory instead.';

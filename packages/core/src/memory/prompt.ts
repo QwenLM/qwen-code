@@ -351,7 +351,7 @@ export function buildStructuredAutoMemoryPrompt(
     '# auto memory',
     '',
     `Managed memory scopes: ${scopes}.`,
-    'Use the complete tree and focused metadata for routing. Use search_memory only when a task needs body details not already present in metadata or conversation history; direct file and shell access to managed-memory paths is unavailable.',
+    'Use the complete tree and focused metadata for routing. Use search_memory only when a task needs body details not already present in metadata or conversation history. Never use read_file, grep_search, list_directory, glob, or shell commands to access managed-memory paths directly.',
   ].join('\n');
 }
 
