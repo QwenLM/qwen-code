@@ -976,8 +976,12 @@ signal, NOT proof that main is healthy.
 
 MAIN_GREEN_CHECKS is sourced from the last-merged PR's PRE-MERGE
 check-runs, which ran against that PR merged with main-as-of-then —
-never the tree now on main (ci.yml has no push trigger, so main's
-squash commits carry no check-runs to read). main breaks here by
+never the tree now on main. (ci.yml's post-merge push lane DOES put
+check-runs on main's squash commits now, but that lane is lint, static
+analysis and unit tests only — the no-AK integration gate and every
+platform lane stay off the push trigger — so it is a strictly narrower
+signal than a PR's full matrix, and this deliberately stays on the
+pre-merge runs.) main breaks here by
 SEMANTIC CONFLICT: two PRs green apart but broken together. In exactly
 that state the last-merged PR is green, this signal reads green, and
 the update would merge a currently-broken main into a healthy PR. The
