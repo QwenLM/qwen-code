@@ -327,6 +327,33 @@ describe('review worktree cleanup steps', () => {
     }
   });
 
+  it.skipIf(!permissionFixturesAvailable)(
+    'ci sweep unlinks a dangling-symlink .qwen via the -L existence arm',
+    () => {
+      const root = mkdtempSync(join(tmpdir(), 'qwen-ci-cleanup-'));
+      const workspace = join(root, 'workspace');
+      mkdirSync(workspace, { recursive: true });
+      const link = join(workspace, '.qwen');
+      try {
+        symlinkSync(join(root, 'missing-target'), link);
+        // -e follows the link, so a dangling leftover reports as absent:
+        // only the -L arm of the existence guard keeps the sweep from
+        // skipping it and leaving checkout to trip on the very residue the
+        // sweep exists to clear.
+        const result = spawnSync('bash', ['-c', ciCleanSteps[0].run], {
+          cwd: workspace,
+          env: { ...process.env, GITHUB_WORKSPACE: workspace },
+          encoding: 'utf8',
+        });
+
+        expect(result.status, result.stderr).toBe(0);
+        expect(linkExists(link)).toBe(false);
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    },
+  );
+
   it('keeps the review-job cleanup sweep pinned to paths.ts', () => {
     // `always()` and the end-of-job position are what make the step fire on
     // the failure/cancellation paths it exists for: Actions' default
