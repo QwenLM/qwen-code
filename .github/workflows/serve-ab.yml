@@ -112,6 +112,16 @@ jobs:
           RWS="${RUNNER_WORKSPACE:?}"
           while [ "${RWS%/}" != "$RWS" ]; do RWS="${RWS%/}"; done
           if [ -z "$RWS" ]; then echo "::error::refusing to wipe: runner workspace resolved to /"; exit 1; fi
+          # Refuse a relative runner workspace BEFORE the ancestor walk
+          # below: dirname -- "." outputs ".", so on a relative path the
+          # walk never reaches "/" and spins forever — no annotation, just
+          # a runner held until timeout-minutes kills the job. The daemon
+          # supplies an absolute path; anything else is the mangled-env
+          # incident class (#9220, #9265) this step's guards exist for.
+          case "$RWS" in
+            /*) ;;
+            *) echo "::error::refusing to wipe relative runner workspace path: ${RWS}"; exit 1 ;;
+          esac
           # Heal the runner-workspace ROOT before anything canonicalizes it:
           # realpath -m resolves THROUGH a planted root link, so every later
           # containment check would then bound the wipe to the link's target
@@ -121,16 +131,13 @@ jobs:
           # a plain directory, so a symlink or non-directory here is state a
           # previous job chose. The root is the top of the containment chain
           # — nothing above it to contain against — so the heal judges the
-          # RAW path instead: no '..' traversal, no known root, not relative
-          # (a relative path would be judged against a CWD that can itself
-          # sit inside a planted link), and the unlink acts on the literal
-          # entry only, never following it.
+          # RAW path instead: no '..' traversal, no known root (relative
+          # paths were already refused above, before the walk), and the
+          # unlink acts on the literal entry only, never following it.
           if [ -L "$RWS" ] || [ ! -d "$RWS" ]; then
             case "$RWS" in
-              ..|../*|*/..|*/../*) echo "::error::refusing to heal runner workspace path containing '..': ${RWS}"; exit 1 ;;
+              */..|*/../*) echo "::error::refusing to heal runner workspace path containing '..': ${RWS}"; exit 1 ;;
               /|/home|/root|/usr*|/etc*|/var) echo "::error::refusing to heal suspicious runner workspace path: ${RWS}"; exit 1 ;;
-              /*) ;;
-              *) echo "::error::refusing to heal relative runner workspace path: ${RWS}"; exit 1 ;;
             esac
             if [ -L "$RWS" ]; then
               # Same annotation-forging guard as the workspace heal below:
@@ -169,6 +176,44 @@ jobs:
           while [ "${RWS%/}" != "$RWS" ]; do RWS="${RWS%/}"; done
           case "$RWS" in
             ..|../*|*/..|*/../*) echo "::error::refusing runner workspace path containing '..': ${RWS}"; exit 1 ;;
+          esac
+          # Heal a symlinked component BETWEEN the runner workspace and the
+          # workspace: the heal below only fires when the LAST component is
+          # a link or non-directory. With the plant one level up, the last
+          # component stays real (through the link), the containment check
+          # refuses and removes nothing, and every later job reading the
+          # same env dies on the plant. The daemon creates plain
+          # directories below the runner workspace, so any link on this
+          # path is state a previous job chose. Judge only paths literally
+          # inside the canonical runner workspace, and unlink the link
+          # itself, never following it.
+          case "$WS" in
+            "$RWS"/*)
+              HEAL_REL="${WS#"$RWS"/}"
+              case "$HEAL_REL" in
+                */*) HEAL_REL="${HEAL_REL%/*}" ;;
+                *) HEAL_REL='' ;;
+              esac
+              HEAL_PREFIX="$RWS"
+              while [ -n "$HEAL_REL" ]; do
+                HEAL_COMP="${HEAL_REL%%/*}"
+                case "$HEAL_REL" in
+                  */*) HEAL_REL="${HEAL_REL#*/}" ;;
+                  *) HEAL_REL='' ;;
+                esac
+                if [ -n "$HEAL_COMP" ]; then
+                  HEAL_PREFIX="${HEAL_PREFIX}/${HEAL_COMP}"
+                  if [ -L "$HEAL_PREFIX" ]; then
+                    heal_target="$(readlink -- "$HEAL_PREFIX" 2>/dev/null || printf '%s' '<unreadable>')"
+                    heal_target="$(printf '%s' "$heal_target" | tr -d '\r\n' | cut -c1-200)"
+                    echo "::warning::healing workspace path ${HEAL_PREFIX}: it was a symlink"
+                    printf 'heal: %s pointed at %s\n' "$HEAL_PREFIX" "$heal_target"
+                    rm -f -- "$HEAL_PREFIX" || { echo "::error::refusing to continue: could not remove ${HEAL_PREFIX}"; exit 1; }
+                    mkdir -- "$HEAL_PREFIX" || { echo "::error::refusing to continue: could not recreate ${HEAL_PREFIX}"; exit 1; }
+                  fi
+                fi
+              done
+              ;;
           esac
           # Heal a workspace a previous job replaced with a symlink (or any
           # non-directory) BEFORE canonicalizing it. Afterwards the path
@@ -239,72 +284,80 @@ jobs:
           # drop mid-pack often enough to read as hung runners. Only a plain
           # directory survives the find: a symlink or gitfile named .git can
           # point at an attacker-controlled repo outside the workspace, so it
-          # is removed like any other leftover. The kept repo is then reduced
-          # to objects and safe refs — the planted-state class a previous job
-          # can leave behind is defanged, because any pool lane may have run
-          # attacker code (a same-repo PR or write-access fork author — the
-          # exact lanes this workflow routes onto the pool — or a compromised
-          # dependency) and the next job must not execute the plant. Hooks
-          # and info/attributes deleted. .git/commondir removed BEFORE any
-          # git call: a normal actions/checkout is not a linked worktree, so
-          # the file never legitimately exists here, and a plant repoints
-          # hooks, config and refs to an attacker gitdir OUTSIDE the
-          # workspace, making every defang below act on the wrong repo.
-          # .git/config.lock removed before the config writes: a plant jams
-          # every unset below into a swallowed failure, leaving exec keys
-          # live. The config scrub's allowlist is narrower than qwen-
-          # triage.yml's config-sanitize (git's exec knobs are an open-ended
-          # class; an allowlist closes it instead of denylisting knobs one by
-          # one): remote narrowed to url/fetch/pushurl — any other remote key
-          # is a knob, e.g. vcs makes the next fetch exec git-remote-<vcs> —
-          # and core.worktree dropped, since it redirects the next checkout's
-          # writes and cleans outside the workspace. refs/replace is stripped
-          # after the scrub: a planted replace ref silently substitutes file
-          # content in the NEXT job's checkout (actions/checkout passes no
-          # --no-replace-objects). .git/shallow is deliberately KEPT: these
-          # checkouts fetch with depth 1, so the file legitimately records
-          # the shallow boundary — deleting it corrupts the very reuse the
-          # kept .git exists for — and a plant can only narrow the object
-          # graph (a loud fetch failure), never exec or substitute content.
-          # The find and the defang rm stay bare on purpose: under the job's
-          # `bash -eo pipefail` a wipe that cannot clear the workspace fails
-          # the job here instead of building both checkouts on top of the
-          # leftovers. Only the config scrub is best-effort, mirroring
-          # qwen-triage.yml's config-sanitize. The replace strip runs bare
-          # inside the kept-.git guard: a repo whose refs cannot even be
-          # enumerated cannot be proven clean (the next checkout would fail
-          # on it anyway), while a healed-empty workspace has no repo and
-          # must not fail here. Worktree-scoped config first, the same defang
-          # pair as qwen-triage's hardened config-sanitize:
-          # extensions.worktreeConfig activates .git/config.worktree, a
-          # second local file that `git config --local` neither lists nor
-          # unsets and that CAN carry exec vectors like core.hooksPath —
-          # delete the file and drop the extension, closing a bypass the
-          # allowlist sweep cannot see. Every git call is anchored to
-          # $WS/.git instead of discovering the repo from the CWD: after the
-          # heal above unlinks a symlinked workspace root, the step's CWD
-          # still is the link's target, and CWD discovery would scrub a repo
-          # outside the workspace.
+          # is removed like any other leftover. The kept gitdir is then
+          # validated WHOLESALE before reuse, because any pool lane may have
+          # run attacker code (a same-repo PR or write-access fork author —
+          # the exact lanes this workflow routes onto the pool — or a
+          # compromised dependency) and a per-entrance defang leaves the next
+          # audit a new entrance: every symlink under it goes — each one
+          # redirects a read or a write (objects, refs, config) through an
+          # attacker-chosen target — then every *.lock of any shape (a plant
+          # jams the defangs below or the next checkout), then
+          # objects/info/alternates (a poisoned object store the next
+          # checkout materializes), then the exec vectors commondir, hooks
+          # and info/attributes. The config scrub's allowlist is narrower
+          # than qwen-triage.yml's config-sanitize — remote narrowed to
+          # url/fetch/pushurl (any other remote key is a knob, e.g. vcs
+          # makes the next fetch exec git-remote-<vcs>), core.worktree
+          # dropped (redirects the next checkout's writes and cleans outside
+          # the workspace) — and keeps NO extensions.* key: git's exec knobs
+          # are an open-ended class, and a planted extension makes every
+          # later git call exit 128 while the scrub's own enumeration dies
+          # on it. So a gitdir whose refs cannot even be enumerated is NOT
+          # carried: the fail-open below removes it and the next job
+          # re-fetches (the next checkout would fail on it anyway), while a
+          # healed-empty workspace has no repo and must not fail here.
+          # refs/replace is stripped after the scrub: a planted replace ref
+          # silently substitutes file content in the NEXT job's checkout
+          # (actions/checkout passes no --no-replace-objects). .git/shallow
+          # is deliberately KEPT: these checkouts fetch with depth 1, so the
+          # file legitimately records the shallow boundary — deleting it
+          # corrupts the very reuse the kept .git exists for — and a plant
+          # can only narrow the object graph (a loud fetch failure), never
+          # exec or substitute content. The find and the defang rm stay bare
+          # on purpose: under the job's `bash -eo pipefail` a wipe that
+          # cannot clear the workspace fails the job here instead of building
+          # both checkouts on top of the leftovers. Only the config scrub is
+          # best-effort, mirroring qwen-triage.yml's config-sanitize.
+          # Worktree-scoped config first, the same defang pair as
+          # qwen-triage's hardened config-sanitize: extensions.worktreeConfig
+          # activates .git/config.worktree, a second local file that
+          # `git config --local` neither lists nor unsets and that CAN carry
+          # exec vectors like core.hooksPath — delete the file and drop the
+          # extension, closing a bypass the allowlist sweep cannot see. Every
+          # git call is anchored to $WS/.git instead of discovering the repo
+          # from the CWD: after the heal above unlinks a symlinked workspace
+          # root, the step's CWD still is the link's target, and CWD
+          # discovery would scrub a repo outside the workspace.
           find "$WS" -mindepth 1 -maxdepth 1 ! \( -name '.git' -type d \) -exec rm -rf {} +
-          rm -f "$WS/.git/commondir"
-          rm -rf "$WS/.git/hooks" "$WS/.git/info/attributes"
-          rm -f "$WS/.git/config.lock"
-          # Remove a symlinked .git/config BEFORE any git call: git creates
-          # a plain file there, so a link is state a previous job chose. An
-          # unparseable target kills every git defang below — the bare
-          # replace strip dies exit 128 and wedges every later job on this
-          # runner permanently — and a parseable target outside the
-          # workspace turns the scrub's writes into writes through the
-          # link. rm -f acts on the link itself and never follows it.
-          if [ -L "$WS/.git/config" ]; then
-            echo "::warning::removing planted symlink at ${WS}/.git/config"
-            rm -f -- "$WS/.git/config"
-          fi
-          rm -f "$(git --git-dir="$WS/.git" rev-parse --git-path config.worktree 2>/dev/null || echo /nonexistent)" 2>/dev/null || true
-          git --git-dir="$WS/.git" config --local --unset-all extensions.worktreeConfig 2>/dev/null || true
-          { git --git-dir="$WS/.git" config --local --name-only --list 2>/dev/null || true; } | { grep -ivE '^(core\.(repositoryformatversion|bare|filemode|symlinks|ignorecase|precomposeunicode|logallrefupdates|hidedotfiles|protecthfs|protectntfs)|remote\..+\.(url|fetch|pushurl)|branch\.|extensions\.|gc\.|pack\.|fetch\.|index\.|safe\.|submodule\.[^.]+\.(url|active|branch))' || true; } | while IFS= read -r key; do git --git-dir="$WS/.git" config --local --unset-all "$key" 2>/dev/null || true; done
           if [ -d "$WS/.git" ]; then
-            { git --git-dir="$WS/.git" for-each-ref --format='%(refname)' refs/replace; } | while IFS= read -r ref; do git --git-dir="$WS/.git" update-ref -d "$ref"; done
+            planted="$(find "$WS/.git" -type l | wc -l | tr -d ' ')"
+            if [ "${planted}" != "0" ]; then
+              # Counted, not named: the names are bytes a previous job
+              # chose, and a newline in one would forge a workflow
+              # annotation once printed.
+              echo "::warning::removing ${planted} planted symlink(s) under ${WS}/.git"
+              find "$WS/.git" -type l -delete
+            fi
+            find "$WS/.git" -name '*.lock' -prune -exec rm -rf {} +
+            rm -rf "$WS/.git/objects/info/alternates"
+          fi
+          rm -rf "$WS/.git/commondir"
+          rm -rf "$WS/.git/hooks" "$WS/.git/info/attributes"
+          rm -rf "$(git --git-dir="$WS/.git" rev-parse --git-path config.worktree 2>/dev/null || echo /nonexistent)" 2>/dev/null || true
+          git --git-dir="$WS/.git" config --local --unset-all extensions.worktreeConfig 2>/dev/null || true
+          { git --git-dir="$WS/.git" config --local --name-only --list 2>/dev/null || true; } | { grep -ivE '^(core\.(repositoryformatversion|bare|filemode|symlinks|ignorecase|precomposeunicode|logallrefupdates|hidedotfiles|protecthfs|protectntfs)|remote\..+\.(url|fetch|pushurl)|branch\.|gc\.|pack\.|fetch\.|index\.|safe\.|submodule\.[^.]+\.(url|active|branch))' || true; } | while IFS= read -r key; do git --git-dir="$WS/.git" config --local --unset-all "$key" 2>/dev/null || true; done
+          if [ -d "$WS/.git" ]; then
+            if ! replace_refs="$(git --git-dir="$WS/.git" for-each-ref --format='%(refname)' refs/replace 2>/dev/null)"; then
+              echo "::warning::removing kept .git whose refs cannot be enumerated: ${WS}/.git"
+              rm -rf "$WS/.git"
+            else
+              printf '%s\n' "${replace_refs}" | while IFS= read -r ref; do
+                if [ -n "${ref}" ]; then
+                  git --git-dir="$WS/.git" update-ref -d "${ref}"
+                fi
+              done
+            fi
           fi
           rm -rf "$WS/.git/refs/replace"
 
