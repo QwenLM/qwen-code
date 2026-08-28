@@ -133,6 +133,8 @@ function renderSection(
     sessionCatalogRequestsEnabled: boolean;
     sessionGroupCatalog: DaemonSessionGroupCatalog;
     sessionLiveStateEnabled: boolean;
+    overviewEnabled: boolean;
+    renderHeader: (expanded: boolean) => ReactNode;
   }> = {},
 ): void {
   act(() => {
@@ -161,10 +163,37 @@ function renderSection(
             <div key={session.sessionId}>{session.displayName}</div>
           )}
           onOpenGitDiff={overrides.onOpenGitDiff}
+          overviewEnabled={overrides.overviewEnabled}
+          renderHeader={overrides.renderHeader}
         />
       </I18nProvider>,
     );
   });
+}
+
+/** A client whose facet calls are observable, for the overview gating tests. */
+function makeOverviewClient(
+  sessions: DaemonSessionSummary[] = [],
+): DaemonClient & { workspaceMcp: ReturnType<typeof vi.fn> } {
+  const workspaceMcp = vi.fn().mockResolvedValue({
+    v: 1,
+    workspaceCwd: '/tmp/project',
+    initialized: true,
+    discoveryState: 'completed',
+    servers: [],
+  });
+  const client = {
+    workspaceMcp,
+    workspaceByCwd: vi.fn(() => ({
+      workspaceGit,
+      workspaceMcp,
+      listWorkspaceSessionsPage: vi.fn().mockResolvedValue({ sessions }),
+      listSessionGroups: vi.fn().mockResolvedValue({ groups: [] }),
+    })),
+  };
+  return client as unknown as DaemonClient & {
+    workspaceMcp: ReturnType<typeof vi.fn>;
+  };
 }
 
 async function flush(): Promise<void> {
@@ -1149,5 +1178,102 @@ describe('isAbsolutePath', () => {
     expect(isAbsolutePath('\\\\server\\share')).toBe(true);
     expect(isAbsolutePath('relative/path')).toBe(false);
     expect(isAbsolutePath('name')).toBe(false);
+  });
+});
+
+describe('WorkspaceSection overview', () => {
+  it('fetches nothing while a custom header renderer hides every consumer', async () => {
+    const client = makeOverviewClient();
+    renderSection({
+      client,
+      expanded: true,
+      overviewEnabled: true,
+      renderHeader: () => <span>custom header</span>,
+    });
+    await flush();
+    expect(client.workspaceMcp).not.toHaveBeenCalled();
+    expect(
+      container.querySelector('[data-web-shell-workspace-path]'),
+    ).toBeNull();
+    expect(
+      container.querySelector('[data-web-shell-workspace-overview]'),
+    ).toBeNull();
+
+    // Control arm: the default header renders the path and chips and fetches.
+    renderSection({ client, expanded: true, overviewEnabled: true });
+    await flush();
+    expect(client.workspaceMcp).toHaveBeenCalledTimes(1);
+    expect(
+      container.querySelector('[data-web-shell-workspace-path]')?.textContent,
+    ).toBe('/tmp/project');
+  });
+
+  it('renders no path or chips for a synthetic workspace without a real cwd', async () => {
+    const client = makeOverviewClient();
+    renderSection({
+      client,
+      workspace: { ...trustedWorkspace, id: 'synthetic', cwd: 'My Project' },
+      expanded: true,
+      overviewEnabled: true,
+    });
+    await flush();
+    expect(client.workspaceMcp).not.toHaveBeenCalled();
+    expect(
+      container.querySelector('[data-web-shell-workspace-path]'),
+    ).toBeNull();
+    expect(
+      container.querySelector('[data-web-shell-workspace-overview]'),
+    ).toBeNull();
+  });
+
+  it('keeps the last session counts while the row is collapsed', async () => {
+    const client = makeOverviewClient([
+      {
+        sessionId: 'a',
+        workspaceCwd: '/tmp/other',
+        displayName: 'Running',
+        hasActivePrompt: true,
+      },
+      { sessionId: 'b', workspaceCwd: '/tmp/other', displayName: 'Idle' },
+    ]);
+    const workspace = {
+      ...untrustedWorkspace,
+      trusted: true,
+      id: 'other',
+      cwd: '/tmp/other',
+    };
+    renderSection({ client, workspace, expanded: true, overviewEnabled: true });
+    await flush();
+    const counts = () =>
+      container.querySelector<HTMLElement>('[class*="headerCounts"]');
+    expect(counts()?.textContent).toBe('12');
+    expect(
+      counts()?.querySelector('[class*="headerCountRunning"]')?.textContent,
+    ).toBe('1');
+
+    renderSection({
+      client,
+      workspace,
+      expanded: false,
+      overviewEnabled: true,
+    });
+    await flush();
+    expect(
+      container.querySelector('[data-web-shell-workspace-path]'),
+    ).toBeNull();
+    expect(counts()?.textContent).toBe('12');
+  });
+
+  it('shows no counts, path or chips when the overview is disabled', async () => {
+    const client = makeOverviewClient([
+      { sessionId: 'a', workspaceCwd: '/tmp/project', hasActivePrompt: true },
+    ]);
+    renderSection({ client, expanded: true });
+    await flush();
+    expect(client.workspaceMcp).not.toHaveBeenCalled();
+    expect(container.querySelector('[class*="headerCounts"]')).toBeNull();
+    expect(
+      container.querySelector('[data-web-shell-workspace-path]'),
+    ).toBeNull();
   });
 });

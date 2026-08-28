@@ -118,6 +118,32 @@ describe('WorkspaceRenameDialog', () => {
     expect(onSubmit).toHaveBeenCalledWith(null);
   });
 
+  it('accepts names up to the daemon cap so a long name can still be edited', async () => {
+    const longName = 'x'.repeat(100);
+    await render(
+      <WorkspaceRenameDialog
+        workspace={{ ...workspace, displayName: longName }}
+        busy={false}
+        onSubmit={vi.fn()}
+        onClose={vi.fn()}
+      />,
+    );
+    expect(input().value).toBe(longName);
+    expect(input().maxLength).toBeGreaterThanOrEqual(256);
+  });
+
+  it('keeps save disabled while busy even when the name changed', async () => {
+    const onSubmit = vi.fn();
+    const props = { workspace, onSubmit, onClose: vi.fn() };
+    await render(<WorkspaceRenameDialog {...props} busy={false} />);
+    await type('Payments API');
+    expect(saveButton().disabled).toBe(false);
+    // Same element tree, so the typed name survives the busy flip.
+    await render(<WorkspaceRenameDialog {...props} busy />);
+    expect(input().value).toBe('Payments API');
+    expect(saveButton().disabled).toBe(true);
+  });
+
   it('locks the form while busy', async () => {
     const onSubmit = vi.fn();
     await render(

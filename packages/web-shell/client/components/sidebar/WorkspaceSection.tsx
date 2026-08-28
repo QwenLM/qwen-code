@@ -466,14 +466,19 @@ export function WorkspaceSection({
     workspace.trusted,
   ]);
 
+  // The path and chips block below and the header menu are the snapshot's
+  // only consumers; a custom header renderer (locked sidebar) hides both.
+  const overviewVisible =
+    overviewEnabled && expanded && !disabled && !renderHeader;
   // Facet chips ride the expanded state like the session list: a collapsed
-  // row costs nothing, and an untrusted workspace has no runtime to ask.
+  // row costs nothing, and an untrusted workspace has no runtime to ask. A
+  // synthetic fallback workspace has no real cwd, so nothing is fetched.
   const { overview } = useWorkspaceOverview(client, gitPollCwd, {
-    enabled: overviewEnabled && expanded && workspace.trusted && !disabled,
+    enabled: overviewVisible && workspace.trusted,
     items: overviewItems,
     reloadToken,
   });
-  const stats = useMemo<WorkspaceSessionStats | undefined>(() => {
+  const liveStats = useMemo<WorkspaceSessionStats | undefined>(() => {
     if (!overviewEnabled) return undefined;
     if (sessionStats) return sessionStats;
     if (!sessionsEnabled || sessionsPage === undefined) return undefined;
@@ -486,6 +491,14 @@ export function WorkspaceSection({
     sessionsPage,
     sessionsResult.nextCursor,
   ]);
+  // Collapsing a row disables its catalog query, so keep the last counts the
+  // row computed: the header keeps telling how busy the workspace is without
+  // paying for a subscription it no longer lists.
+  const [retainedStats, setRetainedStats] = useState<WorkspaceSessionStats>();
+  useEffect(() => {
+    if (liveStats) setRetainedStats(liveStats);
+  }, [liveStats]);
+  const stats = overviewEnabled ? (liveStats ?? retainedStats) : undefined;
 
   const visibleSessions = useMemo(() => {
     const query = searchQuery.trim().toLowerCase();
@@ -671,7 +684,7 @@ export function WorkspaceSection({
         )}
         {headerActions?.(actionsVisible, overview)}
       </div>
-      {overviewEnabled && expanded && !disabled && !renderHeader && (
+      {overviewVisible && gitPollCwd !== undefined && (
         <>
           <div
             className={cx(styles.path, compact && styles.pathCompact)}

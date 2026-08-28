@@ -13,10 +13,12 @@ import type {
 } from '@qwen-code/sdk/daemon';
 import {
   isOverviewFacetKnown,
+  isRuntimeDiscoveredFacet,
   mergeOverviewSnapshots,
   overviewFacetHasIssue,
   summarizeChannels,
   summarizeExtensions,
+  summarizeHooks,
   summarizeMcp,
   summarizeSessions,
   summarizeSkills,
@@ -68,6 +70,72 @@ describe('summarizeSessions', () => {
       attention: 2,
       truncated: true,
     });
+  });
+
+  it('counts a session waiting on a user question as needing attention', () => {
+    // Live state carries isWaitingForUserQuestion without a pending
+    // interaction count, so the flag must count on its own.
+    const sessions = [
+      { sessionId: 'a', workspaceCwd: '/w', isWaitingForUserQuestion: true },
+    ] as DaemonSessionSummary[];
+    expect(summarizeSessions(sessions)).toEqual({
+      total: 1,
+      running: 0,
+      attention: 1,
+      truncated: false,
+    });
+  });
+});
+
+describe('summarizeHooks', () => {
+  it('counts hooks and carries the disabled flag', () => {
+    expect(
+      summarizeHooks({
+        v: 1,
+        workspaceCwd: '/w',
+        initialized: true,
+        disabled: true,
+        hooks: [{ name: 'a' }, { name: 'b' }] as never,
+        events: { BeforeTool: {} } as never,
+      }),
+    ).toEqual({ initialized: true, count: 2, disabled: true });
+  });
+
+  it('keeps an uninitialized runtime unknown', () => {
+    const snapshot: WorkspaceOverviewSnapshot = {
+      hooks: summarizeHooks({
+        v: 1,
+        workspaceCwd: '/w',
+        initialized: false,
+        disabled: false,
+        hooks: [],
+        events: {},
+      }),
+      fetchedAt: 1,
+    };
+    expect(isOverviewFacetKnown(snapshot, 'hooks')).toBe(false);
+    expect(
+      isOverviewFacetKnown(
+        {
+          hooks: { initialized: true, count: 0, disabled: false },
+          fetchedAt: 1,
+        },
+        'hooks',
+      ),
+    ).toBe(true);
+  });
+});
+
+describe('isRuntimeDiscoveredFacet', () => {
+  it('separates ACP-discovered facets from daemon-side ones', () => {
+    expect(
+      (['mcp', 'skills', 'context', 'hooks'] as const).map(
+        isRuntimeDiscoveredFacet,
+      ),
+    ).toEqual([true, true, true, true]);
+    expect(
+      (['extensions', 'channels'] as const).map(isRuntimeDiscoveredFacet),
+    ).toEqual([false, false]);
   });
 });
 

@@ -397,6 +397,7 @@ function renderSidebar(
       target: WorkspaceManagementTarget,
       workspaceCwd: string,
     ) => void;
+    workspaceOverview?: false;
     onOpenAddWorkspace?: () => void;
     onNewSession?: (workspaceCwd?: string) => boolean;
     onLoadSession?: (sessionId: string, workspaceCwd?: string) => void;
@@ -445,6 +446,7 @@ function renderSidebar(
           onSelectWorkspace={overrides.onSelectWorkspace}
           onOpenAddWorkspace={overrides.onOpenAddWorkspace}
           onOpenWorkspaceManagement={overrides.onOpenWorkspaceManagement}
+          workspaceOverview={overrides.workspaceOverview}
           workspaces={overrides.workspaces}
           lockedWorkspaceCwd={overrides.lockedWorkspaceCwd}
           lockedWorkspace={overrides.lockedWorkspace}
@@ -3020,11 +3022,17 @@ describe('WebShellSidebar workspace removal', () => {
       childReloaded: true,
     });
     const previous = workspace.client.workspaceByCwd.getMockImplementation();
+    // Only the clicked workspace's handle carries `reload`, so a call routed
+    // through any other cwd cannot find it.
     workspace.client.workspaceByCwd.mockImplementation((cwd: string) => ({
       ...(previous?.(cwd) ?? {}),
-      reload,
+      ...(cwd === '/tmp/other' ? { reload } : {}),
     }));
-    renderSidebar();
+    const onError = vi.fn();
+    renderSidebar({ onError });
+    const handleCallsBefore = workspace.client.workspaceByCwd.mock.calls.filter(
+      ([cwd]) => cwd === '/tmp/other',
+    ).length;
     act(() => click(workspaceAction('/tmp/other')!));
     const item = Array.from(
       document.body.querySelectorAll<HTMLElement>('[role="menuitem"]'),
@@ -3035,8 +3043,129 @@ describe('WebShellSidebar workspace removal', () => {
       await Promise.resolve();
       await Promise.resolve();
     });
-    expect(workspace.client.workspaceByCwd).toHaveBeenCalledWith('/tmp/other');
     expect(reload).toHaveBeenCalledTimes(1);
+    expect(onError).not.toHaveBeenCalled();
+    // A successful reload bumps the reload token, so the row's per-workspace
+    // queries (sessions, git, overview) refetch instead of waiting a tick.
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(
+      workspace.client.workspaceByCwd.mock.calls.filter(
+        ([cwd]) => cwd === '/tmp/other',
+      ).length,
+    ).toBeGreaterThan(handleCallsBefore + 1);
+  });
+
+  it('reports a runtime reload the client cannot perform', async () => {
+    // The default fixture handle has no reload method (older SDK).
+    const onError = vi.fn();
+    renderSidebar({ onError });
+    act(() => click(workspaceAction('/tmp/other')!));
+    const item = Array.from(
+      document.body.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+    ).find((element) => element.textContent === 'Reload runtime');
+    await act(async () => {
+      click(item!);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(onError.mock.calls[0]?.[1]).toBe(
+      'Failed to reload workspace runtime',
+    );
+  });
+
+  it('copies the workspace path and reports a clipboard failure', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    });
+    const onError = vi.fn();
+    try {
+      renderSidebar({ onError });
+      act(() => click(workspaceAction('/tmp/other')!));
+      const copy = () =>
+        Array.from(
+          document.body.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+        ).find((element) => element.textContent === 'Copy path');
+      await act(async () => {
+        click(copy()!);
+        await Promise.resolve();
+      });
+      expect(writeText).toHaveBeenCalledWith('/tmp/other');
+      expect(onError).not.toHaveBeenCalled();
+
+      writeText.mockRejectedValueOnce(new Error('denied'));
+      act(() => click(workspaceAction('/tmp/other')!));
+      await act(async () => {
+        click(copy()!);
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(onError).toHaveBeenCalledTimes(1);
+      expect(onError.mock.calls[0]?.[1]).toBe('Failed to copy workspace path');
+    } finally {
+      Object.defineProperty(navigator, 'clipboard', {
+        configurable: true,
+        value: undefined,
+      });
+    }
+  });
+
+  it('treats a failed capabilities refresh after a rename as converged', async () => {
+    connection.capabilities = {
+      ...capabilities,
+      features: [...capabilities.features, 'dynamic_workspace_registration'],
+    };
+    workspaceActions.updateWorkspace.mockResolvedValueOnce({
+      id: 'secondary',
+      cwd: '/tmp/other',
+      displayName: 'Other API',
+      primary: false,
+      trusted: true,
+    });
+    workspace.refreshCapabilities.mockRejectedValueOnce(new Error('offline'));
+    const onError = vi.fn();
+    renderSidebar({ onError });
+    act(() => click(workspaceAction('/tmp/other')!));
+    const rename = Array.from(
+      document.body.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+    ).find((element) => element.textContent === 'Rename…');
+    act(() => click(rename!));
+    const input = document.querySelector<HTMLInputElement>(
+      '#workspace-display-name',
+    );
+    act(() => setInputValue(input!, 'Other API'));
+    await act(async () => {
+      input!.form!.dispatchEvent(
+        new Event('submit', { bubbles: true, cancelable: true }),
+      );
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(workspaceActions.updateWorkspace).toHaveBeenCalledTimes(1);
+    expect(document.querySelector('#workspace-display-name')).toBeNull();
+    expect(onError).not.toHaveBeenCalled();
+  });
+
+  it('keeps plain folder headers when the overview is switched off', () => {
+    renderSidebar({ workspaceOverview: false });
+    expect(
+      container.querySelector('[data-web-shell-workspace-path]'),
+    ).toBeNull();
+    expect(
+      container.querySelector('[data-web-shell-workspace-overview]'),
+    ).toBeNull();
+    expect(container.querySelector('[class*="headerCounts"]')).toBeNull();
+    expect(
+      container.querySelector('[class*="projectsHeaderCount"]'),
+    ).toBeNull();
+    // The menu still offers the non-overview actions.
+    act(() => click(workspaceAction('/tmp/other')!));
+    expect(menuItemLabels()).toContain('Copy path');
+    expect(menuItemLabels()).toContain('Reload runtime');
   });
 
   it('opens management pages for the primary workspace only', () => {

@@ -124,6 +124,51 @@ describe('WorkspaceOverview', () => {
     expect(container.querySelector('button')).toBeNull();
   });
 
+  it('renders the opt-in hooks facet as unknown until initialized, then as a count', async () => {
+    await render(
+      <WorkspaceOverview
+        overview={{
+          hooks: { initialized: false, count: 0, disabled: false },
+          fetchedAt: 1,
+        }}
+        items={['hooks']}
+      />,
+    );
+    expect(chip('hooks').textContent).toBe('Hooks—');
+    expect(chip('hooks').getAttribute('title')).toBe(
+      'Hooks: not initialized yet',
+    );
+    await render(
+      <WorkspaceOverview
+        overview={{
+          hooks: { initialized: true, count: 3, disabled: true },
+          fetchedAt: 1,
+        }}
+        items={['hooks']}
+      />,
+    );
+    expect(chip('hooks').textContent).toBe('Hooks3');
+    expect(chip('hooks').getAttribute('title')).toBe(
+      'Hooks: 3 hooks (disabled)',
+    );
+  });
+
+  it('calls a missing daemon-side facet unavailable, not uninitialized', async () => {
+    await render(
+      <WorkspaceOverview
+        overview={{ fetchedAt: 1 }}
+        items={['extensions', 'channels', 'mcp']}
+      />,
+    );
+    expect(chip('extensions').getAttribute('title')).toBe(
+      'Extensions: unavailable on this daemon',
+    );
+    expect(chip('channels').getAttribute('title')).toBe(
+      'Channels: unavailable on this daemon',
+    );
+    expect(chip('mcp').getAttribute('title')).toBe('MCP: not initialized yet');
+  });
+
   it('renders nothing for an empty item list', async () => {
     await render(<WorkspaceOverview overview={snapshot} items={[]} />);
     expect(container.innerHTML).toBe('');

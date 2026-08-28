@@ -57,8 +57,8 @@
 }
 
 .chipIssue {
-  background: color-mix(in srgb, var(--warning, #d29922) 18%, transparent);
-  color: var(--warning, #d29922);
+  background: color-mix(in srgb, var(--warning-color, #d29922) 18%, transparent);
+  color: var(--warning-color, #d29922);
 }
 
 .chipIssue .chipValue {

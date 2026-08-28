@@ -38,8 +38,6 @@ export interface UseWorkspaceOverviewOptions {
 
 export interface WorkspaceOverviewResult {
   overview: WorkspaceOverviewSnapshot | undefined;
-  loading: boolean;
-  reload: () => Promise<void>;
 }
 
 /**
@@ -94,7 +92,6 @@ export function useWorkspaceOverview(
   }: UseWorkspaceOverviewOptions,
 ): WorkspaceOverviewResult {
   const [overview, setOverview] = useState<WorkspaceOverviewSnapshot>();
-  const [loading, setLoading] = useState(false);
   const requestIdRef = useRef(0);
   // Order-insensitive identity so a caller passing a fresh array literal each
   // render does not restart the poll loop.
@@ -106,16 +103,17 @@ export function useWorkspaceOverview(
   );
   const active = enabled && Boolean(workspaceCwd) && requested.size > 0;
 
+  // Refreshes stay internal (mount, focus, poll tick, reload token): the
+  // section refreshes through the sidebar's reload token, and exposing a
+  // trigger would invite callers to bypass the visibility gating.
   const reload = useCallback(async () => {
     if (!active || !workspaceCwd) return;
     const requestId = ++requestIdRef.current;
-    setLoading(true);
     const next = await fetchWorkspaceOverview(client, workspaceCwd, requested);
     if (requestId !== requestIdRef.current) return;
     setOverview((previous) =>
       mergeOverviewSnapshots(previous, next, requested),
     );
-    setLoading(false);
   }, [active, client, requested, workspaceCwd]);
 
   useEffect(() => {
@@ -123,7 +121,6 @@ export function useWorkspaceOverview(
       // Invalidate any in-flight round so it cannot land after the clear.
       requestIdRef.current += 1;
       setOverview(undefined);
-      setLoading(false);
       return;
     }
     void reload();
@@ -138,5 +135,5 @@ export function useWorkspaceOverview(
     };
   }, [active, pollIntervalMs, reload, reloadToken]);
 
-  return { overview, loading, reload };
+  return { overview };
 }

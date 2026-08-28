@@ -2422,14 +2422,21 @@ export function WebShellSidebar({
       setWorkspaceRenameSubmitting(true);
       try {
         await workspaceActions.updateWorkspace(candidate.id, { displayName });
-        // The row label reads the capabilities list; refresh so the new name
-        // shows without waiting for the next connection tick.
-        await workspace.refreshCapabilities?.();
         setWorkspaceRenameCandidate(null);
       } catch (error) {
         onError(error, t('sidebar.renameWorkspaceFailed'));
+        return;
       } finally {
         setWorkspaceRenameSubmitting(false);
+      }
+      // The row label reads the capabilities list; refresh so the new name
+      // shows without waiting for the next connection tick. The rename has
+      // already converged, so a failed refresh is not a rename failure — a
+      // later poll tick reconciles the label.
+      try {
+        await workspace.refreshCapabilities?.();
+      } catch {
+        // Reconciled by the next capabilities refresh.
       }
     },
     [

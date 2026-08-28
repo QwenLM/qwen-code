@@ -16,7 +16,9 @@ issue — a frontend-only change on top of daemon routes that already exist.
 - The header keeps its name, badges and git chip. It gains session counts at
   its right edge: sessions waiting on the user (warning tone), sessions with a
   prompt in flight (success tone), and the total. A total from a truncated
-  catalog page shows as `N+`.
+  catalog page shows as `N+`. Collapsing a row disables its catalog query, so
+  the row keeps the last counts it computed: they stay visible while collapsed
+  and refresh on the next expand.
 - The name carries the full path as a tooltip. While the section is expanded
   the path is printed under the header.
 - The Projects label shows the number of registered workspaces once there is
@@ -36,6 +38,9 @@ context files (count). Hooks are available but off by default.
   finished with an enabled server still not connected; the channels chip when
   an instance is in the error state.
 - Below the sidebar's tight width the chips drop their text labels.
+- Extensions and channels are daemon-side facets. When they are unknown the
+  daemon lacks the route or the fetch failed, so their tooltip says
+  "unavailable on this daemon" rather than "not initialized yet".
 - Chips are read-only. Opening a management page is a menu action, so the
   chips never take the button role and their accessible names cannot collide
   with the navigation buttons that share the same words.
@@ -67,9 +72,18 @@ call fails independently — an older daemon without a route, or a transient
 error, leaves that facet `undefined` and keeps the others. A facet keeps its
 last known value across a failed round.
 
-Fetching is gated on the section being expanded and the workspace trusted, and
-polls every 30 s only while the document is visible, plus a refetch on window
-focus and on the sidebar's reload token. Collapsed rows cost nothing.
+Fetching is gated on the section being expanded, the workspace trusted and the
+default header rendered (a locked sidebar's custom header has no chip or menu
+to feed), and polls every 30 s only while the document is visible, plus a
+refetch on window focus and on the sidebar's reload token. Collapsed rows cost
+nothing, and a synthetic fallback workspace without a real cwd is never asked.
+
+Measured against the mock daemon (`npm run dev`, React StrictMode, 5 trusted
+workspaces all expanded, tab visible): after the initial round the sidebar
+issued 25 facet requests per 30 s tick — 50 over 60 s — next to the 33
+session-catalog and git-status requests the same rows already made in that
+window. Without StrictMode the initial round is 25 requests, not 50. That is
+the cost the layer-C overview endpoint collapses to 5 per tick.
 
 Session counts come from the catalog page the row already lists; the primary
 workspace, whose sessions the sidebar lists itself, gets its counts passed in.
@@ -84,6 +98,11 @@ workspace, whose sessions the sidebar lists itself, gets its counts passed in.
 
 ## Follow-ups (layers B and C in the issue)
 
+- A Trust… menu entry. `POST /workspaces/:w/trust/request` only records a
+  request that needs operator action and a daemon restart
+  (`accepted: false, requiresOperatorAction: true`), so an entry today would
+  promise a change it cannot make; it needs an "operator action required"
+  feedback surface first.
 - Bind the management pages to a chosen workspace so every row can open its
   own MCP / Skills / Extensions view.
 - A Workspaces overview page with a table across workspaces.

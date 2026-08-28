@@ -213,6 +213,16 @@ export interface WorkspaceOverviewSnapshot {
   fetchedAt: number;
 }
 
+/** Facets the workspace's ACP child discovers; the rest are daemon-side. */
+export function isRuntimeDiscoveredFacet(item: WorkspaceOverviewItem): boolean {
+  return (
+    item === 'mcp' ||
+    item === 'skills' ||
+    item === 'context' ||
+    item === 'hooks'
+  );
+}
+
 /**
  * Whether a facet carries a countable value. Runtime-discovered facets are
  * unknown until the ACP child reports `initialized`; the rest are known as

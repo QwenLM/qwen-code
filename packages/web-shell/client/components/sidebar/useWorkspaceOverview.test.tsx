@@ -10,6 +10,7 @@ import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import type { DaemonClient } from '@qwen-code/sdk/daemon';
 import {
+  WORKSPACE_OVERVIEW_POLL_MS,
   useWorkspaceOverview,
   type UseWorkspaceOverviewOptions,
   type WorkspaceOverviewResult,
@@ -38,6 +39,17 @@ const fullHandle = {
   workspaceMemory,
   workspaceHooks,
 };
+
+function skillsStatus(count: number) {
+  return {
+    v: 1,
+    workspaceCwd: '/w',
+    initialized: true,
+    skills: Array.from({ length: count }, (_, index) => ({
+      name: `skill-${index}`,
+    })),
+  };
+}
 
 let root: Root;
 let container: HTMLDivElement;
@@ -96,12 +108,7 @@ beforeEach(() => {
       },
     ],
   });
-  workspaceSkills.mockResolvedValue({
-    v: 1,
-    workspaceCwd: '/w',
-    initialized: true,
-    skills: [{ name: 's' }],
-  });
+  workspaceSkills.mockResolvedValue(skillsStatus(1));
   workspaceExtensions.mockResolvedValue({
     v: 1,
     workspaceId: 'w',
@@ -109,9 +116,15 @@ beforeEach(() => {
     trusted: true,
     desiredGeneration: 0,
     appliedGeneration: 0,
-    extensions: [],
+    extensions: [
+      { extensionId: 'a', effectiveActivation: 'enabled' },
+      { extensionId: 'b', effectiveActivation: 'disabled' },
+    ],
   });
-  workspaceChannels.mockResolvedValue({ revision: '0', instances: {} });
+  workspaceChannels.mockResolvedValue({
+    revision: '0',
+    instances: { gh: { runtime: { state: 'connected' } } },
+  });
   workspaceMemory.mockResolvedValue({
     v: 1,
     workspaceCwd: '/w',
@@ -126,7 +139,7 @@ beforeEach(() => {
     workspaceCwd: '/w',
     initialized: true,
     disabled: false,
-    hooks: [],
+    hooks: [{ name: 'lint' }],
     events: {},
   });
 });
@@ -157,6 +170,8 @@ describe('useWorkspaceOverview', () => {
     expect(workspaceMcp).toHaveBeenCalledTimes(1);
     expect(workspaceMemory).toHaveBeenCalledTimes(1);
     expect(workspaceSkills).not.toHaveBeenCalled();
+    expect(workspaceExtensions).not.toHaveBeenCalled();
+    expect(workspaceChannels).not.toHaveBeenCalled();
     expect(workspaceHooks).not.toHaveBeenCalled();
     expect(latest?.overview?.mcp).toMatchObject({
       configured: 1,
@@ -168,6 +183,26 @@ describe('useWorkspaceOverview', () => {
       ruleCount: 5,
     });
     expect(latest?.overview?.skills).toBeUndefined();
+    expect(latest?.overview?.extensions).toBeUndefined();
+    expect(latest?.overview?.channels).toBeUndefined();
+    expect(latest?.overview?.hooks).toBeUndefined();
+  });
+
+  it('maps the daemon-side and opt-in facets when requested', async () => {
+    await render(makeClient(fullHandle), '/w', {
+      enabled: true,
+      items: ['extensions', 'channels', 'hooks'],
+    });
+    await flush();
+    expect(workspaceExtensions).toHaveBeenCalledTimes(1);
+    expect(workspaceChannels).toHaveBeenCalledTimes(1);
+    expect(workspaceHooks).toHaveBeenCalledTimes(1);
+    expect(workspaceMcp).not.toHaveBeenCalled();
+    expect(latest?.overview).toMatchObject({
+      extensions: { total: 2, active: 1 },
+      channels: { configured: 1, connected: 1, failed: 0 },
+      hooks: { initialized: true, count: 1, disabled: false },
+    });
   });
 
   it('keeps other facets when one call fails and survives a missing method', async () => {
@@ -181,7 +216,6 @@ describe('useWorkspaceOverview', () => {
     expect(latest?.overview?.mcp).toBeDefined();
     expect(latest?.overview?.skills).toBeUndefined();
     expect(latest?.overview?.context).toBeUndefined();
-    expect(latest?.loading).toBe(false);
   });
 
   it('keeps the last known value of a facet across a transient failure', async () => {
@@ -199,6 +233,22 @@ describe('useWorkspaceOverview', () => {
     await flush();
     expect(workspaceSkills).toHaveBeenCalledTimes(2);
     expect(latest?.overview?.skills?.total).toBe(1);
+  });
+
+  it('lands a later successful round over the previous snapshot', async () => {
+    await render(makeClient(fullHandle), '/w', {
+      enabled: true,
+      items: ['skills'],
+      pollIntervalMs: 1_000,
+    });
+    await flush();
+    expect(latest?.overview?.skills?.total).toBe(1);
+    workspaceSkills.mockResolvedValueOnce(skillsStatus(2));
+    await act(async () => {
+      vi.advanceTimersByTime(1_000);
+    });
+    await flush();
+    expect(latest?.overview?.skills?.total).toBe(2);
   });
 
   it('polls only while the document is visible and refetches on focus', async () => {
@@ -231,6 +281,23 @@ describe('useWorkspaceOverview', () => {
     expect(workspaceMcp).toHaveBeenCalledTimes(3);
   });
 
+  it('polls at the 30s default when no interval is given', async () => {
+    await render(makeClient(fullHandle), '/w', {
+      enabled: true,
+      items: ['mcp'],
+    });
+    await flush();
+    expect(workspaceMcp).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      vi.advanceTimersByTime(WORKSPACE_OVERVIEW_POLL_MS - 1);
+    });
+    expect(workspaceMcp).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      vi.advanceTimersByTime(1);
+    });
+    expect(workspaceMcp).toHaveBeenCalledTimes(2);
+  });
+
   it('clears the snapshot and stops polling once disabled', async () => {
     const client = makeClient(fullHandle);
     await render(client, '/w', {
@@ -253,6 +320,32 @@ describe('useWorkspaceOverview', () => {
     expect(workspaceMcp).toHaveBeenCalledTimes(1);
   });
 
+  it('drops a round still in flight when disabled before it lands', async () => {
+    let resolveMcp: (value: unknown) => void = () => {};
+    workspaceMcp.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveMcp = resolve;
+        }),
+    );
+    const client = makeClient(fullHandle);
+    await render(client, '/w', { enabled: true, items: ['mcp'] });
+    await flush();
+    expect(workspaceMcp).toHaveBeenCalledTimes(1);
+    expect(latest?.overview).toBeUndefined();
+    await render(client, '/w', { enabled: false, items: ['mcp'] });
+    await act(async () => {
+      resolveMcp({
+        v: 1,
+        workspaceCwd: '/w',
+        initialized: true,
+        servers: [],
+      });
+    });
+    await flush();
+    expect(latest?.overview).toBeUndefined();
+  });
+
   it('refetches when the reload token changes', async () => {
     const client = makeClient(fullHandle);
     await render(client, '/w', {
@@ -268,5 +361,17 @@ describe('useWorkspaceOverview', () => {
     });
     await flush();
     expect(workspaceMcp).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not refetch for a fresh but equal items array', async () => {
+    const client = makeClient(fullHandle);
+    await render(client, '/w', { enabled: true, items: ['mcp', 'skills'] });
+    await flush();
+    await render(client, '/w', { enabled: true, items: ['skills', 'mcp'] });
+    await flush();
+    await render(client, '/w', { enabled: true, items: ['mcp', 'skills'] });
+    await flush();
+    expect(workspaceMcp).toHaveBeenCalledTimes(1);
+    expect(workspaceSkills).toHaveBeenCalledTimes(1);
   });
 });

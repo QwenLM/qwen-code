@@ -16,6 +16,7 @@ import {
 import { useI18n } from '../../i18n';
 import {
   isOverviewFacetKnown,
+  isRuntimeDiscoveredFacet,
   overviewFacetHasIssue,
   type WorkspaceOverviewItem,
   type WorkspaceOverviewSnapshot,
@@ -100,9 +101,14 @@ export function WorkspaceOverview({
         const value = formatOverviewValue(overview, item);
         const known = value !== undefined;
         const issue = overviewFacetHasIssue(overview, item);
+        // Runtime-discovered facets are unknown until the ACP child reports;
+        // daemon-side facets are unknown only when the route is missing or
+        // failed, where waiting changes nothing.
         const detail = known
           ? overviewDetail(t, overview!, item)
-          : t('sidebar.overview.unknown');
+          : isRuntimeDiscoveredFacet(item)
+            ? t('sidebar.overview.unknown')
+            : t('sidebar.overview.unavailable');
         const title = `${label}: ${detail}`;
         return (
           <div key={item} role="listitem" className={styles.chipItem}>

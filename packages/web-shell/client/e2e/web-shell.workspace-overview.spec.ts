@@ -42,6 +42,7 @@ function createScenario(): WebShellDaemonScenario {
         },
       ],
     },
+    gitStatus: { v: 2, workspaceCwd: PRIMARY_CWD, branch: 'main' },
     mcp: {
       servers: [
         {
@@ -114,8 +115,10 @@ async function gotoSession(
   await expect(page.locator('[data-web-shell-root]')).toBeVisible();
   const connection = await daemon.sse.waitForConnection(scenario.sessionId);
   await daemon.sendEvent(
-    replayCompleteEvent(scenario.sessionId, scenario.events.length),
-    connection.connectionId,
+    replayCompleteEvent({
+      sessionId: connection.sessionId,
+      replayedCount: scenario.events.length,
+    }),
   );
 }
 
@@ -225,8 +228,13 @@ test('opens the workspace menu with management entries on the primary workspace 
     'Reload runtime',
     'Remove workspace',
   ]);
-  await page.keyboard.press('Escape');
+  // "New worktree task" opens a draft in that workspace with the composer's
+  // git mode armed for a worktree.
+  await secondaryMenu
+    .getByRole('menuitem', { name: 'New worktree task' })
+    .click();
   await expect(secondaryMenu).toBeHidden();
+  await expect(page.getByRole('button', { name: 'Worktree' })).toBeVisible();
 
   const primaryRow = sidebar
     .getByRole('button', { name: /^qwen-web-shell-e2e/ })

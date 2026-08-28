@@ -184,6 +184,32 @@ describe('WorkspaceMenu', () => {
     expect(onOpenChange).toHaveBeenLastCalledWith(false);
   });
 
+  it('forwards outside-dismissal hooks to the menu content', async () => {
+    const onPointerDownOutside = vi.fn();
+    const onCloseAutoFocus = vi.fn((event: Event) => event.preventDefault());
+    await render(
+      <WorkspaceMenu
+        workspace={workspace}
+        actions={{ copyPath: vi.fn() }}
+        onPointerDownOutside={onPointerDownOutside}
+        onCloseAutoFocus={onCloseAutoFocus}
+      />,
+    );
+    await open();
+    await act(async () => {
+      document.body.dispatchEvent(
+        new PointerEvent('pointerdown', { bubbles: true, button: 0 }),
+      );
+      await Promise.resolve();
+    });
+    expect(onPointerDownOutside).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(onCloseAutoFocus).toHaveBeenCalledTimes(1);
+    expect(document.body.querySelector('[role="menu"]')).toBeNull();
+  });
+
   it('disables the trigger', async () => {
     await render(
       <WorkspaceMenu

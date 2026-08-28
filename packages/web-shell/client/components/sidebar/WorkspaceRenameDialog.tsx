@@ -14,7 +14,8 @@ import { Input } from '../ui/input';
 import { workspaceBasename } from '../../utils/workspace';
 import styles from './WebShellSidebar.module.css';
 
-export const WORKSPACE_DISPLAY_NAME_MAX_LENGTH = 64;
+/** Mirrors MAX_WORKSPACE_DISPLAY_NAME_LENGTH in the daemon's registration store. */
+export const WORKSPACE_DISPLAY_NAME_MAX_LENGTH = 256;
 
 interface WorkspaceRenameDialogProps {
   workspace: DaemonWorkspaceCapability;
