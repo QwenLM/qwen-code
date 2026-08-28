@@ -362,7 +362,7 @@ class WorkflowToolInvocation extends BaseToolInvocation<
   ): Promise<WorkflowToolResult> {
     const runInBackground = this.params.run_in_background === true;
     if (runInBackground && signal.aborted) {
-      return backgroundStartCancelledResult();
+      return startCancelledResult();
     }
     let handle: WorkflowRunHandle;
     try {
@@ -382,16 +382,18 @@ class WorkflowToolInvocation extends BaseToolInvocation<
             : undefined,
       });
     } catch (error) {
-      // Two cancel sources reach a background start: the caller's own
-      // signal, and a registry-side cancel (`cancelStarting`) that aborts
-      // the run's controller while the caller's signal stays live. The
-      // runner reports the latter with a typed error; both are the same
-      // outcome to the model.
+      // Two cancel sources reach a start before it registers: the caller's
+      // own signal (background only — a foreground start registers and
+      // settles `cancelled` instead), and a registry-side cancel
+      // (`cancelStarting`, `abortAll`) that aborts the run's controller
+      // while the caller's signal stays live, in either mode. The runner
+      // reports the latter with a typed error; both are the same outcome
+      // to the model.
       if (
-        runInBackground &&
-        (signal.aborted || error instanceof WorkflowStartCancelledError)
+        error instanceof WorkflowStartCancelledError ||
+        (runInBackground && signal.aborted)
       ) {
-        return backgroundStartCancelledResult();
+        return startCancelledResult();
       }
       // A script that never compiled has no run behind it, so reporting it as
       // a failed workflow would be wrong twice: it invites the model to go
@@ -531,7 +533,7 @@ class WorkflowToolInvocation extends BaseToolInvocation<
   }
 }
 
-function backgroundStartCancelledResult(): WorkflowToolResult {
+function startCancelledResult(): WorkflowToolResult {
   return {
     llmContent: 'Workflow was cancelled before it could start.',
     returnDisplay: 'Workflow cancelled.',

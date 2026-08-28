@@ -3504,6 +3504,31 @@ export class Session implements SessionContext {
     return true;
   }
 
+  /**
+   * A sibling session deleted `runId` from the shared store. The
+   * deletion-sequence marker is per-Session — it records deletions THIS
+   * session issued — while the store and the delete entrance are
+   * process-wide, so without this a refresh of ours that began reading
+   * the directory before the sibling's delete landed would merge the
+   * stale listing and republish the run the sibling's client was just
+   * told was gone. Called under the sibling's task-mutation claim,
+   * symmetric to the registry `removeTerminal` sweep.
+   *
+   * The R7-5 persisted latch is deliberately kept: a late terminal
+   * emission for the deleted run must still not re-insert it.
+   */
+  noteExternalWorkflowDeletion(runId: string): void {
+    this.workflowDeletionSeqByRunId.set(runId, ++this.workflowDeletionSeq);
+    this.unpersistedWorkflowHistory.delete(runId);
+    this.mergedWorkflowRunIds.delete(runId);
+    const retained = this.workflowHistory.filter(
+      (item) => item.runId !== runId,
+    );
+    if (retained.length === this.workflowHistory.length) return;
+    this.workflowHistory = retained;
+    this.#activeWorkChanged();
+  }
+
   #rememberWorkflowHistory(entry: WorkflowTask): void {
     if (!isTerminalWorkflowStatus(entry.status)) {
       // Back in an active state means this runId was registered afresh
@@ -3813,7 +3838,19 @@ export class Session implements SessionContext {
     if (shellActive) {
       holds.push({ category: 'shell', id: 'background-shells' });
     }
-    for (const task of this.config.getWorkflowRunRegistry().list()) {
+    const workflowRegistry = this.config.getWorkflowRunRegistry();
+    // A reserved-but-unregistered run (script loading, journal replay)
+    // has no `list()` entry yet, but the registry's hasRunningEntries()
+    // and the delete/cancel liveness gates already count it as live. A
+    // daemon-initiated conditional close that read no hold here would
+    // dispose the session and abort the start under the client that just
+    // asked for it. The hold releases itself: registration takes over
+    // with the entry's running hold, and a failed or cancelled start
+    // drops the reservation via `releaseStart`.
+    for (const runId of workflowRegistry.listStartingRunIds?.() ?? []) {
+      holds.push({ category: 'workflow', id: runId });
+    }
+    for (const task of workflowRegistry.list()) {
       // Mirror the registry's hasRunningEntries(): a paused run executes
       // nothing and no backstop would ever release the hold, so it must
       // not pin the session the way executing work does.

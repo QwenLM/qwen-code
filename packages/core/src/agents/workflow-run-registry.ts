@@ -624,6 +624,17 @@ export class WorkflowRunRegistry {
   }
 
   /**
+   * Run ids reserved by `reserveStart` and not yet registered. A session
+   * reports these as active-work holds: `list()` has no entry for the
+   * starting window, and a daemon that judged the session idle from
+   * `list()` alone would close it and abort the start under the client
+   * that just asked for it.
+   */
+  listStartingRunIds(): string[] {
+    return [...this.starting.keys()];
+  }
+
+  /**
    * Cancel a run that has been reserved but not yet registered. Aborts
    * the reserved controller only — the reservation itself is the
    * runner's to release, in its start-failure path, exactly as after

@@ -292,9 +292,7 @@ describe('WorkflowRunner', () => {
       registry.abortAll();
       resolveLoad?.({ results: new Map(), started: new Map() });
 
-      await expect(start).rejects.toThrow(
-        'Background workflow start was cancelled.',
-      );
+      await expect(start).rejects.toThrow('Workflow start was cancelled.');
       expect(registry.isStarting(runId)).toBe(false);
       expect(registry.get(runId)).toBeUndefined();
     } finally {
@@ -344,9 +342,7 @@ describe('WorkflowRunner', () => {
       registry.abortAll();
       finishLoad?.(saved);
 
-      await expect(start).rejects.toThrow(
-        'Background workflow start was cancelled.',
-      );
+      await expect(start).rejects.toThrow('Workflow start was cancelled.');
       // Typed, not a bare Error: the tool maps this to its "cancelled
       // before it could start" result even when the caller's own signal
       // is still live.

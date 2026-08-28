@@ -104,16 +104,17 @@ export class WorkflowScriptNotLaunchedError extends Error {
 }
 
 /**
- * A background start that was cancelled before it registered — by the
- * caller's signal, or by `WorkflowRunRegistry.cancelStarting` aborting the
- * run's own controller while the caller's signal stayed live. The second
- * source is why this is a class and not a bare `Error`: the tool cannot
- * tell it from a genuine start failure by looking at the caller's signal,
- * and would otherwise surface "cancelled" as an unexplained error.
+ * A start that was cancelled before it registered — a background start by
+ * the caller's signal, or a start in either mode by
+ * `WorkflowRunRegistry.cancelStarting` / `abortAll` aborting the run's own
+ * controller while the caller's signal stayed live. The second source is
+ * why this is a class and not a bare `Error`: the tool cannot tell it from
+ * a genuine start failure by looking at the caller's signal, and would
+ * otherwise surface "cancelled" as an unexplained error.
  */
 export class WorkflowStartCancelledError extends Error {
   constructor() {
-    super('Background workflow start was cancelled.');
+    super('Workflow start was cancelled.');
     this.name = 'WorkflowStartCancelledError';
   }
 }
@@ -191,10 +192,19 @@ export class WorkflowRunner {
       resumeReplay = options.resumeFromRunId
         ? await journal?.load()
         : undefined;
-      if (
-        runInBackground &&
-        (controller.signal.aborted || options.signal.aborted)
-      ) {
+      // A registry-side cancel (`cancelStarting`, `abortAll`) aborts the
+      // reserved controller while the caller's signal stays live. It is a
+      // cancel in either mode: registering anyway would let the settlement
+      // classifier — which only knows the caller's signal and the entry's
+      // status — record the run as failed, or completed for a dispatch-free
+      // script, under a client that was just told `{cancelled: true}`.
+      if (controller.signal.aborted && !options.signal.aborted) {
+        throw new WorkflowStartCancelledError();
+      }
+      // The caller's own abort is reported the same way for a background
+      // start; a foreground start registers and settles `cancelled` so the
+      // caller's tool result carries the run it asked for.
+      if (runInBackground && options.signal.aborted) {
         throw new WorkflowStartCancelledError();
       }
       callerWasAbortedBeforeStart = options.signal.aborted;

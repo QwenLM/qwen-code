@@ -10892,7 +10892,14 @@ class QwenAgent implements Agent {
             // liveness gate already treats that window as live; cancel
             // must too, or the client is told "not_found" about a run it
             // can see starting, and cannot stop it until it registers.
-            if (!task && registry.isStarting?.(taskId)) {
+            // A retry reuses its runId, so during ITS starting window the
+            // old terminal entry is still there — a live reservation
+            // shadowed by a terminal entry is the same starting run, not
+            // a "not_running" one.
+            if (
+              (!task || isTerminalWorkflowStatus(task.status)) &&
+              registry.isStarting?.(taskId)
+            ) {
               registry.cancelStarting(taskId);
               debugLogger.info(
                 `sessionTaskCancel completed sessionId=${sessionId} taskId=${taskId} taskKind=${taskKind} status=starting`,
@@ -10971,13 +10978,17 @@ class QwenAgent implements Agent {
               if (changed) {
                 // Every session shares the one store: drop the sibling
                 // registries' terminal entries too, or a retry from a
-                // sibling re-persists the just-deleted run.
+                // sibling re-persists the just-deleted run — and mark the
+                // deletion in each sibling's history, or a sibling refresh
+                // that began reading the directory before this delete
+                // landed merges the stale listing and republishes the run.
                 for (const [siblingId, sibling] of this.sessions) {
                   if (siblingId === sessionId) continue;
                   sibling
                     .getConfig()
                     .getWorkflowRunRegistry()
                     .removeTerminal(taskId);
+                  sibling.noteExternalWorkflowDeletion(taskId);
                 }
               }
               return { changed };
@@ -11075,10 +11086,18 @@ class QwenAgent implements Agent {
                     }
                   : { changed: false, status: task.status };
               }
-              return {
-                changed: true,
-                status: registry.get(taskId)?.status,
-              };
+              // `execute()` reports a start that never registered — a
+              // cancel landing in the retry's starting window, whether from
+              // `cancelStarting` or a session dispose — by omitting
+              // `workflowRunId`, the same shape the rerun and run-saved
+              // branches gate on. Answering `changed: true` there tells the
+              // client a run exists that nothing will ever progress.
+              return result.workflowRunId
+                ? {
+                    changed: true,
+                    status: registry.get(result.workflowRunId)?.status,
+                  }
+                : { changed: false, status: task.status };
             },
           );
           if (!attempt.acquired) {

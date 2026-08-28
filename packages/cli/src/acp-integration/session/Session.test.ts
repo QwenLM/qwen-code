@@ -511,6 +511,7 @@ describe('Session', () => {
     get: ReturnType<typeof vi.fn>;
     getHandle: ReturnType<typeof vi.fn>;
     isStarting: ReturnType<typeof vi.fn>;
+    listStartingRunIds: ReturnType<typeof vi.fn>;
     removeTerminal: ReturnType<typeof vi.fn>;
     list: ReturnType<typeof vi.fn>;
     abortAll: ReturnType<typeof vi.fn>;
@@ -749,6 +750,7 @@ describe('Session', () => {
       get: vi.fn().mockReturnValue(undefined),
       getHandle: vi.fn().mockReturnValue(undefined),
       isStarting: vi.fn().mockReturnValue(false),
+      listStartingRunIds: vi.fn().mockReturnValue([]),
       removeTerminal: vi.fn().mockReturnValue(false),
       list: vi.fn().mockReturnValue([]),
       abortAll: vi.fn(),
@@ -1192,6 +1194,31 @@ describe('Session', () => {
       mockWorkflowRunRegistry.list.mockReturnValue([
         { runId: 'wf-paused', status: 'paused' },
       ]);
+      expect(session.collectActiveWorkHolds()).toEqual([]);
+      expect(session.isIdle()).toBe(true);
+      session.dispose();
+    });
+
+    it('holds a workflow run that is reserved but not yet registered', () => {
+      // Between `reserveStart` and `register` the run has no `list()`
+      // entry, yet the registry's hasRunningEntries() and the liveness
+      // gates already count it as live. A daemon conditional close that
+      // read no hold here disposed the session and aborted the start
+      // under the client that just asked for it.
+      mockWorkflowRunRegistry.listStartingRunIds.mockReturnValue([
+        'wf-starting',
+      ]);
+      mockWorkflowRunRegistry.list.mockReturnValue([
+        { runId: 'wf-paused', status: 'paused' },
+      ]);
+      createReportingSession();
+
+      expect(holdIds('workflow')).toEqual(['wf-starting']);
+      expect(session.isIdle()).toBe(false);
+
+      // Registration takes over with the entry's own running hold; a
+      // failed or cancelled start drops the reservation.
+      mockWorkflowRunRegistry.listStartingRunIds.mockReturnValue([]);
       expect(session.collectActiveWorkHolds()).toEqual([]);
       expect(session.isIdle()).toBe(true);
       session.dispose();
@@ -2912,6 +2939,86 @@ describe('Session', () => {
     expect(session.getWorkflowHistory()).toEqual([
       expect.objectContaining({ runId: 'wf_stale' }),
     ]);
+  });
+
+  it('does not republish a run a sibling session deleted while this refresh was still reading the disk', async () => {
+    // The deletion-sequence marker is per-Session, but the store and the
+    // delete entrance are process-wide: session A's delete landing while
+    // session B's refresh had already read the directory left nothing in
+    // B to filter the stale listing, and B republished the run A's
+    // client was just told was gone. The delete handler now marks the
+    // deletion in every sibling, under its claim.
+    session.dispose();
+    const snapshot = {
+      runId: 'wf_cross',
+      meta: null,
+      status: 'failed' as const,
+      script: 'return 1;',
+      phases: [],
+      agentsDispatched: 0,
+      agentsCompleted: 0,
+      tokensSpent: 0,
+      tokenBudgetTotal: null,
+      perPhaseTokens: [],
+      recentLogs: [],
+      startTime: 1_000,
+      endTime: 2_000,
+    };
+    const deleting = new Session(
+      'deleting-session',
+      mockConfig,
+      mockClient,
+      mockSettings,
+      undefined,
+      undefined,
+      [snapshot],
+    );
+    session = new Session(
+      'observing-session',
+      mockConfig,
+      mockClient,
+      mockSettings,
+      undefined,
+      undefined,
+      [snapshot],
+    );
+    try {
+      let finishStaleRead!: (snapshots: Array<typeof snapshot>) => void;
+      listWorkflowSnapshotsSpy.mockImplementationOnce(
+        () =>
+          new Promise<Array<typeof snapshot>>((resolve) => {
+            finishStaleRead = resolve;
+          }),
+      );
+      const staleRefresh = session.refreshWorkflowHistory();
+      await vi.waitFor(() => expect(finishStaleRead).toBeDefined());
+
+      // The deleting session's own refresh sees the file, then removes
+      // it, and the handler propagates the deletion to the observer.
+      listWorkflowSnapshotsSpy.mockResolvedValueOnce([snapshot]);
+      await expect(
+        deleting.deleteWorkflowHistory(snapshot.runId),
+      ).resolves.toBe(true);
+      session.noteExternalWorkflowDeletion(snapshot.runId);
+      expect(session.getWorkflowHistory()).toEqual([]);
+
+      // The observer's read that began before the delete now completes
+      // with the pre-delete listing.
+      finishStaleRead([snapshot]);
+      await staleRefresh;
+
+      expect(session.getWorkflowHistory()).toEqual([]);
+
+      // A later refresh that genuinely finds the run again (a retry
+      // reuses the runId) is not suppressed by the old deletion.
+      listWorkflowSnapshotsSpy.mockResolvedValueOnce([snapshot]);
+      await session.refreshWorkflowHistory();
+      expect(session.getWorkflowHistory()).toEqual([
+        expect.objectContaining({ runId: 'wf_cross' }),
+      ]);
+    } finally {
+      deleting.dispose();
+    }
   });
 
   it('drops persisted workflow history deleted by another session', async () => {
