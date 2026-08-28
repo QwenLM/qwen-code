@@ -118,6 +118,18 @@ function validateUiScopeFlags(
   // --project save would silently not take effect — reject it up front.
   if (
     parsed.scope === SettingScope.Workspace &&
+    context.executionPolicy?.allowWorkspaceSettingsWrite === false
+  ) {
+    return {
+      type: 'message',
+      messageType: 'error',
+      content: t(
+        'Project language settings are not available in this session.',
+      ),
+    };
+  }
+  if (
+    parsed.scope === SettingScope.Workspace &&
     context.services.settings &&
     !context.services.settings.isTrusted
   ) {
@@ -221,7 +233,7 @@ async function setOutputLanguage(
     if (config) {
       try {
         await config.refreshHierarchicalMemory();
-        await config.getGeminiClient().refreshSystemInstruction();
+        await config.getLlmClient().refreshSystemInstruction();
       } catch (error) {
         debugLogger.warn(
           'Failed to apply output language to running session:',

@@ -7,12 +7,12 @@
 import { randomUUID } from 'node:crypto';
 import type {
   Config,
-  ServerGeminiStreamEvent,
+  ServerLlmStreamEvent,
   ToolCallRequestInfo,
   McpToolProgressData,
   ShellProgressData,
 } from '@qwen-code/qwen-code-core';
-import { GeminiEventType } from '@qwen-code/qwen-code-core';
+import { LlmEventType } from '@qwen-code/qwen-code-core';
 import type {
   CLIAssistantMessage,
   CLIMessage,
@@ -131,8 +131,8 @@ export class StreamJsonOutputAdapter
     this.emitMessage(message);
   }
 
-  override processEvent(event: ServerGeminiStreamEvent): void {
-    if (event.type === GeminiEventType.GoalState) {
+  override processEvent(event: ServerLlmStreamEvent): void {
+    if (event.type === LlmEventType.GoalState) {
       const signature = JSON.stringify(event.value);
       if (signature === this.lastGoalStateSignature) return;
       this.lastGoalStateSignature = signature;
@@ -153,7 +153,7 @@ export class StreamJsonOutputAdapter
     // Active goal updates are session-level metadata, not message content.
     // They intentionally bypass the base finalized guard so late goal state
     // changes can still reach stream consumers.
-    if (event.type === GeminiEventType.ActiveGoal) {
+    if (event.type === LlmEventType.ActiveGoal) {
       this.emitStreamEventIfEnabled(
         {
           type: 'active_goal',

@@ -42,6 +42,8 @@ import { SkillTool } from '../tools/skill.js';
 import { StructuredToolError } from '../tools/priorReadEnforcement.js';
 import { ToolNames, ToolNamesMigration } from '../tools/tool-names.js';
 import { ExitPlanModeTool } from '../tools/exitPlanMode.js';
+import { createMemoryScopedAgentConfig } from '../memory/memory-scoped-agent-config.js';
+import type { PermissionManager } from '../permissions/permission-manager.js';
 import type {
   CompletedToolCall,
   ExecutingToolCall,
@@ -62,7 +64,7 @@ import {
   MOCK_TOOL_GET_DEFAULT_PERMISSION,
   MOCK_TOOL_GET_CONFIRMATION_DETAILS,
 } from '../test-utils/mock-tool.js';
-import { GeminiChat } from './geminiChat.js';
+import { LlmChat } from './llm-chat.js';
 import { MessageBusType } from '../confirmation-bus/types.js';
 import type { HookExecutionResponse } from '../confirmation-bus/types.js';
 import { type NotificationType } from '../hooks/types.js';
@@ -822,7 +824,7 @@ describe('CoreToolScheduler', () => {
     onToolCallsUpdate?: ReturnType<typeof vi.fn>;
     memoryMonitor?: { scheduleCheck: () => void };
     toolOutputBatchBudget?: number;
-    getGeminiClient?: () => unknown;
+    getLlmClient?: () => unknown;
     getPlanFilePath?: () => string;
     truncateToolOutputThreshold?: number;
     truncateToolOutputLines?: number;
@@ -834,6 +836,11 @@ describe('CoreToolScheduler', () => {
       promptId: string,
       fallbackOwner?: string,
     ) => string;
+    permissionManager?: {
+      isToolEnabled: (name: string) => Promise<boolean>;
+      findMatchingDenyRule: (ctx: unknown) => string | undefined;
+      isPermissionsAllowListActive: () => boolean;
+    };
   }) {
     const ensureTool = vi.fn(
       async (name: string) =>
@@ -866,6 +873,7 @@ describe('CoreToolScheduler', () => {
         setApprovalMode: options.setApprovalMode ?? vi.fn(),
         getPermissionsAllow: () => [],
         getPermissionsDeny: options.getPermissionsDeny ?? (() => undefined),
+        getPermissionManager: () => options.permissionManager,
         getContentGeneratorConfig: () => ({
           model: 'test-model',
           authType: 'gemini',
@@ -900,7 +908,7 @@ describe('CoreToolScheduler', () => {
         getToolRegistry: () => mockToolRegistry,
         getCwd: () => '/repo',
         getUseModelRouter: () => false,
-        getGeminiClient: options.getGeminiClient ?? (() => null),
+        getLlmClient: options.getLlmClient ?? (() => null),
         getPlanFilePath:
           options.getPlanFilePath ?? (() => '/tmp/plans/test-session-id.md'),
         getChatRecordingService: () => undefined,
@@ -1158,45 +1166,50 @@ describe('CoreToolScheduler', () => {
     ).toBe(0);
   });
 
-  it('does not leak the path-unescape rewrite into the caller-owned request args', async () => {
-    const readExecute = vi.fn().mockResolvedValue({
-      llmContent: 'read',
-      returnDisplay: 'read',
-    });
-    const { scheduler, onAllToolCallsComplete } =
-      createSchedulerForLegacyToolTests({
-        toolsByName: new Map([
-          [
-            ToolNames.READ_FILE,
-            new MockTool({ name: ToolNames.READ_FILE, execute: readExecute }),
-          ],
-        ]),
+  // `unescapePath` is an intentional no-op on win32 (backslashes are path
+  // separators there), so the rewrite this test pins never fires.
+  it.skipIf(process.platform === 'win32')(
+    'does not leak the path-unescape rewrite into the caller-owned request args',
+    async () => {
+      const readExecute = vi.fn().mockResolvedValue({
+        llmContent: 'read',
+        returnDisplay: 'read',
       });
-    // Callers pass args that may alias the model-emitted functionCall part
-    // stored in chat history; the scheduler's in-place PATH_ARG_KEYS
-    // unescape must land on its own cloned copy, or the rewrite leaks into
-    // history and skews the duplicate-replay fingerprints derived from it.
-    const callerArgs = { file_path: '/tmp/my\\ docs/a.txt' };
-    const callerRequest = {
-      callId: 'escaped-path-call',
-      name: ToolNames.READ_FILE,
-      args: callerArgs,
-      isClientInitiated: false,
-      prompt_id: 'prompt-escaped-path',
-    };
+      const { scheduler, onAllToolCallsComplete } =
+        createSchedulerForLegacyToolTests({
+          toolsByName: new Map([
+            [
+              ToolNames.READ_FILE,
+              new MockTool({ name: ToolNames.READ_FILE, execute: readExecute }),
+            ],
+          ]),
+        });
+      // Callers pass args that may alias the model-emitted functionCall part
+      // stored in chat history; the scheduler's in-place PATH_ARG_KEYS
+      // unescape must land on its own cloned copy, or the rewrite leaks into
+      // history and skews the duplicate-replay fingerprints derived from it.
+      const callerArgs = { file_path: '/tmp/my\\ docs/a.txt' };
+      const callerRequest = {
+        callId: 'escaped-path-call',
+        name: ToolNames.READ_FILE,
+        args: callerArgs,
+        isClientInitiated: false,
+        prompt_id: 'prompt-escaped-path',
+      };
 
-    await scheduler.schedule([callerRequest], new AbortController().signal);
-    await vi.waitFor(() => {
-      expect(onAllToolCallsComplete).toHaveBeenCalledOnce();
-    });
+      await scheduler.schedule([callerRequest], new AbortController().signal);
+      await vi.waitFor(() => {
+        expect(onAllToolCallsComplete).toHaveBeenCalledOnce();
+      });
 
-    const completedCalls = onAllToolCallsComplete.mock
-      .calls[0][0] as CompletedToolCall[];
-    expect(completedCalls[0].request.args['file_path']).toBe(
-      '/tmp/my docs/a.txt',
-    );
-    expect(callerArgs.file_path).toBe('/tmp/my\\ docs/a.txt');
-  });
+      const completedCalls = onAllToolCallsComplete.mock
+        .calls[0][0] as CompletedToolCall[];
+      expect(completedCalls[0].request.args['file_path']).toBe(
+        '/tmp/my docs/a.txt',
+      );
+      expect(callerArgs.file_path).toBe('/tmp/my\\ docs/a.txt');
+    },
+  );
 
   it('clears the display list before awaiting the completion callback (#9420)', async () => {
     // Regression: since v0.21.13 (#9121) the TUI's completion callback awaits
@@ -1499,8 +1512,8 @@ describe('CoreToolScheduler', () => {
     expect(execute).toHaveBeenCalledWith({ plan: 'Original plan' });
   });
 
-  function createChatWithPlanCall(callId: string, plan: string): GeminiChat {
-    return new GeminiChat({} as unknown as Config, {}, [
+  function createChatWithPlanCall(callId: string, plan: string): LlmChat {
+    return new LlmChat({} as unknown as Config, {}, [
       { role: 'user', parts: [{ text: 'please plan this' }] },
       {
         role: 'model',
@@ -1543,7 +1556,7 @@ describe('CoreToolScheduler', () => {
       toolsByName: new Map([[ToolNames.EXIT_PLAN_MODE, tool]]),
       approvalMode: ApprovalMode.YOLO,
       onAllToolCallsComplete,
-      getGeminiClient: () => ({ getChat: () => chat }),
+      getLlmClient: () => ({ getChat: () => chat }),
       getPlanFilePath: () => planFile,
     });
 
@@ -1610,7 +1623,7 @@ describe('CoreToolScheduler', () => {
       messageBus,
       disableHooks: false,
       onAllToolCallsComplete,
-      getGeminiClient: () => ({ getChat: () => chat }),
+      getLlmClient: () => ({ getChat: () => chat }),
       getPlanFilePath: () => planFile,
     });
 
@@ -1664,7 +1677,7 @@ describe('CoreToolScheduler', () => {
       toolsByName: new Map([[ToolNames.EXIT_PLAN_MODE, tool]]),
       approvalMode: ApprovalMode.YOLO,
       onAllToolCallsComplete,
-      getGeminiClient: () => ({ getChat: () => chat }),
+      getLlmClient: () => ({ getChat: () => chat }),
       getPlanFilePath: () => planFile,
     });
 
@@ -1710,7 +1723,7 @@ describe('CoreToolScheduler', () => {
       toolsByName: new Map([[ToolNames.EXIT_PLAN_MODE, tool]]),
       approvalMode: ApprovalMode.YOLO,
       onAllToolCallsComplete,
-      getGeminiClient: () => ({ getChat: () => chat }),
+      getLlmClient: () => ({ getChat: () => chat }),
       getPlanFilePath: () =>
         path.join(os.tmpdir(), 'qwen-plan-that-does-not-exist.md'),
     });
@@ -1749,7 +1762,7 @@ describe('CoreToolScheduler', () => {
       toolsByName: new Map([[ToolNames.EXIT_PLAN_MODE, tool]]),
       approvalMode: ApprovalMode.YOLO,
       onAllToolCallsComplete,
-      getGeminiClient: () => ({ getChat: () => chat }),
+      getLlmClient: () => ({ getChat: () => chat }),
     });
 
     await scheduler.schedule(
@@ -3518,6 +3531,433 @@ describe('CoreToolScheduler', () => {
     }
     expect(execute).not.toHaveBeenCalled();
     expect(ensureTool).not.toHaveBeenCalled();
+  });
+
+  it('attributes a registry-allowlist miss to permissions.allow, not a deny rule (#9827)', async () => {
+    // When isToolEnabled rejects because the tool is not covered by the
+    // active permissions.allow allowlist, findMatchingDenyRule finds
+    // nothing — nothing was ever asked or declined. The error must point
+    // at the real config knob instead of citing a nonexistent deny rule.
+    const execute = vi.fn().mockResolvedValue({
+      llmContent: 'sent',
+      returnDisplay: 'sent',
+    });
+    const toolsByName = new Map<string, MockTool>([
+      [
+        ToolNames.SEND_MESSAGE,
+        new MockTool({ name: ToolNames.SEND_MESSAGE, execute }),
+      ],
+    ]);
+    const permissionManager = {
+      isToolEnabled: vi.fn().mockResolvedValue(false),
+      findMatchingDenyRule: vi.fn().mockReturnValue(undefined),
+      isPermissionsAllowListActive: vi.fn().mockReturnValue(true),
+      isCoveredByAllowOrAskRule: vi.fn().mockReturnValue(false),
+    };
+    const { scheduler, onAllToolCallsComplete } =
+      createSchedulerForLegacyToolTests({
+        toolsByName,
+        permissionManager,
+      });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: 'allowlist-miss',
+          name: ToolNames.SEND_MESSAGE,
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-allowlist-miss',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    expect(onAllToolCallsComplete).toHaveBeenCalled();
+    const completedCalls = onAllToolCallsComplete.mock
+      .calls[0][0] as ToolCall[];
+    const completedCall = completedCalls[0];
+    expect(completedCall.status).toBe('error');
+    if (completedCall.status === 'error') {
+      expect(completedCall.response.errorType).toBe(
+        ToolErrorType.EXECUTION_DENIED,
+      );
+      const message = completedCall.response.error?.message ?? '';
+      expect(message).toContain('permissions.allow');
+      expect(message).toContain(ToolNames.SEND_MESSAGE);
+      expect(message).not.toContain('declined');
+      expect(message).not.toContain('deny rule');
+    }
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it('lets a matching deny rule win over the allowlist-miss attribution (#9827)', async () => {
+    // The deny-rule arm comes FIRST in the message branch, and it must:
+    // a tool rejected by a deny rule is by definition not covered by any
+    // allow/ask rule, so under an active allowlist BOTH the deny arm and
+    // the allowlist-miss arm could fire. The denial is real here —
+    // something was declined — so the message must cite the matching deny
+    // rule, not the "not covered by permissions.allow" attribution (whose
+    // remediation would be wrong: an allow rule cannot override a deny
+    // rule, the only fix is removing the deny rule itself).
+    const execute = vi.fn().mockResolvedValue({
+      llmContent: 'sent',
+      returnDisplay: 'sent',
+    });
+    const toolsByName = new Map<string, MockTool>([
+      [
+        ToolNames.SEND_MESSAGE,
+        new MockTool({ name: ToolNames.SEND_MESSAGE, execute }),
+      ],
+    ]);
+    const permissionManager = {
+      isToolEnabled: vi.fn().mockResolvedValue(false),
+      findMatchingDenyRule: vi.fn().mockReturnValue(ToolNames.SEND_MESSAGE),
+      // Arm the allowlist-miss branch too so this test pins the
+      // if/else-if ORDERING, not just the deny arm in isolation.
+      isPermissionsAllowListActive: vi.fn().mockReturnValue(true),
+      isCoveredByAllowOrAskRule: vi.fn().mockReturnValue(false),
+    };
+    const { scheduler, onAllToolCallsComplete } =
+      createSchedulerForLegacyToolTests({
+        toolsByName,
+        permissionManager,
+      });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: 'deny-rule-beats-allowlist',
+          name: ToolNames.SEND_MESSAGE,
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-deny-rule-beats-allowlist',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    expect(onAllToolCallsComplete).toHaveBeenCalled();
+    const completedCalls = onAllToolCallsComplete.mock
+      .calls[0][0] as ToolCall[];
+    const completedCall = completedCalls[0];
+    expect(completedCall.status).toBe('error');
+    if (completedCall.status === 'error') {
+      expect(completedCall.response.errorType).toBe(
+        ToolErrorType.EXECUTION_DENIED,
+      );
+      const message = completedCall.response.error?.message ?? '';
+      expect(message).toBe(
+        `Qwen Code requires permission to use "${ToolNames.SEND_MESSAGE}", but that permission was declined. Matching deny rule: "${ToolNames.SEND_MESSAGE}".`,
+      );
+      expect(message).not.toContain('permissions.allow');
+    }
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it('lets a matching deny rule win over the generic declined fallback without an active allowlist (#9827)', async () => {
+    // Without an active allowlist only the deny arm and the generic
+    // fallback arm can fire; the matching rule must still surface so the
+    // user sees WHICH configured rule declined the call instead of the
+    // bare "permission was declined" message.
+    const execute = vi.fn().mockResolvedValue({
+      llmContent: 'sent',
+      returnDisplay: 'sent',
+    });
+    const toolsByName = new Map<string, MockTool>([
+      [
+        ToolNames.SEND_MESSAGE,
+        new MockTool({ name: ToolNames.SEND_MESSAGE, execute }),
+      ],
+    ]);
+    const permissionManager = {
+      isToolEnabled: vi.fn().mockResolvedValue(false),
+      findMatchingDenyRule: vi.fn().mockReturnValue(ToolNames.SEND_MESSAGE),
+      isPermissionsAllowListActive: vi.fn().mockReturnValue(false),
+    };
+    const { scheduler, onAllToolCallsComplete } =
+      createSchedulerForLegacyToolTests({
+        toolsByName,
+        permissionManager,
+      });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: 'deny-rule-beats-fallback',
+          name: ToolNames.SEND_MESSAGE,
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-deny-rule-beats-fallback',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    expect(onAllToolCallsComplete).toHaveBeenCalled();
+    const completedCalls = onAllToolCallsComplete.mock
+      .calls[0][0] as ToolCall[];
+    const completedCall = completedCalls[0];
+    expect(completedCall.status).toBe('error');
+    if (completedCall.status === 'error') {
+      expect(completedCall.response.errorType).toBe(
+        ToolErrorType.EXECUTION_DENIED,
+      );
+      const message = completedCall.response.error?.message ?? '';
+      expect(message).toBe(
+        `Qwen Code requires permission to use "${ToolNames.SEND_MESSAGE}", but that permission was declined. Matching deny rule: "${ToolNames.SEND_MESSAGE}".`,
+      );
+      expect(message).toContain('Matching deny rule');
+    }
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it('keeps the legacy declined message when a covered tool is rejected by another gate under an active allowlist (#9827)', async () => {
+    // While the allowlist is active, a COVERED tool can still fail
+    // isToolEnabled through a different gate — the witness is the legacy
+    // coreTools allowlist (`allow: ['Edit']` + `coreTools: ['read_file']`:
+    // `edit` passes the allowlist gate but fails the coreTools check).
+    // There "not covered by any permissions.allow rule" is factually wrong
+    // and its remediation a no-op, so the message must fall back to the
+    // generic declined one instead of citing the allowlist.
+    const execute = vi.fn().mockResolvedValue({
+      llmContent: 'sent',
+      returnDisplay: 'sent',
+    });
+    const toolsByName = new Map<string, MockTool>([
+      [ToolNames.EDIT, new MockTool({ name: ToolNames.EDIT, execute })],
+    ]);
+    const permissionManager = {
+      isToolEnabled: vi.fn().mockResolvedValue(false),
+      findMatchingDenyRule: vi.fn().mockReturnValue(undefined),
+      isPermissionsAllowListActive: vi.fn().mockReturnValue(true),
+      isCoveredByAllowOrAskRule: vi.fn().mockReturnValue(true),
+    };
+    const { scheduler, onAllToolCallsComplete } =
+      createSchedulerForLegacyToolTests({
+        toolsByName,
+        permissionManager,
+      });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: 'covered-other-gate',
+          name: ToolNames.EDIT,
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-covered-other-gate',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    expect(onAllToolCallsComplete).toHaveBeenCalled();
+    const completedCalls = onAllToolCallsComplete.mock
+      .calls[0][0] as ToolCall[];
+    const completedCall = completedCalls[0];
+    expect(completedCall.status).toBe('error');
+    if (completedCall.status === 'error') {
+      expect(completedCall.response.errorType).toBe(
+        ToolErrorType.EXECUTION_DENIED,
+      );
+      expect(completedCall.response.error?.message).toBe(
+        'Qwen Code requires permission to use "edit", but that permission was declined.',
+      );
+      const message = completedCall.response.error?.message ?? '';
+      expect(message).not.toContain('permissions.allow');
+    }
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it('attributes a rejection by the legacy coreTools allowlist to core tools, not permissions.allow (#10075)', async () => {
+    // Since #10075 an uncovered `permissions.allow` tool is deferred (still
+    // registered and callable), never rejected at call time — so a
+    // rejection with no matching deny rule under an active allowlist can
+    // only come from the legacy coreTools allowlist, and the message must
+    // point at that knob instead of advising a permissions.allow rule that
+    // would be a no-op.
+    const execute = vi.fn().mockResolvedValue({
+      llmContent: 'sent',
+      returnDisplay: 'sent',
+    });
+    const toolsByName = new Map<string, MockTool>([
+      [ToolNames.EDIT, new MockTool({ name: ToolNames.EDIT, execute })],
+    ]);
+    const permissionManager = {
+      isToolEnabled: vi.fn().mockResolvedValue(false),
+      findMatchingDenyRule: vi.fn().mockReturnValue(undefined),
+      isPermissionsAllowListActive: vi.fn().mockReturnValue(true),
+      isCoveredByAllowOrAskRule: vi.fn().mockReturnValue(false),
+      isToolDisabledByCoreToolsAllowList: vi.fn().mockReturnValue(true),
+    };
+    const { scheduler, onAllToolCallsComplete } =
+      createSchedulerForLegacyToolTests({
+        toolsByName,
+        permissionManager,
+      });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: 'core-tools-miss',
+          name: ToolNames.EDIT,
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-core-tools-miss',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    expect(onAllToolCallsComplete).toHaveBeenCalled();
+    const completedCalls = onAllToolCallsComplete.mock
+      .calls[0][0] as ToolCall[];
+    const completedCall = completedCalls[0];
+    expect(completedCall.status).toBe('error');
+    if (completedCall.status === 'error') {
+      expect(completedCall.response.errorType).toBe(
+        ToolErrorType.EXECUTION_DENIED,
+      );
+      expect(completedCall.response.error?.message).toBe(
+        '"edit" is not listed in the active core tools allowlist (--core-tools or settings tools.core), so the tool is not available. Add it to the core tools list to re-enable it.',
+      );
+    }
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it('keeps the legacy declined message when the tool is disabled without an active allowlist (#9827)', async () => {
+    const execute = vi.fn().mockResolvedValue({
+      llmContent: 'sent',
+      returnDisplay: 'sent',
+    });
+    const toolsByName = new Map<string, MockTool>([
+      [
+        ToolNames.SEND_MESSAGE,
+        new MockTool({ name: ToolNames.SEND_MESSAGE, execute }),
+      ],
+    ]);
+    const permissionManager = {
+      isToolEnabled: vi.fn().mockResolvedValue(false),
+      findMatchingDenyRule: vi.fn().mockReturnValue(undefined),
+      isPermissionsAllowListActive: vi.fn().mockReturnValue(false),
+    };
+    const { scheduler, onAllToolCallsComplete } =
+      createSchedulerForLegacyToolTests({
+        toolsByName,
+        permissionManager,
+      });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: 'disabled-no-allowlist',
+          name: ToolNames.SEND_MESSAGE,
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-disabled-no-allowlist',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    expect(onAllToolCallsComplete).toHaveBeenCalled();
+    const completedCalls = onAllToolCallsComplete.mock
+      .calls[0][0] as ToolCall[];
+    const completedCall = completedCalls[0];
+    expect(completedCall.status).toBe('error');
+    if (completedCall.status === 'error') {
+      expect(completedCall.response.error?.message).toBe(
+        'Qwen Code requires permission to use "send_message", but that permission was declined.',
+      );
+    }
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it('keeps a memory-scoped shim rejection on the pre-#9827 declined message instead of throwing (#9827)', async () => {
+    // Production installs the memory-scoped PermissionManager shim via
+    // `as unknown as PermissionManager` (memory-scoped-agent-config.ts);
+    // the cast used to hide that the shim lacked
+    // `isPermissionsAllowListActive`, so a shim-rejected call under an
+    // active allowlist threw TypeError in the message branch below and
+    // surfaced as an UNHANDLED_EXCEPTION tool error instead of the
+    // designed permission error. The shim also lacks
+    // `isCoveredByAllowOrAskRule`, so coverage is unknown for it and the
+    // fallback must stay on the pre-#9827 declined message — never the
+    // allowlist attribution, which would be wrong for a COVERED tool
+    // rejected by a different gate (e.g. the legacy coreTools allowlist).
+    // Drive the REAL shim through the scheduler to pin the end-to-end
+    // path.
+    const execute = vi.fn().mockResolvedValue({
+      llmContent: 'sent',
+      returnDisplay: 'sent',
+    });
+    const toolsByName = new Map<string, MockTool>([
+      [
+        ToolNames.SEND_MESSAGE,
+        new MockTool({ name: ToolNames.SEND_MESSAGE, execute }),
+      ],
+    ]);
+    const basePm = {
+      isToolEnabled: vi.fn().mockResolvedValue(false),
+      findMatchingDenyRule: vi.fn().mockReturnValue(undefined),
+      hasMatchingAskRule: vi.fn().mockReturnValue(false),
+      hasRelevantRules: vi.fn().mockReturnValue(false),
+      evaluate: vi.fn().mockResolvedValue('deny'),
+      isPermissionsAllowListActive: vi.fn().mockReturnValue(true),
+    };
+    const scopedConfig = createMemoryScopedAgentConfig(
+      {
+        getPermissionManager: () => basePm as unknown as PermissionManager,
+      } as Config,
+      os.tmpdir(),
+    );
+    const shimPm = scopedConfig.getPermissionManager();
+    if (!shimPm) {
+      throw new Error(
+        'createMemoryScopedAgentConfig must install a PermissionManager',
+      );
+    }
+    const { scheduler, onAllToolCallsComplete } =
+      createSchedulerForLegacyToolTests({
+        toolsByName,
+        permissionManager: shimPm as unknown as {
+          isToolEnabled: (name: string) => Promise<boolean>;
+          findMatchingDenyRule: (ctx: unknown) => string | undefined;
+          isPermissionsAllowListActive: () => boolean;
+        },
+      });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: 'shim-allowlist-miss',
+          name: ToolNames.SEND_MESSAGE,
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-shim-allowlist-miss',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    expect(onAllToolCallsComplete).toHaveBeenCalled();
+    const completedCalls = onAllToolCallsComplete.mock
+      .calls[0][0] as ToolCall[];
+    const completedCall = completedCalls[0];
+    expect(completedCall.status).toBe('error');
+    if (completedCall.status === 'error') {
+      expect(completedCall.response.errorType).toBe(
+        ToolErrorType.EXECUTION_DENIED,
+      );
+      const message = completedCall.response.error?.message ?? '';
+      expect(message).toBe(
+        'Qwen Code requires permission to use "send_message", but that permission was declined.',
+      );
+      expect(message).not.toContain('permissions.allow');
+      expect(message).not.toContain('UNHANDLED_EXCEPTION');
+    }
+    expect(execute).not.toHaveBeenCalled();
   });
 
   it('preserves cancellation when permission evaluation resolves after abort', async () => {
@@ -5897,7 +6337,7 @@ describe('CoreToolScheduler', () => {
       getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
       getToolRegistry: () => mockToolRegistry,
       getUseModelRouter: () => false,
-      getGeminiClient: () => null, // No client needed for these tests
+      getLlmClient: () => null, // No client needed for these tests
       getChatRecordingService: () => undefined,
       getMessageBus: vi.fn().mockReturnValue(undefined),
       getDisableAllHooks: vi.fn().mockReturnValue(true),
@@ -5980,7 +6420,7 @@ describe('CoreToolScheduler', () => {
       getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
       getToolRegistry: () => mockToolRegistry,
       getUseModelRouter: () => false,
-      getGeminiClient: () => null,
+      getLlmClient: () => null,
       getChatRecordingService: () => undefined,
       getMessageBus: vi.fn().mockReturnValue(undefined),
       getDisableAllHooks: vi.fn().mockReturnValue(true),
@@ -6067,7 +6507,7 @@ describe('CoreToolScheduler', () => {
       getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
       getToolRegistry: () => mockToolRegistry,
       getUseModelRouter: () => false,
-      getGeminiClient: () => null,
+      getLlmClient: () => null,
       getChatRecordingService: () => undefined,
       getMessageBus: vi.fn().mockReturnValue(undefined),
       getDisableAllHooks: vi.fn().mockReturnValue(true),
@@ -6122,7 +6562,7 @@ describe('CoreToolScheduler', () => {
       const mockConfig = {
         getToolRegistry: () => mockToolRegistry,
         getUseModelRouter: () => false,
-        getGeminiClient: () => null,
+        getLlmClient: () => null,
         getPermissionsDeny: () => undefined,
         isInteractive: () => true,
         getMessageBus: vi.fn().mockReturnValue(undefined),
@@ -6305,7 +6745,7 @@ describe('CoreToolScheduler', () => {
       const mockConfig = {
         getToolRegistry: () => mockToolRegistry,
         getUseModelRouter: () => false,
-        getGeminiClient: () => null, // No client needed for these tests
+        getLlmClient: () => null, // No client needed for these tests
         getPermissionsDeny: () => undefined,
         isInteractive: () => true,
         getMessageBus: vi.fn().mockReturnValue(undefined),
@@ -6349,7 +6789,7 @@ describe('CoreToolScheduler', () => {
       const mockConfig = {
         getToolRegistry: () => mockToolRegistry,
         getUseModelRouter: () => false,
-        getGeminiClient: () => null,
+        getLlmClient: () => null,
         getPermissionsDeny: () => ['write_file', 'edit', 'run_shell_command'],
         isInteractive: () => false, // Value doesn't matter, but included for completeness
         getMessageBus: vi.fn().mockReturnValue(undefined),
@@ -6382,7 +6822,7 @@ describe('CoreToolScheduler', () => {
       const mockConfig = {
         getToolRegistry: () => mockToolRegistry,
         getUseModelRouter: () => false,
-        getGeminiClient: () => null,
+        getLlmClient: () => null,
         getPermissionsDeny: () => ['write_file', 'edit'],
         isInteractive: () => false, // Value doesn't matter
         getMessageBus: vi.fn().mockReturnValue(undefined),
@@ -6427,7 +6867,7 @@ describe('CoreToolScheduler', () => {
       const mockConfig = {
         getToolRegistry: () => mockToolRegistry,
         getUseModelRouter: () => false,
-        getGeminiClient: () => null,
+        getLlmClient: () => null,
         getPermissionsDeny: () => undefined,
         isInteractive: () => true,
         getMessageBus: vi.fn().mockReturnValue(undefined),
@@ -6475,7 +6915,7 @@ describe('CoreToolScheduler', () => {
       const mockConfig = {
         getToolRegistry: () => mockToolRegistry,
         getUseModelRouter: () => false,
-        getGeminiClient: () => null,
+        getLlmClient: () => null,
         getPermissionsDeny: () => undefined,
         isInteractive: () => true,
         getMessageBus: vi.fn().mockReturnValue(undefined),
@@ -6522,7 +6962,7 @@ describe('CoreToolScheduler', () => {
       const mockConfig = {
         getToolRegistry: () => mockToolRegistry,
         getUseModelRouter: () => false,
-        getGeminiClient: () => null,
+        getLlmClient: () => null,
         getPermissionsDeny: () => undefined,
         isInteractive: () => true,
         getMessageBus: vi.fn().mockReturnValue(undefined),
@@ -6569,7 +7009,7 @@ describe('CoreToolScheduler', () => {
       const mockConfig = {
         getToolRegistry: () => mockToolRegistry,
         getUseModelRouter: () => false,
-        getGeminiClient: () => null,
+        getLlmClient: () => null,
         getPermissionsDeny: () => undefined,
         isInteractive: () => true,
         getMessageBus: vi.fn().mockReturnValue(undefined),
@@ -6643,7 +7083,7 @@ describe('CoreToolScheduler', () => {
         getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
         getToolRegistry: () => mockToolRegistry,
         getUseModelRouter: () => false,
-        getGeminiClient: () => null,
+        getLlmClient: () => null,
         getChatRecordingService: () => undefined,
         getMessageBus: vi.fn().mockReturnValue(undefined),
         getDisableAllHooks: vi.fn().mockReturnValue(true),
@@ -6735,7 +7175,7 @@ describe('CoreToolScheduler', () => {
         getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
         getToolRegistry: () => mockToolRegistry,
         getUseModelRouter: () => false,
-        getGeminiClient: () => null,
+        getLlmClient: () => null,
         getChatRecordingService: () => undefined,
         getMessageBus: vi.fn().mockReturnValue(undefined),
         getDisableAllHooks: vi.fn().mockReturnValue(true),
@@ -6827,7 +7267,7 @@ describe('CoreToolScheduler with payload', () => {
       getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
       getToolRegistry: () => mockToolRegistry,
       getUseModelRouter: () => false,
-      getGeminiClient: () => null, // No client needed for these tests
+      getLlmClient: () => null, // No client needed for these tests
       isInteractive: () => true, // Required to prevent auto-denial of tool calls
       getIdeMode: () => false,
       getExperimentalZedIntegration: () => false,
@@ -7254,7 +7694,7 @@ describe('CoreToolScheduler edit cancellation', () => {
       },
       getToolRegistry: () => mockToolRegistry,
       getUseModelRouter: () => false,
-      getGeminiClient: () => null, // No client needed for these tests
+      getLlmClient: () => null, // No client needed for these tests
       isInteractive: () => true, // Required to prevent auto-denial of tool calls
       getIdeMode: () => false,
       getExperimentalZedIntegration: () => false,
@@ -7362,7 +7802,7 @@ describe('CoreToolScheduler YOLO mode', () => {
       getTruncateToolOutputThreshold: () => 100_000,
       getTruncateToolOutputLines: () => 10_000,
       getUseModelRouter: () => false,
-      getGeminiClient: () => null,
+      getLlmClient: () => null,
       isInteractive: () => isInteractive,
       getIdeMode: () => false,
       getExperimentalZedIntegration: () => false,
@@ -7483,7 +7923,7 @@ describe('CoreToolScheduler YOLO mode', () => {
         DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
       getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
       getUseModelRouter: () => false,
-      getGeminiClient: () => null, // No client needed for these tests
+      getLlmClient: () => null, // No client needed for these tests
       getChatRecordingService: () => undefined,
       getMessageBus: vi.fn().mockReturnValue(undefined),
       getDisableAllHooks: vi.fn().mockReturnValue(true),
@@ -8042,7 +8482,7 @@ describe('CoreToolScheduler request queueing', () => {
       getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
       getToolRegistry: () => mockToolRegistry,
       getUseModelRouter: () => false,
-      getGeminiClient: () => null, // No client needed for these tests
+      getLlmClient: () => null, // No client needed for these tests
       getChatRecordingService: () => undefined,
       getMessageBus: vi.fn().mockReturnValue(undefined),
       getDisableAllHooks: vi.fn().mockReturnValue(true),
@@ -8168,7 +8608,7 @@ describe('CoreToolScheduler request queueing', () => {
       getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
       getToolRegistry: () => mockToolRegistry,
       getUseModelRouter: () => false,
-      getGeminiClient: () => null, // No client needed for these tests
+      getLlmClient: () => null, // No client needed for these tests
       getChatRecordingService: () => undefined,
       getMessageBus: vi.fn().mockReturnValue(undefined),
       getDisableAllHooks: vi.fn().mockReturnValue(true),
@@ -8242,7 +8682,7 @@ describe('CoreToolScheduler request queueing', () => {
         DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
       getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
       getUseModelRouter: () => false,
-      getGeminiClient: () => null, // No client needed for these tests
+      getLlmClient: () => null, // No client needed for these tests
       isInteractive: () => true, // Required to prevent auto-denial of tool calls
       getIdeMode: () => false,
       getExperimentalZedIntegration: () => false,
@@ -8441,7 +8881,7 @@ describe('CoreToolScheduler request queueing', () => {
       getPermissionManager: () => permissionManager,
       getAutoModeDenialState: () => denialState,
       setAutoModeDenialState,
-      getGeminiClient: () => ({ getHistoryTail: () => [] }),
+      getLlmClient: () => ({ getHistoryTail: () => [] }),
       getToolRegistry: () => toolRegistry,
       getAutoModeSettings: () => ({}),
       getModel: () => 'test-model',
@@ -8724,7 +9164,7 @@ describe('CoreToolScheduler truncated output protection', () => {
       getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
       getToolRegistry: () => mockToolRegistry,
       getUseModelRouter: () => false,
-      getGeminiClient: () => null,
+      getLlmClient: () => null,
       getChatRecordingService: () => undefined,
       isInteractive: () => true,
       getMessageBus: vi.fn().mockReturnValue(undefined),
@@ -9032,7 +9472,7 @@ describe('CoreToolScheduler Sequential Execution', () => {
         DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
       getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
       getUseModelRouter: () => false,
-      getGeminiClient: () => null,
+      getLlmClient: () => null,
       getChatRecordingService: () => undefined,
       getMessageBus: vi.fn().mockReturnValue(undefined),
       getDisableAllHooks: vi.fn().mockReturnValue(true),
@@ -9155,7 +9595,7 @@ describe('CoreToolScheduler Sequential Execution', () => {
         DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
       getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
       getUseModelRouter: () => false,
-      getGeminiClient: () => null,
+      getLlmClient: () => null,
       getChatRecordingService: () => undefined,
       getMessageBus: vi.fn().mockReturnValue(undefined),
       getDisableAllHooks: vi.fn().mockReturnValue(true),
@@ -9345,7 +9785,7 @@ describe('CoreToolScheduler plan mode with ask_user_question', () => {
       getConditionalRulesRegistry: () => undefined,
       getSkillManager: () => undefined,
       getUseModelRouter: () => false,
-      getGeminiClient: () => null,
+      getLlmClient: () => null,
       isInteractive: () => true,
       getIdeMode: () => false,
       getExperimentalZedIntegration: () => false,
@@ -10172,7 +10612,7 @@ describe('CoreToolScheduler Plan shell routing', () => {
       getConditionalRulesRegistry: () => undefined,
       getSkillManager: () => undefined,
       getUseModelRouter: () => false,
-      getGeminiClient: () => null,
+      getLlmClient: () => null,
       isInteractive: () => options.interactive ?? true,
       getIdeMode: () => options.ideMode ?? false,
       getExperimentalZedIntegration: () => false,
@@ -11010,7 +11450,7 @@ describe('CoreToolScheduler telemetry spans', () => {
       getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
       getToolRegistry: () => mockToolRegistry,
       getUseModelRouter: () => false,
-      getGeminiClient: () => null,
+      getLlmClient: () => null,
       getChatRecordingService: () => undefined,
       getMessageBus: vi.fn().mockReturnValue(options.messageBus),
       getDisableAllHooks: vi.fn().mockReturnValue(options.disableHooks ?? true),
@@ -13475,7 +13915,7 @@ describe('CoreToolScheduler telemetry spans', () => {
       storage: { getProjectTempDir: () => '/tmp' },
       getToolRegistry: () => mockToolRegistry,
       getUseModelRouter: () => false,
-      getGeminiClient: () => null,
+      getLlmClient: () => null,
       isInteractive: () => true,
       getIdeMode: () => false,
       getExperimentalZedIntegration: () => false,
@@ -13960,7 +14400,7 @@ describe('CoreToolScheduler telemetry spans', () => {
       storage: { getProjectTempDir: () => '/tmp' },
       getToolRegistry: () => mockToolRegistry,
       getUseModelRouter: () => false,
-      getGeminiClient: () => null,
+      getLlmClient: () => null,
       isInteractive: () => true,
       getIdeMode: overrides.getIdeMode ?? (() => false),
       getExperimentalZedIntegration: () => false,
@@ -14066,7 +14506,7 @@ describe('CoreToolScheduler telemetry spans', () => {
       getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
       getToolRegistry: () => mockToolRegistry,
       getUseModelRouter: () => false,
-      getGeminiClient: () => null,
+      getLlmClient: () => null,
       getChatRecordingService: () => undefined,
       isInteractive: () => true,
       getIdeMode: () => false,
@@ -14343,7 +14783,7 @@ describe('CoreToolScheduler telemetry spans', () => {
       storage: { getProjectTempDir: () => '/tmp' },
       getToolRegistry: () => mockToolRegistry,
       getUseModelRouter: () => false,
-      getGeminiClient: () => null,
+      getLlmClient: () => null,
       isInteractive: () => true,
       getIdeMode: () => false,
       getExperimentalZedIntegration: () => false,
@@ -14414,7 +14854,7 @@ describe('CoreToolScheduler telemetry spans', () => {
       storage: { getProjectTempDir: () => '/tmp' },
       getToolRegistry: () => mockToolRegistry,
       getUseModelRouter: () => false,
-      getGeminiClient: () => null,
+      getLlmClient: () => null,
       isInteractive: () => false, // forces non-interactive deny path
       getInputFormat: () => undefined,
       getIdeMode: () => false,
@@ -14500,7 +14940,7 @@ describe('CoreToolScheduler telemetry spans', () => {
       storage: { getProjectTempDir: () => '/tmp' },
       getToolRegistry: () => mockToolRegistry,
       getUseModelRouter: () => false,
-      getGeminiClient: () => null,
+      getLlmClient: () => null,
       isInteractive: () => true,
       getIdeMode: () => false,
       getExperimentalZedIntegration: () => false,
@@ -14573,7 +15013,7 @@ describe('CoreToolScheduler telemetry spans', () => {
       storage: { getProjectTempDir: () => '/tmp' },
       getToolRegistry: () => mockToolRegistry,
       getUseModelRouter: () => false,
-      getGeminiClient: () => null,
+      getLlmClient: () => null,
       isInteractive: () => true,
       getIdeMode: () => false,
       getExperimentalZedIntegration: () => false,
@@ -14704,7 +15144,7 @@ describe('CoreToolScheduler telemetry spans', () => {
       storage: { getProjectTempDir: () => '/tmp' },
       getToolRegistry: () => mockToolRegistry,
       getUseModelRouter: () => false,
-      getGeminiClient: () => null,
+      getLlmClient: () => null,
       isInteractive: () => true,
       getIdeMode: () => false,
       getExperimentalZedIntegration: () => false,
@@ -14814,7 +15254,7 @@ describe('CoreToolScheduler telemetry spans', () => {
       getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
       getToolRegistry: () => mockToolRegistry,
       getUseModelRouter: () => false,
-      getGeminiClient: () => null,
+      getLlmClient: () => null,
       getChatRecordingService: () => undefined,
       getMessageBus: vi.fn(() => {
         throw new Error('prelude boom — getMessageBus throws');
@@ -14977,7 +15417,7 @@ describe('CoreToolScheduler telemetry spans', () => {
       storage: { getProjectTempDir: () => '/tmp' },
       getToolRegistry: () => mockToolRegistry,
       getUseModelRouter: () => false,
-      getGeminiClient: () => null,
+      getLlmClient: () => null,
       isInteractive: () => true,
       getIdeMode: () => false,
       getExperimentalZedIntegration: () => false,
@@ -15213,7 +15653,7 @@ describe('CoreToolScheduler telemetry spans', () => {
       storage: { getProjectTempDir: () => '/tmp' },
       getToolRegistry: () => mockToolRegistry,
       getUseModelRouter: () => false,
-      getGeminiClient: () => null,
+      getLlmClient: () => null,
       isInteractive: () => true,
       getIdeMode: () => false,
       getExperimentalZedIntegration: () => false,
@@ -15862,7 +16302,7 @@ describe('Fire hook functions integration', () => {
         getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
         getToolRegistry: () => mockToolRegistry,
         getUseModelRouter: () => false,
-        getGeminiClient: () => null,
+        getLlmClient: () => null,
         getChatRecordingService: () => undefined,
         getMessageBus: vi.fn().mockReturnValue(undefined),
         getDisableAllHooks: vi.fn().mockReturnValue(true),
@@ -16538,7 +16978,7 @@ describe('CoreToolScheduler IDE interaction', () => {
       getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
       getToolRegistry: () => mockToolRegistry,
       getUseModelRouter: () => false,
-      getGeminiClient: () => null,
+      getLlmClient: () => null,
       isInteractive: () => true,
       getIdeMode: () => overrides.ideMode ?? true,
       getExperimentalZedIntegration: () => false,
@@ -16971,7 +17411,7 @@ describe('CoreToolScheduler validation retry loop detection', () => {
       getTruncateToolOutputLines: () => 10,
       getToolRegistry: () => mockToolRegistry,
       getUseModelRouter: () => false,
-      getGeminiClient: () => null,
+      getLlmClient: () => null,
       isInteractive: () => true,
       getIdeMode: () => false,
       getExperimentalZedIntegration: () => false,
@@ -17315,7 +17755,7 @@ describe('CoreToolScheduler validation retry loop detection', () => {
       getTruncateToolOutputLines: () => 10,
       getToolRegistry: () => mockToolRegistry,
       getUseModelRouter: () => false,
-      getGeminiClient: () => null,
+      getLlmClient: () => null,
       isInteractive: () => true,
       getIdeMode: () => false,
       getExperimentalZedIntegration: () => false,
@@ -17737,7 +18177,7 @@ describe('CoreToolScheduler activation wiring', () => {
       getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
       getToolRegistry: () => mockToolRegistry,
       getUseModelRouter: () => false,
-      getGeminiClient: () => null,
+      getLlmClient: () => null,
       getChatRecordingService: () => undefined,
       getMessageBus: vi.fn().mockReturnValue(undefined),
       getDisableAllHooks: vi.fn().mockReturnValue(true),
@@ -18032,7 +18472,7 @@ describe('CoreToolScheduler activation wiring', () => {
         getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
         getToolRegistry: () => mockToolRegistry,
         getUseModelRouter: () => false,
-        getGeminiClient: () => null,
+        getLlmClient: () => null,
         getChatRecordingService: () => undefined,
         getMessageBus: vi.fn().mockReturnValue(undefined),
         getDisableAllHooks: vi.fn().mockReturnValue(true),
@@ -18149,7 +18589,7 @@ describe('CoreToolScheduler activation wiring', () => {
       getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
       getToolRegistry: () => mockToolRegistry,
       getUseModelRouter: () => false,
-      getGeminiClient: () => null,
+      getLlmClient: () => null,
       getChatRecordingService: () => undefined,
       getMessageBus: vi.fn().mockReturnValue(undefined),
       getDisableAllHooks: vi.fn().mockReturnValue(true),
@@ -18269,7 +18709,7 @@ describe('CoreToolScheduler activation wiring', () => {
       getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
       getToolRegistry: () => mockToolRegistry,
       getUseModelRouter: () => false,
-      getGeminiClient: () => null,
+      getLlmClient: () => null,
       getChatRecordingService: () => undefined,
       getMessageBus: vi.fn().mockReturnValue(undefined),
       getDisableAllHooks: vi.fn().mockReturnValue(true),
@@ -18364,7 +18804,7 @@ describe('CoreToolScheduler activation wiring', () => {
       getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
       getToolRegistry: () => mockToolRegistry,
       getUseModelRouter: () => false,
-      getGeminiClient: () => null,
+      getLlmClient: () => null,
       getChatRecordingService: () => undefined,
       getMessageBus: vi.fn().mockReturnValue(undefined),
       getDisableAllHooks: vi.fn().mockReturnValue(true),
@@ -18460,7 +18900,7 @@ describe('CoreToolScheduler activation wiring', () => {
       getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
       getToolRegistry: () => mockToolRegistry,
       getUseModelRouter: () => false,
-      getGeminiClient: () => null,
+      getLlmClient: () => null,
       getChatRecordingService: () => undefined,
       getMessageBus: vi.fn().mockReturnValue(undefined),
       getDisableAllHooks: vi.fn().mockReturnValue(true),
@@ -18842,7 +19282,7 @@ describe('CoreToolScheduler prompt_id propagation', () => {
       },
       getToolRegistry: () => mockToolRegistry,
       getUseModelRouter: () => false,
-      getGeminiClient: () => null,
+      getLlmClient: () => null,
       isInteractive: () => true,
       getIdeMode: () => false,
       getExperimentalZedIntegration: () => false,
@@ -18924,7 +19364,7 @@ describe('CoreToolScheduler prompt_id propagation', () => {
       },
       getToolRegistry: () => mockToolRegistry,
       getUseModelRouter: () => false,
-      getGeminiClient: () => null,
+      getLlmClient: () => null,
       isInteractive: () => true,
       getIdeMode: () => false,
       getExperimentalZedIntegration: () => false,
@@ -18997,7 +19437,7 @@ describe('CoreToolScheduler prompt_id propagation', () => {
       },
       getToolRegistry: () => mockToolRegistry,
       getUseModelRouter: () => false,
-      getGeminiClient: () => null,
+      getLlmClient: () => null,
       isInteractive: () => true,
       getIdeMode: () => false,
       getExperimentalZedIntegration: () => false,
@@ -19071,7 +19511,7 @@ describe('CoreToolScheduler prompt_id propagation', () => {
       },
       getToolRegistry: () => mockToolRegistry,
       getUseModelRouter: () => false,
-      getGeminiClient: () => null,
+      getLlmClient: () => null,
       isInteractive: () => true,
       getIdeMode: () => false,
       getExperimentalZedIntegration: () => false,

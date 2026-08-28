@@ -749,7 +749,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: false,
         default: 'auto',
         description:
-          'Default effort for /review when --effort is not given. "auto" keeps the built-in rule (high for PRs, medium for local changes). An explicit --effort still wins; an effective --comment still forces high and --fix still floors at medium. Only honored from User, System, and SystemDefaults settings scopes; values set in Workspace settings are ignored, so a repository cannot set review policy for its reviewers.',
+          'Default effort for /review when neither --effort nor a project-remembered explicitly typed level applies. "auto" keeps the built-in rule (high for PRs, medium for local changes). An explicit or remembered level wins; an effective --comment still forces high and --fix still floors at medium. Only honored from User, System, and SystemDefaults settings scopes; values set in Workspace settings are ignored, so a repository cannot set review policy for its reviewers.',
         showInDialog: true,
         options: [
           { value: 'auto', label: 'Auto (high for PRs, medium for local)' },
@@ -940,7 +940,7 @@ const SETTINGS_SCHEMA = {
             )
           | undefined,
         description:
-          'Status line display configuration. Use `type: "preset"` with built-in item ids, or `type: "command"` with a shell command. Optional command `refreshInterval` (seconds, >= 1) re-runs the command on a timer so external data stays fresh. Set `respectUserColors: true` to preserve ANSI color codes in command output instead of applying dim/theme styling. Set `hideContextIndicator: true` to hide the built-in context usage indicator in the footer right section, or `false` to always show it. When `hideContextIndicator` is unset, the footer indicator is hidden automatically for preset status lines that already include `context-used` or `context-remaining`, and shown otherwise (including for `command` status lines). When unset (default), the built-in default preset (model, git branch, context usage, current dir) is shown automatically; set to `null` to explicitly disable the status line.',
+          'Status line display configuration. Use `type: "preset"` with built-in item ids, or `type: "command"` with a shell command. Optional command `refreshInterval` (seconds, >= 1) re-runs the command on a timer so external data stays fresh. Set `respectUserColors: true` to preserve ANSI color codes in command output instead of applying dim/theme styling. Set `hideContextIndicator: true` to hide the built-in context usage indicator in the footer right section, or `false` to always show it. When `hideContextIndicator` is unset, the footer indicator is hidden automatically for preset status lines that already include `context-used` or `context-remaining`, and shown otherwise (including for `command` status lines). When unset (default), the built-in default preset (project name, git branch, model, context usage) is shown automatically; set to `null` to explicitly disable the status line.',
         showInDialog: false,
       },
       customThemes: {
@@ -1177,12 +1177,13 @@ const SETTINGS_SCHEMA = {
         category: 'UI',
         requiresRestart: false,
         default: false,
-        // Retired from the TUI (compact tool output is now always-on there, and
-        // Ctrl+O opens the transcript instead of toggling this). Kept as a
-        // hidden, schema-only setting so the web shell's independent compact
-        // toggle can still persist via the daemon settings routes (mirrors
-        // `voiceModel`). Not shown in the TUI settings dialog.
-        description: 'Compact view (web shell only; not used by the TUI).',
+        // Retired everywhere: compact tool output is always on in the TUI
+        // (Ctrl+O opens the transcript there), and the web shell now fixes
+        // its compact view on too. Kept schema-registered (mirrors
+        // `voiceModel`) so settings files that still carry the key load
+        // without warnings; nothing reads the value anymore.
+        description:
+          'Retired: compact view is always on in both the TUI and the web shell. The key is kept so existing settings files do not warn.',
         showInDialog: false,
       },
       useTerminalBuffer: {
@@ -3261,6 +3262,31 @@ const SETTINGS_SCHEMA = {
             showInDialog: false,
           },
         },
+      },
+      crossSessionMessaging: {
+        type: 'boolean',
+        label: 'Cross-Session Messaging',
+        category: 'Advanced',
+        requiresRestart: true,
+        default: false,
+        description:
+          'Experimental. Let Qwen Code sessions on this machine send each other messages over a per-session local socket. Off by default; turning it on both opens this session to peer messages and makes it discoverable to others.',
+        showInDialog: false,
+      },
+      crossSessionInbound: {
+        type: 'enum',
+        label: 'Inbound Cross-Session Messages',
+        category: 'Advanced',
+        requiresRestart: false,
+        default: undefined as string | undefined,
+        description:
+          'What happens to messages other sessions send this one. "accept" delivers them; "hold" parks them for your review without letting the model act; "refuse" opts this session out. Unset means approval-mode parity: a message auto-delivers only when this session reviews every action, or when both sessions declare a mode that can apply actions without per-action review. Other messages are held for you to review.',
+        showInDialog: false,
+        options: [
+          { value: 'accept', label: 'Accept' },
+          { value: 'hold', label: 'Hold for review' },
+          { value: 'refuse', label: 'Refuse' },
+        ],
       },
       modelGrades: {
         type: 'object',

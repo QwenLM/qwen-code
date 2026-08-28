@@ -628,6 +628,9 @@ export interface BridgeOptions {
    * reports itself unavailable (daemon-only).
    */
   onCreateSubSession?: CreateSubSessionHandler;
+  /** Handles a trusted `cron_create` request to bind a durable task to the
+   * caller's currently executing daemon session. */
+  onCreateCurrentSessionScheduledTask?: CurrentSessionScheduledTaskCreateHandler;
   /** Handles one child-initiated Channel delivery attempt. The bridge
    * authenticates the session and publishes the sanitized result event. */
   onChannelDelivery?: ChannelDeliveryHandler;
@@ -700,6 +703,24 @@ export interface CreateSubSessionResult {
 export type CreateSubSessionHandler = (
   info: CreateSubSessionInfo,
 ) => Promise<CreateSubSessionResult>;
+
+export interface CurrentSessionScheduledTaskCreateInfo {
+  callerSessionId: string;
+  promptId: string;
+  cron: string;
+  prompt: string;
+  recurring: boolean;
+  assertCallerPromptActive: () => void;
+}
+
+export interface CurrentSessionScheduledTaskCreateResult {
+  id: string;
+  cron: string;
+}
+
+export type CurrentSessionScheduledTaskCreateHandler = (
+  info: CurrentSessionScheduledTaskCreateInfo,
+) => Promise<CurrentSessionScheduledTaskCreateResult>;
 
 export const MAX_LIVE_SCREEN_CONTEXT_TEXT_CHARS = 32_000;
 

@@ -56,6 +56,11 @@ describe('canResumeGoal', () => {
     expect(canResumeGoal(goal({ status: 'paused' }))).toBe(true);
     expect(canResumeGoal(goal({ status: 'blocked' }))).toBe(true);
     expect(canResumeGoal(goal({ status: 'usage_limited' }))).toBe(true);
+    expect(
+      canResumeGoal(
+        goal({ status: 'usage_limited', limitKind: 'token_budget' }),
+      ),
+    ).toBe(true);
   });
 
   it('decides by status alone, never by stop metadata', () => {
