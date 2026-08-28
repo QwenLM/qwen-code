@@ -14,10 +14,12 @@ import {
   fetchAttributionRepoKeys,
   fetchGitHubPullRequests,
   fetchRemoteWebUrl,
+  isValidSessionPrUrl,
   readSessionPrs,
   readWorktreeSession,
   replaceSessionPrs,
   repoKeyFromWebUrl,
+  sessionPrSourceAuthority,
   type SessionArchiveState,
   type SessionPr,
   type SessionPrSource,
@@ -484,6 +486,18 @@ export async function backfillWorkspaceSessionPrs(
   const allowedRepoKeys = new Set<string>();
   if (workspaceRepoKey !== undefined) allowedRepoKeys.add(workspaceRepoKey);
   if (pageRepoKey !== undefined) allowedRepoKeys.add(pageRepoKey);
+  // The keys under which a form names THE SAME PR as a bare `/review N` or
+  // the `pr-<N>` convention — this repo's PR N: the workspace itself, and
+  // the page only while it is trusted (the confirmed fork parent). A form
+  // from a divergent page's repo passes the gate for its OWN binding (the
+  // user reviewed that PR), but its URL must never be lent to a bare or
+  // convention number: that would bind a stranger's same-numbered PR onto
+  // the session that exists for this repo's PR N.
+  const sameRepoKeys = new Set<string>();
+  if (workspaceRepoKey !== undefined) sameRepoKeys.add(workspaceRepoKey);
+  if (pageMapTrusted && pageRepoKey !== undefined) {
+    sameRepoKeys.add(pageRepoKey);
+  }
 
   for (const candidate of candidates) {
     // Insert in ASCENDING authority so the strongest bindings survive the
@@ -497,10 +511,15 @@ export async function backfillWorkspaceSessionPrs(
     // `/review <url>` forms name their PR's URL explicitly — bind the named
     // URL itself instead of re-resolving the bare number, which could land
     // another repo's same-numbered PR. Only forms that PASS the repo gate
-    // may supply a number at all.
+    // AND the sidecar's url shape check may supply a number at all: the
+    // transcript is user-controlled text, the capture is unbounded, and
+    // the reader fails the WHOLE sidecar closed on one over-long or
+    // control-character url — persisting it would wipe every binding and
+    // re-poison on each run.
     const formUrlByNumber = new Map<number, string>(
       candidate.reviewedUrlForms
         .filter((form) => {
+          if (!isValidSessionPrUrl(form.url)) return false;
           const repoKey = repoKeyFromWebUrl(form.url);
           return repoKey !== undefined && allowedRepoKeys.has(repoKey);
         })
@@ -511,6 +530,18 @@ export async function backfillWorkspaceSessionPrs(
         numbers.push(form.number);
       }
     }
+    // Numbers named as THIS repo's PR N (bare or convention): a form may
+    // lend such a number its URL only when it names the same PR.
+    const namedAsOwn = new Set<number>(candidate.reviewed);
+    if (candidate.conventionNumber !== undefined) {
+      namedAsOwn.add(candidate.conventionNumber);
+    }
+    const lendableFormUrl = (number: number): string | undefined => {
+      const url = formUrlByNumber.get(number);
+      if (url === undefined || !namedAsOwn.has(number)) return url;
+      const key = repoKeyFromWebUrl(url);
+      return key !== undefined && sameRepoKeys.has(key) ? url : undefined;
+    };
     if (candidate.conventionNumber !== undefined) {
       const conventionNumber = candidate.conventionNumber;
       const rest = numbers.filter((n) => n !== conventionNumber);
@@ -583,7 +614,7 @@ export async function backfillWorkspaceSessionPrs(
     for (const number of numbers) {
       if (existingNumbers.has(number)) continue;
       let url = numberToUrl.get(number);
-      if (url === undefined) url = formUrlByNumber.get(number);
+      if (url === undefined) url = lendableFormUrl(number);
       if (url === undefined && pageMapTrusted) {
         url = pageUrlByNumber.get(number);
       }
@@ -602,7 +633,10 @@ export async function backfillWorkspaceSessionPrs(
           url = `${remote}/pull/${number}`;
         }
       }
-      if (url === undefined) {
+      // Every url source is checked once here: a remote-derived url can
+      // exceed the bound too (an absurd origin), and the sidecar writer
+      // declines what the reader would reject.
+      if (url === undefined || !isValidSessionPrUrl(url)) {
         result.unresolved += 1;
         continue;
       }
@@ -713,24 +747,36 @@ export async function backfillWorkspaceSessionPrs(
           (number) => droppable.has(number) && !foreignNumbers.has(number),
         );
         if (plan.length > slots) {
+          // Trim by provenance authority — the sidecar's own cap rule —
+          // oldest plan position within the same rank. Every plan member
+          // ranks as what this run would stamp it (the convention number
+          // as the session's own PR, everything else as a review), and a
+          // re-offered occupant additionally keeps the rank its persisted
+          // entry carries: a session's created PR re-mentioned as
+          // `/review 100` must not be demoted to a review and displaced by
+          // newer reviews. An occupant persisted without provenance ranks
+          // by this run's stamp alone — the transcript proves at least
+          // that, the absent stamp proves nothing more.
           result.overLimit += plan.length - slots;
-          const convention = candidate.conventionNumber;
-          if (slots === 0) {
-            plan = [];
-          } else if (
-            convention !== undefined &&
-            plan[plan.length - 1] === convention
-          ) {
-            // Keep the pr-<N> slug's PR and displace the oldest reviewed
-            // numbers instead.
-            const reviewSlots = slots - 1;
-            plan = [
-              ...(reviewSlots > 0 ? plan.slice(0, -1).slice(-reviewSlots) : []),
-              convention,
-            ];
-          } else {
-            plan = plan.slice(-slots);
-          }
+          const heldSource = new Map(
+            base.map((entry) => [entry.number, entry.source] as const),
+          );
+          const rank = (number: number): number => {
+            const stamp = sessionPrSourceAuthority(
+              number === candidate.conventionNumber ? 'worktree' : 'review',
+            );
+            const held = heldSource.get(number);
+            return held === undefined
+              ? stamp
+              : Math.max(stamp, sessionPrSourceAuthority(held));
+          };
+          const evicted = new Set(
+            plan
+              .map((_, index) => index)
+              .sort((a, b) => rank(plan[a]) - rank(plan[b]) || a - b)
+              .slice(0, plan.length - slots),
+          );
+          plan = plan.filter((_, index) => !evicted.has(index));
         }
         const planSet = new Set(plan);
         result.alreadyBound += plan.filter((number) =>

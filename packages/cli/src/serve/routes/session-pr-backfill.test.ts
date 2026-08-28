@@ -2793,6 +2793,155 @@ describe('backfillWorkspaceSessionPrs', () => {
     expect(prs?.[0]?.state).toBeUndefined();
   });
 
+  it('does not lend a divergent-page form URL to a bare or convention number', async () => {
+    // gh's page lists a stranger repo, so a `/review <stranger url>` form
+    // passes the page-keyed gate for its own binding — but the same
+    // number named bare (`/review 42`) or by the `pr-42` convention means
+    // THIS repo's PR 42, and must resolve through the workspace remote,
+    // never borrow the stranger's URL. A form-only number from that page
+    // still binds the URL the user named.
+    await seedSession(SESSION_A);
+    await seedWorktreeSidecar(SESSION_A, 'pr-42', 'worktree-pr-42');
+    await appendUserText(
+      SESSION_A,
+      '/review https://github.com/stranger/repoB/pull/42',
+    );
+    await appendUserText(SESSION_A, '/review 42');
+    await seedSession(SESSION_B);
+    await appendUserText(
+      SESSION_B,
+      '/review https://github.com/stranger/repoB/pull/43',
+    );
+    await appendUserText(SESSION_B, '/review 43');
+    await seedSession(SESSION_C);
+    await appendUserText(
+      SESSION_C,
+      '/review https://github.com/stranger/repoB/pull/77',
+    );
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [
+        {
+          ...pr(42, 'whatever'),
+          url: 'https://github.com/stranger/repoB/pull/42',
+          state: 'merged' as const,
+        },
+      ],
+    });
+    fetchAttributionRepoKeysMock.mockResolvedValue({
+      resolved: 'github.com/o/r',
+    });
+
+    const result = await backfillWorkspaceSessionPrs(runtime);
+
+    expect(result).toMatchObject({ scanned: 3, bound: 3, unresolved: 0 });
+    const prsA = await readSessionPrs(
+      sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
+    );
+    expect(prsA).toEqual([
+      expect.objectContaining({
+        number: 42,
+        url: 'https://github.com/o/r/pull/42',
+        source: 'worktree',
+      }),
+    ]);
+    expect(prsA?.[0]?.state).toBeUndefined();
+    const prsB = await readSessionPrs(
+      sessionService.getPrSessionPathForArchiveState(SESSION_B, 'active'),
+    );
+    expect(prsB?.[0]).toMatchObject({
+      number: 43,
+      url: 'https://github.com/o/r/pull/43',
+      source: 'review',
+    });
+    const prsC = await readSessionPrs(
+      sessionService.getPrSessionPathForArchiveState(SESSION_C, 'active'),
+    );
+    expect(prsC?.[0]).toMatchObject({
+      number: 77,
+      url: 'https://github.com/stranger/repoB/pull/77',
+      source: 'review',
+    });
+  });
+
+  it('declines a /review url form the sidecar reader would reject', async () => {
+    // The capture is unbounded user text; an over-long or control-
+    // character url passes the repo gate (only the first two path
+    // segments are inspected) and would fail the WHOLE sidecar closed
+    // once persisted — wiping the existing binding and re-poisoning on
+    // every run.
+    await seedSession(SESSION_A);
+    const prPath = await seedPrSidecar(SESSION_A, [7]);
+    await appendUserText(
+      SESSION_A,
+      `/review https://github.com/o/r/${'x'.repeat(2100)}/pull/43`,
+    );
+    await appendUserText(
+      SESSION_A,
+      '/review https://github.com/o/r/tree\u0007/pull/44',
+    );
+    fetchGitHubPullRequestsMock.mockResolvedValue({ kind: 'cli_unavailable' });
+
+    const result = await backfillWorkspaceSessionPrs(runtime);
+
+    expect(result).toMatchObject({ scanned: 1, bound: 0, unresolved: 0 });
+    expect(await readSessionPrs(prPath)).toEqual([
+      expect.objectContaining({ number: 7 }),
+    ]);
+  });
+
+  it('keeps a re-offered created binding when the trim overflows', async () => {
+    // The session created PR 100 (persisted `source: 'create'`), later
+    // typed `/review 100` and ten more reviews with the sidecar at the
+    // cap. The trim must rank by provenance like the sidecar's own cap:
+    // the created binding survives and the oldest review is displaced —
+    // a positional trim would evict 100 forever, every run.
+    await seedSession(SESSION_A);
+    const prPath = sessionService.getPrSessionPathForArchiveState(
+      SESSION_A,
+      'active',
+    );
+    await fsp.mkdir(path.dirname(prPath), { recursive: true });
+    await fsp.writeFile(
+      prPath,
+      JSON.stringify({
+        prs: [
+          {
+            number: 100,
+            url: 'https://github.com/o/r/pull/100',
+            createdAt: '2026-08-01T00:00:00.000Z',
+            source: 'create',
+          },
+          ...Array.from({ length: SESSION_PR_LIST_LIMIT - 1 }, (_, i) => ({
+            number: i + 1,
+            url: `https://github.com/o/r/pull/${i + 1}`,
+            createdAt: '2026-08-01T00:00:01.000Z',
+            source: 'review',
+          })),
+        ],
+      }),
+      'utf8',
+    );
+    await seedReviewedNumbers(SESSION_A, 100, 100);
+    await seedReviewedNumbers(SESSION_A, 1, 10);
+    fetchGitHubPullRequestsMock.mockResolvedValue({ kind: 'cli_unavailable' });
+
+    const result = await backfillWorkspaceSessionPrs(runtime);
+
+    expect(result).toMatchObject({ bound: 1, overLimit: 1 });
+    const prs = await readSessionPrs(prPath);
+    expect(prs?.map((p) => p.number)).toEqual([
+      100, 2, 3, 4, 5, 6, 7, 8, 9, 10,
+    ]);
+    expect(prs?.[0]?.source).toBe('create');
+    // Idempotent: the next run re-offers the same set and changes nothing.
+    const again = await backfillWorkspaceSessionPrs(runtime);
+    expect(again).toMatchObject({ bound: 0, written: 0 });
+    expect((await readSessionPrs(prPath))?.map((p) => p.number)).toEqual([
+      100, 2, 3, 4, 5, 6, 7, 8, 9, 10,
+    ]);
+  });
+
   it('binds the user-named URL of a /review url form without a trusted page', async () => {
     // The URL form names its PR explicitly and was repo-gated when
     // collected; it binds the named URL itself even when the gh page is
