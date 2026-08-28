@@ -44,13 +44,22 @@ const {
   sendToPeer,
   settleSentPeerMessage,
 } = await import('./peer-send.js');
-const { peerRef, resolvePeerTarget } = await import('./peer-directory.js');
+const { advertisablePeerAddress, peerRef, resolvePeerTarget } = await import(
+  './peer-directory.js'
+);
 
-function peer(sessionId: string, name: string, cwd = '/w/app') {
+function peer(
+  sessionId: string,
+  name: string,
+  cwd = '/w/app',
+  // Overridable so a test can stage the one shape the derived ref cannot
+  // produce: two live sessions whose 6-hex refs collide.
+  ref = peerRef(sessionId),
+) {
   return {
     sessionId,
     name,
-    ref: peerRef(sessionId),
+    ref,
     cwd,
     pid: 100,
     ipcPath: `/tmp/${sessionId}.sock`,
@@ -485,6 +494,72 @@ describe('lookupSentPeerMessageForTest', () => {
     expect(
       lookupSentPeerMessageForTest(sendPeerFrame.mock.calls[1][1].msgId),
     ).toMatchObject({ address: '[aaa111]' });
+  });
+
+  it("records the caller's own target when no address can be advertised", async () => {
+    // Every advertisable form for `docs` is taken: the bare name by the
+    // caller's in-process routing, and both bracketed forms by sessions
+    // carrying those exact strings as literal names (registry names are
+    // other-process input and may contain brackets).
+    const docs = peer('s1', 'docs', '/w/one', 'aaa111');
+    const bracketedName = peer('s2', 'docs [aaa111]', '/w/two', 'bbb222');
+    const bareName = peer('s3', '[aaa111]', '/w/three', 'ccc333');
+    const all = [docs, bracketedName, bareName];
+    listMessageablePeers.mockResolvedValue(all);
+    const isReserved = (address: string) => address === 'docs';
+    expect(advertisablePeerAddress(docs, all, isReserved)).toBeUndefined();
+
+    const outcome = await sendToPeer({
+      target: 'aaa111',
+      message: 'hi',
+      approvalMode: ApprovalMode.DEFAULT,
+      isReserved,
+    });
+
+    expect(outcome).toMatchObject({
+      kind: 'sent',
+      peer: docs,
+      address: 'aaa111',
+    });
+    // The synthesized `[aaa111]` this used to fall back to is precisely a
+    // form `advertisablePeerAddress` had already rejected: it resolves to
+    // two sessions, so a receipt naming it walked the model back into the
+    // ambiguous branch. The caller's own target has no such problem — it
+    // just resolved uniquely to this peer.
+    expect(resolvePeerTarget(all, 'aaa111')).toEqual({
+      kind: 'one',
+      peer: docs,
+    });
+    expect(resolvePeerTarget(all, '[aaa111]').kind).toBe('ambiguous');
+    expect(
+      lookupSentPeerMessageForTest(sendPeerFrame.mock.calls[0][1].msgId),
+    ).toMatchObject({ address: 'aaa111', state: 'pending' });
+  });
+
+  it('says so when no address distinguishes an ambiguous pair', async () => {
+    // One name over a 6-hex ref collision. Both sessions print the same
+    // `name [ref]`, so listing it twice hands the caller one string and the
+    // advice to "re-send with the full name [ref]" cannot be followed.
+    const twinA = peer('s1', 'app-ab', '/w/one', 'abc123');
+    const twinB = peer('s2', 'app-ab', '/w/two', 'abc123');
+    listMessageablePeers.mockResolvedValue([twinA, twinB]);
+
+    const outcome = await sendToPeer({
+      target: 'app-ab',
+      message: 'hi',
+      approvalMode: ApprovalMode.DEFAULT,
+    });
+
+    expect(outcome.kind).toBe('ambiguous');
+    if (outcome.kind === 'ambiguous') {
+      expect(outcome.matches).toHaveLength(2);
+      for (const line of outcome.matches) {
+        expect(line).toContain('no address reaches this one');
+      }
+      expect(outcome.matches[0]).toContain('/w/one');
+      expect(outcome.matches[1]).toContain('/w/two');
+    }
+    expect(sendPeerFrame).not.toHaveBeenCalled();
   });
 
   it('keeps a send that timed out, since the peer may still read it', async () => {

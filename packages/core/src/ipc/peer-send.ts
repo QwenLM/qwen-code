@@ -247,9 +247,24 @@ export async function sendToPeer(
   if (resolved.kind === 'ambiguous') {
     return {
       kind: 'ambiguous',
-      matches: resolved.matches.map(
-        (peer) => `${peer.name} [${peer.ref}] in ${peer.cwd}`,
-      ),
+      // Round-trip every address before printing it. `name [ref]` is the
+      // form the caller is told to retry with, but two sessions can share
+      // both — one name over a 6-hex ref collision — and then this list
+      // prints one string twice and the retry it advises resolves straight
+      // back to this branch. `advertisablePeerAddress` is the same
+      // uniqueness check `list_agents` prints through, so an entry that
+      // survives it is an address the retry can actually use.
+      matches: resolved.matches.map((peer) => {
+        const address = advertisablePeerAddress(
+          peer,
+          peers,
+          options.isReserved,
+        );
+        return address === undefined
+          ? `${peer.name} [${peer.ref}] in ${peer.cwd} — no address reaches ` +
+              `this one while its twin is running`
+          : `${address} in ${peer.cwd}`;
+      }),
     };
   }
 
@@ -257,8 +272,16 @@ export async function sendToPeer(
   // The address the ledger remembers is the one list_agents would print:
   // a receipt that names an address which re-resolves ambiguous — or that
   // the listing never showed — sends the model in circles.
+  //
+  // When no advertisable form exists, the caller's own target is the one
+  // address known to reach this peer: `resolved.kind === 'one'` says it
+  // just resolved here uniquely, and a reserved target would have been
+  // routed in-process before reaching this function. A synthesized
+  // `[ref]` had neither guarantee — it is exactly the form
+  // `advertisablePeerAddress` may have just rejected.
   const address =
-    advertisablePeerAddress(peer, peers, options.isReserved) ?? `[${peer.ref}]`;
+    advertisablePeerAddress(peer, peers, options.isReserved) ??
+    options.target.trim();
   // The wire contract drops frames with empty content silently, and no
   // receipt can ever follow; reporting such a write as sent would strand
   // the ledger entry pending and tell the model not to re-send.
