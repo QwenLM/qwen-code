@@ -88,6 +88,16 @@ const reviewPreCheckoutSweepStep =
 const reviewCheckoutIndex = reviewCleanSteps.findIndex(
   (s) => s.name === 'Checkout base branch',
 );
+// Both copies are directly executable (the review copy ends at `done`;
+// the ci.yml copy's trailing artifact sweep skips workspaces without a
+// .git), and every behavioral fixture below runs each of them against its
+// own workspace: a mutant that survives the substring pins — e.g. a
+// `continue` right after the for-loop head silently no-op-ing one copy —
+// must fail behaviorally on BOTH copies (mutation-probed).
+const executableCleanCopies = [
+  { id: 'ci.yml', run: ciCleanSteps[0].run },
+  { id: 'qwen-code-pr-review.yml', run: reviewPreCheckoutSweepStep },
+];
 // The step's owner-extraction awk is not a worktree filter: anchor on the
 // filter's shape, not the first awk in the step. Derive it once here so the
 // pinning test and the behavioral test always execute the same filter.
@@ -326,27 +336,29 @@ describe('review worktree cleanup steps', () => {
   });
 
   it('removes both known qwen state names without touching .qwenignore', () => {
-    const root = mkdtempSync(join(tmpdir(), 'qwen-ci-cleanup-'));
-    const workspace = join(root, 'workspace');
-    mkdirSync(join(workspace, '.qwen', 'agents'), { recursive: true });
-    mkdirSync(join(workspace, '.qwen.root-orig', 'agents'), {
-      recursive: true,
-    });
-    writeFileSync(join(workspace, '.qwenignore'), 'keep\n');
-
-    try {
-      const result = spawnSync('bash', ['-c', ciCleanSteps[0].run], {
-        cwd: workspace,
-        env: { ...process.env, GITHUB_WORKSPACE: workspace },
-        encoding: 'utf8',
+    for (const { id, run } of executableCleanCopies) {
+      const root = mkdtempSync(join(tmpdir(), 'qwen-ci-cleanup-'));
+      const workspace = join(root, 'workspace');
+      mkdirSync(join(workspace, '.qwen', 'agents'), { recursive: true });
+      mkdirSync(join(workspace, '.qwen.root-orig', 'agents'), {
+        recursive: true,
       });
+      writeFileSync(join(workspace, '.qwenignore'), 'keep\n');
 
-      expect(result.status, result.stderr).toBe(0);
-      expect(existsSync(join(workspace, '.qwen'))).toBe(false);
-      expect(existsSync(join(workspace, '.qwen.root-orig'))).toBe(false);
-      expect(existsSync(join(workspace, '.qwenignore'))).toBe(true);
-    } finally {
-      rmSync(root, { recursive: true, force: true });
+      try {
+        const result = spawnSync('bash', ['-c', run], {
+          cwd: workspace,
+          env: { ...process.env, GITHUB_WORKSPACE: workspace },
+          encoding: 'utf8',
+        });
+
+        expect(result.status, `${id}: ${result.stderr}`).toBe(0);
+        expect(existsSync(join(workspace, '.qwen')), id).toBe(false);
+        expect(existsSync(join(workspace, '.qwen.root-orig')), id).toBe(false);
+        expect(existsSync(join(workspace, '.qwenignore')), id).toBe(true);
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
     }
   });
 
@@ -362,56 +374,60 @@ describe('review worktree cleanup steps', () => {
   });
 
   it.skipIf(!permissionFixturesAvailable)(
-    'ci sweep unlinks a dangling-symlink .qwen via the -L existence arm',
+    'pre-checkout sweeps unlink a dangling-symlink .qwen via the -L existence arm',
     () => {
-      const root = mkdtempSync(join(tmpdir(), 'qwen-ci-cleanup-'));
-      const workspace = join(root, 'workspace');
-      mkdirSync(workspace, { recursive: true });
-      const link = join(workspace, '.qwen');
-      try {
-        symlinkSync(join(root, 'missing-target'), link);
-        // -e follows the link, so a dangling leftover reports as absent:
-        // only the -L arm of the existence guard keeps the sweep from
-        // skipping it and leaving checkout to trip on the very residue the
-        // sweep exists to clear.
-        const result = spawnSync('bash', ['-c', ciCleanSteps[0].run], {
-          cwd: workspace,
-          env: { ...process.env, GITHUB_WORKSPACE: workspace },
-          encoding: 'utf8',
-        });
+      for (const { id, run } of executableCleanCopies) {
+        const root = mkdtempSync(join(tmpdir(), 'qwen-ci-cleanup-'));
+        const workspace = join(root, 'workspace');
+        mkdirSync(workspace, { recursive: true });
+        const link = join(workspace, '.qwen');
+        try {
+          symlinkSync(join(root, 'missing-target'), link);
+          // -e follows the link, so a dangling leftover reports as absent:
+          // only the -L arm of the existence guard keeps the sweep from
+          // skipping it and leaving checkout to trip on the very residue the
+          // sweep exists to clear.
+          const result = spawnSync('bash', ['-c', run], {
+            cwd: workspace,
+            env: { ...process.env, GITHUB_WORKSPACE: workspace },
+            encoding: 'utf8',
+          });
 
-        expect(result.status, result.stderr).toBe(0);
-        expect(linkExists(link)).toBe(false);
-      } finally {
-        rmSync(root, { recursive: true, force: true });
+          expect(result.status, `${id}: ${result.stderr}`).toBe(0);
+          expect(linkExists(link), id).toBe(false);
+        } finally {
+          rmSync(root, { recursive: true, force: true });
+        }
       }
     },
   );
 
   it.skipIf(!permissionFixturesAvailable)(
-    'ci sweep unlinks a live-symlink .qwen without touching its target',
+    'pre-checkout sweeps unlink a live-symlink .qwen without touching its target',
     () => {
-      const root = mkdtempSync(join(tmpdir(), 'qwen-ci-cleanup-'));
-      const workspace = join(root, 'workspace');
-      const target = join(root, 'outside-target');
-      const marker = join(target, 'marker.txt');
-      mkdirSync(workspace, { recursive: true });
-      mkdirSync(target, { recursive: true });
-      writeFileSync(marker, 'keep\n');
-      const link = join(workspace, '.qwen');
-      try {
-        symlinkSync(target, link);
-        const result = spawnSync('bash', ['-c', ciCleanSteps[0].run], {
-          cwd: workspace,
-          env: { ...process.env, GITHUB_WORKSPACE: workspace },
-          encoding: 'utf8',
-        });
+      for (const { id, run } of executableCleanCopies) {
+        const root = mkdtempSync(join(tmpdir(), 'qwen-ci-cleanup-'));
+        const workspace = join(root, 'workspace');
+        const target = join(root, 'outside-target');
+        const marker = join(target, 'marker.txt');
+        mkdirSync(workspace, { recursive: true });
+        mkdirSync(target, { recursive: true });
+        writeFileSync(marker, 'keep\n');
+        const link = join(workspace, '.qwen');
+        try {
+          symlinkSync(target, link);
+          const result = spawnSync('bash', ['-c', run], {
+            cwd: workspace,
+            env: { ...process.env, GITHUB_WORKSPACE: workspace },
+            encoding: 'utf8',
+          });
 
-        expect(result.status, result.stderr).toBe(0);
-        expect(linkExists(link)).toBe(false);
-        expect(readFileSync(marker, 'utf8')).toBe('keep\n');
-      } finally {
-        rmSync(root, { recursive: true, force: true });
+          expect(result.status, `${id}: ${result.stderr}`).toBe(0);
+          expect(linkExists(link), id).toBe(false);
+          expect(readFileSync(marker, 'utf8'), id).toBe('keep\n');
+        } finally {
+          rmSync(root, { recursive: true, force: true });
+        }
       }
     },
   );
