@@ -15,14 +15,14 @@ import type {
 import { ApiError } from '@google/genai';
 import { AuthType, type ContentGenerator } from './contentGenerator.js';
 import {
-  GeminiChat,
+  LlmChat,
   InvalidStreamError,
   approvedPlanRedactionText,
   redactApprovedPlansInHistory,
   redactStructuredOutputArgsForRecording,
   StreamEventType,
   type StreamEvent,
-} from './geminiChat.js';
+} from './llm-chat.js';
 import { RETRYABLE_STREAM_TRANSPORT_CODES } from './stream-transport-retry.js';
 import { getToolCallFingerprint } from './toolCallIdUtils.js';
 import { classifyRetryError } from '../utils/retryErrorClassification.js';
@@ -148,9 +148,9 @@ vi.mock('../utils/debugLogger.js', async (importOriginal) => {
   };
 });
 
-describe('GeminiChat', async () => {
+describe('LlmChat', async () => {
   let mockContentGenerator: ContentGenerator;
-  let chat: GeminiChat;
+  let chat: LlmChat;
   let mockConfig: Config;
   const config: GenerateContentConfig = {};
 
@@ -214,13 +214,7 @@ describe('GeminiChat', async () => {
     // Disable 429 simulation for tests
     setSimulate429(false);
     // Reset history for each test by creating a new instance
-    chat = new GeminiChat(
-      mockConfig,
-      config,
-      [],
-      undefined,
-      uiTelemetryService,
-    );
+    chat = new LlmChat(mockConfig, config, [], undefined, uiTelemetryService);
   });
 
   afterEach(() => {
@@ -256,14 +250,14 @@ describe('GeminiChat', async () => {
   }
 
   function chatWithRecorder(recordAssistantTurn: ReturnType<typeof vi.fn>) {
-    return new GeminiChat(
+    return new LlmChat(
       mockConfig,
       config,
       [],
       {
         recordAssistantTurn,
         recordChatCompression: vi.fn(),
-      } as unknown as ConstructorParameters<typeof GeminiChat>[3],
+      } as unknown as ConstructorParameters<typeof LlmChat>[3],
       uiTelemetryService,
     );
   }
@@ -406,7 +400,7 @@ describe('GeminiChat', async () => {
 
   describe('system instruction helpers', () => {
     it('replaces prior session-start context instead of appending indefinitely', () => {
-      const isolatedChat = new GeminiChat(
+      const isolatedChat = new LlmChat(
         mockConfig,
         {},
         [],
@@ -424,7 +418,7 @@ describe('GeminiChat', async () => {
     });
 
     it('preserves existing system prompt suffixes when replacing session-start context', () => {
-      const isolatedChat = new GeminiChat(
+      const isolatedChat = new LlmChat(
         mockConfig,
         {},
         [],
@@ -444,7 +438,7 @@ describe('GeminiChat', async () => {
     });
 
     it('preserves non-string systemInstruction content when applying session-start context', () => {
-      const isolatedChat = new GeminiChat(
+      const isolatedChat = new LlmChat(
         mockConfig,
         {
           systemInstruction: {
@@ -466,7 +460,7 @@ describe('GeminiChat', async () => {
     });
 
     it('applies session-start context synchronously via applySessionStartContext', () => {
-      const isolatedChat = new GeminiChat(
+      const isolatedChat = new LlmChat(
         mockConfig,
         {},
         [],
@@ -486,7 +480,7 @@ describe('GeminiChat', async () => {
     });
 
     it('does not strip legitimate content that only resembles the old plain-text marker', () => {
-      const isolatedChat = new GeminiChat(
+      const isolatedChat = new LlmChat(
         mockConfig,
         {},
         [],
@@ -888,7 +882,7 @@ describe('GeminiChat', async () => {
           /* consume */
         }
 
-        const replacementChat = new GeminiChat(mockConfig, config);
+        const replacementChat = new LlmChat(mockConfig, config);
         replacementChat.enableManualPlanExitNotices();
         const replacementStream = await replacementChat.sendMessageStream(
           'test-model',
@@ -2815,7 +2809,7 @@ describe('GeminiChat', async () => {
 
     it('keeps an Anthropic-routed refusal quiet tool result completion fatal (#9026)', async () => {
       // Anthropic's `refusal` stop_reason is converted to SAFETY by
-      // mapAnthropicFinishReasonToGemini (anthropicContentGenerator/
+      // mapAnthropicFinishReasonToLlm (anthropicContentGenerator/
       // converter.ts). Without that mapping it would fall through to
       // FINISH_REASON_UNSPECIFIED and the armed attempt would accept the
       // refusal as a quiet "(empty content)" completion, masking the
@@ -3904,8 +3898,8 @@ describe('GeminiChat', async () => {
     });
 
     it('should not update global telemetry when no telemetryService is provided (subagent isolation)', async () => {
-      // Simulate a subagent GeminiChat: created without a telemetryService
-      const subagentChat = new GeminiChat(mockConfig, config, []);
+      // Simulate a subagent LlmChat: created without a telemetryService
+      const subagentChat = new LlmChat(mockConfig, config, []);
 
       const response = (async function* () {
         yield {
@@ -4035,14 +4029,14 @@ describe('GeminiChat', async () => {
 
     it('sanitizes a standalone closing thinking tag without retrying valid tool calls', async () => {
       const recordAssistantTurn = vi.fn();
-      const chatWithRecording = new GeminiChat(
+      const chatWithRecording = new LlmChat(
         mockConfig,
         config,
         [],
         {
           recordAssistantTurn,
           recordChatCompression: vi.fn(),
-        } as unknown as ConstructorParameters<typeof GeminiChat>[3],
+        } as unknown as ConstructorParameters<typeof LlmChat>[3],
         uiTelemetryService,
       );
       const create = vi.fn().mockImplementation(async () =>
@@ -4324,7 +4318,7 @@ describe('GeminiChat', async () => {
         model: 'test-model',
         contextWindowSize: 264_000,
       });
-      const subagentChat = new GeminiChat(mockConfig, config, [
+      const subagentChat = new LlmChat(mockConfig, config, [
         { role: 'user', parts: [{ text: 'inherited' }] },
         { role: 'model', parts: [{ text: 'inherited reply' }] },
       ]);
@@ -5204,14 +5198,14 @@ describe('GeminiChat', async () => {
         { role: 'model', parts: [{ text: 'ack' }] },
       ];
       const recordChatCompression = vi.fn();
-      const chatWithRecording = new GeminiChat(
+      const chatWithRecording = new LlmChat(
         mockConfig,
         config,
         [],
         {
           recordAssistantTurn: vi.fn(),
           recordChatCompression,
-        } as unknown as ConstructorParameters<typeof GeminiChat>[3],
+        } as unknown as ConstructorParameters<typeof LlmChat>[3],
         uiTelemetryService,
       );
       const compressSpy = vi
@@ -5320,14 +5314,14 @@ describe('GeminiChat', async () => {
         { role: 'model', parts: [{ text: 'ack' }] },
       ];
       const recordChatCompression = vi.fn();
-      const chatWithRecording = new GeminiChat(
+      const chatWithRecording = new LlmChat(
         mockConfig,
         config,
         [],
         {
           recordAssistantTurn: vi.fn(),
           recordChatCompression,
-        } as unknown as ConstructorParameters<typeof GeminiChat>[3],
+        } as unknown as ConstructorParameters<typeof LlmChat>[3],
         uiTelemetryService,
       );
       chatWithRecording.setHistory(originalHistory);
@@ -5374,14 +5368,14 @@ describe('GeminiChat', async () => {
         { role: 'model', parts: [{ text: 'ack' }] },
       ];
       const recordChatCompression = vi.fn();
-      const chatWithRecording = new GeminiChat(
+      const chatWithRecording = new LlmChat(
         mockConfig,
         config,
         [],
         {
           recordAssistantTurn: vi.fn(),
           recordChatCompression,
-        } as unknown as ConstructorParameters<typeof GeminiChat>[3],
+        } as unknown as ConstructorParameters<typeof LlmChat>[3],
         uiTelemetryService,
       );
       chatWithRecording.setHistory(originalHistory);
@@ -5428,14 +5422,14 @@ describe('GeminiChat', async () => {
         { role: 'model', parts: [{ text: 'ack' }] },
       ];
       const recordChatCompression = vi.fn();
-      const chatWithRecording = new GeminiChat(
+      const chatWithRecording = new LlmChat(
         mockConfig,
         config,
         [],
         {
           recordAssistantTurn: vi.fn(),
           recordChatCompression,
-        } as unknown as ConstructorParameters<typeof GeminiChat>[3],
+        } as unknown as ConstructorParameters<typeof LlmChat>[3],
         uiTelemetryService,
       );
       chatWithRecording.setHistory(originalHistory);
@@ -6296,7 +6290,7 @@ describe('GeminiChat', async () => {
         makeStreamResponse('clamped response'),
       );
 
-      const chatInstance = new GeminiChat(
+      const chatInstance = new LlmChat(
         mockConfig,
         config,
         [],
@@ -6350,7 +6344,7 @@ describe('GeminiChat', async () => {
         makeStreamResponse('roomy response'),
       );
 
-      const chatInstance = new GeminiChat(
+      const chatInstance = new LlmChat(
         mockConfig,
         config,
         [],
@@ -6399,7 +6393,7 @@ describe('GeminiChat', async () => {
           makeStreamResponse('env ceiling response'),
         );
 
-        const chatInstance = new GeminiChat(
+        const chatInstance = new LlmChat(
           mockConfig,
           config,
           [],
@@ -6452,7 +6446,7 @@ describe('GeminiChat', async () => {
         makeStreamResponse('first send'),
       );
 
-      const chatInstance = new GeminiChat(
+      const chatInstance = new LlmChat(
         mockConfig,
         config,
         [],
@@ -6509,7 +6503,7 @@ describe('GeminiChat', async () => {
         makeStreamResponse('first send after compression'),
       );
 
-      const chatInstance = new GeminiChat(
+      const chatInstance = new LlmChat(
         mockConfig,
         config,
         [
@@ -6559,7 +6553,7 @@ describe('GeminiChat', async () => {
         }),
       );
 
-      const chatInstance = new GeminiChat(
+      const chatInstance = new LlmChat(
         mockConfig,
         config,
         [],
@@ -6603,7 +6597,7 @@ describe('GeminiChat', async () => {
         }),
       );
 
-      const chatInstance = new GeminiChat(
+      const chatInstance = new LlmChat(
         mockConfig,
         config,
         [],
@@ -6652,7 +6646,7 @@ describe('GeminiChat', async () => {
         makeStreamResponse('normal response'),
       );
 
-      const chatInstance = new GeminiChat(
+      const chatInstance = new LlmChat(
         mockConfig,
         config,
         [],
@@ -6730,7 +6724,7 @@ describe('GeminiChat', async () => {
   });
 
   describe('getHistoryFunctionResponseIds', () => {
-    // Walk-only accessor used by `useGeminiStream.handleCompletedTools`
+    // Walk-only accessor used by `useLlmStream.handleCompletedTools`
     // for the dedup pass. The whole point of this method is to avoid
     // the multi-millisecond `structuredClone` hit that
     // `getHistory()` pays on long sessions when only the id Set is
@@ -8086,7 +8080,7 @@ describe('GeminiChat', async () => {
       vi.mocked(mockConfig.getEffectiveInputModalities).mockReturnValue({
         pdf: true,
       });
-      chat = new GeminiChat(
+      chat = new LlmChat(
         mockConfig,
         config,
         [
@@ -12461,14 +12455,14 @@ describe('GeminiChat', async () => {
 
   it('discards a completed protocol-tagged response and retries before persistence', async () => {
     const recordAssistantTurn = vi.fn();
-    const chatWithRecording = new GeminiChat(
+    const chatWithRecording = new LlmChat(
       mockConfig,
       config,
       [],
       {
         recordAssistantTurn,
         recordChatCompression: vi.fn(),
-      } as unknown as ConstructorParameters<typeof GeminiChat>[3],
+      } as unknown as ConstructorParameters<typeof LlmChat>[3],
       uiTelemetryService,
     );
     vi.mocked(mockContentGenerator.generateContentStream)
@@ -12574,14 +12568,14 @@ describe('GeminiChat', async () => {
     'retries a JSON tool protocol leak: $name',
     async ({ leakedJson, trailingText, finishWithContent }) => {
       const recordAssistantTurn = vi.fn();
-      const chatWithRecording = new GeminiChat(
+      const chatWithRecording = new LlmChat(
         mockConfig,
         config,
         [],
         {
           recordAssistantTurn,
           recordChatCompression: vi.fn(),
-        } as unknown as ConstructorParameters<typeof GeminiChat>[3],
+        } as unknown as ConstructorParameters<typeof LlmChat>[3],
         uiTelemetryService,
       );
       const leakedText =
@@ -12757,14 +12751,14 @@ describe('GeminiChat', async () => {
     'retries when a %s interrupts a partial JSON protocol leak',
     async (middleChunkType) => {
       const recordAssistantTurn = vi.fn();
-      const chatWithRecording = new GeminiChat(
+      const chatWithRecording = new LlmChat(
         mockConfig,
         config,
         [],
         {
           recordAssistantTurn,
           recordChatCompression: vi.fn(),
-        } as unknown as ConstructorParameters<typeof GeminiChat>[3],
+        } as unknown as ConstructorParameters<typeof LlmChat>[3],
         uiTelemetryService,
       );
       const leakedText =
@@ -12848,14 +12842,14 @@ describe('GeminiChat', async () => {
     'preserves leading JSON when a tool call ends without a finish reason (tool call first: %s)',
     async (toolCallFirst) => {
       const recordAssistantTurn = vi.fn();
-      const chatWithRecording = new GeminiChat(
+      const chatWithRecording = new LlmChat(
         mockConfig,
         config,
         [],
         {
           recordAssistantTurn,
           recordChatCompression: vi.fn(),
-        } as unknown as ConstructorParameters<typeof GeminiChat>[3],
+        } as unknown as ConstructorParameters<typeof LlmChat>[3],
         uiTelemetryService,
       );
       const response = JSON.stringify([{ name: 'example', value: 1 }]);
@@ -12999,14 +12993,14 @@ describe('GeminiChat', async () => {
 
   it('does not retry after a structured tool call has already been emitted', async () => {
     const recordAssistantTurn = vi.fn();
-    const chatWithRecording = new GeminiChat(
+    const chatWithRecording = new LlmChat(
       mockConfig,
       config,
       [],
       {
         recordAssistantTurn,
         recordChatCompression: vi.fn(),
-      } as unknown as ConstructorParameters<typeof GeminiChat>[3],
+      } as unknown as ConstructorParameters<typeof LlmChat>[3],
       uiTelemetryService,
     );
     const leakedText =
@@ -13247,14 +13241,14 @@ describe('GeminiChat', async () => {
     vi.useFakeTimers();
     try {
       const recordAssistantTurn = vi.fn();
-      const chatWithRecording = new GeminiChat(
+      const chatWithRecording = new LlmChat(
         mockConfig,
         config,
         [],
         {
           recordAssistantTurn,
           recordChatCompression: vi.fn(),
-        } as unknown as ConstructorParameters<typeof GeminiChat>[3],
+        } as unknown as ConstructorParameters<typeof LlmChat>[3],
         uiTelemetryService,
       );
       chatWithRecording.setHistory([
@@ -13570,7 +13564,7 @@ describe('GeminiChat', async () => {
       pendingPartialAssistantTurnIndex: number | null;
       pendingPartialAssistantRecord: unknown;
     };
-    function plantMarkers(c: GeminiChat): void {
+    function plantMarkers(c: LlmChat): void {
       const internal = c as unknown as PrivateFields;
       internal.pendingPartialAssistantTurnIndex = 0;
       internal.pendingPartialAssistantRecord = {
@@ -13578,7 +13572,7 @@ describe('GeminiChat', async () => {
         message: [{ functionCall: { id: 'call_test', name: 't', args: {} } }],
       };
     }
-    function markers(c: GeminiChat): {
+    function markers(c: LlmChat): {
       idx: number | null;
       record: unknown;
     } {
@@ -16149,14 +16143,14 @@ describe('GeminiChat', async () => {
       // be rolled back so later sends and resumed sessions do not repair an
       // incomplete call with a synthetic result.
       const recordAssistantTurn = vi.fn();
-      const chatWithRecording = new GeminiChat(
+      const chatWithRecording = new LlmChat(
         mockConfig,
         config,
         [],
         {
           recordAssistantTurn,
           recordChatCompression: vi.fn(),
-        } as unknown as ConstructorParameters<typeof GeminiChat>[3],
+        } as unknown as ConstructorParameters<typeof LlmChat>[3],
         uiTelemetryService,
       );
 
@@ -16233,8 +16227,8 @@ describe('GeminiChat', async () => {
 
     const REPLACEMENT = '[Plan approved and saved to /tmp/p.md]';
 
-    function chatWith(history: Content[]): GeminiChat {
-      return new GeminiChat({} as unknown as Config, {}, history);
+    function chatWith(history: Content[]): LlmChat {
+      return new LlmChat({} as unknown as Config, {}, history);
     }
 
     it('rewrites only the plan arg of the matching exit_plan_mode call', () => {
@@ -16500,7 +16494,7 @@ describe('GeminiChat', async () => {
       const planFile = '/plans/wired-session.md';
       mockFileSystem.set(planFile, PLAN);
       try {
-        const chat = new GeminiChat(
+        const chat = new LlmChat(
           {
             getPlanFilePath: () => planFile,
             getToolRegistry: () => undefined,
@@ -16520,7 +16514,7 @@ describe('GeminiChat', async () => {
       const planFile = '/plans/ctor-session.md';
       mockFileSystem.set(planFile, PLAN);
       try {
-        const chat = new GeminiChat(
+        const chat = new LlmChat(
           { getPlanFilePath: () => planFile } as unknown as Config,
           {},
           approvedHistory(),
@@ -16533,7 +16527,7 @@ describe('GeminiChat', async () => {
     });
 
     it('setHistory leaves history alone when no plan file exists', () => {
-      const chat = new GeminiChat(
+      const chat = new LlmChat(
         {
           getPlanFilePath: () => '/plans/never-written.md',
           getToolRegistry: () => undefined,
@@ -16617,7 +16611,7 @@ describe('GeminiChat', async () => {
   });
 
   // Compression logic is tested in chatCompressionService.test.ts; this
-  // suite covers per-chat state on GeminiChat: consecutiveFailures
+  // suite covers per-chat state on LlmChat: consecutiveFailures
   // circuit breaker, token-count mutation, history replacement, and
   // conditional telemetry mirroring.
   describe('tryCompress (per-chat state)', () => {
@@ -16699,7 +16693,7 @@ describe('GeminiChat', async () => {
       // A subagent-style chat with no telemetryService must NOT touch the
       // global singleton (per the constructor docstring; per-chat counter
       // still updates).
-      const subagentChat = new GeminiChat(mockConfig, config, []);
+      const subagentChat = new LlmChat(mockConfig, config, []);
       vi.mocked(uiTelemetryService.setLastPromptTokenCount).mockClear();
       mockCompressionService('compressed');
       const info = await subagentChat.tryCompress('p3');
@@ -16719,7 +16713,7 @@ describe('GeminiChat', async () => {
 
       // The next unforced call should reach the service with
       // consecutiveFailures=1 (incremented after the first failure). The
-      // important thing here is that GeminiChat actually forwards the
+      // important thing here is that LlmChat actually forwards the
       // updated counter — the service's own threshold logic is tested
       // separately in chatCompressionService.test.ts.
       compressSpy.mockClear();
@@ -16769,13 +16763,13 @@ describe('GeminiChat', async () => {
 
     it('persists estimated provenance in a compression checkpoint', async () => {
       const recordChatCompression = vi.fn();
-      const recordingChat = new GeminiChat(
+      const recordingChat = new LlmChat(
         mockConfig,
         config,
         [userMsg('history without usage'), modelMsg('response')],
         {
           recordChatCompression,
-        } as unknown as ConstructorParameters<typeof GeminiChat>[3],
+        } as unknown as ConstructorParameters<typeof LlmChat>[3],
         uiTelemetryService,
       );
       mockCompressionService('compressed');
@@ -16791,13 +16785,13 @@ describe('GeminiChat', async () => {
 
     it('preserves an authoritative compression count from the service', async () => {
       const recordChatCompression = vi.fn();
-      const recordingChat = new GeminiChat(
+      const recordingChat = new LlmChat(
         mockConfig,
         config,
         [userMsg('history'), modelMsg('response')],
         {
           recordChatCompression,
-        } as unknown as ConstructorParameters<typeof GeminiChat>[3],
+        } as unknown as ConstructorParameters<typeof LlmChat>[3],
         uiTelemetryService,
       );
       vi.spyOn(ChatCompressionService.prototype, 'compress').mockResolvedValue({
@@ -16827,7 +16821,7 @@ describe('GeminiChat', async () => {
         toolResultsThresholdMinutes: 30,
         toolResultsNumToKeep: 1,
       });
-      const recordingChat = new GeminiChat(
+      const recordingChat = new LlmChat(
         mockConfig,
         config,
         [
@@ -16842,7 +16836,7 @@ describe('GeminiChat', async () => {
         ],
         {
           recordChatCompression,
-        } as unknown as ConstructorParameters<typeof GeminiChat>[3],
+        } as unknown as ConstructorParameters<typeof LlmChat>[3],
         uiTelemetryService,
       );
       recordingChat.seedResumeTokenCounts(1000, 0, false);
@@ -16872,7 +16866,7 @@ describe('GeminiChat', async () => {
         toolResultsThresholdMinutes: 30,
         toolResultsNumToKeep: 1,
       });
-      const fastChat = new GeminiChat(
+      const fastChat = new LlmChat(
         mockConfig,
         config,
         [
@@ -16902,7 +16896,7 @@ describe('GeminiChat', async () => {
         toolResultsThresholdMinutes: 30,
         toolResultsNumToKeep: 1,
       });
-      const fastChat = new GeminiChat(
+      const fastChat = new LlmChat(
         mockConfig,
         config,
         [
@@ -17044,7 +17038,7 @@ describe('GeminiChat', async () => {
   // Route-scoped token counts (#9454): API-reported prompt/output token
   // counts describe the serialization of the route (model + auth type +
   // endpoint) that produced them. A /model switch rebuilds the content
-  // generator but keeps this GeminiChat instance, so counts recorded for the
+  // generator but keeps this LlmChat instance, so counts recorded for the
   // previous route must be invalidated — otherwise they anchor admission,
   // clamp, and compression decisions for a different serialization.
   describe('route-scoped token counts (#9454)', () => {
@@ -17208,7 +17202,7 @@ describe('GeminiChat', async () => {
         toolResultsThresholdMinutes: 30,
         toolResultsNumToKeep: 1,
       });
-      const fastChat = new GeminiChat(
+      const fastChat = new LlmChat(
         mockConfig,
         config,
         [
@@ -17223,7 +17217,7 @@ describe('GeminiChat', async () => {
         ],
         {
           recordChatCompression: vi.fn(),
-        } as unknown as ConstructorParameters<typeof GeminiChat>[3],
+        } as unknown as ConstructorParameters<typeof LlmChat>[3],
         uiTelemetryService,
       );
       fastChat.setLastPromptTokenCount(691_000, false);
@@ -17333,7 +17327,7 @@ describe('GeminiChat', async () => {
       vi.mocked(mockConfig.getModelRouteIdentity).mockImplementation((model) =>
         model ? `${model}@route` : 'active@route',
       );
-      const rescueChat = new GeminiChat(
+      const rescueChat = new LlmChat(
         mockConfig,
         config,
         [
@@ -17342,7 +17336,7 @@ describe('GeminiChat', async () => {
         ],
         {
           recordAssistantTurn: vi.fn(),
-        } as unknown as ConstructorParameters<typeof GeminiChat>[3],
+        } as unknown as ConstructorParameters<typeof LlmChat>[3],
         uiTelemetryService,
       );
       // Authoritative count recorded by an earlier override-route turn.
@@ -17393,13 +17387,13 @@ describe('GeminiChat', async () => {
       vi.mocked(mockConfig.getModelRouteIdentity).mockReturnValue(
         'active@route',
       );
-      const rescueChat = new GeminiChat(
+      const rescueChat = new LlmChat(
         mockConfig,
         config,
         [{ role: 'user', parts: [{ text: 'x'.repeat(720_000) }] }],
         {
           recordAssistantTurn: vi.fn(),
-        } as unknown as ConstructorParameters<typeof GeminiChat>[3],
+        } as unknown as ConstructorParameters<typeof LlmChat>[3],
         uiTelemetryService,
       );
       rescueChat.setLastPromptTokenCount(190_000, false);
@@ -17454,7 +17448,7 @@ describe('GeminiChat', async () => {
       vi.mocked(mockConfig.getModelRouteIdentity).mockReturnValue(
         'override-model@route',
       );
-      const rescueChat = new GeminiChat(
+      const rescueChat = new LlmChat(
         mockConfig,
         config,
         [
@@ -17463,7 +17457,7 @@ describe('GeminiChat', async () => {
         ],
         {
           recordAssistantTurn: vi.fn(),
-        } as unknown as ConstructorParameters<typeof GeminiChat>[3],
+        } as unknown as ConstructorParameters<typeof LlmChat>[3],
         uiTelemetryService,
       );
       // Authoritative count pair recorded by an earlier override-route turn.
@@ -17515,13 +17509,13 @@ describe('GeminiChat', async () => {
       vi.mocked(mockConfig.getModelRouteIdentity).mockReturnValue(
         'active@route',
       );
-      const rescueChat = new GeminiChat(
+      const rescueChat = new LlmChat(
         mockConfig,
         config,
         [{ role: 'user', parts: [{ text: 'x'.repeat(720_000) }] }],
         {
           recordAssistantTurn: vi.fn(),
-        } as unknown as ConstructorParameters<typeof GeminiChat>[3],
+        } as unknown as ConstructorParameters<typeof LlmChat>[3],
         uiTelemetryService,
       );
       rescueChat.setLastPromptTokenCount(150_000, false);
@@ -17568,7 +17562,7 @@ describe('GeminiChat', async () => {
       vi.mocked(mockConfig.getModelRouteIdentity).mockReturnValue(
         'active@route',
       );
-      const stampChat = new GeminiChat(
+      const stampChat = new LlmChat(
         mockConfig,
         config,
         [{ role: 'user', parts: [{ text: 'x'.repeat(720_000) }] }],
@@ -17577,7 +17571,7 @@ describe('GeminiChat', async () => {
           // Successful hard-rescue compression records after the
           // post-compression guard passes (deferred recording).
           recordChatCompression: vi.fn(),
-        } as unknown as ConstructorParameters<typeof GeminiChat>[3],
+        } as unknown as ConstructorParameters<typeof LlmChat>[3],
         uiTelemetryService,
       );
       stampChat.setLastPromptTokenCount(150_000, false);
@@ -17649,7 +17643,7 @@ describe('GeminiChat', async () => {
       vi.mocked(mockConfig.getModelRouteIdentity).mockReturnValue(
         'active@route',
       );
-      const stampChat = new GeminiChat(
+      const stampChat = new LlmChat(
         mockConfig,
         config,
         [{ role: 'user', parts: [{ text: 'x'.repeat(720_000) }] }],
@@ -17658,7 +17652,7 @@ describe('GeminiChat', async () => {
           // Successful hard-rescue compression records after the
           // post-compression guard passes (deferred recording).
           recordChatCompression: vi.fn(),
-        } as unknown as ConstructorParameters<typeof GeminiChat>[3],
+        } as unknown as ConstructorParameters<typeof LlmChat>[3],
         uiTelemetryService,
       );
       stampChat.setLastPromptTokenCount(150_000, false);
@@ -17755,7 +17749,7 @@ describe('GeminiChat', async () => {
         toolResultsThresholdMinutes: 30,
         toolResultsNumToKeep: 1,
       });
-      const fastChat = new GeminiChat(
+      const fastChat = new LlmChat(
         mockConfig,
         config,
         [
@@ -17770,7 +17764,7 @@ describe('GeminiChat', async () => {
         ],
         {
           recordChatCompression: vi.fn(),
-        } as unknown as ConstructorParameters<typeof GeminiChat>[3],
+        } as unknown as ConstructorParameters<typeof LlmChat>[3],
         uiTelemetryService,
       );
       fastChat.setLastPromptTokenCount(691_000, false);
@@ -17873,7 +17867,7 @@ describe('GeminiChat', async () => {
       // each time). After (MAX - 1) failures, the next tryCompress should
       // still call the service. The actual NOOP-at-threshold gating is the
       // service's job (and verified separately) — here we just observe that
-      // GeminiChat keeps forwarding the incremented counter.
+      // LlmChat keeps forwarding the incremented counter.
       const compressSpy = vi.spyOn(
         ChatCompressionService.prototype,
         'compress',
@@ -17895,7 +17889,7 @@ describe('GeminiChat', async () => {
         expect(compressSpy.mock.calls[i][1].consecutiveFailures).toBe(i);
       }
       // After MAX_CONSECUTIVE_FAILURES failures, the breaker is tripped.
-      // The next call will still be made by GeminiChat (it does not
+      // The next call will still be made by LlmChat (it does not
       // short-circuit on its side), but the service's cheap-gate will NOOP.
       expect(compressSpy).toHaveBeenCalledTimes(MAX_CONSECUTIVE_FAILURES);
       await chat.tryCompress('p-last');
@@ -18199,14 +18193,14 @@ describe('GeminiChat', async () => {
 
     it('records the recovered functionCall in the JSONL turn (--resume fidelity)', async () => {
       const recordAssistantTurn = vi.fn();
-      const chatWithRecording = new GeminiChat(
+      const chatWithRecording = new LlmChat(
         mockConfig,
         config,
         [],
         {
           recordAssistantTurn,
           recordChatCompression: vi.fn(),
-        } as unknown as ConstructorParameters<typeof GeminiChat>[3],
+        } as unknown as ConstructorParameters<typeof LlmChat>[3],
         uiTelemetryService,
       );
       const xml =
