@@ -8,6 +8,9 @@ import { randomBytes } from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import * as os from 'node:os';
 import {
+  deriveApprovalModeConfig,
+  deriveConfig,
+  deriveWorktreeConfig,
   installSessionWorkflowRevisionWriteThrough,
   type Config,
 } from '../../config/config.js';
@@ -51,8 +54,6 @@ import {
   generateAgentWorktreeSlug,
   writeWorktreeSessionMarker,
 } from '../../services/gitWorktreeService.js';
-import { FileDiscoveryService } from '../../services/fileDiscoveryService.js';
-import { WorkspaceContext } from '../../utils/workspaceContext.js';
 import { SyntheticOutputTool } from '../../tools/syntheticOutput.js';
 import { rebuildToolRegistryOnOverride } from '../../tools/agent/agent.js';
 import { resolveExternalWorktreeDir } from '../worktree-pin.js';
@@ -803,12 +804,10 @@ function reportTokens(
  * would bypass that normalization and require us to duplicate it here.
  *
  * Why the worktree-rebound Config is passed as `runtimeContext` (not
- * `toolConfigOverride`): `SubagentManager.buildSubagentContextOverride`
- * (subagent-manager.ts:857) builds the subagent context via
- * `Object.create(runtimeContext)`. The own-property rebinds we set on the
- * worktree override propagate through the prototype chain, so all
- * `getTargetDir() / getCwd() / getFileService() / getWorkspaceContext()`
- * call sites inside the subagent see the worktree path. Subsequent
+ * `toolConfigOverride`): `SubagentManager` derives its subagent context from
+ * this worktree profile.
+ * The worktree profile's own getter and field rebinds propagate through that
+ * derivation, so workspace-bound call sites keep the selected path.
  * `rebuildToolRegistryOnOverride` re-resolves `this.config` through the
  * chain and anchors EditTool / WriteFileTool / ReadFileTool to the
  * worktree's FileReadCache, so the subagent cannot leak writes back into
@@ -939,11 +938,14 @@ async function runOverridePath(
     ),
   };
 
-  // Provision worktree BEFORE createAgentHeadless so the override Config
+  // Provision worktree BEFORE createAgentHeadless so the derived Config
   // is in place when convertToRuntimeConfig and buildSubagentContextOverride
-  // resolve cwd-related getters via the prototype chain.
+  // resolve workspace-bound state through the prototype chain.
   let worktreeIsolation: WorkflowWorktreeIsolation | null = null;
   let effectiveContext: Config = config;
+  // Approval-profile cleanup for the derived dispatch contexts below; a
+  // no-op unless the dispatch transitions its child-local mode into AUTO.
+  let approvalCleanup: (() => void) | undefined;
   // Same contradiction the sandbox gate names, re-checked here: the sandbox
   // gate reads the raw opts BEFORE the JSON revival, so an enumerable getter
   // can withhold `isolation` during validation and surface it at stringify
@@ -958,10 +960,13 @@ async function runOverridePath(
   }
   if (opts.isolation === 'worktree') {
     worktreeIsolation = await provisionWorkflowWorktree(config);
-    effectiveContext = createDirScopedConfigOverride(
-      config,
-      worktreeIsolation.path,
-    );
+    effectiveContext = deriveWorktreeConfig(config, worktreeIsolation.path, {
+      customIgnoreFiles: config.getFileFilteringOptions().customIgnoreFiles,
+    });
+    // Session-global Session Workflow revision state must not shadow on
+    // the dir-scoped wrapper (see
+    // installSessionWorkflowRevisionWriteThrough).
+    installSessionWorkflowRevisionWriteThrough(effectiveContext, config);
   } else if (opts.workingDir !== undefined) {
     if (
       typeof opts.workingDir !== 'string' ||
@@ -989,7 +994,24 @@ async function runOverridePath(
         `agent({workingDir: ${sanitizeForErrorMessage(JSON.stringify(opts.workingDir))}}): ${sanitizeForErrorMessage(resolved.error)}`,
       );
     }
-    effectiveContext = createDirScopedConfigOverride(config, resolved.path);
+    effectiveContext = deriveWorktreeConfig(config, resolved.path, {
+      customIgnoreFiles: config.getFileFilteringOptions().customIgnoreFiles,
+    });
+    installSessionWorkflowRevisionWriteThrough(effectiveContext, config);
+  }
+
+  if (effectiveContext !== config) {
+    // Layer an approval profile over the derived dispatch context (as
+    // agent.ts does) so approval-mode transitions on it stay child-local
+    // instead of hitting the bare-derived-Config guard. Initial mode equals
+    // the base mode, so no AUTO strip is acquired and cleanup stays a
+    // no-op unless the dispatch itself transitions into AUTO.
+    const approvalHandle = deriveApprovalModeConfig(
+      effectiveContext,
+      config.getApprovalMode(),
+    );
+    approvalCleanup = approvalHandle.cleanup;
+    effectiveContext = approvalHandle.config;
   }
 
   // R3 review (wenshao T2/T5 [M1]): named parent-abort listener so the
@@ -1204,6 +1226,9 @@ async function runOverridePath(
     if (onParentAbort && signal) {
       signal.removeEventListener('abort', onParentAbort);
     }
+    // Release the dispatch context's approval profile (no-op unless it
+    // acquired an AUTO override during the run).
+    approvalCleanup?.();
     // Outer fallback cleanup: fires only when worktree was provisioned
     // but the success-path cleanup didn't run (createAgentHeadless threw,
     // or execute threw, or the terminateMode check threw, or — after the
@@ -1352,48 +1377,6 @@ async function provisionWorkflowWorktree(
     branch: created.worktree.branch,
     repoRoot: projectRoot,
   };
-}
-
-/**
- * Build a Config wrapper that rebinds every "where am I?" surface to a
- * directory. `Object.create(base)` keeps prototype lookups walking back to
- * the parent for everything else (model config, session id, MCP servers),
- * while the own-property overrides shadow the cwd-adjacent fields so the
- * subagent's tools (Edit / Write / Read / Glob / Grep / Ls / Shell) anchor
- * inside it.
- *
- * Shared by both directory-scoped dispatch modes — `isolation: 'worktree'`,
- * which provisions the directory, and `workingDir`, which is handed one the
- * caller already owns. Mirrors the inline rebind block at agent.ts:2008-2024.
- * Sets BOTH the field shape (e.g. `targetDir`) AND the method shape
- * (`getTargetDir`) because JS does not promote a getter assignment to a field
- * shadow — call sites that read `this.targetDir` directly inside Config
- * methods would otherwise still resolve through the prototype to the parent.
- */
-function createDirScopedConfigOverride(base: Config, wtPath: string): Config {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const ov: any = Object.create(base);
-  // Session Workflow plan-revision state is session-global on the root
-  // Config; without the write-through a divergent todo_write inside the
-  // directory-scoped agent would clear it only as an own property on this
-  // wrapper (see installSessionWorkflowRevisionWriteThrough).
-  installSessionWorkflowRevisionWriteThrough(ov as Config, base);
-  ov.targetDir = wtPath;
-  ov.cwd = wtPath;
-  ov.getTargetDir = () => wtPath;
-  ov.getCwd = () => wtPath;
-  ov.getWorkingDir = () => wtPath;
-  ov.getProjectRoot = () => wtPath;
-  const wtFileService = new FileDiscoveryService(
-    wtPath,
-    base.getFileFilteringOptions().customIgnoreFiles,
-  );
-  ov.fileDiscoveryService = wtFileService;
-  ov.getFileService = () => wtFileService;
-  const wtWorkspace = new WorkspaceContext(wtPath);
-  ov.workspaceContext = wtWorkspace;
-  ov.getWorkspaceContext = () => wtWorkspace;
-  return ov as Config;
 }
 
 /**
@@ -1603,17 +1586,17 @@ async function createSchemaConfigOverride(
   base: Config,
   schema: Record<string, unknown>,
 ): Promise<Config> {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const override: any = Object.create(base);
-  // Same session-global revision contract as createDirScopedConfigOverride —
-  // the schema wrapper is the outermost layer when both apply, so its
-  // write-through must also reach the base (which may itself be the
-  // directory-scoped wrapper; the chain bottoms out at the root Config).
-  installSessionWorkflowRevisionWriteThrough(override as Config, base);
-  await rebuildToolRegistryOnOverride(override as Config, base);
+  const override = deriveConfig(base);
+  // Same session-global revision contract as the dir-scoped dispatch
+  // wrappers — the schema wrapper is the outermost layer when both
+  // apply, so its write-through must also reach the wrapped Config
+  // (which may itself be a wrapper; the chain bottoms out at the
+  // root Config).
+  installSessionWorkflowRevisionWriteThrough(override, base);
+  await rebuildToolRegistryOnOverride(override, base);
   const registry = override.getToolRegistry();
   registry.registerTool(new SyntheticOutputTool(schema));
-  return override as Config;
+  return override;
 }
 
 export class WorkflowOrchestrator {

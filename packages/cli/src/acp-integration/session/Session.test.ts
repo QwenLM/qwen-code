@@ -507,6 +507,7 @@ describe('Session', () => {
     subscribe: ReturnType<typeof vi.fn>;
     beginTurn: ReturnType<typeof vi.fn>;
     releaseTurn: ReturnType<typeof vi.fn>;
+    markTurnDelivered: ReturnType<typeof vi.fn>;
     permitForTurn: ReturnType<typeof vi.fn>;
     getVerifierFeedback: ReturnType<typeof vi.fn>;
     finishTurn: ReturnType<typeof vi.fn>;
@@ -759,6 +760,7 @@ describe('Session', () => {
       subscribe: vi.fn().mockReturnValue(() => {}),
       beginTurn: vi.fn(),
       releaseTurn: vi.fn().mockResolvedValue(false),
+      markTurnDelivered: vi.fn(),
       permitForTurn: vi.fn(),
       getVerifierFeedback: vi.fn(),
       finishTurn: vi.fn().mockResolvedValue(undefined),
@@ -5879,7 +5881,8 @@ describe('Session', () => {
             body: 'Visible collision instructions',
             filePath: '/skills/collision/SKILL.md',
             level: 'extension',
-            extensionName: 'Disabled Extension',
+            extensionName: 'active-ext',
+            extensionDisplayName: 'Disabled Extension',
           },
           {
             name: 'disabled-extension-skill',
@@ -5887,7 +5890,8 @@ describe('Session', () => {
             body: 'Hidden instructions',
             filePath: '/skills/disabled/SKILL.md',
             level: 'extension',
-            extensionName: 'Disabled Extension',
+            extensionName: 'disabled-ext',
+            extensionDisplayName: 'Disabled Extension',
           },
         ]),
       });
@@ -20320,6 +20324,7 @@ describe('Session', () => {
         await boundGoalHost!.startGoalTurn({
           permit,
           continuationContext: 'check weather',
+          objectiveUpdated: true,
           windDown: true,
           verifierFeedback: 'Need independent evidence',
         });
@@ -20353,6 +20358,11 @@ describe('Session', () => {
               }),
               expect.objectContaining({
                 text: expect.stringContaining(
+                  'The Goal objective changed since your last turn',
+                ),
+              }),
+              expect.objectContaining({
+                text: expect.stringContaining(
                   'The autonomous token budget for this Goal window is spent.',
                 ),
               }),
@@ -20365,6 +20375,9 @@ describe('Session', () => {
           }),
           expect.any(String),
           permit,
+        );
+        expect(mockGoalRuntime.markTurnDelivered).toHaveBeenCalledWith(
+          'goal-runtime:turn-1',
         );
         expect(
           mockChatRecordingService.recordGoalRuntimeMessage,

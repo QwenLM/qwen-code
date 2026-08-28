@@ -119,8 +119,17 @@ export async function teardown() {
   }
 
   if (originalMemoryContent !== null) {
-    await mkdir(dirname(memoryFilePath), { recursive: true });
-    await writeFile(memoryFilePath, originalMemoryContent, 'utf-8');
+    try {
+      await mkdir(dirname(memoryFilePath), { recursive: true });
+      await writeFile(memoryFilePath, originalMemoryContent, 'utf-8');
+    } catch (e) {
+      // Best-effort restore: on the persistent pool runners a privileged job
+      // can leave a readable-but-unwritable QWEN.md behind, and the throw
+      // turned every all-green E2E run on that host red with no failing test
+      // ('Startup Error: EACCES'; #10325). Keep the warning visible so the
+      // poisoned host is still diagnosable.
+      console.error(`Warning: could not restore ${memoryFilePath}:`, e);
+    }
   } else {
     try {
       await unlink(memoryFilePath);

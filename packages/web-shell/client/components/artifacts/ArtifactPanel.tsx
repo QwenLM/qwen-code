@@ -67,6 +67,7 @@ import {
   artifactKindLabel,
   downloadWorkspaceFile,
   formatArtifactSize,
+  getArtifactFreshnessKey,
   getArtifactLocation,
   getArtifactImageMimeType,
   getImageMimeTypeFromPath,
@@ -2480,7 +2481,7 @@ function ArtifactDetail({
     return (
       <CodeReviewArtifactDetail
         workspacePath={artifact.workspacePath}
-        artifactVersion={`${artifact.status}:${artifact.updatedAt}`}
+        artifactVersion={getArtifactFreshnessKey(artifact)}
         workspaceActions={workspaceActions}
       />
     );
@@ -2498,7 +2499,7 @@ function ArtifactDetail({
     return (
       <WorkspaceFilePreview
         workspacePath={artifact.workspacePath}
-        artifactVersion={artifact.updatedAt}
+        artifactVersion={getArtifactFreshnessKey(artifact)}
         workspaceActions={workspaceActions}
         previewContent={previewContent}
         imageMimeType={imageMimeType}

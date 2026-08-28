@@ -47,6 +47,11 @@ function makeBridge(
 }
 
 describe('createServeApp default bridge wiring', () => {
+  // Every test below resets the module registry and re-imports the full
+  // serve module graph; under heavy parallel CI load that can exceed the
+  // default timeout without any real hang.
+  vi.setConfig({ testTimeout: 30000, hookTimeout: 30000 });
+
   afterEach(() => {
     vi.doUnmock('./acp-session-bridge.js');
     vi.resetModules();
@@ -125,7 +130,7 @@ describe('createServeApp default bridge wiring', () => {
     ).toEqual({
       kind: 'not_found',
     });
-  }, 15_000);
+  });
 
   it('keeps the same-host write route disabled for an injected filesystem factory', async () => {
     let bridgeOptions: BridgeOptions | undefined;
@@ -182,7 +187,7 @@ describe('createServeApp default bridge wiring', () => {
       }),
     ).rejects.toBe(boundaryError);
     expect(writeSameHostToolText).not.toHaveBeenCalled();
-  }, 15_000);
+  });
 
   it('wires total admission into the internally-created bridge', async () => {
     let freshSessionAdmission: BridgeFreshSessionAdmission | undefined;

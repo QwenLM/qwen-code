@@ -23,6 +23,7 @@ import {
   DEFAULT_WORKFLOW_SUBAGENT_MAX_TIME_MINUTES,
 } from './workflow-orchestrator.js';
 import type {
+  ApprovalMode,
   Config,
   SessionWorkflowPlanRevision,
 } from '../../config/config.js';
@@ -2997,6 +2998,11 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
       clearSessionWorkflowPlanRevision(this: Record<string, unknown>) {
         this['sessionWorkflowPlanRevision'] = undefined;
       },
+      // Derived dispatch contexts layer an approval profile over the
+      // worktree profile; the derivation snapshots the base mode through
+      // these methods.
+      getApprovalMode: () => 'default' as ApprovalMode,
+      isTrustedFolder: () => true,
       // P3 R2 self-review: isolation:'worktree' provisioning reads
       // these methods. Provide deterministic returns so the tests can
       // drive GitWorktreeService stubs without re-deriving cwd.
@@ -4225,6 +4231,37 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
     expect(Object.hasOwn(runtime, 'sessionWorkflowPlanRevision')).toBe(false);
   });
 
+  // R7-1 sibling: the isolation-worktree dispatch wrapper carries the same
+  // write-through contract as the workingDir one — todo_write is not
+  // disallowed, so a divergent todo_write inside the isolated agent must
+  // forward revision mutations to the base instead of shadowing them.
+  it("isolation:'worktree' override writes Session Workflow revision mutations through to the base Config", async () => {
+    const helper = fakeConfigWithMgr({
+      onCreate: async () => ({ finalText: 'isolated', terminateMode: 'GOAL' }),
+    });
+    await createProductionDispatch(helper.config)('hi', {
+      isolation: 'worktree',
+    });
+
+    const runtime = helper.calls[0]!.runtimeContext;
+    expect(runtime).not.toBe(helper.config);
+
+    const sentinel: SessionWorkflowPlanRevision = {
+      planId: 'plan-isolated',
+      sourceCallId: 'call-isolated',
+      todoIds: ['t1'],
+    };
+    runtime.setSessionWorkflowPlanRevision(sentinel);
+    runtime.clearSessionWorkflowPlanRevision();
+
+    expect(Object.hasOwn(runtime, 'sessionWorkflowPlanRevision')).toBe(false);
+    const base = helper.config as unknown as Record<string, unknown>;
+    expect(base['sessionWorkflowPlanRevision']).toBeUndefined();
+    runtime.setSessionWorkflowPlanRevision(sentinel);
+    expect(base['sessionWorkflowPlanRevision']).toBe(sentinel);
+    expect(Object.hasOwn(runtime, 'sessionWorkflowPlanRevision')).toBe(false);
+  });
+
   it('workingDir rejects invalid values before dispatch', async () => {
     const helper = fakeConfigWithMgr({
       onCreate: async () => ({ finalText: 'unused', terminateMode: 'GOAL' }),
@@ -4559,6 +4596,28 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
     expect(calls[0].config.model).toBe('qwen3-max');
     // Default-clean stub auto-removes; no suffix expected.
     expect(String(result)).not.toMatch(/worktree preserved/);
+    expect(calls[0].runtimeContextSame).toBe(false);
+    expect(calls[0].runtimeContext.getTargetDir()).toBe(
+      '/fake/repo/.qwen/worktrees/agent-deadbe1',
+    );
+    expect(calls[0].runtimeContext.getCwd()).toBe(
+      '/fake/repo/.qwen/worktrees/agent-deadbe1',
+    );
+    expect(calls[0].runtimeContext.getWorkingDir()).toBe(
+      '/fake/repo/.qwen/worktrees/agent-deadbe1',
+    );
+    expect(calls[0].runtimeContext.getProjectRoot()).toBe(
+      '/fake/repo/.qwen/worktrees/agent-deadbe1',
+    );
+    // The approval profile layered over the worktree context inherits the
+    // worktree rebinding through the prototype chain. The fake worktree
+    // path does not exist on disk, so assert the rebinding's presence
+    // rather than its resolved directories.
+    expect(calls[0].runtimeContext.getWorkspaceContext()).toBeDefined();
+    expect(
+      calls[0].runtimeContext.getFileService().getQwenIgnoreFileNamesDisplay(),
+    ).toBe('.qwenignore, .cursorignore');
+    expect(config.getTargetDir()).toBe('/fake/repo');
   });
 
   it("schema + isolation:'worktree': structured payload returned, worktree info logged", async () => {
