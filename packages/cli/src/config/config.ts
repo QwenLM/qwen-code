@@ -1542,7 +1542,7 @@ export async function loadCliConfig(
    */
   sessionMcpServers?: Record<string, MCPServerConfig>,
   /**
-   * Lifecycle handle for the settings file watcher started in `gemini.tsx`
+   * Lifecycle handle for the settings file watcher started in `llm.tsx`
    * before `Config.initialize()`. Passed through to `Config` so it can be
    * stopped during shutdown — only `stopWatching()` is exposed here to keep
    * core decoupled from the CLI-owned `SettingsWatcher` implementation.
@@ -2012,7 +2012,7 @@ export async function loadCliConfig(
 
     if (argv.resume) {
       // By the time we get here, argv.resume has been resolved to a valid
-      // session UUID by gemini.tsx (which handles custom title lookup and
+      // session UUID by llm.tsx (which handles custom title lookup and
       // the interactive picker for ambiguous matches).
       sessionId = argv.resume;
       deferProjectionUntilWriterLease =

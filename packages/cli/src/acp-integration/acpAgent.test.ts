@@ -563,7 +563,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
   refreshMemoryInstruction: vi.fn(
     async (config: {
       refreshHierarchicalMemory?: () => Promise<void>;
-      getGeminiClient?: () =>
+      getLlmClient?: () =>
         | { refreshSystemInstruction?: () => Promise<void> }
         | undefined;
     }) => {
@@ -573,7 +573,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
         // Best-effort, matching the real helper.
       }
       try {
-        await config.getGeminiClient?.()?.refreshSystemInstruction?.();
+        await config.getLlmClient?.()?.refreshSystemInstruction?.();
       } catch {
         // Best-effort, matching the real helper.
       }
@@ -1686,7 +1686,7 @@ describe('runAcpAgent shutdown cleanup', () => {
   });
 
   it('writes config startup warnings to stderr for the ACP client log', async () => {
-    // The ACP path exits gemini.tsx before its startup-warning printing
+    // The ACP path exits llm.tsx before its startup-warning printing
     // runs; runAcpAgent must emit config warnings (e.g. the WebSearch
     // enablement notices) itself or they vanish.
     (mockConfig as unknown as { getWarnings: () => string[] }).getWarnings =
@@ -4078,7 +4078,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       getAuthType: vi.fn().mockReturnValue('api-key'),
       getCurrentModelRegistryBaseUrl: vi.fn().mockReturnValue(undefined),
       getAllConfiguredModels: vi.fn().mockReturnValue([]),
-      getGeminiClient: vi.fn().mockReturnValue({
+      getLlmClient: vi.fn().mockReturnValue({
         isInitialized: vi.fn().mockReturnValue(true),
         initialize: vi.fn().mockResolvedValue(undefined),
         waitForMcpReady: vi.fn().mockResolvedValue(undefined),
@@ -4474,7 +4474,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       isRestrictiveSandbox: vi.fn().mockReturnValue(false),
       relocateWorkingDirectory: vi.fn().mockResolvedValue({}),
     });
-    Object.assign(innerConfig.getGeminiClient(), {
+    Object.assign(innerConfig.getLlmClient(), {
       addWorkingDirectoryChangedContext: vi.fn().mockResolvedValue(undefined),
     });
     vi.mocked(loadSettings).mockReturnValue(settings);
@@ -4892,7 +4892,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       isMcpServerDisabled: vi.fn().mockReturnValue(false),
       setDisabledTools: vi.fn(),
       getTargetDir: vi.fn().mockReturnValue('/tmp'),
-      getGeminiClient: vi.fn().mockReturnValue({
+      getLlmClient: vi.fn().mockReturnValue({
         isInitialized: vi.fn().mockReturnValue(false),
         setTools: vi.fn().mockResolvedValue(undefined),
       }),
@@ -5267,7 +5267,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       isRestrictiveSandbox: vi.fn().mockReturnValue(false),
       relocateWorkingDirectory,
     });
-    Object.assign(innerConfig.getGeminiClient(), {
+    Object.assign(innerConfig.getLlmClient(), {
       addWorkingDirectoryChangedContext: vi.fn().mockResolvedValue(undefined),
     });
     const { agent, agentPromise } = await bootAcpAgent();
@@ -5313,7 +5313,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         mcpRefreshError: new Error('MCP failed'),
       }),
     });
-    Object.assign(innerConfig.getGeminiClient(), {
+    Object.assign(innerConfig.getLlmClient(), {
       addWorkingDirectoryChangedContext: vi.fn().mockResolvedValue(undefined),
     });
     const { agent, agentPromise } = await bootAcpAgent();
@@ -5371,7 +5371,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       isRestrictiveSandbox: vi.fn().mockReturnValue(false),
       relocateWorkingDirectory,
     });
-    Object.assign(innerConfig.getGeminiClient(), {
+    Object.assign(innerConfig.getLlmClient(), {
       addWorkingDirectoryChangedContext: vi.fn().mockResolvedValue(undefined),
     });
     const { agent, agentPromise } = await bootAcpAgent();
@@ -6347,7 +6347,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       });
 
       expect(innerConfig.refreshAuth).not.toHaveBeenCalled();
-      expect(innerConfig.getGeminiClient().initialize).not.toHaveBeenCalled();
+      expect(innerConfig.getLlmClient().initialize).not.toHaveBeenCalled();
       expect(innerConfig.activateProvisionalWorkspace).not.toHaveBeenCalled();
       expect(innerConfig.setFileSystemService).not.toHaveBeenCalled();
       expect(
@@ -9579,7 +9579,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       isManagedMemoryAvailable: vi.fn().mockReturnValue(true),
       getProjectRoot: vi.fn().mockReturnValue('/workspace'),
       refreshHierarchicalMemory,
-      getGeminiClient: vi.fn().mockReturnValue({
+      getLlmClient: vi.fn().mockReturnValue({
         refreshSystemInstruction,
       }),
     });
@@ -9638,7 +9638,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       ...makeInnerConfig(),
       getSessionId: vi.fn().mockReturnValue('remember-session'),
       refreshHierarchicalMemory: sessionRefreshHierarchicalMemory,
-      getGeminiClient: vi.fn().mockReturnValue({
+      getLlmClient: vi.fn().mockReturnValue({
         isInitialized: vi.fn().mockReturnValue(true),
         initialize: vi.fn().mockResolvedValue(undefined),
         waitForMcpReady: vi.fn().mockResolvedValue(undefined),
@@ -9717,7 +9717,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       ...makeInnerConfig(),
       getSessionId: vi.fn().mockReturnValue('remember-noop-session'),
       refreshHierarchicalMemory: sessionRefreshHierarchicalMemory,
-      getGeminiClient: vi.fn().mockReturnValue({
+      getLlmClient: vi.fn().mockReturnValue({
         isInitialized: vi.fn().mockReturnValue(true),
         initialize: vi.fn().mockResolvedValue(undefined),
         waitForMcpReady: vi.fn().mockResolvedValue(undefined),
@@ -9796,7 +9796,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       ...makeInnerConfig(),
       getSessionId: vi.fn().mockReturnValue('remember-fail-session'),
       refreshHierarchicalMemory: sessionRefreshHierarchicalMemory,
-      getGeminiClient: vi.fn().mockReturnValue({
+      getLlmClient: vi.fn().mockReturnValue({
         isInitialized: vi.fn().mockReturnValue(true),
         initialize: vi.fn().mockResolvedValue(undefined),
         waitForMcpReady: vi.fn().mockResolvedValue(undefined),
@@ -11017,7 +11017,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     const collapsed = `review this branch ${'x'.repeat(220)}`;
 
     Object.assign(innerConfig, {
-      getGeminiClient: vi.fn().mockReturnValue({
+      getLlmClient: vi.fn().mockReturnValue({
         isInitialized: vi.fn().mockReturnValue(true),
         initialize: vi.fn().mockResolvedValue(undefined),
         waitForMcpReady: vi.fn().mockResolvedValue(undefined),
@@ -11090,7 +11090,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     const execute = vi.fn();
     const build = vi.fn().mockReturnValue({ execute });
     Object.assign(innerConfig, {
-      getGeminiClient: vi.fn().mockReturnValue({
+      getLlmClient: vi.fn().mockReturnValue({
         isInitialized: vi.fn().mockReturnValue(true),
         initialize: vi.fn().mockResolvedValue(undefined),
         waitForMcpReady: vi.fn().mockResolvedValue(undefined),
@@ -11161,7 +11161,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     const execute = vi.fn().mockResolvedValue({ llmContent: 'ok' });
     const build = vi.fn().mockReturnValue({ execute });
     Object.assign(innerConfig, {
-      getGeminiClient: vi.fn().mockReturnValue({
+      getLlmClient: vi.fn().mockReturnValue({
         isInitialized: vi.fn().mockReturnValue(true),
         initialize: vi.fn().mockResolvedValue(undefined),
         waitForMcpReady: vi.fn().mockResolvedValue(undefined),
@@ -15409,7 +15409,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
 
     expect(mockConfig.initialize).toHaveBeenCalledWith({
-      skipGeminiInitialization: true,
+      skipLlmInitialization: true,
       // F2 (#4175 commit 6 review fix — claude-opus-4-7 W119): also
       // pins that the bootstrap path opts out of MCP discovery (so
       // bootstrap + per-session don't double-spawn N stdio servers).
@@ -15518,7 +15518,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     innerConfig.hasHooksForEvent = vi.fn().mockReturnValue(true);
     innerConfig.getModel = vi.fn().mockReturnValue('test-model');
     innerConfig.getApprovalMode = vi.fn().mockReturnValue('default');
-    innerConfig.getGeminiClient = vi.fn().mockReturnValue({
+    innerConfig.getLlmClient = vi.fn().mockReturnValue({
       isInitialized: vi.fn().mockReturnValue(false),
       initialize,
     });
@@ -15539,7 +15539,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agent.newSession({ cwd: '/tmp', mcpServers: [] });
 
     expect(mockConfig.initialize).toHaveBeenCalledWith({
-      skipGeminiInitialization: true,
+      skipLlmInitialization: true,
       // F2 (#4175 commit 6 review fix — claude-opus-4-7 W119): also
       // pins that the bootstrap path opts out of MCP discovery (so
       // bootstrap + per-session don't double-spawn N stdio servers).
@@ -15585,7 +15585,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
-  it('does not directly re-fire SessionStart for subsequent ACP sessions when GeminiClient is already initialized', async () => {
+  it('does not directly re-fire SessionStart for subsequent ACP sessions when LlmClient is already initialized', async () => {
     const innerConfig = await setupSessionMocks(
       'session-followup-session-start',
     );
@@ -15598,7 +15598,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     innerConfig.hasHooksForEvent = vi.fn().mockReturnValue(true);
     innerConfig.getModel = vi.fn().mockReturnValue('test-model');
     innerConfig.getApprovalMode = vi.fn().mockReturnValue('default');
-    innerConfig.getGeminiClient = vi
+    innerConfig.getLlmClient = vi
       .fn()
       .mockReturnValueOnce({
         isInitialized: vi.fn().mockReturnValue(false),
@@ -15659,7 +15659,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     innerConfigA.hasHooksForEvent = vi
       .fn()
       .mockImplementation((event: string) => event === 'SessionEnd');
-    innerConfigA.getGeminiClient = vi.fn().mockReturnValue({
+    innerConfigA.getLlmClient = vi.fn().mockReturnValue({
       isInitialized: vi.fn().mockReturnValue(false),
       initialize: vi.fn().mockResolvedValue(undefined),
     });
@@ -15675,7 +15675,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     innerConfigB.hasHooksForEvent = vi
       .fn()
       .mockImplementation((event: string) => event === 'SessionEnd');
-    innerConfigB.getGeminiClient = vi.fn().mockReturnValue({
+    innerConfigB.getLlmClient = vi.fn().mockReturnValue({
       isInitialized: vi.fn().mockReturnValue(false),
       initialize: vi.fn().mockResolvedValue(undefined),
     });
@@ -16402,7 +16402,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
 
     // The warning must list both failed servers and mention "Warning:"
     // exactly like the top-level path and the other non-interactive
-    // entry points (`gemini.tsx`, `session.ts`).
+    // entry points (`llm.tsx`, `session.ts`).
     await vi.waitFor(() => {
       const matchingWrite = stderrWrite.mock.calls.find(
         ([msg]) =>
@@ -17173,7 +17173,7 @@ describe('QwenAgent extMethod renameSession routing', () => {
       getSessionId: vi.fn().mockReturnValue(liveSessionId),
       getAuthType: vi.fn().mockReturnValue('api-key'),
       getAllConfiguredModels: vi.fn().mockReturnValue([]),
-      getGeminiClient: vi.fn().mockReturnValue({
+      getLlmClient: vi.fn().mockReturnValue({
         isInitialized: vi.fn().mockReturnValue(true),
         initialize: vi.fn().mockResolvedValue(undefined),
         waitForMcpReady: vi.fn().mockResolvedValue(undefined),
@@ -18856,7 +18856,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
       getSessionId: vi.fn().mockReturnValue('persisted-1'),
       getAuthType: vi.fn().mockReturnValue('api-key'),
       getAllConfiguredModels: vi.fn().mockReturnValue([]),
-      getGeminiClient: vi.fn().mockReturnValue({
+      getLlmClient: vi.fn().mockReturnValue({
         isInitialized: vi.fn().mockReturnValue(true),
         initialize: vi.fn().mockResolvedValue(undefined),
         waitForMcpReady: vi.fn().mockResolvedValue(undefined),
@@ -21984,7 +21984,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
       configOptions: expect.anything(),
     });
     // resume semantic: model context is restored internally via
-    // geminiClient.initialize(), but UI replay is NOT triggered —
+    // llmClient.initialize(), but UI replay is NOT triggered —
     // the SSE stream stays clean for clients that already have the
     // history rendered.
     expect(lastSessionMock?.replayHistory).not.toHaveBeenCalled();
@@ -22964,7 +22964,7 @@ describe('sessionLanguage multi-session propagation', () => {
       getSessionId: vi.fn().mockReturnValue('sid'),
       getAuthType: vi.fn().mockReturnValue('api-key'),
       getAllConfiguredModels: vi.fn().mockReturnValue([]),
-      getGeminiClient: vi.fn().mockReturnValue({
+      getLlmClient: vi.fn().mockReturnValue({
         isInitialized: vi.fn().mockReturnValue(true),
         initialize: vi.fn().mockResolvedValue(undefined),
         waitForMcpReady: vi.fn().mockResolvedValue(undefined),
@@ -23087,9 +23087,9 @@ describe('sessionLanguage multi-session propagation', () => {
     expect(cfgC.refreshHierarchicalMemory).toHaveBeenCalled();
 
     // All sessions' system instruction refreshed
-    expect(cfgA.getGeminiClient().refreshSystemInstruction).toHaveBeenCalled();
-    expect(cfgB.getGeminiClient().refreshSystemInstruction).toHaveBeenCalled();
-    expect(cfgC.getGeminiClient().refreshSystemInstruction).toHaveBeenCalled();
+    expect(cfgA.getLlmClient().refreshSystemInstruction).toHaveBeenCalled();
+    expect(cfgB.getLlmClient().refreshSystemInstruction).toHaveBeenCalled();
+    expect(cfgC.getLlmClient().refreshSystemInstruction).toHaveBeenCalled();
 
     // Session C registered the global path
     expect(cfgC.setOutputLanguageFilePath).toHaveBeenCalled();
@@ -23265,9 +23265,7 @@ describe('sessionLanguage multi-session propagation', () => {
     // Both sessions still refreshed despite cfgFail's write failure
     expect(cfgOk.refreshHierarchicalMemory).toHaveBeenCalled();
     expect(cfgFail.refreshHierarchicalMemory).toHaveBeenCalled();
-    expect(
-      cfgFail.getGeminiClient().refreshSystemInstruction,
-    ).toHaveBeenCalled();
+    expect(cfgFail.getLlmClient().refreshSystemInstruction).toHaveBeenCalled();
 
     mockConnectionState.resolve();
     await agentPromise;
@@ -25095,7 +25093,7 @@ describe('sessionLanguage multi-session propagation', () => {
       refreshHierarchicalMemory,
     });
     const refreshSystemInstruction = vi.mocked(
-      cfg.getGeminiClient().refreshSystemInstruction,
+      cfg.getLlmClient().refreshSystemInstruction,
     );
     const sendAvailableCommandsUpdate = vi.fn().mockResolvedValue(undefined);
 
@@ -25259,9 +25257,7 @@ describe('sessionLanguage multi-session propagation', () => {
     expect(skillManager.refreshCache).not.toHaveBeenCalled();
     expect(extensionManager.refreshTools).toHaveBeenCalledOnce();
     expect(cfg.refreshHierarchicalMemory).not.toHaveBeenCalled();
-    expect(
-      cfg.getGeminiClient().refreshSystemInstruction,
-    ).toHaveBeenCalledOnce();
+    expect(cfg.getLlmClient().refreshSystemInstruction).toHaveBeenCalledOnce();
     expect(sendAvailableCommandsUpdate).toHaveBeenCalledOnce();
 
     mockConnectionState.resolve();
@@ -25326,9 +25322,7 @@ describe('sessionLanguage multi-session propagation', () => {
     expect(skillManager.refreshCache).not.toHaveBeenCalled();
     expect(extensionManager.refreshTools).toHaveBeenCalledOnce();
     expect(cfg.refreshHierarchicalMemory).not.toHaveBeenCalled();
-    expect(
-      cfg.getGeminiClient().refreshSystemInstruction,
-    ).toHaveBeenCalledOnce();
+    expect(cfg.getLlmClient().refreshSystemInstruction).toHaveBeenCalledOnce();
     expect(sendAvailableCommandsUpdate).toHaveBeenCalledOnce();
 
     mockConnectionState.resolve();

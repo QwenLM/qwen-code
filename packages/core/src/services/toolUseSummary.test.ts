@@ -190,7 +190,7 @@ describe('generateToolUseSummary', () => {
       getFastModel: () => fastModel,
       // The chat-client check inside generateToolUseSummary is a gating
       // sanity check that runs before any LLM call; only its presence matters.
-      getGeminiClient: () => (baseLlm ? {} : undefined),
+      getLlmClient: () => (baseLlm ? {} : undefined),
       getBaseLlmClient: () => baseLlm,
       getModel: () => fastModel ?? 'main-model',
     } as unknown as Config;
