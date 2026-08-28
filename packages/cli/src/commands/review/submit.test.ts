@@ -4328,13 +4328,72 @@ describe('the thread lifecycle', () => {
     expect(stdoutJson()).toMatchObject({ posted: true });
   });
 
+  it('refuses a Critical deferral whose title carries a fixed id — the relocation leg re-posts it renumbered (#9940 review)', () => {
+    // A deferred Critical does not stay deferred: the split relocates it
+    // into the body Criticals, and the relocation's `path:line — [source]`
+    // prefix strips the carried id from position 0 — the body-Critical
+    // scan reads no id there, the ledger mints a fresh one, and posted,
+    // the same pass would reply `fixed` into the very thread its
+    // relocated blocker re-asserts as standing. The gate scans the
+    // deferral channel the way the closure mint reads it — an id LEADING
+    // the title is the re-post signal — keyed on the split's own Critical
+    // predicate; a Suggestion deferral keeps the prose carve-out below
+    // (#9940 review).
+    seedThreads([
+      {
+        id: 'T1',
+        commentId: 1001,
+        body: '**[Critical]** R1-1: the guard drops a valid case',
+      },
+    ]);
+    const review = payload([], {
+      deferredSuggestions: [
+        {
+          file: 'src/foo.ts',
+          line: 12,
+          source: 'review',
+          severity: 'Critical',
+          title: 'R1-1: the guard drops a valid case',
+        },
+      ],
+      fixedFindings: [{ id: 'R1-1', by: 'the fix' }],
+    });
+    expectRefusal(
+      () => runSubmit(authorizedPost({ review })),
+      /state\.deferredSuggestions\[0\] re-posts R1-1/,
+    );
+    expect(ghMock).not.toHaveBeenCalled();
+  });
+
+  it('the same Critical deferral posts without the fixed ruling — relocated and standing (#9940 review)', () => {
+    // The flip half of the refusal cell: the deferral alone is a
+    // standing re-post — relocated into the body Criticals, carried
+    // renumbered because the relocation prefix strips the id from
+    // position 0. Only a fixed ruling BESIDE it is the contradiction.
+    const review = payload([], {
+      deferredSuggestions: [
+        {
+          file: 'src/foo.ts',
+          line: 12,
+          source: 'review',
+          severity: 'Critical',
+          title: 'R1-1: the guard drops a valid case',
+        },
+      ],
+    });
+    runSubmit(authorizedPost({ review }));
+    const body = reviewPost().body as string;
+    expect(body).toContain('R1-1: the guard drops a valid case');
+    expect(stdoutJson()).toMatchObject({ posted: true });
+  });
+
   // A retired id MENTIONED in prose is a cross-reference, not a re-report:
   // the ledger does not carry it, the next round rules on nothing under it,
   // and the thread it names is legitimately closed. Rounds 3-5 of this
   // change's own review grew a token scan over every such channel; round 6
   // found it refusing payloads over text the body never renders and over
   // transcript-derived lines no re-compose could redraft (#9940 review).
-  // The gate reads the two channels the ledger carries and nothing else:
+  // The gate reads the channels the ledger carries and nothing else:
   // each of these posts, and the ruling resolves its thread.
   it.each<[string, Record<string, unknown>]>([
     [
@@ -4358,20 +4417,6 @@ describe('the thread lifecycle', () => {
       {
         suggestionsDroppedAsDuplicates: [
           'R1-2 loose review-config pins — already reported (comment 3788857379)',
-        ],
-      },
-    ],
-    [
-      'a Critical deferral entry (relocated into the body under a fresh id)',
-      {
-        deferredSuggestions: [
-          {
-            file: 'src/foo.ts',
-            line: 12,
-            source: 'review',
-            severity: 'Critical',
-            title: 'R1-2 the guard still drops a valid case',
-          },
         ],
       },
     ],

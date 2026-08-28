@@ -67,10 +67,29 @@ describe('stripSeverityPrefix — the attribution-off posted shape', () => {
     const stacked = '**[Critical]**\n:\n**[Suggestion]** R1-2: claim';
     expect(stripSeverityPrefix(stacked)).toBe('R1-2: claim');
     expect(stripSeverityPrefix(stacked)).toBe(markerStrippedBody(stacked));
+    expect(carriedClaimLine(stacked)).toBe(stripSeverityPrefix(stacked));
     // Residue around the separator colon is the same machine grammar.
     const residue = '**[Critical]** <!-- x -->: R1-2: claim';
     expect(stripSeverityPrefix(residue)).toBe('R1-2: claim');
     expect(stripSeverityPrefix(residue)).toBe(markerStrippedBody(residue));
+    expect(carriedClaimLine(residue)).toBe(stripSeverityPrefix(residue));
+  });
+
+  it('consumes a MULTI-line residue after the separator colon — the fixpoints still agree (#9940 review)', () => {
+    // The separator's residue arm spans newlines and whole comments, but
+    // the readback stripped residue only BEFORE its separator step and
+    // then split on the newline: a multi-line comment between the colon
+    // and the carried id truncated the claim line to `<!--` while the
+    // attribution-off post exposed the id — the draft re-minted a fresh
+    // id while the post led with the carried one, unreachable by the
+    // ^-anchored ledger readback: one finding, two names, and the
+    // original thread orphaned (#9940 review, round 10).
+    const residueAfter = '**[Critical]** : <!--\nx\n--> R1-2: claim';
+    expect(stripSeverityPrefix(residueAfter)).toBe('R1-2: claim');
+    expect(markerStrippedBody(residueAfter)).toBe('R1-2: claim');
+    expect(carriedClaimLine(residueAfter)).toBe(
+      stripSeverityPrefix(residueAfter),
+    );
   });
 
   it('a marker-only body strips to the empty string — the submit gate refuses it first', () => {

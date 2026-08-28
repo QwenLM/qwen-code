@@ -523,6 +523,20 @@ describe('stampCarriedId — the write side of the readback', () => {
     expect(stampCarriedId(stacked, 'R2-3')).toBe(stacked);
   });
 
+  it('reads a carried id past post-colon multi-line residue — no re-mint (#9940 review)', () => {
+    // The separator's residue arm spans a whole comment between the
+    // colon and the id; a readback that stopped at the newline
+    // truncated the claim line to `<!--`, so the carry went unrecognized
+    // and the stamp re-minted a fresh id in front of it (#9940 review,
+    // round 10).
+    const body = '**[Critical]** : <!--\nx\n--> R1-2: claim';
+    expect(carriedFindingOf(body)).toEqual({
+      id: 'R1-2',
+      fixInduced: false,
+    });
+    expect(stampCarriedId(body, 'R2-1')).toBe(body);
+  });
+
   it('stamps a glued multi-line comment — the id still reads back', () => {
     const stamped = stampCarriedId(
       '**[Critical]**<!--\nrender-note\n-->the claim',

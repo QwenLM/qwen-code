@@ -331,7 +331,7 @@ function boundDeferredLine(rendered: string): string {
   return oneLine;
 }
 
-function toDeferredEntries(value: unknown): DeferredEntry[] {
+export function toDeferredEntries(value: unknown): DeferredEntry[] {
   if (value === undefined || value === null) return [];
   if (!Array.isArray(value)) {
     throw new TypeError(

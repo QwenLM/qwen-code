@@ -113,9 +113,10 @@ export function carriedClaimLine(body: string): string | null {
 }
 
 /**
- * The WHOLE body past the severity marker (and any colon/whitespace right
- * after it) — the multi-line form of the readback strip above, and the same
- * ONE statement: `carriedClaimLine` is its first line, and the floor
+ * The WHOLE body past the severity marker (and the residue-and-colon
+ * separator trailing it) — the multi-line form of the readback strip
+ * above, and the same ONE statement: `carriedClaimLine` is its first
+ * line, and the floor
  * enforcement's moved-record title is its collapsed whole. A second
  * restatement of the marker slice in either consumer is the drift class
  * this file's header exists to prevent. Null when the body opens with
@@ -138,7 +139,7 @@ export function markerStrippedBody(body: string): string | null {
       .replace(LEADING_INVISIBLE_RE, '')
       .slice(marker.length)
       .replace(LEADING_INVISIBLE_RE, '')
-      .replace(/^\s*[:：]?\s*/, '');
+      .replace(MARKER_SEPARATOR_RE, '');
   }
 }
 

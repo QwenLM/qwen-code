@@ -58,6 +58,7 @@ import {
   resolveGhHost,
   setGhHost,
 } from './lib/gh.js';
+import { LEDGER_ID_READBACK } from './lib/ledger.js';
 import { REVIEW_TMP_DIR, tmpFile } from './lib/paths.js';
 import {
   parseReceiptCommentIds,
@@ -70,6 +71,7 @@ import {
   normalizeSeverityFloor,
   tryIngestBodyCriticals,
   tryToCount,
+  toDeferredEntries,
   bodyCriticalClaim,
   type ComposeReviewInput,
   type FixedFinding,
@@ -658,27 +660,31 @@ function inconsistencies(
    * would carry the id into the ledger beside the closed thread); left
    * unposted by a reroute or a discard, it is still the model's own state
    * contradicting itself, and the re-compose loop is told which comment to
-   * settle. The gate refuses exactly the RE-REPORTS: the
-   * two channels whose ids the ledger builder carries, read through the
-   * same readback it applies — a drafted comment's claim line
-   * (`**[Critical]** R1-2: …`, `carriedFindingOf`) and a body Critical
-   * leading with its id (`bodyCriticalClaim`) — plus a ruling naming an id
-   * this same pass MINTS, the round-off-by-one. It reads the comments the
+   * settle. The gate refuses exactly the RE-REPORTS: the channels
+   * whose ids the ledger builder carries, read through the same
+   * readback it applies — a drafted comment's claim line
+   * (`**[Critical]** R1-2: …`, `carriedFindingOf`), a body Critical
+   * leading with its id (`bodyCriticalClaim`), and a deferred
+   * Critical's title, which the relocation leg carries into the body
+   * renumbered — plus a ruling naming an id this same pass MINTS,
+   * the round-off-by-one. It reads the comments the
    * model authored rather than the posting set, so a comment the Aone
    * anchor gate degraded or the floor enforcement rerouted still counts
    * as the assertion it is, and the refusal cites the index in the model's
    * own payload JSON — the one the re-compose loop fixes against.
    *
    * Nothing else is a channel. A retired id MENTIONED in prose — a
-   * cannot-tell about the fix, a duplicate-drop note, a deferral title or
-   * path, a downgrade reason, a budget-gap line, a `by` clause naming a
-   * sibling — is a cross-reference, not a re-report: the ledger does not
-   * carry it, the next round rules on nothing under it, and the thread it
-   * names is legitimately closed. A token scan over such text refused
-   * self-consistent payloads over prose no re-compose could redraft (a
-   * transcript-derived gap line) and over text the body never rendered
-   * (#9940 review, round 6); prose stays the model's responsibility — the
-   * ruling section of SKILL.md — and fails open here.
+   * cannot-tell about the fix, a duplicate-drop note, a Suggestion
+   * deferral's title or path (a Critical deferral is the relocation
+   * channel above), a downgrade reason, a budget-gap line, a `by`
+   * clause naming a sibling — is a cross-reference, not a re-report:
+   * the ledger does not carry it, the next round rules on nothing
+   * under it, and the thread it names is legitimately closed. A
+   * token scan over such text refused self-consistent payloads over
+   * prose no re-compose could redraft (a transcript-derived gap line)
+   * and over text the body never rendered (#9940 review, round 6);
+   * prose stays the model's responsibility — the ruling section of
+   * SKILL.md — and fails open here.
    */
   fixedFindings: FixedFinding[] = [],
   authored?: { comments: ReviewComment[]; bodyCriticals: unknown },
@@ -744,6 +750,21 @@ function inconsistencies(
       const { id } = bodyCriticalClaim(entry);
       if (id !== undefined && fixedIds.has(id)) {
         problems.push(contradiction(`state.bodyCriticals[${i}]`, id));
+      }
+    });
+    // The deferral channel's Critical leg. A deferred Critical is
+    // RELOCATED into the composed body's Criticals, and the relocation's
+    // `path:line — [source]` prefix strips the carried id from position
+    // 0 — buildLedger carries the claim renumbered, and no scan above
+    // sees the id. The closure mint already reads these titles through
+    // LEDGER_ID_READBACK as its re-post signal; the gate reads them the
+    // same way, keyed on the split's own predicate so the scan covers
+    // exactly the entries the relocation carries (#9940 review).
+    toDeferredEntries(payload.state?.deferredSuggestions).forEach((e, i) => {
+      if (e.severity !== 'Critical') return;
+      const id = LEDGER_ID_READBACK.exec(e.title)?.[1];
+      if (id !== undefined && fixedIds.has(id)) {
+        problems.push(contradiction(`state.deferredSuggestions[${i}]`, id));
       }
     });
   }
