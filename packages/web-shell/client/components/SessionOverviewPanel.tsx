@@ -374,15 +374,29 @@ function SessionOverviewPanelInner({
   // Live-state (2s channel) is the sidebar's refresh path: it patches the
   // catalog store's sessions with hasActivePrompt / isWaitingForPermission /
   // isWaitingForUserQuestion and coordinates full-catalog reconciles only when
-  // something actually changed. Adopt it for every workspace whose sessions
-  // the overview shows; without the feature, fall back to catalog polling.
+  // something actually changed. Adopt it only when trusted live-state routes
+  // cover every visible workspace; otherwise fall back to catalog polling.
   const liveStateWorkspaceCwds = useMemo(() => {
-    if (workspaceCwd) return [workspaceCwd];
-    const registered = (registeredWorkspaces ?? [])
-      .filter((entry) => entry.primary || entry.trusted)
-      .map((entry) => entry.cwd);
-    return registered.length > 0 ? registered : primaryCwd ? [primaryCwd] : [];
-  }, [primaryCwd, registeredWorkspaces, workspaceCwd]);
+    if (!workspaceCatalogAdvertised) {
+      const legacyCwd = workspaceCwd || primaryCwd;
+      return legacyCwd ? [legacyCwd] : [];
+    }
+    const visible = workspaceCwd
+      ? (registeredWorkspaces ?? []).filter(
+          (entry) => entry.cwd === workspaceCwd,
+        )
+      : (registeredWorkspaces ?? []).filter(
+          (entry) => entry.primary || entry.trusted,
+        );
+    return visible.length > 0 && visible.every((entry) => entry.trusted)
+      ? visible.map((entry) => entry.cwd)
+      : [];
+  }, [
+    primaryCwd,
+    registeredWorkspaces,
+    workspaceCatalogAdvertised,
+    workspaceCwd,
+  ]);
   const liveStateEnabled =
     (connection.capabilities?.features?.includes(SESSION_LIVE_STATE_FEATURE) ??
       false) &&
@@ -586,11 +600,15 @@ function SessionOverviewPanelInner({
     [currentWorkspaceCwd, isRegisteredTrustedCard],
   );
   const canArchiveCard = useCallback(
-    (card: SessionCard) => sessionArchiveEnabled && canUseSessionMutation(card),
+    (card: SessionCard) =>
+      sessionArchiveEnabled &&
+      card.status === 'idle' &&
+      canUseSessionMutation(card),
     [canUseSessionMutation, sessionArchiveEnabled],
   );
   const canDeleteCard = useCallback(
-    (card: SessionCard) => canUseSessionMutation(card),
+    (card: SessionCard) =>
+      card.status === 'idle' && canUseSessionMutation(card),
     [canUseSessionMutation],
   );
   const canRenameCard = useCallback(

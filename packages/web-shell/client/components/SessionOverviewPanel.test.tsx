@@ -1451,6 +1451,20 @@ describe('SessionOverviewPanel', () => {
     expect(row.querySelector('[data-slot="dropdown-menu-trigger"]')).toBeNull();
   });
 
+  it('disables archive and delete actions for a running session', () => {
+    sessionsState.sessions = [
+      session('s1', { displayName: 'Running', hasActivePrompt: true }),
+    ];
+    render();
+    const row = rows()[0]!;
+    expect(rowActionButton(row, 'Archive').disabled).toBe(true);
+    expect(rowActionButton(row, 'Delete').disabled).toBe(true);
+
+    act(() => click(rowCheckbox(row)));
+    expect(footerButton('Archive')?.disabled).toBe(true);
+    expect(footerButton('Delete')?.disabled).toBe(true);
+  });
+
   it('labels and pins opaque edge columns without borders', () => {
     sessionsState.sessions = [session('s1', { displayName: 'One' })];
     render();
@@ -2620,6 +2634,19 @@ describe('SessionOverviewPanel polling', () => {
     };
     sessionsState.sessions = [session('s')];
     render({ manageLiveState: false });
+    expect(workspaceLiveStateOptions.enabled).toBe(false);
+    expect(scopedSessionsOptions.pollIntervalMs).toBe(3000);
+    expect(statusReportOptions).toEqual({ autoLoad: true, detail: 'full' });
+  });
+
+  it('keeps polling when live state cannot cover an untrusted primary', () => {
+    connectionState.capabilities = {
+      features: ['workspace_session_live_state'],
+      workspaceCwd: '/w',
+      workspaces: [{ id: 'w0', cwd: '/w', primary: true, trusted: false }],
+    };
+    sessionsState.sessions = [session('s')];
+    render();
     expect(workspaceLiveStateOptions.enabled).toBe(false);
     expect(scopedSessionsOptions.pollIntervalMs).toBe(3000);
     expect(statusReportOptions).toEqual({ autoLoad: true, detail: 'full' });
