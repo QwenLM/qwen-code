@@ -15,18 +15,12 @@ interface ToolsListProps {
   tools: readonly ToolDefinition[];
   showDescriptions: boolean;
   contentWidth: number;
-  /**
-   * Whether `tool_search` is registered. Defaults to true so callers that
-   * predate the flag keep the original footnote.
-   */
-  toolSearchAvailable?: boolean;
 }
 
 export const ToolsList: React.FC<ToolsListProps> = ({
   tools,
   showDescriptions,
   contentWidth,
-  toolSearchAvailable = true,
 }) => (
   <Box flexDirection="column">
     <Text bold color={theme.text.primary}>
@@ -66,13 +60,9 @@ export const ToolsList: React.FC<ToolsListProps> = ({
         <Box height={1} />
         <Text color={theme.text.secondary}>
           {'  '}
-          {toolSearchAvailable
-            ? t(
-                'Tools marked "(on demand)" stay available but are not offered to the model upfront; it loads them via tool_search when needed. Set tools.eager to choose which eager-by-default schemas stay upfront, or tools.visible to surface an on-demand tool at startup.',
-              )
-            : t(
-                'Tools marked "(on demand)" are not offered to the model upfront, and tool_search is not enabled this session — so the model cannot load them at all until you restart. Enable tools.toolSearch.enabled, or list the tool in tools.eager (built-ins) or tools.visible (on-demand tools) to send its schema upfront.',
-              )}
+          {t(
+            'Tools marked "(on demand)" are not offered to the model upfront; tool_search can load them when enabled. Use tools.eager for eager-by-default tools or tools.visible for on-demand tools to send a schema upfront.',
+          )}
         </Text>
       </>
     )}

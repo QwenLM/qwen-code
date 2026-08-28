@@ -11,7 +11,6 @@ import {
   resolveToolName,
   splitCompoundCommand,
   SHELL_TOOL_NAMES,
-  TOOL_NAME_ALIASES,
   toolMatchesRuleToolName,
 } from './rule-parser.js';
 import type { PathMatchContext } from './rule-parser.js';
@@ -247,16 +246,12 @@ export class PermissionManager {
     // matching nothing — deferring more than intended is recoverable
     // (ToolSearch still reaches every tool), whereas silently ignoring a
     // configured list would resend exactly the schemas the user asked to
-    // keep out (#9827). Dropped entries are warned on the console — the
-    // debug log file is off in default runs, and this warning exists for
-    // precisely those runs: a typo silently deferring the whole toolset is
-    // the same class of surprise #10075 reported, and nothing else on this
-    // path surfaces it.
+    // keep out (#9827). Dropped entries are warned on the console because
+    // the debug log file is off in default runs.
     const rawEagerTools = this.config.getEagerTools?.();
     if (Array.isArray(rawEagerTools)) {
       const canonicalNames: string[] = [];
       const droppedEntries: string[] = [];
-      const unknownEntries: string[] = [];
       for (const entry of rawEagerTools) {
         if (typeof entry !== 'string' || entry.trim() === '') {
           droppedEntries.push(JSON.stringify(entry));
@@ -268,21 +263,6 @@ export class PermissionManager {
           continue;
         }
         canonicalNames.push(rule.toolName);
-        // A valid-but-unknown name (the `read_flie` typo class) parses
-        // cleanly, so it escapes the dropped-entries warning above while
-        // still activating an allowlist that matches nothing — deferring
-        // every non-exempt tool with zero diagnostic. Built-in names all
-        // resolve through the alias table; `mcp__` / `computer_use__`
-        // names are discovered dynamically and must pass through
-        // unchanged, so only flag entries the alias table cannot resolve
-        // and no dynamic prefix excuses (#10075).
-        if (
-          !(rule.toolName in TOOL_NAME_ALIASES) &&
-          !rule.toolName.startsWith('mcp__') &&
-          !rule.toolName.startsWith('computer_use__')
-        ) {
-          unknownEntries.push(JSON.stringify(entry));
-        }
       }
       if (droppedEntries.length > 0) {
         // eslint-disable-next-line no-console -- operator-facing breadcrumb; the debug log file is off in default runs, where this reshaping would otherwise be invisible
@@ -293,17 +273,6 @@ export class PermissionManager {
             `The allowlist stays active with ${canonicalNames.length} entr${
               canonicalNames.length === 1 ? 'y' : 'ies'
             }, so every other non-exempt tool is deferred to tool_search.`,
-        );
-      }
-      if (unknownEntries.length > 0) {
-        // eslint-disable-next-line no-console -- operator-facing breadcrumb; the debug log file is off in default runs, where this reshaping would otherwise be invisible
-        console.warn(
-          `tools.eager: ${unknownEntries.length} entr${
-            unknownEntries.length === 1 ? 'y' : 'ies'
-          } (${unknownEntries.join(', ')}) ${
-            unknownEntries.length === 1 ? 'does' : 'do'
-          } not match any registered tool name. ` +
-            `The allowlist stays active, so every other non-exempt tool is deferred to tool_search.`,
         );
       }
       this.eagerToolAllowList = canonicalNames;
