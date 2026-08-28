@@ -657,7 +657,18 @@ export function runDrive(args: DriveArgs): DriveReport {
   if (args.ready) {
     const deadline = started + args.readyTimeout * 1000;
     for (;;) {
-      if (exec('bash', ['-lc', args.ready]).status === 0) {
+      // Bound ONE probe by the remaining --ready-timeout budget, and kill it
+      // with SIGKILL — the same contract ab-drive's probeOnce applies. Without
+      // the budget a hanging probe spends the fixed 30s default per call, so
+      // any --ready-timeout under 30s is overrun by a single probe; without
+      // SIGKILL a probe that traps TERM (untrusted code the brief itself
+      // warns about) is waited on by spawnSync forever, hanging the CLI with
+      // no report and a leaked tmux server.
+      const budgetMs = Math.max(1, deadline - Date.now());
+      if (
+        exec('bash', ['-lc', args.ready], undefined, budgetMs, 'SIGKILL')
+          .status === 0
+      ) {
         readyAfterMs = Date.now() - started;
         break;
       }

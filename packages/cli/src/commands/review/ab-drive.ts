@@ -848,6 +848,12 @@ export const abDriveCommand: CommandModule = {
     'Drive the SAME script against two trees (PR arm and base arm) and report the paired captures — same bytes both arms, shared upstream owned end to end, confounds named',
   builder: (yargs) =>
     yargs
+      // Opt out of the root parser's `.strict()` (it propagates into
+      // subcommands): an unknown flag would otherwise die in the CLI-wide
+      // `.fail()` with exit 1 and no report JSON, the run-failed class. With
+      // strict off the handler's own required-flag check catches the typo's
+      // consequence (a missing flag) and exits 2.
+      .strict(false)
       // No `demandOption` on the three required strings: a yargs requirement
       // fires the CLI-wide `.fail()` (exit 1) BEFORE the handler, landing a
       // usage error in the run-failed/coupling-fact class instead of the exit-2

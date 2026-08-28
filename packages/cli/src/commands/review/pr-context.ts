@@ -421,7 +421,18 @@ export function carriesBlockerSignal(body: string | undefined): boolean {
   // would otherwise become an invisible, irrefutable blocker — the exact
   // harm `isBlockerBody`'s identity gate exists to prevent, reached around
   // it. An unclosed comment swallows the rest of the body, as on GitHub.
-  const b = (body ?? '').replace(/<!--[\s\S]*?(?:-->|$)/g, '').toLowerCase();
+  const b = (body ?? '')
+    .replace(/<!--[\s\S]*?(?:-->|$)/g, '')
+    // Fenced code is QUOTED program output, never the comment's own claim:
+    // the posting contract mandates a fenced witness (a test log, a probe
+    // transcript) under every finding, and this repo's own suites print
+    // literal `[Critical]` / "still fails" lines. Scanning inside a fence
+    // would let a non-blocking Suggestion self-promote into the blocker
+    // section every round — the identical harm `isIssueBlocker` documents for
+    // the issue channel. Strip fences before matching; an unclosed fence
+    // swallows the rest, as GitHub renders it.
+    .replace(/```[\s\S]*?(?:```|$)/g, '')
+    .toLowerCase();
   return BLOCKER_PATTERNS.some((re) => {
     // Preserve the pattern's own flags (a future `i`/`u` must not be silently
     // dropped) and add `g` for the scan; dedupe so `g` is never doubled.

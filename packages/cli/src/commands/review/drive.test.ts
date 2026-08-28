@@ -655,6 +655,44 @@ describe('the log cap', () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
+  it("drive's own --ready probe is bounded by the remaining budget and killed with SIGKILL (R15-3)", () => {
+    // The same contract ab-drive's probeOnce carries: without the budget a
+    // hanging probe spends the fixed 30s default per call (any --ready-timeout
+    // under 30s is overrun by one probe); without SIGKILL a TERM-trapping probe
+    // is waited on by spawnSync forever, hanging the CLI with no report.
+    const seen: Array<{ timeoutMs?: number; killSignal?: NodeJS.Signals }> = [];
+    const dir = mkdtempSync(join(tmpdir(), 'drv-ready-'));
+    const exec = (
+      cmd: string,
+      args: string[],
+      _input?: string,
+      timeoutMs?: number,
+      killSignal?: NodeJS.Signals,
+    ): ExecResult => {
+      if (cmd === 'bash' && args[1] === 'true') {
+        seen.push({ timeoutMs, killSignal });
+      }
+      return ok();
+    };
+    runDrive({
+      script: 'noop',
+      cwd: dir,
+      ready: 'true',
+      readyTimeout: 5,
+      timeout: 0, // one poll, then timed-out — we only care about the probe
+      server: 'ready-budget',
+      exec,
+      logPath: join(dir, 'drive.log'),
+    });
+    rmSync(dir, { recursive: true, force: true });
+    expect(seen.length).toBeGreaterThan(0); // the probe really ran
+    for (const s of seen) {
+      expect(s.killSignal).toBe('SIGKILL');
+      expect(s.timeoutMs).toBeGreaterThan(0);
+      expect(s.timeoutMs).toBeLessThanOrEqual(5_000); // ≤ --ready-timeout, not 30s
+    }
+  });
+
   it('readCapped returns an empty snapshot for a non-regular file (R14-5)', () => {
     // An untrusted arm can swap its log for a DIRECTORY (`rm log; mkdir log`).
     // openSync succeeds, fstat reports a dir, and readSync would throw EISDIR

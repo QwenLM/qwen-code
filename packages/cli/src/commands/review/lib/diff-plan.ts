@@ -257,9 +257,24 @@ function stripPrefix(p: string): string {
   return p.startsWith('a/') || p.startsWith('b/') ? p.slice(2) : p;
 }
 
+/**
+ * Cut the `\t<timestamp>` suffix that `diff -u` / `diff -ur` / svn captures
+ * carry on `---` / `+++` header tokens (`--- a/f.txt\t2026-08-27 10:00:00`).
+ * git's own header parser truncates at the tab; a path token that keeps it
+ * resolves to a file that never exists. A C-quoted token never carries a raw
+ * tab (git escapes an embedded tab as `\t` inside the quotes), so quoted
+ * tokens are returned untouched.
+ */
+export function stripHeaderTimestamp(raw: string): string {
+  const t = raw.trim();
+  if (t.startsWith('"')) return t;
+  const tab = t.indexOf('\t');
+  return tab >= 0 ? t.slice(0, tab) : t;
+}
+
 /** Unquote then de-prefix a `diff --git` / `---` / `+++` path token. */
 export function cleanPath(raw: string): string {
-  return stripPrefix(unquote(raw));
+  return stripPrefix(unquote(stripHeaderTimestamp(raw)));
 }
 
 /** Read a C-quoted token starting at `i`; returns the token and the next index. */

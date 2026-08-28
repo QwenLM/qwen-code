@@ -363,7 +363,12 @@ describe('runRevertHunk', () => {
     expect(r.applied).toBe(false);
     expect(r.harnessFailure).toBe(true);
     expect(r.conflict).toBeUndefined(); // NOT the exit-1 coupling class
-    expect(r.note).toContain('non-default diff prefixes');
+    // Refused at the `diff --git` header check (the creation's tokens are
+    // `diff --git b/new b/new` under --no-prefix) — or, for a capture that
+    // forges that header too, at the tree-grounded backstop. Either is exit 2.
+    expect(r.note).toMatch(
+      /standard a\/ b\/ prefixes|non-default diff prefixes/,
+    );
     // The real file under b/ is untouched.
     expect(readFileSync(join(dir, 'b', 'new'), 'utf8')).toBe(before);
   });
@@ -497,6 +502,218 @@ describe('runRevertHunk', () => {
     expect(second.applied).toBe(false);
     expect(second.harnessFailure).toBeUndefined();
     expect(second.conflict).toBeTruthy();
+  });
+
+  it('a glob-magic target absent from the tree is a harness fact even when a sibling matches the glob (R15-2)', () => {
+    // `git ls-files -- 'test[1].ts'` treats `[1]` as a character class and
+    // matches a tracked `test1.ts`, so a pathspec-based check would report the
+    // absent `test[1].ts` as tracked and route git's "No such file" into the
+    // exit-1 coupling class. The in-process byte comparison has no glob.
+    const dir = tempDir('rh-glob-');
+    git(dir, 'init', '-q', '-b', 'main');
+    git(dir, 'config', 'user.email', 't@t');
+    git(dir, 'config', 'user.name', 't');
+    git(dir, 'config', 'core.autocrlf', 'false');
+    writeFileSync(join(dir, 'test[1].ts'), 'old\n');
+    writeFileSync(join(dir, 'test1.ts'), 'sibling\n');
+    git(dir, 'add', '.');
+    git(dir, 'commit', '-qm', 'base');
+    writeFileSync(join(dir, 'test[1].ts'), 'new\n');
+    git(dir, 'add', '.');
+    git(dir, 'commit', '-qm', 'pr');
+    const diffPath = join(dir, 'g.diff');
+    writeFileSync(diffPath, git(dir, 'diff', 'HEAD~1', 'HEAD'));
+    // Now make the target ABSENT (tree and index) while the sibling stays.
+    git(dir, 'rm', '-q', 'test[1].ts');
+    const r = runRevertHunk({
+      diff: diffPath,
+      tree: dir,
+      hunk: 'test[1].ts:1',
+    });
+    expect(r.applied).toBe(false);
+    expect(r.harnessFailure).toBe(true); // NOT the exit-1 conflict class
+    expect(r.conflict).toBeUndefined();
+  });
+
+  it('refuses a byte-identical hunk that git applies as an exit-0 no-op (R15-4)', () => {
+    // A hunk whose - and + sides are the same bytes (a redaction pass that
+    // equalised them) reverse-applies with exit 0 over an untouched tree.
+    // applied:true there is a false witness; the before/after snapshot must
+    // refuse it. A legitimate revert still reports applied:true (every other
+    // applying test in this suite).
+    const dir = tempDir('rh-noop-');
+    git(dir, 'init', '-q', '-b', 'main');
+    git(dir, 'config', 'user.email', 't@t');
+    git(dir, 'config', 'user.name', 't');
+    git(dir, 'config', 'core.autocrlf', 'false');
+    writeFileSync(join(dir, 'f.txt'), 'token\n');
+    git(dir, 'add', '.');
+    git(dir, 'commit', '-qm', 'base');
+    const diffPath = join(dir, 'noop.diff');
+    writeFileSync(
+      diffPath,
+      [
+        'diff --git a/f.txt b/f.txt',
+        'index 1111111..2222222 100644',
+        '--- a/f.txt',
+        '+++ b/f.txt',
+        '@@ -1 +1 @@',
+        '-token',
+        '+token',
+        '',
+      ].join('\n'),
+    );
+    const r = runRevertHunk({ diff: diffPath, tree: dir, hunk: 'f.txt:1' });
+    expect(r.applied).toBe(false);
+    expect(r.harnessFailure).toBe(true);
+    expect(r.note).toContain('byte-identical');
+    expect(readFileSync(join(dir, 'f.txt'), 'utf8')).toBe('token\n');
+  });
+
+  it('a DELETION hunk reverted twice stays a coupling refusal, not a prefix fact (R15-6)', () => {
+    // A PR-deleted file is legitimately absent from the index of a PR-head
+    // checkout; after the first (un-delete) revert it exists only on disk.
+    // Index membership alone would misroute the second revert to a harness
+    // fact with unactionable recapture advice; "in index OR on disk" keeps it
+    // the exit-1 already-reverted class.
+    const dir = tempDir('rh-del2-');
+    git(dir, 'init', '-q', '-b', 'main');
+    git(dir, 'config', 'user.email', 't@t');
+    git(dir, 'config', 'user.name', 't');
+    git(dir, 'config', 'core.autocrlf', 'false');
+    writeFileSync(join(dir, 'keep.txt'), 'k\n');
+    writeFileSync(join(dir, 'doomed.txt'), 'bye\n');
+    git(dir, 'add', '.');
+    git(dir, 'commit', '-qm', 'base');
+    rmSync(join(dir, 'doomed.txt'));
+    git(dir, 'add', '-A');
+    git(dir, 'commit', '-qm', 'pr deletes doomed');
+    const diffPath = join(dir, 'del.diff');
+    writeFileSync(diffPath, git(dir, 'diff', 'HEAD~1', 'HEAD'));
+    const first = runRevertHunk({
+      diff: diffPath,
+      tree: dir,
+      hunk: 'doomed.txt:1',
+    });
+    expect(first.applied).toBe(true);
+    expect(readFileSync(join(dir, 'doomed.txt'), 'utf8')).toBe('bye\n');
+    const second = runRevertHunk({
+      diff: diffPath,
+      tree: dir,
+      hunk: 'doomed.txt:1',
+    });
+    expect(second.applied).toBe(false);
+    expect(second.harnessFailure).toBeUndefined();
+    expect(second.conflict).toBeTruthy();
+  });
+
+  it.skipIf(process.platform !== 'linux')(
+    'a filename with a raw non-UTF-8 byte round-trips byte-faithfully through the tree checks (R14-1)',
+    () => {
+      // git C-quotes `caf\xE9.txt` as `"caf\351.txt"`. Decoding that through
+      // UTF-8 yields U+FFFD, re-encoded as EF BF BD — which can never match the
+      // index entry or the disk (E9) — so a genuine double-revert coupling
+      // refusal would misroute to a "not tracked" harness fact. The byte-
+      // faithful target keeps it the exit-1 class. Linux only: APFS/NTFS
+      // reject or normalise invalid-UTF-8 names.
+      const dir = tempDir('rh-latin1-');
+      git(dir, 'init', '-q', '-b', 'main');
+      git(dir, 'config', 'user.email', 't@t');
+      git(dir, 'config', 'user.name', 't');
+      git(dir, 'config', 'core.autocrlf', 'false');
+      const name = Buffer.from([
+        0x63, 0x61, 0x66, 0xe9, 0x2e, 0x74, 0x78, 0x74,
+      ]);
+      const p = Buffer.concat([Buffer.from(dir + '/'), name]);
+      writeFileSync(p, 'top-old\nmid\n');
+      git(dir, 'add', '.');
+      git(dir, 'commit', '-qm', 'base');
+      writeFileSync(p, 'top-new\nmid\n');
+      git(dir, 'add', '.');
+      git(dir, 'commit', '-qm', 'edit');
+      const diffPath = join(dir, 'l1.diff');
+      const diffBytes = execFileSync('git', ['diff', 'HEAD~1', 'HEAD'], {
+        cwd: dir,
+      });
+      writeFileSync(diffPath, diffBytes);
+      expect(diffBytes.toString('latin1')).toContain('\\351');
+      const id = listHunks(diffBytes.toString('latin1'))[0].id;
+      expect(
+        runRevertHunk({ diff: diffPath, tree: dir, hunk: id }).applied,
+      ).toBe(true);
+      const second = runRevertHunk({ diff: diffPath, tree: dir, hunk: id });
+      expect(second.applied).toBe(false);
+      expect(second.harnessFailure).toBeUndefined();
+      expect(second.conflict).toBeTruthy();
+    },
+  );
+
+  it('strips diff -u timestamp suffixes from ---/+++ headers like git does (R14-7)', () => {
+    // `diff -u` captures carry `\t<mtime>` after the path. git truncates it;
+    // a model that keeps it embeds a tab in the hunk id, compares mtimes as
+    // if they were paths, and queries a timestamped path that is never
+    // tracked — misrouting a genuine coupling refusal to exit 2.
+    const { dir, diffPath } = twoHunkFixture();
+    const stamped = readFileSync(diffPath, 'utf8')
+      .replace(/^--- a\/f\.txt$/m, '--- a/f.txt\t2026-08-27 10:00:00')
+      .replace(/^\+\+\+ b\/f\.txt$/m, '+++ b/f.txt\t2026-08-27 10:00:01');
+    const stampedPath = join(dir, 'stamped.diff');
+    writeFileSync(stampedPath, stamped);
+    // The id is the bare path — no tab, no timestamp.
+    expect(listHunks(stamped).map((h) => h.id)).toEqual(['f.txt:1', 'f.txt:2']);
+    const first = runRevertHunk({
+      diff: stampedPath,
+      tree: dir,
+      hunk: 'f.txt:1',
+    });
+    expect(first.applied).toBe(true);
+    // Differing mtimes did NOT read as "paths differ"; and the genuine
+    // second-revert refusal stays the conflict class.
+    const second = runRevertHunk({
+      diff: stampedPath,
+      tree: dir,
+      hunk: 'f.txt:1',
+    });
+    expect(second.applied).toBe(false);
+    expect(second.harnessFailure).toBeUndefined();
+    expect(second.conflict).toBeTruthy();
+  });
+
+  it('refuses a rename/copy section whose destination metadata line is missing (R12-1)', () => {
+    // `rename from` without `rename to` is metadata git never emits; with no
+    // destination the metadata cross-check has nothing to compare and would
+    // fail OPEN onto a rewrite it cannot vouch for. Refuse the incomplete
+    // shape.
+    const dir = tempDir('rh-nometa-');
+    git(dir, 'init', '-q', '-b', 'main');
+    git(dir, 'config', 'user.email', 't@t');
+    git(dir, 'config', 'user.name', 't');
+    git(dir, 'config', 'core.autocrlf', 'false');
+    writeFileSync(join(dir, 'y'), 'top-new\nmid\n'); // a decoy at the stripped path
+    git(dir, 'add', '.');
+    git(dir, 'commit', '-qm', 'base');
+    const diffPath = join(dir, 'nometa.diff');
+    writeFileSync(
+      diffPath,
+      [
+        'diff --git a/x b/y',
+        'similarity index 80%',
+        'rename from x',
+        '--- a/x',
+        '+++ b/y',
+        '@@ -1,2 +1,2 @@',
+        '-top-old',
+        '+top-new',
+        ' mid',
+        '',
+      ].join('\n'),
+    );
+    const before = readFileSync(join(dir, 'y'), 'utf8');
+    const r = runRevertHunk({ diff: diffPath, tree: dir, hunk: 'y:1' });
+    expect(r.applied).toBe(false);
+    expect(r.harnessFailure).toBe(true);
+    expect(r.note).toContain('no `rename to`');
+    expect(readFileSync(join(dir, 'y'), 'utf8')).toBe(before); // decoy untouched
   });
 
   it('refuses a hand-crafted section whose paths differ without rename metadata', () => {
@@ -1535,6 +1752,11 @@ describe('the command wiring', () => {
     const runThroughYargs = (args: string[]): string[] => {
       const failures: string[] = [];
       yargs(['revert-hunk', ...args])
+        // The production root parser is `.strict()` (config.ts) and strict
+        // propagates into subcommands — so pin against a strict root, or an
+        // unknown-flag typo would take the yargs exit-1 path in production
+        // while a lenient test parser stays green.
+        .strict()
         .command(revertHunkCommand)
         .exitProcess(false)
         .fail((msg) => {
@@ -1568,6 +1790,25 @@ describe('the command wiring', () => {
     expect(process.exitCode).toBe(2);
     expect(vi.mocked(writeStderrLineSafe)).toHaveBeenCalledWith(
       expect.stringContaining('mutually exclusive'),
+    );
+
+    // An unknown flag (a typo for --tree) must NOT die in the strict root's
+    // .fail (exit 1, no JSON): the builder opts out of strict, so the handler
+    // runs, sees no --tree, and exits 2 with its repair message (R15-5).
+    process.exitCode = 0;
+    expect(
+      runThroughYargs([
+        '--diff',
+        diffPath,
+        '--hunk',
+        'f.txt:1',
+        '--treen',
+        dir,
+      ]),
+    ).toEqual([]);
+    expect(process.exitCode).toBe(2);
+    expect(vi.mocked(writeStderrLineSafe)).toHaveBeenCalledWith(
+      expect.stringContaining('--tree'),
     );
   });
 });

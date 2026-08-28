@@ -55,9 +55,14 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, join, resolve, sep } from 'node:path';
 import type { DiffFile } from './lib/diff-plan.js';
-import { parseDiff, cleanPath, unquote } from './lib/diff-plan.js';
+import {
+  parseDiff,
+  cleanPath,
+  unquote,
+  stripHeaderTimestamp,
+} from './lib/diff-plan.js';
 import { sanitizedGitEnv } from './lib/worktree.js';
 import { assertWritableOutPath } from './lib/paths.js';
 import {
@@ -246,7 +251,7 @@ export function extractHunkPatch(
     // a/ b/ (or "a/ "b/) prefixes, so the `"a/`-assuming slice is safe. A
     // plain edit never enters here: git's own -p1 strips the one prefix
     // component, so old and new resolve to the same file untouched.
-    const bTok = plusLine.slice(4);
+    const bTok = stripHeaderTimestamp(plusLine.slice(4));
     const aTok = bTok.startsWith('"')
       ? `"a/${bTok.slice(3)}`
       : `a/${bTok.slice(2)}`;
@@ -290,13 +295,37 @@ export function sectionUnsafeToRevert(
 ): string | null {
   const lines = diffText.split('\n');
   const header = lines.slice(file.diffStart - 1, file.hunks[0].diffStart - 1);
+  // Timestamp-stripped (`diff -u` puts `\t<mtime>` after the path; git's own
+  // parser truncates there), so a pair of identical paths with differing
+  // mtimes is not misread as two different paths.
   const tok = (pfx: string) =>
-    header.find((l) => l.startsWith(pfx))?.slice(pfx.length) ?? '';
+    stripHeaderTimestamp(
+      header.find((l) => l.startsWith(pfx))?.slice(pfx.length) ?? '',
+    );
   const minus = tok('--- ');
   const plus = tok('+++ ');
   // An empty header token means a binary/mode-only section this command
   // already refuses for lacking hunks — not this gate's concern.
   if (minus === '' || plus === '') return null;
+  // The `diff --git` line is the one header git ALWAYS prefixes with a/ b/
+  // under default settings, regardless of which side is /dev/null: a creation
+  // reads `diff --git a/new b/new`, a deletion `diff --git a/old b/old`. Under
+  // --no-prefix the same lines carry the literal paths — `diff --git b/new
+  // b/new` for a file under a top-level `b/` dir — so requiring the first
+  // token to open with `a/` and a later token with ` b/` refuses the
+  // creation/deletion entrances whose `---`/`+++` tokens alone are
+  // indistinguishable from default prefixes (`--- /dev/null` satisfies the
+  // old-side check for any capture). Tolerant of spaces in paths on purpose:
+  // it only asks for the two prefix markers, not a full tokenization.
+  const gitLine = header.find((l) => l.startsWith('diff --git ')) ?? '';
+  if (gitLine !== '') {
+    const rest = gitLine.slice('diff --git '.length);
+    const firstOk = rest.startsWith('a/') || rest.startsWith('"a/');
+    const secondOk = rest.includes(' b/') || rest.includes(' "b/');
+    if (!firstOk || !secondOk) {
+      return `hunk sits in a section whose \`diff --git\` header does not carry git's standard a/ b/ prefixes (got ${JSON.stringify(gitLine)}) — a --no-prefix or custom-prefix capture whose ---/+++ tokens merely look standard. This command assumes default prefixes at every layer. Recapture with default prefixes (drop --src-prefix/--dst-prefix/--no-prefix).`;
+    }
+  }
   // The command assumes git's DEFAULT prefixes at every layer (parseDiff
   // strips a/ b/, extractHunkPatch rewrites with them, git apply -R uses
   // -p1). The old side must be `a/…` and the new side `b/…` (quoted or
@@ -333,13 +362,19 @@ export function sectionUnsafeToRevert(
     const metaLine = header.find(
       (l) => l.startsWith('rename to ') || l.startsWith('copy to '),
     );
-    if (metaLine !== undefined) {
-      const metaPath = unquote(
-        metaLine.slice(metaLine.startsWith('rename to ') ? 10 : 8),
-      );
-      if (metaPath !== '' && cleanPath(plus) !== metaPath) {
-        return `hunk sits in a rename/copy section whose +++ path stripped to ${JSON.stringify(cleanPath(plus))} disagrees with its unprefixed rename/copy metadata ${JSON.stringify(metaPath)} — git never prefixes those lines, so the capture uses non-default prefixes and the -p1 rewrite would target the wrong file. Recapture with git's default prefixes.`;
-      }
+    // A `rename from`/`copy from` with NO destination line is metadata git
+    // never emits (the pair always travels together). Left through, the
+    // cross-check below has nothing to compare against and the gate fails
+    // OPEN — the rewrite then runs on a token it cannot vouch for. Refuse the
+    // incomplete shape instead of trusting it.
+    if (metaLine === undefined) {
+      return `hunk sits in a rename/copy section that carries a \`rename from\`/\`copy from\` line but no \`rename to\`/\`copy to\` — incomplete metadata git does not emit, so the destination the -p1 rewrite would target cannot be verified. This command reverts git-produced diffs; recapture with git.`;
+    }
+    const metaPath = unquote(
+      metaLine.slice(metaLine.startsWith('rename to ') ? 10 : 8),
+    );
+    if (metaPath === '' || cleanPath(plus) !== metaPath) {
+      return `hunk sits in a rename/copy section whose +++ path stripped to ${JSON.stringify(cleanPath(plus))} disagrees with its unprefixed rename/copy metadata ${JSON.stringify(metaPath)} — git never prefixes those lines, so the capture uses non-default prefixes and the -p1 rewrite would target the wrong file. Recapture with git's default prefixes.`;
     }
   }
   // A creation (`--- /dev/null`) or deletion (`+++ /dev/null`) legitimately
@@ -461,21 +496,105 @@ function gitTreeState(
 }
 
 /**
- * Whether `path` is a file git TRACKS in `tree` (present in the index). This is
- * the ground truth for "is git's -p1 target a real file here", used to tell a
- * non-default-prefix / wrong-tree refusal (target not tracked → harness fact)
- * from a genuine coupling refusal (target tracked, content mismatch, or a hunk
- * already reverted — a working-tree delete still leaves the file tracked in the
- * index). `--error-unmatch` makes ls-files exit non-zero for an untracked path.
+ * The file `git apply -R -p1` will actually touch, as the exact BYTES git will
+ * use — derived from the extracted patch's own `---`/`+++` tokens, not from a
+ * decoded display string.
+ *
+ * Byte-faithful on purpose. The diff is read as latin1 (a 1:1 byte↔char map),
+ * so an unquoted token's chars ARE its bytes; a C-quoted token (`"caf\351.txt"`)
+ * decodes its `\NNN` octals to raw bytes. Decoding through UTF-8 instead
+ * (`unquoteCStylePath` → `toString('utf8')`) maps a non-UTF-8 byte such as
+ * `\351` to U+FFFD, and a target re-encoded from that (`EF BF BD`) can never
+ * match the index entry or the disk (`E9`) — a genuine coupling refusal on such
+ * a file would misroute to a "not tracked" harness fact. The `\t<timestamp>`
+ * suffix of a `diff -u` capture is cut (git truncates it too), and exactly one
+ * leading path component is stripped (`-p1`). Returns null for a token this
+ * cannot resolve (both sides /dev/null, no header).
  */
-function isTrackedFile(tree: string, path: string): boolean {
-  const r = spawnSync('git', ['ls-files', '--error-unmatch', '--', path], {
+export function p1TargetBytes(patch: string): Buffer | null {
+  const lines = patch.split('\n');
+  const rawTok = (pfx: string): string | undefined =>
+    lines.find((l) => l.startsWith(pfx))?.slice(pfx.length);
+  const plus = rawTok('+++ ');
+  const minus = rawTok('--- ');
+  // -R modifies the side that is NOT /dev/null: the `+++` (new) side for an
+  // edit or creation, the `---` (old) side for a deletion (un-delete).
+  const chosen =
+    plus !== undefined && stripHeaderTimestamp(plus) !== '/dev/null'
+      ? plus
+      : minus;
+  if (chosen === undefined) return null;
+  const t = stripHeaderTimestamp(chosen);
+  if (t === '/dev/null') return null;
+  let bytes: number[];
+  if (t.startsWith('"') && t.endsWith('"') && t.length >= 2) {
+    const inner = t.slice(1, -1);
+    bytes = [];
+    for (let i = 0; i < inner.length; ) {
+      const c = inner.charCodeAt(i);
+      if (c !== 0x5c) {
+        bytes.push(c & 0xff);
+        i++;
+        continue;
+      }
+      const n = inner[i + 1];
+      const oct = /^[0-7]{1,3}/.exec(inner.slice(i + 1, i + 4));
+      if (oct) {
+        bytes.push(parseInt(oct[0], 8) & 0xff);
+        i += 1 + oct[0].length;
+      } else {
+        const map: Record<string, number> = {
+          a: 0x07,
+          b: 0x08,
+          f: 0x0c,
+          n: 0x0a,
+          r: 0x0d,
+          t: 0x09,
+          v: 0x0b,
+          '"': 0x22,
+          '\\': 0x5c,
+        };
+        bytes.push(n !== undefined && n in map ? map[n] : 0x5c);
+        i += n !== undefined && n in map ? 2 : 1;
+      }
+    }
+  } else {
+    bytes = Array.from(t, (ch) => ch.charCodeAt(0) & 0xff);
+  }
+  const slash = bytes.indexOf(0x2f);
+  return Buffer.from(slash >= 0 ? bytes.slice(slash + 1) : bytes);
+}
+
+/**
+ * Whether the index of `tree` holds exactly these path bytes. Reads the whole
+ * NUL-terminated listing and compares bytes in-process rather than passing the
+ * path to git as an argument: an argv string cannot carry a non-UTF-8 byte
+ * faithfully, and a pathspec argument is subject to glob magic (`test[1].ts`
+ * would match a tracked `test1.ts` and report an absent file as tracked).
+ */
+function indexHasPath(tree: string, path: Buffer): boolean {
+  const r = spawnSync('git', ['ls-files', '-z'], {
     cwd: tree,
-    encoding: 'utf8',
+    encoding: 'buffer',
     env: sanitizedGitEnv(),
     timeout: 60_000,
+    maxBuffer: 256 * 1024 * 1024,
   });
-  return r.status === 0;
+  if (r.status !== 0 || !r.stdout) return false;
+  let start = 0;
+  const out: Buffer = r.stdout;
+  for (let i = 0; i <= out.length; i++) {
+    if (i === out.length || out[i] === 0) {
+      if (i > start && out.subarray(start, i).equals(path)) return true;
+      start = i + 1;
+    }
+  }
+  return false;
+}
+
+/** `tree` joined with raw path bytes, as a Buffer path node's fs accepts. */
+function treePath(tree: string, path: Buffer): Buffer {
+  return Buffer.concat([Buffer.from(tree + sep, 'utf8'), path]);
 }
 
 export function runRevertHunk(args: RevertHunkArgs): RevertHunkReport {
@@ -589,13 +708,23 @@ export function runRevertHunk(args: RevertHunkArgs): RevertHunkReport {
   }
   const patch = extractHunkPatch(diffText, file, sel.n);
   // The file `git apply -R -p1` will TOUCH, grounded in the tree rather than a
-  // guess about the prefix. `file.path` is parseDiff's DECODED new-side path
-  // (or the old-side path for a deletion) — C-quoted names and `diff -u`
-  // timestamp suffixes already handled — which, once sectionUnsafeToRevert has
-  // refused every non-default-prefix rename, equals git's -p1 target. Grounding
-  // the prefix assumption in whether THIS path is a tracked file in the tree is
+  // guess about the prefix. `targetBytes` is derived from the extracted patch's
+  // own header tokens as raw bytes (see `p1TargetBytes`): every tree-side
+  // check below (index membership, lstat, the before/after snapshot) consumes
+  // the bytes git will use, so a non-UTF-8 filename cannot be mangled on the
+  // way. `target` is the decoded display form for notes only. Grounding the
+  // prefix assumption in whether THESE bytes name a real file in the tree is
   // what the syntactic gate cannot do for tokens that merely LOOK like a/ b/.
   const target = file.path;
+  const targetBytes = p1TargetBytes(patch);
+  if (targetBytes === null) {
+    return {
+      applied: false,
+      hunk: entry,
+      harnessFailure: true,
+      note: `hunk ${args.hunk}: the section's ---/+++ headers resolve to no file (both sides /dev/null, or no header) — nothing for git apply -R to target. Recapture with git; nothing was changed.`,
+    };
+  }
 
   const tree = resolve(args.tree);
   // git apply needs no repository, so a --tree that is a plain (non-repo)
@@ -679,12 +808,22 @@ export function runRevertHunk(args: RevertHunkArgs): RevertHunkReport {
       // earlier revert) stays tracked and correctly reads as the exit-1
       // conflict class, not a prefix problem. Untracked → harness fact (exit 2);
       // tracked → a real overlap / already-mutated tree stays exit 1.
-      if (!isTrackedFile(tree, target)) {
+      // "Known to the tree" = in the INDEX or PRESENT ON DISK. Index alone is
+      // not enough: a file the PR DELETED is legitimately absent from the
+      // index of a PR-head checkout, and after a first (un-delete) revert it
+      // exists only on disk — a second revert of that deletion hunk is the
+      // ordinary already-reverted conflict (exit 1, "reset the scratch tree"),
+      // not a prefix problem. Both checks consume the raw bytes.
+      const known =
+        indexHasPath(tree, targetBytes) ||
+        lstatSync(treePath(tree, targetBytes), { throwIfNoEntry: false }) !==
+          undefined;
+      if (!known) {
         return {
           applied: false,
           hunk: entry,
           harnessFailure: true,
-          note: `hunk ${args.hunk}: git apply -R -p1's target ${JSON.stringify(target)} is not a tracked file in ${tree} — a harness fact, not a coupling refusal about the hunk. The capture likely uses non-default diff prefixes (git strips one leading component, assuming a/ b/), or --tree points at the wrong tree. Recapture with git's default prefixes (drop --no-prefix/--src-prefix/--dst-prefix); nothing was changed.`,
+          note: `hunk ${args.hunk}: git apply -R -p1's target ${JSON.stringify(target)} is neither tracked nor present in ${tree} — a harness fact, not a coupling refusal about the hunk. The capture likely uses non-default diff prefixes (git strips one leading component, assuming a/ b/), or --tree points at the wrong tree. Recapture with git's default prefixes (drop --no-prefix/--src-prefix/--dst-prefix); nothing was changed.`,
         };
       }
       return {
@@ -700,7 +839,8 @@ export function runRevertHunk(args: RevertHunkArgs): RevertHunkReport {
     // applied:true would be a false witness over a byte-identical tree, the
     // shape the submodule gate above also guards. A missing target is fine (a
     // deletion being un-deleted); only an existing NON-file is refused.
-    const targetStat = lstatSync(join(tree, target), { throwIfNoEntry: false });
+    const targetPath = treePath(tree, targetBytes);
+    const targetStat = lstatSync(targetPath, { throwIfNoEntry: false });
     if (targetStat && !targetStat.isFile() && !targetStat.isSymbolicLink()) {
       return {
         applied: false,
@@ -709,6 +849,22 @@ export function runRevertHunk(args: RevertHunkArgs): RevertHunkReport {
         note: `hunk ${args.hunk}: the resolved target ${JSON.stringify(target)} is a directory or special file in ${tree}, not a regular file — git apply -R exits 0 without touching it, so applied:true would be a false witness. Point --tree at the scratch worktree; nothing was changed.`,
       };
     }
+    // Snapshot the target's bytes BEFORE the apply, so `applied:true` can be
+    // grounded in the tree having actually changed rather than in exit 0
+    // alone: a hunk whose `-`/`+` sides are byte-identical (a redaction pass
+    // that equalised both sides, a hand edit) reverse-applies as an exit-0
+    // no-op over an untouched tree, and reporting it applied would send the
+    // verifier to re-probe an unchanged tree and record the hunk as dead
+    // weight. `null` = absent, which a creation-revert (delete) or a
+    // deletion-revert (recreate) legitimately flips.
+    const snapshot = (): Buffer | null => {
+      try {
+        return readFileSync(targetPath);
+      } catch {
+        return null;
+      }
+    };
+    const before = snapshot();
     const apply = exec(tree, ['apply', '-R', '--whitespace=nowarn', patchPath]);
     if (apply.error !== undefined || apply.signal !== undefined) {
       // Same misclassification the --check guard above closes, one call
@@ -732,6 +888,17 @@ export function runRevertHunk(args: RevertHunkArgs): RevertHunkReport {
         hunk: entry,
         harnessFailure: true,
         note: `hunk ${args.hunk} passed --check but failed to apply — the tree changed between the two calls, so it may be PARTIALLY modified. Reset the scratch tree and retry.`,
+      };
+    }
+    const after = snapshot();
+    const unchanged =
+      before === null ? after === null : after !== null && before.equals(after);
+    if (unchanged) {
+      return {
+        applied: false,
+        hunk: entry,
+        harnessFailure: true,
+        note: `hunk ${args.hunk}: git apply -R exited 0 but ${JSON.stringify(target)} is byte-identical before and after — the hunk's - and + sides revert to the same bytes (a redacted or hand-edited capture), so nothing was mutated and applied:true would be a false witness over an untouched tree. Recapture the diff from git; nothing was changed.`,
       };
     }
     return {
@@ -759,6 +926,12 @@ export const revertHunkCommand: CommandModule = {
     'List the diff\'s hunks (--list), or apply exactly one in reverse in a tree — the "is this change load-bearing?" mutation, done by git instead of by hand',
   builder: (yargs) =>
     yargs
+      // config.ts applies `.strict()` to the root parser and it propagates
+      // into subcommands, so an unknown flag (`--treen`) would die in the
+      // CLI-wide `.fail()` with exit 1 — the coupling-fact class — and no
+      // report JSON. Opt out here (as commands/auth.ts does): the handler then
+      // sees the typo as a missing --tree and exits 2 with a repair message.
+      .strict(false)
       .option('diff', {
         type: 'string',
         // No `demandOption`: a yargs-layer requirement fires the CLI-wide
