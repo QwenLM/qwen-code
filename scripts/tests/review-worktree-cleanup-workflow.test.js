@@ -154,6 +154,15 @@ function expectQuarantineFallback(run) {
   expect(code).toContain(
     'for stale_qwen in "$GITHUB_WORKSPACE/.qwen" "$GITHUB_WORKSPACE/.qwen.root-orig"; do',
   );
+  // The existence guard's `-L` arm is the only thing that sees a dangling
+  // symlink (`-e` follows the link and reports it absent), and the chmod
+  // guard's `! -L` arm is what keeps `chmod -R u+w` from dereferencing a
+  // symlinked leftover into a tree outside the workspace. No fixture
+  // executes the review-yml copy, so pin both arms here on every copy:
+  // dropping either one keeps this suite green while re-poisoning the
+  // checkout (mutation-probed against qwen-code-pr-review.yml).
+  expect(code).toContain('[ ! -e "$stale_qwen" ] && [ ! -L "$stale_qwen" ]');
+  expect(code).toContain('[ -d "$stale_qwen" ] && [ ! -L "$stale_qwen" ]');
   // The move must be the fallback of the removal chain, not an
   // unconditional relocation: a workspace that deletes cleanly keeps its
   // caches.
