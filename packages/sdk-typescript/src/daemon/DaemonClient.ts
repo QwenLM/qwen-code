@@ -3528,7 +3528,7 @@ export class DaemonClient {
    * Generate a one-sentence "where did I leave off"
    * recap of the session. Wraps `generateSessionRecap` (core/services/
    * sessionRecap.ts) via an ACP control-channel ext-method, so the
-   * summary is computed against the active GeminiClient chat history
+   * summary is computed against the active LlmClient chat history
    * inside the daemon's ACP child.
    *
    * Non-strict mutation gate — posture matches `/session/:id/prompt`
