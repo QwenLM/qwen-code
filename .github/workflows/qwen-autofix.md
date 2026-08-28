@@ -255,6 +255,7 @@ task-oriented guides — what a maintainer types and what happens next — see:
 - [151. run — Convergence-signal circuit breaker — the off-ramp the round and growth brakes cannot…](#af-151)
 - [152. review-scan · Scan for PRs with new feedback — Convergence-signal circuit breaker (#10107): the review side diagnoses a non-converging…](#af-152)
 - [153. review-address · Prepare branch and feedback — Convergence-break mirror (#10107): the scan refuses to select while the breaker holds,…](#af-153)
+- [154. review-address · Report dry-run / failure — Convergence-break report guard (#10122): the report step's stale-base retry is a sibling…](#af-154)
 
 ---
 
@@ -4061,7 +4062,12 @@ boundary, last ledger marker per body (an edited body can hold more than
 one; the newest describes the round), one entry per ROUND keeping the
 newest (the review workflow dismisses its own superseded reviews but the
 dismissed body — and its marker — survives in the list, and a re-run of
-one round must not count twice), reset to zero by any marker round whose
+one round must not count twice), reduced in TIME order — jq's group_by
+re-sorts its input by the grouping key, so the dedup's output is re-sorted
+by submitted_at before the reduce: round-NUMBER order would miscount in
+the unsafe direction whenever a round lands out of order (a dismissed
+round's healthy re-run landing late reads as a signal tail), reset to
+zero by any marker round whose
 codes do not intersect CONVERGENCE_SIGNAL_CODES. A review without a
 parseable marker contributes nothing either way — fallback comments and
 dismissal stubs are not rounds — while a marker without `rec` is a round
@@ -4072,9 +4078,15 @@ a false park.
 The boundary is max(window key, newest trusted-human activity). The
 window-key half makes /retry and re-engagement reset the breaker exactly
 like every other census. The human-activity half is the resume signal the
-notice promises: a maintainer response moves the boundary past the streak,
+notice promises — a maintainer response moves the boundary past the streak:
 the loop wakes with a fresh CONVERGENCE_BREAK_ROUNDS of runway, and the
-response itself reaches the agent as ordinary feedback. The legs mirror
+response itself reaches the agent as ordinary feedback. The reviews arm
+counts every state that records a response — CHANGES_REQUESTED, COMMENTED,
+APPROVED, and DISMISSED: an approval resumes exactly like the notice
+promises ("a review or comment counts"), and a dismissed review keeps the
+boundary where the human put it, so a dismissal can never snap the
+boundary back to the window key and silently re-park under the stale
+pre-resume notice. The legs mirror
 the conflict park's wake legs (trusted-human reviews, inline comments,
 issue comments minus bot markers and @qwen-code commands) with one
 deliberate difference: NO failed-check leg. The conflict park wakes on
@@ -4100,12 +4112,29 @@ workflow on the new head, and the base-merge round reviews an unchanged
 diff — its clean marker resets the streak, silently lifting the park
 with zero human activity (af-108's exact hazard, the one the conflict
 park's guard was added for). Both gates reuse the one derivation, so the
-two reads cannot drift; the park ACTION still sits after the idle
-fast-path (an idle PR dispatches nothing anyway) and before target
-emission, so a parked PR spends no dispatch, no runner, and no round.
+two reads cannot drift; the park ACTION sits ABOVE the idle fast-path —
+a parked PR whose signal rounds all sit at or below the eval watermark IS
+the idle case, and the notice and fleet row the action writes are the
+park's only visible escalation, so below the fast-path they would never
+be reached — and still precedes target emission, so a parked PR spends
+no dispatch, no runner, and no round either way.
 The notice's release clause branches on the takeover label like the cap
 notices: `/takeover stop` is a logged no-op on a PR without the label,
-so there the notice offers takeover itself instead.
+so there the notice offers takeover itself instead. Its codes clause
+claims exactly the union it prints — codes observed since the last
+maintainer response, or the window start if none — because CONV_SINCE
+advances to the newest trusted-human activity, not the window key.
+
+The RELEASE census is the park's own enumeration: a posted notice holds
+the park until the boundary itself moves (a trusted-human response or a
+re-arm). Any clean round resets the streak — including the review a
+maintainer push triggers via synchronize — but must not silently release
+the park: the dedup counts notices newer than the boundary, so a
+release-then-re-trip would re-park under the stale notice with no fresh
+one. If the signal resumes, the streak census re-parks loudly (the
+boundary moved, or the notice is still the newest word); the hold only
+keeps the quiet middle honest. The mirror and the report guard carry the
+same hold.
 ```
 
 <a id="af-153"></a>
@@ -4131,5 +4160,39 @@ visible escalation lags the park by at most one scan interval.
 Keep the two readings in LOCKSTEP with the scan gate (boundary, streak,
 codes) — a divergence between them either burns agent rounds the scan
 already refused, or silently discards rounds the scan still allows. A
-test replays both against the same fixture.
+test replays both against the same fixture. The mirror also carries the
+scan's park HOLD: a target dispatched before a clean round reset the
+streak must not land on a PR a posted notice still holds parked.
+```
+
+<a id="af-154"></a>
+
+### 154. review-address · Report dry-run / failure — Convergence-break report guard (#10122): the report step's stale-base retry is a sibling…
+
+In `review-address` · `Report dry-run / failure`.
+
+```text
+Convergence-break report guard (#10122): the report step's stale-base
+retry is a sibling wake leg the scan's CONV_PARKED cannot cover — that
+reading is scan-local, and this job's inputs froze at prepare time. The
+race: the scan emits a target while the streak is one short; the round
+passes prepare's mirror before the tripping review lands; the scan parks
+the PR on its next tick; the in-flight round then fails its verification
+gate — and this step, POST_HANDOFF on a frozen STALE=false, merges main
+into the parked PR. The merge re-fires every synchronize-triggered
+workflow; the base-merge round reviews an unchanged diff and posts a
+rec-less marker; the streak resets — the park lifts with zero human
+activity, the notice's "base conflicts stay unhandled while paused"
+promise broken, and no fresh notice because the boundary never moved.
+The race window is the full prepare-to-report span — tens of minutes
+against the 10-minute scan cadence — on exactly the PRs the breaker
+targets.
+
+The guard re-derives the breaker's reading over fresh fetches before the
+merge attempt — the rearm key, the boundary, and the streak programs are
+the scan gate's verbatim, and the park hold rides along, so the three
+sites stay in one lockstep pin — and skips update-branch while the
+reading holds, exactly like the conflict verdict's skip above it. A
+skipped retry reports the gate failure honestly instead; the park's own
+notice is still the scan's job.
 ```
