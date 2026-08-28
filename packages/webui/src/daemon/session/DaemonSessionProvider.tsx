@@ -1311,10 +1311,11 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               attachedExistingSession = true;
             }
           }
-          // R9-1: the load this iteration attempted, lifted out of the
-          // !session block so the post-restore success path can tell its own
-          // load apart from a successor's re-preserved one.
-          let attemptedLoadForRun: PendingSessionLoad | undefined;
+          // R9-1: the load the current loop iteration attempted. Reassigned
+          // per iteration that captures a load (iteration-scoped, not
+          // run-scoped), lifted out of the !session block so the post-restore
+          // success path below can still see it.
+          let attemptedLoadForIteration: PendingSessionLoad | undefined;
           if (!session) {
             if (!preservingTranscriptDuringLoad) {
               setConnection((current) => ({
@@ -1516,7 +1517,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               attachmentLifecycle.pendingLoad?.sessionId === targetSessionId
                 ? attachmentLifecycle.pendingLoad
                 : undefined;
-            attemptedLoadForRun = attemptedLoad;
+            attemptedLoadForIteration = attemptedLoad;
             const restoreRequestTimeoutMs =
               attemptedLoad?.requestTimeoutMs ??
               resolveSessionRestoreTimeouts(capabilities).requestTimeoutMs;
@@ -1770,15 +1771,16 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           setPromptStatus(hasSessionActivePrompt() ? 'streaming' : 'idle');
 
           const pendingLoad = attachmentLifecycle.pendingLoad;
-          // R9-1: a superseded run that attempted a load must not adopt the
-          // successor's re-preserved one — session identity alone cannot tell
-          // them apart. A run that attempted no load keeps the pre-R9-1
-          // adoption behaviour (creation flows register the load after the
-          // capture above).
+          // R9-1: a superseded load attempt must not adopt the successor's
+          // re-preserved pending load — session identity alone cannot tell
+          // them apart. Iterations without a load capture keep the pre-R9-1
+          // adoption behaviour; that bypass is what lets creation flows
+          // resolve, since they register the load only after the capture
+          // point above.
           const pendingLoadToResolve =
             pendingLoad?.sessionId === activeSession.sessionId &&
-            (attemptedLoadForRun === undefined ||
-              pendingLoad === attemptedLoadForRun)
+            (attemptedLoadForIteration === undefined ||
+              pendingLoad === attemptedLoadForIteration)
               ? pendingLoad
               : undefined;
 
