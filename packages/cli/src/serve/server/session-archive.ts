@@ -863,31 +863,6 @@ export async function archiveDaemonSessions(params: {
           if (initialLocation === undefined) {
             return { kind: 'notFound' as const, mutationApplied: false };
           }
-          if (initialLocation === 'archived') {
-            let maintenanceError: unknown;
-            try {
-              await updateScheduledTaskForMaintenance(
-                service,
-                sessionId,
-                'archive',
-                assertCanMutate,
-              );
-            } catch (error) {
-              maintenanceError = error;
-              logSessionArchiveWarning(
-                `scheduled task lifecycle update failed action=archive workspace=${safeLogValue(
-                  service.getProjectRoot(),
-                )} session=${safeLogValue(sessionId)} error=${safeLogValue(
-                  errorMessage(error),
-                )}`,
-              );
-            }
-            return {
-              kind: 'alreadyArchived' as const,
-              mutationApplied: false,
-              maintenanceError,
-            };
-          }
           if (initialLocation === 'conflict' && !resolveConflicts) {
             return {
               kind: 'error' as const,
@@ -908,12 +883,6 @@ export async function archiveDaemonSessions(params: {
               if (lockedLocation === undefined) {
                 return {
                   value: 'notFound' as const,
-                  mutationApplied: false,
-                };
-              }
-              if (lockedLocation === 'archived') {
-                return {
-                  value: 'alreadyArchived' as const,
                   mutationApplied: false,
                 };
               }
@@ -964,10 +933,30 @@ export async function archiveDaemonSessions(params: {
               maintenanceError: mutation.maintenanceError,
             };
           }
+          let maintenanceError = mutation.maintenanceError;
+          if (mutation.value === 'alreadyArchived') {
+            try {
+              await updateScheduledTaskForMaintenance(
+                service,
+                sessionId,
+                'archive',
+                assertCanMutate,
+              );
+            } catch (error) {
+              maintenanceError = error;
+              logSessionArchiveWarning(
+                `scheduled task lifecycle update failed action=archive workspace=${safeLogValue(
+                  service.getProjectRoot(),
+                )} session=${safeLogValue(sessionId)} error=${safeLogValue(
+                  errorMessage(error),
+                )}`,
+              );
+            }
+          }
           return {
             kind: mutation.value ?? 'notFound',
             mutationApplied: mutation.mutationApplied,
-            maintenanceError: mutation.maintenanceError,
+            maintenanceError,
           };
         };
         return await (coordinatorLockHeld
@@ -1061,31 +1050,6 @@ export async function unarchiveDaemonSessions(params: {
           if (initialLocation === undefined) {
             return { kind: 'notFound' as const, mutationApplied: false };
           }
-          if (initialLocation === 'active') {
-            let maintenanceError: unknown;
-            try {
-              await updateScheduledTaskForMaintenance(
-                service,
-                sessionId,
-                'unarchive',
-                assertCanMutate,
-              );
-            } catch (error) {
-              maintenanceError = error;
-              logSessionArchiveWarning(
-                `scheduled task lifecycle update failed action=unarchive workspace=${safeLogValue(
-                  service.getProjectRoot(),
-                )} session=${safeLogValue(sessionId)} error=${safeLogValue(
-                  errorMessage(error),
-                )}`,
-              );
-            }
-            return {
-              kind: 'alreadyActive' as const,
-              mutationApplied: false,
-              maintenanceError,
-            };
-          }
           if (initialLocation === 'conflict' && !resolveConflicts) {
             return {
               kind: 'error' as const,
@@ -1106,12 +1070,6 @@ export async function unarchiveDaemonSessions(params: {
               if (lockedLocation === undefined) {
                 return {
                   value: 'notFound' as const,
-                  mutationApplied: false,
-                };
-              }
-              if (lockedLocation === 'active') {
-                return {
-                  value: 'alreadyActive' as const,
                   mutationApplied: false,
                 };
               }
@@ -1161,10 +1119,30 @@ export async function unarchiveDaemonSessions(params: {
               maintenanceError: mutation.maintenanceError,
             };
           }
+          let maintenanceError = mutation.maintenanceError;
+          if (mutation.value === 'alreadyActive') {
+            try {
+              await updateScheduledTaskForMaintenance(
+                service,
+                sessionId,
+                'unarchive',
+                assertCanMutate,
+              );
+            } catch (error) {
+              maintenanceError = error;
+              logSessionArchiveWarning(
+                `scheduled task lifecycle update failed action=unarchive workspace=${safeLogValue(
+                  service.getProjectRoot(),
+                )} session=${safeLogValue(sessionId)} error=${safeLogValue(
+                  errorMessage(error),
+                )}`,
+              );
+            }
+          }
           return {
             kind: mutation.value ?? 'notFound',
             mutationApplied: mutation.mutationApplied,
-            maintenanceError: mutation.maintenanceError,
+            maintenanceError,
           };
         };
         return await (coordinatorLockHeld

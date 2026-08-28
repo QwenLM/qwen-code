@@ -338,6 +338,14 @@ describe('SessionService lifecycle maintenance', () => {
       id: string,
       state: 'active' | 'archived',
     ) => string;
+    getPromptLedgerPathForState: (
+      id: string,
+      state: 'active' | 'archived',
+    ) => string;
+    getWorktreeSessionPathForState: (
+      id: string,
+      state: 'active' | 'archived',
+    ) => string;
     sessionBelongsToCurrentProject: (
       sessionId: string,
       cwd: string,
@@ -1060,6 +1068,80 @@ describe('SessionService lifecycle maintenance', () => {
       expect(fs.existsSync(destinationPath)).toBe(true);
       expect(fs.existsSync(sourceLedger)).toBe(true);
       expect(fs.existsSync(destinationLedger)).toBe(false);
+    },
+  );
+
+  it.each(['archive', 'unarchive'] as const)(
+    'reconciles stranded %s sidecars on an exact retry',
+    async (action) => {
+      const sourceState = action === 'archive' ? 'active' : 'archived';
+      const destinationState = action === 'archive' ? 'archived' : 'active';
+      const { service, sessionId } = createHarness('transcript', sourceState);
+      const internals = service as unknown as Privates;
+      const sourceWorktree = internals.getWorktreeSessionPathForState(
+        sessionId,
+        sourceState,
+      );
+      const destinationWorktree = internals.getWorktreeSessionPathForState(
+        sessionId,
+        destinationState,
+      );
+      const sourcePr = internals.getPrSessionPathForState(
+        sessionId,
+        sourceState,
+      );
+      const destinationPr = internals.getPrSessionPathForState(
+        sessionId,
+        destinationState,
+      );
+      const sourceLedger = internals.getPromptLedgerPathForState(
+        sessionId,
+        sourceState,
+      );
+      const destinationLedger = internals.getPromptLedgerPathForState(
+        sessionId,
+        destinationState,
+      );
+      fs.writeFileSync(sourceWorktree, '{}');
+      const pr = {
+        number: 123,
+        url: 'https://github.com/QwenLM/qwen-code/pull/123',
+        createdAt: '2026-08-28T00:00:00.000Z',
+      };
+      await writeSessionPrs(sourcePr, [pr]);
+      fs.writeFileSync(sourceLedger, '{"promptId":"p1"}\n');
+      const ownershipLost = new Error('writer ownership lost');
+
+      const first = await service[`${action}Sessions`]([sessionId], {
+        assertCleanupOwned: () => {
+          throw ownershipLost;
+        },
+      });
+      expect(first.errors[0]?.error).toBe(ownershipLost);
+
+      const assertCanMutate = vi.fn();
+      const assertCleanupOwned = vi.fn();
+      const retry = await service[`${action}Sessions`]([sessionId], {
+        assertCanMutate,
+        assertCleanupOwned,
+      });
+
+      expect(retry).toMatchObject({
+        [action === 'archive' ? 'alreadyArchived' : 'alreadyActive']: [
+          sessionId,
+        ],
+        errors: [],
+      });
+      expect(fs.existsSync(sourceWorktree)).toBe(false);
+      expect(fs.existsSync(destinationWorktree)).toBe(true);
+      expect(fs.existsSync(sourcePr)).toBe(false);
+      await expect(readSessionPrs(destinationPr)).resolves.toEqual([pr]);
+      expect(fs.existsSync(sourceLedger)).toBe(false);
+      expect(fs.readFileSync(destinationLedger, 'utf8')).toContain(
+        '"promptId":"p1"',
+      );
+      expect(assertCanMutate).toHaveBeenCalled();
+      expect(assertCleanupOwned).toHaveBeenCalled();
     },
   );
 

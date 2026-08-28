@@ -18,8 +18,10 @@ import {
   type SessionWriterLease,
   Storage,
   getCronFilePath,
+  readSessionPrs,
   readCronTasks,
   updateCronTasks,
+  writeSessionPrs,
 } from '@qwen-code/qwen-code-core';
 import {
   SessionArchivedError,
@@ -581,7 +583,7 @@ describe('archiveDaemonSessions', () => {
     expect(result.errors).toEqual([{ sessionId, error: expect.any(Error) }]);
   });
 
-  it('does not acquire writer leases for ids already archived or missing', async () => {
+  it('acquires a writer lease for already archived ids but not missing ids', async () => {
     const archivedId = '550e8400-e29b-41d4-a716-446655440003';
     const missingId = '550e8400-e29b-41d4-a716-446655440004';
     writeSessionFile(workspaceDir, archivedId, 'archived');
@@ -603,8 +605,28 @@ describe('archiveDaemonSessions', () => {
       notFound: [missingId],
       errors: [],
     });
-    expect(acquire).not.toHaveBeenCalled();
+    expect(acquire).toHaveBeenCalledTimes(1);
     expect(closeSession).toHaveBeenCalledTimes(2);
+  });
+
+  it('reconciles stranded sidecars before returning already archived', async () => {
+    const sessionId = '550e8400-e29b-41d4-a716-446655440103';
+    writeSessionFile(workspaceDir, sessionId, 'archived');
+    const service = new SessionService(workspaceDir);
+    const sidecars = await writeLifecycleSidecars(service, sessionId, 'active');
+
+    const result = await archiveDaemonSessions({
+      sessionIds: [sessionId],
+      service,
+      bridge: { closeSession: vi.fn().mockResolvedValue(undefined) },
+      coordinator: new SessionArchiveCoordinator(),
+    });
+
+    expect(result).toMatchObject({
+      alreadyArchived: [sessionId],
+      errors: [],
+    });
+    await expectLifecycleSidecarsMoved(sidecars, 'archived');
   });
 
   it('does not archive while another writer holds the lease', async () => {
@@ -1079,7 +1101,7 @@ describe('unarchiveDaemonSessions', () => {
     vi.restoreAllMocks();
   });
 
-  it('deduplicates ids and does not lock already active or missing ids', async () => {
+  it('deduplicates ids and locks already active ids for reconciliation', async () => {
     const archivedId = '550e8400-e29b-41d4-a716-446655440011';
     const activeId = '550e8400-e29b-41d4-a716-446655440012';
     const missingId = '550e8400-e29b-41d4-a716-446655440013';
@@ -1099,13 +1121,36 @@ describe('unarchiveDaemonSessions', () => {
       notFound: [missingId],
       errors: [],
     });
-    expect(acquire).toHaveBeenCalledTimes(1);
+    expect(acquire).toHaveBeenCalledTimes(2);
     expect(fs.existsSync(sessionPath(workspaceDir, archivedId, 'active'))).toBe(
       true,
     );
     expect(
       fs.existsSync(sessionPath(workspaceDir, archivedId, 'archived')),
     ).toBe(false);
+  });
+
+  it('reconciles stranded sidecars before returning already active', async () => {
+    const sessionId = '550e8400-e29b-41d4-a716-446655440113';
+    writeSessionFile(workspaceDir, sessionId, 'active');
+    const service = new SessionService(workspaceDir);
+    const sidecars = await writeLifecycleSidecars(
+      service,
+      sessionId,
+      'archived',
+    );
+
+    const result = await unarchiveDaemonSessions({
+      sessionIds: [sessionId],
+      service,
+      coordinator: new SessionArchiveCoordinator(),
+    });
+
+    expect(result).toMatchObject({
+      alreadyActive: [sessionId],
+      errors: [],
+    });
+    await expectLifecycleSidecarsMoved(sidecars, 'active');
   });
 
   it('collapses case-variant spellings in one batch to a single unarchive', async () => {
@@ -1848,5 +1893,78 @@ function sessionPath(
   return path.join(
     state === 'archived' ? path.join(chatsDir, 'archive') : chatsDir,
     `${sessionId}.jsonl`,
+  );
+}
+
+async function writeLifecycleSidecars(
+  service: SessionService,
+  sessionId: string,
+  sourceState: 'active' | 'archived',
+): Promise<{
+  sessionId: string;
+  service: SessionService;
+  sourceState: 'active' | 'archived';
+  pr: { number: number; url: string; createdAt: string };
+}> {
+  const worktreePath = service.getWorktreeSessionPathForArchiveState(
+    sessionId,
+    sourceState,
+  );
+  const prPath = service.getPrSessionPathForArchiveState(
+    sessionId,
+    sourceState,
+  );
+  const ledgerPath = path.join(
+    path.dirname(prPath),
+    `${sessionId}.ledger.jsonl`,
+  );
+  const pr = {
+    number: 10300,
+    url: 'https://github.com/QwenLM/qwen-code/pull/10300',
+    createdAt: '2026-08-28T00:00:00.000Z',
+  };
+  fs.mkdirSync(path.dirname(worktreePath), { recursive: true });
+  fs.writeFileSync(worktreePath, '{}');
+  await writeSessionPrs(prPath, [pr]);
+  fs.writeFileSync(ledgerPath, '{"promptId":"p1"}\n');
+  return { sessionId, service, sourceState, pr };
+}
+
+async function expectLifecycleSidecarsMoved(
+  fixture: Awaited<ReturnType<typeof writeLifecycleSidecars>>,
+  destinationState: 'active' | 'archived',
+): Promise<void> {
+  const { sessionId, service, sourceState, pr } = fixture;
+  const sourceWorktree = service.getWorktreeSessionPathForArchiveState(
+    sessionId,
+    sourceState,
+  );
+  const destinationWorktree = service.getWorktreeSessionPathForArchiveState(
+    sessionId,
+    destinationState,
+  );
+  const sourcePr = service.getPrSessionPathForArchiveState(
+    sessionId,
+    sourceState,
+  );
+  const destinationPr = service.getPrSessionPathForArchiveState(
+    sessionId,
+    destinationState,
+  );
+  const sourceLedger = path.join(
+    path.dirname(sourcePr),
+    `${sessionId}.ledger.jsonl`,
+  );
+  const destinationLedger = path.join(
+    path.dirname(destinationPr),
+    `${sessionId}.ledger.jsonl`,
+  );
+  expect(fs.existsSync(sourceWorktree)).toBe(false);
+  expect(fs.existsSync(destinationWorktree)).toBe(true);
+  expect(fs.existsSync(sourcePr)).toBe(false);
+  await expect(readSessionPrs(destinationPr)).resolves.toEqual([pr]);
+  expect(fs.existsSync(sourceLedger)).toBe(false);
+  expect(fs.readFileSync(destinationLedger, 'utf8')).toContain(
+    '"promptId":"p1"',
   );
 }

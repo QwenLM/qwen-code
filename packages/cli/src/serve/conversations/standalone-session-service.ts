@@ -64,6 +64,7 @@ import {
 } from '../workspace-runtime-storage.js';
 import type { WorkspaceRuntime } from '../workspace-registry.js';
 import type { ConversationWorkspace } from './conversation-workspace.js';
+import { ConversationRuntimeOwnershipError } from './conversation-runtime-errors.js';
 import {
   StandaloneDeletionJournalError,
   type StandaloneDeletionJournal,
@@ -1264,7 +1265,9 @@ export class StandaloneSessionService {
         );
       } catch (error) {
         cleanupPending = true;
-        cleanupOwnershipLost = error instanceof SessionWriterError;
+        cleanupOwnershipLost =
+          error instanceof SessionWriterError ||
+          error instanceof ConversationRuntimeOwnershipError;
       }
       if (!cleanupOwnershipLost) {
         try {
@@ -2023,7 +2026,9 @@ export class StandaloneSessionService {
           );
         } catch (error) {
           cleanupPending = true;
-          cleanupOwnershipLost = error instanceof SessionWriterError;
+          cleanupOwnershipLost =
+            error instanceof SessionWriterError ||
+            error instanceof ConversationRuntimeOwnershipError;
         }
         if (!cleanupOwnershipLost) {
           try {

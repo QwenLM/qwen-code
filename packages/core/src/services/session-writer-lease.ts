@@ -8,7 +8,7 @@ import { execFile } from 'node:child_process';
 import * as nodeConstants from 'node:constants';
 import { createHash, randomUUID, type Hash } from 'node:crypto';
 import * as nodeFs from 'node:fs';
-import type { Stats } from 'node:fs';
+import type { BigIntStats, Stats } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -1583,7 +1583,7 @@ export class SessionWriterLease {
   private terminalPromise: Promise<void> | undefined;
   private operationTail: Promise<void> = Promise.resolve();
   private readonly lockRecordRaw: string;
-  private lockFileIdentity: { dev: number; ino: number } | undefined;
+  private lockFileIdentity: { dev: bigint; ino: bigint } | undefined;
   private readonly retiredPath: string;
   private readonly claimPath: string;
 
@@ -2042,9 +2042,9 @@ export class SessionWriterLease {
 
   private async readOwnedLock(): Promise<ActiveLockRecord> {
     if (this.released) throw new SessionWriterLostError();
-    let stat: Awaited<ReturnType<typeof fs.lstat>>;
+    let stat: BigIntStats;
     try {
-      stat = await fs.lstat(this.lockPath);
+      stat = await fs.lstat(this.lockPath, { bigint: true });
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
         throw new SessionWriterLostError();
@@ -2078,10 +2078,27 @@ export class SessionWriterLease {
     ) {
       throw new SessionWriterLostError();
     }
+    let current: BigIntStats;
+    try {
+      current = await fs.lstat(this.lockPath, { bigint: true });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        throw new SessionWriterLostError();
+      }
+      throw new SessionWriterUnavailableError();
+    }
+    if (
+      !current.isFile() ||
+      current.isSymbolicLink() ||
+      current.dev !== stat.dev ||
+      current.ino !== stat.ino
+    ) {
+      throw new SessionWriterLostError();
+    }
     return record;
   }
 
-  private readVerifiedLockIdentity(): { dev: number; ino: number } {
+  private readVerifiedLockIdentity(): { dev: bigint; ino: bigint } {
     let descriptor: number;
     try {
       descriptor = nodeFs.openSync(
@@ -2098,15 +2115,15 @@ export class SessionWriterLease {
       throw new SessionWriterUnavailableError();
     }
     try {
-      const stat = nodeFs.fstatSync(descriptor);
+      const stat = nodeFs.fstatSync(descriptor, { bigint: true });
       if (!stat.isFile()) throw new SessionWriterLostError();
       if (!hasVerifiableInode(stat.ino)) {
         throw new SessionWriterUnavailableError();
       }
       const assertPathMatchesDescriptor = (): void => {
-        let pathStat: Stats;
+        let pathStat: BigIntStats;
         try {
-          pathStat = nodeFs.lstatSync(this.lockPath);
+          pathStat = nodeFs.lstatSync(this.lockPath, { bigint: true });
         } catch (error) {
           if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
             throw new SessionWriterLostError();

@@ -1661,6 +1661,62 @@ export class SessionService {
     fs.unlinkSync(sourcePath);
   }
 
+  private async moveArchiveSidecars(
+    sessionId: string,
+    action: 'archive' | 'unarchive',
+    assertCleanupOwned?: () => void,
+  ): Promise<void> {
+    const sourceState = action === 'archive' ? 'active' : 'archived';
+    const destinationState = action === 'archive' ? 'archived' : 'active';
+    const sourceWorktree = this.getWorktreeSessionPathForState(
+      sessionId,
+      sourceState,
+    );
+    const destinationWorktree = this.getWorktreeSessionPathForState(
+      sessionId,
+      destinationState,
+    );
+    assertCleanupOwned?.();
+    try {
+      this.moveOptionalFile(sourceWorktree, destinationWorktree);
+    } catch (error) {
+      this.warn(
+        `${action}Sessions: failed to move worktree sidecar for ${sessionId} from ${sourceWorktree} to ${destinationWorktree}: ${error}`,
+      );
+    }
+    try {
+      await this.movePrSidecar(
+        this.getPrSessionPathForState(sessionId, sourceState),
+        this.getPrSessionPathForState(sessionId, destinationState),
+        assertCleanupOwned,
+      );
+    } catch (error) {
+      if (error instanceof SessionWriterError) throw error;
+      assertCleanupOwned?.();
+      this.warn(
+        `${action}Sessions: failed to move pr sidecar for ${sessionId}: ${error}`,
+      );
+    }
+    const sourceLedger = this.getPromptLedgerPathForState(
+      sessionId,
+      sourceState,
+    );
+    const destinationLedger = this.getPromptLedgerPathForState(
+      sessionId,
+      destinationState,
+    );
+    try {
+      assertCleanupOwned?.();
+      this.moveLedgerSidecar(sourceLedger, destinationLedger);
+    } catch (error) {
+      if (error instanceof SessionWriterError) throw error;
+      assertCleanupOwned?.();
+      this.warn(
+        `${action}Sessions: failed to move prompt ledger for ${sessionId} from ${sourceLedger} to ${destinationLedger}: ${error}`,
+      );
+    }
+  }
+
   private sessionFileMoveError(
     action: 'archive' | 'unarchive',
     error: unknown,
@@ -2803,6 +2859,12 @@ export class SessionService {
           continue;
         }
         if (location === 'archived') {
+          if (options.assertCleanupOwned) {
+            await this.moveArchiveSidecars(sessionId, 'archive', () => {
+              options.assertCanMutate?.();
+              options.assertCleanupOwned?.();
+            });
+          }
           alreadyArchived.push(sessionId);
           continue;
         }
@@ -2849,22 +2911,6 @@ export class SessionService {
         const sourcePath = this.getSessionFilePath(sessionId, 'active');
         const targetPath = this.getSessionFilePath(sessionId, 'archived');
         fs.mkdirSync(this.getArchiveChatsDir(), { recursive: true });
-        const activeSidecar = this.getWorktreeSessionPathForState(
-          sessionId,
-          'active',
-        );
-        const archivedSidecar = this.getWorktreeSessionPathForState(
-          sessionId,
-          'archived',
-        );
-        const activeLedger = this.getPromptLedgerPathForState(
-          sessionId,
-          'active',
-        );
-        const archivedLedger = this.getPromptLedgerPathForState(
-          sessionId,
-          'archived',
-        );
         await options.assertStorageUnchanged?.();
         options.assertCanMutate?.();
         this.assertMaintainableSessionUnchanged(sessionId, snapshot);
@@ -2873,41 +2919,11 @@ export class SessionService {
         } catch (error) {
           throw this.sessionFileMoveError('archive', error);
         }
-        options.assertCleanupOwned?.();
-        try {
-          this.moveOptionalFile(activeSidecar, archivedSidecar);
-        } catch (sidecarError) {
-          this.warn(
-            `archiveSessions: failed to move worktree sidecar for ${sessionId} from ${activeSidecar} to ${archivedSidecar}: ${sidecarError}`,
-          );
-        }
-        try {
-          await this.movePrSidecar(
-            this.getPrSessionPathForState(sessionId, 'active'),
-            this.getPrSessionPathForState(sessionId, 'archived'),
-            options.assertCleanupOwned,
-          );
-        } catch (sidecarError) {
-          if (sidecarError instanceof SessionWriterError) {
-            throw sidecarError;
-          }
-          options.assertCleanupOwned?.();
-          this.warn(
-            `archiveSessions: failed to move pr sidecar for ${sessionId}: ${sidecarError}`,
-          );
-        }
-        try {
-          options.assertCleanupOwned?.();
-          this.moveLedgerSidecar(activeLedger, archivedLedger);
-        } catch (ledgerError) {
-          if (ledgerError instanceof SessionWriterError) {
-            throw ledgerError;
-          }
-          options.assertCleanupOwned?.();
-          this.warn(
-            `archiveSessions: failed to move prompt ledger for ${sessionId} from ${activeLedger} to ${archivedLedger}: ${ledgerError}`,
-          );
-        }
+        await this.moveArchiveSidecars(
+          sessionId,
+          'archive',
+          options.assertCleanupOwned,
+        );
         archived.push(sessionId);
       } catch (error) {
         if (
@@ -2953,6 +2969,12 @@ export class SessionService {
           continue;
         }
         if (location === 'active') {
+          if (options.assertCleanupOwned) {
+            await this.moveArchiveSidecars(sessionId, 'unarchive', () => {
+              options.assertCanMutate?.();
+              options.assertCleanupOwned?.();
+            });
+          }
           alreadyActive.push(sessionId);
           continue;
         }
@@ -2998,14 +3020,6 @@ export class SessionService {
 
         const sourcePath = this.getSessionFilePath(sessionId, 'archived');
         const targetPath = this.getSessionFilePath(sessionId, 'active');
-        const archivedSidecar = this.getWorktreeSessionPathForState(
-          sessionId,
-          'archived',
-        );
-        const activeSidecar = this.getWorktreeSessionPathForState(
-          sessionId,
-          'active',
-        );
         fs.mkdirSync(path.dirname(targetPath), { recursive: true });
         await options.assertStorageUnchanged?.();
         options.assertCanMutate?.();
@@ -3015,49 +3029,11 @@ export class SessionService {
         } catch (error) {
           throw this.sessionFileMoveError('unarchive', error);
         }
-        options.assertCleanupOwned?.();
-        try {
-          this.moveOptionalFile(archivedSidecar, activeSidecar);
-        } catch (sidecarError) {
-          this.warn(
-            `unarchiveSessions: failed to move worktree sidecar for ${sessionId} from ${archivedSidecar} to ${activeSidecar}: ${sidecarError}`,
-          );
-        }
-        try {
-          await this.movePrSidecar(
-            this.getPrSessionPathForState(sessionId, 'archived'),
-            this.getPrSessionPathForState(sessionId, 'active'),
-            options.assertCleanupOwned,
-          );
-        } catch (sidecarError) {
-          if (sidecarError instanceof SessionWriterError) {
-            throw sidecarError;
-          }
-          options.assertCleanupOwned?.();
-          this.warn(
-            `unarchiveSessions: failed to move pr sidecar for ${sessionId}: ${sidecarError}`,
-          );
-        }
-        const archivedLedger = this.getPromptLedgerPathForState(
+        await this.moveArchiveSidecars(
           sessionId,
-          'archived',
+          'unarchive',
+          options.assertCleanupOwned,
         );
-        const activeLedger = this.getPromptLedgerPathForState(
-          sessionId,
-          'active',
-        );
-        try {
-          options.assertCleanupOwned?.();
-          this.moveLedgerSidecar(archivedLedger, activeLedger);
-        } catch (ledgerError) {
-          if (ledgerError instanceof SessionWriterError) {
-            throw ledgerError;
-          }
-          options.assertCleanupOwned?.();
-          this.warn(
-            `unarchiveSessions: failed to move prompt ledger for ${sessionId} from ${archivedLedger} to ${activeLedger}: ${ledgerError}`,
-          );
-        }
         unarchived.push(sessionId);
       } catch (error) {
         if (

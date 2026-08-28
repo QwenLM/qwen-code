@@ -27,6 +27,7 @@ import * as path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { WorkspaceRuntime } from '../workspace-registry.js';
 import { SessionArchiveCoordinator } from '../server/session-archive.js';
+import { ConversationRuntimeOwnershipError } from './conversation-runtime-errors.js';
 import {
   StandaloneSessionService,
   type StandaloneSessionServiceOptions,
@@ -889,6 +890,36 @@ describe('StandaloneSessionService', () => {
     expect(harness.deletionJournal.clear).not.toHaveBeenCalled();
   });
 
+  it('stops destructive cleanup when deletion loses runtime ownership', async () => {
+    mockActiveStandalone();
+    const harness = createHarness();
+    mockWriterLease();
+    vi.spyOn(
+      SessionService.prototype,
+      'removeSessionTranscriptForLifecycle',
+    ).mockResolvedValue(true);
+    vi.spyOn(
+      SessionService.prototype,
+      'cleanupRemovedSessionStateForLifecycle',
+    ).mockRejectedValue(
+      new ConversationRuntimeOwnershipError(
+        'conversation_runtime_unavailable',
+        true,
+      ),
+    );
+
+    await expect(harness.service.delete([sessionId])).resolves.toEqual({
+      removed: [sessionId],
+      notFound: [],
+      errors: [],
+      fileCleanupPending: [sessionId],
+    });
+
+    expect(harness.bridge.deleteSessionAttachments).not.toHaveBeenCalled();
+    expect(harness.removeStagedStandaloneDirectory).not.toHaveBeenCalled();
+    expect(harness.deletionJournal.clear).not.toHaveBeenCalled();
+  });
+
   it('retains deletion evidence when attachment cleanup fails', async () => {
     mockActiveStandalone();
     const harness = createHarness();
@@ -1356,6 +1387,40 @@ describe('StandaloneSessionService', () => {
       SessionService.prototype,
       'cleanupRemovedSessionStateForLifecycle',
     ).mockRejectedValue(new SessionWriterLostError());
+    const harness = createHarness();
+    mockWriterLease();
+    harness.deletionJournal.read.mockResolvedValueOnce(
+      deletionEntry() as never,
+    );
+    harness.inspectStandaloneDeletionPaths.mockResolvedValueOnce({
+      status: 'absent',
+    });
+
+    await expect(harness.service.delete([sessionId])).resolves.toEqual({
+      removed: [sessionId],
+      notFound: [],
+      errors: [],
+      fileCleanupPending: [sessionId],
+    });
+
+    expect(harness.bridge.deleteSessionAttachments).not.toHaveBeenCalled();
+    expect(harness.deletionJournal.clear).not.toHaveBeenCalled();
+  });
+
+  it('stops attachment cleanup when recovery loses runtime ownership', async () => {
+    vi.spyOn(
+      SessionService.prototype,
+      'findSessionIdIgnoringCase',
+    ).mockResolvedValue(undefined);
+    vi.spyOn(
+      SessionService.prototype,
+      'cleanupRemovedSessionStateForLifecycle',
+    ).mockRejectedValue(
+      new ConversationRuntimeOwnershipError(
+        'conversation_runtime_unavailable',
+        true,
+      ),
+    );
     const harness = createHarness();
     mockWriterLease();
     harness.deletionJournal.read.mockResolvedValueOnce(
