@@ -824,3 +824,317 @@ describe('qwen resolve workflow', () => {
     expect(resolveJob).toContain('Allow edits by maintainers');
   });
 });
+
+// A /resolve request is lost after the agent succeeded whenever the push is
+// declined, and before the agent even runs whenever a preflight refuses it.
+// The suite below pins the recovery paths added for the largest of those
+// losses (2026-06-25..08-27, 839 requests): the head moving during the run
+// (17 resolutions lost), fork PRs the bot cannot push to (10 agent runs
+// wasted), transient permission-API errors (silent denials), and the draft
+// gate (182 skip comments on explicit requests).
+describe('qwen resolve workflow: recovering requests that used to be lost', () => {
+  const workflow = readFileSync(
+    path.join(repoRoot, '.github/workflows/qwen-code-pr-review.yml'),
+    'utf8',
+  );
+  const resolveJob = job(workflow, 'resolve-pr');
+  const authorizeJob = job(workflow, 'authorize');
+  const prepareStep = step(resolveJob, 'Prepare pull request branch');
+  const reportStep = step(resolveJob, 'Report result');
+
+  // The replay functions, dedented out of the `run: |-` block so a real git
+  // fixture can exercise them exactly as the runner will.
+  function replayFunctions() {
+    const start = reportStep.indexOf('replay_give_up() {');
+    const end = reportStep.indexOf('\n          if [ "$OUTCOME" = "fixed" ]');
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    return reportStep.slice(start, end).replace(/^ {10}/gm, '');
+  }
+
+  const gitEnv = {
+    ...process.env,
+    GIT_AUTHOR_NAME: 'fixture',
+    GIT_AUTHOR_EMAIL: 'fixture@example.com',
+    GIT_COMMITTER_NAME: 'fixture',
+    GIT_COMMITTER_EMAIL: 'fixture@example.com',
+    GIT_CONFIG_GLOBAL: '/dev/null',
+    GIT_CONFIG_NOSYSTEM: '1',
+  };
+  function git(cwd, ...args) {
+    const result = spawnSync('git', args, {
+      cwd,
+      env: gitEnv,
+      encoding: 'utf8',
+    });
+    if (result.status !== 0) {
+      throw new Error(
+        `git ${args.join(' ')} failed in ${cwd}:\n${result.stdout}\n${result.stderr}`,
+      );
+    }
+    return result.stdout.trim();
+  }
+
+  // Builds: a bare origin with `main` and refs/pull/1/head; a runner checkout
+  // on branch qwen-resolve/pr-1 holding the agent's resolution of a.txt (the
+  // conflicted file) merged on top of the ORIGINAL head; and a contributor
+  // clone that can move the head. Returns the paths and the original head SHA.
+  function makeFixture() {
+    const root = mkdtempSync(path.join(tmpdir(), 'qwen-resolve-replay-'));
+    const origin = path.join(root, 'origin.git');
+    const contributor = path.join(root, 'contributor');
+    const runner = path.join(root, 'runner');
+    git(root, 'init', '-q', '--bare', origin);
+    git(root, 'init', '-q', '-b', 'main', contributor);
+    writeFileSync(path.join(contributor, 'a.txt'), 'shared line\n');
+    writeFileSync(path.join(contributor, 'b.txt'), 'b original\n');
+    git(contributor, 'add', '.');
+    git(contributor, 'commit', '-q', '-m', 'chore: seed');
+    git(contributor, 'checkout', '-q', '-b', 'feature');
+    writeFileSync(path.join(contributor, 'a.txt'), 'feature side\n');
+    git(contributor, 'commit', '-q', '-am', 'feat: feature side');
+    const originalHead = git(contributor, 'rev-parse', 'HEAD');
+    git(contributor, 'checkout', '-q', 'main');
+    writeFileSync(path.join(contributor, 'a.txt'), 'main side\n');
+    writeFileSync(path.join(contributor, 'c.txt'), 'c from main\n');
+    git(contributor, 'add', '.');
+    git(contributor, 'commit', '-q', '-m', 'feat: main side');
+    git(contributor, 'remote', 'add', 'origin', origin);
+    git(
+      contributor,
+      'push',
+      '-q',
+      'origin',
+      'main',
+      'feature:refs/pull/1/head',
+    );
+
+    git(root, 'clone', '-q', origin, runner);
+    git(
+      runner,
+      'fetch',
+      '-q',
+      'origin',
+      '+refs/pull/1/head:refs/remotes/origin/qwen-resolve/pr-1/head',
+      '+refs/heads/main:refs/remotes/origin/main',
+    );
+    git(
+      runner,
+      'checkout',
+      '-q',
+      '-B',
+      'qwen-resolve/pr-1',
+      'refs/remotes/origin/qwen-resolve/pr-1/head',
+    );
+    // The agent's merge: a.txt conflicts, resolved to a line neither side had.
+    spawnSync('git', ['merge', '--no-commit', 'origin/main'], {
+      cwd: runner,
+      env: gitEnv,
+    });
+    writeFileSync(path.join(runner, 'a.txt'), 'resolved by agent\n');
+    git(runner, 'add', 'a.txt');
+    git(runner, 'commit', '-q', '-m', 'fix: resolve merge conflicts with main');
+    const resolvedCommit = git(runner, 'rev-parse', 'HEAD');
+    return { root, origin, contributor, runner, originalHead, resolvedCommit };
+  }
+
+  function moveHead(fixture, file, content) {
+    git(fixture.contributor, 'checkout', '-q', 'feature');
+    writeFileSync(path.join(fixture.contributor, file), content);
+    git(fixture.contributor, 'add', file);
+    git(
+      fixture.contributor,
+      'commit',
+      '-q',
+      '-m',
+      `chore: move head (${file})`,
+    );
+    git(
+      fixture.contributor,
+      'push',
+      '-q',
+      'origin',
+      'feature:refs/pull/1/head',
+    );
+    return git(fixture.contributor, 'rev-parse', 'HEAD');
+  }
+
+  function runReplay(fixture) {
+    const script = [
+      'set -euo pipefail',
+      replayFunctions(),
+      'replayed_on=""',
+      'if replay_on_moved_head; then rc=0; else rc=$?; fi',
+      'echo "rc=$rc"',
+      'echo "HEAD_SHA=$HEAD_SHA"',
+      'echo "replayed_on=$replayed_on"',
+      'echo "head=$(git rev-parse HEAD)"',
+      'echo "branch=$(git rev-parse --abbrev-ref HEAD)"',
+      'echo "status=$(git status --porcelain | tr "\\n" ";")"',
+    ].join('\n');
+    const result = spawnSync('bash', ['-c', script], {
+      cwd: fixture.runner,
+      env: {
+        ...gitEnv,
+        PR_NUMBER: '1',
+        HEAD_SHA: fixture.originalHead,
+        BASE_REF: 'main',
+      },
+      encoding: 'utf8',
+    });
+    const out = Object.fromEntries(
+      result.stdout
+        .split('\n')
+        .filter((line) =>
+          /^(rc|HEAD_SHA|replayed_on|head|branch|status)=/.test(line),
+        )
+        .map((line) => line.split(/=(.*)/s).slice(0, 2)),
+    );
+    return { ...out, stdout: result.stdout, stderr: result.stderr };
+  }
+
+  it('replays the resolution when the head moved in files the conflict did not touch', () => {
+    const fixture = makeFixture();
+    try {
+      const newHead = moveHead(
+        fixture,
+        'b.txt',
+        'b changed after the agent started\n',
+      );
+      const out = runReplay(fixture);
+      expect(out.rc, out.stdout + out.stderr).toBe('0');
+      // The lease for the second push is taken on the NEW head.
+      expect(out.HEAD_SHA).toBe(newHead);
+      expect(out.replayed_on).toBe(newHead);
+      expect(out.status).toBe('');
+      // The replayed commit sits on the new head, merges the base, keeps the
+      // agent's resolution and the contributor's new change, and reuses the
+      // agent's commit message (CI rejects git's default merge message).
+      const parents = git(
+        fixture.runner,
+        'log',
+        '-1',
+        '--format=%P',
+        out.head,
+      ).split(' ');
+      expect(parents).toContain(newHead);
+      expect(parents).toContain(
+        git(fixture.runner, 'rev-parse', 'origin/main'),
+      );
+      expect(readFileSync(path.join(fixture.runner, 'a.txt'), 'utf8')).toBe(
+        'resolved by agent\n',
+      );
+      expect(readFileSync(path.join(fixture.runner, 'b.txt'), 'utf8')).toBe(
+        'b changed after the agent started\n',
+      );
+      expect(readFileSync(path.join(fixture.runner, 'c.txt'), 'utf8')).toBe(
+        'c from main\n',
+      );
+      expect(git(fixture.runner, 'log', '-1', '--format=%s', out.head)).toBe(
+        'fix: resolve merge conflicts with main',
+      );
+      // Only base-changed files differ from the new head: the scope guard holds.
+      expect(
+        git(fixture.runner, 'diff', '--name-only', newHead, out.head)
+          .split('\n')
+          .sort(),
+      ).toEqual(['a.txt', 'c.txt']);
+    } finally {
+      rmSync(fixture.root, { recursive: true, force: true });
+    }
+  });
+
+  it('gives up, and restores the original resolution, when the new head touched a conflicted file', () => {
+    const fixture = makeFixture();
+    try {
+      moveHead(fixture, 'a.txt', 'feature side, edited again\n');
+      const out = runReplay(fixture);
+      expect(out.rc, out.stdout + out.stderr).toBe('1');
+      expect(out.stdout).toContain(
+        'Replay gave up: a.txt still conflicts and the new head changed it',
+      );
+      // Nothing was taken from the agent's merge for a file the contributor
+      // rewrote, the lease SHA is untouched, and the checkout is back on the
+      // original resolution with a clean tree — the artifact and the "moved"
+      // comment describe exactly what exists.
+      expect(out.HEAD_SHA).toBe(fixture.originalHead);
+      expect(out.replayed_on).toBe('');
+      expect(out.branch).toBe('qwen-resolve/pr-1');
+      expect(out.head).toBe(fixture.resolvedCommit);
+      expect(out.status).toBe('');
+    } finally {
+      rmSync(fixture.root, { recursive: true, force: true });
+    }
+  });
+
+  it('gives up when the head did not move at all (the push failed for another reason)', () => {
+    const fixture = makeFixture();
+    try {
+      const out = runReplay(fixture);
+      expect(out.rc, out.stdout + out.stderr).toBe('1');
+      expect(out.stdout).toContain('the push was declined for another reason');
+      expect(out.head).toBe(fixture.resolvedCommit);
+      expect(out.branch).toBe('qwen-resolve/pr-1');
+    } finally {
+      rmSync(fixture.root, { recursive: true, force: true });
+    }
+  });
+
+  it('wires the replay into the push path with a lease on the new head, and never re-runs the agent', () => {
+    expect(reportStep).toContain(
+      '[ "$push_fail_reason" = "moved" ] && replay_on_moved_head && push_resolution',
+    );
+    // The lease still names ${HEAD_SHA}; the replay moves that variable to the
+    // new head instead of pushing with a bare --force.
+    expect(reportStep).toContain(
+      '--force-with-lease="refs/heads/${HEAD_REF}:${HEAD_SHA}"',
+    );
+    expect(reportStep).toContain('HEAD_SHA="$new_sha"');
+    expect(reportStep).not.toContain('--force ');
+    // The replay re-applies the structural checks of 'Resolution check'.
+    const replay = replayFunctions();
+    expect(replay).toContain("grep -InE -e '^(<<<<<<<|>>>>>>>) '");
+    expect(replay).toContain(
+      'git merge-tree --write-tree "origin/${BASE_REF}" HEAD',
+    );
+    expect(replay).toContain('comm -23 <(printf');
+    expect(replay).not.toContain('qwen-code-action');
+    // And the comment says a replay happened.
+    expect(reportStep).toContain('the resolution was replayed on top of it');
+  });
+
+  it('refuses fork PRs the bot cannot push to before spending an agent run', () => {
+    expect(prepareStep).toContain('maintainerCanModify');
+    expect(prepareStep).toContain(
+      '[ "$head_repo" != "$REPO" ] && [ "$maintainer_can_modify" != "true" ]',
+    );
+    expect(prepareStep).toContain('**Allow edits by maintainers** off');
+    // Same-repo PRs report maintainerCanModify=false too; the fork check must
+    // be conjoined with the head-repo comparison or every in-repo PR is refused.
+    expect(prepareStep).not.toMatch(
+      /\n\s+if \[ "\$maintainer_can_modify" != "true" \]; then/,
+    );
+  });
+
+  it('no longer refuses draft PRs', () => {
+    // /resolve is an explicit request by a writer; a draft with conflicts is
+    // where resolving is cheapest. The automatic review lane keeps its gate.
+    expect(prepareStep).not.toContain('is draft.');
+    expect(prepareStep).not.toContain('isDraft');
+    expect(job(workflow, 'delayed-review') || workflow).toContain('is draft.');
+  });
+
+  it('retries a transient permission-API error before denying, and still fails closed', () => {
+    expect(authorizeJob).toContain(
+      'failed transiently (attempt ${attempt} of 3)',
+    );
+    expect(authorizeJob).toContain('No server is currently available');
+    // After the retries the original fail-closed denial is unchanged.
+    expect(authorizeJob).toContain(
+      '::error::Permission API call failed for ${principal}: ${api_error}',
+    );
+    expect(authorizeJob).toContain(
+      'echo "should_review=false" >> "$GITHUB_OUTPUT"',
+    );
+  });
+});
