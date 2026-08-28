@@ -158,11 +158,14 @@ export function extractDiff(tool: ACPToolCall): string {
   const previewPatch = tool.args?.patch;
   if (typeof previewPatch === 'string' && previewPatch) return previewPatch;
   const previewNewText = tool.args?.newText;
-  if (typeof previewNewText === 'string') {
-    const previewOldText = tool.args?.oldText;
+  const previewOldText = tool.args?.oldText;
+  if (
+    typeof previewNewText === 'string' ||
+    typeof previewOldText === 'string'
+  ) {
     return buildUnifiedDiff(
       typeof previewOldText === 'string' ? previewOldText : '',
-      previewNewText,
+      typeof previewNewText === 'string' ? previewNewText : '',
     );
   }
 

@@ -2289,6 +2289,20 @@ describe('tool output logic', () => {
     ).toContain('DOCUMENT_DIFF_DETAIL');
   });
 
+  it('uses an old-text-only preview for a delete-only diff', () => {
+    expect(
+      extractDiff(
+        makeTool({
+          toolName: 'edit',
+          args: {
+            path: 'document.ts',
+            oldText: 'deleted content',
+          },
+        }),
+      ),
+    ).toContain('-deleted content');
+  });
+
   it('does not render an attempted typed diff for a failed edit', () => {
     expect(
       extractDiff(

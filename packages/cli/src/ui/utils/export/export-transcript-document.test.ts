@@ -167,6 +167,8 @@ describe('ExportTranscriptDocumentV1', () => {
                   'traversal=/home/alice/../../etc/passwd',
                   'file traversal=file:///home/alice/..',
                   'nested=/home/alice/home/notes.txt',
+                  'forged=[home]/home/alice/private.txt',
+                  'redundant=//home/alice/private.txt /./home/bob/private.txt',
                   '![safe](data:image/png;base64,/home/AA)',
                 ].join('\n'),
               },
@@ -198,8 +200,72 @@ describe('ExportTranscriptDocumentV1', () => {
     expect(text).not.toContain('%2Fhome%2Falice');
     expect(text).not.toContain('/home/bob');
     expect(text).toContain('joined=[home]/a,[home]/b');
-    expect(text).toContain('nested=[home]/home/notes.txt');
-    expect(text).not.toContain('[home][home]');
+    expect(text).not.toContain('nested=[home]/home/');
+    expect(text).not.toContain('forged=[home]/home/');
+    expect(text).not.toContain('//home/alice');
+    expect(text).not.toContain('/./home/bob');
+  });
+
+  it('marks excluded file attachments as incomplete', () => {
+    const document = createExportTranscriptDocumentV1(
+      [
+        record('user-file-ref', null, {
+          message: {
+            role: 'user',
+            parts: [{ text: 'check\n\n@attachment:///secret.log' }],
+          },
+          systemPayload: {
+            displayText: 'check\n\n@attachment:///secret.log',
+            hookContext: '',
+            attachmentReferences: [
+              {
+                type: 'resource',
+                attachmentId: 'secret.log',
+                mimeType: 'text/plain',
+                size: 6,
+              },
+            ],
+          },
+        }),
+      ],
+      sessionData,
+      EXPORT_OPTIONS,
+    );
+
+    expect(document.metadata).toMatchObject({
+      complete: false,
+      truncated: true,
+    });
+    expect(document.diagnostics).toContainEqual({
+      code: 'file_attachment_excluded',
+      severity: 'warning',
+      count: 1,
+    });
+  });
+
+  it('re-caps labels after home-path redaction grows them', () => {
+    const document = createExportTranscriptDocumentV1(
+      [record('label-growth', null)],
+      {
+        ...sessionData,
+        metadata: {
+          ...sessionData.metadata,
+          model: `${'m'.repeat(188)}file:/home/a`,
+        },
+      },
+      EXPORT_OPTIONS,
+    );
+
+    expect(document.metadata.model).toHaveLength(200);
+    expect(document.metadata).toMatchObject({
+      complete: false,
+      truncated: true,
+    });
+    expect(document.diagnostics).toContainEqual({
+      code: 'label_sanitized',
+      severity: 'warning',
+      count: 1,
+    });
   });
 
   it('redacts home roots while preserving percent-encoded basenames', () => {
@@ -1012,6 +1078,41 @@ describe('ExportTranscriptDocumentV1', () => {
     });
   });
 
+  it('marks rich-task complexity fallback as incomplete', () => {
+    const document = createExportTranscriptDocumentV1(
+      [
+        record('rich-task-complexity', null, {
+          message: {
+            role: 'user',
+            parts: [
+              {
+                text: ['```mermaid', 'graph TD', '```', '['.repeat(513)].join(
+                  '\n',
+                ),
+              },
+            ],
+          },
+        }),
+      ],
+      sessionData,
+      EXPORT_OPTIONS,
+    );
+
+    expect(document.blocks[0]).toMatchObject({
+      kind: 'user',
+      text: '[markdown omitted: complexity limit exceeded]',
+    });
+    expect(document.diagnostics).toContainEqual({
+      code: 'markdown_complexity_exceeded',
+      severity: 'warning',
+      count: 1,
+    });
+    expect(document.metadata).toMatchObject({
+      complete: false,
+      truncated: true,
+    });
+  });
+
   it('marks sanitized metadata URLs as incomplete without leaking secrets', () => {
     const document = createExportTranscriptDocumentV1(
       [record('user-url', null)],
@@ -1131,7 +1232,7 @@ describe('ExportTranscriptDocumentV1', () => {
       document.blocks[0]?.kind === 'user' ? document.blocks[0].text : '';
 
     expect(text).toContain('[safe](https://example.com/path)');
-    expect(text).toContain('[credential](https://example.com/private)');
+    expect(text).toContain('[credential](<https://example.com/private>)');
     expect(text).toContain('\nhttps://example.com/autolink\n');
     expect(text).toContain('https://example.com/bare');
     expect(text).toContain('http://www.example.com/path');

@@ -41,6 +41,68 @@ describe('markdown document policy', () => {
     expect(activePolicy.onComplexityLimit).toHaveBeenCalledOnce();
   });
 
+  it('fails closed before emphasis or indentation can amplify parse cost', () => {
+    for (const input of [
+      `${'a*'.repeat(10_000)}]`,
+      `${' '.repeat(1_025)}- nested\n]`,
+    ]) {
+      const activePolicy = policy();
+
+      expect(sanitizeMarkdownDocument(input, activePolicy)).toBe(
+        '[markdown omitted: complexity limit exceeded]',
+      );
+      expect(activePolicy.onComplexityLimit).toHaveBeenCalledOnce();
+    }
+  });
+
+  it('keeps flat bracketed logs above the old raw-marker limit', () => {
+    const input = Array.from(
+      { length: 342 },
+      (_, index) =>
+        `[2026-01-01 12:00:${String(index % 60).padStart(2, '0')}] [INFO] [worker-${index}] ok`,
+    ).join('\n');
+    const activePolicy = policy();
+
+    expect(sanitizeMarkdownDocument(input, activePolicy)).toBe(input);
+    expect(activePolicy.onComplexityLimit).not.toHaveBeenCalled();
+  });
+
+  it('reports complexity loss from rich-task transformation', () => {
+    const onComplexityLimit = vi.fn();
+    const input = ['```mermaid', 'graph TD', '```', '['.repeat(513)].join('\n');
+
+    expect(
+      transformRichMarkdownTasks(input, () => true, onComplexityLimit),
+    ).toBe('[markdown omitted: complexity limit exceeded]');
+    expect(onComplexityLimit).toHaveBeenCalledOnce();
+  });
+
+  it('writes sanitized links and definitions with round-trip-safe destinations', () => {
+    const queryStrippingPolicy = policy();
+    queryStrippingPolicy.normalizeUrl = (source: string) => {
+      const url = new URL(source);
+      url.search = '';
+      return url.toString();
+    };
+
+    expect(
+      sanitizeMarkdownDocument(
+        '[docs](<https://example.com/report)v2?q=1>)',
+        queryStrippingPolicy,
+      ),
+    ).toBe('[docs](<https://example.com/report)v2>)');
+    expect(
+      sanitizeMarkdownDocument(
+        ['[docs][ref]', '', '[ref]: <https://example.com/report)v2?q=1>'].join(
+          '\n',
+        ),
+        queryStrippingPolicy,
+      ),
+    ).toBe(
+      ['[docs][ref]', '', '[ref]: <https://example.com/report)v2>'].join('\n'),
+    );
+  });
+
   it('demotes legal tilde fences with backticks in the info string', () => {
     const input = ['~~~`javascript', 'alert(1)', '~~~'].join('\n');
     const transformed = transformRichMarkdownTasks(input, () => false);

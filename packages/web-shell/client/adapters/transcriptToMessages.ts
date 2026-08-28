@@ -1176,6 +1176,7 @@ function mergeToolCall(
   );
   target.content = source.content ?? target.content;
   target.endTime = source.endTime ?? target.endTime;
+  target.wasCancelled = source.wasCancelled ?? target.wasCancelled;
   if (options.replaceRawOutput !== false) {
     target.rawOutput = source.rawOutput ?? target.rawOutput;
   }

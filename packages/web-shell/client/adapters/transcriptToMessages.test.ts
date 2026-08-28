@@ -2356,6 +2356,7 @@ describe('transcriptBlocksToDaemonMessages', () => {
         {
           callId: 'agent-1',
           status: 'completed',
+          wasCancelled: true,
           endTime: 30,
           rawOutput: {
             status: 'cancelled',

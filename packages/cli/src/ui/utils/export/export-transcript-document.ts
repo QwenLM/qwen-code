@@ -442,6 +442,15 @@ function sanitizeBlock(
             return safe ? [safe] : [];
           })
         : undefined;
+      if (block.files && block.files.length > 0) {
+        diagnostics.add(
+          'file_attachment_excluded',
+          'warning',
+          block.files.length,
+          true,
+        );
+        budget.markContentLoss();
+      }
       return {
         ...common,
         kind: block.kind,
@@ -965,10 +974,14 @@ class ExportBudget {
   }
 
   label(value: unknown, maxLength: number, redact = true): string {
-    const safe = safeLabel(value, maxLength);
-    if (safe !== value) this.markTruncated('label_sanitized');
+    const initiallySafe = safeLabel(value, maxLength);
+    const redacted = redact ? redactHomePaths(initiallySafe) : initiallySafe;
+    const safe = safeLabel(redacted, maxLength);
+    if (initiallySafe !== value || safe !== redacted) {
+      this.markTruncated('label_sanitized');
+    }
     return this.applyTextBudgetWithFallback(
-      redact ? redactHomePaths(safe) : safe,
+      safe,
       safeLabel('[content omitted]', maxLength),
     );
   }
@@ -988,6 +1001,10 @@ class ExportBudget {
 
   text(value: string): string {
     value = redactHomePaths(value);
+    const onComplexityLimit = (): void => {
+      this.truncated = true;
+      this.diagnostics.add('markdown_complexity_exceeded', 'warning', 1, true);
+    };
     const replaceImage = (alt: string, source: string | undefined): string => {
       const safeAlt = safeLabel(alt, 200).replace(/([\\[\]])/g, '\\$1');
       const parsed = source ? parseApprovedImageDataUrl(source) : undefined;
@@ -1005,15 +1022,7 @@ class ExportBudget {
         this.truncated = true;
         this.diagnostics.add(code, 'warning', 1, true);
       },
-      onComplexityLimit: () => {
-        this.truncated = true;
-        this.diagnostics.add(
-          'markdown_complexity_exceeded',
-          'warning',
-          1,
-          true,
-        );
-      },
+      onComplexityLimit,
     });
     const richTaskSafeValue = transformRichMarkdownTasks(
       resourceSafeValue,
@@ -1027,6 +1036,7 @@ class ExportBudget {
         this.diagnostics.add('rich_render_budget_exceeded', 'warning');
         return false;
       },
+      onComplexityLimit,
     );
     return this.applyTextBudget(richTaskSafeValue);
   }
@@ -1465,6 +1475,7 @@ const TRUNCATION_DIAGNOSTIC_CODES = new Set([
   'project_name_rejected',
   'permission_resolution_sanitized',
   'tool_result_presentation_missing',
+  'file_attachment_excluded',
   'label_sanitized',
 ]);
 
@@ -1809,9 +1820,7 @@ function safeMetadataLabel(
 ): string | undefined {
   if (value === undefined || value === '') return undefined;
   if (isSafeLabel(value, maxLength)) {
-    return redact
-      ? budget.plainText(value)
-      : budget.label(value, maxLength, false);
+    return budget.label(value, maxLength, redact);
   }
   diagnostics.add(`${field}_rejected`, 'warning', 1, true);
   budget.markContentLoss();
@@ -1930,25 +1939,16 @@ function redactNonHttpHomePathStructures(value: string): string {
 function redactRawHomePathStructures(value: string): string {
   return value
     .replace(
-      /file:\/+(?:[^/\s]+\/)?(?:[A-Za-z]:\/)?(?:home|Users)\/(?:\.\/|\/)*[^/\\\s<>"'\x60,;:|()]+/gi,
+      /file:\/+(?:[^/\s]+\/)?(?:[A-Za-z]:\/)?(?:\.\/|\/)*(?:home|Users)\/(?:\.\/|\/)*[^/\\\s<>"'\x60,;:|()]+/gi,
       'file://[home]',
     )
     .replace(
-      /(^|[^A-Za-z0-9_+\-./\\%])(\/(?:home|Users)\/(?:\.\/|\/)*[^/\\\s<>"'\x60,;:|()]+)/gi,
-      (
-        match: string,
-        prefix: string,
-        _path: string,
-        offset: number,
-        source: string,
-      ) =>
-        source.slice(0, offset + prefix.length).endsWith('[home]')
-          ? match
-          : prefix + '[home]',
+      /(?:\/(?:\.\/|\/)*)+(?:home|Users)\/(?:\.\/|\/)*[^/\\\s<>"'\x60,;:|()]+/gi,
+      '[home]',
     )
     .replace(
-      /(^|[^A-Za-z0-9_+\-./\\%])([A-Za-z]:\\(?:Users|home)\\[^/\\\s<>"'\x60,;:|()]+)/gi,
-      '$1[home]',
+      /(?:[A-Za-z]:)?\\(?:Users|home)\\[^/\\\s<>"'\x60,;:|()]+/gi,
+      '[home]',
     );
 }
 
@@ -1996,23 +1996,15 @@ function containsNonHttpHomePath(
 }
 
 function containsRawHomePath(value: string): boolean {
-  if (
-    /file:\/+(?:[^/\s]+\/)?(?:[A-Za-z]:\/)?(?:home|Users)\/(?:\.\/|\/)*[^/\\\s<>"'\x60,;:|()]+/i.test(
+  return (
+    /file:\/+(?:[^/\s]+\/)?(?:[A-Za-z]:\/)?(?:\.\/|\/)*(?:home|Users)\/(?:\.\/|\/)*[^/\\\s<>"'\x60,;:|()]+/i.test(
       value,
     ) ||
-    /(^|[^A-Za-z0-9_+\-./\\%])[A-Za-z]:\\(?:Users|home)\\[^/\\\s<>"'\x60,;:|()]+/i.test(
+    /(?:\/(?:\.\/|\/)*)+(?:home|Users)\/(?:\.\/|\/)*[^/\\\s<>"'\x60,;:|()]+/i.test(
       value,
-    )
-  ) {
-    return true;
-  }
-  for (const match of value.matchAll(
-    /(^|[^A-Za-z0-9_+\-./\\%])(\/(?:home|Users)\/(?:\.\/|\/)*[^/\\\s<>"'\x60,;:|()]+)/gi,
-  )) {
-    const pathStart = match.index + match[1].length;
-    if (!value.slice(0, pathStart).endsWith('[home]')) return true;
-  }
-  return false;
+    ) ||
+    /(?:[A-Za-z]:)?\\(?:Users|home)\\[^/\\\s<>"'\x60,;:|()]+/i.test(value)
+  );
 }
 
 function safeLabel(value: unknown, maxLength: number): string {

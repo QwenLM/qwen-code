@@ -39,9 +39,13 @@ export interface MarkdownDocumentPolicy {
 
 const MARKDOWN_COMPLEXITY_FALLBACK =
   '[markdown omitted: complexity limit exceeded]';
-const MAX_MARKDOWN_SOURCE_MARKERS = 2_048;
+const MAX_MARKDOWN_SOURCE_CHARACTERS = 400 * 1024;
+const MAX_MARKDOWN_EMPHASIS_DELIMITERS = 2_048;
+const MAX_MARKDOWN_BRACKET_DEPTH = 512;
+const MAX_MARKDOWN_BLOCKQUOTE_DEPTH = 512;
 const MAX_MARKDOWN_AST_NODES = 20_000;
 const MAX_MARKDOWN_AST_DEPTH = 512;
+const MAX_MARKDOWN_LEADING_INDENT = 2 * MAX_MARKDOWN_AST_DEPTH;
 
 const markdownParser = unified()
   .use(remarkParse)
@@ -62,18 +66,78 @@ function mayContainFencedCode(value: string): boolean {
 }
 
 function parseMarkdown(value: string): MarkdownNode | undefined {
-  let markers = 0;
-  for (const character of value) {
-    if (character !== '[' && character !== ']' && character !== '>') continue;
-    markers += 1;
-    if (markers > MAX_MARKDOWN_SOURCE_MARKERS) return undefined;
-  }
+  if (!isMarkdownSourceWithinBudget(value)) return undefined;
   try {
     const root = markdownParser.parse(value) as unknown as MarkdownNode;
     return isMarkdownTreeWithinBudget(root) ? root : undefined;
   } catch {
     return undefined;
   }
+}
+
+function isMarkdownSourceWithinBudget(value: string): boolean {
+  if (value.length > MAX_MARKDOWN_SOURCE_CHARACTERS) return false;
+  let emphasisDelimiters = 0;
+  let bracketDepth = 0;
+  let fence: { character: string; length: number } | undefined;
+  for (const line of value.split('\n')) {
+    const fenceText = line.replace(/^ {0,3}/, '');
+    const fenceRun = /^(`+|~+)/.exec(fenceText)?.[1];
+    if (fence) {
+      if (
+        fenceRun?.[0] === fence.character &&
+        fenceRun.length >= fence.length &&
+        fenceText.slice(fenceRun.length).trim() === ''
+      ) {
+        fence = undefined;
+      }
+      continue;
+    }
+    if (fenceRun && fenceRun.length >= 3) {
+      fence = { character: fenceRun[0], length: fenceRun.length };
+      continue;
+    }
+
+    let leadingIndent = 0;
+    for (const character of line) {
+      if (character === ' ') leadingIndent += 1;
+      else if (character === '\t') leadingIndent += 4;
+      else break;
+      if (leadingIndent > MAX_MARKDOWN_LEADING_INDENT) return false;
+    }
+    const blockquotePrefix = /^ {0,3}((?:>[ \t]?)+)/.exec(line)?.[1];
+    if (
+      blockquotePrefix &&
+      [...blockquotePrefix].filter((character) => character === '>').length >
+        MAX_MARKDOWN_BLOCKQUOTE_DEPTH
+    ) {
+      return false;
+    }
+
+    let escaped = false;
+    for (const character of line) {
+      if (escaped) {
+        escaped = false;
+        continue;
+      }
+      if (character === '\\') {
+        escaped = true;
+        continue;
+      }
+      if (character === '[') {
+        bracketDepth += 1;
+        if (bracketDepth > MAX_MARKDOWN_BRACKET_DEPTH) return false;
+      } else if (character === ']') {
+        bracketDepth = Math.max(0, bracketDepth - 1);
+      } else if (character === '*' || character === '_') {
+        emphasisDelimiters += 1;
+        if (emphasisDelimiters > MAX_MARKDOWN_EMPHASIS_DELIMITERS) {
+          return false;
+        }
+      }
+    }
+  }
+  return true;
 }
 
 function walkMarkdown(
@@ -166,7 +230,11 @@ function safeLinkReplacement(
       : '[link omitted]';
   }
   if (!original.trimStart().startsWith('[')) return safe;
-  return `[${escapeLabel(markdownText(node))}](${safe})`;
+  return `[${escapeLabel(markdownText(node))}](${markdownDestination(safe)})`;
+}
+
+function markdownDestination(value: string): string {
+  return `<${value.replaceAll('<', '%3C').replaceAll('>', '%3E')}>`;
 }
 
 export function sanitizeMarkdownDocument(
@@ -241,7 +309,9 @@ export function sanitizeMarkdownDocument(
       replacements.push({
         ...range,
         value:
-          safe && identifier ? `[${escapeLabel(identifier)}]: ${safe}` : '',
+          safe && identifier
+            ? `[${escapeLabel(identifier)}]: ${markdownDestination(safe)}`
+            : '',
       });
       return false;
     }
@@ -295,11 +365,15 @@ function demoteFence(
 export function transformRichMarkdownTasks(
   value: string,
   keepTask: (language: string) => boolean,
+  onComplexityLimit?: () => void,
 ): string {
   if (!mayContainFencedCode(value)) return value;
   const replacements: Replacement[] = [];
   const root = parseMarkdown(value);
-  if (!root) return MARKDOWN_COMPLEXITY_FALLBACK;
+  if (!root) {
+    onComplexityLimit?.();
+    return MARKDOWN_COMPLEXITY_FALLBACK;
+  }
   walkMarkdown(root, (node) => {
     const language = richLanguage(node);
     if (!language || keepTask(language)) return;

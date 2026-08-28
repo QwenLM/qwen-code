@@ -364,7 +364,12 @@ jobs:
           npm ci --prefer-offline --no-audit --progress=false
 
       - name: 'Install Playwright Chromium'
-        run: 'npx playwright install --with-deps chromium'
+        run: |-
+          node node_modules/playwright/cli.js install --with-deps chromium
+          nested_cli='node_modules/@playwright/test/node_modules/playwright/cli.js'
+          if [ -f "${nested_cli}" ]; then
+            node "${nested_cli}" install chromium
+          fi
 
       - name: 'Run transcript document browser gate'
         run: 'npx vitest run --root ./integration-tests ./chat-transcript-document.test.ts --retry=0'
