@@ -92,18 +92,32 @@ export function checkAdvisorModelAvailability(
     context,
   );
 
-  const availableModels = config
-    .getAllConfiguredModels(
-      selector?.authType ? [selector.authType] : undefined,
+  const configuredModels = config.getAllConfiguredModels(
+    selector?.authType ? [selector.authType] : undefined,
+  );
+  const availableModels = configuredModels.filter((model) =>
+    isAdvisorModelEligible(model, allowFastOnly),
+  );
+  const uncapturedRuntimeModelId =
+    selector !== undefined &&
+    selector.modelId === context.currentModel &&
+    selector.authType === context.currentAuthType &&
+    !configuredModels.some(
+      (model) =>
+        model.id === selector.modelId && model.authType === selector.authType,
     )
-    .filter((model) => isAdvisorModelEligible(model, allowFastOnly));
+      ? selector.modelId
+      : undefined;
+  const availableModelIds = new Set(availableModels.map((model) => model.id));
+  if (uncapturedRuntimeModelId) {
+    availableModelIds.add(uncapturedRuntimeModelId);
+  }
 
   return {
     available:
       selector !== undefined &&
-      availableModels.some((model) => model.id === selector.modelId),
-    availableModelIds: Array.from(
-      new Set(availableModels.map((model) => model.id)),
-    ),
+      (uncapturedRuntimeModelId !== undefined ||
+        availableModels.some((model) => model.id === selector.modelId)),
+    availableModelIds: Array.from(availableModelIds),
   };
 }

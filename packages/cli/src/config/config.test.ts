@@ -1357,6 +1357,28 @@ describe('loadCliConfig', () => {
     expect(config.getAdvisorModel()).toBeUndefined();
   });
 
+  it('allows an Advisor matching the CLI runtime model', async () => {
+    process.argv = [
+      'node',
+      'script.js',
+      '--auth-type',
+      'openai',
+      '--model',
+      'runtime-advisor',
+      '--advisor',
+      'runtime-advisor',
+      '--openai-api-key',
+      'test-key',
+      '--openai-base-url',
+      'https://example.com/v1',
+    ];
+    const argv = await parseArguments();
+
+    const config = await loadCliConfig({}, argv);
+
+    expect(config.getAdvisorModel()).toBe('runtime-advisor');
+  });
+
   it('rejects an unavailable persisted Advisor model', async () => {
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();
