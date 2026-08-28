@@ -17,6 +17,7 @@ import {
   resolveCompactionTuning,
   resolveSlimmingConfig,
   sanitizeMimeForPlaceholder,
+  SLIM_TEXT_TRUNCATION_MARKER,
   slimCompactionInput,
 } from './compactionInputSlimming.js';
 
@@ -353,6 +354,7 @@ describe('compactionInputSlimming', () => {
       expect(result.stats).toEqual({
         imagesStripped: 1,
         documentsStripped: 0,
+        textPartsTruncated: 0,
       });
     });
 
@@ -596,6 +598,122 @@ describe('compactionInputSlimming', () => {
       // (imageTokenEstimate * 4), NOT close to the 1M JSON-stringify size.
       expect(chars).toBeLessThan(10_000);
       expect(chars).toBeGreaterThanOrEqual(6400);
+    });
+  });
+
+  describe('maxTextChars truncation (payload-overflow compaction, #10380)', () => {
+    const bigText = 'T'.repeat(10_000);
+
+    it('keeps text intact without options (token-driven compactions)', () => {
+      const history: Content[] = [
+        { role: 'user', parts: [{ text: bigText }] },
+        {
+          role: 'model',
+          parts: [
+            {
+              functionResponse: {
+                id: 'a',
+                name: 'run_shell_command',
+                response: { output: bigText },
+              },
+            },
+          ],
+        },
+      ];
+      const { slimmedHistory, stats } = slimCompactionInput(history);
+      expect(slimmedHistory).toBe(history);
+      expect(stats.textPartsTruncated).toBe(0);
+    });
+
+    it('truncates oversized text parts and tool-result outputs with maxTextChars', () => {
+      const history: Content[] = [
+        { role: 'user', parts: [{ text: bigText }] },
+        {
+          role: 'model',
+          parts: [
+            {
+              functionResponse: {
+                id: 'a',
+                name: 'run_shell_command',
+                response: { output: bigText },
+              },
+            },
+          ],
+        },
+        {
+          role: 'model',
+          parts: [
+            {
+              functionResponse: {
+                id: 'b',
+                name: 'read_file',
+                response: { error: bigText },
+              },
+            },
+          ],
+        },
+      ];
+      const { slimmedHistory, stats } = slimCompactionInput(
+        history,
+        undefined,
+        {
+          maxTextChars: 500,
+        },
+      );
+
+      expect(stats.textPartsTruncated).toBe(3);
+      expect(slimmedHistory).not.toBe(history);
+      // Input is never mutated.
+      expect(history[0]!.parts![0]!.text).toBe(bigText);
+
+      const textPart = slimmedHistory[0]!.parts![0]!;
+      expect(textPart.text).toBe('T'.repeat(500) + SLIM_TEXT_TRUNCATION_MARKER);
+
+      const outputResponse = (
+        slimmedHistory[1]!.parts![0]!.functionResponse as NonNullable<
+          NonNullable<Content['parts']>[number]['functionResponse']
+        >
+      ).response;
+      expect(outputResponse?.['output']).toBe(
+        'T'.repeat(500) + SLIM_TEXT_TRUNCATION_MARKER,
+      );
+
+      const errorResponse = (
+        slimmedHistory[2]!.parts![0]!.functionResponse as NonNullable<
+          NonNullable<Content['parts']>[number]['functionResponse']
+        >
+      ).response;
+      expect(errorResponse?.['error']).toBe(
+        'T'.repeat(500) + SLIM_TEXT_TRUNCATION_MARKER,
+      );
+    });
+
+    it('leaves payloads under the cap untouched and preserves identity where possible', () => {
+      const small = 'T'.repeat(400);
+      const history: Content[] = [
+        { role: 'user', parts: [{ text: small }] },
+        {
+          role: 'model',
+          parts: [
+            {
+              functionResponse: {
+                id: 'a',
+                name: 'run_shell_command',
+                response: { output: small },
+              },
+            },
+          ],
+        },
+      ];
+      const { slimmedHistory, stats } = slimCompactionInput(
+        history,
+        undefined,
+        {
+          maxTextChars: 500,
+        },
+      );
+      expect(slimmedHistory).toBe(history);
+      expect(stats.textPartsTruncated).toBe(0);
     });
   });
 });

@@ -13,6 +13,7 @@ import {
   computeThresholds,
   MAX_CONSECUTIVE_FAILURES,
   MAX_HOOK_INSTRUCTIONS_CHARS,
+  PAYLOAD_OVERFLOW_SIDE_QUERY_TEXT_CAP,
 } from './chatCompressionService.js';
 import type { Content } from '@google/genai';
 import { CompressionStatus } from '../core/turn.js';
@@ -838,6 +839,110 @@ describe('ChatCompressionService', () => {
     expect(serialized).not.toContain('AAAAAAAA');
     // Placeholder is present.
     expect(serialized).toContain('[image: image/png]');
+  });
+
+  it('truncates oversized tool-result text in the side-query when the compaction is payload-overflow driven (#10380)', async () => {
+    // The side-query travels through the same byte-limited gateway that
+    // rejected the main request with a 413, so its tool-result payloads
+    // must be trimmed instead of shipped verbatim.
+    const hugeOutput = 'O'.repeat(50_000);
+    const history: Content[] = [
+      { role: 'user', parts: [{ text: 'context msg' }] },
+      {
+        role: 'model',
+        parts: [
+          {
+            functionResponse: {
+              id: 'tool-1',
+              name: 'run_shell_command',
+              response: { output: hugeOutput },
+            },
+          },
+        ],
+      },
+      { role: 'user', parts: [{ text: 'final fresh user message' }] },
+      { role: 'model', parts: [{ text: 'final model reply' }] },
+    ];
+    vi.mocked(mockChat.getHistory).mockReturnValue(history);
+    vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(100);
+    vi.mocked(tokenLimit).mockReturnValue(1000);
+
+    const mockGenerateText = vi.fn().mockResolvedValue({
+      text: 'Summary',
+      usage: {
+        promptTokenCount: 200,
+        candidatesTokenCount: 50,
+        totalTokenCount: 250,
+      },
+    });
+    vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+      generateText: mockGenerateText,
+    } as unknown as BaseLlmClient);
+
+    await service.compress(mockChat, {
+      promptId: mockPromptId,
+      force: true,
+      config: mockConfig,
+      consecutiveFailures: 0,
+      originalTokenCount: uiTelemetryService.getLastPromptTokenCount(),
+      requestPayloadTooLarge: true,
+    });
+
+    const call = mockGenerateText.mock.calls[0]?.[0] as { contents: Content[] };
+    expect(call).toBeDefined();
+    const serialized = JSON.stringify(call.contents);
+    expect(serialized).not.toContain(
+      'O'.repeat(PAYLOAD_OVERFLOW_SIDE_QUERY_TEXT_CAP + 1),
+    );
+    expect(serialized).toContain('[...truncated for compaction]');
+  });
+
+  it('keeps tool-result text intact in the side-query for token-driven compactions (#10380)', async () => {
+    const hugeOutput = 'O'.repeat(50_000);
+    const history: Content[] = [
+      { role: 'user', parts: [{ text: 'context msg' }] },
+      {
+        role: 'model',
+        parts: [
+          {
+            functionResponse: {
+              id: 'tool-1',
+              name: 'run_shell_command',
+              response: { output: hugeOutput },
+            },
+          },
+        ],
+      },
+      { role: 'user', parts: [{ text: 'final fresh user message' }] },
+      { role: 'model', parts: [{ text: 'final model reply' }] },
+    ];
+    vi.mocked(mockChat.getHistory).mockReturnValue(history);
+    vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(100);
+    vi.mocked(tokenLimit).mockReturnValue(1000);
+
+    const mockGenerateText = vi.fn().mockResolvedValue({
+      text: 'Summary',
+      usage: {
+        promptTokenCount: 200,
+        candidatesTokenCount: 50,
+        totalTokenCount: 250,
+      },
+    });
+    vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+      generateText: mockGenerateText,
+    } as unknown as BaseLlmClient);
+
+    await service.compress(mockChat, {
+      promptId: mockPromptId,
+      force: true,
+      config: mockConfig,
+      consecutiveFailures: 0,
+      originalTokenCount: uiTelemetryService.getLastPromptTokenCount(),
+    });
+
+    const call = mockGenerateText.mock.calls[0]?.[0] as { contents: Content[] };
+    expect(call).toBeDefined();
+    expect(JSON.stringify(call.contents)).toContain(hugeOutput);
   });
 
   it('passes getCompactionModel to runSideQuery for compression', async () => {

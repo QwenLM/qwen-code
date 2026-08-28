@@ -108,6 +108,10 @@ import type { UiTelemetryService } from '../telemetry/uiTelemetry.js';
 import { type ChatCompressionInfo, CompressionStatus } from './turn.js';
 import { getContextLengthExceededInfo } from '../utils/contextLengthError.js';
 import {
+  getRequestPayloadTooLargeInfo,
+  REQUEST_PAYLOAD_TOO_LARGE_RECOVERY_MESSAGE,
+} from '../utils/request-payload-error.js';
+import {
   getStartupContextLength,
   isSystemReminderContent,
 } from './environmentContext.js';
@@ -507,6 +511,13 @@ interface TryCompressOptions {
    * on the user's stated concern.
    */
   customInstructions?: string;
+  /**
+   * Set when this compression is triggered by an HTTP 413 request-body
+   * overflow instead of a token-count overflow (#10380). The compaction
+   * side-query then slims oversized tool-result text so it can itself fit
+   * under the same gateway body limit.
+   */
+  requestPayloadTooLarge?: boolean;
 }
 
 // Model-output validation errors (protocol tag leaks, malformed tool calls)
@@ -2372,6 +2383,7 @@ export class LlmChat {
       requestGenerationConfig: options?.requestGenerationConfig,
       trigger: options?.trigger,
       customInstructions: options?.customInstructions,
+      requestPayloadTooLarge: options?.requestPayloadTooLarge,
       signal,
     });
     // The service owns the compression outcome; LlmChat owns the input
@@ -3563,9 +3575,23 @@ export class LlmChat {
             }
 
             const contextOverflow = getContextLengthExceededInfo(error);
-            if (contextOverflow.isExceeded) {
+            // A reverse proxy in front of the endpoint can reject the
+            // serialized request with a bare HTTP 413 (no token wording)
+            // even below the token-based compaction threshold; recover it
+            // through this same one-shot reactive path (#10380).
+            const requestPayloadOverflow = getRequestPayloadTooLargeInfo(error);
+            if (
+              contextOverflow.isExceeded ||
+              requestPayloadOverflow.isTooLarge
+            ) {
+              // Whether this pass (or a previous one) spent the one-shot
+              // payload-overflow recovery; when it did and the error is
+              // still a payload overflow, the wrap below turns it into an
+              // actionable error (#10380).
+              let attemptedPayloadRecovery = false;
               if (!exactRoute && !reactiveCompressionAttempted) {
                 reactiveCompressionAttempted = true;
+                attemptedPayloadRecovery = requestPayloadOverflow.isTooLarge;
                 // Only the provider-reported actual count is authoritative.
                 // Limit/config/default fallbacks are projections and must
                 // keep the estimated marker in compression banners.
@@ -3577,7 +3603,9 @@ export class LlmChat {
                   cgConfig?.contextWindowSize ??
                   DEFAULT_TOKEN_LIMIT;
                 debugLogger.warn(
-                  'Context length exceeded; attempting reactive compression.',
+                  requestPayloadOverflow.isTooLarge
+                    ? 'Request body rejected with HTTP 413; attempting reactive compression.'
+                    : 'Context length exceeded; attempting reactive compression.',
                 );
                 try {
                   const reactiveInfo = await self.tryCompress(
@@ -3593,6 +3621,7 @@ export class LlmChat {
                       requestGenerationConfig: params.config,
                       requestRouteKey,
                       trigger: 'auto',
+                      requestPayloadTooLarge: requestPayloadOverflow.isTooLarge,
                     },
                   );
 
@@ -3689,10 +3718,30 @@ export class LlmChat {
                   );
                 }
               } else {
+                attemptedPayloadRecovery =
+                  requestPayloadOverflow.isTooLarge &&
+                  reactiveCompressionAttempted &&
+                  !exactRoute;
                 debugLogger.warn(
                   'Reactive compression already attempted; ' +
                     'propagating the context overflow error to caller.',
                 );
+              }
+              if (attemptedPayloadRecovery) {
+                // The one-shot recovery is spent: compaction either was
+                // already attempted or could not shrink the request below
+                // the gateway's byte limit. Re-sending the same history
+                // would keep failing every prompt, so surface an
+                // actionable next step instead of the bare 413 (#10380).
+                const actionableError = new Error(
+                  REQUEST_PAYLOAD_TOO_LARGE_RECOVERY_MESSAGE,
+                  { cause: error },
+                );
+                const payloadStatus = getErrorStatus(error);
+                if (payloadStatus !== undefined) {
+                  Object.assign(actionableError, { status: payloadStatus });
+                }
+                lastError = actionableError;
               }
               break;
             }

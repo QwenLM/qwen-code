@@ -18415,5 +18415,180 @@ describe('LlmChat', async () => {
         vi.useRealTimers();
       }
     });
+    describe('issue #10380: HTTP 413 request-body overflow recovery', () => {
+      // A reverse proxy in front of an OpenAI-compatible endpoint can reject
+      // the serialized request body (HTTP 413) even when the token count is
+      // below the auto-compaction threshold. The send must recover through the
+      // same one-shot reactive compression path as token-based overflow, and
+      // give an actionable error when recovery cannot fit under the limit.
+      function sdkStyle413(): Error {
+        return Object.assign(
+          new Error(
+            '413 POST https://gateway.internal/v1/chat/completions: Request Entity Too Large\n' +
+              '<html>\n<head><title>413 Request Entity Too Large</title></head>\n' +
+              '<body>\n<center><h1>413 Request Entity Too Large</h1></center>\n' +
+              '<hr><center>nginx</center>\n</body>\n</html>',
+          ),
+          { status: 413 },
+        );
+      }
+
+      function noopThen(result: {
+        newHistory: Content[] | null;
+        info: ChatCompressionInfo;
+      }) {
+        // First call is the pre-send cheap gate; the second is the reactive
+        // overflow attempt (mirrors the plan-exit reactive tests above).
+        return vi
+          .spyOn(ChatCompressionService.prototype, 'compress')
+          .mockResolvedValueOnce({
+            newHistory: null,
+            info: {
+              originalTokenCount: 0,
+              newTokenCount: 0,
+              compressionStatus: CompressionStatus.NOOP,
+            },
+          })
+          .mockResolvedValueOnce(result);
+      }
+
+      async function consumeStream(
+        stream: AsyncGenerator<StreamEvent>,
+      ): Promise<StreamEvent[]> {
+        const events: StreamEvent[] = [];
+        for await (const event of stream) {
+          events.push(event);
+        }
+        return events;
+      }
+
+      it('classifies a model-request 413 as recoverable and compacts once before retrying', async () => {
+        const compressSpy = noopThen({
+          newHistory: [{ role: 'user', parts: [{ text: 'summary' }] }],
+          info: {
+            originalTokenCount: 90_000,
+            newTokenCount: 4_000,
+            compressionStatus: CompressionStatus.COMPRESSED,
+          },
+        });
+        vi.mocked(mockContentGenerator.generateContentStream)
+          .mockRejectedValueOnce(sdkStyle413())
+          .mockImplementationOnce(async () =>
+            streamResponse(
+              stopResponse([{ text: 'recovered after compaction' }]),
+            ),
+          );
+
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          { message: 'next prompt' },
+          'prompt-id-413-recovery',
+        );
+        const events = await consumeStream(stream);
+
+        expect(compressSpy).toHaveBeenCalledTimes(2);
+        expect(compressSpy.mock.calls[1]?.[1]).toEqual(
+          expect.objectContaining({ requestPayloadTooLarge: true }),
+        );
+        expect(
+          events.some((event) => event.type === StreamEventType.COMPRESSED),
+        ).toBe(true);
+        expect(
+          events.some((event) => event.type === StreamEventType.RETRY),
+        ).toBe(true);
+        expect(
+          mockContentGenerator.generateContentStream,
+        ).toHaveBeenCalledTimes(2);
+        const retryRequest = vi.mocked(
+          mockContentGenerator.generateContentStream,
+        ).mock.calls[1]![0] as { contents: Content[] };
+        expect(JSON.stringify(retryRequest.contents)).toContain('summary');
+      });
+
+      it('surfaces an actionable error when the retried request still exceeds the body limit', async () => {
+        const compressSpy = noopThen({
+          newHistory: [{ role: 'user', parts: [{ text: 'summary' }] }],
+          info: {
+            originalTokenCount: 90_000,
+            newTokenCount: 4_000,
+            compressionStatus: CompressionStatus.COMPRESSED,
+          },
+        });
+        vi.mocked(mockContentGenerator.generateContentStream)
+          .mockRejectedValueOnce(sdkStyle413())
+          .mockRejectedValueOnce(sdkStyle413());
+
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          { message: 'next prompt' },
+          'prompt-id-413-still-too-large',
+        );
+        await expect(consumeStream(stream)).rejects.toThrow(
+          /start a new session/i,
+        );
+        // One pre-send cheap gate + one reactive attempt; no compression loop.
+        expect(compressSpy).toHaveBeenCalledTimes(2);
+      });
+
+      it('surfaces an actionable error when compaction cannot recover the 413', async () => {
+        const compressSpy = noopThen({
+          newHistory: null,
+          info: {
+            originalTokenCount: 90_000,
+            newTokenCount: 90_000,
+            compressionStatus:
+              CompressionStatus.COMPRESSION_FAILED_EMPTY_SUMMARY,
+          },
+        });
+        vi.mocked(
+          mockContentGenerator.generateContentStream,
+        ).mockRejectedValueOnce(sdkStyle413());
+
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          { message: 'next prompt' },
+          'prompt-id-413-compression-failed',
+        );
+        await expect(consumeStream(stream)).rejects.toThrow(
+          /start a new session/i,
+        );
+        expect(compressSpy).toHaveBeenCalledTimes(2);
+        expect(
+          mockContentGenerator.generateContentStream,
+        ).toHaveBeenCalledTimes(1);
+      });
+
+      it('keeps token-wording overflow on the original reactive path', async () => {
+        // Regression guard: the 413 classification must not change how
+        // provider-reported context-length wording is recovered.
+        const compressSpy = noopThen({
+          newHistory: [{ role: 'user', parts: [{ text: 'summary' }] }],
+          info: {
+            originalTokenCount: 135_000,
+            newTokenCount: 40_000,
+            compressionStatus: CompressionStatus.COMPRESSED,
+          },
+        });
+        vi.mocked(mockContentGenerator.generateContentStream)
+          .mockRejectedValueOnce(
+            new Error('prompt is too long: 135000 tokens > 128000 maximum'),
+          )
+          .mockImplementationOnce(async () =>
+            streamResponse(stopResponse([{ text: 'recovered' }])),
+          );
+
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          { message: 'overflow prompt' },
+          'prompt-id-wording-overflow',
+        );
+        await consumeStream(stream);
+
+        expect(compressSpy).toHaveBeenCalledTimes(2);
+        expect(compressSpy.mock.calls[1]?.[1]).toEqual(
+          expect.not.objectContaining({ requestPayloadTooLarge: true }),
+        );
+      });
+    });
   });
 });

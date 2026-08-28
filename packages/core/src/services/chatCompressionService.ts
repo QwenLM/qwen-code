@@ -247,6 +247,15 @@ export function computeThresholds(
 
 export type CompactTrigger = 'manual' | 'auto';
 
+/**
+ * Per-text-payload character cap applied to the compaction side-query when
+ * the compaction was triggered by an HTTP 413 request-body overflow
+ * (#10380). The side-query travels through the same byte-limited gateway
+ * as the rejected request, so large tool-result texts are truncated to a
+ * summary-friendly size. Token-driven compactions keep text intact.
+ */
+export const PAYLOAD_OVERFLOW_SIDE_QUERY_TEXT_CAP = 4000;
+
 export interface CompressOptions {
   promptId: string;
   force: boolean;
@@ -298,6 +307,14 @@ export interface CompressOptions {
    * first, hook text last (matches claude-code mergeHookInstructions).
    */
   customInstructions?: string;
+  /**
+   * Set when the compression is triggered by an HTTP 413 request-body
+   * overflow rather than a token-count overflow (#10380). The side-query
+   * input then truncates oversized text/tool-result payloads so the
+   * compression request can itself fit under the gateway byte limit that
+   * rejected the main request.
+   */
+  requestPayloadTooLarge?: boolean;
 }
 
 /**
@@ -599,7 +616,13 @@ export class ChatCompressionService {
     // afterwards.
     let coldInput: ReturnType<typeof slimCompactionInput> | undefined;
     const getColdInput = () => {
-      coldInput ??= slimCompactionInput(sideQueryHistory);
+      coldInput ??= slimCompactionInput(
+        sideQueryHistory,
+        undefined,
+        opts.requestPayloadTooLarge
+          ? { maxTextChars: PAYLOAD_OVERFLOW_SIDE_QUERY_TEXT_CAP }
+          : undefined,
+      );
       return coldInput;
     };
 
