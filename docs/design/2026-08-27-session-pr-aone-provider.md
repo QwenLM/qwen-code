@@ -52,35 +52,34 @@ Reusable Aone primitives from the review subsystem (both dependency-light):
 
 - `packages/cli/src/commands/review/lib/remote-match.ts` (zero imports):
   `parseRemoteUrl` (https/ssh/scp → `{host, owner, repo, groupPath}`) and
-  `isAoneHostFamily` (canonical web/git pair plus `*.alibaba-inc.com`).
+  `isAoneCanonicalHost` (the canonical web/git pair only).
 - `packages/cli/src/commands/review/lib/platform/aone-client.ts`:
   `A1_MIN_VERSION` (0.1.90) and `parseA1Version`. (Its exec transport is NOT
   reused — see below.)
 
 NOT reused: `registry.ts`'s `detectPlatformKind` — its no-signal branch probes
-`process.cwd()`, which is wrong for a multi-workspace daemon, and its
-explicit-hint branches apply the CANONICAL-only predicate (serve needs the
-family predicate on a workspace origin; see Detection below).
+`process.cwd()`, which is wrong for a multi-workspace daemon; serve reads the
+origin per workspace and applies the same canonical-only predicate review
+uses for explicit coordinates.
 
 ## Design
 
-### Detection — per workspace, origin-based
+### Detection — per workspace, origin-based, canonical-only
 
 Each backfill run / refresh sweep resolves the workspace's platform from its
 OWN origin: `git remote get-url origin` at the workspace git root (async
 `execFile`, env sanitized through core's `gitEnv` like every sibling git call
 in these paths), parsed by review's `parseRemoteUrl`, gated by
-`isAoneHostFamily`. Undefined host / unreadable origin / non-Aone host →
-GitHub path (today's behavior).
+`isAoneCanonicalHost`. Undefined host / unreadable origin / non-canonical
+host → GitHub path (today's behavior).
 
-This is the same FAMILY semantics as review's no-signal cwd probe. The
-review write path's stricter canonical-only rule exists because a
-user-supplied `--host`/number could be resolved on the WRONG platform — a
-global Aone id hijacking a GitHub review. That hazard cannot occur here: a
-workspace's a1 calls are scoped to that same origin's `--repo` coordinate,
-and a number discovered on one platform is never resolved through the other.
-A family-but-not-canonical host (a `ghe.alibaba-inc.com`-style GHE instance)
-routes to a1, whose calls fail cleanly → degraded, never wrong bindings.
+The gate is CANONICAL-only (not the `*.alibaba-inc.com` family): that suffix
+also names GitHub Enterprise instances, and a family match would displace a
+GHE workspace onto a1 — before this feature `gh` served it (resolving the
+enterprise host from the origin), while a1 would either fail every read
+(state frozen forever) or, when a same-path repo exists on real Aone, serve
+an unrelated repo's same-numbered MR. The workspace origin is an explicit
+coordinate in review's sense, so its rule applies.
 
 ### New module: `packages/cli/src/serve/server/aone-mrs.ts`
 
@@ -144,10 +143,17 @@ Per workspace, after candidate collection (unchanged):
     `viewAoneMergeRequest` (the only sanctioned URL source), capped at
     `AONE_MAX_MR_VIEW_CALLS_PER_RUN` = 25 unique numbers (the same constant
     bounds the refresh sweep); the excess counts as `unresolved` and the
-    next run retries it. A successful view also records the attested URL in
-    the same-PR identity map, and that identity check fails CLOSED on Aone
-    (an unattested number is treated as a foreign binding and kept, never
-    trimmed) — the gh path keeps its fail-open default.
+    next run retries it.
+  - Same-PR identity on Aone fails CLOSED: an existing entry passes the
+    guard only when it is provably one of this repo's own MRs — either
+    mr-view-attested this run, or matching the exact detailUrl SHAPE for
+    this repoPath (`isAoneDetailUrlForRepo`, under either canonical host
+    spelling). The shape check is exact because repoPath is the origin's
+    full group path (no collapse), and it is what keeps a full sidecar's
+    re-planned entries trimmable WITHOUT spending the view budget
+    re-attesting them every run — re-attestation leaked the whole budget in
+    steady state. Anything unprovable stays foreign and kept; the gh path
+    keeps its fail-open default.
   - Legacy repair: bindings the pre-Aone backfill persisted in the fabricated
     `<origin web URL>/pull/<N>` shape are detected and re-resolved through
     the same capped view path, then rewritten in place with the real
@@ -166,13 +172,28 @@ Per workspace, after candidate collection (unchanged):
 Per workspace, after pending-number collection (unchanged):
 
 - GitHub workspace → exactly today's code path.
-- Aone workspace: dedupe pending numbers ACROSS sessions (a global id bound by
-  several sessions costs one call), then `viewAoneMergeRequest` per unique
-  number, capped at `AONE_MAX_MR_VIEW_CALLS_PER_RUN` = 25. Successful views
-  feed the existing `updateSessionPrStates` write path keyed by
-  `{state, url: detailUrl}` — its canonical-URL identity check keeps working
-  because `detailUrl` is the canonical form of a bound Aone URL. Per-number
-  errors (403/404/timeout) skip that entry; the sweep continues.
+- Aone workspace: drop numbers whose every stored URL misses this repo's
+  detailUrl shape — foreign manual bindings, legacy fabricated entries
+  awaiting backfill repair, another repo's same-numbered MR can never match
+  an attested `detailUrl`, so viewing them would only burn capped slots,
+  every sweep, forever. Dedupe the remainder ACROSS sessions (a global id
+  bound by several sessions costs one call), then `viewAoneMergeRequest`
+  per unique number.
+- The view window is capped at `AONE_MAX_MR_VIEW_CALLS_PER_RUN` = 25 and
+  ROTATES: the timer advances a per-workspace start offset by the cap each
+  sweep, so a refreshable set larger than the cap is fully refreshed in
+  ceil(size/cap) sweeps instead of starving a fixed prefix.
+- The loop also has an AGGREGATE time budget (`AONE_SWEEP_VIEW_BUDGET_MS`
+  = 60s): per-call timeouts bound one view, but 25 sequential hung views
+  would outrun the sweep interval and — via the timer's re-entrancy guard —
+  pause every workspace's refresh. Past the budget the loop stops STARTING
+  views; the remainder degrades like a per-number failure and the rotation
+  retries it.
+- Successful views feed the existing `updateSessionPrStates` write path
+  keyed by `{state, url: detailUrl}` — its canonical-URL identity check
+  keeps working because `detailUrl` is the canonical form of a bound Aone
+  URL. Per-number errors (403/404/timeout) skip that entry; the sweep
+  continues.
 - Only non-`merged` entries are swept today; that stays. Closed MRs are not
   listable via a1, so a binding whose MR was closed keeps its last state —
   but a reopened MR appears under `--state opened` and self-heals.
@@ -221,7 +242,8 @@ and serve → commands imports have precedent (the channel modules).
   Aone later distinguishes it in the badge, revisit.
 - **Closed-state string** was never observed in probes; the mapping is
   defensive (`closed` → `closed`).
-- **Cap starvation**: with >25 unique non-merged bindings, refresh sweeps the
-  first 25 deterministically each tick. Overflow is implausible in practice
-  (sidecars cap at 10 per session and merged entries drop out); documented
-  rather than engineered around.
+- **Cap behavior**: with >25 unique refreshable non-merged bindings, the
+  sweep's rotating window covers them in consecutive sweeps (ceil(size/cap));
+  within one sweep the window tail degrades like a per-number failure.
+  Numbers past the cap also drop out naturally as they merge, so the
+  rotation is belt-and-braces rather than the only drain.

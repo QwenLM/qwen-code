@@ -21,6 +21,7 @@ import {
 import {
   AONE_MAX_MR_VIEW_CALLS_PER_RUN,
   defaultAoneMrBackend,
+  isAoneDetailUrlForRepo,
   resolveAoneWorkspaceRepo,
   type AoneMrBackend,
 } from './aone-mrs.js';
@@ -37,6 +38,17 @@ import { invalidateWorkspaceSessionListCache } from './session-list.js';
 
 export const DEFAULT_SESSION_PR_REFRESH_INTERVAL_MS = 5 * 60 * 1000;
 const FIRST_RUN_DELAY_MS = 60_000;
+
+/**
+ * Aggregate deadline for one workspace's capped `mr view` loop. The
+ * per-call timeout bounds a single view; this bounds the loop — worst case
+ * 25 sequential views x 20s would outrun the sweep interval, and the
+ * timer's re-entrancy guard would then pause EVERY workspace's refresh for
+ * the whole stall. Once past the deadline the loop stops starting views;
+ * the remainder degrades exactly like a per-number failure and the
+ * rotating window retries it on later sweeps.
+ */
+export const AONE_SWEEP_VIEW_BUDGET_MS = 60_000;
 
 /**
  * The slice of {@link SessionArchiveCoordinator} the sweep needs: the
@@ -60,6 +72,15 @@ export interface SessionPrRefreshOptions {
    * daemon uses {@link defaultAoneMrBackend}.
    */
   aoneBackend?: AoneMrBackend;
+  /**
+   * Start offset of the capped Aone view window into the pending set. The
+   * timer advances it per workspace per sweep, so a pending set larger
+   * than the cap is refreshed in consecutive windows instead of starving a
+   * fixed prefix. Defaults to 0.
+   */
+  sweepStart?: number;
+  /** Injectable clock for the aggregate view budget (tests substitute). */
+  now?: () => number;
 }
 
 /**
@@ -123,6 +144,8 @@ export async function refreshWorkspaceSessionPrStates(
     sessionId: string;
     prPath: string;
     numbers: number[];
+    /** Every stored URL per pending number — the Aone refreshability filter. */
+    urls: Map<number, string[]>;
   }> = [];
   let scanned = 0;
   for (const archiveState of ['active', 'archived'] as const) {
@@ -155,13 +178,24 @@ export async function refreshWorkspaceSessionPrStates(
       }
       if (!prs) continue;
       scanned += 1;
-      const numbers = prs
+      const pending = prs.filter(
         // Only merged is terminal: closed PRs can be reopened, so they
         // keep participating in the sweep.
-        .filter((p) => p.state !== 'merged')
-        .map((p) => p.number);
-      if (numbers.length > 0) {
-        pendingNumbers.push({ sessionId, prPath, numbers });
+        (p) => p.state !== 'merged',
+      );
+      if (pending.length > 0) {
+        const urls = new Map<number, string[]>();
+        for (const entry of pending) {
+          const known = urls.get(entry.number);
+          if (known) known.push(entry.url);
+          else urls.set(entry.number, [entry.url]);
+        }
+        pendingNumbers.push({
+          sessionId,
+          prPath,
+          numbers: pending.map((p) => p.number),
+          urls,
+        });
       }
     }
   }
@@ -180,22 +214,52 @@ export async function refreshWorkspaceSessionPrStates(
     runtime.env.effectiveEnv,
   );
   if (aoneRepo) {
+    // A number whose every stored URL misses the detailUrl shape of THIS
+    // repo — a foreign manual binding, a legacy fabricated entry awaiting
+    // backfill repair, another repo's same-numbered MR — can never match
+    // an attested detailUrl in updateSessionPrStates; viewing it would
+    // only burn a capped slot, every sweep, forever.
+    const refreshable = new Set<number>();
+    for (const target of pendingNumbers) {
+      for (const [number, urls] of target.urls) {
+        if (refreshable.has(number)) continue;
+        if (
+          urls.some((url) =>
+            isAoneDetailUrlForRepo(aoneRepo.repoPath, number, url),
+          )
+        ) {
+          refreshable.add(number);
+        }
+      }
+    }
     // Aone's global ids are platform-unique, so a number bound by several
-    // sessions costs one mr view. The cap bounds one sweep's fan-out; a
-    // deterministic tail beyond it waits until the pending set shrinks
-    // (documented as implausible — sidecars cap at 10 entries and merged
-    // bindings drop out). A per-number failure (403/404/timeout) leaves
-    // that entry at its last state; the next sweep retries IT.
+    // sessions costs one mr view. The cap bounds one sweep's fan-out, and
+    // the window ROTATES: the timer advances sweepStart per workspace per
+    // sweep, so a refreshable set larger than the cap is fully refreshed
+    // in ceil(size/cap) sweeps instead of starving a fixed prefix. A
+    // per-number failure (403/404/timeout) leaves that entry at its last
+    // state; the rotation retries it on a later sweep.
     const backend = options.aoneBackend ?? defaultAoneMrBackend;
-    const unique = [
+    const all = [
       ...new Set(pendingNumbers.flatMap((target) => target.numbers)),
-    ].slice(0, AONE_MAX_MR_VIEW_CALLS_PER_RUN);
+    ].filter((number) => refreshable.has(number));
+    const start = all.length === 0 ? 0 : (options.sweepStart ?? 0) % all.length;
+    const unique = [...all.slice(start), ...all.slice(0, start)].slice(
+      0,
+      AONE_MAX_MR_VIEW_CALLS_PER_RUN,
+    );
+    const now = options.now ?? Date.now;
+    const deadline = now() + AONE_SWEEP_VIEW_BUDGET_MS;
     for (const number of unique) {
+      // Aggregate budget: stop STARTING views once spent (the view in
+      // flight may still finish out its own per-call timeout); the
+      // remainder degrades like a per-number failure.
+      if (now() > deadline) break;
       try {
         const view = await backend.view(aoneRepo.repoPath, number);
         numberToFetch.set(view.number, { state: view.state, url: view.url });
       } catch {
-        // Skip this entry; the next sweep retries it.
+        // Skip this entry; the rotation retries it on a later sweep.
       }
     }
     if (numberToFetch.size === 0) return { scanned, updated: 0 };
@@ -291,6 +355,12 @@ export function startSessionPrRefreshTimer(deps: {
 }): { dispose(): void } | undefined {
   const intervalMs = resolveSessionPrRefreshIntervalMs(deps.env ?? process.env);
   if (intervalMs === undefined) return undefined;
+  // Rotating Aone view-window offset per workspace: each sweep advances the
+  // start by the cap so a pending set larger than the cap is fully
+  // refreshed over consecutive sweeps rather than a fixed prefix. Kept
+  // monotonic (not mod'd here) — the sweep reduces it modulo the live set
+  // size itself, so a shrinking set never skews the rotation.
+  const aoneSweepOffsets = new Map<string, number>();
   let running = false;
   const tick = async (): Promise<void> => {
     if (running) return;
@@ -299,15 +369,22 @@ export function startSessionPrRefreshTimer(deps: {
       const archiveCoordinator = deps.getArchiveCoordinator?.();
       for (const runtime of deps.workspaceRegistry.listAll()) {
         if (!runtime.trusted) continue;
+        const sweepStart = aoneSweepOffsets.get(runtime.workspaceCwd) ?? 0;
         try {
           await refreshWorkspaceSessionPrStates(runtime, undefined, {
             archiveCoordinator,
+            sweepStart,
           });
+          aoneSweepOffsets.set(
+            runtime.workspaceCwd,
+            sweepStart + AONE_MAX_MR_VIEW_CALLS_PER_RUN,
+          );
         } catch (error) {
           // A draining daemon rejects every workspace the same way.
           if (error instanceof DaemonDrainingError) return;
           // A single workspace's failure (including a generation retired
-          // mid-sweep) must not starve the rest.
+          // mid-sweep) must not starve the rest. Leave its offset unmoved
+          // so the next tick retries the same window.
         }
       }
     } finally {

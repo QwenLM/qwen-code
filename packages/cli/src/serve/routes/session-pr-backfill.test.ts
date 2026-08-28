@@ -690,42 +690,97 @@ describe('backfillWorkspaceSessionPrs', () => {
         unresolved: 2,
         platform: 'aone',
       });
+
+      // Steady state: the second run re-plans all 25 already-bound numbers
+      // but must NOT spend the view budget re-attesting them (their stored
+      // URLs match this repo's detailUrl shape) — the two still-unbound
+      // sessions get the budget and converge. A re-attestation regressor
+      // exhausts the 25 calls on the bound numbers and leaves run 2 with
+      // bound: 0, unresolved: 2, forever.
+      const second = await backfillWorkspaceSessionPrs(runtime, undefined, {
+        aoneBackend: backend,
+      });
+      expect(view).toHaveBeenCalledTimes(AONE_MAX_MR_VIEW_CALLS_PER_RUN + 2);
+      expect(second).toMatchObject({
+        bound: 2,
+        unresolved: 0,
+        platform: 'aone',
+      });
     });
 
-    it('maps a reused head branch to the highest MR number', async () => {
-      aoneOrigin();
-      await seedTranscriptBranchNames(SESSION_A, ['yongxun']);
-      const backend = fakeAoneBackend({
-        list: vi.fn(async (_repoPath, state) =>
+    it.each([
+      [250, 100],
+      [100, 250],
+    ])(
+      'maps a reused head branch to the highest MR number (%j arrival)',
+      async (first, second) => {
+        aoneOrigin();
+        await seedTranscriptBranchNames(SESSION_A, ['yongxun']);
+        const backend = fakeAoneBackend({
           // a1 lists newest-updated first and Aone ids are monotonic, so
-          // a reused head branch typically arrives DESCENDING — the
-          // highest-number-wins rule must not depend on arrival order.
-          state === 'merged'
-            ? [
-                {
-                  number: 250,
-                  headRefName: 'yongxun',
-                  state: 'merged' as const,
-                },
-                {
-                  number: 100,
-                  headRefName: 'yongxun',
-                  state: 'merged' as const,
-                },
-              ]
-            : [],
-        ),
+          // descending is the typical arrival — pin both directions so the
+          // highest-number-wins rule cannot hide an arrival-order quirk.
+          list: vi.fn(async (_repoPath, state) =>
+            state === 'merged'
+              ? [
+                  {
+                    number: first,
+                    headRefName: 'yongxun',
+                    state: 'merged' as const,
+                  },
+                  {
+                    number: second,
+                    headRefName: 'yongxun',
+                    state: 'merged' as const,
+                  },
+                ]
+              : [],
+          ),
+        });
+
+        const result = await backfillWorkspaceSessionPrs(runtime, undefined, {
+          aoneBackend: backend,
+        });
+
+        expect(result).toMatchObject({ bound: 1, platform: 'aone' });
+        const prs = await readSessionPrs(
+          sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
+        );
+        expect(prs?.map((p) => p.number)).toEqual([250]);
+      },
+    );
+
+    it('keeps a GHE-shaped origin on the GitHub path', async () => {
+      // `*.alibaba-inc.com` also names GitHub Enterprise instances; such a
+      // workspace must stay on gh (which resolves the enterprise host from
+      // the origin) instead of being displaced onto a1.
+      execSync(
+        'git remote add origin git@ghe.alibaba-inc.com:team/project.git',
+        { cwd: workspaceCwd, stdio: 'pipe' },
+      );
+      await seedSession(SESSION_A);
+      await seedWorktreeSidecar(SESSION_A, 'pr-5', 'worktree-pr-5');
+      fetchGitHubPullRequestsMock.mockResolvedValue({
+        kind: 'ok',
+        pullRequests: [pr(5, 'worktree-pr-5', 'merged')],
       });
+      const backend = fakeAoneBackend();
 
       const result = await backfillWorkspaceSessionPrs(runtime, undefined, {
         aoneBackend: backend,
       });
 
-      expect(result).toMatchObject({ bound: 1, platform: 'aone' });
+      expect(result).toMatchObject({ platform: 'github', bound: 1 });
+      expect(backend.list).not.toHaveBeenCalled();
+      expect(backend.view).not.toHaveBeenCalled();
       const prs = await readSessionPrs(
         sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
       );
-      expect(prs?.map((p) => p.number)).toEqual([250]);
+      expect(prs?.[0]).toMatchObject({
+        number: 5,
+        url: 'https://github.com/o/r/pull/5',
+        state: 'merged',
+      });
     });
 
     it('binds branches that only match an opened MR', async () => {
@@ -872,10 +927,13 @@ describe('backfillWorkspaceSessionPrs', () => {
         aoneBackend: backend,
       });
 
-      // The re-planned entry must be re-attested through mr view: without
-      // it, every existing entry fails the closed identity guard, all ten
-      // count foreign, and the new MR is overLimit forever.
-      expect(view).toHaveBeenCalledWith('jspt/agentic_coding', 1);
+      // The existing entries match the exact detailUrl shape of this
+      // repoPath, so the closed identity guard classifies them own — and
+      // trimmable — WITHOUT a re-attestation view; the only view is the
+      // new binding's. Without the shape check every entry counted
+      // foreign, slots fell to zero, and the new MR was overLimit forever.
+      expect(view).toHaveBeenCalledTimes(1);
+      expect(view).toHaveBeenCalledWith('jspt/agentic_coding', 11);
       expect(result).toMatchObject({
         bound: 1,
         overLimit: 1,

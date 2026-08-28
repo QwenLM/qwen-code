@@ -26,6 +26,7 @@ import {
   AONE_BACKFILL_PAGES_PER_STATE,
   AONE_MAX_MR_VIEW_CALLS_PER_RUN,
   defaultAoneMrBackend,
+  isAoneDetailUrlForRepo,
   resolveAoneWorkspaceRepo,
   type AoneMrBackend,
 } from '../server/aone-mrs.js';
@@ -145,7 +146,12 @@ export interface SessionPrBackfillWorkspaceResult {
   alreadyBound: number;
   /** Resolved numbers skipped because they exceed the sidecar cap. */
   overLimit: number;
-  /** Convention numbers whose URL could not be resolved. */
+  /**
+   * Planned numbers whose URL could not be resolved this run. On GitHub
+   * only convention numbers (branch-mapped ones always carry a list URL);
+   * on Aone any planned number, since every URL comes from a capped
+   * `mr view` and can fail or lose the view-budget race.
+   */
   unresolved: number;
   /**
    * Whether the workspace's `gh pr list` succeeded. False means transcript-
@@ -530,16 +536,7 @@ export async function backfillWorkspaceSessionPrs(
     const urls = new Map<number, string>();
     const states = new Map<number, SessionPr['state']>();
     for (const number of numbers) {
-      if (existingNumbers.has(number)) {
-        // Aone fails CLOSED on identity: only an mr-view attestation lets
-        // an existing entry pass the same-PR guard, so a number this run
-        // re-planned is re-attested to stay trimmable — without this, a
-        // full sidecar's re-planned entries all count foreign and cap
-        // eviction stalls permanently. GitHub needs no attestation (its
-        // guard fails open for unlisted numbers).
-        if (aoneRepo) await resolveNumberUrl(number, false);
-        continue;
-      }
+      if (existingNumbers.has(number)) continue;
       let url = numberToUrl.get(number);
       if (url === undefined) {
         url = await resolveNumberUrl(
@@ -613,15 +610,20 @@ export async function backfillWorkspaceSessionPrs(
           // same-numbered PR is foreign to this plan and keeps its slot;
           // trimming it would let a later run flip it to this repo's PR.
           const resolved = numberToUrl.get(entry.number);
-          // Aone fails CLOSED: numberToUrl only holds mr-view-attested URLs
-          // there, so a missing attestation means this run never proved the
-          // entry is one of its own PRs — keep it as foreign rather than
-          // letting the cap trim it. GitHub keeps the fail-open default: an
-          // unlisted convention binding stays re-plannable.
+          // Aone fails CLOSED unless the entry is provably one of this
+          // repo's own MRs — either mr-view-attested this run, or matching
+          // the exact detailUrl shape for this repoPath (the shape a
+          // previous successful bind or repair persisted). The shape check
+          // is what keeps a full sidecar's re-planned entries trimmable
+          // WITHOUT spending the view budget re-attesting them every run;
+          // anything else stays foreign and kept. GitHub keeps the
+          // fail-open default: an unlisted convention binding stays
+          // re-plannable.
           const samePr = aoneRepo
-            ? resolved !== undefined &&
-              canonicalSessionPrUrl(entry.url) ===
-                canonicalSessionPrUrl(resolved)
+            ? (resolved !== undefined &&
+                canonicalSessionPrUrl(entry.url) ===
+                  canonicalSessionPrUrl(resolved)) ||
+              isAoneDetailUrlForRepo(aoneRepo.repoPath, entry.number, entry.url)
             : resolved === undefined ||
               canonicalSessionPrUrl(entry.url) ===
                 canonicalSessionPrUrl(resolved);

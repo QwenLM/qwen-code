@@ -413,6 +413,118 @@ describe('refreshWorkspaceSessionPrStates', () => {
         updated: AONE_MAX_MR_VIEW_CALLS_PER_RUN,
       });
     });
+
+    it('never views numbers whose only binding is off the detailUrl shape', async () => {
+      // Manual binding is platform-neutral: a foreign URL can never match
+      // an attested detailUrl, so viewing its number (a global id — one
+      // usually exists) would only burn a capped slot every sweep.
+      await seedSession(SESSION_A);
+      const prPath = sessionService.getPrSessionPathForArchiveState(
+        SESSION_A,
+        'active',
+      );
+      await upsertSessionPr(prPath, { number: 26430560, url: AONE_URL });
+      await upsertSessionPr(prPath, {
+        number: 12345,
+        url: 'https://github.com/elsewhere/other/pull/12345',
+      });
+      const view = vi.fn(async (_repoPath: string, id: number) => ({
+        number: id,
+        url: AONE_URL,
+        state: 'merged' as const,
+      }));
+      const backend = fakeAoneBackend({ view });
+
+      const result = await refreshWorkspaceSessionPrStates(runtime, undefined, {
+        aoneBackend: backend,
+      });
+
+      expect(view).toHaveBeenCalledTimes(1);
+      expect(view).toHaveBeenCalledWith('jspt/agentic_coding', 26430560);
+      expect(result).toEqual({ scanned: 1, updated: 1 });
+    });
+
+    it('rotates the capped window across sweeps', async () => {
+      // With more permanently pending numbers than the cap, a fixed prefix
+      // would starve the tail; the timer rotates sweepStart per sweep.
+      // View returns a NON-terminal state so nothing leaves the pending
+      // set between the two sweeps.
+      const sessionIds = [SESSION_A, SESSION_B, SESSION_C];
+      let number = 1;
+      for (const sessionId of sessionIds) {
+        await seedSession(sessionId);
+        const prPath = sessionService.getPrSessionPathForArchiveState(
+          sessionId,
+          'active',
+        );
+        for (let i = 0; i < 9; i++, number++) {
+          await upsertSessionPr(prPath, {
+            number,
+            url: `https://code.alibaba-inc.com/jspt/agentic_coding/codereview/${number}`,
+          });
+        }
+      }
+      const seen = new Set<number>();
+      const view = vi.fn(async (_repoPath: string, id: number) => {
+        seen.add(id);
+        return {
+          number: id,
+          url: `https://code.alibaba-inc.com/jspt/agentic_coding/codereview/${id}`,
+          state: 'open' as const,
+        };
+      });
+      const backend = fakeAoneBackend({ view });
+
+      await refreshWorkspaceSessionPrStates(runtime, undefined, {
+        aoneBackend: backend,
+        sweepStart: 0,
+      });
+      expect(view).toHaveBeenCalledTimes(AONE_MAX_MR_VIEW_CALLS_PER_RUN);
+      await refreshWorkspaceSessionPrStates(runtime, undefined, {
+        aoneBackend: backend,
+        sweepStart: AONE_MAX_MR_VIEW_CALLS_PER_RUN,
+      });
+      expect(view).toHaveBeenCalledTimes(2 * AONE_MAX_MR_VIEW_CALLS_PER_RUN);
+      // Two rotated windows cover all 27 numbers; a fixed prefix repeats
+      // the first 25 and never reaches 26/27.
+      expect(seen.size).toBe(27);
+    });
+
+    it('stops starting views once the aggregate sweep budget is spent', async () => {
+      // Per-call timeouts bound one view; the aggregate budget bounds the
+      // loop, or a hung a1 could stall the whole timer past its interval.
+      await seedSession(SESSION_A);
+      const prPath = sessionService.getPrSessionPathForArchiveState(
+        SESSION_A,
+        'active',
+      );
+      for (let i = 1; i <= 5; i++) {
+        await upsertSessionPr(prPath, {
+          number: i,
+          url: `https://code.alibaba-inc.com/jspt/agentic_coding/codereview/${i}`,
+        });
+      }
+      // Each view "hangs" for the full per-call timeout; the 60s budget
+      // admits four of five before the loop stops starting new views.
+      let clock = 0;
+      const view = vi.fn(async (_repoPath: string, id: number) => {
+        clock += 20_000;
+        return {
+          number: id,
+          url: `https://code.alibaba-inc.com/jspt/agentic_coding/codereview/${id}`,
+          state: 'merged' as const,
+        };
+      });
+      const backend = fakeAoneBackend({ view });
+
+      const result = await refreshWorkspaceSessionPrStates(runtime, undefined, {
+        aoneBackend: backend,
+        now: () => clock,
+      });
+
+      expect(view).toHaveBeenCalledTimes(4);
+      expect(result).toEqual({ scanned: 1, updated: 4 });
+    });
   });
 
   it("never applies this workspace's state to a binding pointing at another repository", async () => {

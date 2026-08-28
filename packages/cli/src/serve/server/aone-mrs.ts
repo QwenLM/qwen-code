@@ -21,12 +21,13 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import {
+  canonicalSessionPrUrl,
   findGitRoot,
   gitEnv,
   type SessionPrState,
 } from '@qwen-code/qwen-code-core';
 import {
-  isAoneHostFamily,
+  isAoneCanonicalHost,
   parseRemoteUrl,
 } from '../../commands/review/lib/remote-match.js';
 import {
@@ -72,11 +73,23 @@ export function setA1ExecForTest(exec?: A1Exec): void {
   a1AvailabilityVerified = false;
 }
 
-const A1_TIMEOUT_MS = 20_000;
-const A1_MAX_BUFFER = 16 * 1024 * 1024;
+export const A1_TIMEOUT_MS = 20_000;
+export const A1_MAX_BUFFER = 16 * 1024 * 1024;
 const GIT_ORIGIN_TIMEOUT_MS = 5_000;
+/** Own budget for the `a1 --version` probe (not the git origin's). */
+export const A1_VERSION_TIMEOUT_MS = 10_000;
 /** Display cap for surfaced a1 error messages. */
 const A1_ERROR_MESSAGE_MAX = 512;
+
+/**
+ * The canonical Aone host pair — the web host first: a detailUrl always
+ * carries it, and manual bindings spell the review page with it. The git
+ * host is the spelling a clone's remote uses; identity checks accept both.
+ */
+export const AONE_CANONICAL_HOSTS = [
+  'code.alibaba-inc.com',
+  'gitlab.alibaba-inc.com',
+] as const;
 
 /** `a1 repo mr list` page size is server-fixed; `--page` only picks one. */
 export const AONE_MR_LIST_PAGE_SIZE = 20;
@@ -148,14 +161,15 @@ export function mapAoneMrState(raw: string | undefined): SessionPrState {
 
 /**
  * Resolves the workspace's Aone coordinates, or undefined when it is not an
- * Aone workspace (not a repo, unreadable origin, non-Aone host). This is
- * the per-workspace version of review's no-signal cwd probe — a daemon
+ * Aone workspace (not a repo, unreadable origin, non-Aone host). A daemon
  * serves many workspaces, so the origin is read per workspace instead of at
- * process.cwd(). The FAMILY predicate matches that probe; the stricter
- * canonical-only rule review applies to EXPLICIT hints guards against
- * resolving a user-named number on the wrong platform, which cannot happen
- * here — every a1 fetch below is scoped to this origin's own `--repo`
- * coordinate, never to a number discovered elsewhere.
+ * process.cwd(). Detection is CANONICAL-only, matching the rule review
+ * applies to explicit coordinates: the workspace's origin names the platform
+ * of that workspace's own MRs, and a family-wildcard match would displace
+ * GitHub Enterprise instances (`*.alibaba-inc.com` also names GHE hosts)
+ * onto a1 — a1 then either fails every read (state frozen forever where gh
+ * served before) or, if a same-path repo exists on real Aone, serves an
+ * unrelated repo's same-numbered MR.
  */
 export async function resolveAoneWorkspaceRepo(
   workspaceCwd: string,
@@ -183,8 +197,31 @@ export async function resolveAoneWorkspaceRepo(
     return undefined;
   }
   const identity = parseRemoteUrl(origin.trim());
-  if (!identity || !isAoneHostFamily(identity.host)) return undefined;
+  if (!identity || !isAoneCanonicalHost(identity.host)) return undefined;
   return { gitRoot, repoPath: identity.groupPath };
+}
+
+/**
+ * Exact same-MR identity for this workspace's OWN repo: a detailUrl is
+ * always `<canonical host>/<repoPath>/codereview/<global id>`, and
+ * repoPath here is the origin's exact full group path (no collapse), so the
+ * expected shape is exact under either canonical host spelling. Lets the
+ * identity guards classify persisted entries WITHOUT an `mr view` — views
+ * stay reserved for new bindings and legacy repairs — and lets the refresh
+ * sweep drop numbers it can provably never update. This computes an
+ * identity shape, it never fabricates a binding URL.
+ */
+export function isAoneDetailUrlForRepo(
+  repoPath: string,
+  number: number,
+  url: string,
+): boolean {
+  const canonical = canonicalSessionPrUrl(url);
+  return AONE_CANONICAL_HOSTS.some(
+    (host) =>
+      canonical ===
+      canonicalSessionPrUrl(`https://${host}/${repoPath}/codereview/${number}`),
+  );
 }
 
 function isA1ErrorObject(
@@ -274,7 +311,7 @@ async function checkA1Available(): Promise<void> {
   let stdout: string;
   try {
     ({ stdout } = await a1Exec(['--version'], {
-      timeout: GIT_ORIGIN_TIMEOUT_MS,
+      timeout: A1_VERSION_TIMEOUT_MS,
     }));
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
