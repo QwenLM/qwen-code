@@ -231,6 +231,35 @@ import type {
   DaemonUnarchiveSessionsResult,
 } from './types.js';
 import { parseSseStream } from './sse.js';
+import {
+  DaemonStandaloneCreationOutcomeUnknownError,
+  STANDALONE_SESSIONS_CAPABILITY,
+  isStandaloneCreationOutcomeUnknown,
+  isStandaloneSessionNotFoundError,
+  parseArchiveStandaloneSessionsResult,
+  parseDeleteStandaloneSessionsResult,
+  parseRestoredStandaloneSession,
+  parseStandaloneDirectoryResult,
+  parseStandaloneListPage,
+  parseStandaloneLookup,
+  parseStandaloneMetadataResult,
+  parseStandaloneSession,
+  parseUnarchiveStandaloneSessionsResult,
+  type CreateStandaloneSessionOptions,
+  type DaemonArchiveStandaloneSessionsResult,
+  type DaemonDeleteStandaloneSessionsResult,
+  type DaemonRestoredStandaloneSession,
+  type DaemonStandaloneCreationRecovery,
+  type DaemonStandaloneDirectoryResult,
+  type DaemonStandaloneMetadataResult,
+  type DaemonStandaloneSession,
+  type DaemonStandaloneSessionListOptions,
+  type DaemonStandaloneSessionListPage,
+  type DaemonStandaloneSessionLookup,
+  type DaemonStandaloneSessionSummary,
+  type DaemonUnarchiveStandaloneSessionsResult,
+  type RestoreStandaloneSessionRequest,
+} from './standalone-sessions.js';
 
 const WORKSPACE_MEMORY_REMEMBER_PATH = '/workspace/memory/remember';
 const WORKSPACE_MEMORY_FORGET_PATH = '/workspace/memory/forget';
@@ -2525,6 +2554,265 @@ export class DaemonClient {
   }
 
   // -- Sessions ----------------------------------------------------------
+
+  async createStandaloneSession(
+    options: CreateStandaloneSessionOptions = {},
+  ): Promise<DaemonStandaloneSession> {
+    await this.requireCapability(STANDALONE_SESSIONS_CAPABILITY);
+    const { sessionId: requestedSessionId, ...request } = options;
+    const sessionId = (
+      requestedSessionId ?? globalThis.crypto.randomUUID()
+    ).toLowerCase();
+    try {
+      const response = await this.jsonRequest<unknown>(
+        '/standalone/sessions',
+        'POST /standalone/sessions',
+        {
+          method: 'POST',
+          body: { sessionId, ...request },
+          mode: 'rest',
+        },
+      );
+      return parseStandaloneSession(
+        response,
+        'POST /standalone/sessions',
+        sessionId,
+      );
+    } catch (error) {
+      if (
+        error instanceof DaemonHttpError &&
+        !isStandaloneCreationOutcomeUnknown(error)
+      ) {
+        throw error;
+      }
+      const recovery = await this.recoverStandaloneCreation(sessionId);
+      throw new DaemonStandaloneCreationOutcomeUnknownError(
+        sessionId,
+        recovery,
+        error,
+      );
+    }
+  }
+
+  async listStandaloneSessions(
+    options: DaemonStandaloneSessionListOptions = {},
+  ): Promise<DaemonStandaloneSessionSummary[]> {
+    return (await this.listStandaloneSessionsPage(options)).sessions;
+  }
+
+  async listStandaloneSessionsPage(
+    options: DaemonStandaloneSessionListOptions = {},
+  ): Promise<DaemonStandaloneSessionListPage> {
+    const query = new URLSearchParams();
+    if (options.cursor !== undefined) query.set('cursor', options.cursor);
+    if (options.pageSize !== undefined) {
+      query.set('size', String(options.pageSize));
+    }
+    if (options.archiveState !== undefined) {
+      query.set('archiveState', options.archiveState);
+    }
+    const queryString = query.toString();
+    const suffix = queryString ? `?${queryString}` : '';
+    return await this.standaloneJsonRequest(
+      `/standalone/sessions${suffix}`,
+      'GET /standalone/sessions',
+      parseStandaloneListPage,
+    );
+  }
+
+  async getStandaloneSession(
+    sessionId: string,
+  ): Promise<DaemonStandaloneSessionLookup> {
+    await this.requireCapability(STANDALONE_SESSIONS_CAPABILITY);
+    return await this.getStandaloneSessionUnchecked(sessionId.toLowerCase());
+  }
+
+  async loadStandaloneSession(
+    sessionId: string,
+    request: RestoreStandaloneSessionRequest = {},
+    clientId?: string,
+  ): Promise<DaemonRestoredStandaloneSession> {
+    return await this.restoreStandaloneSession(
+      'load',
+      sessionId,
+      request,
+      clientId,
+    );
+  }
+
+  async resumeStandaloneSession(
+    sessionId: string,
+    request: RestoreStandaloneSessionRequest = {},
+    clientId?: string,
+  ): Promise<DaemonRestoredStandaloneSession> {
+    return await this.restoreStandaloneSession(
+      'resume',
+      sessionId,
+      request,
+      clientId,
+    );
+  }
+
+  async repairStandaloneSessionDirectory(
+    sessionId: string,
+  ): Promise<DaemonStandaloneDirectoryResult> {
+    const normalized = sessionId.toLowerCase();
+    const route = 'POST /standalone/sessions/:id/repair-directory';
+    return await this.standaloneJsonRequest(
+      `/standalone/sessions/${urlEncode(normalized)}/repair-directory`,
+      route,
+      (response) => parseStandaloneDirectoryResult(response, route, normalized),
+      { method: 'POST', body: {} },
+    );
+  }
+
+  async renameStandaloneSession(
+    sessionId: string,
+    displayName: string,
+    clientId?: string,
+  ): Promise<DaemonStandaloneMetadataResult> {
+    const normalized = sessionId.toLowerCase();
+    const route = 'PATCH /standalone/sessions/:id/metadata';
+    return await this.standaloneJsonRequest(
+      `/standalone/sessions/${urlEncode(normalized)}/metadata`,
+      route,
+      (response) => parseStandaloneMetadataResult(response, route, normalized),
+      {
+        method: 'PATCH',
+        body: { displayName },
+        clientId,
+      },
+    );
+  }
+
+  async exportStandaloneSession(
+    sessionId: string,
+    options: { format?: DaemonSessionExportFormat } = {},
+  ): Promise<DaemonSessionExportResult> {
+    await this.requireCapability(STANDALONE_SESSIONS_CAPABILITY);
+    return await this.sessionExportRequest(
+      `/standalone/sessions/${urlEncode(sessionId.toLowerCase())}/export`,
+      'GET /standalone/sessions/:id/export',
+      options,
+    );
+  }
+
+  async archiveStandaloneSessions(
+    sessionIds: string[],
+  ): Promise<DaemonArchiveStandaloneSessionsResult> {
+    return await this.standaloneBatchRequest(
+      'archive',
+      sessionIds,
+      parseArchiveStandaloneSessionsResult,
+    );
+  }
+
+  async unarchiveStandaloneSessions(
+    sessionIds: string[],
+  ): Promise<DaemonUnarchiveStandaloneSessionsResult> {
+    return await this.standaloneBatchRequest(
+      'unarchive',
+      sessionIds,
+      parseUnarchiveStandaloneSessionsResult,
+    );
+  }
+
+  async deleteStandaloneSessions(
+    sessionIds: string[],
+  ): Promise<DaemonDeleteStandaloneSessionsResult> {
+    return await this.standaloneBatchRequest(
+      'delete',
+      sessionIds,
+      parseDeleteStandaloneSessionsResult,
+    );
+  }
+
+  private async standaloneJsonRequest<T>(
+    path: string,
+    route: string,
+    parse: (value: unknown, route: string) => T,
+    options: {
+      method?: string;
+      body?: unknown;
+      clientId?: string;
+      timeoutMs?: number;
+    } = {},
+  ): Promise<T> {
+    await this.requireCapability(STANDALONE_SESSIONS_CAPABILITY);
+    const response = await this.jsonRequest<unknown>(path, route, {
+      ...options,
+      mode: 'rest',
+    });
+    return parse(response, route);
+  }
+
+  private async standaloneBatchRequest<T>(
+    action: 'archive' | 'unarchive' | 'delete',
+    sessionIds: string[],
+    parse: (value: unknown, route: string) => T,
+  ): Promise<T> {
+    const route = `POST /standalone/sessions/${action}`;
+    return await this.standaloneJsonRequest(
+      `/standalone/sessions/${action}`,
+      route,
+      parse,
+      {
+        method: 'POST',
+        body: {
+          sessionIds: sessionIds.map((sessionId) => sessionId.toLowerCase()),
+        },
+      },
+    );
+  }
+
+  private async restoreStandaloneSession(
+    action: 'load' | 'resume',
+    sessionId: string,
+    request: RestoreStandaloneSessionRequest,
+    clientId?: string,
+  ): Promise<DaemonRestoredStandaloneSession> {
+    const normalized = sessionId.toLowerCase();
+    const route = `POST /standalone/sessions/:id/${action}`;
+    const { timeoutMs, ...body } = request;
+    return await this.standaloneJsonRequest(
+      `/standalone/sessions/${urlEncode(normalized)}/${action}`,
+      route,
+      (response) => parseRestoredStandaloneSession(response, route, normalized),
+      {
+        method: 'POST',
+        body,
+        clientId,
+        timeoutMs: this.resolveRestoreTimeoutMs(timeoutMs),
+      },
+    );
+  }
+
+  private async getStandaloneSessionUnchecked(
+    sessionId: string,
+  ): Promise<DaemonStandaloneSessionLookup> {
+    const route = 'GET /standalone/sessions/:id';
+    const response = await this.jsonRequest<unknown>(
+      `/standalone/sessions/${urlEncode(sessionId)}`,
+      route,
+      { mode: 'rest' },
+    );
+    return parseStandaloneLookup(response, route, sessionId);
+  }
+
+  private async recoverStandaloneCreation(
+    sessionId: string,
+  ): Promise<DaemonStandaloneCreationRecovery> {
+    try {
+      const lookup = await this.getStandaloneSessionUnchecked(sessionId);
+      return 'state' in lookup
+        ? { state: 'creating', sessionId }
+        : { state: 'existing', session: lookup };
+    } catch (error) {
+      return isStandaloneSessionNotFoundError(error)
+        ? { state: 'absent', sessionId }
+        : { state: 'unknown', sessionId, error };
+    }
+  }
 
   async createOrAttachSession(
     req: CreateSessionRequest,
