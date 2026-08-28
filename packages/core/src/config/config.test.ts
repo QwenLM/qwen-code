@@ -8996,6 +8996,51 @@ describe('Server Config (config.ts)', () => {
       // monitor stays registered eagerly: the "Shell" allow rule covers it
       // so the shell tool cannot be bypassed by switching to monitor.
       expect(registered).toContain(ToolNames.MONITOR);
+      // tools.eager never promotes a disabled tool into existence: LS is
+      // listed above, but its registration stays gated on isLsToolEnabled()
+      // (tools.listDirectory.enabled / coreTools), which is off here — so
+      // the eager path must neither register nor defer it.
+      expect(registered).not.toContain(ToolNames.LS);
+      expect(deferred).not.toContain(ToolNames.LS);
+    });
+
+    it('demotes an enabled LS to deferred when tools.eager omits it (#9827, #10075)', async () => {
+      // Companion to the test above: with LS enabled via
+      // tools.listDirectory.enabled but omitted from the eager list (and
+      // covered by no listed meta-category — only "Shell" is listed), the
+      // eager gate must demote LS to deferred via
+      // registerPermissionDeferredFactory, never promote it to an eager
+      // registration.
+      const params: ConfigParameters = {
+        ...baseParams,
+        useRipgrep: false,
+        coreTools: undefined,
+        lsToolEnabled: true,
+        eagerTools: ['Shell'],
+      };
+      const config = new Config(params);
+      await config.initialize();
+
+      const { registerFactory, registerPermissionDeferredFactory } = (
+        (await vi.importMock('../tools/tool-registry')) as {
+          ToolRegistry: {
+            prototype: {
+              registerFactory: Mock;
+              registerPermissionDeferredFactory: Mock;
+            };
+          };
+        }
+      ).ToolRegistry.prototype;
+
+      const registered = (registerFactory as Mock).mock.calls.map(
+        (call) => call[0],
+      ) as string[];
+      const deferred = (
+        registerPermissionDeferredFactory as Mock
+      ).mock.calls.map((call) => call[0]) as string[];
+
+      expect(registered).not.toContain(ToolNames.LS);
+      expect(deferred).toContain(ToolNames.LS);
     });
 
     it('registers the full built-in set when no permissionsAllow is set (#9827 regression guard)', async () => {

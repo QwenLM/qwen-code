@@ -3534,13 +3534,13 @@ describe('CoreToolScheduler', () => {
 
   it('cites a matching deny rule when one exists (#9827)', async () => {
     // The deny-rule arm comes FIRST in the message branch, and it must:
-    // a tool rejected by a deny rule is by definition not covered by any
-    // allow/ask rule, so under an active allowlist BOTH the deny arm and
-    // the allowlist-miss arm could fire. The denial is real here —
-    // something was declined — so the message must cite the matching deny
-    // rule, not the "not covered by permissions.allow" attribution (whose
-    // remediation would be wrong: an allow rule cannot override a deny
-    // rule, the only fix is removing the deny rule itself).
+    // this test arms BOTH the deny arm and the coreTools-allowlist-miss
+    // arm, so it pins the if/else-if ORDERING, not just the deny arm in
+    // isolation. Swapping the coreTools arm above the deny arm would hand
+    // a tool hit by both gates the wrong remediation ("Add it to the core
+    // tools list to re-enable it" — a no-op, since a deny rule survives
+    // allowlisting). The denial is real here — something was declined —
+    // so the message must cite the matching deny rule.
     const execute = vi.fn().mockResolvedValue({
       llmContent: 'sent',
       returnDisplay: 'sent',
@@ -3554,8 +3554,9 @@ describe('CoreToolScheduler', () => {
     const permissionManager = {
       isToolEnabled: vi.fn().mockResolvedValue(false),
       findMatchingDenyRule: vi.fn().mockReturnValue(ToolNames.SEND_MESSAGE),
-      // Arm the allowlist-miss branch too so this test pins the
+      // Arm the coreTools branch too so this test pins the
       // if/else-if ORDERING, not just the deny arm in isolation.
+      isToolDisabledByCoreToolsAllowList: vi.fn().mockReturnValue(true),
     };
     const { scheduler, onAllToolCallsComplete } =
       createSchedulerForLegacyToolTests({
