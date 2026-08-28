@@ -723,7 +723,7 @@ describe('workspace skill settings persistence', () => {
     vi.restoreAllMocks();
   });
 
-  it('canonicalizes, deduplicates, preserves orphans, serializes updates, and enforces user locks', async () => {
+  it('canonicalizes, deduplicates, preserves orphans, and serializes updates across settings scopes', async () => {
     workspace = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-skill-settings-')),
     );
@@ -817,8 +817,33 @@ describe('workspace skill settings persistence', () => {
     expect(saved.skills.disabled).toEqual(['orphan', 'alpha', 'beta']);
     expect(saved.skills.enabled).toEqual(['opt-in-skill']);
     await expect(
+      persistDisabledSkills!(workspace, 'locked-skill', false),
+    ).resolves.toEqual({
+      changed: true,
+      disabled: ['orphan', 'alpha', 'beta', 'locked-skill'],
+      settingsChanges: [
+        {
+          key: 'skills.disabled',
+          value: ['orphan', 'alpha', 'beta', 'locked-skill'],
+        },
+      ],
+    });
+    await expect(
       persistDisabledSkills!(workspace, 'locked-skill', true),
-    ).rejects.toMatchObject({ reason: 'locked', lockedScope: 'user' });
+    ).resolves.toEqual({
+      changed: true,
+      disabled: ['orphan', 'alpha', 'beta'],
+      settingsChanges: [
+        {
+          key: 'skills.disabled',
+          value: ['orphan', 'alpha', 'beta'],
+        },
+      ],
+    });
+    const savedUser = JSON.parse(
+      fs.readFileSync(path.join(qwenHome, 'settings.json'), 'utf8'),
+    ) as { skills: { disabled: string[] } };
+    expect(savedUser.skills.disabled).toEqual(['locked-skill']);
   });
 
   it('produces both skills.disabled and skills.enabled changes when enabling a workspace-hard-disabled default-disabled skill', async () => {
@@ -912,7 +937,7 @@ describe('workspace skill settings persistence', () => {
     expect(setValue.mock.calls[0]?.[3]).toBe(toolGuard);
   });
 
-  it('persists a Skill batch with one settings write and per-target lock outcomes', async () => {
+  it('persists a Skill batch with one settings write across settings scopes', async () => {
     workspace = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-skill-batch-')),
     );
@@ -979,14 +1004,14 @@ describe('workspace skill settings persistence', () => {
       skillName: 'alpha',
       changed: true,
     });
-    expect(result.outcomes[2]).toMatchObject({
+    expect(result.outcomes[2]).toEqual({
       skillName: 'locked-skill',
-      error: { reason: 'locked', lockedScope: 'user' },
+      changed: true,
     });
     expect(result.settingsChanges).toEqual([
       {
         key: 'skills.disabled',
-        value: ['orphan', 'review', 'alpha'],
+        value: ['orphan', 'review', 'alpha', 'locked-skill'],
       },
     ]);
     expect(setValues).toHaveBeenCalledOnce();
@@ -1009,6 +1034,7 @@ describe('workspace skill settings persistence', () => {
       'orphan',
       'review',
       'alpha',
+      'locked-skill',
     ]);
     expect(savedAfterDisable.skills.enabled).toBeUndefined();
     const savedUser = JSON.parse(
@@ -1037,7 +1063,10 @@ describe('workspace skill settings persistence', () => {
       { skillName: 'orphan', changed: true },
     ]);
     expect(preinstallEnable.settingsChanges).toEqual([
-      { key: 'skills.disabled', value: ['review', 'alpha'] },
+      {
+        key: 'skills.disabled',
+        value: ['review', 'alpha', 'locked-skill'],
+      },
     ]);
     expect(setValues).toHaveBeenCalledTimes(2);
 
@@ -1061,7 +1090,11 @@ describe('workspace skill settings persistence', () => {
     const savedAfterEnable = JSON.parse(
       fs.readFileSync(path.join(workspace, '.qwen', 'settings.json'), 'utf8'),
     ) as { skills: { disabled: string[]; enabled: string[] } };
-    expect(savedAfterEnable.skills.disabled).toEqual(['review', 'alpha']);
+    expect(savedAfterEnable.skills.disabled).toEqual([
+      'review',
+      'alpha',
+      'locked-skill',
+    ]);
     expect(savedAfterEnable.skills.enabled).toEqual(['opt-in']);
 
     const guard = vi.fn();
