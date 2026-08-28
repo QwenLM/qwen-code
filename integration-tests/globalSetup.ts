@@ -15,6 +15,7 @@ import {
   readdir,
   rm,
   readFile,
+  stat,
   writeFile,
   unlink,
 } from 'node:fs/promises';
@@ -51,9 +52,10 @@ const hostQwenDir = Storage.getGlobalQwenDir();
 // outside the worktree so that copy never lands in a tracked tree. A caller
 // that pins QWEN_HOME — globalSetup.test.ts, or someone reproducing against
 // real state — keeps it, and owns its lifecycle.
+const HERMETIC_HOME_PREFIX = 'qwen-e2e-home-';
 const hermeticQwenHome = join(
   tmpdir(),
-  `qwen-e2e-home-${process.pid}-${Date.now()}`,
+  `${HERMETIC_HOME_PREFIX}${process.pid}-${Date.now()}`,
 );
 const ownsQwenHome = !process.env['QWEN_HOME'];
 if (ownsQwenHome) {
@@ -99,10 +101,44 @@ async function carryOverHostConfig() {
   }
 }
 
+/**
+ * Removes scratch homes an earlier run could not. Teardown's cleanup is
+ * best-effort by design, so on a persistent runner the ones it gives up on
+ * would otherwise pile up forever. The age floor keeps this clear of any run
+ * in flight on the same host: a full E2E run finishes well inside it.
+ */
+async function sweepLeakedQwenHomes() {
+  const cutoff = Date.now() - 24 * 60 * 60 * 1000;
+  try {
+    const entries = await readdir(tmpdir());
+    await Promise.all(
+      entries
+        .filter(
+          (entry) =>
+            entry.startsWith(HERMETIC_HOME_PREFIX) &&
+            join(tmpdir(), entry) !== hermeticQwenHome,
+        )
+        .map(async (entry) => {
+          const dir = join(tmpdir(), entry);
+          try {
+            if ((await stat(dir)).mtimeMs < cutoff) {
+              await rm(dir, { recursive: true, force: true, maxRetries: 3 });
+            }
+          } catch {
+            // Raced with the run that owns it, or still not removable.
+          }
+        }),
+    );
+  } catch {
+    // Housekeeping must never fail a run.
+  }
+}
+
 export async function setup() {
   if (ownsQwenHome) {
     await mkdir(hermeticQwenHome, { recursive: true });
     await carryOverHostConfig();
+    await sweepLeakedQwenHomes();
   }
 
   try {
@@ -197,7 +233,21 @@ export async function teardown() {
   // Not gated on KEEP_OUTPUT: this is a scratch dir rather than a test
   // artifact, and it holds a copy of the developer's credentials.
   if (ownsQwenHome) {
-    await rm(hermeticQwenHome, { recursive: true, force: true });
+    try {
+      // A CLI child outliving its test keeps writing under `debug/`, so the
+      // walk can reach a directory that refills before the rmdir — retries
+      // absorb that. The catch is what matters: a cleanup that cannot finish
+      // must not exit an all-green run red, the way the memory-file restore
+      // did in #10325.
+      await rm(hermeticQwenHome, {
+        recursive: true,
+        force: true,
+        maxRetries: 5,
+        retryDelay: 200,
+      });
+    } catch (e) {
+      console.error(`Warning: could not remove ${hermeticQwenHome}:`, e);
+    }
   }
 }
 
