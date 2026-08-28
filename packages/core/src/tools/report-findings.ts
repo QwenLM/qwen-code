@@ -62,6 +62,31 @@ export const FINDING_SOURCES = [
 ] as const;
 export type FindingSource = (typeof FINDING_SOURCES)[number];
 
+/**
+ * The two decision axes a Critical's severity bit used to collapse (#10291).
+ *
+ * `direction` — which way the defect fails: `certifies-falsely` means the
+ * code produces a wrong result it presents as correct (a wrong output, a
+ * silent corruption, a bypassed check, a decision taken over state nobody
+ * read); `fails-closed` means it refuses, wedges, crashes or degrades to its
+ * own absence under some input or configuration without producing a wrong
+ * result. `baseline` — what the defect is measured against: `regression`
+ * means the merge base handled the trigger correctly and this change breaks
+ * it; `new-surface` means the failing path does not exist at the merge base
+ * (the change adds the feature, the defense or the branch the defect lives
+ * in). Both are optional: a verifier states them off its own witness, and a
+ * Critical it could not classify carries neither — which every consumer
+ * reads as "posts at any floor", never as a classification.
+ */
+export const FINDING_DIRECTIONS = [
+  'certifies-falsely',
+  'fails-closed',
+] as const;
+export type FindingDirection = (typeof FINDING_DIRECTIONS)[number];
+
+export const FINDING_BASELINES = ['regression', 'new-surface'] as const;
+export type FindingBaseline = (typeof FINDING_BASELINES)[number];
+
 export const REPORT_FINDINGS_LEVELS = ['low', 'medium', 'high'] as const;
 export type ReportFindingsLevel = (typeof REPORT_FINDINGS_LEVELS)[number];
 
@@ -110,6 +135,8 @@ export interface ReportFindingsFindingParams {
   shortSummary?: string;
   failureScenario: string;
   category?: string;
+  direction?: FindingDirection;
+  baseline?: FindingBaseline;
   outcome?: FindingOutcome;
   outcomeNote?: string;
 }
@@ -119,7 +146,7 @@ export interface ReportFindingsParams {
   findings: ReportFindingsFindingParams[];
 }
 
-const DESCRIPTION = `Reports code-review findings as typed data so clients (the terminal UI, the Web Shell, ACP hosts) can render a per-finding list. Use it only when an active review flow (such as the bundled review skill) instructs you to report findings with it; otherwise present findings as ordinary text. Call it once per report with the complete list, most severe first — a later call replaces the whole list, it never appends. When the review wrote a findings artifact, copy each field verbatim from it (id, severity, confidence, source, file/line, summary, shortSummary, failureScenario, category); do not re-derive or re-word values — the artifact is the oracle.
+const DESCRIPTION = `Reports code-review findings as typed data so clients (the terminal UI, the Web Shell, ACP hosts) can render a per-finding list. Use it only when an active review flow (such as the bundled review skill) instructs you to report findings with it; otherwise present findings as ordinary text. Call it once per report with the complete list, most severe first — a later call replaces the whole list, it never appends. When the review wrote a findings artifact, copy each field verbatim from it (id, severity, confidence, source, file/line, summary, shortSummary, failureScenario, category, direction, baseline); do not re-derive or re-word values — the artifact is the oracle.
 
 After fixes are applied — at the review's own fix step, or ANY later time in the session a reported finding's disposition changes — call it again with the same findings, each carrying "outcome" ("fixed", "skipped", or "no_change_needed"; "outcomeNote" for the reason). Client per-finding status trusts only a call that carries outcomes, and a call where some findings carry an outcome and others do not is refused: account for every finding.
 
@@ -179,6 +206,18 @@ const FINDING_ITEM_SCHEMA = {
       maxLength: 64,
       description:
         'Free-form kebab-case tag ("correctness", "security", "test-coverage", …).',
+    },
+    direction: {
+      type: 'string',
+      enum: [...FINDING_DIRECTIONS],
+      description:
+        'Which way a Critical fails, from the artifact: "certifies-falsely" (a wrong result presented as correct) or "fails-closed" (refuses, wedges or degrades without a wrong result). Omit when the artifact carries none.',
+    },
+    baseline: {
+      type: 'string',
+      enum: [...FINDING_BASELINES],
+      description:
+        'What a Critical is measured against, from the artifact: "regression" (the merge base handled the trigger correctly) or "new-surface" (the failing path does not exist at the merge base). Omit when the artifact carries none.',
     },
     outcome: {
       type: 'string',
@@ -268,6 +307,8 @@ function normalizeFinding(raw: ReportFindingsFindingParams): ReportedFinding {
     shortSummary: compressFindingSummary(shortSource),
     failureScenario: raw.failureScenario.trim(),
     ...(raw.category?.trim() ? { category: raw.category.trim() } : {}),
+    ...(raw.direction ? { direction: raw.direction } : {}),
+    ...(raw.baseline ? { baseline: raw.baseline } : {}),
     ...(raw.outcome ? { outcome: raw.outcome } : {}),
     ...(raw.outcomeNote?.trim() ? { outcomeNote: raw.outcomeNote.trim() } : {}),
   };

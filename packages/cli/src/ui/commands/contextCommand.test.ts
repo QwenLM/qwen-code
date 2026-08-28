@@ -128,7 +128,7 @@ describe('collectContextData (contextCommand)', () => {
     const isLastPromptTokenCountEstimated = vi.fn().mockReturnValue(false);
     const config = {
       ...makeMockConfig(200_000),
-      getGeminiClient: vi.fn().mockReturnValue({
+      getLlmClient: vi.fn().mockReturnValue({
         isInitialized: vi.fn().mockReturnValue(true),
         getChat: vi.fn().mockReturnValue({
           getLastPromptTokenCount,
@@ -148,7 +148,7 @@ describe('collectContextData (contextCommand)', () => {
   it('reports a nonzero compression-derived count as estimated', async () => {
     const config = {
       ...makeMockConfig(200_000),
-      getGeminiClient: vi.fn().mockReturnValue({
+      getLlmClient: vi.fn().mockReturnValue({
         isInitialized: vi.fn().mockReturnValue(true),
         getChat: vi.fn().mockReturnValue({
           getLastPromptTokenCount: vi.fn().mockReturnValue(50_000),
@@ -173,7 +173,7 @@ describe('collectContextData (contextCommand)', () => {
     mockGetLastPromptTokenCount.mockReturnValue(60_000);
     const config = {
       ...makeMockConfig(200_000),
-      getGeminiClient: vi.fn().mockReturnValue({
+      getLlmClient: vi.fn().mockReturnValue({
         isInitialized: vi.fn().mockReturnValue(false),
         getChat: vi.fn(() => {
           throw new Error('Chat not initialized');
