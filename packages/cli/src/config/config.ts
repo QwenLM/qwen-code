@@ -1803,9 +1803,25 @@ export async function loadCliConfig(
       '⚠ tools.core is an empty allowlist: all tools are disabled for this session. Add tool names to tools.core or remove the key to re-enable tools (#10065).\n',
     );
   }
+  // Settings loading performs no element validation (the schema declares only
+  // `type: 'array'`), so a hand-edited `"core": [42]` — or a mixed
+  // `["read_file", 42]` — would otherwise reach Config.coreTools and
+  // resolvedCoreTools raw, where `parseRule(42)`/`entry.trim()` throw a
+  // TypeError during tool-registry construction instead of the entry being
+  // dropped (#10080). Only an ARRAY activates the allowlist (a non-array
+  // normalizes to ABSENT/undefined, as the pre-#10065 `||` chain did); drop
+  // non-string entries at the boundary. Empty/whitespace strings are KEPT so
+  // they collapse to the explicit empty allowlist (with both #10065
+  // diagnostics) in PermissionManager.initialize() rather than being treated
+  // as ABSENT.
+  const settingsCoreTools: string[] | undefined = Array.isArray(
+    settings.tools?.core,
+  )
+    ? settings.tools.core.filter((t) => typeof t === 'string')
+    : undefined;
   const resolvedCoreTools: string[] = [
     ...(bareMode || safeMode ? [] : (argv.coreTools ?? [])),
-    ...(bareMode || safeMode ? [] : (settings.tools?.core ?? [])),
+    ...(bareMode || safeMode ? [] : (settingsCoreTools ?? [])),
   ];
   const mergedAllow: string[] = [
     ...(bareMode || safeMode ? [] : (settings.permissions?.allow ?? [])),
@@ -2237,21 +2253,20 @@ export async function loadCliConfig(
     // flag) should carry the empty-allowlist semantic, so a forgotten
     // flag value — or a script expanding an unset variable into the flag
     // — cannot silently flip a session to tool-free (#10065). The
-    // settings leg is type-guarded because settings loading performs no
-    // validation: a hand-edited non-array `"core": ""` must normalize to
-    // ABSENT (as the pre-#10065 `||` chain did) instead of flowing raw
-    // into Config.coreTools, where `getCoreTools()?.some(...)` would
-    // throw during tool-registry construction; empty-string entries are
-    // dropped where the allowlist is built (PermissionManager.initialize,
-    // #10065).
+    // settings leg reads `settingsCoreTools` because settings loading
+    // performs no element validation: a hand-edited non-array `"core": ""`
+    // normalizes to ABSENT (as the pre-#10065 `||` chain did), and non-string
+    // array entries (`"core": [42]`) are dropped — either shape flowing raw
+    // into Config.coreTools would make `getCoreTools()?.some(...)` throw
+    // during tool-registry construction (#10080). Empty-string entries are
+    // kept there and dropped where the allowlist is built
+    // (PermissionManager.initialize, #10065).
     coreTools:
       bareMode || safeMode
         ? undefined
         : argv.coreTools?.length
           ? argv.coreTools
-          : Array.isArray(settings.tools?.core)
-            ? settings.tools.core
-            : undefined,
+          : settingsCoreTools,
     allowedTools:
       bareMode || safeMode
         ? argv.allowedTools || undefined

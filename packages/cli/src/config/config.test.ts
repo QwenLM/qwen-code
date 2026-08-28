@@ -3207,6 +3207,44 @@ describe('Approval mode tool exclusion logic', () => {
     expect(config.getCoreTools()).toBeUndefined();
   });
 
+  it('should drop non-string tools.core entries instead of crashing startup', async () => {
+    // Settings loading performs no element validation (the schema declares
+    // only `type: 'array'`), so a hand-edited `"core": [42]` — or a mixed
+    // `["read_file", 42]` — reaches loadCliConfig raw. Without the
+    // boundary filter, the non-interactive exclusion path (`isToolEnabled`
+    // → `filterList` → `entry.trim()`) throws a TypeError inside
+    // loadCliConfig, and `isLsToolEnabled()` → `parseRule(42)` would
+    // crash tool-registry construction. The entries must be dropped, and
+    // an all-non-string list collapses to the explicit empty allowlist
+    // with the #10065 startup notice (#10080).
+    process.argv = ['node', 'script.js', '-p', 'test'];
+    const argv = await parseArguments();
+
+    mockWriteStderrLine.mockClear();
+    const config = await loadCliConfig(
+      { tools: { core: [42 as unknown as string] } },
+      argv,
+      undefined,
+      [],
+    );
+    expect(config.getCoreTools()).toEqual([]);
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining('tools.core is an empty allowlist'),
+    );
+
+    mockWriteStderrLine.mockClear();
+    const mixed = await loadCliConfig(
+      { tools: { core: ['read_file', 42 as unknown as string] } },
+      argv,
+      undefined,
+      [],
+    );
+    expect(mixed.getCoreTools()).toEqual(['read_file']);
+    expect(mockWriteStderrLine).not.toHaveBeenCalledWith(
+      expect.stringContaining('tools.core is an empty allowlist'),
+    );
+  });
+
   it('should suppress the empty-allowlist notice when a valued --core-tools overrides the empty settings list', async () => {
     // A valued argv flag wins over settings (its tools ARE registered),
     // so the "all tools are disabled" notice would be factually wrong
