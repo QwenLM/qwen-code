@@ -11137,6 +11137,35 @@ describe('DaemonSessionProvider', () => {
     expect(connection).toMatchObject({ sessionId: 'session-a' });
   });
 
+  it('publishes the loaded workspace instead of the primary fallback', async () => {
+    sdkMocks.sessions.push(
+      createMockSession({
+        sessionId: 'session-a',
+        workspaceCwd: '/secondary-workspace',
+      }),
+    );
+    let connection: DaemonConnectionState | undefined;
+
+    function Harness() {
+      connection = useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      sessionId: 'session-a',
+    });
+
+    expect(connection).toMatchObject({
+      sessionId: 'session-a',
+      sessionContext: {
+        kind: 'workspace',
+        cwd: '/secondary-workspace',
+      },
+      workspaceCwd: '/secondary-workspace',
+    });
+  });
+
   it('does not duplicate the initial controlled load when workspace is set', async () => {
     sdkMocks.sessions.push(
       createMockSession({ sessionId: 'session-a', clientId: 'client-a' }),

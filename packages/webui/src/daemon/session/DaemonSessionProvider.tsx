@@ -17,6 +17,7 @@ import {
   useSyncExternalStore,
 } from 'react';
 import {
+  DAEMON_APPROVAL_MODES,
   DaemonClient,
   DaemonCapabilityMissingError,
   DaemonHttpError,
@@ -200,19 +201,11 @@ const SESSION_TRANSCRIPT_PAGINATION_FEATURE = 'session_transcript_pagination';
 const CLIENT_IDENTITY_FEATURE = 'client_identity';
 const WORKSPACE_ACP_PREHEAT_FEATURE = 'workspace_acp_preheat';
 const WORKSPACE_ACP_STATUS_FEATURE = 'workspace_acp_status';
-const STANDALONE_APPROVAL_MODES = new Set<DaemonApprovalMode>([
-  'plan',
-  'default',
-  'auto-edit',
-  'auto',
-  'yolo',
-]);
-
 function resolveStandaloneApprovalMode(
   value: string | undefined,
 ): DaemonApprovalMode | undefined {
   if (value === undefined) return undefined;
-  if (STANDALONE_APPROVAL_MODES.has(value as DaemonApprovalMode)) {
+  if (DAEMON_APPROVAL_MODES.includes(value as DaemonApprovalMode)) {
     return value as DaemonApprovalMode;
   }
   throw new Error(`Unsupported standalone approval mode: ${value}`);
@@ -1942,10 +1935,13 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
 
           const activeSession = session;
           const activeProductSessionContext =
-            activeSessionContextRef.current ?? {
-              kind: 'workspace' as const,
-              cwd: activeSession.workspaceCwd,
-            };
+            activeSessionContextRef.current?.kind === 'standalone' ||
+            activeSessionContextRef.current?.kind === 'live'
+              ? activeSessionContextRef.current
+              : {
+                  kind: 'workspace' as const,
+                  cwd: activeSession.workspaceCwd,
+                };
           const activeWorkspaceScoped =
             activeProductSessionContext.kind === 'workspace';
           runnerSession = activeSession;
