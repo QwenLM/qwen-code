@@ -80,8 +80,9 @@ export function matchAreaByPath(policy, files) {
   return matchedAreasByPath(policy, files)[0] ?? null;
 }
 
-// An assignee or a submitted review by any mapped owner means this routing
-// already happened; never stack a second assignment.
+// An assignee or a non-dismissed review by any mapped owner means this
+// routing already happened; never stack a second assignment. A dismissed
+// review is a removed review, so it must not count as coverage.
 export function alreadyCovered(policy, pr) {
   const pool = new Set(
     policy.areas
@@ -90,7 +91,9 @@ export function alreadyCovered(policy, pr) {
   );
   const involved = [
     ...pr.assignees.map((assignee) => assignee.login),
-    ...pr.latestReviews.map((review) => review.author?.login),
+    ...pr.latestReviews
+      .filter((review) => review.state !== 'DISMISSED')
+      .map((review) => review.author?.login),
   ];
   return involved.some((login) => login && pool.has(login.toLowerCase()));
 }

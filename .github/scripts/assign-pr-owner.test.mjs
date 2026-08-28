@@ -193,6 +193,15 @@ describe('assign-pr-owner: pure routing', () => {
       }),
       false,
     );
+    // A dismissed review is a removed review: it must not satisfy the
+    // coverage gate, or a PR never assigned on open stays ownerless.
+    assert.equal(
+      alreadyCovered(policy, {
+        ...corePr,
+        latestReviews: [{ author: { login: owner }, state: 'DISMISSED' }],
+      }),
+      false,
+    );
   });
 });
 
