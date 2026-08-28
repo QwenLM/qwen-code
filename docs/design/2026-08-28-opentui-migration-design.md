@@ -113,8 +113,10 @@ neither mask nor fake an import.
 The pieces, in landing order:
 
 - **Streaming model** (landed, infra batch). A pure, immutable reducer that
-  folds live stream events (user, thinking, text, tool/task lifecycle, done,
-  stats) into ordered history items. Both renderers consume the same fold,
+  folds live stream events (user, thinking, text, tool/task lifecycle, done)
+  into ordered history items; the `task-end` fold also derives each task's
+  stats line as an output field on the history item (there is no separate
+  `stats` input event). Both renderers consume the same fold,
   which is what keeps their transcripts structurally identical; the ink-side
   wiring lands with the batch that carries its consumers. The model replaces
   nothing in ink today — it is additive, and its contract is pinned by an
