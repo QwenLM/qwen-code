@@ -34,6 +34,7 @@ import {
   createDebugLogger,
   NativeLspService,
   isBareMode,
+  isNamelessCoreToolsEntry,
   isTruthy,
   isSafeModeEnv,
   isToolEnabled,
@@ -1787,17 +1788,19 @@ export async function loadCliConfig(
   // session (the empty-allowlist semantic of #10065). Give the user one
   // visible startup notice instead of failing every tool call silently;
   // the argv flag wins over settings when valued, so only the settings
-  // path can resolve to the empty allowlist here. An all-empty-string
-  // list (`"core": [""]`, e.g. an unset-variable expansion written into
-  // settings) carries no tool name either and collapses to the same
-  // empty allowlist in `PermissionManager.initialize()`, so the notice
-  // covers it too (#10065).
+  // path can resolve to the empty allowlist here. Entries carrying no
+  // tool name — empty/whitespace strings, non-string garbage, malformed
+  // rules, and mangled specifiers like `"()"` (e.g. an unset-variable or
+  // template expansion written into settings) — collapse to the same
+  // empty allowlist in `PermissionManager.initialize()`; the gate and
+  // this notice share the `isNamelessCoreToolsEntry` classification from
+  // core so they cannot drift apart (#10065, #10080).
   if (
     !bareMode &&
     !safeMode &&
     !(argv.coreTools && argv.coreTools.length > 0) &&
     Array.isArray(settings.tools?.core) &&
-    settings.tools.core.every((t) => typeof t !== 'string' || t.trim() === '')
+    settings.tools.core.every((t) => isNamelessCoreToolsEntry(t))
   ) {
     writeStderrLine(
       '⚠ tools.core is an empty allowlist: all tools are disabled for this session. Add tool names to tools.core or remove the key to re-enable tools (#10065).\n',
@@ -1888,7 +1891,9 @@ export async function loadCliConfig(
   //
   // An explicitly empty array must survive as an empty array, not collapse
   // into "unset": `[]` is an active allowlist naming nothing (defer
-  // everything). `tools.core` differs: its empty list is treated as unset.
+  // everything). `tools.core` differs only in effect: its explicitly
+  // empty list stays active and disables every tool instead of
+  // deferring (#10065).
   // `normalizeDisabledToolList` maps undefined to `[]`,
   // so the Array.isArray guard has to come first — without it, absent and
   // explicitly-empty would reach core as the same value, which is exactly
