@@ -108,6 +108,33 @@ describe('collectAvailableSkillEntries memoize cache', () => {
     expect(v1).toBe(v2);
   });
 
+  it('hides a collision-renamed skill for a legacy bare disablement entry', async () => {
+    const sm = mockSkillManager();
+    (sm.isSkillActive as ReturnType<typeof vi.fn>).mockReturnValue(true);
+    (sm.listSkills as ReturnType<typeof vi.fn>).mockResolvedValue([
+      {
+        name: 'rust:pdf',
+        description: 'Extension pdf skill',
+        level: 'extension',
+        filePath: '/ext/rust/pdf/SKILL.md',
+        body: '',
+        extensionName: 'rust',
+      },
+    ]);
+    const cfg = mockConfig();
+    (cfg.getDisabledSkillNames as ReturnType<typeof vi.fn>).mockReturnValue(
+      new Set(['pdf']),
+    );
+
+    const collected = await collectAvailableSkillEntries(sm, cfg);
+
+    // The dual-spelling contract: a bare entry written before the rename
+    // still hides the renamed skill from every model-facing surface.
+    expect(collected.availableSkills).toEqual([]);
+    expect(collected.pendingConditionalSkillNames.size).toBe(0);
+    expect(collected.entries).toEqual([]);
+  });
+
   it('rescans after TTL expires', async () => {
     vi.useFakeTimers();
     const sm = mockSkillManager();
