@@ -204,11 +204,15 @@ jobs:
           # test:integration:sandbox:docker: that script would rebuild the image
           # the step above just built.
           # external-context-mem0-write, external-context-auto-recall,
-          # context-compress-interactive and qwen-serve-channel-workers stall
-          # at CLI startup on macOS and the ecs-qwen pool runners (#10272);
-          # with cron-interactive and channel-plugin they are quarantined to
-          # the nightly isolated matrix below until the root fix lands
-          # (#10316).
+          # context-compress-interactive and qwen-serve-channel-workers are
+          # quarantined to the nightly isolated matrix below as a precaution.
+          # Their #10272 startup stalls were the goal-runtime wait bug fixed
+          # by #10290, not a platform defect, and they have not stalled on
+          # any platform since. The nightly canaries run on
+          # ubuntu-latest — which never reproduced the stall — so they keep
+          # functional coverage on hosted Linux but give no signal about the
+          # former stall platforms; restoring these suites to the push lanes
+          # requires verifying them on those runners first.
           if [[ "${{ matrix.sandbox }}" == "sandbox:docker" ]]; then
             npx cross-env QWEN_SANDBOX=docker vitest run --root ./integration-tests --exclude '**/interactive/cron-interactive.test.ts' --exclude '**/channel-plugin.test.ts' --exclude '**/interactive/external-context-mem0-write.test.ts' --exclude '**/interactive/external-context-auto-recall.test.ts' --exclude '**/interactive/context-compress-interactive.test.ts' --exclude '**/cli/qwen-serve-channel-workers.test.ts' --shard='${{ matrix.shard }}'
           else
@@ -297,8 +301,8 @@ jobs:
             test_file: 'interactive/cron-interactive.test.ts'
           - label: 'channel-plugin E2E'
             test_file: 'channel-plugin.test.ts'
-          # Quarantined from the push lanes (#10272, #10316); see the
-          # excludes in the push jobs above.
+          # Quarantined from the push lanes as a precaution; see the
+          # excludes and rationale in the push jobs above.
           - label: 'external-context-mem0-write E2E'
             test_file: 'interactive/external-context-mem0-write.test.ts'
           - label: 'external-context-auto-recall E2E'
