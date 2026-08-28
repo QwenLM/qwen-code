@@ -1250,4 +1250,33 @@ describe('WorkspaceSection pinned group members (issue #10391)', () => {
       container.querySelector('section[aria-label="Ungrouped"]'),
     ).toBeNull();
   });
+
+  it('renders group sections instead of the empty label when every session is pinned', async () => {
+    renderSection({
+      client: makeOrganizationClient([
+        {
+          sessionId: 'pinned-member',
+          displayName: 'Pinned member',
+          groupId: 'design-group',
+          isPinned: true,
+          pinnedAt: '2026-01-02T00:00:00.000Z',
+        },
+      ] as Array<Partial<DaemonSessionSummary>>),
+      expanded: true,
+      organizationEnabled: true,
+      excludePinned: true,
+    });
+    await flush();
+
+    // Every session is a pinned group member, so the pinned-filtered list is
+    // empty; the grouped view must still render the member instead of the
+    // empty label.
+    const groupSection = container.querySelector<HTMLElement>(
+      'section[aria-label="Design"]',
+    );
+    expect(groupSection).not.toBeNull();
+    expect(groupSection?.textContent).toContain('\u00b7 1');
+    expect(groupSection?.textContent).toContain('Pinned member');
+    expect(container.textContent ?? '').not.toContain('No sessions');
+  });
 });

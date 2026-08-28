@@ -588,7 +588,16 @@ export function WorkspaceSection({
               <div className={styles.error} role="status">
                 {loadErrorLabel}
               </div>
-            ) : visibleSessions.length === 0 ? (
+            ) : visibleSessions.length === 0 &&
+              // Group sections keep pinned members even when the
+              // pinned-filtered list is empty, so only show the empty label
+              // when the grouped view has nothing to render either.
+              !(
+                groupedSessions &&
+                groupedSessions.sections.some(
+                  (section) => section.sessions.length > 0,
+                )
+              ) ? (
               // A source switch swaps the query key; until the new source's
               // page settles there is no data yet, so the "no sessions" notice
               // would flash for a whole fetch round-trip.
