@@ -18,7 +18,7 @@ import { afterEach, describe, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { parse } from 'yaml';
 
-import { loadPolicy } from './assign-issue-owner.mjs';
+import { loadPolicy, pickOwner } from './assign-issue-owner.mjs';
 import {
   alreadyCovered,
   changedFiles,
@@ -220,6 +220,10 @@ function runAssign(dryRun, options = {}) {
     denyPerm = 'read',
     editExit = 0,
     editErr = '',
+    // 'once' fails only the first issue-list lookup (the retry and every
+    // later call succeed); 'always' fails every one.
+    loadFail = '',
+    loadErr = 'HTTP 502: Bad Gateway',
     expectExit = 0,
   } = options;
   const fileNames = fileList ?? files.split('\n').filter(Boolean);
@@ -257,8 +261,18 @@ case "$*" in
     fi
     printf '%s' "$GH_STUB_PERMISSION"
     ;;
-  *"--assignee ${zeroLoadOwner}"*"--json number"*) printf '%s' '0' ;;
-  *"issue list"*"--json number"*) printf '%s' '5' ;;
+  *"issue list"*"--json number"*)
+    # The log line for this call is already appended, so the first lookup
+    # counts 1: 'once' fails exactly that one call, and its retry succeeds.
+    if [ "$GH_STUB_LOAD_FAIL" = "always" ] || { [ "$GH_STUB_LOAD_FAIL" = "once" ] && [ "$(grep -c 'issue list' "$GH_STUB_LOG")" -le 1 ]; }; then
+      printf '%s' "$GH_STUB_LOAD_ERR" >&2
+      exit 1
+    fi
+    case "$*" in
+      *"--assignee ${zeroLoadOwner}"*) printf '%s' '0' ;;
+      *) printf '%s' '5' ;;
+    esac
+    ;;
   "pr edit "*) printf '%s' "$GH_STUB_EDIT_ERR" >&2; exit "$GH_STUB_EDIT_EXIT" ;;
 esac
 `,
@@ -291,6 +305,8 @@ esac
       GH_STUB_DENY_PERM: denyPerm,
       GH_STUB_EDIT_EXIT: String(editExit),
       GH_STUB_EDIT_ERR: editErr,
+      GH_STUB_LOAD_FAIL: loadFail,
+      GH_STUB_LOAD_ERR: loadErr,
       GITHUB_REPOSITORY: 'QwenLM/qwen-code',
       GITHUB_STEP_SUMMARY: '',
       PR_NUMBER: '77',
@@ -469,6 +485,32 @@ describe('assign-pr-owner: apply boundary', () => {
       /skipped — token cannot assign PRs with agent assignees/,
     );
     assert.match(log, /pr edit/);
+  });
+
+  it('tolerates a transient issue-list failure after one retry', () => {
+    // One transient gh issue list failure hits the first load lookup; the
+    // retry must recover the real load with no degraded fallback, and the
+    // extra call must be visible in the log.
+    const owners = policy.areas.find((area) => area.name === 'core').owners;
+    const { log, stdout, stderr } = runAssign(false, { loadFail: 'once' });
+    assert.equal((log.match(/issue list/g) ?? []).length, owners.length + 1);
+    assert.doesNotMatch(stderr, /Cannot read open-issue load/);
+    assert.match(log, /pr edit 77 .*--add-assignee DennisYu07/);
+    assert.match(stdout, /assigned @DennisYu07 \(0 open\)/);
+  });
+
+  it('still assigns through rotation when every issue-list lookup fails', () => {
+    // @wenshao's second failing run: issues disabled made every load lookup
+    // throw and failed the check. All loads must degrade with a warning and
+    // the rotation must still land an owner — the load metric is a
+    // tie-break heuristic, not a gate on assigning.
+    const owners = policy.areas.find((area) => area.name === 'core').owners;
+    const degraded = new Map(owners.map((owner) => [owner, 0]));
+    const rotated = pickOwner(owners, degraded, 77);
+    const { log, stdout, stderr } = runAssign(false, { loadFail: 'always' });
+    assert.match(stderr, /Cannot read open-issue load/);
+    assert.match(log, new RegExp(`pr edit 77 .*--add-assignee ${rotated}`));
+    assert.match(stdout, new RegExp(`assigned @${rotated}`));
   });
 });
 

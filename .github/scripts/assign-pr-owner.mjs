@@ -115,6 +115,27 @@ function canWrite(repository, login) {
   }
 }
 
+// Same warn-and-continue tolerance as canWrite(): the load fan-out is one
+// `gh issue list` per eligible owner (up to 15 for the core pool), and one
+// transient failure — secondary rate limit, 5xx, issues disabled — must not
+// fail the run on the contributor's PR. Retry once, then degrade to a zero
+// load so the rotation still lands an owner; the load metric is a tie-break
+// heuristic, not a gate on assigning.
+function ownerLoad(repository, login) {
+  let lastError;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      return openIssueCount(repository, login);
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  console.warn(
+    `::warning::Cannot read open-issue load for @${login}: ${lastError.message}`,
+  );
+  return 0;
+}
+
 // `gh pr view --json files` caps at 100 entries, so the REST files endpoint
 // pages through every changed file instead. Each filename is decoded from
 // base64 because changed filenames are attacker-controlled on fork PRs and
@@ -205,7 +226,7 @@ function main() {
   }
 
   const loadByOwner = new Map(
-    eligible.map((owner) => [owner, openIssueCount(repository, owner)]),
+    eligible.map((owner) => [owner, ownerLoad(repository, owner)]),
   );
   const assignee = pickOwner(eligible, loadByOwner, prNumber);
 
