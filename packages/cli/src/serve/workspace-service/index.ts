@@ -1460,7 +1460,10 @@ export function createDaemonWorkspaceService(
         return { status: failed ? 'failed' : 'applied' };
       } catch (err) {
         assertActiveGeneration();
-        if (err instanceof SessionNotFoundError) {
+        if (
+          err instanceof SessionNotFoundError ||
+          err instanceof BridgeChannelClosedError
+        ) {
           return { status: failed ? 'failed' : 'deferred' };
         }
         writeStderrLine('qwen serve: model-provider ACP child sync failed');

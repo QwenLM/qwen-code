@@ -3623,6 +3623,34 @@ describe('createDaemonWorkspaceService', () => {
       });
     });
 
+    it.each([
+      { runtimeEnvironmentApplied: true, expectedStatus: 'deferred' },
+      { runtimeEnvironmentApplied: false, expectedStatus: 'failed' },
+    ])(
+      'reports $expectedStatus when the ACP channel closes during child refresh',
+      async ({ runtimeEnvironmentApplied, expectedStatus }) => {
+        const invokeWorkspaceCommand = vi
+          .fn()
+          .mockRejectedValue(
+            new BridgeChannelClosedError('mid-request (model providers)'),
+          );
+        const svc = createDaemonWorkspaceService(
+          makeDeps({
+            reloadDaemonEnv: vi.fn().mockResolvedValue({
+              updatedKeys: [],
+              removedKeys: [],
+              runtimeEnvironmentApplied,
+            }),
+            invokeWorkspaceCommand,
+          }),
+        );
+
+        await expect(svc.reloadModelProviders(makeCtx())).resolves.toEqual({
+          status: expectedStatus,
+        });
+      },
+    );
+
     it('stops before the child when its runtime generation closes', async () => {
       let generationClosed = false;
       const assertGenerationOpen = vi.fn(() => {

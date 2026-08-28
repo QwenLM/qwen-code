@@ -21685,7 +21685,7 @@ describe('App session callbacks', () => {
     expect(mockStore.dispatch).not.toHaveBeenCalledWith([
       {
         type: 'status',
-        text: 'Some changes require a restart to take effect.',
+        text: 'This change requires a restart to take effect.',
       },
     ]);
   });
