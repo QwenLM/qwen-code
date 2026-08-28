@@ -226,7 +226,7 @@ export const cdCommand: SlashCommand = {
 
     try {
       await config
-        .getGeminiClient()
+        .getLlmClient()
         ?.addWorkingDirectoryChangedContext(realOldDir, realTargetPath);
     } catch (error) {
       warnings.push(

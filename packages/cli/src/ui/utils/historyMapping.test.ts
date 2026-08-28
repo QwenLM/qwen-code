@@ -56,7 +56,7 @@ function userItem(
   } as HistoryItem;
 }
 
-function geminiItem(id: number): HistoryItem {
+function llmItem(id: number): HistoryItem {
   return { type: 'gemini', id, text: `response ${id}` } as HistoryItem;
 }
 
@@ -93,9 +93,9 @@ describe('computeApiTruncationIndex', () => {
     it('rewinds to the first user turn (keep nothing)', () => {
       const ui: HistoryItem[] = [
         userItem(1),
-        geminiItem(2),
+        llmItem(2),
         userItem(3),
-        geminiItem(4),
+        llmItem(4),
       ];
       const api: Content[] = [
         userContent('prompt 1'),
@@ -110,9 +110,9 @@ describe('computeApiTruncationIndex', () => {
     it('rewinds to the second user turn (keep first turn)', () => {
       const ui: HistoryItem[] = [
         userItem(1),
-        geminiItem(2),
+        llmItem(2),
         userItem(3),
-        geminiItem(4),
+        llmItem(4),
       ];
       const api: Content[] = [
         userContent('prompt 1'),
@@ -127,11 +127,11 @@ describe('computeApiTruncationIndex', () => {
     it('rewinds to the third user turn', () => {
       const ui: HistoryItem[] = [
         userItem(1),
-        geminiItem(2),
+        llmItem(2),
         userItem(3),
-        geminiItem(4),
+        llmItem(4),
         userItem(5),
-        geminiItem(6),
+        llmItem(6),
       ];
       const api: Content[] = [
         userContent('prompt 1'),
@@ -147,7 +147,7 @@ describe('computeApiTruncationIndex', () => {
 
   describe('with startup context entry', () => {
     it('keeps startup context when rewinding to the first turn', () => {
-      const ui: HistoryItem[] = [userItem(1), geminiItem(2)];
+      const ui: HistoryItem[] = [userItem(1), llmItem(2)];
       const api: Content[] = [
         startupEntry(),
         userContent('prompt 1'),
@@ -160,9 +160,9 @@ describe('computeApiTruncationIndex', () => {
     it('keeps startup + first turn when rewinding to second turn', () => {
       const ui: HistoryItem[] = [
         userItem(1),
-        geminiItem(2),
+        llmItem(2),
         userItem(3),
-        geminiItem(4),
+        llmItem(4),
       ];
       const api: Content[] = [
         startupEntry(),
@@ -189,11 +189,11 @@ describe('computeApiTruncationIndex', () => {
       // early, silently dropping a turn's context.
       const ui: HistoryItem[] = [
         userItem(1),
-        geminiItem(2),
+        llmItem(2),
         userItem(3),
-        geminiItem(4),
+        llmItem(4),
         userItem(5),
-        geminiItem(6),
+        llmItem(6),
       ];
       const api: Content[] = [
         startupEntry(),
@@ -227,9 +227,9 @@ describe('computeApiTruncationIndex', () => {
       });
       const ui: HistoryItem[] = [
         userItem(1),
-        geminiItem(2),
+        llmItem(2),
         userItem(3),
-        geminiItem(4),
+        llmItem(4),
       ];
       const api: Content[] = [
         startupEntry(),
@@ -247,10 +247,10 @@ describe('computeApiTruncationIndex', () => {
     it('skips functionResponse entries when counting user prompts', () => {
       const ui: HistoryItem[] = [
         userItem(1),
-        geminiItem(2),
+        llmItem(2),
         // tool_group items are not type 'user', they don't affect the count
         userItem(5),
-        geminiItem(6),
+        llmItem(6),
       ];
       const api: Content[] = [
         userContent('prompt 1'),
@@ -270,11 +270,11 @@ describe('computeApiTruncationIndex', () => {
     it('returns -1 when not enough user prompts found', () => {
       const ui: HistoryItem[] = [
         userItem(1),
-        geminiItem(2),
+        llmItem(2),
         userItem(3),
-        geminiItem(4),
+        llmItem(4),
         userItem(5),
-        geminiItem(6),
+        llmItem(6),
       ];
       // After compression, API history may be shorter than expected
       const api: Content[] = [
@@ -289,14 +289,14 @@ describe('computeApiTruncationIndex', () => {
     it('maps post-compression UI turns from the latest compressed marker', () => {
       const ui: HistoryItem[] = [
         userItem(1, 'pre-compression prompt'),
-        geminiItem(2),
+        llmItem(2),
         compressionItem(3),
         userItem(4, 'post 1'),
-        geminiItem(5),
+        llmItem(5),
         userItem(6, 'post 2'),
-        geminiItem(7),
+        llmItem(7),
         userItem(8, 'post 3'),
-        geminiItem(9),
+        llmItem(9),
       ];
       const api: Content[] = [
         startupEntry(),
@@ -318,7 +318,7 @@ describe('computeApiTruncationIndex', () => {
     it('does not rewind to UI turns before a successful compression marker', () => {
       const ui: HistoryItem[] = [
         userItem(1, 'pre-compression prompt'),
-        geminiItem(2),
+        llmItem(2),
         compressionItem(3),
         userItem(4, 'post compression'),
       ];
@@ -335,10 +335,10 @@ describe('computeApiTruncationIndex', () => {
     it('does not treat no-op compression markers as collapsed history', () => {
       const ui: HistoryItem[] = [
         userItem(1, 'first prompt'),
-        geminiItem(2),
+        llmItem(2),
         compressionItem(3, CompressionStatus.NOOP),
         userItem(4, 'second prompt'),
-        geminiItem(5),
+        llmItem(5),
       ];
       const api: Content[] = [
         startupEntry(),
@@ -358,9 +358,9 @@ describe('computeApiTruncationIndex', () => {
       // prefix and drop every real turn (R5-1 entrance 3).
       const ui: HistoryItem[] = [
         userItem(1, 'pre 1'),
-        geminiItem(2),
+        llmItem(2),
         userItem(3, 'pre 2'),
-        geminiItem(4),
+        llmItem(4),
       ];
       const api: Content[] = [
         startupEntry(),
@@ -380,16 +380,16 @@ describe('computeApiTruncationIndex', () => {
     const fastCompressedHistory = () => {
       const ui: HistoryItem[] = [
         userItem(1, 'pre 1'),
-        geminiItem(2),
+        llmItem(2),
         userItem(3, 'pre 2'),
-        geminiItem(4),
+        llmItem(4),
         userItem(5, 'pre 3'),
-        geminiItem(6),
+        llmItem(6),
         compressionItem(7, CompressionStatus.COMPRESSED, 'fast'),
         userItem(8, 'post 1'),
-        geminiItem(9),
+        llmItem(9),
         userItem(10, 'post 2'),
-        geminiItem(11),
+        llmItem(11),
       ];
       const api: Content[] = [
         startupEntry(),
@@ -429,10 +429,10 @@ describe('computeApiTruncationIndex', () => {
     it('still blocks turns absorbed by a later summarizing compression', () => {
       const ui: HistoryItem[] = [
         userItem(1, 'pre fast'),
-        geminiItem(2),
+        llmItem(2),
         compressionItem(3, CompressionStatus.COMPRESSED, 'fast'),
         userItem(4, 'between compressions'),
-        geminiItem(5),
+        llmItem(5),
         compressionItem(6, CompressionStatus.COMPRESSED, 'summarize'),
         userItem(7, 'post summarize'),
       ];
@@ -460,7 +460,7 @@ describe('computeApiTruncationIndex', () => {
       } as HistoryItem;
       const ui: HistoryItem[] = [
         userItem(1, 'pre-compression prompt'),
-        geminiItem(2),
+        llmItem(2),
         legacyMarker,
         userItem(4, 'post compression'),
       ];
@@ -506,9 +506,9 @@ describe('computeApiTruncationIndex', () => {
     it('does not count a cleared media-only entry as a user prompt', () => {
       const ui: HistoryItem[] = [
         userItem(1, 'hello'),
-        geminiItem(2),
+        llmItem(2),
         userItem(3, 'world'),
-        geminiItem(4),
+        llmItem(4),
       ];
       const api: Content[] = [
         startupEntry(),
@@ -536,12 +536,12 @@ describe('computeApiTruncationIndex', () => {
     it('keeps the full pre-marker history when a cleared entry precedes a fast marker', () => {
       const ui: HistoryItem[] = [
         userItem(1, 'pre 1'),
-        geminiItem(2),
+        llmItem(2),
         compressionItem(3, CompressionStatus.COMPRESSED, 'fast'),
         userItem(4, 'post 1'),
-        geminiItem(5),
+        llmItem(5),
         userItem(6, 'post 2'),
-        geminiItem(7),
+        llmItem(7),
       ];
       const api: Content[] = [
         startupEntry(),
@@ -568,9 +568,9 @@ describe('computeApiTruncationIndex', () => {
       };
       const ui: HistoryItem[] = [
         userItem(1, 'check this image'),
-        geminiItem(2),
+        llmItem(2),
         userItem(3, 'world'),
-        geminiItem(4),
+        llmItem(4),
       ];
       const api: Content[] = [
         startupEntry(),
@@ -597,9 +597,9 @@ describe('computeApiTruncationIndex', () => {
       };
       const ui: HistoryItem[] = [
         userItem(1, prefixPromptText),
-        geminiItem(2),
+        llmItem(2),
         userItem(3, 'world'),
-        geminiItem(4),
+        llmItem(4),
       ];
       const api: Content[] = [
         startupEntry(),
@@ -632,9 +632,9 @@ describe('computeApiTruncationIndex', () => {
       };
       const ui: HistoryItem[] = [
         userItem(1, exactPlaceholderText),
-        geminiItem(2),
+        llmItem(2),
         userItem(3, 'world'),
-        geminiItem(4),
+        llmItem(4),
       ];
       const api: Content[] = [
         startupEntry(),
@@ -663,11 +663,11 @@ describe('computeApiTruncationIndex', () => {
       const exactPlaceholderText = '[Old inline media cleared: image/png]';
       const ui: HistoryItem[] = [
         userItem(1, 'hello'),
-        geminiItem(2),
+        llmItem(2),
         userItem(3, exactPlaceholderText),
-        geminiItem(4),
+        llmItem(4),
         userItem(5, 'world'),
-        geminiItem(6),
+        llmItem(6),
       ];
       const api: Content[] = [
         startupEntry(),
@@ -693,14 +693,14 @@ describe('computeApiTruncationIndex', () => {
       // isUserTextContent). Both sides agree → correct truncation index.
       const ui: HistoryItem[] = [
         userItem(1, 'first prompt'),
-        geminiItem(2),
+        llmItem(2),
         {
           type: 'notification',
           id: 3,
           text: 'btw side question',
         } as HistoryItem,
         userItem(5, 'next prompt'),
-        geminiItem(6),
+        llmItem(6),
       ];
       const btwMergedIntoToolResult: Content = {
         role: 'user',
@@ -729,10 +729,10 @@ describe('computeApiTruncationIndex', () => {
     it('ignores slash-command items when counting user turns', () => {
       const ui: HistoryItem[] = [
         userItem(1, 'hello'),
-        geminiItem(2),
+        llmItem(2),
         userItem(3, '/help'), // slash command — should be skipped
         userItem(5, 'world'),
-        geminiItem(6),
+        llmItem(6),
       ];
       const api: Content[] = [
         userContent('hello'),
@@ -748,11 +748,11 @@ describe('computeApiTruncationIndex', () => {
     it('counts path-like slash prompts that were sent to the model', () => {
       const ui: HistoryItem[] = [
         userItem(1, 'hello'),
-        geminiItem(2),
+        llmItem(2),
         userItem(3, '/api/apiFunction/接口的实现'),
-        geminiItem(4),
+        llmItem(4),
         userItem(5, 'world'),
-        geminiItem(6),
+        llmItem(6),
       ];
       const api: Content[] = [
         userContent('hello'),
@@ -769,11 +769,11 @@ describe('computeApiTruncationIndex', () => {
     it('counts slash command invocations explicitly marked as sent to the model', () => {
       const ui: HistoryItem[] = [
         userItem(1, 'hello'),
-        geminiItem(2),
+        llmItem(2),
         userItem(3, '/filecmd', true),
-        geminiItem(4),
+        llmItem(4),
         userItem(5, 'world'),
-        geminiItem(6),
+        llmItem(6),
       ];
       const api: Content[] = [
         userContent('hello'),
@@ -790,7 +790,7 @@ describe('computeApiTruncationIndex', () => {
 
   describe('single turn', () => {
     it('handles rewinding the only turn', () => {
-      const ui: HistoryItem[] = [userItem(1), geminiItem(2)];
+      const ui: HistoryItem[] = [userItem(1), llmItem(2)];
       const api: Content[] = [
         userContent('prompt 1'),
         modelContent('response 1'),
@@ -841,7 +841,7 @@ describe('isRealUserTurn', () => {
   });
 
   it('returns false for non-user items', () => {
-    expect(isRealUserTurn(geminiItem(1))).toBe(false);
+    expect(isRealUserTurn(llmItem(1))).toBe(false);
     expect(
       isRealUserTurn({ type: 'info', id: 1, text: 'info' } as HistoryItem),
     ).toBe(false);

@@ -158,7 +158,7 @@ export async function refreshMemoryInstruction(
   }
 
   try {
-    await config.getGeminiClient()?.refreshSystemInstruction();
+    await config.getLlmClient()?.refreshSystemInstruction();
   } catch (err) {
     debugLogger.warn(
       `${logPrefix(options)}refreshSystemInstruction failed: ${err}`,
