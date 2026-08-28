@@ -261,7 +261,13 @@ gh pr review "$PR_NUMBER" --repo "$REPO" --request-changes --body-file /tmp/stag
       | "\(.number) \(.merged) \(.repository.nameWithOwner)"')
   read -r MERGED_PR MERGED_FLAG MERGED_REPO <<< "$CLOSER"
   if [ "$MERGED_FLAG" = "true" ] && [ "$MERGED_REPO" = "$REPO" ]; then
-    MERGED_PRS="$MERGED_PRS $MERGED_PR"   # ascending linked-issue order
+    # One closer can close several linked issues — keep only its first
+    # entry: a duplicate iteration re-fetches, and its `>` truncates the
+    # already-fetched patch before gh retries
+    case " $MERGED_PRS " in
+      *" $MERGED_PR "*) ;;
+      *) MERGED_PRS="$MERGED_PRS $MERGED_PR" ;;
+    esac
   fi
   ```
 
@@ -298,13 +304,19 @@ gh pr review "$PR_NUMBER" --repo "$REPO" --request-changes --body-file /tmp/stag
   ```bash
   gh pr diff "$PR_NUMBER" --repo "$REPO" > /tmp/stage-1pre-pr.patch || exit 1
   [ -s /tmp/stage-1pre-pr.patch ] || exit 1
+  FETCHED_PRS=""
   for MERGED_PR in $MERGED_PRS; do
     # failed or empty: this closer is unverifiable — drop it, never judge
     # an empty patch
     gh pr diff "$MERGED_PR" --repo "$REPO" \
       > "/tmp/stage-1pre-closer-$MERGED_PR.patch" || continue
     [ -s "/tmp/stage-1pre-closer-$MERGED_PR.patch" ] || continue
+    FETCHED_PRS="$FETCHED_PRS $MERGED_PR"
   done
+  # judge only the fetchable set — if every closer fetch failed this
+  # leaves $MERGED_PRS empty and the unresolved-closer branch below
+  # escalates instead of judging nothing as verified
+  MERGED_PRS="$FETCHED_PRS"
   ```
 
   Do NOT download the default branch's files one by one via

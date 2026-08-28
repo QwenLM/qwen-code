@@ -7030,6 +7030,17 @@ describe('stage 1-pre duplicate gate', () => {
     expect(section).toContain('carries a failure guard');
   });
 
+  it('judges only the deduped, fetchable closer set', () => {
+    // One closer can close several linked issues, and the duplicate
+    // iteration's '>' truncates the already-fetched patch before gh
+    // retries. A dropped closer must also leave $MERGED_PRS, or "every
+    // closer fetch failed" is unreachable and an empty patch reaches
+    // judgment as verified.
+    expect(section).toContain('*" $MERGED_PR "*) ;;');
+    expect(section).toContain('FETCHED_PRS="$FETCHED_PRS $MERGED_PR"');
+    expect(section).toContain('MERGED_PRS="$FETCHED_PRS"');
+  });
+
   it('decides subsumption from two frozen gh pr diff patches, never per-file downloads', () => {
     // The check compares this PR's patch against each closer's patch —
     // two `gh pr diff` fetches cover any file count. Downloading
