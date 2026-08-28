@@ -3228,9 +3228,9 @@ describe('runNonInteractive', () => {
           return { responseParts: [{ text: request.callId }] };
         },
       );
-      const calls: ServerGeminiStreamEvent[] = ['proxy-1', 'proxy-2'].map(
+      const calls: ServerLlmStreamEvent[] = ['proxy-1', 'proxy-2'].map(
         (callId) => ({
-          type: GeminiEventType.ToolCallRequest,
+          type: LlmEventType.ToolCallRequest,
           value: {
             callId,
             name: ToolNames.DEFERRED_TOOL_CALL,
@@ -3294,9 +3294,9 @@ describe('runNonInteractive', () => {
         },
       );
 
-      const calls: ServerGeminiStreamEvent[] = [
+      const calls: ServerLlmStreamEvent[] = [
         {
-          type: GeminiEventType.ToolCallRequest,
+          type: LlmEventType.ToolCallRequest,
           value: {
             callId: 'search-call',
             name: ToolNames.TOOL_SEARCH,
@@ -3306,7 +3306,7 @@ describe('runNonInteractive', () => {
           },
         },
         {
-          type: GeminiEventType.ToolCallRequest,
+          type: LlmEventType.ToolCallRequest,
           value: {
             callId: 'proxy-call',
             name: ToolNames.DEFERRED_TOOL_CALL,
@@ -3386,8 +3386,8 @@ describe('runNonInteractive', () => {
 
       // A provider that reuses tool-call ids: same providerCallId, same
       // (name, args) fingerprint, only the internal callId differs.
-      const wrapperEvent = (callId: string): ServerGeminiStreamEvent => ({
-        type: GeminiEventType.ToolCallRequest,
+      const wrapperEvent = (callId: string): ServerLlmStreamEvent => ({
+        type: LlmEventType.ToolCallRequest,
         value: {
           callId,
           providerCallId: 'tool_call_0',
@@ -3549,7 +3549,7 @@ describe('runNonInteractive', () => {
         .mockReturnValueOnce(
           createStreamFromEvents([
             {
-              type: GeminiEventType.ToolCallRequest,
+              type: LlmEventType.ToolCallRequest,
               value: {
                 callId: 'search-1',
                 name: ToolNames.TOOL_SEARCH,
@@ -3632,7 +3632,7 @@ describe('runNonInteractive', () => {
         .mockReturnValueOnce(
           createStreamFromEvents([
             {
-              type: GeminiEventType.ToolCallRequest,
+              type: LlmEventType.ToolCallRequest,
               value: {
                 callId: 'search-1',
                 name: ToolNames.TOOL_SEARCH,
@@ -3648,9 +3648,9 @@ describe('runNonInteractive', () => {
           // and the model answers.
           pushCount += 1;
           return createStreamFromEvents([
-            { type: GeminiEventType.Content, value: 'done' },
+            { type: LlmEventType.Content, value: 'done' },
             {
-              type: GeminiEventType.Finished,
+              type: LlmEventType.Finished,
               value: {
                 reason: undefined,
                 usageMetadata: { totalTokenCount: 1 },
@@ -3740,7 +3740,7 @@ describe('runNonInteractive', () => {
           pushCount += 1;
           return createStreamFromEvents([
             {
-              type: GeminiEventType.ToolCallRequest,
+              type: LlmEventType.ToolCallRequest,
               value: {
                 callId: 'search-1',
                 name: ToolNames.TOOL_SEARCH,
@@ -3764,9 +3764,9 @@ describe('runNonInteractive', () => {
           pushCount += 1;
           teammatesActive = false;
           return createStreamFromEvents([
-            { type: GeminiEventType.Content, value: 'done' },
+            { type: LlmEventType.Content, value: 'done' },
             {
-              type: GeminiEventType.Finished,
+              type: LlmEventType.Finished,
               value: {
                 reason: undefined,
                 usageMetadata: { totalTokenCount: 1 },
@@ -3852,7 +3852,7 @@ describe('runNonInteractive', () => {
         pushCount += 1;
         return createStreamFromEvents([
           {
-            type: GeminiEventType.ToolCallRequest,
+            type: LlmEventType.ToolCallRequest,
             value: {
               callId: 'search-1',
               name: ToolNames.TOOL_SEARCH,
@@ -3862,7 +3862,7 @@ describe('runNonInteractive', () => {
             },
           },
           {
-            type: GeminiEventType.ToolCallRequest,
+            type: LlmEventType.ToolCallRequest,
             value: {
               callId: 'so-1',
               name: ToolNames.STRUCTURED_OUTPUT,
@@ -3944,7 +3944,7 @@ describe('runNonInteractive', () => {
         .mockReturnValueOnce(
           createStreamFromEvents([
             {
-              type: GeminiEventType.ToolCallRequest,
+              type: LlmEventType.ToolCallRequest,
               value: {
                 callId: 'search-1',
                 name: ToolNames.TOOL_SEARCH,
@@ -7433,8 +7433,8 @@ describe('runNonInteractive', () => {
       isClientInitiated: false,
       prompt_id: 'prompt-headless-identity',
     };
-    const toolCall: ServerGeminiStreamEvent = {
-      type: GeminiEventType.ToolCallRequest,
+    const toolCall: ServerLlmStreamEvent = {
+      type: LlmEventType.ToolCallRequest,
       value: providerRequest,
     };
     mockCoreExecuteToolCall.mockImplementation(
@@ -7484,7 +7484,7 @@ describe('runNonInteractive', () => {
       .mockReturnValueOnce(
         createStreamFromEvents([
           {
-            type: GeminiEventType.Finished,
+            type: LlmEventType.Finished,
             value: {
               reason: undefined,
               usageMetadata: { totalTokenCount: 1 },

@@ -12449,14 +12449,14 @@ Other open files:
           pushCount = 1;
           return (async function* () {
             yield {
-              type: GeminiEventType.ChatCompressed,
+              type: LlmEventType.ChatCompressed,
               value: {
                 originalTokenCount: 100,
                 newTokenCount: 50,
                 compressionStatus: CompressionStatus.COMPRESSED,
               },
             };
-            yield { type: GeminiEventType.Content, value: 'response' };
+            yield { type: LlmEventType.Content, value: 'response' };
           })();
         });
         const accept = vi.fn();

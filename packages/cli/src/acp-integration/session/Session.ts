@@ -5387,7 +5387,7 @@ export class Session implements SessionContext {
             // turns the restore into a no-op (the clear already invalidated
             // the snapshot).
             let pendingPresentationGeneration = 0;
-            let presentationSendChat: GeminiChat | undefined;
+            let presentationSendChat: LlmChat | undefined;
             let presentationPushCountBeforeSend = 0;
 
             // conversation_finished must fire on every terminal path of the
@@ -8315,7 +8315,7 @@ export class Session implements SessionContext {
               | ReadonlyMap<string, string>
               | undefined;
             let pendingPresentationGeneration = 0;
-            let presentationSendChat: GeminiChat | undefined;
+            let presentationSendChat: LlmChat | undefined;
             let presentationPushCountBeforeSend = 0;
             try {
               await this.assertCanStartTurn();
@@ -9183,7 +9183,7 @@ export class Session implements SessionContext {
           | ReadonlyMap<string, string>
           | undefined;
         let pendingPresentationGeneration = 0;
-        let presentationSendChat: GeminiChat | undefined;
+        let presentationSendChat: LlmChat | undefined;
         let presentationPushCountBeforeSend = 0;
         try {
           await this.assertCanStartTurn();

@@ -3914,12 +3914,12 @@ export const useLlmStream = (
             for await (const event of stream) {
               if (
                 !accepted &&
-                event.type === ServerGeminiEventType.ChatCompressed
+                event.type === ServerLlmEventType.ChatCompressed
               ) {
                 mutatedBeforeAcceptance = true;
               } else if (
                 !accepted &&
-                event.type === ServerGeminiEventType.Retry &&
+                event.type === ServerLlmEventType.Retry &&
                 event.payloadRebuilt
               ) {
                 // Only reactive overflow recovery rebuilds the request payload,
@@ -3931,18 +3931,18 @@ export const useLlmStream = (
                 reportDeliveryFailure();
               }
               const terminalRejection =
-                event.type === ServerGeminiEventType.Error ||
-                event.type === ServerGeminiEventType.UserCancelled;
+                event.type === ServerLlmEventType.Error ||
+                event.type === ServerLlmEventType.UserCancelled;
               // Only provider-produced output proves that the request context
               // was accepted. Limit, retry, fallback, compression, and hook
               // events can all be emitted locally before a request reaches
               // the provider and must therefore fail closed.
               const provesAcceptance =
-                event.type === ServerGeminiEventType.Content ||
-                event.type === ServerGeminiEventType.Thought ||
-                event.type === ServerGeminiEventType.ToolCallRequest ||
-                event.type === ServerGeminiEventType.Finished ||
-                event.type === ServerGeminiEventType.Citation;
+                event.type === ServerLlmEventType.Content ||
+                event.type === ServerLlmEventType.Thought ||
+                event.type === ServerLlmEventType.ToolCallRequest ||
+                event.type === ServerLlmEventType.Finished ||
+                event.type === ServerLlmEventType.Citation;
               if (terminalRejection) {
                 reportDeliveryFailure();
               } else if (provesAcceptance && !accepted) {
