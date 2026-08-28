@@ -3580,9 +3580,9 @@ export class Session implements SessionContext {
     // and a sibling session's deletion was then undone by the next
     // refresh: absent on disk but present in the stale cache reads as a
     // pending write, so the deleted run was republished and stayed for
-    // the life of the session. Cleared on re-registration
-    // (`#forgetPersistedWorkflowRun`) so a genuine re-run of the same
-    // runId is remembered again.
+    // the life of the session. Released at the top of this method when
+    // the runId comes back non-terminal (a retry/resume re-registers it)
+    // so a genuine re-run of the same runId is remembered again.
     if (this.persistedWorkflowRunIds.has(entry.runId)) return;
     const snapshot = toSnapshot(entry);
     this.unpersistedWorkflowHistory.set(snapshot.runId, snapshot);
