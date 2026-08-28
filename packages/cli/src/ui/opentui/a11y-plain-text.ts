@@ -47,17 +47,22 @@ export function markdownToPlainText(markdown: string): string {
 
   for (const rawLine of markdown.split('\n')) {
     // CommonMark fence: 3+ backticks/tildes, optionally indented up to 3
-    // spaces. Inside a block only a same-char fence of >= length closes it;
-    // every other line is literal body (no de-quoting — fenced bodies never
-    // contain blockquote structure).
-    const fenceMatch = /^ {0,3}(`{3,}|~{3,})/.exec(rawLine);
+    // spaces. An OPENING fence may carry info text (```js); a CLOSING
+    // fence cannot — a fence-like line with trailing content inside a
+    // block is literal body, not a close.
+    const fenceMatch = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(rawLine);
     if (fenceMatch) {
       const run = fenceMatch[1]!;
+      const trailing = fenceMatch[2] ?? '';
       const char = run.charAt(0) as '`' | '~';
       if (fenceChar === null) {
         fenceChar = char;
         fenceLength = run.length;
-      } else if (fenceChar === char && run.length >= fenceLength) {
+      } else if (
+        fenceChar === char &&
+        run.length >= fenceLength &&
+        trailing.trim() === ''
+      ) {
         fenceChar = null;
         fenceLength = 0;
       } else {
