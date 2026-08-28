@@ -619,11 +619,15 @@ describe('agent-prompt (command boundary)', () => {
       // The verdict branch: Exclusion Criteria yes, finding format no.
       expect(briefText).toContain('What is NOT a finding');
       expect(briefText).not.toContain('**Anchor:**');
-      // The witness rule: a confirmed Critical returns its executed evidence
+      // The witness rule: a confirmed finding returns its executed evidence
       // or the one-line reason, and the sweep is a named witness form. These
-      // demands are what the orchestrator's low-confidence demotion sorts on,
-      // so a brief that drops them silently demotes every trace-only Critical.
-      expect(briefText).toContain('A confirmed Critical returns its witness.');
+      // demands are what the machine demotion (`holdUnwitnessedFindings`)
+      // sorts on, so a brief that drops them silently demotes every
+      // trace-only Critical — and, since the rule grew to the other postable
+      // severity, every trace-only Suggestion with it.
+      expect(briefText).toContain(
+        'A confirmed Critical returns its witness — and so does every confirmed Suggestion.',
+      );
       expect(briefText).toContain('witness: not run —');
       expect(briefText).toContain('sweep the real population');
       // The two decision axes (#10291) ride the same witness: the brief
@@ -646,6 +650,18 @@ describe('agent-prompt (command boundary)', () => {
         'only a Critical that is both fails-closed and new-surface is recorded as a deferral',
       );
       expect(briefText).toContain('OMIT that line rather than guess');
+      // The incidental channel and the run-pairing capabilities the brief
+      // gained with it: dropping any of these silently reverts the verifier
+      // to a reader.
+      expect(briefText).toContain('### Incidental findings');
+      expect(briefText).toContain('review ab-drive');
+      expect(briefText).toContain('revert-hunk');
+      // The revert-hunk paragraph must distinguish a genuine coupling
+      // refusal (carries `conflict`) from a harness/invocation failure
+      // (carries `harnessFailure`): dropping this tells the verifier to
+      // quote a mistyped --tree as a fact about the diff.
+      expect(briefText).toContain('carries `conflict`');
+      expect(briefText).toContain('`harnessFailure: true`');
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

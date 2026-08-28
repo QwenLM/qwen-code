@@ -416,13 +416,107 @@ const NEGATION = new RegExp(
   `(?:${NEG_WORD})(?:(?!${ADVERSATIVE})[^.!?。！？;:；：\\n]){0,40}$`,
 );
 
+/**
+ * Remove every region of a comment body that GitHub renders as QUOTED text
+ * rather than the comment's own claim, so a blocker scan sees only what the
+ * author asserts. The posting contract mandates a fenced witness (a test log,
+ * a probe transcript) under every finding, and program output routinely
+ * prints literal `[Critical]` / "still fails" lines — scanning inside would
+ * self-promote a non-blocking Suggestion into the blocker section every round,
+ * the identical harm `isIssueBlocker` documents for the issue channel.
+ *
+ * Structural rather than a regex per construct, because the surface is every
+ * quoting form GitHub-flavoured Markdown has: fenced blocks (``` or ~~~, three
+ * or more, opened only at line start with up to three spaces of indent, closed
+ * by a same-character run at least as long — so a 4-backtick fence containing
+ * ``` stays one fence, and a mid-line ``` run is text, not a delimiter),
+ * indented code blocks (four spaces or a tab after a blank line), inline code
+ * spans (a backtick run closed by the same run on the line), and HTML
+ * comments (rendered as nothing; may span lines). Constructs nest the way the
+ * renderer nests them: whichever opens first owns the text until it closes —
+ * a `<!--` inside a fence is fence content, a fence opener inside an open
+ * comment is comment text — and an unclosed fence or comment swallows the
+ * rest of the body, as GitHub renders it.
+ */
+export function stripQuotedRegions(text: string): string {
+  const out: string[] = [];
+  let fence: { ch: string; len: number } | null = null;
+  let inComment = false;
+  let inIndented = false;
+  let prevBlank = true;
+  for (const line of text.split('\n')) {
+    if (fence !== null) {
+      const close = /^ {0,3}(`{3,}|~{3,})\s*$/.exec(line);
+      if (close && close[1][0] === fence.ch && close[1].length >= fence.len) {
+        fence = null;
+      }
+      prevBlank = false;
+      continue;
+    }
+    if (!inComment) {
+      const open = /^ {0,3}(`{3,}|~{3,})/.exec(line);
+      if (open) {
+        fence = { ch: open[1][0], len: open[1].length };
+        prevBlank = false;
+        continue;
+      }
+      // Indented code: begins after a blank line, runs while lines stay
+      // indented (or are blank).
+      if (inIndented) {
+        if (/^(?: {4}|\t)/.test(line) || line.trim() === '') continue;
+        inIndented = false;
+      } else if (prevBlank && /^(?: {4}|\t)/.test(line)) {
+        inIndented = true;
+        continue;
+      }
+    }
+    // Within a plain line: HTML comments (possibly continuing from a previous
+    // line) and inline code spans.
+    let acc = '';
+    let i = 0;
+    while (i < line.length) {
+      if (inComment) {
+        const end = line.indexOf('-->', i);
+        if (end < 0) {
+          i = line.length;
+          break;
+        }
+        inComment = false;
+        i = end + 3;
+        continue;
+      }
+      if (line.startsWith('<!--', i)) {
+        inComment = true;
+        i += 4;
+        continue;
+      }
+      if (line[i] === '`') {
+        const run = /^`+/.exec(line.slice(i))![0];
+        const close = line.indexOf(run, i + run.length);
+        if (close >= 0) {
+          i = close + run.length; // the span is quoted text — drop it
+          continue;
+        }
+        acc += run;
+        i += run.length;
+        continue;
+      }
+      acc += line[i];
+      i++;
+    }
+    out.push(acc);
+    prevBlank = line.trim() === '';
+  }
+  return out.join('\n');
+}
+
 export function carriesBlockerSignal(body: string | undefined): boolean {
   // Only RENDERED text can promote through this ungated channel: GitHub
   // renders an HTML comment as nothing, so a planted `<!-- [critical] -->`
   // would otherwise become an invisible, irrefutable blocker — the exact
   // harm `isBlockerBody`'s identity gate exists to prevent, reached around
   // it. An unclosed comment swallows the rest of the body, as on GitHub.
-  const b = (body ?? '').replace(/<!--[\s\S]*?(?:-->|$)/g, '').toLowerCase();
+  const b = stripQuotedRegions(body ?? '').toLowerCase();
   return BLOCKER_PATTERNS.some((re) => {
     // Preserve the pattern's own flags (a future `i`/`u` must not be silently
     // dropped) and add `g` for the scan; dedupe so `g` is never doubled.
