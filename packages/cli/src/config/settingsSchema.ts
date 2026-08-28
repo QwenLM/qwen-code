@@ -2534,6 +2534,31 @@ const SETTINGS_SCHEMA = {
               'environments.',
             showInDialog: false,
           },
+          mcp: {
+            type: 'object',
+            label: 'Auto Mode MCP Tools',
+            category: 'Tools',
+            requiresRestart: true,
+            default: {},
+            description: 'AUTO classifier controls for third-party MCP tools.',
+            showInDialog: false,
+            properties: {
+              forwardArguments: {
+                type: 'boolean',
+                label: 'Forward MCP Arguments To Classifier',
+                category: 'Tools',
+                requiresRestart: true,
+                default: true,
+                description:
+                  'Forward MCP tool arguments (bounded and truncated) to the ' +
+                  'AUTO classifier so it can judge what the agent is about ' +
+                  'to send to the server. When false the classifier sees ' +
+                  'only the tool name, which usually results in a ' +
+                  'conservative block.',
+                showInDialog: false,
+              },
+            },
+          },
         },
       },
     },

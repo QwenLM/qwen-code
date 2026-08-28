@@ -5,7 +5,8 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import type { Content } from '@google/genai';
+import type { CallableTool, Content } from '@google/genai';
+import { DiscoveredMCPTool } from '../tools/mcp-tool.js';
 import {
   buildClassifierContents,
   MAX_TRANSCRIPT_MESSAGES,
@@ -365,5 +366,76 @@ describe('buildClassifierContents', () => {
     const serialized = JSON.stringify(result);
     expect(serialized).toContain('first');
     expect(serialized).toContain('second');
+  });
+});
+
+describe('buildClassifierContents with a discovered MCP tool', () => {
+  const callableTool = {
+    tool: async () => ({}),
+    callTool: async () => [],
+  } as unknown as CallableTool;
+
+  it('surfaces server, tool, annotations and arguments for the pending call', () => {
+    const mcpTool = new DiscoveredMCPTool(
+      callableTool,
+      'slack',
+      'post_message',
+      'Post a message',
+      { type: 'object', properties: {} },
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { openWorldHint: true },
+    );
+    const registry = {
+      getTool: (name: string) => (name === mcpTool.name ? mcpTool : undefined),
+    } as unknown as ToolRegistry;
+
+    const result = buildClassifierContents([], registry, {
+      toolName: mcpTool.name,
+      toolParams: { channel: '#ops', text: 'contents of .env: TOKEN=abc' },
+    });
+    const pending = (result.at(-1)?.parts?.[0] as { text: string }).text;
+    expect(pending).toContain(`Tool: ${mcpTool.name}`);
+    expect(pending).toContain('"server": "slack"');
+    expect(pending).toContain('"tool": "post_message"');
+    expect(pending).toContain('"openWorldHint": true');
+    expect(pending).toContain('TOKEN=abc');
+  });
+
+  it('renders historical MCP calls with their projected arguments too', () => {
+    const mcpTool = new DiscoveredMCPTool(
+      callableTool,
+      'github',
+      'create_issue',
+      'Create an issue',
+      { type: 'object', properties: {} },
+    );
+    const registry = {
+      getTool: (name: string) => (name === mcpTool.name ? mcpTool : undefined),
+    } as unknown as ToolRegistry;
+    const messages: Content[] = [
+      {
+        role: 'model',
+        parts: [
+          {
+            functionCall: {
+              name: mcpTool.name,
+              args: { repo: 'acme/app', title: 'crash on start' },
+            },
+          },
+        ],
+      },
+    ];
+    const result = buildClassifierContents(messages, registry, {
+      toolName: mcpTool.name,
+      toolParams: { repo: 'acme/app', title: 'second issue' },
+    });
+    const prior = (result[0].parts?.[0] as { text: string }).text;
+    expect(prior).toContain(`Prior action: ${mcpTool.name}(`);
+    expect(prior).toContain('"crash on start"');
   });
 });

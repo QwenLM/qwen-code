@@ -294,3 +294,17 @@ describe('stage suffixes', () => {
     expect(STAGE2_SUFFIX).toMatch(/review/i);
   });
 });
+
+describe('MCP guidance', () => {
+  it('tells the classifier how to read a projected MCP call', () => {
+    const prompt = buildClassifierSystemPrompt(makeConfig({}));
+    expect(prompt).toContain('mcp__');
+    expect(prompt).toMatch(/third-party MCP server/);
+    // Arguments are the evidence; annotations are untrusted; truncation is
+    // never a reason to relax.
+    expect(prompt).toMatch(/`arguments`/);
+    expect(prompt).toMatch(/self-reported by the server/);
+    expect(prompt).toMatch(/arguments_truncated/);
+    expect(prompt).toMatch(/never evidence of safety/);
+  });
+});
