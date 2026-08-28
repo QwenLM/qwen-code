@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import type {
-  WebShellSidebarSessionActionItem,
-  WebShellSidebarSessionInlineActionItem,
+import {
+  DEFAULT_INLINE_ACTION_ITEMS,
+  type WebShellSidebarSessionActionItem,
+  type WebShellSidebarSessionInlineActionItem,
 } from './WebShellSidebar';
 
 const ALL_ITEMS: readonly WebShellSidebarSessionActionItem[] = [
@@ -15,9 +16,6 @@ const ALL_ITEMS: readonly WebShellSidebarSessionActionItem[] = [
 ];
 
 const DEFAULT_ITEMS: readonly WebShellSidebarSessionActionItem[] = ALL_ITEMS;
-
-const DEFAULT_INLINE_ITEMS: readonly WebShellSidebarSessionInlineActionItem[] =
-  ['pin'];
 
 /** Items that can never appear as inline buttons. */
 const DROPDOWN_ONLY_ITEMS: readonly WebShellSidebarSessionActionItem[] = [
@@ -73,7 +71,7 @@ describe('session action visibility matrix', () => {
   describe('defaults (no consumer config)', () => {
     it('shows details on hover, pin inline, and archive plus mutations in the dropdown', () => {
       const { inline, dropdown, hover, showDropdownTrigger } =
-        computeVisibility(DEFAULT_ITEMS, DEFAULT_INLINE_ITEMS);
+        computeVisibility(DEFAULT_ITEMS, DEFAULT_INLINE_ACTION_ITEMS);
 
       expect([...inline].sort()).toEqual(['pin']);
       expect([...dropdown].sort()).toEqual([
@@ -105,7 +103,7 @@ describe('session action visibility matrix', () => {
     it('items: [] — nothing renders anywhere, trigger hidden', () => {
       const { inline, dropdown, showDropdownTrigger } = computeVisibility(
         [],
-        DEFAULT_INLINE_ITEMS,
+        DEFAULT_INLINE_ACTION_ITEMS,
       );
 
       expect(inline.size).toBe(0);
@@ -140,7 +138,7 @@ describe('session action visibility matrix', () => {
 
     it('items: ["details", "group"] — details stays on hover', () => {
       const { inline, dropdown, hover, showDropdownTrigger } =
-        computeVisibility(['details', 'group'], DEFAULT_INLINE_ITEMS);
+        computeVisibility(['details', 'group'], DEFAULT_INLINE_ACTION_ITEMS);
 
       expect(inline.size).toBe(0);
       expect([...dropdown]).toEqual(['group']);
@@ -153,13 +151,13 @@ describe('session action visibility matrix', () => {
         items: readonly WebShellSidebarSessionActionItem[];
         inlineItems: readonly WebShellSidebarSessionInlineActionItem[];
       }> = [
-        { items: DEFAULT_ITEMS, inlineItems: DEFAULT_INLINE_ITEMS },
+        { items: DEFAULT_ITEMS, inlineItems: DEFAULT_INLINE_ACTION_ITEMS },
         { items: DEFAULT_ITEMS, inlineItems: [] },
         { items: DEFAULT_ITEMS, inlineItems: ['pin', 'delete'] },
         { items: DEFAULT_ITEMS, inlineItems: ['rename', 'export', 'delete'] },
         { items: ['delete', 'rename'], inlineItems: ['delete', 'rename'] },
         { items: ['pin', 'archive'], inlineItems: [] },
-        { items: [], inlineItems: DEFAULT_INLINE_ITEMS },
+        { items: [], inlineItems: DEFAULT_INLINE_ACTION_ITEMS },
       ];
 
       for (const config of configs) {
