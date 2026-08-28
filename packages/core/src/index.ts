@@ -83,8 +83,8 @@ export {
   PLAN_MODE_ENTRY_SIBLING_SKIP_MESSAGE,
   findPlanModeEntryBatchBoundaryIndex,
 } from './core/plan-mode-entry-policy.js';
-export * from './core/geminiChat.js';
-export * from './core/geminiRequest.js';
+export * from './core/llm-chat.js';
+export * from './core/llm-request.js';
 export * from './core/inlineMediaLimit.js';
 export * from './core/insightProtocol.js';
 export * from './core/logger.js';
@@ -259,6 +259,11 @@ export type {
   PublishedArtifact,
 } from './tools/artifact/publisher.js';
 export type { CronCreateTool, CronCreateParams } from './tools/cron-create.js';
+export type {
+  CurrentSessionScheduledTaskCreateRequest,
+  CurrentSessionScheduledTaskCreateResult,
+  CurrentSessionScheduledTaskCreator,
+} from './config/config.js';
 export type { CronListTool, CronListParams } from './tools/cron-list.js';
 export type { CronDeleteTool, CronDeleteParams } from './tools/cron-delete.js';
 export type { ToolSearchTool, ToolSearchParams } from './tools/tool-search.js';
@@ -281,6 +286,7 @@ export {
   computeThresholds,
   type CompactionThresholds,
 } from './services/chatCompressionService.js';
+export { estimateContextTextTokens } from './services/tokenEstimation.js';
 export {
   resolveSlimmingConfig,
   type ResolvedSlimmingConfig,
@@ -336,6 +342,12 @@ export * from './services/visionBridge/image-capability.js';
 export * from './services/sessionRecap.js';
 export * from './services/session-artifact-persistence.js';
 export * from './services/session-reference-service.js';
+export * from './ipc/inbound-gate.js';
+export * from './ipc/peer-envelope.js';
+export * from './ipc/peer-frames.js';
+export * from './ipc/socket-path.js';
+export * from './ipc/uds-client.js';
+export * from './ipc/uds-inbox.js';
 export * from './services/session-registry.js';
 export * from './services/sessionService.js';
 export {
@@ -413,6 +425,7 @@ export { escapeXml } from './utils/xml.js';
 export * from './services/shellExecutionService.js';
 export * from './services/monitorRegistry.js';
 export * from './services/backgroundShellRegistry.js';
+export * from './services/web-terminal-registry.js';
 export * from './agents/workflow-run-registry.js';
 export * from './agents/workflow-snapshot.js';
 export {

@@ -30,7 +30,7 @@ import {
   UnauthorizedError,
   toFriendlyError,
 } from '../utils/errors.js';
-import type { GeminiChat } from './geminiChat.js';
+import type { LlmChat } from './llm-chat.js';
 import type { RetryInfo } from '../utils/rateLimit.js';
 import {
   getThoughtSummary,
@@ -59,7 +59,7 @@ export interface ServerTool {
   ): Promise<ToolResult>;
 }
 
-export enum GeminiEventType {
+export enum LlmEventType {
   Content = 'content',
   ToolCallRequest = 'tool_call_request',
   ToolCallResponse = 'tool_call_response',
@@ -84,16 +84,19 @@ export enum GeminiEventType {
   ModelFallback = 'model_fallback',
 }
 
-export type ServerGeminiRetryEvent = {
-  type: GeminiEventType.Retry;
+/** @deprecated Use `LlmEventType`; retained until a future major release. */
+export { LlmEventType as GeminiEventType };
+
+export type ServerLlmRetryEvent = {
+  type: LlmEventType.Retry;
   retryInfo?: RetryInfo;
   /** When true, the retry is a continuation (recovery) rather than a fresh
    *  restart. The UI should keep accumulated text so the continuation appends. */
   isContinuation?: boolean;
 };
 
-export type ServerGeminiModelFallbackEvent = {
-  type: GeminiEventType.ModelFallback;
+export type ServerLlmModelFallbackEvent = {
+  type: LlmEventType.ModelFallback;
   /** The model that exhausted its retry budget. */
   fromModel: string;
   /** The model the system is switching to. */
@@ -109,7 +112,7 @@ export interface StructuredError {
   status?: number;
 }
 
-export interface GeminiErrorEventValue {
+export interface LlmErrorEventValue {
   error: StructuredError;
 }
 
@@ -119,10 +122,16 @@ export interface SessionTokenLimitExceededValue {
   message: string;
 }
 
-export interface GeminiFinishedEventValue {
+export interface LlmFinishedEventValue {
   reason: FinishReason | undefined;
   usageMetadata: GenerateContentResponseUsageMetadata | undefined;
 }
+
+/** @deprecated Use `LlmErrorEventValue`; retained until a future major release. */
+export type GeminiErrorEventValue = LlmErrorEventValue;
+
+/** @deprecated Use `LlmFinishedEventValue`; retained until a future major release. */
+export type GeminiFinishedEventValue = LlmFinishedEventValue;
 
 export interface ToolCallRequestInfo {
   callId: string;
@@ -204,7 +213,7 @@ function summarizeHistoryEntry(content: Content) {
   };
 }
 
-function buildApiErrorReportContext(chat: GeminiChat, req: PartListUnion) {
+function buildApiErrorReportContext(chat: LlmChat, req: PartListUnion) {
   const requestParts = normalizeRequestParts(req);
   return {
     history: {
@@ -302,7 +311,7 @@ export interface ServerToolCallConfirmationDetails {
   details: ToolCallConfirmationDetails;
 }
 
-export type ServerGeminiContentPart =
+export type ServerLlmContentPart =
   | { text: string }
   | {
       inlineData: {
@@ -312,40 +321,40 @@ export type ServerGeminiContentPart =
       };
     };
 
-export type ServerGeminiContentEvent = {
-  type: GeminiEventType.Content;
+export type ServerLlmContentEvent = {
+  type: LlmEventType.Content;
   value: string;
   /** Ordered display parts, present only when the chunk contains an image. */
-  parts?: ServerGeminiContentPart[];
+  parts?: ServerLlmContentPart[];
 };
 
-export type ServerGeminiThoughtEvent = {
-  type: GeminiEventType.Thought;
+export type ServerLlmThoughtEvent = {
+  type: LlmEventType.Thought;
   value: ThoughtSummary;
 };
 
-export type ServerGeminiToolCallRequestEvent = {
-  type: GeminiEventType.ToolCallRequest;
+export type ServerLlmToolCallRequestEvent = {
+  type: LlmEventType.ToolCallRequest;
   value: ToolCallRequestInfo;
 };
 
-export type ServerGeminiToolCallResponseEvent = {
-  type: GeminiEventType.ToolCallResponse;
+export type ServerLlmToolCallResponseEvent = {
+  type: LlmEventType.ToolCallResponse;
   value: ToolCallResponseInfo;
 };
 
-export type ServerGeminiToolCallConfirmationEvent = {
-  type: GeminiEventType.ToolCallConfirmation;
+export type ServerLlmToolCallConfirmationEvent = {
+  type: LlmEventType.ToolCallConfirmation;
   value: ServerToolCallConfirmationDetails;
 };
 
-export type ServerGeminiUserCancelledEvent = {
-  type: GeminiEventType.UserCancelled;
+export type ServerLlmUserCancelledEvent = {
+  type: LlmEventType.UserCancelled;
 };
 
-export type ServerGeminiErrorEvent = {
-  type: GeminiEventType.Error;
-  value: GeminiErrorEventValue;
+export type ServerLlmErrorEvent = {
+  type: LlmEventType.Error;
+  value: LlmErrorEventValue;
 };
 
 export enum CompressionStatus {
@@ -410,27 +419,27 @@ export interface ChatCompressionInfo {
   warning?: string;
 }
 
-export type ServerGeminiChatCompressedEvent = {
-  type: GeminiEventType.ChatCompressed;
+export type ServerLlmChatCompressedEvent = {
+  type: LlmEventType.ChatCompressed;
   value: ChatCompressionInfo | null;
 };
 
-export type ServerGeminiMaxSessionTurnsEvent = {
-  type: GeminiEventType.MaxSessionTurns;
+export type ServerLlmMaxSessionTurnsEvent = {
+  type: LlmEventType.MaxSessionTurns;
 };
 
-export type ServerGeminiSessionTokenLimitExceededEvent = {
-  type: GeminiEventType.SessionTokenLimitExceeded;
+export type ServerLlmSessionTokenLimitExceededEvent = {
+  type: LlmEventType.SessionTokenLimitExceeded;
   value: SessionTokenLimitExceededValue;
 };
 
-export type ServerGeminiFinishedEvent = {
-  type: GeminiEventType.Finished;
-  value: GeminiFinishedEventValue;
+export type ServerLlmFinishedEvent = {
+  type: LlmEventType.Finished;
+  value: LlmFinishedEventValue;
 };
 
-export type ServerGeminiLoopDetectedEvent = {
-  type: GeminiEventType.LoopDetected;
+export type ServerLlmLoopDetectedEvent = {
+  type: LlmEventType.LoopDetected;
   // The loop type is optional so historical call sites that don't produce one
   // (tests, fixtures) stay valid. Real emissions in client.ts always populate
   // it so downstream consumers can surface a concrete reason to the user.
@@ -439,26 +448,26 @@ export type ServerGeminiLoopDetectedEvent = {
   };
 };
 
-export type ServerGeminiCitationEvent = {
-  type: GeminiEventType.Citation;
+export type ServerLlmCitationEvent = {
+  type: LlmEventType.Citation;
   value: string;
 };
 
-export type ServerGeminiHookSystemMessageEvent = {
-  type: GeminiEventType.HookSystemMessage;
+export type ServerLlmHookSystemMessageEvent = {
+  type: LlmEventType.HookSystemMessage;
   value: string;
 };
 
-export type ServerGeminiUserPromptSubmitBlockedEvent = {
-  type: GeminiEventType.UserPromptSubmitBlocked;
+export type ServerLlmUserPromptSubmitBlockedEvent = {
+  type: LlmEventType.UserPromptSubmitBlocked;
   value: {
     reason: string;
     originalPrompt: string;
   };
 };
 
-export type ServerGeminiStopHookLoopEvent = {
-  type: GeminiEventType.StopHookLoop;
+export type ServerLlmStopHookLoopEvent = {
+  type: LlmEventType.StopHookLoop;
   value: {
     iterationCount: number;
     reasons: string[];
@@ -466,45 +475,94 @@ export type ServerGeminiStopHookLoopEvent = {
   };
 };
 
-export type ServerGeminiActiveGoalEvent = {
-  type: GeminiEventType.ActiveGoal;
+export type ServerLlmActiveGoalEvent = {
+  type: LlmEventType.ActiveGoal;
   value: ActiveGoal | null;
 };
 
-export type ServerGeminiGoalStateEvent = {
-  type: GeminiEventType.GoalState;
+export type ServerLlmGoalStateEvent = {
+  type: LlmEventType.GoalState;
   value: GoalSnapshotV2;
   cause?: GoalStateCause;
 };
 
 // The original union type, now composed of the individual types
-export type ServerGeminiStreamEvent =
-  | ServerGeminiGoalStateEvent
-  | ServerGeminiActiveGoalEvent
-  | ServerGeminiChatCompressedEvent
-  | ServerGeminiCitationEvent
-  | ServerGeminiContentEvent
-  | ServerGeminiErrorEvent
-  | ServerGeminiFinishedEvent
-  | ServerGeminiHookSystemMessageEvent
-  | ServerGeminiUserPromptSubmitBlockedEvent
-  | ServerGeminiStopHookLoopEvent
-  | ServerGeminiLoopDetectedEvent
-  | ServerGeminiMaxSessionTurnsEvent
-  | ServerGeminiModelFallbackEvent
-  | ServerGeminiThoughtEvent
-  | ServerGeminiToolCallConfirmationEvent
-  | ServerGeminiToolCallRequestEvent
-  | ServerGeminiToolCallResponseEvent
-  | ServerGeminiUserCancelledEvent
-  | ServerGeminiSessionTokenLimitExceededEvent
-  | ServerGeminiRetryEvent;
+export type ServerLlmStreamEvent =
+  | ServerLlmGoalStateEvent
+  | ServerLlmActiveGoalEvent
+  | ServerLlmChatCompressedEvent
+  | ServerLlmCitationEvent
+  | ServerLlmContentEvent
+  | ServerLlmErrorEvent
+  | ServerLlmFinishedEvent
+  | ServerLlmHookSystemMessageEvent
+  | ServerLlmUserPromptSubmitBlockedEvent
+  | ServerLlmStopHookLoopEvent
+  | ServerLlmLoopDetectedEvent
+  | ServerLlmMaxSessionTurnsEvent
+  | ServerLlmModelFallbackEvent
+  | ServerLlmThoughtEvent
+  | ServerLlmToolCallConfirmationEvent
+  | ServerLlmToolCallRequestEvent
+  | ServerLlmToolCallResponseEvent
+  | ServerLlmUserCancelledEvent
+  | ServerLlmSessionTokenLimitExceededEvent
+  | ServerLlmRetryEvent;
+
+/** @deprecated Use `ServerLlmRetryEvent`; retained until a future major release. */
+export type ServerGeminiRetryEvent = ServerLlmRetryEvent;
+/** @deprecated Use `ServerLlmModelFallbackEvent`; retained until a future major release. */
+export type ServerGeminiModelFallbackEvent = ServerLlmModelFallbackEvent;
+/** @deprecated Use `ServerLlmContentPart`; retained until a future major release. */
+export type ServerGeminiContentPart = ServerLlmContentPart;
+/** @deprecated Use `ServerLlmContentEvent`; retained until a future major release. */
+export type ServerGeminiContentEvent = ServerLlmContentEvent;
+/** @deprecated Use `ServerLlmThoughtEvent`; retained until a future major release. */
+export type ServerGeminiThoughtEvent = ServerLlmThoughtEvent;
+/** @deprecated Use `ServerLlmToolCallRequestEvent`; retained until a future major release. */
+export type ServerGeminiToolCallRequestEvent = ServerLlmToolCallRequestEvent;
+/** @deprecated Use `ServerLlmToolCallResponseEvent`; retained until a future major release. */
+export type ServerGeminiToolCallResponseEvent = ServerLlmToolCallResponseEvent;
+/** @deprecated Use `ServerLlmToolCallConfirmationEvent`; retained until a future major release. */
+export type ServerGeminiToolCallConfirmationEvent =
+  ServerLlmToolCallConfirmationEvent;
+/** @deprecated Use `ServerLlmUserCancelledEvent`; retained until a future major release. */
+export type ServerGeminiUserCancelledEvent = ServerLlmUserCancelledEvent;
+/** @deprecated Use `ServerLlmErrorEvent`; retained until a future major release. */
+export type ServerGeminiErrorEvent = ServerLlmErrorEvent;
+/** @deprecated Use `ServerLlmChatCompressedEvent`; retained until a future major release. */
+export type ServerGeminiChatCompressedEvent = ServerLlmChatCompressedEvent;
+/** @deprecated Use `ServerLlmMaxSessionTurnsEvent`; retained until a future major release. */
+export type ServerGeminiMaxSessionTurnsEvent = ServerLlmMaxSessionTurnsEvent;
+/** @deprecated Use `ServerLlmSessionTokenLimitExceededEvent`; retained until a future major release. */
+export type ServerGeminiSessionTokenLimitExceededEvent =
+  ServerLlmSessionTokenLimitExceededEvent;
+/** @deprecated Use `ServerLlmFinishedEvent`; retained until a future major release. */
+export type ServerGeminiFinishedEvent = ServerLlmFinishedEvent;
+/** @deprecated Use `ServerLlmLoopDetectedEvent`; retained until a future major release. */
+export type ServerGeminiLoopDetectedEvent = ServerLlmLoopDetectedEvent;
+/** @deprecated Use `ServerLlmCitationEvent`; retained until a future major release. */
+export type ServerGeminiCitationEvent = ServerLlmCitationEvent;
+/** @deprecated Use `ServerLlmHookSystemMessageEvent`; retained until a future major release. */
+export type ServerGeminiHookSystemMessageEvent =
+  ServerLlmHookSystemMessageEvent;
+/** @deprecated Use `ServerLlmUserPromptSubmitBlockedEvent`; retained until a future major release. */
+export type ServerGeminiUserPromptSubmitBlockedEvent =
+  ServerLlmUserPromptSubmitBlockedEvent;
+/** @deprecated Use `ServerLlmStopHookLoopEvent`; retained until a future major release. */
+export type ServerGeminiStopHookLoopEvent = ServerLlmStopHookLoopEvent;
+/** @deprecated Use `ServerLlmActiveGoalEvent`; retained until a future major release. */
+export type ServerGeminiActiveGoalEvent = ServerLlmActiveGoalEvent;
+/** @deprecated Use `ServerLlmGoalStateEvent`; retained until a future major release. */
+export type ServerGeminiGoalStateEvent = ServerLlmGoalStateEvent;
+/** @deprecated Use `ServerLlmStreamEvent`; retained until a future major release. */
+export type ServerGeminiStreamEvent = ServerLlmStreamEvent;
 
 function getDisplayContentParts(
   response: GenerateContentResponse,
-): ServerGeminiContentPart[] {
+): ServerLlmContentPart[] {
   const parts = response.candidates?.[0]?.content?.parts ?? [];
-  const displayParts: ServerGeminiContentPart[] = [];
+  const displayParts: ServerLlmContentPart[] = [];
 
   for (const part of parts) {
     if (part.thought) {
@@ -543,7 +601,7 @@ export class Turn {
   private readonly goalContext?: GoalTurnPermit;
 
   constructor(
-    private readonly chat: GeminiChat,
+    private readonly chat: LlmChat,
     private readonly prompt_id: string,
     goalContext?: GoalTurnPermit,
     private readonly promptIdentity?: string,
@@ -555,7 +613,7 @@ export class Turn {
     model: string,
     req: PartListUnion,
     signal: AbortSignal,
-  ): AsyncGenerator<ServerGeminiStreamEvent> {
+  ): AsyncGenerator<ServerLlmStreamEvent> {
     try {
       // Note: This assumes `sendMessageStream` yields events like
       // { type: StreamEventType.RETRY } or { type: StreamEventType.CHUNK, value: GenerateContentResponse }
@@ -574,7 +632,7 @@ export class Turn {
 
       for await (const streamEvent of responseStream) {
         if (signal?.aborted) {
-          yield { type: GeminiEventType.UserCancelled };
+          yield { type: LlmEventType.UserCancelled };
           return;
         }
 
@@ -585,7 +643,7 @@ export class Turn {
           this.pendingCitations.clear();
           this.finishReason = undefined;
           yield {
-            type: GeminiEventType.Retry,
+            type: LlmEventType.Retry,
             retryInfo: streamEvent.retryInfo,
             isContinuation: streamEvent.isContinuation,
           };
@@ -602,7 +660,7 @@ export class Turn {
           this.finishReason = undefined;
           this.currentResponseId = undefined;
           yield {
-            type: GeminiEventType.ModelFallback,
+            type: LlmEventType.ModelFallback,
             fromModel: streamEvent.info.fromModel,
             toModel: streamEvent.info.toModel,
             statusCode: streamEvent.info.statusCode,
@@ -615,10 +673,10 @@ export class Turn {
         // as the top-level ChatCompressed event so existing UI handlers stay
         // connected. This bridge is the primary path for auto-compaction
         // events; manual /compress emits its own ChatCompressed in
-        // GeminiClient.tryCompressChat.
+        // LlmClient.tryCompressChat.
         if (streamEvent.type === 'compressed') {
           yield {
-            type: GeminiEventType.ChatCompressed,
+            type: LlmEventType.ChatCompressed,
             value: streamEvent.info,
           };
           continue;
@@ -636,7 +694,7 @@ export class Turn {
         const thoughtSummary = getThoughtSummary(resp);
         if (thoughtSummary) {
           yield {
-            type: GeminiEventType.Thought,
+            type: LlmEventType.Thought,
             value: thoughtSummary,
           };
         }
@@ -646,7 +704,7 @@ export class Turn {
         const hasImage = displayParts.some((part) => 'inlineData' in part);
         if (text || hasImage) {
           yield {
-            type: GeminiEventType.Content,
+            type: LlmEventType.Content,
             value: text,
             ...(hasImage ? { parts: displayParts } : {}),
           };
@@ -680,7 +738,7 @@ export class Turn {
 
           if (this.pendingCitations.size > 0) {
             yield {
-              type: GeminiEventType.Citation,
+              type: LlmEventType.Citation,
               value: `Citations:\n${[...this.pendingCitations].sort().join('\n')}`,
             };
             this.pendingCitations.clear();
@@ -688,7 +746,7 @@ export class Turn {
 
           this.finishReason = finishReason;
           yield {
-            type: GeminiEventType.Finished,
+            type: LlmEventType.Finished,
             value: {
               reason: finishReason,
               usageMetadata: resp.usageMetadata,
@@ -698,7 +756,7 @@ export class Turn {
       }
     } catch (e) {
       if (signal.aborted) {
-        yield { type: GeminiEventType.UserCancelled };
+        yield { type: LlmEventType.UserCancelled };
         // Regular cancellation error, fail gracefully.
         return;
       }
@@ -736,14 +794,14 @@ export class Turn {
         status: getErrorStatus(error) ?? originalStatus,
       };
       await this.chat.maybeIncludeSchemaDepthContext(structuredError);
-      yield { type: GeminiEventType.Error, value: { error: structuredError } };
+      yield { type: LlmEventType.Error, value: { error: structuredError } };
       return;
     }
   }
 
   private handlePendingFunctionCall(
     fnCall: FunctionCall,
-  ): ServerGeminiStreamEvent | null {
+  ): ServerLlmStreamEvent | null {
     const callId =
       fnCall.id ??
       `${fnCall.name}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
@@ -765,7 +823,7 @@ export class Turn {
     this.pendingToolCalls.push(toolCallRequest);
 
     // Yield a request for the tool call, not the pending/confirming status
-    return { type: GeminiEventType.ToolCallRequest, value: toolCallRequest };
+    return { type: LlmEventType.ToolCallRequest, value: toolCallRequest };
   }
 }
 

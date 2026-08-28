@@ -3627,6 +3627,38 @@ describe('ChatRecordingService', () => {
       await expect(chatRecordingService.close()).rejects.toBe(cleanupFailure);
       expect(chatRecordingService.hasWriteOwnership()).toBe(false);
     });
+
+    it('retries release durability without reporting stale write ownership', async () => {
+      const cleanupFailure = new SessionWriterUnavailableError();
+      let released = false;
+      let durabilityPending = false;
+      Object.defineProperties(mockLease, {
+        isReleased: {
+          configurable: true,
+          get: () => released,
+        },
+        isReleaseDurabilityPending: {
+          configurable: true,
+          get: () => durabilityPending,
+        },
+      });
+      vi.mocked(mockLease.release)
+        .mockImplementationOnce(async () => {
+          released = true;
+          durabilityPending = true;
+          throw cleanupFailure;
+        })
+        .mockImplementationOnce(async () => {
+          durabilityPending = false;
+        });
+
+      await expect(chatRecordingService.close()).rejects.toBe(cleanupFailure);
+      expect(chatRecordingService.hasWriteOwnership()).toBe(false);
+
+      await expect(chatRecordingService.close()).resolves.toBeUndefined();
+      expect(mockLease.release).toHaveBeenCalledTimes(2);
+      expect(chatRecordingService.hasWriteOwnership()).toBe(false);
+    });
   });
 
   // Note: Session management tests (listSessions, loadSession, deleteSession, etc.)

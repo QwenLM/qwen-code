@@ -1646,8 +1646,18 @@ export class ChatRecordingService {
     if (this.closePromise) return this.closePromise;
     if (this.state === 'closed') return Promise.resolve();
     this.beginClose(options);
-    this.closePromise = this.closeOnce();
-    return this.closePromise;
+    const pending = this.closeOnce();
+    this.closePromise = pending;
+    void pending.catch(() => {
+      if (
+        this.closePromise === pending &&
+        this.binding !== undefined &&
+        this.state === 'integrity_failed'
+      ) {
+        this.closePromise = undefined;
+      }
+    });
+    return pending;
   }
 
   beginClose(options?: { handoff?: boolean }): void {
@@ -1688,7 +1698,10 @@ export class ChatRecordingService {
       this.binding = undefined;
       this.state = 'closed';
     } catch (error) {
-      if (lease?.isReleased || error instanceof SessionWriterLostError) {
+      if (
+        error instanceof SessionWriterLostError ||
+        (lease?.isReleased && !lease.isReleaseDurabilityPending)
+      ) {
         this.binding = undefined;
         this.state = 'closed';
       } else {
@@ -1700,7 +1713,7 @@ export class ChatRecordingService {
   }
 
   hasWriteOwnership(): boolean {
-    return this.binding !== undefined;
+    return this.binding !== undefined && !this.binding.lease.isReleased;
   }
 
   /**

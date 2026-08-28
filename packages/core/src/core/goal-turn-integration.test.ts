@@ -12,8 +12,8 @@ import type { ChatRecordingService } from '../services/chatRecordingService.js';
 import { ToolNames } from '../tools/tool-names.js';
 import type { ErroredToolCall } from './coreToolScheduler.js';
 import { CoreToolScheduler } from './coreToolScheduler.js';
-import { GeminiChat, StreamEventType } from './geminiChat.js';
-import { GeminiEventType, Turn } from './turn.js';
+import { LlmChat, StreamEventType } from './llm-chat.js';
+import { LlmEventType, Turn } from './turn.js';
 
 const permit: GoalTurnPermit = {
   goalId: 'goal-1',
@@ -37,7 +37,7 @@ describe('Goal turn evidence propagation', () => {
       })(),
     );
     const turn = new Turn(
-      { sendMessageStream } as unknown as GeminiChat,
+      { sendMessageStream } as unknown as LlmChat,
       'goal-prompt',
       inputPermit,
     );
@@ -60,7 +60,7 @@ describe('Goal turn evidence propagation', () => {
       undefined,
     );
     const toolRequest = events.find(
-      (event) => event.type === GeminiEventType.ToolCallRequest,
+      (event) => event.type === LlmEventType.ToolCallRequest,
     );
     expect(toolRequest?.value).toMatchObject({
       callId: 'goal-tool-call',
@@ -71,7 +71,7 @@ describe('Goal turn evidence propagation', () => {
 
   it('attaches the permit to normal and deferred assistant attempts', async () => {
     const recordAssistantTurn = vi.fn();
-    const chat = new GeminiChat(
+    const chat = new LlmChat(
       {
         getContentGeneratorConfig: () => ({ contextWindowSize: 4096 }),
       } as unknown as Config,

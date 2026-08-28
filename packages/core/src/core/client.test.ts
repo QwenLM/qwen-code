@@ -22,7 +22,7 @@ import { mkdtemp, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Content, GenerateContentResponse, Part } from '@google/genai';
-import { GeminiClient, SendMessageType, type SteerInput } from './client.js';
+import { LlmClient, SendMessageType, type SteerInput } from './client.js';
 import { MESSAGE_DISPLAY_DEBOUNCE_MS } from './message-display-buffer.js';
 import { getRecentGitStatus } from '../utils/gitUtils.js';
 import {
@@ -33,7 +33,7 @@ import {
 } from './contentGenerator.js';
 import { BaseLlmClient } from './baseLlmClient.js';
 import { buildAgentContentGeneratorConfig } from '../models/content-generator-config.js';
-import { GeminiChat } from './geminiChat.js';
+import { LlmChat } from './llm-chat.js';
 import { DEFAULT_TOKEN_LIMIT } from './tokenLimits.js';
 import type { Config } from '../config/config.js';
 import { ApprovalMode } from '../config/config.js';
@@ -47,9 +47,9 @@ import { UnauthorizedError } from '../utils/errors.js';
 import { retryWithBackoff } from '../utils/retry.js';
 import {
   CompressionStatus,
-  GeminiEventType,
+  LlmEventType,
   Turn,
-  type ServerGeminiStreamEvent,
+  type ServerLlmStreamEvent,
 } from './turn.js';
 import { LoopType } from '../telemetry/types.js';
 import { logMemoryRecallDelivery } from '../telemetry/index.js';
@@ -464,7 +464,7 @@ function getLastTurnRequestText(): string {
 describe('Gemini Client (client.ts)', () => {
   let mockContentGenerator: ContentGenerator;
   let mockConfig: Config;
-  let client: GeminiClient;
+  let client: LlmClient;
   let mockGenerateContentFn: Mock;
   let mockFileHistoryService: {
     makeSnapshot: ReturnType<typeof vi.fn>;
@@ -547,7 +547,7 @@ describe('Gemini Client (client.ts)', () => {
       batchEmbedContents: vi.fn(),
     } as unknown as ContentGenerator;
 
-    // Because the GeminiClient constructor kicks off an async process (startChat)
+    // Because the LlmClient constructor kicks off an async process (startChat)
     // that depends on a fully-formed Config object, we need to mock the
     // entire implementation of Config for these tests.
     const mockToolRegistry = {
@@ -620,7 +620,7 @@ describe('Gemini Client (client.ts)', () => {
       getWorkspaceContext: vi.fn().mockReturnValue({
         getDirectories: vi.fn().mockReturnValue(['/test/dir']),
       }),
-      getGeminiClient: vi.fn(),
+      getLlmClient: vi.fn(),
       getModelRouterService: vi.fn().mockReturnValue({
         route: vi.fn().mockResolvedValue({ model: 'default-routed-model' }),
       }),
@@ -702,11 +702,11 @@ describe('Gemini Client (client.ts)', () => {
     });
     vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue(realBaseLlmClient);
 
-    client = new GeminiClient(mockConfig);
+    client = new LlmClient(mockConfig);
     await client.initialize();
-    vi.mocked(mockConfig.getGeminiClient).mockReturnValue(client);
+    vi.mocked(mockConfig.getLlmClient).mockReturnValue(client);
 
-    // GeminiClient.sendMessageStream calls this.tryCompressChat (which now
+    // LlmClient.sendMessageStream calls this.tryCompressChat (which now
     // delegates to chat.tryCompress) before each turn. Most tests use a
     // hand-rolled chat mock that doesn't implement tryCompress; default the
     // wrapper to a NOOP so those tests don't crash. Tests that exercise
@@ -727,8 +727,15 @@ describe('Gemini Client (client.ts)', () => {
 
   describe('initialize', () => {
     it('initializes from the selective runtime projection without the full transcript', async () => {
+      const restoreLoadedSkillsFromHistory = vi.fn();
+      vi.mocked(mockConfig.getToolRegistry().getTool).mockImplementation(
+        (name: string) =>
+          name === ToolNames.SKILL
+            ? ({ restoreLoadedSkillsFromHistory } as never)
+            : undefined,
+      );
       const seedResumeTokenCountsSpy = vi.spyOn(
-        GeminiChat.prototype,
+        LlmChat.prototype,
         'seedResumeTokenCounts',
       );
       const apiHistory = [
@@ -752,7 +759,7 @@ describe('Gemini Client (client.ts)', () => {
         backgroundNotificationTaskIds: [],
       } as unknown as ReturnType<Config['getSessionRestoreRuntime']>);
 
-      const resumedClient = new GeminiClient(mockConfig);
+      const resumedClient = new LlmClient(mockConfig);
       await resumedClient.initialize();
 
       expect(resumedClient.getHistory().at(-1)).toEqual(apiHistory[0]);
@@ -764,6 +771,7 @@ describe('Gemini Client (client.ts)', () => {
         'test-session-id',
       );
       expect(seedResumeTokenCountsSpy).toHaveBeenCalledWith(321, 45, false);
+      expect(restoreLoadedSkillsFromHistory).toHaveBeenCalledWith(apiHistory);
     });
 
     it('seeds resumed chat with replayed prompt token count', async () => {
@@ -782,7 +790,7 @@ describe('Gemini Client (client.ts)', () => {
         123_456,
       );
 
-      const resumedClient = new GeminiClient(mockConfig);
+      const resumedClient = new LlmClient(mockConfig);
       await resumedClient.initialize();
 
       expect(resumedClient.getChat().getLastPromptTokenCount()).toBe(123_456);
@@ -790,7 +798,7 @@ describe('Gemini Client (client.ts)', () => {
 
     it('seeds resumed chat with previous response output token count', async () => {
       const seedResumeTokenCountsSpy = vi.spyOn(
-        GeminiChat.prototype,
+        LlmChat.prototype,
         'seedResumeTokenCounts',
       );
       vi.mocked(mockConfig.getResumedSessionData).mockReturnValue({
@@ -822,7 +830,7 @@ describe('Gemini Client (client.ts)', () => {
         lastCompletedUuid: null,
       });
 
-      const resumedClient = new GeminiClient(mockConfig);
+      const resumedClient = new LlmClient(mockConfig);
       await resumedClient.initialize();
 
       expect(resumedClient.getChat().getLastPromptTokenCount()).toBe(200);
@@ -831,7 +839,7 @@ describe('Gemini Client (client.ts)', () => {
 
     it('restores estimated provenance from a compression checkpoint', async () => {
       const seedResumeTokenCountsSpy = vi.spyOn(
-        GeminiChat.prototype,
+        LlmChat.prototype,
         'seedResumeTokenCounts',
       );
       vi.mocked(mockConfig.getResumedSessionData).mockReturnValue({
@@ -866,7 +874,7 @@ describe('Gemini Client (client.ts)', () => {
         lastCompletedUuid: null,
       });
 
-      const resumedClient = new GeminiClient(mockConfig);
+      const resumedClient = new LlmClient(mockConfig);
       await resumedClient.initialize();
 
       expect(seedResumeTokenCountsSpy).toHaveBeenCalledWith(200, 0, true);
@@ -931,7 +939,7 @@ describe('Gemini Client (client.ts)', () => {
         lastCompletedUuid: null,
       } as unknown as ReturnType<Config['getResumedSessionData']>);
 
-      const resumedClient = new GeminiClient(mockConfig);
+      const resumedClient = new LlmClient(mockConfig);
       await resumedClient.initialize();
 
       expect(resumedClient['recentCompletedToolNames']).toEqual(['read_file']);
@@ -953,7 +961,7 @@ describe('Gemini Client (client.ts)', () => {
         hookSystem as unknown as ReturnType<Config['getHookSystem']>,
       );
 
-      const freshClient = new GeminiClient(mockConfig);
+      const freshClient = new LlmClient(mockConfig);
       await freshClient.initialize();
 
       expect(hookSystem.fireSessionStartEvent).toHaveBeenCalledWith(
@@ -979,7 +987,7 @@ describe('Gemini Client (client.ts)', () => {
         hookSystem as unknown as ReturnType<Config['getHookSystem']>,
       );
 
-      const freshClient = new GeminiClient(mockConfig);
+      const freshClient = new LlmClient(mockConfig);
       await freshClient.initialize();
       const firstChat = freshClient.getChat();
       await freshClient.initialize(SessionStartSource.Resume);
@@ -1006,7 +1014,7 @@ describe('Gemini Client (client.ts)', () => {
         .mockReturnValueOnce('session-a')
         .mockReturnValueOnce('session-b');
 
-      const freshClient = new GeminiClient(mockConfig);
+      const freshClient = new LlmClient(mockConfig);
       await freshClient.initialize();
       const firstChat = freshClient.getChat();
       await freshClient.initialize(SessionStartSource.Resume);
@@ -1106,7 +1114,7 @@ describe('Gemini Client (client.ts)', () => {
 
     it('enables manual plan-exit notices on every main chat', async () => {
       const enableSpy = vi.spyOn(
-        GeminiChat.prototype,
+        LlmChat.prototype,
         'enableManualPlanExitNotices',
       );
 
@@ -1711,7 +1719,7 @@ describe('Gemini Client (client.ts)', () => {
     });
 
     it('re-applies SessionStart additionalContext after refreshing the system instruction', async () => {
-      // startChat() calls getCoreSystemPrompt for the initial GeminiChat
+      // startChat() calls getCoreSystemPrompt for the initial LlmChat
       // construction. The second call is refreshSystemInstruction under test.
       vi.mocked(getCoreSystemPrompt)
         .mockReturnValueOnce('Base instruction')
@@ -1797,12 +1805,12 @@ describe('Gemini Client (client.ts)', () => {
         { role: 'user', parts: [{ text: 'hello' }] },
         { role: 'model', parts: [{ text: 'hi' }] },
       ];
-      const mockChat: Partial<GeminiChat> = {
+      const mockChat: Partial<LlmChat> = {
         getHistory: vi.fn().mockReturnValue(currentHistory),
         getHistoryShallow: vi.fn().mockReturnValue(currentHistory),
         setHistory: vi.fn(),
       };
-      client['chat'] = mockChat as GeminiChat;
+      client['chat'] = mockChat as LlmChat;
       vi.mocked(getInitialChatHistory).mockResolvedValueOnce([[], []]);
 
       await client.refreshStartupContextReminder();
@@ -1836,12 +1844,12 @@ describe('Gemini Client (client.ts)', () => {
           { text: '<system-reminder>\nfresh prelude\n</system-reminder>' },
         ],
       };
-      const mockChat: Partial<GeminiChat> = {
+      const mockChat: Partial<LlmChat> = {
         getHistory: vi.fn().mockReturnValue(currentHistory),
         getHistoryShallow: vi.fn().mockReturnValue(currentHistory),
         setHistory: vi.fn(),
       };
-      client['chat'] = mockChat as GeminiChat;
+      client['chat'] = mockChat as LlmChat;
       vi.mocked(getInitialChatHistory).mockResolvedValueOnce([
         [newPrelude],
         [],
@@ -2076,7 +2084,7 @@ describe('Gemini Client (client.ts)', () => {
     ): Promise<void> {
       mockTurnRunFn.mockReturnValue(
         (async function* () {
-          yield { type: GeminiEventType.Content, value: 'response' };
+          yield { type: LlmEventType.Content, value: 'response' };
         })(),
       );
 
@@ -2111,7 +2119,7 @@ describe('Gemini Client (client.ts)', () => {
 
       mockTurnRunFn.mockReturnValue(
         (async function* () {
-          yield { type: GeminiEventType.Content, value: 'response' };
+          yield { type: LlmEventType.Content, value: 'response' };
         })(),
       );
       const stream = client.sendMessageStream(
@@ -2182,7 +2190,7 @@ describe('Gemini Client (client.ts)', () => {
     it('continues the carried Todo work chain for related notifications', async () => {
       mockTurnRunFn.mockReturnValue(
         (async function* () {
-          yield { type: GeminiEventType.Content, value: 'response' };
+          yield { type: LlmEventType.Content, value: 'response' };
         })(),
       );
 
@@ -2213,14 +2221,14 @@ describe('Gemini Client (client.ts)', () => {
         .mockReturnValueOnce(
           (async function* () {
             yield {
-              type: GeminiEventType.ToolCallRequest,
+              type: LlmEventType.ToolCallRequest,
               value: { callId: 'call-1', name: 'read_file', args: {} },
             };
           })(),
         )
         .mockReturnValueOnce(
           (async function* () {
-            yield { type: GeminiEventType.Content, value: 'done' };
+            yield { type: LlmEventType.Content, value: 'done' };
           })(),
         );
 
@@ -2747,7 +2755,7 @@ describe('Gemini Client (client.ts)', () => {
     it('should call chat.addHistory with the provided content', async () => {
       const mockChat = {
         addHistory: vi.fn(),
-      } as unknown as GeminiChat;
+      } as unknown as LlmChat;
       client['chat'] = mockChat;
 
       const newContent = {
@@ -2977,7 +2985,7 @@ describe('Gemini Client (client.ts)', () => {
       const cacheClear = mockFileReadCacheClear();
       client['chat'] = {
         setHistory: vi.fn(),
-      } as unknown as GeminiChat;
+      } as unknown as LlmChat;
 
       client.setHistory([{ role: 'user', parts: [{ text: 'replaced' }] }]);
 
@@ -2985,19 +2993,19 @@ describe('Gemini Client (client.ts)', () => {
     });
 
     /**
-     * Test helper: mock a GeminiChat whose history length goes from
+     * Test helper: mock a LlmChat whose history length goes from
      * `before` to `after` across truncateHistory(). The first
      * getHistoryLength() call (pre-truncate) returns `before`; the
      * second (post-truncate) returns `after`.
      */
-    function mockChatWithLengths(before: number, after: number): GeminiChat {
+    function mockChatWithLengths(before: number, after: number): LlmChat {
       return {
         getHistoryLength: vi
           .fn()
           .mockReturnValueOnce(before)
           .mockReturnValueOnce(after),
         truncateHistory: vi.fn(),
-      } as unknown as GeminiChat;
+      } as unknown as LlmChat;
     }
 
     it('truncateHistory clears the cache when entries are actually removed', () => {
@@ -3044,7 +3052,7 @@ describe('Gemini Client (client.ts)', () => {
         getHistoryLength,
         getHistory,
         truncateHistory: vi.fn(),
-      } as unknown as GeminiChat;
+      } as unknown as LlmChat;
 
       client.truncateHistory(3);
 
@@ -3059,7 +3067,7 @@ describe('Gemini Client (client.ts)', () => {
       client['chat'] = {
         getHistoryLength: vi.fn().mockReturnValueOnce(3).mockReturnValueOnce(1),
         stripOrphanedUserEntriesFromHistory: strip,
-      } as unknown as GeminiChat;
+      } as unknown as LlmChat;
       client['forceFullIdeContext'] = false;
 
       client.stripOrphanedUserEntriesFromHistory();
@@ -3074,7 +3082,7 @@ describe('Gemini Client (client.ts)', () => {
       client['chat'] = {
         getHistoryLength: vi.fn().mockReturnValue(2),
         stripOrphanedUserEntriesFromHistory: strip2,
-      } as unknown as GeminiChat;
+      } as unknown as LlmChat;
       client['forceFullIdeContext'] = false;
 
       client.stripOrphanedUserEntriesFromHistory();
@@ -3102,10 +3110,10 @@ describe('Gemini Client (client.ts)', () => {
         getHistoryLength,
         stripOrphanedUserEntriesFromHistory,
         repairOrphanedToolUseTurns: vi.fn().mockReturnValue({ injected: [] }),
-      } as unknown as GeminiChat;
+      } as unknown as LlmChat;
       mockTurnRunFn.mockReturnValue(
         (async function* () {
-          yield { type: GeminiEventType.Content, value: 'response' };
+          yield { type: LlmEventType.Content, value: 'response' };
         })(),
       );
 
@@ -3140,7 +3148,7 @@ describe('Gemini Client (client.ts)', () => {
           .fn()
           .mockReturnValue([retryEntry]),
         repairOrphanedToolUseTurns: vi.fn().mockReturnValue({ injected: [] }),
-      } as unknown as GeminiChat;
+      } as unknown as LlmChat;
       vi.mocked(mockConfig.getSessionTokenLimit).mockReturnValue(100);
       vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(
         101,
@@ -3155,7 +3163,7 @@ describe('Gemini Client (client.ts)', () => {
         ),
       );
 
-      expect(events[0]?.type).toBe(GeminiEventType.SessionTokenLimitExceeded);
+      expect(events[0]?.type).toBe(LlmEventType.SessionTokenLimitExceeded);
       expect(mockTurnRunFn).not.toHaveBeenCalled();
       expect(addHistory).toHaveBeenCalledWith(retryEntry);
     });
@@ -3179,7 +3187,7 @@ describe('Gemini Client (client.ts)', () => {
       route = 'route-b';
       mockTurnRunFn.mockReturnValue(
         (async function* () {
-          yield { type: GeminiEventType.Content, value: 'response' };
+          yield { type: LlmEventType.Content, value: 'response' };
         })(),
       );
 
@@ -3193,7 +3201,7 @@ describe('Gemini Client (client.ts)', () => {
 
       expect(events).not.toContainEqual(
         expect.objectContaining({
-          type: GeminiEventType.SessionTokenLimitExceeded,
+          type: LlmEventType.SessionTokenLimitExceeded,
         }),
       );
       expect(telemetryCount).toBe(0);
@@ -3222,7 +3230,7 @@ describe('Gemini Client (client.ts)', () => {
       );
 
       expect(events).toContainEqual({
-        type: GeminiEventType.SessionTokenLimitExceeded,
+        type: LlmEventType.SessionTokenLimitExceeded,
         value: expect.objectContaining({ currentTokens: 101, limit: 100 }),
       });
       expect(mockTurnRunFn).not.toHaveBeenCalled();
@@ -3230,7 +3238,7 @@ describe('Gemini Client (client.ts)', () => {
 
     it('applies the session limit to a resolved full-turn route selector', async () => {
       // The vision-bridge full-turn selector `${id}\0${baseUrl}\0` arrives as
-      // modelOverride. GeminiChat.sendMessageStream resolves it and stamps
+      // modelOverride. LlmChat.sendMessageStream resolves it and stamps
       // counts under the RESOLVED route's identity, so the gate must resolve
       // the selector before keying — the raw selector key (always containing
       // a NUL) can never match a stamped count (#9454).
@@ -3267,7 +3275,7 @@ describe('Gemini Client (client.ts)', () => {
         { failClosed: true },
       );
       expect(events).toContainEqual({
-        type: GeminiEventType.SessionTokenLimitExceeded,
+        type: LlmEventType.SessionTokenLimitExceeded,
         value: expect.objectContaining({ currentTokens: 101, limit: 100 }),
       });
       expect(mockTurnRunFn).not.toHaveBeenCalled();
@@ -3287,7 +3295,7 @@ describe('Gemini Client (client.ts)', () => {
       client.getChat().setLastPromptTokenCount(101);
       mockTurnRunFn.mockReturnValue(
         (async function* () {
-          yield { type: GeminiEventType.Content, value: 'response' };
+          yield { type: LlmEventType.Content, value: 'response' };
         })(),
       );
 
@@ -3303,7 +3311,7 @@ describe('Gemini Client (client.ts)', () => {
       );
       expect(foreignEvents).not.toContainEqual(
         expect.objectContaining({
-          type: GeminiEventType.SessionTokenLimitExceeded,
+          type: LlmEventType.SessionTokenLimitExceeded,
         }),
       );
 
@@ -3318,7 +3326,7 @@ describe('Gemini Client (client.ts)', () => {
         ),
       );
       expect(events).toContainEqual({
-        type: GeminiEventType.SessionTokenLimitExceeded,
+        type: LlmEventType.SessionTokenLimitExceeded,
         value: expect.objectContaining({ currentTokens: 101, limit: 100 }),
       });
       expect(mockTurnRunFn).toHaveBeenCalledTimes(1);
@@ -3365,12 +3373,12 @@ describe('Gemini Client (client.ts)', () => {
   }
 
   describe('thinking block idle cleanup and latch', () => {
-    let mockChat: Partial<GeminiChat>;
+    let mockChat: Partial<LlmChat>;
 
     beforeEach(() => {
       const mockStream = (async function* () {
         yield {
-          type: GeminiEventType.Content,
+          type: LlmEventType.Content,
           value: 'response',
         };
       })();
@@ -3386,7 +3394,7 @@ describe('Gemini Client (client.ts)', () => {
           compressionStatus: CompressionStatus.NOOP,
         }),
       };
-      client['chat'] = mockChat as GeminiChat;
+      client['chat'] = mockChat as LlmChat;
     });
 
     it('should update lastApiCompletionTimestamp after API call', async () => {
@@ -3493,7 +3501,7 @@ describe('Gemini Client (client.ts)', () => {
       mcTmpDir = await mkdtemp(join(tmpdir(), 'qwen-mc-cache-'));
       mockTurnRunFn.mockReturnValue(
         (async function* () {
-          yield { type: GeminiEventType.Content, value: 'response' };
+          yield { type: LlmEventType.Content, value: 'response' };
         })(),
       );
     });
@@ -3516,7 +3524,7 @@ describe('Gemini Client (client.ts)', () => {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue(history),
         setHistory,
-      } as unknown as GeminiChat;
+      } as unknown as LlmChat;
       client['lastApiCompletionTimestamp'] = Date.now() - 90 * 60_000;
 
       const stream = client.sendMessageStream(
@@ -3548,10 +3556,10 @@ describe('Gemini Client (client.ts)', () => {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue(history),
         setHistory: vi.fn(),
-      } as unknown as GeminiChat;
+      } as unknown as LlmChat;
       client['lastApiCompletionTimestamp'] = Date.now() - 90 * 60_000;
 
-      const events: ServerGeminiStreamEvent[] = [];
+      const events: ServerLlmStreamEvent[] = [];
       const stream = client.sendMessageStream(
         [{ text: 'hi' }],
         new AbortController().signal,
@@ -3563,7 +3571,7 @@ describe('Gemini Client (client.ts)', () => {
       }
 
       expect(events).toEqual([
-        { type: GeminiEventType.Content, value: 'response' },
+        { type: LlmEventType.Content, value: 'response' },
       ]);
     });
 
@@ -3576,7 +3584,7 @@ describe('Gemini Client (client.ts)', () => {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue(history),
         setHistory,
-      } as unknown as GeminiChat;
+      } as unknown as LlmChat;
       client['lastApiCompletionTimestamp'] = Date.now();
       client['lastHookMicrocompactionTimestamp'] = Date.now() - 90 * 60_000;
 
@@ -3612,13 +3620,13 @@ describe('Gemini Client (client.ts)', () => {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue(history),
         setHistory: vi.fn(),
-      } as unknown as GeminiChat;
+      } as unknown as LlmChat;
       client['lastApiCompletionTimestamp'] = Date.now();
       const checkpoint = Date.now() - 90 * 60_000;
       client['lastHookMicrocompactionTimestamp'] = checkpoint;
       mockClientDebugLogger.error.mockClear();
 
-      const events: ServerGeminiStreamEvent[] = [];
+      const events: ServerLlmStreamEvent[] = [];
       const stream = client.sendMessageStream(
         [{ text: 'continue goal' }],
         new AbortController().signal,
@@ -3630,7 +3638,7 @@ describe('Gemini Client (client.ts)', () => {
       }
 
       expect(events).toEqual([
-        { type: GeminiEventType.Content, value: 'response' },
+        { type: LlmEventType.Content, value: 'response' },
       ]);
       expect(mockClientDebugLogger.error).toHaveBeenCalledWith(
         expect.stringContaining(
@@ -3649,7 +3657,7 @@ describe('Gemini Client (client.ts)', () => {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue(history),
         setHistory,
-      } as unknown as GeminiChat;
+      } as unknown as LlmChat;
       client['lastApiCompletionTimestamp'] = Date.now();
       client['lastHookMicrocompactionTimestamp'] = Date.now() - 90 * 60_000;
 
@@ -3698,7 +3706,7 @@ describe('Gemini Client (client.ts)', () => {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue(history),
         setHistory,
-      } as unknown as GeminiChat;
+      } as unknown as LlmChat;
       client['lastApiCompletionTimestamp'] = Date.now() - 90 * 60_000;
       client['lastHookMicrocompactionTimestamp'] = null;
 
@@ -3729,7 +3737,7 @@ describe('Gemini Client (client.ts)', () => {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue(history),
         setHistory,
-      } as unknown as GeminiChat;
+      } as unknown as LlmChat;
       client['lastApiCompletionTimestamp'] = Date.now() - 90 * 60_000;
       client['lastHookMicrocompactionTimestamp'] = Date.now();
 
@@ -3757,7 +3765,7 @@ describe('Gemini Client (client.ts)', () => {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue(history),
         setHistory,
-      } as unknown as GeminiChat;
+      } as unknown as LlmChat;
       client['lastApiCompletionTimestamp'] = null;
       client['lastHookMicrocompactionTimestamp'] = null;
       const before = Date.now();
@@ -3816,7 +3824,7 @@ describe('Gemini Client (client.ts)', () => {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue(idless),
         setHistory: vi.fn(),
-      } as unknown as GeminiChat;
+      } as unknown as LlmChat;
       client['lastApiCompletionTimestamp'] = Date.now() - 90 * 60_000;
 
       const stream = client.sendMessageStream(
@@ -3875,7 +3883,7 @@ describe('Gemini Client (client.ts)', () => {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue(history),
         setHistory: vi.fn(),
-      } as unknown as GeminiChat;
+      } as unknown as LlmChat;
       client['lastApiCompletionTimestamp'] = Date.now() - 90 * 60_000;
 
       const stream = client.sendMessageStream(
@@ -3946,7 +3954,7 @@ describe('Gemini Client (client.ts)', () => {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue(history),
         setHistory: vi.fn(),
-      } as unknown as GeminiChat;
+      } as unknown as LlmChat;
       client['lastApiCompletionTimestamp'] = Date.now() - 90 * 60_000;
 
       const stream = client.sendMessageStream(
@@ -3978,7 +3986,7 @@ describe('Gemini Client (client.ts)', () => {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue(history),
         setHistory: vi.fn(),
-      } as unknown as GeminiChat;
+      } as unknown as LlmChat;
       client['lastApiCompletionTimestamp'] = Date.now() - 90 * 60_000;
 
       const stream = client.sendMessageStream(
@@ -4004,7 +4012,7 @@ describe('Gemini Client (client.ts)', () => {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue(history),
         setHistory: vi.fn(),
-      } as unknown as GeminiChat;
+      } as unknown as LlmChat;
       // Recent activity — microcompaction must not fire.
       client['lastApiCompletionTimestamp'] = Date.now() - 30 * 1000;
 
@@ -4030,7 +4038,7 @@ describe('Gemini Client (client.ts)', () => {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue(history),
         setHistory,
-      } as unknown as GeminiChat;
+      } as unknown as LlmChat;
       client['lastApiCompletionTimestamp'] = Date.now() - 90 * 60_000;
 
       const stream = client.sendMessageStream(
@@ -4056,7 +4064,7 @@ describe('Gemini Client (client.ts)', () => {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue(history),
         setHistory,
-      } as unknown as GeminiChat;
+      } as unknown as LlmChat;
       client['lastApiCompletionTimestamp'] = Date.now() - 90 * 60_000;
 
       const stream = client.sendMessageStream(
@@ -4083,7 +4091,7 @@ describe('Gemini Client (client.ts)', () => {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue(history),
         setHistory,
-      } as unknown as GeminiChat;
+      } as unknown as LlmChat;
       vi.mocked(mockConfig.getClearContextOnIdle).mockReturnValue({
         toolResultsThresholdMinutes: 60,
         toolResultsNumToKeep: 1,
@@ -4140,7 +4148,7 @@ describe('Gemini Client (client.ts)', () => {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue(history),
         setHistory,
-      } as unknown as GeminiChat;
+      } as unknown as LlmChat;
       vi.mocked(mockConfig.getClearContextOnIdle).mockReturnValue({
         toolResultsThresholdMinutes: 60,
         toolResultsNumToKeep: 1,
@@ -4190,7 +4198,7 @@ describe('Gemini Client (client.ts)', () => {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue(history),
         setHistory,
-      } as unknown as GeminiChat;
+      } as unknown as LlmChat;
       vi.mocked(mockConfig.getClearContextOnIdle).mockReturnValue({
         toolResultsThresholdMinutes: 60,
         toolResultsNumToKeep: 2,
@@ -4236,7 +4244,7 @@ describe('Gemini Client (client.ts)', () => {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue(history),
         setHistory,
-      } as unknown as GeminiChat;
+      } as unknown as LlmChat;
       client['lastApiCompletionTimestamp'] = Date.now() - 90 * 60_000;
 
       const stream = client.sendMessageStream(
@@ -4261,7 +4269,7 @@ describe('Gemini Client (client.ts)', () => {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue(history),
         setHistory,
-      } as unknown as GeminiChat;
+      } as unknown as LlmChat;
       client['lastApiCompletionTimestamp'] = Date.now();
       const checkpoint = Date.now() - 90 * 60_000;
       client['lastHookMicrocompactionTimestamp'] = checkpoint;
@@ -4293,7 +4301,7 @@ describe('Gemini Client (client.ts)', () => {
         stripOrphanedUserEntriesFromHistory: vi.fn(),
         getHistoryFunctionResponseIds: vi.fn().mockReturnValue(new Set()),
         setHistory,
-      } as unknown as GeminiChat;
+      } as unknown as LlmChat;
       client['lastApiCompletionTimestamp'] = Date.now() - 90 * 60_000;
 
       const stream = client.sendMessageStream(
@@ -4319,7 +4327,7 @@ describe('Gemini Client (client.ts)', () => {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue(history),
         setHistory,
-      } as unknown as GeminiChat;
+      } as unknown as LlmChat;
       client['lastApiCompletionTimestamp'] = Date.now() - 90 * 60_000;
 
       vi.mocked(microcompactHistory).mockImplementationOnce(() => {
@@ -4367,7 +4375,7 @@ describe('Gemini Client (client.ts)', () => {
       });
       client['chat'] = {
         compressFast,
-      } as unknown as GeminiChat;
+      } as unknown as LlmChat;
       client['forceFullIdeContext'] = false;
 
       const result = await client.tryCompressChatFast();
@@ -4400,7 +4408,7 @@ describe('Gemini Client (client.ts)', () => {
       });
       client['chat'] = {
         compressFast,
-      } as unknown as GeminiChat;
+      } as unknown as LlmChat;
       client['forceFullIdeContext'] = false;
 
       const result = await client.tryCompressChatFast();
@@ -4437,7 +4445,7 @@ describe('Gemini Client (client.ts)', () => {
       await writeFile(evictedPath, 'test content');
       client['chat'] = {
         compressFast,
-      } as unknown as GeminiChat;
+      } as unknown as LlmChat;
       client['forceFullIdeContext'] = false;
 
       const result = await client.tryCompressChatFast();
@@ -4473,7 +4481,7 @@ describe('Gemini Client (client.ts)', () => {
       await writeFile(join(mcTmpDir, 'test-file.ts'), 'test content');
       client['chat'] = {
         compressFast,
-      } as unknown as GeminiChat;
+      } as unknown as LlmChat;
       client['forceFullIdeContext'] = false;
 
       const result = await client.tryCompressChatFast();
@@ -4485,9 +4493,9 @@ describe('Gemini Client (client.ts)', () => {
     });
   });
 
-  // tryCompressChat is now a thin wrapper around GeminiChat.tryCompress.
+  // tryCompressChat is now a thin wrapper around LlmChat.tryCompress.
   // The compression logic itself is exercised in chatCompressionService.test.ts
-  // (token math, threshold checks, hook firing) and geminiChat.test.ts (history
+  // (token math, threshold checks, hook firing) and llm-chat.test.ts (history
   // mutation, recording, consecutiveFailures circuit breaker). The tests below cover
   // only what the wrapper itself adds: argument forwarding and the IDE-context
   // flag flip.
@@ -4507,7 +4515,7 @@ describe('Gemini Client (client.ts)', () => {
       client['chat'] = {
         tryCompress,
         getHistory: vi.fn().mockReturnValue([]),
-      } as unknown as GeminiChat;
+      } as unknown as LlmChat;
       const signal = new AbortController().signal;
 
       await client.tryCompressChat('p1', true, signal);
@@ -4527,7 +4535,7 @@ describe('Gemini Client (client.ts)', () => {
       client['chat'] = {
         tryCompress,
         getHistory: vi.fn().mockReturnValue([]),
-      } as unknown as GeminiChat;
+      } as unknown as LlmChat;
 
       await client.tryCompressChat('p1', true, undefined, 'focus on auth bug');
 
@@ -4545,7 +4553,7 @@ describe('Gemini Client (client.ts)', () => {
         }),
         isLastPromptTokenCountEstimated: vi.fn().mockReturnValue(false),
         getHistory: vi.fn().mockReturnValue([]),
-      } as unknown as GeminiChat;
+      } as unknown as LlmChat;
       client['forceFullIdeContext'] = false;
 
       await client.tryCompressChat('p2');
@@ -4694,12 +4702,12 @@ describe('Gemini Client (client.ts)', () => {
         getHistory: vi.fn().mockReturnValue([]),
         setHistory: vi.fn(),
         applySessionStartContext: vi.fn(),
-      } as unknown as GeminiChat;
+      } as unknown as LlmChat;
 
       mockTurnRunFn.mockReturnValue(
         (async function* () {
           yield {
-            type: GeminiEventType.ChatCompressed,
+            type: LlmEventType.ChatCompressed,
             value: {
               originalTokenCount: 1000,
               newTokenCount: 200,
@@ -4746,12 +4754,12 @@ describe('Gemini Client (client.ts)', () => {
         getHistory: vi.fn().mockReturnValue([]),
         setHistory: vi.fn(),
         applySessionStartContext: vi.fn(),
-      } as unknown as GeminiChat;
+      } as unknown as LlmChat;
 
       mockTurnRunFn.mockReturnValue(
         (async function* () {
           yield {
-            type: GeminiEventType.ChatCompressed,
+            type: LlmEventType.ChatCompressed,
             value: {
               originalTokenCount: 1000,
               newTokenCount: 200,
@@ -4759,13 +4767,13 @@ describe('Gemini Client (client.ts)', () => {
             },
           };
           yield {
-            type: GeminiEventType.Finished,
+            type: LlmEventType.Finished,
             value: undefined,
           };
         })(),
       );
 
-      const seenEvents: GeminiEventType[] = [];
+      const seenEvents: LlmEventType[] = [];
       const stream = client.sendMessageStream(
         [{ text: 'hi' }],
         new AbortController().signal,
@@ -4777,8 +4785,8 @@ describe('Gemini Client (client.ts)', () => {
       }
 
       expect(seenEvents).toEqual([
-        GeminiEventType.ChatCompressed,
-        GeminiEventType.Finished,
+        LlmEventType.ChatCompressed,
+        LlmEventType.Finished,
       ]);
       expect(hookSystem.fireSessionStartEvent).toHaveBeenCalledWith(
         SessionStartSource.Compact,
@@ -4805,12 +4813,12 @@ describe('Gemini Client (client.ts)', () => {
         getHistory: vi.fn().mockReturnValue([]),
         setHistory: vi.fn(),
         applySessionStartContext: vi.fn(),
-      } as unknown as GeminiChat;
+      } as unknown as LlmChat;
 
       mockTurnRunFn.mockReturnValue(
         (async function* () {
           yield {
-            type: GeminiEventType.ChatCompressed,
+            type: LlmEventType.ChatCompressed,
             value: {
               originalTokenCount: 1000,
               newTokenCount: 200,
@@ -4846,12 +4854,12 @@ describe('Gemini Client (client.ts)', () => {
         getHistory: vi.fn().mockReturnValue([]),
         setHistory: vi.fn(),
         applySessionStartContext: vi.fn(),
-      } as unknown as GeminiChat;
+      } as unknown as LlmChat;
 
       mockTurnRunFn.mockReturnValue(
         (async function* () {
           yield {
-            type: GeminiEventType.ChatCompressed,
+            type: LlmEventType.ChatCompressed,
             value: {
               originalTokenCount: 1000,
               newTokenCount: 200,
@@ -4897,12 +4905,12 @@ describe('Gemini Client (client.ts)', () => {
         getHistory: vi.fn().mockReturnValue([]),
         setHistory: vi.fn(),
         applySessionStartContext: vi.fn(),
-      } as unknown as GeminiChat;
+      } as unknown as LlmChat;
 
       mockTurnRunFn.mockReturnValue(
         (async function* () {
           yield {
-            type: GeminiEventType.ChatCompressed,
+            type: LlmEventType.ChatCompressed,
             value: {
               originalTokenCount: 1000,
               newTokenCount: 200,
@@ -4910,13 +4918,13 @@ describe('Gemini Client (client.ts)', () => {
             },
           };
           yield {
-            type: GeminiEventType.Finished,
+            type: LlmEventType.Finished,
             value: undefined,
           };
         })(),
       );
 
-      const seenEvents: GeminiEventType[] = [];
+      const seenEvents: LlmEventType[] = [];
       const stream = client.sendMessageStream(
         [{ text: 'hi' }],
         new AbortController().signal,
@@ -4928,8 +4936,8 @@ describe('Gemini Client (client.ts)', () => {
       }
 
       expect(seenEvents).toEqual([
-        GeminiEventType.ChatCompressed,
-        GeminiEventType.Finished,
+        LlmEventType.ChatCompressed,
+        LlmEventType.Finished,
       ]);
       expect(debugLogger.warn).toHaveBeenCalledWith(
         'SessionStart hook failed: Error: compact hook failed',
@@ -4945,7 +4953,7 @@ describe('Gemini Client (client.ts)', () => {
           compressionStatus: CompressionStatus.NOOP,
         }),
         getHistory: vi.fn().mockReturnValue([]),
-      } as unknown as GeminiChat;
+      } as unknown as LlmChat;
       client['forceFullIdeContext'] = false;
 
       await client.tryCompressChat('p3');
@@ -4966,7 +4974,7 @@ describe('Gemini Client (client.ts)', () => {
       mockTurnRunFn.mockReturnValue(
         (async function* () {
           yield {
-            type: GeminiEventType.ChatCompressed,
+            type: LlmEventType.ChatCompressed,
             value: {
               originalTokenCount: 1000,
               newTokenCount: 200,
@@ -4979,7 +4987,7 @@ describe('Gemini Client (client.ts)', () => {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
         setHistory: vi.fn(),
-      } as unknown as GeminiChat;
+      } as unknown as LlmChat;
       client['forceFullIdeContext'] = false;
 
       const stream = client.sendMessageStream(
@@ -5013,7 +5021,7 @@ describe('Gemini Client (client.ts)', () => {
       mockTurnRunFn.mockReturnValue(
         (async function* () {
           yield {
-            type: GeminiEventType.ChatCompressed,
+            type: LlmEventType.ChatCompressed,
             value: {
               originalTokenCount: 1000,
               newTokenCount: 200,
@@ -5027,7 +5035,7 @@ describe('Gemini Client (client.ts)', () => {
         getHistory: vi.fn().mockReturnValue(compactedHistory),
         getHistoryShallow: vi.fn().mockReturnValue(compactedHistory),
         setHistory,
-      } as unknown as GeminiChat;
+      } as unknown as LlmChat;
 
       const stream = client.sendMessageStream(
         [{ text: 'hi' }],
@@ -5075,7 +5083,7 @@ describe('Gemini Client (client.ts)', () => {
       ]);
       mockTurnRunFn.mockReturnValue(
         (async function* () {
-          yield { type: GeminiEventType.Content, value: 'response' };
+          yield { type: LlmEventType.Content, value: 'response' };
         })(),
       );
 
@@ -5116,7 +5124,7 @@ describe('Gemini Client (client.ts)', () => {
     it('does not re-run session writer admission for a mid-turn hook continuation', async () => {
       mockTurnRunFn.mockReturnValue(
         (async function* () {
-          yield { type: GeminiEventType.Content, value: 'continued' };
+          yield { type: LlmEventType.Content, value: 'continued' };
         })(),
       );
 
@@ -5175,7 +5183,7 @@ describe('Gemini Client (client.ts)', () => {
       const mockChat = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
-      } as unknown as GeminiChat;
+      } as unknown as LlmChat;
       client['chat'] = mockChat;
 
       const initialRequest: Part[] = [{ text: 'Hi' }];
@@ -5230,11 +5238,11 @@ Other open files:
       })();
       mockTurnRunFn.mockReturnValue(mockStream);
 
-      const mockChat: Partial<GeminiChat> = {
+      const mockChat: Partial<LlmChat> = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
       };
-      client['chat'] = mockChat as GeminiChat;
+      client['chat'] = mockChat as LlmChat;
 
       const initialRequest = [{ text: 'Hi' }];
 
@@ -5285,11 +5293,11 @@ Other open files:
       })();
       mockTurnRunFn.mockReturnValue(mockStream);
 
-      const mockChat: Partial<GeminiChat> = {
+      const mockChat: Partial<LlmChat> = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
       };
-      client['chat'] = mockChat as GeminiChat;
+      client['chat'] = mockChat as LlmChat;
 
       const initialRequest = [{ text: 'Hi' }];
 
@@ -5350,7 +5358,7 @@ hello
       client['chat'] = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
-      } as unknown as GeminiChat;
+      } as unknown as LlmChat;
 
       const stream = client.sendMessageStream(
         [{ text: 'Hi' }],
@@ -5428,7 +5436,7 @@ hello
       client['chat'] = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
-      } as unknown as GeminiChat;
+      } as unknown as LlmChat;
 
       const done = fromAsync(
         client.sendMessageStream(
@@ -5478,7 +5486,7 @@ hello
       client['chat'] = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
-      } as unknown as GeminiChat;
+      } as unknown as LlmChat;
 
       const done = fromAsync(
         client.sendMessageStream(
@@ -5553,7 +5561,7 @@ hello
       client['chat'] = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
-      } as unknown as GeminiChat;
+      } as unknown as LlmChat;
 
       const done = fromAsync(
         client.sendMessageStream(
@@ -5611,7 +5619,7 @@ hello
       client['chat'] = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
-      } as unknown as GeminiChat;
+      } as unknown as LlmChat;
 
       const userDone = fromAsync(
         client.sendMessageStream(
@@ -5688,7 +5696,7 @@ hello
       client['chat'] = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
-      } as unknown as GeminiChat;
+      } as unknown as LlmChat;
 
       const userDone = fromAsync(
         client.sendMessageStream(
@@ -5764,7 +5772,7 @@ hello
       client['chat'] = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
-      } as unknown as GeminiChat;
+      } as unknown as LlmChat;
 
       const userDone = fromAsync(
         client.sendMessageStream(
@@ -5852,7 +5860,7 @@ hello
       client['chat'] = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
-      } as unknown as GeminiChat;
+      } as unknown as LlmChat;
 
       const done = fromAsync(
         client.sendMessageStream(
@@ -5946,7 +5954,7 @@ hello
       client['chat'] = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
-      } as unknown as GeminiChat;
+      } as unknown as LlmChat;
 
       const done = fromAsync(
         client.sendMessageStream(
@@ -5995,7 +6003,7 @@ hello
       client['chat'] = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
-      } as unknown as GeminiChat;
+      } as unknown as LlmChat;
 
       const first = fromAsync(
         client.sendMessageStream(
@@ -6058,11 +6066,11 @@ hello
       })();
       mockTurnRunFn.mockReturnValue(mockStream);
 
-      const mockChat: Partial<GeminiChat> = {
+      const mockChat: Partial<LlmChat> = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
       };
-      client['chat'] = mockChat as GeminiChat;
+      client['chat'] = mockChat as LlmChat;
       client.recordCompletedToolCall('mcp__ata__article-list-query');
 
       const stream = client.sendMessageStream(
@@ -6122,11 +6130,11 @@ hello
       })();
       mockTurnRunFn.mockReturnValue(mockStream);
 
-      const mockChat: Partial<GeminiChat> = {
+      const mockChat: Partial<LlmChat> = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
       };
-      client['chat'] = mockChat as GeminiChat;
+      client['chat'] = mockChat as LlmChat;
 
       const first = client.sendMessageStream(
         [{ text: 'Please answer tersely' }],
@@ -6172,11 +6180,11 @@ hello
       })();
       mockTurnRunFn.mockReturnValue(mockStream);
 
-      const mockChat: Partial<GeminiChat> = {
+      const mockChat: Partial<LlmChat> = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
       };
-      client['chat'] = mockChat as GeminiChat;
+      client['chat'] = mockChat as LlmChat;
 
       const done = fromAsync(
         client.sendMessageStream(
@@ -6234,7 +6242,7 @@ hello
       client['chat'] = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
-      } as unknown as GeminiChat;
+      } as unknown as LlmChat;
 
       const done = fromAsync(
         client.sendMessageStream(
@@ -6273,11 +6281,11 @@ hello
       })();
       mockTurnRunFn.mockReturnValue(mockStream);
 
-      const mockChat: Partial<GeminiChat> = {
+      const mockChat: Partial<LlmChat> = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
       };
-      client['chat'] = mockChat as GeminiChat;
+      client['chat'] = mockChat as LlmChat;
 
       const stream = client.sendMessageStream(
         [{ text: 'Quick question' }],
@@ -6322,7 +6330,7 @@ hello
       client['chat'] = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
-      } as unknown as GeminiChat;
+      } as unknown as LlmChat;
 
       const stream = client.sendMessageStream(
         [{ text: 'Quick question' }],
@@ -6361,7 +6369,7 @@ hello
       client['chat'] = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
-      } as unknown as GeminiChat;
+      } as unknown as LlmChat;
 
       const stream = client.sendMessageStream(
         [{ text: 'Quick question' }],
@@ -6438,11 +6446,11 @@ hello
       })();
       mockTurnRunFn.mockReturnValue(mockStream);
 
-      const mockChat: Partial<GeminiChat> = {
+      const mockChat: Partial<LlmChat> = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
       };
-      client['chat'] = mockChat as GeminiChat;
+      client['chat'] = mockChat as LlmChat;
 
       // Turn 1: UserQuery — recall still pending, no injection
       const userStream = client.sendMessageStream(
@@ -6535,7 +6543,7 @@ hello
       mockTurnRunFn.mockReturnValueOnce(
         (async function* () {
           yield {
-            type: GeminiEventType.ToolCallRequest,
+            type: LlmEventType.ToolCallRequest,
             value: {
               callId: 'call-1',
               name: 'read_file',
@@ -6566,7 +6574,7 @@ hello
       mockTurnRunFn.mockReturnValueOnce(
         (async function* () {
           yield {
-            type: GeminiEventType.ToolCallRequest,
+            type: LlmEventType.ToolCallRequest,
             value: {
               callId: 'call-2',
               name: 'write_file',
@@ -6600,7 +6608,7 @@ hello
 
       mockTurnRunFn.mockReturnValueOnce(
         (async function* () {
-          yield { type: GeminiEventType.Content, value: 'done' };
+          yield { type: LlmEventType.Content, value: 'done' };
         })(),
       );
 
@@ -6629,7 +6637,7 @@ hello
     it('starts Retry as a fresh agent invocation', async () => {
       mockTurnRunFn.mockReturnValue(
         (async function* () {
-          yield { type: GeminiEventType.Content, value: 'retried' };
+          yield { type: LlmEventType.Content, value: 'retried' };
         })(),
       );
 
@@ -6766,9 +6774,9 @@ hello
       mockInteractionTelemetry.getActiveInteractionSpan.mockReturnValue(owner);
       mockTurnRunFn.mockReturnValue(
         (async function* () {
-          yield { type: GeminiEventType.Content, value: 'final answer' };
+          yield { type: LlmEventType.Content, value: 'final answer' };
           yield {
-            type: GeminiEventType.Finished,
+            type: LlmEventType.Finished,
             value: { reason: 'STOP' },
           };
         })(),
@@ -6803,12 +6811,12 @@ hello
       mockInteractionTelemetry.getActiveInteractionSpan.mockReturnValue(owner);
       mockTurnRunFn.mockReturnValue(
         (async function* () {
-          yield { type: GeminiEventType.Content, value: 'stale answer' };
+          yield { type: LlmEventType.Content, value: 'stale answer' };
           mockInteractionTelemetry.getActiveInteractionSpan.mockReturnValue(
             replacement,
           );
           yield {
-            type: GeminiEventType.Finished,
+            type: LlmEventType.Finished,
             value: { reason: 'STOP' },
           };
         })(),
@@ -6834,13 +6842,13 @@ hello
     it('resets failed provider attempts while preserving continuation retries', async () => {
       mockTurnRunFn.mockReturnValue(
         (async function* () {
-          yield { type: GeminiEventType.Content, value: 'discarded' };
-          yield { type: GeminiEventType.Retry, isContinuation: false };
-          yield { type: GeminiEventType.Content, value: 'kept ' };
-          yield { type: GeminiEventType.Retry, isContinuation: true };
-          yield { type: GeminiEventType.Content, value: 'continuation' };
+          yield { type: LlmEventType.Content, value: 'discarded' };
+          yield { type: LlmEventType.Retry, isContinuation: false };
+          yield { type: LlmEventType.Content, value: 'kept ' };
+          yield { type: LlmEventType.Retry, isContinuation: true };
+          yield { type: LlmEventType.Content, value: 'continuation' };
           yield {
-            type: GeminiEventType.Finished,
+            type: LlmEventType.Finished,
             value: { reason: 'STOP' },
           };
         })(),
@@ -6879,7 +6887,7 @@ hello
       vi.mocked(mockConfig.getJsonSchema).mockReturnValue({ type: 'object' });
       mockTurnRunFn.mockReturnValue(
         (async function* () {
-          yield { type: GeminiEventType.Content, value: 'goal progress' };
+          yield { type: LlmEventType.Content, value: 'goal progress' };
         })(),
       );
 
@@ -6917,7 +6925,7 @@ hello
       mockInteractionTelemetry.getActiveInteractionSpan.mockReturnValue(owner);
       mockTurnRunFn.mockImplementation(() =>
         (async function* () {
-          yield { type: GeminiEventType.Content, value: 'response' };
+          yield { type: LlmEventType.Content, value: 'response' };
         })(),
       );
       const getSteerInput = vi
@@ -6958,7 +6966,7 @@ hello
       });
       mockTurnRunFn.mockReturnValue(
         (async function* () {
-          yield { type: GeminiEventType.Content, value: 'plain text' };
+          yield { type: LlmEventType.Content, value: 'plain text' };
         })(),
       );
 
@@ -6993,7 +7001,7 @@ hello
         });
         mockTurnRunFn.mockReturnValue(
           (async function* () {
-            yield { type: GeminiEventType.Content, value: 'drain complete' };
+            yield { type: LlmEventType.Content, value: 'drain complete' };
           })(),
         );
 
@@ -7039,7 +7047,7 @@ hello
           .mockReturnValueOnce(
             (async function* () {
               yield {
-                type: GeminiEventType.ToolCallRequest,
+                type: LlmEventType.ToolCallRequest,
                 value: {
                   callId: `call-${messageType}`,
                   name: 'read_file',
@@ -7052,7 +7060,7 @@ hello
           )
           .mockReturnValueOnce(
             (async function* () {
-              yield { type: GeminiEventType.Content, value: 'plain text' };
+              yield { type: LlmEventType.Content, value: 'plain text' };
             })(),
           );
 
@@ -7109,7 +7117,7 @@ hello
       client['chat'] = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
-      } as unknown as GeminiChat;
+      } as unknown as LlmChat;
 
       const stream = client.sendMessageStream(
         [{ text: 'no tool calls here' }],
@@ -7144,11 +7152,11 @@ hello
         return new Promise(() => {});
       });
 
-      const mockChat: Partial<GeminiChat> = {
+      const mockChat: Partial<LlmChat> = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
       };
-      client['chat'] = mockChat as GeminiChat;
+      client['chat'] = mockChat as LlmChat;
       mockTurnRunFn.mockReturnValue(
         (async function* () {
           yield { type: 'content', value: 'Hello' };
@@ -7293,7 +7301,7 @@ hello
       client['chat'] = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
-      } as unknown as GeminiChat;
+      } as unknown as LlmChat;
 
       const done = fromAsync(
         client.sendMessageStream(
@@ -7342,7 +7350,7 @@ hello
       client['chat'] = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
-      } as unknown as GeminiChat;
+      } as unknown as LlmChat;
 
       const done = fromAsync(
         client.sendMessageStream(
@@ -7372,11 +7380,11 @@ hello
         return new Promise(() => {});
       });
 
-      const mockChat: Partial<GeminiChat> = {
+      const mockChat: Partial<LlmChat> = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
       };
-      client['chat'] = mockChat as GeminiChat;
+      client['chat'] = mockChat as LlmChat;
       mockTurnRunFn.mockReturnValue(
         (async function* () {
           yield { type: 'content', value: 'Hello' };
@@ -7457,12 +7465,12 @@ hello
         return new Promise(() => {});
       });
 
-      const mockChat: Partial<GeminiChat> = {
+      const mockChat: Partial<LlmChat> = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
         getHistoryLength: vi.fn().mockReturnValue(0),
       };
-      client['chat'] = mockChat as GeminiChat;
+      client['chat'] = mockChat as LlmChat;
       mockTurnRunFn.mockReturnValue(
         (async function* () {
           yield { type: 'content', value: 'Hello' };
@@ -7502,7 +7510,7 @@ hello
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
         getHistoryLength: vi.fn().mockReturnValue(0),
-      } as unknown as GeminiChat;
+      } as unknown as LlmChat;
       mockTurnRunFn.mockReturnValue(
         (async function* () {
           yield { type: 'content', value: 'Hello' };
@@ -7551,7 +7559,7 @@ hello
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
         getHistoryLength: vi.fn().mockReturnValue(0),
-      } as unknown as GeminiChat;
+      } as unknown as LlmChat;
       mockTurnRunFn.mockReturnValue(
         (async function* () {
           yield { type: 'content', value: 'Hello' };
@@ -7602,7 +7610,7 @@ hello
       client['chat'] = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
-      } as unknown as GeminiChat;
+      } as unknown as LlmChat;
       mockTurnRunFn.mockReturnValue(
         (async function* () {
           yield { type: 'content', value: 'Hello' };
@@ -7640,7 +7648,7 @@ hello
       client['chat'] = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
-      } as unknown as GeminiChat;
+      } as unknown as LlmChat;
 
       // ToolCallRequest sets hasToolCalls, then Retry resets it → end-of-turn
       // sees no tool calls and discards the prefetch.
@@ -7691,7 +7699,7 @@ hello
       client['chat'] = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
-      } as unknown as GeminiChat;
+      } as unknown as LlmChat;
 
       // ToolCallRequest → Retry (resets) → ToolCallRequest (re-sets) →
       // end-of-turn sees hasToolCalls=true and preserves the prefetch.
@@ -7747,7 +7755,7 @@ hello
       client['chat'] = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
-      } as unknown as GeminiChat;
+      } as unknown as LlmChat;
 
       // ToolCallRequest sets hasToolCalls, then ModelFallback resets it →
       // end-of-turn sees no tool calls and discards the prefetch.
@@ -7803,7 +7811,7 @@ hello
       client['chat'] = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
-      } as unknown as GeminiChat;
+      } as unknown as LlmChat;
 
       // ToolCallRequest → ModelFallback (resets) → ToolCallRequest (re-sets) →
       // end-of-turn sees hasToolCalls=true and preserves the prefetch.
@@ -7880,7 +7888,7 @@ hello
       client['chat'] = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
-      } as unknown as GeminiChat;
+      } as unknown as LlmChat;
 
       // Turn 1: prefetch fires, tool call preserves it past end-of-turn.
       mockTurnRunFn.mockReturnValue(
@@ -7991,12 +7999,12 @@ hello
         return new Promise(() => {});
       });
 
-      const mockChat: Partial<GeminiChat> = {
+      const mockChat: Partial<LlmChat> = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
         getHistoryLength: vi.fn().mockReturnValue(0),
       };
-      client['chat'] = mockChat as GeminiChat;
+      client['chat'] = mockChat as LlmChat;
 
       // Force LoopDetector to trip on the first event.
       const loopDetector = client['loopDetector'];
@@ -8020,7 +8028,7 @@ hello
         events.push(event);
       }
 
-      expect(events.some((e) => e.type === GeminiEventType.LoopDetected)).toBe(
+      expect(events.some((e) => e.type === LlmEventType.LoopDetected)).toBe(
         true,
       );
       expect(abortHandlerInvoked).toBe(true);
@@ -8036,12 +8044,12 @@ hello
         return new Promise(() => {});
       });
 
-      const mockChat: Partial<GeminiChat> = {
+      const mockChat: Partial<LlmChat> = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
         getHistoryLength: vi.fn().mockReturnValue(0),
       };
-      client['chat'] = mockChat as GeminiChat;
+      client['chat'] = mockChat as LlmChat;
 
       // The always-on cap trips on the first event — it runs before (and
       // independently of) the gated detectors.
@@ -8088,7 +8096,7 @@ hello
       expect(alwaysOnSpy).toHaveBeenCalled();
       expect(heuristicSpy).not.toHaveBeenCalled();
       const loopEvent = events.find(
-        (e) => e.type === GeminiEventType.LoopDetected,
+        (e) => e.type === LlmEventType.LoopDetected,
       );
       expect(loopEvent?.value?.loopType).toBe(LoopType.TURN_TOOL_CALL_CAP);
       // The two pending calls collected before the cap tripped are dropped, so
@@ -8101,12 +8109,12 @@ hello
     });
 
     it('should fire StopFailure hook on always-on loop detection', async () => {
-      const mockChat: Partial<GeminiChat> = {
+      const mockChat: Partial<LlmChat> = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
         getHistoryLength: vi.fn().mockReturnValue(0),
       };
-      client['chat'] = mockChat as GeminiChat;
+      client['chat'] = mockChat as LlmChat;
 
       const fireStopFailureEvent = vi.fn().mockResolvedValue(undefined);
       vi.mocked(mockConfig.getDisableAllHooks).mockReturnValue(false);
@@ -8144,12 +8152,12 @@ hello
     });
 
     it('should fire StopFailure hook on heuristic loop detection', async () => {
-      const mockChat: Partial<GeminiChat> = {
+      const mockChat: Partial<LlmChat> = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
         getHistoryLength: vi.fn().mockReturnValue(0),
       };
-      client['chat'] = mockChat as GeminiChat;
+      client['chat'] = mockChat as LlmChat;
 
       const fireStopFailureEvent = vi.fn().mockResolvedValue(undefined);
       vi.mocked(mockConfig.getDisableAllHooks).mockReturnValue(false);
@@ -8187,12 +8195,12 @@ hello
     });
 
     it('should pass undefined error_details when loopType is null', async () => {
-      const mockChat: Partial<GeminiChat> = {
+      const mockChat: Partial<LlmChat> = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
         getHistoryLength: vi.fn().mockReturnValue(0),
       };
-      client['chat'] = mockChat as GeminiChat;
+      client['chat'] = mockChat as LlmChat;
 
       const fireStopFailureEvent = vi.fn().mockResolvedValue(undefined);
       vi.mocked(mockConfig.getDisableAllHooks).mockReturnValue(false);
@@ -8228,12 +8236,12 @@ hello
     });
 
     it('should not fire StopFailure hook on loop detection when hooks are disabled', async () => {
-      const mockChat: Partial<GeminiChat> = {
+      const mockChat: Partial<LlmChat> = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
         getHistoryLength: vi.fn().mockReturnValue(0),
       };
-      client['chat'] = mockChat as GeminiChat;
+      client['chat'] = mockChat as LlmChat;
 
       const fireStopFailureEvent = vi.fn().mockResolvedValue(undefined);
       vi.mocked(mockConfig.getDisableAllHooks).mockReturnValue(true);
@@ -8268,12 +8276,12 @@ hello
     });
 
     it('should not fire StopFailure hook on loop detection when no StopFailure hooks configured', async () => {
-      const mockChat: Partial<GeminiChat> = {
+      const mockChat: Partial<LlmChat> = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
         getHistoryLength: vi.fn().mockReturnValue(0),
       };
-      client['chat'] = mockChat as GeminiChat;
+      client['chat'] = mockChat as LlmChat;
 
       const fireStopFailureEvent = vi.fn().mockResolvedValue(undefined);
       vi.mocked(mockConfig.getDisableAllHooks).mockReturnValue(false);
@@ -8308,12 +8316,12 @@ hello
     });
 
     it('should swallow StopFailure hook rejection on loop detection', async () => {
-      const mockChat: Partial<GeminiChat> = {
+      const mockChat: Partial<LlmChat> = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
         getHistoryLength: vi.fn().mockReturnValue(0),
       };
-      client['chat'] = mockChat as GeminiChat;
+      client['chat'] = mockChat as LlmChat;
 
       const fireStopFailureEvent = vi
         .fn()
@@ -8377,7 +8385,7 @@ hello
       }) {
         for (const call of [distinctA, distinctB]) {
           this.pendingToolCalls.push(call);
-          yield { type: GeminiEventType.ToolCallRequest, value: call };
+          yield { type: LlmEventType.ToolCallRequest, value: call };
         }
         // TOOL_CALL_LOOP_THRESHOLD (5) identical calls trip the guard on the 5th.
         for (let i = 0; i < 5; i++) {
@@ -8387,15 +8395,15 @@ hello
             args: { command: 'echo loop' },
           };
           this.pendingToolCalls.push(call);
-          yield { type: GeminiEventType.ToolCallRequest, value: call };
+          yield { type: LlmEventType.ToolCallRequest, value: call };
         }
       });
 
-      const mockChat: Partial<GeminiChat> = {
+      const mockChat: Partial<LlmChat> = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
       };
-      client['chat'] = mockChat as GeminiChat;
+      client['chat'] = mockChat as LlmChat;
 
       const stream = client.sendMessageStream(
         [{ text: 'mix distinct then repeat' }],
@@ -8414,7 +8422,7 @@ hello
 
       // Halts on the 5th identical call via the always-on consecutive guard.
       expect(events.at(-1)).toEqual({
-        type: GeminiEventType.LoopDetected,
+        type: LlmEventType.LoopDetected,
         value: { loopType: LoopType.CONSECUTIVE_IDENTICAL_TOOL_CALLS },
       });
       // The pending queue is fully cleared on halt, same as the turn cap.
@@ -8435,11 +8443,11 @@ hello
         return new Promise(() => {}); // never settles
       });
 
-      const mockChat: Partial<GeminiChat> = {
+      const mockChat: Partial<LlmChat> = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
       };
-      client['chat'] = mockChat as GeminiChat;
+      client['chat'] = mockChat as LlmChat;
       mockTurnRunFn.mockReturnValue(
         (async function* () {
           yield { type: 'content', value: 'outer reply' };
@@ -8473,7 +8481,7 @@ hello
                 prompt_id: 'test',
               },
             };
-          })() as unknown as AsyncGenerator<ServerGeminiStreamEvent>,
+          })() as unknown as AsyncGenerator<ServerLlmStreamEvent>,
       );
 
       const stream = client.sendMessageStream(
@@ -8500,11 +8508,11 @@ hello
       })();
       mockTurnRunFn.mockReturnValue(mockStream);
 
-      const mockChat: Partial<GeminiChat> = {
+      const mockChat: Partial<LlmChat> = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
       };
-      client['chat'] = mockChat as GeminiChat;
+      client['chat'] = mockChat as LlmChat;
 
       const stream = client.sendMessageStream(
         [{ text: 'Quick question' }],
@@ -8541,11 +8549,11 @@ hello
       })();
       mockTurnRunFn.mockReturnValue(mockStream);
 
-      const mockChat: Partial<GeminiChat> = {
+      const mockChat: Partial<LlmChat> = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
       };
-      client['chat'] = mockChat as GeminiChat;
+      client['chat'] = mockChat as LlmChat;
 
       const stream = client.sendMessageStream(
         [{ text: 'Quick question' }],
@@ -8579,18 +8587,18 @@ hello
       });
 
       const mockStream = (async function* () {
-        yield { type: GeminiEventType.Content, value: 'Done' };
+        yield { type: LlmEventType.Content, value: 'Done' };
       })();
       mockTurnRunFn.mockReturnValue(mockStream);
 
-      const mockChat: Partial<GeminiChat> = {
+      const mockChat: Partial<LlmChat> = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([
           { role: 'user', parts: [{ text: 'I prefer terse responses.' }] },
           { role: 'model', parts: [{ text: 'Done' }] },
         ]),
       };
-      client['chat'] = mockChat as GeminiChat;
+      client['chat'] = mockChat as LlmChat;
 
       const events = await fromAsync(
         client.sendMessageStream(
@@ -8614,7 +8622,7 @@ hello
         config: mockConfig,
       });
       expect(events).not.toContainEqual({
-        type: GeminiEventType.HookSystemMessage,
+        type: LlmEventType.HookSystemMessage,
         value: 'Managed auto-memory updated: user.md',
       });
     });
@@ -8628,11 +8636,11 @@ hello
       })();
       mockTurnRunFn.mockReturnValue(mockStream);
 
-      const mockChat: Partial<GeminiChat> = {
+      const mockChat: Partial<LlmChat> = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
       };
-      client['chat'] = mockChat as GeminiChat;
+      client['chat'] = mockChat as LlmChat;
 
       const stream = client.sendMessageStream(
         [{ text: 'What day is it?' }],
@@ -8670,7 +8678,7 @@ hello
       client['chat'] = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
-      } as unknown as GeminiChat;
+      } as unknown as LlmChat;
 
       await runWithAgentContext('agent-1', async () => {
         const stream = client.sendMessageStream(
@@ -8699,7 +8707,7 @@ hello
       client['chat'] = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
-      } as unknown as GeminiChat;
+      } as unknown as LlmChat;
 
       const stream = client.sendMessageStream(
         [{ text: 'Plan this change' }],
@@ -8726,7 +8734,7 @@ hello
       client['chat'] = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
-      } as unknown as GeminiChat;
+      } as unknown as LlmChat;
 
       const stream = client.sendMessageStream(
         [{ text: 'Plan this change' }],
@@ -8749,11 +8757,11 @@ hello
       })();
       mockTurnRunFn.mockReturnValue(mockStream1);
 
-      const mockChat: Partial<GeminiChat> = {
+      const mockChat: Partial<LlmChat> = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
       };
-      client['chat'] = mockChat as GeminiChat;
+      client['chat'] = mockChat as LlmChat;
 
       // First query on June 5 — should inject date
       const stream1 = client.sendMessageStream(
@@ -8810,11 +8818,11 @@ hello
       })();
       mockTurnRunFn.mockReturnValue(mockStream1);
 
-      const mockChat: Partial<GeminiChat> = {
+      const mockChat: Partial<LlmChat> = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
       };
-      client['chat'] = mockChat as GeminiChat;
+      client['chat'] = mockChat as LlmChat;
 
       // First query on June 4 — should inject date
       const stream1 = client.sendMessageStream(
@@ -8874,11 +8882,11 @@ hello
       })();
       mockTurnRunFn.mockReturnValue(mockStream);
 
-      const mockChat: Partial<GeminiChat> = {
+      const mockChat: Partial<LlmChat> = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
       };
-      client['chat'] = mockChat as GeminiChat;
+      client['chat'] = mockChat as LlmChat;
 
       // Send a Cron message — date should NOT be injected
       const stream = client.sendMessageStream(
@@ -8929,12 +8937,12 @@ hello
 
     describe('autoSkill: scheduleSkillReview via runManagedAutoMemoryBackgroundTasks', () => {
       let mockStreamFn: () => AsyncGenerator<{ type: string; value: string }>;
-      let mockChat: Partial<GeminiChat>;
+      let mockChat: Partial<LlmChat>;
 
       beforeEach(() => {
         vi.spyOn(client['config'], 'getAutoSkillEnabled').mockReturnValue(true);
         mockStreamFn = async function* () {
-          yield { type: GeminiEventType.Content, value: 'Done' };
+          yield { type: LlmEventType.Content, value: 'Done' };
         };
         mockTurnRunFn.mockReturnValue(mockStreamFn());
         mockChat = {
@@ -8944,7 +8952,7 @@ hello
             { role: 'model', parts: [{ text: 'Done' }] },
           ]),
         };
-        client['chat'] = mockChat as GeminiChat;
+        client['chat'] = mockChat as LlmChat;
       });
 
       it('should call scheduleSkillReview with correct params on UserQuery', async () => {
@@ -9155,11 +9163,11 @@ hello
       })();
       mockTurnRunFn.mockReturnValue(mockStream);
 
-      const mockChat: Partial<GeminiChat> = {
+      const mockChat: Partial<LlmChat> = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
       };
-      client['chat'] = mockChat as GeminiChat;
+      client['chat'] = mockChat as LlmChat;
 
       const initialRequest = [{ text: 'Hi' }];
 
@@ -9193,11 +9201,11 @@ Other open files:
       })();
       mockTurnRunFn.mockReturnValue(mockStream);
 
-      const mockChat: Partial<GeminiChat> = {
+      const mockChat: Partial<LlmChat> = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
       };
-      client['chat'] = mockChat as GeminiChat;
+      client['chat'] = mockChat as LlmChat;
 
       // Act
       const stream = client.sendMessageStream(
@@ -9237,11 +9245,11 @@ Other open files:
       })();
       mockTurnRunFn.mockReturnValue(mockStream);
 
-      const mockChat: Partial<GeminiChat> = {
+      const mockChat: Partial<LlmChat> = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
       };
-      client['chat'] = mockChat as GeminiChat;
+      client['chat'] = mockChat as LlmChat;
 
       // Use a signal that never gets aborted
       const abortController = new AbortController();
@@ -9324,11 +9332,11 @@ Other open files:
       })();
       mockTurnRunFn.mockReturnValue(mockStream);
 
-      const mockChat: Partial<GeminiChat> = {
+      const mockChat: Partial<LlmChat> = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
       };
-      client['chat'] = mockChat as GeminiChat;
+      client['chat'] = mockChat as LlmChat;
 
       // Act & Assert
       // Run up to the limit
@@ -9356,7 +9364,7 @@ Other open files:
         events.push(event);
       }
 
-      expect(events).toEqual([{ type: GeminiEventType.MaxSessionTurns }]);
+      expect(events).toEqual([{ type: LlmEventType.MaxSessionTurns }]);
       expect(mockTurnRunFn).toHaveBeenCalledTimes(MAX_SESSION_TURNS);
     });
 
@@ -9375,11 +9383,11 @@ Other open files:
       })();
       mockTurnRunFn.mockReturnValue(mockStream);
 
-      const mockChat: Partial<GeminiChat> = {
+      const mockChat: Partial<LlmChat> = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
       };
-      client['chat'] = mockChat as GeminiChat;
+      client['chat'] = mockChat as LlmChat;
 
       const stream = client.sendMessageStream(
         [{ text: 'over the limit' }],
@@ -9391,7 +9399,7 @@ Other open files:
         events.push(event);
       }
 
-      expect(events).toEqual([{ type: GeminiEventType.MaxSessionTurns }]);
+      expect(events).toEqual([{ type: LlmEventType.MaxSessionTurns }]);
       expect(abortHandler).toHaveBeenCalledTimes(1);
     });
 
@@ -9415,12 +9423,12 @@ Other open files:
       })();
       mockTurnRunFn.mockReturnValue(mockStream);
 
-      const mockChat: Partial<GeminiChat> = {
+      const mockChat: Partial<LlmChat> = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
         getLastPromptTokenCount: vi.fn().mockReturnValue(9999),
       };
-      client['chat'] = mockChat as GeminiChat;
+      client['chat'] = mockChat as LlmChat;
 
       const stream = client.sendMessageStream(
         [{ text: 'token limit test' }],
@@ -9434,7 +9442,7 @@ Other open files:
 
       expect(events).toEqual([
         {
-          type: GeminiEventType.SessionTokenLimitExceeded,
+          type: LlmEventType.SessionTokenLimitExceeded,
           value: expect.objectContaining({
             currentTokens: 9999,
             limit: 1,
@@ -9464,11 +9472,11 @@ Other open files:
       })();
       mockTurnRunFn.mockReturnValue(mockStream);
 
-      const mockChat: Partial<GeminiChat> = {
+      const mockChat: Partial<LlmChat> = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
       };
-      client['chat'] = mockChat as GeminiChat;
+      client['chat'] = mockChat as LlmChat;
 
       // Use a signal that never gets aborted
       const abortController = new AbortController();
@@ -9538,7 +9546,7 @@ Other open files:
         vi.spyOn(client['config'], 'getIdeMode').mockReturnValue(true);
         mockTurnRunFn.mockReturnValue(mockStream);
 
-        const mockChat: Partial<GeminiChat> = {
+        const mockChat: Partial<LlmChat> = {
           addHistory: vi.fn(),
           setHistory: vi.fn(),
           // Assume history is not empty for delta checks
@@ -9548,7 +9556,7 @@ Other open files:
               { role: 'user', parts: [{ text: 'previous message' }] },
             ]),
         };
-        client['chat'] = mockChat as GeminiChat;
+        client['chat'] = mockChat as LlmChat;
       });
 
       const testCases = [
@@ -9771,7 +9779,7 @@ Other open files:
     });
 
     describe('IDE context with pending tool calls', () => {
-      let mockChat: Partial<GeminiChat>;
+      let mockChat: Partial<LlmChat>;
 
       beforeEach(() => {
         vi.spyOn(client, 'tryCompressChat').mockResolvedValue({
@@ -9790,7 +9798,7 @@ Other open files:
           getHistory: vi.fn().mockReturnValue([]), // Default empty history
           setHistory: vi.fn(),
         };
-        client['chat'] = mockChat as GeminiChat;
+        client['chat'] = mockChat as LlmChat;
 
         vi.spyOn(client['config'], 'getIdeMode').mockReturnValue(true);
         vi.mocked(ideContextStore.get).mockReturnValue({
@@ -9996,7 +10004,7 @@ Other open files:
         mockTurnRunFn.mockReturnValueOnce(
           (async function* () {
             yield {
-              type: GeminiEventType.Error,
+              type: LlmEventType.Error,
               value: new Error('network failed'),
             };
           })(),
@@ -10015,7 +10023,7 @@ Other open files:
 
         mockTurnRunFn.mockReturnValueOnce(
           (async function* () {
-            yield { type: GeminiEventType.Content, value: 'ok' };
+            yield { type: LlmEventType.Content, value: 'ok' };
           })(),
         );
 
@@ -10075,7 +10083,7 @@ Other open files:
           signal: AbortSignal,
         ) {
           if (signal.aborted) {
-            yield { type: GeminiEventType.UserCancelled };
+            yield { type: LlmEventType.UserCancelled };
           }
           throw new UnauthorizedError('unauthorized');
         });
@@ -10094,7 +10102,7 @@ Other open files:
 
         mockTurnRunFn.mockReturnValueOnce(
           (async function* () {
-            yield { type: GeminiEventType.Content, value: 'ok' };
+            yield { type: LlmEventType.Content, value: 'ok' };
           })(),
         );
 
@@ -10365,17 +10373,17 @@ Other open files:
 
       const mockStream = (async function* () {
         yield {
-          type: GeminiEventType.Error,
+          type: LlmEventType.Error,
           value: { error: { message: 'test error' } },
         };
       })();
       mockTurnRunFn.mockReturnValue(mockStream);
 
-      const mockChat: Partial<GeminiChat> = {
+      const mockChat: Partial<LlmChat> = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
       };
-      client['chat'] = mockChat as GeminiChat;
+      client['chat'] = mockChat as LlmChat;
 
       // Act
       const stream = client.sendMessageStream(
@@ -10415,7 +10423,7 @@ Other open files:
       mockTurnRunFn.mockReturnValue(
         (async function* () {
           yield {
-            type: GeminiEventType.Error,
+            type: LlmEventType.Error,
             value: {
               error: {
                 message: 'Bearer secret-token in /private/user/path',
@@ -10469,7 +10477,7 @@ Other open files:
       mockTurnRunFn.mockReturnValue(
         (async function* () {
           yield {
-            type: GeminiEventType.Error,
+            type: LlmEventType.Error,
             value: {
               error: { message: 'provider failed', status: 500 },
             },
@@ -10487,7 +10495,7 @@ Other open files:
 
       expect(events).toEqual([
         {
-          type: GeminiEventType.Error,
+          type: LlmEventType.Error,
           value: {
             error: { message: 'provider failed', status: 500 },
           },
@@ -10578,19 +10586,19 @@ Other open files:
       const mockCheckNextSpeaker = vi.mocked(checkNextSpeaker);
 
       const mockStream = (async function* () {
-        yield { type: GeminiEventType.Content, value: 'some content' };
+        yield { type: LlmEventType.Content, value: 'some content' };
         yield {
-          type: GeminiEventType.Error,
+          type: LlmEventType.Error,
           value: { error: { message: 'test error' } },
         };
       })();
       mockTurnRunFn.mockReturnValue(mockStream);
 
-      const mockChat: Partial<GeminiChat> = {
+      const mockChat: Partial<LlmChat> = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
       };
-      client['chat'] = mockChat as GeminiChat;
+      client['chat'] = mockChat as LlmChat;
 
       // Act
       const stream = client.sendMessageStream(
@@ -10626,11 +10634,11 @@ Other open files:
       })();
       mockTurnRunFn.mockReturnValue(mockStream);
 
-      const mockChat: Partial<GeminiChat> = {
+      const mockChat: Partial<LlmChat> = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
       };
-      client['chat'] = mockChat as GeminiChat;
+      client['chat'] = mockChat as LlmChat;
 
       // Act
       const stream = client.sendMessageStream(
@@ -10654,7 +10662,7 @@ Other open files:
         (async function* () {
           for (let i = 0; i < 5; i++) {
             yield {
-              type: GeminiEventType.ToolCallRequest,
+              type: LlmEventType.ToolCallRequest,
               value: {
                 callId: `repeat-${i}`,
                 name: 'run_shell_command',
@@ -10665,11 +10673,11 @@ Other open files:
         })(),
       );
 
-      const mockChat: Partial<GeminiChat> = {
+      const mockChat: Partial<LlmChat> = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
       };
-      client['chat'] = mockChat as GeminiChat;
+      client['chat'] = mockChat as LlmChat;
 
       const events = await fromAsync(
         client.sendMessageStream(
@@ -10683,7 +10691,7 @@ Other open files:
       // regardless of skipLoopDetection so the DashScope server never sees
       // enough repeats to reject the conversation (issue #5019).
       expect(events.at(-1)).toEqual({
-        type: GeminiEventType.LoopDetected,
+        type: LlmEventType.LoopDetected,
         value: { loopType: LoopType.CONSECUTIVE_IDENTICAL_TOOL_CALLS },
       });
     });
@@ -10695,7 +10703,7 @@ Other open files:
         (async function* () {
           for (let i = 0; i < 5; i++) {
             yield {
-              type: GeminiEventType.ToolCallRequest,
+              type: LlmEventType.ToolCallRequest,
               value: {
                 callId: `repeat-${i}`,
                 name: 'run_shell_command',
@@ -10706,11 +10714,11 @@ Other open files:
         })(),
       );
 
-      const mockChat: Partial<GeminiChat> = {
+      const mockChat: Partial<LlmChat> = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
       };
-      client['chat'] = mockChat as GeminiChat;
+      client['chat'] = mockChat as LlmChat;
 
       const events = await fromAsync(
         client.sendMessageStream(
@@ -10721,7 +10729,7 @@ Other open files:
       );
 
       expect(events.at(-1)).toEqual({
-        type: GeminiEventType.LoopDetected,
+        type: LlmEventType.LoopDetected,
         value: { loopType: LoopType.CONSECUTIVE_IDENTICAL_TOOL_CALLS },
       });
       expect(events).toHaveLength(5);
@@ -10734,7 +10742,7 @@ Other open files:
           parts: [{ text: 'second message' }],
         };
         markApiHistoryPrompt(orphanedPrompt, 'original-prompt');
-        const mockChat: Partial<GeminiChat> = {
+        const mockChat: Partial<LlmChat> = {
           addHistory: vi.fn(),
           getHistory: vi.fn().mockReturnValue([]),
           getHistoryLength: vi.fn().mockReturnValueOnce(3).mockReturnValue(2),
@@ -10744,7 +10752,7 @@ Other open files:
             .mockReturnValue([orphanedPrompt]),
           repairOrphanedToolUseTurns: vi.fn().mockReturnValue({ injected: [] }),
         };
-        client['chat'] = mockChat as GeminiChat;
+        client['chat'] = mockChat as LlmChat;
 
         const mockStream = (async function* () {
           yield { type: 'content', value: 'retry response' };
@@ -10786,7 +10794,7 @@ Other open files:
           markApiHistoryPrompt(entry, id);
           return entry;
         });
-        const mockChat: Partial<GeminiChat> = {
+        const mockChat: Partial<LlmChat> = {
           addHistory: vi.fn(),
           getHistory: vi.fn().mockReturnValue([]),
           getHistoryLength: vi.fn().mockReturnValue(0),
@@ -10796,7 +10804,7 @@ Other open files:
             .mockReturnValue(strippedEntries),
           repairOrphanedToolUseTurns: vi.fn().mockReturnValue({ injected: [] }),
         };
-        client['chat'] = mockChat as GeminiChat;
+        client['chat'] = mockChat as LlmChat;
         mockTurnRunFn.mockReturnValue((async function* () {})());
 
         await fromAsync(
@@ -10821,7 +10829,7 @@ Other open files:
           role: 'user',
           parts: [{ text: 'retry me' }],
         };
-        const mockChat: Partial<GeminiChat> = {
+        const mockChat: Partial<LlmChat> = {
           addHistory: vi.fn(),
           getHistory: vi.fn().mockReturnValue([]),
           getHistoryLength: vi.fn().mockReturnValue(0),
@@ -10833,11 +10841,11 @@ Other open files:
             .mockReturnValue([orphanedPrompt]),
           repairOrphanedToolUseTurns: vi.fn().mockReturnValue({ injected: [] }),
         };
-        client['chat'] = mockChat as GeminiChat;
+        client['chat'] = mockChat as LlmChat;
 
         mockTurnRunFn.mockReturnValue(
           (async function* () {
-            yield* [] as ServerGeminiStreamEvent[];
+            yield* [] as ServerLlmStreamEvent[];
             throw new Error('retry failed before first event');
           })(),
         );
@@ -10866,10 +10874,10 @@ Other open files:
           role: 'user',
           parts: [{ text: 'retry me' }],
         };
-        // Mirror GeminiChat's user-content push counter; the mocked turn bumps
+        // Mirror LlmChat's user-content push counter; the mocked turn bumps
         // it when it simulates the pre-API push.
         let pushCount = 0;
-        const mockChat: Partial<GeminiChat> = {
+        const mockChat: Partial<LlmChat> = {
           addHistory: vi.fn(),
           getHistory: vi.fn().mockReturnValue([]),
           getHistoryLength: vi.fn().mockReturnValue(0),
@@ -10880,14 +10888,14 @@ Other open files:
             .mockReturnValue([orphanedPrompt]),
           repairOrphanedToolUseTurns: vi.fn().mockReturnValue({ injected: [] }),
         };
-        client['chat'] = mockChat as GeminiChat;
+        client['chat'] = mockChat as LlmChat;
 
         mockTurnRunFn.mockReturnValue(
           (async function* () {
             // Simulate the real chat pushing the re-submitted user content into
             // history before the API call, then failing pre-event.
             pushCount++;
-            yield* [] as ServerGeminiStreamEvent[];
+            yield* [] as ServerLlmStreamEvent[];
             throw new Error('retry failed after push, before first event');
           })(),
         );
@@ -10927,7 +10935,7 @@ Other open files:
           { role: 'user', parts: [{ text: 'old-3' }] },
         ];
         let pushCount = 0;
-        const mockChat: Partial<GeminiChat> = {
+        const mockChat: Partial<LlmChat> = {
           addHistory: vi.fn(),
           getHistory: vi.fn(() => historyRef),
           getHistoryLength: vi.fn(() => historyRef.length),
@@ -10938,7 +10946,7 @@ Other open files:
             .mockReturnValue([orphanedPrompt]),
           repairOrphanedToolUseTurns: vi.fn().mockReturnValue({ injected: [] }),
         };
-        client['chat'] = mockChat as GeminiChat;
+        client['chat'] = mockChat as LlmChat;
 
         mockTurnRunFn.mockReturnValue(
           (async function* () {
@@ -10949,7 +10957,7 @@ Other open files:
             historyRef.push({ role: 'user', parts: [{ text: 'summary' }] });
             historyRef.push(orphanedPrompt);
             pushCount++;
-            yield* [] as ServerGeminiStreamEvent[];
+            yield* [] as ServerLlmStreamEvent[];
             throw new Error(
               'failed after compression+push, before first event',
             );
@@ -10974,7 +10982,7 @@ Other open files:
       });
 
       it('should not increment sessionTurnCount for retry', async () => {
-        const mockChat: Partial<GeminiChat> = {
+        const mockChat: Partial<LlmChat> = {
           addHistory: vi.fn(),
           getHistory: vi.fn().mockReturnValue([]),
           getHistoryLength: vi.fn().mockReturnValue(0),
@@ -10982,7 +10990,7 @@ Other open files:
           stripOrphanedUserEntriesFromHistory: vi.fn(),
           repairOrphanedToolUseTurns: vi.fn().mockReturnValue({ injected: [] }),
         };
-        client['chat'] = mockChat as GeminiChat;
+        client['chat'] = mockChat as LlmChat;
 
         const mockStream = (async function* () {
           yield { type: 'content', value: 'ok' };
@@ -11006,7 +11014,7 @@ Other open files:
     });
 
     describe('hooks fast-path optimization', () => {
-      let mockChat: Partial<GeminiChat>;
+      let mockChat: Partial<LlmChat>;
 
       beforeEach(() => {
         vi.spyOn(client, 'tryCompressChat').mockResolvedValue({
@@ -11024,7 +11032,7 @@ Other open files:
           addHistory: vi.fn(),
           getHistory: vi.fn().mockReturnValue([]),
         };
-        client['chat'] = mockChat as GeminiChat;
+        client['chat'] = mockChat as LlmChat;
       });
 
       it('emits active_goal when a goal is active for the turn', async () => {
@@ -11046,7 +11054,7 @@ Other open files:
         );
 
         expect(events[0]).toEqual({
-          type: GeminiEventType.ActiveGoal,
+          type: LlmEventType.ActiveGoal,
           value: {
             condition: 'finish the refactor',
             iterations: 2,
@@ -11089,10 +11097,10 @@ Other open files:
               parts: [{ text: 'done' }],
             },
           ]),
-        } as unknown as GeminiChat;
+        } as unknown as LlmChat;
         mockTurnRunFn.mockReturnValue(
           (async function* () {
-            yield { type: GeminiEventType.Content, value: 'done' };
+            yield { type: LlmEventType.Content, value: 'done' };
           })(),
         );
 
@@ -11105,7 +11113,7 @@ Other open files:
         );
 
         expect(events).toContainEqual({
-          type: GeminiEventType.ActiveGoal,
+          type: LlmEventType.ActiveGoal,
           value: null,
         });
       });
@@ -11143,10 +11151,10 @@ Other open files:
               parts: [{ text: 'done' }],
             },
           ]),
-        } as unknown as GeminiChat;
+        } as unknown as LlmChat;
         mockTurnRunFn.mockReturnValue(
           (async function* () {
-            yield { type: GeminiEventType.Content, value: 'done' };
+            yield { type: LlmEventType.Content, value: 'done' };
           })(),
         );
 
@@ -11159,18 +11167,18 @@ Other open files:
         );
 
         const activeGoalEvents = events.filter(
-          (event) => event.type === GeminiEventType.ActiveGoal,
+          (event) => event.type === LlmEventType.ActiveGoal,
         );
 
         expect(activeGoalEvents).toEqual([
           {
-            type: GeminiEventType.ActiveGoal,
+            type: LlmEventType.ActiveGoal,
             value: expect.objectContaining({
               condition: 'finish the refactor',
             }),
           },
           {
-            type: GeminiEventType.ActiveGoal,
+            type: LlmEventType.ActiveGoal,
             value: null,
           },
         ]);
@@ -11224,10 +11232,10 @@ Other open files:
               parts: [{ text: 'done' }],
             },
           ]),
-        } as unknown as GeminiChat;
+        } as unknown as LlmChat;
         mockTurnRunFn.mockReturnValue(
           (async function* () {
-            yield { type: GeminiEventType.Content, value: 'done' };
+            yield { type: LlmEventType.Content, value: 'done' };
           })(),
         );
 
@@ -11239,19 +11247,19 @@ Other open files:
           ),
         );
         const activeGoalEvents = events.filter(
-          (event) => event.type === GeminiEventType.ActiveGoal,
+          (event) => event.type === LlmEventType.ActiveGoal,
         );
 
         expect(activeGoalEvents).toEqual([
           {
-            type: GeminiEventType.ActiveGoal,
+            type: LlmEventType.ActiveGoal,
             value: expect.objectContaining({
               condition: 'finish the refactor',
               iterations: 2,
             }),
           },
           {
-            type: GeminiEventType.ActiveGoal,
+            type: LlmEventType.ActiveGoal,
             value: expect.objectContaining({
               condition: 'finish the refactor',
               iterations: 3,
@@ -11261,7 +11269,7 @@ Other open files:
         ]);
         expect(events).not.toContainEqual(
           expect.objectContaining({
-            type: GeminiEventType.StopHookLoop,
+            type: LlmEventType.StopHookLoop,
           }),
         );
       });
@@ -11352,8 +11360,8 @@ Other open files:
         );
         mockTurnRunFn.mockReturnValue(
           (async function* () {
-            yield { type: GeminiEventType.Content, value: 'Hello, ' };
-            yield { type: GeminiEventType.Content, value: 'world.' };
+            yield { type: LlmEventType.Content, value: 'Hello, ' };
+            yield { type: LlmEventType.Content, value: 'world.' };
           })(),
         );
 
@@ -11402,9 +11410,9 @@ Other open files:
         });
         mockTurnRunFn.mockReturnValue(
           (async function* () {
-            yield { type: GeminiEventType.Content, value: 'Hello, ' };
+            yield { type: LlmEventType.Content, value: 'Hello, ' };
             await secondChunkGate;
-            yield { type: GeminiEventType.Content, value: 'world.' };
+            yield { type: LlmEventType.Content, value: 'world.' };
           })(),
         );
 
@@ -11473,7 +11481,7 @@ Other open files:
         vi.mocked(mockConfig.getDebugLogger).mockReturnValue(debugLogger);
         mockTurnRunFn.mockReturnValue(
           (async function* () {
-            yield { type: GeminiEventType.Content, value: 'Hello, world.' };
+            yield { type: LlmEventType.Content, value: 'Hello, world.' };
           })(),
         );
 
@@ -11526,7 +11534,7 @@ Other open files:
         );
         mockTurnRunFn.mockReturnValue(
           (async function* () {
-            yield { type: GeminiEventType.Content, value: 'Hello, world.' };
+            yield { type: LlmEventType.Content, value: 'Hello, world.' };
           })(),
         );
 
@@ -11577,7 +11585,7 @@ Other open files:
 
         mockTurnRunFn.mockReturnValue(
           (async function* () {
-            yield { type: GeminiEventType.Content, value: 'Hello, world.' };
+            yield { type: LlmEventType.Content, value: 'Hello, world.' };
           })(),
         );
 
@@ -11622,7 +11630,7 @@ Other open files:
 
         mockTurnRunFn.mockReturnValue(
           (async function* () {
-            yield { type: GeminiEventType.Content, value: 'Hello, world.' };
+            yield { type: LlmEventType.Content, value: 'Hello, world.' };
           })(),
         );
 
@@ -11658,9 +11666,9 @@ Other open files:
 
         mockTurnRunFn.mockReturnValue(
           (async function* () {
-            yield { type: GeminiEventType.Content, value: 'Hello, world.' };
+            yield { type: LlmEventType.Content, value: 'Hello, world.' };
             yield {
-              type: GeminiEventType.Error,
+              type: LlmEventType.Error,
               value: { error: { message: 'test error' } },
             };
           })(),
@@ -11699,7 +11707,7 @@ Other open files:
         const controller = new AbortController();
         mockTurnRunFn.mockReturnValue(
           (async function* () {
-            yield { type: GeminiEventType.Content, value: 'Hello, world.' };
+            yield { type: LlmEventType.Content, value: 'Hello, world.' };
             controller.abort();
           })(),
         );
@@ -11735,7 +11743,7 @@ Other open files:
         mockTurnRunFn.mockReturnValue(
           (async function* () {
             yield {
-              type: GeminiEventType.ToolCallRequest,
+              type: LlmEventType.ToolCallRequest,
               value: {
                 callId: '1',
                 name: 'read_file',
@@ -11790,10 +11798,10 @@ Other open files:
               parts: [{ text: 'not done' }],
             },
           ]),
-        } as unknown as GeminiChat;
+        } as unknown as LlmChat;
         mockTurnRunFn.mockReturnValue(
           (async function* () {
-            yield { type: GeminiEventType.Content, value: 'not done' };
+            yield { type: LlmEventType.Content, value: 'not done' };
           })(),
         );
 
@@ -11808,11 +11816,11 @@ Other open files:
         expect(mockTurnRunFn).toHaveBeenCalledTimes(1);
         expect(events).not.toContainEqual(
           expect.objectContaining({
-            type: GeminiEventType.StopHookLoop,
+            type: LlmEventType.StopHookLoop,
           }),
         );
         expect(events).toContainEqual({
-          type: GeminiEventType.HookSystemMessage,
+          type: LlmEventType.HookSystemMessage,
           value:
             'Stop hook blocked continuation 1 consecutive time; overriding and ending the turn.',
         });
@@ -11851,14 +11859,14 @@ Other open files:
             .mockReturnValue([
               { role: 'model', parts: [{ text: 'not done' }] },
             ]),
-        } as unknown as GeminiChat;
+        } as unknown as LlmChat;
         let turnIndex = 0;
         mockTurnRunFn.mockImplementation(() => {
           const turnNo = turnIndex++;
           return (async function* () {
             for (let i = 0; i < 3; i++) {
               yield {
-                type: GeminiEventType.ToolCallRequest,
+                type: LlmEventType.ToolCallRequest,
                 value: {
                   callId: `call-${turnNo}-${i}`,
                   name: 'test_tool',
@@ -11868,7 +11876,7 @@ Other open files:
                 },
               };
             }
-            yield { type: GeminiEventType.Content, value: 'not done' };
+            yield { type: LlmEventType.Content, value: 'not done' };
           })();
         });
 
@@ -11886,7 +11894,7 @@ Other open files:
         // continuation started a fresh budget instead of inheriting the
         // first turn's accumulated count.
         expect(events).not.toContainEqual(
-          expect.objectContaining({ type: GeminiEventType.LoopDetected }),
+          expect.objectContaining({ type: LlmEventType.LoopDetected }),
         );
         expect(
           mockInteractionTelemetry.startInteractionSpan,
@@ -11932,10 +11940,10 @@ Other open files:
               parts: [{ text: 'not done' }],
             },
           ]),
-        } as unknown as GeminiChat;
+        } as unknown as LlmChat;
         mockTurnRunFn.mockReturnValue(
           (async function* () {
-            yield { type: GeminiEventType.Content, value: 'not done' };
+            yield { type: LlmEventType.Content, value: 'not done' };
           })(),
         );
 
@@ -11947,18 +11955,18 @@ Other open files:
           ),
         );
         const activeGoalEvents = events.filter(
-          (event) => event.type === GeminiEventType.ActiveGoal,
+          (event) => event.type === LlmEventType.ActiveGoal,
         );
 
         expect(activeGoalEvents).toEqual([
           {
-            type: GeminiEventType.ActiveGoal,
+            type: LlmEventType.ActiveGoal,
             value: expect.objectContaining({
               condition: 'finish the refactor',
             }),
           },
           {
-            type: GeminiEventType.ActiveGoal,
+            type: LlmEventType.ActiveGoal,
             value: null,
           },
         ]);
@@ -12131,7 +12139,7 @@ Other open files:
         } as unknown as ReturnType<Config['getChatRecordingService']>);
         mockTurnRunFn.mockReturnValue(
           (async function* () {
-            yield { type: GeminiEventType.Content, value: 'ok' };
+            yield { type: LlmEventType.Content, value: 'ok' };
           })(),
         );
 
@@ -12186,7 +12194,7 @@ Other open files:
         );
         mockTurnRunFn.mockReturnValue(
           (async function* () {
-            yield { type: GeminiEventType.Content, value: 'ok' };
+            yield { type: LlmEventType.Content, value: 'ok' };
           })(),
         );
 
@@ -12240,7 +12248,7 @@ Other open files:
           .mockImplementation(() => {});
         mockTurnRunFn.mockReturnValue(
           (async function* () {
-            yield { type: GeminiEventType.Content, value: 'ok' };
+            yield { type: LlmEventType.Content, value: 'ok' };
           })(),
         );
 
@@ -12329,7 +12337,7 @@ Other open files:
         const sendSpy = vi.spyOn(client, 'sendMessageStream');
         mockTurnRunFn.mockImplementation(() =>
           (async function* () {
-            yield { type: GeminiEventType.Content, value: 'response' };
+            yield { type: LlmEventType.Content, value: 'response' };
           })(),
         );
         const getSteerInput = vi
@@ -12401,7 +12409,7 @@ Other open files:
         );
         mockTurnRunFn.mockImplementation(() =>
           (async function* () {
-            yield { type: GeminiEventType.Content, value: 'response' };
+            yield { type: LlmEventType.Content, value: 'response' };
           })(),
         );
         const getSteerInput = vi
@@ -12449,7 +12457,7 @@ Other open files:
         );
         mockTurnRunFn.mockImplementation(() =>
           (async function* () {
-            yield { type: GeminiEventType.Content, value: 'response' };
+            yield { type: LlmEventType.Content, value: 'response' };
           })(),
         );
         const getSteerInput = vi
@@ -12513,7 +12521,7 @@ Other open files:
         );
         mockTurnRunFn.mockImplementation(() =>
           (async function* () {
-            yield { type: GeminiEventType.Content, value: 'response' };
+            yield { type: LlmEventType.Content, value: 'response' };
           })(),
         );
         const getSteerInput = vi
@@ -12569,7 +12577,7 @@ Other open files:
         );
         mockTurnRunFn.mockImplementation(() =>
           (async function* () {
-            yield { type: GeminiEventType.Content, value: 'response' };
+            yield { type: LlmEventType.Content, value: 'response' };
           })(),
         );
         const getSteerInput = vi
@@ -12591,7 +12599,7 @@ Other open files:
 
         expect(mockTurnRunFn).toHaveBeenCalledOnce();
         expect(events).toContainEqual({
-          type: GeminiEventType.ActiveGoal,
+          type: LlmEventType.ActiveGoal,
           value: null,
         });
       });
@@ -12630,7 +12638,7 @@ Other open files:
         );
         mockTurnRunFn.mockImplementation(() =>
           (async function* () {
-            yield { type: GeminiEventType.Content, value: 'response' };
+            yield { type: LlmEventType.Content, value: 'response' };
           })(),
         );
         const getSteerInput = vi
@@ -12701,7 +12709,7 @@ Other open files:
         );
         mockTurnRunFn.mockImplementation(() =>
           (async function* () {
-            yield { type: GeminiEventType.Content, value: 'response' };
+            yield { type: LlmEventType.Content, value: 'response' };
           })(),
         );
         const getSteerInput = vi
@@ -12742,7 +12750,7 @@ Other open files:
           .mockResolvedValue(null);
         mockTurnRunFn.mockImplementation(() =>
           (async function* () {
-            yield { type: GeminiEventType.Content, value: 'response' };
+            yield { type: LlmEventType.Content, value: 'response' };
           })(),
         );
         const getSteerInput = vi
@@ -12781,7 +12789,7 @@ Other open files:
       it('does not drain steer input without another model-turn budget', async () => {
         mockTurnRunFn.mockReturnValue(
           (async function* () {
-            yield { type: GeminiEventType.Content, value: 'response' };
+            yield { type: LlmEventType.Content, value: 'response' };
           })(),
         );
         const getSteerInput = vi.fn<() => Promise<SteerInput | undefined>>();
@@ -12804,7 +12812,7 @@ Other open files:
         mockTurnRunFn
           .mockImplementationOnce(() =>
             (async function* () {
-              yield { type: GeminiEventType.Content, value: 'response' };
+              yield { type: LlmEventType.Content, value: 'response' };
             })(),
           )
           .mockImplementationOnce(() => {
@@ -12839,7 +12847,7 @@ Other open files:
         mockTurnRunFn.mockImplementation(() => {
           pushCount = 1;
           return (async function* () {
-            yield { type: GeminiEventType.Content, value: 'response' };
+            yield { type: LlmEventType.Content, value: 'response' };
           })();
         });
         const accept = vi.fn();
@@ -12871,8 +12879,8 @@ Other open files:
         mockTurnRunFn.mockImplementation(() => {
           pushCount = 1;
           return (async function* () {
-            yield { type: GeminiEventType.Content, value: 'first' };
-            yield { type: GeminiEventType.Content, value: 'second' };
+            yield { type: LlmEventType.Content, value: 'first' };
+            yield { type: LlmEventType.Content, value: 'second' };
           })();
         });
         const accept = vi.fn();
@@ -13032,7 +13040,7 @@ Other open files:
           pushCount = turnCall;
           return (async function* () {
             yield {
-              type: GeminiEventType.Content,
+              type: LlmEventType.Content,
               value: `response ${turnCall}`,
             };
           })();
@@ -13102,7 +13110,7 @@ Other open files:
           pushCount = turnCall;
           return (async function* () {
             yield {
-              type: GeminiEventType.Content,
+              type: LlmEventType.Content,
               value: `response ${turnCall}`,
             };
           })();
@@ -13238,7 +13246,7 @@ Other open files:
 
         mockTurnRunFn.mockReturnValue(
           (async function* () {
-            yield { type: GeminiEventType.Content, value: 'ok' };
+            yield { type: LlmEventType.Content, value: 'ok' };
           })(),
         );
       });
@@ -13246,14 +13254,14 @@ Other open files:
       async function collectStream(
         messageType: SendMessageType,
         promptId = 'prompt-uq',
-      ): Promise<ServerGeminiStreamEvent[]> {
+      ): Promise<ServerLlmStreamEvent[]> {
         const stream = client.sendMessageStream(
           [{ text: 'user' }],
           new AbortController().signal,
           promptId,
           { type: messageType },
         );
-        const chunks: ServerGeminiStreamEvent[] = [];
+        const chunks: ServerLlmStreamEvent[] = [];
         for await (const chunk of stream) {
           chunks.push(chunk);
         }
@@ -13289,7 +13297,7 @@ Other open files:
         const chunks = await collectStream(SendMessageType.UserQuery);
 
         expect(chunks).toContainEqual({
-          type: GeminiEventType.Content,
+          type: LlmEventType.Content,
           value: 'ok',
         });
       });
@@ -13302,7 +13310,7 @@ Other open files:
         const chunks = await collectStream(SendMessageType.UserQuery);
 
         expect(chunks).toContainEqual({
-          type: GeminiEventType.Content,
+          type: LlmEventType.Content,
           value: 'ok',
         });
       });
@@ -14587,7 +14595,7 @@ Other open files:
           .mockReturnValue({ status: 'skipped', skippedReason: 'disabled' }),
       };
 
-      const client = new GeminiClient(makeMockConfigForShutdown(mgr));
+      const client = new LlmClient(makeMockConfigForShutdown(mgr));
       // Avoid needing a real chat — the method calls getHistoryShallow().
       (
         client as unknown as { getHistoryShallow: () => unknown[] }
@@ -14628,7 +14636,7 @@ Other open files:
           .mockReturnValue({ status: 'skipped', skippedReason: 'disabled' }),
       };
       const cfg = makeMockConfigForShutdown(mgr);
-      const client = new GeminiClient(cfg);
+      const client = new LlmClient(cfg);
 
       // Should not throw on first call
       expect(() => client.requestShutdown()).not.toThrow();
@@ -14837,7 +14845,7 @@ function makeMockConfigForShutdown(
 ): Config {
   return {
     isBareMode: vi.fn().mockReturnValue(false),
-    getGeminiClient: vi.fn().mockReturnValue(undefined),
+    getLlmClient: vi.fn().mockReturnValue(undefined),
     getProjectRoot: vi.fn().mockReturnValue('/project'),
     getSessionId: vi.fn().mockReturnValue('session-1'),
     getMemoryManager: vi.fn().mockReturnValue(mgr),

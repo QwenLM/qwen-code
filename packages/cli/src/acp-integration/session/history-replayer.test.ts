@@ -1606,7 +1606,7 @@ describe('collectHistoryReplayUpdates restore skip', () => {
   it('skips finalize from the transcript tail when chat is not initialized', async () => {
     const config = {
       getRestoreAskUserQuestion: () => true,
-      getGeminiClient: () => ({ isInitialized: () => false }),
+      getLlmClient: () => ({ isInitialized: () => false }),
     } as unknown as Config;
 
     const replay = await collectHistoryReplayUpdates({
@@ -1624,7 +1624,7 @@ describe('collectHistoryReplayUpdates restore skip', () => {
   it('finalizes when restore skip is suppressed', async () => {
     const config = {
       getRestoreAskUserQuestion: () => true,
-      getGeminiClient: () => ({ isInitialized: () => false }),
+      getLlmClient: () => ({ isInitialized: () => false }),
     } as unknown as Config;
 
     const replay = await collectHistoryReplayUpdates({
