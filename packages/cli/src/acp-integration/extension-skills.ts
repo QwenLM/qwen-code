@@ -6,7 +6,10 @@
 
 import type { Config, SkillConfig } from '@qwen-code/qwen-code-core';
 
-function extensionSkillRef(extensionName: string, skillName: string): string {
+export function extensionSkillRef(
+  extensionName: string,
+  skillName: string,
+): string {
   return `${extensionName}\0${skillName}`;
 }
 

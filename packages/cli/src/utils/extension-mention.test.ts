@@ -112,3 +112,110 @@ describe('buildExtensionContextText capability line', () => {
     );
   });
 });
+
+// ── Truth matrix: resolveAdvertisedSkillNames ──
+// Every name source × collision state × entry spelling × operation.
+describe('resolveAdvertisedSkillNames truth matrix', () => {
+  it.each<{
+    extension: { skillName: string; extensionName: string };
+    cachedSkills:
+      | ReadonlyArray<{ name: string; extensionName?: string }>
+      | null
+      | undefined;
+    expected: string[];
+    label: string;
+  }>([
+    // ── Qualified name from cache takes precedence ──
+    {
+      extension: { skillName: 'chat', extensionName: 'demo' },
+      cachedSkills: [{ name: 'demo:chat', extensionName: 'demo' }],
+      expected: ['demo:chat'],
+      label: 'qualified cache name wins over manifest',
+    },
+
+    // ── Bare cache name when no collision ──
+    {
+      extension: { skillName: 'commit', extensionName: 'demo' },
+      cachedSkills: [{ name: 'commit', extensionName: 'demo' }],
+      expected: ['commit'],
+      label: 'bare cache name passes through when no collision',
+    },
+
+    // ── Cold cache falls back to manifest ──
+    {
+      extension: { skillName: 'chat', extensionName: 'demo' },
+      cachedSkills: null,
+      expected: ['chat'],
+      label: 'null cache falls back to manifest name',
+    },
+    {
+      extension: { skillName: 'chat', extensionName: 'demo' },
+      cachedSkills: undefined,
+      expected: ['chat'],
+      label: 'undefined cache falls back to manifest name',
+    },
+    {
+      extension: { skillName: 'chat', extensionName: 'demo' },
+      cachedSkills: [],
+      expected: ['chat'],
+      label: 'empty cache falls back to manifest name',
+    },
+
+    // ── Other-extension cache entries are ignored ──
+    {
+      extension: { skillName: 'chat', extensionName: 'demo' },
+      cachedSkills: [
+        { name: 'chat', extensionName: 'unrelated' },
+        { name: 'unrelated:chat', extensionName: 'unrelated' },
+      ],
+      expected: ['chat'],
+      label: 'other-extension cache entries are ignored',
+    },
+
+    // ── Collision-qualified cache matches manifest ──
+    {
+      extension: { skillName: 'chat', extensionName: 'demo' },
+      cachedSkills: [
+        { name: 'demo:chat', extensionName: 'demo' },
+        { name: 'chat', extensionName: 'demo' },
+      ],
+      expected: ['demo:chat'],
+      label: 'collision-qualified cache takes precedence over bare',
+    },
+
+    // ── Case-insensitive owner matching ──
+    {
+      extension: { skillName: 'chat', extensionName: 'demo' },
+      cachedSkills: [{ name: 'DEMO:CHAT', extensionName: 'demo' }],
+      expected: ['DEMO:CHAT'],
+      label: 'cache name preserves its original casing',
+    },
+
+    // ── Multiple skills ──
+    {
+      extension: { skillName: 'chat', extensionName: 'demo' },
+      cachedSkills: [{ name: 'demo:chat', extensionName: 'demo' }],
+      expected: ['demo:chat'],
+      label: 'single skill resolved correctly',
+    },
+
+    // ── No skills in extension ──
+    {
+      extension: { skillName: '', extensionName: 'demo' },
+      cachedSkills: [],
+      expected: [],
+      label: 'extension with no skills returns empty',
+    },
+  ])('handles $label', ({ extension, cachedSkills, expected }) => {
+    const ext = makeExtension({
+      skills: extension.skillName ? [skill(extension.skillName)] : [],
+    });
+    const namedExt = {
+      ...ext,
+      name: extension.extensionName,
+    } as unknown as Extension;
+
+    const result = resolveAdvertisedSkillNames(namedExt, cachedSkills);
+    expect(result).toEqual(expected);
+  });
+});

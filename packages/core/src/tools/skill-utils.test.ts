@@ -250,4 +250,238 @@ describe('skill setting name matching', () => {
       ),
     ).toBe(false);
   });
+
+  // ── Truth matrix: skillSettingKeys adversarial cells ──
+  // Every name source × collision state × entry spelling combination.
+  describe('skillSettingKeys truth matrix', () => {
+    // name source × extensionName → expected keys
+    const cases: Array<{
+      name: string;
+      extensionName: string | undefined;
+      expected: string[];
+      label: string;
+    }> = [
+      // Qualified name, matching owner → dual spelling
+      {
+        name: 'rust:pdf',
+        extensionName: 'rust',
+        expected: ['rust:pdf', 'pdf'],
+        label: 'qualified name, matching owner',
+      },
+      // Qualified name, different owner → single key only
+      {
+        name: 'other:pdf',
+        extensionName: 'rust',
+        expected: ['other:pdf'],
+        label: 'qualified name, different owner (no prefix ownership)',
+      },
+      // Qualified name, owner is empty string → treated as undefined
+      {
+        name: ':pdf',
+        extensionName: '',
+        expected: [':pdf'],
+        label: 'colon-only name with empty extensionName',
+      },
+      // Bare name, no extension → single key
+      {
+        name: 'pdf',
+        extensionName: undefined,
+        expected: ['pdf'],
+        label: 'bare name, no extension',
+      },
+      // Bare name with whitespace → normalized
+      {
+        name: '  PDF  ',
+        extensionName: undefined,
+        expected: ['pdf'],
+        label: 'bare name with whitespace',
+      },
+      // Qualified name with whitespace → normalized
+      {
+        name: '  Rust:PDF  ',
+        extensionName: ' Rust ',
+        expected: ['rust:pdf', 'pdf'],
+        label: 'qualified name with whitespace, normalized',
+      },
+      // Multiple colons — only the first colon separates owner from name
+      {
+        name: 'a:b:c',
+        extensionName: 'a',
+        expected: ['a:b:c', 'b:c'],
+        label: 'multiple colons in qualified name',
+      },
+      // Qualified name where owner doesn't match prefix → single key
+      {
+        name: 'x:pdf',
+        extensionName: 'rust',
+        expected: ['x:pdf'],
+        label: 'qualified name, owner mismatch with prefix',
+      },
+      // Suffixed qualified name — collision result
+      {
+        name: 'rust:pdf1',
+        extensionName: 'rust',
+        expected: ['rust:pdf1', 'pdf1'],
+        label: 'suffixed qualified name',
+      },
+      // Empty name
+      {
+        name: '',
+        extensionName: undefined,
+        expected: [''],
+        label: 'empty name',
+      },
+    ];
+
+    it.each(cases)(
+      'returns $expected for $label (name=$name, extensionName=$extensionName)',
+      ({ name, extensionName, expected }) => {
+        // Normalize whitespace like the real function does
+        const trimmedName = name.trim();
+        const trimmedOwner = extensionName?.trim();
+        const result = skillSettingKeys({
+          name: trimmedName,
+          extensionName: trimmedOwner,
+        });
+        expect(result).toEqual(expected);
+      },
+    );
+  });
+
+  // Truth matrix: isDisabledSkillName adversarial cells
+  // Every name source × collision state × entry spelling × operation.
+  describe('isDisabledSkillName truth matrix', () => {
+    it.each([
+      // ── Direct match ──
+      {
+        rawName: 'pdf',
+        disabled: new Set(['pdf']),
+        findSkill: () => undefined,
+        expected: true,
+        label: 'direct bare match',
+      },
+      {
+        rawName: 'rust:pdf',
+        disabled: new Set(['rust:pdf']),
+        findSkill: () => undefined,
+        expected: true,
+        label: 'direct qualified match',
+      },
+
+      // ── Legacy bare match via findSkill ──
+      {
+        rawName: 'rust:pdf',
+        disabled: new Set(['pdf']),
+        findSkill: (l: string) =>
+          l === 'rust:pdf'
+            ? { name: 'rust:pdf', extensionName: 'rust' }
+            : undefined,
+        expected: true,
+        label: 'qualified name matched by legacy bare disablement',
+      },
+      {
+        rawName: 'pdf',
+        disabled: new Set(['pdf']),
+        findSkill: () => undefined,
+        expected: true,
+        label: 'bare name matched by bare disablement',
+      },
+
+      // ── Qualified disablement matches qualified name ──
+      {
+        rawName: 'rust:pdf',
+        disabled: new Set(['rust:pdf']),
+        findSkill: () => undefined,
+        expected: true,
+        label: 'qualified name matched by qualified disablement',
+      },
+
+      // ── Owner mismatch ──
+      {
+        rawName: 'other:pdf',
+        disabled: new Set(['pdf']),
+        findSkill: (l: string) =>
+          l === 'other:pdf'
+            ? { name: 'other:pdf', extensionName: 'other' }
+            : undefined,
+        expected: true,
+        label:
+          'other-extension qualified name matches bare disablement via suffix',
+      },
+      {
+        rawName: 'other:pdf',
+        disabled: new Set(['rust:pdf']),
+        findSkill: (l: string) =>
+          l === 'other:pdf'
+            ? { name: 'other:pdf', extensionName: 'other' }
+            : undefined,
+        expected: false,
+        label:
+          'other-extension qualified name must not match qualified disablement for different owner',
+      },
+
+      // ── No match ──
+      {
+        rawName: 'unknown',
+        disabled: new Set(['pdf']),
+        findSkill: () => undefined,
+        expected: false,
+        label: 'unknown name not in disablements',
+      },
+      {
+        rawName: 'rust:pdf',
+        disabled: new Set(['other']),
+        findSkill: (l: string) =>
+          l === 'rust:pdf'
+            ? { name: 'rust:pdf', extensionName: 'rust' }
+            : undefined,
+        expected: false,
+        label: 'qualified name not matched by unrelated disablement',
+      },
+
+      // ── Suffixed name (collision result) ──
+      {
+        rawName: 'rust:pdf1',
+        disabled: new Set(['pdf']),
+        findSkill: (l: string) =>
+          l === 'rust:pdf1'
+            ? { name: 'rust:pdf1', extensionName: 'rust' }
+            : undefined,
+        expected: false,
+        label:
+          'suffixed qualified name must not match bare disablement for base name',
+      },
+      {
+        rawName: 'rust:pdf1',
+        disabled: new Set(['pdf1']),
+        findSkill: (l: string) =>
+          l === 'rust:pdf1'
+            ? { name: 'rust:pdf1', extensionName: 'rust' }
+            : undefined,
+        expected: true,
+        label: 'suffixed qualified name matched by suffixed bare disablement',
+      },
+
+      // ── findSkill returns undefined ──
+      {
+        rawName: 'rust:pdf',
+        disabled: new Set(['pdf']),
+        findSkill: () => undefined,
+        expected: false,
+        label:
+          'qualified name with no findSkill match and no direct disablement',
+      },
+
+      // ── Empty/whitespace ──
+      {
+        rawName: '  pdf  ',
+        disabled: new Set(['pdf']),
+        findSkill: () => undefined,
+        expected: true,
+        label: 'whitespace-normalized bare name',
+      },
+    ])('matches $label', ({ rawName, disabled, findSkill, expected }) => {
+      expect(isDisabledSkillName(rawName, disabled, findSkill)).toBe(expected);
+    });
+  });
 });

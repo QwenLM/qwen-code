@@ -252,3 +252,55 @@ describe('writeSkillArgs', () => {
     expect(writeSkillArgs('review', '6771')).toBeNull();
   });
 });
+
+// ── Truth matrix: safe() injective encoding ──
+// Every name source × collision state × entry spelling × operation.
+describe('safe() injective encoding truth matrix', () => {
+  it.each<{ names: string[]; label: string }>([
+    // ── Colon vs underscore: must never collide ──
+    {
+      names: ['rust:pdf', 'rust_pdf'],
+      label: 'colon-qualified vs underscore alias (#9408)',
+    },
+    { names: ['a:b', 'a_b'], label: 'single colon vs underscore' },
+    { names: ['x:y:z', 'x_y_z'], label: 'multiple colons vs underscores' },
+    {
+      names: ['my-ext:deploy', 'my-ext_deploy'],
+      label: 'extension colon vs underscore',
+    },
+
+    // ── Same name with different safe-encoding characters ──
+    {
+      names: ['a:b', 'a%3Ab'],
+      label: 'colon and percent-encoded colon differ',
+    },
+
+    // ── Unicode characters → unique percent-encoding ──
+    { names: ['中', '_'], label: 'Chinese char vs underscore' },
+    { names: ['日本語', 'nihongo'], label: 'Japanese chars vs ASCII alias' },
+    { names: ['é', 'e'], label: 'accented char vs base ASCII' },
+
+    // ── Safe characters pass through unchanged ──
+    {
+      names: ['review', 'review2'],
+      label: 'distinct plain ASCII names stay distinct',
+    },
+    {
+      names: ['my_skill', 'my.skill'],
+      label: 'underscore, dot, hyphen are all safe and distinct',
+    },
+
+    // ── Mixed special characters ──
+    {
+      names: ['a:b!c@d#e', 'a_b_c_d_e'],
+      label: 'mixed special chars vs underscore alias',
+    },
+
+    // ── Empty and whitespace ──
+    { names: ['', ' '], label: 'empty vs space' },
+  ])('ensures distinct paths for $label', ({ names }) => {
+    const paths = names.map((n) => skillArgsPath(n));
+    const unique = new Set(paths);
+    expect(unique.size).toBe(paths.length);
+  });
+});
