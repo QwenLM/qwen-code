@@ -18505,6 +18505,47 @@ describe('LlmChat', async () => {
         expect(JSON.stringify(retryRequest.contents)).toContain('summary');
       });
 
+      it('anchors the reactive 413 accounting on the real history, not the context window', async () => {
+        // A bare HTTP 413 carries no provider token counts. The reactive
+        // anchor must be a local estimate of the actual (tiny) history —
+        // anchoring on the full context window stamps the post-compaction
+        // count ≈ window − visible history (orders of magnitude too high),
+        // which force-re-compacts the just-compacted history or false-trips
+        // the session-token limit on the next turn (#10380).
+        const compressSpy = noopThen({
+          newHistory: [{ role: 'user', parts: [{ text: 'summary' }] }],
+          info: {
+            originalTokenCount: 90_000,
+            newTokenCount: 4_000,
+            compressionStatus: CompressionStatus.COMPRESSED,
+          },
+        });
+        vi.mocked(mockContentGenerator.generateContentStream)
+          .mockRejectedValueOnce(sdkStyle413())
+          .mockImplementationOnce(async () =>
+            streamResponse(
+              stopResponse([{ text: 'recovered after compaction' }]),
+            ),
+          );
+
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          { message: 'next prompt' },
+          'prompt-id-413-accounting-anchor',
+        );
+        await consumeStream(stream);
+
+        const reactiveOpts = compressSpy.mock.calls[1]?.[1];
+        expect(reactiveOpts).toEqual(
+          expect.objectContaining({ requestPayloadTooLarge: true }),
+        );
+        // The tiny test history estimates to a few dozen tokens; the
+        // context-window fallback (contextWindowSize ?? DEFAULT_TOKEN_LIMIT)
+        // is >= 200K. Goes red if the anchor reverts to the window.
+        expect(reactiveOpts?.originalTokenCount).toBeGreaterThan(0);
+        expect(reactiveOpts?.originalTokenCount).toBeLessThan(10_000);
+      });
+
       it('surfaces an actionable error when the retried request still exceeds the body limit', async () => {
         const compressSpy = noopThen({
           newHistory: [{ role: 'user', parts: [{ text: 'summary' }] }],

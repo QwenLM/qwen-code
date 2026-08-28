@@ -3606,11 +3606,27 @@ export class LlmChat {
                 // keep the estimated marker in compression banners.
                 const reactiveOriginalTokenCountIsEstimated =
                   contextOverflow.actualTokens === undefined;
+                // A bare HTTP 413 carries no provider token counts — the
+                // gateway rejected the serialized BYTE size below any token
+                // threshold. Falling back to the full context window here
+                // would anchor compress()'s newTokenCount math on the window
+                // and stamp the post-compaction count ≈ window − visible
+                // history (orders of magnitude above the real size), which
+                // then force-re-compacts the just-compacted history or
+                // false-trips the session-token limit on the next turn
+                // (#10380). Anchor on a local estimate of the actual
+                // history instead — the same estimator the compaction
+                // service's missing-usage accounting path uses.
                 const reactiveOriginalTokenCount =
                   contextOverflow.actualTokens ??
                   contextOverflow.limitTokens ??
-                  cgConfig?.contextWindowSize ??
-                  DEFAULT_TOKEN_LIMIT;
+                  (requestPayloadOverflow.isTooLarge
+                    ? estimateContentTokens(
+                        self.getHistoryShallow(true),
+                        resolveSlimmingConfig(self.config.getChatCompression())
+                          .imageTokenEstimate,
+                      )
+                    : (cgConfig?.contextWindowSize ?? DEFAULT_TOKEN_LIMIT));
                 debugLogger.warn(
                   requestPayloadOverflow.isTooLarge
                     ? 'Request body rejected with HTTP 413; attempting reactive compression.'
