@@ -132,6 +132,12 @@ describe('SessionService', () => {
     // return; tests that need recovery semantics override this explicitly.
     vi.mocked(jsonl.read).mockResolvedValue([]);
     vi.mocked(jsonl.readLines).mockResolvedValue([]);
+    vi.mocked(jsonl.readLinesWithIntegrity).mockImplementation(
+      async (filePath, count, options) => ({
+        records: await jsonl.readLines(filePath, count, options),
+        complete: true,
+      }),
+    );
     vi.mocked(jsonl.parseLineTolerant).mockReturnValue([]);
     vi.mocked(readRuntimeStatus).mockResolvedValue(null);
 
@@ -7150,6 +7156,12 @@ describe('SessionService', () => {
       return file;
     };
 
+    const writeRawSession = (sessionId: string, content: string) => {
+      const file = realPath.join(getChatsDir(), `${sessionId}.jsonl`);
+      fs.writeFileSync(file, content);
+      return file;
+    };
+
     const findItem = (
       items: Array<{
         sessionId: string;
@@ -7307,6 +7319,91 @@ describe('SessionService', () => {
       expect(findItem(result.items, sessionId)?.goalObjective).toBeUndefined();
       const item = await service.getSessionListItem(sessionId);
       expect(item?.goalObjective).toBeUndefined();
+    });
+
+    it.each([
+      ['short', ''],
+      ['larger than the tail window', 'x'.repeat(70 * 1024)],
+    ])(
+      'does not resurrect a clear glued after a %s torn record',
+      async (_name, tornContent) => {
+        const sessionId = '22222222-1111-4222-8222-111111111111';
+        const create = JSON.stringify(
+          goalStateLine(sessionId, 'Write the release notes'),
+        );
+        const clear = JSON.stringify(goalStateLine(sessionId, null, 'g2'));
+        const torn = JSON.stringify({
+          uuid: 'torn',
+          parentUuid: null,
+          sessionId,
+          type: 'system',
+          subtype: 'note',
+          timestamp: '2026-04-22T00:00:04.000Z',
+          cwd,
+          version: 'test',
+          systemPayload: { text: tornContent },
+        }).slice(0, -3);
+        const file = writeRawSession(sessionId, `${create}${torn}${clear}\n`);
+        const actualJsonl = await vi.importActual<
+          typeof import('../utils/jsonl-utils.js')
+        >('../utils/jsonl-utils.js');
+        vi.mocked(jsonl.readLinesWithIntegrity).mockImplementation(
+          actualJsonl.readLinesWithIntegrity,
+        );
+
+        await expect(
+          jsonl.readLinesWithIntegrity(file, 10),
+        ).resolves.toMatchObject({ complete: false });
+
+        const result = await service.listSessions();
+
+        expect(
+          findItem(result.items, sessionId)?.goalObjective,
+        ).toBeUndefined();
+        await expect(
+          service.getSessionListItem(sessionId),
+        ).resolves.toMatchObject({ goalObjective: undefined });
+      },
+    );
+
+    it('ignores a nested Goal marker in a non-Goal record', async () => {
+      const sessionId = '22222222-3333-4222-8222-333333333333';
+      const records: Array<Record<string, unknown>> = fillerLines(
+        sessionId,
+        9 * 400,
+      ).slice(0, 9);
+      records.push({
+        uuid: 'nested-marker',
+        parentUuid: null,
+        sessionId,
+        type: 'assistant',
+        timestamp: '2026-04-22T00:00:05.000Z',
+        cwd,
+        version: 'test',
+        message: {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                name: 'persist',
+                args: {
+                  type: 'system',
+                  subtype: 'goal_state',
+                  objective: 'injected',
+                },
+              },
+            },
+          ],
+        },
+      });
+      writeSession(sessionId, records);
+
+      const result = await service.listSessions();
+
+      expect(findItem(result.items, sessionId)?.goalObjective).toBeUndefined();
+      await expect(
+        service.getSessionListItem(sessionId),
+      ).resolves.toMatchObject({ goalObjective: undefined });
     });
 
     it('does not resurrect a legacy Goal cleared past the record window', async () => {

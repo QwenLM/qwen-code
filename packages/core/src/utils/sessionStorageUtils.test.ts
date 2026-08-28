@@ -226,6 +226,44 @@ describe('sessionStorageUtils', () => {
       ).toEqual({ matched: false, value: undefined });
     });
 
+    it('uses a complete suffix record after an earlier torn record', () => {
+      const torn = '{"type":"system","subtype":"note","text":"torn';
+      expect(
+        extractJsonStringFieldFromLastMatchingLine(
+          `${create('old')}${torn}${clear}`,
+          GOAL,
+          'objective',
+          true,
+        ),
+      ).toEqual({ matched: true, value: undefined });
+    });
+
+    it('rejects a nested marker when the containing record does not match', () => {
+      const line = JSON.stringify({
+        type: 'assistant',
+        functionCall: {
+          args: {
+            type: 'system',
+            subtype: 'goal_state',
+            objective: 'injected',
+          },
+        },
+      });
+      expect(
+        extractJsonStringFieldFromLastMatchingLine(
+          line,
+          GOAL,
+          'objective',
+          true,
+          (record) =>
+            typeof record === 'object' &&
+            record !== null &&
+            (record as Record<string, unknown>)['type'] === 'system' &&
+            (record as Record<string, unknown>)['subtype'] === 'goal_state',
+        ),
+      ).toEqual({ matched: false, value: undefined });
+    });
+
     it('ignores a leading partial line unless told the text starts on a boundary', () => {
       // A tail-window read starts mid-record: the marker is in view but the
       // fields that precede it are not.

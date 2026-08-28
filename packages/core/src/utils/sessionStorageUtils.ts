@@ -263,45 +263,38 @@ export type LastMatchingLineScan =
  * A crash-truncated line that starts the field but never closes its string is
  * skipped; a well-formed matching line that omits the field remains decisive.
  *
- * The first line is skipped unless `wholeLines` is set: a tail-window read
- * starts mid-record, and a partial line can carry the marker while its
- * fields sit before the window. Such a line only ever "wins" when no
- * complete matching line follows it, and then it would answer with a
- * spurious `undefined`.
+ * A leading partial line contributes only a complete suffix record. Its
+ * truncated outer record cannot win, but a later record glued onto that
+ * prefix remains recoverable.
  */
 export function extractJsonStringFieldFromLastMatchingLine(
   text: string,
   lineContains: string,
   key: string,
   wholeLines = false,
+  recordMatches?: (record: unknown) => boolean,
 ): LastMatchingLineField {
-  const firstLineEnd = text.indexOf('\n');
-  // Everything before `floor` belongs to the leading partial line.
-  const floor = wholeLines || firstLineEnd < 0 ? 0 : firstLineEnd + 1;
   let searchFrom = text.length;
-  while (searchFrom > floor) {
+  while (searchFrom > 0) {
     const hit = text.lastIndexOf(lineContains, searchFrom - 1);
-    if (hit < floor) break;
+    if (hit < 0) break;
     const lineStart = text.lastIndexOf('\n', hit) + 1;
     const eol = text.indexOf('\n', hit);
     const line = text.slice(lineStart, eol < 0 ? text.length : eol);
-    try {
-      JSON.parse(line);
-      return {
-        matched: true,
-        value: extractJsonStringField(line, key),
-      };
-    } catch {
-      // Recover complete records from a malformed physical line below.
-    }
-    const recovered = _recoverObjectsFromLine<unknown>(line);
-    for (let i = recovered.length - 1; i >= 0; i--) {
-      const record = JSON.stringify(recovered[i]);
-      if (record.includes(lineContains)) {
-        return {
-          matched: true,
-          value: extractJsonStringField(record, key),
-        };
+    const leadingPartial = !wholeLines && lineStart === 0;
+    if (!leadingPartial) {
+      try {
+        const parsed = JSON.parse(line);
+        if (!recordMatches || recordMatches(parsed)) {
+          return {
+            matched: true,
+            value: extractJsonStringField(line, key),
+          };
+        }
+        searchFrom = lineStart;
+        continue;
+      } catch {
+        // Recover complete records from a malformed physical line below.
       }
     }
 
@@ -310,8 +303,12 @@ export function extractJsonStringFieldFromLastMatchingLine(
       const recordStart = line.lastIndexOf('{', markerOffset);
       if (recordStart >= 0) {
         try {
-          const record = JSON.stringify(JSON.parse(line.slice(recordStart)));
-          if (record.includes(lineContains)) {
+          const parsed = JSON.parse(line.slice(recordStart));
+          const record = JSON.stringify(parsed);
+          if (
+            record.includes(lineContains) &&
+            (!recordMatches || recordMatches(parsed))
+          ) {
             return {
               matched: true,
               value: extractJsonStringField(record, key),
@@ -325,6 +322,23 @@ export function extractJsonStringFieldFromLastMatchingLine(
         markerOffset === 0
           ? -1
           : line.lastIndexOf(lineContains, markerOffset - 1);
+    }
+
+    if (!leadingPartial) {
+      const recovered = _recoverObjectsFromLine<unknown>(line);
+      for (let i = recovered.length - 1; i >= 0; i--) {
+        const parsed = recovered[i];
+        const record = JSON.stringify(parsed);
+        if (
+          record.includes(lineContains) &&
+          (!recordMatches || recordMatches(parsed))
+        ) {
+          return {
+            matched: true,
+            value: extractJsonStringField(record, key),
+          };
+        }
+      }
     }
 
     searchFrom = lineStart;
@@ -355,6 +369,7 @@ export function readLastMatchingLineFieldSync(
   lineContains: string,
   key: string,
   scratchBuffer?: Buffer,
+  recordMatches?: (record: unknown) => boolean,
 ): LastMatchingLineScan {
   let fd: number | undefined;
   try {
@@ -377,6 +392,7 @@ export function readLastMatchingLineFieldSync(
         lineContains,
         key,
         tail.size <= LITE_READ_BUF_SIZE,
+        recordMatches,
       );
       if (hit.matched) return { matched: true, value: hit.value };
       return tail.size <= LITE_READ_BUF_SIZE

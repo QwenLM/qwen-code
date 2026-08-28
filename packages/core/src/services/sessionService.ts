@@ -422,6 +422,14 @@ const MAX_PROMPT_SCAN_LINES = 10;
  */
 const TAIL_READ_SIZE = 64 * 1024;
 
+function isGoalStateRecord(record: unknown): boolean {
+  if (typeof record !== 'object' || record === null) return false;
+  const candidate = record as Record<string, unknown>;
+  return (
+    candidate['type'] === 'system' && candidate['subtype'] === 'goal_state'
+  );
+}
+
 async function pathExists(filePath: string): Promise<boolean> {
   try {
     await fs.promises.access(filePath);
@@ -1719,69 +1727,48 @@ export class SessionService {
    * — reading "the last objective on any goal_state line" would keep showing
    * a goal the user cleared.
    *
-   * `resolved: false` means the transcript has no reachable v2 `goal_state`
-   * line, so the caller may map a legacy Goal only when its parsed-record
-   * prefix also covers the whole transcript. Every other outcome is final:
-   * on a file larger than the tail window with no `goal_state` in view, the
-   * newest lifecycle record is unreachable and the parsed records are the
-   * OLDEST part of the file, so the honest answer is no label rather than a
-   * possibly-cleared goal.
+   * This scan runs only when the parsed record prefix is truncated or
+   * malformed. A miss stays unlabelled because an unreachable newer record
+   * may have cleared the Goal.
    */
   private readSessionGoalObjectiveFromFile(
     filePath: string,
     tailBuffer?: Buffer,
-  ): { resolved: boolean; objective: string | undefined } {
+  ): string | undefined {
     const scan = readLastMatchingLineFieldSync(
       filePath,
       '"subtype":"goal_state"',
       'objective',
       tailBuffer,
+      isGoalStateRecord,
     );
     if (scan.matched) {
-      return {
-        resolved: true,
-        objective: scan.value
-          ? this.truncatePromptForDisplay(scan.value)
-          : undefined,
-      };
+      return scan.value ? this.truncatePromptForDisplay(scan.value) : undefined;
     }
-    // Out of window: a newer lifecycle record exists somewhere we cannot
-    // reach, and the parsed records are the file's oldest lines — answer "no
-    // label" rather than a goal that may have been cleared long ago. An
-    // `absent` or `unreadable` proves nothing about legacy records, so the
-    // caller may consult a demonstrably complete parsed prefix.
-    return {
-      resolved: scan.reason === 'out-of-window',
-      objective: undefined,
-    };
+    return undefined;
   }
 
   /**
    * Single owner of the session-label goal fallback, called from both
    * producers ({@link listSessions} and {@link getSessionListItem}). Keeping
-   * the policy — skip when a title or prompt already labels the session,
-   * prefer the bounded file scan, fall back to parsed records only for legacy
-   * transcripts — in one place is what stops the TUI picker and the serve
-   * conversation path from disagreeing about the same session.
+   * the policy — skip when a title or prompt already labels the session, use
+   * demonstrably complete parsed records, otherwise use the bounded file scan
+   * — in one place is what stops the TUI picker and the serve conversation
+   * path from disagreeing about the same session.
    */
   private resolveGoalObjective(
     prompt: string,
     title: string | undefined,
     filePath: string,
     records: ChatRecord[],
+    recordsComplete: boolean,
     tailBuffer?: Buffer,
   ): string | undefined {
     if (prompt || title) return undefined;
-    const fromFile = this.readSessionGoalObjectiveFromFile(
-      filePath,
-      tailBuffer,
-    );
-    // Fewer records means the bounded reader reached EOF; exactly the limit
-    // may hide a later legacy clear, so that prefix cannot restore a Goal.
-    if (records.length < MAX_PROMPT_SCAN_LINES) {
+    if (recordsComplete && records.length < MAX_PROMPT_SCAN_LINES) {
       return this.extractGoalObjectiveFromRecords(records);
     }
-    return fromFile.objective;
+    return this.readSessionGoalObjectiveFromFile(filePath, tailBuffer);
   }
 
   /**
@@ -2183,11 +2170,19 @@ export class SessionService {
       lastProcessedMtime = file.mtime;
 
       const filePath = path.join(chatsDir, file.name);
-      const records = signal
-        ? await jsonl.readLines<ChatRecord>(filePath, MAX_PROMPT_SCAN_LINES, {
-            signal,
-          })
-        : await jsonl.readLines<ChatRecord>(filePath, MAX_PROMPT_SCAN_LINES);
+      const readResult = signal
+        ? await jsonl.readLinesWithIntegrity<ChatRecord>(
+            filePath,
+            MAX_PROMPT_SCAN_LINES,
+            {
+              signal,
+            },
+          )
+        : await jsonl.readLinesWithIntegrity<ChatRecord>(
+            filePath,
+            MAX_PROMPT_SCAN_LINES,
+          );
+      const records = readResult.records.slice(0, MAX_PROMPT_SCAN_LINES);
       signal?.throwIfAborted();
 
       if (records.length === 0) continue;
@@ -2212,6 +2207,7 @@ export class SessionService {
         titleInfo.title,
         filePath,
         records,
+        readResult.complete,
         tailBuffer,
       );
       const source = this.extractCreationMetadataFromRecords(records);
@@ -2265,10 +2261,11 @@ export class SessionService {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
       throw error;
     }
-    const records = await jsonl.readLines<ChatRecord>(
+    const readResult = await jsonl.readLinesWithIntegrity<ChatRecord>(
       filePath,
       MAX_PROMPT_SCAN_LINES,
     );
+    const records = readResult.records.slice(0, MAX_PROMPT_SCAN_LINES);
     if (records.length === 0) return undefined;
     const firstRecord = records[0];
     if (
@@ -2296,6 +2293,7 @@ export class SessionService {
         titleInfo.title,
         filePath,
         records,
+        readResult.complete,
       ),
       titleSource: titleInfo.source,
       ...(source.parentSessionId
