@@ -65,13 +65,17 @@ ledger build, the body composer and the mechanism-health check. A Critical
 entry arriving when the floor is not in effect is relocated into the body
 Criticals and posts — the fail-toward-posting direction every arm of the
 floor takes. A deferred Critical never caps, never withholds the anchor,
-leaves the work list, and — on its first deferral — joins the closure mint
-by the id its title carries, so the successor-chain sentinel does not read
-it as a fix. A re-deferral bears an id the previous posted work list never
-held, fails the mint's membership leg, and that round's mint fails closed
-(absence never reads as a fix, at the cost of that round's true closures);
-carrying the round's deferred ids in the marker would let a re-deferral
-join by them and is left for a follow-up.
+leaves the work list. Its relation to the closure mint (#9905) follows the
+mint's existing id join, in three shapes: a Critical posted earlier and
+deferred now carries its `R` id in the title, so the mint reads a re-post
+and does not close it; a Critical deferred on discovery — the dominant
+shape in the #9659 replay — carries no id any posted work list held (its
+artifact id is a `D` id), so that round's mint fails closed exactly as it
+already does for a discovery-deferred Suggestion; a re-deferral of a
+once-posted Critical is the same case one round later. The latter two are
+the pre-existing doctrine for any id-less deferral entry, not a horizon
+this feature adds; carrying the round's deferred ids in the marker would
+let a re-deferral join by them and is left for a follow-up.
 
 ### Trust boundaries
 

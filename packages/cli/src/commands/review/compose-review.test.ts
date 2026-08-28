@@ -16251,3 +16251,20 @@ describe('the claim head slot (#10291, review round 1)', () => {
     expect(untagged.body).not.toContain('engaged in name');
   });
 });
+
+describe('the fix-induced marking behind a source tag (#10291, review round 2)', () => {
+  it('draftedFindingsOf and readClaimHead agree — the marking counts wherever it sits past the id', () => {
+    const body =
+      '**[Critical]** R3-2: [probe] (fix-induced) the fix opened a new gap';
+    expect(draftedFindingsOf([{ path: 'b.ts', body }])).toEqual([
+      { file: 'b.ts', carriedId: 'R3-2', fixInduced: true },
+    ]);
+    // And the ledger title keeps the source tag as the finding's own text.
+    expect(
+      buildLedger(4, [{ path: 'b.ts', line: 1, body }], []).findings[0],
+    ).toMatchObject({
+      id: 'R3-2',
+      title: '[probe] the fix opened a new gap',
+    });
+  });
+});

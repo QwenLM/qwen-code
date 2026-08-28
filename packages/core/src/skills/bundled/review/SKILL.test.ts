@@ -480,6 +480,12 @@ describe('bundled review skill', () => {
     expect(body).toContain(
       'a deterministic Critical the axes classify defers like any other axes-Critical',
     );
+    // The orchestrator-side no-guess rule — the only instruction keeping the
+    // orchestrator from completing a deferrable pair — pinned like its
+    // verifier-side twin in agent-prompt.test.ts.
+    expect(body).toContain('an axis the verifier omitted stays absent');
+    expect(body).toContain("never fill one in from the finding's prose");
+    expect(body).toContain('a guess on EITHER axis of the pair');
     // The in-band report copies the axes too — one copy list, not two.
     expect(body).toContain(
       '`summary`, `shortSummary`, `failureScenario`, `category`, `direction`, `baseline` — never re-typed',

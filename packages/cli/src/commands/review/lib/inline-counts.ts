@@ -17,6 +17,10 @@
 // `Verdict: Approve` over a Critical the report itself listed. One counting
 // function, fed by the comments array both callers already hold.
 
+import {
+  FINDING_BASELINES,
+  FINDING_DIRECTIONS,
+} from '@qwen-code/qwen-code-core';
 import { LEDGER_ID_READBACK } from './ledger.js';
 
 /** The severity prefixes the skill mandates on every posted inline comment. */
@@ -191,8 +195,13 @@ export function unmarkedComments(
  */
 export const FIX_INDUCED_READBACK = /^\(\s*fix-induced\s*\)[:.,-]?\s*/i;
 
-const HEAD_AXIS_TAG_RE =
-  /^\[(certifies-falsely|fails-closed|regression|new-surface)\]\s*/i;
+// Built from the core lists, never spelled a fourth time: a value added
+// there that this tokeniser did not know would stop the head scan at the
+// unknown bracket, hide a carried id behind it, and read the tag as prose.
+const HEAD_AXIS_TAG_RE = new RegExp(
+  `^\\[(${[...FINDING_DIRECTIONS, ...FINDING_BASELINES].join('|')})\\]\\s*`,
+  'i',
+);
 const HEAD_SOURCE_TAG_RE = /^\[(build|test|probe)\]\s*/i;
 
 /** What a claim line's head slot carries — see `readClaimHead`. */
@@ -214,6 +223,12 @@ export interface ClaimHead {
    * title all where they were — for the readers that anchor an id at `^`.
    */
   stripped: string;
+  /**
+   * The line with the id, the marking and the axis tags removed — the
+   * source tag and the title where they were: the ledger's title, which
+   * keeps a deterministic tag as the finding's own text.
+   */
+  claim: string;
 }
 
 /**
@@ -237,24 +252,29 @@ export function readClaimHead(line: string): ClaimHead {
   const axes: string[] = [];
   let source: ClaimHead['source'];
   let sourceText: string | undefined;
-  const kept: string[] = [];
+  // Two projections, kept in step token by token: `stripped` keeps every
+  // head token but the axis tags, `claim` keeps only the source tag.
+  const stripped: string[] = [];
+  const claim: string[] = [];
   for (;;) {
     if (id === undefined) {
       const m = LEDGER_ID_READBACK.exec(rest);
       if (m) {
         id = m[1];
-        kept.push(m[0]);
+        stripped.push(m[0]);
         rest = rest.slice(m[0].length);
         continue;
       }
     }
     // Only ever a marking on a CARRIED id: on a fresh finding there is no
     // entry for the defect to have been induced by, so the token is prose.
+    // Anywhere in the slot past the id — a source tag between the two is
+    // the one placement the old head-anchored read missed.
     if (id !== undefined) {
       const f = FIX_INDUCED_READBACK.exec(rest);
       if (f) {
         marked = true;
-        kept.push(f[0]);
+        stripped.push(f[0]);
         rest = rest.slice(f[0].length);
         continue;
       }
@@ -270,7 +290,8 @@ export function readClaimHead(line: string): ClaimHead {
       if (s) {
         source = s[1].toLowerCase() as ClaimHead['source'];
         sourceText = s[0];
-        kept.push(s[0]);
+        stripped.push(s[0]);
+        claim.push(s[0]);
         rest = rest.slice(s[0].length);
         continue;
       }
@@ -283,6 +304,7 @@ export function readClaimHead(line: string): ClaimHead {
     axes,
     ...(source === undefined ? {} : { source, sourceText }),
     title: rest.trim(),
-    stripped: (kept.join('') + rest).trim(),
+    stripped: (stripped.join('') + rest).trim(),
+    claim: (claim.join('') + rest).trim(),
   };
 }

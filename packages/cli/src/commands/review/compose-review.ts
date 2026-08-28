@@ -118,7 +118,6 @@ import {
   countInlineFindings,
   markerStrippedBody,
   readClaimHead,
-  FIX_INDUCED_READBACK,
   severityOf,
   stripSeverityPrefix,
   unmarkedComments,
@@ -6735,25 +6734,9 @@ export const composeReviewCommand: CommandModule = {
   },
 };
 
-/**
- * The fix-induced marking, read from the head of the CLAIM — after the id and
- * its separator, never inside the id grammar.
- *
- * Placing it there is the whole point. `LEDGER_ID_READBACK` is shared by
- * `idFor`, so widening it to swallow a parenthetical would put the ledger's
- * carry on the same regex as a model-written adjective: a spelling or spacing
- * the wider grammar failed to anticipate (`R1-2(Fix-Induced):`) would stop
- * matching the id at all, and the finding would be silently renumbered — the
- * exact failure "one finding, one name" exists to prevent. Read here, the id
- * is already in hand and nothing about this token can cost it: an unrecognised
- * marking leaves the draft counted as a re-post, which is what every round did
- * before this existed.
- *
- * Case-insensitive, and tolerant of inner spacing, because it governs only
- * whether a comment counts as first-time work — never which finding it is.
- */
-// The regex itself lives in lib/inline-counts.ts, beside the claim-head
-// reader that tokenises the same slot.
+// The `(fix-induced)` marking's grammar (`FIX_INDUCED_READBACK`) and the
+// claim-head tokeniser that reads it live in lib/inline-counts.ts; the
+// placement rules are documented there.
 
 /**
  * The id a claim line carries, whether that id fronts a NEW defect, and the
@@ -6778,23 +6761,18 @@ function readClaim(rest: string): {
   fixInduced: boolean;
   title: string;
 } {
-  // The axis tags come off FIRST (#10291): they are fields the marker
-  // carries, not title text, and wherever the model placed them in the
-  // claim's head slot — before the id, before the `(fix-induced)` marking,
-  // after it — they must not stand between the id and the marking this
-  // reader anchors on. Slot only: a tag quoted in the title's prose stays.
-  const line = readClaimHead(rest.split('\n')[0].trim()).stripped;
-  const carried = LEDGER_ID_READBACK.exec(line);
-  const afterId = (carried ? line.slice(carried[0].length) : line).trim();
-  // Only ever a marking on a CARRIED id. On a fresh finding there is no
-  // entry for the defect to have been induced by, so the token would be
-  // decoration — and honouring it there would let a stray parenthetical add
-  // a first-time count the round already gets for that comment anyway.
-  const marked = carried ? FIX_INDUCED_READBACK.exec(afterId) : null;
+  // ONE reader for the claim's head slot (#10291): the id, the
+  // `(fix-induced)` marking and the axis tags are tokenised wherever the
+  // model placed them in the slot — a source tag between the id and the
+  // marking included — and the title is what is left past the slot, the
+  // source tag kept as the finding's own text. A second derivation here
+  // (an anchored readback over the stripped line) once disagreed with the
+  // tokeniser on exactly that placement.
+  const head = readClaimHead(rest.split('\n')[0].trim());
   return {
-    id: carried?.[1],
-    fixInduced: marked !== null,
-    title: (marked ? afterId.slice(marked[0].length) : afterId).trim(),
+    ...(head.id === undefined ? {} : { id: head.id }),
+    fixInduced: head.fixInduced,
+    title: head.claim,
   };
 }
 
