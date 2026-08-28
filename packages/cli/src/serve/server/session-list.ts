@@ -11,6 +11,7 @@ import {
   Storage,
   readWorktreeSession,
   readSessionPrs,
+  toSessionPrInfo,
   type SessionArchiveState,
   type SessionGroupPresetColor,
   type SessionPr,
@@ -530,18 +531,15 @@ function mergeLiveSessionSummary(
 }
 
 function sidecarToPrInfos(sidecar: readonly SessionPr[]): SessionPrInfo[] {
-  return sidecar.map(({ number, url, state }) => ({
-    number,
-    url,
-    ...(state ? { state } : {}),
-  }));
+  return sidecar.map(toSessionPrInfo);
 }
 
 /**
  * Merges persisted (sidecar-enriched) PR bindings with a live entry's for
  * summary rendering: dedupe by number (live url wins, live-only bindings
- * sort latest). For `state` the persisted sidecar wins: the refresh timer
- * rewrites it there while the live entry is frozen at bind-time.
+ * sort latest). For `state` and `issues` the persisted sidecar wins: the
+ * refresh timer rewrites them there while the live entry is frozen at
+ * bind-time.
  */
 function mergeSummaryPrs(
   persistedPrs: readonly SessionPrInfo[] | undefined,
@@ -557,9 +555,12 @@ function mergeSummaryPrs(
     ),
     ...live.map((l) => {
       const persisted = persistedByNumber.get(l.number);
-      return persisted?.state !== undefined && persisted.state !== l.state
-        ? { ...l, state: persisted.state }
-        : l;
+      if (!persisted) return l;
+      return {
+        ...l,
+        ...(persisted.state ? { state: persisted.state } : {}),
+        ...(persisted.issues ? { issues: persisted.issues } : {}),
+      };
     }),
   ];
 }

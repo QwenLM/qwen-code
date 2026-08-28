@@ -13,7 +13,12 @@ import { writeClipboardText } from '../../utils/clipboard';
 import { isExternalOpenUrl } from '../../utils/externalOpen';
 import { workspaceBasename } from '../../utils/workspace';
 import { Popover, PopoverAnchor, PopoverContent } from '../ui/popover';
-import { SessionPrStateIcon, sessionPrStateLabel } from '../SessionPrStateIcon';
+import {
+  SessionIssueStateIcon,
+  SessionPrStateIcon,
+  sessionIssueStateLabel,
+  sessionPrStateLabel,
+} from '../SessionPrStateIcon';
 import styles from './WebShellSidebar.module.css';
 import { resolveSessionDetailsCollisionBoundary } from './sessionDetailsCollisionBoundary';
 
@@ -51,6 +56,19 @@ export function SessionDetailsTooltip({
   const folderPath = session.workspaceCwd;
   const folderName = workspaceBasename(folderPath);
   const branch = session.worktree?.branch ?? session.branch?.name;
+  const prs = [...(session.prs ?? [])]
+    .reverse()
+    .filter((pr) => isExternalOpenUrl(pr.url));
+  // Stacked PRs can close the same issue; list it once, under its newest PR.
+  const seenIssueUrls = new Set<string>();
+  const issues = prs
+    .flatMap((pr) => pr.issues ?? [])
+    .filter(
+      (issue) =>
+        isExternalOpenUrl(issue.url) &&
+        !seenIssueUrls.has(issue.url) &&
+        seenIssueUrls.add(issue.url),
+    );
   const status = session.hasActivePrompt
     ? t('sidebar.running')
     : completedUnread
@@ -144,39 +162,62 @@ export function SessionDetailsTooltip({
             <span title={branch}>{branch}</span>
           </div>
         )}
-        {[...(session.prs ?? [])]
-          .reverse()
-          .filter((pr) => isExternalOpenUrl(pr.url))
-          .map((pr, index) => {
-            const stateLabel = sessionPrStateLabel(t, pr.state);
-            return (
-              // Index composite: a hand-edited sidecar can carry duplicate
-              // numbers (the reader validates shape, not uniqueness), and a
-              // duplicate key would reconcile rows against each other. The
-              // list is a stable per-snapshot order, so index keys are safe.
-              <div
-                className={styles.sessionDetailsRow}
-                key={`${index}-${pr.number}`}
+        {prs.map((pr, index) => {
+          const stateLabel = sessionPrStateLabel(t, pr.state);
+          return (
+            // Index composite: a hand-edited sidecar can carry duplicate
+            // numbers (the reader validates shape, not uniqueness), and a
+            // duplicate key would reconcile rows against each other. The
+            // list is a stable per-snapshot order, so index keys are safe.
+            <div
+              className={styles.sessionDetailsRow}
+              key={`${index}-${pr.number}`}
+            >
+              <SessionPrStateIcon state={pr.state} />
+              <a
+                href={pr.url}
+                target="_blank"
+                rel="noreferrer"
+                title={pr.url}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  openExternalLink(event, pr.url);
+                }}
               >
-                <SessionPrStateIcon state={pr.state} />
-                <a
-                  href={pr.url}
-                  target="_blank"
-                  rel="noreferrer"
-                  title={pr.url}
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    openExternalLink(event, pr.url);
-                  }}
-                >
-                  {t('sidebar.sessionPr', { number: pr.number })}
-                  {stateLabel ? (
-                    <span className="sr-only">{` · ${stateLabel}`}</span>
-                  ) : null}
-                </a>
-              </div>
-            );
-          })}
+                {t('sidebar.sessionPr', { number: pr.number })}
+                {stateLabel ? (
+                  <span className="sr-only">{` · ${stateLabel}`}</span>
+                ) : null}
+              </a>
+            </div>
+          );
+        })}
+        {issues.map((issue, index) => {
+          const stateLabel = sessionIssueStateLabel(t, issue.state);
+          return (
+            <div
+              className={styles.sessionDetailsRow}
+              key={`issue-${index}-${issue.number}`}
+            >
+              <SessionIssueStateIcon state={issue.state} />
+              <a
+                href={issue.url}
+                target="_blank"
+                rel="noreferrer"
+                title={issue.url}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  openExternalLink(event, issue.url);
+                }}
+              >
+                {t('sidebar.sessionIssue', { number: issue.number })}
+                {stateLabel ? (
+                  <span className="sr-only">{` · ${stateLabel}`}</span>
+                ) : null}
+              </a>
+            </div>
+          );
+        })}
         <div className={styles.sessionDetailsRow}>
           <RadioTowerIcon aria-hidden="true" />
           <span>{status}</span>

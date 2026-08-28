@@ -27961,11 +27961,19 @@ describe('createAcpSessionBridge', () => {
       });
       const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
 
+      const issues = [
+        {
+          number: 7,
+          url: 'https://github.com/o/r/issues/7',
+          state: 'completed' as const,
+        },
+      ];
       bridge.seedSessionPrs?.(session.sessionId, [
         {
           number: 9500,
           url: 'https://github.com/o/r/pull/9500',
           state: 'merged',
+          issues,
         },
       ]);
 
@@ -27974,6 +27982,40 @@ describe('createAcpSessionBridge', () => {
           number: 9500,
           url: 'https://github.com/o/r/pull/9500',
           state: 'merged',
+          issues,
+        },
+      ]);
+
+      await bridge.closeSession(session.sessionId);
+      await bridge.shutdown();
+    });
+
+    it('keeps the seeded issue snapshot on a re-bind of the same pr', async () => {
+      const bridge = makeBridge({
+        channelFactory: async () => makeChannel().channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const issues = [{ number: 7, url: 'https://github.com/o/r/issues/7' }];
+      bridge.seedSessionPrs?.(session.sessionId, [
+        { number: 9500, url: 'https://github.com/o/r/pull/9500', issues },
+      ]);
+
+      // The client never binds issues; the daemon-derived snapshot survives
+      // a re-bind that only carries a new state.
+      bridge.updateSessionMetadata(session.sessionId, {
+        pr: {
+          number: 9500,
+          url: 'https://github.com/o/r/pull/9500',
+          state: 'merged',
+        },
+      });
+
+      expect(bridge.getSessionSummary(session.sessionId).prs).toEqual([
+        {
+          number: 9500,
+          url: 'https://github.com/o/r/pull/9500',
+          state: 'merged',
+          issues,
         },
       ]);
 

@@ -25,12 +25,30 @@ export interface SessionPr {
   createdAt: string;
   /** Snapshot at last write/refresh; refreshed by the daemon timer. */
   state?: SessionPrState;
+  /**
+   * Issues the PR closes (GitHub's closing references), snapshotted by the
+   * daemon timer — never bound by clients. Absent until the first refresh
+   * after binding; an empty array means "fetched, none".
+   */
+  issues?: SessionPrIssue[];
 }
 
 export type SessionPrState = 'open' | 'merged' | 'closed';
 
+export interface SessionPrIssue {
+  number: number;
+  url: string;
+  /** Snapshot at last refresh; `not_planned` covers GitHub's "duplicate" too. */
+  state?: SessionPrIssueState;
+}
+
+export type SessionPrIssueState = 'open' | 'completed' | 'not_planned';
+
 /** Bound on the persisted PR list; oldest bindings are dropped beyond it. */
 export const SESSION_PR_LIST_LIMIT = 10;
+
+/** Bound on the issues kept per PR; GitHub caps closing references anyway. */
+export const SESSION_PR_ISSUE_LIST_LIMIT = 10;
 
 /** Upper bound for a bound PR URL; generous for enterprise hosts + long paths. */
 export const SESSION_PR_URL_MAX_LENGTH = 2048;
@@ -49,9 +67,35 @@ function hasControlCharacter(value: string): boolean {
 }
 
 /**
- * Runtime shape check for one entry. The url is rendered as a link target,
- * so only http(s) URLs are accepted.
+ * Both PR and issue urls are rendered as link targets, so only http(s) URLs
+ * are accepted. The url is also interpolated into a stderr audit line by the
+ * bridge — control characters would forge log lines.
  */
+function isValidBindingUrl(value: unknown): value is string {
+  return (
+    typeof value === 'string' &&
+    value.length <= SESSION_PR_URL_MAX_LENGTH &&
+    /^https?:\/\//i.test(value) &&
+    !hasControlCharacter(value)
+  );
+}
+
+function isValidSessionPrIssue(value: unknown): value is SessionPrIssue {
+  if (value === null || typeof value !== 'object') return false;
+  const v = value as Record<string, unknown>;
+  return (
+    typeof v['number'] === 'number' &&
+    Number.isInteger(v['number']) &&
+    v['number'] > 0 &&
+    isValidBindingUrl(v['url']) &&
+    (v['state'] === undefined ||
+      v['state'] === 'open' ||
+      v['state'] === 'completed' ||
+      v['state'] === 'not_planned')
+  );
+}
+
+/** Runtime shape check for one entry. */
 function isValidSessionPr(value: unknown): value is SessionPr {
   if (value === null || typeof value !== 'object') return false;
   const v = value as Record<string, unknown>;
@@ -59,17 +103,16 @@ function isValidSessionPr(value: unknown): value is SessionPr {
     typeof v['number'] === 'number' &&
     Number.isInteger(v['number']) &&
     v['number'] > 0 &&
-    typeof v['url'] === 'string' &&
-    v['url'].length <= SESSION_PR_URL_MAX_LENGTH &&
-    /^https?:\/\//i.test(v['url']) &&
-    // The url is interpolated into a stderr audit line by the bridge —
-    // control characters would forge log lines.
-    !hasControlCharacter(v['url']) &&
+    isValidBindingUrl(v['url']) &&
     typeof v['createdAt'] === 'string' &&
     (v['state'] === undefined ||
       v['state'] === 'open' ||
       v['state'] === 'merged' ||
-      v['state'] === 'closed')
+      v['state'] === 'closed') &&
+    (v['issues'] === undefined ||
+      (Array.isArray(v['issues']) &&
+        v['issues'].length <= SESSION_PR_ISSUE_LIST_LIMIT &&
+        v['issues'].every(isValidSessionPrIssue)))
   );
 }
 
@@ -125,6 +168,25 @@ export async function writeSessionPrs(
 ): Promise<void> {
   await fs.mkdir(path.dirname(filePath), { recursive: true });
   await atomicWriteJSON(filePath, { prs } satisfies SessionPrList, options);
+}
+
+/**
+ * Wire projection of a binding: drops the sidecar-only `createdAt` and omits
+ * absent optionals, so responses, events, and live bridge entries all carry
+ * the same shape.
+ */
+export function toSessionPrInfo({
+  number,
+  url,
+  state,
+  issues,
+}: Omit<SessionPr, 'createdAt'>): Omit<SessionPr, 'createdAt'> {
+  return {
+    number,
+    url,
+    ...(state ? { state } : {}),
+    ...(issues ? { issues } : {}),
+  };
 }
 
 /**
@@ -197,7 +259,8 @@ export function canonicalSessionPrUrl(url: string): string {
  * number moves to the end (latest) with a fresh createdAt. An omitted
  * `state` preserves the existing entry's state when the re-bind targets the
  * same PR (same canonical url) — a different repository's same-numbered PR
- * is a different PR and must not inherit its state.
+ * is a different PR and must not inherit its state. The issue snapshot is
+ * kept on the same-PR condition: only the refresh sweep writes it.
  */
 export function upsertSessionPr(
   filePath: string,
@@ -220,6 +283,7 @@ export function upsertSessionPr(
         ...((pr.state ?? known?.state)
           ? { state: (pr.state ?? known?.state) as SessionPrState }
           : {}),
+        ...(known?.issues ? { issues: known.issues } : {}),
       },
     ].slice(-SESSION_PR_LIST_LIMIT);
     await writeSessionPrs(filePath, next);
@@ -227,19 +291,40 @@ export function upsertSessionPr(
   });
 }
 
+function sameIssues(
+  left: readonly SessionPrIssue[] | undefined,
+  right: readonly SessionPrIssue[] | undefined,
+): boolean {
+  if (left === undefined || right === undefined) return left === right;
+  return (
+    left.length === right.length &&
+    left.every(
+      (issue, index) =>
+        issue.number === right[index]!.number &&
+        issue.url === right[index]!.url &&
+        issue.state === right[index]!.state,
+    )
+  );
+}
+
 /**
- * Rewrites bound PR states in place — order and createdAt are preserved, so
- * a refresh sweep never reshuffles the badge's "latest" entry. A fetched
- * state applies only when its url matches the entry's: the map is keyed by
- * number, but a binding may point at any repository, and a same-numbered PR
- * of a different repo is a different PR. Returns the number of entries
- * rewritten; 0 when the sidecar is absent/invalid or nothing changed (no
- * write then). `assertCanCommit` runs inside the mutation queue right
+ * Rewrites bound PR snapshots (`state`, `issues`) in place — order and
+ * createdAt are preserved, so a refresh sweep never reshuffles the badge's
+ * "latest" entry. A fetched snapshot applies only when its url matches the
+ * entry's: the map is keyed by number, but a binding may point at any
+ * repository, and a same-numbered PR of a different repo is a different PR.
+ * An omitted `state` or `issues` leaves that field alone (the two come from
+ * different queries, and either may miss a PR). Returns the number of
+ * entries rewritten; 0 when the sidecar is absent/invalid or nothing changed
+ * (no write then). `assertCanCommit` runs inside the mutation queue right
  * before the irreversible write commit; a throw aborts the write.
  */
 export function updateSessionPrStates(
   filePath: string,
-  states: ReadonlyMap<number, { state: SessionPrState; url: string }>,
+  states: ReadonlyMap<
+    number,
+    { state?: SessionPrState; url: string; issues?: SessionPrIssue[] }
+  >,
   options: { assertCanCommit?: () => void } = {},
 ): Promise<number> {
   return enqueuePrMutation(filePath, async () => {
@@ -250,14 +335,21 @@ export function updateSessionPrStates(
       const fetched = states.get(entry.number);
       if (
         fetched === undefined ||
-        canonicalSessionPrUrl(fetched.url) !==
-          canonicalSessionPrUrl(entry.url) ||
-        fetched.state === entry.state
+        canonicalSessionPrUrl(fetched.url) !== canonicalSessionPrUrl(entry.url)
       ) {
         return entry;
       }
+      const state = fetched.state ?? entry.state;
+      const issues = fetched.issues ?? entry.issues;
+      if (state === entry.state && sameIssues(issues, entry.issues)) {
+        return entry;
+      }
       changed += 1;
-      return { ...entry, state: fetched.state };
+      return {
+        ...entry,
+        ...(state ? { state } : {}),
+        ...(issues ? { issues } : {}),
+      };
     });
     if (changed === 0) return 0;
     await writeSessionPrs(filePath, next, options);

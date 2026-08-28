@@ -88,6 +88,7 @@ import {
   Storage,
   TrustGateError,
   readSessionPrs,
+  updateSessionPrStates,
   upsertSessionPr,
   type Extension,
   type ExtensionInstallMetadata,
@@ -15819,6 +15820,18 @@ describe('createServeApp', () => {
         url: 'https://github.com/o/r/pull/9517',
         state: 'merged',
       });
+      // The issue snapshot is likewise sweep-written and sidecar-only.
+      const issues = [
+        {
+          number: 7,
+          url: 'https://github.com/o/r/issues/7',
+          state: 'completed' as const,
+        },
+      ];
+      await updateSessionPrStates(
+        sidecarPath,
+        new Map([[9517, { url: 'https://github.com/o/r/pull/9517', issues }]]),
+      );
       // The TTL cache would otherwise keep serving a scan taken before this
       // test's sidecar write.
       invalidateWorkspaceSessionListCache({
@@ -15853,6 +15866,7 @@ describe('createServeApp', () => {
           number: 9517,
           url: 'https://github.com/o/r/pull/9517',
           state: 'merged',
+          issues,
         },
       ]);
     });

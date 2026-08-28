@@ -217,6 +217,110 @@ describe('SessionDetailsTooltip', () => {
     act(() => root.unmount());
   });
 
+  it('lists the issues the bound pull requests close, once each, with state icons', async () => {
+    vi.useFakeTimers();
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <SessionDetailsTooltip
+            session={{
+              sessionId: 'session-1',
+              workspaceCwd: '/work/qwen-code',
+              clientCount: 1,
+              prs: [
+                {
+                  number: 9500,
+                  url: 'https://github.com/o/r/pull/9500',
+                  state: 'merged',
+                  issues: [
+                    {
+                      number: 7,
+                      url: 'https://github.com/o/r/issues/7',
+                      state: 'completed',
+                    },
+                    // A hand-edited sidecar can carry non-openable schemes.
+                    { number: 99, url: 'javascript:alert(1)' },
+                  ],
+                },
+                {
+                  number: 9517,
+                  url: 'https://github.com/o/r/pull/9517',
+                  state: 'open',
+                  issues: [
+                    // Stacked PRs closing the same issue list it once.
+                    {
+                      number: 7,
+                      url: 'https://github.com/o/r/issues/7',
+                      state: 'completed',
+                    },
+                    {
+                      number: 8,
+                      url: 'https://github.com/o/r/issues/8',
+                      state: 'not_planned',
+                    },
+                    { number: 9, url: 'https://github.com/o/r/issues/9' },
+                  ],
+                },
+              ],
+            }}
+            label="Fix CI"
+            time=""
+            completedUnread={false}
+          >
+            <button type="button">Fix CI</button>
+          </SessionDetailsTooltip>
+        </I18nProvider>,
+      );
+    });
+
+    await openDetails(container);
+
+    const details = document.querySelector('[role="dialog"]');
+    const issueLinks = details?.querySelectorAll('a[href*="/issues/"]');
+    expect(
+      [...(issueLinks ?? [])].map((link) => link.getAttribute('href')),
+    ).toEqual([
+      'https://github.com/o/r/issues/7',
+      'https://github.com/o/r/issues/8',
+      'https://github.com/o/r/issues/9',
+    ]);
+    expect(details?.querySelector('a[href^="javascript:"]')).toBeNull();
+    const byNumber = (number: number) =>
+      details?.querySelector(
+        `a[href="https://github.com/o/r/issues/${number}"]`,
+      );
+    const rowIcon = (number: number) =>
+      byNumber(number)?.parentElement?.querySelector('svg');
+    expect(rowIcon(7)?.classList.contains('lucide-circle-check')).toBe(true);
+    expect(
+      rowIcon(7)?.classList.contains(styles.sessionIssueStateCompleted),
+    ).toBe(true);
+    expect(rowIcon(8)?.classList.contains('lucide-circle-slash')).toBe(true);
+    expect(
+      rowIcon(8)?.classList.contains(styles.sessionIssueStateNotPlanned),
+    ).toBe(true);
+    expect(rowIcon(9)?.classList.contains('lucide-circle-dot')).toBe(true);
+    expect(rowIcon(9)?.className).not.toContain('sessionIssueState');
+    expect(byNumber(7)?.textContent).toBe('Issue #7 · Completed');
+    expect(byNumber(8)?.textContent).toBe('Issue #8 · Not planned');
+    expect(byNumber(9)?.textContent).toBe('Issue #9');
+    // Issues follow the PR rows.
+    const links = [...(details?.querySelectorAll('a[href^="https://"]') ?? [])];
+    expect(links.map((link) => link.getAttribute('href'))).toEqual([
+      'https://github.com/o/r/pull/9517',
+      'https://github.com/o/r/pull/9500',
+      'https://github.com/o/r/issues/7',
+      'https://github.com/o/r/issues/8',
+      'https://github.com/o/r/issues/9',
+    ]);
+
+    act(() => root.unmount());
+  });
+
   it('does not reopen after a row action opens its menu', async () => {
     vi.useFakeTimers();
     const container = document.createElement('div');

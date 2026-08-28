@@ -13,9 +13,11 @@
 // static barrel importer (ACP agent included).
 import { existsSync } from 'node:fs';
 import {
+  fetchGitHubPullRequestIssues,
   fetchGitHubPullRequests,
   readSessionPrs,
   updateSessionPrStates,
+  type SessionPrIssue,
   type SessionPrState,
 } from '@qwen-code/qwen-code-core';
 import { createWorkspaceRuntimeSessionService } from '../workspace-runtime-storage.js';
@@ -81,16 +83,19 @@ export function resolveSessionPrRefreshIntervalMs(
 export interface SessionPrRefreshResult {
   /** Sidecars read (sessions with at least one binding). */
   scanned: number;
-  /** Bindings whose state was rewritten (open → merged/closed). */
+  /** Bindings whose state or issue snapshot was rewritten. */
   updated: number;
 }
 
 /**
- * Refreshes the persisted `state` snapshot of one workspace's PR bindings.
- * Only merged is terminal (closed PRs can reopen), so workspaces whose
- * bindings are all merged cost no `gh` call at all. One slim
- * `gh pr list --state all` per workspace per sweep; rewritten in place
- * (order and createdAt preserved).
+ * Refreshes the persisted `state` and `issues` snapshots of one workspace's
+ * PR bindings. Only merged is terminal (closed PRs can reopen), so
+ * workspaces whose bindings are all merged — with an issue snapshot in
+ * place — cost no `gh` call at all. Per workspace per sweep: one slim
+ * `gh pr list --state all` for states, and one by-number GraphQL lookup
+ * for the closing issues (which can change while the PR is open, and which
+ * legacy bindings lack). Rewritten in place (order and createdAt
+ * preserved).
  */
 export async function refreshWorkspaceSessionPrStates(
   runtime: WorkspaceRuntime,
@@ -110,6 +115,7 @@ export async function refreshWorkspaceSessionPrStates(
     prPath: string;
     numbers: number[];
   }> = [];
+  let needsStates = false;
   let scanned = 0;
   for (const archiveState of ['active', 'archived'] as const) {
     // Sidecar-driven, not transcript-driven: a binding persisted before the
@@ -141,10 +147,12 @@ export async function refreshWorkspaceSessionPrStates(
       }
       if (!prs) continue;
       scanned += 1;
+      // Only merged is terminal: closed PRs can be reopened, so they keep
+      // participating in the sweep. A merged binding still needs one lookup
+      // when it predates the issue snapshot.
+      if (prs.some((p) => p.state !== 'merged')) needsStates = true;
       const numbers = prs
-        // Only merged is terminal: closed PRs can be reopened, so they
-        // keep participating in the sweep.
-        .filter((p) => p.state !== 'merged')
+        .filter((p) => p.state !== 'merged' || p.issues === undefined)
         .map((p) => p.number);
       if (numbers.length > 0) {
         pendingNumbers.push({ sessionId, prPath, numbers });
@@ -153,31 +161,54 @@ export async function refreshWorkspaceSessionPrStates(
   }
   if (pendingNumbers.length === 0) return { scanned, updated: 0 };
 
-  assertGenerationOpen();
-  const result = await fetchPullRequests(
-    runtime.workspaceCwd,
-    runtime.env.effectiveEnv,
-    { state: 'all', limit: 500, slim: true },
-  );
-  if (result.kind !== 'ok') return { scanned, updated: 0 };
-  // The url rides along with the state: the map is keyed by number, but a
+  // The url rides along with the snapshot: the map is keyed by number, but a
   // binding may point at another repository whose same-numbered PR must
-  // never supply this workspace's state.
+  // never supply this workspace's state or issues.
   const numberToFetch = new Map<
     number,
-    { state: SessionPrState; url: string }
+    { state?: SessionPrState; url: string; issues?: SessionPrIssue[] }
   >();
-  for (const pr of result.pullRequests) {
-    // The sidecar snapshot has no 'draft' variant — a draft is still open.
-    numberToFetch.set(pr.number, {
-      state: pr.state === 'draft' ? 'open' : pr.state,
-      url: pr.url,
-    });
+  if (needsStates) {
+    assertGenerationOpen();
+    const result = await fetchPullRequests(
+      runtime.workspaceCwd,
+      runtime.env.effectiveEnv,
+      { state: 'all', limit: 500, slim: true },
+    );
+    if (result.kind === 'ok') {
+      for (const pr of result.pullRequests) {
+        // The sidecar snapshot has no 'draft' variant — a draft is still open.
+        numberToFetch.set(pr.number, {
+          state: pr.state === 'draft' ? 'open' : pr.state,
+          url: pr.url,
+        });
+      }
+    }
   }
+  assertGenerationOpen();
+  const issuesResult = await fetchGitHubPullRequestIssues(
+    runtime.workspaceCwd,
+    runtime.env.effectiveEnv,
+    [...new Set(pendingNumbers.flatMap((target) => target.numbers))],
+  );
+  if (issuesResult.kind === 'ok') {
+    for (const [number, { url, issues }] of issuesResult.pullRequests) {
+      // Both queries resolve the same repository, so a number present in
+      // both names one PR; the state (if any) stays from the list query.
+      numberToFetch.set(number, {
+        ...(numberToFetch.get(number) ?? { url }),
+        issues,
+      });
+    }
+  }
+  if (numberToFetch.size === 0) return { scanned, updated: 0 };
 
   let updated = 0;
   for (const target of pendingNumbers) {
-    const states = new Map<number, { state: SessionPrState; url: string }>();
+    const states = new Map<
+      number,
+      { state?: SessionPrState; url: string; issues?: SessionPrIssue[] }
+    >();
     for (const number of target.numbers) {
       const fetched = numberToFetch.get(number);
       // Only a number ABSENT from gh's page is skipped (out of the limit
