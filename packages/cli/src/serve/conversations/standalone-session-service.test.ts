@@ -864,6 +864,31 @@ describe('StandaloneSessionService', () => {
     expect(harness.removeStagedStandaloneDirectory).toHaveBeenCalledOnce();
   });
 
+  it('stops destructive cleanup when deletion loses writer ownership', async () => {
+    mockActiveStandalone();
+    const harness = createHarness();
+    mockWriterLease();
+    vi.spyOn(
+      SessionService.prototype,
+      'removeSessionTranscriptForLifecycle',
+    ).mockResolvedValue(true);
+    vi.spyOn(
+      SessionService.prototype,
+      'cleanupRemovedSessionStateForLifecycle',
+    ).mockRejectedValue(new SessionWriterLostError());
+
+    await expect(harness.service.delete([sessionId])).resolves.toEqual({
+      removed: [sessionId],
+      notFound: [],
+      errors: [],
+      fileCleanupPending: [sessionId],
+    });
+
+    expect(harness.bridge.deleteSessionAttachments).not.toHaveBeenCalled();
+    expect(harness.removeStagedStandaloneDirectory).not.toHaveBeenCalled();
+    expect(harness.deletionJournal.clear).not.toHaveBeenCalled();
+  });
+
   it('retains deletion evidence when attachment cleanup fails', async () => {
     mockActiveStandalone();
     const harness = createHarness();
@@ -1319,6 +1344,35 @@ describe('StandaloneSessionService', () => {
       fileCleanupPending: [sessionId],
     });
 
+    expect(harness.deletionJournal.clear).not.toHaveBeenCalled();
+  });
+
+  it('stops attachment cleanup when recovery loses writer ownership', async () => {
+    vi.spyOn(
+      SessionService.prototype,
+      'findSessionIdIgnoringCase',
+    ).mockResolvedValue(undefined);
+    vi.spyOn(
+      SessionService.prototype,
+      'cleanupRemovedSessionStateForLifecycle',
+    ).mockRejectedValue(new SessionWriterLostError());
+    const harness = createHarness();
+    mockWriterLease();
+    harness.deletionJournal.read.mockResolvedValueOnce(
+      deletionEntry() as never,
+    );
+    harness.inspectStandaloneDeletionPaths.mockResolvedValueOnce({
+      status: 'absent',
+    });
+
+    await expect(harness.service.delete([sessionId])).resolves.toEqual({
+      removed: [sessionId],
+      notFound: [],
+      errors: [],
+      fileCleanupPending: [sessionId],
+    });
+
+    expect(harness.bridge.deleteSessionAttachments).not.toHaveBeenCalled();
     expect(harness.deletionJournal.clear).not.toHaveBeenCalled();
   });
 

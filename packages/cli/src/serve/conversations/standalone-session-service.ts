@@ -27,6 +27,7 @@ import {
   SessionStorageEntryError,
   SessionTranscriptDurabilityError,
   SessionTranscriptChangedError,
+  SessionWriterError,
   SessionWriterLostError,
   SessionWriterUnavailableError,
   type ApprovalMode,
@@ -1249,6 +1250,7 @@ export class StandaloneSessionService {
           cleanupPending = true;
         }
       }
+      let cleanupOwnershipLost = false;
       try {
         await service.cleanupRemovedSessionStateForLifecycle(
           record.storageSessionId,
@@ -1260,15 +1262,18 @@ export class StandaloneSessionService {
             },
           },
         );
-      } catch {
+      } catch (error) {
         cleanupPending = true;
+        cleanupOwnershipLost = error instanceof SessionWriterError;
       }
-      try {
-        await runtime.bridge.deleteSessionAttachments(sessionId, {
-          assertCanCommit: () => this.options.assertRuntimeCurrent(runtime),
-        });
-      } catch {
-        cleanupPending = true;
+      if (!cleanupOwnershipLost) {
+        try {
+          await runtime.bridge.deleteSessionAttachments(sessionId, {
+            assertCanCommit: () => this.options.assertRuntimeCurrent(runtime),
+          });
+        } catch {
+          cleanupPending = true;
+        }
       }
       if (!(await this.releaseLifecycleLease(lease, record.storageSessionId))) {
         cleanupPending = true;
@@ -2004,6 +2009,7 @@ export class StandaloneSessionService {
           }
         }
 
+        let cleanupOwnershipLost = false;
         try {
           await service.cleanupRemovedSessionStateForLifecycle(
             locked.storageSessionId,
@@ -2015,24 +2021,27 @@ export class StandaloneSessionService {
               },
             },
           );
-        } catch {
+        } catch (error) {
           cleanupPending = true;
+          cleanupOwnershipLost = error instanceof SessionWriterError;
         }
-        try {
-          await runtime.bridge.deleteSessionAttachments(sessionId, {
-            assertCanCommit: () => this.options.assertRuntimeCurrent(runtime),
-          });
-        } catch {
-          cleanupPending = true;
-        }
-        if (directoryWasStaged && paths.status === 'normal') {
+        if (!cleanupOwnershipLost) {
           try {
-            await this.options.workspace.removeStagedStandaloneDirectory(
-              sessionId,
-              paths.identity,
-            );
+            await runtime.bridge.deleteSessionAttachments(sessionId, {
+              assertCanCommit: () => this.options.assertRuntimeCurrent(runtime),
+            });
           } catch {
             cleanupPending = true;
+          }
+          if (directoryWasStaged && paths.status === 'normal') {
+            try {
+              await this.options.workspace.removeStagedStandaloneDirectory(
+                sessionId,
+                paths.identity,
+              );
+            } catch {
+              cleanupPending = true;
+            }
           }
         }
         if (
