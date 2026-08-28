@@ -11057,9 +11057,24 @@ class QwenAgent implements Agent {
         const task = registry.get(taskId);
         if (!task) return { changed: false };
         if (action === 'retry' || action === 'rerun') {
+          // A retry reuses its runId over the one journal/snapshot store
+          // every session shares, so "failed with no handle" in THIS
+          // session's registry is not enough: a sibling may have retried
+          // it already and be running it now — the task-global claim is
+          // released as soon as the background start returns, while the
+          // run is still live. Two runners on one runId interleave the
+          // journal and race the snapshot write. Checked synchronously
+          // beside canStart — no await precedes the claim — so the answer
+          // cannot go stale before the claim is taken.
+          const liveElsewhere =
+            action === 'retry' &&
+            (registry.isStarting?.(taskId) === true ||
+              this.isWorkflowRunLiveOutsideSession(sessionId, taskId));
           const canStart =
             action === 'retry'
-              ? task.status === 'failed' && !registry.getHandle(taskId)
+              ? task.status === 'failed' &&
+                !registry.getHandle(taskId) &&
+                !liveElsewhere
               : task.status === 'completed' ||
                 task.status === 'failed' ||
                 task.status === 'cancelled';
@@ -12371,6 +12386,30 @@ class QwenAgent implements Agent {
                 newMerged.tools?.disabled,
               );
               config.setDisabledTools(new Set(disabled));
+
+              // `/capabilities` reads `tools.workflowsEnabled` live from
+              // the reloaded settings; a session alive before the reload
+              // was constructed with the old value and would keep
+              // answering canUseWorkflowControls with it, so the
+              // advertisement and the controls it gates would diverge.
+              // The merged view is already workspace-stripped, so a repo
+              // cannot self-grant here any more than at construction.
+              const workflowsWereEnabled = config.isWorkflowsEnabled();
+              config.setWorkflowsEnabled(
+                newMerged.tools?.workflowsEnabled === true,
+              );
+              if (config.isWorkflowsEnabled() !== workflowsWereEnabled) {
+                // The `workflows` slash command comes and goes with the
+                // flag; a client holding the old list would keep offering
+                // (or hiding) it.
+                try {
+                  await session.sendAvailableCommandsUpdate();
+                } catch (err) {
+                  debugLogger.warn(
+                    `reload: sendAvailableCommandsUpdate failed for session ${id}: ${err}`,
+                  );
+                }
+              }
 
               const newMode = newMerged.tools?.approvalMode;
               if (
