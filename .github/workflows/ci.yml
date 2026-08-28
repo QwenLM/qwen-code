@@ -198,10 +198,14 @@ jobs:
     # Accepts push on `main`: this is the only post-merge check faster than the
     # ~40-minute E2E, and with no merge queue enabled nothing validates the
     # merged tree before it lands either. The expensive and PR-shaped steps
-    # stay off it on their own gates — the no-AK integration gate, the
-    # checkout-head verifier and the test reporter are each already restricted
-    # to pull_request / merge_group — so a push run is lint, static analysis
-    # and unit tests.
+    # stay off it on their own gates, each by its own mechanism — the no-AK
+    # integration gate and the checkout-head verifier are restricted to
+    # pull_request / merge_group, while the test reporter carries no event
+    # gate at all: its same-repo clause (head.repo.full_name ==
+    # github.repository) is empty on push. Do not "normalise" that clause into
+    # the event allowlist — it also keeps fork PRs out, and dorny/test-reporter
+    # needs `checks: write`, which fork-event runs do not have. So a push run
+    # is lint, static analysis and unit tests.
     if: "${{ !cancelled() && github.event_name != 'schedule' }}"
     runs-on: '${{ fromJSON(needs.classify_pr.outputs.ubuntu_runner || ''["ubuntu-latest"]'') }}'
     timeout-minutes: 60

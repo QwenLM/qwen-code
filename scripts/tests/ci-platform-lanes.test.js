@@ -41,29 +41,65 @@ const PUSH_JOBS = ['classify_pr', 'test'];
 const condOf = (job) => String(ci.jobs[job].if ?? '');
 
 // One helper for both "an <event> run reaches exactly these jobs" invariants.
-// They started as hand-copies and had already diverged: the push mirror's
-// allowlist gained `schedule` while the nightly's never gained `push`, so a
-// push-only job would have failed the nightly assertion with the factually
-// wrong message `<job> would also run on the nightly schedule`, pointing the
-// fixer at the wrong event. Parameterising makes that class of drift
-// impossible — both call sites now share one allowlist shape.
-const assertEventReachesOnly = (event, allowedJobs, allowlist) => {
-  const allowRe = new RegExp(
-    `github\\.event_name == '(${allowlist.join('|')})'`,
-  );
+//
+// It decides by EVALUATING each gate for the event, not by looking for tokens
+// in it — the same substitute-then-evaluate technique
+// `.github/scripts/ci-runner-routing.test.mjs` uses on `runs-on`. Token
+// probes are connective-blind: an `&&`→`||` flip inside an excluded job, or an
+// allowlisted equality paired with an event-neutral disjunct under `||`,
+// changes which jobs run while every substring stays exactly where it was.
+// Evaluation sees the change because it computes the answer instead of
+// pattern-matching the question, and it needs no expression parser of our own.
+//
+// Any context term the substitutions do not model throws rather than reading
+// as false, so a gate that grows a new input is re-read here instead of
+// silently degrading this guard.
+const gateRunsOn = (cond, event) => {
+  if (String(cond ?? '').trim() === '') return true;
+  let e = String(cond)
+    .replace(/\$\{\{/g, ' ')
+    .replace(/\}\}/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  const subs = [
+    [/!cancelled\(\)/g, 'true'],
+    [/cancelled\(\)/g, 'false'],
+    [/always\(\)/g, 'true'],
+    [/github\.event_name/g, `"${event}"`],
+    [/needs\.classify_pr\.outputs\.skip_ci/g, '"false"'],
+    [/needs\.test\.outputs\.ci_profile/g, '"full"'],
+    [
+      /github\.event\.pull_request\.head\.repo\.full_name/g,
+      event === 'pull_request' ? '"QwenLM/qwen-code"' : '""',
+    ],
+    [/github\.repository/g, '"QwenLM/qwen-code"'],
+  ];
+  for (const [re, v] of subs) e = e.replace(re, v);
+  e = e
+    .replace(/!==/g, '@NE@')
+    .replace(/===/g, '@EQ@')
+    .replace(/!=/g, '@NE@')
+    .replace(/==/g, '@EQ@')
+    .replace(/@NE@/g, '!==')
+    .replace(/@EQ@/g, '===');
+  if (/github\.|needs\.|steps\.|vars\.|inputs\./.test(e)) {
+    throw new Error(`gate carries a term this guard does not model: ${e}`);
+  }
+  return Boolean(new Function(`return (${e});`)());
+};
+
+// Asserts both directions: the jobs that must run on `event` do, and every
+// other job does not. The positive half matters as much — a gate that stops
+// admitting its own event turns the lane off with nothing else going red.
+const assertEventReachesOnly = (event, allowedJobs) => {
   for (const [name, job] of Object.entries(ci.jobs)) {
-    if (allowedJobs.includes(name)) continue;
-    const cond = String(job.if ?? '');
-    const excluded =
-      cond.includes(`github.event_name != '${event}'`) || allowRe.test(cond);
-    expect(excluded, `${name} would also run on ${event}`).toBe(true);
-    // Mentioning an allowlisted event is not the same as excluding this one:
-    // `event == 'pull_request' || event == '<event>'` satisfies the check
-    // above while still running. Require the impossibility.
-    expect(cond, `${name} admits ${event} explicitly`).not.toContain(
-      `github.event_name == '${event}'`,
-    );
-    expect(cond, `${name} has no event gate at all`).not.toBe('');
+    const reached = gateRunsOn(job.if, event);
+    expect(
+      reached,
+      allowedJobs.includes(name)
+        ? `${name} no longer runs on ${event}`
+        : `${name} would also run on ${event}`,
+    ).toBe(allowedJobs.includes(name));
   }
 };
 
@@ -180,12 +216,7 @@ describe('platform lanes — triggers', () => {
     // therefore either exclude `schedule` outright or gate on an event
     // allowlist that cannot contain it — otherwise the nightly quietly
     // becomes a full CI run every day.
-    assertEventReachesOnly('schedule', LANES, [
-      'pull_request',
-      'merge_group',
-      'workflow_dispatch',
-      'push',
-    ]);
+    assertEventReachesOnly('schedule', LANES);
   });
 });
 
@@ -226,7 +257,15 @@ describe('post-merge push lane', () => {
     // stops accepting push, `test` still runs but that output is empty and
     // `fromJSON(... || '["ubuntu-latest"]')` silently demotes every
     // post-merge run to a scarce hosted runner.
-    expect(condOf('classify_pr')).toContain("github.event_name == 'push'");
+    // Whole-literal, not a substring: `||`→`&&` anywhere in this allowlist
+    // keeps every token in place while skipping classify_pr on a push. `test`
+    // would still run (its own gate is `!cancelled()`-shaped), but with
+    // `ubuntu_runner` empty it falls back through
+    // `fromJSON(... || '["ubuntu-latest"]')` — every post-merge run silently
+    // demoted to a scarce hosted runner, and `skip_ci`/`ci_profile` empty.
+    expect(condOf('classify_pr')).toBe(
+      "${{ github.event_name == 'pull_request' || github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch' || github.event_name == 'push' }}",
+    );
   });
 
   it('test accepts push while still excluding the nightly', () => {
@@ -241,10 +280,9 @@ describe('post-merge push lane', () => {
     // `success`, and the failure watcher — gated on `conclusion == 'failure'`
     // — would file nothing: the lane gone with zero red anywhere. Requiring
     // the gate to stay exclusion-shaped forecloses that.
-    const cond = condOf('test');
-    expect(cond).not.toContain("github.event_name != 'push'");
-    expect(cond).not.toContain('github.event_name ==');
-    expect(cond).toContain("github.event_name != 'schedule'");
+    expect(condOf('test')).toBe(
+      "${{ !cancelled() && github.event_name != 'schedule' }}",
+    );
   });
 
   it('keeps a post-merge run to exactly classify_pr and test', () => {
@@ -253,12 +291,7 @@ describe('post-merge push lane', () => {
     // outright or gate on an allowlist that cannot contain it. Otherwise a
     // merge quietly becomes a full CI run — desktop_shell's cargo build
     // included.
-    assertEventReachesOnly('push', PUSH_JOBS, [
-      'pull_request',
-      'merge_group',
-      'workflow_dispatch',
-      'schedule',
-    ]);
+    assertEventReachesOnly('push', PUSH_JOBS);
   });
 
   it('checks out the commit the push reported, not the branch tip', () => {
@@ -273,10 +306,9 @@ describe('post-merge push lane', () => {
       String(s.uses ?? '').startsWith('actions/checkout'),
     );
     expect(checkout).toBeDefined();
-    const ref = String(checkout.with?.ref ?? '');
-    const arm = "github.event_name == 'push' && github.sha";
-    expect(ref).toContain(arm);
-    expect(ref.indexOf(arm)).toBeLessThan(ref.lastIndexOf('github.ref '));
+    expect(String(checkout.with?.ref ?? '')).toBe(
+      "${{ github.event.inputs.branch_ref || (github.event_name == 'pull_request' && format('refs/pull/{0}/head', github.event.pull_request.number)) || (github.event_name == 'merge_group' && github.event.merge_group.head_sha) || (github.event_name == 'push' && github.sha) || github.ref }}",
+    );
   });
 
   it('does not upload coverage from a post-merge run', () => {
@@ -286,7 +318,9 @@ describe('post-merge push lane', () => {
     // retention on a lane with no reader.
     const step = stepOf('test', 'Upload coverage reports');
     expect(step).toBeDefined();
-    expect(String(step.if)).toContain("github.event_name != 'push'");
+    expect(String(step.if)).toBe(
+      "${{ always() && needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && github.event_name != 'push' }}",
+    );
   });
 
   it('scopes the concurrency group and keeps main uncancellable', () => {
@@ -308,14 +342,11 @@ describe('post-merge push lane', () => {
     // to all 1854 test:scripts tests, while consecutive merges would cancel
     // each other — the history this repo already recorded once, when 67 of
     // 100 push runs were cancelled and only 25 ever reported.
-    const group = String(ci.concurrency.group);
-    expect(group).toContain('github.event_name');
-    expect(group).toContain(
-      'github.event.pull_request.head.repo.full_name || github.repository',
+    expect(String(ci.concurrency.group)).toBe(
+      '${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.head_ref || github.ref }}',
     );
-    expect(group).toContain('github.head_ref || github.ref');
-    expect(String(ci.concurrency['cancel-in-progress'])).toContain(
-      "github.ref != 'refs/heads/main'",
+    expect(String(ci.concurrency['cancel-in-progress']).trim()).toBe(
+      "${{ github.ref != 'refs/heads/main' && !startsWith(github.ref, 'refs/heads/release/') }}",
     );
   });
 });
