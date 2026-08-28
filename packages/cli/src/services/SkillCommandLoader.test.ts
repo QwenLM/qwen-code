@@ -330,6 +330,7 @@ describe('SkillCommandLoader', () => {
       const skill = makeSkill({
         level: 'extension',
         extensionName: 'superpowers-lab',
+        extensionDisplayName: 'Superpowers Lab',
         description: 'Use tmux for interactive commands',
       });
       mockSkillManager.listSkills.mockImplementation(
@@ -342,8 +343,11 @@ describe('SkillCommandLoader', () => {
 
       expect(commands[0].modelInvocable).toBe(true);
       expect(commands[0].source).toBe('plugin-command');
-      expect(commands[0].sourceLabel).toBe('Extension: superpowers-lab');
+      expect(commands[0].sourceLabel).toBe('Extension: Superpowers Lab');
       expect(commands[0].sourceDetail).toBe('extension');
+      expect(commands[0].skillDetail).toMatchObject({
+        extensionName: 'superpowers-lab',
+      });
     });
 
     it('should be modelInvocable when whenToUse is present', async () => {
@@ -362,6 +366,7 @@ describe('SkillCommandLoader', () => {
       const commands = await loader.loadCommands(signal);
 
       expect(commands[0].modelInvocable).toBe(true);
+      expect(commands[0].sourceLabel).toBe('Extension: superpowers-lab');
     });
 
     it('should NOT be modelInvocable when description and whenToUse are absent', async () => {

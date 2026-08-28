@@ -3,6 +3,10 @@ import type { DaemonWorkspaceSkillStatus } from '@qwen-code/web-shell/daemon-rea
 export type SkillLevelFilter = 'all' | DaemonWorkspaceSkillStatus['level'];
 export type SkillStatusFilter = 'all' | 'enabled' | 'disabled';
 
+export function skillExtensionLabel(skill: DaemonWorkspaceSkillStatus): string {
+  return skill.extensionDisplayName ?? skill.extensionName ?? '-';
+}
+
 export function filterSkills(
   skills: readonly DaemonWorkspaceSkillStatus[],
   query: string,

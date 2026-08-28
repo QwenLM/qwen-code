@@ -124,6 +124,19 @@ function pathExtension(workspacePath?: string): string {
   return dot >= 0 ? name.slice(dot).toLowerCase() : '';
 }
 
+// Mirrors WORKSPACE_CONTENT_SHA256_METADATA_KEY in the core package, which the
+// Web Shell client cannot import.
+const WORKSPACE_CONTENT_SHA256_METADATA_KEY = 'qwen.workspace.sha256';
+
+export function getArtifactFreshnessKey(
+  artifact: Pick<DaemonSessionArtifact, 'status' | 'updatedAt' | 'metadata'>,
+): string {
+  const workspaceHash =
+    artifact.metadata?.[WORKSPACE_CONTENT_SHA256_METADATA_KEY];
+  const hash = typeof workspaceHash === 'string' ? workspaceHash : '';
+  return `${artifact.status}:${artifact.updatedAt}:${hash}`;
+}
+
 export function getArtifactTypeLabel(artifact: DaemonSessionArtifact): string {
   const artifactType = artifact.metadata?.['artifactType'];
   return typeof artifactType === 'string' && artifactType
