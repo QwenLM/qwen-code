@@ -14,7 +14,7 @@ import {
   StreamEventType,
   type ModelFallbackInfo,
   type StreamEvent,
-} from './geminiChat.js';
+} from './llm-chat.js';
 
 export interface ModelStreamTextPart {
   text: string;

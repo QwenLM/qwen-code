@@ -9,7 +9,7 @@
  *
  * The two execution paths are selected by whether cacheSafeParams is supplied:
  *
- *   WITH cacheSafeParams  → GeminiChat single-turn, shares parent prompt
+ *   WITH cacheSafeParams  → LlmChat single-turn, shares parent prompt
  *                            cache (systemInstruction + history). Tools are
  *                            stripped by default (NO_TOOLS) to prevent
  *                            function calls; pass preserveTools: true to
@@ -40,7 +40,7 @@ import {
   type RuntimeContentGeneratorView,
 } from './runtime/agent-context.js';
 import { ApprovalMode, type Config } from '../config/config.js';
-import { GeminiChat } from '../core/geminiChat.js';
+import { LlmChat } from '../core/llm-chat.js';
 import { ModelStreamAttemptState } from '../core/model-stream-attempt-state.js';
 import { createRuntimeContentGeneratorView } from '../models/content-generator-config.js';
 import { createApprovalModeOverride } from '../tools/agent/agent.js';
@@ -125,7 +125,7 @@ function copyHistoryContainers(history: Content[]): Content[] {
 
 /**
  * Save cache-safe params after a successful main conversation turn.
- * Called from GeminiClient.sendMessageStream() on successful completion.
+ * Called from LlmClient.sendMessageStream() on successful completion.
  */
 export function saveCacheSafeParams(
   generationConfig: GenerateContentConfig,
@@ -208,7 +208,7 @@ const NO_TOOLS = Object.freeze({ tools: [] as const }) as Pick<
 >;
 
 /**
- * Create an isolated GeminiChat that shares the main conversation's
+ * Create an isolated LlmChat that shares the main conversation's
  * generationConfig (including systemInstruction, tools, and history).
  *
  * Used by runForkedAgent (cache path) and directly by speculation.ts which
@@ -217,14 +217,14 @@ const NO_TOOLS = Object.freeze({ tools: [] as const }) as Pick<
 export function createForkedChat(
   config: Config,
   params: CacheSafeParams,
-): GeminiChat {
+): LlmChat {
   const maxHistoryEntries = 40;
   const history =
     params.history.length > maxHistoryEntries
       ? params.history.slice(-maxHistoryEntries)
       : params.history;
 
-  const forkedChat = new GeminiChat(
+  const forkedChat = new LlmChat(
     config,
     {
       ...params.generationConfig,

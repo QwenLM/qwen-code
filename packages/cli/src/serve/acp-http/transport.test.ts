@@ -5019,6 +5019,12 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
             ? bridge.loadRequests.length
             : bridge.resumeRequests.length,
         ).toBe((method === 'session/load' ? loadCount : resumeCount) + 1);
+        const restoreRequest =
+          method === 'session/load'
+            ? bridge.loadRequests.at(-1)
+            : bridge.resumeRequests.at(-1);
+        expect(restoreRequest).not.toHaveProperty('sourceType');
+        expect(restoreRequest).not.toHaveProperty('sourceId');
       });
     },
   );
@@ -5077,6 +5083,12 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
               ? bridge.loadRequests.length
               : bridge.resumeRequests.length,
           ).toBe((method === 'session/load' ? loadCount : resumeCount) + 1);
+          const restoreRequest =
+            method === 'session/load'
+              ? bridge.loadRequests.at(-1)
+              : bridge.resumeRequests.at(-1);
+          expect(restoreRequest).not.toHaveProperty('sourceType');
+          expect(restoreRequest).not.toHaveProperty('sourceId');
         } finally {
           readCreationMetadata.mockRestore();
           findSessionId.mockRestore();
@@ -5261,6 +5273,115 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
           findSessionId.mockRestore();
         }
       });
+    },
+  );
+
+  it.each(['session/load', 'session/resume'] as const)(
+    '%s delegates legacy standalone adoption before generic restore gates',
+    async (method) => {
+      const sessionId =
+        method === 'session/load'
+          ? '550e8400-e29b-41d4-a716-446655440160'
+          : '550e8400-e29b-41d4-a716-446655440161';
+      await writeStoredSession(sessionId, 'active', undefined, 'default');
+      const materializeConversationDirectory = vi.fn(
+        async () => `/live/conversation-${sessionId}`,
+      );
+      const restoreLegacyForCompatibility = vi.fn(
+        async (action: 'load' | 'resume', restoredSessionId: string) => ({
+          sessionId: restoredSessionId,
+          workspaceCwd: TEST_WORKSPACE,
+          currentCwd: `/live/conversation-${restoredSessionId}`,
+          attached: false,
+          clientId: 'standalone-client',
+          state: { adopted: true } as never,
+          sourceType: 'standalone' as const,
+          context: { kind: 'standalone' as const },
+          projectlessOutputDirectory: `/live/conversation-${restoredSessionId}`,
+          workingDirectory: { state: 'ready' as const },
+        }),
+      );
+      const archiveCoordinator = new SessionArchiveCoordinator();
+      const registry = new ConnectionRegistry();
+      const rememberLane = new WorkspaceRememberTaskLane(
+        bridge as unknown as HttpAcpBridge,
+      );
+      const dispatcher = new AcpDispatcher(
+        bridge as unknown as HttpAcpBridge,
+        TEST_WORKSPACE,
+        () => process.env,
+        fakeWorkspace,
+        rememberLane,
+        createRequestedSessionIdAdmission({
+          archiveCoordinator,
+          getBridges: () => [bridge as unknown as HttpAcpBridge],
+          getPersistenceTargets: () => [
+            {
+              workspaceCwd: TEST_WORKSPACE,
+              runtimeBaseDir: Storage.getRuntimeBaseDir(),
+            },
+          ],
+        }),
+        undefined,
+        undefined,
+        false,
+        registry,
+        archiveCoordinator,
+        () => true,
+        () => undefined,
+        {
+          materializeConversationDirectory,
+          isSessionActive: () => false,
+        },
+        Storage.getRuntimeBaseDir(),
+        () => ({
+          bridge: bridge as unknown as HttpAcpBridge,
+          sessionRuntimeBaseDir: Storage.getRuntimeBaseDir(),
+          workspaceId: 'conversations',
+        }),
+        { restoreLegacyForCompatibility },
+      );
+      const conn = registry.create(true)!;
+      const frames: unknown[] = [];
+      conn.attachConnStream({
+        kind: 'sse',
+        isClosed: false,
+        async send(message: unknown): Promise<void> {
+          frames.push(message);
+        },
+        async sendSerialized(payload: Buffer) {
+          frames.push(JSON.parse(payload.toString('utf8')));
+          return 'delivered' as const;
+        },
+        close(): void {},
+      } satisfies TransportStream);
+
+      try {
+        await dispatcher.handle(conn, {
+          jsonrpc: '2.0',
+          id: 216,
+          method,
+          params: { sessionId },
+        });
+        await waitUntil(() => frames.length > 0);
+        expect(frames).toContainEqual(
+          expect.objectContaining({
+            id: 216,
+            result: expect.objectContaining({ adopted: true }),
+          }),
+        );
+        expect(restoreLegacyForCompatibility).toHaveBeenCalledWith(
+          method === 'session/load' ? 'load' : 'resume',
+          sessionId,
+          { clientId: expect.any(String) },
+        );
+        expect(bridge.loadRequests).toEqual([]);
+        expect(bridge.resumeRequests).toEqual([]);
+        expect(materializeConversationDirectory).not.toHaveBeenCalled();
+      } finally {
+        registry.dispose();
+        rememberLane.dispose();
+      }
     },
   );
 
@@ -5508,7 +5629,11 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
         params: {
           sessionId,
           metadata: {
-            pr: { number: 9101, url: 'https://github.com/o/r/pull/9101' },
+            pr: {
+              number: 9101,
+              url: 'https://github.com/o/r/pull/9101',
+              state: 'merged',
+            },
           },
         },
       });
@@ -5529,10 +5654,21 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
           'id' in frame &&
           (frame as { id: unknown }).id === 471,
       ) as
-        | { result?: { prs?: Array<{ number: number; url: string }> } }
+        | {
+            result?: {
+              prs?: Array<{ number: number; url: string; state?: string }>;
+            };
+          }
         | undefined;
-      expect(reply?.result?.prs?.map((entry) => entry.number)).toEqual([
-        9100, 9101,
+      // The reply echoes the persisted state: the dispatch persistence arm
+      // must carry `state` into the sidecar write, not drop it.
+      expect(reply?.result?.prs).toEqual([
+        { number: 9100, url: 'https://github.com/o/r/pull/9100' },
+        {
+          number: 9101,
+          url: 'https://github.com/o/r/pull/9101',
+          state: 'merged',
+        },
       ]);
       // The entry must be re-hydrated from the sidecar BEFORE the mutation
       // so the `session_metadata_updated` event payload is complete too.
@@ -5544,6 +5680,9 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       ).toEqual([9100]);
       const persisted = await readSessionPrs(sidecarPath);
       expect(persisted?.map((entry) => entry.number)).toEqual([9100, 9101]);
+      expect(persisted?.find((entry) => entry.number === 9101)?.state).toBe(
+        'merged',
+      );
     } finally {
       registry.dispose();
       rememberLane.dispose();

@@ -7,7 +7,7 @@
 import { describe, expect, it } from 'vitest';
 import type { GenerateContentResponse } from '@google/genai';
 import { FinishReason } from './genai-compat.js';
-import { StreamEventType } from './geminiChat.js';
+import { StreamEventType } from './llm-chat.js';
 import { ModelStreamAttemptState } from './model-stream-attempt-state.js';
 
 describe('ModelStreamAttemptState', () => {

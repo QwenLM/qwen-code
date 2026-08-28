@@ -6,7 +6,7 @@
  * Speculation Engine
  *
  * Speculatively executes the accepted suggestion before the user confirms,
- * using a forked GeminiChat with copy-on-write file isolation.
+ * using a forked LlmChat with copy-on-write file isolation.
  *
  * Flow:
  * 1. Suggestion shown → startSpeculation() fires
@@ -17,7 +17,7 @@
 
 import type { Content, Part } from '@google/genai';
 import type { Config } from '../config/config.js';
-import type { GeminiClient } from '../core/client.js';
+import type { LlmClient } from '../core/client.js';
 import type { ToolArtifact } from '../tools/tools.js';
 import { ModelStreamAttemptState } from '../core/model-stream-attempt-state.js';
 import {
@@ -335,6 +335,13 @@ async function runSpeculativeLoop(
         const name = fc.name ?? '';
         const id = fc.id;
         const args = (fc.args ?? {}) as Record<string, unknown>;
+        const toolRegistry = config.getToolRegistry();
+        // Permission-deferred calls must use the normal scheduler approval
+        // path; speculation deliberately bypasses that path.
+        if (toolRegistry.isPermissionDeferred?.(name)) {
+          hitBoundary = true;
+          break;
+        }
         const persistenceCallId =
           id ?? `${name}-${state.id}-${turn}-${responseEntries.length}`;
         let producerObserved = false;
@@ -379,7 +386,6 @@ async function runSpeculativeLoop(
         // Execute the tool directly (bypassing CoreToolScheduler)
         // SECURITY: Only reaches here for read-only tools or writes gated by approvalMode
         try {
-          const toolRegistry = config.getToolRegistry();
           const tool = await toolRegistry.ensureTool(name);
           if (!tool) {
             const responsePart: Part = {
@@ -595,7 +601,7 @@ async function runSpeculativeLoop(
  */
 export async function acceptSpeculation(
   state: SpeculationState,
-  geminiClient: GeminiClient,
+  llmClient: LlmClient,
 ): Promise<SpeculationResult> {
   const timeSavedMs = state.boundary
     ? Math.max(0, state.boundary.completedAt - state.startTime)
@@ -612,7 +618,7 @@ export async function acceptSpeculation(
 
     // Inject into main conversation
     for (const msg of cleanMessages) {
-      await geminiClient.addHistory(msg);
+      await llmClient.addHistory(msg);
     }
 
     state.status = 'completed';

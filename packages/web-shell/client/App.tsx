@@ -134,6 +134,7 @@ import { SkillsManagerPage } from './components/skills/SkillsManagerPage';
 import { DaemonStatusDialog } from './components/dialogs/DaemonStatusDialog';
 import { SessionOverviewPanel } from './components/SessionOverviewPanel';
 import { SplitView } from './components/SplitView';
+import { GaugeIcon } from 'lucide-react';
 import type { PaneHeaderActionsRenderer } from './components/ChatPane';
 import {
   ArtifactPanel,
@@ -907,6 +908,8 @@ export interface WebShellSidebarOptions {
   defaultCollapsed?: boolean;
   /** Whether to show WebShell's built-in compact drawer toggle. Defaults to true. */
   showCompactToggle?: boolean;
+  /** Whether to show the Tasks/Channels session-source switch. Defaults to true. */
+  showSessionSourceSwitch?: boolean;
   /** Hide or replace the complete sidebar branding row. */
   branding?: false | WebShellSidebarBranding;
   /** Customize the primary navigation area (new task button, custom entries). */
@@ -1239,6 +1242,7 @@ function resolveSidebarOptions(sidebar: WebShellProps['sidebar']): {
   enabled: boolean;
   defaultCollapsed: boolean;
   showCompactToggle: boolean;
+  showSessionSourceSwitch: boolean;
   branding?: false | WebShellSidebarBranding;
   primaryNav?: WebShellSidebarPrimaryNavOptions;
   hideProjectHeader?: boolean;
@@ -1247,15 +1251,26 @@ function resolveSidebarOptions(sidebar: WebShellProps['sidebar']): {
   lockedWorkspace?: WebShellSidebarLockedWorkspace;
 } {
   if (sidebar === true) {
-    return { enabled: true, defaultCollapsed: false, showCompactToggle: true };
+    return {
+      enabled: true,
+      defaultCollapsed: false,
+      showCompactToggle: true,
+      showSessionSourceSwitch: true,
+    };
   }
   if (!sidebar) {
-    return { enabled: false, defaultCollapsed: false, showCompactToggle: true };
+    return {
+      enabled: false,
+      defaultCollapsed: false,
+      showCompactToggle: true,
+      showSessionSourceSwitch: true,
+    };
   }
   return {
     enabled: sidebar.enabled ?? true,
     defaultCollapsed: sidebar.defaultCollapsed ?? false,
     showCompactToggle: sidebar.showCompactToggle ?? true,
+    showSessionSourceSwitch: sidebar.showSessionSourceSwitch ?? true,
     branding: sidebar.branding,
     primaryNav: sidebar.primaryNav,
     hideProjectHeader: sidebar.hideProjectHeader,
@@ -2028,6 +2043,7 @@ export function App({
   const titleHeaderItemVisible = chatHeaderItems.includes('title');
   const environmentHeaderItemVisible = chatHeaderItems.includes('environment');
   const rightPanelHeaderItemVisible = chatHeaderItems.includes('rightPanel');
+  const tokenUsageHeaderItemVisible = chatHeaderItems.includes('tokenUsage');
   const rightPanelItems = rightPanel?.items ?? DEFAULT_RIGHT_PANEL_ITEMS;
   const environmentPanelItems =
     environmentPanel?.items ?? DEFAULT_ENVIRONMENT_PANEL_ITEMS;
@@ -3562,6 +3578,35 @@ export function App({
     },
     [getDefaultReviewPanelWidth, t],
   );
+  const openTokenUsagePanel = useCallback(
+    (
+      sourceSessionId: string,
+      sourceSessionActions?: DaemonSessionActions,
+      closeWithPane = false,
+    ) => {
+      const tab: ArtifactPanelTab = {
+        id: `token-usage:${sourceSessionId}`,
+        kind: 'token_usage',
+        title: t('tokenUsage.title'),
+        sessionId: sourceSessionId,
+        ...(closeWithPane ? { closeWithPane: true } : {}),
+        ...(sourceSessionActions
+          ? { sessionActions: sourceSessionActions }
+          : {}),
+      };
+      setArtifactPanelTabs((tabs) =>
+        tabs.some((item) => item.id === tab.id)
+          ? tabs.map((item) => (item.id === tab.id ? tab : item))
+          : [...tabs, tab],
+      );
+      setActiveArtifactPanelTabId(tab.id);
+      setArtifactPanelWidth((width) =>
+        artifactPanelOpenRef.current ? width : getDefaultReviewPanelWidth(),
+      );
+      setArtifactPanelOpen(true);
+    },
+    [getDefaultReviewPanelWidth, t],
+  );
   const openAttachmentPanel = useCallback(
     (
       file: AttachmentPreviewRequest,
@@ -3946,9 +3991,11 @@ export function App({
       observer.disconnect();
     };
   }, [artifactPanelOpen, artifactPanelFullscreen]);
-  const closeArtifactPanelTab = useCallback((tabId: string) => {
+  const closeArtifactPanelTabs = useCallback((tabIds: ReadonlySet<string>) => {
+    if (tabIds.size === 0) return;
     setArtifactPanelTabs((tabs) => {
-      const nextTabs = tabs.filter((tab) => tab.id !== tabId);
+      const nextTabs = tabs.filter((tab) => !tabIds.has(tab.id));
+      if (nextTabs.length === tabs.length) return tabs;
       if (nextTabs.length === 0) {
         setArtifactPanelOpen(false);
         setArtifactPanelFullscreen(false);
@@ -3960,8 +4007,11 @@ export function App({
         setPaneArtifactSnapshots(new Map());
         return nextTabs;
       }
-      if (activeArtifactPanelTabIdRef.current === tabId) {
-        const closedIndex = tabs.findIndex((tab) => tab.id === tabId);
+      if (
+        activeArtifactPanelTabIdRef.current &&
+        tabIds.has(activeArtifactPanelTabIdRef.current)
+      ) {
+        const closedIndex = tabs.findIndex((tab) => tabIds.has(tab.id));
         const nextActive =
           nextTabs[Math.min(closedIndex, nextTabs.length - 1)] ?? nextTabs[0];
         setActiveArtifactPanelTabId(nextActive.id);
@@ -3969,6 +4019,29 @@ export function App({
       return nextTabs;
     });
   }, []);
+  const closeArtifactPanelTab = useCallback(
+    (tabId: string) => closeArtifactPanelTabs(new Set([tabId])),
+    [closeArtifactPanelTabs],
+  );
+  const closeTokenUsageTabs = useCallback(
+    (sessionIds?: readonly string[], paneOnly = false) => {
+      const sessions = sessionIds ? new Set(sessionIds) : undefined;
+      closeArtifactPanelTabs(
+        new Set(
+          artifactPanelTabsRef.current
+            .filter(
+              (tab) =>
+                tab.kind === 'token_usage' &&
+                (!paneOnly || tab.closeWithPane) &&
+                (!sessions ||
+                  (tab.sessionId !== undefined && sessions.has(tab.sessionId))),
+            )
+            .map((tab) => tab.id),
+        ),
+      );
+    },
+    [closeArtifactPanelTabs],
+  );
   const handleArtifactPanelResizeStart = useCallback(
     (event: ReactPointerEvent<HTMLDivElement>) => {
       event.preventDefault();
@@ -4795,7 +4868,7 @@ export function App({
         if (request !== loadedSkillsRequestRef.current) return;
         setLoadedSkills(availableSkillInfos(status));
         setLoadedSkillsReady(true);
-        return true;
+        return status;
       } catch (error) {
         if (notifyOnError) {
           pushToast(
@@ -4866,17 +4939,36 @@ export function App({
     }
     pendingSkillTogglesByContextRef.current.set(contextKey, pendingToggles);
     let cancelled = false;
-    void reloadLoadedSkills(workspaceCwd, true).then((loaded) => {
-      if (cancelled || !loaded) return;
+    void reloadLoadedSkills(workspaceCwd, true).then((status) => {
+      if (cancelled || !status) return;
       markHandled();
       if (!sessionId) {
         pendingSkillTogglesByContextRef.current.delete(contextKey);
         return;
       }
+      const availableWorkspaceSkillNames = new Set(
+        status.skills
+          .filter((skill) => skill.status === 'ok')
+          .map((skill) => skill.name.toLowerCase()),
+      );
+      const pendingForSession = pendingToggles.filter(
+        (toggle) =>
+          !toggle.enabled ||
+          availableWorkspaceSkillNames.has(toggle.name.toLowerCase()),
+      );
+      if (pendingForSession.length === 0) {
+        pendingSkillTogglesByContextRef.current.delete(contextKey);
+        setLoadedSkillsFallback(undefined);
+        return;
+      }
+      pendingSkillTogglesByContextRef.current.set(
+        contextKey,
+        pendingForSession,
+      );
       const currentSnapshot = connectionSkillSnapshotRef.current;
       if (
         currentSnapshot.sessionId === sessionId &&
-        sessionSkillsReflectToggle(currentSnapshot.skills, pendingToggles)
+        sessionSkillsReflectToggle(currentSnapshot.skills, pendingForSession)
       ) {
         pendingSkillTogglesByContextRef.current.delete(contextKey);
         setLoadedSkillsFallback(undefined);
@@ -5186,6 +5278,18 @@ export function App({
   // dependency (it changes on every pane add/remove).
   const splitSessionIdsRef = useRef<string[]>(splitSessionIds);
   splitSessionIdsRef.current = splitSessionIds;
+  const previousSplitSessionIdsRef = useRef<string[]>(splitSessionIds);
+  useEffect(() => {
+    const nextIds = new Set(splitSessionIds);
+    closeTokenUsageTabs(
+      previousSplitSessionIdsRef.current.filter((id) => !nextIds.has(id)),
+      true,
+    );
+    previousSplitSessionIdsRef.current = splitSessionIds;
+  }, [closeTokenUsageTabs, splitSessionIds]);
+  useEffect(() => {
+    if (mainView !== 'split') closeTokenUsageTabs(undefined, true);
+  }, [closeTokenUsageTabs, mainView]);
   const [mcpDialogMessage, setMcpDialogMessage] =
     useState<SerializedMcpStatusMessage | null>(null);
   // Settings and Daemon Status are shown as an in-place panel that replaces the
@@ -5332,12 +5436,17 @@ export function App({
   }, [externalSplitControlled, externalSplitSignature]);
   const handleSplitPanesChange = useCallback(
     (sessionIds: string[]) => {
+      const nextIds = new Set(sessionIds);
+      closeTokenUsageTabs(
+        splitSessionIdsRef.current.filter((id) => !nextIds.has(id)),
+        true,
+      );
       if (!externalSplitControlled) {
         setSplitSessionIds(sessionIds);
       }
       onSplitSessionIdsChangeRef.current?.(sessionIds);
     },
-    [externalSplitControlled],
+    [closeTokenUsageTabs, externalSplitControlled],
   );
   const notifyControlledSplitClose = useCallback(() => {
     if (externalSplitControlled) {
@@ -5354,6 +5463,28 @@ export function App({
     clearSplitSessions();
     openPanel('sessions');
   }, [notifyControlledSplitClose, openPanel]);
+  // Built-in pane action follows the same tokenUsage opt-in as the chat header.
+  // Hosts can override via `renderPaneHeaderActions` to replace or extend it.
+  const defaultPaneHeaderActions = useCallback<PaneHeaderActionsRenderer>(
+    ({ sessionId, sessionActions }) => (
+      <button
+        type="button"
+        className={styles.tokenUsageHeaderButton}
+        aria-label={t('tokenUsage.open')}
+        title={t('tokenUsage.open')}
+        disabled={!sessionActions}
+        onClick={() =>
+          sessionActions && openTokenUsagePanel(sessionId, sessionActions, true)
+        }
+      >
+        <GaugeIcon size={16} aria-hidden="true" />
+      </button>
+    ),
+    [openTokenUsagePanel, t],
+  );
+  const resolvedPaneHeaderActions =
+    renderPaneHeaderActions ??
+    (tokenUsageHeaderItemVisible ? defaultPaneHeaderActions : undefined);
   // A `?split=a,b` URL (opened in a new tab from the overview) enters the split
   // view with those sessions on load. Consume the param once so a later reload
   // or exit doesn't force the split back on.
@@ -5914,8 +6045,9 @@ export function App({
         reasoningIntent &&
         reasoningIntent.modelId === modelId &&
         reasoningPreview &&
-        (reasoningIntent.value === 'none' ||
-          reasoningPreview.efforts.includes(reasoningIntent.value))
+        (reasoningIntent.value === 'none'
+          ? reasoningPreview.canDisable !== false
+          : reasoningPreview.efforts.includes(reasoningIntent.value))
           ? reasoningIntent.value
           : undefined;
       const modeId =
@@ -6431,11 +6563,26 @@ export function App({
       ? connection.models?.find((model) => model.id === currentModel)
           ?.reasoningPreview
       : undefined;
+  useEffect(() => {
+    if (
+      pendingReasoningIntent?.modelId === currentModel &&
+      pendingReasoningIntent.value === 'none' &&
+      welcomeReasoningPreview?.canDisable === false
+    ) {
+      setPendingReasoningIntent(undefined);
+    }
+  }, [
+    currentModel,
+    pendingReasoningIntent,
+    setPendingReasoningIntent,
+    welcomeReasoningPreview,
+  ]);
   const validPendingReasoningIntent =
     pendingReasoningIntent?.modelId === currentModel &&
     welcomeReasoningPreview &&
-    (pendingReasoningIntent.value === 'none' ||
-      welcomeReasoningPreview.efforts.includes(pendingReasoningIntent.value))
+    (pendingReasoningIntent.value === 'none'
+      ? welcomeReasoningPreview.canDisable !== false
+      : welcomeReasoningPreview.efforts.includes(pendingReasoningIntent.value))
       ? pendingReasoningIntent
       : undefined;
   const displayedReasoning = hasAuthoritativeReasoningContext
@@ -11151,6 +11298,7 @@ export function App({
       if (!preview) return;
       const previous = pendingReasoningIntentRef.current;
       if (value === 'none') {
+        if (preview.canDisable === false) return;
         const previousEffort =
           previous?.modelId === modelId &&
           preview.efforts.includes(previous.effort)
@@ -12020,6 +12168,7 @@ export function App({
               <DeleteSessionDialog
                 workspaceCwd={lockedWorkspaceCwd}
                 onDeleted={(sessionIds) => {
+                  closeTokenUsageTabs(sessionIds);
                   store.dispatch([
                     {
                       type: 'status',
@@ -12218,8 +12367,10 @@ export function App({
                     closePanel();
                   }}
                   onSessionRenameConfirmed={reconcileCatalogRename}
+                  onSessionsDeleted={closeTokenUsageTabs}
                   onError={reportError}
                   mobileOpen={mobileDrawerOpen}
+                  onMobileClose={closeMobileDrawer}
                   selectedWorkspaceCwd={selectedWorkspaceCwd}
                   onSelectWorkspace={setSelectedWorkspaceCwd}
                   onOpenGitDiff={(workspaceCwd) =>
@@ -12256,6 +12407,9 @@ export function App({
                   lockedWorkspace={sidebarOptions.lockedWorkspace}
                   branding={sidebarOptions.branding}
                   primaryNav={sidebarOptions.primaryNav}
+                  showSessionSourceSwitch={
+                    sidebarOptions.showSessionSourceSwitch
+                  }
                   hideProjectHeader={sidebarOptions.hideProjectHeader}
                   sessionActions={sidebarOptions.sessionActions}
                   footer={sidebarOptions.footer}
@@ -12315,6 +12469,15 @@ export function App({
                         onEnvironmentPanelOpenChange:
                           handleEnvironmentPanelOpenChange,
                         onRightPanelOpenChange: handleRightPanelOpenChange,
+                        ...(tokenUsageHeaderItemVisible && connection.sessionId
+                          ? {
+                              onOpenTokenUsage: () =>
+                                openTokenUsagePanel(
+                                  connection.sessionId!,
+                                  sessionActions,
+                                ),
+                            }
+                          : {}),
                       })}
                     </div>
                   ) : (
@@ -12337,6 +12500,15 @@ export function App({
                       }
                       onToggleRightPanel={() =>
                         handleRightPanelOpenChange(!artifactPanelOpen)
+                      }
+                      onOpenTokenUsage={
+                        tokenUsageHeaderItemVisible && connection.sessionId
+                          ? () =>
+                              openTokenUsagePanel(
+                                connection.sessionId!,
+                                sessionActions,
+                              )
+                          : undefined
                       }
                     />
                   )}
@@ -12841,7 +13013,7 @@ export function App({
                         messageTurnOutputs={messageTurnOutputs}
                         restartSseOnPrompt={restartSseOnPrompt}
                         historyPageSize={historyPageSize}
-                        renderPaneHeaderActions={renderPaneHeaderActions}
+                        renderPaneHeaderActions={resolvedPaneHeaderActions}
                         voiceUserRevision={voiceUserRevision}
                         voiceWorkspaceRevisions={voiceWorkspaceRevisions}
                         voiceWorkspaces={
@@ -12935,6 +13107,7 @@ export function App({
                             const messageListContent = (
                               <LiveMessageList
                                 ref={messageListRef}
+                                sessionKey={connection.sessionId}
                                 baselineBlocks={blocks}
                                 baselineSummary={blockChangeSummary}
                                 baselineMessages={messages}
